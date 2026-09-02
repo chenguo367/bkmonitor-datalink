@@ -159,13 +159,13 @@ func validateEnabledCompletion(completion execution.SlotCompletion) error {
 	switch completion.Kind {
 	case execution.CompletionFull, execution.CompletionFullEmpty,
 		execution.CompletionPartialGap, execution.CompletionUnavailable,
-		execution.CompletionTerminal, execution.CompletionGapSkipped:
+		execution.CompletionTerminal, execution.CompletionGapSkipped,
+		execution.CompletionSnapshotUnavailable:
 		// ProgressCommitRequest.Validate has already checked the complete result,
 		// PRIMARY and reason contract. Persist every completion enabled through
 		// G3b so one local deterministic terminal cannot stop the Worker.
 		return nil
 	default:
-		// SNAPSHOT_UNAVAILABLE remains closed until its later Gate.
 		return fmt.Errorf("progress: store does not accept completion kind %q in the current Gate", completion.Kind)
 	}
 }
@@ -175,7 +175,8 @@ func shouldFoldRecentGap(
 	completion execution.SlotCompletion,
 ) bool {
 	switch completion.Kind {
-	case execution.CompletionPartialGap, execution.CompletionTerminal, execution.CompletionGapSkipped:
+	case execution.CompletionPartialGap, execution.CompletionTerminal, execution.CompletionGapSkipped,
+		execution.CompletionSnapshotUnavailable:
 		return true
 	case execution.CompletionUnavailable:
 		// A FULL+DATA result can remain guarded by an earlier query-free

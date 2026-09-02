@@ -432,6 +432,10 @@ func (repository *RedisCatalogRepository) LoadActivation(ctx context.Context) (A
 	return state, nil
 }
 
+func (repository *RedisCatalogRepository) frozenSlotProjectionKey(slot execution.SlotIdentity) string {
+	return repository.prefix + ":frozen_slot_projection:" + string(slot.QueryGroup) + ":" + strconv.FormatInt(int64(slot.EvaluationTime), 10)
+}
+
 func (repository *RedisCatalogRepository) LoadActivations(ctx context.Context, request execution.PlanActivationRequest) (execution.PlanActivationResult, error) {
 	if err := request.Contract.Validate(); err != nil || len(request.Plans) == 0 {
 		return execution.PlanActivationResult{}, errors.New("alarmd controlplane: invalid activation request")

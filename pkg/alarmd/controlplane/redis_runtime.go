@@ -16,12 +16,59 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
-const scheduleTimelineSchemaVersion = "alarmd-control-schedule-timeline-v1"
+const (
+	scheduleTimelineSchemaVersion     = "alarmd-control-schedule-timeline-v1"
+	frozenSlotProjectionSchemaVersion = "alarmd-control-frozen-slot-projection-v1"
+)
 
 var (
-	ErrScheduleUnavailable = errors.New("alarmd controlplane: schedule unavailable")
-	ErrScheduleConflict    = errors.New("alarmd controlplane: schedule activation conflict")
+	ErrScheduleUnavailable             = errors.New("alarmd controlplane: schedule unavailable")
+	ErrScheduleConflict                = errors.New("alarmd controlplane: schedule activation conflict")
+	ErrFrozenSlotProjectionUnavailable = errors.New("alarmd controlplane: frozen Slot projection unavailable")
+	ErrFrozenSlotProjectionConflict    = errors.New("alarmd controlplane: frozen Slot projection conflict")
 )
+
+// FrozenSlotProjection is the minimum independently persisted identity and
+// query-budget projection needed to finalize one already frozen Slot after its
+// immutable Snapshot has aged out. It deliberately excludes Plan bodies,
+// activation state, and warming semantics.
+type FrozenSlotProjection struct {
+	Contract                       execution.FrozenExecutionContractRef `json:"contract"`
+	Targets                        execution.FrozenDuePlanTargets       `json:"targets"`
+	EarliestQueryDeadlineUnixMilli int64                                `json:"earliest_query_deadline_unix_milli"`
+	KeepUntilUnixMilli             int64                                `json:"keep_until_unix_milli"`
+}
+
+type frozenSlotProjectionEnvelope struct {
+	Schema     string               `json:"schema"`
+	Projection FrozenSlotProjection `json:"projection"`
+}
+
+func (projection FrozenSlotProjection) Validate(slot execution.SlotIdentity) error {
+	return projection.validate(slot, true)
+}
+
+func (projection FrozenSlotProjection) validate(slot execution.SlotIdentity, requireKeepUntil bool) error {
+	if err := projection.Contract.Validate(); err != nil {
+		return err
+	}
+	if projection.Contract.Slot != slot || projection.Targets.DuePlanSetDigest != projection.Contract.DuePlanSetDigest ||
+		projection.EarliestQueryDeadlineUnixMilli <= int64(slot.EvaluationTime)*1000 || len(projection.Targets.Plans) == 0 ||
+		(requireKeepUntil && projection.KeepUntilUnixMilli <= projection.EarliestQueryDeadlineUnixMilli) {
+		return errors.New("alarmd controlplane: incomplete frozen Slot projection")
+	}
+	seen := make(map[execution.PlanIdentity]struct{}, len(projection.Targets.Plans))
+	for _, plan := range projection.Targets.Plans {
+		if err := plan.Validate(); err != nil {
+			return err
+		}
+		if _, duplicate := seen[plan]; duplicate {
+			return errors.New("alarmd controlplane: duplicate frozen Slot projection Plan")
+		}
+		seen[plan] = struct{}{}
+	}
+	return nil
+}
 
 type DeterministicScheduleError struct{ Err error }
 
@@ -1072,7 +1119,149 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 	if err := fact.Validate(request); err != nil {
 		return execution.FrozenSlotContractFact{}, err
 	}
+	projection, err := frozenSlotProjectionFromFact(fact)
+	if err != nil {
+		return execution.FrozenSlotContractFact{}, err
+	}
+	if err := runtime.repository.compareAndSetFrozenSlotProjection(ctx, projection); err != nil {
+		return execution.FrozenSlotContractFact{}, err
+	}
 	return fact, nil
+}
+
+func frozenSlotProjectionFromFact(fact execution.FrozenSlotContractFact) (FrozenSlotProjection, error) {
+	deadline := int64(0)
+	for _, requirement := range fact.Requirements {
+		for _, consumer := range requirement.Consumers {
+			if consumer.ConsumerDeadlineUnixMilli <= 0 || consumer.DownstreamExecutionReserveMilliSec <= 0 ||
+				consumer.DownstreamExecutionReserveMilliSec >= consumer.ConsumerDeadlineUnixMilli {
+				return FrozenSlotProjection{}, errors.New("alarmd controlplane: frozen contract query deadline or reserve is invalid")
+			}
+			candidate := consumer.ConsumerDeadlineUnixMilli - consumer.DownstreamExecutionReserveMilliSec
+			if deadline == 0 || candidate < deadline {
+				deadline = candidate
+			}
+		}
+	}
+	if deadline == 0 {
+		return FrozenSlotProjection{}, errors.New("alarmd controlplane: frozen contract query deadline has no consumer")
+	}
+	plans := make([]execution.PlanIdentity, len(fact.DuePlans))
+	for index := range fact.DuePlans {
+		plans[index] = fact.DuePlans[index].Identity
+	}
+	sort.Slice(plans, func(left, right int) bool { return lessPlanIdentity(plans[left], plans[right]) })
+	projection := FrozenSlotProjection{
+		Contract: fact.Contract,
+		Targets: execution.FrozenDuePlanTargets{
+			DuePlanSetDigest: fact.Contract.DuePlanSetDigest,
+			Plans:            plans,
+		},
+		EarliestQueryDeadlineUnixMilli: deadline,
+	}
+	return projection, projection.validate(fact.Contract.Slot, false)
+}
+
+// MatchesFact verifies that this persisted projection is the canonical
+// minimal projection of one freshly re-frozen Slot fact.
+func (projection FrozenSlotProjection) MatchesFact(fact execution.FrozenSlotContractFact) error {
+	want, err := frozenSlotProjectionFromFact(fact)
+	if err != nil {
+		return err
+	}
+	if !sameFrozenSlotProjectionContent(projection, want) {
+		return ErrFrozenSlotProjectionConflict
+	}
+	return nil
+}
+
+const compareAndSetFrozenSlotProjectionScript = `
+local current = redis.call('GET', KEYS[1])
+if current then return current end
+redis.call('PSETEX', KEYS[1], ARGV[2], ARGV[1])
+return ARGV[1]
+`
+
+func (repository *RedisCatalogRepository) compareAndSetFrozenSlotProjection(
+	ctx context.Context,
+	projection FrozenSlotProjection,
+) error {
+	if repository == nil || repository.client == nil {
+		return errors.New("alarmd controlplane: Redis catalog repository is required")
+	}
+	if err := projection.validate(projection.Contract.Slot, false); err != nil {
+		return err
+	}
+	at, err := repository.client.Time(ctx).Result()
+	if err != nil {
+		return fmt.Errorf("alarmd controlplane: read Redis time for frozen Slot projection: %w", err)
+	}
+	projection.KeepUntilUnixMilli = at.Add(repository.ttl).UnixMilli()
+	if err := projection.Validate(projection.Contract.Slot); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(frozenSlotProjectionEnvelope{
+		Schema: frozenSlotProjectionSchemaVersion, Projection: projection,
+	})
+	if err != nil {
+		return fmt.Errorf("alarmd controlplane: encode frozen Slot projection: %w", err)
+	}
+	result, err := repository.client.Eval(ctx, compareAndSetFrozenSlotProjectionScript,
+		[]string{repository.frozenSlotProjectionKey(projection.Contract.Slot)}, payload, repository.ttl.Milliseconds()).Result()
+	if err != nil {
+		return fmt.Errorf("alarmd controlplane: persist frozen Slot projection: %w", err)
+	}
+	persisted, ok := legacyRedisBytes(result)
+	if !ok {
+		return errors.New("alarmd controlplane: invalid frozen Slot projection persistence result")
+	}
+	var envelope frozenSlotProjectionEnvelope
+	if err := json.Unmarshal(persisted, &envelope); err != nil || envelope.Schema != frozenSlotProjectionSchemaVersion ||
+		envelope.Projection.Validate(projection.Contract.Slot) != nil ||
+		!sameFrozenSlotProjectionContent(envelope.Projection, projection) {
+		return ErrFrozenSlotProjectionConflict
+	}
+	return nil
+}
+
+func sameFrozenSlotProjectionContent(left, right FrozenSlotProjection) bool {
+	if left.Contract != right.Contract || left.EarliestQueryDeadlineUnixMilli != right.EarliestQueryDeadlineUnixMilli ||
+		left.Targets.DuePlanSetDigest != right.Targets.DuePlanSetDigest || len(left.Targets.Plans) != len(right.Targets.Plans) {
+		return false
+	}
+	for index := range left.Targets.Plans {
+		if left.Targets.Plans[index] != right.Targets.Plans[index] {
+			return false
+		}
+	}
+	return true
+}
+
+func (runtime *RedisCatalogRuntime) LoadFrozenSlotProjection(
+	ctx context.Context,
+	slot execution.SlotIdentity,
+) (FrozenSlotProjection, error) {
+	if runtime == nil || runtime.repository == nil || slot.QueryGroup == "" || slot.EvaluationTime <= 0 {
+		return FrozenSlotProjection{}, errors.New("alarmd controlplane: complete frozen Slot projection identity is required")
+	}
+	payload, err := runtime.repository.client.Get(ctx, runtime.repository.frozenSlotProjectionKey(slot)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return FrozenSlotProjection{}, ErrFrozenSlotProjectionUnavailable
+	}
+	if err != nil {
+		return FrozenSlotProjection{}, fmt.Errorf("alarmd controlplane: load frozen Slot projection: %w", err)
+	}
+	var envelope frozenSlotProjectionEnvelope
+	if err := json.Unmarshal(payload, &envelope); err != nil {
+		return FrozenSlotProjection{}, fmt.Errorf("alarmd controlplane: decode frozen Slot projection: %w", err)
+	}
+	if envelope.Schema != frozenSlotProjectionSchemaVersion {
+		return FrozenSlotProjection{}, errors.New("alarmd controlplane: invalid frozen Slot projection schema")
+	}
+	if err := envelope.Projection.Validate(slot); err != nil {
+		return FrozenSlotProjection{}, err
+	}
+	return envelope.Projection, nil
 }
 
 func (runtime *RedisCatalogRuntime) readPersistedSegment(

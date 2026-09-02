@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -266,6 +267,54 @@ func TestProductionSlotSourceRestartFreezesSameContract(t *testing.T) {
 	}
 }
 
+func TestProductionSlotSourceUsesFrozenProjectionWhenSnapshotIsUnavailable(t *testing.T) {
+	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
+	request := execution.FreezeSlotContractRequest{
+		QueryGroup: schedule.Segment.QueryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
+		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: 60, DuePlans: schedule.DuePlanRefs(60),
+	}
+	fact := frozenSlotContractFact(t, schedule, request)
+	catalog := &fakeSlotCatalog{
+		t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}, freezeErr: controlplane.ErrSnapshotUnavailable,
+		projection: controlplane.FrozenSlotProjection{
+			Contract: fact.Contract,
+			Targets: execution.FrozenDuePlanTargets{
+				DuePlanSetDigest: fact.Contract.DuePlanSetDigest,
+				Plans:            []execution.PlanIdentity{fact.DuePlans[0].Identity},
+			},
+			EarliestQueryDeadlineUnixMilli: 115_000,
+			KeepUntilUnixMilli:             3_600_000,
+		},
+	}
+	source := newProductionSlotSourceWithRecoveryForTest(t, catalog, missingProgress(), time.Unix(116, 0), testRecoveryLimits())
+
+	slot, due, err := source.Next(context.Background(), "query-group-1")
+	if err != nil || !due {
+		t.Fatalf("Next() due=%v error=%v", due, err)
+	}
+	if slot.Contract != fact.Contract || slot.Dispatch.Operation != execution.OperationReplay ||
+		slot.Recovery.Disposition != ReplayEligible || slot.Recovery.Age != time.Second || catalog.projectionReads != 1 {
+		t.Fatalf("projected Slot = %+v, projection reads=%d", slot, catalog.projectionReads)
+	}
+}
+
+func TestProductionSlotSourceDoesNotAdvanceWithoutSnapshotOrFrozenProjection(t *testing.T) {
+	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
+	catalog := &fakeSlotCatalog{
+		t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}, freezeErr: controlplane.ErrSnapshotUnavailable,
+		projectionErr: controlplane.ErrFrozenSlotProjectionUnavailable,
+	}
+	source := newProductionSlotSourceForTest(t, catalog, missingProgress(), time.Unix(200, 0))
+
+	_, due, err := source.Next(context.Background(), "query-group-1")
+	if err == nil || due || !errors.Is(err, controlplane.ErrFrozenSlotProjectionUnavailable) {
+		t.Fatalf("Next() due=%v error=%v", due, err)
+	}
+	if catalog.projectionReads != 1 {
+		t.Fatalf("projection reads = %d, want 1", catalog.projectionReads)
+	}
+}
+
 func TestProductionSlotSourceRechecksOwnershipAfterFreeze(t *testing.T) {
 	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
@@ -498,6 +547,10 @@ type fakeSlotCatalog struct {
 	requests         []execution.FreezeSlotContractRequest
 	progressIdentity execution.ProgressIdentity
 	retiredAt        *execution.EvaluationTime
+	freezeErr        error
+	projection       controlplane.FrozenSlotProjection
+	projectionErr    error
+	projectionReads  int
 }
 
 func (catalog *fakeSlotCatalog) ReadInitialFrozenSchedule(
@@ -544,6 +597,9 @@ func (catalog *fakeSlotCatalog) FreezeSlotContract(
 	request execution.FreezeSlotContractRequest,
 ) (execution.FrozenSlotContractFact, error) {
 	catalog.requests = append(catalog.requests, request)
+	if catalog.freezeErr != nil {
+		return execution.FrozenSlotContractFact{}, catalog.freezeErr
+	}
 	var schedule execution.FrozenQueryGroupSchedule
 	for _, candidate := range catalog.schedules {
 		if candidate.Segment.Start == request.ScheduleSegmentStart && candidate.Segment.QueryGroup == request.QueryGroup {
@@ -552,6 +608,20 @@ func (catalog *fakeSlotCatalog) FreezeSlotContract(
 		}
 	}
 	return frozenSlotContractFact(catalog.t, schedule, request), nil
+}
+
+func (catalog *fakeSlotCatalog) LoadFrozenSlotProjection(
+	_ context.Context,
+	slot execution.SlotIdentity,
+) (controlplane.FrozenSlotProjection, error) {
+	catalog.projectionReads++
+	if catalog.projectionErr != nil {
+		return controlplane.FrozenSlotProjection{}, catalog.projectionErr
+	}
+	if err := catalog.projection.Validate(slot); err != nil {
+		return controlplane.FrozenSlotProjection{}, err
+	}
+	return catalog.projection, nil
 }
 
 func (catalog *fakeSlotCatalog) ReadScheduleRetirement(

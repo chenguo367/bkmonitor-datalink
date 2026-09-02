@@ -85,6 +85,144 @@ func TestProductionFrozenExecutionResolvesExactPersistedContract(t *testing.T) {
 	}
 }
 
+func TestProductionFrozenExecutionFinalizesSnapshotUnavailableFromPersistedProjection(t *testing.T) {
+	plan := execution.PlanIdentity{TenantID: "tenant-a", BusinessID: "2", StrategyID: "1001"}
+	contractRef := execution.FrozenExecutionContractRef{
+		Slot:             execution.SlotIdentity{QueryGroup: "query-group-1", EvaluationTime: 120},
+		SnapshotRevision: "snapshot-1", QueryRevision: "query-1", ScheduleRevision: "schedule-1",
+		ScheduleSegmentStart: 60, DuePlanSetDigest: "due-1",
+	}
+	projection := controlplane.FrozenSlotProjection{
+		Contract: contractRef,
+		Targets: execution.FrozenDuePlanTargets{
+			DuePlanSetDigest: contractRef.DuePlanSetDigest, Plans: []execution.PlanIdentity{plan},
+		},
+		EarliestQueryDeadlineUnixMilli: 175_000,
+		KeepUntilUnixMilli:             3_600_000,
+	}
+	catalog := &fakeFrozenCatalog{
+		schedule: execution.FrozenQueryGroupSchedule{Segment: execution.ScheduleSegmentFact{
+			Publication: execution.SnapshotPublicationRef{SnapshotRevision: contractRef.SnapshotRevision, PublicationEpoch: 1},
+			QueryGroup:  contractRef.Slot.QueryGroup, QueryRevision: contractRef.QueryRevision,
+			ScheduleRevision: contractRef.ScheduleRevision, Start: contractRef.ScheduleSegmentStart,
+		}},
+		freezeErr: controlplane.ErrSnapshotUnavailable, projection: &projection,
+	}
+	repository := &fakeProductionCatalogRepository{}
+	resolver, err := newProductionFrozenExecution(catalog, repository, func() time.Time { return time.UnixMilli(170_000) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := execution.SlotExecutionRequest{
+		Contract: contractRef,
+		OwnerFence: execution.OwnerFence{
+			QueryGroup: "query-group-1", OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "lease-1",
+		},
+		ExpectedNextSlot: 120, Operation: execution.OperationReplay, AttemptNo: 1,
+	}
+	finalization, err := resolver.ResolveFinalization(context.Background(), request)
+	if err != nil {
+		t.Fatalf("ResolveFinalization() error = %v", err)
+	}
+	if finalization.Mode != execution.FinalizationSnapshotUnavailable ||
+		finalization.ReasonCode != execution.ReasonCode(contract.ReasonSnapshotUnavailable) ||
+		!reflect.DeepEqual(finalization.Targets, projection.Targets) {
+		t.Fatalf("ResolveFinalization() = %+v", finalization)
+	}
+	if err := finalization.Validate(request); err != nil {
+		t.Fatalf("query-free finalization is invalid: %v", err)
+	}
+	if err := resolver.VerifyFrozenDuePlanTargets(context.Background(), contractRef, projection.Targets); err != nil {
+		t.Fatalf("VerifyFrozenDuePlanTargets() error = %v", err)
+	}
+	tampered := projection.Targets
+	tampered.Plans = []execution.PlanIdentity{{TenantID: "tenant-a", BusinessID: "2", StrategyID: "9999"}}
+	if err := resolver.VerifyFrozenDuePlanTargets(context.Background(), contractRef, tampered); err == nil {
+		t.Fatal("VerifyFrozenDuePlanTargets() accepted a tampered exact Plan set")
+	}
+	if repository.snapshotLoads != 0 {
+		t.Fatalf("query-free finalization loaded Snapshot %d times", repository.snapshotLoads)
+	}
+}
+
+func TestProductionFrozenExecutionDoesNotFinalizeWithoutSnapshotOrProjection(t *testing.T) {
+	contractRef := execution.FrozenExecutionContractRef{
+		Slot:             execution.SlotIdentity{QueryGroup: "query-group-1", EvaluationTime: 120},
+		SnapshotRevision: "snapshot-1", QueryRevision: "query-1", ScheduleRevision: "schedule-1",
+		ScheduleSegmentStart: 60, DuePlanSetDigest: "due-1",
+	}
+	catalog := &fakeFrozenCatalog{
+		schedule: execution.FrozenQueryGroupSchedule{Segment: execution.ScheduleSegmentFact{
+			Publication: execution.SnapshotPublicationRef{SnapshotRevision: contractRef.SnapshotRevision, PublicationEpoch: 1},
+			QueryGroup:  contractRef.Slot.QueryGroup, QueryRevision: contractRef.QueryRevision,
+			ScheduleRevision: contractRef.ScheduleRevision, Start: contractRef.ScheduleSegmentStart,
+		}},
+		freezeErr:     controlplane.ErrSnapshotUnavailable,
+		projectionErr: controlplane.ErrFrozenSlotProjectionUnavailable,
+	}
+	resolver, err := newProductionFrozenExecution(catalog, &fakeProductionCatalogRepository{}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := execution.SlotExecutionRequest{
+		Contract: contractRef,
+		OwnerFence: execution.OwnerFence{
+			QueryGroup: "query-group-1", OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "lease-1",
+		},
+		ExpectedNextSlot: 120, Operation: execution.OperationReplay, AttemptNo: 1,
+	}
+	if _, err := resolver.ResolveFinalization(context.Background(), request); !errors.Is(err, controlplane.ErrFrozenSlotProjectionUnavailable) {
+		t.Fatalf("ResolveFinalization() error = %v", err)
+	}
+}
+
+func TestProductionFrozenExecutionRejectsReadableSnapshotProjectionDrift(t *testing.T) {
+	plan := execution.PlanIdentity{TenantID: "tenant-a", BusinessID: "2", StrategyID: "1001"}
+	contractRef := execution.FrozenExecutionContractRef{
+		Slot:             execution.SlotIdentity{QueryGroup: "query-group-1", EvaluationTime: 120},
+		SnapshotRevision: "snapshot-1", QueryRevision: "query-1", ScheduleRevision: "schedule-1",
+		ScheduleSegmentStart: 60, DuePlanSetDigest: "due-1",
+	}
+	fact := execution.FrozenSlotContractFact{
+		Contract: contractRef,
+		DuePlans: []execution.DuePlan{{Identity: plan}},
+		Requirements: []execution.DataRequirement{{Consumers: []execution.DataRequirementConsumer{{
+			Consumer: execution.ConsumerRef{Plan: plan}, ConsumerDeadlineUnixMilli: 180_000,
+			DownstreamExecutionReserveMilliSec: 5_000,
+		}}}},
+	}
+	projection := controlplane.FrozenSlotProjection{
+		Contract: contractRef,
+		Targets: execution.FrozenDuePlanTargets{
+			DuePlanSetDigest: contractRef.DuePlanSetDigest, Plans: []execution.PlanIdentity{plan},
+		},
+		EarliestQueryDeadlineUnixMilli: 176_000,
+		KeepUntilUnixMilli:             3_600_000,
+	}
+	catalog := &fakeFrozenCatalog{
+		schedule: execution.FrozenQueryGroupSchedule{Segment: execution.ScheduleSegmentFact{
+			Publication: execution.SnapshotPublicationRef{SnapshotRevision: contractRef.SnapshotRevision, PublicationEpoch: 1},
+			QueryGroup:  contractRef.Slot.QueryGroup, QueryRevision: contractRef.QueryRevision,
+			ScheduleRevision: contractRef.ScheduleRevision, Start: contractRef.ScheduleSegmentStart,
+		}},
+		fact: fact, projection: &projection,
+	}
+	resolver, err := newProductionFrozenExecution(catalog, &fakeProductionCatalogRepository{}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := execution.SlotExecutionRequest{
+		Contract: contractRef,
+		OwnerFence: execution.OwnerFence{
+			QueryGroup: "query-group-1", OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "lease-1",
+		},
+		ExpectedNextSlot: 120, Operation: execution.OperationNormal, AttemptNo: 1,
+	}
+	if _, err := resolver.ResolveFinalization(context.Background(), request); err == nil || !strings.Contains(err.Error(), "differs from persisted projection") {
+		t.Fatalf("ResolveFinalization() drift error = %v", err)
+	}
+}
+
 func TestProductionFrozenExecutionSkipsExpiredNormalSlotWithoutRecoveryPermit(t *testing.T) {
 	plan := execution.PlanIdentity{TenantID: "tenant-a", BusinessID: "2", StrategyID: "1001"}
 	spec := execution.ScheduleSpec{EvaluationIntervalSeconds: 60, Alignment: 0, Timezone: "UTC"}
@@ -206,9 +344,13 @@ func TestProductionFrozenExecutionSkipsExpiredNormalSlotWithoutRecoveryPermit(t 
 }
 
 type fakeFrozenCatalog struct {
-	schedule execution.FrozenQueryGroupSchedule
-	fact     execution.FrozenSlotContractFact
-	request  execution.FreezeSlotContractRequest
+	schedule         execution.FrozenQueryGroupSchedule
+	fact             execution.FrozenSlotContractFact
+	request          execution.FreezeSlotContractRequest
+	freezeErr        error
+	projection       *controlplane.FrozenSlotProjection
+	projectionErr    error
+	cachedProjection *controlplane.FrozenSlotProjection
 }
 
 func (catalog *fakeFrozenCatalog) ReadFrozenSchedule(
@@ -224,7 +366,48 @@ func (catalog *fakeFrozenCatalog) FreezeSlotContract(
 	request execution.FreezeSlotContractRequest,
 ) (execution.FrozenSlotContractFact, error) {
 	catalog.request = request
+	if catalog.freezeErr != nil {
+		return execution.FrozenSlotContractFact{}, catalog.freezeErr
+	}
 	return catalog.fact, nil
+}
+
+func (catalog *fakeFrozenCatalog) LoadFrozenSlotProjection(
+	_ context.Context,
+	slot execution.SlotIdentity,
+) (controlplane.FrozenSlotProjection, error) {
+	if catalog.projectionErr != nil {
+		return controlplane.FrozenSlotProjection{}, catalog.projectionErr
+	}
+	if catalog.projection != nil {
+		return *catalog.projection, nil
+	}
+	if catalog.cachedProjection != nil {
+		return *catalog.cachedProjection, nil
+	}
+	deadline := int64(0)
+	for _, requirement := range catalog.fact.Requirements {
+		for _, consumer := range requirement.Consumers {
+			candidate := consumer.ConsumerDeadlineUnixMilli - consumer.DownstreamExecutionReserveMilliSec
+			if deadline == 0 || candidate < deadline {
+				deadline = candidate
+			}
+		}
+	}
+	plans := make([]execution.PlanIdentity, len(catalog.fact.DuePlans))
+	for index := range catalog.fact.DuePlans {
+		plans[index] = catalog.fact.DuePlans[index].Identity
+	}
+	projection := controlplane.FrozenSlotProjection{
+		Contract: catalog.fact.Contract,
+		Targets: execution.FrozenDuePlanTargets{
+			DuePlanSetDigest: catalog.fact.Contract.DuePlanSetDigest, Plans: plans,
+		},
+		EarliestQueryDeadlineUnixMilli: deadline,
+		KeepUntilUnixMilli:             deadline + int64(time.Hour/time.Millisecond),
+	}
+	catalog.cachedProjection = &projection
+	return projection, nil
 }
 
 var _ access.FrozenPlanSource = (*productionFrozenExecution)(nil)
@@ -588,6 +771,7 @@ type fakeProductionCatalogRepository struct {
 	activationErr error
 	snapshot      controlplane.PublishedSnapshot
 	snapshots     map[controlplane.SnapshotPublicationRef]controlplane.PublishedSnapshot
+	snapshotLoads int
 }
 
 func (repository *fakeProductionCatalogRepository) LoadPublishedSnapshot(
@@ -613,6 +797,7 @@ func (repository *fakeProductionCatalogRepository) LoadSnapshot(
 	_ context.Context,
 	revision execution.SnapshotRevision,
 ) (controlplane.PublishedSnapshot, error) {
+	repository.snapshotLoads++
 	if repository.snapshot.Publication.SnapshotRevision != revision {
 		return controlplane.PublishedSnapshot{}, errors.New("unexpected Snapshot revision")
 	}

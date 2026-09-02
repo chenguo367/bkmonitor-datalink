@@ -1796,6 +1796,153 @@ func TestRedisCatalogRuntimePersistsInitialScheduleAndFreezesExactSlot(t *testin
 	}
 }
 
+func TestRedisCatalogRuntimePersistsImmutableFrozenSlotProjectionForSnapshotLoss(t *testing.T) {
+	client := newControlplaneRedis(t)
+	const prefix = "alarmd:control:frozen-slot-projection"
+	repository, err := controlplane.NewRedisCatalogRepository(client, prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := validCatalog(t, 80)
+	snapshot, _, err := repository.PublishCatalog(context.Background(), catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedule := frozenSchedule(t, snapshot.Publication, catalog.QueryGroups[0], 60, nil)
+	activation := activationState(t, 1, snapshot, schedule, nil)
+	if err := repository.CompareAndSetInitialScheduleActivation(
+		context.Background(), controlplane.ActivationExpectation{}, activation,
+		[]execution.InitialScheduleActivationFact{{Segment: schedule.Segment}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	compiler, stateSemantics := runtimePlanCompiler(t)
+	runtime, err := controlplane.NewRedisCatalogRuntime(repository, compiler, stateSemantics, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := execution.FreezeSlotContractRequest{
+		QueryGroup: schedule.Segment.QueryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
+		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: 60, DuePlans: schedule.DuePlanRefs(60),
+	}
+	fact, err := runtime.FreezeSlotContract(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, err := runtime.LoadFrozenSlotProjection(context.Background(), fact.Contract.Slot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDeadline := fact.Requirements[0].Consumers[0].ConsumerDeadlineUnixMilli -
+		fact.Requirements[0].Consumers[0].DownstreamExecutionReserveMilliSec
+	if projection.Contract != fact.Contract || projection.EarliestQueryDeadlineUnixMilli != wantDeadline ||
+		projection.KeepUntilUnixMilli <= time.Now().UnixMilli() ||
+		projection.Targets.DuePlanSetDigest != fact.Contract.DuePlanSetDigest ||
+		!reflect.DeepEqual(projection.Targets.Plans, []execution.PlanIdentity{fact.DuePlans[0].Identity}) {
+		t.Fatalf("frozen Slot projection = %#v, fact = %#v", projection, fact)
+	}
+
+	keys, err := client.Keys(context.Background(), prefix+":frozen_slot_projection:*").Result()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("frozen Slot projection keys = %v, %v", keys, err)
+	}
+	if ttl, err := client.PTTL(context.Background(), keys[0]).Result(); err != nil || ttl <= 0 || ttl > time.Hour {
+		t.Fatalf("frozen Slot projection TTL = %s, %v", ttl, err)
+	}
+	keepUntil := projection.KeepUntilUnixMilli
+	if err := client.PExpire(context.Background(), keys[0], 10*time.Minute).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.FreezeSlotContract(context.Background(), request); err != nil {
+		t.Fatalf("idempotent FreezeSlotContract() error = %v", err)
+	}
+	projection, err = runtime.LoadFrozenSlotProjection(context.Background(), fact.Contract.Slot)
+	if err != nil || projection.KeepUntilUnixMilli != keepUntil {
+		t.Fatalf("idempotent projection keep_until = %d, %v; want %d", projection.KeepUntilUnixMilli, err, keepUntil)
+	}
+	if ttl, err := client.PTTL(context.Background(), keys[0]).Result(); err != nil || ttl <= 0 || ttl > 10*time.Minute {
+		t.Fatalf("idempotent Freeze slid projection TTL = %s, %v", ttl, err)
+	}
+
+	// The projection remains independently readable after immutable Snapshot
+	// content ages out; recreating the adapter proves it is not process memory.
+	if err := client.Del(context.Background(), prefix+":snapshot:"+string(snapshot.Publication.SnapshotRevision)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := controlplane.NewRedisCatalogRuntime(repository, compiler, stateSemantics, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := restarted.LoadFrozenSlotProjection(context.Background(), fact.Contract.Slot)
+	if err != nil || !reflect.DeepEqual(loaded, projection) {
+		t.Fatalf("projection after restart and Snapshot loss = %#v, %v", loaded, err)
+	}
+	if _, err := restarted.FreezeSlotContract(context.Background(), request); !errors.Is(err, controlplane.ErrSnapshotUnavailable) {
+		t.Fatalf("FreezeSlotContract after Snapshot loss error = %v", err)
+	}
+}
+
+func TestRedisCatalogRuntimeRejectsFrozenSlotProjectionExactSetTampering(t *testing.T) {
+	client := newControlplaneRedis(t)
+	const prefix = "alarmd:control:frozen-slot-projection-conflict"
+	repository, err := controlplane.NewRedisCatalogRepository(client, prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog := validCatalog(t, 80)
+	snapshot, _, err := repository.PublishCatalog(context.Background(), catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schedule := frozenSchedule(t, snapshot.Publication, catalog.QueryGroups[0], 60, nil)
+	activation := activationState(t, 1, snapshot, schedule, nil)
+	if err := repository.CompareAndSetInitialScheduleActivation(
+		context.Background(), controlplane.ActivationExpectation{}, activation,
+		[]execution.InitialScheduleActivationFact{{Segment: schedule.Segment}},
+	); err != nil {
+		t.Fatal(err)
+	}
+	compiler, stateSemantics := runtimePlanCompiler(t)
+	runtime, err := controlplane.NewRedisCatalogRuntime(repository, compiler, stateSemantics, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := execution.FreezeSlotContractRequest{
+		QueryGroup: schedule.Segment.QueryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
+		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: 60, DuePlans: schedule.DuePlanRefs(60),
+	}
+	if _, err := runtime.FreezeSlotContract(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	keys, err := client.Keys(context.Background(), prefix+":frozen_slot_projection:*").Result()
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("frozen Slot projection keys = %v, %v", keys, err)
+	}
+	raw, err := client.Get(context.Background(), keys[0]).Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatal(err)
+	}
+	projection := envelope["projection"].(map[string]any)
+	targets := projection["targets"].(map[string]any)
+	targets["Plans"] = []any{map[string]any{
+		"TenantID": "tenant-a", "BusinessID": "2", "StrategyID": "tampered",
+	}}
+	tampered, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Set(context.Background(), keys[0], tampered, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.FreezeSlotContract(context.Background(), request); !errors.Is(err, controlplane.ErrFrozenSlotProjectionConflict) {
+		t.Fatalf("FreezeSlotContract after exact-set tamper error = %v", err)
+	}
+}
+
 func TestRedisCatalogRuntimeCutoverUsesOneHalfOpenTimelineAndNewGrid(t *testing.T) {
 	client := newControlplaneRedis(t)
 	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:cutover", time.Hour)

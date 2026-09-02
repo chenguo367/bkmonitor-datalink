@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
@@ -30,6 +31,7 @@ type productionFrozenCatalog interface {
 		execution.EvaluationTime,
 	) (execution.FrozenQueryGroupSchedule, error)
 	FreezeSlotContract(context.Context, execution.FreezeSlotContractRequest) (execution.FrozenSlotContractFact, error)
+	LoadFrozenSlotProjection(context.Context, execution.SlotIdentity) (controlplane.FrozenSlotProjection, error)
 }
 
 type productionSnapshotReader interface {
@@ -91,7 +93,17 @@ func (source *productionFrozenExecution) ResolveFinalization(
 	}
 	fact, err := source.resolveFrozenFact(ctx, request.Contract)
 	if err != nil {
-		return execution.QueryFreeFinalization{}, err
+		if !errors.Is(err, controlplane.ErrSnapshotUnavailable) {
+			return execution.QueryFreeFinalization{}, err
+		}
+		projection, projectionErr := source.loadFrozenSlotProjection(ctx, request.Contract)
+		if projectionErr != nil {
+			return execution.QueryFreeFinalization{}, fmt.Errorf("phase-two load frozen Slot projection after Snapshot loss: %w", projectionErr)
+		}
+		return execution.QueryFreeFinalization{
+			Contract: request.Contract, Mode: execution.FinalizationSnapshotUnavailable,
+			ReasonCode: execution.ReasonCode(contract.ReasonSnapshotUnavailable), Targets: projection.Targets,
+		}, nil
 	}
 	if request.Operation == execution.OperationNormal {
 		expired, deadlineErr := source.g1NormalSlotDeadlineExpired(fact)
@@ -155,18 +167,15 @@ func (source *productionFrozenExecution) VerifyFrozenDuePlanTargets(
 	contractRef execution.FrozenExecutionContractRef,
 	targets execution.FrozenDuePlanTargets,
 ) error {
-	fact, err := source.resolveFrozenFact(ctx, contractRef)
+	projection, err := source.loadFrozenSlotProjection(ctx, contractRef)
 	if err != nil {
 		return err
 	}
-	if targets.DuePlanSetDigest != contractRef.DuePlanSetDigest || len(targets.Plans) != len(fact.DuePlans) {
+	if targets.DuePlanSetDigest != contractRef.DuePlanSetDigest || len(targets.Plans) != len(projection.Targets.Plans) {
 		return errors.New("phase-two frozen due Plan targets differ from exact contract")
 	}
 	want := append([]execution.PlanIdentity(nil), targets.Plans...)
-	got := make([]execution.PlanIdentity, len(fact.DuePlans))
-	for index := range fact.DuePlans {
-		got[index] = fact.DuePlans[index].Identity
-	}
+	got := append([]execution.PlanIdentity(nil), projection.Targets.Plans...)
 	sort.Slice(want, func(i, j int) bool { return lessProductionPlanIdentity(want[i], want[j]) })
 	sort.Slice(got, func(i, j int) bool { return lessProductionPlanIdentity(got[i], got[j]) })
 	for index := range want {
@@ -211,7 +220,37 @@ func (source *productionFrozenExecution) resolveFrozenFact(
 	if fact.Contract != contractRef {
 		return execution.FrozenSlotContractFact{}, errors.New("phase-two re-frozen Slot differs from execution contract")
 	}
+	gotProjection, err := source.loadFrozenSlotProjection(ctx, contractRef)
+	if err != nil {
+		return execution.FrozenSlotContractFact{}, err
+	}
+	if err := gotProjection.MatchesFact(fact); err != nil {
+		return execution.FrozenSlotContractFact{}, fmt.Errorf("phase-two re-frozen Slot differs from persisted projection: %w", err)
+	}
 	return fact, nil
+}
+
+func (source *productionFrozenExecution) loadFrozenSlotProjection(
+	ctx context.Context,
+	contractRef execution.FrozenExecutionContractRef,
+) (controlplane.FrozenSlotProjection, error) {
+	if source == nil || source.catalog == nil {
+		return controlplane.FrozenSlotProjection{}, errors.New("phase-two frozen execution is not initialized")
+	}
+	if err := contractRef.Validate(); err != nil {
+		return controlplane.FrozenSlotProjection{}, err
+	}
+	projection, err := source.catalog.LoadFrozenSlotProjection(ctx, contractRef.Slot)
+	if err != nil {
+		return controlplane.FrozenSlotProjection{}, err
+	}
+	if err := projection.Validate(contractRef.Slot); err != nil {
+		return controlplane.FrozenSlotProjection{}, err
+	}
+	if projection.Contract != contractRef {
+		return controlplane.FrozenSlotProjection{}, errors.New("phase-two frozen Slot projection changed execution contract")
+	}
+	return projection, nil
 }
 
 func lessProductionPlanIdentity(left, right execution.PlanIdentity) bool {
