@@ -54,6 +54,76 @@ func TestSlotExecutionCoordinatorFinalizesSnapshotUnavailableWithoutQuery(t *tes
 	}
 }
 
+func TestSlotExecutionCoordinatorFinalizesSnapshotUnavailableForPendingActivation(t *testing.T) {
+	fixture := newQueryFreeFixture(t, []execution.PlanActivationResult{pendingPlanResult("state-pending", 3)})
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationReplay))
+	if err != nil || !result.Completed {
+		t.Fatalf("Execute() result=%+v error=%v", result, err)
+	}
+	if len(fixture.ports.mutations) != 1 ||
+		fixture.ports.mutations[0].Identity != (execution.PlanGapIdentity{
+			Plan: planIdentity(), StateGeneration: "state-pending",
+		}) || fixture.ports.progressCalls != 1 {
+		t.Fatalf("PENDING activation mutations=%+v progress=%d", fixture.ports.mutations, fixture.ports.progressCalls)
+	}
+}
+
+func TestSlotExecutionCoordinatorProtectsQueryFreeActivationSelectionChangesBeforeProgress(t *testing.T) {
+	tests := []struct {
+		name            string
+		before          execution.PlanActivationResult
+		after           execution.PlanActivationResult
+		wantGenerations []execution.StateGeneration
+	}{
+		{
+			name: "pending_to_current", before: pendingPlanResult("pending-v1", 2),
+			after: activePlanResult("current-v2", 3), wantGenerations: []execution.StateGeneration{"pending-v1", "current-v2"},
+		},
+		{
+			name: "current_to_pending", before: activePlanResult("current-v1", 2),
+			after: pendingPlanResult("pending-v2", 3), wantGenerations: []execution.StateGeneration{"current-v1", "pending-v2"},
+		},
+		{
+			name: "pending_to_none", before: pendingPlanResult("pending-v1", 2),
+			after: noPlanResult(), wantGenerations: []execution.StateGeneration{"pending-v1"},
+		},
+		{
+			name: "none_to_pending", before: noPlanResult(),
+			after: pendingPlanResult("pending-v2", 3), wantGenerations: []execution.StateGeneration{"pending-v2"},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newQueryFreeFixture(t, []execution.PlanActivationResult{test.before, test.after})
+			result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationReplay))
+			if err != nil || result.Completed || result.Result != observability.ResultRetrying ||
+				result.ReasonCode != execution.ReasonCode(contract.ReasonConfigDrift) || fixture.ports.progressCalls != 0 {
+				t.Fatalf("Execute() result=%+v error=%v progress=%d", result, err, fixture.ports.progressCalls)
+			}
+			got := make([]execution.StateGeneration, len(fixture.ports.mutations))
+			for index := range fixture.ports.mutations {
+				got[index] = fixture.ports.mutations[index].Identity.StateGeneration
+			}
+			if !reflect.DeepEqual(got, test.wantGenerations) {
+				t.Fatalf("protected generations=%v, want=%v; mutations=%+v", got, test.wantGenerations, fixture.ports.mutations)
+			}
+		})
+	}
+}
+
+func TestSlotExecutionCoordinatorDoesNotAdvancePendingActivationWhenProgressControlIsUnreadable(t *testing.T) {
+	fixture := newQueryFreeFixture(t, []execution.PlanActivationResult{pendingPlanResult("state-pending", 3)})
+	fixture.ports.activationErrorAt = 2
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationReplay))
+	if err != nil || result.Completed || result.Result != observability.ResultRetrying ||
+		result.ReasonCode != execution.ReasonCode(contract.ReasonProviderUnavailable) || fixture.ports.progressCalls != 0 {
+		t.Fatalf("Execute() result=%+v error=%v progress=%d", result, err, fixture.ports.progressCalls)
+	}
+	if len(fixture.ports.mutations) != 1 || fixture.ports.mutations[0].Identity.StateGeneration != "state-pending" {
+		t.Fatalf("PENDING guard before unreadable control=%+v", fixture.ports.mutations)
+	}
+}
+
 func TestSlotExecutionCoordinatorSkipsGuardWhenActivationHasNoPlan(t *testing.T) {
 	fixture := newQueryFreeFixture(t, []execution.PlanActivationResult{noPlanResult()})
 	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationReplay))
@@ -477,6 +547,12 @@ func activePlanResult(generation execution.StateGeneration, epoch execution.Stat
 			},
 		}},
 	}
+}
+
+func pendingPlanResult(generation execution.StateGeneration, epoch execution.StateApplyEpoch) execution.PlanActivationResult {
+	result := activePlanResult(generation, epoch)
+	result.Facts[0].Selection = execution.ActivationPending
+	return result
 }
 
 func noPlanResult() execution.PlanActivationResult {
