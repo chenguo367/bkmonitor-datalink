@@ -185,6 +185,19 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		return completion, nil
 	}
+	for _, query := range attempt.Spec.PlanFacts.QueryList {
+		if query.FieldSemantics != "fta_event_tags/v1" {
+			continue
+		}
+		confirmed := response.Header.Values("X-Bk-Query-Field-Semantics")
+		if len(confirmed) != 1 || confirmed[0] != query.FieldSemantics {
+			// An older UQ can return HTTP 200 while ignoring field_semantics.
+			// Reject before decoding or streaming any potentially misfiltered points.
+			completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable), execution.ResponseRouteDetail(execution.ResponseFailureFieldSemanticsUnconfirmed))
+			completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
+			return completion, nil
+		}
+	}
 	counted := &countingReader{reader: &boundedReader{reader: response.Body, maximum: client.limits.MaxBodyBytes}}
 	completion, err := client.decode(ctx, counted, attempt, sink)
 	if err != nil {

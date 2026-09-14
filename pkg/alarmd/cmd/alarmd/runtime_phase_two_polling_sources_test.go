@@ -32,7 +32,11 @@ func TestProductionPollingSources(t *testing.T) {
 		{"bk_log_search", "time_series"}, {"bk_log_search", "log"},
 		{"bk_monitor", "log"}, {"custom", "event"}, {"bk_fta", "event"},
 	} {
-		for _, second := range []string{"normal", "unavailable", "partial"} {
+		outcomes := []string{"normal", "unavailable", "partial"}
+		if source.label == "bk_fta" {
+			outcomes = append(outcomes, "unconfirmed")
+		}
+		for _, second := range outcomes {
 			t.Run(source.label+"/"+source.kind+"/"+second, func(t *testing.T) {
 				address, client := startPhaseTwoRedis(t)
 				ctx := context.Background()
@@ -145,7 +149,11 @@ func TestProductionPollingSources(t *testing.T) {
 					if err := json.NewEncoder(&buf).Encode(map[string]any{"series": series, "status": nil, "trace_id": "polling-test", "is_partial": second == "partial" && clock.Load() > base+1}); err != nil {
 						return nil, err
 					}
-					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(&buf), Request: request}, nil
+					headers := make(http.Header)
+					if source.label == "bk_fta" && !((second == "partial" || second == "unconfirmed") && clock.Load() > base+1) {
+						headers.Set("X-Bk-Query-Field-Semantics", "fta_event_tags/v1")
+					}
+					return &http.Response{StatusCode: 200, Header: headers, Body: io.NopCloser(&buf), Request: request}, nil
 				})}
 				cfg := controlledG4RuntimeConfig(address, "http://controlled-uq", "alarmd-polling-controlled")
 				if source.label == "bk_fta" {

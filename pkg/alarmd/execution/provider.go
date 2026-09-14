@@ -179,7 +179,8 @@ const (
 	RouteDetailKindTransport  = "transport"
 	RouteDetailKindResponse   = "response"
 
-	ResponseFailureIsPartialMissing = "is_partial_missing"
+	ResponseFailureIsPartialMissing          = "is_partial_missing"
+	ResponseFailureFieldSemanticsUnconfirmed = "field_semantics_unconfirmed"
 	// ResponseFailureStatusPrefix precedes the lower-cased UQ status code of a
 	// 200 response whose status field reports a deterministic backend failure
 	// (for example "response=status_space_table_id_field_is_not_exists").
@@ -219,7 +220,7 @@ func TransportRouteDetail(class string) string {
 // (for example a missing is_partial flag) as attempt detail.
 func ResponseRouteDetail(class string) string {
 	switch class {
-	case ResponseFailureIsPartialMissing:
+	case ResponseFailureIsPartialMissing, ResponseFailureFieldSemanticsUnconfirmed:
 		return RouteDetailKindResponse + "=" + class
 	default:
 		return RouteDetailKindResponse + "=other"
