@@ -231,12 +231,13 @@ func TestRuntimeProfileNamesTheCanonicalEncoder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if facts.Capacity.CanonicalEncoding != contract.CanonicalModeStreamShadow {
-		t.Fatalf("default deployment should preflight as the terminal encoder with its guard, got %q",
+	if facts.Capacity.CanonicalEncoding != contract.CanonicalModeStream {
+		t.Fatalf("default deployment should preflight as the single-pass encoder, got %q",
 			facts.Capacity.CanonicalEncoding)
 	}
-	if facts.Capacity.CanonicalShadowStride == 0 {
-		t.Fatal("the default compares a sparse sample, so it must preflight with a stride")
+	if facts.Capacity.CanonicalShadowStride != 0 {
+		t.Fatalf("nothing compares by default, so nothing should be sampling; got %d",
+			facts.Capacity.CanonicalShadowStride)
 	}
 
 	cfg.PhaseTwo.Canonical.Mode = contract.CanonicalModeEstablished
