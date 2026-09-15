@@ -343,6 +343,15 @@ type PlanGapIdentity struct {
 	StateGeneration StateGeneration
 }
 
+// PlanNoDataIdentity names one Plan's no-data memory. It is keyed the same way
+// a gap is: by Plan and by the generation of the execution content, so a Plan
+// whose content moves starts its absence clocks fresh rather than inheriting
+// timestamps decided against a roster that no longer means the same thing.
+type PlanNoDataIdentity struct {
+	Plan            PlanIdentity
+	StateGeneration StateGeneration
+}
+
 type ApplyVersion struct {
 	StateApplyEpoch StateApplyEpoch
 	EvaluationTime  EvaluationTime
@@ -387,6 +396,12 @@ type StatePreflightItem struct {
 
 type PlanGapLoadItem struct {
 	Identity         PlanGapIdentity
+	ApplyVersion     ApplyVersion
+	ScheduleRevision PlanScheduleRevision
+}
+
+type PlanNoDataLoadItem struct {
+	Identity         PlanNoDataIdentity
 	ApplyVersion     ApplyVersion
 	ScheduleRevision PlanScheduleRevision
 }
@@ -1410,6 +1425,39 @@ type PlanGapMutation struct {
 	ScheduleRevision       PlanScheduleRevision
 	MutationDigest         MutationDigest
 	Scopes                 []GapScopeMutation
+}
+
+// NoDataGroupMemory is what a Plan remembers about one no-data group between
+// Slots: when it was last seen with data, and when it was first called absent.
+//
+// Both are timestamps, and the absence of any third field is load-bearing. The
+// duration a no-data event reports is derived from these two, so a build that
+// did not run for some rounds - upgraded, rolled back, out of budget - derives
+// the same duration as one that ran every round. A field counting rounds would
+// be wrong by exactly the rounds nobody ran, and wrong in the quiet direction:
+// it would under-report an outage that was running the whole time. There is a
+// test that fails when a field is added here, so that adding one is a decision
+// rather than an oversight.
+type NoDataGroupMemory struct {
+	GroupKey    string `json:"group_key"`
+	LastSeen    int64  `json:"last_seen,omitempty"`
+	FirstAbsent int64  `json:"first_absent,omitempty"`
+}
+
+// PlanNoDataMutation replaces one Plan's whole no-data memory.
+type PlanNoDataMutation struct {
+	Identity               PlanNoDataIdentity
+	SchemaVersion          NoDataMemorySchema
+	ExpectedMarkerRevision uint64
+	ApplyVersion           ApplyVersion
+	ScheduleRevision       PlanScheduleRevision
+	// RosterVersion names the derivation the expected set came from. It is in
+	// the digest because the same group timestamps decided against a different
+	// roster are a different memory, and a reader comparing two records has no
+	// other way to tell.
+	RosterVersion  string
+	MutationDigest MutationDigest
+	Groups         []NoDataGroupMemory
 }
 
 type StateEvaluation struct {
