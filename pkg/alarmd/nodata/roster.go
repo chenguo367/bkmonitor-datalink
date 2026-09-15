@@ -9,7 +9,12 @@
 
 package nodata
 
-import "sort"
+import (
+	"sort"
+	"strings"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+)
 
 // Host dimension names, as the backend's host scenario writes them into the
 // groups it expects.
@@ -26,23 +31,102 @@ type HostIdentity struct {
 	CloudID string
 }
 
-// ResolvedTarget is the strategy's monitoring target, as the caller resolved it
-// against the CMDB index.
+// RosterClass is what the expected set for one item is derived from: which of
+// the five combinations of target shape and no-data dimensions this item is,
+// and, for the one that names hosts, which hosts the target declares.
 //
-// Hosts empty and Resolvable false are different states that produce the same
-// expected set, which is why both are carried rather than collapsed. The
-// backend collapses them - `if not target_instances` catches its None and its
-// empty list alike - and then reports the whole item as absent when no data
-// arrived either. The result is the same and the diagnosis is not: one is a
-// target that currently matches no host, the other is a target shape this build
-// cannot enumerate, and only the second is a gap in alarmd.
-type ResolvedTarget struct {
+// It is one derivation. The compiler refuses a Plan it cannot build a roster
+// for, and the Slot builds the roster; those two have to agree about every
+// combination or the second lock is not one. A compiler that lets through what
+// the derivation refuses produces a Plan that errors every round, and one that
+// refuses what the derivation would have built loses detection silently. Two
+// predicates cannot be made to agree by testing each; one has nothing to
+// disagree with.
+type RosterClass struct {
+	Source RosterSource
+	// Hosts is the target's declared host list, and only TARGET_STATIC has one.
+	// It is what the target says rather than what exists: the caller intersects
+	// it with the hosts the CMDB index holds, as the backend intersects its
+	// target values with the business's hosts.
 	Hosts []HostIdentity
-	// Resolvable says the caller could turn this target into a host set at all.
-	// The first cut resolves a static host list; a topology node or a service
-	// instance target is not resolvable here and says so rather than quietly
-	// producing an empty one.
-	Resolvable bool
+}
+
+// ClassifyRoster decides which of the five combinations an item is.
+//
+// The backend's target read is narrower than this package's target contract,
+// and the difference is not cosmetic. It reads target[0][0] - the first group's
+// first condition - takes that condition's value list, and never looks at the
+// method. A target with an excluded host list, with two host conditions, or
+// with two alternative groups is not a list it enumerates; treating one as
+// though it were would build an expected set out of the hosts a strategy asked
+// to leave out, and then alert because they have no data.
+//
+// So the first cut recognises exactly one host shape: one group, one condition,
+// HOST, EQ. Every other host shape is refused by name rather than approximated.
+func ClassifyRoster(scope *contract.TargetScopeV2, aggDimension []string) (RosterClass, error) {
+	if scope == nil {
+		return RosterClass{Source: RosterHistory}, nil
+	}
+	if !namesTheHostDimension(aggDimension) {
+		// The backend's first step: no-data dimensions that do not name
+		// bk_target_ip make it return nothing at all rather than fall back to
+		// history, and its whole-item rule then reports the item as a whole
+		// when no data arrived. The expected set is empty and the reading is
+		// the whole item, not a target that resolved to nothing.
+		return RosterClass{Source: RosterWhole}, nil
+	}
+	condition, ok := soleHostCondition(scope)
+	if !ok {
+		return RosterClass{}, &RosterUnsupportedError{
+			Reason: "the target is not one included host list, and the backend enumerates only the " +
+				"first condition of the first group",
+		}
+	}
+	if !hostPairIsTheWholeDimensionSet(aggDimension) {
+		return RosterClass{}, &RosterUnsupportedError{
+			Reason: "the no-data dimensions name the host without being the host pair, so the expected " +
+				"set is history filtered by the target, which is not in this build",
+		}
+	}
+	hosts, ok := hostIdentities(condition.Keys)
+	if !ok {
+		return RosterClass{}, &RosterUnsupportedError{
+			Reason: "the target names hosts by identifier only, and a no-data group is addressed by " +
+				"address and cloud",
+		}
+	}
+	return RosterClass{Source: RosterTargetStatic, Hosts: hosts}, nil
+}
+
+// soleHostCondition returns the one included host condition the backend would
+// read, and false for every other shape: more than one group, more than one
+// condition, a condition on anything but hosts, and an excluded list, which
+// names what is not expected rather than what is.
+func soleHostCondition(scope *contract.TargetScopeV2) (contract.TargetScopeConditionV2, bool) {
+	if len(scope.Groups) != 1 || len(scope.Groups[0].Conditions) != 1 {
+		return contract.TargetScopeConditionV2{}, false
+	}
+	condition := scope.Groups[0].Conditions[0]
+	if condition.Field != contract.TargetScopeHost || condition.Method != contract.TargetScopeInclude {
+		return contract.TargetScopeConditionV2{}, false
+	}
+	return condition, true
+}
+
+// hostIdentities reads the address-and-cloud keys out of a host condition. The
+// compiler puts both forms in - a bare host identifier and "address|cloud" for
+// the same value - and a no-data group is addressed by the second, so the first
+// is skipped rather than parsed into a group whose address is a row of digits.
+func hostIdentities(keys []string) ([]HostIdentity, bool) {
+	hosts := make([]HostIdentity, 0, len(keys))
+	for _, key := range keys {
+		separator := strings.LastIndex(key, "|")
+		if separator <= 0 || separator == len(key)-1 {
+			continue
+		}
+		hosts = append(hosts, HostIdentity{IP: key[:separator], CloudID: key[separator+1:]})
+	}
+	return hosts, len(hosts) > 0
 }
 
 // RosterRequest is what the expected set is derived from. Everything in it is
@@ -50,10 +134,14 @@ type ResolvedTarget struct {
 // derivation can be tested against the backend's branch by branch.
 type RosterRequest struct {
 	AggDimension []string
-	// Target is the strategy's target. Nil means it names none, which is not
-	// the same as one that resolves to no host.
-	Target *ResolvedTarget
-	Memory map[string]GroupMemory
+	// Scope is the strategy's target, frozen in the Plan. Nil means it names
+	// none.
+	Scope *contract.TargetScopeV2
+	// KnownHosts is the set of "address|cloud" keys the CMDB index holds for
+	// this business. A declared host missing from it is not expected, which is
+	// the backend intersecting its target values with the business's hosts.
+	KnownHosts map[string]struct{}
+	Memory     map[string]GroupMemory
 }
 
 // RosterUnsupportedError says this build cannot derive an expected set for the
@@ -99,37 +187,22 @@ func (err *RosterUnsupportedError) Error() string {
 // returning empty for either would expect nothing where the backend expects a
 // set, silently, every round.
 func BuildRoster(request RosterRequest) (Roster, error) {
-	roster := Roster{Groups: map[string]Group{}}
-	if request.Target == nil {
-		roster.Source = RosterHistory
+	class, err := ClassifyRoster(request.Scope, request.AggDimension)
+	if err != nil {
+		return Roster{}, err
+	}
+	roster := Roster{Source: class.Source, Groups: map[string]Group{}}
+	switch class.Source {
+	case RosterHistory:
 		roster.Groups = historyGroups(request.Memory)
-		return roster, nil
-	}
-	if !namesTheHostDimension(request.AggDimension) {
-		// The backend's first step: no-data dimensions that do not name
-		// bk_target_ip make it return nothing at all rather than fall back to
-		// history, and its whole-item rule then reports the item as a whole
-		// when no data arrived. So the expected set is empty and the source is
-		// the whole item - not a target that happened to resolve to nothing,
-		// which is a different reading with the same count.
-		roster.Source = RosterWhole
-		return roster, nil
-	}
-	if !request.Target.Resolvable {
-		return Roster{}, &RosterUnsupportedError{
-			Reason: "the target is not a static host list, and enumerating it is not in this build",
+	case RosterTargetStatic:
+		for _, host := range class.Hosts {
+			if _, known := request.KnownHosts[host.IP+"|"+host.CloudID]; !known {
+				continue
+			}
+			group := hostTargetGroup(host)
+			roster.Groups[group.Key()] = group
 		}
-	}
-	if !hostPairIsTheWholeDimensionSet(request.AggDimension) {
-		return Roster{}, &RosterUnsupportedError{
-			Reason: "the no-data dimensions name the host but are not the host pair, so the expected set " +
-				"is history filtered by the target, which is not in this build",
-		}
-	}
-	roster.Source = RosterTargetStatic
-	for _, host := range request.Target.Hosts {
-		group := hostTargetGroup(host)
-		roster.Groups[group.Key()] = group
 	}
 	return roster, nil
 }

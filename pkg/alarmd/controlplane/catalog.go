@@ -904,66 +904,24 @@ const defaultNoDataLevel uint32 = 2
 // noDataRosterUnsupported names the combination of target shape and no-data
 // dimensions this build cannot derive an expected set for, or "" when it can.
 //
-// Three of the five combinations are derivable: no target, dimensions that
-// never name the host, and a static host target whose dimensions are exactly
-// the host pair. The other two have an expected set in the backend that alarmd
-// cannot produce yet - a target it does not enumerate, and dimensions that name
-// the host without being the pair, which the backend answers with history
-// filtered by the target projection.
-//
-// Both are refused rather than answered with an empty expected set. An empty
-// one is a real answer for a static target that matches no host; for these it
-// would mean detecting no absence at all, every round, while the Plan looks
-// like it is working.
+// It asks the derivation rather than repeating it. The Slot builds the roster
+// from the same two frozen facts, and the point of refusing here is that the
+// Slot never has to - which only holds while both reach the same verdict. A
+// second predicate that agrees today is a predicate that can drift tomorrow,
+// and the drift is silent in both directions: a Plan that errors every round,
+// or a Plan that quietly expects nothing.
 func noDataRosterUnsupported(scope *contract.TargetScopeV2, config *contract.NoDataConfigV1) string {
 	if config == nil {
 		return ""
 	}
-	if scope == nil || !namesHostDimension(config.AggDimension) {
-		return ""
-	}
-	if !scopeIsHostOnly(scope) {
-		return "the target is not a host list, and enumerating it for no-data is not in this build"
-	}
-	if !isHostPair(config.AggDimension) {
-		return "the no-data dimensions name the host without being the host pair, so the expected set is " +
-			"history filtered by the target, which is not in this build"
+	if _, err := nodata.ClassifyRoster(scope, config.AggDimension); err != nil {
+		var unsupported *nodata.RosterUnsupportedError
+		if errors.As(err, &unsupported) {
+			return unsupported.Reason
+		}
+		return err.Error()
 	}
 	return ""
-}
-
-func namesHostDimension(dimensions []string) bool {
-	for _, dimension := range dimensions {
-		if dimension == nodata.HostIPDimension {
-			return true
-		}
-	}
-	return false
-}
-
-func isHostPair(dimensions []string) bool {
-	if len(dimensions) != 2 {
-		return false
-	}
-	seen := map[string]bool{}
-	for _, dimension := range dimensions {
-		seen[dimension] = true
-	}
-	return seen[nodata.HostIPDimension] && seen[nodata.HostCloudDimension]
-}
-
-// scopeIsHostOnly reports whether every condition of the scope names hosts. A
-// scope that mixes a host condition with a topology one still needs the
-// topology enumerated, so it is not host-only.
-func scopeIsHostOnly(scope *contract.TargetScopeV2) bool {
-	for _, group := range scope.Groups {
-		for _, condition := range group.Conditions {
-			if condition.Field != contract.TargetScopeHost {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // frozenNoDataConfig returns the section to freeze on the Plan, or nil when the

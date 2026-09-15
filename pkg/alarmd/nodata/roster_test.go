@@ -15,6 +15,8 @@ import (
 	"math/rand"
 	"reflect"
 	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 var hostPair = []string{HostIPDimension, HostCloudDimension}
@@ -65,9 +67,8 @@ func TestRosterNeverExpectsTheWholeItemGroup(t *testing.T) {
 func TestRosterFromAStaticTargetExpectsItsHosts(t *testing.T) {
 	roster := mustBuildRoster(t, RosterRequest{
 		AggDimension: hostPair,
-		Target: &ResolvedTarget{Resolvable: true, Hosts: []HostIdentity{
-			{IP: "10.0.0.1", CloudID: "0"}, {IP: "10.0.0.2", CloudID: "0"},
-		}},
+		Scope:        hostScope("10.0.0.1|0", "10.0.0.2|0"),
+		KnownHosts:   knownHosts("10.0.0.1|0", "10.0.0.2|0"),
 		// A memory full of other groups does not widen a target's expected set.
 		Memory: map[string]GroupMemory{hostTargetGroup(HostIdentity{IP: "10.0.0.9", CloudID: "0"}).Key(): {LastSeen: 100}},
 	})
@@ -90,7 +91,7 @@ func TestRosterFromAStaticTargetExpectsItsHosts(t *testing.T) {
 func TestRosterFromAStaticTargetThatMatchesNoHostExpectsNothing(t *testing.T) {
 	seen := hostTargetGroup(HostIdentity{IP: "10.0.0.1", CloudID: "0"})
 	roster := mustBuildRoster(t, RosterRequest{
-		AggDimension: hostPair, Target: &ResolvedTarget{Resolvable: true},
+		AggDimension: hostPair, Scope: hostScope("10.0.0.1|0"),
 		Memory: map[string]GroupMemory{seen.Key(): {LastSeen: 100}},
 	})
 	if roster.Source != RosterTargetStatic {
@@ -109,8 +110,8 @@ func TestRosterFromAStaticTargetThatMatchesNoHostExpectsNothing(t *testing.T) {
 func TestRosterWithDimensionsThatDoNotNameTheHostIsTheWholeItem(t *testing.T) {
 	roster := mustBuildRoster(t, RosterRequest{
 		AggDimension: []string{"device"},
-		Target:       &ResolvedTarget{Resolvable: true, Hosts: []HostIdentity{{IP: "10.0.0.1", CloudID: "0"}}},
-		Memory:       map[string]GroupMemory{hostTargetGroup(HostIdentity{IP: "10.0.0.9", CloudID: "0"}).Key(): {LastSeen: 100}},
+		Scope:        hostScope("10.0.0.1|0"), KnownHosts: knownHosts("10.0.0.1|0"),
+		Memory: map[string]GroupMemory{hostTargetGroup(HostIdentity{IP: "10.0.0.9", CloudID: "0"}).Key(): {LastSeen: 100}},
 	})
 	if roster.Source != RosterWhole {
 		t.Fatalf("Source = %q, want %q", roster.Source, RosterWhole)
@@ -127,11 +128,23 @@ func TestRosterWithDimensionsThatDoNotNameTheHostIsTheWholeItem(t *testing.T) {
 func TestRosterRefusesWhatThisCutCannotDerive(t *testing.T) {
 	for name, request := range map[string]RosterRequest{
 		"a target this build cannot enumerate": {
-			AggDimension: hostPair, Target: &ResolvedTarget{Resolvable: false},
+			AggDimension: hostPair, Scope: topoScope(),
+		},
+		"an excluded host list": {
+			AggDimension: hostPair, Scope: excludedHostScope("10.0.0.1|0"),
+		},
+		"two host conditions in one group": {
+			AggDimension: hostPair, Scope: twoHostConditions("10.0.0.1|0", "10.0.0.2|0"),
+		},
+		"two alternative groups": {
+			AggDimension: hostPair, Scope: twoGroups("10.0.0.1|0", "10.0.0.2|0"),
+		},
+		"hosts named by identifier only": {
+			AggDimension: hostPair, Scope: hostScope("12345"),
 		},
 		"dimensions that name the host without being the pair": {
 			AggDimension: []string{HostIPDimension, HostCloudDimension, "device"},
-			Target:       &ResolvedTarget{Resolvable: true, Hosts: []HostIdentity{{IP: "10.0.0.1", CloudID: "0"}}},
+			Scope:        hostScope("10.0.0.1|0"), KnownHosts: knownHosts("10.0.0.1|0"),
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -167,7 +180,7 @@ func TestRosterNeverExpectsTheBareHostPairForOtherDimensions(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			roster, err := BuildRoster(RosterRequest{
 				AggDimension: dimensions,
-				Target:       &ResolvedTarget{Resolvable: true, Hosts: []HostIdentity{{IP: "10.0.0.1", CloudID: "0"}}},
+				Scope:        hostScope("10.0.0.1|0"), KnownHosts: knownHosts("10.0.0.1|0"),
 			})
 			if err != nil {
 				return
@@ -242,4 +255,48 @@ func TestParseGroupKeyReadsTheWholeItemGroup(t *testing.T) {
 	if len(group.Dimensions()) != 0 {
 		t.Fatalf("whole-item group parsed to %+v", group.Dimensions())
 	}
+}
+
+func hostScope(keys ...string) *contract.TargetScopeV2 {
+	return &contract.TargetScopeV2{Groups: []contract.TargetScopeGroupV2{{
+		Conditions: []contract.TargetScopeConditionV2{{
+			Field: contract.TargetScopeHost, Method: contract.TargetScopeInclude, Keys: keys,
+		}},
+	}}}
+}
+
+func excludedHostScope(keys ...string) *contract.TargetScopeV2 {
+	scope := hostScope(keys...)
+	scope.Groups[0].Conditions[0].Method = contract.TargetScopeExclude
+	return scope
+}
+
+func twoHostConditions(first, second string) *contract.TargetScopeV2 {
+	scope := hostScope(first)
+	scope.Groups[0].Conditions = append(scope.Groups[0].Conditions, contract.TargetScopeConditionV2{
+		Field: contract.TargetScopeHost, Method: contract.TargetScopeInclude, Keys: []string{second},
+	})
+	return scope
+}
+
+func twoGroups(first, second string) *contract.TargetScopeV2 {
+	scope := hostScope(first)
+	scope.Groups = append(scope.Groups, hostScope(second).Groups[0])
+	return scope
+}
+
+func topoScope() *contract.TargetScopeV2 {
+	return &contract.TargetScopeV2{Groups: []contract.TargetScopeGroupV2{{
+		Conditions: []contract.TargetScopeConditionV2{{
+			Field: contract.TargetScopeTopoNode, Method: contract.TargetScopeInclude, Keys: []string{"module|1"},
+		}},
+	}}}
+}
+
+func knownHosts(keys ...string) map[string]struct{} {
+	known := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		known[key] = struct{}{}
+	}
+	return known
 }
