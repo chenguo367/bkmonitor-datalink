@@ -58,3 +58,44 @@ func TestAWorkerWithoutANoDataStoreDoesNotStart(t *testing.T) {
 		})
 	}
 }
+
+// A worker whose budget allows nothing does not start.
+//
+// That is what keeps a zero budget out of production, and it had no test: the
+// constructor checks five budgets and only the ports half of that check was
+// pinned. It matters for no-data in particular, because the fit check reads a
+// zero budget as no room - so without this, a worker given no budget would skip
+// every no-data Plan for budget, every round, on a deployment that never set
+// one.
+func TestAWorkerWithAnEmptyBudgetDoesNotStart(t *testing.T) {
+	trace := make([]string, 0)
+	ports := &recordingPorts{trace: &trace}
+	observer := observability.ObserverFunc(func(context.Context, observability.Observation) {})
+	complete := worker.Ports{
+		OpenAlerts: ports, Finalization: ports, Activation: ports, Query: ports, Sequencer: ports,
+		Evaluator: ports, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore,
+		Hosts:  worker.SharedHostBusiness,
+		Events: ports, State: ports, Progress: ports, Observer: observer,
+	}
+	whole := worker.ProvisionalBudget{
+		MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10,
+	}
+	if _, err := worker.NewSlotExecutionCoordinator(complete, whole); err != nil {
+		t.Fatalf("fixture: a complete budget was refused: %v", err)
+	}
+	for name, zero := range map[string]func(*worker.ProvisionalBudget){
+		"no state mutations": func(b *worker.ProvisionalBudget) { b.MaxStateMutations = 0 },
+		"no series":          func(b *worker.ProvisionalBudget) { b.MaxSeries = 0 },
+		"no events":          func(b *worker.ProvisionalBudget) { b.MaxEvents = 0 },
+		"no gap mutations":   func(b *worker.ProvisionalBudget) { b.MaxGapMutations = 0 },
+		"no retained bytes":  func(b *worker.ProvisionalBudget) { b.MaxRetainedBytes = 0 },
+	} {
+		t.Run(name, func(t *testing.T) {
+			budget := whole
+			zero(&budget)
+			if _, err := worker.NewSlotExecutionCoordinator(complete, budget); err == nil {
+				t.Fatal("a worker started with a budget that allows nothing")
+			}
+		})
+	}
+}

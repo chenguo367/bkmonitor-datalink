@@ -23,6 +23,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lifecycle"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
@@ -396,6 +397,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_objects"] = "variableLabels: {disposition}"
 	expected["bkmonitor_alarmd_catalog_withheld_objects"] = "variableLabels: {disposition,reason}"
 	expected["bkmonitor_alarmd_catalog_no_data_plans"] = "variableLabels: {source}"
+	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_catalog_inert_plans"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_level_abnormal_total"] = "variableLabels: {window}"
 	expected["bkmonitor_alarmd_platform_settings_mode"] = "variableLabels: {mode}"
@@ -830,6 +832,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// bucket: a source outside the list cannot be produced, because the same
 	// list is what the classification returns.
 	bounds[fqName("catalog_no_data_plans")] = len(controlplane.NoDataRosterSources)
+	// The four outcomes a no-data Plan can land on, and no more: the label is
+	// filled from the same list the evaluation publishes, and all four are
+	// created at startup so a zero on the one that never resolves on its own
+	// can be told from a label nothing ever wrote.
+	bounds[fqName("worker_no_data_slot_plans_total")] = len(nodata.SlotOutcomes)
 	// One series: a count, unlabelled. It stays unlabelled on purpose -- the
 	// interval would be the natural label and it is user input, so labelling
 	// it would put an open set on a family whose whole job is to be a steady

@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -40,6 +41,7 @@ type phaseTwoMetrics struct {
 	ownedQueryGroups                *prometheus.GaugeVec
 	ownershipTransitions            *prometheus.CounterVec
 	queryAdmission                  *prometheus.CounterVec
+	noDataSlotPlans                 *prometheus.CounterVec
 	activeQGSetCount                prometheus.Gauge
 	activeQGSetBytes                prometheus.Gauge
 	activeQGSetEncode               *prometheus.HistogramVec
@@ -233,6 +235,21 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "ownership_transition_total",
 			Help: "Ownership lifecycle transitions by bounded transition, result and reason class.",
 		}, []string{"transition", "result", "reason_class"}),
+		noDataSlotPlans: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_slot_plans_total",
+			Help: "Plans that detect no-data, counted once per Slot by what happened to that detection. " +
+				"The outcomes partition: every such Plan lands on exactly one every Slot, so their sum is " +
+				"the no-data Plans this worker evaluated. EVALUATED is the only one that judged anything. " +
+				"The other three are different kinds of not judging and must be read apart, because once " +
+				"the round is over they look identical: SKIPPED_QUERY_NOT_FULL is a query that did not " +
+				"cover the period and resolves itself next round; SKIPPED_MEMORY_UNREADABLE is a record " +
+				"written by a newer build, which lasts as long as a rollback does; and " +
+				"SKIPPED_SLOT_BUDGET is the Slot being unable to carry the work, which does not resolve " +
+				"on its own - a history roster only grows, so a Plan that did not fit this round does " +
+				"not fit the next one either. A steady zero on that last one is the expected reading and " +
+				"any non-zero is worth acting on. All four labels are created at startup so a zero can " +
+				"be told from a label nothing ever wrote.",
+		}, []string{"outcome"}),
 		queryAdmission: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_query_admission_total",
 			Help: "Process-wide physical query permit admission outcomes by fixed operation and result. " +
@@ -487,6 +504,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.stateWriteChange.WithLabelValues(string(reason), string(stored))
 		}
 	}
+	for _, outcome := range nodata.SlotOutcomes {
+		metrics.noDataSlotPlans.WithLabelValues(string(outcome))
+	}
 	return metrics
 }
 
@@ -503,6 +523,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
 		m.queryAdmission,
+		m.noDataSlotPlans,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead,
@@ -682,6 +703,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		observation.Stage == observability.StageQueryAdmission && observation.QueryPermit != nil {
 		m.observeQueryPermit(observation)
 	}
+	if observation.Component == observability.ComponentEvaluation &&
+		observation.Stage == observability.StageNoDataDecided {
+		m.observeNoDataSlot(observation)
+	}
 	if observation.Component == observability.ComponentControlPlane && observation.SourceKind != "" &&
 		(observation.Result == observability.ResultDegraded || observation.Result == observability.Result(observability.ResultRecovered)) {
 		m.sourceObservations.WithLabelValues(
@@ -730,6 +755,14 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if kind := phaseTwoProgressKind(observation.Stage); kind != "" && observation.Result == observability.ResultSuccess {
 		m.lastProgress.WithLabelValues(kind).Set(float64(time.Now().Unix()))
 	}
+}
+
+func (m phaseTwoMetrics) observeNoDataSlot(observation observability.Observation) {
+	facts := observation.NoDataSlot
+	if facts == nil || facts.Plans <= 0 {
+		return
+	}
+	m.noDataSlotPlans.WithLabelValues(facts.Outcome).Add(float64(facts.Plans))
 }
 
 func (m phaseTwoMetrics) observeQueryPermit(observation observability.Observation) {

@@ -12,11 +12,14 @@ package worker
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -236,5 +239,262 @@ func TestSeenSeriesDimensionsComeBackAsText(t *testing.T) {
 	// other way would be inventing a spelling the backend never used.
 	if text["port"] != "8080" {
 		t.Fatalf("a numeric dimension came back as %q, want its JSON form", text["port"])
+	}
+}
+
+// A Slot whose synthetic points would fall between the positions its own
+// history is kept on is refused, and refused here.
+//
+// Nothing downstream catches it. The history summary has an alignment check,
+// but it compares the window against the point's own time, so an unaligned
+// point satisfies it by construction. What the trigger then reports - measured,
+// not assumed - is DECIDED_DEGRADED with HISTORY_WARMING, which is the same
+// answer a window that is genuinely still filling gives. A Plan permanently off
+// the grid would report warming forever, never fire, and look like a strategy
+// whose window had not warmed up yet.
+func TestAnUnalignedSlotIsRefusedRatherThanReportedAsWarming(t *testing.T) {
+	for name, test := range map[string]struct {
+		evaluationTime int64
+		period         int64
+		refused        bool
+	}{
+		"on the grid":      {evaluationTime: 1788000000, period: 60, refused: false},
+		"off by a second":  {evaluationTime: 1788000001, period: 60, refused: true},
+		"off by half":      {evaluationTime: 1788000030, period: 60, refused: true},
+		"a whole day on":   {evaluationTime: 1788086400, period: 60, refused: false},
+		"no period at all": {evaluationTime: 1788000000, period: 0, refused: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := noDataPointGrid(test.evaluationTime, test.period)
+			if test.refused && err == nil {
+				t.Fatalf("a Slot at %d with a %d-second period was accepted; its points would land "+
+					"between the positions its history is kept on, and the round would read as warming",
+					test.evaluationTime, test.period)
+			}
+			if !test.refused && err != nil {
+				t.Fatalf("a Slot on the grid was refused: %v", err)
+			}
+		})
+	}
+}
+
+// And the refusal reaches the round rather than being swallowed into an
+// outcome: an unaligned Slot produces no series and says why.
+func TestAnUnalignedSlotStopsTheNoDataRound(t *testing.T) {
+	due := noDataWiredPlan(t)
+	stream := noDataWiredStream(t, due, &emptyNoDataStore{})
+	if err := stream.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The fixture's Slot is on the grid, so move it off by one second - the
+	// smallest move that breaks the property, and the one a scheduling change
+	// would most plausibly make.
+	stream.header.Contract.Slot.EvaluationTime++
+
+	round, err := stream.noDataRoundFor(due, nil, execution.CompletenessFull)
+	if err == nil {
+		t.Fatalf("an unaligned Slot produced %d series and outcome %q instead of saying so",
+			len(round.series), round.outcome)
+	}
+	if !strings.Contains(err.Error(), "periods") {
+		t.Fatalf("error = %v, want it to name the grid it is about", err)
+	}
+}
+
+// The budget decision itself: what fits, what does not, and what an unset
+// budget means.
+//
+// An unset budget is no bound, not no room. Reading it the other way would turn
+// no-data off in every deployment that never set one, and it would do it
+// silently - every Plan skipped for budget, on a worker with no budget.
+func TestTheNoDataBudgetDecision(t *testing.T) {
+	for name, test := range map[string]struct {
+		spent, adding, budget uint64
+		fits                  bool
+	}{
+		"room to spare":    {spent: 1, adding: 2, budget: 8, fits: true},
+		"exactly fills it": {spent: 6, adding: 2, budget: 8, fits: true},
+		"one over":         {spent: 7, adding: 2, budget: 8, fits: false},
+		"nothing left":     {spent: 8, adding: 1, budget: 8, fits: false},
+		// Zero is no room, the same reading checkEffectCounts uses for this
+		// number. It is unreachable - the coordinator refuses a zero budget -
+		// and the test below is what makes that the guarantee rather than this.
+		"no budget at all": {spent: 0, adding: 1, budget: 0, fits: false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := noDataFitsSlotBudget(test.spent, test.adding, test.budget); got != test.fits {
+				t.Fatalf("fits(spent=%d, adding=%d, budget=%d) = %t, want %t",
+					test.spent, test.adding, test.budget, got, test.fits)
+			}
+		})
+	}
+}
+
+// A Plan whose synthetic series do not fit the Slot's remaining state budget is
+// skipped by name, and none of its series are evaluated.
+//
+// By name because it does not resolve on its own: a history roster only grows,
+// so a Plan that did not fit this round will not fit the next one either, and
+// folded into any other outcome it reads as a transient. None of its series,
+// because a partial set would report the groups that fitted as absent and say
+// nothing at all about the rest - a half-answer that looks like a whole one.
+func TestAPlanBeyondTheSlotBudgetIsSkippedByNameAndEntirely(t *testing.T) {
+	due := noDataWiredPlan(t)
+	stream := noDataWiredStream(t, due, &emptyNoDataStore{})
+	stream.coordinator.budget.MaxStateMutations = 1
+	if err := stream.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Spend the budget first, as an earlier Plan in the same Slot would.
+	stream.noDataStateMutations = 1
+
+	// Nothing is evaluated, so nothing reaches the batch - which is itself the
+	// assertion: a Plan that was only partly skipped would need the state port
+	// this fixture deliberately does not have, and would panic here.
+	if err := stream.evaluateNoData(context.Background(), nil, 16); err != nil {
+		t.Fatal(err)
+	}
+	if len(stream.noDataOutcomes) != 1 || stream.noDataOutcomes[0] != nodata.OutcomeSkippedSlotBudget {
+		t.Fatalf("outcomes = %+v, want exactly %q", stream.noDataOutcomes, nodata.OutcomeSkippedSlotBudget)
+	}
+	if stream.noDataStateMutations != 1 {
+		t.Fatalf("the skipped Plan spent %d mutations, want it to have spent none",
+			stream.noDataStateMutations-1)
+	}
+
+	// And the same Plan does produce series when asked directly, so the skip
+	// above was the budget rather than the Plan having nothing to say.
+	round, err := stream.noDataRoundFor(due, nil, execution.CompletenessFull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(round.series) == 0 {
+		t.Fatal("the Plan produced no series at all, so the budget test proved nothing")
+	}
+}
+
+// An evaluated Plan spends the budget its series cost, which is visible in what
+// happens to the Plan after it.
+//
+// Asserted through the effect rather than by reading the counter: a Plan that
+// charged nothing would leave room for the next one, and the next one would be
+// evaluated instead of skipped. That is the behaviour the charge exists for,
+// and it is the one a reader of this code would want to be sure of.
+func TestAnEvaluatedPlanSpendsWhatItsSeriesCost(t *testing.T) {
+	first := noDataWiredPlan(t)
+	second := first
+	second.Identity.StrategyID = "8"
+	second.CompiledPlan = noDataPreflightPlan(t, "8", &contract.NoDataConfigV1{
+		Continuous: 1, Level: 2, AggDimension: []string{"bk_target_ip", "bk_target_cloud_id"},
+	})
+	duePlans := []execution.DuePlan{first, second}
+
+	stream := &streamedExecution{
+		coordinator: &SlotExecutionCoordinator{
+			ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
+			// One mutation for the whole Slot: the first Plan's one series fits
+			// and the second Plan's does not.
+			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10,
+				MaxStateMutations: 1},
+		},
+		header: execution.InternalExecutionHeader{
+			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+		},
+	}
+	if err := stream.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	// The batch fails on purpose - this fixture has no evaluator - and that is
+	// after both Plans have been decided, which is what this reads.
+	err := stream.evaluateNoData(context.Background(), nil, 16)
+	if err == nil {
+		t.Fatal("fixture: the batch was expected to fail, so its success means this read something else")
+	}
+	if len(stream.noDataOutcomes) != 2 {
+		t.Fatalf("outcomes = %+v, want one per Plan", stream.noDataOutcomes)
+	}
+	if stream.noDataOutcomes[0] != nodata.OutcomeEvaluated {
+		t.Fatalf("the first Plan landed on %q, want it evaluated", stream.noDataOutcomes[0])
+	}
+	if stream.noDataOutcomes[1] != nodata.OutcomeSkippedSlotBudget {
+		t.Fatalf("the second Plan landed on %q, want %q - the first Plan's series did not spend the budget",
+			stream.noDataOutcomes[1], nodata.OutcomeSkippedSlotBudget)
+	}
+}
+
+// failingStatePort answers every runtime load with an error, so a test can
+// reach the batch without standing up an evaluator.
+type failingStatePort struct{}
+
+func (failingStatePort) LoadRuntime(
+	context.Context, execution.StatePreflightRequest,
+) (execution.StatePreflightResult, error) {
+	return execution.StatePreflightResult{}, errors.New("no state in this fixture")
+}
+
+func (failingStatePort) AdmitRuntime(
+	context.Context, execution.StateApplyRequest,
+) (execution.StateAdmissionResult, error) {
+	return execution.StateAdmissionResult{}, errors.New("no state in this fixture")
+}
+
+func (failingStatePort) ApplyRuntime(
+	context.Context, execution.StateApplyRequest,
+) (execution.StateApplyResult, error) {
+	return execution.StateApplyResult{}, errors.New("no state in this fixture")
+}
+
+// One observation per outcome, carrying how many Plans landed there.
+//
+// Per outcome rather than per Plan, so a Slot with hundreds of no-data Plans
+// emits at most four; and carrying the count rather than one, because a Slot's
+// worth of Plans folded into a single increment under-reports by however many
+// shared the outcome - and under-reporting is the direction nobody checks,
+// since the number still moves.
+func TestNoDataOutcomesAreReportedOncePerOutcomeWithTheirCount(t *testing.T) {
+	recorded := make([]observability.Observation, 0, 4)
+	stream := &streamedExecution{
+		coordinator: &SlotExecutionCoordinator{
+			ports: Ports{Observer: observability.ObserverFunc(
+				func(_ context.Context, observation observability.Observation) {
+					recorded = append(recorded, observation)
+				})},
+		},
+		noDataOutcomes: []nodata.SlotOutcome{
+			nodata.OutcomeEvaluated, nodata.OutcomeSkippedSlotBudget, nodata.OutcomeEvaluated,
+			nodata.OutcomeEvaluated,
+		},
+	}
+	stream.observeNoDataOutcomes(context.Background())
+
+	counts := map[string]int{}
+	for _, observation := range recorded {
+		if observation.Stage != observability.StageNoDataDecided {
+			continue
+		}
+		if observation.NoDataSlot == nil {
+			t.Fatalf("an observation at %q carries no facts", observation.Stage)
+		}
+		if _, repeated := counts[observation.NoDataSlot.Outcome]; repeated {
+			t.Fatalf("outcome %q was reported twice in one Slot", observation.NoDataSlot.Outcome)
+		}
+		counts[observation.NoDataSlot.Outcome] = observation.NoDataSlot.Plans
+	}
+	if len(counts) != 2 {
+		t.Fatalf("reported %+v, want one observation per outcome that occurred", counts)
+	}
+	if counts[string(nodata.OutcomeEvaluated)] != 3 {
+		t.Fatalf("EVALUATED carried %d Plans, want the 3 that landed there",
+			counts[string(nodata.OutcomeEvaluated)])
+	}
+	if counts[string(nodata.OutcomeSkippedSlotBudget)] != 1 {
+		t.Fatalf("SKIPPED_SLOT_BUDGET carried %d Plans, want 1",
+			counts[string(nodata.OutcomeSkippedSlotBudget)])
+	}
+	// An outcome nothing landed on is not reported at all - the metric creates
+	// its label at startup, so silence here is not a missing series.
+	if _, reported := counts[string(nodata.OutcomeSkippedMemoryUnreadable)]; reported {
+		t.Fatal("an outcome no Plan landed on was reported")
 	}
 }
