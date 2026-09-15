@@ -158,6 +158,20 @@ type SourceReconciler struct {
 	// the object catalog after a restart; the whole snapshot body is no
 	// longer read for it.
 	lastGood *PublishedSnapshot
+	// namedWithheld is the withheld objects this process has already written
+	// out, so a round reports only what changed since it last said something.
+	//
+	// Process memory, deliberately, and not the published audit. The audit
+	// records what a leader published; it says nothing about what was written
+	// where an operator can read it, and the two came apart on the very
+	// release that added these lines -- the audit was already in Redis,
+	// published by leaders that had no such lines to write, so the first
+	// leader that could write them found nothing to report and said nothing
+	// at all. An operator arriving after a failover would have counts and no
+	// names, which is the gap these lines exist to close. Nil on a process
+	// that has said nothing, which is what makes its first round name
+	// everything without needing a flag to say so.
+	namedWithheld []ObjectDisposition
 }
 
 // ConfigureClock sets the clock the reconciler paces its periodic full reads
@@ -283,10 +297,12 @@ func (reconciler *SourceReconciler) Refresh(
 	}
 	catalog.ObservationID = observationID
 	composition = ComposeCatalog(catalog)
-	// Named against the last published audit, in the round that has both. The
-	// counts in the composition and these lines come from one pass over one
-	// list, so the page and the log cannot disagree about how many.
-	withheld = ChangedWithheld(composition.WithheldObjects, previousDispositions)
+	// Named against what this process has already named, not against the
+	// stored audit: see namedWithheld. The counts in the composition and these
+	// lines come from one pass over one list, so the page and the log cannot
+	// disagree about how many.
+	withheld = ChangedWithheld(composition.WithheldObjects, reconciler.namedWithheld)
+	reconciler.namedWithheld = RememberNamed(reconciler.namedWithheld, composition.WithheldObjects, withheld.Lines)
 	// The active revision remains the execution authority even when latest points
 	// at a stranded candidate. Restore its occurrence directly; requiring two
 	// identical source observations here can leave the active Snapshot expired
