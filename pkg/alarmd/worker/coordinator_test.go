@@ -1009,7 +1009,7 @@ func buildFixtureWithBudget(
 	ports := &recordingPorts{trace: &trace, ready: ready, failStage: failStage}
 	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports,
 		Finalization: ports, Activation: ports,
-		Query: ports, Sequencer: ports, Evaluator: ports, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore,
+		Query: ports, Sequencer: ports, Evaluator: ports, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore, Hosts: worker.SharedHostBusiness,
 		Events: ports, State: ports, Progress: ports,
 		Observer: observer,
 	}, budget)

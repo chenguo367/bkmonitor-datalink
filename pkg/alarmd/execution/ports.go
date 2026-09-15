@@ -58,6 +58,23 @@ type GapGuardStore interface {
 	ApplyGap(context.Context, GapGuardApplyRequest) (GapGuardApplyResult, error)
 }
 
+// HostBusiness answers which business the CMDB index holds a host under.
+//
+// One host per call rather than a batch, because the index is an in-process
+// snapshot and the call is a map read: a batch interface would suggest a round
+// trip that is not there and would need its own partial-answer semantics for a
+// failure that cannot happen.
+//
+// The three answers are distinct and the caller needs all three. A host CMDB
+// holds under this business is expected; one it holds under another has left,
+// which is what stops a departed host being reported absent forever; and one it
+// does not hold is neither - not expected, and not something that left.
+type HostBusiness interface {
+	// LookupHostBusiness returns the business the host identity belongs to, and
+	// false when the index does not hold it. The identity is "address|cloud".
+	LookupHostBusiness(identity string) (string, bool)
+}
+
 // PlanNoDataStore holds what each Plan remembers about absence between Slots.
 type PlanNoDataStore interface {
 	LoadNoData(context.Context, NoDataLoadRequest) (NoDataLoadResult, error)

@@ -38,7 +38,13 @@ type Ports struct {
 	// evaluate every Plan's thresholds and none of their absence, and the only
 	// sign would be no-data alerts that never fire - which is indistinguishable
 	// from nothing being absent.
-	NoData   execution.PlanNoDataStore
+	NoData execution.PlanNoDataStore
+	// Hosts resolves which business a host belongs to, which decides both what
+	// a no-data roster expects and which of its groups have left. Required for
+	// the same reason: without it every declared host would read as unknown, so
+	// every static target would expect nothing and no absence would ever be
+	// reported - a silence that looks exactly like health.
+	Hosts    execution.HostBusiness
 	Events   execution.EventSink
 	State    execution.StateStore
 	Progress execution.ProgressStore
@@ -97,7 +103,7 @@ func (*activationProtectionRequiredError) Error() string {
 
 func NewSlotExecutionCoordinator(ports Ports, budget ProvisionalBudget) (*SlotExecutionCoordinator, error) {
 	if ports.Finalization == nil || ports.Activation == nil || ports.Query == nil || ports.Sequencer == nil ||
-		ports.Evaluator == nil || ports.Admission == nil || ports.GapGuard == nil || ports.NoData == nil ||
+		ports.Evaluator == nil || ports.Admission == nil || ports.GapGuard == nil || ports.NoData == nil || ports.Hosts == nil ||
 		ports.Events == nil || ports.State == nil || ports.Progress == nil || ports.Observer == nil ||
 		ports.OpenAlerts == nil {
 		return nil, errors.New("alarmd worker: all C0 execution ports are required")
