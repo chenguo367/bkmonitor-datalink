@@ -45,7 +45,6 @@ type Recorder struct {
 	resourceMu        sync.Mutex
 	resourceBound     bool
 	observations      observationMetrics
-	receipts          receiptMetrics
 	phaseTwo          phaseTwoMetrics
 }
 
@@ -62,7 +61,6 @@ func NewRecorder(build BuildInfo) *Recorder {
 	)
 	buildInfo.WithLabelValues(build.Version, build.Commit, build.SchemaVersion).Set(1)
 	observations := newObservationMetrics()
-	receipts := newReceiptMetrics()
 	phaseTwo := newPhaseTwoMetrics()
 
 	collectorsToRegister := []prometheus.Collector{
@@ -81,14 +79,12 @@ func NewRecorder(build BuildInfo) *Recorder {
 		buildInfo,
 	}
 	collectorsToRegister = append(collectorsToRegister, observations.collectors()...)
-	collectorsToRegister = append(collectorsToRegister, receipts.collectors()...)
 	collectorsToRegister = append(collectorsToRegister, phaseTwo.collectors()...)
 	registry.MustRegister(collectorsToRegister...)
 
 	return &Recorder{
 		registry:     registry,
 		observations: observations,
-		receipts:     receipts,
 		phaseTwo:     phaseTwo,
 	}
 }

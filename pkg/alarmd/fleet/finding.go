@@ -421,10 +421,12 @@ var codeSituations = map[string]Situation{
 	// an unsupported algorithm needs a different algorithm or a build that
 	// supports it; a plan over budget needs to be made smaller.
 	//
-	// Phase one has a run-time producer for PLAN_BUDGET_EXCEEDED as well
-	// (detect/admitPlans), and on that runtime this reading would be wrong.
-	// Nothing on the anomaly says which runtime produced the code, so this
-	// table does not try to serve both; it serves the one that feeds it.
+	// This reading used to hold only for the runtime that feeds this page:
+	// phase one had a second, run-time producer for PLAN_BUDGET_EXCEEDED, and
+	// nothing on the anomaly said which runtime emitted the code, so the table
+	// deliberately served one of them. That ambiguity ended with the phase-one
+	// runtime: the compiler is now the only producer of both codes, and the
+	// reading is unconditional rather than scoped to one runtime.
 	"PLAN_BUDGET_EXCEEDED":       SituationPlanTooLarge,
 	"LEVEL_BUDGET_EXCEEDED":      SituationPlanTooLarge,
 	"VALIDATION_BUDGET_EXCEEDED": SituationBudgetExceeded,

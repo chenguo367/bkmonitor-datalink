@@ -259,9 +259,6 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_observed_bytes_total":                         "variableLabels: {stage,direction,result}",
 		"bkmonitor_alarmd_observed_keys_total":                          "variableLabels: {stage,direction,result}",
 		"bkmonitor_alarmd_observed_state_bytes_total":                   "variableLabels: {stage,direction,result}",
-		"bkmonitor_alarmd_message_receipt_status_total":                 "variableLabels: {status}",
-		"bkmonitor_alarmd_message_receipt_business_total":               "variableLabels: {field}",
-		"bkmonitor_alarmd_message_receipt_delivery_total":               "variableLabels: {outcome}",
 		"bkmonitor_alarmd_worker_work_total":                            "variableLabels: {work_kind}",
 		"bkmonitor_alarmd_worker_busy_seconds_total":                    "variableLabels: {stage}",
 		"bkmonitor_alarmd_last_progress_timestamp_seconds":              "variableLabels: {kind}",
@@ -629,10 +626,6 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 			len(observability.AllMetricComponentStages())*len(observability.AllResults()),
 			len(observationDurationBuckets),
 		),
-
-		fqName("message_receipt_status_total"):   len(receiptStatuses),
-		fqName("message_receipt_business_total"): len(receiptBusinessFields),
-		fqName("message_receipt_delivery_total"): 3,
 
 		fqName("worker_work_total"):                     len(phaseTwoWorkKinds),
 		fqName("worker_busy_seconds_total"):             len(phaseTwoBusyStages),
