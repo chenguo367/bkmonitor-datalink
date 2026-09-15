@@ -294,9 +294,15 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			neither: []string{"PlanRevision"},
 		},
 		reflect.TypeOf(contract.EvaluationPlanV2{}): {
-			execution: []string{"plan_id", "input_projection", "output_identity", "target_scope", "terminal_reason_code"},
-			context:   []string{"source_compatibility", "subject_facts", "legacy_output", "wire_format"},
-			split:     []string{"strategy_ref", "strategy_ir"},
+			// no_data is execution: absence is judged while the Slot runs, and
+			// Continuous is the window the synthetic series is read with. The
+			// level it also carries is read at output, but a fact is placed
+			// where it is decided, not everywhere it is read.
+			execution: []string{
+				"plan_id", "input_projection", "output_identity", "target_scope", "no_data", "terminal_reason_code",
+			},
+			context: []string{"source_compatibility", "subject_facts", "legacy_output", "wire_format"},
+			split:   []string{"strategy_ref", "strategy_ir"},
 		},
 		reflect.TypeOf(contract.StrategyIRV2{}): {
 			execution: []string{"schema", "required_features", "execution_semantics", "input_projection", "levels"},

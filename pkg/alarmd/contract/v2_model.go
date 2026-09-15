@@ -233,7 +233,11 @@ type EvaluationPlanV2 struct {
 	// means "a scope existed and was dropped" - compilation rejects the Plan
 	// in that case rather than publish one that alerts outside its target.
 	TargetScope *TargetScopeV2 `json:"target_scope,omitempty"`
-	StrategyIR  StrategyIRV2   `json:"strategy_ir"`
+	// NoData is the item's no-data detection setting. Absent means the item
+	// does not detect no-data; see NoDataConfigV1 for why enablement is the
+	// presence of the section rather than a field inside it.
+	NoData     *NoDataConfigV1 `json:"no_data,omitempty"`
+	StrategyIR StrategyIRV2    `json:"strategy_ir"`
 	// WireFormat is the format this Plan's events are published as, decided
 	// when the Plan was built and frozen with it so a retried Slot cannot
 	// change format between attempts. Empty means the pre-choice behaviour:
@@ -289,9 +293,10 @@ func (plan EvaluationPlanV2) MarshalJSON() ([]byte, error) {
 		SubjectFacts        *MonitorSubjectFacts   `json:"subject_facts,omitempty"`
 		LegacyOutput        *LegacyOutputContext   `json:"legacy_output,omitempty"`
 		TargetScope         *TargetScopeV2         `json:"target_scope,omitempty"`
+		NoData              *NoDataConfigV1        `json:"no_data,omitempty"`
 		StrategyIR          StrategyIRV2           `json:"strategy_ir"`
 		WireFormat          string                 `json:"wire_format,omitempty"`
-	}{plan.PlanID, plan.StrategyRef, plan.InputProjection, plan.SourceCompatibility, plan.OutputIdentity, plan.SubjectFacts, plan.LegacyOutput, plan.TargetScope, plan.StrategyIR, plan.WireFormat})
+	}{plan.PlanID, plan.StrategyRef, plan.InputProjection, plan.SourceCompatibility, plan.OutputIdentity, plan.SubjectFacts, plan.LegacyOutput, plan.TargetScope, plan.NoData, plan.StrategyIR, plan.WireFormat})
 }
 
 type PlanSetV2 struct {
