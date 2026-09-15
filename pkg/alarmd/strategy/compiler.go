@@ -136,6 +136,7 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 		normalizers:         make(map[string]NumericNormalizerSpec),
 		datasetDigest:       datasetDigest,
 		targetScope:         request.Plan.TargetScope,
+		noData:              request.Plan.NoData,
 	}
 	terminals := make([]Terminal, 0)
 	if request.Plan.OutputIdentity != nil {
@@ -169,6 +170,41 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 		compiled.levels = append(compiled.levels, level)
 		for _, normalizer := range normalizers {
 			compiled.normalizers[normalizer.ref] = normalizer
+		}
+	}
+	if request.Plan.NoData != nil {
+		rawLevel, err := BuildNoDataLevelIR(request.Plan.NoData, request.Plan.StrategyIR.ExecutionSemantics)
+		if err != nil {
+			return CompileResult{}, err
+		}
+		// Its own projection, not the item's: the synthetic series carry one
+		// value that is the absence answer, and a detector pointed at one of the
+		// item's real value fields would declare an input it never receives.
+		level, normalizers, terminal, err := c.compileLevel(
+			ctx, NoDataProjection(request.Plan.NoData), request.DatasetContract.IdentityFields,
+			request.Plan.StrategyIR.ExecutionSemantics, rawLevel,
+		)
+		if err != nil {
+			return CompileResult{}, err
+		}
+		switch {
+		case terminal != nil:
+			// Re-pathed, because the no-data level shares the level ID space
+			// with the declared levels: reported as it comes back, a rejected
+			// no-data level is indistinguishable from a rejected threshold level
+			// of the same ID.
+			terminal.FieldPath = "no_data." + terminal.FieldPath
+			terminals = append(terminals, *terminal)
+		default:
+			levelCost := triggerComputeCostForLevel(level.trigger, level.recovery)
+			if levelCost > c.limits.MaxTriggerComputeCost-triggerComputeCost {
+				return CompileResult{planTerminal: &Terminal{ReasonCode: contract.ReasonPlanBudgetExceeded, FieldPath: "no_data.trigger_compute"}}, nil
+			}
+			triggerComputeCost += levelCost
+			compiled.noDataLevel = &level
+			for _, normalizer := range normalizers {
+				compiled.normalizers[normalizer.ref] = normalizer
+			}
 		}
 	}
 	sort.Slice(compiled.levels, func(left, right int) bool {
