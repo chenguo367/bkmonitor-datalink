@@ -35,16 +35,35 @@ func TestNoDataConfigAcceptsEmptyAggDimension(t *testing.T) {
 	}
 }
 
+// A dimension listed twice is the same item either way - the backend holds
+// these in a set - so it is deduplicated rather than refused. Refusing would
+// withhold the whole Plan over something that changes nothing.
+func TestNoDataConfigDeduplicatesRepeatedDimensions(t *testing.T) {
+	config := &NoDataConfigV1{Continuous: 1, Level: 2, AggDimension: []string{"host", "device", "host"}}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+	if got := config.AggDimension; len(got) != 2 || got[0] != "host" || got[1] != "device" {
+		t.Fatalf("AggDimension = %v, want the stated order without the repeat", got)
+	}
+}
+
+// A name no series carries is a live strategy producing no groups, which the
+// projection's dropped count reports. Refusing the Plan would replace a visible
+// misconfiguration with a strategy that detects nothing at all.
+func TestNoDataConfigAcceptsADimensionNoSeriesWillCarry(t *testing.T) {
+	config := &NoDataConfigV1{Continuous: 1, Level: 2, AggDimension: []string{" host"}}
+	if err := config.Validate(); err != nil {
+		t.Fatalf("Validate() refused a dimension that only fails to match: %v", err)
+	}
+}
+
 func TestNoDataConfigRejectsSettingsThatCannotDecide(t *testing.T) {
 	for name, config := range map[string]*NoDataConfigV1{
 		"zero continuous":   {Continuous: 0, Level: 2},
 		"level below one":   {Continuous: 1, Level: 0},
 		"level above three": {Continuous: 1, Level: 4},
 		"empty dimension":   {Continuous: 1, Level: 2, AggDimension: []string{""}},
-		"padded dimension":  {Continuous: 1, Level: 2, AggDimension: []string{" host"}},
-		"repeated dimension": {
-			Continuous: 1, Level: 2, AggDimension: []string{"host", "host"},
-		},
 		"dimension names the tag": {
 			Continuous: 1, Level: 2, AggDimension: []string{NoDataDimensionTag},
 		},
