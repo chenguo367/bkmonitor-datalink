@@ -15,7 +15,6 @@ const (
 	ExecutionEnvelopeSchemaV2 = "execution-envelope"
 	StrategyIRSchemaV2        = "alarmd-strategy-ir"
 	TriggerEventSchemaV1      = "trigger-event"
-	MessageReceiptSchemaV1    = "message-receipt"
 	ExecutionSummarySchemaV1  = "execution-summary"
 
 	QueryCompletenessFull        = "FULL"
@@ -113,10 +112,6 @@ const (
 	LevelResultNormal      = "NORMAL"
 	LevelResultRecovery    = "RECOVERY"
 	LevelResultUnavailable = "UNAVAILABLE"
-
-	ReceiptStatusCompleted             = "COMPLETED"
-	ReceiptStatusCompletedWithTerminal = "COMPLETED_WITH_TERMINAL"
-	ReceiptStatusRejected              = "REJECTED"
 )
 
 const ReasonMultipleEvaluationUnitsUnsupported = "MULTIPLE_EVALUATION_UNITS_UNSUPPORTED"
@@ -573,48 +568,6 @@ type CountSetV1 struct {
 type ReasonCountV1 struct {
 	ReasonCode string `json:"reason_code"`
 	Count      uint64 `json:"count"`
-}
-
-type PlanReceiptV1 struct {
-	PlanID                string `json:"plan_id"`
-	Selected              uint64 `json:"selected"`
-	Abnormal              uint64 `json:"abnormal"`
-	Normal                uint64 `json:"normal"`
-	Recovery              uint64 `json:"recovery"`
-	Unavailable           uint64 `json:"unavailable"`
-	Terminal              uint64 `json:"terminal"`
-	LevelTerminalAffected uint64 `json:"level_terminal_affected"`
-}
-
-type ReceiptCountsV1 struct {
-	Received  uint64 `json:"received"`
-	Selected  uint64 `json:"selected"`
-	Processed uint64 `json:"processed"`
-	// Unavailable counts selected Plan x Record evaluations that produced no
-	// valid three-state decision for a controlled runtime reason. ReasonCounts
-	// distinguishes suppression, missing facts, warming and gapped history.
-	Unavailable uint64 `json:"unavailable"`
-	Terminal    uint64 `json:"terminal"`
-	// LevelTerminalAffected counts Plan x Record evaluations whose sibling
-	// Level terminalized. It can overlap Processed and is not part of the
-	// Selected decomposition.
-	LevelTerminalAffected uint64 `json:"level_terminal_affected"`
-	Events                uint64 `json:"events"`
-}
-
-type MessageReceiptV1 struct {
-	Schema           Schema          `json:"schema"`
-	RequiredFeatures []string        `json:"required_features"`
-	ReceiptID        string          `json:"receipt_id"`
-	ExecutionID      string          `json:"execution_id"`
-	MessageID        string          `json:"message_id"`
-	PayloadDigest    string          `json:"payload_digest"`
-	PlanSetDigest    string          `json:"plan_set_digest"`
-	SourceWindow     SourceWindowV2  `json:"source_window"`
-	Status           string          `json:"status"`
-	Counts           ReceiptCountsV1 `json:"counts"`
-	PerPlan          []PlanReceiptV1 `json:"per_plan"`
-	ReasonCounts     []ReasonCountV1 `json:"reason_counts"`
 }
 
 type ExecutionSummaryV1 struct {
