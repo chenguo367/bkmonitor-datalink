@@ -10,7 +10,9 @@
 package nodata
 
 import (
+	"encoding/json"
 	"sort"
+	"strconv"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
@@ -45,16 +47,36 @@ type SyntheticSeries struct {
 	SourceTime int64
 }
 
-// Dimensions returns what the event carries: the group's own pairs plus the
-// tag, as JSON values ready for the Python-compatible identity hash. The tag is
-// the JSON true that count_md5 sees as "True".
-func (series SyntheticSeries) Dimensions() map[string]string {
-	dimensions := make(map[string]string, len(series.Group.dimensions)+1)
+// IdentityFields returns what the event carries and what its identity is hashed
+// from: the group's own pairs plus the no-data tag, as the JSON values the
+// backend writes.
+//
+// The tag is the JSON boolean true, and it has to be. count_md5 hashes str() of
+// each value, so Python's True and the text "True" flatten together and hash
+// alike - but the text "true" does not, and hashes to something else entirely.
+// A tag reaching the hash in that form would give every no-data anomaly an
+// anomaly_id that no Python-written record matches, which nothing downstream
+// would report as an error; it would read as a fresh anomaly every time.
+//
+// Returning raw JSON rather than text is what keeps that from coming back. The
+// hash input and the event payload are then the same values from the same call,
+// so there is no second representation to convert between and get wrong: a
+// map[string]string cannot hold a boolean, and the conversion that would bridge
+// it is exactly where the text "true" came from.
+func (series SyntheticSeries) IdentityFields() map[string]json.RawMessage {
+	fields := make(map[string]json.RawMessage, len(series.Group.dimensions)+1)
 	for _, dimension := range series.Group.dimensions {
-		dimensions[dimension.Name] = dimension.Value
+		encoded, err := json.Marshal(dimension.Value)
+		if err != nil {
+			// A Go string always marshals, so this cannot happen; encoding the
+			// value by hand rather than skipping it keeps a field that somehow
+			// failed from silently leaving the identity.
+			encoded = json.RawMessage(strconv.Quote(dimension.Value))
+		}
+		fields[dimension.Name] = encoded
 	}
-	dimensions[contract.NoDataDimensionTag] = "true"
-	return dimensions
+	fields[contract.NoDataDimensionTag] = json.RawMessage("true")
+	return fields
 }
 
 // SyntheticInput is what turning verdicts into series needs beyond the verdicts.

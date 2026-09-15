@@ -10,6 +10,7 @@
 package nodata
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 
@@ -112,21 +113,44 @@ func TestSyntheticSeriesCarryTheVerdictAsAValueInAStableOrder(t *testing.T) {
 	}
 }
 
-// The tag is on every synthetic series' dimensions, which is what keeps a
+// The tag is on every synthetic series' identity fields, which is what keeps a
 // no-data group away from the real series of the same item.
-func TestSyntheticSeriesDimensionsAlwaysCarryTheTag(t *testing.T) {
+//
+// It asserts the tag is the JSON boolean, and then asserts why that matters:
+// the text "true" - the form a map[string]string forces and the form this code
+// carried until the hash was checked against Python - hashes to something else.
+// An earlier version of this test asserted the tag was the text "true", which
+// is the code's own choice restated rather than a fact about the backend, and
+// it held the wrong form in place while passing.
+func TestSyntheticSeriesIdentityFieldsAlwaysCarryTheTagAsABoolean(t *testing.T) {
 	group := hostTargetGroup(HostIdentity{IP: "10.0.0.1", CloudID: "0"})
-	series := SyntheticSeries{Group: group}
-	dimensions := series.Dimensions()
-	if dimensions[contract.NoDataDimensionTag] != "true" {
-		t.Fatalf("dimensions = %v, want the tag", dimensions)
+	fields := SyntheticSeries{Group: group}.IdentityFields()
+	if string(fields[contract.NoDataDimensionTag]) != "true" {
+		t.Fatalf("tag = %s, want the JSON boolean true", fields[contract.NoDataDimensionTag])
 	}
-	if dimensions[HostIPDimension] != "10.0.0.1" || dimensions[HostCloudDimension] != "0" {
-		t.Fatalf("dimensions = %v, want the group's own pairs beside the tag", dimensions)
+	if string(fields[HostIPDimension]) != `"10.0.0.1"` || string(fields[HostCloudDimension]) != `"0"` {
+		t.Fatalf("fields = %v, want the group's own pairs as JSON strings beside the tag", fields)
 	}
-	whole := SyntheticSeries{Group: WholeItemGroup()}.Dimensions()
-	if len(whole) != 1 || whole[contract.NoDataDimensionTag] != "true" {
-		t.Fatalf("whole-item dimensions = %v, want only the tag", whole)
+	whole := SyntheticSeries{Group: WholeItemGroup()}.IdentityFields()
+	if len(whole) != 1 || string(whole[contract.NoDataDimensionTag]) != "true" {
+		t.Fatalf("whole-item fields = %v, want only the tag", whole)
+	}
+
+	// count_md5 hashes str() of each value, so Python's True and the text "True"
+	// flatten together while the text "true" does not. Stating it as two hashes
+	// that must differ is what makes a future change back to a string form fail
+	// here rather than in production, where a wrong anomaly_id matches no record
+	// and reads as a brand new anomaly every round.
+	boolean, err := contract.PythonObjectMD5(whole)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := contract.PythonObjectMD5(map[string]json.RawMessage{contract.NoDataDimensionTag: json.RawMessage(`"true"`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if boolean == text {
+		t.Fatal("the boolean tag and the text \"true\" hash alike; this test can no longer tell the forms apart")
 	}
 }
 
