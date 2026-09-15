@@ -70,12 +70,12 @@ func RenewGenerationKey(
 	// interval: that error is what stops a Slot from running against a store
 	// where the keys leak, and a gate that hid it would restore the leak and
 	// the silence together.
-	if !gate.Ask(key, RenewalAskInterval(ttl)) {
+	if !gate.Ask(key) {
 		return nil
 	}
 	if _, err = backend.RenewIfBelow(ctx, key, ttl, GenerationScopedRenewalThreshold(ttl)); err != nil {
 		return err
 	}
-	gate.Answered(key)
+	gate.Answered(key, RenewalAskInterval(ttl))
 	return nil
 }

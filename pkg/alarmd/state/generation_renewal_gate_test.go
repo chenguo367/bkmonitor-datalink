@@ -12,6 +12,7 @@ package state
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -80,19 +81,19 @@ func TestTheAskGoesOutAgainOnceTheIntervalHasPassed(t *testing.T) {
 	gate.now = func() time.Time { return clock }
 	interval := RenewalAskInterval(GenerationScopedFloor)
 
-	if !gate.Ask("k", interval) {
+	if !gate.Ask("k") {
 		t.Fatal("a key the gate has never seen was not asked about")
 	}
-	gate.Answered("k")
-	if gate.Ask("k", interval) {
+	gate.Answered("k", interval)
+	if gate.Ask("k") {
 		t.Fatal("the key was asked about again immediately")
 	}
 	clock = clock.Add(interval - time.Second)
-	if gate.Ask("k", interval) {
+	if gate.Ask("k") {
 		t.Fatal("the key was asked about a second before the interval was up")
 	}
 	clock = clock.Add(time.Second)
-	if !gate.Ask("k", interval) {
+	if !gate.Ask("k") {
 		t.Fatalf("the key was not asked about after %s; nothing else renews it", interval)
 	}
 }
@@ -175,27 +176,132 @@ func TestACapabilityMissIsReportedOnEveryLoad(t *testing.T) {
 	}
 }
 
-// Running out of room forgets everything rather than choosing.
+// A table under pressure drops what has come due and keeps what has not.
 //
-// The only consequence is a round of asking. A gate that decided which keys to
-// keep would have to be right about which Plans are still owned, which it has
-// no way to know and no way to be caught getting wrong.
-func TestAFullGateForgetsEverythingAndAsksAgain(t *testing.T) {
+// This is the difference between a gate that works on a large deployment and
+// one that only works on a small one. Dropping a due entry changes nothing --
+// the next load was going to ask about it anyway -- so it is always the right
+// thing to drop first, and on a real worker it is most of the table: the keys
+// of every generation a rollout replaced leave here.
+func TestAFullTableDropsWhatIsDueAndKeepsWhatIsNot(t *testing.T) {
 	gate := newRenewalGate()
-	gate.capacity = 4
+	clock := time.Unix(1_700_000_000, 0).UTC()
+	gate.now = func() time.Time { return clock }
 	interval := RenewalAskInterval(GenerationScopedFloor)
-	for index := 0; index < 4; index++ {
-		gate.Answered(string(rune('a' + index)))
+
+	// Half the table was answered an interval ago and has come due; half was
+	// answered just now and has not.
+	due := make([]string, 0, renewalGateSweepFloor/2)
+	for index := 0; index < renewalGateSweepFloor/2; index++ {
+		key := fmt.Sprintf("due-%d", index)
+		gate.Answered(key, interval)
+		due = append(due, key)
 	}
-	if gate.Ask("a", interval) {
-		t.Fatal("a key inside the interval was asked about before the gate was full")
+	clock = clock.Add(interval)
+	live := make([]string, 0, renewalGateSweepFloor/2)
+	for index := 0; index < renewalGateSweepFloor/2; index++ {
+		key := fmt.Sprintf("live-%d", index)
+		gate.Answered(key, interval)
+		live = append(live, key)
 	}
-	gate.Answered("e")
-	if !gate.Ask("a", interval) {
-		t.Fatal("a full gate kept an entry; it must forget everything so the next load asks")
+	if len(gate.expiry) != renewalGateSweepFloor {
+		t.Fatalf("table = %d entries, want the sweep trigger %d; the next insert is the one that sweeps",
+			len(gate.expiry), renewalGateSweepFloor)
 	}
-	if len(gate.asked) != 1 {
-		t.Fatalf("entries after overflow = %d, want only the one that caused it", len(gate.asked))
+
+	gate.Answered("one-more", interval)
+
+	if gate.resets != 0 {
+		t.Fatalf("resets = %d, want none: half the table had come due and dropping it made room", gate.resets)
+	}
+	for _, key := range live {
+		if gate.Ask(key) {
+			t.Fatalf("key %s was answered this instant and the table forgot it; only entries that have "+
+				"come due may be dropped, because dropping those changes no behaviour", key)
+		}
+	}
+	for _, key := range due {
+		if !gate.Ask(key) {
+			t.Fatalf("key %s had come due and is still being skipped", key)
+		}
+	}
+	if _, present := gate.expiry[due[0]]; present {
+		t.Fatalf("a due entry was kept; the sweep made no room and the table will clear next time")
+	}
+}
+
+// Sweeping does not fall on every insert once the table is large.
+//
+// A gate that swept on every Answered past its trigger would spend a full pass
+// over the table per load. The trigger tracks what survived, so the cost is
+// spread over as many inserts as the table holds.
+func TestTheSweepTriggerFollowsTheLiveWorkingSet(t *testing.T) {
+	gate := newRenewalGate()
+	clock := time.Unix(1_700_000_000, 0).UTC()
+	gate.now = func() time.Time { return clock }
+	interval := RenewalAskInterval(GenerationScopedFloor)
+
+	for index := 0; index <= renewalGateSweepFloor; index++ {
+		gate.Answered(fmt.Sprintf("live-%d", index), interval)
+	}
+	// Nothing had come due, so the sweep freed nothing and the trigger moved
+	// out to twice what is live rather than staying where every further insert
+	// would sweep again.
+	if gate.sweepAt <= renewalGateSweepFloor {
+		t.Fatalf("sweepAt = %d after a sweep that freed nothing, want it past the floor %d: otherwise "+
+			"every later insert sweeps the whole table", gate.sweepAt, renewalGateSweepFloor)
+	}
+	if gate.resets != 0 {
+		t.Fatalf("resets = %d, want none well below the ceiling", gate.resets)
+	}
+}
+
+// Only the ceiling clears the table, and clearing it is counted.
+//
+// At the ceiling everything in the table is live, so there is nothing to drop
+// that would not change behaviour. Forgetting all of it costs one round of
+// asking and no wrong answers -- but it is the whole cost the gate exists to
+// avoid, paid at once, and nothing else in the process says it happened.
+func TestOnlyTheCeilingClearsTheTableAndSaysSo(t *testing.T) {
+	gate := newRenewalGate()
+	clock := time.Unix(1_700_000_000, 0).UTC()
+	gate.now = func() time.Time { return clock }
+	interval := RenewalAskInterval(GenerationScopedFloor)
+	// Fill past the ceiling with entries that are all live, which is the only
+	// state a sweep cannot help with.
+	for index := 0; index <= renewalGateCeiling; index++ {
+		gate.Answered(fmt.Sprintf("live-%d", index), interval)
+	}
+
+	if gate.Resets() != 1 {
+		t.Fatalf("resets = %d, want exactly one: the table passed the ceiling once", gate.Resets())
+	}
+	if len(gate.expiry) > renewalGateCeiling {
+		t.Fatalf("table = %d entries, want it cleared at the ceiling", len(gate.expiry))
+	}
+	// And it is asking again, which is what a reset means.
+	if !gate.Ask("live-0") {
+		t.Fatal("a key from before the reset is still being skipped")
+	}
+}
+
+// The ceiling covers every Plan of the largest deployment on one worker.
+//
+// This is the arithmetic the number was chosen from, stated where it fails if
+// the shape changes: two generation-scoped keys per Plan, and a deployment
+// around forty-eight times the one this was measured on.
+func TestTheCeilingCoversTheLargestDeploymentOnOneWorker(t *testing.T) {
+	const largestDeploymentPlans = 100000
+	const generationScopedKeysPerPlan = 2
+	if want := largestDeploymentPlans * generationScopedKeysPerPlan; renewalGateCeiling < want {
+		t.Fatalf("ceiling %d is below the %d keys a single worker would hold if it owned every Plan of "+
+			"the largest deployment; past it the gate clears on every answer and saves nothing",
+			renewalGateCeiling, want)
+	}
+	// And the sweep floor is far below it, so an ordinary deployment never
+	// reaches the ceiling path at all.
+	if renewalGateSweepFloor >= renewalGateCeiling {
+		t.Fatalf("sweep floor %d is not below the ceiling %d", renewalGateSweepFloor, renewalGateCeiling)
 	}
 }
 

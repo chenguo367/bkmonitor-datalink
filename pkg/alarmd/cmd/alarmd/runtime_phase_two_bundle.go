@@ -452,6 +452,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// A worker that has forgotten the key lives it remembered is back to one
+	// renewal round trip per Plan per Slot, and nothing else in the process
+	// says so: the Slots keep passing and the keys keep being renewed.
+	recorder.SetRenewalGateSource(executionStore.RenewalGateResets)
 	progressStore, err := progress.NewStore(progress.StoreOptions{
 		Prefix: productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "schedule"), Control: ownershipStore,
 		Slots: catalog, Now: external.Now, Observer: observer,
