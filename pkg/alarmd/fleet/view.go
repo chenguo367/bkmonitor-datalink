@@ -569,10 +569,17 @@ type Snapshot struct {
 	// same duration, and a scheduled comparison that turned out to be measuring
 	// a rollout. The per-row provenance says which durations are bounds; this
 	// says what they are bounded by.
-	StartedAt      time.Time `json:"started_at,omitempty"`
-	Determined     int       `json:"determined"`
-	Anomalies      []Anomaly `json:"anomalies"`
-	TotalAnomalies int       `json:"total_anomalies"`
+	StartedAt time.Time `json:"started_at,omitempty"`
+	// Build is the version, commit and schema this replica's process was built
+	// from -- the same three facts as its build_info series. On the snapshot
+	// because the page reads the replicas' combined numbers, and the first
+	// question about any number that looks wrong after a release is which
+	// build produced it. Absent on a build before this field existed, which the
+	// aggregate keeps apart from any version.
+	Build          *BuildFacts `json:"build,omitempty"`
+	Determined     int         `json:"determined"`
+	Anomalies      []Anomaly   `json:"anomalies"`
+	TotalAnomalies int         `json:"total_anomalies"`
 	// Demoted are the objects held back because their backend kept answering
 	// unavailable. They are published apart from Anomalies, not folded into
 	// them, because they answer a different question: Anomalies is what this
@@ -878,6 +885,31 @@ type ReplicaView struct {
 	// between it and the deployment's PublishedVersion, two persisted
 	// versions; it is never derived from when the report was made.
 	AckedVersion *uint64 `json:"acked_version,omitempty"`
+	// Build is what this replica reported running. Absent when it reported
+	// none, which the page says rather than filling in.
+	Build *BuildFacts `json:"build,omitempty"`
+}
+
+// BuildFacts is one process's build: the three labels of its build_info
+// series, as fields.
+type BuildFacts struct {
+	Version       string `json:"version"`
+	Commit        string `json:"commit"`
+	SchemaVersion string `json:"schema_version"`
+}
+
+// BuildGroup is one distinct build and the counted replicas running it.
+//
+// The deployment's numbers are the replicas' numbers added up, and adding up
+// two builds gives a number neither build produced. Ceph's `ceph versions`
+// answers the same question the same way -- by build, listing who runs each
+// -- so a reader sees one line when the deployment agrees with itself and two
+// when a rollout is in progress or stuck. A replica that reported no build is
+// its own group with an empty Build, never folded into a version it may not
+// be running.
+type BuildGroup struct {
+	Build    BuildFacts `json:"build"`
+	Replicas []string   `json:"replicas"`
 }
 
 // WorkerAcknowledgement partitions the replicas the view counted by whether
@@ -1013,6 +1045,10 @@ type View struct {
 	// against; absent when it could not be read.
 	PublishedVersion uint64                `json:"published_version,omitempty"`
 	Workers          WorkerAcknowledgement `json:"workers"`
+	// Builds is the distinct builds the counted replicas run, most replicas
+	// first. One entry is a deployment that agrees with itself; more is a
+	// rollout, finished or not, and every total above is then a mix.
+	Builds []BuildGroup `json:"builds"`
 }
 
 // Aggregate folds the published snapshots into one view.
@@ -1025,7 +1061,7 @@ type View struct {
 func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas []string, now time.Time, freshness time.Duration) View {
 	view := View{Health: HealthHealthy, Anomalies: []Anomaly{}, Demoted: []Anomaly{},
 		Undecidable: []Anomaly{}, ByDesign: []Anomaly{},
-		Replicas: []string{}, PerReplica: []ReplicaView{}}
+		Replicas: []string{}, PerReplica: []ReplicaView{}, Builds: []BuildGroup{}}
 	ownedByReplica := make([]string, 0, len(expectedReplicas))
 	// The snapshots this view is willing to speak for. Every other number below
 	// is built from these and not from the argument, because the argument
@@ -1130,7 +1166,9 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			// than "started just now", so the page checks before using it.
 			UptimeSeconds: uptimeSeconds(snapshot.StartedAt, now),
 			Truncated:     snapshot.Truncated(), Capacity: snapshot.Capacity,
+			Build: snapshot.Build,
 		}
+		view.Builds = addToBuildGroup(view.Builds, snapshot.Build, replica)
 		view.Workers.Ready++
 		switch {
 		case snapshot.AppliedActivationRecordRevision == 0 || expectation.ActivationRecordRevision == 0:
@@ -1292,7 +1330,39 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	Attribute(view.ByDesign, now)
 	Attribute(view.NoData, now)
 	Settle(&view)
+	sortBuildGroups(view.Builds)
 	return view
+}
+
+// addToBuildGroup files a counted replica under the build it reported. A nil
+// build is filed under the empty BuildFacts, so replicas on a build that did
+// not publish one are counted together and apart from every version.
+func addToBuildGroup(groups []BuildGroup, build *BuildFacts, replica string) []BuildGroup {
+	facts := BuildFacts{}
+	if build != nil {
+		facts = *build
+	}
+	for index := range groups {
+		if groups[index].Build == facts {
+			groups[index].Replicas = append(groups[index].Replicas, replica)
+			return groups
+		}
+	}
+	return append(groups, BuildGroup{Build: facts, Replicas: []string{replica}})
+}
+
+// sortBuildGroups puts the build most replicas run first, then orders by
+// version so two reads of an evenly split deployment list the same way.
+func sortBuildGroups(groups []BuildGroup) {
+	sort.SliceStable(groups, func(i, j int) bool {
+		if len(groups[i].Replicas) != len(groups[j].Replicas) {
+			return len(groups[i].Replicas) > len(groups[j].Replicas)
+		}
+		if groups[i].Build.Version != groups[j].Build.Version {
+			return groups[i].Build.Version > groups[j].Build.Version
+		}
+		return groups[i].Build.Commit < groups[j].Build.Commit
+	})
 }
 
 // Settle sets the verdict, and the per-replica breakdown of what it is about,

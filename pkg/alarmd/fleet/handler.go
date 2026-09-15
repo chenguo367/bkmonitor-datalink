@@ -203,6 +203,10 @@ type HealthResponse struct {
 	// have applied it. Per-replica versions are on PerReplica.
 	PublishedVersion uint64                `json:"published_version,omitempty"`
 	Workers          WorkerAcknowledgement `json:"workers"`
+	// Builds is which build each counted replica runs, grouped. The first
+	// thing to establish about any reading is what produced it; before this
+	// field that meant a PromQL query against build_info for each pod.
+	Builds []BuildGroup `json:"builds"`
 	// Overdue rides here rather than only in the list because the list can be
 	// paged or truncated, and "how many objects are not being evaluated" must
 	// not depend on how much of the list fitted.
@@ -737,7 +741,7 @@ func NewHandler(
 			LastDemotionExit: momentOrNil(view.LastDemotionExit),
 			PrunedSkips:      prunedSkipList(view.PrunedSkips),
 			Coverage:         view.Coverage, PerReplica: view.PerReplica,
-			PublishedVersion: view.PublishedVersion, Workers: view.Workers,
+			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
 			Gaps: view.Gaps, Capacity: view.Capacity,
 		})

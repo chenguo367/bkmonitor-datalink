@@ -267,6 +267,28 @@ func TestThePageDoesNotInferASituationFromTheCounts(t *testing.T) {
 	}
 }
 
+// The queue verdict is read from the census, never from the wait share alone.
+//
+// The share said "支持扩容" at 50%, and a live deployment showed it at 58% with
+// three quarters of its CPU idle and nothing overdue. Whether queueing costs
+// anything is a question about deadlines; the census answers it and the share
+// cannot. A threshold on the share is the defect coming back.
+func TestTheQueueVerdictIsReadFromTheCensusNotTheWaitShare(t *testing.T) {
+	body := string(page)
+	if regexp.MustCompile(`share\s*>=?\s*\d`).MatchString(body) {
+		t.Error("the page compares the wait share against a number again: the verdict on queueing " +
+			"comes from the census (queueVerdict), the share is a measurement")
+	}
+	if !strings.Contains(body, "+ queueVerdict(census)") {
+		t.Error("the queue sentence does not read its verdict from queueVerdict(census)")
+	}
+	// Both readers of the census -- the first sentence and the queue verdict --
+	// go through one standing, so they cannot disagree about keeping up.
+	if strings.Count(body, "scheduleStanding(census)") < 2 {
+		t.Error("scheduleSentence and queueVerdict do not both read scheduleStanding(census)")
+	}
+}
+
 // One column, one name.
 //
 // This column was called three different things in five places: 没归到后端 on

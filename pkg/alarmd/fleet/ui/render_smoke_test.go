@@ -251,10 +251,13 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// sometimes not there -- which is the other half of what a render throws on.
 	rows = append(rows, fleet.Anomaly{QueryGroup: "qg-bare", Replica: "r-1", Kind: "DEGRADED_RUN"})
 
+	// The build the deployment runs. On one replica row and absent on the
+	// other, so the cell renders both a reported and an unreported build.
+	build := fleet.BuildFacts{Version: "0.2.4506", Commit: "62ee924d00000000", SchemaVersion: "v3"}
 	replicas := []fleet.ReplicaView{
 		{Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", Owned: 452, Healthy: 384,
 			Anomalies: 33, Demoted: 19, Undecidable: 12, ByDesign: 4, AgeSeconds: 3,
-			UptimeSeconds: 7200, Ours: 5, External: 26},
+			UptimeSeconds: 7200, Ours: 5, External: 26, Build: &build},
 		// One replica reporting no undecidable objects, so the render is
 		// executed on both a present and an absent count. A fixture where every
 		// row carries every field cannot catch a read on one that is sometimes
@@ -316,6 +319,10 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			Health: "UNKNOWN", Covered: 979, Determined: 979, Unknown: 0, Healthy: 844,
 			AnomaliesTotal: 86, DemotedTotal: 33, UndecidableTotal: 12, ByDesignTotal: 4,
 			DemotedDue: 2, DemotionEntries: 40, DemotionExits: 7, PerReplica: replicas,
+			// Both counted replicas on one build: the line says so in one
+			// sentence. The other shapes -- a rollout in progress, a build that
+			// reports none -- are variants below.
+			Builds: []fleet.BuildGroup{{Build: build, Replicas: []string{replicas[0].Replica, replicas[1].Replica}}},
 			// The tracker writes the exit count and the exit time on adjacent
 			// lines, so a deployment with exits always has this. Without it here
 			// the fixture described a deployment that cannot exist -- and the page
@@ -507,10 +514,19 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	brief := lineStarting(text, "BRIEF ::")
 	for _, want := range []string{"执行情况：跟得上", "9000 轮里 99.6% 在下一轮到期前完成（6 小时 99.4%）",
 		"被挡回 120 轮，其中 118 轮仍按时完成", "1900 个在等下次（33 个在冷却）", "12 个迟到未超一个周期", "1 个接管后还没跑第一轮",
-		"需要处理：", "类问题，影响", "观测完整性：1 处覆盖缺口"} {
+		"需要处理：", "类问题，影响",
+		// Eight objects carry no cause. This line said "全部对象都有结论" over a
+		// grid showing them; completeness is about conclusions, and they have
+		// none yet.
+		"观测完整性：8 个对象没留下成因，还说不清归谁；各自再跑完一轮就补上；1 处覆盖缺口"} {
 		if !strings.Contains(brief, want) {
 			t.Errorf("the brief does not say %q:\n%s", want, brief)
 		}
+	}
+	// What produced the numbers, before any of them is read.
+	buildLine := lineStarting(text, "BUILD ::")
+	if !strings.Contains(buildLine, "alarmd 0.2.4506（62ee924d），2 个副本一致") {
+		t.Errorf("the build line does not name the one build both replicas run:\n%s", buildLine)
 	}
 	// Opening a check lists its folds with their counts; a fold with no objects
 	// says so rather than offering an empty table.
@@ -720,6 +736,27 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"没有轮次返回时不能印一个比率"},
 		{"VAR no-census brief ::", "说不出是否按时", "跟得上",
 			"没有普查时不能说按时"},
+		// The queue verdict on the capacity panel, read from the same census.
+		// The wait share alone said "支持扩容" on a live deployment with three
+		// quarters of its CPU idle; whether queueing costs anything is a
+		// question about deadlines, and only the census answers it.
+		{"VAR behind cap ::", "而且在耽误到期任务（7 个超期", "不构成扩容理由",
+			"排队且跟不上时才是位子成了约束"},
+		{"VAR behind cap ::", "位子是约束，这一项支持扩容", "",
+			"跟不上时要把结论说出来，不能让运维自己算"},
+		{"VAR catching-up cap ::", "有 2 个超期但在追", "支持扩容",
+			"在追上时先看能不能自己追上，不能直接建议扩容"},
+		{"VAR no-census cap ::", "本构建没有普查，判不了", "支持扩容",
+			"没有普查时排队占比不能单独变成扩容建议"},
+		{"VAR healthy cap ::", "没有对象超期", "支持扩容",
+			"没有超期时排队没耽误到期任务，不构成扩容理由"},
+		// Which build the numbers came from, in the three shapes it has.
+		{"VAR mixed-builds build ::", "2 个构建同时在跑——0.2.4506（62ee924d） 1 副本、0.2.4505（4f338bf3） 1 副本", "副本一致",
+			"两个构建同时在跑时不能说一致，总数是混出来的"},
+		{"VAR unreported-build build ::", "未上报版本（旧构建） 1 副本", "",
+			"没上报版本的副本要按旧构建列出，不能归到某个版本下"},
+		{"VAR no-builds build ::", "没有副本被计入", "副本一致",
+			"没有副本被计入时说不出在跑什么"},
 
 		// 被挡回 by cause. The old wording named one remedy -- grow the queue --
 		// for a number that is mostly the branch more room cannot change.
@@ -737,8 +774,10 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// budget begins and ends between two reads.
 		{"PERMIT mostly-waited ::", "56%", "没有查询在排队",
 			"多数查询等过位子时不能因为此刻队列空就说没有排队"},
-		{"PERMIT mostly-waited ::", "位子是约束", "",
-			"占比过半要直接给出结论，不能让运维自己算"},
+		// The fixture's census has nothing overdue, so the share is queueing
+		// and not a reason to add pods -- said as such, with the rates.
+		{"PERMIT mostly-waited ::", "但没有对象超期（按时率 1 小时 99.6%、6 小时 99.4%），排队没耽误到期任务，不构成扩容理由", "支持扩容",
+			"占比过半只说明有排队；有没有耽误到期任务由普查回答，没超期就不能建议扩容"},
 		{"PERMIT never-waited ::", "没有一次排过队", "位子是约束",
 			"一次都没等过才是真的有余量，这一支要和上一支说相反的话"},
 		{"PERMIT nothing-asked ::", "无从谈起", "不是约束",
@@ -874,6 +913,7 @@ console.log('PRUNED :: ' + (store['prunedSkips'] ? store['prunedSkips'].textCont
 console.log('CHECKS :: ' + textOf(store['checkRows']));
 console.log('GOV :: ' + textOf(store['govRows']));
 console.log('BRIEF :: ' + ['briefSchedule', 'briefTodo', 'briefBlind'].map(id => textOf(store[id])).join(' | '));
+console.log('BUILD :: ' + textOf(store['buildLine']));
 // Opening a line renders its folds.
 ctx.openCheck = 'OBSERVATION_GAP';
 ctx.renderChecks(data.checks);
@@ -899,7 +939,7 @@ for (const row of data.anomalies) {
 // the second one has an interval to divide by; without that the rate is absent
 // instead of zero and the branch that threw never runs.
 clockMs += 30000;
-try { ctx.renderCapacity(data.health.capacity, []); }
+try { ctx.renderCapacity(data.health.capacity, [], data.health.schedule); }
 catch (e) { console.error('renderCapacity (refresh, counters unmoved): ' + e.constructor.name + ': ' + e.message); failed++; }
 console.log('CAPACITY :: ' + textOf(store['capCards']));
 
@@ -919,7 +959,7 @@ const permitShapes = {
 };
 for (const [name, override] of Object.entries(permitShapes)) {
   store['capCards'].textContent = '';
-  try { ctx.renderCapacity(Object.assign({}, data.health.capacity, override), []); }
+  try { ctx.renderCapacity(Object.assign({}, data.health.capacity, override), [], data.health.schedule); }
   catch (e) { console.error('renderCapacity (' + name + '): ' + e.message); failed++; continue; }
   console.log('PERMIT ' + name + ' :: ' + textOf(store['capCards']));
 }
@@ -936,7 +976,7 @@ for (const [name, rotation] of Object.entries(rotations)) {
   store['capCards'].textContent = '';
   const capacity = Object.assign({}, data.health.capacity,
     {rotation: Object.assign({}, data.health.capacity.rotation, rotation)});
-  try { ctx.renderCapacity(capacity, []); }
+  try { ctx.renderCapacity(capacity, [], data.health.schedule); }
   catch (e) { console.error('renderCapacity (' + name + '): ' + e.message); failed++; continue; }
   console.log('ROT ' + name + ' :: ' + textOf(store['capCards']));
 }
@@ -993,8 +1033,18 @@ const variants = {
   'quiet-hour': {schedule: {waiting: 1900, late: 0, overdue: 0, never: 0,
                             completed_1h: 0, on_time_1h: 0, completed_6h: 54000, on_time_6h: 53700}},
   'no-census': {schedule: null},
+  // The build line in its other shapes: a rollout with one replica on each
+  // build, a replica on a build that reports none, and nothing counted.
+  'mixed-builds': {builds: [
+    {build: {version: '0.2.4506', commit: '62ee924d00000000', schema_version: 'v3'}, replicas: ['pod-a']},
+    {build: {version: '0.2.4505', commit: '4f338bf300000000', schema_version: 'v3'}, replicas: ['pod-b']}]},
+  'unreported-build': {builds: [
+    {build: {version: '0.2.4506', commit: '62ee924d00000000', schema_version: 'v3'}, replicas: ['pod-a']},
+    {build: {version: '', commit: '', schema_version: ''}, replicas: ['pod-b']}]},
+  'no-builds': {builds: [], per_replica: []},
 };
-const variantCells = ['why', 'poolFlowHint', 'unattributedHint', 'splitBasis', 'overdueHint', 'briefSchedule'];
+const variantCells = ['why', 'poolFlowHint', 'unattributedHint', 'splitBasis', 'overdueHint', 'briefSchedule',
+                      'capCards', 'buildLine'];
 for (const [name, override] of Object.entries(variants)) {
   // Cleared first. A cell whose branch does not run this time keeps whatever
   // the previous render wrote, and the emitted line would then report the
@@ -1012,8 +1062,11 @@ for (const [name, override] of Object.entries(variants)) {
   }
   for (const [label, id] of [['why', 'why'], ['pool', 'poolFlowHint'],
                              ['unattr', 'unattributedHint'], ['split', 'splitBasis'],
-                             ['overdue', 'overdueHint'], ['brief', 'briefSchedule']]) {
-    const said = store[id] ? store[id].textContent : '';
+                             ['overdue', 'overdueHint'], ['brief', 'briefSchedule'],
+                             ['cap', 'capCards'], ['build', 'buildLine']]) {
+    // Children included: the capacity panel is built from appended cards, and
+    // its own textContent is empty however much it rendered.
+    const said = textOf(store[id]);
     console.log('VAR ' + name + ' ' + label + ' :: ' + (said || '(not rendered)'));
   }
 }
