@@ -242,7 +242,8 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	err = coordinator.ports.Sequencer.Sequence(ctx, sequencingScope(stream.header, stream.stateItems, stream.gapItems), func(sequenceCtx context.Context) error {
 		var executeErr error
 		result, executeErr = coordinator.finalizePreparedWithGaps(
-			sequenceCtx, request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated, stream.queryEvidence.availability(),
+			sequenceCtx, request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
+			stream.noDataMutations, stream.queryEvidence.availability(),
 		)
 		return executeErr
 	})
@@ -778,7 +779,8 @@ func (coordinator *SlotExecutionCoordinator) finalizePrepared(
 	evaluated execution.EvaluationResult,
 ) (execution.SlotExecutionResult, error) {
 	return coordinator.finalizePreparedWithGaps(
-		ctx, request, header, bindings, loadedState, execution.GapLoadResult{}, evaluated, execution.QueryAvailabilityUnknown,
+		ctx, request, header, bindings, loadedState, execution.GapLoadResult{}, evaluated, nil,
+		execution.QueryAvailabilityUnknown,
 	)
 }
 
@@ -790,6 +792,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	loadedState execution.StatePreflightResult,
 	loadedGaps execution.GapLoadResult,
 	evaluated execution.EvaluationResult,
+	noDataMemory []execution.PlanNoDataMutation,
 	queryAvailability execution.QueryAvailability,
 ) (execution.SlotExecutionResult, error) {
 	var err error
@@ -972,6 +975,13 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		if planResult.Disposition == execution.PlanRetryPending && retryPendingReason == "" {
 			retryPendingReason = planResult.ReasonCode
 		}
+	}
+	// After every Plan's state and gap, inside the same sequenced scope. The
+	// memory only changes what the next round reports as a duration and which
+	// groups it expects, never whether this round fired - so it follows the
+	// writes that do decide that, rather than racing them.
+	if err := coordinator.applyNoDataMemory(ctx, request, noDataMemory); err != nil {
+		return execution.SlotExecutionResult{}, err
 	}
 	if retryPendingReason != "" {
 		return execution.SlotExecutionResult{

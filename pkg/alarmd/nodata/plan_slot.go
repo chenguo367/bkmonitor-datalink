@@ -20,7 +20,12 @@ import (
 // PlanSlotInput is one Plan's whole no-data round: what the Slot saw, what the
 // store held, and the version facts a write would need.
 type PlanSlotInput struct {
-	Plan             *contract.EvaluationPlanV2
+	// NoData and Scope are the two things the decision reads off the Plan. The
+	// worker holds the compiled form rather than the frozen one, and passing a
+	// half-filled Plan across so this could read two fields off it would put an
+	// object in the code that looks like a Plan and is not one.
+	NoData           *contract.NoDataConfigV1
+	Scope            *contract.TargetScopeV2
 	Identity         execution.PlanNoDataIdentity
 	Snapshot         execution.NoDataMemorySnapshot
 	ApplyVersion     execution.ApplyVersion
@@ -31,7 +36,6 @@ type PlanSlotInput struct {
 	Series           []map[string]string
 	KnownHosts       map[string]struct{}
 	OutOfBusiness    map[string]struct{}
-	RosterVersion    string
 }
 
 // PlanSlotResult is everything the worker needs from one Plan's no-data round.
@@ -57,7 +61,7 @@ type PlanSlotResult struct {
 // the system is briefly in, and routing it through the error path would take
 // the Plan's threshold detection down with it.
 func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
-	if input.Plan == nil || input.Plan.NoData == nil {
+	if input.NoData == nil {
 		return PlanSlotResult{Outcome: OutcomeNone}, nil
 	}
 	switch input.Snapshot.Status {
@@ -72,7 +76,7 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 
 	memory := loadedMemory(input.Snapshot)
 	result, outcome, err := EvaluateSlot(SlotInput{
-		Plan:           input.Plan,
+		Plan:           &contract.EvaluationPlanV2{NoData: input.NoData, TargetScope: input.Scope},
 		EvaluationTime: input.EvaluationTime,
 		PeriodSeconds:  input.PeriodSeconds,
 		Completeness:   input.Completeness,
@@ -80,7 +84,6 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		KnownHosts:     input.KnownHosts,
 		OutOfBusiness:  input.OutOfBusiness,
 		Memory:         memory,
-		RosterVersion:  input.RosterVersion,
 	})
 	if err != nil {
 		return PlanSlotResult{}, err
@@ -103,7 +106,7 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 	})
 
 	groups := storedGroups(result.Memory)
-	if sameStoredGroups(groups, input.Snapshot.Groups) && input.Snapshot.RosterVersion == input.RosterVersion {
+	if sameStoredGroups(groups, input.Snapshot.Groups) && input.Snapshot.RosterVersion == result.Roster.Version {
 		// Nothing moved. Sending the mutation anyway would be correct and
 		// idempotent - the digest would match and the store would say so - but
 		// it costs a round trip per Plan per Slot for a write that changes
@@ -116,7 +119,7 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		ExpectedMarkerRevision: input.Snapshot.MarkerRevision,
 		ApplyVersion:           input.ApplyVersion,
 		ScheduleRevision:       input.ScheduleRevision,
-		RosterVersion:          input.RosterVersion,
+		RosterVersion:          result.Roster.Version,
 		Groups:                 groups,
 	})
 	if err != nil {

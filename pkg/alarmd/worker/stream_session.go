@@ -31,23 +31,25 @@ type streamedExecution struct {
 	// completionOnly holds, per Plan without streamed PRIMARY series, the exact
 	// set validated by validateCompletionOnlyExactSet: one completion binding
 	// per frozen (consumer, requirement). It decides the no-series result.
-	completionOnly map[execution.PlanIdentity][]execution.NamedInputBinding
-	bindings       []execution.NamedInputBinding
-	stateItems     []execution.StatePreflightItem
-	gapItems       []execution.PlanGapLoadItem
-	noDataItems    []execution.PlanNoDataLoadItem
-	state          execution.StatePreflightResult
-	gaps           execution.GapLoadResult
-	noData         execution.NoDataLoadResult
-	noDataHosts    map[execution.PlanNoDataIdentity]nodata.HostResolution
-	effective      map[execution.ConsumerRef]strategy.EffectiveTimeFact
-	evaluated      execution.EvaluationResult
-	delivered      []execution.SeriesDelivery
-	series         uint64
-	retained       uint64
-	effects        effectCounts
-	gapFacts       uint64
-	began          bool
+	completionOnly  map[execution.PlanIdentity][]execution.NamedInputBinding
+	bindings        []execution.NamedInputBinding
+	stateItems      []execution.StatePreflightItem
+	gapItems        []execution.PlanGapLoadItem
+	noDataItems     []execution.PlanNoDataLoadItem
+	state           execution.StatePreflightResult
+	gaps            execution.GapLoadResult
+	noData          execution.NoDataLoadResult
+	noDataHosts     map[execution.PlanNoDataIdentity]nodata.HostResolution
+	noDataOutcomes  []nodata.SlotOutcome
+	noDataMutations []execution.PlanNoDataMutation
+	effective       map[execution.ConsumerRef]strategy.EffectiveTimeFact
+	evaluated       execution.EvaluationResult
+	delivered       []execution.SeriesDelivery
+	series          uint64
+	retained        uint64
+	effects         effectCounts
+	gapFacts        uint64
+	began           bool
 }
 
 type streamedInputKey struct {
@@ -702,6 +704,12 @@ func (stream *streamedExecution) evaluateSeries(
 	if err := flush(); err != nil {
 		return err
 	}
+	// Absence is decided after the Slot's own series, because which groups
+	// reported is the evidence it is decided from. The synthetic series it
+	// produces then go through the same batch as everything above.
+	if err := stream.evaluateNoData(ctx, preparedSeriesEvaluations, batchLimit); err != nil {
+		return err
+	}
 	if len(stream.evaluated.Plans) == 0 {
 		return stream.completeWithoutSeries(ctx, completion)
 	}
@@ -1146,6 +1154,16 @@ type completedSeries struct {
 	item   execution.StatePreflightItem
 }
 
+// kind is what this series is, read off its inputs rather than stored twice.
+// Every input of one series carries the same kind - the evaluator refuses a set
+// that does not - so the first one answers for all of them.
+func (entry completedSeries) kind() execution.SeriesKind {
+	if len(entry.inputs) == 0 {
+		return execution.SeriesKindReal
+	}
+	return entry.inputs[0].Kind
+}
+
 // statePreflightBatchLimit is the shared batch bound clamped to the per-Slot
 // State mutation cap, which stays at or below the store's per-call limit.
 func (stream *streamedExecution) statePreflightBatchLimit() int {
@@ -1256,7 +1274,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	due, series, inputs := entry.due, entry.series, entry.inputs
 	stateItems := []execution.StatePreflightItem{entry.item}
 	loaded := execution.StatePreflightResult{Items: []execution.RuntimeStateView{view}}
-	evaluationHeader, err := bindAlwaysEffectiveTimeFacts(stream.header, stateItems, stream.effective)
+	evaluationHeader, err := bindAlwaysEffectiveTimeFacts(stream.header, stateItems, stream.effective, entry.kind())
 	if err != nil {
 		return fmt.Errorf("alarmd worker: bind series EffectiveTime facts: %w", err)
 	}
