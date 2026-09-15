@@ -74,6 +74,18 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		anomaly("qg-stalled", func(item *fleet.Anomaly) {
 			item.Stalled, item.FailingSince = true, at.Add(-2*time.Hour)
 		}),
+		// Anomalous for an hour, saying its current reason for twelve minutes
+		// and twelve rounds: the two clocks read differently, and the row says
+		// both.
+		anomaly("qg-two-clocks", func(item *fleet.Anomaly) {
+			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "QUERY_TIMEOUT"
+			item.ReasonSince, item.Consecutive = at.Add(-12*time.Minute), 12
+		}),
+		// Saying the same reason since it became anomalous: one clock, said once.
+		anomaly("qg-one-clock", func(item *fleet.Anomaly) {
+			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "QUERY_TIMEOUT"
+			item.ReasonSince, item.Consecutive = at.Add(-time.Hour), 60
+		}),
 		anomaly("qg-blocked", func(item *fleet.Anomaly) {
 			item.Kind, item.ReasonCode, item.Strategies = "BLOCKED_RUN", "source_blocked", nil
 		}),
@@ -486,7 +498,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		}
 	}
 	governance := lineStarting(text, "GOV ::")
-	for _, want := range []string{"查询后端没有应答，1 个对象受影响", "数据侧", "序列活不过检测窗口", "策略侧",
+	for _, want := range []string{"查询后端没有应答，3 个对象受影响（2 种症状", "数据侧", "序列活不过检测窗口", "策略侧",
 		"老序列在缺点", "1 个对象持续没有数据"} {
 		if !strings.Contains(governance, want) {
 			t.Errorf("the governance fold does not say %q:\n%s", want, governance)
@@ -515,6 +527,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// round ended, since when, and what its windows hold.
 	for _, want := range []struct{ object, now, result, window string }{
 		{"qg-stalled", "轮次不结束", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
+		{"qg-two-clocks", "—", "完成 · QUERY_TIMEOUT", "—"},
 		{"qg-cooldown", "冷却中", "失败 · QUERY_UNAVAILABLE", "—"},
 		{"qg-rejected", "冷却中", "被拒绝 · QUERY_UNAVAILABLE", "—"},
 		{"qg-blocked", "—", "失败 · source_blocked", "—"},
@@ -542,6 +555,19 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			if part != "" && cells[index] != part {
 				t.Errorf("%s cell %d = %q, want %q", want.object, index, cells[index], part)
 			}
+		}
+	}
+	// The third clock. An object saying its reason for less time than it has
+	// been anomalous says both; one saying it since the start says the count.
+	for _, want := range []struct{ object, since string }{
+		{"qg-two-clocks", "1 小时 0 分 · 当前原因 12 分钟，连续 12 轮"},
+		{"qg-one-clock", "1 小时 0 分 · 当前原因 连续 60 轮"},
+		{"qg-plain", "1 小时 0 分"},
+	} {
+		line := lineStarting(text, "ROW "+want.object+" ::")
+		cells := strings.Split(strings.TrimPrefix(line, "ROW "+want.object+" :: "), " | ")
+		if len(cells) < 3 || cells[2] != want.since {
+			t.Errorf("%s since cell = %q, want %q", want.object, line, want.since)
 		}
 	}
 	// The waiting object names the moment it is next due; the wall-clock

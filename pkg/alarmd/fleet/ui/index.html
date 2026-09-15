@@ -764,7 +764,7 @@ function loadGroup(code, groupKey, body) {
     var table = document.createElement('table');
     var thead = document.createElement('thead');
     var head = document.createElement('tr');
-    ['对象', '现在', '最近结果', '自何时', '窗口', '去哪', ''].forEach(function (label) {
+    ['对象', '现在', '最近结果', '自何时 · 当前原因多久', '窗口', '去哪', ''].forEach(function (label) {
       var th = document.createElement('th');
       th.textContent = label;
       head.appendChild(th);
@@ -853,8 +853,17 @@ function objectRow(anomaly) {
     result.title = [symptomText(f.detail), f.stage ? '阶段 ' + f.stage : '',
       FAILURE_CATEGORY[f.category] || f.category || ''].filter(Boolean).join('\n');
   }
-  // Since when. The bound prefix says whether this is a measurement or a limit.
-  var held = cell((SINCE_BOUND[anomaly.since_from] || '') + duration(anomaly.since));
+  // Since when: how long anomalous at all, and beside it the object's own
+  // clock -- how long it has been saying its current reason and for how many
+  // rounds. Two clocks, because an object degraded for an hour under one
+  // reason and for two rounds under another is both, and the second is what
+  // says whether the reason is settled or just arrived.
+  var heldText = (SINCE_BOUND[anomaly.since_from] || '') + duration(anomaly.since);
+  if (anomaly.consecutive) {
+    heldText += ' · 当前原因 ' + (anomaly.reason_since && anomaly.reason_since !== anomaly.since
+      ? duration(anomaly.reason_since) + '，' : '') + '连续 ' + anomaly.consecutive + ' 轮';
+  }
+  var held = cell(heldText);
   held.title = SINCE_SOURCE[anomaly.since_from] || anomaly.since_from || '';
   // The window, as counts.
   var windowCoverage = anomaly.coverage;

@@ -492,9 +492,17 @@ type Anomaly struct {
 	// omitzero tag: the release pipeline builds with Go 1.23, whose encoder
 	// does not know that option and would print a zero time on every object
 	// whose rounds are ending normally.
-	FailingSince time.Time   `json:"failing_since"`
-	Replica      string      `json:"replica"`
-	Failure      *FailureRef `json:"failure,omitempty"`
+	FailingSince time.Time `json:"failing_since"`
+	// ReasonSince is when the object's current result and reason first held,
+	// and Consecutive how many rounds in a row they have. It is the third of
+	// the three clocks a row shows -- what it is doing now, since when it has
+	// been anomalous at all, since when it has been saying this -- and the one
+	// that says whether a reason is settled or just arrived. Left off the wire
+	// while zero, like FailingSince, by MarshalJSON.
+	ReasonSince time.Time   `json:"reason_since"`
+	Consecutive int         `json:"consecutive,omitempty"`
+	Replica     string      `json:"replica"`
+	Failure     *FailureRef `json:"failure,omitempty"`
 	// Stalled says the rounds have been failing to finish for longer than the
 	// deployment's own budget for terminating an unfinishable Slot. The
 	// distinction it draws is the one that decides whether anyone has to act: a
@@ -519,9 +527,13 @@ func (anomaly Anomaly) MarshalJSON() ([]byte, error) {
 	encoded := struct {
 		wire
 		FailingSince *time.Time `json:"failing_since,omitempty"`
+		ReasonSince  *time.Time `json:"reason_since,omitempty"`
 	}{wire: wire(anomaly)}
 	if !anomaly.FailingSince.IsZero() {
 		encoded.FailingSince = &anomaly.FailingSince
+	}
+	if !anomaly.ReasonSince.IsZero() {
+		encoded.ReasonSince = &anomaly.ReasonSince
 	}
 	return json.Marshal(encoded)
 }

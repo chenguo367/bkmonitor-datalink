@@ -1245,3 +1245,51 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 		}
 	}
 }
+
+// The object's own clock: since when it has been saying its current reason,
+// and for how many rounds. It is not the anomaly's start -- an object degraded
+// for an hour under one reason and then for two rounds under another has been
+// anomalous for an hour and saying the new reason for two rounds -- and unlike
+// Kubernetes' lastTransitionTime it resets when only the reason changes.
+func TestTheReasonClockResetsWhenTheReasonChangesNotWhenTheRoundRepeats(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	degraded := func(reason string) {
+		observation := completion("qg-clock", "COMPLETED_WITH_UNAVAILABLE", "8930")
+		observation.ProgressCompletionCause, observation.ProgressCompletionReason = "LEVEL_OUTCOME_UNKNOWN", reason
+		tracker.Observe(context.Background(), observation)
+		at.at = at.at.Add(time.Minute)
+	}
+	for round := 0; round < 5; round++ {
+		degraded("QUERY_TIMEOUT")
+	}
+	rows := tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Consecutive != 5 || !rows[0].ReasonSince.Equal(now) || !rows[0].Since.Equal(now) {
+		t.Fatalf("after five rounds of one reason: %+v, want consecutive 5 since the first round", rows)
+	}
+	degraded("HISTORY_WARMING")
+	degraded("HISTORY_WARMING")
+	rows = tracker.Anomalies()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if rows[0].Consecutive != 2 || !rows[0].ReasonSince.Equal(now.Add(5*time.Minute)) {
+		t.Errorf("after the reason changed: consecutive %d since %v, want 2 since the sixth round", rows[0].Consecutive, rows[0].ReasonSince)
+	}
+	if !rows[0].Since.Equal(now) {
+		t.Errorf("the anomaly's own start moved to %v; it has been anomalous since the first round", rows[0].Since)
+	}
+	// The same completion under a different failure code is a different reason
+	// for a failed execution, and a blocked round is its own.
+	for round := 0; round < 3; round++ {
+		tracker.Observe(context.Background(), runOutcome("qg-blocked", "source_blocked"))
+	}
+	if blocked := tracker.Anomalies(); len(blocked) != 2 {
+		t.Fatalf("rows = %v", names(blocked))
+	}
+	for _, row := range tracker.Anomalies() {
+		if row.QueryGroup == "qg-blocked" && row.Consecutive != 3 {
+			t.Errorf("blocked object consecutive = %d, want 3", row.Consecutive)
+		}
+	}
+}

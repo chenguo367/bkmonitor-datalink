@@ -157,9 +157,20 @@ type queryGroupState struct {
 	// fact from data that never came: the first is the data side's, the second
 	// is usually a strategy over a source that only speaks when something
 	// happens, and only the first is listed.
-	emptyRuns     int
-	emptySince    time.Time
-	sawData       bool
+	emptyRuns  int
+	emptySince time.Time
+	sawData    bool
+	// reasonKey names the current result and reason as one string, reasonSince
+	// is when that pair first held and reasonRuns how many consecutive rounds
+	// it has held for. It is the object's own clock for "how long has it been
+	// saying this", and it is not runStartedAt: an object can have been
+	// anomalous for hours and saying its current reason for a minute.
+	// Kubernetes' lastTransitionTime does not reset when only the reason
+	// changes; this one does, on purpose, because the reason is what the
+	// reader acts on.
+	reasonKey     string
+	reasonSince   time.Time
+	reasonRuns    int
 	queryCooldown *observability.QueryCooldownFacts
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
@@ -525,6 +536,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	case completion != "":
 		state.determined = true
 		state.lastCompleted = completion
+		tracker.noteReason(state, completion+"/"+observation.ProgressCompletionReason, at)
 		// The no-data run is kept apart from the anomaly run: an empty
 		// completion is healthy for the equation and ends any anomaly run, and
 		// a round with records -- degraded or not -- ends the empty run.
@@ -603,6 +615,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		}
 	case blockedOutcome(runOutcome):
 		state.determined = true
+		tracker.noteReason(state, "blocked/"+runOutcome, at)
 		state.failingSince = time.Time{}
 		state.blockedRuns++
 		state.currentKind = KindBlockedRun
@@ -612,6 +625,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.sawSomethingWrong = true
 	case failedExecution(executeOutcome):
 		state.determined = true
+		failureCode := ""
+		if state.lastFailure != nil {
+			failureCode = state.lastFailure.Code
+		}
+		tracker.noteReason(state, "failed/"+executeOutcome+"/"+failureCode, at)
 		if state.failingSince.IsZero() {
 			state.failingSince = at
 		}
@@ -652,6 +670,15 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			state.sinceFrom = SinceProcessStart
 		}
 	}
+}
+
+// noteReason advances the object's own clock: a new result-and-reason pair
+// starts it, the same pair counts one more round on it.
+func (tracker *Tracker) noteReason(state *queryGroupState, key string, at time.Time) {
+	if state.reasonKey != key {
+		state.reasonKey, state.reasonSince, state.reasonRuns = key, at, 0
+	}
+	state.reasonRuns++
 }
 
 func (tracker *Tracker) resetRun(state *queryGroupState) {
@@ -804,6 +831,8 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 			Since:        state.runStartedAt,
 			SinceFrom:    state.sinceFrom,
 			FailingSince: state.failingSince,
+			ReasonSince:  state.reasonSince,
+			Consecutive:  state.reasonRuns,
 			Replica:      tracker.replica,
 			Failure:      state.lastFailure,
 		}
