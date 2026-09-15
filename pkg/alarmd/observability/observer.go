@@ -101,6 +101,7 @@ const (
 	StageSlotReadinessArrival   = "slot_readiness_arrival"
 	StageStatePreflight         = "state_preflight"
 	StageGapLoaded              = "gap_loaded"
+	StageNoDataDecided          = "no_data_decided"
 	StageEvaluationCompleted    = "evaluation_completed"
 	StageSideEffectAdmission    = "side_effect_admission"
 	StageStateAdmission         = "state_admission"
@@ -306,6 +307,21 @@ type Counts struct {
 	Bytes      int64
 	Keys       int64
 	StateBytes int64
+}
+
+// NoDataSlotFacts is what happened to one Plan's no-data detection in one Slot.
+//
+// Outcome is the whole point. A Plan that detects no-data lands on exactly one
+// outcome every Slot, and the three that are not EVALUATED are different kinds
+// of "did not judge" that look identical once the round is over: a query that
+// did not cover the period, a Slot that could not carry the work, a memory this
+// build cannot read. Folding them together loses the one that never resolves
+// on its own.
+type NoDataSlotFacts struct {
+	Outcome string
+	// Plans is how many Plans landed on that outcome, so one observation can
+	// carry a whole Slot rather than one per Plan.
+	Plans int
 }
 
 type QueryPermitFacts struct {
@@ -1071,6 +1087,7 @@ type Observation struct {
 	CapacityRejection     *CapacityRejectionFacts
 	SourceKind            SourceKind
 	QueryPermit           *QueryPermitFacts
+	NoDataSlot            *NoDataSlotFacts
 	RuntimeConfig         *RuntimeConfigFacts
 	QueryFailure          *QueryFailureFacts
 	QueryStatus           []QueryStatusFacts
@@ -1164,6 +1181,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.QueryCooldown = normalizeQueryCooldownFacts(observation.QueryCooldown)
 	observation.HistoryCoverage = normalizeHistoryCoverageFacts(observation.HistoryCoverage)
 	observation.QueryPermit = normalizeQueryPermitFacts(observation.QueryPermit)
+	observation.NoDataSlot = normalizeNoDataSlotFacts(observation.NoDataSlot)
 	observation.QueryTiming = normalizeTimingFacts(observation)
 	observation.ShortPeriodCompletion = normalizeShortPeriodCompletion(observation)
 	observation.StateApplyChunk = normalizeStateApplyChunk(observation)
@@ -1690,6 +1708,21 @@ func normalizeLegacyQGMigrationFacts(facts *LegacyQGMigrationFacts) *LegacyQGMig
 	return &normalized
 }
 
+// normalizeNoDataSlotFacts drops facts that name no outcome and clamps a
+// negative count. An outcome this build does not know is kept rather than
+// blanked: the label is bounded by the list the evaluation publishes, and a
+// name that got here without being on it is worth seeing.
+func normalizeNoDataSlotFacts(facts *NoDataSlotFacts) *NoDataSlotFacts {
+	if facts == nil || facts.Outcome == "" {
+		return nil
+	}
+	normalized := *facts
+	if normalized.Plans < 0 {
+		normalized.Plans = 0
+	}
+	return &normalized
+}
+
 func normalizeQueryPermitFacts(facts *QueryPermitFacts) *QueryPermitFacts {
 	if facts == nil {
 		return nil
@@ -1982,6 +2015,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentAccess, StageSlotReadinessArrival},
 	{ComponentEvaluation, StageEvaluationCompleted},
 	{ComponentState, StageStatePreflight}, {ComponentState, StageGapLoaded},
+	{ComponentEvaluation, StageNoDataDecided},
 	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},
 	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission},
 	{ComponentState, StageStateApplied},

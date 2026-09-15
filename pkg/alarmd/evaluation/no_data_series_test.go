@@ -322,3 +322,45 @@ func recordIDFor(sourceTime int64) string {
 	id := strings.Repeat("d", 64)
 	return id[:60] + fmt.Sprintf("%04d", sourceTime%10000)
 }
+
+// A point that lands between the positions its history is kept on reads as a
+// window that is still filling, and nothing says otherwise.
+//
+// This is the reason the worker refuses an unaligned Slot before building any
+// point, and the reason that refusal cannot be left to something downstream.
+// The history summary does check alignment - and passes, because it measures
+// the window from the point's own time, so an unaligned point is aligned with
+// itself. What comes back is DECIDED_DEGRADED with HISTORY_WARMING: the same
+// answer a genuinely warming window gives, every round, forever.
+//
+// The test states the silence rather than the guard, because the guard lives in
+// another package and a comment there asserting this would be a claim with
+// nothing behind it.
+func TestAnOffGridPointIsIndistinguishableFromAWarmingWindow(t *testing.T) {
+	plan := noDataCompiled(t, 3)
+	evaluator := newEvaluator(t)
+	ctx := context.Background()
+	const base = 1788000000
+
+	opened, err := evaluator.Evaluate(ctx, noDataRequestFixtureAt(t, plan, 1, base))
+	if err != nil {
+		t.Fatalf("the aligned round did not evaluate: %v", err)
+	}
+
+	// Forty-five seconds on, where a whole period is sixty.
+	offGrid := noDataRequestFixtureAt(t, plan, 1, base+45)
+	offGrid.State.Items[0] = openedStateFrom(t, opened, offGrid.State.Items[0])
+	result, err := evaluator.Evaluate(ctx, offGrid)
+	if err != nil {
+		t.Fatalf("an off-grid round returned an error, so the worker's guard is no longer the only "+
+			"thing standing between this and silence - revisit it: %v", err)
+	}
+	if len(result.Plans) != 1 || len(result.Plans[0].LevelOutcomes) != 1 {
+		t.Fatalf("result = %+v, want one level outcome", result.Plans)
+	}
+	outcome := result.Plans[0].LevelOutcomes[0]
+	if outcome.ReasonCode != execution.ReasonCode(contract.ReasonHistoryWarming) {
+		t.Fatalf("an off-grid round reported %q; this test exists to record that it reports warming, "+
+			"and if that changed the worker's guard should be reconsidered", outcome.ReasonCode)
+	}
+}

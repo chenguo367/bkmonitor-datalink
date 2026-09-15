@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -101,6 +102,10 @@ func (stream *streamedExecution) noDataRoundFor(
 	}
 	version, err := execution.BuildApplyVersion(stream.header.Contract, due.StateApplyEpoch)
 	if err != nil {
+		return noDataRound{}, err
+	}
+	period := int64(due.CompiledPlan.EvaluationSemantics().EvaluationInterval)
+	if err := noDataPointGrid(int64(stream.header.Contract.Slot.EvaluationTime), period); err != nil {
 		return noDataRound{}, err
 	}
 	hosts := stream.noDataHosts[identity]
@@ -225,6 +230,7 @@ func (stream *streamedExecution) evaluateNoData(
 		pending = pending[:0]
 		return err
 	}
+	budget := stream.coordinator.slotBudget().MaxStateMutations
 	for _, due := range stream.header.DuePlans {
 		if due.CompiledPlan.NoData() == nil {
 			continue
@@ -234,6 +240,17 @@ func (stream *streamedExecution) evaluateNoData(
 		if err != nil {
 			return err
 		}
+		// A synthetic series writes state like any other, so it spends from the
+		// same per-Slot budget. A Plan whose series do not fit is skipped by
+		// name rather than silently trimmed: a history roster only grows, so it
+		// will not fit next round either, and a partial set of synthetic series
+		// would report the groups that fitted as absent and say nothing about
+		// the rest.
+		if !noDataFitsSlotBudget(stream.noDataStateMutations, uint64(len(round.series)), budget) {
+			stream.noDataOutcomes = append(stream.noDataOutcomes, nodata.OutcomeSkippedSlotBudget)
+			continue
+		}
+		stream.noDataStateMutations += uint64(len(round.series))
 		stream.noDataOutcomes = append(stream.noDataOutcomes, round.outcome)
 		if round.mutation != nil {
 			stream.noDataMutations = append(stream.noDataMutations, *round.mutation)
@@ -299,4 +316,74 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 		}
 	}
 	return nil
+}
+
+// observeNoDataOutcomes reports what happened to every no-data Plan this Slot,
+// one observation per outcome that occurred.
+//
+// Every Plan that detects no-data lands on exactly one outcome, so the four
+// counts partition them - and that is the reading the page needs, because the
+// three that did not judge look identical once the round is over. The metric
+// creates all four labels at startup, so a zero on the one that does not
+// resolve on its own can be told from a label nothing ever wrote.
+func (stream *streamedExecution) observeNoDataOutcomes(ctx context.Context) {
+	if len(stream.noDataOutcomes) == 0 {
+		return
+	}
+	counts := make(map[nodata.SlotOutcome]int, len(nodata.SlotOutcomes))
+	for _, outcome := range stream.noDataOutcomes {
+		counts[outcome]++
+	}
+	for _, outcome := range nodata.SlotOutcomes {
+		plans := counts[outcome]
+		if plans == 0 {
+			continue
+		}
+		stream.coordinator.emitObservation(ctx, observability.Observation{
+			Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
+			Operation: observability.Operation(stream.request.Operation),
+			Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+			NoDataSlot: &observability.NoDataSlotFacts{Outcome: string(outcome), Plans: plans},
+		})
+	}
+}
+
+// noDataPointGrid refuses a Slot whose synthetic points would not land on the
+// grid the stored history is kept on.
+//
+// The points of one series have to fall on one set of positions, because the
+// window is read by position: a point one period behind an unaligned Slot lands
+// between the positions the last rounds wrote, and the window finds nothing.
+//
+// It is a refusal because the alternative is silence. Measured on the real
+// trigger, an unaligned round comes back DECIDED_DEGRADED with HISTORY_WARMING
+// - the same answer a window that is genuinely still filling gives - so a Plan
+// whose Slots are permanently off the grid would report warming forever and
+// never fire, and nothing anywhere would say why. Nothing validates it further
+// down: the history summary's own alignment check compares the window against
+// the point's own time, so it is satisfied by construction and never sees this.
+func noDataPointGrid(evaluationTime, period int64) error {
+	if period <= 0 {
+		return fmt.Errorf("alarmd worker: no-data needs a positive period, got %d", period)
+	}
+	if evaluationTime%period != 0 {
+		return fmt.Errorf(
+			"alarmd worker: Slot at %d is not a whole number of %d-second periods, so its no-data points "+
+				"would fall between the positions its own history is kept on", evaluationTime, period)
+	}
+	return nil
+}
+
+// noDataFitsSlotBudget says whether one Plan's synthetic series fit what is
+// left of the Slot's state mutation budget.
+//
+// A zero budget is no room, which is the reading checkEffectCounts already
+// uses for the same number. It reads as harsh and it is unreachable: the
+// coordinator refuses a zero budget at construction and the configuration
+// refuses one before that, so no Slot ever gets here with nothing allowed. An
+// earlier version of this read zero as "no bound", which sounds like a safer
+// default and is really a second meaning for one number - the kind that agrees
+// with the first one until the day it does not.
+func noDataFitsSlotBudget(spent, adding, budget uint64) bool {
+	return spent+adding <= budget
 }

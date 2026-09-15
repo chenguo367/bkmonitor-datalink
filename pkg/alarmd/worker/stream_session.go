@@ -31,25 +31,26 @@ type streamedExecution struct {
 	// completionOnly holds, per Plan without streamed PRIMARY series, the exact
 	// set validated by validateCompletionOnlyExactSet: one completion binding
 	// per frozen (consumer, requirement). It decides the no-series result.
-	completionOnly  map[execution.PlanIdentity][]execution.NamedInputBinding
-	bindings        []execution.NamedInputBinding
-	stateItems      []execution.StatePreflightItem
-	gapItems        []execution.PlanGapLoadItem
-	noDataItems     []execution.PlanNoDataLoadItem
-	state           execution.StatePreflightResult
-	gaps            execution.GapLoadResult
-	noData          execution.NoDataLoadResult
-	noDataHosts     map[execution.PlanNoDataIdentity]nodata.HostResolution
-	noDataOutcomes  []nodata.SlotOutcome
-	noDataMutations []execution.PlanNoDataMutation
-	effective       map[execution.ConsumerRef]strategy.EffectiveTimeFact
-	evaluated       execution.EvaluationResult
-	delivered       []execution.SeriesDelivery
-	series          uint64
-	retained        uint64
-	effects         effectCounts
-	gapFacts        uint64
-	began           bool
+	completionOnly       map[execution.PlanIdentity][]execution.NamedInputBinding
+	bindings             []execution.NamedInputBinding
+	stateItems           []execution.StatePreflightItem
+	gapItems             []execution.PlanGapLoadItem
+	noDataItems          []execution.PlanNoDataLoadItem
+	state                execution.StatePreflightResult
+	gaps                 execution.GapLoadResult
+	noData               execution.NoDataLoadResult
+	noDataHosts          map[execution.PlanNoDataIdentity]nodata.HostResolution
+	noDataOutcomes       []nodata.SlotOutcome
+	noDataStateMutations uint64
+	noDataMutations      []execution.PlanNoDataMutation
+	effective            map[execution.ConsumerRef]strategy.EffectiveTimeFact
+	evaluated            execution.EvaluationResult
+	delivered            []execution.SeriesDelivery
+	series               uint64
+	retained             uint64
+	effects              effectCounts
+	gapFacts             uint64
+	began                bool
 }
 
 type streamedInputKey struct {
@@ -710,6 +711,7 @@ func (stream *streamedExecution) evaluateSeries(
 	if err := stream.evaluateNoData(ctx, preparedSeriesEvaluations, batchLimit); err != nil {
 		return err
 	}
+	stream.observeNoDataOutcomes(ctx)
 	if len(stream.evaluated.Plans) == 0 {
 		return stream.completeWithoutSeries(ctx, completion)
 	}
