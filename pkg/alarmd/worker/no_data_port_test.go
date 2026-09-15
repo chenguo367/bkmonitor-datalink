@@ -33,7 +33,7 @@ func TestAWorkerWithoutANoDataStoreDoesNotStart(t *testing.T) {
 	}
 	complete := worker.Ports{
 		OpenAlerts: ports, Finalization: ports, Activation: ports, Query: ports, Sequencer: ports,
-		Evaluator: ports, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore,
+		Evaluator: ports, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore, Hosts: worker.SharedHostBusiness,
 		Events: ports, State: ports, Progress: ports, Observer: observer,
 	}
 	// The control: a complete set starts, so the refusal below is about the one
@@ -42,10 +42,19 @@ func TestAWorkerWithoutANoDataStoreDoesNotStart(t *testing.T) {
 		t.Fatalf("fixture: a complete set of ports was refused: %v", err)
 	}
 
-	without := complete
-	without.NoData = nil
-	if _, err := worker.NewSlotExecutionCoordinator(without, budget); err == nil {
-		t.Fatal("a worker with no no-data store started; it would detect every threshold and no absence, " +
-			"and nothing anywhere would say so")
+	for name, remove := range map[string]func(*worker.Ports){
+		"no no-data store": func(ports *worker.Ports) { ports.NoData = nil },
+		// Without it every declared host reads as unknown, so every static
+		// target expects nothing: a silence that looks exactly like health.
+		"no host lookup": func(ports *worker.Ports) { ports.Hosts = nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			without := complete
+			remove(&without)
+			if _, err := worker.NewSlotExecutionCoordinator(without, budget); err == nil {
+				t.Fatal("the worker started without a port no-data cannot work without, and the failure " +
+					"that follows leaves nothing behind to find")
+			}
+		})
 	}
 }

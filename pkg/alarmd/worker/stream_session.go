@@ -12,6 +12,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
@@ -38,6 +39,7 @@ type streamedExecution struct {
 	state          execution.StatePreflightResult
 	gaps           execution.GapLoadResult
 	noData         execution.NoDataLoadResult
+	noDataHosts    map[execution.PlanNoDataIdentity]nodata.HostResolution
 	effective      map[execution.ConsumerRef]strategy.EffectiveTimeFact
 	evaluated      execution.EvaluationResult
 	delivered      []execution.SeriesDelivery
@@ -834,6 +836,53 @@ func (stream *streamedExecution) loadNoDataMemory(ctx context.Context) error {
 	stream.coordinator.observeWithCounts(ctx, observability.ComponentState, observability.StageGapLoaded,
 		stream.request.Operation, started, observability.ResultSuccess, observability.ReasonNone,
 		observability.Counts{Keys: int64(len(stream.noData.Items))}, nil)
+	return stream.resolveNoDataRosterHosts()
+}
+
+// resolveNoDataRosterHosts asks the CMDB index about every host each no-data
+// Plan's roster will consult, once the memory is in hand.
+//
+// After the memory rather than before it, because a history roster's hosts are
+// the ones this Plan remembers: the candidates cannot be known until the record
+// has been read. It is the same reason the memory is loaded here at all - it is
+// evidence, and the evidence has to be complete before anything is judged.
+//
+// A Plan whose roster cannot be derived is left out rather than failing the
+// Slot. The catalog withholds such a Plan, so reaching one here means the two
+// derivations disagree, which the evaluation refuses on its own and says which
+// Plan it was; failing the whole Slot would take every other Plan down with it.
+func (stream *streamedExecution) resolveNoDataRosterHosts() error {
+	if len(stream.noData.Items) == 0 {
+		return nil
+	}
+	stream.noDataHosts = make(map[execution.PlanNoDataIdentity]nodata.HostResolution, len(stream.noData.Items))
+	for _, due := range stream.header.DuePlans {
+		config := due.CompiledPlan.NoData()
+		if config == nil {
+			continue
+		}
+		identity := execution.PlanNoDataIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}
+		snapshot, found := stream.noData.Find(identity)
+		if !found {
+			continue
+		}
+		memory := make(map[string]nodata.GroupMemory, len(snapshot.Groups))
+		for _, group := range snapshot.Groups {
+			memory[group.GroupKey] = nodata.GroupMemory{
+				LastSeen: group.LastSeen, FirstAbsent: group.FirstAbsent,
+			}
+		}
+		candidates, err := nodata.HostCandidates(nodata.RosterRequest{
+			AggDimension: config.AggDimension,
+			Scope:        due.CompiledPlan.TargetScope(),
+			Memory:       memory,
+		})
+		if err != nil {
+			continue
+		}
+		stream.noDataHosts[identity] = resolveNoDataHosts(
+			stream.coordinator.ports.Hosts, due.Identity.BusinessID, candidates)
+	}
 	return nil
 }
 

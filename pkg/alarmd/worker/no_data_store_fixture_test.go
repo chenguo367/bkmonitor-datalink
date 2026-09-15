@@ -54,3 +54,18 @@ func (store *emptyNoDataStore) ApplyNoData(
 // SharedNoDataStore is the one the fixtures of unrelated tests point at. Its
 // counters are not read by those tests; a test that reads them makes its own.
 var SharedNoDataStore = &emptyNoDataStore{}
+
+// fixedHostBusiness answers from a map, which is what the CMDB index is.
+type fixedHostBusiness struct {
+	byIdentity map[string]string
+}
+
+func (lookup fixedHostBusiness) LookupHostBusiness(identity string) (string, bool) {
+	business, held := lookup.byIdentity[identity]
+	return business, held
+}
+
+// SharedHostBusiness holds no host, which is what a deployment whose CMDB index
+// has not been built yet looks like. Tests about something else use it; a test
+// about host resolution builds its own.
+var SharedHostBusiness = fixedHostBusiness{}
