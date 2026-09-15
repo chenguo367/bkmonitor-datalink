@@ -394,6 +394,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_query_groups"] = "variableLabels: {source_semantics}"
 	expected["bkmonitor_alarmd_catalog_plans"] = "variableLabels: {source_semantics}"
 	expected["bkmonitor_alarmd_catalog_objects"] = "variableLabels: {disposition}"
+	expected["bkmonitor_alarmd_catalog_withheld_objects"] = "variableLabels: {disposition,reason}"
 	expected["bkmonitor_alarmd_catalog_inert_plans"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_level_abnormal_total"] = "variableLabels: {window}"
 	expected["bkmonitor_alarmd_platform_settings_mode"] = "variableLabels: {mode}"
@@ -818,6 +819,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("catalog_plans")] = len(controlplane.SupportedSourceSemantics) + 2
 	// Every disposition, plus other for one added without being listed.
 	bounds[fqName("catalog_objects")] = len(controlplane.CatalogDispositions) + 1
+	// Every disposition but ACCEPTED, which is not withheld, plus other for one
+	// added without being listed, against every reason including its own other.
+	bounds[fqName("catalog_withheld_objects")] = len(controlplane.CatalogDispositions) * len(controlplane.CatalogReasons)
 	// One series: a count, unlabelled. It stays unlabelled on purpose -- the
 	// interval would be the natural label and it is user input, so labelling
 	// it would put an open set on a family whose whole job is to be a steady

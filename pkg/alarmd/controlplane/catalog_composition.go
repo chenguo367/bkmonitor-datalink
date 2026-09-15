@@ -69,6 +69,20 @@ type CatalogComposition struct {
 	// Objects counts source objects by disposition -- also a partition, over
 	// the objects the round recorded a disposition for.
 	Objects map[Disposition]int
+	// Withheld counts the objects that did not become a Plan, by the pair
+	// (disposition, reason). The disposition alone cannot be acted on: a
+	// CONFIG_REJECTED strategy has stopped detecting, while a STALE_CONFIG one
+	// is still running its last good Plan, and the reason says which change
+	// caused either. It is a partition of every object whose disposition is not
+	// ACCEPTED, and an unnamed reason is counted under other for the same
+	// reason the disposition partition has one.
+	//
+	// It exists because a reason nobody can read is not a diagnosis. These
+	// reasons were written to be read on a live deployment, and until this they
+	// lived only in the object page's Redis snapshot, which the read tooling
+	// does not reach - so the only way to count what a rejection had withheld
+	// was to publish it and watch a disposition total move.
+	Withheld map[WithheldKey]int
 	// InertPlans counts the Plans whose schedule cannot hold the wait their
 	// data needs to land. Such a Plan is ACCEPTED, is scheduled, and executes
 	// -- and every round every one of its consumers is bound unavailable,
@@ -124,6 +138,7 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		QueryGroups: make(map[string]int, len(SupportedSourceSemantics)+2),
 		Plans:       make(map[string]int, len(SupportedSourceSemantics)+2),
 		Objects:     make(map[Disposition]int, len(CatalogDispositions)+1),
+		Withheld:    make(map[WithheldKey]int),
 	}
 	for _, semantics := range SupportedSourceSemantics {
 		composition.QueryGroups[semantics] = 0
@@ -157,9 +172,66 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 			kind = DispositionOther
 		}
 		composition.Objects[kind]++
+		if kind == DispositionAccepted {
+			continue
+		}
+		reason := disposition.Reason
+		if _, named := catalogReasonSet[reason]; !named {
+			reason = ReasonOther
+		}
+		composition.Withheld[WithheldKey{Disposition: kind, Reason: reason}]++
 	}
 	return composition
 }
+
+// WithheldKey pairs what happened to an object with why. Neither half answers
+// on its own: the disposition says whether the strategy is still detecting, the
+// reason says which configuration caused it.
+type WithheldKey struct {
+	Disposition Disposition
+	Reason      string
+}
+
+// ReasonOther collects a reason CatalogReasons does not name, so that a reason
+// added without being listed shows as a rising other rather than as a family
+// that quietly stopped adding up.
+const ReasonOther = "other"
+
+// CatalogReasons is every reason this package attaches to a disposition. It is
+// a list rather than a derivation because the reasons are string literals at
+// their sites; the other bucket is what keeps the partition honest when one is
+// added here and not there.
+var CatalogReasons = []string{
+	"ABSENT_FROM_ACTIVE_SET",
+	"ALGORITHM_NOT_MIGRATED",
+	"ALGORITHM_QUERY_INVALID",
+	"DUPLICATE_STRATEGY_IDENTITY",
+	"EFFECTIVE_TIME_NOT_MIGRATED",
+	"LEVEL_PRIORITY_INVALID",
+	"NO_DATA_CONFIG_INVALID",
+	"OUTPUT_PROTOCOL_REQUIRES_OUTPUT_IDENTITY",
+	"OUTPUT_PROTOCOL_REQUIRES_STRATEGY_REVISION",
+	"PLAN_INVALID",
+	"RECOVERY_CONFIG_INVALID",
+	"REMOVED_FROM_ACTIVE_SET",
+	"SOURCE_IDENTITY_UNAVAILABLE",
+	"SOURCE_OBJECT_INCOMPLETE",
+	"STRATEGY_BUSINESS_IDENTITY_INVALID",
+	"STRATEGY_DOCUMENT_INVALID",
+	"STRATEGY_IDENTITY_INVALID",
+	"TRIGGER_CONFIG_MISSING",
+	"UNSUPPORTED_MULTI_ITEM_STRATEGY",
+	"UNSUPPORTED_PRIORITY_SEMANTICS",
+	ReasonOther,
+}
+
+var catalogReasonSet = func() map[string]struct{} {
+	set := make(map[string]struct{}, len(CatalogReasons))
+	for _, reason := range CatalogReasons {
+		set[reason] = struct{}{}
+	}
+	return set
+}()
 
 // DispositionOther collects a disposition CatalogDispositions does not name,
 // so that the partition keeps adding up and a disposition added without
