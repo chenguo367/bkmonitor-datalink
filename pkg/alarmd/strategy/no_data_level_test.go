@@ -12,6 +12,7 @@ package strategy
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -175,6 +176,56 @@ func TestNoDataLevelDetectorReadsTheSyntheticValue(t *testing.T) {
 		projection.DimensionFields[0] != contract.NoDataDimensionTag || projection.DimensionFields[1] != "host" {
 		t.Fatalf("projection dimensions = %v, want the configured ones and the tag in sorted order",
 			projection.DimensionFields)
+	}
+}
+
+// A no_data section that passes validation and still cannot be compiled takes
+// the whole Plan down, not just its own level.
+//
+// The alternative is a Plan that detects its thresholds and not its absence,
+// carrying a no_data section with no level compiled from it - so "does alarmd
+// cover this strategy" stops having an answer. That is the same half-wired Plan
+// the config layer refuses, one layer deeper.
+//
+// The path is reachable rather than theoretical: continuous arrives from an
+// open type domain, so a value that is positive - which is all validation asks
+// - can still run the trigger window past a compiler limit.
+func TestNoDataLevelThatCannotCompileWithholdsTheWholePlan(t *testing.T) {
+	compiler := newTestCompiler(t)
+	plan := validPlan()
+	declaredLevels := len(plan.StrategyIR.Levels)
+	plan.NoData = &contract.NoDataConfigV1{Continuous: 999999, Level: 2}
+	if err := plan.NoData.Validate(); err != nil {
+		t.Fatalf("fixture: this configuration is meant to pass validation and fail compilation: %v", err)
+	}
+
+	result, err := compiler.Compile(context.Background(), validRequest(plan))
+	if err != nil {
+		t.Fatalf("Compile() error = %v", err)
+	}
+	if compiled, ok := result.Plan(); ok {
+		t.Fatalf("Compile() produced a Plan with %d levels and no-data level %v; want the Plan withheld",
+			len(compiled.Levels()), compiled.NoDataLevel())
+	}
+	terminal := result.PlanTerminal()
+	if terminal == nil {
+		t.Fatal("Compile() withheld the Plan without saying why")
+	}
+	if terminal.ReasonCode != contract.ReasonNoDataConfigInvalid {
+		t.Fatalf("plan terminal reason = %q, want %q: the setting is enabled and produces no decision",
+			terminal.ReasonCode, contract.ReasonNoDataConfigInvalid)
+	}
+	if !strings.HasPrefix(terminal.FieldPath, "no_data.") {
+		t.Fatalf("plan terminal path = %q, want it to name the no_data section", terminal.FieldPath)
+	}
+	if got := len(result.LevelTerminals()); got != 0 {
+		t.Fatalf("level terminals = %d, want none: a rejected no-data level is not one declared level failing, "+
+			"and reported that way it is indistinguishable from a threshold level of the same ID", got)
+	}
+	// And the declared levels are untouched by this: the Plan is withheld whole,
+	// not trimmed down to the levels that happened to compile.
+	if declaredLevels == 0 {
+		t.Fatal("fixture: the plan under test declares no levels, so withholding it proves nothing")
 	}
 }
 

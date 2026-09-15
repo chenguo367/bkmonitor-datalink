@@ -189,12 +189,22 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 		}
 		switch {
 		case terminal != nil:
-			// Re-pathed, because the no-data level shares the level ID space
-			// with the declared levels: reported as it comes back, a rejected
-			// no-data level is indistinguishable from a rejected threshold level
-			// of the same ID.
-			terminal.FieldPath = "no_data." + terminal.FieldPath
-			terminals = append(terminals, *terminal)
+			// The whole Plan, not the level. A level terminal would leave a Plan
+			// that detects its thresholds and not its absence, with the no_data
+			// section present and no level compiled from it - so "does alarmd
+			// cover strategy X" would have no answer. It is the same half-wired
+			// Plan the config layer refuses, one layer deeper, and it is
+			// reachable: continuous arrives from an open type domain, so a value
+			// that passes validation can still run the trigger window past a
+			// compiler limit.
+			//
+			// The reason is the config layer's, because this is the same setting
+			// failing a later check: enabled, but it produces no decision. The
+			// path keeps the no_data prefix to say which part of it.
+			return CompileResult{planTerminal: &Terminal{
+				ReasonCode: contract.ReasonNoDataConfigInvalid,
+				FieldPath:  "no_data." + terminal.FieldPath,
+			}}, nil
 		default:
 			levelCost := triggerComputeCostForLevel(level.trigger, level.recovery)
 			if levelCost > c.limits.MaxTriggerComputeCost-triggerComputeCost {
