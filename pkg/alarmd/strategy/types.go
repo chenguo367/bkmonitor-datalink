@@ -525,6 +525,34 @@ func (p *CompiledPlan) NoDataLevel() *CompiledLevel {
 	return p.noDataLevel
 }
 
+// NoDataView is this Plan seen as a synthetic no-data series sees it: the same
+// Plan in every respect except that its levels are the one no-data level.
+//
+// It exists because "which levels is this Plan judged against" turned out to be
+// asked in fifteen places across four packages - the evaluator, the detector,
+// the trigger and the execution contract's own validators - and every one of
+// them asks the same way, by calling Levels(). Threading a level set through
+// all fifteen would have left the sixteenth, added later by someone with no
+// reason to know the rule; answering the existing question differently leaves
+// nothing to thread and nothing to forget.
+//
+// Everything else is shared with the Plan it came from, deliberately: the plan
+// ref, the fingerprints, the state compatibility hash. A synthetic series is
+// this Plan's series, and its runtime state is told apart by the series digest
+// - its dimensions carry the no-data tag - not by pretending to be a different
+// Plan.
+//
+// Nil when the Plan detects no no-data, which is the caller asking for a view
+// of something that is not there.
+func (p *CompiledPlan) NoDataView() *CompiledPlan {
+	if p == nil || p.noDataLevel == nil {
+		return nil
+	}
+	view := *p
+	view.levels = []CompiledLevel{*p.noDataLevel}
+	return &view
+}
+
 // TargetScope is the strategy's monitoring target, frozen with the Plan. Nil
 // means the strategy names no target; it never means one was dropped, because
 // a target the catalog cannot reduce rejects the Plan instead.

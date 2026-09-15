@@ -403,8 +403,19 @@ func (e *Evaluator) evaluateSeries(
 			break
 		}
 	}
-	if !foundPlan || due.CompiledPlan == nil || uint64(len(due.CompiledPlan.Levels())) > e.limits.MaxLevels {
-		return execution.PlanEvaluationResult{}, errors.New("alarmd evaluation: named input Plan is missing or over budget")
+	if !foundPlan || due.CompiledPlan == nil {
+		return execution.PlanEvaluationResult{}, errors.New("alarmd evaluation: named input Plan is missing")
+	}
+	// Everything below asks the Plan which levels it has, and from here on the
+	// Plan is the one this kind of series is judged against. A real series sees
+	// the strategy's declared levels; a synthetic no-data series sees the
+	// no-data level and nothing else.
+	due, err := planViewFor(due, first.Kind)
+	if err != nil {
+		return execution.PlanEvaluationResult{}, err
+	}
+	if uint64(len(due.CompiledPlan.Levels())) > e.limits.MaxLevels {
+		return execution.PlanEvaluationResult{}, errors.New("alarmd evaluation: named input Plan is over budget")
 	}
 	byLevel := make(map[uint32]execution.SeriesEvaluationInputRequest, len(inputs))
 	for _, input := range inputs {
