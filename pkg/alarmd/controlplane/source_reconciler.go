@@ -286,7 +286,7 @@ func (reconciler *SourceReconciler) Refresh(
 	// Named against the last published audit, in the round that has both. The
 	// counts in the composition and these lines come from one pass over one
 	// list, so the page and the log cannot disagree about how many.
-	withheld = ChangedWithheld(composition.WithheldObjects, previousDispositions, WithheldLineBudget)
+	withheld = ChangedWithheld(composition.WithheldObjects, previousDispositions)
 	// The active revision remains the execution authority even when latest points
 	// at a stranded candidate. Restore its occurrence directly; requiring two
 	// identical source observations here can leave the active Snapshot expired

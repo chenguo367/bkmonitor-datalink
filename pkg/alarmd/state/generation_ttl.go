@@ -65,11 +65,14 @@ func GenerationScopedTTL(
 // Slot: a Plan on a one-minute interval with a one-day life sets a new expiry
 // every twelve hours instead of seven hundred times a day.
 //
-// The threshold bounds the writes, not the round trips. The check itself runs
-// on every load, because it is one EVAL that reads PTTL and decides inside
-// Redis - two per Plan per Slot once both the gap marker and the no-data memory
-// are loaded. That is small beside the same Slot's series reads, but it is not
-// nothing, and a deployment measuring EVAL counts will see it.
+// The threshold bounds the writes and nothing else. It cannot bound the round
+// trips, because it is evaluated inside Redis: a load that reaches the script
+// has already spent the trip, whatever the script then decides. That was taken
+// for small beside the same Slot's series reads and measured otherwise -- 38.6
+// EVAL/s at 7.1ms each on around 2,100 Plans, which is 0.27 seconds of waiting
+// on Redis every second, and it doubles once a Plan loads its no-data memory
+// as well as its gap marker. What bounds the trips is the ask gate, on the
+// client; see RenewalAskInterval.
 func GenerationScopedRenewalThreshold(ttl time.Duration) time.Duration {
 	return ttl / 2
 }
