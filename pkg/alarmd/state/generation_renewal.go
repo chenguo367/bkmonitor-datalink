@@ -36,9 +36,10 @@ var ErrLifetimeUnsupported = errors.New("state: routed backend cannot renew a ke
 // whose execution content changed stops loading the old generation's key
 // entirely, and that key then ages out on its own.
 //
-// It is cheap because of the threshold, not because it is rare: the load
-// happens every Slot and sends a command only when the remaining life has
-// fallen below half.
+// The threshold makes it cheap to write, not free to ask: every load sends the
+// script, which reads PTTL and decides inside Redis, and only the ones below
+// half go on to set a new expiry. So the cost is one EVAL per generation-scoped
+// key per Slot - small beside that Slot's series reads, and not zero.
 func RenewGenerationKey(
 	ctx context.Context, target StorageTarget, key string, retention []execution.StateRetentionRequirement,
 	restartMargin, minimum, maximum time.Duration,

@@ -61,10 +61,15 @@ func GenerationScopedTTL(
 // GenerationScopedRenewalThreshold is the remaining life below which a loaded
 // key is renewed.
 //
-// Half, so that renewal happens about once per half-life per Plan rather than
-// once per Slot. A Plan evaluated every minute with a one-day life sends one
-// PEXPIRE every twelve hours and nothing on the other seven hundred rounds -
-// which is what makes renewing on load affordable at all.
+// Half, so a key is rewritten about once per half-life rather than once per
+// Slot: a Plan on a one-minute interval with a one-day life sets a new expiry
+// every twelve hours instead of seven hundred times a day.
+//
+// The threshold bounds the writes, not the round trips. The check itself runs
+// on every load, because it is one EVAL that reads PTTL and decides inside
+// Redis - two per Plan per Slot once both the gap marker and the no-data memory
+// are loaded. That is small beside the same Slot's series reads, but it is not
+// nothing, and a deployment measuring EVAL counts will see it.
 func GenerationScopedRenewalThreshold(ttl time.Duration) time.Duration {
 	return ttl / 2
 }

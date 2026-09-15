@@ -51,6 +51,32 @@ type NoDataLoadRequest struct {
 	Items    []PlanNoDataLoadItem
 }
 
+type NoDataApplyStatus string
+
+const (
+	NoDataApplied        NoDataApplyStatus = "APPLIED"
+	NoDataAlreadyApplied NoDataApplyStatus = "ALREADY_APPLIED"
+	NoDataStale          NoDataApplyStatus = "STALE_VERSION"
+	NoDataConflict       NoDataApplyStatus = "CONFLICT"
+	NoDataRetryable      NoDataApplyStatus = "RETRYABLE_IO"
+	NoDataRejected       NoDataApplyStatus = "DETERMINISTIC_INVALID"
+)
+
+type NoDataApplyRequest struct {
+	Contract FrozenExecutionContractRef
+	Items    []PlanNoDataMutation
+}
+
+type NoDataApplyItemResult struct {
+	Identity   PlanNoDataIdentity
+	Status     NoDataApplyStatus
+	ReasonCode ReasonCode
+}
+
+type NoDataApplyResult struct {
+	Items []NoDataApplyItemResult
+}
+
 // NoDataMemorySnapshot is one Plan's stored no-data memory as it was read.
 type NoDataMemorySnapshot struct {
 	Identity                PlanNoDataIdentity
