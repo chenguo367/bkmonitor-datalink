@@ -33,9 +33,9 @@ func TestEvaluateSlotSaysNothingForAPlanThatDoesNotDetectNoData(t *testing.T) {
 		"no section": {PlanID: "1001"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			result, evaluated, err := EvaluateSlot(SlotInput{Plan: plan})
-			if err != nil || evaluated {
-				t.Fatalf("EvaluateSlot() = %+v, %t, %v; want no evaluation and no error", result, evaluated, err)
+			result, outcome, err := EvaluateSlot(SlotInput{Plan: plan})
+			if err != nil || outcome != OutcomeNone {
+				t.Fatalf("EvaluateSlot() = %+v, %q, %v; want no outcome and no error", result, outcome, err)
 			}
 		})
 	}
@@ -49,7 +49,7 @@ func TestEvaluateSlotDecidesAStaticTargetFromWhichSeriesReported(t *testing.T) {
 	present := hostTargetGroup(HostIdentity{IP: "10.0.0.1", CloudID: "0"})
 	absent := hostTargetGroup(HostIdentity{IP: "10.0.0.2", CloudID: "0"})
 
-	result, evaluated, err := EvaluateSlot(SlotInput{
+	result, outcome, err := EvaluateSlot(SlotInput{
 		Plan:           slotPlan(scope, []string{HostIPDimension, HostCloudDimension}),
 		EvaluationTime: 1000, PeriodSeconds: 60, Completeness: execution.CompletenessFull,
 		Series: []map[string]string{
@@ -59,8 +59,8 @@ func TestEvaluateSlotDecidesAStaticTargetFromWhichSeriesReported(t *testing.T) {
 		Memory:        map[string]GroupMemory{},
 		RosterVersion: "v1",
 	})
-	if err != nil || !evaluated {
-		t.Fatalf("EvaluateSlot() = %t, %v", evaluated, err)
+	if err != nil || outcome != OutcomeEvaluated {
+		t.Fatalf("EvaluateSlot() = %q, %v", outcome, err)
 	}
 	if got := result.Verdicts[present.Key()]; got != VerdictNormal {
 		t.Fatalf("the host that reported is %q, want %q", got, VerdictNormal)
@@ -81,7 +81,7 @@ func TestEvaluateSlotDecidesAStaticTargetFromWhichSeriesReported(t *testing.T) {
 // host that did report is still absent as far as this item can tell.
 func TestEvaluateSlotCountsASeriesItCannotProject(t *testing.T) {
 	scope := hostScope("10.0.0.1|0")
-	result, _, err := EvaluateSlot(SlotInput{
+	result, outcome, err := EvaluateSlot(SlotInput{
 		Plan:           slotPlan(scope, []string{HostIPDimension, HostCloudDimension}),
 		EvaluationTime: 1000, PeriodSeconds: 60, Completeness: execution.CompletenessFull,
 		Series:     []map[string]string{{HostIPDimension: "10.0.0.1"}},
@@ -90,6 +90,9 @@ func TestEvaluateSlotCountsASeriesItCannotProject(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("EvaluateSlot() error = %v", err)
+	}
+	if outcome != OutcomeEvaluated {
+		t.Fatalf("outcome = %q, want %q", outcome, OutcomeEvaluated)
 	}
 	if result.Facts.Dropped != 1 {
 		t.Fatalf("Dropped = %d, want the series with no cloud dimension counted", result.Facts.Dropped)
@@ -107,13 +110,17 @@ func TestEvaluateSlotPassesTheCompletenessGateThrough(t *testing.T) {
 	scope := hostScope("10.0.0.1|0")
 	group := hostTargetGroup(HostIdentity{IP: "10.0.0.1", CloudID: "0"})
 	memory := map[string]GroupMemory{group.Key(): {LastSeen: 500}}
-	result, _, err := EvaluateSlot(SlotInput{
+	result, outcome, err := EvaluateSlot(SlotInput{
 		Plan:           slotPlan(scope, []string{HostIPDimension, HostCloudDimension}),
 		EvaluationTime: 1000, PeriodSeconds: 60, Completeness: execution.CompletenessPartial,
 		KnownHosts: knownHosts("10.0.0.1|0"), Memory: memory,
 	})
 	if err != nil {
 		t.Fatalf("EvaluateSlot() error = %v", err)
+	}
+	if outcome != OutcomeSkippedQueryNotFull {
+		t.Fatalf("outcome = %q, want %q: a round that did not see the whole period judged nothing",
+			outcome, OutcomeSkippedQueryNotFull)
 	}
 	if got := result.Verdicts[group.Key()]; got != VerdictUnavailable {
 		t.Fatalf("verdict = %q, want %q on a Slot that did not see the whole round", got, VerdictUnavailable)
@@ -128,12 +135,12 @@ func TestEvaluateSlotPassesTheCompletenessGateThrough(t *testing.T) {
 // compiler stops, and it stops loudly.
 func TestEvaluateSlotRefusesAPlanWhoseRosterCannotBeDerived(t *testing.T) {
 	excluded := excludedHostScope("10.0.0.1|0")
-	_, evaluated, err := EvaluateSlot(SlotInput{
+	_, outcome, err := EvaluateSlot(SlotInput{
 		Plan:           slotPlan(excluded, []string{HostIPDimension, HostCloudDimension}),
 		EvaluationTime: 1000, PeriodSeconds: 60, Completeness: execution.CompletenessFull,
 	})
 	var unsupported *RosterUnsupportedError
-	if !errors.As(err, &unsupported) || evaluated {
-		t.Fatalf("EvaluateSlot() = %t, %v; want a RosterUnsupportedError", evaluated, err)
+	if !errors.As(err, &unsupported) || outcome != OutcomeNone {
+		t.Fatalf("EvaluateSlot() = %q, %v; want a RosterUnsupportedError and no outcome", outcome, err)
 	}
 }
