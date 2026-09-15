@@ -80,7 +80,10 @@ func (store *ExecutionStore) loadOneNoData(
 		func() (string, error) { return PlanNoDataKeyV2(store.options.Prefix, item.Identity) })
 	if err != nil {
 		var identityErr *IdentityError
-		if errors.As(err, &identityErr) || errors.Is(err, ErrLifetimeUnsupported) {
+		if errors.Is(err, ErrLifetimeUnsupported) {
+			snapshot.Status = execution.NoDataMemoryTerminal
+			snapshot.ReasonCode = execution.ReasonCode(contract.ReasonBackendCapabilityMissing)
+		} else if errors.As(err, &identityErr) {
 			snapshot.Status = execution.NoDataMemoryTerminal
 			snapshot.ReasonCode = execution.ReasonCode(contract.ReasonStateCorrupt)
 		} else {
@@ -181,9 +184,12 @@ func (store *ExecutionStore) applyOneNoData(
 		return reject(contract.ReasonStateCorrupt)
 	}
 	target, routeErr := store.options.Router.Route(mutation.Identity.Plan.TenantID, mutation.Identity.Plan.StrategyID)
-	backend, ok := target.Backend.(CompareAndSetBackend)
-	if routeErr != nil || !ok {
+	if routeErr != nil {
 		return retry()
+	}
+	backend, ok := target.Backend.(CompareAndSetBackend)
+	if !ok {
+		return reject(contract.ReasonBackendCapabilityMissing)
 	}
 	values, readErr := backend.MGet(ctx, []string{key})
 	if readErr != nil || len(values) != 1 {
