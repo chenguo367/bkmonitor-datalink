@@ -497,6 +497,12 @@ func (runtime *productionPhaseTwoControl) refresh(
 		}
 		refreshResult.Composition = &composition
 	}()
+	// Which strategies are behind the counts, once per change. Written here
+	// rather than at each return for the same reason the composition is: the
+	// lines and the counts come from one pass over one list, and a reader who
+	// sees a count move must be able to find the line that moved it whichever
+	// return the round took.
+	observeWithheldObjects(ctx, runtime.dependencies.Observer, result.Withheld)
 	sourceRefresh := sourceRefreshIdentity(result, result.Publication)
 	defer func() {
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{

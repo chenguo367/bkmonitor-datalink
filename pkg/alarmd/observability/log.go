@@ -200,6 +200,15 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if observation.RuntimeConfig != nil {
 		attributes = append(attributes, slog.Any("runtime_config", observation.RuntimeConfig))
 	}
+	if facts := observation.SourceWithheld; facts != nil {
+		attributes = append(attributes,
+			slog.String("withheld_disposition", facts.Disposition),
+			slog.String("withheld_reason", facts.Reason),
+		)
+		if facts.Dropped > 0 {
+			attributes = append(attributes, slog.Int("withheld_dropped", facts.Dropped))
+		}
+	}
 	if facts := observation.StateGenerationSkew; facts != nil {
 		attributes = append(attributes,
 			slog.String("state_generation_skew_kind", facts.Kind),
@@ -544,6 +553,21 @@ func mandatoryLogStage(stage Stage) bool {
 		return true
 	case StageSnapshotRefreshed, StageSnapshotUnavailable, StageAssignmentAcquired, StageAssignmentLost,
 		StageTakeoverStarted, StageTakeoverCompleted:
+		return true
+	case StageSourceWithheld:
+		// Outside the repeated-line budget, and it has to be. That budget is
+		// per (reason, query group), and a withheld source has no query group -
+		// it never became a Plan - so every line of a round would share one
+		// bucket and roughly half of a full compile would be merged into a
+		// suppressed count. The half that vanished is the half someone is
+		// looking for: these lines exist because a strategy that is not running
+		// cannot be asked about any other way here.
+		//
+		// What keeps the volume bounded is upstream instead: a round reports
+		// only the objects whose disposition changed, so the steady state is
+		// no lines at all and a full first round is one burst. On this
+		// deployment that burst is about 1,250 lines; on the largest it is
+		// about 48 times that, once per leader election.
 		return true
 	default:
 		return false

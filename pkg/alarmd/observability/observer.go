@@ -102,6 +102,7 @@ const (
 	StageStatePreflight         = "state_preflight"
 	StageGapLoaded              = "gap_loaded"
 	StageNoDataDecided          = "no_data_decided"
+	StageSourceWithheld         = "source_withheld"
 	StageEvaluationCompleted    = "evaluation_completed"
 	StageSideEffectAdmission    = "side_effect_admission"
 	StageStateAdmission         = "state_admission"
@@ -322,6 +323,29 @@ type NoDataSlotFacts struct {
 	// Plans is how many Plans landed on that outcome, so one observation can
 	// carry a whole Slot rather than one per Plan.
 	Plans int
+}
+
+// SourceWithheldFacts is what one withheld object has to say that nothing else
+// already carries.
+//
+// It is three fields because the rest already have a home: the strategy, the
+// business, the snapshot, the level and the scope are all TraceFields, and
+// putting them here too would be the same fact in two places under two names.
+// What is left is the pair that says what happened and why, plus how much of
+// the round did not fit.
+//
+// Reason is here rather than in ReasonCode because a control-plane observation
+// only keeps its reason string when it carries a source kind and the reason is
+// one of the source classes; these are neither, so ReasonCode would fold every
+// one of them to _other and the line would say a refusal happened without
+// saying which.
+type SourceWithheldFacts struct {
+	Disposition string
+	Reason      string
+	// Dropped is how many further objects the round could not fit into its
+	// line budget, reported on the last line of the round. A report that was
+	// cut without saying so reads as a complete one.
+	Dropped int
 }
 
 type QueryPermitFacts struct {
@@ -1088,6 +1112,7 @@ type Observation struct {
 	SourceKind            SourceKind
 	QueryPermit           *QueryPermitFacts
 	NoDataSlot            *NoDataSlotFacts
+	SourceWithheld        *SourceWithheldFacts
 	RuntimeConfig         *RuntimeConfigFacts
 	QueryFailure          *QueryFailureFacts
 	QueryStatus           []QueryStatusFacts
@@ -1182,6 +1207,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.HistoryCoverage = normalizeHistoryCoverageFacts(observation.HistoryCoverage)
 	observation.QueryPermit = normalizeQueryPermitFacts(observation.QueryPermit)
 	observation.NoDataSlot = normalizeNoDataSlotFacts(observation.NoDataSlot)
+	observation.SourceWithheld = normalizeSourceWithheldFacts(observation.SourceWithheld)
 	observation.QueryTiming = normalizeTimingFacts(observation)
 	observation.ShortPeriodCompletion = normalizeShortPeriodCompletion(observation)
 	observation.StateApplyChunk = normalizeStateApplyChunk(observation)
@@ -1708,6 +1734,20 @@ func normalizeLegacyQGMigrationFacts(facts *LegacyQGMigrationFacts) *LegacyQGMig
 	return &normalized
 }
 
+// normalizeSourceWithheldFacts drops a record that does not say what happened.
+// A reason with no disposition is half a sentence, and the half it is missing
+// is the one that says whether the object is running.
+func normalizeSourceWithheldFacts(facts *SourceWithheldFacts) *SourceWithheldFacts {
+	if facts == nil || facts.Disposition == "" {
+		return nil
+	}
+	normalized := *facts
+	if normalized.Dropped < 0 {
+		normalized.Dropped = 0
+	}
+	return &normalized
+}
+
 // normalizeNoDataSlotFacts drops facts that name no outcome and clamps a
 // negative count. An outcome this build does not know is kept rather than
 // blanked: the label is bounded by the list the evaluation publishes, and a
@@ -2016,6 +2056,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentEvaluation, StageEvaluationCompleted},
 	{ComponentState, StageStatePreflight}, {ComponentState, StageGapLoaded},
 	{ComponentEvaluation, StageNoDataDecided},
+	{ComponentControlPlane, StageSourceWithheld},
 	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},
 	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission},
 	{ComponentState, StageStateApplied},

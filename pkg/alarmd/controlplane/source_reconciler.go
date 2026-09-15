@@ -106,6 +106,10 @@ type SourceRefreshResult struct {
 	// under any status -- a round that publishes nothing because nothing
 	// changed composed the same Catalog as the one before it, and a reader
 	// asking which data sources are running needs an answer then too.
+	// Withheld names the objects whose disposition changed this round, so a
+	// reader can ask which strategy is held back rather than only how many.
+	// Empty on a round where nothing changed, which is the steady state.
+	Withheld    WithheldReport
 	Composition CatalogComposition
 }
 
@@ -227,6 +231,7 @@ func (reconciler *SourceReconciler) Refresh(
 	cycle, read, err := reconciler.observe(ctx, source)
 	retainedStaleRevisions := 0
 	var composition CatalogComposition
+	var withheld WithheldReport
 	defer func() {
 		if err != nil {
 			reconciler.unsettle()
@@ -234,6 +239,7 @@ func (reconciler *SourceReconciler) Refresh(
 		}
 		result.RetainedStaleRevisions = retainedStaleRevisions
 		result.Composition = composition
+		result.Withheld = withheld
 		result.CompiledStrategies, result.ReusedStrategies = reconciler.candidates.Stats()
 		result.ReadMode, result.ReadReason, result.StrategiesRead = read.mode, read.reason, read.strategies
 		result.ChangeSignalPresent, result.ChangeSignalAgeSeconds = read.signalPresent, read.signalAgeSeconds
@@ -277,6 +283,10 @@ func (reconciler *SourceReconciler) Refresh(
 	}
 	catalog.ObservationID = observationID
 	composition = ComposeCatalog(catalog)
+	// Named against the last published audit, in the round that has both. The
+	// counts in the composition and these lines come from one pass over one
+	// list, so the page and the log cannot disagree about how many.
+	withheld = ChangedWithheld(composition.WithheldObjects, previousDispositions, WithheldLineBudget)
 	// The active revision remains the execution authority even when latest points
 	// at a stranded candidate. Restore its occurrence directly; requiring two
 	// identical source observations here can leave the active Snapshot expired

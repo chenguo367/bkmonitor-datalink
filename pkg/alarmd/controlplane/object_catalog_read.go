@@ -282,6 +282,7 @@ func AssembleQueryGroup(object QueryGroupObject, contexts map[execution.PlanIden
 				PlanID: plan.PlanID, StrategyRef: context.StrategyRef, InputProjection: plan.InputProjection,
 				SourceCompatibility: context.SourceCompatibility, OutputIdentity: plan.OutputIdentity,
 				SubjectFacts: context.SubjectFacts, LegacyOutput: context.LegacyOutput, TargetScope: plan.TargetScope,
+				NoData:     plan.NoData,
 				StrategyIR: strategyIR, WireFormat: context.WireFormat, TerminalReasonCode: plan.TerminalReasonCode,
 			},
 			StateGeneration: plan.StateGeneration, ScheduleSpec: plan.ScheduleSpec, ScheduleRevision: plan.ScheduleRevision,
