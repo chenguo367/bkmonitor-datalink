@@ -819,9 +819,12 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("catalog_plans")] = len(controlplane.SupportedSourceSemantics) + 2
 	// Every disposition, plus other for one added without being listed.
 	bounds[fqName("catalog_objects")] = len(controlplane.CatalogDispositions) + 1
-	// Every disposition but ACCEPTED, which is not withheld, plus other for one
-	// added without being listed, against every reason including its own other.
-	bounds[fqName("catalog_withheld_objects")] = len(controlplane.CatalogDispositions) * len(controlplane.CatalogReasons)
+	// Every disposition but ACCEPTED, which is not withheld, against every
+	// reason this package can attach. The reason half is not a list to keep in
+	// step: controlplane's own test counts the reason-shaped literals in its
+	// source and fails when they pass the headroom this number is built from,
+	// so the bound is wrong only if that test is also red.
+	bounds[fqName("catalog_withheld_objects")] = len(controlplane.CatalogDispositions) * catalogReasonHeadroom
 	// One series: a count, unlabelled. It stays unlabelled on purpose -- the
 	// interval would be the natural label and it is user input, so labelling
 	// it would put an open set on a family whose whole job is to be a steady
@@ -890,3 +893,9 @@ func countCustomSeriesByFamily(t *testing.T, recorder *Recorder) map[string]int 
 	}
 	return counts
 }
+
+// catalogReasonHeadroom is the reason half of catalog_withheld_objects's
+// cardinality bound. It is the same number controlplane's own scan holds its
+// source to, repeated here rather than exported because exporting a test's
+// constant would make it look like a value the package promises.
+const catalogReasonHeadroom = 120

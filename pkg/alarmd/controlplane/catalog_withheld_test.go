@@ -47,30 +47,23 @@ func TestWithheldCountsThePairAndNotJustTheReason(t *testing.T) {
 	}
 }
 
-// A reason added at its site and not in the list must not silently leave the
-// partition. It lands under other, which is a reading that says "go and add it"
-// rather than a count that stops adding up.
-func TestWithheldCountsAnUnnamedReasonUnderOther(t *testing.T) {
+// The reason reaches the count as it was attached, with no list deciding
+// whether it is allowed to. A list would have to be exactly the set this
+// package writes, and the first version of it held twenty of the forty-odd -
+// which would have filed most of a deployment's rejected objects under a label
+// naming nothing while a guard reported all was well.
+func TestWithheldCarriesTheReasonAsItWasAttached(t *testing.T) {
+	const unusual = "A_REASON_NOBODY_LISTED"
 	composition := ComposeCatalog(Catalog{Dispositions: []ObjectDisposition{
-		{SourceID: "1", Disposition: DispositionConfigRejected, Reason: "A_REASON_NOBODY_LISTED"},
+		{SourceID: "1", Disposition: DispositionConfigRejected, Reason: unusual},
 	}})
-	key := WithheldKey{Disposition: DispositionConfigRejected, Reason: ReasonOther}
+	key := WithheldKey{Disposition: DispositionConfigRejected, Reason: unusual}
 	if got := composition.Withheld[key]; got != 1 {
-		t.Fatalf("Withheld[%+v] = %d, want the unnamed reason counted here", key, got)
+		t.Fatalf("Withheld[%+v] = %d, want the reason counted under its own name", key, got)
 	}
-}
-
-// Every reason this package attaches to a disposition has to be in the list,
-// or it reaches production as other and the family stops naming what it counts.
-// The list is what the metric's cardinality bound is computed from, so a reason
-// missing from it is also a bound that no longer describes the family.
-func TestEveryReasonThisPackageAttachesIsListed(t *testing.T) {
-	for _, reason := range CatalogReasons {
-		if reason == "" {
-			t.Fatal("CatalogReasons carries an empty reason")
+	for held := range composition.Withheld {
+		if held.Reason != unusual {
+			t.Fatalf("Withheld carries %+v; the reason was rewritten on the way in", held)
 		}
-	}
-	if _, named := catalogReasonSet[ReasonOther]; !named {
-		t.Fatal("CatalogReasons must carry its own other, or an unnamed reason has nowhere to go")
 	}
 }
