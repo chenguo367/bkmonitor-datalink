@@ -77,11 +77,29 @@ const (
 	// worker's fact, not this package's - and it is named here so that both
 	// skips are read from one list.
 	OutcomeSkippedSlotBudget SlotOutcome = "SKIPPED_SLOT_BUDGET"
+	// OutcomeSkippedMemoryUnreadable means the Plan's stored memory was written
+	// in a schema this build does not understand, which happens on a rollback.
+	// The record is not loaded, not applied to and not cleared, and only this
+	// Plan's no-data detection pauses.
+	//
+	// It is a bucket rather than an error because of how often it happens when
+	// it happens at all: during a rollback it is every no-data Plan, every
+	// round, for as long as the rollback lasts. An error would fail the Plan's
+	// whole evaluation and take its threshold detection down with it - over a
+	// no-data record nobody was asking about.
+	//
+	// Resuming is correct because the record holds timestamps. However many
+	// rounds were skipped, the absence duration comes back from when the group
+	// was last seen and first called absent, not from a count of rounds that
+	// did not run.
+	OutcomeSkippedMemoryUnreadable SlotOutcome = "SKIPPED_MEMORY_UNREADABLE"
 )
 
 // SlotOutcomes is every outcome a Plan that detects no-data can land on, for a
 // partition to pre-create and for a reader to bound the family by.
-var SlotOutcomes = []SlotOutcome{OutcomeEvaluated, OutcomeSkippedQueryNotFull, OutcomeSkippedSlotBudget}
+var SlotOutcomes = []SlotOutcome{
+	OutcomeEvaluated, OutcomeSkippedQueryNotFull, OutcomeSkippedSlotBudget, OutcomeSkippedMemoryUnreadable,
+}
 
 // EvaluateSlot turns one Slot's evidence into the no-data decision for it.
 //

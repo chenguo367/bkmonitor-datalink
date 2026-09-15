@@ -47,6 +47,15 @@ const (
 // Schema zero is not a record at all - it is the absence of one, which is the
 // normal state before a Plan's first no-data round - so it reads as readable
 // and loads as empty memory.
+//
+// One consequence, stated here so it is not mistaken for a defect later. When
+// the pause ends and the record is readable again, a group that was absent
+// throughout reports a duration that includes the pause, because the duration
+// is measured from FirstAbsent and that is when the absence began. It is
+// correct: the data really was missing for that whole span, and nobody was
+// watching is not the same as nothing was wrong. Counting rounds instead would
+// report the shorter number - the rounds that happened to run - which is the
+// under-report this design exists to avoid.
 func NoDataMemoryReadable(schema NoDataMemorySchema) bool {
 	return schema <= MaxSupportedNoDataMemorySchema
 }
