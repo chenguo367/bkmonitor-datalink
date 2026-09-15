@@ -476,6 +476,39 @@ func TestHealthResponseCarriesCapacityWhenReplicasReportIt(t *testing.T) {
 	}
 }
 
+// The verdict response names the build each counted replica runs. It is the
+// first thing to establish about any number on the page after a release, and
+// before this field it took a PromQL query per pod.
+func TestHealthResponseCarriesTheBuildsTheReplicasRun(t *testing.T) {
+	snapshots := healthySnapshots()
+	newer := BuildFacts{Version: "0.2.4506", Commit: "62ee924d", SchemaVersion: "v3"}
+	older := BuildFacts{Version: "0.2.4505", Commit: "4f338bf3", SchemaVersion: "v3"}
+	snapshots[0].Build = &newer
+	snapshots[1].Build = &older
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
+
+	body := requestJSON(t, handler, "/api/health")
+	builds, ok := body["builds"].([]any)
+	if !ok || len(builds) != 2 {
+		t.Fatalf("health response carried builds %v, want two groups, one per build", body["builds"])
+	}
+	versions := map[string]int{}
+	for _, entry := range builds {
+		group := entry.(map[string]any)
+		versions[group["build"].(map[string]any)["version"].(string)] = len(group["replicas"].([]any))
+	}
+	if versions["0.2.4506"] != 1 || versions["0.2.4505"] != 1 {
+		t.Fatalf("builds = %v, want one replica under each version", versions)
+	}
+	// And per replica, where the row that shows it reads it.
+	for _, entry := range body["per_replica"].([]any) {
+		replica := entry.(map[string]any)
+		if replica["build"] == nil {
+			t.Fatalf("replica %v carries no build on the verdict response", replica["replica"])
+		}
+	}
+}
+
 // A deployment whose replicas report no capacity must say so rather than
 // omitting the block, because the page tells those apart and an operator
 // reading "no replica reported capacity" is being told something true.

@@ -165,6 +165,10 @@ details.group table{margin:6px 0 0 12px}
       <span id="health" class="badge b-UNKNOWN">…</span>
       <span id="why" class="why"></span>
     </div>
+    <!-- What produced every number below. One line when the replicas agree on
+         a build; two or more when a rollout is in progress or stuck, and the
+         totals are then a mix that no single build produced. -->
+    <p class="basis" id="buildLine"></p>
     <div class="brief">
       <p id="briefSchedule"></p>
       <p id="briefTodo"></p>
@@ -299,7 +303,7 @@ details.group table{margin:6px 0 0 12px}
     <table>
       <thead><tr>
         <th>副本</th><th>持有</th><th>正常</th><th>没跑成待查</th><th>其中 alarmd 的</th><th>降级池</th><th>判不了恢复</th><th>按配置不处理</th><th>状态未知</th>
-        <th>快照新鲜度</th><th>已运行</th><th>内存</th><th>CPU</th><th>同时在跑</th>
+        <th>快照新鲜度</th><th>已运行</th><th>版本</th><th>内存</th><th>CPU</th><th>同时在跑</th>
       </tr></thead>
       <tbody id="repRows"></tbody>
     </table>
@@ -598,18 +602,92 @@ function checkSentence(report) {
 // produced a usable result are two different questions, and this sentence
 // answers only the first. The second question is what the checks below say.
 function renderBrief(deployment) {
+  renderBuildLine(deployment.builds, deployment.per_replica);
   text('briefSchedule', scheduleSentence(deployment));
   var gaps = deployment.gaps || [];
   var unknown = deployment.unknown || 0;
+  // Objects restored from records that kept "this round did not complete"
+  // and not why. They are counted as anomalies, so the columns add up, but
+  // nothing about them can be concluded yet -- and this line said "全部对象都有
+  // 结论" over a grid showing two of them. Completeness is about conclusions,
+  // and these have none.
+  var unattributed = deployment.unattributed || 0;
   var blind = [];
   if (unknown) blind.push(unknown + ' 个对象现在说不出结论');
+  if (unattributed) blind.push(unattributed + ' 个对象没留下成因，还说不清归谁；各自再跑完一轮就补上');
   if (gaps.length) blind.push(gaps.length + ' 处覆盖缺口');
   text('briefBlind', '观测完整性：' + (blind.length ? blind.join('；') : '全部对象都有结论'));
+}
+
+// Which build the numbers came from. Held to the Go grouping: one group per
+// distinct build, most replicas first, the replicas that reported no build in
+// a group of their own with an empty version.
+function buildLabel(build) {
+  if (!build || !build.version) return '未上报版本（旧构建）';
+  return build.version + '（' + String(build.commit || '').slice(0, 8) + '）';
+}
+
+function renderBuildLine(groups, replicas) {
+  var el = document.getElementById('buildLine');
+  groups = groups || [];
+  var counted = (replicas || []).length;
+  if (!groups.length) {
+    el.textContent = '版本：没有副本被计入，说不出在跑什么';
+    el.className = 'basis stuck';
+    return;
+  }
+  if (groups.length === 1) {
+    el.textContent = '版本：alarmd ' + buildLabel(groups[0].build) + '，' + counted + ' 个副本一致';
+    el.className = 'basis';
+    return;
+  }
+  // Two or more builds. Said as a mix rather than as a version, because the
+  // totals below are neither build's.
+  var parts = groups.map(function (group) {
+    return buildLabel(group.build) + ' ' + group.replicas.length + ' 副本';
+  });
+  el.textContent = '版本：' + groups.length + ' 个构建同时在跑——' + parts.join('、')
+    + '。滚动更新中或滚动卡住了；下面的数是几个构建混出来的，先看副本表再下结论';
+  el.className = 'basis stuck';
 }
 
 function percent(part, whole) {
   if (!whole) return null;
   return Math.round(part / whole * 1000) / 10;
+}
+
+// Where the deployment stands on its deadlines, from the census. One place,
+// read by the first sentence and by the capacity panel's queue verdict, so
+// the two cannot disagree about whether the work is keeping up.
+//
+// Falling behind is a short-window rate below the long-window one while
+// something is actually overdue. A rate alone can dip on a quiet hour; an
+// overdue count alone can be one stuck object on a deployment otherwise on
+// time. Both together is the deployment not keeping up.
+function scheduleStanding(census) {
+  var rate1h = percent(census.on_time_1h, census.completed_1h);
+  var rate6h = percent(census.on_time_6h, census.completed_6h);
+  var behind = census.overdue > 0 && (rate1h === null || rate6h === null || rate1h < rate6h);
+  return {rate1h: rate1h, rate6h: rate6h, behind: behind, overdue: census.overdue || 0};
+}
+
+// Whether queueing for a query slot is costing anything, in the terms the
+// census measures. The wait share alone cannot decide this, and on its own
+// it said "支持扩容" on a deployment with three quarters of its CPU idle.
+function queueVerdict(census) {
+  if (!census) {
+    return '。排队有没有耽误到期任务，本构建没有普查，判不了——别只凭这个比例扩容。';
+  }
+  var standing = scheduleStanding(census);
+  var rates = (standing.rate1h !== null ? '按时率 1 小时 ' + standing.rate1h + '%' : '过去 1 小时没有轮次返回')
+    + (standing.rate6h !== null ? '、6 小时 ' + standing.rate6h + '%' : '');
+  if (standing.behind) {
+    return '——而且在耽误到期任务（' + standing.overdue + ' 个超期，' + rates + '），位子是约束，这一项支持扩容。';
+  }
+  if (standing.overdue) {
+    return '——有 ' + standing.overdue + ' 个超期但在追（' + rates + '），先看能不能自己追上，再谈扩容。';
+  }
+  return '——但没有对象超期（' + rates + '），排队没耽误到期任务，不构成扩容理由。';
 }
 
 function scheduleSentence(deployment) {
@@ -619,13 +697,10 @@ function scheduleSentence(deployment) {
     // on time. Said as such rather than as "on time".
     return '执行情况：没有副本带到期索引，说不出是否按时';
   }
-  var rate1h = percent(census.on_time_1h, census.completed_1h);
-  var rate6h = percent(census.on_time_6h, census.completed_6h);
-  // Falling behind is a short-window rate below the long-window one while
-  // something is actually overdue. A rate alone can dip on a quiet hour; an
-  // overdue count alone can be one stuck object on a deployment otherwise on
-  // time. Both together is the deployment not keeping up.
-  var behind = census.overdue > 0 && (rate1h === null || rate6h === null || rate1h < rate6h);
+  var standing = scheduleStanding(census);
+  var rate1h = standing.rate1h;
+  var rate6h = standing.rate6h;
+  var behind = standing.behind;
   var parts = [];
   if (census.completed_1h) {
     parts.push('过去 1 小时 ' + census.completed_1h + ' 轮里 ' + rate1h + '% 在下一轮到期前完成'
@@ -1211,7 +1286,7 @@ function renderDeployment(deployment) {
     // from the same read rather than fetched separately: two reads would let
     // the page show a verdict from one moment beside occupancy from another.
     show('capErr', false);
-    renderCapacity(deployment.capacity, gaps);
+    renderCapacity(deployment.capacity, gaps, deployment.schedule);
     renderBrief(deployment);
 }
 
@@ -1488,6 +1563,11 @@ function renderReplicas(rows) {
     if (replica.uptime_seconds && replica.uptime_seconds < 1800) { up.className = 'stuck'; }
     up.title = '这个副本上报的"已持续"里，起算来源是本进程接手的那些（带 ≥ 的）不会超过这个数——'
       + '刚重启时它们量的是进程年龄。起算点来自持久化状态或冷却记录的行不受这个数约束，会更老。';
+    // The build this row's numbers came from. Beside uptime because the two
+    // are read together after a release: a short uptime on a new build is the
+    // rollout, a short uptime on the old build is a restart.
+    var build = cell(buildLabel(replica.build), 'mono');
+    if (replica.build) { build.title = 'commit ' + replica.build.commit + '，schema ' + replica.build.schema_version; }
     var cap = replica.capacity;
     cell(cap ? bytes(cap.memory_used_bytes) + ' / ' + bytes(cap.memory_limit_bytes) : '—');
     cell(cap && cap.cpu_cores ? (cap.cpu_seconds !== undefined ? '上限 ' + cap.cpu_cores + ' 核' : '—') : '—');
@@ -1572,7 +1652,9 @@ var KIND_TEXT = {
 };
 function kindText(kind) { return KIND_TEXT[kind] || kind || '—'; }
 
-function renderCapacity(cap, gaps) {
+// census is the schedule census from the same read, for the queue verdict:
+// whether waiting for a slot cost any deadline is answered there, not here.
+function renderCapacity(cap, gaps, census) {
   var box = document.getElementById('capCards');
   box.textContent = '';
   if (!cap || !cap.replicas) {
@@ -1817,6 +1899,16 @@ function renderCapacity(cap, gaps) {
   // permit_waits over permit_acquires is cumulative and counted at one point
   // over one population, so it survives the cycle and is a share rather than a
   // ratio between two different things.
+  //
+  // What the share cannot say is whether the queueing matters. It said
+  // "支持扩容" at 50%, and a live deployment showed it at 58% with CPU at a
+  // quarter of its limit, memory at a seventh and an average of 12 queries
+  // running against a budget of 64: queueing, yes; a reason to add pods, not
+  // shown. Whether the queue costs anything is a question about deadlines --
+  // did rounds still finish before their next turn fell due -- and that is
+  // what the census measures. So the verdict is read from there, in the same
+  // terms as the first sentence of the page, and the share stays a
+  // measurement.
   var asked = cap.permit_acquires || 0;
   var waited = cap.permit_waits || 0;
   var queueText;
@@ -1824,7 +1916,7 @@ function renderCapacity(cap, gaps) {
     var share = Math.round((waited / asked) * 100);
     queueText = waited
       ? '启动至今 ' + asked + ' 次取位子里有 ' + waited + ' 次（' + share + '%）没能立刻拿到、排过队'
-        + (share >= 50 ? '——位子是约束，这一项支持扩容。' : '。')
+        + queueVerdict(census)
       : '启动至今 ' + asked + ' 次取位子全部立刻拿到，没有一次排过队——位子不是约束。';
   } else {
     queueText = '启动至今还没有查询取过位子，够不够无从谈起。';

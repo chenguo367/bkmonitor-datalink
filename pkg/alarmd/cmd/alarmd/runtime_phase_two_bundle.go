@@ -832,7 +832,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 		// on every duration this replica reports, and a ceiling that moves is
 		// not one.
 		startedAt: external.Now(),
-		observe:   publishOutcomeObserver(observer),
+		// The same three facts the recorder puts on build_info, so the page and
+		// the metric cannot name different builds for one process.
+		build:   fleetBuildFacts(recorder.Build()),
+		observe: publishOutcomeObserver(observer),
 		// What survived the restart is read back rather than re-learned. The
 		// staleness bound is the deployment's own replay age: past it a Slot
 		// that cannot complete has already been promised an end, so a Progress

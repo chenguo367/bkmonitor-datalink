@@ -142,8 +142,12 @@ type fleetPublisher struct {
 	// startedAt is this process's start, captured once. It bounds every
 	// duration this replica reports: a run it watched begin cannot predate it.
 	startedAt time.Time
-	owned     func() []execution.QueryGroupIdentity
-	now       func() time.Time
+	// build is what this process was built from, the same facts as its
+	// build_info series. Published on every snapshot so the page can say which
+	// build each replica's numbers came from.
+	build fleet.BuildFacts
+	owned func() []execution.QueryGroupIdentity
+	now   func() time.Time
 	// observe reports each publish outcome. A failure is retried on the next
 	// tick rather than propagated: the snapshot is diagnostics, and diagnostics
 	// must not be able to stop the pipeline whose facts they describe.
@@ -287,6 +291,24 @@ func (publisher *fleetPublisher) publishOnce(ctx context.Context) {
 	}
 }
 
+// fleetBuildFacts carries the recorder's build to the snapshot field by field,
+// so the two types can differ in package without differing in content.
+func fleetBuildFacts(build metric.BuildInfo) fleet.BuildFacts {
+	return fleet.BuildFacts{Version: build.Version, Commit: build.Commit, SchemaVersion: build.SchemaVersion}
+}
+
+// buildFacts is the build this publisher was given, or nil when it was given
+// none: the aggregate keeps "did not report" apart from any version, and a
+// publisher that never learned its build must not publish an empty one as if
+// it were a version.
+func (publisher *fleetPublisher) buildFacts() *fleet.BuildFacts {
+	if publisher.build == (fleet.BuildFacts{}) {
+		return nil
+	}
+	build := publisher.build
+	return &build
+}
+
 // snapshot is what this replica has to say about itself right now. It is built
 // separately from being published so the two can fail independently: what the
 // replica states and whether the statement reached the store are different
@@ -339,6 +361,7 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 		Replica:   publisher.replica,
 		TakenAt:   at,
 		StartedAt: publisher.startedAt,
+		Build:     publisher.buildFacts(),
 		Owned:     len(owned),
 		// Read after Forget, so it counts only objects this replica still owns.
 		// The difference between the two is what the replica owns but cannot
