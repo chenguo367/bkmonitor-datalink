@@ -22,8 +22,7 @@ import "sort"
 //
 // A check is a rule over the dimensions an object carries -- what it is doing
 // now, how its last round ended, how long that has held, what its windows hold
-// -- not a word per combination of them. The situations in finding.go are the
-// combinations; they are being folded into these rules and will go.
+// -- not a word per combination of them. The rules are in finding.go.
 type Check string
 
 const (
@@ -144,70 +143,7 @@ func checkRank(check Check) int {
 // taken over, and a test holds this list to exactly that one.
 var ChecksWithoutAProducer = []Check{CheckNeverEvaluated}
 
-// checkOf decides which check an object is under, or none: an object whose
-// situation is a normal value of some dimension -- a series still young, a
-// strategy outside its hours -- is not on any line of the first screen.
-//
-// Decided from the situation while situations exist, with one look past it:
-// ROUND_BLOCKED covers both a source this deployment could not read and a
-// round that panicked, and those are a dependency and a defect respectively.
-func checkOf(anomaly Anomaly) (Check, bool) {
-	// Stalled first, then overdue, then whatever the last round said. An
-	// object whose rounds stopped ending, or whose turn has been missed, is
-	// not being evaluated now -- and that outranks how its last round went,
-	// which is what the situation describes.
-	switch {
-	case anomaly.Stalled:
-		return CheckRoundsStalled, true
-	case anomaly.Finding.Schedule == ScheduleOverdue:
-		return CheckSlotsOverdue, true
-	case anomaly.Kind == KindNoData:
-		return CheckNoDataPersistent, true
-	}
-	switch anomaly.Finding.Situation {
-	case SituationStalled:
-		return CheckRoundsStalled, true
-	case SituationNeverReached:
-		return CheckSlotsOverdue, true
-	case SituationBudgetExceeded, SituationDetectionAbandoned:
-		// Both are this deployment giving up on work because of its own
-		// limits, and the next step is the same: capacity.
-		return CheckDetectionAbandoned, true
-	case SituationTimelinePruned:
-		return CheckTimelinePruned, true
-	case SituationRoundBlocked:
-		if code := decidingCode(anomaly); code == "panic" || code == "other_error" {
-			return CheckDefect, true
-		}
-		return CheckDependencyDown, true
-	case SituationDependencyDown:
-		return CheckDependencyDown, true
-	case SituationStateDefect, SituationContractRefused, SituationUnclassified:
-		return CheckDefect, true
-	case SituationRestoredWithoutCause:
-		return CheckObservationGap, true
-	case SituationBackendUnavailable, SituationBackendCooldown:
-		// Cooldown is what this deployment does about a backend that keeps not
-		// answering; the line on the page is the backend, and the cooldown is a
-		// mark on the object's row.
-		return CheckBackendNotAnswering, true
-	case SituationQueryRejected:
-		return CheckQueryRefused, true
-	case SituationSeriesDataMissing, SituationDataIntermittent:
-		return CheckSeriesDataMissing, true
-	case SituationSeriesChurning:
-		return CheckSeriesChurning, true
-	case SituationWindowEmpty, SituationSeriesMixed:
-		return CheckWindowUndecided, true
-	case SituationPlanUnevaluable, SituationPlanTooLarge:
-		return CheckPlanUnevaluable, true
-	case SituationConfigDrift, SituationEffectiveTimeUnknown:
-		return CheckConfigUnresolved, true
-	}
-	return "", false
-}
-
-// decidingCode is the code the finding was decided on, in the order findingOf
+// decidingCode is the code the check was decided on, in the order checkOf
 // reads them. It is the grouping key for the checks that fold on a code.
 func decidingCode(anomaly Anomaly) string {
 	failureCode := ""
@@ -256,7 +192,10 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 		}
 		return key
 	case GroupByGapKind:
-		return string(anomaly.Finding.Situation)
+		// The only object-borne member of the observation gap is the object
+		// restored without its cause; the view's own gaps are added by kind
+		// in ReportChecks.
+		return gapRestoredWithoutCause
 	case GroupByCause:
 		return windowCause(anomaly.Coverage)
 	}
@@ -534,7 +473,7 @@ func UnderCheck(check Check, group string, view *View) []Anomaly {
 		}
 		list = append(list, row)
 	}
-	sortByUrgency(list)
+	sortOldestFirst(list)
 	return list
 }
 
@@ -552,24 +491,22 @@ func underKey(check Check, queryGroup string) string {
 // this deployment's and fold on the replica that applied them.
 func skippedRows(view *View, listed map[string]struct{}) []Anomaly {
 	rows := []Anomaly{}
-	row := func(queryGroup string, check Check, situation Situation, reason string, skip SkippedSpan) {
+	row := func(queryGroup string, check Check, reason string, skip SkippedSpan) {
 		if _, already := listed[underKey(check, queryGroup)]; already {
 			return
 		}
 		listed[underKey(check, queryGroup)] = struct{}{}
 		item := Anomaly{QueryGroup: queryGroup, Kind: KindSkippedSpan, ReasonCode: reason,
 			Since: skip.At, SinceFrom: SinceSnapshotContinuity, Replica: skip.Replica, Skip: &skip}
-		item.Finding = finding(situation, 0)
-		item.Finding.Check, item.Finding.Group = check, skip.Replica
-		item.Finding.Owner = checkAnswers[check].Owner
-		item.Attribution = attributionFromFinding(item.Finding)
+		item.Finding = Finding{Check: check, Group: skip.Replica, Owner: checkAnswers[check].Owner}
+		item.Attribution = attributionOf(item)
 		rows = append(rows, item)
 	}
 	for queryGroup, skip := range view.GapSkips {
-		row(queryGroup, CheckDetectionAbandoned, SituationDetectionAbandoned, "GAP_SKIPPED", skip)
+		row(queryGroup, CheckDetectionAbandoned, "GAP_SKIPPED", skip)
 	}
 	for queryGroup, pruned := range view.PrunedSkips {
-		row(queryGroup, CheckTimelinePruned, SituationTimelinePruned, "SCHEDULE_PRUNED",
+		row(queryGroup, CheckTimelinePruned, "SCHEDULE_PRUNED",
 			SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To, At: pruned.At, Replica: pruned.Replica})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].QueryGroup < rows[j].QueryGroup })

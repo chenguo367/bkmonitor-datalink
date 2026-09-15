@@ -923,7 +923,7 @@ func TestTheByDesignColumnHoldsOnlyDeclaredReasons(t *testing.T) {
 		t.Fatal("no by-design reasons declared; the column would be empty and the check vacuous")
 	}
 	for reason := range byDesignReasons {
-		if situation, mapped := codeSituations[reason]; !mapped || finding(situation, 0).Owner == OwnerAlarmd {
+		if verdict, mapped := codeChecks[reason]; !mapped || (!verdict.normal && checkAnswers[verdict.check].Owner == OwnerAlarmd) {
 			t.Errorf("%q is by-design and would count against this deployment: an object nobody "+
 				"acts on must not be ours if it ever falls back to the anomaly column", reason)
 		}

@@ -470,11 +470,12 @@ type Anomaly struct {
 	// for someone else. Filled in by Attribute rather than by the tracker, so
 	// the page and the verdict read one field instead of each deriving it.
 	Attribution Attribution `json:"attribution,omitempty"`
-	// Finding is the four answers the page renders: who has to act, whether it
-	// heals on its own, where to go, and which situation decided those. Decided
-	// in one place from the evidence, so the page renders and does not infer.
-	// Attribution is derived from it, which is what keeps the verdict and the
-	// to-do list from classifying one object two ways.
+	// Finding is what the page renders: which line of the first screen the
+	// object is under and which fold, who acts on it, and where the object is
+	// in its cycle and how its last round ended. Decided in one place from the
+	// evidence, so the page renders and does not infer. Attribution is derived
+	// from it, which is what keeps the verdict and the first screen from
+	// classifying one object two ways.
 	Finding Finding `json:"finding"`
 	// Unclassified says this object is counted against the deployment because
 	// no rule matched, not because a rule said so. A release that adds a

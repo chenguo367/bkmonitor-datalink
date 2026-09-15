@@ -60,50 +60,44 @@ func TestTheCheckTableIsClosedAtSixteen(t *testing.T) {
 	}
 }
 
-// Every situation the server can decide lands under exactly one check or is a
-// normal value that is on no line of the first screen. The normal values are
-// named, so a situation that stops being one has to be moved on purpose.
-func TestEverySituationIsUnderOneCheckOrIsANormalValue(t *testing.T) {
-	normal := map[Situation]bool{
-		SituationSeriesYoung:    true,
-		SituationSeriesRenewed:  true,
-		SituationVerdictHeld:    true,
-		SituationDataJustGapped: true,
-		SituationOffHours:       true,
+// Every check the table answers has evidence that produces it, except the one
+// named as waiting on its producer. A check with no writer reads as a mechanism
+// that is wired, so the gap is stated rather than discovered.
+//
+// The producers are enumerated as anomalies, one per path through checkOf,
+// and the set of checks they reach has to be the table minus the named
+// exception -- so a path that stops producing its check fails here, and so
+// does a check added to the table with nothing that reaches it.
+func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	producers := map[Check]Anomaly{
+		CheckRoundsStalled:       {Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", Stalled: true},
+		CheckSlotsOverdue:        {Kind: KindOverdueWake},
+		CheckDetectionAbandoned:  {Kind: KindDegradedRun, CauseReason: "GAP_SKIPPED"},
+		CheckTimelinePruned:      {Kind: KindDegradedRun, CauseReason: "SCHEDULE_PRUNED"},
+		CheckDependencyDown:      {Kind: KindBlockedRun, ReasonCode: "source_error"},
+		CheckDefect:              {Kind: KindBlockedRun, ReasonCode: "panic"},
+		CheckObservationGap:      {Kind: KindDegradedRun, SinceFrom: SinceRestoredLastFull},
+		CheckBackendNotAnswering: {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "transport=timeout"}},
+		CheckQueryRefused:        {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "http_status=400"}},
+		CheckNoDataPersistent:    {Kind: KindNoData},
+		CheckSeriesChurning: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
+			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Fresh: 4, ShortFresh: 4, FreshRounds: 40}},
+		CheckSeriesDataMissing: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
+			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40}},
+		CheckWindowUndecided: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
+			Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, ShortRounds: 40, EmptyRounds: 40}},
+		CheckPlanUnevaluable:  {Kind: KindDegradedRun, CauseReason: "ALGORITHM_UNSUPPORTED"},
+		CheckConfigUnresolved: {Kind: KindDegradedRun, CauseReason: "CONFIG_DRIFT"},
 	}
-	for _, situation := range Situations() {
-		check, under := checkOf(Anomaly{Finding: finding(situation, 0)})
-		switch {
-		case under && normal[situation]:
-			t.Errorf("%s is under check %s and also declared a normal value", situation, check)
-		case !under && !normal[situation]:
-			t.Errorf("%s is under no check and is not a declared normal value: an object in it "+
-				"vanishes from the first screen", situation)
-		case under && checkAnswers[check].Owner == "":
-			t.Errorf("%s is under %s, which the table does not answer", situation, check)
-		}
-	}
-}
-
-// Every check the table answers has something that produces it, except the two
-// named as waiting on their producer. A check with no writer reads as a
-// mechanism that is wired, so the gap is stated here rather than discovered.
-func TestEveryCheckHasAProducerExceptTheNamedTwo(t *testing.T) {
 	produced := map[Check]bool{}
-	for _, situation := range Situations() {
-		if check, under := checkOf(Anomaly{Finding: finding(situation, 0)}); under {
-			produced[check] = true
+	for want, item := range producers {
+		list := []Anomaly{item}
+		Attribute(list, at)
+		if list[0].Finding.Check != want {
+			t.Errorf("the producer for %s reaches %q instead", want, list[0].Finding.Check)
 		}
-	}
-	// The splits checkOf makes past the situation: a blocked round's outcome
-	// word, and the kinds that are lines of their own.
-	for _, code := range []string{"panic", "source_error"} {
-		if check, under := checkOf(Anomaly{ReasonCode: code, Finding: finding(SituationRoundBlocked, 0)}); under {
-			produced[check] = true
-		}
-	}
-	if check, under := checkOf(Anomaly{Kind: KindNoData}); under {
-		produced[check] = true
+		produced[list[0].Finding.Check] = true
 	}
 	waiting := map[Check]bool{}
 	for _, check := range ChecksWithoutAProducer {
@@ -117,6 +111,29 @@ func TestEveryCheckHasAProducerExceptTheNamedTwo(t *testing.T) {
 			t.Errorf("%s has no producer and is not listed as waiting for one: it reads as wired", check)
 		}
 	}
+	// And the normal values: objects under no line, on purpose, each one a
+	// state that resolves on its own or is the configuration doing its job.
+	for name, item := range map[string]Anomaly{
+		"young": {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
+			Levels: 3, Short: 1, WorstValid: 7, WorstRequired: 9, ShortRounds: 2}},
+		"held":      {Kind: KindDegradedRun, CauseReason: "HISTORY_GAPPED", Coverage: &HistoryCoverage{Levels: 3, Guarded: 3}},
+		"off hours": {Kind: KindDegradedRun, CauseReason: "EFFECTIVE_TIME_INACTIVE"},
+	} {
+		list := []Anomaly{item}
+		Attribute(list, at)
+		if list[0].Finding.Check != "" || list[0].Finding.Owner != OwnerNobody || list[0].Unclassified {
+			t.Errorf("%s is under %q / %s (unclassified %v), want under no line and nobody's", name,
+				list[0].Finding.Check, list[0].Finding.Owner, list[0].Unclassified)
+		}
+	}
+	// And the fall-through: a code nobody has classified is a DEFECT that says
+	// so, not a line somebody chose.
+	unknown := []Anomaly{{Kind: KindDegradedRun, CauseReason: "SOMETHING_NEW"}}
+	Attribute(unknown, at)
+	if unknown[0].Finding.Check != CheckDefect || !unknown[0].Unclassified || unknown[0].Attribution != AttributionOurs {
+		t.Errorf("an unclassified code = %+v (unclassified %v, %s), want DEFECT, flagged, ours",
+			unknown[0].Finding, unknown[0].Unclassified, unknown[0].Attribution)
+	}
 }
 
 // A blocked round is a dependency or a defect depending on the outcome word,
@@ -129,11 +146,10 @@ func TestABlockedRoundIsADefectWhenItPanicked(t *testing.T) {
 		"source_retry":   CheckDependencyDown,
 		"source_blocked": CheckDependencyDown,
 	} {
-		item := Anomaly{Kind: KindBlockedRun, ReasonCode: code}
-		item.Finding = findingOf(item)
-		got, under := checkOf(item)
-		if !under || got != want {
-			t.Errorf("blocked round %q is under %s (%v), want %s", code, got, under, want)
+		list := []Anomaly{{Kind: KindBlockedRun, ReasonCode: code}}
+		Attribute(list, now)
+		if list[0].Finding.Check != want {
+			t.Errorf("blocked round %q is under %s, want %s", code, list[0].Finding.Check, want)
 		}
 	}
 }
@@ -287,10 +303,10 @@ func TestMarkStalledDecidesTheFindingAgain(t *testing.T) {
 	}
 	MarkStalled(list, at, 10*time.Minute)
 	got := list[0]
-	if !got.Stalled || got.Finding.Situation != SituationStalled || got.Finding.Check != CheckRoundsStalled ||
+	if !got.Stalled || got.Finding.Check != CheckRoundsStalled ||
 		got.Finding.Owner != OwnerAlarmd || got.Finding.Schedule != ScheduleStalled ||
 		got.Attribution != AttributionOurs {
-		t.Errorf("after marking: %+v, want STALLED / ROUNDS_STALLED / ALARMD / schedule STALLED / OURS", got.Finding)
+		t.Errorf("after marking: %+v, want ROUNDS_STALLED / ALARMD / schedule STALLED / OURS", got.Finding)
 	}
 }
 
@@ -348,13 +364,13 @@ func TestScheduleAndResultReadTheDimensionsOffTheAnomaly(t *testing.T) {
 // round timed out at the backend and whose turn has since been missed is under
 // SLOTS_OVERDUE, this deployment's, not under the backend's line: the backend
 // is not what is stopping it from running now.
-func TestAMissedTurnOutranksTheLastRoundsSituation(t *testing.T) {
+func TestAMissedTurnOutranksTheLastRoundsReason(t *testing.T) {
 	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
 	list := []Anomaly{{QueryGroup: "qg", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
 		Wake: &WakeFacts{Known: true, DueAt: at.Add(-3 * time.Minute), IntervalSeconds: 60}}}
 	Attribute(list, at)
 	if list[0].Finding.Check != CheckSlotsOverdue || list[0].Finding.Owner != OwnerAlarmd {
-		t.Errorf("overdue object with a backend situation is under %s / %s, want SLOTS_OVERDUE / ALARMD",
+		t.Errorf("overdue object with a backend reason is under %s / %s, want SLOTS_OVERDUE / ALARMD",
 			list[0].Finding.Check, list[0].Finding.Owner)
 	}
 	// The same object, late but within its period, is still the backend's.

@@ -54,23 +54,31 @@ const (
 	AttributionUnknown Attribution = "UNKNOWN"
 )
 
-// attributionOf decides which side one anomaly falls on.
+// attributionOf decides which side one anomaly falls on, from its finding.
 //
-// It is the finding's reading, not a second decision. The code tables that
-// used to live here -- externalReasons, ourReasons, the outcome vocabularies
-// folded in at init -- now live in finding.go as codeSituations, where each
-// code maps to a situation and each situation to an owner. Keeping a copy here
-// would be two classifications of one object, and the first live read of the
-// page found exactly that: the verdict called an object external while the
-// row beside it said nobody could tell.
-//
-// The safe default is preserved through the table. A code nothing maps
-// reaches SituationUnclassified, which is ALARMD's, which is OURS: a failure
-// mode nobody has classified is one this build has just started producing,
-// and defaulting it to "not our problem" would let it arrive as a HEALTHY
-// verdict.
+// Only ALARMD's checks decide the verdict. What nobody can yet hand to anyone
+// stays on the reader's list but does not degrade the deployment -- with one
+// exception, the object restored without a cause, which is missing evidence
+// and keeps the verdict UNKNOWN: not evidence against the deployment, and not
+// evidence of health either.
 func attributionOf(anomaly Anomaly) Attribution {
-	return attributionFromFinding(findingOf(anomaly))
+	if restoredWithoutEvidence(anomaly) {
+		return AttributionUnknown
+	}
+	owner := anomaly.Finding.Owner
+	if owner == "" {
+		// Not attributed yet: decide the line now, on whatever schedule the
+		// finding carries. attribute() always sets the owner first, so this is
+		// the path for a caller asking about one anomaly on its own.
+		owner = OwnerNobody
+		if check, under, _ := checkOf(anomaly, anomaly.Finding.Schedule); under {
+			owner = checkAnswers[check].Owner
+		}
+	}
+	if owner == OwnerAlarmd {
+		return AttributionOurs
+	}
+	return AttributionExternal
 }
 
 // restoredWithoutEvidence reports an object rebuilt from a record that does not
@@ -119,37 +127,27 @@ func Attribute(anomalies []Anomaly, at time.Time) {
 
 // attribute decides everything the page reads about one object, in one place.
 //
-// The finding is decided first and the attribution read off it. Before this
-// the two were decided separately -- attribution from the code tables here,
-// the situation from the counts on the page -- and an object could be external
-// for the verdict while the page told the reader it was undetermined, or the
-// reverse. One decision, two readings.
+// The two dimensions first, then the check on the evidence and the dimensions,
+// then the owner from the check and the attribution from the owner. One
+// decision, and the verdict and the page read the same fields of it.
 //
 // It is called again by MarkStalled for the objects it marks, because Stalled
 // is decided after the view is built and changes the answer to every question
 // here: a stalled object is this deployment's whatever its last code said.
-// Before that, the finding kept the last code's situation while the
-// attribution alone was rewritten, so the STALLED situation had no producer
-// and a stalled row rendered as the backend's or the strategy's.
+// Before that, only the attribution was rewritten, so a stalled row rendered
+// as the backend's or the strategy's.
 func attribute(anomaly *Anomaly, at time.Time) {
-	anomaly.Finding = findingOf(*anomaly)
-	anomaly.Attribution = attributionFromFinding(anomaly.Finding)
+	schedule := scheduleOf(*anomaly, at)
+	check, under, unclassified := checkOf(*anomaly, schedule)
+	finding := Finding{Owner: OwnerNobody, Schedule: schedule, Result: resultOf(*anomaly)}
+	if under {
+		finding.Check, finding.Group, finding.Owner = check, groupKeyOf(*anomaly, check), checkAnswers[check].Owner
+	}
+	anomaly.Finding = finding
 	// Recorded per object rather than derived twice, so the page and the
 	// counts cannot disagree about which of these was actually decided.
-	anomaly.Unclassified = anomaly.Finding.Situation == SituationUnclassified
-	anomaly.Finding.Schedule = scheduleOf(*anomaly, at)
-	anomaly.Finding.Result = resultOf(*anomaly)
-	// The check decides the owner once the object is under one: the line on
-	// the first screen and the row under it must not name two owners, and the
-	// check can outrank the situation (an object not being evaluated is this
-	// deployment's whatever its last round said). The attribution is read off
-	// the finding after that, so the verdict follows the same owner.
-	if check, under := checkOf(*anomaly); under {
-		anomaly.Finding.Check = check
-		anomaly.Finding.Group = groupKeyOf(*anomaly, check)
-		anomaly.Finding.Owner = checkAnswers[check].Owner
-		anomaly.Attribution = attributionFromFinding(anomaly.Finding)
-	}
+	anomaly.Unclassified = unclassified
+	anomaly.Attribution = attributionOf(*anomaly)
 }
 
 // OursCount returns how many of these count against the deployment.
