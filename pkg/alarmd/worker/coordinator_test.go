@@ -320,6 +320,12 @@ func TestSlotExecutionCoordinatorOrdersRequiredSideEffects(t *testing.T) {
 		observability.StageGapLoaded,
 		observability.StageStatePreflight,
 		observability.StageEvaluationCompleted,
+		// Every Slot says how many of its Plans detect no-data, including this
+		// one, which has none. That zero is the point: an outcome is only
+		// reported by a Plan that reached a decision, so a Slot reporting
+		// nothing here used to mean either "no such Plan" or "they were all
+		// dropped before being judged", and nothing told the two apart.
+		observability.StageNoDataDecided,
 		observability.StageQueryCompleted,
 		observability.StageSideEffectAdmission,
 		observability.StageMutationCompared,

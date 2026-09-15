@@ -42,6 +42,7 @@ type phaseTwoMetrics struct {
 	ownershipTransitions            *prometheus.CounterVec
 	queryAdmission                  *prometheus.CounterVec
 	noDataSlotPlans                 *prometheus.CounterVec
+	noDataPlansSeen                 prometheus.Counter
 	sourceWithheldLines             *prometheus.CounterVec
 	activeQGSetCount                prometheus.Gauge
 	activeQGSetBytes                prometheus.Gauge
@@ -258,6 +259,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"leader and the worker looks like, and it looks like nothing else: the Plans still " +
 				"execute, nothing fails, and every label here reads as a computed zero.",
 		}, []string{"outcome"}),
+		noDataPlansSeen: prometheus.NewCounter(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_plans_seen_total",
+			Help: "Plans that detect no-data, counted once per Slot where this worker finds them, before " +
+				"anything is decided about them. " +
+				"Read it against sum(worker_no_data_slot_plans_total): the two are produced by one pass " +
+				"over one list and must agree, so a census above the outcomes is a Plan dropped between " +
+				"being found and being judged. " +
+				"It exists because every outcome is conditional on a Plan reaching a decision, and the " +
+				"failure that hid three releases running is a Plan never reaching one -- nothing judged, " +
+				"nothing counted, four computed zeros and no log line. This is the number that separates " +
+				"'this worker has no such Plan' from 'it has them and judged none'. Read it against the " +
+				"leader's sum(catalog_no_data_plans) times the Slots in the window: the leader says how " +
+				"many exist, this says how many arrived.",
+		}),
 		sourceWithheldLines: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_source_withheld_lines_total",
 			Help: "Source objects whose disposition changed in a refresh round, by whether the round named " +
@@ -560,7 +575,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataPlansSeen, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead,
@@ -743,6 +758,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if observation.Component == observability.ComponentEvaluation &&
 		observation.Stage == observability.StageNoDataDecided {
 		m.observeNoDataSlot(observation)
+		m.observeNoDataCensus(observation)
 	}
 	if observation.Component == observability.ComponentControlPlane &&
 		observation.Stage == observability.StageSourceWithheld {
@@ -804,6 +820,16 @@ func (m phaseTwoMetrics) observeNoDataSlot(observation observability.Observation
 		return
 	}
 	m.noDataSlotPlans.WithLabelValues(facts.Outcome).Add(float64(facts.Plans))
+}
+
+// observeNoDataCensus counts the Plans a Slot found, including none. A Slot
+// with no such Plan still reports, because that zero is the reading.
+func (m phaseTwoMetrics) observeNoDataCensus(observation observability.Observation) {
+	facts := observation.NoDataCensus
+	if facts == nil {
+		return
+	}
+	m.noDataPlansSeen.Add(float64(facts.Plans))
 }
 
 // observeSourceWithheld counts one named line, and the cut the round reported

@@ -325,6 +325,21 @@ type NoDataSlotFacts struct {
 	Plans int
 }
 
+// NoDataCensusFacts is how many Plans this Slot had that detect no-data, before
+// anything was decided about them.
+//
+// It exists because every other no-data signal is conditional on a Plan getting
+// far enough to land on an outcome, and the failure that has now hidden three
+// times running is a Plan never getting there at all: nothing is judged, so
+// nothing is counted, so every outcome reads as a computed zero and no line is
+// written. This is counted in the same pass that produces the outcomes and is
+// reported on every Slot including the ones with none, so the two can be read
+// against each other -- they must agree, and a census above the outcomes is a
+// Plan that was dropped between being seen and being judged.
+type NoDataCensusFacts struct {
+	Plans int
+}
+
 // SourceWithheldFacts is what one withheld object has to say that nothing else
 // already carries.
 //
@@ -1113,6 +1128,7 @@ type Observation struct {
 	QueryPermit           *QueryPermitFacts
 	NoDataSlot            *NoDataSlotFacts
 	SourceWithheld        *SourceWithheldFacts
+	NoDataCensus          *NoDataCensusFacts
 	RuntimeConfig         *RuntimeConfigFacts
 	QueryFailure          *QueryFailureFacts
 	QueryStatus           []QueryStatusFacts
@@ -1208,6 +1224,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.QueryPermit = normalizeQueryPermitFacts(observation.QueryPermit)
 	observation.NoDataSlot = normalizeNoDataSlotFacts(observation.NoDataSlot)
 	observation.SourceWithheld = normalizeSourceWithheldFacts(observation.SourceWithheld)
+	observation.NoDataCensus = normalizeNoDataCensusFacts(observation.NoDataCensus)
 	observation.QueryTiming = normalizeTimingFacts(observation)
 	observation.ShortPeriodCompletion = normalizeShortPeriodCompletion(observation)
 	observation.StateApplyChunk = normalizeStateApplyChunk(observation)
@@ -1744,6 +1761,21 @@ func normalizeSourceWithheldFacts(facts *SourceWithheldFacts) *SourceWithheldFac
 	normalized := *facts
 	if normalized.Dropped < 0 {
 		normalized.Dropped = 0
+	}
+	return &normalized
+}
+
+// normalizeNoDataCensusFacts clamps a negative count. A census of none is kept:
+// zero Plans that detect no-data is the reading this exists to make visible,
+// and dropping it would make the Slot that has none look like the Slot that
+// never counted.
+func normalizeNoDataCensusFacts(facts *NoDataCensusFacts) *NoDataCensusFacts {
+	if facts == nil {
+		return nil
+	}
+	normalized := *facts
+	if normalized.Plans < 0 {
+		normalized.Plans = 0
 	}
 	return &normalized
 }

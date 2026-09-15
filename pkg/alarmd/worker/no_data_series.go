@@ -235,6 +235,10 @@ func (stream *streamedExecution) evaluateNoData(
 		if due.CompiledPlan.NoData() == nil {
 			continue
 		}
+		// Counted here, in the same pass that decides the outcomes, so the two
+		// cannot disagree about which Plans this Slot had. A Plan seen here and
+		// missing from the outcomes was dropped between the two.
+		stream.noDataPlansSeen++
 		round, err := stream.noDataRoundFor(due, seriesDimensionsFor(prepared, due.Identity),
 			stream.noDataCompleteness(due))
 		if err != nil {
@@ -327,6 +331,18 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 // creates all four labels at startup, so a zero on the one that does not
 // resolve on its own can be told from a label nothing ever wrote.
 func (stream *streamedExecution) observeNoDataOutcomes(ctx context.Context) {
+	// The census first, and before any early return. Every outcome below is
+	// conditional on a Plan reaching a decision, so a Slot whose Plans never
+	// got there said nothing at all - no observation, no line, no error - and
+	// read exactly like a worker with no such Plan to begin with. This is the
+	// number that separates the two, so it is the one thing reported
+	// unconditionally.
+	stream.coordinator.emitObservation(ctx, observability.Observation{
+		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
+		Operation: observability.Operation(stream.request.Operation),
+		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		NoDataCensus: &observability.NoDataCensusFacts{Plans: stream.noDataPlansSeen},
+	})
 	if len(stream.noDataOutcomes) == 0 {
 		return
 	}

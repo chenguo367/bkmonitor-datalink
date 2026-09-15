@@ -473,6 +473,10 @@ func TestNoDataOutcomesAreReportedOncePerOutcomeWithTheirCount(t *testing.T) {
 		if observation.Stage != observability.StageNoDataDecided {
 			continue
 		}
+		// The Slot's census shares this stage and is asserted on its own below.
+		if observation.NoDataCensus != nil {
+			continue
+		}
 		if observation.NoDataSlot == nil {
 			t.Fatalf("an observation at %q carries no facts", observation.Stage)
 		}
@@ -496,5 +500,178 @@ func TestNoDataOutcomesAreReportedOncePerOutcomeWithTheirCount(t *testing.T) {
 	// its label at startup, so silence here is not a missing series.
 	if _, reported := counts[string(nodata.OutcomeSkippedMemoryUnreadable)]; reported {
 		t.Fatal("an outcome no Plan landed on was reported")
+	}
+}
+
+// Every Slot reports how many Plans that detect no-data it found, including
+// none.
+//
+// This is the number that separates "this worker has no such Plan" from "it has
+// them and judged none of them". Three releases running, a Plan that never
+// reached a decision produced four computed zeros, no log line and no error --
+// and a worker with genuinely nothing to do produces exactly the same reading.
+// Only a count taken where the Plans are found, before anything is decided,
+// tells the two apart.
+func TestEverySlotReportsHowManyNoDataPlansItFound(t *testing.T) {
+	for name, test := range map[string]struct {
+		seen int
+	}{
+		"a Slot with no such Plan": {seen: 0},
+		"a Slot with several":      {seen: 7},
+	} {
+		t.Run(name, func(t *testing.T) {
+			var recorded []observability.Observation
+			stream := &streamedExecution{
+				coordinator: &SlotExecutionCoordinator{
+					ports: Ports{Observer: observability.ObserverFunc(
+						func(_ context.Context, observation observability.Observation) {
+							recorded = append(recorded, observation)
+						})},
+				},
+				noDataPlansSeen: test.seen,
+			}
+
+			stream.observeNoDataOutcomes(context.Background())
+
+			census := 0
+			for _, observation := range recorded {
+				if observation.NoDataCensus == nil {
+					continue
+				}
+				census++
+				if observation.Stage != observability.StageNoDataDecided {
+					t.Fatalf("the census was reported at %q", observation.Stage)
+				}
+				if observation.NoDataCensus.Plans != test.seen {
+					t.Fatalf("census = %d, want the %d Plans the Slot found",
+						observation.NoDataCensus.Plans, test.seen)
+				}
+			}
+			if census != 1 {
+				t.Fatalf("the Slot reported its census %d times, want exactly once. A Slot that reports "+
+					"none would otherwise be indistinguishable from one that never counted", census)
+			}
+		})
+	}
+}
+
+// The census counts the Plans the round found, and the outcomes account for
+// every one of them.
+//
+// One pass over one list produces both, which is what makes them comparable in
+// production: the leader says how many no-data Plans exist, this says how many
+// arrived, and the outcomes say what was decided about them. A census above the
+// outcomes is a Plan dropped between being found and being judged.
+func TestTheCensusAndTheOutcomesAgreeOnHowManyPlans(t *testing.T) {
+	var recorded []observability.Observation
+	stream := &streamedExecution{
+		coordinator: &SlotExecutionCoordinator{
+			ports: Ports{Observer: observability.ObserverFunc(
+				func(_ context.Context, observation observability.Observation) {
+					recorded = append(recorded, observation)
+				})},
+		},
+		noDataPlansSeen: 4,
+		noDataOutcomes: []nodata.SlotOutcome{
+			nodata.OutcomeEvaluated, nodata.OutcomeEvaluated,
+			nodata.OutcomeSkippedSlotBudget, nodata.OutcomeSkippedQueryNotFull,
+		},
+	}
+
+	stream.observeNoDataOutcomes(context.Background())
+
+	census, judged := -1, 0
+	for _, observation := range recorded {
+		switch {
+		case observation.NoDataCensus != nil:
+			census = observation.NoDataCensus.Plans
+		case observation.NoDataSlot != nil:
+			judged += observation.NoDataSlot.Plans
+		}
+	}
+	if census != judged {
+		t.Fatalf("the Slot found %d Plans and accounted for %d; every Plan the round finds lands on "+
+			"exactly one outcome, and a difference here is a Plan that was dropped in between",
+			census, judged)
+	}
+}
+
+// The census is taken from the Slot's own Plans, by the round that walks them.
+//
+// The tests above set the count on the stream and assert what is reported from
+// it; none of them runs the walk that produces it. That gap is the same shape
+// as the defect the census exists to catch -- an instrument nobody drives reads
+// as a computed zero, and a zero here is the healthy answer on most Slots.
+func TestTheCensusCountsTheSlotsOwnNoDataPlans(t *testing.T) {
+	withNoData := noDataWiredPlan(t)
+	// An ordinary Plan, in the same Slot, that does not detect no-data.
+	plain := withNoData
+	plain.Identity.StrategyID = "8"
+	plain.CompiledPlan = noDataPreflightPlan(t, "8", nil)
+	if plain.CompiledPlan.NoData() != nil {
+		t.Fatal("the fixture's plain Plan detects no-data, so this test cannot tell the two apart")
+	}
+	duePlans := []execution.DuePlan{withNoData, plain}
+
+	stream := &streamedExecution{
+		coordinator: &SlotExecutionCoordinator{
+			ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
+			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1},
+		},
+		header: execution.InternalExecutionHeader{
+			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+		},
+	}
+	if err := stream.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The budget is already spent, as an earlier Plan in the same Slot would
+	// leave it. The no-data Plan is then skipped by name rather than evaluated,
+	// which keeps this test off the state port -- and makes the point sharper:
+	// the census counts a Plan the round found, whatever the round then does
+	// with it.
+	stream.noDataStateMutations = 1
+
+	if err := stream.evaluateNoData(context.Background(), nil, 16); err != nil {
+		t.Fatal(err)
+	}
+
+	if stream.noDataPlansSeen != 1 {
+		t.Fatalf("census = %d over a Slot of one no-data Plan and one ordinary Plan, want 1. It counts "+
+			"the Plans that detect no-data, not the Plans the Slot has", stream.noDataPlansSeen)
+	}
+	// And it accounts for every one of them, which is the relation the page is
+	// read by: the leader says how many exist, this says how many arrived, and
+	// the outcomes say what was decided.
+	if len(stream.noDataOutcomes) != stream.noDataPlansSeen {
+		t.Fatalf("the round found %d Plans and recorded %d outcomes; every Plan it finds lands on exactly "+
+			"one outcome", stream.noDataPlansSeen, len(stream.noDataOutcomes))
+	}
+}
+
+// A Slot with no such Plan counts none, taken by the same walk.
+func TestTheCensusIsZeroWhenNoPlanDetectsNoData(t *testing.T) {
+	plain := noDataWiredPlan(t)
+	plain.CompiledPlan = noDataPreflightPlan(t, "7", nil)
+	duePlans := []execution.DuePlan{plain}
+	stream := &streamedExecution{
+		coordinator: &SlotExecutionCoordinator{
+			ports:  Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{}},
+			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 8},
+		},
+		header: execution.InternalExecutionHeader{
+			Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans,
+		},
+	}
+	if err := stream.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := stream.evaluateNoData(context.Background(), nil, 16); err != nil {
+		t.Fatal(err)
+	}
+
+	if stream.noDataPlansSeen != 0 {
+		t.Fatalf("census = %d on a Slot where no Plan detects no-data, want 0", stream.noDataPlansSeen)
 	}
 }
