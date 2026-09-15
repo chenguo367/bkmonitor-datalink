@@ -629,7 +629,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{
 		Finalization: frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
-		State: executionStore, Progress: progressStore, Observer: observer,
+		NoData: executionStore, State: executionStore, Progress: progressStore, Observer: observer,
 		OpenAlerts: openAlertCopyPort{cache: openAlertCopy},
 	}, worker.ProvisionalBudget{
 		MaxSeries: cfg.PhaseTwo.Coordinator.MaxSeries, MaxRetainedBytes: cfg.PhaseTwo.Coordinator.MaxRetainedBytes,

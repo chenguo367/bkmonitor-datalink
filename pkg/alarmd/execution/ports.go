@@ -58,6 +58,12 @@ type GapGuardStore interface {
 	ApplyGap(context.Context, GapGuardApplyRequest) (GapGuardApplyResult, error)
 }
 
+// PlanNoDataStore holds what each Plan remembers about absence between Slots.
+type PlanNoDataStore interface {
+	LoadNoData(context.Context, NoDataLoadRequest) (NoDataLoadResult, error)
+	ApplyNoData(context.Context, NoDataApplyRequest) (NoDataApplyResult, error)
+}
+
 type EventSink interface {
 	// WriteBatch returns nil only after the whole batch has received its
 	// broker ACK. A non-nil error means that ACK is unknown; callers must not
