@@ -25,6 +25,22 @@ type CompareAndSetBackend interface {
 	CompareAndSet(context.Context, string, []byte, bool, []byte, time.Duration) (bool, error)
 }
 
+// LifetimeBackend renews the life of a key that is read rather than written.
+//
+// It is deliberately not folded into CompareAndSetBackend. Both of that
+// interface's users reach it by type assertion, and both report a failed
+// assertion as the store being unavailable - so widening it would turn a
+// backend without this method into a deployment where every write reports Redis
+// down, with nothing anywhere naming the actual cause. Renewal belongs to the
+// read path and cannot be worth that.
+//
+// A backend that does not implement it is reported by the load that wanted it,
+// not passed over: a renewal nobody performs leaves keys immortal, and the only
+// place that shows up is a Redis instance months later.
+type LifetimeBackend interface {
+	RenewIfBelow(context.Context, string, time.Duration, time.Duration) (bool, error)
+}
+
 type ExecutionStoreOptions struct {
 	Prefix          string
 	Router          StorageRouter
@@ -238,7 +254,22 @@ func decodeRuntime(raw []byte, identity execution.StateKeyIdentity, contractRef 
 	return classified.Items[0]
 }
 
-func (store *ExecutionStore) readOne(ctx context.Context, plan execution.PlanIdentity, key func() (string, error)) ([]byte, error) {
+// readOneRenewing reads one generation-scoped key and, when it is there and its
+// life is running out, extends it.
+//
+// The renewal is on this path because this is the path a live key is on every
+// Slot. A key whose Plan no longer exists, or whose execution content changed,
+// stops arriving here and ages out; a key still in use is renewed whether or
+// not its Plan wrote anything this round, which is what a write-driven renewal
+// could not do.
+//
+// A key that is not there is not renewed, which saves the command for every
+// Plan that has never written a record - that being every Plan until its first
+// no-data round.
+func (store *ExecutionStore) readOneRenewing(
+	ctx context.Context, plan execution.PlanIdentity, retention []execution.StateRetentionRequirement,
+	key func() (string, error),
+) ([]byte, error) {
 	resolved, err := key()
 	if err != nil {
 		return nil, err
@@ -253,6 +284,13 @@ func (store *ExecutionStore) readOne(ctx context.Context, plan execution.PlanIde
 	}
 	if len(values) != 1 {
 		return nil, fmt.Errorf("state: invalid backend read cardinality")
+	}
+	if values[0] == nil {
+		return nil, nil
+	}
+	if err := RenewGenerationKey(ctx, target, resolved, retention,
+		store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL); err != nil {
+		return nil, err
 	}
 	return values[0], nil
 }
@@ -281,10 +319,13 @@ func (store *ExecutionStore) LoadGapsInto(ctx context.Context, request execution
 			return err
 		}
 		snapshot := execution.GapGuardSnapshot{Identity: item.Identity, Status: execution.GapMissing}
-		raw, err := store.readOne(ctx, item.Identity.Plan, func() (string, error) { return PlanGapKeyV2(store.options.Prefix, item.Identity) })
+		raw, err := store.readOneRenewing(ctx, item.Identity.Plan, item.Retention,
+			func() (string, error) { return PlanGapKeyV2(store.options.Prefix, item.Identity) })
 		if err != nil {
 			var identityErr *IdentityError
-			if errors.As(err, &identityErr) {
+			if errors.As(err, &identityErr) || errors.Is(err, ErrLifetimeUnsupported) {
+				// A backend that cannot renew is a wiring defect, not a
+				// flaky store: retrying reaches the same backend.
 				snapshot.Status, snapshot.ReasonCode = execution.GapTerminal, execution.ReasonCode(contract.ReasonStateCorrupt)
 			} else {
 				snapshot.Status, snapshot.ReasonCode = execution.GapUnavailable, execution.ReasonCode(contract.ReasonRedisUnavailable)
@@ -390,7 +431,14 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 			result.Items[index] = item
 			continue
 		}
-		applied, applyErr := backend.CompareAndSet(ctx, key, raw, raw == nil, encoded, 0)
+		// Written at the floor, not at the Plan's own derived lifetime and not
+		// without one. The load that runs at the start of every Slot renews it
+		// to whatever this Plan actually needs, so the write only has to make
+		// sure the key is never born immortal - which is what a Plan whose last
+		// act was creating this key used to leave behind. Carrying the Plan's
+		// retention here as well would be a third copy of one fact for a value
+		// the next Slot overwrites anyway.
+		applied, applyErr := backend.CompareAndSet(ctx, key, raw, raw == nil, encoded, GenerationScopedFloor)
 		if applyErr != nil {
 			item.Status, item.ReasonCode = execution.GapGuardRetryable, execution.ReasonCode(contract.ReasonStateWriteRetryable)
 		} else if !applied {

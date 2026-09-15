@@ -398,12 +398,22 @@ type PlanGapLoadItem struct {
 	Identity         PlanGapIdentity
 	ApplyVersion     ApplyVersion
 	ScheduleRevision PlanScheduleRevision
+	// Retention is the Plan's own state retention, which is what the key's
+	// lifetime is derived from. These keys name a state generation, so a Plan
+	// whose execution content changes leaves the old one behind; its life has to
+	// outlast the window it describes and no longer.
+	//
+	// Empty means the caller has no Plan-specific need and takes the floor. The
+	// floor is the safe direction: a key that lives too long is a byte of waste,
+	// and one that expires too early restarts a clock that was still running.
+	Retention []StateRetentionRequirement
 }
 
 type PlanNoDataLoadItem struct {
 	Identity         PlanNoDataIdentity
 	ApplyVersion     ApplyVersion
 	ScheduleRevision PlanScheduleRevision
+	Retention        []StateRetentionRequirement
 }
 
 // InternalExecution is retained as an execution-package validation aggregate.
