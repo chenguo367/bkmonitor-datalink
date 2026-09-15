@@ -34,6 +34,7 @@ type catalogCompositionCollector struct {
 	plans       *prometheus.Desc
 	objects     *prometheus.Desc
 	withheld    *prometheus.Desc
+	noDataPlans *prometheus.Desc
 	inertPlans  *prometheus.Desc
 }
 
@@ -77,6 +78,18 @@ func newCatalogCompositionCollector() *catalogCompositionCollector {
 				"catalog_objects: these pairs partition every object that is not ACCEPTED, the same pass "+
 				"produces both, and a zero that adds up against that sum is a zero that was computed. "+
 				"Reported by the leader only.", "disposition", "reason"),
+		noDataPlans: descriptor("catalog_no_data_plans",
+			"Plans in the Catalog the leader last built that detect no-data, by where their expected set "+
+				"comes from: the target's hosts, the groups the item has seen, or the item as a whole. "+
+				"Only accepted Plans are here; one a no-data reason withheld is in "+
+				"catalog_withheld_objects under that reason. "+
+				"Read the two together, because a count of what is working answers nothing on its own: "+
+				"these three plus catalog_withheld_objects summed over NO_DATA_CONFIG_INVALID and "+
+				"NO_DATA_ROSTER_UNSUPPORTED, across every disposition, are the items that asked for "+
+				"no-data detection. Summing that reason over every disposition is not optional - a "+
+				"strategy refused for the first time is CONFIG_REJECTED and the same one is STALE_CONFIG "+
+				"once its last good Plan is retained, so reading one disposition loses it on the round it "+
+				"changes state. Reported by the leader only.", "source"),
 		inertPlans: descriptor("catalog_inert_plans",
 			"Plans in the Catalog the leader last built whose schedule cannot hold the wait their data "+
 				"needs to land: their readiness boundary falls past their own completion deadline, so every "+
@@ -95,6 +108,7 @@ func (c *catalogCompositionCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.plans
 	ch <- c.objects
 	ch <- c.withheld
+	ch <- c.noDataPlans
 	ch <- c.inertPlans
 }
 
@@ -122,6 +136,9 @@ func (c *catalogCompositionCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(
 			c.withheld, prometheus.GaugeValue, float64(count), string(key.Disposition), key.Reason,
 		)
+	}
+	for source, count := range composition.NoDataPlans {
+		ch <- prometheus.MustNewConstMetric(c.noDataPlans, prometheus.GaugeValue, float64(count), string(source))
 	}
 	ch <- prometheus.MustNewConstMetric(c.inertPlans, prometheus.GaugeValue, float64(composition.InertPlans))
 }
