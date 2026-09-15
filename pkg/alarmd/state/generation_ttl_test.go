@@ -83,19 +83,19 @@ func TestGenerationScopedTTLTakesTheLongerOfRetentionAndTheFloor(t *testing.T) {
 	}
 }
 
-// Renewing on every load would be one write per Plan per Slot, which is the
-// cost this mechanism cannot pay. The threshold is what makes it affordable:
-// a Plan evaluated every minute with a one-day lifetime sends one command every
-// twelve hours and nothing on the other seven hundred rounds.
+// The script writes a new expiry only when the remaining life is below half.
+//
+// This is about what the script decides once it is reached, which is why each
+// case gets its own store: the ask gate remembers keys per store, and a shared
+// one would answer the second case from the first case's ask. What it costs to
+// reach the script is a separate question, and the gate's own tests are where
+// it is asked.
 func TestGenerationKeyIsRenewedOnlyWhenItsLifeIsRunningOut(t *testing.T) {
-	backend := &casMemoryBackend{values: make(map[string][]byte), remaining: make(map[string]time.Duration)}
-	store := generationStore(t, backend)
 	item := gapLoadItem("generation", nil)
 	key, err := PlanGapKeyV2("alarmd", item.Identity)
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend.values[key] = []byte("{}")
 
 	for name, test := range map[string]struct {
 		remaining time.Duration
@@ -107,8 +107,10 @@ func TestGenerationKeyIsRenewedOnlyWhenItsLifeIsRunningOut(t *testing.T) {
 		"nearly gone":           {remaining: time.Minute, renewed: true},
 	} {
 		t.Run(name, func(t *testing.T) {
+			backend := &casMemoryBackend{values: make(map[string][]byte), remaining: make(map[string]time.Duration)}
+			store := generationStore(t, backend)
+			backend.values[key] = []byte("{}")
 			backend.remaining[key] = test.remaining
-			backend.renewals = nil
 			if _, err := store.LoadGaps(context.Background(), execution.GapLoadRequest{
 				Contract: frozenRef(), Items: []execution.PlanGapLoadItem{item},
 			}); err != nil {

@@ -37,7 +37,7 @@ func TestAFullCompileNamesEveryObjectThatWasNotAccepted(t *testing.T) {
 		ObjectDisposition{SourceID: "5", Scope: "PLAN", Disposition: DispositionAccepted},
 	))
 
-	report := ChangedWithheld(composition.WithheldObjects, nil, WithheldLineBudget)
+	report := ChangedWithheld(composition.WithheldObjects, nil)
 
 	if len(report.Lines) != 3 {
 		t.Fatalf("lines = %d (%+v), want one per object that was not accepted", len(report.Lines), report.Lines)
@@ -82,7 +82,7 @@ func TestARoundWhereNothingChangedNamesNothing(t *testing.T) {
 		{SourceID: "3", Scope: "LEVEL", LevelID: 1, Disposition: DispositionUnsupported, Reason: "ALGORITHM_NOT_MIGRATED"},
 	}
 	first := ComposeCatalog(withheldFixture(dispositions...))
-	if len(ChangedWithheld(first.WithheldObjects, nil, WithheldLineBudget).Lines) != 2 {
+	if len(ChangedWithheld(first.WithheldObjects, nil).Lines) != 2 {
 		t.Fatal("the first round did not name the two withheld objects; the next assertion would pass for the wrong reason")
 	}
 
@@ -90,7 +90,7 @@ func TestARoundWhereNothingChangedNamesNothing(t *testing.T) {
 	// against, so the second round is given the same list under the same
 	// identities.
 	second := ComposeCatalog(withheldFixture(dispositions...))
-	report := ChangedWithheld(second.WithheldObjects, dispositions, WithheldLineBudget)
+	report := ChangedWithheld(second.WithheldObjects, dispositions)
 
 	if len(report.Lines) != 0 {
 		t.Fatalf("lines = %+v, want none: nothing changed between the two rounds", report.Lines)
@@ -119,7 +119,7 @@ func TestOneChangedDispositionIsOneLine(t *testing.T) {
 		ObjectDisposition{SourceID: "3", Scope: "PLAN", Disposition: DispositionStaleConfig, Reason: "PLAN_INVALID"},
 	))
 
-	report := ChangedWithheld(current.WithheldObjects, previous, WithheldLineBudget)
+	report := ChangedWithheld(current.WithheldObjects, previous)
 
 	if len(report.Lines) != 1 {
 		t.Fatalf("lines = %+v, want exactly the one object whose disposition changed", report.Lines)
@@ -142,7 +142,7 @@ func TestAChangedReasonUnderTheSameDispositionIsAChange(t *testing.T) {
 		ObjectDisposition{SourceID: "1", Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "TRIGGER_CONFIG_MISSING"},
 	))
 
-	report := ChangedWithheld(current.WithheldObjects, previous, WithheldLineBudget)
+	report := ChangedWithheld(current.WithheldObjects, previous)
 
 	if len(report.Lines) != 1 || report.Lines[0].Reason != "TRIGGER_CONFIG_MISSING" {
 		t.Fatalf("lines = %+v, want the object reported again under its new reason", report.Lines)
@@ -166,7 +166,7 @@ func TestPlanAndLevelRecordsForOneStrategyAreSeparate(t *testing.T) {
 		ObjectDisposition{SourceID: "1", Scope: "LEVEL", LevelID: 2, Disposition: DispositionConfigRejected, Reason: "TRIGGER_CONFIG_MISSING"},
 	))
 
-	report := ChangedWithheld(current.WithheldObjects, previous, WithheldLineBudget)
+	report := ChangedWithheld(current.WithheldObjects, previous)
 
 	if len(report.Lines) != 1 {
 		t.Fatalf("lines = %+v, want only the level whose disposition changed", report.Lines)
@@ -192,7 +192,7 @@ func TestAnObjectThatIsAcceptedAgainIsNotALine(t *testing.T) {
 		ObjectDisposition{SourceID: "2", Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID"},
 	))
 
-	report := ChangedWithheld(current.WithheldObjects, previous, WithheldLineBudget)
+	report := ChangedWithheld(current.WithheldObjects, previous)
 
 	if len(report.Lines) != 0 {
 		t.Fatalf("lines = %+v, want none: one object was accepted again and the other did not change", report.Lines)
@@ -225,7 +225,7 @@ func TestTheLineBudgetCutsTheSameTailAndSaysHowMuchItCut(t *testing.T) {
 		t.Fatalf("fixture starts at %s; this test needs an input order that differs from the sorted one", first)
 	}
 
-	report := ChangedWithheld(composition.WithheldObjects, nil, 10)
+	report := changedWithheldWithin(composition.WithheldObjects, nil, 10)
 
 	if len(report.Lines) != 10 {
 		t.Fatalf("lines = %d, want the budget", len(report.Lines))
@@ -248,7 +248,7 @@ func TestTheLineBudgetCutsTheSameTailAndSaysHowMuchItCut(t *testing.T) {
 	sort.Slice(shuffled, func(left, right int) bool {
 		return shuffled[left].SourceID > shuffled[right].SourceID
 	})
-	again := ChangedWithheld(shuffled, nil, 10)
+	again := changedWithheldWithin(shuffled, nil, 10)
 	for index := range report.Lines {
 		if again.Lines[index] != report.Lines[index] {
 			t.Fatalf("line %d differs when the same round is read in another order: %+v vs %+v",
@@ -284,8 +284,8 @@ func TestTheCutIsDeterminedAmongOneStrategysOwnRecords(t *testing.T) {
 	}
 	backward := ComposeCatalog(withheldFixture(reversed...))
 
-	first := ChangedWithheld(forward.WithheldObjects, nil, 3)
-	second := ChangedWithheld(backward.WithheldObjects, nil, 3)
+	first := changedWithheldWithin(forward.WithheldObjects, nil, 3)
+	second := changedWithheldWithin(backward.WithheldObjects, nil, 3)
 
 	if len(first.Lines) != 3 || first.Dropped != 6 {
 		t.Fatalf("report = %+v, want three lines and six cut", first)
@@ -311,21 +311,29 @@ func TestTheCutIsDeterminedAmongOneStrategysOwnRecords(t *testing.T) {
 	}
 }
 
-// A budget of zero or less does not cut.
+// The production entry point applies the line budget, and nothing else does.
 //
-// This is not a lenient default: it is what says the cap belongs to the caller
-// that sets one. The production caller passes WithheldLineBudget and a test
-// that wants no cap must not have to guess a number bigger than its fixture.
-func TestAnUnsetLineBudgetDoesNotCut(t *testing.T) {
-	composition := ComposeCatalog(withheldFixture(
-		ObjectDisposition{SourceID: "1", Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID"},
-		ObjectDisposition{SourceID: "2", Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID"},
-	))
+// The budget is the only thing standing between a first round after a leader
+// election and every rejected strategy on the deployment arriving at once. A
+// caller that reached past it would not fail anywhere: the lines would simply
+// all be written, once, on the round nobody was watching.
+func TestTheReportedLinesAreCappedByTheDeclaredBudget(t *testing.T) {
+	var dispositions []ObjectDisposition
+	for index := 0; index < WithheldLineBudget+25; index++ {
+		dispositions = append(dispositions, ObjectDisposition{
+			SourceID: fmt.Sprintf("%06d", index), Scope: "PLAN",
+			Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID",
+		})
+	}
+	composition := ComposeCatalog(withheldFixture(dispositions...))
 
-	report := ChangedWithheld(composition.WithheldObjects, nil, 0)
+	report := ChangedWithheld(composition.WithheldObjects, nil)
 
-	if len(report.Lines) != 2 || report.Dropped != 0 {
-		t.Fatalf("report = %+v, want both lines and nothing cut", report)
+	if len(report.Lines) != WithheldLineBudget {
+		t.Fatalf("lines = %d, want the budget %d", len(report.Lines), WithheldLineBudget)
+	}
+	if report.Dropped != 25 {
+		t.Fatalf("Dropped = %d, want the 25 past the budget", report.Dropped)
 	}
 }
 
@@ -366,7 +374,7 @@ func TestTheLinesAndTheCountsComeFromOnePass(t *testing.T) {
 	}
 	// A full first round names all of them, which is what makes the two totals
 	// comparable in production rather than only here.
-	if lines := ChangedWithheld(composition.WithheldObjects, nil, WithheldLineBudget).Lines; len(lines) != counted {
+	if lines := ChangedWithheld(composition.WithheldObjects, nil).Lines; len(lines) != counted {
 		t.Fatalf("first-round lines = %d, want the %d the counts report", len(lines), counted)
 	}
 }

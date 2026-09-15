@@ -90,6 +90,7 @@ type phaseTwoMetrics struct {
 	dispatchRotation                *dispatchRotationCollector
 	legacyPodCache                  *prometheus.CounterVec
 	redisPool                       *redisPoolCollector
+	renewalGate                     *renewalGateCollector
 	canonicalEncoding               *canonicalEncodingCollector
 	algorithmInputs                 *prometheus.CounterVec
 	seriesAdmission                 *prometheus.CounterVec
@@ -291,6 +292,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.dispatchRotation = newDispatchRotationCollector()
 	metrics.legacyPodCache = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "legacy_pod_cache_total", Help: "Existing Python Pod cache reads by bounded result."}, []string{"result"})
 	metrics.redisPool = newRedisPoolCollector()
+	metrics.renewalGate = newRenewalGateCollector()
 	metrics.canonicalEncoding = newCanonicalEncodingCollector()
 	metrics.shortPeriod = newShortPeriodMetrics()
 	metrics.queryStatus = newQueryStatusMetrics()
@@ -570,7 +572,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	}...), append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...),
 		m.controlCache, m.dispatchRotation, m.openAlertSet, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
-		m.redisPool, m.canonicalEncoding, m.legacyPodCache,
+		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.hostDisableMonitorStates, m.cmdbIndexAge, m.cmdbIndexDegraded,
 		m.catalogComposition)...)
 }

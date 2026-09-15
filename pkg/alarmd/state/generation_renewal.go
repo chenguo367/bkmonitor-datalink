@@ -36,13 +36,20 @@ var ErrLifetimeUnsupported = errors.New("state: routed backend cannot renew a ke
 // whose execution content changed stops loading the old generation's key
 // entirely, and that key then ages out on its own.
 //
-// The threshold makes it cheap to write, not free to ask: every load sends the
-// script, which reads PTTL and decides inside Redis, and only the ones below
-// half go on to set a new expiry. So the cost is one EVAL per generation-scoped
-// key per Slot - small beside that Slot's series reads, and not zero.
+// The threshold makes the write cheap. It does not make the ask cheap: the
+// script decides inside Redis, so every load that reaches it has already spent
+// a round trip, and only the ones below half go on to set a new expiry. That
+// is one EVAL per generation-scoped key per Slot, which was assumed to be small
+// beside the Slot's own series reads and is not - measured, it was 38.6 EVAL/s
+// at 7.1ms each on a deployment of around 2,100 Plans, or 0.27 seconds of
+// waiting on Redis every second.
+//
+// So the gate answers first, from what this process already asked. See
+// renewalGate: it spends half of the guarantee an answered ask leaves behind,
+// and every way it can be wrong sends the ask.
 func RenewGenerationKey(
 	ctx context.Context, target StorageTarget, key string, retention []execution.StateRetentionRequirement,
-	restartMargin, minimum, maximum time.Duration,
+	restartMargin, minimum, maximum time.Duration, gate *renewalGate,
 ) error {
 	backend, ok := target.Backend.(LifetimeBackend)
 	if !ok {
@@ -58,6 +65,17 @@ func RenewGenerationKey(
 	if err != nil {
 		return err
 	}
-	_, err = backend.RenewIfBelow(ctx, key, ttl, GenerationScopedRenewalThreshold(ttl))
-	return err
+	// The capability check stays ahead of the gate. A backend that cannot renew
+	// has to say so on every load, not on the first one and then once every
+	// interval: that error is what stops a Slot from running against a store
+	// where the keys leak, and a gate that hid it would restore the leak and
+	// the silence together.
+	if !gate.Ask(key) {
+		return nil
+	}
+	if _, err = backend.RenewIfBelow(ctx, key, ttl, GenerationScopedRenewalThreshold(ttl)); err != nil {
+		return err
+	}
+	gate.Answered(key, RenewalAskInterval(ttl))
+	return nil
 }

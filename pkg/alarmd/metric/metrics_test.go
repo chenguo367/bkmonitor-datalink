@@ -399,6 +399,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_no_data_plans"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_control_source_withheld_lines_total"] = "variableLabels: {result}"
+	expected["bkmonitor_alarmd_state_renewal_gate_resets_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_inert_plans"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_level_abnormal_total"] = "variableLabels: {window}"
 	expected["bkmonitor_alarmd_platform_settings_mode"] = "variableLabels: {mode}"
@@ -842,6 +843,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// of the two, both are created at startup, and the label is written only
 	// from the two constants this package owns.
 	bounds[fqName("control_source_withheld_lines_total")] = len(sourceWithheldLineResults)
+	// One series: a count, unlabelled. There is nothing to break it down by --
+	// the process either remembers the key lives it is being asked about or it
+	// does not, and the whole reading is that the number never moves.
+	bounds[fqName("state_renewal_gate_resets_total")] = 1
 	// One series: a count, unlabelled. It stays unlabelled on purpose -- the
 	// interval would be the natural label and it is user input, so labelling
 	// it would put an open set on a family whose whole job is to be a steady

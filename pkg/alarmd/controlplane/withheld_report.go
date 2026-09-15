@@ -57,8 +57,22 @@ type withheldIdentity struct {
 // held back; the counts are where a reader sees the total move.
 //
 // The cap is a line budget, not a filter: what does not fit is counted, so a
-// reader can tell a report that fitted from one that was cut.
-func ChangedWithheld(current, previous []ObjectDisposition, limit int) WithheldReport {
+// reader can tell a report that fitted from one that was cut. It is not a
+// parameter, because there is no caller that should be choosing one and no
+// deployment where naming every changed object at once is right; a test that
+// wants to watch the cut happen calls changedWithheldWithin with a budget it
+// can build a fixture for.
+func ChangedWithheld(current, previous []ObjectDisposition) WithheldReport {
+	return changedWithheldWithin(current, previous, WithheldLineBudget)
+}
+
+// changedWithheldWithin is ChangedWithheld against a stated budget.
+//
+// The budget is a count of lines, so a budget of none names none and reports
+// everything as cut. There is no second reading where a budget of none means
+// no budget: that would be one value carrying two opposite meanings, and the
+// one production uses is neither.
+func changedWithheldWithin(current, previous []ObjectDisposition, limit int) WithheldReport {
 	was := make(map[withheldIdentity]ObjectDisposition, len(previous))
 	for _, record := range previous {
 		was[identityOf(record)] = record
@@ -84,7 +98,7 @@ func ChangedWithheld(current, previous []ObjectDisposition, limit int) WithheldR
 		}
 		return changed[left].LevelID < changed[right].LevelID
 	})
-	if limit > 0 && len(changed) > limit {
+	if len(changed) > limit {
 		return WithheldReport{Lines: changed[:limit], Dropped: len(changed) - limit}
 	}
 	return WithheldReport{Lines: changed}

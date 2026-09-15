@@ -61,6 +61,10 @@ type ExecutionStoreOptions struct {
 type ExecutionStore struct {
 	options   ExecutionStoreOptions
 	witnesses *runtimeWitnessCache
+	// renewals is what this process already asked Redis about the life of the
+	// generation-scoped keys it loads. Per store rather than per package so
+	// two stores in one process cannot answer for each other's keys.
+	renewals *renewalGate
 }
 
 type runtimeEnvelope struct {
@@ -91,7 +95,7 @@ func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 		options.RestartMargin < 0 {
 		return nil, fmt.Errorf("state: invalid execution store options")
 	}
-	return &ExecutionStore{options: options, witnesses: newRuntimeWitnessCache()}, nil
+	return &ExecutionStore{options: options, witnesses: newRuntimeWitnessCache(), renewals: newRenewalGate()}, nil
 }
 
 // runtimeTTL derives how long the keys of one apply request have to survive
@@ -289,7 +293,7 @@ func (store *ExecutionStore) readOneRenewing(
 		return nil, nil
 	}
 	if err := RenewGenerationKey(ctx, target, resolved, retention,
-		store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL); err != nil {
+		store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL, store.renewals); err != nil {
 		return nil, err
 	}
 	return values[0], nil
