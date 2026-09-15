@@ -72,9 +72,11 @@ func newCatalogCompositionCollector() *catalogCompositionCollector {
 				"names the configuration that caused either. A reason this build does not name is counted "+
 				"under other, so a reason added at its site and not in the list shows as a rising other "+
 				"rather than as a count that stops adding up. "+
-				"A pair absent from a scrape had no objects that round; the family being present at all is "+
-				"what says the round reported, which is why it is read against catalog_objects rather than "+
-				"on its own. Reported by the leader only.", "disposition", "reason"),
+				"A pair absent from a scrape had no objects that round. Every pair reading zero is the "+
+				"expected state and is also what 'nothing was computed' looks like, so read it against "+
+				"catalog_objects: these pairs partition every object that is not ACCEPTED, the same pass "+
+				"produces both, and a zero that adds up against that sum is a zero that was computed. "+
+				"Reported by the leader only.", "disposition", "reason"),
 		inertPlans: descriptor("catalog_inert_plans",
 			"Plans in the Catalog the leader last built whose schedule cannot hold the wait their data "+
 				"needs to land: their readiness boundary falls past their own completion deadline, so every "+

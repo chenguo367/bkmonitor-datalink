@@ -67,3 +67,46 @@ func TestWithheldCarriesTheReasonAsItWasAttached(t *testing.T) {
 		}
 	}
 }
+
+// The withheld pairs must add up to the objects that were not accepted.
+//
+// This is what makes a zero readable. On the deployment this was written for,
+// every pair reads zero because nothing is being withheld for a reason this
+// release introduced - and a family whose expected value is zero cannot tell
+// "nothing is wrong" from "nothing was computed". Read against the disposition
+// counts it partitions, it can: the same pass over the same dispositions
+// produces both, so a zero that adds up is a zero that was computed.
+func TestWithheldPartitionsTheObjectsThatWereNotAccepted(t *testing.T) {
+	composition := ComposeCatalog(Catalog{Dispositions: []ObjectDisposition{
+		{SourceID: "1", Disposition: DispositionAccepted},
+		{SourceID: "2", Disposition: DispositionAccepted},
+		{SourceID: "3", Disposition: DispositionConfigRejected, Reason: "NO_DATA_CONFIG_INVALID"},
+		{SourceID: "4", Disposition: DispositionUnsupported, Reason: "ALGORITHM_NOT_MIGRATED"},
+		{SourceID: "5", Disposition: DispositionStaleConfig, Reason: "PLAN_INVALID"},
+		{SourceID: "6", Disposition: Disposition("A_DISPOSITION_NOBODY_LISTED"), Reason: "PLAN_INVALID"},
+	}})
+
+	var objects, accepted int
+	for disposition, count := range composition.Objects {
+		objects += count
+		if disposition == DispositionAccepted {
+			accepted += count
+		}
+	}
+	var withheld int
+	for _, count := range composition.Withheld {
+		withheld += count
+	}
+	if want := objects - accepted; withheld != want {
+		t.Fatalf("withheld total = %d, want %d: the pairs do not partition the objects that were not "+
+			"accepted, so a zero in the family cannot be read against the disposition counts", withheld, want)
+	}
+
+	// Including the object whose disposition this build does not name: it is
+	// folded to other in both counts, so the partition holds rather than
+	// quietly losing a member on one side of the comparison.
+	key := WithheldKey{Disposition: DispositionOther, Reason: "PLAN_INVALID"}
+	if got := composition.Withheld[key]; got != 1 {
+		t.Fatalf("Withheld[%+v] = %d, want the unnamed disposition folded the same way Objects folds it", key, got)
+	}
+}
