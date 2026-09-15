@@ -9,6 +9,8 @@
 
 package controlplane
 
+import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
+
 // SupportedSourceSemantics is every data source a query can be compiled from,
 // as pollingSourceSupported admits them. A query config outside this set is
 // not compiled at all, so a Query Group's semantics are always drawn from
@@ -93,6 +95,21 @@ type CatalogComposition struct {
 	// of those literals, taken by a test that reads the source rather than a
 	// list someone has to remember to extend.
 	Withheld map[WithheldKey]int
+	// NoDataPlans counts the Plans that detect no-data, by where their expected
+	// set comes from. Only accepted Plans are in it - a Plan that was withheld
+	// is in Withheld under the reason that withheld it.
+	//
+	// The two together are one partition over the items that asked for no-data
+	// detection: a source here, or a reason there. NoDataPlansPartition states
+	// the sum, because a count of what is working answers nothing on its own -
+	// three sources adding to fewer items than are configured is the reading
+	// that matters, and it is only visible against what the other side holds.
+	NoDataPlans map[nodata.RosterSource]int
+	// NoDataPlansUnclassified counts an accepted Plan whose expected set cannot
+	// be classified. The compiler refuses those, so this is zero and is here to
+	// say so: were it not, the partition would lose a member silently and the
+	// three sources would simply read low.
+	NoDataPlansUnclassified int
 	// InertPlans counts the Plans whose schedule cannot hold the wait their
 	// data needs to land. Such a Plan is ACCEPTED, is scheduled, and executes
 	// -- and every round every one of its consumers is bound unavailable,
@@ -149,6 +166,7 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		Plans:       make(map[string]int, len(SupportedSourceSemantics)+2),
 		Objects:     make(map[Disposition]int, len(CatalogDispositions)+1),
 		Withheld:    make(map[WithheldKey]int),
+		NoDataPlans: make(map[nodata.RosterSource]int, 3),
 	}
 	for _, semantics := range SupportedSourceSemantics {
 		composition.QueryGroups[semantics] = 0
@@ -162,6 +180,9 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		composition.Objects[disposition] = 0
 	}
 	composition.Objects[DispositionOther] = 0
+	for _, source := range NoDataRosterSources {
+		composition.NoDataPlans[source] = 0
+	}
 	for _, group := range catalog.QueryGroups {
 		label := SourceSemanticsLabel(group.QueryPlan.SourceSemantics)
 		composition.QueryGroups[label]++
@@ -170,6 +191,15 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 			if !plan.ScheduleSpec.AffordsSettlingWait() {
 				composition.InertPlans++
 			}
+			if plan.Plan.NoData == nil {
+				continue
+			}
+			class, err := nodata.ClassifyRoster(plan.Plan.TargetScope, plan.Plan.NoData.AggDimension)
+			if err != nil {
+				composition.NoDataPlansUnclassified++
+				continue
+			}
+			composition.NoDataPlans[class.Source]++
 		}
 	}
 	for _, disposition := range catalog.Dispositions {
@@ -188,6 +218,43 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		composition.Withheld[WithheldKey{Disposition: kind, Reason: disposition.Reason}]++
 	}
 	return composition
+}
+
+// NoDataRosterSources is every source an accepted no-data Plan can declare, for
+// the partition to pre-create and for a reader to bound the family by.
+var NoDataRosterSources = []nodata.RosterSource{
+	nodata.RosterTargetStatic,
+	nodata.RosterHistory,
+	nodata.RosterWhole,
+}
+
+// NoDataReasons is the set of reasons that withhold a Plan from no-data
+// detection. The partition below sums over them.
+var NoDataReasons = []string{"NO_DATA_CONFIG_INVALID", "NO_DATA_ROSTER_UNSUPPORTED"}
+
+// NoDataPlansPartition is how many items asked for no-data detection: the ones
+// that got it, by source, plus the ones a no-data reason withheld.
+//
+// The withheld half is summed by reason across dispositions rather than read at
+// one of them. A strategy refused for the first time is CONFIG_REJECTED, and
+// the same strategy is STALE_CONFIG once a previous good Plan is retained for
+// it - same reason, different disposition, on different rounds. Reading only
+// CONFIG_REJECTED would make the total drop by one the round a strategy starts
+// running its last good Plan, which reads as a gauge that lost a count rather
+// than as a strategy that changed state.
+func (composition CatalogComposition) NoDataPlansPartition() int {
+	total := composition.NoDataPlansUnclassified
+	for _, count := range composition.NoDataPlans {
+		total += count
+	}
+	for key, count := range composition.Withheld {
+		for _, reason := range NoDataReasons {
+			if key.Reason == reason {
+				total += count
+			}
+		}
+	}
+	return total
 }
 
 // WithheldKey pairs what happened to an object with why. Neither half answers

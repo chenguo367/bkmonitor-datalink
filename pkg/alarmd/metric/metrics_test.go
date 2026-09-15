@@ -395,6 +395,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_plans"] = "variableLabels: {source_semantics}"
 	expected["bkmonitor_alarmd_catalog_objects"] = "variableLabels: {disposition}"
 	expected["bkmonitor_alarmd_catalog_withheld_objects"] = "variableLabels: {disposition,reason}"
+	expected["bkmonitor_alarmd_catalog_no_data_plans"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_catalog_inert_plans"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_level_abnormal_total"] = "variableLabels: {window}"
 	expected["bkmonitor_alarmd_platform_settings_mode"] = "variableLabels: {mode}"
@@ -825,6 +826,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// source and fails when they pass the headroom this number is built from,
 	// so the bound is wrong only if that test is also red.
 	bounds[fqName("catalog_withheld_objects")] = len(controlplane.CatalogDispositions) * catalogReasonHeadroom
+	// Every source an accepted no-data Plan can declare. There is no other
+	// bucket: a source outside the list cannot be produced, because the same
+	// list is what the classification returns.
+	bounds[fqName("catalog_no_data_plans")] = len(controlplane.NoDataRosterSources)
 	// One series: a count, unlabelled. It stays unlabelled on purpose -- the
 	// interval would be the natural label and it is user input, so labelling
 	// it would put an open set on a family whose whole job is to be a steady
