@@ -133,3 +133,73 @@ func ProjectSeries(series []map[string]string, aggDimension []string) Projection
 	}
 	return tally
 }
+
+// ParseGroupKey is the exact inverse of Key.
+//
+// It exists because a group's memory is held under its key and the history
+// roster has to expect the groups, not the keys. Storing the group beside the
+// key would be the other way, and would put two representations of one identity
+// in the state where they can disagree; a round trip that is checked cannot.
+//
+// It returns false for text this package did not write: a key with no tag, a
+// trailing escape, or a pair with no separator. A caller that reaches those has
+// state from somewhere else, and the safe reading of it is "not a group I know"
+// rather than a group with a name made of whatever the text happened to hold.
+func ParseGroupKey(key string) (Group, bool) {
+	parts, ok := splitEscaped(key, ',')
+	if !ok || len(parts) == 0 {
+		return Group{}, false
+	}
+	tag := parts[len(parts)-1]
+	if tag != contract.NoDataDimensionTag+"=true" {
+		return Group{}, false
+	}
+	parts = parts[:len(parts)-1]
+	dimensions := make([]Dimension, 0, len(parts))
+	for _, part := range parts {
+		pair, ok := splitEscaped(part, '=')
+		if !ok || len(pair) != 2 {
+			return Group{}, false
+		}
+		name, value := unescapeGroupText(pair[0]), unescapeGroupText(pair[1])
+		if name == "" {
+			return Group{}, false
+		}
+		dimensions = append(dimensions, Dimension{Name: name, Value: value})
+	}
+	if !sort.SliceIsSorted(dimensions, func(left, right int) bool {
+		return dimensions[left].Name < dimensions[right].Name
+	}) {
+		return Group{}, false
+	}
+	return Group{dimensions: dimensions}, true
+}
+
+// splitEscaped splits on a separator that escapeGroupText escapes, so a
+// separator inside a value does not split the text that holds it. It reports
+// false for a trailing backslash, which cannot appear in text this package
+// wrote and means the caller is parsing something else.
+func splitEscaped(text string, separator byte) ([]string, bool) {
+	parts := make([]string, 0, 4)
+	var current []byte
+	for index := 0; index < len(text); index++ {
+		switch character := text[index]; character {
+		case '\\':
+			if index+1 >= len(text) {
+				return nil, false
+			}
+			current = append(current, '\\', text[index+1])
+			index++
+		case separator:
+			parts = append(parts, string(current))
+			current = current[:0]
+		default:
+			current = append(current, character)
+		}
+	}
+	return append(parts, string(current)), true
+}
+
+var groupTextUnescaper = strings.NewReplacer(`\\`, `\`, `\=`, `=`, `\,`, `,`)
+
+func unescapeGroupText(text string) string { return groupTextUnescaper.Replace(text) }
