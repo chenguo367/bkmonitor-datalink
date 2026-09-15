@@ -391,6 +391,16 @@ func TestEveryWindowCoverageFieldThePageReadsExistsInTheAPI(t *testing.T) {
 	assertFieldsExist(t, "windowCoverage", reflect.TypeOf(fleet.HistoryCoverage{}))
 }
 
+// The schedule census, the wake facts on a row, and the retained span are read
+// under their own local names for the same reason: a misspelled field there
+// renders the first sentence of the page with a rate of undefined, or a row's
+// cycle position as a blank.
+func TestEveryScheduleFieldThePageReadsExistsInTheAPI(t *testing.T) {
+	assertFieldsExist(t, "census", reflect.TypeOf(fleet.ScheduleCensus{}))
+	assertFieldsExist(t, "wake", reflect.TypeOf(fleet.WakeFacts{}))
+	assertFieldsExist(t, "skip", reflect.TypeOf(fleet.SkippedSpan{}))
+}
+
 // Anomaly kinds had this check and start-time provenances did not, although the
 // consequence is worse: an unmapped kind renders the wrong familiar word, an
 // unmapped provenance renders a raw enum beside a timestamp whose meaning that

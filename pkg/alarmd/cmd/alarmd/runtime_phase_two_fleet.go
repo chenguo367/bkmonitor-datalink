@@ -175,6 +175,10 @@ type fleetPublisher struct {
 	// snapshot then carries no overdue facts at all -- which is a different
 	// answer from "none are overdue" and has to stay one.
 	overdue fleet.OverdueWakeSource
+	// schedule is the same due index, asked where every owned object is in its
+	// cycle and how the rounds have been finishing. Nil with overdue, and the
+	// snapshot then carries no census and no wake facts on its rows.
+	schedule fleet.ScheduleSource
 	// strategies names the strategies behind a Query Group, so an overdue
 	// object arrives in the list identified the way every other anomaly is. A
 	// row nobody can trace back to a strategy is a row nobody can act on.
@@ -382,6 +386,20 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// The spans nothing ever evaluated. Not folded into any column: those
 	// objects are running normally now, and the loss is in their past.
 	snapshot.PrunedSkips = publisher.tracker.PrunedSkips()
+	snapshot.GapSkips = publisher.tracker.GapSkips()
+	// Where every listed object is in its cycle, and the census over all of
+	// them. From the same index and the same instant as the overdue facts, so
+	// the row and the sentence above it cannot read two clocks.
+	if publisher.schedule != nil {
+		census := publisher.schedule.Census(at, len(owned))
+		snapshot.Schedule = &census
+		for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Demoted, snapshot.Undecidable, snapshot.ByDesign} {
+			for index := range column {
+				wake := publisher.schedule.WakeOf(column[index].QueryGroup)
+				column[index].Wake = &wake
+			}
+		}
+	}
 	if publisher.capacity != nil {
 		snapshot.Capacity = publisher.capacity()
 	}

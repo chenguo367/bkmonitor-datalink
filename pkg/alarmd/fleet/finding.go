@@ -508,10 +508,14 @@ func init() {
 // exactly as it did before findings existed.
 func attributionFromFinding(finding Finding) Attribution {
 	switch {
+	case finding.Situation == SituationRestoredWithoutCause:
+		// Before the owner: the check that folds this object (the observation
+		// gap, this deployment's) names the owner ALARMD, and that is who has
+		// to look -- but missing evidence is not evidence against the
+		// deployment, so the verdict stays UNKNOWN exactly as before.
+		return AttributionUnknown
 	case finding.Owner == OwnerAlarmd:
 		return AttributionOurs
-	case finding.Situation == SituationRestoredWithoutCause:
-		return AttributionUnknown
 	default:
 		return AttributionExternal
 	}

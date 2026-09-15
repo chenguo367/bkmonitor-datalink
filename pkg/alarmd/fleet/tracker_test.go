@@ -1089,3 +1089,39 @@ func TestAnObjectThatLostASpanOfSlotsIsVisibleEvenThoughItIsRunningFine(t *testi
 			"would put objects on that line that lost nothing")
 	}
 }
+
+// A run of GAP_SKIPPED completions is retained as one span with its Slots, and
+// the rounds that follow do not clear it. A later skip after a normal round
+// starts a new span rather than extending the old one.
+func TestGapSkipsAreRetainedPastTheRoundsThatFollow(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	skip := func(slot int64) {
+		ctx := observability.ContextWithTraceFields(context.Background(),
+			observability.TraceFields{QueryGroupKey: "qg-skip", EvaluationTime: slot})
+		tracker.Observe(ctx, observability.Observation{ProgressCompletionKind: "GAP_SKIPPED"})
+	}
+	skip(100)
+	skip(160)
+	skip(220)
+	tracker.Observe(context.Background(), completion("qg-skip", "FULL_COMPLETED", "8930"))
+	tracker.Observe(context.Background(), completion("qg-skip", "FULL_COMPLETED", "8930"))
+	skips := tracker.GapSkips()
+	got, retained := skips["qg-skip"]
+	if !retained || got.FirstSlot != 100 || got.LastSlot != 220 || got.Slots != 3 || got.Replica != "pod-a" {
+		t.Fatalf("gap skips = %+v, want one span 100..220 of 3 Slots on pod-a retained past two normal rounds", skips)
+	}
+	if len(tracker.Anomalies()) != 0 {
+		t.Errorf("the object is listed as an anomaly after two normal rounds: the record has to be the "+
+			"retained span, not the anomaly list: %+v", tracker.Anomalies())
+	}
+	skip(400)
+	if got := tracker.GapSkips()["qg-skip"]; got.FirstSlot != 400 || got.Slots != 1 {
+		t.Errorf("a skip after a normal round = %+v, want a new span starting at 400", got)
+	}
+	// An object with no skips has no record.
+	tracker.Observe(context.Background(), completion("qg-fine", "FULL_COMPLETED", "8930"))
+	if _, present := tracker.GapSkips()["qg-fine"]; present {
+		t.Error("an object that never skipped has a skip record")
+	}
+}

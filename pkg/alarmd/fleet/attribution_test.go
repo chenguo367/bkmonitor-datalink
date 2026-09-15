@@ -217,7 +217,7 @@ func TestAStalledObjectIsOursEvenWhenItsLastReasonWasExternal(t *testing.T) {
 		Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "QUERY_TIMEOUT",
 		FailingSince: at.Add(-2 * time.Hour),
 	}}
-	Attribute(anomalies)
+	Attribute(anomalies, now)
 	if anomalies[0].Attribution != AttributionExternal {
 		t.Fatalf("before the stall is marked this object reads as %q; the test no longer "+
 			"exercises the upgrade it exists for", anomalies[0].Attribution)
@@ -247,7 +247,7 @@ func TestARestoredObjectWithNoRecordedCauseIsNotHeldAgainstTheDeployment(t *test
 		QueryGroup: "qg-restored", Kind: KindDegradedRun,
 		ReasonCode: "COMPLETED_WITH_UNAVAILABLE", SinceFrom: SinceRestoredLastFull,
 	}
-	Attribute([]Anomaly{restored})
+	Attribute([]Anomaly{restored}, now)
 	if got := attributionOf(restored); got != AttributionUnknown {
 		t.Errorf("a restored object with no recorded cause reports %q, want %q: it would make "+
 			"every rollout read as a regression", got, AttributionUnknown)
@@ -342,7 +342,7 @@ func TestObjectsHeldAgainstUsByTheDefaultAloneAreCountedApart(t *testing.T) {
 	fellThrough := Anomaly{QueryGroup: "qg-new", Kind: KindDegradedRun,
 		CauseReason: "A_FAILURE_MODE_NOBODY_HAS_CLASSIFIED_YET"}
 	anomalies := []Anomaly{byRule, fellThrough}
-	Attribute(anomalies)
+	Attribute(anomalies, now)
 
 	for _, anomaly := range anomalies {
 		if anomaly.Attribution != AttributionOurs {
@@ -377,7 +377,7 @@ func TestTheRulesThatReadNoCodeAreStillRules(t *testing.T) {
 		{QueryGroup: "qg-missed", Kind: KindOverdueWake},
 	}
 	MarkStalled(anomalies, at, time.Hour)
-	Attribute(anomalies)
+	Attribute(anomalies, now)
 	MarkStalled(anomalies, at, time.Hour)
 	for _, anomaly := range anomalies {
 		if anomaly.Attribution != AttributionOurs {
@@ -492,9 +492,9 @@ func TestSettleIsSafeToRunTwiceTheWayTheHandlerRunsIt(t *testing.T) {
 func TestABlockedObjectIsClassifiedByTheWordItsFieldActuallyCarries(t *testing.T) {
 	blocked := Anomaly{QueryGroup: "qg-retired", Kind: KindBlockedRun,
 		ReasonCode: "source_blocked"}
-	Attribute([]Anomaly{blocked})
+	Attribute([]Anomaly{blocked}, now)
 	anomalies := []Anomaly{blocked}
-	Attribute(anomalies)
+	Attribute(anomalies, now)
 	if anomalies[0].Attribution != AttributionOurs {
 		t.Errorf("attribution = %q, want %q", anomalies[0].Attribution, AttributionOurs)
 	}
@@ -594,7 +594,7 @@ func TestEveryResultContractCodeIsClassified(t *testing.T) {
 	}
 	for _, code := range codes {
 		graded := []Anomaly{{Kind: KindDegradedRun, CauseReason: code}}
-		Attribute(graded)
+		Attribute(graded, now)
 		if graded[0].Unclassified {
 			t.Errorf("%s reaches attribution and no rule matches it: it counts against the deployment "+
 				"by the fall-through, which is the safe direction but is nobody's decision", code)
@@ -633,7 +633,7 @@ func TestTheSettledNeverFillingWindowsAreCountedWithoutLeavingExternal(t *testin
 		CauseReason: "HISTORY_GAPPED",
 		Coverage:    &HistoryCoverage{Levels: 2, Short: 1, WorstValid: 3, WorstRequired: 9, ShortRounds: 40}}
 	anomalies := []Anomaly{filling, never, timedOut, gapped}
-	Attribute(anomalies)
+	Attribute(anomalies, now)
 	for _, anomaly := range anomalies {
 		if anomaly.Attribution != AttributionExternal {
 			t.Fatalf("%s = %q, want all three external for this test to say anything",
@@ -699,7 +699,7 @@ func TestChurningWindowsAreCountedApartFromOnesWhoseDataIsMissing(t *testing.T) 
 		Coverage: &HistoryCoverage{Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40,
 			Fresh: 9, ShortFresh: 4, FreshRounds: 1}}
 	anomalies := []Anomaly{churning, starving, rekeyed}
-	Attribute(anomalies)
+	Attribute(anomalies, now)
 	summary := summarize(anomalies, now)
 
 	if summary.WindowNeverFills != 3 {
@@ -735,7 +735,7 @@ func TestChurningWindowsAreCountedApartFromOnesWhoseDataIsMissing(t *testing.T) 
 // failing is demoted, and that column is decided before this one.
 func TestAbandoningAWindowOfTimeCountsAgainstThisDeployment(t *testing.T) {
 	skipped := []Anomaly{{QueryGroup: "qg-skipped", Kind: KindDegradedRun, CauseReason: "GAP_SKIPPED"}}
-	Attribute(skipped)
+	Attribute(skipped, now)
 	if skipped[0].Attribution != AttributionOurs {
 		t.Fatalf("attribution = %q, want %q: nobody outside alarmd can act on a window alarmd "+
 			"decided not to evaluate", skipped[0].Attribution, AttributionOurs)

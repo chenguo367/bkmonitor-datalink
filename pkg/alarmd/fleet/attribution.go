@@ -9,6 +9,8 @@
 
 package fleet
 
+import "time"
+
 // The anomaly column answers "what did this deployment fail to evaluate". That
 // is not the same question as "is this deployment well", and the two were being
 // read off one number.
@@ -109,9 +111,9 @@ func UnattributedCount(anomalies []Anomaly) int {
 // It runs over the rows rather than being computed in the tracker so that the
 // rule lives in one place and the page cannot disagree with the verdict: both
 // read this field, neither re-derives it.
-func Attribute(anomalies []Anomaly) {
+func Attribute(anomalies []Anomaly, at time.Time) {
 	for index := range anomalies {
-		attribute(&anomalies[index])
+		attribute(&anomalies[index], at)
 	}
 }
 
@@ -129,18 +131,25 @@ func Attribute(anomalies []Anomaly) {
 // Before that, the finding kept the last code's situation while the
 // attribution alone was rewritten, so the STALLED situation had no producer
 // and a stalled row rendered as the backend's or the strategy's.
-func attribute(anomaly *Anomaly) {
+func attribute(anomaly *Anomaly, at time.Time) {
 	anomaly.Finding = findingOf(*anomaly)
 	anomaly.Attribution = attributionFromFinding(anomaly.Finding)
 	// Recorded per object rather than derived twice, so the page and the
 	// counts cannot disagree about which of these was actually decided.
 	anomaly.Unclassified = anomaly.Finding.Situation == SituationUnclassified
+	anomaly.Finding.Schedule = scheduleOf(*anomaly, at)
+	anomaly.Finding.Result = resultOf(*anomaly)
+	// The check decides the owner once the object is under one: the line on
+	// the first screen and the row under it must not name two owners, and the
+	// check can outrank the situation (an object not being evaluated is this
+	// deployment's whatever its last round said). The attribution is read off
+	// the finding after that, so the verdict follows the same owner.
 	if check, under := checkOf(*anomaly); under {
 		anomaly.Finding.Check = check
 		anomaly.Finding.Group = groupKeyOf(*anomaly, check)
+		anomaly.Finding.Owner = checkAnswers[check].Owner
+		anomaly.Attribution = attributionFromFinding(anomaly.Finding)
 	}
-	anomaly.Finding.Schedule = scheduleOf(*anomaly)
-	anomaly.Finding.Result = resultOf(*anomaly)
 }
 
 // OursCount returns how many of these count against the deployment.

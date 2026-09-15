@@ -147,13 +147,20 @@ var ChecksWithoutAProducer = []Check{CheckNeverEvaluated, CheckNoDataPersistent}
 // ROUND_BLOCKED covers both a source this deployment could not read and a
 // round that panicked, and those are a dependency and a defect respectively.
 func checkOf(anomaly Anomaly) (Check, bool) {
+	// Stalled first, then overdue, then whatever the last round said. An
+	// object whose rounds stopped ending, or whose turn has been missed, is
+	// not being evaluated now -- and that outranks how its last round went,
+	// which is what the situation describes.
+	switch {
+	case anomaly.Stalled:
+		return CheckRoundsStalled, true
+	case anomaly.Finding.Schedule == ScheduleOverdue:
+		return CheckSlotsOverdue, true
+	}
 	switch anomaly.Finding.Situation {
 	case SituationStalled:
 		return CheckRoundsStalled, true
 	case SituationNeverReached:
-		// The overdue wake says the wake time passed and nothing came back;
-		// it does not yet say whether the object was ever evaluated. Until the
-		// due index says, this is the coarse reading.
 		return CheckSlotsOverdue, true
 	case SituationBudgetExceeded, SituationDetectionAbandoned:
 		// Both are this deployment giving up on work because of its own
@@ -245,37 +252,6 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 		return string(anomaly.Finding.Situation)
 	}
 	return ""
-}
-
-// Schedule is what the object is doing now: the dimension the first sentence
-// on the page is built from. The values this build can tell apart are these;
-// the due index will split RUNNING into on time and late, and add an object
-// that has never run.
-type Schedule string
-
-const (
-	ScheduleRunning Schedule = "RUNNING"
-	ScheduleStalled Schedule = "STALLED"
-	ScheduleCooling Schedule = "COOLING"
-	ScheduleOverdue Schedule = "OVERDUE"
-	SchedulePaused  Schedule = "PAUSED"
-)
-
-// Schedules lists every schedule value, for the page's completeness check.
-var Schedules = []Schedule{ScheduleRunning, ScheduleStalled, ScheduleCooling, ScheduleOverdue, SchedulePaused}
-
-func scheduleOf(anomaly Anomaly) Schedule {
-	switch {
-	case anomaly.Stalled:
-		return ScheduleStalled
-	case anomaly.Kind == KindOverdueWake:
-		return ScheduleOverdue
-	case anomaly.Kind == KindQueryCooldown:
-		return ScheduleCooling
-	case anomaly.CauseReason == "EFFECTIVE_TIME_INACTIVE":
-		return SchedulePaused
-	}
-	return ScheduleRunning
 }
 
 // Result is how the last round ended. COMPLETED is a round that ran to its
@@ -387,6 +363,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 			}
 		}
 	}
+	listed := map[string]struct{}{}
 	for columnIndex, column := range columns {
 		columnPartial := false
 		if truncated != nil && columnIndex < len(columnNames) {
@@ -401,6 +378,17 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 			entry := ensure(check)
 			entry.partial = entry.partial || columnPartial
 			add(entry, anomaly.Finding.Group, anomaly)
+			listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
+		}
+	}
+	// What this deployment gave up on and never evaluated, retained past the
+	// rounds that followed. An object that skipped Slots an hour ago and has
+	// run normally since is under no column, and it stays on this line until a
+	// restart forgets it: the loss is permanent and the row is the only record.
+	if view != nil {
+		for _, row := range skippedRows(view, listed) {
+			entry := ensure(row.Finding.Check)
+			add(entry, row.Finding.Group, &row)
 		}
 	}
 	// What the view cannot speak for. Unknown is the objects a replica holds
@@ -475,21 +463,70 @@ func checkNames() []string {
 }
 
 // UnderCheck is every object in every column that is under one check, and
-// within one of its groups when group is not empty. This is the list a line on
-// the first screen opens; its total is how many it holds.
-func UnderCheck(check Check, group string, columns ...[]Anomaly) []Anomaly {
+// within one of its groups when group is not empty, plus the retained skip
+// records under it. This is the list a line on the first screen opens; its
+// total is how many it holds.
+func UnderCheck(check Check, group string, view *View) []Anomaly {
 	list := []Anomaly{}
-	for _, column := range columns {
+	listed := map[string]struct{}{}
+	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign} {
 		for _, anomaly := range column {
 			if anomaly.Finding.Check != check {
 				continue
 			}
+			// Marked as listed before the group narrows, so an object in
+			// another group is not re-listed from its retained skip.
+			listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
 			if group != "" && anomaly.Finding.Group != group {
 				continue
 			}
 			list = append(list, anomaly)
 		}
 	}
+	for _, row := range skippedRows(view, listed) {
+		if row.Finding.Check != check || (group != "" && row.Finding.Group != group) {
+			continue
+		}
+		list = append(list, row)
+	}
 	sortByUrgency(list)
 	return list
+}
+
+// underKey names one object under one check, so a retained skip does not add
+// a second row for an object a column already lists under that check while an
+// object listed under some other check still gets its skip row: those are two
+// facts, and Ceph lists an OSD under every check it fails.
+func underKey(check Check, queryGroup string) string {
+	return string(check) + "|" + queryGroup
+}
+
+// skippedRows turns the view's retained skip records into rows, one per
+// object not already listed under the same check. A pruned span is
+// TIMELINE_PRUNED and a replay-window skip is DETECTION_ABANDONED; both are
+// this deployment's and fold on the replica that applied them.
+func skippedRows(view *View, listed map[string]struct{}) []Anomaly {
+	rows := []Anomaly{}
+	row := func(queryGroup string, check Check, situation Situation, reason string, skip SkippedSpan) {
+		if _, already := listed[underKey(check, queryGroup)]; already {
+			return
+		}
+		listed[underKey(check, queryGroup)] = struct{}{}
+		item := Anomaly{QueryGroup: queryGroup, Kind: KindSkippedSpan, ReasonCode: reason,
+			Since: skip.At, SinceFrom: SinceSnapshotContinuity, Replica: skip.Replica, Skip: &skip}
+		item.Finding = finding(situation, 0)
+		item.Finding.Check, item.Finding.Group = check, skip.Replica
+		item.Finding.Owner = checkAnswers[check].Owner
+		item.Attribution = attributionFromFinding(item.Finding)
+		rows = append(rows, item)
+	}
+	for queryGroup, skip := range view.GapSkips {
+		row(queryGroup, CheckDetectionAbandoned, SituationDetectionAbandoned, "GAP_SKIPPED", skip)
+	}
+	for queryGroup, pruned := range view.PrunedSkips {
+		row(queryGroup, CheckTimelinePruned, SituationTimelinePruned, "SCHEDULE_PRUNED",
+			SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To, At: pruned.At, Replica: pruned.Replica})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].QueryGroup < rows[j].QueryGroup })
+	return rows
 }

@@ -195,8 +195,8 @@ func TestReportChecksFoldsColumnsAndCountsDistinctly(t *testing.T) {
 			a.Strategies = []StrategyRef{{StrategyID: "3", BusinessID: "8"}}
 		}),
 	}
-	Attribute(anomalies)
-	Attribute(demoted)
+	Attribute(anomalies, now)
+	Attribute(demoted, now)
 	view := &View{Unknown: 4, Gaps: []Gap{{Kind: GapUndetermined}, {Kind: GapSnapshotStale, Replica: "pod-b"}}}
 	reports := ReportChecks([][]Anomaly{anomalies, demoted, nil, nil},
 		map[string]bool{ColumnDemoted: true}, view)
@@ -260,7 +260,7 @@ func TestMarkStalledDecidesTheFindingAgain(t *testing.T) {
 	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
 	list := []Anomaly{{QueryGroup: "qg", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
 		FailingSince: at.Add(-time.Hour)}}
-	Attribute(list)
+	Attribute(list, now)
 	if list[0].Finding.Check != CheckBackendNotAnswering {
 		t.Fatalf("before marking, check = %s, want BACKEND_NOT_ANSWERING", list[0].Finding.Check)
 	}
@@ -273,32 +273,141 @@ func TestMarkStalledDecidesTheFindingAgain(t *testing.T) {
 	}
 }
 
-// The two dimensions the row shows, read off the anomaly.
+// The two dimensions the row shows, read off the anomaly and the due index's
+// wake facts. Every schedule value has a case, and the empty value -- no wake
+// facts at all -- is a case too, because that is what an older replica sends.
 func TestScheduleAndResultReadTheDimensionsOffTheAnomaly(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	wake := func(due time.Duration, interval int64) *WakeFacts {
+		return &WakeFacts{Known: true, DueAt: at.Add(due), IntervalSeconds: interval}
+	}
 	for name, want := range map[string]struct {
 		item     Anomaly
 		schedule Schedule
 		result   Result
 	}{
-		"completed degraded": {Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING"},
-			ScheduleRunning, ResultCompleted},
-		"failed with a backend error": {Anomaly{Kind: KindDegradedRun,
-			Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "http_status=503"}},
-			ScheduleRunning, ResultError},
+		"no wake facts at all": {Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING"},
+			"", ResultCompleted},
+		"waiting for the next due": {Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING",
+			Wake: wake(40*time.Second, 60)}, ScheduleOnTime, ResultCompleted},
+		"late within one period": {Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING",
+			Wake: wake(-10*time.Second, 60)}, ScheduleLate, ResultCompleted},
+		"late by exactly one period is still late": {Anomaly{Kind: KindDegradedRun,
+			Wake: wake(-60*time.Second, 60)}, ScheduleLate, ResultCompleted},
+		"overdue past one period": {Anomaly{Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
+			Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "http_status=503"},
+			Wake:    wake(-120*time.Second, 60)}, ScheduleOverdue, ResultError},
+		"late with no period known stays late": {Anomaly{Kind: KindDegradedRun,
+			Wake: wake(-3*time.Hour, 0)}, ScheduleLate, ResultCompleted},
+		"never evaluated since takeover": {Anomaly{Kind: KindDegradedRun, SinceFrom: SinceRestoredLastFull,
+			Wake: &WakeFacts{Known: false}}, ScheduleNew, ResultCompleted},
+		"cooling by the wake facts": {Anomaly{Kind: KindDegradedRun,
+			Wake: &WakeFacts{Known: true, DueAt: at.Add(5 * time.Minute), Cooling: true}},
+			ScheduleCooling, ResultCompleted},
 		"refused by the backend": {Anomaly{Kind: KindQueryCooldown,
 			Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_no_such_field"}},
 			ScheduleCooling, ResultRefused},
-		"blocked":  {Anomaly{Kind: KindBlockedRun, ReasonCode: "source_error"}, ScheduleRunning, ResultError},
-		"overdue":  {Anomaly{Kind: KindOverdueWake}, ScheduleOverdue, ""},
-		"paused":   {Anomaly{Kind: KindDegradedRun, CauseReason: "EFFECTIVE_TIME_INACTIVE"}, SchedulePaused, ResultCompleted},
-		"stalled":  {Anomaly{Kind: KindDegradedRun, Stalled: true}, ScheduleStalled, ResultCompleted},
-		"retrying": {Anomaly{Kind: KindDegradedRun, ReasonCode: "retrying"}, ScheduleRunning, ResultError},
+		"blocked": {Anomaly{Kind: KindBlockedRun, ReasonCode: "source_error", Wake: wake(30*time.Second, 60)},
+			ScheduleOnTime, ResultError},
+		"overdue wake": {Anomaly{Kind: KindOverdueWake}, ScheduleOverdue, ""},
+		"paused":       {Anomaly{Kind: KindDegradedRun, CauseReason: "EFFECTIVE_TIME_INACTIVE"}, SchedulePaused, ResultCompleted},
+		"stalled":      {Anomaly{Kind: KindDegradedRun, Stalled: true, Wake: wake(-10*time.Second, 60)}, ScheduleStalled, ResultCompleted},
+		"retrying":     {Anomaly{Kind: KindDegradedRun, ReasonCode: "retrying"}, "", ResultError},
 	} {
-		if got := scheduleOf(want.item); got != want.schedule {
-			t.Errorf("%s: schedule = %s, want %s", name, got, want.schedule)
+		if got := scheduleOf(want.item, at); got != want.schedule {
+			t.Errorf("%s: schedule = %q, want %q", name, got, want.schedule)
 		}
 		if got := resultOf(want.item); got != want.result {
 			t.Errorf("%s: result = %q, want %q", name, got, want.result)
 		}
+	}
+}
+
+// Not being evaluated outranks how the last round went. An object whose last
+// round timed out at the backend and whose turn has since been missed is under
+// SLOTS_OVERDUE, this deployment's, not under the backend's line: the backend
+// is not what is stopping it from running now.
+func TestAMissedTurnOutranksTheLastRoundsSituation(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	list := []Anomaly{{QueryGroup: "qg", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
+		Wake: &WakeFacts{Known: true, DueAt: at.Add(-3 * time.Minute), IntervalSeconds: 60}}}
+	Attribute(list, at)
+	if list[0].Finding.Check != CheckSlotsOverdue || list[0].Finding.Owner != OwnerAlarmd {
+		t.Errorf("overdue object with a backend situation is under %s / %s, want SLOTS_OVERDUE / ALARMD",
+			list[0].Finding.Check, list[0].Finding.Owner)
+	}
+	// The same object, late but within its period, is still the backend's.
+	list[0].Wake.DueAt = at.Add(-10 * time.Second)
+	Attribute(list, at)
+	if list[0].Finding.Check != CheckBackendNotAnswering {
+		t.Errorf("late-but-within-period object is under %s, want BACKEND_NOT_ANSWERING", list[0].Finding.Check)
+	}
+}
+
+// A retained skip is on its line and has a row, whether or not the object is
+// under a column now; an object already under the same check from its current
+// round is counted once; an object under a different check gets its skip row
+// as well, because those are two facts.
+func TestRetainedSkipsAreOnTheirLinesWithRows(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	current := Anomaly{QueryGroup: "qg-skipping-now", Replica: "pod-a", Kind: KindDegradedRun,
+		Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "GAP_SKIPPED"}
+	backend := Anomaly{QueryGroup: "qg-backend", Replica: "pod-a", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT"}
+	anomalies := []Anomaly{current, backend}
+	Attribute(anomalies, at)
+	view := &View{Anomalies: anomalies,
+		GapSkips: map[string]SkippedSpan{
+			// Skipping now and also retained: one object, one row.
+			"qg-skipping-now": {FirstSlot: 100, LastSlot: 220, Slots: 3, At: at.Add(-time.Minute), Replica: "pod-a"},
+			// Healthy now, skipped an hour ago: a row from the record alone.
+			"qg-skipped-earlier": {FirstSlot: 1000, LastSlot: 1060, Slots: 2, At: at.Add(-time.Hour), Replica: "pod-b"},
+			// Under the backend's line now, and skipped earlier: both.
+			"qg-backend": {FirstSlot: 2000, LastSlot: 2000, Slots: 1, At: at.Add(-30 * time.Minute), Replica: "pod-a"},
+		},
+		PrunedSkips: map[string]PrunedSkip{
+			"qg-pruned": {From: 5000, To: 8600, At: at.Add(-2 * time.Hour), Replica: "pod-b"},
+		}}
+	reports := ReportChecks([][]Anomaly{anomalies, nil, nil, nil}, nil, view)
+	byCode := map[Check]CheckReport{}
+	for _, report := range reports {
+		byCode[report.Code] = report
+	}
+	if got := byCode[CheckDetectionAbandoned]; got.Objects != 3 {
+		t.Errorf("DETECTION_ABANDONED = %d objects, want 3: the current skipper once, the earlier one, "+
+			"and the backend's object for its retained skip", got.Objects)
+	}
+	if got := byCode[CheckTimelinePruned]; got.Objects != 1 {
+		t.Errorf("TIMELINE_PRUNED = %d objects, want the one pruned record", got.Objects)
+	}
+	if got := byCode[CheckBackendNotAnswering]; got.Objects != 1 {
+		t.Errorf("BACKEND_NOT_ANSWERING = %d objects, want 1: the retained skip does not remove it", got.Objects)
+	}
+	rows := UnderCheck(CheckDetectionAbandoned, "", view)
+	if len(rows) != 3 {
+		t.Fatalf("under DETECTION_ABANDONED: %v, want 3 rows", names(rows))
+	}
+	kinds := map[string]string{}
+	for _, row := range rows {
+		kinds[row.QueryGroup] = row.Kind
+	}
+	if kinds["qg-skipping-now"] != KindDegradedRun {
+		t.Errorf("the current skipper is listed as %s, want its own row, not a synthesized one", kinds["qg-skipping-now"])
+	}
+	if kinds["qg-skipped-earlier"] != KindSkippedSpan || kinds["qg-backend"] != KindSkippedSpan {
+		t.Errorf("retained skips are listed as %v, want %s rows", kinds, KindSkippedSpan)
+	}
+	for _, row := range rows {
+		if row.Kind == KindSkippedSpan && (row.Skip == nil || row.Skip.Slots == 0 || row.Finding.Group != row.Replica) {
+			t.Errorf("synthesized row %s = %+v, want the span and the replica as its group", row.QueryGroup, row)
+		}
+	}
+	// Narrowing to pod-b lists the earlier skip alone.
+	if got := UnderCheck(CheckDetectionAbandoned, "pod-b", view); len(got) != 1 || got[0].QueryGroup != "qg-skipped-earlier" {
+		t.Errorf("under DETECTION_ABANDONED group pod-b = %v, want [qg-skipped-earlier]", names(got))
+	}
+	// The pruned record's row says its Slot count is not knowable.
+	pruned := UnderCheck(CheckTimelinePruned, "", view)
+	if len(pruned) != 1 || pruned[0].Skip == nil || pruned[0].Skip.Slots != 0 || pruned[0].Skip.FirstSlot != 5000 {
+		t.Errorf("under TIMELINE_PRUNED = %+v, want one row with the span and no Slot count", pruned)
 	}
 }

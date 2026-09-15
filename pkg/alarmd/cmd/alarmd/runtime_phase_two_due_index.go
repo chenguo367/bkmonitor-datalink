@@ -99,6 +99,26 @@ type phaseTwoDueIndex struct {
 	versionTag   string
 	versionSeen  bool
 	versionEpoch uint64
+	// completions is the last six hours of returned rounds, one bucket per
+	// minute, so the census can say how many finished before their next turn
+	// fell due. A ring rather than a list: the cost is fixed whatever the
+	// deployment's rate, and six hours is the longer of the two windows the
+	// page reads.
+	completions [dueCompletionBuckets]dueCompletionBucket
+}
+
+// dueCompletionBuckets is six hours of one-minute buckets.
+const dueCompletionBuckets = 6 * 60
+
+// dueCompletionBucket is what one minute of returned rounds adds up to.
+// minute is the Unix minute the bucket describes, so a bucket that has wrapped
+// around from six hours ago is recognised and reset rather than added to.
+type dueCompletionBucket struct {
+	minute         int64
+	completed      int
+	onTime         int
+	heldBack       int
+	heldBackOnTime int
 }
 
 type phaseTwoDueEntry struct {
@@ -114,7 +134,12 @@ type phaseTwoDueEntry struct {
 	// queue, or backing off would become a way to jump the recovery rotation.
 	deferred      bool
 	queryCooldown bool
-	position      int
+	// heldBack marks that the dispatcher pushed this object back at least once
+	// since its last round returned: no room in the ready queue, or not urgent
+	// enough for the recovery queue. Cleared when the next round returns, and
+	// read at that moment to say whether being pushed back cost the deadline.
+	heldBack bool
+	position int
 }
 
 func newPhaseTwoDueIndex(recorder *metric.Recorder) *phaseTwoDueIndex {
@@ -302,10 +327,21 @@ func (index *phaseTwoDueIndex) Record(
 		// been read at all, and that is a real state worth being able to see.
 		interval = existing.intervalSeconds
 	}
+	if ok && bound.Executed {
+		// The round that just returned fell due at the bound the previous
+		// round wrote, and it is on time if it returned before the next one
+		// falls due: one period after. Measured here because this is the one
+		// place both moments are in hand. Only executed rounds count -- a
+		// return that ran nothing is not a completion -- and only rounds whose
+		// period is known can be judged, so the rest are not in the
+		// denominator either.
+		index.recordCompletionLocked(nowUnix, existing.dueAtUnix, interval, existing.heldBack)
+	}
 	if ok {
 		existing.dueAtUnix, existing.intervalSeconds = dueAt, interval
 		existing.deferred = bound.Deferred
 		existing.queryCooldown = bound.QueryCooldown
+		existing.heldBack = false
 		heap.Fix(&index.pending, existing.position)
 	} else {
 		entry := &phaseTwoDueEntry{
@@ -484,6 +520,134 @@ func (index *phaseTwoDueIndex) OverdueWakes(now time.Time, limit int) ([]Overdue
 		})
 	}
 	return wakes, total
+}
+
+// recordCompletionLocked adds one returned round to the minute it returned in.
+// Caller holds the lock.
+func (index *phaseTwoDueIndex) recordCompletionLocked(nowUnix, dueAtUnix, intervalSeconds int64, heldBack bool) {
+	if intervalSeconds <= 0 {
+		return
+	}
+	minute := nowUnix / 60
+	bucket := &index.completions[dueBucketSlot(minute)]
+	if bucket.minute != minute {
+		*bucket = dueCompletionBucket{minute: minute}
+	}
+	// A publication that pulled the bound to now while the round was running
+	// leaves the round returning before it was ever due by the entry's
+	// reckoning; that is on time.
+	onTime := nowUnix-dueAtUnix <= intervalSeconds
+	bucket.completed++
+	if onTime {
+		bucket.onTime++
+	}
+	if heldBack {
+		bucket.heldBack++
+		if onTime {
+			bucket.heldBackOnTime++
+		}
+	}
+}
+
+// MarkHeldBack records that the dispatcher pushed this object back rather than
+// queueing it. Called from the line that makes the decision, like RecordSkip,
+// so no path that grows into the decision can forget it. An object with no
+// entry has nothing to mark: nothing has been evaluated for it yet, so there is
+// no next return to judge.
+func (index *phaseTwoDueIndex) MarkHeldBack(queryGroup execution.QueryGroupIdentity) {
+	if index == nil {
+		return
+	}
+	index.mu.Lock()
+	defer index.mu.Unlock()
+	if entry, ok := index.entries[queryGroup]; ok {
+		entry.heldBack = true
+	}
+}
+
+// dueBucketSlot is the ring position of a Unix minute. Go's % keeps the sign
+// of the dividend, and a minute earlier than the ring is long is what a test
+// clock starting near zero produces.
+func dueBucketSlot(minute int64) int64 {
+	return ((minute % dueCompletionBuckets) + dueCompletionBuckets) % dueCompletionBuckets
+}
+
+// Census counts the owned objects by where they are in their cycle right now,
+// and the returned rounds of the last hour and six hours by whether they were
+// on time. owned is how many objects the replica holds, so objects with no
+// entry -- nothing evaluated since takeover -- can be counted.
+//
+// The grace is one period: an object past its due time by less than its own
+// period is late, past it by more is overdue and has missed a turn. This is
+// the same rule OverdueWakes applies, stated once more here because the census
+// is over every entry and that call is over the overdue ones only.
+func (index *phaseTwoDueIndex) Census(now time.Time, owned int) fleet.ScheduleCensus {
+	census := fleet.ScheduleCensus{}
+	if index == nil {
+		return census
+	}
+	index.mu.Lock()
+	defer index.mu.Unlock()
+	nowUnix := now.Unix()
+	for _, entry := range index.pending {
+		switch {
+		case entry.dueAtUnix > nowUnix:
+			census.Waiting++
+			if entry.queryCooldown {
+				census.Cooling++
+			}
+		default:
+			late := nowUnix - entry.dueAtUnix
+			switch {
+			case entry.intervalSeconds <= 0:
+				census.Late++
+				census.MissingPeriod++
+			case late <= entry.intervalSeconds:
+				census.Late++
+			default:
+				census.Overdue++
+			}
+			if float64(late) > census.OldestLateSeconds {
+				census.OldestLateSeconds = float64(late)
+			}
+		}
+	}
+	if owned > len(index.entries) {
+		census.Never = owned - len(index.entries)
+	}
+	minute := nowUnix / 60
+	for offset := int64(0); offset < dueCompletionBuckets; offset++ {
+		bucket := index.completions[dueBucketSlot(minute-offset)]
+		if bucket.minute != minute-offset {
+			continue
+		}
+		census.Completed6h += bucket.completed
+		census.OnTime6h += bucket.onTime
+		if offset < 60 {
+			census.Completed1h += bucket.completed
+			census.OnTime1h += bucket.onTime
+			census.HeldBack1h += bucket.heldBack
+			census.HeldBackOnTime1h += bucket.heldBackOnTime
+		}
+	}
+	return census
+}
+
+// WakeOf reports what the index holds for one object. Known is false when it
+// holds nothing, which means nothing has been evaluated for the object since
+// this replica took it over.
+func (index *phaseTwoDueIndex) WakeOf(queryGroup string) fleet.WakeFacts {
+	if index == nil {
+		return fleet.WakeFacts{}
+	}
+	index.mu.Lock()
+	defer index.mu.Unlock()
+	entry, ok := index.entries[execution.QueryGroupIdentity(queryGroup)]
+	if !ok {
+		return fleet.WakeFacts{}
+	}
+	return fleet.WakeFacts{Known: true, DueAt: time.Unix(entry.dueAtUnix, 0),
+		IntervalSeconds: entry.intervalSeconds, Deferred: entry.deferred, Cooling: entry.queryCooldown}
 }
 
 // dueEntryHeap orders by wake time, then by name so an ordering is total. The

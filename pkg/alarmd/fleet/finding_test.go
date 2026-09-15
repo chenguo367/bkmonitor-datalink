@@ -284,7 +284,8 @@ func TestUnderCheckCrossesColumnsAndOrdersByUrgency(t *testing.T) {
 		mk("stalled-older", SituationStalled, at.Add(-4*time.Hour)),
 		mk("young", SituationSeriesYoung, at.Add(-5*time.Hour)),
 	}
-	got := UnderCheck(CheckRoundsStalled, "", anomalies, demoted, undecidable)
+	view := &View{Anomalies: anomalies, Demoted: demoted, Undecidable: undecidable}
+	got := UnderCheck(CheckRoundsStalled, "", view)
 	want := []string{"stalled-older", "stalled-old", "stalled-new"}
 	if len(got) != len(want) {
 		t.Fatalf("under ROUNDS_STALLED = %v, want %v", names(got), want)
@@ -296,7 +297,7 @@ func TestUnderCheckCrossesColumnsAndOrdersByUrgency(t *testing.T) {
 	}
 	// A group narrows to one fold and nothing else.
 	demoted[0].Finding.Group = "pod-b"
-	if got := UnderCheck(CheckRoundsStalled, "pod-b", anomalies, demoted, undecidable); len(got) != 1 ||
+	if got := UnderCheck(CheckRoundsStalled, "pod-b", view); len(got) != 1 ||
 		got[0].QueryGroup != "stalled-old" {
 		t.Errorf("under ROUNDS_STALLED group pod-b = %v, want [stalled-old]", names(got))
 	}

@@ -34,6 +34,12 @@ const (
 	// the absence of rounds, and the only thing that can report it is whatever
 	// is holding the object's next wake time.
 	KindOverdueWake = "OVERDUE_WAKE"
+	// KindSkippedSpan is a retained record of Slots this deployment never
+	// evaluated -- skipped past the replay window, or lost to a pruned
+	// timeline. It is not a round: the object is usually running normally now.
+	// It exists as a kind so the record can be listed under its check like any
+	// other row, rather than only counted.
+	KindSkippedSpan = "SKIPPED_SPAN"
 )
 
 // ReasonWakeMissed is the reason code carried by an overdue object. The other
@@ -132,7 +138,13 @@ type queryGroupState struct {
 	// outlives the rounds around it on purpose: the object recovers immediately
 	// and every later round looks healthy, while the detection inside the span
 	// never happened and cannot be made to happen.
-	prunedSkip    *PrunedSkip
+	prunedSkip *PrunedSkip
+	// gapSkip is the last run of Slots this object skipped because they fell
+	// past the replay window -- this deployment giving up on work it could not
+	// catch up. Retained for the same reason prunedSkip is: the object recovers
+	// at the next round and every later round reads healthy, while the Slots
+	// in the span were never evaluated and never will be.
+	gapSkip       *SkippedSpan
 	queryCooldown *observability.QueryCooldownFacts
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
@@ -366,7 +378,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// the context that names the query group does not name the strategy;
 	// replacing one with the other loses whichever half it did not come from.
 	trace := observation.Trace
-	if trace.QueryGroupKey == "" || trace.StrategyID == "" {
+	if trace.QueryGroupKey == "" || trace.StrategyID == "" || trace.EvaluationTime == 0 {
 		fromContext := observability.TraceFieldsFromContext(ctx)
 		if trace.QueryGroupKey == "" {
 			trace.QueryGroupKey = fromContext.QueryGroupKey
@@ -374,6 +386,9 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if trace.StrategyID == "" {
 			trace.StrategyID = fromContext.StrategyID
 			trace.BusinessID = fromContext.BusinessID
+		}
+		if trace.EvaluationTime == 0 {
+			trace.EvaluationTime = fromContext.EvaluationTime
 		}
 	}
 	queryGroup := trace.QueryGroupKey
@@ -423,13 +438,24 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if cursorAdvance.Status == observability.CursorAdvanceApplied {
 			state.prunedSkip = &PrunedSkip{
 				From: cursorAdvance.From, To: cursorAdvance.To, At: at,
-				DiscardedSlot: cursorAdvance.InFlightSlot,
+				DiscardedSlot: cursorAdvance.InFlightSlot, Replica: tracker.replica,
 			}
 		}
 		if completion == "" && runOutcome == "" && executeOutcome == "" && failure == nil &&
 			observation.QueryCooldown == nil {
 			return
 		}
+	}
+	// A Slot skipped because it fell past the replay window. Consecutive skips
+	// are one span; a round that is not a skip ends it, and the span stays as
+	// the record of what was never evaluated.
+	if completion == "GAP_SKIPPED" {
+		if state.gapSkip == nil || state.lastCompleted != "GAP_SKIPPED" {
+			state.gapSkip = &SkippedSpan{FirstSlot: trace.EvaluationTime, Replica: tracker.replica}
+		}
+		state.gapSkip.LastSlot = trace.EvaluationTime
+		state.gapSkip.Slots++
+		state.gapSkip.At = at
 	}
 	// Captured before this round is folded in: by the time the run-start block
 	// runs, this round has already made the object determined, and the question
@@ -869,6 +895,26 @@ func sortStrategies(strategies []StrategyRef) {
 			strategies[inner-1], strategies[inner] = right, left
 		}
 	}
+}
+
+// GapSkips is every object this replica has seen skip a run of Slots because
+// they fell past the replay window, with the last such run. Like PrunedSkips,
+// it outlives the rounds around it: the loss is in the object's past and no
+// later round can carry it.
+func (tracker *Tracker) GapSkips() map[string]SkippedSpan {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	var skips map[string]SkippedSpan
+	for queryGroup, state := range tracker.groups {
+		if state.gapSkip == nil {
+			continue
+		}
+		if skips == nil {
+			skips = make(map[string]SkippedSpan, 4)
+		}
+		skips[queryGroup] = *state.gapSkip
+	}
+	return skips
 }
 
 // PrunedSkips is every object this replica has seen lose a span of Slots to a

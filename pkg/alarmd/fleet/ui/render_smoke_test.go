@@ -191,15 +191,42 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			item.Coverage = &fleet.HistoryCoverage{Levels: 3, Short: 2, Empty: 2,
 				WorstRequired: 14, ShortRounds: 40, EmptyRounds: 40}
 		}),
+		// Where the object is in its cycle, from the due index. One waiting,
+		// one late within its period, one that has missed a turn under a
+		// backend situation (and is therefore this deployment's line, not the
+		// backend's), one never evaluated since takeover.
+		anomaly("qg-waiting", func(item *fleet.Anomaly) {
+			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
+			item.Wake = &fleet.WakeFacts{Known: true, DueAt: at.Add(40 * time.Second), IntervalSeconds: 60}
+		}),
+		anomaly("qg-late", func(item *fleet.Anomaly) {
+			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
+			item.Wake = &fleet.WakeFacts{Known: true, DueAt: at.Add(-12 * time.Second), IntervalSeconds: 60}
+		}),
+		anomaly("qg-missed-turn", func(item *fleet.Anomaly) {
+			item.CauseReason = "QUERY_TIMEOUT"
+			item.Wake = &fleet.WakeFacts{Known: true, DueAt: at.Add(-4 * time.Minute), IntervalSeconds: 60}
+		}),
+		anomaly("qg-never", func(item *fleet.Anomaly) {
+			item.SinceFrom = fleet.SinceRestoredLastFull
+			item.Wake = &fleet.WakeFacts{Known: false}
+		}),
 	}
-	fleet.Attribute(rows)
+	fleet.Attribute(rows, at)
 	// The first screen, folded from the same rows by the same Go code the route
 	// uses, so the sentences the page renders are checked against counts that
 	// cannot drift from what the server sends. Three objects nobody can speak
 	// for and a stale replica, so the observation-gap line has both a fold with
 	// objects and one without.
-	checks := fleet.ReportChecks([][]fleet.Anomaly{rows}, nil,
-		&fleet.View{Unknown: 3, Gaps: []fleet.Gap{{Kind: fleet.GapSnapshotStale, Replica: "pod-b"}}})
+	// A retained skip: an object that skipped Slots past the replay window an
+	// hour ago and has run normally since. It is under no column and on the
+	// first screen anyway, with a row of its own.
+	retained := &fleet.View{Unknown: 3, Gaps: []fleet.Gap{{Kind: fleet.GapSnapshotStale, Replica: "pod-b"}},
+		GapSkips: map[string]fleet.SkippedSpan{"qg-skipped-hour-ago": {
+			FirstSlot: at.Add(-90 * time.Minute).Unix(), LastSlot: at.Add(-70 * time.Minute).Unix(),
+			Slots: 20, At: at.Add(-time.Hour), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"}}}
+	checks := fleet.ReportChecks([][]fleet.Anomaly{rows}, nil, retained)
+	rows = append(rows, fleet.UnderCheck(fleet.CheckDetectionAbandoned, "", retained)...)
 	// The barest row the API can send: every omitempty field absent. It goes in
 	// after Attribute so it keeps its empty attribution, because a fixture where
 	// every row has every field cannot catch a property read on a field that is
@@ -301,6 +328,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			// the one nobody had ever executed.
 			Overdue:  &fleet.OverdueFacts{Total: 0},
 			Dispatch: &fleet.DispatchSuppression{Parked: 1993, Skipped: map[string]uint64{}},
+			// The census the first sentence is built from: keeping up, with a
+			// few late and one never evaluated.
+			Schedule: &fleet.ScheduleCensus{Waiting: 1900, Cooling: 33, Late: 12, Overdue: 0, Never: 1,
+				Completed1h: 9000, OnTime1h: 8964, Completed6h: 54000, OnTime6h: 53700,
+				HeldBack1h: 120, HeldBackOnTime1h: 118},
 			// Capacity, which this check had never executed: the fixture carried
 			// no capacity, so renderCapacity returned at its first guard and the
 			// busiest computed panel on the page was covered by nothing. A null
@@ -428,13 +460,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 
 	// The first screen. Checks this reader acts on, in one sentence each with
 	// the counts substituted; the ones already somebody else's under the fold.
-	// The fixture has one stalled object, two refused queries (one in the
-	// cooldown pool, one not), a backend timing out, a churning strategy, and
-	// four objects nobody can speak for: three the view holds undetermined and
-	// one restored without its cause, under three folds with the stale replica.
+	// The fixture has one stalled object, one that has missed a turn, two
+	// refused queries (one in the cooldown pool, one not), a backend timing
+	// out, a churning strategy, two skips (one current, one retained), and
+	// five objects nobody can speak for: three the view holds undetermined and
+	// two restored without their cause, under three folds with the stale
+	// replica.
 	todo := lineStarting(text, "CHECKS ::")
 	for _, want := range []string{"1 个对象的轮次不再结束", "alarmd", "后端拒绝了 2 个对象的查询", "待确认",
-		"1 个对象因 alarmd 自己的容量限制放弃了检测", "4 个对象现在说不出结论（3 种原因）"} {
+		"2 个对象因 alarmd 自己的容量限制放弃了检测", "1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）"} {
 		if !strings.Contains(todo, want) {
 			t.Errorf("the checks do not say %q:\n%s", want, todo)
 		}
@@ -453,7 +487,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		}
 	}
 	brief := lineStarting(text, "BRIEF ::")
-	for _, want := range []string{"执行情况：没有对象到期没跑", "需要处理：", "类问题，影响", "观测完整性：1 处覆盖缺口"} {
+	for _, want := range []string{"执行情况：跟得上", "9000 轮里 99.6% 在下一轮到期前完成（6 小时 99.4%）",
+		"被挡回 120 轮，其中 118 轮仍按时完成", "1900 个在等下次（33 个在冷却）", "12 个迟到未超一个周期", "1 个接管后还没跑第一轮",
+		"需要处理：", "类问题，影响", "观测完整性：1 处覆盖缺口"} {
 		if !strings.Contains(brief, want) {
 			t.Errorf("the brief does not say %q:\n%s", want, brief)
 		}
@@ -461,7 +497,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// Opening a check lists its folds with their counts; a fold with no objects
 	// says so rather than offering an empty table.
 	groups := lineStarting(text, "GROUPS ::")
-	for _, want := range []string{"UNDETERMINED · 3 个对象", "RESTORED_WITHOUT_CAUSE · 1 个对象",
+	for _, want := range []string{"UNDETERMINED · 3 个对象", "RESTORED_WITHOUT_CAUSE · 2 个对象",
 		"SNAPSHOT_STALE · 副本级缺口，没有可列的对象"} {
 		if !strings.Contains(groups, want) {
 			t.Errorf("the groups of OBSERVATION_GAP do not say %q:\n%s", want, groups)
@@ -475,11 +511,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"qg-stalled", "轮次不结束", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
 		{"qg-cooldown", "冷却中", "失败 · QUERY_UNAVAILABLE", "—"},
 		{"qg-rejected", "冷却中", "被拒绝 · QUERY_UNAVAILABLE", "—"},
-		{"qg-blocked", "在跑", "失败 · source_blocked", "—"},
+		{"qg-blocked", "—", "失败 · source_blocked", "—"},
 		{"qg-offhours", "生效时段外", "完成 · EFFECTIVE_TIME_INACTIVE", "—"},
-		{"qg-window-churn", "在跑", "完成 · HISTORY_WARMING", "9 个窗口 · 短 4 · 空 0 · 新 4 · 连续 40 轮"},
-		{"qg-window-starved", "在跑", "完成 · HISTORY_WARMING", "3 个窗口 · 短 2 · 空 2 · 新 0 · 连续 40 轮"},
-		{"qg-plain", "在跑", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
+		{"qg-window-churn", "—", "完成 · HISTORY_WARMING", "9 个窗口 · 短 4 · 空 0 · 新 4 · 连续 40 轮"},
+		{"qg-window-starved", "—", "完成 · HISTORY_WARMING", "3 个窗口 · 短 2 · 空 2 · 新 0 · 连续 40 轮"},
+		{"qg-plain", "—", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
+		{"qg-late", "迟到 12 秒", "完成 · HISTORY_WARMING", "—"},
+		{"qg-missed-turn", "超期 4 分 0 秒", "完成 · QUERY_TIMEOUT", "—"},
+		{"qg-never", "接管后未跑", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
+		{"qg-skipped-hour-ago", "—", "— · GAP_SKIPPED", "—"},
 	} {
 		line := lineStarting(text, "ROW "+want.object+" ::")
 		if line == "" {
@@ -496,6 +536,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 				t.Errorf("%s cell %d = %q, want %q", want.object, index, cells[index], part)
 			}
 		}
+	}
+	// The waiting object names the moment it is next due; the wall-clock
+	// rendering is the harness's locale, so only the shape is pinned.
+	if line := lineStarting(text, "ROW qg-waiting ::"); !strings.Contains(line, "等下次 · 预计 ") {
+		t.Errorf("qg-waiting renders %q, want it to say when it is next due", line)
+	}
+	// The retained skip carries its span in the evidence.
+	if line := lineStarting(text, "SKIP qg-skipped-hour-ago ::"); !strings.Contains(line, "20 个 Slot") {
+		t.Errorf("the retained skip renders %q, want the span with its Slot count", line)
 	}
 
 	// What the capacity panel says when a refresh arrives before any counter has
@@ -627,13 +676,17 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"健康且没有覆盖缺口时不能还说证据不全"},
 		{"VAR degraded why ::", "存在 alarmd 自己该负责的异常", "",
 			"DEGRADED 要说清是 alarmd 自己的异常，否则和数据源问题分不开"},
-		// The first sentence of the brief, in the states the overdue cell has.
-		{"VAR overdue-present brief ::", "3 个对象到期没跑，最久 900 秒", "",
-			"有到期没跑的对象时第一句要给出个数和最久多少秒"},
-		{"VAR overdue-truncated brief ::", "数不出来", "没有对象到期没跑",
-			"截断时不能说没有"},
-		{"VAR dispatch-off brief ::", "说不出是否按时", "没有对象到期没跑",
-			"到期索引没启用时不能说按时"},
+		// The first sentence of the brief, in the states the census has.
+		{"VAR behind brief ::", "跟不上", "跟得上",
+			"有超期且 1 小时按时率低于 6 小时时要说跟不上"},
+		{"VAR behind brief ::", "7 个对象超期，最久 15 分 0 秒", "",
+			"跟不上时要给出超期个数和最久多少"},
+		{"VAR catching-up brief ::", "有超期但在追", "跟不上",
+			"有超期但短窗按时率不低于长窗时不是跟不上"},
+		{"VAR quiet-hour brief ::", "过去 1 小时没有轮次返回", "%",
+			"没有轮次返回时不能印一个比率"},
+		{"VAR no-census brief ::", "说不出是否按时", "跟得上",
+			"没有普查时不能说按时"},
 
 		// 被挡回 by cause. The old wording named one remedy -- grow the queue --
 		// for a number that is mostly the branch more room cannot change.
@@ -801,6 +854,7 @@ for (const row of data.anomalies) {
   catch (e) { console.error('objectRow threw on ' + row.query_group + ': ' + e.message); failed++; continue; }
   const cells = tr.children.map(textOf);
   console.log('ROW ' + row.query_group + ' :: ' + cells.slice(1, 5).join(' | '));
+  if (row.skip) { console.log('SKIP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the
@@ -896,6 +950,16 @@ const variants = {
   'expected-mismatch': {expected: 2075},
   'healthy': {health: 'HEALTHY', gaps: [], unattributed: 0},
   'degraded': {health: 'DEGRADED', gaps: [], unattributed: 0},
+  // The census in the other states it has: falling behind (overdue, and the
+  // hour's rate below the six hours'), overdue but the rate not falling, a
+  // quiet hour with nothing returned, and no census at all.
+  'behind': {schedule: {waiting: 1800, late: 40, overdue: 7, never: 0, oldest_late_seconds: 900,
+                        completed_1h: 8000, on_time_1h: 7000, completed_6h: 54000, on_time_6h: 53000}},
+  'catching-up': {schedule: {waiting: 1800, late: 40, overdue: 2, never: 0, oldest_late_seconds: 130,
+                             completed_1h: 8000, on_time_1h: 7950, completed_6h: 54000, on_time_6h: 53000}},
+  'quiet-hour': {schedule: {waiting: 1900, late: 0, overdue: 0, never: 0,
+                            completed_1h: 0, on_time_1h: 0, completed_6h: 54000, on_time_6h: 53700}},
+  'no-census': {schedule: null},
 };
 const variantCells = ['why', 'poolFlowHint', 'unattributedHint', 'splitBasis', 'overdueHint', 'briefSchedule'];
 for (const [name, override] of Object.entries(variants)) {
