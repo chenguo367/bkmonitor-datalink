@@ -249,7 +249,13 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"on its own - a history roster only grows, so a Plan that did not fit this round does " +
 				"not fit the next one either. A steady zero on that last one is the expected reading and " +
 				"any non-zero is worth acting on. All four labels are created at startup so a zero can " +
-				"be told from a label nothing ever wrote.",
+				"be told from a label nothing ever wrote. " +
+				"Read the fleet's sum of all four over a minute against the leader's " +
+				"sum(catalog_no_data_plans) times the Slots in that minute: they are the same Plans " +
+				"counted at the two ends of the publication, so the two should agree. All four at zero " +
+				"while the leader reports Plans is what a Plan losing its no-data section between the " +
+				"leader and the worker looks like, and it looks like nothing else: the Plans still " +
+				"execute, nothing fails, and every label here reads as a computed zero.",
 		}, []string{"outcome"}),
 		sourceWithheldLines: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_source_withheld_lines_total",
