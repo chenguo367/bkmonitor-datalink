@@ -323,9 +323,10 @@ func (store *ExecutionStore) LoadGapsInto(ctx context.Context, request execution
 			func() (string, error) { return PlanGapKeyV2(store.options.Prefix, item.Identity) })
 		if err != nil {
 			var identityErr *IdentityError
-			if errors.As(err, &identityErr) || errors.Is(err, ErrLifetimeUnsupported) {
-				// A backend that cannot renew is a wiring defect, not a
-				// flaky store: retrying reaches the same backend.
+			if errors.Is(err, ErrLifetimeUnsupported) {
+				snapshot.Status = execution.GapTerminal
+				snapshot.ReasonCode = execution.ReasonCode(contract.ReasonBackendCapabilityMissing)
+			} else if errors.As(err, &identityErr) {
 				snapshot.Status, snapshot.ReasonCode = execution.GapTerminal, execution.ReasonCode(contract.ReasonStateCorrupt)
 			} else {
 				snapshot.Status, snapshot.ReasonCode = execution.GapUnavailable, execution.ReasonCode(contract.ReasonRedisUnavailable)
@@ -367,9 +368,19 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 			continue
 		}
 		target, routeErr := store.options.Router.Route(mutation.Identity.Plan.TenantID, mutation.Identity.Plan.StrategyID)
-		backend, ok := target.Backend.(CompareAndSetBackend)
-		if routeErr != nil || !ok {
+		if routeErr != nil {
 			item.Status, item.ReasonCode = execution.GapGuardRetryable, execution.ReasonCode(contract.ReasonRedisUnavailable)
+			result.Items[index] = item
+			continue
+		}
+		backend, ok := target.Backend.(CompareAndSetBackend)
+		if !ok {
+			// Not the store being unavailable: the store this deployment routed
+			// to cannot do what this write needs. Retrying reaches the same
+			// backend and gets the same answer, so a retryable status here would
+			// retry it forever while the page said Redis was down.
+			item.Status = execution.GapGuardRejected
+			item.ReasonCode = execution.ReasonCode(contract.ReasonBackendCapabilityMissing)
 			result.Items[index] = item
 			continue
 		}

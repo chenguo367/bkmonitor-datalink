@@ -62,6 +62,7 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonPlanDuplicateLevelID:     {ReasonPlanDuplicateLevelID, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonPlanBudgetExceeded:       {ReasonPlanBudgetExceeded, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonNoDataConfigInvalid:      {ReasonNoDataConfigInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonBackendCapabilityMissing: {ReasonBackendCapabilityMissing, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonProjectionInvalid:        {ReasonProjectionInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonSelectorInvalid:          {ReasonSelectorInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonLevelInvalid:             {ReasonLevelInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},

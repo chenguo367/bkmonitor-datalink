@@ -248,6 +248,11 @@ var codeChecks = map[string]verdict{
 	"STATE_CORRUPT":            lands(CheckDefect),
 	"STATE_SCHEMA_UNSUPPORTED": lands(CheckDefect),
 	"AUDIT_DROP":               lands(CheckDefect),
+	// The store this deployment routed to cannot do what the write needs. It is
+	// wiring rather than weather: retrying reaches the same backend and gets the
+	// same answer. It used to arrive as REDIS_UNAVAILABLE, which sent the reader
+	// to look at a Redis that was fine and let the work retry forever.
+	"BACKEND_CAPABILITY_MISSING": lands(CheckDefect),
 
 	// The control plane did not give the runner something to run. A live read
 	// found twelve objects whose strategies had been retired days earlier and
