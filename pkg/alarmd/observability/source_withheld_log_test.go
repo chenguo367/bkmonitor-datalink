@@ -132,3 +132,80 @@ func TestARoundsWithheldLinesAreNotMergedIntoASuppressedCount(t *testing.T) {
 		}
 	}
 }
+
+// A Slot that found no no-data Plan says so, in a line somebody can grep for.
+//
+// This is the line whose absence cost three releases. Looking for why no-data
+// detection reported nothing, the search is for this stage, and no line at all
+// means either "this worker has no such Plan" or "it had them and not one
+// reached a decision" -- and every other no-data signal is produced by a Plan
+// that did reach one, so all of them are silent in both cases. The zero is what
+// splits them, so it is written rather than omitted as empty.
+func TestASlotWithNoNoDataPlansWritesTheZero(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	withheldObserver(t, &output).Observe(context.Background(), Observation{
+		Component: ComponentEvaluation, Stage: StageNoDataDecided, Result: ResultSuccess,
+		NoDataCensus: &NoDataCensusFacts{Plans: 0},
+	})
+
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode no-data census log: %v; log=%s", err, output.String())
+	}
+	value, present := event["no_data_plans"]
+	if !present {
+		t.Fatalf("a Slot that found no no-data Plan wrote no count; event=%#v", event)
+	}
+	if value != float64(0) {
+		t.Fatalf("no_data_plans = %#v, want 0", value)
+	}
+}
+
+// And a Slot that found some says how many, next to what was decided.
+func TestANoDataSlotWritesItsCensusAndItsOutcome(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	// Its own limiter with room for both: the helper above deliberately allows
+	// one line per window, and what this test is about is the fields, not the
+	// budget. That these two lines share one limiter bucket -- same reason, no
+	// query group -- is real and worth knowing, but at two Slots a minute it is
+	// nowhere near the budget in production.
+	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 100})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewBoundedLogPolicy(limiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observer := NewLoggingObserver(New("alarmd", &output), policy)
+	observer.Observe(context.Background(), Observation{
+		Component: ComponentEvaluation, Stage: StageNoDataDecided, Result: ResultSuccess,
+		NoDataCensus: &NoDataCensusFacts{Plans: 9},
+	})
+	observer.Observe(context.Background(), Observation{
+		Component: ComponentEvaluation, Stage: StageNoDataDecided, Result: ResultSuccess,
+		NoDataSlot: &NoDataSlotFacts{Outcome: "EVALUATED", Plans: 9},
+	})
+
+	lines := strings.Split(strings.TrimSpace(output.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("wrote %d lines, want the census and the outcome; log=%s", len(lines), output.String())
+	}
+	var census, outcome map[string]any
+	if err := json.Unmarshal([]byte(lines[0]), &census); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(lines[1]), &outcome); err != nil {
+		t.Fatal(err)
+	}
+	if census["no_data_plans"] != float64(9) {
+		t.Fatalf("census line = %#v, want 9 Plans", census)
+	}
+	if outcome["no_data_outcome"] != "EVALUATED" || outcome["no_data_outcome_plans"] != float64(9) {
+		t.Fatalf("outcome line = %#v, want EVALUATED carrying 9 Plans", outcome)
+	}
+}

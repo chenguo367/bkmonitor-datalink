@@ -209,6 +209,20 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			attributes = append(attributes, slog.Int("withheld_dropped", facts.Dropped))
 		}
 	}
+	if facts := observation.NoDataCensus; facts != nil {
+		// Written even when it is none, which is the whole reason it is here.
+		// Somebody looking for why no-data detection reported nothing greps
+		// this stage and finds no line at all, and no line means either "this
+		// worker has no such Plan" or "it had them and none reached a
+		// decision". The zero is the answer to that question.
+		attributes = append(attributes, slog.Int("no_data_plans", facts.Plans))
+	}
+	if facts := observation.NoDataSlot; facts != nil {
+		attributes = append(attributes,
+			slog.String("no_data_outcome", facts.Outcome),
+			slog.Int("no_data_outcome_plans", facts.Plans),
+		)
+	}
 	if facts := observation.StateGenerationSkew; facts != nil {
 		attributes = append(attributes,
 			slog.String("state_generation_skew_kind", facts.Kind),

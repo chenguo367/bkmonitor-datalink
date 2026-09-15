@@ -31,16 +31,19 @@ type streamedExecution struct {
 	// completionOnly holds, per Plan without streamed PRIMARY series, the exact
 	// set validated by validateCompletionOnlyExactSet: one completion binding
 	// per frozen (consumer, requirement). It decides the no-series result.
-	completionOnly       map[execution.PlanIdentity][]execution.NamedInputBinding
-	bindings             []execution.NamedInputBinding
-	stateItems           []execution.StatePreflightItem
-	gapItems             []execution.PlanGapLoadItem
-	noDataItems          []execution.PlanNoDataLoadItem
-	state                execution.StatePreflightResult
-	gaps                 execution.GapLoadResult
-	noData               execution.NoDataLoadResult
-	noDataHosts          map[execution.PlanNoDataIdentity]nodata.HostResolution
-	noDataOutcomes       []nodata.SlotOutcome
+	completionOnly map[execution.PlanIdentity][]execution.NamedInputBinding
+	bindings       []execution.NamedInputBinding
+	stateItems     []execution.StatePreflightItem
+	gapItems       []execution.PlanGapLoadItem
+	noDataItems    []execution.PlanNoDataLoadItem
+	state          execution.StatePreflightResult
+	gaps           execution.GapLoadResult
+	noData         execution.NoDataLoadResult
+	noDataHosts    map[execution.PlanNoDataIdentity]nodata.HostResolution
+	noDataOutcomes []nodata.SlotOutcome
+	// noDataPlansSeen is how many of this Slot's Plans detect no-data,
+	// counted where they are found rather than where they are judged.
+	noDataPlansSeen      int
 	noDataStateMutations uint64
 	noDataMutations      []execution.PlanNoDataMutation
 	effective            map[execution.ConsumerRef]strategy.EffectiveTimeFact
