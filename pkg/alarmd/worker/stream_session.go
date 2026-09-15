@@ -34,8 +34,10 @@ type streamedExecution struct {
 	bindings       []execution.NamedInputBinding
 	stateItems     []execution.StatePreflightItem
 	gapItems       []execution.PlanGapLoadItem
+	noDataItems    []execution.PlanNoDataLoadItem
 	state          execution.StatePreflightResult
 	gaps           execution.GapLoadResult
+	noData         execution.NoDataLoadResult
 	effective      map[execution.ConsumerRef]strategy.EffectiveTimeFact
 	evaluated      execution.EvaluationResult
 	delivered      []execution.SeriesDelivery
@@ -365,6 +367,35 @@ func (stream *streamedExecution) validateSeriesBatch(batch execution.SeriesExecu
 	return series, nil
 }
 
+// noDataPreflightForHeader is the load list for the Plans that detect no-data,
+// and only those.
+//
+// A Plan without the section has no memory to read and never will, so asking
+// for it would be one Redis read per Slot per Plan for an answer that is always
+// "nothing there" - and it would put those Plans into the load result, where a
+// reader counting no-data Plans would find every Plan in the deployment.
+func noDataPreflightForHeader(header execution.InternalExecutionHeader) ([]execution.PlanNoDataLoadItem, error) {
+	items := make([]execution.PlanNoDataLoadItem, 0, len(header.DuePlans))
+	for _, due := range header.DuePlans {
+		if due.CompiledPlan.NoData() == nil {
+			continue
+		}
+		version, err := execution.BuildApplyVersion(header.Contract, due.StateApplyEpoch)
+		if err != nil {
+			return nil, err
+		}
+		retention, err := execution.DeriveStateRetentionRequirement(due.CompiledPlan)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, execution.PlanNoDataLoadItem{
+			Identity:     execution.PlanNoDataIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration},
+			ApplyVersion: version, ScheduleRevision: due.ScheduleRevision, Retention: retention,
+		})
+	}
+	return items, nil
+}
+
 func gapPreflightForHeader(header execution.InternalExecutionHeader) ([]execution.PlanGapLoadItem, error) {
 	items := make([]execution.PlanGapLoadItem, 0, len(header.DuePlans))
 	for _, due := range header.DuePlans {
@@ -600,6 +631,9 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	if err := stream.loadGaps(ctx); err != nil {
 		return err
 	}
+	if err := stream.loadNoDataMemory(ctx); err != nil {
+		return err
+	}
 	if err := stream.evaluateSeries(ctx, completion, preparedSeriesEvaluations); err != nil {
 		var exceeded *provisionalBudgetExceededError
 		if errors.As(err, &exceeded) && exceeded.slot {
@@ -756,6 +790,50 @@ func (stream *streamedExecution) loadGaps(ctx context.Context) error {
 	result, reason := summarizeGapLoad(stream.gaps)
 	stream.coordinator.observeWithCounts(ctx, observability.ComponentState, observability.StageGapLoaded,
 		stream.request.Operation, started, result, reason, observability.Counts{Keys: int64(len(stream.gaps.Items))}, nil)
+	return nil
+}
+
+// loadNoDataMemory reads what each no-data Plan remembers, beside the gap load
+// and at the same point in the Slot.
+//
+// Here rather than later because the memory is evidence the evaluation needs,
+// not a detail of writing it back: a Slot that reached its series before
+// knowing what it remembered would have to either decide absence without the
+// clocks or go back to the store mid-evaluation, and the second is what makes a
+// retried Slot stop being a function of its evidence.
+func (stream *streamedExecution) loadNoDataMemory(ctx context.Context) error {
+	items, err := noDataPreflightForHeader(stream.header)
+	if err != nil {
+		return err
+	}
+	stream.noDataItems = items
+	if len(items) == 0 {
+		// No Plan in this Slot detects no-data. Nothing to read, and an empty
+		// request is refused by the store rather than answered with nothing.
+		stream.noData = execution.NoDataLoadResult{}
+		return nil
+	}
+	var targetBytes uint64
+	for _, item := range items {
+		targetBytes += retainedObjectBytes(item)
+	}
+	if err := stream.retainTargetBytes(ctx, len(items), targetBytes); err != nil {
+		return err
+	}
+	request := execution.NoDataLoadRequest{Contract: stream.header.Contract, Items: items}
+	started := time.Now()
+	stream.noData, err = stream.coordinator.ports.NoData.LoadNoData(ctx, request)
+	if err == nil {
+		err = execution.ValidateNoDataLoad(request, stream.noData)
+	}
+	if err != nil {
+		stream.coordinator.observe(ctx, observability.ComponentState, observability.StageGapLoaded,
+			stream.request.Operation, started, "", "", err)
+		return fmt.Errorf("alarmd worker: no-data memory preflight: %w", err)
+	}
+	stream.coordinator.observeWithCounts(ctx, observability.ComponentState, observability.StageGapLoaded,
+		stream.request.Operation, started, observability.ResultSuccess, observability.ReasonNone,
+		observability.Counts{Keys: int64(len(stream.noData.Items))}, nil)
 	return nil
 }
 

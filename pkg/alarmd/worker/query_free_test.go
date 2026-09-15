@@ -724,7 +724,7 @@ func newQueryFreeFixture(t *testing.T, activations []execution.PlanActivationRes
 	}
 	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{OpenAlerts: ports,
 		Finalization: ports, Activation: ports,
-		Query: ports, Sequencer: ports, Evaluator: ports, Admission: ports, GapGuard: ports,
+		Query: ports, Sequencer: ports, Evaluator: ports, Admission: ports, GapGuard: ports, NoData: worker.SharedNoDataStore,
 		Events: ports, State: ports, Progress: ports,
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observability.NormalizeObservation(observation))

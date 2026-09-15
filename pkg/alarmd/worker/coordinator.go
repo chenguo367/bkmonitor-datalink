@@ -34,10 +34,15 @@ type Ports struct {
 	Evaluator    execution.Evaluator
 	Admission    execution.SideEffectAdmitter
 	GapGuard     execution.GapGuardStore
-	Events       execution.EventSink
-	State        execution.StateStore
-	Progress     execution.ProgressStore
-	Observer     execution.Observer
+	// NoData is required, like every other port here. A worker without it would
+	// evaluate every Plan's thresholds and none of their absence, and the only
+	// sign would be no-data alerts that never fire - which is indistinguishable
+	// from nothing being absent.
+	NoData   execution.PlanNoDataStore
+	Events   execution.EventSink
+	State    execution.StateStore
+	Progress execution.ProgressStore
+	Observer execution.Observer
 	// OpenAlerts is required: a worker that evaluates without it sends every
 	// RECOVERY envelope, and the trigger counts that as not_configured, which
 	// on a production worker is the wiring having come apart.
@@ -92,7 +97,7 @@ func (*activationProtectionRequiredError) Error() string {
 
 func NewSlotExecutionCoordinator(ports Ports, budget ProvisionalBudget) (*SlotExecutionCoordinator, error) {
 	if ports.Finalization == nil || ports.Activation == nil || ports.Query == nil || ports.Sequencer == nil ||
-		ports.Evaluator == nil || ports.Admission == nil || ports.GapGuard == nil ||
+		ports.Evaluator == nil || ports.Admission == nil || ports.GapGuard == nil || ports.NoData == nil ||
 		ports.Events == nil || ports.State == nil || ports.Progress == nil || ports.Observer == nil ||
 		ports.OpenAlerts == nil {
 		return nil, errors.New("alarmd worker: all C0 execution ports are required")
