@@ -69,6 +69,30 @@ type CatalogComposition struct {
 	// Objects counts source objects by disposition -- also a partition, over
 	// the objects the round recorded a disposition for.
 	Objects map[Disposition]int
+	// Withheld counts the objects that did not become a Plan, by the pair
+	// (disposition, reason). The disposition alone cannot be acted on: a
+	// CONFIG_REJECTED strategy has stopped detecting, while a STALE_CONFIG one
+	// is still running its last good Plan, and the reason says which change
+	// caused either. It is a partition of every object whose disposition is not
+	// ACCEPTED, carrying the
+	// reason the disposition partition has one.
+	//
+	// It exists because a reason nobody can read is not a diagnosis. These
+	// reasons were written to be read on a live deployment, and until this they
+	// lived only in the object page's Redis snapshot, which the read tooling
+	// does not reach - so the only way to count what a rejection had withheld
+	// was to publish it and watch a disposition total move.
+	//
+	// The reason is carried as it was written, with no list of accepted values
+	// and no other to fold the rest into. A list would have to be exactly the
+	// set the package attaches or the majority of objects would count as other
+	// - the first version of this had twenty of the forty-odd reasons this
+	// package writes, which would have put most of a deployment's rejections
+	// under a label that names nothing. The set is finite because every reason
+	// is a literal in this package's source; what bounds the metric is a count
+	// of those literals, taken by a test that reads the source rather than a
+	// list someone has to remember to extend.
+	Withheld map[WithheldKey]int
 	// InertPlans counts the Plans whose schedule cannot hold the wait their
 	// data needs to land. Such a Plan is ACCEPTED, is scheduled, and executes
 	// -- and every round every one of its consumers is bound unavailable,
@@ -124,6 +148,7 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		QueryGroups: make(map[string]int, len(SupportedSourceSemantics)+2),
 		Plans:       make(map[string]int, len(SupportedSourceSemantics)+2),
 		Objects:     make(map[Disposition]int, len(CatalogDispositions)+1),
+		Withheld:    make(map[WithheldKey]int),
 	}
 	for _, semantics := range SupportedSourceSemantics {
 		composition.QueryGroups[semantics] = 0
@@ -157,8 +182,20 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 			kind = DispositionOther
 		}
 		composition.Objects[kind]++
+		if kind == DispositionAccepted {
+			continue
+		}
+		composition.Withheld[WithheldKey{Disposition: kind, Reason: disposition.Reason}]++
 	}
 	return composition
+}
+
+// WithheldKey pairs what happened to an object with why. Neither half answers
+// on its own: the disposition says whether the strategy is still detecting, the
+// reason says which configuration caused it.
+type WithheldKey struct {
+	Disposition Disposition
+	Reason      string
 }
 
 // DispositionOther collects a disposition CatalogDispositions does not name,

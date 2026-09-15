@@ -59,6 +59,46 @@ func TestAStatedNumberDoesNotCostTheStrategyItsOtherDetection(t *testing.T) {
 	if _, err := frozenNoDataConfig(decoded.Items[0]); err == nil {
 		t.Fatal("frozenNoDataConfig() accepted a continuous that is not a number")
 	}
+
+	// Typing the numbers alone was not enough. Every position in this section
+	// is open, so each one that stayed typed kept the whole blast radius: these
+	// two failed Decode for the document until the section itself became raw.
+	// wantItemError says whether the item itself is then refused. Surviving the
+	// document decode is only half: a shape the section should not hold has to
+	// be refused by name, or it arrives in a Plan as a dimension no series can
+	// carry and the item detects nothing while looking configured.
+	for name, shape := range map[string]struct {
+		section       string
+		wantItemError bool
+	}{
+		"is_enabled as text":         {section: `{"is_enabled":"true","continuous":5}`},
+		"agg_dimension of numbers":   {section: `{"is_enabled":true,"continuous":5,"agg_dimension":[1]}`, wantItemError: true},
+		"the section is not a table": {section: `"enabled"`, wantItemError: true},
+	} {
+		section := shape.section
+		t.Run(name, func(t *testing.T) {
+			document := json.RawMessage(`{"id":1,"bk_biz_id":2,"update_time":1700000000,"items":[{"id":11,` +
+				`"query_md5":"m","expression":"a","query_configs":[{}],` +
+				`"algorithms":[{"level":1,"type":"Threshold"}],"no_data_config":` + section + `}]}`)
+			decoded, err := decodeLegacyStrategy(document)
+			if err != nil {
+				t.Fatalf("decode strategy = %v; the shape took the whole strategy with it", err)
+			}
+			if len(decoded.Items) != 1 || len(decoded.Items[0].Algorithms) != 1 {
+				t.Fatalf("decoded items = %+v, want the item and its algorithm intact", decoded.Items)
+			}
+			config, err := frozenNoDataConfig(decoded.Items[0])
+			if shape.wantItemError {
+				if err == nil {
+					t.Fatalf("frozenNoDataConfig() = %+v, want the shape refused by name", config)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("frozenNoDataConfig() error = %v", err)
+			}
+		})
+	}
 }
 
 func TestFrozenNoDataConfigFollowsTheBackendReadSites(t *testing.T) {

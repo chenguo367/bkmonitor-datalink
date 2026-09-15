@@ -791,24 +791,67 @@ type legacyItem struct {
 	// strategy cache carried no section" is distinguishable from "it carried
 	// one with everything at zero"; the two mean different things and the
 	// second is a malformed entry rather than a disabled item.
-	NoDataConfig *legacyNoDataConfig `json:"no_data_config"`
+	NoDataConfig json.RawMessage `json:"no_data_config"`
 }
 
 // legacyNoDataConfig is the no_data_config the strategy cache stores.
 //
-// The numbers are raw because the type this section arrives in is open: the
-// SaaS serializer stores it as a bare DictField with no field-level validation,
-// and the backend reads every number out of it through int(), which accepts "5"
-// as readily as 5. Anything narrower here does not disable no-data when it meets
-// a value it did not expect - it fails Decode for the whole strategy document,
-// taking the item's threshold detection with it, and json.Number is only
-// narrower by a little: it admits "5" and still refuses "many" at that level.
-// Raw keeps every malformed value inside the section it came from.
+// The whole section is raw, and every field inside it is raw again, because the
+// type it arrives in is open at every position: the SaaS serializer stores
+// no_data_config as a bare DictField with no field-level validation, and the
+// backend reads it with int(), a truthiness test and a list comprehension, none
+// of which care what JSON type the value had.
+//
+// The reason to be raw is not tolerance for its own sake. A narrower Go type
+// here does not disable no-data when it meets a shape it did not expect - it
+// fails Decode for the whole strategy document, and the item's threshold
+// detection stops with it, under an error naming a field the vanished strategy
+// had nothing to do with. Typing the numbers alone was not enough: "is_enabled":
+// "true" and "agg_dimension": [1] kept the old blast radius until this became
+// raw too. Every shape problem now lands on NO_DATA_CONFIG_INVALID, which names
+// the item and leaves the rest of the catalogue alone.
 type legacyNoDataConfig struct {
-	IsEnabled    bool            `json:"is_enabled"`
-	Continuous   json.RawMessage `json:"continuous"`
-	AggDimension []string        `json:"agg_dimension"`
-	Level        json.RawMessage `json:"level"`
+	IsEnabled    json.RawMessage   `json:"is_enabled"`
+	Continuous   json.RawMessage   `json:"continuous"`
+	AggDimension []json.RawMessage `json:"agg_dimension"`
+	Level        json.RawMessage   `json:"level"`
+}
+
+// legacyNoDataEnabled reads is_enabled the way the backend's truthiness test
+// does: a JSON true, a non-zero number, or a non-empty string that is not one
+// of Python's falsey spellings. A shape it cannot read is an error rather than
+// a silent "off", because "off" here is a strategy that stops detecting no-data
+// without saying so.
+func legacyNoDataEnabled(raw json.RawMessage) (bool, error) {
+	text := strings.TrimSpace(string(raw))
+	switch text {
+	case "", "null", "false", "0", `""`:
+		return false, nil
+	case "true":
+		return true, nil
+	}
+	if unquoted, err := strconv.Unquote(text); err == nil {
+		// Python's `if no_data_config.get("is_enabled")` is true for any
+		// non-empty string, "false" included. Following that literally is the
+		// point: this reads a store the backend also reads.
+		return strings.TrimSpace(unquoted) != "", nil
+	}
+	if number, err := json.Number(text).Float64(); err == nil {
+		return number != 0, nil
+	}
+	return false, fmt.Errorf("no_data_config is_enabled %s is not a value this can read", text)
+}
+
+// legacyNoDataDimension reads one agg_dimension entry. The backend puts these
+// straight into a set and compares them against dimension names, which are
+// strings; a number there is a name no series can carry, and saying so by item
+// is better than losing the strategy to a decode error.
+func legacyNoDataDimension(raw json.RawMessage) (string, error) {
+	text := strings.TrimSpace(string(raw))
+	if unquoted, err := strconv.Unquote(text); err == nil {
+		return unquoted, nil
+	}
+	return "", fmt.Errorf("no_data_config agg_dimension entry %s is not a dimension name", text)
 }
 
 // legacyNoDataNumber reads one of that section's numbers the way the backend's
@@ -863,14 +906,30 @@ const defaultNoDataLevel uint32 = 2
 // asked for the detection, and dropping it quietly is the failure mode that
 // looks like nothing happened.
 func frozenNoDataConfig(item legacyItem) (*contract.NoDataConfigV1, error) {
-	source := item.NoDataConfig
-	if source == nil || !source.IsEnabled {
+	raw := strings.TrimSpace(string(item.NoDataConfig))
+	if raw == "" || raw == "null" {
 		return nil, nil
 	}
-	config := &contract.NoDataConfigV1{
-		AggDimension: append([]string(nil), source.AggDimension...),
-		Level:        defaultNoDataLevel,
+	var source legacyNoDataConfig
+	if err := json.Unmarshal(item.NoDataConfig, &source); err != nil {
+		return nil, fmt.Errorf("alarmd controlplane: item %d no_data_config: %w", item.ID, err)
 	}
+	enabled, err := legacyNoDataEnabled(source.IsEnabled)
+	if err != nil {
+		return nil, fmt.Errorf("alarmd controlplane: item %d %w", item.ID, err)
+	}
+	if !enabled {
+		return nil, nil
+	}
+	dimensions := make([]string, 0, len(source.AggDimension))
+	for _, entry := range source.AggDimension {
+		dimension, err := legacyNoDataDimension(entry)
+		if err != nil {
+			return nil, fmt.Errorf("alarmd controlplane: item %d %w", item.ID, err)
+		}
+		dimensions = append(dimensions, dimension)
+	}
+	config := &contract.NoDataConfigV1{AggDimension: dimensions, Level: defaultNoDataLevel}
 	// Continuous stays zero when the item omits it, and Validate refuses that.
 	// See defaultNoDataLevel for why this one is not defaulted.
 	continuous, stated, err := legacyNoDataNumber("continuous", source.Continuous)

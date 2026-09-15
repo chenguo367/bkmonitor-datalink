@@ -33,6 +33,7 @@ type catalogCompositionCollector struct {
 	queryGroups *prometheus.Desc
 	plans       *prometheus.Desc
 	objects     *prometheus.Desc
+	withheld    *prometheus.Desc
 	inertPlans  *prometheus.Desc
 }
 
@@ -64,6 +65,18 @@ func newCatalogCompositionCollector() *catalogCompositionCollector {
 				"listing here, which lands under other so the partition keeps adding up. ACCEPTED became "+
 				"Plans; the rest did not, and the object page says which strategies. Reported by the "+
 				"leader only.", "disposition"),
+		withheld: descriptor("catalog_withheld_objects",
+			"Source objects the Catalog the leader last built did not turn into a Plan, by what happened "+
+				"to them and why. The disposition alone cannot be acted on: a CONFIG_REJECTED strategy has "+
+				"stopped detecting, a STALE_CONFIG one is still running its last good Plan, and the reason "+
+				"names the configuration that caused either. A reason this build does not name is counted "+
+				"under other, so a reason added at its site and not in the list shows as a rising other "+
+				"rather than as a count that stops adding up. "+
+				"A pair absent from a scrape had no objects that round. Every pair reading zero is the "+
+				"expected state and is also what 'nothing was computed' looks like, so read it against "+
+				"catalog_objects: these pairs partition every object that is not ACCEPTED, the same pass "+
+				"produces both, and a zero that adds up against that sum is a zero that was computed. "+
+				"Reported by the leader only.", "disposition", "reason"),
 		inertPlans: descriptor("catalog_inert_plans",
 			"Plans in the Catalog the leader last built whose schedule cannot hold the wait their data "+
 				"needs to land: their readiness boundary falls past their own completion deadline, so every "+
@@ -81,6 +94,7 @@ func (c *catalogCompositionCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.queryGroups
 	ch <- c.plans
 	ch <- c.objects
+	ch <- c.withheld
 	ch <- c.inertPlans
 }
 
@@ -103,6 +117,11 @@ func (c *catalogCompositionCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	for disposition, count := range composition.Objects {
 		ch <- prometheus.MustNewConstMetric(c.objects, prometheus.GaugeValue, float64(count), string(disposition))
+	}
+	for key, count := range composition.Withheld {
+		ch <- prometheus.MustNewConstMetric(
+			c.withheld, prometheus.GaugeValue, float64(count), string(key.Disposition), key.Reason,
+		)
 	}
 	ch <- prometheus.MustNewConstMetric(c.inertPlans, prometheus.GaugeValue, float64(composition.InertPlans))
 }
