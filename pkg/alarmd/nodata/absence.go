@@ -12,9 +12,12 @@ package nodata
 import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 
 // RosterSource says where the expected set came from. It is carried into the
-// facts so a deployment can tell a roster that was enumerated from one that
-// fell back to history: a strategy silently detecting only what it has already
-// seen looks the same from the outside as one detecting everything it should.
+// facts as the caller declared it - never rewritten by the evaluation - so a
+// deployment can tell a roster that was enumerated from one that fell back to
+// history, and a target that resolved to no host (declared TARGET_STATIC,
+// Expected 0) from an item that expects nothing by design (declared WHOLE): a
+// strategy silently detecting only what it has already seen, or nothing at
+// all, looks the same from the outside as one detecting everything it should.
 type RosterSource string
 
 const (
@@ -22,7 +25,11 @@ const (
 	RosterTargetTopo    RosterSource = "TARGET_TOPO"
 	RosterTargetService RosterSource = "TARGET_SERVICE"
 	RosterHistory       RosterSource = "HISTORY"
-	RosterWhole         RosterSource = "WHOLE"
+	// RosterWhole is declared by the roster derivation for an item that expects
+	// no group by design: the backend's host scenario returns None when the
+	// no-data dimensions do not name bk_target_ip while a target is configured,
+	// and then expects nothing, so only the item as a whole can be absent.
+	RosterWhole RosterSource = "WHOLE"
 )
 
 // Roster is the set of groups this item expects to see, keyed by Group.Key().
@@ -73,9 +80,13 @@ const (
 	VerdictUnavailable Verdict = "UNAVAILABLE"
 )
 
-// AbsenceFacts are the low-cardinality counts one Slot reports.
+// AbsenceFacts are the low-cardinality counts one Slot reports. Expected is
+// the roster's size: with RosterSource it is what makes an enumeration that
+// came back empty visible, which is the failure that otherwise reads as an item
+// with nothing to say.
 type AbsenceFacts struct {
 	Present       uint64
+	Expected      uint64
 	Absent        uint64
 	Unavailable   uint64
 	Dropped       uint64
@@ -110,7 +121,7 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 		Verdicts: make(map[string]Verdict, len(input.Roster.Groups)+1),
 		Memory:   copyGroupMemory(input.Memory),
 		Facts: AbsenceFacts{
-			Present: uint64(len(input.Present)), Dropped: input.Dropped,
+			Present: uint64(len(input.Present)), Expected: uint64(len(input.Roster.Groups)), Dropped: input.Dropped,
 			RosterSource: input.Roster.Source, RosterVersion: input.Roster.Version,
 		},
 	}
@@ -131,9 +142,10 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 	// A2 and A3. With nothing expected, the item speaks about itself: it is
 	// absent when nothing arrived, and recovers as soon as anything does. The
 	// groups that arrive are remembered without being judged, which is where a
-	// history roster grows from.
+	// history roster grows from. The declared roster source is left as it is:
+	// an empty roster that was declared TARGET_STATIC is a target that resolved
+	// to no host, and rewriting it to WHOLE would hide exactly that.
 	if len(input.Roster.Groups) == 0 {
-		result.Facts.RosterSource = RosterWhole
 		if len(input.Present) == 0 {
 			result.Verdicts[whole] = VerdictAnomaly
 			result.Facts.Absent++
@@ -205,10 +217,16 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 
 // rememberPresent records a group that arrived without a verdict. An
 // out-of-business one is dropped instead: it does not belong to this item, so
-// remembering it would carry it into a later history roster.
+// remembering it would carry it into a later history roster. The whole-item
+// group is never remembered as seen: with an empty agg_dimension every series
+// projects onto it, so it arrives every round the item has data, but it is not
+// a series and a LastSeen would make it one.
 func rememberPresent(memory map[string]GroupMemory, key string, input AbsenceInput) {
 	if _, foreign := input.OutOfBusiness[key]; foreign {
 		delete(memory, key)
+		return
+	}
+	if key == WholeItemGroup().Key() {
 		return
 	}
 	memory[key] = GroupMemory{LastSeen: input.EvaluationTime}
