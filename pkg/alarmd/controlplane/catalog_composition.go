@@ -95,6 +95,14 @@ type CatalogComposition struct {
 	// of those literals, taken by a test that reads the source rather than a
 	// list someone has to remember to extend.
 	Withheld map[WithheldKey]int
+	// WithheldObjects is the same objects the counts above are made of, one
+	// record each, so a reader can ask which strategy rather than how many.
+	//
+	// It is filled by the same pass that fills Withheld, and a test holds the
+	// two to the same total. Counting in one place and listing in another is
+	// the shape where the page says forty and the log names thirty-nine and
+	// nothing is wrong with either.
+	WithheldObjects []ObjectDisposition
 	// NoDataPlans counts the Plans that detect no-data, by where their expected
 	// set comes from. Only accepted Plans are in it - a Plan that was withheld
 	// is in Withheld under the reason that withheld it.
@@ -216,6 +224,12 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 			continue
 		}
 		composition.Withheld[WithheldKey{Disposition: kind, Reason: disposition.Reason}]++
+		// The same record, kept whole. The count says how many; this says
+		// which, and the two cannot disagree because this is the line that
+		// made the count.
+		withheld := disposition
+		withheld.Disposition = kind
+		composition.WithheldObjects = append(composition.WithheldObjects, withheld)
 	}
 	return composition
 }

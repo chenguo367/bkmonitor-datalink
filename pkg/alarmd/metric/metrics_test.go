@@ -398,6 +398,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_withheld_objects"] = "variableLabels: {disposition,reason}"
 	expected["bkmonitor_alarmd_catalog_no_data_plans"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_control_source_withheld_lines_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_catalog_inert_plans"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_level_abnormal_total"] = "variableLabels: {window}"
 	expected["bkmonitor_alarmd_platform_settings_mode"] = "variableLabels: {mode}"
@@ -837,6 +838,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// created at startup so a zero on the one that never resolves on its own
 	// can be told from a label nothing ever wrote.
 	bounds[fqName("worker_no_data_slot_plans_total")] = len(nodata.SlotOutcomes)
+	// Named or dropped, and no third thing: each changed object goes to one
+	// of the two, both are created at startup, and the label is written only
+	// from the two constants this package owns.
+	bounds[fqName("control_source_withheld_lines_total")] = len(sourceWithheldLineResults)
 	// One series: a count, unlabelled. It stays unlabelled on purpose -- the
 	// interval would be the natural label and it is user input, so labelling
 	// it would put an open set on a family whose whole job is to be a steady

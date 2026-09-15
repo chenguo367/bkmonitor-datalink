@@ -42,6 +42,7 @@ type phaseTwoMetrics struct {
 	ownershipTransitions            *prometheus.CounterVec
 	queryAdmission                  *prometheus.CounterVec
 	noDataSlotPlans                 *prometheus.CounterVec
+	sourceWithheldLines             *prometheus.CounterVec
 	activeQGSetCount                prometheus.Gauge
 	activeQGSetBytes                prometheus.Gauge
 	activeQGSetEncode               *prometheus.HistogramVec
@@ -250,6 +251,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"any non-zero is worth acting on. All four labels are created at startup so a zero can " +
 				"be told from a label nothing ever wrote.",
 		}, []string{"outcome"}),
+		sourceWithheldLines: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_source_withheld_lines_total",
+			Help: "Source objects whose disposition changed in a refresh round, by whether the round named " +
+				"the object in a log line or its line budget cut it. A partition of the changed objects: " +
+				"each one is named or dropped, never both, so their sum is how much changed. " +
+				"named is what a reader can act on -- each one is a log line at stage source_withheld " +
+				"carrying the strategy, what happened to it and why. dropped is what the round decided " +
+				"not to write, which happens when more objects changed at once than one round names; the " +
+				"objects behind it are withheld all the same and are counted in catalog_withheld_objects. " +
+				"Both labels are created at startup, so a steady zero on dropped can be told from a label " +
+				"nothing ever wrote, and it is only a computed zero while named moves: on a leader that " +
+				"reports neither, nothing changed that round, which is the steady state. Reported by the " +
+				"leader only: no other replica refreshes the source.",
+		}, []string{"result"}),
 		queryAdmission: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_query_admission_total",
 			Help: "Process-wide physical query permit admission outcomes by fixed operation and result. " +
@@ -507,8 +522,22 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range nodata.SlotOutcomes {
 		metrics.noDataSlotPlans.WithLabelValues(string(outcome))
 	}
+	for _, result := range sourceWithheldLineResults {
+		metrics.sourceWithheldLines.WithLabelValues(result)
+	}
 	return metrics
 }
+
+// sourceWithheldLineResults is what can happen to one changed object in a
+// round: the round named it, or the line budget cut it. A partition, and the
+// reason both are pre-created -- dropped is expected to stay at zero, and a
+// zero nobody can tell from an absent label says nothing.
+var sourceWithheldLineResults = []string{sourceWithheldLineNamed, sourceWithheldLineDropped}
+
+const (
+	sourceWithheldLineNamed   = "named"
+	sourceWithheldLineDropped = "dropped"
+)
 
 func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	return append(append(m.workflow.collectors(), []prometheus.Collector{
@@ -523,7 +552,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
 		m.queryAdmission,
-		m.noDataSlotPlans,
+		m.noDataSlotPlans, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead,
@@ -707,6 +736,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		observation.Stage == observability.StageNoDataDecided {
 		m.observeNoDataSlot(observation)
 	}
+	if observation.Component == observability.ComponentControlPlane &&
+		observation.Stage == observability.StageSourceWithheld {
+		m.observeSourceWithheld(observation)
+	}
 	if observation.Component == observability.ComponentControlPlane && observation.SourceKind != "" &&
 		(observation.Result == observability.ResultDegraded || observation.Result == observability.Result(observability.ResultRecovered)) {
 		m.sourceObservations.WithLabelValues(
@@ -763,6 +796,21 @@ func (m phaseTwoMetrics) observeNoDataSlot(observation observability.Observation
 		return
 	}
 	m.noDataSlotPlans.WithLabelValues(facts.Outcome).Add(float64(facts.Plans))
+}
+
+// observeSourceWithheld counts one named line, and the cut the round reported
+// on its last line. The drop rides on a line rather than on its own
+// observation because there is no round with a drop and no line: the budget
+// only cuts what did not fit after it was filled.
+func (m phaseTwoMetrics) observeSourceWithheld(observation observability.Observation) {
+	facts := observation.SourceWithheld
+	if facts == nil {
+		return
+	}
+	m.sourceWithheldLines.WithLabelValues(sourceWithheldLineNamed).Inc()
+	if facts.Dropped > 0 {
+		m.sourceWithheldLines.WithLabelValues(sourceWithheldLineDropped).Add(float64(facts.Dropped))
+	}
 }
 
 func (m phaseTwoMetrics) observeQueryPermit(observation observability.Observation) {
