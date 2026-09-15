@@ -11,13 +11,19 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
-func TestCanonicalModeDefaultsToTheEstablishedForm(t *testing.T) {
+// A deployment that says nothing gets the terminal position: the stream
+// encoder answers and the established one keeps checking a sparse sample of
+// it. Nothing about the encoder is asked for; only the way back stays a key.
+func TestCanonicalModeDefaultsToTheTerminalForm(t *testing.T) {
 	cfg := Default().PhaseTwo.Canonical
-	if cfg.SelectedMode() != contract.CanonicalModeEstablished {
-		t.Fatalf("a deployment that says nothing must keep the established encoder, got %q", cfg.SelectedMode())
+	if cfg.SelectedMode() != contract.CanonicalModeStreamShadow {
+		t.Fatalf("a deployment that says nothing must run the terminal encoder with its guard, got %q", cfg.SelectedMode())
 	}
-	if cfg.Stride() != 0 {
-		t.Fatalf("no comparison is running, so nothing should be paying for one; stride %d", cfg.Stride())
+	if cfg.Stride() != defaultCanonicalShadowStride {
+		t.Fatalf("the guard must sample at the derived stride by default, got %d", cfg.Stride())
+	}
+	if (PhaseTwoCanonicalConfig{Mode: contract.CanonicalModeEstablished}).SelectedMode() != contract.CanonicalModeEstablished {
+		t.Fatal("the established encoder must stay selectable as the way back")
 	}
 }
 

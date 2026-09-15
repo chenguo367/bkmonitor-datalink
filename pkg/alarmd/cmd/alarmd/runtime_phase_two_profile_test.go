@@ -231,27 +231,27 @@ func TestRuntimeProfileNamesTheCanonicalEncoder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if facts.Capacity.CanonicalEncoding != contract.CanonicalModeEstablished {
-		t.Fatalf("default deployment should preflight as the established encoder, got %q",
+	if facts.Capacity.CanonicalEncoding != contract.CanonicalModeStreamShadow {
+		t.Fatalf("default deployment should preflight as the terminal encoder with its guard, got %q",
 			facts.Capacity.CanonicalEncoding)
 	}
-	if facts.Capacity.CanonicalShadowStride != 0 {
-		t.Fatalf("nothing compares by default, so nothing should be sampling; got %d",
-			facts.Capacity.CanonicalShadowStride)
+	if facts.Capacity.CanonicalShadowStride == 0 {
+		t.Fatal("the default compares a sparse sample, so it must preflight with a stride")
 	}
 
-	cfg.PhaseTwo.Canonical.Mode = contract.CanonicalModeStreamShadow
-	shadowed, err := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
+	cfg.PhaseTwo.Canonical.Mode = contract.CanonicalModeEstablished
+	established, err := phaseTwoRuntimeProfile(cfg, "cpu_quota", 8)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if shadowed.Capacity.CanonicalEncoding != contract.CanonicalModeStreamShadow {
-		t.Fatalf("preflight did not follow the selected mode, got %q", shadowed.Capacity.CanonicalEncoding)
+	if established.Capacity.CanonicalEncoding != contract.CanonicalModeEstablished {
+		t.Fatalf("preflight did not follow the selected mode, got %q", established.Capacity.CanonicalEncoding)
 	}
-	if shadowed.Capacity.CanonicalShadowStride == 0 {
-		t.Fatal("a comparing mode preflighted with no sampling at all")
+	if established.Capacity.CanonicalShadowStride != 0 {
+		t.Fatalf("nothing compares in the established mode, so nothing should be sampling; got %d",
+			established.Capacity.CanonicalShadowStride)
 	}
-	if shadowed.Digest == facts.Digest {
+	if established.Digest == facts.Digest {
 		t.Fatal("two deployments running different encoders share a runtime config digest")
 	}
 }

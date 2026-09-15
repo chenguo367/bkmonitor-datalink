@@ -329,28 +329,24 @@ type PhaseTwoCanonicalConfig struct {
 // keys retire is every deployment.
 const defaultCanonicalShadowStride = 1024
 
-// The default mode is deliberately still the established encoder, and it is
-// deliberately NOT the terminal one, which makes this pair of defaults
-// asymmetric: defaultCanonicalShadowStride below already describes the
-// terminal rate, this does not describe the terminal mode.
+// The default mode is the terminal one: the single-pass encoder answers and
+// the established one keeps checking a sparse sample of it at the derived
+// stride. Both defaults now describe the end state.
 //
-// Read them together and it is natural to assume both describe the end state.
-// They do not, and acting on that assumption is not hypothetical: an
-// instruction to "remove the two rollout keys" was issued on exactly that
-// reading. Carried out, it would have returned the reference deployment to
-// the established encoder with no error and no alert -- an action named "enter
-// the terminal state" whose effect is to return to the start.
-//
-// What it takes to move this: shadow evidence from each deployment, not from
-// the reference one. The first retirement condition says every deployment, and
-// at least one has not run its own shadow yet. Changing this default is what
-// makes the new encoder answer in an environment that never proved it there.
+// This default was the established encoder until the first retirement
+// condition held: every deployment had run stream_shadow on its own traffic
+// and reported zero divergence in all three classes over a window that
+// covered its call sites. Until then a deployment that said nothing kept the
+// proven encoder, and an instruction to "remove the rollout keys" would have
+// quietly returned the reference deployment to it. Now a deployment that says
+// nothing gets the terminal encoder with the guard still running; the
+// established form stays selectable as the way back.
 //
 // Deployments are named by role rather than by environment: this file is
 // public.
 func (c PhaseTwoCanonicalConfig) mode() string {
 	if c.Mode == "" {
-		return contract.CanonicalModeEstablished
+		return contract.CanonicalModeStreamShadow
 	}
 	return c.Mode
 }
