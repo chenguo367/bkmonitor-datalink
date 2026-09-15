@@ -101,6 +101,11 @@ type AbsenceResult struct {
 	Verdicts map[string]Verdict
 	Memory   map[string]GroupMemory
 	Facts    AbsenceFacts
+	// Roster is the expected set the verdicts were made against. The verdicts
+	// are keyed by group key, so turning one back into the group it names needs
+	// this: a result carrying verdicts without it is incomplete for its own
+	// reader, who would have to rebuild the roster and hope it matches.
+	Roster Roster
 }
 
 // Evaluate decides, for one Slot, which expected groups are absent.
@@ -120,6 +125,7 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 	result := AbsenceResult{
 		Verdicts: make(map[string]Verdict, len(input.Roster.Groups)+1),
 		Memory:   copyGroupMemory(input.Memory),
+		Roster:   input.Roster,
 		Facts: AbsenceFacts{
 			Present: uint64(len(input.Present)), Expected: uint64(len(input.Roster.Groups)), Dropped: input.Dropped,
 			RosterSource: input.Roster.Source, RosterVersion: input.Roster.Version,
