@@ -56,6 +56,27 @@ type RosterRequest struct {
 	Memory map[string]GroupMemory
 }
 
+// RosterUnsupportedError says this build cannot derive an expected set for the
+// combination of target shape and no-data dimensions the Plan carries.
+//
+// It is an error rather than an empty roster because the two are different
+// facts and only one of them is a judgement. An empty roster is a real answer -
+// a static target that currently matches no host has an empty expected set, and
+// the backend agrees - while this is the absence of an answer. Returning empty
+// for it would expect nothing where the backend expects a set, and would do it
+// silently, every round, for as long as the strategy exists.
+//
+// Nothing about this decision changes between rounds: the target shape and the
+// dimensions are both frozen in the Plan, so a Slot learns nothing a compiler
+// did not already know. The Plan is therefore refused when it is built, and
+// this exists to make the derivation refuse it too rather than trust that the
+// compiler caught it.
+type RosterUnsupportedError struct{ Reason string }
+
+func (err *RosterUnsupportedError) Error() string {
+	return "alarmd nodata: no expected set can be derived: " + err.Reason
+}
+
 // BuildRoster derives the expected set for one item.
 //
 // It follows the backend's branch structure rather than the summary of it. The
@@ -65,34 +86,63 @@ type RosterRequest struct {
 // asks whether the dimension set is exactly the target's, which is what decides
 // between expecting the target instances and filtering history by them.
 //
-// The first cut covers the two ends of that: the dimension set that is exactly
-// the host pair, and no target at all. A target whose dimensions merely include
-// bk_target_ip needs history filtered by the target projection and the target
-// instances never seen reported separately; it is not here, and it reports
-// itself as unresolvable rather than falling through to history, because
-// falling through would expect fewer groups than the backend does while looking
-// like it was working.
-func BuildRoster(request RosterRequest) Roster {
+// The first cut answers three of the five combinations those two steps produce.
+// No target at all is history. A target with dimensions that do not name the
+// host is the whole item, because the backend never consults the target and
+// then has nothing expected. A static host target with exactly the host pair is
+// the target's hosts, empty included - a target that matches no host right now
+// is an answer, and the backend gives the same one.
+//
+// The other two are refused rather than answered emptily. A target this build
+// cannot enumerate, and a dimension set that names the host without being the
+// pair, both have an expected set in the backend that this cut cannot produce;
+// returning empty for either would expect nothing where the backend expects a
+// set, silently, every round.
+func BuildRoster(request RosterRequest) (Roster, error) {
 	roster := Roster{Groups: map[string]Group{}}
 	if request.Target == nil {
 		roster.Source = RosterHistory
 		roster.Groups = historyGroups(request.Memory)
-		return roster
+		return roster, nil
 	}
-	if !request.Target.Resolvable || !hostPairIsTheWholeDimensionSet(request.AggDimension) {
-		// Nothing is expected. The backend reaches the same expected set here,
-		// and its whole-item rule then reports the item as a whole when no data
-		// arrived - which is the absence evaluation's A2, not a decision this
-		// makes.
-		roster.Source = RosterTargetStatic
-		return roster
+	if !namesTheHostDimension(request.AggDimension) {
+		// The backend's first step: no-data dimensions that do not name
+		// bk_target_ip make it return nothing at all rather than fall back to
+		// history, and its whole-item rule then reports the item as a whole
+		// when no data arrived. So the expected set is empty and the source is
+		// the whole item - not a target that happened to resolve to nothing,
+		// which is a different reading with the same count.
+		roster.Source = RosterWhole
+		return roster, nil
+	}
+	if !request.Target.Resolvable {
+		return Roster{}, &RosterUnsupportedError{
+			Reason: "the target is not a static host list, and enumerating it is not in this build",
+		}
+	}
+	if !hostPairIsTheWholeDimensionSet(request.AggDimension) {
+		return Roster{}, &RosterUnsupportedError{
+			Reason: "the no-data dimensions name the host but are not the host pair, so the expected set " +
+				"is history filtered by the target, which is not in this build",
+		}
 	}
 	roster.Source = RosterTargetStatic
 	for _, host := range request.Target.Hosts {
 		group := hostTargetGroup(host)
 		roster.Groups[group.Key()] = group
 	}
-	return roster
+	return roster, nil
+}
+
+// namesTheHostDimension is the backend's first step, which decides whether the
+// target is consulted at all: `if "bk_target_ip" not in no_data_dimensions`.
+func namesTheHostDimension(aggDimension []string) bool {
+	for _, dimension := range aggDimension {
+		if dimension == HostIPDimension {
+			return true
+		}
+	}
+	return false
 }
 
 // hostPairIsTheWholeDimensionSet is the backend's

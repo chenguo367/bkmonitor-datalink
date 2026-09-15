@@ -12,6 +12,8 @@ package controlplane
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 // The item's setting is read off the strategy cache exactly as the backend
@@ -188,6 +190,78 @@ func TestFrozenNoDataConfigFollowsTheBackendReadSites(t *testing.T) {
 				len(config.AggDimension) != test.dimensions {
 				t.Fatalf("frozenNoDataConfig() = %+v, want continuous=%d level=%d dimensions=%d",
 					config, test.continuous, test.level, test.dimensions)
+			}
+		})
+	}
+}
+
+// The five combinations of target shape and no-data dimensions, and which of
+// them this build can derive an expected set for. Each case names the backend
+// behaviour it is measured against, because "unsupported" here means "the
+// backend expects a set we cannot produce", not "the backend does nothing".
+func TestNoDataRosterUnsupportedNamesOnlyWhatThisBuildCannotDerive(t *testing.T) {
+	hostScope := &contract.TargetScopeV2{Groups: []contract.TargetScopeGroupV2{{
+		Conditions: []contract.TargetScopeConditionV2{{
+			Field: contract.TargetScopeHost, Method: contract.TargetScopeInclude, Keys: []string{"10.0.0.1|0"},
+		}},
+	}}}
+	topoScope := &contract.TargetScopeV2{Groups: []contract.TargetScopeGroupV2{{
+		Conditions: []contract.TargetScopeConditionV2{{
+			Field: contract.TargetScopeTopoNode, Method: contract.TargetScopeInclude, Keys: []string{"module|1"},
+		}},
+	}}}
+	hostPair := []string{"bk_target_ip", "bk_target_cloud_id"}
+
+	for name, test := range map[string]struct {
+		scope       *contract.TargetScopeV2
+		config      *contract.NoDataConfigV1
+		unsupported bool
+	}{
+		// a. No target: the expected set is history.
+		"no target": {config: &contract.NoDataConfigV1{Continuous: 1, Level: 2, AggDimension: hostPair}},
+		// The item does not detect no-data at all, so no expected set is owed.
+		"no no-data section": {scope: topoScope},
+		// b. The backend never consults the target, and expects nothing.
+		"dimensions never name the host": {
+			scope: hostScope, config: &contract.NoDataConfigV1{Continuous: 1, Level: 2, AggDimension: []string{"device"}},
+		},
+		// c. The expected set is the target's hosts, empty included.
+		"static host target with the host pair": {
+			scope: hostScope, config: &contract.NoDataConfigV1{Continuous: 1, Level: 2, AggDimension: hostPair},
+		},
+		// d. The backend enumerates CMDB; this build does not.
+		"topology target with the host pair": {
+			scope: topoScope, config: &contract.NoDataConfigV1{Continuous: 1, Level: 2, AggDimension: hostPair},
+			unsupported: true,
+		},
+		// e. The backend filters history by the target projection.
+		"host target with dimensions past the pair": {
+			scope: hostScope,
+			config: &contract.NoDataConfigV1{
+				Continuous: 1, Level: 2, AggDimension: []string{"bk_target_ip", "bk_target_cloud_id", "device"},
+			},
+			unsupported: true,
+		},
+		// A scope that mixes shapes still needs the shape this build cannot
+		// enumerate, so it is not host-only.
+		"host and topology together": {
+			scope: &contract.TargetScopeV2{Groups: []contract.TargetScopeGroupV2{{
+				Conditions: []contract.TargetScopeConditionV2{
+					{Field: contract.TargetScopeHost, Method: contract.TargetScopeInclude, Keys: []string{"10.0.0.1|0"}},
+					{Field: contract.TargetScopeTopoNode, Method: contract.TargetScopeInclude, Keys: []string{"module|1"}},
+				},
+			}}},
+			config:      &contract.NoDataConfigV1{Continuous: 1, Level: 2, AggDimension: hostPair},
+			unsupported: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			reason := noDataRosterUnsupported(test.scope, test.config)
+			if test.unsupported && reason == "" {
+				t.Fatal("noDataRosterUnsupported() said this build can derive an expected set it cannot")
+			}
+			if !test.unsupported && reason != "" {
+				t.Fatalf("noDataRosterUnsupported() = %q, want this build to derive it", reason)
 			}
 		})
 	}

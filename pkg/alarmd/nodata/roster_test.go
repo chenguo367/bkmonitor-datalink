@@ -10,6 +10,7 @@
 package nodata
 
 import (
+	"errors"
 	"fmt"
 	"math/rand"
 	"reflect"
@@ -23,7 +24,7 @@ var hostPair = []string{HostIPDimension, HostCloudDimension}
 // arrived without being expected, and they become what is expected next time.
 func TestRosterWithoutATargetIsWhatTheMemoryHasSeen(t *testing.T) {
 	seen, never := hostTargetGroup(HostIdentity{IP: "10.0.0.1", CloudID: "0"}), hostTargetGroup(HostIdentity{IP: "10.0.0.2", CloudID: "0"})
-	roster := BuildRoster(RosterRequest{
+	roster := mustBuildRoster(t, RosterRequest{
 		AggDimension: hostPair,
 		Memory: map[string]GroupMemory{
 			seen.Key():  {LastSeen: 100},
@@ -47,7 +48,7 @@ func TestRosterWithoutATargetIsWhatTheMemoryHasSeen(t *testing.T) {
 // was absent, which is the state that put it in the memory.
 func TestRosterNeverExpectsTheWholeItemGroup(t *testing.T) {
 	whole := WholeItemGroup().Key()
-	roster := BuildRoster(RosterRequest{
+	roster := mustBuildRoster(t, RosterRequest{
 		AggDimension: hostPair,
 		Memory:       map[string]GroupMemory{whole: {LastSeen: 100, FirstAbsent: 50}},
 	})
@@ -62,7 +63,7 @@ func TestRosterNeverExpectsTheWholeItemGroup(t *testing.T) {
 // A static host target with the host pair as its dimensions expects exactly the
 // hosts it resolved to.
 func TestRosterFromAStaticTargetExpectsItsHosts(t *testing.T) {
-	roster := BuildRoster(RosterRequest{
+	roster := mustBuildRoster(t, RosterRequest{
 		AggDimension: hostPair,
 		Target: &ResolvedTarget{Resolvable: true, Hosts: []HostIdentity{
 			{IP: "10.0.0.1", CloudID: "0"}, {IP: "10.0.0.2", CloudID: "0"},
@@ -83,34 +84,80 @@ func TestRosterFromAStaticTargetExpectsItsHosts(t *testing.T) {
 	}
 }
 
-// A target that resolves to no host expects nothing - and must not fall back to
-// history. The backend asks for the target's instances and reports nothing when
-// there are none; falling back would expect groups it does not, and would do it
-// while looking like it was working.
-func TestRosterFromATargetThatResolvesToNoHostExpectsNothing(t *testing.T) {
+// A static target that currently matches no host is an answer, not a gap: the
+// expected set is empty and the backend's is too. It must not fall back to
+// history, which would expect groups the backend does not.
+func TestRosterFromAStaticTargetThatMatchesNoHostExpectsNothing(t *testing.T) {
 	seen := hostTargetGroup(HostIdentity{IP: "10.0.0.1", CloudID: "0"})
-	for name, target := range map[string]*ResolvedTarget{
-		"resolves to no host": {Resolvable: true},
-		"not resolvable here": {Resolvable: false, Hosts: []HostIdentity{{IP: "10.0.0.1", CloudID: "0"}}},
+	roster := mustBuildRoster(t, RosterRequest{
+		AggDimension: hostPair, Target: &ResolvedTarget{Resolvable: true},
+		Memory: map[string]GroupMemory{seen.Key(): {LastSeen: 100}},
+	})
+	if roster.Source != RosterTargetStatic {
+		t.Fatalf("Source = %q, want %q: an empty static target is still a target", roster.Source, RosterTargetStatic)
+	}
+	if len(roster.Groups) != 0 {
+		t.Fatalf("roster = %v, want nothing expected rather than a fall back to history", roster.Groups)
+	}
+}
+
+// A target whose no-data dimensions never name the host is the backend's first
+// step: the target is not consulted at all and nothing is expected. The source
+// says the whole item rather than a target, because there is no target reading
+// here to report - the same empty count means two different things and this is
+// the one that is not about a target.
+func TestRosterWithDimensionsThatDoNotNameTheHostIsTheWholeItem(t *testing.T) {
+	roster := mustBuildRoster(t, RosterRequest{
+		AggDimension: []string{"device"},
+		Target:       &ResolvedTarget{Resolvable: true, Hosts: []HostIdentity{{IP: "10.0.0.1", CloudID: "0"}}},
+		Memory:       map[string]GroupMemory{hostTargetGroup(HostIdentity{IP: "10.0.0.9", CloudID: "0"}).Key(): {LastSeen: 100}},
+	})
+	if roster.Source != RosterWhole {
+		t.Fatalf("Source = %q, want %q", roster.Source, RosterWhole)
+	}
+	if len(roster.Groups) != 0 {
+		t.Fatalf("roster = %v, want nothing expected", roster.Groups)
+	}
+}
+
+// The two combinations this cut cannot derive are refused rather than answered
+// with an empty set. The backend expects a set for both, so empty would expect
+// nothing where it expects something - silently, every round, for as long as
+// the strategy exists.
+func TestRosterRefusesWhatThisCutCannotDerive(t *testing.T) {
+	for name, request := range map[string]RosterRequest{
+		"a target this build cannot enumerate": {
+			AggDimension: hostPair, Target: &ResolvedTarget{Resolvable: false},
+		},
+		"dimensions that name the host without being the pair": {
+			AggDimension: []string{HostIPDimension, HostCloudDimension, "device"},
+			Target:       &ResolvedTarget{Resolvable: true, Hosts: []HostIdentity{{IP: "10.0.0.1", CloudID: "0"}}},
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			roster := BuildRoster(RosterRequest{
-				AggDimension: hostPair, Target: target,
-				Memory: map[string]GroupMemory{seen.Key(): {LastSeen: 100}},
-			})
-			if len(roster.Groups) != 0 {
-				t.Fatalf("roster = %v, want nothing expected rather than a fall back to history", roster.Groups)
+			roster, err := BuildRoster(request)
+			var unsupported *RosterUnsupportedError
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("BuildRoster() = %v, %v, want a RosterUnsupportedError", roster, err)
 			}
 		})
 	}
 }
 
-// The backend takes the target path only when the no-data dimensions are
-// exactly the host pair. Anything else needs history filtered by the target
-// projection, which the first cut does not do - and it must not silently expect
-// the bare host pair instead, which would be a different set of objects than
-// either the backend or the next cut produces.
-func TestRosterDoesNotTakeTheTargetPathForOtherDimensions(t *testing.T) {
+func mustBuildRoster(t *testing.T, request RosterRequest) Roster {
+	t.Helper()
+	roster, err := BuildRoster(request)
+	if err != nil {
+		t.Fatalf("BuildRoster() error = %v", err)
+	}
+	return roster
+}
+
+// The target's hosts are expected only when the dimensions are exactly the host
+// pair. Every other shape either never consults the target or is refused, and
+// none of them may quietly expect the bare pair, which is a different set of
+// objects than the backend or the next cut produces.
+func TestRosterNeverExpectsTheBareHostPairForOtherDimensions(t *testing.T) {
 	for name, dimensions := range map[string][]string{
 		"host pair plus another": {HostIPDimension, HostCloudDimension, "device"},
 		"ip alone":               {HostIPDimension},
@@ -118,12 +165,15 @@ func TestRosterDoesNotTakeTheTargetPathForOtherDimensions(t *testing.T) {
 		"none":                   nil,
 	} {
 		t.Run(name, func(t *testing.T) {
-			roster := BuildRoster(RosterRequest{
+			roster, err := BuildRoster(RosterRequest{
 				AggDimension: dimensions,
 				Target:       &ResolvedTarget{Resolvable: true, Hosts: []HostIdentity{{IP: "10.0.0.1", CloudID: "0"}}},
 			})
+			if err != nil {
+				return
+			}
 			if len(roster.Groups) != 0 {
-				t.Fatalf("roster = %v, want nothing expected for dimensions the first cut does not resolve", roster.Groups)
+				t.Fatalf("roster = %v, want nothing expected for dimensions that are not the host pair", roster.Groups)
 			}
 		})
 	}

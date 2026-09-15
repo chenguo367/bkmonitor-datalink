@@ -13,6 +13,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -900,6 +901,71 @@ func legacyNoDataNumber(field string, raw json.RawMessage) (uint32, bool, error)
 // detecting on a default.
 const defaultNoDataLevel uint32 = 2
 
+// noDataRosterUnsupported names the combination of target shape and no-data
+// dimensions this build cannot derive an expected set for, or "" when it can.
+//
+// Three of the five combinations are derivable: no target, dimensions that
+// never name the host, and a static host target whose dimensions are exactly
+// the host pair. The other two have an expected set in the backend that alarmd
+// cannot produce yet - a target it does not enumerate, and dimensions that name
+// the host without being the pair, which the backend answers with history
+// filtered by the target projection.
+//
+// Both are refused rather than answered with an empty expected set. An empty
+// one is a real answer for a static target that matches no host; for these it
+// would mean detecting no absence at all, every round, while the Plan looks
+// like it is working.
+func noDataRosterUnsupported(scope *contract.TargetScopeV2, config *contract.NoDataConfigV1) string {
+	if config == nil {
+		return ""
+	}
+	if scope == nil || !namesHostDimension(config.AggDimension) {
+		return ""
+	}
+	if !scopeIsHostOnly(scope) {
+		return "the target is not a host list, and enumerating it for no-data is not in this build"
+	}
+	if !isHostPair(config.AggDimension) {
+		return "the no-data dimensions name the host without being the host pair, so the expected set is " +
+			"history filtered by the target, which is not in this build"
+	}
+	return ""
+}
+
+func namesHostDimension(dimensions []string) bool {
+	for _, dimension := range dimensions {
+		if dimension == nodata.HostIPDimension {
+			return true
+		}
+	}
+	return false
+}
+
+func isHostPair(dimensions []string) bool {
+	if len(dimensions) != 2 {
+		return false
+	}
+	seen := map[string]bool{}
+	for _, dimension := range dimensions {
+		seen[dimension] = true
+	}
+	return seen[nodata.HostIPDimension] && seen[nodata.HostCloudDimension]
+}
+
+// scopeIsHostOnly reports whether every condition of the scope names hosts. A
+// scope that mixes a host condition with a topology one still needs the
+// topology enumerated, so it is not host-only.
+func scopeIsHostOnly(scope *contract.TargetScopeV2) bool {
+	for _, group := range scope.Groups {
+		for _, condition := range group.Conditions {
+			if condition.Field != contract.TargetScopeHost {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // frozenNoDataConfig returns the section to freeze on the Plan, or nil when the
 // item does not detect no-data. An item that is enabled but whose setting
 // cannot be validated is an error rather than a silent disable: the strategy
@@ -1191,6 +1257,25 @@ func compilePlan(
 		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", dispositions, err
 	}
 	plan.NoData = noData
+	if reason := noDataRosterUnsupported(targetScope, noData); reason != "" {
+		// Refused where it is decided rather than every round. The expected set
+		// is a function of the target's shape and the no-data dimensions, both
+		// frozen here, so a Slot would reach the same answer with no new
+		// information - and reaching it there would mean a Plan that runs while
+		// detecting no absence at all, which reads as a working strategy.
+		//
+		// The whole Plan is withheld, thresholds included, which is the same
+		// trade NO_DATA_CONFIG_INVALID makes and is visible the same way: the
+		// withheld metric counts it under this reason, so what it costs is a
+		// number rather than an argument. On the deployment this was written
+		// against that number is one strategy.
+		dispositions = append(dispositions, ObjectDisposition{
+			SourceID: sourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
+			Reason: "NO_DATA_ROSTER_UNSUPPORTED",
+		})
+		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", dispositions,
+			fmt.Errorf("alarmd controlplane: item %d no-data roster: %s", item.ID, reason)
+	}
 	if ref.SnapshotRevision > 0 {
 		plan.OutputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: dataset.DynamicDimensions, DimensionFields: append([]string{}, dataset.IdentityFields...)}
 		plan.SubjectFacts = frozenSubjectFacts(source, item)
