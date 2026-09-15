@@ -402,11 +402,12 @@ func TestTheObjectRouteServesChecksAndTheRowsUnderOne(t *testing.T) {
 	if echoed, _ := body["check"].(string); echoed != string(CheckWindowUndecided) {
 		t.Errorf("the response echoes check=%q, want %s", echoed, CheckWindowUndecided)
 	}
-	// A group within it narrows to that fold. The undecided object names
-	// strategy 8930, so that is its group.
-	_, body = get(t, handler, "/api/objects?check="+string(CheckWindowUndecided)+"&group=8930")
+	// A group within it narrows to that fold. The undecided object carries a
+	// HISTORY_WARMING with no window counts at all, so its fold is the one
+	// that says so.
+	_, body = get(t, handler, "/api/objects?check="+string(CheckWindowUndecided)+"&group="+causeNoCounts)
 	if rows, _ := body["anomalies"].([]any); len(rows) != 1 {
-		t.Errorf("check=WINDOW_UNDECIDED group=8930: %d rows, want 1", len(rows))
+		t.Errorf("check=WINDOW_UNDECIDED group=%s: %d rows, want 1", causeNoCounts, len(rows))
 	}
 	_, body = get(t, handler, "/api/objects?check="+string(CheckWindowUndecided)+"&group=nobody")
 	if rows, _ := body["anomalies"].([]any); len(rows) != 0 {

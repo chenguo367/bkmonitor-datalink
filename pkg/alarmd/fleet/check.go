@@ -57,6 +57,11 @@ const (
 	GroupByDetail     GroupBy = "detail"
 	GroupByStrategy   GroupBy = "strategy"
 	GroupByGapKind    GroupBy = "gap_kind"
+	// GroupByCause folds on what the window counts say happened: the reason
+	// the detection could not use the record, or that the series are a mix of
+	// new and old. It is the fold for the one check whose objects share a
+	// symptom and not yet an owner.
+	GroupByCause GroupBy = "cause"
 )
 
 // checkAnswers is the closed table: who acts on each check and what its
@@ -85,7 +90,7 @@ var checkAnswers = map[Check]struct {
 	CheckPlanUnevaluable: {OwnerStrategy, GroupByStrategy},
 
 	CheckQueryRefused:     {OwnerUndetermined, GroupByDetail},
-	CheckWindowUndecided:  {OwnerUndetermined, GroupByStrategy},
+	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
 	CheckConfigUnresolved: {OwnerUndetermined, GroupByStrategy},
 }
 
@@ -135,9 +140,9 @@ func checkRank(check Check) int {
 // ChecksWithoutAProducer names the checks nothing decides yet. They are in the
 // table so the page has words for them the day they arrive, and named here so
 // that a check with no writer cannot read as a mechanism that is wired: the
-// due index will produce NEVER_EVALUATED, the empty-window split will produce
-// NO_DATA_PERSISTENT, and a test holds this list to exactly those two.
-var ChecksWithoutAProducer = []Check{CheckNeverEvaluated, CheckNoDataPersistent}
+// due index will produce NEVER_EVALUATED once it knows when each object was
+// taken over, and a test holds this list to exactly that one.
+var ChecksWithoutAProducer = []Check{CheckNeverEvaluated}
 
 // checkOf decides which check an object is under, or none: an object whose
 // situation is a normal value of some dimension -- a series still young, a
@@ -156,6 +161,8 @@ func checkOf(anomaly Anomaly) (Check, bool) {
 		return CheckRoundsStalled, true
 	case anomaly.Finding.Schedule == ScheduleOverdue:
 		return CheckSlotsOverdue, true
+	case anomaly.Kind == KindNoData:
+		return CheckNoDataPersistent, true
 	}
 	switch anomaly.Finding.Situation {
 	case SituationStalled:
@@ -250,8 +257,35 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 		return key
 	case GroupByGapKind:
 		return string(anomaly.Finding.Situation)
+	case GroupByCause:
+		return windowCause(anomaly.Coverage)
 	}
 	return ""
+}
+
+// The folds of a window that will not fill and whose owner the counts do not
+// decide. A starved window is a record that arrived and could not be used --
+// the reason the detection gave is the fold, because REQUIRED_VALUE_MISSING
+// and an algorithm's refusal are different conversations -- and a window
+// short over a mix of new and old series is its own.
+const (
+	causeSeriesMixed    = "新老序列混合"
+	causeUnusableNoWord = "检测用不了记录（原因没带上）"
+	causeNoCounts       = "没有窗口计数（副本没报）"
+)
+
+func windowCause(coverage *HistoryCoverage) string {
+	switch {
+	case coverage == nil || coverage.Levels == 0:
+		return causeNoCounts
+	case coverage.Starved():
+		if coverage.UnusableReason != "" {
+			return coverage.UnusableReason
+		}
+		return causeUnusableNoWord
+	default:
+		return causeSeriesMixed
+	}
 }
 
 // Result is how the last round ended. COMPLETED is a round that ran to its
@@ -278,8 +312,10 @@ var Results = []Result{ResultCompleted, ResultError, ResultRefused, ResultNoData
 // round to speak of: an object whose wake time passed has no last result.
 func resultOf(anomaly Anomaly) Result {
 	switch {
-	case anomaly.Kind == KindOverdueWake:
+	case anomaly.Kind == KindOverdueWake, anomaly.Kind == KindSkippedSpan:
 		return ""
+	case anomaly.Kind == KindNoData:
+		return ResultNoData
 	case queryRejected(anomaly.Failure):
 		return ResultRefused
 	case anomaly.Failure != nil, anomaly.Kind == KindBlockedRun, failedExecution(anomaly.ReasonCode):
@@ -385,10 +421,19 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 	// rounds that followed. An object that skipped Slots an hour ago and has
 	// run normally since is under no column, and it stays on this line until a
 	// restart forgets it: the loss is permanent and the row is the only record.
+	// And the objects whose data stopped: under no column either, their rounds
+	// complete, and on the data side's line.
 	if view != nil {
 		for _, row := range skippedRows(view, listed) {
 			entry := ensure(row.Finding.Check)
 			add(entry, row.Finding.Group, &row)
+		}
+		for index := range view.NoData {
+			row := &view.NoData[index]
+			if row.Finding.Check == "" {
+				continue
+			}
+			add(ensure(row.Finding.Check), row.Finding.Group, row)
 		}
 	}
 	// What the view cannot speak for. Unknown is the objects a replica holds
@@ -469,7 +514,7 @@ func checkNames() []string {
 func UnderCheck(check Check, group string, view *View) []Anomaly {
 	list := []Anomaly{}
 	listed := map[string]struct{}{}
-	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign} {
+	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData} {
 		for _, anomaly := range column {
 			if anomaly.Finding.Check != check {
 				continue

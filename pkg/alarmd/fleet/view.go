@@ -309,6 +309,23 @@ type HistoryCoverage struct {
 	// windows are.
 	Fresh      uint32 `json:"fresh,omitempty"`
 	ShortFresh uint32 `json:"short_fresh,omitempty"`
+	// Unusable is how many windows' latest record the detection could not use
+	// (UNAVAILABLE or ERROR), and UnusableReason why, from the first of them.
+	// An empty window is made of these: the record arrived and was unusable,
+	// every round. So a starved window is not "no data" -- the data is there
+	// -- and the reason says whether the strategy names a field the records do
+	// not carry, the value has the wrong shape, or an algorithm declined it.
+	Unusable       uint32 `json:"unusable,omitempty"`
+	UnusableReason string `json:"unusable_reason,omitempty"`
+	// Abnormal is how many Level verdicts in the last round were ABNORMAL and
+	// AbnormalOnIncomplete how many of those were reached on a window that was
+	// not full. The trigger decides ABNORMAL before it reads completeness, so
+	// an alert can open on a window that will never fill -- and then never
+	// close. The pair says whether that is happening on this object, which is
+	// the difference between "recovery cannot be decided" as a footnote and as
+	// an alert somebody is looking at.
+	Abnormal             uint32 `json:"abnormal,omitempty"`
+	AbnormalOnIncomplete uint32 `json:"abnormal_on_incomplete,omitempty"`
 	// FreshRounds is how many consecutive rounds every short window belonged to
 	// a series with no loaded history.
 	//
@@ -586,6 +603,10 @@ type Snapshot struct {
 	// GapSkips are the objects that skipped a run of Slots past the replay
 	// window, retained for the same reason.
 	GapSkips map[string]SkippedSpan `json:"gap_skips,omitempty"`
+	// NoData is the objects whose query has returned no records for a run of
+	// rounds after having returned some. In no column -- their rounds complete
+	// -- and listed so the data side's line can name them.
+	NoData []Anomaly `json:"no_data,omitempty"`
 	// Capacity is how close this replica is to its own limits. Absent on a
 	// replica that does not report it, which is why the aggregate counts the
 	// replicas it actually heard from rather than assuming every one answered.
@@ -929,6 +950,7 @@ type View struct {
 	// exactly why this needs somewhere of its own to be said.
 	PrunedSkips        map[string]PrunedSkip  `json:"pruned_skips,omitempty"`
 	GapSkips           map[string]SkippedSpan `json:"gap_skips,omitempty"`
+	NoData             []Anomaly              `json:"no_data,omitempty"`
 	DemotionEntries    int                    `json:"demotion_entries"`
 	DemotionExtensions int                    `json:"demotion_extensions"`
 	DemotionExits      int                    `json:"demotion_exits"`
@@ -1064,6 +1086,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 				view.GapSkips[queryGroup] = skip
 			}
 		}
+		view.NoData = append(view.NoData, snapshot.NoData...)
 		if snapshot.LastDemotionExit.After(view.LastDemotionExit) {
 			view.LastDemotionExit = snapshot.LastDemotionExit
 		}
@@ -1254,6 +1277,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	Attribute(view.Demoted, now)
 	Attribute(view.Undecidable, now)
 	Attribute(view.ByDesign, now)
+	Attribute(view.NoData, now)
 	Settle(&view)
 	return view
 }

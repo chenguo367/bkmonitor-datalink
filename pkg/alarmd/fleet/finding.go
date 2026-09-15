@@ -248,6 +248,12 @@ func findingOf(anomaly Anomaly) Finding {
 		}
 		return finding(SituationBackendCooldown, 0)
 	}
+	if anomaly.Kind == KindNoData {
+		// The data stopped. Filed under the nearest data situation while
+		// situations exist; the check (NO_DATA_PERSISTENT) is what decides the
+		// line and the owner, and the situation goes with the rest of them.
+		return finding(SituationSeriesDataMissing, 0)
+	}
 	// The coverage-bearing reasons are decided on the coverage, because the
 	// code alone cannot say which of six things happened.
 	if anomaly.CauseReason == "HISTORY_WARMING" || anomaly.CauseReason == "HISTORY_GAPPED" {

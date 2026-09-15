@@ -387,13 +387,16 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// objects are running normally now, and the loss is in their past.
 	snapshot.PrunedSkips = publisher.tracker.PrunedSkips()
 	snapshot.GapSkips = publisher.tracker.GapSkips()
+	// And the objects whose data stopped: rounds completing, nothing coming
+	// back. In no column, and on the data side's line.
+	snapshot.NoData = publisher.tracker.NoData()
 	// Where every listed object is in its cycle, and the census over all of
 	// them. From the same index and the same instant as the overdue facts, so
 	// the row and the sentence above it cannot read two clocks.
 	if publisher.schedule != nil {
 		census := publisher.schedule.Census(at, len(owned))
 		snapshot.Schedule = &census
-		for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Demoted, snapshot.Undecidable, snapshot.ByDesign} {
+		for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Demoted, snapshot.Undecidable, snapshot.ByDesign, snapshot.NoData} {
 			for index := range column {
 				wake := publisher.schedule.WakeOf(column[index].QueryGroup)
 				column[index].Wake = &wake

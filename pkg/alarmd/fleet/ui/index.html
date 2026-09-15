@@ -562,13 +562,13 @@ var CHECK = {
   NO_DATA_PERSISTENT:    '{n} 个对象持续没有数据（{s} 条策略）',
   SERIES_CHURNING:       '{n} 个对象的序列活不过检测窗口（{s} 条策略），恢复判不了',
   SERIES_DATA_MISSING:   '{n} 个对象的老序列在缺点（{s} 条策略），恢复判不了',
-  WINDOW_UNDECIDED:      '{n} 个对象的窗口填不满，还分不出原因（{s} 条策略）',
+  WINDOW_UNDECIDED:      '{n} 个对象的窗口填不满，还分不出是谁的（{g} 种情况，{s} 条策略）',
   PLAN_UNEVALUABLE:      '{s} 条策略按现在的定义算不了，{n} 个对象不检测',
   CONFIG_UNRESOLVED:     '{n} 个对象的配置状态说不清（{s} 条策略）'
 };
 
 // What the objects of a check are folded on, in words.
-var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口'};
+var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况'};
 
 // The two dimensions each object row shows, in words. Held to the Go lists.
 var SCHEDULE = {NEW: '接管后未跑', ON_TIME: '等下次', LATE: '迟到', OVERDUE: '超期', PAUSED: '生效时段外',
@@ -862,6 +862,8 @@ function objectRow(anomaly) {
     ? windowCoverage.levels + ' 个窗口 · 短 ' + (windowCoverage.short || 0) + ' · 空 ' + (windowCoverage.empty || 0)
       + ' · 新 ' + (windowCoverage.fresh || 0)
       + (windowCoverage.short_rounds ? ' · 连续 ' + windowCoverage.short_rounds + ' 轮' : '')
+      + (windowCoverage.unusable ? ' · 检测用不了 ' + windowCoverage.unusable + ' 个：' + windowCoverage.unusable_reason : '')
+      + (windowCoverage.abnormal_on_incomplete ? ' · 不完整窗口上报了 ' + windowCoverage.abnormal_on_incomplete + ' 个异常' : '')
     : '—', 'mono');
   if (windowCoverage && windowCoverage.guarded) {
     win.title = windowCoverage.guarded + '/' + windowCoverage.levels + ' 个窗口报的是沿用上一轮的结论，不是本轮算出来的';
@@ -1556,7 +1558,8 @@ var KIND_TEXT = {
   DEGRADED_RUN: '降级',
   BLOCKED_RUN: '被阻塞',
   OVERDUE_WAKE: '没被调度',
-  SKIPPED_SPAN: '留存的漏检记录'
+  SKIPPED_SPAN: '留存的漏检记录',
+  NO_DATA: '持续无数据'
 };
 function kindText(kind) { return KIND_TEXT[kind] || kind || '—'; }
 

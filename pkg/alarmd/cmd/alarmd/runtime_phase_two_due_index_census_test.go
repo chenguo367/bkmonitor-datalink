@@ -161,10 +161,18 @@ func TestFleetPublisherCarriesTheCensusAndWakeFacts(t *testing.T) {
 			})
 		}
 	}
+	// And one whose data stopped, so the no-data list is published and its
+	// row carries wake facts like every other.
+	tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "FULL_COMPLETED",
+		Trace: observability.TraceFields{QueryGroupKey: "query-group-c", StrategyID: "1", BusinessID: "2"}})
+	for i := 0; i < fleet.DefaultDegradedRounds; i++ {
+		tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "FULL_EMPTY_COMPLETED",
+			Trace: observability.TraceFields{QueryGroupKey: "query-group-c", StrategyID: "1", BusinessID: "2"}})
+	}
 	publisher := fleetPublisher{
 		tracker: tracker, replica: "replica-1", now: clock.now,
 		owned: func() []execution.QueryGroupIdentity {
-			return []execution.QueryGroupIdentity{"query-group-a", "query-group-b"}
+			return []execution.QueryGroupIdentity{"query-group-a", "query-group-b", "query-group-c"}
 		},
 		schedule: index,
 	}
@@ -172,8 +180,11 @@ func TestFleetPublisherCarriesTheCensusAndWakeFacts(t *testing.T) {
 	if snapshot.Schedule == nil {
 		t.Fatal("the snapshot carried no schedule census")
 	}
-	if snapshot.Schedule.Overdue != 1 || snapshot.Schedule.Never != 1 {
-		t.Errorf("census = %+v, want one overdue (a, 100 s past a 60 s period) and one never (b)", *snapshot.Schedule)
+	if len(snapshot.NoData) != 1 || snapshot.NoData[0].QueryGroup != "query-group-c" || snapshot.NoData[0].Wake == nil {
+		t.Errorf("no-data = %+v, want query-group-c with wake facts attached", snapshot.NoData)
+	}
+	if snapshot.Schedule.Overdue != 1 || snapshot.Schedule.Never != 2 {
+		t.Errorf("census = %+v, want one overdue (a, 100 s past a 60 s period) and two never (b, c)", *snapshot.Schedule)
 	}
 	wakes := map[string]*fleet.WakeFacts{}
 	for _, anomaly := range snapshot.Anomalies {

@@ -95,11 +95,15 @@ func TestEveryCheckHasAProducerExceptTheNamedTwo(t *testing.T) {
 			produced[check] = true
 		}
 	}
-	// The one split checkOf makes past the situation.
+	// The splits checkOf makes past the situation: a blocked round's outcome
+	// word, and the kinds that are lines of their own.
 	for _, code := range []string{"panic", "source_error"} {
 		if check, under := checkOf(Anomaly{ReasonCode: code, Finding: finding(SituationRoundBlocked, 0)}); under {
 			produced[check] = true
 		}
+	}
+	if check, under := checkOf(Anomaly{Kind: KindNoData}); under {
+		produced[check] = true
 	}
 	waiting := map[Check]bool{}
 	for _, check := range ChecksWithoutAProducer {
@@ -157,6 +161,23 @@ func TestGroupKeysFoldOnTheEntityAndNameItsAbsence(t *testing.T) {
 	}
 	if got := groupKeyOf(Anomaly{Replica: "pod-a"}, CheckRoundsStalled); got != "pod-a" {
 		t.Errorf("replica group = %q", got)
+	}
+	// The undecided window folds on what happened, not on the strategy: a
+	// starved window on the reason its record could not be used, a mixed one
+	// on being mixed.
+	starved := Anomaly{Coverage: &HistoryCoverage{Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, EmptyRounds: 40,
+		Unusable: 2, UnusableReason: "REQUIRED_VALUE_MISSING"}}
+	if got := groupKeyOf(starved, CheckWindowUndecided); got != "REQUIRED_VALUE_MISSING" {
+		t.Errorf("starved window group = %q, want the detection's reason", got)
+	}
+	starvedNoReason := Anomaly{Coverage: &HistoryCoverage{Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, EmptyRounds: 40}}
+	if got := groupKeyOf(starvedNoReason, CheckWindowUndecided); got != causeUnusableNoWord {
+		t.Errorf("starved window without a reason group = %q, want %q", got, causeUnusableNoWord)
+	}
+	mixed := Anomaly{Coverage: &HistoryCoverage{Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40,
+		Fresh: 2, ShortFresh: 2, FreshRounds: 40}}
+	if got := groupKeyOf(mixed, CheckWindowUndecided); got != causeSeriesMixed {
+		t.Errorf("mixed window group = %q, want %q", got, causeSeriesMixed)
 	}
 	if got := groupKeyOf(Anomaly{CauseReason: "REDIS_UNAVAILABLE"}, CheckDependencyDown); got != "REDIS_UNAVAILABLE" {
 		t.Errorf("code group = %q", got)
@@ -409,5 +430,36 @@ func TestRetainedSkipsAreOnTheirLinesWithRows(t *testing.T) {
 	pruned := UnderCheck(CheckTimelinePruned, "", view)
 	if len(pruned) != 1 || pruned[0].Skip == nil || pruned[0].Skip.Slots != 0 || pruned[0].Skip.FirstSlot != 5000 {
 		t.Errorf("under TIMELINE_PRUNED = %+v, want one row with the span and no Slot count", pruned)
+	}
+}
+
+// Objects whose data stopped are on the data side's line and listed under it,
+// from the view's own list rather than from a column: their rounds complete
+// and the equation counts them healthy.
+func TestNoDataObjectsAreOnTheDataSidesLine(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	view := &View{NoData: []Anomaly{
+		{QueryGroup: "qg-stopped-a", Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: "pod-a",
+			Since: at.Add(-time.Hour), Strategies: []StrategyRef{{StrategyID: "77", BusinessID: "3"}}},
+		{QueryGroup: "qg-stopped-b", Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: "pod-b",
+			Since: at.Add(-2 * time.Hour), Strategies: []StrategyRef{{StrategyID: "77", BusinessID: "3"}}},
+	}}
+	Attribute(view.NoData, at)
+	reports := ReportChecks([][]Anomaly{nil, nil, nil, nil}, nil, view)
+	if len(reports) != 1 || reports[0].Code != CheckNoDataPersistent || reports[0].Owner != OwnerData ||
+		reports[0].Objects != 2 || reports[0].Strategies != 1 {
+		t.Fatalf("reports = %+v, want one NO_DATA_PERSISTENT line, the data side's, over 2 objects of 1 strategy", reports)
+	}
+	if len(reports[0].Groups) != 1 || reports[0].Groups[0].Key != "77" {
+		t.Errorf("groups = %+v, want one fold on strategy 77", reports[0].Groups)
+	}
+	rows := UnderCheck(CheckNoDataPersistent, "77", view)
+	if len(rows) != 2 || rows[0].QueryGroup != "qg-stopped-b" {
+		t.Errorf("under NO_DATA_PERSISTENT group 77 = %v, want both, oldest first", names(rows))
+	}
+	for _, row := range rows {
+		if row.Finding.Result != ResultNoData || row.Attribution != AttributionExternal {
+			t.Errorf("row %s = result %s / attribution %s, want NO_DATA / EXTERNAL", row.QueryGroup, row.Finding.Result, row.Attribution)
+		}
 	}
 }

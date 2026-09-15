@@ -40,6 +40,12 @@ const (
 	// It exists as a kind so the record can be listed under its check like any
 	// other row, rather than only counted.
 	KindSkippedSpan = "SKIPPED_SPAN"
+	// KindNoData is an object whose rounds complete and whose query has
+	// returned no records for a run of rounds after having returned some. It
+	// is not a failure -- the round ran, the backend answered -- and it is not
+	// in any column of the health equation; it is the data having stopped, and
+	// it is listed under the data side's line for as long as it holds.
+	KindNoData = "NO_DATA"
 )
 
 // ReasonWakeMissed is the reason code carried by an overdue object. The other
@@ -144,7 +150,16 @@ type queryGroupState struct {
 	// catch up. Retained for the same reason prunedSkip is: the object recovers
 	// at the next round and every later round reads healthy, while the Slots
 	// in the span were never evaluated and never will be.
-	gapSkip       *SkippedSpan
+	gapSkip *SkippedSpan
+	// emptyRuns counts consecutive rounds whose query returned no records at
+	// all, emptySince when that run began, and sawData whether any round in
+	// this process ever returned records. Data that stopped is a different
+	// fact from data that never came: the first is the data side's, the second
+	// is usually a strategy over a source that only speaks when something
+	// happens, and only the first is listed.
+	emptyRuns     int
+	emptySince    time.Time
+	sawData       bool
 	queryCooldown *observability.QueryCooldownFacts
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
@@ -510,6 +525,20 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	case completion != "":
 		state.determined = true
 		state.lastCompleted = completion
+		// The no-data run is kept apart from the anomaly run: an empty
+		// completion is healthy for the equation and ends any anomaly run, and
+		// a round with records -- degraded or not -- ends the empty run.
+		if completion == "FULL_EMPTY_COMPLETED" {
+			if state.emptyRuns == 0 {
+				state.emptySince = at
+			}
+			state.emptyRuns++
+		} else {
+			state.emptyRuns = 0
+			if completion == "FULL_COMPLETED" {
+				state.sawData = true
+			}
+		}
 		if healthyCompletion(completion) {
 			tracker.resetRun(state)
 			return
@@ -568,6 +597,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				ShortRounds: state.shortRounds, EmptyRounds: state.emptyRounds,
 				Guarded: facts.Guarded,
 				Fresh:   facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,
+				Unusable: facts.Unusable, UnusableReason: facts.UnusableReason,
+				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
 			}
 		}
 	case blockedOutcome(runOutcome):
@@ -895,6 +926,41 @@ func sortStrategies(strategies []StrategyRef) {
 			strategies[inner-1], strategies[inner] = right, left
 		}
 	}
+}
+
+// NoData is every object whose query has returned no records for at least the
+// degraded-rounds threshold after having returned some. Under no column: the
+// rounds complete and the health equation counts the object as healthy, which
+// it is as far as this deployment goes. It is the data side's line.
+//
+// Objects that have never returned records in this process are not listed. A
+// source that only speaks when something happens looks exactly like one that
+// stopped, and only the run that follows records says which.
+func (tracker *Tracker) NoData() []Anomaly {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	anomalies := make([]Anomaly, 0)
+	for queryGroup, state := range tracker.groups {
+		if !state.sawData || state.emptyRuns < tracker.degradedRounds {
+			continue
+		}
+		anomaly := Anomaly{
+			QueryGroup: queryGroup, Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED",
+			Since: state.emptySince, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
+		}
+		for strategy := range state.strategies {
+			anomaly.Strategies = append(anomaly.Strategies, strategy)
+		}
+		sortStrategies(anomaly.Strategies)
+		anomalies = append(anomalies, anomaly)
+	}
+	sort.Slice(anomalies, func(left, right int) bool {
+		if anomalies[left].Since.Equal(anomalies[right].Since) {
+			return anomalies[left].QueryGroup < anomalies[right].QueryGroup
+		}
+		return anomalies[left].Since.Before(anomalies[right].Since)
+	})
+	return anomalies
 }
 
 // GapSkips is every object this replica has seen skip a run of Slots because

@@ -139,7 +139,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
 			item.Coverage = &fleet.HistoryCoverage{Levels: 9, Short: 4,
 				WorstValid: 2, WorstRequired: 9, ShortRounds: 40,
-				Fresh: 4, ShortFresh: 4, FreshRounds: 40}
+				Fresh: 4, ShortFresh: 4, FreshRounds: 40,
+				Abnormal: 3, AbnormalOnIncomplete: 3}
 		}),
 		anomaly("qg-window-stale-data", func(item *fleet.Anomaly) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
@@ -189,7 +190,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		anomaly("qg-window-starved", func(item *fleet.Anomaly) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
 			item.Coverage = &fleet.HistoryCoverage{Levels: 3, Short: 2, Empty: 2,
-				WorstRequired: 14, ShortRounds: 40, EmptyRounds: 40}
+				WorstRequired: 14, ShortRounds: 40, EmptyRounds: 40,
+				Unusable: 2, UnusableReason: "REQUIRED_VALUE_MISSING"}
+		}),
+		// Data that stopped: rounds completing, nothing coming back.
+		anomaly("qg-no-data", func(item *fleet.Anomaly) {
+			item.Kind, item.ReasonCode = fleet.KindNoData, "FULL_EMPTY_COMPLETED"
 		}),
 		// Where the object is in its cycle, from the due index. One waiting,
 		// one late within its period, one that has missed a turn under a
@@ -481,7 +487,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	}
 	governance := lineStarting(text, "GOV ::")
 	for _, want := range []string{"查询后端没有应答，1 个对象受影响", "数据侧", "序列活不过检测窗口", "策略侧",
-		"老序列在缺点"} {
+		"老序列在缺点", "1 个对象持续没有数据"} {
 		if !strings.Contains(governance, want) {
 			t.Errorf("the governance fold does not say %q:\n%s", want, governance)
 		}
@@ -513,8 +519,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"qg-rejected", "冷却中", "被拒绝 · QUERY_UNAVAILABLE", "—"},
 		{"qg-blocked", "—", "失败 · source_blocked", "—"},
 		{"qg-offhours", "生效时段外", "完成 · EFFECTIVE_TIME_INACTIVE", "—"},
-		{"qg-window-churn", "—", "完成 · HISTORY_WARMING", "9 个窗口 · 短 4 · 空 0 · 新 4 · 连续 40 轮"},
-		{"qg-window-starved", "—", "完成 · HISTORY_WARMING", "3 个窗口 · 短 2 · 空 2 · 新 0 · 连续 40 轮"},
+		{"qg-window-churn", "—", "完成 · HISTORY_WARMING", "9 个窗口 · 短 4 · 空 0 · 新 4 · 连续 40 轮 · 不完整窗口上报了 3 个异常"},
+		{"qg-window-starved", "—", "完成 · HISTORY_WARMING", "3 个窗口 · 短 2 · 空 2 · 新 0 · 连续 40 轮 · 检测用不了 2 个：REQUIRED_VALUE_MISSING"},
+		{"qg-no-data", "—", "无数据 · FULL_EMPTY_COMPLETED", "—"},
 		{"qg-plain", "—", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
 		{"qg-late", "迟到 12 秒", "完成 · HISTORY_WARMING", "—"},
 		{"qg-missed-turn", "超期 4 分 0 秒", "完成 · QUERY_TIMEOUT", "—"},
