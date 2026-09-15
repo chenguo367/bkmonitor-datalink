@@ -65,3 +65,16 @@ func TestSyntheticSeriesSourceTimeIsThePeriodDecided(t *testing.T) {
 		t.Fatalf("series = %+v, want one series with SourceTime %d", series, absenceRound2-absencePeriod)
 	}
 }
+
+// The two period counts only disagree when a round did not happen between the
+// last data and the first absence - an unavailable round, which sets neither
+// LastSeen nor FirstAbsent. Python then reports the count since the last
+// point, and says separately that the data is late; a fixture in which the
+// absence began the round after the last data cannot tell which count was
+// used, because both give the same number there.
+func TestSyntheticSeriesPeriodsCountFromTheLastDataWhenARoundWasUnavailable(t *testing.T) {
+	memory := GroupMemory{LastSeen: absenceRound1 - 4*absencePeriod, FirstAbsent: absenceRound1 - 2*absencePeriod}
+	if got := absentPeriods(memory, absenceRound1, absencePeriod); got != 4 {
+		t.Fatalf("absentPeriods(%+v) = %d, want 4 counted from the last data, not 3 from the first absence", memory, got)
+	}
+}
