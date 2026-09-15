@@ -135,8 +135,6 @@ func TestDefaultRequiresExplicitEnvironmentCoordinates(t *testing.T) {
 func TestValidConfigurationLeavesConsumerKafkaFieldsEmpty(t *testing.T) {
 	cfg := validGoAccessConfigObject()
 	cfg.Kafka.MessageReceipt.MaxMessageBytes = 0
-	cfg.ReceiptQueue.MaxQueuedMessages = 0
-	cfg.ReceiptQueue.MaxQueuedBytes = 0
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)

@@ -105,10 +105,6 @@ func (c KafkaConfig) TriggerEventCoordinates() enginekafka.DecisionSinkConfig {
 	return c.outputCoordinates(c.TriggerEvent)
 }
 
-func (c KafkaConfig) MessageReceiptCoordinates() enginekafka.DecisionSinkConfig {
-	return c.outputCoordinates(c.MessageReceipt)
-}
-
 func (c KafkaConfig) outputCoordinates(output KafkaOutputConfig) enginekafka.DecisionSinkConfig {
 	return enginekafka.DecisionSinkConfig{
 		Brokers:         append([]string(nil), c.Brokers...),
@@ -164,11 +160,6 @@ type PlatformCacheConfig struct {
 	DynamicConfig *RedisConnectionConfig `yaml:"dynamic_config,omitempty"`
 }
 
-type ReceiptQueueConfig struct {
-	MaxQueuedMessages int `yaml:"max_queued_messages"`
-	MaxQueuedBytes    int `yaml:"max_queued_bytes"`
-}
-
 type Config struct {
 	Input           PhaseTwoInputConfig   `yaml:"input"`
 	HTTP            HTTPConfig            `yaml:"http"`
@@ -176,7 +167,6 @@ type Config struct {
 	Redis           RedisConfig           `yaml:"redis"`
 	PlatformCache   PlatformCacheConfig   `yaml:"platform_cache"`
 	Limits          LimitsConfig          `yaml:"limits"`
-	ReceiptQueue    ReceiptQueueConfig    `yaml:"receipt_queue"`
 	PhaseTwo        PhaseTwoRuntimeConfig `yaml:"phase_two"`
 	ShutdownTimeout Duration              `yaml:"shutdown_timeout"`
 }
@@ -209,7 +199,6 @@ func Default() Config {
 			MinTTL:      Duration(time.Minute), MaxTTL: Duration(30 * 24 * time.Hour), RestartMargin: Duration(10 * time.Minute),
 		},
 		Limits:          defaultLimits(),
-		ReceiptQueue:    ReceiptQueueConfig{MaxQueuedMessages: 4096, MaxQueuedBytes: 16 << 20},
 		PhaseTwo:        defaultPhaseTwoRuntime(),
 		ShutdownTimeout: Duration(10 * time.Second),
 	}
@@ -461,12 +450,6 @@ func (c Config) StateStoreOptions(codec *state.Codec, router state.StorageRouter
 		Prefix: c.Redis.StatePrefix, Codec: codec, Router: router, Limits: c.StoreLimits(),
 		MinTTL: c.Redis.MinTTL.Duration(), MaxTTL: c.Redis.MaxTTL.Duration(),
 		RestartMargin: c.Redis.RestartMargin.Duration(), Observer: observer,
-	}
-}
-
-func (c Config) ReceiptPublisherLimits() enginekafka.ReceiptPublisherLimits {
-	return enginekafka.ReceiptPublisherLimits{
-		MaxQueuedMessages: c.ReceiptQueue.MaxQueuedMessages, MaxQueuedBytes: c.ReceiptQueue.MaxQueuedBytes,
 	}
 }
 
