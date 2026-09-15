@@ -13,6 +13,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -900,6 +901,29 @@ func legacyNoDataNumber(field string, raw json.RawMessage) (uint32, bool, error)
 // detecting on a default.
 const defaultNoDataLevel uint32 = 2
 
+// noDataRosterUnsupported names the combination of target shape and no-data
+// dimensions this build cannot derive an expected set for, or "" when it can.
+//
+// It asks the derivation rather than repeating it. The Slot builds the roster
+// from the same two frozen facts, and the point of refusing here is that the
+// Slot never has to - which only holds while both reach the same verdict. A
+// second predicate that agrees today is a predicate that can drift tomorrow,
+// and the drift is silent in both directions: a Plan that errors every round,
+// or a Plan that quietly expects nothing.
+func noDataRosterUnsupported(scope *contract.TargetScopeV2, config *contract.NoDataConfigV1) string {
+	if config == nil {
+		return ""
+	}
+	if _, err := nodata.ClassifyRoster(scope, config.AggDimension); err != nil {
+		var unsupported *nodata.RosterUnsupportedError
+		if errors.As(err, &unsupported) {
+			return unsupported.Reason
+		}
+		return err.Error()
+	}
+	return ""
+}
+
 // frozenNoDataConfig returns the section to freeze on the Plan, or nil when the
 // item does not detect no-data. An item that is enabled but whose setting
 // cannot be validated is an error rather than a silent disable: the strategy
@@ -1191,6 +1215,25 @@ func compilePlan(
 		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", dispositions, err
 	}
 	plan.NoData = noData
+	if reason := noDataRosterUnsupported(targetScope, noData); reason != "" {
+		// Refused where it is decided rather than every round. The expected set
+		// is a function of the target's shape and the no-data dimensions, both
+		// frozen here, so a Slot would reach the same answer with no new
+		// information - and reaching it there would mean a Plan that runs while
+		// detecting no absence at all, which reads as a working strategy.
+		//
+		// The whole Plan is withheld, thresholds included, which is the same
+		// trade NO_DATA_CONFIG_INVALID makes and is visible the same way: the
+		// withheld metric counts it under this reason, so what it costs is a
+		// number rather than an argument. On the deployment this was written
+		// against that number is one strategy.
+		dispositions = append(dispositions, ObjectDisposition{
+			SourceID: sourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
+			Reason: "NO_DATA_ROSTER_UNSUPPORTED",
+		})
+		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", dispositions,
+			fmt.Errorf("alarmd controlplane: item %d no-data roster: %s", item.ID, reason)
+	}
 	if ref.SnapshotRevision > 0 {
 		plan.OutputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: dataset.DynamicDimensions, DimensionFields: append([]string{}, dataset.IdentityFields...)}
 		plan.SubjectFacts = frozenSubjectFacts(source, item)
