@@ -68,11 +68,10 @@ type KafkaOutputConfig struct {
 }
 
 type KafkaConfig struct {
-	LegacyAdapter  LegacyAdapterConfig `yaml:"legacy_adapter"`
-	Brokers        []string            `yaml:"brokers"`
-	InputTopic     string              `yaml:"input_topic"`
-	TriggerEvent   KafkaOutputConfig   `yaml:"trigger_event"`
-	MessageReceipt KafkaOutputConfig   `yaml:"message_receipt"`
+	LegacyAdapter LegacyAdapterConfig `yaml:"legacy_adapter"`
+	Brokers       []string            `yaml:"brokers"`
+	InputTopic    string              `yaml:"input_topic"`
+	TriggerEvent  KafkaOutputConfig   `yaml:"trigger_event"`
 	// Deprecated: accepted and ignored. It required every output topic to be
 	// repeated in a list, which protected nothing the topics themselves did not
 	// already state, and turned "add an output topic" into a startup failure
@@ -187,9 +186,8 @@ func Default() Config {
 		},
 		Kafka: KafkaConfig{
 			ClientID: "alarmd", BrokerVersion: "0.10.2.0",
-			TriggerEvent:   KafkaOutputConfig{Topic: "alarmd_event", MaxMessageBytes: defaultOutputMaxMessageBytes},
-			LegacyAdapter:  LegacyAdapterConfig{Topic: "alarmd_0bkmonitor_backend_event"},
-			MessageReceipt: KafkaOutputConfig{MaxMessageBytes: defaultOutputMaxMessageBytes},
+			TriggerEvent:  KafkaOutputConfig{Topic: "alarmd_event", MaxMessageBytes: defaultOutputMaxMessageBytes},
+			LegacyAdapter: LegacyAdapterConfig{Topic: "alarmd_0bkmonitor_backend_event"},
 		},
 		Redis: RedisConfig{
 			RedisConnectionConfig: RedisConnectionConfig{Mode: RedisModeStandalone,
@@ -580,9 +578,6 @@ func (c Config) validateCommon() error {
 func (c Config) validateGoAccessRuntime() error {
 	if c.Kafka.InputTopic != "" || c.Kafka.GroupID != "" || c.Kafka.InitialOffset != "" {
 		return errors.New("phase-two Go Access must not configure phase-one Kafka input coordinates")
-	}
-	if c.Kafka.MessageReceipt.Topic != "" {
-		return errors.New("phase-two Go Access must not configure the phase-one message receipt topic")
 	}
 	if err := validatePhaseTwoKafkaOutput(c.Kafka); err != nil {
 		return fmt.Errorf("trigger event configuration: %w", err)

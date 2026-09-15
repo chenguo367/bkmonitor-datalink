@@ -116,7 +116,6 @@ const (
 	StageOutputACKed            = "output_acked"
 	StageCoverageCompleted      = "coverage_completed"
 	StageCoverageGap            = "coverage_gap"
-	StageReceiptQueued          = "receipt_queued"
 	StageResourceSoft           = "resource_soft"
 	StageResourceHard           = "resource_hard"
 	StageResourceResumed        = "resource_resumed"
@@ -1952,7 +1951,6 @@ var metricComponentStages = []ComponentStage{
 	{ComponentTrigger, StageTriggerCompleted},
 	{ComponentOutput, StageOutputACKed},
 	{ComponentCoverage, StageCoverageCompleted}, {ComponentCoverage, StageCoverageGap},
-	{ComponentCoverage, StageReceiptQueued},
 	{ComponentResource, StageResourceSoft}, {ComponentResource, StageResourceHard},
 	{ComponentResource, StageResourceResumed},
 	{ComponentPythonProducer, StagePythonSource}, {ComponentPythonProducer, StagePythonBuilt},
