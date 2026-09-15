@@ -108,7 +108,9 @@ func copyGroups(groups map[string]Group) map[string]Group {
 //     completeness gate exists to prevent;
 //   - the whole-item group never records a LastSeen: it is not a series, and a
 //     LastSeen would carry it into the history roster (A8) as if it were one;
-//   - the facts are the counts of what was said, and Dropped passes through.
+//   - the facts are the counts of what was said and what was expected; the
+//     roster source is reported as the caller declared it, never rewritten,
+//     and Dropped passes through.
 func evaluate(t *testing.T, input AbsenceInput) AbsenceResult {
 	t.Helper()
 	memoryBefore, presentBefore, rosterBefore := copyMemory(input.Memory), copyGroups(input.Present), copyGroups(input.Roster.Groups)
@@ -145,8 +147,8 @@ func evaluate(t *testing.T, input AbsenceInput) AbsenceResult {
 		}
 	}
 	wantFacts := AbsenceFacts{
-		Present: uint64(len(input.Present)), Absent: absent, Unavailable: unavailable, Dropped: input.Dropped,
-		RosterSource: result.Facts.RosterSource, RosterVersion: input.Roster.Version,
+		Present: uint64(len(input.Present)), Expected: uint64(len(input.Roster.Groups)), Absent: absent, Unavailable: unavailable,
+		Dropped: input.Dropped, RosterSource: input.Roster.Source, RosterVersion: input.Roster.Version,
 	}
 	if result.Facts != wantFacts {
 		t.Fatalf("Facts = %+v, want %+v", result.Facts, wantFacts)
@@ -220,15 +222,24 @@ func TestAbsence_A1_NonFullSlotWithEmptyRosterSaysNothing(t *testing.T) {
 
 // A2. No expected groups and no data at all: the one thing that can be said
 // is that the item as a whole has no data, so the whole-item group is the
-// anomaly, the roster source reported is WHOLE, and the whole-item group
-// starts counting its absence from this round.
+// anomaly and starts counting its absence from this round. The facts keep the
+// roster source as declared: an empty roster declared TARGET_STATIC is a
+// target that resolved to no host, and that is the thing to be able to see.
 func TestAbsence_A2_NoRosterAndNoDataIsOneWholeItemAnomaly(t *testing.T) {
 	whole := WholeItemGroup().Key()
-	result := evaluate(t, fullRound(absenceRound1, historyRoster("v1"), nil, map[string]GroupMemory{}))
-	wantVerdicts(t, result, map[string]Verdict{whole: VerdictAnomaly})
-	wantMemory(t, result, whole, GroupMemory{FirstAbsent: absenceRound1})
-	if result.Facts.RosterSource != RosterWhole {
-		t.Fatalf("Facts.RosterSource = %q, want %q", result.Facts.RosterSource, RosterWhole)
+	for name, roster := range map[string]Roster{
+		"declared whole":            {Version: "v1", Source: RosterWhole, Groups: map[string]Group{}},
+		"history with nothing seen": historyRoster("v1"),
+		"target resolved to none":   staticRoster("v1"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			result := evaluate(t, fullRound(absenceRound1, roster, nil, map[string]GroupMemory{}))
+			wantVerdicts(t, result, map[string]Verdict{whole: VerdictAnomaly})
+			wantMemory(t, result, whole, GroupMemory{FirstAbsent: absenceRound1})
+			if result.Facts.RosterSource != roster.Source || result.Facts.Expected != 0 {
+				t.Fatalf("Facts = %+v, want the declared source %q and Expected 0", result.Facts, roster.Source)
+			}
+		})
 	}
 }
 
@@ -255,8 +266,26 @@ func TestAbsence_A3_NoRosterWithDataRecoversWholeItemAndRecordsTheGroups(t *test
 	wantMemory(t, result, whole, GroupMemory{})
 	wantMemory(t, result, one.Key(), GroupMemory{LastSeen: absenceRound1})
 	wantMemory(t, result, two.Key(), GroupMemory{LastSeen: absenceRound1})
-	if result.Facts.RosterSource != RosterWhole {
-		t.Fatalf("Facts.RosterSource = %q, want %q", result.Facts.RosterSource, RosterWhole)
+	if result.Facts.RosterSource != RosterHistory || result.Facts.Expected != 0 {
+		t.Fatalf("Facts = %+v, want the declared source HISTORY and Expected 0", result.Facts)
+	}
+}
+
+// A3 with an empty agg_dimension: every series projects onto the whole-item
+// group, so Present holds the whole-item group itself. It is NORMAL, and it is
+// not remembered as seen - it is not a series, and the history roster must
+// not come to expect the item as one of its own groups.
+func TestAbsence_A3_WholeItemPresentIsNormalAndNotRemembered(t *testing.T) {
+	whole := WholeItemGroup().Key()
+	memory := map[string]GroupMemory{whole: {FirstAbsent: absenceRound1 - absencePeriod}}
+	roster := Roster{Version: "v1", Source: RosterWhole, Groups: map[string]Group{}}
+	result := evaluate(t, fullRound(absenceRound1, roster, groupSet(WholeItemGroup()), memory))
+	wantVerdicts(t, result, map[string]Verdict{whole: VerdictNormal})
+	if entry, ok := result.Memory[whole]; ok && entry != (GroupMemory{}) {
+		t.Fatalf("Memory[whole] = %+v, want cleared", entry)
+	}
+	if result.Facts.Present != 1 || result.Facts.Expected != 0 || result.Facts.RosterSource != RosterWhole {
+		t.Fatalf("Facts = %+v, want Present 1, Expected 0, source WHOLE", result.Facts)
 	}
 }
 
