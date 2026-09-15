@@ -542,6 +542,11 @@ func (p *CompiledPlan) NoDataLevel() *CompiledLevel {
 // - its dimensions carry the no-data tag - not by pretending to be a different
 // Plan.
 //
+// The view is read-only, and it is safe because a CompiledPlan is: the copy is
+// shallow, so it shares every reference the Plan holds, and nothing on this type
+// mutates. A setter added here later would reach through the view into the Plan
+// it came from - and through every other view of it.
+//
 // Nil when the Plan detects no no-data, which is the caller asking for a view
 // of something that is not there.
 func (p *CompiledPlan) NoDataView() *CompiledPlan {

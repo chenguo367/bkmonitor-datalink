@@ -10,6 +10,7 @@
 package nodata
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
@@ -204,7 +205,39 @@ func BuildRoster(request RosterRequest) (Roster, error) {
 			roster.Groups[group.Key()] = group
 		}
 	}
+	version, err := rosterVersion(roster)
+	if err != nil {
+		return Roster{}, err
+	}
+	roster.Version = version
 	return roster, nil
+}
+
+// rosterVersion names the expected set this round was decided against.
+//
+// It is derived from the set rather than passed in, because the roster knows
+// what it is the moment it is built and a caller stating it is a caller that
+// can state it wrong. It is not the state generation either: that already keys
+// the memory record and says the Plan's content changed, so repeating it here
+// would be one fact written twice with the second copy saying nothing. What a
+// reader of a stored memory needs from this field is the other question - was
+// this decided against the same expected set as last time - and membership is
+// exactly what moves without the content moving: a host joining or leaving the
+// business changes the set and nothing else does.
+func rosterVersion(roster Roster) (string, error) {
+	keys := make([]string, 0, len(roster.Groups))
+	for key := range roster.Groups {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	digest, err := contract.DeriveCanonicalDigestV2("alarmd-no-data-roster-v1", struct {
+		Source RosterSource `json:"source"`
+		Groups []string     `json:"groups"`
+	}{Source: roster.Source, Groups: keys})
+	if err != nil {
+		return "", fmt.Errorf("alarmd nodata: derive roster version: %w", err)
+	}
+	return digest, nil
 }
 
 // namesTheHostDimension is the backend's first step, which decides whether the

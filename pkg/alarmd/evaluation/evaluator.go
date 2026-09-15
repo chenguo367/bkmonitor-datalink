@@ -410,7 +410,7 @@ func (e *Evaluator) evaluateSeries(
 	// Plan is the one this kind of series is judged against. A real series sees
 	// the strategy's declared levels; a synthetic no-data series sees the
 	// no-data level and nothing else.
-	due, err := planViewFor(due, first.Kind)
+	due, err := execution.PlanViewFor(due, first.Kind)
 	if err != nil {
 		return execution.PlanEvaluationResult{}, err
 	}

@@ -55,9 +55,8 @@ func TestEvaluateSlotDecidesAStaticTargetFromWhichSeriesReported(t *testing.T) {
 		Series: []map[string]string{
 			{HostIPDimension: "10.0.0.1", HostCloudDimension: "0", "device": "eth0"},
 		},
-		KnownHosts:    knownHosts("10.0.0.1|0", "10.0.0.2|0"),
-		Memory:        map[string]GroupMemory{},
-		RosterVersion: "v1",
+		KnownHosts: knownHosts("10.0.0.1|0", "10.0.0.2|0"),
+		Memory:     map[string]GroupMemory{},
 	})
 	if err != nil || outcome != OutcomeEvaluated {
 		t.Fatalf("EvaluateSlot() = %q, %v", outcome, err)
@@ -71,8 +70,12 @@ func TestEvaluateSlotDecidesAStaticTargetFromWhichSeriesReported(t *testing.T) {
 	if entry := result.Memory[absent.Key()]; entry.FirstAbsent != 1000 {
 		t.Fatalf("Memory[absent] = %+v, want its absence clock started at this round", entry)
 	}
-	if result.Facts.RosterSource != RosterTargetStatic || result.Facts.RosterVersion != "v1" {
-		t.Fatalf("Facts = %+v, want the target source and the stated version", result.Facts)
+	// The facts and the roster say the same version, because there is one: the
+	// roster derives it when it is built and the facts report what it derived.
+	if result.Facts.RosterSource != RosterTargetStatic || result.Facts.RosterVersion == "" ||
+		result.Facts.RosterVersion != result.Roster.Version {
+		t.Fatalf("Facts = %+v, want the target source and the roster's own version %q",
+			result.Facts, result.Roster.Version)
 	}
 }
 

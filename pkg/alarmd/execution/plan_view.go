@@ -7,33 +7,30 @@
 // an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
 // specific language governing permissions and limitations under the License.
 
-package evaluation
+package execution
 
-import (
-	"errors"
+import "errors"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-)
-
-// planViewFor is the one place that decides which levels a series is judged
-// against, and it decides it by choosing which view of the Plan the rest of the
-// evaluation sees.
+// PlanViewFor is the one place that decides which levels a series is judged
+// against, and it decides it by choosing which view of the Plan everything
+// downstream sees.
 //
-// Everything downstream - this package, the detector, the trigger, and the
-// execution contract's own validators - asks the Plan for its levels, in
-// fifteen places across four packages. Threading a level set through all of
-// them would have left the sixteenth, added later by someone with no reason to
+// That question is asked in sixteen places across five packages - the worker's
+// own EffectiveTime binding, the evaluator, the detector, the trigger and this
+// package's validators - and all sixteen ask it the same way, by calling
+// Levels() on the Plan they were handed. Threading a level set through them
+// would have left the seventeenth, added later by someone with no reason to
 // know the rule existed. Answering the existing question differently leaves
 // nothing to thread.
 //
-// The choice is made from the kind of series, which is a property of how the
-// input was built, never of which inputs turned up. A test fails if any
-// non-test source in this package chooses a view anywhere else.
-func planViewFor(due execution.DuePlan, kind execution.SeriesKind) (execution.DuePlan, error) {
+// It lives here rather than in either caller because both the worker and the
+// evaluator need it, and two copies of a decision are not one decision. A test
+// fails if anything outside this function chooses a view.
+func PlanViewFor(due DuePlan, kind SeriesKind) (DuePlan, error) {
 	switch kind {
-	case execution.SeriesKindReal:
+	case SeriesKindReal:
 		return due, nil
-	case execution.SeriesKindNoData:
+	case SeriesKindNoData:
 		view := due.CompiledPlan.NoDataView()
 		if view == nil {
 			// A synthetic series for a Plan that does not detect no-data. The
@@ -41,12 +38,11 @@ func planViewFor(due execution.DuePlan, kind execution.SeriesKind) (execution.Du
 			// the two disagreeing, and guessing which is right would either
 			// judge absence a strategy never asked for or feed an answer to a
 			// level expecting a measurement.
-			return execution.DuePlan{}, errors.New(
-				"alarmd evaluation: no-data series for a Plan with no no-data level")
+			return DuePlan{}, errors.New("alarmd execution: no-data series for a Plan with no no-data level")
 		}
 		due.CompiledPlan = view
 		return due, nil
 	default:
-		return execution.DuePlan{}, errors.New("alarmd evaluation: unknown series kind")
+		return DuePlan{}, errors.New("alarmd execution: unknown series kind")
 	}
 }

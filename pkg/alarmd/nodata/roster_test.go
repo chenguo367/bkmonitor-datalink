@@ -300,3 +300,76 @@ func knownHosts(keys ...string) map[string]struct{} {
 	}
 	return known
 }
+
+// The roster version names the expected set, and only the expected set.
+//
+// Three properties, and the third is the one that keeps it from quietly
+// becoming another spelling of the state generation. That generation already
+// keys the memory record and says the Plan's content moved; what a reader of a
+// stored memory needs from this field is the other question - was this decided
+// against the same set as last time - and membership is what moves without the
+// content moving.
+func TestTheRosterVersionNamesTheExpectedSetAndNothingElse(t *testing.T) {
+	request := RosterRequest{
+		AggDimension: []string{HostIPDimension, HostCloudDimension},
+		Scope:        hostScope("10.0.0.1|0", "10.0.0.2|0"),
+		KnownHosts:   knownHosts("10.0.0.1|0", "10.0.0.2|0"),
+	}
+	first, err := BuildRoster(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Version == "" {
+		t.Fatal("a roster was built without a version")
+	}
+
+	// The same expected set, derived again.
+	same, err := BuildRoster(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same.Version != first.Version {
+		t.Fatalf("two rounds over the same expected set gave %q and %q", first.Version, same.Version)
+	}
+
+	// One host leaves the business. The set moved, so the version moves - this
+	// is the change the field exists to record.
+	departed := request
+	departed.KnownHosts = knownHosts("10.0.0.1|0")
+	fewer, err := BuildRoster(departed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fewer.Version == first.Version {
+		t.Fatalf("a host left the business and the version stayed %q", first.Version)
+	}
+
+	// And nothing outside the expected set reaches it. The request carries no
+	// state generation at all, which is the structural half of the property:
+	// a Plan whose content changed without its expected set changing derives
+	// the same version, because there is nothing else in the derivation.
+	sameSetDifferentMemory := request
+	sameSetDifferentMemory.Memory = map[string]GroupMemory{"something else": {LastSeen: 1}}
+	unchanged, err := BuildRoster(sameSetDifferentMemory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.Version != first.Version {
+		t.Fatalf("the version moved on something that is not the expected set: %q vs %q",
+			unchanged.Version, first.Version)
+	}
+
+	// A different source with the same (empty) groups is still a different
+	// roster, so the source is part of it.
+	whole, err := BuildRoster(RosterRequest{AggDimension: []string{"device"}, Scope: hostScope("10.0.0.1|0")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history, err := BuildRoster(RosterRequest{AggDimension: []string{HostIPDimension, HostCloudDimension}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whole.Version == history.Version {
+		t.Fatalf("two rosters from different sources share the version %q", whole.Version)
+	}
+}

@@ -35,9 +35,6 @@ type SlotInput struct {
 	// OutOfBusiness names the groups whose host resolved to another business.
 	OutOfBusiness map[string]struct{}
 	Memory        map[string]GroupMemory
-	// RosterVersion names the derivation the roster came from, carried into the
-	// facts so a reader can tell one round's expected set from another's.
-	RosterVersion string
 }
 
 // SlotOutcome says what happened to one no-data Plan in one Slot. Every Plan
@@ -133,7 +130,6 @@ func EvaluateSlot(input SlotInput) (AbsenceResult, SlotOutcome, error) {
 	if err != nil {
 		return AbsenceResult{}, OutcomeNone, err
 	}
-	roster.Version = input.RosterVersion
 	outcome := OutcomeEvaluated
 	if input.Completeness != execution.CompletenessFull {
 		outcome = OutcomeSkippedQueryNotFull

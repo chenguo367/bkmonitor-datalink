@@ -16,7 +16,21 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-const planSlotRosterVersion = "TARGET_STATIC/1"
+// planSlotRosterVersion is what this fixture's expected set derives to. It is
+// read from the derivation rather than written out, because a hand-written one
+// is a second statement of the same thing and they drift.
+func planSlotRosterVersion(t *testing.T) string {
+	t.Helper()
+	roster, err := BuildRoster(RosterRequest{
+		AggDimension: []string{HostIPDimension, HostCloudDimension},
+		Scope:        hostScope("10.0.0.1|0", "10.0.0.2|0"),
+		KnownHosts:   knownHosts("10.0.0.1|0", "10.0.0.2|0"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return roster.Version
+}
 
 func planSlotIdentity() execution.PlanNoDataIdentity {
 	return execution.PlanNoDataIdentity{
@@ -28,7 +42,8 @@ func planSlotIdentity() execution.PlanNoDataIdentity {
 func planSlotInput(snapshot execution.NoDataMemorySnapshot, series ...map[string]string) PlanSlotInput {
 	scope := hostScope("10.0.0.1|0", "10.0.0.2|0")
 	return PlanSlotInput{
-		Plan:             slotPlan(scope, []string{HostIPDimension, HostCloudDimension}),
+		NoData:           &contract.NoDataConfigV1{Continuous: 3, Level: 2, AggDimension: []string{HostIPDimension, HostCloudDimension}},
+		Scope:            scope,
 		Identity:         planSlotIdentity(),
 		Snapshot:         snapshot,
 		ApplyVersion:     execution.ApplyVersion{StateApplyEpoch: 7, EvaluationTime: 1000, SlotDigest: "slot"},
@@ -38,7 +53,6 @@ func planSlotInput(snapshot execution.NoDataMemorySnapshot, series ...map[string
 		Completeness:     execution.CompletenessFull,
 		Series:           series,
 		KnownHosts:       knownHosts("10.0.0.1|0", "10.0.0.2|0"),
-		RosterVersion:    planSlotRosterVersion,
 	}
 }
 
@@ -46,13 +60,13 @@ func presentSeries() map[string]string {
 	return map[string]string{HostIPDimension: "10.0.0.1", HostCloudDimension: "0"}
 }
 
-func storedSnapshot(groups ...execution.NoDataGroupMemory) execution.NoDataMemorySnapshot {
+func storedSnapshot(t *testing.T, groups ...execution.NoDataGroupMemory) execution.NoDataMemorySnapshot {
 	return execution.NoDataMemorySnapshot{
 		Identity: planSlotIdentity(), Status: execution.NoDataMemoryFound,
 		MarkerRevision: 4, SchemaVersion: execution.NoDataMemorySchemaV1,
 		PersistedApplyVersion:   execution.ApplyVersion{StateApplyEpoch: 6, EvaluationTime: 940, SlotDigest: "slot"},
 		PersistedMutationDigest: "digest", LastScheduleRevision: "revision-1",
-		RosterVersion: planSlotRosterVersion, Groups: groups,
+		RosterVersion: planSlotRosterVersion(t), Groups: groups,
 	}
 }
 
@@ -83,7 +97,7 @@ func TestPlanSlotProducesSeriesAndTheMemoryToStore(t *testing.T) {
 		t.Fatalf("expected marker revision = %d, want 0 for a record that does not exist yet",
 			result.Mutation.ExpectedMarkerRevision)
 	}
-	if result.Mutation.RosterVersion != planSlotRosterVersion {
+	if result.Mutation.RosterVersion != planSlotRosterVersion(t) {
 		t.Fatalf("mutation roster version = %q, want the one the round decided against",
 			result.Mutation.RosterVersion)
 	}
@@ -98,7 +112,7 @@ func TestPlanSlotProducesSeriesAndTheMemoryToStore(t *testing.T) {
 // and writes nothing. The absence clocks must not move on evidence the round
 // did not have.
 func TestPlanSlotWritesNothingOnAnIncompleteRound(t *testing.T) {
-	input := planSlotInput(storedSnapshot(
+	input := planSlotInput(storedSnapshot(t,
 		execution.NoDataGroupMemory{GroupKey: hostTargetGroup(HostIdentity{IP: "10.0.0.1", CloudID: "0"}).Key(), LastSeen: 940},
 	))
 	input.Completeness = execution.CompletenessPartial
@@ -186,7 +200,7 @@ func TestPlanSlotWritesNothingWhenTheMemoryDidNotMove(t *testing.T) {
 
 	// Feed the memory it just produced back in as the stored record, with the
 	// same Slot. Nothing about the round changed, so nothing is written.
-	repeat, err := EvaluatePlanSlot(planSlotInput(storedSnapshot(first.Mutation.Groups...), presentSeries()))
+	repeat, err := EvaluatePlanSlot(planSlotInput(storedSnapshot(t, first.Mutation.Groups...), presentSeries()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +227,7 @@ func TestPlanSlotWritesWhenOnlyTheRosterVersionMoved(t *testing.T) {
 	if err != nil || first.Mutation == nil {
 		t.Fatalf("fixture: %+v, %v", first.Mutation, err)
 	}
-	stored := storedSnapshot(first.Mutation.Groups...)
+	stored := storedSnapshot(t, first.Mutation.Groups...)
 	stored.RosterVersion = "HISTORY/1"
 
 	result, err := EvaluatePlanSlot(planSlotInput(stored, presentSeries()))
@@ -223,7 +237,7 @@ func TestPlanSlotWritesWhenOnlyTheRosterVersionMoved(t *testing.T) {
 	if result.Mutation == nil {
 		t.Fatal("the memory was decided against a different roster and was not rewritten")
 	}
-	if result.Mutation.RosterVersion != planSlotRosterVersion {
+	if result.Mutation.RosterVersion != planSlotRosterVersion(t) {
 		t.Fatalf("mutation roster version = %q, want this round's", result.Mutation.RosterVersion)
 	}
 }
@@ -231,7 +245,7 @@ func TestPlanSlotWritesWhenOnlyTheRosterVersionMoved(t *testing.T) {
 // A Plan that does not detect no-data is answered with nothing to do, so the
 // caller can ask every Plan.
 func TestPlanSlotSaysNothingForAPlanWithoutNoData(t *testing.T) {
-	result, err := EvaluatePlanSlot(PlanSlotInput{Plan: &contract.EvaluationPlanV2{PlanID: "1001"}})
+	result, err := EvaluatePlanSlot(PlanSlotInput{})
 	if err != nil {
 		t.Fatal(err)
 	}
