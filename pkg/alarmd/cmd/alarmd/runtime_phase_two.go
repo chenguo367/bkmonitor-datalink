@@ -1293,6 +1293,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 				dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(scheduled.queryGroup), observability.TargetFlowFacts{Decision: "normal_queue_full"})
 				dispatcher.rotation.deferred++
 				dispatcher.rotation.deferredQueueFull++
+				dispatcher.dueIndex.MarkHeldBack(scheduled.queryGroup)
 				return
 			}
 			dispatcher.normal = append(dispatcher.normal, queued)
@@ -1306,11 +1307,13 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 					dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(scheduled.queryGroup), observability.TargetFlowFacts{Decision: "delayed_queue_full", ReadyAtMS: diagnosticTimeMS(readyAt)})
 					dispatcher.rotation.deferred++
 					dispatcher.rotation.deferredNotBetter++
+					dispatcher.dueIndex.MarkHeldBack(scheduled.queryGroup)
 					advance()
 					continue
 				}
 				evicted := dispatcher.delayed[latest].scheduled
 				dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(evicted.queryGroup), observability.TargetFlowFacts{Decision: "delayed_queue_evicted"})
+				dispatcher.dueIndex.MarkHeldBack(evicted.queryGroup)
 				if dispatcher.queued[evicted.queryGroup] == evicted.lifecycle {
 					delete(dispatcher.queued, evicted.queryGroup)
 				}

@@ -844,6 +844,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		// rather than evaluated. It lives on the bundle precisely so a reader
 		// outside the dispatch loop can ask it.
 		overdue:    bundle.ensureDueIndex(),
+		schedule:   bundle.ensureDueIndex(),
 		strategies: fleetTracker.StrategiesFor,
 		// Whether anything can be parked at all, from the same bundle. The
 		// overdue count above is only readable next to this: on a build that

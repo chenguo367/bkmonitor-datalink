@@ -214,6 +214,15 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 	// appears and the second is not. Reading it here costs nothing -- the load
 	// already happened, and its outcome is on the view being evaluated.
 	fresh := view.Status == execution.StateMissingWarming
+	// Which Levels could not use this record, by Level, so the window count
+	// beside each one can say so. The facts are in hand here and nowhere
+	// downstream.
+	unusable := make(map[uint32]string, len(facts))
+	for _, f := range facts {
+		if f.Result == detect.FactResultUnavailable || f.Result == detect.FactResultError {
+			unusable[f.Definition.LevelID] = f.ReasonCode
+		}
+	}
 	for i, l := range levels {
 		h, _ := window.History(l.Definition().LevelID)
 		completeness := ""
@@ -245,6 +254,9 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		// time the summary is returned the forced value and the computed one are
 		// the same field.
 		coverage.Observe(summary.ValidPositions, summary.RequiredPositions, completeness != "", fresh)
+		if reason, unusableHere := unusable[l.Definition().LevelID]; unusableHere {
+			coverage.ObserveUnusable(reason)
+		}
 		fact, found := effectiveFact(request.Header, due.Identity, l.Definition().LevelID, series)
 		if !found {
 			return recordResult{}, errors.New("alarmd evaluation: EffectiveTime fact missing")

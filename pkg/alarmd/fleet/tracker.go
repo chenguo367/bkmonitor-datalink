@@ -34,6 +34,18 @@ const (
 	// the absence of rounds, and the only thing that can report it is whatever
 	// is holding the object's next wake time.
 	KindOverdueWake = "OVERDUE_WAKE"
+	// KindSkippedSpan is a retained record of Slots this deployment never
+	// evaluated -- skipped past the replay window, or lost to a pruned
+	// timeline. It is not a round: the object is usually running normally now.
+	// It exists as a kind so the record can be listed under its check like any
+	// other row, rather than only counted.
+	KindSkippedSpan = "SKIPPED_SPAN"
+	// KindNoData is an object whose rounds complete and whose query has
+	// returned no records for a run of rounds after having returned some. It
+	// is not a failure -- the round ran, the backend answered -- and it is not
+	// in any column of the health equation; it is the data having stopped, and
+	// it is listed under the data side's line for as long as it holds.
+	KindNoData = "NO_DATA"
 )
 
 // ReasonWakeMissed is the reason code carried by an overdue object. The other
@@ -132,7 +144,33 @@ type queryGroupState struct {
 	// outlives the rounds around it on purpose: the object recovers immediately
 	// and every later round looks healthy, while the detection inside the span
 	// never happened and cannot be made to happen.
-	prunedSkip    *PrunedSkip
+	prunedSkip *PrunedSkip
+	// gapSkip is the last run of Slots this object skipped because they fell
+	// past the replay window -- this deployment giving up on work it could not
+	// catch up. Retained for the same reason prunedSkip is: the object recovers
+	// at the next round and every later round reads healthy, while the Slots
+	// in the span were never evaluated and never will be.
+	gapSkip *SkippedSpan
+	// emptyRuns counts consecutive rounds whose query returned no records at
+	// all, emptySince when that run began, and sawData whether any round in
+	// this process ever returned records. Data that stopped is a different
+	// fact from data that never came: the first is the data side's, the second
+	// is usually a strategy over a source that only speaks when something
+	// happens, and only the first is listed.
+	emptyRuns  int
+	emptySince time.Time
+	sawData    bool
+	// reasonKey names the current result and reason as one string, reasonSince
+	// is when that pair first held and reasonRuns how many consecutive rounds
+	// it has held for. It is the object's own clock for "how long has it been
+	// saying this", and it is not runStartedAt: an object can have been
+	// anomalous for hours and saying its current reason for a minute.
+	// Kubernetes' lastTransitionTime does not reset when only the reason
+	// changes; this one does, on purpose, because the reason is what the
+	// reader acts on.
+	reasonKey     string
+	reasonSince   time.Time
+	reasonRuns    int
 	queryCooldown *observability.QueryCooldownFacts
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
@@ -366,7 +404,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// the context that names the query group does not name the strategy;
 	// replacing one with the other loses whichever half it did not come from.
 	trace := observation.Trace
-	if trace.QueryGroupKey == "" || trace.StrategyID == "" {
+	if trace.QueryGroupKey == "" || trace.StrategyID == "" || trace.EvaluationTime == 0 {
 		fromContext := observability.TraceFieldsFromContext(ctx)
 		if trace.QueryGroupKey == "" {
 			trace.QueryGroupKey = fromContext.QueryGroupKey
@@ -374,6 +412,9 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if trace.StrategyID == "" {
 			trace.StrategyID = fromContext.StrategyID
 			trace.BusinessID = fromContext.BusinessID
+		}
+		if trace.EvaluationTime == 0 {
+			trace.EvaluationTime = fromContext.EvaluationTime
 		}
 	}
 	queryGroup := trace.QueryGroupKey
@@ -423,13 +464,24 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if cursorAdvance.Status == observability.CursorAdvanceApplied {
 			state.prunedSkip = &PrunedSkip{
 				From: cursorAdvance.From, To: cursorAdvance.To, At: at,
-				DiscardedSlot: cursorAdvance.InFlightSlot,
+				DiscardedSlot: cursorAdvance.InFlightSlot, Replica: tracker.replica,
 			}
 		}
 		if completion == "" && runOutcome == "" && executeOutcome == "" && failure == nil &&
 			observation.QueryCooldown == nil {
 			return
 		}
+	}
+	// A Slot skipped because it fell past the replay window. Consecutive skips
+	// are one span; a round that is not a skip ends it, and the span stays as
+	// the record of what was never evaluated.
+	if completion == "GAP_SKIPPED" {
+		if state.gapSkip == nil || state.lastCompleted != "GAP_SKIPPED" {
+			state.gapSkip = &SkippedSpan{FirstSlot: trace.EvaluationTime, Replica: tracker.replica}
+		}
+		state.gapSkip.LastSlot = trace.EvaluationTime
+		state.gapSkip.Slots++
+		state.gapSkip.At = at
 	}
 	// Captured before this round is folded in: by the time the run-start block
 	// runs, this round has already made the object determined, and the question
@@ -484,6 +536,21 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	case completion != "":
 		state.determined = true
 		state.lastCompleted = completion
+		tracker.noteReason(state, completion+"/"+observation.ProgressCompletionReason, at)
+		// The no-data run is kept apart from the anomaly run: an empty
+		// completion is healthy for the equation and ends any anomaly run, and
+		// a round with records -- degraded or not -- ends the empty run.
+		if completion == "FULL_EMPTY_COMPLETED" {
+			if state.emptyRuns == 0 {
+				state.emptySince = at
+			}
+			state.emptyRuns++
+		} else {
+			state.emptyRuns = 0
+			if completion == "FULL_COMPLETED" {
+				state.sawData = true
+			}
+		}
 		if healthyCompletion(completion) {
 			tracker.resetRun(state)
 			return
@@ -542,10 +609,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				ShortRounds: state.shortRounds, EmptyRounds: state.emptyRounds,
 				Guarded: facts.Guarded,
 				Fresh:   facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,
+				Unusable: facts.Unusable, UnusableReason: facts.UnusableReason,
+				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
 			}
 		}
 	case blockedOutcome(runOutcome):
 		state.determined = true
+		tracker.noteReason(state, "blocked/"+runOutcome, at)
 		state.failingSince = time.Time{}
 		state.blockedRuns++
 		state.currentKind = KindBlockedRun
@@ -555,6 +625,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.sawSomethingWrong = true
 	case failedExecution(executeOutcome):
 		state.determined = true
+		failureCode := ""
+		if state.lastFailure != nil {
+			failureCode = state.lastFailure.Code
+		}
+		tracker.noteReason(state, "failed/"+executeOutcome+"/"+failureCode, at)
 		if state.failingSince.IsZero() {
 			state.failingSince = at
 		}
@@ -595,6 +670,15 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			state.sinceFrom = SinceProcessStart
 		}
 	}
+}
+
+// noteReason advances the object's own clock: a new result-and-reason pair
+// starts it, the same pair counts one more round on it.
+func (tracker *Tracker) noteReason(state *queryGroupState, key string, at time.Time) {
+	if state.reasonKey != key {
+		state.reasonKey, state.reasonSince, state.reasonRuns = key, at, 0
+	}
+	state.reasonRuns++
 }
 
 func (tracker *Tracker) resetRun(state *queryGroupState) {
@@ -747,6 +831,8 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 			Since:        state.runStartedAt,
 			SinceFrom:    state.sinceFrom,
 			FailingSince: state.failingSince,
+			ReasonSince:  state.reasonSince,
+			Consecutive:  state.reasonRuns,
 			Replica:      tracker.replica,
 			Failure:      state.lastFailure,
 		}
@@ -869,6 +955,61 @@ func sortStrategies(strategies []StrategyRef) {
 			strategies[inner-1], strategies[inner] = right, left
 		}
 	}
+}
+
+// NoData is every object whose query has returned no records for at least the
+// degraded-rounds threshold after having returned some. Under no column: the
+// rounds complete and the health equation counts the object as healthy, which
+// it is as far as this deployment goes. It is the data side's line.
+//
+// Objects that have never returned records in this process are not listed. A
+// source that only speaks when something happens looks exactly like one that
+// stopped, and only the run that follows records says which.
+func (tracker *Tracker) NoData() []Anomaly {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	anomalies := make([]Anomaly, 0)
+	for queryGroup, state := range tracker.groups {
+		if !state.sawData || state.emptyRuns < tracker.degradedRounds {
+			continue
+		}
+		anomaly := Anomaly{
+			QueryGroup: queryGroup, Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED",
+			Since: state.emptySince, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
+		}
+		for strategy := range state.strategies {
+			anomaly.Strategies = append(anomaly.Strategies, strategy)
+		}
+		sortStrategies(anomaly.Strategies)
+		anomalies = append(anomalies, anomaly)
+	}
+	sort.Slice(anomalies, func(left, right int) bool {
+		if anomalies[left].Since.Equal(anomalies[right].Since) {
+			return anomalies[left].QueryGroup < anomalies[right].QueryGroup
+		}
+		return anomalies[left].Since.Before(anomalies[right].Since)
+	})
+	return anomalies
+}
+
+// GapSkips is every object this replica has seen skip a run of Slots because
+// they fell past the replay window, with the last such run. Like PrunedSkips,
+// it outlives the rounds around it: the loss is in the object's past and no
+// later round can carry it.
+func (tracker *Tracker) GapSkips() map[string]SkippedSpan {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	var skips map[string]SkippedSpan
+	for queryGroup, state := range tracker.groups {
+		if state.gapSkip == nil {
+			continue
+		}
+		if skips == nil {
+			skips = make(map[string]SkippedSpan, 4)
+		}
+		skips[queryGroup] = *state.gapSkip
+	}
+	return skips
 }
 
 // PrunedSkips is every object this replica has seen lose a span of Slots to a

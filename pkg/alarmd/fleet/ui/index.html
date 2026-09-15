@@ -562,16 +562,17 @@ var CHECK = {
   NO_DATA_PERSISTENT:    '{n} 个对象持续没有数据（{s} 条策略）',
   SERIES_CHURNING:       '{n} 个对象的序列活不过检测窗口（{s} 条策略），恢复判不了',
   SERIES_DATA_MISSING:   '{n} 个对象的老序列在缺点（{s} 条策略），恢复判不了',
-  WINDOW_UNDECIDED:      '{n} 个对象的窗口填不满，还分不出原因（{s} 条策略）',
+  WINDOW_UNDECIDED:      '{n} 个对象的窗口填不满，还分不出是谁的（{g} 种情况，{s} 条策略）',
   PLAN_UNEVALUABLE:      '{s} 条策略按现在的定义算不了，{n} 个对象不检测',
   CONFIG_UNRESOLVED:     '{n} 个对象的配置状态说不清（{s} 条策略）'
 };
 
 // What the objects of a check are folded on, in words.
-var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口'};
+var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况'};
 
 // The two dimensions each object row shows, in words. Held to the Go lists.
-var SCHEDULE = {RUNNING: '在跑', STALLED: '轮次不结束', COOLING: '冷却中', OVERDUE: '到期没跑', PAUSED: '生效时段外'};
+var SCHEDULE = {NEW: '接管后未跑', ON_TIME: '等下次', LATE: '迟到', OVERDUE: '超期', PAUSED: '生效时段外',
+                STALLED: '轮次不结束', COOLING: '冷却中'};
 var RESULT = {COMPLETED: '完成', ERROR: '失败', REFUSED: '被拒绝', NO_DATA: '无数据'};
 
 function checkSentence(report) {
@@ -589,25 +590,62 @@ function checkSentence(report) {
 
 // The running brief: three sentences, each answering one question. The first
 // and third come from the verdict response, the second from the checks.
+//
+// The first sentence is built from the schedule census and nothing else: how
+// many rounds finished before their next turn fell due, over the last hour and
+// the last six, and how many objects are past due now. Rounds that failed are
+// completed rounds here -- whether the work was done on time and whether it
+// produced a usable result are two different questions, and this sentence
+// answers only the first. The second question is what the checks below say.
 function renderBrief(deployment) {
-  var overdue = deployment.overdue;
-  var schedule;
-  if (!overdue || !deployment.dispatch) {
-    schedule = '执行情况：到期索引没启用，这一版说不出是否按时';
-  } else if (overdue.truncated) {
-    schedule = '执行情况：异常列表被截断，到期没跑的数不出来';
-  } else if (overdue.total) {
-    schedule = '执行情况：' + overdue.total + ' 个对象到期没跑，最久 ' + Math.round(overdue.oldest_seconds || 0) + ' 秒';
-  } else {
-    schedule = '执行情况：没有对象到期没跑';
-  }
-  text('briefSchedule', schedule);
+  text('briefSchedule', scheduleSentence(deployment));
   var gaps = deployment.gaps || [];
   var unknown = deployment.unknown || 0;
   var blind = [];
   if (unknown) blind.push(unknown + ' 个对象现在说不出结论');
   if (gaps.length) blind.push(gaps.length + ' 处覆盖缺口');
   text('briefBlind', '观测完整性：' + (blind.length ? blind.join('；') : '全部对象都有结论'));
+}
+
+function percent(part, whole) {
+  if (!whole) return null;
+  return Math.round(part / whole * 1000) / 10;
+}
+
+function scheduleSentence(deployment) {
+  var census = deployment.schedule;
+  if (!census) {
+    // No replica has a due index, so nothing here can say whether the work is
+    // on time. Said as such rather than as "on time".
+    return '执行情况：没有副本带到期索引，说不出是否按时';
+  }
+  var rate1h = percent(census.on_time_1h, census.completed_1h);
+  var rate6h = percent(census.on_time_6h, census.completed_6h);
+  // Falling behind is a short-window rate below the long-window one while
+  // something is actually overdue. A rate alone can dip on a quiet hour; an
+  // overdue count alone can be one stuck object on a deployment otherwise on
+  // time. Both together is the deployment not keeping up.
+  var behind = census.overdue > 0 && (rate1h === null || rate6h === null || rate1h < rate6h);
+  var parts = [];
+  if (census.completed_1h) {
+    parts.push('过去 1 小时 ' + census.completed_1h + ' 轮里 ' + rate1h + '% 在下一轮到期前完成'
+      + (rate6h !== null ? '（6 小时 ' + rate6h + '%）' : ''));
+    if (census.held_back_1h) {
+      parts.push('被挡回 ' + census.held_back_1h + ' 轮，其中 ' + census.held_back_on_time_1h + ' 轮仍按时完成');
+    }
+  } else {
+    parts.push('过去 1 小时没有轮次返回');
+  }
+  if (census.overdue) {
+    parts.push(census.overdue + ' 个对象超期，最久 ' + elapsedLabel(census.oldest_late_seconds));
+  }
+  var now = [];
+  if (census.waiting) now.push(census.waiting + ' 个在等下次' + (census.cooling ? '（' + census.cooling + ' 个在冷却）' : ''));
+  if (census.late) now.push(census.late + ' 个迟到未超一个周期');
+  if (census.never) now.push(census.never + ' 个接管后还没跑第一轮');
+  if (now.length) parts.push('现在 ' + now.join('、'));
+  if (census.missing_period) parts.push(census.missing_period + ' 个对象周期未知，迟到没法判超期');
+  return '执行情况：' + (behind ? '跟不上' : (census.overdue ? '有超期但在追' : '跟得上')) + '——' + parts.join('；');
 }
 
 function loadChecks() {
@@ -726,7 +764,7 @@ function loadGroup(code, groupKey, body) {
     var table = document.createElement('table');
     var thead = document.createElement('thead');
     var head = document.createElement('tr');
-    ['对象', '现在', '最近结果', '自何时', '窗口', '去哪', ''].forEach(function (label) {
+    ['对象', '现在', '最近结果', '自何时 · 当前原因多久', '窗口', '去哪', ''].forEach(function (label) {
       var th = document.createElement('th');
       th.textContent = label;
       head.appendChild(th);
@@ -782,8 +820,20 @@ function objectRow(anomaly) {
     document.getElementById('qg').value = anomaly.query_group;
   });
   var finding = anomaly.finding || {};
-  // Now.
-  var now = cell(SCHEDULE[finding.schedule] || finding.schedule || '—');
+  // Now: the value, and beside it the moment or the lag that decides it.
+  var wake = anomaly.wake;
+  var nowWord = SCHEDULE[finding.schedule] || finding.schedule || '—';
+  if (wake && wake.known && wake.due_at) {
+    if (finding.schedule === 'ON_TIME') nowWord += ' · 预计 ' + momentLabel(wake.due_at);
+    if (finding.schedule === 'LATE' || finding.schedule === 'OVERDUE') {
+      nowWord += ' ' + elapsedLabel((Date.now() - new Date(wake.due_at).getTime()) / 1000);
+    }
+  }
+  var now = cell(nowWord);
+  if (wake && wake.known && wake.interval_seconds) {
+    now.title = '周期 ' + elapsedLabel(wake.interval_seconds) + '；到期 ' + momentLabel(wake.due_at)
+      + '；超过一个周期算超期';
+  }
   if (finding.schedule === 'STALLED') {
     now.className = 'stuck';
     now.title = '已连续 ' + duration(anomaly.failing_since) + ' 没有一轮结束，超过了本部署终结一个跑不完 Slot 的时限';
@@ -803,8 +853,17 @@ function objectRow(anomaly) {
     result.title = [symptomText(f.detail), f.stage ? '阶段 ' + f.stage : '',
       FAILURE_CATEGORY[f.category] || f.category || ''].filter(Boolean).join('\n');
   }
-  // Since when. The bound prefix says whether this is a measurement or a limit.
-  var held = cell((SINCE_BOUND[anomaly.since_from] || '') + duration(anomaly.since));
+  // Since when: how long anomalous at all, and beside it the object's own
+  // clock -- how long it has been saying its current reason and for how many
+  // rounds. Two clocks, because an object degraded for an hour under one
+  // reason and for two rounds under another is both, and the second is what
+  // says whether the reason is settled or just arrived.
+  var heldText = (SINCE_BOUND[anomaly.since_from] || '') + duration(anomaly.since);
+  if (anomaly.consecutive) {
+    heldText += ' · 当前原因 ' + (anomaly.reason_since && anomaly.reason_since !== anomaly.since
+      ? duration(anomaly.reason_since) + '，' : '') + '连续 ' + anomaly.consecutive + ' 轮';
+  }
+  var held = cell(heldText);
   held.title = SINCE_SOURCE[anomaly.since_from] || anomaly.since_from || '';
   // The window, as counts.
   var windowCoverage = anomaly.coverage;
@@ -812,6 +871,8 @@ function objectRow(anomaly) {
     ? windowCoverage.levels + ' 个窗口 · 短 ' + (windowCoverage.short || 0) + ' · 空 ' + (windowCoverage.empty || 0)
       + ' · 新 ' + (windowCoverage.fresh || 0)
       + (windowCoverage.short_rounds ? ' · 连续 ' + windowCoverage.short_rounds + ' 轮' : '')
+      + (windowCoverage.unusable ? ' · 检测用不了 ' + windowCoverage.unusable + ' 个：' + windowCoverage.unusable_reason : '')
+      + (windowCoverage.abnormal_on_incomplete ? ' · 不完整窗口上报了 ' + windowCoverage.abnormal_on_incomplete + ' 个异常' : '')
     : '—', 'mono');
   if (windowCoverage && windowCoverage.guarded) {
     win.title = windowCoverage.guarded + '/' + windowCoverage.levels + ' 个窗口报的是沿用上一轮的结论，不是本轮算出来的';
@@ -867,6 +928,12 @@ function objectRow(anomaly) {
     line('后端症状', symptomText(f.detail), f.detail);
     line('失败在哪', FAILURE_CATEGORY[f.category] || f.category,
       ['阶段 ' + f.stage, '分类 ' + f.category, f.code ? '代码 ' + f.code : ''].filter(Boolean).join('\n'));
+  }
+  var skip = anomaly.skip;
+  if (skip) {
+    line('没检测的时段', momentLabel(skip.first_slot * 1000) + ' – ' + momentLabel(skip.last_slot * 1000)
+      + (skip.slots ? '，' + skip.slots + ' 个 Slot' : '，个数无法得知'),
+      '这段里的时间点没有被评估过，也不会补跑。对象现在通常是正常的；要处理的是这段没有告警覆盖的时间。');
   }
   line('起算来源', SINCE_SOURCE[anomaly.since_from] || anomaly.since_from);
   line('副本', shortReplica(anomaly.replica), anomaly.replica);
@@ -1499,7 +1566,9 @@ var KIND_TEXT = {
   QUERY_COOLDOWN: '外部查询冷却',
   DEGRADED_RUN: '降级',
   BLOCKED_RUN: '被阻塞',
-  OVERDUE_WAKE: '没被调度'
+  OVERDUE_WAKE: '没被调度',
+  SKIPPED_SPAN: '留存的漏检记录',
+  NO_DATA: '持续无数据'
 };
 function kindText(kind) { return KIND_TEXT[kind] || kind || '—'; }
 

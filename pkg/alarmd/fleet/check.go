@@ -22,8 +22,7 @@ import "sort"
 //
 // A check is a rule over the dimensions an object carries -- what it is doing
 // now, how its last round ended, how long that has held, what its windows hold
-// -- not a word per combination of them. The situations in finding.go are the
-// combinations; they are being folded into these rules and will go.
+// -- not a word per combination of them. The rules are in finding.go.
 type Check string
 
 const (
@@ -57,6 +56,11 @@ const (
 	GroupByDetail     GroupBy = "detail"
 	GroupByStrategy   GroupBy = "strategy"
 	GroupByGapKind    GroupBy = "gap_kind"
+	// GroupByCause folds on what the window counts say happened: the reason
+	// the detection could not use the record, or that the series are a mix of
+	// new and old. It is the fold for the one check whose objects share a
+	// symptom and not yet an owner.
+	GroupByCause GroupBy = "cause"
 )
 
 // checkAnswers is the closed table: who acts on each check and what its
@@ -85,7 +89,7 @@ var checkAnswers = map[Check]struct {
 	CheckPlanUnevaluable: {OwnerStrategy, GroupByStrategy},
 
 	CheckQueryRefused:     {OwnerUndetermined, GroupByDetail},
-	CheckWindowUndecided:  {OwnerUndetermined, GroupByStrategy},
+	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
 	CheckConfigUnresolved: {OwnerUndetermined, GroupByStrategy},
 }
 
@@ -135,65 +139,11 @@ func checkRank(check Check) int {
 // ChecksWithoutAProducer names the checks nothing decides yet. They are in the
 // table so the page has words for them the day they arrive, and named here so
 // that a check with no writer cannot read as a mechanism that is wired: the
-// due index will produce NEVER_EVALUATED, the empty-window split will produce
-// NO_DATA_PERSISTENT, and a test holds this list to exactly those two.
-var ChecksWithoutAProducer = []Check{CheckNeverEvaluated, CheckNoDataPersistent}
+// due index will produce NEVER_EVALUATED once it knows when each object was
+// taken over, and a test holds this list to exactly that one.
+var ChecksWithoutAProducer = []Check{CheckNeverEvaluated}
 
-// checkOf decides which check an object is under, or none: an object whose
-// situation is a normal value of some dimension -- a series still young, a
-// strategy outside its hours -- is not on any line of the first screen.
-//
-// Decided from the situation while situations exist, with one look past it:
-// ROUND_BLOCKED covers both a source this deployment could not read and a
-// round that panicked, and those are a dependency and a defect respectively.
-func checkOf(anomaly Anomaly) (Check, bool) {
-	switch anomaly.Finding.Situation {
-	case SituationStalled:
-		return CheckRoundsStalled, true
-	case SituationNeverReached:
-		// The overdue wake says the wake time passed and nothing came back;
-		// it does not yet say whether the object was ever evaluated. Until the
-		// due index says, this is the coarse reading.
-		return CheckSlotsOverdue, true
-	case SituationBudgetExceeded, SituationDetectionAbandoned:
-		// Both are this deployment giving up on work because of its own
-		// limits, and the next step is the same: capacity.
-		return CheckDetectionAbandoned, true
-	case SituationTimelinePruned:
-		return CheckTimelinePruned, true
-	case SituationRoundBlocked:
-		if code := decidingCode(anomaly); code == "panic" || code == "other_error" {
-			return CheckDefect, true
-		}
-		return CheckDependencyDown, true
-	case SituationDependencyDown:
-		return CheckDependencyDown, true
-	case SituationStateDefect, SituationContractRefused, SituationUnclassified:
-		return CheckDefect, true
-	case SituationRestoredWithoutCause:
-		return CheckObservationGap, true
-	case SituationBackendUnavailable, SituationBackendCooldown:
-		// Cooldown is what this deployment does about a backend that keeps not
-		// answering; the line on the page is the backend, and the cooldown is a
-		// mark on the object's row.
-		return CheckBackendNotAnswering, true
-	case SituationQueryRejected:
-		return CheckQueryRefused, true
-	case SituationSeriesDataMissing, SituationDataIntermittent:
-		return CheckSeriesDataMissing, true
-	case SituationSeriesChurning:
-		return CheckSeriesChurning, true
-	case SituationWindowEmpty, SituationSeriesMixed:
-		return CheckWindowUndecided, true
-	case SituationPlanUnevaluable, SituationPlanTooLarge:
-		return CheckPlanUnevaluable, true
-	case SituationConfigDrift, SituationEffectiveTimeUnknown:
-		return CheckConfigUnresolved, true
-	}
-	return "", false
-}
-
-// decidingCode is the code the finding was decided on, in the order findingOf
+// decidingCode is the code the check was decided on, in the order checkOf
 // reads them. It is the grouping key for the checks that fold on a code.
 func decidingCode(anomaly Anomaly) string {
 	failureCode := ""
@@ -242,40 +192,39 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 		}
 		return key
 	case GroupByGapKind:
-		return string(anomaly.Finding.Situation)
+		// The only object-borne member of the observation gap is the object
+		// restored without its cause; the view's own gaps are added by kind
+		// in ReportChecks.
+		return gapRestoredWithoutCause
+	case GroupByCause:
+		return windowCause(anomaly.Coverage)
 	}
 	return ""
 }
 
-// Schedule is what the object is doing now: the dimension the first sentence
-// on the page is built from. The values this build can tell apart are these;
-// the due index will split RUNNING into on time and late, and add an object
-// that has never run.
-type Schedule string
-
+// The folds of a window that will not fill and whose owner the counts do not
+// decide. A starved window is a record that arrived and could not be used --
+// the reason the detection gave is the fold, because REQUIRED_VALUE_MISSING
+// and an algorithm's refusal are different conversations -- and a window
+// short over a mix of new and old series is its own.
 const (
-	ScheduleRunning Schedule = "RUNNING"
-	ScheduleStalled Schedule = "STALLED"
-	ScheduleCooling Schedule = "COOLING"
-	ScheduleOverdue Schedule = "OVERDUE"
-	SchedulePaused  Schedule = "PAUSED"
+	causeSeriesMixed    = "新老序列混合"
+	causeUnusableNoWord = "检测用不了记录（原因没带上）"
+	causeNoCounts       = "没有窗口计数（副本没报）"
 )
 
-// Schedules lists every schedule value, for the page's completeness check.
-var Schedules = []Schedule{ScheduleRunning, ScheduleStalled, ScheduleCooling, ScheduleOverdue, SchedulePaused}
-
-func scheduleOf(anomaly Anomaly) Schedule {
+func windowCause(coverage *HistoryCoverage) string {
 	switch {
-	case anomaly.Stalled:
-		return ScheduleStalled
-	case anomaly.Kind == KindOverdueWake:
-		return ScheduleOverdue
-	case anomaly.Kind == KindQueryCooldown:
-		return ScheduleCooling
-	case anomaly.CauseReason == "EFFECTIVE_TIME_INACTIVE":
-		return SchedulePaused
+	case coverage == nil || coverage.Levels == 0:
+		return causeNoCounts
+	case coverage.Starved():
+		if coverage.UnusableReason != "" {
+			return coverage.UnusableReason
+		}
+		return causeUnusableNoWord
+	default:
+		return causeSeriesMixed
 	}
-	return ScheduleRunning
 }
 
 // Result is how the last round ended. COMPLETED is a round that ran to its
@@ -302,8 +251,10 @@ var Results = []Result{ResultCompleted, ResultError, ResultRefused, ResultNoData
 // round to speak of: an object whose wake time passed has no last result.
 func resultOf(anomaly Anomaly) Result {
 	switch {
-	case anomaly.Kind == KindOverdueWake:
+	case anomaly.Kind == KindOverdueWake, anomaly.Kind == KindSkippedSpan:
 		return ""
+	case anomaly.Kind == KindNoData:
+		return ResultNoData
 	case queryRejected(anomaly.Failure):
 		return ResultRefused
 	case anomaly.Failure != nil, anomaly.Kind == KindBlockedRun, failedExecution(anomaly.ReasonCode):
@@ -387,6 +338,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 			}
 		}
 	}
+	listed := map[string]struct{}{}
 	for columnIndex, column := range columns {
 		columnPartial := false
 		if truncated != nil && columnIndex < len(columnNames) {
@@ -401,6 +353,26 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 			entry := ensure(check)
 			entry.partial = entry.partial || columnPartial
 			add(entry, anomaly.Finding.Group, anomaly)
+			listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
+		}
+	}
+	// What this deployment gave up on and never evaluated, retained past the
+	// rounds that followed. An object that skipped Slots an hour ago and has
+	// run normally since is under no column, and it stays on this line until a
+	// restart forgets it: the loss is permanent and the row is the only record.
+	// And the objects whose data stopped: under no column either, their rounds
+	// complete, and on the data side's line.
+	if view != nil {
+		for _, row := range skippedRows(view, listed) {
+			entry := ensure(row.Finding.Check)
+			add(entry, row.Finding.Group, &row)
+		}
+		for index := range view.NoData {
+			row := &view.NoData[index]
+			if row.Finding.Check == "" {
+				continue
+			}
+			add(ensure(row.Finding.Check), row.Finding.Group, row)
 		}
 	}
 	// What the view cannot speak for. Unknown is the objects a replica holds
@@ -475,21 +447,68 @@ func checkNames() []string {
 }
 
 // UnderCheck is every object in every column that is under one check, and
-// within one of its groups when group is not empty. This is the list a line on
-// the first screen opens; its total is how many it holds.
-func UnderCheck(check Check, group string, columns ...[]Anomaly) []Anomaly {
+// within one of its groups when group is not empty, plus the retained skip
+// records under it. This is the list a line on the first screen opens; its
+// total is how many it holds.
+func UnderCheck(check Check, group string, view *View) []Anomaly {
 	list := []Anomaly{}
-	for _, column := range columns {
+	listed := map[string]struct{}{}
+	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData} {
 		for _, anomaly := range column {
 			if anomaly.Finding.Check != check {
 				continue
 			}
+			// Marked as listed before the group narrows, so an object in
+			// another group is not re-listed from its retained skip.
+			listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
 			if group != "" && anomaly.Finding.Group != group {
 				continue
 			}
 			list = append(list, anomaly)
 		}
 	}
-	sortByUrgency(list)
+	for _, row := range skippedRows(view, listed) {
+		if row.Finding.Check != check || (group != "" && row.Finding.Group != group) {
+			continue
+		}
+		list = append(list, row)
+	}
+	sortOldestFirst(list)
 	return list
+}
+
+// underKey names one object under one check, so a retained skip does not add
+// a second row for an object a column already lists under that check while an
+// object listed under some other check still gets its skip row: those are two
+// facts, and Ceph lists an OSD under every check it fails.
+func underKey(check Check, queryGroup string) string {
+	return string(check) + "|" + queryGroup
+}
+
+// skippedRows turns the view's retained skip records into rows, one per
+// object not already listed under the same check. A pruned span is
+// TIMELINE_PRUNED and a replay-window skip is DETECTION_ABANDONED; both are
+// this deployment's and fold on the replica that applied them.
+func skippedRows(view *View, listed map[string]struct{}) []Anomaly {
+	rows := []Anomaly{}
+	row := func(queryGroup string, check Check, reason string, skip SkippedSpan) {
+		if _, already := listed[underKey(check, queryGroup)]; already {
+			return
+		}
+		listed[underKey(check, queryGroup)] = struct{}{}
+		item := Anomaly{QueryGroup: queryGroup, Kind: KindSkippedSpan, ReasonCode: reason,
+			Since: skip.At, SinceFrom: SinceSnapshotContinuity, Replica: skip.Replica, Skip: &skip}
+		item.Finding = Finding{Check: check, Group: skip.Replica, Owner: checkAnswers[check].Owner}
+		item.Attribution = attributionOf(item)
+		rows = append(rows, item)
+	}
+	for queryGroup, skip := range view.GapSkips {
+		row(queryGroup, CheckDetectionAbandoned, "GAP_SKIPPED", skip)
+	}
+	for queryGroup, pruned := range view.PrunedSkips {
+		row(queryGroup, CheckTimelinePruned, "SCHEDULE_PRUNED",
+			SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To, At: pruned.At, Replica: pruned.Replica})
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].QueryGroup < rows[j].QueryGroup })
+	return rows
 }

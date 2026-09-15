@@ -219,7 +219,12 @@ type HealthResponse struct {
 	// above is unreadable: a build that suppresses nothing reports the same zero
 	// as one where every object is being reached on time.
 	Dispatch *DispatchSuppression `json:"dispatch"`
-	Gaps     []Gap                `json:"gaps"`
+	// Schedule is the census the first sentence of the page is built from:
+	// waiting, late, overdue, never yet evaluated, and the on-time rates over
+	// two windows. Absent when no replica has a due index, and the page then
+	// says it cannot tell rather than saying "on time".
+	Schedule *ScheduleCensus `json:"schedule"`
+	Gaps     []Gap           `json:"gaps"`
 	// Capacity rides on the verdict rather than getting an endpoint of its own:
 	// the two are answers from one read, and splitting them would let a page
 	// show a verdict from one moment beside occupancy from another.
@@ -569,7 +574,7 @@ func MarkStalled(anomalies []Anomaly, at time.Time, stallAfter time.Duration) {
 			// clears on its own. The whole finding is decided again, not the
 			// attribution alone: rewriting one field left the other three
 			// saying the backend's, and the page reads those.
-			attribute(&anomalies[index])
+			attribute(&anomalies[index], at)
 		}
 	}
 }
@@ -733,7 +738,7 @@ func NewHandler(
 			PrunedSkips:      prunedSkipList(view.PrunedSkips),
 			Coverage:         view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers,
-			Overdue: view.Overdue, Dispatch: view.Dispatch,
+			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
 			Gaps: view.Gaps, Capacity: view.Capacity,
 		})
 	})
@@ -842,7 +847,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 				map[string]string{"error": "check must be one of " + strings.Join(checkNames(), ", ")})
 			return
 		}
-		view.Anomalies = UnderCheck(check, group, columns...)
+		view.Anomalies = UnderCheck(check, group, &view)
 		view.AnomaliesTotal = len(view.Anomalies)
 		summaryPartial = truncated[ColumnAnomalies] || truncated[ColumnDemoted] ||
 			truncated[ColumnUndecidable] || truncated[ColumnByDesign]

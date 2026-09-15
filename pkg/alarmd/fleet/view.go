@@ -309,6 +309,23 @@ type HistoryCoverage struct {
 	// windows are.
 	Fresh      uint32 `json:"fresh,omitempty"`
 	ShortFresh uint32 `json:"short_fresh,omitempty"`
+	// Unusable is how many windows' latest record the detection could not use
+	// (UNAVAILABLE or ERROR), and UnusableReason why, from the first of them.
+	// An empty window is made of these: the record arrived and was unusable,
+	// every round. So a starved window is not "no data" -- the data is there
+	// -- and the reason says whether the strategy names a field the records do
+	// not carry, the value has the wrong shape, or an algorithm declined it.
+	Unusable       uint32 `json:"unusable,omitempty"`
+	UnusableReason string `json:"unusable_reason,omitempty"`
+	// Abnormal is how many Level verdicts in the last round were ABNORMAL and
+	// AbnormalOnIncomplete how many of those were reached on a window that was
+	// not full. The trigger decides ABNORMAL before it reads completeness, so
+	// an alert can open on a window that will never fill -- and then never
+	// close. The pair says whether that is happening on this object, which is
+	// the difference between "recovery cannot be decided" as a footnote and as
+	// an alert somebody is looking at.
+	Abnormal             uint32 `json:"abnormal,omitempty"`
+	AbnormalOnIncomplete uint32 `json:"abnormal_on_incomplete,omitempty"`
 	// FreshRounds is how many consecutive rounds every short window belonged to
 	// a series with no loaded history.
 	//
@@ -440,16 +457,25 @@ type Anomaly struct {
 	Coverage  *HistoryCoverage `json:"coverage,omitempty"`
 	Since     time.Time        `json:"since"`
 	SinceFrom SinceSource      `json:"since_from"`
+	// Wake is where the object is in its cycle, from the due index, attached
+	// by the publisher. Absent on a replica with no index; Known false when
+	// the index has no entry, which means no round has returned since that
+	// replica took the object over.
+	Wake *WakeFacts `json:"wake,omitempty"`
+	// Skip is the span of Slots never evaluated, on a row of KindSkippedSpan.
+	// Slots is zero when the count is not knowable (a pruned timeline).
+	Skip *SkippedSpan `json:"skip,omitempty"`
 	// Attribution says whether capacity or design could have prevented this.
 	// Only the ones where it could decide the verdict; the rest are real work
 	// for someone else. Filled in by Attribute rather than by the tracker, so
 	// the page and the verdict read one field instead of each deriving it.
 	Attribution Attribution `json:"attribution,omitempty"`
-	// Finding is the four answers the page renders: who has to act, whether it
-	// heals on its own, where to go, and which situation decided those. Decided
-	// in one place from the evidence, so the page renders and does not infer.
-	// Attribution is derived from it, which is what keeps the verdict and the
-	// to-do list from classifying one object two ways.
+	// Finding is what the page renders: which line of the first screen the
+	// object is under and which fold, who acts on it, and where the object is
+	// in its cycle and how its last round ended. Decided in one place from the
+	// evidence, so the page renders and does not infer. Attribution is derived
+	// from it, which is what keeps the verdict and the first screen from
+	// classifying one object two ways.
 	Finding Finding `json:"finding"`
 	// Unclassified says this object is counted against the deployment because
 	// no rule matched, not because a rule said so. A release that adds a
@@ -467,9 +493,17 @@ type Anomaly struct {
 	// omitzero tag: the release pipeline builds with Go 1.23, whose encoder
 	// does not know that option and would print a zero time on every object
 	// whose rounds are ending normally.
-	FailingSince time.Time   `json:"failing_since"`
-	Replica      string      `json:"replica"`
-	Failure      *FailureRef `json:"failure,omitempty"`
+	FailingSince time.Time `json:"failing_since"`
+	// ReasonSince is when the object's current result and reason first held,
+	// and Consecutive how many rounds in a row they have. It is the third of
+	// the three clocks a row shows -- what it is doing now, since when it has
+	// been anomalous at all, since when it has been saying this -- and the one
+	// that says whether a reason is settled or just arrived. Left off the wire
+	// while zero, like FailingSince, by MarshalJSON.
+	ReasonSince time.Time   `json:"reason_since"`
+	Consecutive int         `json:"consecutive,omitempty"`
+	Replica     string      `json:"replica"`
+	Failure     *FailureRef `json:"failure,omitempty"`
 	// Stalled says the rounds have been failing to finish for longer than the
 	// deployment's own budget for terminating an unfinishable Slot. The
 	// distinction it draws is the one that decides whether anyone has to act: a
@@ -494,9 +528,13 @@ func (anomaly Anomaly) MarshalJSON() ([]byte, error) {
 	encoded := struct {
 		wire
 		FailingSince *time.Time `json:"failing_since,omitempty"`
+		ReasonSince  *time.Time `json:"reason_since,omitempty"`
 	}{wire: wire(anomaly)}
 	if !anomaly.FailingSince.IsZero() {
 		encoded.FailingSince = &anomaly.FailingSince
+	}
+	if !anomaly.ReasonSince.IsZero() {
+		encoded.ReasonSince = &anomaly.ReasonSince
 	}
 	return json.Marshal(encoded)
 }
@@ -575,6 +613,13 @@ type Snapshot struct {
 	// about its current round says so correctly. What happened is in its past
 	// and is permanent.
 	PrunedSkips map[string]PrunedSkip `json:"pruned_skips,omitempty"`
+	// GapSkips are the objects that skipped a run of Slots past the replay
+	// window, retained for the same reason.
+	GapSkips map[string]SkippedSpan `json:"gap_skips,omitempty"`
+	// NoData is the objects whose query has returned no records for a run of
+	// rounds after having returned some. In no column -- their rounds complete
+	// -- and listed so the data side's line can name them.
+	NoData []Anomaly `json:"no_data,omitempty"`
 	// Capacity is how close this replica is to its own limits. Absent on a
 	// replica that does not report it, which is why the aggregate counts the
 	// replicas it actually heard from rather than assuming every one answered.
@@ -583,6 +628,10 @@ type Snapshot struct {
 	// Absent means the replica has nothing holding wake times, which is a
 	// different answer from "nothing is overdue" and must not be shown as one.
 	Overdue *OverdueFacts `json:"overdue,omitempty"`
+	// Schedule is where this replica's owned objects are in their cycles and
+	// how its rounds have been finishing. Absent for the same reason Overdue
+	// can be: no due index, no census.
+	Schedule *ScheduleCensus `json:"schedule,omitempty"`
 	// Suppression is present only on a build whose dispatcher actually holds
 	// objects back. Absent, the overdue count above is structurally zero and
 	// must not be read as "nothing is overdue".
@@ -872,6 +921,11 @@ type View struct {
 	// paged or truncated, because "how many objects are not being evaluated" is
 	// the one number that must not depend on how much of the list fitted.
 	Overdue *OverdueFacts `json:"overdue,omitempty"`
+	// Schedule is the deployment's census: how many objects are waiting,
+	// late, overdue or never yet evaluated, and how many rounds finished on
+	// time in the last hour and the last six. It is the sentence "is the
+	// deployment keeping up", and it is absent when no replica has an index.
+	Schedule *ScheduleCensus `json:"schedule,omitempty"`
 	// Suppression says whether anything in this deployment can be parked at
 	// all. See DispatchSuppression: its absence, not its value, is the answer.
 	Dispatch  *DispatchSuppression `json:"dispatch,omitempty"`
@@ -907,11 +961,13 @@ type View struct {
 	// keyed by Query Group. In no column and in no total: the objects are
 	// running now and every signal about their current round says so, which is
 	// exactly why this needs somewhere of its own to be said.
-	PrunedSkips        map[string]PrunedSkip `json:"pruned_skips,omitempty"`
-	DemotionEntries    int                   `json:"demotion_entries"`
-	DemotionExtensions int                   `json:"demotion_extensions"`
-	DemotionExits      int                   `json:"demotion_exits"`
-	LastDemotionExit   time.Time             `json:"last_demotion_exit,omitempty"`
+	PrunedSkips        map[string]PrunedSkip  `json:"pruned_skips,omitempty"`
+	GapSkips           map[string]SkippedSpan `json:"gap_skips,omitempty"`
+	NoData             []Anomaly              `json:"no_data,omitempty"`
+	DemotionEntries    int                    `json:"demotion_entries"`
+	DemotionExtensions int                    `json:"demotion_extensions"`
+	DemotionExits      int                    `json:"demotion_exits"`
+	LastDemotionExit   time.Time              `json:"last_demotion_exit,omitempty"`
 	// DemotedDue counts pooled objects whose own cooldown window has already
 	// elapsed at the moment of this read: they are due to be tried again and are
 	// still in the pool.
@@ -1035,6 +1091,15 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 				view.PrunedSkips[queryGroup] = skip
 			}
 		}
+		for queryGroup, skip := range snapshot.GapSkips {
+			if view.GapSkips == nil {
+				view.GapSkips = make(map[string]SkippedSpan, len(snapshot.GapSkips))
+			}
+			if existing, seen := view.GapSkips[queryGroup]; !seen || skip.At.After(existing.At) {
+				view.GapSkips[queryGroup] = skip
+			}
+		}
+		view.NoData = append(view.NoData, snapshot.NoData...)
 		if snapshot.LastDemotionExit.After(view.LastDemotionExit) {
 			view.LastDemotionExit = snapshot.LastDemotionExit
 		}
@@ -1136,6 +1201,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	// Same snapshots, same reason: a stale replica's idea of what it has not
 	// picked up describes a moment that has passed.
 	aggregateOverdue(&view, counted)
+	aggregateSchedule(&view, counted)
 	aggregateDispatchSuppression(&view, counted)
 
 	// Owning an object is not knowing about it. A replica that has just restarted
@@ -1220,10 +1286,11 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	// prevented this" is a real question about a demoted object, and the column
 	// it sits in does not answer it. What the column decides is whether the
 	// object bears on the verdict; who could have prevented it is decided here.
-	Attribute(view.Anomalies)
-	Attribute(view.Demoted)
-	Attribute(view.Undecidable)
-	Attribute(view.ByDesign)
+	Attribute(view.Anomalies, now)
+	Attribute(view.Demoted, now)
+	Attribute(view.Undecidable, now)
+	Attribute(view.ByDesign, now)
+	Attribute(view.NoData, now)
 	Settle(&view)
 	return view
 }
@@ -1483,6 +1550,22 @@ type PrunedSkip struct {
 	// was discarded with the span, or zero. It is the one Slot in the span that
 	// can be named, and it was being worked on when it was dropped.
 	DiscardedSlot int64 `json:"discarded_slot,omitempty"`
+	// Replica is the replica that applied the skip, so the record can be folded
+	// with the rest of that replica's lines.
+	Replica string `json:"replica,omitempty"`
+}
+
+// SkippedSpan is a run of Slots one object skipped because they had fallen
+// past the replay window: this deployment giving up on work it could not
+// catch up. Unlike a pruned span the Slots are countable -- each skip is a
+// completion of its own -- so the count is given.
+type SkippedSpan struct {
+	FirstSlot int64 `json:"first_slot"`
+	LastSlot  int64 `json:"last_slot"`
+	Slots     int   `json:"slots"`
+	// At is when the last skip in the run happened.
+	At      time.Time `json:"at"`
+	Replica string    `json:"replica,omitempty"`
 }
 
 // Spanning is how long the skipped span covers. It is a duration rather than a

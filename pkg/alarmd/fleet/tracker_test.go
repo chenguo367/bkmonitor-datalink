@@ -11,6 +11,7 @@ package fleet
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -922,7 +923,7 @@ func TestTheByDesignColumnHoldsOnlyDeclaredReasons(t *testing.T) {
 		t.Fatal("no by-design reasons declared; the column would be empty and the check vacuous")
 	}
 	for reason := range byDesignReasons {
-		if situation, mapped := codeSituations[reason]; !mapped || finding(situation, 0).Owner == OwnerAlarmd {
+		if verdict, mapped := codeChecks[reason]; !mapped || (!verdict.normal && checkAnswers[verdict.check].Owner == OwnerAlarmd) {
 			t.Errorf("%q is by-design and would count against this deployment: an object nobody "+
 				"acts on must not be ours if it ever falls back to the anomaly column", reason)
 		}
@@ -1087,5 +1088,208 @@ func TestAnObjectThatLostASpanOfSlotsIsVisibleEvenThoughItIsRunningFine(t *testi
 	if _, ok := tracker.PrunedSkips()["qg-refused"]; ok {
 		t.Fatal("a refused skip was reported as a lost span; nothing was skipped, and reporting it " +
 			"would put objects on that line that lost nothing")
+	}
+}
+
+// A run of GAP_SKIPPED completions is retained as one span with its Slots, and
+// the rounds that follow do not clear it. A later skip after a normal round
+// starts a new span rather than extending the old one.
+func TestGapSkipsAreRetainedPastTheRoundsThatFollow(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	skip := func(slot int64) {
+		ctx := observability.ContextWithTraceFields(context.Background(),
+			observability.TraceFields{QueryGroupKey: "qg-skip", EvaluationTime: slot})
+		tracker.Observe(ctx, observability.Observation{ProgressCompletionKind: "GAP_SKIPPED"})
+	}
+	skip(100)
+	skip(160)
+	skip(220)
+	tracker.Observe(context.Background(), completion("qg-skip", "FULL_COMPLETED", "8930"))
+	tracker.Observe(context.Background(), completion("qg-skip", "FULL_COMPLETED", "8930"))
+	skips := tracker.GapSkips()
+	got, retained := skips["qg-skip"]
+	if !retained || got.FirstSlot != 100 || got.LastSlot != 220 || got.Slots != 3 || got.Replica != "pod-a" {
+		t.Fatalf("gap skips = %+v, want one span 100..220 of 3 Slots on pod-a retained past two normal rounds", skips)
+	}
+	if len(tracker.Anomalies()) != 0 {
+		t.Errorf("the object is listed as an anomaly after two normal rounds: the record has to be the "+
+			"retained span, not the anomaly list: %+v", tracker.Anomalies())
+	}
+	skip(400)
+	if got := tracker.GapSkips()["qg-skip"]; got.FirstSlot != 400 || got.Slots != 1 {
+		t.Errorf("a skip after a normal round = %+v, want a new span starting at 400", got)
+	}
+	// An object with no skips has no record.
+	tracker.Observe(context.Background(), completion("qg-fine", "FULL_COMPLETED", "8930"))
+	if _, present := tracker.GapSkips()["qg-fine"]; present {
+		t.Error("an object that never skipped has a skip record")
+	}
+}
+
+// An object whose query returns no records for the degraded-rounds threshold,
+// after having returned some, is listed as no-data: healthy for the equation,
+// the data side's to look at. One that never returned records is not -- a
+// source that only speaks when something happens looks the same until it
+// speaks -- and a round with records ends the run.
+func TestNoDataIsListedOnlyAfterDataStopped(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	empty := func(queryGroup string) {
+		tracker.Observe(context.Background(), completion(queryGroup, "FULL_EMPTY_COMPLETED", "8930"))
+	}
+	// Never had data: not listed however long it stays empty.
+	for round := 0; round < DefaultDegradedRounds+2; round++ {
+		empty("qg-silent-by-nature")
+	}
+	// Had data, then stopped.
+	tracker.Observe(context.Background(), completion("qg-stopped", "FULL_COMPLETED", "8930"))
+	at.at = at.at.Add(time.Minute)
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		empty("qg-stopped")
+	}
+	// Had data, empty for one round short of the threshold.
+	tracker.Observe(context.Background(), completion("qg-blip", "FULL_COMPLETED", "8930"))
+	for round := 0; round < DefaultDegradedRounds-1; round++ {
+		empty("qg-blip")
+	}
+	listed := tracker.NoData()
+	if len(listed) != 1 || listed[0].QueryGroup != "qg-stopped" {
+		t.Fatalf("no-data = %+v, want only qg-stopped", listed)
+	}
+	if listed[0].Kind != KindNoData || listed[0].ReasonCode != "FULL_EMPTY_COMPLETED" ||
+		!listed[0].Since.Equal(now.Add(time.Minute)) || listed[0].SinceFrom != SinceSnapshotContinuity {
+		t.Errorf("no-data row = %+v, want kind NO_DATA since the first empty round", listed[0])
+	}
+	if len(listed[0].Strategies) != 1 {
+		t.Errorf("no-data row carries %d strategies, want the one the object serves", len(listed[0].Strategies))
+	}
+	// Under no column: the equation counts it as healthy.
+	if len(tracker.Anomalies())+len(tracker.Undecidable())+len(tracker.ByDesign())+len(tracker.Demoted()) != 0 {
+		t.Error("a no-data object is in a column of the health equation")
+	}
+	// Records coming back end the run.
+	tracker.Observe(context.Background(), completion("qg-stopped", "FULL_COMPLETED", "8930"))
+	if len(tracker.NoData()) != 0 {
+		t.Errorf("no-data = %+v after records returned, want none", tracker.NoData())
+	}
+	// A degraded round with records ends it too: the query answered with
+	// something, and that something is what the degraded row is about.
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		empty("qg-stopped")
+	}
+	tracker.Observe(context.Background(), completion("qg-stopped", "COMPLETED_WITH_UNAVAILABLE", "8930"))
+	if len(tracker.NoData()) != 0 {
+		t.Errorf("no-data = %+v after a degraded round with records, want none", tracker.NoData())
+	}
+}
+
+// Every window count the observation carries reaches the row's coverage. The
+// same handoff check the worker has, at the other end of the wire: the tracker
+// copies field by field, and a field it forgets is computed, published and
+// never rendered -- which is how the reason a record could not be used was
+// dropped while its count crossed.
+//
+// The row-only counts (ShortRounds, EmptyRounds, FreshRounds) are the tracker's
+// own and have no counterpart on the observation; they are named here so the
+// check fails on any other field it cannot find.
+func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	facts := observability.HistoryCoverageFacts{}
+	source := reflect.ValueOf(&facts).Elem()
+	for i := 0; i < source.NumField(); i++ {
+		field := source.Field(i)
+		switch field.Kind() {
+		case reflect.Uint32:
+			field.SetUint(uint64(90 + i))
+		case reflect.String:
+			field.SetString("REASON_" + source.Type().Field(i).Name)
+		default:
+			t.Fatalf("%s is neither a uint32 nor a string; decide how it crosses", source.Type().Field(i).Name)
+		}
+	}
+	facts.Levels = 200
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		observation := completion("qg-coverage", "COMPLETED_WITH_UNAVAILABLE", "8930")
+		copied := facts
+		observation.HistoryCoverage = &copied
+		observation.ProgressCompletionCause, observation.ProgressCompletionReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
+		tracker.Observe(context.Background(), observation)
+	}
+	rows := tracker.Undecidable()
+	if len(rows) != 1 || rows[0].Coverage == nil {
+		t.Fatalf("rows = %+v, want one undecidable object carrying coverage", rows)
+	}
+	published := reflect.ValueOf(rows[0].Coverage).Elem()
+	rowOnly := map[string]bool{"ShortRounds": true, "EmptyRounds": true, "FreshRounds": true}
+	for i := 0; i < published.NumField(); i++ {
+		name := published.Type().Field(i).Name
+		if rowOnly[name] {
+			continue
+		}
+		want := source.FieldByName(name)
+		if !want.IsValid() {
+			t.Errorf("HistoryCoverage.%s on the row has no counterpart on the observation: nothing can fill it", name)
+			continue
+		}
+		if !reflect.DeepEqual(published.Field(i).Interface(), want.Interface()) {
+			t.Errorf("%s reached the row as %v, want %v: the tracker's copy dropped or crossed it", name,
+				published.Field(i).Interface(), want.Interface())
+		}
+	}
+	for i := 0; i < source.NumField(); i++ {
+		name := source.Type().Field(i).Name
+		if !published.FieldByName(name).IsValid() {
+			t.Errorf("the observation's %s has no field on the row: published and never rendered", name)
+		}
+	}
+}
+
+// The object's own clock: since when it has been saying its current reason,
+// and for how many rounds. It is not the anomaly's start -- an object degraded
+// for an hour under one reason and then for two rounds under another has been
+// anomalous for an hour and saying the new reason for two rounds -- and unlike
+// Kubernetes' lastTransitionTime it resets when only the reason changes.
+func TestTheReasonClockResetsWhenTheReasonChangesNotWhenTheRoundRepeats(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	degraded := func(reason string) {
+		observation := completion("qg-clock", "COMPLETED_WITH_UNAVAILABLE", "8930")
+		observation.ProgressCompletionCause, observation.ProgressCompletionReason = "LEVEL_OUTCOME_UNKNOWN", reason
+		tracker.Observe(context.Background(), observation)
+		at.at = at.at.Add(time.Minute)
+	}
+	for round := 0; round < 5; round++ {
+		degraded("QUERY_TIMEOUT")
+	}
+	rows := tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Consecutive != 5 || !rows[0].ReasonSince.Equal(now) || !rows[0].Since.Equal(now) {
+		t.Fatalf("after five rounds of one reason: %+v, want consecutive 5 since the first round", rows)
+	}
+	degraded("HISTORY_WARMING")
+	degraded("HISTORY_WARMING")
+	rows = tracker.Anomalies()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if rows[0].Consecutive != 2 || !rows[0].ReasonSince.Equal(now.Add(5*time.Minute)) {
+		t.Errorf("after the reason changed: consecutive %d since %v, want 2 since the sixth round", rows[0].Consecutive, rows[0].ReasonSince)
+	}
+	if !rows[0].Since.Equal(now) {
+		t.Errorf("the anomaly's own start moved to %v; it has been anomalous since the first round", rows[0].Since)
+	}
+	// The same completion under a different failure code is a different reason
+	// for a failed execution, and a blocked round is its own.
+	for round := 0; round < 3; round++ {
+		tracker.Observe(context.Background(), runOutcome("qg-blocked", "source_blocked"))
+	}
+	if blocked := tracker.Anomalies(); len(blocked) != 2 {
+		t.Fatalf("rows = %v", names(blocked))
+	}
+	for _, row := range tracker.Anomalies() {
+		if row.QueryGroup == "qg-blocked" && row.Consecutive != 3 {
+			t.Errorf("blocked object consecutive = %d, want 3", row.Consecutive)
+		}
 	}
 }

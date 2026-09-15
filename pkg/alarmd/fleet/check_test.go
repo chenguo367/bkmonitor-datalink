@@ -60,46 +60,44 @@ func TestTheCheckTableIsClosedAtSixteen(t *testing.T) {
 	}
 }
 
-// Every situation the server can decide lands under exactly one check or is a
-// normal value that is on no line of the first screen. The normal values are
-// named, so a situation that stops being one has to be moved on purpose.
-func TestEverySituationIsUnderOneCheckOrIsANormalValue(t *testing.T) {
-	normal := map[Situation]bool{
-		SituationSeriesYoung:    true,
-		SituationSeriesRenewed:  true,
-		SituationVerdictHeld:    true,
-		SituationDataJustGapped: true,
-		SituationOffHours:       true,
+// Every check the table answers has evidence that produces it, except the one
+// named as waiting on its producer. A check with no writer reads as a mechanism
+// that is wired, so the gap is stated rather than discovered.
+//
+// The producers are enumerated as anomalies, one per path through checkOf,
+// and the set of checks they reach has to be the table minus the named
+// exception -- so a path that stops producing its check fails here, and so
+// does a check added to the table with nothing that reaches it.
+func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	producers := map[Check]Anomaly{
+		CheckRoundsStalled:       {Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", Stalled: true},
+		CheckSlotsOverdue:        {Kind: KindOverdueWake},
+		CheckDetectionAbandoned:  {Kind: KindDegradedRun, CauseReason: "GAP_SKIPPED"},
+		CheckTimelinePruned:      {Kind: KindDegradedRun, CauseReason: "SCHEDULE_PRUNED"},
+		CheckDependencyDown:      {Kind: KindBlockedRun, ReasonCode: "source_error"},
+		CheckDefect:              {Kind: KindBlockedRun, ReasonCode: "panic"},
+		CheckObservationGap:      {Kind: KindDegradedRun, SinceFrom: SinceRestoredLastFull},
+		CheckBackendNotAnswering: {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "transport=timeout"}},
+		CheckQueryRefused:        {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "http_status=400"}},
+		CheckNoDataPersistent:    {Kind: KindNoData},
+		CheckSeriesChurning: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
+			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Fresh: 4, ShortFresh: 4, FreshRounds: 40}},
+		CheckSeriesDataMissing: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
+			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40}},
+		CheckWindowUndecided: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
+			Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, ShortRounds: 40, EmptyRounds: 40}},
+		CheckPlanUnevaluable:  {Kind: KindDegradedRun, CauseReason: "ALGORITHM_UNSUPPORTED"},
+		CheckConfigUnresolved: {Kind: KindDegradedRun, CauseReason: "CONFIG_DRIFT"},
 	}
-	for _, situation := range Situations() {
-		check, under := checkOf(Anomaly{Finding: finding(situation, 0)})
-		switch {
-		case under && normal[situation]:
-			t.Errorf("%s is under check %s and also declared a normal value", situation, check)
-		case !under && !normal[situation]:
-			t.Errorf("%s is under no check and is not a declared normal value: an object in it "+
-				"vanishes from the first screen", situation)
-		case under && checkAnswers[check].Owner == "":
-			t.Errorf("%s is under %s, which the table does not answer", situation, check)
-		}
-	}
-}
-
-// Every check the table answers has something that produces it, except the two
-// named as waiting on their producer. A check with no writer reads as a
-// mechanism that is wired, so the gap is stated here rather than discovered.
-func TestEveryCheckHasAProducerExceptTheNamedTwo(t *testing.T) {
 	produced := map[Check]bool{}
-	for _, situation := range Situations() {
-		if check, under := checkOf(Anomaly{Finding: finding(situation, 0)}); under {
-			produced[check] = true
+	for want, item := range producers {
+		list := []Anomaly{item}
+		Attribute(list, at)
+		if list[0].Finding.Check != want {
+			t.Errorf("the producer for %s reaches %q instead", want, list[0].Finding.Check)
 		}
-	}
-	// The one split checkOf makes past the situation.
-	for _, code := range []string{"panic", "source_error"} {
-		if check, under := checkOf(Anomaly{ReasonCode: code, Finding: finding(SituationRoundBlocked, 0)}); under {
-			produced[check] = true
-		}
+		produced[list[0].Finding.Check] = true
 	}
 	waiting := map[Check]bool{}
 	for _, check := range ChecksWithoutAProducer {
@@ -113,6 +111,29 @@ func TestEveryCheckHasAProducerExceptTheNamedTwo(t *testing.T) {
 			t.Errorf("%s has no producer and is not listed as waiting for one: it reads as wired", check)
 		}
 	}
+	// And the normal values: objects under no line, on purpose, each one a
+	// state that resolves on its own or is the configuration doing its job.
+	for name, item := range map[string]Anomaly{
+		"young": {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
+			Levels: 3, Short: 1, WorstValid: 7, WorstRequired: 9, ShortRounds: 2}},
+		"held":      {Kind: KindDegradedRun, CauseReason: "HISTORY_GAPPED", Coverage: &HistoryCoverage{Levels: 3, Guarded: 3}},
+		"off hours": {Kind: KindDegradedRun, CauseReason: "EFFECTIVE_TIME_INACTIVE"},
+	} {
+		list := []Anomaly{item}
+		Attribute(list, at)
+		if list[0].Finding.Check != "" || list[0].Finding.Owner != OwnerNobody || list[0].Unclassified {
+			t.Errorf("%s is under %q / %s (unclassified %v), want under no line and nobody's", name,
+				list[0].Finding.Check, list[0].Finding.Owner, list[0].Unclassified)
+		}
+	}
+	// And the fall-through: a code nobody has classified is a DEFECT that says
+	// so, not a line somebody chose.
+	unknown := []Anomaly{{Kind: KindDegradedRun, CauseReason: "SOMETHING_NEW"}}
+	Attribute(unknown, at)
+	if unknown[0].Finding.Check != CheckDefect || !unknown[0].Unclassified || unknown[0].Attribution != AttributionOurs {
+		t.Errorf("an unclassified code = %+v (unclassified %v, %s), want DEFECT, flagged, ours",
+			unknown[0].Finding, unknown[0].Unclassified, unknown[0].Attribution)
+	}
 }
 
 // A blocked round is a dependency or a defect depending on the outcome word,
@@ -125,11 +146,10 @@ func TestABlockedRoundIsADefectWhenItPanicked(t *testing.T) {
 		"source_retry":   CheckDependencyDown,
 		"source_blocked": CheckDependencyDown,
 	} {
-		item := Anomaly{Kind: KindBlockedRun, ReasonCode: code}
-		item.Finding = findingOf(item)
-		got, under := checkOf(item)
-		if !under || got != want {
-			t.Errorf("blocked round %q is under %s (%v), want %s", code, got, under, want)
+		list := []Anomaly{{Kind: KindBlockedRun, ReasonCode: code}}
+		Attribute(list, now)
+		if list[0].Finding.Check != want {
+			t.Errorf("blocked round %q is under %s, want %s", code, list[0].Finding.Check, want)
 		}
 	}
 }
@@ -157,6 +177,23 @@ func TestGroupKeysFoldOnTheEntityAndNameItsAbsence(t *testing.T) {
 	}
 	if got := groupKeyOf(Anomaly{Replica: "pod-a"}, CheckRoundsStalled); got != "pod-a" {
 		t.Errorf("replica group = %q", got)
+	}
+	// The undecided window folds on what happened, not on the strategy: a
+	// starved window on the reason its record could not be used, a mixed one
+	// on being mixed.
+	starved := Anomaly{Coverage: &HistoryCoverage{Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, EmptyRounds: 40,
+		Unusable: 2, UnusableReason: "REQUIRED_VALUE_MISSING"}}
+	if got := groupKeyOf(starved, CheckWindowUndecided); got != "REQUIRED_VALUE_MISSING" {
+		t.Errorf("starved window group = %q, want the detection's reason", got)
+	}
+	starvedNoReason := Anomaly{Coverage: &HistoryCoverage{Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, EmptyRounds: 40}}
+	if got := groupKeyOf(starvedNoReason, CheckWindowUndecided); got != causeUnusableNoWord {
+		t.Errorf("starved window without a reason group = %q, want %q", got, causeUnusableNoWord)
+	}
+	mixed := Anomaly{Coverage: &HistoryCoverage{Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40,
+		Fresh: 2, ShortFresh: 2, FreshRounds: 40}}
+	if got := groupKeyOf(mixed, CheckWindowUndecided); got != causeSeriesMixed {
+		t.Errorf("mixed window group = %q, want %q", got, causeSeriesMixed)
 	}
 	if got := groupKeyOf(Anomaly{CauseReason: "REDIS_UNAVAILABLE"}, CheckDependencyDown); got != "REDIS_UNAVAILABLE" {
 		t.Errorf("code group = %q", got)
@@ -195,8 +232,8 @@ func TestReportChecksFoldsColumnsAndCountsDistinctly(t *testing.T) {
 			a.Strategies = []StrategyRef{{StrategyID: "3", BusinessID: "8"}}
 		}),
 	}
-	Attribute(anomalies)
-	Attribute(demoted)
+	Attribute(anomalies, now)
+	Attribute(demoted, now)
 	view := &View{Unknown: 4, Gaps: []Gap{{Kind: GapUndetermined}, {Kind: GapSnapshotStale, Replica: "pod-b"}}}
 	reports := ReportChecks([][]Anomaly{anomalies, demoted, nil, nil},
 		map[string]bool{ColumnDemoted: true}, view)
@@ -260,45 +297,185 @@ func TestMarkStalledDecidesTheFindingAgain(t *testing.T) {
 	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
 	list := []Anomaly{{QueryGroup: "qg", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
 		FailingSince: at.Add(-time.Hour)}}
-	Attribute(list)
+	Attribute(list, now)
 	if list[0].Finding.Check != CheckBackendNotAnswering {
 		t.Fatalf("before marking, check = %s, want BACKEND_NOT_ANSWERING", list[0].Finding.Check)
 	}
 	MarkStalled(list, at, 10*time.Minute)
 	got := list[0]
-	if !got.Stalled || got.Finding.Situation != SituationStalled || got.Finding.Check != CheckRoundsStalled ||
+	if !got.Stalled || got.Finding.Check != CheckRoundsStalled ||
 		got.Finding.Owner != OwnerAlarmd || got.Finding.Schedule != ScheduleStalled ||
 		got.Attribution != AttributionOurs {
-		t.Errorf("after marking: %+v, want STALLED / ROUNDS_STALLED / ALARMD / schedule STALLED / OURS", got.Finding)
+		t.Errorf("after marking: %+v, want ROUNDS_STALLED / ALARMD / schedule STALLED / OURS", got.Finding)
 	}
 }
 
-// The two dimensions the row shows, read off the anomaly.
+// The two dimensions the row shows, read off the anomaly and the due index's
+// wake facts. Every schedule value has a case, and the empty value -- no wake
+// facts at all -- is a case too, because that is what an older replica sends.
 func TestScheduleAndResultReadTheDimensionsOffTheAnomaly(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	wake := func(due time.Duration, interval int64) *WakeFacts {
+		return &WakeFacts{Known: true, DueAt: at.Add(due), IntervalSeconds: interval}
+	}
 	for name, want := range map[string]struct {
 		item     Anomaly
 		schedule Schedule
 		result   Result
 	}{
-		"completed degraded": {Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING"},
-			ScheduleRunning, ResultCompleted},
-		"failed with a backend error": {Anomaly{Kind: KindDegradedRun,
-			Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "http_status=503"}},
-			ScheduleRunning, ResultError},
+		"no wake facts at all": {Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING"},
+			"", ResultCompleted},
+		"waiting for the next due": {Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING",
+			Wake: wake(40*time.Second, 60)}, ScheduleOnTime, ResultCompleted},
+		"late within one period": {Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING",
+			Wake: wake(-10*time.Second, 60)}, ScheduleLate, ResultCompleted},
+		"late by exactly one period is still late": {Anomaly{Kind: KindDegradedRun,
+			Wake: wake(-60*time.Second, 60)}, ScheduleLate, ResultCompleted},
+		"overdue past one period": {Anomaly{Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
+			Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "http_status=503"},
+			Wake:    wake(-120*time.Second, 60)}, ScheduleOverdue, ResultError},
+		"late with no period known stays late": {Anomaly{Kind: KindDegradedRun,
+			Wake: wake(-3*time.Hour, 0)}, ScheduleLate, ResultCompleted},
+		"never evaluated since takeover": {Anomaly{Kind: KindDegradedRun, SinceFrom: SinceRestoredLastFull,
+			Wake: &WakeFacts{Known: false}}, ScheduleNew, ResultCompleted},
+		"cooling by the wake facts": {Anomaly{Kind: KindDegradedRun,
+			Wake: &WakeFacts{Known: true, DueAt: at.Add(5 * time.Minute), Cooling: true}},
+			ScheduleCooling, ResultCompleted},
 		"refused by the backend": {Anomaly{Kind: KindQueryCooldown,
 			Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_no_such_field"}},
 			ScheduleCooling, ResultRefused},
-		"blocked":  {Anomaly{Kind: KindBlockedRun, ReasonCode: "source_error"}, ScheduleRunning, ResultError},
-		"overdue":  {Anomaly{Kind: KindOverdueWake}, ScheduleOverdue, ""},
-		"paused":   {Anomaly{Kind: KindDegradedRun, CauseReason: "EFFECTIVE_TIME_INACTIVE"}, SchedulePaused, ResultCompleted},
-		"stalled":  {Anomaly{Kind: KindDegradedRun, Stalled: true}, ScheduleStalled, ResultCompleted},
-		"retrying": {Anomaly{Kind: KindDegradedRun, ReasonCode: "retrying"}, ScheduleRunning, ResultError},
+		"blocked": {Anomaly{Kind: KindBlockedRun, ReasonCode: "source_error", Wake: wake(30*time.Second, 60)},
+			ScheduleOnTime, ResultError},
+		"overdue wake": {Anomaly{Kind: KindOverdueWake}, ScheduleOverdue, ""},
+		"paused":       {Anomaly{Kind: KindDegradedRun, CauseReason: "EFFECTIVE_TIME_INACTIVE"}, SchedulePaused, ResultCompleted},
+		"stalled":      {Anomaly{Kind: KindDegradedRun, Stalled: true, Wake: wake(-10*time.Second, 60)}, ScheduleStalled, ResultCompleted},
+		"retrying":     {Anomaly{Kind: KindDegradedRun, ReasonCode: "retrying"}, "", ResultError},
 	} {
-		if got := scheduleOf(want.item); got != want.schedule {
-			t.Errorf("%s: schedule = %s, want %s", name, got, want.schedule)
+		if got := scheduleOf(want.item, at); got != want.schedule {
+			t.Errorf("%s: schedule = %q, want %q", name, got, want.schedule)
 		}
 		if got := resultOf(want.item); got != want.result {
 			t.Errorf("%s: result = %q, want %q", name, got, want.result)
+		}
+	}
+}
+
+// Not being evaluated outranks how the last round went. An object whose last
+// round timed out at the backend and whose turn has since been missed is under
+// SLOTS_OVERDUE, this deployment's, not under the backend's line: the backend
+// is not what is stopping it from running now.
+func TestAMissedTurnOutranksTheLastRoundsReason(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	list := []Anomaly{{QueryGroup: "qg", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
+		Wake: &WakeFacts{Known: true, DueAt: at.Add(-3 * time.Minute), IntervalSeconds: 60}}}
+	Attribute(list, at)
+	if list[0].Finding.Check != CheckSlotsOverdue || list[0].Finding.Owner != OwnerAlarmd {
+		t.Errorf("overdue object with a backend reason is under %s / %s, want SLOTS_OVERDUE / ALARMD",
+			list[0].Finding.Check, list[0].Finding.Owner)
+	}
+	// The same object, late but within its period, is still the backend's.
+	list[0].Wake.DueAt = at.Add(-10 * time.Second)
+	Attribute(list, at)
+	if list[0].Finding.Check != CheckBackendNotAnswering {
+		t.Errorf("late-but-within-period object is under %s, want BACKEND_NOT_ANSWERING", list[0].Finding.Check)
+	}
+}
+
+// A retained skip is on its line and has a row, whether or not the object is
+// under a column now; an object already under the same check from its current
+// round is counted once; an object under a different check gets its skip row
+// as well, because those are two facts.
+func TestRetainedSkipsAreOnTheirLinesWithRows(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	current := Anomaly{QueryGroup: "qg-skipping-now", Replica: "pod-a", Kind: KindDegradedRun,
+		Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "GAP_SKIPPED"}
+	backend := Anomaly{QueryGroup: "qg-backend", Replica: "pod-a", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT"}
+	anomalies := []Anomaly{current, backend}
+	Attribute(anomalies, at)
+	view := &View{Anomalies: anomalies,
+		GapSkips: map[string]SkippedSpan{
+			// Skipping now and also retained: one object, one row.
+			"qg-skipping-now": {FirstSlot: 100, LastSlot: 220, Slots: 3, At: at.Add(-time.Minute), Replica: "pod-a"},
+			// Healthy now, skipped an hour ago: a row from the record alone.
+			"qg-skipped-earlier": {FirstSlot: 1000, LastSlot: 1060, Slots: 2, At: at.Add(-time.Hour), Replica: "pod-b"},
+			// Under the backend's line now, and skipped earlier: both.
+			"qg-backend": {FirstSlot: 2000, LastSlot: 2000, Slots: 1, At: at.Add(-30 * time.Minute), Replica: "pod-a"},
+		},
+		PrunedSkips: map[string]PrunedSkip{
+			"qg-pruned": {From: 5000, To: 8600, At: at.Add(-2 * time.Hour), Replica: "pod-b"},
+		}}
+	reports := ReportChecks([][]Anomaly{anomalies, nil, nil, nil}, nil, view)
+	byCode := map[Check]CheckReport{}
+	for _, report := range reports {
+		byCode[report.Code] = report
+	}
+	if got := byCode[CheckDetectionAbandoned]; got.Objects != 3 {
+		t.Errorf("DETECTION_ABANDONED = %d objects, want 3: the current skipper once, the earlier one, "+
+			"and the backend's object for its retained skip", got.Objects)
+	}
+	if got := byCode[CheckTimelinePruned]; got.Objects != 1 {
+		t.Errorf("TIMELINE_PRUNED = %d objects, want the one pruned record", got.Objects)
+	}
+	if got := byCode[CheckBackendNotAnswering]; got.Objects != 1 {
+		t.Errorf("BACKEND_NOT_ANSWERING = %d objects, want 1: the retained skip does not remove it", got.Objects)
+	}
+	rows := UnderCheck(CheckDetectionAbandoned, "", view)
+	if len(rows) != 3 {
+		t.Fatalf("under DETECTION_ABANDONED: %v, want 3 rows", names(rows))
+	}
+	kinds := map[string]string{}
+	for _, row := range rows {
+		kinds[row.QueryGroup] = row.Kind
+	}
+	if kinds["qg-skipping-now"] != KindDegradedRun {
+		t.Errorf("the current skipper is listed as %s, want its own row, not a synthesized one", kinds["qg-skipping-now"])
+	}
+	if kinds["qg-skipped-earlier"] != KindSkippedSpan || kinds["qg-backend"] != KindSkippedSpan {
+		t.Errorf("retained skips are listed as %v, want %s rows", kinds, KindSkippedSpan)
+	}
+	for _, row := range rows {
+		if row.Kind == KindSkippedSpan && (row.Skip == nil || row.Skip.Slots == 0 || row.Finding.Group != row.Replica) {
+			t.Errorf("synthesized row %s = %+v, want the span and the replica as its group", row.QueryGroup, row)
+		}
+	}
+	// Narrowing to pod-b lists the earlier skip alone.
+	if got := UnderCheck(CheckDetectionAbandoned, "pod-b", view); len(got) != 1 || got[0].QueryGroup != "qg-skipped-earlier" {
+		t.Errorf("under DETECTION_ABANDONED group pod-b = %v, want [qg-skipped-earlier]", names(got))
+	}
+	// The pruned record's row says its Slot count is not knowable.
+	pruned := UnderCheck(CheckTimelinePruned, "", view)
+	if len(pruned) != 1 || pruned[0].Skip == nil || pruned[0].Skip.Slots != 0 || pruned[0].Skip.FirstSlot != 5000 {
+		t.Errorf("under TIMELINE_PRUNED = %+v, want one row with the span and no Slot count", pruned)
+	}
+}
+
+// Objects whose data stopped are on the data side's line and listed under it,
+// from the view's own list rather than from a column: their rounds complete
+// and the equation counts them healthy.
+func TestNoDataObjectsAreOnTheDataSidesLine(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	view := &View{NoData: []Anomaly{
+		{QueryGroup: "qg-stopped-a", Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: "pod-a",
+			Since: at.Add(-time.Hour), Strategies: []StrategyRef{{StrategyID: "77", BusinessID: "3"}}},
+		{QueryGroup: "qg-stopped-b", Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: "pod-b",
+			Since: at.Add(-2 * time.Hour), Strategies: []StrategyRef{{StrategyID: "77", BusinessID: "3"}}},
+	}}
+	Attribute(view.NoData, at)
+	reports := ReportChecks([][]Anomaly{nil, nil, nil, nil}, nil, view)
+	if len(reports) != 1 || reports[0].Code != CheckNoDataPersistent || reports[0].Owner != OwnerData ||
+		reports[0].Objects != 2 || reports[0].Strategies != 1 {
+		t.Fatalf("reports = %+v, want one NO_DATA_PERSISTENT line, the data side's, over 2 objects of 1 strategy", reports)
+	}
+	if len(reports[0].Groups) != 1 || reports[0].Groups[0].Key != "77" {
+		t.Errorf("groups = %+v, want one fold on strategy 77", reports[0].Groups)
+	}
+	rows := UnderCheck(CheckNoDataPersistent, "77", view)
+	if len(rows) != 2 || rows[0].QueryGroup != "qg-stopped-b" {
+		t.Errorf("under NO_DATA_PERSISTENT group 77 = %v, want both, oldest first", names(rows))
+	}
+	for _, row := range rows {
+		if row.Finding.Result != ResultNoData || row.Attribution != AttributionExternal {
+			t.Errorf("row %s = result %s / attribution %s, want NO_DATA / EXTERNAL", row.QueryGroup, row.Finding.Result, row.Attribution)
 		}
 	}
 }

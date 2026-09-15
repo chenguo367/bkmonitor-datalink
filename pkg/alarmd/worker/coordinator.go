@@ -1684,6 +1684,7 @@ func historyCoverageFacts(coverage execution.HistoryCoverage) *observability.His
 		Guarded: coverage.Guarded,
 		Fresh:   coverage.Fresh, ShortFresh: coverage.ShortFresh,
 		Abnormal: coverage.Abnormal, AbnormalOnIncomplete: coverage.AbnormalOnIncomplete,
+		Unusable: coverage.Unusable, UnusableReason: coverage.UnusableReason,
 	}
 }
 

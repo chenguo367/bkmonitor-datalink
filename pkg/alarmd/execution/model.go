@@ -1595,6 +1595,33 @@ type HistoryCoverage struct {
 	// thousand are different readings, and only the pair keeps them apart.
 	Abnormal             uint32
 	AbnormalOnIncomplete uint32
+	// Unusable is how many Levels could not use this round's record at all:
+	// the detection returned UNAVAILABLE or ERROR for it, so the point went
+	// into the window with no valid bit. UnusableReason is the first such
+	// Level's reason code -- REQUIRED_VALUE_MISSING, a type mismatch, a
+	// detector's declared refusal -- which is the one fact that says why.
+	//
+	// This is what an empty window is made of. A record that never arrives is
+	// never evaluated, so it never reaches the window; an empty window is a
+	// record that did arrive and could not be used, every round, and until this
+	// was carried the two read the same and the empty ones were filed as the
+	// data's.
+	Unusable       uint32
+	UnusableReason string
+}
+
+// ObserveUnusable records one Level whose detection could not use this
+// round's record, with the reason the detection gave. The first reason is
+// kept: it is the one to show, and a record that fails several Levels for
+// several reasons is rare enough that one is the right amount to carry.
+func (coverage *HistoryCoverage) ObserveUnusable(reason string) {
+	if coverage == nil {
+		return
+	}
+	coverage.Unusable++
+	if coverage.UnusableReason == "" {
+		coverage.UnusableReason = reason
+	}
 }
 
 // Observe folds one Level summary in. Zero required points means the window
@@ -1649,6 +1676,10 @@ func (coverage *HistoryCoverage) Merge(other HistoryCoverage) {
 	coverage.ShortFresh += other.ShortFresh
 	coverage.Abnormal += other.Abnormal
 	coverage.AbnormalOnIncomplete += other.AbnormalOnIncomplete
+	coverage.Unusable += other.Unusable
+	if coverage.UnusableReason == "" {
+		coverage.UnusableReason = other.UnusableReason
+	}
 	if other.Short > 0 && other.WorstRequired-other.WorstValid > coverage.WorstRequired-coverage.WorstValid {
 		coverage.WorstValid, coverage.WorstRequired = other.WorstValid, other.WorstRequired
 	}
