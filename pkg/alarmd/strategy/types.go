@@ -497,6 +497,32 @@ type CompiledPlan struct {
 	resourceEstimate    ResourceEstimate
 	datasetDigest       string
 	targetScope         *contract.TargetScopeV2
+	noData              *contract.NoDataConfigV1
+	noDataLevel         *CompiledLevel
+}
+
+// NoData is the strategy's no-data configuration, frozen with the Plan. Nil
+// means the strategy does not detect no-data; enablement is the presence of the
+// section rather than a field inside it.
+func (p *CompiledPlan) NoData() *contract.NoDataConfigV1 {
+	if p == nil {
+		return nil
+	}
+	return p.noData
+}
+
+// NoDataLevel is the level the synthetic no-data series are evaluated against,
+// compiled from the no_data configuration by the same compiler that compiles a
+// declared level. Nil means the Plan detects no no-data.
+//
+// It is deliberately not in Levels(). A caller iterating the strategy's levels
+// is asking what the operator configured, and this is not one of those; a
+// caller evaluating a no-data series asks for it by name.
+func (p *CompiledPlan) NoDataLevel() *CompiledLevel {
+	if p == nil {
+		return nil
+	}
+	return p.noDataLevel
 }
 
 // TargetScope is the strategy's monitoring target, frozen with the Plan. Nil

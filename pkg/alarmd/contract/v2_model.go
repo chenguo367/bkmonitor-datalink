@@ -47,6 +47,7 @@ const (
 	ReasonPlanInvalid                      = "PLAN_INVALID"
 	ReasonPlanDuplicateLevelID             = "PLAN_DUPLICATE_LEVEL_ID"
 	ReasonPlanBudgetExceeded               = "PLAN_BUDGET_EXCEEDED"
+	ReasonNoDataConfigInvalid              = "NO_DATA_CONFIG_INVALID"
 	ReasonProjectionInvalid                = "PROJECTION_INVALID"
 	ReasonSelectorInvalid                  = "SELECTOR_INVALID"
 	ReasonLevelInvalid                     = "LEVEL_INVALID"

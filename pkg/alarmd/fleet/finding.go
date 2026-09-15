@@ -304,6 +304,12 @@ var codeChecks = map[string]verdict{
 	"SCHEMA_MAJOR_UNSUPPORTED":              lands(CheckPlanUnevaluable),
 	"PLAN_INVALID":                          lands(CheckPlanUnevaluable),
 	"PLAN_DUPLICATE_LEVEL_ID":               lands(CheckPlanUnevaluable),
+	// The strategy turned no-data detection on and its settings produce no
+	// decision. It is the strategy's, like the rest of this group: nothing about
+	// this deployment changes the answer, and the whole Plan is withheld rather
+	// than run with its thresholds and no absence detection - a Plan half-wired
+	// that way would answer "is this strategy covered" with neither yes nor no.
+	"NO_DATA_CONFIG_INVALID": lands(CheckPlanUnevaluable),
 	// The definition's input projection, not this deployment's state
 	// projection: the compiler emits it for a plan whose input_projection is
 	// invalid, and the catalog files it as CONFIG_REJECTED beside PLAN_INVALID.
