@@ -786,7 +786,58 @@ type legacyItem struct {
 	// until 2026-09-09, which is how alarmd came to alert on hosts outside
 	// every scoped strategy's target while Python filtered them out.
 	Target [][]legacyTargetCondition `json:"target"`
+	// NoDataConfig is the item's no-data setting. A pointer so that "the
+	// strategy cache carried no section" is distinguishable from "it carried
+	// one with everything at zero"; the two mean different things and the
+	// second is a malformed entry rather than a disabled item.
+	NoDataConfig *legacyNoDataConfig `json:"no_data_config"`
 }
+
+// legacyNoDataConfig is Python's no_data_config as the strategy cache stores
+// it. Level is a pointer because Python reads it with a default of 2 rather
+// than requiring it, and an absent field must not arrive here as level 0.
+type legacyNoDataConfig struct {
+	IsEnabled    bool     `json:"is_enabled"`
+	Continuous   *uint32  `json:"continuous"`
+	AggDimension []string `json:"agg_dimension"`
+	Level        *uint32  `json:"level"`
+}
+
+// Python's defaults, from bkmonitor/models/strategy.py's no_data_config() and
+// from as_code's read of the level. They are applied here rather than left to
+// the reader so that every Plan states the setting it will be judged by.
+const (
+	defaultNoDataContinuous uint32 = 5
+	defaultNoDataLevel      uint32 = 2
+)
+
+// frozenNoDataConfig returns the section to freeze on the Plan, or nil when the
+// item does not detect no-data. An item that is enabled but whose setting
+// cannot be validated is an error rather than a silent disable: the strategy
+// asked for the detection, and dropping it quietly is the failure mode that
+// looks like nothing happened.
+func frozenNoDataConfig(item legacyItem) (*contract.NoDataConfigV1, error) {
+	source := item.NoDataConfig
+	if source == nil || !source.IsEnabled {
+		return nil, nil
+	}
+	config := &contract.NoDataConfigV1{
+		Continuous:   defaultNoDataContinuous,
+		AggDimension: append([]string(nil), source.AggDimension...),
+		Level:        defaultNoDataLevel,
+	}
+	if source.Continuous != nil {
+		config.Continuous = *source.Continuous
+	}
+	if source.Level != nil {
+		config.Level = *source.Level
+	}
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("alarmd controlplane: item %d no_data_config: %w", item.ID, err)
+	}
+	return config, nil
+}
+
 type legacyAlgorithm struct {
 	Level      uint32          `json:"level"`
 	Type       string          `json:"type"`
@@ -1012,6 +1063,11 @@ func compilePlan(
 	ir := contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2, Minor: 0}, RequiredFeatures: []string{}, StrategyRef: ref, ExecutionSemantics: semantics, InputProjection: projection, Levels: levels}
 	plan := contract.EvaluationPlanV2{PlanID: strategyID, StrategyRef: ref, InputProjection: projection, SourceCompatibility: &contract.SourceCompatibilityV2{ItemID: strconv.FormatInt(item.ID, 10)}, StrategyIR: ir}
 	plan.TargetScope = targetScope
+	noData, err := frozenNoDataConfig(item)
+	if err != nil {
+		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", dispositions, err
+	}
+	plan.NoData = noData
 	if ref.SnapshotRevision > 0 {
 		plan.OutputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: dataset.DynamicDimensions, DimensionFields: append([]string{}, dataset.IdentityFields...)}
 		plan.SubjectFacts = frozenSubjectFacts(source, item)
