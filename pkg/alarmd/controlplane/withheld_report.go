@@ -48,9 +48,13 @@ type withheldIdentity struct {
 // repeated: a deployment with two hundred rejected strategies would otherwise
 // write two hundred identical lines every refresh, and the one strategy that
 // started failing this morning would be somewhere in the middle of the two
-// hundredth copy. A round with no previous audit reports everything, which is
-// what the first round after a restart should do - nothing has been said yet,
-// so nothing is a repeat.
+// hundredth copy.
+//
+// A nil previous reports everything. Which rounds pass nil is the caller's
+// decision and not this function's: see SourceReconciler.namedWithheld. It is
+// not "the audit is missing" - the audit is published state that outlives a
+// leader, so keying on it would mean a new leader reports only what changed
+// since a list nobody in that process ever wrote down.
 //
 // Records that stopped being withheld are not reported. This answers "what is
 // being held back and why", and a strategy that is now accepted is not being
@@ -102,6 +106,34 @@ func changedWithheldWithin(current, previous []ObjectDisposition, limit int) Wit
 		return WithheldReport{Lines: changed[:limit], Dropped: len(changed) - limit}
 	}
 	return WithheldReport{Lines: changed}
+}
+
+// RememberNamed is what a process has named, after a round that named justNamed
+// out of current.
+//
+// Two things go in it: the records it had already named that are still withheld
+// under the same disposition and reason, and the ones this round wrote out. A
+// record the line budget cut is in neither, and that is the point -- the budget
+// defers rather than suppresses. Left out of the memory, a cut record is still
+// unsaid, so the next round names it, and a first round on a deployment with
+// far more withheld objects than one round may name drains a budget at a time
+// instead of losing the remainder to a count.
+//
+// A record that stopped being withheld, or that is withheld for a new reason,
+// is dropped: the first is no longer something to report and the second is a
+// change the next round should name again.
+func RememberNamed(named, current, justNamed []ObjectDisposition) []ObjectDisposition {
+	is := make(map[withheldIdentity]ObjectDisposition, len(current))
+	for _, record := range current {
+		is[identityOf(record)] = record
+	}
+	remembered := make([]ObjectDisposition, 0, len(named)+len(justNamed))
+	for _, record := range named {
+		if now, present := is[identityOf(record)]; present && now == record {
+			remembered = append(remembered, record)
+		}
+	}
+	return append(remembered, justNamed...)
 }
 
 func identityOf(record ObjectDisposition) withheldIdentity {

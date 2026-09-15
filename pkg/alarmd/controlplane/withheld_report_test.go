@@ -82,21 +82,48 @@ func TestARoundWhereNothingChangedNamesNothing(t *testing.T) {
 		{SourceID: "3", Scope: "LEVEL", LevelID: 1, Disposition: DispositionUnsupported, Reason: "ALGORITHM_NOT_MIGRATED"},
 	}
 	first := ComposeCatalog(withheldFixture(dispositions...))
-	if len(ChangedWithheld(first.WithheldObjects, nil).Lines) != 2 {
+	firstReport := ChangedWithheld(first.WithheldObjects, nil)
+	if len(firstReport.Lines) != 2 {
 		t.Fatal("the first round did not name the two withheld objects; the next assertion would pass for the wrong reason")
 	}
+	named := RememberNamed(nil, first.WithheldObjects, firstReport.Lines)
 
-	// The audit the first round published is what the second round compares
-	// against, so the second round is given the same list under the same
-	// identities.
 	second := ComposeCatalog(withheldFixture(dispositions...))
-	report := ChangedWithheld(second.WithheldObjects, dispositions)
+	report := ChangedWithheld(second.WithheldObjects, named)
 
 	if len(report.Lines) != 0 {
 		t.Fatalf("lines = %+v, want none: nothing changed between the two rounds", report.Lines)
 	}
 	if report.Dropped != 0 {
 		t.Fatalf("Dropped = %d, want 0", report.Dropped)
+	}
+}
+
+// A process that has said nothing names everything, whatever a previous leader
+// published.
+//
+// The comparand is what this process has named, not the stored audit, and the
+// two are different things: the audit outlives a leader, so a new leader diffing
+// against it reports only what changed since a list nobody in that process ever
+// wrote down. On the release that added these lines the audit was already in
+// Redis with every disposition in it, published by leaders that had no such
+// lines to write -- so diffing against it, the first leader that could write
+// them wrote none, and an operator arriving after the failover had counts and
+// no names.
+func TestANewLeaderNamesEverythingEvenWhenAnAuditAlreadyRecordsIt(t *testing.T) {
+	dispositions := []ObjectDisposition{
+		{SourceID: "1", Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "NO_DATA_CONFIG_INVALID"},
+		{SourceID: "2", Scope: "LEVEL", LevelID: 1, Disposition: DispositionUnsupported, Reason: "ALGORITHM_NOT_MIGRATED"},
+	}
+	composition := ComposeCatalog(withheldFixture(dispositions...))
+
+	// The audit a previous leader published records exactly these, and this
+	// process has named nothing.
+	report := ChangedWithheld(composition.WithheldObjects, nil)
+
+	if len(report.Lines) != 2 {
+		t.Fatalf("lines = %+v, want both objects named: a process that has written nothing has nothing "+
+			"to be repeating, whatever a previous leader published", report.Lines)
 	}
 }
 
@@ -385,4 +412,109 @@ func composedWithheldTotal(composition CatalogComposition) int {
 		total += count
 	}
 	return total
+}
+
+// What the budget cut is not remembered as said, so the next round says it.
+//
+// This is what makes the cap a deferral rather than a filter. A first round on
+// a deployment with far more withheld objects than one round may name would
+// otherwise lose every name past the budget to a count, permanently: the
+// records are unchanged next round, so a report of changes would never mention
+// them again.
+func TestWhatTheBudgetCutIsNamedByTheNextRound(t *testing.T) {
+	var dispositions []ObjectDisposition
+	for index := 0; index < 25; index++ {
+		dispositions = append(dispositions, ObjectDisposition{
+			SourceID: fmt.Sprintf("%03d", index), Scope: "PLAN",
+			Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID",
+		})
+	}
+	composition := ComposeCatalog(withheldFixture(dispositions...))
+
+	var named []ObjectDisposition
+	var seen []string
+	for round := 0; round < 3; round++ {
+		report := changedWithheldWithin(composition.WithheldObjects, named, 10)
+		for _, line := range report.Lines {
+			seen = append(seen, line.SourceID)
+		}
+		named = RememberNamed(named, composition.WithheldObjects, report.Lines)
+	}
+
+	if len(seen) != 25 {
+		t.Fatalf("named %d objects over three rounds of a budget of 10, want all 25: the budget defers "+
+			"what does not fit, it does not drop it", len(seen))
+	}
+	for index, sourceID := range seen {
+		if want := fmt.Sprintf("%03d", index); sourceID != want {
+			t.Fatalf("line %d = %s, want %s: each round takes the next budget's worth, in order, "+
+				"rather than repeating the first one", index, sourceID, want)
+		}
+	}
+	// And a fourth round, with everything said, says nothing.
+	if report := changedWithheldWithin(composition.WithheldObjects, named, 10); len(report.Lines) != 0 {
+		t.Fatalf("a round after everything was named reported %+v", report.Lines)
+	}
+}
+
+// A record that stops being withheld leaves the memory.
+//
+// Left in it, the memory would grow for the life of the process, and a strategy
+// that was refused, fixed, and refused again would never be named the second
+// time -- which is exactly the round somebody needs to see.
+func TestARecordThatIsAcceptedAgainLeavesTheMemory(t *testing.T) {
+	withheldRound := ComposeCatalog(withheldFixture(
+		ObjectDisposition{SourceID: "1", Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID"},
+	))
+	first := ChangedWithheld(withheldRound.WithheldObjects, nil)
+	named := RememberNamed(nil, withheldRound.WithheldObjects, first.Lines)
+	if len(named) != 1 {
+		t.Fatalf("named = %+v, want the one object that was reported", named)
+	}
+
+	// Fixed: the object is accepted, so it is not withheld and not remembered.
+	acceptedRound := ComposeCatalog(withheldFixture(
+		ObjectDisposition{SourceID: "1", Scope: "PLAN", Disposition: DispositionAccepted},
+	))
+	named = RememberNamed(named, acceptedRound.WithheldObjects, ChangedWithheld(acceptedRound.WithheldObjects, named).Lines)
+	if len(named) != 0 {
+		t.Fatalf("named = %+v, want empty: the object is running again", named)
+	}
+
+	// Refused again: a new fact, named again.
+	againRound := ComposeCatalog(withheldFixture(
+		ObjectDisposition{SourceID: "1", Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID"},
+	))
+	if report := ChangedWithheld(againRound.WithheldObjects, named); len(report.Lines) != 1 {
+		t.Fatalf("lines = %+v, want the object named again after it was refused a second time", report.Lines)
+	}
+}
+
+// The memory holds one entry per withheld record, however often it changes.
+//
+// It is a set of what has been said, not a log of the saying. A strategy whose
+// reason flaps between two values -- which is what a strategy being edited
+// looks like -- would otherwise add an entry per flap and keep every one of
+// them for the life of the process. The behaviour stays correct as it grows,
+// because the later entry wins the comparison, so nothing fails and the slice
+// just gets longer: a leak with no symptom.
+func TestTheNamingMemoryDoesNotGrowWhenARecordKeepsChanging(t *testing.T) {
+	reasons := []string{"PLAN_INVALID", "TRIGGER_CONFIG_MISSING"}
+	var named []ObjectDisposition
+	for round := 0; round < 20; round++ {
+		composition := ComposeCatalog(withheldFixture(ObjectDisposition{
+			SourceID: "1", Scope: "PLAN",
+			Disposition: DispositionConfigRejected, Reason: reasons[round%2],
+		}))
+		report := ChangedWithheld(composition.WithheldObjects, named)
+		if len(report.Lines) != 1 {
+			t.Fatalf("round %d named %+v, want the one record under its new reason", round, report.Lines)
+		}
+		named = RememberNamed(named, composition.WithheldObjects, report.Lines)
+		if len(named) != 1 {
+			t.Fatalf("after %d rounds the memory holds %d entries for one record; it is a set of what "+
+				"has been said, and a record that keeps changing must not add one entry per change",
+				round+1, len(named))
+		}
+	}
 }

@@ -563,11 +563,13 @@ func mandatoryLogStage(stage Stage) bool {
 		// looking for: these lines exist because a strategy that is not running
 		// cannot be asked about any other way here.
 		//
-		// What keeps the volume bounded is upstream instead: a round reports
-		// only the objects whose disposition changed, so the steady state is
-		// no lines at all and a full first round is one burst. On this
-		// deployment that burst is about 1,250 lines; on the largest it is
-		// about 48 times that, once per leader election.
+		// What keeps the volume bounded is upstream instead: after its first
+		// round a process reports only the objects whose disposition changed,
+		// so the steady state is no lines at all. The first round of each
+		// process is one burst, measured at 1,249 lines on this deployment
+		// and about 48 times that on the largest, once per leader election -
+		// and that burst is itself capped, with what did not fit counted
+		// rather than dropped in silence. See WithheldLineBudget.
 		return true
 	default:
 		return false
