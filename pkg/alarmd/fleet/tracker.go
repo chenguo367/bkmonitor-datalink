@@ -752,6 +752,19 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				state.coverage.PreviousWorstValid, state.coverage.PreviousKnown = previous, true
 			}
 		}
+	case runOutcome == "ownership_rejected":
+		// The fence refused this replica's round: the object is another
+		// replica's now, or the store could not confirm whose it is. Either
+		// way this replica has stopped running its rounds, and the clock
+		// that says "the rounds stopped ending" must stop with them -- read
+		// on, it marked an object the rebalance had just moved away as
+		// stalled here while its new owner had not yet listed it, and the
+		// first screen read a deterministic defect as a stall and then as
+		// fixed. Nothing else about the row changes: what it last said is
+		// still what it last said, until the publisher forgets an object
+		// this replica no longer owns.
+		state.failingSince = time.Time{}
+		return
 	case blockedOutcome(runOutcome):
 		state.determined = true
 		tracker.noteReason(state, "blocked/"+runOutcome, at)
