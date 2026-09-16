@@ -33,8 +33,13 @@ const RecoveredRetention = time.Hour
 type RecoveredProblem struct {
 	Check Check  `json:"check"`
 	Key   string `json:"key"`
-	// Objects is the distinct objects that recovered from this fold within
-	// the retention.
+	// Objects is the distinct objects this replica saw recover from the fold
+	// within the retention, each counted from its own recovery: an object
+	// that recovered seventy minutes ago is not in it, whatever the fold's
+	// other objects did since. Across replicas the counts add, and an object
+	// that recovered on one replica, moved, and recovered on another is in
+	// both -- the snapshot carries no object identities to tell, and the
+	// page says the sum is a sum.
 	Objects int `json:"objects"`
 	// FirstFailure is the earliest onset among them, LastFailure the latest
 	// round any of them was seen failing before it recovered.
@@ -46,10 +51,12 @@ type RecoveredProblem struct {
 }
 
 // recoveredFold is the tracker's own record of one fold: the objects by
-// identity, so an object that recovers twice within the hour is one object.
+// identity with each one's latest recovery, so an object that recovers twice
+// within the hour is one object and one that recovered before the hour is
+// none, whatever the fold's other objects did since.
 type recoveredFold struct {
 	problem RecoveredProblem
-	objects map[string]struct{}
+	objects map[string]time.Time
 }
 
 func recoveredID(check Check, key string) string { return string(check) + "\x00" + key }
@@ -64,7 +71,19 @@ func (tracker *Tracker) noteRecovery(queryGroup string, state *queryGroupState, 
 	if !tracker.over(state) || columnOf(state) != ColumnAnomalies {
 		return
 	}
-	row := tracker.rowOf(queryGroup, state)
+	tracker.recordRecovery(queryGroup, tracker.rowOf(queryGroup, state), at)
+}
+
+// noteMemoryRecovery records the write that ended an object's refused
+// absence memory, under the line the refusal was listed on. Called before
+// the refusal is cleared, because the row is read from it.
+func (tracker *Tracker) noteMemoryRecovery(queryGroup string, state *queryGroupState, at time.Time) {
+	tracker.recordRecovery(queryGroup, tracker.memoryRowOf(queryGroup, state), at)
+}
+
+// recordRecovery files one object's recovery under the line and fold its
+// row was on at that moment.
+func (tracker *Tracker) recordRecovery(queryGroup string, row Anomaly, at time.Time) {
 	attribute(&row, at)
 	if row.Finding.Check == "" {
 		return
@@ -75,10 +94,10 @@ func (tracker *Tracker) noteRecovery(queryGroup string, state *queryGroupState, 
 	id := recoveredID(row.Finding.Check, row.Finding.Group)
 	fold := tracker.recovered[id]
 	if fold == nil {
-		fold = &recoveredFold{problem: RecoveredProblem{Check: row.Finding.Check, Key: row.Finding.Group, FirstRecovery: at}, objects: map[string]struct{}{}}
+		fold = &recoveredFold{problem: RecoveredProblem{Check: row.Finding.Check, Key: row.Finding.Group, FirstRecovery: at}, objects: map[string]time.Time{}}
 		tracker.recovered[id] = fold
 	}
-	fold.objects[queryGroup] = struct{}{}
+	fold.objects[queryGroup] = at
 	fold.problem.Objects = len(fold.objects)
 	if !row.Since.IsZero() && (fold.problem.FirstFailure.IsZero() || row.Since.Before(fold.problem.FirstFailure)) {
 		fold.problem.FirstFailure = row.Since
@@ -99,15 +118,23 @@ func (tracker *Tracker) noteRecovery(queryGroup string, state *queryGroupState, 
 }
 
 // Recovered returns the problems whose objects recovered within the
-// retention, and forgets the rest. Ordered by check and key so a publisher
-// that cuts the list keeps a deterministic prefix.
+// retention, and forgets the rest: each object drops out of its fold's
+// count an hour after its own recovery, and a fold with no object left is
+// gone. Ordered by check and key so a publisher that cuts the list keeps a
+// deterministic prefix.
 func (tracker *Tracker) Recovered() []RecoveredProblem {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	now := tracker.now()
 	problems := make([]RecoveredProblem, 0, len(tracker.recovered))
 	for id, fold := range tracker.recovered {
-		if now.Sub(fold.problem.LastRecovery) > RecoveredRetention {
+		for queryGroup, recoveredAt := range fold.objects {
+			if now.Sub(recoveredAt) > RecoveredRetention {
+				delete(fold.objects, queryGroup)
+			}
+		}
+		fold.problem.Objects = len(fold.objects)
+		if fold.problem.Objects == 0 {
 			delete(tracker.recovered, id)
 			continue
 		}
@@ -124,8 +151,10 @@ func (tracker *Tracker) Recovered() []RecoveredProblem {
 
 // mergeRecovered folds one replica's recovered problems into the view's,
 // by check and key: objects add up -- each replica counts the objects it
-// saw recover, and an object recovers on the replica that owns it -- and
-// the clocks take the earliest onset and the latest of everything else.
+// saw recover, and the snapshot carries no identities to tell an object
+// that recovered on two replicas from two objects, so the sum is what the
+// page has and what it says it has -- and the clocks take the earliest
+// onset and the latest of everything else.
 func mergeRecovered(view *View, problems []RecoveredProblem) {
 	for _, problem := range problems {
 		merged := false

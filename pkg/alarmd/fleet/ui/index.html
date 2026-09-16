@@ -690,7 +690,7 @@ var RECOVERY_STATE = {
   BLOCKED: '仍然受阻（最近窗口内还在失败）',
   RECOVERING: '正在恢复（窗口内没有新失败；轮次在结束或只是迟到，结果还没补齐）',
   UNCONFIRMED: '恢复待确认（窗口内没有新失败，也没观察到任何一轮成功——不算已恢复）',
-  RECOVERED: '已恢复（曾在这一组的每个对象都在之后成功完成过，现在没有对象在这一组）',
+  RECOVERED: '已恢复（这一组的对象都在之后成功完成过，现在没有对象在这一组；对象数是各副本观察到的合计）',
   HISTORICAL: '留有历史影响（历史检测缺口，那段未检测的时间不补）'
 };
 
@@ -722,8 +722,8 @@ function problemClause(report, group) {
 // positive evidence -- a healthy completion after being listed -- so it is
 // never inferred from an object having left the list.
 function recoveredWords(group) {
-  var when = group.recovered_last ? '，最近一次 ' + momentLabel(group.recovered_last) : '';
-  return (group.objects ? '已恢复 ' : '最近 1 小时内恢复 ') + group.recovered + ' 个' + when;
+  var when = group.recovered_last ? '，最近一次健康完成 ' + momentLabel(group.recovered_last) : '';
+  return '已恢复 ' + group.recovered + ' 个（各副本合计）' + when;
 }
 
 // The fold key on the Blocked reading, in words, with the codes under it.
@@ -836,7 +836,7 @@ var RECOVERY = {
   ROUNDS_STALLED:        '对象的轮次重新结束（对象行离开"轮次不结束"）；不会自己发生',
   DETECTION_ABANDONED:   '{w} 分钟内没有新的跳过（"仍在发生"折归零）；已停止的记录不会归零，那是记录不是指标',
   TIMELINE_PRUNED:       '{w} 分钟内没有新的越过；已停止的记录不会归零',
-  NO_DATA_MEMORY_REFUSED: '该 Plan 一次成功写入（目前没有成功写入的信号，行只会说"自 HH:MM 起被拒"，不会说已恢复；{w} 分钟内没有新拒绝也不算恢复）',
+  NO_DATA_MEMORY_REFUSED: '该 Plan 一次写入落库（no_data_memory_written 且 stored=true——ALREADY_APPLIED 算、STALE_VERSION 不算，以发射方的 stored 为准不看结局名）；这一行随之消失，进历史区的"已恢复"。{w} 分钟内没有新拒绝不算恢复',
   DEPENDENCY_DOWN:       '依赖恢复后各对象下一轮完成，这一行自动清',
   DEFECT:                '修复上线后该原因码不再出现',
   OBSERVATION_GAP:       '各对象下一轮完成后补上成因、离开这一行——只是补齐证据，不等于这几个对象当前有新故障；副本级缺口随该副本重新发布快照消失',
@@ -1338,8 +1338,8 @@ function renderChecks(checks) {
       + (t.retained_newest ? '，最后一次 ' + momentLabel(t.retained_newest) : ''));
   }
   if (recoveredObjects) {
-    historyParts.push('已恢复 ' + recoveredObjects + ' 个对象（最近 1 小时内有健康完成'
-      + (recoveredLast ? '，最近一次 ' + momentLabel(recoveredLast) : '') + '）');
+    historyParts.push('已恢复：各副本合计 ' + recoveredObjects + ' 个对象（每个对象在自己恢复后的 1 小时内计入，换副本后再恢复会计两次'
+      + (recoveredLast ? '；最近一次健康完成 ' + momentLabel(recoveredLast) : '') + '）');
   }
   text('historyCount', history.length || historyParts.length ? historyParts.join('；') : '没有');
   text('briefTodo', todoSentence(todo, pending, governance, t));
@@ -1506,7 +1506,7 @@ function recoveredClause(report) {
     return groupKeyLabel(report, group.key, group) + '：' + facts.join('，');
   });
   var rest = folds.length > 3 ? '；另 ' + (folds.length - 3) + ' 组见展开' : '';
-  return '已恢复 ' + report.recovered + ' 个对象（最近 1 小时内有健康完成，现在不在这一行上）——' + shown.join('；') + rest;
+  return '已恢复：各副本合计 ' + report.recovered + ' 个对象在各自恢复后的 1 小时内（同一对象换副本后再恢复会计两次；现在不在这一行上）——' + shown.join('；') + rest;
 }
 
 // The next step for a check, with the window it names filled in.
@@ -1875,7 +1875,7 @@ function objectRow(anomaly) {
       + '；自 ' + momentLabel(memory.first_at) + ' 起被拒 ' + (memory.refusals || 0) + ' 轮，最近 ' + momentLabel(memory.last_at)
       + (memory.plan && memory.plan.strategy_id ? '；策略 ' + memory.plan.strategy_id : ''),
       '阈值检测照常跑、结果照发，只是学到的缺失没写下去：记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发。'
-      + '没有"写成功"的信号，所以这一行不会说已恢复');
+      + '这一行只在该 Plan 一次写入落库（stored=true）后消失；没有新拒绝不算恢复');
   }
   // A failure of this deployment's own making beside the finding the column
   // decided: the row is on its line for the column's reason and under

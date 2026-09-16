@@ -142,6 +142,30 @@ func TestARecoveredProblemIsForgottenAfterTheRetention(t *testing.T) {
 	}
 }
 
+// Each object counts for the hour after its own recovery, not the fold's
+// latest: two objects that recovered seventy and twenty minutes ago are one
+// object within the hour, whatever the fold says about its last recovery.
+func TestEachObjectCountsForTheHourAfterItsOwnRecovery(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	for _, queryGroup := range []string{"qg-early", "qg-late"} {
+		for round := 0; round < DefaultDegradedRounds; round++ {
+			redisCommitFailure(tracker, queryGroup, int64(100+60*round))
+		}
+	}
+	tracker.Observe(context.Background(), healthyRound("qg-early", 400))
+	at.at = at.at.Add(50 * time.Minute)
+	tracker.Observe(context.Background(), healthyRound("qg-late", 3400))
+	at.at = at.at.Add(20 * time.Minute)
+	recovered := tracker.Recovered()
+	if len(recovered) != 1 || recovered[0].Objects != 1 {
+		t.Fatalf("recovered = %+v, want one object within the hour: the early one recovered seventy minutes ago", recovered)
+	}
+	if !recovered[0].LastRecovery.Equal(now.Add(50 * time.Minute)) {
+		t.Fatalf("last recovery = %v, want the late object's", recovered[0].LastRecovery)
+	}
+}
+
 // On the report, recoveries land on the fold they came from. With objects
 // still under it they say how far the problem has come back and do not
 // lift the state -- one object still failing keeps the group blocked. With

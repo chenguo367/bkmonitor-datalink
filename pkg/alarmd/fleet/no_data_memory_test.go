@@ -85,6 +85,66 @@ func TestARefusedAbsenceMemoryIsListedApartFromTheColumns(t *testing.T) {
 	}
 }
 
+// memoryWritten is the observation the worker emits for every absence-memory
+// write that was not refused: the store's outcome word, and whether the
+// store now holds what the round wanted -- carried, not derived by readers.
+func memoryWritten(ctx context.Context, tracker *Tracker, outcome string, stored bool) {
+	result := observability.Result(observability.ResultDegraded)
+	if stored {
+		result = observability.Result(observability.ResultSuccess)
+	}
+	tracker.Observe(ctx, observability.Observation{
+		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryWritten, Result: result,
+		Direction:         observability.DirectionInternal,
+		Trace:             observability.TraceFields{StrategyID: "s-1", BusinessID: "2"},
+		NoDataMemoryWrite: &observability.NoDataMemoryWriteFacts{Outcome: outcome, Stored: stored},
+	})
+}
+
+// The refusal ends when a write for the Plan stores -- the emitter's stored
+// flag, not the outcome's name: ALREADY_APPLIED is stored, STALE_VERSION is
+// not. The row leaves and the recovery is on the ledger under the line it
+// was listed on; a write that did not store changes nothing.
+func TestAStoredWriteEndsTheRefusalAndIsItsRecovery(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-memory"})
+	for round := 0; round < 3; round++ {
+		memoryRefused(ctx, tracker, 70000)
+		at.at = at.at.Add(time.Minute)
+	}
+	memoryWritten(ctx, tracker, "STALE_VERSION", false)
+	if rows := tracker.NoDataMemory(); len(rows) != 1 || rows[0].NoDataMemory.Refusals != 3 {
+		t.Fatalf("rows after a write that did not store = %+v, want the refusal still listed", rows)
+	}
+	if recovered := tracker.Recovered(); len(recovered) != 0 {
+		t.Fatalf("recovered after a write that did not store = %+v, want nothing", recovered)
+	}
+	storedAt := at.at
+	memoryWritten(ctx, tracker, "ALREADY_APPLIED", true)
+	if rows := tracker.NoDataMemory(); len(rows) != 0 {
+		t.Fatalf("rows after a stored write = %+v, want the refusal gone", rows)
+	}
+	recovered := tracker.Recovered()
+	if len(recovered) != 1 || recovered[0].Check != CheckNoDataMemoryRefused || recovered[0].Key != "STATE_BUDGET_EXCEEDED" || recovered[0].Objects != 1 {
+		t.Fatalf("recovered = %+v, want the one object under the refusal's line and reason", recovered)
+	}
+	if !recovered[0].FirstFailure.Equal(now) || !recovered[0].LastRecovery.Equal(storedAt) {
+		t.Fatalf("recovered clocks = %+v, want the first refusal as onset and the stored write as recovery", recovered[0])
+	}
+	// A stored write for a different Plan of the same object does not end
+	// a refusal that named another.
+	memoryRefused(ctx, tracker, 70000)
+	tracker.Observe(ctx, observability.Observation{
+		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryWritten, Result: observability.ResultSuccess,
+		Trace:             observability.TraceFields{StrategyID: "s-other", BusinessID: "2"},
+		NoDataMemoryWrite: &observability.NoDataMemoryWriteFacts{Outcome: "APPLIED", Stored: true},
+	})
+	if rows := tracker.NoDataMemory(); len(rows) != 1 {
+		t.Fatalf("rows after another Plan's stored write = %+v, want the refusal still listed", rows)
+	}
+}
+
 // On the report the object is under its own line, on the work list, folded
 // on the store's reason, and counted as this deployment's; the row reads
 // completed for the round and the check for the loss.
