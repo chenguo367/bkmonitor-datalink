@@ -421,3 +421,67 @@ func TestTheObjectRouteServesChecksAndTheRowsUnderOne(t *testing.T) {
 		t.Errorf("unknown check: status = %d, want 400", status)
 	}
 }
+
+// A reason carried by a durable history guard is the guard's trigger, not
+// this round's event. Six strategies sat under "配置状态说不清" for hours with
+// CONFIG_DRIFT on every round: the guard had been established on a
+// configuration change once, nothing had changed since, and two of them
+// recovered with snapshot, query and schedule revisions identical before and
+// after. The row's question is why the guard has not released, which is a
+// window question, folded on the trigger and on whether the live window is
+// still short or already full.
+func TestAReasonHeldByAGuardIsAWindowQuestionNotAConfigOne(t *testing.T) {
+	// consecutive is the reason clock, which the window filling does not
+	// restart: on the round a guard converges it already reads the rounds
+	// the window was short for. heldFull is the counter that does restart.
+	held := func(short, guarded uint32, heldFull uint32) Anomaly {
+		return Anomaly{Kind: KindDegradedRun, Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "CONFIG_DRIFT",
+			Consecutive: 29,
+			Coverage: &HistoryCoverage{Levels: 3, Short: short, Guarded: guarded, WorstValid: 5, WorstRequired: 9,
+				ShortRounds: 29, HeldFullRounds: heldFull}}
+	}
+	for name, testCase := range map[string]struct {
+		anomaly Anomaly
+		check   Check
+		group   string
+	}{
+		// The live window is still short under the guard: the guard is
+		// doing its job, and the row says what it is waiting on.
+		"held and short": {held(1, 3, 0), CheckWindowUndecided, "保护未解除（最初触发 CONFIG_DRIFT）"},
+		// The live window is full and the guard has held for more than one
+		// round: the guard converges on the first full record, so this is a
+		// guard that should have released.
+		"held and full for two rounds": {held(0, 3, 2), CheckWindowUndecided, "保护未解除且窗口已满（最初触发 CONFIG_DRIFT）"},
+		// Full for one round only -- with the reason clock at 29, as it is on
+		// the real path: the round the guard converges on. Not a line.
+		"held and full for one round": {held(0, 3, 1), "", ""},
+		// No guard: CONFIG_DRIFT is this round's own finding and reads as
+		// the configuration question it is.
+		"not held": {Anomaly{Kind: KindDegradedRun, Cause: "CONFIG_DRIFT", CauseReason: "CONFIG_DRIFT",
+			Coverage: &HistoryCoverage{Levels: 3}}, CheckConfigUnresolved, "1854"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			item := testCase.anomaly
+			item.Strategies = []StrategyRef{{StrategyID: "1854", BusinessID: "7"}}
+			list := []Anomaly{item}
+			Attribute(list, now)
+			if list[0].Finding.Check != testCase.check {
+				t.Fatalf("check = %q, want %q", list[0].Finding.Check, testCase.check)
+			}
+			if testCase.check != "" && list[0].Finding.Group != testCase.group {
+				t.Fatalf("group = %q, want %q", list[0].Finding.Group, testCase.group)
+			}
+			if testCase.check != "" && list[0].Finding.Owner != checkAnswers[testCase.check].Owner {
+				t.Fatalf("owner = %s, want the check's", list[0].Finding.Owner)
+			}
+		})
+	}
+	// A guard under a window word of its own keeps reading the window: the
+	// held-complete row of the render fixture is a normal value, as before.
+	windowWord := []Anomaly{{Kind: KindDegradedRun, Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "HISTORY_GAPPED",
+		Consecutive: 5, Coverage: &HistoryCoverage{Levels: 3, Guarded: 3}}}
+	Attribute(windowWord, now)
+	if windowWord[0].Finding.Check != "" {
+		t.Fatalf("a guard under HISTORY_GAPPED with a full window = %q, want no line (held, as before)", windowWord[0].Finding.Check)
+	}
+}

@@ -223,6 +223,10 @@ type queryGroupState struct {
 	// only part that separates a window that is filling from one that never
 	// will.
 	shortRounds uint32
+	// heldFullRounds counts consecutive rounds whose windows were all full
+	// while a guard held them; a short round, an unguarded round or a
+	// healthy completion ends it.
+	heldFullRounds uint32
 	// emptyRounds counts consecutive rounds whose windows held nothing at all.
 	// Separate from shortRounds because a window can be short for an hour and
 	// empty only for the last two, and those last two are the ones that say
@@ -254,6 +258,20 @@ type queryGroupState struct {
 	// Slot it was on and how many rounds in a row have failed on that Slot.
 	// Cleared by a healthy completion, like everything else about a run.
 	lastError *LastError
+	// seenRevisions is the snapshot/query/schedule triple the latest
+	// observation of this object carried; completedRevisions the triple at
+	// the last completed round; configChanged whether the two differed when
+	// the round completed. A carried CONFIG_DRIFT moves no revision.
+	seenRevisions      revisionTriple
+	completedRevisions revisionTriple
+	configChanged      bool
+}
+
+// revisionTriple is the configuration an object's round ran under.
+type revisionTriple struct{ snapshot, query, schedule string }
+
+func (triple revisionTriple) known() bool {
+	return triple.snapshot != "" || triple.query != "" || triple.schedule != ""
 }
 
 // lastErrorTextLimit bounds the error text a row carries: it travels on
@@ -574,10 +592,19 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.strategies[StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}] = struct{}{}
 	}
 
+	// The revisions this round ran under, from whichever observation carries
+	// them; read against the last completed round's when this one completes.
+	if seen := (revisionTriple{trace.SnapshotRevision, trace.QueryRevision, trace.ScheduleRevision}); seen.known() {
+		state.seenRevisions = seen
+	}
+
 	switch {
 	case completion != "":
 		state.determined = true
 		state.lastCompleted = completion
+		state.configChanged = state.completedRevisions.known() && state.seenRevisions.known() &&
+			state.seenRevisions != state.completedRevisions
+		state.completedRevisions = state.seenRevisions
 		tracker.noteReason(state, completion+"/"+observation.ProgressCompletionReason, at)
 		// The no-data run is kept apart from the anomaly run: an empty
 		// completion is healthy for the equation and ends any anomaly run, and
@@ -630,6 +657,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		} else {
 			state.emptyRounds++
 		}
+		// Full under a guard: the round the guard converges on, and every
+		// round after it that it has not.
+		if facts := observation.HistoryCoverage; facts == nil || facts.Guarded == 0 || facts.Short != 0 {
+			state.heldFullRounds = 0
+		} else {
+			state.heldFullRounds++
+		}
 		// Every short window belonged to a series with no loaded history, or
 		// the run ends. "Every", not "any": one short window that did have
 		// history is a round where churn is not the whole story, and this
@@ -649,8 +683,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				Levels: facts.Levels, Short: facts.Short, Empty: facts.Empty,
 				WorstValid: facts.WorstValid, WorstRequired: facts.WorstRequired,
 				ShortRounds: state.shortRounds, EmptyRounds: state.emptyRounds,
-				Guarded: facts.Guarded,
-				Fresh:   facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,
+				Guarded: facts.Guarded, HeldFullRounds: state.heldFullRounds,
+				Fresh: facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,
 				Unusable: facts.Unusable, UnusableReason: facts.UnusableReason,
 				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
 			}
@@ -732,6 +766,7 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.coverage = nil
 	state.shortRounds = 0
 	state.emptyRounds = 0
+	state.heldFullRounds = 0
 	state.sawSomethingWrong = false
 	state.degradedRuns = 0
 	state.blockedRuns = 0
@@ -870,15 +905,16 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 			QueryCooldown: state.queryCooldown,
 			Kind:          state.currentKind,
 			ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason,
-			Coverage:     state.coverage,
-			Since:        state.runStartedAt,
-			SinceFrom:    state.sinceFrom,
-			FailingSince: state.failingSince,
-			ReasonSince:  state.reasonSince,
-			Consecutive:  state.reasonRuns,
-			Replica:      tracker.replica,
-			Failure:      state.lastFailure,
-			LastError:    state.lastError,
+			Coverage:      state.coverage,
+			Since:         state.runStartedAt,
+			SinceFrom:     state.sinceFrom,
+			FailingSince:  state.failingSince,
+			ReasonSince:   state.reasonSince,
+			Consecutive:   state.reasonRuns,
+			Replica:       tracker.replica,
+			Failure:       state.lastFailure,
+			LastError:     state.lastError,
+			ConfigChanged: state.configChanged,
 		}
 		if anomaly.Kind == "" && state.queryCooldown != nil {
 			anomaly.Kind = KindQueryCooldown

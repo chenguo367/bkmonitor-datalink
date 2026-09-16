@@ -193,6 +193,16 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		anomaly("qg-drift", func(item *fleet.Anomaly) {
 			item.Cause, item.CauseReason = "CONFIG_DRIFT", "CONFIG_DRIFT"
 		}),
+		// The shape of six live strategies: CONFIG_DRIFT on every round for
+		// 29 rounds, carried by a history guard established once, over a
+		// window still short. Read bare it sent a reader to check whether the
+		// strategy was being edited.
+		anomaly("qg-guard-held", func(item *fleet.Anomaly) {
+			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "CONFIG_DRIFT"
+			item.ReasonSince, item.Consecutive = at.Add(-29*time.Minute), 29
+			item.Coverage = &fleet.HistoryCoverage{Levels: 3, Short: 1, Guarded: 3,
+				WorstValid: 5, WorstRequired: 9, ShortRounds: 29}
+		}),
 		anomaly("qg-offhours", func(item *fleet.Anomaly) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "EFFECTIVE_TIME_INACTIVE"
 		}),
@@ -564,6 +574,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// Opening a standing's line names its replicas, not objects.
 	for _, want := range []struct{ line, says string }{
 		{"GROUPS CUTOVER ::", "schedule_cutover/schedule_conflict · 副本 abcde，没有可列的对象"},
+		// The guard-held fold names the trigger and that the window is still
+		// short; the reader is not sent to edit a strategy.
+		{"GROUPS WINDOW ::", "保护未解除（最初触发 CONFIG_DRIFT） · 1 个对象 · 1 条策略 · 1 个业务"},
 		{"BASIS CUTOVER ::", "最近一次激活失败：alarmd controlplane: schedule activation conflict（副本 abcde）。伴随证据：segment_content_freshness_total{stale}"},
 		{"GROUPS DEGRADED ::", "OPEN_ALERT_SET_STALE（已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识） · 副本 fghij，没有可列的对象"},
 	} {
@@ -592,7 +605,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// lines this reader acts on, 19 distinct objects under them now (16
 		// rows plus the 3 the view holds undetermined; the two standings have
 		// none), and one retained record made an hour ago.
-		"需要处理：11 类检查项，当前影响 19 个对象（去重）；曾经漏检 1 个对象另列，最近 1 小时新增 1",
+		"需要处理：11 类检查项，当前影响 20 个对象（去重）；曾经漏检 1 个对象另列，最近 1 小时新增 1",
 		// On time, and on a stale publication: both true at once, and the
 		// first sentence says both.
 		"起没有生效：舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3，连续 120 轮激活失败",
@@ -633,6 +646,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"qg-window-starved", "—", "完成 · HISTORY_WARMING", "3 个窗口 · 短 2 · 空 2 · 新 0 · 连续 40 轮 · 检测用不了 2 个：REQUIRED_VALUE_MISSING"},
 		{"qg-no-data", "—", "无数据 · FULL_EMPTY_COMPLETED", "—"},
 		{"qg-plain", "—", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
+		{"qg-guard-held", "—", "完成 · CONFIG_DRIFT（保护沿用，非本轮）", "3 个窗口 · 短 1 · 空 0 · 新 0 · 连续 29 轮"},
 		{"qg-stuck-slot", "— · 卡在 " + at.Add(-3*time.Minute).In(time.Local).Format("15:04:05") + " 这个 Slot，第 3 次失败", "失败 · error", "—"},
 		{"qg-late", "迟到 12 秒", "完成 · HISTORY_WARMING", "—"},
 		{"qg-missed-turn", "超期 4 分 0 秒", "完成 · QUERY_TIMEOUT", "—"},
@@ -1010,6 +1024,9 @@ console.log('BUILD :: ' + textOf(store['buildLine']));
 ctx.openCheck = 'OBSERVATION_GAP';
 ctx.renderChecks(data.checks);
 console.log('GROUPS :: ' + textOf(store['groups']));
+ctx.openCheck = 'WINDOW_UNDECIDED';
+ctx.renderChecks(data.checks);
+console.log('GROUPS WINDOW :: ' + textOf(store['groups']));
 ctx.openCheck = 'CUTOVER_FAILING';
 ctx.renderChecks(data.checks);
 console.log('GROUPS CUTOVER :: ' + textOf(store['groups']));

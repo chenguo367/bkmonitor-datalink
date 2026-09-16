@@ -104,6 +104,25 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 			return check, under, false
 		}
 	}
+	// A reason carried by a durable history guard is not this round's
+	// finding. A Level judged WARMING or GAPPED under some trigger -- a
+	// configuration change, a gap marker -- reports that trigger's reason on
+	// every UNKNOWN outcome until the guard releases, and the counts beside
+	// it stay live. Read through the code table, CONFIG_DRIFT under a guard
+	// became "配置状态说不清" for six strategies whose configuration had not
+	// changed and whose snapshot, query and schedule revisions were identical
+	// before and after two of them recovered. The question such a row poses
+	// is why the guard has not released, which is a window question: it goes
+	// under the undecided window, folded on the trigger and on whether the
+	// live window is still short or already full.
+	if held, line := guardHeld(anomaly); held {
+		if !line {
+			// The round a guard converges on: full window, first round of
+			// it. Not a line, and not a configuration question either.
+			return "", false, false
+		}
+		return CheckWindowUndecided, true, false
+	}
 	failureCode := ""
 	if anomaly.Failure != nil {
 		failureCode = anomaly.Failure.Code
@@ -149,6 +168,38 @@ const gapRestoredWithoutCause = "RESTORED_WITHOUT_CAUSE"
 // decides it; what is decided is that it is not the backend being down, so it
 // does not go to the data owner. The detail grammar is the emitter's: a
 // response status the provider returned, or an HTTP 4xx.
+// guardHeld says whether the object's completeness this round was held by a
+// durable guard rather than computed, with a reason that is not a window word
+// of its own; and whether that is a line. A guard over a live window that is
+// still short is a line: the row is waiting on the window. A guard over a
+// full window is a line from its second round: the guard converges on the
+// first full record, so a second round in that state is a guard that should
+// have released. The first such round is neither a line nor a configuration
+// question.
+//
+// The window words themselves never reach here: checkOf reads them through
+// windowCheck first, which decides every guarded shape. And a CONFIG_DRIFT
+// on a round whose revisions actually moved is this round's own drift, not
+// a carried one, however the window is guarded.
+func guardHeld(anomaly Anomaly) (held bool, line bool) {
+	coverage := anomaly.Coverage
+	if coverage == nil || coverage.Levels == 0 || coverage.Guarded == 0 || anomaly.CauseReason == "" {
+		return false, false
+	}
+	if anomaly.CauseReason == "CONFIG_DRIFT" && anomaly.ConfigChanged {
+		return false, false
+	}
+	if coverage.Short == 0 {
+		// Its own counter, not the reason clock: that clock runs on the
+		// completion/reason pair and does not restart when the window
+		// fills, so on the round a guard should converge it already reads
+		// as many rounds as the window was short for -- and the first
+		// version of this read that as a guard overdue to release.
+		return true, coverage.HeldFullRounds >= 2
+	}
+	return true, true
+}
+
 // refusalCheck decides between the two refusals on what the backend said.
 // A status that names something as not existing is the backend reading the
 // strategy's table or field and answering that it is not there: that is the
