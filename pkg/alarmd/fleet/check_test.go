@@ -723,3 +723,45 @@ func TestTheTodoTellsLossInProgressFromTheRecord(t *testing.T) {
 		t.Fatalf("todo eleven minutes later = %+v, want nothing in progress and four on record", later)
 	}
 }
+
+// A demoted object's record is the cooldown's consequence only if it was
+// made after the object's anomaly began: an object that lost rounds to the
+// replay bound before it entered the pool has an older record, and folding
+// that into the refusal would hide a loss the refusal did not cause. The
+// onset is the bound; a record made after it is folded.
+func TestARecordOlderThanTheDemotionIsNotItsConsequence(t *testing.T) {
+	at := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	refused := func(queryGroup string, since time.Time) Anomaly {
+		return Anomaly{QueryGroup: queryGroup, Kind: KindQueryCooldown, Since: since,
+			Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}}
+	}
+	// Anomalous since an hour ago; one record from two hours ago, one from a
+	// minute ago.
+	demoted := []Anomaly{refused("qg-before", at.Add(-time.Hour)), refused("qg-after", at.Add(-time.Hour))}
+	Attribute(demoted, at)
+	view := &View{Demoted: demoted, GapSkips: map[string]SkippedSpan{
+		"qg-before": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-2 * time.Hour), Replica: "pod-a"},
+		"qg-after":  {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-time.Minute), Replica: "pod-a"},
+	}}
+	columns := [][]Anomaly{nil, demoted, nil, nil}
+	byCode := map[Check]CheckReport{}
+	for _, report := range ReportChecks(columns, nil, view, at) {
+		byCode[report.Code] = report
+	}
+	target := byCode[CheckQueryTargetMissing]
+	if target.Consequence == nil || target.Consequence.Skipped != 1 {
+		t.Fatalf("QUERY_TARGET_MISSING = %+v, want exactly the record made after the onset as its consequence", target)
+	}
+	abandoned := byCode[CheckDetectionAbandoned]
+	if abandoned.Retained != 1 || abandoned.Current != 0 {
+		t.Fatalf("DETECTION_ABANDONED = %+v, want the older record on it as history, read by its age", abandoned)
+	}
+	rows := UnderCheck(CheckQueryTargetMissing, "", view, at)
+	carried := map[string]bool{}
+	for _, row := range rows {
+		carried[row.QueryGroup] = row.Skip != nil
+	}
+	if carried["qg-before"] || !carried["qg-after"] {
+		t.Fatalf("rows carry records %v, want only the object whose record post-dates its onset", carried)
+	}
+}

@@ -257,3 +257,39 @@ func TestHeldBackObjectsAreMarkedAtTheDispatchersDecision(t *testing.T) {
 		t.Errorf("census = %+v, want one held-back round that was still on time", census)
 	}
 }
+
+// A retained record carries the object's period from the same index the
+// wake facts come from: a loss in progress on a ten-second object is the
+// scheduler's replay bound, a named mechanism, and the row can say so
+// without the reader looking the strategy up.
+func TestFleetPublisherPutsThePeriodOnRetainedRecords(t *testing.T) {
+	clock := &dueIndexClock{at: time.Unix(20_000, 0)}
+	dispatcher := dueIndexDispatcher(clock, metric.NewRecorder(metric.BuildInfo{}), 8, 8,
+		map[execution.QueryGroupIdentity]walkRunner{"qg-short": {}})
+	index := dispatcher.dueIndex
+	index.Record("qg-short", dispatcher.bundle.runners["qg-short"], index.versionEpoch,
+		scheduler.RunnerDueBound{NotDueUntilUnix: 20_010, IntervalSeconds: 10}, time.Unix(19_990, 0))
+	tracker := fleet.NewTracker(nil, "replica-1", clock.now)
+	for _, name := range []string{"qg-short", "qg-unindexed"} {
+		ctx := observability.ContextWithTraceFields(context.Background(),
+			observability.TraceFields{QueryGroupKey: name, EvaluationTime: 19_980})
+		tracker.Observe(ctx, observability.Observation{ProgressCompletionKind: "GAP_SKIPPED",
+			Trace: observability.TraceFields{QueryGroupKey: name}})
+	}
+	publisher := fleetPublisher{
+		tracker: tracker, replica: "replica-1", now: clock.now,
+		owned: func() []execution.QueryGroupIdentity {
+			return []execution.QueryGroupIdentity{"qg-short", "qg-unindexed"}
+		},
+		schedule: index,
+	}
+	snapshot := publisher.snapshot(context.Background())
+	if skip := snapshot.GapSkips["qg-short"]; skip.IntervalSeconds != 10 {
+		t.Fatalf("record for the indexed object = %+v, want its ten-second period", skip)
+	}
+	// An object the index has no entry for: zero, said as unknown, not
+	// invented.
+	if skip := snapshot.GapSkips["qg-unindexed"]; skip.IntervalSeconds != 0 {
+		t.Fatalf("record for the unindexed object = %+v, want no period", skip)
+	}
+}

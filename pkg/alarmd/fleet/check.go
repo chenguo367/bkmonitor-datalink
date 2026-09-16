@@ -757,8 +757,8 @@ func UnderCheck(check Check, group string, view *View, now time.Time) []Anomaly 
 			// A demoted object's record rides on its own row: what it lost
 			// while under this line, said on the row rather than on a line
 			// that would file it as this deployment's capacity.
-			if line, isDemoted := demoted[anomaly.QueryGroup]; isDemoted && line != "" && anomaly.Skip == nil {
-				if skip, recorded := view.GapSkips[anomaly.QueryGroup]; recorded {
+			if object, isDemoted := demoted[anomaly.QueryGroup]; isDemoted && object.line != "" && anomaly.Skip == nil {
+				if skip, recorded := view.GapSkips[anomaly.QueryGroup]; recorded && !skip.At.Before(object.since) {
 					record := skip
 					anomaly.Skip, anomaly.Loss = &record, LossWhileDemoted
 				}

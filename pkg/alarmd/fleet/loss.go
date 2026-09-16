@@ -93,12 +93,18 @@ func (consequence *Consequence) note(at, now time.Time) {
 	}
 }
 
-// demotedObjects maps each object in the demoted column -- the pool a query
-// cooldown holds -- to the line it is under.
-func demotedObjects(view *View) map[string]Check {
-	under := map[string]Check{}
+// demotedObject is one object in the demoted column -- the pool a query
+// cooldown holds: the line it is under, and since when it has been
+// anomalous.
+type demotedObject struct {
+	line  Check
+	since time.Time
+}
+
+func demotedObjects(view *View) map[string]demotedObject {
+	under := map[string]demotedObject{}
 	for _, anomaly := range view.Demoted {
-		under[anomaly.QueryGroup] = anomaly.Finding.Check
+		under[anomaly.QueryGroup] = demotedObject{line: anomaly.Finding.Check, since: anomaly.Since}
 	}
 	return under
 }
@@ -107,19 +113,30 @@ func demotedObjects(view *View) map[string]Check {
 // caller with its kind: the record's own check, and for a demoted object
 // the line it is under, whose consequence the record is. One walk, so the
 // lines, the rows and the arithmetic count the same records the same way.
-// A demoted object under no line -- which the tracker does not produce --
-// is read by its age like any other, rather than counted on a line that
-// does not exist.
+//
+// A record is the cooldown's consequence only if it was made after the
+// object's anomaly began: an object that lost rounds to the replay bound
+// before it ever entered the pool has a record older than that, and
+// folding it into the refusal would hide a loss the refusal did not cause.
+// The anomaly's onset is the bound the row carries; the pool is entered
+// some failures later, so a record made between the two is still folded --
+// an approximation on the side of the refusal, and a record keeps only the
+// latest skip per object, so on a demoted object it is almost always the
+// cooldown's. A demoted object under no line -- which the tracker does not
+// produce -- is read by its age like any other, rather than counted on a
+// line that does not exist.
 func lossRecords(view *View, now time.Time, visit func(queryGroup string, check, line Check, code string, skip SkippedSpan, loss Loss)) {
 	if view == nil {
 		return
 	}
 	demoted := demotedObjects(view)
 	each := func(queryGroup string, check Check, code string, skip SkippedSpan) {
-		line, isDemoted := demoted[queryGroup]
-		loss := lossOf(isDemoted && line != "", skip.At, now)
-		if loss != LossWhileDemoted {
-			line = ""
+		object, isDemoted := demoted[queryGroup]
+		consequence := isDemoted && object.line != "" && !skip.At.Before(object.since)
+		loss := lossOf(consequence, skip.At, now)
+		line := Check("")
+		if loss == LossWhileDemoted {
+			line = object.line
 		}
 		visit(queryGroup, check, line, code, skip, loss)
 	}
@@ -128,6 +145,6 @@ func lossRecords(view *View, now time.Time, visit func(queryGroup string, check,
 	}
 	for queryGroup, pruned := range view.PrunedSkips {
 		each(queryGroup, CheckTimelinePruned, "SCHEDULE_PRUNED", SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To,
-			At: pruned.At, Replica: pruned.Replica, Strategies: pruned.Strategies})
+			At: pruned.At, Replica: pruned.Replica, Strategies: pruned.Strategies, IntervalSeconds: pruned.IntervalSeconds})
 	}
 }

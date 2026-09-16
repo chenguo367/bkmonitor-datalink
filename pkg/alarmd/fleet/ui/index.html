@@ -625,30 +625,82 @@ var DEGRADATION = {
   PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置'
 };
 
-// What to do about each check, one sentence, held to the Go list. The line
-// says what happened; a reader who opened a group still asked "so what do I
-// do". This is the third of the three things a line owes (发生了什么、影响什么、
-// 下一步做什么), and it is per check, not per object.
+// What each line owes past its sentence, per check and held to the Go list:
+// where the direct evidence is, what to do, and what state counts as
+// recovered. The sentence says what happened and what it affects; a reader
+// who opened a group still asked "so what do I do", and one who did it
+// still asked "when is it good". "先等" says until when and whom to find
+// after; "取原始请求核" says where the request actually is -- alarmd does
+// not log the full request text, so it says what exists instead of sending
+// the reader to look for something that does not.
+var EVIDENCE = {
+  CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
+  REPLICA_DEGRADED:      '展开按种类看是哪个副本；副本表里该副本的策略源/告警集合/平台设置时钟',
+  SLOTS_OVERDUE:         '对象行"超期"与超期多久（预计时刻已过多久）；副本表里该副本的已运行时长与被挡回数',
+  NEVER_EVALUATED:       '对象行"接管后未跑"与接管时刻',
+  ROUNDS_STALLED:        '对象行"最近一次错误"：原文、类型、卡住的 Slot、同一 Slot 连续几次',
+  DETECTION_ABANDONED:   '对象行"没检测的时段"：首末 Slot、记录时刻、对象周期；"资源预算拒绝"折对照容量面板的"预算被拒"',
+  TIMELINE_PRUNED:       '对象行"没检测的时段"：游标从哪跳到哪、记录时刻',
+  DEPENDENCY_DOWN:       '分组的原因码说是哪个依赖；对象行"最近一次错误"给原文',
+  DEFECT:                '分组的原因码 + 对象行"最近一次错误"原文与 Slot——上报带这两样',
+  OBSERVATION_GAP:       '对象行"等下次 · 预计 HH:MM"；副本级缺口看副本表里该副本的快照年龄',
+  QUERY_REFUSED:         '分组的后端回答（状态词）+ 对象行"最近一次错误"的后端原文；请求本身 = 该策略的查询定义（行上策略链接），alarmd 不落完整请求文本',
+  WINDOW_UNDECIDED:      '对象行的窗口计数：短窗/满窗、保护与最初触发',
+  CONFIG_UNRESOLVED:     '对象行 config_changed 与快照/查询/调度三版本是否变了',
+  BACKEND_NOT_ANSWERING: '分组的症状（超时/5xx）；对象行的冷却到期时刻与失败次数',
+  NO_DATA_PERSISTENT:    '对象行连续空轮数，与"有过数据"（进过索引）',
+  SERIES_DATA_MISSING:   '对象行窗口计数：老序列缺点的比例',
+  SERIES_CHURNING:       '对象行窗口计数：新序列占比与活不过窗口的轮数',
+  PLAN_UNEVALUABLE:      '分组的策略与原因码',
+  QUERY_TARGET_MISSING:  '分组的后端回答（表/字段不存在）+ 对象行"最近一次错误"原文；策略定义看行上策略链接'
+};
+
 var NEXT = {
   CUTOVER_FAILING:       '先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效',
   REPLICA_DEGRADED:      '按种类处理：源过期看策略源刷新，leader 缺席看租约，告警集合/平台设置过期看对应发布者',
   SLOTS_OVERDUE:         '看该副本是否卡住或过载：展开看对象与超期多久；持续增长就是容量或调度问题',
   NEVER_EVALUATED:       '展开看接管后多久没跑；接管不久可等，超过一个周期就查该副本的调度',
   ROUNDS_STALLED:        '不会自己恢复：展开找对象，查它卡在哪一步（日志按 query_group_key），必要时重启副本',
-  DETECTION_ABANDONED:   '仍在发生的：看对象行的周期与最近一次跳过——短周期对象错过实时轮后重放超上限是调度边界问题，alarmd 的；只有"资源预算拒绝"分组才是容量限制，不能据此扩容。恢复标准：{w} 分钟内没有新的跳过',
-  TIMELINE_PRUNED:       '仍在发生的：看游标为什么落后到被剪；已停止的只是记录，那段永久没检测。恢复标准：{w} 分钟内没有新的越过',
+  DETECTION_ABANDONED:   '仍在发生的：看对象行的周期与最近一次跳过——10/15/30 秒周期对象错过实时轮后重放超上限是调度边界问题，alarmd 的；只有"资源预算拒绝"分组才是容量限制，不能据此扩容',
+  TIMELINE_PRUNED:       '仍在发生的：看游标为什么落后到被剪；已停止的只是记录，那段永久没检测',
   DEPENDENCY_DOWN:       '按原因码看是哪个依赖（Redis/Kafka/后端）；依赖恢复后自动清',
   DEFECT:                '程序缺陷：带原因码上报，展开取一个对象的证据',
-  OBSERVATION_GAP:       '先等：成因缺失的对象各自再跑一轮就补上（行上有预计时刻）；副本级缺口看该副本快照',
-  QUERY_REFUSED:         '展开看后端回答：分不出是查询还是策略时，取一个对象的原始请求核',
-  WINDOW_UNDECIDED:      '按"情况"分组看：检测用不了的看原因码；新老序列混合的等窗口填满',
-  CONFIG_UNRESOLVED:     '按策略看：配置状态说不清，先核该策略最近有没有改',
+  OBSERVATION_GAP:       '等到行上的预计时刻：到了就有成因；过了还没有，它会落到"到期没跑"那一行（alarmd 的），查该副本的调度；副本级缺口看该副本快照',
+  QUERY_REFUSED:         '展开看后端回答：状态词说表/字段不存在就是策略侧；说不清的，拿行上策略链接里的查询定义与后端原文核是查询还是策略',
+  WINDOW_UNDECIDED:      '按"情况"分组看：检测用不了的看原因码；新老序列混合的等窗口填满；保护未解除的等它解除，不改策略',
+  CONFIG_UNRESOLVED:     '按策略看：config_changed 为真才是最近改过，下一轮按新配置跑；为假的不在这一行',
   BACKEND_NOT_ANSWERING: '交数据侧：按症状分组给后端负责人；alarmd 已降频不再反复查',
   NO_DATA_PERSISTENT:    '交数据侧：按策略看是数据停了还是采集停了',
   SERIES_DATA_MISSING:   '交数据侧：老序列在缺点，按策略给数据负责人',
   SERIES_CHURNING:       '交策略侧：序列活不过检测窗口，通常是聚合维度太细',
   PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略',
   QUERY_TARGET_MISSING:  '交策略侧：策略引用的表或字段不存在，改策略或接入数据；已降级的对象修好后会自动重试'
+};
+
+// What state counts as recovered, per check: the thing to look at after
+// acting, and a line count going to zero is not always it -- a record does
+// not go to zero, and a refusal recovers by being handed to its owner, not
+// by disappearing.
+var RECOVERY = {
+  CUTOVER_FAILING:       '执行版本追上目标发布（两者一致）且之后一轮激活成功；这一行消失',
+  REPLICA_DEGRADED:      '该副本的那个时钟回到设计界内；这一行消失',
+  SLOTS_OVERDUE:         '超期数归零并保持一个周期；执行情况一句回到"跟得上"',
+  NEVER_EVALUATED:       '对象跑完第一轮',
+  ROUNDS_STALLED:        '对象的轮次重新结束（对象行离开"轮次不结束"）；不会自己发生',
+  DETECTION_ABANDONED:   '{w} 分钟内没有新的跳过（"仍在发生"折归零）；已停止的记录不会归零，那是记录不是指标',
+  TIMELINE_PRUNED:       '{w} 分钟内没有新的越过；已停止的记录不会归零',
+  DEPENDENCY_DOWN:       '依赖恢复后各对象下一轮完成，这一行自动清',
+  DEFECT:                '修复上线后该原因码不再出现',
+  OBSERVATION_GAP:       '各对象跑完一轮补上成因；副本级缺口随该副本重新发布快照消失',
+  QUERY_REFUSED:         '分出归属后转到对应行（策略侧或 alarmd）；不是等它消失',
+  WINDOW_UNDECIDED:      '窗口填满或保护解除后，对象归到某一行或离开列表',
+  CONFIG_UNRESOLVED:     '下一轮按新配置完成，对象离开这一行',
+  BACKEND_NOT_ANSWERING: '后端应答后冷却到期自动重试成功，对象离开降级池（降级池"出过"数在涨）',
+  NO_DATA_PERSISTENT:    '数据恢复后下一轮非空',
+  SERIES_DATA_MISSING:   '老序列补上点后窗口填满',
+  SERIES_CHURNING:       '序列稳定活过窗口后窗口填满',
+  PLAN_UNEVALUABLE:      '策略改定义后下一轮可算',
+  QUERY_TARGET_MISSING:  '策略改好或表接入后，冷却到期自动重试成功，对象离开降级池'
 };
 
 // The next step for the two record lines in the history fold, where the
@@ -1064,8 +1116,14 @@ function groupKeyLabel(report, key) {
 
 // The next step for a check, with the window it names filled in.
 function nextWords(code) {
-  var words = NEXT[code];
-  if (!words) return '（页面没有这条检查项的下一步：' + code + '，请上报）';
+  return tableWords(NEXT, code, '下一步');
+}
+
+// One of the per-check tables, loudly when the table has no entry: a blank
+// would read as "nothing to say".
+function tableWords(table, code, what) {
+  var words = table[code];
+  if (!words) return '（页面没有这条检查项的' + what + '：' + code + '，请上报）';
   return words.replace('{w}', String(recentWindowMinutes()));
 }
 
@@ -1087,9 +1145,15 @@ function checkRow(report, which) {
   if (which === 'retained') {
     what.appendChild(document.createTextNode(historyClause(report)));
   }
+  // The three things past the sentence, on one line each so a reader sees
+  // 影响 → 证据 → 下一步 → 恢复标准 in that order and never has to infer
+  // one from another.
+  var retained = which === 'retained';
   var next = document.createElement('div');
   next.className = 'next';
-  next.textContent = '下一步：' + (which === 'retained' && NEXT_RETAINED[report.code] ? NEXT_RETAINED[report.code] : nextWords(report.code));
+  next.textContent = '证据：' + tableWords(EVIDENCE, report.code, '证据')
+    + ' ｜ 下一步：' + (retained && NEXT_RETAINED[report.code] ? NEXT_RETAINED[report.code] : nextWords(report.code))
+    + ' ｜ 恢复标准：' + (retained ? '记录不会归零；看的是同一对象有没有再跳过' : tableWords(RECOVERY, report.code, '恢复标准'));
   what.appendChild(next);
   what.title = report.code;
   what.style.cursor = 'pointer';
@@ -1371,9 +1435,15 @@ function objectRow(anomaly) {
     // the window it was decided on.
     var loss = anomaly.loss && LOSS[anomaly.loss]
       ? '。' + LOSS[anomaly.loss].replace('{w}', String(recentWindowMinutes())) : '';
+    // The period names the mechanism: a loss in progress on a 10/15/30
+    // second object is the scheduler's replay bound, and the row says so
+    // rather than sending the reader to look the strategy's period up.
+    var period = skip.interval_seconds ? '，' + skip.interval_seconds + ' 秒周期' : '';
+    var mechanism = anomaly.loss === 'ONGOING' && skip.interval_seconds && skip.interval_seconds <= 30
+      ? '——短周期对象错过实时轮后重放超上限，是 alarmd 的调度边界，不是策略的事' : '';
     line('没检测的时段', momentLabel(skip.first_slot * 1000) + ' – ' + momentLabel(skip.last_slot * 1000)
       + (skip.slots ? '，' + skip.slots + ' 个 Slot' : '，个数无法得知')
-      + '，记录于 ' + momentLabel(skip.at) + loss,
+      + '，记录于 ' + momentLabel(skip.at) + period + loss + mechanism,
       '这段里的时间点没有被评估过，也不会补跑。仍在发生的要看对象为什么追不上；已停止的只是记录，要处理的是这段没有告警覆盖的时间。');
   }
   line('起算来源', SINCE_SOURCE[anomaly.since_from] || anomaly.since_from);

@@ -445,6 +445,17 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 				column[index].Wake = &wake
 			}
 		}
+		// And the period behind each retained record, from the same index: a
+		// loss in progress on a ten-second object is one mechanism, on a
+		// five-minute object another, and the record alone cannot say which.
+		for queryGroup, skip := range snapshot.GapSkips {
+			skip.IntervalSeconds = publisher.schedule.WakeOf(queryGroup).IntervalSeconds
+			snapshot.GapSkips[queryGroup] = skip
+		}
+		for queryGroup, skip := range snapshot.PrunedSkips {
+			skip.IntervalSeconds = publisher.schedule.WakeOf(queryGroup).IntervalSeconds
+			snapshot.PrunedSkips[queryGroup] = skip
+		}
 	}
 	if publisher.capacity != nil {
 		snapshot.Capacity = publisher.capacity()
