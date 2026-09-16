@@ -1304,6 +1304,14 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// then abandon. The two were derived in two packages that did not read each
 	// other, and a wait longer than the replay window was the result.
 	SettlingWait time.Duration
+	// LeaseTTL and ReconcileInterval set how long the rebalance writer waits
+	// after the ready set changed before it moves anything: a lease TTL for
+	// the leases a departed worker still holds to lapse, plus two rounds for
+	// the reconcile to have re-placed what it released. Moving during a
+	// rolling update would hand Query Groups to a replica about to be
+	// terminated; moving after it settles is one convergence.
+	LeaseTTL          time.Duration
+	ReconcileInterval time.Duration
 }
 
 type productionPhaseTwoOwnership struct {
@@ -1325,6 +1333,20 @@ type productionPhaseTwoOwnership struct {
 	// fleet snapshot this replica publishes. Nil until this process has
 	// planned a round, which only a Leader does.
 	lastRebalance *fleet.RebalanceFacts
+
+	// readySet is the ready set the last round reconciled against and when
+	// it last changed, remembered under the fence epoch it was observed in;
+	// a new Leader starts a fresh memory and so waits out one window before
+	// it moves anything.
+	readyEpoch     uint64
+	readySet       map[string]struct{}
+	readyChangedAt time.Time
+}
+
+// rebalanceStabilisation is how long the ready set must have been unchanged
+// before a round publishes the moves it planned.
+func (runtime *productionPhaseTwoOwnership) rebalanceStabilisation() time.Duration {
+	return runtime.dependencies.LeaseTTL + 2*runtime.dependencies.ReconcileInterval
 }
 
 func newProductionPhaseTwoOwnership(
@@ -1340,6 +1362,9 @@ func newProductionPhaseTwoOwnership(
 		dependencies.SnapshotRetention <= 0 || dependencies.PublicationDelayAllowance <= 0 ||
 		dependencies.SettlingWait <= 0 {
 		return nil, errors.New("phase-two post-recovery terminal delay is required")
+	}
+	if dependencies.LeaseTTL <= 0 || dependencies.ReconcileInterval <= 0 {
+		return nil, errors.New("phase-two rebalance stabilisation inputs are required")
 	}
 	return &productionPhaseTwoOwnership{
 		dependencies: dependencies, reconciler: dependencies.Reconcile, flights: dependencies.Flights,
@@ -1401,6 +1426,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		return err
 	}
 	owners := make(map[execution.QueryGroupIdentity]string, len(ordered))
+	records := make(map[execution.QueryGroupIdentity]ownership.AssignmentRecord, len(ordered))
 	for _, queryGroup := range ordered {
 		record, err := runtime.reconciler.ReconcileWith(ctx, authority, queryGroup, workers, at)
 		if err != nil {
@@ -1410,29 +1436,143 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 			return err
 		}
 		owners[queryGroup] = record.DesiredWorkerID
+		records[queryGroup] = record
 	}
-	runtime.planRebalance(ctx, owners, workers, at)
+	// Placement first, correction second, both under this round's ready
+	// set: rendezvous only decides where a Query Group with no eligible
+	// holder goes, and the holder it picks is sticky, so a replica that
+	// comes back after a crash or a rollout owns nothing until this moves
+	// its share to it. The index is written from the owners after the moves,
+	// so a worker reads the round's final answer.
+	plan := runtime.reconciler.PlanRebalance(owners, workers, at)
+	outcome, err := runtime.publishRebalance(ctx, authority, plan, records, workers, at)
+	for _, move := range outcome.applied {
+		owners[move.QueryGroup] = move.To
+	}
+	runtime.observeRebalance(ctx, plan, outcome, at)
+	if err != nil {
+		return err
+	}
 	runtime.publishAssignmentIndex(ctx, authority, owners, workers, at)
 	return nil
 }
 
-// planRebalance reports what one rebalance round would move given the
-// desired owners this round just reconciled and the ready set it reconciled
-// them against, so the plan and the round agree on who is ready. It only
-// computes: the plan is observed for the shadow period, moves named one by
-// one so that a plan can be checked against the Assignments by hand, and
-// nothing publishes them, so the reconcile above stays the only writer of
-// Assignments.
-func (runtime *productionPhaseTwoOwnership) planRebalance(
+// rebalanceOutcome is what one round did with the plan it computed.
+type rebalanceOutcome struct {
+	applied   []scheduler.RebalanceMove
+	conflicts int
+	paused    bool
+	pausedFor time.Duration
+}
+
+// publishRebalance publishes the moves of one plan as Assignment decisions
+// under this round's authority, unless the ready set changed within the
+// stabilisation window, in which case the round only reports the plan.
+//
+// Each move names the record revision the reconcile just read, so a record
+// another writer moved in between is refused by the store and skipped, not
+// overwritten; the next round plans over what is actually there. A stale
+// fence ends the round, as it ends the reconcile. The old holder is not
+// asked: its next renewal is refused with NOT_DESIRED and its in-flight
+// commit by the fence, and the new holder resumes the Query Group from its
+// Progress, which is the same handover a rendezvous re-placement makes.
+func (runtime *productionPhaseTwoOwnership) publishRebalance(
 	ctx context.Context,
-	owners map[execution.QueryGroupIdentity]string,
+	authority ownership.PublicationAuthority,
+	plan scheduler.RebalancePlan,
+	records map[execution.QueryGroupIdentity]ownership.AssignmentRecord,
 	workers []ownership.WorkerRegistration,
 	at time.Time,
+) (rebalanceOutcome, error) {
+	outcome := rebalanceOutcome{}
+	stable, remaining := runtime.observeReadySet(authority, workers, at)
+	if len(plan.Moves) == 0 {
+		return outcome, nil
+	}
+	if !stable {
+		outcome.paused, outcome.pausedFor = true, remaining
+		return outcome, nil
+	}
+	for _, move := range plan.Moves {
+		record, known := records[move.QueryGroup]
+		if !known || record.DesiredWorkerID != move.From {
+			// The plan was computed from these records; a move over a Query
+			// Group they do not hold as the planner saw it is a defect in the
+			// planner, and skipping it is the safe reading.
+			outcome.conflicts++
+			continue
+		}
+		_, err := runtime.dependencies.Store.PublishAssignment(ctx, authority, ownership.AssignmentDecision{
+			QueryGroup: move.QueryGroup, DesiredWorkerID: move.To, ExpectedRecordRevision: record.RecordRevision,
+			PlacementReason: ownership.PlacementRebalance, DecidedAt: at,
+		})
+		switch {
+		case errors.Is(err, ownership.ErrAssignmentConflict):
+			outcome.conflicts++
+			continue
+		case errors.Is(err, ownership.ErrStaleFence):
+			runtime.clearControlAuthority(authority)
+			return outcome, err
+		case err != nil:
+			return outcome, err
+		}
+		outcome.applied = append(outcome.applied, move)
+	}
+	return outcome, nil
+}
+
+// observeReadySet remembers the ready set this round reconciled against and
+// reports whether it has been unchanged for the stabilisation window, and
+// if not, for how much longer the writer waits. The memory belongs to the
+// fence epoch: a new Leader starts from this round.
+func (runtime *productionPhaseTwoOwnership) observeReadySet(
+	authority ownership.PublicationAuthority,
+	workers []ownership.WorkerRegistration,
+	at time.Time,
+) (bool, time.Duration) {
+	ready := make(map[string]struct{}, len(workers))
+	for _, worker := range workers {
+		if worker.Validate() != nil || worker.AssignmentReadiness != ownership.WorkerReady || !worker.ExpiresAt.After(at) {
+			continue
+		}
+		ready[worker.WorkerID] = struct{}{}
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	changed := runtime.readySet == nil || runtime.readyEpoch != authority.Fence.OwnerEpoch || len(ready) != len(runtime.readySet)
+	if !changed {
+		for workerID := range ready {
+			if _, known := runtime.readySet[workerID]; !known {
+				changed = true
+				break
+			}
+		}
+	}
+	if changed {
+		runtime.readyEpoch, runtime.readySet, runtime.readyChangedAt = authority.Fence.OwnerEpoch, ready, at
+	}
+	elapsed := at.Sub(runtime.readyChangedAt)
+	if window := runtime.rebalanceStabilisation(); elapsed < window {
+		return false, window - elapsed
+	}
+	return true, 0
+}
+
+// observeRebalance reports one rebalance round: the plan, moves named one by
+// one so the plan can be checked against the Assignments by hand, and what
+// the round did with it -- published, paused for the ready set to settle,
+// or refused by the store for some of them.
+func (runtime *productionPhaseTwoOwnership) observeRebalance(
+	ctx context.Context,
+	plan scheduler.RebalancePlan,
+	outcome rebalanceOutcome,
+	at time.Time,
 ) {
-	plan := runtime.reconciler.PlanRebalance(owners, workers, at)
 	facts := &observability.RebalanceFacts{
 		ReadyWorkers: plan.ReadyWorkers, Assigned: plan.Assigned, Target: plan.Target,
 		MostOwned: plan.MostOwned, LeastOwned: plan.LeastOwned, Batch: plan.Batch, PlannedMoves: len(plan.Moves),
+		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts,
+		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
 	}
 	workerIDs := make([]string, 0, len(plan.Owned))
 	for workerID := range plan.Owned {
@@ -1449,13 +1589,16 @@ func (runtime *productionPhaseTwoOwnership) planRebalance(
 		Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned,
 		Result: observability.ResultSuccess, Operation: observability.OperationLoad, Rebalance: facts,
 	})
-	// The same round for the fleet snapshot. Shadow is written here because
-	// this is where the moves are not published: when a round starts
-	// publishing them, this is the line that changes, and the page follows.
+	// The same round for the fleet snapshot. Shadow is false here because
+	// this is the round that publishes the moves; what it did with them is
+	// beside the plan, so the page can say "moving" or "waiting for the
+	// ready set to settle" rather than "would move".
 	published := &fleet.RebalanceFacts{
 		PlannedAt: at, ReadyWorkers: plan.ReadyWorkers, Assigned: plan.Assigned, Target: plan.Target,
 		MostOwned: plan.MostOwned, LeastOwned: plan.LeastOwned, Batch: plan.Batch, PlannedMoves: len(plan.Moves),
-		StopSpreadPercent: scheduler.RebalanceStopSpreadPercent, Shadow: true,
+		StopSpreadPercent: scheduler.RebalanceStopSpreadPercent, Shadow: false,
+		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts,
+		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
 	}
 	if len(plan.Moves) > 0 {
 		// The pair the round chose, from the round's own first move rather
@@ -1521,7 +1664,12 @@ func (runtime *productionPhaseTwoOwnership) publishAssignmentIndex(
 		runtime.indexDigests = map[string][sha256.Size]byte{}
 	}
 	for _, workerID := range workerIDs {
-		digest := ownership.AssignedSetDigest(byWorker[workerID])
+		// Ordered before it is written: the digest sorts for itself, but the
+		// set is persisted as given, and a set gathered from a map is in a
+		// different order on every round.
+		set := byWorker[workerID]
+		sort.Slice(set, func(left, right int) bool { return set[left] < set[right] })
+		digest := ownership.AssignedSetDigest(set)
 		digests[workerID] = digest
 		previous, known := runtime.indexDigests[workerID]
 		writes = append(writes, ownership.AssignedSetWrite{

@@ -676,6 +676,15 @@ type RebalanceFacts struct {
 	// MovesTruncated says the moves were cut at MaxRebalanceMoveSamples;
 	// PlannedMoves still counts them all.
 	MovesTruncated bool `json:"moves_truncated"`
+	// PublishedMoves is how many of the planned moves the round wrote as
+	// Assignments, Conflicts how many the store refused because the record
+	// had moved under the round. Paused says the round wrote none because
+	// the ready set changed within the stabilisation window, PausedForSeconds
+	// how much of the window was left.
+	PublishedMoves   int     `json:"published_moves"`
+	Conflicts        int     `json:"conflicts"`
+	Paused           bool    `json:"paused"`
+	PausedForSeconds float64 `json:"paused_for_seconds"`
 }
 
 func normalizeRebalanceFacts(facts *RebalanceFacts) *RebalanceFacts {
@@ -685,7 +694,7 @@ func normalizeRebalanceFacts(facts *RebalanceFacts) *RebalanceFacts {
 	normalized := *facts
 	for _, count := range []*int{
 		&normalized.ReadyWorkers, &normalized.Assigned, &normalized.Target, &normalized.MostOwned,
-		&normalized.LeastOwned, &normalized.Batch, &normalized.PlannedMoves,
+		&normalized.LeastOwned, &normalized.Batch, &normalized.PlannedMoves, &normalized.PublishedMoves, &normalized.Conflicts,
 	} {
 		if *count < 0 {
 			*count = 0

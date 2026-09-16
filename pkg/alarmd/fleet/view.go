@@ -767,6 +767,15 @@ type RebalanceFacts struct {
 	// Shadow is true while the round only computes and nothing publishes the
 	// moves; a plan is then a measurement, not an action in progress.
 	Shadow bool `json:"shadow"`
+	// PublishedMoves is how many of the planned moves this round wrote as
+	// Assignments; Conflicts how many the store refused because the record
+	// had moved under the round. Paused says the round wrote none because
+	// the ready set changed within the stabilisation window, and
+	// PausedForSeconds how much of that window was left.
+	PublishedMoves   int     `json:"published_moves"`
+	Conflicts        int     `json:"conflicts,omitempty"`
+	Paused           bool    `json:"paused,omitempty"`
+	PausedForSeconds float64 `json:"paused_for_seconds,omitempty"`
 }
 
 // Skewed is the one reading the fleet takes: the scheduler would move
