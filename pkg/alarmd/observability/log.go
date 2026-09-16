@@ -213,6 +213,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("withheld_disposition", facts.Disposition),
 			slog.String("withheld_reason", facts.Reason),
 		)
+		if facts.Field != "" {
+			attributes = append(attributes, slog.String("withheld_field", facts.Field))
+		}
 		if facts.Dropped > 0 {
 			attributes = append(attributes, slog.Int("withheld_dropped", facts.Dropped))
 		}

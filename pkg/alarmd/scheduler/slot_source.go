@@ -442,10 +442,15 @@ func (source *ProductionSlotSource) Next(
 	if err != nil {
 		if load.Progress != nil && load.Progress.UnfinishedSlot != nil {
 			decision = "projection_fallback"
+			// The cohort is set by slotFromProjection, from the schedule at the
+			// projection's own Slot. It used to be set here instead, and only
+			// when the projection still matched the current grid point -- so a
+			// projection carried across a cutover, which is one of the reasons
+			// a Slot is resumed at all, completed with no cohort and dropped
+			// out of the counter read to decide whether that cohort completes.
+			// Two derivations of one value, agreeing only in the case that
+			// does not need either of them.
 			slot, due, err := source.slotFromProjection(ctx, initialAssignment, initialFence, *load.Progress.UnfinishedSlot, at)
-			if err == nil && slot.Contract.ScheduleRevision == schedule.Segment.ScheduleRevision && slot.Contract.ScheduleSegmentStart == schedule.Segment.Start && slot.Contract.Slot.EvaluationTime == nextSlot {
-				slot.ShortPeriodCohort = shortPeriodCohortForInterval(dueInterval)
-			}
 			return slot, due, SlotDueFacts{IntervalSeconds: dueInterval}, err
 		}
 		deadline, deadlineErr := source.scheduleQueryDeadline(schedule, nextSlot)
@@ -571,6 +576,33 @@ func shortPeriodCohort(schedule execution.FrozenQueryGroupSchedule, slot executi
 	return shortPeriodCohortForInterval(minimumAlignedInterval(schedule, slot))
 }
 
+// cohortForSlot is the short-period cohort of a Slot the source did not build
+// from a schedule it was already holding.
+//
+// A Slot resumed from an unfinished projection is the same Slot it was before
+// the process restarted or the owner changed, and it belongs to the same
+// cohort. It used to carry none, so its completion never reached
+// short_period_completion_total -- and what that counter is read for is
+// exactly whether the short-period cohorts are completing, which makes the
+// resumed rounds the ones most worth counting.
+//
+// Best effort on purpose. The cohort is a label on an observation and decides
+// nothing; a Slot must not fail to resume because the schedule under it could
+// not be read, which is a state a resumed Slot is more likely to be in than
+// any other.
+func (source *ProductionSlotSource) cohortForSlot(ctx context.Context, slot execution.EvaluationTime) string {
+	schedule, err := source.catalog.ReadFrozenSchedule(ctx, source.queryGroup, slot)
+	if err != nil {
+		return ""
+	}
+	// No separate validity check on the schedule: a Plan whose spec does not
+	// validate contributes no interval, because IsAligned validates it, so a
+	// malformed schedule already yields no cohort. A second guard in front of
+	// that one would be a branch nothing can reach and no test could tell from
+	// its absence.
+	return shortPeriodCohort(schedule, slot)
+}
+
 func shortPeriodCohortForInterval(minimum int64) string {
 	// 30 belongs here for the same reason 10 and 15 do: its completion deadline
 	// is thirty seconds. It reaches that by the offset defaulting to the
@@ -622,6 +654,7 @@ func (source *ProductionSlotSource) slotFromProjection(
 		RecoveryUntilUnixMilli:         recoveryUntil, KeepUntilUnixMilli: projection.KeepUntilUnixMilli,
 		Dispatch:         SlotDispatchContext{Operation: operation, OwnerFence: currentFence, AssignmentGeneration: currentAssignment.AssignmentGeneration},
 		ExpectedNextSlot: projection.Contract.Slot.EvaluationTime, Recovery: recovery,
+		ShortPeriodCohort: source.cohortForSlot(ctx, projection.Contract.Slot.EvaluationTime),
 	}
 	if err := slot.Validate(source.queryGroup); err != nil {
 		return FrozenSlot{}, false, &SourceBlockedError{Err: err}

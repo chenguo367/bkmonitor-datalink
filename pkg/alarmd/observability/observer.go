@@ -410,6 +410,11 @@ type SegmentContentFacts struct {
 type SourceWithheldFacts struct {
 	Disposition string
 	Reason      string
+	// Field is where in the strategy document the refusal happened. The reason
+	// alone names a class; a document has a few hundred keys, and which one it
+	// was is the difference between a line an operator can act on and one they
+	// have to reproduce offline. Empty when the refusal is not about a field.
+	Field string
 	// Dropped is how many further objects the round could not fit into its
 	// line budget, reported on the last line of the round. A report that was
 	// cut without saying so reads as a complete one.
