@@ -99,6 +99,8 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 		return CheckSlotsOverdue, true, false
 	case anomaly.Kind == KindNoData:
 		return CheckNoDataPersistent, true, false
+	case anomaly.Kind == KindNoDataMemoryRefused:
+		return CheckNoDataMemoryRefused, true, false
 	case anomaly.Kind == KindQueryCooldown:
 		// Cooldown is what this deployment does about a backend that keeps not
 		// answering; the line is the backend's, unless the backend answered and

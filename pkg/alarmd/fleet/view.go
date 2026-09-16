@@ -241,6 +241,24 @@ type FailureRef struct {
 	Slot int64 `json:"slot,omitempty"`
 }
 
+// NoDataMemoryRefusal is what the store said when it would not take a Plan's
+// absence memory, on the object row that lists it: the store's reason, and
+// for a refusal about size which record was measured and the two numbers it
+// compared -- a record a little over the bound and one many times it are
+// different situations, and a bound that moved under an unchanged record a
+// third. Refusals counts the rounds refused since FirstAt; LastAt is the
+// latest. Plan is the strategy whose memory it is.
+type NoDataMemoryRefusal struct {
+	Reason   string      `json:"reason"`
+	Record   string      `json:"record,omitempty"`
+	Bytes    int         `json:"bytes,omitempty"`
+	Limit    int         `json:"limit,omitempty"`
+	FirstAt  time.Time   `json:"first_at"`
+	LastAt   time.Time   `json:"last_at"`
+	Refusals int         `json:"refusals"`
+	Plan     StrategyRef `json:"plan"`
+}
+
 // LastError is the last error a round of this object returned.
 //
 // Text is the error's own words, sanitised and bounded by the same limit the
@@ -603,6 +621,9 @@ type Anomaly struct {
 	// reason. Present until this process completes a round of its own, so a
 	// reader knows the row's cause is from before the takeover.
 	Restored *RestoredRound `json:"restored,omitempty"`
+	// NoDataMemory is on rows of KindNoDataMemoryRefused: the refusal the
+	// row lists, whole.
+	NoDataMemory *NoDataMemoryRefusal `json:"no_data_memory,omitempty"`
 	// ConfigChanged says the object's snapshot, query or schedule revision
 	// differs between its last two completed rounds: the configuration it
 	// runs under actually changed. It is the one fact that tells a
@@ -741,6 +762,10 @@ type Snapshot struct {
 	// rounds after having returned some. In no column -- their rounds complete
 	// -- and listed so the data side's line can name them.
 	NoData []Anomaly `json:"no_data,omitempty"`
+	// NoDataMemory is the objects one of whose Plans the store refused an
+	// absence memory for. In no column -- the rounds complete -- and listed
+	// so the line that says detection stopped silently can name them.
+	NoDataMemory []Anomaly `json:"no_data_memory,omitempty"`
 	// Capacity is how close this replica is to its own limits. Absent on a
 	// replica that does not report it, which is why the aggregate counts the
 	// replicas it actually heard from rather than assuming every one answered.
@@ -1247,6 +1272,9 @@ type View struct {
 	PrunedSkips map[string]PrunedSkip  `json:"pruned_skips,omitempty"`
 	GapSkips    map[string]SkippedSpan `json:"gap_skips,omitempty"`
 	NoData      []Anomaly              `json:"no_data,omitempty"`
+	// NoDataMemory is the objects whose absence memory the store refuses,
+	// from every counted replica. In no column and in no total, like NoData.
+	NoDataMemory []Anomaly `json:"no_data_memory,omitempty"`
 	// Recovered is the problems whose objects completed healthily within the
 	// retention, merged over the counted replicas by line and fold. In no
 	// column and in no total, like the skips: the objects are running now.
@@ -1402,6 +1430,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			}
 		}
 		view.NoData = append(view.NoData, snapshot.NoData...)
+		view.NoDataMemory = append(view.NoDataMemory, snapshot.NoDataMemory...)
 		mergeRecovered(&view, snapshot.Recovered)
 		if snapshot.LastDemotionExit.After(view.LastDemotionExit) {
 			view.LastDemotionExit = snapshot.LastDemotionExit
@@ -1612,6 +1641,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	Attribute(view.Undecidable, now)
 	Attribute(view.ByDesign, now)
 	Attribute(view.NoData, now)
+	Attribute(view.NoDataMemory, now)
 	Settle(&view)
 	sortBuildGroups(view.Builds)
 	return view

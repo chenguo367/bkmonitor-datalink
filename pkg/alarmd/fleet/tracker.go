@@ -48,6 +48,13 @@ const (
 	// in any column of the health equation; it is the data having stopped, and
 	// it is listed under the data side's line for as long as it holds.
 	KindNoData = "NO_DATA"
+	// KindNoDataMemoryRefused is an object one of whose Plans the store will
+	// not take an absence memory for. Not a failure of the round -- it judged
+	// and its results went out -- and in no column; listed under its own line
+	// because what it loses is silent: the memory stays at the last version
+	// that was written, a group that goes absent after that is never recorded
+	// as first absent, and its no-data alert never fires.
+	KindNoDataMemoryRefused = "NO_DATA_MEMORY_REFUSED"
 )
 
 // ReasonWakeMissed is the reason code carried by an overdue object. The other
@@ -162,6 +169,11 @@ type queryGroupState struct {
 	emptyRuns  int
 	emptySince time.Time
 	sawData    bool
+	// noDataMemory is the last refused absence-memory write among this
+	// object's Plans, with how often and since when. Kept until a write is
+	// seen to succeed -- which no observation reports yet, so for now it is
+	// kept until the process forgets the object; the reading says as much.
+	noDataMemory *NoDataMemoryRefusal
 	// reasonKey names the current result and reason as one string, reasonSince
 	// is when that pair first held and reasonRuns how many consecutive rounds
 	// it has held for. It is the object's own clock for "how long has it been
@@ -532,7 +544,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// will be -- was the one thing on this deployment with nothing on screen.
 	cursorAdvance := observation.CursorAdvance
 	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" &&
-		failure == nil && observation.QueryCooldown == nil && cursorAdvance == nil {
+		failure == nil && observation.QueryCooldown == nil && cursorAdvance == nil && observation.NoDataMemoryRefusal == nil {
 		return
 	}
 
@@ -545,6 +557,23 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		tracker.groups[queryGroup] = state
 	}
 	at := tracker.now()
+	// A refused absence-memory write is not a round either: the round it
+	// happened in was fine and is reported separately. Recorded on the object
+	// with the store's reason and the size it measured, and it does not
+	// touch the round bookkeeping -- the observation's strategy is still
+	// learned below, since the Plan it names is the one whose memory is lost.
+	if refusal := observation.NoDataMemoryRefusal; refusal != nil {
+		if state.noDataMemory == nil {
+			state.noDataMemory = &NoDataMemoryRefusal{FirstAt: at}
+		}
+		memory := state.noDataMemory
+		memory.Reason, memory.Record, memory.Bytes, memory.Limit = refusal.Reason, refusal.Record, refusal.Bytes, refusal.Limit
+		memory.LastAt = at
+		memory.Refusals++
+		if trace.StrategyID != "" {
+			memory.Plan = StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}
+		}
+	}
 	// Recorded before anything else, because it is not a round and none of the
 	// round bookkeeping below applies to it. The object is very likely running
 	// normally now -- what happened is in its past and is permanent, which is
@@ -1226,6 +1255,46 @@ func (tracker *Tracker) NoData() []Anomaly {
 			anomaly.Strategies = append(anomaly.Strategies, strategy)
 		}
 		sortStrategies(anomaly.Strategies)
+		anomalies = append(anomalies, anomaly)
+	}
+	sort.Slice(anomalies, func(left, right int) bool {
+		if anomalies[left].Since.Equal(anomalies[right].Since) {
+			return anomalies[left].QueryGroup < anomalies[right].QueryGroup
+		}
+		return anomalies[left].Since.Before(anomalies[right].Since)
+	})
+	return anomalies
+}
+
+// NoDataMemory is every object one of whose Plans the store has refused an
+// absence memory for. Under no column: the rounds complete and the health
+// equation counts the object as healthy, which as far as its threshold
+// detection goes it is. What it has lost is silent -- the memory stays at
+// the last version written, so a group that goes absent after that is never
+// recorded as first absent and its no-data alert never fires -- which is why
+// it needs a line of its own rather than a mark on a row nobody opens.
+//
+// Kept until the process forgets the object. A successful write would end
+// it, and none is reported yet: a row here says "refused since", never
+// "recovered", until something says the write went through.
+func (tracker *Tracker) NoDataMemory() []Anomaly {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	anomalies := make([]Anomaly, 0)
+	for queryGroup, state := range tracker.groups {
+		if state.noDataMemory == nil {
+			continue
+		}
+		memory := *state.noDataMemory
+		anomaly := Anomaly{
+			QueryGroup: queryGroup, Kind: KindNoDataMemoryRefused, ReasonCode: memory.Reason,
+			Since: memory.FirstAt, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
+			ReasonSince: memory.FirstAt, ReasonLastAt: memory.LastAt, Consecutive: memory.Refusals,
+			NoDataMemory: &memory,
+		}
+		if memory.Plan.StrategyID != "" {
+			anomaly.Strategies = []StrategyRef{memory.Plan}
+		}
 		anomalies = append(anomalies, anomaly)
 	}
 	sort.Slice(anomalies, func(left, right int) bool {

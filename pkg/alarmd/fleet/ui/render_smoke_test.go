@@ -394,11 +394,24 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 				FirstFailure: at.Add(-40 * time.Minute), LastFailure: at.Add(-9 * time.Minute),
 				FirstRecovery: at.Add(-8 * time.Minute), LastRecovery: at.Add(-6 * time.Minute)},
 		}}
+	// An object the store refuses an absence memory for: its rounds complete
+	// and its results go out, so it is in no column; the line it is under
+	// says what it silently lost, and the row carries the refusal whole.
+	memoryRows := []fleet.Anomaly{anomaly("qg-memory-refused", func(item *fleet.Anomaly) {
+		item.Kind = "NO_DATA_MEMORY_REFUSED"
+		item.ReasonCode = "STATE_BUDGET_EXCEEDED"
+		item.Since, item.ReasonSince, item.ReasonLastAt, item.Consecutive = at.Add(-40*time.Minute), at.Add(-40*time.Minute), at.Add(-time.Minute), 79
+		item.NoDataMemory = &fleet.NoDataMemoryRefusal{Reason: "STATE_BUDGET_EXCEEDED", Record: "NEXT", Bytes: 74112, Limit: 65536,
+			FirstAt: at.Add(-40 * time.Minute), LastAt: at.Add(-time.Minute), Refusals: 79, Plan: fleet.StrategyRef{StrategyID: "s-88", BusinessID: "9"}}
+	})}
+	fleet.Attribute(memoryRows, at)
+	retained.NoDataMemory = memoryRows
 	columns := [][]fleet.Anomaly{rows, demoted}
 	checks := fleet.ReportChecks(columns, nil, retained, at)
 	todo := fleet.SummarizeTodo(checks, columns, retained, at)
 	rows = append(rows, fleet.UnderCheck(fleet.CheckDetectionAbandoned, "", retained, at)...)
 	rows = append(rows, fleet.UnderCheck(fleet.CheckQueryTargetMissing, "", retained, at)...)
+	rows = append(rows, fleet.UnderCheck(fleet.CheckNoDataMemoryRefused, "", retained, at)...)
 	// The barest row the API can send: every omitempty field absent. It goes in
 	// after Attribute so it keeps its empty attribution, because a fixture where
 	// every row has every field cannot catch a property read on a field that is
@@ -763,6 +776,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"PENDING ::", "恢复所需的老序列数据不完整（1 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出"},
 		{"PENDING ::", "恢复标准：分出归属后转到对应行（策略侧或 alarmd）；不是等它消失"},
 		{"HISTORY COUNT ::", "漏检记录 1 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
+		// The silent loss: the line on the work list with its sentence, and
+		// the row with the refusal's reason, the two numbers it compared,
+		// since when, and no claim of recovery.
+		{"CHECKS ::", "1 个对象的无数据记忆写不进去（1 条策略）：阈值检测照常，但记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发"},
+		{"CHECKS ::", "下一步：按 decision-008（按组分 field 的存储表示）处理"},
+		{"MEMORY qg-memory-refused ::", "无数据记忆写不进去：STATE_BUDGET_EXCEEDED，量的是本轮要写的记录 74112 字节，上限 65536（超 13%）；自 17:20:00 起被拒 79 轮，最近 17:59:00；策略 s-88"},
 		// Where detection is stuck and how much is unknown, as one sentence
 		// beside the badge's verdict: the largest folds across this
 		// deployment's and the undetermined lines, then the unknown count,
@@ -788,7 +807,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\"（1 种回答，1 条策略，1 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错；其中 1 个已降级，不再反复查；其中 1 个在被拒期间还跳过了检测（最近 10 分钟内 1 个）——冷却让旧轮次超出重放范围，首要原因是查询不可用，扩容无用"},
 		{"GOV ::", "策略侧"},
 		{"ACTION ::", "现在要做的：先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效（控制面变更自 "},
-		{"ACTION ::", "；之后还有 8 类，按顺序在下面；待归因 5 类另看，别交出去"},
+		{"ACTION ::", "；之后还有 9 类，按顺序在下面；待归因 5 类另看，别交出去"},
 		// A record line's folds name what each loss is; the refusal's object
 		// row says what it lost while under its line.
 		// Every fold with object rows carries the problem's state and its
@@ -895,7 +914,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// none), and one retained record made an hour ago.
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
-		"需要处理：alarmd 已确认 9 类（16 个对象，去重）；待归因 5 类（17 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"需要处理：alarmd 已确认 10 类（17 个对象，去重）；待归因 5 类（17 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
 		"另有 1 个是滚动后的追赶漏检（副本启动 5 分钟内），看它还有没有新增",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
@@ -1424,6 +1443,7 @@ for (const row of data.anomalies) {
   if (row.internal_failure) { console.log('INTERNAL ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.blocked) { console.log('BLOCKED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.restored) { console.log('RESTORED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.no_data_memory) { console.log('MEMORY ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the
