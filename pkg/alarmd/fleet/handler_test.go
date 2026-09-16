@@ -389,6 +389,36 @@ func TestListFlagsObjectsWhoseRoundsStoppedFinishing(t *testing.T) {
 	}
 }
 
+// Stalling is marked on every column before the first screen is drawn, so an
+// object in the demoted pool that stopped ending rounds is on the
+// ROUNDS_STALLED line and counted in the summary whichever column the
+// request serves -- and the line is the same one the metric exports.
+func TestAStalledObjectInTheDemotedPoolIsOnTheLine(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[1].Demoted = []Anomaly{agedAnomaly("demoted-stuck", "error", 2*time.Hour)}
+	snapshots[1].TotalDemoted = 1
+
+	status, body := get(t, handlerWithStallBudget(t, snapshots, 10*time.Minute), "/api/objects")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	var stalledLine map[string]any
+	for _, entry := range body["checks"].([]any) {
+		report := entry.(map[string]any)
+		if report["code"] == string(CheckRoundsStalled) {
+			stalledLine = report
+		}
+	}
+	if stalledLine == nil || stalledLine["current"].(float64) != 1 {
+		t.Fatalf("ROUNDS_STALLED line = %v, want the demoted object on it", stalledLine)
+	}
+	// The served column is the anomaly list, which is empty; the deployment
+	// count is across every column.
+	if body["stalled_total"].(float64) != 1 {
+		t.Fatalf("stalled_total = %v, want the demoted object counted", body["stalled_total"])
+	}
+}
+
 // A deployment that wired no budget has no basis for the claim, and a flag
 // asserted without one would label every long-running failure as unrecoverable.
 func TestListWithoutAStallBudgetFlagsNothing(t *testing.T) {

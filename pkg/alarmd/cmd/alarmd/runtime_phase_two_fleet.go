@@ -529,10 +529,10 @@ func fleetVerdictSource(
 		defer cancel()
 		at := now()
 		view := service.View(ctx)
-		fleet.MarkStalled(view.Anomalies, at, stallAfter)
-		// Same as the HTTP path: stalling can only move an object towards
-		// ours, so the verdict is decided again once it is known.
-		fleet.Settle(&view)
+		// The same call the HTTP path makes, so the two never mark or settle
+		// differently: it used to mark stalling on the anomaly list alone
+		// while the page marked every column.
+		fleet.Decide(&view, at, stallAfter)
 		return fleetVerdictOf(view, at)
 	}
 }
@@ -594,6 +594,26 @@ func fleetVerdictOf(view fleet.View, at time.Time) metric.FleetVerdict {
 		gaps.add(fleet.MetricGapKind(gap.Kind), 0)
 	}
 	verdict.Gaps = gaps.counts()
+
+	// The first screen's lines, by the same call the page makes, and the
+	// whole closed table rather than the lines that are up: a line that is
+	// down is exported at zero. Absent would read the same as a build
+	// without the family, and an alert on "this line is up" needs to see it
+	// go down.
+	lines := map[fleet.Check]int{}
+	for _, report := range fleet.Report(&view, at).Checks {
+		lines[report.Code] = report.LineCount()
+	}
+	for _, code := range fleet.Checks() {
+		verdict.Checks = append(verdict.Checks, metric.FleetCount{Value: string(code), Count: lines[code]})
+	}
+	replicas := map[fleet.DegradationKind]int{}
+	for _, degradation := range view.Degradations {
+		replicas[degradation.Kind]++
+	}
+	for _, kind := range fleet.DegradationKinds {
+		verdict.Degradations = append(verdict.Degradations, metric.FleetCount{Value: string(kind), Count: replicas[kind]})
+	}
 	return verdict
 }
 
