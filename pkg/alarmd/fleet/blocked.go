@@ -189,6 +189,12 @@ var failureFacets = map[string]facets{
 	"GAP_GUARD_CONFLICT":         {StageEvaluate, ClassContract, DependencyNone},
 	"GAP_SCOPE_REASON_CONFLICT":  {StageEvaluate, ClassContract, DependencyNone},
 	"EVALUATION_FAILED":          {StageEvaluate, ClassContract, DependencyNone},
+	// The series state moved under the Slot writing it. The step is the
+	// state write -- the apply and its preflight are the commit of the
+	// round's result -- so a reader is sent to what was committing against
+	// what, not to the evaluation, which had finished.
+	"STATE_VERSION_CONFLICT": {StageCommit, ClassContract, DependencyNone},
+	"STATE_STALE_VERSION":    {StageCommit, ClassContract, DependencyNone},
 
 	// A Plan this deployment keeps too little for.
 	"SNAPSHOT_RETENTION_INSUFFICIENT": {StageConfig, ClassRetention, DependencyNone},
