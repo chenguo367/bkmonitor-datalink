@@ -375,9 +375,12 @@ func (store *ExecutionStore) applyRuntime(
 			// earlier copy's bytes one revision up. Name that for what it is
 			// -- the producer sent one series twice -- so it does not count as
 			// a re-sent write.
-			if _, earlier := written[keys[index]]; earlier && result.Items[index].Status == execution.StateApplyAlreadyApplied &&
-				result.Items[index].AlreadyApplied == execution.StateAlreadyAppliedRevisionSkew {
-				result.Items[index].AlreadyApplied = execution.StateAlreadyAppliedRepeatedKey
+			if _, earlier := written[keys[index]]; earlier {
+				result.Items[index].RepeatedKey = true
+				if result.Items[index].Status == execution.StateApplyAlreadyApplied &&
+					result.Items[index].AlreadyApplied == execution.StateAlreadyAppliedRevisionSkew {
+					result.Items[index].AlreadyApplied = execution.StateAlreadyAppliedRepeatedKey
+				}
 			}
 			written[keys[index]] = struct{}{}
 			continue

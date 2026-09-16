@@ -2697,6 +2697,12 @@ type StateApplyItemResult struct {
 	// found at, so a revision_skew line can say how far the expectation was off.
 	AlreadyApplied     StateAlreadyAppliedKind
 	StoredBlobRevision uint64
+	// RepeatedKey says the request itself carried this key earlier. On an
+	// ALREADY_APPLIED it is the repeated_key kind; on a STATE_VERSION_CONFLICT
+	// it is the one fact that tells a producer that made two different
+	// statements for one series from a writer that lost a race, and the
+	// status alone reads the same for both.
+	RepeatedKey bool
 }
 
 type StateApplyResult struct {
