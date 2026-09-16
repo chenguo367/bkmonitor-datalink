@@ -407,71 +407,127 @@ func TestAMissedTurnOutranksTheLastRoundsReason(t *testing.T) {
 	}
 }
 
-// A retained skip is on its line and has a row, whether or not the object is
-// under a column now; an object already under the same check from its current
-// round is counted once; an object under a different check gets its skip row
-// as well, because those are two facts.
-func TestRetainedSkipsAreOnTheirLinesWithRows(t *testing.T) {
+// A retained record is one of three things, decided from what the view
+// knows about the object: a demoted object's record is the consequence of
+// the line it is under and rides on that object's row; a record made within
+// the window is a loss in progress, current, on the record line; a record
+// older than the window is a loss that stopped, retained on the same line.
+// A live page filed all of them as this deployment giving up for want of
+// capacity, when most were the backend refusing and no capacity changes
+// that. An object already under the same check from its current round is
+// counted once; an object under a different check gets its record row as
+// well, because those are two facts.
+func TestRetainedRecordsAreConsequenceOngoingOrHistory(t *testing.T) {
 	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
 	current := Anomaly{QueryGroup: "qg-skipping-now", Replica: "pod-a", Kind: KindDegradedRun,
 		Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "GAP_SKIPPED"}
 	backend := Anomaly{QueryGroup: "qg-backend", Replica: "pod-a", Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT"}
 	anomalies := []Anomaly{current, backend}
+	// In the demoted pool on a refusal: its record is the refusal's consequence.
+	demoted := []Anomaly{{QueryGroup: "qg-refused", Replica: "pod-b", Kind: KindQueryCooldown,
+		Failure:    &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"},
+		Strategies: []StrategyRef{{StrategyID: "2864", BusinessID: "7"}}}}
 	Attribute(anomalies, at)
-	view := &View{Anomalies: anomalies,
+	Attribute(demoted, at)
+	view := &View{Anomalies: anomalies, Demoted: demoted,
 		GapSkips: map[string]SkippedSpan{
 			// Skipping now and also retained: one object, one row.
 			"qg-skipping-now": {FirstSlot: 100, LastSlot: 220, Slots: 3, At: at.Add(-time.Minute), Replica: "pod-a"},
-			// Healthy now, skipped an hour ago: a row from the record alone.
+			// Healthy now, skipped an hour ago: history, from the record alone.
 			"qg-skipped-earlier": {FirstSlot: 1000, LastSlot: 1060, Slots: 2, At: at.Add(-time.Hour), Replica: "pod-b"},
-			// Under the backend's line now, and skipped earlier: both.
+			// Healthy now, skipped two minutes ago: a loss in progress.
+			"qg-losing-now": {FirstSlot: 3000, LastSlot: 3010, Slots: 1, At: at.Add(-2 * time.Minute), Replica: "pod-b"},
+			// Under the backend's line now (not demoted), and skipped earlier: both.
 			"qg-backend": {FirstSlot: 2000, LastSlot: 2000, Slots: 1, At: at.Add(-30 * time.Minute), Replica: "pod-a"},
+			// Demoted on a refusal, skipped three minutes ago while there.
+			"qg-refused": {FirstSlot: 4000, LastSlot: 4120, Slots: 3, At: at.Add(-3 * time.Minute), Replica: "pod-b"},
 		},
 		PrunedSkips: map[string]PrunedSkip{
 			"qg-pruned": {From: 5000, To: 8600, At: at.Add(-2 * time.Hour), Replica: "pod-b"},
 		}}
-	reports := ReportChecks([][]Anomaly{anomalies, nil, nil, nil}, nil, view, now)
+	reports := ReportChecks([][]Anomaly{anomalies, demoted, nil, nil}, nil, view, at)
 	byCode := map[Check]CheckReport{}
 	for _, report := range reports {
 		byCode[report.Code] = report
 	}
-	if got := byCode[CheckDetectionAbandoned]; got.Objects != 3 {
-		t.Errorf("DETECTION_ABANDONED = %d objects, want 3: the current skipper once, the earlier one, "+
-			"and the backend's object for its retained skip", got.Objects)
+	abandoned := byCode[CheckDetectionAbandoned]
+	if abandoned.Objects != 4 || abandoned.Current != 2 || abandoned.Retained != 2 {
+		t.Errorf("DETECTION_ABANDONED = %+v, want 4 objects: the current skipper and the loss in progress current, "+
+			"the earlier one and the backend's object retained; the demoted object's record is not here", abandoned)
 	}
-	if got := byCode[CheckTimelinePruned]; got.Objects != 1 {
-		t.Errorf("TIMELINE_PRUNED = %d objects, want the one pruned record", got.Objects)
+	if abandoned.GroupBy != GroupByLoss {
+		t.Errorf("DETECTION_ABANDONED folds on %s, want %s", abandoned.GroupBy, GroupByLoss)
 	}
-	if got := byCode[CheckBackendNotAnswering]; got.Objects != 1 {
-		t.Errorf("BACKEND_NOT_ANSWERING = %d objects, want 1: the retained skip does not remove it", got.Objects)
+	groups := map[string]int{}
+	for _, group := range abandoned.Groups {
+		groups[group.Key] = group.Objects
 	}
-	rows := UnderCheck(CheckDetectionAbandoned, "", view)
-	if len(rows) != 3 {
-		t.Fatalf("under DETECTION_ABANDONED: %v, want 3 rows", names(rows))
+	if groups[string(LossOngoing)] != 1 || groups[string(LossHistorical)] != 2 || groups["GAP_SKIPPED"] != 1 {
+		t.Errorf("DETECTION_ABANDONED groups = %v, want ONGOING 1, HISTORICAL 2, and the current skipper on its code", groups)
+	}
+	if got := byCode[CheckTimelinePruned]; got.Objects != 1 || got.Retained != 1 || got.Groups[0].Key != string(LossHistorical) {
+		t.Errorf("TIMELINE_PRUNED = %+v, want the one pruned record, retained, folded HISTORICAL", got)
+	}
+	if got := byCode[CheckBackendNotAnswering]; got.Objects != 1 || got.Consequence != nil {
+		t.Errorf("BACKEND_NOT_ANSWERING = %+v, want 1 object and no consequence: it is not demoted, its record is a row", got)
+	}
+	refused := byCode[CheckQueryTargetMissing]
+	if refused.Objects != 1 || refused.Consequence == nil || refused.Consequence.Skipped != 1 ||
+		refused.Consequence.SkippedRecent != 1 || refused.Consequence.SkippedNewest == nil ||
+		!refused.Consequence.SkippedNewest.Equal(at.Add(-3*time.Minute)) {
+		t.Errorf("QUERY_TARGET_MISSING = %+v, want its one object with the consequence: 1 skipped, 1 within the window, newest 3 minutes ago", refused)
+	}
+
+	rows := UnderCheck(CheckDetectionAbandoned, "", view, at)
+	if len(rows) != 4 {
+		t.Fatalf("under DETECTION_ABANDONED: %v, want 4 rows", names(rows))
 	}
 	kinds := map[string]string{}
+	losses := map[string]Loss{}
 	for _, row := range rows {
-		kinds[row.QueryGroup] = row.Kind
+		kinds[row.QueryGroup], losses[row.QueryGroup] = row.Kind, row.Loss
 	}
 	if kinds["qg-skipping-now"] != KindDegradedRun {
 		t.Errorf("the current skipper is listed as %s, want its own row, not a synthesized one", kinds["qg-skipping-now"])
 	}
-	if kinds["qg-skipped-earlier"] != KindSkippedSpan || kinds["qg-backend"] != KindSkippedSpan {
-		t.Errorf("retained skips are listed as %v, want %s rows", kinds, KindSkippedSpan)
+	if losses["qg-losing-now"] != LossOngoing || losses["qg-skipped-earlier"] != LossHistorical || losses["qg-backend"] != LossHistorical {
+		t.Errorf("record rows carry %v, want ONGOING for the loss in progress and HISTORICAL for the stopped ones", losses)
 	}
 	for _, row := range rows {
-		if row.Kind == KindSkippedSpan && (row.Skip == nil || row.Skip.Slots == 0 || row.Finding.Group != row.Replica) {
-			t.Errorf("synthesized row %s = %+v, want the span and the replica as its group", row.QueryGroup, row)
+		if row.Kind == KindSkippedSpan && (row.Skip == nil || row.Skip.Slots == 0 || row.Finding.Group != string(row.Loss)) {
+			t.Errorf("synthesized row %s = %+v, want the span and its loss as its group", row.QueryGroup, row)
 		}
 	}
-	// Narrowing to pod-b lists the earlier skip alone.
-	if got := UnderCheck(CheckDetectionAbandoned, "pod-b", view); len(got) != 1 || got[0].QueryGroup != "qg-skipped-earlier" {
-		t.Errorf("under DETECTION_ABANDONED group pod-b = %v, want [qg-skipped-earlier]", names(got))
+	// Narrowing to the loss in progress lists it alone; to history, the two.
+	if got := UnderCheck(CheckDetectionAbandoned, string(LossOngoing), view, at); len(got) != 1 || got[0].QueryGroup != "qg-losing-now" {
+		t.Errorf("under DETECTION_ABANDONED group ONGOING = %v, want [qg-losing-now]", names(got))
+	}
+	if got := UnderCheck(CheckDetectionAbandoned, string(LossHistorical), view, at); len(got) != 2 {
+		t.Errorf("under DETECTION_ABANDONED group HISTORICAL = %v, want the two stopped losses", names(got))
+	}
+	// The demoted object's row, under its own line, carries what it lost there.
+	refusedRows := UnderCheck(CheckQueryTargetMissing, "", view, at)
+	if len(refusedRows) != 1 || refusedRows[0].Skip == nil || refusedRows[0].Skip.Slots != 3 || refusedRows[0].Loss != LossWhileDemoted {
+		t.Errorf("under QUERY_TARGET_MISSING = %+v, want the object's row with its record and WHILE_DEMOTED", refusedRows)
 	}
 	// The pruned record's row says its Slot count is not knowable.
-	pruned := UnderCheck(CheckTimelinePruned, "", view)
+	pruned := UnderCheck(CheckTimelinePruned, "", view, at)
 	if len(pruned) != 1 || pruned[0].Skip == nil || pruned[0].Skip.Slots != 0 || pruned[0].Skip.FirstSlot != 5000 {
 		t.Errorf("under TIMELINE_PRUNED = %+v, want one row with the span and no Slot count", pruned)
+	}
+}
+
+// The record of a demoted object is its line's consequence only while the
+// object is under a line; the tracker never produces a demoted object under
+// none, and if one arrived its record would be read by age like any other
+// rather than counted on a line that does not exist.
+func TestADemotedObjectUnderNoLineIsReadByAge(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	view := &View{Demoted: []Anomaly{{QueryGroup: "qg-orphan", Kind: KindQueryCooldown}},
+		GapSkips: map[string]SkippedSpan{"qg-orphan": {FirstSlot: 1, LastSlot: 2, Slots: 2, At: at.Add(-time.Minute), Replica: "pod-a"}}}
+	reports := ReportChecks([][]Anomaly{nil, view.Demoted, nil, nil}, nil, view, at)
+	if len(reports) != 1 || reports[0].Code != CheckDetectionAbandoned || reports[0].Current != 1 || reports[0].Consequence != nil {
+		t.Fatalf("reports = %+v, want the record current on DETECTION_ABANDONED and no consequence anywhere", reports)
 	}
 }
 
@@ -495,7 +551,7 @@ func TestNoDataObjectsAreOnTheDataSidesLine(t *testing.T) {
 	if len(reports[0].Groups) != 1 || reports[0].Groups[0].Key != "77" {
 		t.Errorf("groups = %+v, want one fold on strategy 77", reports[0].Groups)
 	}
-	rows := UnderCheck(CheckNoDataPersistent, "77", view)
+	rows := UnderCheck(CheckNoDataPersistent, "77", view, now)
 	if len(rows) != 2 || rows[0].QueryGroup != "qg-stopped-b" {
 		t.Errorf("under NO_DATA_PERSISTENT group 77 = %v, want both, oldest first", names(rows))
 	}
@@ -550,14 +606,22 @@ func TestReportsSplitCurrentFromRetainedAndTheTodoCountsDistinctObjects(t *testi
 	}
 
 	todo := SummarizeTodo(reports, columns, view, at)
-	// Lines with something on them now and this reader's: SLOTS_OVERDUE,
-	// WINDOW_UNDECIDED, OBSERVATION_GAP. DETECTION_ABANDONED has only the
-	// record. Objects: qg-a once, plus the two undetermined.
-	if todo.Checks != 3 || todo.Objects != 3 {
-		t.Fatalf("todo = %+v, want 3 lines and 3 distinct objects (qg-a once, plus 2 undetermined)", todo)
+	// Lines with something on them now, confirmed this deployment's:
+	// SLOTS_OVERDUE and OBSERVATION_GAP; DETECTION_ABANDONED has only the
+	// record. Objects: qg-a once, plus the two unknown. WINDOW_UNDECIDED is
+	// the one line nobody can hand to anyone, with qg-a under it too -- a
+	// third part, not folded into either of the other two.
+	if todo.Checks != 2 || todo.Objects != 3 {
+		t.Fatalf("todo = %+v, want 2 lines confirmed ours and 3 distinct objects (qg-a once, plus 2 unknown)", todo)
+	}
+	if todo.Undetermined != 1 || todo.UndeterminedObjects != 1 {
+		t.Fatalf("todo undetermined = %+v, want the one undecided line with its one object", todo)
 	}
 	if todo.Retained != 2 || todo.RetainedLastHour != 1 || todo.RetainedNewest == nil || !todo.RetainedNewest.Equal(at.Add(-30*time.Minute)) {
 		t.Fatalf("todo record = %+v, want 2 retained, 1 in the last hour, newest half an hour ago", todo)
+	}
+	if todo.Ongoing != 0 || todo.WhileDemoted != 0 || todo.RecentWindowSeconds != int(RecentSkipWindow/time.Second) {
+		t.Fatalf("todo loss = %+v, want nothing in progress, nothing demoted, and the window it was decided on", todo)
 	}
 	if todo.Governance != 1 || todo.GovernanceObjects != 1 {
 		t.Fatalf("todo governance = %+v, want the one strategy-side line with its one object", todo)
@@ -579,7 +643,7 @@ func TestRetainedLossOpensNewestFirst(t *testing.T) {
 		"qg-new": {FirstSlot: 8, LastSlot: 9, Slots: 2, At: at.Add(-2 * time.Minute), Replica: "pod-a"},
 		"qg-mid": {FirstSlot: 4, LastSlot: 5, Slots: 2, At: at.Add(-time.Hour), Replica: "pod-a"},
 	}}
-	rows := UnderCheck(CheckDetectionAbandoned, "", view)
+	rows := UnderCheck(CheckDetectionAbandoned, "", view, now)
 	if len(rows) != 3 || rows[0].QueryGroup != "qg-new" || rows[1].QueryGroup != "qg-mid" || rows[2].QueryGroup != "qg-old" {
 		names := make([]string, 0, len(rows))
 		for _, row := range rows {
@@ -604,7 +668,7 @@ func TestRetainedRecordsCarryTheirStrategiesOntoRowsAndFolds(t *testing.T) {
 			Strategies: []StrategyRef{{StrategyID: "2001", BusinessID: "9"}}}},
 	}
 	for check, want := range map[Check]string{CheckDetectionAbandoned: "1854", CheckTimelinePruned: "2001"} {
-		rows := UnderCheck(check, "", view)
+		rows := UnderCheck(check, "", view, now)
 		if len(rows) != 1 || len(rows[0].Strategies) != 1 || rows[0].Strategies[0].StrategyID != want {
 			t.Fatalf("%s rows = %+v, want one row naming strategy %s", check, rows, want)
 		}
@@ -613,5 +677,49 @@ func TestRetainedRecordsCarryTheirStrategiesOntoRowsAndFolds(t *testing.T) {
 		if report.Strategies != 1 || report.Businesses != 1 || len(report.Groups) != 1 || report.Groups[0].Strategies != 1 {
 			t.Fatalf("%s = %+v, want one strategy and one business counted on the line and its fold", report.Code, report)
 		}
+	}
+}
+
+// The first screen's arithmetic tells a loss in progress from a record of a
+// loss that stopped, and both from a demoted object's record, which is its
+// line's consequence. "曾经漏检、不用处理" over a record that was still
+// growing is what this exists for: a loss in progress is this deployment's,
+// current, and its object counts as work; the record is only the stopped
+// ones; and the window all of it was decided on travels with the numbers.
+func TestTheTodoTellsLossInProgressFromTheRecord(t *testing.T) {
+	at := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	demoted := []Anomaly{{QueryGroup: "qg-refused", Kind: KindQueryCooldown,
+		Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}}}
+	Attribute(demoted, at)
+	view := &View{Demoted: demoted, GapSkips: map[string]SkippedSpan{
+		"qg-refused":  {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-time.Minute), Replica: "pod-a"},
+		"qg-losing-a": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-2 * time.Minute), Replica: "pod-a"},
+		"qg-losing-b": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-9 * time.Minute), Replica: "pod-a"},
+		"qg-stopped":  {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-11 * time.Minute), Replica: "pod-a"},
+		"qg-old":      {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-3 * time.Hour), Replica: "pod-a"},
+	}}
+	columns := [][]Anomaly{nil, demoted, nil, nil}
+	reports := ReportChecks(columns, nil, view, at)
+	todo := SummarizeTodo(reports, columns, view, at)
+	if todo.Ongoing != 2 || todo.OngoingNewest == nil || !todo.OngoingNewest.Equal(at.Add(-2*time.Minute)) {
+		t.Fatalf("todo ongoing = %+v, want the two records within the window, newest two minutes ago", todo)
+	}
+	if todo.Checks != 1 || todo.Objects != 2 {
+		t.Fatalf("todo = %+v, want DETECTION_ABANDONED up as ours with the two objects losing rounds now", todo)
+	}
+	if todo.Retained != 2 || todo.RetainedLastHour != 1 || todo.RetainedNewest == nil || !todo.RetainedNewest.Equal(at.Add(-11*time.Minute)) {
+		t.Fatalf("todo record = %+v, want the two stopped losses, one within the hour, newest eleven minutes ago", todo)
+	}
+	if todo.WhileDemoted != 1 || todo.WhileDemotedRecent != 1 {
+		t.Fatalf("todo while demoted = %+v, want the refused object's record counted as its line's consequence", todo)
+	}
+	if todo.Governance != 1 || todo.GovernanceObjects != 1 {
+		t.Fatalf("todo governance = %+v, want the refusal line with its object", todo)
+	}
+	// Eleven minutes on, nothing is in progress: the same records read as
+	// the record, and the objects are no longer work.
+	later := SummarizeTodo(ReportChecks(columns, nil, view, at.Add(11*time.Minute)), columns, view, at.Add(11*time.Minute))
+	if later.Ongoing != 0 || later.Objects != 0 || later.Checks != 0 || later.Retained != 4 {
+		t.Fatalf("todo eleven minutes later = %+v, want nothing in progress and four on record", later)
 	}
 }

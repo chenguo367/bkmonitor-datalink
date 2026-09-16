@@ -389,6 +389,36 @@ func TestListFlagsObjectsWhoseRoundsStoppedFinishing(t *testing.T) {
 	}
 }
 
+// Stalling is marked on every column before the first screen is drawn, so an
+// object in the demoted pool that stopped ending rounds is on the
+// ROUNDS_STALLED line and counted in the summary whichever column the
+// request serves -- and the line is the same one the metric exports.
+func TestAStalledObjectInTheDemotedPoolIsOnTheLine(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[1].Demoted = []Anomaly{agedAnomaly("demoted-stuck", "error", 2*time.Hour)}
+	snapshots[1].TotalDemoted = 1
+
+	status, body := get(t, handlerWithStallBudget(t, snapshots, 10*time.Minute), "/api/objects")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	var stalledLine map[string]any
+	for _, entry := range body["checks"].([]any) {
+		report := entry.(map[string]any)
+		if report["code"] == string(CheckRoundsStalled) {
+			stalledLine = report
+		}
+	}
+	if stalledLine == nil || stalledLine["current"].(float64) != 1 {
+		t.Fatalf("ROUNDS_STALLED line = %v, want the demoted object on it", stalledLine)
+	}
+	// The served column is the anomaly list, which is empty; the deployment
+	// count is across every column.
+	if body["stalled_total"].(float64) != 1 {
+		t.Fatalf("stalled_total = %v, want the demoted object counted", body["stalled_total"])
+	}
+}
+
 // A deployment that wired no budget has no basis for the claim, and a flag
 // asserted without one would label every long-running failure as unrecoverable.
 func TestListWithoutAStallBudgetFlagsNothing(t *testing.T) {
@@ -778,5 +808,66 @@ func TestHealthResponseCarriesTheSpansNothingEverEvaluated(t *testing.T) {
 		if _, present := first[field]; present {
 			t.Fatalf("the response carries %q for a span whose Slots cannot be counted: %v", field, first)
 		}
+	}
+}
+
+// On the route: a demoted object's record rides on its refusal line as that
+// line's consequence, a loss in progress is current on the record line and
+// on the to-do arithmetic, a stopped loss is the record, and the window all
+// of it was decided on travels with the numbers -- so the page prints what
+// the server decided, and neither reads "曾经漏检、不用处理" over a loss
+// still happening or "容量限制" over a refusal.
+func TestTheRouteTellsTheThreeKindsOfLossApart(t *testing.T) {
+	snapshots := healthySnapshots()
+	refused := anomaly("qg-refused")
+	refused.Kind = KindQueryCooldown
+	refused.Failure = &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}
+	snapshots[1].Demoted = []Anomaly{refused}
+	snapshots[1].TotalDemoted = 1
+	snapshots[1].GapSkips = map[string]SkippedSpan{
+		"qg-refused": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: now.Add(-2 * time.Minute), Replica: "pod-b"},
+		"qg-losing":  {FirstSlot: 1, LastSlot: 3, Slots: 3, At: now.Add(-3 * time.Minute), Replica: "pod-b"},
+		"qg-stopped": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: now.Add(-time.Hour), Replica: "pod-b"},
+	}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas())
+
+	status, body := get(t, handler, "/api/objects")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d: %v", status, body)
+	}
+	byCode := map[string]map[string]any{}
+	for _, entry := range body["checks"].([]any) {
+		report := entry.(map[string]any)
+		byCode[report["code"].(string)] = report
+	}
+	target := byCode[string(CheckQueryTargetMissing)]
+	consequence, _ := target["consequence"].(map[string]any)
+	if consequence == nil || consequence["skipped"].(float64) != 1 || consequence["skipped_recent"].(float64) != 1 {
+		t.Fatalf("QUERY_TARGET_MISSING = %v, want its consequence: 1 skipped, 1 within the window", target)
+	}
+	abandoned := byCode[string(CheckDetectionAbandoned)]
+	if abandoned["current"].(float64) != 1 || abandoned["retained"].(float64) != 1 || abandoned["group_by"] != string(GroupByLoss) {
+		t.Fatalf("DETECTION_ABANDONED = %v, want 1 current, 1 retained, folded on loss", abandoned)
+	}
+	todo := body["todo"].(map[string]any)
+	for field, want := range map[string]float64{
+		"checks": 1, "objects": 1, "undetermined": 0, "undetermined_objects": 0,
+		"ongoing": 1, "while_demoted": 1, "while_demoted_recent": 1, "retained": 1,
+		"recent_window_seconds": RecentSkipWindow.Seconds(), "governance": 1, "governance_objects": 1,
+	} {
+		if got, _ := todo[field].(float64); got != want {
+			t.Errorf("todo.%s = %v, want %v (todo = %v)", field, todo[field], want, todo)
+		}
+	}
+	// Opening the refusal line: the object's row carries its record and what
+	// it is; opening the record line by kind lists the one in progress.
+	_, rows := get(t, handler, "/api/objects?check="+string(CheckQueryTargetMissing))
+	row := rows["anomalies"].([]any)[0].(map[string]any)
+	if row["skip"] == nil || row["loss"] != string(LossWhileDemoted) {
+		t.Fatalf("the refused object's row = %v, want its record and WHILE_DEMOTED", row)
+	}
+	_, ongoing := get(t, handler, "/api/objects?check="+string(CheckDetectionAbandoned)+"&group="+string(LossOngoing))
+	if list := ongoing["anomalies"].([]any); len(list) != 1 || list[0].(map[string]any)["query_group"] != "qg-losing" {
+		t.Fatalf("under DETECTION_ABANDONED/ONGOING = %v, want the one object losing rounds now", list)
 	}
 }

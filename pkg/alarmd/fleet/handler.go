@@ -746,7 +746,7 @@ func NewHandler(
 			UndecidableTotal: view.UndecidableTotal, ByDesignTotal: view.ByDesignTotal,
 			Ours:             OursCount(view.Anomalies),
 			Unattributed:     UnattributedCount(view.Anomalies),
-			Impact:           ImpactOf(view),
+			Impact:           ImpactOf(view, now()),
 			StrategyLinkBase: strategyLinkBase,
 			DemotedDue:       view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
 			DemotionEntries:    view.DemotionEntries,
@@ -807,24 +807,20 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 		order = OrderOldest
 	}
 	view := service.View(request.Context())
-	// Marked before filtering so a filtered response reports the same flag for the
-	// same object as an unfiltered one, and on every column rather than only the
-	// one being served: an object that has stopped ending rounds is stuck whether
-	// or not this request happens to be about its column.
-	columns := [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign}
-	for _, list := range columns {
-		MarkStalled(list, now(), stallAfter)
-	}
-	// Stalling can only move an object towards ours, so the verdict is decided
-	// again with that known. Deciding it once, before the marking, would call a
-	// deployment with nothing but stuck objects healthy.
-	//
-	// Decided here, before a column is served, and always on the anomaly list.
-	// It used to run after the swap below, so asking for the demoted pool
-	// recomputed the deployment's verdict and its per-replica breakdown over the
-	// pool instead -- and the response carries both. Which list a reader is
-	// paging cannot be allowed to change what the deployment's health is.
-	Settle(&view)
+	// Marked and settled before filtering, so a filtered response reports the
+	// same flag for the same object as an unfiltered one, and before a column
+	// is served, always on the anomaly list. Settling used to run after the
+	// swap below, so asking for the demoted pool recomputed the deployment's
+	// verdict and its per-replica breakdown over the pool instead -- and the
+	// response carries both. Which list a reader is paging cannot be allowed
+	// to change what the deployment's health is.
+	Decide(&view, now(), stallAfter)
+	// The first screen, from every column before any of them is swapped in as
+	// the rows. Drawn here so the line a reader clicks and the rows it opens
+	// come from one read of the view -- and by the same call the metric
+	// collector makes, so the line and the series agree.
+	screen := Report(&view, now())
+	columns, truncated, checks, todo := screen.Columns, screen.Truncated, screen.Checks, screen.Todo
 	// Counted over every column for the same reason it survives a filter: these
 	// are the objects that will not recover on their own, and a number that
 	// shrinks because of what the reader is currently looking at reads as "there
@@ -840,26 +836,10 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// Serving a column replaces the rows this request is about, and nothing
 	// else. The deployment-wide counts on the view are untouched, so the
 	// response still carries every total and a reader paging one column can see
-	// how many objects are not in it.
-	// A replica publishes at most what fits its byte budget, so on a bad enough
-	// deployment the list this summary counts is already a sample. The counts
-	// stay useful for "which of these is it", and stop being usable as a
-	// distribution -- and nothing in the summary said so, leaving that to a
-	// reader who thought to compare two other fields.
-	//
-	// Decided per column before the swap, because a check is drawn from all
-	// four and is a sample if any of them is.
-	truncated := map[string]bool{
-		ColumnAnomalies:   view.AnomaliesTotal > len(view.Anomalies),
-		ColumnDemoted:     view.DemotedTotal > len(view.Demoted),
-		ColumnUndecidable: view.UndecidableTotal > len(view.Undecidable),
-		ColumnByDesign:    view.ByDesignTotal > len(view.ByDesign),
-	}
-	// The first screen, from every column before any of them is swapped in as
-	// the rows. Counted here so the line a reader clicks and the rows it opens
-	// come from one read of the view.
-	checks := ReportChecks(columns, truncated, &view, now())
-	todo := SummarizeTodo(checks, columns, &view, now())
+	// how many objects are not in it. On a bad enough deployment the list this
+	// summary counts is already a sample; the counts stay useful for "which of
+	// these is it" and stop being usable as a distribution, and the response
+	// says so rather than leaving it to a reader comparing two other fields.
 	summaryPartial := truncated[column]
 	// A check is a line on the first screen, and the rows it opens come from
 	// every column: the check decides membership, not the column. Its total is
@@ -876,7 +856,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 				map[string]string{"error": "check must be one of " + strings.Join(checkNames(), ", ")})
 			return
 		}
-		view.Anomalies = UnderCheck(check, group, &view)
+		view.Anomalies = UnderCheck(check, group, &view, now())
 		view.AnomaliesTotal = len(view.Anomalies)
 		summaryPartial = truncated[ColumnAnomalies] || truncated[ColumnDemoted] ||
 			truncated[ColumnUndecidable] || truncated[ColumnByDesign]

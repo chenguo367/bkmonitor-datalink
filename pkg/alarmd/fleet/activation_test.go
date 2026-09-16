@@ -95,7 +95,7 @@ func TestStandingsAreTheFirstLinesAndNameReplicas(t *testing.T) {
 	}
 	// Opening either line lists no objects: the rows route answers empty
 	// rather than inventing rows for a fact that has none.
-	if rows := UnderCheck(CheckCutoverFailing, "", &view); len(rows) != 0 {
+	if rows := UnderCheck(CheckCutoverFailing, "", &view, now); len(rows) != 0 {
 		t.Fatalf("CUTOVER_FAILING lists %d objects, want none", len(rows))
 	}
 }

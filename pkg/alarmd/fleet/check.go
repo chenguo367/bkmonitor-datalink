@@ -97,8 +97,8 @@ var checkAnswers = map[Check]struct {
 	CheckSlotsOverdue:       {OwnerAlarmd, GroupByReplica},
 	CheckNeverEvaluated:     {OwnerAlarmd, GroupByReplica},
 	CheckRoundsStalled:      {OwnerAlarmd, GroupByReplica},
-	CheckDetectionAbandoned: {OwnerAlarmd, GroupByReplica},
-	CheckTimelinePruned:     {OwnerAlarmd, GroupByReplica},
+	CheckDetectionAbandoned: {OwnerAlarmd, GroupByLoss},
+	CheckTimelinePruned:     {OwnerAlarmd, GroupByLoss},
 	CheckDependencyDown:     {OwnerAlarmd, GroupByReasonCode},
 	CheckDefect:             {OwnerAlarmd, GroupByReasonCode},
 	CheckObservationGap:     {OwnerAlarmd, GroupByGapKind},
@@ -224,6 +224,14 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 		return gapRestoredWithoutCause
 	case GroupByCause:
 		return windowCause(anomaly.Coverage, anomaly.CauseReason)
+	case GroupByLoss:
+		// An object a column put on the line folds on the code that put it
+		// there, which for these lines is a budget rejection -- the fold a
+		// reader may call capacity. A record row folds on its kind, set
+		// where the row is made (skippedRows); no record row comes through
+		// here, so no branch for it -- a branch nothing reaches would read
+		// as a rule.
+		return decidingCode(anomaly)
 	}
 	return ""
 }
@@ -324,13 +332,21 @@ type CheckReport struct {
 	// lost in the past and is kept on record. A line that added the two read
 	// as 393 objects to act on when 10 were anomalous and 383 were records of
 	// Slots skipped hours ago; the reader could not tell which without
-	// opening every group. RetainedLastHour and RetainedNewest are the part
-	// of the record a reader can still do something about: what was just
-	// lost, and when.
+	// opening every group. On the two record lines a record younger than
+	// RecentSkipWindow is a loss in progress and counts as Current; only the
+	// records that stopped are Retained. RetainedLastHour is how many of
+	// those stopped within the last hour, RetainedNewest the latest -- not
+	// "new" records: a record keeps one skip per object, the latest, so how
+	// many objects were added cannot be known from it.
 	Current          int        `json:"current"`
 	Retained         int        `json:"retained,omitempty"`
 	RetainedLastHour int        `json:"retained_last_hour,omitempty"`
 	RetainedNewest   *time.Time `json:"retained_newest,omitempty"`
+	// Consequence is on the lines whose objects are in the demoted pool: how
+	// many of them also skipped detection while there. The skip is what the
+	// cooldown did to the backlog, so it is this line's, and no capacity
+	// changes it.
+	Consequence *Consequence `json:"consequence,omitempty"`
 	// Partial says at least one column this check draws from was truncated by
 	// its replica, so the counts here are a sample of that column.
 	Partial bool         `json:"partial,omitempty"`
@@ -375,6 +391,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		newest     time.Time
 		activation *ActivationFacts
 		replica    string
+		skipped    *Consequence
 	}
 	tallies := map[Check]*tally{}
 	ensure := func(check Check) *tally {
@@ -431,15 +448,24 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		}
 	}
 	// What this deployment gave up on and never evaluated, retained past the
-	// rounds that followed. An object that skipped Slots an hour ago and has
-	// run normally since is under no column, and it stays on this line until a
-	// restart forgets it: the loss is permanent and the row is the only record.
+	// rounds that followed. A record made within the window is a loss in
+	// progress and is current; one that stopped is retained: an object that
+	// skipped Slots an hour ago and has run normally since is under no
+	// column, and it stays on this line until a restart forgets it, because
+	// the loss is permanent and the row is the only record. A demoted
+	// object's record is neither: it is the consequence of the line the
+	// object is under, and is counted there.
 	// And the objects whose data stopped: under no column either, their rounds
 	// complete, and on the data side's line.
 	if view != nil {
-		for _, row := range skippedRows(view, listed) {
+		rows, consequences := skippedRows(view, listed, now)
+		for _, row := range rows {
 			entry := ensure(row.Finding.Check)
 			add(entry, row.Finding.Group, &row)
+			if row.Loss == LossOngoing {
+				entry.current++
+				continue
+			}
 			entry.retained++
 			if row.Skip != nil {
 				if now.Sub(row.Skip.At) <= time.Hour {
@@ -449,6 +475,9 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 					entry.newest = row.Skip.At
 				}
 			}
+		}
+		for check, consequence := range consequences {
+			ensure(check).skipped = consequence
 		}
 		for index := range view.NoData {
 			row := &view.NoData[index]
@@ -510,7 +539,8 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		report := CheckReport{Code: check, Owner: checkAnswers[check].Owner, GroupBy: checkAnswers[check].GroupBy,
 			Objects: entry.objects, Strategies: len(entry.strategies), Businesses: len(entry.businesses),
 			Partial: entry.partial, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
-			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour}
+			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour,
+			Consequence: entry.skipped}
 		if !entry.newest.IsZero() {
 			newest := entry.newest
 			report.RetainedNewest = &newest
@@ -541,19 +571,48 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 // two lines counted twice. What a reader needs is how many lines are theirs,
 // how many distinct objects those lines cover now, and -- apart from that --
 // how much was lost in the past and how much of it just now.
+//
+// Three parts, because "not confirmed as this deployment's" and "confirmed
+// as somebody else's" are different statements and the page made them one:
+// it said the rest were the strategy's or the data's people while the lines
+// under it still read 待确认. Checks and Objects are what is confirmed as
+// this deployment's; Undetermined what nobody can yet hand to anyone;
+// Governance what is confirmed as the strategy's or the data's.
 type Todo struct {
-	// Checks is the lines this reader acts on that have something on them
-	// now: an object, or a standing of the deployment itself.
+	// Checks is the lines confirmed as this deployment's that have something
+	// on them now: an object, or a standing of the deployment itself.
 	Checks int `json:"checks"`
 	// Objects is the distinct objects under those lines, now. An object
 	// under two lines is one object.
 	Objects int `json:"objects"`
-	// Retained is the distinct objects with a record of past loss, kept
-	// until somebody looks; RetainedLastHour is how many of those records
-	// were made in the last hour and RetainedNewest when the newest was.
+	// Undetermined is the lines whose owner the evidence does not decide,
+	// and the distinct objects under them. Not this deployment's to fix and
+	// not yet anybody else's: the part a reader must not hand over.
+	Undetermined        int `json:"undetermined"`
+	UndeterminedObjects int `json:"undetermined_objects"`
+	// Ongoing is the distinct objects, not in the demoted pool, whose latest
+	// skip record was made within RecentWindowSeconds: detection being lost
+	// now. OngoingNewest is the latest of them. They are on the current
+	// lines and in Objects; they are named here because they are the answer
+	// to "is it still happening", which the record count is not.
+	Ongoing       int        `json:"ongoing"`
+	OngoingNewest *time.Time `json:"ongoing_newest,omitempty"`
+	// WhileDemoted is the distinct objects in the demoted pool that also
+	// skipped detection there, and how many within the window: the
+	// cooldown's consequence, counted on the lines the objects are under.
+	WhileDemoted       int `json:"while_demoted"`
+	WhileDemotedRecent int `json:"while_demoted_recent"`
+	// Retained is the distinct objects with a record of a loss that stopped:
+	// older than the window, and not demoted. RetainedLastHour is how many of
+	// those stopped within the last hour, RetainedNewest the latest. The
+	// record keeps one skip per object, so neither says how many objects
+	// were added.
 	Retained         int        `json:"retained"`
 	RetainedLastHour int        `json:"retained_last_hour"`
 	RetainedNewest   *time.Time `json:"retained_newest,omitempty"`
+	// RecentWindowSeconds is the window the counts above are decided on,
+	// so the page prints the bound it was measured with.
+	RecentWindowSeconds int `json:"recent_window_seconds"`
 	// Governance is the lines already confirmed as somebody else's, and the
 	// distinct objects under them.
 	Governance        int `json:"governance"`
@@ -564,17 +623,21 @@ type Todo struct {
 // the columns say which objects are under them, so the distinct count is
 // taken from the objects and not from the lines.
 func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now time.Time) Todo {
-	todo := Todo{}
+	todo := Todo{RecentWindowSeconds: int(RecentSkipWindow / time.Second)}
 	ours := map[string]struct{}{}
+	undetermined := map[string]struct{}{}
 	theirs := map[string]struct{}{}
 	count := func(list []Anomaly) {
 		for _, anomaly := range list {
 			if anomaly.Finding.Check == "" {
 				continue
 			}
-			if checkAnswers[anomaly.Finding.Check].Owner.actionRequired() {
+			switch checkAnswers[anomaly.Finding.Check].Owner {
+			case OwnerAlarmd:
 				ours[anomaly.QueryGroup] = struct{}{}
-			} else {
+			case OwnerUndetermined:
+				undetermined[anomaly.QueryGroup] = struct{}{}
+			default:
 				theirs[anomaly.QueryGroup] = struct{}{}
 			}
 		}
@@ -585,7 +648,45 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 	if view != nil {
 		count(view.NoData)
 	}
-	todo.Objects, todo.GovernanceObjects = len(ours), len(theirs)
+	if view != nil {
+		// One walk over the records, the same one the lines make. A loss in
+		// progress is this deployment's and current, so its object counts
+		// with ours; a demoted object's record is its line's consequence; a
+		// stopped loss is the record.
+		var ongoingNewest, retainedNewest time.Time
+		whileDemoted := map[string]struct{}{}
+		lossRecords(view, now, func(queryGroup string, _, _ Check, _ string, skip SkippedSpan, loss Loss) {
+			switch loss {
+			case LossOngoing:
+				ours[queryGroup] = struct{}{}
+				todo.Ongoing++
+				if skip.At.After(ongoingNewest) {
+					ongoingNewest = skip.At
+				}
+			case LossWhileDemoted:
+				whileDemoted[queryGroup] = struct{}{}
+				if now.Sub(skip.At) <= RecentSkipWindow {
+					todo.WhileDemotedRecent++
+				}
+			default:
+				todo.Retained++
+				if now.Sub(skip.At) <= time.Hour {
+					todo.RetainedLastHour++
+				}
+				if skip.At.After(retainedNewest) {
+					retainedNewest = skip.At
+				}
+			}
+		})
+		todo.WhileDemoted = len(whileDemoted)
+		if !ongoingNewest.IsZero() {
+			todo.OngoingNewest = &ongoingNewest
+		}
+		if !retainedNewest.IsZero() {
+			todo.RetainedNewest = &retainedNewest
+		}
+	}
+	todo.Objects, todo.UndeterminedObjects, todo.GovernanceObjects = len(ours), len(undetermined), len(theirs)
 	if view != nil {
 		// The objects a replica holds and has said nothing conclusive about
 		// are under OBSERVATION_GAP and have no row to be distinct by; they
@@ -593,32 +694,14 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 		todo.Objects += view.Unknown
 	}
 	for _, report := range reports {
+		up := report.Current > 0 || report.Activation != nil || report.Code == CheckReplicaDegraded
 		switch {
 		case !report.ActionRequired():
 			todo.Governance++
-		case report.Current > 0 || report.Activation != nil || report.Code == CheckReplicaDegraded:
+		case report.Owner == OwnerUndetermined && up:
+			todo.Undetermined++
+		case up:
 			todo.Checks++
-		}
-	}
-	if view != nil {
-		var newest time.Time
-		note := func(at time.Time) {
-			todo.Retained++
-			if now.Sub(at) <= time.Hour {
-				todo.RetainedLastHour++
-			}
-			if at.After(newest) {
-				newest = at
-			}
-		}
-		for _, skip := range view.GapSkips {
-			note(skip.At)
-		}
-		for _, skip := range view.PrunedSkips {
-			note(skip.At)
-		}
-		if !newest.IsZero() {
-			todo.RetainedNewest = &newest
 		}
 	}
 	return todo
@@ -656,9 +739,10 @@ func checkNames() []string {
 // within one of its groups when group is not empty, plus the retained skip
 // records under it. This is the list a line on the first screen opens; its
 // total is how many it holds.
-func UnderCheck(check Check, group string, view *View) []Anomaly {
+func UnderCheck(check Check, group string, view *View, now time.Time) []Anomaly {
 	list := []Anomaly{}
 	listed := map[string]struct{}{}
+	demoted := demotedObjects(view)
 	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData} {
 		for _, anomaly := range column {
 			if anomaly.Finding.Check != check {
@@ -670,10 +754,20 @@ func UnderCheck(check Check, group string, view *View) []Anomaly {
 			if group != "" && anomaly.Finding.Group != group {
 				continue
 			}
+			// A demoted object's record rides on its own row: what it lost
+			// while under this line, said on the row rather than on a line
+			// that would file it as this deployment's capacity.
+			if line, isDemoted := demoted[anomaly.QueryGroup]; isDemoted && line != "" && anomaly.Skip == nil {
+				if skip, recorded := view.GapSkips[anomaly.QueryGroup]; recorded {
+					record := skip
+					anomaly.Skip, anomaly.Loss = &record, LossWhileDemoted
+				}
+			}
 			list = append(list, anomaly)
 		}
 	}
-	for _, row := range skippedRows(view, listed) {
+	rows, _ := skippedRows(view, listed, now)
+	for _, row := range rows {
 		if row.Finding.Check != check || (group != "" && row.Finding.Group != group) {
 			continue
 		}
@@ -700,32 +794,38 @@ func underKey(check Check, queryGroup string) string {
 	return string(check) + "|" + queryGroup
 }
 
-// skippedRows turns the view's retained skip records into rows, one per
-// object not already listed under the same check. A pruned span is
-// TIMELINE_PRUNED and a replay-window skip is DETECTION_ABANDONED; both are
-// this deployment's and fold on the replica that applied them.
-func skippedRows(view *View, listed map[string]struct{}) []Anomaly {
+// skippedRows turns the view's retained skip records into rows for the two
+// record lines, one per object not already listed under the same check: a
+// pruned span is TIMELINE_PRUNED and a replay-window skip is
+// DETECTION_ABANDONED, both this deployment's, folded on what the loss is --
+// in progress, or stopped. A demoted object's record is not a row here: it
+// is handed back as the consequence of the line the object is under, keyed
+// by that line, because the cooldown that line reports is what skipped the
+// rounds. A demoted object under no line -- which the tracker does not
+// produce -- is treated like any other.
+func skippedRows(view *View, listed map[string]struct{}, now time.Time) ([]Anomaly, map[Check]*Consequence) {
 	rows := []Anomaly{}
-	row := func(queryGroup string, check Check, reason string, skip SkippedSpan) {
+	consequences := map[Check]*Consequence{}
+	lossRecords(view, now, func(queryGroup string, check, line Check, reason string, skip SkippedSpan, loss Loss) {
+		if loss == LossWhileDemoted {
+			if consequences[line] == nil {
+				consequences[line] = &Consequence{}
+			}
+			consequences[line].note(skip.At, now)
+			return
+		}
 		if _, already := listed[underKey(check, queryGroup)]; already {
 			return
 		}
 		listed[underKey(check, queryGroup)] = struct{}{}
+		record := skip
 		item := Anomaly{QueryGroup: queryGroup, Kind: KindSkippedSpan, ReasonCode: reason,
-			Since: skip.At, SinceFrom: SinceSnapshotContinuity, Replica: skip.Replica, Skip: &skip,
-			Strategies: skip.Strategies}
-		item.Finding = Finding{Check: check, Group: skip.Replica, Owner: checkAnswers[check].Owner}
+			Since: skip.At, SinceFrom: SinceSnapshotContinuity, Replica: skip.Replica, Skip: &record,
+			Strategies: skip.Strategies, Loss: loss}
+		item.Finding = Finding{Check: check, Group: string(loss), Owner: checkAnswers[check].Owner}
 		item.Attribution = attributionOf(item)
 		rows = append(rows, item)
-	}
-	for queryGroup, skip := range view.GapSkips {
-		row(queryGroup, CheckDetectionAbandoned, "GAP_SKIPPED", skip)
-	}
-	for queryGroup, pruned := range view.PrunedSkips {
-		row(queryGroup, CheckTimelinePruned, "SCHEDULE_PRUNED",
-			SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To, At: pruned.At, Replica: pruned.Replica,
-				Strategies: pruned.Strategies})
-	}
+	})
 	sort.Slice(rows, func(i, j int) bool { return rows[i].QueryGroup < rows[j].QueryGroup })
-	return rows
+	return rows, consequences
 }
