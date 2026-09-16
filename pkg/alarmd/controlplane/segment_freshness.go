@@ -181,3 +181,20 @@ func OpenSegmentObjectDigestForTest(
 	}
 	return timeline.Segments[last].Schedule.Segment.ObjectDigest, nil
 }
+
+// ScheduleTimelineBytesForTest is the stored bytes of a Query Group's schedule
+// timeline, so a test can assert a refused cutover wrote nothing.
+//
+// Reading the bytes rather than the decoded timeline is the point: "the
+// cutover returned an error before the write" is a statement about code order,
+// and code order is what the next edit changes.
+func ScheduleTimelineBytesForTest(
+	ctx context.Context, repository *RedisCatalogRepository, group execution.QueryGroupIdentity,
+) ([]byte, error) {
+	return repository.client.Get(ctx, repository.scheduleTimelineKey(group)).Bytes()
+}
+
+// ActivationBytesForTest is the stored bytes of the current activation.
+func ActivationBytesForTest(ctx context.Context, repository *RedisCatalogRepository) ([]byte, error) {
+	return repository.client.Get(ctx, repository.activationKey()).Bytes()
+}

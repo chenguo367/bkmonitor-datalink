@@ -472,10 +472,7 @@ type ScheduleCutoverFacts struct {
 
 // ScheduleCutoverDecisions is the closed vocabulary of what a publication
 // cutover does with one Query Group.
-var ScheduleCutoverDecisions = []string{
-	"kept", "revised", "cut", "legacy_cut", "retired", "added",
-	"adopted_current", "repaired_foreign",
-}
+var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", "retired", "added"}
 
 // ObjectCatalogFacts describe one write or renewal of the content-addressed
 // Query Group objects, output contexts and the manifest that names them for

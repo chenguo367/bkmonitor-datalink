@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -96,14 +97,58 @@ func TestEveryCutoverReasonIsListed(t *testing.T) {
 		}
 		listed[reason] = true
 	}
-	for _, reason := range []string{
-		CutoverReasonActivationRecordMissing, CutoverReasonSegmentConflict, CutoverReasonDigestMismatch,
-		CutoverReasonConflict, CutoverReasonUnavailable, CutoverReasonInvalidRequest,
-		CutoverReasonIO, CutoverReasonOther,
-	} {
-		if !listed[reason] {
-			t.Fatalf("reason %q is declared and not listed, so the metric never creates its label and "+
-				"a failure landing there reports a series nobody can find", reason)
+
+	// The reasons are found by reading the source rather than from a list kept
+	// here, because a list kept here is one more place to forget -- and it was
+	// already stale by one reason when this was written. A reason that is
+	// declared, returned somewhere, and absent from CutoverReasons creates no
+	// label at startup, so the first failure landing on it reports a series
+	// nobody is watching for.
+	fileSet := token.NewFileSet()
+	declared := map[string]bool{}
+	for _, name := range []string{"cutover_reason.go", "redis_runtime.go"} {
+		parsed, err := parser.ParseFile(fileSet, name, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ast.Inspect(parsed, func(node ast.Node) bool {
+			identifier, ok := node.(*ast.Ident)
+			if ok && strings.HasPrefix(identifier.Name, "CutoverReason") {
+				declared[identifier.Name] = true
+			}
+			return true
+		})
+	}
+	if len(declared) == 0 {
+		t.Fatal("no reasons were found in the source, so this guard scans nothing")
+	}
+	byName := map[string]string{
+		"CutoverReasonActivationRecordMissing": CutoverReasonActivationRecordMissing,
+		"CutoverReasonTimelineMissing":         CutoverReasonTimelineMissing,
+		"CutoverReasonOpenSegmentClosed":       CutoverReasonOpenSegmentClosed,
+		"CutoverReasonOpenDigestMismatch":      CutoverReasonOpenDigestMismatch,
+		"CutoverReasonLegacyRevisionMismatch":  CutoverReasonLegacyRevisionMismatch,
+		"CutoverReasonSegmentContentMismatch":  CutoverReasonSegmentContentMismatch,
+		"CutoverReasonSegmentConflict":         CutoverReasonSegmentConflict,
+		"CutoverReasonDigestMismatch":          CutoverReasonDigestMismatch,
+		"CutoverReasonConflict":                CutoverReasonConflict,
+		"CutoverReasonUnavailable":             CutoverReasonUnavailable,
+		"CutoverReasonInvalidRequest":          CutoverReasonInvalidRequest,
+		"CutoverReasonIO":                      CutoverReasonIO,
+		"CutoverReasonOther":                   CutoverReasonOther,
+	}
+	for name := range declared {
+		if name == "CutoverReasons" {
+			continue
+		}
+		value, known := byName[name]
+		if !known {
+			t.Fatalf("%s is used in the cutover and this guard does not know its value; add it here and "+
+				"to CutoverReasons, or the metric will never create its label", name)
+		}
+		if !listed[value] {
+			t.Fatalf("reason %s (%q) is used and not in CutoverReasons, so the metric never creates its "+
+				"label and a failure landing there reports a series nobody can find", name, value)
 		}
 	}
 }
@@ -238,42 +283,98 @@ func TestASegmentIsNotCutForAQueryGroupThePublicationDoesNotName(t *testing.T) {
 
 // A Segment carries the names it was given, unchanged.
 func TestASegmentCarriesTheNamesItWasGiven(t *testing.T) {
-	refs := []execution.OutputContextRef{{
-		Plan:   execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "1"},
-		Digest: execution.OutputContextDigest("ctx-digest"),
-	}}
+	group := QueryGroup{Identity: "qg-a", Plans: []FrozenPlan{{
+		Identity: execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "1"},
+		Plan:     contract.EvaluationPlanV2{PlanID: "1"},
+	}}}
+	named := namedContentForTest(t, group)
+
 	segment, err := scheduleSegmentForGroup(
-		SnapshotPublicationRef{SnapshotRevision: "rev", PublicationEpoch: 1},
-		QueryGroup{Identity: "qg-a"}, 60,
-		ContentEntry{Digest: execution.ObjectDigest("object-digest"), Refs: refs},
-	)
+		SnapshotPublicationRef{SnapshotRevision: "rev", PublicationEpoch: 1}, group, 60, named)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if segment.ObjectDigest != execution.ObjectDigest("object-digest") {
-		t.Fatalf("segment names %q, want the object the publication named", segment.ObjectDigest)
+	if segment.ObjectDigest != named.Digest {
+		t.Fatalf("segment names %q, want the object the publication named (%q)",
+			segment.ObjectDigest, named.Digest)
 	}
-	if len(segment.OutputContextRefs) != 1 || segment.OutputContextRefs[0].Digest != refs[0].Digest {
+	if len(segment.OutputContextRefs) != 1 || segment.OutputContextRefs[0].Digest != named.Refs[0].Digest {
 		t.Fatalf("segment output contexts = %+v, want the ones the publication named", segment.OutputContextRefs)
 	}
 }
 
-// The two decisions this change adds are in the vocabulary the metric bounds
-// itself by.
+// A Segment is refused when the content does not hash to the name it is being
+// given.
 //
-// A decision the list does not name creates no label at startup, so the first
-// time it happens it appears as a series nobody is watching for -- and both of
-// these are meant to be watched: one says an earlier cutover half completed,
-// the other says a Segment was found executing content nobody published.
-func TestTheRecoveryDecisionsAreInTheClosedVocabulary(t *testing.T) {
-	listed := map[string]bool{}
-	for _, decision := range observability.ScheduleCutoverDecisions {
-		listed[decision] = true
+// Copying the name stops assembly from changing a name. It does not stop
+// assembly from changing the content, and a Segment naming one object while
+// carrying another is the same fault wearing the other mask -- it would be
+// written, it would verify against its own digest, and it would be found weeks
+// later by a cutover refusing a mismatch nobody could explain.
+func TestASegmentIsRefusedWhenItsContentDoesNotMatchItsName(t *testing.T) {
+	group := QueryGroup{Identity: "qg-a", Plans: []FrozenPlan{{
+		Identity: execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "1"},
+		Plan:     contract.EvaluationPlanV2{PlanID: "1", NoData: &contract.NoDataConfigV1{Continuous: 1, Level: 2}},
+	}}}
+	// The manifest names the content as published; the group comes back from
+	// assembly with the section gone, which is exactly what happened.
+	named := namedContentForTest(t, group)
+	lossy := group
+	lossy.Plans = append([]FrozenPlan(nil), group.Plans...)
+	lossy.Plans[0].Plan.NoData = nil
+
+	_, err := scheduleSegmentForGroup(
+		SnapshotPublicationRef{SnapshotRevision: "rev", PublicationEpoch: 1}, lossy, 60, named)
+
+	if err == nil {
+		t.Fatal("a Segment was cut naming an object its content does not hash to")
 	}
-	for _, decision := range []contentCutoverDecision{cutoverAdopted, cutoverRepaired} {
-		if !listed[string(decision)] {
-			t.Fatalf("decision %q is made by the cutover and is not in ScheduleCutoverDecisions, so the "+
-				"metric never creates its label", decision)
+	if got := cutoverFailureReason(err); got != CutoverReasonSegmentContentMismatch {
+		t.Fatalf("reason = %q, want %q", got, CutoverReasonSegmentContentMismatch)
+	}
+	var conflict *ScheduleConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("the refusal carries no conflict: %v", err)
+	}
+	if !strings.Contains(conflict.Detail, "manifest_digest=") ||
+		!strings.Contains(conflict.Detail, "assembled_digest=") {
+		t.Fatalf("detail = %q, want both digests", conflict.Detail)
+	}
+}
+
+// The output context names are checked too, not only the object.
+func TestASegmentIsRefusedWhenAnOutputContextDoesNotMatch(t *testing.T) {
+	group := QueryGroup{Identity: "qg-a", Plans: []FrozenPlan{{
+		Identity: execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "1"},
+		Plan:     contract.EvaluationPlanV2{PlanID: "1"},
+	}}}
+	named := namedContentForTest(t, group)
+	named.Refs = []execution.OutputContextRef{{
+		Plan: group.Plans[0].Identity, Digest: execution.OutputContextDigest("something-else"),
+	}}
+
+	_, err := scheduleSegmentForGroup(
+		SnapshotPublicationRef{SnapshotRevision: "rev", PublicationEpoch: 1}, group, 60, named)
+
+	if got := cutoverFailureReason(err); got != CutoverReasonSegmentContentMismatch {
+		t.Fatalf("reason = %q, want %q; err = %v", got, CutoverReasonSegmentContentMismatch, err)
+	}
+}
+
+// namedContentForTest is the manifest entry a publication of this group writes.
+func namedContentForTest(t *testing.T, group QueryGroup) ContentEntry {
+	t.Helper()
+	digest, err := DeriveQueryGroupObjectDigest(group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := make([]execution.OutputContextRef, 0, len(group.Plans))
+	for _, plan := range group.Plans {
+		contextDigest, err := DeriveOutputContextDigest(plan)
+		if err != nil {
+			t.Fatal(err)
 		}
+		refs = append(refs, execution.OutputContextRef{Plan: plan.Identity, Digest: contextDigest})
 	}
+	return ContentEntry{Digest: digest, Refs: refs}
 }

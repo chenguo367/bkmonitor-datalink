@@ -436,26 +436,18 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		// Segment that disagrees was changed outside this path. A Segment
 		// written before Segments named their content is compared on the
 		// revisions the old source carries instead.
-		// What the open Segment names, against what the last activation named
-		// and what this publication names. Three answers, not two.
-		//
-		// It agreeing with the activation is the ordinary case and falls
-		// through. It agreeing with this publication instead means a previous
-		// attempt already cut it and did not land its activation: there is
-		// nothing left to cut, and adopting it is the idempotent answer.
-		// Agreeing with neither means it is executing content no one can name,
-		// and that is repaired rather than refused -- refusing it leaves the
-		// Segment exactly where it is and fails the same way every round, which
-		// is how a fleet spent eleven hours on content nobody had published.
-		adopt, repair := false, false
+		// A source that names the content must agree with the Segment; a
+		// Segment that disagrees was changed outside this path, and this path
+		// does not repair it. Segments already carrying a name nobody
+		// published are cleaned up once, deliberately, by the repair
+		// subcommand -- not by a self-healing branch that would have to stay
+		// in the code forever for a state that cannot be produced any more.
 		if oldDigest, named := previousContent.digests[queryGroup]; named && open.Schedule.Segment.ObjectDigest != "" &&
 			open.Schedule.Segment.ObjectDigest != oldDigest {
-			switch open.Schedule.Segment.ObjectDigest {
-			case newContent[queryGroup].digest:
-				adopt = true
-			default:
-				repair = true
-			}
+			return scheduleConflict(CutoverReasonOpenDigestMismatch, queryGroup,
+				fmt.Sprintf("open_digest=%s activation_digest=%s published_digest=%s content_source=%s",
+					open.Schedule.Segment.ObjectDigest, oldDigest, newContent[queryGroup].digest,
+					previousContent.source))
 		}
 		if open.Schedule.Segment.ObjectDigest == "" && oldGroup.QueryPlan.QueryRevision != "" &&
 			(open.Schedule.Segment.QueryRevision != oldGroup.QueryPlan.QueryRevision ||
@@ -471,13 +463,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		for _, record := range open.Plans {
 			coveredPrevious[record.Fact.Plan] = struct{}{}
 		}
-		if repair {
-			// Falls through to the close-and-reopen below, which cuts from this
-			// publication. Counted under its own decision because a Segment
-			// nobody named is worth knowing about even once it is repaired.
-			cutover.decided(cutoverRepaired)
-		} else if remains && open.Schedule.Segment.ObjectDigest != "" &&
-			(open.Schedule.Segment.ObjectDigest == newContent[queryGroup].digest || adopt) {
+		if remains && open.Schedule.Segment.ObjectDigest != "" && open.Schedule.Segment.ObjectDigest == newContent[queryGroup].digest {
 			// Same execution content: the Segment and its records stay. Only
 			// the output contexts may have moved, and they move by revision.
 			plans = append(plans, open.Plans...)
@@ -487,16 +473,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 				inForce = segment.OutputContextRevisions[count-1].Refs
 			}
 			if execution.SameOutputContextRefs(inForce, newContent[queryGroup].refs) {
-				// Adoption takes the count when it applies. It is the rare and
-				// diagnostic one -- an open Segment that already names this
-				// publication's content is a previous attempt that wrote its
-				// Segments and did not land its activation -- and kept is the
-				// steady state nobody reads individually.
-				decision := cutoverKept
-				if adopt {
-					decision = cutoverAdopted
-				}
-				cutover.decided(decision)
+				cutover.decided(cutoverKept)
 				continue
 			}
 			revised := open.Schedule
@@ -515,13 +492,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 				candidates = append(candidates, pruneCandidate{update: len(updates), dead: dead})
 			}
 			updates = append(updates, scheduleTimelineUpdate{expected: raw, next: timeline})
-			// Same reason as above: the contexts did move and were revised, and
-			// the adoption is the fact worth seeing.
-			revisedDecision := cutoverRevised
-			if adopt {
-				revisedDecision = cutoverAdopted
-			}
-			cutover.decided(revisedDecision)
+			cutover.decided(cutoverRevised)
 			continue
 		}
 		closed := open.Schedule
@@ -1257,6 +1228,18 @@ func scheduleSegmentForGroup(
 	if named.Digest == "" {
 		return execution.ScheduleSegmentFact{}, fmt.Errorf(
 			"%w: the publication names no object for Query Group %s", ErrCutoverRequest, group.Identity)
+	}
+	// And the content is checked against the names before either is written.
+	//
+	// Copying stops assembly from changing a name. It does not stop assembly
+	// from changing the content, and a Segment naming one object while
+	// carrying another is the same fault wearing the other mask. Recomputing
+	// here is the only place both are in hand at once, so it is where they are
+	// compared -- and a disagreement is refused rather than written, because
+	// what follows would put a Segment on the store that says one thing and
+	// executes another.
+	if err := verifySegmentContent(group, named); err != nil {
+		return execution.ScheduleSegmentFact{}, err
 	}
 	objectDigest := named.Digest
 	refs := append([]execution.OutputContextRef(nil), named.Refs...)

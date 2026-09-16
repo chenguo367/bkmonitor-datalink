@@ -58,6 +58,18 @@ const (
 	// named their content, whose query or schedule revision disagrees with the
 	// group it is being compared against.
 	CutoverReasonLegacyRevisionMismatch = "legacy_revision_mismatch"
+	// CutoverReasonSegmentContentMismatch is the publication's own names
+	// disagreeing with the content it hands the cutter: the manifest says this
+	// Query Group's object is one digest and the group that came back from the
+	// object store hashes to another.
+	//
+	// It means assembly changed the content on the way back -- a field dropped,
+	// a field added, an encoding that no longer round-trips. That has happened,
+	// it named every Segment cut during it after an object the manifest did not
+	// name, and it was invisible for eleven hours because nothing compared the
+	// two. Comparing them makes it a refusal at the moment it happens, on the
+	// Query Group it happens to, with both digests in the line.
+	CutoverReasonSegmentContentMismatch = "segment_content_mismatch"
 	// CutoverReasonSegmentConflict is a Segment precondition that none of the
 	// four above names. Like other, it should stay at zero.
 	CutoverReasonSegmentConflict = "segment_conflict"
@@ -90,7 +102,8 @@ const (
 var CutoverReasons = []string{
 	CutoverReasonActivationRecordMissing,
 	CutoverReasonTimelineMissing, CutoverReasonOpenSegmentClosed,
-	CutoverReasonOpenDigestMismatch, CutoverReasonLegacyRevisionMismatch, CutoverReasonSegmentConflict,
+	CutoverReasonOpenDigestMismatch, CutoverReasonLegacyRevisionMismatch,
+	CutoverReasonSegmentContentMismatch, CutoverReasonSegmentConflict,
 	CutoverReasonDigestMismatch, CutoverReasonConflict, CutoverReasonUnavailable,
 	CutoverReasonInvalidRequest, CutoverReasonIO, CutoverReasonOther,
 }
@@ -182,4 +195,48 @@ func (facts *cutoverFacts) failedAt(group execution.QueryGroupIdentity) {
 		return
 	}
 	facts.group = string(group)
+}
+
+// verifySegmentContent checks that the group a Segment is cut from is the
+// content the publication named.
+//
+// The names are copied from the manifest and the content comes back from the
+// object store, so the two have different provenances and only this comparison
+// ties them together. It is deliberately the derivation the manifest itself
+// used: an agreement here means the bytes that were published are the bytes
+// that came back, and a disagreement names both sides.
+func verifySegmentContent(group QueryGroup, named ContentEntry) error {
+	assembled, err := DeriveQueryGroupObjectDigest(group)
+	if err != nil {
+		return err
+	}
+	if assembled != named.Digest {
+		return scheduleConflict(CutoverReasonSegmentContentMismatch, group.Identity, fmt.Sprintf(
+			"manifest_digest=%s assembled_digest=%s", named.Digest, assembled))
+	}
+	byPlan := make(map[execution.PlanIdentity]execution.OutputContextDigest, len(named.Refs))
+	for _, ref := range named.Refs {
+		byPlan[ref.Plan] = ref.Digest
+	}
+	for _, plan := range group.Plans {
+		digest, err := DeriveOutputContextDigest(plan)
+		if err != nil {
+			return err
+		}
+		wanted, ok := byPlan[plan.Identity]
+		if !ok {
+			return scheduleConflict(CutoverReasonSegmentContentMismatch, group.Identity, fmt.Sprintf(
+				"manifest_refs name no output context for Plan %s assembled_ref=%s",
+				plan.Identity.StrategyID, digest))
+		}
+		if wanted != digest {
+			return scheduleConflict(CutoverReasonSegmentContentMismatch, group.Identity, fmt.Sprintf(
+				"plan=%s manifest_ref=%s assembled_ref=%s", plan.Identity.StrategyID, wanted, digest))
+		}
+	}
+	if len(named.Refs) != len(group.Plans) {
+		return scheduleConflict(CutoverReasonSegmentContentMismatch, group.Identity, fmt.Sprintf(
+			"manifest_refs=%d assembled_plans=%d", len(named.Refs), len(group.Plans)))
+	}
+	return nil
 }

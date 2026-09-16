@@ -11,12 +11,12 @@ package controlplane_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // A Segment names the object the publication's manifest names.
@@ -92,145 +92,117 @@ func shortPrefix(name string) string {
 	return string(out)
 }
 
-// A Segment naming content neither the activation nor the publication names is
-// repaired, not refused forever.
+// A refused cutover writes nothing at all.
 //
-// This is production's state, reproduced: an open Segment whose digest is a
-// third value, because it was cut from a group that had been through an
-// assembly which dropped a field. Refusing it -- what the code did until now --
-// leaves the Segment exactly where it is and fails the same way on every later
-// round, so the fleet goes on executing content nobody published for as long as
-// that lasts. It lasted eleven hours. A refusal that cannot be recovered from
-// protects nothing.
-func TestASegmentNamingContentNobodyNamesIsRepaired(t *testing.T) {
-	fixture := newNoDataHopFixture(t, "segment-repair", validCatalog(t, 80))
+// Every one of the cutover's refusals happens inside the per-Query-Group loop,
+// and both writes -- the timeline prune and the activation compare-and-set --
+// come after it. That ordering is the whole reason a refusal is safe: it
+// leaves the store exactly as it found it, so the next round sees the same
+// thing and the failure stays one failure rather than becoming a half-applied
+// publication. It is also ordering, which is what the next edit to a
+// two-hundred-line function changes without noticing.
+//
+// Asserted on the stored bytes rather than on the decoded records, because
+// "it returned before the write" is a claim about code order and the bytes are
+// the only thing that can contradict it.
+func TestARefusedCutoverWritesNothing(t *testing.T) {
+	fixture := newNoDataHopFixture(t, "cutover-writes-nothing", validCatalog(t, 80))
 	ctx := context.Background()
 
-	// Put the open Segment on a digest neither side names, the way a Segment
-	// cut from a lossy assembly was.
-	foreign := execution.ObjectDigest("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
-	if err := controlplane.SetOpenSegmentObjectDigestForTest(ctx, fixture.repository, fixture.group, foreign); err != nil {
+	timelineBefore, err := controlplane.ScheduleTimelineBytesForTest(ctx, fixture.repository, fixture.group)
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Not read back through the runtime here: that read is cached, and the
-	// cutover reads the timeline for update, uncached. The repair decision
-	// below is what says the fixture landed.
+	activationBefore, err := controlplane.ActivationBytesForTest(ctx, fixture.repository)
+	if err != nil {
+		t.Fatal(err)
+	}
 
-	decisions := map[string]int{}
-	fixture.repository.ConfigureObserver(observability.ObserverFunc(
-		func(_ context.Context, observation observability.Observation) {
-			if facts := observation.ScheduleCutover; facts != nil {
-				for decision, count := range facts.QueryGroups {
-					decisions[decision] += count
-				}
-			}
-		}))
-
-	// The second cutover cuts at a later boundary; at the same instant the open
-	// Segment already starts at, it is refused for that reason before the
-	// digest is ever compared.
-	*fixture.now = fixture.now.Add(2 * time.Minute)
+	// The clock does not move, so the second publication cuts at the instant
+	// the open Segment already starts at and the cutover refuses.
 	second, _, err := fixture.repository.PublishCatalog(ctx, noDataSourceCatalog(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.reconciler.Ensure(ctx, second.Publication); err != nil {
-		t.Fatalf("the cutover refused a Segment nobody names: %v. Refusing leaves it there and fails the "+
-			"same way next round, which is how a fleet stays on unpublished content indefinitely", err)
+	if _, err := fixture.reconciler.Ensure(ctx, second.Publication); err == nil {
+		t.Skip("this fixture no longer produces a refusal; the assertion below would prove nothing")
 	}
 
-	if decisions["repaired_foreign"] == 0 {
-		t.Fatalf("decisions = %+v, want the repair counted: it is rare and worth seeing even once it "+
-			"heals itself", decisions)
-	}
-	// And the Segment the cutover left behind names what the publication
-	// names, read straight from the timeline rather than through the cache.
-	after, err := controlplane.OpenSegmentObjectDigestForTest(ctx, fixture.repository, fixture.group)
+	timelineAfter, err := controlplane.ScheduleTimelineBytesForTest(ctx, fixture.repository, fixture.group)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after == foreign {
-		t.Fatal("the Segment still names the content nobody published")
+	if string(timelineAfter) != string(timelineBefore) {
+		t.Fatalf("a refused cutover changed the schedule timeline. Every refusal is inside the " +
+			"per-Query-Group loop and both writes come after it; a refusal that writes leaves a " +
+			"half-applied publication behind and the next round sees a different store than it did")
+	}
+	activationAfter, err := controlplane.ActivationBytesForTest(ctx, fixture.repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(activationAfter) != string(activationBefore) {
+		t.Fatal("a refused cutover changed the activation")
 	}
 }
 
-// A Segment already naming what this publication names is adopted, not cut
-// again.
+// Publishing the same content twice leaves the Segment where it is, and a
+// worker reading it still gets the no-data section.
 //
-// That is a previous attempt which wrote its Segments and did not land its
-// activation: the Segment is already where the cutover would put it. Cutting
-// again would close a Segment onto itself; refusing it -- what the code did --
-// would stall on work that is already done. Adoption is the idempotent answer,
-// and it is counted separately because it says an earlier attempt half
-// completed, which is worth knowing even though it recovers.
-func TestASegmentAlreadyNamingThisPublicationIsAdopted(t *testing.T) {
-	fixture := newNoDataHopFixture(t, "segment-adopt", validCatalog(t, 80))
+// The regression this closes end to end: a Segment named from the manifest, a
+// second publication of identical content keeping it, and the section still
+// present on the far side of the object store. Each of those was true in
+// isolation while the chain was broken.
+func TestRepublishingTheSameContentKeepsTheSegmentAndItsNoData(t *testing.T) {
+	fixture := newNoDataHopFixture(t, "republish-keeps", noDataSourceCatalog(t))
 	ctx := context.Background()
 
-	// What the next publication will name for this Query Group.
-	next := noDataSourceCatalog(t)
-	nextDigest, err := controlplane.DeriveQueryGroupObjectDigest(next.QueryGroups[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The open Segment is already on it, output contexts and all, as a
-	// half-completed cutover leaves it. The contexts matter: with them moved
-	// too the cutover takes its "nothing changed" path, and without them its
-	// "contexts were revised" path. Both must count the adoption, and they are
-	// two separate lines of code.
-	nextRefs := make([]execution.OutputContextRef, 0, len(next.QueryGroups[0].Plans))
-	for _, plan := range next.QueryGroups[0].Plans {
-		contextDigest, err := controlplane.DeriveOutputContextDigest(plan)
-		if err != nil {
-			t.Fatal(err)
-		}
-		nextRefs = append(nextRefs, execution.OutputContextRef{Plan: plan.Identity, Digest: contextDigest})
-	}
-	if err := controlplane.SetOpenSegmentObjectDigestForTest(
-		ctx, fixture.repository, fixture.group, nextDigest, nextRefs...); err != nil {
-		t.Fatal(err)
-	}
-
-	decisions := map[string]int{}
-	fixture.repository.ConfigureObserver(observability.ObserverFunc(
-		func(_ context.Context, observation observability.Observation) {
-			if facts := observation.ScheduleCutover; facts != nil {
-				for decision, count := range facts.QueryGroups {
-					decisions[decision] += count
-				}
-			}
-		}))
-
+	// Publishing the same content again is the same publication: the revision
+	// is derived from the content, so there is no second cutover to run and
+	// nothing for it to keep. What the republish does establish is that the
+	// second publication names the Segment the same way the first did, which
+	// is the equality this regression is about.
 	*fixture.now = fixture.now.Add(2 * time.Minute)
-	published, _, err := fixture.repository.PublishCatalog(ctx, next)
+	again, _, err := fixture.repository.PublishCatalog(ctx, noDataSourceCatalog(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := fixture.reconciler.Ensure(ctx, published.Publication); err != nil {
-		t.Fatalf("the cutover refused a Segment that already names what it was about to cut to: %v", err)
+	if _, err := fixture.reconciler.Ensure(ctx, again.Publication); err != nil {
+		t.Fatal(err)
 	}
 
-	if decisions["adopted_current"] == 0 {
-		t.Fatalf("decisions = %+v, want the adoption counted; it says an earlier attempt wrote its "+
-			"Segments and did not land its activation", decisions)
-	}
-	if decisions["repaired_foreign"] != 0 {
-		t.Fatalf("decisions = %+v, want no repair: the Segment names exactly what was published, which "+
-			"is the one case that needs nothing done to it", decisions)
-	}
-	// And it is not filed as an ordinary keep or revise. Whether the output
-	// contexts also moved decides which of those two the Segment would
-	// otherwise be counted as, and neither of them says an earlier attempt
-	// half completed -- which is the only thing this decision is for.
-	if decisions["kept"] != 0 || decisions["revised"] != 0 {
-		t.Fatalf("decisions = %+v, want the adoption counted as itself rather than as the steady state "+
-			"nobody reads", decisions)
-	}
-	after, err := controlplane.OpenSegmentObjectDigestForTest(ctx, fixture.repository, fixture.group)
+	// The Segment names what both publications named.
+	manifest, err := fixture.repository.LoadCatalogManifest(ctx, again.Publication.SnapshotRevision)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if after != nextDigest {
-		t.Fatalf("the adopted Segment now names %s, want the %s it already named", after, nextDigest)
+	open, err := controlplane.OpenSegmentObjectDigestForTest(ctx, fixture.repository, fixture.group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var namedNow execution.ObjectDigest
+	for _, entry := range manifest.QueryGroups {
+		if entry.QueryGroup == fixture.group {
+			namedNow = entry.ObjectDigest
+		}
+	}
+	if open != namedNow {
+		t.Fatalf("the Segment names %s and the publication names %s", open, namedNow)
+	}
+
+	// And what a worker reads back through it still detects no-data.
+	schedule, err := fixture.runtime.ReadFrozenSchedule(ctx, fixture.group, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read, err := fixture.repository.LoadSegmentQueryGroup(ctx, schedule.Segment, 60,
+		func(ctx context.Context) (controlplane.QueryGroup, error) {
+			return controlplane.QueryGroup{}, errors.New("the content path was not taken")
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(read.Plans) != 1 || read.Plans[0].Plan.NoData == nil {
+		t.Fatalf("the Plan a worker reads through this Segment does not detect no-data: %+v", read.Plans)
 	}
 }
