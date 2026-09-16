@@ -855,7 +855,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"qg-window-starved", "—", "完成 · HISTORY_WARMING", "3 个窗口 · 短 2 · 空 2 · 新 0 · 连续 40 轮 · 最差 0/14 · 检测用不了 2 个：REQUIRED_VALUE_MISSING"},
 		{"qg-no-data", "—", "无数据 · FULL_EMPTY_COMPLETED", "—"},
 		{"qg-plain", "—", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
-		{"qg-guard-held", "—", "完成 · CONFIG_DRIFT（保护沿用，非本轮）", "3 个窗口 · 短 1 · 空 0 · 新 0 · 连续 29 轮 · 最差 5/9"},
+		{"qg-guard-held", "—", "完成 · CONFIG_DRIFT（保护沿用，非本轮）", "3 个窗口 · 短 1 · 空 0 · 新 0 · 连续 29 轮 · 最差 5/9（持久化保护要求的，可大于策略配置）"},
 		{"qg-stuck-slot", "— · 卡在 " + at.Add(-3*time.Minute).In(time.Local).Format("15:04:05") + " 这个 Slot，第 3 次失败", "失败 · error", "—"},
 		{"qg-late", "迟到 12 秒", "完成 · HISTORY_WARMING", "—"},
 		{"qg-missed-turn", "超期 4 分 0 秒", "完成 · QUERY_TIMEOUT", "—"},
