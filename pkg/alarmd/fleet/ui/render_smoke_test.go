@@ -292,7 +292,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"qg-losing-now": {
 				FirstSlot: at.Add(-4 * time.Minute).Unix(), LastSlot: at.Add(-3 * time.Minute).Unix(),
 				Slots: 6, At: at.Add(-3 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij",
-				Strategies: []fleet.StrategyRef{{StrategyID: "8709", BusinessID: "9"}}},
+				Strategies: []fleet.StrategyRef{{StrategyID: "8709", BusinessID: "9"}}, IntervalSeconds: 10},
 			"qg-demoted-rejected": {
 				FirstSlot: at.Add(-5 * time.Minute).Unix(), LastSlot: at.Add(-2 * time.Minute).Unix(),
 				Slots: 3, At: at.Add(-2 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"},
@@ -573,8 +573,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		"2 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 1 个；没有资源预算拒绝，不是容量问题）",
 		"恢复标准：10 分钟内没有新的跳过",
 		"1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）",
-		// Every line says what to do next.
-		"下一步：先修激活", "下一步：先等：成因缺失的对象各自再跑一轮就补上",
+		// Every line says where the evidence is, what to do next, and what
+		// counts as recovered -- and "先等" says until when and whom after.
+		"证据：展开这一行：最近一次激活失败原文", "下一步：先修激活",
+		"恢复标准：执行版本追上目标发布（两者一致）且之后一轮激活成功",
+		"下一步：等到行上的预计时刻：到了就有成因；过了还没有，它会落到\"到期没跑\"那一行（alarmd 的）",
+		"恢复标准：10 分钟内没有新的跳过（\"仍在发生\"折归零）",
 		// The two standings, first. The time is the viewer's clock and is not
 		// asserted; everything after it is.
 		"起没有生效：连续 120 轮激活失败（1 种原因），舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3",
@@ -605,6 +609,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// not call it "新增": the record keeps one skip per object.
 		{"HISTORY ::", "1 个对象跳过了检测，那段不补（已停止，10 分钟以上没有再发生）——其中 1 个最近 1 小时内还发生过，最后一次 "},
 		{"HISTORY ::", "下一步：已停止，不用让它停；那段永久没检测"},
+		{"HISTORY ::", "恢复标准：记录不会归零；看的是同一对象有没有再跳过"},
+		// A loss in progress on a ten-second object names its mechanism on
+		// the row; the refused object's record carries its period too.
+		{"SKIP qg-losing-now ::", "，10 秒周期。仍在发生（最近 10 分钟内跳过）——短周期对象错过实时轮后重放超上限，是 alarmd 的调度边界，不是策略的事"},
+		{"PENDING ::", "证据：分组的后端回答（状态词）+ 对象行\"最近一次错误\"的后端原文；请求本身 = 该策略的查询定义（行上策略链接），alarmd 不落完整请求文本"},
+		{"PENDING ::", "恢复标准：分出归属后转到对应行（策略侧或 alarmd）；不是等它消失"},
 		{"HISTORY COUNT ::", "1 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
 		// The refusal line carries what its demoted object lost there, as the
 		// refusal's consequence and not as capacity.

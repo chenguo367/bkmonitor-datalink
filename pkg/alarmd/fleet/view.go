@@ -1754,8 +1754,9 @@ type PrunedSkip struct {
 	// Replica is the replica that applied the skip, so the record can be folded
 	// with the rest of that replica's lines.
 	Replica string `json:"replica,omitempty"`
-	// Strategies, as on SkippedSpan.
-	Strategies []StrategyRef `json:"strategies,omitempty"`
+	// Strategies and IntervalSeconds, as on SkippedSpan.
+	Strategies      []StrategyRef `json:"strategies,omitempty"`
+	IntervalSeconds int64         `json:"interval_seconds,omitempty"`
 }
 
 // SkippedSpan is a run of Slots one object skipped because they had fallen
@@ -1774,6 +1775,12 @@ type SkippedSpan struct {
 	// column, and a row nobody can trace to a strategy is a row nobody can
 	// act on.
 	Strategies []StrategyRef `json:"strategies,omitempty"`
+	// IntervalSeconds is the object's evaluation period, from the due index
+	// as the publisher knew it; zero when the index had no entry. A loss in
+	// progress on a ten-second object is the scheduler's replay bound, a
+	// mechanism with a name; the row says the period so a reader does not
+	// have to look the strategy up to know which conversation this is.
+	IntervalSeconds int64 `json:"interval_seconds,omitempty"`
 }
 
 // Spanning is how long the skipped span covers. It is a duration rather than a

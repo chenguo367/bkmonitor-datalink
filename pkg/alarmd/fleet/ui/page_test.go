@@ -222,22 +222,28 @@ func TestThePageHasWordingForEveryCheckOwnerScheduleAndResult(t *testing.T) {
 	// And what to do about each, one per check and none for a check that
 	// does not exist: a line without a next step is the reader asking "so
 	// what do I do", which is the question the line exists to answer.
-	next := regexp.MustCompile(`var NEXT = \{([\s\S]*?)\};`).FindStringSubmatch(body)
-	if next == nil {
-		t.Fatal("the page has no NEXT table")
-	}
-	stepped := map[string]bool{}
-	for _, entry := range regexp.MustCompile(`(?m)^  ([A-Z_]+):`).FindAllStringSubmatch(next[1], -1) {
-		stepped[entry[1]] = true
-	}
-	for _, name := range checkNames() {
-		if !stepped[name] {
-			t.Errorf("NEXT has no step for %s: the line would say what happened and not what to do", name)
+	// Three tables past the sentence -- where the evidence is, what to do,
+	// what counts as recovered -- each one per check and none for a check
+	// that does not exist. A line missing any of the three is a reader
+	// asking the question that entry exists to answer.
+	for _, table := range []string{"EVIDENCE", "NEXT", "RECOVERY"} {
+		found := regexp.MustCompile(`var ` + table + ` = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+		if found == nil {
+			t.Fatalf("the page has no %s table", table)
 		}
-	}
-	for name := range stepped {
-		if !containsString(checkNames(), name) {
-			t.Errorf("NEXT has a step for %s, which the server never sends", name)
+		entries := map[string]bool{}
+		for _, entry := range regexp.MustCompile(`(?m)^  ([A-Z_]+):`).FindAllStringSubmatch(found[1], -1) {
+			entries[entry[1]] = true
+		}
+		for _, name := range checkNames() {
+			if !entries[name] {
+				t.Errorf("%s has no entry for %s: the line would say what happened and not this", table, name)
+			}
+		}
+		for name := range entries {
+			if !containsString(checkNames(), name) {
+				t.Errorf("%s has an entry for %s, which the server never sends", table, name)
+			}
 		}
 	}
 	// The replica-level standings have words too, one per kind the Go side
