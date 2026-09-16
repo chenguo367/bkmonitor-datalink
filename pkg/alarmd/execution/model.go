@@ -3108,6 +3108,45 @@ type ScheduleProgress struct {
 	CurrentOrRecentGap *ProgressGapSummary
 	UnfinishedSlot     *UnfinishedSlotProjection
 	UnfinishedRange    *ExpiredRangeProjectionV1 `json:",omitempty"`
+	// LastCompletion is what the round that last moved this cursor concluded.
+	//
+	// LastCompletionKind above is one word of it and was all there was: a
+	// reader with a Query Group that stopped could see that the last round
+	// ended in a gap and not which Slot it was, when it happened, why, or
+	// against which frozen contract -- and the round itself had scrolled out
+	// of the log by the time anyone looked. Every field here was already in
+	// hand at the commit, so carrying them costs no read.
+	//
+	// Nil on a record written before this field existed. That is a real
+	// answer -- this process has not committed a round for that Query Group
+	// since the upgrade -- and it is why the field is a pointer rather than a
+	// zero-valued struct that would read as a completion at Slot zero.
+	LastCompletion *LastCompletionSummary `json:"last_completion,omitempty"`
+}
+
+// LastCompletionSummary is one committed round, as the commit already knew it.
+//
+// The names are the wire contract the page reads by and are fixed; a field
+// renamed here is a field the page stops finding, with nothing failing to say
+// so.
+type LastCompletionSummary struct {
+	// Slot is the evaluation time the round completed, not the one it moved to.
+	Slot EvaluationTime `json:"slot"`
+	// CompletedAt is when this process committed it, RFC3339. It is the
+	// commit's clock rather than the Slot's, because the question it answers is
+	// "how long ago did anything happen here", and a Slot time answers that
+	// only for a deployment that is keeping up -- which is not the deployment
+	// anybody is looking at when they ask.
+	CompletedAt string `json:"completed_at"`
+	// Kind and ReasonCode are how it ended and why, the same two the round
+	// reported. The reason is empty for a completion that had none.
+	Kind       CompletionKind `json:"kind"`
+	ReasonCode ReasonCode     `json:"reason_code,omitempty"`
+	// Contract is the frozen contract the round ran under, verbatim. It is
+	// what makes the summary checkable against anything else that names the
+	// same Slot: a summary carrying a Slot number and no contract cannot be
+	// told from one written by a different generation of the same Query Group.
+	Contract FrozenExecutionContractRef `json:"contract"`
 }
 
 type UnfinishedSlotProjection struct {
