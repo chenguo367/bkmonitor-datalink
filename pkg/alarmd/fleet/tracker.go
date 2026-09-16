@@ -260,6 +260,25 @@ type queryGroupState struct {
 	// correct at zero and only ever rises.
 	sawSomethingWrong bool
 	lastFailure       *FailureRef
+	// lastFailureSlot is the Slot the last failure was observed on, so a
+	// skip can carry the failure that preceded it only when it was this
+	// Slot's -- lastFailure itself is never cleared and would otherwise
+	// hand a skip a failure from another round.
+	lastFailureSlot int64
+	// internal is the last failure of this deployment's own making seen in
+	// the current run -- a contract or evaluation error -- kept until a
+	// healthy completion and published beside the row's finding. The
+	// object's line is decided by its column (a pool object is the
+	// refusal's), and an internal error under it was invisible: a live row
+	// filed as HTTP 400 had also hit an aggregation conflict every round.
+	internal *FailureRef
+	// previousWorstValid and noProgressRounds say whether a short window is
+	// filling: the worst level's valid count last round, and how many
+	// consecutive rounds it has not risen. A window at 8/24 that was 7/24
+	// is being filled; one at 0/5 for thirty rounds is not, and "等窗口填满"
+	// is only advice for the first.
+	previousWorstValid uint32
+	noProgressRounds   uint32
 	// lastError is the last round that returned an error, verbatim, with the
 	// Slot it was on and how many rounds in a row have failed on that Slot.
 	// Cleared by a healthy completion, like everything else about a run.
@@ -530,6 +549,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.gapSkip.LastSlot = trace.EvaluationTime
 		state.gapSkip.Slots++
 		state.gapSkip.At = at
+		// The last step before the skip, when it was this Slot's: a permit
+		// deadline missed says the retry came too late, a budget rejection
+		// says the resources did not fit -- and the two are different
+		// conversations that a bare GAP_SKIPPED had folded into "容量".
+		if state.lastFailure != nil && state.lastFailureSlot == trace.EvaluationTime {
+			state.gapSkip.Reason, state.gapSkip.ReasonCategory = state.lastFailure.Code, state.lastFailure.Category
+		}
 	}
 	// Captured before this round is folded in: by the time the run-start block
 	// runs, this round has already made the object determined, and the question
@@ -577,6 +603,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// make a retried transient look like a determined verdict.
 		state.lastFailure = &FailureRef{Stage: failure.Stage, Category: failure.Category,
 			Code: failure.Code, Detail: failure.Detail}
+		state.lastFailureSlot = trace.EvaluationTime
+		if internalFailure(failure.Category) {
+			copy := *state.lastFailure
+			state.internal = &copy
+		}
 	}
 	// The error's own words, kept beside the classification, from the one
 	// observation that ends the round: slot_completed with a failed outcome.
@@ -685,6 +716,21 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		} else {
 			state.freshRounds++
 		}
+		// Whether the worst window is filling: compared with the previous
+		// round's valid count on the same object; a round with nothing short
+		// ends the comparison, like every other run counter here.
+		previous := state.previousWorstValid
+		if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 {
+			state.noProgressRounds, state.previousWorstValid = 0, 0
+		} else {
+			if state.coverage != nil && facts.WorstValid <= previous {
+				state.noProgressRounds++
+			} else {
+				state.noProgressRounds = 0
+			}
+			state.previousWorstValid = facts.WorstValid
+		}
+		hadCoverage := state.coverage != nil
 		state.coverage = nil
 		if facts := observation.HistoryCoverage; facts != nil {
 			state.coverage = &HistoryCoverage{
@@ -695,6 +741,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				Fresh: facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,
 				Unusable: facts.Unusable, UnusableReason: facts.UnusableReason,
 				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
+				NoProgressRounds: state.noProgressRounds,
+			}
+			if hadCoverage && facts.Short != 0 {
+				state.coverage.PreviousWorstValid, state.coverage.PreviousKnown = previous, true
 			}
 		}
 	case blockedOutcome(runOutcome):
@@ -785,6 +835,17 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.sinceFrom = ""
 	state.failingSince = time.Time{}
 	state.lastError = nil
+	state.internal = nil
+	// The window's progress counters reset with the coverage they compare
+	// against: a round with no short window clears them where it clears
+	// state.coverage, so nothing is left for this to do.
+}
+
+// internalFailure reports whether a failure category is this deployment's
+// own doing rather than the backend's or the strategy's: a contract the
+// pipeline set for itself and broke, or an evaluation that could not run.
+func internalFailure(category string) bool {
+	return category == observability.QueryFailureCategoryCompletionContract || category == observability.QueryFailureCategoryEvaluation
 }
 
 // Anomalies returns the query groups this deployment's own execution is failing
@@ -922,6 +983,7 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 			Consecutive:   state.reasonRuns,
 			Replica:       tracker.replica,
 			Failure:       state.lastFailure,
+			Internal:      state.internal,
 			LastError:     state.lastError,
 			ConfigChanged: state.configChanged,
 		}

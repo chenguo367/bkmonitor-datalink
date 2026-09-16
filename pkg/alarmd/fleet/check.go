@@ -103,9 +103,7 @@ var checkAnswers = map[Check]struct {
 	CheckDefect:             {OwnerAlarmd, GroupByReasonCode},
 	CheckObservationGap:     {OwnerAlarmd, GroupByGapKind},
 
-	CheckBackendNotAnswering: {OwnerData, GroupByDetail},
-	CheckNoDataPersistent:    {OwnerData, GroupByStrategy},
-	CheckSeriesDataMissing:   {OwnerData, GroupByStrategy},
+	CheckNoDataPersistent: {OwnerData, GroupByStrategy},
 
 	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
 	CheckPlanUnevaluable:    {OwnerStrategy, GroupByStrategy},
@@ -114,6 +112,13 @@ var checkAnswers = map[Check]struct {
 	CheckQueryRefused:     {OwnerUndetermined, GroupByDetail},
 	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
 	CheckConfigUnresolved: {OwnerUndetermined, GroupByStrategy},
+	// A client-side timeout does not establish a fault on the data side: the
+	// query's budget, the network and the backend's own latency all have to
+	// be read first. And a window short of old-series points may be short
+	// because this deployment did not fetch them. Both were handed to the
+	// data owner as confirmed; a live review found neither confirmed.
+	CheckBackendNotAnswering: {OwnerUndetermined, GroupByDetail},
+	CheckSeriesDataMissing:   {OwnerUndetermined, GroupByStrategy},
 }
 
 // checkOrder is the order the first screen lists the checks in, and the order
@@ -138,8 +143,8 @@ var checkOrder = []Check{
 	CheckWindowUndecided,
 	CheckConfigUnresolved,
 	CheckBackendNotAnswering,
-	CheckNoDataPersistent,
 	CheckSeriesDataMissing,
+	CheckNoDataPersistent,
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,
@@ -347,6 +352,11 @@ type CheckReport struct {
 	// cooldown did to the backlog, so it is this line's, and no capacity
 	// changes it.
 	Consequence *Consequence `json:"consequence,omitempty"`
+	// SkipReasons, on the record lines, counts the current records by the
+	// last step before the skip: a permit deadline missed, a budget
+	// rejection, or nothing tried. It is what replaced inferring the
+	// mechanism from the object's period.
+	SkipReasons map[string]int `json:"skip_reasons,omitempty"`
 	// Partial says at least one column this check draws from was truncated by
 	// its replica, so the counts here are a sample of that column.
 	Partial bool         `json:"partial,omitempty"`
@@ -368,6 +378,11 @@ type CheckGroup struct {
 	Strategies int      `json:"strategies"`
 	Businesses int      `json:"businesses"`
 	Replicas   []string `json:"replicas,omitempty"`
+	// Stage and Text are on a standing's fold where the replica's facts name
+	// the failure behind it: the line then says what failed, not only which
+	// bound was passed.
+	Stage string `json:"stage,omitempty"`
+	Text  string `json:"text,omitempty"`
 }
 
 // ReportChecks folds every object in every column into the checks it is
@@ -392,6 +407,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		activation *ActivationFacts
 		replica    string
 		skipped    *Consequence
+		reasons    map[string]int
 	}
 	tallies := map[Check]*tally{}
 	ensure := func(check Check) *tally {
@@ -445,6 +461,17 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				entry.demoted++
 			}
 			listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
+			// A failure of this deployment's own making under a line the
+			// column decided is a second fact, and it gets its second line:
+			// the pool object filed as HTTP 400 that also hit an aggregation
+			// conflict every round was invisible under the refusal.
+			if anomaly.Internal != nil && check != CheckDefect {
+				defect := ensure(CheckDefect)
+				defect.partial = defect.partial || columnPartial
+				add(defect, anomaly.Internal.Code, anomaly)
+				defect.current++
+				listed[underKey(CheckDefect, anomaly.QueryGroup)] = struct{}{}
+			}
 		}
 	}
 	// What this deployment gave up on and never evaluated, retained past the
@@ -464,6 +491,14 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			add(entry, row.Finding.Group, &row)
 			if row.Loss == LossOngoing || row.Loss == LossAfterRestart {
 				entry.current++
+				if entry.reasons == nil {
+					entry.reasons = map[string]int{}
+				}
+				reason := skipReasonNone
+				if row.Skip != nil && row.Skip.Reason != "" {
+					reason = row.Skip.Reason
+				}
+				entry.reasons[reason]++
 				continue
 			}
 			entry.retained++
@@ -532,6 +567,9 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				entry.groups[string(degradation.Kind)] = group
 			}
 			group.Replicas = append(group.Replicas, degradation.Replica)
+			if group.Text == "" && degradation.Text != "" {
+				group.Stage, group.Text = degradation.Stage, degradation.Text
+			}
 		}
 	}
 	reports := make([]CheckReport, 0, len(tallies))
@@ -540,7 +578,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			Objects: entry.objects, Strategies: len(entry.strategies), Businesses: len(entry.businesses),
 			Partial: entry.partial, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
 			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour,
-			Consequence: entry.skipped}
+			Consequence: entry.skipped, SkipReasons: entry.reasons}
 		if !entry.newest.IsZero() {
 			newest := entry.newest
 			report.RetainedNewest = &newest
@@ -755,6 +793,16 @@ func UnderCheck(check Check, group string, view *View, now time.Time) []Anomaly 
 	demoted := demotedObjects(view)
 	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData} {
 		for _, anomaly := range column {
+			// Under DEFECT a row is also the one whose column filed it
+			// elsewhere but which carries a failure of this deployment's own
+			// making: listed by that failure's code, the second fact.
+			if check == CheckDefect && anomaly.Finding.Check != check && anomaly.Internal != nil {
+				listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
+				if group == "" || anomaly.Internal.Code == group {
+					list = append(list, anomaly)
+				}
+				continue
+			}
 			if anomaly.Finding.Check != check {
 				continue
 			}
@@ -795,6 +843,10 @@ func UnderCheck(check Check, group string, view *View, now time.Time) []Anomaly 
 	}
 	return list
 }
+
+// skipReasonNone is the fold of a skip that followed no failure of its
+// Slot's: the Slot fell past the replay bound with nothing tried on it.
+const skipReasonNone = "NOTHING_TRIED"
 
 // underKey names one object under one check, so a retained skip does not add
 // a second row for an object a column already lists under that check while an

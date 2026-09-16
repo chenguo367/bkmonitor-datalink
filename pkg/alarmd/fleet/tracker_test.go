@@ -1225,7 +1225,10 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 		t.Fatalf("rows = %+v, want one undecidable object carrying coverage", rows)
 	}
 	published := reflect.ValueOf(rows[0].Coverage).Elem()
-	rowOnly := map[string]bool{"ShortRounds": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true}
+	// The run counters and the round-over-round progress are the tracker's
+	// own: one round cannot supply them.
+	rowOnly := map[string]bool{"ShortRounds": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true,
+		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true}
 	for i := 0; i < published.NumField(); i++ {
 		name := published.Type().Field(i).Name
 		if rowOnly[name] {
@@ -1495,5 +1498,146 @@ func TestTheConvergingRoundIsNotALineOnTheRealPath(t *testing.T) {
 	round(1)
 	if again := classify(); again.Coverage.HeldFullRounds != 0 || again.Finding.Group != "保护未解除（最初触发 CONFIG_DRIFT）" {
 		t.Fatalf("a short round after: held_full=%d group=%q, want the counter back to zero", again.Coverage.HeldFullRounds, again.Finding.Group)
+	}
+}
+
+// A skip carries the last step before it, when that step was this Slot's: a
+// live object waited for data, retried after its frozen deadline, was
+// refused admission (QUERY_PERMIT_DEADLINE) and then skipped -- "错过查询截止
+// 时间", a different conversation from a Slot that fell past the replay
+// bound with nothing tried, and from a budget rejection. A failure from
+// another Slot is not this skip's.
+func TestASkipCarriesTheLastStepBeforeItWhenItWasThisSlots(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	slot := int64(1_700_000_000)
+	// The admission refusal on this Slot, then the skip of this Slot.
+	tracker.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted,
+		Result:       observability.Result(observability.ResultFailed),
+		QueryFailure: &observability.QueryFailureFacts{Stage: "execute", Category: "admission", Code: "QUERY_PERMIT_DEADLINE"},
+		Trace:        observability.TraceFields{QueryGroupKey: "qg-late", StrategyID: "8721", EvaluationTime: slot},
+	})
+	tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "GAP_SKIPPED",
+		Trace: observability.TraceFields{QueryGroupKey: "qg-late", StrategyID: "8721", EvaluationTime: slot}})
+	skip := tracker.GapSkips()["qg-late"]
+	if skip.Reason != "QUERY_PERMIT_DEADLINE" || skip.ReasonCategory != "admission" {
+		t.Fatalf("skip = %+v, want the admission refusal of this Slot as its last step", skip)
+	}
+	// A later Slot skipped with nothing tried on it: the earlier failure is
+	// not this skip's, and the record says nothing was tried.
+	tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "FULL_COMPLETED",
+		Trace: observability.TraceFields{QueryGroupKey: "qg-late", StrategyID: "8721", EvaluationTime: slot + 10}})
+	tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "GAP_SKIPPED",
+		Trace: observability.TraceFields{QueryGroupKey: "qg-late", StrategyID: "8721", EvaluationTime: slot + 20}})
+	if skip := tracker.GapSkips()["qg-late"]; skip.Reason != "" || skip.FirstSlot != slot+20 {
+		t.Fatalf("a skip with nothing tried on its Slot = %+v, want no reason on a new record", skip)
+	}
+}
+
+// The window's progress is the tracker's to say: the worst level's valid
+// count against the previous round's, and how many rounds it has not
+// risen. 7/24 then 8/24 is filling; 0/5 for three rounds is not; a round
+// with nothing short ends the comparison.
+func TestTheWindowSaysWhetherItIsFilling(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	short := func(valid uint32) {
+		observation := completion("qg-window", "COMPLETED_WITH_UNAVAILABLE", "11802")
+		observation.ProgressCompletionCause, observation.ProgressCompletionReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
+		observation.HistoryCoverage = &observability.HistoryCoverageFacts{Levels: 3, Short: 1, WorstValid: valid, WorstRequired: 24}
+		tracker.Observe(context.Background(), observation)
+	}
+	row := func() *HistoryCoverage {
+		for _, list := range [][]Anomaly{tracker.Undecidable(), tracker.Anomalies()} {
+			for _, item := range list {
+				if item.QueryGroup == "qg-window" {
+					return item.Coverage
+				}
+			}
+		}
+		t.Fatal("the object is on no list")
+		return nil
+	}
+	// Listed from the third degraded round; by then two rounds have not
+	// moved the window.
+	short(7)
+	short(7)
+	short(7)
+	if coverage := row(); coverage == nil || !coverage.PreviousKnown || coverage.PreviousWorstValid != 7 || coverage.NoProgressRounds != 2 {
+		t.Fatalf("after three rounds at 7: %+v, want previous 7 known and two rounds without progress", coverage)
+	}
+	short(8)
+	if coverage := row(); coverage.PreviousWorstValid != 7 || coverage.NoProgressRounds != 0 || coverage.WorstValid != 8 {
+		t.Fatalf("after 7 then 8: %+v, want previous 7, progress made, no rounds without", coverage)
+	}
+	short(8)
+	short(8)
+	if coverage := row(); coverage.NoProgressRounds != 2 {
+		t.Fatalf("after 8, 8, 8: %+v, want two rounds without progress", coverage)
+	}
+	// The first short round after a full one has no previous to compare;
+	// the run restarts, so it takes three rounds to be listed again, and by
+	// the third the comparison has two rounds behind it.
+	tracker.Observe(context.Background(), completion("qg-window", "FULL_COMPLETED", "11802"))
+	short(3)
+	short(4)
+	short(5)
+	if coverage := row(); !coverage.PreviousKnown || coverage.PreviousWorstValid != 4 || coverage.NoProgressRounds != 0 {
+		t.Fatalf("after a full round then 3, 4, 5: %+v, want previous 4 and progress every round", coverage)
+	}
+}
+
+// A failure of this deployment's own making -- a contract or evaluation
+// error -- stays on the row until a healthy completion, beside the finding
+// the column decided: a pool object filed under the refusal that also hit an
+// aggregation conflict is listed under DEFECT as well, by that conflict, and
+// the refusal line still has it. A backend failure is not internal.
+func TestAnInternalFailureIsASecondFactUnderDefect(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	observe := func(o observability.Observation) {
+		o.Trace.QueryGroupKey, o.Trace.StrategyID = "qg-8326", "8326"
+		tracker.Observe(context.Background(), o)
+	}
+	observe(observability.Observation{QueryFailure: &observability.QueryFailureFacts{Stage: "execute", Category: "completion_contract",
+		Code: "GAP_SCOPE_REASON_CONFLICT", Detail: "input_a=QUERY_UNAVAILABLE input_b=QUERY_TIMEOUT"}})
+	observe(observability.Observation{ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionCause: "query_failed"})
+	observe(observability.Observation{QueryFailure: &observability.QueryFailureFacts{Stage: "provider", Category: "source_backend",
+		Code: "QUERY_UNAVAILABLE", Detail: "http_status=400"}})
+	observe(observability.Observation{QueryCooldown: &observability.QueryCooldownFacts{Event: "entered", Until: now.Add(time.Minute), LastQueryAt: now, Failures: 3}})
+	rows := tracker.Demoted()
+	Attribute(rows, now)
+	if len(rows) != 1 || rows[0].Finding.Check != CheckQueryRefused || rows[0].Internal == nil || rows[0].Internal.Code != "GAP_SCOPE_REASON_CONFLICT" {
+		t.Fatalf("pool row = %+v, want it under the refusal with the conflict kept as its internal failure", rows)
+	}
+	view := &View{Demoted: rows}
+	reports := ReportChecks([][]Anomaly{nil, rows, nil, nil}, nil, view, now)
+	byCode := map[Check]CheckReport{}
+	for _, report := range reports {
+		byCode[report.Code] = report
+	}
+	if byCode[CheckQueryRefused].Current != 1 || byCode[CheckDefect].Current != 1 ||
+		len(byCode[CheckDefect].Groups) != 1 || byCode[CheckDefect].Groups[0].Key != "GAP_SCOPE_REASON_CONFLICT" {
+		t.Fatalf("reports = %+v, want the object on the refusal line and on DEFECT folded on the conflict", reports)
+	}
+	if listed := UnderCheck(CheckDefect, "GAP_SCOPE_REASON_CONFLICT", view, now); len(listed) != 1 || listed[0].QueryGroup != "qg-8326" {
+		t.Fatalf("under DEFECT/GAP_SCOPE_REASON_CONFLICT = %v, want the pool object", names(listed))
+	}
+	// A healthy completion clears it: the next run, failing on the backend
+	// alone, is listed without the old conflict beside it.
+	observe(observability.Observation{QueryCooldown: &observability.QueryCooldownFacts{Event: "recovered"}})
+	observe(observability.Observation{ProgressCompletionKind: "FULL_COMPLETED"})
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		observe(observability.Observation{QueryFailure: &observability.QueryFailureFacts{Stage: "provider", Category: "source_backend",
+			Code: "QUERY_UNAVAILABLE", Detail: "transport=timeout"}})
+		observe(observability.Observation{ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionCause: "query_failed"})
+	}
+	listed := tracker.Anomalies()
+	if len(listed) != 1 || listed[0].QueryGroup != "qg-8326" {
+		t.Fatalf("after the next failing run the object is not listed: %+v", listed)
+	}
+	if listed[0].Internal != nil {
+		t.Fatalf("after a healthy completion the row still carries %+v", listed[0].Internal)
 	}
 }
