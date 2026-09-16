@@ -83,6 +83,15 @@ type Finding struct {
 // whatever its last round said; the window counts say more about a window
 // reason than the word does; and only then are the codes read.
 func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, unclassified bool) {
+	// A code the table files as this deployment's own defect is the line,
+	// whatever else the row says: a gap guard in conflict with itself stops
+	// the Slot, so the object also stalls, and filing it as stalled first
+	// sent the reader to "restart the replica" for a defect that repeats
+	// until fixed -- and flickered between the two lines every time the
+	// object changed owner.
+	if check, decided := codeVerdict(anomaly); decided && check == CheckDefect {
+		return CheckDefect, true, false
+	}
 	switch {
 	case anomaly.Stalled:
 		return CheckRoundsStalled, true, false
@@ -123,6 +132,23 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 		}
 		return CheckWindowUndecided, true, false
 	}
+	if check, decided := codeVerdict(anomaly); decided {
+		if check == "" {
+			return "", false, false
+		}
+		return check, true, false
+	}
+	if restoredWithoutEvidence(anomaly) {
+		return CheckObservationGap, true, false
+	}
+	return CheckDefect, true, true
+}
+
+// codeVerdict is what the code table says about the row's codes, read in
+// the order they are trusted: the cause's reason, the cause, the query
+// failure's code, the round's outcome. Decided with an empty check is a
+// code the table calls normal. Not decided is a row no code reaches.
+func codeVerdict(anomaly Anomaly) (check Check, decided bool) {
 	failureCode := ""
 	if anomaly.Failure != nil {
 		failureCode = anomaly.Failure.Code
@@ -136,17 +162,14 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 			continue
 		}
 		if verdict.normal {
-			return "", false, false
+			return "", true
 		}
 		if verdict.check == CheckBackendNotAnswering && queryRejected(anomaly.Failure) {
-			return refusalCheck(anomaly.Failure), true, false
+			return refusalCheck(anomaly.Failure), true
 		}
-		return verdict.check, true, false
+		return verdict.check, true
 	}
-	if restoredWithoutEvidence(anomaly) {
-		return CheckObservationGap, true, false
-	}
-	return CheckDefect, true, true
+	return "", false
 }
 
 // gapRestoredWithoutCause is the fold, within the observation gap, of objects
