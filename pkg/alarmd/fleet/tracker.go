@@ -11,9 +11,11 @@ package fleet
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -248,6 +250,28 @@ type queryGroupState struct {
 	// correct at zero and only ever rises.
 	sawSomethingWrong bool
 	lastFailure       *FailureRef
+	// lastError is the last round that returned an error, verbatim, with the
+	// Slot it was on and how many rounds in a row have failed on that Slot.
+	// Cleared by a healthy completion, like everything else about a run.
+	lastError *LastError
+}
+
+// lastErrorTextLimit bounds the error text a row carries: it travels on
+// every snapshot, and an error can quote a response body.
+const lastErrorTextLimit = 256
+
+// boundedErrorText cuts at the limit on a rune boundary. Cutting bytes
+// leaves half a character at the end of a text with Chinese in it, which
+// the JSON encoder turns into U+FFFD.
+func boundedErrorText(text string) string {
+	if len(text) <= lastErrorTextLimit {
+		return text
+	}
+	cut := lastErrorTextLimit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut] + "..."
 }
 
 // undecidableReason is a completion reason that means the detection window
@@ -528,6 +552,24 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.lastFailure = &FailureRef{Stage: failure.Stage, Category: failure.Category,
 			Code: failure.Code, Detail: failure.Detail}
 	}
+	// The error's own words, kept beside the classification, from the one
+	// observation that ends the round: slot_completed with a failed outcome.
+	// A round that fails emits its error more than once on the way there --
+	// the query, the commit, the state admission each report it before the
+	// Slot completes with the same error -- and counting every carrier would
+	// call one failed round two or three. The terminal one wraps the words
+	// of the rest, so nothing is lost by reading only it. Attempts counts
+	// rounds in a row on the same Slot: the same Slot failing again is a
+	// stuck object, a new Slot failing is a new failure.
+	if observation.Err != nil && failedExecution(executeOutcome) {
+		text := boundedErrorText(observability.SanitizeErrorText(observation.Err.Error()))
+		attempts := 1
+		if state.lastError != nil && state.lastError.EvaluationTime == trace.EvaluationTime && trace.EvaluationTime != 0 {
+			attempts = state.lastError.Attempts + 1
+		}
+		state.lastError = &LastError{Text: text, Type: fmt.Sprintf("%T", observation.Err),
+			EvaluationTime: trace.EvaluationTime, At: at, Attempts: attempts}
+	}
 	if trace.StrategyID != "" && len(state.strategies) < maxStrategiesPerQueryGroup {
 		state.strategies[StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}] = struct{}{}
 	}
@@ -699,6 +741,7 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.runStartedAt = time.Time{}
 	state.sinceFrom = ""
 	state.failingSince = time.Time{}
+	state.lastError = nil
 }
 
 // Anomalies returns the query groups this deployment's own execution is failing
@@ -835,6 +878,7 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 			Consecutive:  state.reasonRuns,
 			Replica:      tracker.replica,
 			Failure:      state.lastFailure,
+			LastError:    state.lastError,
 		}
 		if anomaly.Kind == "" && state.queryCooldown != nil {
 			anomaly.Kind = KindQueryCooldown

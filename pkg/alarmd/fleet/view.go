@@ -230,6 +230,23 @@ type FailureRef struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// LastError is the last error a round of this object returned.
+//
+// Text is the error's own words, sanitised and bounded by the same limit the
+// control source's failure text is; Type is the Go type that carried it,
+// which is what tells a wrapped contract failure from a transport error when
+// the words do not. EvaluationTime is the Slot the round was on, and
+// Attempts how many rounds in a row have failed on that same Slot -- a round
+// that keeps failing on one Slot is stuck, a round that fails on each new
+// Slot is unlucky, and the count is the difference.
+type LastError struct {
+	Text           string    `json:"text"`
+	Type           string    `json:"type,omitempty"`
+	EvaluationTime int64     `json:"evaluation_time,omitempty"`
+	At             time.Time `json:"at"`
+	Attempts       int       `json:"attempts"`
+}
+
 // HistoryCoverage is how far short of the required detection window this
 // object's series were, and for how many consecutive rounds.
 //
@@ -504,6 +521,14 @@ type Anomaly struct {
 	Consecutive int         `json:"consecutive,omitempty"`
 	Replica     string      `json:"replica"`
 	Failure     *FailureRef `json:"failure,omitempty"`
+	// LastError is the last round that returned an error, verbatim: what it
+	// said, which Slot it was on, and how many rounds in a row that same Slot
+	// has failed. The classification above answers "what kind"; this answers
+	// "what exactly", which is what a reader needed a diagnostic window and
+	// one more failure to learn. Two objects stuck on a gap-guard conflict
+	// were located from raw logs and source while the page said only which
+	// two.
+	LastError *LastError `json:"last_error,omitempty"`
 	// Stalled says the rounds have been failing to finish for longer than the
 	// deployment's own budget for terminating an unfinishable Slot. The
 	// distinction it draws is the one that decides whether anyone has to act: a

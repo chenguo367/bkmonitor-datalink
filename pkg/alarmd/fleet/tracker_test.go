@@ -11,9 +11,12 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -1291,5 +1294,87 @@ func TestTheReasonClockResetsWhenTheReasonChangesNotWhenTheRoundRepeats(t *testi
 		if row.QueryGroup == "qg-blocked" && row.Consecutive != 3 {
 			t.Errorf("blocked object consecutive = %d, want 3", row.Consecutive)
 		}
+	}
+}
+
+// A failed round's own error travels to the row: the words, the Slot, and
+// how many rounds in a row have failed on that Slot. Two objects stuck on a
+// gap-guard conflict were located from raw logs and source while the page
+// said only which two; the row now says what the round said.
+func TestTheLastErrorTravelsToTheRowWithItsSlotAndAttempts(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	fail := func(slot int64, text string) {
+		tracker.Observe(context.Background(), observability.Observation{
+			ExecuteOutcome: "error", Err: errors.New(text),
+			Trace: observability.TraceFields{QueryGroupKey: "qg-stuck", EvaluationTime: slot},
+		})
+	}
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		fail(1_700_000_000, "alarmd state: gap guard conflict: expected 41 got 43")
+	}
+	anomalies := tracker.Anomalies()
+	if len(anomalies) != 1 || anomalies[0].LastError == nil {
+		t.Fatalf("anomalies = %+v, want the failing object with its last error", anomalies)
+	}
+	last := anomalies[0].LastError
+	if last.Text != "alarmd state: gap guard conflict: expected 41 got 43" || last.EvaluationTime != 1_700_000_000 ||
+		last.Attempts != DefaultDegradedRounds || last.Type != "*errors.errorString" || !last.At.Equal(now) {
+		t.Fatalf("last error = %+v, want the words, the Slot, %d attempts on it, the type and the time", last, DefaultDegradedRounds)
+	}
+	// A failure on a new Slot is a new failure: the count starts over.
+	fail(1_700_000_060, "alarmd state: gap guard conflict: expected 42 got 43")
+	if last := tracker.Anomalies()[0].LastError; last.Attempts != 1 || last.EvaluationTime != 1_700_000_060 {
+		t.Fatalf("after a failure on the next Slot: %+v, want attempts back to 1 on the new Slot", last)
+	}
+	// Bounded: an error that quotes a body is cut, not carried whole, and cut
+	// on a rune boundary -- a byte cut leaves half a character, which the
+	// JSON encoder turns into U+FFFD.
+	fail(1_700_000_060, strings.Repeat("x", 600))
+	if last := tracker.Anomalies()[0].LastError; len(last.Text) != lastErrorTextLimit+3 || !strings.HasSuffix(last.Text, "...") {
+		t.Fatalf("a long error text is %d bytes, want %d plus an ellipsis", len(last.Text), lastErrorTextLimit)
+	}
+	fail(1_700_000_060, strings.Repeat("x", lastErrorTextLimit-1)+"中文")
+	if last := tracker.Anomalies()[0].LastError; !utf8.ValidString(last.Text) || !strings.HasSuffix(last.Text, "x...") {
+		t.Fatalf("a text cut inside a character: %q", last.Text)
+	}
+	// One failed round emits its error more than once on the way to the
+	// terminal observation: the query, the commit, then slot_completed with
+	// the same error. Only the terminal one counts, or one round reads as
+	// three attempts.
+	tracker.Observe(context.Background(), completion("qg-stuck", "FULL_COMPLETED", "8930"))
+	for round := 0; round < 3; round++ {
+		// As the emitters send them: the query's carries its failure facts,
+		// the commit's names the strategy from the context; either is enough
+		// for the tracker to read the observation at all.
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted,
+			Result:       observability.Result(observability.ResultFailed),
+			Err:          errors.New("alarmd state: gap guard conflict: expected 41 got 43"),
+			QueryFailure: &observability.QueryFailureFacts{Stage: "execute", Category: "completion_contract", Code: "GAP_GUARD_CONFLICT"},
+			Trace:        observability.TraceFields{QueryGroupKey: "qg-stuck", EvaluationTime: 1_700_000_180},
+		})
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
+			Result: observability.Result(observability.ResultFailed),
+			Err:    errors.New("alarmd state: gap guard conflict: expected 41 got 43"),
+			Trace:  observability.TraceFields{QueryGroupKey: "qg-stuck", StrategyID: "8930", EvaluationTime: 1_700_000_180},
+		})
+		fail(1_700_000_180, "alarmd state: gap guard conflict: expected 41 got 43")
+	}
+	if last := tracker.Anomalies()[0].LastError; last == nil || last.Attempts != 3 {
+		t.Fatalf("three rounds each carrying the error on three observations = %+v, want attempts 3, not 9", last)
+	}
+	// A healthy round ends the run and the error with it.
+	tracker.Observe(context.Background(), completion("qg-stuck", "FULL_COMPLETED", "8930"))
+	if len(tracker.Anomalies()) != 0 {
+		t.Fatalf("still anomalous after a healthy round: %+v", tracker.Anomalies())
+	}
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), observability.Observation{ExecuteOutcome: "error",
+			Trace: observability.TraceFields{QueryGroupKey: "qg-stuck", EvaluationTime: 1_700_000_120}})
+	}
+	if last := tracker.Anomalies()[0].LastError; last != nil {
+		t.Fatalf("an error from before the healthy round is still on the row: %+v", last)
 	}
 }
