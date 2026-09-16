@@ -56,6 +56,7 @@ type phaseTwoMetrics struct {
 	scheduleSegmentsPruned          prometheus.Counter
 	schedulePruneSkipped            *prometheus.CounterVec
 	scheduleCutoverDuration         *prometheus.HistogramVec
+	scheduleCutovers                *prometheus.CounterVec
 	scheduleCutoverQueryGroups      *prometheus.CounterVec
 	scheduleCutoverTimelinesRead    prometheus.Gauge
 	queryFailures                   *prometheus.CounterVec
@@ -371,6 +372,31 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		metrics.schedulePruneSkipped.WithLabelValues(reason)
 	}
 	metrics.scheduleCutoverQueryGroups = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_query_groups_total", Help: "Query Groups by what a publication cutover did with them: kept (content and contexts unchanged, no write), revised (contexts changed, one output context revision appended), cut (content changed, Segment closed and reopened), legacy_cut (Segment named no content and was cut once), retired, added."}, []string{"decision"})
+	metrics.scheduleCutovers = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_total",
+		Help: "Publication cutovers by result and, when they failed, why. The cutover is what moves the " +
+			"fleet onto newly published execution content: it closes the open Segment of every Query " +
+			"Group whose content changed and opens a new one naming the new object. A cutover that " +
+			"fails leaves every Segment where it is, so the fleet keeps executing what it was " +
+			"executing and every later publication fails the same way at the same place -- the " +
+			"leader compiles, publishes and writes objects normally the whole time, and what a reader " +
+			"sees is that changes made in the source stop taking effect. " +
+			"Read failure by reason: activation_record_missing is the activation and the open Segments " +
+			"disagreeing about which Plans exist; segment_conflict is an open Segment not in the state " +
+			"the cutover requires; digest_mismatch is stored content that does not hash to its name; " +
+			"conflict is losing a compare-and-set, which is expected occasionally and clears itself; " +
+			"unavailable is content that is not stored or has expired; invalid_request is being asked " +
+			"for something that is not a cutover; io is the store failing underneath. " +
+			"other must stay at zero: every failure the cutover can return is named above, so a " +
+			"non-zero other is a failure path that was added without a name -- which is the state this " +
+			"family was created out of. Every label exists from startup, and a sustained non-zero on " +
+			"any reason but conflict means the fleet is frozen on the content it already had. " +
+			"Reported by the leader only.",
+	}, []string{"result", "reason"})
+	for _, reason := range controlplane.CutoverReasons {
+		metrics.scheduleCutovers.WithLabelValues("failure", reason)
+	}
+	metrics.scheduleCutovers.WithLabelValues("success", "")
 	for _, decision := range observability.ScheduleCutoverDecisions {
 		metrics.scheduleCutoverQueryGroups.WithLabelValues(decision)
 	}
@@ -625,6 +651,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.noDataSlotPlans, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
@@ -733,6 +760,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.ScheduleCutover; facts != nil {
 		m.scheduleCutoverDuration.WithLabelValues(facts.Result).Observe(facts.Duration.Seconds())
+		m.scheduleCutovers.WithLabelValues(facts.Result, facts.Reason).Inc()
 		m.scheduleSegmentsPruned.Add(float64(facts.SegmentsPruned))
 		for reason, count := range facts.PrunesSkipped {
 			m.schedulePruneSkipped.WithLabelValues(reason).Add(float64(count))

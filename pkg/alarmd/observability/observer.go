@@ -441,7 +441,16 @@ type ActiveQGSetFacts struct {
 // that were left unpruned because their Progress could not be read, by
 // reason; those timelines keep growing until a later cutover reads it.
 type ScheduleCutoverFacts struct {
-	Result           string
+	Result string
+	// Reason names why a failed cutover failed, from the control plane's
+	// bounded list. Empty on success. Without it a cutover that has been
+	// failing every round says only that it failed, which is what let one
+	// fail about twice a minute for eleven hours while the fleet quietly
+	// stopped picking up published changes.
+	Reason string
+	// QueryGroup is the one the cutover was working on when it stopped, so a
+	// reader has somewhere to look rather than a whole population.
+	QueryGroup       string
 	Timelines        int
 	PayloadBytes     int
 	MaxTimelineBytes int

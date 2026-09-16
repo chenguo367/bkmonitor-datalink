@@ -217,6 +217,15 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		// decision". The zero is the answer to that question.
 		attributes = append(attributes, slog.Int("no_data_plans", facts.Plans))
 	}
+	if facts := observation.ScheduleCutover; facts != nil && facts.Result != "success" {
+		// Both, and on every failure. A cutover that says only that it failed
+		// leaves a reader with a whole population to search and no cause; these
+		// two are the difference between that and one line to act on.
+		attributes = append(attributes,
+			slog.String("cutover_reason", facts.Reason),
+			slog.String("cutover_query_group", facts.QueryGroup),
+		)
+	}
 	if facts := observation.SegmentContent; facts != nil {
 		attributes = append(attributes, slog.String("segment_content", facts.State))
 	}

@@ -401,6 +401,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_worker_no_data_plans_seen_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
+	expected["bkmonitor_alarmd_schedule_cutover_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_control_source_withheld_lines_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_state_renewal_gate_resets_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_inert_plans"] = "variableLabels: {}"
@@ -851,6 +852,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// One per state a Segment can be in against the latest publication, and
 	// no more: the label is written only from the list controlplane publishes.
 	bounds[fqName("segment_content_freshness_total")] = len(controlplane.SegmentContentStates)
+	// Every reason under failure, and one success. Success carries no reason
+	// because there is nothing to explain; the label is empty there.
+	bounds[fqName("schedule_cutover_total")] = len(controlplane.CutoverReasons) + 1
 	// Named or dropped, and no third thing: each changed object goes to one
 	// of the two, both are created at startup, and the label is written only
 	// from the two constants this package owns.
