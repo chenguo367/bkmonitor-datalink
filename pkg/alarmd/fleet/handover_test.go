@@ -154,6 +154,36 @@ func TestTheTerminalsOwnReasonIsTheRoundsCode(t *testing.T) {
 	}
 }
 
+// A state version conflict named at the terminal is this deployment's own
+// defect at the commit step: both versions compared are this system's
+// writes, and the evaluation had finished. Before the scheduler named it the
+// rounds arrived as internal_unknown and sat under the unclassified defect
+// until the stall budget moved them; named, they stay the defect and fold
+// with the other state-write contract refusals.
+func TestAStateVersionConflictIsTheCommitStepsOwnDefect(t *testing.T) {
+	for _, code := range []string{"STATE_VERSION_CONFLICT", "STATE_STALE_VERSION"} {
+		at := &clock{at: now}
+		tracker := newTracker(t, at)
+		for round := 0; round < DefaultDegradedRounds; round++ {
+			tracker.Observe(context.Background(), observability.Observation{
+				ExecuteOutcome: "error", ReasonCode: observability.ReasonCode(code),
+				Err:   errors.New("alarmd worker: execute frozen Slot: alarmd worker: apply state: state apply did not complete: " + code),
+				Trace: observability.TraceFields{QueryGroupKey: "qg-" + code, EvaluationTime: 1_700_000_000},
+			})
+			at.at = at.at.Add(30 * time.Second)
+		}
+		rows := tracker.Anomalies()
+		MarkStalled(rows, at.at.Add(time.Hour), 10*time.Minute)
+		Attribute(rows, at.at.Add(time.Hour))
+		if len(rows) != 1 || rows[0].Finding.Check != CheckDefect || rows[0].Finding.Group != "COMMIT/NONE/CONTRACT" {
+			t.Fatalf("%s rows = %+v, want DEFECT folded as the commit step's contract refusal, stalled or not", code, rows)
+		}
+		if rows[0].Blocked == nil || rows[0].Blocked.Code != code || rows[0].Blocked.Stage != StageCommit || rows[0].Blocked.Class != ClassContract || rows[0].Blocked.Dependency != DependencyNone {
+			t.Fatalf("%s blocked = %+v, want COMMIT/CONTRACT with no dependency", code, rows[0].Blocked)
+		}
+	}
+}
+
 // The scheduler's class words are not codes. internal_unknown says the
 // scheduler could not name the failure; reading it as a code would file every
 // unnamed failure under one invented name and hide that nobody named it.

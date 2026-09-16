@@ -112,6 +112,10 @@ const (
 	// left the attempt reading as an unclassified internal error, on every
 	// round, for a Query Group that would never get past it.
 	ReasonGapGuardConflict = "GAP_GUARD_CONFLICT"
+	// State version refusals are observation-only names; they do not change
+	// the state store's status contract or the scheduler's retry decision.
+	ReasonStateVersionConflict = "STATE_VERSION_CONFLICT"
+	ReasonStateStaleVersion    = "STATE_STALE_VERSION"
 	// ReasonSnapshotRetentionInsufficient names a Plan whose recovery
 	// contract needs a Snapshot kept longer than this deployment retains one.
 	// The retention is the deployment's capacity and does not follow a Plan, so

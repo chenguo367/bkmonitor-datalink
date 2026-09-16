@@ -499,7 +499,7 @@ func (coordinator *SlotExecutionCoordinator) protectActivatedPlanGaps(
 	request execution.SlotExecutionRequest,
 	reason execution.ReasonCode,
 	activations execution.PlanActivationResult,
-	reuseSufficientQueryFreeProtection bool,
+	reuseCommittedQueryFreeStatement bool,
 ) error {
 	return coordinator.ports.Sequencer.Sequence(
 		ctx,
@@ -510,7 +510,7 @@ func (coordinator *SlotExecutionCoordinator) protectActivatedPlanGaps(
 				request,
 				reason,
 				activations,
-				reuseSufficientQueryFreeProtection,
+				reuseCommittedQueryFreeStatement,
 			)
 			return err
 		},
@@ -578,7 +578,7 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 	request execution.SlotExecutionRequest,
 	reason execution.ReasonCode,
 	activations execution.PlanActivationResult,
-	reuseSufficientQueryFreeProtection bool,
+	reuseCommittedQueryFreeStatement bool,
 ) (bool, error) {
 	owner := &streamedExecution{coordinator: coordinator, request: request}
 	defer owner.releaseProvisional()
@@ -629,7 +629,6 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 	}
 	mutations := make([]execution.PlanGapMutation, 0, len(items))
 	requireAlready := make(map[execution.PlanGapIdentity]struct{})
-	extensions := make(map[execution.PlanGapIdentity]*observability.GapExtensionFacts)
 	for _, item := range items {
 		marker, found := loaded.Find(item.Identity)
 		if !found {
@@ -640,6 +639,11 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 			return false, err
 		}
 		plan := selected[item.Identity.Plan]
+		// Query-free finalization cannot replace a statement already committed
+		// by this Slot, including a tombstone left by successful gap recovery.
+		if reuseCommittedQueryFreeStatement && sameSlotGapCommitted(marker, item, plan) {
+			continue
+		}
 		mutation, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{
 			Identity: item.Identity, ExpectedMarkerRevision: marker.MarkerRevision,
 			ApplyVersion: item.ApplyVersion, ScheduleRevision: item.ScheduleRevision,
@@ -660,13 +664,7 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 					requireAlready[item.Identity] = struct{}{}
 					break
 				}
-				if reuseSufficientQueryFreeProtection && queryFreeGapAlreadyProtects(marker, item, plan) {
-					continue
-				}
-				if !reuseSufficientQueryFreeProtection || !queryFreeGapCanExtend(marker, item, plan, mutation) {
-					return false, newGapGuardConflict(marker, item, mutation, reason, plan)
-				}
-				extensions[item.Identity] = gapExtensionFacts(marker, mutation)
+				return false, newGapGuardConflict(marker, item, mutation, reason, plan)
 			}
 		}
 		if err := owner.retainGapMutation(ctx, mutation); err != nil {
@@ -677,58 +675,17 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 	if len(mutations) == 0 {
 		return true, nil
 	}
-	return coordinator.applyActivatedPlanGaps(ctx, request.Operation, request.Contract, mutations, requireAlready, extensions)
+	return coordinator.applyActivatedPlanGaps(ctx, request.Operation, request.Contract, mutations, requireAlready)
 }
 
-// sameSlotProtectionCandidate fences both reuse and extension with the same
-// identity and version checks before either path compares protection strength.
-func sameSlotProtectionCandidate(marker execution.GapGuardSnapshot, item execution.PlanGapLoadItem, plan execution.ActivatedPlan) bool {
-	return marker.Status == execution.GapFound && marker.Identity == item.Identity &&
+// sameSlotGapCommitted fences reuse with the selected identity and versions.
+// A tombstone is this Slot's conclusion too, not active protection to strengthen.
+func sameSlotGapCommitted(marker execution.GapGuardSnapshot, item execution.PlanGapLoadItem, plan execution.ActivatedPlan) bool {
+	return (marker.Status == execution.GapFound || marker.Status == execution.GapClearedTombstone) && marker.Identity == item.Identity &&
 		plan.Identity == item.Identity.Plan && plan.StateGeneration == item.Identity.StateGeneration &&
 		plan.StateApplyEpoch == item.ApplyVersion.StateApplyEpoch && plan.ScheduleRevision == item.ScheduleRevision &&
 		execution.CompareApplyVersion(marker.PersistedApplyVersion, item.ApplyVersion) == execution.ApplyVersionEqual &&
 		marker.LastScheduleRevision == item.ScheduleRevision
-}
-
-func queryFreeGapAlreadyProtects(
-	marker execution.GapGuardSnapshot,
-	item execution.PlanGapLoadItem,
-	plan execution.ActivatedPlan,
-) bool {
-	// The existing Guard reason explains how recovery protection was established.
-	// Query-free finalization records SNAPSHOT_UNAVAILABLE in Progress without rewriting it.
-	if !sameSlotProtectionCandidate(marker, item, plan) {
-		return false
-	}
-	for _, scope := range marker.Scopes {
-		if !scope.Scope.HasLevel {
-			// A committed warmup has not released protection until the full
-			// recovery window is satisfied. Preserve that same-Slot evidence.
-			// Valid persisted WARMING scopes always have observed < required;
-			// keep that invariant explicit here, not as a substitute for store validation.
-			protected := scope.Status == execution.GapStatusGapped ||
-				(scope.Status == execution.GapStatusWarming && scope.ObservedFullSlots < scope.RequiredFullSlots)
-			return protected &&
-				scope.RequiredFullSlots >= plan.RequiredFullSlots
-		}
-	}
-	return false
-}
-
-// ActivatedPlan has no complete level set when the original snapshot is gone.
-// Preserve the existing level scopes and add Plan-wide protection instead of
-// guessing that the observed levels cover every threshold and no-data level.
-func queryFreeGapCanExtend(marker execution.GapGuardSnapshot, item execution.PlanGapLoadItem, plan execution.ActivatedPlan, mutation execution.PlanGapMutation) bool {
-	if !sameSlotProtectionCandidate(marker, item, plan) {
-		return false
-	}
-	for _, scope := range marker.Scopes {
-		if !scope.Scope.HasLevel {
-			return false
-		}
-	}
-	_, ok := execution.ExtendSameSlotGap(marker.Scopes, mutation.Scopes)
-	return ok
 }
 
 func ensureGappedKind(marker execution.GapGuardSnapshot) (execution.GapMutationKind, error) {
@@ -923,6 +880,12 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		if err := coordinator.admit(ctx, request, due); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
+		// Gap statements commit independently from series State. This also
+		// covers retries whose query became partial or exceeded its budget,
+		// which never enter the evaluator.
+		planResult.GuardBeforeEvents = uncommittedGapMutations(loadedGaps, planResult.GuardBeforeEvents)
+		planResult.GuardAfterState = uncommittedGapMutations(loadedGaps, planResult.GuardAfterState)
+
 		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardBeforeEvents); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
@@ -970,7 +933,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, observability.ResultSuccess, observability.ReasonNone, nil)
 				continue
 			case execution.StateStaleVersion, execution.StateVersionConflict:
-				err = fmt.Errorf("state mutation preflight: %s", disposition)
+				err = &StateConflictError{Stage: "state mutation preflight", Status: string(disposition)}
 				coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, "", "", err)
 				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: %w", err)
 			default:
@@ -1479,6 +1442,8 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 					case execution.StateApplyDeterministicInvalid:
 						deterministic[item.Identity] = item.ReasonCode
 						rejected++
+					case execution.StateApplyStale, execution.StateApplyVersionConflict:
+						err = &StateConflictError{Stage: "state apply did not complete", Status: string(item.Status)}
 					default:
 						err = fmt.Errorf("state apply did not complete: %s", item.Status)
 					}

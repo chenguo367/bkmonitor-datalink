@@ -369,6 +369,17 @@ var codeChecks = map[string]verdict{
 	// refusal carries both values, which is what makes it actionable rather
 	// than something to watch.
 	"GAP_GUARD_CONFLICT": lands(CheckDefect),
+	// The state this deployment persisted for a series moved under the Slot
+	// that was writing it: the version the Slot read is no longer the version
+	// in the store (STATE_VERSION_CONFLICT, the compare-and-set refused), or
+	// the Slot's own version is behind the one already persisted
+	// (STATE_STALE_VERSION). Both sides of the comparison are this system's
+	// writes -- a concurrent Slot on the same series, a batch applied in part,
+	// a previous owner's tail -- and retrying reads the same two versions
+	// again. Named at the terminal by the scheduler; before it was, the
+	// rounds reached here as internal_unknown and the row carried no code.
+	"STATE_VERSION_CONFLICT": lands(CheckDefect),
+	"STATE_STALE_VERSION":    lands(CheckDefect),
 	// A Plan this deployment cannot serve: it asks for a Snapshot kept longer
 	// than the retention, or leaves its own queries no time to run. Neither is
 	// weather and neither clears itself -- somebody changes the strategy or

@@ -2171,6 +2171,9 @@ func (executor observedProductionSlotExecutor) Execute(
 			if conflict, named := worker.GapGuardConflictReason(err); named {
 				reason = observability.ReasonCode(conflict)
 			}
+			if conflict, named := worker.StateConflictReason(err); named {
+				reason = observability.ReasonCode(conflict)
+			}
 		}
 	} else if observedResult == "" {
 		observedResult = observability.ResultSuccess

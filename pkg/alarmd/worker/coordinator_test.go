@@ -717,8 +717,20 @@ func TestSlotExecutionCoordinatorShortCircuitsAlreadyAppliedState(t *testing.T) 
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, []string{
-		"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial", "gap_after", "admission_progress", "progress_commit",
+		"query", "gap_load", "state_load", "sequence", "admission_initial", "admission_progress", "progress_commit",
 	})
+	var reused int
+	for _, observed := range *fixture.observations {
+		if observed.Stage == observability.StageMutationCompared {
+			normalized := observability.NormalizeObservation(observed)
+			if normalized.ReasonCode == observability.ReasonStateAlreadyAppliedBeforeEvaluation {
+				reused++
+			}
+		}
+	}
+	if reused != 1 {
+		t.Fatalf("pre-evaluation reuse observations = %d, want 1", reused)
+	}
 }
 
 func TestSlotExecutionCoordinatorRejectsInvalidRequestAndProviderDrift(t *testing.T) {

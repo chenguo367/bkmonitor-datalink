@@ -267,7 +267,8 @@ const (
 	SourceRefreshUnchanged SourceRefreshStatus = "UNCHANGED"
 	SourceRefreshConflict  SourceRefreshStatus = "PUBLICATION_CONFLICT"
 
-	ReasonNone ReasonCode = "none"
+	ReasonNone                                ReasonCode = "none"
+	ReasonStateAlreadyAppliedBeforeEvaluation ReasonCode = "state_already_applied_before_evaluation"
 	// ReasonInternalUnknown is chosen by a site that has looked at the failure
 	// and has nothing finer to say about it.
 	ReasonInternalUnknown ReasonCode = "internal_unknown"
@@ -2422,10 +2423,10 @@ func joinReasons(groups ...[]ReasonCode) []ReasonCode {
 	return joined
 }
 
-var allCommonReasons = joinReasons(unclassifiedReasons, contractClassReasons, []ReasonCode{ReasonOther})
+var allCommonReasons = joinReasons(unclassifiedReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 var allResourceReasons = joinReasons(
-	unclassifiedReasons, resourceOnlyReasons, contractClassReasons, []ReasonCode{ReasonOther})
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, []ReasonCode{ReasonOther})
+	unclassifiedReasons, resourceOnlyReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
@@ -2433,7 +2434,7 @@ var resultSet = makeResultSet(allResults)
 var operationSet = makeOperationSet(allOperations)
 var metricOperationSet = makeOperationSet(metricOperations)
 var directionSet = makeDirectionSet(allDirections)
-var commonReasonSet = makeReasonSet(unclassifiedReasons)
+var commonReasonSet = makeReasonSet(joinReasons(unclassifiedReasons, []ReasonCode{ReasonStateAlreadyAppliedBeforeEvaluation}))
 var resourceReasonSet = makeReasonSet(resourceOnlyReasons)
 var activationFailureReasonSet = makeReasonSet(activationFailureReasons)
 var contractObservationReasons, contractObservationReasonSet, contractObservationMetricReasonByCode = loadContractObservationReasons()
