@@ -85,17 +85,37 @@ func (repository *RedisCatalogRepository) observeSegmentContentFreshness(
 // segmentContentState compares the Segment's object with the published one and
 // returns the state and the digest the latest publication names, which is empty
 // whenever the comparison could not be made.
+//
+// It runs on every frozen Slot, so both reads it makes are served from this
+// process where they can be; see segment_freshness_cache.go for what that
+// costs and what it does not change. Anything but "current" is re-asked
+// against a freshly read publication pointer, once per reading, because a
+// Segment a cutover has just recut is newer than the memo and must not be
+// reported stale on account of this process's own cache.
 func (repository *RedisCatalogRepository) segmentContentState(
 	ctx context.Context, segment execution.ScheduleSegmentFact,
 ) (string, execution.ObjectDigest) {
 	if segment.ObjectDigest == "" {
 		return SegmentContentLegacy, ""
 	}
-	publication, err := repository.LoadLatestPublication(ctx)
+	state, digest := repository.compareSegmentWithPublished(ctx, segment)
+	if state == SegmentContentCurrent {
+		return state, digest
+	}
+	if !repository.refreshFreshnessPublication(ctx) {
+		return state, digest
+	}
+	return repository.compareSegmentWithPublished(ctx, segment)
+}
+
+func (repository *RedisCatalogRepository) compareSegmentWithPublished(
+	ctx context.Context, segment execution.ScheduleSegmentFact,
+) (string, execution.ObjectDigest) {
+	publication, err := repository.freshnessPublication(ctx)
 	if err != nil {
 		return SegmentContentUnknown, ""
 	}
-	manifest, err := repository.LoadCatalogManifest(ctx, publication.SnapshotRevision)
+	manifest, err := repository.freshnessManifest(ctx, publication.SnapshotRevision)
 	if err != nil {
 		var corrupt *PersistedSnapshotCorruptError
 		if errors.Is(err, ErrCatalogManifestUnavailable) || errors.As(err, &corrupt) {

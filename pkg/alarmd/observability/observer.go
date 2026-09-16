@@ -573,7 +573,7 @@ type ObjectReadFacts struct {
 // ObjectReadKinds and ObjectReadResults are the closed vocabularies of
 // ObjectReadFacts; a value outside them is reported as "other".
 var (
-	ObjectReadKinds   = []string{"query_group", "output_context", "segment"}
+	ObjectReadKinds   = []string{"query_group", "output_context", "segment", "manifest"}
 	ObjectReadResults = []string{"hit", "miss", "share", "missing", "invalid", "object", "legacy_segment", "segment_without_ref", "object_missing", "object_invalid", "object_mismatch"}
 )
 
