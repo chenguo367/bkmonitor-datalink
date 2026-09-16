@@ -545,6 +545,26 @@ func TestHealthResponseCarriesTheStandingsTheVerdictIsDecidedOn(t *testing.T) {
 	}
 }
 
+// The objects response carries the first screen's arithmetic, computed once
+// on the server: the page adding lines up counted past records as work and
+// an object under two lines twice.
+func TestObjectsResponseCarriesTheTodoArithmetic(t *testing.T) {
+	handler := handlerWith(t, snapshotsWithAnomalies(3), Expectation{QueryGroups: 949, Known: true}, replicas())
+	_, body := get(t, handler, "/api/objects?limit=1")
+	todo, ok := body["todo"].(map[string]any)
+	if !ok {
+		t.Fatalf("objects response carries no todo: %v", body)
+	}
+	if todo["checks"].(float64) < 1 || todo["objects"].(float64) != 3 {
+		t.Fatalf("todo = %v, want at least one line and the 3 distinct anomalous objects", todo)
+	}
+	for _, field := range []string{"retained", "retained_last_hour", "governance", "governance_objects"} {
+		if _, present := todo[field]; !present {
+			t.Fatalf("todo is missing %q, which the first screen reads: %v", field, todo)
+		}
+	}
+}
+
 // A deployment whose replicas report no capacity must say so rather than
 // omitting the block, because the page tells those apart and an operator
 // reading "no replica reported capacity" is being told something true.

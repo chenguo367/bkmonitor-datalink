@@ -9,7 +9,10 @@
 
 package fleet
 
-import "sort"
+import (
+	"sort"
+	"time"
+)
 
 // A Check is one line on the page's first screen.
 //
@@ -45,12 +48,18 @@ const (
 	CheckObservationGap      Check = "OBSERVATION_GAP"
 	CheckBackendNotAnswering Check = "BACKEND_NOT_ANSWERING"
 	CheckQueryRefused        Check = "QUERY_REFUSED"
-	CheckNoDataPersistent    Check = "NO_DATA_PERSISTENT"
-	CheckSeriesChurning      Check = "SERIES_CHURNING"
-	CheckSeriesDataMissing   Check = "SERIES_DATA_MISSING"
-	CheckWindowUndecided     Check = "WINDOW_UNDECIDED"
-	CheckPlanUnevaluable     Check = "PLAN_UNEVALUABLE"
-	CheckConfigUnresolved    Check = "CONFIG_UNRESOLVED"
+	// QueryTargetMissing is the refusal that names what is missing: the
+	// backend read the query and answered that the table or field the
+	// strategy references does not exist. That is the strategy's, and the
+	// page's pool card already called these "策略本身不可用" while the line
+	// under it said 待确认 -- one page, two verdicts on the same objects.
+	CheckQueryTargetMissing Check = "QUERY_TARGET_MISSING"
+	CheckNoDataPersistent   Check = "NO_DATA_PERSISTENT"
+	CheckSeriesChurning     Check = "SERIES_CHURNING"
+	CheckSeriesDataMissing  Check = "SERIES_DATA_MISSING"
+	CheckWindowUndecided    Check = "WINDOW_UNDECIDED"
+	CheckPlanUnevaluable    Check = "PLAN_UNEVALUABLE"
+	CheckConfigUnresolved   Check = "CONFIG_UNRESOLVED"
 )
 
 // GroupBy is the key a check's objects are folded on. One backend not
@@ -75,7 +84,7 @@ const (
 )
 
 // checkAnswers is the closed table: who acts on each check and what its
-// objects fold on. Eighteen rows, and a test holds the count there. A check
+// objects fold on. Nineteen rows, and a test holds the count there. A check
 // whose owner is UNDETERMINED is one whose grouping key does not reach an
 // external entity yet -- it stays on this deployment's side of the page until
 // it does, rather than being handed to whichever owner is likeliest.
@@ -98,8 +107,9 @@ var checkAnswers = map[Check]struct {
 	CheckNoDataPersistent:    {OwnerData, GroupByStrategy},
 	CheckSeriesDataMissing:   {OwnerData, GroupByStrategy},
 
-	CheckSeriesChurning:  {OwnerStrategy, GroupByStrategy},
-	CheckPlanUnevaluable: {OwnerStrategy, GroupByStrategy},
+	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
+	CheckPlanUnevaluable:    {OwnerStrategy, GroupByStrategy},
+	CheckQueryTargetMissing: {OwnerStrategy, GroupByDetail},
 
 	CheckQueryRefused:     {OwnerUndetermined, GroupByDetail},
 	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
@@ -132,6 +142,7 @@ var checkOrder = []Check{
 	CheckSeriesDataMissing,
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
+	CheckQueryTargetMissing,
 }
 
 // Checks lists every check the table answers, in the order the page lists
@@ -292,6 +303,22 @@ type CheckReport struct {
 	Objects    int `json:"objects"`
 	Strategies int `json:"strategies"`
 	Businesses int `json:"businesses"`
+	// Demoted is how many of Objects sit in the demoted pool: this deployment
+	// has already stopped re-querying them. The pool card says so of the
+	// pool; the line has to say so of its own objects, or the two read as
+	// different verdicts on the same strategies.
+	Demoted int `json:"demoted,omitempty"`
+	// Current and Retained split Objects into what is wrong now and what was
+	// lost in the past and is kept on record. A line that added the two read
+	// as 393 objects to act on when 10 were anomalous and 383 were records of
+	// Slots skipped hours ago; the reader could not tell which without
+	// opening every group. RetainedLastHour and RetainedNewest are the part
+	// of the record a reader can still do something about: what was just
+	// lost, and when.
+	Current          int        `json:"current"`
+	Retained         int        `json:"retained,omitempty"`
+	RetainedLastHour int        `json:"retained_last_hour,omitempty"`
+	RetainedNewest   *time.Time `json:"retained_newest,omitempty"`
 	// Partial says at least one column this check draws from was truncated by
 	// its replica, so the counts here are a sample of that column.
 	Partial bool         `json:"partial,omitempty"`
@@ -321,7 +348,7 @@ type CheckGroup struct {
 //
 // Ordered as checkOrder is, so the page renders the list in the order the
 // reader acts and does not sort by a rule of its own.
-func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []CheckReport {
+func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, now time.Time) []CheckReport {
 	type tally struct {
 		objects    int
 		strategies map[string]struct{}
@@ -329,6 +356,11 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 		groups     map[string]*CheckGroup
 		groupSets  map[string][2]map[string]struct{}
 		partial    bool
+		demoted    int
+		current    int
+		retained   int
+		lastHour   int
+		newest     time.Time
 		activation *ActivationFacts
 		replica    string
 	}
@@ -379,6 +411,10 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 			entry := ensure(check)
 			entry.partial = entry.partial || columnPartial
 			add(entry, anomaly.Finding.Group, anomaly)
+			entry.current++
+			if columnIndex < len(columnNames) && columnNames[columnIndex] == ColumnDemoted {
+				entry.demoted++
+			}
 			listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
 		}
 	}
@@ -392,6 +428,15 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 		for _, row := range skippedRows(view, listed) {
 			entry := ensure(row.Finding.Check)
 			add(entry, row.Finding.Group, &row)
+			entry.retained++
+			if row.Skip != nil {
+				if now.Sub(row.Skip.At) <= time.Hour {
+					entry.lastHour++
+				}
+				if row.Skip.At.After(entry.newest) {
+					entry.newest = row.Skip.At
+				}
+			}
 		}
 		for index := range view.NoData {
 			row := &view.NoData[index]
@@ -399,6 +444,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 				continue
 			}
 			add(ensure(row.Finding.Check), row.Finding.Group, row)
+			ensure(row.Finding.Check).current++
 		}
 	}
 	// What the view cannot speak for. Unknown is the objects a replica holds
@@ -410,6 +456,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 			entry := ensure(CheckObservationGap)
 			add(entry, string(GapUndetermined), nil)
 			entry.objects += view.Unknown - 1
+			entry.current += view.Unknown
 			entry.groups[string(GapUndetermined)].Objects += view.Unknown - 1
 		}
 		for _, gap := range view.Gaps {
@@ -450,7 +497,12 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 	for check, entry := range tallies {
 		report := CheckReport{Code: check, Owner: checkAnswers[check].Owner, GroupBy: checkAnswers[check].GroupBy,
 			Objects: entry.objects, Strategies: len(entry.strategies), Businesses: len(entry.businesses),
-			Partial: entry.partial, Activation: entry.activation, Replica: entry.replica}
+			Partial: entry.partial, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
+			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour}
+		if !entry.newest.IsZero() {
+			newest := entry.newest
+			report.RetainedNewest = &newest
+		}
 		for key, group := range entry.groups {
 			if sets, known := entry.groupSets[key]; known {
 				group.Strategies, group.Businesses = len(sets[0]), len(sets[1])
@@ -471,6 +523,99 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 	return reports
 }
 
+// Todo is the first screen's arithmetic, done once here rather than by the
+// page adding lines up. The page summed every check's object count and said
+// "需要处理 768 个对象": records of past losses counted in, and an object under
+// two lines counted twice. What a reader needs is how many lines are theirs,
+// how many distinct objects those lines cover now, and -- apart from that --
+// how much was lost in the past and how much of it just now.
+type Todo struct {
+	// Checks is the lines this reader acts on that have something on them
+	// now: an object, or a standing of the deployment itself.
+	Checks int `json:"checks"`
+	// Objects is the distinct objects under those lines, now. An object
+	// under two lines is one object.
+	Objects int `json:"objects"`
+	// Retained is the distinct objects with a record of past loss, kept
+	// until somebody looks; RetainedLastHour is how many of those records
+	// were made in the last hour and RetainedNewest when the newest was.
+	Retained         int        `json:"retained"`
+	RetainedLastHour int        `json:"retained_last_hour"`
+	RetainedNewest   *time.Time `json:"retained_newest,omitempty"`
+	// Governance is the lines already confirmed as somebody else's, and the
+	// distinct objects under them.
+	Governance        int `json:"governance"`
+	GovernanceObjects int `json:"governance_objects"`
+}
+
+// SummarizeTodo counts the first screen. The reports say which lines exist;
+// the columns say which objects are under them, so the distinct count is
+// taken from the objects and not from the lines.
+func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now time.Time) Todo {
+	todo := Todo{}
+	ours := map[string]struct{}{}
+	theirs := map[string]struct{}{}
+	count := func(list []Anomaly) {
+		for _, anomaly := range list {
+			if anomaly.Finding.Check == "" {
+				continue
+			}
+			if checkAnswers[anomaly.Finding.Check].Owner.actionRequired() {
+				ours[anomaly.QueryGroup] = struct{}{}
+			} else {
+				theirs[anomaly.QueryGroup] = struct{}{}
+			}
+		}
+	}
+	for _, column := range columns {
+		count(column)
+	}
+	if view != nil {
+		count(view.NoData)
+	}
+	todo.Objects, todo.GovernanceObjects = len(ours), len(theirs)
+	if view != nil {
+		// The objects a replica holds and has said nothing conclusive about
+		// are under OBSERVATION_GAP and have no row to be distinct by; they
+		// are in no column, so adding the count cannot double-count.
+		todo.Objects += view.Unknown
+	}
+	for _, report := range reports {
+		switch {
+		case !report.ActionRequired():
+			todo.Governance++
+		case report.Current > 0 || report.Activation != nil || report.Code == CheckReplicaDegraded:
+			todo.Checks++
+		}
+	}
+	if view != nil {
+		var newest time.Time
+		note := func(at time.Time) {
+			todo.Retained++
+			if now.Sub(at) <= time.Hour {
+				todo.RetainedLastHour++
+			}
+			if at.After(newest) {
+				newest = at
+			}
+		}
+		for _, skip := range view.GapSkips {
+			note(skip.At)
+		}
+		for _, skip := range view.PrunedSkips {
+			note(skip.At)
+		}
+		if !newest.IsZero() {
+			todo.RetainedNewest = &newest
+		}
+	}
+	return todo
+}
+
+func (owner Owner) actionRequired() bool {
+	return owner == OwnerAlarmd || owner == OwnerUndetermined
+}
+
 // columnNames is the order the handler passes the columns in, so a truncated
 // flag can be looked up by position.
 var columnNames = []string{ColumnAnomalies, ColumnDemoted, ColumnUndecidable, ColumnByDesign}
@@ -478,7 +623,7 @@ var columnNames = []string{ColumnAnomalies, ColumnDemoted, ColumnUndecidable, Co
 // ActionRequired reports whether the check is this reader's to act on: this
 // deployment's own, or one nobody can yet hand to anyone.
 func (report CheckReport) ActionRequired() bool {
-	return report.Owner == OwnerAlarmd || report.Owner == OwnerUndetermined
+	return report.Owner.actionRequired()
 }
 
 func knownCheck(name string) bool {
@@ -522,7 +667,16 @@ func UnderCheck(check Check, group string, view *View) []Anomaly {
 		}
 		list = append(list, row)
 	}
-	sortOldestFirst(list)
+	// Oldest first: on one line every owner is the same, so age is the only
+	// order left, and the oldest is the one to look at. The two lines that
+	// keep records of past loss are the exception: the record grows, and
+	// what a reader can act on is the newest entry -- who was just lost and
+	// which span -- not the oldest.
+	if check == CheckDetectionAbandoned || check == CheckTimelinePruned {
+		SortAnomaliesNewestFirst(list)
+	} else {
+		sortOldestFirst(list)
+	}
 	return list
 }
 
@@ -546,7 +700,8 @@ func skippedRows(view *View, listed map[string]struct{}) []Anomaly {
 		}
 		listed[underKey(check, queryGroup)] = struct{}{}
 		item := Anomaly{QueryGroup: queryGroup, Kind: KindSkippedSpan, ReasonCode: reason,
-			Since: skip.At, SinceFrom: SinceSnapshotContinuity, Replica: skip.Replica, Skip: &skip}
+			Since: skip.At, SinceFrom: SinceSnapshotContinuity, Replica: skip.Replica, Skip: &skip,
+			Strategies: skip.Strategies}
 		item.Finding = Finding{Check: check, Group: skip.Replica, Owner: checkAnswers[check].Owner}
 		item.Attribution = attributionOf(item)
 		rows = append(rows, item)
@@ -556,7 +711,8 @@ func skippedRows(view *View, listed map[string]struct{}) []Anomaly {
 	}
 	for queryGroup, pruned := range view.PrunedSkips {
 		row(queryGroup, CheckTimelinePruned, "SCHEDULE_PRUNED",
-			SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To, At: pruned.At, Replica: pruned.Replica})
+			SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To, At: pruned.At, Replica: pruned.Replica,
+				Strategies: pruned.Strategies})
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].QueryGroup < rows[j].QueryGroup })
 	return rows

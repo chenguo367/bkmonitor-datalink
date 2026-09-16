@@ -418,6 +418,18 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// objects are running normally now, and the loss is in their past.
 	snapshot.PrunedSkips = publisher.tracker.PrunedSkips()
 	snapshot.GapSkips = publisher.tracker.GapSkips()
+	// The strategies behind each retained record, so a row built from it can
+	// be traced to something a reader can act on.
+	if publisher.strategies != nil {
+		for queryGroup, skip := range snapshot.PrunedSkips {
+			skip.Strategies = publisher.strategies(queryGroup)
+			snapshot.PrunedSkips[queryGroup] = skip
+		}
+		for queryGroup, skip := range snapshot.GapSkips {
+			skip.Strategies = publisher.strategies(queryGroup)
+			snapshot.GapSkips[queryGroup] = skip
+		}
+	}
 	// And the objects whose data stopped: rounds completing, nothing coming
 	// back. In no column, and on the data side's line.
 	snapshot.NoData = publisher.tracker.NoData()

@@ -18,16 +18,18 @@ import (
 // design change -- a rule over the dimensions -- and this is what makes it one
 // rather than a word.
 //
-// Eighteen: the sixteen rules over object dimensions, and two standings of
-// the deployment itself -- the fleet executing a publication that is no
-// longer current, and a replica past a bound -- which decided the verdict
-// with no line on the first screen until a running deployment spent half a
-// day on a stale publication behind a DEGRADED badge that named the object
-// list. The design names all eighteen.
-func TestTheCheckTableIsClosedAtEighteen(t *testing.T) {
-	if got := len(Checks()); got != 18 || len(checkAnswers) != 18 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 18: a new check has to "+
-			"be a rule over the existing dimensions or a named standing, and the design says which eighteen", got, len(checkAnswers))
+// Nineteen: the sixteen rules over object dimensions; two standings of the
+// deployment itself -- the fleet executing a publication that is no longer
+// current, and a replica past a bound -- which decided the verdict with no
+// line on the first screen until a running deployment spent half a day on a
+// stale publication behind a DEGRADED badge that named the object list; and
+// the refusal that names what is missing, split from the one that does not,
+// because the pool card called those strategies unusable while the line said
+// 待确认. The design names all nineteen.
+func TestTheCheckTableIsClosedAtNineteen(t *testing.T) {
+	if got := len(Checks()); got != 19 || len(checkAnswers) != 19 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 19: a new check has to "+
+			"be a rule over the existing dimensions or a named standing, and the design says which nineteen", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
 	for _, check := range Checks() {
@@ -87,6 +89,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckObservationGap:      {Kind: KindDegradedRun, SinceFrom: SinceRestoredLastFull},
 		CheckBackendNotAnswering: {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "transport=timeout"}},
 		CheckQueryRefused:        {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "http_status=400"}},
+		CheckQueryTargetMissing:  {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}},
 		CheckNoDataPersistent:    {Kind: KindNoData},
 		CheckSeriesChurning: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Fresh: 4, ShortFresh: 4, FreshRounds: 40}},
@@ -115,7 +118,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckReplicaDegraded: {Degradations: []Degradation{{Kind: DegradationOpenAlertSetStale, Replica: "pod-b"}}},
 	}
 	for want, view := range standings {
-		reports := ReportChecks(nil, nil, &view)
+		reports := ReportChecks(nil, nil, &view, now)
 		if len(reports) != 1 || reports[0].Code != want {
 			t.Errorf("the standing producer for %s reaches %+v instead", want, reports)
 			continue
@@ -259,7 +262,7 @@ func TestReportChecksFoldsColumnsAndCountsDistinctly(t *testing.T) {
 	Attribute(demoted, now)
 	view := &View{Unknown: 4, Gaps: []Gap{{Kind: GapUndetermined}, {Kind: GapSnapshotStale, Replica: "pod-b"}}}
 	reports := ReportChecks([][]Anomaly{anomalies, demoted, nil, nil},
-		map[string]bool{ColumnDemoted: true}, view)
+		map[string]bool{ColumnDemoted: true}, view, now)
 
 	byCode := map[Check]CheckReport{}
 	order := []Check{}
@@ -427,7 +430,7 @@ func TestRetainedSkipsAreOnTheirLinesWithRows(t *testing.T) {
 		PrunedSkips: map[string]PrunedSkip{
 			"qg-pruned": {From: 5000, To: 8600, At: at.Add(-2 * time.Hour), Replica: "pod-b"},
 		}}
-	reports := ReportChecks([][]Anomaly{anomalies, nil, nil, nil}, nil, view)
+	reports := ReportChecks([][]Anomaly{anomalies, nil, nil, nil}, nil, view, now)
 	byCode := map[Check]CheckReport{}
 	for _, report := range reports {
 		byCode[report.Code] = report
@@ -484,7 +487,7 @@ func TestNoDataObjectsAreOnTheDataSidesLine(t *testing.T) {
 			Since: at.Add(-2 * time.Hour), Strategies: []StrategyRef{{StrategyID: "77", BusinessID: "3"}}},
 	}}
 	Attribute(view.NoData, at)
-	reports := ReportChecks([][]Anomaly{nil, nil, nil, nil}, nil, view)
+	reports := ReportChecks([][]Anomaly{nil, nil, nil, nil}, nil, view, now)
 	if len(reports) != 1 || reports[0].Code != CheckNoDataPersistent || reports[0].Owner != OwnerData ||
 		reports[0].Objects != 2 || reports[0].Strategies != 1 {
 		t.Fatalf("reports = %+v, want one NO_DATA_PERSISTENT line, the data side's, over 2 objects of 1 strategy", reports)
@@ -499,6 +502,116 @@ func TestNoDataObjectsAreOnTheDataSidesLine(t *testing.T) {
 	for _, row := range rows {
 		if row.Finding.Result != ResultNoData || row.Attribution != AttributionExternal {
 			t.Errorf("row %s = result %s / attribution %s, want NO_DATA / EXTERNAL", row.QueryGroup, row.Finding.Result, row.Attribution)
+		}
+	}
+}
+
+// A line splits what is wrong now from what was lost in the past and kept,
+// and says how many of its objects the deployment already stopped querying;
+// the first screen's arithmetic counts lines with something on them now and
+// distinct objects, with the record apart. Adding every line's objects up
+// read as "需要处理 768 个对象" on a deployment with a few dozen wrong: past
+// records counted as work, and an object under two lines twice.
+func TestReportsSplitCurrentFromRetainedAndTheTodoCountsDistinctObjects(t *testing.T) {
+	at := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+	anomalies := []Anomaly{{QueryGroup: "qg-a", Kind: KindOverdueWake, Strategies: []StrategyRef{{StrategyID: "1", BusinessID: "7"}}}}
+	demoted := []Anomaly{{QueryGroup: "qg-b", Kind: KindQueryCooldown,
+		Failure:    &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"},
+		Strategies: []StrategyRef{{StrategyID: "2", BusinessID: "7"}}}}
+	// The same object under a second line: one object, not two.
+	undecidable := []Anomaly{{QueryGroup: "qg-a", Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING",
+		Coverage: &HistoryCoverage{Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, ShortRounds: 40, EmptyRounds: 40}}}
+	Attribute(anomalies, at)
+	Attribute(demoted, at)
+	Attribute(undecidable, at)
+	view := &View{Unknown: 2, GapSkips: map[string]SkippedSpan{
+		"qg-c": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-30 * time.Minute), Replica: "pod-a"},
+		"qg-d": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-3 * time.Hour), Replica: "pod-a"},
+	}}
+	columns := [][]Anomaly{anomalies, demoted, undecidable, nil}
+	reports := ReportChecks(columns, nil, view, at)
+	byCode := map[Check]CheckReport{}
+	for _, report := range reports {
+		byCode[report.Code] = report
+	}
+	abandoned := byCode[CheckDetectionAbandoned]
+	if abandoned.Objects != 2 || abandoned.Current != 0 || abandoned.Retained != 2 || abandoned.RetainedLastHour != 1 ||
+		abandoned.RetainedNewest == nil || !abandoned.RetainedNewest.Equal(at.Add(-30*time.Minute)) {
+		t.Fatalf("DETECTION_ABANDONED = %+v, want 2 objects all retained, 1 in the last hour, newest half an hour ago", abandoned)
+	}
+	if gap := byCode[CheckObservationGap]; gap.Current != 2 || gap.Objects != 2 {
+		t.Fatalf("OBSERVATION_GAP = %+v, want the 2 undetermined objects current", gap)
+	}
+	if target := byCode[CheckQueryTargetMissing]; target.Current != 1 || target.Demoted != 1 || target.Owner != OwnerStrategy {
+		t.Fatalf("QUERY_TARGET_MISSING = %+v, want 1 current, 1 demoted, the strategy's", target)
+	}
+	if overdue := byCode[CheckSlotsOverdue]; overdue.Current != 1 || overdue.Demoted != 0 {
+		t.Fatalf("SLOTS_OVERDUE = %+v, want 1 current, none demoted", overdue)
+	}
+
+	todo := SummarizeTodo(reports, columns, view, at)
+	// Lines with something on them now and this reader's: SLOTS_OVERDUE,
+	// WINDOW_UNDECIDED, OBSERVATION_GAP. DETECTION_ABANDONED has only the
+	// record. Objects: qg-a once, plus the two undetermined.
+	if todo.Checks != 3 || todo.Objects != 3 {
+		t.Fatalf("todo = %+v, want 3 lines and 3 distinct objects (qg-a once, plus 2 undetermined)", todo)
+	}
+	if todo.Retained != 2 || todo.RetainedLastHour != 1 || todo.RetainedNewest == nil || !todo.RetainedNewest.Equal(at.Add(-30*time.Minute)) {
+		t.Fatalf("todo record = %+v, want 2 retained, 1 in the last hour, newest half an hour ago", todo)
+	}
+	if todo.Governance != 1 || todo.GovernanceObjects != 1 {
+		t.Fatalf("todo governance = %+v, want the one strategy-side line with its one object", todo)
+	}
+	// A standing counts as a line to act on though it has no objects.
+	standing := &View{Activation: &ActivationFacts{Behind: true, BehindBeyondBound: true}, ActivationReplica: "pod-a"}
+	if only := SummarizeTodo(ReportChecks(nil, nil, standing, at), nil, standing, at); only.Checks != 1 || only.Objects != 0 {
+		t.Fatalf("todo with a standing only = %+v, want 1 line, 0 objects", only)
+	}
+}
+
+// The record of past loss opens newest first: what a reader can act on is
+// who was just lost and which span, not the oldest entry of a list that
+// only grows.
+func TestRetainedLossOpensNewestFirst(t *testing.T) {
+	at := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+	view := &View{GapSkips: map[string]SkippedSpan{
+		"qg-old": {FirstSlot: 1, LastSlot: 2, Slots: 2, At: at.Add(-3 * time.Hour), Replica: "pod-a"},
+		"qg-new": {FirstSlot: 8, LastSlot: 9, Slots: 2, At: at.Add(-2 * time.Minute), Replica: "pod-a"},
+		"qg-mid": {FirstSlot: 4, LastSlot: 5, Slots: 2, At: at.Add(-time.Hour), Replica: "pod-a"},
+	}}
+	rows := UnderCheck(CheckDetectionAbandoned, "", view)
+	if len(rows) != 3 || rows[0].QueryGroup != "qg-new" || rows[1].QueryGroup != "qg-mid" || rows[2].QueryGroup != "qg-old" {
+		names := make([]string, 0, len(rows))
+		for _, row := range rows {
+			names = append(names, row.QueryGroup)
+		}
+		t.Fatalf("DETECTION_ABANDONED opens %v, want newest first", names)
+	}
+	if rows[0].Skip == nil || rows[0].Skip.FirstSlot != 8 {
+		t.Fatalf("the newest row does not carry its span: %+v", rows[0].Skip)
+	}
+}
+
+// A row built from a retained record carries the record's strategies, and
+// the line's fold counts them: a record nobody can trace to a strategy is a
+// record nobody can act on, and it rendered with an empty strategy column.
+func TestRetainedRecordsCarryTheirStrategiesOntoRowsAndFolds(t *testing.T) {
+	at := time.Date(2026, 9, 16, 10, 0, 0, 0, time.UTC)
+	view := &View{
+		GapSkips: map[string]SkippedSpan{"qg-gap": {FirstSlot: 1, LastSlot: 2, Slots: 2, At: at.Add(-time.Minute), Replica: "pod-a",
+			Strategies: []StrategyRef{{StrategyID: "1854", BusinessID: "7"}}}},
+		PrunedSkips: map[string]PrunedSkip{"qg-pruned": {From: 1, To: 900, At: at.Add(-time.Hour), Replica: "pod-a",
+			Strategies: []StrategyRef{{StrategyID: "2001", BusinessID: "9"}}}},
+	}
+	for check, want := range map[Check]string{CheckDetectionAbandoned: "1854", CheckTimelinePruned: "2001"} {
+		rows := UnderCheck(check, "", view)
+		if len(rows) != 1 || len(rows[0].Strategies) != 1 || rows[0].Strategies[0].StrategyID != want {
+			t.Fatalf("%s rows = %+v, want one row naming strategy %s", check, rows, want)
+		}
+	}
+	for _, report := range ReportChecks(nil, nil, view, at) {
+		if report.Strategies != 1 || report.Businesses != 1 || len(report.Groups) != 1 || report.Groups[0].Strategies != 1 {
+			t.Fatalf("%s = %+v, want one strategy and one business counted on the line and its fold", report.Code, report)
 		}
 	}
 }
