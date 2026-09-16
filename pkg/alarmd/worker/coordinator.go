@@ -702,7 +702,11 @@ func queryFreeGapAlreadyProtects(
 	}
 	for _, scope := range marker.Scopes {
 		if !scope.Scope.HasLevel {
-			return scope.Status == execution.GapStatusGapped &&
+			// A committed warmup has not released protection until the full
+			// recovery window is satisfied. Preserve that same-Slot evidence.
+			protected := scope.Status == execution.GapStatusGapped ||
+				(scope.Status == execution.GapStatusWarming && scope.ObservedFullSlots < scope.RequiredFullSlots)
+			return protected &&
 				scope.RequiredFullSlots >= plan.RequiredFullSlots
 		}
 	}
@@ -1548,12 +1552,6 @@ func (coordinator *SlotExecutionCoordinator) observeWithCounts(
 // panic never fails the Slot.
 func (coordinator *SlotExecutionCoordinator) emitObservation(ctx context.Context, observation observability.Observation) {
 	if observation.Err != nil {
-		var conflict *GapGuardConflictError
-		if errors.As(observation.Err, &conflict) {
-			observation.GapConflict = gapExtensionFacts(
-				execution.GapGuardSnapshot{MarkerRevision: conflict.Persisted.MarkerRevision, Scopes: conflict.Persisted.ScopeDetails},
-				execution.PlanGapMutation{Identity: execution.PlanGapIdentity{Plan: conflict.Plan}, Scopes: conflict.Proposed.MutationScopes})
-		}
 		observation.Result = observability.Result(observability.ResultFailed)
 		if observation.ReasonCode == "" || observation.ReasonCode == observability.ReasonNone {
 			observation.ReasonCode = observability.ReasonInternalUnknown

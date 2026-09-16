@@ -81,3 +81,22 @@ func TestQueryFreeFinalizationAddsMissingPlanProtection(t *testing.T) {
 		t.Fatalf("commit observations=%d, want one (no duplicate metric event)", commits)
 	}
 }
+
+func TestQueryFreeFinalizationReusesWarmingProtection(t *testing.T) {
+	activation := activePlanResult("state-v2", 2)
+	activation.Facts[0].Selected.RequiredFullSlots = 9
+	selected := activation.Facts[0].Selected
+	fixture := newQueryFreeFixture(t, []execution.PlanActivationResult{activation})
+	marker := queryFreeGapMarker(t, selected, currentQueryFreeApplyVersion(t), selected.ScheduleRevision,
+		[]execution.GapScopeState{{Scope: execution.GapScope{}, Status: execution.GapStatusWarming,
+			ReasonCode: execution.ReasonCode(contract.ReasonGapSkipped), RequiredFullSlots: 9, ObservedFullSlots: 1}})
+	before := cloneGapGuardSnapshot(marker)
+	fixture.ports.markers[marker.Identity] = marker
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationReplay))
+	if err != nil || !result.Completed || fixture.ports.progressCalls != 1 {
+		t.Fatalf("warming finalization: result=%+v err=%v progress=%d", result, err, fixture.ports.progressCalls)
+	}
+	if fixture.ports.applyCalls != 0 || !reflect.DeepEqual(before, fixture.ports.markers[marker.Identity]) {
+		t.Fatal("reusing WARMING protection must leave persisted evidence unchanged")
+	}
+}

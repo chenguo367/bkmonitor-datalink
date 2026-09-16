@@ -111,3 +111,50 @@ func TestSameSlotGapExtensionPreservesScopesAndChecksCAS(t *testing.T) {
 		})
 	}
 }
+
+// The same-Slot extension contract preserves observations, unlike a new-Slot
+// strengthen. Do not reject existing GAPPED markers merely for having them.
+func TestSameSlotStrengtheningPersistsExistingObservations(t *testing.T) {
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	router, _ := NewFixedRouter("test", backend)
+	store, err := NewExecutionStore(ExecutionStoreOptions{Prefix: "alarmd", Router: router, MaxValueBytes: 4096, MaxItemsPerCall: 4, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := execution.PlanGapIdentity{Plan: stateIdentityV2().Plan, StateGeneration: "generation"}
+	version := applyVersion()
+	apply := func(kind execution.GapMutationKind, revision uint64) {
+		mutation, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{
+			Identity: identity, ExpectedMarkerRevision: revision, ApplyVersion: version, ScheduleRevision: "plan-r1",
+			Scopes: []execution.GapScopeMutation{{Kind: kind, ReasonCode: execution.ReasonCode(contract.ReasonHistoryGapped), RequiredFullSlots: 9}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := store.ApplyGap(context.Background(), execution.GapGuardApplyRequest{Contract: frozenRef(), Items: []execution.PlanGapMutation{mutation}})
+		if err != nil || result.Items[0].Status != execution.GapGuardApplied {
+			t.Fatalf("%s: result=%+v err=%v", kind, result, err)
+		}
+	}
+	load := func() execution.GapGuardSnapshot {
+		result, err := store.LoadGaps(context.Background(), execution.GapLoadRequest{Contract: frozenRef(), Items: []execution.PlanGapLoadItem{{Identity: identity, ApplyVersion: version, ScheduleRevision: "plan-r1"}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Items[0]
+	}
+	apply(execution.GapOpen, 0)
+	version.EvaluationTime += 60
+	apply(execution.GapWarmup, load().MarkerRevision)
+	before := load()
+	if before.Status != execution.GapFound || len(before.Scopes) != 1 || before.Scopes[0].Status != execution.GapStatusWarming || before.Scopes[0].ObservedFullSlots != 1 {
+		t.Fatalf("warmup=%+v", before)
+	}
+	apply(execution.GapStrengthen, before.MarkerRevision)
+	after := load()
+	want := before.Scopes[0]
+	want.Status = execution.GapStatusGapped
+	if after.Status != execution.GapFound || after.MarkerRevision != before.MarkerRevision+1 || len(after.Scopes) != 1 || after.Scopes[0] != want {
+		t.Fatalf("same-Slot extension lost observations: %+v", after)
+	}
+}
