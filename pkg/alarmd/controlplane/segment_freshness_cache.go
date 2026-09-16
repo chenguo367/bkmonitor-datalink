@@ -106,6 +106,21 @@ func (cache *catalogManifestCache) store(revision execution.SnapshotRevision, ma
 	}
 }
 
+// drop forgets one revision. Nothing about the manifest goes out of date, so
+// this is not invalidation: it is for the one case where the store no longer
+// has the object this copy is a copy of.
+func (cache *catalogManifestCache) drop(revision execution.SnapshotRevision) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	kept := cache.entries[:0]
+	for _, entry := range cache.entries {
+		if entry.revision != revision {
+			kept = append(kept, entry)
+		}
+	}
+	cache.entries = kept
+}
+
 // latestPublicationMemo is the publication pointer this process last read and
 // when it read it.
 type latestPublicationMemo struct {
@@ -119,13 +134,24 @@ type latestPublicationMemo struct {
 	rechecked bool
 }
 
-// freshnessManifest serves the manifest of one publication for the per-Slot
-// freshness check, from this process where it can.
+// cachedCatalogManifest serves the manifest of one publication to the paths a
+// Slot takes, from this process where it can.
+//
+// Two of them: the freshness comparison, which runs on every frozen Slot, and
+// the Snapshot fallback a Slot takes when its Segment names no object or the
+// content it names cannot be read. The second is quiet today and is the same
+// 760 KB per Slot when it is not -- a Redis reload that comes back without the
+// object keys puts the whole fleet on it at once, which is the shape of the
+// incident this cache was written for.
+//
+// It is not used by the paths that ask whether the manifest is still in the
+// store: renewal and the activation's existence check read through, because
+// there the answer they want is about Redis rather than about the content.
 //
 // The hit and the miss are both counted, on the same series the Worker's other
 // object reads use. The hit rate is the whole point of this cache, and a hit
 // count with no miss count beside it cannot be told from a cache nobody calls.
-func (repository *RedisCatalogRepository) freshnessManifest(
+func (repository *RedisCatalogRepository) cachedCatalogManifest(
 	ctx context.Context, revision execution.SnapshotRevision,
 ) (CatalogManifest, error) {
 	if manifest, ok := repository.manifestCache.lookup(revision); ok {
@@ -139,6 +165,45 @@ func (repository *RedisCatalogRepository) freshnessManifest(
 	}
 	repository.observeObjectRead(ctx, "manifest", "miss")
 	repository.manifestCache.store(revision, manifest)
+	return manifest, nil
+}
+
+// retainedCatalogManifest serves the manifest to the Snapshot fallback: from
+// this process, but only once the store has confirmed the key is still there.
+//
+// The extra round trip is deliberate and it is not the one that cost anything.
+// LoadQueryGroup promises that a revision whose manifest is gone reads as an
+// unavailable Snapshot, and that promise is the only per-Slot check that the
+// content this revision names is still retained -- the objects it names are
+// served from a process cache that does not re-ask either. Serving the
+// manifest from memory without it would turn a lapsed retention into Slots
+// executing content the store no longer holds, silently, which is a worse
+// failure than the one being fixed.
+//
+// What is kept is the 760 KB. EXISTS is a few bytes and one round trip on a
+// path that is idle while every Segment is on the content path; the bytes were
+// the whole problem.
+func (repository *RedisCatalogRepository) retainedCatalogManifest(
+	ctx context.Context, revision execution.SnapshotRevision,
+) (CatalogManifest, error) {
+	manifest, cached := repository.manifestCache.lookup(revision)
+	if !cached {
+		return repository.cachedCatalogManifest(ctx, revision)
+	}
+	present, err := repository.client.Exists(ctx, repository.catalogManifestKey(revision)).Result()
+	if err != nil {
+		repository.observeObjectRead(ctx, "manifest", "missing")
+		return CatalogManifest{}, activationDependencyIO(err)
+	}
+	if present == 0 {
+		// Gone from the store. Drop what this process holds as well: keeping it
+		// would answer the next reader from a copy of something that has been
+		// deleted, which is the state this check exists to refuse.
+		repository.manifestCache.drop(revision)
+		repository.observeObjectRead(ctx, "manifest", "missing")
+		return CatalogManifest{}, ErrCatalogManifestUnavailable
+	}
+	repository.observeObjectRead(ctx, "manifest", "hit")
 	return manifest, nil
 }
 

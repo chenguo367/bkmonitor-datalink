@@ -115,7 +115,7 @@ func (repository *RedisCatalogRepository) compareSegmentWithPublished(
 	if err != nil {
 		return SegmentContentUnknown, ""
 	}
-	manifest, err := repository.freshnessManifest(ctx, publication.SnapshotRevision)
+	manifest, err := repository.cachedCatalogManifest(ctx, publication.SnapshotRevision)
 	if err != nil {
 		var corrupt *PersistedSnapshotCorruptError
 		if errors.Is(err, ErrCatalogManifestUnavailable) || errors.As(err, &corrupt) {

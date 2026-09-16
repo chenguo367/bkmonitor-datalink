@@ -114,6 +114,50 @@ func TestFreezingManySlotsAgainstOnePublicationReadsTheManifestOnce(t *testing.T
 	}
 }
 
+// Many Slots taking the Snapshot fallback read the manifest once.
+//
+// The fallback is the other per-Slot path that reads a whole manifest, and it
+// is quiet only while every Segment is on the content path. A Segment that
+// names no object takes it, and so does one whose object cannot be read -- so
+// the day the object keys are gone, which is the day this cache was written
+// for, the whole fleet takes it at once. Twelve Slots here, one read.
+//
+// Only the bytes are saved. Each of the twelve still asks the store whether
+// the manifest key is there, because LoadQueryGroup promises that a revision
+// whose manifest is gone reads as an unavailable Snapshot, and that is the
+// only per-Slot check that this revision's content is still retained -- the
+// objects are served from a process cache that does not re-ask either.
+// TestLoadQueryGroupReadsTheManifestAndObjects holds that end, and holds it
+// with this cache warm.
+func TestSlotsOnTheSnapshotFallbackReadTheManifestOnce(t *testing.T) {
+	ctx := context.Background()
+	fixture := newCountedFreshnessFixture(t, "freshness-reads-fallback")
+	schedule, err := fixture.runtime.ReadFrozenSchedule(ctx, fixture.group, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A Segment naming no object is what a fleet cut before content addressing
+	// carries, and it is the fallback's own reason code.
+	legacy := schedule.Segment
+	legacy.ObjectDigest, legacy.OutputContextRefs = "", nil
+	fixture.gets.reset()
+
+	const slots = 12
+	for round := 0; round < slots; round++ {
+		if _, err := fixture.repository.LoadSegmentQueryGroup(ctx, legacy, 60, func(ctx context.Context) (controlplane.QueryGroup, error) {
+			return fixture.repository.LoadQueryGroup(ctx, legacy.Publication.SnapshotRevision, fixture.group)
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := fixture.gets.count("manifest"); got != 1 {
+		t.Fatalf("manifest GETs = %d over %d Slots on the fallback, want 1. This path reads the same "+
+			"760 KB the freshness check did, and every Segment takes it when the content it names "+
+			"cannot be read", got, slots)
+	}
+}
+
 // A Segment left on an older publication is reported stale once the memo is
 // re-read, and the Slots behind it cost nothing more.
 //

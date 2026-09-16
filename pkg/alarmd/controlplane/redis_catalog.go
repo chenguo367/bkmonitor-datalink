@@ -622,7 +622,12 @@ func (repository *RedisCatalogRepository) LoadQueryGroup(ctx context.Context, re
 	if identity == "" {
 		return QueryGroup{}, errors.New("alarmd controlplane: query group identity is required")
 	}
-	manifest, err := repository.LoadCatalogManifest(ctx, revision)
+	// Served from this process where it can be. This is the Snapshot fallback
+	// a Slot takes when its Segment names no object, or names content that
+	// cannot be read, and it is the same whole-manifest read per Slot that the
+	// freshness check was: quiet while every Segment is on the content path,
+	// and the entire fleet at once on the day the object keys are gone.
+	manifest, err := repository.retainedCatalogManifest(ctx, revision)
 	if errors.Is(err, ErrCatalogManifestUnavailable) {
 		return QueryGroup{}, ErrSnapshotUnavailable
 	}
