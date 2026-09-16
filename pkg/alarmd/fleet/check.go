@@ -89,7 +89,19 @@ const (
 	// GroupByDegradation folds on the kind of replica-level standing, the
 	// closed DegradationKinds; the replicas in it are named on the group.
 	GroupByDegradation GroupBy = "degradation"
+	// GroupByBlocked folds on where the failure is stuck, what it was
+	// talking to and what kind it was -- the row's Blocked reading -- with
+	// the reason codes under that as a secondary count. It is the fold that
+	// makes a Redis restart one problem ("commit, Redis, unavailable: 86
+	// objects") instead of one line per code, and a query timeout one
+	// problem whose dependency the fold does not pretend to know.
+	GroupByBlocked GroupBy = "blocked"
 )
+
+// GroupBys is the closed list of folds, for the page's completeness test:
+// a fold the page has no words for renders as its key on the line a reader
+// opens a check with.
+var GroupBys = []GroupBy{GroupByReplica, GroupByReasonCode, GroupByDetail, GroupByStrategy, GroupByGapKind, GroupByCause, GroupByDegradation, GroupByLoss, GroupByBlocked}
 
 // checkAnswers is the closed table: who acts on each check and what its
 // objects fold on. Twenty rows, and a test holds the count there. A check
@@ -108,8 +120,8 @@ var checkAnswers = map[Check]struct {
 	CheckRoundsStalled:      {OwnerAlarmd, GroupByReplica},
 	CheckDetectionAbandoned: {OwnerAlarmd, GroupByLoss},
 	CheckTimelinePruned:     {OwnerAlarmd, GroupByLoss},
-	CheckDependencyDown:     {OwnerAlarmd, GroupByReasonCode},
-	CheckDefect:             {OwnerAlarmd, GroupByReasonCode},
+	CheckDependencyDown:     {OwnerAlarmd, GroupByBlocked},
+	CheckDefect:             {OwnerAlarmd, GroupByBlocked},
 	CheckObservationGap:     {OwnerAlarmd, GroupByGapKind},
 
 	CheckNoDataPersistent: {OwnerData, GroupByStrategy},
@@ -118,7 +130,7 @@ var checkAnswers = map[Check]struct {
 	CheckPlanUnevaluable:    {OwnerStrategy, GroupByStrategy},
 	CheckQueryTargetMissing: {OwnerStrategy, GroupByDetail},
 
-	CheckQueryRefused:     {OwnerUndetermined, GroupByDetail},
+	CheckQueryRefused:     {OwnerUndetermined, GroupByBlocked},
 	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
 	CheckConfigUnresolved: {OwnerUndetermined, GroupByStrategy},
 	// A client-side timeout does not establish a fault on the data side: the
@@ -126,7 +138,7 @@ var checkAnswers = map[Check]struct {
 	// be read first. And a window short of old-series points may be short
 	// because this deployment did not fetch them. Both were handed to the
 	// data owner as confirmed; a live review found neither confirmed.
-	CheckBackendNotAnswering: {OwnerUndetermined, GroupByDetail},
+	CheckBackendNotAnswering: {OwnerUndetermined, GroupByBlocked},
 	CheckSeriesDataMissing:   {OwnerUndetermined, GroupByStrategy},
 }
 
@@ -222,6 +234,8 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 		return anomaly.Replica
 	case GroupByReasonCode:
 		return decidingCode(anomaly)
+	case GroupByBlocked:
+		return blockedKey(anomaly.Blocked)
 	case GroupByDetail:
 		if anomaly.Failure != nil && anomaly.Failure.Detail != "" {
 			return anomaly.Failure.Detail
@@ -408,6 +422,138 @@ type CheckGroup struct {
 	// bound was passed.
 	Stage string `json:"stage,omitempty"`
 	Text  string `json:"text,omitempty"`
+	// Codes counts the reason codes under a fold on the Blocked reading: the
+	// secondary key, so "commit, Redis, unavailable" can still say it was
+	// REDIS_UNAVAILABLE 60 and STATE_WRITE_RETRYABLE 26.
+	Codes map[string]int `json:"codes,omitempty"`
+	// The problem's own facts, on every fold with object rows: how many of
+	// its objects are overdue now and how many are retrying, when it began
+	// (the earliest onset), when it was last seen failing, when any of its
+	// objects last completed healthily -- and Recovery, read from those.
+	Overdue      int        `json:"overdue,omitempty"`
+	Retrying     int        `json:"retrying,omitempty"`
+	FirstFailure *time.Time `json:"first_failure,omitempty"`
+	LastFailure  *time.Time `json:"last_failure,omitempty"`
+	LastSuccess  *time.Time `json:"last_success,omitempty"`
+	Recovery     Recovery   `json:"recovery,omitempty"`
+	// Behind the recovery reading: objects seen failing within the recent
+	// window, objects whose rounds ended within it without a usable result,
+	// objects only late, and objects nothing was heard from within it.
+	FailingNow    int `json:"failing_now,omitempty"`
+	CompletingNow int `json:"completing_now,omitempty"`
+	Delayed       int `json:"delayed,omitempty"`
+	Silent        int `json:"silent,omitempty"`
+}
+
+// Recovery is where a problem is between failing and fixed, read from its
+// objects' rows and never from the dependency's own health: a store that
+// answers again is not detection that has caught up.
+type Recovery string
+
+const (
+	// RecoveryBlocked: objects were seen failing within the recent window.
+	RecoveryBlocked Recovery = "BLOCKED"
+	// RecoveryRecovering: no failure within the window; rounds are ending
+	// again (with results nobody can use yet) or are only late.
+	RecoveryRecovering Recovery = "RECOVERING"
+	// RecoveryUnconfirmed: no failure within the window, and nothing heard
+	// from any object within it either -- a cooldown, a round not yet due.
+	// Not recovered: recovery needs a success, and none was seen.
+	RecoveryUnconfirmed Recovery = "UNCONFIRMED"
+	// RecoveryRecovered: every object completed healthily after its last
+	// failure and none is late; the problem has left the current lines.
+	RecoveryRecovered Recovery = "RECOVERED"
+	// RecoveryHistorical: the objects run normally now; what remains is a
+	// record of detection that did not happen and cannot be made to.
+	RecoveryHistorical Recovery = "HISTORICAL"
+)
+
+// RecoveryStates is the closed list, for the page's completeness test.
+var RecoveryStates = []Recovery{RecoveryBlocked, RecoveryRecovering, RecoveryUnconfirmed, RecoveryRecovered, RecoveryHistorical}
+
+// RecoveryStatesWithoutAProducer names the states nothing decides yet.
+// RECOVERED needs a problem remembered after its objects left the lines,
+// which nothing keeps; until something does, the state is in the list so
+// the page has words for it and in this list so the test that every state
+// has a producer knows it is waiting for one rather than wired.
+var RecoveryStatesWithoutAProducer = []Recovery{RecoveryRecovered}
+
+// blockedKey is the fold key on the Blocked reading: stage, dependency and
+// class, joined so the page can split them back out. A row with no reading
+// -- one that records no failure -- folds under the unlocated triple.
+func blockedKey(blocked *Blocked) string {
+	if blocked == nil {
+		return string(StageUnlocated) + "/" + string(DependencyUnlocated) + "/" + string(ClassUnlocated)
+	}
+	return string(blocked.Stage) + "/" + string(blocked.Dependency) + "/" + string(blocked.Class)
+}
+
+// noteProblem adds one object row to its group's problem facts, counted
+// under code when the fold names one and under the row's own code otherwise.
+func noteProblem(group *CheckGroup, anomaly *Anomaly, code string, now time.Time) {
+	blocked := anomaly.Blocked
+	if group.Codes == nil {
+		group.Codes = map[string]int{}
+	}
+	if code == "" {
+		code = decidingCode(*anomaly)
+		if blocked != nil && blocked.Code != "" {
+			code = blocked.Code
+		}
+	}
+	if code == "" {
+		code = skipReasonNone
+	}
+	group.Codes[code]++
+	if anomaly.Finding.Schedule == ScheduleOverdue {
+		group.Overdue++
+	}
+	if !anomaly.Since.IsZero() && (group.FirstFailure == nil || anomaly.Since.Before(*group.FirstFailure)) {
+		since := anomaly.Since
+		group.FirstFailure = &since
+	}
+	if blocked == nil {
+		group.Silent++
+		return
+	}
+	if blocked.Retrying {
+		group.Retrying++
+	}
+	if blocked.At != nil && (group.LastFailure == nil || blocked.At.After(*group.LastFailure)) {
+		at := *blocked.At
+		group.LastFailure = &at
+	}
+	if blocked.LastSuccessAt != nil && (group.LastSuccess == nil || blocked.LastSuccessAt.After(*group.LastSuccess)) {
+		at := *blocked.LastSuccessAt
+		group.LastSuccess = &at
+	}
+	recent := blocked.At != nil && now.Sub(*blocked.At) <= RecentSkipWindow
+	switch {
+	case !recent:
+		group.Silent++
+	case blocked.Effect == EffectRetrying, blocked.Effect == EffectSkipped:
+		group.FailingNow++
+	case blocked.Effect == EffectDelayed:
+		group.Delayed++
+	default:
+		group.CompletingNow++
+	}
+}
+
+// recoveryOf reads the state from the counts noteProblem kept. A retained
+// record fold is historical by construction: its objects run normally and
+// the record is what is left.
+func recoveryOf(group *CheckGroup, historical bool) Recovery {
+	switch {
+	case historical:
+		return RecoveryHistorical
+	case group.FailingNow > 0:
+		return RecoveryBlocked
+	case group.CompletingNow > 0 || group.Delayed > 0:
+		return RecoveryRecovering
+	default:
+		return RecoveryUnconfirmed
+	}
 }
 
 // ReportChecks folds every object in every column into the checks it is
@@ -445,7 +591,10 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		}
 		return entry
 	}
-	add := func(entry *tally, key string, anomaly *Anomaly) {
+	// code is what the fold counts the row under, when the fold is not on
+	// the row's own deciding code: the second fact under DEFECT counts the
+	// internal code, not the refusal the row is listed for.
+	addAs := func(entry *tally, key string, anomaly *Anomaly, code string) {
 		entry.objects++
 		group := entry.groups[key]
 		if group == nil {
@@ -457,6 +606,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		if anomaly == nil {
 			return
 		}
+		noteProblem(group, anomaly, code, now)
 		sets := entry.groupSets[key]
 		for _, strategy := range anomaly.Strategies {
 			entry.strategies[strategy.StrategyID] = struct{}{}
@@ -467,6 +617,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			}
 		}
 	}
+	add := func(entry *tally, key string, anomaly *Anomaly) { addAs(entry, key, anomaly, "") }
 	listed := map[string]struct{}{}
 	for columnIndex, column := range columns {
 		columnPartial := false
@@ -494,7 +645,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			if anomaly.Internal != nil && check != CheckDefect {
 				defect := ensure(CheckDefect)
 				defect.partial = defect.partial || columnPartial
-				add(defect, anomaly.Internal.Code, anomaly)
+				addAs(defect, anomaly.Internal.Code, anomaly, anomaly.Internal.Code)
 				defect.current++
 				listed[underKey(CheckDefect, anomaly.QueryGroup)] = struct{}{}
 			}
@@ -622,6 +773,13 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		for key, group := range entry.groups {
 			if sets, known := entry.groupSets[key]; known {
 				group.Strategies, group.Businesses = len(sets[0]), len(sets[1])
+			}
+			// A fold with object rows behind it gets its recovery reading; a
+			// standing's fold and a gap's have no rows and no reading. Record
+			// folds of stopped loss are historical; the folds of loss in
+			// progress are read like any other.
+			if group.Codes != nil {
+				group.Recovery = recoveryOf(group, key == string(LossHistorical) || key == string(LossWhileDemoted))
 			}
 			report.Groups = append(report.Groups, *group)
 		}

@@ -47,7 +47,10 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			QueryGroup: id, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 			Kind: "DEGRADED_RUN", ReasonCode: "COMPLETED_WITH_UNAVAILABLE",
 			Since: at.Add(-time.Hour), SinceFrom: fleet.SinceSnapshotContinuity,
-			Strategies: []fleet.StrategyRef{{StrategyID: "1234", BusinessID: "7"}},
+			// The latest round said the reason half a minute ago: rounds are
+			// ending, which is what the recovery reading is read from.
+			ReasonLastAt: at.Add(-30 * time.Second),
+			Strategies:   []fleet.StrategyRef{{StrategyID: "1234", BusinessID: "7"}},
 		}
 		if mutate != nil {
 			mutate(&item)
@@ -698,6 +701,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"BLOCKED qg-losing-now ::", "卡在哪一步：调度接管（alarmd 自身（预算、截止、定义），由原因码判定）：容量不足 GAP_SKIPPED；影响：确认漏检（跳过记录已持久化，那段不补）"},
 		{"BLOCKED qg-rejected ::", "卡在哪一步：数据查询（查询后端，由原因码判定）：被拒绝 "},
 		{"CHECKS ::", "6 个对象命中程序缺陷（3 种），上报"},
+		// The line's problems before it is opened: each fold as where, talking
+		// to what, what kind, how many, and whether it is still happening.
+		{"CHECKS ::", "6 个对象命中程序缺陷（3 种），上报——环节待定位 · 依赖待定位 · 类型待定位（COMPLETED_WITH_UNAVAILABLE 3、error 1）：4 个，仍然受阻，最近失败 17:59:30；"},
+		{"CHECKS ::", "alarmd 自己的依赖没答，1 个对象受影响（1 种）——配置获取 · 依赖待定位 · 不可用（source_blocked 1）：1 个，仍然受阻，最近失败 17:59:30"},
+		{"CHECKS ::", "；GAP_SCOPE_REASON_CONFLICT（内部错误，第二事实）：1 个，仍然受阻"},
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\""},
 		{"PENDING ::", "证据：分组的后端回答只有状态码/状态词（非 200 的响应正文当前不保留，\"最近一次错误\"是结束这一轮的 alarmd 错误，不是后端原文）"},
 		// The timeout and the short old-series window are not the data side's
@@ -716,7 +724,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"ACTION ::", "；之后还有 8 类，按顺序在下面；待归因 5 类另看，别交出去"},
 		// A record line's folds name what each loss is; the refusal's object
 		// row says what it lost while under its line.
-		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过）） · 1 个对象 · 1 条策略 · 1 个业务"},
+		// Every fold with object rows carries the problem's state and its
+		// clock: a loss in progress is still blocked, a stopped one is
+		// history, and a record fold does not claim this process never saw
+		// its objects succeed -- that is not the record's question.
+		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过）） · 1 个对象 · 仍然受阻（最近窗口内还在失败） · 首次 17:57:00 · 最近失败 17:57:00 · 1 条策略 · 1 个业务"},
+		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象 · 留有历史影响（对象现在正常，那段没检测的时间不补） · 首次 17:00:00 · 最后一次 17:00:00"},
 		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象"},
 		{"GROUPS LOSS ::", "AFTER_RESTART（滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）） · 1 个对象"},
 		{"SKIP qg-restart-catchup ::", "，10 秒周期。滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）"},
@@ -776,7 +789,10 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"GROUPS CUTOVER ::", "schedule_cutover/schedule_conflict · 副本 abcde，没有可列的对象"},
 		// The guard-held fold names the trigger and that the window is still
 		// short; the reader is not sent to edit a strategy.
-		{"GROUPS WINDOW ::", "保护未解除（最初触发 CONFIG_DRIFT） · 1 个对象 · 1 条策略 · 1 个业务"},
+		// A window fold: rounds end (with results nobody can use), so the
+		// problem is recovering, and the clock is the latest round, not a
+		// failure.
+		{"GROUPS WINDOW ::", "保护未解除（最初触发 CONFIG_DRIFT） · 1 个对象 · 正在恢复（窗口内没有新失败；轮次在结束或只是迟到，结果还没补齐） · 首次 17:00:00 · 最近一轮 17:59:30 · 本进程没见过这些对象成功完成 · 1 条策略 · 1 个业务"},
 		{"BASIS CUTOVER ::", "最近一次激活失败：alarmd controlplane: schedule activation conflict（副本 abcde）。伴随证据：segment_content_freshness_total{stale}"},
 		{"GROUPS DEGRADED ::", "OPEN_ALERT_SET_STALE（已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识） · 副本 fghij，没有可列的对象"},
 		{"GROUPS DEGRADED ::", "CONTROL_SOURCE_STALE（策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录——最近一次失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m） · 副本 abcde，没有可列的对象"},

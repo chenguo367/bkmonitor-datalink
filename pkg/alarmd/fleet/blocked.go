@@ -363,9 +363,22 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 	} else if anomaly.Failure != nil && anomaly.Failure.Detail != "" {
 		blocked.Text = anomaly.Failure.Detail
 	}
-	if blocked.At == nil && !anomaly.ReasonSince.IsZero() {
-		at := anomaly.ReasonSince
+	// When it was last seen: the skip record's time on a record, the failing
+	// round's own time, else the latest round that said the reason, else when
+	// the reason began. The latest end, because "still happening" is read
+	// from it.
+	if anomaly.Skip != nil && !anomaly.Skip.At.IsZero() {
+		at := anomaly.Skip.At
 		blocked.At = &at
+	}
+	if blocked.At == nil {
+		for _, candidate := range []time.Time{anomaly.ReasonLastAt, anomaly.ReasonSince} {
+			if !candidate.IsZero() {
+				at := candidate
+				blocked.At = &at
+				break
+			}
+		}
 	}
 	if !anomaly.LastHealthyAt.IsZero() {
 		at := anomaly.LastHealthyAt

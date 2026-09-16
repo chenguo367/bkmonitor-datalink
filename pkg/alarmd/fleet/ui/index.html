@@ -669,7 +669,54 @@ var CHECK = {
 
 // What the objects of a check are folded on, in words.
 var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况',
-                degradation: '超界的状态', loss: '损失是什么'};
+                degradation: '超界的状态', loss: '损失是什么', blocked: '卡在哪一步 · 依赖 · 类型（原因码在组内计数）'};
+
+// Where a problem is between failing and fixed, from the server's reading
+// of its objects' rows -- never from the dependency's own health. Held to
+// the Go list. "恢复待确认" is an answer: nothing failed within the window
+// and nothing succeeded either, and calling that recovered would be the
+// second accuracy constraint broken.
+var RECOVERY_STATE = {
+  BLOCKED: '仍然受阻（最近窗口内还在失败）',
+  RECOVERING: '正在恢复（窗口内没有新失败；轮次在结束或只是迟到，结果还没补齐）',
+  UNCONFIRMED: '恢复待确认（窗口内没有新失败，也没观察到任何一轮成功——不算已恢复）',
+  RECOVERED: '已恢复（每个对象都在最近一次失败之后成功完成过）',
+  HISTORICAL: '留有历史影响（对象现在正常，那段没检测的时间不补）'
+};
+
+// A problem's facts on its fold: the state, what is overdue and retrying
+// under it, when it began, when it was last seen failing, when any of its
+// objects last succeeded.
+function problemClause(report, group) {
+  if (!group || !group.recovery) return '';
+  var parts = [RECOVERY_STATE[group.recovery] || group.recovery];
+  if (group.overdue) parts.push('其中 ' + group.overdue + ' 个已超期');
+  if (group.retrying) parts.push(group.retrying + ' 个在重试');
+  if (group.first_failure) parts.push('首次 ' + momentLabel(group.first_failure));
+  // The latest time the problem was seen: a failure while objects are still
+  // failing, otherwise the latest round that ended under it.
+  if (group.last_failure) {
+    var clock = group.failing_now ? '最近失败 ' : group.recovery === 'HISTORICAL' ? '最后一次 ' : '最近一轮 ';
+    parts.push(clock + momentLabel(group.last_failure));
+  }
+  // A record fold's objects usually run normally now; whether this process
+  // saw them succeed is not the record's question.
+  if (group.last_success) parts.push('最近一次成功 ' + momentLabel(group.last_success));
+  else if (report.group_by !== 'loss') parts.push('本进程没见过这些对象成功完成');
+  return parts.join(' · ');
+}
+
+// The fold key on the Blocked reading, in words, with the codes under it.
+function blockedKeyLabel(key, group) {
+  var parts = String(key).split('/');
+  // The second fact under DEFECT folds on the internal code itself, not on
+  // a triple; it prints as the code.
+  if (parts.length !== 3) return String(key) + '（内部错误，第二事实）';
+  var words = (STAGE[parts[0]] || parts[0]) + ' · ' + (DEPENDENCY[parts[1]] || parts[1]) + ' · ' + (FAILURE_CLASS[parts[2]] || parts[2]);
+  var codes = group && group.codes ? Object.keys(group.codes).sort(function (a, b) { return group.codes[b] - group.codes[a]; })
+    .map(function (code) { return code + ' ' + group.codes[code]; }) : [];
+  return words + (codes.length ? '（' + codes.join('、') + '）' : '');
+}
 
 // What a retained record is a record of, in words. Held to the Go list.
 // The window the first two are decided on comes from the response.
@@ -819,7 +866,7 @@ function checkSentence(report, count) {
     .replace('{since}', since)
     .replace('{applied}', shortRevision(activation.applied))
     .replace('{published}', shortRevision(activation.published))
-    + demoted + lossClause(report, count) + consequenceClause(report) + standingClause(report);
+    + demoted + lossClause(report, count) + consequenceClause(report) + standingClause(report) + problemsClause(report);
 }
 
 // The split line's numbers, from the leader's rebalance round on the report:
@@ -1313,11 +1360,29 @@ function groupKeyLabel(report, key, group) {
     var failure = group && group.text ? '——最近一次失败' + (group.stage ? '于 ' + group.stage : '') + '：' + group.text : '';
     return key + '（' + DEGRADATION[key] + failure + '）';
   }
+  if (report.group_by === 'blocked') return blockedKeyLabel(key, group);
   if (report.group_by === 'loss') {
     if (LOSS[key]) return key + '（' + lossWords(key) + '）';
     if (/BUDGET|RESOURCE_HARD_STOP|RECORD_TOO_LARGE/.test(key)) return key + '（资源预算拒绝——这一组才是容量限制）';
   }
   return key;
+}
+
+// The line's problems, for a check folded on the Blocked reading: each fold
+// as one clause -- where, talking to what, what kind, how many, the state --
+// so the line answers "what is stuck and is it still" before it is opened.
+// Three at most; the rest are counted.
+function problemsClause(report) {
+  if (report.group_by !== 'blocked' || !report.groups || !report.groups.length) return '';
+  var shown = report.groups.slice(0, 3).map(function (group) {
+    var facts = [group.objects + ' 个'];
+    if (group.overdue) facts.push(group.overdue + ' 个已超期');
+    facts.push((RECOVERY_STATE[group.recovery] || group.recovery || '').split('（')[0]);
+    if (group.last_failure) facts.push('最近失败 ' + momentLabel(group.last_failure));
+    return blockedKeyLabel(group.key, group) + '：' + facts.filter(Boolean).join('，');
+  });
+  var rest = report.groups.length > 3 ? '；另 ' + (report.groups.length - 3) + ' 组见展开' : '';
+  return '——' + shown.join('；') + rest;
 }
 
 // The next step for a check, with the window it names filled in.
@@ -1410,6 +1475,9 @@ function renderGroups() {
     // A fold with no objects behind it is a replica-level fact, not a list:
     // a coverage hole, or a standing, which names its replicas instead.
     if (group.objects) parts.push(group.objects + ' 个对象');
+    // Where this problem is between failing and fixed, and the facts it was
+    // read from, on every fold that has object rows.
+    if (group.recovery) parts.push(problemClause(report, group));
     else if (group.replicas && group.replicas.length) parts.push('副本 ' + group.replicas.map(shortReplica).join('、') + '，没有可列的对象');
     else parts.push('副本级缺口，没有可列的对象');
     if (group.strategies) parts.push(group.strategies + ' 条策略');

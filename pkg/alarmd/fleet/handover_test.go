@@ -83,7 +83,7 @@ func TestADefectCodeOutranksTheStall(t *testing.T) {
 		LastError: &LastError{Text: "context deadline exceeded", At: now}}
 	rows := []Anomaly{defect, stalled}
 	Attribute(rows, now)
-	if rows[0].Finding.Check != CheckDefect || rows[0].Finding.Group != "GAP_GUARD_CONFLICT" || !rows[0].Stalled {
+	if rows[0].Finding.Check != CheckDefect || rows[0].Finding.Group != "EVALUATE/NONE/CONTRACT" || !rows[0].Stalled {
 		t.Fatalf("a stalled defect = %+v, want under DEFECT on its code, still marked stalled", rows[0].Finding)
 	}
 	if rows[1].Finding.Check != CheckRoundsStalled {

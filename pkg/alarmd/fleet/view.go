@@ -550,10 +550,14 @@ type Anomaly struct {
 	// been anomalous at all, since when it has been saying this -- and the one
 	// that says whether a reason is settled or just arrived. Left off the wire
 	// while zero, like FailingSince, by MarshalJSON.
-	ReasonSince time.Time   `json:"reason_since"`
-	Consecutive int         `json:"consecutive,omitempty"`
-	Replica     string      `json:"replica"`
-	Failure     *FailureRef `json:"failure,omitempty"`
+	ReasonSince time.Time `json:"reason_since"`
+	// ReasonLastAt is the latest round that said the current reason: the
+	// other end of ReasonSince's clock, and the end a group's "still
+	// happening" is read from. Left off the wire while zero.
+	ReasonLastAt time.Time   `json:"reason_last_at"`
+	Consecutive  int         `json:"consecutive,omitempty"`
+	Replica      string      `json:"replica"`
+	Failure      *FailureRef `json:"failure,omitempty"`
 	// LastError is the last round that returned an error, verbatim: what it
 	// said, which Slot it was on, and how many rounds in a row that same Slot
 	// has failed. The classification above answers "what kind"; this answers
@@ -606,6 +610,7 @@ func (anomaly Anomaly) MarshalJSON() ([]byte, error) {
 		wire
 		FailingSince  *time.Time `json:"failing_since,omitempty"`
 		ReasonSince   *time.Time `json:"reason_since,omitempty"`
+		ReasonLastAt  *time.Time `json:"reason_last_at,omitempty"`
 		LastHealthyAt *time.Time `json:"last_healthy_at,omitempty"`
 	}{wire: wire(anomaly)}
 	if !anomaly.FailingSince.IsZero() {
@@ -613,6 +618,9 @@ func (anomaly Anomaly) MarshalJSON() ([]byte, error) {
 	}
 	if !anomaly.ReasonSince.IsZero() {
 		encoded.ReasonSince = &anomaly.ReasonSince
+	}
+	if !anomaly.ReasonLastAt.IsZero() {
+		encoded.ReasonLastAt = &anomaly.ReasonLastAt
 	}
 	if !anomaly.LastHealthyAt.IsZero() {
 		encoded.LastHealthyAt = &anomaly.LastHealthyAt
