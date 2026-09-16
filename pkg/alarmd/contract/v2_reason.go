@@ -101,12 +101,16 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonRecordTooLarge:        {ReasonRecordTooLarge, ReasonClassCoverage, ReasonDomainSummary | ReasonDomainObservation},
 	ReasonAuditDrop:             {ReasonAuditDrop, ReasonClassCoverage, ReasonDomainObservation},
 
-	ReasonKafkaUnavailable:           {ReasonKafkaUnavailable, ReasonClassRetryable, ReasonDomainSummary | ReasonDomainObservation},
-	ReasonRedisUnavailable:           {ReasonRedisUnavailable, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonProviderUnavailable:        {ReasonProviderUnavailable, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonProgressBeginRejected:      {ReasonProgressBeginRejected, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonProgressBeginFailed:        {ReasonProgressBeginFailed, ReasonClassDeterministic, ReasonDomainObservation},
-	ReasonActivationReadFailed:       {ReasonActivationReadFailed, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonKafkaUnavailable:      {ReasonKafkaUnavailable, ReasonClassRetryable, ReasonDomainSummary | ReasonDomainObservation},
+	ReasonRedisUnavailable:      {ReasonRedisUnavailable, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonProviderUnavailable:   {ReasonProviderUnavailable, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonProgressBeginRejected: {ReasonProgressBeginRejected, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonProgressBeginFailed:   {ReasonProgressBeginFailed, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonActivationReadFailed:  {ReasonActivationReadFailed, ReasonClassRetryable, ReasonDomainObservation},
+	// Retryable rather than deterministic: the record is absent now, and the
+	// Control Leader's next round writes it back from the published Catalog.
+	// Repeating the read is what finds it there.
+	ReasonActivationMissing:          {ReasonActivationMissing, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonSnapshotRetryPending:       {ReasonSnapshotRetryPending, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonSlotSourceRetry:            {ReasonSlotSourceRetry, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonBlockedExactSetUnavailable: {ReasonBlockedExactSetUnavailable, ReasonClassDeterministic, ReasonDomainObservation},

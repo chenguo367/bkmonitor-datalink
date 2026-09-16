@@ -1321,7 +1321,7 @@ func TestPhaseTwoWorkerBundleAcquiresControlLeaderBeforeInitialRefresh(t *testin
 	_ = bundle.Shutdown(context.Background())
 }
 
-func TestPhaseTwoWorkerBundleStartsReadyDegradedWhenInitialSnapshotIsUnavailableAndRecovers(t *testing.T) {
+func TestPhaseTwoWorkerBundleStartsNotReadyWhenInitialSnapshotIsUnavailableAndRecovers(t *testing.T) {
 	cfg := validGoAccessRuntimeConfig()
 	queryGroup := execution.QueryGroupIdentity("query-group-1")
 	health := newPhaseTwoApplicationHealth()
@@ -1339,8 +1339,8 @@ func TestPhaseTwoWorkerBundleStartsReadyDegradedWhenInitialSnapshotIsUnavailable
 		t.Fatalf("Start(snapshot unavailable) error = %v", err)
 	}
 	defer func() { _ = bundle.Shutdown(context.Background()) }()
-	if snapshot := health.HealthSnapshot(); snapshot.State != observability.HealthDegraded || !snapshot.Ready {
-		t.Fatalf("initial unavailable health=%+v, want ready degraded", snapshot)
+	if snapshot := health.HealthSnapshot(); snapshot.State != observability.HealthNotReady || snapshot.Ready {
+		t.Fatalf("initial unavailable health=%+v, want not ready until a round names the Query Groups", snapshot)
 	}
 	if owner.publishAssignmentCount() != 0 || len(bundle.runners) != 0 {
 		t.Fatalf("initial unavailable published/runners=%d/%d, want 0/0", owner.publishAssignmentCount(), len(bundle.runners))
@@ -1359,7 +1359,7 @@ func TestPhaseTwoWorkerBundleStartsReadyDegradedWhenInitialSnapshotIsUnavailable
 	}
 }
 
-func TestPhaseTwoWorkerBundleFollowerStartsReadyDegradedWhenActiveSnapshotIsUnavailable(t *testing.T) {
+func TestPhaseTwoWorkerBundleFollowerStartsNotReadyWhenActiveSnapshotIsUnavailable(t *testing.T) {
 	cfg := validGoAccessRuntimeConfig()
 	health := newPhaseTwoApplicationHealth()
 	control := &fakePhaseTwoControl{loadActiveErr: controlplane.ErrSnapshotUnavailable}
@@ -1370,24 +1370,15 @@ func TestPhaseTwoWorkerBundleFollowerStartsReadyDegradedWhenActiveSnapshotIsUnav
 		t.Fatalf("Start(follower snapshot unavailable) error = %v", err)
 	}
 	defer func() { _ = bundle.Shutdown(context.Background()) }()
-	if snapshot := health.HealthSnapshot(); snapshot.State != observability.HealthDegraded || !snapshot.Ready {
-		t.Fatalf("follower unavailable health=%+v, want ready degraded", snapshot)
+	// Not ready rather than ready-degraded: a replica that has never read the
+	// control facts cannot be placed onto, and must not answer a rollout's
+	// readiness probe as if it could.
+	if snapshot := health.HealthSnapshot(); snapshot.State != observability.HealthNotReady || snapshot.Ready {
+		t.Fatalf("follower unavailable health=%+v, want not ready", snapshot)
 	}
 	if owner.publishAssignmentCount() != 0 || len(bundle.runners) != 0 {
 		t.Fatalf("follower unavailable published/runners=%d/%d, want 0/0", owner.publishAssignmentCount(), len(bundle.runners))
 	}
-}
-
-func TestPhaseTwoWorkerBundleStillRejectsNonSnapshotInitialControlFailure(t *testing.T) {
-	cfg := validGoAccessRuntimeConfig()
-	want := errors.New("invalid initial control facts")
-	control := &fakePhaseTwoControl{beforeInitialRefresh: func() error { return want }}
-	bundle := mustPhaseTwoWorkerBundle(t, cfg, newPhaseTwoApplicationHealth(), control, &fakePhaseTwoOwnership{})
-
-	if err := bundle.Start(context.Background()); !errors.Is(err, want) {
-		t.Fatalf("Start(non-snapshot failure) error = %v, want %v", err, want)
-	}
-	_ = bundle.Shutdown(context.Background())
 }
 
 func TestPhaseTwoWorkerBundleKeepsHealthyQueryGroupAcrossSnapshotUnavailableRefresh(t *testing.T) {
