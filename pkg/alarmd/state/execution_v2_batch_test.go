@@ -585,6 +585,12 @@ func TestApplyRuntimeTheSameWriteSentAgainUnchangedIsAlreadyApplied(t *testing.T
 						"mutation, and calling them a conflict sends the Slot into a retry that cannot ever succeed",
 						index, item, execution.StateApplyAlreadyApplied)
 				}
+				// The item says how it was decided and where the statement was
+				// found, or the coordinator cannot count re-sends apart from
+				// ordinary replays.
+				if item.AlreadyApplied != execution.StateAlreadyAppliedRevisionSkew || item.StoredBlobRevision != 1 {
+					t.Fatalf("item %d after an unchanged re-send = %+v, want kind revision_skew at stored revision 1", index, item)
+				}
 			}
 			if len(backend.values) != len(snapshot) {
 				t.Fatalf("re-send changed the key set: %d != %d", len(backend.values), len(snapshot))
