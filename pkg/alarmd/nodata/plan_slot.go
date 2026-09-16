@@ -35,6 +35,7 @@ type PlanSlotInput struct {
 	Completeness     execution.Completeness
 	Series           []map[string]string
 	KnownHosts       map[string]struct{}
+	HostsResolved    bool
 	OutOfBusiness    map[string]struct{}
 }
 
@@ -82,6 +83,7 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		Completeness:   input.Completeness,
 		Series:         input.Series,
 		KnownHosts:     input.KnownHosts,
+		HostsResolved:  input.HostsResolved,
 		OutOfBusiness:  input.OutOfBusiness,
 		Memory:         memory,
 	})

@@ -107,6 +107,15 @@ func groupHostIdentity(group Group) (HostIdentity, bool) {
 // CMDB does not hold at all is not expected and has not left the business, it
 // is simply not a host of this deployment as far as the index knows.
 type HostResolution struct {
+	// Resolved says the pass had an index to answer from. Without it, Known
+	// being empty has two meanings that call for opposite behaviour: a target
+	// whose hosts are all gone -- a real, empty expected set -- and a process
+	// whose host index has not been built, which knows nothing about the
+	// target either way. Acting on the second as though it were the first
+	// turns every static-target item into one that expects nothing, so a cold
+	// index reports the item as a whole absent and leaves the absences open on
+	// its hosts with nothing that will ever close them.
+	Resolved bool
 	// Known is the "ip|cloud" set the expected roster intersects with.
 	Known map[string]struct{}
 	// OutOfBusiness is keyed by group, because that is what the evaluation asks

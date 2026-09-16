@@ -32,6 +32,10 @@ type SlotInput struct {
 	// KnownHosts is the set of "address|cloud" keys the CMDB index confirmed
 	// for this business, for a target roster to be intersected with.
 	KnownHosts map[string]struct{}
+	// HostsResolved says KnownHosts is an answer about hosts rather than the
+	// absence of one. It is false when this process has no host index, and
+	// then an empty KnownHosts means "not known" rather than "none".
+	HostsResolved bool
 	// OutOfBusiness names the groups whose host resolved to another business.
 	OutOfBusiness map[string]struct{}
 	Memory        map[string]GroupMemory
@@ -90,12 +94,25 @@ const (
 	// was last seen and first called absent, not from a count of rounds that
 	// did not run.
 	OutcomeSkippedMemoryUnreadable SlotOutcome = "SKIPPED_MEMORY_UNREADABLE"
+	// OutcomeSkippedHostsUnresolved means the item's expected set is a host
+	// target and this process has no host index to resolve it against.
+	//
+	// It is a skip rather than an empty roster because the two are opposite
+	// answers wearing one shape. A target that resolves to no host is a real,
+	// empty expected set and the item then speaks about itself; a target that
+	// could not be resolved is not known to be empty, and treating it as empty
+	// sends a no-data alert under the whole-item identity while the item's own
+	// host groups keep their absences open with nothing left that would ever
+	// close them. Nothing is judged, nothing is remembered and no series is
+	// produced, so the round leaves no trace but its name.
+	OutcomeSkippedHostsUnresolved SlotOutcome = "SKIPPED_HOSTS_UNRESOLVED"
 )
 
 // SlotOutcomes is every outcome a Plan that detects no-data can land on, for a
 // partition to pre-create and for a reader to bound the family by.
 var SlotOutcomes = []SlotOutcome{
 	OutcomeEvaluated, OutcomeSkippedQueryNotFull, OutcomeSkippedSlotBudget, OutcomeSkippedMemoryUnreadable,
+	OutcomeSkippedHostsUnresolved,
 }
 
 // EvaluateSlot turns one Slot's evidence into the no-data decision for it.
@@ -120,6 +137,21 @@ func EvaluateSlot(input SlotInput) (AbsenceResult, SlotOutcome, error) {
 		return AbsenceResult{}, OutcomeNone, nil
 	}
 	config := input.Plan.NoData
+	class, err := ClassifyRoster(input.Plan.TargetScope, config.AggDimension)
+	if err != nil {
+		return AbsenceResult{}, OutcomeNone, err
+	}
+	if class.Source == RosterTargetStatic && !input.HostsResolved {
+		// The expected set is a host target and this process cannot resolve
+		// hosts. Building the roster anyway would intersect the target with an
+		// empty index and produce an empty expected set, which every rule
+		// below reads as "this item expects nothing" -- the one reading that
+		// is certainly wrong here. The classes that do not look at hosts are
+		// untouched: a history roster comes out of the memory and a whole-item
+		// one expects nothing by design, and neither becomes less true because
+		// the index is cold.
+		return AbsenceResult{}, OutcomeSkippedHostsUnresolved, nil
+	}
 	tally := ProjectSeries(input.Series, config.AggDimension)
 	roster, err := BuildRoster(RosterRequest{
 		AggDimension: config.AggDimension,

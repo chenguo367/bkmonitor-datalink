@@ -121,6 +121,7 @@ func (stream *streamedExecution) noDataRoundFor(
 		Completeness:     completeness,
 		Series:           seen,
 		KnownHosts:       hosts.Known,
+		HostsResolved:    hosts.Resolved,
 		OutOfBusiness:    hosts.OutOfBusiness,
 	})
 	if err != nil {

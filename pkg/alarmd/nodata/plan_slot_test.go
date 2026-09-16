@@ -53,6 +53,7 @@ func planSlotInput(snapshot execution.NoDataMemorySnapshot, series ...map[string
 		Completeness:     execution.CompletenessFull,
 		Series:           series,
 		KnownHosts:       knownHosts("10.0.0.1|0", "10.0.0.2|0"),
+		HostsResolved:    true,
 	}
 }
 
