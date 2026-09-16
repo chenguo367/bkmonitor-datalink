@@ -327,6 +327,14 @@ type NoDataSlotFacts struct {
 	Plans int
 }
 
+// NoDataStallFacts names one Plan whose no-data detection has stopped rather
+// than missed a round: it has skipped noDataPersistentSkipRounds Slots in a
+// row, and this is the round it crossed. Reported once per stall, not once per
+// round -- a count of rounds is what the outcome buckets already give.
+type NoDataStallFacts struct {
+	Outcome string
+}
+
 // NoDataCensusFacts is how many Plans this Slot had that detect no-data, before
 // anything was decided about them.
 //
@@ -1275,6 +1283,7 @@ type Observation struct {
 	SourceKind            SourceKind
 	QueryPermit           *QueryPermitFacts
 	NoDataSlot            *NoDataSlotFacts
+	NoDataStall           *NoDataStallFacts
 	SourceWithheld        *SourceWithheldFacts
 	NoDataCensus          *NoDataCensusFacts
 	SegmentContent        *SegmentContentFacts

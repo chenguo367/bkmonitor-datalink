@@ -263,7 +263,7 @@ func (stream *streamedExecution) evaluateNoData(
 			// count the absence from a checkpoint no alert was ever raised
 			// against.
 			stream.observeNoDataLocalFailure(ctx, due, outcome, err)
-			stream.noDataOutcomes = append(stream.noDataOutcomes, outcome)
+			stream.recordNoDataOutcome(ctx, due, outcome)
 			continue
 		}
 		// A synthetic series writes state like any other, so it spends from the
@@ -273,11 +273,11 @@ func (stream *streamedExecution) evaluateNoData(
 		// would report the groups that fitted as absent and say nothing about
 		// the rest.
 		if !noDataFitsSlotBudget(stream.noDataStateMutations, uint64(len(round.series)), budget) {
-			stream.noDataOutcomes = append(stream.noDataOutcomes, nodata.OutcomeSkippedSlotBudget)
+			stream.recordNoDataOutcome(ctx, due, nodata.OutcomeSkippedSlotBudget)
 			continue
 		}
 		stream.noDataStateMutations += uint64(len(round.series))
-		stream.noDataOutcomes = append(stream.noDataOutcomes, round.outcome)
+		stream.recordNoDataOutcome(ctx, due, round.outcome)
 		if round.mutation != nil {
 			stream.noDataMutations = append(stream.noDataMutations, *round.mutation)
 		}
