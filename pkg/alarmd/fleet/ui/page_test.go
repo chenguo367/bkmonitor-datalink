@@ -212,12 +212,25 @@ func TestThePageHasWordingForEveryCheckOwnerScheduleAndResult(t *testing.T) {
 		}
 	}
 	// And the table is the size the design says: the first screen is
-	// nineteen lines at most, and a twentieth sentence here is a twentieth
-	// check.
+	// twenty lines at most, and a twenty-first sentence here is a
+	// twenty-first check.
 	entries := regexp.MustCompile(`(?m)^  [A-Z_]+:`).FindAllString(
 		regexp.MustCompile(`var CHECK = \{([\s\S]*?)\};`).FindStringSubmatch(body)[1], -1)
-	if len(entries) != 19 {
-		t.Errorf("CHECK has %d sentences, want 19", len(entries))
+	if len(entries) != 20 {
+		t.Errorf("CHECK has %d sentences, want 20", len(entries))
+	}
+	// The page's list of standings is the Go side's: a standing the page
+	// does not know is a line it files under "no objects, nothing up" and
+	// never shows.
+	standing := regexp.MustCompile(`function isStanding\(report\) \{[\s\S]*?return ([^;]*);`).FindStringSubmatch(body)
+	if standing == nil {
+		t.Fatal("the page has no isStanding")
+	}
+	for _, check := range fleet.Checks() {
+		named := strings.Contains(standing[1], "'"+string(check)+"'")
+		if named != check.Standing() {
+			t.Errorf("isStanding names %s = %v, the Go side says %v", check, named, check.Standing())
+		}
 	}
 	// And what to do about each, one per check and none for a check that
 	// does not exist: a line without a next step is the reader asking "so

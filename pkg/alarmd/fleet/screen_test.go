@@ -129,6 +129,12 @@ func TestLineCountIsWhatTheLinePrints(t *testing.T) {
 				{Key: string(DegradationControlLeaderAbsent), Replicas: []string{"pod-a"}},
 			}}, 3},
 		{"a standing with no replicas is down", CheckReport{Code: CheckReplicaDegraded}, 0},
+		// The split names the pair it is between, not the objects it would
+		// move: 23 moves a round is the batch, 1185 over the target is the
+		// excess, and neither is the line's count.
+		{"the split standing is its two replicas", CheckReport{Code: CheckOwnershipSkewed, Replica: "pod-a",
+			Rebalance: &RebalanceFacts{MostOwned: 2370, Target: 1185, PlannedMoves: 23},
+			Groups:    []CheckGroup{{Key: "pod-a", Replicas: []string{"pod-a", "pod-b"}}}}, 2},
 	}
 	for _, tc := range cases {
 		if got := tc.report.LineCount(); got != tc.want {

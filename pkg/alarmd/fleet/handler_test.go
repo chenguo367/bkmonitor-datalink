@@ -575,6 +575,71 @@ func TestHealthResponseCarriesTheStandingsTheVerdictIsDecidedOn(t *testing.T) {
 	}
 }
 
+// The leader's rebalance round reaches both routes: the verdict route,
+// whole and beside the replica table whose counts it judged, and the
+// objects route as the third standing with the round on the line. The
+// split does not degrade the verdict -- it is a line to act on, not a bound
+// passed -- and a follower-only deployment carries none.
+func TestBothRoutesCarryTheOwnershipSplit(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[0].Rebalance = &RebalanceFacts{PlannedAt: now.Add(-10 * time.Second), ReadyWorkers: 2, Assigned: 949, Target: 474,
+		MostOwned: 949, LeastOwned: 0, MostOwnedBy: "pod-a", LeastOwnedBy: "pod-b", Batch: 9, PlannedMoves: 9, StopSpreadPercent: 5, Shadow: true}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, []string{"pod-a", "pod-b"})
+
+	body := requestJSON(t, handler, "/api/health")
+	if body["health"] != "HEALTHY" {
+		t.Fatalf("health = %v, want HEALTHY: the split is a line, not a degradation", body["health"])
+	}
+	rebalance, ok := body["rebalance"].(map[string]any)
+	if !ok || rebalance["planned_moves"] != 9.0 || rebalance["most_owned_by"] != "pod-a" || rebalance["shadow"] != true ||
+		rebalance["stop_spread_percent"] != 5.0 || body["rebalance_replica"] != "pod-a" {
+		t.Fatalf("rebalance = %v from %v, want the leader's round whole", body["rebalance"], body["rebalance_replica"])
+	}
+	load := body["load"].(map[string]any)
+	bottleneck := load["bottleneck"].(map[string]any)
+	if skew, ok := bottleneck["skew"].(map[string]any); !ok || skew["most_owned"] != 949.0 {
+		t.Fatalf("load.bottleneck.skew = %v, want the round on the reading", bottleneck["skew"])
+	}
+
+	_, objects := get(t, handler, "/api/objects?limit=1")
+	var line map[string]any
+	for _, check := range objects["checks"].([]any) {
+		if check.(map[string]any)["code"] == string(CheckOwnershipSkewed) {
+			line = check.(map[string]any)
+		}
+	}
+	if line == nil || line["owner"] != string(OwnerAlarmd) || line["replica"] != "pod-a" {
+		t.Fatalf("objects checks carry no OWNERSHIP_SKEWED line of ours from pod-a: %v", objects["checks"])
+	}
+	if round, ok := line["rebalance"].(map[string]any); !ok || round["planned_moves"] != 9.0 || round["least_owned_by"] != "pod-b" {
+		t.Fatalf("OWNERSHIP_SKEWED line = %v, want the round on it", line)
+	}
+	groups := line["groups"].([]any)
+	if len(groups) != 1 || groups[0].(map[string]any)["key"] != "pod-a" {
+		t.Fatalf("OWNERSHIP_SKEWED groups = %v, want one on the loaded replica", groups)
+	}
+	if replicas := groups[0].(map[string]any)["replicas"].([]any); len(replicas) != 2 || replicas[0] != "pod-a" || replicas[1] != "pod-b" {
+		t.Fatalf("OWNERSHIP_SKEWED group replicas = %v, want the pair", groups[0])
+	}
+	todo := objects["todo"].(map[string]any)
+	if todo["checks"] != 1.0 || todo["objects"] != 0.0 {
+		t.Fatalf("todo = %v, want the split as one line of ours over no objects", todo)
+	}
+
+	// No replica planned a round: absent on the verdict route, no line on
+	// the objects route.
+	plain := handlerWith(t, healthySnapshots(), Expectation{QueryGroups: 949, Known: true}, []string{"pod-a", "pod-b"})
+	if value, present := requestJSON(t, plain, "/api/health")["rebalance"]; present && value != nil {
+		t.Fatalf("rebalance with no round = %v, want absent", value)
+	}
+	_, none := get(t, plain, "/api/objects?limit=1")
+	for _, check := range none["checks"].([]any) {
+		if check.(map[string]any)["code"] == string(CheckOwnershipSkewed) {
+			t.Fatalf("a deployment with no round has the split line: %v", check)
+		}
+	}
+}
+
 // The objects response carries the first screen's arithmetic, computed once
 // on the server: the page adding lines up counted past records as work and
 // an object under two lines twice.

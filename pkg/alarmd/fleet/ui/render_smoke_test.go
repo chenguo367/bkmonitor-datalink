@@ -269,6 +269,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// the publication for two hours (the shape a running deployment was in
 	// for half a day), and one replica's open alert set past its bound.
 	failingFor := (2 * time.Hour).Seconds()
+	// The leader's rebalance round the split standing is decided on: 527
+	// against 452 is 15% of the even 489, past the scheduler's 5%, so the
+	// round would move a batch of nine -- and the build does not.
+	rebalance := &fleet.RebalanceFacts{PlannedAt: at.Add(-20 * time.Second), ReadyWorkers: 2, Assigned: 979, Target: 489,
+		MostOwned: 527, LeastOwned: 452, MostOwnedBy: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
+		LeastOwnedBy: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", Batch: 9, PlannedMoves: 9, StopSpreadPercent: 5, Shadow: true}
 	activation := &fleet.ActivationFacts{
 		Applied: "bdc6ffcb0000000000000000", Published: "e7a1b2c30000000000000000",
 		Behind: true, BehindBeyondBound: true, ConsecutiveFailures: 120,
@@ -326,6 +332,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			{Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", StartedAt: at.Add(-5 * time.Minute)},
 		},
 		Activation: activation, ActivationReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
+		// The leader's rebalance round: the replica that restarted five
+		// minutes ago holds less than the one that has been up for hours,
+		// past the scheduler's tolerance, and the build only plans the
+		// moves. The third standing is built from this and nothing else.
+		Rebalance: rebalance, RebalanceReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 		Degradations: degradations}
 	columns := [][]fleet.Anomaly{rows, demoted}
 	checks := fleet.ReportChecks(columns, nil, retained, at)
@@ -342,17 +353,20 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// other, so the cell renders both a reported and an unreported build.
 	build := fleet.BuildFacts{Version: "0.2.4506", Commit: "62ee924d00000000", SchemaVersion: "v3"}
 	replicas := []fleet.ReplicaView{
-		{Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", Owned: 452, Healthy: 384,
-			Anomalies: 33, Demoted: 19, Undecidable: 12, ByDesign: 4, AgeSeconds: 3,
-			UptimeSeconds: 7200, Ours: 5, External: 26, Build: &build},
 		// One replica reporting no undecidable objects, so the render is
 		// executed on both a present and an absent count. A fixture where every
 		// row carries every field cannot catch a read on one that is sometimes
 		// missing, which is half of what a render throws on.
-		// And this one published a cut list, so the completeness sentence
-		// renders both halves: every object has a state, the detail is a sample.
-		{Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", Owned: 527, Healthy: 460,
-			Anomalies: 53, Demoted: 14, AgeSeconds: 4, UptimeSeconds: 300, Ours: 8, External: 41, Truncated: true},
+		{Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", Owned: 527, Healthy: 460,
+			Anomalies: 53, Demoted: 14, AgeSeconds: 3, UptimeSeconds: 7200, StartedAt: at.Add(-2 * time.Hour),
+			Ours: 8, External: 41, Build: &build},
+		// This one restarted five minutes ago and holds less: the shape the
+		// split standing is read on. And it published a cut list, so the
+		// completeness sentence renders both halves: every object has a
+		// state, the detail is a sample.
+		{Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", Owned: 452, Healthy: 384,
+			Anomalies: 33, Demoted: 19, Undecidable: 12, ByDesign: 4, AgeSeconds: 4,
+			UptimeSeconds: 300, StartedAt: at.Add(-5 * time.Minute), Ours: 5, External: 26, Truncated: true},
 	}
 	lastExit := at.Add(-2 * time.Minute)
 	fixture := map[string]any{
@@ -417,6 +431,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			// and the first sentence can name them.
 			Degradations: degradations, Activation: activation,
 			ActivationReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
+			Rebalance:         rebalance, RebalanceReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 			// The tracker writes the exit count and the exit time on adjacent
 			// lines, so a deployment with exits always has this. Without it here
 			// the fixture described a deployment that cannot exist -- and the page
@@ -515,7 +530,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	earlier := 0
 	health.Schedule.OverdueAgo, health.Schedule.OverdueAgoSeconds = &earlier, 1800
 	health.Load = fleet.LoadOf(&fleet.View{Schedule: health.Schedule, Capacity: health.Capacity,
-		Demoted: demoted, GapSkips: retained.GapSkips, PerReplica: retained.PerReplica}, at)
+		Demoted: demoted, GapSkips: retained.GapSkips, PerReplica: retained.PerReplica, Rebalance: rebalance}, at)
 	fixture["health"] = health
 	encoded, err := json.Marshal(fixture)
 	if err != nil {
@@ -620,7 +635,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The two standings, first. The time is the viewer's clock and is not
 		// asserted; everything after it is.
 		"起没有生效：连续 120 轮激活失败（1 种原因），舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3",
-		"2 种副本级运行状态超出设计界，判定因此降级——策略配置刷新失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m，新配置尚未发布，跑的是上一份好的目录"} {
+		"2 种副本级运行状态超出设计界，判定因此降级——策略配置刷新失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m，新配置尚未发布，跑的是上一份好的目录",
+		// The third standing: the numbers are the leader's round, the lag is
+		// the replica table's, and the next step says what not to do first.
+		"对象分布不均：abcde 持有 527 个（53.8%），fghij 持有 452 个，2 个就绪副本均分应是 489 个——持有多的那个副本上的跳过、超时、排队都是这个原因，不是容量——fghij 比 abcde 晚 1 小时 55 分 启动",
+		"下一步：不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。Leader 本轮计划移 9 个（每轮最多 9 个），但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动；在均分回来之前",
+		"恢复标准：Leader 的再平衡计划移动数归零（最多与最少之差回到均分的 5% 以内，这是调度器自己的容差）"} {
 		if !strings.Contains(todoLine, want) {
 			t.Errorf("the checks do not say %q:\n%s", want, todoLine)
 		}
@@ -673,7 +693,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\"（1 种回答，1 条策略，1 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错；其中 1 个已降级，不再反复查；其中 1 个在被拒期间还跳过了检测（最近 10 分钟内 1 个）——冷却让旧轮次超出重放范围，首要原因是查询不可用，扩容无用"},
 		{"GOV ::", "策略侧"},
 		{"ACTION ::", "现在要做的：先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效（控制面变更自 "},
-		{"ACTION ::", "；之后还有 7 类，按顺序在下面；待归因 5 类另看，别交出去"},
+		{"ACTION ::", "；之后还有 8 类，按顺序在下面；待归因 5 类另看，别交出去"},
 		// A record line's folds name what each loss is; the refusal's object
 		// row says what it lost while under its line.
 		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过）） · 1 个对象 · 1 条策略 · 1 个业务"},
@@ -691,7 +711,14 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"LOAD ::", "按时完成：跟得上，没有对象超期"},
 		{"LOAD ::", "积压：没有，30 分 0 秒 前也没有"},
 		{"LOAD ::", "漏检：正在发生——1 个对象最近 10 分钟内跳过了检测，另有 1 个是滚动后的追赶（副本启动 5 分钟内），看它还有没有新增、不由它问容量；另有 1 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）"},
-		{"LOAD ::", "瓶颈：查询并发位子——启动至今 56% 的取位子排过队，而工作在落后或在漏检"},
+		// Behind (a loss in progress) while the leader's round would move
+		// objects: the split is the constraint, named before the permits it
+		// fills, and the sentence says what the build does about it.
+		{"LOAD ::", "瓶颈：对象分布不均——abcde 持有 53.8% 的对象（527 / 均分 489），它的并发位子与队列满是因为它持有别的副本没持有的；加副本、加资源都分不走它的对象，Leader 本轮计划移 9 个（每轮最多 9 个），但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动"},
+		{"LOAD behind-permits ::", "瓶颈：查询并发位子——启动至今 56% 的取位子排过队，而工作在落后或在漏检"},
+		// A budget rejection with the round beside it keeps its name and
+		// says whose reading it is.
+		{"LOAD budget-skewed ::", "瓶颈：内存派生的体量预算——已拒绝 41 次，这套资源装不下当前负载（这是唯一按定义就是容量的读数；其余读数为零只排除各自那一种约束）；对象分布不均（abcde 持有 53.8%），这个读数是它一个副本的，先看首屏\"对象分布不均\"那一行，不据此扩容"},
 		{"LOAD ::", "限制条件：不推算还能承载多少对象——没有测这个，编出来的数会被当真；积压对照样本不足 1 小时（最年轻的副本索引还没跑满 1 小时）；资源占比是各进程启动至今的累计，不是最近 1 小时"},
 		{"LOAD behind-permits ::", "按时完成：跟不上——7 个对象超期（最久 15 分 0 秒），1 小时按时率 88.9% 低于 6 小时 99.3%"},
 		{"LOAD behind-permits ::", "积压：在涨——现在 7 个超期，1 小时 0 分 前 2 个"},
@@ -752,7 +779,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// none), and one retained record made an hour ago.
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
-		"需要处理：alarmd 已确认 8 类（15 个对象，去重）；待归因 5 类（15 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"需要处理：alarmd 已确认 9 类（15 个对象，去重）；待归因 5 类（15 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
 		"另有 1 个是滚动后的追赶漏检（副本启动 5 分钟内），看它还有没有新增",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
@@ -1207,6 +1234,13 @@ const loadStates = {
     backlog: {state: 'NONE', now: 0, earlier: 0, span_seconds: 3600},
     loss: {state: 'NONE', ongoing: 0, while_demoted_recent: 0, window_seconds: 600},
     bottleneck: {resource: 'BUDGET', budget_rejections: 41, memory_limit_hits: 0, queue_full: 0},
+    limits: ['NO_HEADROOM_ESTIMATE', 'COUNTERS_SINCE_START']},
+  'budget-skewed': {on_time: {state: 'KEEPING_UP', overdue: 0, oldest_late_seconds: 0, rate_1h: 99.6, rate_6h: 99.4},
+    backlog: {state: 'NONE', now: 0, earlier: 0, span_seconds: 3600},
+    loss: {state: 'NONE', ongoing: 0, while_demoted_recent: 0, window_seconds: 600},
+    bottleneck: {resource: 'BUDGET', budget_rejections: 41, memory_limit_hits: 0, queue_full: 0,
+      skew: {assigned: 979, target: 489, most_owned: 527, least_owned: 452, most_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-abcde',
+        least_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-fghij', batch: 9, planned_moves: 9, stop_spread_percent: 5, shadow: true}},
     limits: ['NO_HEADROOM_ESTIMATE', 'COUNTERS_SINCE_START']},
   'nothing': {on_time: {state: 'UNKNOWN'}, backlog: {state: 'UNKNOWN', now: 0}, loss: {state: 'NONE', window_seconds: 600},
     bottleneck: {resource: 'UNKNOWN'}, limits: ['NO_HEADROOM_ESTIMATE', 'NO_CENSUS', 'NO_CAPACITY']},

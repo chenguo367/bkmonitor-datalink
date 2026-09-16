@@ -225,6 +225,12 @@ type HealthResponse struct {
 	// the numbers under it come from.
 	Load              Load   `json:"load"`
 	ActivationReplica string `json:"activation_replica,omitempty"`
+	// Rebalance is the leader's latest rebalance planning round, whole, and
+	// RebalanceReplica which leader. On the verdict route because the
+	// replica table under it shows the counts the round judged, and the
+	// judgement has to be beside them.
+	Rebalance        *RebalanceFacts `json:"rebalance,omitempty"`
+	RebalanceReplica string          `json:"rebalance_replica,omitempty"`
 	// Overdue rides here rather than only in the list because the list can be
 	// paged or truncated, and "how many objects are not being evaluated" must
 	// not depend on how much of the list fitted.
@@ -762,6 +768,7 @@ func NewHandler(
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			Degradations: degradationList(view.Degradations),
 			Activation:   view.Activation, ActivationReplica: view.ActivationReplica,
+			Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,
 			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
 			Gaps: view.Gaps, Capacity: view.Capacity,
 			Load: LoadOf(&view, now()),

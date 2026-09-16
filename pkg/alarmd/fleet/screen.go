@@ -66,13 +66,13 @@ func viewColumns(view *View) [][]Anomaly {
 }
 
 // LineCount is the number the line prints, and the one its metric carries:
-// objects currently under an object check, replicas under one of the two
+// objects currently under an object check, replicas under one of the
 // standings, which have no objects. Zero is a line that is down. Records of
 // past loss kept under DETECTION_ABANDONED and TIMELINE_PRUNED are not
 // current and do not count -- a line held up by an hour-old record would
 // read as work to do now.
 func (report CheckReport) LineCount() int {
-	if report.Code != CheckCutoverFailing && report.Code != CheckReplicaDegraded {
+	if !report.Code.Standing() {
 		return report.Current
 	}
 	replicas := map[string]struct{}{}

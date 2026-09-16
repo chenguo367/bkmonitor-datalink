@@ -36,8 +36,16 @@ const (
 	// verdict without a line on the first screen until a running deployment
 	// spent half a day executing a stale publication behind a DEGRADED badge
 	// whose one sentence named something else.
-	CheckCutoverFailing      Check = "CUTOVER_FAILING"
-	CheckReplicaDegraded     Check = "REPLICA_DEGRADED"
+	CheckCutoverFailing  Check = "CUTOVER_FAILING"
+	CheckReplicaDegraded Check = "REPLICA_DEGRADED"
+	// OwnershipSkewed is the third standing: the scheduler's own rebalance
+	// round would move objects, so by its tolerance the ready replicas hold
+	// uneven shares. It is the deployment's, not any object's: a replica
+	// that left and came back holds nothing while the other holds all of
+	// it, and every skip and timeout on the loaded one is this, not a
+	// capacity question. The page printed 2370 against 0 in a table whose
+	// heading said that case needs different handling, and no line said so.
+	CheckOwnershipSkewed     Check = "OWNERSHIP_SKEWED"
 	CheckSlotsOverdue        Check = "SLOTS_OVERDUE"
 	CheckNeverEvaluated      Check = "NEVER_EVALUATED"
 	CheckRoundsStalled       Check = "ROUNDS_STALLED"
@@ -84,7 +92,7 @@ const (
 )
 
 // checkAnswers is the closed table: who acts on each check and what its
-// objects fold on. Nineteen rows, and a test holds the count there. A check
+// objects fold on. Twenty rows, and a test holds the count there. A check
 // whose owner is UNDETERMINED is one whose grouping key does not reach an
 // external entity yet -- it stays on this deployment's side of the page until
 // it does, rather than being handed to whichever owner is likeliest.
@@ -94,6 +102,7 @@ var checkAnswers = map[Check]struct {
 }{
 	CheckCutoverFailing:     {OwnerAlarmd, GroupByReasonCode},
 	CheckReplicaDegraded:    {OwnerAlarmd, GroupByDegradation},
+	CheckOwnershipSkewed:    {OwnerAlarmd, GroupByReplica},
 	CheckSlotsOverdue:       {OwnerAlarmd, GroupByReplica},
 	CheckNeverEvaluated:     {OwnerAlarmd, GroupByReplica},
 	CheckRoundsStalled:      {OwnerAlarmd, GroupByReplica},
@@ -131,6 +140,7 @@ var checkAnswers = map[Check]struct {
 var checkOrder = []Check{
 	CheckCutoverFailing,
 	CheckReplicaDegraded,
+	CheckOwnershipSkewed,
 	CheckSlotsOverdue,
 	CheckNeverEvaluated,
 	CheckRoundsStalled,
@@ -148,6 +158,15 @@ var checkOrder = []Check{
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,
+}
+
+// Standing is whether a check is a fact about the whole deployment rather
+// than a rule over objects: no object row under it, and its count is the
+// replicas it names. The three are decided in one place so the line count,
+// the first screen's arithmetic and the page's layout cannot disagree on
+// which checks those are.
+func (check Check) Standing() bool {
+	return check == CheckCutoverFailing || check == CheckReplicaDegraded || check == CheckOwnershipSkewed
 }
 
 // Checks lists every check the table answers, in the order the page lists
@@ -367,10 +386,16 @@ type CheckReport struct {
 	// when -- and an object count cannot say any of that.
 	Activation *ActivationFacts `json:"activation,omitempty"`
 	Replica    string           `json:"replica,omitempty"`
+	// Rebalance is on OWNERSHIP_SKEWED only: the leader's planning round,
+	// whole, and Replica which leader. The sentence is built from it -- who
+	// holds how much, what the even share is, what the round would move and
+	// whether anything moves it -- and the two replicas in the group cannot
+	// say that.
+	Rebalance *RebalanceFacts `json:"rebalance,omitempty"`
 }
 
 // CheckGroup is one fold of a check's objects: the objects sharing one key.
-// Replicas is on the groups of the two standing checks, whose folds have no
+// Replicas is on the groups of the standing checks, whose folds have no
 // objects and name the replicas instead.
 type CheckGroup struct {
 	Key        string   `json:"key"`
@@ -406,6 +431,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		newest     time.Time
 		activation *ActivationFacts
 		replica    string
+		rebalance  *RebalanceFacts
 		skipped    *Consequence
 		reasons    map[string]int
 	}
@@ -545,7 +571,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				entry.groups[string(gap.Kind)] = &CheckGroup{Key: string(gap.Kind)}
 			}
 		}
-		// The two standings. Not objects either: the fleet executing a stale
+		// The standings. Not objects either: the fleet executing a stale
 		// publication is one fact about the whole deployment, folded on why
 		// the activation fails; a replica past a bound is one fact per
 		// replica, folded on which bound.
@@ -571,6 +597,16 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				group.Stage, group.Text = degradation.Stage, degradation.Text
 			}
 		}
+		// The third standing: the scheduler would move objects between the
+		// two replicas it names. Folded on the loaded one, the pair on the
+		// group, the round whole on the line. The judgement is the
+		// scheduler's tolerance, not a share the page decides is too much.
+		if view.Rebalance.Skewed() {
+			entry := ensure(CheckOwnershipSkewed)
+			entry.rebalance, entry.replica = view.Rebalance, view.RebalanceReplica
+			key := view.Rebalance.MostOwnedBy
+			entry.groups[key] = &CheckGroup{Key: key, Replicas: []string{view.Rebalance.MostOwnedBy, view.Rebalance.LeastOwnedBy}}
+		}
 	}
 	reports := make([]CheckReport, 0, len(tallies))
 	for check, entry := range tallies {
@@ -578,7 +614,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			Objects: entry.objects, Strategies: len(entry.strategies), Businesses: len(entry.businesses),
 			Partial: entry.partial, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
 			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour,
-			Consequence: entry.skipped, SkipReasons: entry.reasons}
+			Consequence: entry.skipped, SkipReasons: entry.reasons, Rebalance: entry.rebalance}
 		if !entry.newest.IsZero() {
 			newest := entry.newest
 			report.RetainedNewest = &newest
@@ -742,7 +778,7 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 		todo.Objects += view.Unknown
 	}
 	for _, report := range reports {
-		up := report.Current > 0 || report.Activation != nil || report.Code == CheckReplicaDegraded
+		up := report.Current > 0 || report.Code.Standing()
 		switch {
 		case !report.ActionRequired():
 			todo.Governance++

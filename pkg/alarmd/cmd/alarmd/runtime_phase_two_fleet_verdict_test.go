@@ -272,6 +272,11 @@ func TestAStandingReachesTheExportUnderItsOwnCode(t *testing.T) {
 			{Kind: fleet.DegradationOpenAlertSetStale, Replica: "pod-a"},
 			{Kind: fleet.DegradationOpenAlertSetStale, Replica: "pod-b"},
 		},
+		// And the third standing: the leader's round would move objects
+		// between the two replicas, so the series carries two.
+		Rebalance: &fleet.RebalanceFacts{PlannedAt: at, ReadyWorkers: 2, Assigned: 2370, Target: 1185, MostOwned: 2370,
+			MostOwnedBy: "pod-a", LeastOwnedBy: "pod-b", Batch: 23, PlannedMoves: 23, StopSpreadPercent: 5, Shadow: true},
+		RebalanceReplica: "pod-a",
 		Anomalies: []fleet.Anomaly{
 			{QueryGroup: "parked", Kind: fleet.KindOverdueWake, ReasonCode: fleet.ReasonWakeMissed, Since: at.Add(-9 * time.Minute)},
 		},
@@ -289,6 +294,7 @@ func TestAStandingReachesTheExportUnderItsOwnCode(t *testing.T) {
 	for code, want := range map[string]int{
 		string(fleet.CheckCutoverFailing):     1,
 		string(fleet.CheckReplicaDegraded):    2,
+		string(fleet.CheckOwnershipSkewed):    2,
 		string(fleet.CheckSlotsOverdue):       1,
 		string(fleet.CheckDetectionAbandoned): 0,
 	} {

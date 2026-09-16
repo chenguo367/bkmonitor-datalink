@@ -866,6 +866,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		controlSource:    bundle.controlSourceFleetFacts,
 		platformSettings: platformSettingsFactsSource(platformSettings, external.Now),
 		activation:       bundle.activationFleetFacts,
+		rebalance:        bundle.rebalanceFleetFacts,
 	}
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.

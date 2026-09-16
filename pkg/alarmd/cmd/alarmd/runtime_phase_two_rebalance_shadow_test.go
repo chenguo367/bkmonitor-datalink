@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
@@ -167,6 +168,26 @@ func TestProductionPhaseTwoOwnershipReportsARebalancePlanWithoutPublishingIt(t *
 			if store.assignments[queryGroup].DesiredWorkerID != "worker-1" {
 				t.Fatalf("%s moved to %q during a shadow round", queryGroup, store.assignments[queryGroup].DesiredWorkerID)
 			}
+		}
+		// The same round is kept for the fleet snapshot, with the pair the
+		// round's first move names and Shadow set where the moves are not
+		// published. Before any round there is nothing to keep.
+		kept := production.LastRebalance()
+		wantKept := &fleet.RebalanceFacts{PlannedAt: now, ReadyWorkers: 2, Assigned: 3, Target: 1, MostOwned: 3, LeastOwned: 0,
+			MostOwnedBy: "worker-1", LeastOwnedBy: "worker-2", Batch: 1, PlannedMoves: 1,
+			StopSpreadPercent: scheduler.RebalanceStopSpreadPercent, Shadow: true}
+		if kept == nil || *kept != *wantKept {
+			t.Fatalf("LastRebalance() = %+v, want %+v", kept, wantKept)
+		}
+		kept.PlannedMoves = 0
+		if again := production.LastRebalance(); again.PlannedMoves != 1 {
+			t.Fatalf("LastRebalance() hands out its own copy; a caller's change reached it")
+		}
+	})
+	t.Run("no round planned is no facts, not a round that moves nothing", func(t *testing.T) {
+		production, _ := newOwnership(t, newStore())
+		if kept := production.LastRebalance(); kept != nil {
+			t.Fatalf("LastRebalance() before any round = %+v, want nil", kept)
 		}
 	})
 	t.Run("a failed ready-set read is reported as a failed round", func(t *testing.T) {

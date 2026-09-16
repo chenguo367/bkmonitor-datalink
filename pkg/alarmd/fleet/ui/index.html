@@ -417,6 +417,9 @@ var openCheck = '';
 var expandedGroups = {};
 var groupOffsets = {};
 var latestChecks = [];
+// The replica rows of the latest health read, for the lines that name a
+// replica's start beside another's.
+var latestReplicas = [];
 
 function api(path, init) {
   return fetch(BASE + 'api/' + path, init).then(function (r) {
@@ -579,14 +582,16 @@ var OWNER = {ALARMD: 'alarmd', DATA: '数据侧', STRATEGY: '策略侧', NOBODY:
              UNDETERMINED: '待确认'};
 
 // One sentence per check. This is the whole of the page's wording about what
-// is wrong: sixteen lines, held to the Go table by a test. The server decides
+// is wrong: twenty lines, held to the Go table by a test. The server decides
 // which check an object is under and folds the objects; the page substitutes
 // the counts. {n} objects, {g} groups, {s} strategies, {b} businesses.
 var CHECK = {
-  // The two standings. {since}, {c}, {applied} and {published} come from the
-  // leader's activation facts on the report, not from counts.
+  // The three standings. {since}, {c}, {applied} and {published} come from
+  // the leader's activation facts on the report, not from counts; the split
+  // line's numbers come from the leader's rebalance round on the report.
   CUTOVER_FAILING:       '控制面变更自 {since} 起没有生效：连续 {c} 轮激活失败（{g} 种原因），舰队在执行 {applied} 的内容，源已到 {published}',
   REPLICA_DEGRADED:      '{g} 种副本级运行状态超出设计界，判定因此降级',
+  OWNERSHIP_SKEWED:      '对象分布不均：{most_by} 持有 {most} 个（{share}），{least_by} 持有 {least} 个，{ready} 个就绪副本均分应是 {target} 个——持有多的那个副本上的跳过、超时、排队都是这个原因，不是容量',
   SLOTS_OVERDUE:         '{n} 个对象到期没跑',
   NEVER_EVALUATED:       '{n} 个对象接管后从未评估',
   ROUNDS_STALLED:        '{n} 个对象的轮次不再结束，不会自己恢复',
@@ -652,6 +657,7 @@ var DEGRADATION = {
 // the reader to look for something that does not.
 var EVIDENCE = {
   CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
+  OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡计划在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_planned_moves',
   REPLICA_DEGRADED:      '展开按种类看是哪个副本；策略源过期的组直接带最近一次刷新失败的阶段与原文（下面组名后）；副本表里该副本的策略源/告警集合/平台设置时钟',
   SLOTS_OVERDUE:         '对象行"超期"与超期多久（预计时刻已过多久）；副本表里该副本的已运行时长与被挡回数',
   NEVER_EVALUATED:       '对象行"接管后未跑"与接管时刻',
@@ -674,6 +680,7 @@ var EVIDENCE = {
 
 var NEXT = {
   CUTOVER_FAILING:       '先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效',
+  OWNERSHIP_SKEWED:      '不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。{rebalance}；在均分回来之前，持有多的那个副本上的漏检与超时不按容量处理、不据此扩副本或加资源',
   REPLICA_DEGRADED:      '按种类处理：源过期看策略源刷新，leader 缺席看租约，告警集合/平台设置过期看对应发布者',
   SLOTS_OVERDUE:         '看该副本是否卡住或过载：展开看对象与超期多久；持续增长就是容量或调度问题',
   NEVER_EVALUATED:       '展开看接管后多久没跑；接管不久可等，超过一个周期就查该副本的调度',
@@ -700,6 +707,7 @@ var NEXT = {
 // by disappearing.
 var RECOVERY = {
   CUTOVER_FAILING:       '执行版本追上目标发布（两者一致）且之后一轮激活成功；这一行消失',
+  OWNERSHIP_SKEWED:      'Leader 的再平衡计划移动数归零（最多与最少之差回到均分的 {stop}% 以内，这是调度器自己的容差）；这一行消失',
   REPLICA_DEGRADED:      '该副本的那个时钟回到设计界内；策略源的 = 一轮刷新成功、新目录发布，这一行消失',
   SLOTS_OVERDUE:         '超期数归零并保持一个周期；执行情况一句回到"跟得上"',
   NEVER_EVALUATED:       '对象跑完第一轮',
@@ -750,7 +758,7 @@ function checkSentence(report, count) {
   // because the pool card says it of the pool and the two must agree.
   var demoted = report.demoted && count === (report.current || 0)
     ? '；其中 ' + report.demoted + ' 个已降级，不再反复查' : '';
-  return words.replace('{n}', String(count))
+  return rebalanceWords(words, report.rebalance).replace('{n}', String(count))
     .replace('{g}', String((report.groups || []).length))
     .replace('{s}', String(report.strategies || 0))
     .replace('{b}', String(report.businesses || 0))
@@ -761,11 +769,41 @@ function checkSentence(report, count) {
     + demoted + lossClause(report, count) + consequenceClause(report) + standingClause(report);
 }
 
+// The split line's numbers, from the leader's rebalance round on the report:
+// who holds how much, the even share, and what the round would move. The
+// page substitutes; it does not decide from the counts that a split is too
+// uneven -- the scheduler's round already did, and its tolerance travels
+// with the facts as {stop}.
+function rebalanceWords(words, rebalance) {
+  var r = rebalance || {};
+  var assigned = r.assigned || 0;
+  var share = assigned ? Math.round((r.most_owned || 0) / assigned * 1000) / 10 + '%' : '（无）';
+  return words.replace('{most_by}', shortReplica(r.most_owned_by || '（未知副本）'))
+    .replace('{least_by}', shortReplica(r.least_owned_by || '（未知副本）'))
+    .replace('{most}', String(r.most_owned || 0)).replace('{least}', String(r.least_owned || 0))
+    .replace('{share}', share).replace('{ready}', String(r.ready_workers || 0))
+    .replace('{target}', String(r.target || 0)).replace('{moves}', String(r.planned_moves || 0))
+    .replace('{batch}', String(r.batch || 0)).replace('{stop}', String(r.stop_spread_percent || 0))
+    .replace('{rebalance}', rebalanceStanding(r));
+}
+
+// What the leader is doing about the split, from the round itself: a shadow
+// round is a measurement the build does not act on, and the line has to say
+// that rather than let a reader wait for a move that will not come.
+function rebalanceStanding(r) {
+  if (!r || !r.planned_moves) return '等再平衡';
+  var plan = 'Leader 本轮计划移 ' + r.planned_moves + ' 个（每轮最多 ' + (r.batch || 0) + ' 个）';
+  return r.shadow
+    ? plan + '，但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动'
+    : plan + '，正在逐轮移，看这一行的数在不在降';
+}
+
 // A standing's fold that carries the failure behind it says so on the line:
 // a stale strategy source whose last round stopped at catalogue validation
 // is "策略配置刷新失败：<what it said>，新配置尚未发布", not a kind name that
 // sent readers to the previous incident's cause.
 function standingClause(report) {
+  if (report.code === 'OWNERSHIP_SKEWED') return startLagClause(report.rebalance);
   if (report.code !== 'REPLICA_DEGRADED') return '';
   var parts = [];
   (report.groups || []).forEach(function (group) {
@@ -774,6 +812,32 @@ function standingClause(report) {
     }
   });
   return parts.length ? '——' + parts.join('；') : '';
+}
+
+// How the split came about, as far as the replica table can say: the
+// replica holding least started later than the one holding most, on the
+// same build. That is what a replica that left and came back looks like --
+// a rollout starts the two within a minute or two of each other -- and the
+// reader's next question, why it left, is answered by the container's last
+// exit, which this page cannot see and says so. Nothing when the health
+// read has not arrived or the two started together.
+function startLagClause(rebalance) {
+  if (!rebalance || !rebalance.most_owned_by || !rebalance.least_owned_by) return '';
+  var most = null, least = null;
+  latestReplicas.forEach(function (replica) {
+    if (replica.replica === rebalance.most_owned_by) most = replica;
+    if (replica.replica === rebalance.least_owned_by) least = replica;
+  });
+  if (!most || !least || !most.started_at || !least.started_at) return '';
+  var lag = (Date.parse(least.started_at) - Date.parse(most.started_at)) / 1000;
+  if (lag < 60) return '';
+  // Whether the two run the same build decides what the lag means, and only
+  // when both reported one: an unreported build is an older build, not a
+  // different one.
+  var builds = most.build && least.build ? (most.build.commit === least.build.commit ? 'same' : 'different') : 'unknown';
+  return '——' + shortReplica(least.replica) + ' 比 ' + shortReplica(most.replica) + ' 晚 ' + elapsedLabel(lag) + ' 启动'
+    + (builds === 'same' ? '（同一构建：不是滚动，是中途退出后重启的；退出原因看容器上一次退出，页面看不到）'
+       : builds === 'different' ? '（构建不同：是滚动的先后）' : '');
 }
 
 // Whether the worst window is filling, from the tracker's round-over-round
@@ -1067,8 +1131,9 @@ function loadChecks() {
 }
 
 // A line is a standing of the deployment itself, with no objects under it.
+// Held to the Go list of standings by a test.
 function isStanding(report) {
-  return report.code === 'CUTOVER_FAILING' || report.code === 'REPLICA_DEGRADED';
+  return report.code === 'CUTOVER_FAILING' || report.code === 'REPLICA_DEGRADED' || report.code === 'OWNERSHIP_SKEWED';
 }
 
 // The first screen: the checks this reader acts on now; folded away, the
@@ -1152,7 +1217,7 @@ function todoSentence(todo, pending, governance, t) {
 function actionSentence(todo, pending, governance, t) {
   if (todo.length) {
     var first = todo[0];
-    return '现在要做的：' + nextWords(first.code) + '（' + checkSentence(first, first.current) + '）'
+    return '现在要做的：' + nextWords(first.code, first) + '（' + checkSentence(first, first.current) + '）'
       + (todo.length > 1 ? '；之后还有 ' + (todo.length - 1) + ' 类，按顺序在下面' : '')
       + (pending.length ? '；待归因 ' + pending.length + ' 类另看，别交出去' : '');
   }
@@ -1185,16 +1250,16 @@ function groupKeyLabel(report, key, group) {
 }
 
 // The next step for a check, with the window it names filled in.
-function nextWords(code) {
-  return tableWords(NEXT, code, '下一步');
+function nextWords(code, report) {
+  return tableWords(NEXT, code, '下一步', report);
 }
 
 // One of the per-check tables, loudly when the table has no entry: a blank
 // would read as "nothing to say".
-function tableWords(table, code, what) {
+function tableWords(table, code, what, report) {
   var words = table[code];
   if (!words) return '（页面没有这条检查项的' + what + '：' + code + '，请上报）';
-  return words.replace('{w}', String(recentWindowMinutes()));
+  return rebalanceWords(words, report && report.rebalance).replace('{w}', String(recentWindowMinutes()));
 }
 
 // which is the count the sentence is about: 'current' for the todo list,
@@ -1221,9 +1286,9 @@ function checkRow(report, which) {
   var retained = which === 'retained';
   var next = document.createElement('div');
   next.className = 'next';
-  next.textContent = '证据：' + tableWords(EVIDENCE, report.code, '证据')
-    + ' ｜ 下一步：' + (retained && NEXT_RETAINED[report.code] ? NEXT_RETAINED[report.code] : nextWords(report.code))
-    + ' ｜ 恢复标准：' + (retained ? '记录不会归零；看的是同一对象有没有再跳过' : tableWords(RECOVERY, report.code, '恢复标准'));
+  next.textContent = '证据：' + tableWords(EVIDENCE, report.code, '证据', report)
+    + ' ｜ 下一步：' + (retained && NEXT_RETAINED[report.code] ? NEXT_RETAINED[report.code] : nextWords(report.code, report))
+    + ' ｜ 恢复标准：' + (retained ? '记录不会归零；看的是同一对象有没有再跳过' : tableWords(RECOVERY, report.code, '恢复标准', report));
   what.appendChild(next);
   what.title = report.code;
   what.style.cursor = 'pointer';
@@ -2043,6 +2108,7 @@ function share(count, owned) {
 
 function renderReplicas(rows) {
   rows = rows || [];
+  latestReplicas = rows;
   show('replicaPanel', rows.length > 0);
   var host = document.getElementById('repRows');
   host.textContent = '';
@@ -2219,6 +2285,7 @@ var BOTTLENECK = {
   BUDGET: '瓶颈：内存派生的体量预算——已拒绝 {rejections} 次，这套资源装不下当前负载（这是唯一按定义就是容量的读数；其余读数为零只排除各自那一种约束）',
   MEMORY: '瓶颈：内存——容器撞到 limit {hits} 次',
   CPU: '瓶颈：CPU——启动至今被限流的时间占 {throttled}',
+  SKEW: '瓶颈：对象分布不均——{most_by} 持有 {share} 的对象（{most} / 均分 {target}），它的并发位子与队列满是因为它持有别的副本没持有的；加副本、加资源都分不走它的对象，{rebalance}',
   PERMITS: '瓶颈：查询并发位子——启动至今 {waits} 的取位子排过队，而工作在落后或在漏检',
   QUEUE: '瓶颈：就绪队列——满过 {queue} 次，而工作在落后或在漏检',
   UNLOCATED: '瓶颈：资源数字都不指向任何一处，但工作在落后或在漏检——约束在调度（重放边界、派发顺序），加资源不是这一步',
@@ -2268,12 +2335,20 @@ function renderLoad(load) {
         ? '，另有 ' + loss.after_restart + ' 个是滚动后的追赶（副本启动 '
           + Math.round((loss.restart_grace_seconds || 300) / 60) + ' 分钟内），看它还有没有新增、不由它问容量' : '')
       + (loss.while_demoted_recent ? '；另有 ' + loss.while_demoted_recent + ' 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）' : ''),
-    (BOTTLENECK[bottleneck.resource] || '瓶颈：（页面没有这个状态的文案：' + bottleneck.resource + '，请上报）')
+    rebalanceWords(BOTTLENECK[bottleneck.resource] || '瓶颈：（页面没有这个状态的文案：' + bottleneck.resource + '，请上报）', bottleneck.skew)
       .replace('{rejections}', String(bottleneck.budget_rejections || 0))
       .replace('{hits}', String(bottleneck.memory_limit_hits || 0))
       .replace('{throttled}', percentOf(bottleneck.throttled_share))
       .replace('{waits}', percentOf(bottleneck.permit_wait_share))
       .replace('{queue}', String(bottleneck.queue_full || 0))
+      // A resource reading taken while one replica holds nearly everything
+      // is that replica's: the number is real, and the move it suggests is
+      // not, because the other replica has the same resource idle.
+      + (bottleneck.skew && bottleneck.resource !== 'SKEW' && bottleneck.resource !== 'NONE' && bottleneck.resource !== 'UNKNOWN'
+          ? '；对象分布不均（' + shortReplica(bottleneck.skew.most_owned_by || '') + ' 持有 '
+            + (bottleneck.skew.assigned ? Math.round((bottleneck.skew.most_owned || 0) / bottleneck.skew.assigned * 1000) / 10 + '%' : '（无）')
+            + '），这个读数是它一个副本的，先看首屏"对象分布不均"那一行，不据此扩容'
+          : '')
   ];
   lines.forEach(function (line) {
     var div = document.createElement('div');

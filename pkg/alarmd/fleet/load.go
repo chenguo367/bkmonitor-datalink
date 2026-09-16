@@ -129,6 +129,14 @@ const (
 	// BottleneckQueue: the ready queue turned objects away, while the work is
 	// behind or being lost.
 	BottleneckQueue Bottleneck = "QUEUE"
+	// BottleneckSkew: the work is behind or being lost while the scheduler's
+	// own round says the ready replicas hold uneven shares. The constraint
+	// is the split, not a resource: the loaded replica's permits and queue
+	// are full because it holds what the others do not, and adding replicas
+	// or resources does not move an object off it. Read before the permit
+	// and queue readings, which on the loaded replica are this seen from
+	// the resource side.
+	BottleneckSkew Bottleneck = "SKEW"
 	// BottleneckUnlocated: the work is behind or being lost and no resource
 	// reading points anywhere -- the constraint is the schedule (a replay
 	// bound, a dispatch order), not a resource, and adding resources is not
@@ -151,6 +159,11 @@ type LoadBottleneck struct {
 	// acquisition.
 	PermitWaitShare *float64 `json:"permit_wait_share,omitempty"`
 	QueueFull       uint64   `json:"queue_full"`
+	// Skew is the leader's planning round when it would move objects, on
+	// every reading and not only the one named SKEW: a budget or memory
+	// reading taken while one replica holds nearly everything is that
+	// replica's, and the sentence has to say so.
+	Skew *RebalanceFacts `json:"skew,omitempty"`
 }
 
 // LoadLimit is one condition a reading holds under.
@@ -201,7 +214,7 @@ func LoadOf(view *View, now time.Time) Load {
 	// other mechanism does.
 	behind := load.OnTime.State == OnTimeFallingBehind || load.OnTime.State == OnTimeCatchingUp ||
 		load.Backlog.State == BacklogGrowing || load.Loss.Ongoing > 0
-	load.Bottleneck = bottleneckOf(view.Capacity, behind)
+	load.Bottleneck = bottleneckOf(view.Capacity, behind, view.Rebalance)
 	if view.Schedule == nil {
 		load.Limits = append(load.Limits, LimitNoCensus)
 	} else if load.Backlog.Earlier != nil && load.Backlog.SpanSeconds < 3600 {
@@ -305,11 +318,16 @@ func lossOfView(view *View, now time.Time) LoadLoss {
 // the work is behind or being lost, because on a deployment keeping up
 // they are what a full-enough deployment looks like, not a constraint.
 // Behind with no resource pointing anywhere is its own answer.
-func bottleneckOf(capacity *CapacityView, behind bool) LoadBottleneck {
-	if capacity == nil {
-		return LoadBottleneck{Resource: BottleneckUnknown}
+func bottleneckOf(capacity *CapacityView, behind bool, rebalance *RebalanceFacts) LoadBottleneck {
+	var skew *RebalanceFacts
+	if rebalance.Skewed() {
+		facts := *rebalance
+		skew = &facts
 	}
-	reading := LoadBottleneck{MemoryLimitHits: capacity.MemoryLimitHits}
+	if capacity == nil {
+		return LoadBottleneck{Resource: BottleneckUnknown, Skew: skew}
+	}
+	reading := LoadBottleneck{MemoryLimitHits: capacity.MemoryLimitHits, Skew: skew}
 	for _, count := range capacity.Rejections {
 		reading.BudgetRejections += count
 	}
@@ -333,6 +351,8 @@ func bottleneckOf(capacity *CapacityView, behind bool) LoadBottleneck {
 		reading.Resource = BottleneckCPU
 	case !behind:
 		reading.Resource = BottleneckNone
+	case skew != nil:
+		reading.Resource = BottleneckSkew
 	case reading.PermitWaitShare != nil && *reading.PermitWaitShare >= permitWaitShareBottleneck:
 		reading.Resource = BottleneckPermits
 	case reading.QueueFull > 0:
@@ -348,6 +368,6 @@ var (
 	OnTimeStates  = []OnTimeState{OnTimeKeepingUp, OnTimeCatchingUp, OnTimeFallingBehind, OnTimeUnknown}
 	BacklogStates = []BacklogState{BacklogNone, BacklogGrowing, BacklogShrinking, BacklogFlat, BacklogUnknown}
 	LossStates    = []LossState{LossNone, LossInProgress}
-	Bottlenecks   = []Bottleneck{BottleneckNone, BottleneckBudget, BottleneckMemory, BottleneckCPU, BottleneckPermits, BottleneckQueue, BottleneckUnlocated, BottleneckUnknown}
+	Bottlenecks   = []Bottleneck{BottleneckNone, BottleneckBudget, BottleneckMemory, BottleneckCPU, BottleneckSkew, BottleneckPermits, BottleneckQueue, BottleneckUnlocated, BottleneckUnknown}
 	LoadLimits    = []LoadLimit{LimitCountersSinceStart, LimitTrendSpan, LimitNoCensus, LimitNoCapacity, LimitNoHeadroomEstimate}
 )

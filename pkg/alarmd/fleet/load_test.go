@@ -108,18 +108,67 @@ func TestBottleneckIsNamedFromTheEvidence(t *testing.T) {
 	for _, tc := range cases {
 		capacity := base()
 		tc.shape(capacity)
-		if got := bottleneckOf(capacity, tc.behind).Resource; got != tc.want {
+		if got := bottleneckOf(capacity, tc.behind, nil).Resource; got != tc.want {
 			t.Errorf("%s: resource = %s, want %s", tc.name, got, tc.want)
 		}
 	}
-	if got := bottleneckOf(nil, true).Resource; got != BottleneckUnknown {
+	if got := bottleneckOf(nil, true, nil).Resource; got != BottleneckUnknown {
 		t.Errorf("no capacity: resource = %s, want UNKNOWN", got)
 	}
 	// The shares travel with the reading, since start, so the words can show
 	// what the name was read from.
-	reading := bottleneckOf(base(), false)
+	reading := bottleneckOf(base(), false, nil)
 	if reading.PermitWaitShare == nil || *reading.PermitWaitShare != 0.1 || reading.ThrottledShare == nil || *reading.ThrottledShare != 0.01 {
 		t.Errorf("shares = %v / %v, want 0.1 permit waits and 0.01 throttled", reading.PermitWaitShare, reading.ThrottledShare)
+	}
+}
+
+// The split outranks the permit and queue readings and gives way to the
+// resource ones. A leader's round that would move objects says the ready
+// replicas hold uneven shares; the loaded one's permits and queue are then
+// full because of what it holds, so naming them would send a reader to add
+// concurrency to a deployment whose other replica is idle. A budget
+// rejection or a memory limit stays what it is, with the round beside it so
+// the sentence can say whose reading it is. A round that moves nothing is
+// not a skew and changes nothing.
+func TestBottleneckReadsTheSplitBeforeTheResourcesItFills(t *testing.T) {
+	skewed := &RebalanceFacts{ReadyWorkers: 2, Assigned: 2370, Target: 1185, MostOwned: 2370, LeastOwned: 0,
+		MostOwnedBy: "alarmd-a", LeastOwnedBy: "alarmd-b", Batch: 23, PlannedMoves: 23, StopSpreadPercent: 5, Shadow: true}
+	even := &RebalanceFacts{ReadyWorkers: 2, Assigned: 2370, Target: 1185, MostOwned: 1190, LeastOwned: 1180, Batch: 23, StopSpreadPercent: 5, Shadow: true}
+	base := func() *CapacityView {
+		return &CapacityView{PermitAcquires: 1000, PermitWaits: 700, CPUSeconds: 100, ThrottledSeconds: 1, ThrottledKnown: true, Rotation: &Rotation{DeferredQueueFull: 12}}
+	}
+	cases := []struct {
+		name      string
+		shape     func(*CapacityView)
+		behind    bool
+		rebalance *RebalanceFacts
+		want      Bottleneck
+		skew      bool
+	}{
+		{"behind, permits and queue full, skewed", func(*CapacityView) {}, true, skewed, BottleneckSkew, true},
+		{"behind, permits and queue full, even", func(*CapacityView) {}, true, even, BottleneckPermits, false},
+		{"keeping up, skewed", func(*CapacityView) {}, false, skewed, BottleneckNone, true},
+		{"budget rejected, skewed", func(c *CapacityView) { c.Rejections = map[string]uint64{"slot": 1} }, true, skewed, BottleneckBudget, true},
+		{"memory limit hit, skewed", func(c *CapacityView) { c.MemoryLimitHits = 1 }, true, skewed, BottleneckMemory, true},
+		{"behind, nothing points anywhere, skewed", func(c *CapacityView) { c.PermitWaits = 0; c.Rotation.DeferredQueueFull = 0 }, true, skewed, BottleneckSkew, true},
+	}
+	for _, tc := range cases {
+		capacity := base()
+		tc.shape(capacity)
+		reading := bottleneckOf(capacity, tc.behind, tc.rebalance)
+		if reading.Resource != tc.want {
+			t.Errorf("%s: resource = %s, want %s", tc.name, reading.Resource, tc.want)
+		}
+		if (reading.Skew != nil) != tc.skew {
+			t.Errorf("%s: skew carried = %v, want %v", tc.name, reading.Skew != nil, tc.skew)
+		}
+		if reading.Skew != nil && (reading.Skew.MostOwnedBy != "alarmd-a" || reading.Skew.PlannedMoves != 23) {
+			t.Errorf("%s: skew = %+v, want the leader's round whole", tc.name, reading.Skew)
+		}
+	}
+	if reading := bottleneckOf(nil, true, skewed); reading.Resource != BottleneckUnknown || reading.Skew == nil {
+		t.Errorf("no capacity, skewed: reading = %+v, want UNKNOWN with the round carried", reading)
 	}
 }
 

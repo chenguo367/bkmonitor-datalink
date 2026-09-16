@@ -731,6 +731,48 @@ type Snapshot struct {
 	// replica that has not attempted it, which is every follower, and on a
 	// build before this fact existed.
 	Activation *ActivationFacts `json:"activation,omitempty"`
+	// Rebalance is the control leader's last rebalance planning round: how
+	// the ready replicas hold the assigned objects and what the round would
+	// move. Absent on every follower and on a build before this fact existed.
+	Rebalance *RebalanceFacts `json:"rebalance,omitempty"`
+}
+
+// RebalanceFacts is one rebalance planning round on the control leader, as
+// the scheduler computed it. The fleet reads it for one fact: whether the
+// scheduler's own tolerance says the split is uneven, which is PlannedMoves
+// above zero. The page had the counts -- two replicas holding 2370 and 0 --
+// and no sentence, because no number on it was the scheduler's judgement of
+// those counts.
+//
+// MostOwnedBy and LeastOwnedBy are the pair the round would move between,
+// named only when it would move something. Shadow is written where the
+// decision not to publish the moves lives, so the page reads what the build
+// does rather than what a page constant says it does.
+type RebalanceFacts struct {
+	PlannedAt    time.Time `json:"planned_at"`
+	ReadyWorkers int       `json:"ready_workers"`
+	Assigned     int       `json:"assigned"`
+	Target       int       `json:"target"`
+	MostOwned    int       `json:"most_owned"`
+	LeastOwned   int       `json:"least_owned"`
+	MostOwnedBy  string    `json:"most_owned_by,omitempty"`
+	LeastOwnedBy string    `json:"least_owned_by,omitempty"`
+	Batch        int       `json:"batch"`
+	PlannedMoves int       `json:"planned_moves"`
+	// StopSpreadPercent is the scheduler's tolerance: no move is planned
+	// while the most and least loaded ready replica are within this share of
+	// the even target. Carried so the recovery criterion is the scheduler's
+	// number and not one the page keeps.
+	StopSpreadPercent int `json:"stop_spread_percent"`
+	// Shadow is true while the round only computes and nothing publishes the
+	// moves; a plan is then a measurement, not an action in progress.
+	Shadow bool `json:"shadow"`
+}
+
+// Skewed is the one reading the fleet takes: the scheduler would move
+// something, so by its own tolerance the split is uneven.
+func (facts *RebalanceFacts) Skewed() bool {
+	return facts != nil && facts.PlannedMoves > 0
 }
 
 // ActivationFacts is what the control leader says about the activation --
@@ -1198,6 +1240,12 @@ type View struct {
 	// replica said so. Absent when no counted replica has attempted it.
 	Activation        *ActivationFacts `json:"activation,omitempty"`
 	ActivationReplica string           `json:"activation_replica,omitempty"`
+	// Rebalance is the newest rebalance planning round any counted replica
+	// published, and RebalanceReplica which one. Newest rather than "the one
+	// that has it": a replica that stopped being the leader keeps its last
+	// plan, and after a leader change two replicas carry one each.
+	Rebalance        *RebalanceFacts `json:"rebalance,omitempty"`
+	RebalanceReplica string          `json:"rebalance_replica,omitempty"`
 }
 
 // Aggregate folds the published snapshots into one view.
@@ -1316,6 +1364,10 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			if snapshot.Activation.BehindBeyondBound {
 				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationActivationBehind, Replica: replica})
 			}
+		}
+		if snapshot.Rebalance != nil && (view.Rebalance == nil || snapshot.Rebalance.PlannedAt.After(view.Rebalance.PlannedAt)) {
+			facts := *snapshot.Rebalance
+			view.Rebalance, view.RebalanceReplica = &facts, replica
 		}
 		perReplica := ReplicaView{
 			Replica: replica, Owned: snapshot.Owned, Determined: snapshot.Determined,
