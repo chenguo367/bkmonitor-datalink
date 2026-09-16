@@ -281,10 +281,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	failingFor := (2 * time.Hour).Seconds()
 	// The leader's rebalance round the split standing is decided on: 527
 	// against 452 is 15% of the even 489, past the scheduler's 5%, so the
-	// round would move a batch of nine -- and the build does not.
+	// round moves a batch of nine -- and this round published them all.
 	rebalance := &fleet.RebalanceFacts{PlannedAt: at.Add(-20 * time.Second), ReadyWorkers: 2, Assigned: 979, Target: 489,
 		MostOwned: 527, LeastOwned: 452, MostOwnedBy: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
-		LeastOwnedBy: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", Batch: 9, PlannedMoves: 9, StopSpreadPercent: 5, Shadow: true}
+		LeastOwnedBy: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", Batch: 9, PlannedMoves: 9, StopSpreadPercent: 5,
+		PublishedMoves: 9}
 	activation := &fleet.ActivationFacts{
 		Applied: "bdc6ffcb0000000000000000", Published: "e7a1b2c30000000000000000",
 		Behind: true, BehindBeyondBound: true, ConsecutiveFailures: 120,
@@ -649,7 +650,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The third standing: the numbers are the leader's round, the lag is
 		// the replica table's, and the next step says what not to do first.
 		"对象分布不均：abcde 持有 527 个（53.8%），fghij 持有 452 个，2 个就绪副本均分应是 489 个——持有多的那个副本上的跳过、超时、排队都是这个原因，不是容量——fghij 比 abcde 晚 1 小时 55 分 启动",
-		"下一步：不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。Leader 本轮计划移 9 个（每轮最多 9 个），但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动；在均分回来之前",
+		"下一步：不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。已在移：本轮发出 9 个（每轮最多 9 个），最多与最少还差 75 个；看这一行的数在不在降；在均分回来之前",
 		"恢复标准：Leader 的再平衡计划移动数归零（最多与最少之差回到均分的 5% 以内，这是调度器自己的容差）"} {
 		if !strings.Contains(todoLine, want) {
 			t.Errorf("the checks do not say %q:\n%s", want, todoLine)
@@ -733,7 +734,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// Behind (a loss in progress) while the leader's round would move
 		// objects: the split is the constraint, named before the permits it
 		// fills, and the sentence says what the build does about it.
-		{"LOAD ::", "瓶颈：对象分布不均——abcde 持有 53.8% 的对象（527 / 均分 489），它的并发位子与队列满是因为它持有别的副本没持有的；加副本、加资源都分不走它的对象，Leader 本轮计划移 9 个（每轮最多 9 个），但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动"},
+		{"LOAD ::", "瓶颈：对象分布不均——abcde 持有 53.8% 的对象（527 / 均分 489），它的并发位子与队列满是因为它持有别的副本没持有的；加副本、加资源都分不走它的对象，已在移：本轮发出 9 个（每轮最多 9 个），最多与最少还差 75 个；看这一行的数在不在降"},
+		// The other states the round can be in, each on the next-step sentence
+		// the line prints: paused for the ready set to settle, with the time
+		// left; a shadow round on a build that only plans; a round that
+		// published nothing and says so; conflicts named beside the moves.
+		{"SENTENCE rebalance-paused ::", "但这一轮没发：就绪副本集刚变过，等它稳定（还剩 23 秒）再发"},
+		{"SENTENCE rebalance-shadow ::", "但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动"},
+		{"SENTENCE rebalance-none ::", "这一轮一个都没发出去，3 个因指派记录同时被改本轮没发、下轮再算——若下一轮仍是 0"},
+		{"SENTENCE rebalance-conflicts ::", "已在移：本轮发出 6 个（每轮最多 9 个），最多与最少还差 75 个，3 个因指派记录同时被改本轮没发、下轮再算；看这一行的数在不在降"},
 		{"LOAD behind-permits ::", "瓶颈：查询并发位子——启动至今 56% 的取位子排过队，而工作在落后或在漏检"},
 		// A budget rejection with the round beside it keeps its name and
 		// says whose reading it is.
@@ -1232,6 +1241,17 @@ console.log('SENTENCE demoted :: ' + ctx.checkSentence({code: 'QUERY_TARGET_MISS
 console.log('SENTENCE budget :: ' + ctx.checkSentence({code: 'DETECTION_ABANDONED', objects: 5, current: 5, group_by: 'loss',
   groups: [{key: 'EXECUTION_BUDGET_EXHAUSTED', objects: 3}, {key: 'ONGOING', objects: 2}]}, 5));
 console.log('BRIEF :: ' + ['briefSchedule', 'briefTodo', 'briefBlind'].map(id => textOf(store[id])).join(' | '));
+// The split line's next step in every state the leader's round can be in.
+const round = {ready_workers: 2, assigned: 979, target: 489, most_owned: 527, least_owned: 452, batch: 9, planned_moves: 9, stop_spread_percent: 5,
+  most_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-abcde', least_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-fghij'};
+for (const [name, extra] of Object.entries({
+  'paused': {paused: true, paused_for_seconds: 22.4},
+  'shadow': {shadow: true},
+  'none': {published_moves: 0, conflicts: 3},
+  'conflicts': {published_moves: 6, conflicts: 3},
+})) {
+  console.log('SENTENCE rebalance-' + name + ' :: ' + ctx.nextWords('OWNERSHIP_SKEWED', {rebalance: Object.assign({}, round, extra)}));
+}
 console.log('BUILD :: ' + textOf(store['buildLine']));
 // The operating judgment at the top of the capacity panel, with its limits.
 console.log('LOAD :: ' + textOf(store['loadLines']) + ' ｜ ' + textOf(store['loadLimits']));

@@ -710,7 +710,7 @@ var DEGRADATION = {
 // the reader to look for something that does not.
 var EVIDENCE = {
   CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
-  OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡计划在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_planned_moves',
+  OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡这一轮（计划/发出/暂停）在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_gap、assignment_moves_total{reason=rebalance}、rebalance_paused_total{reason=set_unstable}',
   REPLICA_DEGRADED:      '展开按种类看是哪个副本；策略源过期的组直接带最近一次刷新失败的阶段与原文（下面组名后）；副本表里该副本的策略源/告警集合/平台设置时钟',
   SLOTS_OVERDUE:         '对象行"超期"与超期多久（预计时刻已过多久）；副本表里该副本的已运行时长与被挡回数',
   NEVER_EVALUATED:       '对象行"接管后未跑"与接管时刻',
@@ -840,15 +840,28 @@ function rebalanceWords(words, rebalance) {
     .replace('{rebalance}', rebalanceStanding(r));
 }
 
-// What the leader is doing about the split, from the round itself: a shadow
-// round is a measurement the build does not act on, and the line has to say
-// that rather than let a reader wait for a move that will not come.
+// What the leader is doing about the split, from the round itself, in the
+// states the round can be in: a shadow round is a measurement the build
+// does not act on; a round paused because the ready set changed inside its
+// settling window wrote nothing on purpose and says for how much longer; a
+// round that published is moving, and the gap it still has to close is on
+// the line so a reader can watch it fall. The line has to say which,
+// rather than let a reader wait for a move that will not come or restart a
+// replica to force one that is already under way.
 function rebalanceStanding(r) {
   if (!r || !r.planned_moves) return '等再平衡';
+  var gap = Math.max(0, (r.most_owned || 0) - (r.least_owned || 0));
   var plan = 'Leader 本轮计划移 ' + r.planned_moves + ' 个（每轮最多 ' + (r.batch || 0) + ' 个）';
-  return r.shadow
-    ? plan + '，但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动'
-    : plan + '，正在逐轮移，看这一行的数在不在降';
+  if (r.shadow) return plan + '，但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动';
+  if (r.paused) {
+    return plan + '，但这一轮没发：就绪副本集刚变过，等它稳定'
+      + (r.paused_for_seconds ? '（还剩 ' + Math.ceil(r.paused_for_seconds) + ' 秒）' : '') + '再发';
+  }
+  var conflicts = r.conflicts ? '，' + r.conflicts + ' 个因指派记录同时被改本轮没发、下轮再算' : '';
+  if (r.published_moves) {
+    return '已在移：本轮发出 ' + r.published_moves + ' 个（每轮最多 ' + (r.batch || 0) + ' 个），最多与最少还差 ' + gap + ' 个' + conflicts + '；看这一行的数在不在降';
+  }
+  return plan + '，这一轮一个都没发出去' + conflicts + '——若下一轮仍是 0，看 leader 日志 rebalance_planned';
 }
 
 // A standing's fold that carries the failure behind it says so on the line:

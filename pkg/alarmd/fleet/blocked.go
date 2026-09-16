@@ -173,6 +173,13 @@ var failureFacets = map[string]facets{
 	"SNAPSHOT_UNAVAILABLE":   {StageConfig, ClassUnavailable, ""},
 	"SNAPSHOT_RETRY_PENDING": {StageConfig, ClassUnavailable, ""},
 	"ACTIVATION_READ_FAILED": {StageConfig, ClassUnavailable, ""},
+	// The store answered and the activation record was not in it: the
+	// configuration step with nothing to load. The code names the record
+	// and the store it lives in, so the dependency is named by it; whether
+	// the store lost the record or nobody wrote it is the next question, and
+	// the leader answers it by rebuilding from the catalogue or degrading
+	// by name.
+	"ACTIVATION_MISSING": {StageConfig, ClassUnavailable, DependencyRedis},
 
 	// This deployment in conflict with what it persisted.
 	"STATE_CORRUPT":              {StageCommit, ClassContract, DependencyNone},

@@ -70,7 +70,7 @@ func TestAmbiguousCodesLeaveTheDependencyUnlocated(t *testing.T) {
 	}
 	// Codes that name the dependency name it, and say it was the code.
 	for code, want := range map[string]Dependency{"REDIS_UNAVAILABLE": DependencyRedis, "KAFKA_UNAVAILABLE": DependencyKafka,
-		"PROVIDER_UNAVAILABLE": DependencyQueryBackend, "EXECUTION_BUDGET_EXHAUSTED": DependencyNone} {
+		"PROVIDER_UNAVAILABLE": DependencyQueryBackend, "EXECUTION_BUDGET_EXHAUSTED": DependencyNone, "ACTIVATION_MISSING": DependencyRedis} {
 		blocked := blockedOf(Anomaly{Kind: KindDegradedRun, CauseReason: code}, ScheduleOnTime)
 		if blocked.Dependency != want || blocked.DependencyEvidence != dependencyByCode {
 			t.Errorf("%s: dependency = %s by %q, want %s by code", code, blocked.Dependency, blocked.DependencyEvidence, want)
