@@ -501,10 +501,19 @@ func NewRunner(
 
 // NextDeadline reports when the next Slot this Runner would run stops being
 // worth running: the frozen Slot's query deadline when one is held, else a
-// bound derived from the schedule -- the next due second plus the shortest
-// interval due there, which for every cohort is at or before the true
-// deadline and orders the cohorts the same way. Zero when nothing is known,
-// which a dispatcher orders after everything that is.
+// bound derived from the schedule. Zero only when nothing is known, which a
+// dispatcher orders after everything that is.
+//
+// The bound is the next due second plus the shortest interval due there,
+// and when the next due second is not known -- the Slot just completed and
+// the next one is not frozen until the next round -- the current second plus
+// that interval. Both are within the query reserve of the true deadline for
+// every cohort (a cohort's deadline is due time plus offset minus reserve,
+// and the offset is at least the interval) and order the cohorts the same
+// way. The second case is the one the minute's tide found: a ten-second
+// Runner back in the ready queue right after completing a Slot carried no
+// deadline, ranked behind a thousand minute Slots that did, and was held
+// back at the full queue -- the one cohort the ordering exists for.
 //
 // It is read at the same point NextReadyAt is: a dispatcher deciding what to
 // run next needs both, and a Slot that is ready first but expires last is
@@ -517,11 +526,13 @@ func (runner *Runner) NextDeadline() time.Time {
 		return runner.nextDeadline
 	}
 	bound := runner.dueBound
-	if bound.Verdict == DueVerdictNotDue && !bound.Deferred && !bound.Retired &&
-		bound.NotDueUntilUnix > 0 && bound.IntervalSeconds > 0 {
+	if bound.IntervalSeconds <= 0 || bound.Retired {
+		return time.Time{}
+	}
+	if bound.Verdict == DueVerdictNotDue && !bound.Deferred && bound.NotDueUntilUnix > 0 {
 		return time.Unix(bound.NotDueUntilUnix+bound.IntervalSeconds, 0)
 	}
-	return time.Time{}
+	return runner.now().Add(time.Duration(bound.IntervalSeconds) * time.Second)
 }
 
 // NextReadyAt reports when the Runner can make its next QG-local attempt.
