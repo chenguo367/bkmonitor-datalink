@@ -553,6 +553,10 @@ var OWNER = {ALARMD: 'alarmd', DATA: '数据侧', STRATEGY: '策略侧', NOBODY:
 // which check an object is under and folds the objects; the page substitutes
 // the counts. {n} objects, {g} groups, {s} strategies, {b} businesses.
 var CHECK = {
+  // The two standings. {since}, {c}, {applied} and {published} come from the
+  // leader's activation facts on the report, not from counts.
+  CUTOVER_FAILING:       '控制面变更自 {since} 起没有生效：连续 {c} 轮激活失败（{g} 种原因），舰队在执行 {applied} 的内容，源已到 {published}',
+  REPLICA_DEGRADED:      '{g} 种副本级运行状态超出设计界，判定因此降级',
   SLOTS_OVERDUE:         '{n} 个对象到期没跑',
   NEVER_EVALUATED:       '{n} 个对象接管后从未评估',
   ROUNDS_STALLED:        '{n} 个对象的轮次不再结束，不会自己恢复',
@@ -572,7 +576,17 @@ var CHECK = {
 };
 
 // What the objects of a check are folded on, in words.
-var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况'};
+var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况',
+                degradation: '超界的状态'};
+
+// The replica-level standings, in words. Held to the Go list.
+var DEGRADATION = {
+  ACTIVATION_BEHIND: '控制面变更没有生效：源发布了新内容，激活跟不上去，舰队在执行旧发布',
+  CONTROL_SOURCE_STALE: '策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录',
+  CONTROL_LEADER_ABSENT: '副本拿不到控制面 leader 租约、也不知道谁持有，超过设计允许的时间——可能没人在刷新',
+  OPEN_ALERT_SET_STALE: '已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识',
+  PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置'
+};
 
 // The two dimensions each object row shows, in words. Held to the Go lists.
 var SCHEDULE = {NEW: '接管后未跑', ON_TIME: '等下次', LATE: '迟到', OVERDUE: '超期', PAUSED: '生效时段外',
@@ -586,10 +600,36 @@ function checkSentence(report) {
     // line on the first screen reads as "nothing here".
     return '（页面没有这条检查项的文案：' + report.code + '，请上报）';
   }
+  var activation = report.activation || {};
+  var since = activation.failing_seconds_this_process
+    ? momentLabel(new Date(Date.now() - activation.failing_seconds_this_process * 1000).toISOString()) : '（未知时刻）';
   return words.replace('{n}', String(report.objects || 0))
     .replace('{g}', String((report.groups || []).length))
     .replace('{s}', String(report.strategies || 0))
-    .replace('{b}', String(report.businesses || 0));
+    .replace('{b}', String(report.businesses || 0))
+    .replace('{c}', String(activation.consecutive_failures || 0))
+    .replace('{since}', since)
+    .replace('{applied}', shortRevision(activation.applied))
+    .replace('{published}', shortRevision(activation.published));
+}
+
+// The standings in words, each once with its replicas: two replicas past the
+// same bound are one kind, not two.
+function degradationWords(degradations) {
+  var byKind = {};
+  var order = [];
+  degradations.forEach(function (d) {
+    if (!byKind[d.kind]) { byKind[d.kind] = []; order.push(d.kind); }
+    if (d.replica) byKind[d.kind].push(shortReplica(d.replica));
+  });
+  return order.map(function (kind) {
+    return (DEGRADATION[kind] || kind) + (byKind[kind].length ? '（副本 ' + byKind[kind].join('、') + '）' : '');
+  }).join('；');
+}
+
+function shortRevision(revision) {
+  if (!revision) return '（未知）';
+  return String(revision).slice(0, 8);
 }
 
 // The running brief: three sentences, each answering one question. The first
@@ -695,7 +735,7 @@ function scheduleSentence(deployment) {
   if (!census) {
     // No replica has a due index, so nothing here can say whether the work is
     // on time. Said as such rather than as "on time".
-    return '执行情况：没有副本带到期索引，说不出是否按时';
+    return '执行情况：没有副本带到期索引，说不出是否按时' + activationClause(deployment.activation);
   }
   var standing = scheduleStanding(census);
   var rate1h = standing.rate1h;
@@ -720,7 +760,19 @@ function scheduleSentence(deployment) {
   if (census.never) now.push(census.never + ' 个接管后还没跑第一轮');
   if (now.length) parts.push('现在 ' + now.join('、'));
   if (census.missing_period) parts.push(census.missing_period + ' 个对象周期未知，迟到没法判超期');
-  return '执行情况：' + (behind ? '跟不上' : (census.overdue ? '有超期但在追' : '跟得上')) + '——' + parts.join('；');
+  return '执行情况：' + (behind ? '跟不上' : (census.overdue ? '有超期但在追' : '跟得上')) + '——' + parts.join('；')
+    + activationClause(deployment.activation);
+}
+
+// Whether the work being done on time is the current work. On time and on a
+// stale publication are both true at once when the activation cannot follow
+// the source, and the first sentence said only the first.
+function activationClause(activation) {
+  if (!activation || !activation.behind_beyond_bound) return '';
+  var since = activation.failing_seconds_this_process
+    ? momentLabel(new Date(Date.now() - activation.failing_seconds_this_process * 1000).toISOString()) : '（未知时刻）';
+  return '。但控制面变更自 ' + since + ' 起没有生效：舰队在执行 ' + shortRevision(activation.applied)
+    + ' 的内容，源已到 ' + shortRevision(activation.published) + '，连续 ' + (activation.consecutive_failures || 0) + ' 轮激活失败';
 }
 
 function loadChecks() {
@@ -800,15 +852,25 @@ function renderGroups() {
   if (!report) return;
   text('detailTitle', checkSentence(report));
   text('detailBasis', '按' + (GROUP_BY[report.group_by] || report.group_by || '分组键') + '合并；展开一组看对象。'
-    + (report.partial ? '有副本没能发布完整清单，这里是样本。' : ''));
+    + (report.partial ? '有副本没能发布完整清单，这里是样本。' : '')
+    // The standing's own evidence: what the last failed attempt said, and the
+    // two series that corroborate it from outside this page.
+    + (report.activation
+        ? '最近一次激活失败：' + (report.activation.last_failure || '（没有文本）')
+          + '（副本 ' + shortReplica(report.replica || '') + '）。伴随证据：segment_content_freshness_total{stale}、'
+          + 'schedule_cutover_total{result,reason}、日志 stage activation_failed。'
+        : ''));
   (report.groups || []).forEach(function (group) {
     var key = report.code + '|' + group.key;
     var details = document.createElement('details');
     details.className = 'more group';
     var label = document.createElement('summary');
-    var parts = [group.key];
-    // A fold with no objects behind it is a replica-level hole, not a list.
-    parts.push(group.objects ? group.objects + ' 个对象' : '副本级缺口，没有可列的对象');
+    var parts = [DEGRADATION[group.key] ? group.key + '（' + DEGRADATION[group.key] + '）' : group.key];
+    // A fold with no objects behind it is a replica-level fact, not a list:
+    // a coverage hole, or a standing, which names its replicas instead.
+    if (group.objects) parts.push(group.objects + ' 个对象');
+    else if (group.replicas && group.replicas.length) parts.push('副本 ' + group.replicas.map(shortReplica).join('、') + '，没有可列的对象');
+    else parts.push('副本级缺口，没有可列的对象');
     if (group.strategies) parts.push(group.strategies + ' 条策略');
     if (group.businesses) parts.push(group.businesses + ' 个业务');
     label.textContent = parts.join(' · ');
@@ -1252,6 +1314,7 @@ function renderDeployment(deployment) {
     // gaps, unknown-state zero and every column adding up, and this line told
     // the reader "证据齐全" underneath it: the page asserting the opposite of
     // its own badge, with nothing on it that could settle the argument.
+    var degradations = deployment.degradations || [];
     text('why', gaps.length
       ? '证据不全：' + (GAP_MEANING[gaps[0].kind] || gaps[0].kind) +
         (gaps.length > 1 ? '，另有 ' + (gaps.length - 1) + ' 项' : '')
@@ -1263,8 +1326,16 @@ function renderDeployment(deployment) {
       // The verdict follows only the objects capacity or design could have
       // prevented, so the wording has to say that -- otherwise HEALTHY beside a
       // list of ninety-nine objects reads as the page contradicting itself.
+      //
+      // A replica-level standing decides DEGRADED before the object list is
+      // consulted, and this sentence used to name the object list anyway:
+      // half a day of a fleet executing a stale publication read here as
+      // "容量或架构". The standing is named first when there is one.
       : (h === 'DEGRADED'
-          ? '证据齐全，存在 alarmd 自己该负责的异常（容量或架构）'
+          ? (degradations.length
+              ? '证据齐全，副本级运行状态超出设计界：' + degradationWords(degradations)
+                + '。对象列表不决定这次判定；看首屏第一行'
+              : '证据齐全，存在 alarmd 自己该负责的异常（容量或架构）')
           : (deployment.anomalies_total > 0
               ? '证据齐全，alarmd 自己没有异常；列表里那些是数据源或策略配置的问题，由对应负责人处理'
               : '证据齐全，无异常对象'))));

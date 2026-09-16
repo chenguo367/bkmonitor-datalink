@@ -211,12 +211,35 @@ func TestThePageHasWordingForEveryCheckOwnerScheduleAndResult(t *testing.T) {
 			}
 		}
 	}
-	// And the table is the size the design says: the first screen is sixteen
-	// lines at most, and a seventeenth sentence here is a seventeenth check.
+	// And the table is the size the design says: the first screen is
+	// eighteen lines at most, and a nineteenth sentence here is a nineteenth
+	// check.
 	entries := regexp.MustCompile(`(?m)^  [A-Z_]+:`).FindAllString(
 		regexp.MustCompile(`var CHECK = \{([\s\S]*?)\};`).FindStringSubmatch(body)[1], -1)
-	if len(entries) != 16 {
-		t.Errorf("CHECK has %d sentences, want 16", len(entries))
+	if len(entries) != 18 {
+		t.Errorf("CHECK has %d sentences, want 18", len(entries))
+	}
+	// The replica-level standings have words too, one per kind the Go side
+	// can produce, and none the Go side cannot.
+	kinds := map[string]bool{}
+	for _, kind := range fleet.DegradationKinds {
+		kinds[string(kind)] = true
+	}
+	table := regexp.MustCompile(`var DEGRADATION = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+	if table == nil {
+		t.Fatal("the page has no DEGRADATION wording table")
+	}
+	worded := map[string]bool{}
+	for _, entry := range regexp.MustCompile(`(?m)^  ([A-Z_]+):`).FindAllStringSubmatch(table[1], -1) {
+		worded[entry[1]] = true
+		if !kinds[entry[1]] {
+			t.Errorf("DEGRADATION has words for %s, which the server never sends", entry[1])
+		}
+	}
+	for kind := range kinds {
+		if !worded[kind] {
+			t.Errorf("DEGRADATION has no words for %s: the standing would render as its code", kind)
+		}
 	}
 }
 

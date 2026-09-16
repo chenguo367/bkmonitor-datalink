@@ -239,10 +239,27 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// A retained skip: an object that skipped Slots past the replay window an
 	// hour ago and has run normally since. It is under no column and on the
 	// first screen anyway, with a row of its own.
+	// And the two standings: the leader unable to bring the activation to
+	// the publication for two hours (the shape a running deployment was in
+	// for half a day), and one replica's open alert set past its bound.
+	failingFor := (2 * time.Hour).Seconds()
+	activation := &fleet.ActivationFacts{
+		Applied: "bdc6ffcb0000000000000000", Published: "e7a1b2c30000000000000000",
+		Behind: true, BehindBeyondBound: true, ConsecutiveFailures: 120,
+		FailingSecondsThisProcess: &failingFor,
+		FailureStage:              "schedule_cutover", FailureClass: "schedule_conflict",
+		LastFailure: "alarmd controlplane: schedule activation conflict",
+	}
+	degradations := []fleet.Degradation{
+		{Kind: fleet.DegradationActivationBehind, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"},
+		{Kind: fleet.DegradationOpenAlertSetStale, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij"},
+	}
 	retained := &fleet.View{Unknown: 3, Gaps: []fleet.Gap{{Kind: fleet.GapSnapshotStale, Replica: "pod-b"}},
 		GapSkips: map[string]fleet.SkippedSpan{"qg-skipped-hour-ago": {
 			FirstSlot: at.Add(-90 * time.Minute).Unix(), LastSlot: at.Add(-70 * time.Minute).Unix(),
-			Slots: 20, At: at.Add(-time.Hour), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"}}}
+			Slots: 20, At: at.Add(-time.Hour), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"}},
+		Activation: activation, ActivationReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
+		Degradations: degradations}
 	checks := fleet.ReportChecks([][]fleet.Anomaly{rows}, nil, retained)
 	rows = append(rows, fleet.UnderCheck(fleet.CheckDetectionAbandoned, "", retained)...)
 	// The barest row the API can send: every omitempty field absent. It goes in
@@ -323,6 +340,10 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			// sentence. The other shapes -- a rollout in progress, a build that
 			// reports none -- are variants below.
 			Builds: []fleet.BuildGroup{{Build: build, Replicas: []string{replicas[0].Replica, replicas[1].Replica}}},
+			// The standings the verdict was decided on, whole, so the why line
+			// and the first sentence can name them.
+			Degradations: degradations, Activation: activation,
+			ActivationReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 			// The tracker writes the exit count and the exit time on adjacent
 			// lines, so a deployment with exits always has this. Without it here
 			// the fixture described a deployment that cannot exist -- and the page
@@ -493,9 +514,26 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// replica.
 	todo := lineStarting(text, "CHECKS ::")
 	for _, want := range []string{"1 个对象的轮次不再结束", "alarmd", "后端拒绝了 2 个对象的查询", "待确认",
-		"2 个对象因 alarmd 自己的容量限制放弃了检测", "1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）"} {
+		"2 个对象因 alarmd 自己的容量限制放弃了检测", "1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）",
+		// The two standings, first. The time is the viewer's clock and is not
+		// asserted; everything after it is.
+		"起没有生效：连续 120 轮激活失败（1 种原因），舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3",
+		"1 种副本级运行状态超出设计界，判定因此降级"} {
 		if !strings.Contains(todo, want) {
 			t.Errorf("the checks do not say %q:\n%s", want, todo)
+		}
+	}
+	if !strings.HasPrefix(strings.TrimPrefix(todo, "CHECKS :: "), "控制面变更自 ") {
+		t.Errorf("the fleet executing a stale publication is not the first line:\n%s", todo)
+	}
+	// Opening a standing's line names its replicas, not objects.
+	for _, want := range []struct{ line, says string }{
+		{"GROUPS CUTOVER ::", "schedule_cutover/schedule_conflict · 副本 abcde，没有可列的对象"},
+		{"BASIS CUTOVER ::", "最近一次激活失败：alarmd controlplane: schedule activation conflict（副本 abcde）。伴随证据：segment_content_freshness_total{stale}"},
+		{"GROUPS DEGRADED ::", "OPEN_ALERT_SET_STALE（已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识） · 副本 fghij，没有可列的对象"},
+	} {
+		if line := lineStarting(text, want.line); !strings.Contains(line, want.says) {
+			t.Errorf("%s does not say %q:\n%s", want.line, want.says, line)
 		}
 	}
 	for _, mustNot := range []string{"数据侧", "策略侧", "查询后端没有应答"} {
@@ -515,6 +553,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	for _, want := range []string{"执行情况：跟得上", "9000 轮里 99.6% 在下一轮到期前完成（6 小时 99.4%）",
 		"被挡回 120 轮，其中 118 轮仍按时完成", "1900 个在等下次（33 个在冷却）", "12 个迟到未超一个周期", "1 个接管后还没跑第一轮",
 		"需要处理：", "类问题，影响",
+		// On time, and on a stale publication: both true at once, and the
+		// first sentence says both.
+		"起没有生效：舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3，连续 120 轮激活失败",
 		// Eight objects carry no cause. This line said "全部对象都有结论" over a
 		// grid showing them; completeness is about conclusions, and they have
 		// none yet.
@@ -723,8 +764,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"分栏之和与应有对不上时必须自己说出来，这是读者唯一能发现分栏漏了一类的途径"},
 		{"VAR healthy why ::", "证据齐全", "证据不全",
 			"健康且没有覆盖缺口时不能还说证据不全"},
-		{"VAR degraded why ::", "存在 alarmd 自己该负责的异常", "",
-			"DEGRADED 要说清是 alarmd 自己的异常，否则和数据源问题分不开"},
+		{"VAR degraded why ::", "副本级运行状态超出设计界：控制面变更没有生效", "容量或架构",
+			"副本级 standing 决定的 DEGRADED 要点名 standing，不能说成对象列表的容量或架构问题"},
+		{"VAR degraded why ::", "（副本 abcde）；已开告警集合", "",
+			"两种 standing 各说一次并带副本"},
+		{"VAR degraded-objects why ::", "存在 alarmd 自己该负责的异常", "超出设计界",
+			"没有 standing 时 DEGRADED 才是对象列表决定的"},
 		// The first sentence of the brief, in the states the census has.
 		{"VAR behind brief ::", "跟不上", "跟得上",
 			"有超期且 1 小时按时率低于 6 小时时要说跟不上"},
@@ -918,6 +963,13 @@ console.log('BUILD :: ' + textOf(store['buildLine']));
 ctx.openCheck = 'OBSERVATION_GAP';
 ctx.renderChecks(data.checks);
 console.log('GROUPS :: ' + textOf(store['groups']));
+ctx.openCheck = 'CUTOVER_FAILING';
+ctx.renderChecks(data.checks);
+console.log('GROUPS CUTOVER :: ' + textOf(store['groups']));
+console.log('BASIS CUTOVER :: ' + textOf(store['detailBasis']));
+ctx.openCheck = 'REPLICA_DEGRADED';
+ctx.renderChecks(data.checks);
+console.log('GROUPS DEGRADED :: ' + textOf(store['groups']));
 ctx.openCheck = '';
 
 // The four dimensions each row shows, read off the rendered cells.
@@ -1023,6 +1075,7 @@ const variants = {
   'expected-mismatch': {expected: 2075},
   'healthy': {health: 'HEALTHY', gaps: [], unattributed: 0},
   'degraded': {health: 'DEGRADED', gaps: [], unattributed: 0},
+  'degraded-objects': {health: 'DEGRADED', gaps: [], unattributed: 0, degradations: [], activation: null},
   // The census in the other states it has: falling behind (overdue, and the
   // hour's rate below the six hours'), overdue but the rate not falling, a
   // quiet hour with nothing returned, and no census at all.
