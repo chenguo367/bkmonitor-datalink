@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strconv"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -133,6 +134,7 @@ func (stream *streamedExecution) observeSnapshotProgress(ctx context.Context, sn
 			GapProgress: &observability.GapProgressFacts{
 				Scope: name, Status: string(scope.Status), Reason: string(scope.ReasonCode),
 				Required: scope.RequiredFullSlots, Observed: scope.ObservedFullSlots,
+				Progress: contract.GapScopeProgress(scope.ObservedFullSlots, scope.RequiredFullSlots),
 			},
 		})
 	}

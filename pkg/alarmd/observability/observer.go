@@ -382,6 +382,9 @@ type GapProgressFacts struct {
 	// Required and Observed are N and k.
 	Required uint32
 	Observed uint32
+	// Progress is where k stands against N as a bounded word, so a reader and
+	// a metric label agree without either deriving it again.
+	Progress string
 }
 
 // NoDataStallFacts names one Plan whose no-data detection has stopped rather

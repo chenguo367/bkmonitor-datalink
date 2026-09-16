@@ -303,6 +303,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("gap_scope_reason", facts.Reason),
 			slog.Uint64("gap_full_slots_required", uint64(facts.Required)),
 			slog.Uint64("gap_full_slots_observed", uint64(facts.Observed)),
+			slog.String("gap_progress", facts.Progress),
 		)
 	}
 	if facts := observation.NoDataMemoryWrite; facts != nil {

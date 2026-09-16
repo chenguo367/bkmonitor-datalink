@@ -12,6 +12,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
@@ -48,6 +49,7 @@ type phaseTwoMetrics struct {
 	noDataStalls                    *prometheus.CounterVec
 	noDataMemoryRefusals            *prometheus.CounterVec
 	noDataMemoryWrites              *prometheus.CounterVec
+	gapGuardScopeRounds             *prometheus.CounterVec
 	noDataPlansSeen                 prometheus.Counter
 	noDataPlansByHop                *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
@@ -401,6 +403,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"worker_no_data_memory_refusals_total is every mutation the store was asked for. " +
 			"Every outcome has a label at startup, so a zero is a zero rather than a label nothing wrote.",
 	}, []string{"outcome"})
+	metrics.gapGuardScopeRounds = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_gap_guard_scope_rounds_total",
+		Help: "One per held gap scope per round that read it, by status, by why it is held, and by " +
+			"where its count stands against its requirement. The rate is how many scopes are being " +
+			"held; progress=none holding up is a guard that has had no complete round since it was " +
+			"raised, which is the state somebody is looking for and the one a changed-only signal " +
+			"would say nothing about. It is counted per round rather than gauged because whether a " +
+			"guard is moving is a question about a stretch of time, and because a gauge would need a " +
+			"memory of the previous round that survives a Query Group changing owner. " +
+			"progress=ready should stay near zero: a warming scope cannot persist in that state. " +
+			"reason=other is a reason nobody named here. Every combination has a label at startup.",
+	}, []string{"status", "reason", "progress"})
 	metrics.dueIndex = newDueIndexMetrics()
 	metrics.controlFacts = newControlFactsMetrics()
 	metrics.redisCalls = newRedisCallMetrics()
@@ -711,6 +725,13 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}
 		metrics.noDataStalls.WithLabelValues(string(outcome))
 	}
+	for _, status := range execution.GapScopeStatuses {
+		for _, reason := range append(contract.GapScopeReasons(), contract.GapScopeReasonOther) {
+			for _, progress := range contract.GapScopeProgressValues {
+				metrics.gapGuardScopeRounds.WithLabelValues(string(status), reason, progress)
+			}
+		}
+	}
 	for _, outcome := range execution.NoDataWriteOutcomes {
 		metrics.noDataMemoryWrites.WithLabelValues(string(outcome))
 	}
@@ -758,7 +779,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -961,6 +982,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.NoDataMemoryWrite; facts != nil {
 		m.noDataMemoryWrites.WithLabelValues(facts.Outcome).Inc()
+	}
+	if facts := observation.GapProgress; facts != nil {
+		m.gapGuardScopeRounds.WithLabelValues(
+			facts.Status, contract.NormalizeGapScopeReason(facts.Reason), facts.Progress,
+		).Inc()
 	}
 	// Dispatched on the facts rather than on a component and stage: the hops
 	// are reported from the control plane and from the evaluation, and the
