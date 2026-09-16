@@ -2587,6 +2587,8 @@ func (runner *fakePhaseTwoQueryGroup) RunOneAdmitted(
 
 func (*fakePhaseTwoQueryGroup) NextReadyAt() time.Time { return time.Time{} }
 
+func (*fakePhaseTwoQueryGroup) NextDeadline() time.Time { return time.Time{} }
+
 func (*fakePhaseTwoQueryGroup) DueBound() scheduler.RunnerDueBound {
 	return scheduler.RunnerDueBound{}
 }

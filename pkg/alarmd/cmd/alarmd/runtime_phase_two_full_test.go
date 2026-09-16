@@ -2085,6 +2085,8 @@ func (runtime *recordingPhaseTwoQueryGroupRuntime) NextReadyAt() time.Time {
 	return runtime.next.NextReadyAt()
 }
 
+func (runtime *recordingPhaseTwoQueryGroupRuntime) NextDeadline() time.Time { return time.Time{} }
+
 func (runtime *recordingPhaseTwoQueryGroupRuntime) DueBound() scheduler.RunnerDueBound {
 	return scheduler.RunnerDueBound{}
 }
