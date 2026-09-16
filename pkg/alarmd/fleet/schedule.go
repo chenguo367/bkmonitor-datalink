@@ -61,11 +61,32 @@ type ScheduleCensus struct {
 	// whether being pushed back costs a deadline.
 	HeldBack1h       int `json:"held_back_1h"`
 	HeldBackOnTime1h int `json:"held_back_on_time_1h"`
+	// OverdueAgo is the overdue count this index found OverdueAgoSeconds ago
+	// -- the oldest sample of the last hour it holds -- so the backlog can be
+	// read as growing or shrinking rather than as one number. Absent when the
+	// index has no earlier sample (a process that just started). Summed
+	// across replicas only when every replica has one; the span is then the
+	// shortest of theirs, because a trend is only as long as its youngest
+	// sample.
+	OverdueAgo        *int    `json:"overdue_ago,omitempty"`
+	OverdueAgoSeconds float64 `json:"overdue_ago_seconds,omitempty"`
 }
 
 // Add folds another replica's census into this one. Counts add; the oldest
-// lateness is the worst anywhere.
+// lateness is the worst anywhere; the earlier backlog adds only when both
+// sides have one, and is dropped when either does not -- so the aggregate
+// starts from the first replica's census as it is, not from an empty one
+// that would read as a replica without a sample.
 func (census *ScheduleCensus) Add(other ScheduleCensus) {
+	if census.OverdueAgo == nil || other.OverdueAgo == nil {
+		census.OverdueAgo, census.OverdueAgoSeconds = nil, 0
+	} else {
+		sum := *census.OverdueAgo + *other.OverdueAgo
+		census.OverdueAgo = &sum
+		if other.OverdueAgoSeconds < census.OverdueAgoSeconds {
+			census.OverdueAgoSeconds = other.OverdueAgoSeconds
+		}
+	}
 	census.Waiting += other.Waiting
 	census.Cooling += other.Cooling
 	census.Late += other.Late
@@ -93,7 +114,9 @@ func aggregateSchedule(view *View, snapshots []Snapshot) {
 			continue
 		}
 		if census == nil {
-			census = &ScheduleCensus{}
+			first := *snapshot.Schedule
+			census = &first
+			continue
 		}
 		census.Add(*snapshot.Schedule)
 	}

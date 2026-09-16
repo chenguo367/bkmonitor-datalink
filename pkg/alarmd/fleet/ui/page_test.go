@@ -705,3 +705,47 @@ func containsString(list []string, want string) bool {
 	}
 	return false
 }
+
+// The operating judgment is four closed states and a closed list of limits,
+// decided by the server; the page has words for every one and for none the
+// server never sends. A state without words would render as its code on the
+// line a reader opens the capacity panel with.
+func TestThePageHasWordingForEveryLoadState(t *testing.T) {
+	body := string(page)
+	tables := []struct {
+		name   string
+		values []string
+	}{
+		{"ON_TIME", stringsOf(fleet.OnTimeStates)},
+		{"BACKLOG", stringsOf(fleet.BacklogStates)},
+		{"LOSS_STATE", stringsOf(fleet.LossStates)},
+		{"BOTTLENECK", stringsOf(fleet.Bottlenecks)},
+		{"LOAD_LIMIT", stringsOf(fleet.LoadLimits)},
+	}
+	for _, table := range tables {
+		found := regexp.MustCompile(`var ` + table.name + ` = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+		if found == nil {
+			t.Fatalf("the page has no %s wording table", table.name)
+		}
+		worded := map[string]bool{}
+		for _, entry := range regexp.MustCompile(`(?m)^  ([A-Z_]+):`).FindAllStringSubmatch(found[1], -1) {
+			worded[entry[1]] = true
+			if !containsString(table.values, entry[1]) {
+				t.Errorf("%s has words for %s, which the server never sends", table.name, entry[1])
+			}
+		}
+		for _, value := range table.values {
+			if !worded[value] {
+				t.Errorf("%s has no words for %s: the judgment would render as its code", table.name, value)
+			}
+		}
+	}
+}
+
+func stringsOf[T ~string](values []T) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		out = append(out, string(value))
+	}
+	return out
+}

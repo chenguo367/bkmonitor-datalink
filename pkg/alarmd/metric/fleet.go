@@ -193,7 +193,10 @@ func newFleetCollector(source FleetVerdictSource) *fleetCollector {
 				"the line is down, so > 0 is exactly 'this line is on the first screen' and an absent series "+
 				"is a build without this family, not a clear line. Records of past loss retained under "+
 				"DETECTION_ABANDONED and TIMELINE_PRUNED are not current and are not counted; the JSON todo "+
-				"carries those. Written by every replica from the same shared view; aggregate with max, not sum.",
+				"carries those. Written by every replica from the same shared snapshots, each read at that "+
+				"replica's own scrape instant: a code that changes from round to round can differ between "+
+				"replicas within one scrape interval, and for those the comparison is within one replica over "+
+				"time. Aggregate with max, not sum.",
 			[]string{"code"}),
 		degradations: descriptor("fleet_degradations",
 			"Replicas under each closed degradation kind. Any non-zero kind decides fleet_health DEGRADED "+

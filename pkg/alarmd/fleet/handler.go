@@ -217,9 +217,14 @@ type HealthResponse struct {
 	// over a deployment that had executed a stale publication for half a
 	// day. Present and empty when there are none, so a reader can tell "no
 	// standing degrades this deployment" from "this build has no such field".
-	Degradations      []Degradation    `json:"degradations"`
-	Activation        *ActivationFacts `json:"activation"`
-	ActivationReplica string           `json:"activation_replica,omitempty"`
+	Degradations []Degradation    `json:"degradations"`
+	Activation   *ActivationFacts `json:"activation"`
+	// Load is the operating judgment the capacity panel opens with: on
+	// time, backlog, loss, bottleneck, with the numbers each was read from
+	// and the limits it holds under. Decided here, once, from the same view
+	// the numbers under it come from.
+	Load              Load   `json:"load"`
+	ActivationReplica string `json:"activation_replica,omitempty"`
 	// Overdue rides here rather than only in the list because the list can be
 	// paged or truncated, and "how many objects are not being evaluated" must
 	// not depend on how much of the list fitted.
@@ -759,6 +764,7 @@ func NewHandler(
 			Activation:   view.Activation, ActivationReplica: view.ActivationReplica,
 			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
 			Gaps: view.Gaps, Capacity: view.Capacity,
+			Load: LoadOf(&view, now()),
 		})
 	})
 	return mux, nil

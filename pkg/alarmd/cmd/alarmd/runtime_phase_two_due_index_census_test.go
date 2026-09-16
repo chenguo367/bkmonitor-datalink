@@ -293,3 +293,48 @@ func TestFleetPublisherPutsThePeriodOnRetainedRecords(t *testing.T) {
 		t.Fatalf("record for the unindexed object = %+v, want no period", skip)
 	}
 }
+
+// The census remembers the overdue count it found, one sample a minute for an
+// hour, and reports the oldest one it still holds with its age: the first
+// census has nothing earlier; half an hour on, the comparison is half an
+// hour old and says so; past an hour, the oldest sample is the one from an
+// hour ago, not the first one ever taken.
+func TestCensusReportsTheBacklogItFoundEarlier(t *testing.T) {
+	clock := &dueIndexClock{at: time.Unix(100_000, 0)}
+	dispatcher := dueIndexDispatcher(clock, metric.NewRecorder(metric.BuildInfo{}), 8, 8,
+		map[execution.QueryGroupIdentity]walkRunner{"a": {}, "b": {}, "c": {}})
+	index := dispatcher.dueIndex
+	epoch := index.versionEpoch
+	lifecycle := func(name execution.QueryGroupIdentity) *phaseTwoQueryGroupLifecycle {
+		return dispatcher.bundle.runners[name]
+	}
+	// Three objects due at 100_060 on a 60 s period: overdue from 100_121.
+	for _, name := range []execution.QueryGroupIdentity{"a", "b", "c"} {
+		index.Record(name, lifecycle(name), epoch,
+			scheduler.RunnerDueBound{NotDueUntilUnix: 100_060, IntervalSeconds: 60}, time.Unix(100_000, 0))
+	}
+	first := index.Census(time.Unix(100_200, 0), 3)
+	if first.Overdue != 3 || first.OverdueAgo != nil {
+		t.Fatalf("first census = %+v, want 3 overdue and no earlier sample", first)
+	}
+	// One object returns; half an hour on, the backlog is 2 against 3.
+	index.Record("a", lifecycle("a"), epoch,
+		scheduler.RunnerDueBound{NotDueUntilUnix: 200_000, IntervalSeconds: 60, Executed: true}, time.Unix(100_210, 0))
+	later := index.Census(time.Unix(100_200+1800, 0), 3)
+	if later.Overdue != 2 || later.OverdueAgo == nil || *later.OverdueAgo != 3 || later.OverdueAgoSeconds != 1800 {
+		t.Fatalf("half an hour on = %+v, want 2 overdue against 3 half an hour ago", later)
+	}
+	// Two hours on, the sample from the start has aged out of the ring; the
+	// oldest one still held is the half-hour census, now ninety minutes
+	// old -- past the ring, so it too is gone, and only what was sampled in
+	// the last hour remains: nothing, until this census samples.
+	twoHours := index.Census(time.Unix(100_200+7200, 0), 3)
+	if twoHours.OverdueAgo != nil {
+		t.Fatalf("two hours on with no census in between = %+v, want no earlier sample within the hour", twoHours)
+	}
+	// And a census 59 minutes after that reads the two-hour one.
+	end := index.Census(time.Unix(100_200+7200+59*60, 0), 3)
+	if end.OverdueAgo == nil || *end.OverdueAgo != 2 || end.OverdueAgoSeconds != 59*60 {
+		t.Fatalf("59 minutes on = %+v, want the two-hour census as the earlier sample", end)
+	}
+}

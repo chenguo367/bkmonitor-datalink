@@ -297,7 +297,12 @@ details.group table{margin:6px 0 0 12px}
 
   <section class="panel">
     <h2>容量</h2>
-    <p class="basis">各副本当前的占用与上限。<b>这里只报测到的数，不替你判断够不够。</b></p>
+    <!-- The judgment first, the numbers under it as its evidence. The panel
+         used to report CPU, memory and permits and leave "is it enough" to
+         the reader, who could not answer it from those. -->
+    <div id="loadLines" class="basis"></div>
+    <p class="basis" id="loadLimits"></p>
+    <p class="basis">下面是各副本当前的占用与上限，是上面判断的依据。</p>
     <details class="more">
       <summary>时间口径与这些上限是怎么来的</summary>
       <p class="basis">
@@ -1731,6 +1736,7 @@ function renderDeployment(deployment) {
     // from the same read rather than fetched separately: two reads would let
     // the page show a verdict from one moment beside occupancy from another.
     show('capErr', false);
+    renderLoad(deployment.load);
     renderCapacity(deployment.capacity, gaps, deployment.schedule);
     renderBrief(deployment);
 }
@@ -2109,6 +2115,94 @@ function kindText(kind) { return KIND_TEXT[kind] || kind || '—'; }
 
 // census is the schedule census from the same read, for the queue verdict:
 // whether waiting for a slot cost any deadline is answered there, not here.
+// The operating judgment, in words per closed state the server decides.
+// Each line is the state, then the numbers it was read from: the reader
+// takes the conclusion with its evidence, and the limits with both.
+var ON_TIME = {
+  KEEPING_UP: '按时完成：跟得上，没有对象超期',
+  CATCHING_UP: '按时完成：有 {overdue} 个对象超期但在追（最久 {oldest}）——1 小时按时率 {r1} 不低于 6 小时 {r6}',
+  FALLING_BEHIND: '按时完成：跟不上——{overdue} 个对象超期（最久 {oldest}），1 小时按时率 {r1} 低于 6 小时 {r6}',
+  UNKNOWN: '按时完成：没有副本带到期索引，说不出'
+};
+var BACKLOG = {
+  NONE: '积压：没有，{span} 前也没有',
+  GROWING: '积压：在涨——现在 {now} 个超期，{span} 前 {earlier} 个',
+  SHRINKING: '积压：在消——现在 {now} 个超期，{span} 前 {earlier} 个',
+  FLAT: '积压：持平——现在 {now} 个超期，{span} 前 {earlier} 个',
+  UNKNOWN: '积压：现在 {now} 个超期；没有够早的对照样本，涨没涨说不出'
+};
+var LOSS_STATE = {
+  NONE: '漏检：最近 {w} 分钟没有对象跳过检测',
+  IN_PROGRESS: '漏检：正在发生——{ongoing} 个对象最近 {w} 分钟内跳过了检测'
+};
+var BOTTLENECK = {
+  NONE: '瓶颈：没有——工作按时完成、没有漏检，资源数字不指向任何约束',
+  BUDGET: '瓶颈：内存派生的体量预算——已拒绝 {rejections} 次，这套资源装不下当前负载（这是唯一按定义就是容量的读数）',
+  MEMORY: '瓶颈：内存——容器撞到 limit {hits} 次',
+  CPU: '瓶颈：CPU——启动至今被限流的时间占 {throttled}',
+  PERMITS: '瓶颈：查询并发位子——启动至今 {waits} 的取位子排过队，而工作在落后或在漏检',
+  QUEUE: '瓶颈：就绪队列——满过 {queue} 次，而工作在落后或在漏检',
+  UNLOCATED: '瓶颈：资源数字都不指向任何一处，但工作在落后或在漏检——约束在调度（重放边界、派发顺序），加资源不是这一步',
+  UNKNOWN: '瓶颈：没有副本报容量，判不了'
+};
+var LOAD_LIMIT = {
+  COUNTERS_SINCE_START: '资源占比是各进程启动至今的累计，不是最近 1 小时',
+  TREND_SPAN_SHORT: '积压对照样本不足 1 小时（最年轻的副本索引还没跑满 1 小时）',
+  NO_CENSUS: '没有到期索引，按时与积压两项判不了',
+  NO_CAPACITY: '没有容量数据，瓶颈一项判不了',
+  NO_HEADROOM_ESTIMATE: '不推算还能承载多少对象——没有测这个，编出来的数会被当真'
+};
+
+function percentOf(share) {
+  return share === null || share === undefined ? '（无）' : Math.round(share * 100) + '%';
+}
+
+function rateWords(rate) {
+  return rate === null || rate === undefined ? '（无轮次）' : Math.round(rate * 10) / 10 + '%';
+}
+
+function renderLoad(load) {
+  var host = document.getElementById('loadLines');
+  host.textContent = '';
+  if (!load) {
+    host.textContent = '（这一构建没有运行判断）';
+    text('loadLimits', '');
+    return;
+  }
+  var w = String(load.loss && load.loss.window_seconds ? Math.round(load.loss.window_seconds / 60) : recentWindowMinutes());
+  var onTime = load.on_time || {};
+  var backlog = load.backlog || {};
+  var loss = load.loss || {};
+  var bottleneck = load.bottleneck || {};
+  var lines = [
+    (ON_TIME[onTime.state] || '按时完成：（页面没有这个状态的文案：' + onTime.state + '，请上报）')
+      .replace('{overdue}', String(onTime.overdue || 0))
+      .replace('{oldest}', elapsedLabel(onTime.oldest_late_seconds || 0))
+      .replace('{r1}', rateWords(onTime.rate_1h)).replace('{r6}', rateWords(onTime.rate_6h)),
+    (BACKLOG[backlog.state] || '积压：（页面没有这个状态的文案：' + backlog.state + '，请上报）')
+      .replace('{now}', String(backlog.now || 0))
+      .replace('{earlier}', String(backlog.earlier === undefined || backlog.earlier === null ? '（无）' : backlog.earlier))
+      .replace('{span}', elapsedLabel(backlog.span_seconds || 0)),
+    (LOSS_STATE[loss.state] || '漏检：（页面没有这个状态的文案：' + loss.state + '，请上报）')
+      .replace('{ongoing}', String(loss.ongoing || 0)).replace('{w}', w)
+      + (loss.while_demoted_recent ? '；另有 ' + loss.while_demoted_recent + ' 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）' : ''),
+    (BOTTLENECK[bottleneck.resource] || '瓶颈：（页面没有这个状态的文案：' + bottleneck.resource + '，请上报）')
+      .replace('{rejections}', String(bottleneck.budget_rejections || 0))
+      .replace('{hits}', String(bottleneck.memory_limit_hits || 0))
+      .replace('{throttled}', percentOf(bottleneck.throttled_share))
+      .replace('{waits}', percentOf(bottleneck.permit_wait_share))
+      .replace('{queue}', String(bottleneck.queue_full || 0))
+  ];
+  lines.forEach(function (line) {
+    var div = document.createElement('div');
+    div.textContent = line;
+    host.appendChild(div);
+  });
+  text('loadLimits', '限制条件：' + (load.limits || []).map(function (limit) {
+    return LOAD_LIMIT[limit] || '（页面没有这个限制的文案：' + limit + '，请上报）';
+  }).join('；'));
+}
+
 function renderCapacity(cap, gaps, census) {
   var box = document.getElementById('capCards');
   box.textContent = '';
