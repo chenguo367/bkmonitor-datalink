@@ -130,6 +130,16 @@ type CatalogComposition struct {
 	// one, a suspended Plan filed as "never asked" would keep the published
 	// family adding up while the objects disappeared.
 	NoDataNotConfigured int
+	// SuspendedNoDataObjects names the strategies whose no-data half is off,
+	// one record each.
+	//
+	// They are ObjectDispositions because that is what the changed-only line
+	// machinery takes, and because the fields are the same four an operator
+	// reads -- which strategy, at what scope, why. They are deliberately not
+	// in Catalog.Dispositions: that list is a partition of what happened to
+	// each object, every one of these is ACCEPTED in it, and putting them in
+	// twice would break the equation the partition exists to make checkable.
+	SuspendedNoDataObjects []ObjectDisposition
 	// InertPlans counts the Plans whose schedule cannot hold the wait their
 	// data needs to land. Such a Plan is ACCEPTED, is scheduled, and executes
 	// -- and every round every one of its consumers is bound unavailable,
@@ -222,6 +232,14 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 			// this change exists to make visible.
 			switch {
 			case plan.NoDataSuspended != "":
+				// Named as well as counted. A count of suspensions tells an
+				// operator that some strategies are detecting thresholds and
+				// not absence, and nothing at all about which -- and the
+				// coverage list the migration is read from is a list of
+				// strategies, not a number.
+				composition.SuspendedNoDataObjects = append(composition.SuspendedNoDataObjects,
+					ObjectDisposition{SourceID: plan.Identity.StrategyID, Scope: "PLAN",
+						Disposition: DispositionAccepted, Reason: plan.NoDataSuspended})
 				source, known := suspendedNoDataSource(plan.NoDataSuspended)
 				if !known {
 					// A reason nobody mapped. Counted where an unclassifiable

@@ -192,3 +192,46 @@ func wantNotWithheld(t *testing.T, catalog controlplane.Catalog) {
 		}
 	}
 }
+
+// The suspended strategies are named, once each, and not repeated while
+// nothing about them changes.
+//
+// A count of suspensions says that some strategies are detecting thresholds
+// and not absence, and nothing about which. The coverage list this migration
+// is read from is a list of strategies, and it is the same gap the withheld
+// lines were added to close -- for the objects that used to be withheld and
+// now are not.
+func TestSuspendedStrategiesAreNamedAndNotRepeated(t *testing.T) {
+	catalog := buildSuspensionCatalog(t, `{"is_enabled":true,"continuous":"many"}`, nil)
+	composition := controlplane.ComposeCatalog(catalog)
+
+	if len(composition.SuspendedNoDataObjects) != 1 {
+		t.Fatalf("named = %+v, want the one suspended strategy", composition.SuspendedNoDataObjects)
+	}
+	named := composition.SuspendedNoDataObjects[0]
+	if named.SourceID != "1001" || named.Reason != "NO_DATA_CONFIG_INVALID" {
+		t.Fatalf("named = %+v, want the strategy and why its no-data half is off", named)
+	}
+	// Not a withheld object: it is accepted, and counting it as withheld is
+	// what would break the partition the equation is checked against.
+	if named.Disposition != controlplane.DispositionAccepted {
+		t.Fatalf("named as %q; a suspended no-data half is not a withheld object", named.Disposition)
+	}
+
+	// First round names it; a round that finds the same state says nothing.
+	first := controlplane.ChangedWithheld(composition.SuspendedNoDataObjects, nil)
+	if len(first.Lines) != 1 {
+		t.Fatalf("first round wrote %d lines, want the one that just appeared", len(first.Lines))
+	}
+	again := controlplane.ChangedWithheld(composition.SuspendedNoDataObjects, composition.SuspendedNoDataObjects)
+	if len(again.Lines) != 0 {
+		t.Fatalf("an unchanged round wrote %+v; a standing set repeated every round buries the one "+
+			"that just joined it", again.Lines)
+	}
+
+	// And a strategy whose no-data half comes back is not left named.
+	working := controlplane.ComposeCatalog(buildSuspensionCatalog(t, `{"is_enabled":true,"continuous":3}`, nil))
+	if len(working.SuspendedNoDataObjects) != 0 {
+		t.Fatalf("a working strategy is named as suspended: %+v", working.SuspendedNoDataObjects)
+	}
+}
