@@ -708,13 +708,16 @@ type ActivationFacts struct {
 	LastFailure  string `json:"last_failure,omitempty"`
 }
 
-// Reason is the classification as one word, for grouping: stage/class, or
-// "unclassified" when the failure carried none.
+// Reason is the classification as one word, for grouping: the same word the
+// activation_failed log line carries as reason_code, from the same function,
+// so the line and the page cannot name a failure differently. "unclassified"
+// when the failure carried none.
 func (facts ActivationFacts) Reason() string {
 	if facts.FailureStage == "" && facts.FailureClass == "" {
 		return "unclassified"
 	}
-	return facts.FailureStage + "/" + facts.FailureClass
+	return string(observability.ActivationFailureReason(
+		observability.ActivationFailureStage(facts.FailureStage), observability.ActivationFailureClass(facts.FailureClass)))
 }
 
 // PlatformSettingsFacts is what a replica says about its copy of the

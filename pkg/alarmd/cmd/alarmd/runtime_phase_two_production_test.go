@@ -1710,6 +1710,12 @@ func TestProductionPhaseTwoControlKeepsLastGoodAcrossFailedCutoverAndRecovery(t 
 		!errors.Is(failures[0].Err, controlplane.ErrScheduleConflict) {
 		t.Fatalf("activation failure observations=%#v", failures)
 	}
+	// The reason on the line is the classification, verbatim: what the fleet
+	// page groups CUTOVER_FAILING on, so the two name the failure alike. It
+	// used to be contract_retryable, which normalises to _other.
+	if failures[0].ReasonCode != "schedule_cutover/schedule_conflict" {
+		t.Fatalf("activation_failed reason_code = %q, want schedule_cutover/schedule_conflict", failures[0].ReasonCode)
+	}
 }
 
 type fakeSourceReconciler struct {

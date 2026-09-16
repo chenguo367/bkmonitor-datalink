@@ -645,12 +645,17 @@ func (runtime *productionPhaseTwoControl) activate(
 			samplesTruncated = failure.ReappearedQueryGroupSamplesTruncated
 		}
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
-			Component:  observability.ComponentControlPlane,
-			Stage:      observability.StageActivationFailed,
-			Result:     observability.ResultDegraded,
-			Operation:  observability.OperationTransition,
-			Direction:  observability.DirectionInternal,
-			ReasonCode: observability.ReasonContractRetryable,
+			Component: observability.ComponentControlPlane,
+			Stage:     observability.StageActivationFailed,
+			Result:    observability.ResultDegraded,
+			Operation: observability.OperationTransition,
+			Direction: observability.DirectionInternal,
+			// The classification, as the reason: the same word the fleet
+			// page groups the failure on. contract_retryable here was folded
+			// to _other by the normaliser, and the field people grep said
+			// nothing while the two beside it said schedule_conflict.
+			ReasonCode: observability.ActivationFailureReason(
+				observability.ActivationFailureStage(failure.Stage), observability.ActivationFailureClass(failure.Class)),
 			ActivationFailure: &observability.ActivationFailureFacts{
 				Stage:                                observability.ActivationFailureStage(failure.Stage),
 				Class:                                observability.ActivationFailureClass(failure.Class),
