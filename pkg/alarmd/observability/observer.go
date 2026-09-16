@@ -84,6 +84,8 @@ const (
 	StageRunnerCompleted        = "runner_completed"
 	StageSlotSourceCompleted    = "slot_source_completed"
 	StageScheduleCursorAdvanced = "schedule_cursor_advanced"
+	StageReplayExpired          = "replay_expired"
+	StageSlotWait               = "slot_wait"
 	StageQueryAdmission         = "query_admission"
 	StageRestartRecovered       = "restart_recovered"
 	StageFleetSnapshotPublish   = "fleet_snapshot_publish"
@@ -473,6 +475,70 @@ type ScheduleCutoverFacts struct {
 // ScheduleCutoverDecisions is the closed vocabulary of what a publication
 // cutover does with one Query Group.
 var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", "retired", "added"}
+
+// ReplayExpiryFacts describe one Slot the scheduler gave up replaying.
+//
+// The reason is the point of them. A Slot too old for the replay window and a
+// Slot whose own readiness rule holds it past that window look identical from
+// outside -- both end as a skipped grid point with no failure anywhere -- and
+// they need opposite responses: the first is a worker that fell behind, the
+// second is two settings that disagree and will skip every Slot of that period
+// for as long as they do.
+//
+// ReadyAtUnixMilli and DistanceBoundaryUnixMilli are the two instants the
+// third reason compared, and are zero for the others.
+type ReplayExpiryFacts struct {
+	Reason                    string
+	Distance                  uint32
+	AgeSeconds                float64
+	ReadyAtUnixMilli          int64
+	DistanceBoundaryUnixMilli int64
+}
+
+// SlotWaitFacts is one blocking wait inside a Slot attempt, named and timed.
+//
+// A Slot attempt that is stuck is the one state the whole pipeline cannot
+// describe. Every failure reports itself; waiting reports nothing, so an
+// attempt that sat for twenty-two seconds between beginning and issuing its
+// query left no line at all -- not an error, not a slow duration, nothing. The
+// only readable fact was the silence between two timestamps, and silence
+// cannot say which of the several things it could have been waiting on it was.
+//
+// One fact per wait, always measured and always counted; only the slow ones
+// spend log quota, because a three-millisecond wait answers no question and
+// there are thousands of them a second.
+type SlotWaitFacts struct {
+	// Wait is one of SlotWaits.
+	Wait string
+}
+
+// SlotWaits is the closed vocabulary of the blocking waits inside one Slot
+// attempt, in the order an attempt meets them.
+const (
+	// SlotWaitProgressBegin is the fenced Progress write that opens the Slot.
+	SlotWaitProgressBegin = "progress_begin"
+	// SlotWaitFinalization is deciding whether this Slot needs a query at all,
+	// which reads the frozen Plan and so the Segment's content objects.
+	SlotWaitFinalization = "finalization"
+	// SlotWaitObjectShare is waiting on another goroutine's in-flight read of
+	// the same catalog object. This one has no timeout of its own and no error
+	// when it is slow: the joiner waits for whatever the leader is doing.
+	SlotWaitObjectShare = "object_share"
+)
+
+var SlotWaits = []string{SlotWaitProgressBegin, SlotWaitFinalization, SlotWaitObjectShare}
+
+// SlowSlotWait is the threshold above which a wait is worth a log line. It is
+// one settling wait: a wait that outlasts the time the product allows for data
+// to land is long enough to be the answer to "why did this Slot take so long".
+const SlowSlotWait = 10 * time.Second
+
+// ReplayExpiryReasons is the closed vocabulary of why a replay expired. The
+// scheduler's typed constants are held to this list by a test rather than by
+// hand, so a new reason cannot arrive without a series to count it.
+var ReplayExpiryReasons = []string{
+	"REPLAY_AGE_EXCEEDED", "REPLAY_DISTANCE_EXCEEDED", "REPLAY_WAIT_EXCEEDS_DISTANCE", "REPLAY_RANGE_EXPIRED",
+}
 
 // ObjectCatalogFacts describe one write or renewal of the content-addressed
 // Query Group objects, output contexts and the manifest that names them for
@@ -1201,6 +1267,8 @@ type Observation struct {
 	StateWriteReuse       *StateWriteReuseFacts
 	ActiveQGSet           *ActiveQGSetFacts
 	ScheduleCutover       *ScheduleCutoverFacts
+	ReplayExpiry          *ReplayExpiryFacts
+	SlotWait              *SlotWaitFacts
 	ObjectCatalog         *ObjectCatalogFacts
 	ObjectRead            *ObjectReadFacts
 	StateGenerationSkew   *StateGenerationSkewFacts
@@ -2188,7 +2256,8 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageQueryCooldown}, {ComponentScheduler, StageRunnerReturned}, {ComponentScheduler, StageDispatcherSnapshot}, {ComponentScheduler, StageQueryPermitWait},
 	{ComponentScheduler, StageExpiredRangeReturned},
 	{ComponentScheduler, StageRunnerCompleted}, {ComponentScheduler, StageSlotSourceCompleted},
-	{ComponentScheduler, StageScheduleCursorAdvanced},
+	{ComponentScheduler, StageScheduleCursorAdvanced}, {ComponentScheduler, StageReplayExpired},
+	{ComponentScheduler, StageSlotWait},
 	{ComponentAccess, StageQueryCompleted},
 	{ComponentAccess, StageQueryBudgetResolved},
 	{ComponentAccess, StageSlotReadinessArrival},
@@ -2386,4 +2455,46 @@ func NormalizeHealthMetricReasons(reasons []ReasonCode) []ReasonCode {
 		mapped = append(mapped, reason)
 	}
 	return sortedUniqueReasons(mapped)
+}
+
+// ObserveSlotWait reports one blocking wait inside a Slot attempt. The wait
+// name must be one of SlotWaits.
+//
+// It exists as a function rather than as a line at each site because the three
+// waits are only useful read together: the question a reader arrives with is
+// "which of them was this attempt in", and an answer that exists for one of
+// them and not the others cannot be given.
+// The operation is the attempt's own, so a wait reads like every other line of
+// that attempt; a shared read that belongs to no single attempt passes none.
+func ObserveSlotWait(
+	ctx context.Context,
+	observer Observer,
+	wait string,
+	operation Operation,
+	started time.Time,
+	now func() time.Time,
+) {
+	if observer == nil || started.IsZero() {
+		return
+	}
+	if now == nil {
+		now = time.Now
+	}
+	elapsed := now().Sub(started)
+	if elapsed < 0 {
+		return
+	}
+	result := Result(ResultSuccess)
+	if elapsed >= SlowSlotWait {
+		// Not a failure -- nothing went wrong and nothing will report one.
+		// Degraded is what a Slot attempt that spent this long waiting is,
+		// and it is what keeps the line out of the success population.
+		result = Result(ResultDegraded)
+	}
+	// Observability is a fail-open side channel, as at every other boundary.
+	defer func() { _ = recover() }()
+	observer.Observe(ctx, Observation{
+		Component: ComponentScheduler, Stage: StageSlotWait, Result: result, Operation: operation,
+		Direction: DirectionInternal, Duration: elapsed, SlotWait: &SlotWaitFacts{Wait: wait},
+	})
 }

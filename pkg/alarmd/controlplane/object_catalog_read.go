@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 
@@ -170,11 +171,18 @@ func (repository *RedisCatalogRepository) loadObject(
 	}
 	flights.mu.Unlock()
 	if joined {
+		// Timed, because this wait has no deadline of its own and produces no
+		// error when it is long: the joiner waits for whatever the leader is
+		// doing, and if the leader is slow every joiner is silently slow with
+		// it.
+		waited := time.Now()
 		select {
 		case <-flight.done:
 		case <-ctx.Done():
+			observability.ObserveSlotWait(ctx, repository.observer, observability.SlotWaitObjectShare, "", waited, time.Now)
 			return nil, ctx.Err()
 		}
+		observability.ObserveSlotWait(ctx, repository.observer, observability.SlotWaitObjectShare, "", waited, time.Now)
 		if flight.err == nil {
 			repository.observeObjectRead(ctx, kind, objectReadShare)
 		}

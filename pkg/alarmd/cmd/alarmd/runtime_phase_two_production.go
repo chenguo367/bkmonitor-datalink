@@ -1210,6 +1210,11 @@ type productionPhaseTwoOwnershipDependencies struct {
 	QueryDeadlineReserve      time.Duration
 	SnapshotRetention         time.Duration
 	PublicationDelayAllowance time.Duration
+	// SettlingWait is access's MinReadyDelay, given to the slot source so it
+	// can tell a replay it could dispatch from one it could only dispatch and
+	// then abandon. The two were derived in two packages that did not read each
+	// other, and a wait longer than the replay window was the result.
+	SettlingWait time.Duration
 }
 
 type productionPhaseTwoOwnership struct {
@@ -1238,7 +1243,8 @@ func newProductionPhaseTwoOwnership(
 		return nil, errors.New("phase-two production ownership dependencies are incomplete")
 	}
 	if dependencies.PostRecoveryTerminalDelay <= 0 || dependencies.QueryDeadlineReserve <= 0 ||
-		dependencies.SnapshotRetention <= 0 || dependencies.PublicationDelayAllowance <= 0 {
+		dependencies.SnapshotRetention <= 0 || dependencies.PublicationDelayAllowance <= 0 ||
+		dependencies.SettlingWait <= 0 {
 		return nil, errors.New("phase-two post-recovery terminal delay is required")
 	}
 	return &productionPhaseTwoOwnership{
@@ -1746,6 +1752,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		scheduler.WithRecoveryLimits(runtime.dependencies.RecoveryLimits),
 		scheduler.WithPostRecoveryTerminalDelay(runtime.dependencies.PostRecoveryTerminalDelay),
 		scheduler.WithQueryDeadlineReserve(runtime.dependencies.QueryDeadlineReserve),
+		scheduler.WithSettlingWait(runtime.dependencies.SettlingWait),
 		scheduler.WithSnapshotRetention(runtime.dependencies.SnapshotRetention, runtime.dependencies.PublicationDelayAllowance),
 		scheduler.WithExpiredRangeCreation(runtime.dependencies.ExpiredRangeEnabled),
 		scheduler.WithObserver(runtime.dependencies.Observer),

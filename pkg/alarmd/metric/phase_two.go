@@ -24,6 +24,7 @@ type phaseTwoMetrics struct {
 	queryUnavailable                queryUnavailableMetrics
 	queryCooldown                   *prometheus.CounterVec
 	slotReadiness                   slotReadinessMetrics
+	slotWait                        *prometheus.HistogramVec
 	slotTiming                      *prometheus.HistogramVec
 	work                            *prometheus.CounterVec
 	busy                            *prometheus.CounterVec
@@ -57,6 +58,7 @@ type phaseTwoMetrics struct {
 	schedulePruneSkipped            *prometheus.CounterVec
 	scheduleCutoverDuration         *prometheus.HistogramVec
 	scheduleCutovers                *prometheus.CounterVec
+	replayExpiries                  *prometheus.CounterVec
 	scheduleCutoverQueryGroups      *prometheus.CounterVec
 	scheduleCutoverTimelinesRead    prometheus.Gauge
 	queryFailures                   *prometheus.CounterVec
@@ -357,6 +359,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.queryCooldown = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_cooldown_events_total", Help: "External source_backend query cooldown transitions and failed real probes by bounded event."}, []string{"event"})
 	metrics.slotReadiness = newSlotReadinessMetrics()
 	metrics.slotTiming = newSlotTimingMetrics()
+	metrics.slotWait = newSlotWaitMetrics()
+	for _, wait := range observability.SlotWaits {
+		metrics.slotWait.WithLabelValues(wait)
+	}
 	metrics.workflow = newWorkflowMetrics()
 	metrics.activeQGSetCount = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "active_qg_set_query_groups", Help: "Query groups in the current immutable Active Set."})
 	metrics.activeQGSetBytes = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "active_qg_set_object_bytes", Help: "Encoded bytes in the current immutable Active Set."})
@@ -399,6 +405,24 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.scheduleCutovers.WithLabelValues("success", "")
 	for _, decision := range observability.ScheduleCutoverDecisions {
 		metrics.scheduleCutoverQueryGroups.WithLabelValues(decision)
+	}
+	metrics.replayExpiries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "replay_expired_total",
+		Help: "Slots the scheduler gave up replaying, by reason. REPLAY_AGE_EXCEEDED and " +
+			"REPLAY_DISTANCE_EXCEEDED are ordinary: the Slot is older than the replay window, or too " +
+			"many grid points have passed since it. REPLAY_RANGE_EXPIRED is a persisted range of such " +
+			"Slots being finalized after a restart or handoff. " +
+			"REPLAY_WAIT_EXCEEDS_DISTANCE is a defect report and must stay at zero: the Slot was " +
+			"still inside its replay window and the readiness rule would have held the read until " +
+			"after that window closed, so the replay would have been dispatched, made to wait, and " +
+			"then abandoned for being late. It means the settling wait and the replay window have " +
+			"been derived from settings that disagree, and every Slot of that period which misses " +
+			"its live deadline will be skipped for as long as they do. Read with " +
+			"short_period_completion_total{completion_kind=\"GAP_SKIPPED\"}: this counter says which " +
+			"of the skipped Slots were skipped by a rule rather than by falling behind.",
+	}, []string{"reason"})
+	for _, reason := range observability.ReplayExpiryReasons {
+		metrics.replayExpiries.WithLabelValues(reason)
 	}
 	metrics.scheduleCutoverTimelinesRead = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_timelines_read", Help: "Schedule timelines the last publication cutover read to decide. Equal to the population on the first cutover of a Control Leader process, the changed set afterwards."})
 	// The failure code itself is an open vocabulary and stays in the log and
@@ -642,7 +666,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryUnavailable.attributions,
 		m.queryCooldown,
 		m.slotReadiness.slack, m.slotReadiness.boundary,
-		m.slotTiming,
+		m.slotTiming, m.slotWait,
 		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateWriteChange, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
@@ -652,7 +676,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
-		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead,
+		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
@@ -758,6 +782,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if facts := observation.QueryFailure; facts != nil && observation.Result == observability.ResultFailed {
 		m.queryFailures.WithLabelValues(facts.Stage, facts.Category).Inc()
 	}
+	if facts := observation.ReplayExpiry; facts != nil {
+		m.replayExpiries.WithLabelValues(facts.Reason).Inc()
+	}
+	m.observeSlotWait(observation)
 	if facts := observation.ScheduleCutover; facts != nil {
 		m.scheduleCutoverDuration.WithLabelValues(facts.Result).Observe(facts.Duration.Seconds())
 		m.scheduleCutovers.WithLabelValues(facts.Result, facts.Reason).Inc()

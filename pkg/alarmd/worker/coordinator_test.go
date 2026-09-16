@@ -104,10 +104,11 @@ func TestSlotExecutionCoordinatorObservesReadinessDeferralWithoutFailureOrSideEf
 		!isZeroProgressCommit(fixture.ports.lastProgress) {
 		t.Fatal("readiness deferral crossed State/Event/Progress side-effect boundary")
 	}
-	if len(*fixture.observations) != 1 {
-		t.Fatalf("observations=%+v, want only query completion", *fixture.observations)
+	steps := slotObservations(fixture.observations)
+	if len(steps) != 1 {
+		t.Fatalf("observations=%+v, want only query completion", steps)
 	}
-	observation := (*fixture.observations)[0]
+	observation := steps[0]
 	if observation.Stage != observability.StageQueryCompleted || observation.Result != observability.ResultRetrying ||
 		observation.Err != nil {
 		t.Fatalf("readiness observation=%+v, want retrying without failure", observation)
@@ -342,9 +343,9 @@ func TestSlotExecutionCoordinatorOrdersRequiredSideEffects(t *testing.T) {
 		observability.StageSideEffectAdmission,
 		observability.StageProgressCommitted,
 	}
-	gotStages := make([]observability.Stage, len(*fixture.observations))
-	for index := range *fixture.observations {
-		gotStages[index] = (*fixture.observations)[index].Stage
+	var gotStages []observability.Stage
+	for _, observation := range slotObservations(fixture.observations) {
+		gotStages = append(gotStages, observation.Stage)
 	}
 	if !reflect.DeepEqual(gotStages, wantStages) {
 		t.Fatalf("observed stages=%v, want=%v", gotStages, wantStages)
@@ -692,7 +693,7 @@ func TestSlotExecutionCoordinatorPreservesStateTerminalAsPlanCompletion(t *testi
 	if fixture.ports.lastProgress.Completion.Kind != execution.CompletionTerminal {
 		t.Fatalf("completion=%q", fixture.ports.lastProgress.Completion.Kind)
 	}
-	stateObservation := (*fixture.observations)[1]
+	stateObservation := slotObservations(fixture.observations)[1]
 	if stateObservation.Result != observability.ResultTerminal || stateObservation.ReasonCode != contract.ReasonRecordInvalid ||
 		stateObservation.Counts.Keys != 1 {
 		t.Fatalf("state observation=%+v", stateObservation)
@@ -789,7 +790,7 @@ func TestSlotExecutionCoordinatorObservesGapUnavailableWithoutCallingItSuccess(t
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, []string{"query", "gap_load", "state_load", "evaluate", "sequence", "admission_initial"})
-	gapObservation := (*fixture.observations)[0]
+	gapObservation := slotObservations(fixture.observations)[0]
 	if gapObservation.Result != observability.ResultDegraded || gapObservation.ReasonCode != contract.ReasonRedisUnavailable ||
 		gapObservation.Counts.Keys != 1 {
 		t.Fatalf("gap observation=%+v", gapObservation)
@@ -2003,6 +2004,25 @@ func mustPlanGapMutation(mutation execution.PlanGapMutation) execution.PlanGapMu
 		panic(err)
 	}
 	return built
+}
+
+// slotObservations drops the timing records a Slot attempt makes about itself.
+//
+// Those are measurements of the attempt rather than steps of it, and the
+// assertions below are about the steps: which ones happened, in what order,
+// and what the one that mattered said. Reading them by position through the
+// raw list would mean every future measurement edits an assertion about
+// something else -- and an ordering assertion edited without reading what it
+// pins is an ordering assertion that no longer pins it.
+func slotObservations(observations *[]observability.Observation) []observability.Observation {
+	var kept []observability.Observation
+	for _, observation := range *observations {
+		if observation.Stage == observability.StageSlotWait {
+			continue
+		}
+		kept = append(kept, observation)
+	}
+	return kept
 }
 
 func assertObservedOperations(t *testing.T, observations *[]observability.Observation, operation execution.Operation) {

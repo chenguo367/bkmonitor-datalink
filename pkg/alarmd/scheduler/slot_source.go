@@ -200,6 +200,7 @@ type ProductionSlotSource struct {
 	recovery                  *RecoveryLimits
 	terminalDelay             time.Duration
 	queryReserve              time.Duration
+	settlingWait              time.Duration
 	snapshotRetention         time.Duration
 	publicationDelayAllowance time.Duration
 	observer                  observability.Observer
@@ -248,6 +249,21 @@ func WithQueryDeadlineReserve(reserve time.Duration) ProductionSlotSourceOption 
 	}
 }
 
+// WithSettlingWait gives the source the wait the deployment configures for
+// data to land, which is access's MinReadyDelay. The source does not wait --
+// it needs the number to tell a replay it could dispatch from one it could
+// only dispatch and then abandon. Without it that check is not made, which is
+// the behaviour before the check existed.
+func WithSettlingWait(configured time.Duration) ProductionSlotSourceOption {
+	return func(source *ProductionSlotSource) error {
+		if configured <= 0 {
+			return ErrRecoveryLimitsInvalid
+		}
+		source.settlingWait = configured
+		return nil
+	}
+}
+
 func WithSnapshotRetention(retention, publicationDelayAllowance time.Duration) ProductionSlotSourceOption {
 	return func(source *ProductionSlotSource) error {
 		if retention <= 0 || publicationDelayAllowance <= 0 || retention <= publicationDelayAllowance {
@@ -280,6 +296,16 @@ func NewProductionSlotSource(
 		if err := option(source); err != nil {
 			return nil, err
 		}
+	}
+	// Recovery classification is not complete without the readiness number.
+	// Deciding that a Slot may be replayed while unable to say whether it can
+	// be read before the replay window closes is how a ten-second Slot came to
+	// be dispatched, made to wait, and skipped for having waited. Required
+	// here rather than defaulted, because a source built without it would
+	// classify replays exactly as it did before the check existed and nothing
+	// would report the omission.
+	if source.recovery != nil && source.settlingWait <= 0 {
+		return nil, fmt.Errorf("%w: recovery classification requires the settling wait", ErrRecoveryLimitsInvalid)
 	}
 	return source, nil
 }
@@ -713,11 +739,14 @@ func (source *ProductionSlotSource) classifyRecovery(
 	}
 	age := at.Sub(time.UnixMilli(deadline))
 	if age >= source.recovery.MaxReplayAge {
-		return execution.OperationNormal, SlotRecoveryFacts{
+		aged := SlotRecoveryFacts{
 			Disposition: ReplayExpired,
+			Reason:      ReplayExpiredByAge,
 			Distance:    1,
 			Age:         age,
-		}, nil
+		}
+		source.observeReplayExpiry(ctx, evaluationTime, aged)
+		return execution.OperationNormal, aged, nil
 	}
 	distance, recheckAt, err := source.replayDistance(ctx, evaluationTime, at)
 	if err != nil {
@@ -726,9 +755,136 @@ func (source *ProductionSlotSource) classifyRecovery(
 	facts := SlotRecoveryFacts{Disposition: ReplayEligible, Distance: distance, Age: age, RecheckAtUnixMilli: recheckAt}
 	if distance > source.recovery.MaxReplaySlots {
 		facts.Disposition = ReplayExpired
+		facts.Reason = ReplayExpiredByDistance
+		source.observeReplayExpiry(ctx, evaluationTime, facts)
+		return execution.OperationNormal, facts, nil
+	}
+	expired, err := source.replayWaitOutlastsDistance(ctx, evaluationTime, deadline, &facts)
+	if err != nil {
+		return "", SlotRecoveryFacts{}, err
+	}
+	if expired {
+		source.observeReplayExpiry(ctx, evaluationTime, facts)
 		return execution.OperationNormal, facts, nil
 	}
 	return execution.OperationReplay, facts, nil
+}
+
+// observeReplayExpiry reports one Slot given up on, with the reason and the
+// values behind it.
+//
+// Emitted here, where the decision is taken, rather than where the Slot is
+// later completed. By then it is a gap like any other gap, and the population
+// of gaps is exactly what a reader cannot divide without this.
+func (source *ProductionSlotSource) observeReplayExpiry(
+	ctx context.Context,
+	evaluationTime execution.EvaluationTime,
+	facts SlotRecoveryFacts,
+) {
+	if source.observer == nil {
+		return
+	}
+	// Observability is a fail-open side channel, as everywhere else.
+	defer func() { _ = recover() }()
+	source.observer.Observe(ctx, observability.Observation{
+		Component: observability.ComponentScheduler, Stage: observability.StageReplayExpired,
+		Result: observability.ResultDegraded, Direction: observability.DirectionInternal,
+		Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
+		ReplayExpiry: &observability.ReplayExpiryFacts{
+			Reason: string(facts.Reason), Distance: facts.Distance, AgeSeconds: facts.Age.Seconds(),
+			ReadyAtUnixMilli: facts.ReadyAtUnixMilli, DistanceBoundaryUnixMilli: facts.DistanceBoundaryUnixMilli,
+		},
+	})
+}
+
+// replayWaitOutlastsDistance reports whether this replay would be told to wait
+// past the point at which it is too far behind to run, and fills in the two
+// instants it compared.
+//
+// The readiness rule and the replay window are two halves of one inequality,
+// and they are derived in two packages. When they disagree the Slot is
+// dispatched as a replay, told by access to wait, and then -- because it
+// waited -- classified expired on the next round and skipped. Nothing fails:
+// each half did what it was configured to do. This is the place where the two
+// halves meet, so it is the place that can say so.
+//
+// It holds the readiness rule to the schedule's own ruler,
+// execution.SettlingWaitWithinQueryBudget, the same call access makes. The
+// estimate is deliberately the earliest instant access could pick: a Plan with
+// a source delay or a window that ends before its evaluation time reads later
+// than this, so the guard under-fires rather than over-fires. Refusing a
+// replay that would have worked is a detection loss; letting one through that
+// will not is the behaviour already in production.
+func (source *ProductionSlotSource) replayWaitOutlastsDistance(
+	ctx context.Context,
+	evaluationTime execution.EvaluationTime,
+	deadline int64,
+	facts *SlotRecoveryFacts,
+) (bool, error) {
+	if source.settlingWait <= 0 {
+		return false, nil
+	}
+	queryBudget := time.Duration(deadline-int64(evaluationTime)*1000) * time.Millisecond
+	readyAt := time.Unix(int64(evaluationTime), 0).
+		Add(execution.SettlingWaitWithinQueryBudget(queryBudget, source.settlingWait)).UnixMilli()
+	// The boundary is never earlier than the next grid point while the distance
+	// is still inside the limit, so a read that lands before that point cannot
+	// outlast the boundary and the walk below is not worth its reads. This is
+	// the ordinary case -- it is what a healthy deployment does on every
+	// replay -- and the walk happens only when the arithmetic cannot rule the
+	// contradiction out. A recheck instant of zero means the schedule retires
+	// before the limit, so there is no boundary to outlast.
+	if facts.RecheckAtUnixMilli == 0 || readyAt < facts.RecheckAtUnixMilli {
+		return false, nil
+	}
+	boundary, bounded, err := source.replayDistanceBoundary(ctx, evaluationTime)
+	if err != nil || !bounded {
+		return false, err
+	}
+	boundaryMilli := int64(boundary) * 1000
+	if readyAt < boundaryMilli {
+		return false, nil
+	}
+	facts.Disposition = ReplayExpired
+	facts.Reason = ReplayExpiredByWait
+	facts.ReadyAtUnixMilli = readyAt
+	facts.DistanceBoundaryUnixMilli = boundaryMilli
+	return true, nil
+}
+
+// replayDistanceBoundary is the grid point at which this Slot's replay
+// distance passes MaxReplaySlots: the MaxReplaySlots-th Slot after it on the
+// same schedule, which is the instant replayDistance starts returning a
+// distance over the limit.
+//
+// It walks the schedule rather than adding MaxReplaySlots intervals, because
+// the grid is what replayDistance itself walks and a Segment boundary can
+// change the cadence inside the walk. A Query Group that retires before the
+// boundary has no such instant: its distance can never pass the limit, so
+// there is nothing for the wait to outlast.
+func (source *ProductionSlotSource) replayDistanceBoundary(
+	ctx context.Context,
+	first execution.EvaluationTime,
+) (execution.EvaluationTime, bool, error) {
+	retiredAt, retired, err := source.catalog.ReadScheduleRetirement(ctx, source.queryGroup)
+	if err != nil {
+		return 0, false, err
+	}
+	cursor := first
+	for step := uint32(0); step < source.recovery.MaxReplaySlots; step++ {
+		next, err := source.catalog.NextSlotAfter(ctx, source.queryGroup, cursor)
+		if err != nil {
+			return 0, false, err
+		}
+		if next <= cursor {
+			return 0, false, ErrScheduleFactsInvalid
+		}
+		if retired && next == retiredAt {
+			return 0, false, nil
+		}
+		cursor = next
+	}
+	return cursor, true, nil
 }
 
 func frozenSlotExecutionFacts(
