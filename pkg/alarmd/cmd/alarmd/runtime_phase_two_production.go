@@ -562,6 +562,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 	// sees a count move must be able to find the line that moved it whichever
 	// return the round took.
 	observeWithheldObjects(ctx, runtime.dependencies.Observer, result.Withheld)
+	observeSuspendedNoDataObjects(ctx, runtime.dependencies.Observer, result.Suspended)
 	sourceRefresh := sourceRefreshIdentity(result, result.Publication)
 	defer func() {
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{

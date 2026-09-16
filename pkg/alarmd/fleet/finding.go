@@ -431,12 +431,21 @@ var codeChecks = map[string]verdict{
 	"SCHEMA_MAJOR_UNSUPPORTED":              lands(CheckPlanUnevaluable),
 	"PLAN_INVALID":                          lands(CheckPlanUnevaluable),
 	"PLAN_DUPLICATE_LEVEL_ID":               lands(CheckPlanUnevaluable),
-	// The strategy turned no-data detection on and its settings produce no
-	// decision. It is the strategy's, like the rest of this group: nothing about
-	// this deployment changes the answer, and the whole Plan is withheld rather
-	// than run with its thresholds and no absence detection - a Plan half-wired
-	// that way would answer "is this strategy covered" with neither yes nor no.
-	"NO_DATA_CONFIG_INVALID": lands(CheckPlanUnevaluable),
+	// The strategy turned no-data detection on and this build cannot compile
+	// the settings, or cannot derive the expected set the target implies.
+	//
+	// Under no line. It used to land here because the whole Plan was withheld,
+	// and the comment argued that a half-wired Plan answers "is this strategy
+	// covered" with neither yes nor no. The ruling went the other way and the
+	// argument with it: the strategy is evaluated, its thresholds detect, and
+	// only its absence detection is suspended. Putting it under "the Plan
+	// cannot be evaluated" would file a working strategy as a broken one, and
+	// the half that is off is not invisible -- it is counted in
+	// catalog_no_data_plans under its own suspended source and listed by
+	// strategy, which is the coverage question this belongs to rather than a
+	// first-screen line.
+	"NO_DATA_CONFIG_INVALID":     isNormal,
+	"NO_DATA_ROSTER_UNSUPPORTED": isNormal,
 	// The definition's input projection, not this deployment's state
 	// projection: the compiler emits it for a plan whose input_projection is
 	// invalid, and the catalog files it as CONFIG_REJECTED beside PLAN_INVALID.

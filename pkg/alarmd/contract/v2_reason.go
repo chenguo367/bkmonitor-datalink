@@ -59,9 +59,12 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonMultipleEvaluationUnitsUnsupported: {
 		ReasonMultipleEvaluationUnitsUnsupported, ReasonClassDeterministic, reasonOutcomeDomainsV2,
 	},
-	ReasonPlanDuplicateLevelID:     {ReasonPlanDuplicateLevelID, ReasonClassDeterministic, reasonOutcomeDomainsV2},
-	ReasonPlanBudgetExceeded:       {ReasonPlanBudgetExceeded, ReasonClassDeterministic, reasonOutcomeDomainsV2},
-	ReasonNoDataConfigInvalid:      {ReasonNoDataConfigInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonPlanDuplicateLevelID: {ReasonPlanDuplicateLevelID, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonPlanBudgetExceeded:   {ReasonPlanBudgetExceeded, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonNoDataConfigInvalid:  {ReasonNoDataConfigInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	// Deterministic for the same reason: the target's shape and the no-data
+	// dimensions are both frozen, so every round would reach this answer again.
+	ReasonNoDataRosterUnsupported:  {ReasonNoDataRosterUnsupported, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonBackendCapabilityMissing: {ReasonBackendCapabilityMissing, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonProjectionInvalid:        {ReasonProjectionInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonSelectorInvalid:          {ReasonSelectorInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},

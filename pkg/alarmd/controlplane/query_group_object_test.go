@@ -295,7 +295,15 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			split:     []string{"Plan"},
 			// PlanRevision digests the whole EvaluationPlanV2, update_time and
 			// source document included, and nothing reads it.
-			neither: []string{"PlanRevision"},
+			//
+			// NoDataSuspended is a control-plane fact about a Plan, not part of
+			// what a Slot executes: the Slot decides by Plan.no_data, which is
+			// absent for a suspended Plan and is execution content above. It
+			// stays out of both digests deliberately -- putting it in the
+			// execution content would move every affected object's digest for
+			// a fact the execution does not read, and the digest already moves
+			// on this change because no_data itself goes away.
+			neither: []string{"PlanRevision", "NoDataSuspended"},
 		},
 		reflect.TypeOf(contract.EvaluationPlanV2{}): {
 			// no_data is execution: absence is judged while the Slot runs, and

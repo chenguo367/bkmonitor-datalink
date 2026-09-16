@@ -240,21 +240,26 @@ var failureFacets = map[string]facets{
 	"SCHEMA_MAJOR_UNSUPPORTED":              {StageConfig, ClassConfig, DependencyNone},
 	"PLAN_INVALID":                          {StageConfig, ClassConfig, DependencyNone},
 	"PLAN_DUPLICATE_LEVEL_ID":               {StageConfig, ClassConfig, DependencyNone},
-	"NO_DATA_CONFIG_INVALID":                {StageConfig, ClassConfig, DependencyNone},
-	"PROJECTION_INVALID":                    {StageConfig, ClassConfig, DependencyNone},
-	"PLAN_SET_CONFLICT":                     {StageConfig, ClassConfig, DependencyNone},
-	"LEVEL_INVALID":                         {StageConfig, ClassConfig, DependencyNone},
-	"SELECTOR_INVALID":                      {StageConfig, ClassConfig, DependencyNone},
-	"SELECTOR_ORDINAL_INVALID":              {StageConfig, ClassConfig, DependencyNone},
-	"REQUIRED_VALUE_MISSING":                {StageConfig, ClassConfig, DependencyNone},
-	"REQUIRED_VALUE_TYPE_MISMATCH":          {StageConfig, ClassConfig, DependencyNone},
-	"REQUIRED_VALUE_NORMALIZATION_FAILED":   {StageConfig, ClassConfig, DependencyNone},
-	"TIME_INVALID":                          {StageConfig, ClassConfig, DependencyNone},
-	"TENANT_INVALID":                        {StageConfig, ClassConfig, DependencyNone},
-	"MALFORMED_JSON":                        {StageConfig, ClassConfig, DependencyNone},
-	"PAYLOAD_DIGEST_MISMATCH":               {StageConfig, ClassConfig, DependencyNone},
-	"RECORD_INVALID":                        {StageConfig, ClassConfig, DependencyNone},
-	"RECORD_IDENTITY_CONFLICT":              {StageConfig, ClassConfig, DependencyNone},
+	// Both no-data suspensions: the strategy's own settings, and nothing about
+	// this deployment changes the answer. They are here because the code has
+	// to be classified, not because either blocks the strategy -- its
+	// thresholds are detected either way.
+	"NO_DATA_CONFIG_INVALID":              {StageConfig, ClassConfig, DependencyNone},
+	"NO_DATA_ROSTER_UNSUPPORTED":          {StageConfig, ClassConfig, DependencyNone},
+	"PROJECTION_INVALID":                  {StageConfig, ClassConfig, DependencyNone},
+	"PLAN_SET_CONFLICT":                   {StageConfig, ClassConfig, DependencyNone},
+	"LEVEL_INVALID":                       {StageConfig, ClassConfig, DependencyNone},
+	"SELECTOR_INVALID":                    {StageConfig, ClassConfig, DependencyNone},
+	"SELECTOR_ORDINAL_INVALID":            {StageConfig, ClassConfig, DependencyNone},
+	"REQUIRED_VALUE_MISSING":              {StageConfig, ClassConfig, DependencyNone},
+	"REQUIRED_VALUE_TYPE_MISMATCH":        {StageConfig, ClassConfig, DependencyNone},
+	"REQUIRED_VALUE_NORMALIZATION_FAILED": {StageConfig, ClassConfig, DependencyNone},
+	"TIME_INVALID":                        {StageConfig, ClassConfig, DependencyNone},
+	"TENANT_INVALID":                      {StageConfig, ClassConfig, DependencyNone},
+	"MALFORMED_JSON":                      {StageConfig, ClassConfig, DependencyNone},
+	"PAYLOAD_DIGEST_MISMATCH":             {StageConfig, ClassConfig, DependencyNone},
+	"RECORD_INVALID":                      {StageConfig, ClassConfig, DependencyNone},
+	"RECORD_IDENTITY_CONFLICT":            {StageConfig, ClassConfig, DependencyNone},
 }
 
 // failureRefCodes are the codes that reach a row through the query failure

@@ -89,14 +89,38 @@ type BuildRequest struct {
 }
 
 type FrozenPlan struct {
-	Identity             execution.PlanIdentity
-	Plan                 contract.EvaluationPlanV2
-	PlanRevision         string
-	StateGeneration      execution.StateGeneration `json:",omitempty"`
+	Identity        execution.PlanIdentity
+	Plan            contract.EvaluationPlanV2
+	PlanRevision    string
+	StateGeneration execution.StateGeneration `json:",omitempty"`
+	// NoDataSuspended names why this Plan's no-data detection is not attached,
+	// and is empty for a Plan that has it and for one that never asked for it.
+	// Those two are told apart by Plan.NoData, and the three together are what
+	// the composition partitions; neither field is inferred from the other.
+	//
+	// It is omitempty and it has to be: this struct is inside the Query Group
+	// the object digest is taken over, so a field that serialized on every
+	// Plan would change every digest in the deployment at once and cost a
+	// republication and a Segment recut for content that did not change.
+	NoDataSuspended      string `json:",omitempty"`
 	ScheduleSpec         execution.ScheduleSpec
 	ScheduleRevision     execution.PlanScheduleRevision
 	RequirementTemplates []execution.DataRequirementTemplate                    `json:"RequirementTemplates,omitempty"`
 	QueryPlans           map[execution.LogicalQueryRef]execution.QueryPlanFacts `json:"QueryPlans,omitempty"`
+}
+
+// planCompileFacts is what compiling one item produced besides the Plan: the
+// schedule it runs on, and whether its no-data half was suspended.
+//
+// One struct rather than three more return values, because the three are one
+// answer about one Plan and a caller that took two of them would be describing
+// a Plan it did not fully read.
+type planCompileFacts struct {
+	ScheduleSpec     execution.ScheduleSpec
+	ScheduleRevision execution.PlanScheduleRevision
+	// NoDataSuspended is empty for a Plan whose no-data detection is attached
+	// and for one that never configured it. See FrozenPlan.
+	NoDataSuspended string
 }
 
 type QueryGroup struct {
@@ -664,7 +688,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		}
 		compiledInputs.osRestartHistory = &history
 	}
-	plan, scheduleSpec, schedule, dispositions, err := compilePlan(
+	plan, compiled, dispositions, err := compilePlan(
 		legacy, item, source.Identity, facts.Normalization.DatasetContract, source.SourceID, &compiledInputs, targetScope,
 	)
 	if err != nil {
@@ -713,7 +737,9 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	candidate.facts = facts
 	candidate.plan = FrozenPlan{
 		Identity: execution.PlanIdentity{TenantID: source.Identity.TenantID, BusinessID: source.Identity.BusinessID, StrategyID: source.SourceID},
-		Plan:     plan, PlanRevision: revision, ScheduleSpec: scheduleSpec, ScheduleRevision: schedule,
+		Plan:     plan, PlanRevision: revision,
+		ScheduleSpec: compiled.ScheduleSpec, ScheduleRevision: compiled.ScheduleRevision,
+		NoDataSuspended:      compiled.NoDataSuspended,
 		RequirementTemplates: compiledInputs.requirements, QueryPlans: compiledInputs.queryPlans,
 	}
 	candidate.dispositions = append(candidate.dispositions, dispositions...)
@@ -1106,20 +1132,20 @@ func compilePlan(
 	sourceID string,
 	inputs *compiledPlanInputs,
 	targetScope *contract.TargetScopeV2,
-) (contract.EvaluationPlanV2, execution.ScheduleSpec, execution.PlanScheduleRevision, []ObjectDisposition, error) {
+) (contract.EvaluationPlanV2, planCompileFacts, []ObjectDisposition, error) {
 	if hasJSONValue(source.Priority) || source.PriorityGroupKey != "" {
-		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", nil, errors.New("alarmd controlplane: G1 does not support priority semantics")
+		return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, errors.New("alarmd controlplane: G1 does not support priority semantics")
 	}
 	interval, err := itemInterval(item)
 	if err != nil {
-		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", nil, err
+		return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, err
 	}
 	strategyID := strconv.FormatInt(source.ID, 10)
 	revision := source.UpdateTime.String()
 	if revision != "" {
 		value, parseErr := source.UpdateTime.Float64()
 		if parseErr != nil {
-			return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", nil, fmt.Errorf("alarmd controlplane: invalid strategy update_time: %w", parseErr)
+			return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, fmt.Errorf("alarmd controlplane: invalid strategy update_time: %w", parseErr)
 		}
 		if value == 0 {
 			revision = ""
@@ -1128,13 +1154,13 @@ func compilePlan(
 	if revision == "" {
 		revision, err = contract.DeriveCanonicalDigestV2("alarmd-legacy-strategy-revision-v1", source)
 		if err != nil {
-			return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", nil, err
+			return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, err
 		}
 	}
 	ref := contract.StrategyRefV2{TenantID: identity.TenantID, StrategyID: strategyID, Revision: revision}
 	if len(source.SnapshotRevision) != 0 {
 		if err := json.Unmarshal(source.SnapshotRevision, &ref.SnapshotRevision); err != nil || ref.SnapshotRevision <= 0 {
-			return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", nil, errors.New("alarmd controlplane: invalid strategy_revision")
+			return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, errors.New("alarmd controlplane: invalid strategy_revision")
 		}
 	}
 	unit := itemUnit(item)
@@ -1164,7 +1190,7 @@ func compilePlan(
 		detect, ok := detectByLevel[uint32(rawLevel)]
 		if ok && !isAlwaysActiveUptime(detect.Trigger.Uptime) {
 			disposition := ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionUnsupported, Reason: "EFFECTIVE_TIME_NOT_MIGRATED"}
-			return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", []ObjectDisposition{disposition}, errors.New("alarmd controlplane: non-default uptime unsupported")
+			return contract.EvaluationPlanV2{}, planCompileFacts{}, []ObjectDisposition{disposition}, errors.New("alarmd controlplane: non-default uptime unsupported")
 		}
 	}
 	levels := make([]contract.LevelIRV2, 0, len(levelIDs))
@@ -1237,44 +1263,39 @@ func compilePlan(
 		inputs.merge(levelInputs)
 	}
 	if len(levels) == 0 {
-		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", dispositions, errors.New("alarmd controlplane: no executable level")
+		return contract.EvaluationPlanV2{}, planCompileFacts{}, dispositions, errors.New("alarmd controlplane: no executable level")
 	}
 	semantics := contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries, QueryWindow: uint32(interval), AggregationInterval: uint32(interval), EvaluationInterval: uint32(interval), LatenessTolerance: uint32(interval * 2)}
 	ir := contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2, Minor: 0}, RequiredFeatures: []string{}, StrategyRef: ref, ExecutionSemantics: semantics, InputProjection: projection, Levels: levels}
 	plan := contract.EvaluationPlanV2{PlanID: strategyID, StrategyRef: ref, InputProjection: projection, SourceCompatibility: &contract.SourceCompatibilityV2{ItemID: strconv.FormatInt(item.ID, 10)}, StrategyIR: ir}
 	plan.TargetScope = targetScope
+	// A no-data configuration this build cannot compile suspends no-data
+	// detection for this Plan and nothing else.
+	//
+	// It used to withhold the whole Plan, thresholds included, on the argument
+	// that half a Plan makes "is this strategy covered" unanswerable. The
+	// answer to that is to say which half rather than to stop both: a strategy
+	// whose threshold detection is switched off because its no-data settings
+	// do not compile has lost the detection somebody was actually watching,
+	// over the half they may not have known was configured. The half that is
+	// off is named here, counted in the composition, and listed by strategy.
+	suspended := ""
 	noData, err := frozenNoDataConfig(item)
 	if err != nil {
-		// Named rather than left to the generic rejection: an operator reading
-		// PLAN_INVALID against a strategy whose thresholds are fine has nothing
-		// to act on, and the whole Plan is withheld here - alarmd keeps one Plan
-		// per item and does not run half of it, where the backend would have
-		// gone on detecting thresholds while its nodata trigger raised.
-		dispositions = append(dispositions, ObjectDisposition{
-			SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigRejected,
-			Reason: "NO_DATA_CONFIG_INVALID",
-		})
-		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", dispositions, err
+		suspended, noData = contract.ReasonNoDataConfigInvalid, nil
 	}
 	plan.NoData = noData
-	if reason := noDataRosterUnsupported(targetScope, noData); reason != "" {
-		// Refused where it is decided rather than every round. The expected set
-		// is a function of the target's shape and the no-data dimensions, both
-		// frozen here, so a Slot would reach the same answer with no new
-		// information - and reaching it there would mean a Plan that runs while
-		// detecting no absence at all, which reads as a working strategy.
+	if reason := noDataRosterUnsupported(targetScope, noData); suspended == "" && reason != "" {
+		// Decided here rather than every round. The expected set is a function
+		// of the target's shape and the no-data dimensions, both frozen here,
+		// so a Slot would reach the same answer with no new information - and
+		// reaching it there would mean a Plan that runs while detecting no
+		// absence at all, which reads as a working strategy.
 		//
-		// The whole Plan is withheld, thresholds included, which is the same
-		// trade NO_DATA_CONFIG_INVALID makes and is visible the same way: the
-		// withheld metric counts it under this reason, so what it costs is a
-		// number rather than an argument. On the deployment this was written
-		// against that number is one strategy.
-		dispositions = append(dispositions, ObjectDisposition{
-			SourceID: sourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
-			Reason: "NO_DATA_ROSTER_UNSUPPORTED",
-		})
-		return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", dispositions,
-			fmt.Errorf("alarmd controlplane: item %d no-data roster: %s", item.ID, reason)
+		// Suspending rather than refusing for the reason above it: what this
+		// build cannot do is the roster, and the thresholds do not depend on
+		// it.
+		suspended, plan.NoData = contract.ReasonNoDataRosterUnsupported, nil
 	}
 	if ref.SnapshotRevision > 0 {
 		plan.OutputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: dataset.DynamicDimensions, DimensionFields: append([]string{}, dataset.IdentityFields...)}
@@ -1282,7 +1303,8 @@ func compilePlan(
 	}
 	scheduleSpec := execution.DeriveScheduleSpec(interval)
 	schedule, err := execution.DerivePlanScheduleRevision(scheduleSpec)
-	return plan, scheduleSpec, schedule, dispositions, err
+	return plan, planCompileFacts{ScheduleSpec: scheduleSpec, ScheduleRevision: schedule, NoDataSuspended: suspended},
+		dispositions, err
 }
 
 func supportedAlgorithmKind(kind string) bool {
