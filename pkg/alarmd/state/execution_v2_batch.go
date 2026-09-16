@@ -341,6 +341,7 @@ func (store *ExecutionStore) applyRuntime(
 		seen[keys[index]] = struct{}{}
 	}
 	pipeline := &runtimeApplyPipeline{store: store, guard: guard, request: request, result: &result}
+	written := make(map[string]struct{}, len(request.Items))
 	for index, mutation := range request.Items {
 		item := execution.StateApplyItemResult{Identity: mutation.Identity}
 		if err := mutation.ValidateDigest(); err != nil || keyErrors[index] != nil {
@@ -370,6 +371,15 @@ func (store *ExecutionStore) applyRuntime(
 				continue
 			}
 			result.Items[index] = store.applyRuntimeSequential(ctx, request.Contract, mutation, keys[index], ttl, casBackend)
+			// The later copy of a key this request already wrote meets the
+			// earlier copy's bytes one revision up. Name that for what it is
+			// -- the producer sent one series twice -- so it does not count as
+			// a re-sent write.
+			if _, earlier := written[keys[index]]; earlier && result.Items[index].Status == execution.StateApplyAlreadyApplied &&
+				result.Items[index].AlreadyApplied == execution.StateAlreadyAppliedRevisionSkew {
+				result.Items[index].AlreadyApplied = execution.StateAlreadyAppliedRepeatedKey
+			}
+			written[keys[index]] = struct{}{}
 			continue
 		}
 		if classified, proceed := classifyWitnessedMutation(witness, mutation); !proceed {

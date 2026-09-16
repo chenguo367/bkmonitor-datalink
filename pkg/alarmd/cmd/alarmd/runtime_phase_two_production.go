@@ -2228,6 +2228,13 @@ func (runtime *productionPhaseTwoQueryGroup) DueBound() scheduler.RunnerDueBound
 	return runtime.runner.DueBound()
 }
 
+func (runtime *productionPhaseTwoQueryGroup) NextDeadline() time.Time {
+	if runtime == nil || runtime.runner == nil {
+		return time.Time{}
+	}
+	return runtime.runner.NextDeadline()
+}
+
 // MaintainLease renews the Query Group lease every interval. A failure to
 // reach the Ownership Store is retried inside the interval and again on the
 // following ticks for as long as the lease is still inside its TTL; the

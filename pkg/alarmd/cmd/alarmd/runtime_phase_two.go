@@ -396,6 +396,14 @@ type phaseTwoQueryGroupRuntime interface {
 	// this Query Group is worth running again. It is read at the same point
 	// NextReadyAt is, because the two answers belong to the same moment.
 	DueBound() scheduler.RunnerDueBound
+	// NextDeadline is when the next Slot this Query Group would run stops
+	// being worth running; zero when nothing is known. It is required rather
+	// than optional: as an optional interface the production Runtime never
+	// implemented it, every production Query Group was queued with no
+	// deadline, and the deadline order shipped twice without ever having run.
+	// A method the compiler does not demand is a method one implementation
+	// silently lacks.
+	NextDeadline() time.Time
 	MaintainLease(context.Context, time.Duration, time.Duration) error
 	Release(context.Context) error
 }
@@ -544,20 +552,6 @@ type phaseTwoQueuedRunner struct {
 	deadline time.Time
 	sequence uint64
 	cohort   string
-}
-
-// phaseTwoDeadlineRunner is the Runner's answer to "by when": the production
-// Runner implements it; a Runner that does not is queued with no deadline
-// and ordered after every one that has.
-type phaseTwoDeadlineRunner interface {
-	NextDeadline() time.Time
-}
-
-func queuedRunnerDeadline(runner phaseTwoQueryGroupRuntime) time.Time {
-	if withDeadline, ok := runner.(phaseTwoDeadlineRunner); ok {
-		return withDeadline.NextDeadline()
-	}
-	return time.Time{}
 }
 
 // deadlineBefore orders two queued Runners by when their work expires:
@@ -1364,7 +1358,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 		readyAt := scheduled.lifecycle.runner.NextReadyAt()
 		dispatcher.queueSequence++
 		queued := phaseTwoQueuedRunner{
-			scheduled: scheduled, readyAt: readyAt, deadline: queuedRunnerDeadline(scheduled.lifecycle.runner),
+			scheduled: scheduled, readyAt: readyAt, deadline: scheduled.lifecycle.runner.NextDeadline(),
 			sequence: dispatcher.queueSequence,
 			cohort:   scheduler.ShortPeriodCohortForInterval(scheduled.lifecycle.runner.DueBound().IntervalSeconds),
 		}

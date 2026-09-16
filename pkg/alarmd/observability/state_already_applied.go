@@ -30,7 +30,11 @@ type StateAlreadyAppliedKind string
 const (
 	StateAlreadyAppliedStable       StateAlreadyAppliedKind = "stable"
 	StateAlreadyAppliedRevisionSkew StateAlreadyAppliedKind = "revision_skew"
-	stateAlreadyAppliedOther        StateAlreadyAppliedKind = "other"
+	// repeated_key: the same request carried the key twice and the later copy
+	// met the earlier one -- a producer that made two mutations for one
+	// series, not a re-sent write.
+	StateAlreadyAppliedRepeatedKey StateAlreadyAppliedKind = "repeated_key"
+	stateAlreadyAppliedOther       StateAlreadyAppliedKind = "other"
 )
 
 func AllStateAlreadyAppliedSites() []StateAlreadyAppliedSite {
@@ -38,7 +42,7 @@ func AllStateAlreadyAppliedSites() []StateAlreadyAppliedSite {
 }
 
 func AllStateAlreadyAppliedKinds() []StateAlreadyAppliedKind {
-	return []StateAlreadyAppliedKind{StateAlreadyAppliedStable, StateAlreadyAppliedRevisionSkew, stateAlreadyAppliedOther}
+	return []StateAlreadyAppliedKind{StateAlreadyAppliedStable, StateAlreadyAppliedRevisionSkew, StateAlreadyAppliedRepeatedKey, stateAlreadyAppliedOther}
 }
 
 // NormalizeStateAlreadyAppliedKind folds a kind this build does not name into
@@ -46,7 +50,7 @@ func AllStateAlreadyAppliedKinds() []StateAlreadyAppliedKind {
 // rather than as a label set that grows with its input.
 func NormalizeStateAlreadyAppliedKind(kind StateAlreadyAppliedKind) StateAlreadyAppliedKind {
 	switch kind {
-	case StateAlreadyAppliedStable, StateAlreadyAppliedRevisionSkew:
+	case StateAlreadyAppliedStable, StateAlreadyAppliedRevisionSkew, StateAlreadyAppliedRepeatedKey:
 		return kind
 	}
 	return stateAlreadyAppliedOther
@@ -82,7 +86,7 @@ func (facts *StateAlreadyAppliedFacts) Record(site StateAlreadyAppliedSite, kind
 		facts.Counts = map[StateAlreadyAppliedKey]int64{}
 	}
 	facts.Counts[StateAlreadyAppliedKey{Site: site, Kind: kind}]++
-	if kind == StateAlreadyAppliedRevisionSkew && facts.Skew == nil {
+	if (kind == StateAlreadyAppliedRevisionSkew || kind == StateAlreadyAppliedRepeatedKey) && facts.Skew == nil {
 		facts.Skew = &StateRevisionSkewSample{Site: site, SeriesIdentity: series, ExpectedRevision: expected, StoredRevision: stored}
 	}
 }

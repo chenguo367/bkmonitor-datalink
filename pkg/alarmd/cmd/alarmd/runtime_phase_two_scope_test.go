@@ -303,6 +303,8 @@ func (group *schedulerRunnerQueryGroup) DueBound() scheduler.RunnerDueBound {
 	return group.runner.DueBound()
 }
 
+func (group *schedulerRunnerQueryGroup) NextDeadline() time.Time { return group.runner.NextDeadline() }
+
 func (*schedulerRunnerQueryGroup) MaintainLease(ctx context.Context, _, _ time.Duration) error {
 	<-ctx.Done()
 	return ctx.Err()

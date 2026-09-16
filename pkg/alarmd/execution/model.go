@@ -1284,10 +1284,17 @@ type StateAlreadyAppliedKind string
 const (
 	StateAlreadyAppliedStable       StateAlreadyAppliedKind = "stable"
 	StateAlreadyAppliedRevisionSkew StateAlreadyAppliedKind = "revision_skew"
+	// StateAlreadyAppliedRepeatedKey is a revision_skew with a known cause:
+	// the same request carried this key twice, and the later copy met the
+	// earlier copy's bytes. That is not a re-sent write, it is an evaluation
+	// that produced two mutations for one series identity, and it is counted
+	// apart because the fix is at the producer and a steady revision_skew
+	// that is really this would otherwise read as a re-sending client.
+	StateAlreadyAppliedRepeatedKey StateAlreadyAppliedKind = "repeated_key"
 )
 
 func AllStateAlreadyAppliedKinds() []StateAlreadyAppliedKind {
-	return []StateAlreadyAppliedKind{StateAlreadyAppliedStable, StateAlreadyAppliedRevisionSkew}
+	return []StateAlreadyAppliedKind{StateAlreadyAppliedStable, StateAlreadyAppliedRevisionSkew, StateAlreadyAppliedRepeatedKey}
 }
 
 func ClassifyStateMutation(view RuntimeStateView, mutation StateMutation) StatePreflightDisposition {
