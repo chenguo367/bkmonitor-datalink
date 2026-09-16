@@ -287,3 +287,78 @@ func segmentContentSeries(t *testing.T, recorder *Recorder) map[string]float64 {
 	}
 	return read
 }
+
+// Every cutover reason has a label from startup, and a failure counts under its
+// own.
+//
+// other must stay at zero and the rest are expected to as well, which is
+// precisely why every label has to exist before anything happens: the reading
+// is "none of these ever move", and a number that is absent rather than zero
+// cannot be read that way. A cutover failing every round with no named reason
+// is how a fleet stopped picking up published content for eleven hours.
+func TestEveryCutoverReasonHasALabelAndAFailureCountsUnderIts(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{Version: "0.2.9999", Commit: "0123456789abcdef", SchemaVersion: "v3"})
+	read := cutoverSeries(t, recorder)
+	for _, reason := range controlplane.CutoverReasons {
+		if value, present := read["failure|"+reason]; !present || value != 0 {
+			t.Fatalf("failure/%s = %v (present=%t), want a reported zero; series=%+v",
+				reason, value, present, read)
+		}
+	}
+	if value, present := read["success|"]; !present || value != 0 {
+		t.Fatalf("success = %v (present=%t), want a reported zero", value, present)
+	}
+
+	ctx := context.Background()
+	recorder.Observe(ctx, observability.Observation{
+		Component: observability.ComponentControlPlane, Stage: observability.StageScheduleCutover,
+		Result: observability.ResultFailed,
+		ScheduleCutover: &observability.ScheduleCutoverFacts{
+			Result: "failure", Reason: controlplane.CutoverReasonActivationRecordMissing,
+			QueryGroup: "qg-a",
+		},
+	})
+	recorder.Observe(ctx, observability.Observation{
+		Component: observability.ComponentControlPlane, Stage: observability.StageScheduleCutover,
+		Result:          observability.ResultSuccess,
+		ScheduleCutover: &observability.ScheduleCutoverFacts{Result: "success"},
+	})
+
+	read = cutoverSeries(t, recorder)
+	if read["failure|"+controlplane.CutoverReasonActivationRecordMissing] != 1 {
+		t.Fatalf("the named failure did not count under its reason; series=%+v", read)
+	}
+	if read["success|"] != 1 {
+		t.Fatalf("the success did not count; series=%+v", read)
+	}
+	if read["failure|"+controlplane.CutoverReasonOther] != 0 {
+		t.Fatalf("a named failure landed in other; series=%+v", read)
+	}
+}
+
+func cutoverSeries(t *testing.T, recorder *Recorder) map[string]float64 {
+	t.Helper()
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_schedule_cutover_total" {
+			continue
+		}
+		for _, series := range family.GetMetric() {
+			result, reason := "", ""
+			for _, pair := range series.GetLabel() {
+				switch pair.GetName() {
+				case "result":
+					result = pair.GetValue()
+				case "reason":
+					reason = pair.GetValue()
+				}
+			}
+			read[result+"|"+reason] = series.GetCounter().GetValue()
+		}
+	}
+	return read
+}

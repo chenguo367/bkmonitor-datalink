@@ -11,6 +11,8 @@ package controlplane_test
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -33,6 +35,7 @@ import (
 type noDataHopFixture struct {
 	client     redis.Cmdable
 	prefix     string
+	reconciler *controlplane.ScheduleActivationReconciler
 	repository *controlplane.RedisCatalogRepository
 	runtime    *controlplane.RedisCatalogRuntime
 	group      execution.QueryGroupIdentity
@@ -70,7 +73,7 @@ func newNoDataHopFixture(t *testing.T, prefix string, catalog controlplane.Catal
 		t.Fatal(err)
 	}
 	fixture := &noDataHopFixture{
-		client: client, prefix: "alarmd:control:" + prefix,
+		client: client, prefix: "alarmd:control:" + prefix, reconciler: reconciler,
 		repository: repository, runtime: runtime,
 		group: catalog.QueryGroups[0].Identity,
 		hops:  map[string]int{}, states: map[string]int{},
@@ -323,5 +326,77 @@ func TestAColdReaderCountsTheStoredBytesToo(t *testing.T) {
 	}
 	if got := hops[observability.NoDataHopAssembled]; got != 1 {
 		t.Fatalf("assembled = %d, want 1; hops=%+v", got, hops)
+	}
+}
+
+// A cutover that refuses says which precondition refused, on which Query Group,
+// and with which values.
+//
+// Driven through the reconciler rather than constructed, because the thing
+// under test is that the real cutover attaches this and the real observer
+// carries it. In production this exact family has been refusing about twice a
+// minute, and until now it said only "schedule activation conflict" -- one
+// sentence covering four different preconditions, with nothing to look at.
+//
+// The refusal here is the boundary one: the fixture's clock does not move, so
+// a second publication cuts at the instant the open Segment already starts at.
+func TestARefusedCutoverNamesThePreconditionAndItsValues(t *testing.T) {
+	fixture := newNoDataHopFixture(t, "cutover-refused", validCatalog(t, 80))
+	ctx := context.Background()
+
+	var observed []observability.Observation
+	fixture.repository.ConfigureObserver(observability.ObserverFunc(
+		func(_ context.Context, observation observability.Observation) {
+			if observation.ScheduleCutover != nil {
+				observed = append(observed, observation)
+			}
+		}))
+
+	// A second publication, cut at the same instant the open Segment starts.
+	second, _, err := fixture.repository.PublishCatalog(ctx, noDataSourceCatalog(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ensureErr := fixture.reconciler.Ensure(ctx, second.Publication)
+	if ensureErr == nil {
+		t.Skip("this fixture's clock no longer produces a boundary the open Segment refuses")
+	}
+
+	var conflict *controlplane.ScheduleConflictError
+	if !errors.As(ensureErr, &conflict) {
+		t.Fatalf("the cutover refused with %v, which carries no precondition. Four different checks "+
+			"return this sentinel and a reader cannot tell them apart", ensureErr)
+	}
+	if conflict.Reason != controlplane.CutoverReasonOpenSegmentClosed {
+		t.Fatalf("reason = %q, want %q", conflict.Reason, controlplane.CutoverReasonOpenSegmentClosed)
+	}
+	if conflict.QueryGroup == "" {
+		t.Fatal("the refusal names no Query Group, so a reader has the whole population to search")
+	}
+	if !strings.Contains(conflict.Detail, "boundary=") || !strings.Contains(conflict.Detail, "open_start=") {
+		t.Fatalf("detail = %q, want the values that were compared", conflict.Detail)
+	}
+	// And it is still the sentinel every existing reader matches on.
+	if !errors.Is(ensureErr, controlplane.ErrScheduleConflict) {
+		t.Fatal("the refusal no longer satisfies errors.Is(ErrScheduleConflict); every existing caller " +
+			"that branches on it would stop recognising it")
+	}
+
+	// The observation carries it too, which is the only part a reader sees.
+	var reported *observability.ScheduleCutoverFacts
+	for _, observation := range observed {
+		if observation.ScheduleCutover.Result == "failure" {
+			reported = observation.ScheduleCutover
+		}
+	}
+	if reported == nil {
+		t.Fatalf("no failed cutover was reported; observations=%+v", observed)
+	}
+	if reported.Reason != controlplane.CutoverReasonOpenSegmentClosed {
+		t.Fatalf("reported reason = %q, want %q", reported.Reason, controlplane.CutoverReasonOpenSegmentClosed)
+	}
+	if reported.QueryGroup != string(conflict.QueryGroup) {
+		t.Fatalf("reported Query Group = %q, want the one the cutover stopped on (%q)",
+			reported.QueryGroup, conflict.QueryGroup)
 	}
 }
