@@ -656,26 +656,32 @@ func TestPhaseTwoSnapshotMinimumRetentionUsesExistingRecoveryAndOwnershipParamet
 	}
 }
 
-func TestPhaseTwoCatalogRetentionValidatorIncludesCandidateScheduleOffset(t *testing.T) {
+func TestPhaseTwoCatalogRetentionAdmissionUsesTheCandidatesOwnScheduleOffset(t *testing.T) {
 	cfg := validGoAccessRuntimeConfig()
 	catalog := controlplane.Catalog{QueryGroups: []controlplane.QueryGroup{{Plans: []controlplane.FrozenPlan{{
 		ScheduleSpec: execution.ScheduleSpec{EvaluationIntervalSeconds: 60, Timezone: "UTC"},
 	}}}}}
-	validator := phaseTwoCatalogRetentionValidator(cfg)
-	if err := validator(catalog); err != nil {
-		t.Fatalf("validator(default) error=%v", err)
+	admitted, err := phaseTwoCatalogRetentionAdmission(cfg)(catalog)
+	if err != nil || len(admitted.QueryGroups) != 1 {
+		t.Fatalf("admission(default) = (%+v, %v), want the Plan kept", admitted.QueryGroups, err)
 	}
 	// The retention is derived from the longest cadence the deployment
 	// supports, so shortening the configured floor no longer shortens it;
 	// the way to need more retention than there is, is a Plan evaluated less
 	// often than that bound. The property under test is unchanged: the
-	// candidate's own schedule offset decides whether the Catalog fits.
+	// candidate's own schedule offset decides whether it fits -- only the
+	// consequence moved, from refusing the Catalog to withholding the Plan.
 	beyond := controlplane.Catalog{QueryGroups: []controlplane.QueryGroup{{Plans: []controlplane.FrozenPlan{{
 		ScheduleSpec: execution.ScheduleSpec{
 			EvaluationIntervalSeconds: int64(phaseTwoMaxSupportedEvaluationInterval/time.Second) + 60, Timezone: "UTC"},
 	}}}}}
-	if err := validator(beyond); !errors.Is(err, scheduler.ErrSnapshotRetentionInsufficient) {
-		t.Fatalf("validator(insufficient) error=%v", err)
+	admitted, err = phaseTwoCatalogRetentionAdmission(cfg)(beyond)
+	if err != nil {
+		t.Fatalf("admission(beyond) error = %v, want the Plan withheld rather than the round refused", err)
+	}
+	if len(admitted.QueryGroups) != 0 || len(admitted.Dispositions) != 1 {
+		t.Fatalf("admission(beyond) = groups %+v dispositions %+v, want the Plan withheld",
+			admitted.QueryGroups, admitted.Dispositions)
 	}
 }
 

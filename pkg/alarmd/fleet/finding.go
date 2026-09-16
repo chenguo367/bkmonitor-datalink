@@ -289,6 +289,12 @@ var codeChecks = map[string]verdict{
 	// refusal carries both values, which is what makes it actionable rather
 	// than something to watch.
 	"GAP_GUARD_CONFLICT": lands(CheckDefect),
+	// A Plan this deployment cannot serve: it asks for a Snapshot kept longer
+	// than the retention, or leaves its own queries no time to run. Neither is
+	// weather and neither clears itself -- somebody changes the strategy or
+	// the deployment -- and the strategy is not being evaluated meanwhile.
+	"SNAPSHOT_RETENTION_INSUFFICIENT": lands(CheckDetectionAbandoned),
+	"COMPLETION_OFFSET_BELOW_RESERVE": lands(CheckDetectionAbandoned),
 
 	// The control plane did not give the runner something to run. A live read
 	// found twelve objects whose strategies had been retired days earlier and
