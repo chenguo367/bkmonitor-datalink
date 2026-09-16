@@ -288,14 +288,27 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"qg-skipped-hour-ago": {
 				FirstSlot: at.Add(-90 * time.Minute).Unix(), LastSlot: at.Add(-70 * time.Minute).Unix(),
 				Slots: 20, At: at.Add(-time.Hour), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"},
-			// Healthy now and losing rounds now: a loss in progress, current.
+			// Healthy now and losing rounds now, on the replica that has been
+			// up for hours: a loss in progress by some mechanism that is not
+			// the restart's.
 			"qg-losing-now": {
 				FirstSlot: at.Add(-4 * time.Minute).Unix(), LastSlot: at.Add(-3 * time.Minute).Unix(),
-				Slots: 6, At: at.Add(-3 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij",
+				Slots: 6, At: at.Add(-3 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 				Strategies: []fleet.StrategyRef{{StrategyID: "8709", BusinessID: "9"}}, IntervalSeconds: 10},
 			"qg-demoted-rejected": {
 				FirstSlot: at.Add(-5 * time.Minute).Unix(), LastSlot: at.Add(-2 * time.Minute).Unix(),
 				Slots: 3, At: at.Add(-2 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"},
+			// Skipped a minute after its replica started five minutes ago: the
+			// restart's catch-up, the shape every rollout produces.
+			"qg-restart-catchup": {
+				FirstSlot: at.Add(-5 * time.Minute).Unix(), LastSlot: at.Add(-4 * time.Minute).Unix(),
+				Slots: 6, At: at.Add(-4 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", IntervalSeconds: 10},
+		},
+		// The replicas' starts, which the restart grace is read against:
+		// fghij restarted five minutes ago (the rollout), abcde two hours ago.
+		PerReplica: []fleet.ReplicaView{
+			{Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", StartedAt: at.Add(-2 * time.Hour)},
+			{Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", StartedAt: at.Add(-5 * time.Minute)},
 		},
 		Activation: activation, ActivationReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 		Degradations: degradations}
@@ -487,7 +500,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	earlier := 0
 	health.Schedule.OverdueAgo, health.Schedule.OverdueAgoSeconds = &earlier, 1800
 	health.Load = fleet.LoadOf(&fleet.View{Schedule: health.Schedule, Capacity: health.Capacity,
-		Demoted: demoted, GapSkips: retained.GapSkips}, at)
+		Demoted: demoted, GapSkips: retained.GapSkips, PerReplica: retained.PerReplica}, at)
 	fixture["health"] = health
 	encoded, err := json.Marshal(fixture)
 	if err != nil {
@@ -580,7 +593,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// losing rounds now from its record; the stopped one is in the
 		// record section. The line says which part is still happening and
 		// that none of it is a budget rejection -- so not capacity.
-		"2 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 1 个；没有资源预算拒绝，不是容量问题）",
+		"3 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 1 个；1 个是刚滚动后的追赶，5 分钟内会自己停；没有资源预算拒绝，不是容量问题）",
 		"恢复标准：10 分钟内没有新的跳过",
 		"1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）",
 		// Every line says where the evidence is, what to do next, and what
@@ -636,6 +649,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// row says what it lost while under its line.
 		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过）） · 1 个对象 · 1 条策略 · 1 个业务"},
 		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象"},
+		{"GROUPS LOSS ::", "AFTER_RESTART（刚滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，会自己停，不是容量）） · 1 个对象"},
+		{"SKIP qg-restart-catchup ::", "，10 秒周期。刚滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，会自己停，不是容量）"},
 		{"SKIP qg-demoted-rejected ::", "3 个 Slot，记录于 "},
 		{"SKIP qg-demoted-rejected ::", "。在被拒期间跳过（冷却让旧轮次超出重放范围，首要原因是查询不可用）"},
 		{"SKIP qg-losing-now ::", "。仍在发生（最近 10 分钟内跳过）"},
@@ -646,7 +661,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// estimates headroom.
 		{"LOAD ::", "按时完成：跟得上，没有对象超期"},
 		{"LOAD ::", "积压：没有，30 分 0 秒 前也没有"},
-		{"LOAD ::", "漏检：正在发生——1 个对象最近 10 分钟内跳过了检测；另有 1 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）"},
+		{"LOAD ::", "漏检：正在发生——1 个对象最近 10 分钟内跳过了检测，另有 1 个是刚滚动后的追赶（副本启动 5 分钟内），会自己停、不问容量；另有 1 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）"},
 		{"LOAD ::", "瓶颈：查询并发位子——启动至今 56% 的取位子排过队，而工作在落后或在漏检"},
 		{"LOAD ::", "限制条件：不推算还能承载多少对象——没有测这个，编出来的数会被当真；积压对照样本不足 1 小时（最年轻的副本索引还没跑满 1 小时）；资源占比是各进程启动至今的累计，不是最近 1 小时"},
 		{"LOAD behind-permits ::", "按时完成：跟不上——7 个对象超期（最久 15 分 0 秒），1 小时按时率 88.9% 低于 6 小时 99.3%"},
@@ -708,7 +723,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// none), and one retained record made an hour ago.
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
-		"需要处理：alarmd 已确认 8 类（14 个对象，去重）；待归因 3 类（7 个对象）；业务侧已确认 5 类（12 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"需要处理：alarmd 已确认 8 类（15 个对象，去重）；待归因 3 类（7 个对象）；业务侧已确认 5 类（12 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"另有 1 个是刚滚动后的追赶漏检（副本启动 5 分钟内），会自己停",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
 		// first sentence says both.

@@ -33,9 +33,17 @@ const (
 	// given up -- so the loss belongs on the line the object is already
 	// under, as that line's consequence, not on a line of its own.
 	LossWhileDemoted Loss = "WHILE_DEMOTED"
-	// LossOngoing: not demoted, and the record was made within
-	// RecentSkipWindow. The object is losing rounds now; it is a current
-	// line, and this deployment's.
+	// LossAfterRestart: not demoted, within the window, and made within
+	// RestartCatchUpGrace of its replica's process start. A restart puts
+	// every short-period object past its replay bound at once -- a live
+	// rollout skipped a hundred and sixty in a minute -- and for the ten
+	// minutes after each one the page would otherwise read "正在漏检" with
+	// no mechanism named. It is a loss; it is also expected to stop on its
+	// own, and it asks no capacity question.
+	LossAfterRestart Loss = "AFTER_RESTART"
+	// LossOngoing: not demoted, within the window, and not the restart's.
+	// The object is losing rounds now; it is a current line, and this
+	// deployment's.
 	LossOngoing Loss = "ONGOING"
 	// LossHistorical: not demoted, and the record is older than the window.
 	// A loss that stopped; it stays on record because the span is never
@@ -44,7 +52,13 @@ const (
 )
 
 // Losses lists every kind, for the page's completeness test.
-var Losses = []Loss{LossWhileDemoted, LossOngoing, LossHistorical}
+var Losses = []Loss{LossWhileDemoted, LossAfterRestart, LossOngoing, LossHistorical}
+
+// RestartCatchUpGrace is how long after a replica's process start a skip is
+// read as the restart's catch-up. The spike is over within the first
+// minutes; five covers it and leaves the rest of the window to the
+// mechanisms that are not the restart's. It travels on the response.
+const RestartCatchUpGrace = 5 * time.Minute
 
 // RecentSkipWindow is the bound on "still happening". A record younger than
 // this is a loss in progress; older, it is history. Ten minutes is several
@@ -59,17 +73,37 @@ const RecentSkipWindow = 10 * time.Minute
 // word capacity is earned.
 const GroupByLoss GroupBy = "loss"
 
-// lossOf decides a record's kind from the object's column and the record's
-// age.
-func lossOf(demoted bool, at, now time.Time) Loss {
+// lossOf decides a record's kind from the object's column, the record's
+// age, and whether it was made in its replica's restart grace.
+func lossOf(demoted, afterRestart bool, at, now time.Time) Loss {
 	switch {
 	case demoted:
 		return LossWhileDemoted
-	case now.Sub(at) <= RecentSkipWindow:
-		return LossOngoing
-	default:
+	case now.Sub(at) > RecentSkipWindow:
 		return LossHistorical
+	case afterRestart:
+		return LossAfterRestart
+	default:
+		return LossOngoing
 	}
+}
+
+// replicaStarts maps each replica to its process start, where published.
+func replicaStarts(view *View) map[string]time.Time {
+	starts := map[string]time.Time{}
+	for _, replica := range view.PerReplica {
+		if !replica.StartedAt.IsZero() {
+			starts[replica.Replica] = replica.StartedAt
+		}
+	}
+	return starts
+}
+
+// inRestartGrace reports whether a record made at by replica falls within
+// the grace after that replica's start. Unknown start: no.
+func inRestartGrace(starts map[string]time.Time, replica string, at time.Time) bool {
+	start, known := starts[replica]
+	return known && !at.Before(start) && at.Sub(start) <= RestartCatchUpGrace
 }
 
 // Consequence is what a line's objects lost while under it: how many also
@@ -136,10 +170,11 @@ func lossRecords(view *View, now time.Time, visit func(queryGroup string, check,
 		return
 	}
 	demoted := demotedObjects(view)
+	starts := replicaStarts(view)
 	each := func(queryGroup string, check Check, code string, skip SkippedSpan) {
 		object, isDemoted := demoted[queryGroup]
 		consequence := isDemoted && object.line != "" && !skip.At.Before(object.since)
-		loss := lossOf(consequence, skip.At, now)
+		loss := lossOf(consequence, inRestartGrace(starts, skip.Replica, skip.At), skip.At, now)
 		line := Check("")
 		if loss == LossWhileDemoted {
 			line = object.line

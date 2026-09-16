@@ -462,7 +462,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		for _, row := range rows {
 			entry := ensure(row.Finding.Check)
 			add(entry, row.Finding.Group, &row)
-			if row.Loss == LossOngoing {
+			if row.Loss == LossOngoing || row.Loss == LossAfterRestart {
 				entry.current++
 				continue
 			}
@@ -591,12 +591,19 @@ type Todo struct {
 	Undetermined        int `json:"undetermined"`
 	UndeterminedObjects int `json:"undetermined_objects"`
 	// Ongoing is the distinct objects, not in the demoted pool, whose latest
-	// skip record was made within RecentWindowSeconds: detection being lost
-	// now. OngoingNewest is the latest of them. They are on the current
-	// lines and in Objects; they are named here because they are the answer
-	// to "is it still happening", which the record count is not.
-	Ongoing       int        `json:"ongoing"`
-	OngoingNewest *time.Time `json:"ongoing_newest,omitempty"`
+	// skip record was made within RecentWindowSeconds and not in their
+	// replica's restart grace: detection being lost now, by a mechanism
+	// that is not the restart. OngoingNewest is the latest of them. They
+	// are on the current lines and in Objects; they are named here because
+	// they are the answer to "is it still happening", which the record
+	// count is not. AfterRestart is the objects whose record falls in the
+	// grace after their replica started: the restart's catch-up, current
+	// and on the lines and in Objects too, named apart because it is
+	// expected to stop on its own and asks no capacity question.
+	Ongoing             int        `json:"ongoing"`
+	OngoingNewest       *time.Time `json:"ongoing_newest,omitempty"`
+	AfterRestart        int        `json:"after_restart"`
+	RestartGraceSeconds int        `json:"restart_grace_seconds"`
 	// WhileDemoted is the distinct objects in the demoted pool that also
 	// skipped detection there, and how many within the window: the
 	// cooldown's consequence, counted on the lines the objects are under.
@@ -623,7 +630,7 @@ type Todo struct {
 // the columns say which objects are under them, so the distinct count is
 // taken from the objects and not from the lines.
 func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now time.Time) Todo {
-	todo := Todo{RecentWindowSeconds: int(RecentSkipWindow / time.Second)}
+	todo := Todo{RecentWindowSeconds: int(RecentSkipWindow / time.Second), RestartGraceSeconds: int(RestartCatchUpGrace / time.Second)}
 	ours := map[string]struct{}{}
 	undetermined := map[string]struct{}{}
 	theirs := map[string]struct{}{}
@@ -663,6 +670,9 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 				if skip.At.After(ongoingNewest) {
 					ongoingNewest = skip.At
 				}
+			case LossAfterRestart:
+				ours[queryGroup] = struct{}{}
+				todo.AfterRestart++
 			case LossWhileDemoted:
 				whileDemoted[queryGroup] = struct{}{}
 				if now.Sub(skip.At) <= RecentSkipWindow {

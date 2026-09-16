@@ -93,14 +93,17 @@ const (
 	LossInProgress LossState = "IN_PROGRESS"
 )
 
-// LoadLoss is the loss reading: objects losing rounds now, and the demoted
-// objects that skipped within the window -- the refusal's consequence, said
-// apart because no capacity changes it.
+// LoadLoss is the loss reading: objects losing rounds now; the ones whose
+// loss is their replica's restart catching up, apart because it stops on
+// its own; and the demoted objects that skipped within the window -- the
+// refusal's consequence, apart because no capacity changes it.
 type LoadLoss struct {
-	State              LossState `json:"state"`
-	Ongoing            int       `json:"ongoing"`
-	WhileDemotedRecent int       `json:"while_demoted_recent"`
-	WindowSeconds      int       `json:"window_seconds"`
+	State               LossState `json:"state"`
+	Ongoing             int       `json:"ongoing"`
+	AfterRestart        int       `json:"after_restart"`
+	WhileDemotedRecent  int       `json:"while_demoted_recent"`
+	WindowSeconds       int       `json:"window_seconds"`
+	RestartGraceSeconds int       `json:"restart_grace_seconds"`
 }
 
 // Bottleneck is the resource the evidence points at, or that it points at
@@ -194,8 +197,10 @@ func LoadOf(view *View, now time.Time) Load {
 	load := Load{Limits: []LoadLimit{LimitNoHeadroomEstimate}}
 	load.OnTime, load.Backlog = onTimeOf(view.Schedule), backlogOf(view.Schedule)
 	load.Loss = lossOfView(view, now)
+	// The restart's catch-up asks no capacity question: only a loss by some
+	// other mechanism does.
 	behind := load.OnTime.State == OnTimeFallingBehind || load.OnTime.State == OnTimeCatchingUp ||
-		load.Backlog.State == BacklogGrowing || load.Loss.State == LossInProgress
+		load.Backlog.State == BacklogGrowing || load.Loss.Ongoing > 0
 	load.Bottleneck = bottleneckOf(view.Capacity, behind)
 	if view.Schedule == nil {
 		load.Limits = append(load.Limits, LimitNoCensus)
@@ -273,18 +278,21 @@ func backlogOf(census *ScheduleCensus) LoadBacklog {
 // when not demoted and within the window; the demoted objects' recent
 // skips apart.
 func lossOfView(view *View, now time.Time) LoadLoss {
-	reading := LoadLoss{State: LossNone, WindowSeconds: int(RecentSkipWindow / time.Second)}
+	reading := LoadLoss{State: LossNone, WindowSeconds: int(RecentSkipWindow / time.Second),
+		RestartGraceSeconds: int(RestartCatchUpGrace / time.Second)}
 	lossRecords(view, now, func(_ string, _, _ Check, _ string, skip SkippedSpan, loss Loss) {
 		switch loss {
 		case LossOngoing:
 			reading.Ongoing++
+		case LossAfterRestart:
+			reading.AfterRestart++
 		case LossWhileDemoted:
 			if now.Sub(skip.At) <= RecentSkipWindow {
 				reading.WhileDemotedRecent++
 			}
 		}
 	})
-	if reading.Ongoing > 0 {
+	if reading.Ongoing > 0 || reading.AfterRestart > 0 {
 		reading.State = LossInProgress
 	}
 	return reading
