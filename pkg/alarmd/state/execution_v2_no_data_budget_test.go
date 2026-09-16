@@ -12,8 +12,10 @@ package state
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -208,4 +210,144 @@ func TestEveryNoDataRefusalShapeIsPublished(t *testing.T) {
 			}
 		})
 	}
+}
+
+// unreadableBackend answers every read with a transport failure, which is the
+// one apply outcome that cannot be reached by arranging the stored record.
+type unreadableBackend struct{}
+
+func (*unreadableBackend) MGet(context.Context, []string) ([][]byte, error) {
+	return nil, errors.New("state: the store did not answer")
+}
+
+func (*unreadableBackend) SetMany(context.Context, []BackendWrite) error { return nil }
+
+func (*unreadableBackend) CompareAndSet(
+	context.Context, string, []byte, bool, []byte, time.Duration,
+) (bool, error) {
+	return false, errors.New("state: the store did not answer")
+}
+
+func (*unreadableBackend) RenewIfBelow(context.Context, string, time.Duration, time.Duration) (bool, error) {
+	return false, errors.New("state: the store did not answer")
+}
+
+// Every status the store can return is in the list the two observation
+// families are built from.
+//
+// The lists are how a reader gets a computed zero rather than an absent
+// series, and how the metric's cardinality is bounded. A status the store can
+// return that no list holds is a series nobody pre-created, a bound that is
+// not one, and an outcome the Slot reports without anybody having decided
+// whether it means the memory was kept -- so the check has to be against what
+// the store actually answers, not against a second copy of the list.
+func TestEveryNoDataApplyStatusTheStoreReturnsIsPublished(t *testing.T) {
+	published := make(map[execution.NoDataApplyStatus]bool, len(execution.NoDataApplyStatuses))
+	for _, status := range execution.NoDataApplyStatuses {
+		published[status] = true
+	}
+
+	oneGroup := execution.NoDataGroupMemory{GroupKey: "a", FirstAbsent: 940}
+
+	for _, test := range []struct {
+		name  string
+		build func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation)
+		want  execution.NoDataApplyStatus
+	}{
+		{
+			name: "a first write",
+			build: func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation) {
+				return generationStore(t, &casMemoryBackend{values: make(map[string][]byte)}),
+					noDataMutationV2(t, 0, oneGroup)
+			},
+			want: execution.NoDataApplied,
+		},
+		{
+			name: "the same write twice",
+			build: func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation) {
+				store := generationStore(t, &casMemoryBackend{values: make(map[string][]byte)})
+				mutation := noDataMutationV2(t, 0, oneGroup)
+				if _, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+					Contract: frozenRef(), Items: []execution.PlanNoDataMutation{mutation},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return store, mutation
+			},
+			want: execution.NoDataAlreadyApplied,
+		},
+		{
+			name: "a write whose expected revision no longer holds",
+			build: func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation) {
+				backend := &casMemoryBackend{values: make(map[string][]byte)}
+				store := generationStore(t, backend)
+				if _, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+					Contract: frozenRef(), Items: []execution.PlanNoDataMutation{noDataMutationV2(t, 0, oneGroup)},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				// Same version, different content: the record the store holds
+				// is not the one this mutation expects to be replacing.
+				return store, noDataMutationV2(t, 7,
+					execution.NoDataGroupMemory{GroupKey: "b", FirstAbsent: 941})
+			},
+			want: execution.NoDataConflict,
+		},
+		{
+			name: "a write an older round is sending late",
+			build: func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation) {
+				backend := &casMemoryBackend{values: make(map[string][]byte)}
+				store := generationStore(t, backend)
+				if _, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+					Contract: frozenRef(), Items: []execution.PlanNoDataMutation{noDataMutationV2(t, 0, oneGroup)},
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return store, olderNoDataMutation(t, oneGroup)
+			},
+			want: execution.NoDataStale,
+		},
+		{
+			name: "the store did not answer",
+			build: func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation) {
+				return capabilityStore(t, &unreadableBackend{}), noDataMutationV2(t, 0, oneGroup)
+			},
+			want: execution.NoDataRetryable,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store, mutation := test.build(t)
+			applied, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+				Contract: frozenRef(), Items: []execution.PlanNoDataMutation{mutation},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			status := applied.Items[0].Status
+			if !published[status] {
+				t.Fatalf("the store returned %s, which execution.NoDataApplyStatuses does not hold: "+
+					"the metric pre-creates its series and bounds its cardinality from that list", status)
+			}
+			if status != test.want {
+				t.Fatalf("status = %s, want %s; this fixture is not reaching the outcome it names",
+					status, test.want)
+			}
+		})
+	}
+}
+
+// olderNoDataMutation is a write from a round before the one already stored.
+func olderNoDataMutation(t *testing.T, groups ...execution.NoDataGroupMemory) execution.PlanNoDataMutation {
+	t.Helper()
+	older := applyVersion()
+	older.EvaluationTime--
+	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMutation{
+		Identity: noDataIdentityV2(), SchemaVersion: execution.NoDataMemorySchemaV1,
+		ExpectedMarkerRevision: 0, ApplyVersion: older, ScheduleRevision: "plan-r1",
+		RosterVersion: "TARGET_STATIC/1", Groups: groups,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mutation
 }

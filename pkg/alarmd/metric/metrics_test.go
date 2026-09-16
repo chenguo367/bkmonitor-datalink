@@ -411,6 +411,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_persistent_skips_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_refusals_total"] = "variableLabels: {reason,record}"
+	expected["bkmonitor_alarmd_worker_no_data_memory_writes_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_plans_seen_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
@@ -878,6 +879,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// written only from the list execution publishes, and the store's own test
 	// keeps that list equal to what the store can produce.
 	bounds[fqName("worker_no_data_memory_refusals_total")] = len(execution.NoDataRefusals)
+	// One per outcome the store can return that is not a deterministic
+	// refusal, and no more: the label is written only from the list execution
+	// publishes.
+	bounds[fqName("worker_no_data_memory_writes_total")] = len(execution.NoDataWriteOutcomes)
 	// One series: a count, unlabelled. Its whole job is to be read against
 	// the outcome family, which carries the breakdown.
 	bounds[fqName("worker_no_data_plans_seen_total")] = 1

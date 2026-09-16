@@ -329,10 +329,14 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	}
 	for _, item := range result.Items {
 		switch item.Status {
-		case execution.NoDataApplied, execution.NoDataAlreadyApplied, execution.NoDataStale, execution.NoDataConflict:
-			continue
-		case execution.NoDataRetryable:
-			continue
+		case execution.NoDataApplied, execution.NoDataAlreadyApplied, execution.NoDataStale,
+			execution.NoDataConflict, execution.NoDataRetryable:
+			// Reported, including the ones that worked. Whether a Plan's
+			// memory is being kept is a question about the present, and a
+			// reader with only the failures has to answer it from an absence
+			// of them -- which reads the same whether the Plan recovered, or
+			// stopped being evaluated, or started losing races instead.
+			coordinator.observeNoDataMemoryWrite(ctx, request, item)
 		default:
 			// Reported, not raised. A deterministic refusal is one no retry
 			// resolves, so failing the Slot over it does not store the record
@@ -351,6 +355,34 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 		}
 	}
 	return nil
+}
+
+// observeNoDataMemoryWrite reports what became of one Plan's memory write.
+//
+// One line per Plan per Slot, on every outcome including the ordinary one. The
+// volume is the volume of no-data Plans, which is the same order as the Slot
+// lines beside it, and the repeated-line budget bounds it by (reason, Query
+// Group) like every other workflow stage.
+func (coordinator *SlotExecutionCoordinator) observeNoDataMemoryWrite(
+	ctx context.Context, request execution.SlotExecutionRequest, item execution.NoDataApplyItemResult,
+) {
+	stored := execution.NoDataWriteStored(item.Status)
+	result := observability.Result(observability.ResultDegraded)
+	if stored {
+		result = observability.Result(observability.ResultSuccess)
+	}
+	coordinator.emitObservation(ctx, observability.Observation{
+		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryWritten,
+		Operation: observability.Operation(request.Operation),
+		Direction: observability.DirectionInternal, Result: result,
+		ReasonCode: observability.ReasonCode(item.ReasonCode),
+		Trace: observability.TraceFields{
+			StrategyID: item.Identity.Plan.StrategyID, BusinessID: item.Identity.Plan.BusinessID,
+		},
+		NoDataMemoryWrite: &observability.NoDataMemoryWriteFacts{
+			Outcome: string(item.Status), Stored: stored,
+		},
+	})
 }
 
 // observeNoDataMemoryRefusal reports one Plan the store would not take a
