@@ -53,7 +53,7 @@ func gatherStateAlreadyApplied(t *testing.T, observations ...observability.Obser
 func TestStateAlreadyAppliedPublishesEveryPairAndCountsBySiteAndKind(t *testing.T) {
 	gathered := gatherStateAlreadyApplied(t)
 	for _, site := range []string{"preflight", "apply"} {
-		for _, kind := range []string{"stable", "revision_skew", "other"} {
+		for _, kind := range []string{"stable", "revision_skew", "repeated_key", "other"} {
 			if value, found := gathered[site+"/"+kind]; !found || value != 0 {
 				t.Fatalf("%s/%s before any observation = %v (found=%v), want published at zero", site, kind, value, found)
 			}
@@ -69,7 +69,7 @@ func TestStateAlreadyAppliedPublishesEveryPairAndCountsBySiteAndKind(t *testing.
 		Result: observability.ResultSuccess, StateAlreadyApplied: &facts,
 	})
 	want := map[string]float64{"apply/revision_skew": 2, "preflight/stable": 1, "preflight/other": 1,
-		"apply/stable": 0, "apply/other": 0, "preflight/revision_skew": 0}
+		"apply/stable": 0, "apply/other": 0, "preflight/revision_skew": 0, "apply/repeated_key": 0, "preflight/repeated_key": 0}
 	for key, value := range want {
 		if gathered[key] != value {
 			t.Fatalf("%s = %v, want %v; gathered=%v", key, gathered[key], value, gathered)

@@ -644,3 +644,32 @@ func TestApplyRuntimeTheSameWriteSentAgainUnchangedIsAlreadyApplied(t *testing.T
 		requireUntouched(t, backend, snapshot)
 	})
 }
+
+// The same key twice in one request with the same statement is the producer's
+// duplicate, not a re-sent write: the later copy reads ALREADY_APPLIED with
+// kind repeated_key, so a steady skew count that is really this cannot pose as
+// a re-sending client.
+func TestApplyRuntimeRepeatedKeyWithTheSameStatementIsNamedRepeatedKey(t *testing.T) {
+	backend := newPipelineMemoryBackend()
+	store := newBatchStore(t, backend, nil)
+	first := seriesMutation(t, seriesIdentity(0), applyVersion(), 0, "")
+	again := first
+	sibling := seriesMutation(t, seriesIdentity(1), applyVersion(), 0, "")
+	result, err := store.ApplyRuntime(context.Background(), execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
+		Items: []execution.StateMutation{first, sibling, again}})
+	if err != nil {
+		t.Fatalf("ApplyRuntime() error = %v", err)
+	}
+	if result.Items[0].Status != execution.StateApplied || result.Items[1].Status != execution.StateApplied {
+		t.Fatalf("first copies = %+v / %+v, want applied", result.Items[0], result.Items[1])
+	}
+	later := result.Items[2]
+	if later.Status != execution.StateApplyAlreadyApplied || later.AlreadyApplied != execution.StateAlreadyAppliedRepeatedKey || later.StoredBlobRevision != 1 {
+		t.Fatalf("later copy = %+v, want ALREADY_APPLIED kind repeated_key at stored revision 1: the request itself wrote this key, no client re-sent it", later)
+	}
+	key, _ := RuntimeStateKeyV2("alarmd", first.Identity)
+	view := decodeRuntime(backend.values[key], first.Identity, frozenRef(), first.ApplyVersion)
+	if view.BlobRevision != 1 {
+		t.Fatalf("the later copy rewrote the key: revision %d, want 1", view.BlobRevision)
+	}
+}
