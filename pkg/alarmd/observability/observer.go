@@ -1303,6 +1303,7 @@ type Observation struct {
 	// reason on every round, so without the counts the two are one population.
 	HistoryCoverage       *HistoryCoverageFacts
 	Dispatcher            *DispatcherFacts
+	DispatchTurnaway      *DispatchTurnawayFacts
 	PermitWait            *PermitWaitFacts
 	ExpiredRange          *ExpiredRangeFacts
 	Component             Component
@@ -2324,6 +2325,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageSlotCompleted}, {ComponentScheduler, StageQueryAdmission},
 	{ComponentScheduler, StageQueryCooldown}, {ComponentScheduler, StageRunnerReturned}, {ComponentScheduler, StageDispatcherSnapshot}, {ComponentScheduler, StageQueryPermitWait},
 	{ComponentScheduler, StageExpiredRangeReturned},
+	{ComponentScheduler, StageDispatchTurnaway},
 	{ComponentScheduler, StageRunnerCompleted}, {ComponentScheduler, StageSlotSourceCompleted},
 	{ComponentScheduler, StageScheduleCursorAdvanced}, {ComponentScheduler, StageReplayExpired},
 	{ComponentScheduler, StageSlotWait},
