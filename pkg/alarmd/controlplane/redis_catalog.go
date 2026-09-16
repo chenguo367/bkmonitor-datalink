@@ -106,15 +106,20 @@ type ActivationExpectation struct {
 }
 
 type RedisCatalogRepository struct {
-	client                     redis.Cmdable
-	prefix                     string
-	ttl                        time.Duration
-	activationCache            parsedActivationCache
-	objectCatalog              objectCatalogState
-	catalogIndex               catalogIndex
-	contentMemo                publishedContentMemo
-	objectCache                *objectReadCache
-	objectFlights              objectReadFlights
+	client          redis.Cmdable
+	prefix          string
+	ttl             time.Duration
+	activationCache parsedActivationCache
+	objectCatalog   objectCatalogState
+	catalogIndex    catalogIndex
+	contentMemo     publishedContentMemo
+	objectCache     *objectReadCache
+	objectFlights   objectReadFlights
+	// manifestCache and latestPublication bound the two reads the per-Slot
+	// Segment freshness check makes. See segment_freshness_cache.go.
+	manifestCache              catalogManifestCache
+	latestPublication          latestPublicationMemo
+	freshnessClock             func() time.Time
 	controlCache               *controlReadCache
 	controlReads               controlReadCounters
 	adoptMu                    sync.Mutex

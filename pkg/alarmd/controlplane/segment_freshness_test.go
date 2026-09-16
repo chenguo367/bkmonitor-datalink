@@ -49,8 +49,21 @@ type noDataHopFixture struct {
 
 func newNoDataHopFixture(t *testing.T, prefix string, catalog controlplane.Catalog) *noDataHopFixture {
 	t.Helper()
+	return newNoDataHopFixtureWithHook(t, prefix, catalog, nil)
+}
+
+// newNoDataHopFixtureWithHook is the same fixture with a Redis hook installed
+// before anything is published, for a test that counts round trips rather than
+// outcomes.
+func newNoDataHopFixtureWithHook(
+	t *testing.T, prefix string, catalog controlplane.Catalog, hook redis.Hook,
+) *noDataHopFixture {
+	t.Helper()
 	ctx := context.Background()
 	client := newControlplaneRedis(t)
+	if hook != nil {
+		client.AddHook(hook)
+	}
 	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:"+prefix, time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -107,6 +120,11 @@ func (f *noDataHopFixture) republish(t *testing.T, catalog controlplane.Catalog)
 
 func (f *noDataHopFixture) freeze(t *testing.T) {
 	t.Helper()
+	f.freezeAt(t, 60)
+}
+
+func (f *noDataHopFixture) freezeAt(t *testing.T, at execution.EvaluationTime) {
+	t.Helper()
 	ctx := context.Background()
 	f.repository.ConfigureObserver(observability.ObserverFunc(
 		func(_ context.Context, observation observability.Observation) {
@@ -117,14 +135,14 @@ func (f *noDataHopFixture) freeze(t *testing.T) {
 				f.states[facts.State]++
 			}
 		}))
-	schedule, err := f.runtime.ReadFrozenSchedule(ctx, f.group, 60)
+	schedule, err := f.runtime.ReadFrozenSchedule(ctx, f.group, at)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := f.runtime.FreezeSlotContract(ctx, execution.FreezeSlotContractRequest{
 		QueryGroup: schedule.Segment.QueryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
-		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: 60,
-		DuePlans: schedule.DuePlanRefs(60),
+		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: at,
+		DuePlans: schedule.DuePlanRefs(at),
 	}); err != nil {
 		t.Fatal(err)
 	}
