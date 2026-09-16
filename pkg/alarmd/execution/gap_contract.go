@@ -159,6 +159,9 @@ func ExtendSameSlotGap(previous []GapScopeState, mutations []GapScopeMutation) (
 		if current.Status != GapStatusGapped || mutation.RequiredFullSlots > current.RequiredFullSlots {
 			changed = true
 		}
+		// A same-Slot retry preserves the first commit's observations, so
+		// GAPPED may retain a positive count. It does not count a new Slot;
+		// a new-Slot gap is applied separately and resets that count.
 		current.Status = GapStatusGapped
 		current.RequiredFullSlots = mutation.RequiredFullSlots
 	}
