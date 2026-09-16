@@ -316,9 +316,9 @@ func (coordinator *SlotExecutionCoordinator) executeQueryFreeFinalization(
 			// The mode was never what made reuse safe. queryFreeGapAlreadyProtects
 			// is, and it checks sufficiency directly: same Plan, same
 			// generation, same ApplyVersion, same schedule revision, a
-			// Plan-wide scope that is gapped with nothing observed against it
-			// and the same RequiredFullSlots. It is deliberately not relaxed
-			// here -- the gate above it is what moves.
+			// Plan-wide scope whose protection is at least as strong as the
+			// requested protection. The same Slot must not reset observations
+			// already committed by an earlier attempt.
 			true,
 		); err != nil {
 			return err
@@ -625,6 +625,7 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 	}
 	mutations := make([]execution.PlanGapMutation, 0, len(items))
 	requireAlready := make(map[execution.PlanGapIdentity]struct{})
+	extensions := make(map[execution.PlanGapIdentity]*observability.GapExtensionFacts)
 	for _, item := range items {
 		marker, found := loaded.Find(item.Identity)
 		if !found {
@@ -658,7 +659,10 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 				if reuseSufficientQueryFreeProtection && queryFreeGapAlreadyProtects(marker, item, plan) {
 					continue
 				}
-				return false, newGapGuardConflict(marker, item, mutation, reason, plan)
+				if !reuseSufficientQueryFreeProtection || !queryFreeGapCanExtend(marker, item, plan, mutation) {
+					return false, newGapGuardConflict(marker, item, mutation, reason, plan)
+				}
+				extensions[item.Identity] = gapExtensionFacts(marker, mutation)
 			}
 		}
 		if err := owner.retainGapMutation(ctx, mutation); err != nil {
@@ -669,7 +673,17 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 	if len(mutations) == 0 {
 		return true, nil
 	}
-	return coordinator.applyActivatedPlanGaps(ctx, request.Operation, request.Contract, mutations, requireAlready)
+	return coordinator.applyActivatedPlanGaps(ctx, request.Operation, request.Contract, mutations, requireAlready, extensions)
+}
+
+// sameSlotProtectionCandidate fences both reuse and extension with the same
+// identity and version checks before either path compares protection strength.
+func sameSlotProtectionCandidate(marker execution.GapGuardSnapshot, item execution.PlanGapLoadItem, plan execution.ActivatedPlan) bool {
+	return marker.Status == execution.GapFound && marker.Identity == item.Identity &&
+		plan.Identity == item.Identity.Plan && plan.StateGeneration == item.Identity.StateGeneration &&
+		plan.StateApplyEpoch == item.ApplyVersion.StateApplyEpoch && plan.ScheduleRevision == item.ScheduleRevision &&
+		execution.CompareApplyVersion(marker.PersistedApplyVersion, item.ApplyVersion) == execution.ApplyVersionEqual &&
+		marker.LastScheduleRevision == item.ScheduleRevision
 }
 
 func queryFreeGapAlreadyProtects(
@@ -679,20 +693,32 @@ func queryFreeGapAlreadyProtects(
 ) bool {
 	// The existing Guard reason explains how recovery protection was established.
 	// Query-free finalization records SNAPSHOT_UNAVAILABLE in Progress without rewriting it.
-	if marker.Status != execution.GapFound || marker.Identity != item.Identity ||
-		plan.Identity != item.Identity.Plan || plan.StateGeneration != item.Identity.StateGeneration ||
-		plan.StateApplyEpoch != item.ApplyVersion.StateApplyEpoch || plan.ScheduleRevision != item.ScheduleRevision ||
-		execution.CompareApplyVersion(marker.PersistedApplyVersion, item.ApplyVersion) != execution.ApplyVersionEqual ||
-		marker.LastScheduleRevision != item.ScheduleRevision {
+	if !sameSlotProtectionCandidate(marker, item, plan) {
 		return false
 	}
 	for _, scope := range marker.Scopes {
 		if !scope.Scope.HasLevel {
-			return scope.Status == execution.GapStatusGapped && scope.ObservedFullSlots == 0 &&
-				scope.RequiredFullSlots == plan.RequiredFullSlots
+			return scope.Status == execution.GapStatusGapped &&
+				scope.RequiredFullSlots >= plan.RequiredFullSlots
 		}
 	}
 	return false
+}
+
+// ActivatedPlan has no complete level set when the original snapshot is gone.
+// Preserve the existing level scopes and add Plan-wide protection instead of
+// guessing that the observed levels cover every threshold and no-data level.
+func queryFreeGapCanExtend(marker execution.GapGuardSnapshot, item execution.PlanGapLoadItem, plan execution.ActivatedPlan, mutation execution.PlanGapMutation) bool {
+	if !sameSlotProtectionCandidate(marker, item, plan) {
+		return false
+	}
+	for _, scope := range marker.Scopes {
+		if !scope.Scope.HasLevel {
+			return false
+		}
+	}
+	_, ok := execution.ExtendSameSlotGap(marker.Scopes, mutation.Scopes)
+	return ok
 }
 
 func ensureGappedKind(marker execution.GapGuardSnapshot) (execution.GapMutationKind, error) {
@@ -719,6 +745,7 @@ func (coordinator *SlotExecutionCoordinator) applyActivatedPlanGaps(
 	contractRef execution.FrozenExecutionContractRef,
 	items []execution.PlanGapMutation,
 	requireAlready map[execution.PlanGapIdentity]struct{},
+	extensions ...map[execution.PlanGapIdentity]*observability.GapExtensionFacts,
 ) (bool, error) {
 	allAlready := len(items) > 0
 	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, "activated Plan gap guard",
@@ -733,7 +760,7 @@ func (coordinator *SlotExecutionCoordinator) applyActivatedPlanGaps(
 				return fmt.Errorf("activated Plan gap guard did not complete: %s", item.Status)
 			}
 			return nil
-		})
+		}, extensions...)
 	if err != nil {
 		return false, fmt.Errorf("alarmd worker: apply activated Plan gap guard: %w", err)
 	}
@@ -751,11 +778,20 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 	items []execution.PlanGapMutation,
 	subject string,
 	accept func(execution.GapGuardApplyItemResult) error,
+	extensionMaps ...map[execution.PlanGapIdentity]*observability.GapExtensionFacts,
 ) error {
 	started := time.Now()
 	var totals applyTotals
 	return forEachChunk(ctx, len(items), coordinator.applyChunkItems(coordinator.budget.MaxGapMutations), func(chunk applyChunk) error {
 		chunkItems := items[chunk.start:chunk.end]
+		var extensions []*observability.GapExtensionFacts
+		if len(extensionMaps) > 0 {
+			for _, item := range chunkItems {
+				if facts := extensionMaps[0][item.Identity]; facts != nil {
+					extensions = append(extensions, facts)
+				}
+			}
+		}
 		chunkStarted := time.Now()
 		result, err := coordinator.ports.GapGuard.ApplyGap(ctx, execution.GapGuardApplyRequest{Contract: contractRef, Items: chunkItems})
 		var reason execution.ReasonCode
@@ -780,7 +816,7 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 		}
 		totals.keys += int64(len(chunkItems))
 		coordinator.observeChunk(ctx, observability.StageGapGuardCommitted, operation, chunkStarted, started, "", reason,
-			chunk, totals, observability.Counts{}, err)
+			chunk, totals, observability.Counts{}, err, extensions...)
 		return err
 	})
 }
@@ -1508,6 +1544,12 @@ func (coordinator *SlotExecutionCoordinator) observeWithCounts(
 // panic never fails the Slot.
 func (coordinator *SlotExecutionCoordinator) emitObservation(ctx context.Context, observation observability.Observation) {
 	if observation.Err != nil {
+		var conflict *GapGuardConflictError
+		if errors.As(observation.Err, &conflict) {
+			observation.GapConflict = gapExtensionFacts(
+				execution.GapGuardSnapshot{MarkerRevision: conflict.Persisted.MarkerRevision, Scopes: conflict.Persisted.ScopeDetails},
+				execution.PlanGapMutation{Identity: execution.PlanGapIdentity{Plan: conflict.Plan}, Scopes: conflict.Proposed.MutationScopes})
+		}
 		observation.Result = observability.Result(observability.ResultFailed)
 		if observation.ReasonCode == "" || observation.ReasonCode == observability.ReasonNone {
 			observation.ReasonCode = observability.ReasonInternalUnknown
@@ -1802,4 +1844,17 @@ func storedStateLabel(status execution.StateLoadStatus) observability.StateWrite
 	default:
 		return observability.StateWriteReuseStoredOther
 	}
+}
+
+func gapExtensionFacts(marker execution.GapGuardSnapshot, mutation execution.PlanGapMutation) *observability.GapExtensionFacts {
+	facts := &observability.GapExtensionFacts{StrategyID: mutation.Identity.Plan.StrategyID, MarkerRevision: marker.MarkerRevision}
+	for _, scope := range marker.Scopes {
+		facts.Persisted = append(facts.Persisted, observability.GapScopeFacts{LevelID: scope.Scope.LevelID, HasLevel: scope.Scope.HasLevel,
+			Status: string(scope.Status), Reason: string(scope.ReasonCode), Required: scope.RequiredFullSlots, Observed: scope.ObservedFullSlots})
+	}
+	for _, scope := range mutation.Scopes {
+		facts.Proposed = append(facts.Proposed, observability.GapScopeFacts{LevelID: scope.Scope.LevelID, HasLevel: scope.Scope.HasLevel,
+			Kind: string(scope.Kind), Status: string(execution.GapStatusGapped), Reason: string(scope.ReasonCode), Required: scope.RequiredFullSlots})
+	}
+	return facts
 }

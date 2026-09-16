@@ -124,30 +124,9 @@ func TestSlotExecutionCoordinatorDoesNotReuseInsufficientSameSlotGap(t *testing.
 			},
 		},
 		{
-			name: "observed full slot",
-			marker: func(t *testing.T) execution.GapGuardSnapshot {
-				return queryFreeGapMarker(t, selected, version, selected.ScheduleRevision, planWide(execution.GapStatusGapped, 3, 1))
-			},
-		},
-		{
 			name: "lower required full slots",
 			marker: func(t *testing.T) execution.GapGuardSnapshot {
 				return queryFreeGapMarker(t, selected, version, selected.ScheduleRevision, planWide(execution.GapStatusGapped, 2, 0))
-			},
-		},
-		{
-			name: "higher required full slots",
-			marker: func(t *testing.T) execution.GapGuardSnapshot {
-				return queryFreeGapMarker(t, selected, version, selected.ScheduleRevision, planWide(execution.GapStatusGapped, 4, 0))
-			},
-		},
-		{
-			name: "level scope only",
-			marker: func(t *testing.T) execution.GapGuardSnapshot {
-				return queryFreeGapMarker(t, selected, version, selected.ScheduleRevision, []execution.GapScopeState{{
-					Scope: execution.GapScope{LevelID: 5, HasLevel: true}, Status: execution.GapStatusGapped,
-					ReasonCode: execution.ReasonCode(contract.ReasonConfigDrift), RequiredFullSlots: 3,
-				}})
 			},
 		},
 		{

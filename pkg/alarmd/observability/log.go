@@ -172,6 +172,12 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		slog.String("direction", string(observation.Direction)),
 		slog.Int64("duration_ms", observation.Duration.Milliseconds()),
 	}
+	if f := observation.GapExtensions; len(f) > 0 {
+		attributes = append(attributes, slog.Any("gap_extensions", f))
+	}
+	if f := observation.GapConflict; f != nil {
+		attributes = append(attributes, slog.Any("gap_conflict", f))
+	}
 	if f := observation.QueryCooldown; f != nil {
 		attributes = append(attributes, slog.Any("query_cooldown", f))
 	}
