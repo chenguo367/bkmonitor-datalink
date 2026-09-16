@@ -441,6 +441,10 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// And the objects whose data stopped: rounds completing, nothing coming
 	// back. In no column, and on the data side's line.
 	snapshot.NoData = publisher.tracker.NoData()
+	// And the problems whose objects recovered within the hour: the evidence
+	// the RECOVERED reading is made of, which nothing on the current lines
+	// carries once the objects have left them.
+	snapshot.Recovered = publisher.tracker.Recovered()
 	// Where every listed object is in its cycle, and the census over all of
 	// them. From the same index and the same instant as the overdue facts, so
 	// the row and the sentence above it cannot read two clocks.

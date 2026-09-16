@@ -390,6 +390,13 @@ type CheckReport struct {
 	// rejection, or nothing tried. It is what replaced inferring the
 	// mechanism from the object's period.
 	SkipReasons map[string]int `json:"skip_reasons,omitempty"`
+	// Recovered is the objects that recovered from this line within
+	// RecoveredRetention, over its folds; RecoveredLast the latest of them.
+	// Not in Objects or Current: they are not under the line now. A line with
+	// nothing current and something recovered is a problem that ended, and
+	// the page lists it with the history rather than with the work.
+	Recovered     int        `json:"recovered,omitempty"`
+	RecoveredLast *time.Time `json:"recovered_last,omitempty"`
 	// Partial says at least one column this check draws from was truncated by
 	// its replica, so the counts here are a sample of that column.
 	Partial bool         `json:"partial,omitempty"`
@@ -443,6 +450,16 @@ type CheckGroup struct {
 	CompletingNow int `json:"completing_now,omitempty"`
 	Delayed       int `json:"delayed,omitempty"`
 	Silent        int `json:"silent,omitempty"`
+	// Recovered is the objects that completed healthily after being listed
+	// under this fold, within RecoveredRetention: the positive evidence. On a
+	// fold with objects still under it, it is how far the problem has come
+	// back without lifting the state -- one object still failing keeps the
+	// group blocked. On a fold with none, the fold is the record of a problem
+	// that recovered, and Objects is zero. RecoveredFirst and RecoveredLast
+	// bound when they recovered.
+	Recovered      int        `json:"recovered,omitempty"`
+	RecoveredFirst *time.Time `json:"recovered_first,omitempty"`
+	RecoveredLast  *time.Time `json:"recovered_last,omitempty"`
 }
 
 // Recovery is where a problem is between failing and fixed, read from its
@@ -460,8 +477,10 @@ const (
 	// from any object within it either -- a cooldown, a round not yet due.
 	// Not recovered: recovery needs a success, and none was seen.
 	RecoveryUnconfirmed Recovery = "UNCONFIRMED"
-	// RecoveryRecovered: every object completed healthily after its last
-	// failure and none is late; the problem has left the current lines.
+	// RecoveryRecovered: every object that was under the fold completed
+	// healthily after being listed, and none is under it now. Read from the
+	// recoveries the trackers recorded at the completion, never from the
+	// fold's absence -- a restart or a change of owner empties a fold too.
 	RecoveryRecovered Recovery = "RECOVERED"
 	// RecoveryHistorical: the objects run normally now; what remains is a
 	// record of detection that did not happen and cannot be made to.
@@ -471,12 +490,11 @@ const (
 // RecoveryStates is the closed list, for the page's completeness test.
 var RecoveryStates = []Recovery{RecoveryBlocked, RecoveryRecovering, RecoveryUnconfirmed, RecoveryRecovered, RecoveryHistorical}
 
-// RecoveryStatesWithoutAProducer names the states nothing decides yet.
-// RECOVERED needs a problem remembered after its objects left the lines,
-// which nothing keeps; until something does, the state is in the list so
-// the page has words for it and in this list so the test that every state
-// has a producer knows it is waiting for one rather than wired.
-var RecoveryStatesWithoutAProducer = []Recovery{RecoveryRecovered}
+// RecoveryStatesWithoutAProducer names the states nothing decides yet. Empty
+// since the trackers began recording recoveries: every state has a producer,
+// and the test that checks so has nothing to excuse. Kept so a state added
+// before its producer has somewhere to be declared as waiting.
+var RecoveryStatesWithoutAProducer = []Recovery{}
 
 // blockedKey is the fold key on the Blocked reading: stage, dependency and
 // class, joined so the page can split them back out. A row with no reading
@@ -580,6 +598,10 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		rebalance  *RebalanceFacts
 		skipped    *Consequence
 		reasons    map[string]int
+		// recovered is the objects that recovered from this line within the
+		// retention, recoveredLast the latest of them.
+		recovered     int
+		recoveredLast time.Time
 	}
 	tallies := map[Check]*tally{}
 	ensure := func(check Check) *tally {
@@ -758,6 +780,53 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			key := view.Rebalance.MostOwnedBy
 			entry.groups[key] = &CheckGroup{Key: key, Replicas: []string{view.Rebalance.MostOwnedBy, view.Rebalance.LeastOwnedBy}}
 		}
+		// The problems whose objects recovered. Onto the fold they were under:
+		// beside the objects still there as how far it has come back, or as
+		// the whole fold when none is left -- which is the RECOVERED reading's
+		// only producer. The clocks the fold shows for a recovered problem are
+		// the record's, since no row is left to read them from.
+		for _, problem := range view.Recovered {
+			if problem.Objects == 0 || problem.Check == "" {
+				continue
+			}
+			entry := ensure(problem.Check)
+			group := entry.groups[problem.Key]
+			if group == nil {
+				group = &CheckGroup{Key: problem.Key}
+				entry.groups[problem.Key] = group
+			}
+			group.Recovered += problem.Objects
+			entry.recovered += problem.Objects
+			if !problem.FirstRecovery.IsZero() && (group.RecoveredFirst == nil || problem.FirstRecovery.Before(*group.RecoveredFirst)) {
+				at := problem.FirstRecovery
+				group.RecoveredFirst = &at
+			}
+			if !problem.LastRecovery.IsZero() {
+				at := problem.LastRecovery
+				if group.RecoveredLast == nil || at.After(*group.RecoveredLast) {
+					group.RecoveredLast = &at
+				}
+				if at.After(entry.recoveredLast) {
+					entry.recoveredLast = at
+				}
+				// A healthy completion after the failure is the success the
+				// recovery reading asks for, on this fold.
+				if group.LastSuccess == nil || at.After(*group.LastSuccess) {
+					group.LastSuccess = &at
+				}
+			}
+			if group.Codes == nil {
+				// No row left: the record's clocks are the fold's.
+				if !problem.FirstFailure.IsZero() && (group.FirstFailure == nil || problem.FirstFailure.Before(*group.FirstFailure)) {
+					at := problem.FirstFailure
+					group.FirstFailure = &at
+				}
+				if !problem.LastFailure.IsZero() && (group.LastFailure == nil || problem.LastFailure.After(*group.LastFailure)) {
+					at := problem.LastFailure
+					group.LastFailure = &at
+				}
+			}
+		}
 	}
 	reports := make([]CheckReport, 0, len(tallies))
 	for check, entry := range tallies {
@@ -765,10 +834,15 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			Objects: entry.objects, Strategies: len(entry.strategies), Businesses: len(entry.businesses),
 			Partial: entry.partial, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
 			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour,
-			Consequence: entry.skipped, SkipReasons: entry.reasons, Rebalance: entry.rebalance}
+			Consequence: entry.skipped, SkipReasons: entry.reasons, Rebalance: entry.rebalance,
+			Recovered: entry.recovered}
 		if !entry.newest.IsZero() {
 			newest := entry.newest
 			report.RetainedNewest = &newest
+		}
+		if !entry.recoveredLast.IsZero() {
+			last := entry.recoveredLast
+			report.RecoveredLast = &last
 		}
 		for key, group := range entry.groups {
 			if sets, known := entry.groupSets[key]; known {
@@ -777,9 +851,13 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			// A fold with object rows behind it gets its recovery reading; a
 			// standing's fold and a gap's have no rows and no reading. Record
 			// folds of stopped loss are historical; the folds of loss in
-			// progress are read like any other.
-			if group.Codes != nil {
+			// progress are read like any other. A fold with no rows and
+			// recoveries behind it is a problem that recovered.
+			switch {
+			case group.Codes != nil:
 				group.Recovery = recoveryOf(group, key == string(LossHistorical) || key == string(LossWhileDemoted))
+			case group.Recovered > 0:
+				group.Recovery = RecoveryRecovered
 			}
 			report.Groups = append(report.Groups, *group)
 		}
@@ -939,7 +1017,12 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 		up := report.Current > 0 || report.Code.Standing()
 		switch {
 		case !report.ActionRequired():
-			todo.Governance++
+			// A governance line with nothing under it now -- there only for
+			// the problems that recovered from it -- is not a line in
+			// governance; the page lists it with the history.
+			if report.Objects > 0 || report.Recovered == 0 {
+				todo.Governance++
+			}
 		case report.Owner == OwnerUndetermined && up:
 			todo.Undetermined++
 		case up:

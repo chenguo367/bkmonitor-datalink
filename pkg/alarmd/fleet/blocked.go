@@ -315,11 +315,7 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 	blocked := &Blocked{Stage: StageUnlocated, Dependency: DependencyUnlocated, Class: ClassUnlocated}
 	// The code the check was decided on, in the same order checkOf reads
 	// them, so the reading and the line cannot come from two different codes.
-	failureCode := ""
-	if anomaly.Failure != nil {
-		failureCode = anomaly.Failure.Code
-	}
-	for _, code := range []string{anomaly.CauseReason, string(anomaly.Cause), failureCode, anomaly.ReasonCode} {
+	for _, code := range decisionCodes(anomaly) {
 		if code == "" {
 			continue
 		}
@@ -366,12 +362,15 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 	// current they lent a new reason an old Redis error as its dependency
 	// and called a round that had just ended silence.
 	//
-	// Whether they are this round's is decided by Slot first and by clock
-	// only when a Slot is missing. A failure is observed on its way to the
-	// round's end, so its stamp is a moment before the round's: judged by
-	// clock alone, a real failure filed one millisecond before its own Slot
-	// completed was dropped, and the row said the round was stuck at commit
-	// with nothing to show for it.
+	// Whether they are this round's is decided by Slot when both sides know
+	// theirs, and by clock only when one does not. A failure is observed on
+	// its way to the round's end, so its stamp is a moment before the
+	// round's: judged by clock alone, a real failure filed one millisecond
+	// before its own Slot completed was dropped, and the row said the round
+	// was stuck at commit with nothing to show for it. Two Slots that are
+	// known and differ are two rounds, whatever the clocks say -- a failure
+	// stamped after the latest round ended is the next round's, still in
+	// flight, and becomes this round's when that round ends.
 	latest := time.Time{}
 	for _, candidate := range []time.Time{anomaly.ReasonLastAt, anomaly.ReasonSince} {
 		if candidate.After(latest) {
@@ -385,8 +384,8 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 		latest = anomaly.Skip.At
 	}
 	thisRound := func(slot int64, at *time.Time) bool {
-		if anomaly.RoundSlot != 0 && slot == anomaly.RoundSlot {
-			return true
+		if anomaly.RoundSlot != 0 && slot != 0 {
+			return slot == anomaly.RoundSlot
 		}
 		return at != nil && !at.Before(latest)
 	}

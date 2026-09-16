@@ -787,6 +787,10 @@ type Snapshot struct {
 	// the ready replicas hold the assigned objects and what the round would
 	// move. Absent on every follower and on a build before this fact existed.
 	Rebalance *RebalanceFacts `json:"rebalance,omitempty"`
+	// Recovered is the problems whose listed objects completed healthily
+	// within RecoveredRetention, by line and fold: the positive evidence a
+	// RECOVERED reading is made of. Absent on a build before it existed.
+	Recovered []RecoveredProblem `json:"recovered,omitempty"`
 }
 
 // RebalanceFacts is one rebalance planning round on the control leader, as
@@ -1240,13 +1244,17 @@ type View struct {
 	// keyed by Query Group. In no column and in no total: the objects are
 	// running now and every signal about their current round says so, which is
 	// exactly why this needs somewhere of its own to be said.
-	PrunedSkips        map[string]PrunedSkip  `json:"pruned_skips,omitempty"`
-	GapSkips           map[string]SkippedSpan `json:"gap_skips,omitempty"`
-	NoData             []Anomaly              `json:"no_data,omitempty"`
-	DemotionEntries    int                    `json:"demotion_entries"`
-	DemotionExtensions int                    `json:"demotion_extensions"`
-	DemotionExits      int                    `json:"demotion_exits"`
-	LastDemotionExit   time.Time              `json:"last_demotion_exit,omitempty"`
+	PrunedSkips map[string]PrunedSkip  `json:"pruned_skips,omitempty"`
+	GapSkips    map[string]SkippedSpan `json:"gap_skips,omitempty"`
+	NoData      []Anomaly              `json:"no_data,omitempty"`
+	// Recovered is the problems whose objects completed healthily within the
+	// retention, merged over the counted replicas by line and fold. In no
+	// column and in no total, like the skips: the objects are running now.
+	Recovered          []RecoveredProblem `json:"recovered,omitempty"`
+	DemotionEntries    int                `json:"demotion_entries"`
+	DemotionExtensions int                `json:"demotion_extensions"`
+	DemotionExits      int                `json:"demotion_exits"`
+	LastDemotionExit   time.Time          `json:"last_demotion_exit,omitempty"`
 	// DemotedDue counts pooled objects whose own cooldown window has already
 	// elapsed at the moment of this read: they are due to be tried again and are
 	// still in the pool.
@@ -1394,6 +1402,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			}
 		}
 		view.NoData = append(view.NoData, snapshot.NoData...)
+		mergeRecovered(&view, snapshot.Recovered)
 		if snapshot.LastDemotionExit.After(view.LastDemotionExit) {
 			view.LastDemotionExit = snapshot.LastDemotionExit
 		}

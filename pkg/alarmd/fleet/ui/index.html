@@ -179,6 +179,12 @@ details.group table{margin:6px 0 0 12px}
     <p class="basis" id="buildLine"></p>
     <div class="brief">
       <p id="briefAction"></p>
+      <!-- Where detection is stuck and how much cannot yet be said, as two
+           clauses of one sentence that stands whatever the badge says: a
+           verdict of UNKNOWN is about the evidence, and it used to be the
+           only thing the top of the page said while eighty objects sat
+           blocked on Redis two sections down. -->
+      <p id="briefBlocked"></p>
       <p id="briefSchedule"></p>
       <p id="briefTodo"></p>
       <p id="briefBlind"></p>
@@ -420,6 +426,9 @@ var latestChecks = [];
 // The replica rows of the latest health read, for the lines that name a
 // replica's start beside another's.
 var latestReplicas = [];
+// The latest health read, whole, for the sentence that sets what is blocked
+// beside what cannot yet be said: the two come from different responses.
+var latestDeployment = null;
 
 function api(path, init) {
   return fetch(BASE + 'api/' + path, init).then(function (r) {
@@ -680,23 +689,25 @@ var RECOVERY_STATE = {
   BLOCKED: '仍然受阻（最近窗口内还在失败）',
   RECOVERING: '正在恢复（窗口内没有新失败；轮次在结束或只是迟到，结果还没补齐）',
   UNCONFIRMED: '恢复待确认（窗口内没有新失败，也没观察到任何一轮成功——不算已恢复）',
-  RECOVERED: '已恢复（每个对象都在最近一次失败之后成功完成过）',
+  RECOVERED: '已恢复（曾在这一组的每个对象都在之后成功完成过，现在没有对象在这一组）',
   HISTORICAL: '留有历史影响（历史检测缺口，那段未检测的时间不补）'
 };
 
 // A problem's facts on its fold: the state, what is overdue and retrying
 // under it, when it began, when it was last seen failing, when any of its
-// objects last succeeded.
+// objects last succeeded -- and how many of its objects have recovered,
+// which does not lift the state while one is still under it.
 function problemClause(report, group) {
   if (!group || !group.recovery) return '';
   var parts = [RECOVERY_STATE[group.recovery] || group.recovery];
   if (group.overdue) parts.push('其中 ' + group.overdue + ' 个已超期');
   if (group.retrying) parts.push(group.retrying + ' 个在重试');
+  if (group.recovered) parts.push(recoveredWords(group));
   if (group.first_failure) parts.push('首次 ' + momentLabel(group.first_failure));
   // The latest time the problem was seen: a failure while objects are still
   // failing, otherwise the latest round that ended under it.
   if (group.last_failure) {
-    var clock = group.failing_now ? '最近失败 ' : group.recovery === 'HISTORICAL' ? '最后一次 ' : '最近一轮 ';
+    var clock = group.failing_now ? '最近失败 ' : (group.recovery === 'HISTORICAL' || group.recovery === 'RECOVERED') ? '最后一次 ' : '最近一轮 ';
     parts.push(clock + momentLabel(group.last_failure));
   }
   // A record fold's objects usually run normally now; whether this process
@@ -704,6 +715,14 @@ function problemClause(report, group) {
   if (group.last_success) parts.push('最近一次成功 ' + momentLabel(group.last_success));
   else if (report.group_by !== 'loss') parts.push('本进程没见过这些对象成功完成');
   return parts.join(' · ');
+}
+
+// How many of a fold's objects recovered within the hour, and when: the
+// positive evidence -- a healthy completion after being listed -- so it is
+// never inferred from an object having left the list.
+function recoveredWords(group) {
+  var when = group.recovered_last ? '，最近一次 ' + momentLabel(group.recovered_last) : '';
+  return (group.objects ? '已恢复 ' : '最近 1 小时内恢复 ') + group.recovered + ' 个' + when;
 }
 
 // The fold key on the Blocked reading, in words, with the codes under it.
@@ -859,7 +878,7 @@ function checkSentence(report, count) {
   var demoted = report.demoted && count === (report.current || 0)
     ? '；其中 ' + report.demoted + ' 个已降级，不再反复查' : '';
   return rebalanceWords(words, report.rebalance).replace('{n}', String(count))
-    .replace('{g}', String((report.groups || []).length))
+    .replace('{g}', String(currentGroups(report).length))
     .replace('{s}', String(report.strategies || 0))
     .replace('{b}', String(report.businesses || 0))
     .replace('{c}', String(activation.consecutive_failures || 0))
@@ -867,6 +886,13 @@ function checkSentence(report, count) {
     .replace('{applied}', shortRevision(activation.applied))
     .replace('{published}', shortRevision(activation.published))
     + demoted + lossClause(report, count) + consequenceClause(report) + standingClause(report) + problemsClause(report);
+}
+
+// The folds that are the line now. A fold with nothing under it and
+// recoveries behind it is a problem that ended, on the history side; it
+// is not one of the "kinds" the sentence counts.
+function currentGroups(report) {
+  return (report.groups || []).filter(function (group) { return group.objects || !group.recovered; });
 }
 
 // The split line's numbers, from the leader's rebalance round on the report:
@@ -1073,6 +1099,7 @@ function shortRevision(revision) {
 function renderBrief(deployment) {
   renderBuildLine(deployment.builds, deployment.per_replica);
   text('briefSchedule', scheduleSentence(deployment));
+  text('briefBlocked', blockedSentence(actionLines(latestChecks), deployment));
   var gaps = deployment.gaps || [];
   var unknown = deployment.unknown || 0;
   // Objects restored from records that kept "this round did not complete"
@@ -1272,12 +1299,21 @@ function renderChecks(checks) {
   var pending = [];
   var history = [];
   var governance = [];
+  var recoveredObjects = 0, recoveredLast = '';
   latestChecks.forEach(function (report) {
     var up = (report.current || 0) > 0 || isStanding(report);
-    if (report.retained) history.push(report);
+    // History is what is not the work now: records of loss that stopped, and
+    // problems whose objects recovered within the hour. A line that is up
+    // and also has recoveries is listed with the work; its recovered count
+    // rides on its folds there.
+    if (report.retained || (report.recovered && !up)) history.push(report);
+    if (report.recovered) {
+      recoveredObjects += report.recovered;
+      if (report.recovered_last && report.recovered_last > recoveredLast) recoveredLast = report.recovered_last;
+    }
     if (report.owner === 'ALARMD') { if (up) todo.push(report); }
     else if (report.owner === 'UNDETERMINED') { if (up) pending.push(report); }
-    else governance.push(report);
+    else if (up || report.objects || !report.recovered) governance.push(report);
   });
   fillCheckRows(document.getElementById('checkRows'), todo, 'current');
   show('checksEmpty', todo.length === 0);
@@ -1291,13 +1327,20 @@ function renderChecks(checks) {
                           ongoing: 0, while_demoted: 0, retained: 0, retained_last_hour: 0,
                           governance: governance.length, governance_objects: 0};
   text('govCount', governance.length ? t.governance + ' 类，' + t.governance_objects + ' 个对象' : '没有');
-  text('historyCount', history.length
-    ? t.retained + ' 个对象'
+  var historyParts = [];
+  if (t.retained) {
+    historyParts.push('漏检记录 ' + t.retained + ' 个对象'
       + (t.retained_last_hour ? '，其中 ' + t.retained_last_hour + ' 个最近 1 小时内还发生过' : '，最近 1 小时内都没有发生过')
-      + (t.retained_newest ? '，最后一次 ' + momentLabel(t.retained_newest) : '')
-    : '没有');
+      + (t.retained_newest ? '，最后一次 ' + momentLabel(t.retained_newest) : ''));
+  }
+  if (recoveredObjects) {
+    historyParts.push('已恢复 ' + recoveredObjects + ' 个对象（最近 1 小时内有健康完成'
+      + (recoveredLast ? '，最近一次 ' + momentLabel(recoveredLast) : '') + '）');
+  }
+  text('historyCount', history.length || historyParts.length ? historyParts.join('；') : '没有');
   text('briefTodo', todoSentence(todo, pending, governance, t));
   text('briefAction', actionSentence(todo, pending, governance, t));
+  text('briefBlocked', blockedSentence(actionLines(latestChecks), latestDeployment));
   if (openCheck && !latestChecks.some(function (r) { return r.code === openCheck; })) {
     openCheck = '';
   }
@@ -1326,6 +1369,61 @@ function todoSentence(todo, pending, governance, t) {
   }
   if (t.retained) loss.push('已停止的漏检记录 ' + t.retained + ' 个对象另列');
   return '需要处理：' + parts.join('；') + (loss.length ? '。' + loss.join('；') : '');
+}
+
+// Where detection is stuck, and how much cannot yet be said, in one sentence
+// that does not depend on the badge. The folds are the lines' problem folds
+// across every line that is up -- this deployment's and the undetermined --
+// ordered by how many objects are under them, three at most; each says
+// where, talking to what, what kind, how many, and which of the four states
+// it is in. Then what is unknown, as a count: objects no replica can speak
+// for, and objects restored without a cause. A verdict of UNKNOWN is about
+// the second clause and says nothing about the first, and the page used to
+// let it: "证据不全" beside the badge, and the eighty objects blocked on
+// Redis nowhere until the third section.
+// The lines that are somebody's to act on and have something on them now:
+// this deployment's and the undetermined, up. The same split renderChecks
+// makes, named so the sentence can be rebuilt when the health read lands
+// after the checks did.
+function actionLines(checks) {
+  return (checks || []).filter(function (report) {
+    var up = (report.current || 0) > 0 || isStanding(report);
+    return up && (report.owner === 'ALARMD' || report.owner === 'UNDETERMINED');
+  });
+}
+
+function blockedSentence(lines, deployment) {
+  var folds = [];
+  lines.forEach(function (report) {
+    if (report.group_by !== 'blocked') return;
+    currentGroups(report).forEach(function (group) {
+      if (group.objects) folds.push({report: report, group: group});
+    });
+  });
+  folds.sort(function (a, b) { return b.group.objects - a.group.objects; });
+  var parts = [];
+  if (folds.length) {
+    var shown = folds.slice(0, 3).map(function (fold) {
+      var group = fold.group;
+      return blockedKeyLabel(group.key, group) + ' ' + group.objects + ' 个，'
+        + (RECOVERY_STATE[group.recovery] || group.recovery || '状态未读出').split('（')[0];
+    });
+    var rest = folds.slice(3).reduce(function (sum, fold) { return sum + fold.group.objects; }, 0);
+    parts.push('受阻：' + shown.join('；') + (folds.length > 3 ? '；另 ' + (folds.length - 3) + ' 组共 ' + rest + ' 个，见各行' : ''));
+  } else {
+    parts.push('受阻：没有对象卡在某个环节上');
+  }
+  var d = deployment || {};
+  var unknown = (d.unknown || 0) + (d.unattributed || 0);
+  if (unknown) {
+    parts.push('待确认：' + unknown + ' 个对象说不出结论'
+      + (d.unknown ? '（' + d.unknown + ' 个没有副本能报告' + (d.unattributed ? '，' + d.unattributed + ' 个没留下成因' : '') + '）'
+                   : '（没留下成因，各自再跑完一轮就补上）'));
+    if (String(d.health || '') === 'UNKNOWN' && folds.length) {
+      parts.push('判定停在 UNKNOWN 说的是这一句，不抵消前一句');
+    }
+  }
+  return parts.join('；');
 }
 
 // One conclusion before the evidence. The lines are in the order the reader
@@ -1374,15 +1472,37 @@ function groupKeyLabel(report, key, group) {
 // Three at most; the rest are counted.
 function problemsClause(report) {
   if (report.group_by !== 'blocked' || !report.groups || !report.groups.length) return '';
-  var shown = report.groups.slice(0, 3).map(function (group) {
+  // Folds with objects under them now. A fold whose objects all recovered
+  // is on the history side of the page, not in the sentence about the work.
+  var current = report.groups.filter(function (group) { return group.objects > 0; });
+  if (!current.length) return '';
+  var shown = current.slice(0, 3).map(function (group) {
     var facts = [group.objects + ' 个'];
     if (group.overdue) facts.push(group.overdue + ' 个已超期');
+    if (group.recovered) facts.push('已恢复 ' + group.recovered + ' 个');
     facts.push((RECOVERY_STATE[group.recovery] || group.recovery || '').split('（')[0]);
     if (group.last_failure) facts.push('最近失败 ' + momentLabel(group.last_failure));
     return blockedKeyLabel(group.key, group) + '：' + facts.filter(Boolean).join('，');
   });
-  var rest = report.groups.length > 3 ? '；另 ' + (report.groups.length - 3) + ' 组见展开' : '';
+  var rest = current.length > 3 ? '；另 ' + (current.length - 3) + ' 组见展开' : '';
   return '——' + shown.join('；') + rest;
+}
+
+// The problems of a line that recovered within the hour, for the history
+// side: each recovered fold as one clause, with when it failed and when it
+// recovered. Only folds with nothing under them now -- a fold with objects
+// still failing is in the sentence above with its recovered count.
+function recoveredClause(report) {
+  var folds = (report.groups || []).filter(function (group) { return !group.objects && group.recovered; });
+  if (!folds.length) return '';
+  var shown = folds.slice(0, 3).map(function (group) {
+    var facts = [group.recovered + ' 个'];
+    if (group.first_failure) facts.push('失败 ' + momentLabel(group.first_failure) + (group.last_failure ? '–' + momentLabel(group.last_failure) : ''));
+    if (group.recovered_first) facts.push('恢复 ' + momentLabel(group.recovered_first) + (group.recovered_last && group.recovered_last !== group.recovered_first ? '–' + momentLabel(group.recovered_last) : ''));
+    return groupKeyLabel(report, group.key, group) + '：' + facts.join('，');
+  });
+  var rest = folds.length > 3 ? '；另 ' + (folds.length - 3) + ' 组见展开' : '';
+  return '已恢复 ' + report.recovered + ' 个对象（最近 1 小时内有健康完成，现在不在这一行上）——' + shown.join('；') + rest;
 }
 
 // The next step for a check, with the window it names filled in.
@@ -1412,9 +1532,19 @@ function checkRow(report, which) {
   if (report.code === openCheck) tr.className = 'openrow';
   var what = document.createElement('td');
   var count = which === 'retained' ? report.retained : (which === 'current' ? report.current : report.objects);
-  what.appendChild(document.createTextNode(checkSentence(report, count)));
-  if (which === 'retained') {
-    what.appendChild(document.createTextNode(historyClause(report)));
+  // On the history side a line can be there for two reasons: records of
+  // loss that stopped, said with the check's own sentence over the retained
+  // count; and problems that recovered, said as such. A line there for the
+  // second reason alone does not get the check's sentence over a count of
+  // zero -- that reads as a current problem with no objects.
+  if (which === 'retained' && !report.retained && report.recovered) {
+    what.appendChild(document.createTextNode(recoveredClause(report)));
+  } else {
+    what.appendChild(document.createTextNode(checkSentence(report, count)));
+    if (which === 'retained') {
+      what.appendChild(document.createTextNode(historyClause(report)));
+      if (report.recovered) what.appendChild(document.createTextNode('；' + recoveredClause(report)));
+    }
   }
   // The three things past the sentence, on one line each so a reader sees
   // 影响 → 证据 → 下一步 → 恢复标准 in that order and never has to infer
@@ -1797,6 +1927,7 @@ function loadHealth() {
 // check stays green. That has already shipped once from the object table.
 function renderDeployment(deployment) {
     show('healthErr', false);
+    latestDeployment = deployment;
     var h = deployment.health || 'UNKNOWN';
     var badge = document.getElementById('health');
     badge.textContent = h;

@@ -149,11 +149,7 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 // failure's code, the round's outcome. Decided with an empty check is a
 // code the table calls normal. Not decided is a row no code reaches.
 func codeVerdict(anomaly Anomaly) (check Check, decided bool) {
-	failureCode := ""
-	if anomaly.Failure != nil {
-		failureCode = anomaly.Failure.Code
-	}
-	for _, code := range []string{anomaly.CauseReason, string(anomaly.Cause), failureCode, anomaly.ReasonCode} {
+	for _, code := range decisionCodes(anomaly) {
 		if code == "" {
 			continue
 		}
@@ -170,6 +166,42 @@ func codeVerdict(anomaly Anomaly) (check Check, decided bool) {
 		return verdict.check, true
 	}
 	return "", false
+}
+
+// decisionCodes is the row's codes in the order they are trusted, shared by
+// the check and by the reading so the line and its stage cannot come from
+// two different codes: the cause's reason, the cause, the query failure's
+// code, the round's outcome. The cause describes the last round that
+// completed, so when the latest round did not complete -- it failed -- and
+// the failure named this round, the failure's code comes first: a row whose
+// last completion was skipped past the replay window and whose rounds since
+// are refused by a gap guard is the refusal, not the skip, and read cause
+// first it sat under "检测已停" while the refusal repeated every thirty
+// seconds. A failure kept from an earlier Slot does not get that place; it
+// stays third, as it was.
+func decisionCodes(anomaly Anomaly) []string {
+	failureCode := ""
+	if anomaly.Failure != nil {
+		failureCode = anomaly.Failure.Code
+	}
+	codes := []string{anomaly.CauseReason, string(anomaly.Cause), failureCode, anomaly.ReasonCode}
+	if failedExecution(anomaly.ReasonCode) && failureThisRound(anomaly) {
+		codes = append([]string{failureCode}, codes...)
+	}
+	return codes
+}
+
+// failureThisRound says the row's query failure belongs to its latest round:
+// by Slot when both are known, by clock against the latest round's when one
+// is not. Rows from a publisher before either field are read as they were.
+func failureThisRound(anomaly Anomaly) bool {
+	if anomaly.Failure == nil {
+		return false
+	}
+	if anomaly.RoundSlot != 0 && anomaly.Failure.Slot != 0 {
+		return anomaly.Failure.Slot == anomaly.RoundSlot
+	}
+	return anomaly.Failure.At != nil && !anomaly.Failure.At.Before(anomaly.ReasonLastAt)
 }
 
 // gapRestoredWithoutCause is the fold, within the observation gap, of objects

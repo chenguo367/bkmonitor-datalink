@@ -455,6 +455,9 @@ type Tracker struct {
 	demotionExtensions int
 	demotionExits      int
 	lastDemotionExit   time.Time
+	// recovered is the problems whose listed objects completed healthily,
+	// by line and fold, kept for RecoveredRetention after the last one did.
+	recovered map[string]*recoveredFold
 }
 
 // NewTracker wraps an observer. A nil next observer is allowed; the tracker is
@@ -688,6 +691,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 
 	switch {
 	case completion != "":
+		if healthyCompletion(completion) {
+			// The one moment recovery has positive evidence: the object that
+			// was a row completed healthily. Remembered under the line and
+			// fold it was on -- read from the row as it was before this round
+			// is folded in, since this round is the one that ends it.
+			tracker.noteRecovery(queryGroup, state, at)
+		}
 		state.determined = true
 		state.lastCompleted = completion
 		state.lastRoundSlot = trace.EvaluationTime
@@ -1026,64 +1036,73 @@ func columnOf(state *queryGroupState) string {
 	return ColumnAnomalies
 }
 
+// over says whether the object's run has lasted long enough to be listed,
+// or the object is exposed by the pool: the one predicate for "is this a
+// row", shared by the list and by the recovery that ends a row.
+func (tracker *Tracker) over(state *queryGroupState) bool {
+	over := (state.currentKind == KindDegradedRun && state.degradedRuns >= tracker.degradedRounds) ||
+		(state.currentKind == KindBlockedRun && state.blockedRuns >= tracker.blockedRounds)
+	return over || state.queryCooldown != nil || (state.cooldownExposed && state.inAnomalyRun)
+}
+
+// rowOf is the object's row as the list publishes it. Caller holds the lock.
+func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly {
+	anomaly := Anomaly{
+		QueryGroup:    queryGroup,
+		QueryCooldown: state.queryCooldown,
+		DemotedSince:  state.demotedSince,
+		Kind:          state.currentKind,
+		ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason,
+		Coverage:      state.coverage,
+		Since:         state.runStartedAt,
+		SinceFrom:     state.sinceFrom,
+		FailingSince:  state.failingSince,
+		ReasonSince:   state.reasonSince,
+		ReasonLastAt:  state.reasonLastAt,
+		RoundSlot:     state.lastRoundSlot,
+		Consecutive:   state.reasonRuns,
+		Replica:       tracker.replica,
+		Failure:       state.lastFailure,
+		Internal:      state.internal,
+		LastError:     state.lastError,
+		LastHealthyAt: state.lastHealthyAt,
+		ConfigChanged: state.configChanged,
+		Restored:      state.restoredRound,
+	}
+	if anomaly.Kind == "" && state.queryCooldown != nil {
+		anomaly.Kind = KindQueryCooldown
+		if anomaly.Since.IsZero() {
+			anomaly.Since = state.queryCooldown.LastQueryAt
+			anomaly.SinceFrom = SinceSnapshotContinuity
+		}
+	}
+	// Nothing can have started later than the moment it is being read, so a
+	// start time in the future is a defect in whatever produced it, not a
+	// long-running object. Refusing it here rather than letting the sort
+	// absorb it is deliberate: ordered oldest-first, a future timestamp
+	// sorts last, which is where a shortened list stops showing rows -- the
+	// mis-stamped object disappears exactly when the list gets interesting.
+	if now := tracker.now(); anomaly.Since.After(now) {
+		anomaly.Since = now
+		anomaly.SinceFrom = SinceRefusedFuture
+	}
+	for strategy := range state.strategies {
+		anomaly.Strategies = append(anomaly.Strategies, strategy)
+	}
+	sortStrategies(anomaly.Strategies)
+	return anomaly
+}
+
 func (tracker *Tracker) listed(column string) []Anomaly {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 
 	anomalies := make([]Anomaly, 0)
 	for queryGroup, state := range tracker.groups {
-		over := (state.currentKind == KindDegradedRun && state.degradedRuns >= tracker.degradedRounds) ||
-			(state.currentKind == KindBlockedRun && state.blockedRuns >= tracker.blockedRounds)
-		if !over && state.queryCooldown == nil && !(state.cooldownExposed && state.inAnomalyRun) {
+		if !tracker.over(state) || columnOf(state) != column {
 			continue
 		}
-		if columnOf(state) != column {
-			continue
-		}
-		anomaly := Anomaly{
-			QueryGroup:    queryGroup,
-			QueryCooldown: state.queryCooldown,
-			DemotedSince:  state.demotedSince,
-			Kind:          state.currentKind,
-			ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason,
-			Coverage:      state.coverage,
-			Since:         state.runStartedAt,
-			SinceFrom:     state.sinceFrom,
-			FailingSince:  state.failingSince,
-			ReasonSince:   state.reasonSince,
-			ReasonLastAt:  state.reasonLastAt,
-			RoundSlot:     state.lastRoundSlot,
-			Consecutive:   state.reasonRuns,
-			Replica:       tracker.replica,
-			Failure:       state.lastFailure,
-			Internal:      state.internal,
-			LastError:     state.lastError,
-			LastHealthyAt: state.lastHealthyAt,
-			ConfigChanged: state.configChanged,
-			Restored:      state.restoredRound,
-		}
-		if anomaly.Kind == "" && state.queryCooldown != nil {
-			anomaly.Kind = KindQueryCooldown
-			if anomaly.Since.IsZero() {
-				anomaly.Since = state.queryCooldown.LastQueryAt
-				anomaly.SinceFrom = SinceSnapshotContinuity
-			}
-		}
-		// Nothing can have started later than the moment it is being read, so a
-		// start time in the future is a defect in whatever produced it, not a
-		// long-running object. Refusing it here rather than letting the sort
-		// absorb it is deliberate: ordered oldest-first, a future timestamp
-		// sorts last, which is where a shortened list stops showing rows -- the
-		// mis-stamped object disappears exactly when the list gets interesting.
-		if now := tracker.now(); anomaly.Since.After(now) {
-			anomaly.Since = now
-			anomaly.SinceFrom = SinceRefusedFuture
-		}
-		for strategy := range state.strategies {
-			anomaly.Strategies = append(anomaly.Strategies, strategy)
-		}
-		sortStrategies(anomaly.Strategies)
-		anomalies = append(anomalies, anomaly)
+		anomalies = append(anomalies, tracker.rowOf(queryGroup, state))
 	}
 	// Sorted here rather than only in the aggregate, because the publisher cuts
 	// this list at the cap before anyone aggregates it. Ranging over a Go map is
