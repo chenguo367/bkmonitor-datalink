@@ -488,9 +488,14 @@ type Anomaly struct {
 	// the index has no entry, which means no round has returned since that
 	// replica took the object over.
 	Wake *WakeFacts `json:"wake,omitempty"`
-	// Skip is the span of Slots never evaluated, on a row of KindSkippedSpan.
-	// Slots is zero when the count is not knowable (a pruned timeline).
+	// Skip is the span of Slots never evaluated, on a row of KindSkippedSpan
+	// -- and on an object row whose object also holds a record, so the row
+	// says what the object lost while under its line. Slots is zero when the
+	// count is not knowable (a pruned timeline). Loss says what the record
+	// is a record of, decided at read time from the object's column and the
+	// record's age; empty on a row with no record.
 	Skip *SkippedSpan `json:"skip,omitempty"`
+	Loss Loss         `json:"loss,omitempty"`
 	// Attribution says whether capacity or design could have prevented this.
 	// Only the ones where it could decide the verdict; the rest are real work
 	// for someone else. Filled in by Attribute rather than by the tracker, so

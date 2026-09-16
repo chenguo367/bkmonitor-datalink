@@ -260,18 +260,27 @@ details.group table{margin:6px 0 0 12px}
 
   <section class="panel">
     <h2>检查项</h2>
-    <p class="basis">需要 alarmd 这边处理的，和证据还分不出是谁的。点一行，看它按成因分组的对象。</p>
+    <p class="basis">三部分：已确认是 alarmd 的；证据还分不出是谁的（不能交出去，也不能当没事）；已确认是业务侧的。点一行，看它按成因分组的对象。</p>
     <div id="objErr" class="err" hidden></div>
     <table>
-      <thead><tr><th>发生了什么</th><th>谁处理</th><th></th></tr></thead>
+      <thead><tr><th>alarmd 已确认</th><th>谁处理</th><th></th></tr></thead>
       <tbody id="checkRows"></tbody>
     </table>
-    <div class="empty" id="checksEmpty" hidden>现在没有需要 alarmd 这边处理的问题。</div>
+    <div class="empty" id="checksEmpty" hidden>现在没有已确认要 alarmd 这边处理的问题。</div>
+    <!-- Not confirmed as this deployment's is not confirmed as anybody's.
+         These used to sit in the table above under 待确认 while the act
+         line said the rest were the strategy's or the data's people. -->
+    <table id="pendingTable">
+      <thead><tr><th>待归因：未确认属 alarmd，也不等于业务侧的</th><th>谁处理</th><th></th></tr></thead>
+      <tbody id="pendingRows"></tbody>
+    </table>
     <!-- Past loss, kept on record until somebody looks, apart from what is
          wrong now. Mixed into the lines above it read as 393 objects to act
-         on when 10 were anomalous and the rest were Slots skipped hours ago. -->
+         on when 10 were anomalous and the rest were Slots skipped hours ago;
+         and a loss still in progress is not history -- it is on the lines
+         above, and the fold here holds only what stopped. -->
     <details class="more" id="historyFold">
-      <summary>曾经漏检（留存记录，不会自己消失）——<span id="historyCount"></span></summary>
+      <summary>历史检测缺口（已停止的漏检记录，不会自己消失；仍在发生的在上面）——<span id="historyCount"></span></summary>
       <table><tbody id="historyRows"></tbody></table>
     </details>
     <details class="more">
@@ -576,7 +585,10 @@ var CHECK = {
   SLOTS_OVERDUE:         '{n} 个对象到期没跑',
   NEVER_EVALUATED:       '{n} 个对象接管后从未评估',
   ROUNDS_STALLED:        '{n} 个对象的轮次不再结束，不会自己恢复',
-  DETECTION_ABANDONED:   '{n} 个对象因 alarmd 自己的容量限制放弃了检测，那段不补',
+  // The two record lines. What the loss is -- in progress, a budget
+  // rejection, or stopped -- is said by lossClause from the groups; the
+  // word 容量 appears only over a budget rejection.
+  DETECTION_ABANDONED:   '{n} 个对象跳过了检测，那段不补',
   TIMELINE_PRUNED:       '{n} 个对象的游标越过了已裁掉的时间线，那段没检测也不补',
   DEPENDENCY_DOWN:       'alarmd 自己的依赖没答，{n} 个对象受影响（{g} 种）',
   DEFECT:                '{n} 个对象命中程序缺陷（{g} 种），上报',
@@ -594,7 +606,15 @@ var CHECK = {
 
 // What the objects of a check are folded on, in words.
 var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况',
-                degradation: '超界的状态'};
+                degradation: '超界的状态', loss: '损失是什么'};
+
+// What a retained record is a record of, in words. Held to the Go list.
+// The window the first two are decided on comes from the response.
+var LOSS = {
+  WHILE_DEMOTED: '在被拒期间跳过（冷却让旧轮次超出重放范围，首要原因是查询不可用）',
+  ONGOING: '仍在发生（最近 {w} 分钟内跳过）',
+  HISTORICAL: '已停止（{w} 分钟以上没有再跳过）'
+};
 
 // The replica-level standings, in words. Held to the Go list.
 var DEGRADATION = {
@@ -615,8 +635,8 @@ var NEXT = {
   SLOTS_OVERDUE:         '看该副本是否卡住或过载：展开看对象与超期多久；持续增长就是容量或调度问题',
   NEVER_EVALUATED:       '展开看接管后多久没跑；接管不久可等，超过一个周期就查该副本的调度',
   ROUNDS_STALLED:        '不会自己恢复：展开找对象，查它卡在哪一步（日志按 query_group_key），必要时重启副本',
-  DETECTION_ABANDONED:   '当前有的：查为什么追不上（容量、查询慢）；留存记录只记损失，不用处理，看"曾经漏检"里的最近新增',
-  TIMELINE_PRUNED:       '留存记录，那段永久没检测；要处理的是让它不再发生：看游标为什么落后到被剪',
+  DETECTION_ABANDONED:   '仍在发生的：看对象行的周期与最近一次跳过——短周期对象错过实时轮后重放超上限是调度边界问题，alarmd 的；只有"资源预算拒绝"分组才是容量限制，不能据此扩容。恢复标准：{w} 分钟内没有新的跳过',
+  TIMELINE_PRUNED:       '仍在发生的：看游标为什么落后到被剪；已停止的只是记录，那段永久没检测。恢复标准：{w} 分钟内没有新的越过',
   DEPENDENCY_DOWN:       '按原因码看是哪个依赖（Redis/Kafka/后端）；依赖恢复后自动清',
   DEFECT:                '程序缺陷：带原因码上报，展开取一个对象的证据',
   OBSERVATION_GAP:       '先等：成因缺失的对象各自再跑一轮就补上（行上有预计时刻）；副本级缺口看该副本快照',
@@ -629,6 +649,13 @@ var NEXT = {
   SERIES_CHURNING:       '交策略侧：序列活不过检测窗口，通常是聚合维度太细',
   PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略',
   QUERY_TARGET_MISSING:  '交策略侧：策略引用的表或字段不存在，改策略或接入数据；已降级的对象修好后会自动重试'
+};
+
+// The next step for the two record lines in the history fold, where the
+// loss has stopped: nothing to make stop, only a span with no alert cover.
+var NEXT_RETAINED = {
+  DETECTION_ABANDONED: '已停止，不用让它停；那段永久没检测，按策略看影响的是谁、要不要补告警覆盖',
+  TIMELINE_PRUNED:     '已停止，不用让它停；那段永久没检测，按策略看影响的是谁'
 };
 
 // The two dimensions each object row shows, in words. Held to the Go lists.
@@ -661,7 +688,48 @@ function checkSentence(report, count) {
     .replace('{c}', String(activation.consecutive_failures || 0))
     .replace('{since}', since)
     .replace('{applied}', shortRevision(activation.applied))
-    .replace('{published}', shortRevision(activation.published)) + demoted;
+    .replace('{published}', shortRevision(activation.published))
+    + demoted + lossClause(report, count) + consequenceClause(report);
+}
+
+// The window "still happening" is decided on, in minutes, from the
+// response; the page does not assume it.
+function recentWindowMinutes() {
+  var seconds = latestTodo && latestTodo.recent_window_seconds;
+  return seconds ? Math.round(seconds / 60) : 10;
+}
+
+// A record line's groups say what its objects lost: rounds still being
+// lost now, a budget rejection -- the one fold that is a capacity limit --
+// or a loss that stopped. Said on the line so that "跳过了检测" is never read
+// as "扩容" without the evidence for it.
+function lossClause(report, count) {
+  if (report.group_by !== 'loss') return '';
+  var ongoing = 0, budget = 0, stopped = 0;
+  (report.groups || []).forEach(function (group) {
+    if (group.key === 'ONGOING') ongoing += group.objects || 0;
+    else if (group.key === 'HISTORICAL') stopped += group.objects || 0;
+    else if (/BUDGET|RESOURCE_HARD_STOP|RECORD_TOO_LARGE/.test(group.key)) budget += group.objects || 0;
+  });
+  var parts = [];
+  if (count === (report.current || 0)) {
+    if (ongoing) parts.push('最近 ' + recentWindowMinutes() + ' 分钟内仍在跳过 ' + ongoing + ' 个');
+    parts.push(budget ? '资源预算拒绝 ' + budget + ' 个——只有这部分是容量限制' : '没有资源预算拒绝，不是容量问题');
+  } else if (stopped) {
+    parts.push('已停止，' + recentWindowMinutes() + ' 分钟以上没有再发生');
+  }
+  return parts.length ? '（' + parts.join('；') + '）' : '';
+}
+
+// A line whose objects sit in the demoted pool says what they lost there.
+// The skip is the cooldown's doing and the refusal is the cause, so it is
+// this line's clause and not a line of this deployment's own.
+function consequenceClause(report) {
+  var consequence = report.consequence;
+  if (!consequence || !consequence.skipped) return '';
+  return '；其中 ' + consequence.skipped + ' 个在被拒期间还跳过了检测'
+    + (consequence.skipped_recent ? '（最近 ' + recentWindowMinutes() + ' 分钟内 ' + consequence.skipped_recent + ' 个）' : '')
+    + '——冷却让旧轮次超出重放范围，首要原因是查询不可用，扩容无用';
 }
 
 // The standings in words, each once with its replicas: two replicas past the
@@ -678,14 +746,15 @@ function degradationWords(degradations) {
   }).join('；');
 }
 
-// When the record was made: what a reader can still act on is the part that
-// was just added, so the newest and the last hour are said, not only the
-// total.
+// When the stopped losses stopped. Not "新增": a record keeps one skip per
+// object, the latest, so how many objects were added cannot be read from
+// it; what can is how many stopped within the last hour, and when the
+// latest did.
 function historyClause(report) {
   var parts = [];
-  if (report.retained_last_hour) parts.push('最近 1 小时新增 ' + report.retained_last_hour + ' 个');
-  else parts.push('最近 1 小时没有新增');
-  if (report.retained_newest) parts.push('最新一条 ' + momentLabel(report.retained_newest));
+  if (report.retained_last_hour) parts.push('其中 ' + report.retained_last_hour + ' 个最近 1 小时内还发生过');
+  else parts.push('最近 1 小时内都没有发生过');
+  if (report.retained_newest) parts.push('最后一次 ' + momentLabel(report.retained_newest));
   return '——' + parts.join('，');
 }
 
@@ -718,7 +787,15 @@ function renderBrief(deployment) {
   if (unknown) blind.push(unknown + ' 个对象现在说不出结论');
   if (unattributed) blind.push(unattributed + ' 个对象没留下成因，还说不清归谁；各自再跑完一轮就补上');
   if (gaps.length) blind.push(gaps.length + ' 处覆盖缺口');
-  text('briefBlind', '观测完整性：' + (blind.length ? blind.join('；') : '全部对象都有结论'));
+  // Two different completenesses, said apart. Every object having a
+  // conclusion is about the states; whether the anomaly lists behind the
+  // lines are whole is about the detail -- and "全部对象都有结论" beside a
+  // cell reading 看不全 left the reader to reconcile the two.
+  var truncated = (deployment.per_replica || []).filter(function (r) { return r.truncated; });
+  var detail = truncated.length
+    ? '明细不全：' + truncated.length + ' 个副本的异常清单被截断，下面的分组数和策略数是样本'
+    : '异常明细完整';
+  text('briefBlind', '状态覆盖：' + (blind.length ? blind.join('；') : '全部对象都有结论') + '。' + detail);
 }
 
 // Which build the numbers came from. Held to the Go grouping: one group per
@@ -792,6 +869,30 @@ function queueVerdict(census) {
   return '——但没有对象超期（' + rates + '），排队没耽误到期任务，不构成扩容理由。';
 }
 
+// Whether a full ready queue is something to grow. "这一种扩队列有用" was a
+// remedy stated off one counter; a bigger queue relieves a burst or only
+// makes objects wait longer, and which it is shows in whether due work is
+// finishing on time and whether detection is being lost -- so the verdict
+// is those facts, and a bigger queue is never promised.
+function queueFullVerdict(census) {
+  var ongoing = latestTodo ? latestTodo.ongoing || 0 : 0;
+  if (!census) {
+    return '。到期任务有没有被耽误，本构建没有普查，判不了——别只凭这个数扩队列。';
+  }
+  var standing = scheduleStanding(census);
+  var loss = ongoing ? '，且正在漏检 ' + ongoing + ' 个对象' : '';
+  if (standing.behind || ongoing) {
+    return '。此刻 ' + standing.overdue + ' 个对象超期' + loss + '：先看等待时长与消费速度——'
+      + '排队在增长、按时率在降（1 小时 ' + (standing.rate1h === null ? '无' : standing.rate1h + '%')
+      + ' 对 6 小时 ' + (standing.rate6h === null ? '无' : standing.rate6h + '%') + '）才是位子不够；'
+      + '只扩队列可能只是让任务等得更久，不保证有效。';
+  }
+  if (standing.overdue) {
+    return '。此刻 ' + standing.overdue + ' 个对象超期但在追、没有正在发生的漏检——先看能不能自己追上，再谈扩队列。';
+  }
+  return '。此刻没有对象超期、没有正在发生的漏检——排队没耽误到期任务，不构成扩队列的理由。';
+}
+
 function scheduleSentence(deployment) {
   var census = deployment.schedule;
   if (!census) {
@@ -861,60 +962,111 @@ function isStanding(report) {
 // than by adding lines up: the sum of every line's objects counted past
 // losses as work and an object under two lines twice, and read as "需要处理
 // 768 个对象" over a deployment with a few dozen objects wrong.
+// Four sections: confirmed this deployment's, not yet anybody's, the record
+// of stopped losses, and confirmed somebody else's. The middle one is its
+// own because "not confirmed as ours" and "confirmed as theirs" are two
+// statements, and one table with an act line saying the rest were the
+// strategy's or the data's people made them one.
 function renderChecks(checks) {
   latestChecks = checks || [];
   var todo = [];
+  var pending = [];
   var history = [];
   var governance = [];
   latestChecks.forEach(function (report) {
-    var ours = report.owner === 'ALARMD' || report.owner === 'UNDETERMINED';
+    var up = (report.current || 0) > 0 || isStanding(report);
     if (report.retained) history.push(report);
-    if (!ours) governance.push(report);
-    else if ((report.current || 0) > 0 || isStanding(report)) todo.push(report);
+    if (report.owner === 'ALARMD') { if (up) todo.push(report); }
+    else if (report.owner === 'UNDETERMINED') { if (up) pending.push(report); }
+    else governance.push(report);
   });
   fillCheckRows(document.getElementById('checkRows'), todo, 'current');
   show('checksEmpty', todo.length === 0);
+  fillCheckRows(document.getElementById('pendingRows'), pending, 'current');
+  show('pendingTable', pending.length > 0);
   fillCheckRows(document.getElementById('historyRows'), history, 'retained');
   show('historyFold', history.length > 0);
   fillCheckRows(document.getElementById('govRows'), governance, 'objects');
   show('govEmpty', governance.length === 0);
-  var t = latestTodo || {checks: todo.length, objects: 0, retained: 0, retained_last_hour: 0,
+  var t = latestTodo || {checks: todo.length, objects: 0, undetermined: pending.length, undetermined_objects: 0,
+                          ongoing: 0, while_demoted: 0, retained: 0, retained_last_hour: 0,
                           governance: governance.length, governance_objects: 0};
   text('govCount', governance.length ? t.governance + ' 类，' + t.governance_objects + ' 个对象' : '没有');
   text('historyCount', history.length
-    ? t.retained + ' 个对象' + (t.retained_last_hour ? '，最近 1 小时新增 ' + t.retained_last_hour + ' 个' : '，最近 1 小时没有新增')
-      + (t.retained_newest ? '，最新 ' + momentLabel(t.retained_newest) : '')
+    ? t.retained + ' 个对象'
+      + (t.retained_last_hour ? '，其中 ' + t.retained_last_hour + ' 个最近 1 小时内还发生过' : '，最近 1 小时内都没有发生过')
+      + (t.retained_newest ? '，最后一次 ' + momentLabel(t.retained_newest) : '')
     : '没有');
-  text('briefTodo', todo.length
-    ? '需要处理：' + t.checks + ' 类检查项，当前影响 ' + t.objects + ' 个对象（去重）'
-      + (t.retained ? '；曾经漏检 ' + t.retained + ' 个对象另列' + (t.retained_last_hour ? '，最近 1 小时新增 ' + t.retained_last_hour : '') : '')
-    : '需要处理：现在没有需要 alarmd 这边处理的问题'
-      + (t.retained ? '；曾经漏检 ' + t.retained + ' 个对象另列' + (t.retained_last_hour ? '，最近 1 小时新增 ' + t.retained_last_hour : '') : ''));
-  text('briefAction', actionSentence(todo, history, governance, t));
+  text('briefTodo', todoSentence(todo, pending, governance, t));
+  text('briefAction', actionSentence(todo, pending, governance, t));
   if (openCheck && !latestChecks.some(function (r) { return r.code === openCheck; })) {
     openCheck = '';
   }
   renderGroups();
 }
 
+// The three parts, each with its own number, then what is being lost now
+// and what the refused objects lost -- apart, so a loss in progress is
+// never read as history and a refusal's consequence never as capacity.
+function todoSentence(todo, pending, governance, t) {
+  var parts = ['alarmd 已确认 ' + (todo.length ? t.checks + ' 类（' + t.objects + ' 个对象，去重）' : '没有'),
+               '待归因 ' + (pending.length ? t.undetermined + ' 类（' + t.undetermined_objects + ' 个对象）' : '没有'),
+               '业务侧已确认 ' + (governance.length ? t.governance + ' 类（' + t.governance_objects + ' 个对象）在运营治理' : '没有')];
+  var loss = [];
+  if (t.ongoing) {
+    loss.push('正在漏检 ' + t.ongoing + ' 个对象（最近 ' + recentWindowMinutes() + ' 分钟内跳过'
+      + (t.ongoing_newest ? '，最近一次 ' + momentLabel(t.ongoing_newest) : '') + '）');
+  }
+  if (t.while_demoted) {
+    loss.push('被拒的对象里 ' + t.while_demoted + ' 个在冷却期间跳过了检测'
+      + (t.while_demoted_recent ? '（最近 ' + recentWindowMinutes() + ' 分钟内 ' + t.while_demoted_recent + ' 个）' : '')
+      + '，首要原因是查询不可用');
+  }
+  if (t.retained) loss.push('已停止的漏检记录 ' + t.retained + ' 个对象另列');
+  return '需要处理：' + parts.join('；') + (loss.length ? '。' + loss.join('；') : '');
+}
+
 // One conclusion before the evidence. The lines are in the order the reader
 // acts, so the first one is the thing to do; the other sections are named so
 // the reader knows they were weighed and not hidden. The page used to give
 // three sentences that each stood, and left combining them to the reader.
-function actionSentence(todo, history, governance, t) {
+function actionSentence(todo, pending, governance, t) {
   if (todo.length) {
     var first = todo[0];
-    return '现在要做的：' + (NEXT[first.code] || first.code) + '（' + checkSentence(first, first.current) + '）'
-      + (todo.length > 1 ? '；之后还有 ' + (todo.length - 1) + ' 类，按顺序在下面' : '');
+    return '现在要做的：' + nextWords(first.code) + '（' + checkSentence(first, first.current) + '）'
+      + (todo.length > 1 ? '；之后还有 ' + (todo.length - 1) + ' 类，按顺序在下面' : '')
+      + (pending.length ? '；待归因 ' + pending.length + ' 类另看，别交出去' : '');
   }
-  var parts = ['现在要做的：alarmd 这边没有要处理的'];
-  if (t.retained_last_hour) {
-    parts.push('但最近 1 小时新增了 ' + t.retained_last_hour + ' 个漏检记录，先看"曾经漏检"里最新的是谁、漏了哪段');
+  var parts = ['现在要做的：alarmd 这边没有已确认要处理的'];
+  if (pending.length) {
+    parts.push('先看待归因的 ' + pending.length + ' 类（' + t.undetermined_objects + ' 个对象）——未确认属 alarmd，也不等于业务侧的');
+  }
+  if (t.ongoing) {
+    parts.push('正在漏检 ' + t.ongoing + ' 个对象，先看它们的周期与最近一次跳过');
   }
   if (governance.length) {
     parts.push('运营治理 ' + governance.length + ' 类交对应负责人');
   }
   return parts.join('；');
+}
+
+// A group's key in words where the key is a closed value the page has
+// words for: a standing's kind, or what a record is a record of. A budget
+// rejection under a record line is named as the one fold that is capacity.
+function groupKeyLabel(report, key) {
+  if (DEGRADATION[key]) return key + '（' + DEGRADATION[key] + '）';
+  if (report.group_by === 'loss') {
+    if (LOSS[key]) return key + '（' + LOSS[key].replace('{w}', String(recentWindowMinutes())) + '）';
+    if (/BUDGET|RESOURCE_HARD_STOP|RECORD_TOO_LARGE/.test(key)) return key + '（资源预算拒绝——这一组才是容量限制）';
+  }
+  return key;
+}
+
+// The next step for a check, with the window it names filled in.
+function nextWords(code) {
+  var words = NEXT[code];
+  if (!words) return '（页面没有这条检查项的下一步：' + code + '，请上报）';
+  return words.replace('{w}', String(recentWindowMinutes()));
 }
 
 // which is the count the sentence is about: 'current' for the todo list,
@@ -937,7 +1089,7 @@ function checkRow(report, which) {
   }
   var next = document.createElement('div');
   next.className = 'next';
-  next.textContent = '下一步：' + (NEXT[report.code] || '（页面没有这条检查项的下一步：' + report.code + '，请上报）');
+  next.textContent = '下一步：' + (which === 'retained' && NEXT_RETAINED[report.code] ? NEXT_RETAINED[report.code] : nextWords(report.code));
   what.appendChild(next);
   what.title = report.code;
   what.style.cursor = 'pointer';
@@ -984,7 +1136,7 @@ function renderGroups() {
     var details = document.createElement('details');
     details.className = 'more group';
     var label = document.createElement('summary');
-    var parts = [DEGRADATION[group.key] ? group.key + '（' + DEGRADATION[group.key] + '）' : group.key];
+    var parts = [groupKeyLabel(report, group.key)];
     // A fold with no objects behind it is a replica-level fact, not a list:
     // a coverage hole, or a standing, which names its replicas instead.
     if (group.objects) parts.push(group.objects + ' 个对象');
@@ -1214,9 +1366,15 @@ function objectRow(anomaly) {
   }
   var skip = anomaly.skip;
   if (skip) {
+    // What the loss is, from the server's classification of the record
+    // against the object's column and the record's age; the words carry
+    // the window it was decided on.
+    var loss = anomaly.loss && LOSS[anomaly.loss]
+      ? '。' + LOSS[anomaly.loss].replace('{w}', String(recentWindowMinutes())) : '';
     line('没检测的时段', momentLabel(skip.first_slot * 1000) + ' – ' + momentLabel(skip.last_slot * 1000)
-      + (skip.slots ? '，' + skip.slots + ' 个 Slot' : '，个数无法得知'),
-      '这段里的时间点没有被评估过，也不会补跑。对象现在通常是正常的；要处理的是这段没有告警覆盖的时间。');
+      + (skip.slots ? '，' + skip.slots + ' 个 Slot' : '，个数无法得知')
+      + '，记录于 ' + momentLabel(skip.at) + loss,
+      '这段里的时间点没有被评估过，也不会补跑。仍在发生的要看对象为什么追不上；已停止的只是记录，要处理的是这段没有告警覆盖的时间。');
   }
   line('起算来源', SINCE_SOURCE[anomaly.since_from] || anomaly.since_from);
   line('副本', shortReplica(anomaly.replica), anomaly.replica);
@@ -1577,17 +1735,27 @@ function renderImpact(impact) {
       + '——这些告警报出来之后不会自动关闭。'));
   }
   // Whether to act, and by whom. This is the only sentence here that asks
-  // somebody to do something, so it is the only one set apart.
-  var ours = columnImpact(impact.ours);
+  // somebody to do something, so it is the only one set apart -- and it is
+  // three parts, not two: what is confirmed this deployment's, what nobody
+  // can yet hand to anyone, and what is confirmed the strategy's or the
+  // data's. "其余要找策略配置或数据源的人" over lines reading 待确认 sent
+  // readers to the wrong people.
+  var alarmd = columnImpact(impact.alarmd), undetermined = columnImpact(impact.undetermined);
+  var strategy = columnImpact(impact.strategy), data = columnImpact(impact.data);
   var act = line('act');
-  if (ours.strategies) {
-    act.textContent = '需要 alarmd 这边处理的：' + ours.strategies + ' 条策略（'
-      + ours.objects + ' 个对象）。其余要找策略配置或数据源的人。';
-  } else if (blindStrategies || undecided.strategies) {
-    act.textContent = '这些当前都不指向 alarmd 自己，要找策略配置或数据源的人。';
-  } else {
-    act.textContent = '当前没有需要处理的。';
+  var parts = [];
+  parts.push(alarmd.objects
+    ? '需要 alarmd 这边处理的：' + alarmd.strategies + ' 条策略（' + alarmd.objects + ' 个对象）'
+    : '当前没有已确认要 alarmd 这边处理的');
+  if (undetermined.objects) {
+    parts.push('待归因：' + undetermined.strategies + ' 条策略（' + undetermined.objects
+      + ' 个对象）——未确认属 alarmd，也不等于业务侧的，不要交出去');
   }
+  if (strategy.objects || data.objects) {
+    parts.push('业务侧已确认：策略侧 ' + strategy.strategies + ' 条策略（' + strategy.objects + ' 个对象）、数据侧 '
+      + data.strategies + ' 条策略（' + data.objects + ' 个对象）');
+  }
+  act.textContent = parts.join('；') + '。';
   // What these counts cannot cover. Said here rather than left to be inferred:
   // a strategy count off a truncated list is a lower bound in the same shape as
   // an exact one, on the line a reader uses to decide whether to act tonight.
@@ -2192,11 +2360,10 @@ function renderCapacity(cap, gaps, census) {
         + '这一栏在涨不代表跑不过来。';
     } else if (!notBetter) {
       detail = '全部 ' + full + ' 次都是就绪队列没位置。队列满时这一轮轮转就停在这里，'
-        + '排在它后面的对象这一轮也没被轮到（所以"轮转被打断"会同步涨）。这一种扩队列有用。';
+        + '排在它后面的对象这一轮也没被轮到（所以"轮转被打断"会同步涨）' + queueFullVerdict(census);
     } else {
-      detail = '就绪队列没位置 ' + full + ' 次（这一种扩队列有用，而且队列满时轮转就地停下，'
-        + '后面的对象这一轮也没轮到）；恢复队列里都比它更早到期 ' + notBetter
-        + ' 次（这是排队顺序，扩队列没用）。先看第一个数。';
+      detail = '就绪队列没位置 ' + full + ' 次（队列满时轮转就地停下，后面的对象这一轮也没轮到）；'
+        + '恢复队列里都比它更早到期 ' + notBetter + ' 次（这是排队顺序，扩队列没用）' + queueFullVerdict(census);
     }
     cell('被挡回', rot.deferred + ' 次', detail, !!full);
   }

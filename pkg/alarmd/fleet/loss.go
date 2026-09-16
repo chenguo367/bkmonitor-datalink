@@ -1,0 +1,133 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2025 Tencent. All rights reserved.
+// Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://opensource.org/licenses/MIT
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+// an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+
+package fleet
+
+import "time"
+
+// A retained skip record says an object gave up on a span of Slots. It does
+// not say why, and the two record lines read every one of them as this
+// deployment giving up for want of capacity: a live page filed some four
+// hundred objects that way, under "曾经漏检、不用处理", while the records were
+// three different things -- most of them objects the backend was refusing
+// whose cooldown had carried their backlog past the replay range, a few
+// dozen a rollout's catch-up an hour earlier, and the rest short-period
+// objects still losing rounds to the scheduler's replay bound that minute.
+// The first is the refusal's consequence and no amount of capacity changes
+// it; the second is over; the third is happening. This file tells them apart
+// from what the view already knows about each object.
+
+// Loss is what a retained skip record is a record of.
+type Loss string
+
+const (
+	// LossWhileDemoted: the object is in the demoted pool right now. The
+	// skip is what a query cooldown does to an object's backlog -- rounds
+	// wait out the cooldown, the oldest fall past the replay range and are
+	// given up -- so the loss belongs on the line the object is already
+	// under, as that line's consequence, not on a line of its own.
+	LossWhileDemoted Loss = "WHILE_DEMOTED"
+	// LossOngoing: not demoted, and the record was made within
+	// RecentSkipWindow. The object is losing rounds now; it is a current
+	// line, and this deployment's.
+	LossOngoing Loss = "ONGOING"
+	// LossHistorical: not demoted, and the record is older than the window.
+	// A loss that stopped; it stays on record because the span is never
+	// re-evaluated, and it is not work.
+	LossHistorical Loss = "HISTORICAL"
+)
+
+// Losses lists every kind, for the page's completeness test.
+var Losses = []Loss{LossWhileDemoted, LossOngoing, LossHistorical}
+
+// RecentSkipWindow is the bound on "still happening". A record younger than
+// this is a loss in progress; older, it is history. Ten minutes is several
+// rounds of any object this deployment schedules, so a record that old
+// belongs to an object that has since run clean for that many rounds. It
+// travels on the response, so the page prints it rather than assuming it.
+const RecentSkipWindow = 10 * time.Minute
+
+// GroupByLoss folds the two record checks on what each record is: the
+// loss kinds above for records, the deciding code for the objects a column
+// put there -- which are the budget rejections, the one case where the
+// word capacity is earned.
+const GroupByLoss GroupBy = "loss"
+
+// lossOf decides a record's kind from the object's column and the record's
+// age.
+func lossOf(demoted bool, at, now time.Time) Loss {
+	switch {
+	case demoted:
+		return LossWhileDemoted
+	case now.Sub(at) <= RecentSkipWindow:
+		return LossOngoing
+	default:
+		return LossHistorical
+	}
+}
+
+// Consequence is what a line's objects lost while under it: how many also
+// skipped detection, how many of those within the window, and the newest.
+// It is carried on the refusal and backend lines, whose cooldown is what
+// produced the skips.
+type Consequence struct {
+	Skipped       int        `json:"skipped"`
+	SkippedRecent int        `json:"skipped_recent"`
+	SkippedNewest *time.Time `json:"skipped_newest,omitempty"`
+}
+
+func (consequence *Consequence) note(at, now time.Time) {
+	consequence.Skipped++
+	if now.Sub(at) <= RecentSkipWindow {
+		consequence.SkippedRecent++
+	}
+	if consequence.SkippedNewest == nil || at.After(*consequence.SkippedNewest) {
+		newest := at
+		consequence.SkippedNewest = &newest
+	}
+}
+
+// demotedObjects maps each object in the demoted column -- the pool a query
+// cooldown holds -- to the line it is under.
+func demotedObjects(view *View) map[string]Check {
+	under := map[string]Check{}
+	for _, anomaly := range view.Demoted {
+		under[anomaly.QueryGroup] = anomaly.Finding.Check
+	}
+	return under
+}
+
+// lossRecords walks the view's retained records once and hands each to the
+// caller with its kind: the record's own check, and for a demoted object
+// the line it is under, whose consequence the record is. One walk, so the
+// lines, the rows and the arithmetic count the same records the same way.
+// A demoted object under no line -- which the tracker does not produce --
+// is read by its age like any other, rather than counted on a line that
+// does not exist.
+func lossRecords(view *View, now time.Time, visit func(queryGroup string, check, line Check, code string, skip SkippedSpan, loss Loss)) {
+	if view == nil {
+		return
+	}
+	demoted := demotedObjects(view)
+	each := func(queryGroup string, check Check, code string, skip SkippedSpan) {
+		line, isDemoted := demoted[queryGroup]
+		loss := lossOf(isDemoted && line != "", skip.At, now)
+		if loss != LossWhileDemoted {
+			line = ""
+		}
+		visit(queryGroup, check, line, code, skip, loss)
+	}
+	for queryGroup, skip := range view.GapSkips {
+		each(queryGroup, CheckDetectionAbandoned, "GAP_SKIPPED", skip)
+	}
+	for queryGroup, pruned := range view.PrunedSkips {
+		each(queryGroup, CheckTimelinePruned, "SCHEDULE_PRUNED", SkippedSpan{FirstSlot: pruned.From, LastSlot: pruned.To,
+			At: pruned.At, Replica: pruned.Replica, Strategies: pruned.Strategies})
+	}
+}

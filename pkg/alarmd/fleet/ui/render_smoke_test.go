@@ -271,15 +271,39 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{Kind: fleet.DegradationActivationBehind, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"},
 		{Kind: fleet.DegradationOpenAlertSetStale, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij"},
 	}
+	// The demoted pool: a refused object that also skipped Slots while
+	// there, two minutes ago. The shape of 346 live objects whose records
+	// the page filed as this deployment giving up for want of capacity.
+	demoted := []fleet.Anomaly{anomaly("qg-demoted-rejected", func(item *fleet.Anomaly) {
+		item.Kind = "QUERY_COOLDOWN"
+		item.QueryCooldown = &observability.QueryCooldownFacts{
+			Until: at.Add(time.Hour), LastQueryAt: at.Add(-time.Minute), Failures: 23}
+		item.Failure = &fleet.FailureRef{Stage: "provider", Category: "source_backend",
+			Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}
+	})}
+	fleet.Attribute(demoted, at)
 	retained := &fleet.View{Unknown: 3, Gaps: []fleet.Gap{{Kind: fleet.GapSnapshotStale, Replica: "pod-b"}},
-		GapSkips: map[string]fleet.SkippedSpan{"qg-skipped-hour-ago": {
-			FirstSlot: at.Add(-90 * time.Minute).Unix(), LastSlot: at.Add(-70 * time.Minute).Unix(),
-			Slots: 20, At: at.Add(-time.Hour), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"}},
+		Demoted: demoted,
+		GapSkips: map[string]fleet.SkippedSpan{
+			"qg-skipped-hour-ago": {
+				FirstSlot: at.Add(-90 * time.Minute).Unix(), LastSlot: at.Add(-70 * time.Minute).Unix(),
+				Slots: 20, At: at.Add(-time.Hour), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"},
+			// Healthy now and losing rounds now: a loss in progress, current.
+			"qg-losing-now": {
+				FirstSlot: at.Add(-4 * time.Minute).Unix(), LastSlot: at.Add(-3 * time.Minute).Unix(),
+				Slots: 6, At: at.Add(-3 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij",
+				Strategies: []fleet.StrategyRef{{StrategyID: "8709", BusinessID: "9"}}},
+			"qg-demoted-rejected": {
+				FirstSlot: at.Add(-5 * time.Minute).Unix(), LastSlot: at.Add(-2 * time.Minute).Unix(),
+				Slots: 3, At: at.Add(-2 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"},
+		},
 		Activation: activation, ActivationReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 		Degradations: degradations}
-	checks := fleet.ReportChecks([][]fleet.Anomaly{rows}, nil, retained, at)
-	todo := fleet.SummarizeTodo(checks, [][]fleet.Anomaly{rows}, retained, at)
-	rows = append(rows, fleet.UnderCheck(fleet.CheckDetectionAbandoned, "", retained)...)
+	columns := [][]fleet.Anomaly{rows, demoted}
+	checks := fleet.ReportChecks(columns, nil, retained, at)
+	todo := fleet.SummarizeTodo(checks, columns, retained, at)
+	rows = append(rows, fleet.UnderCheck(fleet.CheckDetectionAbandoned, "", retained, at)...)
+	rows = append(rows, fleet.UnderCheck(fleet.CheckQueryTargetMissing, "", retained, at)...)
 	// The barest row the API can send: every omitempty field absent. It goes in
 	// after Attribute so it keeps its empty attribution, because a fixture where
 	// every row has every field cannot catch a property read on a field that is
@@ -297,8 +321,10 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// executed on both a present and an absent count. A fixture where every
 		// row carries every field cannot catch a read on one that is sometimes
 		// missing, which is half of what a render throws on.
+		// And this one published a cut list, so the completeness sentence
+		// renders both halves: every object has a state, the detail is a sample.
 		{Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", Owned: 527, Healthy: 460,
-			Anomalies: 53, Demoted: 14, AgeSeconds: 4, UptimeSeconds: 300, Ours: 8, External: 41},
+			Anomalies: 53, Demoted: 14, AgeSeconds: 4, UptimeSeconds: 300, Ours: 8, External: 41, Truncated: true},
 	}
 	lastExit := at.Add(-2 * time.Minute)
 	fixture := map[string]any{
@@ -438,7 +464,13 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 				ByDesign:    fleet.ColumnImpact{Objects: 4, Strategies: 4, Businesses: 1},
 				// Fewer than 31 + 70: a strategy with objects in both columns is
 				// one strategy, which is why this is a field and not a sum.
-				Blind:        fleet.ColumnImpact{Objects: 119, Strategies: 95, Businesses: 11, Partial: true},
+				Blind: fleet.ColumnImpact{Objects: 119, Strategies: 95, Businesses: 11, Partial: true},
+				// By who acts: three parts, the middle one neither this
+				// deployment's nor anybody else's yet.
+				Alarmd:       fleet.ColumnImpact{Objects: 6, Strategies: 5, Businesses: 2, Partial: true},
+				Undetermined: fleet.ColumnImpact{Objects: 14, Strategies: 13, Businesses: 4, Partial: true},
+				Strategy:     fleet.ColumnImpact{Objects: 35, Strategies: 33, Businesses: 6, Partial: true},
+				Data:         fleet.ColumnImpact{Objects: 40, Strategies: 30, Businesses: 5, Partial: true},
 				NoStrategies: 7,
 			},
 		},
@@ -488,8 +520,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// is 95 because a strategy with objects in both is one strategy.
 		"95 条策略拿不到检测结果",
 		"11 个业务",
-		// Whether to act, and by whom.
-		"需要 alarmd 这边处理的：4 条策略",
+		// Whether to act, and by whom: three parts, the middle one neither
+		// this deployment's nor anybody else's yet.
+		"需要 alarmd 这边处理的：5 条策略（6 个对象）；待归因：13 条策略（14 个对象）——未确认属 alarmd，也不等于业务侧的，不要交出去；业务侧已确认：策略侧 33 条策略（35 个对象）、数据侧 30 条策略（40 个对象）。",
 		// What the counts cannot cover. Both are true of a live deployment and
 		// both change what the numbers may be taken to mean.
 		"是下界",
@@ -532,9 +565,14 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// two restored without their cause, under three folds with the stale
 	// replica.
 	todoLine := lineStarting(text, "CHECKS ::")
-	for _, want := range []string{"1 个对象的轮次不再结束", "alarmd", "后端拒绝了 1 个对象的查询", "待确认",
-		// One current; the retained one is in the record section, not here.
-		"1 个对象因 alarmd 自己的容量限制放弃了检测", "1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）",
+	for _, want := range []string{"1 个对象的轮次不再结束", "alarmd",
+		// Two current: the object whose round ended skipping, and the one
+		// losing rounds now from its record; the stopped one is in the
+		// record section. The line says which part is still happening and
+		// that none of it is a budget rejection -- so not capacity.
+		"2 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 1 个；没有资源预算拒绝，不是容量问题）",
+		"恢复标准：10 分钟内没有新的跳过",
+		"1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）",
 		// Every line says what to do next.
 		"下一步：先修激活", "下一步：先等：成因缺失的对象各自再跑一轮就补上",
 		// The two standings, first. The time is the viewer's clock and is not
@@ -548,21 +586,45 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	if !strings.HasPrefix(strings.TrimPrefix(todoLine, "CHECKS :: "), "控制面变更自 ") {
 		t.Errorf("the fleet executing a stale publication is not the first line:\n%s", todoLine)
 	}
+	// Not confirmed as this deployment's is its own part, not on the list
+	// above and not handed over: the bare refusal and the undecided windows.
+	pendingLine := lineStarting(text, "PENDING ::")
+	for _, want := range []string{"后端拒绝了 1 个对象的查询", "待确认", "个对象的窗口填不满，还分不出是谁的"} {
+		if !strings.Contains(pendingLine, want) {
+			t.Errorf("the undetermined part does not say %q:\n%s", want, pendingLine)
+		}
+	}
+	if strings.Contains(todoLine, "待确认") || strings.Contains(todoLine, "后端拒绝了") {
+		t.Errorf("an undetermined line is on the list of what is confirmed this deployment's:\n%s", todoLine)
+	}
 	// The record of past loss, apart from the lines above, with when it was
 	// made; and the refusal that names a missing target is the strategy's,
 	// in the governance fold, not 待确认 in the list above.
 	for _, want := range []struct{ line, says string }{
-		{"HISTORY ::", "1 个对象因 alarmd 自己的容量限制放弃了检测，那段不补——最近 1 小时新增 1 个，最新一条 "},
-		{"HISTORY COUNT ::", "1 个对象，最近 1 小时新增 1 个，最新 "},
-		{"GOV ::", "1 个对象的策略引用了后端说不存在的表或字段（1 种回答，1 条策略，1 个业务）——后端读了查询并明确拒绝"},
+		// The record holds only the stopped loss, says it stopped, and does
+		// not call it "新增": the record keeps one skip per object.
+		{"HISTORY ::", "1 个对象跳过了检测，那段不补（已停止，10 分钟以上没有再发生）——其中 1 个最近 1 小时内还发生过，最后一次 "},
+		{"HISTORY ::", "下一步：已停止，不用让它停；那段永久没检测"},
+		{"HISTORY COUNT ::", "1 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
+		// The refusal line carries what its demoted object lost there, as the
+		// refusal's consequence and not as capacity.
+		{"GOV ::", "2 个对象的策略引用了后端说不存在的表或字段（1 种回答，1 条策略，1 个业务）——后端读了查询并明确拒绝；其中 1 个已降级，不再反复查；其中 1 个在被拒期间还跳过了检测（最近 10 分钟内 1 个）——冷却让旧轮次超出重放范围，首要原因是查询不可用，扩容无用"},
 		{"GOV ::", "策略侧"},
 		{"ACTION ::", "现在要做的：先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效（控制面变更自 "},
-		{"ACTION ::", "；之后还有 10 类，按顺序在下面"},
+		{"ACTION ::", "；之后还有 7 类，按顺序在下面；待归因 3 类另看，别交出去"},
+		// A record line's folds name what each loss is; the refusal's object
+		// row says what it lost while under its line.
+		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过）） · 1 个对象 · 1 条策略 · 1 个业务"},
+		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象"},
+		{"SKIP qg-demoted-rejected ::", "3 个 Slot，记录于 "},
+		{"SKIP qg-demoted-rejected ::", "。在被拒期间跳过（冷却让旧轮次超出重放范围，首要原因是查询不可用）"},
+		{"SKIP qg-losing-now ::", "。仍在发生（最近 10 分钟内跳过）"},
 		// A line whose objects are all in the pool says so, in the pool card's
 		// words, so the two cannot read as different verdicts.
 		{"ERR qg-stuck-slot ::", "最近一次错误：alarmd state: gap guard conflict: expected 41 got 43（*errors.errorString），Slot "},
 		{"ERR qg-stuck-slot ::", "，同一 Slot 连续 3 次，"},
 		{"SENTENCE demoted ::", "351 个对象的策略引用了后端说不存在的表或字段（1 种回答，351 条策略，59 个业务）——后端读了查询并明确拒绝；其中 351 个已降级，不再反复查"},
+		{"SENTENCE budget ::", "5 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 2 个；资源预算拒绝 3 个——只有这部分是容量限制）"},
 	} {
 		if line := lineStarting(text, want.line); !strings.Contains(line, want.says) {
 			t.Errorf("%s does not say %q:\n%s", want.line, want.says, line)
@@ -605,14 +667,19 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// lines this reader acts on, 19 distinct objects under them now (16
 		// rows plus the 3 the view holds undetermined; the two standings have
 		// none), and one retained record made an hour ago.
-		"需要处理：11 类检查项，当前影响 20 个对象（去重）；曾经漏检 1 个对象另列，最近 1 小时新增 1",
+		// Three parts from the server's arithmetic, then what is being lost
+		// now and what the refused objects lost, apart from the record.
+		"需要处理：alarmd 已确认 8 类（14 个对象，去重）；待归因 3 类（7 个对象）；业务侧已确认 5 类（12 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
 		// first sentence says both.
 		"起没有生效：舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3，连续 120 轮激活失败",
 		// Eight objects carry no cause. This line said "全部对象都有结论" over a
 		// grid showing them; completeness is about conclusions, and they have
 		// none yet.
-		"观测完整性：8 个对象没留下成因，还说不清归谁；各自再跑完一轮就补上；1 处覆盖缺口"} {
+		// Two completenesses, said apart: every object's state, and whether
+		// the detail behind the lines is whole.
+		"状态覆盖：8 个对象没留下成因，还说不清归谁；各自再跑完一轮就补上；1 处覆盖缺口。明细不全：1 个副本的异常清单被截断，下面的分组数和策略数是样本"} {
 		if !strings.Contains(brief, want) {
 			t.Errorf("the brief does not say %q:\n%s", want, brief)
 		}
@@ -862,7 +929,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// for a number that is mostly the branch more room cannot change.
 		{"ROT only-not-better ::", "扩队列不会改变这个数", "扩队列有用",
 			"全是排序结果时不能让人去扩队列"},
-		{"ROT only-queue-full ::", "这一种扩队列有用", "扩队列不会改变这个数",
+		{"QUEUE quiet ::", "此刻没有对象超期、没有正在发生的漏检——排队没耽误到期任务，不构成扩队列的理由", "扩队列有用",
+			"没超期没漏检时队列满不是扩队列的理由"},
+		{"QUEUE losing ::", "正在漏检 3 个对象：先看等待时长与消费速度", "扩队列有用",
+			"正在漏检时先看等待与消费速度，不承诺扩队列有效"},
+		{"QUEUE behind ::", "此刻 7 个对象超期：先看等待时长与消费速度——排队在增长、按时率在降（1 小时 88.9% 对 6 小时 99.3%）才是位子不够；只扩队列可能只是让任务等得更久，不保证有效", "扩队列有用",
+			"跟不上时给出判据与两个按时率，不承诺扩队列有效"},
+		{"QUEUE no-census ::", "本构建没有普查，判不了——别只凭这个数扩队列", "扩队列有用",
+			"没普查时判不了"},
+		{"ROT only-queue-full ::", "先看等待时长与消费速度", "扩队列有用",
 			"全是没位置时扩队列确实有用，而且轮转会就地停下"},
 		{"ROT mixed ::", "就绪队列没位置 12 次", "",
 			"两种都有时先给出该看的那个数，不是只给总数"},
@@ -1011,6 +1086,7 @@ console.log('PRUNED :: ' + (store['prunedSkips'] ? store['prunedSkips'].textCont
 
 // The first screen and the fold under it, as rendered.
 console.log('CHECKS :: ' + textOf(store['checkRows']));
+console.log('PENDING :: ' + textOf(store['pendingRows']));
 console.log('HISTORY :: ' + textOf(store['historyRows']));
 console.log('HISTORY COUNT :: ' + textOf(store['historyCount']));
 console.log('GOV :: ' + textOf(store['govRows']));
@@ -1018,6 +1094,10 @@ console.log('ACTION :: ' + textOf(store['briefAction']));
 // The pool suffix, on a line shaped like the live one: every object demoted.
 console.log('SENTENCE demoted :: ' + ctx.checkSentence({code: 'QUERY_TARGET_MISSING', objects: 351, current: 351, demoted: 351,
   strategies: 351, businesses: 59, groups: [{key: 'response=status_space_table_id_field_is_not_exists', objects: 351}]}, 351));
+// A record line over a budget rejection: the one fold the word capacity is
+// earned for, said as such and only for that part.
+console.log('SENTENCE budget :: ' + ctx.checkSentence({code: 'DETECTION_ABANDONED', objects: 5, current: 5, group_by: 'loss',
+  groups: [{key: 'EXECUTION_BUDGET_EXHAUSTED', objects: 3}, {key: 'ONGOING', objects: 2}]}, 5));
 console.log('BRIEF :: ' + ['briefSchedule', 'briefTodo', 'briefBlind'].map(id => textOf(store[id])).join(' | '));
 console.log('BUILD :: ' + textOf(store['buildLine']));
 // Opening a line renders its folds.
@@ -1034,6 +1114,11 @@ console.log('BASIS CUTOVER :: ' + textOf(store['detailBasis']));
 ctx.openCheck = 'REPLICA_DEGRADED';
 ctx.renderChecks(data.checks);
 console.log('GROUPS DEGRADED :: ' + textOf(store['groups']));
+// The record line's folds name what each loss is, and the refusal line
+// carries what its demoted objects lost there.
+ctx.openCheck = 'DETECTION_ABANDONED';
+ctx.renderChecks(data.checks);
+console.log('GROUPS LOSS :: ' + textOf(store['groups']));
 ctx.openCheck = '';
 
 // The four dimensions each row shows, read off the rendered cells.
@@ -1045,6 +1130,7 @@ for (const row of data.anomalies) {
   console.log('ROW ' + row.query_group + ' :: ' + cells.slice(1, 5).join(' | '));
   if (row.skip) { console.log('SKIP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.last_error) { console.log('ERR ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.skip) { console.log('SKIP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the
@@ -1097,6 +1183,28 @@ for (const [name, rotation] of Object.entries(rotations)) {
   catch (e) { console.error('renderCapacity (' + name + '): ' + e.message); failed++; continue; }
   console.log('ROT ' + name + ' :: ' + textOf(store['capCards']));
 }
+// A full ready queue is judged on whether due work is finishing and whether
+// detection is being lost, not promised a remedy: the same full queue over
+// a deployment with nothing overdue and nothing being lost, over one losing
+// rounds now, and over one falling behind.
+const savedTodo = ctx.latestTodo;
+const fullQueue = Object.assign({}, data.health.capacity,
+  {rotation: Object.assign({}, data.health.capacity.rotation, rotations['only-queue-full'])});
+const queueStates = {
+  'quiet': {todo: Object.assign({}, data.todo, {ongoing: 0}), schedule: data.health.schedule},
+  'losing': {todo: Object.assign({}, data.todo, {ongoing: 3}), schedule: data.health.schedule},
+  'behind': {todo: Object.assign({}, data.todo, {ongoing: 0}),
+             schedule: Object.assign({}, data.health.schedule, {overdue: 7, on_time_1h: 8000, on_time_6h: 53640})},
+  'no-census': {todo: Object.assign({}, data.todo, {ongoing: 0}), schedule: null},
+};
+for (const [name, state] of Object.entries(queueStates)) {
+  store['capCards'].textContent = '';
+  ctx.latestTodo = state.todo;
+  try { ctx.renderCapacity(fullQueue, [], state.schedule); }
+  catch (e) { console.error('renderCapacity (queue ' + name + '): ' + e.message); failed++; continue; }
+  console.log('QUEUE ' + name + ' :: ' + textOf(store['capCards']));
+}
+ctx.latestTodo = savedTodo;
 
 // The impact line -- the only thing on the page that answers "what is affected"
 // rather than "how many objects".

@@ -746,7 +746,7 @@ func NewHandler(
 			UndecidableTotal: view.UndecidableTotal, ByDesignTotal: view.ByDesignTotal,
 			Ours:             OursCount(view.Anomalies),
 			Unattributed:     UnattributedCount(view.Anomalies),
-			Impact:           ImpactOf(view),
+			Impact:           ImpactOf(view, now()),
 			StrategyLinkBase: strategyLinkBase,
 			DemotedDue:       view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
 			DemotionEntries:    view.DemotionEntries,
@@ -856,7 +856,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 				map[string]string{"error": "check must be one of " + strings.Join(checkNames(), ", ")})
 			return
 		}
-		view.Anomalies = UnderCheck(check, group, &view)
+		view.Anomalies = UnderCheck(check, group, &view, now())
 		view.AnomaliesTotal = len(view.Anomalies)
 		summaryPartial = truncated[ColumnAnomalies] || truncated[ColumnDemoted] ||
 			truncated[ColumnUndecidable] || truncated[ColumnByDesign]

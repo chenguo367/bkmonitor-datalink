@@ -262,6 +262,35 @@ func TestThePageHasWordingForEveryCheckOwnerScheduleAndResult(t *testing.T) {
 			t.Errorf("DEGRADATION has no words for %s: the standing would render as its code", kind)
 		}
 	}
+	// And what a retained record is a record of: one entry per kind the Go
+	// side decides, none it does not, each naming the window it is decided
+	// on rather than assuming ten minutes.
+	losses := map[string]bool{}
+	for _, loss := range fleet.Losses {
+		losses[string(loss)] = true
+	}
+	lossTable := regexp.MustCompile(`var LOSS = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+	if lossTable == nil {
+		t.Fatal("the page has no LOSS wording table")
+	}
+	lossWorded := map[string]bool{}
+	for _, entry := range regexp.MustCompile(`(?m)^  ([A-Z_]+): '([^']*)'`).FindAllStringSubmatch(lossTable[1], -1) {
+		lossWorded[entry[1]] = true
+		if !losses[entry[1]] {
+			t.Errorf("LOSS has words for %s, which the server never sends", entry[1])
+		}
+		if entry[1] != string(fleet.LossWhileDemoted) && !strings.Contains(entry[2], "{w}") {
+			t.Errorf("LOSS %s does not name the window it is decided on: %q", entry[1], entry[2])
+		}
+	}
+	for loss := range losses {
+		if !lossWorded[loss] {
+			t.Errorf("LOSS has no words for %s: the record would render as its code", loss)
+		}
+	}
+	if !strings.Contains(body, "recent_window_seconds") {
+		t.Error("the page does not read recent_window_seconds: the window would be assumed rather than read")
+	}
 }
 
 func checkNames() []string {
