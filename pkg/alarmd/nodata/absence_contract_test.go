@@ -17,7 +17,8 @@ import (
 )
 
 // These are the contract cases for the absence evaluation, one group of tests
-// per rule of the decomposition's layer-3 contract (rules A1 to A9), plus the
+// per rule of the decomposition's layer-3 contract (rules A1 to A9, A8 as
+// ruled on 2026-09-16), plus the
 // two multi-round cases the rules only imply. They pin what Evaluate must say,
 // not how it says it: a test here names an input and the verdicts, memory and
 // facts that must come out, and nothing about the order the rules are applied
@@ -101,8 +102,10 @@ func copyGroups(groups map[string]Group) map[string]Group {
 //
 //   - the input is not modified - the caller keeps the previous Memory to
 //     decide what to persist, and a retried Slot must see the same input;
-//   - a verdict is only ever given to a roster group or to the whole-item
-//     group, never to a group the item did not expect (A5);
+//   - a verdict is only ever given to a roster group, to the whole-item
+//     group, or - as the one NORMAL that closes it - to a remembered group
+//     with an open absence that the roster no longer expects (A8); never to a
+//     group the item did not expect and has nothing open on (A5);
 //   - when the roster is not empty, every roster group has a verdict - a
 //     group that is expected and gets no answer is the silent gap the
 //     completeness gate exists to prevent;
@@ -119,10 +122,15 @@ func evaluate(t *testing.T, input AbsenceInput) AbsenceResult {
 		t.Fatal("Evaluate() modified its input")
 	}
 	whole := WholeItemGroup().Key()
-	for key := range result.Verdicts {
-		if _, expected := input.Roster.Groups[key]; !expected && key != whole {
-			t.Fatalf("Evaluate() gave a verdict to %q, which is neither a roster group nor the whole-item group", key)
+	for key, verdict := range result.Verdicts {
+		if _, expected := input.Roster.Groups[key]; expected || key == whole {
+			continue
 		}
+		if entry, remembered := input.Memory[key]; remembered && entry.FirstAbsent != 0 && verdict == VerdictNormal {
+			// The closing NORMAL of an absence the roster stopped expecting (A8).
+			continue
+		}
+		t.Fatalf("Evaluate() gave verdict %q to %q, which is neither a roster group, the whole-item group, nor an open absence being closed", verdict, key)
 	}
 	if len(input.Roster.Groups) > 0 {
 		for key := range input.Roster.Groups {
@@ -370,22 +378,65 @@ func TestAbsence_A7_PresentIsNormalWhateverTheMemorySays(t *testing.T) {
 	}
 }
 
-// A8. When the roster changes version, a remembered group that the new
-// roster no longer expects is not judged and its memory is kept as it was -
-// FirstAbsent included, which is what Python does with a first-anomaly
-// checkpoint for a group that stopped being expected. A group the new roster
-// still expects carries its absence clock across the change.
-func TestAbsence_A8_RosterVersionChangeKeepsUnexpectedMemoryUnjudged(t *testing.T) {
-	kept, removed := hostGroup(t, "10.0.0.1"), hostGroup(t, "10.0.0.2")
-	first := evaluate(t, fullRound(absenceRound1, staticRoster("v1", kept, removed), nil, map[string]GroupMemory{}))
-	wantVerdicts(t, first, map[string]Verdict{kept.Key(): VerdictAnomaly, removed.Key(): VerdictAnomaly})
+// A8. When the roster changes, a remembered group the new roster no longer
+// expects is handled by what it has open. One with an open absence - a
+// FirstAbsent, so an alert may be standing on it - gets exactly one NORMAL so
+// the alert can close, and is then forgotten: the roster stopped expecting it,
+// so nothing will ever say NORMAL for it again, and without this one verdict
+// the alert would stand forever. One with nothing open (a LastSeen only) is
+// not judged and keeps its memory, which is where a history roster grows from.
+// A group the new roster still expects carries its absence clock across the
+// change. This is the user's ruling of 2026-09-16 (decomposition 5.9 item 3):
+// a whole-item group turning into target groups, and a host confirmed gone,
+// must end the old alert correctly.
+func TestAbsence_A8_OpenAbsenceTheRosterDroppedIsClosedOnceAndForgotten(t *testing.T) {
+	kept, removed, quiet := hostGroup(t, "10.0.0.1"), hostGroup(t, "10.0.0.2"), hostGroup(t, "10.0.0.3")
+	first := evaluate(t, fullRound(absenceRound1, staticRoster("v1", kept, removed, quiet), groupSet(quiet), map[string]GroupMemory{}))
+	wantVerdicts(t, first, map[string]Verdict{kept.Key(): VerdictAnomaly, removed.Key(): VerdictAnomaly, quiet.Key(): VerdictNormal})
+
+	// v2 expects only kept: removed has an open absence, quiet has only a LastSeen.
 	second := evaluate(t, fullRound(absenceRound2, staticRoster("v2", kept), nil, first.Memory))
-	wantVerdicts(t, second, map[string]Verdict{kept.Key(): VerdictAnomaly})
+	wantVerdicts(t, second, map[string]Verdict{kept.Key(): VerdictAnomaly, removed.Key(): VerdictNormal})
 	wantMemory(t, second, kept.Key(), GroupMemory{FirstAbsent: absenceRound1})
-	wantMemory(t, second, removed.Key(), first.Memory[removed.Key()])
-	if second.Facts.RosterVersion != "v2" {
-		t.Fatalf("Facts.RosterVersion = %q, want v2", second.Facts.RosterVersion)
+	if entry, ok := second.Memory[removed.Key()]; ok {
+		t.Fatalf("Memory[removed] = %+v, want the closed absence forgotten", entry)
 	}
+	wantMemory(t, second, quiet.Key(), GroupMemory{LastSeen: absenceRound1})
+	if second.Facts.RosterVersion != "v2" || second.Facts.Absent != 1 {
+		t.Fatalf("Facts = %+v, want RosterVersion v2 and one absent (the closing NORMAL is not an absence)", second.Facts)
+	}
+
+	// The closing verdict is repeatable: a Slot whose events were not
+	// acknowledged keeps the old memory and asks again, and must get the same
+	// answer rather than a silent nothing.
+	again := evaluate(t, fullRound(absenceRound2, staticRoster("v2", kept), nil, first.Memory))
+	if !reflect.DeepEqual(again.Verdicts, second.Verdicts) || !reflect.DeepEqual(again.Memory, second.Memory) {
+		t.Fatalf("a retried round answered differently: %v / %v vs %v / %v", again.Verdicts, again.Memory, second.Verdicts, second.Memory)
+	}
+}
+
+// A8, whole item to targets. An item that expected nothing (A2) and is
+// absent has an alert standing on the whole-item group. When a target roster
+// appears, that alert is closed by one NORMAL on the whole-item group and the
+// whole-item memory is dropped; the new target groups start their own clocks.
+func TestAbsence_A8_WholeItemAbsenceIsClosedWhenATargetRosterArrives(t *testing.T) {
+	whole := WholeItemGroup().Key()
+	first := evaluate(t, fullRound(absenceRound1, staticRoster("v0"), nil, map[string]GroupMemory{}))
+	wantVerdicts(t, first, map[string]Verdict{whole: VerdictAnomaly})
+	wantMemory(t, first, whole, GroupMemory{FirstAbsent: absenceRound1})
+
+	host := hostGroup(t, "10.0.0.1")
+	second := evaluate(t, fullRound(absenceRound2, staticRoster("v1", host), nil, first.Memory))
+	wantVerdicts(t, second, map[string]Verdict{whole: VerdictNormal, host.Key(): VerdictAnomaly})
+	if entry, ok := second.Memory[whole]; ok {
+		t.Fatalf("Memory[whole] = %+v, want the whole-item absence forgotten once closed", entry)
+	}
+	wantMemory(t, second, host.Key(), GroupMemory{FirstAbsent: absenceRound2})
+
+	// And once closed it stays closed: the next round says nothing about the
+	// whole-item group.
+	third := evaluate(t, fullRound(absenceRound3, staticRoster("v1", host), nil, second.Memory))
+	wantVerdicts(t, third, map[string]Verdict{host.Key(): VerdictAnomaly})
 }
 
 // A9. The first cut has no retirement: a history group that has been absent
