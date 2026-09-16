@@ -744,7 +744,7 @@ var NEXT = {
   DEFECT:                '程序缺陷：带原因码上报，展开取一个对象的证据',
   OBSERVATION_GAP:       '等下一轮完成以补齐原因（行上有预计时刻；到点后仍可能在等待、重试或取消）；超过预计完成时间仍未补齐，它会落到"到期没跑"那一行（alarmd 的），再查该副本的调度与执行；副本级缺口看该副本快照',
   QUERY_REFUSED:         '展开看后端回答的状态词：说表/字段不存在的已单列到策略侧；只有状态码的，页面上没有后端原文可核，先留待归因，拿行上策略链接里的查询定义与后端侧日志对',
-  WINDOW_UNDECIDED:      '按"情况"分组看，再看行上最差窗口的进展：在补的（上一轮更少）等；连续多轮没进展的不能只等——看每一轮不完整的原因（那才是根因，多半是查询不可用或冷却）；保护未解除的等它解除，不改策略',
+  WINDOW_UNDECIDED:      '按"情况"分组看，再看行上最差窗口的进展：在补的（上一轮更少）等；连续多轮没进展的不能只等——看每一轮不完整的原因（那才是根因，多半是查询不可用或冷却）；保护未解除的等它解除，不改策略——它要求的完整轮数是这份持久化保护的，可能大于策略配置值，别拿策略里的数去核',
   CONFIG_UNRESOLVED:     '按策略看：config_changed 为真才是最近改过，下一轮按新配置跑；为假的不在这一行',
   BACKEND_NOT_ANSWERING: '先查查询链路：超时看查询预算、网络、后端耗时哪一环超了；5xx 看后端；核实是后端的再交数据侧。alarmd 已降频不再反复查',
   NO_DATA_PERSISTENT:    '交数据侧：按策略看是数据停了还是采集停了',
@@ -911,7 +911,12 @@ function startLagClause(rebalance) {
 // window at 0/5 for thirty rounds is not, whatever its reason says.
 function windowProgress(coverage) {
   if (!coverage || !coverage.short || !coverage.worst_required) return '';
-  var text = ' · 最差 ' + (coverage.worst_valid || 0) + '/' + coverage.worst_required;
+  // Under a guard the required count is the persisted guard's, which a
+  // repair may have raised past what the strategy configures: a reader
+  // checking the strategy would find a smaller number and read the window
+  // as fuller than it is.
+  var required = coverage.guarded ? coverage.worst_required + '（持久化保护要求的，可大于策略配置）' : String(coverage.worst_required);
+  var text = ' · 最差 ' + (coverage.worst_valid || 0) + '/' + required;
   if (coverage.previous_known) {
     text += coverage.worst_valid > coverage.previous_worst_valid
       ? '（上一轮 ' + coverage.previous_worst_valid + '，在补）'
