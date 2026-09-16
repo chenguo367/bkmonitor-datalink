@@ -427,6 +427,37 @@ type InternalExecution struct {
 	EffectiveTimeFacts []BoundEffectiveTimeFact
 	StatePreflight     []StatePreflightItem
 	GapPreflight       []PlanGapLoadItem
+	// FullPlans is, per due Plan, the Plan before any view was chosen for the
+	// series being validated. DuePlans carries the view -- what this series'
+	// inputs and state are judged against -- and this carries what the Plan
+	// as a whole has, which is what a Plan-scoped record such as a gap guard
+	// is validated against. Absent (nil) when no view was chosen; readers fall
+	// back to the due Plan itself.
+	FullPlans map[PlanIdentity]*strategy.CompiledPlan
+}
+
+// fullPlanOf is the Plan as a whole for a due Plan that may be a view of it.
+func (input InternalExecution) fullPlanOf(plan DuePlan) *strategy.CompiledPlan {
+	if full, found := input.FullPlans[plan.Identity]; found && full != nil {
+		return full
+	}
+	return plan.CompiledPlan
+}
+
+// planOwnsLevel says whether a level belongs to the Plan as a whole: one of the
+// strategy's declared levels, or the Plan's no-data level. It is the question
+// a Plan-scoped record asks -- a gap guard protects the Plan, and a scope it
+// names on either kind of level is loaded for every series' round, real or
+// synthetic -- as opposed to the question an input or a state mutation asks,
+// which is answered by the view (compiledPlanHasLevel on DuePlan.CompiledPlan).
+func planOwnsLevel(plan *strategy.CompiledPlan, levelID uint32) bool {
+	if compiledPlanHasLevel(plan, levelID) {
+		return true
+	}
+	if level := plan.NoDataLevel(); level != nil && level.Definition().LevelID == levelID {
+		return true
+	}
+	return false
 }
 
 func (input InternalExecution) Validate(expected FrozenExecutionContractRef) error {
@@ -1766,10 +1797,28 @@ func buildEvaluationInternalExecution(request EvaluationRequest) (InternalExecut
 			break
 		}
 	}
-	if !found || due.CompiledPlan == nil || len(request.Inputs) != len(due.CompiledPlan.Levels()) {
+	if !found || due.CompiledPlan == nil {
 		return InternalExecution{}, errors.New("alarmd execution: evaluation inputs do not exactly cover one due Plan")
 	}
-	input := InternalExecution{Contract: request.Header.Contract, DuePlans: []DuePlan{due}}
+	// The Plan the inputs are judged against is the view for this kind of
+	// series -- the same choice the evaluator made when it produced the result
+	// being validated. A synthetic no-data series carries one input for the
+	// no-data level; measuring it against the strategy's declared levels read
+	// as "inputs do not cover the Plan" on every no-data round in production,
+	// and the state its evaluation wrote read as a Level contract the Plan did
+	// not have. The full Plan is kept beside the view: a gap guard belongs to
+	// the Plan, not to one view of it, and is validated against every level
+	// the Plan has (see planOwnsLevel).
+	full := due.CompiledPlan
+	due, err := PlanViewFor(due, first.Kind)
+	if err != nil {
+		return InternalExecution{}, err
+	}
+	if len(request.Inputs) != len(due.CompiledPlan.Levels()) {
+		return InternalExecution{}, errors.New("alarmd execution: evaluation inputs do not exactly cover one due Plan")
+	}
+	input := InternalExecution{Contract: request.Header.Contract, DuePlans: []DuePlan{due},
+		FullPlans: map[PlanIdentity]*strategy.CompiledPlan{due.Identity: full}}
 	for index, level := range due.CompiledPlan.Levels() {
 		current := request.Inputs[index]
 		if current.Contract != request.Header.Contract || current.Consumer.Plan != due.Identity || !current.Consumer.HasLevel ||
@@ -1902,7 +1951,7 @@ func (result EvaluationResult) Validate(request EvaluationRequest) error {
 		if planResult.Disposition == PlanDecided && (len(localTerminalReasons) != 0 || len(localUnknownReasons) != 0) {
 			return errors.New("alarmd execution: localized terminal or unknown outcome requires degraded Plan disposition")
 		}
-		if err := validateLoadedGapLevels(plan, request.Gaps); err != nil {
+		if err := validateLoadedGapLevels(input.fullPlanOf(plan), plan.Identity, request.Gaps); err != nil {
 			return err
 		}
 		switch planResult.Disposition {
@@ -2369,13 +2418,13 @@ func validateLoadedStateContracts(plan DuePlan, states StatePreflightResult, lev
 	return nil
 }
 
-func validateLoadedGapLevels(plan DuePlan, gaps GapLoadResult) error {
+func validateLoadedGapLevels(full *strategy.CompiledPlan, identity PlanIdentity, gaps GapLoadResult) error {
 	for _, item := range gaps.Items {
-		if item.Identity.Plan != plan.Identity {
+		if item.Identity.Plan != identity {
 			continue
 		}
 		for _, scope := range item.Scopes {
-			if scope.Scope.HasLevel && !compiledPlanHasLevel(plan.CompiledPlan, scope.Scope.LevelID) {
+			if scope.Scope.HasLevel && !planOwnsLevel(full, scope.Scope.LevelID) {
 				return errors.New("alarmd execution: persisted gap references an unknown compiled Level")
 			}
 		}
@@ -2412,7 +2461,7 @@ func validatePlanGapMutation(
 		if err := validateOptionalLevel(scope.Scope.LevelID, scope.Scope.HasLevel); err != nil {
 			return err
 		}
-		if scope.Scope.HasLevel && !compiledPlanHasLevel(plan.CompiledPlan, scope.Scope.LevelID) {
+		if scope.Scope.HasLevel && !planOwnsLevel(input.fullPlanOf(plan), scope.Scope.LevelID) {
 			return errors.New("alarmd execution: gap mutation references an unknown compiled Level")
 		}
 		if _, duplicate := seen[scope.Scope]; duplicate {
