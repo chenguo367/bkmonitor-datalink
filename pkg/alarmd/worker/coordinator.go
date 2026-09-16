@@ -676,6 +676,16 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 	return coordinator.applyActivatedPlanGaps(ctx, request.Operation, request.Contract, mutations, requireAlready, extensions)
 }
 
+// sameSlotProtectionCandidate fences both reuse and extension with the same
+// identity and version checks before either path compares protection strength.
+func sameSlotProtectionCandidate(marker execution.GapGuardSnapshot, item execution.PlanGapLoadItem, plan execution.ActivatedPlan) bool {
+	return marker.Status == execution.GapFound && marker.Identity == item.Identity &&
+		plan.Identity == item.Identity.Plan && plan.StateGeneration == item.Identity.StateGeneration &&
+		plan.StateApplyEpoch == item.ApplyVersion.StateApplyEpoch && plan.ScheduleRevision == item.ScheduleRevision &&
+		execution.CompareApplyVersion(marker.PersistedApplyVersion, item.ApplyVersion) == execution.ApplyVersionEqual &&
+		marker.LastScheduleRevision == item.ScheduleRevision
+}
+
 func queryFreeGapAlreadyProtects(
 	marker execution.GapGuardSnapshot,
 	item execution.PlanGapLoadItem,
@@ -683,11 +693,7 @@ func queryFreeGapAlreadyProtects(
 ) bool {
 	// The existing Guard reason explains how recovery protection was established.
 	// Query-free finalization records SNAPSHOT_UNAVAILABLE in Progress without rewriting it.
-	if marker.Status != execution.GapFound || marker.Identity != item.Identity ||
-		plan.Identity != item.Identity.Plan || plan.StateGeneration != item.Identity.StateGeneration ||
-		plan.StateApplyEpoch != item.ApplyVersion.StateApplyEpoch || plan.ScheduleRevision != item.ScheduleRevision ||
-		execution.CompareApplyVersion(marker.PersistedApplyVersion, item.ApplyVersion) != execution.ApplyVersionEqual ||
-		marker.LastScheduleRevision != item.ScheduleRevision {
+	if !sameSlotProtectionCandidate(marker, item, plan) {
 		return false
 	}
 	for _, scope := range marker.Scopes {
@@ -703,11 +709,7 @@ func queryFreeGapAlreadyProtects(
 // Preserve the existing level scopes and add Plan-wide protection instead of
 // guessing that the observed levels cover every threshold and no-data level.
 func queryFreeGapCanExtend(marker execution.GapGuardSnapshot, item execution.PlanGapLoadItem, plan execution.ActivatedPlan, mutation execution.PlanGapMutation) bool {
-	if marker.Status != execution.GapFound || marker.Identity != item.Identity ||
-		plan.Identity != item.Identity.Plan || plan.StateGeneration != item.Identity.StateGeneration ||
-		plan.StateApplyEpoch != item.ApplyVersion.StateApplyEpoch || plan.ScheduleRevision != item.ScheduleRevision ||
-		execution.CompareApplyVersion(marker.PersistedApplyVersion, item.ApplyVersion) != execution.ApplyVersionEqual ||
-		marker.LastScheduleRevision != item.ScheduleRevision {
+	if !sameSlotProtectionCandidate(marker, item, plan) {
 		return false
 	}
 	for _, scope := range marker.Scopes {
