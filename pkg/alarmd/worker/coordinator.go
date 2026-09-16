@@ -305,7 +305,21 @@ func (coordinator *SlotExecutionCoordinator) executeQueryFreeFinalization(
 			request,
 			finalization.ReasonCode,
 			guardFacts,
-			finalization.Mode == execution.FinalizationSnapshotUnavailable,
+			// Both query-free modes may reuse protection that is already
+			// sufficient. Gating this on the mode made a Slot with a marker
+			// from an earlier streaming attempt unfinishable: a GAP_SKIPPED
+			// finalization compared the two digests, found them different --
+			// legitimately, because a streaming attempt and a query-free
+			// finalization write different content for the same Slot -- and
+			// refused, on every round, for as long as the marker stood.
+			//
+			// The mode was never what made reuse safe. queryFreeGapAlreadyProtects
+			// is, and it checks sufficiency directly: same Plan, same
+			// generation, same ApplyVersion, same schedule revision, a
+			// Plan-wide scope that is gapped with nothing observed against it
+			// and the same RequiredFullSlots. It is deliberately not relaxed
+			// here -- the gate above it is what moves.
+			true,
 		); err != nil {
 			return err
 		}
@@ -342,7 +356,10 @@ func (coordinator *SlotExecutionCoordinator) executeQueryFreeFinalization(
 			request,
 			finalization.ReasonCode,
 			*changedActivations,
-			finalization.Mode == execution.FinalizationSnapshotUnavailable,
+			// The same, for the activations that changed underneath this
+			// round. Reuse is decided by whether the protection is sufficient,
+			// not by which query-free mode asked.
+			true,
 		); err != nil {
 			return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: protect changed query-free activation: %w", err)
 		}
@@ -641,7 +658,7 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 				if reuseSufficientQueryFreeProtection && queryFreeGapAlreadyProtects(marker, item, plan) {
 					continue
 				}
-				return false, errors.New("alarmd worker: activated Plan gap marker conflicts with the Slot")
+				return false, newGapGuardConflict(marker, item, mutation, reason, plan)
 			}
 		}
 		if err := owner.retainGapMutation(ctx, mutation); err != nil {

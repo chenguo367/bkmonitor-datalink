@@ -93,14 +93,20 @@ const (
 	ReasonSnapshotRetryPending       = "SNAPSHOT_RETRY_PENDING"
 	ReasonSlotSourceRetry            = "SLOT_SOURCE_RETRY"
 	ReasonBlockedExactSetUnavailable = "BLOCKED_EXACT_SET_UNAVAILABLE"
-	ReasonResourceHardStop           = "RESOURCE_HARD_STOP"
-	ReasonSlotBudgetExceeded         = "SLOT_BUDGET_EXCEEDED"
-	ReasonOutputACKUnknown           = "OUTPUT_ACK_UNKNOWN"
-	ReasonStateWriteRetryable        = "STATE_WRITE_RETRYABLE"
-	ReasonStateCorrupt               = "STATE_CORRUPT"
-	ReasonStateSchemaUnsupported     = "STATE_SCHEMA_UNSUPPORTED"
-	ReasonStateBudgetExceeded        = "STATE_BUDGET_EXCEEDED"
-	ReasonAuditDrop                  = "AUDIT_DROP"
+	// ReasonGapGuardConflict names a Slot refused because the Plan gap marker
+	// already persisted for its ApplyVersion neither matches what this Slot
+	// proposes nor already protects it. Without a name of its own the refusal
+	// left the attempt reading as an unclassified internal error, on every
+	// round, for a Query Group that would never get past it.
+	ReasonGapGuardConflict       = "GAP_GUARD_CONFLICT"
+	ReasonResourceHardStop       = "RESOURCE_HARD_STOP"
+	ReasonSlotBudgetExceeded     = "SLOT_BUDGET_EXCEEDED"
+	ReasonOutputACKUnknown       = "OUTPUT_ACK_UNKNOWN"
+	ReasonStateWriteRetryable    = "STATE_WRITE_RETRYABLE"
+	ReasonStateCorrupt           = "STATE_CORRUPT"
+	ReasonStateSchemaUnsupported = "STATE_SCHEMA_UNSUPPORTED"
+	ReasonStateBudgetExceeded    = "STATE_BUDGET_EXCEEDED"
+	ReasonAuditDrop              = "AUDIT_DROP"
 
 	CompatibilityModeLegacyGroupOfOne = "LEGACY_GROUP_OF_ONE"
 

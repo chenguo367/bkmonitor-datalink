@@ -24,6 +24,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
 type productionFrozenCatalog interface {
@@ -1889,6 +1890,13 @@ func (executor observedProductionSlotExecutor) Execute(
 			reason = observability.ReasonInternalUnknown
 			if errors.Is(err, access.ErrFrozenQueryPlanUnavailable) {
 				reason = observability.ReasonContractDeterministic
+			}
+			// A gap guard conflict is a classifiable refusal, and it repeats on
+			// every round for the same Query Group. internal_unknown is where a
+			// site that looked at a failure and could not name it puts things;
+			// this one has a name and carries the two values it compared.
+			if conflict, named := worker.GapGuardConflictReason(err); named {
+				reason = observability.ReasonCode(conflict)
 			}
 		}
 	} else if observedResult == "" {

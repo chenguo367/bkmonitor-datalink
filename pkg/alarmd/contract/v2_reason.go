@@ -110,7 +110,10 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonSnapshotRetryPending:       {ReasonSnapshotRetryPending, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonSlotSourceRetry:            {ReasonSlotSourceRetry, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonBlockedExactSetUnavailable: {ReasonBlockedExactSetUnavailable, ReasonClassDeterministic, ReasonDomainObservation},
-	ReasonResourceHardStop:           {ReasonResourceHardStop, ReasonClassRetryable, ReasonDomainObservation},
+	// Deterministic: the persisted marker and the proposed one are both facts,
+	// and repeating the attempt compares the same two facts again.
+	ReasonGapGuardConflict: {ReasonGapGuardConflict, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonResourceHardStop: {ReasonResourceHardStop, ReasonClassRetryable, ReasonDomainObservation},
 	// One Slot's own State, Event or Gap output exceeds the per-Slot cap the
 	// process can ever apply; the Slot completes deterministically. The code
 	// is observation-only: Progress records the coverage completion reason.

@@ -30,6 +30,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
 func TestPhaseTwoApplicationHealthUsesWorkerReadinessWithoutKafkaInputState(t *testing.T) {
@@ -1597,7 +1598,15 @@ func TestPhaseTwoWorkerBundleQueryFreeGapConflictDoesNotStopSiblingOrWorker(t *t
 	queryGroups := []execution.QueryGroupIdentity{"query-free-gap-conflict", "healthy-sibling"}
 	control := &fakePhaseTwoControl{queryGroups: queryGroups}
 	failed := newFakePhaseTwoQueryGroup()
-	failed.runErr = errors.New("finalize query-free Slot: activated Plan gap marker conflicts with the Slot")
+	// The real refusal, not a sentence that resembles one. Its sibling test
+	// below already uses the real error for the same reason: a stand-in that
+	// only looks right stops looking right the moment the thing it stands for
+	// changes, and nothing says so.
+	failed.runErr = fmt.Errorf("alarmd worker: finalize query-free Slot: %w", &worker.GapGuardConflictError{
+		Plan:      execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "1001"},
+		Persisted: worker.GapGuardProtection{Kind: "FOUND", RequiredFullSlots: 2},
+		Proposed:  worker.GapGuardProtection{Kind: "STRENGTHEN", RequiredFullSlots: 3},
+	})
 	healthy := newFakePhaseTwoQueryGroup()
 	healthy.runResult = execution.SlotExecutionResult{Completed: true, Result: observability.ResultSuccess}
 	owner := &fakePhaseTwoOwnership{assigned: queryGroups, runners: map[execution.QueryGroupIdentity]phaseTwoQueryGroupRuntime{
