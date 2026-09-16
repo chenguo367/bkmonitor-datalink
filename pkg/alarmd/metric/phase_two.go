@@ -47,6 +47,7 @@ type phaseTwoMetrics struct {
 	noDataSlotPlans                 *prometheus.CounterVec
 	noDataStalls                    *prometheus.CounterVec
 	noDataMemoryRefusals            *prometheus.CounterVec
+	noDataMemoryWrites              *prometheus.CounterVec
 	noDataPlansSeen                 prometheus.Counter
 	noDataPlansByHop                *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
@@ -389,6 +390,17 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"store will not take, and the line beside it carries the bytes and the bound. record is " +
 			"empty for a refusal that was not about size.",
 	}, []string{"reason", "record"})
+	metrics.noDataMemoryWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_memory_writes_total",
+		Help: "Absence-memory writes by what became of them, counting the ones that worked. " +
+			"APPLIED and ALREADY_APPLIED mean the store now holds what the round wanted; " +
+			"STALE_VERSION, CONFLICT and RETRYABLE_IO mean it does not, and each is a different " +
+			"situation. Read it as the answer to \"is this Plan's memory being kept\", which the " +
+			"refusal family cannot answer on its own: a write that lost a race stores nothing just as " +
+			"a refused one does, so an absence of refusals is not recovery. This family plus " +
+			"worker_no_data_memory_refusals_total is every mutation the store was asked for. " +
+			"Every outcome has a label at startup, so a zero is a zero rather than a label nothing wrote.",
+	}, []string{"outcome"})
 	metrics.dueIndex = newDueIndexMetrics()
 	metrics.controlFacts = newControlFactsMetrics()
 	metrics.redisCalls = newRedisCallMetrics()
@@ -699,6 +711,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}
 		metrics.noDataStalls.WithLabelValues(string(outcome))
 	}
+	for _, outcome := range execution.NoDataWriteOutcomes {
+		metrics.noDataMemoryWrites.WithLabelValues(string(outcome))
+	}
 	for _, refusal := range execution.NoDataRefusals {
 		// Pre-created, because the reading this family exists for is the zero.
 		// A Plan whose memory the store will not take produces no other signal
@@ -743,7 +758,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.noDataStalls, m.noDataMemoryRefusals, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -943,6 +958,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.NoDataMemoryRefusal; facts != nil {
 		m.noDataMemoryRefusals.WithLabelValues(facts.Reason, facts.Record).Inc()
+	}
+	if facts := observation.NoDataMemoryWrite; facts != nil {
+		m.noDataMemoryWrites.WithLabelValues(facts.Outcome).Inc()
 	}
 	// Dispatched on the facts rather than on a component and stage: the hops
 	// are reported from the control plane and from the evaluation, and the

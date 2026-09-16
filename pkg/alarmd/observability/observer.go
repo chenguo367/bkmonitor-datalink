@@ -125,6 +125,15 @@ const (
 	// the Plan already has an outcome -- it was evaluated -- and a second one
 	// would make the partition stop adding up.
 	StageNoDataMemoryRefused = "no_data_memory_refused"
+	// StageNoDataMemoryWritten names what became of a Plan's absence-memory
+	// write when the store did not refuse it deterministically. Together with
+	// the refusals it is every mutation the store was asked for.
+	//
+	// It exists because "no refusals lately" is not an answer to "is this
+	// Plan's memory being kept". A write that lost a race stores nothing just
+	// as a refused one does, and a reader with only the refusal lines cannot
+	// tell a Plan that recovered from one that started losing races instead.
+	StageNoDataMemoryWritten = "no_data_memory_written"
 	StageEvaluationCompleted = "evaluation_completed"
 	StageSideEffectAdmission = "side_effect_admission"
 	StageStateAdmission      = "state_admission"
@@ -392,6 +401,21 @@ type NoDataStallFacts struct {
 // are different situations, and a bound that moved under an unchanged record
 // is a third. With the measurement on the line, the same reader can see which
 // one this is and whether it is getting worse.
+// NoDataMemoryWriteFacts is what became of one Plan's absence-memory write.
+//
+// Outcome is the store's own word for it rather than a success flag, because
+// the four that are not APPLIED are four different situations: the record was
+// already this round's, a newer one won, another writer got there, or the
+// store could not be reached. A page that only knew "stored / not stored"
+// would send a reader looking in the same place for all of them.
+type NoDataMemoryWriteFacts struct {
+	Outcome string
+	// Stored says whether the store now holds what this round wanted written.
+	// It is carried rather than derived at each reader, so the one place that
+	// decides which outcomes count is the one place anybody has to agree with.
+	Stored bool
+}
+
 type NoDataMemoryRefusalFacts struct {
 	// Reason is the store's reason code, so a refusal about size and one about
 	// a corrupt record are told apart before anyone reads the numbers.
@@ -1356,6 +1380,7 @@ type Observation struct {
 	NoDataStall           *NoDataStallFacts
 	GapProgress           *GapProgressFacts
 	NoDataMemoryRefusal   *NoDataMemoryRefusalFacts
+	NoDataMemoryWrite     *NoDataMemoryWriteFacts
 	SourceWithheld        *SourceWithheldFacts
 	NoDataCensus          *NoDataCensusFacts
 	SegmentContent        *SegmentContentFacts
@@ -2371,6 +2396,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentState, StageGapGuardProgress},
 	{ComponentEvaluation, StageNoDataDecided},
 	{ComponentState, StageNoDataMemoryRefused},
+	{ComponentState, StageNoDataMemoryWritten},
 	{ComponentControlPlane, StageSourceWithheld},
 	{ComponentControlPlane, StageNoDataSuspended},
 	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},

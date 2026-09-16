@@ -85,3 +85,43 @@ func TestNoDataMemoryRefusalLineOmitsNumbersItDoesNotHave(t *testing.T) {
 		}
 	}
 }
+
+// The write line carries the outcome and whether it was kept.
+//
+// Both, because they answer different halves of one question: stored says
+// whether to worry, outcome says where to look. A line with only the first
+// sends a reader to the same place for a lost race and an unreachable store.
+func TestNoDataMemoryWriteLineCarriesTheOutcomeAndWhetherItWasKept(t *testing.T) {
+	for _, test := range []struct {
+		outcome string
+		stored  bool
+	}{
+		{"APPLIED", true},
+		{"STALE_VERSION", false},
+	} {
+		var output bytes.Buffer
+		observer := refusalLogObserver(&output, t)
+		observer.Observe(context.Background(), Observation{
+			Component: ComponentState, Stage: StageNoDataMemoryWritten, Result: ResultSuccess,
+			Trace:             TraceFields{StrategyID: "8946"},
+			NoDataMemoryWrite: &NoDataMemoryWriteFacts{Outcome: test.outcome, Stored: test.stored},
+		})
+		var line map[string]any
+		if err := json.Unmarshal([]byte(strings.TrimSpace(output.String())), &line); err != nil {
+			t.Fatal(err)
+		}
+		for field, want := range map[string]any{
+			"stage":                  string(StageNoDataMemoryWritten),
+			"no_data_memory_outcome": test.outcome,
+			// Written even when false, which is the reading somebody is
+			// looking for: an omitted false is a line that does not say the
+			// memory was dropped.
+			"no_data_memory_stored": test.stored,
+			"strategy_id":           "8946",
+		} {
+			if line[field] != want {
+				t.Fatalf("line[%q] = %#v, want %#v; line=%#v", field, line[field], want, line)
+			}
+		}
+	}
+}

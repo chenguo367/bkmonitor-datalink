@@ -305,6 +305,15 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Uint64("gap_full_slots_observed", uint64(facts.Observed)),
 		)
 	}
+	if facts := observation.NoDataMemoryWrite; facts != nil {
+		// Both, always. The outcome alone makes a reader remember which of the
+		// five mean the record was kept, and that is the question they came
+		// with; stored alone loses which situation it was.
+		attributes = append(attributes,
+			slog.String("no_data_memory_outcome", facts.Outcome),
+			slog.Bool("no_data_memory_stored", facts.Stored),
+		)
+	}
 	if facts := observation.NoDataMemoryRefusal; facts != nil {
 		attributes = append(attributes, slog.String("no_data_memory_refusal", facts.Reason))
 		if facts.Record != "" {

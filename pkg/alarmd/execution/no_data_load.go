@@ -124,6 +124,48 @@ var NoDataRefusals = []NoDataRefusal{
 	{Reason: ReasonCode(contract.ReasonStateSchemaUnsupported)},
 }
 
+// NoDataWriteOutcomes is every outcome of a no-data memory write that is not a
+// deterministic refusal.
+//
+// The refusals are reported on their own, with the store's reason and the
+// measurement behind it; these are the rest, and they have to be reported too.
+// A Plan whose write keeps landing on CONFLICT stores nothing, round after
+// round, exactly as a refused one does -- and with only the refusals reported,
+// that Plan is silent. The two lists together are every mutation the store was
+// asked for, which is what makes "is this Plan's memory being kept" answerable
+// rather than inferable from an absence of complaints.
+var NoDataWriteOutcomes = noDataWriteOutcomes()
+
+// NoDataApplyStatuses is every status an apply can return. The two lists that
+// partition it are derived from this one rather than written beside it: two
+// hand-kept lists whose union has to be this one is the shape where a status
+// added later goes missing from both and nothing notices.
+var NoDataApplyStatuses = []NoDataApplyStatus{
+	NoDataApplied, NoDataAlreadyApplied, NoDataStale, NoDataConflict, NoDataRetryable, NoDataRejected,
+}
+
+func noDataWriteOutcomes() []NoDataApplyStatus {
+	outcomes := make([]NoDataApplyStatus, 0, len(NoDataApplyStatuses)-1)
+	for _, status := range NoDataApplyStatuses {
+		if status == NoDataRejected {
+			continue
+		}
+		outcomes = append(outcomes, status)
+	}
+	return outcomes
+}
+
+// NoDataWriteStored reports whether an outcome means the store now holds what
+// the round wanted written.
+//
+// ALREADY_APPLIED counts: the record carries this round's own version and
+// digest, so the memory the next round reads is the one this round produced.
+// STALE_VERSION does not, and it is the one that reads like success and is not
+// -- a newer record won, and what this round learned was dropped.
+func NoDataWriteStored(status NoDataApplyStatus) bool {
+	return status == NoDataApplied || status == NoDataAlreadyApplied
+}
+
 type NoDataApplyResult struct {
 	Items []NoDataApplyItemResult
 }
