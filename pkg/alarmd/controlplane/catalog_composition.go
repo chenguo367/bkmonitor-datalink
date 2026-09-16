@@ -9,7 +9,10 @@
 
 package controlplane
 
-import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
+import (
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
+)
 
 // SupportedSourceSemantics is every data source a query can be compiled from,
 // as pollingSourceSupported admits them. A query config outside this set is
@@ -191,6 +194,9 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 	for _, source := range NoDataRosterSources {
 		composition.NoDataPlans[source] = 0
 	}
+	for _, key := range AlwaysReportedWithheld {
+		composition.Withheld[key] = 0
+	}
 	for _, group := range catalog.QueryGroups {
 		label := SourceSemanticsLabel(group.QueryPlan.SourceSemantics)
 		composition.QueryGroups[label]++
@@ -240,6 +246,24 @@ var NoDataRosterSources = []nodata.RosterSource{
 	nodata.RosterTargetStatic,
 	nodata.RosterHistory,
 	nodata.RosterWhole,
+}
+
+// AlwaysReportedWithheld are the pairs the composition publishes even when
+// nothing was withheld under them.
+//
+// Most pairs are not pre-created, and that is deliberate: the cross product of
+// every disposition with every reason is mostly combinations that cannot
+// happen, and publishing them would bury the ones that do. These two are here
+// because their zero is itself a claim somebody acts on -- "no strategy in
+// this deployment asks for a Snapshot kept longer than we keep one", "no
+// strategy leaves its own queries no time to run" -- and a claim that reads
+// identically to "this build does not produce that reason" is not one. Both
+// are new enough that a reader has no way to tell those apart, and both are
+// the acceptance reading for a change that withheld a Plan instead of
+// refusing the whole Catalog.
+var AlwaysReportedWithheld = []WithheldKey{
+	{Disposition: DispositionUnsupported, Reason: contract.ReasonSnapshotRetentionInsufficient},
+	{Disposition: DispositionUnsupported, Reason: contract.ReasonCompletionOffsetBelowReserve},
 }
 
 // NoDataReasons is the set of reasons that withhold a Plan from no-data

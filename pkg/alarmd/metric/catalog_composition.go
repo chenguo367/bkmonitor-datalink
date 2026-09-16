@@ -73,10 +73,13 @@ func newCatalogCompositionCollector() *catalogCompositionCollector {
 				"names the configuration that caused either. A reason this build does not name is counted "+
 				"under other, so a reason added at its site and not in the list shows as a rising other "+
 				"rather than as a count that stops adding up. "+
-				"A pair absent from a scrape had no objects that round. Every pair reading zero is the "+
-				"expected state and is also what 'nothing was computed' looks like, so read it against "+
-				"catalog_objects: these pairs partition every object that is not ACCEPTED, the same pass "+
-				"produces both, and a zero that adds up against that sum is a zero that was computed. "+
+				"Most pairs are absent from a scrape that had no objects under them; a few are published "+
+				"at zero regardless, because their zero is a claim somebody acts on and a claim that "+
+				"reads the same as 'this build does not produce that reason' is not one. Every pair "+
+				"reading zero is the expected state and is also what 'nothing was computed' looks like, "+
+				"so read it against catalog_objects: these pairs partition every object that is not "+
+				"ACCEPTED, the same pass produces both, and a zero that adds up against that sum is a "+
+				"zero that was computed. "+
 				"Reported by the leader only.", "disposition", "reason"),
 		noDataPlans: descriptor("catalog_no_data_plans",
 			"Plans in the Catalog the leader last built that detect no-data, by where their expected set "+
