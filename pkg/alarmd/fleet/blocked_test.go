@@ -410,6 +410,76 @@ func TestARoundThatEndedAfterItsErrorIsNotBeingRetried(t *testing.T) {
 	}
 }
 
+// Two Slots that are known and differ are two rounds, whatever the clocks
+// say: a failure stamped after the latest round ended, on the next Slot, is
+// the next round's -- in flight -- and not this one's. The clock decides
+// only when a Slot is missing, which a publisher before the field is.
+func TestKnownAndDifferentSlotsAreTwoRoundsWhateverTheClocksSay(t *testing.T) {
+	later := now.Add(time.Second)
+	inFlight := Anomaly{Kind: KindDegradedRun, ReasonCode: "COMPLETED_WITH_UNAVAILABLE", CauseReason: "HISTORY_GAPPED",
+		ReasonLastAt: now, RoundSlot: 1000,
+		Failure: &FailureRef{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout", At: &later, Slot: 1060}}
+	blocked := blockedOf(inFlight, "")
+	if blocked.Dependency == DependencyRedis || blocked.Text != "" {
+		t.Fatalf("blocked = %+v, want the next Slot's failure not read as this round's although stamped later", blocked)
+	}
+	// The same row from a publisher that stamps no Slot: the clock decides,
+	// as it did before the field existed.
+	unslotted := inFlight
+	unslotted.RoundSlot = 0
+	unslotted.Failure = &FailureRef{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout", At: &later}
+	if blocked := blockedOf(unslotted, ""); blocked.Dependency != DependencyRedis {
+		t.Fatalf("blocked = %+v, want the clock to decide when no Slot is known", blocked)
+	}
+}
+
+// The cause describes the last round that completed. When the latest round
+// failed instead, and the failure named this round, the failure decides the
+// line and the reading: a row whose last completion was skipped past the
+// replay window and whose rounds since are refused by a gap guard is the
+// refusal, not the skip. A completion after the failure puts the cause
+// back first; a failure kept from an earlier Slot never comes first.
+func TestThisRoundsFailureOutranksTheLastCompletionsCause(t *testing.T) {
+	failedAt := now
+	refusedAfterSkip := Anomaly{Kind: KindDegradedRun, ReasonCode: "error", CauseReason: "GAP_SKIPPED", ReasonLastAt: now, RoundSlot: 1060,
+		Failure:   &FailureRef{Stage: "other", Category: "completion_contract", Code: "GAP_GUARD_CONFLICT", At: &failedAt, Slot: 1060},
+		LastError: &LastError{Text: "alarmd worker: finalize query-free Slot: gap marker conflicts", At: now, EvaluationTime: 1060}}
+	rows := []Anomaly{refusedAfterSkip}
+	Attribute(rows, now)
+	if rows[0].Finding.Check != CheckDefect || rows[0].Finding.Group != "EVALUATE/NONE/CONTRACT" || rows[0].Blocked == nil || rows[0].Blocked.Code != "GAP_GUARD_CONFLICT" {
+		t.Fatalf("refused after a skip = %+v / %+v, want the refusal to decide the line and the reading", rows[0].Finding, rows[0].Blocked)
+	}
+	// The latest round completed -- degraded, skipped again: the cause is
+	// this round's and comes first again.
+	skippedAgain := refusedAfterSkip
+	skippedAgain.ReasonCode = "GAP_SKIPPED"
+	skippedAgain.RoundSlot = 1120
+	rows = []Anomaly{skippedAgain}
+	Attribute(rows, now)
+	if rows[0].Finding.Check != CheckDetectionAbandoned || rows[0].Blocked == nil || rows[0].Blocked.Code != "GAP_SKIPPED" {
+		t.Fatalf("skipped again = %+v / %+v, want the completion's cause first again", rows[0].Finding, rows[0].Blocked)
+	}
+	// The latest round failed, but the failure the row keeps is an earlier
+	// Slot's: it stays where it was, third.
+	staleFailure := refusedAfterSkip
+	staleFailure.RoundSlot = 1120
+	rows = []Anomaly{staleFailure}
+	Attribute(rows, now)
+	if rows[0].Finding.Check != CheckDetectionAbandoned {
+		t.Fatalf("failed with a stale failure = %+v, want the cause still first over a failure from another Slot", rows[0].Finding)
+	}
+	// The latest round completed after a failure on the same Slot -- the
+	// retry got through, degraded: the completion's cause is the round's
+	// verdict and the failure on the way is its history, not its line.
+	completedAfterFailure := Anomaly{Kind: KindDegradedRun, ReasonCode: "COMPLETED_WITH_UNAVAILABLE", CauseReason: "HISTORY_GAPPED", ReasonLastAt: now, RoundSlot: 1060,
+		Failure: &FailureRef{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", At: &failedAt, Slot: 1060}}
+	rows = []Anomaly{completedAfterFailure}
+	Attribute(rows, now)
+	if rows[0].Finding.Check == CheckDependencyDown || rows[0].Blocked == nil || rows[0].Blocked.Code != "HISTORY_GAPPED" {
+		t.Fatalf("completed after a failure = %+v / %+v, want the completion's cause to decide, not the failure on the way", rows[0].Finding, rows[0].Blocked)
+	}
+}
+
 // A failure on the previous Slot is the previous round's: the next round
 // completing on a new Slot with a different reason does not borrow it, which
 // is the guarantee the Slot comparison has to keep from the clock comparison

@@ -153,10 +153,10 @@ func TestRecordFoldsReadHistoryFromTheSkipsClock(t *testing.T) {
 	}
 }
 
-// Every recovery state has a producer, or is named as waiting for one:
-// RECOVERED needs a problem remembered after its objects left the lines,
-// which nothing keeps yet, and a state on the page's list with nothing
-// producing it would read as a mechanism that is wired.
+// Every recovery state has a producer, or is named as waiting for one: a
+// state on the page's list with nothing producing it would read as a
+// mechanism that is wired. RECOVERED's producer is the recoveries the
+// trackers record at the healthy completion, carried on the view.
 func TestEveryRecoveryStateIsProducedOrNamedAsWaiting(t *testing.T) {
 	produced := map[Recovery]bool{}
 	fresh := now.Add(-time.Minute)
@@ -174,7 +174,10 @@ func TestEveryRecoveryStateIsProducedOrNamedAsWaiting(t *testing.T) {
 		}
 	}
 	view := &View{Replicas: []string{"pod-a"}, GapSkips: map[string]SkippedSpan{"qg-then": {At: now.Add(-2 * time.Hour), Replica: "pod-a"}},
-		PerReplica: []ReplicaView{{Replica: "pod-a", StartedAt: now.Add(-24 * time.Hour)}}}
+		PerReplica: []ReplicaView{{Replica: "pod-a", StartedAt: now.Add(-24 * time.Hour)}},
+		Recovered: []RecoveredProblem{{Check: CheckDependencyDown, Key: "COMMIT/REDIS/UNAVAILABLE", Objects: 3,
+			FirstFailure: now.Add(-30 * time.Minute), LastFailure: now.Add(-12 * time.Minute),
+			FirstRecovery: now.Add(-11 * time.Minute), LastRecovery: now.Add(-10 * time.Minute)}}}
 	for _, report := range ReportChecks(nil, nil, view, now) {
 		for _, group := range report.Groups {
 			produced[group.Recovery] = true

@@ -375,7 +375,25 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// past the scheduler's tolerance, and the build only plans the
 		// moves. The third standing is built from this and nothing else.
 		Rebalance: rebalance, RebalanceReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
-		Degradations: degradations}
+		Degradations: degradations,
+		// Problems whose objects recovered within the hour, as the trackers
+		// recorded them at the healthy completion. One on a fold of a line
+		// that still has objects (the recovered count rides on the fold and
+		// lifts nothing); one on a line with nothing current, which is the
+		// RECOVERED reading's only producer and sits with the history.
+		Recovered: []fleet.RecoveredProblem{
+			{Check: fleet.CheckDependencyDown, Key: "COMMIT/REDIS/UNAVAILABLE", Objects: 86,
+				FirstFailure: at.Add(-25 * time.Minute), LastFailure: at.Add(-13 * time.Minute),
+				FirstRecovery: at.Add(-12 * time.Minute), LastRecovery: at.Add(-11 * time.Minute)},
+			{Check: fleet.CheckPlanUnevaluable, Key: "s-42", Objects: 3,
+				FirstFailure: at.Add(-50 * time.Minute), LastFailure: at.Add(-31 * time.Minute),
+				FirstRecovery: at.Add(-30 * time.Minute), LastRecovery: at.Add(-30 * time.Minute)},
+			// And one on a fold that still has objects under it: the count
+			// rides on the fold in the first-screen sentence and lifts nothing.
+			{Check: fleet.CheckDefect, Key: "UNLOCATED/UNLOCATED/UNLOCATED", Objects: 12,
+				FirstFailure: at.Add(-40 * time.Minute), LastFailure: at.Add(-9 * time.Minute),
+				FirstRecovery: at.Add(-8 * time.Minute), LastRecovery: at.Add(-6 * time.Minute)},
+		}}
 	columns := [][]fleet.Anomaly{rows, demoted}
 	checks := fleet.ReportChecks(columns, nil, retained, at)
 	todo := fleet.SummarizeTodo(checks, columns, retained, at)
@@ -732,7 +750,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"CHECKS ::", "6 个对象命中程序缺陷（3 种），上报"},
 		// The line's problems before it is opened: each fold as where, talking
 		// to what, what kind, how many, and whether it is still happening.
-		{"CHECKS ::", "6 个对象命中程序缺陷（3 种），上报——环节待定位 · 依赖待定位 · 类型待定位（COMPLETED_WITH_UNAVAILABLE 3、error 1）：4 个，仍然受阻，最近失败 17:59:30；"},
+		{"CHECKS ::", "6 个对象命中程序缺陷（3 种），上报——环节待定位 · 依赖待定位 · 类型待定位（COMPLETED_WITH_UNAVAILABLE 3、error 1）：4 个，已恢复 12 个，仍然受阻，最近失败 17:59:30；"},
 		{"CHECKS ::", "alarmd 自己的依赖没答，1 个对象受影响（1 种）——配置获取 · 依赖待定位 · 不可用（source_blocked 1）：1 个，仍然受阻，最近失败 17:59:30"},
 		{"CHECKS ::", "；GAP_SCOPE_REASON_CONFLICT（内部错误，第二事实）：1 个，仍然受阻"},
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\""},
@@ -744,7 +762,27 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"PENDING ::", "下一步：先查查询链路：超时看查询预算、网络、后端耗时哪一环超了"},
 		{"PENDING ::", "恢复所需的老序列数据不完整（1 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出"},
 		{"PENDING ::", "恢复标准：分出归属后转到对应行（策略侧或 alarmd）；不是等它消失"},
-		{"HISTORY COUNT ::", "1 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
+		{"HISTORY COUNT ::", "漏检记录 1 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
+		// Where detection is stuck and how much is unknown, as one sentence
+		// beside the badge's verdict: the largest folds across this
+		// deployment's and the undetermined lines, then the unknown count,
+		// and -- the verdict here is UNKNOWN for a coverage gap -- that the
+		// verdict is about the second clause. Same words whichever response
+		// rendered last.
+		{"BLOCKED SENTENCE ::", "受阻：环节待定位 · 依赖待定位 · 类型待定位（COMPLETED_WITH_UNAVAILABLE 3、error 1） 4 个，仍然受阻；数据查询 · 依赖待定位 · 超时（QUERY_TIMEOUT 4） 4 个，正在恢复；配置获取 · 依赖待定位 · 不可用（source_blocked 1） 1 个，仍然受阻；另 4 组共 4 个，见各行"},
+		{"BLOCKED SENTENCE ::", "；待确认：8 个对象说不出结论（没留下成因，各自再跑完一轮就补上）；判定停在 UNKNOWN 说的是这一句，不抵消前一句"},
+		{"BLOCKED SENTENCE BEFORE HEALTH ::", "另 4 组共 4 个，见各行"},
+		{"BLOCKED SENTENCE AFTER HEALTH ::", "受阻：环节待定位 · 依赖待定位 · 类型待定位（COMPLETED_WITH_UNAVAILABLE 3、error 1） 4 个，仍然受阻；数据查询 · 依赖待定位 · 超时（QUERY_TIMEOUT 4） 4 个，正在恢复；"},
+		{"BLOCKED SENTENCE AFTER HEALTH ::", "；待确认：8 个对象说不出结论"},
+		// The problems that recovered within the hour, on the history side:
+		// the count over the lines, and the line with nothing current said
+		// as recovered -- never with the check's sentence over zero objects.
+		{"HISTORY COUNT ::", "；已恢复 101 个对象（最近 1 小时内有健康完成，最近一次 17:54:00）"},
+		{"HISTORY ::", "已恢复 3 个对象（最近 1 小时内有健康完成，现在不在这一行上）——s-42：3 个，失败 17:10:00–17:29:00，恢复 17:30:00"},
+		// The recovered fold of a line that still has objects rides on the
+		// line: in the expanded groups with its count and clocks, and not in
+		// the first-screen sentence, which is about the objects there now.
+		{"GROUPS BLOCKED ::", "结果提交 · Redis（控制面与状态存储） · 不可用 · 已恢复（曾在这一组的每个对象都在之后成功完成过，现在没有对象在这一组） · 最近 1 小时内恢复 86 个，最近一次 17:49:00 · 首次 17:35:00 · 最后一次 17:47:00 · 最近一次成功 17:49:00"},
 		// The refusal line carries what its demoted object lost there, as the
 		// refusal's consequence and not as capacity.
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\"（1 种回答，1 条策略，1 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错；其中 1 个已降级，不再反复查；其中 1 个在被拒期间还跳过了检测（最近 10 分钟内 1 个）——冷却让旧轮次超出重放范围，首要原因是查询不可用，扩容无用"},
@@ -812,6 +850,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	}
 	if strings.Contains(todoLine, "策略引用了后端说不存在的表或字段") {
 		t.Errorf("the refusal naming a missing target is still on the list this reader acts on:\n%s", todoLine)
+	}
+	// Before the health read there is no unknown count to state; the sentence
+	// must not invent one, and must gain it when the read lands.
+	if before := lineStarting(text, "BLOCKED SENTENCE BEFORE HEALTH ::"); strings.Contains(before, "待确认") {
+		t.Errorf("the blocked sentence states an unknown count before any health read:\n%s", before)
 	}
 	// Opening a standing's line names its replicas, not objects.
 	for _, want := range []struct{ line, says string }{
@@ -1278,6 +1321,16 @@ console.log('HISTORY :: ' + textOf(store['historyRows']));
 console.log('HISTORY COUNT :: ' + textOf(store['historyCount']));
 console.log('GOV :: ' + textOf(store['govRows']));
 console.log('ACTION :: ' + textOf(store['briefAction']));
+// The blocked/unknown sentence: built when the checks render, and again when
+// the health read lands, so it reads the same whichever came last.
+console.log('BLOCKED SENTENCE :: ' + textOf(store['briefBlocked']));
+// Checks rendered before any health read: the sentence has the folds and
+// no unknown clause yet; the health read then completes it.
+ctx.latestDeployment = null;
+ctx.renderChecks(data.checks);
+console.log('BLOCKED SENTENCE BEFORE HEALTH :: ' + textOf(store['briefBlocked']));
+ctx.renderDeployment(data.health);
+console.log('BLOCKED SENTENCE AFTER HEALTH :: ' + textOf(store['briefBlocked']));
 // The pool suffix, on a line shaped like the live one: every object demoted.
 console.log('SENTENCE demoted :: ' + ctx.checkSentence({code: 'QUERY_TARGET_MISSING', objects: 351, current: 351, demoted: 351,
   strategies: 351, businesses: 59, groups: [{key: 'response=status_space_table_id_field_is_not_exists', objects: 351}]}, 351));
@@ -1353,6 +1406,10 @@ console.log('GROUPS DEGRADED :: ' + textOf(store['groups']));
 ctx.openCheck = 'DETECTION_ABANDONED';
 ctx.renderChecks(data.checks);
 console.log('GROUPS LOSS :: ' + textOf(store['groups']));
+// A line with objects under one fold and a recovered fold beside it.
+ctx.openCheck = 'DEPENDENCY_DOWN';
+ctx.renderChecks(data.checks);
+console.log('GROUPS BLOCKED :: ' + textOf(store['groups']));
 ctx.openCheck = '';
 
 // The four dimensions each row shows, read off the rendered cells.
