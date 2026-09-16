@@ -134,7 +134,10 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 
 	// A1. Not FULL: every expected group is unavailable, and nothing is
 	// learned - not even about a group that did arrive, because a partial
-	// answer is not evidence about what it left out either.
+	// answer is not evidence about what it left out either. An absence the
+	// roster has stopped expecting is not closed here either: the roster
+	// change is known, but closing is a verdict, and a round that did not look
+	// gives no verdicts. The next FULL round closes it.
 	if input.Completeness != execution.CompletenessFull {
 		for key := range input.Roster.Groups {
 			result.Verdicts[key] = VerdictUnavailable
@@ -163,6 +166,7 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 			// LastSeen: one would carry it into a history roster as if it were.
 			entry.LastSeen = 0
 			result.Memory[whole] = entry
+			closeDroppedAbsences(&result, input)
 			return result
 		}
 		result.Verdicts[whole] = VerdictNormal
@@ -170,6 +174,7 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 		for key := range input.Present {
 			rememberPresent(result.Memory, key, input)
 		}
+		closeDroppedAbsences(&result, input)
 		return result
 	}
 
@@ -215,10 +220,48 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 		rememberPresent(result.Memory, key, input)
 	}
 
-	// A8 needs no branch. A remembered group the new roster no longer expects
-	// is simply one no loop above touched, so it keeps the memory it had -
-	// FirstAbsent included - and gets no verdict.
+	closeDroppedAbsences(&result, input)
 	return result
+}
+
+// closeDroppedAbsences is A8: a remembered group the roster has stopped
+// expecting is handled by what it has open.
+//
+// One with an open absence -- a FirstAbsent, so an alert may be standing on it
+// -- gets exactly one NORMAL and is then forgotten. The roster no longer
+// expects it, so no later round will ever say NORMAL for it; without this one
+// verdict the alert stands until somebody closes it by hand. That is the case
+// a host leaving the target, and an item's whole-item absence turning into
+// target groups, both land in.
+//
+// One with nothing open keeps its memory and gets no verdict, which is where a
+// history roster grows from.
+//
+// One sweep rather than a branch in each path, because the reason is one
+// reason and it does not care which way the roster changed: a target roster
+// becoming empty strands the host groups exactly as a target roster arriving
+// strands the whole-item group. The NORMAL is not counted as an absence -- it
+// is the end of one.
+//
+// It reads the input memory, not the result's, so the answer does not depend
+// on what the loops above have already written and a retried Slot reaching
+// here with the same memory gets the same answer. A group already judged this
+// round keeps that verdict: the roster expects it, or it is the whole-item
+// group this round has just spoken about.
+func closeDroppedAbsences(result *AbsenceResult, input AbsenceInput) {
+	for key, entry := range input.Memory {
+		if entry.FirstAbsent == 0 {
+			continue
+		}
+		if _, expected := input.Roster.Groups[key]; expected {
+			continue
+		}
+		if _, judged := result.Verdicts[key]; judged {
+			continue
+		}
+		result.Verdicts[key] = VerdictNormal
+		delete(result.Memory, key)
+	}
 }
 
 // rememberPresent records a group that arrived without a verdict. An

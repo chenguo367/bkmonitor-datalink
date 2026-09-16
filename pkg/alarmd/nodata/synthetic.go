@@ -114,10 +114,24 @@ func SyntheticSeriesFor(input SyntheticInput) []SyntheticSeries {
 	series := make([]SyntheticSeries, 0, len(keys))
 	sourceTime := input.EvaluationTime - input.PeriodSeconds
 	for _, key := range keys {
-		group, ok := input.Roster.Groups[key]
-		if !ok {
-			// The only verdict that is not a roster group is the whole item.
-			group = WholeItemGroup()
+		group, named := input.Roster.Groups[key]
+		if !named {
+			// Two verdicts are not roster groups: the whole item, and the one
+			// NORMAL that closes an absence on a group the roster has stopped
+			// expecting (A8). The second cannot come from the roster -- being
+			// dropped from it is what it is -- so its group comes back out of
+			// its key, the same round trip the history roster makes.
+			//
+			// This has to be right rather than approximately right. The point
+			// carries the group's identity all the way to the event, so a
+			// closing recovery built from the wrong group would end some other
+			// alert and leave the one it was for standing, which is worse than
+			// the verdict never having been made.
+			parsed, ok := ParseGroupKey(key)
+			if !ok {
+				continue
+			}
+			group = parsed
 		}
 		entry := SyntheticSeries{Group: group, SourceTime: sourceTime, Value: PresentValue}
 		if input.Result.Verdicts[key] == VerdictAnomaly {
