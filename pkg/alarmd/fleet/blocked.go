@@ -351,45 +351,60 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 			blocked.Code = anomaly.Failure.Code
 		}
 	}
+	// The current round is the latest thing the row records: a skip record's
+	// time, the failing round's time, the latest round that said the reason,
+	// or when the reason began. Everything below is read from that round
+	// and nothing older. The error's words and the query failure's detail
+	// are kept until a healthy completion, so on a row whose latest round
+	// ended some other way they describe an earlier round -- and read as
+	// current they lent a new reason an old Redis error as its dependency
+	// and called a round that had just ended silence.
+	latest := time.Time{}
+	for _, candidate := range []time.Time{anomaly.ReasonLastAt, anomaly.ReasonSince} {
+		if candidate.After(latest) {
+			latest = candidate
+		}
+	}
+	if anomaly.LastError != nil && anomaly.LastError.At.After(latest) {
+		latest = anomaly.LastError.At
+	}
+	if anomaly.Skip != nil && anomaly.Skip.At.After(latest) {
+		latest = anomaly.Skip.At
+	}
+	errorCurrent := anomaly.LastError != nil && !anomaly.LastError.At.Before(latest)
+	failureCurrent := anomaly.Failure != nil && anomaly.Failure.At != nil && !anomaly.Failure.At.Before(latest)
 	// A code that does not name the dependency defers to the error's text,
-	// which the dependency's client wrote.
+	// which the dependency's client wrote -- this round's text only.
 	if blocked.Dependency == DependencyUnlocated {
-		for _, text := range []string{errorText(anomaly.LastError), failureDetail(anomaly.Failure)} {
+		texts := []string{}
+		if errorCurrent {
+			texts = append(texts, anomaly.LastError.Text)
+		}
+		if failureCurrent {
+			texts = append(texts, anomaly.Failure.Detail)
+		}
+		for _, text := range texts {
 			if dependency, named := dependencyFromText(text); named {
 				blocked.Dependency, blocked.DependencyEvidence = dependency, dependencyByText
 				break
 			}
 		}
 	}
-	if anomaly.LastError != nil {
+	switch {
+	case errorCurrent:
 		blocked.Text, blocked.Operation = anomaly.LastError.Text, anomaly.LastError.Operation
-		at := anomaly.LastError.At
-		blocked.At = &at
-	} else if anomaly.Failure != nil && anomaly.Failure.Detail != "" {
+	case failureCurrent && anomaly.Failure.Detail != "":
 		blocked.Text = anomaly.Failure.Detail
 	}
-	// When it was last seen: the skip record's time on a record, the failing
-	// round's own time, else the latest round that said the reason, else when
-	// the reason began. The latest end, because "still happening" is read
-	// from it.
-	if anomaly.Skip != nil && !anomaly.Skip.At.IsZero() {
-		at := anomaly.Skip.At
+	if !latest.IsZero() {
+		at := latest
 		blocked.At = &at
-	}
-	if blocked.At == nil {
-		for _, candidate := range []time.Time{anomaly.ReasonLastAt, anomaly.ReasonSince} {
-			if !candidate.IsZero() {
-				at := candidate
-				blocked.At = &at
-				break
-			}
-		}
 	}
 	if !anomaly.LastHealthyAt.IsZero() {
 		at := anomaly.LastHealthyAt
 		blocked.LastSuccessAt = &at
 	}
-	blocked.Effect = effectOf(anomaly, schedule)
+	blocked.Effect = effectOf(anomaly, schedule, errorCurrent)
 	blocked.Retrying = blocked.Effect == EffectRetrying
 	// An overdue wake with no failure behind it is not stuck at any step:
 	// it is late, and the reading says only that.
@@ -404,11 +419,14 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 // whatever else the row says; a retry scheduled or a round that did not
 // finish will be tried again; a round that ended without a usable result
 // is unconfirmed; a late round with nothing else wrong is only late.
-func effectOf(anomaly Anomaly, schedule Schedule) Effect {
+//
+// errorCurrent says the failing round is the row's latest: an error kept
+// from an earlier round does not make a round that has since ended a retry.
+func effectOf(anomaly Anomaly, schedule Schedule, errorCurrent bool) Effect {
 	switch {
 	case anomaly.Skip != nil, anomaly.Kind == KindSkippedSpan:
 		return EffectSkipped
-	case anomaly.QueryCooldown != nil, anomaly.LastError != nil, anomaly.Kind == KindBlockedRun, anomaly.Stalled:
+	case anomaly.QueryCooldown != nil, errorCurrent, anomaly.Kind == KindBlockedRun, anomaly.Stalled:
 		return EffectRetrying
 	case anomaly.Kind == KindDegradedRun, anomaly.Coverage != nil, restoredWithoutEvidence(anomaly):
 		return EffectUnconfirmed
@@ -428,20 +446,6 @@ func dependencyFromText(text string) (Dependency, bool) {
 		}
 	}
 	return "", false
-}
-
-func errorText(lastError *LastError) string {
-	if lastError == nil {
-		return ""
-	}
-	return lastError.Text
-}
-
-func failureDetail(failure *FailureRef) string {
-	if failure == nil {
-		return ""
-	}
-	return failure.Detail
 }
 
 // The tracker's own vocabularies are read the same way the code table folds

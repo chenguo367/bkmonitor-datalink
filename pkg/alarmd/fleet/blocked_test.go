@@ -94,8 +94,8 @@ func TestTheErrorTextNamesTheDependencyTheCodeDoesNot(t *testing.T) {
 			LastError: &LastError{Text: "alarmd progress: commit: redis: connection pool timeout", At: at}}, DependencyRedis, dependencyByText},
 		{"the server's LOADING reply", Anomaly{Kind: KindDegradedRun, ReasonCode: "error",
 			LastError: &LastError{Text: "LOADING Redis is loading the dataset in memory", At: at}}, DependencyRedis, dependencyByText},
-		{"the query failure's detail", Anomaly{Kind: KindDegradedRun, CauseReason: "STATE_WRITE_RETRYABLE",
-			Failure: &FailureRef{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout"}}, DependencyRedis, dependencyByText},
+		{"the query failure's detail", Anomaly{Kind: KindDegradedRun, CauseReason: "STATE_WRITE_RETRYABLE", ReasonLastAt: at,
+			Failure: &FailureRef{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout", At: &at}}, DependencyRedis, dependencyByText},
 		{"a timeout whose text names nothing stays unlocated", Anomaly{Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT",
 			LastError: &LastError{Text: "context deadline exceeded", At: at}}, DependencyUnlocated, ""},
 		{"the code wins over the text when it names one", Anomaly{Kind: KindDegradedRun, CauseReason: "KAFKA_UNAVAILABLE",
@@ -106,6 +106,45 @@ func TestTheErrorTextNamesTheDependencyTheCodeDoesNot(t *testing.T) {
 		if blocked == nil || blocked.Dependency != tc.want || blocked.DependencyEvidence != tc.by {
 			t.Errorf("%s: blocked = %+v, want dependency %s by %q", tc.name, blocked, tc.want, tc.by)
 		}
+	}
+}
+
+// Every field of the reading comes from the row's latest round. The error's
+// words and the query failure's detail are kept until a healthy completion,
+// so on a row whose latest round ended some other way they describe an
+// earlier round: read as current, a new reason borrowed an old Redis error
+// as its dependency, and a round that had just ended was called a retry and
+// then silence. A failure reference from before the timestamp existed is
+// not current either -- it cannot say when it was, so it says nothing.
+func TestTheReadingIsTakenFromTheLatestRoundOnly(t *testing.T) {
+	old := now.Add(-20 * time.Minute)
+	fresh := now.Add(-time.Minute)
+	stale := &LastError{Text: "alarmd progress: commit: redis: connection pool timeout", At: old, Operation: "commit"}
+	row := Anomaly{Kind: KindDegradedRun, Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "QUERY_TIMEOUT", ReasonLastAt: fresh, LastError: stale,
+		Failure: &FailureRef{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout", At: &old}}
+	blocked := blockedOf(row, ScheduleOnTime)
+	if blocked.Dependency != DependencyUnlocated || blocked.DependencyEvidence != "" || blocked.Text != "" || blocked.Operation != "" {
+		t.Fatalf("blocked = %+v, want the old error's words and dependency left out of this round's reading", blocked)
+	}
+	if blocked.At == nil || !blocked.At.Equal(fresh) || blocked.Effect != EffectUnconfirmed || blocked.Retrying {
+		t.Fatalf("blocked = %+v, want the latest round's time and its effect (a round that ended, unconfirmed), not a retry", blocked)
+	}
+	// The same error on the round that is the latest: read in full.
+	current := row
+	current.ReasonLastAt, current.LastError = old, stale
+	current.Cause, current.CauseReason = "", ""
+	current.ReasonCode = "error"
+	blocked = blockedOf(current, ScheduleOnTime)
+	if blocked.Dependency != DependencyRedis || blocked.DependencyEvidence != dependencyByText || blocked.Operation != "commit" ||
+		blocked.At == nil || !blocked.At.Equal(old) || blocked.Effect != EffectRetrying {
+		t.Fatalf("blocked = %+v, want the error read in full when its round is the latest", blocked)
+	}
+	// A failure reference without a time is from a publisher that could not
+	// say when it was: not this round's evidence.
+	undated := Anomaly{Kind: KindDegradedRun, CauseReason: "STATE_WRITE_RETRYABLE", ReasonLastAt: fresh,
+		Failure: &FailureRef{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout"}}
+	if blocked := blockedOf(undated, ScheduleOnTime); blocked.Dependency != DependencyUnlocated || blocked.Text != "" {
+		t.Fatalf("blocked = %+v, want an undated failure reference left out", blocked)
 	}
 }
 
@@ -124,7 +163,7 @@ func TestEffectIsReadFromTheRowsEvidence(t *testing.T) {
 	}{
 		{"a persisted skip record", Anomaly{Kind: KindSkippedSpan, ReasonCode: "GAP_SKIPPED", Skip: &SkippedSpan{At: at, Slots: 3}}, ScheduleOnTime, EffectSkipped},
 		{"a skip record on a demoted row outranks the cooldown", Anomaly{Kind: KindQueryCooldown, QueryCooldown: &cooldownFacts, Skip: &SkippedSpan{At: at}}, ScheduleOnTime, EffectSkipped},
-		{"a round that failed will run again", Anomaly{Kind: KindDegradedRun, ReasonCode: "error", LastError: &LastError{Text: "x", At: at}}, ScheduleOnTime, EffectRetrying},
+		{"a round that failed will run again", Anomaly{Kind: KindDegradedRun, ReasonCode: "error", ReasonLastAt: at, LastError: &LastError{Text: "x", At: at}}, ScheduleOnTime, EffectRetrying},
 		{"a cooldown is a retry scheduled", Anomaly{Kind: KindQueryCooldown, QueryCooldown: &cooldownFacts}, ScheduleOnTime, EffectRetrying},
 		{"a round nothing came of", Anomaly{Kind: KindBlockedRun, ReasonCode: "source_error"}, ScheduleOnTime, EffectRetrying},
 		{"a stalled round", Anomaly{Kind: KindDegradedRun, Stalled: true, ReasonCode: "error"}, ScheduleOnTime, EffectRetrying},
@@ -285,4 +324,30 @@ func containsDependency(dependency Dependency) bool {
 		}
 	}
 	return false
+}
+
+// The tracker stamps the query failure with when it was seen, so the reading
+// can tell this round's failure from one kept since an earlier round -- and
+// use this round's detail for the dependency.
+func TestTrackerStampsTheQueryFailureWithItsTime(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), observability.Observation{
+			QueryFailure: &observability.QueryFailureFacts{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout"},
+			Trace:        observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: 100},
+		})
+		tracker.Observe(context.Background(), observability.Observation{
+			ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionCause: "LEVEL_OUTCOME_UNKNOWN", ProgressCompletionReason: "STATE_WRITE_RETRYABLE",
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: 100},
+		})
+	}
+	rows := tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.At == nil || !rows[0].Failure.At.Equal(now) {
+		t.Fatalf("rows = %+v, want the failure reference stamped with the time it was seen", rows)
+	}
+	Attribute(rows, now)
+	if rows[0].Blocked == nil || rows[0].Blocked.Dependency != DependencyRedis || rows[0].Blocked.DependencyEvidence != dependencyByText {
+		t.Fatalf("blocked = %+v, want Redis named from this round's failure detail", rows[0].Blocked)
+	}
 }
