@@ -333,6 +333,13 @@ var codeChecks = map[string]verdict{
 	// same answer. It used to arrive as REDIS_UNAVAILABLE, which sent the reader
 	// to look at a Redis that was fine and let the work retry forever.
 	"BACKEND_CAPABILITY_MISSING": lands(CheckDefect),
+	// The gap marker this deployment persisted for a Slot and the one the Slot
+	// proposes neither match nor subsume each other. Both are this system's own
+	// writes, and retrying compares the same two facts again -- so the Slot
+	// does not advance on its own, and the Query Group behind it stops. The
+	// refusal carries both values, which is what makes it actionable rather
+	// than something to watch.
+	"GAP_GUARD_CONFLICT": lands(CheckDefect),
 
 	// The control plane did not give the runner something to run. A live read
 	// found twelve objects whose strategies had been retired days earlier and

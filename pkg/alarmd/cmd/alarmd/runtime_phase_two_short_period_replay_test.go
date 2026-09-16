@@ -122,12 +122,14 @@ func startShortPeriodFixture(t *testing.T) *shortPeriodFixture {
 	ctx := context.Background()
 	installShortPeriodStrategy(t, ctx, redisClient)
 
-	// Aligned to the ten-second grid this strategy runs on, and deliberately
-	// close to the wall clock: the query deadline the fake clock derives is
-	// handed to the HTTP client as an absolute instant, which that client
-	// compares against the real one. A base rounded to a wider boundary sits
-	// up to a minute in the real past and the query times out before it is
-	// sent -- on some runs and not others, which is worse than always.
+	// Aligned to the ten-second grid this strategy runs on, which also keeps
+	// it close to the wall clock. That matters: the query deadline the fake
+	// clock derives is handed to the HTTP client as an absolute instant, and
+	// that client compares it against the real one. Rounded to a wider
+	// boundary the base sits up to a minute in the real past and the query
+	// times out before it is sent -- on some runs and not others, which is
+	// worse than always. Here the base is at most nine seconds behind and the
+	// deadline it derives is T+25, so the margin is never negative.
 	base := time.Now().Unix()
 	base -= base % 10
 	fixture := &shortPeriodFixture{t: t, base: base, clock: &atomic.Int64{}, uqCalls: &atomic.Int64{}}
