@@ -958,7 +958,7 @@ func (stream *streamedExecution) noSeriesPlanResult(due execution.DuePlan) (exec
 			ReasonCode: observability.ReasonNone,
 			Plans:      []execution.PlanEvaluationResult{{Plan: due.Identity, Disposition: execution.PlanDecided}}}, nil
 	}
-	mutation, err := stream.completionGapMutationFor(due, bindings, nil, primary.ReasonCode)
+	mutation, err := stream.completionGapMutationFor(due, bindings)
 	if err != nil {
 		return execution.EvaluationResult{}, err
 	}
@@ -1234,7 +1234,7 @@ func (stream *streamedExecution) mergePrimaryIncompleteSeries(
 			break
 		}
 	}
-	mutation, err := stream.completionGapMutationFor(due, primaryIncomplete, nil, reason)
+	mutation, err := stream.completionGapMutationFor(due, primaryIncomplete)
 	if err != nil {
 		return err
 	}
@@ -1310,7 +1310,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		if len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
 			return errors.New("alarmd worker: incomplete named input produced an invalid Plan result")
 		}
-		mutation, mutationErr := stream.completionGapMutationFor(due, incomplete, evaluated.Plans[0].LevelOutcomes, evaluated.Plans[0].ReasonCode)
+		mutation, mutationErr := stream.completionGapMutationFor(due, incomplete)
 		if mutationErr != nil {
 			return mutationErr
 		}
@@ -1801,69 +1801,13 @@ func planCompletedFullEmpty(bindings []execution.NamedInputBinding, plan executi
 	return found
 }
 
-// gapScopeReasonConflictError is the rejection of a Plan whose incomplete
-// named inputs of one gap scope carry different completion reasons and
-// neither the scope's evaluated outcome nor the Plan's own reason decides
-// between them, or a PARTIAL input disagrees with what would; see
-// completionGapReasons. It names the scope, the two inputs, their reasons
-// and which of the two refusals it is.
-type gapScopeReasonConflictError struct {
-	plan          execution.PlanIdentity
-	scope         execution.GapScope
-	first, second execution.NamedInputBinding
-	why           string
-}
-
-// The two refusals a gapScopeReasonConflictError names in its detail:
-// undecided, nothing the contract compares the marker with named one of the
-// inputs' reasons; partial, a PARTIAL input carries a reason other than the
-// one decided, and the contract would compare its marker with that input.
-const (
-	gapScopeConflictUndecided = "undecided"
-	gapScopeConflictPartial   = "partial"
-)
-
-func (e *gapScopeReasonConflictError) Error() string {
-	level := "plan"
-	if e.scope.HasLevel {
-		level = strconv.FormatUint(uint64(e.scope.LevelID), 10)
-	}
-	return fmt.Sprintf("alarmd worker: one gap scope has conflicting completion reasons (%s): strategy %s level %s: %s/%s %s %s vs %s/%s %s %s",
-		e.why, e.plan.StrategyID, level,
-		e.first.RequirementID, e.first.DatasetName, e.first.Completeness, e.first.ReasonCode,
-		e.second.RequirementID, e.second.DatasetName, e.second.Completeness, e.second.ReasonCode)
-}
-
-func (e *gapScopeReasonConflictError) QueryFailure() (string, string) {
-	return observability.QueryFailureCategoryNamedInput, codeGapScopeReasonConflict
-}
-
-// QueryFailureDetail is the scope, the two reasons and which refusal it is,
-// in the bounded detail grammar (lower case, at most 96 bytes), so the shape
-// survives rate limiting and the branch that refused can be read off the line.
-func (e *gapScopeReasonConflictError) QueryFailureDetail() string {
-	level := "plan"
-	if e.scope.HasLevel {
-		level = strconv.FormatUint(uint64(e.scope.LevelID), 10)
-	}
-	detail := "level=" + level + "-first=" + strings.ToLower(string(e.first.ReasonCode)) + "-second=" + strings.ToLower(string(e.second.ReasonCode)) + "-why=" + e.why
-	if len(detail) > 96 {
-		detail = detail[:96]
-	}
-	return detail
-}
-
 // completionGapMutationFor builds the Plan gap mutation for a set of
-// incomplete bindings, deciding each scope's reason against the Level
-// outcomes the evaluator produced for the same Slot and the reason the Plan
-// result itself carries.
+// incomplete bindings.
 func (stream *streamedExecution) completionGapMutationFor(
 	due execution.DuePlan,
 	bindings []execution.NamedInputBinding,
-	outcomes []execution.LevelOutcome,
-	planReason execution.ReasonCode,
 ) (execution.PlanGapMutation, error) {
-	reasons, err := completionGapReasons(due, bindings, outcomes, planReason)
+	reasons, err := completionGapReasons(due, bindings)
 	if err != nil {
 		return execution.PlanGapMutation{}, err
 	}
@@ -1871,28 +1815,19 @@ func (stream *streamedExecution) completionGapMutationFor(
 }
 
 // completionGapReasons decides the one reason each gap scope carries for a
-// set of incomplete bindings. A marker carries one reason per scope, and the
-// result contract reads it in two places: a degraded Level outcome needs a
-// marker of its scope with the outcome's own reason, and a PARTIAL input
-// needs a marker of its scope with that input's reason. Inputs of one scope
-// that agree decide the scope directly. Inputs that disagree, which two
-// inputs of one Level failing for different transient reasons do on every
-// Slot of an outage and on the replay after a restart, are decided by what
-// the contract will compare the marker with, or by what the Plan result
-// itself says when the contract compares nothing: first the reason of the
-// Level's UNKNOWN outcome, which the evaluator took from one of these same
-// inputs; then, when the Level has no outcome, as on the no-series and
-// PRIMARY paths, the reason the Plan result carries, which those paths take
-// from the PRIMARY input. Either is taken only when it is one an input of
-// the scope gave, and no PARTIAL input of the scope carries another. Anything
-// else is the conflict, named with the two inputs it saw and which of the
-// two refusals it is, since a marker that satisfies one of the contract's
-// comparisons would fail the other.
+// set of incomplete bindings: the incomplete inputs of the scope, folded by
+// GapReasonFoldOrder.
+//
+// A marker carries one reason per scope, and the result contract reads it in
+// two places -- a degraded Level outcome needs a marker of its scope with the
+// outcome's own reason, and a PARTIAL input needs a marker of its scope with
+// that input's reason. The fold is what makes those comparisons hold by
+// construction: the marker's reason and the Level's UNKNOWN reason are the
+// same function of the same inputs, so there is no second derivation for the
+// first to disagree with.
 func completionGapReasons(
 	due execution.DuePlan,
 	bindings []execution.NamedInputBinding,
-	outcomes []execution.LevelOutcome,
-	planReason execution.ReasonCode,
 ) (map[execution.GapScope]execution.ReasonCode, error) {
 	members := make(map[execution.GapScope][]execution.NamedInputBinding)
 	order := make([]execution.GapScope, 0)
@@ -1911,77 +1846,18 @@ func completionGapReasons(
 	}
 	reasons := make(map[execution.GapScope]execution.ReasonCode, len(order))
 	for _, scope := range order {
-		inputs := members[scope]
-		first := inputs[0]
-		disagreeing, found := firstDisagreeingReason(inputs)
-		if !found {
-			reasons[scope] = first.ReasonCode
-			continue
+		// The reason this is a fold and not a choice is what the refusal cost.
+		// Two inputs of one Level failing differently -- one QUERY_UNAVAILABLE,
+		// one QUERY_TIMEOUT, which a backend outage produces on every round --
+		// left every candidate reason unable to satisfy both comparisons, and
+		// the Plan's whole evaluation was refused for as long as that lasted.
+		folded := make([]string, 0, len(members[scope]))
+		for _, input := range members[scope] {
+			folded = append(folded, string(input.ReasonCode))
 		}
-		conflict := &gapScopeReasonConflictError{plan: due.Identity, scope: scope, first: first, second: disagreeing, why: gapScopeConflictUndecided}
-		decided, ok := unknownOutcomeReason(due.Identity, outcomes, scope)
-		if !ok && planReason != "" && planReason != execution.ReasonCode(observability.ReasonNone) {
-			decided, ok = planReason, true
-		}
-		if !ok {
-			return nil, conflict
-		}
-		var carrier *execution.NamedInputBinding
-		for index := range inputs {
-			if inputs[index].ReasonCode == decided {
-				carrier = &inputs[index]
-				break
-			}
-		}
-		if carrier == nil {
-			return nil, conflict
-		}
-		for _, input := range inputs {
-			if input.Completeness == execution.CompletenessPartial && input.ReasonCode != decided {
-				return nil, &gapScopeReasonConflictError{plan: due.Identity, scope: scope, first: input, second: *carrier, why: gapScopeConflictPartial}
-			}
-		}
-		reasons[scope] = decided
+		reasons[scope] = execution.ReasonCode(contract.FoldGapReason(folded))
 	}
 	return reasons, nil
-}
-
-func firstDisagreeingReason(inputs []execution.NamedInputBinding) (execution.NamedInputBinding, bool) {
-	for _, input := range inputs[1:] {
-		if input.ReasonCode != inputs[0].ReasonCode {
-			return input, true
-		}
-	}
-	return execution.NamedInputBinding{}, false
-}
-
-// unknownOutcomeReason is the reason of the one UNKNOWN outcome the evaluator
-// gave a Level scope, if the outcomes of that Level all say the same thing. A
-// Plan scope has no outcome of its own, and a Level whose series were given
-// different reasons decides nothing.
-func unknownOutcomeReason(
-	plan execution.PlanIdentity,
-	outcomes []execution.LevelOutcome,
-	scope execution.GapScope,
-) (execution.ReasonCode, bool) {
-	if !scope.HasLevel {
-		return "", false
-	}
-	decided := execution.ReasonCode("")
-	for _, outcome := range outcomes {
-		if outcome.Plan != plan || outcome.LevelID != scope.LevelID {
-			continue
-		}
-		if outcome.Outcome != execution.LevelOutcomeUnknown || outcome.ReasonCode == "" ||
-			outcome.ReasonCode == execution.ReasonCode(observability.ReasonNone) {
-			return "", false
-		}
-		if decided != "" && decided != outcome.ReasonCode {
-			return "", false
-		}
-		decided = outcome.ReasonCode
-	}
-	return decided, decided != ""
 }
 
 // gapMutationForReasons builds the Plan gap mutation that opens or
