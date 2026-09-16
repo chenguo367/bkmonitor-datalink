@@ -212,13 +212,21 @@ func TestARejectedQueryIsNotFiledAsTheBackendsAvailability(t *testing.T) {
 		check   Check
 		owner   Owner
 	}{
-		// The provider answered with a status code: it read the query and
-		// refused it.
-		{"cooldown on a provider status", cooldown("response=status_space_table_id_field_is_not_exists"),
-			CheckQueryRefused, OwnerUndetermined},
-		{"degraded on a provider status", degraded("response=status_space_table_id_field_is_not_exists"),
-			CheckQueryRefused, OwnerUndetermined},
-		// An HTTP 4xx is the same statement in the transport's vocabulary.
+		// The provider answered with a status that names what is missing: it
+		// read the strategy's table or field and said it is not there. That
+		// is the strategy's, confirmed by the backend itself -- the pool card
+		// already called these strategies unusable, and the line under it
+		// said 待确认 of the same objects.
+		{"cooldown on a provider status naming a missing target", cooldown("response=status_space_table_id_field_is_not_exists"),
+			CheckQueryTargetMissing, OwnerStrategy},
+		{"degraded on a provider status naming a missing target", degraded("response=status_space_table_id_field_is_not_exists"),
+			CheckQueryTargetMissing, OwnerStrategy},
+		{"cooldown on a not-found status", cooldown("response=status_table_not_found"), CheckQueryTargetMissing, OwnerStrategy},
+		// A status this build has no reading of stays on this side of the
+		// page: refused, by whom is not decided.
+		{"cooldown on an unknown provider status", cooldown("response=status_other"), CheckQueryRefused, OwnerUndetermined},
+		// An HTTP 4xx is the same statement in the transport's vocabulary,
+		// and names nothing.
 		{"cooldown on a 4xx", cooldown("http_status=400"), CheckQueryRefused, OwnerUndetermined},
 		// A timeout or a 5xx is the backend not answering: the data's.
 		{"cooldown on a timeout", cooldown("transport=timeout"), CheckBackendNotAnswering, OwnerData},

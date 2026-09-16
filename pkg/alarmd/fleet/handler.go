@@ -85,6 +85,9 @@ type ListResponse struct {
 	// verdict's so that the counts and the rows a check opens come from one
 	// read of the view.
 	Checks []CheckReport `json:"checks"`
+	// Todo is the first screen's arithmetic: lines to act on, distinct
+	// objects under them now, and the record of past loss apart from both.
+	Todo Todo `json:"todo"`
 	// Check and Group echo which line and which fold the rows are, when the
 	// request asked for one. Echoed rather than inferred from the request, like
 	// Column: the rows of one check under another's heading read as that
@@ -855,7 +858,8 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// The first screen, from every column before any of them is swapped in as
 	// the rows. Counted here so the line a reader clicks and the rows it opens
 	// come from one read of the view.
-	checks := ReportChecks(columns, truncated, &view)
+	checks := ReportChecks(columns, truncated, &view, now())
+	todo := SummarizeTodo(checks, columns, &view, now())
 	summaryPartial := truncated[column]
 	// A check is a line on the first screen, and the rows it opens come from
 	// every column: the check decides membership, not the column. Its total is
@@ -933,7 +937,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 		Applied:           replica != "" || strategy != "" || business != "",
 		StallAfterSeconds: int(stallAfter / time.Second),
 		StalledTotal:      stalledTotal,
-		Checks:            checks, Check: check, Group: group,
+		Checks:            checks, Check: check, Group: group, Todo: todo,
 		Order: order,
 		Page:  Page{Offset: offset, Limit: limit, Total: total},
 	})

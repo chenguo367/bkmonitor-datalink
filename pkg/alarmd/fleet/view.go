@@ -1708,6 +1708,8 @@ type PrunedSkip struct {
 	// Replica is the replica that applied the skip, so the record can be folded
 	// with the rest of that replica's lines.
 	Replica string `json:"replica,omitempty"`
+	// Strategies, as on SkippedSpan.
+	Strategies []StrategyRef `json:"strategies,omitempty"`
 }
 
 // SkippedSpan is a run of Slots one object skipped because they had fallen
@@ -1721,6 +1723,11 @@ type SkippedSpan struct {
 	// At is when the last skip in the run happened.
 	At      time.Time `json:"at"`
 	Replica string    `json:"replica,omitempty"`
+	// Strategies is what the object evaluates, as the publisher knew it. A
+	// retained record without them rendered as a row with an empty strategy
+	// column, and a row nobody can trace to a strategy is a row nobody can
+	// act on.
+	Strategies []StrategyRef `json:"strategies,omitempty"`
 }
 
 // Spanning is how long the skipped span covers. It is a duration rather than a

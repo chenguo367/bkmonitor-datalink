@@ -71,7 +71,7 @@ func TestStandingsAreTheFirstLinesAndNameReplicas(t *testing.T) {
 		},
 		Anomalies: []Anomaly{{QueryGroup: "qg-1", Kind: KindOverdueWake, Finding: Finding{Check: CheckSlotsOverdue, Group: "pod-a"}}},
 	}
-	reports := ReportChecks([][]Anomaly{view.Anomalies}, nil, &view)
+	reports := ReportChecks([][]Anomaly{view.Anomalies}, nil, &view, now)
 	if len(reports) != 3 || reports[0].Code != CheckCutoverFailing || reports[1].Code != CheckReplicaDegraded || reports[2].Code != CheckSlotsOverdue {
 		t.Fatalf("reports = %+v, want CUTOVER_FAILING, REPLICA_DEGRADED, then the object checks", reports)
 	}
@@ -104,7 +104,7 @@ func TestStandingsAreTheFirstLinesAndNameReplicas(t *testing.T) {
 // failure of one round must not put the deployment's first line up.
 func TestAStandingWithinTheBoundIsNotALine(t *testing.T) {
 	view := View{Activation: &ActivationFacts{Behind: true, ConsecutiveFailures: 1}, ActivationReplica: "pod-a"}
-	if reports := ReportChecks(nil, nil, &view); len(reports) != 0 {
+	if reports := ReportChecks(nil, nil, &view, now); len(reports) != 0 {
 		t.Fatalf("reports = %+v, want none within the bound", reports)
 	}
 }

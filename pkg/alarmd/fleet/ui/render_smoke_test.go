@@ -260,7 +260,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			Slots: 20, At: at.Add(-time.Hour), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"}},
 		Activation: activation, ActivationReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 		Degradations: degradations}
-	checks := fleet.ReportChecks([][]fleet.Anomaly{rows}, nil, retained)
+	checks := fleet.ReportChecks([][]fleet.Anomaly{rows}, nil, retained, at)
+	todo := fleet.SummarizeTodo(checks, [][]fleet.Anomaly{rows}, retained, at)
 	rows = append(rows, fleet.UnderCheck(fleet.CheckDetectionAbandoned, "", retained)...)
 	// The barest row the API can send: every omitempty field absent. It goes in
 	// after Attribute so it keeps its empty attribution, because a fixture where
@@ -286,6 +287,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	fixture := map[string]any{
 		"anomalies": rows,
 		"checks":    checks,
+		"todo":      todo,
 		"summary": fleet.Summary{
 			ByKind:   fleet.Distribution{Top: []fleet.Count{{Value: "DEGRADED_RUN", Count: 7}}, Distinct: 1},
 			ByReason: fleet.Distribution{Top: []fleet.Count{{Value: "COMPLETED_WITH_UNAVAILABLE", Count: 7}}, Distinct: 1},
@@ -512,19 +514,43 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// five objects nobody can speak for: three the view holds undetermined and
 	// two restored without their cause, under three folds with the stale
 	// replica.
-	todo := lineStarting(text, "CHECKS ::")
-	for _, want := range []string{"1 个对象的轮次不再结束", "alarmd", "后端拒绝了 2 个对象的查询", "待确认",
-		"2 个对象因 alarmd 自己的容量限制放弃了检测", "1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）",
+	todoLine := lineStarting(text, "CHECKS ::")
+	for _, want := range []string{"1 个对象的轮次不再结束", "alarmd", "后端拒绝了 1 个对象的查询", "待确认",
+		// One current; the retained one is in the record section, not here.
+		"1 个对象因 alarmd 自己的容量限制放弃了检测", "1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）",
+		// Every line says what to do next.
+		"下一步：先修激活", "下一步：先等：成因缺失的对象各自再跑一轮就补上",
 		// The two standings, first. The time is the viewer's clock and is not
 		// asserted; everything after it is.
 		"起没有生效：连续 120 轮激活失败（1 种原因），舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3",
 		"1 种副本级运行状态超出设计界，判定因此降级"} {
-		if !strings.Contains(todo, want) {
-			t.Errorf("the checks do not say %q:\n%s", want, todo)
+		if !strings.Contains(todoLine, want) {
+			t.Errorf("the checks do not say %q:\n%s", want, todoLine)
 		}
 	}
-	if !strings.HasPrefix(strings.TrimPrefix(todo, "CHECKS :: "), "控制面变更自 ") {
-		t.Errorf("the fleet executing a stale publication is not the first line:\n%s", todo)
+	if !strings.HasPrefix(strings.TrimPrefix(todoLine, "CHECKS :: "), "控制面变更自 ") {
+		t.Errorf("the fleet executing a stale publication is not the first line:\n%s", todoLine)
+	}
+	// The record of past loss, apart from the lines above, with when it was
+	// made; and the refusal that names a missing target is the strategy's,
+	// in the governance fold, not 待确认 in the list above.
+	for _, want := range []struct{ line, says string }{
+		{"HISTORY ::", "1 个对象因 alarmd 自己的容量限制放弃了检测，那段不补——最近 1 小时新增 1 个，最新一条 "},
+		{"HISTORY COUNT ::", "1 个对象，最近 1 小时新增 1 个，最新 "},
+		{"GOV ::", "1 个对象的策略引用了后端说不存在的表或字段（1 种回答，1 条策略，1 个业务）——后端读了查询并明确拒绝"},
+		{"GOV ::", "策略侧"},
+		{"ACTION ::", "现在要做的：先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效（控制面变更自 "},
+		{"ACTION ::", "；之后还有 10 类，按顺序在下面"},
+		// A line whose objects are all in the pool says so, in the pool card's
+		// words, so the two cannot read as different verdicts.
+		{"SENTENCE demoted ::", "351 个对象的策略引用了后端说不存在的表或字段（1 种回答，351 条策略，59 个业务）——后端读了查询并明确拒绝；其中 351 个已降级，不再反复查"},
+	} {
+		if line := lineStarting(text, want.line); !strings.Contains(line, want.says) {
+			t.Errorf("%s does not say %q:\n%s", want.line, want.says, line)
+		}
+	}
+	if strings.Contains(todoLine, "策略引用了后端说不存在的表或字段") {
+		t.Errorf("the refusal naming a missing target is still on the list this reader acts on:\n%s", todoLine)
 	}
 	// Opening a standing's line names its replicas, not objects.
 	for _, want := range []struct{ line, says string }{
@@ -537,9 +563,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		}
 	}
 	for _, mustNot := range []string{"数据侧", "策略侧", "查询后端没有应答"} {
-		if strings.Contains(todo, mustNot) {
+		if strings.Contains(todoLine, mustNot) {
 			t.Errorf("the to-do checks say %q: that is somebody else's confirmed work, and it belongs "+
-				"under the governance fold, not on the reader's list:\n%s", mustNot, todo)
+				"under the governance fold, not on the reader's list:\n%s", mustNot, todoLine)
 		}
 	}
 	governance := lineStarting(text, "GOV ::")
@@ -552,7 +578,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	brief := lineStarting(text, "BRIEF ::")
 	for _, want := range []string{"执行情况：跟得上", "9000 轮里 99.6% 在下一轮到期前完成（6 小时 99.4%）",
 		"被挡回 120 轮，其中 118 轮仍按时完成", "1900 个在等下次（33 个在冷却）", "12 个迟到未超一个周期", "1 个接管后还没跑第一轮",
-		"需要处理：", "类问题，影响",
+		// From the server's arithmetic: lines with something on them now, and
+		// distinct objects under them; the record apart. The fixture has 11
+		// lines this reader acts on, 18 distinct objects under them now (15
+		// rows plus the 3 the view holds undetermined; the two standings have
+		// none), and one retained record made an hour ago.
+		"需要处理：11 类检查项，当前影响 18 个对象（去重）；曾经漏检 1 个对象另列，最近 1 小时新增 1",
 		// On time, and on a stale publication: both true at once, and the
 		// first sentence says both.
 		"起没有生效：舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3，连续 120 轮激活失败",
@@ -930,7 +961,7 @@ try {
 const calls = [
   ['objectRow (every row shape)', () => data.anomalies.forEach(r => ctx.objectRow(r))],
   ['renderDeployment', () => ctx.renderDeployment(data.health)],
-  ['renderChecks', () => ctx.renderChecks(data.checks)],
+  ['renderChecks', () => { ctx.latestTodo = data.todo; ctx.renderChecks(data.checks); }],
   ['renderReplicas', () => ctx.renderReplicas(data.per_replica)],
   ['renderCoverage', () => ctx.renderCoverage(data.coverage)],
 ];
@@ -956,7 +987,13 @@ console.log('PRUNED :: ' + (store['prunedSkips'] ? store['prunedSkips'].textCont
 
 // The first screen and the fold under it, as rendered.
 console.log('CHECKS :: ' + textOf(store['checkRows']));
+console.log('HISTORY :: ' + textOf(store['historyRows']));
+console.log('HISTORY COUNT :: ' + textOf(store['historyCount']));
 console.log('GOV :: ' + textOf(store['govRows']));
+console.log('ACTION :: ' + textOf(store['briefAction']));
+// The pool suffix, on a line shaped like the live one: every object demoted.
+console.log('SENTENCE demoted :: ' + ctx.checkSentence({code: 'QUERY_TARGET_MISSING', objects: 351, current: 351, demoted: 351,
+  strategies: 351, businesses: 59, groups: [{key: 'response=status_space_table_id_field_is_not_exists', objects: 351}]}, 351));
 console.log('BRIEF :: ' + ['briefSchedule', 'briefTodo', 'briefBlind'].map(id => textOf(store[id])).join(' | '));
 console.log('BUILD :: ' + textOf(store['buildLine']));
 // Opening a line renders its folds.

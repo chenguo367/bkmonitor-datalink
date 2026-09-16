@@ -95,7 +95,7 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 		// answering; the line is the backend's, unless the backend answered and
 		// refused.
 		if queryRejected(anomaly.Failure) {
-			return CheckQueryRefused, true, false
+			return refusalCheck(anomaly.Failure), true, false
 		}
 		return CheckBackendNotAnswering, true, false
 	}
@@ -120,7 +120,7 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 			return "", false, false
 		}
 		if verdict.check == CheckBackendNotAnswering && queryRejected(anomaly.Failure) {
-			return CheckQueryRefused, true, false
+			return refusalCheck(anomaly.Failure), true, false
 		}
 		return verdict.check, true, false
 	}
@@ -149,6 +149,35 @@ const gapRestoredWithoutCause = "RESTORED_WITHOUT_CAUSE"
 // decides it; what is decided is that it is not the backend being down, so it
 // does not go to the data owner. The detail grammar is the emitter's: a
 // response status the provider returned, or an HTTP 4xx.
+// refusalCheck decides between the two refusals on what the backend said.
+// A status that names something as not existing is the backend reading the
+// strategy's table or field and answering that it is not there: that is the
+// strategy's, confirmed by the backend itself, and the pool card already
+// calls these strategies unusable. A status that names nothing -- a bare
+// 4xx, or a status this build has no reading of -- stays undetermined.
+//
+// A substring rule over an open vocabulary, deliberately in the safe
+// direction: a status it does not recognise stays on this deployment's side
+// of the page rather than being handed to the strategy owner.
+func refusalCheck(failure *FailureRef) Check {
+	if refusalNamesMissingTarget(failure) {
+		return CheckQueryTargetMissing
+	}
+	return CheckQueryRefused
+}
+
+func refusalNamesMissingTarget(failure *FailureRef) bool {
+	if failure == nil {
+		return false
+	}
+	prefix := routedetail.RouteDetailKindResponse + "=" + routedetail.ResponseFailureStatusPrefix
+	if !strings.HasPrefix(failure.Detail, prefix) {
+		return false
+	}
+	status := strings.TrimPrefix(failure.Detail, prefix)
+	return strings.Contains(status, "not_exist") || strings.Contains(status, "not_found")
+}
+
 func queryRejected(failure *FailureRef) bool {
 	if failure == nil {
 		return false
