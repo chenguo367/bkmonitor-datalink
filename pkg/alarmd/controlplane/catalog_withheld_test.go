@@ -61,9 +61,16 @@ func TestWithheldCarriesTheReasonAsItWasAttached(t *testing.T) {
 	if got := composition.Withheld[key]; got != 1 {
 		t.Fatalf("Withheld[%+v] = %d, want the reason counted under its own name", key, got)
 	}
-	for held := range composition.Withheld {
+	for held, count := range composition.Withheld {
+		if count == 0 {
+			// A pair the composition publishes at zero, not one this round
+			// produced. It cannot be a rewritten reason: nothing was counted
+			// under it. See AlwaysReportedWithheld.
+			continue
+		}
 		if held.Reason != unusual {
-			t.Fatalf("Withheld carries %+v; the reason was rewritten on the way in", held)
+			t.Fatalf("Withheld carries %+v with %d objects; the reason was rewritten on the way in",
+				held, count)
 		}
 	}
 }
@@ -108,5 +115,52 @@ func TestWithheldPartitionsTheObjectsThatWereNotAccepted(t *testing.T) {
 	key := WithheldKey{Disposition: DispositionOther, Reason: "PLAN_INVALID"}
 	if got := composition.Withheld[key]; got != 1 {
 		t.Fatalf("Withheld[%+v] = %d, want the unnamed disposition folded the same way Objects folds it", key, got)
+	}
+}
+
+// The two reasons whose zero is a claim are published even when nothing was
+// withheld under them.
+//
+// Most pairs are not pre-created and should not be: the cross product of every
+// disposition with every reason is mostly combinations that cannot happen. But
+// "no strategy in this deployment asks for a Snapshot kept longer than we keep
+// one" is something an operator acts on, and read off an absent series it is
+// indistinguishable from "this build does not produce that reason" -- which is
+// exactly the state the deployment was in the day before the reason existed.
+// Both of these arrived with the change that withholds a Plan instead of
+// refusing the whole Catalog, and both are the acceptance reading for it.
+func TestTheRetentionWithheldReasonsArePublishedAtZero(t *testing.T) {
+	composition := ComposeCatalog(Catalog{Dispositions: []ObjectDisposition{
+		{SourceID: "1", Disposition: DispositionAccepted, Reason: "ACCEPTED"},
+	}})
+
+	for _, key := range AlwaysReportedWithheld {
+		count, published := composition.Withheld[key]
+		if !published {
+			t.Fatalf("Withheld has no pair %+v. Its zero is what says no object was withheld for that "+
+				"reason; absent, it says nothing at all and reads the same as a build that cannot "+
+				"produce it", key)
+		}
+		if count != 0 {
+			t.Fatalf("Withheld[%+v] = %d on a Catalog that withheld nothing", key, count)
+		}
+	}
+
+	// And a pre-created pair does not become a second count when something is
+	// withheld under it: the zero is a starting point, not an extra object.
+	withheld := ComposeCatalog(Catalog{Dispositions: []ObjectDisposition{
+		{SourceID: "1", Disposition: DispositionUnsupported, Reason: "SNAPSHOT_RETENTION_INSUFFICIENT"},
+	}})
+	key := WithheldKey{Disposition: DispositionUnsupported, Reason: "SNAPSHOT_RETENTION_INSUFFICIENT"}
+	if got := withheld.Withheld[key]; got != 1 {
+		t.Fatalf("Withheld[%+v] = %d, want the one object that was withheld", key, got)
+	}
+	var total int
+	for _, count := range withheld.Withheld {
+		total += count
+	}
+	if total != 1 {
+		t.Fatalf("withheld total = %d, want 1: the pre-created pairs must not add objects to the "+
+			"partition, or it stops adding up against catalog_objects", total)
 	}
 }
