@@ -11,6 +11,7 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -128,4 +129,72 @@ func ObserveSegmentContentFreshnessForTest(
 	repository *RedisCatalogRepository, ctx context.Context, segment execution.ScheduleSegmentFact,
 ) {
 	repository.observeSegmentContentFreshness(ctx, segment)
+}
+
+// SetOpenSegmentObjectDigestForTest puts a Query Group's open Segment on the
+// given object digest.
+//
+// It exists to reproduce the state production reached and nothing else can
+// construct: a Segment naming content that neither the activation nor any
+// publication names. That state was produced by a Segment being cut from a
+// group an assembly had quietly changed -- a path the code no longer has, and
+// which therefore cannot be reached by publishing.
+func SetOpenSegmentObjectDigestForTest(
+	ctx context.Context, repository *RedisCatalogRepository,
+	group execution.QueryGroupIdentity, digest execution.ObjectDigest,
+	refs ...execution.OutputContextRef,
+) error {
+	timeline, raw, err := repository.loadScheduleTimelineForUpdate(ctx, group)
+	if err != nil {
+		return err
+	}
+	last := len(timeline.Segments) - 1
+	if last < 0 {
+		return errors.New("alarmd controlplane: the Query Group has no Segment to put on a digest")
+	}
+	timeline.Segments[last].Schedule.Segment.ObjectDigest = digest
+	if len(refs) > 0 {
+		timeline.Segments[last].Schedule.Segment.OutputContextRefs = refs
+		timeline.Segments[last].Schedule.Segment.OutputContextRevisions = nil
+	}
+	timeline.RecordRevision++
+	payload, err := json.Marshal(timeline)
+	if err != nil {
+		return err
+	}
+	_ = raw
+	return repository.client.Set(ctx, repository.scheduleTimelineKey(group), payload, 0).Err()
+}
+
+// OpenSegmentObjectDigestForTest reads the open Segment's object digest
+// straight from the timeline, past the caches a Worker read goes through.
+func OpenSegmentObjectDigestForTest(
+	ctx context.Context, repository *RedisCatalogRepository, group execution.QueryGroupIdentity,
+) (execution.ObjectDigest, error) {
+	timeline, _, err := repository.loadScheduleTimelineForUpdate(ctx, group)
+	if err != nil {
+		return "", err
+	}
+	last := len(timeline.Segments) - 1
+	if last < 0 {
+		return "", errors.New("alarmd controlplane: the Query Group has no Segment")
+	}
+	return timeline.Segments[last].Schedule.Segment.ObjectDigest, nil
+}
+
+// ScheduleTimelineBytesForTest is the stored bytes of a Query Group's schedule
+// timeline, so a test can assert a refused cutover wrote nothing.
+//
+// Reading the bytes rather than the decoded timeline is the point: "the
+// cutover returned an error before the write" is a statement about code order,
+// and code order is what the next edit changes.
+func ScheduleTimelineBytesForTest(
+	ctx context.Context, repository *RedisCatalogRepository, group execution.QueryGroupIdentity,
+) ([]byte, error) {
+	return repository.client.Get(ctx, repository.scheduleTimelineKey(group)).Bytes()
+}
+
+// ActivationBytesForTest is the stored bytes of the current activation.
+func ActivationBytesForTest(ctx context.Context, repository *RedisCatalogRepository) ([]byte, error) {
+	return repository.client.Get(ctx, repository.activationKey()).Bytes()
 }

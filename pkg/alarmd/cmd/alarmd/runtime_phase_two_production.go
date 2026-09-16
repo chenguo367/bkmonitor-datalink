@@ -492,10 +492,23 @@ func (runtime *productionPhaseTwoControl) refresh(
 	// get an answer that depends on which one the round took.
 	composition := result.Composition
 	defer func() {
-		if refreshErr != nil || refreshResult.Status != phaseTwoControlHealthy {
-			return
-		}
-		refreshResult.Composition = &composition
+		// Delivered whenever this round composed a Catalog, not only when the
+		// round ended healthy.
+		//
+		// The gauges say what the Catalog the leader last built is made of.
+		// The leader builds one on every round that reads its source; whether
+		// the fleet was then activated onto it is a different fact, and
+		// activation_failed and the activation standing already report that.
+		// Gating the composition on a healthy round meant a process whose
+		// activation never succeeded published no composition at all, ever --
+		// so the one state where somebody most needs to see the partition, a
+		// cutover refusing every round, is precisely the state in which it
+		// disappears. It did, for five leader generations.
+		//
+		// A composed Catalog is told from an absent one by its maps: ComposeCatalog
+		// pre-creates every partition it publishes, so a round that did not get
+		// that far leaves them nil rather than empty, and nothing is delivered.
+		refreshResult.Composition = publishedComposition(refreshErr, composition, refreshResult.Status)
 	}()
 	// Which strategies are behind the counts, once per change. Written here
 	// rather than at each return for the same reason the composition is: the
@@ -2098,4 +2111,21 @@ func newPhaseTwoRuntimeObserver(recorder *metric.Recorder, logger *observability
 		return nil, err
 	}
 	return observability.Multi(recorder, observability.NewLoggingObserver(logger, policy)), nil
+}
+
+// publishedComposition is what a round hands the catalog gauges.
+//
+// A composed Catalog is told from an absent one by its maps: ComposeCatalog
+// pre-creates every partition it publishes, so a round that did not get that
+// far leaves them nil rather than empty. That matters because an absent
+// composition and one full of zeros read the same on a scrape.
+func publishedComposition(
+	refreshErr error,
+	composition controlplane.CatalogComposition,
+	_ phaseTwoControlRefreshStatus,
+) *controlplane.CatalogComposition {
+	if refreshErr != nil || composition.Objects == nil {
+		return nil
+	}
+	return &composition
 }
