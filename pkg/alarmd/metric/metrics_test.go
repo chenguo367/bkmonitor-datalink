@@ -407,6 +407,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_withheld_objects"] = "variableLabels: {disposition,reason}"
 	expected["bkmonitor_alarmd_catalog_no_data_plans"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_worker_no_data_persistent_skips_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_plans_seen_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
@@ -865,6 +866,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// created at startup so a zero on the one that never resolves on its own
 	// can be told from a label nothing ever wrote.
 	bounds[fqName("worker_no_data_slot_plans_total")] = len(nodata.SlotOutcomes)
+	// Every outcome but EVALUATED: a Plan that evaluated has not stalled, so
+	// that pair cannot happen and a label for it would be a zero that means
+	// nothing rather than one that means "nothing has stopped".
+	bounds[fqName("worker_no_data_persistent_skips_total")] = len(nodata.SlotOutcomes) - 1
 	// One series: a count, unlabelled. Its whole job is to be read against
 	// the outcome family, which carries the breakdown.
 	bounds[fqName("worker_no_data_plans_seen_total")] = 1

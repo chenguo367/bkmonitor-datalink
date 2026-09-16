@@ -43,6 +43,7 @@ type phaseTwoMetrics struct {
 	ownershipTransitions            *prometheus.CounterVec
 	queryAdmission                  *prometheus.CounterVec
 	noDataSlotPlans                 *prometheus.CounterVec
+	noDataStalls                    *prometheus.CounterVec
 	noDataPlansSeen                 prometheus.Counter
 	noDataPlansByHop                *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
@@ -349,6 +350,17 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"permits being off.",
 		}, []string{"operation", "result"}),
 	}
+	metrics.noDataStalls = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_persistent_skips_total",
+		Help: "Plans whose no-data detection stopped rather than missed a round, by the outcome it is " +
+			"stuck on. Counted once per stall and not once per round: a Plan skipping for a day and a " +
+			"hundred Plans each missing one round are the same increment on " +
+			"worker_no_data_slot_plans_total, which is why that family cannot answer this and this one " +
+			"exists. A Plan becomes countable again only after it evaluates, so this rising means " +
+			"something new has stopped. Read it against worker_no_data_slot_plans_total{outcome}: the " +
+			"skips there are a rate and these are the ones that became a state. Every outcome that can " +
+			"stall has a label at startup, so a zero is a zero rather than a label nothing wrote.",
+	}, []string{"outcome"})
 	metrics.dueIndex = newDueIndexMetrics()
 	metrics.controlFacts = newControlFactsMetrics()
 	metrics.redisCalls = newRedisCallMetrics()
@@ -646,6 +658,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range nodata.SlotOutcomes {
 		metrics.noDataSlotPlans.WithLabelValues(string(outcome))
 	}
+	for _, outcome := range nodata.SlotOutcomes {
+		if outcome == nodata.OutcomeEvaluated {
+			// A Plan that evaluated has not stalled, so the label would be a
+			// combination that cannot happen rather than a zero worth reading.
+			continue
+		}
+		metrics.noDataStalls.WithLabelValues(string(outcome))
+	}
 	for _, result := range sourceWithheldLineResults {
 		metrics.sourceWithheldLines.WithLabelValues(result)
 	}
@@ -682,7 +702,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataStalls, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -878,6 +898,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if observation.Component == observability.ComponentEvaluation &&
 		observation.Stage == observability.StageNoDataDecided {
 		m.observeNoDataSlot(observation)
+		m.observeNoDataStall(observation)
 	}
 	// Dispatched on the facts rather than on a component and stage: the hops
 	// are reported from the control plane and from the evaluation, and the
@@ -946,6 +967,16 @@ func (m phaseTwoMetrics) observeNoDataSlot(observation observability.Observation
 		return
 	}
 	m.noDataSlotPlans.WithLabelValues(facts.Outcome).Add(float64(facts.Plans))
+}
+
+// observeNoDataStall counts one Plan the round it stopped, not every round it
+// stays stopped.
+func (m phaseTwoMetrics) observeNoDataStall(observation observability.Observation) {
+	facts := observation.NoDataStall
+	if facts == nil || facts.Outcome == "" {
+		return
+	}
+	m.noDataStalls.WithLabelValues(facts.Outcome).Inc()
 }
 
 // observeNoDataCensus counts the Plans a Slot found, including none. A Slot

@@ -59,6 +59,10 @@ type SlotExecutionCoordinator struct {
 	ports        Ports
 	budget       ProvisionalBudget
 	reservations processProvisionalReservations
+	// noDataSkips is how long each Plan's no-data detection has been skipping.
+	// One per process, because a streak is about rounds rather than about one
+	// Slot. See no_data_skip_streak.go.
+	noDataSkips noDataSkipStreaks
 }
 
 type processProvisionalReservations struct {
