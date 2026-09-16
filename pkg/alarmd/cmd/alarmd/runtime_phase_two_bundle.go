@@ -670,6 +670,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 		SettlingWait:              cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
 		SnapshotRetention:         phaseTwoCatalogRetention(cfg),
 		PublicationDelayAllowance: phaseTwoPublicationDelayAllowance(cfg),
+		LeaseTTL:                  cfg.PhaseTwo.Ownership.LeaseTTL.Duration(),
+		ReconcileInterval:         cfg.PhaseTwo.Control.ReconcileInterval.Duration(),
 	})
 	if err != nil {
 		return nil, err
