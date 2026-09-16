@@ -1488,6 +1488,11 @@ const (
 	GapStatusWarming GapStatus = "WARMING"
 )
 
+// GapScopeStatuses is every status a held scope can be in, for the partition
+// to pre-create and for a reader to bound a family by. A scope that is neither
+// is not held: the marker drops it.
+var GapScopeStatuses = []GapStatus{GapStatusGapped, GapStatusWarming}
+
 type GapScope struct {
 	LevelID  uint32
 	HasLevel bool

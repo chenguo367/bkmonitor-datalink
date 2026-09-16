@@ -400,8 +400,10 @@ func TestSlotExecutionCoordinatorReportsGapScopeProgressEveryRound(t *testing.T)
 		got = append(got, *observation.GapProgress)
 	}
 	want := []observability.GapProgressFacts{
-		{Scope: "plan", Status: string(execution.GapStatusGapped), Reason: contract.ReasonConfigDrift, Required: 5, Observed: 0},
-		{Scope: "5", Status: string(execution.GapStatusWarming), Reason: contract.ReasonHistoryWarming, Required: 5, Observed: 3},
+		{Scope: "plan", Status: string(execution.GapStatusGapped), Reason: contract.ReasonConfigDrift,
+			Required: 5, Observed: 0, Progress: contract.GapScopeProgressNone},
+		{Scope: "5", Status: string(execution.GapStatusWarming), Reason: contract.ReasonHistoryWarming,
+			Required: 5, Observed: 3, Progress: contract.GapScopeProgressPartial},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("gap progress facts=%+v, want=%+v", got, want)

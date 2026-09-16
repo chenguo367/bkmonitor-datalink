@@ -30,6 +30,7 @@ func TestGapScopeProgressLineCarriesBothNumbers(t *testing.T) {
 		Trace: TraceFields{StrategyID: "1074"},
 		GapProgress: &GapProgressFacts{
 			Scope: "plan", Status: "GAPPED", Reason: "CONFIG_DRIFT", Required: 5, Observed: 0,
+			Progress: "none",
 		},
 	})
 
@@ -51,7 +52,10 @@ func TestGapScopeProgressLineCarriesBothNumbers(t *testing.T) {
 		// complete round since it was raised is the state somebody is looking
 		// for, and an omitted field reads as a line that does not report k.
 		"gap_full_slots_observed": float64(0),
-		"strategy_id":             "1074",
+		// The same word the metric label carries, so a reader moving between
+		// the chart and the line is reading one vocabulary rather than two.
+		"gap_progress": "none",
+		"strategy_id":  "1074",
 	} {
 		if line[field] != want {
 			t.Fatalf("line[%q] = %#v, want %#v; line=%#v", field, line[field], want, line)
