@@ -108,3 +108,22 @@ func TestAStandingWithinTheBoundIsNotALine(t *testing.T) {
 		t.Fatalf("reports = %+v, want none within the bound", reports)
 	}
 }
+
+// A stale source's fold carries where its last round stopped and what it
+// said, so the line names the failure -- a catalogue that would not
+// validate -- rather than the kind, which sent readers to the previous
+// incident's cause.
+func TestTheStaleSourceFoldCarriesTheFailureBehindIt(t *testing.T) {
+	view := View{Degradations: []Degradation{
+		{Kind: DegradationControlSourceStale, Replica: "pod-a", Stage: "validate_catalog", Text: "plan retention exceeds catalog retention"},
+		{Kind: DegradationControlSourceStale, Replica: "pod-b"},
+	}}
+	reports := ReportChecks(nil, nil, &view, now)
+	if len(reports) != 1 || len(reports[0].Groups) != 1 {
+		t.Fatalf("reports = %+v, want one REPLICA_DEGRADED line with one fold", reports)
+	}
+	group := reports[0].Groups[0]
+	if group.Stage != "validate_catalog" || group.Text != "plan retention exceeds catalog retention" || len(group.Replicas) != 2 {
+		t.Fatalf("fold = %+v, want both replicas and the failure the first one carries", group)
+	}
+}

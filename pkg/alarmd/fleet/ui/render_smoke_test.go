@@ -270,6 +270,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	degradations := []fleet.Degradation{
 		{Kind: fleet.DegradationActivationBehind, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"},
 		{Kind: fleet.DegradationOpenAlertSetStale, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij"},
+		// The stale source with the failure behind it: a catalogue that would
+		// not validate because one plan asks for more retention than the
+		// deployment keeps. The line says that, not the kind name.
+		{Kind: fleet.DegradationControlSourceStale, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
+			Stage: "validate_catalog", Text: "plan retention 60h13m exceeds catalog retention 24h13m"},
 	}
 	// The demoted pool: a refused object that also skipped Slots while
 	// there, two minutes ago. The shape of 346 live objects whose records
@@ -593,19 +598,19 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// losing rounds now from its record; the stopped one is in the
 		// record section. The line says which part is still happening and
 		// that none of it is a budget rejection -- so not capacity.
-		"3 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 1 个；1 个是刚滚动后的追赶，5 分钟内会自己停；没有资源预算拒绝，不是容量问题）",
+		"3 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 1 个；1 个是滚动后的追赶（副本启动 5 分钟内），看这一组还有没有新增；没有资源预算拒绝（只排除这一种拒绝，不排除别的容量或调度约束））",
 		"恢复标准：10 分钟内没有新的跳过",
 		"1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）",
 		// Every line says where the evidence is, what to do next, and what
 		// counts as recovered -- and "先等" says until when and whom after.
 		"证据：展开这一行：最近一次激活失败原文", "下一步：先修激活",
 		"恢复标准：执行版本追上目标发布（两者一致）且之后一轮激活成功",
-		"下一步：等到行上的预计时刻：到了就有成因；过了还没有，它会落到\"到期没跑\"那一行（alarmd 的）",
+		"下一步：等下一轮完成以补齐原因（行上有预计时刻；到点后仍可能在等待、重试或取消）；超过预计完成时间仍未补齐，它会落到\"到期没跑\"那一行（alarmd 的）",
 		"恢复标准：10 分钟内没有新的跳过（\"仍在发生\"折归零）",
 		// The two standings, first. The time is the viewer's clock and is not
 		// asserted; everything after it is.
 		"起没有生效：连续 120 轮激活失败（1 种原因），舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3",
-		"1 种副本级运行状态超出设计界，判定因此降级"} {
+		"2 种副本级运行状态超出设计界，判定因此降级——策略配置刷新失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m，新配置尚未发布，跑的是上一份好的目录"} {
 		if !strings.Contains(todoLine, want) {
 			t.Errorf("the checks do not say %q:\n%s", want, todoLine)
 		}
@@ -636,21 +641,27 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// A loss in progress on a ten-second object names its mechanism on
 		// the row; the refused object's record carries its period too.
 		{"SKIP qg-losing-now ::", "，10 秒周期。仍在发生（最近 10 分钟内跳过）——短周期对象错过实时轮后重放超上限，是 alarmd 的调度边界，不是策略的事"},
-		{"PENDING ::", "证据：分组的后端回答（状态词）+ 对象行\"最近一次错误\"的后端原文；请求本身 = 该策略的查询定义（行上策略链接），alarmd 不落完整请求文本"},
+		{"PENDING ::", "证据：分组的后端回答只有状态码/状态词（非 200 的响应正文当前不保留，\"最近一次错误\"是结束这一轮的 alarmd 错误，不是后端原文）"},
+		// The timeout and the short old-series window are not the data side's
+		// until the query path and the fetch are ruled out: both are here, not
+		// under governance.
+		{"PENDING ::", "查询没有得到应答，3 个对象受影响（2 种症状，1 条策略）——客户端超时或 5xx，查询预算、网络、后端耗时哪一环还分不出"},
+		{"PENDING ::", "下一步：先查查询链路：超时看查询预算、网络、后端耗时哪一环超了"},
+		{"PENDING ::", "恢复所需的老序列数据不完整（1 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出"},
 		{"PENDING ::", "恢复标准：分出归属后转到对应行（策略侧或 alarmd）；不是等它消失"},
 		{"HISTORY COUNT ::", "1 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
 		// The refusal line carries what its demoted object lost there, as the
 		// refusal's consequence and not as capacity.
-		{"GOV ::", "2 个对象的策略引用了后端说不存在的表或字段（1 种回答，1 条策略，1 个业务）——后端读了查询并明确拒绝；其中 1 个已降级，不再反复查；其中 1 个在被拒期间还跳过了检测（最近 10 分钟内 1 个）——冷却让旧轮次超出重放范围，首要原因是查询不可用，扩容无用"},
+		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\"（1 种回答，1 条策略，1 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错；其中 1 个已降级，不再反复查；其中 1 个在被拒期间还跳过了检测（最近 10 分钟内 1 个）——冷却让旧轮次超出重放范围，首要原因是查询不可用，扩容无用"},
 		{"GOV ::", "策略侧"},
 		{"ACTION ::", "现在要做的：先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效（控制面变更自 "},
-		{"ACTION ::", "；之后还有 7 类，按顺序在下面；待归因 3 类另看，别交出去"},
+		{"ACTION ::", "；之后还有 7 类，按顺序在下面；待归因 5 类另看，别交出去"},
 		// A record line's folds name what each loss is; the refusal's object
 		// row says what it lost while under its line.
 		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过）） · 1 个对象 · 1 条策略 · 1 个业务"},
 		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象"},
-		{"GROUPS LOSS ::", "AFTER_RESTART（刚滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，会自己停，不是容量）） · 1 个对象"},
-		{"SKIP qg-restart-catchup ::", "，10 秒周期。刚滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，会自己停，不是容量）"},
+		{"GROUPS LOSS ::", "AFTER_RESTART（滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）） · 1 个对象"},
+		{"SKIP qg-restart-catchup ::", "，10 秒周期。滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）"},
 		{"SKIP qg-demoted-rejected ::", "3 个 Slot，记录于 "},
 		{"SKIP qg-demoted-rejected ::", "。在被拒期间跳过（冷却让旧轮次超出重放范围，首要原因是查询不可用）"},
 		{"SKIP qg-losing-now ::", "。仍在发生（最近 10 分钟内跳过）"},
@@ -661,7 +672,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// estimates headroom.
 		{"LOAD ::", "按时完成：跟得上，没有对象超期"},
 		{"LOAD ::", "积压：没有，30 分 0 秒 前也没有"},
-		{"LOAD ::", "漏检：正在发生——1 个对象最近 10 分钟内跳过了检测，另有 1 个是刚滚动后的追赶（副本启动 5 分钟内），会自己停、不问容量；另有 1 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）"},
+		{"LOAD ::", "漏检：正在发生——1 个对象最近 10 分钟内跳过了检测，另有 1 个是滚动后的追赶（副本启动 5 分钟内），看它还有没有新增、不由它问容量；另有 1 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）"},
 		{"LOAD ::", "瓶颈：查询并发位子——启动至今 56% 的取位子排过队，而工作在落后或在漏检"},
 		{"LOAD ::", "限制条件：不推算还能承载多少对象——没有测这个，编出来的数会被当真；积压对照样本不足 1 小时（最年轻的副本索引还没跑满 1 小时）；资源占比是各进程启动至今的累计，不是最近 1 小时"},
 		{"LOAD behind-permits ::", "按时完成：跟不上——7 个对象超期（最久 15 分 0 秒），1 小时按时率 88.9% 低于 6 小时 99.3%"},
@@ -669,7 +680,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"LOAD unlocated ::", "按时完成：有 3 个对象超期但在追（最久 2 分 0 秒）——1 小时按时率 99.6% 不低于 6 小时 99.4%"},
 		{"LOAD unlocated ::", "积压：现在 3 个超期；没有够早的对照样本，涨没涨说不出"},
 		{"LOAD unlocated ::", "瓶颈：资源数字都不指向任何一处，但工作在落后或在漏检——约束在调度（重放边界、派发顺序），加资源不是这一步"},
-		{"LOAD budget ::", "瓶颈：内存派生的体量预算——已拒绝 41 次，这套资源装不下当前负载（这是唯一按定义就是容量的读数）"},
+		{"LOAD budget ::", "瓶颈：内存派生的体量预算——已拒绝 41 次，这套资源装不下当前负载（这是唯一按定义就是容量的读数；其余读数为零只排除各自那一种约束）"},
 		{"LOAD nothing ::", "按时完成：没有副本带到期索引，说不出"},
 		{"LOAD nothing ::", "瓶颈：没有副本报容量，判不了"},
 		{"LOAD nothing ::", "没有到期索引，按时与积压两项判不了；没有容量数据，瓶颈一项判不了"},
@@ -677,8 +688,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// words, so the two cannot read as different verdicts.
 		{"ERR qg-stuck-slot ::", "最近一次错误：alarmd state: gap guard conflict: expected 41 got 43（*errors.errorString），Slot "},
 		{"ERR qg-stuck-slot ::", "，同一 Slot 连续 3 次，"},
-		{"SENTENCE demoted ::", "351 个对象的策略引用了后端说不存在的表或字段（1 种回答，351 条策略，59 个业务）——后端读了查询并明确拒绝；其中 351 个已降级，不再反复查"},
-		{"SENTENCE budget ::", "5 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 2 个；资源预算拒绝 3 个——只有这部分是容量限制）"},
+		{"SENTENCE demoted ::", "351 个对象的查询被后端回\"表或字段不存在\"（1 种回答，351 条策略，59 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错；其中 351 个已降级，不再反复查"},
+		{"SENTENCE budget ::", "5 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 2 个；资源预算拒绝 3 个——只有这部分是资源装不下）"},
 	} {
 		if line := lineStarting(text, want.line); !strings.Contains(line, want.says) {
 			t.Errorf("%s does not say %q:\n%s", want.line, want.says, line)
@@ -695,6 +706,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"GROUPS WINDOW ::", "保护未解除（最初触发 CONFIG_DRIFT） · 1 个对象 · 1 条策略 · 1 个业务"},
 		{"BASIS CUTOVER ::", "最近一次激活失败：alarmd controlplane: schedule activation conflict（副本 abcde）。伴随证据：segment_content_freshness_total{stale}"},
 		{"GROUPS DEGRADED ::", "OPEN_ALERT_SET_STALE（已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识） · 副本 fghij，没有可列的对象"},
+		{"GROUPS DEGRADED ::", "CONTROL_SOURCE_STALE（策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录——最近一次失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m） · 副本 abcde，没有可列的对象"},
 	} {
 		if line := lineStarting(text, want.line); !strings.Contains(line, want.says) {
 			t.Errorf("%s does not say %q:\n%s", want.line, want.says, line)
@@ -707,8 +719,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		}
 	}
 	governance := lineStarting(text, "GOV ::")
-	for _, want := range []string{"查询后端没有应答，3 个对象受影响（2 种症状", "数据侧", "序列活不过检测窗口", "策略侧",
-		"老序列在缺点", "1 个对象持续没有数据"} {
+	for _, want := range []string{"数据侧", "序列活不过检测窗口", "策略侧", "1 个对象持续没有数据"} {
 		if !strings.Contains(governance, want) {
 			t.Errorf("the governance fold does not say %q:\n%s", want, governance)
 		}
@@ -723,8 +734,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// none), and one retained record made an hour ago.
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
-		"需要处理：alarmd 已确认 8 类（15 个对象，去重）；待归因 3 类（7 个对象）；业务侧已确认 5 类（12 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
-		"另有 1 个是刚滚动后的追赶漏检（副本启动 5 分钟内），会自己停",
+		"需要处理：alarmd 已确认 8 类（15 个对象，去重）；待归因 5 类（15 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"另有 1 个是滚动后的追赶漏检（副本启动 5 分钟内），看它还有没有新增",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
 		// first sentence says both.

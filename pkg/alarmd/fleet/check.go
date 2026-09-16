@@ -103,9 +103,7 @@ var checkAnswers = map[Check]struct {
 	CheckDefect:             {OwnerAlarmd, GroupByReasonCode},
 	CheckObservationGap:     {OwnerAlarmd, GroupByGapKind},
 
-	CheckBackendNotAnswering: {OwnerData, GroupByDetail},
-	CheckNoDataPersistent:    {OwnerData, GroupByStrategy},
-	CheckSeriesDataMissing:   {OwnerData, GroupByStrategy},
+	CheckNoDataPersistent: {OwnerData, GroupByStrategy},
 
 	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
 	CheckPlanUnevaluable:    {OwnerStrategy, GroupByStrategy},
@@ -114,6 +112,13 @@ var checkAnswers = map[Check]struct {
 	CheckQueryRefused:     {OwnerUndetermined, GroupByDetail},
 	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
 	CheckConfigUnresolved: {OwnerUndetermined, GroupByStrategy},
+	// A client-side timeout does not establish a fault on the data side: the
+	// query's budget, the network and the backend's own latency all have to
+	// be read first. And a window short of old-series points may be short
+	// because this deployment did not fetch them. Both were handed to the
+	// data owner as confirmed; a live review found neither confirmed.
+	CheckBackendNotAnswering: {OwnerUndetermined, GroupByDetail},
+	CheckSeriesDataMissing:   {OwnerUndetermined, GroupByStrategy},
 }
 
 // checkOrder is the order the first screen lists the checks in, and the order
@@ -138,8 +143,8 @@ var checkOrder = []Check{
 	CheckWindowUndecided,
 	CheckConfigUnresolved,
 	CheckBackendNotAnswering,
-	CheckNoDataPersistent,
 	CheckSeriesDataMissing,
+	CheckNoDataPersistent,
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,
@@ -368,6 +373,11 @@ type CheckGroup struct {
 	Strategies int      `json:"strategies"`
 	Businesses int      `json:"businesses"`
 	Replicas   []string `json:"replicas,omitempty"`
+	// Stage and Text are on a standing's fold where the replica's facts name
+	// the failure behind it: the line then says what failed, not only which
+	// bound was passed.
+	Stage string `json:"stage,omitempty"`
+	Text  string `json:"text,omitempty"`
 }
 
 // ReportChecks folds every object in every column into the checks it is
@@ -532,6 +542,9 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				entry.groups[string(degradation.Kind)] = group
 			}
 			group.Replicas = append(group.Replicas, degradation.Replica)
+			if group.Text == "" && degradation.Text != "" {
+				group.Stage, group.Text = degradation.Stage, degradation.Text
+			}
 		}
 	}
 	reports := make([]CheckReport, 0, len(tallies))

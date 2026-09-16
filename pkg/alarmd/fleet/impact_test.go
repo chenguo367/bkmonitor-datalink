@@ -126,8 +126,11 @@ func TestImpactCutsEveryColumnByWhoActs(t *testing.T) {
 	for _, list := range [][]Anomaly{anomalies, demoted, undecidable} {
 		Attribute(list, at)
 	}
+	// Data that stopped: the one line that is the data side's.
+	noData := []Anomaly{{QueryGroup: "qg-nodata", Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED", Strategies: ref("7", "8")}}
+	Attribute(noData, at)
 	view := View{Anomalies: anomalies, AnomaliesTotal: 2, Demoted: demoted, DemotedTotal: 2,
-		Undecidable: undecidable, UndecidableTotal: 1,
+		Undecidable: undecidable, UndecidableTotal: 1, NoData: noData,
 		GapSkips: map[string]SkippedSpan{
 			// Losing rounds now: this deployment's, whatever column it is not in.
 			"qg-losing": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-time.Minute), Replica: "pod-a", Strategies: ref("5", "9")},
@@ -140,14 +143,16 @@ func TestImpactCutsEveryColumnByWhoActs(t *testing.T) {
 	if impact.Alarmd.Objects != 2 || impact.Alarmd.Strategies != 2 || impact.Alarmd.Businesses != 2 {
 		t.Errorf("alarmd = %+v, want the overdue object and the one losing rounds now: 2 objects, strategies 1 and 5, businesses 7 and 9", impact.Alarmd)
 	}
-	if impact.Undetermined.Objects != 2 || impact.Undetermined.Strategies != 2 {
-		t.Errorf("undetermined = %+v, want the bare refusal and the overdue object's undecided window: 2 objects, strategies 1 and 3", impact.Undetermined)
+	// The timed-out object is undetermined too: a client-side timeout does
+	// not establish a fault on the data side.
+	if impact.Undetermined.Objects != 3 || impact.Undetermined.Strategies != 3 {
+		t.Errorf("undetermined = %+v, want the bare refusal, the timeout and the overdue object's undecided window: 3 objects, strategies 1, 2 and 3", impact.Undetermined)
 	}
 	if impact.Strategy.Objects != 1 || impact.Strategy.Strategies != 1 || impact.Strategy.Businesses != 1 {
 		t.Errorf("strategy = %+v, want the object whose target is missing: strategy 4, business 8", impact.Strategy)
 	}
 	if impact.Data.Objects != 1 || impact.Data.Strategies != 1 {
-		t.Errorf("data = %+v, want the timed-out object: strategy 2", impact.Data)
+		t.Errorf("data = %+v, want the object whose data stopped: strategy 7", impact.Data)
 	}
 	if impact.Alarmd.Partial || impact.Undetermined.Partial {
 		t.Errorf("no column was cut, yet a part reads partial: %+v %+v", impact.Alarmd, impact.Undetermined)

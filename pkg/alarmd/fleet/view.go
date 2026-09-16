@@ -883,6 +883,14 @@ var DegradationKinds = []DegradationKind{
 type Degradation struct {
 	Kind    DegradationKind `json:"kind"`
 	Replica string          `json:"replica"`
+	// Stage and Text are what the replica's own facts say about the failure
+	// behind the standing, where it has them: for a stale control source,
+	// where the last refresh round stopped and what it said. A standing read
+	// as its kind alone sent a reader to the previous incident's cause; the
+	// round that fails at catalogue validation is a different failure from
+	// the one that failed at activation, and the facts say which.
+	Stage string `json:"stage,omitempty"`
+	Text  string `json:"text,omitempty"`
 }
 
 // Truncated reports whether the replica had more anomalies than it published.
@@ -1278,7 +1286,8 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 		if snapshot.ControlSource != nil {
 			if snapshot.ControlSource.StaleBeyondBound {
-				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationControlSourceStale, Replica: replica})
+				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationControlSourceStale, Replica: replica,
+					Stage: snapshot.ControlSource.LastFailureExit, Text: snapshot.ControlSource.LastFailure})
 			}
 			if snapshot.ControlSource.LeaderAbsentBeyondBound {
 				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationControlLeaderAbsent, Replica: replica})

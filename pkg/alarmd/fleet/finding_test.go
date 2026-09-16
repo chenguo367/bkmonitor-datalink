@@ -53,7 +53,7 @@ func TestAWindowReasonIsDecidedOnItsCountsNotItsCode(t *testing.T) {
 		// the data.
 		{"data missing", warming(HistoryCoverage{Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9,
 			ShortRounds: 40}),
-			CheckSeriesDataMissing, OwnerData},
+			CheckSeriesDataMissing, OwnerUndetermined},
 		// Some fresh, some not: cannot be handed to either.
 		{"mixed", warming(HistoryCoverage{Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9,
 			ShortRounds: 40, Fresh: 2, ShortFresh: 2, FreshRounds: 0}),
@@ -74,7 +74,7 @@ func TestAWindowReasonIsDecidedOnItsCountsNotItsCode(t *testing.T) {
 		// Holes, sustained past the window: data arriving with holes in it.
 		{"intermittent", gapped(HistoryCoverage{Levels: 1, Short: 1, WorstValid: 5, WorstRequired: 9,
 			ShortRounds: 29}),
-			CheckSeriesDataMissing, OwnerData},
+			CheckSeriesDataMissing, OwnerUndetermined},
 		// Holes, not yet past the window: could be data that just stopped.
 		{"just gapped", gapped(HistoryCoverage{Levels: 1, Short: 1, WorstValid: 5, WorstRequired: 9,
 			ShortRounds: 3}),
@@ -229,11 +229,11 @@ func TestARejectedQueryIsNotFiledAsTheBackendsAvailability(t *testing.T) {
 		// and names nothing.
 		{"cooldown on a 4xx", cooldown("http_status=400"), CheckQueryRefused, OwnerUndetermined},
 		// A timeout or a 5xx is the backend not answering: the data's.
-		{"cooldown on a timeout", cooldown("transport=timeout"), CheckBackendNotAnswering, OwnerData},
-		{"degraded on a 503", degraded("http_status=503"), CheckBackendNotAnswering, OwnerData},
+		{"cooldown on a timeout", cooldown("transport=timeout"), CheckBackendNotAnswering, OwnerUndetermined},
+		{"degraded on a 503", degraded("http_status=503"), CheckBackendNotAnswering, OwnerUndetermined},
 		// No detail at all: nothing says it was refused, so the coarse reading.
 		{"cooldown without detail", Anomaly{Kind: KindQueryCooldown, CauseReason: "QUERY_UNAVAILABLE"},
-			CheckBackendNotAnswering, OwnerData},
+			CheckBackendNotAnswering, OwnerUndetermined},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			list := []Anomaly{testCase.anomaly}
@@ -350,7 +350,7 @@ func TestTheObjectRouteServesChecksAndTheRowsUnderOne(t *testing.T) {
 	}{
 		string(CheckDependencyDown):      {OwnerAlarmd, 1},
 		string(CheckSeriesChurning):      {OwnerStrategy, 1},
-		string(CheckBackendNotAnswering): {OwnerData, 1},
+		string(CheckBackendNotAnswering): {OwnerUndetermined, 1},
 		string(CheckWindowUndecided):     {OwnerUndetermined, 1},
 		string(CheckConfigUnresolved):    {OwnerUndetermined, 1},
 	} {
