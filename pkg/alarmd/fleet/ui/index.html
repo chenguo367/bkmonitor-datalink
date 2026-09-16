@@ -684,7 +684,7 @@ var NEXT = {
   DEFECT:                '程序缺陷：带原因码上报，展开取一个对象的证据',
   OBSERVATION_GAP:       '等下一轮完成以补齐原因（行上有预计时刻；到点后仍可能在等待、重试或取消）；超过预计完成时间仍未补齐，它会落到"到期没跑"那一行（alarmd 的），再查该副本的调度与执行；副本级缺口看该副本快照',
   QUERY_REFUSED:         '展开看后端回答的状态词：说表/字段不存在的已单列到策略侧；只有状态码的，页面上没有后端原文可核，先留待归因，拿行上策略链接里的查询定义与后端侧日志对',
-  WINDOW_UNDECIDED:      '按"情况"分组看：检测用不了的看原因码；新老序列混合的等窗口填满；保护未解除的等它解除，不改策略',
+  WINDOW_UNDECIDED:      '按"情况"分组看，再看行上最差窗口的进展：在补的（上一轮更少）等；连续多轮没进展的不能只等——看每一轮不完整的原因（那才是根因，多半是查询不可用或冷却）；保护未解除的等它解除，不改策略',
   CONFIG_UNRESOLVED:     '按策略看：config_changed 为真才是最近改过，下一轮按新配置跑；为假的不在这一行',
   BACKEND_NOT_ANSWERING: '先查查询链路：超时看查询预算、网络、后端耗时哪一环超了；5xx 看后端；核实是后端的再交数据侧。alarmd 已降频不再反复查',
   NO_DATA_PERSISTENT:    '交数据侧：按策略看是数据停了还是采集停了',
@@ -710,7 +710,7 @@ var RECOVERY = {
   DEFECT:                '修复上线后该原因码不再出现',
   OBSERVATION_GAP:       '各对象下一轮完成后补上成因、离开这一行——只是补齐证据，不等于这几个对象当前有新故障；副本级缺口随该副本重新发布快照消失',
   QUERY_REFUSED:         '分出归属后转到对应行（策略侧或 alarmd）；不是等它消失',
-  WINDOW_UNDECIDED:      '窗口填满或保护解除后，对象归到某一行或离开列表',
+  WINDOW_UNDECIDED:      '行上最差窗口的有效点逐轮上涨直到填满，或保护解除；对象归到某一行或离开列表。连续多轮不涨不算在恢复',
   CONFIG_UNRESOLVED:     '下一轮按新配置完成，对象离开这一行',
   BACKEND_NOT_ANSWERING: '分出是哪一环后转到对应行；应答恢复后冷却到期自动重试成功，对象离开降级池（降级池"出过"数在涨）',
   NO_DATA_PERSISTENT:    '数据恢复后下一轮非空',
@@ -776,6 +776,33 @@ function standingClause(report) {
   return parts.length ? '——' + parts.join('；') : '';
 }
 
+// Whether the worst window is filling, from the tracker's round-over-round
+// comparison: "等窗口填满" is advice only for a window that is moving, and a
+// window at 0/5 for thirty rounds is not, whatever its reason says.
+function windowProgress(coverage) {
+  if (!coverage || !coverage.short || !coverage.worst_required) return '';
+  var text = ' · 最差 ' + (coverage.worst_valid || 0) + '/' + coverage.worst_required;
+  if (coverage.previous_known) {
+    text += coverage.worst_valid > coverage.previous_worst_valid
+      ? '（上一轮 ' + coverage.previous_worst_valid + '，在补）'
+      : '（上一轮 ' + coverage.previous_worst_valid + '，连续 ' + (coverage.no_progress_rounds || 0) + ' 轮没进展）';
+  }
+  return text;
+}
+
+// The last step before a skip, in words. Held to nothing: the codes are the
+// emitters' and a new one prints as itself.
+var SKIP_REASON = {
+  QUERY_PERMIT_DEADLINE: '错过查询截止时间（重试到达时冻结的截止已过）',
+  NOTHING_TRIED: '这一 Slot 没有尝试过，直接越过了重放范围'
+};
+
+function skipReasonWords(code) {
+  if (SKIP_REASON[code]) return SKIP_REASON[code];
+  if (/BUDGET|RESOURCE_HARD_STOP|RECORD_TOO_LARGE/.test(code)) return '资源预算拒绝（' + code + '）';
+  return code;
+}
+
 // The window "still happening" is decided on, in minutes, from the
 // response; the page does not assume it.
 function recentWindowMinutes() {
@@ -800,6 +827,9 @@ function lossClause(report, count) {
   if (count === (report.current || 0)) {
     if (ongoing) parts.push('最近 ' + recentWindowMinutes() + ' 分钟内仍在跳过 ' + ongoing + ' 个');
     if (restart) parts.push(restart + ' 个是滚动后的追赶（副本启动 ' + restartGraceMinutes() + ' 分钟内），看这一组还有没有新增');
+    var reasons = report.skip_reasons || {};
+    var named = Object.keys(reasons).sort().map(function (code) { return skipReasonWords(code) + ' ' + reasons[code] + ' 个'; });
+    if (named.length) parts.push('跳过前最后一步：' + named.join('、'));
     parts.push(budget ? '资源预算拒绝 ' + budget + ' 个——只有这部分是资源装不下' : '没有资源预算拒绝（只排除这一种拒绝，不排除别的容量或调度约束）');
   } else if (stopped) {
     parts.push('已停止，' + recentWindowMinutes() + ' 分钟以上没有再发生');
@@ -1400,6 +1430,7 @@ function objectRow(anomaly) {
     ? windowCoverage.levels + ' 个窗口 · 短 ' + (windowCoverage.short || 0) + ' · 空 ' + (windowCoverage.empty || 0)
       + ' · 新 ' + (windowCoverage.fresh || 0)
       + (windowCoverage.short_rounds ? ' · 连续 ' + windowCoverage.short_rounds + ' 轮' : '')
+      + windowProgress(windowCoverage)
       + (windowCoverage.unusable ? ' · 检测用不了 ' + windowCoverage.unusable + ' 个：' + windowCoverage.unusable_reason : '')
       + (windowCoverage.abnormal_on_incomplete ? ' · 不完整窗口上报了 ' + windowCoverage.abnormal_on_incomplete + ' 个异常' : '')
     : '—', 'mono');
@@ -1468,6 +1499,14 @@ function objectRow(anomaly) {
       + '，' + momentLabel(lastError.at),
       '这一轮返回的原始错误，已脱敏并截断到 256 字。同一 Slot 连续失败次数区分"卡住"和"每轮换一个 Slot 失败"');
   }
+  // A failure of this deployment's own making beside the finding the column
+  // decided: the row is on its line for the column's reason and under
+  // DEFECT for this one, and neither hides the other.
+  if (anomaly.internal_failure) {
+    var internal = anomaly.internal_failure;
+    line('内部错误', internal.code + (internal.detail ? '（' + internal.detail + '）' : '') + (internal.stage ? '，阶段 ' + internal.stage : ''),
+      'alarmd 自己的合同或评估错误，与这一行的归属无关，另列在"程序缺陷"线下；健康完成一轮后清掉');
+  }
   var skip = anomaly.skip;
   if (skip) {
     // What the loss is, from the server's classification of the record
@@ -1478,12 +1517,18 @@ function objectRow(anomaly) {
     // second object is the scheduler's replay bound, and the row says so
     // rather than sending the reader to look the strategy's period up.
     var period = skip.interval_seconds ? '，' + skip.interval_seconds + ' 秒周期' : '';
-    var mechanism = anomaly.loss === 'ONGOING' && skip.interval_seconds && skip.interval_seconds <= 30
-      ? '——短周期对象错过实时轮后重放超上限，是 alarmd 的调度边界，不是策略的事' : '';
+    // The mechanism is the last step before the skip, not the period: a
+    // ten-second object can be skipped by the replay bound or by a retry
+    // that came too late, and the two are different fixes.
+    var mechanism = '';
     line('没检测的时段', momentLabel(skip.first_slot * 1000) + ' – ' + momentLabel(skip.last_slot * 1000)
       + (skip.slots ? '，' + skip.slots + ' 个 Slot' : '，个数无法得知')
       + '，记录于 ' + momentLabel(skip.at) + period + loss + mechanism,
       '这段里的时间点没有被评估过，也不会补跑。仍在发生的要看对象为什么追不上；已停止的只是记录，要处理的是这段没有告警覆盖的时间。');
+    if (skip.reason || anomaly.loss === 'ONGOING' || anomaly.loss === 'AFTER_RESTART') {
+      line('跳过前最后一步', skipReasonWords(skip.reason || 'NOTHING_TRIED'),
+        '这一 Slot 被放弃前最后一次失败的步骤；它是根因所在，不按周期推断');
+    }
   }
   line('起算来源', SINCE_SOURCE[anomaly.since_from] || anomaly.since_from);
   line('副本', shortReplica(anomaly.replica), anomaly.replica);

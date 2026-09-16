@@ -111,6 +111,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 				Until: at.Add(time.Hour), LastQueryAt: at.Add(-time.Minute), Failures: 40}
 			item.Failure = &fleet.FailureRef{Stage: "provider", Category: "source_backend",
 				Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}
+			// And an internal aggregation conflict beside the refusal: the
+			// second fact, listed under DEFECT as well, never hidden by the
+			// HTTP status.
+			item.Internal = &fleet.FailureRef{Stage: "execute", Category: "completion_contract",
+				Code: "GAP_SCOPE_REASON_CONFLICT", Detail: "input_a=QUERY_UNAVAILABLE input_b=QUERY_TIMEOUT"}
 		}),
 		anomaly("qg-window-filling", func(item *fleet.Anomaly) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
@@ -156,15 +161,19 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// whose aggregation dimensions were never the problem.
 		anomaly("qg-window-churn", func(item *fleet.Anomaly) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
+			// Not moving: the same worst count for twelve rounds.
 			item.Coverage = &fleet.HistoryCoverage{Levels: 9, Short: 4,
 				WorstValid: 2, WorstRequired: 9, ShortRounds: 40,
 				Fresh: 4, ShortFresh: 4, FreshRounds: 40,
-				Abnormal: 3, AbnormalOnIncomplete: 3}
+				Abnormal: 3, AbnormalOnIncomplete: 3,
+				PreviousKnown: true, PreviousWorstValid: 2, NoProgressRounds: 12}
 		}),
 		anomaly("qg-window-stale-data", func(item *fleet.Anomaly) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
+			// Filling: one more valid point than last round.
 			item.Coverage = &fleet.HistoryCoverage{Levels: 9, Short: 4,
-				WorstValid: 2, WorstRequired: 9, ShortRounds: 40}
+				WorstValid: 2, WorstRequired: 9, ShortRounds: 40,
+				PreviousKnown: true, PreviousWorstValid: 1}
 		}),
 		// Every short window fresh for a single round, which is what the round
 		// after a strategy edit looks like: a StateGeneration change re-keys
@@ -299,7 +308,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"qg-losing-now": {
 				FirstSlot: at.Add(-4 * time.Minute).Unix(), LastSlot: at.Add(-3 * time.Minute).Unix(),
 				Slots: 6, At: at.Add(-3 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
-				Strategies: []fleet.StrategyRef{{StrategyID: "8709", BusinessID: "9"}}, IntervalSeconds: 10},
+				Strategies: []fleet.StrategyRef{{StrategyID: "8709", BusinessID: "9"}}, IntervalSeconds: 10,
+				Reason: "QUERY_PERMIT_DEADLINE", ReasonCategory: "admission"},
 			"qg-demoted-rejected": {
 				FirstSlot: at.Add(-5 * time.Minute).Unix(), LastSlot: at.Add(-2 * time.Minute).Unix(),
 				Slots: 3, At: at.Add(-2 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde"},
@@ -598,7 +608,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// losing rounds now from its record; the stopped one is in the
 		// record section. The line says which part is still happening and
 		// that none of it is a budget rejection -- so not capacity.
-		"3 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 1 个；1 个是滚动后的追赶（副本启动 5 分钟内），看这一组还有没有新增；没有资源预算拒绝（只排除这一种拒绝，不排除别的容量或调度约束））",
+		"3 个对象跳过了检测，那段不补（最近 10 分钟内仍在跳过 1 个；1 个是滚动后的追赶（副本启动 5 分钟内），看这一组还有没有新增；跳过前最后一步：这一 Slot 没有尝试过，直接越过了重放范围 1 个、错过查询截止时间（重试到达时冻结的截止已过） 1 个；没有资源预算拒绝（只排除这一种拒绝，不排除别的容量或调度约束））",
 		"恢复标准：10 分钟内没有新的跳过",
 		"1 个对象到期没跑", "5 个对象现在说不出结论（3 种原因）",
 		// Every line says where the evidence is, what to do next, and what
@@ -640,7 +650,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"HISTORY ::", "恢复标准：记录不会归零；看的是同一对象有没有再跳过"},
 		// A loss in progress on a ten-second object names its mechanism on
 		// the row; the refused object's record carries its period too.
-		{"SKIP qg-losing-now ::", "，10 秒周期。仍在发生（最近 10 分钟内跳过）——短周期对象错过实时轮后重放超上限，是 alarmd 的调度边界，不是策略的事"},
+		// The mechanism is the last step before the skip, on the row, not
+		// inferred from the period: this one retried after its deadline.
+		{"SKIP qg-losing-now ::", "，10 秒周期。仍在发生（最近 10 分钟内跳过）跳过前最后一步：错过查询截止时间（重试到达时冻结的截止已过）"},
+		{"SKIP qg-restart-catchup ::", "跳过前最后一步：这一 Slot 没有尝试过，直接越过了重放范围"},
+		// The internal conflict beside the refusal, on the row and as a
+		// second fact on the DEFECT line -- the refusal still has the object.
+		{"INTERNAL qg-rejected ::", "内部错误：GAP_SCOPE_REASON_CONFLICT（input_a=QUERY_UNAVAILABLE input_b=QUERY_TIMEOUT），阶段 execute"},
+		{"CHECKS ::", "5 个对象命中程序缺陷（3 种），上报"},
+		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\""},
 		{"PENDING ::", "证据：分组的后端回答只有状态码/状态词（非 200 的响应正文当前不保留，\"最近一次错误\"是结束这一轮的 alarmd 错误，不是后端原文）"},
 		// The timeout and the short old-series window are not the data side's
 		// until the query path and the fetch are ruled out: both are here, not
@@ -775,11 +793,14 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"qg-rejected", "冷却中", "被拒绝 · QUERY_UNAVAILABLE", "—"},
 		{"qg-blocked", "—", "失败 · source_blocked", "—"},
 		{"qg-offhours", "生效时段外", "完成 · EFFECTIVE_TIME_INACTIVE", "—"},
-		{"qg-window-churn", "—", "完成 · HISTORY_WARMING", "9 个窗口 · 短 4 · 空 0 · 新 4 · 连续 40 轮 · 不完整窗口上报了 3 个异常"},
-		{"qg-window-starved", "—", "完成 · HISTORY_WARMING", "3 个窗口 · 短 2 · 空 2 · 新 0 · 连续 40 轮 · 检测用不了 2 个：REQUIRED_VALUE_MISSING"},
+		// The window's progress on the cell: not moving for twelve rounds, or
+		// one more point than last round.
+		{"qg-window-churn", "—", "完成 · HISTORY_WARMING", "9 个窗口 · 短 4 · 空 0 · 新 4 · 连续 40 轮 · 最差 2/9（上一轮 2，连续 12 轮没进展） · 不完整窗口上报了 3 个异常"},
+		{"qg-window-stale-data", "—", "完成 · HISTORY_WARMING", "9 个窗口 · 短 4 · 空 0 · 新 0 · 连续 40 轮 · 最差 2/9（上一轮 1，在补）"},
+		{"qg-window-starved", "—", "完成 · HISTORY_WARMING", "3 个窗口 · 短 2 · 空 2 · 新 0 · 连续 40 轮 · 最差 0/14 · 检测用不了 2 个：REQUIRED_VALUE_MISSING"},
 		{"qg-no-data", "—", "无数据 · FULL_EMPTY_COMPLETED", "—"},
 		{"qg-plain", "—", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
-		{"qg-guard-held", "—", "完成 · CONFIG_DRIFT（保护沿用，非本轮）", "3 个窗口 · 短 1 · 空 0 · 新 0 · 连续 29 轮"},
+		{"qg-guard-held", "—", "完成 · CONFIG_DRIFT（保护沿用，非本轮）", "3 个窗口 · 短 1 · 空 0 · 新 0 · 连续 29 轮 · 最差 5/9"},
 		{"qg-stuck-slot", "— · 卡在 " + at.Add(-3*time.Minute).In(time.Local).Format("15:04:05") + " 这个 Slot，第 3 次失败", "失败 · error", "—"},
 		{"qg-late", "迟到 12 秒", "完成 · HISTORY_WARMING", "—"},
 		{"qg-missed-turn", "超期 4 分 0 秒", "完成 · QUERY_TIMEOUT", "—"},
@@ -1225,7 +1246,7 @@ for (const row of data.anomalies) {
   console.log('ROW ' + row.query_group + ' :: ' + cells.slice(1, 5).join(' | '));
   if (row.skip) { console.log('SKIP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.last_error) { console.log('ERR ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
-  if (row.skip) { console.log('SKIP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.internal_failure) { console.log('INTERNAL ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the

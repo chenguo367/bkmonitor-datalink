@@ -368,6 +368,14 @@ type HistoryCoverage struct {
 	// fills, so on the round a guard should converge it already reads as
 	// many rounds as the window was short for.
 	HeldFullRounds uint32 `json:"held_full_rounds,omitempty"`
+	// PreviousWorstValid is the worst level's valid count the round before,
+	// when there was one (PreviousKnown); NoProgressRounds is how many
+	// consecutive rounds that count has not risen. Together they say whether
+	// the window is filling -- the one fact that makes "等窗口填满" advice
+	// rather than hope.
+	PreviousWorstValid uint32 `json:"previous_worst_valid,omitempty"`
+	PreviousKnown      bool   `json:"previous_known,omitempty"`
+	NoProgressRounds   uint32 `json:"no_progress_rounds,omitempty"`
 }
 
 // Churning reports series that have never survived long enough to be seen
@@ -499,6 +507,11 @@ type Anomaly struct {
 	// DemotedSince is when the object entered the demoted pool, on a row in
 	// it; zero elsewhere, and on rows from a publisher that predates it.
 	DemotedSince time.Time `json:"demoted_since,omitempty"`
+	// Internal is the last failure of this deployment's own making in the
+	// current run -- a contract or evaluation error -- kept beside the
+	// finding the column decided. The line is the column's; this is the
+	// second fact, and the row is listed under DEFECT for it as well.
+	Internal *FailureRef `json:"internal_failure,omitempty"`
 	// Attribution says whether capacity or design could have prevented this.
 	// Only the ones where it could decide the verdict; the rest are real work
 	// for someone else. Filled in by Attribute rather than by the tracker, so
@@ -1792,6 +1805,12 @@ type SkippedSpan struct {
 	// column, and a row nobody can trace to a strategy is a row nobody can
 	// act on.
 	Strategies []StrategyRef `json:"strategies,omitempty"`
+	// Reason and ReasonCategory are the last failure observed on the skipped
+	// Slot before it was given up, when there was one: a permit deadline
+	// missed, a budget rejection. Empty when the skip followed no failure of
+	// that Slot's (the Slot fell past the replay bound with nothing tried).
+	Reason         string `json:"reason,omitempty"`
+	ReasonCategory string `json:"reason_category,omitempty"`
 	// IntervalSeconds is the object's evaluation period, from the due index
 	// as the publisher knew it; zero when the index had no entry. A loss in
 	// progress on a ten-second object is the scheduler's replay bound, a
