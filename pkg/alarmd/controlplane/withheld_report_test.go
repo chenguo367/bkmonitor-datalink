@@ -518,3 +518,29 @@ func TestTheNamingMemoryDoesNotGrowWhenARecordKeepsChanging(t *testing.T) {
 		}
 	}
 }
+
+// A field that changes under an unchanged disposition and reason is also a
+// change.
+//
+// LEVEL_INVALID at the algorithms and LEVEL_INVALID at the trigger config are
+// two different things to go and fix, exactly as two reasons under one
+// disposition are. A report keyed on the pair alone would show the first field
+// for as long as the strategy stayed refused, and the day somebody fixes one
+// field and trips another it would say nothing at all -- which is the round
+// the field was added for.
+func TestAChangedFieldUnderTheSameReasonIsAChange(t *testing.T) {
+	previous := []ObjectDisposition{
+		{SourceID: "1", Scope: "LEVEL", LevelID: 1, Disposition: DispositionConfigRejected,
+			Reason: "LEVEL_INVALID", FieldPath: "level.detect_plan.algorithms"},
+	}
+	current := ComposeCatalog(withheldFixture(
+		ObjectDisposition{SourceID: "1", Scope: "LEVEL", LevelID: 1, Disposition: DispositionConfigRejected,
+			Reason: "LEVEL_INVALID", FieldPath: "level.trigger_plan"},
+	))
+
+	report := ChangedWithheld(current.WithheldObjects, previous)
+
+	if len(report.Lines) != 1 || report.Lines[0].FieldPath != "level.trigger_plan" {
+		t.Fatalf("lines = %+v, want the one line naming the field it moved to", report.Lines)
+	}
+}

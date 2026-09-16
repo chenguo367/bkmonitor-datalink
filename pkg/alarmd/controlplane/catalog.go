@@ -126,6 +126,13 @@ type ObjectDisposition struct {
 	LevelID     uint32
 	Disposition Disposition
 	Reason      string
+	// FieldPath is where in the strategy document the refusal happened, as the
+	// compiler reported it. The compiler has always known; it was dropped on
+	// the way out, and a reader was left with a reason word for a document of
+	// a few hundred keys. One deployment's 327 LEVEL_INVALID strategies all
+	// came from the same field, and finding out which took compiling the
+	// documents again offline. Empty when the refusal is not about a field.
+	FieldPath string
 }
 
 type Catalog struct {
@@ -713,6 +720,29 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	return candidate, nil
 }
 
+// itemUnit is the item's data unit, derived the way Python derives it: the
+// first non-empty unit among the item's query configs.
+//
+// Python builds the same value with list(set(...))[0] over the non-empty ones,
+// which is unordered when the configs disagree. This takes the first in the
+// stored order instead, so one document always compiles to one Plan. The
+// disagreement itself is not refused here -- Python does not refuse it, and a
+// new refusal would take strategies out that run today.
+func itemUnit(item legacyItem) string {
+	for _, raw := range item.QueryConfigs {
+		var config struct {
+			Unit string `json:"unit"`
+		}
+		if err := json.Unmarshal(raw, &config); err != nil {
+			continue
+		}
+		if config.Unit != "" {
+			return config.Unit
+		}
+	}
+	return ""
+}
+
 func primaryQueryContract(item legacyItem) (string, []string) {
 	expression := item.Expression
 	if itemHasAlgorithm(item, strategy.DetectorKindOsRestart) {
@@ -783,7 +813,18 @@ type legacyItem struct {
 	Functions    []json.RawMessage `json:"functions"`
 	QueryConfigs []json.RawMessage `json:"query_configs"`
 	Algorithms   []legacyAlgorithm `json:"algorithms"`
-	Unit         string            `json:"unit"`
+	// Unit is deliberately absent from this struct. The strategy cache has no
+	// unit on an item: Python's Item.unit is a derived property that walks
+	// query_configs and takes the first non-empty one, so reading a "unit" key
+	// here found nothing on every strategy the platform stores. Every
+	// threshold algorithm configured with a unit prefix then compiled against
+	// an empty data unit, failed to find the prefix in the identity unit's
+	// suffix table, and took the whole level out as LEVEL_INVALID. A full
+	// reading of one deployment put 327 strategies -- 11.5% of all of them --
+	// behind that one missing key, none of them evaluating at all, and the
+	// only symptom was a count of withheld objects that named no field.
+	//
+	// Read it with itemUnit.
 	// Target is the strategy's monitoring scope. It was silently ignored here
 	// until 2026-09-09, which is how alarmd came to alert on hosts outside
 	// every scoped strategy's target while Python filtered them out.
@@ -1096,11 +1137,12 @@ func compilePlan(
 			return contract.EvaluationPlanV2{}, execution.ScheduleSpec{}, "", nil, errors.New("alarmd controlplane: invalid strategy_revision")
 		}
 	}
+	unit := itemUnit(item)
 	dimensionFields := append([]string(nil), dataset.IdentityFields...)
 	if itemHasAlgorithm(item, strategy.DetectorKindProcPort) {
 		dimensionFields = []string{"bind_ip", "listen", "nonlisten", "not_accurate_listen", "protocol"}
 	}
-	projection := contract.InputProjectionV2{DynamicDimensions: dataset.DynamicDimensions, ValueFields: []string{"value"}, DimensionFields: dimensionFields, BusinessIdentityField: "bk_biz_id", MultiValueAlignment: "SINGLE_VALUE", DataUnit: item.Unit, MissingValuePolicy: contract.MissingValuePolicyRequired}
+	projection := contract.InputProjectionV2{DynamicDimensions: dataset.DynamicDimensions, ValueFields: []string{"value"}, DimensionFields: dimensionFields, BusinessIdentityField: "bk_biz_id", MultiValueAlignment: "SINGLE_VALUE", DataUnit: unit, MissingValuePolicy: contract.MissingValuePolicyRequired}
 	detectByLevel := make(map[uint32]legacyDetect, len(source.Detects))
 	duplicateDetect := make(map[uint32]struct{})
 	for _, detect := range source.Detects {
@@ -1149,7 +1191,7 @@ func compilePlan(
 				invalid = true
 				break
 			}
-			config, err := compileAlgorithmConfig(raw, item.Unit, levelID, projection, dataset.IdentityFields, interval, &levelInputs)
+			config, err := compileAlgorithmConfig(raw, unit, levelID, projection, dataset.IdentityFields, interval, &levelInputs)
 			if err != nil {
 				reason := "ALGORITHM_CONFIG_INVALID"
 				if raw.Type == strategy.DetectorKindThreshold {

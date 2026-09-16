@@ -54,6 +54,7 @@ func observeWithheldObjects(
 		facts := observability.SourceWithheldFacts{
 			Disposition: string(line.Disposition),
 			Reason:      line.Reason,
+			Field:       line.FieldPath,
 		}
 		// The cut is reported on the last line that fitted, so the reader who
 		// reaches the end of the round's lines learns there that more were

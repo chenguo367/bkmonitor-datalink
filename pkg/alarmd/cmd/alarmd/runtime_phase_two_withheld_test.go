@@ -35,8 +35,10 @@ func collectWithheldLines(report controlplane.WithheldReport) []observability.Ob
 // count into something to look at.
 func TestEachWithheldLineNamesTheStrategyAndWhy(t *testing.T) {
 	written := collectWithheldLines(controlplane.WithheldReport{Lines: []controlplane.ObjectDisposition{
-		{SourceID: "7", Scope: "PLAN", Disposition: controlplane.DispositionConfigRejected, Reason: "NO_DATA_CONFIG_INVALID"},
-		{SourceID: "9", Scope: "LEVEL", LevelID: 3, Disposition: controlplane.DispositionUnsupported, Reason: "ALGORITHM_NOT_MIGRATED"},
+		{SourceID: "7", Scope: "PLAN", Disposition: controlplane.DispositionConfigRejected,
+			Reason: "NO_DATA_CONFIG_INVALID", FieldPath: "item.no_data_config"},
+		{SourceID: "9", Scope: "LEVEL", LevelID: 3, Disposition: controlplane.DispositionUnsupported,
+			Reason: "ALGORITHM_NOT_MIGRATED", FieldPath: "level.detect_plan.algorithms"},
 	}})
 
 	if len(written) != 2 {
@@ -67,6 +69,15 @@ func TestEachWithheldLineNamesTheStrategyAndWhy(t *testing.T) {
 	if plan.SourceWithheld.Disposition != string(controlplane.DispositionConfigRejected) ||
 		plan.SourceWithheld.Reason != "NO_DATA_CONFIG_INVALID" {
 		t.Fatalf("plan line facts = %+v, want the disposition and reason it was withheld under", plan.SourceWithheld)
+	}
+	// And the field. A reason names a class of refusal; a strategy document has
+	// a few hundred keys, and which one it was is the difference between a line
+	// an operator can act on and one they have to reproduce offline. The
+	// compiler has always known -- it was dropped on the way out.
+	if plan.SourceWithheld.Field != "item.no_data_config" ||
+		level.SourceWithheld.Field != "level.detect_plan.algorithms" {
+		t.Fatalf("withheld fields = %q and %q, want the two the compiler reported",
+			plan.SourceWithheld.Field, level.SourceWithheld.Field)
 	}
 	if level.Trace.LevelID != "3" {
 		t.Fatalf("level line level_id = %q, want 3", level.Trace.LevelID)

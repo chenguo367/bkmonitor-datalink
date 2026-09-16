@@ -84,7 +84,11 @@ func changedWithheldWithin(current, previous []ObjectDisposition, limit int) Wit
 	changed := make([]ObjectDisposition, 0, len(current))
 	for _, record := range current {
 		before, known := was[identityOf(record)]
-		if known && before.Disposition == record.Disposition && before.Reason == record.Reason {
+		// The field is part of what was said. The same reason at a different
+		// field is a different refusal, and a report that treated the two as
+		// one would go quiet on the change that matters most.
+		if known && before.Disposition == record.Disposition && before.Reason == record.Reason &&
+			before.FieldPath == record.FieldPath {
 			continue
 		}
 		changed = append(changed, record)
