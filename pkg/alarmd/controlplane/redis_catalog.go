@@ -118,6 +118,7 @@ type RedisCatalogRepository struct {
 	// manifestCache and latestPublication bound the two reads the per-Slot
 	// Segment freshness check makes. See segment_freshness_cache.go.
 	manifestCache              catalogManifestCache
+	manifestFlights            catalogManifestFlights
 	latestPublication          latestPublicationMemo
 	freshnessClock             func() time.Time
 	controlCache               *controlReadCache

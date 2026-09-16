@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // The freshness check runs once per frozen Slot, and the two reads it needs
@@ -158,14 +159,67 @@ func (repository *RedisCatalogRepository) cachedCatalogManifest(
 		repository.observeObjectRead(ctx, "manifest", "hit")
 		return manifest, nil
 	}
-	manifest, err := repository.LoadCatalogManifest(ctx, revision)
-	if err != nil {
+	// The miss is shared, the way this repository already shares object reads.
+	// A cache keyed by revision misses on exactly one thing -- the moment a
+	// publication changes the revision -- and at that moment every Slot in
+	// flight misses at once: one replica was measured fetching the same 760 KB
+	// manifest twenty times inside one publication. Reading it once and giving
+	// the bytes to everyone waiting is the difference between one fetch per
+	// publication per replica and one per concurrent Slot.
+	flights := &repository.manifestFlights
+	key := string(revision)
+	flights.mu.Lock()
+	if flights.byRevision == nil {
+		flights.byRevision = make(map[string]*catalogManifestFlight)
+	}
+	flight, joined := flights.byRevision[key]
+	if !joined {
+		flight = &catalogManifestFlight{done: make(chan struct{})}
+		flights.byRevision[key] = flight
+	}
+	flights.mu.Unlock()
+	if joined {
+		// Timed on the shared wait series, because a joiner waits for whatever
+		// the leader is doing and has no deadline of its own: a slow leader
+		// makes every joiner silently slow with it.
+		waited := time.Now()
+		select {
+		case <-flight.done:
+		case <-ctx.Done():
+			observability.ObserveSlotWait(ctx, repository.observer, observability.SlotWaitObjectShare, "", waited, time.Now)
+			return CatalogManifest{}, ctx.Err()
+		}
+		observability.ObserveSlotWait(ctx, repository.observer, observability.SlotWaitObjectShare, "", waited, time.Now)
+		if flight.err == nil {
+			repository.observeObjectRead(ctx, "manifest", "share")
+		}
+		return flight.manifest, flight.err
+	}
+	flight.manifest, flight.err = repository.LoadCatalogManifest(ctx, revision)
+	flights.mu.Lock()
+	delete(flights.byRevision, key)
+	flights.mu.Unlock()
+	close(flight.done)
+	if flight.err != nil {
 		repository.observeObjectRead(ctx, "manifest", "missing")
-		return CatalogManifest{}, err
+		return CatalogManifest{}, flight.err
 	}
 	repository.observeObjectRead(ctx, "manifest", "miss")
-	repository.manifestCache.store(revision, manifest)
-	return manifest, nil
+	repository.manifestCache.store(revision, flight.manifest)
+	return flight.manifest, nil
+}
+
+// catalogManifestFlights joins concurrent reads of one revision's manifest in
+// this process into one network read, the way object reads are joined.
+type catalogManifestFlights struct {
+	mu         sync.Mutex
+	byRevision map[string]*catalogManifestFlight
+}
+
+type catalogManifestFlight struct {
+	done     chan struct{}
+	manifest CatalogManifest
+	err      error
 }
 
 // retainedCatalogManifest serves the manifest to the Snapshot fallback: from

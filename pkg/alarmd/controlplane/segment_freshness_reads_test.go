@@ -27,6 +27,12 @@ import (
 type controlGetCountingHook struct {
 	mu     sync.Mutex
 	counts map[string]int
+	// manifestDelay holds every manifest GET open for this long. It is what
+	// makes a concurrency test about sharing a fetch actually concurrent: with
+	// an instant fetch the first reader finishes before the others start, the
+	// cache serves them, and the test passes whether or not anything is
+	// shared.
+	manifestDelay time.Duration
 }
 
 func newControlGetCountingHook() *controlGetCountingHook {
@@ -52,7 +58,11 @@ func (hook *controlGetCountingHook) BeforeProcess(ctx context.Context, cmd redis
 	}
 	hook.mu.Lock()
 	hook.counts[kind]++
+	delay := hook.manifestDelay
 	hook.mu.Unlock()
+	if kind == "manifest" && delay > 0 {
+		time.Sleep(delay)
+	}
 	return ctx, nil
 }
 
@@ -68,6 +78,12 @@ func (hook *controlGetCountingHook) count(kind string) int {
 	hook.mu.Lock()
 	defer hook.mu.Unlock()
 	return hook.counts[kind]
+}
+
+func (hook *controlGetCountingHook) holdManifestFor(delay time.Duration) {
+	hook.mu.Lock()
+	defer hook.mu.Unlock()
+	hook.manifestDelay = delay
 }
 
 func (hook *controlGetCountingHook) reset() {
@@ -269,5 +285,55 @@ func (f *countedFreshnessFixture) republishAndRecut(
 	*f.now = time.Unix(boundary, 0)
 	if _, err := f.reconciler.Ensure(ctx, snapshot.Publication); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Concurrent Slots missing the same revision cost one fetch, not one each.
+//
+// The cache is keyed by revision, so it misses on exactly one thing: the
+// moment a publication changes the revision. At that moment every Slot in
+// flight misses at once, and on a settled deployment that is the only moment
+// the manifest is fetched at all -- so without sharing, "one fetch per
+// publication" is really one fetch per concurrent Slot. It was measured at
+// twenty on one replica inside one publication, each of them the whole 760 KB.
+func TestConcurrentSlotsMissingOneRevisionShareTheManifestFetch(t *testing.T) {
+	ctx := context.Background()
+	fixture := newCountedFreshnessFixture(t, "freshness-reads-share")
+	schedule, err := fixture.runtime.ReadFrozenSchedule(ctx, fixture.group, 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := schedule.Segment
+	legacy.ObjectDigest, legacy.OutputContextRefs = "", nil
+	// A revision nothing in this process has read yet, which is what a Slot
+	// meets on the round a publication lands.
+	revision := legacy.Publication.SnapshotRevision
+	fixture.gets.reset()
+	fixture.gets.holdManifestFor(50 * time.Millisecond)
+
+	const readers = 16
+	var wg sync.WaitGroup
+	errs := make([]error, readers)
+	start := make(chan struct{})
+	for index := 0; index < readers; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			_, errs[index] = fixture.repository.LoadQueryGroup(ctx, revision, fixture.group)
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+
+	for index, err := range errs {
+		if err != nil {
+			t.Fatalf("reader %d: %v; sharing a fetch must not cost anyone their answer", index, err)
+		}
+	}
+	if got := fixture.gets.count("manifest"); got != 1 {
+		t.Fatalf("manifest GETs = %d for %d concurrent readers of one revision, want 1. Every one of "+
+			"them fetched the same immutable bytes, and they are the bytes that took the shared Redis "+
+			"instance down", got, readers)
 	}
 }
