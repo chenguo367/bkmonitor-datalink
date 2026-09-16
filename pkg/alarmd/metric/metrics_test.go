@@ -22,6 +22,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lifecycle"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -408,6 +409,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_no_data_plans"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_persistent_skips_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_worker_no_data_memory_refusals_total"] = "variableLabels: {reason,record}"
 	expected["bkmonitor_alarmd_worker_no_data_plans_seen_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
@@ -870,6 +872,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// that pair cannot happen and a label for it would be a zero that means
 	// nothing rather than one that means "nothing has stopped".
 	bounds[fqName("worker_no_data_persistent_skips_total")] = len(nodata.SlotOutcomes) - 1
+	// One per shape a deterministic refusal takes, and no more: the pair is
+	// written only from the list execution publishes, and the store's own test
+	// keeps that list equal to what the store can produce.
+	bounds[fqName("worker_no_data_memory_refusals_total")] = len(execution.NoDataRefusals)
 	// One series: a count, unlabelled. Its whole job is to be read against
 	// the outcome family, which carries the breakdown.
 	bounds[fqName("worker_no_data_plans_seen_total")] = 1

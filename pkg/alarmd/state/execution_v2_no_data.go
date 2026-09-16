@@ -172,6 +172,10 @@ func (store *ExecutionStore) applyOneNoData(
 		item.Status, item.ReasonCode = execution.NoDataRejected, execution.ReasonCode(reason)
 		return item
 	}
+	tooLarge := func(record execution.NoDataRecordKind, size int) execution.NoDataApplyItemResult {
+		item.Size = &execution.NoDataRecordSize{Record: record, Bytes: size, Limit: store.options.MaxValueBytes}
+		return reject(contract.ReasonStateBudgetExceeded)
+	}
 	retry := func() execution.NoDataApplyItemResult {
 		item.Status, item.ReasonCode = execution.NoDataRetryable, execution.ReasonCode(contract.ReasonRedisUnavailable)
 		return item
@@ -198,7 +202,7 @@ func (store *ExecutionStore) applyOneNoData(
 	raw := values[0]
 	if raw != nil {
 		if len(raw) > store.options.MaxValueBytes {
-			return reject(contract.ReasonStateBudgetExceeded)
+			return tooLarge(execution.NoDataRecordStored, len(raw))
 		}
 		previous := decodeNoData(raw, mutation.Identity)
 		switch previous.Status {
@@ -240,8 +244,11 @@ func (store *ExecutionStore) applyOneNoData(
 		RosterVersion: mutation.RosterVersion, Groups: mutation.Groups,
 	}
 	encoded, encodeErr := json.Marshal(next)
-	if encodeErr != nil || len(encoded) > store.options.MaxValueBytes {
-		return reject(contract.ReasonStateBudgetExceeded)
+	if encodeErr != nil {
+		return reject(contract.ReasonStateCorrupt)
+	}
+	if len(encoded) > store.options.MaxValueBytes {
+		return tooLarge(execution.NoDataRecordNext, len(encoded))
 	}
 	// The floor, for the same reason a gap marker takes it: the load renews to
 	// whatever this Plan needs, and this only has to keep the key from being

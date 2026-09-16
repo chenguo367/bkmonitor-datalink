@@ -68,6 +68,33 @@ func ValidQueryFailureCode(code string) bool {
 	return true
 }
 
+// CapacityBudgetFailureCode is the failure code a rejection by one budget
+// carries.
+//
+// It exists because the budget's own value is a metric label -- lower case,
+// chosen to read well beside other labels -- and the failure code grammar is
+// upper case. The budget was being passed straight through as the code, so
+// every budget rejection published a code no reader could parse: fleet
+// normalised it away and the page was left with the free text, which is rate
+// limited and gone first. The two spellings are the same fact, and this is the
+// one place that says so.
+func CapacityBudgetFailureCode(budget CapacityBudget) string {
+	switch NormalizeCapacityBudget(budget) {
+	case CapacityBudgetSeries:
+		return "BUDGET_SERIES"
+	case CapacityBudgetRetainedBytes:
+		return "BUDGET_RETAINED_BYTES"
+	case CapacityBudgetStateMutations:
+		return "BUDGET_STATE_MUTATIONS"
+	case CapacityBudgetEvents:
+		return "BUDGET_EVENTS"
+	case CapacityBudgetGapMutations:
+		return "BUDGET_GAP_MUTATIONS"
+	default:
+		return "BUDGET_OTHER"
+	}
+}
+
 // NormalizeQueryFailureCode returns code when it matches the grammar and OTHER
 // otherwise.
 func NormalizeQueryFailureCode(code string) string {

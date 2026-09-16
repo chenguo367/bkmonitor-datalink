@@ -71,6 +71,57 @@ type NoDataApplyItemResult struct {
 	Identity   PlanNoDataIdentity
 	Status     NoDataApplyStatus
 	ReasonCode ReasonCode
+	// Size is set only by a refusal about how large the record is, and carries
+	// the measurement that refusal made. STATE_BUDGET_EXCEEDED on its own says
+	// a Plan's memory did not fit and leaves a reader with no way to tell a
+	// record a little over the bound from one many times it, or to tell which
+	// of the two records was measured -- and those are different situations
+	// with different remedies.
+	Size *NoDataRecordSize
+}
+
+// NoDataRecordKind names which record a size refusal measured.
+type NoDataRecordKind string
+
+const (
+	// NoDataRecordStored is the record already in the store, measured before
+	// it is decoded. A Plan can only reach this if the bound moved or another
+	// build wrote the record, because no write of this build exceeds it.
+	NoDataRecordStored NoDataRecordKind = "STORED"
+	// NoDataRecordNext is the record this round would write.
+	NoDataRecordNext NoDataRecordKind = "NEXT"
+)
+
+// NoDataRecordSize is the measurement behind a size refusal: which record, how
+// many bytes it holds, and the bound it was measured against.
+type NoDataRecordSize struct {
+	Record NoDataRecordKind
+	Bytes  int
+	Limit  int
+}
+
+// NoDataRefusal is one shape a deterministic refusal takes, for the partition
+// to pre-create and for a reader to bound the family by.
+type NoDataRefusal struct {
+	Reason ReasonCode
+	Record NoDataRecordKind
+}
+
+// NoDataRefusals is every shape a deterministic no-data apply refusal takes.
+//
+// It is a closed list because every refusal in the store names its reason in
+// that file, including the one that passes a stored record's reason through:
+// the decoder produces exactly one terminal reason. That is what makes this
+// safe to publish and to bound a metric label by, and the store's own test
+// drives each condition and checks the pair it produced is here -- a list kept
+// by hand beside code that can produce anything is the shape that reads as a
+// bound while not being one.
+var NoDataRefusals = []NoDataRefusal{
+	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordStored},
+	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordNext},
+	{Reason: ReasonCode(contract.ReasonStateCorrupt)},
+	{Reason: ReasonCode(contract.ReasonBackendCapabilityMissing)},
+	{Reason: ReasonCode(contract.ReasonStateSchemaUnsupported)},
 }
 
 type NoDataApplyResult struct {
