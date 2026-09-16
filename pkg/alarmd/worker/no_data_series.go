@@ -334,14 +334,44 @@ func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 		case execution.NoDataRetryable:
 			continue
 		default:
-			// A deterministic refusal is this build disagreeing with what it
-			// just built, which no retry resolves and which would otherwise be
-			// invisible until someone wondered why a duration never grew.
-			return fmt.Errorf("alarmd worker: no-data memory for strategy %s was refused: %s",
-				item.Identity.Plan.StrategyID, item.ReasonCode)
+			// Reported, not raised. A deterministic refusal is one no retry
+			// resolves, so failing the Slot over it does not store the record
+			// and does throw away the threshold results this round already
+			// computed and sent -- every round, for as long as the condition
+			// lasts. That is this Plan's ordinary detection stopped, and the
+			// other Plans of the Query Group with it, over a record nobody was
+			// looking at.
+			//
+			// What failing the Slot did give was visibility, and that is what
+			// this line is for. It names the Plan, the store's own reason and,
+			// for a refusal about size, the two numbers it compared -- which
+			// is more than the failed Slot carried: that one reached the page
+			// as internal_unknown on a retry.
+			coordinator.observeNoDataMemoryRefusal(ctx, request, item)
 		}
 	}
 	return nil
+}
+
+// observeNoDataMemoryRefusal reports one Plan the store would not take a
+// memory for.
+func (coordinator *SlotExecutionCoordinator) observeNoDataMemoryRefusal(
+	ctx context.Context, request execution.SlotExecutionRequest, item execution.NoDataApplyItemResult,
+) {
+	facts := observability.NoDataMemoryRefusalFacts{Reason: string(item.ReasonCode)}
+	if size := item.Size; size != nil {
+		facts.Record, facts.Bytes, facts.Limit = string(size.Record), size.Bytes, size.Limit
+	}
+	coordinator.emitObservation(ctx, observability.Observation{
+		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRefused,
+		Operation: observability.Operation(request.Operation),
+		Direction: observability.DirectionInternal, Result: observability.ResultDegraded,
+		ReasonCode: observability.ReasonCode(item.ReasonCode),
+		Trace: observability.TraceFields{
+			StrategyID: item.Identity.Plan.StrategyID, BusinessID: item.Identity.Plan.BusinessID,
+		},
+		NoDataMemoryRefusal: &facts,
+	})
 }
 
 // observeNoDataOutcomes reports what happened to every no-data Plan this Slot,

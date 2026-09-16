@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -45,6 +46,7 @@ type phaseTwoMetrics struct {
 	queryAdmission                  *prometheus.CounterVec
 	noDataSlotPlans                 *prometheus.CounterVec
 	noDataStalls                    *prometheus.CounterVec
+	noDataMemoryRefusals            *prometheus.CounterVec
 	noDataPlansSeen                 prometheus.Counter
 	noDataPlansByHop                *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
@@ -376,6 +378,17 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"skips there are a rate and these are the ones that became a state. Every outcome that can " +
 			"stall has a label at startup, so a zero is a zero rather than a label nothing wrote.",
 	}, []string{"outcome"})
+	metrics.noDataMemoryRefusals = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_memory_refusals_total",
+		Help: "Absence-memory writes the store refused deterministically, by reason and by which record " +
+			"was measured when the reason was size. A refusal does not fail the Slot, so nothing else " +
+			"in this family moves when it happens: the Plan evaluated, reported and was counted as " +
+			"evaluated, and only the record it would have written was lost. That is why this exists - " +
+			"without it a Plan whose memory has stopped being writable is indistinguishable from one " +
+			"whose memory is fine, for as long as it lasts. Rising and staying up is one object the " +
+			"store will not take, and the line beside it carries the bytes and the bound. record is " +
+			"empty for a refusal that was not about size.",
+	}, []string{"reason", "record"})
 	metrics.dueIndex = newDueIndexMetrics()
 	metrics.controlFacts = newControlFactsMetrics()
 	metrics.redisCalls = newRedisCallMetrics()
@@ -686,6 +699,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}
 		metrics.noDataStalls.WithLabelValues(string(outcome))
 	}
+	for _, refusal := range execution.NoDataRefusals {
+		// Pre-created, because the reading this family exists for is the zero.
+		// A Plan whose memory the store will not take produces no other signal
+		// -- it evaluated, it reported, it was counted as evaluated -- so a
+		// series that is absent rather than zero leaves a reader unable to say
+		// whether nothing was refused or nothing was looking.
+		metrics.noDataMemoryRefusals.WithLabelValues(string(refusal.Reason), string(refusal.Record))
+	}
 	for _, result := range sourceWithheldLineResults {
 		metrics.sourceWithheldLines.WithLabelValues(result)
 	}
@@ -722,7 +743,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.noDataStalls, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataStalls, m.noDataMemoryRefusals, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -919,6 +940,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		observation.Stage == observability.StageNoDataDecided {
 		m.observeNoDataSlot(observation)
 		m.observeNoDataStall(observation)
+	}
+	if facts := observation.NoDataMemoryRefusal; facts != nil {
+		m.noDataMemoryRefusals.WithLabelValues(facts.Reason, facts.Record).Inc()
 	}
 	// Dispatched on the facts rather than on a component and stage: the hops
 	// are reported from the control plane and from the evaluation, and the

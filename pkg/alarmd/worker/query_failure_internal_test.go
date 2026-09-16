@@ -17,7 +17,8 @@ func TestQueryFailureWrappedBudgetWinsOverProviderDiagnostic(t *testing.T) {
 	c := &SlotExecutionCoordinator{ports: Ports{Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { got = observability.NormalizeObservation(o) })}}
 	original := &provisionalBudgetExceededError{budget: observability.CapacityBudgetRetainedBytes}
 	c.observeQueryFailure(context.Background(), execution.OperationReplay, time.Now(), "execute", providerLikeBudgetError{fmt.Errorf("https://user:secret@example.test/?token=secret: %w", original)})
-	if got.QueryFailure == nil || got.QueryFailure.Category != "budget" || got.QueryFailure.Code != "retained_bytes" {
+	if got.QueryFailure == nil || got.QueryFailure.Category != "budget" ||
+		got.QueryFailure.Code != observability.CapacityBudgetFailureCode(observability.CapacityBudgetRetainedBytes) {
 		t.Fatalf("diagnostics=%+v", got.QueryFailure)
 	}
 }

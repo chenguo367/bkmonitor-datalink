@@ -114,7 +114,17 @@ const (
 	// round read it: how far its release condition has got, and why it is
 	// held. Reported every round rather than on change, because the state it
 	// exists to show is a count that is not moving.
-	StageGapGuardProgress    = "gap_guard_progress"
+	StageGapGuardProgress = "gap_guard_progress"
+	// StageNoDataMemoryRefused names a Plan whose absence memory the store
+	// would not take. The round itself was fine: it judged, it reported, its
+	// threshold results were sent. What it could not do is write down what it
+	// learned, so the next round reads a memory one round old and every round
+	// after that does the same.
+	//
+	// Its own stage rather than an outcome of the no-data partition, because
+	// the Plan already has an outcome -- it was evaluated -- and a second one
+	// would make the partition stop adding up.
+	StageNoDataMemoryRefused = "no_data_memory_refused"
 	StageEvaluationCompleted = "evaluation_completed"
 	StageSideEffectAdmission = "side_effect_admission"
 	StageStateAdmission      = "state_admission"
@@ -370,6 +380,27 @@ type GapProgressFacts struct {
 // round -- a count of rounds is what the outcome buckets already give.
 type NoDataStallFacts struct {
 	Outcome string
+}
+
+// NoDataMemoryRefusalFacts is one Plan's refused absence-memory write: why the
+// store said no and, when the refusal was about size, the two numbers it
+// compared.
+//
+// The numbers are the point. "This Plan's memory did not fit" is not something
+// a reader can act on: a record a little over the bound and one many times it
+// are different situations, and a bound that moved under an unchanged record
+// is a third. With the measurement on the line, the same reader can see which
+// one this is and whether it is getting worse.
+type NoDataMemoryRefusalFacts struct {
+	// Reason is the store's reason code, so a refusal about size and one about
+	// a corrupt record are told apart before anyone reads the numbers.
+	Reason string
+	// Record, Bytes and Limit are set only by a size refusal. Record says
+	// which record was measured: the one already stored, or the one this round
+	// would have written.
+	Record string
+	Bytes  int
+	Limit  int
 }
 
 // NoDataCensusFacts is how many Plans this Slot had that detect no-data, before
@@ -1323,6 +1354,7 @@ type Observation struct {
 	NoDataSlot            *NoDataSlotFacts
 	NoDataStall           *NoDataStallFacts
 	GapProgress           *GapProgressFacts
+	NoDataMemoryRefusal   *NoDataMemoryRefusalFacts
 	SourceWithheld        *SourceWithheldFacts
 	NoDataCensus          *NoDataCensusFacts
 	SegmentContent        *SegmentContentFacts
@@ -2336,6 +2368,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentEvaluation, StageEvaluationCompleted},
 	{ComponentState, StageStatePreflight}, {ComponentState, StageGapLoaded},
 	{ComponentEvaluation, StageNoDataDecided},
+	{ComponentState, StageNoDataMemoryRefused},
 	{ComponentControlPlane, StageSourceWithheld},
 	{ComponentControlPlane, StageNoDataSuspended},
 	{ComponentEvaluation, StageGapGuardProgress},

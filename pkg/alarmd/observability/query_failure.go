@@ -68,6 +68,33 @@ func ValidQueryFailureCode(code string) bool {
 	return true
 }
 
+// CapacityBudgetFailureCode is the failure code a rejection by one budget
+// carries.
+//
+// It exists because the budget's own value is a metric label -- lower case,
+// chosen to read well beside other labels -- and the failure code grammar is
+// upper case. The budget was being passed straight through as the code, so
+// every budget rejection published a code no reader could parse: fleet
+// normalised it away and the page was left with the free text, which is rate
+// limited and gone first. The two spellings are the same fact, and this is the
+// one place that says so.
+func CapacityBudgetFailureCode(budget CapacityBudget) string {
+	switch NormalizeCapacityBudget(budget) {
+	case CapacityBudgetSeries:
+		return "BUDGET_SERIES"
+	case CapacityBudgetRetainedBytes:
+		return "BUDGET_RETAINED_BYTES"
+	case CapacityBudgetStateMutations:
+		return "BUDGET_STATE_MUTATIONS"
+	case CapacityBudgetEvents:
+		return "BUDGET_EVENTS"
+	case CapacityBudgetGapMutations:
+		return "BUDGET_GAP_MUTATIONS"
+	default:
+		return "BUDGET_OTHER"
+	}
+}
+
 // NormalizeQueryFailureCode returns code when it matches the grammar and OTHER
 // otherwise.
 func NormalizeQueryFailureCode(code string) string {
@@ -104,13 +131,15 @@ func normalizeQueryFailure(component Component, stage Stage, input *QueryFailure
 		f.Stage = QueryFailureStageOther
 	}
 	switch f.Category {
-	case QueryFailureCategoryBudget:
-		if budget := NormalizeCapacityBudget(CapacityBudget(f.Code)); budget != "" && budget != CapacityBudgetOther {
-			f.Code = string(budget)
-		} else {
-			f.Code = NormalizeQueryFailureCode(f.Code)
-		}
-	case QueryFailureCategorySourceBackend, QueryFailureCategorySeriesIdentity, QueryFailureCategoryCompletionContract,
+	// Budget goes through the same grammar as every other category. It used to
+	// have an exemption: a code that spelled a known budget was kept as it was,
+	// which is how every budget rejection came to publish a lower-case label as
+	// its code without anything noticing. The exemption was what made it
+	// invisible -- OTHER on that path would have said at once that the code was
+	// not a code. Publishers map the budget to its code themselves now, with
+	// CapacityBudgetFailureCode.
+	case QueryFailureCategoryBudget, QueryFailureCategorySourceBackend, QueryFailureCategorySeriesIdentity,
+		QueryFailureCategoryCompletionContract,
 		QueryFailureCategoryNamedInput, QueryFailureCategoryProviderTransport, QueryFailureCategoryAdmission,
 		QueryFailureCategoryEvaluation:
 		f.Code = NormalizeQueryFailureCode(f.Code)
