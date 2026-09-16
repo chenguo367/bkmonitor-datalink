@@ -195,6 +195,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.ShortPeriodCompletion; f != nil {
 		attributes = append(attributes, slog.Any("short_period_completion", f))
 	}
+	if f := observation.DispatchTurnaway; f != nil {
+		attributes = append(attributes, slog.Any("dispatch_turnaway", f))
+	}
 	if f := observation.StateApplyChunk; f != nil {
 		attributes = append(attributes, slog.Int("chunk_index", f.Index), slog.Int("chunk_count", f.Count),
 			slog.Int64("applied_keys", f.AppliedKeys), slog.Int64("applied_bytes", f.AppliedBytes), slog.Int64("elapsed_ms", f.ElapsedMillis))

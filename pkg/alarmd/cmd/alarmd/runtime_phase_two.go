@@ -1490,6 +1490,9 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 				if latest < 0 || queued.deadline.IsZero() || !deadlineBefore(queued, dispatcher.normal[latest]) {
 					dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(scheduled.queryGroup), observability.TargetFlowFacts{Decision: "normal_queue_full"})
 					recorder.RecordDispatchTurnaway("normal_queue_full", queued.cohort)
+					if latest >= 0 {
+						dispatcher.observeTurnaway("normal_queue_full", queued, dispatcher.normal[latest], readyQueueVerdict(queued, dispatcher.normal[latest]), len(dispatcher.normal), limits.ReadyQueueCapacity)
+					}
 					dispatcher.rotation.deferred++
 					dispatcher.rotation.deferredQueueFull++
 					dispatcher.dueIndex.MarkHeldBack(scheduled.queryGroup)
@@ -1498,6 +1501,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 				evicted := dispatcher.normal[latest]
 				dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(evicted.scheduled.queryGroup), observability.TargetFlowFacts{Decision: "normal_queue_evicted"})
 				recorder.RecordDispatchTurnaway("normal_queue_evicted", evicted.cohort)
+				dispatcher.observeTurnaway("normal_queue_evicted", evicted, queued, "displaced", len(dispatcher.normal), limits.ReadyQueueCapacity)
 				dispatcher.rotation.deferred++
 				dispatcher.rotation.deferredQueueFull++
 				dispatcher.dueIndex.MarkHeldBack(evicted.scheduled.queryGroup)
@@ -1521,6 +1525,9 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 					// not a lack of room, and the walk moves on.
 					dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(scheduled.queryGroup), observability.TargetFlowFacts{Decision: "delayed_queue_full", ReadyAtMS: diagnosticTimeMS(readyAt)})
 					recorder.RecordDispatchTurnaway("delayed_not_better", queued.cohort)
+					if latest >= 0 {
+						dispatcher.observeTurnaway("delayed_not_better", queued, dispatcher.delayed[latest], "ready_at_not_before", len(dispatcher.delayed), recoveryCapacity)
+					}
 					dispatcher.rotation.deferred++
 					dispatcher.rotation.deferredNotBetter++
 					dispatcher.dueIndex.MarkHeldBack(scheduled.queryGroup)
@@ -1530,6 +1537,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 				evicted := dispatcher.delayed[latest].scheduled
 				dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(evicted.queryGroup), observability.TargetFlowFacts{Decision: "delayed_queue_evicted"})
 				recorder.RecordDispatchTurnaway("delayed_evicted", dispatcher.delayed[latest].cohort)
+				dispatcher.observeTurnaway("delayed_evicted", dispatcher.delayed[latest], queued, "ready_at_displaced", len(dispatcher.delayed), recoveryCapacity)
 				dispatcher.dueIndex.MarkHeldBack(evicted.queryGroup)
 				if dispatcher.queued[evicted.queryGroup] == evicted.lifecycle {
 					delete(dispatcher.queued, evicted.queryGroup)
@@ -1821,6 +1829,42 @@ func delayedBefore(left, right phaseTwoQueuedRunner) bool {
 		return left.scheduled.queryGroup < right.scheduled.queryGroup
 	}
 	return left.readyAt.Before(right.readyAt)
+}
+
+// readyQueueVerdict names which clause of deadlineBefore kept an arrival out
+// of a full ready queue, so a turned-away short-period Query Group says what
+// it lost to rather than only that it lost.
+func readyQueueVerdict(arrival, tail phaseTwoQueuedRunner) string {
+	switch {
+	case arrival.deadline.IsZero():
+		return "deadline_unknown"
+	case tail.deadline.IsZero() || tail.deadline.Before(arrival.deadline):
+		return "tail_earlier"
+	}
+	return "tail_equal"
+}
+
+// observeTurnaway writes the facts of one turnaway for a short-period cohort.
+// The counter is recorded for every cohort at the call site; this is the
+// explanation, and only the cohorts whose turnaways are a finding get one.
+// The observer is scoped by Query Group, so one Query Group turned away every
+// pass is rate limited on its own and cannot push out another's line.
+func (dispatcher *phaseTwoRunnerDispatcher) observeTurnaway(outcome string, turnedAway, kept phaseTwoQueuedRunner, verdict string, queueLength, queueCapacity int) {
+	if !observability.IsShortPeriodCohort(turnedAway.cohort) {
+		return
+	}
+	observeRuntime(context.Background(), dispatcher.bundle.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentScheduler, Stage: observability.StageDispatchTurnaway,
+		Result: observability.ResultSuccess,
+		Trace:  observability.TraceFields{QueryGroupKey: string(turnedAway.scheduled.queryGroup)},
+		DispatchTurnaway: &observability.DispatchTurnawayFacts{
+			Outcome: outcome, Cohort: turnedAway.cohort, Verdict: verdict,
+			DeadlineUnixMilli: diagnosticTimeMS(turnedAway.deadline), ReadyAtUnixMilli: diagnosticTimeMS(turnedAway.readyAt),
+			KeptQueryGroup: string(kept.scheduled.queryGroup), KeptCohort: kept.cohort,
+			KeptDeadlineUnixMilli: diagnosticTimeMS(kept.deadline), KeptReadyAtUnixMilli: diagnosticTimeMS(kept.readyAt),
+			QueueLength: queueLength, QueueCapacity: queueCapacity,
+		},
+	})
 }
 
 func (dispatcher *phaseTwoRunnerDispatcher) dropStaleQueued(revision uint64) {
