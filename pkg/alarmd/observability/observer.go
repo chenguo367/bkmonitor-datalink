@@ -84,6 +84,7 @@ const (
 	StageRunnerCompleted        = "runner_completed"
 	StageSlotSourceCompleted    = "slot_source_completed"
 	StageScheduleCursorAdvanced = "schedule_cursor_advanced"
+	StageReplayExpired          = "replay_expired"
 	StageQueryAdmission         = "query_admission"
 	StageRestartRecovered       = "restart_recovered"
 	StageFleetSnapshotPublish   = "fleet_snapshot_publish"
@@ -473,6 +474,32 @@ type ScheduleCutoverFacts struct {
 // ScheduleCutoverDecisions is the closed vocabulary of what a publication
 // cutover does with one Query Group.
 var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", "retired", "added"}
+
+// ReplayExpiryFacts describe one Slot the scheduler gave up replaying.
+//
+// The reason is the point of them. A Slot too old for the replay window and a
+// Slot whose own readiness rule holds it past that window look identical from
+// outside -- both end as a skipped grid point with no failure anywhere -- and
+// they need opposite responses: the first is a worker that fell behind, the
+// second is two settings that disagree and will skip every Slot of that period
+// for as long as they do.
+//
+// ReadyAtUnixMilli and DistanceBoundaryUnixMilli are the two instants the
+// third reason compared, and are zero for the others.
+type ReplayExpiryFacts struct {
+	Reason                    string
+	Distance                  uint32
+	AgeSeconds                float64
+	ReadyAtUnixMilli          int64
+	DistanceBoundaryUnixMilli int64
+}
+
+// ReplayExpiryReasons is the closed vocabulary of why a replay expired. The
+// scheduler's typed constants are held to this list by a test rather than by
+// hand, so a new reason cannot arrive without a series to count it.
+var ReplayExpiryReasons = []string{
+	"REPLAY_AGE_EXCEEDED", "REPLAY_DISTANCE_EXCEEDED", "REPLAY_WAIT_EXCEEDS_DISTANCE", "REPLAY_RANGE_EXPIRED",
+}
 
 // ObjectCatalogFacts describe one write or renewal of the content-addressed
 // Query Group objects, output contexts and the manifest that names them for
@@ -1201,6 +1228,7 @@ type Observation struct {
 	StateWriteReuse       *StateWriteReuseFacts
 	ActiveQGSet           *ActiveQGSetFacts
 	ScheduleCutover       *ScheduleCutoverFacts
+	ReplayExpiry          *ReplayExpiryFacts
 	ObjectCatalog         *ObjectCatalogFacts
 	ObjectRead            *ObjectReadFacts
 	StateGenerationSkew   *StateGenerationSkewFacts
@@ -2188,7 +2216,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageQueryCooldown}, {ComponentScheduler, StageRunnerReturned}, {ComponentScheduler, StageDispatcherSnapshot}, {ComponentScheduler, StageQueryPermitWait},
 	{ComponentScheduler, StageExpiredRangeReturned},
 	{ComponentScheduler, StageRunnerCompleted}, {ComponentScheduler, StageSlotSourceCompleted},
-	{ComponentScheduler, StageScheduleCursorAdvanced},
+	{ComponentScheduler, StageScheduleCursorAdvanced}, {ComponentScheduler, StageReplayExpired},
 	{ComponentAccess, StageQueryCompleted},
 	{ComponentAccess, StageQueryBudgetResolved},
 	{ComponentAccess, StageSlotReadinessArrival},

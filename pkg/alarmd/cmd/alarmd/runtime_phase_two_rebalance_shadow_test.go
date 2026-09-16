@@ -117,7 +117,7 @@ func TestProductionPhaseTwoOwnershipReportsARebalancePlanWithoutPublishingIt(t *
 			ControlLeaderTTL: time.Minute, Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 				*observations = append(*observations, observation)
 			}), Reconcile: reconciler, Flights: flights, RecoveryLimits: limits, PostRecoveryTerminalDelay: time.Minute,
-			QueryDeadlineReserve: 5 * time.Second, SnapshotRetention: time.Hour, PublicationDelayAllowance: time.Minute,
+			QueryDeadlineReserve: 5 * time.Second, SnapshotRetention: time.Hour, PublicationDelayAllowance: time.Minute, SettlingWait: 30 * time.Second,
 		})
 		if err != nil {
 			t.Fatal(err)

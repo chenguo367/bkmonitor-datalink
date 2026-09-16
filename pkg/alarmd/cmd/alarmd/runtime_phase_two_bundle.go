@@ -666,6 +666,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		Observer: observer, Reconcile: assignmentReconciler, Flights: flights, RecoveryLimits: recoveryLimits,
 		PostRecoveryTerminalDelay: retention.TerminalDelay,
 		QueryDeadlineReserve:      retention.QueryReserve,
+		SettlingWait:              cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
 		SnapshotRetention:         phaseTwoCatalogRetention(cfg),
 		PublicationDelayAllowance: phaseTwoPublicationDelayAllowance(cfg),
 	})

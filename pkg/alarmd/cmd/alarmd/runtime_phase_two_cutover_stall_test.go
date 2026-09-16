@@ -454,6 +454,7 @@ func (probe cutoverStallProbe) run(
 	source, err := scheduler.NewProductionSlotSource(
 		queryGroup, dependencies.WorkerID, session, probe.catalog, probe.progress, now,
 		scheduler.WithRecoveryLimits(dependencies.RecoveryLimits),
+		scheduler.WithSettlingWait(dependencies.SettlingWait),
 		scheduler.WithPostRecoveryTerminalDelay(dependencies.PostRecoveryTerminalDelay),
 		scheduler.WithQueryDeadlineReserve(dependencies.QueryDeadlineReserve),
 		scheduler.WithSnapshotRetention(dependencies.SnapshotRetention, dependencies.PublicationDelayAllowance),

@@ -57,6 +57,7 @@ type phaseTwoMetrics struct {
 	schedulePruneSkipped            *prometheus.CounterVec
 	scheduleCutoverDuration         *prometheus.HistogramVec
 	scheduleCutovers                *prometheus.CounterVec
+	replayExpiries                  *prometheus.CounterVec
 	scheduleCutoverQueryGroups      *prometheus.CounterVec
 	scheduleCutoverTimelinesRead    prometheus.Gauge
 	queryFailures                   *prometheus.CounterVec
@@ -400,6 +401,24 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, decision := range observability.ScheduleCutoverDecisions {
 		metrics.scheduleCutoverQueryGroups.WithLabelValues(decision)
 	}
+	metrics.replayExpiries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "replay_expired_total",
+		Help: "Slots the scheduler gave up replaying, by reason. REPLAY_AGE_EXCEEDED and " +
+			"REPLAY_DISTANCE_EXCEEDED are ordinary: the Slot is older than the replay window, or too " +
+			"many grid points have passed since it. REPLAY_RANGE_EXPIRED is a persisted range of such " +
+			"Slots being finalized after a restart or handoff. " +
+			"REPLAY_WAIT_EXCEEDS_DISTANCE is a defect report and must stay at zero: the Slot was " +
+			"still inside its replay window and the readiness rule would have held the read until " +
+			"after that window closed, so the replay would have been dispatched, made to wait, and " +
+			"then abandoned for being late. It means the settling wait and the replay window have " +
+			"been derived from settings that disagree, and every Slot of that period which misses " +
+			"its live deadline will be skipped for as long as they do. Read with " +
+			"short_period_completion_total{completion_kind=\"GAP_SKIPPED\"}: this counter says which " +
+			"of the skipped Slots were skipped by a rule rather than by falling behind.",
+	}, []string{"reason"})
+	for _, reason := range observability.ReplayExpiryReasons {
+		metrics.replayExpiries.WithLabelValues(reason)
+	}
 	metrics.scheduleCutoverTimelinesRead = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_timelines_read", Help: "Schedule timelines the last publication cutover read to decide. Equal to the population on the first cutover of a Control Leader process, the changed set afterwards."})
 	// The failure code itself is an open vocabulary and stays in the log and
 	// the fleet view; the counter carries the bounded stage and category so a
@@ -652,7 +671,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
-		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead,
+		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
@@ -757,6 +776,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.QueryFailure; facts != nil && observation.Result == observability.ResultFailed {
 		m.queryFailures.WithLabelValues(facts.Stage, facts.Category).Inc()
+	}
+	if facts := observation.ReplayExpiry; facts != nil {
+		m.replayExpiries.WithLabelValues(facts.Reason).Inc()
 	}
 	if facts := observation.ScheduleCutover; facts != nil {
 		m.scheduleCutoverDuration.WithLabelValues(facts.Result).Observe(facts.Duration.Seconds())
