@@ -234,6 +234,11 @@ type FailureRef struct {
 	// round's evidence uses this to tell the two apart. Absent on rows from
 	// a publisher that predates it.
 	At *time.Time `json:"at,omitempty"`
+	// Slot is the Slot the failure was observed on, and the first thing the
+	// reading compares with the row's RoundSlot: a failure on the latest
+	// round's Slot is that round's, whatever the clocks say. Zero when the
+	// observation carried no Slot.
+	Slot int64 `json:"slot,omitempty"`
 }
 
 // LastError is the last error a round of this object returned.
@@ -560,10 +565,18 @@ type Anomaly struct {
 	// ReasonLastAt is the latest round that said the current reason: the
 	// other end of ReasonSince's clock, and the end a group's "still
 	// happening" is read from. Left off the wire while zero.
-	ReasonLastAt time.Time   `json:"reason_last_at"`
-	Consecutive  int         `json:"consecutive,omitempty"`
-	Replica      string      `json:"replica"`
-	Failure      *FailureRef `json:"failure,omitempty"`
+	ReasonLastAt time.Time `json:"reason_last_at"`
+	// RoundSlot is the Slot of the row's latest round -- the one that most
+	// recently ended, however it ended. It is what says whether a failure or
+	// an error the row keeps belongs to this round: the two are observed on
+	// their way to the round's end, so they are stamped a moment before it,
+	// and telling them apart by clock dropped a real failure filed one
+	// millisecond before its own Slot completed. Zero on rows from a
+	// publisher that predates it, or for a round with no Slot in its trace.
+	RoundSlot   int64       `json:"round_slot,omitempty"`
+	Consecutive int         `json:"consecutive,omitempty"`
+	Replica     string      `json:"replica"`
+	Failure     *FailureRef `json:"failure,omitempty"`
 	// LastError is the last round that returned an error, verbatim: what it
 	// said, which Slot it was on, and how many rounds in a row that same Slot
 	// has failed. The classification above answers "what kind"; this answers

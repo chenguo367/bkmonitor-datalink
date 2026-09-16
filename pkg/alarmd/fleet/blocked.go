@@ -359,6 +359,13 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 	// ended some other way they describe an earlier round -- and read as
 	// current they lent a new reason an old Redis error as its dependency
 	// and called a round that had just ended silence.
+	//
+	// Whether they are this round's is decided by Slot first and by clock
+	// only when a Slot is missing. A failure is observed on its way to the
+	// round's end, so its stamp is a moment before the round's: judged by
+	// clock alone, a real failure filed one millisecond before its own Slot
+	// completed was dropped, and the row said the round was stuck at commit
+	// with nothing to show for it.
 	latest := time.Time{}
 	for _, candidate := range []time.Time{anomaly.ReasonLastAt, anomaly.ReasonSince} {
 		if candidate.After(latest) {
@@ -371,8 +378,14 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 	if anomaly.Skip != nil && anomaly.Skip.At.After(latest) {
 		latest = anomaly.Skip.At
 	}
-	errorCurrent := anomaly.LastError != nil && !anomaly.LastError.At.Before(latest)
-	failureCurrent := anomaly.Failure != nil && anomaly.Failure.At != nil && !anomaly.Failure.At.Before(latest)
+	thisRound := func(slot int64, at *time.Time) bool {
+		if anomaly.RoundSlot != 0 && slot == anomaly.RoundSlot {
+			return true
+		}
+		return at != nil && !at.Before(latest)
+	}
+	errorCurrent := anomaly.LastError != nil && thisRound(anomaly.LastError.EvaluationTime, &anomaly.LastError.At)
+	failureCurrent := anomaly.Failure != nil && thisRound(anomaly.Failure.Slot, anomaly.Failure.At)
 	// A code that does not name the dependency defers to the error's text,
 	// which the dependency's client wrote -- this round's text only.
 	if blocked.Dependency == DependencyUnlocated {
@@ -404,7 +417,7 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 		at := anomaly.LastHealthyAt
 		blocked.LastSuccessAt = &at
 	}
-	blocked.Effect = effectOf(anomaly, schedule, errorCurrent)
+	blocked.Effect = effectOf(anomaly, schedule, failedExecution(anomaly.ReasonCode))
 	blocked.Retrying = blocked.Effect == EffectRetrying
 	// An overdue wake with no failure behind it is not stuck at any step:
 	// it is late, and the reading says only that.
@@ -420,13 +433,15 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 // finish will be tried again; a round that ended without a usable result
 // is unconfirmed; a late round with nothing else wrong is only late.
 //
-// errorCurrent says the failing round is the row's latest: an error kept
-// from an earlier round does not make a round that has since ended a retry.
-func effectOf(anomaly Anomaly, schedule Schedule, errorCurrent bool) Effect {
+// roundFailed says the row's latest round ended by failing to finish, which
+// is the round being tried again: read from how that round ended, not from
+// whether an error is kept, because an error is kept until a healthy
+// completion and a round that ended degraded after its own error is over.
+func effectOf(anomaly Anomaly, schedule Schedule, roundFailed bool) Effect {
 	switch {
 	case anomaly.Skip != nil, anomaly.Kind == KindSkippedSpan:
 		return EffectSkipped
-	case anomaly.QueryCooldown != nil, errorCurrent, anomaly.Kind == KindBlockedRun, anomaly.Stalled:
+	case anomaly.QueryCooldown != nil, roundFailed, anomaly.Kind == KindBlockedRun, anomaly.Stalled:
 		return EffectRetrying
 	case anomaly.Kind == KindDegradedRun, anomaly.Coverage != nil, restoredWithoutEvidence(anomaly):
 		return EffectUnconfirmed

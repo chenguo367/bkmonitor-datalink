@@ -29,11 +29,7 @@ func TestOwnershipRejectionStopsTheStallClockAndKeepsTheRow(t *testing.T) {
 	at := &clock{at: now}
 	tracker := newTracker(t, at)
 	fail := func() {
-		tracker.Observe(context.Background(), observability.Observation{
-			ExecuteOutcome: "error", Err: errors.New("alarmd state: gap guard conflict: expected 41 got 43"),
-			QueryFailure: &observability.QueryFailureFacts{Stage: "execute", Category: "completion_contract", Code: "GAP_GUARD_CONFLICT"},
-			Trace:        observability.TraceFields{QueryGroupKey: "qg-moved", EvaluationTime: 1_700_000_000},
-		})
+		tracker.Observe(context.Background(), gapGuardRefusal("qg-moved", 1_700_000_000))
 	}
 	for round := 0; round < DefaultDegradedRounds; round++ {
 		fail()
@@ -98,5 +94,112 @@ func TestADefectCodeOutranksTheStall(t *testing.T) {
 	Attribute(fresh, now)
 	if fresh[0].Finding.Check != CheckDefect || fresh[0].Finding.Group != rows[0].Finding.Group {
 		t.Fatalf("the same defect on its new owner = %+v, want the same line and fold as on the old", fresh[0].Finding)
+	}
+}
+
+// gapGuardRefusal is the observation the scheduler actually emits when a gap
+// guard refuses a query-free Slot at finalize: a terminal slot_completed
+// with the refusal's reason on the observation and no query failure before
+// it, because the Slot never went through the query stage. The earlier
+// version of these tests put the code on a QueryFailure, which the emitter
+// never does for this path, and so exercised a row the deployment never
+// produces.
+func gapGuardRefusal(queryGroup string, slot int64) observability.Observation {
+	return observability.Observation{
+		ExecuteOutcome: "error", ReasonCode: "GAP_GUARD_CONFLICT",
+		Err:   errors.New("alarmd worker: finalize query-free Slot: alarmd worker: activated Plan gap marker conflicts with the Slot"),
+		Trace: observability.TraceFields{QueryGroupKey: queryGroup, EvaluationTime: slot},
+	}
+}
+
+// The reason the terminal observation names is the round's code when the
+// query stage named none. Read on: a live object refused by its gap guard
+// every thirty seconds carried no code at all -- the code was on the
+// slot_completed observation and the tracker read only query failures -- so
+// it sat under the unclassified defect, and ten minutes after its replica
+// started, the stall budget, it moved to "rounds stalled" with "restart the
+// replica" as the next step. The first screen read DEFECT 3→2 and
+// ROUNDS_STALLED 0→1 in the same minute, once per rollout.
+func TestTheTerminalsOwnReasonIsTheRoundsCode(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	slot := int64(1_700_000_000)
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), gapGuardRefusal("qg-refused", slot))
+		at.at = at.at.Add(30 * time.Second)
+	}
+	rows := tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.Code != "GAP_GUARD_CONFLICT" || rows[0].Failure.Slot != slot {
+		t.Fatalf("rows = %+v, want the terminal's reason as the round's failure code, on the round's Slot", rows)
+	}
+	if rows[0].Internal == nil || rows[0].Internal.Code != "GAP_GUARD_CONFLICT" {
+		t.Fatalf("internal = %+v, want the refusal filed as this deployment's own", rows[0].Internal)
+	}
+	// Past the stall budget the object is stalled -- and still the defect.
+	for at.at.Sub(now) <= 10*time.Minute {
+		tracker.Observe(context.Background(), gapGuardRefusal("qg-refused", slot))
+		at.at = at.at.Add(30 * time.Second)
+	}
+	rows = tracker.Anomalies()
+	MarkStalled(rows, at.at, 10*time.Minute)
+	Attribute(rows, at.at)
+	if len(rows) != 1 || !rows[0].Stalled {
+		t.Fatalf("rows = %+v, want the object marked stalled after the budget", rows)
+	}
+	if rows[0].Finding.Check != CheckDefect || rows[0].Finding.Group != "EVALUATE/NONE/CONTRACT" {
+		t.Fatalf("finding = %+v, want DEFECT on the refusal's code, not ROUNDS_STALLED", rows[0].Finding)
+	}
+	if rows[0].Blocked == nil || rows[0].Blocked.Code != "GAP_GUARD_CONFLICT" || rows[0].Blocked.Stage != StageEvaluate || rows[0].Blocked.Class != ClassContract || rows[0].Blocked.Effect != EffectRetrying {
+		t.Fatalf("blocked = %+v, want the refusal read as EVALUATE/CONTRACT and retrying", rows[0].Blocked)
+	}
+}
+
+// The scheduler's class words are not codes. internal_unknown says the
+// scheduler could not name the failure; reading it as a code would file every
+// unnamed failure under one invented name and hide that nobody named it.
+func TestTheTerminalsClassWordIsNotACode(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), observability.Observation{
+			ExecuteOutcome: "error", ReasonCode: "internal_unknown",
+			Err:   errors.New("alarmd worker: execute frozen Slot: alarmd worker: apply state: state apply did not complete: STATE_VERSION_CONFLICT"),
+			Trace: observability.TraceFields{QueryGroupKey: "qg-unnamed", EvaluationTime: 1_700_000_000},
+		})
+		at.at = at.at.Add(time.Minute)
+	}
+	rows := tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Failure != nil {
+		t.Fatalf("rows = %+v, want no failure code for a terminal that named only its class", rows)
+	}
+}
+
+// A query stage that named this Slot's failure saw it closer to where it
+// happened, and keeps the name; the terminal's reason fills in only where
+// the query stage said nothing. A failure named on an earlier Slot does not
+// stand in for this one.
+func TestTheQueryStagesNameForThisSlotOutranksTheTerminals(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	slot := int64(1_700_000_000)
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), observability.Observation{
+			QueryFailure: &observability.QueryFailureFacts{Stage: "execute", Category: "completion_contract", Code: "OUTCOME_DUPLICATE"},
+			Trace:        observability.TraceFields{QueryGroupKey: "qg-named", EvaluationTime: slot},
+		})
+		at.at = at.at.Add(time.Millisecond)
+		tracker.Observe(context.Background(), gapGuardRefusal("qg-named", slot))
+		at.at = at.at.Add(time.Minute)
+	}
+	rows := tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.Code != "OUTCOME_DUPLICATE" {
+		t.Fatalf("rows = %+v, want the query stage's name for this Slot kept", rows)
+	}
+	// The next Slot is refused with nothing from the query stage: the
+	// terminal's name is that round's.
+	tracker.Observe(context.Background(), gapGuardRefusal("qg-named", slot+60))
+	rows = tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.Code != "GAP_GUARD_CONFLICT" || rows[0].Failure.Slot != slot+60 {
+		t.Fatalf("rows = %+v, want the terminal's name on the Slot the query stage said nothing about", rows)
 	}
 }

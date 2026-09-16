@@ -326,28 +326,133 @@ func containsDependency(dependency Dependency) bool {
 	return false
 }
 
-// The tracker stamps the query failure with when it was seen, so the reading
-// can tell this round's failure from one kept since an earlier round -- and
-// use this round's detail for the dependency.
-func TestTrackerStampsTheQueryFailureWithItsTime(t *testing.T) {
+// The tracker stamps the query failure with when it was seen and which Slot
+// it was on, so the reading can tell this round's failure from one kept
+// since an earlier round -- and use this round's detail for the dependency.
+//
+// The clock runs: the failure is observed on its way to the round's end, so
+// it is stamped a moment before the completion that ends the same Slot.
+// Frozen, the clock hid that order, and a reading that compared the two
+// stamps dropped every real failure filed one millisecond before its own
+// round completed -- the row then said the round was stuck with nothing to
+// show for it.
+func TestTrackerStampsTheQueryFailureWithItsTimeAndSlot(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	var failedAt time.Time
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		slot := int64(100 + 60*round)
+		failedAt = at.at
+		tracker.Observe(context.Background(), observability.Observation{
+			QueryFailure: &observability.QueryFailureFacts{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout"},
+			Trace:        observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
+		})
+		at.at = at.at.Add(time.Millisecond)
+		tracker.Observe(context.Background(), observability.Observation{
+			ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionCause: "LEVEL_OUTCOME_UNKNOWN", ProgressCompletionReason: "STATE_WRITE_RETRYABLE",
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
+		})
+		at.at = at.at.Add(time.Minute)
+	}
+	rows := tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.At == nil || !rows[0].Failure.At.Equal(failedAt) || rows[0].Failure.Slot != 100+60*(DefaultDegradedRounds-1) {
+		t.Fatalf("rows = %+v, want the failure reference stamped with the time it was seen and the Slot it was on", rows)
+	}
+	if rows[0].RoundSlot != rows[0].Failure.Slot {
+		t.Fatalf("round slot = %d, failure slot = %d, want the row's latest round to be the Slot the failure was on", rows[0].RoundSlot, rows[0].Failure.Slot)
+	}
+	Attribute(rows, at.at)
+	blocked := rows[0].Blocked
+	if blocked == nil || blocked.Dependency != DependencyRedis || blocked.DependencyEvidence != dependencyByText || blocked.Text != "dial tcp 10.0.0.1:6379: i/o timeout" {
+		t.Fatalf("blocked = %+v, want Redis named from this round's failure detail, and the detail as the round's words", blocked)
+	}
+	// The round ended -- degraded, but ended -- so it is not being retried,
+	// whatever the failure on its way there said.
+	if blocked.Effect != EffectUnconfirmed {
+		t.Fatalf("effect = %s, want UNCONFIRMED for a round that ended degraded after its own failure", blocked.Effect)
+	}
+}
+
+// A Slot that failed and was then retried to a degraded completion is one
+// round with an error in its history and an end: the error is that round's
+// words, and the round is over, not being retried. The effect is read from
+// how the round ended, not from the error being this round's -- the two
+// used to be one flag.
+func TestARoundThatEndedAfterItsErrorIsNotBeingRetried(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	slot := int64(1_700_000_000)
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), observability.Observation{
+			ExecuteOutcome: "error", Err: errors.New("alarmd worker: commit: redis: connection pool timeout"),
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
+		})
+		at.at = at.at.Add(30 * time.Second)
+	}
+	rows := tracker.Anomalies()
+	Attribute(rows, at.at)
+	if len(rows) != 1 || rows[0].Blocked == nil || rows[0].Blocked.Effect != EffectRetrying || rows[0].Blocked.Dependency != DependencyRedis {
+		t.Fatalf("rows = %+v, want the failing Slot read as retrying against Redis", rows)
+	}
+	// The retry of the same Slot ends it, degraded.
+	tracker.Observe(context.Background(), observability.Observation{
+		ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionReason: "STATE_WRITE_RETRYABLE",
+		Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
+	})
+	rows = tracker.Anomalies()
+	Attribute(rows, at.at)
+	blocked := rows[0].Blocked
+	if blocked == nil || blocked.Effect != EffectUnconfirmed || blocked.Retrying {
+		t.Fatalf("blocked = %+v, want the ended round not read as retrying", blocked)
+	}
+	if blocked.Text != "alarmd worker: commit: redis: connection pool timeout" || blocked.Dependency != DependencyRedis {
+		t.Fatalf("blocked = %+v, want the error kept as this round's words, it was this Slot's", blocked)
+	}
+}
+
+// A failure on the previous Slot is the previous round's: the next round
+// completing on a new Slot with a different reason does not borrow it, which
+// is the guarantee the Slot comparison has to keep from the clock comparison
+// it replaces.
+func TestAFailureOnThePreviousSlotIsNotLentToTheNextRound(t *testing.T) {
 	at := &clock{at: now}
 	tracker := newTracker(t, at)
 	for round := 0; round < DefaultDegradedRounds; round++ {
+		slot := int64(100 + 60*round)
 		tracker.Observe(context.Background(), observability.Observation{
-			QueryFailure: &observability.QueryFailureFacts{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout"},
-			Trace:        observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: 100},
+			ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionReason: "HISTORY_GAPPED",
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
 		})
-		tracker.Observe(context.Background(), observability.Observation{
-			ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionCause: "LEVEL_OUTCOME_UNKNOWN", ProgressCompletionReason: "STATE_WRITE_RETRYABLE",
-			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: 100},
-		})
+		at.at = at.at.Add(time.Minute)
 	}
+	// This round: a Redis failure on the way to the completion.
+	tracker.Observe(context.Background(), observability.Observation{
+		QueryFailure: &observability.QueryFailureFacts{Stage: "execute", Category: "other", Code: "STATE_WRITE_RETRYABLE", Detail: "dial tcp 10.0.0.1:6379: i/o timeout"},
+		Trace:        observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: 1000},
+	})
+	at.at = at.at.Add(time.Millisecond)
+	tracker.Observe(context.Background(), observability.Observation{
+		ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionReason: "STATE_WRITE_RETRYABLE",
+		Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: 1000},
+	})
 	rows := tracker.Anomalies()
-	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.At == nil || !rows[0].Failure.At.Equal(now) {
-		t.Fatalf("rows = %+v, want the failure reference stamped with the time it was seen", rows)
+	Attribute(rows, at.at)
+	if len(rows) != 1 || rows[0].Blocked == nil || rows[0].Blocked.Dependency != DependencyRedis {
+		t.Fatalf("rows = %+v, want this round's Redis failure read as this round's", rows)
 	}
-	Attribute(rows, now)
-	if rows[0].Blocked == nil || rows[0].Blocked.Dependency != DependencyRedis || rows[0].Blocked.DependencyEvidence != dependencyByText {
-		t.Fatalf("blocked = %+v, want Redis named from this round's failure detail", rows[0].Blocked)
+	// The next round, on the next Slot, completes with a window reason and no
+	// failure of its own: the Redis detail stays with Slot 1000.
+	at.at = at.at.Add(time.Minute)
+	tracker.Observe(context.Background(), observability.Observation{
+		ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionReason: "HISTORY_GAPPED",
+		Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: 1060},
+	})
+	rows = tracker.Anomalies()
+	Attribute(rows, at.at)
+	if len(rows) != 1 || rows[0].RoundSlot != 1060 || rows[0].Failure == nil || rows[0].Failure.Slot != 1000 {
+		t.Fatalf("rows = %+v, want the row on Slot 1060 still carrying the Slot 1000 failure reference", rows)
+	}
+	if rows[0].Blocked == nil || rows[0].Blocked.Dependency == DependencyRedis || rows[0].Blocked.Text != "" {
+		t.Fatalf("blocked = %+v, want the previous Slot's Redis failure not lent to this round", rows[0].Blocked)
 	}
 }

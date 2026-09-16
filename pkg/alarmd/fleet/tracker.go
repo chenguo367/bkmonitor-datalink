@@ -270,6 +270,10 @@ type queryGroupState struct {
 	// Slot's -- lastFailure itself is never cleared and would otherwise
 	// hand a skip a failure from another round.
 	lastFailureSlot int64
+	// lastRoundSlot is the Slot of the latest round that ended, however it
+	// ended; published so the reading can tell this round's failure and
+	// error from an earlier round's by Slot rather than by clock.
+	lastRoundSlot int64
 	// internal is the last failure of this deployment's own making seen in
 	// the current run -- a contract or evaluation error -- kept until a
 	// healthy completion and published beside the row's finding. The
@@ -618,9 +622,38 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// make a retried transient look like a determined verdict.
 		seen := at
 		state.lastFailure = &FailureRef{Stage: failure.Stage, Category: failure.Category,
-			Code: failure.Code, Detail: failure.Detail, At: &seen}
+			Code: failure.Code, Detail: failure.Detail, At: &seen, Slot: trace.EvaluationTime}
 		state.lastFailureSlot = trace.EvaluationTime
 		if internalFailure(failure.Category) {
+			copy := *state.lastFailure
+			state.internal = &copy
+		}
+	}
+	// The observation that ends a failed round can name the failure itself,
+	// and for one class of failure it is the only observation that does: a
+	// query-free Slot never passes through the query stage, so a gap guard
+	// refusing it at finalize reaches here as a terminal error with its
+	// reason on the observation and no query failure before it. The tracker
+	// read only the query stage's failures, so the row carried no code at
+	// all: it fell through to the unclassified defect, and when the stall
+	// budget ran out ten minutes later it moved to "rounds stalled", with
+	// "restart the replica" as the next step for a refusal that repeats
+	// until fixed. The code the terminal names is the round's code when
+	// this Slot has no failure of its own yet; a query stage that already
+	// named this Slot's failure saw it closer to where it happened and
+	// keeps the name. Only a code in the contract grammar is a code -- the
+	// scheduler's own class words (internal_unknown, contract_deterministic)
+	// say which kind of failure it could not name, not what failed. The
+	// category is the completion contract's because that is the one place
+	// the scheduler names a terminal reason from: its own refusal of what
+	// the round produced, read off the returned error.
+	if failedExecution(executeOutcome) {
+		if code := string(observation.ReasonCode); observability.ValidQueryFailureCode(code) &&
+			(state.lastFailure == nil || state.lastFailureSlot != trace.EvaluationTime) {
+			seen := at
+			state.lastFailure = &FailureRef{Stage: observability.QueryFailureStageOther,
+				Category: observability.QueryFailureCategoryCompletionContract, Code: code, At: &seen, Slot: trace.EvaluationTime}
+			state.lastFailureSlot = trace.EvaluationTime
 			copy := *state.lastFailure
 			state.internal = &copy
 		}
@@ -657,6 +690,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	case completion != "":
 		state.determined = true
 		state.lastCompleted = completion
+		state.lastRoundSlot = trace.EvaluationTime
 		// A round completed in this process speaks for the object; the
 		// summary it was restored from is history now.
 		state.restoredRound = nil
@@ -782,6 +816,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		return
 	case blockedOutcome(runOutcome):
 		state.determined = true
+		state.lastRoundSlot = trace.EvaluationTime
 		tracker.noteReason(state, "blocked/"+runOutcome, at)
 		state.failingSince = time.Time{}
 		state.blockedRuns++
@@ -792,6 +827,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.sawSomethingWrong = true
 	case failedExecution(executeOutcome):
 		state.determined = true
+		state.lastRoundSlot = trace.EvaluationTime
 		failureCode := ""
 		if state.lastFailure != nil {
 			failureCode = state.lastFailure.Code
@@ -1016,6 +1052,7 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 			FailingSince:  state.failingSince,
 			ReasonSince:   state.reasonSince,
 			ReasonLastAt:  state.reasonLastAt,
+			RoundSlot:     state.lastRoundSlot,
 			Consecutive:   state.reasonRuns,
 			Replica:       tracker.replica,
 			Failure:       state.lastFailure,
