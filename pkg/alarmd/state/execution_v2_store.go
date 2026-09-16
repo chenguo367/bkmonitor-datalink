@@ -396,6 +396,7 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 		}
 		raw := values[0]
 		var previous gapEnvelope
+		var sameSlotScopes []execution.GapScopeState
 		if raw != nil {
 			if len(raw) > store.options.MaxValueBytes {
 				item.Status, item.ReasonCode = execution.GapGuardRejected, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
@@ -418,11 +419,18 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 			if comparison == execution.ApplyVersionEqual {
 				if previous.MutationDigest == mutation.MutationDigest {
 					item.Status = execution.GapGuardAlreadyApplied
-				} else {
-					item.Status = execution.GapGuardConflict
+					result.Items[index] = item
+					continue
 				}
-				result.Items[index] = item
-				continue
+				var extended bool
+				if previous.ScheduleRevision == mutation.ScheduleRevision {
+					sameSlotScopes, extended = execution.ExtendSameSlotGap(previous.Scopes, mutation.Scopes)
+				}
+				if !extended {
+					item.Status = execution.GapGuardConflict
+					result.Items[index] = item
+					continue
+				}
 			}
 		}
 		if previous.MarkerRevision != mutation.ExpectedMarkerRevision {
@@ -430,7 +438,10 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 			result.Items[index] = item
 			continue
 		}
-		nextScopes := applyGapScopes(previous.Scopes, mutation.Scopes, previous.ScheduleRevision, mutation.ScheduleRevision)
+		nextScopes := sameSlotScopes
+		if nextScopes == nil {
+			nextScopes = applyGapScopes(previous.Scopes, mutation.Scopes, previous.ScheduleRevision, mutation.ScheduleRevision)
+		}
 		if err := validatePersistedGapScopes(nextScopes); err != nil {
 			item.Status, item.ReasonCode = execution.GapGuardRejected, execution.ReasonCode(contract.ReasonStateCorrupt)
 			result.Items[index] = item

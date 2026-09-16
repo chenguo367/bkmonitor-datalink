@@ -25,6 +25,8 @@ var ErrGapGuardConflict = errors.New("alarmd worker: activated Plan gap marker c
 // GapGuardProtection is one side of the comparison a gap guard refusal made:
 // what is persisted for this Plan's ApplyVersion, or what this Slot proposes.
 type GapGuardProtection struct {
+	ScopeDetails      []execution.GapScopeState
+	MutationScopes    []execution.GapScopeMutation
 	Kind              string
 	ReasonCode        string
 	Scopes            int
@@ -34,9 +36,9 @@ type GapGuardProtection struct {
 }
 
 func (protection GapGuardProtection) String() string {
-	return fmt.Sprintf("kind=%s reason=%s scopes=%d required_full_slots=%d observed_full_slots=%d marker_revision=%d",
+	return fmt.Sprintf("kind=%s reason=%s scopes=%d required_full_slots=%d observed_full_slots=%d marker_revision=%d scope_details=%+v mutations=%+v",
 		emptyAsNone(protection.Kind), emptyAsNone(protection.ReasonCode), protection.Scopes,
-		protection.RequiredFullSlots, protection.ObservedFullSlots, protection.MarkerRevision)
+		protection.RequiredFullSlots, protection.ObservedFullSlots, protection.MarkerRevision, protection.ScopeDetails, protection.MutationScopes)
 }
 
 // GapGuardConflictError is a Slot refused because the gap marker already
@@ -97,9 +99,11 @@ func newGapGuardConflict(
 		Plan: item.Identity.Plan, StateGeneration: item.Identity.StateGeneration, ApplyVersion: item.ApplyVersion,
 		Persisted: GapGuardProtection{
 			ReasonCode: string(marker.ReasonCode), Scopes: len(marker.Scopes), MarkerRevision: marker.MarkerRevision,
+			ScopeDetails: append([]execution.GapScopeState(nil), marker.Scopes...),
 		},
 		Proposed: GapGuardProtection{
 			ReasonCode: string(reason), Scopes: len(mutation.Scopes),
+			MutationScopes:    append([]execution.GapScopeMutation(nil), mutation.Scopes...),
 			RequiredFullSlots: plan.RequiredFullSlots, MarkerRevision: mutation.ExpectedMarkerRevision,
 		},
 	}

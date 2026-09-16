@@ -1230,6 +1230,8 @@ type TraceFields struct {
 }
 
 type Observation struct {
+	GapExtensions          []*GapExtensionFacts
+	GapConflict            *GapExtensionFacts
 	QueryCooldown          *QueryCooldownFacts
 	RunOutcome             string
 	Attempted              bool
