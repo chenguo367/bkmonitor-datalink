@@ -48,10 +48,6 @@ const (
 	codeStreamedNamedInputFoldInvalid     = "STREAMED_NAMED_INPUT_FOLD_INVALID"
 	codeEvaluationFailed                  = "EVALUATION_FAILED"
 	codeEvaluationResultInvalid           = "EVALUATION_RESULT_INVALID"
-	// codeGapScopeReasonConflict names a Plan whose incomplete named inputs of
-	// one gap scope carry different completion reasons; the error's detail
-	// says which two, so the shape can be read before either side is changed.
-	codeGapScopeReasonConflict = "GAP_SCOPE_REASON_CONFLICT"
 )
 
 // queryContractError is a typed worker failure. It keeps the historical error
