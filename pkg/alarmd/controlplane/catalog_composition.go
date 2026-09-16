@@ -121,6 +121,15 @@ type CatalogComposition struct {
 	// say so: were it not, the partition would lose a member silently and the
 	// three sources would simply read low.
 	NoDataPlansUnclassified int
+	// NoDataNotConfigured counts the Plans that never asked for no-data
+	// detection. It is not published beside the others -- the family answers
+	// "what is no-data detection doing for the items that asked for it" -- and
+	// it is computed all the same, because it is the third member of the
+	// partition and a partition whose members are not all computed cannot be
+	// checked. The test adds the three against the Plan count; without this
+	// one, a suspended Plan filed as "never asked" would keep the published
+	// family adding up while the objects disappeared.
+	NoDataNotConfigured int
 	// InertPlans counts the Plans whose schedule cannot hold the wait their
 	// data needs to land. Such a Plan is ACCEPTED, is scheduled, and executes
 	// -- and every round every one of its consumers is bound unavailable,
@@ -205,15 +214,36 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 			if !plan.ScheduleSpec.AffordsSettlingWait() {
 				composition.InertPlans++
 			}
-			if plan.Plan.NoData == nil {
-				continue
+			// Three states, read from two fields and never inferred from one.
+			// A suspended Plan carries no no-data section either, so deciding
+			// "not configured" by the section being absent would file every
+			// suspended Plan as one that never asked -- the count would still
+			// look like a partition and would have lost exactly the objects
+			// this change exists to make visible.
+			switch {
+			case plan.NoDataSuspended != "":
+				source, known := suspendedNoDataSource(plan.NoDataSuspended)
+				if !known {
+					// A reason nobody mapped. Counted where an unclassifiable
+					// Plan is already counted rather than given a label of its
+					// own: a label minted from whatever string arrived would
+					// make the family's cardinality follow the reasons anyone
+					// adds, and a reason that reaches here is a gap between
+					// two vocabularies rather than a state of the fleet.
+					composition.NoDataPlansUnclassified++
+					continue
+				}
+				composition.NoDataPlans[source]++
+			case plan.Plan.NoData == nil:
+				composition.NoDataNotConfigured++
+			default:
+				class, err := nodata.ClassifyRoster(plan.Plan.TargetScope, plan.Plan.NoData.AggDimension)
+				if err != nil {
+					composition.NoDataPlansUnclassified++
+					continue
+				}
+				composition.NoDataPlans[class.Source]++
 			}
-			class, err := nodata.ClassifyRoster(plan.Plan.TargetScope, plan.Plan.NoData.AggDimension)
-			if err != nil {
-				composition.NoDataPlansUnclassified++
-				continue
-			}
-			composition.NoDataPlans[class.Source]++
 		}
 	}
 	for _, disposition := range catalog.Dispositions {
@@ -246,6 +276,38 @@ var NoDataRosterSources = []nodata.RosterSource{
 	nodata.RosterTargetStatic,
 	nodata.RosterHistory,
 	nodata.RosterWhole,
+	SuspendedNoDataConfigInvalid,
+	SuspendedNoDataRosterUnsupported,
+}
+
+// The two states a Plan's no-data detection is in when it is configured and
+// not running. They sit in the same family as the roster sources because the
+// question the family answers is "what is this Plan's no-data detection
+// doing", and "nothing, because this build cannot compile it" is one of the
+// answers -- kept out, it would be an item that asked for detection and
+// appears nowhere.
+const (
+	SuspendedNoDataConfigInvalid     = nodata.RosterSource("SUSPENDED_CONFIG_INVALID")
+	SuspendedNoDataRosterUnsupported = nodata.RosterSource("SUSPENDED_ROSTER_UNSUPPORTED")
+)
+
+// suspendedNoDataSource maps the reason a Plan's no-data half was suspended to
+// the bucket it is counted in.
+//
+// Two vocabularies, one mapping, in one place. The reason is what the line
+// names to an operator -- the same word the withheld line used to carry, so a
+// reader who knew it still knows it -- and the bucket is what the family is
+// labelled by. Casting one to the other would work today and would make every
+// future reason a new label nobody chose, on a family whose labels are meant
+// to be a closed set.
+func suspendedNoDataSource(reason string) (nodata.RosterSource, bool) {
+	switch reason {
+	case contract.ReasonNoDataConfigInvalid:
+		return SuspendedNoDataConfigInvalid, true
+	case contract.ReasonNoDataRosterUnsupported:
+		return SuspendedNoDataRosterUnsupported, true
+	}
+	return "", false
 }
 
 // AlwaysReportedWithheld are the pairs the composition publishes even when
