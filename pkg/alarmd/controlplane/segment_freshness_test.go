@@ -36,6 +36,10 @@ type noDataHopFixture struct {
 	client     redis.Cmdable
 	prefix     string
 	reconciler *controlplane.ScheduleActivationReconciler
+	// now is the reconciler's clock, movable so a test can cut a second
+	// Segment at a later boundary. Held by pointer because the reconciler
+	// captured the closure at construction.
+	now        *time.Time
 	repository *controlplane.RedisCatalogRepository
 	runtime    *controlplane.RedisCatalogRuntime
 	group      execution.QueryGroupIdentity
@@ -56,8 +60,9 @@ func newNoDataHopFixture(t *testing.T, prefix string, catalog controlplane.Catal
 	}
 	compiler, semantics := runtimePlanCompiler(t)
 	progress := &activationProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{}}
+	clock := time.Unix(60, 0)
 	reconciler, err := controlplane.NewScheduleActivationReconcilerWithProgress(
-		repository, compiler, semantics, progress, func() time.Time { return time.Unix(60, 0) })
+		repository, compiler, semantics, progress, func() time.Time { return clock })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +78,7 @@ func newNoDataHopFixture(t *testing.T, prefix string, catalog controlplane.Catal
 		t.Fatal(err)
 	}
 	fixture := &noDataHopFixture{
-		client: client, prefix: "alarmd:control:" + prefix, reconciler: reconciler,
+		client: client, prefix: "alarmd:control:" + prefix, reconciler: reconciler, now: &clock,
 		repository: repository, runtime: runtime,
 		group: catalog.QueryGroups[0].Identity,
 		hops:  map[string]int{}, states: map[string]int{},

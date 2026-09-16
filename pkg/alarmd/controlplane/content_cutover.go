@@ -226,6 +226,20 @@ const (
 	cutoverLegacyCut contentCutoverDecision = "legacy_cut"
 	cutoverRetired   contentCutoverDecision = "retired"
 	cutoverAdded     contentCutoverDecision = "added"
+	// cutoverAdopted is an open Segment that already names what this
+	// publication names. A previous attempt cut it and did not land its
+	// activation, so there is nothing left to cut: adopting it is the
+	// idempotent answer, and cutting again would close a Segment onto itself.
+	cutoverAdopted contentCutoverDecision = "adopted_current"
+	// cutoverRepaired is an open Segment naming content that neither the last
+	// activation nor this publication names. Nobody claims what it is
+	// executing, so it is closed and recut from the publication.
+	//
+	// This used to be refused, and refusing it protected nothing: the Segment
+	// was already executing that content and would go on doing so, while every
+	// later publication failed at the same comparison. A fleet does not become
+	// safer by being left on content no one can name.
+	cutoverRepaired contentCutoverDecision = "repaired_foreign"
 )
 
 // validateContentCoverage checks that the assembled activation names every

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -213,5 +214,66 @@ func TestASuccessfulCutoverReportsNoReason(t *testing.T) {
 	}
 	if reported := observed[0].ScheduleCutover; reported.Result != "success" || reported.Reason != "" {
 		t.Fatalf("result = %q reason = %q, want success with no reason", reported.Result, reported.Reason)
+	}
+}
+
+// A Segment cannot be cut for a Query Group the publication does not name.
+//
+// Refusing is the point. Deriving a name from the group instead is exactly the
+// second derivation this change removed, and the damage it does is invisible
+// until a cutover refuses the mismatch weeks later -- by which time the fleet
+// has been executing content nobody published for as long as that took.
+func TestASegmentIsNotCutForAQueryGroupThePublicationDoesNotName(t *testing.T) {
+	_, err := scheduleSegmentForGroup(
+		SnapshotPublicationRef{SnapshotRevision: "rev", PublicationEpoch: 1},
+		QueryGroup{Identity: "qg-a"}, 60, ContentEntry{},
+	)
+	if err == nil {
+		t.Fatal("a Segment was cut with no name from the publication")
+	}
+	if cutoverFailureReason(err) != CutoverReasonInvalidRequest {
+		t.Fatalf("reason = %q, want %q", cutoverFailureReason(err), CutoverReasonInvalidRequest)
+	}
+}
+
+// A Segment carries the names it was given, unchanged.
+func TestASegmentCarriesTheNamesItWasGiven(t *testing.T) {
+	refs := []execution.OutputContextRef{{
+		Plan:   execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "1"},
+		Digest: execution.OutputContextDigest("ctx-digest"),
+	}}
+	segment, err := scheduleSegmentForGroup(
+		SnapshotPublicationRef{SnapshotRevision: "rev", PublicationEpoch: 1},
+		QueryGroup{Identity: "qg-a"}, 60,
+		ContentEntry{Digest: execution.ObjectDigest("object-digest"), Refs: refs},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if segment.ObjectDigest != execution.ObjectDigest("object-digest") {
+		t.Fatalf("segment names %q, want the object the publication named", segment.ObjectDigest)
+	}
+	if len(segment.OutputContextRefs) != 1 || segment.OutputContextRefs[0].Digest != refs[0].Digest {
+		t.Fatalf("segment output contexts = %+v, want the ones the publication named", segment.OutputContextRefs)
+	}
+}
+
+// The two decisions this change adds are in the vocabulary the metric bounds
+// itself by.
+//
+// A decision the list does not name creates no label at startup, so the first
+// time it happens it appears as a series nobody is watching for -- and both of
+// these are meant to be watched: one says an earlier cutover half completed,
+// the other says a Segment was found executing content nobody published.
+func TestTheRecoveryDecisionsAreInTheClosedVocabulary(t *testing.T) {
+	listed := map[string]bool{}
+	for _, decision := range observability.ScheduleCutoverDecisions {
+		listed[decision] = true
+	}
+	for _, decision := range []contentCutoverDecision{cutoverAdopted, cutoverRepaired} {
+		if !listed[string(decision)] {
+			t.Fatalf("decision %q is made by the cutover and is not in ScheduleCutoverDecisions, so the "+
+				"metric never creates its label", decision)
+		}
 	}
 }

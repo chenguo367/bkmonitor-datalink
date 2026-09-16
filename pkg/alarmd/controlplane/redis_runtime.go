@@ -436,12 +436,26 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		// Segment that disagrees was changed outside this path. A Segment
 		// written before Segments named their content is compared on the
 		// revisions the old source carries instead.
+		// What the open Segment names, against what the last activation named
+		// and what this publication names. Three answers, not two.
+		//
+		// It agreeing with the activation is the ordinary case and falls
+		// through. It agreeing with this publication instead means a previous
+		// attempt already cut it and did not land its activation: there is
+		// nothing left to cut, and adopting it is the idempotent answer.
+		// Agreeing with neither means it is executing content no one can name,
+		// and that is repaired rather than refused -- refusing it leaves the
+		// Segment exactly where it is and fails the same way every round, which
+		// is how a fleet spent eleven hours on content nobody had published.
+		adopt, repair := false, false
 		if oldDigest, named := previousContent.digests[queryGroup]; named && open.Schedule.Segment.ObjectDigest != "" &&
 			open.Schedule.Segment.ObjectDigest != oldDigest {
-			return scheduleConflict(CutoverReasonOpenDigestMismatch, queryGroup,
-				fmt.Sprintf("open_digest=%s activation_digest=%s published_digest=%s content_source=%s",
-					open.Schedule.Segment.ObjectDigest, oldDigest, newContent[queryGroup].digest,
-					previousContent.source))
+			switch open.Schedule.Segment.ObjectDigest {
+			case newContent[queryGroup].digest:
+				adopt = true
+			default:
+				repair = true
+			}
 		}
 		if open.Schedule.Segment.ObjectDigest == "" && oldGroup.QueryPlan.QueryRevision != "" &&
 			(open.Schedule.Segment.QueryRevision != oldGroup.QueryPlan.QueryRevision ||
@@ -457,7 +471,13 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		for _, record := range open.Plans {
 			coveredPrevious[record.Fact.Plan] = struct{}{}
 		}
-		if remains && open.Schedule.Segment.ObjectDigest != "" && open.Schedule.Segment.ObjectDigest == newContent[queryGroup].digest {
+		if repair {
+			// Falls through to the close-and-reopen below, which cuts from this
+			// publication. Counted under its own decision because a Segment
+			// nobody named is worth knowing about even once it is repaired.
+			cutover.decided(cutoverRepaired)
+		} else if remains && open.Schedule.Segment.ObjectDigest != "" &&
+			(open.Schedule.Segment.ObjectDigest == newContent[queryGroup].digest || adopt) {
 			// Same execution content: the Segment and its records stay. Only
 			// the output contexts may have moved, and they move by revision.
 			plans = append(plans, open.Plans...)
@@ -467,7 +487,16 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 				inForce = segment.OutputContextRevisions[count-1].Refs
 			}
 			if execution.SameOutputContextRefs(inForce, newContent[queryGroup].refs) {
-				cutover.decided(cutoverKept)
+				// Adoption takes the count when it applies. It is the rare and
+				// diagnostic one -- an open Segment that already names this
+				// publication's content is a previous attempt that wrote its
+				// Segments and did not land its activation -- and kept is the
+				// steady state nobody reads individually.
+				decision := cutoverKept
+				if adopt {
+					decision = cutoverAdopted
+				}
+				cutover.decided(decision)
 				continue
 			}
 			revised := open.Schedule
@@ -486,7 +515,13 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 				candidates = append(candidates, pruneCandidate{update: len(updates), dead: dead})
 			}
 			updates = append(updates, scheduleTimelineUpdate{expected: raw, next: timeline})
-			cutover.decided(cutoverRevised)
+			// Same reason as above: the contexts did move and were revised, and
+			// the adoption is the fact worth seeing.
+			revisedDecision := cutoverRevised
+			if adopt {
+				revisedDecision = cutoverAdopted
+			}
+			cutover.decided(revisedDecision)
 			continue
 		}
 		closed := open.Schedule
@@ -497,7 +532,8 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		timeline.Segments[last].Schedule = closed
 		timeline.RecordRevision++
 		if remains {
-			segment, err := scheduleSegmentForGroup(published.content.Publication, newGroup, boundary)
+			segment, err := scheduleSegmentForGroup(published.content.Publication, newGroup, boundary,
+				published.content.Groups[queryGroup])
 			if err != nil {
 				return err
 			}
@@ -540,7 +576,8 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	}
 	sort.Slice(newIdentities, func(i, j int) bool { return newIdentities[i] < newIdentities[j] })
 	for _, queryGroup := range newIdentities {
-		opened, err := repository.openQueryGroupTimeline(ctx, published.content.Publication, newGroups[queryGroup], boundary, candidate, now, cutover)
+		opened, err := repository.openQueryGroupTimeline(ctx, published.content.Publication, newGroups[queryGroup],
+			published.content.Groups[queryGroup], boundary, candidate, now, cutover)
 		if err != nil {
 			return err
 		}
@@ -596,12 +633,13 @@ func (repository *RedisCatalogRepository) openQueryGroupTimeline(
 	ctx context.Context,
 	publication SnapshotPublicationRef,
 	group QueryGroup,
+	named ContentEntry,
 	boundary execution.EvaluationTime,
 	candidate ActivationState,
 	now time.Time,
 	cutover *cutoverFacts,
 ) (openedQueryGroupTimeline, error) {
-	segment, err := scheduleSegmentForGroup(publication, group, boundary)
+	segment, err := scheduleSegmentForGroup(publication, group, boundary, named)
 	if err != nil {
 		return openedQueryGroupTimeline{}, err
 	}
@@ -756,7 +794,8 @@ func (repository *RedisCatalogRepository) CompareAndSetHeldReactivation(
 	candidates := make([]pruneCandidate, 0, len(identities))
 	plans := append([]PlanActivationRecord(nil), previous.Plans...)
 	for _, identity := range identities {
-		opened, err := repository.openQueryGroupTimeline(ctx, previous.Current, groups[identity], boundary, next, now, cutover)
+		opened, err := repository.openQueryGroupTimeline(ctx, previous.Current, groups[identity],
+			published.content.Groups[identity], boundary, next, now, cutover)
 		if err != nil {
 			return err
 		}
@@ -1198,19 +1237,29 @@ func scheduleSegmentForGroup(
 	publication SnapshotPublicationRef,
 	group QueryGroup,
 	start execution.EvaluationTime,
+	named ContentEntry,
 ) (execution.ScheduleSegmentFact, error) {
-	objectDigest, err := DeriveQueryGroupObjectDigest(group)
-	if err != nil {
-		return execution.ScheduleSegmentFact{}, err
+	// The names come from the publication's manifest; they are not derived
+	// again here.
+	//
+	// They used to be, from the group this function is handed -- and that group
+	// has been through the object store and back, while the manifest's names
+	// were computed from the Catalog the leader built. Two derivations of one
+	// name, and they agree only for as long as assembly returns exactly what
+	// was published. When assembly dropped a field, every Segment cut from an
+	// assembled group named an object the manifest did not, the cutover refused
+	// the mismatch on every later round, and the fleet stopped taking up
+	// published content for eleven hours with every other signal healthy.
+	//
+	// Copying makes that class impossible rather than unlikely: the manifest is
+	// what a publication is called, the assembled group is only what it
+	// contains, and a field lost in assembly can no longer change a name.
+	if named.Digest == "" {
+		return execution.ScheduleSegmentFact{}, fmt.Errorf(
+			"%w: the publication names no object for Query Group %s", ErrCutoverRequest, group.Identity)
 	}
-	refs := make([]execution.OutputContextRef, 0, len(group.Plans))
-	for _, plan := range group.Plans {
-		digest, err := DeriveOutputContextDigest(plan)
-		if err != nil {
-			return execution.ScheduleSegmentFact{}, err
-		}
-		refs = append(refs, execution.OutputContextRef{Plan: plan.Identity, Digest: digest})
-	}
+	objectDigest := named.Digest
+	refs := append([]execution.OutputContextRef(nil), named.Refs...)
 	sort.Slice(refs, func(i, j int) bool { return lessPlanIdentity(refs[i].Plan, refs[j].Plan) })
 	return execution.ScheduleSegmentFact{
 		Publication: execution.SnapshotPublicationRef{SnapshotRevision: publication.SnapshotRevision,

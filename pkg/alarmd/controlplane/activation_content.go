@@ -276,10 +276,12 @@ func compilePublishedGroups(
 	stateSemantics strategy.StateSemantics,
 	publication SnapshotPublicationRef,
 	groups []QueryGroup,
+	named map[execution.QueryGroupIdentity]ContentEntry,
 	boundary execution.EvaluationTime,
 ) ([]PlanActivationRecord, []execution.ScheduleSegmentFact, error) {
 	return compilePublishedActivation(ctx, compiler, stateSemantics,
-		PublishedSnapshot{SchemaVersion: snapshotSchemaVersion, Publication: publication, QueryGroups: groups}, boundary)
+		PublishedSnapshot{SchemaVersion: snapshotSchemaVersion, Publication: publication, QueryGroups: groups},
+		named, boundary)
 }
 
 // carriedActivationRecords picks, for an activation of next over previous,
