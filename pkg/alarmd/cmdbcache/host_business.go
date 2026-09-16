@@ -42,3 +42,25 @@ func (lookup *HostBusinessLookup) LookupHostBusiness(identity string) (string, b
 	}
 	return facts.BusinessID, true
 }
+
+// HostIndexResolved reports whether there is an index behind those answers.
+//
+// It exists because the safe direction above is only safe for one host. Asked
+// about every host of a target, a store with no index answers "not held" to
+// all of them, and a caller that reads that as the target's answer has a
+// static target that resolved to nobody -- which is a legitimate state, so
+// nothing downstream can tell that this one is not it.
+//
+// An index holding no hosts is not resolved either, for the reason Health
+// already gives it: an empty host cache would put every host-scoped strategy
+// out of scope at once, and that is never a real state here. A stale index is
+// resolved: it holds hosts and answers about them, and the answer being a few
+// minutes old is a lag this deployment tolerates everywhere else, whereas
+// calling it unresolved would stop no-data detection on every static target
+// for the length of a CMDB hiccup.
+func (lookup *HostBusinessLookup) HostIndexResolved() bool {
+	if lookup == nil || lookup.store == nil {
+		return false
+	}
+	return lookup.store.HostIndexResolved()
+}

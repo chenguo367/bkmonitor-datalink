@@ -29,6 +29,10 @@ func (lookup *countingHostBusiness) LookupHostBusiness(identity string) (string,
 	return business, held
 }
 
+// HostIndexResolved follows the map, so a fake standing for a process with no
+// index cannot claim to have resolved anything out of it.
+func (lookup *countingHostBusiness) HostIndexResolved() bool { return len(lookup.byIdentity) > 0 }
+
 func hostCandidate(t *testing.T, ip, cloud string) nodata.HostCandidate {
 	t.Helper()
 	return nodata.HostCandidate{
@@ -187,5 +191,35 @@ func TestResolvingNoDataHostsExpectsNothingFromAColdIndex(t *testing.T) {
 	})
 	if len(resolution.Known) != 0 || len(resolution.OutOfBusiness) != 0 {
 		t.Fatalf("resolution = %+v, want nothing from an index that holds nothing", resolution)
+	}
+}
+
+// A pass with no index says so, and does not look.
+//
+// The two sets it would produce are empty either way, so nothing about them
+// distinguishes a process that has not built an index from a target whose
+// hosts have all left this business. Resolved is the only thing that does,
+// and the evaluation stops on it rather than judging an item against an
+// expected set it has no basis for.
+func TestResolvingNoDataHostsReportsAnIndexItCouldNotRead(t *testing.T) {
+	cold := &countingHostBusiness{}
+	candidates := []nodata.HostCandidate{hostCandidate(t, "10.0.0.1", "0"), hostCandidate(t, "10.0.0.2", "0")}
+
+	resolution := resolveNoDataHosts(cold, "2", candidates)
+
+	if resolution.Resolved {
+		t.Fatal("Resolved is true with no index behind it: every host reads as one CMDB has never " +
+			"heard of, which is indistinguishable from a target that resolved to nobody")
+	}
+	if cold.lookups != 0 {
+		t.Fatalf("lookups = %d, want none: there is nothing to look in", cold.lookups)
+	}
+	if len(resolution.Known) != 0 || len(resolution.OutOfBusiness) != 0 {
+		t.Fatalf("resolution = %+v, want both sets empty", resolution)
+	}
+
+	warm := &countingHostBusiness{byIdentity: map[string]string{"10.0.0.1|0": "2"}}
+	if got := resolveNoDataHosts(warm, "2", candidates); !got.Resolved {
+		t.Fatalf("resolution = %+v, want Resolved once there is an index to answer from", got)
 	}
 }

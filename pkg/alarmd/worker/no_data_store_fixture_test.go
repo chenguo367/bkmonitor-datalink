@@ -65,6 +65,12 @@ func (lookup fixedHostBusiness) LookupHostBusiness(identity string) (string, boo
 	return business, held
 }
 
+// HostIndexResolved follows the index this fake stands for: one holding hosts
+// is an index, one holding none is a process that has not built one. Tying it
+// to the map rather than to a flag of its own is what keeps a fixture from
+// claiming to have resolved a target out of an index with nothing in it.
+func (lookup fixedHostBusiness) HostIndexResolved() bool { return len(lookup.byIdentity) > 0 }
+
 // SharedHostBusiness holds no host, which is what a deployment whose CMDB index
 // has not been built yet looks like. Tests about something else use it; a test
 // about host resolution builds its own.

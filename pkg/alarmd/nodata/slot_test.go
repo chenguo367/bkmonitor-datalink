@@ -55,8 +55,8 @@ func TestEvaluateSlotDecidesAStaticTargetFromWhichSeriesReported(t *testing.T) {
 		Series: []map[string]string{
 			{HostIPDimension: "10.0.0.1", HostCloudDimension: "0", "device": "eth0"},
 		},
-		KnownHosts: knownHosts("10.0.0.1|0", "10.0.0.2|0"),
-		Memory:     map[string]GroupMemory{},
+		KnownHosts: knownHosts("10.0.0.1|0", "10.0.0.2|0"), HostsResolved: true,
+		Memory: map[string]GroupMemory{},
 	})
 	if err != nil || outcome != OutcomeEvaluated {
 		t.Fatalf("EvaluateSlot() = %q, %v", outcome, err)
@@ -88,8 +88,8 @@ func TestEvaluateSlotCountsASeriesItCannotProject(t *testing.T) {
 		Plan:           slotPlan(scope, []string{HostIPDimension, HostCloudDimension}),
 		EvaluationTime: 1000, PeriodSeconds: 60, Completeness: execution.CompletenessFull,
 		Series:     []map[string]string{{HostIPDimension: "10.0.0.1"}},
-		KnownHosts: knownHosts("10.0.0.1|0"),
-		Memory:     map[string]GroupMemory{},
+		KnownHosts: knownHosts("10.0.0.1|0"), HostsResolved: true,
+		Memory: map[string]GroupMemory{},
 	})
 	if err != nil {
 		t.Fatalf("EvaluateSlot() error = %v", err)
@@ -116,7 +116,7 @@ func TestEvaluateSlotPassesTheCompletenessGateThrough(t *testing.T) {
 	result, outcome, err := EvaluateSlot(SlotInput{
 		Plan:           slotPlan(scope, []string{HostIPDimension, HostCloudDimension}),
 		EvaluationTime: 1000, PeriodSeconds: 60, Completeness: execution.CompletenessPartial,
-		KnownHosts: knownHosts("10.0.0.1|0"), Memory: memory,
+		KnownHosts: knownHosts("10.0.0.1|0"), HostsResolved: true, Memory: memory,
 	})
 	if err != nil {
 		t.Fatalf("EvaluateSlot() error = %v", err)

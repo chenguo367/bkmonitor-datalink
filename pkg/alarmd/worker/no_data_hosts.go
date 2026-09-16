@@ -31,8 +31,19 @@ func resolveNoDataHosts(
 	index execution.HostBusiness, businessID string, candidates []nodata.HostCandidate,
 ) nodata.HostResolution {
 	resolution := nodata.HostResolution{
+		// Asked once for the whole pass rather than per host: it is a fact
+		// about this process, and reading it per host would let it change
+		// halfway through one target's resolution.
+		Resolved:      index.HostIndexResolved(),
 		Known:         make(map[string]struct{}, len(candidates)),
 		OutOfBusiness: make(map[string]struct{}),
+	}
+	if !resolution.Resolved {
+		// Nothing to intersect with. Walking the candidates would produce the
+		// empty sets anyway, and a caller that reads them without reading
+		// Resolved would see a target that resolved to nobody; returning here
+		// is only to say that plainly.
+		return resolution
 	}
 	for _, candidate := range candidates {
 		business, held := index.LookupHostBusiness(candidate.Key())
