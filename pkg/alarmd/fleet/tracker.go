@@ -174,6 +174,12 @@ type queryGroupState struct {
 	reasonSince   time.Time
 	reasonRuns    int
 	queryCooldown *observability.QueryCooldownFacts
+	// demotedSince is when the object entered the pool: the first entered or
+	// extended event with no cooldown standing. Zero outside the pool. It is
+	// the bound a retained record is read against to decide whether the
+	// skip was the cooldown's doing; the anomaly's onset is earlier and was
+	// an approximation on the refusal's side.
+	demotedSince time.Time
 	// Once cooldown exposes a failure, keep that evidence visible until a real healthy completion.
 	cooldownExposed bool
 	strategies      map[StrategyRef]struct{}
@@ -535,6 +541,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			copy := *facts
 			if state.queryCooldown == nil {
 				tracker.demotionEntries++
+				state.demotedSince = at
 			} else {
 				// Counted apart from entries because it is the only thing that
 				// separates a pool that is still working from one that is stuck.
@@ -561,6 +568,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				tracker.lastDemotionExit = at
 			}
 			state.queryCooldown = nil
+			state.demotedSince = time.Time{}
 		}
 	}
 	if failure != nil {
@@ -903,6 +911,7 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 		anomaly := Anomaly{
 			QueryGroup:    queryGroup,
 			QueryCooldown: state.queryCooldown,
+			DemotedSince:  state.demotedSince,
 			Kind:          state.currentKind,
 			ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason,
 			Coverage:      state.coverage,

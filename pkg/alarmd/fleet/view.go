@@ -496,6 +496,9 @@ type Anomaly struct {
 	// record's age; empty on a row with no record.
 	Skip *SkippedSpan `json:"skip,omitempty"`
 	Loss Loss         `json:"loss,omitempty"`
+	// DemotedSince is when the object entered the demoted pool, on a row in
+	// it; zero elsewhere, and on rows from a publisher that predates it.
+	DemotedSince time.Time `json:"demoted_since,omitempty"`
 	// Attribution says whether capacity or design could have prevented this.
 	// Only the ones where it could decide the verdict; the rest are real work
 	// for someone else. Filled in by Attribute rather than by the tracker, so

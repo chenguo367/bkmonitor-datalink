@@ -765,3 +765,38 @@ func TestARecordOlderThanTheDemotionIsNotItsConsequence(t *testing.T) {
 		t.Fatalf("rows carry records %v, want only the object whose record post-dates its onset", carried)
 	}
 }
+
+// Where the pooled row carries its pool entry, that is the bound a record is
+// read against, not the anomaly's earlier onset: a record made after the
+// failures began and before the pool was entered is the replay bound's
+// doing, not the cooldown's.
+func TestTheRecordBoundIsThePoolEntryWhereTheRowCarriesIt(t *testing.T) {
+	at := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	refused := Anomaly{QueryGroup: "qg-refused", Kind: KindQueryCooldown, Since: at.Add(-time.Hour), DemotedSince: at.Add(-10 * time.Minute),
+		Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}}
+	demoted := []Anomaly{refused}
+	Attribute(demoted, at)
+	// Skipped twenty minutes ago: after the onset, before the entry.
+	view := &View{Demoted: demoted, GapSkips: map[string]SkippedSpan{
+		"qg-refused": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-20 * time.Minute), Replica: "pod-a"}}}
+	columns := [][]Anomaly{nil, demoted, nil, nil}
+	byCode := map[Check]CheckReport{}
+	for _, report := range ReportChecks(columns, nil, view, at) {
+		byCode[report.Code] = report
+	}
+	if byCode[CheckQueryTargetMissing].Consequence != nil {
+		t.Fatalf("QUERY_TARGET_MISSING = %+v, want no consequence: the record predates the pool entry", byCode[CheckQueryTargetMissing])
+	}
+	if abandoned := byCode[CheckDetectionAbandoned]; abandoned.Retained != 1 {
+		t.Fatalf("DETECTION_ABANDONED = %+v, want the record on it, read by its age", abandoned)
+	}
+	// The same record made after the entry is the consequence.
+	view.GapSkips["qg-refused"] = SkippedSpan{FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-5 * time.Minute), Replica: "pod-a"}
+	byCode = map[Check]CheckReport{}
+	for _, report := range ReportChecks(columns, nil, view, at) {
+		byCode[report.Code] = report
+	}
+	if byCode[CheckQueryTargetMissing].Consequence == nil || byCode[CheckQueryTargetMissing].Consequence.Skipped != 1 {
+		t.Fatalf("QUERY_TARGET_MISSING = %+v, want the record made after the entry as its consequence", byCode[CheckQueryTargetMissing])
+	}
+}
