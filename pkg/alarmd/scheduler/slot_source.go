@@ -603,6 +603,19 @@ func (source *ProductionSlotSource) cohortForSlot(ctx context.Context, slot exec
 	return shortPeriodCohort(schedule, slot)
 }
 
+// ShortPeriodCohortForInterval names the cohort of an evaluation interval as
+// the dispatcher labels its queue decisions: the three short cohorts by
+// name, "other" for any other interval, "unknown" for none.
+func ShortPeriodCohortForInterval(interval int64) string {
+	if interval <= 0 {
+		return "unknown"
+	}
+	if cohort := shortPeriodCohortForInterval(interval); cohort != "" {
+		return cohort
+	}
+	return "other"
+}
+
 func shortPeriodCohortForInterval(minimum int64) string {
 	// 30 belongs here for the same reason 10 and 15 do: its completion deadline
 	// is thirty seconds. It reaches that by the offset defaulting to the

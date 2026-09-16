@@ -536,6 +536,48 @@ type phaseTwoScheduledResult struct {
 type phaseTwoQueuedRunner struct {
 	scheduled phaseTwoScheduledRunner
 	readyAt   time.Time
+	// deadline is when the next Slot stops being worth running, as the
+	// Runner knew it when queued; zero when it did not. sequence is the
+	// order of queueing, the tie-break among equal deadlines so the ready
+	// queue stays first-come among equals. cohort labels what this entry's
+	// turn-aways are counted under.
+	deadline time.Time
+	sequence uint64
+	cohort   string
+}
+
+// phaseTwoDeadlineRunner is the Runner's answer to "by when": the production
+// Runner implements it; a Runner that does not is queued with no deadline
+// and ordered after every one that has.
+type phaseTwoDeadlineRunner interface {
+	NextDeadline() time.Time
+}
+
+func queuedRunnerDeadline(runner phaseTwoQueryGroupRuntime) time.Time {
+	if withDeadline, ok := runner.(phaseTwoDeadlineRunner); ok {
+		return withDeadline.NextDeadline()
+	}
+	return time.Time{}
+}
+
+// deadlineBefore orders two queued Runners by when their work expires:
+// the earlier deadline first, a known deadline before an unknown one, and
+// among equals the one that was ready first, then the one queued first,
+// then by identity. It is the one order both queues and the choice between
+// them use; a second order anywhere is where the short cohort lost its
+// place before.
+func deadlineBefore(left, right phaseTwoQueuedRunner) bool {
+	switch {
+	case left.deadline.IsZero() != right.deadline.IsZero():
+		return !left.deadline.IsZero()
+	case !left.deadline.Equal(right.deadline):
+		return left.deadline.Before(right.deadline)
+	case !left.readyAt.Equal(right.readyAt):
+		return left.readyAt.Before(right.readyAt)
+	case left.sequence != right.sequence:
+		return left.sequence < right.sequence
+	}
+	return left.scheduled.queryGroup < right.scheduled.queryGroup
 }
 
 type phaseTwoRunnerGeneration struct {
@@ -573,7 +615,13 @@ type phaseTwoRunnerDispatcher struct {
 	active     map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle
 	normal     []phaseTwoQueuedRunner
 	delayed    []phaseTwoQueuedRunner
+	// queueSequence numbers queue entries in order of queueing; normalDirty
+	// says the ready queue took entries since it was last ordered.
+	queueSequence uint64
+	normalDirty   bool
 
+	// preferDelayed alternates the two queues only when neither candidate
+	// carries a deadline; whenever one does, the deadline decides.
 	preferDelayed  bool
 	oneShot        bool
 	oneShotTargets map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle
@@ -1091,17 +1139,42 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 		dispatcher.fillQueues(runners, revision)
 		now := dispatcher.bundle.schedulerNow()
 		dispatcher.sortDelayed()
+		dispatcher.sortNormal()
 		dispatcher.observeOccupancy(ctx)
 		delayedDue := len(dispatcher.delayed) > 0 && !dispatcher.delayed[0].readyAt.After(now)
 		normalReady := len(dispatcher.normal) > 0
-		selectDelayed := canceled == nil && delayedDue && (!normalReady || dispatcher.preferDelayed)
-		selectNormal := canceled == nil && normalReady && !selectDelayed
+		// Earliest deadline first, across both queues. The ready queue is
+		// ordered, so its head is its earliest; the recovery queue is ordered
+		// by readiness, so its due prefix is scanned for the earliest. A Slot
+		// that became ready at :10 and expires at :25 used to wait behind the
+		// minute's thousand ready Slots that expire at :55, alternating one
+		// for one with them, and started at :24.
+		delayedIndex := -1
+		if canceled == nil && delayedDue {
+			delayedIndex = dispatcher.earliestDueDelayedIndex(now)
+		}
+		selectDelayed, selectNormal := false, false
+		switch {
+		case canceled != nil:
+		case delayedIndex >= 0 && normalReady:
+			candidate, head := dispatcher.delayed[delayedIndex], dispatcher.normal[0]
+			if candidate.deadline.IsZero() && head.deadline.IsZero() {
+				selectDelayed = dispatcher.preferDelayed
+			} else {
+				selectDelayed = deadlineBefore(candidate, head)
+			}
+			selectNormal = !selectDelayed
+		case delayedIndex >= 0:
+			selectDelayed = true
+		case normalReady:
+			selectNormal = true
+		}
 
 		var dispatch chan phaseTwoScheduledRunner
 		var scheduled phaseTwoScheduledRunner
 		if selectDelayed {
 			dispatch = dispatcher.jobs
-			scheduled = dispatcher.delayed[0].scheduled
+			scheduled = dispatcher.delayed[delayedIndex].scheduled
 		} else if selectNormal {
 			dispatch = dispatcher.jobs
 			scheduled = dispatcher.normal[0].scheduled
@@ -1120,7 +1193,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 
 		select {
 		case dispatch <- scheduled:
-			dispatcher.markDispatched(scheduled, selectDelayed, delayedDue)
+			dispatcher.markDispatched(scheduled, selectDelayed, delayedIndex, delayedDue)
 		case result := <-dispatcher.results:
 			dispatcher.handleResult(ctx, result, canceled == nil)
 		case <-wake:
@@ -1289,7 +1362,13 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 			scheduled.queuedAt = time.Now()
 		}
 		readyAt := scheduled.lifecycle.runner.NextReadyAt()
-		queued := phaseTwoQueuedRunner{scheduled: scheduled, readyAt: readyAt}
+		dispatcher.queueSequence++
+		queued := phaseTwoQueuedRunner{
+			scheduled: scheduled, readyAt: readyAt, deadline: queuedRunnerDeadline(scheduled.lifecycle.runner),
+			sequence: dispatcher.queueSequence,
+			cohort:   scheduler.ShortPeriodCohortForInterval(scheduled.lifecycle.runner.DueBound().IntervalSeconds),
+		}
+		recorder := dispatcher.bundle.dependencies.Recorder
 		// The recovery queue may not turn a Query Group away while it holds fewer
 		// entries than this Worker owns.
 		//
@@ -1395,7 +1474,11 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 		recoveryCapacity := max(limits.RecoveryQueueCapacity, len(runners))
 		if readyAt.IsZero() {
 			if len(dispatcher.normal) >= limits.ReadyQueueCapacity {
-				// The walk stops here rather than scanning past this Query Group
+				// A full ready queue gives up the entry that expires last for an
+				// arrival that expires earlier: at the minute's tide the queue
+				// is a thousand Slots expiring at :55, and a short-period Slot
+				// arriving behind them must not wait for a place. Otherwise the
+				// walk stops here rather than scanning past this Query Group
 				// for one the recovery queue could still take. Scanning past it
 				// would read the whole owned set again on every pass for as long
 				// as the ready queue stays full, which is the per-pass sweep this
@@ -1403,13 +1486,32 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 				// load where that sweep costs the most. What is behind this Query
 				// Group is deferred, not dropped: one dispatch frees one place,
 				// and the walk resumes from here within the same generation.
-				dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(scheduled.queryGroup), observability.TargetFlowFacts{Decision: "normal_queue_full"})
+				latest := dispatcher.latestNormalIndex()
+				if latest < 0 || queued.deadline.IsZero() || !deadlineBefore(queued, dispatcher.normal[latest]) {
+					dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(scheduled.queryGroup), observability.TargetFlowFacts{Decision: "normal_queue_full"})
+					recorder.RecordDispatchTurnaway("normal_queue_full", queued.cohort)
+					dispatcher.rotation.deferred++
+					dispatcher.rotation.deferredQueueFull++
+					dispatcher.dueIndex.MarkHeldBack(scheduled.queryGroup)
+					return
+				}
+				evicted := dispatcher.normal[latest]
+				dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(evicted.scheduled.queryGroup), observability.TargetFlowFacts{Decision: "normal_queue_evicted"})
+				recorder.RecordDispatchTurnaway("normal_queue_evicted", evicted.cohort)
 				dispatcher.rotation.deferred++
 				dispatcher.rotation.deferredQueueFull++
-				dispatcher.dueIndex.MarkHeldBack(scheduled.queryGroup)
-				return
+				dispatcher.dueIndex.MarkHeldBack(evicted.scheduled.queryGroup)
+				if dispatcher.queued[evicted.scheduled.queryGroup] == evicted.scheduled.lifecycle {
+					delete(dispatcher.queued, evicted.scheduled.queryGroup)
+				}
+				if dispatcher.oneShot {
+					delete(dispatcher.lastQueued, evicted.scheduled.queryGroup)
+				}
+				dispatcher.normal[latest] = queued
+			} else {
+				dispatcher.normal = append(dispatcher.normal, queued)
 			}
-			dispatcher.normal = append(dispatcher.normal, queued)
+			dispatcher.normalDirty = true
 		} else {
 			if len(dispatcher.delayed) >= recoveryCapacity {
 				latest := dispatcher.latestDelayedIndex()
@@ -1418,6 +1520,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 					// does not belong in the queue at all. That is a decision,
 					// not a lack of room, and the walk moves on.
 					dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(scheduled.queryGroup), observability.TargetFlowFacts{Decision: "delayed_queue_full", ReadyAtMS: diagnosticTimeMS(readyAt)})
+					recorder.RecordDispatchTurnaway("delayed_not_better", queued.cohort)
 					dispatcher.rotation.deferred++
 					dispatcher.rotation.deferredNotBetter++
 					dispatcher.dueIndex.MarkHeldBack(scheduled.queryGroup)
@@ -1426,6 +1529,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 				}
 				evicted := dispatcher.delayed[latest].scheduled
 				dispatcher.bundle.dependencies.TargetFlow.Record("queue_skipped", string(evicted.queryGroup), observability.TargetFlowFacts{Decision: "delayed_queue_evicted"})
+				recorder.RecordDispatchTurnaway("delayed_evicted", dispatcher.delayed[latest].cohort)
 				dispatcher.dueIndex.MarkHeldBack(evicted.queryGroup)
 				if dispatcher.queued[evicted.queryGroup] == evicted.lifecycle {
 					delete(dispatcher.queued, evicted.queryGroup)
@@ -1521,12 +1625,13 @@ func rotationView(facts phaseTwoRotationFacts) *fleet.Rotation {
 func (dispatcher *phaseTwoRunnerDispatcher) markDispatched(
 	scheduled phaseTwoScheduledRunner,
 	delayed bool,
+	delayedIndex int,
 	delayedDue bool,
 ) {
 	delete(dispatcher.queued, scheduled.queryGroup)
 	dispatcher.active[scheduled.queryGroup] = scheduled.lifecycle
 	if delayed {
-		dispatcher.delayed = dispatcher.delayed[1:]
+		dispatcher.delayed = append(dispatcher.delayed[:delayedIndex], dispatcher.delayed[delayedIndex+1:]...)
 		dispatcher.preferDelayed = false
 		return
 	}
@@ -1534,6 +1639,46 @@ func (dispatcher *phaseTwoRunnerDispatcher) markDispatched(
 	if delayedDue {
 		dispatcher.preferDelayed = true
 	}
+}
+
+// earliestDueDelayedIndex is the entry of the recovery queue's due prefix
+// with the earliest deadline, under the same order the ready queue keeps.
+// The queue is sorted by readiness, so the prefix is contiguous.
+func (dispatcher *phaseTwoRunnerDispatcher) earliestDueDelayedIndex(now time.Time) int {
+	best := -1
+	for index := range dispatcher.delayed {
+		if dispatcher.delayed[index].readyAt.After(now) {
+			break
+		}
+		if best < 0 || deadlineBefore(dispatcher.delayed[index], dispatcher.delayed[best]) {
+			best = index
+		}
+	}
+	return best
+}
+
+// sortNormal orders the ready queue by deadline when entries were added
+// since it was last ordered; removing the head keeps the order.
+func (dispatcher *phaseTwoRunnerDispatcher) sortNormal() {
+	if !dispatcher.normalDirty {
+		return
+	}
+	sort.SliceStable(dispatcher.normal, func(left, right int) bool {
+		return deadlineBefore(dispatcher.normal[left], dispatcher.normal[right])
+	})
+	dispatcher.normalDirty = false
+}
+
+// latestNormalIndex is the ready queue entry that expires last, the one a
+// full queue gives up for an arrival that expires earlier.
+func (dispatcher *phaseTwoRunnerDispatcher) latestNormalIndex() int {
+	latest := -1
+	for index := range dispatcher.normal {
+		if latest < 0 || deadlineBefore(dispatcher.normal[latest], dispatcher.normal[index]) {
+			latest = index
+		}
+	}
+	return latest
 }
 
 func (dispatcher *phaseTwoRunnerDispatcher) handleResult(
