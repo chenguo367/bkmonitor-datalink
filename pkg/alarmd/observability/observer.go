@@ -1397,6 +1397,32 @@ func AllActivationFailureClasses() []ActivationFailureClass {
 	return append([]ActivationFailureClass(nil), allActivationFailureClasses...)
 }
 
+// ActivationFailureReason is the reason code an activation failure is
+// reported under: stage/class, one word from two closed lists. It is the
+// same word the fleet page groups CUTOVER_FAILING on, so the log line and
+// the first screen name a failure identically.
+//
+// The activation_failed line used to carry contract_retryable here, which
+// the normaliser folds to _other; the classification the line already had
+// in its own fields was not on the field people grep. A running deployment
+// logged two such lines a minute for half a day, each saying reason_code
+// _other beside activation_failure_class schedule_conflict.
+func ActivationFailureReason(stage ActivationFailureStage, class ActivationFailureClass) ReasonCode {
+	return ReasonCode(string(stage) + "/" + string(class))
+}
+
+// activationFailureReasons is the closed product of the two lists, so the
+// normaliser can keep every one verbatim and fold anything else.
+var activationFailureReasons = func() []ReasonCode {
+	reasons := make([]ReasonCode, 0, len(allActivationFailureStages)*len(allActivationFailureClasses))
+	for _, stage := range allActivationFailureStages {
+		for _, class := range allActivationFailureClasses {
+			reasons = append(reasons, ActivationFailureReason(stage, class))
+		}
+	}
+	return reasons
+}()
+
 func normalizeSourceRefreshFacts(component Component, stage Stage, facts *SourceRefreshFacts) *SourceRefreshFacts {
 	if facts == nil || component != ComponentControlPlane || stage != StageSnapshotRefreshed ||
 		!validSourceRefreshStatus(facts.Status) {
@@ -1998,6 +2024,9 @@ func NormalizeReason(reason ReasonCode, result Result) ReasonCode {
 	if _, ok := contractObservationReasonSet[string(reason)]; ok {
 		return reason
 	}
+	if _, ok := activationFailureReasonSet[reason]; ok {
+		return reason
+	}
 	return ReasonOther
 }
 
@@ -2223,7 +2252,7 @@ func joinReasons(groups ...[]ReasonCode) []ReasonCode {
 var allCommonReasons = joinReasons(unclassifiedReasons, contractClassReasons, []ReasonCode{ReasonOther})
 var allResourceReasons = joinReasons(
 	unclassifiedReasons, resourceOnlyReasons, contractClassReasons, []ReasonCode{ReasonOther})
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, []ReasonCode{ReasonOther})
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, []ReasonCode{ReasonOther})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
@@ -2233,6 +2262,7 @@ var metricOperationSet = makeOperationSet(metricOperations)
 var directionSet = makeDirectionSet(allDirections)
 var commonReasonSet = makeReasonSet(unclassifiedReasons)
 var resourceReasonSet = makeReasonSet(resourceOnlyReasons)
+var activationFailureReasonSet = makeReasonSet(activationFailureReasons)
 var contractObservationReasons, contractObservationReasonSet, contractObservationMetricReasonByCode = loadContractObservationReasons()
 
 func makeComponentStageSet(values []ComponentStage) map[ComponentStage]struct{} {

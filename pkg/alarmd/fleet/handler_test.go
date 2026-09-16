@@ -509,6 +509,62 @@ func TestHealthResponseCarriesTheBuildsTheReplicasRun(t *testing.T) {
 	}
 }
 
+// The verdict response names the standings it was decided on and the
+// leader's activation. Both decided DEGRADED before they were on this
+// response, and the page's one sentence then named the object list.
+func TestHealthResponseCarriesTheStandingsTheVerdictIsDecidedOn(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[0].Activation = &ActivationFacts{Applied: "bdc6ffcb", Published: "e7a1b2c3", Behind: true,
+		BehindBeyondBound: true, ConsecutiveFailures: 120, FailureStage: "schedule_cutover", FailureClass: "schedule_conflict"}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, []string{"pod-a", "pod-b"})
+
+	body := requestJSON(t, handler, "/api/health")
+	if body["health"] != "DEGRADED" {
+		t.Fatalf("health = %v, want DEGRADED from the standing alone", body["health"])
+	}
+	degradations, ok := body["degradations"].([]any)
+	if !ok || len(degradations) != 1 || degradations[0].(map[string]any)["kind"] != "ACTIVATION_BEHIND" {
+		t.Fatalf("degradations = %v, want the one ACTIVATION_BEHIND", body["degradations"])
+	}
+	activation, ok := body["activation"].(map[string]any)
+	if !ok || activation["applied"] != "bdc6ffcb" || activation["published"] != "e7a1b2c3" || activation["behind_beyond_bound"] != true {
+		t.Fatalf("activation = %v, want the leader's facts whole", body["activation"])
+	}
+	if body["activation_replica"] != "pod-a" {
+		t.Fatalf("activation_replica = %v, want pod-a", body["activation_replica"])
+	}
+
+	// Nothing degrading: an empty list and an explicit null, both present, so
+	// "no standing" and "this build has no such field" read differently.
+	plain := requestJSON(t, handlerWith(t, healthySnapshots(), Expectation{QueryGroups: 949, Known: true}, []string{"pod-a", "pod-b"}), "/api/health")
+	if list, present := plain["degradations"].([]any); !present || len(list) != 0 {
+		t.Fatalf("degradations with none = %v, want []", plain["degradations"])
+	}
+	if value, present := plain["activation"]; !present || value != nil {
+		t.Fatalf("activation with no attempt = present=%v value=%v, want explicit null", present, value)
+	}
+}
+
+// The objects response carries the first screen's arithmetic, computed once
+// on the server: the page adding lines up counted past records as work and
+// an object under two lines twice.
+func TestObjectsResponseCarriesTheTodoArithmetic(t *testing.T) {
+	handler := handlerWith(t, snapshotsWithAnomalies(3), Expectation{QueryGroups: 949, Known: true}, replicas())
+	_, body := get(t, handler, "/api/objects?limit=1")
+	todo, ok := body["todo"].(map[string]any)
+	if !ok {
+		t.Fatalf("objects response carries no todo: %v", body)
+	}
+	if todo["checks"].(float64) < 1 || todo["objects"].(float64) != 3 {
+		t.Fatalf("todo = %v, want at least one line and the 3 distinct anomalous objects", todo)
+	}
+	for _, field := range []string{"retained", "retained_last_hour", "governance", "governance_objects"} {
+		if _, present := todo[field]; !present {
+			t.Fatalf("todo is missing %q, which the first screen reads: %v", field, todo)
+		}
+	}
+}
+
 // A deployment whose replicas report no capacity must say so rather than
 // omitting the block, because the page tells those apart and an operator
 // reading "no replica reported capacity" is being told something true.

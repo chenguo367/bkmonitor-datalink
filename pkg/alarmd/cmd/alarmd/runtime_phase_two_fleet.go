@@ -208,6 +208,11 @@ type fleetPublisher struct {
 	// refresh. Nil on a bundle that has none, and the snapshot then carries
 	// no facts.
 	controlSource func() *fleet.ControlSourceFacts
+	// activation reports the control leader's standing on bringing the
+	// fleet's activation to the current publication. Nil on a replica that
+	// has not attempted it, which is every follower; the aggregate then
+	// takes the one replica that has.
+	activation func() *fleet.ActivationFacts
 	// platformSettings reports the state of this replica's copy of the
 	// platform's settings. Nil on a bundle that has none.
 	platformSettings func() *fleet.PlatformSettingsFacts
@@ -392,6 +397,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.platformSettings != nil {
 		snapshot.PlatformSettings = publisher.platformSettings()
 	}
+	if publisher.activation != nil {
+		snapshot.Activation = publisher.activation()
+	}
 	// And the objects whose rounds end without a basis to decide recovery.
 	// Beside the anomalies for a different reason than the pool: not "this is
 	// somebody else's fault" but "this is not a fault". Counting them as
@@ -410,6 +418,18 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// objects are running normally now, and the loss is in their past.
 	snapshot.PrunedSkips = publisher.tracker.PrunedSkips()
 	snapshot.GapSkips = publisher.tracker.GapSkips()
+	// The strategies behind each retained record, so a row built from it can
+	// be traced to something a reader can act on.
+	if publisher.strategies != nil {
+		for queryGroup, skip := range snapshot.PrunedSkips {
+			skip.Strategies = publisher.strategies(queryGroup)
+			snapshot.PrunedSkips[queryGroup] = skip
+		}
+		for queryGroup, skip := range snapshot.GapSkips {
+			skip.Strategies = publisher.strategies(queryGroup)
+			snapshot.GapSkips[queryGroup] = skip
+		}
+	}
 	// And the objects whose data stopped: rounds completing, nothing coming
 	// back. In no column, and on the data side's line.
 	snapshot.NoData = publisher.tracker.NoData()

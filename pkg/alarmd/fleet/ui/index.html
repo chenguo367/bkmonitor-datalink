@@ -28,11 +28,19 @@ h1{font-size:15px;margin:0 0 2px}
 .verdict .why{color:var(--muted)}
 .s{display:inline-block;padding:0 6px;border-radius:3px;color:#fff;font-weight:600;
   font-size:11px;line-height:1.7;vertical-align:1px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+/* auto-fill, not auto-fit: every grid on the page gets the same track width
+   from the same container width, so a card in a four-card row is the same
+   width as one in a seven-card row and the numbers line up in columns down
+   the page. auto-fit stretched each row's cards to fill it, and the numbers
+   drifted by row. */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px}
 .cell{border:1px solid var(--line);border-radius:5px;padding:8px 10px}
+.cell.wide{grid-column:span 2}
 .cell .k{color:var(--muted);font-size:11px}
-.cell .v{font-size:19px;font-variant-numeric:tabular-nums}
+.cell .k:first-child{min-height:15px}
+.cell .v{font-size:19px;line-height:1.3;min-height:1.3em;font-variant-numeric:tabular-nums}
 .cell.hl .v{color:var(--warn)}
+.next{color:var(--muted);font-size:11px;margin-top:2px}
 .rec{max-height:340px;overflow:auto;background:var(--bg2,#0d1117);border:1px solid var(--line);
   border-radius:5px;padding:8px 10px;font-size:11px;line-height:1.6;white-space:pre-wrap;word-break:break-all}
 .run{border:1px solid var(--line);border-radius:5px;margin-top:8px}
@@ -170,6 +178,7 @@ details.group table{margin:6px 0 0 12px}
          totals are then a mix that no single build produced. -->
     <p class="basis" id="buildLine"></p>
     <div class="brief">
+      <p id="briefAction"></p>
       <p id="briefSchedule"></p>
       <p id="briefTodo"></p>
       <p id="briefBlind"></p>
@@ -199,7 +208,7 @@ details.group table{margin:6px 0 0 12px}
         <div class="v" id="unattributed">–</div>
         <div class="k" id="unattributedHint"></div>
       </div>
-      <div class="cell hl" id="overdueCell" hidden>
+      <div class="cell hl wide" id="overdueCell" hidden>
         <div class="k">没被调度 (overdue)</div>
         <div class="v" id="overdue">–</div>
         <div class="k" id="overdueHint"></div>
@@ -209,7 +218,7 @@ details.group table{margin:6px 0 0 12px}
       <div class="cell"><div class="k">应有 (expected)</div><div class="v" id="expected">–</div></div>
       <div class="cell"><div class="k">已覆盖 (covered)</div><div class="v" id="covered">–</div></div>
       <div class="cell"><div class="k">已知状态 (determined)</div><div class="v" id="determined">–</div></div>
-      <div class="cell">
+      <div class="cell wide">
         <div class="k">出过降级池</div>
         <div class="v" id="poolExits">–</div>
         <div class="k" id="poolFlowHint"></div>
@@ -258,6 +267,13 @@ details.group table{margin:6px 0 0 12px}
       <tbody id="checkRows"></tbody>
     </table>
     <div class="empty" id="checksEmpty" hidden>现在没有需要 alarmd 这边处理的问题。</div>
+    <!-- Past loss, kept on record until somebody looks, apart from what is
+         wrong now. Mixed into the lines above it read as 393 objects to act
+         on when 10 were anomalous and the rest were Slots skipped hours ago. -->
+    <details class="more" id="historyFold">
+      <summary>曾经漏检（留存记录，不会自己消失）——<span id="historyCount"></span></summary>
+      <table><tbody id="historyRows"></tbody></table>
+    </details>
     <details class="more">
       <summary>运营治理：已确认是数据侧或策略侧的问题——<span id="govCount"></span></summary>
       <table><tbody id="govRows"></tbody></table>
@@ -553,6 +569,10 @@ var OWNER = {ALARMD: 'alarmd', DATA: '数据侧', STRATEGY: '策略侧', NOBODY:
 // which check an object is under and folds the objects; the page substitutes
 // the counts. {n} objects, {g} groups, {s} strategies, {b} businesses.
 var CHECK = {
+  // The two standings. {since}, {c}, {applied} and {published} come from the
+  // leader's activation facts on the report, not from counts.
+  CUTOVER_FAILING:       '控制面变更自 {since} 起没有生效：连续 {c} 轮激活失败（{g} 种原因），舰队在执行 {applied} 的内容，源已到 {published}',
+  REPLICA_DEGRADED:      '{g} 种副本级运行状态超出设计界，判定因此降级',
   SLOTS_OVERDUE:         '{n} 个对象到期没跑',
   NEVER_EVALUATED:       '{n} 个对象接管后从未评估',
   ROUNDS_STALLED:        '{n} 个对象的轮次不再结束，不会自己恢复',
@@ -563,6 +583,7 @@ var CHECK = {
   OBSERVATION_GAP:       '{n} 个对象现在说不出结论（{g} 种原因）',
   BACKEND_NOT_ANSWERING: '查询后端没有应答，{n} 个对象受影响（{g} 种症状，{s} 条策略）',
   QUERY_REFUSED:         '后端拒绝了 {n} 个对象的查询（{g} 种原因，{b} 个业务）——不是后端挂，是查询本身或策略引用的表字段',
+  QUERY_TARGET_MISSING:  '{n} 个对象的策略引用了后端说不存在的表或字段（{g} 种回答，{s} 条策略，{b} 个业务）——后端读了查询并明确拒绝',
   NO_DATA_PERSISTENT:    '{n} 个对象持续没有数据（{s} 条策略）',
   SERIES_CHURNING:       '{n} 个对象的序列活不过检测窗口（{s} 条策略），恢复判不了',
   SERIES_DATA_MISSING:   '{n} 个对象的老序列在缺点（{s} 条策略），恢复判不了',
@@ -572,24 +593,105 @@ var CHECK = {
 };
 
 // What the objects of a check are folded on, in words.
-var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况'};
+var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况',
+                degradation: '超界的状态'};
+
+// The replica-level standings, in words. Held to the Go list.
+var DEGRADATION = {
+  ACTIVATION_BEHIND: '控制面变更没有生效：源发布了新内容，激活跟不上去，舰队在执行旧发布',
+  CONTROL_SOURCE_STALE: '策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录',
+  CONTROL_LEADER_ABSENT: '副本拿不到控制面 leader 租约、也不知道谁持有，超过设计允许的时间——可能没人在刷新',
+  OPEN_ALERT_SET_STALE: '已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识',
+  PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置'
+};
+
+// What to do about each check, one sentence, held to the Go list. The line
+// says what happened; a reader who opened a group still asked "so what do I
+// do". This is the third of the three things a line owes (发生了什么、影响什么、
+// 下一步做什么), and it is per check, not per object.
+var NEXT = {
+  CUTOVER_FAILING:       '先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效',
+  REPLICA_DEGRADED:      '按种类处理：源过期看策略源刷新，leader 缺席看租约，告警集合/平台设置过期看对应发布者',
+  SLOTS_OVERDUE:         '看该副本是否卡住或过载：展开看对象与超期多久；持续增长就是容量或调度问题',
+  NEVER_EVALUATED:       '展开看接管后多久没跑；接管不久可等，超过一个周期就查该副本的调度',
+  ROUNDS_STALLED:        '不会自己恢复：展开找对象，查它卡在哪一步（日志按 query_group_key），必要时重启副本',
+  DETECTION_ABANDONED:   '当前有的：查为什么追不上（容量、查询慢）；留存记录只记损失，不用处理，看"曾经漏检"里的最近新增',
+  TIMELINE_PRUNED:       '留存记录，那段永久没检测；要处理的是让它不再发生：看游标为什么落后到被剪',
+  DEPENDENCY_DOWN:       '按原因码看是哪个依赖（Redis/Kafka/后端）；依赖恢复后自动清',
+  DEFECT:                '程序缺陷：带原因码上报，展开取一个对象的证据',
+  OBSERVATION_GAP:       '先等：成因缺失的对象各自再跑一轮就补上（行上有预计时刻）；副本级缺口看该副本快照',
+  QUERY_REFUSED:         '展开看后端回答：分不出是查询还是策略时，取一个对象的原始请求核',
+  WINDOW_UNDECIDED:      '按"情况"分组看：检测用不了的看原因码；新老序列混合的等窗口填满',
+  CONFIG_UNRESOLVED:     '按策略看：配置状态说不清，先核该策略最近有没有改',
+  BACKEND_NOT_ANSWERING: '交数据侧：按症状分组给后端负责人；alarmd 已降频不再反复查',
+  NO_DATA_PERSISTENT:    '交数据侧：按策略看是数据停了还是采集停了',
+  SERIES_DATA_MISSING:   '交数据侧：老序列在缺点，按策略给数据负责人',
+  SERIES_CHURNING:       '交策略侧：序列活不过检测窗口，通常是聚合维度太细',
+  PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略',
+  QUERY_TARGET_MISSING:  '交策略侧：策略引用的表或字段不存在，改策略或接入数据；已降级的对象修好后会自动重试'
+};
 
 // The two dimensions each object row shows, in words. Held to the Go lists.
 var SCHEDULE = {NEW: '接管后未跑', ON_TIME: '等下次', LATE: '迟到', OVERDUE: '超期', PAUSED: '生效时段外',
                 STALLED: '轮次不结束', COOLING: '冷却中'};
 var RESULT = {COMPLETED: '完成', ERROR: '失败', REFUSED: '被拒绝', NO_DATA: '无数据'};
 
-function checkSentence(report) {
+// count is which of the line's objects the sentence is about: what is wrong
+// now, or what is on record. The same line can be in both sections with a
+// different number in each.
+function checkSentence(report, count) {
   var words = CHECK[report.code];
   if (!words) {
     // Loudly. A check this table has no words for is a defect, and a blank
     // line on the first screen reads as "nothing here".
     return '（页面没有这条检查项的文案：' + report.code + '，请上报）';
   }
-  return words.replace('{n}', String(report.objects || 0))
+  if (count === undefined) count = report.objects || 0;
+  var activation = report.activation || {};
+  var since = activation.failing_seconds_this_process
+    ? momentLabel(new Date(Date.now() - activation.failing_seconds_this_process * 1000).toISOString()) : '（未知时刻）';
+  // Objects this deployment already stopped re-querying, said on the line
+  // because the pool card says it of the pool and the two must agree.
+  var demoted = report.demoted && count === (report.current || 0)
+    ? '；其中 ' + report.demoted + ' 个已降级，不再反复查' : '';
+  return words.replace('{n}', String(count))
     .replace('{g}', String((report.groups || []).length))
     .replace('{s}', String(report.strategies || 0))
-    .replace('{b}', String(report.businesses || 0));
+    .replace('{b}', String(report.businesses || 0))
+    .replace('{c}', String(activation.consecutive_failures || 0))
+    .replace('{since}', since)
+    .replace('{applied}', shortRevision(activation.applied))
+    .replace('{published}', shortRevision(activation.published)) + demoted;
+}
+
+// The standings in words, each once with its replicas: two replicas past the
+// same bound are one kind, not two.
+function degradationWords(degradations) {
+  var byKind = {};
+  var order = [];
+  degradations.forEach(function (d) {
+    if (!byKind[d.kind]) { byKind[d.kind] = []; order.push(d.kind); }
+    if (d.replica) byKind[d.kind].push(shortReplica(d.replica));
+  });
+  return order.map(function (kind) {
+    return (DEGRADATION[kind] || kind) + (byKind[kind].length ? '（副本 ' + byKind[kind].join('、') + '）' : '');
+  }).join('；');
+}
+
+// When the record was made: what a reader can still act on is the part that
+// was just added, so the newest and the last hour are said, not only the
+// total.
+function historyClause(report) {
+  var parts = [];
+  if (report.retained_last_hour) parts.push('最近 1 小时新增 ' + report.retained_last_hour + ' 个');
+  else parts.push('最近 1 小时没有新增');
+  if (report.retained_newest) parts.push('最新一条 ' + momentLabel(report.retained_newest));
+  return '——' + parts.join('，');
+}
+
+function shortRevision(revision) {
+  if (!revision) return '（未知）';
+  return String(revision).slice(0, 8);
 }
 
 // The running brief: three sentences, each answering one question. The first
@@ -695,7 +797,7 @@ function scheduleSentence(deployment) {
   if (!census) {
     // No replica has a due index, so nothing here can say whether the work is
     // on time. Said as such rather than as "on time".
-    return '执行情况：没有副本带到期索引，说不出是否按时';
+    return '执行情况：没有副本带到期索引，说不出是否按时' + activationClause(deployment.activation);
   }
   var standing = scheduleStanding(census);
   var rate1h = standing.rate1h;
@@ -720,54 +822,123 @@ function scheduleSentence(deployment) {
   if (census.never) now.push(census.never + ' 个接管后还没跑第一轮');
   if (now.length) parts.push('现在 ' + now.join('、'));
   if (census.missing_period) parts.push(census.missing_period + ' 个对象周期未知，迟到没法判超期');
-  return '执行情况：' + (behind ? '跟不上' : (census.overdue ? '有超期但在追' : '跟得上')) + '——' + parts.join('；');
+  return '执行情况：' + (behind ? '跟不上' : (census.overdue ? '有超期但在追' : '跟得上')) + '——' + parts.join('；')
+    + activationClause(deployment.activation);
 }
+
+// Whether the work being done on time is the current work. On time and on a
+// stale publication are both true at once when the activation cannot follow
+// the source, and the first sentence said only the first.
+function activationClause(activation) {
+  if (!activation || !activation.behind_beyond_bound) return '';
+  var since = activation.failing_seconds_this_process
+    ? momentLabel(new Date(Date.now() - activation.failing_seconds_this_process * 1000).toISOString()) : '（未知时刻）';
+  return '。但控制面变更自 ' + since + ' 起没有生效：舰队在执行 ' + shortRevision(activation.applied)
+    + ' 的内容，源已到 ' + shortRevision(activation.published) + '，连续 ' + (activation.consecutive_failures || 0) + ' 轮激活失败';
+}
+
+var latestTodo = null;
 
 function loadChecks() {
   // The checks ride on the object list response; one row is asked for so the
   // response is small, and the rows themselves are fetched per group.
   return api('objects?limit=1').then(function (objects) {
     show('objErr', false);
+    latestTodo = objects.todo || null;
     renderChecks(objects.checks || []);
   }).catch(function (e) { fail('objErr', e); });
 }
 
-// The first screen: the checks this reader acts on, and, folded away, the ones
-// already confirmed as somebody else's.
+// A line is a standing of the deployment itself, with no objects under it.
+function isStanding(report) {
+  return report.code === 'CUTOVER_FAILING' || report.code === 'REPLICA_DEGRADED';
+}
+
+// The first screen: the checks this reader acts on now; folded away, the
+// record of past loss and the ones already confirmed as somebody else's.
+//
+// Three sections, three numbers, from the server's arithmetic (todo) rather
+// than by adding lines up: the sum of every line's objects counted past
+// losses as work and an object under two lines twice, and read as "需要处理
+// 768 个对象" over a deployment with a few dozen objects wrong.
 function renderChecks(checks) {
   latestChecks = checks || [];
   var todo = [];
+  var history = [];
   var governance = [];
   latestChecks.forEach(function (report) {
-    (report.owner === 'ALARMD' || report.owner === 'UNDETERMINED' ? todo : governance).push(report);
+    var ours = report.owner === 'ALARMD' || report.owner === 'UNDETERMINED';
+    if (report.retained) history.push(report);
+    if (!ours) governance.push(report);
+    else if ((report.current || 0) > 0 || isStanding(report)) todo.push(report);
   });
-  fillCheckRows(document.getElementById('checkRows'), todo);
+  fillCheckRows(document.getElementById('checkRows'), todo, 'current');
   show('checksEmpty', todo.length === 0);
-  fillCheckRows(document.getElementById('govRows'), governance);
+  fillCheckRows(document.getElementById('historyRows'), history, 'retained');
+  show('historyFold', history.length > 0);
+  fillCheckRows(document.getElementById('govRows'), governance, 'objects');
   show('govEmpty', governance.length === 0);
-  var sum = function (list) { return list.reduce(function (n, r) { return n + (r.objects || 0); }, 0); };
-  text('govCount', governance.length ? governance.length + ' 类，' + sum(governance) + ' 个对象' : '没有');
+  var t = latestTodo || {checks: todo.length, objects: 0, retained: 0, retained_last_hour: 0,
+                          governance: governance.length, governance_objects: 0};
+  text('govCount', governance.length ? t.governance + ' 类，' + t.governance_objects + ' 个对象' : '没有');
+  text('historyCount', history.length
+    ? t.retained + ' 个对象' + (t.retained_last_hour ? '，最近 1 小时新增 ' + t.retained_last_hour + ' 个' : '，最近 1 小时没有新增')
+      + (t.retained_newest ? '，最新 ' + momentLabel(t.retained_newest) : '')
+    : '没有');
   text('briefTodo', todo.length
-    ? '需要处理：' + todo.length + ' 类问题，影响 ' + sum(todo) + ' 个对象'
-    : '需要处理：现在没有需要 alarmd 这边处理的问题');
+    ? '需要处理：' + t.checks + ' 类检查项，当前影响 ' + t.objects + ' 个对象（去重）'
+      + (t.retained ? '；曾经漏检 ' + t.retained + ' 个对象另列' + (t.retained_last_hour ? '，最近 1 小时新增 ' + t.retained_last_hour : '') : '')
+    : '需要处理：现在没有需要 alarmd 这边处理的问题'
+      + (t.retained ? '；曾经漏检 ' + t.retained + ' 个对象另列' + (t.retained_last_hour ? '，最近 1 小时新增 ' + t.retained_last_hour : '') : ''));
+  text('briefAction', actionSentence(todo, history, governance, t));
   if (openCheck && !latestChecks.some(function (r) { return r.code === openCheck; })) {
     openCheck = '';
   }
   renderGroups();
 }
 
-function fillCheckRows(host, reports) {
-  host.textContent = '';
-  reports.forEach(function (report) { host.appendChild(checkRow(report)); });
+// One conclusion before the evidence. The lines are in the order the reader
+// acts, so the first one is the thing to do; the other sections are named so
+// the reader knows they were weighed and not hidden. The page used to give
+// three sentences that each stood, and left combining them to the reader.
+function actionSentence(todo, history, governance, t) {
+  if (todo.length) {
+    var first = todo[0];
+    return '现在要做的：' + (NEXT[first.code] || first.code) + '（' + checkSentence(first, first.current) + '）'
+      + (todo.length > 1 ? '；之后还有 ' + (todo.length - 1) + ' 类，按顺序在下面' : '');
+  }
+  var parts = ['现在要做的：alarmd 这边没有要处理的'];
+  if (t.retained_last_hour) {
+    parts.push('但最近 1 小时新增了 ' + t.retained_last_hour + ' 个漏检记录，先看"曾经漏检"里最新的是谁、漏了哪段');
+  }
+  if (governance.length) {
+    parts.push('运营治理 ' + governance.length + ' 类交对应负责人');
+  }
+  return parts.join('；');
 }
 
-// One line of the first screen: the sentence, who acts, and whether the count
-// is a sample.
-function checkRow(report) {
+// which is the count the sentence is about: 'current' for the todo list,
+// 'retained' for the record, 'objects' for governance.
+function fillCheckRows(host, reports, which) {
+  host.textContent = '';
+  reports.forEach(function (report) { host.appendChild(checkRow(report, which)); });
+}
+
+// One line of the first screen: the sentence, what to do, who acts, and
+// whether the count is a sample.
+function checkRow(report, which) {
   var tr = document.createElement('tr');
   if (report.code === openCheck) tr.className = 'openrow';
   var what = document.createElement('td');
-  what.textContent = checkSentence(report);
+  var count = which === 'retained' ? report.retained : (which === 'current' ? report.current : report.objects);
+  what.appendChild(document.createTextNode(checkSentence(report, count)));
+  if (which === 'retained') {
+    what.appendChild(document.createTextNode(historyClause(report)));
+  }
+  var next = document.createElement('div');
+  next.className = 'next';
+  next.textContent = '下一步：' + (NEXT[report.code] || '（页面没有这条检查项的下一步：' + report.code + '，请上报）');
+  what.appendChild(next);
   what.title = report.code;
   what.style.cursor = 'pointer';
   what.addEventListener('click', function () {
@@ -800,15 +971,25 @@ function renderGroups() {
   if (!report) return;
   text('detailTitle', checkSentence(report));
   text('detailBasis', '按' + (GROUP_BY[report.group_by] || report.group_by || '分组键') + '合并；展开一组看对象。'
-    + (report.partial ? '有副本没能发布完整清单，这里是样本。' : ''));
+    + (report.partial ? '有副本没能发布完整清单，这里是样本。' : '')
+    // The standing's own evidence: what the last failed attempt said, and the
+    // two series that corroborate it from outside this page.
+    + (report.activation
+        ? '最近一次激活失败：' + (report.activation.last_failure || '（没有文本）')
+          + '（副本 ' + shortReplica(report.replica || '') + '）。伴随证据：segment_content_freshness_total{stale}、'
+          + 'schedule_cutover_total{result,reason}、日志 stage activation_failed。'
+        : ''));
   (report.groups || []).forEach(function (group) {
     var key = report.code + '|' + group.key;
     var details = document.createElement('details');
     details.className = 'more group';
     var label = document.createElement('summary');
-    var parts = [group.key];
-    // A fold with no objects behind it is a replica-level hole, not a list.
-    parts.push(group.objects ? group.objects + ' 个对象' : '副本级缺口，没有可列的对象');
+    var parts = [DEGRADATION[group.key] ? group.key + '（' + DEGRADATION[group.key] + '）' : group.key];
+    // A fold with no objects behind it is a replica-level fact, not a list:
+    // a coverage hole, or a standing, which names its replicas instead.
+    if (group.objects) parts.push(group.objects + ' 个对象');
+    else if (group.replicas && group.replicas.length) parts.push('副本 ' + group.replicas.map(shortReplica).join('、') + '，没有可列的对象');
+    else parts.push('副本级缺口，没有可列的对象');
     if (group.strategies) parts.push(group.strategies + ' 条策略');
     if (group.businesses) parts.push(group.businesses + ' 个业务');
     label.textContent = parts.join(' · ');
@@ -903,6 +1084,12 @@ function objectRow(anomaly) {
     if (finding.schedule === 'LATE' || finding.schedule === 'OVERDUE') {
       nowWord += ' ' + elapsedLabel((Date.now() - new Date(wake.due_at).getTime()) / 1000);
     }
+  }
+  // A round that keeps failing on one Slot is stuck on it; said here, on
+  // the cell that answers "what is it doing now", with the count.
+  var lastError = anomaly.last_error;
+  if (lastError && lastError.evaluation_time && lastError.attempts > 1) {
+    nowWord += ' · 卡在 ' + momentLabel(lastError.evaluation_time * 1000) + ' 这个 Slot，第 ' + lastError.attempts + ' 次失败';
   }
   var now = cell(nowWord);
   if (wake && wake.known && wake.interval_seconds) {
@@ -1003,6 +1190,16 @@ function objectRow(anomaly) {
     line('后端症状', symptomText(f.detail), f.detail);
     line('失败在哪', FAILURE_CATEGORY[f.category] || f.category,
       ['阶段 ' + f.stage, '分类 ' + f.category, f.code ? '代码 ' + f.code : ''].filter(Boolean).join('\n'));
+  }
+  // The error's own words, without opening a window and waiting for one
+  // more failure. The classification lines above say what kind; this says
+  // what exactly, and which Slot.
+  if (lastError) {
+    line('最近一次错误', lastError.text + (lastError.type ? '（' + lastError.type + '）' : '')
+      + (lastError.evaluation_time ? '，Slot ' + momentLabel(lastError.evaluation_time * 1000) : '')
+      + (lastError.attempts > 1 ? '，同一 Slot 连续 ' + lastError.attempts + ' 次' : '')
+      + '，' + momentLabel(lastError.at),
+      '这一轮返回的原始错误，已脱敏并截断到 256 字。同一 Slot 连续失败次数区分"卡住"和"每轮换一个 Slot 失败"');
   }
   var skip = anomaly.skip;
   if (skip) {
@@ -1252,6 +1449,7 @@ function renderDeployment(deployment) {
     // gaps, unknown-state zero and every column adding up, and this line told
     // the reader "证据齐全" underneath it: the page asserting the opposite of
     // its own badge, with nothing on it that could settle the argument.
+    var degradations = deployment.degradations || [];
     text('why', gaps.length
       ? '证据不全：' + (GAP_MEANING[gaps[0].kind] || gaps[0].kind) +
         (gaps.length > 1 ? '，另有 ' + (gaps.length - 1) + ' 项' : '')
@@ -1263,8 +1461,16 @@ function renderDeployment(deployment) {
       // The verdict follows only the objects capacity or design could have
       // prevented, so the wording has to say that -- otherwise HEALTHY beside a
       // list of ninety-nine objects reads as the page contradicting itself.
+      //
+      // A replica-level standing decides DEGRADED before the object list is
+      // consulted, and this sentence used to name the object list anyway:
+      // half a day of a fleet executing a stale publication read here as
+      // "容量或架构". The standing is named first when there is one.
       : (h === 'DEGRADED'
-          ? '证据齐全，存在 alarmd 自己该负责的异常（容量或架构）'
+          ? (degradations.length
+              ? '证据齐全，副本级运行状态超出设计界：' + degradationWords(degradations)
+                + '。对象列表不决定这次判定；看首屏第一行'
+              : '证据齐全，存在 alarmd 自己该负责的异常（容量或架构）')
           : (deployment.anomalies_total > 0
               ? '证据齐全，alarmd 自己没有异常；列表里那些是数据源或策略配置的问题，由对应负责人处理'
               : '证据齐全，无异常对象'))));

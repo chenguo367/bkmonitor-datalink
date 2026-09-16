@@ -230,6 +230,23 @@ type FailureRef struct {
 	Detail string `json:"detail,omitempty"`
 }
 
+// LastError is the last error a round of this object returned.
+//
+// Text is the error's own words, sanitised and bounded by the same limit the
+// control source's failure text is; Type is the Go type that carried it,
+// which is what tells a wrapped contract failure from a transport error when
+// the words do not. EvaluationTime is the Slot the round was on, and
+// Attempts how many rounds in a row have failed on that same Slot -- a round
+// that keeps failing on one Slot is stuck, a round that fails on each new
+// Slot is unlucky, and the count is the difference.
+type LastError struct {
+	Text           string    `json:"text"`
+	Type           string    `json:"type,omitempty"`
+	EvaluationTime int64     `json:"evaluation_time,omitempty"`
+	At             time.Time `json:"at"`
+	Attempts       int       `json:"attempts"`
+}
+
 // HistoryCoverage is how far short of the required detection window this
 // object's series were, and for how many consecutive rounds.
 //
@@ -504,6 +521,14 @@ type Anomaly struct {
 	Consecutive int         `json:"consecutive,omitempty"`
 	Replica     string      `json:"replica"`
 	Failure     *FailureRef `json:"failure,omitempty"`
+	// LastError is the last round that returned an error, verbatim: what it
+	// said, which Slot it was on, and how many rounds in a row that same Slot
+	// has failed. The classification above answers "what kind"; this answers
+	// "what exactly", which is what a reader needed a diagnostic window and
+	// one more failure to learn. Two objects stuck on a gap-guard conflict
+	// were located from raw logs and source while the page said only which
+	// two.
+	LastError *LastError `json:"last_error,omitempty"`
 	// Stalled says the rounds have been failing to finish for longer than the
 	// deployment's own budget for terminating an unfinishable Slot. The
 	// distinction it draws is the one that decides whether anyone has to act: a
@@ -664,6 +689,60 @@ type Snapshot struct {
 	// PlatformSettings is the state of this replica's copy of the platform's
 	// settings it evaluates by. Absent on a build before it existed.
 	PlatformSettings *PlatformSettingsFacts `json:"platform_settings,omitempty"`
+	// Activation is the standing of bringing the fleet's activation to the
+	// current publication, as the control leader reports it. Absent on every
+	// replica that has not attempted it, which is every follower, and on a
+	// build before this fact existed.
+	Activation *ActivationFacts `json:"activation,omitempty"`
+}
+
+// ActivationFacts is what the control leader says about the activation --
+// the content the fleet executes -- against the publication the source last
+// produced. Behind is Published != Applied: the fleet is executing content
+// that is not the current publication. BehindBeyondBound is the one fact the
+// verdict reads: it has been so for longer than the staleness the design
+// accepts for the source itself.
+//
+// The source's own clock cannot see this. A source that publishes every
+// round while the activation fails to follow it reads fresh there; on a
+// running deployment that hid a fleet executing a half-day-old publication
+// behind a verdict that named nothing.
+type ActivationFacts struct {
+	Applied        string `json:"applied"`
+	AppliedEpoch   uint64 `json:"applied_epoch,omitempty"`
+	Published      string `json:"published"`
+	PublishedEpoch uint64 `json:"published_epoch,omitempty"`
+	// Behind is Published != Applied after the last attempt.
+	Behind            bool `json:"behind"`
+	BehindBeyondBound bool `json:"behind_beyond_bound"`
+	// ConsecutiveFailures is how many attempts in a row have failed; zero
+	// after a success.
+	ConsecutiveFailures int `json:"consecutive_failures"`
+	// LastSuccessAgeSeconds is how long since this process last brought the
+	// activation to the publication; absent until it has once.
+	// FailingSecondsThisProcess is how long the current run of failures has
+	// lasted; absent while succeeding. Both this process only: a leader
+	// change resets them, which is why the row says which replica speaks.
+	LastSuccessAgeSeconds     *float64 `json:"last_success_age_seconds,omitempty"`
+	FailingSecondsThisProcess *float64 `json:"failing_seconds_this_process,omitempty"`
+	// FailureStage and FailureClass are the bounded classification of the
+	// last failed attempt -- the same words as the activation_failed log
+	// line -- and LastFailure its text, bounded. Empty after a success.
+	FailureStage string `json:"failure_stage,omitempty"`
+	FailureClass string `json:"failure_class,omitempty"`
+	LastFailure  string `json:"last_failure,omitempty"`
+}
+
+// Reason is the classification as one word, for grouping: the same word the
+// activation_failed log line carries as reason_code, from the same function,
+// so the line and the page cannot name a failure differently. "unclassified"
+// when the failure carried none.
+func (facts ActivationFacts) Reason() string {
+	if facts.FailureStage == "" && facts.FailureClass == "" {
+		return "unclassified"
+	}
+	return string(observability.ActivationFailureReason(
+		observability.ActivationFailureStage(facts.FailureStage), observability.ActivationFailureClass(facts.FailureClass)))
 }
 
 // PlatformSettingsFacts is what a replica says about its copy of the
@@ -759,7 +838,22 @@ const (
 	// computing-platform switch or a disk filter the platform may have
 	// changed, and nothing on the object list shows that.
 	DegradationPlatformSettingsStale DegradationKind = "PLATFORM_SETTINGS_STALE"
+	// DegradationActivationBehind: the control leader has been unable to
+	// bring the activation to the current publication for longer than the
+	// staleness bound, so the fleet executes content that is no longer what
+	// the source published -- every strategy change since is not in it. The
+	// source clock cannot see this: the source published every round. On a
+	// running deployment this went unseen for half a day, with the failure
+	// text sitting on every snapshot and nothing reading it.
+	DegradationActivationBehind DegradationKind = "ACTIVATION_BEHIND"
 )
+
+// DegradationKinds is the closed set, for the page's wording table and the
+// check that folds them.
+var DegradationKinds = []DegradationKind{
+	DegradationActivationBehind, DegradationControlSourceStale, DegradationControlLeaderAbsent,
+	DegradationOpenAlertSetStale, DegradationPlatformSettingsStale,
+}
 
 // Degradation is one replica-level reason the deployment is degraded.
 type Degradation struct {
@@ -1049,6 +1143,11 @@ type View struct {
 	// first. One entry is a deployment that agrees with itself; more is a
 	// rollout, finished or not, and every total above is then a mix.
 	Builds []BuildGroup `json:"builds"`
+	// Activation is the control leader's standing on bringing the fleet's
+	// activation to the current publication, and ActivationReplica which
+	// replica said so. Absent when no counted replica has attempted it.
+	Activation        *ActivationFacts `json:"activation,omitempty"`
+	ActivationReplica string           `json:"activation_replica,omitempty"`
 }
 
 // Aggregate folds the published snapshots into one view.
@@ -1154,6 +1253,17 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			}
 			if snapshot.ControlSource.LeaderAbsentBeyondBound {
 				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationControlLeaderAbsent, Replica: replica})
+			}
+		}
+		if snapshot.Activation != nil {
+			// The leader's standing is the deployment's: only one replica
+			// attempts activation, and what it reports is what every replica
+			// executes. Kept whole, not summarised, so the page can say which
+			// publication is running and which one is not.
+			view.Activation = snapshot.Activation
+			view.ActivationReplica = replica
+			if snapshot.Activation.BehindBeyondBound {
+				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationActivationBehind, Replica: replica})
 			}
 		}
 		perReplica := ReplicaView{
@@ -1623,6 +1733,8 @@ type PrunedSkip struct {
 	// Replica is the replica that applied the skip, so the record can be folded
 	// with the rest of that replica's lines.
 	Replica string `json:"replica,omitempty"`
+	// Strategies, as on SkippedSpan.
+	Strategies []StrategyRef `json:"strategies,omitempty"`
 }
 
 // SkippedSpan is a run of Slots one object skipped because they had fallen
@@ -1636,6 +1748,11 @@ type SkippedSpan struct {
 	// At is when the last skip in the run happened.
 	At      time.Time `json:"at"`
 	Replica string    `json:"replica,omitempty"`
+	// Strategies is what the object evaluates, as the publisher knew it. A
+	// retained record without them rendered as a row with an empty strategy
+	// column, and a row nobody can trace to a strategy is a row nobody can
+	// act on.
+	Strategies []StrategyRef `json:"strategies,omitempty"`
 }
 
 // Spanning is how long the skipped span covers. It is a duration rather than a

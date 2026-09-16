@@ -211,12 +211,56 @@ func TestThePageHasWordingForEveryCheckOwnerScheduleAndResult(t *testing.T) {
 			}
 		}
 	}
-	// And the table is the size the design says: the first screen is sixteen
-	// lines at most, and a seventeenth sentence here is a seventeenth check.
+	// And the table is the size the design says: the first screen is
+	// nineteen lines at most, and a twentieth sentence here is a twentieth
+	// check.
 	entries := regexp.MustCompile(`(?m)^  [A-Z_]+:`).FindAllString(
 		regexp.MustCompile(`var CHECK = \{([\s\S]*?)\};`).FindStringSubmatch(body)[1], -1)
-	if len(entries) != 16 {
-		t.Errorf("CHECK has %d sentences, want 16", len(entries))
+	if len(entries) != 19 {
+		t.Errorf("CHECK has %d sentences, want 19", len(entries))
+	}
+	// And what to do about each, one per check and none for a check that
+	// does not exist: a line without a next step is the reader asking "so
+	// what do I do", which is the question the line exists to answer.
+	next := regexp.MustCompile(`var NEXT = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+	if next == nil {
+		t.Fatal("the page has no NEXT table")
+	}
+	stepped := map[string]bool{}
+	for _, entry := range regexp.MustCompile(`(?m)^  ([A-Z_]+):`).FindAllStringSubmatch(next[1], -1) {
+		stepped[entry[1]] = true
+	}
+	for _, name := range checkNames() {
+		if !stepped[name] {
+			t.Errorf("NEXT has no step for %s: the line would say what happened and not what to do", name)
+		}
+	}
+	for name := range stepped {
+		if !containsString(checkNames(), name) {
+			t.Errorf("NEXT has a step for %s, which the server never sends", name)
+		}
+	}
+	// The replica-level standings have words too, one per kind the Go side
+	// can produce, and none the Go side cannot.
+	kinds := map[string]bool{}
+	for _, kind := range fleet.DegradationKinds {
+		kinds[string(kind)] = true
+	}
+	table := regexp.MustCompile(`var DEGRADATION = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+	if table == nil {
+		t.Fatal("the page has no DEGRADATION wording table")
+	}
+	worded := map[string]bool{}
+	for _, entry := range regexp.MustCompile(`(?m)^  ([A-Z_]+):`).FindAllStringSubmatch(table[1], -1) {
+		worded[entry[1]] = true
+		if !kinds[entry[1]] {
+			t.Errorf("DEGRADATION has words for %s, which the server never sends", entry[1])
+		}
+	}
+	for kind := range kinds {
+		if !worded[kind] {
+			t.Errorf("DEGRADATION has no words for %s: the standing would render as its code", kind)
+		}
 	}
 }
 
@@ -616,4 +660,13 @@ func assertFieldsExist(t *testing.T, object string, response reflect.Type) {
 				object, match[1], response.Name())
 		}
 	}
+}
+
+func containsString(list []string, want string) bool {
+	for _, item := range list {
+		if item == want {
+			return true
+		}
+	}
+	return false
 }

@@ -85,6 +85,9 @@ type ListResponse struct {
 	// verdict's so that the counts and the rows a check opens come from one
 	// read of the view.
 	Checks []CheckReport `json:"checks"`
+	// Todo is the first screen's arithmetic: lines to act on, distinct
+	// objects under them now, and the record of past loss apart from both.
+	Todo Todo `json:"todo"`
 	// Check and Group echo which line and which fold the rows are, when the
 	// request asked for one. Echoed rather than inferred from the request, like
 	// Column: the rows of one check under another's heading read as that
@@ -207,6 +210,16 @@ type HealthResponse struct {
 	// thing to establish about any reading is what produced it; before this
 	// field that meant a PromQL query against build_info for each pod.
 	Builds []BuildGroup `json:"builds"`
+	// Degradations are the replica-level standings the verdict was decided
+	// on, and Activation the control leader's standing on the publication
+	// the fleet executes. Both decided the verdict before they were on this
+	// response: a DEGRADED badge whose only sentence named the object list,
+	// over a deployment that had executed a stale publication for half a
+	// day. Present and empty when there are none, so a reader can tell "no
+	// standing degrades this deployment" from "this build has no such field".
+	Degradations      []Degradation    `json:"degradations"`
+	Activation        *ActivationFacts `json:"activation"`
+	ActivationReplica string           `json:"activation_replica,omitempty"`
 	// Overdue rides here rather than only in the list because the list can be
 	// paged or truncated, and "how many objects are not being evaluated" must
 	// not depend on how much of the list fitted.
@@ -742,11 +755,22 @@ func NewHandler(
 			PrunedSkips:      prunedSkipList(view.PrunedSkips),
 			Coverage:         view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
+			Degradations: degradationList(view.Degradations),
+			Activation:   view.Activation, ActivationReplica: view.ActivationReplica,
 			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
 			Gaps: view.Gaps, Capacity: view.Capacity,
 		})
 	})
 	return mux, nil
+}
+
+// degradationList is the view's degradations as an empty list rather than
+// null: the page iterates it, and null and [] are two different statements.
+func degradationList(degradations []Degradation) []Degradation {
+	if degradations == nil {
+		return []Degradation{}
+	}
+	return degradations
 }
 
 func listObjects(response http.ResponseWriter, request *http.Request, service *Service,
@@ -834,7 +858,8 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// The first screen, from every column before any of them is swapped in as
 	// the rows. Counted here so the line a reader clicks and the rows it opens
 	// come from one read of the view.
-	checks := ReportChecks(columns, truncated, &view)
+	checks := ReportChecks(columns, truncated, &view, now())
+	todo := SummarizeTodo(checks, columns, &view, now())
 	summaryPartial := truncated[column]
 	// A check is a line on the first screen, and the rows it opens come from
 	// every column: the check decides membership, not the column. Its total is
@@ -912,7 +937,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 		Applied:           replica != "" || strategy != "" || business != "",
 		StallAfterSeconds: int(stallAfter / time.Second),
 		StalledTotal:      stalledTotal,
-		Checks:            checks, Check: check, Group: group,
+		Checks:            checks, Check: check, Group: group, Todo: todo,
 		Order: order,
 		Page:  Page{Offset: offset, Limit: limit, Total: total},
 	})

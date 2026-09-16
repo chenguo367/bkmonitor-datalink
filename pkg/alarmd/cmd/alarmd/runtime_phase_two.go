@@ -297,6 +297,26 @@ type phaseTwoControlRefreshResult struct {
 	// composition it last had rather than reporting an empty one, because
 	// empty and "the Catalog has nothing in it" are not the same answer.
 	Composition *controlplane.CatalogComposition
+	// Activation is what this round did about bringing the activation to the
+	// publication the source produced, when it tried. Absent on a round that
+	// did not try: a follower's load, a source failure before any publication
+	// existed. The bundle keeps a standing from these, because a round that
+	// fails here leaves the source fresh and the fleet executing content that
+	// is no longer the current publication -- and the source clock alone
+	// cannot see that.
+	Activation *phaseTwoActivationOutcome
+}
+
+// phaseTwoActivationOutcome is one activation attempt's result. Published is
+// the publication the round tried to bring the activation to; Applied is the
+// one the activation is actually on afterwards -- equal to Published on
+// success, the last good one on failure, and zero when even that could not
+// be read. Failure is the bounded classification the attempt failed with.
+type phaseTwoActivationOutcome struct {
+	Published controlplane.SnapshotPublicationRef
+	Applied   controlplane.SnapshotPublicationRef
+	Failure   *controlplane.ActivationFailure
+	Cause     error
 }
 
 type phaseTwoControlRuntime interface {
@@ -418,6 +438,12 @@ type phaseTwoWorkerBundle struct {
 	// process reports it, read at scrape and at publish rather than on a
 	// transition. See runtime_phase_two_control_source.go.
 	controlSource controlSourceState
+	// activation is the standing of bringing the fleet's activation to the
+	// current publication, kept apart from controlSource because the two
+	// clocks disagree in exactly the case that matters: a source that
+	// publishes every round while the activation fails to follow it reads
+	// fresh on the source clock and stuck on this one.
+	activation activationStanding
 	// rotation is the dispatcher's own view of whether it is still getting
 	// round everything it owns, published once per rotation rather than read
 	// out of the walk.
