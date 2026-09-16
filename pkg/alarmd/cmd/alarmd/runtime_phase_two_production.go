@@ -467,7 +467,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 				Outcome: observability.ControlSourceRoundFailed, Exit: string(controlplane.SourceRefreshExitOf(err)),
 			},
 		})
-		result, fallbackErr := runtime.keepLastGood(ctx, sourceKind, err)
+		result, _, fallbackErr := runtime.keepLastGood(ctx, sourceKind, err)
 		return result, false, fallbackErr
 	}
 	if !knownSourceRefreshStatus(result.Status) {
@@ -545,6 +545,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 			runtime.enrichSourceRefreshCounts(ctx, sourceRefresh, state, nil, activated, sourceRefreshCurrentCount(activated, queryGroups))
 			return phaseTwoControlRefreshResult{
 				QueryGroups: queryGroups, Status: phaseTwoControlHealthy, SourceRefreshObserved: true,
+				Activation: &phaseTwoActivationOutcome{Published: result.Latest, Applied: activated.Current},
 			}, false, nil
 		}
 		queryGroups, err := runtime.loadActiveQueryGroups(ctx, state)
@@ -608,6 +609,9 @@ func (runtime *productionPhaseTwoControl) refresh(
 	runtime.enrichSourceRefreshCounts(ctx, sourceRefresh, previous, previousErr, state, currentCount)
 	return phaseTwoControlRefreshResult{
 		QueryGroups: queryGroups, Status: phaseTwoControlHealthy, SourceRefreshObserved: true,
+		// A round that found the source unchanged still brought the activation
+		// to it (Ensure is idempotent), so it is a success of the same kind.
+		Activation: &phaseTwoActivationOutcome{Published: result.Publication, Applied: state.Current},
 	}, false, nil
 }
 
@@ -627,7 +631,10 @@ func (runtime *productionPhaseTwoControl) activate(
 	if err == nil {
 		return state, phaseTwoActivationFallback{}, true
 	}
+	outcome := &phaseTwoActivationOutcome{Published: publication, Cause: err}
 	if failure, ok := controlplane.ActivationFailureFromError(err); ok {
+		copied := failure
+		outcome.Failure = &copied
 		var samples []string
 		samplesTruncated := false
 		if failure.Class == controlplane.ActivationFailureClassNotDrained {
@@ -656,7 +663,13 @@ func (runtime *productionPhaseTwoControl) activate(
 			Err: err,
 		})
 	}
-	fallback, fallbackErr := runtime.keepLastGood(ctx, observability.SourceKindCompiledSnapshot, err)
+	fallback, lastGood, fallbackErr := runtime.keepLastGood(ctx, observability.SourceKindCompiledSnapshot, err)
+	// The last good activation keepLastGood answered with is what the fleet
+	// keeps executing; the outcome names it beside the publication it could
+	// not reach, so the standing can say both. Zero when even that could not
+	// be read, which the standing keeps apart from "on the last good one".
+	outcome.Applied = lastGood.Current
+	fallback.Activation = outcome
 	return controlplane.ActivationState{}, phaseTwoActivationFallback{result: fallback, err: fallbackErr}, false
 }
 
@@ -805,21 +818,24 @@ func (runtime *productionPhaseTwoControl) observeCurrentObjectRenewal(ctx contex
 	}
 }
 
+// The activation it answered with travels back as the second result, so a
+// caller that failed to move the activation can say which publication the
+// fleet is therefore still executing.
 func (runtime *productionPhaseTwoControl) keepLastGood(
 	ctx context.Context,
 	sourceKind observability.SourceKind,
 	cause error,
-) (phaseTwoControlRefreshResult, error) {
+) (phaseTwoControlRefreshResult, controlplane.ActivationState, error) {
 	reason := observability.ReasonContractRetryable
 	if errors.Is(cause, controlplane.ErrPublicationOccurrenceCollision) {
 		reason = observability.ReasonContractDeterministic
 	}
 	state, err := runtime.dependencies.Repository.LoadActivation(ctx)
 	if errors.Is(err, controlplane.ErrActivationUnavailable) {
-		return phaseTwoControlRefreshResult{}, cause
+		return phaseTwoControlRefreshResult{}, controlplane.ActivationState{}, cause
 	}
 	if err != nil {
-		return phaseTwoControlRefreshResult{}, errors.Join(cause, err)
+		return phaseTwoControlRefreshResult{}, controlplane.ActivationState{}, errors.Join(cause, err)
 	}
 	queryGroups, err := runtime.loadActiveQueryGroups(ctx, state)
 	if err != nil {
@@ -827,14 +843,14 @@ func (runtime *productionPhaseTwoControl) keepLastGood(
 			return phaseTwoControlRefreshResult{
 				Status: phaseTwoControlDegradedLastGood, SourceKind: sourceKind,
 				ReasonCode: reason, Cause: cause,
-			}, nil
+			}, state, nil
 		}
-		return phaseTwoControlRefreshResult{}, errors.Join(cause, err)
+		return phaseTwoControlRefreshResult{}, controlplane.ActivationState{}, errors.Join(cause, err)
 	}
 	return phaseTwoControlRefreshResult{
 		QueryGroups: queryGroups, Status: phaseTwoControlDegradedLastGood, SourceKind: sourceKind,
 		ReasonCode: reason, Cause: cause,
-	}, nil
+	}, state, nil
 }
 
 func (runtime *productionPhaseTwoControl) loadActiveQueryGroups(

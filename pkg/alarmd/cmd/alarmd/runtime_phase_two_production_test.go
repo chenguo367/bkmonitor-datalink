@@ -1676,10 +1676,24 @@ func TestProductionPhaseTwoControlKeepsLastGoodAcrossFailedCutoverAndRecovery(t 
 		!reflect.DeepEqual(degraded.QueryGroups, []execution.QueryGroupIdentity{"query-group-healthy"}) {
 		t.Fatalf("degraded Refresh()=(%#v,%v)", degraded, err)
 	}
+	// The round says what it tried and where the activation is left: the
+	// candidate it could not reach, the current publication the fleet keeps
+	// executing, and the bounded classification. This is the fact the fleet
+	// standing is kept from; the source clock alone reads this round as a
+	// success, because the source did publish.
+	if degraded.Activation == nil || degraded.Activation.Published != candidate || degraded.Activation.Applied != current ||
+		degraded.Activation.Failure == nil || degraded.Activation.Failure.Class != controlplane.ActivationFailureClassScheduleConflict ||
+		!errors.Is(degraded.Activation.Cause, controlplane.ErrScheduleConflict) {
+		t.Fatalf("degraded round's activation outcome = %+v, want published=candidate applied=current with the schedule conflict", degraded.Activation)
+	}
 	healthy, err := control.Refresh(context.Background())
 	if err != nil || healthy.Status != phaseTwoControlHealthy ||
 		!reflect.DeepEqual(healthy.QueryGroups, []execution.QueryGroupIdentity{"query-group-healthy"}) {
 		t.Fatalf("healthy Refresh()=(%#v,%v)", healthy, err)
+	}
+	if healthy.Activation == nil || healthy.Activation.Published != candidate || healthy.Activation.Applied != candidate ||
+		healthy.Activation.Cause != nil {
+		t.Fatalf("recovered round's activation outcome = %+v, want published=applied=candidate and no cause", healthy.Activation)
 	}
 	if activator.calls != 2 {
 		t.Fatalf("activation calls=%d, want 2", activator.calls)

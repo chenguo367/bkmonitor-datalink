@@ -26,7 +26,15 @@ import "sort"
 type Check string
 
 const (
-	// This deployment's own.
+	// This deployment's own. The first two are deployment-wide standings
+	// rather than rules over objects: the fleet executing content that is no
+	// longer the current publication, and a replica past a bound the design
+	// accepts. Neither has an object row under it, and both decided the
+	// verdict without a line on the first screen until a running deployment
+	// spent half a day executing a stale publication behind a DEGRADED badge
+	// whose one sentence named something else.
+	CheckCutoverFailing      Check = "CUTOVER_FAILING"
+	CheckReplicaDegraded     Check = "REPLICA_DEGRADED"
 	CheckSlotsOverdue        Check = "SLOTS_OVERDUE"
 	CheckNeverEvaluated      Check = "NEVER_EVALUATED"
 	CheckRoundsStalled       Check = "ROUNDS_STALLED"
@@ -61,10 +69,13 @@ const (
 	// new and old. It is the fold for the one check whose objects share a
 	// symptom and not yet an owner.
 	GroupByCause GroupBy = "cause"
+	// GroupByDegradation folds on the kind of replica-level standing, the
+	// closed DegradationKinds; the replicas in it are named on the group.
+	GroupByDegradation GroupBy = "degradation"
 )
 
 // checkAnswers is the closed table: who acts on each check and what its
-// objects fold on. Sixteen rows, and a test holds the count there. A check
+// objects fold on. Eighteen rows, and a test holds the count there. A check
 // whose owner is UNDETERMINED is one whose grouping key does not reach an
 // external entity yet -- it stays on this deployment's side of the page until
 // it does, rather than being handed to whichever owner is likeliest.
@@ -72,6 +83,8 @@ var checkAnswers = map[Check]struct {
 	Owner   Owner
 	GroupBy GroupBy
 }{
+	CheckCutoverFailing:     {OwnerAlarmd, GroupByReasonCode},
+	CheckReplicaDegraded:    {OwnerAlarmd, GroupByDegradation},
 	CheckSlotsOverdue:       {OwnerAlarmd, GroupByReplica},
 	CheckNeverEvaluated:     {OwnerAlarmd, GroupByReplica},
 	CheckRoundsStalled:      {OwnerAlarmd, GroupByReplica},
@@ -101,6 +114,8 @@ var checkAnswers = map[Check]struct {
 // order rather than as a fifth field beside each row. A test holds it to the
 // same keys as checkAnswers.
 var checkOrder = []Check{
+	CheckCutoverFailing,
+	CheckReplicaDegraded,
 	CheckSlotsOverdue,
 	CheckNeverEvaluated,
 	CheckRoundsStalled,
@@ -281,14 +296,23 @@ type CheckReport struct {
 	// its replica, so the counts here are a sample of that column.
 	Partial bool         `json:"partial,omitempty"`
 	Groups  []CheckGroup `json:"groups"`
+	// Activation and Replica are on CUTOVER_FAILING only: the leader's
+	// standing, whole, and which replica it is. The line's sentence is built
+	// from them -- which publication is running, which one is not, since
+	// when -- and an object count cannot say any of that.
+	Activation *ActivationFacts `json:"activation,omitempty"`
+	Replica    string           `json:"replica,omitempty"`
 }
 
 // CheckGroup is one fold of a check's objects: the objects sharing one key.
+// Replicas is on the groups of the two standing checks, whose folds have no
+// objects and name the replicas instead.
 type CheckGroup struct {
-	Key        string `json:"key"`
-	Objects    int    `json:"objects"`
-	Strategies int    `json:"strategies"`
-	Businesses int    `json:"businesses"`
+	Key        string   `json:"key"`
+	Objects    int      `json:"objects"`
+	Strategies int      `json:"strategies"`
+	Businesses int      `json:"businesses"`
+	Replicas   []string `json:"replicas,omitempty"`
 }
 
 // ReportChecks folds every object in every column into the checks it is
@@ -305,6 +329,8 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 		groups     map[string]*CheckGroup
 		groupSets  map[string][2]map[string]struct{}
 		partial    bool
+		activation *ActivationFacts
+		replica    string
 	}
 	tallies := map[Check]*tally{}
 	ensure := func(check Check) *tally {
@@ -396,12 +422,35 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View) []
 				entry.groups[string(gap.Kind)] = &CheckGroup{Key: string(gap.Kind)}
 			}
 		}
+		// The two standings. Not objects either: the fleet executing a stale
+		// publication is one fact about the whole deployment, folded on why
+		// the activation fails; a replica past a bound is one fact per
+		// replica, folded on which bound.
+		if view.Activation != nil && view.Activation.BehindBeyondBound {
+			entry := ensure(CheckCutoverFailing)
+			entry.activation, entry.replica = view.Activation, view.ActivationReplica
+			key := view.Activation.Reason()
+			entry.groups[key] = &CheckGroup{Key: key, Replicas: []string{view.ActivationReplica}}
+		}
+		for _, degradation := range view.Degradations {
+			if degradation.Kind == DegradationActivationBehind {
+				// Its own line, above.
+				continue
+			}
+			entry := ensure(CheckReplicaDegraded)
+			group := entry.groups[string(degradation.Kind)]
+			if group == nil {
+				group = &CheckGroup{Key: string(degradation.Kind)}
+				entry.groups[string(degradation.Kind)] = group
+			}
+			group.Replicas = append(group.Replicas, degradation.Replica)
+		}
 	}
 	reports := make([]CheckReport, 0, len(tallies))
 	for check, entry := range tallies {
 		report := CheckReport{Code: check, Owner: checkAnswers[check].Owner, GroupBy: checkAnswers[check].GroupBy,
 			Objects: entry.objects, Strategies: len(entry.strategies), Businesses: len(entry.businesses),
-			Partial: entry.partial}
+			Partial: entry.partial, Activation: entry.activation, Replica: entry.replica}
 		for key, group := range entry.groups {
 			if sets, known := entry.groupSets[key]; known {
 				group.Strategies, group.Businesses = len(sets[0]), len(sets[1])

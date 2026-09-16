@@ -17,10 +17,17 @@ import (
 // The table is closed at sixteen. Adding a line to the first screen is a
 // design change -- a rule over the dimensions -- and this is what makes it one
 // rather than a word.
-func TestTheCheckTableIsClosedAtSixteen(t *testing.T) {
-	if got := len(Checks()); got != 16 || len(checkAnswers) != 16 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 16: a new check has to "+
-			"be a rule over the existing dimensions, and the design says which sixteen", got, len(checkAnswers))
+//
+// Eighteen: the sixteen rules over object dimensions, and two standings of
+// the deployment itself -- the fleet executing a publication that is no
+// longer current, and a replica past a bound -- which decided the verdict
+// with no line on the first screen until a running deployment spent half a
+// day on a stale publication behind a DEGRADED badge that named the object
+// list. The design names all eighteen.
+func TestTheCheckTableIsClosedAtEighteen(t *testing.T) {
+	if got := len(Checks()); got != 18 || len(checkAnswers) != 18 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 18: a new check has to "+
+			"be a rule over the existing dimensions or a named standing, and the design says which eighteen", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
 	for _, check := range Checks() {
@@ -98,6 +105,22 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 			t.Errorf("the producer for %s reaches %q instead", want, list[0].Finding.Check)
 		}
 		produced[list[0].Finding.Check] = true
+	}
+	// The two standings are produced from the view, not from any object: one
+	// fact per deployment about the publication it executes, one per replica
+	// about a bound. Each is enumerated the same way, one view per path.
+	standings := map[Check]View{
+		CheckCutoverFailing: {Activation: &ActivationFacts{Behind: true, BehindBeyondBound: true,
+			FailureStage: "schedule_cutover", FailureClass: "schedule_conflict"}, ActivationReplica: "pod-a"},
+		CheckReplicaDegraded: {Degradations: []Degradation{{Kind: DegradationOpenAlertSetStale, Replica: "pod-b"}}},
+	}
+	for want, view := range standings {
+		reports := ReportChecks(nil, nil, &view)
+		if len(reports) != 1 || reports[0].Code != want {
+			t.Errorf("the standing producer for %s reaches %+v instead", want, reports)
+			continue
+		}
+		produced[want] = true
 	}
 	waiting := map[Check]bool{}
 	for _, check := range ChecksWithoutAProducer {

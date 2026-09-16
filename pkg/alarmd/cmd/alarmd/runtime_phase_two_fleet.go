@@ -208,6 +208,11 @@ type fleetPublisher struct {
 	// refresh. Nil on a bundle that has none, and the snapshot then carries
 	// no facts.
 	controlSource func() *fleet.ControlSourceFacts
+	// activation reports the control leader's standing on bringing the
+	// fleet's activation to the current publication. Nil on a replica that
+	// has not attempted it, which is every follower; the aggregate then
+	// takes the one replica that has.
+	activation func() *fleet.ActivationFacts
 	// platformSettings reports the state of this replica's copy of the
 	// platform's settings. Nil on a bundle that has none.
 	platformSettings func() *fleet.PlatformSettingsFacts
@@ -391,6 +396,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.platformSettings != nil {
 		snapshot.PlatformSettings = publisher.platformSettings()
+	}
+	if publisher.activation != nil {
+		snapshot.Activation = publisher.activation()
 	}
 	// And the objects whose rounds end without a basis to decide recovery.
 	// Beside the anomalies for a different reason than the pool: not "this is
