@@ -542,6 +542,14 @@ func TestEverySlotReportsHowManyNoDataPlansItFound(t *testing.T) {
 				if observation.Stage != observability.StageNoDataDecided {
 					t.Fatalf("the census was reported at %q", observation.Stage)
 				}
+				// Labelled as the due hop, which is what puts it in the table
+				// beside the published, assembled and frozen counts. Without
+				// the label it lands under no hop at all and the last column
+				// of that table is empty.
+				if observation.NoDataCensus.Hop != observability.NoDataHopDue {
+					t.Fatalf("the census was reported under hop %q, want %q",
+						observation.NoDataCensus.Hop, observability.NoDataHopDue)
+				}
 				if observation.NoDataCensus.Plans != test.seen {
 					t.Fatalf("census = %d, want the %d Plans the Slot found",
 						observation.NoDataCensus.Plans, test.seen)

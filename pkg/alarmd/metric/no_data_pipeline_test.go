@@ -36,7 +36,7 @@ func TestNoDataObservationsReachTheCountersThroughTheRecorder(t *testing.T) {
 	recorder.Observe(ctx, observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
 		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
-		NoDataCensus: &observability.NoDataCensusFacts{Plans: 9},
+		NoDataCensus: &observability.NoDataCensusFacts{Hop: observability.NoDataHopDue, Plans: 9},
 	})
 	recorder.Observe(ctx, observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
@@ -81,7 +81,7 @@ func TestASlotWithNoNoDataPlansStillReportsItsCensus(t *testing.T) {
 	recorder.Observe(context.Background(), observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
 		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
-		NoDataCensus: &observability.NoDataCensusFacts{Plans: 0},
+		NoDataCensus: &observability.NoDataCensusFacts{Hop: observability.NoDataHopDue, Plans: 0},
 	})
 
 	if _, reported := recorderCounterSeries(t, recorder, "bkmonitor_alarmd_worker_no_data_plans_seen_total"); !reported {
@@ -131,6 +131,91 @@ func noDataSlotSeriesFrom(t *testing.T, recorder *Recorder) map[string]float64 {
 		for _, series := range family.GetMetric() {
 			for _, pair := range series.GetLabel() {
 				if pair.GetName() == "outcome" {
+					read[pair.GetValue()] = series.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return read
+}
+
+// Every hop reports into one family, and each label exists from startup.
+//
+// The family is read in order -- published, assembled, frozen, due -- and the
+// first hop reading zero while the one before it does not is where the Plans
+// stop existing. That reading needs every label present before anything
+// happens: a hop that has reported nothing and a hop that reported zero are
+// exactly the two the family exists to tell apart, and three releases were
+// spent on the version of that question the call graph could not answer.
+func TestEveryHopHasALabelBeforeAnythingHappens(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{Version: "0.2.9999", Commit: "0123456789abcdef", SchemaVersion: "v3"})
+	read := hopSeries(t, recorder)
+	if len(read) != len(observability.NoDataHops) {
+		t.Fatalf("hops = %+v, want one series per hop (%d)", read, len(observability.NoDataHops))
+	}
+	for _, hop := range observability.NoDataHops {
+		if value, present := read[hop]; !present || value != 0 {
+			t.Fatalf("hop %q = %v (present=%t), want a reported zero", hop, value, present)
+		}
+	}
+}
+
+// A hop counts into its own label, from whichever side reported it.
+//
+// The leader reports the published hop and the workers report the rest, so the
+// dispatch cannot be keyed on a component and stage without splitting the table
+// the reader needs whole.
+func TestEachHopCountsUnderItsOwnLabel(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{Version: "0.2.9999", Commit: "0123456789abcdef", SchemaVersion: "v3"})
+	ctx := context.Background()
+	recorder.Observe(ctx, observability.Observation{
+		Component: observability.ComponentControlPlane, Stage: observability.StageSnapshotRefreshed,
+		Result:       observability.ResultSuccess,
+		NoDataCensus: &observability.NoDataCensusFacts{Hop: observability.NoDataHopPublished, Plans: 90},
+	})
+	recorder.Observe(ctx, observability.Observation{
+		Component: observability.ComponentControlPlane, Stage: observability.StageSnapshotRefreshed,
+		Result:       observability.ResultSuccess,
+		NoDataCensus: &observability.NoDataCensusFacts{Hop: observability.NoDataHopAssembled, Plans: 12},
+	})
+	recorder.Observe(ctx, observability.Observation{
+		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
+		Result:       observability.ResultSuccess,
+		NoDataCensus: &observability.NoDataCensusFacts{Hop: observability.NoDataHopDue, Plans: 3},
+	})
+
+	read := hopSeries(t, recorder)
+	for hop, want := range map[string]float64{
+		observability.NoDataHopPublished: 90,
+		observability.NoDataHopAssembled: 12,
+		observability.NoDataHopFrozen:    0,
+		observability.NoDataHopDue:       3,
+	} {
+		if read[hop] != want {
+			t.Fatalf("hop %q = %v, want %v; hops = %+v", hop, read[hop], want, read)
+		}
+	}
+	// And the standalone counter is the due hop, from the same emission, so
+	// the two cannot disagree about it.
+	if got := recorderCounterValue(t, recorder, "bkmonitor_alarmd_worker_no_data_plans_seen_total"); got != 3 {
+		t.Fatalf("worker_no_data_plans_seen_total = %v, want the due hop's 3", got)
+	}
+}
+
+func hopSeries(t *testing.T, recorder *Recorder) map[string]float64 {
+	t.Helper()
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_no_data_plans_by_hop_total" {
+			continue
+		}
+		for _, series := range family.GetMetric() {
+			for _, pair := range series.GetLabel() {
+				if pair.GetName() == "hop" {
 					read[pair.GetValue()] = series.GetCounter().GetValue()
 				}
 			}

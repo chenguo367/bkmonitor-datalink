@@ -2007,6 +2007,17 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 		planByID[plan.Identity] = plan
 	}
 	duePlans := make([]execution.DuePlan, 0, len(request.DuePlans))
+	// What the object store handed this worker back for the Segment it is
+	// executing, before any of it is compiled. Counted over the assembled
+	// group rather than the due set, because a Plan can be dropped by either
+	// and the point of the two counts is to say which.
+	assembled := 0
+	for _, plan := range group.Plans {
+		if plan.Plan.NoData != nil {
+			assembled++
+		}
+	}
+	frozen := 0
 	for _, dueRef := range request.DuePlans {
 		plan, ok := planByID[dueRef.Identity]
 		record, active := activationByPlan[dueRef.Identity]
@@ -2037,10 +2048,31 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 		for _, level := range compiled.Levels() {
 			capabilities = append(capabilities, execution.LevelPartialCapability{LevelID: level.Definition().LevelID, Policy: execution.PartialRequiresFull})
 		}
+		if compiled.NoData() != nil {
+			frozen++
+		}
 		duePlans = append(duePlans, execution.DuePlan{Identity: plan.Identity, CompiledPlan: compiled,
 			StateGeneration: record.Fact.Selected.StateGeneration, StateApplyEpoch: record.Fact.Selected.StateApplyEpoch,
 			ScheduleRevision: plan.ScheduleRevision, ScheduleSpec: plan.ScheduleSpec,
 			CompletionDeadlineUnixMilli: deadline, PartialCapabilities: capabilities})
+	}
+	// Both hops, reported on every Slot whether either is any or none. The
+	// leader's published count and these two are read in order: the first that
+	// reads zero while the one before it does not is where the section is lost.
+	for hop, plans := range map[string]int{
+		observability.NoDataHopAssembled: assembled,
+		observability.NoDataHopFrozen:    frozen,
+	} {
+		runtime.repository.observe(ctx, observability.Observation{
+			Component: observability.ComponentControlPlane, Stage: observability.StageFrozenPlanGeneration,
+			Result: observability.ResultSuccess,
+			Trace: observability.TraceFields{
+				QueryGroupKey:    string(request.QueryGroup),
+				EvaluationTime:   int64(request.EvaluationTime),
+				SnapshotRevision: string(schedule.Segment.Publication.SnapshotRevision),
+			},
+			NoDataCensus: &observability.NoDataCensusFacts{Hop: hop, Plans: plans},
+		})
 	}
 	requirements, err := runtime.slotRequirements(group, duePlans, planByID)
 	if err != nil {

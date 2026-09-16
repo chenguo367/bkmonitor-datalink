@@ -337,8 +337,38 @@ type NoDataSlotFacts struct {
 // against each other -- they must agree, and a census above the outcomes is a
 // Plan that was dropped between being seen and being judged.
 type NoDataCensusFacts struct {
+	// Hop is where along the way from the leader's Catalog to the worker's
+	// Slot this count was taken. Every hop reports one, so the first one that
+	// reads zero is where the Plans stop existing.
+	//
+	// Three releases were spent proving from the call graph that each hop
+	// carries the section, and production read zero every time. A count per
+	// hop replaces the argument with a number.
+	Hop   string
 	Plans int
 }
+
+// The hops a no-data Plan passes on its way from the leader's Catalog to being
+// judged in a Slot. Each is counted where the Plans are in hand, and reported
+// whether or not there are any.
+const (
+	// NoDataHopPublished is the count decoded back out of the bytes the leader
+	// just wrote. It is taken from the payload rather than the struct it was
+	// built from, because what a later process reads is the payload.
+	NoDataHopPublished = "published"
+	// NoDataHopAssembled is what a worker got back from the object store for
+	// the Segment it is executing.
+	NoDataHopAssembled = "assembled"
+	// NoDataHopFrozen is what survived compilation into the Slot's due set.
+	NoDataHopFrozen = "frozen"
+	// NoDataHopDue is what the no-data round found when it walked that due set.
+	NoDataHopDue = "due"
+)
+
+// NoDataHops is every hop, for a reader to bound the family by and for the
+// metric to create each label at startup: a hop that reports nothing and a hop
+// that reports zero are the whole difference this family exists to show.
+var NoDataHops = []string{NoDataHopPublished, NoDataHopAssembled, NoDataHopFrozen, NoDataHopDue}
 
 // SourceWithheldFacts is what one withheld object has to say that nothing else
 // already carries.
@@ -1777,6 +1807,10 @@ func normalizeNoDataCensusFacts(facts *NoDataCensusFacts) *NoDataCensusFacts {
 	if normalized.Plans < 0 {
 		normalized.Plans = 0
 	}
+	// A hop this build does not name is kept rather than blanked, the same way
+	// an unknown outcome is: the label is bounded by the list above, and a hop
+	// added at its site and not in the list must show as a new label rather
+	// than silently join another one.
 	return &normalized
 }
 
