@@ -528,3 +528,119 @@ func TestRuntimeWitnessCacheScopesBySlotAndEvictsOldGroups(t *testing.T) {
 		t.Fatal("newest group was evicted")
 	}
 }
+
+// The same write sent a second time, unchanged, is the statement already on
+// disk and must read ALREADY_APPLIED with kind revision_skew, without a write.
+//
+// This is what the Redis client library does on its own: a pipeline whose
+// reply was lost to a read timeout or a dropped connection is re-sent as it
+// was, and the first copy had already executed. Nothing preflights again in
+// between, so the shape is built the way it happens: the witness still says
+// the key is missing, the bytes on disk are already ours. Classifying the
+// second copy by revision first called our own landed write a conflict, and
+// the Slot's retry then re-evaluated against post-Slot state and conflicted
+// again on every attempt.
+func TestApplyRuntimeTheSameWriteSentAgainUnchangedIsAlreadyApplied(t *testing.T) {
+	requireSkew := func(t *testing.T, result execution.StateApplyResult) {
+		t.Helper()
+		for index, item := range result.Items {
+			if item.Status != execution.StateApplyAlreadyApplied {
+				t.Fatalf("item %d after an unchanged re-send = %+v, want %s: the bytes on disk are this very "+
+					"mutation, and calling them a conflict sends the Slot into a retry that cannot ever succeed",
+					index, item, execution.StateApplyAlreadyApplied)
+			}
+			// The item says how it was decided and where the statement was
+			// found, or the coordinator cannot count re-sends apart from
+			// ordinary replays.
+			if item.AlreadyApplied != execution.StateAlreadyAppliedRevisionSkew || item.StoredBlobRevision != 1 {
+				t.Fatalf("item %d after an unchanged re-send = %+v, want kind revision_skew at stored revision 1", index, item)
+			}
+		}
+	}
+	requireUntouched := func(t *testing.T, backend *pipelineMemoryBackend, snapshot map[string]string) {
+		t.Helper()
+		if len(backend.values) != len(snapshot) {
+			t.Fatalf("re-send changed the key set: %d != %d", len(backend.values), len(snapshot))
+		}
+		for key, value := range snapshot {
+			if string(backend.values[key]) != value {
+				t.Fatalf("re-send rewrote %s", key)
+			}
+		}
+	}
+	snapshotOf := func(backend *pipelineMemoryBackend) map[string]string {
+		snapshot := map[string]string{}
+		for key, value := range backend.values {
+			snapshot[key] = string(value)
+		}
+		return snapshot
+	}
+
+	t.Run("pipelined fenced write whose first copy landed", func(t *testing.T) {
+		backend := newPipelineMemoryBackend()
+		store := newBatchStore(t, backend, fixedFenceKeys{testFenceKeys()})
+		mutations := seriesMutations(t, 3, applyVersion(), 0)
+		request := execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(), Items: mutations}
+		if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: preflightItems(mutations)}); err != nil {
+			t.Fatalf("LoadRuntime() error = %v", err)
+		}
+		// The first copy executed: our bytes are on disk at revision 1. The
+		// witness from preflight still says missing, so the re-sent copy goes
+		// to the pipeline and meets them there.
+		for _, mutation := range mutations {
+			key, _ := RuntimeStateKeyV2("alarmd", mutation.Identity)
+			backend.values[key], _ = encodeRuntime(mutation, 1)
+		}
+		snapshot := snapshotOf(backend)
+		result, err := store.ApplyRuntimeFenced(context.Background(), request, testApplyFence())
+		if err != nil {
+			t.Fatalf("ApplyRuntimeFenced() error = %v", err)
+		}
+		if backend.pipelines != 1 {
+			t.Fatalf("pipelines = %d, want the re-sent copy to reach the pipeline and be classified from the conflict it meets", backend.pipelines)
+		}
+		requireSkew(t, result)
+		requireUntouched(t, backend, snapshot)
+	})
+
+	t.Run("sequential write sent again without a new preflight", func(t *testing.T) {
+		backend := newPipelineMemoryBackend()
+		store := newBatchStore(t, backend, nil)
+		mutations := seriesMutations(t, 3, applyVersion(), 0)
+		request := execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(), Items: mutations}
+		first, err := store.ApplyRuntime(context.Background(), request)
+		if err != nil {
+			t.Fatalf("ApplyRuntime() error = %v", err)
+		}
+		requireAllStatus(t, first, execution.StateApplied)
+		snapshot := snapshotOf(backend)
+		again, err := store.ApplyRuntime(context.Background(), request)
+		if err != nil {
+			t.Fatalf("re-sent ApplyRuntime() error = %v", err)
+		}
+		requireSkew(t, again)
+		requireUntouched(t, backend, snapshot)
+	})
+
+	t.Run("retry that preflighted again but kept the old expectation", func(t *testing.T) {
+		backend := newPipelineMemoryBackend()
+		store := newBatchStore(t, backend, fixedFenceKeys{testFenceKeys()})
+		mutations := seriesMutations(t, 3, applyVersion(), 0)
+		request := execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(), Items: mutations}
+		apply := func() execution.StateApplyResult {
+			t.Helper()
+			if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: preflightItems(mutations)}); err != nil {
+				t.Fatalf("LoadRuntime() error = %v", err)
+			}
+			result, err := store.ApplyRuntimeFenced(context.Background(), request, testApplyFence())
+			if err != nil {
+				t.Fatalf("ApplyRuntimeFenced() error = %v", err)
+			}
+			return result
+		}
+		requireAllStatus(t, apply(), execution.StateApplied)
+		snapshot := snapshotOf(backend)
+		requireSkew(t, apply())
+		requireUntouched(t, backend, snapshot)
+	})
+}

@@ -41,6 +41,9 @@ type chunkStore struct {
 	cancel            context.CancelFunc
 	gapStatuses       []execution.GapGuardApplyStatus
 	delay             time.Duration
+	// skewCall answers its first item ALREADY_APPLIED at a revision one above
+	// the one the mutation expected: the write landed and was sent again.
+	skewCall int
 }
 
 func (store *chunkStore) LoadRuntime(context.Context, execution.StatePreflightRequest) (execution.StatePreflightResult, error) {
@@ -76,6 +79,11 @@ func (store *chunkStore) ApplyRuntime(ctx context.Context, request execution.Sta
 		result.Items[0].Status, result.Items[0].ReasonCode = execution.StateApplyRetryable, execution.ReasonCode(contract.ReasonStateWriteRetryable)
 	case store.deterministicCall:
 		result.Items[0].Status, result.Items[0].ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
+	case store.skewCall:
+		result.Items[0].Status, result.Items[0].AlreadyApplied = execution.StateApplyAlreadyApplied, execution.StateAlreadyAppliedRevisionSkew
+		result.Items[0].StoredBlobRevision = request.Items[0].ExpectedBlobRevision + 1
+		result.Items[1].Status, result.Items[1].AlreadyApplied = execution.StateApplyAlreadyApplied, execution.StateAlreadyAppliedStable
+		result.Items[1].StoredBlobRevision = request.Items[1].ExpectedBlobRevision
 	}
 	return result, nil
 }
@@ -361,5 +369,51 @@ func TestSlotBudgetDerivesThePerSlotCaps(t *testing.T) {
 				t.Fatalf("slotBudget() = %+v, want state/gap %d and events %d", budget, test.wantSlot, test.process)
 			}
 		})
+	}
+}
+
+// A write the store found already on disk is counted by how the store decided
+// it, and a revision_skew keeps its two revisions. This is the reading that
+// says whether a re-sent write happens in production at all; a Slot that
+// merely completes reads the same as one that met its own landed write.
+func TestApplyStateCountsAlreadyAppliedBySiteAndKindAndKeepsTheSkew(t *testing.T) {
+	store := &chunkStore{skewCall: 1}
+	fixture := newChunkFixture(store, 8192)
+	mutations := chunkMutations(3)
+	for index := range mutations {
+		mutations[index].ExpectedBlobRevision = 7
+	}
+	rejected, err := fixture.coordinator.applyState(context.Background(), execution.OperationNormal, fixture.contract, fixture.fence, chunkRetention, mutations, nil)
+	if err != nil || len(rejected) != 0 {
+		t.Fatalf("applyState() rejected=%v error=%v: ALREADY_APPLIED items complete the apply", rejected, err)
+	}
+	var facts *observability.StateAlreadyAppliedFacts
+	for _, observation := range fixture.chunkObservations(observability.StageMutationCompared) {
+		if observation.StateAlreadyApplied != nil {
+			if facts != nil {
+				t.Fatalf("two already-applied observations for one applyState; want one per site")
+			}
+			facts = observation.StateAlreadyApplied
+		}
+	}
+	if facts == nil {
+		t.Fatal("applyState met an already-applied write and published no already-applied facts")
+	}
+	wantCounts := map[observability.StateAlreadyAppliedKey]int64{
+		{Site: observability.StateAlreadyAppliedAtApply, Kind: observability.StateAlreadyAppliedRevisionSkew}: 1,
+		{Site: observability.StateAlreadyAppliedAtApply, Kind: observability.StateAlreadyAppliedStable}:       1,
+	}
+	if len(facts.Counts) != len(wantCounts) {
+		t.Fatalf("already-applied counts = %v, want %v", facts.Counts, wantCounts)
+	}
+	for key, want := range wantCounts {
+		if facts.Counts[key] != want {
+			t.Fatalf("already-applied counts[%+v] = %d, want %d; counts=%v", key, facts.Counts[key], want, facts.Counts)
+		}
+	}
+	if facts.Skew == nil || facts.Skew.Site != observability.StateAlreadyAppliedAtApply ||
+		facts.Skew.ExpectedRevision != 7 || facts.Skew.StoredRevision != 8 ||
+		facts.Skew.SeriesIdentity != string(mutations[0].Identity.SeriesIdentityDigest) {
+		t.Fatalf("revision skew sample = %+v, want site apply, expected 7, stored 8, series %s", facts.Skew, mutations[0].Identity.SeriesIdentityDigest)
 	}
 }

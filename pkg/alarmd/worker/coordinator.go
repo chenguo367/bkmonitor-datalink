@@ -939,6 +939,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		// witnessed view and the mutation are both in hand, and the question
 		// only has meaning for mutations that are actually about to be written.
 		var writeReuse observability.StateWriteReuseFacts
+		var alreadyApplied observability.StateAlreadyAppliedFacts
 		for _, stateResult := range stateResults {
 			statePosition, found := stateIndex[stateResult.Mutation.Identity]
 			if !found {
@@ -946,7 +947,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			}
 			view := loadedState.Items[statePosition]
 			started := time.Now()
-			disposition := execution.ClassifyStateMutation(view, stateResult.Mutation)
+			disposition, appliedKind := execution.ClassifyStateMutationDetail(view, stateResult.Mutation)
 			switch disposition {
 			case execution.StateProceed:
 				reuseClass, reuseReason := execution.ClassifyStateWriteReuse(view, stateResult.Mutation)
@@ -959,6 +960,8 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				mutations = append(mutations, stateResult.Mutation)
 				eventsByState[stateResult.Mutation.Identity] = append([]contract.TriggerEventV1(nil), stateResult.Events...)
 			case execution.StateAlreadyApplied:
+				alreadyApplied.Record(observability.StateAlreadyAppliedAtPreflight, observability.StateAlreadyAppliedKind(appliedKind),
+					string(stateResult.Mutation.Identity.SeriesIdentityDigest), stateResult.Mutation.ExpectedBlobRevision, view.BlobRevision)
 				execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
 					if c.PriorStateApplied != nil {
 						c.PriorStateApplied()
@@ -985,6 +988,9 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				Direction: observability.DirectionInternal, ReasonCode: observability.ReasonNone,
 				StateWriteReuse: &facts,
 			})
+		}
+		if !alreadyApplied.Empty() {
+			coordinator.emitAlreadyApplied(ctx, request.Operation, alreadyApplied)
 		}
 
 		if len(mutations) > 0 {
@@ -1429,8 +1435,13 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 	useFence := ok && fence.Validate(contractRef) == nil
 	deterministic := make(map[execution.StateKeyIdentity]execution.ReasonCode)
 	var totals applyTotals
+	var alreadyApplied observability.StateAlreadyAppliedFacts
 	err := forEachChunk(ctx, len(mutations), coordinator.applyChunkItems(coordinator.budget.MaxStateMutations), func(chunk applyChunk) error {
 		chunkItems := mutations[chunk.start:chunk.end]
+		expectedRevisions := make(map[execution.StateKeyIdentity]uint64, len(chunkItems))
+		for _, mutation := range chunkItems {
+			expectedRevisions[mutation.Identity] = mutation.ExpectedBlobRevision
+		}
 		applyRequest := execution.StateApplyRequest{Contract: contractRef, Retention: retention, Items: chunkItems}
 		chunkStarted := time.Now()
 		var result execution.StateApplyResult
@@ -1454,7 +1465,17 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 				reason = firstStateApplyFailureReason(result.Items)
 				for _, item := range result.Items {
 					switch item.Status {
-					case execution.StateApplied, execution.StateApplyAlreadyApplied:
+					case execution.StateApplied:
+					case execution.StateApplyAlreadyApplied:
+						// The store says how it decided; a store that does not
+						// is read as stable, so a missing kind cannot pose as
+						// the one reading this family exists to catch.
+						kind := observability.StateAlreadyAppliedKind(item.AlreadyApplied)
+						if kind == "" {
+							kind = observability.StateAlreadyAppliedStable
+						}
+						alreadyApplied.Record(observability.StateAlreadyAppliedAtApply, kind,
+							string(item.Identity.SeriesIdentityDigest), expectedRevisions[item.Identity], item.StoredBlobRevision)
 					case execution.StateApplyDeterministicInvalid:
 						deterministic[item.Identity] = item.ReasonCode
 						rejected++
@@ -1480,10 +1501,26 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err)
 		return err
 	})
+	if !alreadyApplied.Empty() {
+		coordinator.emitAlreadyApplied(ctx, operation, alreadyApplied)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("alarmd worker: apply state: %w", err)
 	}
 	return deterministic, nil
+}
+
+// emitAlreadyApplied publishes one Slot's ALREADY_APPLIED decisions from one
+// site. It is published before the apply error is returned, so a chunk that
+// met its own landed write and a later chunk that failed are both on the
+// record for the round the retry follows.
+func (coordinator *SlotExecutionCoordinator) emitAlreadyApplied(ctx context.Context, operation execution.Operation, facts observability.StateAlreadyAppliedFacts) {
+	coordinator.emitObservation(ctx, observability.Observation{
+		Component: observability.ComponentState, Stage: observability.StageMutationCompared,
+		Result: observability.ResultSuccess, Operation: observability.Operation(operation),
+		Direction: observability.DirectionInternal, ReasonCode: observability.ReasonNone,
+		StateAlreadyApplied: &facts,
+	})
 }
 
 func firstStateAdmissionFailureReason(items []execution.StateAdmissionItemResult) execution.ReasonCode {

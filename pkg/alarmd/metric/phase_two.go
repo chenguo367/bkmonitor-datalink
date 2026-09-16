@@ -32,6 +32,7 @@ type phaseTwoMetrics struct {
 	capacity                        *prometheus.CounterVec
 	stateWriteReuse                 *prometheus.CounterVec
 	stateWriteChange                *prometheus.CounterVec
+	stateAlreadyApplied             *prometheus.CounterVec
 	sourceObservations              *prometheus.CounterVec
 	sourceRefreshes                 *prometheus.CounterVec
 	sourceCompiles                  *prometheus.CounterVec
@@ -206,6 +207,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"conversion is not assumed to be one: it is this family's sum over a window against the " +
 				"pipelined evalsha count over the same window, and it has to be measured before it is used.",
 		}, []string{"class", "stored"}),
+		stateAlreadyApplied: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_already_applied_total",
+			Help: "Runtime State mutations found already on disk, by where that was decided and how. " +
+				"site: preflight is the view the Slot loaded before evaluating, apply is the bytes the CAS " +
+				"met when it tried to write. kind: stable is the ordinary retry that read the stored " +
+				"revision and found its own statement there; revision_skew is the same statement -- same " +
+				"ApplyVersion, same digest -- found at a revision the mutation did not expect, which is a " +
+				"write that landed while its reply was lost or was sent twice, and which used to be " +
+				"classified STATE_VERSION_CONFLICT and send the Slot into a retry that could not succeed. " +
+				"revision_skew is the only reading that says whether such re-sends happen in production: " +
+				"non-zero and aligned with conflict bursts confirms the mechanism, a steady zero says " +
+				"something else writes the key. Every pair is published at zero so absent and zero read " +
+				"apart. Population is mutations, not Redis commands.",
+		}, []string{"site", "kind"}),
 		stateWriteChange: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_write_change_reason_total",
 			Help: "For State writes whose stored decision state differed, which field differed first, in a " +
@@ -655,6 +670,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.stateWriteChange.WithLabelValues(string(reason), string(stored))
 		}
 	}
+	for _, site := range observability.AllStateAlreadyAppliedSites() {
+		for _, kind := range observability.AllStateAlreadyAppliedKinds() {
+			metrics.stateAlreadyApplied.WithLabelValues(string(site), string(kind))
+		}
+	}
 	for _, outcome := range nodata.SlotOutcomes {
 		metrics.noDataSlotPlans.WithLabelValues(string(outcome))
 	}
@@ -697,7 +717,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryCooldown,
 		m.slotReadiness.slack, m.slotReadiness.boundary,
 		m.slotTiming, m.slotWait,
-		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateWriteChange, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
+		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateWriteChange, m.stateAlreadyApplied, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
@@ -931,6 +951,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		}
 		for key, count := range facts.ChangeReasons {
 			m.stateWriteChange.WithLabelValues(string(key.Reason), string(key.Stored)).Add(float64(count))
+		}
+	}
+	if facts := observation.StateAlreadyApplied; facts != nil && !facts.Empty() {
+		for key, count := range facts.Counts {
+			m.stateAlreadyApplied.WithLabelValues(string(key.Site), string(observability.NormalizeStateAlreadyAppliedKind(key.Kind))).Add(float64(count))
 		}
 	}
 	if observation.Component == observability.ComponentResource && observation.CapacityBudget != "" {
