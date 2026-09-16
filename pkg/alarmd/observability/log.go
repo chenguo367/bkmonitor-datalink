@@ -198,6 +198,14 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.DispatchTurnaway; f != nil {
 		attributes = append(attributes, slog.Any("dispatch_turnaway", f))
 	}
+	if f := observation.StateAlreadyApplied; f != nil && !f.Empty() {
+		for key, count := range f.Counts {
+			attributes = append(attributes, slog.Int64("state_already_applied_"+string(key.Site)+"_"+string(key.Kind), count))
+		}
+		if f.Skew != nil {
+			attributes = append(attributes, slog.Any("state_revision_skew", f.Skew))
+		}
+	}
 	if f := observation.StateApplyChunk; f != nil {
 		attributes = append(attributes, slog.Int("chunk_index", f.Index), slog.Int("chunk_count", f.Count),
 			slog.Int64("applied_keys", f.AppliedKeys), slog.Int64("applied_bytes", f.AppliedBytes), slog.Int64("elapsed_ms", f.ElapsedMillis))

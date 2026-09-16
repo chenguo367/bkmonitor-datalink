@@ -160,6 +160,24 @@ func TestStateMutationPreflightClassifiesStableReplay(t *testing.T) {
 	if got := execution.ClassifyStateMutation(view, mutation); got != execution.StateAlreadyApplied {
 		t.Fatalf("same version/digest=%q", got)
 	}
+	if _, kind := execution.ClassifyStateMutationDetail(view, mutation); kind != execution.StateAlreadyAppliedStable {
+		t.Fatalf("same version/digest at the expected revision kind=%q, want stable", kind)
+	}
+	// The same statement one revision up is the write that landed while its
+	// reply was lost, re-sent unchanged. It is on disk; it is applied. Before
+	// this it was a conflict, and the Slot retried against post-Slot state
+	// and conflicted on every attempt.
+	skewed := view
+	skewed.BlobRevision = mutation.ExpectedBlobRevision + 1
+	if got, kind := execution.ClassifyStateMutationDetail(skewed, mutation); got != execution.StateAlreadyApplied || kind != execution.StateAlreadyAppliedRevisionSkew {
+		t.Fatalf("same version/digest one revision up = %q/%q, want ALREADY_APPLIED/revision_skew", got, kind)
+	}
+	// Same version, different digest, one revision up is still somebody else's
+	// statement: the digest is what says whose it is, not the revision.
+	skewed.PersistedMutationDigest = execution.MutationDigest("different")
+	if got, kind := execution.ClassifyStateMutationDetail(skewed, mutation); got != execution.StateVersionConflict || kind != "" {
+		t.Fatalf("same version/different digest one revision up = %q/%q, want STATE_VERSION_CONFLICT", got, kind)
+	}
 	view.PersistedMutationDigest = execution.MutationDigest("different")
 	if got := execution.ClassifyStateMutation(view, mutation); got != execution.StateVersionConflict {
 		t.Fatalf("same version/different digest=%q", got)

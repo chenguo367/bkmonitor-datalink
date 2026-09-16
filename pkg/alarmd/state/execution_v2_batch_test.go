@@ -528,3 +528,72 @@ func TestRuntimeWitnessCacheScopesBySlotAndEvictsOldGroups(t *testing.T) {
 		t.Fatal("newest group was evicted")
 	}
 }
+
+// The same fenced write sent a second time, unchanged, is the statement
+// already on disk and must read ALREADY_APPLIED without a write.
+//
+// This is what the Redis client library does on its own: a pipeline whose
+// reply was lost to a read timeout or a dropped connection is re-sent as it
+// was, and the first copy had already executed. Classifying the second copy
+// by revision first called our own landed write a conflict, and the Slot's
+// retry then re-evaluated against post-Slot state and conflicted again on
+// every attempt.
+func TestApplyRuntimeTheSameWriteSentAgainUnchangedIsAlreadyApplied(t *testing.T) {
+	for _, path := range []struct {
+		name  string
+		fence bool
+	}{{name: "pipelined fenced write", fence: true}, {name: "sequential write", fence: false}} {
+		t.Run(path.name, func(t *testing.T) {
+			backend := newPipelineMemoryBackend()
+			var resolver FenceKeyResolver
+			if path.fence {
+				resolver = fixedFenceKeys{testFenceKeys()}
+			}
+			store := newBatchStore(t, backend, resolver)
+			mutations := seriesMutations(t, 3, applyVersion(), 0)
+			request := execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(), Items: mutations}
+			apply := func() execution.StateApplyResult {
+				t.Helper()
+				if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: preflightItems(mutations)}); err != nil {
+					t.Fatalf("LoadRuntime() error = %v", err)
+				}
+				var result execution.StateApplyResult
+				var err error
+				if path.fence {
+					result, err = store.ApplyRuntimeFenced(context.Background(), request, testApplyFence())
+				} else {
+					result, err = store.ApplyRuntime(context.Background(), request)
+				}
+				if err != nil {
+					t.Fatalf("apply error = %v", err)
+				}
+				return result
+			}
+			requireAllStatus(t, apply(), execution.StateApplied)
+			snapshot := map[string]string{}
+			for key, value := range backend.values {
+				snapshot[key] = string(value)
+			}
+
+			// The reply of that write never arrived; the request goes again
+			// exactly as it was, ExpectedBlobRevision still 0. The preflight
+			// the retry re-runs sees revision 1 on disk, and so does the CAS.
+			replay := apply()
+			for index, item := range replay.Items {
+				if item.Status != execution.StateApplyAlreadyApplied {
+					t.Fatalf("item %d after an unchanged re-send = %+v, want %s: the bytes on disk are this very "+
+						"mutation, and calling them a conflict sends the Slot into a retry that cannot ever succeed",
+						index, item, execution.StateApplyAlreadyApplied)
+				}
+			}
+			if len(backend.values) != len(snapshot) {
+				t.Fatalf("re-send changed the key set: %d != %d", len(backend.values), len(snapshot))
+			}
+			for key, value := range snapshot {
+				if string(backend.values[key]) != value {
+					t.Fatalf("re-send rewrote %s", key)
+				}
+			}
+		})
+	}
+}

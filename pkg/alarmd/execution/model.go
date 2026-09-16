@@ -1271,22 +1271,64 @@ const (
 	StateVersionConflict StatePreflightDisposition = "STATE_VERSION_CONFLICT"
 )
 
+// StateAlreadyAppliedKind says how an ALREADY_APPLIED was decided. stable is
+// the ordinary replay: the retry read the stored revision, expected it, and
+// found its own statement. revision_skew is the same statement found at a
+// revision the mutation did not expect -- the write landed and its reply was
+// lost, or something re-sent it -- which used to be classified a conflict.
+// The two are counted apart because revision_skew is the only reading that
+// can say whether that re-send happens in production, and how often, and a
+// fix whose trigger cannot be seen is a fix nobody can confirm.
+type StateAlreadyAppliedKind string
+
+const (
+	StateAlreadyAppliedStable       StateAlreadyAppliedKind = "stable"
+	StateAlreadyAppliedRevisionSkew StateAlreadyAppliedKind = "revision_skew"
+)
+
+func AllStateAlreadyAppliedKinds() []StateAlreadyAppliedKind {
+	return []StateAlreadyAppliedKind{StateAlreadyAppliedStable, StateAlreadyAppliedRevisionSkew}
+}
+
 func ClassifyStateMutation(view RuntimeStateView, mutation StateMutation) StatePreflightDisposition {
+	disposition, _ := ClassifyStateMutationDetail(view, mutation)
+	return disposition
+}
+
+// ClassifyStateMutationDetail is ClassifyStateMutation with, for an
+// ALREADY_APPLIED, how it was decided; the kind is empty for every other
+// disposition.
+func ClassifyStateMutationDetail(view RuntimeStateView, mutation StateMutation) (StatePreflightDisposition, StateAlreadyAppliedKind) {
+	// The same statement already on disk is applied, whichever revision it
+	// landed at. This is decided before the revision is compared because the
+	// revision cannot tell our own landed write from somebody else's: a write
+	// re-sent after its reply was lost meets its own bytes one revision up.
+	// Called a conflict, that sent the Slot into a retry that re-evaluated
+	// against post-Slot state and conflicted on every attempt. The digest is
+	// the whole mutation less the revision it expected, so equal digests under
+	// an equal ApplyVersion are the same statement.
+	if view.VersionComparison == ApplyVersionEqual && mutation.MutationDigest != "" &&
+		view.PersistedMutationDigest == mutation.MutationDigest {
+		if mutation.ExpectedBlobRevision != view.BlobRevision {
+			return StateAlreadyApplied, StateAlreadyAppliedRevisionSkew
+		}
+		return StateAlreadyApplied, StateAlreadyAppliedStable
+	}
 	if mutation.ExpectedBlobRevision != view.BlobRevision {
-		return StateVersionConflict
+		return StateVersionConflict, ""
 	}
 	switch view.VersionComparison {
 	case ApplyVersionPersistedOlder:
-		return StateProceed
+		return StateProceed, ""
 	case ApplyVersionPersistedNewer:
-		return StateStaleVersion
+		return StateStaleVersion, ""
 	case ApplyVersionEqual:
 		if view.PersistedMutationDigest != mutation.MutationDigest {
-			return StateVersionConflict
+			return StateVersionConflict, ""
 		}
-		return StateAlreadyApplied
+		return StateAlreadyApplied, StateAlreadyAppliedStable
 	default:
-		return StateVersionConflict
+		return StateVersionConflict, ""
 	}
 }
 
@@ -2643,6 +2685,11 @@ type StateApplyItemResult struct {
 	Identity   StateKeyIdentity
 	Status     StateApplyStatus
 	ReasonCode ReasonCode
+	// AlreadyApplied says how an ALREADY_APPLIED was decided and is empty for
+	// every other status; StoredBlobRevision is the revision the statement was
+	// found at, so a revision_skew line can say how far the expectation was off.
+	AlreadyApplied     StateAlreadyAppliedKind
+	StoredBlobRevision uint64
 }
 
 type StateApplyResult struct {

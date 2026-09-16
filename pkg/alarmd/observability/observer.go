@@ -1335,6 +1335,7 @@ type Observation struct {
 	ShortPeriodCompletion *ShortPeriodCompletionFacts
 	StateApplyChunk       *StateApplyChunkFacts
 	StateWriteReuse       *StateWriteReuseFacts
+	StateAlreadyApplied   *StateAlreadyAppliedFacts
 	ActiveQGSet           *ActiveQGSetFacts
 	ScheduleCutover       *ScheduleCutoverFacts
 	ReplayExpiry          *ReplayExpiryFacts
