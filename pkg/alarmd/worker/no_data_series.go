@@ -341,7 +341,9 @@ func (stream *streamedExecution) observeNoDataOutcomes(ctx context.Context) {
 		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
 		Operation: observability.Operation(stream.request.Operation),
 		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
-		NoDataCensus: &observability.NoDataCensusFacts{Plans: stream.noDataPlansSeen},
+		NoDataCensus: &observability.NoDataCensusFacts{
+			Hop: observability.NoDataHopDue, Plans: stream.noDataPlansSeen,
+		},
 	})
 	if len(stream.noDataOutcomes) == 0 {
 		return

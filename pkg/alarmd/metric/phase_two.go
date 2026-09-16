@@ -43,6 +43,7 @@ type phaseTwoMetrics struct {
 	queryAdmission                  *prometheus.CounterVec
 	noDataSlotPlans                 *prometheus.CounterVec
 	noDataPlansSeen                 prometheus.Counter
+	noDataPlansByHop                *prometheus.CounterVec
 	sourceWithheldLines             *prometheus.CounterVec
 	activeQGSetCount                prometheus.Gauge
 	activeQGSetBytes                prometheus.Gauge
@@ -273,6 +274,27 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"leader's sum(catalog_no_data_plans) times the Slots in the window: the leader says how " +
 				"many exist, this says how many arrived.",
 		}),
+		noDataPlansByHop: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "no_data_plans_by_hop_total",
+			Help: "Plans that detect no-data, counted at each hop between the leader's Catalog and the " +
+				"Slot that judges them, so the hop where they stop existing is a number rather than an " +
+				"argument. published is what decodes back out of the bytes the leader wrote; assembled " +
+				"is what a worker got back from the object store for its Segment; frozen is what " +
+				"survived compilation into the due set; due is what the no-data round found there. " +
+				"Read them in that order against the leader's sum(catalog_no_data_plans): the first hop " +
+				"that reads zero while the one before it does not is where the section is being lost. " +
+				"published is reported by the leader once per publication and the rest by every worker " +
+				"once per Slot, so compare rates rather than raw sums across hops on different sides. " +
+				"published only advances when a publication is actually written, so a flat zero there " +
+				"means either that every publication carried none or that there was no publication at " +
+				"all -- read it against object_catalog_objects_total{operation=\"write\"}, which is how " +
+				"you tell those apart. assembled and frozen are per Slot and directly comparable with " +
+				"each other and with worker_no_data_plans_seen_total over the same window. " +
+				"Every label is created at startup, because a hop reporting nothing and a hop reporting " +
+				"zero are the whole difference this family exists to show. It exists because three " +
+				"releases were spent proving from the call graph that every hop carries the section " +
+				"while production read zero at the end of it.",
+		}, []string{"hop"}),
 		sourceWithheldLines: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_source_withheld_lines_total",
 			Help: "Source objects whose disposition changed in a refresh round, by whether the round named " +
@@ -548,6 +570,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, result := range sourceWithheldLineResults {
 		metrics.sourceWithheldLines.WithLabelValues(result)
 	}
+	for _, hop := range observability.NoDataHops {
+		metrics.noDataPlansByHop.WithLabelValues(hop)
+	}
 	return metrics
 }
 
@@ -575,7 +600,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.noDataPlansSeen, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataPlansSeen, m.noDataPlansByHop, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead,
@@ -758,8 +783,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if observation.Component == observability.ComponentEvaluation &&
 		observation.Stage == observability.StageNoDataDecided {
 		m.observeNoDataSlot(observation)
-		m.observeNoDataCensus(observation)
 	}
+	// Dispatched on the facts rather than on a component and stage: the hops
+	// are reported from the control plane and from the evaluation, and the
+	// point of the family is that one reader sees all of them.
+	m.observeNoDataCensus(observation)
 	if observation.Component == observability.ComponentControlPlane &&
 		observation.Stage == observability.StageSourceWithheld {
 		m.observeSourceWithheld(observation)
@@ -829,7 +857,15 @@ func (m phaseTwoMetrics) observeNoDataCensus(observation observability.Observati
 	if facts == nil {
 		return
 	}
-	m.noDataPlansSeen.Add(float64(facts.Plans))
+	if facts.Hop != "" {
+		m.noDataPlansByHop.WithLabelValues(facts.Hop).Add(float64(facts.Plans))
+	}
+	// The unlabelled counter is the due hop and nothing else, kept because it
+	// is what the current read-out asks for. One emission feeds both, so they
+	// cannot disagree.
+	if facts.Hop == observability.NoDataHopDue {
+		m.noDataPlansSeen.Add(float64(facts.Plans))
+	}
 }
 
 // observeSourceWithheld counts one named line, and the cut the round reported

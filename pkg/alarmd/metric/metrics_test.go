@@ -399,6 +399,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_no_data_plans"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_plans_seen_total"] = "variableLabels: {}"
+	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
 	expected["bkmonitor_alarmd_control_source_withheld_lines_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_state_renewal_gate_resets_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_inert_plans"] = "variableLabels: {}"
@@ -843,6 +844,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// One series: a count, unlabelled. Its whole job is to be read against
 	// the outcome family, which carries the breakdown.
 	bounds[fqName("worker_no_data_plans_seen_total")] = 1
+	// One per hop between the leader's Catalog and the Slot, and no more:
+	// the label is written only from the list observability publishes.
+	bounds[fqName("no_data_plans_by_hop_total")] = len(observability.NoDataHops)
 	// Named or dropped, and no third thing: each changed object goes to one
 	// of the two, both are created at startup, and the label is written only
 	// from the two constants this package owns.
