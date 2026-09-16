@@ -617,9 +617,21 @@ var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症�
 // The window the first two are decided on comes from the response.
 var LOSS = {
   WHILE_DEMOTED: '在被拒期间跳过（冷却让旧轮次超出重放范围，首要原因是查询不可用）',
+  AFTER_RESTART: '刚滚动后的追赶（副本启动 {g} 分钟内跳过；每次滚动都有，会自己停，不是容量）',
   ONGOING: '仍在发生（最近 {w} 分钟内跳过）',
   HISTORICAL: '已停止（{w} 分钟以上没有再跳过）'
 };
+
+// The grace after a replica's start within which a skip is the restart's,
+// in minutes, from the response.
+function restartGraceMinutes() {
+  var seconds = latestTodo && latestTodo.restart_grace_seconds;
+  return seconds ? Math.round(seconds / 60) : 5;
+}
+
+function lossWords(key) {
+  return (LOSS[key] || key).replace('{w}', String(recentWindowMinutes())).replace('{g}', String(restartGraceMinutes()));
+}
 
 // The replica-level standings, in words. Held to the Go list.
 var DEGRADATION = {
@@ -762,15 +774,17 @@ function recentWindowMinutes() {
 // as "扩容" without the evidence for it.
 function lossClause(report, count) {
   if (report.group_by !== 'loss') return '';
-  var ongoing = 0, budget = 0, stopped = 0;
+  var ongoing = 0, restart = 0, budget = 0, stopped = 0;
   (report.groups || []).forEach(function (group) {
     if (group.key === 'ONGOING') ongoing += group.objects || 0;
+    else if (group.key === 'AFTER_RESTART') restart += group.objects || 0;
     else if (group.key === 'HISTORICAL') stopped += group.objects || 0;
     else if (/BUDGET|RESOURCE_HARD_STOP|RECORD_TOO_LARGE/.test(group.key)) budget += group.objects || 0;
   });
   var parts = [];
   if (count === (report.current || 0)) {
     if (ongoing) parts.push('最近 ' + recentWindowMinutes() + ' 分钟内仍在跳过 ' + ongoing + ' 个');
+    if (restart) parts.push(restart + ' 个是刚滚动后的追赶，' + restartGraceMinutes() + ' 分钟内会自己停');
     parts.push(budget ? '资源预算拒绝 ' + budget + ' 个——只有这部分是容量限制' : '没有资源预算拒绝，不是容量问题');
   } else if (stopped) {
     parts.push('已停止，' + recentWindowMinutes() + ' 分钟以上没有再发生');
@@ -1074,6 +1088,9 @@ function todoSentence(todo, pending, governance, t) {
     loss.push('正在漏检 ' + t.ongoing + ' 个对象（最近 ' + recentWindowMinutes() + ' 分钟内跳过'
       + (t.ongoing_newest ? '，最近一次 ' + momentLabel(t.ongoing_newest) : '') + '）');
   }
+  if (t.after_restart) {
+    loss.push('另有 ' + t.after_restart + ' 个是刚滚动后的追赶漏检（副本启动 ' + restartGraceMinutes() + ' 分钟内），会自己停');
+  }
   if (t.while_demoted) {
     loss.push('被拒的对象里 ' + t.while_demoted + ' 个在冷却期间跳过了检测'
       + (t.while_demoted_recent ? '（最近 ' + recentWindowMinutes() + ' 分钟内 ' + t.while_demoted_recent + ' 个）' : '')
@@ -1113,7 +1130,7 @@ function actionSentence(todo, pending, governance, t) {
 function groupKeyLabel(report, key) {
   if (DEGRADATION[key]) return key + '（' + DEGRADATION[key] + '）';
   if (report.group_by === 'loss') {
-    if (LOSS[key]) return key + '（' + LOSS[key].replace('{w}', String(recentWindowMinutes())) + '）';
+    if (LOSS[key]) return key + '（' + lossWords(key) + '）';
     if (/BUDGET|RESOURCE_HARD_STOP|RECORD_TOO_LARGE/.test(key)) return key + '（资源预算拒绝——这一组才是容量限制）';
   }
   return key;
@@ -1438,8 +1455,7 @@ function objectRow(anomaly) {
     // What the loss is, from the server's classification of the record
     // against the object's column and the record's age; the words carry
     // the window it was decided on.
-    var loss = anomaly.loss && LOSS[anomaly.loss]
-      ? '。' + LOSS[anomaly.loss].replace('{w}', String(recentWindowMinutes())) : '';
+    var loss = anomaly.loss && LOSS[anomaly.loss] ? '。' + lossWords(anomaly.loss) : '';
     // The period names the mechanism: a loss in progress on a 10/15/30
     // second object is the scheduler's replay bound, and the row says so
     // rather than sending the reader to look the strategy's period up.
@@ -2133,7 +2149,7 @@ var BACKLOG = {
 };
 var LOSS_STATE = {
   NONE: '漏检：最近 {w} 分钟没有对象跳过检测',
-  IN_PROGRESS: '漏检：正在发生——{ongoing} 个对象最近 {w} 分钟内跳过了检测'
+  IN_PROGRESS: '漏检：正在发生——{ongoing} 个对象最近 {w} 分钟内跳过了检测{restart}'
 };
 var BOTTLENECK = {
   NONE: '瓶颈：没有——工作按时完成、没有漏检，资源数字不指向任何约束',
@@ -2185,6 +2201,9 @@ function renderLoad(load) {
       .replace('{span}', elapsedLabel(backlog.span_seconds || 0)),
     (LOSS_STATE[loss.state] || '漏检：（页面没有这个状态的文案：' + loss.state + '，请上报）')
       .replace('{ongoing}', String(loss.ongoing || 0)).replace('{w}', w)
+      .replace('{restart}', loss.after_restart
+        ? '，另有 ' + loss.after_restart + ' 个是刚滚动后的追赶（副本启动 '
+          + Math.round((loss.restart_grace_seconds || 300) / 60) + ' 分钟内），会自己停、不问容量' : '')
       + (loss.while_demoted_recent ? '；另有 ' + loss.while_demoted_recent + ' 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）' : ''),
     (BOTTLENECK[bottleneck.resource] || '瓶颈：（页面没有这个状态的文案：' + bottleneck.resource + '，请上报）')
       .replace('{rejections}', String(bottleneck.budget_rejections || 0))

@@ -800,3 +800,86 @@ func TestTheRecordBoundIsThePoolEntryWhereTheRowCarriesIt(t *testing.T) {
 		t.Fatalf("QUERY_TARGET_MISSING = %+v, want the record made after the entry as its consequence", byCode[CheckQueryTargetMissing])
 	}
 }
+
+// A record made within the grace after its replica's start is the restart's
+// catch-up: current, on the line and in the arithmetic as its own kind, and
+// not what asks the capacity question. A live rollout skipped a hundred and
+// sixty short-period objects in its first minute, and for the next ten the
+// page read "正在漏检" with no mechanism named. Unknown start: not the
+// restart's; outside the grace: not the restart's; older than the window:
+// history whatever the start.
+func TestARecordInTheRestartGraceIsTheRestartsCatchUp(t *testing.T) {
+	at := time.Date(2026, 9, 16, 12, 0, 0, 0, time.UTC)
+	started := at.Add(-4 * time.Minute)
+	view := &View{
+		PerReplica: []ReplicaView{{Replica: "pod-a", StartedAt: started}, {Replica: "pod-b"}},
+		GapSkips: map[string]SkippedSpan{
+			// pod-a started four minutes ago; skipped three minutes ago: the restart's.
+			"qg-catching-up": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-3 * time.Minute), Replica: "pod-a"},
+			// pod-a, skipped before it started (a record it inherited): not the restart's.
+			"qg-before-start": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-6 * time.Minute), Replica: "pod-a"},
+			// pod-b published no start: the grace cannot be read, so not the restart's.
+			"qg-no-start": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: at.Add(-3 * time.Minute), Replica: "pod-b"},
+		}}
+	columns := [][]Anomaly{nil, nil, nil, nil}
+	reports := ReportChecks(columns, nil, view, at)
+	abandoned := reports[0]
+	if abandoned.Code != CheckDetectionAbandoned || abandoned.Current != 3 || abandoned.Retained != 0 {
+		t.Fatalf("DETECTION_ABANDONED = %+v, want all three current", abandoned)
+	}
+	groups := map[string]int{}
+	for _, group := range abandoned.Groups {
+		groups[group.Key] = group.Objects
+	}
+	if groups[string(LossAfterRestart)] != 1 || groups[string(LossOngoing)] != 2 {
+		t.Fatalf("groups = %v, want one AFTER_RESTART and two ONGOING", groups)
+	}
+	todo := SummarizeTodo(reports, columns, view, at)
+	if todo.AfterRestart != 1 || todo.Ongoing != 2 || todo.Objects != 3 || todo.RestartGraceSeconds != int(RestartCatchUpGrace/time.Second) {
+		t.Fatalf("todo = %+v, want 1 after restart, 2 ongoing, 3 objects, the grace named", todo)
+	}
+	// The restart's catch-up alone asks no capacity question; a loss by any
+	// other mechanism does.
+	view.GapSkips = map[string]SkippedSpan{"qg-catching-up": view.GapSkips["qg-catching-up"]}
+	view.Capacity = &CapacityView{PermitAcquires: 1000, PermitWaits: 800}
+	view.Schedule = &ScheduleCensus{Completed1h: 100, OnTime1h: 100}
+	load := LoadOf(view, at)
+	if load.Loss.State != LossInProgress || load.Loss.AfterRestart != 1 || load.Loss.Ongoing != 0 || load.Bottleneck.Resource != BottleneckNone {
+		t.Fatalf("load = %+v, want the restart's loss in progress and no bottleneck asked", load)
+	}
+	// The grace is about when the skip happened, not about now: a record
+	// made in the first minutes stays the restart's until the window ages it
+	// into history, and one made seven minutes after the start was never
+	// the restart's.
+	view.GapSkips = map[string]SkippedSpan{
+		"qg-catching-up": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: started.Add(time.Minute), Replica: "pod-a"},
+		"qg-later":       {FirstSlot: 1, LastSlot: 3, Slots: 3, At: started.Add(7 * time.Minute), Replica: "pod-a"},
+	}
+	groups = map[string]int{}
+	for _, group := range ReportChecks(columns, nil, view, started.Add(9*time.Minute))[0].Groups {
+		groups[group.Key] = group.Objects
+	}
+	if groups[string(LossAfterRestart)] != 1 || groups[string(LossOngoing)] != 1 {
+		t.Fatalf("groups nine minutes after the start = %v, want the first-minute record AFTER_RESTART and the seventh-minute one ONGOING", groups)
+	}
+}
+
+// On the real path the replica's start reaches the view from its snapshot,
+// and a record made in the first minute after it folds as the restart's.
+// Built through Aggregate, so a view that dropped the start would fail here
+// while a view assembled by hand could not.
+func TestTheReplicaStartReachesTheViewFromItsSnapshot(t *testing.T) {
+	started := now.Add(-3 * time.Minute)
+	snapshots := []Snapshot{
+		{Replica: "pod-a", TakenAt: now.Add(-10 * time.Second), Owned: 2, Determined: 2, StartedAt: started,
+			GapSkips: map[string]SkippedSpan{"qg-catching-up": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: started.Add(time.Minute), Replica: "pod-a"}}},
+	}
+	view := Aggregate(Expectation{Known: true, QueryGroups: 2}, snapshots, []string{"pod-a"}, now, freshness)
+	if len(view.PerReplica) != 1 || !view.PerReplica[0].StartedAt.Equal(started) {
+		t.Fatalf("per_replica = %+v, want pod-a's start carried from its snapshot", view.PerReplica)
+	}
+	reports := ReportChecks(nil, nil, &view, now)
+	if len(reports) != 1 || len(reports[0].Groups) != 1 || reports[0].Groups[0].Key != string(LossAfterRestart) {
+		t.Fatalf("reports = %+v, want the record folded as the restart's catch-up", reports)
+	}
+}

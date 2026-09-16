@@ -982,6 +982,11 @@ type ReplicaView struct {
 	// is what every duration this replica reports is bounded by. Zero means the
 	// replica did not publish it, which is not the same as "just started".
 	UptimeSeconds float64 `json:"uptime_seconds,omitempty"`
+	// StartedAt is when the process started, as the replica published it;
+	// zero when it did not. A retained record made within minutes of it is
+	// the restart's catch-up, a mechanism with a name, and the records are
+	// read against it.
+	StartedAt time.Time `json:"started_at,omitempty"`
 	// The same three-way split the verdict is decided on, per replica.
 	//
 	// Anomalies alone cannot answer "which replica is unwell". A live read had
@@ -1298,8 +1303,8 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			// Left at zero when the replica did not publish a start time, which
 			// an older build will not. Zero has to read as "not reported" rather
 			// than "started just now", so the page checks before using it.
-			UptimeSeconds: uptimeSeconds(snapshot.StartedAt, now),
-			Truncated:     snapshot.Truncated(), Capacity: snapshot.Capacity,
+			UptimeSeconds: uptimeSeconds(snapshot.StartedAt, now), StartedAt: snapshot.StartedAt,
+			Truncated: snapshot.Truncated(), Capacity: snapshot.Capacity,
 			Build: snapshot.Build,
 		}
 		view.Builds = addToBuildGroup(view.Builds, snapshot.Build, replica)

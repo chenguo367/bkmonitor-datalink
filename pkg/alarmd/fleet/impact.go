@@ -172,7 +172,7 @@ func ImpactOf(view View, now time.Time) Impact {
 	}
 	rows, _ := skippedRows(&view, map[string]struct{}{}, now)
 	for _, row := range rows {
-		if row.Loss == LossOngoing {
+		if row.Loss == LossOngoing || row.Loss == LossAfterRestart {
 			byOwner[OwnerAlarmd] = append(byOwner[OwnerAlarmd], row)
 		}
 	}

@@ -285,8 +285,17 @@ func TestThePageHasWordingForEveryCheckOwnerScheduleAndResult(t *testing.T) {
 		if !losses[entry[1]] {
 			t.Errorf("LOSS has words for %s, which the server never sends", entry[1])
 		}
-		if entry[1] != string(fleet.LossWhileDemoted) && !strings.Contains(entry[2], "{w}") {
-			t.Errorf("LOSS %s does not name the window it is decided on: %q", entry[1], entry[2])
+		// Each kind decided on a bound names it: the window for the two
+		// decided by age, the grace for the restart's.
+		switch entry[1] {
+		case string(fleet.LossOngoing), string(fleet.LossHistorical):
+			if !strings.Contains(entry[2], "{w}") {
+				t.Errorf("LOSS %s does not name the window it is decided on: %q", entry[1], entry[2])
+			}
+		case string(fleet.LossAfterRestart):
+			if !strings.Contains(entry[2], "{g}") {
+				t.Errorf("LOSS %s does not name the grace it is decided on: %q", entry[1], entry[2])
+			}
 		}
 	}
 	for loss := range losses {
@@ -294,8 +303,10 @@ func TestThePageHasWordingForEveryCheckOwnerScheduleAndResult(t *testing.T) {
 			t.Errorf("LOSS has no words for %s: the record would render as its code", loss)
 		}
 	}
-	if !strings.Contains(body, "recent_window_seconds") {
-		t.Error("the page does not read recent_window_seconds: the window would be assumed rather than read")
+	for _, field := range []string{"recent_window_seconds", "restart_grace_seconds"} {
+		if !strings.Contains(body, field) {
+			t.Errorf("the page does not read %s: the bound would be assumed rather than read", field)
+		}
 	}
 }
 
