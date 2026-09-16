@@ -361,6 +361,11 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_rebalance_planned_moves":                      "variableLabels: {}",
 		"bkmonitor_alarmd_assignment_index_stale_rounds":                "variableLabels: {}",
 		"bkmonitor_alarmd_assignment_index_write_total":                 "variableLabels: {result}",
+		"bkmonitor_alarmd_control_facts_read_total":                     "variableLabels: {fact}",
+		"bkmonitor_alarmd_control_facts_unavailable_total":              "variableLabels: {fact,reason}",
+		"bkmonitor_alarmd_control_facts_rebuilt_total":                  "variableLabels: {fact}",
+		"bkmonitor_alarmd_control_health_facts_total":                   "variableLabels: {status}",
+		"bkmonitor_alarmd_control_health_invalid_total":                 "variableLabels: {field}",
 		"bkmonitor_alarmd_assignment_index_read_total":                  "variableLabels: {result}",
 		"bkmonitor_alarmd_assignment_index_confirm_total":               "variableLabels: {result}",
 		"bkmonitor_alarmd_assignment_record_read_total":                 "variableLabels: {path}",
@@ -778,9 +783,16 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("rebalance_planned_moves"):                     1,
 		fqName("assignment_index_stale_rounds"):               1,
 		fqName("assignment_index_write_total"):                2,
-		fqName("assignment_index_read_total"):                 4,
-		fqName("assignment_index_confirm_total"):              4,
-		fqName("assignment_record_read_total"):                2,
+		// Closed label sets, every series created at construction; see
+		// control_facts.go.
+		fqName("control_facts_read_total"):        len(controlFactNames),
+		fqName("control_facts_unavailable_total"): len(controlFactNames) * len(controlFactUnavailableReasons),
+		fqName("control_facts_rebuilt_total"):     len(controlFactNames),
+		fqName("control_health_facts_total"):      len(controlHealthStatuses),
+		fqName("control_health_invalid_total"):    len(controlHealthInvalidFields),
+		fqName("assignment_index_read_total"):     4,
+		fqName("assignment_index_confirm_total"):  4,
+		fqName("assignment_record_read_total"):    2,
 		// Four outcomes without a refusal, plus a conflict for each refusal
 		// OTHER included, all created at construction.
 		fqName("schedule_cursor_advance_total"):   len(observability.CursorAdvanceStatuses) - 1 + len(observability.CursorRefusals),

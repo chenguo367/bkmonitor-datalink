@@ -381,6 +381,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		if facts.ActivationCaughtUp {
 			attributes = append(attributes, slog.Bool("activation_caught_up", true))
 		}
+		if facts.ActivationRebuilt {
+			attributes = append(attributes, slog.Bool("activation_rebuilt", true))
+		}
 		if facts.ActiveQueryGroupsKnown {
 			attributes = append(attributes, slog.Int("active_query_groups", facts.ActiveQueryGroups))
 		}

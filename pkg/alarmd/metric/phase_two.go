@@ -106,6 +106,7 @@ type phaseTwoMetrics struct {
 	cmdbIndexAge                    *prometheus.GaugeVec
 	cmdbIndexDegraded               *prometheus.GaugeVec
 	dueIndex                        dueIndexMetrics
+	controlFacts                    controlFactsMetrics
 	// catalogComposition reports what the Catalog the leader last built is
 	// made of; see catalog_composition.go.
 	catalogComposition *catalogCompositionCollector
@@ -346,6 +347,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}, []string{"operation", "result"}),
 	}
 	metrics.dueIndex = newDueIndexMetrics()
+	metrics.controlFacts = newControlFactsMetrics()
 	metrics.redisCalls = newRedisCallMetrics()
 	metrics.controlCache = newControlCacheCollector()
 	metrics.dispatchRotation = newDispatchRotationCollector()
@@ -682,7 +684,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
-	}...), append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...),
+	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.controlCache, m.dispatchRotation, m.openAlertSet, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,

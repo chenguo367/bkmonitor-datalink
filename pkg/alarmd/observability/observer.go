@@ -927,6 +927,12 @@ type SourceRefreshFacts struct {
 	// activation to the publication an earlier round had published and not
 	// activated. The counts below then describe that move.
 	ActivationCaughtUp bool
+	// ActivationRebuilt marks a caught-up round that found no activation
+	// record at all and established one from the published Catalog, as a
+	// first activation does. Catching up moves an activation; rebuilding
+	// writes one where the store had none, which is what a store that came
+	// back without its keys leaves behind, and the two must not read alike.
+	ActivationRebuilt bool
 	// ActiveQueryGroups is a size, not a change. The counts below are a change,
 	// and the two are kept apart because a round that publishes nothing has no
 	// previous set to difference against: reporting a difference there can only
