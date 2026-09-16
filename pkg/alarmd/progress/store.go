@@ -292,7 +292,21 @@ func (store *Store) CommitProgress(ctx context.Context, request execution.Progre
 		return execution.ProgressCommitResult{}, fmt.Errorf("progress: next continuous Slot must follow completion")
 	}
 	next := execution.ScheduleProgress{Identity: request.Identity, NextSlot: nextSlot,
-		LastCompletionKind: request.Completion.Kind}
+		LastCompletionKind: request.Completion.Kind,
+		// Copied from the round that is committing, not read back from
+		// anywhere: every field is already in hand here, so the summary costs
+		// no round trip and cannot disagree with the commit it describes.
+		//
+		// Written on every commit, so it is always the last one. There is no
+		// merge with what was stored: a summary of the previous round kept
+		// beside this one would be two answers to a question that has one.
+		LastCompletion: &execution.LastCompletionSummary{
+			Slot:        request.ExpectedNextSlot,
+			CompletedAt: store.options.Now().UTC().Format(time.RFC3339),
+			Kind:        request.Completion.Kind,
+			ReasonCode:  request.Completion.ReasonCode,
+			Contract:    request.Completion.Contract,
+		}}
 	if !missing {
 		next.LastFullSlot = current.LastFullSlot
 		next.CurrentOrRecentGap = current.CurrentOrRecentGap

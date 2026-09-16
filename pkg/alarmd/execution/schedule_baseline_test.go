@@ -30,7 +30,7 @@ func TestFrozenContractKeepsScheduleAsProvenance(t *testing.T) {
 
 func TestScheduleProgressUsesQueryGroupIdentity(t *testing.T) {
 	fields := fieldNames(reflect.TypeOf(execution.ScheduleProgress{}))
-	want := []string{"Identity", "NextSlot", "LastFullSlot", "LastCompletionKind", "CurrentOrRecentGap", "UnfinishedSlot", "UnfinishedRange"}
+	want := []string{"Identity", "NextSlot", "LastFullSlot", "LastCompletionKind", "CurrentOrRecentGap", "UnfinishedSlot", "UnfinishedRange", "LastCompletion"}
 	if !reflect.DeepEqual(fields, want) {
 		t.Fatalf("ScheduleProgress fields = %v, want %v", fields, want)
 	}
