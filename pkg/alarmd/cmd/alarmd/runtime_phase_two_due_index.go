@@ -105,10 +105,26 @@ type phaseTwoDueIndex struct {
 	// deployment's rate, and six hours is the longer of the two windows the
 	// page reads.
 	completions [dueCompletionBuckets]dueCompletionBucket
+	// overdue is the last hour of the census's own overdue count, one sample
+	// per minute, so the next census can say whether the backlog grew. The
+	// count alone is an instant; "is it growing" needs the same count an
+	// hour ago, and nothing else keeps it.
+	overdue [dueOverdueSamples]dueOverdueSample
 }
 
 // dueCompletionBuckets is six hours of one-minute buckets.
 const dueCompletionBuckets = 6 * 60
+
+// dueOverdueSamples is one hour of one-minute samples of the overdue count.
+const dueOverdueSamples = 60
+
+// dueOverdueSample is the overdue count the census found in one minute; the
+// last census of that minute wins, and a sample that has wrapped from an
+// hour ago is recognised by its minute and not read as this hour's.
+type dueOverdueSample struct {
+	minute  int64
+	overdue int
+}
 
 // dueCompletionBucket is what one minute of returned rounds adds up to.
 // minute is the Unix minute the bucket describes, so a bucket that has wrapped
@@ -630,6 +646,21 @@ func (index *phaseTwoDueIndex) Census(now time.Time, owned int) fleet.ScheduleCe
 			census.HeldBackOnTime1h += bucket.heldBackOnTime
 		}
 	}
+	// The backlog an hour ago, from the oldest sample of the last hour this
+	// index still holds -- which is younger than an hour on a process
+	// younger than that, and the census says how much younger rather than
+	// letting a ten-minute-old sample read as an hour's trend.
+	for offset := int64(dueOverdueSamples - 1); offset > 0; offset-- {
+		sample := index.overdue[((minute-offset)%dueOverdueSamples+dueOverdueSamples)%dueOverdueSamples]
+		if sample.minute != minute-offset {
+			continue
+		}
+		ago := sample.overdue
+		census.OverdueAgo = &ago
+		census.OverdueAgoSeconds = float64(offset * 60)
+		break
+	}
+	index.overdue[(minute%dueOverdueSamples+dueOverdueSamples)%dueOverdueSamples] = dueOverdueSample{minute: minute, overdue: census.Overdue}
 	return census
 }
 

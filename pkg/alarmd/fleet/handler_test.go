@@ -871,3 +871,39 @@ func TestTheRouteTellsTheThreeKindsOfLossApart(t *testing.T) {
 		t.Fatalf("under DETECTION_ABANDONED/ONGOING = %v, want the one object losing rounds now", list)
 	}
 }
+
+// The health route carries the operating judgment, decided from the same
+// view as the numbers under it, with the limit that nothing estimates
+// headroom always on it.
+func TestTheHealthRouteCarriesTheOperatingJudgment(t *testing.T) {
+	snapshots := healthySnapshots()
+	earlier := 2
+	snapshots[0].Schedule = &ScheduleCensus{Overdue: 5, Completed1h: 100, OnTime1h: 80, Completed6h: 600, OnTime6h: 590,
+		OverdueAgo: &earlier, OverdueAgoSeconds: 3000}
+	snapshots[1].Schedule = &ScheduleCensus{Overdue: 4, Completed1h: 100, OnTime1h: 80, Completed6h: 600, OnTime6h: 590,
+		OverdueAgo: &earlier, OverdueAgoSeconds: 3600}
+	snapshots[0].Capacity = &Capacity{PermitAcquires: 1000, PermitWaits: 800}
+	status, body := get(t, handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas()), "/api/health")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d: %v", status, body)
+	}
+	load, _ := body["load"].(map[string]any)
+	if load == nil {
+		t.Fatalf("health carries no load: %v", body)
+	}
+	onTime := load["on_time"].(map[string]any)
+	backlog := load["backlog"].(map[string]any)
+	if onTime["state"] != string(OnTimeFallingBehind) || onTime["overdue"].(float64) != 9 {
+		t.Errorf("on_time = %v, want FALLING_BEHIND over 9 overdue (80%% this hour against 98%% over six)", onTime)
+	}
+	if backlog["state"] != string(BacklogGrowing) || backlog["earlier"].(float64) != 4 || backlog["span_seconds"].(float64) != 3000 {
+		t.Errorf("backlog = %v, want GROWING: 9 now against 4 over the shorter span of 3000 s", backlog)
+	}
+	limits := map[string]bool{}
+	for _, limit := range load["limits"].([]any) {
+		limits[limit.(string)] = true
+	}
+	if !limits[string(LimitNoHeadroomEstimate)] || !limits[string(LimitTrendSpan)] {
+		t.Errorf("limits = %v, want no headroom estimate and the short trend span", load["limits"])
+	}
+}

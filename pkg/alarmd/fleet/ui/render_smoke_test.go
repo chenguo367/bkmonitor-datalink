@@ -479,6 +479,16 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			HeldNotExpectedTotal: 12},
 		"page": map[string]int{"offset": 0, "limit": 50, "total": len(rows)},
 	}
+	// The operating judgment, decided by the same Go code the route uses,
+	// from the census, capacity and records the fixture already carries --
+	// so the four lines the page renders are checked against states that
+	// cannot drift from what the server sends.
+	health := fixture["health"].(fleet.HealthResponse)
+	earlier := 0
+	health.Schedule.OverdueAgo, health.Schedule.OverdueAgoSeconds = &earlier, 1800
+	health.Load = fleet.LoadOf(&fleet.View{Schedule: health.Schedule, Capacity: health.Capacity,
+		Demoted: demoted, GapSkips: retained.GapSkips}, at)
+	fixture["health"] = health
 	encoded, err := json.Marshal(fixture)
 	if err != nil {
 		t.Fatalf("encode fixture: %v", err)
@@ -629,6 +639,25 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"SKIP qg-demoted-rejected ::", "3 个 Slot，记录于 "},
 		{"SKIP qg-demoted-rejected ::", "。在被拒期间跳过（冷却让旧轮次超出重放范围，首要原因是查询不可用）"},
 		{"SKIP qg-losing-now ::", "。仍在发生（最近 10 分钟内跳过）"},
+		// The operating judgment from the fixture's own census, capacity and
+		// records: keeping up, no backlog, one loss in progress, and -- since
+		// something is being lost -- the queued permits named as the
+		// constraint; the limits name the half-hour trend and that nothing
+		// estimates headroom.
+		{"LOAD ::", "按时完成：跟得上，没有对象超期"},
+		{"LOAD ::", "积压：没有，30 分 0 秒 前也没有"},
+		{"LOAD ::", "漏检：正在发生——1 个对象最近 10 分钟内跳过了检测；另有 1 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）"},
+		{"LOAD ::", "瓶颈：查询并发位子——启动至今 56% 的取位子排过队，而工作在落后或在漏检"},
+		{"LOAD ::", "限制条件：不推算还能承载多少对象——没有测这个，编出来的数会被当真；积压对照样本不足 1 小时（最年轻的副本索引还没跑满 1 小时）；资源占比是各进程启动至今的累计，不是最近 1 小时"},
+		{"LOAD behind-permits ::", "按时完成：跟不上——7 个对象超期（最久 15 分 0 秒），1 小时按时率 88.9% 低于 6 小时 99.3%"},
+		{"LOAD behind-permits ::", "积压：在涨——现在 7 个超期，1 小时 0 分 前 2 个"},
+		{"LOAD unlocated ::", "按时完成：有 3 个对象超期但在追（最久 2 分 0 秒）——1 小时按时率 99.6% 不低于 6 小时 99.4%"},
+		{"LOAD unlocated ::", "积压：现在 3 个超期；没有够早的对照样本，涨没涨说不出"},
+		{"LOAD unlocated ::", "瓶颈：资源数字都不指向任何一处，但工作在落后或在漏检——约束在调度（重放边界、派发顺序），加资源不是这一步"},
+		{"LOAD budget ::", "瓶颈：内存派生的体量预算——已拒绝 41 次，这套资源装不下当前负载（这是唯一按定义就是容量的读数）"},
+		{"LOAD nothing ::", "按时完成：没有副本带到期索引，说不出"},
+		{"LOAD nothing ::", "瓶颈：没有副本报容量，判不了"},
+		{"LOAD nothing ::", "没有到期索引，按时与积压两项判不了；没有容量数据，瓶颈一项判不了"},
 		// A line whose objects are all in the pool says so, in the pool card's
 		// words, so the two cannot read as different verdicts.
 		{"ERR qg-stuck-slot ::", "最近一次错误：alarmd state: gap guard conflict: expected 41 got 43（*errors.errorString），Slot "},
@@ -1110,6 +1139,35 @@ console.log('SENTENCE budget :: ' + ctx.checkSentence({code: 'DETECTION_ABANDONE
   groups: [{key: 'EXECUTION_BUDGET_EXHAUSTED', objects: 3}, {key: 'ONGOING', objects: 2}]}, 5));
 console.log('BRIEF :: ' + ['briefSchedule', 'briefTodo', 'briefBlind'].map(id => textOf(store[id])).join(' | '));
 console.log('BUILD :: ' + textOf(store['buildLine']));
+// The operating judgment at the top of the capacity panel, with its limits.
+console.log('LOAD :: ' + textOf(store['loadLines']) + ' ｜ ' + textOf(store['loadLimits']));
+// The same judgment in the states a deployment is actually in: behind on
+// permits, behind with nothing pointing anywhere, a budget rejection while
+// keeping up, and nothing to read from.
+const loadStates = {
+  'behind-permits': {on_time: {state: 'FALLING_BEHIND', overdue: 7, oldest_late_seconds: 900, rate_1h: 88.9, rate_6h: 99.3},
+    backlog: {state: 'GROWING', now: 7, earlier: 2, span_seconds: 3600},
+    loss: {state: 'NONE', ongoing: 0, while_demoted_recent: 0, window_seconds: 600},
+    bottleneck: {resource: 'PERMITS', budget_rejections: 0, memory_limit_hits: 0, throttled_share: 0.01, permit_wait_share: 0.56, queue_full: 12},
+    limits: ['NO_HEADROOM_ESTIMATE', 'COUNTERS_SINCE_START']},
+  'unlocated': {on_time: {state: 'CATCHING_UP', overdue: 3, oldest_late_seconds: 120, rate_1h: 99.6, rate_6h: 99.4},
+    backlog: {state: 'UNKNOWN', now: 3},
+    loss: {state: 'IN_PROGRESS', ongoing: 2, while_demoted_recent: 5, window_seconds: 600},
+    bottleneck: {resource: 'UNLOCATED', budget_rejections: 0, memory_limit_hits: 0, permit_wait_share: 0.1, queue_full: 0},
+    limits: ['NO_HEADROOM_ESTIMATE', 'COUNTERS_SINCE_START']},
+  'budget': {on_time: {state: 'KEEPING_UP', overdue: 0, oldest_late_seconds: 0, rate_1h: 99.6, rate_6h: 99.4},
+    backlog: {state: 'NONE', now: 0, earlier: 0, span_seconds: 3600},
+    loss: {state: 'NONE', ongoing: 0, while_demoted_recent: 0, window_seconds: 600},
+    bottleneck: {resource: 'BUDGET', budget_rejections: 41, memory_limit_hits: 0, queue_full: 0},
+    limits: ['NO_HEADROOM_ESTIMATE', 'COUNTERS_SINCE_START']},
+  'nothing': {on_time: {state: 'UNKNOWN'}, backlog: {state: 'UNKNOWN', now: 0}, loss: {state: 'NONE', window_seconds: 600},
+    bottleneck: {resource: 'UNKNOWN'}, limits: ['NO_HEADROOM_ESTIMATE', 'NO_CENSUS', 'NO_CAPACITY']},
+};
+for (const [name, load] of Object.entries(loadStates)) {
+  try { ctx.renderLoad(load); }
+  catch (e) { console.error('renderLoad (' + name + '): ' + e.message); failed++; continue; }
+  console.log('LOAD ' + name + ' :: ' + textOf(store['loadLines']) + ' ｜ ' + textOf(store['loadLimits']));
+}
 // Opening a line renders its folds.
 ctx.openCheck = 'OBSERVATION_GAP';
 ctx.renderChecks(data.checks);
