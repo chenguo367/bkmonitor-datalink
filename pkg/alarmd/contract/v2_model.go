@@ -98,15 +98,24 @@ const (
 	// proposes nor already protects it. Without a name of its own the refusal
 	// left the attempt reading as an unclassified internal error, on every
 	// round, for a Query Group that would never get past it.
-	ReasonGapGuardConflict       = "GAP_GUARD_CONFLICT"
-	ReasonResourceHardStop       = "RESOURCE_HARD_STOP"
-	ReasonSlotBudgetExceeded     = "SLOT_BUDGET_EXCEEDED"
-	ReasonOutputACKUnknown       = "OUTPUT_ACK_UNKNOWN"
-	ReasonStateWriteRetryable    = "STATE_WRITE_RETRYABLE"
-	ReasonStateCorrupt           = "STATE_CORRUPT"
-	ReasonStateSchemaUnsupported = "STATE_SCHEMA_UNSUPPORTED"
-	ReasonStateBudgetExceeded    = "STATE_BUDGET_EXCEEDED"
-	ReasonAuditDrop              = "AUDIT_DROP"
+	ReasonGapGuardConflict = "GAP_GUARD_CONFLICT"
+	// ReasonSnapshotRetentionInsufficient names a Plan whose recovery
+	// contract needs a Snapshot kept longer than this deployment retains one.
+	// The retention is the deployment's capacity and does not follow a Plan, so
+	// the Plan is what gives way -- but only that Plan.
+	ReasonSnapshotRetentionInsufficient = "SNAPSHOT_RETENTION_INSUFFICIENT"
+	// ReasonCompletionOffsetBelowReserve names a Plan whose completion deadline
+	// does not clear the downstream execution reserve, leaving its queries no
+	// time to run in.
+	ReasonCompletionOffsetBelowReserve = "COMPLETION_OFFSET_BELOW_RESERVE"
+	ReasonResourceHardStop             = "RESOURCE_HARD_STOP"
+	ReasonSlotBudgetExceeded           = "SLOT_BUDGET_EXCEEDED"
+	ReasonOutputACKUnknown             = "OUTPUT_ACK_UNKNOWN"
+	ReasonStateWriteRetryable          = "STATE_WRITE_RETRYABLE"
+	ReasonStateCorrupt                 = "STATE_CORRUPT"
+	ReasonStateSchemaUnsupported       = "STATE_SCHEMA_UNSUPPORTED"
+	ReasonStateBudgetExceeded          = "STATE_BUDGET_EXCEEDED"
+	ReasonAuditDrop                    = "AUDIT_DROP"
 
 	CompatibilityModeLegacyGroupOfOne = "LEGACY_GROUP_OF_ONE"
 

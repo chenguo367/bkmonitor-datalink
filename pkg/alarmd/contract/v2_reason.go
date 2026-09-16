@@ -113,6 +113,12 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// Deterministic: the persisted marker and the proposed one are both facts,
 	// and repeating the attempt compares the same two facts again.
 	ReasonGapGuardConflict: {ReasonGapGuardConflict, ReasonClassDeterministic, ReasonDomainObservation},
+	// Deterministic: the Plan asks for more than this deployment has, and it
+	// will ask for the same on every round until one of the two changes.
+	ReasonSnapshotRetentionInsufficient: {
+		ReasonSnapshotRetentionInsufficient, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonCompletionOffsetBelowReserve: {
+		ReasonCompletionOffsetBelowReserve, ReasonClassDeterministic, ReasonDomainObservation},
 	ReasonResourceHardStop: {ReasonResourceHardStop, ReasonClassRetryable, ReasonDomainObservation},
 	// One Slot's own State, Event or Gap output exceeds the per-Slot cap the
 	// process can ever apply; the Slot completes deterministically. The code

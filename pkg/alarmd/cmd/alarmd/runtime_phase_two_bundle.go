@@ -400,7 +400,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, scheduler.ErrSnapshotRetentionInsufficient
 	}
 	reconciler, err := controlplane.NewSourceReconciler(repository, compiler, strategySemantics,
-		phaseTwoCatalogRetentionValidator(cfg))
+		phaseTwoCatalogRetentionAdmission(cfg))
 	if err != nil {
 		return nil, err
 	}
@@ -987,60 +987,97 @@ func phaseTwoSnapshotMinimumRetention(cfg config.Config, queryDeadlineOffset tim
 		cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration() + phaseTwoPostRecoveryTerminalDelay(cfg)
 }
 
-// phaseTwoCatalogRetentionValidator refuses a Catalog the deployment cannot
-// keep long enough to serve the recovery contract. It refuses on two
-// unrelated conditions, and it used to report both with the same sentence.
+// phaseTwoCatalogRetentionAdmission withholds the Plans this deployment cannot
+// serve and publishes the rest.
 //
-// That sentence is what a refused round leaves behind: the round publishes
-// nothing, the deployment keeps the last good Catalog, and the only account
-// of why is this text. One of the conditions is a single strategy whose
-// completion offset does not clear the downstream reserve; the other is the
-// deployment's own Catalog TTL being shorter than the retention its longest
-// plan needs. They are fixed by different people in different places, and
-// telling them apart from the outside was not possible.
+// Two conditions, both of them properties of one Plan: a completion offset that
+// does not clear the downstream execution reserve, which leaves the Plan with
+// no time to query in; and a Plan whose recovery contract needs a Snapshot kept
+// longer than the deployment's Catalog retention, which would let a Slot be
+// replayed after the content it names is gone.
 //
-// So each refusal now says which condition, with the numbers that decided
-// it and, for the per-plan one, which plan. It still wraps
-// ErrSnapshotRetentionInsufficient, which is what the callers match on.
-func phaseTwoCatalogRetentionValidator(cfg config.Config) func(controlplane.Catalog) error {
-	return func(catalog controlplane.Catalog) error {
+// Both used to refuse the whole Catalog. One strategy asking for sixty hours of
+// retention stopped every strategy in the deployment from publishing, every
+// round, for as long as it existed -- the fleet went stale, no cutover was
+// attempted, nothing was written, and the account of it was one sentence naming
+// a strategy nobody had touched. The retention is the deployment's capacity and
+// does not follow a Plan; a Plan that asks for more than there is, is the Plan
+// that cannot run.
+//
+// Withholding names both numbers, because the two readings are different
+// actions: shorten the strategy's evaluation cadence, or raise the deployment's
+// retention. A refusal saying only that the Catalog cannot be retained left the
+// reader to work out which of those it was.
+func phaseTwoCatalogRetentionAdmission(cfg config.Config) controlplane.CatalogAdmission {
+	return func(catalog controlplane.Catalog) (controlplane.Catalog, error) {
 		reserve := cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
-		var maximumOffset time.Duration
-		var maximumPlan execution.PlanIdentity
+		retention := phaseTwoCatalogRetention(cfg)
+		// One record per withheld source, in the order they were met, because
+		// the dispositions are a partition: every object counted once. The
+		// compiler has already recorded an ACCEPTED for each source it
+		// compiled, so a withheld source's record replaces that one rather
+		// than joining it -- appending both would count the object twice, put
+		// it in two partitions at once, and leave the ACCEPTED total unmoved
+		// while the strategy stopped running.
+		withheld := map[string]controlplane.ObjectDisposition{}
+		order := make([]string, 0)
+		withhold := func(plan controlplane.FrozenPlan, reason, detail string) {
+			if _, already := withheld[plan.Identity.StrategyID]; already {
+				// A source with several Plans is still one object. The first
+				// reason met is the one reported; the rest are the same
+				// verdict about the same strategy.
+				return
+			}
+			order = append(order, plan.Identity.StrategyID)
+			withheld[plan.Identity.StrategyID] = controlplane.ObjectDisposition{
+				SourceID: plan.Identity.StrategyID, Scope: "PLAN",
+				Disposition: controlplane.DispositionUnsupported, Reason: reason, FieldPath: detail,
+			}
+		}
+
+		groups := make([]controlplane.QueryGroup, 0, len(catalog.QueryGroups))
 		for _, group := range catalog.QueryGroups {
+			kept := make([]controlplane.FrozenPlan, 0, len(group.Plans))
 			for _, plan := range group.Plans {
 				completion := time.Duration(plan.ScheduleSpec.CompletionOffsetSeconds()) * time.Second
 				offset := completion - reserve
 				if offset <= 0 {
-					// One plan, and the Catalog is refused for every
-					// strategy in it. Naming the plan is the difference
-					// between changing one strategy and searching for it.
-					return fmt.Errorf("%w: the plan of strategy %s in business %s completes %s after its "+
-						"Evaluation Time, which does not clear the %s downstream execution reserve",
-						scheduler.ErrSnapshotRetentionInsufficient, plan.Identity.StrategyID,
-						plan.Identity.BusinessID, completion, reserve)
+					withhold(plan, contract.ReasonCompletionOffsetBelowReserve,
+						fmt.Sprintf("completion_offset=%s downstream_execution_reserve=%s", completion, reserve))
+					continue
 				}
-				if offset > maximumOffset {
-					maximumOffset, maximumPlan = offset, plan.Identity
+				if required := phaseTwoSnapshotMinimumRetention(cfg, offset); retention < required {
+					withhold(plan, contract.ReasonSnapshotRetentionInsufficient,
+						fmt.Sprintf("required_retention=%s catalog_retention=%s", required, retention))
+					continue
 				}
+				kept = append(kept, plan)
 			}
+			if len(kept) == 0 {
+				// Every Plan of this Query Group was withheld, so the group has
+				// nothing to execute. Publishing it empty would put a Query
+				// Group on the fleet that no worker can do anything with.
+				continue
+			}
+			group.Plans = kept
+			groups = append(groups, group)
 		}
-		required := phaseTwoSnapshotMinimumRetention(cfg, maximumOffset)
-		retention := phaseTwoCatalogRetention(cfg)
-		if retention < required {
-			// The deployment's own setting, not any one strategy: the
-			// longest plan in the Catalog decides how long a Snapshot has
-			// to be kept, and the configured TTL is shorter than that.
-			return fmt.Errorf("%w: Catalog retention %s is shorter than the %s this Catalog needs "+
-				"(publication delay allowance %s + %s past the Evaluation Time, from the plan of strategy %s "+
-				"in business %s + max replay age %s + post-recovery terminal delay %s). Retention covers "+
-				"evaluation cadences up to %s; that plan is evaluated less often than that",
-				scheduler.ErrSnapshotRetentionInsufficient, retention, required,
-				phaseTwoPublicationDelayAllowance(cfg), maximumOffset, maximumPlan.StrategyID,
-				maximumPlan.BusinessID, cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
-				phaseTwoPostRecoveryTerminalDelay(cfg), phaseTwoMaxSupportedEvaluationInterval)
+		catalog.QueryGroups = groups
+		if len(withheld) == 0 {
+			return catalog, nil
 		}
-		return nil
+		dispositions := make([]controlplane.ObjectDisposition, 0, len(catalog.Dispositions)+len(withheld))
+		for _, disposition := range catalog.Dispositions {
+			if _, replaced := withheld[disposition.SourceID]; replaced && disposition.Scope == "PLAN" {
+				continue
+			}
+			dispositions = append(dispositions, disposition)
+		}
+		for _, sourceID := range order {
+			dispositions = append(dispositions, withheld[sourceID])
+		}
+		catalog.Dispositions = dispositions
+		return catalog, nil
 	}
 }
 

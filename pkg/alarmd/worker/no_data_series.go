@@ -179,6 +179,10 @@ func (stream *streamedExecution) noDataCompletedSeries(
 		DimensionIdentity: contract.DimensionIdentityV2{Fields: identityFields, Digest: digest},
 		Values: map[string]json.RawMessage{
 			strategy.NoDataValueField: json.RawMessage(strconv.Itoa(synthetic.Value)),
+			// Carried, not detected: the alert text says how many periods this
+			// group has been silent, and the converter has no other way to
+			// know. The count itself is decided where the absence is.
+			contract.NoDataPeriodFactField: json.RawMessage(strconv.FormatInt(synthetic.Periods, 10)),
 		},
 		Dimensions:   fields,
 		ReceivedTime: synthetic.SourceTime,

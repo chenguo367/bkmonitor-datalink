@@ -143,7 +143,7 @@ type SourceReconciler struct {
 	publisher       *SnapshotPublisher
 	compiler        RuntimePlanCompiler
 	stateSemantics  strategy.StateSemantics
-	validateCatalog func(Catalog) error
+	validateCatalog CatalogAdmission
 	outputProtocol  string
 	// candidates carries the compiler's output from one round to the next,
 	// so a round compiles only the documents that changed. It lives on the
@@ -206,11 +206,27 @@ func (reconciler *SourceReconciler) ConfigureOutputProtocol(protocol string) err
 	}
 }
 
+// CatalogAdmission is the deployment's say over a Catalog the compiler built.
+//
+// It returns the Catalog to publish, which is how a deployment withholds the
+// Plans it cannot serve while publishing the rest. Returning an error refuses
+// the whole round instead, and is for conditions that are genuinely about the
+// Catalog rather than about any Plan in it.
+//
+// The distinction is the point. This hook used to be able only to refuse, and
+// the one condition production gave it -- a Plan needing longer Snapshot
+// retention than the deployment keeps -- is a property of one Plan. A single
+// strategy asking for sixty hours stopped every other strategy in the
+// deployment from being published at all, on every round, for as long as it
+// existed; the fleet went stale, no cutover was attempted, and the account of
+// why was one sentence naming a strategy nobody had changed.
+type CatalogAdmission func(Catalog) (Catalog, error)
+
 func NewSourceReconciler(
 	repository *RedisCatalogRepository,
 	compiler RuntimePlanCompiler,
 	stateSemantics strategy.StateSemantics,
-	validators ...func(Catalog) error,
+	validators ...CatalogAdmission,
 ) (*SourceReconciler, error) {
 	if compiler == nil || !validStateSemantics(stateSemantics) || len(validators) > 1 ||
 		(len(validators) == 1 && validators[0] == nil) {
@@ -220,7 +236,7 @@ func NewSourceReconciler(
 	if err != nil {
 		return nil, err
 	}
-	var validateCatalog func(Catalog) error
+	var validateCatalog CatalogAdmission
 	if len(validators) == 1 {
 		validateCatalog = validators[0]
 	}
@@ -291,7 +307,18 @@ func (reconciler *SourceReconciler) Refresh(
 			errors.New("alarmd controlplane: source observation changed while building Catalog"))
 	}
 	if reconciler.validateCatalog != nil {
-		if err := reconciler.validateCatalog(catalog); err != nil {
+		admitted, err := reconciler.validateCatalog(catalog)
+		if err != nil {
+			return SourceRefreshResult{}, exitAt(SourceRefreshExitValidateCatalog, err)
+		}
+		catalog = admitted
+		// The revision names the content, so content the deployment withheld
+		// has to be named by a different one. Publishing the admitted Catalog
+		// under the revision the built one derived is refused at the write --
+		// correctly, because the two would disagree about what that revision
+		// contains, and everything downstream reads content by revision.
+		catalog.SnapshotRevision, err = deriveSnapshotRevision(catalog.QueryGroups)
+		if err != nil {
 			return SourceRefreshResult{}, exitAt(SourceRefreshExitValidateCatalog, err)
 		}
 	}

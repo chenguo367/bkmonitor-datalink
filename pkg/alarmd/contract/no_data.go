@@ -21,6 +21,18 @@ import (
 // where the identity is built, not here.
 const NoDataDimensionTag = "__NO_DATA_DIMENSION__"
 
+// NoDataPeriodFactField carries, on a synthetic no-data point, how many periods
+// the group has been without data. The output layer states it in the alert
+// text; nothing detects on it.
+//
+// It travels with the point's values because that is the only channel a
+// synthetic point has to the converter, and because it is a fact about this
+// point rather than configuration shared by the Plan. It is named apart from
+// the detected value so that the one thing the detector reads stays the one
+// thing it reads: a second number under a name the detector recognises is how
+// an output-only fact becomes an input nobody meant.
+const NoDataPeriodFactField = "__no_data_periods__"
+
 // NoDataConfigV1 is an item's no-data detection setting, frozen with the Plan
 // that carries it.
 //

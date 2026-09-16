@@ -75,10 +75,24 @@ func TestANoDataRoundProducesASeriesTheEvaluationCanRead(t *testing.T) {
 			entry.kind(), execution.SeriesKindNoData)
 	}
 	// The Plan it carries is the no-data view, so everything downstream that
-	// asks for levels gets the one this series is judged against.
+	// asks for levels gets the one this series is judged against -- and that is
+	// the level the no-data configuration names, not the strategy's own.
+	//
+	// Stated as the number rather than as "the same as NoDataLevel()", which
+	// would move with whatever NoDataLevel returned and agree with itself while
+	// being wrong. This fixture configures no-data at level 2 and detects
+	// thresholds at level 5, so the two answers are different numbers: the
+	// level is the last segment of the anomaly_id, and taking the strategy's
+	// would give every no-data alert a deduplication key that no group on the
+	// other side shares.
+	const noDataConfiguredLevel = uint32(2)
 	if levels := entry.due.CompiledPlan.Levels(); len(levels) != 1 ||
-		levels[0].Definition().LevelID != due.CompiledPlan.NoDataLevel().Definition().LevelID {
-		t.Fatalf("the series carries levels %+v, want only the no-data level", levels)
+		levels[0].Definition().LevelID != noDataConfiguredLevel {
+		t.Fatalf("the series carries levels %+v, want only the configured no-data level %d", levels, noDataConfiguredLevel)
+	}
+	if entry.inputs[0].Inputs[0].Consumer.LevelID != noDataConfiguredLevel {
+		t.Fatalf("the binding names level %d, want the configured no-data level %d",
+			entry.inputs[0].Inputs[0].Consumer.LevelID, noDataConfiguredLevel)
 	}
 	if entry.item.Identity.SeriesIdentityDigest != entry.series {
 		t.Fatalf("state key series %q does not match the series %q",
@@ -100,6 +114,14 @@ func TestANoDataRoundProducesASeriesTheEvaluationCanRead(t *testing.T) {
 	}
 	if _, tagged := record.Dimensions()[contract.NoDataDimensionTag]; !tagged {
 		t.Fatalf("synthetic dimensions = %v, want the no-data tag", record.Dimensions())
+	}
+	// And the point carries how long the group has been silent. The alert text
+	// states it and the output layer has no other way to know: the count is
+	// decided here, where the absence is, and the values are the only channel
+	// a synthetic point has to the converter.
+	if got := string(record.Values()[contract.NoDataPeriodFactField]); got != "1" {
+		t.Fatalf("synthetic period count = %q, want 1 for a group absent since this round. Without it "+
+			"every no-data alert says one period however long the silence has lasted", got)
 	}
 	// Exactly one period behind, not merely behind: the point is the period this
 	// Slot decided, and the backend's anomaly_id is built from that timestamp -
