@@ -131,13 +131,15 @@ func normalizeQueryFailure(component Component, stage Stage, input *QueryFailure
 		f.Stage = QueryFailureStageOther
 	}
 	switch f.Category {
-	case QueryFailureCategoryBudget:
-		if budget := NormalizeCapacityBudget(CapacityBudget(f.Code)); budget != "" && budget != CapacityBudgetOther {
-			f.Code = string(budget)
-		} else {
-			f.Code = NormalizeQueryFailureCode(f.Code)
-		}
-	case QueryFailureCategorySourceBackend, QueryFailureCategorySeriesIdentity, QueryFailureCategoryCompletionContract,
+	// Budget goes through the same grammar as every other category. It used to
+	// have an exemption: a code that spelled a known budget was kept as it was,
+	// which is how every budget rejection came to publish a lower-case label as
+	// its code without anything noticing. The exemption was what made it
+	// invisible -- OTHER on that path would have said at once that the code was
+	// not a code. Publishers map the budget to its code themselves now, with
+	// CapacityBudgetFailureCode.
+	case QueryFailureCategoryBudget, QueryFailureCategorySourceBackend, QueryFailureCategorySeriesIdentity,
+		QueryFailureCategoryCompletionContract,
 		QueryFailureCategoryNamedInput, QueryFailureCategoryProviderTransport, QueryFailureCategoryAdmission,
 		QueryFailureCategoryEvaluation:
 		f.Code = NormalizeQueryFailureCode(f.Code)
