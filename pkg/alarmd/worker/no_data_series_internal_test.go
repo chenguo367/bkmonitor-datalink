@@ -101,6 +101,14 @@ func TestANoDataRoundProducesASeriesTheEvaluationCanRead(t *testing.T) {
 	if _, tagged := record.Dimensions()[contract.NoDataDimensionTag]; !tagged {
 		t.Fatalf("synthetic dimensions = %v, want the no-data tag", record.Dimensions())
 	}
+	// And the point carries how long the group has been silent. The alert text
+	// states it and the output layer has no other way to know: the count is
+	// decided here, where the absence is, and the values are the only channel
+	// a synthetic point has to the converter.
+	if got := string(record.Values()[contract.NoDataPeriodFactField]); got != "1" {
+		t.Fatalf("synthetic period count = %q, want 1 for a group absent since this round. Without it "+
+			"every no-data alert says one period however long the silence has lasted", got)
+	}
 	// Exactly one period behind, not merely behind: the point is the period this
 	// Slot decided, and the backend's anomaly_id is built from that timestamp -
 	// off by a second and no Python-written record matches it.
