@@ -319,6 +319,9 @@ func TestSlotExecutionCoordinatorOrdersRequiredSideEffects(t *testing.T) {
 	assertTrace(t, fixture.trace, fullTrace)
 	wantStages := []observability.Stage{
 		observability.StageGapLoaded,
+		// Right behind the load, because that is where the marker was read. A
+		// round that goes on to fail later has still stood under the guard.
+		observability.StageGapGuardProgress,
 		observability.StageStatePreflight,
 		observability.StageEvaluationCompleted,
 		// Every Slot says how many of its Plans detect no-data, including this
@@ -349,6 +352,67 @@ func TestSlotExecutionCoordinatorOrdersRequiredSideEffects(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotStages, wantStages) {
 		t.Fatalf("observed stages=%v, want=%v", gotStages, wantStages)
+	}
+}
+
+// A held guard says how far it has got every round it is read, not only on
+// the rounds where the number moved. The state somebody is looking for is a
+// count that is not moving -- a strategy at 0 of 5 for hours -- and that state
+// is exactly the one a changed-only rule would report nothing about.
+func TestSlotExecutionCoordinatorReportsGapScopeProgressEveryRound(t *testing.T) {
+	fixture := newFixture(t, true, "")
+	fixture.ports.gapScopes = []execution.GapScopeState{
+		{
+			Scope: execution.GapScope{}, Status: execution.GapStatusGapped,
+			ReasonCode: execution.ReasonCode(contract.ReasonConfigDrift), RequiredFullSlots: 5,
+		},
+		{
+			Scope: execution.GapScope{LevelID: 5, HasLevel: true}, Status: execution.GapStatusWarming,
+			ReasonCode: execution.ReasonCode(contract.ReasonHistoryWarming), RequiredFullSlots: 5, ObservedFullSlots: 3,
+		},
+	}
+	if _, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	// Both numbers of both scopes, read off the observations rather than off
+	// the fixture: a reader needs k, N, which scope, and why it is held, and
+	// an assertion that only counted the lines would pass on a report of
+	// zeroes.
+	var got []observability.GapProgressFacts
+	for _, observation := range slotObservations(fixture.observations) {
+		if observation.Stage != observability.StageGapGuardProgress {
+			continue
+		}
+		if observation.GapProgress == nil {
+			t.Fatalf("gap progress observation carried no facts: %+v", observation)
+		}
+		if observation.Trace.StrategyID != planIdentity().StrategyID {
+			t.Fatalf("gap progress strategy=%q, want=%q", observation.Trace.StrategyID, planIdentity().StrategyID)
+		}
+		got = append(got, *observation.GapProgress)
+	}
+	want := []observability.GapProgressFacts{
+		{Scope: "plan", Status: string(execution.GapStatusGapped), Reason: contract.ReasonConfigDrift, Required: 5, Observed: 0},
+		{Scope: "5", Status: string(execution.GapStatusWarming), Reason: contract.ReasonHistoryWarming, Required: 5, Observed: 3},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("gap progress facts=%+v, want=%+v", got, want)
+	}
+}
+
+// Nothing is reported for a Plan whose marker is gone. That silence is the
+// counterpart of the line above: a reader who saw a scope reported for every
+// Plan could not tell a held guard from a released one.
+func TestSlotExecutionCoordinatorReportsNoGapScopeProgressWithoutAMarker(t *testing.T) {
+	fixture := newFixture(t, true, "")
+	fixture.ports.gapMissing = true
+	if _, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err != nil {
+		t.Fatalf("Execute() error: %v", err)
+	}
+	for _, observation := range slotObservations(fixture.observations) {
+		if observation.Stage == observability.StageGapGuardProgress {
+			t.Fatalf("cleared marker reported progress: %+v", observation.GapProgress)
+		}
 	}
 }
 
@@ -693,7 +757,16 @@ func TestSlotExecutionCoordinatorPreservesStateTerminalAsPlanCompletion(t *testi
 	if fixture.ports.lastProgress.Completion.Kind != execution.CompletionTerminal {
 		t.Fatalf("completion=%q", fixture.ports.lastProgress.Completion.Kind)
 	}
-	stateObservation := slotObservations(fixture.observations)[1]
+	// Selected by stage rather than by position: an index into the
+	// observation stream breaks on any unrelated line added anywhere before
+	// it, and names nothing about what it is checking.
+	var stateObservation observability.Observation
+	for _, observed := range slotObservations(fixture.observations) {
+		if observed.Stage == observability.StageStatePreflight {
+			stateObservation = observed
+			break
+		}
+	}
 	if stateObservation.Result != observability.ResultTerminal || stateObservation.ReasonCode != contract.ReasonRecordInvalid ||
 		stateObservation.Counts.Keys != 1 {
 		t.Fatalf("state observation=%+v", stateObservation)
@@ -1126,6 +1199,7 @@ type recordingPorts struct {
 	stateLoadCalls                  int
 	gapLoadStatus                   execution.GapLoadStatus
 	gapMissing                      bool
+	gapScopes                       []execution.GapScopeState
 	eventSeriesDrift                bool
 	eventTimeDrift                  bool
 	eventRecordDrift                bool
@@ -1389,7 +1463,10 @@ func (ports *recordingPorts) Evaluate(_ context.Context, request execution.Evalu
 			ApplyVersion: mutation.ApplyVersion, ScheduleRevision: "plan-schedule-v1",
 			Scopes: []execution.GapScopeMutation{{Kind: execution.GapOpen, ReasonCode: reason, RequiredFullSlots: 1}},
 		})}
-	} else {
+	} else if !ports.gapMissing {
+		// Only when the load found a marker. A Plan with no marker has nothing
+		// to clear, and a GapClear naming marker revision 1 against a missing
+		// one is refused before it reaches the store.
 		guardAfter = []execution.PlanGapMutation{mustPlanGapMutation(execution.PlanGapMutation{
 			Identity:               execution.PlanGapIdentity{Plan: planIdentity(), StateGeneration: "state-v1"},
 			ExpectedMarkerRevision: 1, ApplyVersion: mutation.ApplyVersion, ScheduleRevision: "plan-schedule-v1",
@@ -1504,6 +1581,9 @@ func (ports *recordingPorts) LoadGaps(_ context.Context, request execution.GapLo
 			items[index].Scopes = []execution.GapScopeState{{
 				Status: execution.GapStatusWarming, ReasonCode: execution.ReasonCode(contract.ReasonHistoryWarming), RequiredFullSlots: 1,
 			}}
+			if ports.gapScopes != nil {
+				items[index].Scopes = append([]execution.GapScopeState(nil), ports.gapScopes...)
+			}
 		}
 	}
 	return execution.GapLoadResult{Items: items}, ports.fail("gap_load")

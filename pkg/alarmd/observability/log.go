@@ -281,6 +281,19 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Int("no_data_outcome_plans", facts.Plans),
 		)
 	}
+	if facts := observation.GapProgress; facts != nil {
+		// Both numbers, on every line. The question these answer is "how far
+		// has this guard got", and k alone answers it only for a reader who
+		// already knows N -- which varies by strategy, because it is the
+		// largest history requirement across that strategy's Levels.
+		attributes = append(attributes,
+			slog.String("gap_scope", facts.Scope),
+			slog.String("gap_scope_status", facts.Status),
+			slog.String("gap_scope_reason", facts.Reason),
+			slog.Uint64("gap_full_slots_required", uint64(facts.Required)),
+			slog.Uint64("gap_full_slots_observed", uint64(facts.Observed)),
+		)
+	}
 	if facts := observation.StateGenerationSkew; facts != nil {
 		attributes = append(attributes,
 			slog.String("state_generation_skew_kind", facts.Kind),

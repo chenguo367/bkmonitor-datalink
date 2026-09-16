@@ -109,7 +109,12 @@ const (
 	// absence detection is not. It is deliberately not source_withheld: that
 	// stage means the strategy is not running, and a reader who has learned
 	// to treat those lines as outages would read these the same way.
-	StageNoDataSuspended     = "no_data_suspended"
+	StageNoDataSuspended = "no_data_suspended"
+	// StageGapGuardProgress names one gap scope's standing at the moment a
+	// round read it: how far its release condition has got, and why it is
+	// held. Reported every round rather than on change, because the state it
+	// exists to show is a count that is not moving.
+	StageGapGuardProgress    = "gap_guard_progress"
 	StageEvaluationCompleted = "evaluation_completed"
 	StageSideEffectAdmission = "side_effect_admission"
 	StageStateAdmission      = "state_admission"
@@ -330,6 +335,33 @@ type NoDataSlotFacts struct {
 	// Plans is how many Plans landed on that outcome, so one observation can
 	// carry a whole Slot rather than one per Plan.
 	Plans int
+}
+
+// GapProgressFacts is one gap scope's release condition as a round found it.
+//
+// The page's sentence is "releasing needs N consecutive complete rounds,
+// currently k". Nothing emitted k or N: they lived only inside the persisted
+// marker and inside a conflict error, so a strategy sitting at 0 of 5 for
+// hours looked from outside exactly like one nobody had looked at. The
+// numbers are what turn "this guard is holding" into "this guard has made no
+// progress since it was raised".
+//
+// Reported on every round a marker is read, deliberately not only when it
+// changes. A converging guard moves k every round and a stuck one does not,
+// and the stuck one is what somebody is looking for -- a changed-only rule
+// would say nothing about exactly the case this exists for.
+type GapProgressFacts struct {
+	// Scope is "plan" or the level id, so the two kinds are not told apart by
+	// a zero.
+	Scope string
+	// Status is GAPPED or WARMING. Only a warming scope is counting up, and a
+	// reader shown k/N against a gapped one would read a stalled count where
+	// there is no count.
+	Status string
+	Reason string
+	// Required and Observed are N and k.
+	Required uint32
+	Observed uint32
 }
 
 // NoDataStallFacts names one Plan whose no-data detection has stopped rather
@@ -1289,6 +1321,7 @@ type Observation struct {
 	QueryPermit           *QueryPermitFacts
 	NoDataSlot            *NoDataSlotFacts
 	NoDataStall           *NoDataStallFacts
+	GapProgress           *GapProgressFacts
 	SourceWithheld        *SourceWithheldFacts
 	NoDataCensus          *NoDataCensusFacts
 	SegmentContent        *SegmentContentFacts
@@ -2301,6 +2334,8 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentState, StageStatePreflight}, {ComponentState, StageGapLoaded},
 	{ComponentEvaluation, StageNoDataDecided},
 	{ComponentControlPlane, StageSourceWithheld},
+	{ComponentControlPlane, StageNoDataSuspended},
+	{ComponentEvaluation, StageGapGuardProgress},
 	{ComponentState, StageSideEffectAdmission}, {ComponentState, StageGapGuardCommitted},
 	{ComponentState, StageMutationCompared}, {ComponentState, StageStateAdmission},
 	{ComponentState, StageStateApplied},
