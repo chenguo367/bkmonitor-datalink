@@ -97,16 +97,16 @@ func (stream *streamedExecution) noDataRoundFor(
 	identity := execution.PlanNoDataIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}
 	snapshot, found := stream.noData.Find(identity)
 	if !found {
-		return noDataRound{}, fmt.Errorf(
-			"alarmd worker: no-data memory for strategy %s was not loaded", due.Identity.StrategyID)
+		return noDataRound{}, derivationFailed(fmt.Errorf(
+			"alarmd worker: no-data memory for strategy %s was not loaded", due.Identity.StrategyID))
 	}
 	version, err := execution.BuildApplyVersion(stream.header.Contract, due.StateApplyEpoch)
 	if err != nil {
-		return noDataRound{}, err
+		return noDataRound{}, derivationFailed(err)
 	}
 	period := int64(due.CompiledPlan.EvaluationSemantics().EvaluationInterval)
 	if err := noDataPointGrid(int64(stream.header.Contract.Slot.EvaluationTime), period); err != nil {
-		return noDataRound{}, err
+		return noDataRound{}, derivationFailed(err)
 	}
 	hosts := stream.noDataHosts[identity]
 	decided, err := nodata.EvaluatePlanSlot(nodata.PlanSlotInput{
@@ -125,7 +125,7 @@ func (stream *streamedExecution) noDataRoundFor(
 		OutOfBusiness:    hosts.OutOfBusiness,
 	})
 	if err != nil {
-		return noDataRound{}, err
+		return noDataRound{}, derivationFailed(err)
 	}
 	round := noDataRound{mutation: decided.Mutation, outcome: decided.Outcome}
 	if len(decided.Series) == 0 {
@@ -133,12 +133,12 @@ func (stream *streamedExecution) noDataRoundFor(
 	}
 	view, err := execution.PlanViewFor(due, execution.SeriesKindNoData)
 	if err != nil {
-		return noDataRound{}, err
+		return noDataRound{}, outputFailed(err)
 	}
 	for _, synthetic := range decided.Series {
 		entry, err := stream.noDataCompletedSeries(view, synthetic, version)
 		if err != nil {
-			return noDataRound{}, err
+			return noDataRound{}, outputFailed(err)
 		}
 		round.series = append(round.series, entry)
 	}
@@ -247,7 +247,24 @@ func (stream *streamedExecution) evaluateNoData(
 		round, err := stream.noDataRoundFor(due, seriesDimensionsFor(prepared, due.Identity),
 			stream.noDataCompleteness(due))
 		if err != nil {
-			return err
+			outcome, local := noDataLocalOutcome(err)
+			if !local || ctx.Err() != nil {
+				return err
+			}
+			// This Plan's no-data detection did not happen. Its threshold
+			// detection did, and the rest of this Slot's Plans have not been
+			// looked at yet; both used to be thrown away here, and the Slot
+			// retried to compute them again, over a no-data record nobody was
+			// asking about. The failure is this Plan's outcome for this Slot.
+			//
+			// Nothing is remembered either. A round that could not be decided
+			// has nothing to write, and a round whose verdicts could not be
+			// said must not record that it said them: the next round would
+			// count the absence from a checkpoint no alert was ever raised
+			// against.
+			stream.observeNoDataLocalFailure(ctx, due, outcome, err)
+			stream.noDataOutcomes = append(stream.noDataOutcomes, outcome)
+			continue
 		}
 		// A synthetic series writes state like any other, so it spends from the
 		// same per-Slot budget. A Plan whose series do not fit is skipped by
