@@ -119,7 +119,9 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonBlockedExactSetUnavailable: {ReasonBlockedExactSetUnavailable, ReasonClassDeterministic, ReasonDomainObservation},
 	// Deterministic: the persisted marker and the proposed one are both facts,
 	// and repeating the attempt compares the same two facts again.
-	ReasonGapGuardConflict: {ReasonGapGuardConflict, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonGapGuardConflict:     {ReasonGapGuardConflict, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonStateVersionConflict: {ReasonStateVersionConflict, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonStateStaleVersion:    {ReasonStateStaleVersion, ReasonClassDeterministic, ReasonDomainObservation},
 	// Deterministic: the Plan asks for more than this deployment has, and it
 	// will ask for the same on every round until one of the two changes.
 	ReasonSnapshotRetentionInsufficient: {
