@@ -170,6 +170,12 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		Identity:   execution.ProgressIdentity{QueryGroup: request.Contract.Slot.QueryGroup},
 		OwnerFence: request.OwnerFence, Projection: request.UnfinishedProjection(),
 	})
+	// Timed whichever way it went. A BeginSlot that fails says so; one that
+	// simply took twenty seconds used to say nothing at all, and an attempt
+	// stuck here is indistinguishable from one stuck anywhere else between
+	// slot_started and slot_completed.
+	observability.ObserveSlotWait(ctx, coordinator.ports.Observer, observability.SlotWaitProgressBegin,
+		observability.Operation(request.Operation), beginStarted, time.Now)
 	if err != nil {
 		return coordinator.progressBeginFailure(ctx, request, beginStarted, err), nil
 	}
@@ -183,7 +189,14 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		}
 		return activationRetry(reason), nil
 	}
+	finalizationStarted := time.Now()
 	finalization, err := coordinator.ports.Finalization.ResolveFinalization(ctx, request)
+	// This step reads the frozen Plan, and so the Segment's content objects.
+	// It is where the twenty-two second silence in the production evidence
+	// falls: after the frozen Plan was generated and before access planned a
+	// query, with no line on either side of it.
+	observability.ObserveSlotWait(ctx, coordinator.ports.Observer, observability.SlotWaitFinalization,
+		observability.Operation(request.Operation), finalizationStarted, time.Now)
 	if err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: resolve finalization: %w", err)
 	}

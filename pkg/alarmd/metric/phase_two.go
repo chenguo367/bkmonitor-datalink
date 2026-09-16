@@ -24,6 +24,7 @@ type phaseTwoMetrics struct {
 	queryUnavailable                queryUnavailableMetrics
 	queryCooldown                   *prometheus.CounterVec
 	slotReadiness                   slotReadinessMetrics
+	slotWait                        *prometheus.HistogramVec
 	slotTiming                      *prometheus.HistogramVec
 	work                            *prometheus.CounterVec
 	busy                            *prometheus.CounterVec
@@ -358,6 +359,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.queryCooldown = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_cooldown_events_total", Help: "External source_backend query cooldown transitions and failed real probes by bounded event."}, []string{"event"})
 	metrics.slotReadiness = newSlotReadinessMetrics()
 	metrics.slotTiming = newSlotTimingMetrics()
+	metrics.slotWait = newSlotWaitMetrics()
+	for _, wait := range observability.SlotWaits {
+		metrics.slotWait.WithLabelValues(wait)
+	}
 	metrics.workflow = newWorkflowMetrics()
 	metrics.activeQGSetCount = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "active_qg_set_query_groups", Help: "Query groups in the current immutable Active Set."})
 	metrics.activeQGSetBytes = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "active_qg_set_object_bytes", Help: "Encoded bytes in the current immutable Active Set."})
@@ -661,7 +666,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryUnavailable.attributions,
 		m.queryCooldown,
 		m.slotReadiness.slack, m.slotReadiness.boundary,
-		m.slotTiming,
+		m.slotTiming, m.slotWait,
 		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateWriteChange, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
@@ -780,6 +785,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if facts := observation.ReplayExpiry; facts != nil {
 		m.replayExpiries.WithLabelValues(facts.Reason).Inc()
 	}
+	m.observeSlotWait(observation)
 	if facts := observation.ScheduleCutover; facts != nil {
 		m.scheduleCutoverDuration.WithLabelValues(facts.Result).Observe(facts.Duration.Seconds())
 		m.scheduleCutovers.WithLabelValues(facts.Result, facts.Reason).Inc()

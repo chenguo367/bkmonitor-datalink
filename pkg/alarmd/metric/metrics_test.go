@@ -403,6 +403,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_schedule_cutover_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_replay_expired_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_slot_wait_duration_seconds"] = "variableLabels: {wait}"
 	expected["bkmonitor_alarmd_control_source_withheld_lines_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_state_renewal_gate_resets_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_inert_plans"] = "variableLabels: {}"
@@ -860,6 +861,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// written only from the list observability publishes, and the scheduler's
 	// typed constants are held to that list by a test of its own.
 	bounds[fqName("replay_expired_total")] = len(observability.ReplayExpiryReasons)
+	// One series per blocking wait a Slot attempt can be in, and no more: the
+	// label is written only from the list observability publishes, and the
+	// three call sites pass those constants.
+	bounds[fqName("slot_wait_duration_seconds")] = histogramSeries(len(observability.SlotWaits), len(slotWaitBuckets))
 	// Named or dropped, and no third thing: each changed object goes to one
 	// of the two, both are created at startup, and the label is written only
 	// from the two constants this package owns.

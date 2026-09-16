@@ -137,6 +137,14 @@ func (l *LoggingObserver) Observe(ctx context.Context, observation Observation) 
 		switch observation.Stage {
 		case StageRunnerReturned, StageDispatcherSnapshot, StageQueryPermitWait, StageExpiredRangeReturned:
 			return
+		case StageSlotWait:
+			// Every wait is measured; only a slow one is written down. The
+			// ordinary case is thousands a second of a few milliseconds each,
+			// answers no question anyone asks, and would push out the lines
+			// that do.
+			if observation.Duration < SlowSlotWait {
+				return
+			}
 		}
 	}
 	if l == nil || l.logger == nil || l.logger.next == nil || l.policy == nil {
@@ -225,6 +233,11 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("cutover_reason", facts.Reason),
 			slog.String("cutover_query_group", facts.QueryGroup),
 		)
+	}
+	if facts := observation.SlotWait; facts != nil {
+		// Reached only for a wait past the threshold, which is the attempt
+		// that has something to explain.
+		attributes = append(attributes, slog.String("slot_wait", facts.Wait))
 	}
 	if facts := observation.ReplayExpiry; facts != nil {
 		// The reason on every expiry, and the two compared instants on the one
