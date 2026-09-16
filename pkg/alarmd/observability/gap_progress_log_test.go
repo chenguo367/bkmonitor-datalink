@@ -26,7 +26,7 @@ func TestGapScopeProgressLineCarriesBothNumbers(t *testing.T) {
 	}
 	observer := NewLoggingObserver(New("alarmd", &output), policy)
 	observer.Observe(context.Background(), Observation{
-		Component: ComponentEvaluation, Stage: StageGapGuardProgress, Result: ResultSuccess,
+		Component: ComponentState, Stage: StageGapGuardProgress, Result: ResultSuccess,
 		Trace: TraceFields{StrategyID: "1074"},
 		GapProgress: &GapProgressFacts{
 			Scope: "plan", Status: "GAPPED", Reason: "CONFIG_DRIFT", Required: 5, Observed: 0,

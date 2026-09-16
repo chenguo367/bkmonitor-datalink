@@ -386,6 +386,14 @@ func TestSlotExecutionCoordinatorReportsGapScopeProgressEveryRound(t *testing.T)
 		if observation.GapProgress == nil {
 			t.Fatalf("gap progress observation carried no facts: %+v", observation)
 		}
+		// Beside the gap load and the gap commit, which are both state. A
+		// reader looking for what a guard is doing filters by component, so a
+		// line under another one is a line they do not see; and an
+		// unregistered component/stage pair normalises the stage to _other,
+		// which takes the line out of the log budget's workflow path as well.
+		if observation.Component != observability.ComponentState {
+			t.Fatalf("gap progress component=%q, want=%q", observation.Component, observability.ComponentState)
+		}
 		if observation.Trace.StrategyID != planIdentity().StrategyID {
 			t.Fatalf("gap progress strategy=%q, want=%q", observation.Trace.StrategyID, planIdentity().StrategyID)
 		}

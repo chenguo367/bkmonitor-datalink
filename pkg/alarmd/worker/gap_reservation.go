@@ -104,6 +104,12 @@ func (stream *streamedExecution) retainGapMutation(ctx context.Context, mutation
 //
 // What is not silent is a held scope on a round that read it, every round,
 // whether or not the numbers moved.
+//
+// Reported under the state component, beside the gap load and the gap commit.
+// It was evaluation, which is where the guard has its effect but not where it
+// lives: a reader looking for what a guard is doing filters by component, and
+// finds gap_loaded and gap_guard_committed under state with this one missing
+// from between them.
 func (stream *streamedExecution) observeGapProgress(ctx context.Context) {
 	for _, snapshot := range stream.gaps.Items {
 		stream.observeSnapshotProgress(ctx, snapshot)
@@ -117,7 +123,7 @@ func (stream *streamedExecution) observeSnapshotProgress(ctx context.Context, sn
 			name = strconv.FormatUint(uint64(scope.Scope.LevelID), 10)
 		}
 		stream.coordinator.emitObservation(ctx, observability.Observation{
-			Component: observability.ComponentEvaluation, Stage: observability.StageGapGuardProgress,
+			Component: observability.ComponentState, Stage: observability.StageGapGuardProgress,
 			Operation: observability.Operation(stream.request.Operation),
 			Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
 			Trace: observability.TraceFields{
