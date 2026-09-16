@@ -322,6 +322,12 @@ var codeChecks = map[string]verdict{
 	"SNAPSHOT_UNAVAILABLE":   lands(CheckDependencyDown),
 	"SNAPSHOT_RETRY_PENDING": lands(CheckDependencyDown),
 	"ACTIVATION_READ_FAILED": lands(CheckDependencyDown),
+	// The store answered and the activation record was not in it. That is the
+	// infrastructure losing state rather than refusing a read, but it lands
+	// here for the same reason the rest do: nobody outside this deployment can
+	// help, and the question it sends the reader to is whether this
+	// deployment's store is keeping what it is given.
+	"ACTIVATION_MISSING": lands(CheckDependencyDown),
 
 	// What this deployment persisted cannot be read back as written. Retrying
 	// reads the same bytes.

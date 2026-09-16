@@ -291,6 +291,14 @@ type phaseTwoControlRefreshResult struct {
 	SourceKind            observability.SourceKind
 	ReasonCode            observability.ReasonCode
 	Cause                 error
+	// QueryGroupsRetained says this round could not read the active set, so
+	// the receiver keeps the one it already has. It is not an empty set: an
+	// empty set is an answer, and applying one here would take every Query
+	// Group off this replica on a round that learned nothing -- which is the
+	// same local failure toppling the whole that the degraded status exists
+	// to prevent. Only a degraded round may set it; a healthy round that
+	// does not know the set is not healthy.
+	QueryGroupsRetained bool
 	// Composition is what the Catalog the round built is made of, when the
 	// round built one. Absent on a degraded round and on an activation load,
 	// neither of which composed a Catalog: the process then keeps the
@@ -661,7 +669,16 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 	}
 	leader, err := bundle.tryAcquireControlLeader(ctx)
 	if err != nil {
-		return fmt.Errorf("phase-two acquire Control Leader: %w", err)
+		// Not knowing whether this replica holds the lease is not the same as
+		// not holding it, but the work is: read what somebody else published
+		// and ask again on the reconcile tick. Ending startup here turned a
+		// store that was still loading its dataset into a crash loop, and a
+		// crash loop is the one state from which this replica can do nothing
+		// at all.
+		bundle.dependencies.Recorder.RecordControlFactUnavailable("leader_lease", "read_failed")
+		leader = false
+	} else {
+		bundle.dependencies.Recorder.RecordControlFactRead("leader_lease")
 	}
 	var controlResult phaseTwoControlRefreshResult
 	controlFactsAvailable := true
@@ -671,16 +688,19 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 		controlResult, err = bundle.dependencies.Control.LoadActive(ctx)
 	}
 	if err != nil {
-		if !errors.Is(err, controlplane.ErrSnapshotUnavailable) {
-			return fmt.Errorf("phase-two initial control facts: %w", err)
+		if ctx.Err() != nil {
+			return err
 		}
+		// Every failed read of the starting control facts lands here, not only
+		// the one shape a previous version named. A replica that cannot read
+		// them knows less than one that can; it does not know less than a
+		// replica that is not running, which is what exiting made it. It waits
+		// under a named reason, registers as starting rather than ready so no
+		// Query Group is assigned to it meanwhile, and joins on the first tick
+		// that reads the facts.
 		controlFactsAvailable = false
-		controlResult = phaseTwoControlRefreshResult{
-			Status: phaseTwoControlDegradedLastGood, SourceKind: observability.SourceKindCompiledSnapshot,
-			ReasonCode: observability.ReasonContractRetryable, Cause: err,
-		}
+		controlResult = degradedStartingControlFacts(err)
 	}
-	queryGroups := controlResult.QueryGroups
 	if leader || controlResult.Status == phaseTwoControlDegradedLastGood {
 		if err := bundle.applyControlRefresh(ctx, controlResult); err != nil {
 			return err
@@ -692,7 +712,20 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 	if err := bundle.register(ctx, ownership.WorkerReady); err != nil {
 		return err
 	}
-	if leader && controlFactsAvailable {
+	if !controlFactsAvailable {
+		// Nothing to publish and nothing to be assigned: this replica does not
+		// know which Query Groups exist. The assignment steps are skipped
+		// rather than run against an empty set, which would read as "there is
+		// no work" and, on the Control Leader, publish that answer to everyone
+		// else. The reconcile tick does both once the facts are readable.
+		bundle.startMaintenance()
+		bundle.updateReadiness()
+		return nil
+	}
+	bundle.mu.RLock()
+	queryGroups := append([]execution.QueryGroupIdentity(nil), bundle.queryGroups...)
+	bundle.mu.RUnlock()
+	if leader {
 		if err := bundle.dependencies.Ownership.PublishAssignments(ctx, queryGroups, bundle.dependencies.Now()); err != nil {
 			return fmt.Errorf("phase-two publish Assignment: %w", err)
 		}
@@ -707,6 +740,23 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 	bundle.startMaintenance()
 	bundle.updateReadiness()
 	return nil
+}
+
+// degradedStartingControlFacts is the health fact a replica runs under when it
+// could not read the control facts it starts from. The reason names which fact
+// was missing, because "degraded" alone sends a reader to look at all of them
+// and the two that happen here have different answers: a missing activation is
+// written back by the Control Leader, an unreadable snapshot is retried.
+func degradedStartingControlFacts(err error) phaseTwoControlRefreshResult {
+	reason := observability.ReasonContractRetryable
+	if errors.Is(err, controlplane.ErrActivationUnavailable) {
+		reason = observability.ReasonCode(contract.ReasonActivationMissing)
+	}
+	return phaseTwoControlRefreshResult{
+		Status: phaseTwoControlDegradedLastGood, QueryGroupsRetained: true,
+		SourceKind: observability.SourceKindCompiledSnapshot,
+		ReasonCode: reason, Cause: err,
+	}
 }
 
 // probeControlRedis measures the round trip floor on the reconcile cadence. A
@@ -1772,9 +1822,21 @@ func (bundle *phaseTwoWorkerBundle) register(ctx context.Context, readiness owne
 	if readiness == ownership.WorkerReady {
 		bundle.mu.RLock()
 		draining := bundle.draining
+		factsSeen := bundle.controlFactsSeen
 		bundle.mu.RUnlock()
 		if draining {
 			return nil
+		}
+		if !factsSeen {
+			// A replica that has never read the control facts cannot say which
+			// Query Groups exist, so it must not be given a share of them.
+			// Registering as starting is how it says so while keeping its
+			// registration alive: the renewal loop runs either way, so waiting
+			// costs nothing and the replica joins on the round that reads the
+			// facts. This is the half of "do not exit on a control read" that
+			// is easy to leave out -- a replica that stays up but reports
+			// ready would be handed a share of Query Groups it cannot open.
+			readiness = ownership.WorkerStarting
 		}
 	}
 	registration, err := phaseTwoWorkerRegistration(
@@ -2375,17 +2437,25 @@ func (bundle *phaseTwoWorkerBundle) refreshAndReconcile(ctx context.Context, ref
 		if leader {
 			var result phaseTwoControlRefreshResult
 			result, err = bundle.dependencies.Control.Refresh(ctx)
-			queryGroups = result.QueryGroups
 			if err == nil {
 				err = bundle.applyControlRefresh(ctx, result)
 			}
 		} else {
 			var result phaseTwoControlRefreshResult
 			result, err = bundle.dependencies.Control.LoadActive(ctx)
-			queryGroups = result.QueryGroups
 			if err == nil {
 				err = bundle.applyFollowerControlLoad(ctx, result)
 			}
+		}
+		// Read back what was applied rather than what the round returned. The
+		// two differ on a round that could not read the active set: it keeps
+		// the set the replica already had, and publishing the round's empty
+		// one would take every Query Group off the fleet on a round that
+		// learned nothing.
+		if err == nil {
+			bundle.mu.RLock()
+			queryGroups = append([]execution.QueryGroupIdentity(nil), bundle.queryGroups...)
+			bundle.mu.RUnlock()
 		}
 		// Every replica reads the persisted success time on the refresh
 		// tick, whatever its role and however the tick went: the age it
@@ -2457,25 +2527,75 @@ func (bundle *phaseTwoWorkerBundle) applyFollowerControlLoad(ctx context.Context
 	return nil
 }
 
+// invalidControlHealthField names the field of a control refresh result this
+// replica cannot act on, and reports whether there was one.
+//
+// The fields are checked in the order a reader would ask about them, and only
+// the first wrong one is named: the fix starts there, and naming every wrong
+// field would give the counter as many label values as there are ways for one
+// round to be wrong.
+func invalidControlHealthField(result phaseTwoControlRefreshResult) (string, bool) {
+	if result.Status != phaseTwoControlHealthy && result.Status != phaseTwoControlDegradedLastGood {
+		return "status", true
+	}
+	if result.Status == phaseTwoControlHealthy {
+		if result.QueryGroupsRetained {
+			// A round that could not read the active set has not established
+			// that the deployment is healthy; it has established that it does
+			// not know. Accepting the pair would let a replica report healthy
+			// while serving a set nothing this round confirmed.
+			return "query_groups", true
+		}
+		return "", false
+	}
+	switch {
+	case result.SourceKind != observability.SourceKindLegacyStrategy &&
+		result.SourceKind != observability.SourceKindCompiledSnapshot:
+		return "source_kind", true
+	case result.ReasonCode == "":
+		return "reason_code", true
+	case result.Cause == nil:
+		return "cause", true
+	}
+	return "", false
+}
+
 func (bundle *phaseTwoWorkerBundle) applyControlRefresh(
 	ctx context.Context,
 	result phaseTwoControlRefreshResult,
 ) error {
-	if result.Status != phaseTwoControlHealthy && result.Status != phaseTwoControlDegradedLastGood {
-		return newPhaseTwoInvariantError("phase-two Control refresh returned an invalid health fact")
+	if field, invalid := invalidControlHealthField(result); invalid {
+		// The refresh returned a health fact this replica cannot act on. That
+		// is a defect in this program, and it used to end the process: the
+		// round returned an invariant error, Run returned it, and the
+		// container restarted -- on a Control Leader, in the one state where
+		// only it could write the activation back.
+		//
+		// Keeping the previous fact is strictly better than exiting on every
+		// count. The previous fact was true when it was applied, the Query
+		// Groups this replica owns keep running under it, and the next round
+		// is seconds away. What must not be lost is that it happened, so the
+		// field that was wrong is named in the log and in a counter of its
+		// own rather than inferred from a restart.
+		bundle.dependencies.Recorder.RecordControlHealthFact("invalid")
+		bundle.dependencies.Recorder.RecordControlHealthInvalid(field)
+		observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
+			Component: observability.ComponentControlPlane, Stage: observability.StageSnapshotRefreshed,
+			Result: observability.ResultFailed, Direction: observability.DirectionInternal,
+			ReasonCode: observability.ReasonInternalUnknown,
+			Err:        fmt.Errorf("phase-two Control refresh returned an invalid health fact: %s", field),
+		})
+		return nil
 	}
-	if result.Status == phaseTwoControlDegradedLastGood &&
-		(result.SourceKind != observability.SourceKindLegacyStrategy &&
-			result.SourceKind != observability.SourceKindCompiledSnapshot ||
-			result.ReasonCode == "" || result.Cause == nil) {
-		return newPhaseTwoInvariantError("phase-two degraded Control refresh returned an incomplete health fact")
-	}
+	bundle.dependencies.Recorder.RecordControlHealthFact(strings.ToLower(string(result.Status)))
 	var transitionResult observability.Result
 	var transitionSource observability.SourceKind
 	var transitionReason observability.ReasonCode
 	var transitionCause error
 	bundle.mu.Lock()
-	bundle.queryGroups = append(bundle.queryGroups[:0], result.QueryGroups...)
+	if !result.QueryGroupsRetained {
+		bundle.queryGroups = append(bundle.queryGroups[:0], result.QueryGroups...)
+	}
 	bundle.noteControlRoundLocked(result)
 	switch result.Status {
 	case phaseTwoControlDegradedLastGood:

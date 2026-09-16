@@ -90,6 +90,14 @@ const (
 	ReasonProgressBeginRejected      = "PROGRESS_BEGIN_REJECTED"
 	ReasonProgressBeginFailed        = "PROGRESS_BEGIN_FAILED"
 	ReasonActivationReadFailed       = "ACTIVATION_READ_FAILED"
+	// ReasonActivationMissing names a control round that found no activation
+	// record at all. It is separate from ACTIVATION_READ_FAILED because the
+	// store answered: there is no record, rather than no answer, and the two
+	// call for different work. A failed read is retried; a missing record is
+	// rebuilt from the published Catalog by whichever replica holds the
+	// Control Leader, and until one does, no replica can learn which Query
+	// Groups exist.
+	ReasonActivationMissing = "ACTIVATION_MISSING"
 	ReasonSnapshotRetryPending       = "SNAPSHOT_RETRY_PENDING"
 	ReasonSlotSourceRetry            = "SLOT_SOURCE_RETRY"
 	ReasonBlockedExactSetUnavailable = "BLOCKED_EXACT_SET_UNAVAILABLE"

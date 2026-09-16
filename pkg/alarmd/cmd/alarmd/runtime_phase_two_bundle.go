@@ -473,6 +473,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		Source: strategySource, Planner: planner, Reconciler: reconciler, Activator: activator,
 		Repository: repository, Schedules: catalog, Progress: progressStore,
 		Observer:        observer,
+		Recorder:        recorder,
 		RefreshInterval: cfg.PhaseTwo.Control.RefreshInterval.Duration(), Wait: waitProductionControl,
 		Now: external.Now, MaxReplayAge: cfg.PhaseTwo.Scheduler.MaxReplayAge.Duration(),
 		Close: func() error {

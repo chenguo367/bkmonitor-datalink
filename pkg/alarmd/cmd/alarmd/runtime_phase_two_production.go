@@ -329,7 +329,13 @@ type productionPhaseTwoControlDependencies struct {
 	Repository      productionCatalogRepository
 	Schedules       productionScheduleProjection
 	Progress        productionPhaseTwoProgressReader
-	Observer        observability.Observer
+	Observer observability.Observer
+	// Recorder counts the control-plane reads this runtime makes. It is
+	// counted here, where the read returns, rather than from the result the
+	// caller applies: a round that finds the activation missing and then
+	// rebuilds it returns a healthy result, so a count taken from the result
+	// would be absent in exactly the case worth seeing. Nil records nothing.
+	Recorder        *metric.Recorder
 	RefreshInterval time.Duration
 	Wait            func(context.Context, time.Duration) error
 	Close           func() error
@@ -346,6 +352,14 @@ type productionPhaseTwoControl struct {
 	dependencies  productionPhaseTwoControlDependencies
 	renewMu       sync.Mutex
 	renewDegraded bool
+}
+
+func (runtime *productionPhaseTwoControl) recordControlFactRead(fact string) {
+	runtime.dependencies.Recorder.RecordControlFactRead(fact)
+}
+
+func (runtime *productionPhaseTwoControl) recordControlFactUnavailable(fact, reason string) {
+	runtime.dependencies.Recorder.RecordControlFactUnavailable(fact, reason)
 }
 
 func newProductionPhaseTwoControl(
@@ -375,7 +389,7 @@ func (runtime *productionPhaseTwoControl) InitialRefresh(
 	for {
 		result, pending, err := runtime.refresh(ctx)
 		if err != nil || !pending {
-			return result, err
+			return completeControlResult(result, err)
 		}
 		if err := runtime.dependencies.Wait(ctx, runtime.dependencies.RefreshInterval); err != nil {
 			return phaseTwoControlRefreshResult{}, err
@@ -390,8 +404,32 @@ func (runtime *productionPhaseTwoControl) Refresh(
 		return phaseTwoControlRefreshResult{}, errors.New("phase-two production Control is not initialized")
 	}
 	result, _, err := runtime.refresh(ctx)
-	return result, err
+	return completeControlResult(result, err)
 }
+
+// completeControlResult refuses the one shape this runtime must never hand
+// back: a zero-valued result with no error.
+//
+// The caller decides what to do from the health fact in the result, and it
+// only looks at the result when the error is nil. A round that returns
+// neither is telling it nothing while claiming to have succeeded, which it
+// reads as a fact it cannot act on -- and answering that by ending the
+// process was how one unreadable activation took a Control Leader down four
+// times on 2026-09-16. Every path through refresh now names its outcome; this
+// is the guard that keeps the next one from forgetting to, and it turns the
+// omission into a retried round rather than an exit.
+func completeControlResult(
+	result phaseTwoControlRefreshResult,
+	err error,
+) (phaseTwoControlRefreshResult, error) {
+	if err != nil || result.Status != "" {
+		return result, err
+	}
+	return phaseTwoControlRefreshResult{}, errIncompleteControlResult
+}
+
+var errIncompleteControlResult = errors.New(
+	"phase-two Control round returned no health fact and no error")
 
 func (runtime *productionPhaseTwoControl) LoadActive(
 	ctx context.Context,
@@ -401,8 +439,14 @@ func (runtime *productionPhaseTwoControl) LoadActive(
 	}
 	state, err := runtime.dependencies.Repository.LoadActivation(ctx)
 	if err != nil {
+		reason := "read_failed"
+		if errors.Is(err, controlplane.ErrActivationUnavailable) {
+			reason = "missing"
+		}
+		runtime.recordControlFactUnavailable("activation", reason)
 		return phaseTwoControlRefreshResult{}, err
 	}
+	runtime.recordControlFactRead("activation")
 	queryGroups, err := runtime.loadActiveQueryGroups(ctx, state)
 	return phaseTwoControlRefreshResult{QueryGroups: queryGroups, Status: phaseTwoControlHealthy}, err
 }
@@ -530,10 +574,41 @@ func (runtime *productionPhaseTwoControl) refresh(
 	if result.Status == controlplane.SourceRefreshPendingConfirmation {
 		state, err := runtime.dependencies.Repository.LoadActivation(ctx)
 		if errors.Is(err, controlplane.ErrActivationUnavailable) {
-			return phaseTwoControlRefreshResult{}, true, nil
-		}
-		if err != nil {
+			// The activation record is gone. The store answered; there is
+			// nothing there -- a Redis reload that came back without the key,
+			// which is what happened on 2026-09-16.
+			//
+			// Falling through with the zero state is what repairs it: the
+			// branch below finds the publication this round named and no
+			// activation on it, and activating is idempotent -- it is the same
+			// call that establishes the first activation of a fresh
+			// deployment. The Control Leader is the only process that can do
+			// this, so returning early here left the one replica able to write
+			// the record deciding not to, once a round, for as long as it went
+			// on.
+			//
+			// Returning early also returned the zero result with a nil error,
+			// which the caller read as a health fact it could not act on and
+			// answered by ending the process. Whatever this round can say, it
+			// says as a complete fact below.
+			runtime.recordControlFactUnavailable("activation", "missing")
+			if result.Latest == (controlplane.SnapshotPublicationRef{}) {
+				// Nothing has been published yet, so there is nothing to
+				// activate. This is a fresh deployment whose candidate still
+				// needs its second observation, and it is the case pending
+				// exists for: InitialRefresh waits, and a running process
+				// keeps the facts it already has.
+				return phaseTwoControlRefreshResult{
+					Status: phaseTwoControlDegradedLastGood, QueryGroupsRetained: true,
+					SourceKind: observability.SourceKindCompiledSnapshot,
+					ReasonCode: observability.ReasonCode(contract.ReasonActivationMissing), Cause: err,
+				}, true, nil
+			}
+		} else if err != nil {
+			runtime.recordControlFactUnavailable("activation", "read_failed")
 			return phaseTwoControlRefreshResult{}, false, err
+		} else {
+			runtime.recordControlFactRead("activation")
 		}
 		// A publication an earlier round published and never activated (the
 		// process stopped between the two) is still the one the fleet should
