@@ -1,0 +1,77 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2025 Tencent. All rights reserved.
+// Licensed under the MIT License.
+
+package worker
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+)
+
+func TestCoordinatorNamesStateRefusalsWithoutCommittingProgress(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		comparison execution.ApplyVersionComparison
+		apply      execution.StateApplyStatus
+		want       string
+		stage      string
+	}{
+		{"preflight conflict", execution.ApplyVersionEqual, "", contract.ReasonStateVersionConflict, "state mutation preflight"},
+		{"preflight stale", execution.ApplyVersionPersistedNewer, "", contract.ReasonStateStaleVersion, "state mutation preflight"},
+		{"apply conflict", execution.ApplyVersionPersistedOlder, execution.StateApplyVersionConflict, contract.ReasonStateVersionConflict, "state apply did not complete"},
+		{"apply stale", execution.ApplyVersionPersistedOlder, execution.StateApplyStale, contract.ReasonStateStaleVersion, "state apply did not complete"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newPlanIsolationFixture(t, nil)
+			fixture.loaded.Items[0].VersionComparison = test.comparison
+			// Equal ApplyVersion with a different mutation digest is a real
+			// preflight conflict, rather than a constructed error value.
+			fixture.loaded.Items[0].PersistedMutationDigest = "another-mutation"
+			state := &refusingStateApplyStore{StateStore: fixture.coordinator.ports.State, status: test.apply}
+			if test.apply != "" {
+				fixture.coordinator.ports.State = state
+			}
+			result, err := fixture.coordinator.finalizePreparedWithGaps(context.Background(), fixture.request,
+				fixture.header, fixture.bindings, fixture.loaded, execution.GapLoadResult{}, fixture.evaluated,
+				nil, execution.QueryAvailabilityUnknown)
+			if err == nil || result.Completed || fixture.base.progressCommits != 0 {
+				t.Fatalf("refusal advanced Progress: result=%+v commits=%d err=%v", result, fixture.base.progressCommits, err)
+			}
+			if reason, named := StateConflictReason(err); !named || string(reason) != test.want {
+				t.Fatalf("reason=%s named=%v, want %s; err=%v", reason, named, test.want, err)
+			}
+			var refusal *StateConflictError
+			if !errors.As(err, &refusal) || refusal.Stage != test.stage {
+				t.Fatalf("wrong refusal site: %v", err)
+			}
+			wantApplyCalls := 0
+			if test.apply != "" {
+				wantApplyCalls = 1
+			}
+			if state.calls != wantApplyCalls || len(fixture.base.stateApplied) != 0 {
+				t.Fatalf("apply calls=%d want=%d, successful writes=%v", state.calls, wantApplyCalls, fixture.base.stateApplied)
+			}
+		})
+	}
+}
+
+type refusingStateApplyStore struct {
+	execution.StateStore
+	status execution.StateApplyStatus
+	calls  int
+}
+
+func (store *refusingStateApplyStore) ApplyRuntime(_ context.Context, request execution.StateApplyRequest) (execution.StateApplyResult, error) {
+	store.calls++
+	items := make([]execution.StateApplyItemResult, len(request.Items))
+	for index, mutation := range request.Items {
+		items[index] = execution.StateApplyItemResult{Identity: mutation.Identity, Status: store.status}
+	}
+	return execution.StateApplyResult{Items: items}, nil
+}

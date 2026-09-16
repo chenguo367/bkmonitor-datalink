@@ -1278,6 +1278,24 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 
 func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry completedSeries, view execution.RuntimeStateView) error {
 	due, series, inputs := entry.due, entry.series, entry.inputs
+	if view.VersionComparison == execution.ApplyVersionEqual {
+		resumed, err := resumedSeriesResult(stream.header, due, view, stream.gaps)
+		if err != nil {
+			return err
+		}
+		if err := stream.mergeProvisional(ctx, resumed, 0); err != nil {
+			return err
+		}
+		execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
+			if c.PriorStateApplied != nil {
+				c.PriorStateApplied()
+			}
+		})
+		stream.coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared,
+			stream.request.Operation, time.Now(), observability.ResultSuccess,
+			observability.ReasonStateAlreadyAppliedBeforeEvaluation, nil)
+		return nil
+	}
 	stateItems := []execution.StatePreflightItem{entry.item}
 	loaded := execution.StatePreflightResult{Items: []execution.RuntimeStateView{view}}
 	evaluationHeader, err := bindAlwaysEffectiveTimeFacts(stream.header, stateItems, stream.effective, entry.kind())
@@ -1334,6 +1352,20 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	stream.state.Items = append(stream.state.Items, loaded.Items...)
 	stream.stateItems = append(stream.stateItems, stateItems...)
 	return nil
+}
+
+func uncommittedGapMutations(gaps execution.GapLoadResult, mutations []execution.PlanGapMutation) []execution.PlanGapMutation {
+	pending := mutations[:0]
+	for _, mutation := range mutations {
+		marker, found := gaps.Find(mutation.Identity)
+		if found && (marker.Status == execution.GapFound || marker.Status == execution.GapClearedTombstone) &&
+			marker.LastScheduleRevision == mutation.ScheduleRevision &&
+			execution.CompareApplyVersion(marker.PersistedApplyVersion, mutation.ApplyVersion) == execution.ApplyVersionEqual {
+			continue
+		}
+		pending = append(pending, mutation)
+	}
+	return pending
 }
 
 func (stream *streamedExecution) observeEvaluationCompleted(

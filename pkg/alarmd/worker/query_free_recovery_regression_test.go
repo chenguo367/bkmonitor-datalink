@@ -12,7 +12,6 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // A prior attempt already counted a full observation for this same Slot.
@@ -38,10 +37,8 @@ func TestQueryFreeFinalizationPreservesObservedProtection(t *testing.T) {
 	}
 }
 
-// A level-only marker cannot be reused as Plan-wide protection. The coordinator
-// must request an additional Plan scope rather than repeatedly rejecting the Slot.
-// Preservation of stored level scopes is checked with ExecutionStore separately.
-func TestQueryFreeFinalizationAddsMissingPlanProtection(t *testing.T) {
+// A committed level-only statement also wins over a retry proposal for this Slot.
+func TestQueryFreeFinalizationPreservesCommittedLevelProtection(t *testing.T) {
 	activation := activePlanResult("state-v2", 2)
 	activation.Facts[0].Selected.RequiredFullSlots = 9
 	selected := activation.Facts[0].Selected
@@ -56,29 +53,8 @@ func TestQueryFreeFinalizationAddsMissingPlanProtection(t *testing.T) {
 	if err != nil || !result.Completed || fixture.ports.progressCalls != 1 {
 		t.Fatalf("result=%+v err=%v progress=%d", result, err, fixture.ports.progressCalls)
 	}
-	if len(fixture.ports.mutations) != 1 {
-		t.Fatalf("mutations=%d", len(fixture.ports.mutations))
-	}
-	m := fixture.ports.mutations[0]
-	if m.ExpectedMarkerRevision != marker.MarkerRevision || m.ApplyVersion != marker.PersistedApplyVersion || len(m.Scopes) != 1 || m.Scopes[0].Scope.HasLevel || m.Scopes[0].RequiredFullSlots != 9 {
-		t.Fatalf("unexpected extension: %+v", m)
-	}
-	commits := 0
-	for _, observation := range *fixture.observations {
-		if observation.Stage != observability.StageGapGuardCommitted {
-			continue
-		}
-		commits++
-		if len(observation.GapExtensions) != 1 {
-			t.Fatalf("missing extension evidence: %+v", observation)
-		}
-		facts := observation.GapExtensions[0]
-		if facts.MarkerRevision != marker.MarkerRevision || facts.StrategyID != selected.Identity.StrategyID || len(facts.Persisted) != 2 || len(facts.Proposed) != 1 || facts.Persisted[1].Observed != 1 {
-			t.Fatalf("incomplete extension evidence: %+v", facts)
-		}
-	}
-	if commits != 1 {
-		t.Fatalf("commit observations=%d, want one (no duplicate metric event)", commits)
+	if fixture.ports.applyCalls != 0 || !reflect.DeepEqual(marker, fixture.ports.markers[marker.Identity]) {
+		t.Fatal("same-Slot level protection was rewritten")
 	}
 }
 
