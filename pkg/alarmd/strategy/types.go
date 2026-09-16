@@ -488,6 +488,7 @@ type CompiledPlan struct {
 	outputIdentity      *contract.MonitorOutputIdentity
 	subjectFacts        *contract.MonitorSubjectFacts
 	wireFormat          string
+	signalType          string
 	legacyOutput        *contract.FrozenLegacyOutput
 	projection          contract.InputProjectionV2
 	evaluationSemantics contract.ExecutionSemanticsV2
@@ -595,6 +596,15 @@ func (p *CompiledPlan) PublishesCompatibleProtocol() bool {
 }
 
 // WireFormat returns the format this Plan's events are published as.
+// SignalType is what this Plan's events are observed from, frozen with the
+// Plan. Empty means this build could not name it; see EvaluationPlanV2.
+func (p *CompiledPlan) SignalType() string {
+	if p == nil {
+		return ""
+	}
+	return p.signalType
+}
+
 func (p *CompiledPlan) WireFormat() string {
 	if p == nil {
 		return ""

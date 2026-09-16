@@ -668,9 +668,8 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		return candidate, err
 	}
 	compiledInputs := compiledPlanInputs{primary: facts}
-	for _, raw := range item.QueryConfigs {
-		q, _ := decodeLegacyQueryConfig(raw)
-		if q.DataTypeLabel == "log" || q.DataTypeLabel == "event" {
+	for _, label := range itemDataTypes(item) {
+		if label == "log" || label == "event" {
 			compiledInputs.missingHistoryAsZero = true
 		}
 	}
@@ -714,6 +713,10 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		return candidate, errors.New("OUTPUT_PROTOCOL_REQUIRES_STRATEGY_REVISION")
 	}
 	plan.WireFormat = format
+	// Beside the wire format and for the same reason: the sink writes one
+	// event at a time with no Plan in hand, and no record says whether it came
+	// from a metric, a log or an event stream.
+	plan.SignalType = contract.SignalTypeForDataTypes(itemDataTypes(item))
 	// The alert consumer keys alerts by a fingerprint built from the output
 	// identity; its sink refuses an envelope without one, and refuses the
 	// whole batch with it. The identity is set with the revision above and
@@ -754,6 +757,22 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 // stored order instead, so one document always compiles to one Plan. The
 // disagreement itself is not refused here -- Python does not refuse it, and a
 // new refusal would take strategies out that run today.
+// itemDataTypes is the data_type_label of every query config of one item, in
+// the stored order, including the empty ones.
+//
+// The empty ones are kept rather than skipped: a config this build could not
+// decode is a config whose data type is unknown, and dropping it would let the
+// rest agree on a signal type the item may not have. The one caller that only
+// asks "is any of them a log or an event" is unaffected either way.
+func itemDataTypes(item legacyItem) []string {
+	labels := make([]string, 0, len(item.QueryConfigs))
+	for _, raw := range item.QueryConfigs {
+		config, _ := decodeLegacyQueryConfig(raw)
+		labels = append(labels, config.DataTypeLabel)
+	}
+	return labels
+}
+
 func itemUnit(item legacyItem) string {
 	for _, raw := range item.QueryConfigs {
 		var config struct {

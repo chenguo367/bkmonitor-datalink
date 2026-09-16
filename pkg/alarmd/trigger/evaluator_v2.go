@@ -157,6 +157,7 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 			event.LegacyOutput = &contract.LegacyEventContext{Configuration: legacy, AnomalyTimestamps: append([]int64{}, timestamps...)}
 		}
 		event.WireFormat = request.Plan.WireFormat()
+		event.SignalType = request.Plan.SignalType()
 		if identity := request.Plan.OutputIdentity(); identity != nil {
 			subject, remaining, subjectErr := contract.ProjectMonitorSubject(
 				request.RecordRef.Dimensions, *identity, request.Plan.SubjectFacts(),
