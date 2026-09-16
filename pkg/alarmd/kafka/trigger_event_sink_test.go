@@ -302,7 +302,7 @@ func legacyTriggerEventGolden(t testing.TB) contract.TriggerEventV1 {
 // The switch has to reach the wire, not just the configuration: a Plan built as
 // native publishes the standard raw event, keyed by the alert identity so the
 // consumer's partitions hold one alert's history together.
-func TestTriggerEventSinkPublishesTheStandardRawEventWhenThePlanSaysSo(t *testing.T) {
+func TestTriggerEventSinkPublishesTheRawEventWhenThePlanSaysSo(t *testing.T) {
 	t.Parallel()
 
 	event := triggerEventGolden(t)
@@ -342,16 +342,20 @@ func TestTriggerEventSinkPublishesTheStandardRawEventWhenThePlanSaysSo(t *testin
 	}
 	var written map[string]json.RawMessage
 	if err := json.Unmarshal(value, &written); err != nil {
-		t.Fatalf("written message is not the standard raw event: %v", err)
+		t.Fatalf("written message is not the raw event: %v", err)
 	}
-	for _, field := range []string{"alert_id", "action", "severity", "occurred_at", "labels", "extra_data"} {
+	// The consumer's own field names. Naming them here rather than checking
+	// "some JSON came out" is the point: the sink's job is to put this
+	// shape on that topic, and a message the consumer does not read is
+	// indistinguishable from one it does until somebody looks at linkd.
+	for _, field := range []string{"alert_id", "action", "severity", "data_time", "occurred_time", "observation", "strategy", "extra"} {
 		if _, present := written[field]; !present {
 			t.Fatalf("written message has no %s: %s", field, value)
 		}
 	}
 	// And it is not the decision event: that one has no alert_id at all.
 	if _, decision := written["event_kind"]; decision {
-		t.Fatalf("the decision event was written instead of the standard raw event: %s", value)
+		t.Fatalf("the decision event was written instead of the raw event: %s", value)
 	}
 }
 

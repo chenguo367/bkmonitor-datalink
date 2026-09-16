@@ -3,15 +3,24 @@
 // Copyright (C) 2017-2025 Tencent. All rights reserved.
 // Licensed under the MIT License.
 
-// Package linkdoutput writes a decision as the standard raw event the alert
-// pipeline consumes.
+// Package linkdoutput writes a decision as the RawEvent the alert link daemon
+// consumes.
 //
 // It carries facts and nothing else: whether this object is now triggered or
-// resolved, at which level, from which data point, and since when its anomalies
-// began. Everything an alert needs on top of that - when it was first seen,
-// whether this supersedes an earlier level, when it closes, what the strategy
-// and the resource behind it are - belongs to the consumer, which is why none of
-// it is computed here and no state is kept for it.
+// recovered, at which level, from which data point, and what the round saw.
+// Everything an alert needs on top of that -- when the alert started, whether
+// this supersedes an earlier level, when it closes, why it recovered, which
+// model and instance the subject resolves to -- belongs to the consumer, which
+// is why none of it is computed here and no state is kept for it.
+//
+// The field names and the action words are the consumer's, copied from its
+// RawEvent contract rather than chosen here. Where this writes something the
+// contract does not name -- subject.type, observation.value, extra -- it is
+// named in the projection contract and the consumer ignores what it does not
+// read; where the contract names a field this process has no fact for --
+// record_id, received_time, alert_start_time, status, inst_id, model_id -- it
+// is left out, because the consumer fills those and a value here would either
+// be overwritten or believed.
 package linkdoutput
 
 import (
@@ -25,11 +34,15 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
-// The actions the consumer distinguishes. A closed action is deliberately never
-// produced: closing is a lifetime decision and this process does not own one.
+// The two actions this process produces.
+//
+// updated and closed are the consumer's other two and are deliberately never
+// written: a repeated triggered is how a continuing anomaly is stated, and
+// closing is a lifetime decision made on a timeout this process does not
+// observe.
 const (
 	ActionTriggered = "triggered"
-	ActionResolved  = "resolved"
+	ActionRecovered = "recovered"
 )
 
 // The platform's alert levels, which are a closed set of three
@@ -37,18 +50,13 @@ const (
 // because the consumer reads the severity as a name rather than a number.
 var builtInSeverities = map[uint32]string{1: "critical", 2: "warning", 3: "info"}
 
-// subjectSystems says which system owns each kind of object. The consumer uses
-// it to look the object up, so a wrong system is worse than no subject.
-var subjectSystems = map[string]struct{ System, Type string }{
-	contract.MonitorSubjectHost:        {"cmdb", "host"},
-	contract.MonitorSubjectService:     {"cmdb", "service_instance"},
-	contract.MonitorSubjectTopo:        {"cmdb", "topo_node"},
-	contract.MonitorSubjectK8sPod:      {"bcs", "pod"},
-	contract.MonitorSubjectK8sNode:     {"bcs", "node"},
-	contract.MonitorSubjectK8sService:  {"bcs", "service"},
-	contract.MonitorSubjectK8sWorkload: {"bcs", "workload"},
-	contract.MonitorSubjectAPMService:  {"apm", "service"},
-}
+// The evaluation families this process produces. A keyword strategy on a log
+// or event source is still an algorithm over a counted series here, so it is
+// metric_algorithm; only absence detection is its own family.
+const (
+	evaluationFamilyMetricAlgorithm = "metric_algorithm"
+	evaluationFamilyNoData          = "no_data"
+)
 
 // Event is one message on the wire.
 type Event struct {
@@ -60,42 +68,66 @@ type Event struct {
 	SubjectKd string
 }
 
+// wireSubject is the alert instance.
+//
+// inst_id and model_id are the consumer's to fill: it resolves them from its
+// own model, and this process does not know their vocabulary. type is what
+// this process does know -- its own target kind -- and is what the resolution
+// is configured against.
 type wireSubject struct {
-	System string `json:"system"`
-	Type   string `json:"type"`
-	ID     string `json:"id"`
+	Type     string `json:"type"`
+	NativeID string `json:"native_id"`
 }
 
-type wireLabels struct {
-	StrategyID      int64 `json:"strategy_id"`
-	StrategyVersion int64 `json:"strategy_version"`
-	BusinessID      int64 `json:"bk_biz_id"`
+// wireObservation is what the event was observed from and how it was judged.
+type wireObservation struct {
+	SignalType       string          `json:"signal_type,omitempty"`
+	EvaluationFamily string          `json:"evaluation_family"`
+	Value            json.RawMessage `json:"value,omitempty"`
+	Unit             string          `json:"unit,omitempty"`
+	ObservedAt       string          `json:"observed_at,omitempty"`
 }
 
-type wireExtraData struct {
+type wireStrategy struct {
+	ID         string `json:"id"`
+	Version    string `json:"version"`
+	BusinessID string `json:"bk_biz_id"`
+}
+
+type wireWindow struct {
+	Size      uint32 `json:"size"`
+	Anomalies uint32 `json:"anomalies"`
+	Required  uint32 `json:"required"`
+}
+
+type wireExtra struct {
 	AnomalyBeginTime     string                     `json:"anomaly_begin_time,omitempty"`
+	Window               *wireWindow                `json:"window,omitempty"`
 	AdditionalDimensions map[string]json.RawMessage `json:"additional_dimensions,omitempty"`
+	EventSemanticDigest  string                     `json:"event_semantic_digest,omitempty"`
+	NoDataPeriods        json.RawMessage            `json:"no_data_periods,omitempty"`
+	EmittedTime          string                     `json:"emitted_time,omitempty"`
 }
 
 type wireEvent struct {
 	TenantID     string                     `json:"bk_tenant_id"`
 	EventID      string                     `json:"event_id"`
 	AlertID      string                     `json:"alert_id"`
+	DataTime     string                     `json:"data_time"`
+	OccurredTime string                     `json:"occurred_time"`
 	Title        string                     `json:"title"`
 	Content      string                     `json:"content"`
-	Severity     string                     `json:"severity"`
 	Action       string                     `json:"action"`
-	ActionReason string                     `json:"action_reason"`
 	Dimensions   map[string]json.RawMessage `json:"dimensions"`
+	Severity     string                     `json:"severity"`
+	Observation  wireObservation            `json:"observation"`
 	Subject      *wireSubject               `json:"subject,omitempty"`
-	OccurredAt   string                     `json:"occurred_at"`
-	ProducedAt   string                     `json:"produced_at"`
-	Labels       wireLabels                 `json:"labels"`
-	ExtraData    wireExtraData              `json:"extra_data"`
+	Strategy     wireStrategy               `json:"strategy"`
+	Extra        wireExtra                  `json:"extra"`
 }
 
-// Converter turns decisions into wire messages. Now is injected because
-// produced_at is the only field whose value is the moment of writing.
+// Converter turns decisions into wire messages. Now is injected because the
+// emitted time is the only value that is the moment of writing.
 type Converter struct {
 	now func() time.Time
 	// onUnmappedSeverity is called for each event whose level had no name in
@@ -115,10 +147,10 @@ func NewConverter(now func() time.Time, onUnmappedSeverity func(level uint32)) (
 // Convert writes one decision.
 //
 // A decision without a frozen strategy revision cannot be written: the alert it
-// would open is identified by a fingerprint this process derives from that
-// revision, and the labels name a strategy version that only exists there. The
-// caller decides what to do about such a decision - this returns an error
-// rather than a message with holes in it.
+// would open is identified by a key this process derives from that revision,
+// and the strategy it names only exists there. The caller decides what to do
+// about such a decision - this returns an error rather than a message with
+// holes in it.
 func (converter *Converter) Convert(event *contract.TriggerEventV1) (Event, error) {
 	if converter == nil || event == nil {
 		return Event{}, errors.New("alarmd linkdoutput: a decision is required")
@@ -137,42 +169,62 @@ func (converter *Converter) Convert(event *contract.TriggerEventV1) (Event, erro
 	if err != nil {
 		return Event{}, err
 	}
-	businessID, err := strconv.ParseInt(event.BusinessID, 10, 64)
-	if err != nil {
-		return Event{}, fmt.Errorf("alarmd linkdoutput: business identity %q: %w", event.BusinessID, err)
-	}
-	dimensions := map[string]json.RawMessage{}
-	var subject *wireSubject
-	var additional map[string]json.RawMessage
-	if event.Subject != nil {
-		dimensions = event.Subject.Dimensions
-		subject = wireSubjectFor(event.Subject.Subject)
-		additional = event.Subject.Subject.Additional
-	}
-	if dimensions == nil {
-		dimensions = map[string]json.RawMessage{}
-	}
 	severity := severityFor(primary)
 	if !SeverityIsBuiltIn(primary) && converter.onUnmappedSeverity != nil {
 		converter.onUnmappedSeverity(primary.LevelID)
 	}
+	// The record's own dimensions, whole. The object's identity fields stay in
+	// here rather than being taken out into the subject: the consumer's
+	// fingerprint and its dimension enrichment both read this map, and a
+	// fingerprint computed over dimensions with the identity removed would put
+	// every object of one strategy under one alert.
+	dimensions := event.RecordRef.Dimensions
+	if dimensions == nil {
+		dimensions = map[string]json.RawMessage{}
+	}
+	var subject *wireSubject
+	var additional map[string]json.RawMessage
+	if event.Subject != nil {
+		subject = wireSubjectFor(event.Subject.Subject)
+		additional = event.Subject.Subject.Additional
+	}
+	noData := isNoDataEvent(dimensions)
 	message := wireEvent{
 		TenantID: event.TenantID, EventID: event.EventID, AlertID: event.DedupeMD5,
-		Title: title(event, primary, action), Content: content(event, primary),
-		Severity: severity, Action: action,
-		// Left empty on purpose: the reason an alert resolved is not a fact
-		// this process establishes, and a guess here would be read as one.
-		ActionReason: "",
-		Dimensions:   dimensions, Subject: subject,
-		OccurredAt: wireTime(event.RecordRef.SourceTime), ProducedAt: wireTime(converter.now().Unix()),
-		Labels: wireLabels{
-			StrategyID: event.StrategyRef.StrategyID, StrategyVersion: event.StrategyRef.Revision,
-			BusinessID: businessID,
+		DataTime: wireTime(event.RecordRef.SourceTime), OccurredTime: wireTime(event.EvaluationTime),
+		Title: title(event, primary, action), Content: content(event, primary, noData),
+		Action: action, Dimensions: dimensions, Severity: severity,
+		Observation: observationFor(event, noData),
+		Subject:     subject,
+		Strategy: wireStrategy{
+			ID: strconv.FormatInt(event.StrategyRef.StrategyID, 10),
+			// The frozen revision. The consumer stores it beside the alert so
+			// two alerts of one strategy can be told apart by the configuration
+			// that produced them.
+			Version:    strconv.FormatInt(event.StrategyRef.Revision, 10),
+			BusinessID: event.BusinessID,
 		},
-		ExtraData: wireExtraData{AdditionalDimensions: additional},
+		Extra: wireExtra{
+			Window: &wireWindow{
+				Size:      primary.DecisionWindow.Trigger.WindowSize,
+				Anomalies: primary.DecisionWindow.Trigger.ObservedAnomalies,
+				Required:  primary.DecisionWindow.Trigger.RequiredAnomalies,
+			},
+			AdditionalDimensions: additional,
+			EventSemanticDigest:  event.EventSemanticDigest,
+			EmittedTime:          wireTime(converter.now().Unix()),
+		},
 	}
 	if begin := primary.DecisionWindow.Trigger.AnomalyBeginTime; begin > 0 {
-		message.ExtraData.AnomalyBeginTime = wireTime(begin)
+		// In extra and not in alert_start_time. It is the earliest anomalous
+		// point still inside this window, so it moves as the window slides;
+		// written as the alert's start it would make a long-running alert look
+		// like it started again every round. The consumer takes the start from
+		// the trigger it opened the alert on.
+		message.Extra.AnomalyBeginTime = wireTime(begin)
+	}
+	if noData {
+		message.Extra.NoDataPeriods = event.Observed.Values[contract.NoDataPeriodFactField]
 	}
 	payload, err := json.Marshal(message)
 	if err != nil {
@@ -193,10 +245,57 @@ func actionFor(kind string) (string, error) {
 	case contract.TriggerEventAbnormal:
 		return ActionTriggered, nil
 	case contract.TriggerEventRecovery:
-		return ActionResolved, nil
+		return ActionRecovered, nil
 	default:
 		return "", fmt.Errorf("alarmd linkdoutput: decision kind %q has no action", kind)
 	}
+}
+
+// isNoDataEvent reads the tag the absence evaluation puts in the group's
+// dimensions.
+//
+// From the dimensions rather than from anything about the Plan: a strategy that
+// detects no-data also detects thresholds, so the Plan cannot say which of the
+// two this event is. The tag is on the series, which is what the event is
+// about, and it is the same thing the existing alert pipeline reads.
+func isNoDataEvent(dimensions map[string]json.RawMessage) bool {
+	_, tagged := dimensions[contract.NoDataDimensionTag]
+	return tagged
+}
+
+func observationFor(event *contract.TriggerEventV1, noData bool) wireObservation {
+	observation := wireObservation{
+		SignalType:       event.SignalType,
+		EvaluationFamily: evaluationFamilyMetricAlgorithm,
+	}
+	if noData {
+		// No value, on purpose. The synthetic point a no-data round produces
+		// carries a marker rather than a measurement, and publishing it as the
+		// observed value would put a number on a page whose whole subject is
+		// that there was no number.
+		observation.EvaluationFamily = evaluationFamilyNoData
+		return observation
+	}
+	observation.Unit = event.Observed.Unit
+	observation.ObservedAt = wireTime(event.RecordRef.SourceTime)
+	observation.Value = soleObservedValue(event.Observed)
+	return observation
+}
+
+// soleObservedValue is the observation's value when there is exactly one, and
+// nothing when there is not.
+//
+// A decision over several values has no single observed value, and picking one
+// would state a measurement the strategy did not make. The values are all in
+// the content either way, which is where a reader sees them.
+func soleObservedValue(observed contract.TriggerObservedV1) json.RawMessage {
+	if len(observed.Values) != 1 {
+		return nil
+	}
+	for _, value := range observed.Values {
+		return value
+	}
+	return nil
 }
 
 // primaryLevel returns the level the event was aggregated to. The aggregation
@@ -241,15 +340,20 @@ func SeverityIsBuiltIn(level contract.LevelResultV1) bool {
 	return builtIn || level.LevelCode != ""
 }
 
+// wireSubjectFor writes this process's own target kind and target id.
+//
+// The kind is not translated into the consumer's model name: that mapping is
+// the consumer's configuration, it differs per deployment, and a guess here
+// would attach an alert to the wrong model in a way nothing downstream could
+// tell from a right one.
 func wireSubjectFor(subject contract.MonitorSubject) *wireSubject {
-	naming, known := subjectSystems[subject.Type]
-	if !known || subject.ID == "" {
+	if subject.Type == "" || subject.ID == "" {
 		// A record with no object is a real answer - custom reporting with no
-		// target dimensions has none - and an empty subject says so. Inventing
-		// one would attach the alert to something.
+		// target dimensions has none - and no subject says so. Inventing one
+		// would attach the alert to something.
 		return nil
 	}
-	return &wireSubject{System: naming.System, Type: naming.Type, ID: subject.ID}
+	return &wireSubject{Type: subject.Type, NativeID: subject.ID}
 }
 
 func wireTime(epochSeconds int64) string {
@@ -260,15 +364,17 @@ func wireTime(epochSeconds int64) string {
 // point the consumer enriches with the strategy and the resource, so they name
 // only what this process established, and never guess a metric's meaning.
 func title(event *contract.TriggerEventV1, primary contract.LevelResultV1, action string) string {
-	verb := "triggered"
-	if action == ActionResolved {
-		verb = "resolved"
-	}
-	return fmt.Sprintf("Strategy %d level %d %s", event.StrategyRef.StrategyID, primary.LevelID, verb)
+	return fmt.Sprintf("Strategy %d level %d %s", event.StrategyRef.StrategyID, primary.LevelID, action)
 }
 
-func content(event *contract.TriggerEventV1, primary contract.LevelResultV1) string {
+func content(event *contract.TriggerEventV1, primary contract.LevelResultV1, noData bool) string {
 	window := primary.DecisionWindow.Trigger
+	if noData {
+		return fmt.Sprintf(
+			"no data for %s periods, as of %s",
+			noDataPeriods(event.Observed), wireTime(event.RecordRef.SourceTime),
+		)
+	}
 	values := observedValues(event.Observed)
 	if values == "" {
 		values = "no value"
@@ -277,6 +383,17 @@ func content(event *contract.TriggerEventV1, primary contract.LevelResultV1) str
 		"%s at %s; %d of %d points in the window were anomalous",
 		values, wireTime(event.RecordRef.SourceTime), window.ObservedAnomalies, window.WindowSize,
 	)
+}
+
+// noDataPeriods is how many periods the group has been silent, as the absence
+// evaluation counted it and carried it on the point. It is not recomputed here
+// from anything: this process would have to know the period and the clock to do
+// that, and the number would then disagree with the one that was detected on.
+func noDataPeriods(observed contract.TriggerObservedV1) string {
+	if raw, carried := observed.Values[contract.NoDataPeriodFactField]; carried {
+		return string(raw)
+	}
+	return "an unknown number of"
 }
 
 func observedValues(observed contract.TriggerObservedV1) string {

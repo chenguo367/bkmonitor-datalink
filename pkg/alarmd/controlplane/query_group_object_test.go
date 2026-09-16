@@ -313,7 +313,10 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			execution: []string{
 				"plan_id", "input_projection", "output_identity", "target_scope", "no_data", "terminal_reason_code",
 			},
-			context: []string{"source_compatibility", "subject_facts", "legacy_output", "wire_format"},
+			// signal_type sits with wire_format: both describe the event this
+			// Plan publishes rather than what the Slot executes, and both are
+			// decided once when the Plan is built.
+			context: []string{"source_compatibility", "subject_facts", "legacy_output", "wire_format", "signal_type"},
 			split:   []string{"strategy_ref", "strategy_ir"},
 		},
 		reflect.TypeOf(contract.StrategyIRV2{}): {

@@ -272,7 +272,16 @@ type EvaluationPlanV2 struct {
 	// when the Plan was built and frozen with it so a retried Slot cannot
 	// change format between attempts. Empty means the pre-choice behaviour:
 	// the frozen revision decides.
-	WireFormat         string `json:"wire_format,omitempty"`
+	WireFormat string `json:"wire_format,omitempty"`
+	// SignalType is what this Plan's events are observed from -- metric, log
+	// or event -- decided from the item's query configs when the Plan is built
+	// and frozen with it, for the same reason the wire format is: the sink has
+	// no Plan in hand and cannot work it out from a record.
+	//
+	// Empty means this build could not name it: a data type it has no mapping
+	// for, or an item whose configs disagree. The event then omits the field
+	// rather than carrying a guess.
+	SignalType         string `json:"signal_type,omitempty"`
 	TerminalReasonCode string `json:"terminal_reason_code,omitempty"`
 }
 
@@ -551,7 +560,10 @@ type TriggerEventV1 struct {
 	// WireFormat is the format this event is published as, taken from the Plan
 	// it was evaluated for. It travels beside the event rather than inside it:
 	// a consumer reads one format and never has to be told which.
-	WireFormat              string               `json:"-"`
+	WireFormat string `json:"-"`
+	// SignalType travels beside WireFormat and for the same reason: the sink
+	// has no Plan in hand. Empty means this build could not name it.
+	SignalType              string               `json:"-"`
 	Schema                  Schema               `json:"schema"`
 	RequiredFeatures        []string             `json:"required_features"`
 	EventID                 string               `json:"event_id"`
