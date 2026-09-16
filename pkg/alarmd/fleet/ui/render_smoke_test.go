@@ -96,6 +96,16 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		anomaly("qg-blocked", func(item *fleet.Anomaly) {
 			item.Kind, item.ReasonCode, item.Strategies = "BLOCKED_RUN", "source_blocked", nil
 		}),
+		// A round whose commit failed while the state store was reloading,
+		// in the words the store's client wrote, after an hour of healthy
+		// completions: the reading names Redis from the text, the commit
+		// operation, the retry, and the last success.
+		anomaly("qg-redis-commit", func(item *fleet.Anomaly) {
+			item.ReasonCode = "error"
+			item.LastError = &fleet.LastError{Text: "alarmd progress: commit: LOADING Redis is loading the dataset in memory",
+				Type: "*fmt.wrapError", EvaluationTime: at.Add(-2 * time.Minute).Unix(), At: at.Add(-90 * time.Second), Attempts: 2, Operation: "commit"}
+			item.LastHealthyAt = at.Add(-time.Hour)
+		}),
 		anomaly("qg-cooldown", func(item *fleet.Anomaly) {
 			item.Kind = "QUERY_COOLDOWN"
 			item.QueryCooldown = &observability.QueryCooldownFacts{
@@ -271,10 +281,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	failingFor := (2 * time.Hour).Seconds()
 	// The leader's rebalance round the split standing is decided on: 527
 	// against 452 is 15% of the even 489, past the scheduler's 5%, so the
-	// round would move a batch of nine -- and the build does not.
+	// round moves a batch of nine -- and this round published them all.
 	rebalance := &fleet.RebalanceFacts{PlannedAt: at.Add(-20 * time.Second), ReadyWorkers: 2, Assigned: 979, Target: 489,
 		MostOwned: 527, LeastOwned: 452, MostOwnedBy: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
-		LeastOwnedBy: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", Batch: 9, PlannedMoves: 9, StopSpreadPercent: 5, Shadow: true}
+		LeastOwnedBy: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", Batch: 9, PlannedMoves: 9, StopSpreadPercent: 5,
+		PublishedMoves: 9}
 	activation := &fleet.ActivationFacts{
 		Applied: "bdc6ffcb0000000000000000", Published: "e7a1b2c30000000000000000",
 		Behind: true, BehindBeyondBound: true, ConsecutiveFailures: 120,
@@ -639,7 +650,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The third standing: the numbers are the leader's round, the lag is
 		// the replica table's, and the next step says what not to do first.
 		"对象分布不均：abcde 持有 527 个（53.8%），fghij 持有 452 个，2 个就绪副本均分应是 489 个——持有多的那个副本上的跳过、超时、排队都是这个原因，不是容量——fghij 比 abcde 晚 1 小时 55 分 启动",
-		"下一步：不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。Leader 本轮计划移 9 个（每轮最多 9 个），但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动；在均分回来之前",
+		"下一步：不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。已在移：本轮发出 9 个（每轮最多 9 个），最多与最少还差 75 个；看这一行的数在不在降；在均分回来之前",
 		"恢复标准：Leader 的再平衡计划移动数归零（最多与最少之差回到均分的 5% 以内，这是调度器自己的容差）"} {
 		if !strings.Contains(todoLine, want) {
 			t.Errorf("the checks do not say %q:\n%s", want, todoLine)
@@ -677,7 +688,16 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The internal conflict beside the refusal, on the row and as a
 		// second fact on the DEFECT line -- the refusal still has the object.
 		{"INTERNAL qg-rejected ::", "内部错误：GAP_SCOPE_REASON_CONFLICT（input_a=QUERY_UNAVAILABLE input_b=QUERY_TIMEOUT），阶段 execute"},
-		{"CHECKS ::", "5 个对象命中程序缺陷（3 种），上报"},
+		// The one shape every failure is read in, on rows of four different
+		// shapes: the dependency from the error's words with the operation
+		// and the last success; a timeout that names no dependency and says
+		// so; a persisted skip as a confirmed loss; a refusal at the query
+		// step from the backend that answered.
+		{"BLOCKED qg-redis-commit ::", "卡在哪一步：环节待定位（Redis（控制面与状态存储），由错误原文判定，操作 commit）：类型待定位 error；影响：正在重试（这一轮没完成，会再跑）；最近一次成功 "},
+		{"BLOCKED qg-one-clock ::", "卡在哪一步：数据查询（依赖待定位）：超时 QUERY_TIMEOUT；影响：结果待确认（这一轮结束了但结果不能采信）；本进程没见过它成功完成"},
+		{"BLOCKED qg-losing-now ::", "卡在哪一步：调度接管（alarmd 自身（预算、截止、定义），由原因码判定）：容量不足 GAP_SKIPPED；影响：确认漏检（跳过记录已持久化，那段不补）"},
+		{"BLOCKED qg-rejected ::", "卡在哪一步：数据查询（查询后端，由原因码判定）：被拒绝 "},
+		{"CHECKS ::", "6 个对象命中程序缺陷（3 种），上报"},
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\""},
 		{"PENDING ::", "证据：分组的后端回答只有状态码/状态词（非 200 的响应正文当前不保留，\"最近一次错误\"是结束这一轮的 alarmd 错误，不是后端原文）"},
 		// The timeout and the short old-series window are not the data side's
@@ -714,7 +734,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// Behind (a loss in progress) while the leader's round would move
 		// objects: the split is the constraint, named before the permits it
 		// fills, and the sentence says what the build does about it.
-		{"LOAD ::", "瓶颈：对象分布不均——abcde 持有 53.8% 的对象（527 / 均分 489），它的并发位子与队列满是因为它持有别的副本没持有的；加副本、加资源都分不走它的对象，Leader 本轮计划移 9 个（每轮最多 9 个），但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动"},
+		{"LOAD ::", "瓶颈：对象分布不均——abcde 持有 53.8% 的对象（527 / 均分 489），它的并发位子与队列满是因为它持有别的副本没持有的；加副本、加资源都分不走它的对象，已在移：本轮发出 9 个（每轮最多 9 个），最多与最少还差 75 个；看这一行的数在不在降"},
+		// The other states the round can be in, each on the next-step sentence
+		// the line prints: paused for the ready set to settle, with the time
+		// left; a shadow round on a build that only plans; a round that
+		// published nothing and says so; conflicts named beside the moves.
+		{"SENTENCE rebalance-paused ::", "但这一轮没发：就绪副本集刚变过，等它稳定（还剩 23 秒）再发"},
+		{"SENTENCE rebalance-shadow ::", "但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动"},
+		{"SENTENCE rebalance-none ::", "这一轮一个都没发出去，3 个因指派记录同时被改本轮没发、下轮再算——若下一轮仍是 0"},
+		{"SENTENCE rebalance-conflicts ::", "已在移：本轮发出 6 个（每轮最多 9 个），最多与最少还差 75 个，3 个因指派记录同时被改本轮没发、下轮再算；看这一行的数在不在降"},
 		{"LOAD behind-permits ::", "瓶颈：查询并发位子——启动至今 56% 的取位子排过队，而工作在落后或在漏检"},
 		// A budget rejection with the round beside it keeps its name and
 		// says whose reading it is.
@@ -779,7 +807,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// none), and one retained record made an hour ago.
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
-		"需要处理：alarmd 已确认 9 类（15 个对象，去重）；待归因 5 类（15 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"需要处理：alarmd 已确认 9 类（16 个对象，去重）；待归因 5 类（15 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
 		"另有 1 个是滚动后的追赶漏检（副本启动 5 分钟内），看它还有没有新增",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
@@ -1213,6 +1241,17 @@ console.log('SENTENCE demoted :: ' + ctx.checkSentence({code: 'QUERY_TARGET_MISS
 console.log('SENTENCE budget :: ' + ctx.checkSentence({code: 'DETECTION_ABANDONED', objects: 5, current: 5, group_by: 'loss',
   groups: [{key: 'EXECUTION_BUDGET_EXHAUSTED', objects: 3}, {key: 'ONGOING', objects: 2}]}, 5));
 console.log('BRIEF :: ' + ['briefSchedule', 'briefTodo', 'briefBlind'].map(id => textOf(store[id])).join(' | '));
+// The split line's next step in every state the leader's round can be in.
+const round = {ready_workers: 2, assigned: 979, target: 489, most_owned: 527, least_owned: 452, batch: 9, planned_moves: 9, stop_spread_percent: 5,
+  most_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-abcde', least_owned_by: 'bk-monitor-alarmd-trigger-5bdb679ddf-fghij'};
+for (const [name, extra] of Object.entries({
+  'paused': {paused: true, paused_for_seconds: 22.4},
+  'shadow': {shadow: true},
+  'none': {published_moves: 0, conflicts: 3},
+  'conflicts': {published_moves: 6, conflicts: 3},
+})) {
+  console.log('SENTENCE rebalance-' + name + ' :: ' + ctx.nextWords('OWNERSHIP_SKEWED', {rebalance: Object.assign({}, round, extra)}));
+}
 console.log('BUILD :: ' + textOf(store['buildLine']));
 // The operating judgment at the top of the capacity panel, with its limits.
 console.log('LOAD :: ' + textOf(store['loadLines']) + ' ｜ ' + textOf(store['loadLimits']));
@@ -1281,6 +1320,7 @@ for (const row of data.anomalies) {
   if (row.skip) { console.log('SKIP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.last_error) { console.log('ERR ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.internal_failure) { console.log('INTERNAL ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.blocked) { console.log('BLOCKED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the

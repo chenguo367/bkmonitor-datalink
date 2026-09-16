@@ -245,6 +245,9 @@ type LastError struct {
 	EvaluationTime int64     `json:"evaluation_time,omitempty"`
 	At             time.Time `json:"at"`
 	Attempts       int       `json:"attempts"`
+	// Operation is the dependency operation the failing round reported,
+	// when it reported one: the query, the commit, the state write.
+	Operation string `json:"operation,omitempty"`
 }
 
 // HistoryCoverage is how far short of the required detection window this
@@ -559,6 +562,18 @@ type Anomaly struct {
 	// were located from raw logs and source while the page said only which
 	// two.
 	LastError *LastError `json:"last_error,omitempty"`
+	// LastHealthyAt is when this process last saw the object complete
+	// healthily; zero when it never has, which a restored row is. It
+	// survives the run resets everything else about a run goes through,
+	// because it is the one positive fact a recovery is judged on: a
+	// failure that left the window is not a recovery, a success after the
+	// failure is. Left off the wire while zero, by MarshalJSON.
+	LastHealthyAt time.Time `json:"last_healthy_at"`
+	// Blocked is the row's failure read in the one shape every failure is
+	// read in -- step, dependency, class, effect -- decided beside the
+	// finding from the same evidence. Absent on a row that records no
+	// failure.
+	Blocked *Blocked `json:"blocked,omitempty"`
 	// ConfigChanged says the object's snapshot, query or schedule revision
 	// differs between its last two completed rounds: the configuration it
 	// runs under actually changed. It is the one fact that tells a
@@ -589,14 +604,18 @@ func (anomaly Anomaly) MarshalJSON() ([]byte, error) {
 	type wire Anomaly
 	encoded := struct {
 		wire
-		FailingSince *time.Time `json:"failing_since,omitempty"`
-		ReasonSince  *time.Time `json:"reason_since,omitempty"`
+		FailingSince  *time.Time `json:"failing_since,omitempty"`
+		ReasonSince   *time.Time `json:"reason_since,omitempty"`
+		LastHealthyAt *time.Time `json:"last_healthy_at,omitempty"`
 	}{wire: wire(anomaly)}
 	if !anomaly.FailingSince.IsZero() {
 		encoded.FailingSince = &anomaly.FailingSince
 	}
 	if !anomaly.ReasonSince.IsZero() {
 		encoded.ReasonSince = &anomaly.ReasonSince
+	}
+	if !anomaly.LastHealthyAt.IsZero() {
+		encoded.LastHealthyAt = &anomaly.LastHealthyAt
 	}
 	return json.Marshal(encoded)
 }

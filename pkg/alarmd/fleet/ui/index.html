@@ -526,6 +526,59 @@ var FAILURE_CATEGORY = {
   evaluation: '评估失败'
 };
 
+// The one shape every failure is read in, from the server's Blocked on the
+// row: which step, which dependency, what kind, what it did. Held to the Go
+// lists by a test. The dependency line says how it was decided -- by the
+// code or by the error's own words -- and "待定位" is an answer, not a blank:
+// a query timeout does not say whether the time went to the backend, the
+// network or the budget, and the row must not point at one of them.
+var STAGE = {
+  CONFIG: '配置获取',
+  SCHEDULE: '调度接管',
+  QUERY: '数据查询',
+  EVALUATE: '检测计算',
+  COMMIT: '结果提交',
+  UNLOCATED: '环节待定位'
+};
+var DEPENDENCY = {
+  REDIS: 'Redis（控制面与状态存储）',
+  QUERY_BACKEND: '查询后端',
+  CONTROL_SOURCE: '策略源',
+  KAFKA: 'Kafka（输出）',
+  NONE: 'alarmd 自身（预算、截止、定义）',
+  UNLOCATED: '依赖待定位'
+};
+var FAILURE_CLASS = {
+  TIMEOUT: '超时',
+  UNAVAILABLE: '不可用',
+  REFUSED: '被拒绝',
+  CAPACITY: '容量不足',
+  CONTRACT: '内部状态冲突',
+  CONFIG: '定义不可算',
+  RETENTION: '保留期不足',
+  UNLOCATED: '类型待定位'
+};
+var EFFECT = {
+  DELAYED: '只是延迟，还没丢',
+  RETRYING: '正在重试（这一轮没完成，会再跑）',
+  SKIPPED: '确认漏检（跳过记录已持久化，那段不补）',
+  UNCONFIRMED: '结果待确认（这一轮结束了但结果不能采信）'
+};
+
+// One sentence for the row: where it is stuck, talking to what, what kind,
+// and what it did to the detection -- then the last success, or that this
+// process never saw one, which is the fact a recovery is judged on.
+function blockedWords(blocked) {
+  var evidence = blocked.dependency_evidence === 'code' ? '，由原因码判定'
+    : blocked.dependency_evidence === 'text' ? '，由错误原文判定' : '';
+  return (STAGE[blocked.stage] || blocked.stage)
+    + '（' + (DEPENDENCY[blocked.dependency] || blocked.dependency) + evidence
+    + (blocked.operation ? '，操作 ' + blocked.operation : '') + '）'
+    + '：' + (FAILURE_CLASS[blocked.class] || blocked.class) + (blocked.code ? ' ' + blocked.code : '')
+    + '；影响：' + (EFFECT[blocked.effect] || blocked.effect)
+    + (blocked.last_success_at ? '；最近一次成功 ' + momentLabel(blocked.last_success_at) : '；本进程没见过它成功完成');
+}
+
 // What the timestamp in the previous column actually is. Three of these are not
 // a start time at all, and the column renders identically either way, so the
 // wording is the only thing carrying the difference.
@@ -657,7 +710,7 @@ var DEGRADATION = {
 // the reader to look for something that does not.
 var EVIDENCE = {
   CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
-  OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡计划在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_planned_moves',
+  OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡这一轮（计划/发出/暂停）在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_gap、assignment_moves_total{reason=rebalance}、rebalance_paused_total{reason=set_unstable}',
   REPLICA_DEGRADED:      '展开按种类看是哪个副本；策略源过期的组直接带最近一次刷新失败的阶段与原文（下面组名后）；副本表里该副本的策略源/告警集合/平台设置时钟',
   SLOTS_OVERDUE:         '对象行"超期"与超期多久（预计时刻已过多久）；副本表里该副本的已运行时长与被挡回数',
   NEVER_EVALUATED:       '对象行"接管后未跑"与接管时刻',
@@ -787,15 +840,28 @@ function rebalanceWords(words, rebalance) {
     .replace('{rebalance}', rebalanceStanding(r));
 }
 
-// What the leader is doing about the split, from the round itself: a shadow
-// round is a measurement the build does not act on, and the line has to say
-// that rather than let a reader wait for a move that will not come.
+// What the leader is doing about the split, from the round itself, in the
+// states the round can be in: a shadow round is a measurement the build
+// does not act on; a round paused because the ready set changed inside its
+// settling window wrote nothing on purpose and says for how much longer; a
+// round that published is moving, and the gap it still has to close is on
+// the line so a reader can watch it fall. The line has to say which,
+// rather than let a reader wait for a move that will not come or restart a
+// replica to force one that is already under way.
 function rebalanceStanding(r) {
   if (!r || !r.planned_moves) return '等再平衡';
+  var gap = Math.max(0, (r.most_owned || 0) - (r.least_owned || 0));
   var plan = 'Leader 本轮计划移 ' + r.planned_moves + ' 个（每轮最多 ' + (r.batch || 0) + ' 个）';
-  return r.shadow
-    ? plan + '，但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动'
-    : plan + '，正在逐轮移，看这一行的数在不在降';
+  if (r.shadow) return plan + '，但这个构建只计划不执行——均分要等再平衡执行上线或下一次滚动';
+  if (r.paused) {
+    return plan + '，但这一轮没发：就绪副本集刚变过，等它稳定'
+      + (r.paused_for_seconds ? '（还剩 ' + Math.ceil(r.paused_for_seconds) + ' 秒）' : '') + '再发';
+  }
+  var conflicts = r.conflicts ? '，' + r.conflicts + ' 个因指派记录同时被改本轮没发、下轮再算' : '';
+  if (r.published_moves) {
+    return '已在移：本轮发出 ' + r.published_moves + ' 个（每轮最多 ' + (r.batch || 0) + ' 个），最多与最少还差 ' + gap + ' 个' + conflicts + '；看这一行的数在不在降';
+  }
+  return plan + '，这一轮一个都没发出去' + conflicts + '——若下一轮仍是 0，看 leader 日志 rebalance_planned';
 }
 
 // A standing's fold that carries the failure behind it says so on the line:
@@ -1553,6 +1619,13 @@ function objectRow(anomaly) {
     line('后端症状', symptomText(f.detail), f.detail);
     line('失败在哪', FAILURE_CATEGORY[f.category] || f.category,
       ['阶段 ' + f.stage, '分类 ' + f.category, f.code ? '代码 ' + f.code : ''].filter(Boolean).join('\n'));
+  }
+  // The same failure in the shape every failure is read in, so a Redis
+  // restart, a backend timeout and an uncompilable strategy answer the same
+  // question on the same line.
+  if (anomaly.blocked) {
+    line('卡在哪一步', blockedWords(anomaly.blocked),
+      '环节、依赖、类型、影响，由服务端按同一个原因码判定；"待定位"是结论——证据不足以指向某个依赖或环节时不猜');
   }
   // The error's own words, without opening a window and waiting for one
   // more failure. The classification lines above say what kind; this says
