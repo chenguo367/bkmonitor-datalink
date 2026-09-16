@@ -1110,7 +1110,18 @@ function objectRow(anomaly) {
   // Last result: the value and the code it ended with.
   var f = anomaly.failure;
   var code = anomaly.cause_reason || (f && f.code) || anomaly.reason_code || '';
-  var result = cell((RESULT[finding.result] || finding.result || '—') + (code ? ' · ' + code : ''), 'mono');
+  // A reason under a durable history guard is the guard's trigger carried
+  // onto this round, not this round's event. Read bare, CONFIG_DRIFT sent a
+  // reader to check whether a strategy was being edited; it was not.
+  var coverage = anomaly.coverage;
+  var held = coverage && coverage.guarded > 0 && anomaly.cause_reason
+    && anomaly.cause_reason !== 'HISTORY_WARMING' && anomaly.cause_reason !== 'HISTORY_GAPPED';
+  var result = cell((RESULT[finding.result] || finding.result || '—') + (code ? ' · ' + code : '')
+    + (held ? '（保护沿用，非本轮）' : ''), 'mono');
+  if (held) {
+    result.title = '历史窗口保护尚未解除；' + code + ' 是保护最初建立时的原因，每一轮都沿用，不代表这一轮又发生了它。'
+      + '当前缺什么看右边的窗口列';
+  }
   if (f) {
     result.title = [symptomText(f.detail), f.stage ? '阶段 ' + f.stage : '',
       FAILURE_CATEGORY[f.category] || f.category || ''].filter(Boolean).join('\n');

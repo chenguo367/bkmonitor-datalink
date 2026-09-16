@@ -1225,7 +1225,7 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 		t.Fatalf("rows = %+v, want one undecidable object carrying coverage", rows)
 	}
 	published := reflect.ValueOf(rows[0].Coverage).Elem()
-	rowOnly := map[string]bool{"ShortRounds": true, "EmptyRounds": true, "FreshRounds": true}
+	rowOnly := map[string]bool{"ShortRounds": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true}
 	for i := 0; i < published.NumField(); i++ {
 		name := published.Type().Field(i).Name
 		if rowOnly[name] {
@@ -1376,5 +1376,124 @@ func TestTheLastErrorTravelsToTheRowWithItsSlotAndAttempts(t *testing.T) {
 	}
 	if last := tracker.Anomalies()[0].LastError; last != nil {
 		t.Fatalf("an error from before the healthy round is still on the row: %+v", last)
+	}
+}
+
+// A CONFIG_DRIFT under a history guard on rounds whose snapshot, query and
+// schedule revisions have not moved is the guard's carried trigger, and
+// must not put the object on the configuration line; a CONFIG_DRIFT on a
+// round where one of the three did move is a drift and must. The first is
+// the only shape a carried reason can take -- a drift by definition moves a
+// revision -- so this is the assertion only the carrying branch satisfies.
+func TestACarriedConfigDriftIsNotAConfigLineButARealOneIs(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	round := func(queryGroup, snapshot, query, schedule string) {
+		// The frozen trace on the round's start, then its completion under a
+		// guard: coverage held, CONFIG_DRIFT carried as the reason.
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageSlotStarted,
+			Result: observability.Result(observability.ResultStarted),
+			Trace: observability.TraceFields{QueryGroupKey: queryGroup, StrategyID: "1074", BusinessID: "7",
+				SnapshotRevision: snapshot, QueryRevision: query, ScheduleRevision: schedule, EvaluationTime: 1_700_000_000},
+		})
+		observation := completion(queryGroup, "COMPLETED_WITH_PARTIAL_GAP", "1074")
+		observation.ProgressCompletionCause, observation.ProgressCompletionReason = "LEVEL_OUTCOME_UNKNOWN", "CONFIG_DRIFT"
+		observation.HistoryCoverage = &observability.HistoryCoverageFacts{Levels: 3, Short: 1, Guarded: 3, WorstValid: 5, WorstRequired: 9}
+		tracker.Observe(context.Background(), observation)
+	}
+	for i := 0; i < DefaultDegradedRounds+1; i++ {
+		round("qg-1074", "snap-a", "query-a", "schedule-a")
+	}
+	rows := tracker.Anomalies()
+	if len(rows) != 1 || rows[0].ConfigChanged {
+		t.Fatalf("rows = %+v, want one row with no revision change across its rounds", rows)
+	}
+	Attribute(rows, now)
+	if rows[0].Finding.Check == CheckConfigUnresolved || rows[0].Finding.Check != CheckWindowUndecided {
+		t.Fatalf("carried CONFIG_DRIFT with unchanged revisions is under %q, want the undecided window, never the configuration line",
+			rows[0].Finding.Check)
+	}
+	if rows[0].Finding.Group != "保护未解除（最初触发 CONFIG_DRIFT）" {
+		t.Fatalf("fold = %q, want the guard named with its trigger", rows[0].Finding.Group)
+	}
+
+	// The counterexample: one revision moves. That round's CONFIG_DRIFT is a
+	// drift, and the configuration line is where it goes.
+	round("qg-1074", "snap-a", "query-b", "schedule-a")
+	rows = tracker.Anomalies()
+	if len(rows) != 1 || !rows[0].ConfigChanged {
+		t.Fatalf("rows = %+v, want the row to say its revisions moved", rows)
+	}
+	Attribute(rows, now)
+	if rows[0].Finding.Check != CheckConfigUnresolved {
+		t.Fatalf("CONFIG_DRIFT on a round whose query revision moved is under %q, want the configuration line", rows[0].Finding.Check)
+	}
+	// And the round after, on the new revisions with nothing moving again:
+	// carried once more.
+	round("qg-1074", "snap-a", "query-b", "schedule-a")
+	rows = tracker.Anomalies()
+	Attribute(rows, now)
+	if rows[0].ConfigChanged || rows[0].Finding.Check != CheckWindowUndecided {
+		t.Fatalf("the round after the change: changed=%v check=%q, want unchanged and back under the window", rows[0].ConfigChanged, rows[0].Finding.Check)
+	}
+}
+
+// The round a guard converges on is not a line, on the real path: the window
+// has been short under the guard for dozens of rounds, the reason clock reads
+// dozens because the completion/reason pair never changed, and then the
+// window fills. That round is the guard releasing. The next round still
+// held over a full window is a guard that should have released. The first
+// version judged this on the reason clock and called the converging round
+// overdue.
+func TestTheConvergingRoundIsNotALineOnTheRealPath(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	round := func(short uint32) {
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageSlotStarted,
+			Result: observability.Result(observability.ResultStarted),
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1074", StrategyID: "1074", BusinessID: "7",
+				SnapshotRevision: "snap-a", QueryRevision: "query-a", ScheduleRevision: "schedule-a", EvaluationTime: 1_700_000_000},
+		})
+		observation := completion("qg-1074", "COMPLETED_WITH_PARTIAL_GAP", "1074")
+		observation.ProgressCompletionCause, observation.ProgressCompletionReason = "LEVEL_OUTCOME_UNKNOWN", "CONFIG_DRIFT"
+		observation.HistoryCoverage = &observability.HistoryCoverageFacts{Levels: 3, Short: short, Guarded: 3, WorstValid: 9 - short, WorstRequired: 9}
+		tracker.Observe(context.Background(), observation)
+	}
+	classify := func() Anomaly {
+		rows := tracker.Anomalies()
+		if len(rows) != 1 {
+			t.Fatalf("rows = %+v, want one", rows)
+		}
+		Attribute(rows, now)
+		return rows[0]
+	}
+	for i := 0; i < 30; i++ {
+		round(1)
+	}
+	short := classify()
+	if short.Consecutive < 3 || short.Finding.Check != CheckWindowUndecided || short.Finding.Group != "保护未解除（最初触发 CONFIG_DRIFT）" {
+		t.Fatalf("after thirty short rounds: consecutive=%d check=%q group=%q", short.Consecutive, short.Finding.Check, short.Finding.Group)
+	}
+	// The window fills. The reason clock still reads thirty-one; the
+	// held-full counter reads one; not a line.
+	round(0)
+	converging := classify()
+	if converging.Consecutive < 30 || converging.Coverage.HeldFullRounds != 1 || converging.Finding.Check != "" {
+		t.Fatalf("the converging round: consecutive=%d held_full=%d check=%q, want no line with the reason clock still high",
+			converging.Consecutive, converging.Coverage.HeldFullRounds, converging.Finding.Check)
+	}
+	// Still held over a full window on the next round: overdue to release.
+	round(0)
+	overdue := classify()
+	if overdue.Coverage.HeldFullRounds != 2 || overdue.Finding.Check != CheckWindowUndecided ||
+		overdue.Finding.Group != "保护未解除且窗口已满（最初触发 CONFIG_DRIFT）" {
+		t.Fatalf("the round after: held_full=%d check=%q group=%q", overdue.Coverage.HeldFullRounds, overdue.Finding.Check, overdue.Finding.Group)
+	}
+	// A short round again ends the full run.
+	round(1)
+	if again := classify(); again.Coverage.HeldFullRounds != 0 || again.Finding.Group != "保护未解除（最初触发 CONFIG_DRIFT）" {
+		t.Fatalf("a short round after: held_full=%d group=%q, want the counter back to zero", again.Coverage.HeldFullRounds, again.Finding.Group)
 	}
 }

@@ -223,7 +223,7 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 		// in ReportChecks.
 		return gapRestoredWithoutCause
 	case GroupByCause:
-		return windowCause(anomaly.Coverage)
+		return windowCause(anomaly.Coverage, anomaly.CauseReason)
 	}
 	return ""
 }
@@ -237,12 +237,24 @@ const (
 	causeSeriesMixed    = "新老序列混合"
 	causeUnusableNoWord = "检测用不了记录（原因没带上）"
 	causeNoCounts       = "没有窗口计数（副本没报）"
+	// A window held by a durable guard: the reason on the row is the one
+	// the guard was established with, carried onto every round until the
+	// guard releases, not what happened this round. Folded on that trigger,
+	// with whether the live window is still short or already full -- the
+	// second is a guard that should have released and has not.
+	causeGuardHeld           = "保护未解除"
+	causeGuardHeldWindowFull = "保护未解除且窗口已满"
 )
 
-func windowCause(coverage *HistoryCoverage) string {
+func windowCause(coverage *HistoryCoverage, reason string) string {
 	switch {
 	case coverage == nil || coverage.Levels == 0:
 		return causeNoCounts
+	case coverage.Guarded > 0 && reason != "" && reason != "HISTORY_WARMING" && reason != "HISTORY_GAPPED":
+		if coverage.Short == 0 {
+			return causeGuardHeldWindowFull + "（最初触发 " + reason + "）"
+		}
+		return causeGuardHeld + "（最初触发 " + reason + "）"
 	case coverage.Starved():
 		if coverage.UnusableReason != "" {
 			return coverage.UnusableReason

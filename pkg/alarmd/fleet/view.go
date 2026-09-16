@@ -359,6 +359,15 @@ type HistoryCoverage struct {
 	// all load nothing and all look new -- and that round is indistinguishable
 	// from churn. A run longer than the window is wide is not.
 	FreshRounds uint32 `json:"fresh_rounds,omitempty"`
+	// HeldFullRounds is how many rounds in a row the windows have been full
+	// while a guard still held them. The guard converges on the first full
+	// record, so one such round is the guard releasing and two is a guard
+	// that should have released. It has its own counter because no other
+	// clock on the row can tell the two apart: the reason clock runs on the
+	// completion/reason pair, which does not change when a short window
+	// fills, so on the round a guard should converge it already reads as
+	// many rounds as the window was short for.
+	HeldFullRounds uint32 `json:"held_full_rounds,omitempty"`
 }
 
 // Churning reports series that have never survived long enough to be seen
@@ -529,6 +538,13 @@ type Anomaly struct {
 	// were located from raw logs and source while the page said only which
 	// two.
 	LastError *LastError `json:"last_error,omitempty"`
+	// ConfigChanged says the object's snapshot, query or schedule revision
+	// differs between its last two completed rounds: the configuration it
+	// runs under actually changed. It is the one fact that tells a
+	// CONFIG_DRIFT this round from a CONFIG_DRIFT a history guard has been
+	// carrying since a change rounds ago -- a drift by definition moves a
+	// revision, and a carried reason moves none.
+	ConfigChanged bool `json:"config_changed,omitempty"`
 	// Stalled says the rounds have been failing to finish for longer than the
 	// deployment's own budget for terminating an unfinishable Slot. The
 	// distinction it draws is the one that decides whether anyone has to act: a
