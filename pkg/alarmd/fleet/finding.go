@@ -110,29 +110,37 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 		}
 		return CheckBackendNotAnswering, true, false
 	}
-	if anomaly.CauseReason == "HISTORY_WARMING" || anomaly.CauseReason == "HISTORY_GAPPED" {
-		if check, under, decided := windowCheck(anomaly.CauseReason, anomaly.Coverage); decided {
-			return check, under, false
+	// The window counts and the guard describe the last round that
+	// completed. A round that failed since is read by its own facts, below:
+	// an object whose last completion was warming and whose latest round
+	// failed is a failed round, and the page follows the latest round even
+	// when the object alternates -- one round failing, one completing
+	// degraded -- because that is what the object is doing.
+	if !failedExecution(anomaly.ReasonCode) {
+		if anomaly.CauseReason == "HISTORY_WARMING" || anomaly.CauseReason == "HISTORY_GAPPED" {
+			if check, under, decided := windowCheck(anomaly.CauseReason, anomaly.Coverage); decided {
+				return check, under, false
+			}
 		}
-	}
-	// A reason carried by a durable history guard is not this round's
-	// finding. A Level judged WARMING or GAPPED under some trigger -- a
-	// configuration change, a gap marker -- reports that trigger's reason on
-	// every UNKNOWN outcome until the guard releases, and the counts beside
-	// it stay live. Read through the code table, CONFIG_DRIFT under a guard
-	// became "配置状态说不清" for six strategies whose configuration had not
-	// changed and whose snapshot, query and schedule revisions were identical
-	// before and after two of them recovered. The question such a row poses
-	// is why the guard has not released, which is a window question: it goes
-	// under the undecided window, folded on the trigger and on whether the
-	// live window is still short or already full.
-	if held, line := guardHeld(anomaly); held {
-		if !line {
-			// The round a guard converges on: full window, first round of
-			// it. Not a line, and not a configuration question either.
-			return "", false, false
+		// A reason carried by a durable history guard is not this round's
+		// finding. A Level judged WARMING or GAPPED under some trigger -- a
+		// configuration change, a gap marker -- reports that trigger's reason on
+		// every UNKNOWN outcome until the guard releases, and the counts beside
+		// it stay live. Read through the code table, CONFIG_DRIFT under a guard
+		// became "配置状态说不清" for six strategies whose configuration had not
+		// changed and whose snapshot, query and schedule revisions were identical
+		// before and after two of them recovered. The question such a row poses
+		// is why the guard has not released, which is a window question: it goes
+		// under the undecided window, folded on the trigger and on whether the
+		// live window is still short or already full.
+		if held, line := guardHeld(anomaly); held {
+			if !line {
+				// The round a guard converges on: full window, first round of
+				// it. Not a line, and not a configuration question either.
+				return "", false, false
+			}
+			return CheckWindowUndecided, true, false
 		}
-		return CheckWindowUndecided, true, false
 	}
 	if check, decided := codeVerdict(anomaly); decided {
 		if check == "" {

@@ -302,6 +302,43 @@ type LastError struct {
 // It is a strategy whose series identity contains something that churns, and
 // what it needs is a change to the strategy, not to alarmd. But a reader
 // cannot reach that conclusion from a label both cases share.
+// GapGuard is one held gap scope of one of the object's Plans, as the round
+// that read it reported it: which scope, whether it is counting up (WARMING)
+// or holding a gap (GAPPED), why, and where its count stands. A warming
+// scope has a k/N; a gapped one has no count to show, and a page that showed
+// k/N against it would read a stalled count where there is none. Rounds is
+// how many rounds this process saw the scope held; UnchangedRounds how many
+// in a row its count did not move, which for a gapped scope at zero is how
+// long the guard has held without the release condition advancing.
+type GapGuard struct {
+	Plan     StrategyRef `json:"plan"`
+	Scope    string      `json:"scope"`
+	Status   string      `json:"status"`
+	Reason   string      `json:"reason,omitempty"`
+	Required uint32      `json:"required"`
+	Observed uint32      `json:"observed"`
+	// Progress is derived from the count and nothing else: none while
+	// Observed is zero, partial while it is short of Required.
+	Progress        string    `json:"progress"`
+	FirstAt         time.Time `json:"first_at"`
+	LastAt          time.Time `json:"last_at"`
+	Rounds          int       `json:"rounds"`
+	UnchangedRounds int       `json:"unchanged_rounds"`
+}
+
+// GapProgressNone and GapProgressPartial are the two readings of a held
+// scope's count, derived by the reader from Observed against Required.
+const (
+	GapProgressNone    = "none"
+	GapProgressPartial = "partial"
+)
+
+// MaxGuardsPerRow bounds how many held scopes a row carries: the worst few,
+// gapped before warming, the least advanced first. A Query Group with many
+// Plans and levels can hold dozens, and the row is read for whether the
+// object is waiting on a guard that is moving, not for the list.
+const MaxGuardsPerRow = 4
+
 type HistoryCoverage struct {
 	// Levels and Short are the counts from the last round: how many Level
 	// windows were summarised, and how many held fewer points than required.
@@ -624,6 +661,12 @@ type Anomaly struct {
 	// reason. Present until this process completes a round of its own, so a
 	// reader knows the row's cause is from before the takeover.
 	Restored *RestoredRound `json:"restored,omitempty"`
+	// Guards is the held gap scopes of the object's Plans as of its latest
+	// round, the worst MaxGuardsPerRow of them; GuardsTotal how many there
+	// are. Absent when no scope is held. A scope not reported by the round
+	// that just completed was released, and is gone.
+	Guards      []GapGuard `json:"guards,omitempty"`
+	GuardsTotal int        `json:"guards_total,omitempty"`
 	// NoDataMemory is on rows of KindNoDataMemoryRefused: the refusal the
 	// row lists, whole.
 	NoDataMemory *NoDataMemoryRefusal `json:"no_data_memory,omitempty"`
