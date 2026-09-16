@@ -30,6 +30,12 @@ const (
 	rebalanceStopSpreadPercent = 5
 )
 
+// RebalanceStopSpreadPercent is the tolerance above, for a reader that
+// reports a plan: "no moves" means the spread is within this share of the
+// even target, and the reader should say so with this number rather than
+// one of its own.
+const RebalanceStopSpreadPercent = rebalanceStopSpreadPercent
+
 // RebalanceMove names one Assignment a rebalance round would move, from
 // its current desired owner to the worker the round chose.
 type RebalanceMove struct {

@@ -149,6 +149,54 @@ func TestFleetPublisherCarriesTheActivationStanding(t *testing.T) {
 	}
 }
 
+// The publisher puts the leader's rebalance round on the snapshot the same
+// way, and none when this replica planned none: a follower must not read as
+// a leader whose round moves nothing.
+func TestFleetPublisherCarriesTheRebalanceRound(t *testing.T) {
+	clock := &dueIndexClock{at: time.Unix(20_000, 0)}
+	facts := &fleet.RebalanceFacts{PlannedAt: clock.now(), ReadyWorkers: 2, Assigned: 2370, Target: 1185, MostOwned: 2370,
+		MostOwnedBy: "replica-1", LeastOwnedBy: "replica-2", Batch: 23, PlannedMoves: 23, StopSpreadPercent: 5, Shadow: true}
+	publisher := fleetPublisher{
+		tracker: fleet.NewTracker(nil, "replica-1", clock.now), replica: "replica-1", now: clock.now,
+		owned:     func() []execution.QueryGroupIdentity { return nil },
+		rebalance: func() *fleet.RebalanceFacts { return facts },
+	}
+	if snapshot := publisher.snapshot(context.Background()); snapshot.Rebalance == nil || *snapshot.Rebalance != *facts {
+		t.Fatalf("snapshot rebalance = %+v, want the round as given", snapshot.Rebalance)
+	}
+	publisher.rebalance = func() *fleet.RebalanceFacts { return nil }
+	if snapshot := publisher.snapshot(context.Background()); snapshot.Rebalance != nil {
+		t.Fatalf("a replica with no round published %+v", snapshot.Rebalance)
+	}
+}
+
+// The bundle reads the round from an ownership runtime that plans one and
+// nothing from one that does not: the production runtime is the source, and
+// a fake without the method is a deployment with no round, not a nil
+// dereference.
+func TestBundleReadsTheRebalanceRoundOnlyFromARuntimeThatPlans(t *testing.T) {
+	facts := &fleet.RebalanceFacts{PlannedMoves: 1, MostOwnedBy: "a", LeastOwnedBy: "b", Shadow: true}
+	planning := &planningOwnershipRuntime{fakePhaseTwoOwnership: &fakePhaseTwoOwnership{}, last: facts}
+	bundle := &phaseTwoWorkerBundle{dependencies: phaseTwoWorkerBundleDependencies{Ownership: planning}}
+	if got := bundle.rebalanceFleetFacts(); got == nil || *got != *facts {
+		t.Fatalf("rebalanceFleetFacts() = %+v, want the runtime's round", got)
+	}
+	bundle.dependencies.Ownership = &fakePhaseTwoOwnership{}
+	if got := bundle.rebalanceFleetFacts(); got != nil {
+		t.Fatalf("rebalanceFleetFacts() from a runtime that does not plan = %+v, want nil", got)
+	}
+	if got := (*phaseTwoWorkerBundle)(nil).rebalanceFleetFacts(); got != nil {
+		t.Fatalf("rebalanceFleetFacts() on a nil bundle = %+v, want nil", got)
+	}
+}
+
+type planningOwnershipRuntime struct {
+	*fakePhaseTwoOwnership
+	last *fleet.RebalanceFacts
+}
+
+func (runtime *planningOwnershipRuntime) LastRebalance() *fleet.RebalanceFacts { return runtime.last }
+
 // A retained record of past loss carries the strategies behind the object,
 // so the row built from it can be traced to something a reader can act on.
 // Without them the record rendered as a row with an empty strategy column.

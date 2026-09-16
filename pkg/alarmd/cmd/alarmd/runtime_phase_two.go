@@ -352,6 +352,28 @@ type phaseTwoOwnershipRuntime interface {
 	Close() error
 }
 
+// phaseTwoRebalanceSource is what an ownership runtime that plans rebalance
+// rounds reports about its latest one. Optional rather than on the interface
+// above: a runtime that plans nothing publishes no plan, which the fleet
+// keeps apart from a plan that moves nothing.
+type phaseTwoRebalanceSource interface {
+	LastRebalance() *fleet.RebalanceFacts
+}
+
+// rebalanceFleetFacts is the latest rebalance planning round on this
+// process, for the fleet snapshot; nil on a follower and on a runtime that
+// does not plan.
+func (bundle *phaseTwoWorkerBundle) rebalanceFleetFacts() *fleet.RebalanceFacts {
+	if bundle == nil {
+		return nil
+	}
+	source, ok := bundle.dependencies.Ownership.(phaseTwoRebalanceSource)
+	if !ok {
+		return nil
+	}
+	return source.LastRebalance()
+}
+
 type phaseTwoQueryGroupLifecycle struct {
 	runner phaseTwoQueryGroupRuntime
 	cancel context.CancelFunc

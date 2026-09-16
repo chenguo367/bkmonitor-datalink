@@ -18,18 +18,20 @@ import (
 // design change -- a rule over the dimensions -- and this is what makes it one
 // rather than a word.
 //
-// Nineteen: the sixteen rules over object dimensions; two standings of the
+// Twenty: the sixteen rules over object dimensions; three standings of the
 // deployment itself -- the fleet executing a publication that is no longer
-// current, and a replica past a bound -- which decided the verdict with no
-// line on the first screen until a running deployment spent half a day on a
-// stale publication behind a DEGRADED badge that named the object list; and
-// the refusal that names what is missing, split from the one that does not,
-// because the pool card called those strategies unusable while the line said
-// 待确认. The design names all nineteen.
-func TestTheCheckTableIsClosedAtNineteen(t *testing.T) {
-	if got := len(Checks()); got != 19 || len(checkAnswers) != 19 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 19: a new check has to "+
-			"be a rule over the existing dimensions or a named standing, and the design says which nineteen", got, len(checkAnswers))
+// current, a replica past a bound, and the ready replicas holding uneven
+// shares by the scheduler's own tolerance -- the first two of which decided
+// the verdict with no line on the first screen until a running deployment
+// spent half a day on a stale publication behind a DEGRADED badge that named
+// the object list, and the third of which sat in the replica table as 2370
+// against 0 with no line; and the refusal that names what is missing, split
+// from the one that does not, because the pool card called those strategies
+// unusable while the line said 待确认. The design names all twenty.
+func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
+	if got := len(Checks()); got != 20 || len(checkAnswers) != 20 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 20: a new check has to "+
+			"be a rule over the existing dimensions or a named standing, and the design says which twenty", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
 	for _, check := range Checks() {
@@ -109,13 +111,16 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		}
 		produced[list[0].Finding.Check] = true
 	}
-	// The two standings are produced from the view, not from any object: one
-	// fact per deployment about the publication it executes, one per replica
-	// about a bound. Each is enumerated the same way, one view per path.
+	// The three standings are produced from the view, not from any object:
+	// one fact per deployment about the publication it executes, one per
+	// replica about a bound, one per deployment about how the replicas share
+	// the objects. Each is enumerated the same way, one view per path.
 	standings := map[Check]View{
 		CheckCutoverFailing: {Activation: &ActivationFacts{Behind: true, BehindBeyondBound: true,
 			FailureStage: "schedule_cutover", FailureClass: "schedule_conflict"}, ActivationReplica: "pod-a"},
 		CheckReplicaDegraded: {Degradations: []Degradation{{Kind: DegradationOpenAlertSetStale, Replica: "pod-b"}}},
+		CheckOwnershipSkewed: {Rebalance: &RebalanceFacts{ReadyWorkers: 2, Assigned: 4, Target: 2, MostOwned: 4,
+			MostOwnedBy: "pod-a", LeastOwnedBy: "pod-b", Batch: 1, PlannedMoves: 1, StopSpreadPercent: 5, Shadow: true}, RebalanceReplica: "pod-a"},
 	}
 	for want, view := range standings {
 		reports := ReportChecks(nil, nil, &view, now)

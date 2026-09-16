@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -1232,6 +1233,11 @@ type productionPhaseTwoOwnership struct {
 	indexEpoch   uint64
 	indexDigests map[string][sha256.Size]byte
 	indexReader  assignmentIndexReader
+
+	// lastRebalance is the plan the latest round computed, kept for the
+	// fleet snapshot this replica publishes. Nil until this process has
+	// planned a round, which only a Leader does.
+	lastRebalance *fleet.RebalanceFacts
 }
 
 func newProductionPhaseTwoOwnership(
@@ -1356,6 +1362,37 @@ func (runtime *productionPhaseTwoOwnership) planRebalance(
 		Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned,
 		Result: observability.ResultSuccess, Operation: observability.OperationLoad, Rebalance: facts,
 	})
+	// The same round for the fleet snapshot. Shadow is written here because
+	// this is where the moves are not published: when a round starts
+	// publishing them, this is the line that changes, and the page follows.
+	published := &fleet.RebalanceFacts{
+		PlannedAt: at, ReadyWorkers: plan.ReadyWorkers, Assigned: plan.Assigned, Target: plan.Target,
+		MostOwned: plan.MostOwned, LeastOwned: plan.LeastOwned, Batch: plan.Batch, PlannedMoves: len(plan.Moves),
+		StopSpreadPercent: scheduler.RebalanceStopSpreadPercent, Shadow: true,
+	}
+	if len(plan.Moves) > 0 {
+		// The pair the round chose, from the round's own first move rather
+		// than a second walk over the counts with its own tie rule.
+		published.MostOwnedBy, published.LeastOwnedBy = plan.Moves[0].From, plan.Moves[0].To
+	}
+	runtime.mu.Lock()
+	runtime.lastRebalance = published
+	runtime.mu.Unlock()
+}
+
+// LastRebalance is the plan the latest round on this process computed, for
+// the fleet snapshot; nil on a process that has never been the Leader.
+func (runtime *productionPhaseTwoOwnership) LastRebalance() *fleet.RebalanceFacts {
+	if runtime == nil {
+		return nil
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.lastRebalance == nil {
+		return nil
+	}
+	facts := *runtime.lastRebalance
+	return &facts
 }
 
 // publishAssignmentIndex writes the per-worker Assignment index for the
