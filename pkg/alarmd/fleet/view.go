@@ -228,6 +228,12 @@ type FailureRef struct {
 	// [a-z0-9_=.-], so URLs, messages and response bodies are refused upstream
 	// rather than trimmed here.
 	Detail string `json:"detail,omitempty"`
+	// At is when this failure was observed. The reference is kept until a
+	// healthy completion, so on a row whose latest round ended some other
+	// way it describes an earlier round; the reading that names the current
+	// round's evidence uses this to tell the two apart. Absent on rows from
+	// a publisher that predates it.
+	At *time.Time `json:"at,omitempty"`
 }
 
 // LastError is the last error a round of this object returned.
@@ -578,6 +584,12 @@ type Anomaly struct {
 	// finding from the same evidence. Absent on a row that records no
 	// failure.
 	Blocked *Blocked `json:"blocked,omitempty"`
+	// Restored is the persisted summary of the last committed round this
+	// row was rebuilt from after a restart or a change of owner: the round
+	// before this process took over, with its Slot, commit time, ending and
+	// reason. Present until this process completes a round of its own, so a
+	// reader knows the row's cause is from before the takeover.
+	Restored *RestoredRound `json:"restored,omitempty"`
 	// ConfigChanged says the object's snapshot, query or schedule revision
 	// differs between its last two completed rounds: the configuration it
 	// runs under actually changed. It is the one fact that tells a

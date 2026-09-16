@@ -288,10 +288,16 @@ type queryGroupState struct {
 	// Slot it was on and how many rounds in a row have failed on that Slot.
 	// Cleared by a healthy completion, like everything else about a run.
 	lastError *LastError
-	// lastHealthyAt is when this process last saw a healthy completion. Not
-	// cleared by resetRun -- it is what the next run's recovery is judged
-	// against -- and zero until the first, which a restored object is.
+	// lastHealthyAt is when the object last completed healthily as far as
+	// this process can vouch: a round it watched, or the healthy round the
+	// commit recorded and it was restored from. Not cleared by resetRun --
+	// it is what the next run's recovery is judged against -- and zero when
+	// neither is known.
 	lastHealthyAt time.Time
+	// restoredRound is the persisted summary of the last committed round the
+	// object was restored from, published on the row until this process
+	// completes a round of its own, when the row speaks for itself.
+	restoredRound *RestoredRound
 	// seenRevisions is the snapshot/query/schedule triple the latest
 	// observation of this object carried; completedRevisions the triple at
 	// the last completed round; configChanged whether the two differed when
@@ -610,8 +616,9 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// Remembered, not counted: this is context for an anomaly the outcome
 		// paths decide on. Treating a failure as conclusive on its own would
 		// make a retried transient look like a determined verdict.
+		seen := at
 		state.lastFailure = &FailureRef{Stage: failure.Stage, Category: failure.Category,
-			Code: failure.Code, Detail: failure.Detail}
+			Code: failure.Code, Detail: failure.Detail, At: &seen}
 		state.lastFailureSlot = trace.EvaluationTime
 		if internalFailure(failure.Category) {
 			copy := *state.lastFailure
@@ -650,6 +657,9 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	case completion != "":
 		state.determined = true
 		state.lastCompleted = completion
+		// A round completed in this process speaks for the object; the
+		// summary it was restored from is history now.
+		state.restoredRound = nil
 		state.configChanged = state.completedRevisions.known() && state.seenRevisions.known() &&
 			state.seenRevisions != state.completedRevisions
 		state.completedRevisions = state.seenRevisions
@@ -860,6 +870,7 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.failingSince = time.Time{}
 	state.lastError = nil
 	state.internal = nil
+	state.restoredRound = nil
 	// The window's progress counters reset with the coverage they compare
 	// against: a round with no short window clears them where it clears
 	// state.coverage, so nothing is left for this to do.
@@ -1012,6 +1023,7 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 			LastError:     state.lastError,
 			LastHealthyAt: state.lastHealthyAt,
 			ConfigChanged: state.configChanged,
+			Restored:      state.restoredRound,
 		}
 		if anomaly.Kind == "" && state.queryCooldown != nil {
 			anomaly.Kind = KindQueryCooldown

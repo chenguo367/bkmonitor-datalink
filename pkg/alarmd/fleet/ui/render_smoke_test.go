@@ -71,6 +71,17 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		anomaly("qg-restored", func(item *fleet.Anomaly) {
 			item.SinceFrom = fleet.SinceRestoredLastFull
 		}),
+		// Restored from the commit's summary of the last round before this
+		// process took over: the cause is that round's, the clocks are the
+		// commit's, and the row says so.
+		anomaly("qg-restored-with-cause", func(item *fleet.Anomaly) {
+			item.SinceFrom = fleet.SinceRestoredLastFull
+			item.Cause, item.CauseReason = "", "QUERY_TIMEOUT"
+			item.ReasonSince, item.ReasonLastAt = at.Add(-4*time.Minute), at.Add(-4*time.Minute)
+			item.Restored = &fleet.RestoredRound{Slot: at.Add(-5 * time.Minute), CompletedAt: at.Add(-4 * time.Minute),
+				Kind: "COMPLETED_WITH_UNAVAILABLE", ReasonCode: "QUERY_TIMEOUT", SnapshotRevision: "s1"}
+			item.Wake = &fleet.WakeFacts{Known: true, DueAt: at.Add(3 * time.Minute), IntervalSeconds: 60}
+		}),
 		anomaly("qg-preexisting", func(item *fleet.Anomaly) {
 			item.SinceFrom = fleet.SinceProcessStart
 		}),
@@ -95,6 +106,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			item.ReasonCode = "error"
 			item.LastError = &fleet.LastError{Text: "alarmd state: gap guard conflict: expected 41 got 43",
 				Type: "*errors.errorString", EvaluationTime: at.Add(-3 * time.Minute).Unix(), At: at.Add(-time.Minute), Attempts: 3}
+			// The failing round is the latest round: the tracker stamps both
+			// clocks from the same observation.
+			item.ReasonLastAt = item.LastError.At
 		}),
 		anomaly("qg-blocked", func(item *fleet.Anomaly) {
 			item.Kind, item.ReasonCode, item.Strategies = "BLOCKED_RUN", "source_blocked", nil
@@ -107,7 +121,17 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			item.ReasonCode = "error"
 			item.LastError = &fleet.LastError{Text: "alarmd progress: commit: LOADING Redis is loading the dataset in memory",
 				Type: "*fmt.wrapError", EvaluationTime: at.Add(-2 * time.Minute).Unix(), At: at.Add(-90 * time.Second), Attempts: 2, Operation: "commit"}
+			item.ReasonLastAt = item.LastError.At
 			item.LastHealthyAt = at.Add(-time.Hour)
+		}),
+		// The same error kept from an earlier round on an object whose latest
+		// round ended with a degraded completion: the current reading must not
+		// borrow the old Redis words as this round's dependency, nor call the
+		// round that just ended a retry.
+		anomaly("qg-stale-error", func(item *fleet.Anomaly) {
+			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "QUERY_TIMEOUT"
+			item.LastError = &fleet.LastError{Text: "alarmd progress: commit: redis: connection pool timeout",
+				Type: "*fmt.wrapError", EvaluationTime: at.Add(-20 * time.Minute).Unix(), At: at.Add(-20 * time.Minute), Attempts: 1, Operation: "commit"}
 		}),
 		anomaly("qg-cooldown", func(item *fleet.Anomaly) {
 			item.Kind = "QUERY_COOLDOWN"
@@ -698,6 +722,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// step from the backend that answered.
 		{"BLOCKED qg-redis-commit ::", "卡在哪一步：环节待定位（Redis（控制面与状态存储），由错误原文判定，操作 commit）：类型待定位 error；影响：正在重试（这一轮没完成，会再跑）；最近一次成功 "},
 		{"BLOCKED qg-one-clock ::", "卡在哪一步：数据查询（依赖待定位）：超时 QUERY_TIMEOUT；影响：结果待确认（这一轮结束了但结果不能采信）；本进程没见过它成功完成"},
+		// The persisted summary on the row: the round's reason, its Slot, the
+		// commit's clock, the next round -- said as before this process took
+		// over, so the reason is not taken for a live one.
+		{"RESTORED qg-restored-with-cause ::", "最近一次检测未完整完成：COMPLETED_WITH_UNAVAILABLE（QUERY_TIMEOUT）。结果来自本进程接手前的 17:55:00 轮次（提交于 17:56:00）；下一轮预计 18:03:00"},
+		{"BLOCKED qg-stale-error ::", "卡在哪一步：数据查询（依赖待定位）：超时 QUERY_TIMEOUT；影响：结果待确认（这一轮结束了但结果不能采信）；本进程没见过它成功完成"},
 		{"BLOCKED qg-losing-now ::", "卡在哪一步：调度接管（alarmd 自身（预算、截止、定义），由原因码判定）：容量不足 GAP_SKIPPED；影响：确认漏检（跳过记录已持久化，那段不补）"},
 		{"BLOCKED qg-rejected ::", "卡在哪一步：数据查询（查询后端，由原因码判定）：被拒绝 "},
 		{"CHECKS ::", "6 个对象命中程序缺陷（3 种），上报"},
@@ -711,7 +740,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The timeout and the short old-series window are not the data side's
 		// until the query path and the fetch are ruled out: both are here, not
 		// under governance.
-		{"PENDING ::", "查询没有得到应答，3 个对象受影响（2 种症状，1 条策略）——客户端超时或 5xx，查询预算、网络、后端耗时哪一环还分不出"},
+		{"PENDING ::", "查询没有得到应答，5 个对象受影响（2 种症状，1 条策略）——客户端超时或 5xx，查询预算、网络、后端耗时哪一环还分不出"},
 		{"PENDING ::", "下一步：先查查询链路：超时看查询预算、网络、后端耗时哪一环超了"},
 		{"PENDING ::", "恢复所需的老序列数据不完整（1 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出"},
 		{"PENDING ::", "恢复标准：分出归属后转到对应行（策略侧或 alarmd）；不是等它消失"},
@@ -729,7 +758,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// history, and a record fold does not claim this process never saw
 		// its objects succeed -- that is not the record's question.
 		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过）） · 1 个对象 · 仍然受阻（最近窗口内还在失败） · 首次 17:57:00 · 最近失败 17:57:00 · 1 条策略 · 1 个业务"},
-		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象 · 留有历史影响（对象现在正常，那段没检测的时间不补） · 首次 17:00:00 · 最后一次 17:00:00"},
+		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象 · 留有历史影响（历史检测缺口，那段未检测的时间不补） · 首次 17:00:00 · 最后一次 17:00:00"},
 		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象"},
 		{"GROUPS LOSS ::", "AFTER_RESTART（滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）） · 1 个对象"},
 		{"SKIP qg-restart-catchup ::", "，10 秒周期。滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）"},
@@ -823,7 +852,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// none), and one retained record made an hour ago.
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
-		"需要处理：alarmd 已确认 9 类（16 个对象，去重）；待归因 5 类（15 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"需要处理：alarmd 已确认 9 类（16 个对象，去重）；待归因 5 类（17 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
 		"另有 1 个是滚动后的追赶漏检（副本启动 5 分钟内），看它还有没有新增",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
@@ -1337,6 +1366,7 @@ for (const row of data.anomalies) {
   if (row.last_error) { console.log('ERR ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.internal_failure) { console.log('INTERNAL ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.blocked) { console.log('BLOCKED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.restored) { console.log('RESTORED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the

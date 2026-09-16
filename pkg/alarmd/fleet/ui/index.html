@@ -681,7 +681,7 @@ var RECOVERY_STATE = {
   RECOVERING: '正在恢复（窗口内没有新失败；轮次在结束或只是迟到，结果还没补齐）',
   UNCONFIRMED: '恢复待确认（窗口内没有新失败，也没观察到任何一轮成功——不算已恢复）',
   RECOVERED: '已恢复（每个对象都在最近一次失败之后成功完成过）',
-  HISTORICAL: '留有历史影响（对象现在正常，那段没检测的时间不补）'
+  HISTORICAL: '留有历史影响（历史检测缺口，那段未检测的时间不补）'
 };
 
 // A problem's facts on its fold: the state, what is overdue and retrying
@@ -1709,6 +1709,21 @@ function objectRow(anomaly) {
       + (lastError.attempts > 1 ? '，同一 Slot 连续 ' + lastError.attempts + ' 次' : '')
       + '，' + momentLabel(lastError.at),
       '这一轮返回的原始错误，已脱敏并截断到 256 字。同一 Slot 连续失败次数区分"卡住"和"每轮换一个 Slot 失败"');
+  }
+  // A row rebuilt from the commit's summary of the last round before this
+  // process took over: the cause is that round's, the clock is the commit's,
+  // and the next round is when this process will speak for itself. Said so a
+  // reader does not take a pre-restart reason for a live one -- and so a
+  // restart no longer costs a round of "restored without its cause".
+  if (anomaly.restored) {
+    var restored = anomaly.restored;
+    var configNote = anomaly.config_changed ? '；之后配置已变，这一条是历史' : '';
+    var nextNote = anomaly.wake && anomaly.wake.known && anomaly.wake.due_at ? '；下一轮预计 ' + momentLabel(anomaly.wake.due_at) : '';
+    line('最近一次检测未完整完成', restored.kind + (restored.reason_code ? '（' + restored.reason_code + '）' : '')
+      + '。结果来自本进程接手前的 ' + momentLabel(restored.slot) + ' 轮次'
+      + (restored.completed_at && new Date(restored.completed_at).getTime() > 0 ? '（提交于 ' + momentLabel(restored.completed_at) + '）' : '')
+      + nextNote + configNote,
+      '进度提交时留下的上一轮摘要；本进程跑完一轮后这一行换成自己的');
   }
   // A failure of this deployment's own making beside the finding the column
   // decided: the row is on its line for the column's reason and under
