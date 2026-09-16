@@ -170,9 +170,14 @@ type queryGroupState struct {
 	// Kubernetes' lastTransitionTime does not reset when only the reason
 	// changes; this one does, on purpose, because the reason is what the
 	// reader acts on.
-	reasonKey     string
-	reasonSince   time.Time
-	reasonRuns    int
+	reasonKey   string
+	reasonSince time.Time
+	reasonRuns  int
+	// reasonLastAt is the latest round that said the current reason: the
+	// other end of the reason's clock. reasonSince says when it started
+	// and cannot say whether it is still happening; a group's "still
+	// blocked" is read from this end.
+	reasonLastAt  time.Time
 	queryCooldown *observability.QueryCooldownFacts
 	// demotedSince is when the object entered the pool: the first entered or
 	// extended event with no cooldown standing. Zero outside the pool. It is
@@ -831,6 +836,7 @@ func (tracker *Tracker) noteReason(state *queryGroupState, key string, at time.T
 		state.reasonKey, state.reasonSince, state.reasonRuns = key, at, 0
 	}
 	state.reasonRuns++
+	state.reasonLastAt = at
 }
 
 func (tracker *Tracker) resetRun(state *queryGroupState) {
@@ -998,6 +1004,7 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 			SinceFrom:     state.sinceFrom,
 			FailingSince:  state.failingSince,
 			ReasonSince:   state.reasonSince,
+			ReasonLastAt:  state.reasonLastAt,
 			Consecutive:   state.reasonRuns,
 			Replica:       tracker.replica,
 			Failure:       state.lastFailure,

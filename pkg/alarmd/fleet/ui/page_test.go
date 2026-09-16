@@ -750,6 +750,7 @@ func TestThePageHasWordingForEveryLoadState(t *testing.T) {
 		{"DEPENDENCY", stringsOf(fleet.Dependencies)},
 		{"FAILURE_CLASS", stringsOf(fleet.Classes)},
 		{"EFFECT", stringsOf(fleet.Effects)},
+		{"RECOVERY_STATE", stringsOf(fleet.RecoveryStates)},
 	}
 	for _, table := range tables {
 		found := regexp.MustCompile(`var ` + table.name + ` = \{([\s\S]*?)\};`).FindStringSubmatch(body)
@@ -767,6 +768,29 @@ func TestThePageHasWordingForEveryLoadState(t *testing.T) {
 			if !worded[value] {
 				t.Errorf("%s has no words for %s: the judgment would render as its code", table.name, value)
 			}
+		}
+	}
+}
+
+// Every fold the server can send has words on the page, and the page has
+// words for no fold the server never sends: the fold's name is the first
+// thing a reader sees when a check is opened.
+func TestThePageHasWordingForEveryFold(t *testing.T) {
+	body := string(page)
+	found := regexp.MustCompile(`var GROUP_BY = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+	if found == nil {
+		t.Fatal("the page has no GROUP_BY wording table")
+	}
+	worded := map[string]bool{}
+	for _, entry := range regexp.MustCompile(`([a-z_]+):`).FindAllStringSubmatch(found[1], -1) {
+		worded[entry[1]] = true
+		if !containsString(stringsOf(fleet.GroupBys), entry[1]) {
+			t.Errorf("GROUP_BY has words for %s, which the server never sends", entry[1])
+		}
+	}
+	for _, fold := range fleet.GroupBys {
+		if !worded[string(fold)] {
+			t.Errorf("GROUP_BY has no words for %s", fold)
 		}
 	}
 }
