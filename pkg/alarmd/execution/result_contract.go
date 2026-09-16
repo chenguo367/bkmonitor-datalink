@@ -204,7 +204,20 @@ func validateLevelOutcome(
 			}
 		case LevelOutcomeUnknown:
 			if !loadedSeriesWarmingCompleted(outcome, plan, stateResults, states, gaps) {
-				if _, ok := guardReasons[outcome.ReasonCode]; !ok && disposition != PlanRetryPending {
+				// Either the reason the guard is already up for, or the reason
+				// this round is adding to it. Both are exact -- two named
+				// values, not "any reason" -- and the second one has to be
+				// admitted because it is what the guard covering this outcome
+				// will carry once this round's mutation is applied.
+				//
+				// Only the first used to be, and a round that brought a new
+				// incomplete input to an already guarded Level could then
+				// satisfy neither rule: this one wanted the stored reason and
+				// the exact-guard rule wanted the final marker's, which is the
+				// new one. The Plan failed to evaluate on every Slot for as
+				// long as the input stayed incomplete.
+				if _, ok := guardReasons[outcome.ReasonCode]; !ok && disposition != PlanRetryPending &&
+					!roundGuardCarriesReason(input, plan.Identity, outcome) {
 					return resultContractViolation(codeOutcomeUnknownDropsGuardReason, "UNKNOWN Level outcome does not preserve its active guard reason")
 				}
 				constrained = true
@@ -868,6 +881,18 @@ func partialBinding(input InternalExecution, outcome LevelOutcome, requirement R
 		}
 	}
 	return NamedInputBinding{}, false
+}
+
+// roundGuardCarriesReason reports whether the guard this round proposes for
+// the outcome's Level carries the reason the outcome does.
+//
+// It asks the same function the guard's reason comes from, so the two cannot
+// answer differently: what the proposal will hold is the fold of this round's
+// incomplete inputs for the scope, and this reads that fold rather than the
+// proposal, which is not built yet when a Level outcome is validated.
+func roundGuardCarriesReason(input InternalExecution, plan PlanIdentity, outcome LevelOutcome) bool {
+	proposed, found := RoundGuardReasonForLevel(input.Inputs, plan, outcome.LevelID)
+	return found && proposed == outcome.ReasonCode
 }
 
 func requiredGapScope(binding NamedInputBinding, outcome LevelOutcome) GapScope {

@@ -323,6 +323,21 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// record that converges the guard keeps its own local reason.
 			if guarded, found := durableGuardReasons[o.LevelID]; found && guardStaysActive(o, historyCompleteness[o.LevelID]) {
 				reason = guarded
+				// Unless this round has incomplete inputs of its own for the
+				// Level. Then the guard that ends up covering this outcome is
+				// the one this round proposes, carrying the fold of those
+				// inputs -- so that is the reason the outcome has to carry,
+				// and taking the stored marker's instead is what made the two
+				// disagree on every Slot of an already guarded Level.
+				//
+				// Same function, same inputs, called from the two places the
+				// contract compares. The stored reason stays for a round that
+				// adds nothing: it is still the reason the guard is up.
+				if folded, proposed := execution.RoundGuardReasonForLevel(
+					evaluationBindings(request), due.Identity, o.LevelID,
+				); proposed {
+					reason = folded
+				}
 			}
 		}
 		outcomes[i] = execution.LevelOutcome{Plan: due.Identity, LevelID: o.LevelID, SeriesIdentityDigest: series, Record: execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()}, Outcome: kind, ReasonCode: reason,

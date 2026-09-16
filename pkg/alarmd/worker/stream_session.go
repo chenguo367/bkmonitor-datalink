@@ -1862,33 +1862,9 @@ func completionGapReasons(
 	due execution.DuePlan,
 	bindings []execution.NamedInputBinding,
 ) (map[execution.GapScope]execution.ReasonCode, error) {
-	members := make(map[execution.GapScope][]execution.NamedInputBinding)
-	order := make([]execution.GapScope, 0)
-	for _, binding := range bindings {
-		if binding.Consumer.Plan != due.Identity || binding.Completeness == execution.CompletenessFull {
-			continue
-		}
-		scope := execution.GapScope{LevelID: binding.Consumer.LevelID, HasLevel: binding.Consumer.HasLevel}
-		if _, seen := members[scope]; !seen {
-			order = append(order, scope)
-		}
-		members[scope] = append(members[scope], binding)
-	}
-	if len(order) == 0 {
+	reasons := execution.RoundGapScopeReasons(bindings, due.Identity)
+	if len(reasons) == 0 {
 		return nil, errors.New("alarmd worker: incomplete named input requires a gap scope")
-	}
-	reasons := make(map[execution.GapScope]execution.ReasonCode, len(order))
-	for _, scope := range order {
-		// The reason this is a fold and not a choice is what the refusal cost.
-		// Two inputs of one Level failing differently -- one QUERY_UNAVAILABLE,
-		// one QUERY_TIMEOUT, which a backend outage produces on every round --
-		// left every candidate reason unable to satisfy both comparisons, and
-		// the Plan's whole evaluation was refused for as long as that lasted.
-		folded := make([]string, 0, len(members[scope]))
-		for _, input := range members[scope] {
-			folded = append(folded, string(input.ReasonCode))
-		}
-		reasons[scope] = execution.ReasonCode(contract.FoldGapReason(folded))
 	}
 	return reasons, nil
 }
