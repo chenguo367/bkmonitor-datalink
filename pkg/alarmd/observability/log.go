@@ -217,6 +217,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		// decision". The zero is the answer to that question.
 		attributes = append(attributes, slog.Int("no_data_plans", facts.Plans))
 	}
+	if facts := observation.SegmentContent; facts != nil {
+		attributes = append(attributes, slog.String("segment_content", facts.State))
+	}
 	if facts := observation.NoDataSlot; facts != nil {
 		attributes = append(attributes,
 			slog.String("no_data_outcome", facts.Outcome),

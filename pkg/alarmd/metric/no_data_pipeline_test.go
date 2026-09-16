@@ -13,6 +13,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -216,6 +217,69 @@ func hopSeries(t *testing.T, recorder *Recorder) map[string]float64 {
 		for _, series := range family.GetMetric() {
 			for _, pair := range series.GetLabel() {
 				if pair.GetName() == "hop" {
+					read[pair.GetValue()] = series.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return read
+}
+
+// The Segment freshness states each have a label from startup, and each counts
+// under its own.
+//
+// stale is expected to stay at zero on a converged fleet, which is exactly why
+// the label has to exist before anything happens: the reading is "this number
+// never moves", and a number that is absent instead of zero cannot be read that
+// way. unknown is separate from current on purpose -- "could not check" and
+// "checked and it is current" are the two a reader must not confuse.
+func TestEverySegmentContentStateHasALabelAndCountsUnderIt(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{Version: "0.2.9999", Commit: "0123456789abcdef", SchemaVersion: "v3"})
+	read := segmentContentSeries(t, recorder)
+	if len(read) != len(controlplane.SegmentContentStates) {
+		t.Fatalf("states = %+v, want one series per state (%d)", read, len(controlplane.SegmentContentStates))
+	}
+	for _, state := range controlplane.SegmentContentStates {
+		if value, present := read[state]; !present || value != 0 {
+			t.Fatalf("state %q = %v (present=%t), want a reported zero", state, value, present)
+		}
+	}
+
+	ctx := context.Background()
+	for _, state := range []string{
+		controlplane.SegmentContentCurrent, controlplane.SegmentContentCurrent, controlplane.SegmentContentStale,
+	} {
+		recorder.Observe(ctx, observability.Observation{
+			Component: observability.ComponentControlPlane, Stage: observability.StageFrozenPlanGeneration,
+			Result:         observability.ResultSuccess,
+			SegmentContent: &observability.SegmentContentFacts{State: state},
+		})
+	}
+
+	read = segmentContentSeries(t, recorder)
+	if read[controlplane.SegmentContentCurrent] != 2 || read[controlplane.SegmentContentStale] != 1 {
+		t.Fatalf("states = %+v, want two current and one stale", read)
+	}
+	if read[controlplane.SegmentContentUnknown] != 0 {
+		t.Fatalf("unknown = %v, want a reported zero; a comparison that was made must not land there",
+			read[controlplane.SegmentContentUnknown])
+	}
+}
+
+func segmentContentSeries(t *testing.T, recorder *Recorder) map[string]float64 {
+	t.Helper()
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_segment_content_freshness_total" {
+			continue
+		}
+		for _, series := range family.GetMetric() {
+			for _, pair := range series.GetLabel() {
+				if pair.GetName() == "state" {
 					read[pair.GetValue()] = series.GetCounter().GetValue()
 				}
 			}
