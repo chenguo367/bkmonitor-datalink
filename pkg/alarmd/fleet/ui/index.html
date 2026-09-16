@@ -722,7 +722,7 @@ function problemClause(report, group) {
 // positive evidence -- a healthy completion after being listed -- so it is
 // never inferred from an object having left the list.
 function recoveredWords(group) {
-  var when = group.recovered_last ? '，最近一次健康完成 ' + momentLabel(group.recovered_last) : '';
+  var when = group.recovered_last ? '，最近一次确认恢复 ' + momentLabel(group.recovered_last) : '';
   return '已恢复 ' + group.recovered + ' 个（各副本合计）' + when;
 }
 
@@ -1339,7 +1339,7 @@ function renderChecks(checks) {
   }
   if (recoveredObjects) {
     historyParts.push('已恢复：各副本合计 ' + recoveredObjects + ' 个对象（每个对象在自己恢复后的 1 小时内计入，换副本后再恢复会计两次'
-      + (recoveredLast ? '；最近一次健康完成 ' + momentLabel(recoveredLast) : '') + '）');
+      + (recoveredLast ? '；最近一次确认恢复 ' + momentLabel(recoveredLast) : '') + '）');
   }
   text('historyCount', history.length || historyParts.length ? historyParts.join('；') : '没有');
   text('briefTodo', todoSentence(todo, pending, governance, t));
@@ -1873,7 +1873,8 @@ function objectRow(anomaly) {
       : '';
     line('无数据记忆写不进去', (memory.reason || '（存储没给原因）') + measured
       + '；自 ' + momentLabel(memory.first_at) + ' 起被拒 ' + (memory.refusals || 0) + ' 轮，最近 ' + momentLabel(memory.last_at)
-      + (memory.plan && memory.plan.strategy_id ? '；策略 ' + memory.plan.strategy_id : ''),
+      + (memory.plan && memory.plan.strategy_id ? '；策略 ' + memory.plan.strategy_id : '')
+      + (memory.plans > 1 ? '（这个对象还有 ' + (memory.plans - 1) + ' 条策略同样被拒，显示的是最近的一条；每条要各自写成功）' : ''),
       '阈值检测照常跑、结果照发，只是学到的缺失没写下去：记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发。'
       + '这一行只在该 Plan 一次写入落库（stored=true）后消失；没有新拒绝不算恢复');
   }

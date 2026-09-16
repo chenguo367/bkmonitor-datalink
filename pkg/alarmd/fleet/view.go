@@ -247,7 +247,9 @@ type FailureRef struct {
 // compared -- a record a little over the bound and one many times it are
 // different situations, and a bound that moved under an unchanged record a
 // third. Refusals counts the rounds refused since FirstAt; LastAt is the
-// latest. Plan is the strategy whose memory it is.
+// latest. Plan is the strategy whose memory it is. On an object row the
+// refusal shown is the latest among the object's refused Plans and Plans
+// says how many of them are refused; the row's strategies name them all.
 type NoDataMemoryRefusal struct {
 	Reason   string      `json:"reason"`
 	Record   string      `json:"record,omitempty"`
@@ -257,6 +259,7 @@ type NoDataMemoryRefusal struct {
 	LastAt   time.Time   `json:"last_at"`
 	Refusals int         `json:"refusals"`
 	Plan     StrategyRef `json:"plan"`
+	Plans    int         `json:"plans,omitempty"`
 }
 
 // LastError is the last error a round of this object returned.

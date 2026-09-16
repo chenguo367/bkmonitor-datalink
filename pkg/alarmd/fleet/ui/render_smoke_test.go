@@ -796,12 +796,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The problems that recovered within the hour, on the history side:
 		// the count over the lines, and the line with nothing current said
 		// as recovered -- never with the check's sentence over zero objects.
-		{"HISTORY COUNT ::", "；已恢复：各副本合计 101 个对象（每个对象在自己恢复后的 1 小时内计入，换副本后再恢复会计两次；最近一次健康完成 17:54:00）"},
+		{"HISTORY COUNT ::", "；已恢复：各副本合计 101 个对象（每个对象在自己恢复后的 1 小时内计入，换副本后再恢复会计两次；最近一次确认恢复 17:54:00）"},
 		{"HISTORY ::", "已恢复：各副本合计 3 个对象在各自恢复后的 1 小时内（同一对象换副本后再恢复会计两次；现在不在这一行上）——s-42：3 个，失败 17:10:00–17:29:00，恢复 17:30:00"},
 		// The recovered fold of a line that still has objects rides on the
 		// line: in the expanded groups with its count and clocks, and not in
 		// the first-screen sentence, which is about the objects there now.
-		{"GROUPS BLOCKED ::", "结果提交 · Redis（控制面与状态存储） · 不可用 · 已恢复（这一组的对象都在之后成功完成过，现在没有对象在这一组；对象数是各副本观察到的合计） · 已恢复 86 个（各副本合计），最近一次健康完成 17:49:00 · 首次 17:35:00 · 最后一次 17:47:00 · 最近一次成功 17:49:00"},
+		{"GROUPS BLOCKED ::", "结果提交 · Redis（控制面与状态存储） · 不可用 · 已恢复（这一组的对象都在之后成功完成过，现在没有对象在这一组；对象数是各副本观察到的合计） · 已恢复 86 个（各副本合计），最近一次确认恢复 17:49:00 · 首次 17:35:00 · 最后一次 17:47:00 · 最近一次成功 17:49:00"},
 		// The refusal line carries what its demoted object lost there, as the
 		// refusal's consequence and not as capacity.
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\"（1 种回答，1 条策略，1 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错；其中 1 个已降级，不再反复查；其中 1 个在被拒期间还跳过了检测（最近 10 分钟内 1 个）——冷却让旧轮次超出重放范围，首要原因是查询不可用，扩容无用"},

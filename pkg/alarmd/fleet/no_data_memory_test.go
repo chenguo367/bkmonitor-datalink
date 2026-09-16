@@ -145,6 +145,54 @@ func TestAStoredWriteEndsTheRefusalAndIsItsRecovery(t *testing.T) {
 	}
 }
 
+// Two Plans of one object refused, one of them storing: one Plan recovered
+// and an object still listed, naming the Plan still refused -- not the whole
+// object recovered on the strength of the wrong Plan's write. The recovery
+// is recorded when the last refused Plan stores.
+func TestOnePlanStoringDoesNotRecoverAnotherRefusedPlan(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-two"})
+	refuse := func(strategy string, bytes int) {
+		tracker.Observe(ctx, observability.Observation{
+			Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRefused, Result: observability.ResultDegraded,
+			ReasonCode: "STATE_BUDGET_EXCEEDED", Trace: observability.TraceFields{StrategyID: strategy, BusinessID: "2"},
+			NoDataMemoryRefusal: &observability.NoDataMemoryRefusalFacts{Reason: "STATE_BUDGET_EXCEEDED", Record: "NEXT", Bytes: bytes, Limit: 65536},
+		})
+	}
+	store := func(strategy string) {
+		tracker.Observe(ctx, observability.Observation{
+			Component: observability.ComponentState, Stage: observability.StageNoDataMemoryWritten, Result: observability.ResultSuccess,
+			Trace:             observability.TraceFields{StrategyID: strategy, BusinessID: "2"},
+			NoDataMemoryWrite: &observability.NoDataMemoryWriteFacts{Outcome: "APPLIED", Stored: true},
+		})
+	}
+	refuse("s-a", 70000)
+	at.at = at.at.Add(time.Minute)
+	refuse("s-b", 90000)
+	rows := tracker.NoDataMemory()
+	if len(rows) != 1 || rows[0].NoDataMemory.Plans != 2 || len(rows[0].Strategies) != 2 || rows[0].NoDataMemory.Plan.StrategyID != "s-b" || rows[0].Consecutive != 2 || !rows[0].Since.Equal(now) {
+		t.Fatalf("rows = %+v / %+v, want one object with two refused Plans, the latest refusal shown, since the first", rows, rows[0].NoDataMemory)
+	}
+	at.at = at.at.Add(time.Minute)
+	store("s-b")
+	rows = tracker.NoDataMemory()
+	if len(rows) != 1 || rows[0].NoDataMemory.Plans != 1 || rows[0].NoDataMemory.Plan.StrategyID != "s-a" || len(rows[0].Strategies) != 1 || rows[0].Strategies[0].StrategyID != "s-a" {
+		t.Fatalf("rows after one Plan stored = %+v / %+v, want the object still listed for the other Plan", rows, rows[0].NoDataMemory)
+	}
+	if recovered := tracker.Recovered(); len(recovered) != 0 {
+		t.Fatalf("recovered after one of two Plans stored = %+v, want nothing: the object has not recovered", recovered)
+	}
+	at.at = at.at.Add(time.Minute)
+	store("s-a")
+	if rows := tracker.NoDataMemory(); len(rows) != 0 {
+		t.Fatalf("rows after both Plans stored = %+v, want the object gone", rows)
+	}
+	if recovered := tracker.Recovered(); len(recovered) != 1 || recovered[0].Objects != 1 || !recovered[0].LastRecovery.Equal(at.at) {
+		t.Fatalf("recovered after both Plans stored = %+v, want the object recovered at the last Plan's write", recovered)
+	}
+}
+
 // On the report the object is under its own line, on the work list, folded
 // on the store's reason, and counted as this deployment's; the row reads
 // completed for the round and the check for the loss.

@@ -169,10 +169,12 @@ type queryGroupState struct {
 	emptyRuns  int
 	emptySince time.Time
 	sawData    bool
-	// noDataMemory is the last refused absence-memory write among this
-	// object's Plans, with how often and since when. Kept until a write for
-	// the Plan is seen to store, or the process forgets the object.
-	noDataMemory *NoDataMemoryRefusal
+	// noDataMemory is the refused absence-memory write of each of this
+	// object's Plans still refused, by Plan, with how often and since when.
+	// A Plan's entry is kept until a write for that Plan is seen to store;
+	// the object is listed while any entry remains, and recovers when the
+	// last one goes -- one Plan's write storing says nothing about another's.
+	noDataMemory map[StrategyRef]*NoDataMemoryRefusal
 	// reasonKey names the current result and reason as one string, reasonSince
 	// is when that pair first held and reasonRuns how many consecutive rounds
 	// it has held for. It is the object's own clock for "how long has it been
@@ -562,30 +564,38 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// with the store's reason and the size it measured, and it does not
 	// touch the round bookkeeping -- the observation's strategy is still
 	// learned below, since the Plan it names is the one whose memory is lost.
+	plan := StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}
 	if refusal := observation.NoDataMemoryRefusal; refusal != nil {
 		if state.noDataMemory == nil {
-			state.noDataMemory = &NoDataMemoryRefusal{FirstAt: at}
+			state.noDataMemory = map[StrategyRef]*NoDataMemoryRefusal{}
 		}
-		memory := state.noDataMemory
+		memory := state.noDataMemory[plan]
+		if memory == nil {
+			memory = &NoDataMemoryRefusal{FirstAt: at, Plan: plan}
+			state.noDataMemory[plan] = memory
+		}
 		memory.Reason, memory.Record, memory.Bytes, memory.Limit = refusal.Reason, refusal.Record, refusal.Bytes, refusal.Limit
 		memory.LastAt = at
 		memory.Refusals++
-		if trace.StrategyID != "" {
-			memory.Plan = StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}
-		}
 	}
-	// A write that went through ends the refusal: the store now holds what
-	// the round wanted written, which is the one positive fact recovery is
-	// read from here. Stored is the emitter's word for it, carried rather
+	// A write that went through ends that Plan's refusal: the store now holds
+	// what the round wanted written, which is the one positive fact recovery
+	// is read from here. Stored is the emitter's word for it, carried rather
 	// than derived from the outcome -- ALREADY_APPLIED is stored and
 	// STALE_VERSION is not, and the one place that decides is the emitter.
 	// A write that did not store is not a refusal either: those have their
 	// own stage, and a stale or conflicting write is a different situation
-	// from a record the store will not take.
-	if write := observation.NoDataMemoryWrite; write != nil && write.Stored && state.noDataMemory != nil &&
-		(trace.StrategyID == "" || state.noDataMemory.Plan.StrategyID == "" || state.noDataMemory.Plan.StrategyID == trace.StrategyID) {
-		tracker.noteMemoryRecovery(queryGroup, state, at)
-		state.noDataMemory = nil
+	// from a record the store will not take. Only the matching Plan's entry
+	// goes: two Plans of one object refused and one of them storing is one
+	// Plan recovered and an object still listed, and read on, it was the
+	// whole object recovered on the strength of the wrong Plan's write.
+	if write := observation.NoDataMemoryWrite; write != nil && write.Stored && state.noDataMemory[plan] != nil {
+		if len(state.noDataMemory) == 1 {
+			tracker.noteMemoryRecovery(queryGroup, state, at)
+			state.noDataMemory = nil
+		} else {
+			delete(state.noDataMemory, plan)
+		}
 	}
 	// Recorded before anything else, because it is not a round and none of the
 	// round bookkeeping below applies to it. The object is very likely running
@@ -1296,7 +1306,7 @@ func (tracker *Tracker) NoDataMemory() []Anomaly {
 	defer tracker.mu.Unlock()
 	anomalies := make([]Anomaly, 0)
 	for queryGroup, state := range tracker.groups {
-		if state.noDataMemory == nil {
+		if len(state.noDataMemory) == 0 {
 			continue
 		}
 		anomalies = append(anomalies, tracker.memoryRowOf(queryGroup, state))
@@ -1310,20 +1320,36 @@ func (tracker *Tracker) NoDataMemory() []Anomaly {
 	return anomalies
 }
 
-// memoryRowOf is the object's refused-memory row as the list publishes it.
-// Caller holds the lock and has checked the refusal is there.
+// memoryRowOf is the object's refused-memory row as the list publishes it:
+// one row per object, carrying the latest refusal among its Plans whole and
+// how many Plans are refused, since the earliest, with every refused Plan as
+// a strategy. Caller holds the lock and has checked a refusal is there.
 func (tracker *Tracker) memoryRowOf(queryGroup string, state *queryGroupState) Anomaly {
-	memory := *state.noDataMemory
-	anomaly := Anomaly{
+	var latest *NoDataMemoryRefusal
+	first := time.Time{}
+	refusals := 0
+	strategies := make([]StrategyRef, 0, len(state.noDataMemory))
+	for plan, memory := range state.noDataMemory {
+		if latest == nil || memory.LastAt.After(latest.LastAt) {
+			latest = memory
+		}
+		if first.IsZero() || memory.FirstAt.Before(first) {
+			first = memory.FirstAt
+		}
+		refusals += memory.Refusals
+		if plan.StrategyID != "" {
+			strategies = append(strategies, plan)
+		}
+	}
+	memory := *latest
+	memory.Plans = len(state.noDataMemory)
+	sortStrategies(strategies)
+	return Anomaly{
 		QueryGroup: queryGroup, Kind: KindNoDataMemoryRefused, ReasonCode: memory.Reason,
-		Since: memory.FirstAt, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
-		ReasonSince: memory.FirstAt, ReasonLastAt: memory.LastAt, Consecutive: memory.Refusals,
-		NoDataMemory: &memory,
+		Since: first, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
+		ReasonSince: first, ReasonLastAt: memory.LastAt, Consecutive: refusals,
+		NoDataMemory: &memory, Strategies: strategies,
 	}
-	if memory.Plan.StrategyID != "" {
-		anomaly.Strategies = []StrategyRef{memory.Plan}
-	}
-	return anomaly
 }
 
 // GapSkips is every object this replica has seen skip a run of Slots because
