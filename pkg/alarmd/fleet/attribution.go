@@ -148,6 +148,9 @@ func attribute(anomaly *Anomaly, at time.Time) {
 	// counts cannot disagree about which of these was actually decided.
 	anomaly.Unclassified = unclassified
 	anomaly.Attribution = attributionOf(*anomaly)
+	// And the failure in the one shape every failure is read in, from the
+	// same evidence and the same code the check was decided on.
+	anomaly.Blocked = blockedOf(*anomaly, schedule)
 }
 
 // OursCount returns how many of these count against the deployment.

@@ -283,6 +283,10 @@ type queryGroupState struct {
 	// Slot it was on and how many rounds in a row have failed on that Slot.
 	// Cleared by a healthy completion, like everything else about a run.
 	lastError *LastError
+	// lastHealthyAt is when this process last saw a healthy completion. Not
+	// cleared by resetRun -- it is what the next run's recovery is judged
+	// against -- and zero until the first, which a restored object is.
+	lastHealthyAt time.Time
 	// seenRevisions is the snapshot/query/schedule triple the latest
 	// observation of this object carried; completedRevisions the triple at
 	// the last completed round; configChanged whether the two differed when
@@ -625,7 +629,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			attempts = state.lastError.Attempts + 1
 		}
 		state.lastError = &LastError{Text: text, Type: fmt.Sprintf("%T", observation.Err),
-			EvaluationTime: trace.EvaluationTime, At: at, Attempts: attempts}
+			EvaluationTime: trace.EvaluationTime, At: at, Attempts: attempts, Operation: string(observation.Operation)}
 	}
 	if trace.StrategyID != "" && len(state.strategies) < maxStrategiesPerQueryGroup {
 		state.strategies[StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}] = struct{}{}
@@ -661,6 +665,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		}
 		if healthyCompletion(completion) {
 			tracker.resetRun(state)
+			state.lastHealthyAt = at
 			return
 		}
 		// A degraded completion is still a round that ended and moved the
@@ -985,6 +990,7 @@ func (tracker *Tracker) listed(column string) []Anomaly {
 			Failure:       state.lastFailure,
 			Internal:      state.internal,
 			LastError:     state.lastError,
+			LastHealthyAt: state.lastHealthyAt,
 			ConfigChanged: state.configChanged,
 		}
 		if anomaly.Kind == "" && state.queryCooldown != nil {

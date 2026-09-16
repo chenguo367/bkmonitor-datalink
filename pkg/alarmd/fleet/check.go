@@ -922,6 +922,9 @@ func skippedRows(view *View, listed map[string]struct{}, now time.Time) ([]Anoma
 			Strategies: skip.Strategies, Loss: loss}
 		item.Finding = Finding{Check: check, Group: string(loss), Owner: checkAnswers[check].Owner}
 		item.Attribution = attributionOf(item)
+		// The record in the one shape every failure is read in: a persisted
+		// skip, which is the confirmed loss.
+		item.Blocked = blockedOf(item, item.Finding.Schedule)
 		rows = append(rows, item)
 	})
 	sort.Slice(rows, func(i, j int) bool { return rows[i].QueryGroup < rows[j].QueryGroup })

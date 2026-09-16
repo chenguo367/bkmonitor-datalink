@@ -526,6 +526,59 @@ var FAILURE_CATEGORY = {
   evaluation: '评估失败'
 };
 
+// The one shape every failure is read in, from the server's Blocked on the
+// row: which step, which dependency, what kind, what it did. Held to the Go
+// lists by a test. The dependency line says how it was decided -- by the
+// code or by the error's own words -- and "待定位" is an answer, not a blank:
+// a query timeout does not say whether the time went to the backend, the
+// network or the budget, and the row must not point at one of them.
+var STAGE = {
+  CONFIG: '配置获取',
+  SCHEDULE: '调度接管',
+  QUERY: '数据查询',
+  EVALUATE: '检测计算',
+  COMMIT: '结果提交',
+  UNLOCATED: '环节待定位'
+};
+var DEPENDENCY = {
+  REDIS: 'Redis（控制面与状态存储）',
+  QUERY_BACKEND: '查询后端',
+  CONTROL_SOURCE: '策略源',
+  KAFKA: 'Kafka（输出）',
+  NONE: 'alarmd 自身（预算、截止、定义）',
+  UNLOCATED: '依赖待定位'
+};
+var FAILURE_CLASS = {
+  TIMEOUT: '超时',
+  UNAVAILABLE: '不可用',
+  REFUSED: '被拒绝',
+  CAPACITY: '容量不足',
+  CONTRACT: '内部状态冲突',
+  CONFIG: '定义不可算',
+  RETENTION: '保留期不足',
+  UNLOCATED: '类型待定位'
+};
+var EFFECT = {
+  DELAYED: '只是延迟，还没丢',
+  RETRYING: '正在重试（这一轮没完成，会再跑）',
+  SKIPPED: '确认漏检（跳过记录已持久化，那段不补）',
+  UNCONFIRMED: '结果待确认（这一轮结束了但结果不能采信）'
+};
+
+// One sentence for the row: where it is stuck, talking to what, what kind,
+// and what it did to the detection -- then the last success, or that this
+// process never saw one, which is the fact a recovery is judged on.
+function blockedWords(blocked) {
+  var evidence = blocked.dependency_evidence === 'code' ? '，由原因码判定'
+    : blocked.dependency_evidence === 'text' ? '，由错误原文判定' : '';
+  return (STAGE[blocked.stage] || blocked.stage)
+    + '（' + (DEPENDENCY[blocked.dependency] || blocked.dependency) + evidence
+    + (blocked.operation ? '，操作 ' + blocked.operation : '') + '）'
+    + '：' + (FAILURE_CLASS[blocked.class] || blocked.class) + (blocked.code ? ' ' + blocked.code : '')
+    + '；影响：' + (EFFECT[blocked.effect] || blocked.effect)
+    + (blocked.last_success_at ? '；最近一次成功 ' + momentLabel(blocked.last_success_at) : '；本进程没见过它成功完成');
+}
+
 // What the timestamp in the previous column actually is. Three of these are not
 // a start time at all, and the column renders identically either way, so the
 // wording is the only thing carrying the difference.
@@ -1553,6 +1606,13 @@ function objectRow(anomaly) {
     line('后端症状', symptomText(f.detail), f.detail);
     line('失败在哪', FAILURE_CATEGORY[f.category] || f.category,
       ['阶段 ' + f.stage, '分类 ' + f.category, f.code ? '代码 ' + f.code : ''].filter(Boolean).join('\n'));
+  }
+  // The same failure in the shape every failure is read in, so a Redis
+  // restart, a backend timeout and an uncompilable strategy answer the same
+  // question on the same line.
+  if (anomaly.blocked) {
+    line('卡在哪一步', blockedWords(anomaly.blocked),
+      '环节、依赖、类型、影响，由服务端按同一个原因码判定；"待定位"是结论——证据不足以指向某个依赖或环节时不猜');
   }
   // The error's own words, without opening a window and waiting for one
   // more failure. The classification lines above say what kind; this says

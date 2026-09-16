@@ -745,6 +745,11 @@ func TestThePageHasWordingForEveryLoadState(t *testing.T) {
 		{"LOSS_STATE", stringsOf(fleet.LossStates)},
 		{"BOTTLENECK", stringsOf(fleet.Bottlenecks)},
 		{"LOAD_LIMIT", stringsOf(fleet.LoadLimits)},
+		// And the one shape every failure is read in.
+		{"STAGE", stringsOf(fleet.Stages)},
+		{"DEPENDENCY", stringsOf(fleet.Dependencies)},
+		{"FAILURE_CLASS", stringsOf(fleet.Classes)},
+		{"EFFECT", stringsOf(fleet.Effects)},
 	}
 	for _, table := range tables {
 		found := regexp.MustCompile(`var ` + table.name + ` = \{([\s\S]*?)\};`).FindStringSubmatch(body)

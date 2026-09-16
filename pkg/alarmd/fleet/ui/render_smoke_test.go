@@ -96,6 +96,16 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		anomaly("qg-blocked", func(item *fleet.Anomaly) {
 			item.Kind, item.ReasonCode, item.Strategies = "BLOCKED_RUN", "source_blocked", nil
 		}),
+		// A round whose commit failed while the state store was reloading,
+		// in the words the store's client wrote, after an hour of healthy
+		// completions: the reading names Redis from the text, the commit
+		// operation, the retry, and the last success.
+		anomaly("qg-redis-commit", func(item *fleet.Anomaly) {
+			item.ReasonCode = "error"
+			item.LastError = &fleet.LastError{Text: "alarmd progress: commit: LOADING Redis is loading the dataset in memory",
+				Type: "*fmt.wrapError", EvaluationTime: at.Add(-2 * time.Minute).Unix(), At: at.Add(-90 * time.Second), Attempts: 2, Operation: "commit"}
+			item.LastHealthyAt = at.Add(-time.Hour)
+		}),
 		anomaly("qg-cooldown", func(item *fleet.Anomaly) {
 			item.Kind = "QUERY_COOLDOWN"
 			item.QueryCooldown = &observability.QueryCooldownFacts{
@@ -677,7 +687,16 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The internal conflict beside the refusal, on the row and as a
 		// second fact on the DEFECT line -- the refusal still has the object.
 		{"INTERNAL qg-rejected ::", "内部错误：GAP_SCOPE_REASON_CONFLICT（input_a=QUERY_UNAVAILABLE input_b=QUERY_TIMEOUT），阶段 execute"},
-		{"CHECKS ::", "5 个对象命中程序缺陷（3 种），上报"},
+		// The one shape every failure is read in, on rows of four different
+		// shapes: the dependency from the error's words with the operation
+		// and the last success; a timeout that names no dependency and says
+		// so; a persisted skip as a confirmed loss; a refusal at the query
+		// step from the backend that answered.
+		{"BLOCKED qg-redis-commit ::", "卡在哪一步：环节待定位（Redis（控制面与状态存储），由错误原文判定，操作 commit）：类型待定位 error；影响：正在重试（这一轮没完成，会再跑）；最近一次成功 "},
+		{"BLOCKED qg-one-clock ::", "卡在哪一步：数据查询（依赖待定位）：超时 QUERY_TIMEOUT；影响：结果待确认（这一轮结束了但结果不能采信）；本进程没见过它成功完成"},
+		{"BLOCKED qg-losing-now ::", "卡在哪一步：调度接管（alarmd 自身（预算、截止、定义），由原因码判定）：容量不足 GAP_SKIPPED；影响：确认漏检（跳过记录已持久化，那段不补）"},
+		{"BLOCKED qg-rejected ::", "卡在哪一步：数据查询（查询后端，由原因码判定）：被拒绝 "},
+		{"CHECKS ::", "6 个对象命中程序缺陷（3 种），上报"},
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\""},
 		{"PENDING ::", "证据：分组的后端回答只有状态码/状态词（非 200 的响应正文当前不保留，\"最近一次错误\"是结束这一轮的 alarmd 错误，不是后端原文）"},
 		// The timeout and the short old-series window are not the data side's
@@ -779,7 +798,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// none), and one retained record made an hour ago.
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
-		"需要处理：alarmd 已确认 9 类（15 个对象，去重）；待归因 5 类（15 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"需要处理：alarmd 已确认 9 类（16 个对象，去重）；待归因 5 类（15 个对象）；业务侧已确认 3 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
 		"另有 1 个是滚动后的追赶漏检（副本启动 5 分钟内），看它还有没有新增",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
@@ -1281,6 +1300,7 @@ for (const row of data.anomalies) {
   if (row.skip) { console.log('SKIP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.last_error) { console.log('ERR ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.internal_failure) { console.log('INTERNAL ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.blocked) { console.log('BLOCKED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the
