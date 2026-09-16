@@ -704,6 +704,8 @@ func queryFreeGapAlreadyProtects(
 		if !scope.Scope.HasLevel {
 			// A committed warmup has not released protection until the full
 			// recovery window is satisfied. Preserve that same-Slot evidence.
+			// Valid persisted WARMING scopes always have observed < required;
+			// keep that invariant explicit here, not as a substitute for store validation.
 			protected := scope.Status == execution.GapStatusGapped ||
 				(scope.Status == execution.GapStatusWarming && scope.ObservedFullSlots < scope.RequiredFullSlots)
 			return protected &&
