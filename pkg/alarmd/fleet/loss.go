@@ -94,8 +94,10 @@ func (consequence *Consequence) note(at, now time.Time) {
 }
 
 // demotedObject is one object in the demoted column -- the pool a query
-// cooldown holds: the line it is under, and since when it has been
-// anomalous.
+// cooldown holds: the line it is under, and since when its record is the
+// cooldown's doing: the pool entry where the row carries it, the anomaly's
+// onset where it does not (a publisher older than the field), which is
+// earlier and errs on the refusal's side.
 type demotedObject struct {
 	line  Check
 	since time.Time
@@ -104,7 +106,11 @@ type demotedObject struct {
 func demotedObjects(view *View) map[string]demotedObject {
 	under := map[string]demotedObject{}
 	for _, anomaly := range view.Demoted {
-		under[anomaly.QueryGroup] = demotedObject{line: anomaly.Finding.Check, since: anomaly.Since}
+		since := anomaly.DemotedSince
+		if since.IsZero() {
+			since = anomaly.Since
+		}
+		under[anomaly.QueryGroup] = demotedObject{line: anomaly.Finding.Check, since: since}
 	}
 	return under
 }
@@ -115,16 +121,16 @@ func demotedObjects(view *View) map[string]demotedObject {
 // lines, the rows and the arithmetic count the same records the same way.
 //
 // A record is the cooldown's consequence only if it was made after the
-// object's anomaly began: an object that lost rounds to the replay bound
-// before it ever entered the pool has a record older than that, and
-// folding it into the refusal would hide a loss the refusal did not cause.
-// The anomaly's onset is the bound the row carries; the pool is entered
-// some failures later, so a record made between the two is still folded --
-// an approximation on the side of the refusal, and a record keeps only the
-// latest skip per object, so on a demoted object it is almost always the
-// cooldown's. A demoted object under no line -- which the tracker does not
-// produce -- is read by its age like any other, rather than counted on a
-// line that does not exist.
+// object entered the pool: an object that lost rounds to the replay bound
+// before it ever entered has an older record, and folding it into the
+// refusal would hide a loss the refusal did not cause. The row carries the
+// pool entry; a row from a publisher older than that field carries only
+// the anomaly's onset, which is earlier, so a record made between onset and
+// entry is then still folded -- an approximation on the side of the
+// refusal, and a record keeps only the latest skip per object, so on a
+// demoted object it is almost always the cooldown's. A demoted object under
+// no line -- which the tracker does not produce -- is read by its age like
+// any other, rather than counted on a line that does not exist.
 func lossRecords(view *View, now time.Time, visit func(queryGroup string, check, line Check, code string, skip SkippedSpan, loss Loss)) {
 	if view == nil {
 		return
