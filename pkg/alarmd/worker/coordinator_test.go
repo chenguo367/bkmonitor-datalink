@@ -709,7 +709,7 @@ func TestSlotExecutionCoordinatorShortCircuitsAlreadyAppliedState(t *testing.T) 
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, []string{
-		"query", "gap_load", "state_load", "sequence", "admission_initial", "gap_after", "admission_progress", "progress_commit",
+		"query", "gap_load", "state_load", "sequence", "admission_initial", "admission_progress", "progress_commit",
 	})
 	var reused int
 	for _, observed := range *fixture.observations {

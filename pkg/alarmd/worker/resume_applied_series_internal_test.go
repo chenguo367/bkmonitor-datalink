@@ -71,14 +71,13 @@ func TestResumedSeriesKeepsPersistedCompletionFacts(t *testing.T) {
 	}
 }
 
-func TestResumedSeriesContinuesOnlyUncommittedGap(t *testing.T) {
+func TestResumedSeriesNeverInfersGapRecovery(t *testing.T) {
 	for _, name := range []string{"same version", "same version different schedule", "newer", "older warm", "older clear", "older changed schedule", "same tombstone", "older tombstone"} {
 		t.Run(name, func(t *testing.T) {
 			header, due, view := resumeFixture(t)
 			gap := execution.GapGuardSnapshot{Identity: execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}, Status: execution.GapFound, MarkerRevision: 4, LastScheduleRevision: due.ScheduleRevision, PersistedApplyVersion: view.PersistedApplyVersion,
 				Scopes: []execution.GapScopeState{{Status: execution.GapStatusWarming, RequiredFullSlots: 3, ObservedFullSlots: 1, ReasonCode: "GAP_SKIPPED"}}}
 			wantErr := false
-			wantKind := execution.GapMutationKind("")
 			switch name {
 			case "same version different schedule":
 				gap.LastScheduleRevision = "different"
@@ -88,16 +87,13 @@ func TestResumedSeriesContinuesOnlyUncommittedGap(t *testing.T) {
 				wantErr = true
 			case "older warm":
 				gap.PersistedApplyVersion.StateApplyEpoch--
-				wantKind = execution.GapWarmup
 			case "older clear":
 				gap.PersistedApplyVersion.StateApplyEpoch--
 				gap.Scopes[0].ObservedFullSlots = 2
-				wantKind = execution.GapClear
 			case "older changed schedule":
 				gap.PersistedApplyVersion.StateApplyEpoch--
 				gap.LastScheduleRevision = "old"
 				gap.Scopes[0].ObservedFullSlots = 2
-				wantKind = execution.GapWarmup
 			case "same tombstone":
 				gap.Status = execution.GapClearedTombstone
 				gap.Scopes = nil
@@ -121,15 +117,9 @@ func TestResumedSeriesContinuesOnlyUncommittedGap(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			mutations := result.Plans[0].GuardAfterState
-			if wantKind == "" {
-				if len(mutations) != 0 {
-					t.Fatalf("committed gap advanced twice: %+v", mutations)
-				}
-				return
-			}
-			if len(mutations) != 1 || mutations[0].Scopes[0].Kind != wantKind || mutations[0].ExpectedMarkerRevision != 4 {
-				t.Fatalf("gap continuation=%+v want %s", mutations, wantKind)
+			plan := result.Plans[0]
+			if len(plan.GuardBeforeEvents) != 0 || len(plan.GuardAfterState) != 0 {
+				t.Fatalf("resume inferred a recovery decision that was not persisted: before=%+v after=%+v", plan.GuardBeforeEvents, plan.GuardAfterState)
 			}
 		})
 	}

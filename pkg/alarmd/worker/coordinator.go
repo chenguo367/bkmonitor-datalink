@@ -885,12 +885,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		// which never enter the evaluator.
 		planResult.GuardBeforeEvents = uncommittedGapMutations(loadedGaps, planResult.GuardBeforeEvents)
 		planResult.GuardAfterState = uncommittedGapMutations(loadedGaps, planResult.GuardAfterState)
-		if len(planResult.GuardBeforeEvents) != 0 {
-			// An incomplete sibling takes precedence over a resumed series'
-			// recovery proposal. This Slot must not first protect the Plan and
-			// then warm or clear that same committed gap statement.
-			planResult.GuardAfterState = nil
-		}
+
 		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardBeforeEvents); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}

@@ -79,26 +79,9 @@ func resumedSeriesResult(header execution.InternalExecutionHeader, due execution
 			}
 			// This Slot already committed its gap update; do not count it twice.
 		case execution.ApplyVersionPersistedOlder:
-			if gap.Status == execution.GapFound {
-				scopes := make([]execution.GapScopeMutation, len(gap.Scopes))
-				for i, current := range gap.Scopes {
-					observed := current.ObservedFullSlots
-					if gap.LastScheduleRevision != due.ScheduleRevision {
-						observed = 0
-					}
-					scopes[i] = execution.GapScopeMutation{Scope: current.Scope, Kind: execution.GapClear}
-					if observed+1 < current.RequiredFullSlots {
-						scopes[i].Kind = execution.GapWarmup
-						scopes[i].ReasonCode = current.ReasonCode
-						scopes[i].RequiredFullSlots = current.RequiredFullSlots
-					}
-				}
-				mutation, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{Identity: gap.Identity, ExpectedMarkerRevision: gap.MarkerRevision, ApplyVersion: version, ScheduleRevision: due.ScheduleRevision, Scopes: scopes})
-				if err != nil {
-					return execution.EvaluationResult{}, err
-				}
-				plan.GuardAfterState = []execution.PlanGapMutation{mutation}
-			}
+			// The original recovery decision was not persisted with State.
+			// Its inputs cannot be reconstructed from post-Slot history, so
+			// leave protection intact until a later evaluated Slot advances it.
 		default:
 			return execution.EvaluationResult{}, fmt.Errorf("alarmd worker: resumed Plan gap version is not comparable")
 		}
