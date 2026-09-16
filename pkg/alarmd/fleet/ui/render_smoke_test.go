@@ -86,6 +86,13 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "QUERY_TIMEOUT"
 			item.ReasonSince, item.Consecutive = at.Add(-time.Hour), 60
 		}),
+		// A round failing on the same Slot three times, with the error's own
+		// words: what a reader had to open a window and wait for.
+		anomaly("qg-stuck-slot", func(item *fleet.Anomaly) {
+			item.ReasonCode = "error"
+			item.LastError = &fleet.LastError{Text: "alarmd state: gap guard conflict: expected 41 got 43",
+				Type: "*errors.errorString", EvaluationTime: at.Add(-3 * time.Minute).Unix(), At: at.Add(-time.Minute), Attempts: 3}
+		}),
 		anomaly("qg-blocked", func(item *fleet.Anomaly) {
 			item.Kind, item.ReasonCode, item.Strategies = "BLOCKED_RUN", "source_blocked", nil
 		}),
@@ -543,6 +550,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"ACTION ::", "；之后还有 10 类，按顺序在下面"},
 		// A line whose objects are all in the pool says so, in the pool card's
 		// words, so the two cannot read as different verdicts.
+		{"ERR qg-stuck-slot ::", "最近一次错误：alarmd state: gap guard conflict: expected 41 got 43（*errors.errorString），Slot "},
+		{"ERR qg-stuck-slot ::", "，同一 Slot 连续 3 次，"},
 		{"SENTENCE demoted ::", "351 个对象的策略引用了后端说不存在的表或字段（1 种回答，351 条策略，59 个业务）——后端读了查询并明确拒绝；其中 351 个已降级，不再反复查"},
 	} {
 		if line := lineStarting(text, want.line); !strings.Contains(line, want.says) {
@@ -580,10 +589,10 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		"被挡回 120 轮，其中 118 轮仍按时完成", "1900 个在等下次（33 个在冷却）", "12 个迟到未超一个周期", "1 个接管后还没跑第一轮",
 		// From the server's arithmetic: lines with something on them now, and
 		// distinct objects under them; the record apart. The fixture has 11
-		// lines this reader acts on, 18 distinct objects under them now (15
+		// lines this reader acts on, 19 distinct objects under them now (16
 		// rows plus the 3 the view holds undetermined; the two standings have
 		// none), and one retained record made an hour ago.
-		"需要处理：11 类检查项，当前影响 18 个对象（去重）；曾经漏检 1 个对象另列，最近 1 小时新增 1",
+		"需要处理：11 类检查项，当前影响 19 个对象（去重）；曾经漏检 1 个对象另列，最近 1 小时新增 1",
 		// On time, and on a stale publication: both true at once, and the
 		// first sentence says both.
 		"起没有生效：舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3，连续 120 轮激活失败",
@@ -624,6 +633,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"qg-window-starved", "—", "完成 · HISTORY_WARMING", "3 个窗口 · 短 2 · 空 2 · 新 0 · 连续 40 轮 · 检测用不了 2 个：REQUIRED_VALUE_MISSING"},
 		{"qg-no-data", "—", "无数据 · FULL_EMPTY_COMPLETED", "—"},
 		{"qg-plain", "—", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
+		{"qg-stuck-slot", "— · 卡在 " + at.Add(-3*time.Minute).In(time.Local).Format("15:04:05") + " 这个 Slot，第 3 次失败", "失败 · error", "—"},
 		{"qg-late", "迟到 12 秒", "完成 · HISTORY_WARMING", "—"},
 		{"qg-missed-turn", "超期 4 分 0 秒", "完成 · QUERY_TIMEOUT", "—"},
 		{"qg-never", "接管后未跑", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
@@ -1017,6 +1027,7 @@ for (const row of data.anomalies) {
   const cells = tr.children.map(textOf);
   console.log('ROW ' + row.query_group + ' :: ' + cells.slice(1, 5).join(' | '));
   if (row.skip) { console.log('SKIP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.last_error) { console.log('ERR ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the

@@ -1085,6 +1085,12 @@ function objectRow(anomaly) {
       nowWord += ' ' + elapsedLabel((Date.now() - new Date(wake.due_at).getTime()) / 1000);
     }
   }
+  // A round that keeps failing on one Slot is stuck on it; said here, on
+  // the cell that answers "what is it doing now", with the count.
+  var lastError = anomaly.last_error;
+  if (lastError && lastError.evaluation_time && lastError.attempts > 1) {
+    nowWord += ' · 卡在 ' + momentLabel(lastError.evaluation_time * 1000) + ' 这个 Slot，第 ' + lastError.attempts + ' 次失败';
+  }
   var now = cell(nowWord);
   if (wake && wake.known && wake.interval_seconds) {
     now.title = '周期 ' + elapsedLabel(wake.interval_seconds) + '；到期 ' + momentLabel(wake.due_at)
@@ -1184,6 +1190,16 @@ function objectRow(anomaly) {
     line('后端症状', symptomText(f.detail), f.detail);
     line('失败在哪', FAILURE_CATEGORY[f.category] || f.category,
       ['阶段 ' + f.stage, '分类 ' + f.category, f.code ? '代码 ' + f.code : ''].filter(Boolean).join('\n'));
+  }
+  // The error's own words, without opening a window and waiting for one
+  // more failure. The classification lines above say what kind; this says
+  // what exactly, and which Slot.
+  if (lastError) {
+    line('最近一次错误', lastError.text + (lastError.type ? '（' + lastError.type + '）' : '')
+      + (lastError.evaluation_time ? '，Slot ' + momentLabel(lastError.evaluation_time * 1000) : '')
+      + (lastError.attempts > 1 ? '，同一 Slot 连续 ' + lastError.attempts + ' 次' : '')
+      + '，' + momentLabel(lastError.at),
+      '这一轮返回的原始错误，已脱敏并截断到 256 字。同一 Slot 连续失败次数区分"卡住"和"每轮换一个 Slot 失败"');
   }
   var skip = anomaly.skip;
   if (skip) {
