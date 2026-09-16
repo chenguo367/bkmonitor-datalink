@@ -2494,8 +2494,17 @@ type fakePhaseTwoQueryGroup struct {
 type callbackPhaseTwoQueryGroup struct {
 	run             func(context.Context) (execution.SlotExecutionResult, bool, error)
 	nextReadyAt     func() time.Time
+	nextDeadline    func() time.Time
+	dueBound        func() scheduler.RunnerDueBound
 	operation       execution.Operation
 	beforeAdmission func(execution.Operation)
+}
+
+func (runner *callbackPhaseTwoQueryGroup) NextDeadline() time.Time {
+	if runner.nextDeadline == nil {
+		return time.Time{}
+	}
+	return runner.nextDeadline()
 }
 
 func (runner *callbackPhaseTwoQueryGroup) RunOne(ctx context.Context) (execution.SlotExecutionResult, bool, error) {
@@ -2530,7 +2539,10 @@ func (runner *callbackPhaseTwoQueryGroup) NextReadyAt() time.Time {
 }
 
 func (runner *callbackPhaseTwoQueryGroup) DueBound() scheduler.RunnerDueBound {
-	return scheduler.RunnerDueBound{}
+	if runner.dueBound == nil {
+		return scheduler.RunnerDueBound{}
+	}
+	return runner.dueBound()
 }
 
 func (*callbackPhaseTwoQueryGroup) MaintainLease(ctx context.Context, _, _ time.Duration) error {
