@@ -41,3 +41,20 @@ func TestStateConflictReasonSurvivesWrappers(t *testing.T) {
 		}
 	}
 }
+
+// A conflict on a repeated key says so in its text: the same status from a
+// race with another writer and from a producer that made two statements for
+// one series must not read alike.
+func TestStateConflictErrorNamesARepeatedKey(t *testing.T) {
+	plain := &worker.StateConflictError{Stage: "state apply did not complete", Status: "STATE_VERSION_CONFLICT"}
+	repeated := &worker.StateConflictError{Stage: "state apply did not complete", Status: "STATE_VERSION_CONFLICT", RepeatedKey: true}
+	if plain.Error() == repeated.Error() {
+		t.Fatalf("a repeated-key conflict reads the same as a plain one: %q", plain.Error())
+	}
+	if want := "state apply did not complete: STATE_VERSION_CONFLICT (repeated key in the same request)"; repeated.Error() != want {
+		t.Fatalf("repeated-key conflict = %q, want %q", repeated.Error(), want)
+	}
+	if reason, ok := worker.StateConflictReason(repeated); !ok || string(reason) != "STATE_VERSION_CONFLICT" {
+		t.Fatalf("reason of a repeated-key conflict = %q/%v, want STATE_VERSION_CONFLICT: the code stays, the text carries the cause", reason, ok)
+	}
+}

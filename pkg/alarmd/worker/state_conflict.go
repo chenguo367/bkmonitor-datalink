@@ -18,9 +18,17 @@ import (
 type StateConflictError struct {
 	Stage  string
 	Status string
+	// RepeatedKey: the conflicting item was the later copy of a key the same
+	// request had already written -- the producer made two different
+	// statements for one series. The line has to say so, because from the
+	// status alone this is indistinguishable from a race with another writer.
+	RepeatedKey bool
 }
 
 func (err *StateConflictError) Error() string {
+	if err.RepeatedKey {
+		return fmt.Sprintf("%s: %s (repeated key in the same request)", err.Stage, err.Status)
+	}
 	return fmt.Sprintf("%s: %s", err.Stage, err.Status)
 }
 

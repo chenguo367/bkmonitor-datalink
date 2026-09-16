@@ -673,3 +673,28 @@ func TestApplyRuntimeRepeatedKeyWithTheSameStatementIsNamedRepeatedKey(t *testin
 		t.Fatalf("the later copy rewrote the key: revision %d, want 1", view.BlobRevision)
 	}
 }
+
+// The same key twice in one request with two different statements is a
+// conflict the producer caused, and the item says so: from the status alone it
+// reads like a race with another writer, and the fix for those lives in
+// different places.
+func TestApplyRuntimeRepeatedKeyWithADifferentStatementIsAConflictThatNamesTheRepeat(t *testing.T) {
+	backend := newPipelineMemoryBackend()
+	store := newBatchStore(t, backend, nil)
+	first := seriesMutation(t, seriesIdentity(0), applyVersion(), 0, "")
+	other := seriesMutation(t, seriesIdentity(0), applyVersion(), 0, "other")
+	if first.MutationDigest == other.MutationDigest {
+		t.Fatal("fixture: the two statements must differ")
+	}
+	result, err := store.ApplyRuntime(context.Background(), execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
+		Items: []execution.StateMutation{first, other}})
+	if err != nil {
+		t.Fatalf("ApplyRuntime() error = %v", err)
+	}
+	if result.Items[0].Status != execution.StateApplied || result.Items[0].RepeatedKey {
+		t.Fatalf("first copy = %+v, want applied and not marked repeated", result.Items[0])
+	}
+	if result.Items[1].Status != execution.StateApplyVersionConflict || !result.Items[1].RepeatedKey {
+		t.Fatalf("later different copy = %+v, want STATE_VERSION_CONFLICT marked as a repeated key", result.Items[1])
+	}
+}

@@ -1443,7 +1443,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 						deterministic[item.Identity] = item.ReasonCode
 						rejected++
 					case execution.StateApplyStale, execution.StateApplyVersionConflict:
-						err = &StateConflictError{Stage: "state apply did not complete", Status: string(item.Status)}
+						err = &StateConflictError{Stage: "state apply did not complete", Status: string(item.Status), RepeatedKey: item.RepeatedKey}
 					default:
 						err = fmt.Errorf("state apply did not complete: %s", item.Status)
 					}
