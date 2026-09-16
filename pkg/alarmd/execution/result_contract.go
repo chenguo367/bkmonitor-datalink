@@ -120,6 +120,13 @@ func validateLevelOutcomes(
 	if err := validateStateHistoryReplacements(plan, result.StateResults, states); err != nil {
 		return err
 	}
+	// The markers this round ends with, built the way the exact-guard rule
+	// builds them, so an outcome's reason is judged against the guard that
+	// will actually be covering it rather than against a second derivation of
+	// what that guard ought to say.
+	finalMarkers := cloneGapScopes(loadedGapScopes(gaps, result.Plan))
+	applyGapMutations(finalMarkers, result.GuardBeforeEvents)
+	applyGapMutations(finalMarkers, result.GuardAfterState)
 	seen := make(map[levelOutcomeIdentity]LevelOutcome, len(result.LevelOutcomes))
 	for _, outcome := range result.LevelOutcomes {
 		identity := levelOutcomeIdentity{
@@ -131,7 +138,7 @@ func validateLevelOutcomes(
 		if _, duplicate := seen[identity]; duplicate {
 			return resultContractViolation(codeOutcomeDuplicate, "duplicate Level outcome")
 		}
-		if err := validateLevelOutcome(input, plan, result.Disposition, outcome, result.StateResults, states, gaps); err != nil {
+		if err := validateLevelOutcome(input, plan, result.Disposition, outcome, result.StateResults, states, gaps, finalMarkers); err != nil {
 			return err
 		}
 		seen[identity] = outcome
@@ -153,6 +160,7 @@ func validateLevelOutcome(
 	stateResults []StateEvaluation,
 	states StatePreflightResult,
 	gaps GapLoadResult,
+	finalMarkers map[GapScope]GapScopeState,
 ) error {
 	if outcome.Plan != plan.Identity || !compiledPlanHasLevel(plan.CompiledPlan, outcome.LevelID) ||
 		outcome.SeriesIdentityDigest == "" {
@@ -204,11 +212,17 @@ func validateLevelOutcome(
 			}
 		case LevelOutcomeUnknown:
 			if !loadedSeriesWarmingCompleted(outcome, plan, stateResults, states, gaps) {
-				// Either the reason the guard is already up for, or the reason
-				// this round is adding to it. Both are exact -- two named
-				// values, not "any reason" -- and the second one has to be
-				// admitted because it is what the guard covering this outcome
-				// will carry once this round's mutation is applied.
+				// Either the reason the guard is already up for, or the
+				// reason the marker this round ends with carries. Both are
+				// exact -- two named values, not "any reason" -- and the
+				// second has to be admitted because it is the guard that will
+				// actually be covering this outcome.
+				//
+				// Read off the final marker through the same function the
+				// exact-guard rule uses, not worked out again from the inputs.
+				// Recomputing it here would put the fold in two places with
+				// nothing comparing them, which is the shape this whole change
+				// exists to remove.
 				//
 				// Only the first used to be, and a round that brought a new
 				// incomplete input to an already guarded Level could then
@@ -217,7 +231,7 @@ func validateLevelOutcome(
 				// new one. The Plan failed to evaluate on every Slot for as
 				// long as the input stayed incomplete.
 				if _, ok := guardReasons[outcome.ReasonCode]; !ok && disposition != PlanRetryPending &&
-					!roundGuardCarriesReason(input, plan.Identity, outcome) {
+					!finalGapGuardsOutcome(finalMarkers, outcome) {
 					return resultContractViolation(codeOutcomeUnknownDropsGuardReason, "UNKNOWN Level outcome does not preserve its active guard reason")
 				}
 				constrained = true
@@ -881,18 +895,6 @@ func partialBinding(input InternalExecution, outcome LevelOutcome, requirement R
 		}
 	}
 	return NamedInputBinding{}, false
-}
-
-// roundGuardCarriesReason reports whether the guard this round proposes for
-// the outcome's Level carries the reason the outcome does.
-//
-// It asks the same function the guard's reason comes from, so the two cannot
-// answer differently: what the proposal will hold is the fold of this round's
-// incomplete inputs for the scope, and this reads that fold rather than the
-// proposal, which is not built yet when a Level outcome is validated.
-func roundGuardCarriesReason(input InternalExecution, plan PlanIdentity, outcome LevelOutcome) bool {
-	proposed, found := RoundGuardReasonForLevel(input.Inputs, plan, outcome.LevelID)
-	return found && proposed == outcome.ReasonCode
 }
 
 func requiredGapScope(binding NamedInputBinding, outcome LevelOutcome) GapScope {
