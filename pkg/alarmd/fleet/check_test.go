@@ -28,10 +28,15 @@ import (
 // against 0 with no line; and the refusal that names what is missing, split
 // from the one that does not, because the pool card called those strategies
 // unusable while the line said 待确认. The design names all twenty.
+//
+// Twenty-one since the store began refusing absence memories without failing
+// the round: a Plan that runs and reports and cannot write down what it
+// learned is detection that stopped silently, and none of the twenty rules
+// could see it -- the round is fine by every dimension they read.
 func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
-	if got := len(Checks()); got != 20 || len(checkAnswers) != 20 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 20: a new check has to "+
-			"be a rule over the existing dimensions or a named standing, and the design says which twenty", got, len(checkAnswers))
+	if got := len(Checks()); got != 21 || len(checkAnswers) != 21 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 21: a new check has to "+
+			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
 	for _, check := range Checks() {
@@ -93,6 +98,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckQueryRefused:        {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "http_status=400"}},
 		CheckQueryTargetMissing:  {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}},
 		CheckNoDataPersistent:    {Kind: KindNoData},
+		CheckNoDataMemoryRefused: {Kind: KindNoDataMemoryRefused, ReasonCode: "STATE_BUDGET_EXCEEDED"},
 		CheckSeriesChurning: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Fresh: 4, ShortFresh: 4, FreshRounds: 40}},
 		CheckSeriesDataMissing: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{

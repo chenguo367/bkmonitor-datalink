@@ -8,10 +8,12 @@ package worker
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 func TestCoordinatorNamesStateRefusalsWithoutCommittingProgress(t *testing.T) {
@@ -56,6 +58,24 @@ func TestCoordinatorNamesStateRefusalsWithoutCommittingProgress(t *testing.T) {
 			}
 			if state.calls != wantApplyCalls || len(fixture.base.stateApplied) != 0 {
 				t.Fatalf("apply calls=%d want=%d, successful writes=%v", state.calls, wantApplyCalls, fixture.base.stateApplied)
+			}
+			// The chunk's own line names the refusal too, with the error's
+			// words: it used to read internal_unknown beside an error_type
+			// that already said which refusal it was.
+			if test.apply != "" {
+				applied := 0
+				for _, observation := range fixture.observations {
+					if observation.Stage != observability.StageStateApplied {
+						continue
+					}
+					applied++
+					if string(observation.ReasonCode) != test.want || observation.Err == nil || !strings.Contains(observation.Err.Error(), test.stage) {
+						t.Fatalf("state_applied observation = reason %s err %v, want %s with the refusal's words", observation.ReasonCode, observation.Err, test.want)
+					}
+				}
+				if applied == 0 {
+					t.Fatalf("no state_applied observation for the refused chunk")
+				}
 			}
 		})
 	}

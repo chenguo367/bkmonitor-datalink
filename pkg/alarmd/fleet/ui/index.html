@@ -662,6 +662,7 @@ var CHECK = {
   // word 容量 appears only over a budget rejection.
   DETECTION_ABANDONED:   '{n} 个对象跳过了检测，那段不补',
   TIMELINE_PRUNED:       '{n} 个对象的游标越过了已裁掉的时间线，那段没检测也不补',
+  NO_DATA_MEMORY_REFUSED: '{n} 个对象的无数据记忆写不进去（{s} 条策略）：阈值检测照常，但记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发',
   DEPENDENCY_DOWN:       'alarmd 自己的依赖没答，{n} 个对象受影响（{g} 种）',
   DEFECT:                '{n} 个对象命中程序缺陷（{g} 种），上报',
   OBSERVATION_GAP:       '{n} 个对象现在说不出结论（{g} 种原因）',
@@ -689,7 +690,7 @@ var RECOVERY_STATE = {
   BLOCKED: '仍然受阻（最近窗口内还在失败）',
   RECOVERING: '正在恢复（窗口内没有新失败；轮次在结束或只是迟到，结果还没补齐）',
   UNCONFIRMED: '恢复待确认（窗口内没有新失败，也没观察到任何一轮成功——不算已恢复）',
-  RECOVERED: '已恢复（曾在这一组的每个对象都在之后成功完成过，现在没有对象在这一组）',
+  RECOVERED: '已恢复（这一组的对象都在之后成功完成过，现在没有对象在这一组；对象数是各副本观察到的合计）',
   HISTORICAL: '留有历史影响（历史检测缺口，那段未检测的时间不补）'
 };
 
@@ -721,8 +722,8 @@ function problemClause(report, group) {
 // positive evidence -- a healthy completion after being listed -- so it is
 // never inferred from an object having left the list.
 function recoveredWords(group) {
-  var when = group.recovered_last ? '，最近一次 ' + momentLabel(group.recovered_last) : '';
-  return (group.objects ? '已恢复 ' : '最近 1 小时内恢复 ') + group.recovered + ' 个' + when;
+  var when = group.recovered_last ? '，最近一次确认恢复 ' + momentLabel(group.recovered_last) : '';
+  return '已恢复 ' + group.recovered + ' 个（各副本合计）' + when;
 }
 
 // The fold key on the Blocked reading, in words, with the codes under it.
@@ -783,6 +784,7 @@ var EVIDENCE = {
   ROUNDS_STALLED:        '对象行"最近一次错误"：原文、类型、卡住的 Slot、同一 Slot 连续几次',
   DETECTION_ABANDONED:   '对象行"没检测的时段"：首末 Slot、记录时刻、对象周期；"资源预算拒绝"折对照容量面板的"预算被拒"',
   TIMELINE_PRUNED:       '对象行"没检测的时段"：游标从哪跳到哪、记录时刻',
+  NO_DATA_MEMORY_REFUSED: '对象行"无数据记忆"：存储的拒绝原因、量的是哪份记录（已存 / 本轮要写）、字节数与上限、首次与最近拒绝时刻、被拒轮数；指标 worker_no_data_memory_refusals_total{reason,record}',
   DEPENDENCY_DOWN:       '分组的原因码说是哪个依赖；对象行"最近一次错误"给原文',
   DEFECT:                '分组的原因码 + 对象行"最近一次错误"原文与 Slot——上报带这两样',
   OBSERVATION_GAP:       '对象行"等下次 · 预计 HH:MM"；副本级缺口看副本表里该副本的快照年龄',
@@ -806,6 +808,7 @@ var NEXT = {
   ROUNDS_STALLED:        '不会自己恢复：展开找对象，查它卡在哪一步（日志按 query_group_key），必要时重启副本',
   DETECTION_ABANDONED:   '仍在发生的：看对象行的"跳过前最后一步"（错过查询截止 / 数据未就绪 / 预算拒绝…）与周期，按那一步查；只有"资源预算拒绝"分组是资源装不下，其余不据此扩容，也不据此排除别的容量或调度约束',
   TIMELINE_PRUNED:       '仍在发生的：看游标为什么落后到被剪；已停止的只是记录，那段永久没检测',
+  NO_DATA_MEMORY_REFUSED: '按 decision-008（按组分 field 的存储表示）处理；修复前这条策略的无数据告警不会触发，要人工盯这组的缺失。字节数远超上限是记录形状问题，略超是上限问题，两者修法不同',
   DEPENDENCY_DOWN:       '按原因码看是哪个依赖（Redis/Kafka/后端）；依赖恢复后自动清',
   DEFECT:                '程序缺陷：带原因码上报，展开取一个对象的证据',
   OBSERVATION_GAP:       '等下一轮完成以补齐原因（行上有预计时刻；到点后仍可能在等待、重试或取消）；超过预计完成时间仍未补齐，它会落到"到期没跑"那一行（alarmd 的），再查该副本的调度与执行；副本级缺口看该副本快照',
@@ -833,6 +836,7 @@ var RECOVERY = {
   ROUNDS_STALLED:        '对象的轮次重新结束（对象行离开"轮次不结束"）；不会自己发生',
   DETECTION_ABANDONED:   '{w} 分钟内没有新的跳过（"仍在发生"折归零）；已停止的记录不会归零，那是记录不是指标',
   TIMELINE_PRUNED:       '{w} 分钟内没有新的越过；已停止的记录不会归零',
+  NO_DATA_MEMORY_REFUSED: '该 Plan 一次写入落库（no_data_memory_written 且 stored=true——ALREADY_APPLIED 算、STALE_VERSION 不算，以发射方的 stored 为准不看结局名）；这一行随之消失，进历史区的"已恢复"。{w} 分钟内没有新拒绝不算恢复',
   DEPENDENCY_DOWN:       '依赖恢复后各对象下一轮完成，这一行自动清',
   DEFECT:                '修复上线后该原因码不再出现',
   OBSERVATION_GAP:       '各对象下一轮完成后补上成因、离开这一行——只是补齐证据，不等于这几个对象当前有新故障；副本级缺口随该副本重新发布快照消失',
@@ -1334,8 +1338,8 @@ function renderChecks(checks) {
       + (t.retained_newest ? '，最后一次 ' + momentLabel(t.retained_newest) : ''));
   }
   if (recoveredObjects) {
-    historyParts.push('已恢复 ' + recoveredObjects + ' 个对象（最近 1 小时内有健康完成'
-      + (recoveredLast ? '，最近一次 ' + momentLabel(recoveredLast) : '') + '）');
+    historyParts.push('已恢复：各副本合计 ' + recoveredObjects + ' 个对象（每个对象在自己恢复后的 1 小时内计入，换副本后再恢复会计两次'
+      + (recoveredLast ? '；最近一次确认恢复 ' + momentLabel(recoveredLast) : '') + '）');
   }
   text('historyCount', history.length || historyParts.length ? historyParts.join('；') : '没有');
   text('briefTodo', todoSentence(todo, pending, governance, t));
@@ -1502,7 +1506,7 @@ function recoveredClause(report) {
     return groupKeyLabel(report, group.key, group) + '：' + facts.join('，');
   });
   var rest = folds.length > 3 ? '；另 ' + (folds.length - 3) + ' 组见展开' : '';
-  return '已恢复 ' + report.recovered + ' 个对象（最近 1 小时内有健康完成，现在不在这一行上）——' + shown.join('；') + rest;
+  return '已恢复：各副本合计 ' + report.recovered + ' 个对象在各自恢复后的 1 小时内（同一对象换副本后再恢复会计两次；现在不在这一行上）——' + shown.join('；') + rest;
 }
 
 // The next step for a check, with the window it names filled in.
@@ -1854,6 +1858,25 @@ function objectRow(anomaly) {
       + (restored.completed_at && new Date(restored.completed_at).getTime() > 0 ? '（提交于 ' + momentLabel(restored.completed_at) + '）' : '')
       + nextNote + configNote,
       '进度提交时留下的上一轮摘要；本进程跑完一轮后这一行换成自己的');
+  }
+  // The store refusing this object's absence memory: the round is fine and
+  // the memory is not written, so the row says what was refused and the two
+  // numbers the refusal compared -- a record a little over the bound and one
+  // many times it are different repairs -- and since when. It never says
+  // recovered: nothing reports a successful write yet.
+  if (anomaly.no_data_memory) {
+    var memory = anomaly.no_data_memory;
+    var measured = memory.bytes || memory.limit
+      ? '，量的是' + (memory.record === 'STORED' ? '已存记录' : memory.record === 'NEXT' ? '本轮要写的记录' : memory.record || '记录')
+        + ' ' + (memory.bytes || 0) + ' 字节，上限 ' + (memory.limit || 0)
+        + (memory.limit && memory.bytes > memory.limit ? '（超 ' + Math.round((memory.bytes / memory.limit - 1) * 100) + '%）' : '')
+      : '';
+    line('无数据记忆写不进去', (memory.reason || '（存储没给原因）') + measured
+      + '；自 ' + momentLabel(memory.first_at) + ' 起被拒 ' + (memory.refusals || 0) + ' 轮，最近 ' + momentLabel(memory.last_at)
+      + (memory.plan && memory.plan.strategy_id ? '；策略 ' + memory.plan.strategy_id : '')
+      + (memory.plans > 1 ? '（这个对象还有 ' + (memory.plans - 1) + ' 条策略同样被拒，显示的是最近的一条；每条要各自写成功）' : ''),
+      '阈值检测照常跑、结果照发，只是学到的缺失没写下去：记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发。'
+      + '这一行只在该 Plan 一次写入落库（stored=true）后消失；没有新拒绝不算恢复');
   }
   // A failure of this deployment's own making beside the finding the column
   // decided: the row is on its line for the column's reason and under

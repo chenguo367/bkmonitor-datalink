@@ -334,8 +334,9 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 		}
 	}
 	// A failure the pipeline classified but no code read: the category says
-	// which step raised it, and only that.
-	if blocked.Stage == StageUnlocated && anomaly.Failure != nil {
+	// which step raised it, and only that -- when the failure is this
+	// round's. A failure kept from an earlier Slot names no step for this one.
+	if blocked.Stage == StageUnlocated && failureThisRound(anomaly) {
 		if stage, known := categoryStages[anomaly.Failure.Category]; known {
 			blocked.Stage = stage
 			if blocked.Code == "" {
@@ -346,7 +347,7 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 	// A backend that answered and refused named itself by answering: the
 	// refusal is the query stage's, and the dependency is the one that
 	// spoke. Whose fault the refusal is stays with the owner, not here.
-	if queryRejected(anomaly.Failure) {
+	if failureThisRound(anomaly) && queryRejected(anomaly.Failure) {
 		blocked.Stage, blocked.Class = StageQuery, ClassRefused
 		blocked.Dependency, blocked.DependencyEvidence = DependencyQueryBackend, dependencyByCode
 		if blocked.Code == "" {

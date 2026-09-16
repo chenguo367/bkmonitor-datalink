@@ -48,6 +48,13 @@ const (
 	// in any column of the health equation; it is the data having stopped, and
 	// it is listed under the data side's line for as long as it holds.
 	KindNoData = "NO_DATA"
+	// KindNoDataMemoryRefused is an object one of whose Plans the store will
+	// not take an absence memory for. Not a failure of the round -- it judged
+	// and its results went out -- and in no column; listed under its own line
+	// because what it loses is silent: the memory stays at the last version
+	// that was written, a group that goes absent after that is never recorded
+	// as first absent, and its no-data alert never fires.
+	KindNoDataMemoryRefused = "NO_DATA_MEMORY_REFUSED"
 )
 
 // ReasonWakeMissed is the reason code carried by an overdue object. The other
@@ -162,6 +169,12 @@ type queryGroupState struct {
 	emptyRuns  int
 	emptySince time.Time
 	sawData    bool
+	// noDataMemory is the refused absence-memory write of each of this
+	// object's Plans still refused, by Plan, with how often and since when.
+	// A Plan's entry is kept until a write for that Plan is seen to store;
+	// the object is listed while any entry remains, and recovers when the
+	// last one goes -- one Plan's write storing says nothing about another's.
+	noDataMemory map[StrategyRef]*NoDataMemoryRefusal
 	// reasonKey names the current result and reason as one string, reasonSince
 	// is when that pair first held and reasonRuns how many consecutive rounds
 	// it has held for. It is the object's own clock for "how long has it been
@@ -532,7 +545,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// will be -- was the one thing on this deployment with nothing on screen.
 	cursorAdvance := observation.CursorAdvance
 	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" &&
-		failure == nil && observation.QueryCooldown == nil && cursorAdvance == nil {
+		failure == nil && observation.QueryCooldown == nil && cursorAdvance == nil &&
+		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil {
 		return
 	}
 
@@ -545,6 +559,44 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		tracker.groups[queryGroup] = state
 	}
 	at := tracker.now()
+	// A refused absence-memory write is not a round either: the round it
+	// happened in was fine and is reported separately. Recorded on the object
+	// with the store's reason and the size it measured, and it does not
+	// touch the round bookkeeping -- the observation's strategy is still
+	// learned below, since the Plan it names is the one whose memory is lost.
+	plan := StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}
+	if refusal := observation.NoDataMemoryRefusal; refusal != nil {
+		if state.noDataMemory == nil {
+			state.noDataMemory = map[StrategyRef]*NoDataMemoryRefusal{}
+		}
+		memory := state.noDataMemory[plan]
+		if memory == nil {
+			memory = &NoDataMemoryRefusal{FirstAt: at, Plan: plan}
+			state.noDataMemory[plan] = memory
+		}
+		memory.Reason, memory.Record, memory.Bytes, memory.Limit = refusal.Reason, refusal.Record, refusal.Bytes, refusal.Limit
+		memory.LastAt = at
+		memory.Refusals++
+	}
+	// A write that went through ends that Plan's refusal: the store now holds
+	// what the round wanted written, which is the one positive fact recovery
+	// is read from here. Stored is the emitter's word for it, carried rather
+	// than derived from the outcome -- ALREADY_APPLIED is stored and
+	// STALE_VERSION is not, and the one place that decides is the emitter.
+	// A write that did not store is not a refusal either: those have their
+	// own stage, and a stale or conflicting write is a different situation
+	// from a record the store will not take. Only the matching Plan's entry
+	// goes: two Plans of one object refused and one of them storing is one
+	// Plan recovered and an object still listed, and read on, it was the
+	// whole object recovered on the strength of the wrong Plan's write.
+	if write := observation.NoDataMemoryWrite; write != nil && write.Stored && state.noDataMemory[plan] != nil {
+		if len(state.noDataMemory) == 1 {
+			tracker.noteMemoryRecovery(queryGroup, state, at)
+			state.noDataMemory = nil
+		} else {
+			delete(state.noDataMemory, plan)
+		}
+	}
 	// Recorded before anything else, because it is not a round and none of the
 	// round bookkeeping below applies to it. The object is very likely running
 	// normally now -- what happened is in its past and is permanent, which is
@@ -1235,6 +1287,69 @@ func (tracker *Tracker) NoData() []Anomaly {
 		return anomalies[left].Since.Before(anomalies[right].Since)
 	})
 	return anomalies
+}
+
+// NoDataMemory is every object one of whose Plans the store has refused an
+// absence memory for. Under no column: the rounds complete and the health
+// equation counts the object as healthy, which as far as its threshold
+// detection goes it is. What it has lost is silent -- the memory stays at
+// the last version written, so a group that goes absent after that is never
+// recorded as first absent and its no-data alert never fires -- which is why
+// it needs a line of its own rather than a mark on a row nobody opens.
+//
+// Kept until a write for the Plan is seen to store -- the one positive fact
+// recovery is read from here -- or the process forgets the object. A row
+// says "refused since", never "recovered": once the write stores, the row is
+// gone and the recovery is on the ledger.
+func (tracker *Tracker) NoDataMemory() []Anomaly {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	anomalies := make([]Anomaly, 0)
+	for queryGroup, state := range tracker.groups {
+		if len(state.noDataMemory) == 0 {
+			continue
+		}
+		anomalies = append(anomalies, tracker.memoryRowOf(queryGroup, state))
+	}
+	sort.Slice(anomalies, func(left, right int) bool {
+		if anomalies[left].Since.Equal(anomalies[right].Since) {
+			return anomalies[left].QueryGroup < anomalies[right].QueryGroup
+		}
+		return anomalies[left].Since.Before(anomalies[right].Since)
+	})
+	return anomalies
+}
+
+// memoryRowOf is the object's refused-memory row as the list publishes it:
+// one row per object, carrying the latest refusal among its Plans whole and
+// how many Plans are refused, since the earliest, with every refused Plan as
+// a strategy. Caller holds the lock and has checked a refusal is there.
+func (tracker *Tracker) memoryRowOf(queryGroup string, state *queryGroupState) Anomaly {
+	var latest *NoDataMemoryRefusal
+	first := time.Time{}
+	refusals := 0
+	strategies := make([]StrategyRef, 0, len(state.noDataMemory))
+	for plan, memory := range state.noDataMemory {
+		if latest == nil || memory.LastAt.After(latest.LastAt) {
+			latest = memory
+		}
+		if first.IsZero() || memory.FirstAt.Before(first) {
+			first = memory.FirstAt
+		}
+		refusals += memory.Refusals
+		if plan.StrategyID != "" {
+			strategies = append(strategies, plan)
+		}
+	}
+	memory := *latest
+	memory.Plans = len(state.noDataMemory)
+	sortStrategies(strategies)
+	return Anomaly{
+		QueryGroup: queryGroup, Kind: KindNoDataMemoryRefused, ReasonCode: memory.Reason,
+		Since: first, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
+		ReasonSince: first, ReasonLastAt: memory.LastAt, Consecutive: refusals,
+		NoDataMemory: &memory, Strategies: strategies,
+	}
 }
 
 // GapSkips is every object this replica has seen skip a run of Slots because

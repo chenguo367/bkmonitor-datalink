@@ -933,7 +933,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// the lines and the arithmetic were all counted above from the whole
 	// view and stay; a reader who wants the rows of another column asks
 	// for that column, and gets them paged.
-	view.Demoted, view.Undecidable, view.ByDesign, view.NoData = []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}
+	view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory = []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}
 	view.GapSkips, view.PrunedSkips = map[string]SkippedSpan{}, map[string]PrunedSkip{}
 	writeJSON(response, http.StatusOK, ListResponse{
 		Summary: summary,

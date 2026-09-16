@@ -1460,6 +1460,14 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		if rejected > 0 {
 			observationResult = observability.ResultTerminal
 		}
+		// A version refusal is a typed error with a name of its own. The
+		// item's reason is empty for it -- the store names the status, not a
+		// reason -- so without this the chunk's line normalised to
+		// internal_unknown beside an error_type that already said which
+		// refusal it was, while the terminal line for the same round named it.
+		if named, ok := StateConflictReason(err); ok {
+			reason = named
+		}
 		totals.keys += int64(len(chunkItems))
 		totals.bytes += chunkBytes
 		coordinator.observeChunk(ctx, observability.StageStateApplied, operation, chunkStarted, started, observationResult, reason,

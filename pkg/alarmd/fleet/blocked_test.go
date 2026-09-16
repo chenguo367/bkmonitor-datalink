@@ -459,14 +459,24 @@ func TestThisRoundsFailureOutranksTheLastCompletionsCause(t *testing.T) {
 	if rows[0].Finding.Check != CheckDetectionAbandoned || rows[0].Blocked == nil || rows[0].Blocked.Code != "GAP_SKIPPED" {
 		t.Fatalf("skipped again = %+v / %+v, want the completion's cause first again", rows[0].Finding, rows[0].Blocked)
 	}
-	// The latest round failed, but the failure the row keeps is an earlier
-	// Slot's: it stays where it was, third.
+	// The latest round failed, and the only failure the row keeps is an
+	// earlier Slot's: neither it nor the old completion's cause is this
+	// round's, so the round is what it is -- a failure nobody named.
 	staleFailure := refusedAfterSkip
 	staleFailure.RoundSlot = 1120
 	rows = []Anomaly{staleFailure}
 	Attribute(rows, now)
-	if rows[0].Finding.Check != CheckDetectionAbandoned {
-		t.Fatalf("failed with a stale failure = %+v, want the cause still first over a failure from another Slot", rows[0].Finding)
+	if rows[0].Finding.Check != CheckDefect || rows[0].Finding.Group != "UNLOCATED/UNLOCATED/UNLOCATED" || rows[0].Blocked == nil || rows[0].Blocked.Code != "error" {
+		t.Fatalf("failed with only a stale failure = %+v / %+v, want an unnamed failure, not the old cause or the old failure", rows[0].Finding, rows[0].Blocked)
+	}
+	// A refusal the backend gave an earlier Slot does not make this round's
+	// unnamed failure a refusal at the query step either.
+	staleRefusal := staleFailure
+	staleRefusal.Failure = &FailureRef{Stage: "provider", Category: "source_backend", Code: "QUERY_UNAVAILABLE", Detail: "http_status=400", At: &failedAt, Slot: 1060}
+	rows = []Anomaly{staleRefusal}
+	Attribute(rows, now)
+	if rows[0].Finding.Check != CheckDefect || rows[0].Blocked == nil || rows[0].Blocked.Class == ClassRefused || rows[0].Blocked.Dependency == DependencyQueryBackend {
+		t.Fatalf("failed with only a stale refusal = %+v / %+v, want no refusal reading borrowed from another Slot", rows[0].Finding, rows[0].Blocked)
 	}
 	// The latest round completed after a failure on the same Slot -- the
 	// retry got through, degraded: the completion's cause is the round's
@@ -477,6 +487,41 @@ func TestThisRoundsFailureOutranksTheLastCompletionsCause(t *testing.T) {
 	Attribute(rows, now)
 	if rows[0].Finding.Check == CheckDependencyDown || rows[0].Blocked == nil || rows[0].Blocked.Code != "HISTORY_GAPPED" {
 		t.Fatalf("completed after a failure = %+v / %+v, want the completion's cause to decide, not the failure on the way", rows[0].Finding, rows[0].Blocked)
+	}
+}
+
+// Through the tracker, the shape a live object had: a Slot skipped past the
+// replay window, then the next Slot failing with an error the terminal did
+// not name. The row is not the skip -- that round is over and its record is
+// kept apart -- and the error's words are this round's, so the row is an
+// unnamed failure at an unlocated step, not "检测已停" with a contract
+// error beside it.
+func TestAnUnnamedFailureAfterASkipIsNotExplainedByTheSkip(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), observability.Observation{
+			ProgressCompletionKind: "GAP_SKIPPED", ProgressCompletionReason: "GAP_SKIPPED",
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: int64(1000 + 60*round)},
+		})
+		at.at = at.at.Add(time.Minute)
+	}
+	tracker.Observe(context.Background(), observability.Observation{
+		ExecuteOutcome: "error", ReasonCode: "internal_unknown",
+		Err:   errors.New("alarmd worker: invalid query result: alarmd worker: invalid series evaluation: alarmd execution: degraded Level outcome lacks an exact durable guard"),
+		Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: 1180},
+	})
+	rows := tracker.Anomalies()
+	Attribute(rows, at.at)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v, want the one object", rows)
+	}
+	row := rows[0]
+	if row.Finding.Check != CheckDefect || row.Finding.Group != "UNLOCATED/UNLOCATED/UNLOCATED" {
+		t.Fatalf("finding = %+v, want an unnamed failure under DEFECT at no located step, not the skip's line", row.Finding)
+	}
+	if row.Blocked == nil || row.Blocked.Code == "GAP_SKIPPED" || row.Blocked.Stage == StageSchedule || !strings.Contains(row.Blocked.Text, "durable guard") {
+		t.Fatalf("blocked = %+v, want this round's words and no reading borrowed from the skip", row.Blocked)
 	}
 }
 

@@ -45,12 +45,20 @@ const (
 	// it, and every skip and timeout on the loaded one is this, not a
 	// capacity question. The page printed 2370 against 0 in a table whose
 	// heading said that case needs different handling, and no line said so.
-	CheckOwnershipSkewed     Check = "OWNERSHIP_SKEWED"
-	CheckSlotsOverdue        Check = "SLOTS_OVERDUE"
-	CheckNeverEvaluated      Check = "NEVER_EVALUATED"
-	CheckRoundsStalled       Check = "ROUNDS_STALLED"
-	CheckDetectionAbandoned  Check = "DETECTION_ABANDONED"
-	CheckTimelinePruned      Check = "TIMELINE_PRUNED"
+	CheckOwnershipSkewed    Check = "OWNERSHIP_SKEWED"
+	CheckSlotsOverdue       Check = "SLOTS_OVERDUE"
+	CheckNeverEvaluated     Check = "NEVER_EVALUATED"
+	CheckRoundsStalled      Check = "ROUNDS_STALLED"
+	CheckDetectionAbandoned Check = "DETECTION_ABANDONED"
+	CheckTimelinePruned     Check = "TIMELINE_PRUNED"
+	// NoDataMemoryRefused is a Plan whose absence memory the store will not
+	// take: the round is fine -- it judged, its threshold results were sent
+	// -- and what it learned about absence is not written down, so every
+	// round after reads a memory one round old, a group that goes absent is
+	// never recorded as first absent, and its no-data alert never fires. In
+	// the family of detection that stopped, not of defects: the Plan runs,
+	// and only its absence detection is silently gone.
+	CheckNoDataMemoryRefused Check = "NO_DATA_MEMORY_REFUSED"
 	CheckDependencyDown      Check = "DEPENDENCY_DOWN"
 	CheckDefect              Check = "DEFECT"
 	CheckObservationGap      Check = "OBSERVATION_GAP"
@@ -112,17 +120,18 @@ var checkAnswers = map[Check]struct {
 	Owner   Owner
 	GroupBy GroupBy
 }{
-	CheckCutoverFailing:     {OwnerAlarmd, GroupByReasonCode},
-	CheckReplicaDegraded:    {OwnerAlarmd, GroupByDegradation},
-	CheckOwnershipSkewed:    {OwnerAlarmd, GroupByReplica},
-	CheckSlotsOverdue:       {OwnerAlarmd, GroupByReplica},
-	CheckNeverEvaluated:     {OwnerAlarmd, GroupByReplica},
-	CheckRoundsStalled:      {OwnerAlarmd, GroupByReplica},
-	CheckDetectionAbandoned: {OwnerAlarmd, GroupByLoss},
-	CheckTimelinePruned:     {OwnerAlarmd, GroupByLoss},
-	CheckDependencyDown:     {OwnerAlarmd, GroupByBlocked},
-	CheckDefect:             {OwnerAlarmd, GroupByBlocked},
-	CheckObservationGap:     {OwnerAlarmd, GroupByGapKind},
+	CheckCutoverFailing:      {OwnerAlarmd, GroupByReasonCode},
+	CheckReplicaDegraded:     {OwnerAlarmd, GroupByDegradation},
+	CheckOwnershipSkewed:     {OwnerAlarmd, GroupByReplica},
+	CheckSlotsOverdue:        {OwnerAlarmd, GroupByReplica},
+	CheckNeverEvaluated:      {OwnerAlarmd, GroupByReplica},
+	CheckRoundsStalled:       {OwnerAlarmd, GroupByReplica},
+	CheckDetectionAbandoned:  {OwnerAlarmd, GroupByLoss},
+	CheckTimelinePruned:      {OwnerAlarmd, GroupByLoss},
+	CheckNoDataMemoryRefused: {OwnerAlarmd, GroupByReasonCode},
+	CheckDependencyDown:      {OwnerAlarmd, GroupByBlocked},
+	CheckDefect:              {OwnerAlarmd, GroupByBlocked},
+	CheckObservationGap:      {OwnerAlarmd, GroupByGapKind},
 
 	CheckNoDataPersistent: {OwnerData, GroupByStrategy},
 
@@ -158,6 +167,7 @@ var checkOrder = []Check{
 	CheckRoundsStalled,
 	CheckDetectionAbandoned,
 	CheckTimelinePruned,
+	CheckNoDataMemoryRefused,
 	CheckDependencyDown,
 	CheckDefect,
 	CheckObservationGap,
@@ -208,11 +218,7 @@ var ChecksWithoutAProducer = []Check{CheckNeverEvaluated}
 // decidingCode is the code the check was decided on, in the order checkOf
 // reads them. It is the grouping key for the checks that fold on a code.
 func decidingCode(anomaly Anomaly) string {
-	failureCode := ""
-	if anomaly.Failure != nil {
-		failureCode = anomaly.Failure.Code
-	}
-	for _, code := range []string{anomaly.CauseReason, string(anomaly.Cause), failureCode, anomaly.ReasonCode} {
+	for _, code := range decisionCodes(anomaly) {
 		if code != "" {
 			return code
 		}
@@ -339,6 +345,9 @@ func resultOf(anomaly Anomaly) Result {
 		return ""
 	case anomaly.Kind == KindNoData:
 		return ResultNoData
+	case anomaly.Kind == KindNoDataMemoryRefused:
+		// The round completed; what was refused was the memory beside it.
+		return ResultCompleted
 	case queryRejected(anomaly.Failure):
 		return ResultRefused
 	case anomaly.Failure != nil, anomaly.Kind == KindBlockedRun, failedExecution(anomaly.ReasonCode):
@@ -713,13 +722,15 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		for check, consequence := range consequences {
 			ensure(check).skipped = consequence
 		}
-		for index := range view.NoData {
-			row := &view.NoData[index]
-			if row.Finding.Check == "" {
-				continue
+		for _, list := range [][]Anomaly{view.NoData, view.NoDataMemory} {
+			for index := range list {
+				row := &list[index]
+				if row.Finding.Check == "" {
+					continue
+				}
+				add(ensure(row.Finding.Check), row.Finding.Group, row)
+				ensure(row.Finding.Check).current++
 			}
-			add(ensure(row.Finding.Check), row.Finding.Group, row)
-			ensure(row.Finding.Check).current++
 		}
 	}
 	// What the view cannot speak for. Unknown is the objects a replica holds
@@ -964,6 +975,7 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 	}
 	if view != nil {
 		count(view.NoData)
+		count(view.NoDataMemory)
 	}
 	if view != nil {
 		// One walk over the records, the same one the lines make. A loss in
@@ -1068,7 +1080,7 @@ func UnderCheck(check Check, group string, view *View, now time.Time) []Anomaly 
 	list := []Anomaly{}
 	listed := map[string]struct{}{}
 	demoted := demotedObjects(view)
-	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData} {
+	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory} {
 		for _, anomaly := range column {
 			// Under DEFECT a row is also the one whose column filed it
 			// elsewhere but which carries a failure of this deployment's own
