@@ -958,7 +958,7 @@ func (stream *streamedExecution) noSeriesPlanResult(due execution.DuePlan) (exec
 			ReasonCode: observability.ReasonNone,
 			Plans:      []execution.PlanEvaluationResult{{Plan: due.Identity, Disposition: execution.PlanDecided}}}, nil
 	}
-	mutation, err := stream.completionGapMutationFor(due, bindings, nil, primary.ReasonCode)
+	mutation, err := stream.completionGapMutationFor(due, bindings)
 	if err != nil {
 		return execution.EvaluationResult{}, err
 	}
@@ -1234,7 +1234,7 @@ func (stream *streamedExecution) mergePrimaryIncompleteSeries(
 			break
 		}
 	}
-	mutation, err := stream.completionGapMutationFor(due, primaryIncomplete, nil, reason)
+	mutation, err := stream.completionGapMutationFor(due, primaryIncomplete)
 	if err != nil {
 		return err
 	}
@@ -1310,7 +1310,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		if len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
 			return errors.New("alarmd worker: incomplete named input produced an invalid Plan result")
 		}
-		mutation, mutationErr := stream.completionGapMutationFor(due, incomplete, evaluated.Plans[0].LevelOutcomes, evaluated.Plans[0].ReasonCode)
+		mutation, mutationErr := stream.completionGapMutationFor(due, incomplete)
 		if mutationErr != nil {
 			return mutationErr
 		}
@@ -1802,16 +1802,12 @@ func planCompletedFullEmpty(bindings []execution.NamedInputBinding, plan executi
 }
 
 // completionGapMutationFor builds the Plan gap mutation for a set of
-// incomplete bindings, deciding each scope's reason against the Level
-// outcomes the evaluator produced for the same Slot and the reason the Plan
-// result itself carries.
+// incomplete bindings.
 func (stream *streamedExecution) completionGapMutationFor(
 	due execution.DuePlan,
 	bindings []execution.NamedInputBinding,
-	outcomes []execution.LevelOutcome,
-	planReason execution.ReasonCode,
 ) (execution.PlanGapMutation, error) {
-	reasons, err := completionGapReasons(due, bindings, outcomes)
+	reasons, err := completionGapReasons(due, bindings)
 	if err != nil {
 		return execution.PlanGapMutation{}, err
 	}
@@ -1819,27 +1815,19 @@ func (stream *streamedExecution) completionGapMutationFor(
 }
 
 // completionGapReasons decides the one reason each gap scope carries for a
-// set of incomplete bindings. A marker carries one reason per scope, and the
-// result contract reads it in two places: a degraded Level outcome needs a
-// marker of its scope with the outcome's own reason, and a PARTIAL input
-// needs a marker of its scope with that input's reason. Inputs of one scope
-// that agree decide the scope directly. Inputs that disagree, which two
-// inputs of one Level failing for different transient reasons do on every
-// Slot of an outage and on the replay after a restart, are decided by what
-// the contract will compare the marker with, or by what the Plan result
-// itself says when the contract compares nothing: first the reason of the
-// Level's UNKNOWN outcome, which the evaluator took from one of these same
-// inputs; then, when the Level has no outcome, as on the no-series and
-// PRIMARY paths, the reason the Plan result carries, which those paths take
-// from the PRIMARY input. Either is taken only when it is one an input of
-// the scope gave, and no PARTIAL input of the scope carries another. Anything
-// else is the conflict, named with the two inputs it saw and which of the
-// two refusals it is, since a marker that satisfies one of the contract's
-// comparisons would fail the other.
+// set of incomplete bindings: the incomplete inputs of the scope, folded by
+// GapReasonFoldOrder.
+//
+// A marker carries one reason per scope, and the result contract reads it in
+// two places -- a degraded Level outcome needs a marker of its scope with the
+// outcome's own reason, and a PARTIAL input needs a marker of its scope with
+// that input's reason. The fold is what makes those comparisons hold by
+// construction: the marker's reason and the Level's UNKNOWN reason are the
+// same function of the same inputs, so there is no second derivation for the
+// first to disagree with.
 func completionGapReasons(
 	due execution.DuePlan,
 	bindings []execution.NamedInputBinding,
-	outcomes []execution.LevelOutcome,
 ) (map[execution.GapScope]execution.ReasonCode, error) {
 	members := make(map[execution.GapScope][]execution.NamedInputBinding)
 	order := make([]execution.GapScope, 0)
@@ -1858,13 +1846,6 @@ func completionGapReasons(
 	}
 	reasons := make(map[execution.GapScope]execution.ReasonCode, len(order))
 	for _, scope := range order {
-		// Folded over every incomplete input of the scope, by the one order
-		// the Level's own UNKNOWN reason is chosen with. There is nothing left
-		// to disagree about: the marker's reason and the outcome's reason are
-		// the same function of the same inputs, so the contract's comparison
-		// holds by construction rather than by two derivations happening to
-		// meet.
-		//
 		// The reason this is a fold and not a choice is what the refusal cost.
 		// Two inputs of one Level failing differently -- one QUERY_UNAVAILABLE,
 		// one QUERY_TIMEOUT, which a backend outage produces on every round --

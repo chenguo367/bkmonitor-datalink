@@ -166,10 +166,11 @@ func TestInputsThatFailedDifferentlyFoldToOneReason(t *testing.T) {
 		{"a plan scope, which has no outcome of its own", []execution.NamedInputBinding{planPrevious, planHistory}, execution.GapScope{}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			// No outcomes and no plan reason: the fold needs neither, which is
-			// the point -- those were the two things that used to have to
-			// agree with it.
-			reasons, err := completionGapReasons(due, test.bindings, nil)
+			// The signature is the assertion: the fold takes the bindings and
+			// nothing else. The Level outcomes and the Plan reason, which used
+			// to have to agree with the marker, are no longer reachable from
+			// here.
+			reasons, err := completionGapReasons(due, test.bindings)
 			if err != nil {
 				t.Fatalf("completionGapReasons() = %v; inputs that failed differently are not a refusal", err)
 			}
@@ -221,18 +222,9 @@ func TestTheNoSeriesPathTakesTheFoldAndLeavesThePlanResultAlone(t *testing.T) {
 		Role: execution.InputRoleAlgorithmDependency, Completeness: execution.CompletenessUnavailable, ReasonCode: "QUERY_UNAVAILABLE"}
 	level := execution.GapScope{LevelID: 1, HasLevel: true}
 
-	reasons, err := completionGapReasons(due, []execution.NamedInputBinding{primary, history}, nil)
+	reasons, err := completionGapReasons(due, []execution.NamedInputBinding{primary, history})
 	if err != nil || len(reasons) != 1 || reasons[level] != "QUERY_UNAVAILABLE" {
 		t.Fatalf("no-series shape: reasons = %v, err = %v; want the fold of the scope's inputs and not "+
 			"whichever one the merge happened to report", reasons, err)
-	}
-
-	// And an outcome does not change it either: the outcome is derived from
-	// these same inputs by this same order, so there is nothing for it to
-	// decide that the fold has not already decided.
-	outcome := []execution.LevelOutcome{{Plan: plan, LevelID: 1, Outcome: execution.LevelOutcomeUnknown, ReasonCode: "QUERY_UNAVAILABLE"}}
-	reasons, err = completionGapReasons(due, []execution.NamedInputBinding{primary, history}, outcome)
-	if err != nil || reasons[level] != "QUERY_UNAVAILABLE" {
-		t.Fatalf("with an outcome: reasons = %v, err = %v", reasons, err)
 	}
 }
