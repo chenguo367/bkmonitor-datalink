@@ -162,6 +162,14 @@ func (l *LoggingObserver) Observe(ctx context.Context, observation Observation) 
 }
 
 func (l *Logger) logObservation(ctx context.Context, observation Observation, admission LogAdmission) {
+	// Terminal scheduler errors bypass the worker's internal observations.
+	// Read typed evidence from the returned error before text is truncated.
+	if observation.GapConflict == nil && observation.Err != nil {
+		var conflict interface{ GapConflictEvidence() *GapExtensionFacts }
+		if errors.As(observation.Err, &conflict) {
+			observation.GapConflict = conflict.GapConflictEvidence()
+		}
+	}
 	observation.Trace = mergeTraceFields(observation.Trace, TraceFieldsFromContext(ctx))
 	attributes := []slog.Attr{
 		slog.String("component", string(observation.Component)),

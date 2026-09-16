@@ -16,6 +16,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // ErrGapGuardConflict is what every gap guard refusal unwraps to, so a caller
@@ -72,6 +73,14 @@ func (err *GapGuardConflictError) Error() string {
 }
 
 func (err *GapGuardConflictError) Unwrap() error { return ErrGapGuardConflict }
+
+// GapConflictEvidence carries both sides through the scheduler's terminal log,
+// even when the rendered error text is bounded.
+func (err *GapGuardConflictError) GapConflictEvidence() *observability.GapExtensionFacts {
+	return gapExtensionFacts(
+		execution.GapGuardSnapshot{MarkerRevision: err.Persisted.MarkerRevision, Scopes: err.Persisted.ScopeDetails},
+		execution.PlanGapMutation{Identity: execution.PlanGapIdentity{Plan: err.Plan}, Scopes: err.Proposed.MutationScopes})
+}
 
 // ReasonCode is the bounded name this refusal reports as.
 func (err *GapGuardConflictError) ReasonCode() execution.ReasonCode {

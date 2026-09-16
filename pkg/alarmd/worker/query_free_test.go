@@ -118,9 +118,9 @@ func TestSlotExecutionCoordinatorDoesNotReuseInsufficientSameSlotGap(t *testing.
 			},
 		},
 		{
-			name: "plan scope warming",
+			name: "plan scope warming insufficient",
 			marker: func(t *testing.T) execution.GapGuardSnapshot {
-				return queryFreeGapMarker(t, selected, version, selected.ScheduleRevision, planWide(execution.GapStatusWarming, 3, 1))
+				return queryFreeGapMarker(t, selected, version, selected.ScheduleRevision, planWide(execution.GapStatusWarming, 2, 1))
 			},
 		},
 		{

@@ -27,7 +27,7 @@ func TestGapConflictLogsBothSidesBeyondErrorTextLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	co := &SlotExecutionCoordinator{ports: Ports{Observer: observability.NewLoggingObserver(observability.New("alarmd", &output), policy)}}
+	logger := observability.NewLoggingObserver(observability.New("alarmd", &output), policy)
 	conflict := &GapGuardConflictError{Persisted: GapGuardProtection{MarkerRevision: 6}}
 	for i := uint32(1); i <= 8; i++ {
 		conflict.Persisted.ScopeDetails = append(conflict.Persisted.ScopeDetails, execution.GapScopeState{
@@ -35,8 +35,10 @@ func TestGapConflictLogsBothSidesBeyondErrorTextLimit(t *testing.T) {
 			ReasonCode: "HISTORY_GAPPED", RequiredFullSlots: 9, ObservedFullSlots: 1})
 	}
 	conflict.Proposed.MutationScopes = []execution.GapScopeMutation{{Kind: execution.GapOpen, ReasonCode: "SNAPSHOT_UNAVAILABLE", RequiredFullSlots: 9}}
-	co.emitObservation(context.Background(), observability.Observation{Component: observability.ComponentScheduler,
-		Stage: observability.StageSlotCompleted, ReasonCode: "GAP_GUARD_CONFLICT", Err: fmt.Errorf("finalization: %w", conflict)})
+	// The scheduler logs Execute's returned error directly; it does not pass
+	// through the coordinator's internal stage observation helper.
+	logger.Observe(context.Background(), observability.Observation{Component: observability.ComponentScheduler,
+		Stage: observability.StageSlotCompleted, Result: observability.ResultFailed, ReasonCode: "GAP_GUARD_CONFLICT", Err: fmt.Errorf("finalization: %w", conflict)})
 	var event struct {
 		GapConflict observability.GapExtensionFacts `json:"gap_conflict"`
 	}
