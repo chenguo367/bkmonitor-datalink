@@ -907,3 +907,47 @@ func TestTheHealthRouteCarriesTheOperatingJudgment(t *testing.T) {
 		t.Errorf("limits = %v, want no headroom estimate and the short trend span", load["limits"])
 	}
 }
+
+// The list response sends the rows it is about and not the others: the
+// served column paged, the other columns and the retained records empty,
+// with every total, line and count still taken from the whole view. They
+// used to ride along whole on every refresh -- 177 KB of demoted rows under
+// a 50-row page at the size of the deployment this page is read on -- on a
+// request the page makes for the lines alone.
+func TestTheListResponseSendsOnlyTheRowsItIsAbout(t *testing.T) {
+	snapshots := columnSnapshots()
+	snapshots[1].GapSkips = map[string]SkippedSpan{
+		"qg-stopped": {FirstSlot: 1, LastSlot: 3, Slots: 3, At: now.Add(-time.Hour), Replica: "pod-b"}}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas())
+
+	_, body := get(t, handler, "/api/objects?limit=1")
+	for _, column := range []string{"demoted", "undecidable", "by_design", "no_data"} {
+		if rows, _ := body[column].([]any); len(rows) != 0 {
+			t.Errorf("%s carries %d rows on the anomaly page, want none", column, len(rows))
+		}
+	}
+	for _, records := range []string{"gap_skips", "pruned_skips"} {
+		if entries, _ := body[records].(map[string]any); len(entries) != 0 {
+			t.Errorf("%s carries %d records on the anomaly page, want none", records, len(entries))
+		}
+	}
+	if body["demoted_total"].(float64) != 1 || body["undecidable_total"].(float64) != 1 || body["by_design_total"].(float64) != 1 {
+		t.Errorf("totals = demoted %v / undecidable %v / by_design %v, want 1 each: counted from the whole view, not the rows sent",
+			body["demoted_total"], body["undecidable_total"], body["by_design_total"])
+	}
+	// The pool asked for: its rows in anomalies, and the demoted list still
+	// not repeated beside them.
+	_, pool := get(t, handler, "/api/objects?column=demoted")
+	if rows, _ := pool["anomalies"].([]any); len(rows) != 1 {
+		t.Errorf("column=demoted serves %d rows, want the pool's one", len(rows))
+	}
+	if rows, _ := pool["demoted"].([]any); len(rows) != 0 {
+		t.Errorf("column=demoted repeats %d rows under demoted, want none", len(rows))
+	}
+	// The record line still opens to its record rows: they were drawn from
+	// the view before the response was trimmed.
+	_, record := get(t, handler, "/api/objects?check="+string(CheckDetectionAbandoned))
+	if rows, _ := record["anomalies"].([]any); len(rows) != 1 || rows[0].(map[string]any)["query_group"] != "qg-stopped" {
+		t.Errorf("check=DETECTION_ABANDONED serves %v, want the one retained record as a row", rows)
+	}
+}

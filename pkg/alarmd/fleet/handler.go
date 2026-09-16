@@ -917,6 +917,17 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 		SortAnomaliesNewestFirst(view.Anomalies)
 	}
 	view.Anomalies = pageOf(view.Anomalies, offset, limit)
+	// The rows this request is not about are not sent. The served column is
+	// paged; the other three, the no-data list and the retained records
+	// were shipped whole under it on every response -- measured at 2074
+	// objects with 350 in the pool: 177 KB of demoted rows and 41 KB of
+	// records under a 50-row page, on a request the page makes every
+	// thirty seconds for the lines and the arithmetic alone. The totals,
+	// the lines and the arithmetic were all counted above from the whole
+	// view and stay; a reader who wants the rows of another column asks
+	// for that column, and gets them paged.
+	view.Demoted, view.Undecidable, view.ByDesign, view.NoData = []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}
+	view.GapSkips, view.PrunedSkips = map[string]SkippedSpan{}, map[string]PrunedSkip{}
 	writeJSON(response, http.StatusOK, ListResponse{
 		Summary: summary,
 		View:    view, Replica: replica, Strategy: strategy, Business: business, Column: column,
