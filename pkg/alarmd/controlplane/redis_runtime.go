@@ -2056,6 +2056,10 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 			ScheduleRevision: plan.ScheduleRevision, ScheduleSpec: plan.ScheduleSpec,
 			CompletionDeadlineUnixMilli: deadline, PartialCapabilities: capabilities})
 	}
+	// Whether this Segment still names what the control plane publishes. Not
+	// part of the no-data hops: it is the same question one level up, asked of
+	// the whole execution content rather than one field of it.
+	runtime.repository.observeSegmentContentFreshness(ctx, schedule.Segment)
 	// Both hops, reported on every Slot whether either is any or none. The
 	// leader's published count and these two are read in order: the first that
 	// reads zero while the one before it does not is where the section is lost.

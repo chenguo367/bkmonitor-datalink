@@ -400,6 +400,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_plans_seen_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
+	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_control_source_withheld_lines_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_state_renewal_gate_resets_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_inert_plans"] = "variableLabels: {}"
@@ -847,6 +848,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// One per hop between the leader's Catalog and the Slot, and no more:
 	// the label is written only from the list observability publishes.
 	bounds[fqName("no_data_plans_by_hop_total")] = len(observability.NoDataHops)
+	// One per state a Segment can be in against the latest publication, and
+	// no more: the label is written only from the list controlplane publishes.
+	bounds[fqName("segment_content_freshness_total")] = len(controlplane.SegmentContentStates)
 	// Named or dropped, and no third thing: each changed object goes to one
 	// of the two, both are created at startup, and the label is written only
 	// from the two constants this package owns.

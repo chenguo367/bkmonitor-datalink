@@ -44,6 +44,7 @@ type phaseTwoMetrics struct {
 	noDataSlotPlans                 *prometheus.CounterVec
 	noDataPlansSeen                 prometheus.Counter
 	noDataPlansByHop                *prometheus.CounterVec
+	segmentContent                  *prometheus.CounterVec
 	sourceWithheldLines             *prometheus.CounterVec
 	activeQGSetCount                prometheus.Gauge
 	activeQGSetBytes                prometheus.Gauge
@@ -295,6 +296,24 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"releases were spent proving from the call graph that every hop carries the section " +
 				"while production read zero at the end of it.",
 		}, []string{"hop"}),
+		segmentContent: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "segment_content_freshness_total",
+			Help: "Slots frozen against a Segment, by whether that Segment names the execution object the " +
+				"latest publication names for its Query Group. current is what a converged fleet " +
+				"reports. stale means the fleet is executing content the control plane no longer " +
+				"publishes: a Segment is cut when the schedule changes and carries the object digest it " +
+				"was cut with, a publication that changes execution content writes new objects and " +
+				"leaves the old ones in place renewed, and a Segment that is never recut keeps the old " +
+				"ones indefinitely. legacy is a Segment that names no object and is served from the " +
+				"Snapshot. unknown is a comparison that could not be made -- no publication, no " +
+				"manifest, or the Query Group is not in it -- and is reported rather than folded into " +
+				"current, because 'could not check' and 'checked and current' are the two a reader must " +
+				"not confuse. " +
+				"Any non-zero stale is worth acting on and nothing else reports it: the objects load, " +
+				"the digests verify, the Plans compile and the Slots pass, so the only symptom is that " +
+				"a change made in the source never takes effect. This is not about any one field; " +
+				"every execution field stops at the Segment the same way.",
+		}, []string{"state"}),
 		sourceWithheldLines: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_source_withheld_lines_total",
 			Help: "Source objects whose disposition changed in a refresh round, by whether the round named " +
@@ -573,6 +592,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, hop := range observability.NoDataHops {
 		metrics.noDataPlansByHop.WithLabelValues(hop)
 	}
+	for _, state := range controlplane.SegmentContentStates {
+		metrics.segmentContent.WithLabelValues(state)
+	}
 	return metrics
 }
 
@@ -600,7 +622,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.noDataPlansSeen, m.noDataPlansByHop, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead,
@@ -788,6 +810,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	// are reported from the control plane and from the evaluation, and the
 	// point of the family is that one reader sees all of them.
 	m.observeNoDataCensus(observation)
+	if facts := observation.SegmentContent; facts != nil {
+		m.segmentContent.WithLabelValues(facts.State).Inc()
+	}
 	if observation.Component == observability.ComponentControlPlane &&
 		observation.Stage == observability.StageSourceWithheld {
 		m.observeSourceWithheld(observation)

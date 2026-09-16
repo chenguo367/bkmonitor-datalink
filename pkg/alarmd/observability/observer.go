@@ -356,8 +356,14 @@ const (
 	// just wrote. It is taken from the payload rather than the struct it was
 	// built from, because what a later process reads is the payload.
 	NoDataHopPublished = "published"
+	// NoDataHopAssembledBytes is how many times the Segment's stored object
+	// names the no-data section, counted in the bytes before anything decodes
+	// them. Beside NoDataHopAssembled it separates a decoding fault from a
+	// Segment naming an object that never carried the section: the two produce
+	// the same zero everywhere downstream.
+	NoDataHopAssembledBytes = "assembled_bytes"
 	// NoDataHopAssembled is what a worker got back from the object store for
-	// the Segment it is executing.
+	// the Segment it is executing, after decoding.
 	NoDataHopAssembled = "assembled"
 	// NoDataHopFrozen is what survived compilation into the Slot's due set.
 	NoDataHopFrozen = "frozen"
@@ -368,7 +374,22 @@ const (
 // NoDataHops is every hop, for a reader to bound the family by and for the
 // metric to create each label at startup: a hop that reports nothing and a hop
 // that reports zero are the whole difference this family exists to show.
-var NoDataHops = []string{NoDataHopPublished, NoDataHopAssembled, NoDataHopFrozen, NoDataHopDue}
+var NoDataHops = []string{
+	NoDataHopPublished, NoDataHopAssembledBytes, NoDataHopAssembled, NoDataHopFrozen, NoDataHopDue,
+}
+
+// SegmentContentFacts says whether the Segment a Slot executes names the object
+// the latest publication names for its Query Group.
+//
+// A Segment carries the object digest it was cut with, and a publication that
+// changes execution content writes new objects and leaves the old ones in
+// place. A fleet whose Segments are not recut keeps executing the old content
+// with every other signal healthy -- the objects load, the digests verify, the
+// Plans compile, the Slots pass -- and the only symptom is that a change made
+// in the source never takes effect.
+type SegmentContentFacts struct {
+	State string
+}
 
 // SourceWithheldFacts is what one withheld object has to say that nothing else
 // already carries.
@@ -1159,6 +1180,7 @@ type Observation struct {
 	NoDataSlot            *NoDataSlotFacts
 	SourceWithheld        *SourceWithheldFacts
 	NoDataCensus          *NoDataCensusFacts
+	SegmentContent        *SegmentContentFacts
 	RuntimeConfig         *RuntimeConfigFacts
 	QueryFailure          *QueryFailureFacts
 	QueryStatus           []QueryStatusFacts
@@ -1255,6 +1277,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.NoDataSlot = normalizeNoDataSlotFacts(observation.NoDataSlot)
 	observation.SourceWithheld = normalizeSourceWithheldFacts(observation.SourceWithheld)
 	observation.NoDataCensus = normalizeNoDataCensusFacts(observation.NoDataCensus)
+	observation.SegmentContent = normalizeSegmentContentFacts(observation.SegmentContent)
 	observation.QueryTiming = normalizeTimingFacts(observation)
 	observation.ShortPeriodCompletion = normalizeShortPeriodCompletion(observation)
 	observation.StateApplyChunk = normalizeStateApplyChunk(observation)
@@ -1792,6 +1815,18 @@ func normalizeSourceWithheldFacts(facts *SourceWithheldFacts) *SourceWithheldFac
 	if normalized.Dropped < 0 {
 		normalized.Dropped = 0
 	}
+	return &normalized
+}
+
+// normalizeSegmentContentFacts drops facts that name no state. A state this
+// build does not know is kept rather than blanked: the label is bounded by the
+// list the control plane publishes, and a state added at its site and not in
+// that list must show as a new label rather than join another one.
+func normalizeSegmentContentFacts(facts *SegmentContentFacts) *SegmentContentFacts {
+	if facts == nil || facts.State == "" {
+		return nil
+	}
+	normalized := *facts
 	return &normalized
 }
 

@@ -164,9 +164,9 @@ func (repository *RedisCatalogRepository) loadQueryGroupObjectsCached(
 	missing := make([]ManifestQueryGroup, 0, len(batch))
 	for _, entry := range batch {
 		if value, ok := repository.objectCache.lookup(repository.queryGroupObjectKey(entry.ObjectDigest)); ok {
-			if object, ok := value.(QueryGroupObject); ok {
+			if stored, ok := value.(storedQueryGroupObject); ok {
 				repository.observeObjectRead(ctx, objectReadKindQueryGroup, objectReadHit)
-				objects[entry.ObjectDigest] = object
+				objects[entry.ObjectDigest] = stored.object
 				continue
 			}
 		}

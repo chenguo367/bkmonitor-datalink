@@ -29,60 +29,23 @@ import (
 // graph has said "this hop carries the section" three times while production
 // read zero at the end of it. Both are reported on every Slot, so a zero here
 // is a measurement rather than an absence.
+//
+// It runs against a Segment the activation reconciler cut, which is the only
+// kind that takes the content path. An earlier version of this test built the
+// Segment by hand; a hand-built one carries no object digest, so it took the
+// Snapshot fallback and proved nothing about the road production drives on.
 func TestFreezingASlotReportsTheAssembledAndFrozenNoDataPlans(t *testing.T) {
-	client := newControlplaneRedis(t)
-	ctx := context.Background()
-	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:no-data-hops", time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The no-data section comes from the source document, the way a real one
-	// does: the Catalog's revision is derived from its content, so a Plan
-	// edited after the build no longer matches the revision it carries.
-	catalog := noDataSourceCatalog(t)
-	snapshot, _, err := repository.PublishCatalog(ctx, catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schedule := frozenSchedule(t, snapshot.Publication, catalog.QueryGroups[0], 60, nil)
-	activation := activationState(t, 1, snapshot, schedule, nil)
-	if err := repository.CompareAndSetInitialScheduleActivation(ctx, controlplane.ActivationExpectation{},
-		activation, []execution.InitialScheduleActivationFact{{Segment: schedule.Segment}}); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newNoDataHopFixture(t, "no-data-hops", noDataSourceCatalog(t))
+	fixture.freeze(t)
 
-	hops := map[string]int{}
-	repository.ConfigureObserver(observability.ObserverFunc(
-		func(_ context.Context, observation observability.Observation) {
-			if facts := observation.NoDataCensus; facts != nil {
-				hops[facts.Hop] += facts.Plans
-			}
-		}))
-
-	compiler, stateSemantics := runtimePlanCompiler(t)
-	runtime, err := controlplane.NewRedisCatalogRuntime(repository, compiler, stateSemantics, 5*time.Second)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runtime.ReadInitialFrozenSchedule(ctx, schedule.Segment.QueryGroup); err != nil {
-		t.Fatal(err)
-	}
-	request := execution.FreezeSlotContractRequest{
-		QueryGroup: schedule.Segment.QueryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
-		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: 60, DuePlans: schedule.DuePlanRefs(60),
-	}
-	if _, err := runtime.FreezeSlotContract(ctx, request); err != nil {
-		t.Fatal(err)
-	}
-
-	if got := hops[observability.NoDataHopAssembled]; got != 1 {
+	if got := fixture.hops[observability.NoDataHopAssembled]; got != 1 {
 		t.Fatalf("assembled = %d, want the one no-data Plan the object store handed back; hops=%+v",
-			got, hops)
+			got, fixture.hops)
 	}
-	if got := hops[observability.NoDataHopFrozen]; got != 1 {
+	if got := fixture.hops[observability.NoDataHopFrozen]; got != 1 {
 		t.Fatalf("frozen = %d, want the one that survived compilation; hops=%+v. A difference from "+
 			"assembled is the section being lost in the compile, which is one of the hops this exists "+
-			"to separate", got, hops)
+			"to separate", got, fixture.hops)
 	}
 }
 
@@ -92,48 +55,28 @@ func TestFreezingASlotReportsTheAssembledAndFrozenNoDataPlans(t *testing.T) {
 // Without this the two hops would answer only when the answer is good news,
 // which is the failure mode every other no-data signal already had.
 func TestFreezingASlotWithoutNoDataPlansReportsZeroAtBothHops(t *testing.T) {
-	client := newControlplaneRedis(t)
-	ctx := context.Background()
-	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:no-data-hops-empty", time.Hour)
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog := validCatalog(t, 80)
-	snapshot, _, err := repository.PublishCatalog(ctx, catalog)
-	if err != nil {
-		t.Fatal(err)
-	}
-	schedule := frozenSchedule(t, snapshot.Publication, catalog.QueryGroups[0], 60, nil)
-	activation := activationState(t, 1, snapshot, schedule, nil)
-	if err := repository.CompareAndSetInitialScheduleActivation(ctx, controlplane.ActivationExpectation{},
-		activation, []execution.InitialScheduleActivationFact{{Segment: schedule.Segment}}); err != nil {
-		t.Fatal(err)
-	}
-
+	fixture := newNoDataHopFixture(t, "no-data-hops-empty", validCatalog(t, 80))
 	reported := map[string]int{}
-	repository.ConfigureObserver(observability.ObserverFunc(
+	fixture.repository.ConfigureObserver(observability.ObserverFunc(
 		func(_ context.Context, observation observability.Observation) {
 			if facts := observation.NoDataCensus; facts != nil {
 				reported[facts.Hop]++
 			}
 		}))
-
-	compiler, stateSemantics := runtimePlanCompiler(t)
-	runtime, err := controlplane.NewRedisCatalogRuntime(repository, compiler, stateSemantics, 5*time.Second)
+	schedule, err := fixture.runtime.ReadFrozenSchedule(context.Background(), fixture.group, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.ReadInitialFrozenSchedule(ctx, schedule.Segment.QueryGroup); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := runtime.FreezeSlotContract(ctx, execution.FreezeSlotContractRequest{
+	if _, err := fixture.runtime.FreezeSlotContract(context.Background(), execution.FreezeSlotContractRequest{
 		QueryGroup: schedule.Segment.QueryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
 		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: 60, DuePlans: schedule.DuePlanRefs(60),
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	for _, hop := range []string{observability.NoDataHopAssembled, observability.NoDataHopFrozen} {
+	for _, hop := range []string{
+		observability.NoDataHopAssembledBytes, observability.NoDataHopAssembled, observability.NoDataHopFrozen,
+	} {
 		if reported[hop] != 1 {
 			t.Fatalf("hop %q was reported %d times on a Slot with no such Plan, want exactly once: a hop "+
 				"that only speaks when it has something to say cannot answer why the next one is empty",
