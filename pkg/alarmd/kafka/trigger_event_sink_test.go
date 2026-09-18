@@ -348,7 +348,7 @@ func TestTriggerEventSinkPublishesTheRawEventWhenThePlanSaysSo(t *testing.T) {
 	// "some JSON came out" is the point: the sink's job is to put this
 	// shape on that topic, and a message the consumer does not read is
 	// indistinguishable from one it does until somebody looks at linkd.
-	for _, field := range []string{"alert_id", "action", "severity", "data_time", "occurred_time", "observation", "strategy", "extra"} {
+	for _, field := range []string{"alert_id", "evaluations", "dimensions", "occurred_at", "produced_at", "labels", "extra_data"} {
 		if _, present := written[field]; !present {
 			t.Fatalf("written message has no %s: %s", field, value)
 		}
@@ -356,6 +356,17 @@ func TestTriggerEventSinkPublishesTheRawEventWhenThePlanSaysSo(t *testing.T) {
 	// And it is not the decision event: that one has no alert_id at all.
 	if _, decision := written["event_kind"]; decision {
 		t.Fatalf("the decision event was written instead of the raw event: %s", value)
+	}
+	// The tenant rides in the record header the consumer's adapter reads,
+	// and agrees with the payload the consumer's cleaner reads.
+	tenant := ""
+	for _, header := range message.Headers {
+		if string(header.Key) == "bk_tenant_id" {
+			tenant = string(header.Value)
+		}
+	}
+	if tenant != event.TenantID || string(written["bk_tenant_id"]) != `"`+event.TenantID+`"` {
+		t.Fatalf("tenant header = %q, payload = %s, want both to carry %q", tenant, written["bk_tenant_id"], event.TenantID)
 	}
 }
 

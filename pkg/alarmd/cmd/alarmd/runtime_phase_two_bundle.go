@@ -602,7 +602,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 			}
 			converter.Pods = resolver
 		}
-		standard, standardErr := linkdoutput.NewConverter(external.Now, recorder.RecordUnmappedSeverity)
+		standard, standardErr := linkdoutput.NewConverter(recorder.RecordUnmappedSeverity)
 		if standardErr != nil {
 			return nil, standardErr
 		}
