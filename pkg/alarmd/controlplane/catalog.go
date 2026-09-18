@@ -639,7 +639,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	// the outcome: a rejected configuration retains the last good Plan, and
 	// that Plan predates the target filter, so the strategy would go on
 	// alerting outside its target with nothing to show for it.
-	targetScope, err := compileTargetScope(item.Target)
+	targetScope, err := compileTargetScope(item.Target, item.QueryConfigs)
 	if err != nil {
 		return sourceCandidate{dispositions: []ObjectDisposition{{
 			SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
