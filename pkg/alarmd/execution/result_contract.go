@@ -8,6 +8,7 @@ package execution
 import (
 	"reflect"
 	"sort"
+	"strconv"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -809,7 +810,9 @@ func validateDegradedGuardCoverage(
 		if finalStateGuardsOutcome(finalStates, outcome) || finalGapGuardsOutcome(finalMarkers, outcome) {
 			continue
 		}
-		return resultContractViolation(codeGuardMissingForDegradedOutcome, "degraded Level outcome lacks an exact durable guard")
+		return resultContractViolation(codeGuardMissingForDegradedOutcome,
+			"degraded Level outcome lacks an exact durable guard"+
+				describeMissingGuard(input, result, loadedMarkers, finalMarkers, finalStates, outcome))
 	}
 	if obligations == 0 &&
 		(result.Disposition == PlanUnavailable || result.Disposition == PlanReadinessGap || result.Disposition == PlanTerminal) &&
@@ -817,6 +820,78 @@ func validateDegradedGuardCoverage(
 		return resultContractViolation(codeGuardMissingPreEvent, "degraded plan completion requires a durable pre-event gap guard")
 	}
 	return nil
+}
+
+// describeMissingGuard renders what the two comparisons saw when neither
+// guarded a degraded outcome. The refusal used to say only that it refused,
+// and a residue of it on two objects could not be attributed: whether the
+// outcome carried this round's fold, the stored marker's reason or a local
+// one, and whether the State guard or the marker was the one that did not
+// match, were not in the line. Each value is a closed vocabulary, a bounded
+// integer or yes/no; who it happened to is on the observation already.
+func describeMissingGuard(
+	input InternalExecution, result PlanEvaluationResult,
+	loadedMarkers, finalMarkers map[GapScope]GapScopeState,
+	finalStates map[StateKeyIdentity]RuntimeStateView, outcome LevelOutcome,
+) string {
+	seriesGuard, levelGuard, stateWritten := "none", "none", false
+	for identity, state := range finalStates {
+		if identity.Plan != outcome.Plan || identity.SeriesIdentityDigest != outcome.SeriesIdentityDigest {
+			continue
+		}
+		if state.SeriesGuard != nil {
+			seriesGuard = string(state.SeriesGuard.ReasonCode)
+		}
+		for _, level := range state.Levels {
+			if level.LevelID == outcome.LevelID {
+				levelGuard = string(level.HistoryCompleteness) + "/" + contractReasonOrNone(level.GapReasonCode)
+			}
+		}
+	}
+	for _, state := range result.StateResults {
+		if state.Mutation.Identity.Plan == outcome.Plan && state.Mutation.Identity.SeriesIdentityDigest == outcome.SeriesIdentityDigest {
+			stateWritten = true
+		}
+	}
+	fold, proposed := RoundGuardReasonForLevel(input.Inputs, outcome.Plan, outcome.LevelID)
+	if !proposed {
+		fold = ""
+	}
+	outcomesForLevel := 0
+	for _, other := range result.LevelOutcomes {
+		if other.Plan == outcome.Plan && other.LevelID == outcome.LevelID && other.SeriesIdentityDigest == outcome.SeriesIdentityDigest {
+			outcomesForLevel++
+		}
+	}
+	return " (outcome " + string(outcome.Outcome) +
+		", reason " + contractReasonOrNone(outcome.ReasonCode) +
+		", level " + strconv.FormatUint(uint64(outcome.LevelID), 10) +
+		", outcomes for level " + strconv.Itoa(outcomesForLevel) +
+		", input full " + formatContractBool(stateInputAllowsAdvance(input, outcome)) +
+		", round fold " + contractReasonOrNone(fold) +
+		", state series guard " + seriesGuard +
+		", state level guard " + levelGuard +
+		", state written " + formatContractBool(stateWritten) +
+		", marker plan loaded " + markerReasonOrNone(loadedMarkers, GapScope{}) +
+		", marker level loaded " + markerReasonOrNone(loadedMarkers, GapScope{HasLevel: true, LevelID: outcome.LevelID}) +
+		", marker plan final " + markerReasonOrNone(finalMarkers, GapScope{}) +
+		", marker level final " + markerReasonOrNone(finalMarkers, GapScope{HasLevel: true, LevelID: outcome.LevelID}) +
+		", guard proposed " + formatContractBool(len(result.GuardBeforeEvents) != 0 || len(result.GuardAfterState) != 0) + ")"
+}
+
+func contractReasonOrNone(reason ReasonCode) string {
+	if reason == "" {
+		return "none"
+	}
+	return string(reason)
+}
+
+func markerReasonOrNone(markers map[GapScope]GapScopeState, scope GapScope) string {
+	marker, found := markers[scope]
+	if !found {
+		return "none"
+	}
+	return string(marker.Status) + "/" + contractReasonOrNone(marker.ReasonCode)
 }
 
 func loadedGapScopes(gaps GapLoadResult, plan PlanIdentity) map[GapScope]GapScopeState {

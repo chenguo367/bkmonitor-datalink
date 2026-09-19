@@ -12,6 +12,7 @@ package execution_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -1137,8 +1138,29 @@ func TestDegradedOutcomeCannotClearItsOnlyFinalGuard(t *testing.T) {
 			GuardAfterState: []execution.PlanGapMutation{clear},
 		}},
 	}
-	if err := result.Validate(request); err == nil {
+	err := result.Validate(request)
+	if err == nil {
 		t.Fatal("clearing the only exact guard before Progress must fail")
+	}
+	// The refusal says what the two comparisons saw. A residue of this line
+	// on two production objects could not be attributed because it said
+	// only that it refused; each value here is what a reader needs to tell
+	// "the outcome carried this round's fold" from "the stored marker's
+	// reason" from "a local one", and the State guard from the marker.
+	for _, want := range []string{
+		"outcome TERMINAL", "reason " + string(reason), "level 5", "outcomes for level 1",
+		"input full yes", "round fold none",
+		"state series guard none", "state level guard none", "state written no",
+		"marker plan loaded GAPPED/" + string(reason), "marker level loaded none",
+		"marker plan final none", "marker level final none", "guard proposed yes",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("refusal %q does not say %q", err.Error(), want)
+		}
+	}
+	var refusal *execution.ResultContractError
+	if !errors.As(err, &refusal) || refusal.Code() != "GUARD_MISSING_FOR_DEGRADED_OUTCOME" {
+		t.Fatalf("refusal code = %v, want GUARD_MISSING_FOR_DEGRADED_OUTCOME with the description in the text only", err)
 	}
 }
 
