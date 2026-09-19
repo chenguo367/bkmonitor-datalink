@@ -6,10 +6,10 @@
 package linkdoutput
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
@@ -60,9 +60,26 @@ func noDataDecision() *contract.TriggerEventV1 {
 	})
 }
 
-func convert(t *testing.T, event *contract.TriggerEventV1) map[string]json.RawMessage {
+// twoLevelDecision is the shape the consumer's multi-level contract exists
+// for: the same data point crossed the fatal threshold while the warning
+// level's recovery window completed.
+func twoLevelDecision() *contract.TriggerEventV1 {
+	return decision(func(event *contract.TriggerEventV1) {
+		event.PrimaryLevelID = 1
+		event.LevelResults = []contract.LevelResultV1{
+			{LevelID: 1, Priority: 0, Result: contract.LevelResultAbnormal,
+				DecisionWindow: contract.DecisionWindowV1{Trigger: contract.TriggerWindowEvidenceV1{
+					WindowSize: 5, RequiredAnomalies: 2, ObservedAnomalies: 2, AnomalyBeginTime: 1756684740,
+				}}},
+			{LevelID: 2, Priority: 1, Result: contract.LevelResultRecovery},
+			{LevelID: 3, Priority: 2, Result: contract.LevelResultNormal},
+		}
+	})
+}
+
+func convertRaw(t *testing.T, event *contract.TriggerEventV1) Event {
 	t.Helper()
-	converter, err := NewConverter(func() time.Time { return time.Unix(1756684870, 0).UTC() }, nil)
+	converter, err := NewConverter(nil)
 	if err != nil {
 		t.Fatalf("NewConverter() error = %v", err)
 	}
@@ -70,9 +87,18 @@ func convert(t *testing.T, event *contract.TriggerEventV1) map[string]json.RawMe
 	if err != nil {
 		t.Fatalf("Convert() error = %v", err)
 	}
+	return written
+}
+
+func convert(t *testing.T, event *contract.TriggerEventV1) map[string]json.RawMessage {
+	t.Helper()
+	written := convertRaw(t, event)
 	var message map[string]json.RawMessage
 	if err := json.Unmarshal(written.Payload, &message); err != nil {
 		t.Fatalf("decode written message: %v", err)
+	}
+	if err := checkStandardPayload(written.Payload); err != nil {
+		t.Fatalf("the consumer's cleaner would refuse this message: %v\n%s", err, written.Payload)
 	}
 	return message
 }
@@ -86,97 +112,132 @@ func assertFields(t *testing.T, message map[string]json.RawMessage, want map[str
 	}
 }
 
-// The whole message, field by field, because every one of them is read by
-// something downstream and a silently wrong one is not a failure there.
-//
-// The field names are the consumer's, taken from its RawEvent contract, not
-// names chosen here: a message whose fields this process finds reasonable and
-// the consumer does not read is a message that arrives and does nothing.
-func TestAnAbnormalDecisionIsWrittenAsARawEvent(t *testing.T) {
-	message := convert(t, decision(nil))
-	assertFields(t, message, map[string]string{
-		"bk_tenant_id":  `"tenant-a"`,
-		"event_id":      `"` + strings.Repeat("a", 64) + `"`,
-		"alert_id":      `"` + strings.Repeat("b", 32) + `"`,
-		"data_time":     `"2025-09-01T00:00:00Z"`,
-		"occurred_time": `"2025-09-01T00:01:00Z"`,
-		"title":         `"Strategy 123 level 2 triggered"`,
-		"content":       `"value=92.5% at 2025-09-01T00:00:00Z; 3 of 5 points in the window were anomalous"`,
-		"action":        `"triggered"`,
-		"severity":      `"warning"`,
-		// Whole, with the target identity still in it.
-		"dimensions":  `{"bk_target_cloud_id":"0","bk_target_ip":"127.0.0.1","device":"sda"}`,
-		"observation": `{"signal_type":"metric","evaluation_family":"metric_algorithm","value":92.5,"unit":"%","observed_at":"2025-09-01T00:00:00Z"}`,
-		"subject":     `{"type":"HOST","native_id":"127.0.0.1|0"}`,
-		"strategy":    `{"id":"123","version":"7","bk_biz_id":"2"}`,
-		"extra": `{"anomaly_begin_time":"2025-08-31T23:58:00Z","window":{"size":5,"anomalies":3,"required":2},` +
-			`"event_semantic_digest":"` + strings.Repeat("c", 64) + `","emitted_time":"2025-09-01T00:01:10Z"}`,
-	})
-	// The fields the consumer fills are absent rather than empty. A value here
-	// is either overwritten, which makes it noise, or believed, which makes it
-	// a fact this process did not establish.
-	for _, field := range []string{"record_id", "received_time", "alert_start_time", "status", "action_reason", "labels", "produced_at", "alarm_source_id"} {
+func assertAbsent(t *testing.T, message map[string]json.RawMessage, fields ...string) {
+	t.Helper()
+	for _, field := range fields {
 		if _, written := message[field]; written {
-			t.Errorf("%s = %s, want it left to the consumer", field, message[field])
+			t.Errorf("%s = %s, want it absent", field, message[field])
 		}
 	}
 }
 
+// The whole message, field by field, because every one of them is read by
+// something downstream and a silently wrong one is not a failure there.
+//
+// The field names are the consumer's, taken from its standard cleaner
+// (pkg/linkd/internal/cleaner/raw_event.go), not names chosen here: a message
+// whose fields this process finds reasonable and the consumer does not read
+// is a message that arrives and does nothing - or, for this consumer, one
+// that is refused whole.
+func TestAnAbnormalDecisionIsWrittenAsAStandardEvent(t *testing.T) {
+	message := convert(t, decision(nil))
+	assertFields(t, message, map[string]string{
+		"bk_tenant_id": `"tenant-a"`,
+		"event_id":     `"` + strings.Repeat("a", 64) + `"`,
+		"alert_id":     `"` + strings.Repeat("b", 32) + `"`,
+		"title":        `"Strategy 123 level 2 triggered"`,
+		"content":      `"value=92.5% at 2025-09-01T00:00:00Z; 3 of 5 points in the window were anomalous"`,
+		"values":       `{"value":92.5}`,
+		"evaluations":  `[{"severity":"warning","action":"triggered","action_reason":""}]`,
+		// Whole, with the target identity still in it.
+		"dimensions":  `{"bk_target_cloud_id":"0","bk_target_ip":"127.0.0.1","device":"sda"}`,
+		"subject":     `{"system":"cmdb","type":"host","id":"127.0.0.1|0"}`,
+		"occurred_at": `"2025-09-01T00:00:00Z"`,
+		"produced_at": `"2025-09-01T00:01:00Z"`,
+		"labels":      `{"strategy_id":123,"strategy_version":7,"bk_biz_id":2}`,
+		"extra_data": `{"anomaly_begin_time":"2025-08-31T23:58:00Z","window":{"size":5,"anomalies":3,"required":2},` +
+			`"event_semantic_digest":"` + strings.Repeat("c", 64) + `","signal_type":"metric",` +
+			`"evaluation_family":"metric_algorithm","unit":"%"}`,
+	})
+	// The previous protocol's fields are gone, not renamed beside the new
+	// ones: the consumer does not read a top-level severity or action any
+	// more, and a message carrying both shapes would be read as whichever
+	// the reader happened to look at.
+	assertAbsent(t, message, "severity", "action", "action_reason", "data_time", "occurred_time",
+		"observation", "strategy", "extra", "record_id", "received_at", "alarm_source_id")
+}
+
 // The recovery of the same series: the same alert_id, the consumer's own word
 // for it, and the round that decided it.
-func TestARecoveryDecisionIsWrittenAsARawEvent(t *testing.T) {
+func TestARecoveryDecisionIsWrittenAsAStandardEvent(t *testing.T) {
 	message := convert(t, decision(func(event *contract.TriggerEventV1) {
 		event.EventKind = contract.TriggerEventRecovery
 		event.LevelResults[0].Result = contract.LevelResultRecovery
 		event.EvaluationTime = 1756685160
 	}))
 	assertFields(t, message, map[string]string{
-		"alert_id":      `"` + strings.Repeat("b", 32) + `"`,
-		"action":        `"recovered"`,
-		"title":         `"Strategy 123 level 2 recovered"`,
-		"occurred_time": `"2025-09-01T00:06:00Z"`,
-		"data_time":     `"2025-09-01T00:00:00Z"`,
+		"alert_id":    `"` + strings.Repeat("b", 32) + `"`,
+		"evaluations": `[{"severity":"warning","action":"resolved","action_reason":""}]`,
+		"title":       `"Strategy 123 level 2 resolved"`,
+		"occurred_at": `"2025-09-01T00:00:00Z"`,
+		"produced_at": `"2025-09-01T00:06:00Z"`,
 	})
+}
+
+// Every decided level is written and every undecided one is left out. The
+// consumer keeps a lifecycle per severity and reads an absent level as
+// "nothing said": writing resolved for a level that stayed normal would close
+// nothing, and a resolution sent only at the primary level would miss the
+// level the consumer's alert is actually open at.
+func TestEveryDecidedLevelIsAnEvaluationAndUndecidedOnesAreNot(t *testing.T) {
+	message := convert(t, twoLevelDecision())
+	assertFields(t, message, map[string]string{
+		"evaluations": `[{"severity":"critical","action":"triggered","action_reason":""},` +
+			`{"severity":"warning","action":"resolved","action_reason":""}]`,
+		"title": `"Strategy 123 level 1 triggered"`,
+	})
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(message["extra_data"], &extra); err != nil {
+		t.Fatal(err)
+	}
+	// The window and the anomaly start are the primary level's.
+	if string(extra["window"]) != `{"size":5,"anomalies":2,"required":2}` || string(extra["anomaly_begin_time"]) != `"2025-08-31T23:59:00Z"` {
+		t.Fatalf("extra_data = %s, want the primary level's window", message["extra_data"])
+	}
+	unavailable := convert(t, decision(func(event *contract.TriggerEventV1) {
+		event.LevelResults = append(event.LevelResults, contract.LevelResultV1{LevelID: 1, Result: contract.LevelResultUnavailable})
+	}))
+	if string(unavailable["evaluations"]) != `[{"severity":"warning","action":"triggered","action_reason":""}]` {
+		t.Fatalf("evaluations = %s, want a level this round could not evaluate left unsaid", unavailable["evaluations"])
+	}
 }
 
 // An absence round: its own family, no value, the tag in the dimensions, and
 // the period count as the evaluation carried it.
-func TestANoDataDecisionIsWrittenAsARawEvent(t *testing.T) {
+func TestANoDataDecisionIsWrittenAsAStandardEvent(t *testing.T) {
 	message := convert(t, noDataDecision())
 	assertFields(t, message, map[string]string{
-		"action":   `"triggered"`,
-		"alert_id": `"` + strings.Repeat("d", 32) + `"`,
-		"content":  `"no data for 5 periods, as of 2025-09-01T00:00:00Z"`,
-		// evaluation_family is what tells this apart from a threshold alert on
-		// the same series for a consumer that routes on it; the tag in the
-		// dimensions is what tells the two apart for one that does not.
-		"observation": `{"signal_type":"metric","evaluation_family":"no_data"}`,
+		"evaluations": `[{"severity":"warning","action":"triggered","action_reason":""}]`,
+		"alert_id":    `"` + strings.Repeat("d", 32) + `"`,
+		"content":     `"no data for 5 periods, as of 2025-09-01T00:00:00Z"`,
 		"dimensions":  `{"__NO_DATA_DIMENSION__":true,"bk_target_cloud_id":"0","bk_target_ip":"127.0.0.1","device":"sda"}`,
 	})
+	// No values: the synthetic point carries a marker, not a measurement,
+	// and the consumer would accept the count as a number.
+	assertAbsent(t, message, "values")
 	var extra map[string]json.RawMessage
-	if err := json.Unmarshal(message["extra"], &extra); err != nil {
+	if err := json.Unmarshal(message["extra_data"], &extra); err != nil {
 		t.Fatal(err)
 	}
-	if string(extra["no_data_periods"]) != "5" {
-		t.Fatalf("extra.no_data_periods = %s, want the count the evaluation carried", extra["no_data_periods"])
+	if string(extra["no_data_periods"]) != "5" || string(extra["evaluation_family"]) != `"no_data"` {
+		t.Fatalf("extra_data = %s, want the period count and the no_data family", message["extra_data"])
+	}
+	if _, written := extra["unit"]; written {
+		t.Fatalf("extra_data = %s, want no unit on an absence", message["extra_data"])
 	}
 }
 
 // The action has two values and no others.
 //
-// updated and closed are the consumer's, and both are lifetime decisions: one
-// says an open alert changed, the other that it timed out. This process sees
-// neither, and writing one would take a decision away from the only component
-// that can make it.
-// The words are written out rather than taken from this package's constants.
-// Checking a produced action against ActionRecovered would pass for any string
-// that constant happened to hold, including the one the previous protocol
-// used; these two are the consumer's vocabulary, and they are the thing under
-// test.
-func TestTheActionIsOnlyEverTriggeredOrRecovered(t *testing.T) {
+// closed is the consumer's third and is a lifetime decision: it says an alert
+// timed out. This process does not see that, and writing it would take a
+// decision away from the only component that can make it. The words are
+// written out rather than taken from this package's constants: they are the
+// consumer's vocabulary, and they are the thing under test.
+func TestTheActionIsOnlyEverTriggeredOrResolved(t *testing.T) {
 	want := map[string]string{
 		contract.TriggerEventAbnormal: "triggered",
-		contract.TriggerEventRecovery: "recovered",
+		contract.TriggerEventRecovery: "resolved",
 	}
 	seen := map[string]bool{}
 	for kind, expected := range want {
@@ -192,7 +253,6 @@ func TestTheActionIsOnlyEverTriggeredOrRecovered(t *testing.T) {
 	if len(seen) != 2 {
 		t.Fatalf("the two decision kinds produced %d actions, want one each", len(seen))
 	}
-	// And nothing else is a decision kind.
 	for _, kind := range []string{"", "UPDATED", "CLOSED", contract.LevelResultNormal} {
 		if _, err := actionFor(kind); err == nil {
 			t.Fatalf("kind %q produced an action", kind)
@@ -200,39 +260,60 @@ func TestTheActionIsOnlyEverTriggeredOrRecovered(t *testing.T) {
 	}
 }
 
-// The target's identity fields stay in the dimensions.
-//
-// The consumer computes its fingerprint from the strategy id and these
-// dimensions. With the identity taken out -- which is what the previous
-// protocol did, moving it into the subject -- every object of one strategy
-// projects onto the same dimensions, so they all collapse into one alert. The
-// subject carries the identity too, and that is not a duplicate: the subject is
-// for resolving the instance, the dimensions are for telling instances apart.
-func TestTheTargetIdentityStaysInTheDimensions(t *testing.T) {
-	message := convert(t, decision(nil))
-	var dimensions map[string]json.RawMessage
-	if err := json.Unmarshal(message["dimensions"], &dimensions); err != nil {
+// A declared identity dimension the series did not carry is null here, and
+// null is not a value the consumer's dimension type has: one such entry
+// refuses the whole message. It is left out, which says the same thing.
+func TestANullDimensionIsLeftOutRatherThanRefusedDownstream(t *testing.T) {
+	message := convert(t, decision(func(event *contract.TriggerEventV1) {
+		event.RecordRef.Dimensions["bk_host_id"] = json.RawMessage("null")
+		event.RecordRef.Dimensions["mount"] = json.RawMessage(" null ")
+	}))
+	if string(message["dimensions"]) != `{"bk_target_cloud_id":"0","bk_target_ip":"127.0.0.1","device":"sda"}` {
+		t.Fatalf("dimensions = %s, want the null entries left out", message["dimensions"])
+	}
+}
+
+// The projection's additional dimensions never repeat a key the record
+// carries - the consumer refuses a key present in both maps - and never carry
+// a null.
+func TestAdditionalDimensionsNeverRepeatARecordDimension(t *testing.T) {
+	message := convert(t, decision(func(event *contract.TriggerEventV1) {
+		event.RecordRef.Dimensions["app_name"] = json.RawMessage(`"shop"`)
+		event.Subject.Subject.Additional = map[string]json.RawMessage{
+			"app_name":     json.RawMessage(`"shop-from-strategy"`),
+			"service_name": json.RawMessage(`"api"`),
+			"empty":        json.RawMessage("null"),
+		}
+	}))
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(message["extra_data"], &extra); err != nil {
 		t.Fatal(err)
 	}
-	for _, field := range []string{"bk_target_ip", "bk_target_cloud_id", "device"} {
-		if _, kept := dimensions[field]; !kept {
-			t.Fatalf("dimensions = %v, want %s: the consumer's fingerprint reads these, and without the "+
-				"identity every object of this strategy is one alert", dimensions, field)
-		}
+	if string(extra["additional_dimensions"]) != `{"service_name":"api"}` {
+		t.Fatalf("additional_dimensions = %s, want only what the record did not carry", extra["additional_dimensions"])
+	}
+	none := convert(t, decision(func(event *contract.TriggerEventV1) {
+		event.Subject.Subject.Additional = map[string]json.RawMessage{"device": json.RawMessage(`"sdb"`)}
+	}))
+	var noneExtra map[string]json.RawMessage
+	if err := json.Unmarshal(none["extra_data"], &noneExtra); err != nil {
+		t.Fatal(err)
+	}
+	if _, written := noneExtra["additional_dimensions"]; written {
+		t.Fatalf("extra_data = %s, want no additional dimensions when every one repeats the record", none["extra_data"])
 	}
 }
 
 // Two rounds of the same series carry the same alert key, and a different
 // series carries a different one.
 //
-// The consumer uses it to tie a recovery to the trigger it closes, so a key
-// that moved between rounds would leave every alert open; one shared across
-// series would close somebody else's.
+// The consumer keys its lifecycle on it, so a key that moved between rounds
+// would leave every alert open; one shared across series would close
+// somebody else's.
 func TestTheAlertKeyIsTheSeriesDedupeKey(t *testing.T) {
 	event := decision(nil)
 	first := convert(t, event)
 	second := convert(t, decision(func(e *contract.TriggerEventV1) {
-		// A later round of the same series: a new point, a new decision time.
 		e.RecordRef.SourceTime = 1756684860
 		e.EvaluationTime = 1756684920
 	}))
@@ -249,23 +330,51 @@ func TestTheAlertKeyIsTheSeriesDedupeKey(t *testing.T) {
 	}
 }
 
-// data_time is the data point, occurred_time is the round. Reading the clock
-// for either would make every replayed Slot claim the anomaly happened now.
-func TestTheTimesAreTheDataPointAndTheRoundAndNotTheClock(t *testing.T) {
-	message := convert(t, decision(nil))
-	var extra map[string]json.RawMessage
-	if err := json.Unmarshal(message["extra"], &extra); err != nil {
-		t.Fatal(err)
+// occurred_at is the data point and produced_at is the round that judged it.
+// Neither is the clock: the consumer asks that a retried or replayed message
+// keep its produced_at, and a converter that read the clock could not
+// promise that. So the same decision converts to the same bytes, every time.
+func TestTheTimesAreFactsOfTheDecisionAndAConversionIsRepeatable(t *testing.T) {
+	event := decision(nil)
+	first := convertRaw(t, event)
+	second := convertRaw(t, event)
+	if !bytes.Equal(first.Payload, second.Payload) {
+		t.Fatalf("two conversions of one decision differ:\n%s\n%s", first.Payload, second.Payload)
 	}
-	if string(message["data_time"]) == string(extra["emitted_time"]) ||
-		string(message["occurred_time"]) == string(extra["emitted_time"]) {
-		t.Fatalf("message = %v: the data point and the round must come from the decision, not the clock", message)
+	message := convert(t, event)
+	if string(message["produced_at"]) != `"2025-09-01T00:01:00Z"` || string(message["occurred_at"]) != `"2025-09-01T00:00:00Z"` {
+		t.Fatalf("occurred_at = %s produced_at = %s, want the data point and the round", message["occurred_at"], message["produced_at"])
+	}
+}
+
+// The three labels the consumer's enrichment requires are positive integers
+// on the wire - number tokens, not strings - because its processors refuse
+// a string, a zero or a fraction with invalid_field and the alert then
+// carries no strategy, resource or metric.
+func TestTheLabelsArePositiveIntegerNumbers(t *testing.T) {
+	message := convert(t, decision(nil))
+	var labels map[string]json.Number
+	decoder := json.NewDecoder(bytes.NewReader(message["labels"]))
+	decoder.UseNumber()
+	if err := decoder.Decode(&labels); err != nil {
+		t.Fatalf("labels = %s: %v", message["labels"], err)
+	}
+	for _, name := range []string{"strategy_id", "strategy_version", "bk_biz_id"} {
+		value, err := labels[name].Int64()
+		if err != nil || value <= 0 {
+			t.Fatalf("labels.%s = %s, want a positive integer", name, labels[name])
+		}
+	}
+	converter, _ := NewConverter(nil)
+	if _, err := converter.Convert(decision(func(e *contract.TriggerEventV1) { e.BusinessID = "biz" })); err == nil {
+		t.Fatal("a business identity that is not a number was written")
 	}
 }
 
 // The platform's three levels are named; a level beyond them is passed through
 // rather than rejected or guessed at, because levels are stated in the strategy
-// snapshot and the platform may grow more.
+// snapshot and the platform may grow more. Two levels that end up under one
+// name are refused, because the consumer would refuse the whole message.
 func TestSeverityNamesTheBuiltInLevelsAndPassesOthersThrough(t *testing.T) {
 	for name, test := range map[string]struct {
 		level contract.LevelResultV1
@@ -281,14 +390,23 @@ func TestSeverityNamesTheBuiltInLevelsAndPassesOthersThrough(t *testing.T) {
 			t.Errorf("%s: severity = %q, want %q", name, got, test.want)
 		}
 	}
-	// A derived name is the one case the consumer cannot map, so it has to be
-	// distinguishable from the rest: it means this build has no mapping for a
-	// level the platform grew, and the alert will land on a default severity.
 	if SeverityIsBuiltIn(contract.LevelResultV1{LevelID: 9}) {
 		t.Fatal("a level with neither a built-in name nor its own must be reported as unmapped")
 	}
 	if !SeverityIsBuiltIn(contract.LevelResultV1{LevelID: 9, LevelCode: "notice"}) {
 		t.Fatal("a level that names itself is mapped")
+	}
+	unmapped := 0
+	converter, _ := NewConverter(func(uint32) { unmapped++ })
+	if _, err := converter.Convert(decision(func(e *contract.TriggerEventV1) {
+		e.LevelResults = append(e.LevelResults, contract.LevelResultV1{LevelID: 9, Result: contract.LevelResultAbnormal})
+	})); err != nil || unmapped != 1 {
+		t.Fatalf("an unnamed level: err %v, reported %d times, want shipped and reported once", err, unmapped)
+	}
+	if _, err := converter.Convert(decision(func(e *contract.TriggerEventV1) {
+		e.LevelResults = append(e.LevelResults, contract.LevelResultV1{LevelID: 9, LevelCode: "warning", Result: contract.LevelResultAbnormal})
+	})); err == nil {
+		t.Fatal("two levels under one severity name were written; the consumer refuses that whole")
 	}
 }
 
@@ -298,11 +416,7 @@ func TestARecordWithNoObjectCarriesNoSubject(t *testing.T) {
 	message := convert(t, decision(func(e *contract.TriggerEventV1) {
 		e.Subject = &contract.MonitorSubjectContext{Dimensions: map[string]json.RawMessage{}}
 	}))
-	if _, written := message["subject"]; written {
-		t.Fatalf("subject = %s, want none", message["subject"])
-	}
-	// And the dimensions are still whole: no subject is not a reason to drop
-	// what the record said.
+	assertAbsent(t, message, "subject")
 	var dimensions map[string]json.RawMessage
 	if err := json.Unmarshal(message["dimensions"], &dimensions); err != nil {
 		t.Fatal(err)
@@ -313,19 +427,29 @@ func TestARecordWithNoObjectCarriesNoSubject(t *testing.T) {
 }
 
 // A Plan this build could not label leaves the field out rather than guessing.
-// A consumer routing on signal_type would send a log alert down the metric path
-// on a wrong value, and has nothing to notice it by; an absent field it can see.
 func TestAnUnnamedSignalTypeIsOmittedRatherThanGuessed(t *testing.T) {
 	message := convert(t, decision(func(e *contract.TriggerEventV1) { e.SignalType = "" }))
-	var observation map[string]json.RawMessage
-	if err := json.Unmarshal(message["observation"], &observation); err != nil {
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(message["extra_data"], &extra); err != nil {
 		t.Fatal(err)
 	}
-	if _, written := observation["signal_type"]; written {
-		t.Fatalf("observation = %v, want no signal type", observation)
+	if _, written := extra["signal_type"]; written {
+		t.Fatalf("extra_data = %v, want no signal type", extra)
 	}
-	if string(observation["evaluation_family"]) != `"metric_algorithm"` {
-		t.Fatalf("observation = %v: the family is decided here and is always written", observation)
+	if string(extra["evaluation_family"]) != `"metric_algorithm"` {
+		t.Fatalf("extra_data = %v: the family is decided here and is always written", extra)
+	}
+}
+
+// A decision over several values has no single observed value; none is
+// written rather than one picked.
+func TestSeveralObservedValuesWriteNoValue(t *testing.T) {
+	message := convert(t, decision(func(e *contract.TriggerEventV1) {
+		e.Observed.Values["other"] = json.RawMessage(`1`)
+	}))
+	assertAbsent(t, message, "values")
+	if !strings.Contains(string(message["content"]), "other=1%") {
+		t.Fatalf("content = %s, want every value stated", message["content"])
 	}
 }
 
@@ -335,13 +459,14 @@ func TestADecisionWithNoAlertIdentityIsRefused(t *testing.T) {
 	for name, mutate := range map[string]func(*contract.TriggerEventV1){
 		"no strategy revision": func(e *contract.TriggerEventV1) { e.StrategyRef = nil },
 		"no series identity":   func(e *contract.TriggerEventV1) { e.DedupeMD5 = "" },
+		"no decided level":     func(e *contract.TriggerEventV1) { e.LevelResults[0].Result = contract.LevelResultNormal },
 	} {
-		converter, err := NewConverter(time.Now, nil)
+		converter, err := NewConverter(nil)
 		if err != nil {
 			t.Fatalf("NewConverter() error = %v", err)
 		}
 		if _, err := converter.Convert(decision(mutate)); err == nil {
-			t.Fatalf("%s: Convert() accepted a decision with no alert identity", name)
+			t.Fatalf("%s: Convert() accepted a decision it cannot write", name)
 		}
 	}
 }

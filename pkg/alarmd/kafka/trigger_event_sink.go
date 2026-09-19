@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/Shopify/sarama"
 
@@ -112,7 +111,7 @@ func newTriggerEventSink(
 	if err != nil {
 		return nil, err
 	}
-	standard, err := linkdoutput.NewConverter(time.Now, nil)
+	standard, err := linkdoutput.NewConverter(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +120,10 @@ func newTriggerEventSink(
 		legacyTopic: "alarmd_0bkmonitor_backend_event", maxLegacyBytes: 524288,
 	}, nil
 }
+
+// tenantHeader is the record header the consumer's Kafka adapter reads the
+// tenant from.
+const tenantHeader = "bk_tenant_id"
 
 func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.TriggerEventV1) error {
 	if sink == nil || sink.core == nil {
@@ -142,10 +145,14 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			}
 			// Keyed by the alert identity, so one alert's history stays on one
 			// partition and its trigger and its resolution arrive in order.
+			// The tenant rides in a header as well as in the payload: the
+			// consumer's adapter reads the header and its cleaner reads the
+			// payload, and the two have to agree.
 			messages[index] = &sarama.ProducerMessage{
-				Topic: sink.core.outputTopic,
-				Key:   sarama.StringEncoder(converted.AlertID),
-				Value: sarama.ByteEncoder(converted.Payload),
+				Topic:   sink.core.outputTopic,
+				Key:     sarama.StringEncoder(converted.AlertID),
+				Value:   sarama.ByteEncoder(converted.Payload),
+				Headers: []sarama.RecordHeader{{Key: []byte(tenantHeader), Value: []byte(converted.TenantID)}},
 			}
 			continue
 		}
