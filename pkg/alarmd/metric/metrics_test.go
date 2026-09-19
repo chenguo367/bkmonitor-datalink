@@ -293,6 +293,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_series_admission_total":                       "variableLabels: {filter,result,reason}",
 		"bkmonitor_alarmd_unmapped_severity_total":                      "variableLabels: {level}",
 		"bkmonitor_alarmd_cmdb_host_index_hosts":                        "variableLabels: {}",
+		"bkmonitor_alarmd_cmdb_service_instance_index_instances":        "variableLabels: {}",
 		"bkmonitor_alarmd_host_disable_monitor_states":                  "variableLabels: {}",
 		"bkmonitor_alarmd_cmdb_host_index_age_seconds":                  "variableLabels: {kind}",
 		"bkmonitor_alarmd_cmdb_host_index_degraded":                     "variableLabels: {reason}",
@@ -701,11 +702,12 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// Levels 1..64 plus "other". Empty in a healthy build: the platform's
 		// three levels all have names here, so a series appearing at all is the
 		// signal.
-		fqName("unmapped_severity_total"):     65,
-		fqName("cmdb_host_index_hosts"):       1,
-		fqName("host_disable_monitor_states"): 1,
-		fqName("cmdb_host_index_age_seconds"): 2,
-		fqName("cmdb_host_index_degraded"):    len(cmdbIndexReasons),
+		fqName("unmapped_severity_total"):               65,
+		fqName("cmdb_host_index_hosts"):                 1,
+		fqName("cmdb_service_instance_index_instances"): 1,
+		fqName("host_disable_monitor_states"):           1,
+		fqName("cmdb_host_index_age_seconds"):           2,
+		fqName("cmdb_host_index_degraded"):              len(cmdbIndexReasons),
 		// Every combination is created at construction, so these are exact rather
 		// than an upper bound: a series that has never happened still publishes a
 		// zero, which is what lets "no violations" be told apart from "not wired".

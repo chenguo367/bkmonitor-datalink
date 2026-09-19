@@ -508,7 +508,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// A series is evaluated for a strategy only inside that strategy's
 	// monitoring target. The facts it is decided on come from the platform's
 	// CMDB host cache, on the database this client already uses.
-	seriesAdmission, cmdbIndex, err := buildSeriesAdmission(ctx, cfg, cmdbClient, recorder, hostStatus)
+	seriesAdmission, cmdbIndex, err := buildSeriesAdmission(ctx, cfg, cmdbClient, recorder, logger, hostStatus)
 	if err != nil {
 		return nil, err
 	}
