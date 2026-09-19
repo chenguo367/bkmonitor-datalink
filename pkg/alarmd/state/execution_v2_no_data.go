@@ -247,6 +247,18 @@ func (store *ExecutionStore) renewNoDataHash(
 		// would take a Plan's threshold detection down over the lifetime of a
 		// record that is still perfectly readable. The two differ on purpose
 		// and the reason is that the old path had no way to say it at all.
+		//
+		// The policy is still one policy, because this branch never runs on its
+		// own: the condition is a routed backend that does not implement
+		// LifetimeBackend, which is deployment-wide and static rather than per
+		// Plan, and the gap guard's load on that same backend stops the Slot
+		// anyway. So carrying on here loses no protection and gains a named,
+		// countable reason from the first round after startup, where stopping
+		// gives one failure per Plan per round with nothing naming the cause.
+		// Making the two genuinely alike means detecting the capability when
+		// the store is opened, so the wiring fails at startup rather than
+		// sounding on every Slot; that is a general ruling and is filed
+		// separately.
 		renewal.ReasonCode = execution.ReasonCode(contract.ReasonBackendCapabilityMissing)
 	default:
 		renewal.ReasonCode = execution.ReasonCode(contract.ReasonRedisUnavailable)
