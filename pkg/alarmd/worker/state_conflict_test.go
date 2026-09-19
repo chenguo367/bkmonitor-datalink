@@ -58,3 +58,34 @@ func TestStateConflictErrorNamesARepeatedKey(t *testing.T) {
 		t.Fatalf("reason of a repeated-key conflict = %q/%v, want STATE_VERSION_CONFLICT: the code stays, the text carries the cause", reason, ok)
 	}
 }
+
+// A conflict that names its comparison says so in its text with the two
+// revisions it compared, and the reason code stays the same: the code is
+// what the retry decision and the terminal line read, the text is what a
+// reader acts on.
+func TestStateConflictErrorNamesTheComparisonThatRefused(t *testing.T) {
+	for _, test := range []struct {
+		err  *worker.StateConflictError
+		want string
+	}{
+		{&worker.StateConflictError{Stage: "state apply did not complete", Status: "STATE_VERSION_CONFLICT",
+			Kind: execution.StateVersionConflictMissing, ExpectedRevision: 7},
+			"state apply did not complete: STATE_VERSION_CONFLICT (missing: expected revision 7, stored revision 0)"},
+		{&worker.StateConflictError{Stage: "state apply did not complete", Status: "STATE_VERSION_CONFLICT",
+			Kind: execution.StateVersionConflictRevisionMoved, ExpectedRevision: 7, StoredRevision: 9, VersionComparison: execution.ApplyVersionPersistedNewer},
+			"state apply did not complete: STATE_VERSION_CONFLICT (revision_moved: expected revision 7, stored revision 9, stored version PERSISTED_NEWER)"},
+		{&worker.StateConflictError{Stage: "state apply did not complete", Status: "STATE_VERSION_CONFLICT",
+			Kind: execution.StateVersionConflictRevisionMoved, ExpectedRevision: 0, StoredRevision: 1, VersionComparison: execution.ApplyVersionEqual, RepeatedKey: true},
+			"state apply did not complete: STATE_VERSION_CONFLICT (revision_moved: expected revision 0, stored revision 1, stored version PERSISTED_EQUAL) (repeated key in the same request)"},
+		{&worker.StateConflictError{Stage: "state mutation preflight", Status: "STATE_VERSION_CONFLICT",
+			Kind: execution.StateVersionConflictSameVersionOtherStatement, ExpectedRevision: 3, StoredRevision: 3, VersionComparison: execution.ApplyVersionEqual},
+			"state mutation preflight: STATE_VERSION_CONFLICT (same_version_other_statement: expected revision 3, stored revision 3, stored version PERSISTED_EQUAL)"},
+	} {
+		if test.err.Error() != test.want {
+			t.Fatalf("text = %q, want %q", test.err.Error(), test.want)
+		}
+		if reason, ok := worker.StateConflictReason(test.err); !ok || string(reason) != contract.ReasonStateVersionConflict {
+			t.Fatalf("reason of %q = %q/%v, want STATE_VERSION_CONFLICT: the kind is in the text, not the code", test.want, reason, ok)
+		}
+	}
+}

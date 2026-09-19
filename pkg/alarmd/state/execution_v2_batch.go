@@ -145,7 +145,7 @@ func classifyWitnessedMutation(witness runtimeWitness, mutation execution.StateM
 	item := execution.StateApplyItemResult{Identity: mutation.Identity}
 	if witness.missing {
 		if mutation.ExpectedBlobRevision != 0 {
-			item.Status = execution.StateApplyVersionConflict
+			item.MarkVersionConflict(execution.StateVersionConflictMissing, execution.RuntimeStateView{})
 			return item, false
 		}
 		return item, true
@@ -153,16 +153,16 @@ func classifyWitnessedMutation(witness runtimeWitness, mutation execution.StateM
 	view := execution.RuntimeStateView{BlobRevision: witness.blobRevision,
 		PersistedApplyVersion: witness.applyVersion, PersistedMutationDigest: witness.mutationDigest}
 	view.VersionComparison = execution.CompareApplyVersion(view.PersistedApplyVersion, mutation.ApplyVersion)
-	disposition, kind := execution.ClassifyStateMutationDetail(view, mutation)
-	switch disposition {
+	classified := execution.ClassifyStateMutationDetail(view, mutation)
+	switch classified.Disposition {
 	case execution.StateAlreadyApplied:
-		item.Status, item.AlreadyApplied, item.StoredBlobRevision = execution.StateApplyAlreadyApplied, kind, view.BlobRevision
+		item.Status, item.AlreadyApplied, item.StoredBlobRevision = execution.StateApplyAlreadyApplied, classified.AlreadyApplied, view.BlobRevision
 		return item, false
 	case execution.StateStaleVersion:
 		item.Status = execution.StateApplyStale
 		return item, false
 	case execution.StateVersionConflict:
-		item.Status = execution.StateApplyVersionConflict
+		item.MarkVersionConflict(classified.VersionConflict, view)
 		return item, false
 	}
 	return item, true
@@ -185,7 +185,7 @@ func (store *ExecutionStore) classifyFencedOutcome(
 		item.Status = execution.StateApplied
 	case FencedWriteConflictMissing:
 		if mutation.ExpectedBlobRevision != 0 {
-			item.Status = execution.StateApplyVersionConflict
+			item.MarkVersionConflict(execution.StateVersionConflictMissing, execution.RuntimeStateView{})
 		} else {
 			item.Status, item.ReasonCode = execution.StateApplyCASConflict, execution.ReasonCode(contract.ReasonStateWriteRetryable)
 		}
@@ -201,14 +201,14 @@ func (store *ExecutionStore) classifyFencedOutcome(
 			return item
 		}
 		view.VersionComparison = execution.CompareApplyVersion(view.PersistedApplyVersion, mutation.ApplyVersion)
-		disposition, kind := execution.ClassifyStateMutationDetail(view, mutation)
-		switch disposition {
+		classified := execution.ClassifyStateMutationDetail(view, mutation)
+		switch classified.Disposition {
 		case execution.StateAlreadyApplied:
-			item.Status, item.AlreadyApplied, item.StoredBlobRevision = execution.StateApplyAlreadyApplied, kind, view.BlobRevision
+			item.Status, item.AlreadyApplied, item.StoredBlobRevision = execution.StateApplyAlreadyApplied, classified.AlreadyApplied, view.BlobRevision
 		case execution.StateStaleVersion:
 			item.Status = execution.StateApplyStale
 		case execution.StateVersionConflict:
-			item.Status = execution.StateApplyVersionConflict
+			item.MarkVersionConflict(classified.VersionConflict, view)
 		default:
 			item.Status, item.ReasonCode = execution.StateApplyCASConflict, execution.ReasonCode(contract.ReasonStateWriteRetryable)
 		}
@@ -435,20 +435,20 @@ func (store *ExecutionStore) applyRuntimeSequential(
 			return item
 		}
 		view.VersionComparison = execution.CompareApplyVersion(view.PersistedApplyVersion, mutation.ApplyVersion)
-		disposition, kind := execution.ClassifyStateMutationDetail(view, mutation)
-		switch disposition {
+		classified := execution.ClassifyStateMutationDetail(view, mutation)
+		switch classified.Disposition {
 		case execution.StateAlreadyApplied:
-			item.Status, item.AlreadyApplied, item.StoredBlobRevision = execution.StateApplyAlreadyApplied, kind, view.BlobRevision
+			item.Status, item.AlreadyApplied, item.StoredBlobRevision = execution.StateApplyAlreadyApplied, classified.AlreadyApplied, view.BlobRevision
 			return item
 		case execution.StateStaleVersion:
 			item.Status = execution.StateApplyStale
 			return item
 		case execution.StateVersionConflict:
-			item.Status = execution.StateApplyVersionConflict
+			item.MarkVersionConflict(classified.VersionConflict, view)
 			return item
 		}
 	} else if mutation.ExpectedBlobRevision != 0 {
-		item.Status = execution.StateApplyVersionConflict
+		item.MarkVersionConflict(execution.StateVersionConflictMissing, execution.RuntimeStateView{})
 		return item
 	}
 	encoded, err := encodeRuntime(mutation, mutation.ExpectedBlobRevision+1)

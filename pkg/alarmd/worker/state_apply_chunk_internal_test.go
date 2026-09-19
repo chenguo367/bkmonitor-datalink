@@ -44,6 +44,10 @@ type chunkStore struct {
 	// skewCall answers its first item ALREADY_APPLIED at a revision one above
 	// the one the mutation expected: the write landed and was sent again.
 	skewCall int
+	// conflictCall refuses its items STATE_VERSION_CONFLICT: the first and
+	// third with the key missing, the second moved two revisions ahead under
+	// a newer ApplyVersion, the fourth without saying which comparison.
+	conflictCall int
 }
 
 func (store *chunkStore) LoadRuntime(context.Context, execution.StatePreflightRequest) (execution.StatePreflightResult, error) {
@@ -84,6 +88,12 @@ func (store *chunkStore) ApplyRuntime(ctx context.Context, request execution.Sta
 		result.Items[0].StoredBlobRevision = request.Items[0].ExpectedBlobRevision + 1
 		result.Items[1].Status, result.Items[1].AlreadyApplied = execution.StateApplyAlreadyApplied, execution.StateAlreadyAppliedStable
 		result.Items[1].StoredBlobRevision = request.Items[1].ExpectedBlobRevision
+	case store.conflictCall:
+		result.Items[0].MarkVersionConflict(execution.StateVersionConflictMissing, execution.RuntimeStateView{})
+		result.Items[1].MarkVersionConflict(execution.StateVersionConflictRevisionMoved, execution.RuntimeStateView{
+			BlobRevision: request.Items[1].ExpectedBlobRevision + 2, VersionComparison: execution.ApplyVersionPersistedNewer})
+		result.Items[2].MarkVersionConflict(execution.StateVersionConflictMissing, execution.RuntimeStateView{})
+		result.Items[3].Status = execution.StateApplyVersionConflict
 	}
 	return result, nil
 }
@@ -415,5 +425,58 @@ func TestApplyStateCountsAlreadyAppliedBySiteAndKindAndKeepsTheSkew(t *testing.T
 		facts.Skew.ExpectedRevision != 7 || facts.Skew.StoredRevision != 8 ||
 		facts.Skew.SeriesIdentity != string(mutations[0].Identity.SeriesIdentityDigest) {
 		t.Fatalf("revision skew sample = %+v, want site apply, expected 7, stored 8, series %s", facts.Skew, mutations[0].Identity.SeriesIdentityDigest)
+	}
+}
+
+// A refused chunk counts every conflicting item by the comparison that
+// refused it and carries the first one's values in the error, so the line
+// says "3 missing, 1 moved" and not "STATE_VERSION_CONFLICT" four times; an
+// item the store refused without a kind counts as other rather than as any
+// kind a reader would act on.
+func TestApplyStateCountsVersionConflictsByKindAndNamesTheFirst(t *testing.T) {
+	store := &chunkStore{conflictCall: 1}
+	fixture := newChunkFixture(store, 8192)
+	mutations := chunkMutations(4)
+	for index := range mutations {
+		mutations[index].ExpectedBlobRevision = 7
+	}
+	_, err := fixture.coordinator.applyState(context.Background(), execution.OperationNormal, fixture.contract, fixture.fence, chunkRetention, mutations, nil)
+	var refusal *StateConflictError
+	if !errors.As(err, &refusal) {
+		t.Fatalf("applyState() error = %v, want a StateConflictError", err)
+	}
+	if refusal.Kind != execution.StateVersionConflictMissing || refusal.ExpectedRevision != 7 || refusal.StoredRevision != 0 || refusal.VersionComparison != "" {
+		t.Fatalf("refusal = %+v, want the first item's kind missing, expected 7, stored 0", refusal)
+	}
+	if want := "state apply did not complete: STATE_VERSION_CONFLICT (missing: expected revision 7, stored revision 0)"; refusal.Error() != want {
+		t.Fatalf("refusal text = %q, want %q", refusal.Error(), want)
+	}
+	applied := fixture.chunkObservations(observability.StageStateApplied)
+	if len(applied) != 1 {
+		t.Fatalf("state_applied observations = %d, want the one refused chunk", len(applied))
+	}
+	facts := applied[0].StateVersionConflict
+	if facts == nil || string(applied[0].ReasonCode) != contract.ReasonStateVersionConflict {
+		t.Fatalf("refused chunk line = reason %s facts %+v, want STATE_VERSION_CONFLICT with conflict facts on the same line", applied[0].ReasonCode, facts)
+	}
+	wantCounts := map[observability.StateVersionConflictKey]int64{
+		{Site: observability.StateAlreadyAppliedAtApply, Kind: observability.StateVersionConflictMissing}:       2,
+		{Site: observability.StateAlreadyAppliedAtApply, Kind: observability.StateVersionConflictRevisionMoved}: 1,
+		{Site: observability.StateAlreadyAppliedAtApply, Kind: "other"}:                                         1,
+	}
+	if len(facts.Counts) != len(wantCounts) {
+		t.Fatalf("conflict counts = %v, want %v", facts.Counts, wantCounts)
+	}
+	for key, want := range wantCounts {
+		if facts.Counts[key] != want {
+			t.Fatalf("conflict counts[%+v] = %d, want %d; counts=%v", key, facts.Counts[key], want, facts.Counts)
+		}
+	}
+	if len(facts.Samples) != 3 || facts.Samples[0].Kind != observability.StateVersionConflictMissing ||
+		facts.Samples[0].SeriesIdentity != string(mutations[0].Identity.SeriesIdentityDigest) ||
+		facts.Samples[1].Kind != observability.StateVersionConflictRevisionMoved || facts.Samples[1].ExpectedRevision != 7 ||
+		facts.Samples[1].StoredRevision != 9 || facts.Samples[1].VersionComparison != string(execution.ApplyVersionPersistedNewer) ||
+		facts.Samples[2].Kind != "other" {
+		t.Fatalf("conflict samples = %+v, want one per kind in first-seen order: missing(series 0), revision_moved(7 -> 9, PERSISTED_NEWER), other", facts.Samples)
 	}
 }

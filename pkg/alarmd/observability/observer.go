@@ -1397,6 +1397,7 @@ type Observation struct {
 	StateApplyChunk       *StateApplyChunkFacts
 	StateWriteReuse       *StateWriteReuseFacts
 	StateAlreadyApplied   *StateAlreadyAppliedFacts
+	StateVersionConflict  *StateVersionConflictFacts
 	ActiveQGSet           *ActiveQGSetFacts
 	ScheduleCutover       *ScheduleCutoverFacts
 	ReplayExpiry          *ReplayExpiryFacts
