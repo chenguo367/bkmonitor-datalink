@@ -410,6 +410,87 @@ func TestSeverityNamesTheBuiltInLevelsAndPassesOthersThrough(t *testing.T) {
 	}
 }
 
+// The consumer refuses a severity over 32 bytes whole. A level code that long
+// is written as the derived name and counted as unmapped: the alert arrives
+// at the consumer's default level, visibly, instead of not arriving.
+func TestALevelCodeTheConsumerCannotCarryIsDerivedAndCounted(t *testing.T) {
+	long := strings.Repeat("s", MaxSeverityBytes+1)
+	exact := strings.Repeat("s", MaxSeverityBytes)
+	if got := severityFor(contract.LevelResultV1{LevelID: 9, LevelCode: long}); got != "level_9" {
+		t.Fatalf("severity for a %d-byte code = %q, want the derived name", len(long), got)
+	}
+	if got := severityFor(contract.LevelResultV1{LevelID: 9, LevelCode: exact}); got != exact {
+		t.Fatalf("severity for a %d-byte code = %q, want the code itself: the bound is inclusive", len(exact), got)
+	}
+	if SeverityIsBuiltIn(contract.LevelResultV1{LevelID: 9, LevelCode: long}) {
+		t.Fatal("a level whose code the consumer cannot carry must be reported as unmapped")
+	}
+	unmapped := 0
+	converter, _ := NewConverter(func(uint32) { unmapped++ })
+	event, err := converter.Convert(decision(func(e *contract.TriggerEventV1) {
+		e.LevelResults = append(e.LevelResults, contract.LevelResultV1{LevelID: 9, LevelCode: long, Result: contract.LevelResultAbnormal})
+	}))
+	if err != nil || unmapped != 1 {
+		t.Fatalf("a level with an over-long code: err %v, reported %d times, want shipped and reported once", err, unmapped)
+	}
+	if err := checkStandardPayload(event.Payload); err != nil {
+		t.Fatalf("the shipped message would be refused by the consumer: %v", err)
+	}
+	if !strings.Contains(string(event.Payload), `"severity":"level_9"`) || strings.Contains(string(event.Payload), long) {
+		t.Fatalf("payload = %s, want the derived name and not the over-long code", event.Payload)
+	}
+}
+
+// A message carries at most 32 evaluations. The level budget is held below
+// that at configuration time (config refuses a larger max_levels_per_plan),
+// so the converter's own refusal is a contract violation for a decision that
+// was never compiled - and it is a refusal, not a truncation.
+func TestMoreDecidedLevelsThanOneMessageCarriesIsRefused(t *testing.T) {
+	converter, _ := NewConverter(nil)
+	_, err := converter.Convert(decision(func(e *contract.TriggerEventV1) {
+		for id := uint32(4); len(e.LevelResults) <= MaxEvaluations; id++ {
+			e.LevelResults = append(e.LevelResults, contract.LevelResultV1{LevelID: id, Result: contract.LevelResultAbnormal})
+		}
+	}))
+	if err == nil || !strings.Contains(err.Error(), "evaluations") {
+		t.Fatalf("err = %v, want a refusal naming the evaluations bound", err)
+	}
+	if _, err := converter.Convert(decision(func(e *contract.TriggerEventV1) {
+		for id := uint32(4); len(e.LevelResults) < MaxEvaluations; id++ {
+			e.LevelResults = append(e.LevelResults, contract.LevelResultV1{LevelID: id, Result: contract.LevelResultAbnormal})
+		}
+	})); err != nil {
+		t.Fatalf("exactly %d decided levels refused: %v", MaxEvaluations, err)
+	}
+}
+
+// Every object type the projection can produce has a spelling for the
+// consumer, and the table spells nothing the projection cannot produce; the
+// unknown branch of wireSubjectFor is therefore the empty type alone. Walked
+// over the contract's list rather than the ones somebody remembered.
+func TestEverySubjectTypeTheProjectionProducesHasAConsumerSpelling(t *testing.T) {
+	types := contract.MonitorSubjectTypes()
+	if len(types) == 0 {
+		t.Fatal("the contract lists no subject types")
+	}
+	for _, kind := range types {
+		naming, known := subjectSystems[kind]
+		if !known || naming.System == "" || naming.Type == "" {
+			t.Fatalf("subject type %q has no consumer spelling", kind)
+		}
+		subject := wireSubjectFor(contract.MonitorSubject{Type: kind, ID: "x"})
+		if subject == nil || subject.System != naming.System || subject.Type != naming.Type || subject.ID != "x" {
+			t.Fatalf("subject type %q written as %+v", kind, subject)
+		}
+	}
+	if len(subjectSystems) != len(types) {
+		t.Fatalf("subjectSystems spells %d types, the projection produces %d", len(subjectSystems), len(types))
+	}
+	if wireSubjectFor(contract.MonitorSubject{Type: "", ID: "x"}) != nil || wireSubjectFor(contract.MonitorSubject{Type: types[0]}) != nil {
+		t.Fatal("an empty type or an empty id must write no subject")
+	}
+}
+
 // A record with no object is a real answer. Writing a subject for it would
 // attach the alert to something.
 func TestARecordWithNoObjectCarriesNoSubject(t *testing.T) {
