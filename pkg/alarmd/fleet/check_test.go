@@ -40,9 +40,16 @@ import (
 // the strategy whose definition the compiler refused. A deployment whose
 // source withheld every strategy read HEALTHY with expected 0 and had no line
 // anywhere that said so.
+//
+// Twenty-five since interrupted bookkeeping: a Slot an earlier attempt had
+// executed whole -- events sent, state written -- and then could not write
+// the Progress for was closed later as GAP_SKIPPED and filed as detection
+// that never happened. It is the one visible face of a control-plane store
+// failing writes, and it is not a loss of detection, so it is its own line on
+// the record side.
 func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
-	if got := len(Checks()); got != 24 || len(checkAnswers) != 24 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 24: a new check has to "+
+	if got := len(Checks()); got != 25 || len(checkAnswers) != 25 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 25: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -94,9 +101,13 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
 	producers := map[Check]Anomaly{
-		CheckRoundsStalled:       {Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", Stalled: true},
-		CheckSlotsOverdue:        {Kind: KindOverdueWake},
-		CheckDetectionAbandoned:  {Kind: KindDegradedRun, CauseReason: "GAP_SKIPPED"},
+		CheckRoundsStalled:      {Kind: KindDegradedRun, CauseReason: "QUERY_TIMEOUT", Stalled: true},
+		CheckSlotsOverdue:       {Kind: KindOverdueWake},
+		CheckDetectionAbandoned: {Kind: KindDegradedRun, CauseReason: "GAP_SKIPPED"},
+		// The same code with the evidence that an earlier attempt executed
+		// every Plan: bookkeeping interrupted, not detection abandoned.
+		CheckBookkeepingAbandoned: {Kind: KindDegradedRun, CauseReason: "GAP_SKIPPED",
+			ExecutionEvidence: &ExecutionEvidence{Kind: "STATE_APPLIED", Reading: "STATE_APPLIED", PlansApplied: 2, PlansTotal: 2}},
 		CheckTimelinePruned:      {Kind: KindDegradedRun, CauseReason: "SCHEDULE_PRUNED"},
 		CheckDependencyDown:      {Kind: KindBlockedRun, ReasonCode: "source_error"},
 		CheckDefect:              {Kind: KindBlockedRun, ReasonCode: "panic"},

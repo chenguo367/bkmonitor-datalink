@@ -51,6 +51,15 @@ const (
 	CheckRoundsStalled      Check = "ROUNDS_STALLED"
 	CheckDetectionAbandoned Check = "DETECTION_ABANDONED"
 	CheckTimelinePruned     Check = "TIMELINE_PRUNED"
+	// BookkeepingAbandoned is the span a query-free completion closed whose
+	// every Slot an earlier attempt had already executed -- events sent,
+	// state written -- and then failed to write the Progress for. Detection
+	// happened; what was lost is the bookkeeping. It used to be filed under
+	// DETECTION_ABANDONED as detection that never happened, and it is the
+	// one visible face of a control-plane store failing writes, so it has a
+	// line of its own: on the record side, never on the work list, with a
+	// running count and the latest occurrence for the trend.
+	CheckBookkeepingAbandoned Check = "BOOKKEEPING_ABANDONED"
 	// NoDataMemoryRefused is a Plan whose absence memory the store will not
 	// take: the round is fine -- it judged, its threshold results were sent
 	// -- and what it learned about absence is not written down, so every
@@ -152,6 +161,7 @@ var checkAnswers = map[Check]struct {
 	CheckRoundsStalled:         {OwnerAlarmd, GroupByReplica},
 	CheckDetectionAbandoned:    {OwnerAlarmd, GroupByLoss},
 	CheckTimelinePruned:        {OwnerAlarmd, GroupByLoss},
+	CheckBookkeepingAbandoned:  {OwnerAlarmd, GroupByReplica},
 	CheckNoDataMemoryRefused:   {OwnerAlarmd, GroupByReasonCode},
 	CheckDependencyDown:        {OwnerAlarmd, GroupByBlocked},
 	CheckDefect:                {OwnerAlarmd, GroupByBlocked},
@@ -196,6 +206,7 @@ var checkOrder = []Check{
 	CheckRoundsStalled,
 	CheckDetectionAbandoned,
 	CheckTimelinePruned,
+	CheckBookkeepingAbandoned,
 	CheckNoDataMemoryRefused,
 	CheckDependencyDown,
 	CheckDefect,
@@ -461,6 +472,10 @@ type CheckReport struct {
 	// whether anything moves it -- and the two replicas in the group cannot
 	// say that.
 	Rebalance *RebalanceFacts `json:"rebalance,omitempty"`
+	// Bookkeeping is on BOOKKEEPING_ABANDONED only: the replicas' running
+	// count of Slots executed and then closed without their Progress, the
+	// objects, and the latest -- the trend the records cannot carry.
+	Bookkeeping *BookkeepingFacts `json:"bookkeeping,omitempty"`
 }
 
 // CheckGroup is one fold of a check's objects: the objects sharing one key.
@@ -721,6 +736,15 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			entry := ensure(check)
 			entry.partial = entry.partial || columnPartial
 			add(entry, anomaly.Finding.Group, anomaly)
+			if check == CheckBookkeepingAbandoned {
+				// Interrupted bookkeeping is a record, never work: the object
+				// detected and alerted. Counted with the records, newest kept.
+				entry.retained++
+				if !anomaly.ReasonLastAt.IsZero() && anomaly.ReasonLastAt.After(entry.newest) {
+					entry.newest = anomaly.ReasonLastAt
+				}
+				continue
+			}
 			entry.current++
 			if columnIndex < len(columnNames) && columnNames[columnIndex] == ColumnDemoted {
 				entry.demoted++
@@ -754,7 +778,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		for _, row := range rows {
 			entry := ensure(row.Finding.Check)
 			add(entry, row.Finding.Group, &row)
-			if row.Loss == LossOngoing || row.Loss == LossAfterRestart {
+			if (row.Loss == LossOngoing || row.Loss == LossAfterRestart) && row.Finding.Check != CheckBookkeepingAbandoned {
 				entry.current++
 				if entry.reasons == nil {
 					entry.reasons = map[string]int{}
@@ -923,6 +947,11 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			}
 		}
 	}
+	// The running count rides on the bookkeeping line, and makes the line
+	// when the records alone would not: a record keeps one span per object.
+	if view != nil && view.BookkeepingAbandoned != nil && view.BookkeepingAbandoned.Slots > 0 {
+		ensure(CheckBookkeepingAbandoned)
+	}
 	reports := make([]CheckReport, 0, len(tallies))
 	for check, entry := range tallies {
 		report := CheckReport{Code: check, Owner: checkAnswers[check].Owner, GroupBy: checkAnswers[check].GroupBy,
@@ -933,6 +962,10 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			Recovered: entry.recovered}
 		if check.SourceStanding() {
 			report.Strategies = entry.sourceStrategies
+		}
+		if check == CheckBookkeepingAbandoned && view != nil && view.BookkeepingAbandoned != nil {
+			facts := *view.BookkeepingAbandoned
+			report.Bookkeeping = &facts
 		}
 		if !entry.newest.IsZero() {
 			newest := entry.newest
@@ -953,7 +986,8 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			// recoveries behind it is a problem that recovered.
 			switch {
 			case group.Codes != nil:
-				group.Recovery = recoveryOf(group, key == string(LossHistorical) || key == string(LossWhileDemoted))
+				group.Recovery = recoveryOf(group, key == string(LossHistorical) || key == string(LossWhileDemoted) ||
+					check == CheckBookkeepingAbandoned)
 			case group.Recovered > 0:
 				group.Recovery = RecoveryRecovered
 			}
@@ -1044,7 +1078,9 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 	theirs := map[string]struct{}{}
 	count := func(list []Anomaly) {
 		for _, anomaly := range list {
-			if anomaly.Finding.Check == "" {
+			// Interrupted bookkeeping is a record and nobody's work: its
+			// object detected and alerted, and its line carries its own count.
+			if anomaly.Finding.Check == "" || anomaly.Finding.Check == CheckBookkeepingAbandoned {
 				continue
 			}
 			switch checkAnswers[anomaly.Finding.Check].Owner {
@@ -1071,7 +1107,12 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 		// stopped loss is the record.
 		var ongoingNewest, retainedNewest time.Time
 		whileDemoted := map[string]struct{}{}
-		lossRecords(view, now, func(queryGroup string, _, _ Check, _ string, skip SkippedSpan, loss Loss) {
+		lossRecords(view, now, func(queryGroup string, check, _ Check, _ string, skip SkippedSpan, loss Loss) {
+			if check == CheckBookkeepingAbandoned {
+				// Not a loss of detection in progress or on record: the
+				// bookkeeping line counts these itself.
+				return
+			}
 			switch loss {
 			case LossOngoing:
 				ours[queryGroup] = struct{}{}
@@ -1215,7 +1256,7 @@ func UnderCheck(check Check, group string, view *View, now time.Time) []Anomaly 
 	// keep records of past loss are the exception: the record grows, and
 	// what a reader can act on is the newest entry -- who was just lost and
 	// which span -- not the oldest.
-	if check == CheckDetectionAbandoned || check == CheckTimelinePruned {
+	if check == CheckDetectionAbandoned || check == CheckTimelinePruned || check == CheckBookkeepingAbandoned {
 		SortAnomaliesNewestFirst(list)
 	} else {
 		sortOldestFirst(list)
@@ -1263,7 +1304,14 @@ func skippedRows(view *View, listed map[string]struct{}, now time.Time) ([]Anoma
 		item := Anomaly{QueryGroup: queryGroup, Kind: KindSkippedSpan, ReasonCode: reason,
 			Since: skip.At, SinceFrom: SinceSnapshotContinuity, Replica: skip.Replica, Skip: &record,
 			Strategies: skip.Strategies, Loss: loss}
-		item.Finding = Finding{Check: check, Group: string(loss), Owner: checkAnswers[check].Owner}
+		group := string(loss)
+		if check == CheckBookkeepingAbandoned {
+			// Folded on the replica whose Progress write was lost: which store
+			// client is failing is the question, not what kind of loss -- there
+			// is no detection loss.
+			group = skip.Replica
+		}
+		item.Finding = Finding{Check: check, Group: group, Owner: checkAnswers[check].Owner}
 		item.Attribution = attributionOf(item)
 		// The record in the one shape every failure is read in: a persisted
 		// skip, which is the confirmed loss.

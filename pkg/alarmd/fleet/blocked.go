@@ -320,6 +320,14 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 	if anomaly.Kind == KindNoData {
 		return nil
 	}
+	// A span every Slot of which an earlier attempt executed, or an object
+	// whose latest completion found its Slot executed whole, is not detection
+	// stuck anywhere: the reading it would get -- SCHEDULE, capacity, a
+	// confirmed skip or an unconfirmed result -- is the one the row exists to
+	// contradict.
+	if fullyExecuted(anomaly) {
+		return nil
+	}
 	blocked := &Blocked{Stage: StageUnlocated, Dependency: DependencyUnlocated, Class: ClassUnlocated}
 	// The code the check was decided on, in the same order checkOf reads
 	// them, so the reading and the line cannot come from two different codes.

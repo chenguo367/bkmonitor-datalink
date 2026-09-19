@@ -180,9 +180,24 @@ func codeVerdict(anomaly Anomaly) (check Check, decided bool) {
 		if verdict.check == CheckBackendNotAnswering && queryRejected(anomaly.Failure) {
 			return refusalCheck(anomaly.Failure), true
 		}
+		if verdict.check == CheckDetectionAbandoned && fullyExecuted(anomaly) {
+			// The Slot was given up for bookkeeping, not for detection: an
+			// earlier attempt had executed every Plan.
+			return CheckBookkeepingAbandoned, true
+		}
 		return verdict.check, true
 	}
 	return "", false
+}
+
+// fullyExecuted reports whether the row's evidence says an earlier attempt
+// executed every Plan of the Slot the row was decided on: the latest
+// completion's evidence for an object row, the span's for a record.
+func fullyExecuted(anomaly Anomaly) bool {
+	if anomaly.Skip != nil {
+		return anomaly.Skip.FullyApplied()
+	}
+	return anomaly.ExecutionEvidence != nil && anomaly.ExecutionEvidence.Reading == routedetail.EvidenceReadingFullyApplied
 }
 
 // decisionCodes is the row's codes in the order they are trusted, shared by
