@@ -3167,12 +3167,100 @@ type ProgressIdentity struct {
 	QueryGroup QueryGroupIdentity
 }
 
+// ExecutionEvidenceKind is what a query-free completion learned about how far
+// an earlier attempt at this Slot got.
+type ExecutionEvidenceKind string
+
+const (
+	// EvidenceStateApplied is at least one due Plan whose state an earlier
+	// attempt wrote. The events went out before the state did, so this also
+	// means those Plans alerted.
+	EvidenceStateApplied ExecutionEvidenceKind = "STATE_APPLIED"
+	// EvidenceNoneFound is a mark that was read and was not there. It is the
+	// ordinary case: a Slot that never got past its query leaves none.
+	EvidenceNoneFound ExecutionEvidenceKind = "NONE_FOUND"
+	// EvidenceUnreadable is a mark that could not be read, which is not the
+	// same as one that is not there. The difference is the whole point of
+	// having the value: "nothing ran" and "nobody could say" lead somewhere
+	// different, and folding the second into the first is how a detection that
+	// did happen gets recorded as one that never did.
+	EvidenceUnreadable ExecutionEvidenceKind = "UNREADABLE"
+)
+
+// ExecutionEvidenceKinds is every value, for a metric to bound itself by.
+var ExecutionEvidenceKinds = []ExecutionEvidenceKind{
+	EvidenceStateApplied, EvidenceNoneFound, EvidenceUnreadable,
+}
+
+// ExecutionEvidence is what a query-free completion found out about an earlier
+// attempt at the same Slot.
+//
+// A query-free completion happens when a Slot missed its replay window: it does
+// not query, does not load state, and holds nothing but the frozen due Plans.
+// So it cannot tell "this Slot was never evaluated" from "this Slot evaluated,
+// sent its events, wrote its state, and then failed to write down that it had
+// done so" -- and it used to record both as a gap, which is the second one
+// recorded as the first.
+//
+// It appears only on the two query-free kinds. A completion that came from the
+// query path is its own evidence.
+type ExecutionEvidence struct {
+	Kind ExecutionEvidenceKind
+	// PlansApplied is how many of PlansTotal an earlier attempt got to. Both
+	// are carried rather than a ratio or a flag: a Slot that applied three of
+	// ten Plans is a different situation from one that applied ten, and the
+	// fold below treats them differently.
+	PlansApplied int
+	PlansTotal   int
+}
+
+// Validate checks one reading of an earlier attempt against itself.
+func (evidence ExecutionEvidence) Validate() error {
+	if evidence.PlansApplied < 0 || evidence.PlansTotal < 0 {
+		return errors.New("alarmd execution: execution evidence counts must not be negative")
+	}
+	if evidence.PlansApplied > evidence.PlansTotal {
+		return errors.New("alarmd execution: execution evidence applied more Plans than the Slot had")
+	}
+	switch evidence.Kind {
+	case EvidenceStateApplied:
+		if evidence.PlansApplied < 1 {
+			return errors.New("alarmd execution: STATE_APPLIED evidence names no Plan")
+		}
+	case EvidenceNoneFound, EvidenceUnreadable:
+		if evidence.PlansApplied != 0 {
+			return fmt.Errorf("alarmd execution: %s evidence names %d applied Plans",
+				evidence.Kind, evidence.PlansApplied)
+		}
+	default:
+		return fmt.Errorf("alarmd execution: unknown execution evidence kind %q", evidence.Kind)
+	}
+	return nil
+}
+
+// FullyApplied reports whether an earlier attempt got to every Plan this Slot
+// was going to evaluate.
+//
+// It is the one question the gap fold asks, and it lives here so the fold and
+// the page cannot answer it differently. Anything less than all of them is a
+// partial execution: some Plans really were not evaluated, and the Slot still
+// owes them a gap.
+func (evidence ExecutionEvidence) FullyApplied() bool {
+	return evidence.Kind == EvidenceStateApplied && evidence.PlansTotal > 0 &&
+		evidence.PlansApplied == evidence.PlansTotal
+}
+
 type SlotCompletion struct {
 	Contract   FrozenExecutionContractRef
 	Kind       CompletionKind
 	Primary    *PrimaryInputFact
 	Result     Result
 	ReasonCode ReasonCode
+	// Evidence is how far an earlier attempt at this Slot got, and is set only
+	// on the two query-free kinds. Nil is a real state and not an omission to
+	// be worked around: a completion written by a build from before this
+	// existed has none, and the fold treats that exactly as it did before.
+	Evidence *ExecutionEvidence
 }
 
 type ProgressCommitRequest struct {
@@ -3219,7 +3307,20 @@ func (request ProgressCommitRequest) Validate() error {
 		if request.Completion.ReasonCode != expectedReason {
 			return errors.New("alarmd execution: query-free completion requires its exact reason")
 		}
+		if evidence := request.Completion.Evidence; evidence != nil {
+			if err := evidence.Validate(); err != nil {
+				return err
+			}
+		}
 		return nil
+	}
+	if request.Completion.Evidence != nil {
+		// A completion that came from the query path is its own evidence: it
+		// queried, it evaluated, and it is saying so. Carrying a reading of an
+		// earlier attempt there would be a second answer to a question already
+		// answered, and the fold would have two places to look.
+		return fmt.Errorf("alarmd execution: %s completion carries execution evidence, which only a "+
+			"query-free completion may", request.Completion.Kind)
 	}
 	if request.Completion.Primary == nil {
 		return errors.New("alarmd execution: business completion requires PRIMARY facts")
@@ -3455,6 +3556,14 @@ type ProgressGapSummary struct {
 	// though the population inside it cannot be.
 	ResumedAt   EvaluationTime
 	NextProbeAt *int64
+	// Evidence is what the completion that opened or extended this gap knew
+	// about an earlier attempt at the same Slot. It is persisted with the gap
+	// so the page reads it from here rather than inferring it from a tracker
+	// that only sees what is happening now: the gap outlives the round.
+	//
+	// Nil for every gap this build did not put evidence on, which is every kind
+	// but the two query-free ones and every gap written before this existed.
+	Evidence *ExecutionEvidence
 }
 
 func (progress ScheduleProgress) Validate() error {

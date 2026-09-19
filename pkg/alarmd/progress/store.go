@@ -360,8 +360,19 @@ func shouldFoldRecentGap(
 	completion execution.SlotCompletion,
 ) bool {
 	switch completion.Kind {
-	case execution.CompletionPartialGap, execution.CompletionTerminal, execution.CompletionGapSkipped,
-		execution.CompletionSnapshotUnavailable:
+	case execution.CompletionGapSkipped, execution.CompletionSnapshotUnavailable:
+		// A Slot that missed its replay window is a gap unless an earlier
+		// attempt at it already evaluated every Plan it was going to. That
+		// attempt sent its events and wrote its state; all it failed to do was
+		// write down that it had, which is not a detection that did not happen.
+		//
+		// Every Plan, not one of them. A partially applied Slot really did
+		// leave some Plans unevaluated, and the consumers that read a gap as
+		// fact -- no-data, expired ranges -- have to keep seeing it: the cost of
+		// one gap too many is one extra evaluation, and the cost of one too few
+		// is a miss nobody can see.
+		return completion.Evidence == nil || !completion.Evidence.FullyApplied()
+	case execution.CompletionPartialGap, execution.CompletionTerminal:
 		return true
 	case execution.CompletionUnavailable:
 		// A FULL+DATA result can remain guarded by an earlier query-free
@@ -391,6 +402,7 @@ func foldRecentGap(
 	return &execution.ProgressGapSummary{
 		Kind: request.Completion.Kind, ReasonCode: request.Completion.ReasonCode,
 		FirstSlot: request.ExpectedNextSlot, LastSlot: request.ExpectedNextSlot, Count: 1,
+		Evidence: request.Completion.Evidence,
 	}
 }
 

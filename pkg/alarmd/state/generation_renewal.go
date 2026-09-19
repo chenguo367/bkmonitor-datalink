@@ -25,6 +25,13 @@ import (
 // instance that has been growing for months.
 var ErrLifetimeUnsupported = errors.New("state: routed backend cannot renew a key lifetime")
 
+// ErrSlotAppliedUnsupported is a routed backend that cannot hold the mark a
+// failed attempt leaves behind. It is named rather than reported as the store
+// being down, because nothing about a Slot depends on it: a deployment whose
+// backend cannot do this keeps exactly the behaviour it had before the mark
+// existed, which is to record such a Slot as a gap.
+var ErrSlotAppliedUnsupported = errors.New("state: routed backend cannot hold a slot-applied mark")
+
 // RenewGenerationKey extends the life of a generation-scoped key that is being
 // loaded, when it is running out.
 //
