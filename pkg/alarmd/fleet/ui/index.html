@@ -1047,6 +1047,68 @@ function skipReasonWords(code) {
   return code;
 }
 
+// The gap guards an object's Plans are held under, as the round that read
+// them reported: one clause per scope, worst first as the server ordered
+// them. A warming scope is counting complete rounds toward its release and
+// its k/N means something; a gapped one is not counting, and k/N printed
+// against it would read a stalled count where there is none. The two
+// vocabularies are the emitter's and are held to the Go lists.
+var GUARD_STATUS = {
+  WARMING: '预热中',
+  GAPPED: '缺口保护中'
+};
+var GUARD_PROGRESS = {
+  none: '还没有完整轮次计入',
+  partial: '在计入',
+  ready: '已达要求但保护没解除'
+};
+// The guard's trigger, in words where the page has them; a code the page has
+// no words for prints as itself, and the code is always on the hover.
+var GUARD_REASON = {
+  GAP_SKIPPED: '之前有轮次被跳过',
+  HISTORY_WARMING: '窗口从头预热',
+  CONFIG_DRIFT: '配置变过',
+  QUERY_UNAVAILABLE: '查询不可用',
+  QUERY_TIMEOUT: '查询超时',
+  QUERY_PARTIAL: '查询结果不完整'
+};
+
+function guardScopeWords(guard) {
+  var scope = guard.scope === 'plan' ? '整条策略' : '级别 ' + guard.scope;
+  return scope + (guard.plan && guard.plan.strategy_id ? '（策略 ' + guard.plan.strategy_id + '）' : '');
+}
+
+function guardWords(guard) {
+  var reason = guard.reason ? '，起因：' + (GUARD_REASON[guard.reason] || guard.reason) : '';
+  if (guard.status === 'GAPPED') {
+    // No count against a gapped scope. What a reader can know of it is how
+    // long it has held without the release condition moving.
+    return guardScopeWords(guard) + '：' + GUARD_STATUS.GAPPED + reason + '，解除前不计进度；本进程见它 ' + (guard.rounds || 0) + ' 轮'
+      + (guard.unchanged_rounds ? '，连续 ' + guard.unchanged_rounds + ' 轮没变化' : '');
+  }
+  return guardScopeWords(guard) + '：' + (GUARD_STATUS[guard.status] || guard.status)
+    + '，完整轮次 ' + (guard.observed || 0) + '/' + (guard.required || 0) + reason
+    + '，' + (GUARD_PROGRESS[guard.progress] || guard.progress || '')
+    + (guard.progress !== 'ready' && guard.unchanged_rounds ? '，连续 ' + guard.unchanged_rounds + ' 轮没进展' : '');
+}
+
+function guardsWords(anomaly) {
+  var clauses = (anomaly.guards || []).map(function (guard) { return guardWords(guard); });
+  var hidden = (anomaly.guards_total || 0) - clauses.length;
+  if (hidden > 0) clauses.push('还有 ' + hidden + ' 个范围没列（列的是最差的 ' + clauses.length + ' 个）');
+  return clauses.join('；') + '——要求的轮数是这份持久化保护的，可大于策略配置；保护解除后这一行消失';
+}
+
+function guardsTitle(anomaly) {
+  var codes = (anomaly.guards || []).map(function (guard) {
+    return guardScopeWords(guard) + ' ' + guard.status + '/' + (guard.reason || '-') + '/' + guard.progress
+      + ' 自 ' + momentLabel(guard.first_at) + ' 最近 ' + momentLabel(guard.last_at);
+  });
+  return '保护写在状态存储里：被保护的范围按上一轮结论输出，原因沿用建立保护时的；解除要连续 N 个完整轮次。'
+    + '数字是本轮读到的，每一轮读到都会上报，所以"连续 K 轮没进展"是本进程数出来的。\n'
+    + codes.join('\n') + '\n指标 worker_gap_guard_scope_rounds_total{status,reason,progress}';
+}
+
 // The window "still happening" is decided on, in minutes, from the
 // response; the page does not assume it.
 function recentWindowMinutes() {
@@ -1935,6 +1997,13 @@ function objectRow(anomaly) {
       + (restored.completed_at && new Date(restored.completed_at).getTime() > 0 ? '（提交于 ' + momentLabel(restored.completed_at) + '）' : '')
       + nextNote + configNote,
       '进度提交时留下的上一轮摘要；本进程跑完一轮后这一行换成自己的');
+  }
+  // The guards the object's Plans are held under, worst first: what a reader
+  // waiting on "等保护解除" needs is whether the guard is moving, and a scope
+  // at 0/9 for forty rounds looks from every other cell exactly like one
+  // raised a minute ago.
+  if (anomaly.guards && anomaly.guards.length) {
+    line('持久化保护', guardsWords(anomaly), guardsTitle(anomaly));
   }
   // The store refusing this object's absence memory: the round is fine and
   // the memory is not written, so the row says what was refused and the two

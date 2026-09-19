@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	gapstatus "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -116,6 +117,12 @@ var (
 	FailedExecutions = []string{"error", "retrying", "incomplete"}
 )
 
+// gapGuardState is one held scope as the tracker keeps it.
+type gapGuardState struct {
+	guard GapGuard
+	gen   int
+}
+
 func inVocabulary(value string, vocabulary []string) bool {
 	for _, known := range vocabulary {
 		if value == known {
@@ -175,6 +182,12 @@ type queryGroupState struct {
 	// the object is listed while any entry remains, and recovers when the
 	// last one goes -- one Plan's write storing says nothing about another's.
 	noDataMemory map[StrategyRef]*NoDataMemoryRefusal
+	// guards is the held gap scopes reported for this object, by Plan and
+	// scope, with the completion generation each was last reported in. A
+	// completion prunes the scopes the round did not report -- a released
+	// guard is silent -- and advances the generation.
+	guards   map[string]*gapGuardState
+	guardGen int
 	// reasonKey names the current result and reason as one string, reasonSince
 	// is when that pair first held and reasonRuns how many consecutive rounds
 	// it has held for. It is the object's own clock for "how long has it been
@@ -546,7 +559,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	cursorAdvance := observation.CursorAdvance
 	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" &&
 		failure == nil && observation.QueryCooldown == nil && cursorAdvance == nil &&
-		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil {
+		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil && observation.GapProgress == nil {
 		return
 	}
 
@@ -565,6 +578,30 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// touch the round bookkeeping -- the observation's strategy is still
 	// learned below, since the Plan it names is the one whose memory is lost.
 	plan := StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}
+	// A held gap scope, as the round that read it reports it, every round it
+	// is held. Not a round either: the round it belongs to completes on its
+	// own and prunes the scopes it did not report.
+	if progress := observation.GapProgress; progress != nil {
+		if state.guards == nil {
+			state.guards = map[string]*gapGuardState{}
+		}
+		key := plan.StrategyID + "\x00" + progress.Scope
+		held := state.guards[key]
+		if held == nil {
+			held = &gapGuardState{guard: GapGuard{Plan: plan, Scope: progress.Scope, FirstAt: at}}
+			state.guards[key] = held
+		} else if held.guard.Observed == progress.Observed {
+			held.guard.UnchangedRounds++
+		} else {
+			held.guard.UnchangedRounds = 0
+		}
+		held.guard.Status, held.guard.Reason = progress.Status, progress.Reason
+		held.guard.Required, held.guard.Observed = progress.Required, progress.Observed
+		held.guard.Progress = progress.Progress
+		held.guard.LastAt = at
+		held.guard.Rounds++
+		held.gen = state.guardGen
+	}
 	if refusal := observation.NoDataMemoryRefusal; refusal != nil {
 		if state.noDataMemory == nil {
 			state.noDataMemory = map[StrategyRef]*NoDataMemoryRefusal{}
@@ -743,6 +780,15 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 
 	switch {
 	case completion != "":
+		// The round that reported its held scopes is over: a scope it did
+		// not report was released, and the next round reports into a new
+		// generation.
+		for key, held := range state.guards {
+			if held.gen != state.guardGen {
+				delete(state.guards, key)
+			}
+		}
+		state.guardGen++
 		if healthyCompletion(completion) {
 			// The one moment recovery has positive evidence: the object that
 			// was a row completed healthily. Remembered under the line and
@@ -1121,6 +1167,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		ConfigChanged: state.configChanged,
 		Restored:      state.restoredRound,
 	}
+	anomaly.Guards, anomaly.GuardsTotal = worstGuards(state.guards)
 	if anomaly.Kind == "" && state.queryCooldown != nil {
 		anomaly.Kind = KindQueryCooldown
 		if anomaly.Since.IsZero() {
@@ -1143,6 +1190,52 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	}
 	sortStrategies(anomaly.Strategies)
 	return anomaly
+}
+
+// worstGuards is the row's held scopes, the worst MaxGuardsPerRow of them:
+// gapped before warming, then the least advanced -- observed against
+// required -- then the longest unchanged, then by Plan and scope so the
+// order is total. The count is of all of them.
+func worstGuards(held map[string]*gapGuardState) ([]GapGuard, int) {
+	if len(held) == 0 {
+		return nil, 0
+	}
+	guards := make([]GapGuard, 0, len(held))
+	for _, state := range held {
+		guards = append(guards, state.guard)
+	}
+	sort.Slice(guards, func(i, j int) bool {
+		left, right := guards[i], guards[j]
+		gapped := string(gapstatus.GapStatusGapped)
+		if (left.Status == gapped) != (right.Status == gapped) {
+			return left.Status == gapped
+		}
+		leftShare, rightShare := guardShare(left), guardShare(right)
+		if leftShare != rightShare {
+			return leftShare < rightShare
+		}
+		if left.UnchangedRounds != right.UnchangedRounds {
+			return left.UnchangedRounds > right.UnchangedRounds
+		}
+		if left.Plan.StrategyID != right.Plan.StrategyID {
+			return left.Plan.StrategyID < right.Plan.StrategyID
+		}
+		return left.Scope < right.Scope
+	})
+	total := len(guards)
+	if total > MaxGuardsPerRow {
+		guards = guards[:MaxGuardsPerRow]
+	}
+	return guards, total
+}
+
+// guardShare is how far a held scope's count has got, as a fraction; a
+// scope requiring nothing is read as complete.
+func guardShare(guard GapGuard) float64 {
+	if guard.Required == 0 {
+		return 1
+	}
+	return float64(guard.Observed) / float64(guard.Required)
 }
 
 func (tracker *Tracker) listed(column string) []Anomaly {

@@ -753,6 +753,8 @@ func TestThePageHasWordingForEveryLoadState(t *testing.T) {
 		{"FAILURE_CLASS", stringsOf(fleet.Classes)},
 		{"EFFECT", stringsOf(fleet.Effects)},
 		{"RECOVERY_STATE", stringsOf(fleet.RecoveryStates)},
+		// And the status of a held gap guard on the object row.
+		{"GUARD_STATUS", fleet.GapGuardStatuses},
 	}
 	for _, table := range tables {
 		found := regexp.MustCompile(`var ` + table.name + ` = \{([\s\S]*?)\};`).FindStringSubmatch(body)
@@ -793,6 +795,30 @@ func TestThePageHasWordingForEveryFold(t *testing.T) {
 	for _, fold := range fleet.GroupBys {
 		if !worded[string(fold)] {
 			t.Errorf("GROUP_BY has no words for %s", fold)
+		}
+	}
+}
+
+// The progress word beside a held guard is the emitter's, lower-case, and
+// the page has words for each of its three and for none it never sends: the
+// third word, ready, is the one that names a guard that should have released,
+// and a table without it would print the code where the finding is.
+func TestThePageHasWordingForEveryGuardProgress(t *testing.T) {
+	body := string(page)
+	found := regexp.MustCompile(`var GUARD_PROGRESS = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+	if found == nil {
+		t.Fatal("the page has no GUARD_PROGRESS wording table")
+	}
+	worded := map[string]bool{}
+	for _, entry := range regexp.MustCompile(`(?m)^  ([a-z_]+):`).FindAllStringSubmatch(found[1], -1) {
+		worded[entry[1]] = true
+		if !containsString(fleet.GapProgressValues, entry[1]) {
+			t.Errorf("GUARD_PROGRESS has words for %s, which the emitter never sends", entry[1])
+		}
+	}
+	for _, value := range fleet.GapProgressValues {
+		if !worded[value] {
+			t.Errorf("GUARD_PROGRESS has no words for %s", value)
 		}
 	}
 }
