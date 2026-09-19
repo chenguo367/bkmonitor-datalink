@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"time"
 
@@ -33,6 +34,15 @@ type NoDataHashBackend interface {
 	// and no error: absent and empty are the same record here, because the
 	// header field is written by every write, so a hash that exists has one.
 	ReadHash(context.Context, string) (map[string][]byte, error)
+	// ReadHashField returns one field, nil when the key or the field is not
+	// there.
+	//
+	// It exists so a write does not have to read the record it is about to
+	// change. Everything a write decides on -- the schema, the revision, the
+	// version and the digest -- is in the header, and reading the groups as
+	// well would double what a Plan transfers every round, on exactly the
+	// objects whose size this representation exists to bring down.
+	ReadHashField(context.Context, string, string) ([]byte, error)
 	// ApplyHashDelta applies one delta atomically, proving it was derived from
 	// the header the caller read.
 	ApplyHashDelta(context.Context, HashDeltaWrite) (HashDeltaOutcome, error)
@@ -161,6 +171,20 @@ func (backend *RedisBackend) ReadHash(ctx context.Context, key string) (map[stri
 	return record, nil
 }
 
+func (backend *RedisBackend) ReadHashField(ctx context.Context, key, field string) ([]byte, error) {
+	if backend == nil || backend.client == nil {
+		return nil, fmt.Errorf("state: redis backend is not configured")
+	}
+	value, err := backend.client.HGet(ctx, key, field).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
 func (backend *RedisBackend) ApplyHashDelta(
 	ctx context.Context, write HashDeltaWrite,
 ) (HashDeltaOutcome, error) {
@@ -220,5 +244,6 @@ var _ NoDataHashBackend = (*RedisBackend)(nil)
 // phase-one set.
 type hashClient interface {
 	HGetAll(context.Context, string) *redis.StringStringMapCmd
+	HGet(context.Context, string, string) *redis.StringCmd
 	EvalSha(context.Context, string, []string, ...interface{}) *redis.Cmd
 }

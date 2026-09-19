@@ -280,6 +280,7 @@ func (mutation PlanNoDataMutation) validateStatement() error {
 			// thing is two digests for one memory.
 			return errors.New("alarmd execution: a group last seen in the present round must be stored as present")
 		}
+
 	}
 	previous = ""
 	for index, key := range mutation.Del {

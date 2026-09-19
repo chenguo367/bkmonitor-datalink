@@ -73,34 +73,9 @@ func decodeNoDataHash(
 ) execution.NoDataMemorySnapshot {
 	corrupt := execution.NoDataMemorySnapshot{Identity: identity, Status: execution.NoDataMemoryTerminal,
 		ReasonCode: execution.ReasonCode(contract.ReasonStateCorrupt)}
-	raw, present := fields[noDataHeaderField]
-	if !present {
-		// A hash with groups and no header is not a record with a default
-		// header. Every write puts one there, so its absence means the record
-		// was written by something that does not hold this shape, or partly
-		// destroyed - and reading the groups without it would take a present
-		// group's last-seen time from a round nobody stated.
-		return execution.NoDataMemorySnapshot{Identity: identity, Status: execution.NoDataMemoryUnreadable,
-			ReasonCode: execution.ReasonCode(contract.ReasonStateSchemaUnsupported)}
-	}
-	var version noDataHashVersion
-	if err := json.Unmarshal(raw, &version); err != nil {
-		return corrupt
-	}
-	if version.Schema != executionNoDataSchema || version.Identity != identity || version.Version == 0 {
-		return corrupt
-	}
-	if !execution.NoDataMemoryReadable(version.Version) {
-		return execution.NoDataMemorySnapshot{Identity: identity, Status: execution.NoDataMemoryUnreadable,
-			SchemaVersion: version.Version,
-			ReasonCode:    execution.ReasonCode(contract.ReasonStateSchemaUnsupported)}
-	}
-	var header noDataHashHeader
-	if err := json.Unmarshal(raw, &header); err != nil {
-		return corrupt
-	}
-	if header.MarkerRevision == 0 {
-		return corrupt
+	snapshot, header, ok := decodeNoDataHashHeader(fields[noDataHeaderField], identity)
+	if !ok {
+		return snapshot
 	}
 	groups := make([]execution.NoDataGroupMemory, 0, len(fields))
 	for name, value := range fields {
@@ -113,20 +88,64 @@ func decodeNoDataHash(
 			// be reading a record while pretending not to have seen part of it.
 			return corrupt
 		}
-		group, ok := decodeNoDataGroupValue(key, value, header.PresentAsOf)
-		if !ok {
+		group, decoded := decodeNoDataGroupValue(key, value, header.PresentAsOf)
+		if !decoded {
 			return corrupt
 		}
 		groups = append(groups, group)
 	}
 	sort.Slice(groups, func(left, right int) bool { return groups[left].GroupKey < groups[right].GroupKey })
+	snapshot.Groups = groups
+	return snapshot
+}
+
+// decodeNoDataHashHeader reads everything a write decides on, and nothing a
+// write does not.
+//
+// A write compares the schema, the revision, the version and the digest, all of
+// which are here; reading the groups as well would double what every Plan
+// transfers each round, on exactly the objects this representation exists to
+// make smaller. The false return carries the snapshot to answer with.
+func decodeNoDataHashHeader(
+	raw []byte, identity execution.PlanNoDataIdentity,
+) (execution.NoDataMemorySnapshot, noDataHashHeader, bool) {
+	corrupt := execution.NoDataMemorySnapshot{Identity: identity, Status: execution.NoDataMemoryTerminal,
+		ReasonCode: execution.ReasonCode(contract.ReasonStateCorrupt)}
+	if raw == nil {
+		// A hash with groups and no header is not a record with a default
+		// header. Every write puts one there, so its absence means the record
+		// was written by something that does not hold this shape, or partly
+		// destroyed - and reading the groups without it would take a present
+		// group's last-seen time from a round nobody stated.
+		return execution.NoDataMemorySnapshot{Identity: identity, Status: execution.NoDataMemoryUnreadable,
+			ReasonCode: execution.ReasonCode(contract.ReasonStateSchemaUnsupported)}, noDataHashHeader{}, false
+	}
+	var version noDataHashVersion
+	if err := json.Unmarshal(raw, &version); err != nil {
+		return corrupt, noDataHashHeader{}, false
+	}
+	if version.Schema != executionNoDataSchema || version.Identity != identity || version.Version == 0 {
+		return corrupt, noDataHashHeader{}, false
+	}
+	if !execution.NoDataMemoryReadable(version.Version) {
+		return execution.NoDataMemorySnapshot{Identity: identity, Status: execution.NoDataMemoryUnreadable,
+			SchemaVersion: version.Version,
+			ReasonCode:    execution.ReasonCode(contract.ReasonStateSchemaUnsupported)}, noDataHashHeader{}, false
+	}
+	var header noDataHashHeader
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return corrupt, noDataHashHeader{}, false
+	}
+	if header.MarkerRevision == 0 {
+		return corrupt, noDataHashHeader{}, false
+	}
 	return execution.NoDataMemorySnapshot{
 		Identity: identity, MarkerRevision: header.MarkerRevision,
 		PersistedApplyVersion: header.ApplyVersion, PersistedMutationDigest: header.MemoryDigest,
 		Status: execution.NoDataMemoryFound, SchemaVersion: header.Version,
 		LastScheduleRevision: header.ScheduleRevision, RosterVersion: header.RosterVersion,
-		PresentAsOf: header.PresentAsOf, Groups: groups,
-	}
+		PresentAsOf: header.PresentAsOf,
+	}, header, true
 }
 
 func decodeNoDataGroupValue(
@@ -144,10 +163,12 @@ func decodeNoDataGroupValue(
 	if err := json.Unmarshal(value, &absent); err != nil {
 		return execution.NoDataGroupMemory{}, false
 	}
-	if absent.LastSeen < 0 || absent.FirstAbsent < 0 ||
-		(absent.LastSeen == 0 && absent.FirstAbsent == 0) {
+	if absent.LastSeen < 0 || absent.FirstAbsent < 0 {
 		return execution.NoDataGroupMemory{}, false
 	}
+	// A group that remembers nothing is not rejected here. The load contract
+	// rejects it for the whole record, and one deciding place is the point: two
+	// checks of one rule leave a mutation that deletes either of them green.
 	return execution.NoDataGroupMemory{
 		GroupKey: key, LastSeen: absent.LastSeen, FirstAbsent: absent.FirstAbsent,
 	}, true

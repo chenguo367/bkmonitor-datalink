@@ -850,7 +850,67 @@ func (stream *streamedExecution) loadNoDataMemory(ctx context.Context) error {
 	stream.coordinator.observeWithCounts(ctx, observability.ComponentState, observability.StageGapLoaded,
 		stream.request.Operation, started, observability.ResultSuccess, observability.ReasonNone,
 		observability.Counts{Keys: int64(len(stream.noData.Items))}, nil)
+	stream.observeNoDataRepresentations(ctx)
+	stream.observeNoDataRenewals(ctx)
 	return stream.resolveNoDataRosterHosts()
+}
+
+// observeNoDataRenewals reports every renewal that reached the store.
+//
+// Only those: the gate answers most loads from what this process already knows,
+// and counting the skips would bury the attempts that say whether renewal
+// works. A failure is a failure of the renewal and not of the load -- the
+// record was read and the round goes on -- so it is reported here rather than
+// turned into a load status, and it is the only signal there is for it.
+func (stream *streamedExecution) observeNoDataRenewals(ctx context.Context) {
+	for _, renewal := range stream.noData.Renewals {
+		result := observability.Result(observability.ResultSuccess)
+		reason := observability.ReasonCode(observability.ReasonNone)
+		if renewal.ReasonCode != "" {
+			result = observability.ResultDegraded
+			reason = observability.ReasonCode(renewal.ReasonCode)
+		}
+		stream.coordinator.emitObservation(ctx, observability.Observation{
+			Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRenewed,
+			Operation: observability.Operation(stream.request.Operation),
+			Direction: observability.DirectionInternal, Result: result, ReasonCode: reason,
+			Trace: observability.TraceFields{
+				StrategyID: renewal.Identity.Plan.StrategyID, BusinessID: renewal.Identity.Plan.BusinessID,
+			},
+			NoDataMemoryRenewal: &observability.NoDataMemoryRenewalFacts{
+				Renewed: renewal.Renewed, TTLSeconds: renewal.TTLSeconds,
+			},
+		})
+	}
+}
+
+// observeNoDataRepresentations reports which stored shape each Plan's memory
+// came from, one per Plan per round.
+//
+// Unconditionally, and at the point the answer is known rather than where
+// something is decided on it. Every Plan that was asked for is counted,
+// including the ones with no memory yet, so the three counts add up to the
+// Plans in the request and a reader can check that rather than assume it. A
+// signal emitted only when the shape changed would say nothing at all about a
+// fleet that has been half migrated for a week, which is the question this
+// exists to answer.
+func (stream *streamedExecution) observeNoDataRepresentations(ctx context.Context) {
+	for _, snapshot := range stream.noData.Items {
+		representation := snapshot.Representation
+		if representation == "" {
+			representation = execution.NoDataRepresentationNone
+		}
+		stream.coordinator.emitObservation(ctx, observability.Observation{
+			Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRead,
+			Operation: observability.Operation(stream.request.Operation),
+			Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+			ReasonCode: observability.ReasonNone,
+			Trace: observability.TraceFields{
+				StrategyID: snapshot.Identity.Plan.StrategyID, BusinessID: snapshot.Identity.Plan.BusinessID,
+			},
+			NoDataMemoryRead: &observability.NoDataMemoryReadFacts{Representation: string(representation)},
+		})
+	}
 }
 
 // resolveNoDataRosterHosts asks the CMDB index about every host each no-data

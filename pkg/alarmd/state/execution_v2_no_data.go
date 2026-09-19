@@ -67,20 +67,24 @@ func (store *ExecutionStore) LoadNoData(
 		if err := ctx.Err(); err != nil {
 			return execution.NoDataLoadResult{}, err
 		}
-		result.Items[index] = store.loadOneNoData(ctx, request, item)
+		snapshot, renewal := store.loadOneNoData(ctx, request, item)
+		result.Items[index] = snapshot
+		if renewal != nil {
+			result.Renewals = append(result.Renewals, *renewal)
+		}
 	}
 	return result, nil
 }
 
 func (store *ExecutionStore) loadOneNoData(
 	ctx context.Context, request execution.NoDataLoadRequest, item execution.PlanNoDataLoadItem,
-) execution.NoDataMemorySnapshot {
+) (execution.NoDataMemorySnapshot, *execution.NoDataMemoryRenewal) {
 	blob := store.loadOneNoDataBlob(ctx, request, item)
-	hash, consulted := store.loadOneNoDataHash(ctx, request, item)
+	hash, renewal, consulted := store.loadOneNoDataHash(ctx, request, item)
 	if !consulted {
-		return blob
+		return blob, renewal
 	}
-	return newerNoDataMemory(blob, hash)
+	return newerNoDataMemory(blob, hash), renewal
 }
 
 // newerNoDataMemory picks between the two representations a Plan may have
@@ -120,6 +124,9 @@ func newerNoDataMemory(blob, hash execution.NoDataMemorySnapshot) execution.NoDa
 		// unreadable one is the memory, not a missing one.
 		return hash
 	default:
+		// Neither is a record. Nothing was read, so nothing names a shape: a
+		// Plan before its first no-data round must not read as "still on the
+		// old representation", which is the number the cleanup waits on.
 		return blob
 	}
 }
@@ -152,7 +159,23 @@ func (store *ExecutionStore) loadOneNoDataBlob(
 		snapshot.ReasonCode = execution.ReasonCode(contract.ReasonStateBudgetExceeded)
 		return snapshot
 	}
-	return store.validatedNoData(request, item, decodeNoData(raw, item.Identity))
+	return store.validatedNoData(request, item,
+		named(decodeNoData(raw, item.Identity), execution.NoDataRepresentationWholeMemory))
+}
+
+// named says which record a snapshot was read from, and only when one was.
+//
+// Only a record that was read names a shape. A failed or unreadable one carries
+// nothing but its status and its schema, which is the rule the load contract
+// already holds: nothing may be taken out of a record this build could not
+// read, and "which key answered" would be the first exception to it.
+func named(
+	snapshot execution.NoDataMemorySnapshot, representation execution.NoDataRepresentation,
+) execution.NoDataMemorySnapshot {
+	if snapshot.Status == execution.NoDataMemoryFound {
+		snapshot.Representation = representation
+	}
+	return snapshot
 }
 
 // loadOneNoDataHash reads the per-group representation. The second return is
@@ -161,31 +184,35 @@ func (store *ExecutionStore) loadOneNoDataBlob(
 // capability gap would pause a Plan the old path can serve.
 func (store *ExecutionStore) loadOneNoDataHash(
 	ctx context.Context, request execution.NoDataLoadRequest, item execution.PlanNoDataLoadItem,
-) (execution.NoDataMemorySnapshot, bool) {
+) (execution.NoDataMemorySnapshot, *execution.NoDataMemoryRenewal, bool) {
 	target, routeErr := store.options.Router.Route(item.Identity.Plan.TenantID, item.Identity.Plan.StrategyID)
 	if routeErr != nil {
 		return execution.NoDataMemorySnapshot{Identity: item.Identity, Status: execution.NoDataMemoryUnavailable,
-			ReasonCode: execution.ReasonCode(contract.ReasonRedisUnavailable)}, true
+			ReasonCode: execution.ReasonCode(contract.ReasonRedisUnavailable)}, nil, true
 	}
 	backend, ok := target.Backend.(NoDataHashBackend)
 	if !ok {
-		return execution.NoDataMemorySnapshot{}, false
+		return execution.NoDataMemorySnapshot{}, nil, false
 	}
 	key, err := PlanNoDataHashKeyV2(store.options.Prefix, item.Identity)
 	if err != nil {
 		return execution.NoDataMemorySnapshot{Identity: item.Identity, Status: execution.NoDataMemoryTerminal,
-			ReasonCode: execution.ReasonCode(contract.ReasonStateCorrupt)}, true
+			ReasonCode: execution.ReasonCode(contract.ReasonStateCorrupt)}, nil, true
 	}
 	fields, readErr := backend.ReadHash(ctx, key)
 	if readErr != nil {
 		return execution.NoDataMemorySnapshot{Identity: item.Identity, Status: execution.NoDataMemoryUnavailable,
-			ReasonCode: execution.ReasonCode(contract.ReasonRedisUnavailable)}, true
+			ReasonCode: execution.ReasonCode(contract.ReasonRedisUnavailable)}, nil, true
 	}
 	if len(fields) == 0 {
-		return execution.NoDataMemorySnapshot{Identity: item.Identity, Status: execution.NoDataMemoryMissing}, true
+		return execution.NoDataMemorySnapshot{Identity: item.Identity, Status: execution.NoDataMemoryMissing}, nil, true
 	}
-	store.renewNoDataHash(ctx, target, item, key)
-	return store.validatedNoData(request, item, decodeNoDataHash(fields, item.Identity)), true
+	// Renewed before the record is decoded, and for a record this build cannot
+	// read just as much as for one it can: a paused Plan's memory must not
+	// expire while the rollback it is waiting out is still going on.
+	renewal := store.renewNoDataHash(ctx, target, item, key)
+	return store.validatedNoData(request, item,
+		named(decodeNoDataHash(fields, item.Identity), execution.NoDataRepresentationPerGroup)), renewal, true
 }
 
 // renewNoDataHash keeps a record that was read alive the way a whole-memory one
@@ -199,9 +226,32 @@ func (store *ExecutionStore) loadOneNoDataHash(
 // record was read, and the read is what the caller asked for.
 func (store *ExecutionStore) renewNoDataHash(
 	ctx context.Context, target StorageTarget, item execution.PlanNoDataLoadItem, key string,
-) {
-	_ = RenewGenerationKey(ctx, target, key, item.Retention,
+) *execution.NoDataMemoryRenewal {
+	attempt, err := RenewGenerationKeyReporting(ctx, target, key, item.Retention,
 		store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL, store.renewals)
+	if !attempt.Asked && err == nil {
+		// The gate answered from what this process already knows. Reporting it
+		// would bury the attempts that reached the store under the ones that
+		// did not, and it is only the former that say whether renewal works.
+		return nil
+	}
+	renewal := &execution.NoDataMemoryRenewal{
+		Identity: item.Identity, Renewed: attempt.Renewed, TTLSeconds: int64(attempt.TTL.Seconds()),
+	}
+	switch {
+	case err == nil:
+	case errors.Is(err, ErrLifetimeUnsupported):
+		// A backend that cannot renew leaks the lifetime of every memory it
+		// holds. The whole-memory path reports this on every load and stops the
+		// Slot; this path reports it and carries on, because stopping here
+		// would take a Plan's threshold detection down over the lifetime of a
+		// record that is still perfectly readable. The two differ on purpose
+		// and the reason is that the old path had no way to say it at all.
+		renewal.ReasonCode = execution.ReasonCode(contract.ReasonBackendCapabilityMissing)
+	default:
+		renewal.ReasonCode = execution.ReasonCode(contract.ReasonRedisUnavailable)
+	}
+	return renewal
 }
 
 func (store *ExecutionStore) validatedNoData(
@@ -322,13 +372,17 @@ func (store *ExecutionStore) applyOneNoData(
 	if !ok {
 		return reject(contract.ReasonBackendCapabilityMissing)
 	}
-	fields, readErr := backend.ReadHash(ctx, key)
+	// The header and nothing else. Everything this write decides on is in it,
+	// and reading the groups as well would double what every Plan transfers per
+	// round -- on the very objects whose size this representation exists to
+	// bring down, where the record the read would drag back is the thousands of
+	// group fields the write is not touching.
+	expectedHeader, readErr := backend.ReadHashField(ctx, key, noDataHeaderField)
 	if readErr != nil {
 		return retry()
 	}
-	expectedHeader := fields[noDataHeaderField]
-	if len(fields) > 0 {
-		previous := decodeNoDataHash(fields, mutation.Identity)
+	if expectedHeader != nil {
+		previous, _, _ := decodeNoDataHashHeader(expectedHeader, mutation.Identity)
 		switch previous.Status {
 		case execution.NoDataMemoryTerminal:
 			return reject(string(previous.ReasonCode))

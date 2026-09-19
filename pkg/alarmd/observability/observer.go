@@ -134,6 +134,25 @@ const (
 	// as a refused one does, and a reader with only the refusal lines cannot
 	// tell a Plan that recovered from one that started losing races instead.
 	StageNoDataMemoryWritten = "no_data_memory_written"
+	// StageNoDataMemoryRead names which of the two stored shapes one Plan's
+	// memory was read from.
+	//
+	// It is the only signal that says how far the change of representation has
+	// got. Every other one looks the same either way -- the memory is read, the
+	// Plan evaluates, the write goes through -- and the count of Plans still on
+	// the old record is what the one-shot cleanup waits for. Without it that
+	// wait is somebody's guess about how long a rollout takes.
+	StageNoDataMemoryRead = "no_data_memory_read"
+	// StageNoDataMemoryRenewed names one renewal of a Plan's absence-memory
+	// key that actually reached the store.
+	//
+	// Under the per-group representation a Plan whose groups are steady writes
+	// nothing, so renewal on the read is the only thing keeping its memory
+	// alive. That makes a renewal that stopped working the failure this
+	// representation can have that the old one could not, and it has no other
+	// signal: not the write family, which is correctly silent for such a Plan,
+	// and not the memory itself, which reads fine right up until it is gone.
+	StageNoDataMemoryRenewed = "no_data_memory_renewed"
 	StageEvaluationCompleted = "evaluation_completed"
 	StageSideEffectAdmission = "side_effect_admission"
 	StageStateAdmission      = "state_admission"
@@ -417,6 +436,26 @@ type NoDataMemoryWriteFacts struct {
 	// It is carried rather than derived at each reader, so the one place that
 	// decides which outcomes count is the one place anybody has to agree with.
 	Stored bool
+}
+
+// NoDataMemoryReadFacts says which stored shape one Plan's memory came from.
+type NoDataMemoryReadFacts struct {
+	// Representation is execution.NoDataRepresentation as text. NONE is a
+	// value and not an omission: every load lands on exactly one of the three,
+	// so the three add up to the Plans that were asked for, and a reader can
+	// check that rather than assume it.
+	Representation string
+}
+
+// NoDataMemoryRenewalFacts is what one renewal did.
+//
+// Renewed false is the ordinary case and not a failure: the key had enough life
+// left, which is what the threshold is for. The failure is carried by the
+// observation's result and reason, not by this flag, so a reader cannot mistake
+// a skipped renewal for a broken one.
+type NoDataMemoryRenewalFacts struct {
+	Renewed    bool
+	TTLSeconds int64
 }
 
 type NoDataMemoryRefusalFacts struct {
@@ -1386,6 +1425,8 @@ type Observation struct {
 	GapProgress           *GapProgressFacts
 	NoDataMemoryRefusal   *NoDataMemoryRefusalFacts
 	NoDataMemoryWrite     *NoDataMemoryWriteFacts
+	NoDataMemoryRead      *NoDataMemoryReadFacts
+	NoDataMemoryRenewal   *NoDataMemoryRenewalFacts
 	SourceWithheld        *SourceWithheldFacts
 	NoDataCensus          *NoDataCensusFacts
 	SegmentContent        *SegmentContentFacts
@@ -2401,6 +2442,8 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentState, StageStatePreflight}, {ComponentState, StageGapLoaded},
 	{ComponentState, StageGapGuardProgress},
 	{ComponentEvaluation, StageNoDataDecided},
+	{ComponentState, StageNoDataMemoryRead},
+	{ComponentState, StageNoDataMemoryRenewed},
 	{ComponentState, StageNoDataMemoryRefused},
 	{ComponentState, StageNoDataMemoryWritten},
 	{ComponentControlPlane, StageSourceWithheld},

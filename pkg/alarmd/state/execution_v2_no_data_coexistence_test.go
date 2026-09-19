@@ -262,6 +262,56 @@ func TestAPerGroupRecordWithAnUnreadableFieldIsCorrupt(t *testing.T) {
 	}
 }
 
+// A write reads the header and not the record it is about to change.
+//
+// Everything a write decides on -- the schema, the revision, the version, the
+// digest -- is in the header, and the groups are what this representation
+// exists to stop moving. Reading them here would undo that on the write side:
+// the load already transferred them once, and a second HGETALL per Plan per
+// round is the whole saving given back on exactly the large objects that
+// motivated the change. At three thousand groups it is roughly a quarter of a
+// megabyte a round, against the few kilobytes the delta saves.
+func TestAWriteReadsTheHeaderAndNotTheRecord(t *testing.T) {
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	store := generationStore(t, backend)
+	backend.hashes = map[string]map[string][]byte{
+		noDataHashKey(t): perGroupRecord(t, 1, coexistenceApplyVersion(0), 940,
+			execution.NoDataGroupMemory{GroupKey: "a", LastSeen: 940},
+			execution.NoDataGroupMemory{GroupKey: "b", LastSeen: 940},
+		),
+	}
+	backend.commands = nil
+
+	applied, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+		Contract: frozenRef(),
+		Items: []execution.PlanNoDataMutation{noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
+			Identity: noDataIdentityV2(), ExpectedMarkerRevision: 1,
+			ApplyVersion: coexistenceApplyVersion(1), ScheduleRevision: "plan-r1",
+			RosterVersion: "TARGET_STATIC/1", PresentAsOf: 1000,
+			Memory: []execution.NoDataGroupMemory{{GroupKey: "a", LastSeen: 1000}},
+			Loaded: []execution.NoDataGroupMemory{
+				{GroupKey: "a", LastSeen: 940}, {GroupKey: "b", LastSeen: 940},
+			},
+			LoadedPresentAsOf: 940,
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Items[0].Status != execution.NoDataApplied {
+		t.Fatalf("apply = %+v, want it applied", applied.Items[0])
+	}
+	for _, command := range backend.commands {
+		if command != "HGET" {
+			t.Fatalf("the write path issued %v, want only HGET: reading the whole record to find "+
+				"the header doubles what every Plan transfers per round", backend.commands)
+		}
+	}
+	if len(backend.commands) == 0 {
+		t.Fatal("the write path read nothing; it cannot have proven the record was untouched")
+	}
+}
+
 // A memory read once and written back unchanged is recognised rather than
 // written again, and a Plan that goes quiet keeps its record alive.
 //

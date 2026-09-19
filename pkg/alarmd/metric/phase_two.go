@@ -53,6 +53,8 @@ type phaseTwoMetrics struct {
 	gapGuardScopeRounds             *prometheus.CounterVec
 	noDataPlansSeen                 prometheus.Counter
 	noDataPlansByHop                *prometheus.CounterVec
+	noDataMemoryReads               *prometheus.CounterVec
+	noDataMemoryRenewals            *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
 	sourceWithheldLines             *prometheus.CounterVec
 	activeQGSetCount                prometheus.Gauge
@@ -422,6 +424,29 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"worker_no_data_memory_refusals_total is every mutation the store was asked for. " +
 			"Every outcome has a label at startup, so a zero is a zero rather than a label nothing wrote.",
 	}, []string{"outcome"})
+	metrics.noDataMemoryReads = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_memory_reads_total",
+		Help: "One per Plan per round that read its absence memory, by which stored shape it came " +
+			"from. WHOLE_MEMORY is the single-value record this build reads and no longer writes, " +
+			"PER_GROUP is the one it writes, NONE is a Plan with no memory yet or one whose read " +
+			"failed. It is the only signal that says how far the change of representation has got: " +
+			"every other one looks the same either way, and WHOLE_MEMORY at zero across a rolling " +
+			"window is the condition the one-shot cleanup waits for. WHOLE_MEMORY rising again after " +
+			"reaching zero is a Plan that went back to an older build, which is the one case where " +
+			"deleting the old records would lose rounds. The three add up to the Plans that were " +
+			"asked for, so the sum is checkable rather than assumed, and every label exists at " +
+			"startup so a zero is a zero rather than a label nothing wrote.",
+	}, []string{"representation"})
+	metrics.noDataMemoryRenewals = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_memory_renewals_total",
+		Help: "Absence-memory key renewals that reached the store, by result and reason. Under the " +
+			"per-group representation a Plan whose groups are steady writes nothing at all, so this " +
+			"is the only thing keeping its memory alive and the only signal that says whether that " +
+			"is working: the write family is correctly silent for such a Plan, and the memory reads " +
+			"fine right up until it is gone. Renewals the process answered from its own gate are not " +
+			"counted -- they would bury the ones that reached the store. A failure here does not " +
+			"fail the round; it means memories are on their way to expiring.",
+	}, []string{"result", "reason"})
 	metrics.gapGuardScopeRounds = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_gap_guard_scope_rounds_total",
 		Help: "One per held gap scope per round that read it, by status, by why it is held, and by " +
@@ -763,6 +788,24 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range execution.NoDataWriteOutcomes {
 		metrics.noDataMemoryWrites.WithLabelValues(string(outcome))
 	}
+	for _, shape := range []struct{ result, reason string }{
+		{string(observability.ResultSuccess), string(observability.ReasonNone)},
+		{string(observability.ResultDegraded), contract.ReasonBackendCapabilityMissing},
+		{string(observability.ResultDegraded), contract.ReasonRedisUnavailable},
+	} {
+		// Pre-created for the same reason as the rest: the reading is the zero,
+		// and here it is the success one -- a deployment whose renewals stopped
+		// shows a success series that has stopped rising, which an absent series
+		// cannot show.
+		metrics.noDataMemoryRenewals.WithLabelValues(shape.result, shape.reason)
+	}
+	for _, representation := range execution.NoDataRepresentations {
+		// Pre-created, because the reading this family exists for is a zero:
+		// WHOLE_MEMORY reaching zero and staying there is what says every Plan
+		// has moved, and a series that is absent rather than zero cannot say
+		// the difference between "none left" and "nobody looked".
+		metrics.noDataMemoryReads.WithLabelValues(string(representation))
+	}
 	for _, refusal := range execution.NoDataRefusals {
 		// Pre-created, because the reading this family exists for is the zero.
 		// A Plan whose memory the store will not take produces no other signal
@@ -822,7 +865,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
-		m.cmdbIndexDegraded, m.catalogComposition)...)
+		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals)...)
 }
 
 func (m phaseTwoMetrics) observe(observation observability.Observation) {
@@ -1010,6 +1053,14 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.NoDataMemoryWrite; facts != nil {
 		m.noDataMemoryWrites.WithLabelValues(facts.Outcome).Inc()
+	}
+	if facts := observation.NoDataMemoryRead; facts != nil {
+		m.noDataMemoryReads.WithLabelValues(facts.Representation).Inc()
+	}
+	if observation.Stage == observability.StageNoDataMemoryRenewed && observation.NoDataMemoryRenewal != nil {
+		m.noDataMemoryRenewals.WithLabelValues(
+			string(observation.Result), string(observation.ReasonCode),
+		).Inc()
 	}
 	if facts := observation.GapProgress; facts != nil {
 		m.gapGuardScopeRounds.WithLabelValues(

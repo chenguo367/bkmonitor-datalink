@@ -284,6 +284,10 @@ func (*unreadableBackend) ReadHash(context.Context, string) (map[string][]byte, 
 	return nil, errors.New("state: the store did not answer")
 }
 
+func (*unreadableBackend) ReadHashField(context.Context, string, string) ([]byte, error) {
+	return nil, errors.New("state: the store did not answer")
+}
+
 func (*unreadableBackend) ApplyHashDelta(context.Context, HashDeltaWrite) (HashDeltaOutcome, error) {
 	return HashDeltaOutcome{}, errors.New("state: the store did not answer")
 }

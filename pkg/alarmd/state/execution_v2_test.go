@@ -21,7 +21,11 @@ type casMemoryBackend struct {
 	values map[string][]byte
 	// hashes is the second key space this backend holds: one map of fields per
 	// key, which is what the no-data memory moved to.
-	hashes   map[string]map[string][]byte
+	hashes map[string]map[string][]byte
+	// commands is which hash command each call used, so a test can say what a
+	// path read rather than only what it concluded. The difference between one
+	// field and every field is the whole cost argument.
+	commands []string
 	conflict bool
 	reads    int
 	// remaining models what PTTL would answer, in the same encoding: absent
@@ -105,7 +109,17 @@ func (*casMemoryBackend) SetMany(context.Context, []BackendWrite) error { return
 // with them. The header comparison in particular is the whole atomicity
 // argument, so a fake that applied unconditionally would let every test of the
 // conflict paths pass against a store that had none.
+func (backend *casMemoryBackend) ReadHashField(_ context.Context, key, field string) ([]byte, error) {
+	backend.commands = append(backend.commands, "HGET")
+	value, found := backend.hashes[key][field]
+	if !found {
+		return nil, nil
+	}
+	return append([]byte(nil), value...), nil
+}
+
 func (backend *casMemoryBackend) ReadHash(_ context.Context, key string) (map[string][]byte, error) {
+	backend.commands = append(backend.commands, "HGETALL")
 	backend.reads++
 	fields := backend.hashes[key]
 	if len(fields) == 0 {

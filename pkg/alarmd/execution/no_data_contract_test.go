@@ -280,11 +280,28 @@ func TestAGroupLastSeenBeforeThisRoundIsNotStoredAsPresent(t *testing.T) {
 	if *history.Absent != (NoDataGroupAbsence{LastSeen: 60}) {
 		t.Fatalf("history group = %+v, want its own last-seen time and no absence", *history.Absent)
 	}
-	// And the store must refuse the other encoding of the same group, so the
-	// two can never both be written and produce two digests for one memory.
-	built.Set[0].Absent = &NoDataGroupAbsence{LastSeen: built.PresentAsOf}
-	if err := built.ValidateDigest(); err == nil {
-		t.Fatal("ValidateDigest() accepted a present group written the long way")
+	// And the validator must refuse the other encoding of the same group, so
+	// the two can never both be written and produce two digests for one memory.
+	//
+	// Through validateStatement rather than ValidateDigest, and that is the
+	// whole point of this half. Rewriting a built mutation changes what its
+	// statement digest derives to, so ValidateDigest rejects it either way and
+	// a test using it passes with this rule deleted -- which is what a mutation
+	// run found. The rule is pinned where it lives.
+	longWay := built
+	longWay.Set = []NoDataGroupDelta{{
+		GroupKey: "live", Absent: &NoDataGroupAbsence{LastSeen: built.PresentAsOf},
+	}}
+	if err := longWay.validateStatement(); err == nil {
+		t.Fatal("validateStatement() accepted a present group written the long way; one memory now " +
+			"has two encodings and so two digests")
+	}
+	// The same payload written the short way is accepted, so the refusal above
+	// is about the encoding and not about something else in the statement.
+	shortWay := built
+	shortWay.Set = []NoDataGroupDelta{{GroupKey: "live"}}
+	if err := shortWay.validateStatement(); err != nil {
+		t.Fatalf("validateStatement() refused the compressed encoding: %v", err)
 	}
 }
 
