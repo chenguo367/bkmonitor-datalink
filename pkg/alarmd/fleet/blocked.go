@@ -127,6 +127,14 @@ const (
 	// -- a window short of points, an outcome nobody could decide, a state
 	// restored without its cause.
 	EffectUnconfirmed Effect = "UNCONFIRMED"
+	// EffectMemoryLost: the round ended and its result stands; what was lost
+	// is the round's upkeep of a Plan's absence memory -- the write the store
+	// refused, or the renewal it would not do -- and the store is asked again
+	// next round. None of the four above says that: the memory row read as
+	// UNCONFIRMED, which told a reader the round's result could not be relied
+	// on when it could, and read the fold as recovering while the store was
+	// refusing every round.
+	EffectMemoryLost Effect = "MEMORY_LOST"
 )
 
 // Closed lists, for the page's completeness tests.
@@ -134,7 +142,7 @@ var (
 	Stages       = []Stage{StageConfig, StageSchedule, StageQuery, StageEvaluate, StageCommit, StageUnlocated}
 	Dependencies = []Dependency{DependencyRedis, DependencyQueryBackend, DependencyControlSource, DependencyKafka, DependencyNone, DependencyUnlocated}
 	Classes      = []Class{ClassTimeout, ClassUnavailable, ClassRefused, ClassCapacity, ClassContract, ClassConfig, ClassRetention, ClassUnlocated}
-	Effects      = []Effect{EffectDelayed, EffectRetrying, EffectSkipped, EffectUnconfirmed}
+	Effects      = []Effect{EffectDelayed, EffectRetrying, EffectSkipped, EffectUnconfirmed, EffectMemoryLost}
 )
 
 // DependencyEvidence values: how the dependency was named.
@@ -447,6 +455,10 @@ func effectOf(anomaly Anomaly, schedule Schedule, roundFailed bool) Effect {
 	switch {
 	case anomaly.Skip != nil, anomaly.Kind == KindSkippedSpan:
 		return EffectSkipped
+	case anomaly.Kind == KindNoDataMemoryRefused:
+		// The round is over and fine; the memory's upkeep is what the store
+		// refused, and it is asked again next round.
+		return EffectMemoryLost
 	case anomaly.QueryCooldown != nil, roundFailed, anomaly.Kind == KindBlockedRun, anomaly.Stalled:
 		return EffectRetrying
 	case anomaly.Kind == KindDegradedRun, anomaly.Coverage != nil, restoredWithoutEvidence(anomaly):

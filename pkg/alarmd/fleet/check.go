@@ -603,7 +603,9 @@ func noteProblem(group *CheckGroup, anomaly *Anomaly, code string, now time.Time
 	switch {
 	case !recent:
 		group.Silent++
-	case blocked.Effect == EffectRetrying, blocked.Effect == EffectSkipped:
+	case blocked.Effect == EffectRetrying, blocked.Effect == EffectSkipped, blocked.Effect == EffectMemoryLost:
+		// A refusal within the window is the store still refusing: the
+		// memory line is blocked, not recovering, while that lasts.
 		group.FailingNow++
 	case blocked.Effect == EffectDelayed:
 		group.Delayed++

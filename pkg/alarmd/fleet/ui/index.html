@@ -587,7 +587,8 @@ var EFFECT = {
   DELAYED: '只是延迟，还没丢',
   RETRYING: '正在重试（这一轮没完成，会再跑）',
   SKIPPED: '确认漏检（跳过记录已持久化，那段不补）',
-  UNCONFIRMED: '结果待确认（这一轮结束了但结果不能采信）'
+  UNCONFIRMED: '结果待确认（这一轮结束了但结果不能采信）',
+  MEMORY_LOST: '这一轮的结果可信，丢的是无数据记忆的维护（没写进去或续不了期），下一轮再向存储要一次'
 };
 
 // One sentence for the row: where it is stuck, talking to what, what kind,
@@ -684,7 +685,7 @@ var CHECK = {
   // word 容量 appears only over a budget rejection.
   DETECTION_ABANDONED:   '{n} 个对象跳过了检测，那段不补',
   TIMELINE_PRUNED:       '{n} 个对象的游标越过了已裁掉的时间线，那段没检测也不补',
-  NO_DATA_MEMORY_REFUSED: '{n} 个对象的无数据记忆写不进去（{s} 条策略）：阈值检测照常，但记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发',
+  NO_DATA_MEMORY_REFUSED: '{n} 个对象的无数据记忆维护不了（{s} 条策略）：阈值检测照常，但写不进去的记忆停在最后一次成功写入、续不了期的记忆会在有效期到后整份过期——之后变缺失的组不会被记为首次缺失，无数据告警不会触发',
   DEPENDENCY_DOWN:       'alarmd 自己的依赖没答，{n} 个对象受影响（{g} 种）',
   DEFECT:                '{n} 个对象命中程序缺陷（{g} 种），上报',
   OBSERVATION_GAP:       '{n} 个对象现在说不出结论（{g} 种原因）',
@@ -810,7 +811,7 @@ var EVIDENCE = {
   ROUNDS_STALLED:        '对象行"最近一次错误"：原文、类型、卡住的 Slot、同一 Slot 连续几次',
   DETECTION_ABANDONED:   '对象行"没检测的时段"：首末 Slot、记录时刻、对象周期；"资源预算拒绝"折对照容量面板的"预算被拒"',
   TIMELINE_PRUNED:       '对象行"没检测的时段"：游标从哪跳到哪、记录时刻',
-  NO_DATA_MEMORY_REFUSED: '对象行"无数据记忆"：存储的拒绝原因、这份记忆的组数与上限、首次与最近拒绝时刻、被拒轮数；指标 worker_no_data_memory_refusals_total{reason,record}',
+  NO_DATA_MEMORY_REFUSED: '按原因分组看是写不进去还是续不了期。对象行"无数据记忆写不进去"：存储的拒绝原因、这份记忆的组数与上限、首次与最近拒绝时刻、被拒轮数；"无数据记忆续不了期"：拒绝原因、尝试次数；健康对象行的"无数据记忆维护"是对照（最近一次问存储的时刻在前进）。指标 worker_no_data_memory_refusals_total{reason,record}、worker_no_data_memory_renewals_total{result,reason}',
   DEPENDENCY_DOWN:       '分组的原因码说是哪个依赖；对象行"最近一次错误"给原文',
   DEFECT:                '分组的原因码 + 对象行"最近一次错误"原文与 Slot——上报带这两样',
   OBSERVATION_GAP:       '对象行"等下次 · 预计 HH:MM"；副本级缺口看副本表里该副本的快照年龄',
@@ -837,7 +838,7 @@ var NEXT = {
   ROUNDS_STALLED:        '不会自己恢复：展开找对象，查它卡在哪一步（日志按 query_group_key），必要时重启副本',
   DETECTION_ABANDONED:   '仍在发生的：看对象行的"跳过前最后一步"（错过查询截止 / 数据未就绪 / 预算拒绝…）与周期，按那一步查；只有"资源预算拒绝"分组是资源装不下，其余不据此扩容，也不据此排除别的容量或调度约束',
   TIMELINE_PRUNED:       '仍在发生的：看游标为什么落后到被剪；已停止的只是记录，那段永久没检测',
-  NO_DATA_MEMORY_REFUSED: '这条策略的无数据记忆组数超过了上限（默认 100,000，是防失控的护栏，不是工作上限——线上最大的记忆只有几千组）：先看策略的聚合维度是不是把组数放飞了（按高基数维度分组），收维度而不是抬上限；修复前这条策略的无数据告警不会触发，要人工盯这组的缺失',
+  NO_DATA_MEMORY_REFUSED: '写不进去的：这条策略的无数据记忆组数超过了上限（默认 100,000，是防失控的护栏，不是工作上限——线上最大的记忆只有几千组），先看策略的聚合维度是不是把组数放飞了（按高基数维度分组），收维度而不是抬上限。续不了期的：看状态存储（Redis）是否可用、是否支持设置有效期，恢复后下一轮自动续上，不用动策略。修复前这些策略的无数据告警不会触发，要人工盯这组的缺失',
   DEPENDENCY_DOWN:       '按原因码看是哪个依赖（Redis/Kafka/后端）；依赖恢复后自动清',
   DEFECT:                '程序缺陷：带原因码上报，展开取一个对象的证据',
   OBSERVATION_GAP:       '等下一轮完成以补齐原因（行上有预计时刻；到点后仍可能在等待、重试或取消）；超过预计完成时间仍未补齐，它会落到"到期没跑"那一行（alarmd 的），再查该副本的调度与执行；副本级缺口看该副本快照',
@@ -868,7 +869,7 @@ var RECOVERY = {
   ROUNDS_STALLED:        '对象的轮次重新结束（对象行离开"轮次不结束"）；不会自己发生',
   DETECTION_ABANDONED:   '{w} 分钟内没有新的跳过（"仍在发生"折归零）；已停止的记录不会归零，那是记录不是指标',
   TIMELINE_PRUNED:       '{w} 分钟内没有新的越过；已停止的记录不会归零',
-  NO_DATA_MEMORY_REFUSED: '该 Plan 一次写入落库（no_data_memory_written 且 stored=true——ALREADY_APPLIED 算、STALE_VERSION 不算，以发射方的 stored 为准不看结局名）；这一行随之消失，进历史区的"已恢复"。{w} 分钟内没有新拒绝不算恢复',
+  NO_DATA_MEMORY_REFUSED: '写不进去的：该 Plan 一次写入落库（no_data_memory_written 且 stored=true——ALREADY_APPLIED 算、STALE_VERSION 不算，以发射方的 stored 为准不看结局名）。续不了期的：一次续期到达存储（不论答"续了"还是"还够长"）或一次写入落库。这一行随之消失，进历史区的"已恢复"。{w} 分钟内没有新拒绝不算恢复',
   DEPENDENCY_DOWN:       '依赖恢复后各对象下一轮完成，这一行自动清',
   DEFECT:                '修复上线后该原因码不再出现',
   OBSERVATION_GAP:       '各对象下一轮完成后补上成因、离开这一行——只是补齐证据，不等于这几个对象当前有新故障；副本级缺口随该副本重新发布快照消失',
@@ -1072,6 +1073,42 @@ var GUARD_REASON = {
   QUERY_TIMEOUT: '查询超时',
   QUERY_PARTIAL: '查询结果不完整'
 };
+
+// The store's reasons for refusing to keep a memory alive, in words; a code
+// the page has no words for prints as itself and is on the hover.
+var MEMORY_REASON = {
+  REDIS_UNAVAILABLE: '状态存储（Redis）不可用',
+  BACKEND_CAPABILITY_MISSING: '状态存储不支持设置有效期'
+};
+// Which upkeep the store refused, and which stored shape a read found. Both
+// closed lists on the Go side, and the page has words for each.
+var MEMORY_REFUSAL_KIND = {
+  WRITE: '写不进去',
+  RENEWAL: '续不了期'
+};
+var MEMORY_REPRESENTATION = {
+  NONE: '还没有记忆（没写过，或读失败）',
+  WHOLE_MEMORY: '整份存的旧格式（升级后还没写过）',
+  PER_GROUP: '按组存的新格式'
+};
+
+function memoryUpkeepWords(upkeep) {
+  var parts = [];
+  if (upkeep.last_attempt_at) {
+    parts.push('最近一次问存储 ' + momentLabel(upkeep.last_attempt_at)
+      + (upkeep.last_renewed_at ? '，最近一次真的续了 ' + momentLabel(upkeep.last_renewed_at) : '，还没到需要续的时候')
+      + (upkeep.ttl_seconds ? '；续期后有效 ' + elapsedLabel(upkeep.ttl_seconds) : ''));
+  } else {
+    parts.push('本进程还没问过存储（读到就问，隔有效期的四分之一问一次）');
+  }
+  if (upkeep.representation) {
+    parts.push('上次读到的是' + (MEMORY_REPRESENTATION[upkeep.representation] || upkeep.representation)
+      + (upkeep.last_read_at ? '（' + momentLabel(upkeep.last_read_at) + '）' : ''));
+  }
+  if (upkeep.plan && upkeep.plan.strategy_id) parts.push('策略 ' + upkeep.plan.strategy_id);
+  if (upkeep.plans > 1) parts.push('这个对象另有 ' + (upkeep.plans - 1) + ' 条策略有记忆，显示的是最近问过的一条');
+  return parts.join('；');
+}
 
 function guardScopeWords(guard) {
   var scope = guard.scope === 'plan' ? '整条策略' : '级别 ' + guard.scope;
@@ -2012,16 +2049,36 @@ function objectRow(anomaly) {
   // recovered: nothing reports a successful write yet.
   if (anomaly.no_data_memory) {
     var memory = anomaly.no_data_memory;
-    var measured = memory.groups || memory.limit
-      ? '，这份记忆里有 ' + (memory.groups || 0) + ' 个组，上限 ' + (memory.limit || 0)
-        + (memory.limit && memory.groups > memory.limit ? '（超 ' + Math.round((memory.groups / memory.limit - 1) * 100) + '%）' : '')
-      : '';
-    line('无数据记忆写不进去', (memory.reason || '（存储没给原因）') + measured
-      + '；自 ' + momentLabel(memory.first_at) + ' 起被拒 ' + (memory.refusals || 0) + ' 轮，最近 ' + momentLabel(memory.last_at)
+    var tail = '；自 ' + momentLabel(memory.first_at) + ' 起被拒 ' + (memory.refusals || 0) + ' 次，最近 ' + momentLabel(memory.last_at)
       + (memory.plan && memory.plan.strategy_id ? '；策略 ' + memory.plan.strategy_id : '')
-      + (memory.plans > 1 ? '（这个对象还有 ' + (memory.plans - 1) + ' 条策略同样被拒，显示的是最近的一条；每条要各自写成功）' : ''),
-      '阈值检测照常跑、结果照发，只是学到的缺失没写下去：记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发。'
-      + '这一行只在该 Plan 一次写入落库（stored=true）后消失；没有新拒绝不算恢复');
+      + (memory.plans > 1 ? '（这个对象还有 ' + (memory.plans - 1) + ' 条策略同样被拒，显示的是最近的一条；每条要各自恢复）' : '');
+    if (memory.kind === 'RENEWAL') {
+      // The loss a memory kept one field per group can have: nothing writes
+      // it while its groups are steady, so the renewal on every read is all
+      // that keeps its key alive, and a renewal the store refuses is a memory
+      // on its way to expiring whole.
+      line('无数据记忆续不了期', (MEMORY_REASON[memory.reason] || memory.reason || '（存储没给原因）') + tail,
+        '阈值检测照常跑、结果照发。这份记忆在存储里有有效期，平时靠每次读到时续期保活；续不了期，有效期一到整份过期，之后每个组都从"没有历史"重来，变缺失的组不会被记为首次缺失，无数据告警不会触发。'
+        + '存储每一轮都会被再问一次；一次续期到达存储（不论它答"续了"还是"还够长"）或一次写入落库，这一行消失。原始原因码：' + (memory.reason || '-')
+        + '；指标 worker_no_data_memory_renewals_total{result,reason}');
+    } else {
+      var measured = memory.groups || memory.limit
+        ? '，这份记忆里有 ' + (memory.groups || 0) + ' 个组，上限 ' + (memory.limit || 0)
+          + (memory.limit && memory.groups > memory.limit ? '（超 ' + Math.round((memory.groups / memory.limit - 1) * 100) + '%）' : '')
+        : '';
+      line('无数据记忆写不进去', (memory.reason || '（存储没给原因）') + measured + tail,
+        '阈值检测照常跑、结果照发，只是学到的缺失没写下去：记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发。'
+        + '这一行只在该 Plan 一次写入落库（stored=true）后消失；没有新拒绝不算恢复');
+    }
+  }
+  // The positive evidence about the same memory: the store was asked to keep
+  // it alive and answered. A memory that is alive reads exactly like one about
+  // to expire, and the write family is silent for a steady Plan by design; a
+  // renewal that reached the store and answered is what says upkeep works.
+  if (anomaly.no_data_memory_upkeep) {
+    line('无数据记忆维护', memoryUpkeepWords(anomaly.no_data_memory_upkeep),
+      '记忆有有效期，靠每次读到时续期保活：每隔有效期的四分之一问一次存储，剩余不到一半才真的续。"最近一次问"在前进就是维护在工作；写入次数不涨是正常的（组不变就不写），别拿它判断记忆是否还活着。'
+      + '指标 worker_no_data_memory_renewals_total{result,reason}、worker_no_data_memory_reads_total{representation}');
   }
   // A failure of this deployment's own making beside the finding the column
   // decided: the row is on its line for the column's reason and under

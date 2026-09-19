@@ -157,6 +157,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		}),
 		anomaly("qg-window-filling", func(item *fleet.Anomaly) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
+			// A memory being kept alive: the store was asked twenty minutes
+			// ago and renewed, the last read found the new shape, and a second
+			// Plan of the object has memory too.
+			item.NoDataMemoryUpkeep = &fleet.NoDataMemoryUpkeep{Plan: fleet.StrategyRef{StrategyID: "s-12", BusinessID: "9"}, Representation: "PER_GROUP",
+				LastReadAt: ptrTime(at.Add(-time.Minute)), LastAttemptAt: ptrTime(at.Add(-20 * time.Minute)), LastRenewedAt: ptrTime(at.Add(-20 * time.Minute)),
+				TTLSeconds: 43200, Plans: 2}
 			item.Coverage = &fleet.HistoryCoverage{Levels: 3, Short: 1,
 				WorstValid: 8, WorstRequired: 9, ShortRounds: 2}
 		}),
@@ -464,9 +470,25 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		item.Kind = "NO_DATA_MEMORY_REFUSED"
 		item.ReasonCode = "STATE_BUDGET_EXCEEDED"
 		item.Since, item.ReasonSince, item.ReasonLastAt, item.Consecutive = at.Add(-40*time.Minute), at.Add(-40*time.Minute), at.Add(-time.Minute), 79
-		item.NoDataMemory = &fleet.NoDataMemoryRefusal{Reason: "STATE_BUDGET_EXCEEDED", Record: "GROUPS", Groups: 120400, Limit: 100000,
+		item.NoDataMemory = &fleet.NoDataMemoryRefusal{Kind: fleet.NoDataMemoryRefusalWrite, Reason: "STATE_BUDGET_EXCEEDED", Record: "GROUPS", Groups: 120400, Limit: 100000,
 			FirstAt: at.Add(-40 * time.Minute), LastAt: at.Add(-time.Minute), Refusals: 79, Plan: fleet.StrategyRef{StrategyID: "s-88", BusinessID: "9"}}
-	})}
+	}),
+		// The other loss a memory can have: the store will not keep its key
+		// alive. Nothing else about the object is wrong, and the upkeep
+		// beside the refusal says the store was asked and what it read.
+		anomaly("qg-memory-renewal", func(item *fleet.Anomaly) {
+			item.Kind = "NO_DATA_MEMORY_REFUSED"
+			item.ReasonCode = "REDIS_UNAVAILABLE"
+			item.Since, item.ReasonSince, item.ReasonLastAt, item.Consecutive = at.Add(-6*time.Minute), at.Add(-6*time.Minute), at.Add(-time.Minute), 6
+			item.NoDataMemory = &fleet.NoDataMemoryRefusal{Kind: fleet.NoDataMemoryRefusalRenewal, Reason: "REDIS_UNAVAILABLE",
+				FirstAt: at.Add(-6 * time.Minute), LastAt: at.Add(-time.Minute), Refusals: 6, Plan: fleet.StrategyRef{StrategyID: "s-89", BusinessID: "9"}}
+			// As the tracker publishes it: the refused Plans are the row's
+			// strategies, and the rounds complete -- the last did a minute ago.
+			item.Strategies = []fleet.StrategyRef{{StrategyID: "s-89", BusinessID: "9"}}
+			item.LastHealthyAt = at.Add(-time.Minute)
+			item.NoDataMemoryUpkeep = &fleet.NoDataMemoryUpkeep{Plan: fleet.StrategyRef{StrategyID: "s-89", BusinessID: "9"}, Representation: "PER_GROUP",
+				LastReadAt: ptrTime(at.Add(-time.Minute)), LastAttemptAt: ptrTime(at.Add(-time.Minute)), TTLSeconds: 43200}
+		})}
 	fleet.Attribute(memoryRows, at)
 	retained.NoDataMemory = memoryRows
 	columns := [][]fleet.Anomaly{rows, demoted}
@@ -856,9 +878,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The silent loss: the line on the work list with its sentence, and
 		// the row with the refusal's reason, the two numbers it compared,
 		// since when, and no claim of recovery.
-		{"CHECKS ::", "1 个对象的无数据记忆写不进去（1 条策略）：阈值检测照常，但记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发"},
-		{"CHECKS ::", "下一步：这条策略的无数据记忆组数超过了上限（默认 100,000，是防失控的护栏，不是工作上限"},
-		{"MEMORY qg-memory-refused ::", "无数据记忆写不进去：STATE_BUDGET_EXCEEDED，这份记忆里有 120400 个组，上限 100000（超 20%）；自 17:20:00 起被拒 79 轮，最近 17:59:00；策略 s-88"},
+		{"CHECKS ::", "2 个对象的无数据记忆维护不了（2 条策略）：阈值检测照常，但写不进去的记忆停在最后一次成功写入、续不了期的记忆会在有效期到后整份过期——之后变缺失的组不会被记为首次缺失，无数据告警不会触发"},
+		{"CHECKS ::", "下一步：写不进去的：这条策略的无数据记忆组数超过了上限（默认 100,000，是防失控的护栏，不是工作上限——线上最大的记忆只有几千组），先看策略的聚合维度是不是把组数放飞了（按高基数维度分组），收维度而不是抬上限。续不了期的：看状态存储（Redis）是否可用、是否支持设置有效期，恢复后下一轮自动续上，不用动策略"},
+		{"MEMORY qg-memory-refused ::", "无数据记忆写不进去：STATE_BUDGET_EXCEEDED，这份记忆里有 120400 个组，上限 100000（超 20%）；自 17:20:00 起被拒 79 次，最近 17:59:00；策略 s-88"},
+		// The refused renewal: the store's reason in words, the attempts, and
+		// beside it the upkeep -- asked and refused, the last read's shape.
+		{"MEMORY qg-memory-renewal ::", "无数据记忆续不了期：状态存储（Redis）不可用；自 17:54:00 起被拒 6 次，最近 17:59:00；策略 s-89"},
+		{"MEMORY qg-memory-renewal ::", "无数据记忆维护：最近一次问存储 17:59:00，还没到需要续的时候；续期后有效 12 小时 0 分；上次读到的是按组存的新格式（17:59:00）；策略 s-89"},
+		// The positive evidence on a row nothing is refused on.
+		{"UPKEEP qg-window-filling ::", "无数据记忆维护：最近一次问存储 17:40:00，最近一次真的续了 17:40:00；续期后有效 12 小时 0 分；上次读到的是按组存的新格式（17:59:00）；策略 s-12；这个对象另有 1 条策略有记忆，显示的是最近问过的一条"},
 		// The guards behind a held window: the gapped scope with no count and
 		// how long it has held, the warming ones with their k/N and whether
 		// they are moving, the one at its requirement said as not released,
@@ -1028,7 +1056,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// none), and one retained record made an hour ago.
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
-		"需要处理：现在要处理 11 类（17 个对象，去重；其中平台写入方 1 类，按策略计不按对象计）；待归因 5 类（17 个对象）；业务侧已确认 4 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"需要处理：现在要处理 11 类（18 个对象，去重；其中平台写入方 1 类，按策略计不按对象计）；待归因 5 类（17 个对象）；业务侧已确认 4 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
 		"另有 1 个是滚动后的追赶漏检（副本启动 5 分钟内），看它还有没有新增",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
@@ -1338,7 +1366,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 // lineStarting returns the harness line with this prefix, or "" if the render
 // emitted none -- which is itself a result, and a different one from a line
 // that came out empty.
-func ptrFloat(value float64) *float64 { return &value }
+func ptrFloat(value float64) *float64    { return &value }
+func ptrTime(value time.Time) *time.Time { return &value }
 
 func lineStarting(text, prefix string) string {
 	for _, candidate := range strings.Split(text, "\n") {
@@ -1576,6 +1605,7 @@ for (const row of data.anomalies) {
   if (row.restored) { console.log('RESTORED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.no_data_memory) { console.log('MEMORY ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.guards) { console.log('GUARDS ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.no_data_memory_upkeep) { console.log('UPKEEP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the
