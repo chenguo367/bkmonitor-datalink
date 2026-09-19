@@ -414,6 +414,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_worker_no_data_persistent_skips_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_refusals_total"] = "variableLabels: {reason,record}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_writes_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_query_free_completion_total"] = "variableLabels: {kind,evidence}"
+	expected["bkmonitor_alarmd_execution_evidence_written_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_reads_total"] = "variableLabels: {representation}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_renewals_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_worker_gap_guard_scope_rounds_total"] = "variableLabels: {status,reason,progress}"
@@ -890,6 +892,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// refusal, and no more: the label is written only from the list execution
 	// publishes.
 	bounds[fqName("worker_no_data_memory_writes_total")] = len(execution.NoDataWriteOutcomes)
+	bounds[fqName("query_free_completion_total")] =
+		len(execution.QueryFreeCompletionKinds) * len(execution.ExecutionEvidenceReadings)
+	// Success and degraded; the write either landed or it did not.
+	bounds[fqName("execution_evidence_written_total")] = 2
 	bounds[fqName("worker_no_data_memory_reads_total")] = len(execution.NoDataRepresentations)
 	// One success shape and one per reason a renewal can fail with. The reasons
 	// are the two the store maps its errors onto, so the bound is the shape of

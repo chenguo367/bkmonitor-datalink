@@ -1225,7 +1225,8 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		}
 	})
 	coordinator.observeCommittedProgress(ctx, request.Operation, started, observationResult, observationReason,
-		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionCause.Coverage)
+		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionCause.Coverage,
+		completion.Evidence)
 	return execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode}, nil
 }
 
@@ -1824,7 +1825,7 @@ func indexStatePreflight(result execution.StatePreflightResult) map[execution.St
 }
 
 // Called only after this invocation received and validated ProgressCommitted.
-func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, coverage execution.HistoryCoverage) {
+func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, coverage execution.HistoryCoverage, evidence *execution.ExecutionEvidence) {
 	if reason == "" {
 		reason = observability.ReasonNone
 	}
@@ -1835,8 +1836,21 @@ func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx contex
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		Result: result, ReasonCode: reason, Duration: time.Since(started), ProgressCompletionKind: kind,
 		ProgressCompletionCause: cause, ProgressCompletionReason: causeReason,
-		HistoryCoverage: coverageFacts,
+		HistoryCoverage: coverageFacts, ExecutionEvidence: executionEvidenceFacts(evidence),
 	})
+}
+
+// executionEvidenceFacts carries what an earlier attempt got to onto the
+// completion's observation, in the same hand-copied shape as the coverage
+// counts above and for the same reason: a field computed where the decision is
+// made and dropped on the way out is this codebase's most frequent defect.
+func executionEvidenceFacts(evidence *execution.ExecutionEvidence) *observability.ExecutionEvidenceFacts {
+	if evidence == nil {
+		return nil
+	}
+	return &observability.ExecutionEvidenceFacts{
+		Kind: string(evidence.Kind), PlansApplied: evidence.PlansApplied, PlansTotal: evidence.PlansTotal,
+	}
 }
 
 // historyCoverageFacts carries the Slot's window counts onto the observation.

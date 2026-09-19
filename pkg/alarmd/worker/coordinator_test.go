@@ -1125,7 +1125,21 @@ func (ports *recordingPorts) ResolveFinalization(
 	_ context.Context,
 	request execution.SlotExecutionRequest,
 ) (execution.QueryFreeFinalization, error) {
-	return execution.QueryFreeFinalization{Contract: request.Contract, Mode: execution.FinalizationQueryRequired}, nil
+	mode := ports.finalizationMode
+	if mode == "" {
+		mode = execution.FinalizationQueryRequired
+	}
+	finalization := execution.QueryFreeFinalization{Contract: request.Contract, Mode: mode}
+	if mode == execution.FinalizationGapSkipped || mode == execution.FinalizationSnapshotUnavailable {
+		// A query-free finalization carries the due Plans it is finalizing:
+		// that frozen set is the only thing the path has to work from.
+		finalization.Targets = request.DuePlanTargets
+		finalization.ReasonCode = execution.ReasonCode(contract.ReasonGapSkipped)
+		if mode == execution.FinalizationSnapshotUnavailable {
+			finalization.ReasonCode = execution.ReasonCode(contract.ReasonSnapshotUnavailable)
+		}
+	}
+	return finalization, nil
 }
 
 func (ports *recordingPorts) LoadActivations(
@@ -1181,6 +1195,10 @@ func (ports *recordingPorts) LoadActivations(
 }
 
 type recordingPorts struct {
+	// finalizationMode lets a test put the Slot on the query-free path, which
+	// is where the evidence is read. Empty means the ordinary query path.
+	finalizationMode                execution.FinalizationMode
+	evidence                        *memoryEvidenceStore
 	openAlerts                      map[string]bool
 	trackedPlans                    []execution.PlanIdentity
 	acknowledged                    []contract.TriggerEventV1

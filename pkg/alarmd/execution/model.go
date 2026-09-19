@@ -3194,6 +3194,57 @@ var ExecutionEvidenceKinds = []ExecutionEvidenceKind{
 	EvidenceStateApplied, EvidenceNoneFound, EvidenceUnreadable,
 }
 
+// The readings a counter takes of one completion's evidence.
+//
+// Four of them, and they are not the three kinds: STATE_APPLIED splits into
+// "every Plan" and "some of them", which is the split the gap fold turns on and
+// therefore the one a reader has to be able to see. It is derived here rather
+// than added to the kinds, so Validate and the counter cannot end up with two
+// vocabularies for one fact.
+const (
+	EvidenceReadingFullyApplied = "STATE_APPLIED"
+	EvidenceReadingMixed        = "MIXED"
+	EvidenceReadingNoneFound    = "NONE_FOUND"
+	EvidenceReadingUnreadable   = "UNREADABLE"
+	// EvidenceReadingAbsent is a completion carrying no evidence at all: a
+	// build or a deployment without the port. It is a label rather than a
+	// skipped observation, so the readings add up to the query-free
+	// completions and a reader can check that instead of assuming it -- and so
+	// a runtime that is not recording evidence says so here rather than by the
+	// other three staying at zero, which is what "nothing has gone wrong"
+	// looks like too.
+	EvidenceReadingAbsent = "ABSENT"
+)
+
+// ExecutionEvidenceReadings is every label the counter may carry.
+var ExecutionEvidenceReadings = []string{
+	EvidenceReadingFullyApplied, EvidenceReadingMixed, EvidenceReadingNoneFound,
+	EvidenceReadingUnreadable, EvidenceReadingAbsent,
+}
+
+// ReadEvidence names what a completion's evidence says, for the counter.
+func ReadEvidence(evidence *ExecutionEvidence) string {
+	if evidence == nil {
+		return EvidenceReadingAbsent
+	}
+	switch evidence.Kind {
+	case EvidenceStateApplied:
+		if evidence.FullyApplied() {
+			return EvidenceReadingFullyApplied
+		}
+		return EvidenceReadingMixed
+	case EvidenceNoneFound:
+		return EvidenceReadingNoneFound
+	case EvidenceUnreadable:
+		return EvidenceReadingUnreadable
+	default:
+		return EvidenceReadingAbsent
+	}
+}
+
+// QueryFreeCompletionKinds is the two kinds this counter is partitioned by.
+var QueryFreeCompletionKinds = []CompletionKind{CompletionGapSkipped, CompletionSnapshotUnavailable}
+
 // ExecutionEvidence is what a query-free completion found out about an earlier
 // attempt at the same Slot.
 //
