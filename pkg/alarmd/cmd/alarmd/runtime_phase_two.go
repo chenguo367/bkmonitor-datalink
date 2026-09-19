@@ -484,6 +484,14 @@ type phaseTwoWorkerBundle struct {
 	controlSourceKind     observability.SourceKind
 	controlReason         observability.ReasonCode
 	lastControlRecoveryAt time.Time
+	// outputSinkReady is whether the output sink is open. A replica whose
+	// sink is not open registers as starting and reports not ready, for the
+	// same reason as one that has not read the control facts: it is up and
+	// answers, but must not be handed Query Groups whose decisions it cannot
+	// publish. Set by outputSinkChanged from the sink's own record; a bundle
+	// assembled without a lazy sink (the tests' fakes open theirs before the
+	// bundle exists) keeps the initial true.
+	outputSinkReady bool
 	// controlSource is the state of the control source refresh as this
 	// process reports it, read at scrape and at publish rather than on a
 	// transition. See runtime_phase_two_control_source.go.
@@ -712,7 +720,7 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 	if err := dependencies.Config.Validate(); err != nil {
 		return nil, err
 	}
-	bundle := &phaseTwoWorkerBundle{dependencies: dependencies,
+	bundle := &phaseTwoWorkerBundle{dependencies: dependencies, outputSinkReady: true,
 		assigned: make(map[execution.QueryGroupIdentity]struct{}),
 		runners:  make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle)}
 	if dependencies.Recorder != nil {
@@ -2048,6 +2056,7 @@ func (bundle *phaseTwoWorkerBundle) register(ctx context.Context, readiness owne
 		bundle.mu.RLock()
 		draining := bundle.draining
 		factsSeen := bundle.controlFactsSeen
+		sinkReady := bundle.outputSinkReady
 		bundle.mu.RUnlock()
 		if draining {
 			return nil
@@ -2061,6 +2070,13 @@ func (bundle *phaseTwoWorkerBundle) register(ctx context.Context, readiness owne
 			// facts. This is the half of "do not exit on a control read" that
 			// is easy to leave out -- a replica that stays up but reports
 			// ready would be handed a share of Query Groups it cannot open.
+			readiness = ownership.WorkerStarting
+		}
+		if !sinkReady {
+			// The same half for the output sink: a replica that cannot
+			// publish must not be handed Query Groups to decide. The renewal
+			// loop registers it ready on the first renewal after the sink
+			// opens, within one renewal interval.
 			readiness = ownership.WorkerStarting
 		}
 	}
@@ -2626,10 +2642,17 @@ func (bundle *phaseTwoWorkerBundle) updateReadiness() {
 	factsSeen := bundle.controlFactsSeen
 	dependencyDegraded := bundle.dependencyDegraded
 	lastRecoveryAt := bundle.lastControlRecoveryAt
+	sinkReady := bundle.outputSinkReady
 	bundle.mu.RUnlock()
 	state := observability.HealthReady
 	var reasons []observability.ReasonCode
-	if !factsSeen {
+	if !sinkReady {
+		// Not ready, under the dependency's name: the replica is up and its
+		// diagnostics answer, and the rollout waits on it instead of
+		// terminating the replicas that can publish for one that cannot.
+		state = observability.HealthNotReady
+		reasons = []observability.ReasonCode{phaseTwoOutputSinkReason}
+	} else if !factsSeen {
 		// Not ready rather than degraded: degraded still answers the
 		// readiness probe as ready, and a rollout that took that answer would
 		// terminate the replica that does know the facts for one that does
@@ -2653,8 +2676,32 @@ func (bundle *phaseTwoWorkerBundle) updateReadiness() {
 	}
 	bundle.dependencies.Health.Update(phaseTwoReadiness{
 		State: state, Reasons: reasons, SnapshotReady: true, AssignmentReady: assignmentReady,
-		RuntimeStateReady: true, OutputSinkReady: true, LastRecoveryAt: lastRecoveryAt,
+		RuntimeStateReady: true, OutputSinkReady: sinkReady, LastRecoveryAt: lastRecoveryAt,
 	})
+}
+
+// phaseTwoOutputSinkReason is the readiness reason while the output sink is
+// not open. Kafka's own code, because that is the dependency that did not
+// answer; the endpoint list carries what it said.
+var phaseTwoOutputSinkReason = observability.ReasonCode(contract.ReasonKafkaUnavailable)
+
+// outputSinkChanged is told by the lazy output sink after every attempt. It
+// keeps the readiness fact and the worker registration in step with the sink:
+// not ready and starting while it is closed, ready on the first renewal after
+// it opens.
+func (bundle *phaseTwoWorkerBundle) outputSinkChanged(state outputSinkState) {
+	bundle.mu.Lock()
+	changed := bundle.outputSinkReady != state.Ready
+	bundle.outputSinkReady = state.Ready
+	bundle.mu.Unlock()
+	if !changed {
+		return
+	}
+	bundle.updateReadiness()
+	if !state.Ready && state.LastFailure != "" {
+		bundle.observe(context.Background(), observability.ComponentRuntime, observability.StageStartup,
+			observability.ResultDegraded, errors.New("output sink is not open: "+state.LastFailure))
+	}
 }
 
 // refreshAndReconcile runs one control tick. Dependency failures never stop
@@ -2917,9 +2964,12 @@ func (bundle *phaseTwoWorkerBundle) markControlFollower(err error) {
 // registration maintenance. Transient Ownership Store failures never reach
 // it; they are retried by maintainRegistration.
 func (bundle *phaseTwoWorkerBundle) markOwnershipUnsafe(err error) {
+	bundle.mu.RLock()
+	sinkReady := bundle.outputSinkReady
+	bundle.mu.RUnlock()
 	bundle.dependencies.Health.Update(phaseTwoReadiness{
 		State: observability.HealthNotReady, Reasons: []observability.ReasonCode{observability.ReasonInternalUnknown},
-		SnapshotReady: true, RuntimeStateReady: true, OutputSinkReady: true,
+		SnapshotReady: true, RuntimeStateReady: true, OutputSinkReady: sinkReady,
 	})
 	bundle.observe(context.Background(), observability.ComponentOwnership, observability.StageAssignmentLost, observability.ResultFailed, err)
 }

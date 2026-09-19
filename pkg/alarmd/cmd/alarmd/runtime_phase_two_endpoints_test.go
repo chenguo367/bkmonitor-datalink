@@ -137,7 +137,9 @@ func TestEndpointFactsReadTheSharedConnectionAndTheSourceRound(t *testing.T) {
 	}
 	// The hook stamps with the wall clock, so the facts read the same clock
 	// and the age is asserted small rather than exact.
-	facts := endpointFactsSource(cfg, sharing, recorder, nil, nil, source, time.Now)()
+	sinkState := outputSinkState{Ready: false, Attempts: 3, LastFailureAt: time.Now().Add(-2 * time.Second),
+		LastFailure: "kafka trigger event sink: open producer: client has run out of available brokers"}
+	facts := endpointFactsSource(cfg, sharing, recorder, nil, nil, source, func() outputSinkState { return sinkState }, time.Now)()
 	byRole := map[string]fleet.Endpoint{}
 	for _, entry := range facts {
 		byRole[entry.Role] = entry
@@ -156,16 +158,43 @@ func TestEndpointFactsReadTheSharedConnectionAndTheSourceRound(t *testing.T) {
 	if compat := byRole[fleet.EndpointCompatOutput]; compat.LastSuccessAgeSeconds != nil {
 		t.Errorf("a connection that issued nothing reads as recently succeeded: %+v", compat)
 	}
+	// The output sink's own record: not open, three attempts, and what the
+	// last one said, with no success age because it has never been open.
+	output := byRole[fleet.EndpointOutputKafka]
+	if output.Ready == nil || *output.Ready || output.Attempts == nil || *output.Attempts != 3 ||
+		output.LastFailureAgeSeconds == nil || *output.LastFailureAgeSeconds < 1 || *output.LastFailureAgeSeconds > 6 ||
+		output.LastFailure != sinkState.LastFailure || output.LastSuccessAgeSeconds != nil {
+		t.Errorf("output kafka = %+v, want not ready after 3 attempts with the last failure and no success age", output)
+	}
+	// Once open: ready, the success age is the time since it opened, the
+	// attempt count is how many it took, and the failure is gone.
+	sinkState = outputSinkState{Ready: true, Since: time.Now().Add(-40 * time.Second), Attempts: 4}
+	opened := endpointFactsSource(cfg, sharing, recorder, nil, nil, source, func() outputSinkState { return sinkState }, time.Now)()
+	for _, entry := range opened {
+		if entry.Role != fleet.EndpointOutputKafka {
+			continue
+		}
+		if entry.Ready == nil || !*entry.Ready || entry.Attempts == nil || *entry.Attempts != 4 ||
+			entry.LastSuccessAgeSeconds == nil || *entry.LastSuccessAgeSeconds < 39 || *entry.LastSuccessAgeSeconds > 45 ||
+			entry.LastFailureAgeSeconds != nil || entry.LastFailure != "" {
+			t.Errorf("open output kafka = %+v, want ready, 4 attempts, ~40 s since open, no failure", entry)
+		}
+	}
 	writer := byRole[fleet.EndpointStrategyCache].Writer
 	if writer == nil || !writer.Present || writer.Count != 81 || writer.State != "marker_present" || writer.AgeSeconds == nil || *writer.AgeSeconds != 95 {
 		t.Errorf("strategy cache writer = %+v, want 81 listed with a 95-second-old marker", writer)
 	}
 	// A follower has no round and says nothing about the writer.
-	none := endpointFactsSource(cfg, sharing, recorder, nil, nil, func() *fleet.SourceFacts { return nil },
+	none := endpointFactsSource(cfg, sharing, recorder, nil, nil, func() *fleet.SourceFacts { return nil }, nil,
 		func() time.Time { return moment })()
 	for _, entry := range none {
 		if entry.Role == fleet.EndpointStrategyCache && entry.Writer != nil {
 			t.Errorf("a follower reports writer evidence it never read: %+v", entry.Writer)
+		}
+		// No sink record source: the entry says nothing about readiness
+		// rather than inventing an answer.
+		if entry.Role == fleet.EndpointOutputKafka && (entry.Ready != nil || entry.Attempts != nil) {
+			t.Errorf("output kafka without a sink record reports readiness: %+v", entry)
 		}
 	}
 }

@@ -63,8 +63,14 @@ type phaseTwoProductionExternalDependencies struct {
 	// only ever set it ahead of the real clock: a Slot whose deadline lies in
 	// the real past has its query context expire on entry, and the failure
 	// reads as a query timeout rather than as the clock skew it is.
-	Now                func() time.Time
-	HTTPClient         *http.Client
+	Now        func() time.Time
+	HTTPClient *http.Client
+	// PrepareEvents validates the output coordinates and returns the opener
+	// that connects; validation errors refuse startup, the opener's errors
+	// are retried while the replica reports itself not ready. OpenEvents is
+	// the older hook that does both at once; a test that sets only it gets
+	// an opener that calls it, so its sink is opened on the first attempt.
+	PrepareEvents      func(enginekafka.DecisionSinkConfig) (outputSinkOpener, error)
 	OpenEvents         func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error)
 	AdditionalObserver observability.Observer
 }
@@ -72,10 +78,22 @@ type phaseTwoProductionExternalDependencies struct {
 func defaultPhaseTwoProductionExternalDependencies() phaseTwoProductionExternalDependencies {
 	return phaseTwoProductionExternalDependencies{
 		Now: time.Now, HTTPClient: newPhaseTwoUQHTTPClient(),
-		OpenEvents: func(coordinates enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error) {
-			return enginekafka.OpenTriggerEventSink(coordinates)
+		PrepareEvents: func(coordinates enginekafka.DecisionSinkConfig) (outputSinkOpener, error) {
+			opener, err := enginekafka.PrepareTriggerEventSink(coordinates)
+			if err != nil {
+				return nil, err
+			}
+			return outputSinkOpenerFunc(func() (productionPhaseTwoEventSink, error) { return opener.Open() }), nil
 		},
 	}
+}
+
+// prepareEvents resolves whichever hook the dependencies carry into an opener.
+func (external phaseTwoProductionExternalDependencies) prepareEvents(coordinates enginekafka.DecisionSinkConfig) (outputSinkOpener, error) {
+	if external.PrepareEvents != nil {
+		return external.PrepareEvents(coordinates)
+	}
+	return outputSinkOpenerFunc(func() (productionPhaseTwoEventSink, error) { return external.OpenEvents(coordinates) }), nil
 }
 
 // phaseTwoUQDialer bounds connection establishment to the query provider and
@@ -144,7 +162,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	external phaseTwoProductionExternalDependencies,
 ) (_ *phaseTwoWorkerBundle, resultErr error) {
 	if ctx == nil || recorder == nil || logger == nil || health == nil || newStrategySource == nil ||
-		external.Now == nil || external.HTTPClient == nil || external.OpenEvents == nil {
+		external.Now == nil || external.HTTPClient == nil || (external.OpenEvents == nil && external.PrepareEvents == nil) {
 		return nil, errors.New("phase-two production Bundle dependencies are incomplete")
 	}
 	if err := cfg.Validate(); err != nil {
@@ -547,7 +565,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	events, err := external.OpenEvents(cfg.Kafka.TriggerEventCoordinates())
+	// The coordinates are checked here and refuse startup when wrong; the
+	// connection is made by Start below, after the converters are configured
+	// and the bundle exists to be told, and is retried if it fails.
+	eventsOpener, err := external.prepareEvents(cfg.Kafka.TriggerEventCoordinates())
+	if err != nil {
+		return nil, err
+	}
+	events, err := newLazyOutputSink(eventsOpener, external.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -879,12 +904,18 @@ func openProductionPhaseTwoBundleWithDependencies(
 		rebalance:        bundle.rebalanceFleetFacts,
 		source:           bundle.sourceFleetFacts,
 		endpoints: endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
-			bundle.sourceFleetFacts, external.Now),
+			bundle.sourceFleetFacts, events.State, external.Now),
 	}
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.
 	bundle.applied = publisher.applied
 	bundle.capacity = publisher.capacity
+	// The first attempt runs now, so a broker that answers is open before the
+	// worker registers, as it always was; one that does not leaves the sink
+	// retrying and the bundle told, which is what keeps this replica out of
+	// the ready set until it can publish.
+	events.SetOnChange(bundle.outputSinkChanged)
+	events.Start()
 	return bundle, nil
 }
 
