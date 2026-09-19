@@ -464,7 +464,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		item.Kind = "NO_DATA_MEMORY_REFUSED"
 		item.ReasonCode = "STATE_BUDGET_EXCEEDED"
 		item.Since, item.ReasonSince, item.ReasonLastAt, item.Consecutive = at.Add(-40*time.Minute), at.Add(-40*time.Minute), at.Add(-time.Minute), 79
-		item.NoDataMemory = &fleet.NoDataMemoryRefusal{Reason: "STATE_BUDGET_EXCEEDED", Record: "NEXT", Groups: 74112, Limit: 65536,
+		item.NoDataMemory = &fleet.NoDataMemoryRefusal{Reason: "STATE_BUDGET_EXCEEDED", Record: "GROUPS", Groups: 120400, Limit: 100000,
 			FirstAt: at.Add(-40 * time.Minute), LastAt: at.Add(-time.Minute), Refusals: 79, Plan: fleet.StrategyRef{StrategyID: "s-88", BusinessID: "9"}}
 	})}
 	fleet.Attribute(memoryRows, at)
@@ -857,8 +857,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// the row with the refusal's reason, the two numbers it compared,
 		// since when, and no claim of recovery.
 		{"CHECKS ::", "1 个对象的无数据记忆写不进去（1 条策略）：阈值检测照常，但记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发"},
-		{"CHECKS ::", "下一步：按 decision-008（按组分 field 的存储表示）处理"},
-		{"MEMORY qg-memory-refused ::", "无数据记忆写不进去：STATE_BUDGET_EXCEEDED，这份记忆里有 74112 个组，上限 65536（超 13%）；自 17:20:00 起被拒 79 轮，最近 17:59:00；策略 s-88"},
+		{"CHECKS ::", "下一步：这条策略的无数据记忆组数超过了上限（默认 100,000，是防失控的护栏，不是工作上限"},
+		{"MEMORY qg-memory-refused ::", "无数据记忆写不进去：STATE_BUDGET_EXCEEDED，这份记忆里有 120400 个组，上限 100000（超 20%）；自 17:20:00 起被拒 79 轮，最近 17:59:00；策略 s-88"},
 		// The guards behind a held window: the gapped scope with no count and
 		// how long it has held, the warming ones with their k/N and whether
 		// they are moving, the one at its requirement said as not released,
