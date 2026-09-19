@@ -49,6 +49,24 @@ const (
 // because the consumer reads the severity as a name rather than a number.
 var builtInSeverities = map[uint32]string{1: "critical", 2: "warning", 3: "info"}
 
+// The consumer's bounds on what one message may carry, transcribed from its
+// cleaner (linkd standard: evaluations 1..32 items, severity 1..32 bytes). A
+// message over either is refused whole there, silently to this side, so both
+// are held here where the values are made.
+const (
+	// MaxEvaluations is the most decided levels one message can carry. The
+	// levels of a Plan are bounded by the compiler's level budget, and the
+	// configuration refuses a budget above this, so the converter's own check
+	// is reached only by a decision that was never compiled.
+	MaxEvaluations = 32
+	// MaxSeverityBytes is the longest severity name the consumer accepts. A
+	// level code longer than this is treated as a level without a code: the
+	// derived name is written and the level is counted as unmapped, because
+	// a name the consumer refuses whole loses the alert, and a derived name
+	// it maps to its default loses only the level, visibly.
+	MaxSeverityBytes = 32
+)
+
 // subjectSystems says which system owns each kind of object, in the consumer's
 // spelling. The consumer resolves the instance from its own strategy and the
 // dimensions; the subject is what it shows and what its display falls back on,
@@ -323,6 +341,12 @@ func (converter *Converter) evaluations(event *contract.TriggerEventV1) ([]wireE
 	if len(evaluations) == 0 {
 		return nil, errors.New("alarmd linkdoutput: a decision with no decided level has nothing to say")
 	}
+	if len(evaluations) > MaxEvaluations {
+		// Unreachable for a compiled Plan: the level budget is held below
+		// this at configuration time. Refused here so that it stays a
+		// contract violation rather than a message the consumer drops.
+		return nil, fmt.Errorf("alarmd linkdoutput: %d decided levels exceed the %d evaluations one message carries", len(evaluations), MaxEvaluations)
+	}
 	return evaluations, nil
 }
 
@@ -448,36 +472,46 @@ func primaryLevel(event *contract.TriggerEventV1) (contract.LevelResultV1, error
 // The three built-in levels are the platform's whole set today and their names
 // do not change. A level outside them is not rejected: levels are stated in the
 // strategy snapshot and the platform may extend them, so the snapshot's own
-// identifier is used when it has one, and otherwise an identifier derived from
-// the level. Neither case invents a business meaning - a consumer that does not
-// recognise the name maps it or falls back on its own terms.
+// identifier is used when it has one the consumer can carry, and otherwise an
+// identifier derived from the level. Neither case invents a business meaning -
+// a consumer that does not recognise the name maps it or falls back on its own
+// terms.
 func severityFor(level contract.LevelResultV1) string {
 	if name, builtIn := builtInSeverities[level.LevelID]; builtIn {
 		return name
 	}
-	if level.LevelCode != "" {
+	if levelCodeCarriable(level.LevelCode) {
 		return level.LevelCode
 	}
 	return "level_" + strconv.FormatUint(uint64(level.LevelID), 10)
 }
 
+// levelCodeCarriable reports whether a snapshot's level code can be written
+// as the severity: present, and within the consumer's length bound.
+func levelCodeCarriable(code string) bool {
+	return code != "" && len(code) <= MaxSeverityBytes
+}
+
 // SeverityIsBuiltIn reports whether a level had a name of its own rather than
 // one derived from its number. A derived name is the signal that the platform
-// grew a level this build has no mapping for, which is worth counting: the
-// consumer will fall back to its default severity and the alert arrives at the
-// wrong level, quietly.
+// grew a level this build has no mapping for, or named one in a way the
+// consumer cannot carry, which is worth counting: the consumer will fall back
+// to its default severity and the alert arrives at the wrong level, quietly.
 func SeverityIsBuiltIn(level contract.LevelResultV1) bool {
 	_, builtIn := builtInSeverities[level.LevelID]
-	return builtIn || level.LevelCode != ""
+	return builtIn || levelCodeCarriable(level.LevelCode)
 }
 
 // wireSubjectFor writes the object in the consumer's spelling.
+//
+// Every type the projection can produce has a spelling in subjectSystems -
+// the test walks contract.MonitorSubjectTypes() through the table - so the
+// unknown branch is the empty type: a record with no object, which is a real
+// answer (custom reporting with no target dimensions has none), and no
+// subject says so. Inventing one would attach the alert to something.
 func wireSubjectFor(subject contract.MonitorSubject) *wireSubject {
 	naming, known := subjectSystems[subject.Type]
 	if !known || subject.ID == "" {
-		// A record with no object is a real answer - custom reporting with no
-		// target dimensions has none - and no subject says so. Inventing one
-		// would attach the alert to something.
 		return nil
 	}
 	return &wireSubject{System: naming.System, Type: naming.Type, ID: subject.ID}
