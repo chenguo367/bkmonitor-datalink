@@ -42,6 +42,7 @@ type redisClient interface {
 	Eval(context.Context, string, []string, ...interface{}) *redis.Cmd
 	Close() error
 	hashClient
+	setClient
 }
 
 // compareAndSetByDigestSHA addresses the batched script by its SHA-1, so one

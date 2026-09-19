@@ -13,11 +13,13 @@
 package execution
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -3248,6 +3250,19 @@ func (evidence ExecutionEvidence) Validate() error {
 func (evidence ExecutionEvidence) FullyApplied() bool {
 	return evidence.Kind == EvidenceStateApplied && evidence.PlansTotal > 0 &&
 		evidence.PlansApplied == evidence.PlansTotal
+}
+
+// SlotExecutionEvidenceStore records which Plans of a Slot an attempt applied,
+// and reads it back for a completion that cannot know otherwise.
+//
+// Both halves are best-effort by construction. Recording failure costs a later
+// completion its evidence and must not change what the failing attempt reports;
+// a read failure is UNREADABLE and must not stop a Slot that has already missed
+// its window from finishing.
+type SlotExecutionEvidenceStore interface {
+	Record(ctx context.Context, slot SlotIdentity, duePlans []PlanIdentity,
+		applied []PlanIdentity, recoveryUntil time.Time, now time.Time) error
+	Read(ctx context.Context, slot SlotIdentity, duePlans []PlanIdentity) (ExecutionEvidence, error)
 }
 
 type SlotCompletion struct {

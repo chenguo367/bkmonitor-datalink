@@ -11,10 +11,13 @@ package state
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strconv"
 	"time"
+
+	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -183,4 +186,51 @@ func (store *SlotAppliedMarkStore) Read(
 	}
 	evidence.Kind, evidence.PlansApplied = execution.EvidenceStateApplied, applied
 	return evidence, nil
+}
+
+// AddSlotApplied and ReadSlotApplied on the Redis backend.
+//
+// The add and the lifetime go in one pipeline rather than two round trips: a
+// set written whose PEXPIRE then failed is a key with no lifetime on a store
+// where nothing else will ever touch it again, which is the one outcome worth
+// spending a pipeline to avoid.
+func (backend *RedisBackend) AddSlotApplied(
+	ctx context.Context, key string, members []string, ttl time.Duration,
+) error {
+	if backend == nil || backend.client == nil {
+		return fmt.Errorf("state: redis backend is not configured")
+	}
+	if len(members) == 0 || ttl <= 0 {
+		return nil
+	}
+	values := make([]interface{}, 0, len(members))
+	for _, member := range members {
+		values = append(values, member)
+	}
+	_, err := backend.client.Pipelined(ctx, func(pipeline redis.Pipeliner) error {
+		pipeline.SAdd(ctx, key, values...)
+		pipeline.PExpire(ctx, key, ttl)
+		return nil
+	})
+	return err
+}
+
+func (backend *RedisBackend) ReadSlotApplied(ctx context.Context, key string) ([]string, error) {
+	if backend == nil || backend.client == nil {
+		return nil, fmt.Errorf("state: redis backend is not configured")
+	}
+	members, err := backend.client.SMembers(ctx, key).Result()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	return members, err
+}
+
+var _ SlotAppliedBackend = (*RedisBackend)(nil)
+
+// setClient is the part of the Redis client this file needs.
+type setClient interface {
+	SAdd(context.Context, string, ...interface{}) *redis.IntCmd
+	SMembers(context.Context, string) *redis.StringSliceCmd
+	PExpire(context.Context, string, time.Duration) *redis.BoolCmd
 }

@@ -161,23 +161,29 @@ const (
 	StageEventACKed          = "event_acked"
 	StageStateApplied        = "state_applied"
 	StageProgressCommitted   = "progress_committed"
-	StageDependencyLoaded    = "dependency_loaded"
-	StageStateCommitted      = "state_committed"
-	StageDetectCompleted     = "detect_completed"
-	StageTriggerCompleted    = "trigger_completed"
-	StageOutputACKed         = "output_acked"
-	StageCoverageCompleted   = "coverage_completed"
-	StageCoverageGap         = "coverage_gap"
-	StageResourceSoft        = "resource_soft"
-	StageResourceHard        = "resource_hard"
-	StageResourceResumed     = "resource_resumed"
-	StagePythonSource        = "source"
-	StagePythonBuilt         = "built"
-	StagePythonEnqueued      = "enqueued"
-	StagePythonPublished     = "published"
-	StagePythonACKed         = "acked"
-	StagePythonDropped       = "dropped"
-	StageOther               = "_other"
+	// StageExecutionEvidenceWritten names the mark an attempt leaves when it
+	// wrote state and then could not write the Slot down. It is the only sign
+	// that the mark-writing works at all: nothing downstream fails when it does
+	// not, so without this a deployment where every such write fails looks
+	// exactly like one where none was ever needed.
+	StageExecutionEvidenceWritten = "execution_evidence_written"
+	StageDependencyLoaded         = "dependency_loaded"
+	StageStateCommitted           = "state_committed"
+	StageDetectCompleted          = "detect_completed"
+	StageTriggerCompleted         = "trigger_completed"
+	StageOutputACKed              = "output_acked"
+	StageCoverageCompleted        = "coverage_completed"
+	StageCoverageGap              = "coverage_gap"
+	StageResourceSoft             = "resource_soft"
+	StageResourceHard             = "resource_hard"
+	StageResourceResumed          = "resource_resumed"
+	StagePythonSource             = "source"
+	StagePythonBuilt              = "built"
+	StagePythonEnqueued           = "enqueued"
+	StagePythonPublished          = "published"
+	StagePythonACKed              = "acked"
+	StagePythonDropped            = "dropped"
+	StageOther                    = "_other"
 
 	ResultTerminal = "terminal"
 	ResultRetrying = "retrying"
@@ -456,6 +462,18 @@ type NoDataMemoryReadFacts struct {
 type NoDataMemoryRenewalFacts struct {
 	Renewed    bool
 	TTLSeconds int64
+}
+
+// ExecutionEvidenceFacts is how far an earlier attempt at a Slot got.
+//
+// One typed fact rather than three loose fields, so a reader that has it has
+// all of it: the kind without the counts cannot tell a fully executed Slot from
+// a partly executed one, and the counts without the kind cannot tell zero
+// applied from unreadable.
+type ExecutionEvidenceFacts struct {
+	Kind         string
+	PlansApplied int
+	PlansTotal   int
 }
 
 type NoDataMemoryRefusalFacts struct {
@@ -1427,6 +1445,7 @@ type Observation struct {
 	NoDataMemoryWrite     *NoDataMemoryWriteFacts
 	NoDataMemoryRead      *NoDataMemoryReadFacts
 	NoDataMemoryRenewal   *NoDataMemoryRenewalFacts
+	ExecutionEvidence     *ExecutionEvidenceFacts
 	SourceWithheld        *SourceWithheldFacts
 	NoDataCensus          *NoDataCensusFacts
 	SegmentContent        *SegmentContentFacts
@@ -2442,6 +2461,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentState, StageStatePreflight}, {ComponentState, StageGapLoaded},
 	{ComponentState, StageGapGuardProgress},
 	{ComponentEvaluation, StageNoDataDecided},
+	{ComponentProgress, StageExecutionEvidenceWritten},
 	{ComponentState, StageNoDataMemoryRead},
 	{ComponentState, StageNoDataMemoryRenewed},
 	{ComponentState, StageNoDataMemoryRefused},
