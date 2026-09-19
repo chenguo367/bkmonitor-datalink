@@ -191,6 +191,21 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_WARMING"
 			item.Coverage = &fleet.HistoryCoverage{Levels: 4, Short: 2, Guarded: 1,
 				WorstValid: 2, WorstRequired: 14, ShortRounds: 40}
+			// The guards behind the held window, as the tracker orders them:
+			// the gapped scope first, then the warming ones least advanced
+			// first, one of them at its requirement and not released, and two
+			// more than the row shows.
+			item.Guards = []fleet.GapGuard{
+				{Plan: fleet.StrategyRef{StrategyID: "s-14", BusinessID: "9"}, Scope: "3", Status: "GAPPED", Reason: "QUERY_UNAVAILABLE",
+					Required: 14, Observed: 0, Progress: "none", FirstAt: at.Add(-40 * time.Minute), LastAt: at.Add(-time.Minute), Rounds: 40, UnchangedRounds: 39},
+				{Plan: fleet.StrategyRef{StrategyID: "s-14", BusinessID: "9"}, Scope: "plan", Status: "WARMING", Reason: "GAP_SKIPPED",
+					Required: 14, Observed: 2, Progress: "partial", FirstAt: at.Add(-40 * time.Minute), LastAt: at.Add(-time.Minute), Rounds: 40, UnchangedRounds: 12},
+				{Plan: fleet.StrategyRef{StrategyID: "s-15", BusinessID: "9"}, Scope: "2", Status: "WARMING", Reason: "HISTORY_WARMING",
+					Required: 5, Observed: 3, Progress: "partial", FirstAt: at.Add(-6 * time.Minute), LastAt: at.Add(-time.Minute), Rounds: 6},
+				{Plan: fleet.StrategyRef{StrategyID: "s-15", BusinessID: "9"}, Scope: "1", Status: "WARMING", Reason: "CONFIG_DRIFT",
+					Required: 5, Observed: 5, Progress: "ready", FirstAt: at.Add(-6 * time.Minute), LastAt: at.Add(-time.Minute), Rounds: 6, UnchangedRounds: 3},
+			}
+			item.GuardsTotal = 6
 		}),
 		// The two halves of "this window will never fill", identical in every
 		// count that was ever published about them: same shortfall, same run,
@@ -844,6 +859,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"CHECKS ::", "1 个对象的无数据记忆写不进去（1 条策略）：阈值检测照常，但记忆停在最后一次成功写入，之后变缺失的组不会被记为首次缺失，无数据告警不会触发"},
 		{"CHECKS ::", "下一步：按 decision-008（按组分 field 的存储表示）处理"},
 		{"MEMORY qg-memory-refused ::", "无数据记忆写不进去：STATE_BUDGET_EXCEEDED，量的是本轮要写的记录 74112 字节，上限 65536（超 13%）；自 17:20:00 起被拒 79 轮，最近 17:59:00；策略 s-88"},
+		// The guards behind a held window: the gapped scope with no count and
+		// how long it has held, the warming ones with their k/N and whether
+		// they are moving, the one at its requirement said as not released,
+		// and the two the row does not list counted.
+		{"GUARDS qg-window-held-short ::", "持久化保护：级别 3（策略 s-14）：缺口保护中，起因：查询不可用，解除前不计进度；本进程见它 40 轮，连续 39 轮没变化；" +
+			"整条策略（策略 s-14）：预热中，完整轮次 2/14，起因：之前有轮次被跳过，在计入，连续 12 轮没进展；" +
+			"级别 2（策略 s-15）：预热中，完整轮次 3/5，起因：窗口从头预热，在计入；" +
+			"级别 1（策略 s-15）：预热中，完整轮次 5/5，起因：配置变过，已达要求但保护没解除；" +
+			"还有 2 个范围没列（列的是最差的 4 个）——要求的轮数是这份持久化保护的，可大于策略配置；保护解除后这一行消失"},
 		// Where detection is stuck and how much is unknown, as one sentence
 		// beside the badge's verdict: the largest folds across this
 		// deployment's and the undetermined lines, then the unknown count,
@@ -1551,6 +1575,7 @@ for (const row of data.anomalies) {
   if (row.blocked) { console.log('BLOCKED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.restored) { console.log('RESTORED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.no_data_memory) { console.log('MEMORY ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.guards) { console.log('GUARDS ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
 }
 
 // The capacity panel on a refresh that arrives after a real interval with the
