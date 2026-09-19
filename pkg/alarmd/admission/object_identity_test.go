@@ -293,6 +293,96 @@ func TestAnUnmatchedIdentityIsReportedOnlyWhileThePlanMatchesNothing(t *testing.
 	}
 }
 
+// An object identity that hit inside a group another condition then failed
+// is not an admission through the object identity: only the group that
+// matched as a whole says how the plan matched, and that is what the
+// reporter reads to decide whether a plan's unmatched rejections are worth a
+// line. The trace is pinned directly because the filter's reason rule
+// happens to mask the stale flag today (a plan with an object-free
+// alternative never reports unmatched); the invariant is the reporter's,
+// not the reason rule's.
+func TestAnObjectIdentityHitCountsOnlyForTheGroupThatMatched(t *testing.T) {
+	record := enrich(dims("cw_object_model_id", `"switch"`, "cw_object_model_inst_id", `2`, "bk_target_ip", `"10.0.0.1"`))
+	record.SetTopoNodes([]string{"module|91"})
+	objectThenTopoFails := TargetScopeGroup{Conditions: []TargetScopeCondition{
+		object(TargetScopeInclude, [][2]string{defaultPair}, "switch|2"),
+		topo(TargetScopeInclude, "module|85"),
+	}}
+	hostOnly := TargetScopeGroup{Conditions: []TargetScopeCondition{host(TargetScopeInclude, "10.0.0.1|0")}}
+	objectThenTopoHolds := TargetScopeGroup{Conditions: []TargetScopeCondition{
+		object(TargetScopeInclude, [][2]string{defaultPair}, "switch|2"),
+		topo(TargetScopeInclude, "module|91"),
+	}}
+
+	var trace matchTrace
+	if objectThenTopoFails.matches(&record, &trace) || trace.objectIdentityHit {
+		t.Fatalf("a group that failed after its object identity hit left the hit on the trace: %+v", trace)
+	}
+	if !hostOnly.matches(&record, &trace) || trace.objectIdentityHit {
+		t.Fatalf("a host group that matched after an object hit in a failed group reads as an object admission: %+v", trace)
+	}
+	if !objectThenTopoHolds.matches(&record, &trace) || !trace.objectIdentityHit {
+		t.Fatalf("a group that matched through its object identity did not say so: %+v", trace)
+	}
+	// And the flag follows the latest matched group, not the history.
+	if !hostOnly.matches(&record, &trace) || trace.objectIdentityHit {
+		t.Fatalf("the hit of an earlier matched group leaked into a later one: %+v", trace)
+	}
+
+	// Through the filter: the record admitted through the host group does
+	// not silence the unmatched report of a record the object group refuses
+	// on its own.
+	clock := time.Unix(1700000000, 0)
+	sink := &reportSink{}
+	filter := TargetScopeFilter{Reporter: NewIdentityReporter(func() time.Time { return clock }, time.Minute, sink.receive)}
+	plan := PlanContext{StrategyID: "78", TargetScope: scope(objectThenTopoFails, hostOnly)}
+	if decision := filter.Admit(plan, &record); !decision.Admit {
+		t.Fatalf("decision = %+v, want admitted through the host group", decision)
+	}
+	objectOnly := PlanContext{StrategyID: "78", TargetScope: scope(TargetScopeGroup{Conditions: []TargetScopeCondition{
+		object(TargetScopeInclude, [][2]string{defaultPair}, "switch|2"),
+	}})}
+	mismatched := enrich(dims("cw_object_model_id", `"sw"`, "cw_object_model_inst_id", `1`))
+	if decision := filter.Admit(objectOnly, &mismatched); decision.Reason != "object_identity_unmatched" {
+		t.Fatalf("decision = %+v", decision)
+	}
+	if len(sink.reports) != 1 {
+		t.Fatalf("reports = %+v, want the unmatched line: the admission above went through the host, not the object identity", sink.reports)
+	}
+}
+
+// ResolvesToNoHost is answered from host facts, which carry no dimensions,
+// so a scope with an object-model condition would read as satisfiable by no
+// host and its query would be skipped outright. Such a scope is not decidable
+// ahead of the data and the answer is false, whatever the hosts say; a scope
+// of host attributes alone is still decided.
+func TestAScopeWithAnObjectModelConditionIsNotDecidableFromHosts(t *testing.T) {
+	noHosts := func(func(*Facts) bool) {}
+	oneHost := func(yield func(*Facts) bool) {
+		facts := hostFacts("10.0.0.1|0")
+		facts.SetTopoNodes([]string{"module|91"})
+		yield(&facts)
+	}
+	objectScope := scope(TargetScopeGroup{Conditions: []TargetScopeCondition{object(TargetScopeInclude, [][2]string{defaultPair}, "switch|2")}})
+	mixedScope := scope(
+		TargetScopeGroup{Conditions: []TargetScopeCondition{topo(TargetScopeInclude, "module|85")}},
+		TargetScopeGroup{Conditions: []TargetScopeCondition{object(TargetScopeInclude, [][2]string{defaultPair}, "switch|2")}},
+	)
+	for name, candidate := range map[string]*TargetScope{"object only": objectScope, "object beside topology": mixedScope} {
+		if candidate.ResolvesToNoHost(noHosts) || candidate.ResolvesToNoHost(oneHost) {
+			t.Fatalf("%s: a scope with an object-model condition was decided from hosts", name)
+		}
+	}
+	topoScope := scope(TargetScopeGroup{Conditions: []TargetScopeCondition{topo(TargetScopeInclude, "module|85")}})
+	if !topoScope.ResolvesToNoHost(oneHost) || !topoScope.ResolvesToNoHost(noHosts) {
+		t.Fatalf("a topology scope no host is under was not resolved to no host")
+	}
+	underScope := scope(TargetScopeGroup{Conditions: []TargetScopeCondition{topo(TargetScopeInclude, "module|91")}})
+	if underScope.ResolvesToNoHost(oneHost) {
+		t.Fatalf("a topology scope a host is under was resolved to no host")
+	}
+}
+
 // Missing and unmatched do not share a window, a nil reporter counts and
 // says nothing, and plans not seen for a long time are forgotten.
 func TestTheReporterKeepsItsBookkeepingBounded(t *testing.T) {

@@ -190,15 +190,17 @@ func (fuller *ServiceInstanceTopologyFuller) Fill(_ map[string]json.RawMessage, 
 		// instance's host. Python assigns bk_target_ip from the instance, so
 		// an address the record arrived with no longer counts; the id the
 		// record carried is kept because Python keeps bk_host_id as it was.
-		hostKeys := make([]string, 0, 3)
+		// The instance's own bk_host_id is not added: Python's instance
+		// branch never writes it, so is_match sees only the record's id and
+		// the instance's address. Adding it would be a superset -- an eq host
+		// target would admit more and a neq host target would drop more than
+		// Python, and the second is silent.
+		hostKeys := make([]string, 0, 2)
 		if facts.HostNaming.IDKey != "" {
 			hostKeys = append(hostKeys, facts.HostNaming.IDKey)
 		}
 		if instance.IP != "" {
 			hostKeys = append(hostKeys, instance.IP+"|"+instance.CloudID)
-		}
-		if instance.HostID != "" {
-			hostKeys = append(hostKeys, instance.HostID)
 		}
 		facts.Set(contract.AttributeHostIdentity, hostKeys)
 		// Python writes the instance's address and cloud into the record, so

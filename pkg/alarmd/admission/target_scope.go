@@ -144,6 +144,10 @@ type matchTrace struct {
 	// objectIdentityHit records that the group that matched did so through
 	// an OBJECT_MODEL_INST condition, which the reporter needs to tell a
 	// target that never matches from one that merely rejects some records.
+	// It is set only by a group that matched as a whole: an object identity
+	// that hit inside a group another condition then failed proves nothing
+	// about the target, and counting it would silence the unmatched report
+	// for a window.
 	objectIdentityHit bool
 }
 
@@ -187,6 +191,7 @@ func (trace *matchTrace) reason() string {
 }
 
 func (group TargetScopeGroup) matches(facts *Facts, trace *matchTrace) bool {
+	objectIdentityHit := false
 	for index := range group.Conditions {
 		condition := &group.Conditions[index]
 		attribute, known := contract.TargetScopeAttributeFor(contract.TargetScopeField(condition.Field))
@@ -231,9 +236,10 @@ func (group TargetScopeGroup) matches(facts *Facts, trace *matchTrace) bool {
 			return false
 		}
 		if attribute.Source == contract.TargetScopeSourceDimensionPairs {
-			trace.objectIdentityHit = true
+			objectIdentityHit = true
 		}
 	}
+	trace.objectIdentityHit = objectIdentityHit
 	return true
 }
 
@@ -281,8 +287,16 @@ func objectIdentityKeys(facts *Facts, pairs [][2]string) []string {
 // exactly one question: may the query be skipped entirely? It never decides
 // whether a series is admitted - that stays with Admit, so there is only ever
 // one implementation of the predicate that can drift.
+//
+// It can only be answered for a scope whose every condition reads facts a
+// host carries. A condition built from the record's own dimensions has no
+// candidate on any host, and its absence fails the group, so evaluating such
+// a scope against hosts would answer "no host can satisfy it" for every
+// object-model target and skip every one of their queries. For those the
+// answer is false: not "some host can", but "this cannot be known ahead of
+// the data".
 func (scope *TargetScope) ResolvesToNoHost(candidates func(func(*Facts) bool)) bool {
-	if scope == nil {
+	if scope == nil || !scope.decidableFromHosts() {
 		return false
 	}
 	matched := false
@@ -297,6 +311,21 @@ func (scope *TargetScope) ResolvesToNoHost(candidates func(func(*Facts) bool)) b
 		return true
 	})
 	return !matched
+}
+
+// decidableFromHosts reports whether every condition in the scope reads an
+// attribute a host fact can carry, so that evaluating the scope against the
+// host index is evaluating it at all.
+func (scope *TargetScope) decidableFromHosts() bool {
+	for _, group := range scope.Groups {
+		for _, condition := range group.Conditions {
+			attribute, known := contract.TargetScopeAttributeFor(contract.TargetScopeField(condition.Field))
+			if !known || attribute.Source != contract.TargetScopeSourceFacts {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // dimensionNames lists a record's dimension names for a report. Names are

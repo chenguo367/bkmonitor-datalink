@@ -157,8 +157,11 @@ func TestAServiceInstanceSeriesIsPlacedUnderItsModuleAndJudgedByItsHost(t *testi
 	if got := facts.TopoNodes(); !reflect.DeepEqual(got, []string{"biz|999", "module|85", "set|12"}) {
 		t.Fatalf("topo nodes = %v, want the instance's module chain", got)
 	}
-	if got := facts.HostKeys(); !reflect.DeepEqual(got, []string{"10.0.0.7|0", "700001"}) {
-		t.Fatalf("host keys = %v, want the instance's host by address and id", got)
+	// By address only: Python's instance branch writes bk_target_ip and
+	// bk_target_cloud_id and never bk_host_id, so the instance's own host id
+	// is not a key the record can be matched by.
+	if got := facts.HostKeys(); !reflect.DeepEqual(got, []string{"10.0.0.7|0"}) {
+		t.Fatalf("host keys = %v, want the instance's host by address only", got)
 	}
 	if !facts.HostResolved || facts.HostState != "备用机" || facts.HostBusinessID != "999" {
 		t.Fatalf("facts = %+v, want the instance's host resolved", facts)
@@ -199,6 +202,36 @@ func TestAServiceInstanceSeriesIsPlacedUnderItsModuleAndJudgedByItsHost(t *testi
 	if admitted, name, reason := chain.Admit(liveTarget, &live); !admitted {
 		t.Fatalf("an instance on a live host was refused: %s/%s", name, reason)
 	}
+
+	// A host target against an instance-only series is decided by the
+	// instance's address and by nothing else, in both directions. Python's
+	// is_match builds the record's keys from bk_host_id (which the instance
+	// branch never wrote) and bk_target_ip|bk_target_cloud_id (which it did);
+	// a target frozen as the host's id alone therefore does not name this
+	// series, and an exclusion frozen the same way does not drop it. The
+	// instance's own bk_host_id counting as a key would flip both.
+	hostTarget := func(method admission.TargetScopeMethod, keys ...string) admission.PlanContext {
+		set := make(map[string]struct{}, len(keys))
+		for _, key := range keys {
+			set[key] = struct{}{}
+		}
+		return admission.PlanContext{TargetScope: &admission.TargetScope{Groups: []admission.TargetScopeGroup{{
+			Conditions: []admission.TargetScopeCondition{{Field: admission.TargetScopeHost, Method: method, Keys: set}},
+		}}}}
+	}
+	scope := admission.TargetScopeFilter{}
+	if decision := scope.Admit(hostTarget(admission.TargetScopeInclude, "700002"), &live); decision.Admit {
+		t.Fatalf("a host target frozen as the instance's host id alone admitted an instance-only series: %+v", decision)
+	}
+	if decision := scope.Admit(hostTarget(admission.TargetScopeExclude, "700002"), &live); !decision.Admit {
+		t.Fatalf("a host exclusion frozen as the instance's host id alone dropped an instance-only series: %+v", decision)
+	}
+	if decision := scope.Admit(hostTarget(admission.TargetScopeInclude, "700002", "10.0.0.8|0"), &live); !decision.Admit {
+		t.Fatalf("a host target frozen with the address refused the instance on it: %+v", decision)
+	}
+	if decision := scope.Admit(hostTarget(admission.TargetScopeExclude, "700002", "10.0.0.8|0"), &live); decision.Admit {
+		t.Fatalf("a host exclusion frozen with the address admitted the instance on it: %+v", decision)
+	}
 }
 
 // Python's precedence, transcribed: a record that resolved its host by id
@@ -229,8 +262,8 @@ func TestTheInstanceIsConsultedOnlyWhereTheHostByIDWasNot(t *testing.T) {
 	if got := byAddress.TopoNodes(); !reflect.DeepEqual(got, []string{"biz|999", "module|85", "set|12"}) {
 		t.Fatalf("topo nodes = %v, want the instance's chain over the address's", got)
 	}
-	if got := byAddress.HostKeys(); !reflect.DeepEqual(got, []string{"10.0.0.7|0", "700001"}) {
-		t.Fatalf("host keys = %v, want the instance's host, not the address the record arrived with", got)
+	if got := byAddress.HostKeys(); !reflect.DeepEqual(got, []string{"10.0.0.7|0"}) {
+		t.Fatalf("host keys = %v, want the instance's address, not the address the record arrived with and not the instance's host id", got)
 	}
 	if byAddress.HostState != "备用机" {
 		t.Fatalf("host state = %q, want the instance's host", byAddress.HostState)
@@ -248,8 +281,8 @@ func TestTheInstanceIsConsultedOnlyWhereTheHostByIDWasNot(t *testing.T) {
 	if unknownID.HostResolved || unknownID.HostNaming.IDKey != "700009" {
 		t.Fatalf("facts = %+v, want the unknown id kept as the host Python looks up", unknownID)
 	}
-	if got := unknownID.HostKeys(); !reflect.DeepEqual(got, []string{"10.0.0.7|0", "700001", "700009"}) {
-		t.Fatalf("host keys = %v, want the record's id kept beside the instance's host", got)
+	if got := unknownID.HostKeys(); !reflect.DeepEqual(got, []string{"10.0.0.7|0", "700009"}) {
+		t.Fatalf("host keys = %v, want the record's id kept beside the instance's address", got)
 	}
 	judged := instanceChain(t, store, "备用机")
 	if admitted, name, reason := judged.Admit(admission.PlanContext{}, &unknownID); admitted || name != "host_status" || reason != "host_unknown" {
