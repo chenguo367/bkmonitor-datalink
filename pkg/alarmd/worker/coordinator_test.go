@@ -1197,19 +1197,23 @@ func (ports *recordingPorts) LoadActivations(
 type recordingPorts struct {
 	// finalizationMode lets a test put the Slot on the query-free path, which
 	// is where the evidence is read. Empty means the ordinary query path.
-	finalizationMode                execution.FinalizationMode
-	evidence                        *memoryEvidenceStore
-	openAlerts                      map[string]bool
-	trackedPlans                    []execution.PlanIdentity
-	acknowledged                    []contract.TriggerEventV1
-	openAlertCalls                  []string
-	trace                           *[]string
-	ready                           bool
-	failStage                       string
-	beginErr                        error
-	admissionCalls                  int
-	contractDrift                   bool
-	alreadyApplied                  bool
+	finalizationMode execution.FinalizationMode
+	evidence         *memoryEvidenceStore
+	openAlerts       map[string]bool
+	trackedPlans     []execution.PlanIdentity
+	acknowledged     []contract.TriggerEventV1
+	openAlertCalls   []string
+	trace            *[]string
+	ready            bool
+	failStage        string
+	beginErr         error
+	admissionCalls   int
+	contractDrift    bool
+	alreadyApplied   bool
+	// stateApplyAlreadyApplied makes every state write report that an earlier
+	// attempt had already written it, which is what a retry of a Slot whose
+	// first attempt got that far actually sees.
+	stateApplyAlreadyApplied        bool
 	degraded                        bool
 	completionCompleteness          execution.Completeness
 	wrongGapIdentity                bool
@@ -1763,6 +1767,11 @@ func (ports *recordingPorts) ApplyRuntime(_ context.Context, request execution.S
 	}
 	for index, item := range request.Items {
 		items[index] = execution.StateApplyItemResult{Identity: item.Identity, Status: execution.StateApplied}
+		if ports.stateApplyAlreadyApplied {
+			items[index].Status = execution.StateApplyAlreadyApplied
+			items[index].AlreadyApplied = execution.StateAlreadyAppliedStable
+			items[index].StoredBlobRevision = 1
+		}
 		if ports.wrongStateApplyIdentity {
 			items[index].Identity.SeriesIdentityDigest = "another"
 		}

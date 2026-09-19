@@ -265,3 +265,70 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+// A retry whose state writes all say "already applied" leaves no mark.
+//
+// Already-applied is an earlier attempt's work. That attempt, if it also failed
+// to write its Slot down, left its own mark; if it did not, the Slot is
+// finished. Either way this attempt did nothing to record, and counting those
+// Plans here would let it claim work it did not do -- against a total that
+// decides whether the Slot still owes a gap, so the inflation is exactly what
+// would stop a partly executed Slot reporting one.
+func TestAnAttemptThatOnlyFoundStateAlreadyAppliedLeavesNoMark(t *testing.T) {
+	header, batches := workerG4StreamFixture(t, strategy.DetectorKindSimpleRingRatio)
+	store := newMemoryEvidenceStore()
+	ports, _, coordinator := workerG4CoordinatorWithEvidence(t, store)
+	ports.executeOverride = streamExecution(header, batches, fullCompletion(t, header, batches))
+	ports.stateApplyAlreadyApplied = true
+	ports.failStage = "progress_commit"
+
+	if _, err := coordinator.Execute(context.Background(), liveSlotRequest(header.Contract)); err == nil {
+		t.Fatal("the fixture did not fail the Progress commit")
+	}
+	if store.writes != 0 {
+		t.Fatalf("an attempt whose state was already applied wrote %d marks, want none: those Plans "+
+			"are an earlier attempt's, and claiming them here inflates the count the gap fold "+
+			"compares against the whole due set", store.writes)
+	}
+}
+
+// Both query-free modes read the mark.
+//
+// SNAPSHOT_UNAVAILABLE is query-free for a different reason than GAP_SKIPPED,
+// and it is just as able to be the second half of an attempt that evaluated,
+// alerted and then lost its bookkeeping. Reading the mark on one and not the
+// other would leave that Slot recording a gap it does not owe, for a reason
+// nothing about it would explain.
+func TestASnapshotUnavailableFinalizationAlsoReadsTheMark(t *testing.T) {
+	header, batches := workerG4StreamFixture(t, strategy.DetectorKindSimpleRingRatio)
+	ports, _, coordinator := workerG4CoordinatorWithEvidence(t, newMemoryEvidenceStore())
+	ports.executeOverride = streamExecution(header, batches, fullCompletion(t, header, batches))
+	request := liveSlotRequest(header.Contract)
+
+	ports.failStage = "progress_commit"
+	if _, err := coordinator.Execute(context.Background(), request); err == nil {
+		t.Fatal("the fixture did not fail the Progress commit")
+	}
+
+	ports.failStage = ""
+	ports.finalizationMode = execution.FinalizationSnapshotUnavailable
+	retry := request
+	retry.ReplayExpired = true
+	retry.AttemptNo = 2
+	result, err := coordinator.Execute(context.Background(), retry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.CompletionKind != execution.CompletionSnapshotUnavailable {
+		t.Fatalf("completion = %q, want SNAPSHOT_UNAVAILABLE", result.CompletionKind)
+	}
+	completion := ports.lastProgress.Completion
+	if completion.Evidence == nil {
+		t.Fatal("a SNAPSHOT_UNAVAILABLE completion carried no evidence; it is query-free too, and the " +
+			"Slot behind it can have been evaluated just the same")
+	}
+	want := execution.ExecutionEvidence{Kind: execution.EvidenceStateApplied, PlansApplied: 1, PlansTotal: 1}
+	if *completion.Evidence != want {
+		t.Fatalf("evidence = %+v, want %+v", *completion.Evidence, want)
+	}
+}

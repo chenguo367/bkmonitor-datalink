@@ -449,27 +449,6 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"counted -- they would bury the ones that reached the store. A failure here does not " +
 			"fail the round; it means memories are on their way to expiring.",
 	}, []string{"result", "reason"})
-	metrics.queryFreeCompletions = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_free_completion_total",
-		Help: "Slots finished without querying, by kind and by what an earlier attempt at the same Slot " +
-			"was found to have done. STATE_APPLIED means every due Plan was already evaluated and " +
-			"alerted and only the bookkeeping was lost, which is not a gap; MIXED means some of them " +
-			"were, which still is; NONE_FOUND means no earlier attempt got that far; UNREADABLE means " +
-			"the record could not be read, which is not the same as nothing being there; ABSENT means " +
-			"this runtime is not recording evidence at all. The five add up to the query-free " +
-			"completions, so a reader can check the partition rather than assume it. Read a rising " +
-			"{GAP_SKIPPED, STATE_APPLIED} beside a flat {GAP_SKIPPED, NONE_FOUND} as the defect this " +
-			"exists for; during a rollout NONE_FOUND also covers Slots an older build wrote, so it " +
-			"says nothing until every replica is on this version.",
-	}, []string{"kind", "evidence"})
-	metrics.executionEvidenceWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "execution_evidence_written_total",
-		Help: "Marks left by an attempt that wrote state and then could not write its Slot down, by " +
-			"result. It is the only sign the mark-writing works: nothing downstream fails when it " +
-			"does not, so without this a deployment where every such write fails looks exactly like " +
-			"one that never needed a mark. A failure here does not fail the Slot -- it means a later " +
-			"query-free completion will have no evidence and record a gap it does not owe.",
-	}, []string{"result"})
 	metrics.gapGuardScopeRounds = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_gap_guard_scope_rounds_total",
 		Help: "One per held gap scope per round that read it, by status, by why it is held, and by " +
