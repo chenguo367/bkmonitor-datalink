@@ -386,6 +386,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// deployment keeps. The line says that, not the kind name.
 		{Kind: fleet.DegradationControlSourceStale, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 			Stage: "validate_catalog", Text: "plan retention 60h13m exceeds catalog retention 24h13m"},
+		// The replica that restarted five minutes ago cannot open its output:
+		// up, not ready, assigned nothing, retrying. Its facts are the sink's
+		// own -- since its start, the attempts, the last failure -- and the
+		// line says them of this replica by name.
+		{Kind: fleet.DegradationOutputNotReady, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", Stage: "output",
+			Text: "kafka: dial tcp 10.0.0.1:9092: i/o timeout", AgeSeconds: ptrFloat(300), Attempts: ptrInt(12)},
 		// The blocked source, last, as Aggregate appends it after the replica
 		// loop: one fact about the deployment, decided on the newest round.
 		{Kind: fleet.DegradationSourceBlocked, Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", Stage: "catalog",
@@ -776,7 +782,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The two standings, first. The time is the viewer's clock and is not
 		// asserted; everything after it is.
 		"起没有生效：连续 120 轮激活失败（1 种原因），舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3",
-		"2 种副本级运行状态超出设计界，判定因此降级——策略配置刷新失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m，新配置尚未发布，跑的是上一份好的目录",
+		"3 种副本级运行状态超出设计界，判定因此降级——策略配置刷新失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m，新配置尚未发布，跑的是上一份好的目录；" +
+			"副本 fghij 告警输出未就绪 5 分 0 秒，已试 12 次（这个副本不接检测任务，其余副本在顶；通了自动就绪）",
+		"下一步：按种类处理：源过期看策略源刷新，leader 缺席看租约，告警集合/平台设置过期看对应发布者；输出未就绪看该副本所在节点到告警输出的网络（它自己在重试，最多 30 秒一次，通了就就绪），不用重启它",
 		// The third standing: the numbers are the leader's round, the lag is
 		// the replica table's, and the next step says what not to do first.
 		"对象分布不均：abcde 持有 527 个（53.8%），fghij 持有 452 个，2 个就绪副本均分应是 489 个——持有多的那个副本上的跳过、超时、排队都是这个原因，不是容量——fghij 比 abcde 晚 1 小时 55 分 启动",
@@ -1001,6 +1009,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"BASIS CUTOVER ::", "最近一次激活失败：alarmd controlplane: schedule activation conflict（副本 abcde）。伴随证据：segment_content_freshness_total{stale}"},
 		{"GROUPS DEGRADED ::", "OPEN_ALERT_SET_STALE（已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识） · 副本 fghij，没有可列的对象"},
 		{"GROUPS DEGRADED ::", "CONTROL_SOURCE_STALE（策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录——最近一次失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m） · 副本 abcde，没有可列的对象"},
+		// The failure's own words stay on the expanded group; the first
+		// screen says which replica, for how long and how many tries.
+		{"GROUPS DEGRADED ::", "OUTPUT_NOT_READY（副本连不上告警输出：进程活着但不就绪，不接检测任务，由其余副本顶着——少一个副本的容量——最近一次失败于 output：kafka: dial tcp 10.0.0.1:9092: i/o timeout） · 副本 fghij，没有可列的对象"},
 	} {
 		if line := lineStarting(text, want.line); !strings.Contains(line, want.says) {
 			t.Errorf("%s does not say %q:\n%s", want.line, want.says, line)
@@ -1339,6 +1350,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 // emitted none -- which is itself a result, and a different one from a line
 // that came out empty.
 func ptrFloat(value float64) *float64 { return &value }
+func ptrInt(value int) *int           { return &value }
 
 func lineStarting(text, prefix string) string {
 	for _, candidate := range strings.Split(text, "\n") {

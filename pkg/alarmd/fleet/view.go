@@ -1085,6 +1085,14 @@ const (
 	// platform was writing 81 strategies and the round withheld all 81 for
 	// want of the identity fields the contract requires.
 	DegradationSourceBlocked DegradationKind = "SOURCE_BLOCKED"
+	// DegradationOutputNotReady: the replica could not open its output sink
+	// and is up, not ready and assigned nothing, retrying on its own. Before
+	// the sink was opened lazily the process exited instead, the rollout
+	// stalled on a crash loop, and the only diagnosis was the log of a
+	// container that kept restarting. Now the replica says so on its own
+	// output_kafka endpoint entry every snapshot; this is the line that reads
+	// it, since a replica holding nothing has no object row to be seen on.
+	DegradationOutputNotReady DegradationKind = "OUTPUT_NOT_READY"
 )
 
 // DegradationKinds is the closed set, for the page's wording table and the
@@ -1092,6 +1100,17 @@ const (
 var DegradationKinds = []DegradationKind{
 	DegradationActivationBehind, DegradationControlSourceStale, DegradationControlLeaderAbsent,
 	DegradationOpenAlertSetStale, DegradationPlatformSettingsStale, DegradationSourceBlocked,
+	DegradationOutputNotReady,
+}
+
+// endpointByRole is the entry under role in a replica's list, or nil.
+func endpointByRole(endpoints []Endpoint, role string) *Endpoint {
+	for index := range endpoints {
+		if endpoints[index].Role == role {
+			return &endpoints[index]
+		}
+	}
+	return nil
 }
 
 // Degradation is one replica-level reason the deployment is degraded.
@@ -1106,6 +1125,13 @@ type Degradation struct {
 	// the one that failed at activation, and the facts say which.
 	Stage string `json:"stage,omitempty"`
 	Text  string `json:"text,omitempty"`
+	// AgeSeconds and Attempts are on the standings whose facts say how long
+	// they have held and how many times the replica has tried: for an output
+	// that is not ready, since the process started -- a sink once open stays
+	// open, so not ready is not ready since start -- and the attempts the
+	// sink has made. Absent where the standing has no such facts.
+	AgeSeconds *float64 `json:"age_seconds,omitempty"`
+	Attempts   *int     `json:"attempts,omitempty"`
 }
 
 // Truncated reports whether the replica had more anomalies than it published.
@@ -1557,6 +1583,24 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if len(snapshot.Dependencies) > 0 && (view.Dependencies == nil || snapshot.TakenAt.After(dependenciesTakenAt)) {
 			view.Dependencies = append([]Endpoint(nil), snapshot.Dependencies...)
 			view.DependenciesReplica, dependenciesTakenAt = replica, snapshot.TakenAt
+		}
+		// Every replica's own output entry, not only the newest list's: a
+		// replica that cannot open its output is up, ready for nothing and
+		// assigned nothing, and the one place it says so is this entry on its
+		// own snapshot. An entry without the readiness fact is an older
+		// build's, and says nothing either way.
+		if output := endpointByRole(snapshot.Dependencies, EndpointOutputKafka); output != nil &&
+			output.Ready != nil && !*output.Ready {
+			degradation := Degradation{Kind: DegradationOutputNotReady, Replica: replica, Stage: "output", Text: output.LastFailure}
+			if output.Attempts != nil {
+				attempts := *output.Attempts
+				degradation.Attempts = &attempts
+			}
+			if !snapshot.StartedAt.IsZero() {
+				age := now.Sub(snapshot.StartedAt).Seconds()
+				degradation.AgeSeconds = &age
+			}
+			view.Degradations = append(view.Degradations, degradation)
 		}
 		perReplica := ReplicaView{
 			Replica: replica, Owned: snapshot.Owned, Determined: snapshot.Determined,
