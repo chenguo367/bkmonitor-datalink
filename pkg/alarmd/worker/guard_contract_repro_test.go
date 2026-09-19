@@ -97,11 +97,15 @@ func TestGuardContractRealWorkerRepro(t *testing.T) {
 			"inputs and the result contract compares them", scope.ReasonCode, outcome.ReasonCode)
 	}
 	// And the State side writes nothing for it. A Level with an incomplete
-	// input of its own this round is frozen (InputAllowsStateAdvance), so
+	// input of its own this round does not advance -- here the trigger
+	// freezes it on the unavailable fact; where the trigger would advance,
+	// the evaluator's InputAllowsStateAdvance check freezes it -- so
 	// buildMutation never writes a new guard reason for it; its stored
 	// reason stays as loaded and the marker above is the guard that covers
 	// the outcome. That is why the State guard's reason cannot be the one
 	// that disagrees with the fold: a Level under a fold does not advance.
+	// (This fixture exercises the trigger's freeze only; the evaluator's
+	// branch has no PARTIAL fixture of its own yet.)
 	if len(plan.StateResults) != 0 {
 		t.Fatalf("state results = %+v, want none: a Level under this round's fold is frozen and writes no guard reason of its own", plan.StateResults)
 	}

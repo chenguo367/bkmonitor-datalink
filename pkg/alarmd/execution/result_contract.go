@@ -853,10 +853,8 @@ func describeMissingGuard(
 			stateWritten = true
 		}
 	}
-	fold, proposed := RoundGuardReasonForLevel(input.Inputs, outcome.Plan, outcome.LevelID)
-	if !proposed {
-		fold = ""
-	}
+	// Empty when this round proposes no guard for the Level.
+	fold, _ := RoundGuardReasonForLevel(input.Inputs, outcome.Plan, outcome.LevelID)
 	outcomesForLevel := 0
 	for _, other := range result.LevelOutcomes {
 		if other.Plan == outcome.Plan && other.LevelID == outcome.LevelID && other.SeriesIdentityDigest == outcome.SeriesIdentityDigest {
