@@ -664,12 +664,24 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
-	coordinator, err := worker.NewSlotExecutionCoordinator(worker.Ports{
+	// The mark a failed attempt leaves behind. Wired here and asserted by a
+	// test on this function: the port is allowed to be nil, and a production
+	// runtime that left it nil would lose every query-free completion's
+	// evidence without failing anything -- which is the shape that cost two
+	// releases when the deadline port was implemented by every fake and by no
+	// production runtime.
+	slotAppliedMarks, err := state.NewSlotAppliedMarkStore(cfg.Redis.StatePrefix, storageRouter)
+	if err != nil {
+		return nil, err
+	}
+	workerPorts := worker.Ports{
 		Finalization: frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
 		NoData: executionStore, Hosts: cmdbcache.NewHostBusinessLookup(cmdbIndex), State: executionStore, Progress: progressStore, Observer: observer,
-		OpenAlerts: openAlertCopyPort{cache: openAlertCopy},
-	}, worker.ProvisionalBudget{
+		ExecutionEvidence: slotAppliedMarks,
+		OpenAlerts:        openAlertCopyPort{cache: openAlertCopy},
+	}
+	coordinator, err := worker.NewSlotExecutionCoordinator(workerPorts, worker.ProvisionalBudget{
 		MaxSeries: cfg.PhaseTwo.Coordinator.MaxSeries, MaxRetainedBytes: cfg.PhaseTwo.Coordinator.MaxRetainedBytes,
 		MaxStateMutations: cfg.PhaseTwo.Coordinator.MaxStateMutations, MaxEvents: cfg.PhaseTwo.Coordinator.MaxEvents,
 		MaxGapMutations: cfg.PhaseTwo.Coordinator.MaxGapMutations, StoreMaxItems: uint64(cfg.Limits.Store.MaxKeysPerBatch),
@@ -844,6 +856,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	bundle.workerPorts = workerPorts
 	// The walk's counts, from the same published facts the verdict page reads.
 	//
 	// None of them were on /metrics, so the one signal that says this replica
