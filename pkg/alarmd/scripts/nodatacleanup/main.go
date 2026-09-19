@@ -76,8 +76,23 @@ func run(
 	fmt.Println(counts.String())
 	if !remove {
 		fmt.Println("nothing was deleted: pass -delete to remove the eligible records")
+		return err
 	}
+	// Where the copies are and how many, on the same screen as the delete
+	// count. A copy nobody can find is not a copy, and the moment anyone looks
+	// for one is after the run, when this output is all they have.
+	fmt.Printf("%d saved records are in %s\n", counts.Deleted, copyTo)
+	fmt.Printf("to put them back: %s\n", restoreCommand(copyTo))
 	return err
+}
+
+// restoreCommand is the one line that undoes the run, printed rather than
+// documented somewhere else: the copies exist for a moment when nobody is
+// reading documentation.
+func restoreCommand(copyTo string) string {
+	return "while IFS=$'\\t' read -r key payload; do " +
+		"redis-cli -h <host> -p <port> -n <db> --no-raw RESTORE \"$key\" 0 " +
+		"\"$(printf %s \"$payload\" | base64 -d)\"; done < " + copyTo
 }
 
 // fileCopier appends one saved record per line as "key<TAB>base64", which
