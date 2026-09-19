@@ -118,7 +118,7 @@ func resolveEndpoints(cfg config.Config, sharing endpointSharing) []fleet.Endpoi
 func endpointFactsSource(
 	cfg config.Config, sharing endpointSharing, recorder *metric.Recorder,
 	cmdb *cmdbcache.Store, settings *platformsettings.Cache,
-	source func() *fleet.SourceFacts, now func() time.Time,
+	source func() *fleet.SourceFacts, outputSink func() outputSinkState, now func() time.Time,
 ) func() []fleet.Endpoint {
 	static := resolveEndpoints(cfg, sharing)
 	return func() []fleet.Endpoint {
@@ -127,6 +127,28 @@ func endpointFactsSource(
 		copy(endpoints, static)
 		for index := range endpoints {
 			entry := &endpoints[index]
+			if entry.Role == fleet.EndpointOutputKafka && outputSink != nil {
+				// The output sink's own record: open or not, since when, and
+				// what the last attempt said. Before this the entry had an
+				// address and nothing else, and a replica that could not
+				// reach it exited instead of saying so here.
+				state := outputSink()
+				ready := state.Ready
+				entry.Ready = &ready
+				if state.Ready {
+					age := at.Sub(state.Since).Seconds()
+					entry.LastSuccessAgeSeconds = &age
+				}
+				if !state.LastFailureAt.IsZero() {
+					age := at.Sub(state.LastFailureAt).Seconds()
+					entry.LastFailureAgeSeconds = &age
+					entry.LastFailure = state.LastFailure
+				}
+				if state.Attempts > 0 {
+					attempts := state.Attempts
+					entry.Attempts = &attempts
+				}
+			}
 			if entry.Kind == "redis" && entry.Configured && recorder != nil {
 				if health, known := recorder.RedisClientHealth(sharing.redisClientForRole(entry.Role)); known {
 					if !health.LastSuccessAt.IsZero() {

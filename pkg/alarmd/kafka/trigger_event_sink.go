@@ -82,20 +82,52 @@ func (err *triggerEventDependencyError) Unwrap() error {
 
 func (err *triggerEventDependencyError) RetryableOutputDependency() {}
 
+// OpenTriggerEventSink prepares and opens the sink in one call.
 func OpenTriggerEventSink(coordinates DecisionSinkConfig) (*TriggerEventSink, error) {
+	opener, err := PrepareTriggerEventSink(coordinates)
+	if err != nil {
+		return nil, err
+	}
+	return opener.Open()
+}
+
+// TriggerEventSinkOpener is the half of opening the sink that needs the
+// network. The other half -- reading and validating the coordinates -- has
+// already run when one of these exists, so an error from Open is the broker
+// not answering, never the configuration being wrong. The two are separated
+// because the process treats them differently: a wrong configuration is
+// refused at startup, a broker that does not answer is retried while the
+// replica stays up and says it is not ready.
+type TriggerEventSinkOpener struct {
+	coordinates DecisionSinkConfig
+	config      *sarama.Config
+}
+
+// PrepareTriggerEventSink validates the coordinates and builds the client
+// configuration, and touches no network.
+func PrepareTriggerEventSink(coordinates DecisionSinkConfig) (*TriggerEventSinkOpener, error) {
 	config, err := NewDecisionProducerOnlyConfig(coordinates)
 	if err != nil {
 		return nil, err
 	}
-	client, err := sarama.NewClient(coordinates.Brokers, config)
+	return &TriggerEventSinkOpener{coordinates: coordinates, config: config}, nil
+}
+
+// Open connects to the brokers and opens the producer. It may be called
+// again after a failure; each call is a fresh attempt.
+func (opener *TriggerEventSinkOpener) Open() (*TriggerEventSink, error) {
+	if opener == nil || opener.config == nil {
+		return nil, errors.New("kafka trigger event sink: opener is not prepared")
+	}
+	client, err := sarama.NewClient(opener.coordinates.Brokers, opener.config)
 	if err != nil {
 		return nil, fmt.Errorf("kafka trigger event sink: open client: %w", err)
 	}
-	producer, err := newSyncProducerForOutput(client, coordinates.OutputTopic)
+	producer, err := newSyncProducerForOutput(client, opener.coordinates.OutputTopic)
 	if err != nil {
 		return nil, errors.Join(fmt.Errorf("kafka trigger event sink: open producer: %w", err), client.Close())
 	}
-	sink, err := newTriggerEventSink(coordinates.OutputTopic, producer, client)
+	sink, err := newTriggerEventSink(opener.coordinates.OutputTopic, producer, client)
 	if err != nil {
 		return nil, errors.Join(err, producer.Close(), client.Close())
 	}

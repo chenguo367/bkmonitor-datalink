@@ -49,6 +49,12 @@ type Endpoint struct {
 	LastSuccessAgeSeconds *float64 `json:"last_success_age_seconds,omitempty"`
 	LastFailureAgeSeconds *float64 `json:"last_failure_age_seconds,omitempty"`
 	LastFailure           string   `json:"last_failure,omitempty"`
+	// Ready and Attempts are for a role the replica opens rather than calls:
+	// whether it is open now, and how many attempts it has made, which for
+	// an open one is how many it took. Absent for the roles read through a
+	// connection, whose health is the command record above.
+	Ready    *bool `json:"ready,omitempty"`
+	Attempts *int  `json:"attempts,omitempty"`
 	// Writer is what the replica found of the platform's writing under this
 	// role, for the roles that read a platform cache.
 	Writer *WriterEvidence `json:"writer,omitempty"`
