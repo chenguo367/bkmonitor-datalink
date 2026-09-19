@@ -76,6 +76,38 @@ func TestCoordinatorNamesStateRefusalsWithoutCommittingProgress(t *testing.T) {
 				if applied == 0 {
 					t.Fatalf("no state_applied observation for the refused chunk")
 				}
+				return
+			}
+			// The preflight line names the refusal the same way, and a
+			// conflict decided there is one kind only: the mutation's
+			// expectation came from this very view, so the revision cannot
+			// differ; what differs is the statement for the same window.
+			var refused *observability.Observation
+			for index := range fixture.observations {
+				observation := &fixture.observations[index]
+				if observation.Stage == observability.StageMutationCompared && observation.Err != nil {
+					refused = observation
+					break
+				}
+			}
+			if refused == nil || string(refused.ReasonCode) != test.want {
+				t.Fatalf("preflight refusal line = %+v, want reason %s", refused, test.want)
+			}
+			if test.want != contract.ReasonStateVersionConflict {
+				if refusal.Kind != "" || refused.StateVersionConflict != nil {
+					t.Fatalf("stale refusal carries a conflict kind: err=%+v facts=%+v", refusal, refused.StateVersionConflict)
+				}
+				return
+			}
+			view := fixture.loaded.Items[0]
+			if refusal.Kind != execution.StateVersionConflictSameVersionOtherStatement || refusal.ExpectedRevision != view.BlobRevision ||
+				refusal.StoredRevision != view.BlobRevision || refusal.VersionComparison != execution.ApplyVersionEqual {
+				t.Fatalf("preflight conflict = %+v, want same_version_other_statement at revision %d both sides, PERSISTED_EQUAL", refusal, view.BlobRevision)
+			}
+			key := observability.StateVersionConflictKey{Site: observability.StateAlreadyAppliedAtPreflight, Kind: observability.StateVersionConflictSameVersionOtherStatement}
+			if facts := refused.StateVersionConflict; facts == nil || len(facts.Counts) != 1 || facts.Counts[key] != 1 ||
+				len(facts.Samples) != 1 || facts.Samples[0].SeriesIdentity != string(view.Identity.SeriesIdentityDigest) {
+				t.Fatalf("preflight conflict facts = %+v, want one %+v with the refused series as sample", refused.StateVersionConflict, key)
 			}
 		})
 	}

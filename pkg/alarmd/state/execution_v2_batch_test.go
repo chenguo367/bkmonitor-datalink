@@ -326,11 +326,14 @@ func TestApplyRuntimeClassifiesValueChangedBetweenPreflightAndApply(t *testing.T
 	movedRevision := seriesMutation(t, seriesIdentity(1), newer, 1, "")
 	movedBytes := seriesMutation(t, seriesIdentity(2), newer, 1, "")
 	vanished := seriesMutation(t, seriesIdentity(3), newer, 1, "")
+	recreated := seriesMutation(t, seriesIdentity(4), newer, 3, "")
 	for _, mutation := range []execution.StateMutation{movedRevision, movedBytes, vanished} {
 		key, _ := RuntimeStateKeyV2("alarmd", mutation.Identity)
 		backend.values[key], _ = encodeRuntime(seriesMutation(t, mutation.Identity, version, 0, ""), 1)
 	}
-	items := preflightItems([]execution.StateMutation{missingThenWritten, movedRevision, movedBytes, vanished})
+	key4, _ := RuntimeStateKeyV2("alarmd", recreated.Identity)
+	backend.values[key4], _ = encodeRuntime(seriesMutation(t, recreated.Identity, version, 2, ""), 3)
+	items := preflightItems([]execution.StateMutation{missingThenWritten, movedRevision, movedBytes, vanished, recreated})
 	if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: items}); err != nil {
 		t.Fatalf("LoadRuntime() error = %v", err)
 	}
@@ -344,18 +347,20 @@ func TestApplyRuntimeClassifiesValueChangedBetweenPreflightAndApply(t *testing.T
 	backend.values[key2], _ = encodeRuntime(seriesMutation(t, movedBytes.Identity, older, 0, "other"), 1)
 	key3, _ := RuntimeStateKeyV2("alarmd", vanished.Identity)
 	delete(backend.values, key3)
+	// The key was gone and written fresh: revision 3 at preflight, 1 now.
+	backend.values[key4], _ = encodeRuntime(seriesMutation(t, recreated.Identity, version, 0, "other"), 1)
 	snapshot := map[string]string{}
 	for key, value := range backend.values {
 		snapshot[key] = string(value)
 	}
 
 	result, err := store.ApplyRuntime(context.Background(), execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
-		Items: []execution.StateMutation{missingThenWritten, movedRevision, movedBytes, vanished}})
+		Items: []execution.StateMutation{missingThenWritten, movedRevision, movedBytes, vanished, recreated}})
 	if err != nil {
 		t.Fatalf("ApplyRuntime() error = %v", err)
 	}
 	want := []execution.StateApplyStatus{execution.StateApplyVersionConflict, execution.StateApplyVersionConflict,
-		execution.StateApplyCASConflict, execution.StateApplyVersionConflict}
+		execution.StateApplyCASConflict, execution.StateApplyVersionConflict, execution.StateApplyVersionConflict}
 	for index, status := range want {
 		if result.Items[index].Status != status {
 			t.Fatalf("item %d = %+v, want %s", index, result.Items[index], status)
@@ -363,6 +368,24 @@ func TestApplyRuntimeClassifiesValueChangedBetweenPreflightAndApply(t *testing.T
 	}
 	if result.Items[2].ReasonCode != execution.ReasonCode(contract.ReasonStateWriteRetryable) {
 		t.Fatalf("CAS conflict reason = %s", result.Items[2].ReasonCode)
+	}
+	// Each conflict says which comparison refused it and what it compared;
+	// the status alone reads the same for a key that expired and a key
+	// another writer moved.
+	wantKinds := map[int]execution.StateApplyItemResult{
+		0: {VersionConflict: execution.StateVersionConflictRevisionMoved, StoredBlobRevision: 1, StoredVersionComparison: execution.ApplyVersionEqual},
+		1: {VersionConflict: execution.StateVersionConflictRevisionMoved, StoredBlobRevision: 2, StoredVersionComparison: execution.ApplyVersionPersistedOlder},
+		3: {VersionConflict: execution.StateVersionConflictMissing},
+		4: {VersionConflict: execution.StateVersionConflictRevisionReset, StoredBlobRevision: 1, StoredVersionComparison: execution.ApplyVersionPersistedOlder},
+	}
+	for index, want := range wantKinds {
+		got := result.Items[index]
+		if got.VersionConflict != want.VersionConflict || got.StoredBlobRevision != want.StoredBlobRevision || got.StoredVersionComparison != want.StoredVersionComparison {
+			t.Fatalf("item %d = %+v, want kind %s stored revision %d comparison %q", index, got, want.VersionConflict, want.StoredBlobRevision, want.StoredVersionComparison)
+		}
+	}
+	if result.Items[2].VersionConflict != "" {
+		t.Fatalf("CAS conflict carries a version conflict kind: %+v", result.Items[2])
 	}
 	if len(backend.values) != len(snapshot) {
 		t.Fatalf("conflicting apply changed the key set: %d != %d", len(backend.values), len(snapshot))
@@ -697,4 +720,75 @@ func TestApplyRuntimeRepeatedKeyWithADifferentStatementIsAConflictThatNamesTheRe
 	if result.Items[1].Status != execution.StateApplyVersionConflict || !result.Items[1].RepeatedKey {
 		t.Fatalf("later different copy = %+v, want STATE_VERSION_CONFLICT marked as a repeated key", result.Items[1])
 	}
+	// The repeat mark does not replace the comparison: the later copy
+	// expected nothing and met the earlier copy at revision 1.
+	if later := result.Items[1]; later.VersionConflict != execution.StateVersionConflictRevisionMoved || later.StoredBlobRevision != 1 {
+		t.Fatalf("later different copy = %+v, want kind revision_moved at stored revision 1 beside the repeat mark", later)
+	}
+}
+
+// The sequential path and the witnessed path name their conflicts the same
+// way the pipelined one does: the missing key from the site that saw it
+// missing, the rest from the one classifier. A retry carrying an old
+// expectation into a key that expired is the shape the missing kind exists
+// to name, and it is decided without a round trip when the witness already
+// says so.
+func TestApplyRuntimeSequentialAndWitnessedConflictsNameTheComparison(t *testing.T) {
+	version := applyVersion()
+	t.Run("sequential", func(t *testing.T) {
+		backend := newPipelineMemoryBackend()
+		store := newBatchStore(t, backend, nil)
+		expired := seriesMutation(t, seriesIdentity(0), version, 2, "")
+		reset := seriesMutation(t, seriesIdentity(1), version, 3, "")
+		moved := seriesMutation(t, seriesIdentity(2), version, 1, "")
+		otherStatement := seriesMutation(t, seriesIdentity(3), version, 1, "")
+		keyReset, _ := RuntimeStateKeyV2("alarmd", reset.Identity)
+		backend.values[keyReset], _ = encodeRuntime(seriesMutation(t, reset.Identity, version, 0, "fresh"), 1)
+		keyMoved, _ := RuntimeStateKeyV2("alarmd", moved.Identity)
+		backend.values[keyMoved], _ = encodeRuntime(seriesMutation(t, moved.Identity, version, 1, "theirs"), 2)
+		keyOther, _ := RuntimeStateKeyV2("alarmd", otherStatement.Identity)
+		backend.values[keyOther], _ = encodeRuntime(seriesMutation(t, otherStatement.Identity, version, 0, "theirs"), 1)
+		result, err := store.ApplyRuntime(context.Background(), execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
+			Items: []execution.StateMutation{expired, reset, moved, otherStatement}})
+		if err != nil {
+			t.Fatalf("ApplyRuntime() error = %v", err)
+		}
+		requireAllStatus(t, result, execution.StateApplyVersionConflict)
+		want := []execution.StateApplyItemResult{
+			{VersionConflict: execution.StateVersionConflictMissing},
+			{VersionConflict: execution.StateVersionConflictRevisionReset, StoredBlobRevision: 1, StoredVersionComparison: execution.ApplyVersionEqual},
+			{VersionConflict: execution.StateVersionConflictRevisionMoved, StoredBlobRevision: 2, StoredVersionComparison: execution.ApplyVersionEqual},
+			{VersionConflict: execution.StateVersionConflictSameVersionOtherStatement, StoredBlobRevision: 1, StoredVersionComparison: execution.ApplyVersionEqual},
+		}
+		for index, item := range want {
+			got := result.Items[index]
+			if got.VersionConflict != item.VersionConflict || got.StoredBlobRevision != item.StoredBlobRevision || got.StoredVersionComparison != item.StoredVersionComparison {
+				t.Fatalf("item %d = %+v, want kind %s stored revision %d comparison %q", index, got, item.VersionConflict, item.StoredBlobRevision, item.StoredVersionComparison)
+			}
+		}
+		if backend.casCalls != 0 {
+			t.Fatalf("a refused item reached CompareAndSet: cas=%d", backend.casCalls)
+		}
+	})
+	t.Run("witnessed missing with an old expectation", func(t *testing.T) {
+		backend := newPipelineMemoryBackend()
+		store := newBatchStore(t, backend, fixedFenceKeys{testFenceKeys()})
+		fresh := seriesMutation(t, seriesIdentity(0), version, 0, "")
+		if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: preflightItems([]execution.StateMutation{fresh})}); err != nil {
+			t.Fatalf("LoadRuntime() error = %v", err)
+		}
+		stale := seriesMutation(t, seriesIdentity(0), version, 4, "")
+		result, err := store.ApplyRuntimeFenced(context.Background(), execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
+			Items: []execution.StateMutation{stale}}, testApplyFence())
+		if err != nil {
+			t.Fatalf("ApplyRuntimeFenced() error = %v", err)
+		}
+		got := result.Items[0]
+		if got.Status != execution.StateApplyVersionConflict || got.VersionConflict != execution.StateVersionConflictMissing || got.StoredBlobRevision != 0 {
+			t.Fatalf("item = %+v, want STATE_VERSION_CONFLICT kind missing at stored revision 0", got)
+		}
+		if backend.pipelines != 0 || backend.casCalls != 0 || len(backend.values) != 0 {
+			t.Fatalf("witnessed missing decided with a round trip or a write: pipelines=%d cas=%d keys=%d", backend.pipelines, backend.casCalls, len(backend.values))
+		}
+	})
 }

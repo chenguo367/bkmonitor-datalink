@@ -783,7 +783,7 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 		}
 		totals.keys += int64(len(chunkItems))
 		coordinator.observeChunk(ctx, observability.StageGapGuardCommitted, operation, chunkStarted, started, "", reason,
-			chunk, totals, observability.Counts{}, err, extensions...)
+			chunk, totals, observability.Counts{}, err, nil, extensions...)
 		return err
 	})
 }
@@ -910,8 +910,8 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			}
 			view := loadedState.Items[statePosition]
 			started := time.Now()
-			disposition, appliedKind := execution.ClassifyStateMutationDetail(view, stateResult.Mutation)
-			switch disposition {
+			classified := execution.ClassifyStateMutationDetail(view, stateResult.Mutation)
+			switch classified.Disposition {
 			case execution.StateProceed:
 				reuseClass, reuseReason := execution.ClassifyStateWriteReuse(view, stateResult.Mutation)
 				writeReuse.Record(
@@ -923,7 +923,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				mutations = append(mutations, stateResult.Mutation)
 				eventsByState[stateResult.Mutation.Identity] = append([]contract.TriggerEventV1(nil), stateResult.Events...)
 			case execution.StateAlreadyApplied:
-				alreadyApplied.Record(observability.StateAlreadyAppliedAtPreflight, observability.StateAlreadyAppliedKind(appliedKind),
+				alreadyApplied.Record(observability.StateAlreadyAppliedAtPreflight, observability.StateAlreadyAppliedKind(classified.AlreadyApplied),
 					string(stateResult.Mutation.Identity.SeriesIdentityDigest), stateResult.Mutation.ExpectedBlobRevision, view.BlobRevision)
 				execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
 					if c.PriorStateApplied != nil {
@@ -933,8 +933,28 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, observability.ResultSuccess, observability.ReasonNone, nil)
 				continue
 			case execution.StateStaleVersion, execution.StateVersionConflict:
-				err = &StateConflictError{Stage: "state mutation preflight", Status: string(disposition)}
-				coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, "", "", err)
+				// The refusal names itself and the line carries the name:
+				// the reason from the error, and for a conflict the kind
+				// with the two revisions compared, so the line does not read
+				// internal_unknown beside an error_type that already knew.
+				refusal := &StateConflictError{Stage: "state mutation preflight", Status: string(classified.Disposition)}
+				var conflicts *observability.StateVersionConflictFacts
+				if classified.Disposition == execution.StateVersionConflict {
+					refusal.Kind, refusal.ExpectedRevision, refusal.StoredRevision, refusal.VersionComparison =
+						classified.VersionConflict, stateResult.Mutation.ExpectedBlobRevision, view.BlobRevision, view.VersionComparison
+					conflicts = &observability.StateVersionConflictFacts{}
+					conflicts.Record(observability.StateAlreadyAppliedAtPreflight, observability.StateVersionConflictKind(classified.VersionConflict),
+						string(stateResult.Mutation.Identity.SeriesIdentityDigest), stateResult.Mutation.ExpectedBlobRevision, view.BlobRevision,
+						string(view.VersionComparison), false)
+				}
+				err = refusal
+				reason, _ := StateConflictReason(err)
+				coordinator.emitObservation(ctx, observability.Observation{
+					Component: observability.ComponentState, Stage: observability.StageMutationCompared,
+					Operation: observability.Operation(request.Operation), Direction: observability.DirectionInternal,
+					ReasonCode: observability.ReasonCode(reason), Duration: time.Since(started), Err: err,
+					StateVersionConflict: conflicts,
+				})
 				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: %w", err)
 			default:
 				err = errors.New("unknown state mutation preflight result")
@@ -1364,7 +1384,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 		totals.keys += int64(len(chunkItems))
 		totals.bytes += chunkBytes
 		coordinator.observeChunk(ctx, observability.StageStateAdmission, operation, chunkStarted, started, observationResult, reason,
-			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err)
+			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, nil)
 		return err
 	})
 	if err != nil {
@@ -1415,6 +1435,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 			result, err = coordinator.ports.State.ApplyRuntime(ctx, applyRequest)
 		}
 		var reason execution.ReasonCode
+		var conflicts observability.StateVersionConflictFacts
 		rejected := 0
 		if err == nil {
 			if err = result.Validate(); err == nil {
@@ -1426,6 +1447,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 			}
 			if err == nil {
 				reason = firstStateApplyFailureReason(result.Items)
+				var refusal *StateConflictError
 				for _, item := range result.Items {
 					switch item.Status {
 					case execution.StateApplied:
@@ -1443,10 +1465,28 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 						deterministic[item.Identity] = item.ReasonCode
 						rejected++
 					case execution.StateApplyStale, execution.StateApplyVersionConflict:
-						err = &StateConflictError{Stage: "state apply did not complete", Status: string(item.Status), RepeatedKey: item.RepeatedKey}
+						// Every refused item is counted by the comparison
+						// that refused it; the error carries the first one's
+						// values. A store that does not say which comparison
+						// counts as other, so a missing kind cannot pose as
+						// the one a reader would act on.
+						named := &StateConflictError{Stage: "state apply did not complete", Status: string(item.Status), RepeatedKey: item.RepeatedKey}
+						if item.Status == execution.StateApplyVersionConflict {
+							named.Kind, named.ExpectedRevision, named.StoredRevision, named.VersionComparison =
+								item.VersionConflict, expectedRevisions[item.Identity], item.StoredBlobRevision, item.StoredVersionComparison
+							conflicts.Record(observability.StateAlreadyAppliedAtApply, observability.StateVersionConflictKind(item.VersionConflict),
+								string(item.Identity.SeriesIdentityDigest), expectedRevisions[item.Identity], item.StoredBlobRevision,
+								string(item.StoredVersionComparison), item.RepeatedKey)
+						}
+						if refusal == nil {
+							refusal = named
+						}
 					default:
 						err = fmt.Errorf("state apply did not complete: %s", item.Status)
 					}
+				}
+				if err == nil && refusal != nil {
+					err = refusal
 				}
 			}
 		}
@@ -1470,8 +1510,12 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		}
 		totals.keys += int64(len(chunkItems))
 		totals.bytes += chunkBytes
+		var conflictFacts *observability.StateVersionConflictFacts
+		if !conflicts.Empty() {
+			conflictFacts = &conflicts
+		}
 		coordinator.observeChunk(ctx, observability.StageStateApplied, operation, chunkStarted, started, observationResult, reason,
-			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err)
+			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, conflictFacts)
 		return err
 	})
 	if !alreadyApplied.Empty() {

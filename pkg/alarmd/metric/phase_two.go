@@ -35,6 +35,7 @@ type phaseTwoMetrics struct {
 	stateWriteReuse                 *prometheus.CounterVec
 	stateWriteChange                *prometheus.CounterVec
 	stateAlreadyApplied             *prometheus.CounterVec
+	stateVersionConflict            *prometheus.CounterVec
 	sourceObservations              *prometheus.CounterVec
 	sourceRefreshes                 *prometheus.CounterVec
 	sourceCompiles                  *prometheus.CounterVec
@@ -225,6 +226,22 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"non-zero and aligned with conflict bursts confirms the mechanism, a steady zero says " +
 				"something else writes the key. Every pair is published at zero so absent and zero read " +
 				"apart. Population is mutations, not Redis commands.",
+		}, []string{"site", "kind"}),
+		stateVersionConflict: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_version_conflict_total",
+			Help: "Runtime State mutations refused STATE_VERSION_CONFLICT, by where that was decided and which " +
+				"comparison refused them. site: preflight is the view the Slot loaded before evaluating, apply " +
+				"is the bytes the write met. kind: missing is a key the mutation expected at a revision and did " +
+				"not find, which is what a TTL that ran out between the Slot's read and its write leaves -- the " +
+				"retry then reads missing, expects nothing and succeeds, so this kind rising alone is the key's " +
+				"lifetime against the Slot's duration and not a competing writer; revision_moved is a key another " +
+				"write advanced after the read; revision_reset is a key found below the revision expected, gone " +
+				"and written fresh since the read; same_version_other_statement is the expected revision holding " +
+				"this window's ApplyVersion with a different digest, two evaluations of one window that " +
+				"disagree; version_incomparable is a view that reached the comparison without an ordering; " +
+				"other is a store that refused without saying which. The status alone reads the same for all of " +
+				"them and each points at a different fix. Every pair is published at zero so absent and zero " +
+				"read apart. Population is mutations, not Redis commands.",
 		}, []string{"site", "kind"}),
 		stateWriteChange: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_write_change_reason_total",
@@ -713,6 +730,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		for _, kind := range observability.AllStateAlreadyAppliedKinds() {
 			metrics.stateAlreadyApplied.WithLabelValues(string(site), string(kind))
 		}
+		for _, kind := range observability.AllStateVersionConflictKinds() {
+			metrics.stateVersionConflict.WithLabelValues(string(site), string(kind))
+		}
 	}
 	for _, outcome := range nodata.SlotOutcomes {
 		metrics.noDataSlotPlans.WithLabelValues(string(outcome))
@@ -774,7 +794,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryCooldown,
 		m.slotReadiness.slack, m.slotReadiness.boundary,
 		m.slotTiming, m.slotWait,
-		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateWriteChange, m.stateAlreadyApplied, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
+		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateWriteChange, m.stateAlreadyApplied, m.stateVersionConflict, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions,
@@ -1024,6 +1044,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if facts := observation.StateAlreadyApplied; facts != nil && !facts.Empty() {
 		for key, count := range facts.Counts {
 			m.stateAlreadyApplied.WithLabelValues(string(key.Site), string(observability.NormalizeStateAlreadyAppliedKind(key.Kind))).Add(float64(count))
+		}
+	}
+	if facts := observation.StateVersionConflict; facts != nil && !facts.Empty() {
+		for key, count := range facts.Counts {
+			m.stateVersionConflict.WithLabelValues(string(key.Site), string(observability.NormalizeStateVersionConflictKind(key.Kind))).Add(float64(count))
 		}
 	}
 	if observation.Component == observability.ComponentResource && observation.CapacityBudget != "" {

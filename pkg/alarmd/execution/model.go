@@ -1297,15 +1297,67 @@ func AllStateAlreadyAppliedKinds() []StateAlreadyAppliedKind {
 	return []StateAlreadyAppliedKind{StateAlreadyAppliedStable, StateAlreadyAppliedRevisionSkew, StateAlreadyAppliedRepeatedKey}
 }
 
-func ClassifyStateMutation(view RuntimeStateView, mutation StateMutation) StatePreflightDisposition {
-	disposition, _ := ClassifyStateMutationDetail(view, mutation)
-	return disposition
+// StateVersionConflictKind says which comparison refused a
+// STATE_VERSION_CONFLICT. The status alone reads the same for a key that
+// expired between the Slot's read and its write, a key another writer moved,
+// and a Slot that re-evaluated one window into a different statement, and the
+// fix for each lives somewhere else: the first is the key's TTL against the
+// Slot's duration, the second is ownership, the third is the evaluation. Each
+// kind is one branch of the classifier, so a count by kind is a count of
+// branches taken and not a second reading of the same facts.
+type StateVersionConflictKind string
+
+const (
+	// StateVersionConflictMissing: the mutation expected a stored revision and
+	// the key is not there. A key that expires between the preflight read and
+	// the apply leaves exactly this; the retry reads missing, expects nothing
+	// and succeeds, so a steady count here with no rising revision_moved is
+	// the TTL, not a writer.
+	StateVersionConflictMissing StateVersionConflictKind = "missing"
+	// StateVersionConflictRevisionMoved: the stored revision is ahead of the
+	// one expected, and the bytes there are not this statement. Something
+	// wrote the key after the Slot read it.
+	StateVersionConflictRevisionMoved StateVersionConflictKind = "revision_moved"
+	// StateVersionConflictRevisionReset: the stored revision is behind the
+	// one expected. Revisions only grow on one key, so the key was gone and
+	// written fresh since the read: an expiry or a flush followed by another
+	// writer, which is the missing kind seen one write later.
+	StateVersionConflictRevisionReset StateVersionConflictKind = "revision_reset"
+	// StateVersionConflictSameVersionOtherStatement: the revision is the one
+	// expected and the stored ApplyVersion is this mutation's, but the digest
+	// differs. Two evaluations of one window produced two statements for one
+	// series; the store did not move, the input did.
+	StateVersionConflictSameVersionOtherStatement StateVersionConflictKind = "same_version_other_statement"
+	// StateVersionConflictVersionIncomparable: the revision is the one
+	// expected and the stored ApplyVersion could not be ordered against the
+	// mutation's. The view reached the classifier without a comparison.
+	StateVersionConflictVersionIncomparable StateVersionConflictKind = "version_incomparable"
+)
+
+func AllStateVersionConflictKinds() []StateVersionConflictKind {
+	return []StateVersionConflictKind{StateVersionConflictMissing, StateVersionConflictRevisionMoved,
+		StateVersionConflictRevisionReset, StateVersionConflictSameVersionOtherStatement, StateVersionConflictVersionIncomparable}
 }
 
-// ClassifyStateMutationDetail is ClassifyStateMutation with, for an
-// ALREADY_APPLIED, how it was decided; the kind is empty for every other
-// disposition.
-func ClassifyStateMutationDetail(view RuntimeStateView, mutation StateMutation) (StatePreflightDisposition, StateAlreadyAppliedKind) {
+// StateMutationClassification is one mutation's disposition against the
+// stored view with, for the two dispositions that have more than one way of
+// being reached, which one it was. AlreadyApplied is set only for
+// ALREADY_APPLIED and VersionConflict only for STATE_VERSION_CONFLICT.
+type StateMutationClassification struct {
+	Disposition     StatePreflightDisposition
+	AlreadyApplied  StateAlreadyAppliedKind
+	VersionConflict StateVersionConflictKind
+}
+
+func ClassifyStateMutation(view RuntimeStateView, mutation StateMutation) StatePreflightDisposition {
+	return ClassifyStateMutationDetail(view, mutation).Disposition
+}
+
+// ClassifyStateMutationDetail is ClassifyStateMutation with how the
+// disposition was reached. It is the only place the stored view and a
+// mutation are compared; the store's apply paths and the coordinator's
+// preflight both read their kinds from here.
+func ClassifyStateMutationDetail(view RuntimeStateView, mutation StateMutation) StateMutationClassification {
 	// The same statement already on disk is applied, whichever revision it
 	// landed at. This is decided before the revision is compared because the
 	// revision cannot tell our own landed write from somebody else's: a write
@@ -1317,25 +1369,28 @@ func ClassifyStateMutationDetail(view RuntimeStateView, mutation StateMutation) 
 	if view.VersionComparison == ApplyVersionEqual && mutation.MutationDigest != "" &&
 		view.PersistedMutationDigest == mutation.MutationDigest {
 		if mutation.ExpectedBlobRevision != view.BlobRevision {
-			return StateAlreadyApplied, StateAlreadyAppliedRevisionSkew
+			return StateMutationClassification{Disposition: StateAlreadyApplied, AlreadyApplied: StateAlreadyAppliedRevisionSkew}
 		}
-		return StateAlreadyApplied, StateAlreadyAppliedStable
+		return StateMutationClassification{Disposition: StateAlreadyApplied, AlreadyApplied: StateAlreadyAppliedStable}
 	}
 	if mutation.ExpectedBlobRevision != view.BlobRevision {
-		return StateVersionConflict, ""
+		if view.BlobRevision < mutation.ExpectedBlobRevision {
+			return StateMutationClassification{Disposition: StateVersionConflict, VersionConflict: StateVersionConflictRevisionReset}
+		}
+		return StateMutationClassification{Disposition: StateVersionConflict, VersionConflict: StateVersionConflictRevisionMoved}
 	}
 	switch view.VersionComparison {
 	case ApplyVersionPersistedOlder:
-		return StateProceed, ""
+		return StateMutationClassification{Disposition: StateProceed}
 	case ApplyVersionPersistedNewer:
-		return StateStaleVersion, ""
+		return StateMutationClassification{Disposition: StateStaleVersion}
 	case ApplyVersionEqual:
 		if view.PersistedMutationDigest != mutation.MutationDigest {
-			return StateVersionConflict, ""
+			return StateMutationClassification{Disposition: StateVersionConflict, VersionConflict: StateVersionConflictSameVersionOtherStatement}
 		}
-		return StateAlreadyApplied, StateAlreadyAppliedStable
+		return StateMutationClassification{Disposition: StateAlreadyApplied, AlreadyApplied: StateAlreadyAppliedStable}
 	default:
-		return StateVersionConflict, ""
+		return StateMutationClassification{Disposition: StateVersionConflict, VersionConflict: StateVersionConflictVersionIncomparable}
 	}
 }
 
@@ -2697,17 +2752,30 @@ type StateApplyItemResult struct {
 	Identity   StateKeyIdentity
 	Status     StateApplyStatus
 	ReasonCode ReasonCode
-	// AlreadyApplied says how an ALREADY_APPLIED was decided and is empty for
-	// every other status; StoredBlobRevision is the revision the statement was
-	// found at, so a revision_skew line can say how far the expectation was off.
-	AlreadyApplied     StateAlreadyAppliedKind
-	StoredBlobRevision uint64
+	// AlreadyApplied says how an ALREADY_APPLIED was decided and
+	// VersionConflict how a STATE_VERSION_CONFLICT was; each is empty for
+	// every other status. StoredBlobRevision is the revision the key was found
+	// at for both, zero when it was not found, so a line can say how far the
+	// expectation was off; StoredVersionComparison is how the stored
+	// ApplyVersion ordered against the mutation's, empty when there was
+	// nothing stored to compare.
+	AlreadyApplied          StateAlreadyAppliedKind
+	VersionConflict         StateVersionConflictKind
+	StoredBlobRevision      uint64
+	StoredVersionComparison ApplyVersionComparison
 	// RepeatedKey says the request itself carried this key earlier. On an
 	// ALREADY_APPLIED it is the repeated_key kind; on a STATE_VERSION_CONFLICT
 	// it is the one fact that tells a producer that made two different
 	// statements for one series from a writer that lost a race, and the
 	// status alone reads the same for both.
 	RepeatedKey bool
+}
+
+// MarkVersionConflict fills in a STATE_VERSION_CONFLICT with the values the
+// comparison used, so the item carries them to whoever reads the refusal.
+func (item *StateApplyItemResult) MarkVersionConflict(kind StateVersionConflictKind, view RuntimeStateView) {
+	item.Status, item.VersionConflict = StateApplyVersionConflict, kind
+	item.StoredBlobRevision, item.StoredVersionComparison = view.BlobRevision, view.VersionComparison
 }
 
 type StateApplyResult struct {
