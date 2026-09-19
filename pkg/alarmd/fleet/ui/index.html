@@ -787,7 +787,8 @@ var DEGRADATION = {
   CONTROL_SOURCE_STALE: '策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录',
   CONTROL_LEADER_ABSENT: '副本拿不到控制面 leader 租约、也不知道谁持有，超过设计允许的时间——可能没人在刷新',
   OPEN_ALERT_SET_STALE: '已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识',
-  PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置'
+  PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置',
+  OUTPUT_NOT_READY: '副本连不上告警输出：进程活着但不就绪，不接检测任务，由其余副本顶着——少一个副本的容量'
 };
 
 // What each line owes past its sentence, per check and held to the Go list:
@@ -804,7 +805,7 @@ var EVIDENCE = {
   CONFIG_REJECTED:       '展开按原因看策略样本与字段路径（field_path 是编译器拒绝的那个字段）；指标 catalog_withheld_objects{disposition="CONFIG_REJECTED",reason}',
   CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
   OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡这一轮（计划/发出/暂停）在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_gap、assignment_moves_total{reason=rebalance}、rebalance_paused_total{reason=set_unstable}',
-  REPLICA_DEGRADED:      '展开按种类看是哪个副本；策略源过期的组直接带最近一次刷新失败的阶段与原文（下面组名后）；副本表里该副本的策略源/告警集合/平台设置时钟',
+  REPLICA_DEGRADED:      '展开按种类看是哪个副本；策略源过期的组直接带最近一次刷新失败的阶段与原文（下面组名后）；输出未就绪的组带该副本的未就绪时长、重试次数与最近一次失败原文；副本表里该副本的策略源/告警集合/平台设置时钟；依赖面板"告警输出"行',
   SLOTS_OVERDUE:         '对象行"超期"与超期多久（预计时刻已过多久）；副本表里该副本的已运行时长与被挡回数',
   NEVER_EVALUATED:       '对象行"接管后未跑"与接管时刻',
   ROUNDS_STALLED:        '对象行"最近一次错误"：原文、类型、卡住的 Slot、同一 Slot 连续几次',
@@ -831,7 +832,7 @@ var NEXT = {
   CONFIG_REJECTED:       '交策略侧：按原因组与字段路径改策略定义；alarmd 这边不用改，改好后下一轮刷新自动接受。STALE_CONFIG 组的策略仍在按上一版跑，不算漏检',
   CUTOVER_FAILING:       '先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效',
   OWNERSHIP_SKEWED:      '不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。{rebalance}；在均分回来之前，持有多的那个副本上的漏检与超时不按容量处理、不据此扩副本或加资源',
-  REPLICA_DEGRADED:      '按种类处理：源过期看策略源刷新，leader 缺席看租约，告警集合/平台设置过期看对应发布者',
+  REPLICA_DEGRADED:      '按种类处理：源过期看策略源刷新，leader 缺席看租约，告警集合/平台设置过期看对应发布者；输出未就绪看该副本所在节点到告警输出的网络（它自己在重试，最多 30 秒一次，通了就就绪），不用重启它',
   SLOTS_OVERDUE:         '看该副本是否卡住或过载：展开看对象与超期多久；持续增长就是容量或调度问题',
   NEVER_EVALUATED:       '展开看接管后多久没跑；接管不久可等，超过一个周期就查该副本的调度',
   ROUNDS_STALLED:        '不会自己恢复：展开找对象，查它卡在哪一步（日志按 query_group_key），必要时重启副本',
@@ -862,7 +863,7 @@ var RECOVERY = {
   CONFIG_REJECTED:       '策略改好后一轮刷新：该策略离开这一组；这一行只在全部改好后消失',
   CUTOVER_FAILING:       '执行版本追上目标发布（两者一致）且之后一轮激活成功；这一行消失',
   OWNERSHIP_SKEWED:      'Leader 的再平衡计划移动数归零（最多与最少之差回到均分的 {stop}% 以内，这是调度器自己的容差）；这一行消失',
-  REPLICA_DEGRADED:      '该副本的那个时钟回到设计界内；策略源的 = 一轮刷新成功、新目录发布，这一行消失',
+  REPLICA_DEGRADED:      '该副本的那个时钟回到设计界内；策略源的 = 一轮刷新成功、新目录发布；输出的 = 该副本打开告警输出成功、变为就绪并开始接任务，这一行消失',
   SLOTS_OVERDUE:         '超期数归零并保持一个周期；执行情况一句回到"跟得上"',
   NEVER_EVALUATED:       '对象跑完第一轮',
   ROUNDS_STALLED:        '对象的轮次重新结束（对象行离开"轮次不结束"）；不会自己发生',
@@ -985,8 +986,24 @@ function standingClause(report) {
     if (group.key === 'CONTROL_SOURCE_STALE' && group.text) {
       parts.push('策略配置刷新失败' + (group.stage ? '于 ' + group.stage : '') + '：' + group.text + '，新配置尚未发布，跑的是上一份好的目录');
     }
+    // One clause per replica whose output is not open: which one, for how
+    // long, how many tries. A node with no route to the output used to be
+    // a crash loop with no line anywhere; now it is this sentence.
+    if (group.key === 'OUTPUT_NOT_READY') {
+      (group.degradations || []).forEach(function (d) { parts.push(outputNotReadyWords(d)); });
+    }
   });
   return parts.length ? '——' + parts.join('；') : '';
+}
+
+// A replica whose output is not ready, in one clause: not ready since its
+// start (an output once open stays open), the attempts so far, and what it
+// means for the deployment. The failure text is on the expanded group, not
+// here.
+function outputNotReadyWords(d) {
+  var since = d.age_seconds != null ? '未就绪 ' + elapsedLabel(d.age_seconds) : '未就绪';
+  var tries = d.attempts ? '，已试 ' + d.attempts + ' 次' : '';
+  return '副本 ' + shortReplica(d.replica) + ' 告警输出' + since + tries + '（这个副本不接检测任务，其余副本在顶；通了自动就绪）';
 }
 
 // How the split came about, as far as the replica table can say: the

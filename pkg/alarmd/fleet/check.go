@@ -477,6 +477,12 @@ type CheckGroup struct {
 	// bound was passed.
 	Stage string `json:"stage,omitempty"`
 	Text  string `json:"text,omitempty"`
+	// Degradations is the replica-level standings folded under this group,
+	// whole, on REPLICA_DEGRADED: Replicas above names them, this carries
+	// each one's own facts -- how long it has held, how many attempts, what
+	// the last one said -- so the line can say "副本 X 输出未就绪 5 分钟" of
+	// each replica rather than one kind name over a list of names.
+	Degradations []Degradation `json:"degradations,omitempty"`
 	// Disposition and Samples are on a source standing's fold: which
 	// disposition the control plane gave the strategies in it, and a bounded
 	// sample of which strategies. Strategies above holds the count; there are
@@ -827,6 +833,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				entry.groups[string(degradation.Kind)] = group
 			}
 			group.Replicas = append(group.Replicas, degradation.Replica)
+			group.Degradations = append(group.Degradations, degradation)
 			if group.Text == "" && degradation.Text != "" {
 				group.Stage, group.Text = degradation.Stage, degradation.Text
 			}
