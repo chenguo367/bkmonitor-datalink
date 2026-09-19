@@ -36,7 +36,7 @@ func TestNoDataMemoryRefusalLineCarriesTheSizeAndTheBound(t *testing.T) {
 		ReasonCode: ReasonCode("STATE_BUDGET_EXCEEDED"),
 		Trace:      TraceFields{StrategyID: "8946"},
 		NoDataMemoryRefusal: &NoDataMemoryRefusalFacts{
-			Reason: "STATE_BUDGET_EXCEEDED", Record: "NEXT", Bytes: 537383, Limit: 524288,
+			Reason: "STATE_BUDGET_EXCEEDED", Record: "GROUPS", Groups: 120000, Limit: 100000,
 		},
 	})
 
@@ -51,9 +51,9 @@ func TestNoDataMemoryRefusalLineCarriesTheSizeAndTheBound(t *testing.T) {
 	for field, want := range map[string]any{
 		"stage":                  string(StageNoDataMemoryRefused),
 		"no_data_memory_refusal": "STATE_BUDGET_EXCEEDED",
-		"no_data_memory_record":  "NEXT",
-		"no_data_memory_bytes":   float64(537383),
-		"no_data_memory_limit":   float64(524288),
+		"no_data_memory_record":  "GROUPS",
+		"no_data_memory_groups":  float64(120000),
+		"no_data_memory_limit":   float64(100000),
 		"strategy_id":            "8946",
 	} {
 		if line[field] != want {
@@ -79,7 +79,7 @@ func TestNoDataMemoryRefusalLineOmitsNumbersItDoesNotHave(t *testing.T) {
 	if line["no_data_memory_refusal"] != "STATE_CORRUPT" {
 		t.Fatalf("line = %#v, want the reason named", line)
 	}
-	for _, field := range []string{"no_data_memory_record", "no_data_memory_bytes", "no_data_memory_limit"} {
+	for _, field := range []string{"no_data_memory_record", "no_data_memory_groups", "no_data_memory_limit"} {
 		if _, present := line[field]; present {
 			t.Fatalf("line carried %q for a refusal that measured nothing: %#v", field, line)
 		}

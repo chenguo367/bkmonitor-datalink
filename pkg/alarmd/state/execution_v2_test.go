@@ -18,7 +18,10 @@ import (
 )
 
 type casMemoryBackend struct {
-	values   map[string][]byte
+	values map[string][]byte
+	// hashes is the second key space this backend holds: one map of fields per
+	// key, which is what the no-data memory moved to.
+	hashes   map[string]map[string][]byte
 	conflict bool
 	reads    int
 	// remaining models what PTTL would answer, in the same encoding: absent
@@ -51,7 +54,9 @@ func (backend *casMemoryBackend) RenewIfBelow(
 	_ context.Context, key string, ttl, threshold time.Duration,
 ) (bool, error) {
 	call := renewalCall{Key: key, TTL: ttl, Threshold: threshold}
-	if _, exists := backend.values[key]; exists {
+	_, isValue := backend.values[key]
+	_, isHash := backend.hashes[key]
+	if isValue || isHash {
 		// The script's rule, restated here rather than assumed: a key with no
 		// expiry is renewed, and one with time left above the threshold is not.
 		left, hasExpiry := backend.remaining[key]
@@ -94,6 +99,65 @@ func TestIncrementalGapLoadStopsBeforeNextReadOnRejectionAndCancel(t *testing.T)
 	}
 }
 func (*casMemoryBackend) SetMany(context.Context, []BackendWrite) error { return nil }
+
+// ReadHash and ApplyHashDelta are the hash half of the backend, written to the
+// same rules the Lua script holds rather than to what the caller happens to do
+// with them. The header comparison in particular is the whole atomicity
+// argument, so a fake that applied unconditionally would let every test of the
+// conflict paths pass against a store that had none.
+func (backend *casMemoryBackend) ReadHash(_ context.Context, key string) (map[string][]byte, error) {
+	backend.reads++
+	fields := backend.hashes[key]
+	if len(fields) == 0 {
+		return nil, nil
+	}
+	copied := make(map[string][]byte, len(fields))
+	for name, value := range fields {
+		copied[name] = append([]byte(nil), value...)
+	}
+	return copied, nil
+}
+
+func (backend *casMemoryBackend) ApplyHashDelta(
+	_ context.Context, write HashDeltaWrite,
+) (HashDeltaOutcome, error) {
+	if backend.conflict {
+		return HashDeltaOutcome{Status: HashDeltaConflict}, nil
+	}
+	fields := backend.hashes[write.Key]
+	header, present := fields[write.HeaderField]
+	if write.ExpectedMissing {
+		if present {
+			return HashDeltaOutcome{Status: HashDeltaConflict, Current: header}, nil
+		}
+	} else {
+		if !present {
+			return HashDeltaOutcome{Status: HashDeltaConflict}, nil
+		}
+		if HeaderDigest(header) != write.ExpectedDigest {
+			return HashDeltaOutcome{Status: HashDeltaConflict, Current: header}, nil
+		}
+	}
+	if fields == nil {
+		fields = make(map[string][]byte)
+		if backend.hashes == nil {
+			backend.hashes = make(map[string]map[string][]byte)
+		}
+		backend.hashes[write.Key] = fields
+	}
+	for _, field := range write.Set {
+		fields[field.Name] = append([]byte(nil), field.Value...)
+	}
+	for _, name := range write.Del {
+		delete(fields, name)
+	}
+	fields[write.HeaderField] = append([]byte(nil), write.Header...)
+	if backend.writeTTLs == nil {
+		backend.writeTTLs = make(map[string]time.Duration)
+	}
+	backend.writeTTLs[write.Key] = write.TTL
+	return HashDeltaOutcome{Status: HashDeltaApplied}, nil
+}
 func (backend *casMemoryBackend) CompareAndSet(_ context.Context, key string, expected []byte, missing bool, value []byte, ttl time.Duration) (bool, error) {
 	if backend.conflict {
 		return false, nil

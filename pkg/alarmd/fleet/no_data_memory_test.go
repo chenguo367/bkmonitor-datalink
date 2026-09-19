@@ -26,7 +26,7 @@ func memoryRefused(ctx context.Context, tracker *Tracker, bytes int) {
 		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRefused,
 		Result: observability.ResultDegraded, ReasonCode: "STATE_BUDGET_EXCEEDED", Direction: observability.DirectionInternal,
 		Trace:               observability.TraceFields{StrategyID: "s-1", BusinessID: "2"},
-		NoDataMemoryRefusal: &observability.NoDataMemoryRefusalFacts{Reason: "STATE_BUDGET_EXCEEDED", Record: "NEXT", Bytes: bytes, Limit: 65536},
+		NoDataMemoryRefusal: &observability.NoDataMemoryRefusalFacts{Reason: "STATE_BUDGET_EXCEEDED", Record: "GROUPS", Groups: bytes, Limit: 65536},
 	})
 }
 
@@ -59,7 +59,7 @@ func TestARefusedAbsenceMemoryIsListedApartFromTheColumns(t *testing.T) {
 	if memory == nil || memory.Refusals != 3 || !memory.FirstAt.Equal(now) || !memory.LastAt.Equal(now.Add(2*time.Minute)) {
 		t.Fatalf("memory = %+v, want three refusals from %v to %v", memory, now, now.Add(2*time.Minute))
 	}
-	if memory.Record != "NEXT" || memory.Bytes != 70002 || memory.Limit != 65536 || memory.Plan.StrategyID != "s-1" {
+	if memory.Record != "GROUPS" || memory.Groups != 70002 || memory.Limit != 65536 || memory.Plan.StrategyID != "s-1" {
 		t.Fatalf("memory = %+v, want the latest measurement and the Plan", memory)
 	}
 	if !row.Since.Equal(now) || row.Consecutive != 3 || len(row.Strategies) != 1 || row.Strategies[0].StrategyID != "s-1" {
@@ -157,7 +157,7 @@ func TestOnePlanStoringDoesNotRecoverAnotherRefusedPlan(t *testing.T) {
 		tracker.Observe(ctx, observability.Observation{
 			Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRefused, Result: observability.ResultDegraded,
 			ReasonCode: "STATE_BUDGET_EXCEEDED", Trace: observability.TraceFields{StrategyID: strategy, BusinessID: "2"},
-			NoDataMemoryRefusal: &observability.NoDataMemoryRefusalFacts{Reason: "STATE_BUDGET_EXCEEDED", Record: "NEXT", Bytes: bytes, Limit: 65536},
+			NoDataMemoryRefusal: &observability.NoDataMemoryRefusalFacts{Reason: "STATE_BUDGET_EXCEEDED", Record: "GROUPS", Groups: bytes, Limit: 65536},
 		})
 	}
 	store := func(strategy string) {

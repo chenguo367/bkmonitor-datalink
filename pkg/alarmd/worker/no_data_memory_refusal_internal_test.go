@@ -62,14 +62,14 @@ func noDataRefusalFixture(store *refusingNoDataStore) (*SlotExecutionCoordinator
 
 func refusedMemoryMutation(t *testing.T) execution.PlanNoDataMutation {
 	t.Helper()
-	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMutation{
+	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMemoryUpdate{
 		Identity: execution.PlanNoDataIdentity{
 			Plan:            execution.PlanIdentity{TenantID: "tenant", BusinessID: "10", StrategyID: "8946"},
 			StateGeneration: "generation",
 		},
-		SchemaVersion: execution.NoDataMemorySchemaV1, ApplyVersion: execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 60, SlotDigest: "slot"},
-		ScheduleRevision: "plan-r1", RosterVersion: "HISTORY/1",
-		Groups: []execution.NoDataGroupMemory{{GroupKey: "a", FirstAbsent: 940}},
+		ApplyVersion:     execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 60, SlotDigest: "slot"},
+		ScheduleRevision: "plan-r1", RosterVersion: "HISTORY/1", PresentAsOf: 1000,
+		Memory: []execution.NoDataGroupMemory{{GroupKey: "a", FirstAbsent: 940}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -90,7 +90,7 @@ func TestARefusedNoDataMemoryIsReportedRatherThanFailingTheSlot(t *testing.T) {
 	store := &refusingNoDataStore{
 		reason: execution.ReasonCode(contract.ReasonStateBudgetExceeded),
 		size: &execution.NoDataRecordSize{
-			Record: execution.NoDataRecordNext, Bytes: 537383, Limit: 524288,
+			Record: execution.NoDataRecordGroups, Groups: 120000, Limit: 100000,
 		},
 	}
 	coordinator, observed := noDataRefusalFixture(store)
@@ -119,8 +119,8 @@ func TestARefusedNoDataMemoryIsReportedRatherThanFailingTheSlot(t *testing.T) {
 	// whether one object is a little over the bound or many times it, and the
 	// two are different situations with different remedies.
 	want := observability.NoDataMemoryRefusalFacts{
-		Reason: contract.ReasonStateBudgetExceeded, Record: string(execution.NoDataRecordNext),
-		Bytes: 537383, Limit: 524288,
+		Reason: contract.ReasonStateBudgetExceeded, Record: string(execution.NoDataRecordGroups),
+		Groups: 120000, Limit: 100000,
 	}
 	if *facts != want {
 		t.Fatalf("refusal facts = %+v, want %+v", *facts, want)

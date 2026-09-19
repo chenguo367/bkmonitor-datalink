@@ -2012,10 +2012,9 @@ function objectRow(anomaly) {
   // recovered: nothing reports a successful write yet.
   if (anomaly.no_data_memory) {
     var memory = anomaly.no_data_memory;
-    var measured = memory.bytes || memory.limit
-      ? '，量的是' + (memory.record === 'STORED' ? '已存记录' : memory.record === 'NEXT' ? '本轮要写的记录' : memory.record || '记录')
-        + ' ' + (memory.bytes || 0) + ' 字节，上限 ' + (memory.limit || 0)
-        + (memory.limit && memory.bytes > memory.limit ? '（超 ' + Math.round((memory.bytes / memory.limit - 1) * 100) + '%）' : '')
+    var measured = memory.groups || memory.limit
+      ? '，这份记忆里有 ' + (memory.groups || 0) + ' 个组，上限 ' + (memory.limit || 0)
+        + (memory.limit && memory.groups > memory.limit ? '（超 ' + Math.round((memory.groups / memory.limit - 1) * 100) + '%）' : '')
       : '';
     line('无数据记忆写不进去', (memory.reason || '（存储没给原因）') + measured
       + '；自 ' + momentLabel(memory.first_at) + ' 起被拒 ' + (memory.refusals || 0) + ' 轮，最近 ' + momentLabel(memory.last_at)

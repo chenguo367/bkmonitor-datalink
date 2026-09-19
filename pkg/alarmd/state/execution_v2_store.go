@@ -46,6 +46,13 @@ type ExecutionStoreOptions struct {
 	Router          StorageRouter
 	MaxValueBytes   int
 	MaxItemsPerCall int
+	// MaxNoDataGroups bounds how many groups one Plan's no-data memory may
+	// hold. It is a guard against an expected set that has run away, not a
+	// working limit: the memory is stored one field per group and has no size
+	// ceiling, so this is an order of magnitude beyond what any Plan reaches.
+	// Zero takes DefaultMaxNoDataGroups rather than meaning no bound, because
+	// an unset field must not be the way a guard is removed.
+	MaxNoDataGroups int
 	// MinTTL, MaxTTL and RestartMargin bound the write TTL the store derives
 	// per apply request from that request's Plan retention. MaxTTL is the
 	// ceiling a derived TTL may not exceed, not the value keys are written at.
@@ -89,11 +96,22 @@ type gapEnvelope struct {
 	Scopes           []execution.GapScopeState      `json:"scopes,omitempty"`
 }
 
+// DefaultMaxNoDataGroups is the group guard a store takes when none is given.
+//
+// It is derived from what the container can hold rather than from what a Plan
+// is expected to have: the largest memory seen in production is a few thousand
+// groups, and this is two orders of magnitude above it, which is what makes it
+// a guard rather than something a Plan can reach by growing normally.
+const DefaultMaxNoDataGroups = 100000
+
 func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 	if options.Prefix == "" || options.Router == nil || options.MaxValueBytes <= 0 ||
 		options.MaxItemsPerCall <= 0 || options.MinTTL <= 0 || options.MaxTTL < options.MinTTL ||
-		options.RestartMargin < 0 {
+		options.RestartMargin < 0 || options.MaxNoDataGroups < 0 {
 		return nil, fmt.Errorf("state: invalid execution store options")
+	}
+	if options.MaxNoDataGroups == 0 {
+		options.MaxNoDataGroups = DefaultMaxNoDataGroups
 	}
 	return &ExecutionStore{options: options, witnesses: newRuntimeWitnessCache(), renewals: newRenewalGate()}, nil
 }

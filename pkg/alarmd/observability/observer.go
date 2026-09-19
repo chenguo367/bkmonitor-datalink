@@ -423,11 +423,13 @@ type NoDataMemoryRefusalFacts struct {
 	// Reason is the store's reason code, so a refusal about size and one about
 	// a corrupt record are told apart before anyone reads the numbers.
 	Reason string
-	// Record, Bytes and Limit are set only by a size refusal. Record says
-	// which record was measured: the one already stored, or the one this round
-	// would have written.
+	// Record, Groups and Limit are set only by a bound refusal. Record says
+	// what was measured, and today the one bound left on a memory is how many
+	// groups it holds: a memory held one field per group has no size a write
+	// can exceed, so the byte measurement that used to be here is gone rather
+	// than kept as a field nothing fills.
 	Record string
-	Bytes  int
+	Groups int
 	Limit  int
 }
 

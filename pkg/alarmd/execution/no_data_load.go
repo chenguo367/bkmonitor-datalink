@@ -78,25 +78,53 @@ type NoDataApplyItemResult struct {
 	// of the two records was measured -- and those are different situations
 	// with different remedies.
 	Size *NoDataRecordSize
+	// Conflict is set only by CONFLICT, and says which comparison refused.
+	// Without it every conflict reads the same, and two of them are not: a
+	// revision that moved is somebody else's write landing first, while one
+	// statement meeting another of its own version is two writers describing
+	// the same round differently, which no retry resolves on its own.
+	Conflict *NoDataConflictFacts
+}
+
+// NoDataConflictFacts names the comparison that refused a write and the two
+// statements it compared.
+type NoDataConflictFacts struct {
+	// Kind is the store-wide conflict vocabulary, not a second one. The same
+	// phenomenon in the runtime state store already has these names, and a
+	// no-data conflict that spelled them differently would make one question
+	// need two queries.
+	Kind StateVersionConflictKind
+	// Persisted and Proposed are the memory digests either side of the
+	// comparison, set when the conflict is about what the two say rather than
+	// about which came first. A conflict that names no values is a conflict
+	// nobody can act on.
+	Persisted MutationDigest
+	Proposed  MutationDigest
 }
 
 // NoDataRecordKind names which record a size refusal measured.
 type NoDataRecordKind string
 
 const (
-	// NoDataRecordStored is the record already in the store, measured before
-	// it is decoded. A Plan can only reach this if the bound moved or another
-	// build wrote the record, because no write of this build exceeds it.
-	NoDataRecordStored NoDataRecordKind = "STORED"
-	// NoDataRecordNext is the record this round would write.
-	NoDataRecordNext NoDataRecordKind = "NEXT"
+	// NoDataRecordGroups is how many groups the memory this round would store
+	// holds, against the bound on that number. It is the only measurement an
+	// apply refusal carries.
+	//
+	// It replaced a byte bound rather than joining one. A byte bound belonged
+	// to a memory held in a single value, and it was reached by an ordinary
+	// Plan with enough groups - silently, at the moment absence was being
+	// detected, which is when each group's entry grows. One field per group has
+	// no such bound, so nothing this build writes can be refused for its size,
+	// and the shape that used to report it is gone rather than kept as a label
+	// nothing can produce.
+	NoDataRecordGroups NoDataRecordKind = "GROUPS"
 )
 
-// NoDataRecordSize is the measurement behind a size refusal: which record, how
-// many bytes it holds, and the bound it was measured against.
+// NoDataRecordSize is the measurement behind a bound refusal: what was
+// measured, the measurement, and the bound it was taken against.
 type NoDataRecordSize struct {
 	Record NoDataRecordKind
-	Bytes  int
+	Groups int
 	Limit  int
 }
 
@@ -117,8 +145,7 @@ type NoDataRefusal struct {
 // by hand beside code that can produce anything is the shape that reads as a
 // bound while not being one.
 var NoDataRefusals = []NoDataRefusal{
-	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordStored},
-	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordNext},
+	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordGroups},
 	{Reason: ReasonCode(contract.ReasonStateCorrupt)},
 	{Reason: ReasonCode(contract.ReasonBackendCapabilityMissing)},
 	{Reason: ReasonCode(contract.ReasonStateSchemaUnsupported)},
@@ -183,8 +210,14 @@ type NoDataMemorySnapshot struct {
 	SchemaVersion        NoDataMemorySchema
 	LastScheduleRevision PlanScheduleRevision
 	RosterVersion        string
-	Groups               []NoDataGroupMemory
-	ReasonCode           ReasonCode
+	// PresentAsOf is the round the record says the Plan last had data in. A v1
+	// record does not hold one and reads as zero, which is right rather than
+	// missing: every group in a v1 record carries its own last-seen time, so
+	// nothing in it was compressed against a round and nothing is lost. The
+	// first v2 write after reading one simply writes each group out in full.
+	PresentAsOf int64
+	Groups      []NoDataGroupMemory
+	ReasonCode  ReasonCode
 }
 
 type NoDataLoadResult struct {
@@ -203,7 +236,7 @@ func (result NoDataLoadResult) Find(identity PlanNoDataIdentity) (NoDataMemorySn
 func noDataSnapshotHasPayload(snapshot NoDataMemorySnapshot) bool {
 	return snapshot.MarkerRevision != 0 || snapshot.PersistedMutationDigest != "" ||
 		snapshot.PersistedApplyVersion != (ApplyVersion{}) || snapshot.LastScheduleRevision != "" ||
-		snapshot.RosterVersion != "" || len(snapshot.Groups) != 0
+		snapshot.RosterVersion != "" || snapshot.PresentAsOf != 0 || len(snapshot.Groups) != 0
 }
 
 func ValidateNoDataLoad(request NoDataLoadRequest, result NoDataLoadResult) error {
@@ -257,7 +290,27 @@ func validateNoDataSnapshot(item NoDataMemorySnapshot) error {
 		if item.RosterVersion == "" {
 			return errors.New("alarmd execution: found no-data memory requires the roster version it was decided against")
 		}
-		return validateNoDataGroups(item.Groups)
+		if item.PresentAsOf < 0 {
+			return errors.New("alarmd execution: found no-data memory has a negative present-as-of")
+		}
+		if err := validateNoDataGroups(item.Groups); err != nil {
+			return err
+		}
+		if item.SchemaVersion != NoDataMemorySchemaV2 {
+			return nil
+		}
+		// A v2 record stores a group with no absence as present, and present
+		// means exactly the round the header names. A decoded group that claims
+		// to have been seen later than the Plan last had data did not come out
+		// of that encoding, so the record was decoded wrong or written by
+		// something that does not hold the rule.
+		for _, group := range item.Groups {
+			if group.LastSeen > item.PresentAsOf {
+				return fmt.Errorf(
+					"alarmd execution: no-data group %q was last seen after the Plan last had data", group.GroupKey)
+			}
+		}
+		return nil
 	case NoDataMemoryUnreadable:
 		// The schema is the one fact kept, because it is what names the build
 		// that wrote the record. Everything else is refused: a payload in a
@@ -266,7 +319,14 @@ func validateNoDataSnapshot(item NoDataMemorySnapshot) error {
 		if noDataSnapshotHasPayload(item) {
 			return errors.New("alarmd execution: unreadable no-data memory carries a payload this build cannot read")
 		}
-		if NoDataMemoryReadable(item.SchemaVersion) {
+		// Schema zero is the second way a record is unreadable, and the two are
+		// deliberately one status. A record whose header is gone does not say
+		// what shape it is in, so this build cannot read it for the same reason
+		// it cannot read a newer one, and the right thing to do with it is the
+		// same: leave it exactly as it is and pause this Plan's no-data
+		// detection. Reading it anyway would take each group's last-seen time
+		// from a round nobody stated.
+		if item.SchemaVersion != 0 && NoDataMemoryReadable(item.SchemaVersion) {
 			return fmt.Errorf("alarmd execution: no-data memory schema %d is readable by this build and must not be "+
 				"reported unreadable", item.SchemaVersion)
 		}

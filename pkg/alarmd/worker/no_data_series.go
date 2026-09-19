@@ -392,7 +392,7 @@ func (coordinator *SlotExecutionCoordinator) observeNoDataMemoryRefusal(
 ) {
 	facts := observability.NoDataMemoryRefusalFacts{Reason: string(item.ReasonCode)}
 	if size := item.Size; size != nil {
-		facts.Record, facts.Bytes, facts.Limit = string(size.Record), size.Bytes, size.Limit
+		facts.Record, facts.Groups, facts.Limit = string(size.Record), size.Groups, size.Limit
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRefused,
