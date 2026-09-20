@@ -65,8 +65,12 @@ type Discovery interface {
 }
 
 // ObjectProbe says how many of a view's objects the Worker cannot read
-// from its catalog. Asked once per install, for the objects the install
-// brought: every object of a snapshot, the upserted ones of a delta.
+// from its catalog. Asked once per install about the whole installed
+// view, not only what the install brought: an object missing since the
+// snapshot stays missing through deltas that touch other Query Groups, and
+// a count taken over the upserts alone would read 0 the moment the next
+// unrelated publication arrived. The probe serves from the cache first, so
+// a whole view of held objects costs no round trip.
 type ObjectProbe interface {
 	MissingObjects(ctx context.Context, objects []execution.ObjectDigest, contexts []execution.OutputContextDigest) (int, error)
 }
@@ -81,11 +85,14 @@ type ClientIdentity struct {
 
 // ClientStats is the Worker's account of the stream for its metrics.
 type ClientStats struct {
-	Connected      bool
-	Leader         LeaderEndpoint
-	Installed      Version
-	InstalledAt    time.Time
+	Connected   bool
+	Leader      LeaderEndpoint
+	Installed   Version
+	InstalledAt time.Time
+	// ObjectsMissing is of the whole installed view, meaningful only when
+	// ObjectsProbed: a probe that failed leaves the count unknown, not 0.
 	ObjectsMissing int
+	ObjectsProbed  bool
 	// Counters since the process started. Installs is by kind: snapshot,
 	// delta, empty_delta.
 	Installs           map[string]uint64
@@ -365,13 +372,13 @@ func (client *Client) installSnapshot(ctx context.Context, chunks []*pb.Snapshot
 		client.countInstallFailure(FailureSnapshotInvalid)
 		client.observe(ctx, "install_refused", FailureSnapshotInvalid, err)
 		version := versionFromWire(chunks[0].Version)
-		_ = send(receiptMessage(client.identity.Incarnation, version, true, false, FailureSnapshotInvalid, 0))
+		_ = send(receiptMessage(client.identity.Incarnation, version, true, false, FailureSnapshotInvalid, 0, false))
 		client.requestSnapshot(send, FailureSnapshotInvalid)
 		return
 	}
-	missing := client.probeMissing(ctx, view.Entries)
-	client.install(ctx, view, missing, "snapshot")
-	_ = send(receiptMessage(client.identity.Incarnation, view.Version, true, true, "", missing))
+	missing, probed := client.probeMissing(ctx, view.Entries)
+	client.install(ctx, view, missing, probed, "snapshot")
+	_ = send(receiptMessage(client.identity.Incarnation, view.Version, true, true, "", missing, probed))
 }
 
 func (client *Client) installDelta(ctx context.Context, wire *pb.Delta, send func(*pb.WorkerMessage) error) {
@@ -394,22 +401,20 @@ func (client *Client) installDelta(ctx context.Context, wire *pb.Delta, send fun
 		}
 		client.countInstallFailure(reason)
 		client.observe(ctx, "install_refused", reason, err)
-		_ = send(receiptMessage(client.identity.Incarnation, delta.Target, true, false, reason, 0))
+		_ = send(receiptMessage(client.identity.Incarnation, delta.Target, true, false, reason, 0, false))
 		client.requestSnapshot(send, reason)
 		return
 	}
-	missing := client.probeMissing(ctx, delta.Upserts)
+	// The whole view is probed, not the upserts: what went missing since
+	// the last install -- an object evicted or expired under a Query Group
+	// this delta did not touch -- is found here or nowhere.
+	missing, probed := client.probeMissing(ctx, next.Entries)
 	kind := "delta"
 	if delta.Empty() {
-		// Nothing moved for this Worker: the objects it holds are the ones
-		// it held, and the count stands.
-		client.mu.Lock()
-		missing = client.stats.ObjectsMissing
-		client.mu.Unlock()
 		kind = "empty_delta"
 	}
-	client.install(ctx, next, missing, kind)
-	_ = send(receiptMessage(client.identity.Incarnation, next.Version, true, true, "", missing))
+	client.install(ctx, next, missing, probed, kind)
+	_ = send(receiptMessage(client.identity.Incarnation, next.Version, true, true, "", missing, probed))
 }
 
 func (client *Client) requestSnapshot(send func(*pb.WorkerMessage) error, reason string) {
@@ -425,11 +430,12 @@ func (client *Client) requestSnapshot(send func(*pb.WorkerMessage) error, reason
 }
 
 // probeMissing asks the catalog about the objects entries name. Without a
-// probe, or when the probe fails, the count is unknown and reported as 0
-// with the failure observed -- never invented.
-func (client *Client) probeMissing(ctx context.Context, entries []Entry) int {
+// probe, or when the probe fails, the count is unknown: false, with the
+// failure observed, and never 0 in its place. A view naming no objects is
+// probed trivially, 0 and true.
+func (client *Client) probeMissing(ctx context.Context, entries []Entry) (int, bool) {
 	if client.probe == nil {
-		return 0
+		return 0, false
 	}
 	var objects []execution.ObjectDigest
 	var contexts []execution.OutputContextDigest
@@ -443,25 +449,26 @@ func (client *Client) probeMissing(ctx context.Context, entries []Entry) int {
 		}
 	}
 	if len(objects) == 0 && len(contexts) == 0 {
-		return 0
+		return 0, true
 	}
 	missing, err := client.probe.MissingObjects(ctx, objects, contexts)
 	if err != nil {
 		client.observe(ctx, "object_probe_failed", "", err)
-		return 0
+		return 0, false
 	}
-	return missing
+	return missing, true
 }
 
 // install swaps the view in atomically and records the install.
-func (client *Client) install(ctx context.Context, view View, missing int, kind string) {
+func (client *Client) install(ctx context.Context, view View, missing int, probed bool, kind string) {
 	copied := view
 	client.installed.Store(&copied)
 	client.mu.Lock()
-	client.stats.Installed, client.stats.InstalledAt, client.stats.ObjectsMissing = view.Version, client.now(), missing
+	client.stats.Installed, client.stats.InstalledAt = view.Version, client.now()
+	client.stats.ObjectsMissing, client.stats.ObjectsProbed = missing, probed
 	client.stats.Installs[kind]++
 	client.mu.Unlock()
-	client.observeInstall(ctx, view, missing)
+	client.observeInstall(ctx, view, missing, probed)
 }
 
 func (client *Client) countInstallFailure(reason string) {
@@ -470,10 +477,10 @@ func (client *Client) countInstallFailure(reason string) {
 	client.mu.Unlock()
 }
 
-func receiptMessage(incarnation string, version Version, acked, installed bool, failure string, missing int) *pb.WorkerMessage {
+func receiptMessage(incarnation string, version Version, acked, installed bool, failure string, missing int, probed bool) *pb.WorkerMessage {
 	return &pb.WorkerMessage{Body: &pb.WorkerMessage_Receipt{Receipt: ReceiptToWire(Receipt{
 		Receiver: Receiver{Incarnation: incarnation}, Version: version, Acked: acked, Installed: installed,
-		Failure: failure, ObjectsMissing: missing,
+		Failure: failure, ObjectsMissing: missing, ObjectsProbed: probed,
 	})}}
 }
 
@@ -490,10 +497,14 @@ func (client *Client) observe(ctx context.Context, event, reason string, err err
 	})
 }
 
-func (client *Client) observeInstall(ctx context.Context, view View, missing int) {
+func (client *Client) observeInstall(ctx context.Context, view View, missing int, probed bool) {
+	reason := ""
+	if !probed {
+		reason = "OBJECTS_NOT_PROBED"
+	}
 	client.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageViewInstalled, Result: observability.ResultSuccess,
 		ViewStream: &observability.ViewStreamFacts{Event: "installed", WorkerID: client.identity.WorkerID, Incarnation: client.identity.Incarnation,
-			ControlEpoch: view.Version.ControlEpoch, Revision: view.Version.Revision, Affected: len(view.Entries), ObjectsMissing: missing},
+			ControlEpoch: view.Version.ControlEpoch, Revision: view.Version.Revision, Affected: len(view.Entries), ObjectsMissing: missing, Reason: reason},
 	})
 }

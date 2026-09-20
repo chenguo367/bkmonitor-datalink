@@ -28,7 +28,7 @@ func viewStreamCounts(stats viewstream.Stats) metric.ViewStreamCounts {
 func viewClientCounts(stats viewstream.ClientStats) metric.ViewClientCounts {
 	return metric.ViewClientCounts{
 		Connected: stats.Connected, InstalledRevision: stats.Installed.Revision, InstalledEpoch: stats.Installed.ControlEpoch,
-		ObjectsMissing: stats.ObjectsMissing, Installs: stats.Installs, InstallFailures: stats.InstallFailures,
+		ObjectsMissing: stats.ObjectsMissing, ObjectsProbed: stats.ObjectsProbed, Installs: stats.Installs, InstallFailures: stats.InstallFailures,
 		SnapshotsRequested: stats.SnapshotsRequested, Refusals: stats.Refusals, Connections: stats.Connections,
 		DiscoveryMisses: stats.DiscoveryMisses,
 	}

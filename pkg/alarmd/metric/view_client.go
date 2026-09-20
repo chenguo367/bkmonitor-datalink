@@ -6,6 +6,7 @@
 package metric
 
 import (
+	"math"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -20,13 +21,16 @@ import (
 type ViewClientCounts struct {
 	Connected                         bool
 	InstalledRevision, InstalledEpoch uint64
-	ObjectsMissing                    int
-	Installs                          map[string]uint64
-	InstallFailures                   map[string]uint64
-	SnapshotsRequested                uint64
-	Refusals                          map[string]uint64
-	Connections                       uint64
-	DiscoveryMisses                   uint64
+	// ObjectsMissing is read only when ObjectsProbed; unprobed, the gauge
+	// is NaN, which is what "unknown" is on a gauge, and never 0.
+	ObjectsMissing     int
+	ObjectsProbed      bool
+	Installs           map[string]uint64
+	InstallFailures    map[string]uint64
+	SnapshotsRequested uint64
+	Refusals           map[string]uint64
+	Connections        uint64
+	DiscoveryMisses    uint64
 }
 
 // viewClientInstallFailures and viewClientRefusals are the closed label
@@ -64,9 +68,10 @@ func newViewClientCollector() *viewClientCollector {
 				"behind has view_install_total{result} saying why.", nil, nil),
 		objectsMissing: prometheus.NewDesc(name("view_objects_missing"),
 			"Objects the installed view names that this Worker can neither serve from its cache nor find in the "+
-				"catalog, as of the last install. A gauge of the current view, not a running count: it answers "+
-				"whether the content is there now. Anything above 0 is content the view promises and the Worker "+
-				"could not execute.", nil, nil),
+				"catalog, as of the last install, counted over the whole installed view every time. A gauge of the "+
+				"current view, not a running count: it answers whether the content is there now. Anything above 0 "+
+				"is content the view promises and the Worker could not execute. NaN when the last install could "+
+				"not probe the catalog: unknown is not 0.", nil, nil),
 		installs: prometheus.NewDesc(name("view_install_total"),
 			"Views this Worker installed, by kind: snapshot, delta (something changed for this Worker), empty_delta "+
 				"(the revision moved and nothing changed for this Worker). Their sum is the installs; failures are "+
@@ -121,7 +126,11 @@ func (c *viewClientCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	ch <- prometheus.MustNewConstMetric(c.connected, prometheus.GaugeValue, connected)
 	ch <- prometheus.MustNewConstMetric(c.installed, prometheus.GaugeValue, float64(counts.InstalledRevision))
-	ch <- prometheus.MustNewConstMetric(c.objectsMissing, prometheus.GaugeValue, float64(counts.ObjectsMissing))
+	objectsMissing := math.NaN()
+	if counts.ObjectsProbed {
+		objectsMissing = float64(counts.ObjectsMissing)
+	}
+	ch <- prometheus.MustNewConstMetric(c.objectsMissing, prometheus.GaugeValue, objectsMissing)
 	ch <- prometheus.MustNewConstMetric(c.snapshots, prometheus.CounterValue, float64(counts.SnapshotsRequested))
 	ch <- prometheus.MustNewConstMetric(c.connections, prometheus.CounterValue, float64(counts.Connections))
 	ch <- prometheus.MustNewConstMetric(c.discoveryMisses, prometheus.CounterValue, float64(counts.DiscoveryMisses))

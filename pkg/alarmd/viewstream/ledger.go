@@ -24,9 +24,11 @@ type Receiver struct {
 // but the ledger does not infer one from another: a receipt that asserts
 // switched without installed does not count as installed, and the Worker
 // resends the complete facts. Failure is why a stage was not reached, in
-// the Worker's bounded words; ObjectsMissing is how many of the view's
-// objects the Worker could not read when it installed, which is a fact of
-// the installed view and not a failure of installation.
+// the Worker's bounded words; ObjectsMissing is how many of the whole
+// installed view's objects the Worker could not read when it installed,
+// which is a fact of the installed view and not a failure of installation.
+// It means nothing unless ObjectsProbed: a Worker whose probe failed knows
+// nothing about its objects and does not say 0.
 type Receipt struct {
 	Receiver       Receiver
 	Version        Version
@@ -35,6 +37,7 @@ type Receipt struct {
 	Switched       bool
 	Failure        string
 	ObjectsMissing int
+	ObjectsProbed  bool
 }
 
 // Counts are the four numbers of one version, with the receivers the
@@ -85,6 +88,7 @@ type receiverState struct {
 	sent, acked, installed, switched bool
 	failure                          string
 	objectsMissing                   int
+	objectsProbed                    bool
 }
 
 type versionLedger struct {
@@ -250,7 +254,7 @@ func (ledger *Ledger) Record(receipt Receipt) Recorded {
 		state.failure = receipt.Failure
 	}
 	if receipt.Installed {
-		state.objectsMissing = receipt.ObjectsMissing
+		state.objectsMissing, state.objectsProbed = receipt.ObjectsMissing, receipt.ObjectsProbed
 	}
 	recorded := Recorded{Attributed: true, Version: entry.version, Expected: len(entry.receivers)}
 	if entry.installedByAllAt.IsZero() {
@@ -309,7 +313,8 @@ func (ledger *Ledger) Lagging(stage string) []LaggingReceiver {
 		if reached {
 			continue
 		}
-		lagging = append(lagging, LaggingReceiver{WorkerID: worker, Incarnation: state.incarnation, Failure: state.failure, ObjectsMissing: state.objectsMissing})
+		lagging = append(lagging, LaggingReceiver{WorkerID: worker, Incarnation: state.incarnation, Failure: state.failure,
+			ObjectsMissing: state.objectsMissing, ObjectsProbed: state.objectsProbed})
 	}
 	sort.Slice(lagging, func(left, right int) bool { return lagging[left].WorkerID < lagging[right].WorkerID })
 	return lagging
@@ -318,10 +323,13 @@ func (ledger *Ledger) Lagging(stage string) []LaggingReceiver {
 // LaggingReceiver is one Worker short of a stage. Connected is filled by
 // the server from its session table: a lagging Worker with no stream is a
 // Worker that is gone or cannot reach the Leader, not one that is slow.
+// ObjectsMissing is read only when ObjectsProbed; a page renders the pair
+// as a number or as unknown, never 0 for unknown.
 type LaggingReceiver struct {
 	WorkerID       string
 	Incarnation    string
 	Failure        string
 	ObjectsMissing int
+	ObjectsProbed  bool
 	Connected      bool
 }

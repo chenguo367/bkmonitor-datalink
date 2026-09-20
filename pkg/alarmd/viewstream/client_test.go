@@ -45,19 +45,35 @@ func (discovery *scriptedDiscovery) set(endpoint string, found bool) {
 	discovery.leader, discovery.found = viewstream.LeaderEndpoint{WorkerID: "leader", ControlEpoch: 7, Endpoint: endpoint}, found
 }
 
-// countingProbe reports a fixed number missing and remembers what it was
-// asked about.
+// countingProbe answers from a set of digests it holds to be missing --
+// the count is derived from what it is asked, as the catalog's would be --
+// and remembers what it was asked about. An error set makes it fail.
 type countingProbe struct {
 	mu      sync.Mutex
-	missing int
+	missing map[string]struct{}
+	err     error
 	asked   [][]execution.ObjectDigest
 }
 
-func (probe *countingProbe) MissingObjects(_ context.Context, objects []execution.ObjectDigest, _ []execution.OutputContextDigest) (int, error) {
+func (probe *countingProbe) MissingObjects(_ context.Context, objects []execution.ObjectDigest, contexts []execution.OutputContextDigest) (int, error) {
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
 	probe.asked = append(probe.asked, append([]execution.ObjectDigest(nil), objects...))
-	return probe.missing, nil
+	if probe.err != nil {
+		return 0, probe.err
+	}
+	count := 0
+	for _, digest := range objects {
+		if _, gone := probe.missing[string(digest)]; gone {
+			count++
+		}
+	}
+	for _, digest := range contexts {
+		if _, gone := probe.missing[string(digest)]; gone {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // bufconnDialer dials whichever listener the endpoint names, so a test can
@@ -132,9 +148,11 @@ func startClient(t *testing.T, discovery *scriptedDiscovery, probe viewstream.Ob
 // The Worker finds the Leader, installs the snapshot it is sent and
 // reports it; a publication that moves its projection arrives as a delta
 // and is installed on top; one that does not arrives as an empty delta and
-// is installed by receipt with the object count standing; the Leader's
-// ledger counts each install; the probe is asked about exactly the objects
-// each install brought.
+// is installed by receipt; the Leader's ledger counts each install. The
+// objects missing are counted over the whole installed view at every
+// install: two missing since the snapshot stay two through a delta that
+// touches another Query Group, and a probe that fails reports unknown,
+// not 0.
 func TestTheWorkerInstallsWhatTheLeaderSendsAndReportsIt(t *testing.T) {
 	harness := startServer(t)
 	ctx := context.Background()
@@ -150,7 +168,8 @@ func TestTheWorkerInstallsWhatTheLeaderSendsAndReportsIt(t *testing.T) {
 	dialer.serveOn(t, "leader-a", harness.server)
 	discovery := &scriptedDiscovery{}
 	discovery.set("leader-a", true)
-	probe := &countingProbe{missing: 2}
+	// qg-2's object and its context are missing from the catalog.
+	probe := &countingProbe{missing: map[string]struct{}{"obj-2": {}, "ctx-s2": {}}}
 	observer := &sessionObserver{}
 	client, _ := startClient(t, discovery, probe, dialer, observer)
 
@@ -162,7 +181,7 @@ func TestTheWorkerInstallsWhatTheLeaderSendsAndReportsIt(t *testing.T) {
 		return harness.server.Stats().Counts.Installed == 1
 	})
 	stats := client.Stats()
-	if !stats.Connected || stats.Leader.Endpoint != "leader-a" || stats.Installs["snapshot"] != 1 || stats.ObjectsMissing != 2 || stats.Installed.Revision != 1 {
+	if !stats.Connected || stats.Leader.Endpoint != "leader-a" || stats.Installs["snapshot"] != 1 || stats.ObjectsMissing != 2 || !stats.ObjectsProbed || stats.Installed.Revision != 1 {
 		t.Fatalf("client stats after the snapshot = %+v", stats)
 	}
 	probe.mu.Lock()
@@ -172,14 +191,18 @@ func TestTheWorkerInstallsWhatTheLeaderSendsAndReportsIt(t *testing.T) {
 	if asked != 1 || len(firstAsk) != 2 {
 		t.Fatalf("probe asked %d times, first about %v; want once about the snapshot's two objects", asked, firstAsk)
 	}
+	eventually(t, "the Leader holds the count", func() bool {
+		for _, lagging := range harness.server.Stats().Lagging {
+			_ = lagging
+		}
+		return harness.server.Stats().Counts.Installed == 1
+	})
 
-	// w1's content moves: a delta with one upsert; the probe is asked about
-	// that one object; the Leader counts revision 2 installed.
+	// w1's other Query Group moves: a delta with one upsert. The probe is
+	// asked about the whole view again, and qg-2's two objects are still
+	// missing: a count over the upsert alone would have read 0 here.
 	second := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w1", "qg-3": "w2"},
 		map[string]viewstream.Content{"qg-1": content("obj-1b", "s1"), "qg-2": content("obj-2", "s2"), "qg-3": content("obj-3", "s3")})
-	probe.mu.Lock()
-	probe.missing = 0
-	probe.mu.Unlock()
 	if _, err := harness.server.Publish(ctx, second); err != nil {
 		t.Fatal(err)
 	}
@@ -188,21 +211,28 @@ func TestTheWorkerInstallsWhatTheLeaderSendsAndReportsIt(t *testing.T) {
 		return ok && view.Version.Revision == 2
 	})
 	view, _ := client.Installed()
-	if view.Entries[0].Content.ObjectDigest != "obj-1b" || len(view.Entries) != 2 || client.Stats().ObjectsMissing != 0 {
-		t.Fatalf("view after the delta = %+v stats=%+v", view, client.Stats())
+	if view.Entries[0].Content.ObjectDigest != "obj-1b" || len(view.Entries) != 2 {
+		t.Fatalf("view after the delta = %+v", view)
+	}
+	if stats := client.Stats(); stats.ObjectsMissing != 2 || !stats.ObjectsProbed {
+		t.Fatalf("objects missing after a delta on another Query Group = %+v, want the two still missing", stats)
 	}
 	probe.mu.Lock()
 	lastAsk := probe.asked[len(probe.asked)-1]
 	probe.mu.Unlock()
-	if len(lastAsk) != 1 || lastAsk[0] != "obj-1b" {
-		t.Fatalf("probe asked about %v for the delta, want the one upserted object", lastAsk)
+	if len(lastAsk) != 2 {
+		t.Fatalf("probe asked about %v for the delta, want the whole view's two objects", lastAsk)
 	}
 	eventually(t, "revision 2 installed on the Leader", func() bool {
 		stats := harness.server.Stats()
 		return stats.Revision == 2 && stats.Counts.Installed == 1
 	})
-	// Only w2 moves: w1 gets an empty delta and installs revision 3 by
-	// receipt, its object count standing.
+	// The missing objects arrive in the catalog; only w2 moves: w1 gets an
+	// empty delta, installs revision 3 by receipt, and the probe over the
+	// whole view now finds nothing missing.
+	probe.mu.Lock()
+	probe.missing = map[string]struct{}{}
+	probe.mu.Unlock()
 	third := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w1", "qg-3": "w2"},
 		map[string]viewstream.Content{"qg-1": content("obj-1b", "s1"), "qg-2": content("obj-2", "s2"), "qg-3": content("obj-3b", "s3")})
 	if _, err := harness.server.Publish(ctx, third); err != nil {
@@ -212,10 +242,28 @@ func TestTheWorkerInstallsWhatTheLeaderSendsAndReportsIt(t *testing.T) {
 		view, ok := client.Installed()
 		return ok && view.Version.Revision == 3
 	})
-	if stats := client.Stats(); stats.Installs["snapshot"] != 1 || stats.Installs["delta"] != 1 || stats.Installs["empty_delta"] != 1 || stats.Installed.Revision != 3 || len(stats.InstallFailures) != 0 || stats.SnapshotsRequested != 0 {
+	if stats := client.Stats(); stats.Installs["snapshot"] != 1 || stats.Installs["delta"] != 1 || stats.Installs["empty_delta"] != 1 || stats.Installed.Revision != 3 ||
+		len(stats.InstallFailures) != 0 || stats.SnapshotsRequested != 0 || stats.ObjectsMissing != 0 || !stats.ObjectsProbed {
 		t.Fatalf("client stats after three installs = %+v", stats)
 	}
-	if observer.count("installed", "") != 3 || observer.count("connected", "") != 1 {
+	// The probe fails on the next install: the count is unknown, reported
+	// as not probed, and the last known number is not carried forward.
+	probe.mu.Lock()
+	probe.err = errors.New("catalog unreachable")
+	probe.mu.Unlock()
+	fourth := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w1", "qg-3": "w2"},
+		map[string]viewstream.Content{"qg-1": content("obj-1c", "s1"), "qg-2": content("obj-2", "s2"), "qg-3": content("obj-3b", "s3")})
+	if _, err := harness.server.Publish(ctx, fourth); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "revision 4 installed with the probe failing", func() bool {
+		view, ok := client.Installed()
+		return ok && view.Version.Revision == 4
+	})
+	if stats := client.Stats(); stats.ObjectsProbed || stats.ObjectsMissing != 0 {
+		t.Fatalf("stats with a failing probe = %+v, want not probed", stats)
+	}
+	if observer.count("installed", "OBJECTS_NOT_PROBED") != 1 || observer.count("object_probe_failed", "") != 1 || observer.count("installed", "") != 4 || observer.count("connected", "") != 1 {
 		t.Fatalf("events = %+v", observer.events)
 	}
 }

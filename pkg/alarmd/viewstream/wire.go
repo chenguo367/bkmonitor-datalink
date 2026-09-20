@@ -222,7 +222,7 @@ func ReceiptToWire(receipt Receipt) *pb.Receipt {
 	return &pb.Receipt{
 		Incarnation: receipt.Receiver.Incarnation, Version: versionToWire(receipt.Version),
 		Acked: receipt.Acked, Installed: receipt.Installed, Switched: receipt.Switched,
-		Failure: receipt.Failure, ObjectsMissing: uint32(receipt.ObjectsMissing),
+		Failure: receipt.Failure, ObjectsMissing: uint32(receipt.ObjectsMissing), ObjectsProbed: receipt.ObjectsProbed,
 	}
 }
 
@@ -233,6 +233,6 @@ func ReceiptFromWire(workerID string, wire *pb.Receipt) (Receipt, error) {
 	return Receipt{
 		Receiver: Receiver{WorkerID: workerID, Incarnation: wire.Incarnation}, Version: versionFromWire(wire.Version),
 		Acked: wire.Acked, Installed: wire.Installed, Switched: wire.Switched,
-		Failure: wire.Failure, ObjectsMissing: int(wire.ObjectsMissing),
+		Failure: wire.Failure, ObjectsMissing: int(wire.ObjectsMissing), ObjectsProbed: wire.ObjectsProbed,
 	}, nil
 }
