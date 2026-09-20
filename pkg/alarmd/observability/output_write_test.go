@@ -72,11 +72,18 @@ func TestTheEventAckedLineSaysHowManyMessagesLeft(t *testing.T) {
 // for a release with only its stage and result, and "swept" with nothing
 // beside it could not be told from "swept nothing".
 func TestTheSweepLineCarriesItsNumbers(t *testing.T) {
+	// Five different numbers, so each key is pinned to its own field; then a
+	// sweep whose last three are zero, so the zeros are pinned as present.
 	event := renderObservation(t, Observation{Component: ComponentOwnership, Stage: StageAssignmentSwept, Result: ResultSuccess,
-		Operation: OperationWrite, AssignmentSweep: &AssignmentSweepFacts{Scanned: 2407, Retired: 6, Reclaimed: 6}})
-	if event["assignment_sweep_scanned"] != 2407.0 || event["assignment_sweep_retired"] != 6.0 || event["assignment_sweep_reclaimed"] != 6.0 ||
-		event["assignment_sweep_held_by_lease"] != 0.0 || event["assignment_sweep_changed"] != 0.0 {
-		t.Fatalf("sweep line = %v, want the five numbers with their zeros", event)
+		Operation: OperationWrite, AssignmentSweep: &AssignmentSweepFacts{Scanned: 2407, Retired: 6, Reclaimed: 3, HeldByLease: 2, Changed: 1}})
+	if event["assignment_sweep_scanned"] != 2407.0 || event["assignment_sweep_retired"] != 6.0 || event["assignment_sweep_reclaimed"] != 3.0 ||
+		event["assignment_sweep_held_by_lease"] != 2.0 || event["assignment_sweep_changed"] != 1.0 {
+		t.Fatalf("sweep line = %v, want the five numbers each under its own key", event)
+	}
+	quiet := renderObservation(t, Observation{Component: ComponentOwnership, Stage: StageAssignmentSwept, Result: ResultSuccess,
+		Operation: OperationWrite, AssignmentSweep: &AssignmentSweepFacts{Scanned: 2401}})
+	if quiet["assignment_sweep_retired"] != 0.0 || quiet["assignment_sweep_reclaimed"] != 0.0 || quiet["assignment_sweep_held_by_lease"] != 0.0 || quiet["assignment_sweep_changed"] != 0.0 {
+		t.Fatalf("sweep line that found nothing = %v, want its zeros present", quiet)
 	}
 	bare := renderObservation(t, Observation{Component: ComponentOwnership, Stage: StageAssignmentSwept, Result: ResultSuccess, Operation: OperationWrite})
 	if _, present := bare["assignment_sweep_scanned"]; present {
