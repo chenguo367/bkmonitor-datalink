@@ -118,6 +118,19 @@ func TestRecoveryEnvelopeGoesOnlyToAnOpenAlert(t *testing.T) {
 			set:      func(t *testing.T) *openAlertSetFixture { return &openAlertSetFixture{} },
 			wantGate: RecoveryGateV2{Held: true, Cause: RecoveryHeldNoOpenAlert, OpenAlertGate: OpenAlertGateHeldNoOpenAlert},
 			envelope: false, asked: 1,
+		}, {
+			name: "a historical empty-format Plan with revision uses the consumer recovery gate",
+			plan: func(t *testing.T) *strategy.CompiledPlan {
+				return compilePlanV2WithOutput(t, recovered, func(p *contract.EvaluationPlanV2) {
+					p.WireFormat = ""
+					p.StrategyRef.SnapshotRevision = 7
+					p.StrategyIR.StrategyRef.SnapshotRevision = 7
+					p.OutputIdentity = identity
+				})
+			},
+			set:      func(t *testing.T) *openAlertSetFixture { return &openAlertSetFixture{} },
+			wantGate: RecoveryGateV2{Held: true, Cause: RecoveryHeldNoOpenAlert, OpenAlertGate: OpenAlertGateHeldNoOpenAlert},
+			envelope: false, asked: 1,
 		},
 	}
 	for _, test := range tests {
