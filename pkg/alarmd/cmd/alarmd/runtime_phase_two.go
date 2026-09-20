@@ -551,6 +551,25 @@ type phaseTwoScheduledRunner struct {
 	// late from a clock that crossed the boundary between the prediction and the
 	// verdict -- two situations the count of violations alone reports the same.
 	predictedHeldFor time.Duration
+	// place is the place in the queue this dispatch was given: the deadline it
+	// was ordered by, its sequence among equals and the cohort its turn-aways
+	// count under. It travels with the dispatch and comes back with the
+	// result, so a Slot that returns unfinished is requeued in the place it
+	// had rather than a new one. Empty until the Runner is first queued.
+	place phaseTwoQueuePlace
+}
+
+// phaseTwoQueuePlace is one Slot's standing in the queue, given when the
+// Slot is first offered a place and kept for as long as that Slot is the one
+// the Runner is due for. A Slot that came back deferred -- for readiness,
+// admission or backoff -- is the same work with the same deadline, and
+// giving it a fresh sequence would move it behind everything queued while it
+// was out; reading no deadline for it would rank it behind every Slot that
+// has one, which is where the short cohort's five-second Slot went.
+type phaseTwoQueuePlace struct {
+	deadline time.Time
+	sequence uint64
+	cohort   string
 }
 
 type phaseTwoScheduledResult struct {
@@ -1379,12 +1398,7 @@ func (dispatcher *phaseTwoRunnerDispatcher) fillQueues(runners []phaseTwoSchedul
 			scheduled.queuedAt = time.Now()
 		}
 		readyAt := scheduled.lifecycle.runner.NextReadyAt()
-		dispatcher.queueSequence++
-		queued := phaseTwoQueuedRunner{
-			scheduled: scheduled, readyAt: readyAt, deadline: scheduled.lifecycle.runner.NextDeadline(),
-			sequence: dispatcher.queueSequence,
-			cohort:   scheduler.ShortPeriodCohortForInterval(scheduled.lifecycle.runner.DueBound().IntervalSeconds),
-		}
+		queued := dispatcher.queueEntry(scheduled, readyAt)
 		recorder := dispatcher.bundle.dependencies.Recorder
 		// The recovery queue may not turn a Query Group away while it holds fewer
 		// entries than this Worker owns.
@@ -1774,8 +1788,40 @@ func (dispatcher *phaseTwoRunnerDispatcher) handleResult(
 	if len(dispatcher.delayed) >= dispatcher.bundle.dependencies.Config.PhaseTwo.Scheduler.RecoveryQueueCapacity {
 		return
 	}
-	dispatcher.delayed = append(dispatcher.delayed, phaseTwoQueuedRunner{scheduled: scheduled, readyAt: readyAt})
+	// The same entry the walk would build, not a bare one. This used to write
+	// only the Runner and its readiness, so a deferred Slot re-entered the
+	// recovery queue with no deadline, no sequence and no cohort: the order
+	// ranked it behind every Slot with a deadline, and a ten-second Slot with
+	// five seconds left waited behind the minute's Slots with fifty-five.
+	dispatcher.delayed = append(dispatcher.delayed, dispatcher.queueEntry(scheduled, readyAt))
 	dispatcher.queued[scheduled.queryGroup] = scheduled.lifecycle
+}
+
+// queueEntry is the one way a Runner becomes a queue entry, from the walk
+// and from a deferred return alike.
+//
+// The deadline is read from the Runner every time: it holds the frozen
+// Slot's deadline until that Slot completes, so an unfinished Slot reads the
+// same value it was queued with and a completed one reads the next Slot's.
+// That is also how the two are told apart. A Runner whose deadline is the
+// one its place was given for is still due for that Slot and keeps its
+// sequence and cohort; one whose deadline moved is being queued for a new
+// Slot and is given the next sequence, as any first queueing is. A Runner
+// with no deadline either time keeps its place: it ranks after every dated
+// entry regardless, and the tie-break is all a new sequence would change.
+func (dispatcher *phaseTwoRunnerDispatcher) queueEntry(scheduled phaseTwoScheduledRunner, readyAt time.Time) phaseTwoQueuedRunner {
+	deadline := scheduled.lifecycle.runner.NextDeadline()
+	if scheduled.place.sequence == 0 || !deadline.Equal(scheduled.place.deadline) {
+		dispatcher.queueSequence++
+		scheduled.place = phaseTwoQueuePlace{
+			deadline: deadline, sequence: dispatcher.queueSequence,
+			cohort: scheduler.ShortPeriodCohortForInterval(scheduled.lifecycle.runner.DueBound().IntervalSeconds),
+		}
+	}
+	return phaseTwoQueuedRunner{
+		scheduled: scheduled, readyAt: readyAt,
+		deadline: deadline, sequence: scheduled.place.sequence, cohort: scheduled.place.cohort,
+	}
 }
 
 // recordDueBound rewrites the index entry from the round that has just
