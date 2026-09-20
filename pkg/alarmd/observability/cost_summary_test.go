@@ -23,7 +23,25 @@ func costFixture() (*CostSummary, *time.Time, CostGroup) {
 }
 
 func costObservation(stage Stage) Observation {
-	return Observation{Stage: stage, Result: ResultSuccess, Duration: time.Millisecond, Trace: TraceFields{QueryGroupKey: "shared", EvaluationTime: 590}}
+	o := Observation{Stage: stage, Result: ResultSuccess, Duration: time.Millisecond, Trace: TraceFields{QueryGroupKey: "shared", EvaluationTime: 590}}
+	if stage == StageProgressCommitted {
+		o.ProgressCompletionKind = "FULL_COMPLETED"
+	}
+	return o
+}
+
+func TestCostSummaryCountsCommittedUnavailableButNotStageNameAlone(t *testing.T) {
+	c, now, _ := costFixture()
+	c.Observe(context.Background(), costObservation(StageSlotCompleted))
+	o := costObservation(StageProgressCommitted)
+	o.ProgressCompletionKind, o.Result = "COMPLETED_WITH_UNAVAILABLE", ResultDegraded
+	c.Observe(context.Background(), o)
+	o.ProgressCompletionKind, o.Result = "", ResultSuccess
+	c.Observe(context.Background(), o)
+	c.Publish(*now)
+	if got := costRow(t, c.Snapshot(), "query_group", CostPlanIdentity{}).Current.ProgressCommits; got != 1 {
+		t.Fatalf("committed work inferred from result instead of actual receipt: %d", got)
+	}
 }
 
 func costRow(t *testing.T, s CostSnapshot, scope string, identity CostPlanIdentity) CostContributor {

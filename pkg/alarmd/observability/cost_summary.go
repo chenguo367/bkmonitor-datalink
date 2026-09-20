@@ -333,7 +333,7 @@ func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
 			s.LagUnknown++
 		}
 	case StageProgressCommitted:
-		if o.Err == nil && o.Result == ResultSuccess {
+		if o.Err == nil && ValidProgressCompletionKind(o.ProgressCompletionKind) {
 			s.ProgressCommits++
 			s.LastProgressUnix = now.Unix()
 		}
