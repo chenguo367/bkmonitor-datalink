@@ -465,9 +465,21 @@ func TestTheWorkerWaitsOutDiscoveryAndConnectsWhenALeaderAppears(t *testing.T) {
 func TestTheWorkerCutsAStreamOnWhichTheLeaderAnswersNothing(t *testing.T) {
 	desired := desiredAt(publicationA, map[string]string{"qg-1": "w1"}, map[string]viewstream.Content{"qg-1": content("obj-1", "s1")})
 	snapshot := viewFrom(desired, "w1", 1)
+	// The snapshot is answered to the first Hello only: after the cut the
+	// Leader sends nothing, so the view the Worker holds afterwards is the
+	// one it kept, not one it was given again.
 	mute := &scriptedLeader{}
-	for _, chunk := range viewstream.SnapshotChunks(snapshot, 0) {
-		mute.onHello = append(mute.onHello, &pb.LeaderMessage{Body: &pb.LeaderMessage_Snapshot{Snapshot: chunk}})
+	served := false
+	mute.replies = func(message *pb.WorkerMessage) []*pb.LeaderMessage {
+		if message.GetHello() == nil || served {
+			return nil
+		}
+		served = true
+		var out []*pb.LeaderMessage
+		for _, chunk := range viewstream.SnapshotChunks(snapshot, 0) {
+			out = append(out, &pb.LeaderMessage{Body: &pb.LeaderMessage_Snapshot{Snapshot: chunk}})
+		}
+		return out
 	}
 	dialer := &bufconnDialer{}
 	dialer.serveOn(t, "mute", mute)
@@ -490,8 +502,12 @@ func TestTheWorkerCutsAStreamOnWhichTheLeaderAnswersNothing(t *testing.T) {
 		return observer.count("disconnected", viewstream.DisconnectLeaderSilent) >= 1
 	})
 	eventually(t, "the Worker connects again", func() bool { return client.Stats().Connections >= 2 })
-	if view, ok := client.Installed(); !ok || view.Version.Revision != 1 {
-		t.Fatalf("the installed view was lost across the cut: %+v ok=%t", view, ok)
+	// Kept, not re-given: the second Hello was answered with nothing, so a
+	// view still here is the one that survived the cut. Losing it on a cut
+	// would, once the hot path reads the view, turn every Query Group into
+	// "no content" at the moment the control plane is least healthy.
+	if view, ok := client.Installed(); !ok || view.Version.Revision != 1 || client.Stats().Installs["snapshot"] != 1 {
+		t.Fatalf("the installed view was lost across the cut: %+v ok=%t installs=%v", view, ok, client.Stats().Installs)
 	}
 	if mute.got("heartbeat") == 0 {
 		t.Fatal("no heartbeat was sent before the cut; the silence rule would then be about a stream that never spoke")

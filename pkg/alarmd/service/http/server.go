@@ -86,7 +86,12 @@ func (s *Server) SetAPI(handler http.Handler) {
 // stay unset, because any of them would cut a long-lived stream at the
 // deadline and the symptom would be "the stream drops for no reason". A
 // timeout added for the request/response routes has to leave the gRPC
-// route out.
+// route out. And the stream's client runs gRPC keepalive at thirty
+// seconds, which this listener tolerates only because grpc.Server.ServeHTTP
+// applies no keepalive enforcement policy; a native gRPC listener would
+// refuse that ping rate with too_many_pings under its default five-minute
+// MinTime and close every stream. Whoever moves the stream off this
+// listener sets the policy to match.
 func (s *Server) SetGRPC(handler http.Handler) {
 	s.grpcHandler.Store(&handler)
 }

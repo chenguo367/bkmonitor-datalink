@@ -253,8 +253,11 @@ func (ledger *Ledger) Record(receipt Receipt) Recorded {
 	if receipt.Failure != "" {
 		state.failure = receipt.Failure
 	}
-	if receipt.Installed {
-		state.objectsMissing, state.objectsProbed = receipt.ObjectsMissing, receipt.ObjectsProbed
+	// An installed receipt that probed the objects is the current count; one
+	// that did not -- a Hello standing in for a lost receipt -- says nothing
+	// about them and leaves a count already in hand where it is.
+	if receipt.Installed && receipt.ObjectsProbed {
+		state.objectsMissing, state.objectsProbed = receipt.ObjectsMissing, true
 	}
 	recorded := Recorded{Attributed: true, Version: entry.version, Expected: len(entry.receivers)}
 	if entry.installedByAllAt.IsZero() {
@@ -273,6 +276,40 @@ func (ledger *Ledger) countDigestMismatch() {
 	ledger.mu.Lock()
 	ledger.ignored.DigestMismatch++
 	ledger.mu.Unlock()
+}
+
+// ObjectsSummary is what the installed receivers of a version said about
+// their objects: how many receivers probed, how many could not, and the
+// missing objects summed over those that probed. Unprobed receivers add
+// nothing to the sum and are counted apart, so a sum of 0 over a fleet
+// that mostly could not probe is not read as a fleet with its objects.
+type ObjectsSummary struct {
+	Missing  int
+	Probed   int
+	Unprobed int
+}
+
+// Objects summarizes the object counts of a version's installed receivers.
+func (ledger *Ledger) Objects(version Key) (ObjectsSummary, bool) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	entry := ledger.find(version)
+	if entry == nil {
+		return ObjectsSummary{}, false
+	}
+	summary := ObjectsSummary{}
+	for _, state := range entry.receivers {
+		if !(state.sent && state.acked && state.installed) {
+			continue
+		}
+		if state.objectsProbed {
+			summary.Probed++
+			summary.Missing += state.objectsMissing
+		} else {
+			summary.Unprobed++
+		}
+	}
+	return summary, true
 }
 
 // Counts of a version the ledger still follows; false for any other.

@@ -69,9 +69,11 @@ type Stats struct {
 	ControlEpoch uint64
 	Revision     uint64
 	Sessions     int
-	// Current is the four numbers of the current version; Key its identity.
+	// Current is the four numbers of the current version; Key its identity;
+	// Objects what its installed receivers said about their objects.
 	Current Key
 	Counts  Counts
+	Objects ObjectsSummary
 	Ignored Ignored
 	// Lagging lists the Workers that have not installed the current version.
 	Lagging []LaggingReceiver
@@ -239,6 +241,7 @@ func (server *Server) Stats() Stats {
 	stats.Leading, stats.ControlEpoch, stats.Revision = true, server.publisher.epoch, server.publisher.Revision()
 	if key, counts, ok := server.publisher.ledger.Current(); ok {
 		stats.Current, stats.Counts = key, counts
+		stats.Objects, _ = server.publisher.ledger.Objects(key)
 		stats.Lagging = server.publisher.ledger.Lagging("installed")
 		for index := range stats.Lagging {
 			_, connected := server.sessions[stats.Lagging[index].WorkerID]
