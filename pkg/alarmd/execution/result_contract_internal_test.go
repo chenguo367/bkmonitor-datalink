@@ -94,8 +94,13 @@ func TestDescribeMissingGuardNamesTheFullButEmptyBinding(t *testing.T) {
 			Completeness: CompletenessUnavailable, Disposition: AccessUnavailable, ReasonCode: "QUERY_TIMEOUT"},
 	}}
 	got := describeMissingGuard(input, PlanEvaluationResult{Plan: plan, LevelOutcomes: []LevelOutcome{outcome}}, nil, nil, nil, outcome)
+	// The fold now reads the same definition of incomplete the advance gate
+	// does, so the line says which guard the round would propose for the
+	// empty dependency. It read "round fold none" while the fold looked at
+	// completeness alone, which is what production produced sixty-nine
+	// times in eighteen minutes.
 	for _, want := range []string{
-		"input full no", "round fold none",
+		"input full no", "round fold QUERY_EMPTY",
 		"inputs [level:PRIMARY:FULL/DATA/AVAILABLE level:ALGORITHM_DEPENDENCY:FULL/EMPTY/AVAILABLE] localized no",
 	} {
 		if !strings.Contains(got, want) {

@@ -30,11 +30,11 @@ import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 func RoundGapScopeReasons(bindings []NamedInputBinding, plan PlanIdentity) map[GapScope]ReasonCode {
 	members := make(map[GapScope][]string)
 	for _, binding := range bindings {
-		if binding.Consumer.Plan != plan || binding.Completeness == CompletenessFull {
+		if binding.Consumer.Plan != plan || !InputIncompleteForGuard(binding) {
 			continue
 		}
 		scope := GapScope{LevelID: binding.Consumer.LevelID, HasLevel: binding.Consumer.HasLevel}
-		members[scope] = append(members[scope], string(binding.ReasonCode))
+		members[scope] = append(members[scope], string(InputGuardReason(binding)))
 	}
 	reasons := make(map[GapScope]ReasonCode, len(members))
 	for scope, folded := range members {
@@ -46,6 +46,38 @@ func RoundGapScopeReasons(bindings []NamedInputBinding, plan PlanIdentity) map[G
 		reasons[scope] = ReasonCode(contract.FoldGapReason(folded))
 	}
 	return reasons
+}
+
+// InputIncompleteForGuard is the one definition of an input the round has to
+// guard against: the fold that names the guard and the worker that proposes it
+// both read this, so what one guards the other names.
+//
+// It used to be "not FULL", and the advance gate -- InputAllowsStateAdvance --
+// read more than that: FULL, carrying data, available, not localized. A Level
+// in the difference was frozen by the gate and invisible to the fold, so no
+// guard was ever proposed for it and its degraded outcome carried a local
+// reason no marker matched. The result contract refused that Level on every
+// round for as long as the input stayed that way, which for a dependency
+// query that returns no rows is indefinitely. The difference that occurs is
+// exactly that one: a dependency that completed and holds nothing. A PRIMARY
+// that completed and holds nothing is a Plan with no series to guard and is
+// decided elsewhere, so it is not here.
+func InputIncompleteForGuard(binding NamedInputBinding) bool {
+	if binding.Completeness != CompletenessFull {
+		return true
+	}
+	return binding.Role == InputRoleAlgorithmDependency && binding.DataState == DataStateEmpty &&
+		binding.Disposition == AccessAvailable
+}
+
+// InputGuardReason is the reason a guard for an incomplete input carries. An
+// input that did not complete says why itself; a dependency that completed
+// empty succeeded and has no reason of its own, so the guard says what it is.
+func InputGuardReason(binding NamedInputBinding) ReasonCode {
+	if binding.Completeness == CompletenessFull {
+		return ReasonCode(contract.ReasonQueryEmpty)
+	}
+	return binding.ReasonCode
 }
 
 // RoundGuardReasonForLevel is the reason the guard this round proposes will

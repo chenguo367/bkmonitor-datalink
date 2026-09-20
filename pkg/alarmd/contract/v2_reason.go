@@ -83,6 +83,7 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 
 	ReasonConfigDrift:      {ReasonConfigDrift, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryPartial:     {ReasonQueryPartial, ReasonClassCoverage, reasonQueryDomainsV2},
+	ReasonQueryEmpty:       {ReasonQueryEmpty, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryTimeout:     {ReasonQueryTimeout, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryUnavailable: {ReasonQueryUnavailable, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonReadinessBudgetInvalid: {

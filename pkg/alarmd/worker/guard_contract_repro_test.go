@@ -110,3 +110,67 @@ func TestGuardContractRealWorkerRepro(t *testing.T) {
 		t.Fatalf("state results = %+v, want none: a Level under this round's fold is frozen and writes no guard reason of its own", plan.StateResults)
 	}
 }
+
+// The other production shape, sixty-nine times in eighteen minutes on three
+// Query Groups: the PRIMARY has data and the algorithm dependency query
+// completed and returned no rows at all. The advance gate froze the Level on
+// it, and the fold -- reading completeness alone -- saw nothing incomplete,
+// so no guard was proposed and the frozen Level's UNKNOWN carried a local
+// reason no marker matched: "degraded Level outcome lacks an exact durable
+// guard", every round, for as long as the dependency stayed empty. One
+// definition of incomplete for the gate and the fold is what this pins: the
+// round proposes a Level marker for the empty dependency, the outcome names
+// it, and the two agree because they are the same fold.
+func TestAnEmptyDependencyIsGuardedLikeAnyOtherIncompleteInput(t *testing.T) {
+	header, batches := workerG4StreamFixture(t, strategy.DetectorKindSimpleRingRatio)
+	ports, eval, co := workerG4Coordinator(t)
+	completion := execution.QueryExecutionCompletion{AllRequiredCompleted: true}
+	streamed := make([]execution.SeriesExecutionBatch, 0, len(batches))
+	for _, b := range batches {
+		physical := execution.PhysicalQueryCompletion{
+			Ref: b.CompletionRef, PhysicalQuery: b.PhysicalQuery, QueryRevision: b.QueryRevision,
+			Completeness: execution.CompletenessFull, DataState: execution.DataStateData, Delivery: b.Delivery,
+		}
+		if b.Inputs[0].Role == execution.InputRoleAlgorithmDependency {
+			// Completed, and nothing came back: no streamed batch, an EMPTY
+			// completion. The session binds it FULL/EMPTY/AVAILABLE.
+			physical.DataState = execution.DataStateEmpty
+			physical.Delivery = execution.SeriesDelivery{}
+			completion.PhysicalQueries = append(completion.PhysicalQueries, physical)
+			continue
+		}
+		completion.PhysicalQueries = append(completion.PhysicalQueries, physical)
+		streamed = append(streamed, b)
+	}
+	completion.CompletionBindings = accessShapedCompletionBindings(t, header, completion.PhysicalQueries)
+	ports.executeOverride = streamExecution(header, streamed, completion)
+
+	result, err := co.Execute(context.Background(), workerSlotRequest(header.Contract))
+	if err != nil {
+		t.Fatalf("result=%+v error=%v evaluations=%+v: an empty dependency is refused by the result contract, "+
+			"which is the defect this pins", result, err, eval.results)
+	}
+	if len(eval.results) != 1 || len(eval.results[0].Plans) != 1 {
+		t.Fatalf("evaluations = %+v, want one Plan result", eval.results)
+	}
+	plan := eval.results[0].Plans[0]
+	if len(plan.LevelOutcomes) != 1 || plan.LevelOutcomes[0].Outcome != execution.LevelOutcomeUnknown {
+		t.Fatalf("outcomes = %+v, want one UNKNOWN", plan.LevelOutcomes)
+	}
+	outcome := plan.LevelOutcomes[0]
+	if want := execution.ReasonCode(contract.ReasonQueryEmpty); outcome.ReasonCode != want {
+		t.Fatalf("outcome reason = %q, want %q: the round's own cause, which is the guard that covers it",
+			outcome.ReasonCode, want)
+	}
+	if len(plan.GuardBeforeEvents) != 1 || len(plan.GuardBeforeEvents[0].Scopes) != 1 {
+		t.Fatalf("guard = %+v, want one scope proposed for the empty dependency", plan.GuardBeforeEvents)
+	}
+	scope := plan.GuardBeforeEvents[0].Scopes[0]
+	if scope.Scope != (execution.GapScope{HasLevel: true, LevelID: 5}) || scope.ReasonCode != outcome.ReasonCode {
+		t.Fatalf("guard scope = %+v, want the Level with the outcome's reason %q", scope, outcome.ReasonCode)
+	}
+	// The gate is not relaxed: the Level stays frozen and writes nothing.
+	if len(plan.StateResults) != 0 {
+		t.Fatalf("state results = %+v, want none: a Level whose dependency is empty does not advance", plan.StateResults)
+	}
+}

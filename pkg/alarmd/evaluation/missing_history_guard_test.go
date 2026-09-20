@@ -20,7 +20,11 @@ func TestMissingHistoryFromFullPersistsCurrentFactAndConvergesAfterReplay(t *tes
 	}
 	request := requestFixtureForPlan(t, plan, []contract.CanonicalRecordV2{g4Record(720, "80", nil)}, history)
 	request.State.Items[0].Levels[0].LastProcessedEventTime = 660
-	request.Inputs = []execution.SeriesEvaluationInputRequest{g4Input(t, request, map[string][]contract.CanonicalRecordV2{"primary": {g4Record(720, "80", nil)}})}
+	// The dependency holds this series' data at a time the algorithm does not
+	// ask for: the per-series missing point, guarded by the Level state
+	// written for the series.
+	request.Inputs = []execution.SeriesEvaluationInputRequest{g4Input(t, request, map[string][]contract.CanonicalRecordV2{
+		"primary": {g4Record(720, "80", nil)}, "previous": {g4OffsetMissRecord(660, "100")}})}
 	evaluator := newEvaluator(t)
 	evaluate := func(request execution.EvaluationRequest) execution.PlanEvaluationResult {
 		t.Helper()

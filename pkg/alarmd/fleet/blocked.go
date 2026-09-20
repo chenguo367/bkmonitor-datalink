@@ -231,9 +231,13 @@ var failureFacets = map[string]facets{
 
 	// The backend was asked. Only PROVIDER_UNAVAILABLE names it; a timeout
 	// or a partial answer does not say where the time went.
-	"QUERY_TIMEOUT":        {StageQuery, ClassTimeout, ""},
-	"QUERY_UNAVAILABLE":    {StageQuery, ClassUnavailable, ""},
-	"QUERY_PARTIAL":        {StageQuery, ClassUnavailable, ""},
+	"QUERY_TIMEOUT":     {StageQuery, ClassTimeout, ""},
+	"QUERY_UNAVAILABLE": {StageQuery, ClassUnavailable, ""},
+	"QUERY_PARTIAL":     {StageQuery, ClassUnavailable, ""},
+	// The backend answered, completely, with nothing: the dependency data is
+	// not there. Not unavailable -- the query succeeded -- and where the data
+	// went is not this deployment's to say.
+	"QUERY_EMPTY":          {StageQuery, ClassUnlocated, ""},
 	"PROVIDER_UNAVAILABLE": {StageQuery, ClassUnavailable, DependencyQueryBackend},
 	"QUERY_NOT_READY":      {StageQuery, ClassUnavailable, ""},
 	"LATE_OUT_OF_WINDOW":   {StageQuery, ClassTimeout, ""},
