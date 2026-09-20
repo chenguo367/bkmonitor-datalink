@@ -232,6 +232,10 @@ type fleetPublisher struct {
 	// would move. Nil on a follower; the aggregate takes the newest round
 	// any replica published.
 	rebalance func() *fleet.RebalanceFacts
+	// assignmentScope reports the control leader's latest reconcile round's
+	// census of the content scope on the Assignment records. Nil on a
+	// follower, like rebalance.
+	assignmentScope func() *fleet.AssignmentScopeFacts
 	// platformSettings reports the state of this replica's copy of the
 	// platform's settings. Nil on a bundle that has none.
 	platformSettings func() *fleet.PlatformSettingsFacts
@@ -437,6 +441,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.rebalance != nil {
 		snapshot.Rebalance = publisher.rebalance()
+	}
+	if publisher.assignmentScope != nil {
+		snapshot.AssignmentScope = publisher.assignmentScope()
 	}
 	if publisher.source != nil {
 		snapshot.Source = publisher.source()

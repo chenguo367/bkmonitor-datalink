@@ -955,6 +955,10 @@ type Snapshot struct {
 	// the ready replicas hold the assigned objects and what the round would
 	// move. Absent on every follower and on a build before this fact existed.
 	Rebalance *RebalanceFacts `json:"rebalance,omitempty"`
+	// AssignmentScope is the control leader's last reconcile round's census
+	// of the content scope on the Assignment records. Absent on every
+	// follower and on a build before this fact existed.
+	AssignmentScope *AssignmentScopeFacts `json:"assignment_scope,omitempty"`
 	// Recovered is the problems whose listed objects completed healthily
 	// within RecoveredRetention, by line and fold: the positive evidence a
 	// RECOVERED reading is made of. Absent on a build before it existed.
@@ -1644,6 +1648,11 @@ type View struct {
 	// plan, and after a leader change two replicas carry one each.
 	Rebalance        *RebalanceFacts `json:"rebalance,omitempty"`
 	RebalanceReplica string          `json:"rebalance_replica,omitempty"`
+	// AssignmentScope is the newest content-scope census any counted replica
+	// published, and AssignmentScopeReplica which one; newest for the same
+	// reason Rebalance is.
+	AssignmentScope        *AssignmentScopeFacts `json:"assignment_scope,omitempty"`
+	AssignmentScopeReplica string                `json:"assignment_scope_replica,omitempty"`
 	// Source is the newest source round any counted replica published, and
 	// SourceReplica which one. Newest for the same reason Rebalance is: a
 	// replica that stopped being the leader keeps its last round.
@@ -1799,6 +1808,10 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if snapshot.Rebalance != nil && (view.Rebalance == nil || snapshot.Rebalance.PlannedAt.After(view.Rebalance.PlannedAt)) {
 			facts := *snapshot.Rebalance
 			view.Rebalance, view.RebalanceReplica = &facts, replica
+		}
+		if snapshot.AssignmentScope != nil && (view.AssignmentScope == nil || snapshot.AssignmentScope.At.After(view.AssignmentScope.At)) {
+			facts := *snapshot.AssignmentScope
+			view.AssignmentScope, view.AssignmentScopeReplica = &facts, replica
 		}
 		if snapshot.Source != nil && (view.Source == nil || snapshot.Source.At.After(view.Source.At)) {
 			facts := *snapshot.Source

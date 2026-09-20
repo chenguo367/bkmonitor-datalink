@@ -372,6 +372,10 @@ type phaseTwoOwnershipRuntime interface {
 // keeps apart from a plan that moves nothing.
 type phaseTwoRebalanceSource interface {
 	LastRebalance() *fleet.RebalanceFacts
+	// LastAssignmentScope is the same round's census of the content scope
+	// on the records it settled. On the same interface as the plan, so a
+	// runtime that plans reports both or is a compile error.
+	LastAssignmentScope() *fleet.AssignmentScopeFacts
 }
 
 // rebalanceFleetFacts is the latest rebalance planning round on this
@@ -386,6 +390,20 @@ func (bundle *phaseTwoWorkerBundle) rebalanceFleetFacts() *fleet.RebalanceFacts 
 		return nil
 	}
 	return source.LastRebalance()
+}
+
+// assignmentScopeFleetFacts is the latest reconcile round's content-scope
+// census on this process, for the fleet snapshot; nil on a follower and on a
+// runtime that does not plan.
+func (bundle *phaseTwoWorkerBundle) assignmentScopeFleetFacts() *fleet.AssignmentScopeFacts {
+	if bundle == nil {
+		return nil
+	}
+	source, ok := bundle.dependencies.Ownership.(phaseTwoRebalanceSource)
+	if !ok {
+		return nil
+	}
+	return source.LastAssignmentScope()
 }
 
 type phaseTwoQueryGroupLifecycle struct {

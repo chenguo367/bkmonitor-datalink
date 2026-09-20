@@ -255,6 +255,12 @@ type HealthResponse struct {
 	// judgement has to be beside them.
 	Rebalance        *RebalanceFacts `json:"rebalance,omitempty"`
 	RebalanceReplica string          `json:"rebalance_replica,omitempty"`
+	// AssignmentScope is the leader's last round's census of the content
+	// scope on the Assignment records, and AssignmentScopeReplica which
+	// leader: how far the content contract has reached the records, from
+	// the read the round makes anyway.
+	AssignmentScope        *AssignmentScopeFacts `json:"assignment_scope,omitempty"`
+	AssignmentScopeReplica string                `json:"assignment_scope_replica,omitempty"`
 	// Source is what the leader's last round found at the strategy source,
 	// and SourceReplica which leader. On the verdict route because Expected
 	// is decided by it: an expected of 0 next to a source listing 81 is a
@@ -860,6 +866,7 @@ func NewHandler(
 			Degradations:    degradationList(view.Degradations),
 			Activation:      view.Activation, ActivationReplica: view.ActivationReplica,
 			Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,
+			AssignmentScope: view.AssignmentScope, AssignmentScopeReplica: view.AssignmentScopeReplica,
 			Source: view.Source, SourceReplica: view.SourceReplica,
 			Dependencies: dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 			DependenciesReplicas: view.DependenciesReplicas, ReplicasNotReady: view.ReplicasNotReady,

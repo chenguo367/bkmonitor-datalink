@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
@@ -227,6 +228,13 @@ func TestProductionPhaseTwoOwnershipPublishesRebalanceMovesOnceTheReadySetIsStab
 		}
 		if store.published != 0 || !reflect.DeepEqual(owners(store), map[string]int{"worker-1": 3}) {
 			t.Fatalf("round 1 published %d, owners %v: a Leader's first round must not move anything", store.published, owners(store))
+		}
+		// The same round's census of the content scope, from the records it
+		// read: workers that declare no capability make it a withdrawing
+		// round, and none of the three records names a content.
+		if scope := production.LastAssignmentScope(); scope == nil || scope.Policy != fleet.AssignmentScopePolicyWithdrawn ||
+			scope.Total != 3 || scope.Declared != 0 || scope.Undeclared != 3 || !scope.At.Equal(now) || !scope.Consistent() {
+			t.Fatalf("round 1 assignment scope = %+v, want a withdrawing round over three undeclared records", scope)
 		}
 
 		at := now.Add(stabilisation)

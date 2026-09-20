@@ -1344,6 +1344,9 @@ type productionPhaseTwoOwnership struct {
 	// fleet snapshot this replica publishes. Nil until this process has
 	// planned a round, which only a Leader does.
 	lastRebalance *fleet.RebalanceFacts
+	// lastAssignmentScope is the same round's census of the content scope
+	// on the records it settled, for the fleet snapshot. Nil until a round.
+	lastAssignmentScope *fleet.AssignmentScopeFacts
 
 	// readySet is the ready set the last round reconciled against and when
 	// it last changed, remembered under the fence epoch it was observed in;
@@ -1495,6 +1498,10 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		}
 		return err
 	}
+	// The round's census of the content scope on the records it settled,
+	// for the page: the same read, counted once, so how far the contract
+	// has reached the records is not a question for a script in a Pod.
+	runtime.recordAssignmentScope(at, scopes, records)
 	owners := make(map[execution.QueryGroupIdentity]string, len(ordered))
 	for queryGroup, record := range records {
 		owners[queryGroup] = record.DesiredWorkerID
@@ -1766,6 +1773,49 @@ func (runtime *productionPhaseTwoOwnership) LastRebalance() *fleet.RebalanceFact
 		return nil
 	}
 	facts := *runtime.lastRebalance
+	return &facts
+}
+
+// recordAssignmentScope keeps the round's content-scope census for the
+// fleet snapshot, with the policy spelled in the fleet's words.
+func (runtime *productionPhaseTwoOwnership) recordAssignmentScope(
+	at time.Time,
+	scopes scheduler.ContentScopes,
+	records map[execution.QueryGroupIdentity]ownership.AssignmentRecord,
+) {
+	facts := fleet.AssignmentScopeOf(at, assignmentScopePolicyWord(scopes.Policy), scopes.Digests, records)
+	runtime.mu.Lock()
+	runtime.lastAssignmentScope = facts
+	runtime.mu.Unlock()
+}
+
+// assignmentScopePolicyWord is the fleet's word for the round's policy.
+// Every policy has one; a new policy without a word here is the untouched
+// word, which is the one that reads as "the round changed nothing".
+func assignmentScopePolicyWord(policy scheduler.ContentScopePolicy) string {
+	switch policy {
+	case scheduler.ContentScopesDeclared:
+		return fleet.AssignmentScopePolicyDeclared
+	case scheduler.ContentScopesWithdrawn:
+		return fleet.AssignmentScopePolicyWithdrawn
+	default:
+		return fleet.AssignmentScopePolicyUntouched
+	}
+}
+
+// LastAssignmentScope is the latest round's content-scope census on this
+// process, for the fleet snapshot; nil on a process that has never been the
+// Leader.
+func (runtime *productionPhaseTwoOwnership) LastAssignmentScope() *fleet.AssignmentScopeFacts {
+	if runtime == nil {
+		return nil
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.lastAssignmentScope == nil {
+		return nil
+	}
+	facts := *runtime.lastAssignmentScope
 	return &facts
 }
 
