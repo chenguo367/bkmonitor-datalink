@@ -96,9 +96,12 @@ type PlanNoDataMemoryUpdate struct {
 	// the statement is a delta or the whole memory.
 	DerivedFrom            NoDataRepresentation
 	ExpectedMarkerRevision uint64
-	ApplyVersion           ApplyVersion
-	ScheduleRevision       PlanScheduleRevision
-	RosterVersion          string
+	// LoadedApplyVersion is the apply version of the record this round read,
+	// zero when it read none. See PlanNoDataMutation.LoadedApplyVersion.
+	LoadedApplyVersion ApplyVersion
+	ApplyVersion       ApplyVersion
+	ScheduleRevision   PlanScheduleRevision
+	RosterVersion      string
 	// PresentAsOf is the round this Plan last had data in: this round's time
 	// when anything reported, and otherwise LoadedPresentAsOf carried forward.
 	PresentAsOf int64
@@ -161,6 +164,7 @@ func BuildPlanNoDataMutation(update PlanNoDataMemoryUpdate) (PlanNoDataMutation,
 		Identity:               update.Identity,
 		SchemaVersion:          WrittenNoDataMemorySchema,
 		DerivedFrom:            update.DerivedFrom,
+		LoadedApplyVersion:     update.LoadedApplyVersion,
 		ExpectedMarkerRevision: update.ExpectedMarkerRevision,
 		ApplyVersion:           update.ApplyVersion,
 		ScheduleRevision:       update.ScheduleRevision,
@@ -230,6 +234,7 @@ func derivePlanNoDataStatementDigest(mutation PlanNoDataMutation) (MutationDiges
 		SchemaVersion          NoDataMemorySchema   `json:"schema_version"`
 		DerivedFrom            NoDataRepresentation `json:"derived_from"`
 		ExpectedMarkerRevision uint64               `json:"expected_marker_revision"`
+		LoadedApplyVersion     ApplyVersion         `json:"loaded_apply_version"`
 		ApplyVersion           ApplyVersion         `json:"apply_version"`
 		ScheduleRevision       PlanScheduleRevision `json:"schedule_revision"`
 		RosterVersion          string               `json:"roster_version"`
@@ -240,7 +245,7 @@ func derivePlanNoDataStatementDigest(mutation PlanNoDataMutation) (MutationDiges
 		Del                    []string             `json:"del"`
 	}{
 		mutation.Identity, mutation.SchemaVersion, mutation.DerivedFrom, mutation.ExpectedMarkerRevision,
-		mutation.ApplyVersion,
+		mutation.LoadedApplyVersion, mutation.ApplyVersion,
 		mutation.ScheduleRevision, mutation.RosterVersion, mutation.PresentAsOf, mutation.MemoryDigest,
 		mutation.GroupCount, mutation.Set, mutation.Del,
 	})
@@ -273,6 +278,17 @@ func (mutation PlanNoDataMutation) validateStatement() error {
 	if mutation.ReplacesWholeRecord() && len(mutation.Del) != 0 {
 		return errors.New(
 			"alarmd execution: a Plan no-data mutation that replaces the record has nothing to delete from it")
+	}
+	// The loaded version goes with the record: a statement derived from one
+	// names the version it read, and one derived from none names nothing. A
+	// zero beside a named record would let the store's "did the record move
+	// since the read" comparison pass on a value nobody read.
+	if mutation.DerivedFrom == NoDataRepresentationNone {
+		if mutation.LoadedApplyVersion != (ApplyVersion{}) {
+			return errors.New("alarmd execution: a Plan no-data mutation derived from no record cannot name a loaded version")
+		}
+	} else if err := mutation.LoadedApplyVersion.Validate(); err != nil {
+		return fmt.Errorf("alarmd execution: a Plan no-data mutation derived from a record must name the version it read: %w", err)
 	}
 	if mutation.RosterVersion == "" {
 		return errors.New("alarmd execution: Plan no-data mutation requires the roster version it was decided against")

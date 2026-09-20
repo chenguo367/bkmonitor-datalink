@@ -129,6 +129,7 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		// record whatever it was actually derived from, and a Plan still on
 		// the whole-memory record can never write one.
 		DerivedFrom:            input.Snapshot.Representation,
+		LoadedApplyVersion:     input.Snapshot.PersistedApplyVersion,
 		ExpectedMarkerRevision: input.Snapshot.MarkerRevision,
 		ApplyVersion:           input.ApplyVersion,
 		ScheduleRevision:       input.ScheduleRevision,
