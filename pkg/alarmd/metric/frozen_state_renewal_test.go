@@ -90,3 +90,54 @@ func TestASlotsFrozenRenewalOutcomesReachTheScrapeAsCounts(t *testing.T) {
 		t.Fatalf("population = %d, want the 51 series the two Plans reported", facts.Frozen)
 	}
 }
+
+// The census reaches the scrape, including the zeros.
+//
+// A Slot that read every series it meant to evaluate and froze none of them
+// reports three numbers and four zeros. That reading is the one this family
+// exists for: before it, a replica with nothing frozen and a replica whose
+// candidate set was computed wrongly published exactly the same thing --
+// nothing -- and telling them apart cost a deployment.
+func TestTheSeriesCensusReachesTheScrapeBesideTheOutcomes(t *testing.T) {
+	var facts observability.FrozenStateRenewalFacts
+	facts.RecordCensus(900, 150, 148)
+	gathered := gatherFrozenStateCensus(t, observability.Observation{
+		Component: observability.ComponentState, Stage: observability.StageFrozenStateRenewed,
+		Operation: observability.Operation(execution.OperationNormal), Direction: observability.DirectionInternal,
+		Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone,
+		FrozenStateRenewal: &facts,
+	})
+	for stage, want := range map[string]float64{"due": 900, "read": 150, "written": 148} {
+		if gathered[stage] != want {
+			t.Fatalf("%s = %v, want %v", stage, gathered[stage], want)
+		}
+	}
+	// The two differences a reader takes from it, neither derivable from the
+	// other: 750 series were never read at all, and 2 were read and not
+	// written.
+	if gathered["due"]-gathered["read"] != 750 || gathered["read"]-gathered["written"] != 2 {
+		t.Fatalf("census = %v, want the two populations separable", gathered)
+	}
+}
+
+func gatherFrozenStateCensus(t *testing.T, observations ...observability.Observation) map[string]float64 {
+	t.Helper()
+	recorder := NewRecorder(BuildInfo{})
+	for _, observation := range observations {
+		recorder.Observe(context.Background(), observability.NormalizeObservation(observation))
+	}
+	families, err := recorder.registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	gathered := map[string]float64{}
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_worker_frozen_state_census_total" {
+			continue
+		}
+		for _, series := range family.Metric {
+			gathered[series.Label[0].GetValue()] = series.GetCounter().GetValue()
+		}
+	}
+	return gathered
+}

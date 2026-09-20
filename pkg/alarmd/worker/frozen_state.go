@@ -18,6 +18,38 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
+// seriesCensus is where a Slot's series went: how many it meant to evaluate,
+// how many it read Runtime State for, and how many it wrote.
+//
+// It exists because the first attempt to size the population that needs
+// renewal inferred it from two rates a deployment already published --
+// state_load minus state_apply -- and that difference is not the population.
+// It also holds series short-circuited before the loaded views, series already
+// applied by an earlier attempt of the same Slot, and series that never had a
+// key. Sizing a mechanism from it put the estimate two orders of magnitude out
+// and the mechanism shipped renewing almost nothing.
+//
+// The two differences answer different questions and neither can be derived
+// from the other:
+//
+//   - Due minus Read is the series a Slot meant to evaluate and did not read.
+//     A series whose PRIMARY input is incomplete is skipped before the State
+//     preflight, so it is neither read nor written and its key ages the whole
+//     time -- and a renewal that hangs on the read cannot reach it.
+//   - Read minus Written is the series that were read and not written, which
+//     is the population the renewal does cover.
+//
+// Counted at the three places the decisions are made, and reported on every
+// Slot that had anything due. A count that only appears when it is non-zero
+// cannot say the difference between "nothing was frozen" and "nothing was
+// looked at", which is exactly the reading that had to be chased through a
+// deployment.
+type seriesCensus struct {
+	Due     int
+	Read    int
+	Written int
+}
+
 // frozenSeriesOf is the series of one Plan that this Slot read and is not
 // going to write.
 //

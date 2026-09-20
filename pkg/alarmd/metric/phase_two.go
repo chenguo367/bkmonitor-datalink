@@ -59,6 +59,7 @@ type phaseTwoMetrics struct {
 	queryFreeCompletions            *prometheus.CounterVec
 	executionEvidenceWrites         *prometheus.CounterVec
 	frozenStateRenewals             *prometheus.CounterVec
+	frozenStateCensus               *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
 	sourceWithheldLines             *prometheus.CounterVec
 	activeQGSetCount                prometheus.Gauge
@@ -466,6 +467,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"independently as state_load minus state_apply -- the two disagreeing is the reading " +
 			"that says the candidate set is wrong rather than that nothing is frozen.",
 	}, []string{"result"})
+	metrics.frozenStateCensus = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_frozen_state_census_total",
+		Help: "Where a Slot's series went, counted at the three places the decisions are made: due is " +
+			"what it meant to evaluate, read is what it issued a Runtime State preflight for, written is " +
+			"what it actually wrote. due-read is the series skipped before the State read -- a PRIMARY " +
+			"input that was incomplete never reaches the preflight, so those keys age with nothing " +
+			"touching them and a renewal that hangs on the read cannot reach them. read-written is the " +
+			"population worker_frozen_state_renewals_total covers. Both differences are needed and " +
+			"neither derives from the other; sizing that population instead from state_load minus " +
+			"state_apply, which holds several other things, put the estimate two orders of magnitude " +
+			"out and shipped a renewal that renewed almost nothing.",
+	}, []string{"stage"})
 	metrics.gapGuardScopeRounds = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_gap_guard_scope_rounds_total",
 		Help: "One per held gap scope per round that read it, by status, by why it is held, and by " +
@@ -847,6 +860,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, result := range []string{string(observability.ResultSuccess), string(observability.ResultDegraded)} {
 		metrics.executionEvidenceWrites.WithLabelValues(result)
 	}
+	for _, stage := range frozenCensusStages {
+		// Pre-created for the reading that started this: a replica reporting
+		// nothing and a replica with nothing due looked the same.
+		metrics.frozenStateCensus.WithLabelValues(stage)
+	}
 	for _, outcome := range execution.FrozenRenewalOutcomes {
 		// Pre-created, because two of the four readings are zeros somebody
 		// acts on: missing staying at zero is what says the mechanism has
@@ -922,7 +940,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
-		m.queryFreeCompletions, m.executionEvidenceWrites, m.frozenStateRenewals)...)
+		m.queryFreeCompletions, m.executionEvidenceWrites, m.frozenStateRenewals, m.frozenStateCensus)...)
 }
 
 func (m phaseTwoMetrics) observe(observation observability.Observation) {
@@ -1134,6 +1152,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		).Inc()
 	}
 	if facts := observation.FrozenStateRenewal; facts != nil {
+		m.frozenStateCensus.WithLabelValues(frozenCensusDue).Add(float64(facts.Due))
+		m.frozenStateCensus.WithLabelValues(frozenCensusRead).Add(float64(facts.Read))
+		m.frozenStateCensus.WithLabelValues(frozenCensusWritten).Add(float64(facts.Written))
 		// Added rather than incremented once: one observation carries a whole
 		// Slot's outcomes, and a Slot that renewed two hundred keys is not the
 		// same event as one that renewed one.
@@ -1221,6 +1242,15 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.lastProgress.WithLabelValues(kind).Set(float64(time.Now().Unix()))
 	}
 }
+
+// The three stages of the series census, in the order a reader walks them.
+const (
+	frozenCensusDue     = "due"
+	frozenCensusRead    = "read"
+	frozenCensusWritten = "written"
+)
+
+var frozenCensusStages = []string{frozenCensusDue, frozenCensusRead, frozenCensusWritten}
 
 // frozenRenewalLabel is the label one renewal outcome is counted under.
 //

@@ -407,6 +407,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_worker_no_data_memory_reads_total"] = "variableLabels: {representation}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_renewals_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_worker_frozen_state_renewals_total"] = "variableLabels: {result}"
+	expected["bkmonitor_alarmd_worker_frozen_state_census_total"] = "variableLabels: {stage}"
 	expected["bkmonitor_alarmd_worker_gap_guard_scope_rounds_total"] = "variableLabels: {status,reason,progress}"
 	expected["bkmonitor_alarmd_worker_no_data_plans_seen_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
@@ -896,6 +897,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// silent loss, renewed staying at zero is it never having run -- so all
 	// four exist from startup.
 	bounds[fqName("worker_frozen_state_renewals_total")] = len(execution.FrozenRenewalOutcomes)
+	// One per stage of the census and no more. All three are created at
+	// startup: a replica with nothing due and a replica reporting nothing at
+	// all read identically otherwise, which is the reading this family was
+	// added to end.
+	bounds[fqName("worker_frozen_state_census_total")] = 3
 	// Every held status against every reason this build can put on a scope
 	// plus the catch-all, against every place the count can stand. All three
 	// come from published lists, so a value added to any of them moves this

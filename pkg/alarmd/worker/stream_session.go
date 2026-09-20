@@ -41,6 +41,9 @@ type streamedExecution struct {
 	noData         execution.NoDataLoadResult
 	noDataHosts    map[execution.PlanNoDataIdentity]nodata.HostResolution
 	noDataOutcomes []nodata.SlotOutcome
+	// seriesCensus is where this Slot's series went, counted where each
+	// decision is made rather than inferred afterwards. See seriesCensus.
+	seriesCensus seriesCensus
 	// noDataPlansSeen is how many of this Slot's Plans detect no-data,
 	// counted where they are found rather than where they are judged.
 	noDataPlansSeen      int
@@ -211,6 +214,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.bindings, stream.stateItems, stream.gapItems, stream.delivered = nil, nil, nil, nil
 	stream.state, stream.gaps = execution.StatePreflightResult{}, execution.GapLoadResult{}
 	stream.evaluated = execution.EvaluationResult{}
+	stream.seriesCensus = seriesCensus{}
 	stream.coordinator.reservations.mu.Lock()
 	stream.coordinator.reservations.gapFacts -= stream.gapFacts
 	stream.coordinator.reservations.mu.Unlock()
@@ -681,6 +685,9 @@ func (stream *streamedExecution) evaluateSeries(
 		pending = pending[:0]
 		return err
 	}
+	// Counted here, before the first branch that can drop a series: this is
+	// the Slot's intent, and every later count is measured against it.
+	stream.seriesCensus.Due += len(preparedSeriesEvaluations)
 	for _, prepared := range preparedSeriesEvaluations {
 		if incomplete := primaryIncompleteBindings(prepared.inputs); len(incomplete) != 0 {
 			if err := flush(); err != nil {
@@ -695,6 +702,7 @@ func (stream *streamedExecution) evaluateSeries(
 		if err != nil {
 			return err
 		}
+		stream.seriesCensus.Read++
 		pending = append(pending, completedSeries{due: prepared.due, series: prepared.identity, inputs: prepared.inputs,
 			item: execution.StatePreflightItem{Identity: execution.StateKeyIdentity{
 				Plan: prepared.due.Identity, StateGeneration: prepared.due.StateGeneration, SeriesIdentityDigest: prepared.identity,
