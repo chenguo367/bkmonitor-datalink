@@ -685,7 +685,7 @@ var CHECK = {
   // word 容量 appears only over a budget rejection.
   DETECTION_ABANDONED:   '{n} 个对象跳过了检测，那段不补',
   TIMELINE_PRUNED:       '{n} 个对象的游标越过了已裁掉的时间线，那段没检测也不补',
-  BOOKKEEPING_ABANDONED: '{n} 个对象已检测、告警已发，只是记账前被打断{bookkeeping}',
+  BOOKKEEPING_ABANDONED: '{n} 个对象检测已执行、输出阶段已完成，完成记账未获确认{bookkeeping}',
   NO_DATA_MEMORY_REFUSED: '{n} 个对象的无数据记忆维护不了（{s} 条策略）：阈值检测照常，但写不进去的记忆停在最后一次成功写入、续不了期的记忆会在有效期到后整份过期——之后变缺失的组不会被记为首次缺失，无数据告警不会触发',
   DEPENDENCY_DOWN:       'alarmd 自己的依赖没答，{n} 个对象受影响（{g} 种）',
   DEFECT:                '{n} 个对象命中程序缺陷（{g} 种），上报',
@@ -813,7 +813,7 @@ var EVIDENCE = {
   ROUNDS_STALLED:        '对象行"最近一次错误"：原文、类型、卡住的 Slot、同一 Slot 连续几次',
   DETECTION_ABANDONED:   '对象行"没检测的时段"：首末 Slot、记录时刻、对象周期；"资源预算拒绝"折对照容量面板的"预算被拒"',
   TIMELINE_PRUNED:       '对象行"没检测的时段"：游标从哪跳到哪、记录时刻',
-  BOOKKEEPING_ABANDONED: '对象行"没检测的时段"里写着"每个时间点都已检测（N/N 个策略）"；累计数与最近时刻在这一行；对照依赖面板"alarmd 自己的状态"行（控制面 Redis）的最近失败——一段时间里连续出现，就是那台 Redis 写不进去',
+  BOOKKEEPING_ABANDONED: '对象行"记账前被打断的时段"给出执行标记；累计数与最近时刻在这一行。结合同对象、同一 Slot 的失败环节、错误原文和后续 Progress 提交记录定位，不能仅凭此记录确定失败依赖',
   NO_DATA_MEMORY_REFUSED: '按原因分组看是写不进去还是续不了期。对象行"无数据记忆写不进去"：存储的拒绝原因、这份记忆的组数与上限、首次与最近拒绝时刻、被拒轮数；"无数据记忆续不了期"：拒绝原因、尝试次数；健康对象行的"无数据记忆维护"是对照（最近一次问存储的时刻在前进）。指标 worker_no_data_memory_refusals_total{reason,record}、worker_no_data_memory_renewals_total{result,reason}',
   DEPENDENCY_DOWN:       '分组的原因码说是哪个依赖；对象行"最近一次错误"给原文',
   DEFECT:                '分组的原因码 + 对象行"最近一次错误"原文与 Slot——上报带这两样',
@@ -841,7 +841,7 @@ var NEXT = {
   ROUNDS_STALLED:        '不会自己恢复：展开找对象，查它卡在哪一步（日志按 query_group_key），必要时重启副本',
   DETECTION_ABANDONED:   '仍在发生的：看对象行的"跳过前最后一步"（错过查询截止 / 数据未就绪 / 预算拒绝…）与周期，按那一步查；只有"资源预算拒绝"分组是资源装不下，其余不据此扩容，也不据此排除别的容量或调度约束',
   TIMELINE_PRUNED:       '仍在发生的：看游标为什么落后到被剪；已停止的只是记录，那段永久没检测',
-  BOOKKEEPING_ABANDONED: '这些对象不用处理，检测做过了、告警也发了。看的是趋势：累计数在一段时间里连续涨，是控制面 Redis 写失败，去看依赖面板"alarmd 自己的状态"行；偶发一次是瞬时抖动',
+  BOOKKEEPING_ABANDONED: '核对同对象、同一 Slot 的最后失败步骤与后续 Progress 提交，定位受阻环节及依赖；持续新增时优先排查，单次记录也不能直接归因为瞬时抖动',
   NO_DATA_MEMORY_REFUSED: '写不进去的：这条策略的无数据记忆组数超过了上限（默认 100,000，是防失控的护栏，不是工作上限——线上最大的记忆只有几千组），先看策略的聚合维度是不是把组数放飞了（按高基数维度分组），收维度而不是抬上限。续不了期的：看状态存储（Redis）是否可用、是否支持设置有效期，恢复后下一轮自动续上，不用动策略。修复前这些策略的无数据告警不会触发，要人工盯这组的缺失',
   DEPENDENCY_DOWN:       '按原因码看是哪个依赖（Redis/Kafka/后端）；依赖恢复后自动清',
   DEFECT:                '程序缺陷：带原因码上报，展开取一个对象的证据',
@@ -873,7 +873,7 @@ var RECOVERY = {
   ROUNDS_STALLED:        '对象的轮次重新结束（对象行离开"轮次不结束"）；不会自己发生',
   DETECTION_ABANDONED:   '{w} 分钟内没有新的跳过（"仍在发生"折归零）；已停止的记录不会归零，那是记录不是指标',
   TIMELINE_PRUNED:       '{w} 分钟内没有新的越过；已停止的记录不会归零',
-  BOOKKEEPING_ABANDONED: '不是故障状态，是记录：累计数只增不减，看"最近"是否还在前进；停下来就是记账恢复了',
+  BOOKKEEPING_ABANDONED: '累计数来自当前可观测副本自各自启动以来的记录，重启或副本缺席会改变合计；停止增长仅表示未再观察到。确认恢复须看到同对象后续 Progress 成功提交',
   NO_DATA_MEMORY_REFUSED: '写不进去的：该 Plan 一次写入落库（no_data_memory_written 且 stored=true——ALREADY_APPLIED 算、STALE_VERSION 不算，以发射方的 stored 为准不看结局名）。续不了期的：一次续期到达存储（不论答"续了"还是"还够长"）或一次写入落库。这一行随之消失，进历史区的"已恢复"。{w} 分钟内没有新拒绝不算恢复',
   DEPENDENCY_DOWN:       '依赖恢复后各对象下一轮完成，这一行自动清',
   DEFECT:                '修复上线后该原因码不再出现',
@@ -894,7 +894,7 @@ var RECOVERY = {
 var NEXT_RETAINED = {
   DETECTION_ABANDONED: '已停止，不用让它停；那段永久没检测，按策略看影响的是谁、要不要补告警覆盖',
   TIMELINE_PRUNED:     '已停止，不用让它停；那段永久没检测，按策略看影响的是谁',
-  BOOKKEEPING_ABANDONED: '这些对象不用处理，检测做过了、告警也发了。看的是趋势：累计数在一段时间里连续涨，是控制面 Redis 写失败，去看依赖面板"alarmd 自己的状态"行；偶发一次是瞬时抖动'
+  BOOKKEEPING_ABANDONED: '核对同对象、同一 Slot 的最后失败步骤与后续 Progress 提交，定位受阻环节及依赖；持续新增时优先排查，单次记录也不能直接归因为瞬时抖动'
 };
 
 // The two dimensions each object row shows, in words. Held to the Go lists.
@@ -932,17 +932,16 @@ function checkSentence(report, count) {
     + demoted + lossClause(report, count) + consequenceClause(report) + standingClause(report) + problemsClause(report);
 }
 
-// The running count on the bookkeeping line: Slots executed and then closed
-// without their Progress, over the replicas' lifetimes, and the latest. The
-// records under the line keep one span per object and cannot say this; the
-// count is what makes a run of them readable as the control-plane store
-// failing writes. The loss column says what was lost, and it is not "无":
-// this line is the one visible face of that failure.
+// The running count sums the currently observable replicas' process lifetimes;
+// membership changes or restarts can lower it. Records retain one span per
+// object, while this count describes every observed interrupted completion.
+// Neither silence nor growth identifies recovery or the failed dependency,
+// and an output acknowledgement does not establish downstream delivery.
 function bookkeepingClause(report) {
   var facts = report.bookkeeping;
-  if (!facts) return '。损失：无告警损失，只影响"最近完成"读数与缺口统计';
-  return '。累计 ' + facts.slots + ' 个 Slot（' + facts.objects + ' 个对象），最近 ' + momentLabel(facts.last_at)
-    + '。损失：无告警损失，只影响"最近完成"读数与缺口统计';
+  if (!facts) return '。影响：完成记账未获确认；不能据此判断下游告警送达';
+  return '。当前可观测副本自各自启动以来累计 ' + facts.slots + ' 个 Slot（' + facts.objects + ' 个对象），最近 ' + momentLabel(facts.last_at)
+    + '。影响：完成记账未获确认；不能据此判断下游告警送达';
 }
 
 // The folds that are the line now. A fold with nothing under it and
@@ -1156,7 +1155,7 @@ function memoryUpkeepWords(upkeep) {
 // "confirmed never evaluated" until every replica is on a build that writes
 // the mark: an older build executed and left none.
 var EXECUTION_EVIDENCE = {
-  STATE_APPLIED: '早先那次尝试已检测全部策略、告警已发，只是没写下"完成"这一笔',
+  STATE_APPLIED: '早先那次尝试已检测全部策略，输出阶段已完成，完成记账未获确认',
   MIXED: '早先那次尝试只检测了部分策略，其余没检测',
   NONE_FOUND: '没有找到早先尝试的执行证据（滚动期间老版本不留证据，全部副本到新版前不算确认未检测）',
   UNREADABLE: '执行证据读不到，说不清早先那次尝试做到哪',
@@ -1180,7 +1179,7 @@ function skipEvidenceWords(skip) {
   if (!ev) return '';
   var slots = skip.slots || 0;
   if (slots && ev.slots_applied === slots) {
-    return '；这段每个时间点都已检测、告警已发（' + (ev.plans_applied || 0) + '/' + (ev.plans_total || 0) + ' 个策略），只是记账前被打断——无告警损失';
+    return '；这段每个时间点都已检测（' + (ev.plans_applied || 0) + '/' + (ev.plans_total || 0) + ' 个策略），输出阶段已完成，完成记账未获确认；此证据不判断下游告警送达';
   }
   var parts = [];
   if (ev.slots_applied) parts.push(ev.slots_applied + ' 个时间点已检测完');
@@ -1555,7 +1554,7 @@ function renderChecks(checks) {
   }
   history.forEach(function (report) {
     if (report.code === 'BOOKKEEPING_ABANDONED' && report.bookkeeping) {
-      historyParts.push('记账被打断（检测做过了）：累计 ' + report.bookkeeping.slots + ' 个 Slot（' + report.bookkeeping.objects + ' 个对象），最近 '
+      historyParts.push('记账被打断（检测做过了）：当前可观测副本自各自启动以来累计 ' + report.bookkeeping.slots + ' 个 Slot（' + report.bookkeeping.objects + ' 个对象），最近 '
         + momentLabel(report.bookkeeping.last_at));
     }
   });
@@ -2221,7 +2220,7 @@ function objectRow(anomaly, check, group) {
       + (skip.slots ? '，' + skip.slots + ' 个 Slot' : '，个数无法得知')
       + '，记录于 ' + momentLabel(skip.at) + period + loss + mechanism + evidence,
       executed
-        ? '这段里的每个时间点都由早先的尝试检测过、告警发出去了、状态写进去了，只是没能写下"完成"这一笔；后来越过重放窗口时按"跳过"收了尾。无告警损失，只影响"最近完成"读数与缺口统计。'
+        ? '执行标记表明这段里的每个时间点都由早先的尝试检测过，输出阶段已完成，完成记账未获确认；后来越过重放窗口时按"跳过"收了尾。如有生成的事件，输出端已确认；下游告警送达不在此证据范围内。'
           + '证据来自收尾时读到的执行标记；指标 query_free_completion_total{kind,evidence}'
         : '这段里的时间点没有被评估过，也不会补跑。仍在发生的要看对象为什么追不上；已停止的只是记录，要处理的是这段没有告警覆盖的时间。'
           + (skip.evidence ? '执行证据来自收尾时读到的标记；指标 query_free_completion_total{kind,evidence}' : ''));
