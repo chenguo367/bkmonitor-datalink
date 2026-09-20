@@ -139,6 +139,14 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonStateCorrupt:           {ReasonStateCorrupt, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonStateSchemaUnsupported: {ReasonStateSchemaUnsupported, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonStateBudgetExceeded:    {ReasonStateBudgetExceeded, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
+	// Ownership refusals. A stale fence, an assignment naming another worker
+	// and a moved content scope are facts about the store the same attempt
+	// would meet again; a lease held by another owner is the one that a later
+	// attempt can find released.
+	ReasonOwnershipStaleFence: {ReasonOwnershipStaleFence, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonOwnershipNotDesired: {ReasonOwnershipNotDesired, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonOwnershipLeaseBusy:  {ReasonOwnershipLeaseBusy, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonContentScopeMoved:   {ReasonContentScopeMoved, ReasonClassDeterministic, ReasonDomainObservation},
 }
 
 func ReasonCatalogV2() []ReasonDefinitionV2 {

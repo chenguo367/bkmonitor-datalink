@@ -1,0 +1,99 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2025 Tencent. All rights reserved.
+// Licensed under the MIT License.
+
+package worker_test
+
+import (
+	"context"
+	"errors"
+	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+)
+
+// reasonOf is the reason the first observation of stage carried, "" when no
+// observation of that stage was made.
+func reasonOf(observations *[]observability.Observation, stage observability.Stage) observability.ReasonCode {
+	for _, observation := range *observations {
+		if observation.Stage == stage {
+			return observation.ReasonCode
+		}
+	}
+	return ""
+}
+
+// The store's refusal of the side-effect admission is named on the admission
+// line by the store's own word. It was internal_unknown: the admission result
+// carries no reason for an error, and the four typed refusals could only be
+// told apart by reading the error text off a rate-limited log line.
+func TestTheAdmissionLineNamesTheStoresRefusal(t *testing.T) {
+	for _, test := range []struct {
+		refusal error
+		want    string
+	}{
+		{ownership.ErrNotDesired, contract.ReasonOwnershipNotDesired},
+		{ownership.ErrStaleFence, contract.ReasonOwnershipStaleFence},
+		{ownership.ErrLeaseBusy, contract.ReasonOwnershipLeaseBusy},
+	} {
+		t.Run(test.want, func(t *testing.T) {
+			observations := make([]observability.Observation, 0, 8)
+			observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+				observations = append(observations, observability.NormalizeObservation(observation))
+			})
+			fixture := buildFixture(t, true, "admission_initial", observer, &observations)
+			fixture.ports.failErr = test.refusal
+			_, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+			if !errors.Is(err, test.refusal) {
+				t.Fatalf("Execute() error = %v, want the refusal wrapped", err)
+			}
+			if got := reasonOf(&observations, observability.StageSideEffectAdmission); string(got) != test.want {
+				t.Fatalf("admission line reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+	// An anonymous failure of the same check is still unknown: the name is
+	// the store's, not a guess.
+	observations := make([]observability.Observation, 0, 8)
+	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		observations = append(observations, observability.NormalizeObservation(observation))
+	})
+	fixture := buildFixture(t, true, "admission_initial", observer, &observations)
+	if _, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err == nil {
+		t.Fatal("injected admission failure did not fail the Slot")
+	}
+	if got := reasonOf(&observations, observability.StageSideEffectAdmission); got != observability.ReasonNotReported && got != observability.ReasonInternalUnknown {
+		t.Fatalf("anonymous admission failure reason = %q, want it left unnamed", got)
+	}
+}
+
+// A fenced State write the store refused is named on the state_applied line
+// the same way -- stale fence, or the content scope having moved under the
+// write -- so the three numbers a scope move is verified by are readable from
+// this line: the old scope written before it took effect, refused with
+// CONTENT_SCOPE_MOVED after, and the new scope written.
+func TestTheStateAppliedLineNamesTheFencedRefusal(t *testing.T) {
+	for _, test := range []struct {
+		refusal error
+		want    string
+	}{
+		{ownership.ErrStaleFence, contract.ReasonOwnershipStaleFence},
+		{ownership.ErrContentScopeMoved, contract.ReasonContentScopeMoved},
+	} {
+		t.Run(test.want, func(t *testing.T) {
+			fixture, fenced := newFencedFixture(t, false)
+			fenced.refusal = test.refusal
+			_, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+			if !errors.Is(err, test.refusal) {
+				t.Fatalf("Execute() error = %v, want %v wrapped", err, test.refusal)
+			}
+			if got := reasonOf(fixture.observations, observability.StageStateApplied); string(got) != test.want {
+				t.Fatalf("state_applied line reason = %q, want %q", got, test.want)
+			}
+		})
+	}
+}

@@ -1222,10 +1222,14 @@ type recordingPorts struct {
 	trace            *[]string
 	ready            bool
 	failStage        string
-	beginErr         error
-	admissionCalls   int
-	contractDrift    bool
-	alreadyApplied   bool
+	// failErr, when set, is what the failing stage wraps, so a test can hand
+	// the coordinator the store's own typed refusal rather than an anonymous
+	// error.
+	failErr        error
+	beginErr       error
+	admissionCalls int
+	contractDrift  bool
+	alreadyApplied bool
 	// stateApplyAlreadyApplied makes every state write report that an earlier
 	// attempt had already written it, which is what a retry of a Slot whose
 	// first attempt got that far actually sees.
@@ -1833,6 +1837,9 @@ func isZeroProgressCommit(request execution.ProgressCommitRequest) bool {
 }
 func (ports *recordingPorts) fail(stage string) error {
 	if ports.failStage == stage {
+		if ports.failErr != nil {
+			return fmt.Errorf("injected %s: %w", stage, ports.failErr)
+		}
 		return errors.New("injected " + stage)
 	}
 	return nil

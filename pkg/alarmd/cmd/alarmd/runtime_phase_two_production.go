@@ -1739,6 +1739,7 @@ func (runtime *productionPhaseTwoOwnership) publishAssignmentIndex(
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentOwnership, Stage: observability.StageAssignmentIndexWritten,
 			Result: observability.ResultFailed, Operation: observability.OperationWrite, Err: err, AssignmentIndex: facts,
+			ReasonCode: ownershipObservationReason(err),
 		})
 		return
 	}
@@ -2360,14 +2361,12 @@ func observeProductionOwnership(
 	err error,
 ) {
 	result := observability.Result(observability.ResultSuccess)
-	reason := observability.ReasonCode(observability.ReasonNone)
 	if err != nil {
 		result = observability.ResultFailed
-		reason = observability.ReasonInternalUnknown
 	}
 	observeRuntime(ctx, observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: stage, Result: result,
-		Direction: observability.DirectionInternal, ReasonCode: reason, Err: err,
+		Direction: observability.DirectionInternal, ReasonCode: ownershipObservationReason(err), Err: err,
 	})
 }
 

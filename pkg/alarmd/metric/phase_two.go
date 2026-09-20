@@ -18,6 +18,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
 type phaseTwoMetrics struct {
@@ -37,6 +38,7 @@ type phaseTwoMetrics struct {
 	stateWriteChange                *prometheus.CounterVec
 	stateAlreadyApplied             *prometheus.CounterVec
 	stateVersionConflict            *prometheus.CounterVec
+	ownershipRefusals               *prometheus.CounterVec
 	sourceObservations              *prometheus.CounterVec
 	sourceRefreshes                 *prometheus.CounterVec
 	sourceCompiles                  *prometheus.CounterVec
@@ -312,6 +314,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "ownership_transition_total",
 			Help: "Ownership lifecycle transitions by bounded transition, result and reason class.",
 		}, []string{"transition", "result", "reason_class"}),
+		ownershipRefusals: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "ownership_refusals_total",
+			Help: "Refusals the ownership store answered, by which of its four words and where it was met. " +
+				"refusal: OWNERSHIP_STALE_FENCE (the fence's epoch, token or deadline no longer match the lease), " +
+				"OWNERSHIP_NOT_DESIRED (the assignment names another worker), OWNERSHIP_LEASE_BUSY (another " +
+				"owner holds the lease), CONTENT_SCOPE_MOVED (the content scope a write was fenced against has " +
+				"moved; the lease itself is live). site: admission is the side-effect admission check before a " +
+				"Slot's writes, state_apply the fenced State write itself, lease the worker's acquire, release and " +
+				"takeover, renewal the lease renewal, control the control leader's assignment writes. Every " +
+				"pair is created at startup, so a zero is never happened and not an absent series; a change " +
+				"of content scope is read as state_apply CONTENT_SCOPE_MOVED rising for the old scope after it " +
+				"took effect and nothing before. Counted once per observation, not per key: a fenced batch " +
+				"refused as a whole is one.",
+		}, []string{"site", "refusal"}),
 		noDataSlotPlans: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_slot_plans_total",
 			Help: "Plans that detect no-data, counted once per Slot by what happened to that detection. " +
@@ -848,6 +864,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.stateVersionConflict.WithLabelValues(string(site), string(kind))
 		}
 	}
+	for _, site := range ownershipRefusalSites {
+		for _, refusal := range ownership.RefusalReasons {
+			metrics.ownershipRefusals.WithLabelValues(site, refusal)
+		}
+	}
 	for _, outcome := range nodata.SlotOutcomes {
 		metrics.noDataSlotPlans.WithLabelValues(string(outcome))
 	}
@@ -950,7 +971,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateWriteChange, m.stateAlreadyApplied, m.stateVersionConflict, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
 		m.sourceReads, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
-		m.ownedQueryGroups, m.ownershipTransitions,
+		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
 		m.queryAdmission,
 		m.noDataSlotPlans, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
@@ -1239,6 +1260,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			string(observation.Stage), string(observation.Result), string(reasonClass),
 		).Inc()
 	}
+	if site := ownershipRefusalSite(observation); site != "" {
+		m.ownershipRefusals.WithLabelValues(site, string(observation.ReasonCode)).Inc()
+	}
 	if facts := observation.StateWriteReuse; facts != nil && !facts.Empty() {
 		for key, count := range facts.Counts {
 			m.stateWriteReuse.WithLabelValues(string(key.Class), string(key.Stored)).Add(float64(count))
@@ -1396,6 +1420,50 @@ func (r *Recorder) SetOwnedQueryGroups(count int) {
 		count = 0
 	}
 	r.phaseTwo.ownedQueryGroups.WithLabelValues("complete").Set(float64(count))
+}
+
+// ownershipRefusalSites is where a refusal can be met, as the counter's site
+// label spells them. One list so the pre-registration and the classifier
+// below cannot disagree.
+var ownershipRefusalSites = []string{"admission", "state_apply", "lease", "renewal", "control"}
+
+// ownershipRefusalSite classifies an observation for ownership_refusals_total:
+// the site when its reason is one of the store's four refusals, "" when it
+// is not one to count. The admission check is counted on the fence_checked
+// relay and not on the state-side admission line it is relayed from, so one
+// refusal is one.
+func ownershipRefusalSite(observation observability.Observation) string {
+	if !isOwnershipRefusalReason(observation.ReasonCode) {
+		return ""
+	}
+	switch observation.Component {
+	case observability.ComponentOwnership:
+		switch observation.Stage {
+		case observability.StageFenceChecked:
+			return "admission"
+		case observability.StageLeaseRenewed:
+			return "renewal"
+		case observability.StageAssignmentAcquired, observability.StageAssignmentLost,
+			observability.StageTakeoverStarted, observability.StageTakeoverCompleted:
+			return "lease"
+		default:
+			return "control"
+		}
+	case observability.ComponentState:
+		if observation.Stage == observability.StageStateApplied {
+			return "state_apply"
+		}
+	}
+	return ""
+}
+
+func isOwnershipRefusalReason(reason observability.ReasonCode) bool {
+	for _, refusal := range ownership.RefusalReasons {
+		if string(reason) == refusal {
+			return true
+		}
+	}
+	return false
 }
 
 func isOwnershipTransitionStage(stage observability.Stage) bool {
