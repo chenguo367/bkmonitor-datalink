@@ -281,6 +281,21 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		// that has something to explain.
 		attributes = append(attributes, slog.String("slot_wait", facts.Wait))
 	}
+	if facts := observation.RangeGate; facts != nil {
+		// The word plus the values it was derived from. Without the values the
+		// word cannot be checked, and this word exists precisely because the
+		// previous reading -- a GAP_SKIPPED completion -- could not be.
+		attributes = append(attributes,
+			slog.String("range_gate", facts.Outcome),
+			slog.Int64("range_gate_progress_next_slot", facts.ProgressNextSlot),
+			slog.Int64("range_gate_expected_next_slot", facts.ExpectedNextSlot),
+			slog.Bool("range_gate_unfinished_slot", facts.UnfinishedSlotPresent),
+		)
+		if facts.UnfinishedSlotPresent {
+			attributes = append(attributes,
+				slog.Int64("range_gate_unfinished_evaluation_time", facts.UnfinishedSlotEvaluationTime))
+		}
+	}
 	if facts := observation.ReplayExpiry; facts != nil {
 		// The reason on every expiry, and the two compared instants on the one
 		// that reports a defect. A Slot that says only that it was skipped

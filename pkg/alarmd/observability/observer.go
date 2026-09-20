@@ -88,6 +88,7 @@ const (
 	StageScheduleCursorAdvanced = "schedule_cursor_advanced"
 	StageReplayExpired          = "replay_expired"
 	StageRangeDistanceExpired   = "range_distance_expired"
+	StageRangeGateDecided       = "range_gate_decided"
 	StageSlotWait               = "slot_wait"
 	StageQueryAdmission         = "query_admission"
 	StageRestartRecovered       = "restart_recovered"
@@ -755,6 +756,79 @@ var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", 
 //
 // ReadyAtUnixMilli and DistanceBoundaryUnixMilli are the two instants the
 // third reason compared, and are zero for the others.
+// RangeGateOutcome values name what became of the catch-up path on a round
+// that gave up on a Slot.
+//
+// Total by construction: the five refusals are the gate's own conditions in
+// the order it writes them, the two post-build words are the only other ways
+// the range is not used, and applied is the rest. A round that expires a Slot
+// reports exactly one of them, so the share that never reaches the builder is
+// readable against the share that does without remembering a previous round.
+//
+// unexplained means the gate and the description of it disagree. It should
+// stay at zero; a reading above zero is a defect in one of the two, not a
+// state of the Query Group, and is the reason the word exists rather than a
+// silent fallthrough.
+const (
+	RangeGateApplied               = "applied"
+	RangeGateCreationDisabled      = "range_creation_disabled"
+	RangeGateProgressMissing       = "progress_missing"
+	RangeGateNextSlotMoved         = "next_slot_moved"
+	RangeGateUnfinishedSlotPresent = "unfinished_slot_present"
+	RangeGateNoRangeFlight         = "no_range_flight"
+	RangeGateNotEligible           = "not_eligible"
+	RangeGateProofTooLarge         = "proof_too_large"
+	RangeGateUnexplained           = "unexplained"
+)
+
+// RangeGateOutcomes is every value the outcome takes, for the partition to
+// pre-create and for a reader to bound the family by.
+var RangeGateOutcomes = []string{
+	RangeGateApplied, RangeGateCreationDisabled, RangeGateProgressMissing, RangeGateNextSlotMoved,
+	RangeGateUnfinishedSlotPresent, RangeGateNoRangeFlight, RangeGateNotEligible,
+	RangeGateProofTooLarge, RangeGateUnexplained,
+}
+
+// RangeGateFacts is one round that gave up on a Slot, and what the catch-up
+// path did with it.
+//
+// The three values the gate compared travel beside the word, so a reader can
+// check the word against them rather than trust it -- the same reason both
+// candidate bounds travel on a distance expiry. They are locals of one
+// comparison and are kept nowhere else.
+type RangeGateFacts struct {
+	Outcome string `json:"outcome"`
+	// ProgressNextSlot and ExpectedNextSlot are the two the gate compares;
+	// ProgressPresent distinguishes a Progress record that is absent from one
+	// whose next Slot happens to be zero.
+	ProgressPresent  bool  `json:"progress_present"`
+	ProgressNextSlot int64 `json:"progress_next_slot"`
+	ExpectedNextSlot int64 `json:"expected_next_slot"`
+	// UnfinishedSlotPresent is the condition that would mean the Query Group
+	// is still holding the Slot it began, and the evaluation time says which.
+	UnfinishedSlotPresent        bool  `json:"unfinished_slot_present"`
+	UnfinishedSlotEvaluationTime int64 `json:"unfinished_slot_evaluation_time"`
+	RangeCreationEnabled         bool  `json:"range_creation_enabled"`
+}
+
+func normalizeRangeGateFacts(facts *RangeGateFacts) *RangeGateFacts {
+	if facts == nil {
+		return nil
+	}
+	normalized := *facts
+	known := false
+	for _, outcome := range RangeGateOutcomes {
+		if normalized.Outcome == outcome {
+			known = true
+			break
+		}
+	}
+	if !known {
+		normalized.Outcome = RangeGateUnexplained
+	}
+	return &normalized
+}
+
 // RangeBoundByDistance, RangeBoundByDeadline and RangeBoundByBoth name which
 // of the two candidate bounds produced an expired range.
 //
@@ -1681,6 +1755,7 @@ type Observation struct {
 	ScheduleCutover       *ScheduleCutoverFacts
 	ReplayExpiry          *ReplayExpiryFacts
 	RangeDistance         *RangeDistanceFacts
+	RangeGate             *RangeGateFacts
 	SlotWait              *SlotWaitFacts
 	ObjectCatalog         *ObjectCatalogFacts
 	ObjectRead            *ObjectReadFacts
@@ -1801,6 +1876,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.Rebalance = normalizeRebalanceFacts(observation.Rebalance)
 	observation.ControlReads = normalizeControlReadFacts(observation.ControlReads)
 	observation.RangeDistance = normalizeRangeDistanceFacts(observation.RangeDistance)
+	observation.RangeGate = normalizeRangeGateFacts(observation.RangeGate)
 	observation.AssignmentIndex = normalizeAssignmentIndexFacts(observation.AssignmentIndex)
 	observation.CursorAdvance = normalizeCursorAdvanceFacts(observation.CursorAdvance)
 	observation.SourceRefresh = normalizeSourceRefreshFacts(observation.Component, observation.Stage, observation.SourceRefresh)
@@ -2682,6 +2758,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageRunnerCompleted}, {ComponentScheduler, StageSlotSourceCompleted},
 	{ComponentScheduler, StageScheduleCursorAdvanced}, {ComponentScheduler, StageReplayExpired},
 	{ComponentScheduler, StageRangeDistanceExpired},
+	{ComponentScheduler, StageRangeGateDecided},
 	{ComponentScheduler, StageSlotWait},
 	{ComponentAccess, StageQueryCompleted},
 	{ComponentAccess, StageQueryBudgetResolved},
