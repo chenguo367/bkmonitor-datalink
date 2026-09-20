@@ -1382,8 +1382,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	started := time.Now()
 	evaluated, err := stream.coordinator.ports.Evaluator.Evaluate(ctx, request)
 	if err != nil {
-		stream.coordinator.observe(ctx, observability.ComponentEvaluation, observability.StageEvaluationCompleted,
-			stream.request.Operation, started, "", "", err)
+		stream.observeEvaluationFailure(ctx, started, due, err)
 		return wrapEvaluationError(codeEvaluationFailed, fmt.Errorf("alarmd worker: evaluate series: %w", err))
 	}
 	incomplete := make([]execution.NamedInputBinding, 0)
@@ -1408,8 +1407,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 		evaluated.Plans[0].GuardAfterState = nil
 	}
 	if err := evaluated.Validate(request); err != nil {
-		stream.coordinator.observe(ctx, observability.ComponentEvaluation, observability.StageEvaluationCompleted,
-			stream.request.Operation, started, "", "", err)
+		stream.observeEvaluationFailure(ctx, started, due, err)
 		return wrapEvaluationError(codeEvaluationResultInvalid, fmt.Errorf("alarmd worker: invalid series evaluation: %w", err))
 	}
 	stream.observeEvaluationCompleted(ctx, started, due, series, inputs, evaluated)
@@ -1454,11 +1452,25 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 		Result: evaluated.Result, Operation: observability.Operation(stream.request.Operation),
 		Direction: observability.DirectionInternal, ReasonCode: evaluated.ReasonCode,
 		Duration: time.Since(started), Counts: observability.Counts{Records: evaluationRecordCount(inputs)},
+		DurationKnown: true, EvaluationOwner: costEvaluationOwner(due.Identity), EvaluationRecordsKnown: true,
 		Trace:                observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID, DimensionIdentityDigest: string(series)},
 		AlgorithmEvaluations: evaluations, AlgorithmInputs: namedInputs,
 		RecoveryGates: recoveryGateFacts(due, evaluated), OpenAlertGates: openAlertGateFacts(due, evaluated),
 	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
+}
+
+func costEvaluationOwner(identity execution.PlanIdentity) observability.CostPlanIdentity {
+	return observability.CostPlanIdentity{TenantID: identity.TenantID, BusinessID: identity.BusinessID, StrategyID: identity.StrategyID}
+}
+
+func (stream *streamedExecution) observeEvaluationFailure(ctx context.Context, started time.Time, due execution.DuePlan, err error) {
+	stream.coordinator.emitObservation(ctx, observability.Observation{
+		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
+		Operation: observability.Operation(stream.request.Operation), Direction: observability.DirectionInternal,
+		Duration: time.Since(started), DurationKnown: true, Err: err,
+		EvaluationOwner: costEvaluationOwner(due.Identity),
+	})
 }
 
 // openAlertGateFacts carries what the second recovery gate did with the
@@ -1514,6 +1526,7 @@ func (stream *streamedExecution) observeCompletionOnlyPlan(
 		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
 		Result: evaluated.Result, Operation: observability.Operation(stream.request.Operation),
 		Direction: observability.DirectionInternal, ReasonCode: evaluated.ReasonCode,
+		EvaluationOwner: costEvaluationOwner(due.Identity), EvaluationRecordsKnown: true,
 		Trace:           observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID},
 		AlgorithmInputs: stream.completionOnlyAlgorithmInputFacts(due),
 	}
