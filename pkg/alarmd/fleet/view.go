@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
-	gapstatus "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -253,6 +253,9 @@ type FailureRef struct {
 // refusal shown is the latest among the object's refused Plans and Plans
 // says how many of them are refused; the row's strategies name them all.
 type NoDataMemoryRefusal struct {
+	// Kind is which upkeep the store refused, WRITE or RENEWAL; Reason is
+	// the store's reason code for it.
+	Kind   string `json:"kind"`
 	Reason string `json:"reason"`
 	Record string `json:"record,omitempty"`
 	// Groups and Limit are the measurement behind a bound refusal. It used to
@@ -264,6 +267,57 @@ type NoDataMemoryRefusal struct {
 	Refusals int         `json:"refusals"`
 	Plan     StrategyRef `json:"plan"`
 	Plans    int         `json:"plans,omitempty"`
+}
+
+// Memory upkeep the store refused, as this row names it. The write is the
+// refusal the row was made for: the round's memory was not taken, and the
+// store keeps the last one it did. The renewal is the one a memory kept one
+// field per group can lose: such a Plan writes nothing while its groups are
+// steady, so the renewal on every read is all that keeps its key alive, and
+// a renewal the store will not do is a memory on its way to expiring whole
+// -- after which every group starts again with no history. Different loss,
+// same line: detection that stopped remembering, silently.
+const (
+	NoDataMemoryRefusalWrite   = "WRITE"
+	NoDataMemoryRefusalRenewal = "RENEWAL"
+)
+
+// NoDataMemoryRefusalKinds is the closed list, for the page's wording table.
+var NoDataMemoryRefusalKinds = []string{NoDataMemoryRefusalWrite, NoDataMemoryRefusalRenewal}
+
+// NoDataMemoryRepresentations is every stored shape a read can name, as the
+// emitter defines them; for the page's wording table.
+var NoDataMemoryRepresentations = func() []string {
+	names := make([]string, 0, len(model.NoDataRepresentations))
+	for _, representation := range model.NoDataRepresentations {
+		names = append(names, string(representation))
+	}
+	return names
+}()
+
+// NoDataMemoryUpkeep is the last this process saw of a Plan's absence memory
+// being kept alive, on the object row: which stored shape the last read came
+// from, when a renewal last reached the store and whether it renewed, and the
+// lifetime a renewal sets. This is the positive evidence. A memory that is
+// alive reads exactly like one about to expire, and the write family is
+// silent for a steady Plan by design, so neither says whether upkeep works;
+// a renewal that reached the store and answered does.
+type NoDataMemoryUpkeep struct {
+	Plan StrategyRef `json:"plan"`
+	// Representation is what the last read said the memory was stored as:
+	// NONE, WHOLE_MEMORY or PER_GROUP, as the emitter names them.
+	Representation string     `json:"representation,omitempty"`
+	LastReadAt     *time.Time `json:"last_read_at,omitempty"`
+	// LastAttemptAt is the last renewal that reached the store, whatever it
+	// answered; LastRenewedAt the last that set a new lifetime. The store
+	// answers "enough life left" to most, which is not a failure. Pointers,
+	// so a clock nothing has set is absent rather than the zero time.
+	LastAttemptAt *time.Time `json:"last_attempt_at,omitempty"`
+	LastRenewedAt *time.Time `json:"last_renewed_at,omitempty"`
+	TTLSeconds    int64      `json:"ttl_seconds,omitempty"`
+	// Plans is how many of the object's Plans this process has seen memory
+	// upkeep for; the row carries the one attempted most recently.
+	Plans int `json:"plans,omitempty"`
 }
 
 // LastError is the last error a round of this object returned.
@@ -339,7 +393,7 @@ type GapGuard struct {
 // scope's Status and Progress take, as the emitter defines them; here for the
 // page's completeness test, which holds its words to these lists.
 var (
-	GapGuardStatuses  = []string{string(gapstatus.GapStatusGapped), string(gapstatus.GapStatusWarming)}
+	GapGuardStatuses  = []string{string(model.GapStatusGapped), string(model.GapStatusWarming)}
 	GapProgressValues = contract.GapScopeProgressValues
 )
 
@@ -680,6 +734,11 @@ type Anomaly struct {
 	// NoDataMemory is on rows of KindNoDataMemoryRefused: the refusal the
 	// row lists, whole.
 	NoDataMemory *NoDataMemoryRefusal `json:"no_data_memory,omitempty"`
+	// NoDataMemoryUpkeep is on every row of an object whose Plans this
+	// process has seen the store keep a memory alive for: the last read's
+	// stored shape and the last renewal. Absent until a renewal reached the
+	// store or a read said what it read.
+	NoDataMemoryUpkeep *NoDataMemoryUpkeep `json:"no_data_memory_upkeep,omitempty"`
 	// ConfigChanged says the object's snapshot, query or schedule revision
 	// differs between its last two completed rounds: the configuration it
 	// runs under actually changed. It is the one fact that tells a

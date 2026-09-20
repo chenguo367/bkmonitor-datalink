@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	gapstatus "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -182,6 +182,11 @@ type queryGroupState struct {
 	// the object is listed while any entry remains, and recovers when the
 	// last one goes -- one Plan's write storing says nothing about another's.
 	noDataMemory map[StrategyRef]*NoDataMemoryRefusal
+	// upkeep is the last this process saw of the store keeping this object's
+	// memories alive, by Plan: the last read's stored shape and the last
+	// renewal that reached the store. Positive evidence, kept apart from the
+	// refusals above; the row carries the Plan attempted most recently.
+	upkeep map[StrategyRef]*NoDataMemoryUpkeep
 	// guards is the held gap scopes reported for this object, by Plan and
 	// scope, with the completion generation each was last reported in. A
 	// completion prunes the scopes the round did not report -- a released
@@ -559,7 +564,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	cursorAdvance := observation.CursorAdvance
 	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" &&
 		failure == nil && observation.QueryCooldown == nil && cursorAdvance == nil &&
-		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil && observation.GapProgress == nil {
+		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil && observation.GapProgress == nil &&
+		observation.NoDataMemoryRead == nil && observation.NoDataMemoryRenewal == nil {
 		return
 	}
 
@@ -607,14 +613,60 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			state.noDataMemory = map[StrategyRef]*NoDataMemoryRefusal{}
 		}
 		memory := state.noDataMemory[plan]
-		if memory == nil {
-			memory = &NoDataMemoryRefusal{FirstAt: at, Plan: plan}
+		if memory == nil || memory.Kind != NoDataMemoryRefusalWrite {
+			// A Plan whose renewal was refused and whose write is now refused
+			// too is listed for the write: the write is the loss that stands
+			// whatever happens to the key's lifetime.
+			memory = &NoDataMemoryRefusal{Kind: NoDataMemoryRefusalWrite, FirstAt: at, Plan: plan}
 			state.noDataMemory[plan] = memory
 		}
 		memory.Reason, memory.Record, memory.Groups, memory.Limit =
 			refusal.Reason, refusal.Record, refusal.Groups, refusal.Limit
 		memory.LastAt = at
 		memory.Refusals++
+	}
+	// What the last read said the memory was stored as. On every read of a
+	// Plan with a memory, so the row can say what it has -- and, once the
+	// rollout is over, that nothing is still on the old record.
+	if read := observation.NoDataMemoryRead; read != nil {
+		upkeep := state.upkeepOf(plan)
+		readAt := at
+		upkeep.Representation, upkeep.LastReadAt = read.Representation, &readAt
+	}
+	// A renewal that reached the store. Success -- whether or not it set a
+	// new lifetime; "enough life left" is the ordinary answer -- is the one
+	// positive fact about upkeep, and it ends a refused renewal for the Plan.
+	// A refusal is listed at once and stays until a renewal or a write goes
+	// through: the store is asked again every round while it refuses, and a
+	// memory whose key nobody can renew is on its way to expiring for as long
+	// as that lasts.
+	if renewal := observation.NoDataMemoryRenewal; renewal != nil {
+		upkeep := state.upkeepOf(plan)
+		attemptAt := at
+		upkeep.LastAttemptAt, upkeep.TTLSeconds = &attemptAt, renewal.TTLSeconds
+		if renewal.Renewed {
+			renewedAt := at
+			upkeep.LastRenewedAt = &renewedAt
+		}
+		reason := string(observation.ReasonCode)
+		if observation.Result == observability.ResultSuccess || reason == "" || reason == string(observability.ReasonNone) {
+			if memory := state.noDataMemory[plan]; memory != nil && memory.Kind == NoDataMemoryRefusalRenewal {
+				tracker.endMemoryRefusal(queryGroup, state, plan, at)
+			}
+		} else {
+			if state.noDataMemory == nil {
+				state.noDataMemory = map[StrategyRef]*NoDataMemoryRefusal{}
+			}
+			memory := state.noDataMemory[plan]
+			if memory == nil {
+				memory = &NoDataMemoryRefusal{Kind: NoDataMemoryRefusalRenewal, FirstAt: at, Plan: plan}
+				state.noDataMemory[plan] = memory
+			}
+			if memory.Kind == NoDataMemoryRefusalRenewal {
+				memory.Reason, memory.LastAt = reason, at
+				memory.Refusals++
+			}
+		}
 	}
 	// A write that went through ends that Plan's refusal: the store now holds
 	// what the round wanted written, which is the one positive fact recovery
@@ -627,13 +679,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// goes: two Plans of one object refused and one of them storing is one
 	// Plan recovered and an object still listed, and read on, it was the
 	// whole object recovered on the strength of the wrong Plan's write.
+	// A stored write also sets the key's lifetime, so it ends a refused
+	// renewal as much as a refused write.
 	if write := observation.NoDataMemoryWrite; write != nil && write.Stored && state.noDataMemory[plan] != nil {
-		if len(state.noDataMemory) == 1 {
-			tracker.noteMemoryRecovery(queryGroup, state, at)
-			state.noDataMemory = nil
-		} else {
-			delete(state.noDataMemory, plan)
-		}
+		tracker.endMemoryRefusal(queryGroup, state, plan, at)
 	}
 	// Recorded before anything else, because it is not a round and none of the
 	// round bookkeeping below applies to it. The object is very likely running
@@ -1169,6 +1218,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		Restored:      state.restoredRound,
 	}
 	anomaly.Guards, anomaly.GuardsTotal = worstGuards(state.guards)
+	anomaly.NoDataMemoryUpkeep = latestUpkeep(state)
 	if anomaly.Kind == "" && state.queryCooldown != nil {
 		anomaly.Kind = KindQueryCooldown
 		if anomaly.Since.IsZero() {
@@ -1207,7 +1257,7 @@ func worstGuards(held map[string]*gapGuardState) ([]GapGuard, int) {
 	}
 	sort.Slice(guards, func(i, j int) bool {
 		left, right := guards[i], guards[j]
-		gapped := string(gapstatus.GapStatusGapped)
+		gapped := string(model.GapStatusGapped)
 		if (left.Status == gapped) != (right.Status == gapped) {
 			return left.Status == gapped
 		}
@@ -1383,6 +1433,57 @@ func (tracker *Tracker) NoData() []Anomaly {
 	return anomalies
 }
 
+// upkeepOf is the Plan's upkeep record, made on first sight.
+func (state *queryGroupState) upkeepOf(plan StrategyRef) *NoDataMemoryUpkeep {
+	if state.upkeep == nil {
+		state.upkeep = map[StrategyRef]*NoDataMemoryUpkeep{}
+	}
+	upkeep := state.upkeep[plan]
+	if upkeep == nil {
+		upkeep = &NoDataMemoryUpkeep{Plan: plan}
+		state.upkeep[plan] = upkeep
+	}
+	return upkeep
+}
+
+// endMemoryRefusal removes one Plan's refusal; the object recovers when the
+// last one goes, and the recovery is recorded under the line and fold the
+// row was on. Two Plans of one object refused and one of them ending is one
+// Plan recovered and an object still listed.
+func (tracker *Tracker) endMemoryRefusal(queryGroup string, state *queryGroupState, plan StrategyRef, at time.Time) {
+	if len(state.noDataMemory) == 1 {
+		tracker.noteMemoryRecovery(queryGroup, state, at)
+		state.noDataMemory = nil
+		return
+	}
+	delete(state.noDataMemory, plan)
+}
+
+// latestUpkeep is the object's upkeep as the row carries it: the Plan whose
+// renewal reached the store most recently (or, before any did, whose memory
+// was read most recently), with how many Plans have upkeep at all.
+func latestUpkeep(state *queryGroupState) *NoDataMemoryUpkeep {
+	if len(state.upkeep) == 0 {
+		return nil
+	}
+	stamp := func(at *time.Time) time.Time {
+		if at == nil {
+			return time.Time{}
+		}
+		return *at
+	}
+	var latest *NoDataMemoryUpkeep
+	for _, candidate := range state.upkeep {
+		if latest == nil || stamp(candidate.LastAttemptAt).After(stamp(latest.LastAttemptAt)) ||
+			(stamp(candidate.LastAttemptAt).Equal(stamp(latest.LastAttemptAt)) && stamp(candidate.LastReadAt).After(stamp(latest.LastReadAt))) {
+			latest = candidate
+		}
+	}
+	copied := *latest
+	copied.Plans = len(state.upkeep)
+	return &copied
+}
+
 // NoDataMemory is every object one of whose Plans the store has refused an
 // absence memory for. Under no column: the rounds complete and the health
 // equation counts the object as healthy, which as far as its threshold
@@ -1442,7 +1543,10 @@ func (tracker *Tracker) memoryRowOf(queryGroup string, state *queryGroupState) A
 		QueryGroup: queryGroup, Kind: KindNoDataMemoryRefused, ReasonCode: memory.Reason,
 		Since: first, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
 		ReasonSince: first, ReasonLastAt: memory.LastAt, Consecutive: refusals,
-		NoDataMemory: &memory, Strategies: strategies,
+		NoDataMemory: &memory, NoDataMemoryUpkeep: latestUpkeep(state), Strategies: strategies,
+		// The object's rounds complete; the row says when the last did, so
+		// the loss reads as the memory's and not as the round's.
+		LastHealthyAt: state.lastHealthyAt,
 	}
 }
 

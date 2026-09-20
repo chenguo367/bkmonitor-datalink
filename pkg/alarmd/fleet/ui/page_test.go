@@ -755,6 +755,10 @@ func TestThePageHasWordingForEveryLoadState(t *testing.T) {
 		{"RECOVERY_STATE", stringsOf(fleet.RecoveryStates)},
 		// And the status of a held gap guard on the object row.
 		{"GUARD_STATUS", fleet.GapGuardStatuses},
+		// Which upkeep of an absence memory the store refused, and which
+		// stored shape a read of one found.
+		{"MEMORY_REFUSAL_KIND", fleet.NoDataMemoryRefusalKinds},
+		{"MEMORY_REPRESENTATION", fleet.NoDataMemoryRepresentations},
 	}
 	for _, table := range tables {
 		found := regexp.MustCompile(`var ` + table.name + ` = \{([\s\S]*?)\};`).FindStringSubmatch(body)
