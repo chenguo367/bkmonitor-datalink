@@ -896,10 +896,11 @@ func (stream *streamedExecution) observeNoDataRenewals(ctx context.Context) {
 // exists to answer.
 func (stream *streamedExecution) observeNoDataRepresentations(ctx context.Context) {
 	for _, snapshot := range stream.noData.Items {
+		// The store stamps NONE on a snapshot that read no record, so this
+		// reads the value rather than deciding it. It used to decide it, and
+		// the empty spelling then reached a reader that had no way to tell
+		// "no record" from "nobody said".
 		representation := snapshot.Representation
-		if representation == "" {
-			representation = execution.NoDataRepresentationNone
-		}
 		stream.coordinator.emitObservation(ctx, observability.Observation{
 			Component: observability.ComponentState, Stage: observability.StageNoDataMemoryRead,
 			Operation: observability.Operation(stream.request.Operation),

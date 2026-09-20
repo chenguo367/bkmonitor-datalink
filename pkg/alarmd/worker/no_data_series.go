@@ -379,10 +379,34 @@ func (coordinator *SlotExecutionCoordinator) observeNoDataMemoryWrite(
 		Trace: observability.TraceFields{
 			StrategyID: item.Identity.Plan.StrategyID, BusinessID: item.Identity.Plan.BusinessID,
 		},
-		NoDataMemoryWrite: &observability.NoDataMemoryWriteFacts{
-			Outcome: string(item.Status), Stored: stored,
-		},
+		NoDataMemoryWrite: noDataMemoryWriteFacts(item, stored),
 	})
+}
+
+// noDataMemoryWriteFacts is what the line says about one write.
+//
+// The conflict, when there is one, travels with it. A conflict carries no
+// reason code -- it is a comparison the write lost, not a rejection -- so
+// without these values the line reports that the write did not happen and
+// nothing about which comparison refused it or what the two sides were. That
+// is not a shortcoming anybody would notice until it mattered: a fleet whose
+// every memory write was refused read as reason_not_reported for a day, while
+// the store had the failing comparison in hand the whole time.
+func noDataMemoryWriteFacts(
+	item execution.NoDataApplyItemResult, stored bool,
+) *observability.NoDataMemoryWriteFacts {
+	facts := &observability.NoDataMemoryWriteFacts{Outcome: string(item.Status), Stored: stored}
+	if conflict := item.Conflict; conflict != nil {
+		facts.DerivedFrom = string(conflict.DerivedFrom)
+		facts.Conflict = &observability.NoDataMemoryConflictFacts{
+			Kind:             string(conflict.Kind),
+			Persisted:        string(conflict.Persisted),
+			Proposed:         string(conflict.Proposed),
+			ExpectedRevision: conflict.ExpectedRevision,
+			StoredRevision:   conflict.StoredRevision,
+		}
+	}
+	return facts
 }
 
 // observeNoDataMemoryRefusal reports one Plan the store would not take a

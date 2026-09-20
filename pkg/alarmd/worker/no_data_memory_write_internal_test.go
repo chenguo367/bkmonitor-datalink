@@ -18,8 +18,12 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
-// answeringNoDataStore answers every write with one chosen status.
-type answeringNoDataStore struct{ status execution.NoDataApplyStatus }
+// answeringNoDataStore answers every write with one chosen status, and with
+// the conflict facts the store would have attached to it.
+type answeringNoDataStore struct {
+	status   execution.NoDataApplyStatus
+	conflict *execution.NoDataConflictFacts
+}
 
 func (store *answeringNoDataStore) LoadNoData(
 	_ context.Context, request execution.NoDataLoadRequest,
@@ -27,7 +31,11 @@ func (store *answeringNoDataStore) LoadNoData(
 	result := execution.NoDataLoadResult{Items: make([]execution.NoDataMemorySnapshot, len(request.Items))}
 	for index, item := range request.Items {
 		result.Items[index] = execution.NoDataMemorySnapshot{
+			// NONE rather than an unset field: the store stamps it, and a
+			// double that leaves it empty is standing in for a snapshot the
+			// store cannot produce.
 			Identity: item.Identity, Status: execution.NoDataMemoryMissing,
+			Representation: execution.NoDataRepresentationNone,
 		}
 	}
 	return result, nil
@@ -38,7 +46,9 @@ func (store *answeringNoDataStore) ApplyNoData(
 ) (execution.NoDataApplyResult, error) {
 	result := execution.NoDataApplyResult{Items: make([]execution.NoDataApplyItemResult, len(request.Items))}
 	for index, mutation := range request.Items {
-		result.Items[index] = execution.NoDataApplyItemResult{Identity: mutation.Identity, Status: store.status}
+		result.Items[index] = execution.NoDataApplyItemResult{
+			Identity: mutation.Identity, Status: store.status, Conflict: store.conflict,
+		}
 	}
 	return result, nil
 }
@@ -149,5 +159,60 @@ func TestARefusedWriteIsNotAlsoReportedAsAWrite(t *testing.T) {
 		if observation.Stage == observability.StageNoDataMemoryWritten {
 			t.Fatalf("a refused write was also counted as a write: %+v", observation.NoDataMemoryWrite)
 		}
+	}
+}
+
+// The comparison a refused write lost reaches the line.
+//
+// This is the step that was missing, and its absence is why a fleet-wide
+// refusal read as reason_not_reported for a day: the store named the failing
+// comparison and both of its values on every item, the line rendered neither,
+// and nothing between them was wrong enough to fail. A conflict carries no
+// reason code -- it is a comparison, not a rejection -- so these values are the
+// only thing the line can say about why the memory was not kept.
+func TestARefusedNoDataMemoryWriteReportsTheComparisonTheStoreMade(t *testing.T) {
+	observed := make([]observability.Observation, 0, 2)
+	store := &answeringNoDataStore{
+		status: execution.NoDataConflict,
+		conflict: &execution.NoDataConflictFacts{
+			Kind: execution.StateVersionConflictMissing, Persisted: "stored-digest", Proposed: "proposed-digest",
+			ExpectedRevision: 7, StoredRevision: 0,
+			DerivedFrom: execution.NoDataRepresentationWholeMemory,
+		},
+	}
+	coordinator := &SlotExecutionCoordinator{ports: Ports{
+		NoData: store, Hosts: SharedHostBusiness,
+		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+			observed = append(observed, observability.NormalizeObservation(observation))
+		}),
+	}}
+	if err := coordinator.applyNoDataMemory(context.Background(), execution.SlotExecutionRequest{
+		Operation: execution.OperationNormal,
+	}, []execution.PlanNoDataMutation{refusedMemoryMutation(t)}); err != nil {
+		t.Fatalf("applyNoDataMemory() error: %v", err)
+	}
+	var facts *observability.NoDataMemoryWriteFacts
+	for _, observation := range observed {
+		if observation.Stage == observability.StageNoDataMemoryWritten {
+			facts = observation.NoDataMemoryWrite
+		}
+	}
+	if facts == nil {
+		t.Fatalf("no write line was reported: %+v", observed)
+	}
+	if facts.Conflict == nil {
+		t.Fatal("the refused write reported no comparison. The store made one and named both its sides; " +
+			"a line without them says the memory was not kept and nothing about why")
+	}
+	want := observability.NoDataMemoryConflictFacts{
+		Kind: string(execution.StateVersionConflictMissing), Persisted: "stored-digest",
+		Proposed: "proposed-digest", ExpectedRevision: 7, StoredRevision: 0,
+	}
+	if *facts.Conflict != want {
+		t.Fatalf("conflict facts = %+v, want %+v", *facts.Conflict, want)
+	}
+	if facts.DerivedFrom != string(execution.NoDataRepresentationWholeMemory) {
+		t.Fatalf("derived-from = %q, want the record the statement was built from; it is what tells a "+
+			"rollout apart from a race between two writers of the same record", facts.DerivedFrom)
 	}
 }

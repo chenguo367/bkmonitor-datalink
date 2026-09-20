@@ -152,6 +152,14 @@ func (backend *casMemoryBackend) ApplyHashDelta(
 			return HashDeltaOutcome{Status: HashDeltaConflict, Current: header}, nil
 		}
 	}
+	if write.Replace {
+		// The script's DEL, restated rather than assumed. A double that laid a
+		// whole-memory statement on top of what the record held would leave the
+		// groups the statement no longer has -- which is exactly the mixture
+		// nobody wrote, and the reason this branch exists.
+		fields = nil
+		delete(backend.hashes, write.Key)
+	}
 	if fields == nil {
 		fields = make(map[string][]byte)
 		if backend.hashes == nil {

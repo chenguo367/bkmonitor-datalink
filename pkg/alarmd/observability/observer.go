@@ -442,6 +442,36 @@ type NoDataMemoryWriteFacts struct {
 	// It is carried rather than derived at each reader, so the one place that
 	// decides which outcomes count is the one place anybody has to agree with.
 	Stored bool
+	// Conflict is the comparison that refused the write, and is set only on a
+	// conflict.
+	//
+	// A refusal that names no values is not something anyone can act on. A
+	// whole fleet's writes were refused for a day and the line said
+	// reason_not_reported: the store knew which comparison failed and what the
+	// two sides were, and none of it left the store. The reason code cannot
+	// carry it either, because a conflict is not a rejection and has none.
+	Conflict *NoDataMemoryConflictFacts
+	// DerivedFrom is the record the refused statement was built from. It is
+	// what tells a conflict during a rollout -- a Plan still writing from the
+	// whole-memory record -- from one between two writers of the same record.
+	DerivedFrom string
+}
+
+// NoDataMemoryConflictFacts is the comparison a refused memory write lost.
+type NoDataMemoryConflictFacts struct {
+	// Kind is the store-wide conflict vocabulary, so this line and the runtime
+	// state's answer one query rather than two.
+	Kind string
+	// Persisted and Proposed are the two memory digests. Empty on a conflict
+	// about which record exists rather than about what it says.
+	Persisted string
+	Proposed  string
+	// ExpectedRevision is what the statement was derived against and
+	// StoredRevision what the record holds. Both are always rendered, because
+	// the pair is the comparison: either alone leaves a reader guessing which
+	// way it went.
+	ExpectedRevision uint64
+	StoredRevision   uint64
 }
 
 // NoDataMemoryReadFacts says which stored shape one Plan's memory came from.
