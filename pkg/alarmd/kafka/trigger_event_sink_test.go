@@ -21,13 +21,16 @@ import (
 	"github.com/Shopify/sarama"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 )
 
-func TestTriggerEventSinkPublishesOfficialWireWithEmptyKeyAfterBrokerACK(t *testing.T) {
+func TestTriggerEventSinkPublishesRawEventAfterBrokerACK(t *testing.T) {
 	t.Parallel()
 
 	event := triggerEventGolden(t)
-	wantPayload, err := contract.EncodeTriggerEventV1(&event)
+	converter, _ := linkdoutput.NewConverter(nil)
+	wantEvent, err := converter.Convert(&event)
+	wantPayload := wantEvent.Payload
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +57,7 @@ func TestTriggerEventSinkPublishesOfficialWireWithEmptyKeyAfterBrokerACK(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message.Topic != "alarmd-trigger-event-shadow" || message.Key != nil || !bytes.Equal(value, wantPayload) {
+	if message.Topic != "alarmd-trigger-event-shadow" || message.Key == nil || !bytes.Equal(value, wantPayload) {
 		t.Fatalf("message = topic:%q key:%#v value:%s", message.Topic, message.Key, value)
 	}
 	release <- nil
@@ -118,13 +121,26 @@ func testTriggerEventSinkPublishesSnapshotProtocol(t *testing.T, kind string) {
 	if err := sink.WriteBatch(context.Background(), []contract.TriggerEventV1{*event}); err != nil {
 		t.Fatal(err)
 	}
-	decoded, err := contract.DecodeTriggerEventV1(payload)
-	if err != nil {
+	var decoded struct {
+		Labels struct {
+			StrategyID int64 `json:"strategy_id"`
+			Revision   int64 `json:"strategy_version"`
+		} `json:"labels"`
+		Evaluations []struct {
+			Action string `json:"action"`
+		} `json:"evaluations"`
+	}
+	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.EventKind != kind || decoded.Schema.Minor != 2 || decoded.DedupeMD5 != event.DedupeMD5 || decoded.StrategyRef == nil || *decoded.StrategyRef != *event.StrategyRef {
-		t.Fatalf("Kafka payload lost snapshot reference: %s", payload)
+	wantAction := "triggered"
+	if kind == contract.TriggerEventRecovery {
+		wantAction = "resolved"
 	}
+	if decoded.Labels.StrategyID != event.StrategyRef.StrategyID || decoded.Labels.Revision != event.StrategyRef.Revision || decoded.Evaluations[0].Action != wantAction {
+		t.Fatalf("RawEvent lost snapshot/action: %s", payload)
+	}
+
 	firstPayload := append([]byte(nil), payload...)
 	if err := sink.WriteBatch(context.Background(), []contract.TriggerEventV1{*event}); err != nil {
 		t.Fatal(err)
@@ -279,7 +295,7 @@ func TestTriggerEventSinkDoesNotMarkLocalLifecycleFailureRetryable(t *testing.T)
 func triggerEventGolden(t testing.TB) contract.TriggerEventV1 {
 	t.Helper()
 	legacy := legacyTriggerEventGolden(t)
-	event, err := contract.BuildTriggerEventV1(contract.TriggerEventBuildInputV1{EventKind: legacy.EventKind, TenantID: legacy.TenantID, BusinessID: legacy.BusinessID, PlanRef: legacy.PlanRef, RecordRef: legacy.RecordRef, Observed: legacy.Observed, LevelResults: legacy.LevelResults, EvaluationTime: legacy.EvaluationTime, DetectPlanFingerprint: legacy.DetectPlanFingerprint, TriggerStateFingerprint: legacy.TriggerStateFingerprint, ExecutionID: legacy.Trace.ExecutionID, MaxEvidenceBytes: 64 << 10, StrategyRef: &contract.StrategySnapshotRef{TenantID: legacy.TenantID, BusinessID: 2, StrategyID: 1001, Revision: 7}})
+	event, err := contract.BuildTriggerEventV1(contract.TriggerEventBuildInputV1{EventKind: legacy.EventKind, TenantID: legacy.TenantID, BusinessID: legacy.BusinessID, PlanRef: legacy.PlanRef, RecordRef: legacy.RecordRef, Observed: legacy.Observed, LevelResults: legacy.LevelResults, EvaluationTime: legacy.EvaluationTime, DetectPlanFingerprint: legacy.DetectPlanFingerprint, TriggerStateFingerprint: legacy.TriggerStateFingerprint, ExecutionID: legacy.Trace.ExecutionID, MaxEvidenceBytes: 64 << 10, DedupeMD5: "0260bae09d2ae3f75683bd06a76e9479", StrategyRef: &contract.StrategySnapshotRef{TenantID: legacy.TenantID, BusinessID: 2, StrategyID: 1001, Revision: 7}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +324,7 @@ func TestTriggerEventSinkPublishesTheRawEventWhenThePlanSaysSo(t *testing.T) {
 	event := triggerEventGolden(t)
 	event.WireFormat = contract.WireFormatStandardRawEvent
 	event.StrategyRef = &contract.StrategySnapshotRef{
-		TenantID: event.TenantID, BusinessID: 2, StrategyID: 123, Revision: 7,
+		TenantID: event.TenantID, BusinessID: 2, StrategyID: 1001, Revision: 7,
 	}
 	event.DedupeMD5 = strings.Repeat("b", 32)
 	event.BusinessID = "2"
@@ -370,13 +386,14 @@ func TestTriggerEventSinkPublishesTheRawEventWhenThePlanSaysSo(t *testing.T) {
 	}
 }
 
-// A Plan that did not ask for it keeps publishing exactly what it published
-// before. This is what makes the switch releasable ahead of its consumer.
-func TestAPlanWithNoFormatStillPublishesTheDecisionEvent(t *testing.T) {
+// Old frozen Plans no longer leak the internal envelope onto the output topic.
+func TestAPlanWithNoFormatPublishesRawEvent(t *testing.T) {
 	t.Parallel()
 
 	event := triggerEventGolden(t)
-	wantPayload, err := contract.EncodeTriggerEventV1(&event)
+	converter, _ := linkdoutput.NewConverter(nil)
+	wantEvent, err := converter.Convert(&event)
+	wantPayload := wantEvent.Payload
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -399,6 +416,91 @@ func TestAPlanWithNoFormatStillPublishesTheDecisionEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(value, wantPayload) {
-		t.Fatalf("value = %s, want the decision event unchanged", value)
+		t.Fatalf("value = %s, want the standard RawEvent", value)
+	}
+}
+
+func TestTriggerEventSinkOnlyPublishesTwoFormatsInMixedBatch(t *testing.T) {
+	for _, format := range []string{"", contract.WireFormatTriggerEvent, contract.WireFormatStandardRawEvent} {
+		t.Run(format, func(t *testing.T) {
+			native := triggerEventGolden(t)
+			native.WireFormat = format
+			// Even with a revision, a frozen Python context must keep the legacy route.
+			legacy := triggerEventGolden(t)
+			legacy.WireFormat = contract.WireFormatPythonCompatible
+			legacy.LegacyOutput = legacyEventForTest(t).LegacyOutput
+
+			producer := &batchAwareSyncProducer{}
+			sink, err := newTriggerEventSink("native", producer, &fakeCloser{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sink.Close()
+			if err := sink.ConfigureLegacyOutput(legacyConverterFunc(func(_ context.Context, events []contract.TriggerEventV1) ([]LegacyConvertedEvent, error) {
+				if len(events) != 1 {
+					t.Fatalf("legacy batch = %d, want 1", len(events))
+				}
+				result := make([]LegacyConvertedEvent, len(events))
+				for i, event := range events {
+					result[i] = LegacyConvertedEvent{EventID: event.EventID, DedupeMD5: event.DedupeMD5, Payload: []byte(`{"status":"ABNORMAL"}`)}
+				}
+				return result, nil
+			}), "alarmd_legacy", 64<<10); err != nil {
+				t.Fatal(err)
+			}
+			if err := sink.WriteBatch(context.Background(), []contract.TriggerEventV1{native, legacy}); err != nil {
+				t.Fatal(err)
+			}
+			if producer.batchCalls != 1 || len(producer.messages) != 2 {
+				t.Fatal("mixed batch did not share broker ACK")
+			}
+			for i, message := range producer.messages {
+				payload, _ := message.Value.Encode()
+				var fields map[string]json.RawMessage
+				if err := json.Unmarshal(payload, &fields); err != nil {
+					t.Fatal(err)
+				}
+				if fields["event_kind"] != nil || fields["schema"] != nil {
+					t.Fatalf("internal TriggerEvent leaked: %s", payload)
+				}
+				if i == 0 {
+					if message.Topic != "native" || fields["alert_id"] == nil || fields["labels"] == nil || len(message.Headers) != 1 {
+						t.Fatalf("not RawEvent: %+v %s", message, payload)
+					}
+				} else if message.Topic != "alarmd_legacy" || fields["status"] == nil {
+					t.Fatalf("not Python compatible: %s", payload)
+				}
+			}
+		})
+	}
+}
+
+func TestTriggerEventSinkRefusesInvalidRoutingWithoutPublishingPartialBatch(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		change func(*contract.TriggerEventV1)
+	}{
+		{"unknown format", func(e *contract.TriggerEventV1) { e.WireFormat = "unknown" }},
+		{"missing series identity", func(e *contract.TriggerEventV1) { e.DedupeMD5 = ""; e.Schema.Minor = 1 }},
+		{"python without frozen context", func(e *contract.TriggerEventV1) { e.WireFormat = contract.WireFormatPythonCompatible }},
+		{"invalid snapshot identity", func(e *contract.TriggerEventV1) { e.StrategyRef.Revision = 0 }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			good := triggerEventGolden(t)
+			bad := triggerEventGolden(t)
+			test.change(&bad)
+			producer := &batchAwareSyncProducer{}
+			sink, err := newTriggerEventSink("native", producer, &fakeCloser{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer sink.Close()
+			if err := sink.WriteBatch(context.Background(), []contract.TriggerEventV1{good, bad}); err == nil {
+				t.Fatal("invalid routing accepted")
+			}
+			if producer.batchCalls != 0 || producer.singleCalls != 0 {
+				t.Fatal("partial batch published")
+			}
+		})
 	}
 }

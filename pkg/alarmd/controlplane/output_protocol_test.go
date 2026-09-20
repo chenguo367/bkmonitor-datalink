@@ -21,14 +21,17 @@ func TestTheDeploymentChoiceResolvesToOneFormatPerStrategy(t *testing.T) {
 		want       string
 		honoured   bool
 	}{
-		"unset keeps what the revision already decided": {
-			configured: "", revision: 7, want: contract.WireFormatTriggerEvent, honoured: true,
+		"unset with revision publishes standard raw event": {
+			configured: "", revision: 7, want: contract.WireFormatStandardRawEvent, honoured: true,
 		},
 		"unset and no revision is the compatibility protocol": {
 			configured: "", revision: 0, want: contract.WireFormatPythonCompatible, honoured: true,
 		},
-		"auto is the same rule, named": {
-			configured: outputProtocolAuto, revision: 7, want: contract.WireFormatTriggerEvent, honoured: true,
+		"auto with revision publishes standard raw event": {
+			configured: outputProtocolAuto, revision: 7, want: contract.WireFormatStandardRawEvent, honoured: true,
+		},
+		"auto without revision publishes compatibility protocol": {
+			configured: outputProtocolAuto, revision: 0, want: contract.WireFormatPythonCompatible, honoured: true,
 		},
 		"legacy forces compatibility even with a revision": {
 			configured: outputProtocolLegacy, revision: 7, want: contract.WireFormatPythonCompatible, honoured: true,
@@ -84,8 +87,8 @@ func TestTheEffectiveFormatIsTheFrozenWordOrTheRevisionRuleNamedAsSuch(t *testin
 		"frozen compatibility with a revision stays compatibility": {
 			frozen: contract.WireFormatPythonCompatible, revision: 7, want: contract.WireFormatPythonCompatible, decidedBy: WireFormatDecidedFrozen,
 		},
-		"no word and a revision is the trigger event by the rule": {
-			frozen: "", revision: 7, want: contract.WireFormatTriggerEvent, decidedBy: WireFormatDecidedByRevision,
+		"no word and a revision is the standard raw event by the rule": {
+			frozen: "", revision: 7, want: contract.WireFormatStandardRawEvent, decidedBy: WireFormatDecidedByRevision,
 		},
 		"no word and no revision is compatibility by the rule": {
 			frozen: "", revision: 0, want: contract.WireFormatPythonCompatible, decidedBy: WireFormatDecidedByRevision,

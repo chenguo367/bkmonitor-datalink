@@ -170,7 +170,24 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 	messages := make([]*sarama.ProducerMessage, len(events))
 	groups := make(map[string][]int)
 	for index := range events {
-		if events[index].WireFormat == contract.WireFormatStandardRawEvent {
+		// Standard events have already been validated when built; retain the
+		// converter's wire checks without rehashing the internal envelope.
+		// Historical and Python paths retain the validation formerly done by
+		// EncodeTriggerEventV1, but no longer encode that internal structure.
+		if events[index].WireFormat != contract.WireFormatStandardRawEvent {
+			if err := contract.ValidateTriggerEventV1(&events[index]); err != nil {
+				return fmt.Errorf("kafka trigger event sink: validate event %d: %w", index, err)
+			}
+		}
+		var revision int64
+		if events[index].StrategyRef != nil {
+			revision = events[index].StrategyRef.Revision
+		}
+		format := contract.ResolveOutputWireFormat(events[index].WireFormat, revision)
+		if format != contract.WireFormatStandardRawEvent && format != contract.WireFormatPythonCompatible {
+			return fmt.Errorf("kafka trigger event sink: unsupported output format %q", format)
+		}
+		if format == contract.WireFormatStandardRawEvent {
 			converted, convertErr := sink.standardConverter.Convert(&events[index])
 			if convertErr != nil {
 				return &triggerEventDependencyError{err: convertErr}
@@ -188,26 +205,7 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			}
 			continue
 		}
-		payload, err := contract.EncodeTriggerEventV1(&events[index])
-		if err != nil {
-			return fmt.Errorf("kafka trigger event sink: encode event %d: %w", index, err)
-		}
-		messages[index] = &sarama.ProducerMessage{
-			Topic: sink.core.outputTopic,
-			Key:   nil,
-			Value: sarama.ByteEncoder(payload),
-		}
-		if events[index].DedupeMD5 != "" {
-			// Keep a series on the same hash partition using the protocol's
-			// lowercase hex text, not the decoded 16-byte digest.
-			messages[index].Key = sarama.StringEncoder(events[index].DedupeMD5)
-		}
-		// The Plan's frozen format selects the protocol, and for a Plan built
-		// before the choice existed that is still the frozen revision: a
-		// compatibility context is attached only where the compatibility
-		// protocol is what the Plan publishes. Missing Python snapshot
-		// dependencies must never change that choice to native output.
-		if events[index].LegacyOutput != nil || events[index].StrategyRef == nil {
+		if format == contract.WireFormatPythonCompatible {
 			if events[index].LegacyOutput == nil || events[index].LegacyOutput.Configuration == nil {
 				return errors.New("legacy event has no frozen compatibility context")
 			}

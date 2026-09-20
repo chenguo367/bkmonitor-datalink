@@ -309,17 +309,35 @@ func (plan EvaluationPlanV2) PublishesCompatibleProtocol() bool {
 	return plan.StrategyRef.SnapshotRevision == 0
 }
 
-// The formats an event can be published as. They name bytes on a topic, not a
-// deployment's intent - the configuration's three words resolve into these.
+// The two external formats plus the historical spelling retained for reading
+// frozen Plans. TriggerEvent is only an internal result, never an output format.
 const (
 	// WireFormatPythonCompatible is the event the Python alert builder reads.
 	WireFormatPythonCompatible = "python_compatible"
-	// WireFormatTriggerEvent is alarmd's own decision event.
+	// WireFormatTriggerEvent is a historical frozen-Plan value. Readers resolve
+	// it to standard raw output; new Plans never select it.
 	WireFormatTriggerEvent = "trigger_event_v1"
 	// WireFormatStandardRawEvent is the standard raw event the alert pipeline
 	// consumes.
 	WireFormatStandardRawEvent = "standard_raw_event"
 )
+
+// ResolveOutputWireFormat interprets historical frozen Plans without changing
+// their serialized identity. Evaluation (including recovery gating) and the
+// output sink use the same rule. Unknown formats remain unknown for rejection.
+func ResolveOutputWireFormat(format string, snapshotRevision int64) string {
+	switch format {
+	case WireFormatTriggerEvent:
+		return WireFormatStandardRawEvent
+	case "":
+		if snapshotRevision > 0 {
+			return WireFormatStandardRawEvent
+		}
+		return WireFormatPythonCompatible
+	default:
+		return format
+	}
+}
 
 // MarshalJSON keeps the 2.0 wire union flat: a producer emits either the
 // executable Plan body or the bounded terminal Plan identity, never both.

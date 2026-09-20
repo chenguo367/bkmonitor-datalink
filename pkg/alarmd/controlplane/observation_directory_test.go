@@ -352,7 +352,12 @@ func TestObservationDirectoryReadsTheFrozenOutputFormatNotTheCurrentChoice(t *te
 		wireFormat string
 		compat     bool
 	}{
-		"native freezes the standard raw event":     {protocol: "native", wireFormat: contract.WireFormatStandardRawEvent},
+		// Only the legacy word can discriminate here: since auto resolves a
+		// revisioned strategy to the standard raw event, a native word agrees
+		// with the rule and a read that re-derived the format would report
+		// the same thing. Legacy is the word the rule would never produce
+		// for a revisioned strategy, so it is the case that tells the two
+		// reads apart.
 		"legacy freezes compatibility with context": {protocol: "legacy", wireFormat: contract.WireFormatPythonCompatible, compat: true},
 	} {
 		name, test := name, test
