@@ -331,3 +331,37 @@ func TestActivationFailureReasonSurvivesNormalisationAndIsLogged(t *testing.T) {
 		t.Fatalf("reason_code = %#v, want schedule_cutover/schedule_conflict; event=%#v", event["reason_code"], event)
 	}
 }
+
+// The short-period completion line carries which attempt completed. A lag past
+// the deadline reads two ways -- dispatched late, or a retry after an earlier
+// attempt failed -- and without the attempt number on the line the live tail
+// past fifteen seconds could not be told one from the other.
+func TestLoggingObserverWritesTheAttemptOnAShortPeriodCompletion(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewBoundedLogPolicy(limiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+		Component: ComponentScheduler, Stage: StageSlotCompleted, Operation: OperationRetry, Result: ResultSuccess,
+		ShortPeriodCompletion: &ShortPeriodCompletionFacts{Cohort: "10s", CompletionKind: "FULL_COMPLETED", LagSeconds: 17.5, AttemptNo: 2},
+	})
+
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode short period completion log: %v; log=%s", err, output.String())
+	}
+	completion, ok := event["short_period_completion"].(map[string]any)
+	if !ok {
+		t.Fatalf("no short_period_completion on the line: %#v", event)
+	}
+	if completion["attempt_no"] != float64(2) || completion["completion_kind"] != "FULL_COMPLETED" || completion["lag_seconds"] != 17.5 {
+		t.Fatalf("short_period_completion = %#v, want attempt 2, FULL_COMPLETED, lag 17.5", completion)
+	}
+}
