@@ -228,6 +228,13 @@ func TestTheRoundsAssignmentScopeCensusIsKeptForTheFleetInTheFleetsWords(t *test
 	if first == nil || first.Policy != fleet.AssignmentScopePolicyDeclared || first.Total != 2 || first.Current != 1 || first.Undeclared != 1 || !first.At.Equal(at) || !first.Consistent() {
 		t.Fatalf("census = %+v, want a declaring round over one current and one undeclared record", first)
 	}
+	// What a reader is handed is its own: writing on it does not reach the
+	// runtime's census.
+	first.Current = 99
+	if runtime.LastAssignmentScope().Current != 1 {
+		t.Fatal("a reader's copy wrote through to the runtime's census")
+	}
+	first.Current = 1
 	records["qg-2"] = ownership.AssignmentRecord{QueryGroup: "qg-2", ContentScope: "c2"}
 	runtime.recordAssignmentScope(at.Add(time.Second), scopes, records)
 	if first.Current != 1 {
