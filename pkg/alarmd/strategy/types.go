@@ -609,7 +609,7 @@ func (p *CompiledPlan) WireFormat() string {
 	if p == nil {
 		return ""
 	}
-	return p.wireFormat
+	return contract.ResolveOutputWireFormat(p.wireFormat, p.strategyRef.SnapshotRevision)
 }
 
 // SubjectFacts returns the frozen strategy facts the subject projection reads.

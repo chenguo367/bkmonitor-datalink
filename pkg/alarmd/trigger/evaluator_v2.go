@@ -567,8 +567,8 @@ func recoveryGateV2(outcomes []LevelOutcomeV2) RecoveryGateV2 {
 //
 // Two shapes do not ask the set. A Plan that does not publish the alert
 // consumer's protocol is not gated: the set is that consumer's, and the
-// other protocols either carry no RECOVERY message (the sink drops it) or
-// go to no consumer that keeps an open alert set. A caller that passed no
+// The Python compatibility protocol carries no RECOVERY message (the sink
+// drops it). A caller that passed no
 // set has no gate; that is the state before the gate existed and is named
 // as such, so a worker that stops passing the set shows up as a count
 // rather than as recoveries quietly going out again.

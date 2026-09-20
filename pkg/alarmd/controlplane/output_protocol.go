@@ -22,8 +22,8 @@ const (
 // deployment wants, the format says what bytes are written, and "auto" is not a
 // format.
 //
-// Auto is not a third behaviour either - it is the rule that was already in
-// force, that a frozen revision is what makes a strategy publishable natively.
+// Auto selects one of the two external formats. A frozen revision makes a
+// strategy publishable as a standard raw event.
 // Resolving it into the Plan means the Plan says which format it uses instead
 // of leaving every reader to re-derive it from the revision.
 //
@@ -42,5 +42,5 @@ func resolveWireFormat(configured string, snapshotRevision int64) (string, bool)
 	if snapshotRevision == 0 {
 		return contract.WireFormatPythonCompatible, true
 	}
-	return contract.WireFormatTriggerEvent, true
+	return contract.WireFormatStandardRawEvent, true
 }

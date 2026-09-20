@@ -227,10 +227,9 @@ type PhaseTwoCoordinatorConfig struct {
 // frozen with it, so a Slot that is retried cannot change wire format between
 // attempts.
 const (
-	// OutputProtocolAuto keeps the split the frozen revision already decides:
-	// a strategy with a revision publishes the native event, one without it
-	// publishes the Python-compatible event. It is the default because it is
-	// what the process already did.
+	// OutputProtocolAuto selects the standard raw event for a strategy with a
+	// frozen revision and the Python-compatible event for one without it.
+	// TriggerEvent remains an internal evaluation result, never a wire format.
 	OutputProtocolAuto = "auto"
 	// OutputProtocolLegacy publishes every strategy through the
 	// Python-compatible protocol, including strategies that have a revision.
