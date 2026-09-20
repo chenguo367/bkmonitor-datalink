@@ -1578,10 +1578,11 @@ function renderChecks(checks) {
 function todoSentence(todo, pending, governance, t) {
   // The platform's lines are in the first count with this deployment's, and
   // named apart: a reader who reads "alarmd 已确认 10 类" and finds one line
-  // owned by the platform's cache writer has been told the wrong thing.
-  var platform = todo.filter(function (r) { return r.owner === 'PLATFORM'; }).length;
+  // owned by the platform's cache writer has been told the wrong thing. The
+  // split is the server's, on the todo, so the JSON says what the page says.
+  var platform = t.platform_checks || 0;
   var parts = ['现在要处理 ' + (todo.length ? t.checks + ' 类（' + t.objects + ' 个对象，去重'
-                 + (platform ? '；其中平台写入方 ' + platform + ' 类，按策略计不按对象计' : '') + '）' : '没有'),
+                 + (platform ? '；其中平台写入方 ' + platform + ' 类（' + (t.platform_strategies || 0) + ' 条策略），按策略计不按对象计' : '') + '）' : '没有'),
                '待归因 ' + (pending.length ? t.undetermined + ' 类（' + t.undetermined_objects + ' 个对象）' : '没有'),
                '业务侧已确认 ' + (governance.length ? t.governance + ' 类（' + t.governance_objects + ' 个对象）在运营治理' : '没有')];
   var loss = [];
