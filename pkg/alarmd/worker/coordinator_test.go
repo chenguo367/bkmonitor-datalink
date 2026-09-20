@@ -1229,6 +1229,9 @@ type recordingPorts struct {
 	// eventRejection, when set with failStage event_ack, makes the event
 	// write fail as the sink's own refusal rather than a retryable dependency.
 	eventRejection *eventRejectionShape
+	// outputWrite, when set, is the count the fake sink reports for every
+	// batch, the way the real sink counts what a batch became.
+	outputWrite    *observability.OutputWriteFacts
 	beginErr       error
 	admissionCalls int
 	contractDrift  bool
@@ -1742,10 +1745,13 @@ func (ports *recordingPorts) lastTrace() string {
 	return (*ports.trace)[len(*ports.trace)-1]
 }
 
-func (ports *recordingPorts) WriteBatch(_ context.Context, events []contract.TriggerEventV1) error {
+func (ports *recordingPorts) WriteBatch(ctx context.Context, events []contract.TriggerEventV1) error {
 	ports.record("event_ack")
 	ports.eventCount += len(events)
 	ports.lastEvents = append([]contract.TriggerEventV1(nil), events...)
+	if ports.outputWrite != nil {
+		observability.ReportOutputWrite(ctx, int(ports.outputWrite.Published), int(ports.outputWrite.WithoutMessage))
+	}
 	if err := ports.fail("event_ack"); err != nil {
 		if ports.eventRejection != nil {
 			// The sink refusing to write, as the sink states it: not a

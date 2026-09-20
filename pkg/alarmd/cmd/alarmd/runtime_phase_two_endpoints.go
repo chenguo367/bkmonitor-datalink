@@ -10,6 +10,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 )
@@ -128,29 +130,36 @@ func endpointFactsSource(
 		copy(endpoints, static)
 		for index := range endpoints {
 			entry := &endpoints[index]
-			if entry.Role == fleet.EndpointOutputKafka && outputSink != nil {
+			if entry.Role == fleet.EndpointOutputKafka {
 				// The output sink's own record: open or not, since when, and
 				// what the last attempt said. Before this the entry had an
 				// address and nothing else, and a replica that could not
 				// reach it exited instead of saying so here.
-				state := outputSink()
-				ready := state.Ready
-				entry.Ready = &ready
-				if state.Ready {
-					// How long it has been open -- not a success record; the
-					// sink does not report messages here.
-					age := at.Sub(state.Since).Seconds()
-					entry.ReadySinceAgeSeconds = &age
+				var protocol *enginekafka.ProtocolNegotiation
+				if outputSink != nil {
+					state := outputSink()
+					protocol = state.Protocol
+					ready := state.Ready
+					entry.Ready = &ready
+					if state.Ready {
+						// How long it has been open -- not a success record; the
+						// sink does not report messages here.
+						age := at.Sub(state.Since).Seconds()
+						entry.ReadySinceAgeSeconds = &age
+					}
+					if !state.LastFailureAt.IsZero() {
+						age := at.Sub(state.LastFailureAt).Seconds()
+						entry.LastFailureAgeSeconds = &age
+						entry.LastFailure = state.LastFailure
+					}
+					if state.Attempts > 0 {
+						attempts := state.Attempts
+						entry.Attempts = &attempts
+					}
 				}
-				if !state.LastFailureAt.IsZero() {
-					age := at.Sub(state.LastFailureAt).Seconds()
-					entry.LastFailureAgeSeconds = &age
-					entry.LastFailure = state.LastFailure
-				}
-				if state.Attempts > 0 {
-					attempts := state.Attempts
-					entry.Attempts = &attempts
-				}
+				// What the brokers answered, and the checks decided from it;
+				// with no answer yet the checks are present and say so.
+				outputProtocolFacts(entry, protocol)
 			}
 			if entry.Kind == "redis" && entry.Configured && recorder != nil {
 				if health, known := recorder.RedisClientHealth(sharing.redisClientForRole(entry.Role)); known {
@@ -215,31 +224,89 @@ func endpointFactsSource(
 // publisher built without one -- publishes no fact rather than a made-up
 // ready.
 // outputKafkaEndpoint is the output role with what the client is configured
-// to speak and what that means for the standard raw event: the version, and
-// two checks decided from it before any message is sent. The client refuses
-// to produce a record header to a broker it has been told is older than
-// 0.11, and the standard raw event carries the tenant in a header, so a
-// version below that is every native event refused -- readable here, before
-// the first refusal, rather than inferred from an afternoon of ACKs that
-// never came.
+// to speak: the floor version, and the one check that is the configuration's
+// alone -- that the version parses. What the client actually speaks, and
+// whether that can carry the standard raw event's record header, is the
+// brokers' to say and is written by outputProtocolFacts once the sink has
+// asked them. Two checks used to be decided here from the configured
+// version; on a live deployment they read ok for an hour while the brokers,
+// three minor versions older than that configuration, closed the connection
+// on every write.
 func outputKafkaEndpoint(cfg config.Config) fleet.Endpoint {
 	entry := fleet.Endpoint{Role: fleet.EndpointOutputKafka, Kind: "kafka", Address: strings.Join(cfg.Kafka.Brokers, ","),
 		Prefix: cfg.Kafka.TriggerEvent.Topic, Configured: len(cfg.Kafka.Brokers) > 0, ProtocolVersion: cfg.Kafka.BrokerVersion}
-	version, err := sarama.ParseKafkaVersion(cfg.Kafka.BrokerVersion)
-	if err != nil {
+	if _, err := sarama.ParseKafkaVersion(cfg.Kafka.BrokerVersion); err != nil {
 		entry.Checks = append(entry.Checks, fleet.EndpointCheck{Name: fleet.EndpointCheckBrokerVersion,
 			Detail: "broker_version " + cfg.Kafka.BrokerVersion + " does not parse: " + err.Error()})
 		return entry
 	}
 	entry.Checks = append(entry.Checks, fleet.EndpointCheck{Name: fleet.EndpointCheckBrokerVersion, OK: true})
-	headers := version.IsAtLeast(sarama.V0_11_0_0)
-	entry.HeadersSupported = &headers
-	check := fleet.EndpointCheck{Name: fleet.EndpointCheckRecordHeaders, OK: headers}
-	if !headers {
-		check.Detail = "broker_version " + cfg.Kafka.BrokerVersion + " cannot carry record headers; the standard raw event carries the tenant in one, so every native event is refused by the client before it is sent (needs 0.11.0.0 or later)"
-	}
-	entry.Checks = append(entry.Checks, check)
 	return entry
+}
+
+// outputProtocolFacts writes onto the output entry what the brokers answered
+// when the sink asked them, and the two checks decided from that answer. Nil
+// is a sink that has asked nobody yet: both checks are then present and
+// failing, saying so, because a check that is absent while the sink is not
+// open reads the same as one that passed.
+//
+// record_headers is whether the version the client came away with can carry
+// the header the standard raw event puts the tenant in; when it cannot, the
+// sentence names each broker whose accepted Produce range stops short of the
+// version that carries it. produce_version_accepted is whether every broker
+// answered and accepts the version the client sends -- the fleet's reading
+// of the same answers.
+func outputProtocolFacts(entry *fleet.Endpoint, protocol *enginekafka.ProtocolNegotiation) {
+	checks := append([]fleet.EndpointCheck(nil), entry.Checks...)
+	if protocol == nil {
+		checks = append(checks,
+			fleet.EndpointCheck{Name: fleet.EndpointCheckRecordHeaders, Detail: "not decided yet: the brokers have not been asked which protocol they accept"},
+			fleet.ProduceVersionCheck(0, nil, false))
+		entry.Checks = checks
+		return
+	}
+	entry.NegotiatedVersion = protocol.Negotiated
+	produce := protocol.ProduceVersion
+	entry.ProduceVersion = &produce
+	headers := protocol.HeadersSupported
+	entry.HeadersSupported = &headers
+	entry.Brokers = make([]fleet.BrokerProtocol, 0, len(protocol.Brokers))
+	for _, broker := range protocol.Brokers {
+		entry.Brokers = append(entry.Brokers, fleet.BrokerProtocol{
+			Address: broker.Address, ID: broker.ID, Answered: broker.Answered,
+			ProduceMinVersion: broker.ProduceMinVersion, ProduceMaxVersion: broker.ProduceMaxVersion, Error: broker.Error,
+		})
+	}
+	record := fleet.EndpointCheck{Name: fleet.EndpointCheckRecordHeaders, OK: headers}
+	if !headers {
+		record.Detail = recordHeadersRefusedDetail(protocol)
+	}
+	checks = append(checks, record, fleet.ProduceVersionCheck(protocol.ProduceVersion, entry.Brokers, true))
+	entry.Checks = checks
+}
+
+// recordHeadersRefusedDetail names the brokers that keep the client below the
+// record-header version, each with the range it accepts, then what that
+// means for the standard raw event.
+func recordHeadersRefusedDetail(protocol *enginekafka.ProtocolNegotiation) string {
+	var capping []string
+	for _, broker := range protocol.Brokers {
+		if !broker.Answered {
+			capping = append(capping, fmt.Sprintf("%s did not answer (%s)", broker.Address, broker.Error))
+			continue
+		}
+		if broker.ProduceMaxVersion < protocol.WantedProduceVersion {
+			capping = append(capping, fmt.Sprintf("%s accepts Produce v%d..v%d", broker.Address, broker.ProduceMinVersion, broker.ProduceMaxVersion))
+		}
+	}
+	if len(capping) == 0 {
+		// Headers refused with no broker to blame: the configured floor was
+		// already above what the client asked for, or the answers say
+		// something this sentence has no branch for. Say what is known.
+		capping = append(capping, "no broker capped the version")
+	}
+	return fmt.Sprintf("%s; record headers need Produce v%d (%s), so the client speaks %s and no native event can leave",
+		strings.Join(capping, "; "), protocol.WantedProduceVersion, protocol.Wanted, protocol.Negotiated)
 }
 
 func readinessFactsSource(health *phaseTwoApplicationHealth) func() *fleet.ReadinessFacts {

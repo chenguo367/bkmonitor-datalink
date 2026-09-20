@@ -198,6 +198,11 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if r := observation.OutputRejection; r != nil {
 		attributes = append(attributes, slog.Any("output_rejection", r))
 	}
+	if w := observation.OutputWrite; w != nil {
+		// Both numbers, zero included: a success that handed the broker
+		// nothing is the case this exists to tell from a write.
+		attributes = append(attributes, slog.Int64("messages_published", w.Published), slog.Int64("events_without_message", w.WithoutMessage))
+	}
 	if f := observation.FrozenStateRenewal; f != nil {
 		// The eight numbers on the line, not only on the metric: the line is
 		// what a reader of one Slot has, and without them frozen_state_renewed

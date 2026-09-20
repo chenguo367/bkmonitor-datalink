@@ -1803,7 +1803,13 @@ type Observation struct {
 	// sentence, apart from the error chain that wraps them -- on a failed
 	// event_acked observation. Nil when the write failed for any other
 	// reason, or did not fail.
-	OutputRejection        *OutputRejectionFacts
+	OutputRejection *OutputRejectionFacts
+	// OutputWrite is the sink's own count of the batch on an event_acked
+	// observation: messages handed to the client and events the protocol
+	// had no message for. Nil when the sink did not count -- and left
+	// absent rather than read as zero, because a success with zero messages
+	// is a real state this field exists to name.
+	OutputWrite            *OutputWriteFacts
 	RunOutcome             string
 	Attempted              bool
 	ExecuteOutcome         string

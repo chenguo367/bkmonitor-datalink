@@ -53,6 +53,13 @@ type outputSinkState struct {
 	Attempts      int
 	LastFailureAt time.Time
 	LastFailure   string
+	// Protocol is what the brokers answered when the sink last asked them:
+	// the agreement an open sink speaks under, or the partial answers of an
+	// attempt that failed because a broker did not answer. Nil until the
+	// first attempt has asked -- and a reader tells the two apart, because
+	// an entry that only said "ready" was what the page showed for an hour
+	// of every write being refused.
+	Protocol *enginekafka.ProtocolNegotiation
 }
 
 // outputSinkNotOpenError is the write refused because the sink is not open
@@ -181,6 +188,13 @@ func (sink *lazyOutputSink) tryOpen() bool {
 	if err != nil {
 		sink.state.LastFailureAt = at
 		sink.state.LastFailure = boundedFailureText(err)
+		// An attempt that asked the brokers and got no answer from one of
+		// them keeps the answers it did get, so the entry names the broker.
+		// Any other failure leaves the last agreement as it was.
+		var negotiation *enginekafka.ProtocolNegotiationError
+		if errors.As(err, &negotiation) {
+			sink.state.Protocol = copyNegotiation(&negotiation.Negotiation)
+		}
 		state := sink.state
 		sink.mu.Unlock()
 		sink.notify(state)
@@ -216,6 +230,9 @@ func (sink *lazyOutputSink) tryOpen() bool {
 	sink.inner = opened
 	sink.state.Ready, sink.state.Since = true, at
 	sink.state.LastFailure, sink.state.LastFailureAt = "", time.Time{}
+	// The agreement this open sink speaks under; a sink that asked nobody
+	// gives nil, and the entry says so rather than carrying a stale one.
+	sink.state.Protocol = copyNegotiation(opened.ProtocolNegotiation())
 	state := sink.state
 	sink.mu.Unlock()
 	sink.notify(state)
@@ -243,6 +260,24 @@ func (sink *lazyOutputSink) State() outputSinkState {
 	sink.mu.Lock()
 	defer sink.mu.Unlock()
 	return sink.state
+}
+
+// ProtocolNegotiation is the open sink's agreement, or the last attempt's
+// partial answers; nil before anyone was asked.
+func (sink *lazyOutputSink) ProtocolNegotiation() *enginekafka.ProtocolNegotiation {
+	return sink.State().Protocol
+}
+
+// copyNegotiation is the state's own copy of an agreement, broker list
+// included, so what a reader was handed does not change under it when the
+// sink renegotiates.
+func copyNegotiation(negotiation *enginekafka.ProtocolNegotiation) *enginekafka.ProtocolNegotiation {
+	if negotiation == nil {
+		return nil
+	}
+	copied := *negotiation
+	copied.Brokers = append([]enginekafka.BrokerProtocol(nil), negotiation.Brokers...)
+	return &copied
 }
 
 func boundedFailureText(err error) string {

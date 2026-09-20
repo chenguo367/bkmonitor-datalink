@@ -143,3 +143,44 @@ func TestTheEventAckedLineCarriesTheSinksOwnRefusal(t *testing.T) {
 		}
 	}
 }
+
+// The event_acked line carries the sink's own count of what the batch
+// became, when the sink gives one: a success whose events all produced no
+// message says zero messages, and a sink that did not count leaves the field
+// absent rather than zero.
+func TestTheEventAckedLineCarriesTheSinksCount(t *testing.T) {
+	observations := make([]observability.Observation, 0, 16)
+	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		observations = append(observations, observation)
+	})
+	acked := func() *observability.Observation {
+		for index := range observations {
+			if observations[index].Stage == observability.StageEventACKed {
+				return &observations[index]
+			}
+		}
+		t.Fatal("no event_acked observation")
+		return nil
+	}
+	fixture := buildFixture(t, true, "", observer, &observations)
+	fixture.ports.outputWrite = &observability.OutputWriteFacts{Published: 0, WithoutMessage: 1}
+	if _, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err != nil {
+		t.Fatal(err)
+	}
+	line := acked()
+	if line.Result != observability.ResultSuccess || line.OutputWrite == nil || line.OutputWrite.Published != 0 || line.OutputWrite.WithoutMessage != 1 {
+		t.Fatalf("event_acked = result %s, output write %+v, want a success that handed the broker nothing, said so", line.Result, line.OutputWrite)
+	}
+	if line.Counts.Events == 0 {
+		t.Fatalf("event_acked lost the event count: %+v", line.Counts)
+	}
+
+	observations = observations[:0]
+	fixture = buildFixture(t, true, "", observer, &observations)
+	if _, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err != nil {
+		t.Fatal(err)
+	}
+	if line := acked(); line.OutputWrite != nil {
+		t.Fatalf("a sink that did not count wrote %+v", line.OutputWrite)
+	}
+}
