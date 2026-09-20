@@ -167,6 +167,9 @@ type queryGroupState struct {
 	// at the next round and every later round reads healthy, while the Slots
 	// in the span were never evaluated and never will be.
 	gapSkip *SkippedSpan
+	// lastEvidence is what the latest completion said about an earlier
+	// attempt at its Slot, for the row; nil when it carried none.
+	lastEvidence *ExecutionEvidence
 	// emptyRuns counts consecutive rounds whose query returned no records at
 	// all, emptySince when that run began, and sawData whether any round in
 	// this process ever returned records. Data that stopped is a different
@@ -489,6 +492,13 @@ type Tracker struct {
 	// recovered is the problems whose listed objects completed healthily,
 	// by line and fold, kept for RecoveredRetention after the last one did.
 	recovered map[string]*recoveredFold
+	// bookkeeping is the running count of Slots an earlier attempt fully
+	// executed that a query-free completion then closed, and the objects it
+	// happened to. Not derivable from the records, which keep one span per
+	// object; the trend is what says the control-plane store is failing
+	// writes.
+	bookkeeping        BookkeepingFacts
+	bookkeepingObjects map[string]struct{}
 }
 
 // NewTracker wraps an observer. A nil next observer is allowed; the tracker is
@@ -703,6 +713,19 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// A Slot skipped because it fell past the replay window. Consecutive skips
 	// are one span; a round that is not a skip ends it, and the span stays as
 	// the record of what was never evaluated.
+	// What the completion found about an earlier attempt at the Slot, as the
+	// emitter read it; carried on the row and, for a skip, into the span.
+	// Read through the emitter's own reading rather than the counts, so the
+	// row, the gap fold and the counter cannot classify one Slot three ways.
+	if completion != "" {
+		state.lastEvidence = nil
+		if facts := observation.ExecutionEvidence; facts != nil {
+			evidence := model.ExecutionEvidence{Kind: model.ExecutionEvidenceKind(facts.Kind),
+				PlansApplied: facts.PlansApplied, PlansTotal: facts.PlansTotal}
+			state.lastEvidence = &ExecutionEvidence{Kind: facts.Kind, Reading: model.ReadEvidence(&evidence),
+				PlansApplied: facts.PlansApplied, PlansTotal: facts.PlansTotal}
+		}
+	}
 	if completion == "GAP_SKIPPED" {
 		if state.gapSkip == nil || state.lastCompleted != "GAP_SKIPPED" {
 			state.gapSkip = &SkippedSpan{FirstSlot: trace.EvaluationTime, Replica: tracker.replica}
@@ -710,6 +733,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.gapSkip.LastSlot = trace.EvaluationTime
 		state.gapSkip.Slots++
 		state.gapSkip.At = at
+		tracker.noteSkipEvidence(queryGroup, state, at)
 		// The last step before the skip, when it was this Slot's: a permit
 		// deadline missed says the retry came too late, a budget rejection
 		// says the resources did not fit -- and the two are different
@@ -1219,6 +1243,10 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	}
 	anomaly.Guards, anomaly.GuardsTotal = worstGuards(state.guards)
 	anomaly.NoDataMemoryUpkeep = latestUpkeep(state)
+	if state.lastEvidence != nil {
+		evidence := *state.lastEvidence
+		anomaly.ExecutionEvidence = &evidence
+	}
 	if anomaly.Kind == "" && state.queryCooldown != nil {
 		anomaly.Kind = KindQueryCooldown
 		if anomaly.Since.IsZero() {
@@ -1554,6 +1582,56 @@ func (tracker *Tracker) memoryRowOf(queryGroup string, state *queryGroupState) A
 // they fell past the replay window, with the last such run. Like PrunedSkips,
 // it outlives the rounds around it: the loss is in the object's past and no
 // later round can carry it.
+// noteSkipEvidence folds the latest completion's evidence into the object's
+// current span -- one reading per Slot, the emitter's -- and keeps the
+// running count of Slots that were fully executed and then closed without
+// their Progress. A Slot without evidence leaves the span's counts alone and
+// its last reading ABSENT. Caller holds the lock; the span exists.
+func (tracker *Tracker) noteSkipEvidence(queryGroup string, state *queryGroupState, at time.Time) {
+	skip := state.gapSkip
+	evidence := state.lastEvidence
+	if evidence == nil {
+		if skip.Evidence != nil {
+			skip.Evidence.Reading = model.EvidenceReadingAbsent
+			skip.Evidence.PlansApplied, skip.Evidence.PlansTotal = 0, 0
+		}
+		return
+	}
+	if skip.Evidence == nil {
+		skip.Evidence = &SkipEvidence{}
+	}
+	skip.Evidence.Reading = evidence.Reading
+	skip.Evidence.PlansApplied, skip.Evidence.PlansTotal = evidence.PlansApplied, evidence.PlansTotal
+	switch evidence.Reading {
+	case model.EvidenceReadingFullyApplied:
+		skip.Evidence.SlotsApplied++
+		tracker.bookkeeping.Slots++
+		tracker.bookkeeping.LastAt = at
+		if tracker.bookkeepingObjects == nil {
+			tracker.bookkeepingObjects = map[string]struct{}{}
+		}
+		tracker.bookkeepingObjects[queryGroup] = struct{}{}
+		tracker.bookkeeping.Objects = len(tracker.bookkeepingObjects)
+	case model.EvidenceReadingMixed:
+		skip.Evidence.SlotsPartial++
+	case model.EvidenceReadingUnreadable:
+		skip.Evidence.SlotsUnreadable++
+	}
+}
+
+// BookkeepingAbandoned is the running count of interrupted bookkeeping this
+// process has seen: Slots an earlier attempt fully executed, closed later by a
+// query-free completion. Nil until the first.
+func (tracker *Tracker) BookkeepingAbandoned() *BookkeepingFacts {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	if tracker.bookkeeping.Slots == 0 {
+		return nil
+	}
+	facts := tracker.bookkeeping
+	return &facts
+}
+
 func (tracker *Tracker) GapSkips() map[string]SkippedSpan {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()

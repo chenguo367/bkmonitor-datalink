@@ -759,6 +759,8 @@ func TestThePageHasWordingForEveryLoadState(t *testing.T) {
 		// stored shape a read of one found.
 		{"MEMORY_REFUSAL_KIND", fleet.NoDataMemoryRefusalKinds},
 		{"MEMORY_REPRESENTATION", fleet.NoDataMemoryRepresentations},
+		// And what a query-free completion found about an earlier attempt.
+		{"EXECUTION_EVIDENCE", fleet.ExecutionEvidenceReadings},
 	}
 	for _, table := range tables {
 		found := regexp.MustCompile(`var ` + table.name + ` = \{([\s\S]*?)\};`).FindStringSubmatch(body)

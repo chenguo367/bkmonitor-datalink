@@ -729,8 +729,15 @@ type Anomaly struct {
 	// round, the worst MaxGuardsPerRow of them; GuardsTotal how many there
 	// are. Absent when no scope is held. A scope not reported by the round
 	// that just completed was released, and is gone.
-	Guards      []GapGuard `json:"guards,omitempty"`
-	GuardsTotal int        `json:"guards_total,omitempty"`
+	Guards []GapGuard `json:"guards,omitempty"`
+	// ExecutionEvidence is what the object's latest query-free completion
+	// found about an earlier attempt at that Slot, as the emitter read it:
+	// STATE_APPLIED / MIXED / NONE_FOUND / UNREADABLE with the Plan counts.
+	// Absent when the latest completion carried none. A row whose latest
+	// round was GAP_SKIPPED and fully executed is interrupted bookkeeping,
+	// not abandoned detection, and checkOf files it so.
+	ExecutionEvidence *ExecutionEvidence `json:"execution_evidence,omitempty"`
+	GuardsTotal       int                `json:"guards_total,omitempty"`
 	// NoDataMemory is on rows of KindNoDataMemoryRefused: the refusal the
 	// row lists, whole.
 	NoDataMemory *NoDataMemoryRefusal `json:"no_data_memory,omitempty"`
@@ -931,6 +938,13 @@ type Snapshot struct {
 	// within RecoveredRetention, by line and fold: the positive evidence a
 	// RECOVERED reading is made of. Absent on a build before it existed.
 	Recovered []RecoveredProblem `json:"recovered,omitempty"`
+	// BookkeepingAbandoned is this replica's running count of Slots that an
+	// earlier attempt fully executed and a query-free completion then closed:
+	// detection done, alert sent, the Progress write lost. A record keeps
+	// one span per object, so the records cannot count these over time; a
+	// run of them is what a control-plane store failing writes looks like,
+	// and the trend has to be readable. Absent before the fact existed.
+	BookkeepingAbandoned *BookkeepingFacts `json:"bookkeeping_abandoned,omitempty"`
 	// Source is what the control leader's last refresh round found at the
 	// strategy source: how many strategies it listed, how many were accepted,
 	// and what kept the rest out. Absent on every follower and on a build
@@ -1435,11 +1449,16 @@ type View struct {
 	// Recovered is the problems whose objects completed healthily within the
 	// retention, merged over the counted replicas by line and fold. In no
 	// column and in no total, like the skips: the objects are running now.
-	Recovered          []RecoveredProblem `json:"recovered,omitempty"`
-	DemotionEntries    int                `json:"demotion_entries"`
-	DemotionExtensions int                `json:"demotion_extensions"`
-	DemotionExits      int                `json:"demotion_exits"`
-	LastDemotionExit   time.Time          `json:"last_demotion_exit,omitempty"`
+	Recovered []RecoveredProblem `json:"recovered,omitempty"`
+	// BookkeepingAbandoned sums the replicas' running counts: Slots fully
+	// executed and then closed without their Progress, distinct objects as
+	// each replica counted them (an object that moved counts on both), and
+	// the latest. Absent when no replica reports the fact.
+	BookkeepingAbandoned *BookkeepingFacts `json:"bookkeeping_abandoned,omitempty"`
+	DemotionEntries      int               `json:"demotion_entries"`
+	DemotionExtensions   int               `json:"demotion_extensions"`
+	DemotionExits        int               `json:"demotion_exits"`
+	LastDemotionExit     time.Time         `json:"last_demotion_exit,omitempty"`
 	// DemotedDue counts pooled objects whose own cooldown window has already
 	// elapsed at the moment of this read: they are due to be tried again and are
 	// still in the pool.
@@ -1601,6 +1620,16 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		view.NoData = append(view.NoData, snapshot.NoData...)
 		view.NoDataMemory = append(view.NoDataMemory, snapshot.NoDataMemory...)
 		mergeRecovered(&view, snapshot.Recovered)
+		if facts := snapshot.BookkeepingAbandoned; facts != nil && facts.Slots > 0 {
+			if view.BookkeepingAbandoned == nil {
+				view.BookkeepingAbandoned = &BookkeepingFacts{}
+			}
+			view.BookkeepingAbandoned.Slots += facts.Slots
+			view.BookkeepingAbandoned.Objects += facts.Objects
+			if facts.LastAt.After(view.BookkeepingAbandoned.LastAt) {
+				view.BookkeepingAbandoned.LastAt = facts.LastAt
+			}
+		}
 		if snapshot.LastDemotionExit.After(view.LastDemotionExit) {
 			view.LastDemotionExit = snapshot.LastDemotionExit
 		}
@@ -2189,6 +2218,65 @@ type SkippedSpan struct {
 	// mechanism with a name; the row says the period so a reader does not
 	// have to look the strategy up to know which conversation this is.
 	IntervalSeconds int64 `json:"interval_seconds,omitempty"`
+	// Evidence is what the query-free completions of this span found about
+	// earlier attempts at the same Slots: how many Slots an earlier attempt
+	// had fully executed (events sent, state written) before failing to write
+	// the Progress, how many partly, how many nobody could say, and the last
+	// Slot's reading whole. Absent on a span from a build before the fact
+	// existed. A span every Slot of which was fully executed is not a gap in
+	// detection at all -- it is bookkeeping that was interrupted -- and is
+	// filed as such.
+	Evidence *SkipEvidence `json:"evidence,omitempty"`
+}
+
+// ExecutionEvidence is one completion's reading of an earlier attempt, as
+// the emitter reported it and as execution.ReadEvidence names it.
+type ExecutionEvidence struct {
+	Kind         string `json:"kind"`
+	Reading      string `json:"reading"`
+	PlansApplied int    `json:"plans_applied"`
+	PlansTotal   int    `json:"plans_total"`
+}
+
+// ExecutionEvidenceReadings is every reading a completion's evidence can take,
+// as the emitter names them; for the page's wording table.
+var ExecutionEvidenceReadings = model.ExecutionEvidenceReadings
+
+// BookkeepingFacts is the running count of interrupted bookkeeping: Slots an
+// earlier attempt fully executed that a query-free completion then closed,
+// the distinct objects it happened to, and when it last did.
+type BookkeepingFacts struct {
+	Slots   int       `json:"slots"`
+	Objects int       `json:"objects"`
+	LastAt  time.Time `json:"last_at"`
+}
+
+// SkipEvidence is a span's execution evidence, folded from one reading per
+// GAP_SKIPPED Slot. Each Slot's reading is the emitter's --
+// execution.ReadEvidence over the completion's evidence -- so the row, the
+// gap fold and the counter say the same thing of the same Slot; only the
+// count over the span is this package's.
+type SkipEvidence struct {
+	// SlotsApplied, SlotsPartial and SlotsUnreadable partition the span's
+	// Slots that carried evidence: fully executed, partly executed, and read
+	// failures. Slots with NONE_FOUND or no evidence are the remainder.
+	SlotsApplied    int `json:"slots_applied"`
+	SlotsPartial    int `json:"slots_partial"`
+	SlotsUnreadable int `json:"slots_unreadable"`
+	// Reading, PlansApplied and PlansTotal are the last Slot's, as the
+	// emitter read them: STATE_APPLIED, MIXED, NONE_FOUND, UNREADABLE or
+	// ABSENT, and the counts behind the first two.
+	Reading      string `json:"reading"`
+	PlansApplied int    `json:"plans_applied,omitempty"`
+	PlansTotal   int    `json:"plans_total,omitempty"`
+}
+
+// FullyApplied reports whether every Slot of the span was found fully
+// executed by an earlier attempt: the span is interrupted bookkeeping, not
+// abandoned detection. One Slot short of that and some Plan really was not
+// evaluated, and the span still owes it a gap.
+func (skip SkippedSpan) FullyApplied() bool {
+	return skip.Evidence != nil && skip.Slots > 0 && skip.Evidence.SlotsApplied == skip.Slots
 }
 
 // Spanning is how long the skipped span covers. It is a duration rather than a

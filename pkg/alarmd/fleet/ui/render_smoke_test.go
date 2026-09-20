@@ -187,6 +187,14 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// last processed record, while the counts beside it stay live. This row
 		// used to render 检测窗口完整 next to a cause of HISTORY_GAPPED -- the
 		// page stating both halves of a contradiction and marking neither.
+		// An object whose latest round closed a Slot without a query and found
+		// an earlier attempt had executed it whole: the row lands on the
+		// bookkeeping line by its evidence, and says what the attempt did.
+		anomaly("qg-bookkept-row", func(item *fleet.Anomaly) {
+			item.Cause, item.CauseReason = "REPLAY_EXPIRED", "GAP_SKIPPED"
+			item.ReasonCode = "GAP_SKIPPED"
+			item.ExecutionEvidence = &fleet.ExecutionEvidence{Kind: "STATE_APPLIED", Reading: "STATE_APPLIED", PlansApplied: 2, PlansTotal: 2}
+		}),
 		anomaly("qg-window-held-complete", func(item *fleet.Anomaly) {
 			item.Cause, item.CauseReason = "LEVEL_OUTCOME_UNKNOWN", "HISTORY_GAPPED"
 			item.Coverage = &fleet.HistoryCoverage{Levels: 3, Guarded: 3}
@@ -436,7 +444,23 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			"qg-restart-catchup": {
 				FirstSlot: at.Add(-5 * time.Minute).Unix(), LastSlot: at.Add(-4 * time.Minute).Unix(),
 				Slots: 6, At: at.Add(-4 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-fghij", IntervalSeconds: 10},
+			// A span every Slot of which an earlier attempt had executed whole:
+			// interrupted bookkeeping, on its own record line, not a gap.
+			"qg-bookkept": {
+				FirstSlot: at.Add(-34 * time.Minute).Unix(), LastSlot: at.Add(-31 * time.Minute).Unix(),
+				Slots: 4, At: at.Add(-30 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", IntervalSeconds: 60,
+				Strategies: []fleet.StrategyRef{{StrategyID: "s-77", BusinessID: "9"}},
+				Evidence:   &fleet.SkipEvidence{SlotsApplied: 4, Reading: "STATE_APPLIED", PlansApplied: 2, PlansTotal: 2}},
+			// And one short of that: one Slot executed whole, one partly, one
+			// with no sign of execution -- still a gap, and the row says how
+			// far the earlier attempts got.
+			"qg-half-executed": {
+				FirstSlot: at.Add(-72 * time.Minute).Unix(), LastSlot: at.Add(-70 * time.Minute).Unix(),
+				Slots: 3, At: at.Add(-70 * time.Minute), Replica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", IntervalSeconds: 60,
+				Evidence: &fleet.SkipEvidence{SlotsApplied: 1, SlotsPartial: 1, Reading: "MIXED", PlansApplied: 1, PlansTotal: 2}},
 		},
+		// The replicas' running count of interrupted bookkeeping, summed.
+		BookkeepingAbandoned: &fleet.BookkeepingFacts{Slots: 9, Objects: 3, LastAt: at.Add(-30 * time.Minute)},
 		// The replicas' starts, which the restart grace is read against:
 		// fghij restarted five minutes ago (the rollout), abcde two hours ago.
 		PerReplica: []fleet.ReplicaView{
@@ -501,6 +525,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	checks := fleet.ReportChecks(columns, nil, retained, at)
 	todo := fleet.SummarizeTodo(checks, columns, retained, at)
 	rows = append(rows, fleet.UnderCheck(fleet.CheckDetectionAbandoned, "", retained, at)...)
+	rows = append(rows, fleet.UnderCheck(fleet.CheckBookkeepingAbandoned, "", retained, at)...)
 	rows = append(rows, fleet.UnderCheck(fleet.CheckQueryTargetMissing, "", retained, at)...)
 	rows = append(rows, fleet.UnderCheck(fleet.CheckNoDataMemoryRefused, "", retained, at)...)
 	// The barest row the API can send: every omitempty field absent. It goes in
@@ -841,7 +866,13 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	for _, want := range []struct{ line, says string }{
 		// The record holds only the stopped loss, says it stopped, and does
 		// not call it "新增": the record keeps one skip per object.
-		{"HISTORY ::", "1 个对象跳过了检测，那段不补（已停止，10 分钟以上没有再发生）——其中 1 个最近 1 小时内还发生过，最后一次 "},
+		{"HISTORY ::", "2 个对象跳过了检测，那段不补（已停止，10 分钟以上没有再发生）——其中 1 个最近 1 小时内还发生过，最后一次 "},
+		// Interrupted bookkeeping on the record side: the running count and
+		// the latest, the loss said rather than left blank, and its own next
+		// step and recovery words rather than the gap records'.
+		{"HISTORY ::", "2 个对象已检测、告警已发，只是记账前被打断。累计 9 个 Slot（3 个对象），最近 17:30:00。损失：无告警损失，只影响\"最近完成\"读数与缺口统计——其中 1 个最近 1 小时内还发生过，最后一次 17:59:30"},
+		{"HISTORY ::", "下一步：这些对象不用处理，检测做过了、告警也发了。看的是趋势：累计数在一段时间里连续涨，是控制面 Redis 写失败"},
+		{"HISTORY ::", "恢复标准：不是故障状态，是记录：累计数只增不减，看\"最近\"是否还在前进；停下来就是记账恢复了"},
 		{"HISTORY ::", "下一步：已停止，不用让它停；那段永久没检测"},
 		{"HISTORY ::", "恢复标准：记录不会归零；看的是同一对象有没有再跳过"},
 		// A loss in progress on a ten-second object names its mechanism on
@@ -882,7 +913,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"PENDING ::", "下一步：先查查询链路：超时看查询预算、网络、后端耗时哪一环超了"},
 		{"PENDING ::", "恢复所需的老序列数据不完整（1 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出"},
 		{"PENDING ::", "恢复标准：分出归属后转到对应行（策略侧或 alarmd）；不是等它消失"},
-		{"HISTORY COUNT ::", "漏检记录 1 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
+		{"HISTORY COUNT ::", "漏检记录 2 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
+		{"HISTORY COUNT ::", "；记账被打断（检测做过了）：累计 9 个 Slot（3 个对象），最近 17:30:00"},
+		// The two records: every Slot executed whole, said so with no Blocked
+		// reading and its kind renamed; one short of that, said how far.
+		{"SKIP qg-bookkept ::", "种类：留存的记账中断记录（检测做过了）结果码：GAP_SKIPPED记账前被打断的时段：17:26:00 – 17:29:00，4 个 Slot，记录于 17:30:00，60 秒周期。已停止（10 分钟以上没有再跳过）；这段每个时间点都已检测、告警已发（2/2 个策略），只是记账前被打断——无告警损失"},
+		{"SKIP qg-half-executed ::", "没检测的时段：16:48:00 – 16:50:00，3 个 Slot，记录于 16:50:00，60 秒周期。已停止（10 分钟以上没有再跳过）；其中 1 个时间点已检测完、1 个只检测了部分策略（最近一个 1/2）、1 个没有找到已检测的证据（滚动期间老版本不留证据，全部副本到新版前不算确认），其余未检测的策略那段不补"},
+		// The object row whose latest completion found its Slot executed
+		// whole: what the earlier attempt did, and no Blocked reading.
+		{"PROOF qg-bookkept-row ::", "结果码：GAP_SKIPPED成因：REPLAY_EXPIRED下一层原因：GAP_SKIPPED早先那次尝试：早先那次尝试已检测全部策略、告警已发，只是没写下\"完成\"这一笔（2/2 个策略）"},
 		// The silent loss: the line on the work list with its sentence, and
 		// the row with the refusal's reason, the two numbers it compared,
 		// since when, and no claim of recovery.
@@ -937,8 +976,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// history, and a record fold does not claim this process never saw
 		// its objects succeed -- that is not the record's question.
 		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过）） · 1 个对象 · 仍然受阻（最近窗口内还在失败） · 首次 17:57:00 · 最近失败 17:57:00 · 1 条策略 · 1 个业务"},
-		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象 · 留有历史影响（历史检测缺口，那段未检测的时间不补） · 首次 17:00:00 · 最后一次 17:00:00"},
-		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 1 个对象"},
+		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 2 个对象 · 留有历史影响（历史检测缺口，那段未检测的时间不补） · 首次 16:50:00 · 最后一次 17:00:00"},
+		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 2 个对象"},
 		{"GROUPS LOSS ::", "AFTER_RESTART（滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）） · 1 个对象"},
 		{"SKIP qg-restart-catchup ::", "，10 秒周期。滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）"},
 		{"SKIP qg-demoted-rejected ::", "3 个 Slot，记录于 "},
@@ -1069,7 +1108,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// now and what the refused objects lost, apart from the record.
 		"需要处理：现在要处理 11 类（18 个对象，去重；其中平台写入方 1 类，按策略计不按对象计）；待归因 5 类（17 个对象）；业务侧已确认 4 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
 		"另有 1 个是滚动后的追赶漏检（副本启动 5 分钟内），看它还有没有新增",
-		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 1 个对象另列",
+		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 2 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
 		// first sentence says both.
 		"起没有生效：舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3，连续 120 轮激活失败",
@@ -1611,6 +1650,7 @@ for (const row of data.anomalies) {
   const cells = tr.children.map(textOf);
   console.log('ROW ' + row.query_group + ' :: ' + cells.slice(1, 5).join(' | '));
   if (row.skip) { console.log('SKIP ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
+  if (row.execution_evidence) { console.log('PROOF ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.last_error) { console.log('ERR ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.internal_failure) { console.log('INTERNAL ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }
   if (row.blocked) { console.log('BLOCKED ' + row.query_group + ' :: ' + textOf(tr.children[tr.children.length - 1])); }

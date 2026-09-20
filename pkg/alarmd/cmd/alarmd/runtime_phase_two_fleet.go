@@ -460,6 +460,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// the RECOVERED reading is made of, which nothing on the current lines
 	// carries once the objects have left them.
 	snapshot.Recovered = publisher.tracker.Recovered()
+	// And the running count of Slots executed and then closed without their
+	// Progress: the records keep one span per object and cannot carry it.
+	snapshot.BookkeepingAbandoned = publisher.tracker.BookkeepingAbandoned()
 	// Where every listed object is in its cycle, and the census over all of
 	// them. From the same index and the same instant as the overdue facts, so
 	// the row and the sentence above it cannot read two clocks.
