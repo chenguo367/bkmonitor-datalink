@@ -99,6 +99,14 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 	if check, decided := codeVerdict(anomaly); decided && check == CheckDefect {
 		return CheckDefect, true, false
 	}
+	// This deployment's own client refusing to write the round's events is
+	// the same kind of line: a refusal the client decided, repeated every
+	// round until the configuration or the converter changes. Read from the
+	// failure's words, because the code it arrives under is the one the
+	// broker not answering also arrives under.
+	if _, kind, isOutput := outputFailureOf(anomaly); isOutput && kind == OutputFailureClientRejected && failureThisRound(anomaly) {
+		return CheckDefect, true, false
+	}
 	switch {
 	case anomaly.Stalled:
 		return CheckRoundsStalled, true, false
