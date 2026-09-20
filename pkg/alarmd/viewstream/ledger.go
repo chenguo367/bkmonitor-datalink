@@ -91,6 +91,11 @@ type versionLedger struct {
 	version   Key
 	openedAt  time.Time
 	receivers map[string]*receiverState
+	// installedByAllAt is when the last expected receiver reported the
+	// version installed; zero until then. The interval from openedAt is
+	// how long the fleet took to hold one publication, which is the number
+	// decision-016 section 10 step 4 measures.
+	installedByAllAt time.Time
 }
 
 func (ledger *versionLedger) counts() Counts {
@@ -199,30 +204,43 @@ func (ledger *Ledger) MarkSent(version Key, receiver Receiver) bool {
 	return true
 }
 
+// Recorded is what one receipt did to the ledger: whether it was
+// attributed, and, when it was the receipt that completed the installed
+// stage for every expected receiver of its version, how long that took
+// from the version's publication. InstalledByAll is false for every other
+// receipt, including repeats after the completing one.
+type Recorded struct {
+	Attributed     bool
+	InstalledByAll bool
+	Version        Key
+	Expected       int
+	Elapsed        time.Duration
+}
+
 // Record attributes a receipt to its version and receiver, or counts why it
 // could not. Stages are recorded as asserted and counted in order, so a
 // receipt asserting a later stage without an earlier one moves nothing the
 // earlier gates; a Worker's later complete receipt does.
-func (ledger *Ledger) Record(receipt Receipt) bool {
+func (ledger *Ledger) Record(receipt Receipt) Recorded {
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
 	entry := ledger.find(receipt.Version.Key())
 	if entry == nil {
 		ledger.ignored.UnknownVersion++
-		return false
+		return Recorded{}
 	}
 	state, expected := entry.receivers[receipt.Receiver.WorkerID]
 	if !expected {
 		ledger.ignored.UnexpectedReceiver++
-		return false
+		return Recorded{}
 	}
 	if receipt.Version.Digest != state.digest {
 		ledger.ignored.DigestMismatch++
-		return false
+		return Recorded{}
 	}
 	if state.incarnation != "" && state.incarnation != receipt.Receiver.Incarnation {
 		ledger.ignored.StaleIncarnation++
-		return false
+		return Recorded{}
 	}
 	state.incarnation = receipt.Receiver.Incarnation
 	state.acked = state.acked || receipt.Acked
@@ -234,7 +252,14 @@ func (ledger *Ledger) Record(receipt Receipt) bool {
 	if receipt.Installed {
 		state.objectsMissing = receipt.ObjectsMissing
 	}
-	return true
+	recorded := Recorded{Attributed: true, Version: entry.version, Expected: len(entry.receivers)}
+	if entry.installedByAllAt.IsZero() {
+		if counts := entry.counts(); counts.Expected > 0 && counts.Installed == counts.Expected {
+			entry.installedByAllAt = ledger.now()
+			recorded.InstalledByAll, recorded.Elapsed = true, entry.installedByAllAt.Sub(entry.openedAt)
+		}
+	}
+	return recorded
 }
 
 // Counts of a version the ledger still follows; false for any other.

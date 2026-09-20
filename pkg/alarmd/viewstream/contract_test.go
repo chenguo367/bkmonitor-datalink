@@ -325,10 +325,26 @@ func TestTheLedgerCountsEachReceiverOncePerStageInOrder(t *testing.T) {
 	if len(lagging) != 3 || lagging[0].WorkerID != "w1" || lagging[0].Incarnation != "i1b" || lagging[2].WorkerID != "w3" || lagging[2].Incarnation != "" {
 		t.Fatalf("lagging installed = %+v", lagging)
 	}
-	// Everyone switches: complete.
+	// Everyone installs, then switches: the receipt that completes the
+	// installed stage for the last expected receiver says so once, with
+	// the time from publication; later receipts do not say it again.
+	now = now.Add(7 * time.Second)
+	var completions []viewstream.Recorded
 	for _, receiver := range []viewstream.Receiver{{WorkerID: "w1", Incarnation: "i1b"}, w2, {WorkerID: "w3", Incarnation: "i3"}} {
 		ledger.MarkSent(v1, receiver)
-		ledger.Record(viewstream.Receipt{Receiver: receiver, Version: version(receiver.WorkerID, "d"+receiver.WorkerID[1:]), Acked: true, Installed: true, Switched: true})
+		recorded := ledger.Record(viewstream.Receipt{Receiver: receiver, Version: version(receiver.WorkerID, "d"+receiver.WorkerID[1:]), Acked: true, Installed: true, Switched: true})
+		if !recorded.Attributed {
+			t.Fatalf("receipt from %s not attributed", receiver.WorkerID)
+		}
+		if recorded.InstalledByAll {
+			completions = append(completions, recorded)
+		}
+	}
+	if len(completions) != 1 || completions[0].Version != v1 || completions[0].Expected != 3 || completions[0].Elapsed != 7*time.Second {
+		t.Fatalf("installed-by-all completions = %+v, want one for v1 with three expected after seven seconds", completions)
+	}
+	if again := ledger.Record(viewstream.Receipt{Receiver: w2, Version: version("w2", "d2"), Acked: true, Installed: true, Switched: true}); again.InstalledByAll || !again.Attributed {
+		t.Fatalf("a repeat after completion = %+v, want attributed and not completing again", again)
 	}
 	if counts, _ = ledger.Counts(v1); !counts.Complete() || counts != (viewstream.Counts{Expected: 3, Sent: 3, Acked: 3, Installed: 3, Switched: 3}) {
 		t.Fatalf("after everyone switched = %+v", counts)

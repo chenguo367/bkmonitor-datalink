@@ -302,6 +302,17 @@ func TestTheServerBringsEachWorkerToTheCurrentRevisionBySnapshotOrOneStep(t *tes
 	if harness.observer.count("published", "") != 2 || harness.observer.count("opened", "") != 3 {
 		t.Fatalf("events = %+v", harness.observer.events)
 	}
+	// w3 installs revision 2 too: the version is installed by all three,
+	// and the Leader says so once with the time it took.
+	w1.receipt("i1", delta1.Target, true)
+	w2.receipt("i2", delta2.Target, true)
+	w3.receipt("i3", snap3.Version, true)
+	eventually(t, "installed by all is reported once", func() bool { return harness.observer.count("installed_by_all", "") == 1 })
+	w3.receipt("i3", snap3.Version, true)
+	time.Sleep(20 * time.Millisecond)
+	if harness.observer.count("installed_by_all", "") != 1 {
+		t.Fatalf("installed_by_all reported %d times, want once", harness.observer.count("installed_by_all", ""))
+	}
 }
 
 // Every way a stream is refused says why: a bad token, an unknown Worker,

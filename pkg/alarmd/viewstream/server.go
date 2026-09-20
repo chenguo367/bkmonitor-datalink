@@ -344,6 +344,18 @@ func (server *Server) observeSession(ctx context.Context, event string, receiver
 	})
 }
 
+// observeInstalledByAll reports the moment a version is installed by every
+// receiver it expected, with how long that took from its publication: the
+// fleet's time to hold one publication, per publication, on the line.
+func (server *Server) observeInstalledByAll(ctx context.Context, recorded Recorded) {
+	server.observer.Observe(ctx, observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageViewPublished,
+		Result: observability.ResultSuccess, Duration: recorded.Elapsed,
+		ViewStream: &observability.ViewStreamFacts{Event: "installed_by_all", ControlEpoch: recorded.Version.ControlEpoch,
+			Revision: recorded.Version.Revision, Expected: recorded.Expected, Installed: recorded.Expected},
+	})
+}
+
 func (server *Server) count(update func(*serverCounters)) {
 	server.mu.Lock()
 	update(&server.counters)
@@ -442,7 +454,9 @@ func (sess *session) receive() {
 				continue
 			}
 			if publisher := sess.server.currentPublisher(); publisher != nil {
-				publisher.ledger.Record(receipt)
+				if recorded := publisher.ledger.Record(receipt); recorded.InstalledByAll {
+					sess.server.observeInstalledByAll(sess.stream.Context(), recorded)
+				}
 			}
 			if receipt.Installed {
 				sess.mu.Lock()
