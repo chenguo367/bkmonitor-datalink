@@ -496,3 +496,75 @@ func TestObservationDirectoryReadsTheFrozenOutputFormatNotTheCurrentChoice(t *te
 		})
 	}
 }
+
+// A deployment carries output contexts frozen under the earlier rule, whose
+// word is trigger_event_v1: no new Plan selects it, nothing rewrote the
+// objects, and the sink resolves it to the standard raw event. The read has
+// to say both -- the word that is in the object and the format that is
+// written -- and name the decision, because a read that reported the word as
+// the format would tell an operator the sink writes something it does not.
+//
+// The object is a real one from a publication with its word changed and
+// re-addressed by its own digest, which is the shape of an object the earlier
+// rule wrote: same contract version, same identity, same everything but the
+// word.
+func TestObservationDirectoryReportsAHistoricalFrozenWordBesideWhatIsWritten(t *testing.T) {
+	h := newObjectCatalogHarness(t)
+	pub := h.publish(t, catalogWithSchedule(t, revisionedCatalog(t, ""), 60, 0))
+	if _, err := indexReconciler(t, h.repository, sharedClock()).Ensure(h.ctx, pub.Publication); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(1000, 0)
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	row := d.Page(at, "", "", "", 0, 20).Rows[0]
+	selected, err := d.ResolveCurrent(at, row.Identity.TenantID, row.Identity.BusinessID, row.Identity.StrategyID, string(row.QueryGroup))
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := d.EffectiveOutput(h.ctx, selected)
+	if !current.Known || current.WireFormat != contract.WireFormatStandardRawEvent || current.DecidedBy != controlplane.WireFormatDecidedFrozen {
+		t.Fatalf("a Plan built now = %+v, want the standard raw event, frozen", current)
+	}
+	// The same object as the earlier rule wrote it.
+	payload, err := h.client.Get(h.ctx, h.prefix+":outctx:"+string(row.OutputContext)).Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var historical controlplane.OutputContextObject
+	if err = json.Unmarshal(payload, &historical); err != nil {
+		t.Fatal(err)
+	}
+	historical.WireFormat = contract.WireFormatTriggerEvent
+	digest, err := contract.DeriveCanonicalDigestV2(historical.ContractVersion, historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := contract.CanonicalJSONV2(historical)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = h.client.Set(h.ctx, h.prefix+":outctx:"+digest, encoded, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	selected.OutputContext = execution.OutputContextDigest(digest)
+	facts := d.EffectiveOutput(h.ctx, selected)
+	if !facts.Known {
+		t.Fatalf("historical object = %+v, want known", facts)
+	}
+	if facts.WireFormat != contract.WireFormatTriggerEvent {
+		t.Errorf("wire_format = %q, want the word that is in the object, %q", facts.WireFormat, contract.WireFormatTriggerEvent)
+	}
+	if want := contract.ResolveOutputWireFormat(contract.WireFormatTriggerEvent, facts.SnapshotRevision); facts.EffectiveWireFormat != want {
+		t.Errorf("effective_wire_format = %q, want what the sink writes, %q", facts.EffectiveWireFormat, want)
+	}
+	if facts.DecidedBy != controlplane.WireFormatDecidedHistorical {
+		t.Errorf("decided_by = %q, want %s: the word and the format differ", facts.DecidedBy, controlplane.WireFormatDecidedHistorical)
+	}
+	if facts.EffectiveWireFormat == facts.WireFormat {
+		t.Errorf("the historical read shows one word %q for both fields; the sink does not write that word", facts.WireFormat)
+	}
+}

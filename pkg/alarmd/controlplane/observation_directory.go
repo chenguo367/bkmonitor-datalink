@@ -524,9 +524,12 @@ type OutputFormatFacts struct {
 	// before the choice existed, where the revision was the whole rule.
 	WireFormat string `json:"wire_format,omitempty"`
 	// EffectiveWireFormat is the format the sink writes for this Plan, and
-	// DecidedBy how that is known: FROZEN when the word above is there,
-	// REVISION_RULE when the rule the readers apply to an object without one
-	// decided it.
+	// DecidedBy how that is known, one of WireFormatDecisions: FROZEN when
+	// the word above is there and is what is written, REVISION_RULE when the
+	// rule the readers apply to an object without one decided it, and
+	// HISTORICAL_WORD_RESOLVED when the word above is from an earlier rule
+	// and the readers resolve it to a current format -- the two fields then
+	// differ on purpose, and both are the truth.
 	EffectiveWireFormat string `json:"effective_wire_format,omitempty"`
 	DecidedBy           string `json:"decided_by,omitempty"`
 	// SnapshotRevision is the frozen strategy revision the rule reads. Zero
