@@ -34,6 +34,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	httpservice "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/service/http"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
 var errPhaseTwoWorkerBundleNotAssembled = errors.New(
@@ -450,6 +451,15 @@ type phaseTwoWorkerBundleDependencies struct {
 type phaseTwoWorkerBundle struct {
 	runtimeConfig *observability.RuntimeConfigFacts
 	dependencies  phaseTwoWorkerBundleDependencies
+	// workerPorts is what this runtime actually handed the coordinator.
+	//
+	// Kept so a test can read it. A port that may be nil is a port a production
+	// runtime can be missing while every fake has it, and the only sign is the
+	// capability quietly not happening -- which is how a deadline port went two
+	// releases implemented by every test double and by nothing that shipped.
+	// The check is a scan of the whole struct rather than of one field, so the
+	// next optional port is covered without anybody remembering to add it.
+	workerPorts worker.Ports
 	// applied and capacity feed the heartbeat's acknowledgement and load.
 	// Both are set at assembly and may be nil, in which case the heartbeat
 	// carries neither, which readers take as unknown.

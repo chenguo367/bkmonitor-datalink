@@ -1125,7 +1125,21 @@ func (ports *recordingPorts) ResolveFinalization(
 	_ context.Context,
 	request execution.SlotExecutionRequest,
 ) (execution.QueryFreeFinalization, error) {
-	return execution.QueryFreeFinalization{Contract: request.Contract, Mode: execution.FinalizationQueryRequired}, nil
+	mode := ports.finalizationMode
+	if mode == "" {
+		mode = execution.FinalizationQueryRequired
+	}
+	finalization := execution.QueryFreeFinalization{Contract: request.Contract, Mode: mode}
+	if mode == execution.FinalizationGapSkipped || mode == execution.FinalizationSnapshotUnavailable {
+		// A query-free finalization carries the due Plans it is finalizing:
+		// that frozen set is the only thing the path has to work from.
+		finalization.Targets = request.DuePlanTargets
+		finalization.ReasonCode = execution.ReasonCode(contract.ReasonGapSkipped)
+		if mode == execution.FinalizationSnapshotUnavailable {
+			finalization.ReasonCode = execution.ReasonCode(contract.ReasonSnapshotUnavailable)
+		}
+	}
+	return finalization, nil
 }
 
 func (ports *recordingPorts) LoadActivations(
@@ -1181,17 +1195,25 @@ func (ports *recordingPorts) LoadActivations(
 }
 
 type recordingPorts struct {
-	openAlerts                      map[string]bool
-	trackedPlans                    []execution.PlanIdentity
-	acknowledged                    []contract.TriggerEventV1
-	openAlertCalls                  []string
-	trace                           *[]string
-	ready                           bool
-	failStage                       string
-	beginErr                        error
-	admissionCalls                  int
-	contractDrift                   bool
-	alreadyApplied                  bool
+	// finalizationMode lets a test put the Slot on the query-free path, which
+	// is where the evidence is read. Empty means the ordinary query path.
+	finalizationMode execution.FinalizationMode
+	evidence         *memoryEvidenceStore
+	openAlerts       map[string]bool
+	trackedPlans     []execution.PlanIdentity
+	acknowledged     []contract.TriggerEventV1
+	openAlertCalls   []string
+	trace            *[]string
+	ready            bool
+	failStage        string
+	beginErr         error
+	admissionCalls   int
+	contractDrift    bool
+	alreadyApplied   bool
+	// stateApplyAlreadyApplied makes every state write report that an earlier
+	// attempt had already written it, which is what a retry of a Slot whose
+	// first attempt got that far actually sees.
+	stateApplyAlreadyApplied        bool
 	degraded                        bool
 	completionCompleteness          execution.Completeness
 	wrongGapIdentity                bool
@@ -1745,6 +1767,11 @@ func (ports *recordingPorts) ApplyRuntime(_ context.Context, request execution.S
 	}
 	for index, item := range request.Items {
 		items[index] = execution.StateApplyItemResult{Identity: item.Identity, Status: execution.StateApplied}
+		if ports.stateApplyAlreadyApplied {
+			items[index].Status = execution.StateApplyAlreadyApplied
+			items[index].AlreadyApplied = execution.StateAlreadyAppliedStable
+			items[index].StoredBlobRevision = 1
+		}
 		if ports.wrongStateApplyIdentity {
 			items[index].Identity.SeriesIdentityDigest = "another"
 		}

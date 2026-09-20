@@ -53,6 +53,12 @@ type Ports struct {
 	// RECOVERY envelope, and the trigger counts that as not_configured, which
 	// on a production worker is the wiring having come apart.
 	OpenAlerts execution.OpenAlertCopy
+	// ExecutionEvidence records and reads how far an earlier attempt at a Slot
+	// got. It is the one optional port: nil keeps exactly the behaviour of
+	// builds before it existed, which is that a Slot finalized after its replay
+	// window reads as never evaluated. A deployment without it loses a reading,
+	// not a detection.
+	ExecutionEvidence execution.SlotExecutionEvidenceStore
 }
 
 type SlotExecutionCoordinator struct {
@@ -156,6 +162,13 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	if err := request.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid execution request: %w", err)
 	}
+	ctx, applied := withAppliedPlans(ctx)
+	// On the way out, and only when this attempt wrote state and then could not
+	// write the Slot down. Best-effort by construction: the mark is what lets a
+	// later query-free completion say "this was evaluated", and failing to
+	// leave it costs that completion its evidence -- it must not also change
+	// what this attempt reports to the scheduler, which is about the Slot.
+	defer func() { coordinator.recordExecutionEvidence(ctx, request, applied) }()
 	ctx = observability.ContextWithTraceFields(ctx, observability.TraceFields{
 		QueryGroupKey:        string(request.Contract.Slot.QueryGroup),
 		SnapshotRevision:     string(request.Contract.SnapshotRevision),
@@ -345,9 +358,16 @@ func (coordinator *SlotExecutionCoordinator) executeQueryFreeFinalization(
 		if finalization.Mode == execution.FinalizationGapSkipped {
 			completionKind = execution.CompletionGapSkipped
 		}
+		// What an earlier attempt at this Slot got to, read here because this
+		// is the last moment anything knows the frozen due set and the first
+		// moment the completion is being built. Both query-free modes ask: each
+		// of them can be the second half of an attempt that evaluated, alerted
+		// and then failed to write the Slot down.
+		evidence := coordinator.readExecutionEvidence(sequenceCtx, plans, request.Contract.Slot)
 		result, err = coordinator.commitProgress(sequenceCtx, request, execution.SlotCompletion{
 			Contract: request.Contract, Kind: completionKind,
 			Result: observability.ResultDegraded, ReasonCode: finalization.ReasonCode,
+			Evidence: evidence,
 		}, execution.CompletionAttribution{})
 		return err
 	})
@@ -1189,6 +1209,10 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		coordinator.observe(ctx, observability.ComponentProgress, observability.StageProgressCommitted, request.Operation, started, "", progress.ReasonCode, err)
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: %w", err)
 	}
+	// The Slot is written down. Whatever this attempt applied is now recorded
+	// where it belongs, so it must leave no mark behind: the mark answers a
+	// question only an attempt that never got here can raise.
+	appliedPlansFrom(ctx).progressCommitted()
 	observationResult := observability.Result(observability.ResultSuccess)
 	observationReason := progress.ReasonCode
 	if completion.Kind == execution.CompletionGapSkipped || completion.Kind == execution.CompletionSnapshotUnavailable {
@@ -1201,7 +1225,8 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 		}
 	})
 	coordinator.observeCommittedProgress(ctx, request.Operation, started, observationResult, observationReason,
-		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionCause.Coverage)
+		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionCause.Coverage,
+		completion.Evidence)
 	return execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode}, nil
 }
 
@@ -1451,6 +1476,10 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 				for _, item := range result.Items {
 					switch item.Status {
 					case execution.StateApplied:
+						// This attempt wrote this Plan's state. Noted here
+						// because this is the only place that knows, and used
+						// only if the attempt then fails to write its Progress.
+						appliedPlansFrom(ctx).recordApplied(item.Identity.Plan)
 					case execution.StateApplyAlreadyApplied:
 						// The store says how it decided; a store that does not
 						// is read as stable, so a missing kind cannot pose as
@@ -1796,7 +1825,7 @@ func indexStatePreflight(result execution.StatePreflightResult) map[execution.St
 }
 
 // Called only after this invocation received and validated ProgressCommitted.
-func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, coverage execution.HistoryCoverage) {
+func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, coverage execution.HistoryCoverage, evidence *execution.ExecutionEvidence) {
 	if reason == "" {
 		reason = observability.ReasonNone
 	}
@@ -1807,8 +1836,21 @@ func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx contex
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		Result: result, ReasonCode: reason, Duration: time.Since(started), ProgressCompletionKind: kind,
 		ProgressCompletionCause: cause, ProgressCompletionReason: causeReason,
-		HistoryCoverage: coverageFacts,
+		HistoryCoverage: coverageFacts, ExecutionEvidence: executionEvidenceFacts(evidence),
 	})
+}
+
+// executionEvidenceFacts carries what an earlier attempt got to onto the
+// completion's observation, in the same hand-copied shape as the coverage
+// counts above and for the same reason: a field computed where the decision is
+// made and dropped on the way out is this codebase's most frequent defect.
+func executionEvidenceFacts(evidence *execution.ExecutionEvidence) *observability.ExecutionEvidenceFacts {
+	if evidence == nil {
+		return nil
+	}
+	return &observability.ExecutionEvidenceFacts{
+		Kind: string(evidence.Kind), PlansApplied: evidence.PlansApplied, PlansTotal: evidence.PlansTotal,
+	}
 }
 
 // historyCoverageFacts carries the Slot's window counts onto the observation.

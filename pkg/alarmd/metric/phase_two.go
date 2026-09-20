@@ -55,6 +55,8 @@ type phaseTwoMetrics struct {
 	noDataPlansByHop                *prometheus.CounterVec
 	noDataMemoryReads               *prometheus.CounterVec
 	noDataMemoryRenewals            *prometheus.CounterVec
+	queryFreeCompletions            *prometheus.CounterVec
+	executionEvidenceWrites         *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
 	sourceWithheldLines             *prometheus.CounterVec
 	activeQGSetCount                prometheus.Gauge
@@ -515,6 +517,27 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"any reason but conflict means the fleet is frozen on the content it already had. " +
 			"Reported by the leader only.",
 	}, []string{"result", "reason"})
+	metrics.queryFreeCompletions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_free_completion_total",
+		Help: "Slots finished without querying, by kind and by what an earlier attempt at the same Slot " +
+			"was found to have done. STATE_APPLIED means every due Plan was already evaluated and " +
+			"alerted and only the bookkeeping was lost, which is not a gap; MIXED means some of them " +
+			"were, which still is; NONE_FOUND means no earlier attempt got that far; UNREADABLE means " +
+			"the record could not be read, which is not the same as nothing being there; ABSENT means " +
+			"this runtime is not recording evidence at all. The five add up to the query-free " +
+			"completions, so a reader can check the partition rather than assume it. Read a rising " +
+			"{GAP_SKIPPED, STATE_APPLIED} beside a flat {GAP_SKIPPED, NONE_FOUND} as the defect this " +
+			"exists for; during a rollout NONE_FOUND also covers Slots an older build wrote, so it " +
+			"says nothing until every replica is on this version.",
+	}, []string{"kind", "evidence"})
+	metrics.executionEvidenceWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "execution_evidence_written_total",
+		Help: "Marks left by an attempt that wrote state and then could not write its Slot down, by " +
+			"result. It is the only sign the mark-writing works: nothing downstream fails when it " +
+			"does not, so without this a deployment where every such write fails looks exactly like " +
+			"one that never needed a mark. A failure here does not fail the Slot -- it means a later " +
+			"query-free completion will have no evidence and record a gap it does not owe.",
+	}, []string{"result"})
 	for _, reason := range controlplane.CutoverReasons {
 		metrics.scheduleCutovers.WithLabelValues("failure", reason)
 	}
@@ -799,6 +822,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		// cannot show.
 		metrics.noDataMemoryRenewals.WithLabelValues(shape.result, shape.reason)
 	}
+	for _, kind := range execution.QueryFreeCompletionKinds {
+		for _, reading := range execution.ExecutionEvidenceReadings {
+			metrics.queryFreeCompletions.WithLabelValues(string(kind), reading)
+		}
+	}
+	for _, result := range []string{string(observability.ResultSuccess), string(observability.ResultDegraded)} {
+		metrics.executionEvidenceWrites.WithLabelValues(result)
+	}
 	for _, representation := range execution.NoDataRepresentations {
 		// Pre-created, because the reading this family exists for is a zero:
 		// WHOLE_MEMORY reaching zero and staying there is what says every Plan
@@ -865,7 +896,8 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
-		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals)...)
+		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
+		m.queryFreeCompletions, m.executionEvidenceWrites)...)
 }
 
 func (m phaseTwoMetrics) observe(observation observability.Observation) {
@@ -1053,6 +1085,20 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.NoDataMemoryWrite; facts != nil {
 		m.noDataMemoryWrites.WithLabelValues(facts.Outcome).Inc()
+	}
+	if observation.Stage == observability.StageExecutionEvidenceWritten {
+		m.executionEvidenceWrites.WithLabelValues(string(observation.Result)).Inc()
+	}
+	if observation.Stage == observability.StageProgressCommitted &&
+		(observation.ProgressCompletionKind == string(execution.CompletionGapSkipped) ||
+			observation.ProgressCompletionKind == string(execution.CompletionSnapshotUnavailable)) {
+		// Counted here, unconditionally, for every query-free completion --
+		// including the ones carrying no evidence. A counter that only fired
+		// when there was something to say would leave a runtime that records
+		// nothing looking like one where nothing happened.
+		m.queryFreeCompletions.WithLabelValues(
+			observation.ProgressCompletionKind, readingOf(observation.ExecutionEvidence),
+		).Inc()
 	}
 	if facts := observation.NoDataMemoryRead; facts != nil {
 		m.noDataMemoryReads.WithLabelValues(facts.Representation).Inc()
@@ -1355,4 +1401,19 @@ func (gauge *loadedGauge) Collect(ch chan<- prometheus.Metric) {
 	if gauge.loaded.Load() {
 		gauge.gauge.Collect(ch)
 	}
+}
+
+// readingOf is the counter's word for one completion's evidence.
+//
+// It delegates rather than switching here: the split between "every Plan" and
+// "some of them" is the same split the gap fold turns on, and two copies of it
+// would let the page and the counter disagree about which Slots were gaps.
+func readingOf(facts *observability.ExecutionEvidenceFacts) string {
+	if facts == nil {
+		return execution.EvidenceReadingAbsent
+	}
+	return execution.ReadEvidence(&execution.ExecutionEvidence{
+		Kind:         execution.ExecutionEvidenceKind(facts.Kind),
+		PlansApplied: facts.PlansApplied, PlansTotal: facts.PlansTotal,
+	})
 }
