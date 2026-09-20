@@ -26,18 +26,22 @@ func withHeldBy(ctx context.Context, facts observability.HeldByFacts) context.Co
 	return context.WithValue(ctx, heldByContextKey{}, facts)
 }
 
-// HeldByFromContext is what the previous round did with this Query Group, or
-// nil when nothing held it: either that round ran the Slot, or this is the
-// first round.
+// HeldByFromContext is what the previous round did with this Query Group.
+//
+// Never nil: a round that held nothing reports the word for that, and so does
+// the first round of all, which has no round before it. Returning nil for
+// those was the bug -- the claim was that "none" is a word and not a missing
+// key, and production showed the key simply absent on every line that should
+// have carried it, which is the state a reader cannot tell from "this build
+// does not report held_by at all". A distribution needs its commonest value
+// present to be a distribution.
 //
 // Exported because the runtime's executor reports the completion line and
-// lives in another package. Returning nil rather than a zero value keeps the
-// caller from having to know which word means "nothing"; the normalizer fills
-// that in at the observer.
+// lives in another package.
 func HeldByFromContext(ctx context.Context) *observability.HeldByFacts {
 	facts, ok := ctx.Value(heldByContextKey{}).(observability.HeldByFacts)
-	if !ok || facts.Decision == "" || facts.Decision == observability.HeldByNothing {
-		return nil
+	if !ok || facts.Decision == "" {
+		return &observability.HeldByFacts{Decision: observability.HeldByNothing}
 	}
 	return &facts
 }

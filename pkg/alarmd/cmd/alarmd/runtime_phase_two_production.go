@@ -2185,13 +2185,15 @@ func (executor observedProductionSlotExecutor) Execute(
 	if err == nil && result.Completed && result.CompletionKind != "" && observability.IsShortPeriodCohort(request.ShortPeriodCohort) {
 		shortCompletion = &observability.ShortPeriodCompletionFacts{Cohort: request.ShortPeriodCohort, CompletionKind: string(result.CompletionKind),
 			LagSeconds: time.Since(time.Unix(int64(request.Contract.Slot.EvaluationTime), 0)).Seconds(), AttemptNo: request.AttemptNo}
-		// Only on the completion that is a skip. On the ones that ran, the
-		// previous round's word answers a question nobody is asking, and
-		// carrying it there would make "held by X" look like a property of
-		// healthy Slots too.
-		if result.CompletionKind == execution.CompletionGapSkipped {
-			shortCompletion.HeldBy = scheduler.HeldByFromContext(ctx)
-		}
+	}
+	// What held the round before this one, on the completions where that is
+	// the question. Any cohort: it used to ride inside the short-period
+	// bundle, and the Query Groups on sixty seconds and slower -- the bulk of
+	// the ones whose Slots are being skipped -- have no such bundle, so their
+	// completion lines named the outcome and never the cause.
+	var heldBy *observability.HeldByFacts
+	if result.CompletionKind == execution.CompletionGapSkipped || request.ReplayExpired {
+		heldBy = scheduler.HeldByFromContext(ctx)
 	}
 	observedResult := result.Result
 	reason := result.ReasonCode
@@ -2224,6 +2226,7 @@ func (executor observedProductionSlotExecutor) Execute(
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
+		HeldBy:         heldBy,
 		ExecuteOutcome: executeReturnOutcome(result, err),
 		Result:         observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Duration: time.Since(started), Trace: trace, Err: observedErr,

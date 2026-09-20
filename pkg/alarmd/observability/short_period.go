@@ -60,12 +60,6 @@ type ShortPeriodCompletionFacts struct {
 	// live tail past fifteen seconds could not be attributed for want of it.
 	// Zero is an emitter that did not say.
 	AttemptNo uint32 `json:"attempt_no"`
-	// HeldBy is what the round before this one did with the Query Group, on
-	// the completions where that is the question: a GAP_SKIPPED names the
-	// outcome and nothing about the cause, and the cause is a word the Runner
-	// already had. Absent on the completions that ran, where nothing held the
-	// Slot and the field would only add a word meaning "not applicable".
-	HeldBy *HeldByFacts `json:"held_by,omitempty"`
 }
 
 // ShortPeriodCompletionKinds is every completion kind a short-period Slot's

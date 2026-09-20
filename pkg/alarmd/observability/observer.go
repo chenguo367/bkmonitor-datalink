@@ -1853,28 +1853,35 @@ type Observation struct {
 	ActiveQGSet           *ActiveQGSetFacts
 	ScheduleCutover       *ScheduleCutoverFacts
 	ReplayExpiry          *ReplayExpiryFacts
-	RangeDistance         *RangeDistanceFacts
-	RangeGate             *RangeGateFacts
-	SlotWait              *SlotWaitFacts
-	ObjectCatalog         *ObjectCatalogFacts
-	ObjectRead            *ObjectReadFacts
-	StateGenerationSkew   *StateGenerationSkewFacts
-	ActivationHold        *ActivationHoldFacts
-	LegacyMigration       *LegacyQGMigrationFacts
-	DrainingQG            *DrainingQGFacts
-	Rebalance             *RebalanceFacts
-	ControlReads          *ControlReadFacts
-	AssignmentIndex       *AssignmentIndexFacts
-	CursorAdvance         *CursorAdvanceFacts
-	SourceRefresh         *SourceRefreshFacts
-	ActivationFailure     *ActivationFailureFacts
-	AlgorithmEvaluations  []AlgorithmEvaluationFact
-	AlgorithmInputs       []AlgorithmInputFact
-	RecoveryGates         []RecoveryGateFact
-	OpenAlertGates        []OpenAlertGateFact
-	ControlSourceRound    *ControlSourceRoundFacts
-	normalized            bool
-	stageReasonBucket     bool
+	// HeldBy is what the round before this one did with the Query Group. It
+	// sits on the Observation rather than inside one cohort's fact bundle:
+	// it first shipped inside ShortPeriodCompletionFacts, and every Query
+	// Group on a sixty-second or longer period -- which is most of the ones
+	// whose Slots are being skipped -- has no such bundle, so their
+	// completion lines carried no cause at all.
+	HeldBy               *HeldByFacts
+	RangeDistance        *RangeDistanceFacts
+	RangeGate            *RangeGateFacts
+	SlotWait             *SlotWaitFacts
+	ObjectCatalog        *ObjectCatalogFacts
+	ObjectRead           *ObjectReadFacts
+	StateGenerationSkew  *StateGenerationSkewFacts
+	ActivationHold       *ActivationHoldFacts
+	LegacyMigration      *LegacyQGMigrationFacts
+	DrainingQG           *DrainingQGFacts
+	Rebalance            *RebalanceFacts
+	ControlReads         *ControlReadFacts
+	AssignmentIndex      *AssignmentIndexFacts
+	CursorAdvance        *CursorAdvanceFacts
+	SourceRefresh        *SourceRefreshFacts
+	ActivationFailure    *ActivationFailureFacts
+	AlgorithmEvaluations []AlgorithmEvaluationFact
+	AlgorithmInputs      []AlgorithmInputFact
+	RecoveryGates        []RecoveryGateFact
+	OpenAlertGates       []OpenAlertGateFact
+	ControlSourceRound   *ControlSourceRoundFacts
+	normalized           bool
+	stageReasonBucket    bool
 
 	// DurationKnown distinguishes a measured zero from an absent timer. Older
 	// producers with a positive Duration are also understood as measured.
@@ -1976,6 +1983,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.ControlReads = normalizeControlReadFacts(observation.ControlReads)
 	observation.RangeDistance = normalizeRangeDistanceFacts(observation.RangeDistance)
 	observation.RangeGate = normalizeRangeGateFacts(observation.RangeGate)
+	observation.HeldBy = normalizeHeldByFacts(observation.HeldBy)
 	if observation.ReplayExpiry != nil {
 		normalizedExpiry := *observation.ReplayExpiry
 		normalizedExpiry.HeldBy = normalizeHeldByFacts(normalizedExpiry.HeldBy)
