@@ -934,6 +934,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 			DeferredNotBetter: facts.DeferredNotBetter,
 		}
 	})
+	// The view this Worker holds by content, summed over what it owns right
+	// now. Bound after the bundle exists for the same reason as the fleet
+	// snapshot below: only the bundle knows the owned set, and the view is
+	// defined over it, not over what the object cache happens to retain.
+	recorder.SetLocalViewSource(func() metric.LocalViewCounts {
+		view := repository.LocalView(bundle.ownedQueryGroups())
+		return metric.LocalViewCounts{QueryGroups: view.QueryGroups, ObjectBytes: view.ObjectBytes, OutputContextBytes: view.OutputContextBytes}
+	})
 	// Bound after the bundle exists: the snapshot reports what this replica
 	// currently owns, which only the bundle knows.
 	publisher = fleetPublisher{

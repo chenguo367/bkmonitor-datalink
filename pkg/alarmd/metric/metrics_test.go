@@ -329,6 +329,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_schedule_timeline_bytes":                      "variableLabels: {}",
 		"bkmonitor_alarmd_schedule_segments_pruned_total":               "variableLabels: {}",
 		"bkmonitor_alarmd_dispatch_rotation_total":                      "variableLabels: {result}",
+		"bkmonitor_alarmd_local_view_object_bytes":                      "variableLabels: {kind}",
+		"bkmonitor_alarmd_local_view_query_groups":                      "variableLabels: {}",
 		"bkmonitor_alarmd_dispatch_walk_total":                          "variableLabels: {result}",
 		"bkmonitor_alarmd_due_index_audit_overshoot_seconds":            "variableLabels: {cooldown}",
 		"bkmonitor_alarmd_schedule_prune_skipped_total":                 "variableLabels: {reason}",
@@ -766,6 +768,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// a numerator and a denominator that do not describe the same thing.
 		fqName("dispatch_rotation_total"): 2,
 		fqName("dispatch_walk_total"):     4,
+		// Two kinds of content and one count; the view is defined over the
+		// owned set, so a Worker role always has a source and these are
+		// always present, zeros for an idle Worker.
+		fqName("local_view_object_bytes"): 2,
+		fqName("local_view_query_groups"): 1,
 		// Audited dispatches only -- one Query Group per generation -- which is
 		// why it is its own metric and not a cell on due_index_prediction_total,
 		// whose four cells mix a sampled population with a full one.
