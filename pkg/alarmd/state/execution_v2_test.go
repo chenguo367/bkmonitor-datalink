@@ -254,7 +254,7 @@ func TestPlanGapIdentityHasNoSeriesOrLevel(t *testing.T) {
 
 func TestApplyGapRejectsInvalidIdentityWithoutCallingStorage(t *testing.T) {
 	backend := &casMemoryBackend{values: make(map[string][]byte)}
-	router, _ := NewFixedRouter("monitor-01", backend)
+	router, _ := NewFixedRouter("state-01", backend)
 	store, _ := NewExecutionStore(ExecutionStoreOptions{Prefix: "alarmd", Router: router, MaxValueBytes: 4096, MaxItemsPerCall: 4, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
 	identity := execution.PlanGapIdentity{Plan: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "9:1"}, StateGeneration: "generation"}
 	mutation, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{Identity: identity, ApplyVersion: applyVersion(), ScheduleRevision: "plan-r1", Scopes: []execution.GapScopeMutation{{Kind: execution.GapOpen, ReasonCode: execution.ReasonCode(contract.ReasonHistoryGapped), RequiredFullSlots: 2}}})
@@ -272,7 +272,7 @@ func TestApplyGapRejectsInvalidIdentityWithoutCallingStorage(t *testing.T) {
 
 func TestExecutionStoreDoesNotResetCorruptRuntimeState(t *testing.T) {
 	backend := &casMemoryBackend{values: make(map[string][]byte)}
-	router, _ := NewFixedRouter("monitor-01", backend)
+	router, _ := NewFixedRouter("state-01", backend)
 	store, err := NewExecutionStore(ExecutionStoreOptions{Prefix: "alarmd", Router: router, MaxValueBytes: 4096, MaxItemsPerCall: 4, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
 	if err != nil {
 		t.Fatal(err)
@@ -335,7 +335,7 @@ func TestGapWarmupCountsFullSlotsMonotonicallyAndResetsOnScheduleChange(t *testi
 
 func TestExecutionStoreExactCASAndReplay(t *testing.T) {
 	backend := &casMemoryBackend{values: make(map[string][]byte)}
-	router, _ := NewFixedRouter("monitor-01", backend)
+	router, _ := NewFixedRouter("state-01", backend)
 	store, _ := NewExecutionStore(ExecutionStoreOptions{Prefix: "alarmd", Router: router, MaxValueBytes: 4096, MaxItemsPerCall: 4, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
 	mutation, err := execution.BuildStateMutation(execution.StateMutation{Identity: stateIdentityV2(), ApplyVersion: applyVersion(),
 		AffectedRecords: []execution.RecordAnchor{{RecordID: "r1", SourceTime: 60}},
@@ -359,7 +359,7 @@ func TestExecutionStoreExactCASAndReplay(t *testing.T) {
 
 func TestExecutionStoreAdmissionAndCASBudgetStatuses(t *testing.T) {
 	backend := &casMemoryBackend{values: make(map[string][]byte), conflict: true}
-	router, _ := NewFixedRouter("monitor-01", backend)
+	router, _ := NewFixedRouter("state-01", backend)
 	mutation, err := execution.BuildStateMutation(execution.StateMutation{Identity: stateIdentityV2(), ApplyVersion: applyVersion(), AffectedRecords: []execution.RecordAnchor{{RecordID: "r1", SourceTime: 60}}, Levels: []execution.RuntimeLevelStateMutation{{LevelID: 1, LevelStateCompatibility: "compat", HistoryCompleteness: execution.HistoryFull, WarmupRequirementRef: "warm", LastProcessedEventTime: 60}}, Points: []execution.StateHistoryPoint{{RecordID: "r1", SourceTime: 60, Levels: []execution.StateLevelFact{{LevelID: 1, DetectFingerprint: "detect", Result: execution.LevelFactNormal}}}}})
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +379,7 @@ func TestExecutionStoreAdmissionAndCASBudgetStatuses(t *testing.T) {
 
 func TestRuntimeOversizeIsLocalAndApplyDoesNotOverwrite(t *testing.T) {
 	backend := &casMemoryBackend{values: make(map[string][]byte)}
-	router, _ := NewFixedRouter("monitor-01", backend)
+	router, _ := NewFixedRouter("state-01", backend)
 	goodIdentity := stateIdentityV2()
 	goodIdentity.SeriesIdentityDigest = "good"
 	badIdentity := stateIdentityV2()
@@ -413,7 +413,7 @@ func TestRuntimeOversizeIsLocalAndApplyDoesNotOverwrite(t *testing.T) {
 
 func TestExecutionStorePlanGapRoundTripAndTombstone(t *testing.T) {
 	backend := &casMemoryBackend{values: make(map[string][]byte)}
-	router, _ := NewFixedRouter("monitor-01", backend)
+	router, _ := NewFixedRouter("state-01", backend)
 	store, _ := NewExecutionStore(ExecutionStoreOptions{Prefix: "alarmd", Router: router, MaxValueBytes: 4096, MaxItemsPerCall: 4, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
 	identity := execution.PlanGapIdentity{Plan: stateIdentityV2().Plan, StateGeneration: "generation"}
 	opened, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{Identity: identity, ApplyVersion: applyVersion(), ScheduleRevision: "plan-r1",
@@ -476,7 +476,7 @@ func TestExecutionStorePlanGapRoundTripAndTombstone(t *testing.T) {
 
 func TestGapOversizeIsLocalAndApplyDoesNotOverwrite(t *testing.T) {
 	backend := &casMemoryBackend{values: make(map[string][]byte)}
-	router, _ := NewFixedRouter("monitor-01", backend)
+	router, _ := NewFixedRouter("state-01", backend)
 	good := execution.PlanGapIdentity{Plan: stateIdentityV2().Plan, StateGeneration: "good"}
 	bad := execution.PlanGapIdentity{Plan: stateIdentityV2().Plan, StateGeneration: "bad"}
 	mutation, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{Identity: good, ApplyVersion: applyVersion(), ScheduleRevision: "plan-r1", Scopes: []execution.GapScopeMutation{{Kind: execution.GapOpen, ReasonCode: execution.ReasonCode(contract.ReasonHistoryGapped), RequiredFullSlots: 2}}})

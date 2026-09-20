@@ -149,7 +149,7 @@ func preflightItems(mutations []execution.StateMutation) []execution.StatePrefli
 
 func newBatchStore(t *testing.T, backend Backend, resolver FenceKeyResolver) *ExecutionStore {
 	t.Helper()
-	router, err := NewFixedRouter("monitor-01", backend)
+	router, err := NewFixedRouter("state-01", backend)
 	if err != nil {
 		t.Fatal(err)
 	}
