@@ -73,12 +73,13 @@ type Discovery interface {
 }
 
 // ObjectProbe says how many of a view's objects the Worker cannot read
-// from its catalog. Asked once per install about the whole installed
-// view, not only what the install brought: an object missing since the
-// snapshot stays missing through deltas that touch other Query Groups, and
-// a count taken over the upserts alone would read 0 the moment the next
-// unrelated publication arrived. The probe serves from the cache first, so
-// a whole view of held objects costs no round trip.
+// from its catalog. Asked about the whole installed view at every install
+// and again on every heartbeat: an object missing since the snapshot stays
+// missing through deltas that touch other Query Groups, and an object that
+// expired or was evicted between publications goes missing with no install
+// at all -- only a periodic look finds it. The probe serves from the cache
+// first, so a whole view of held objects costs no round trip, and a
+// heartbeat's re-probe of a healthy Worker touches Redis not at all.
 type ObjectProbe interface {
 	MissingObjects(ctx context.Context, objects []execution.ObjectDigest, contexts []execution.OutputContextDigest) (int, error)
 }
@@ -344,11 +345,14 @@ func (client *Client) session(ctx context.Context, stream pb.ControlService_Conn
 					cancel()
 					return
 				}
-				installed, _ := client.Installed()
+				installed, has := client.Installed()
 				if err := send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Heartbeat{Heartbeat: &pb.Heartbeat{
 					SentAtMs: client.now().UnixMilli(), Installed: versionToWire(installed.Version)}}}); err != nil {
 					cancel()
 					return
+				}
+				if has {
+					client.reprobe(ctx, installed, send)
 				}
 			}
 		}
@@ -488,6 +492,28 @@ func (client *Client) probeMissing(ctx context.Context, entries []Entry) (int, b
 		return 0, false
 	}
 	return missing, true
+}
+
+// reprobe asks the catalog about the installed view again, on the
+// heartbeat, and tells the Leader when the answer changed: a receipt for
+// the same version with the new count, which the ledger takes as the
+// current objects-missing of an installed receiver and nothing more.
+func (client *Client) reprobe(ctx context.Context, installed View, send func(*pb.WorkerMessage) error) {
+	if client.probe == nil {
+		return
+	}
+	missing, probed := client.probeMissing(ctx, installed.Entries)
+	client.mu.Lock()
+	same := client.stats.Installed == installed.Version && client.stats.ObjectsMissing == missing && client.stats.ObjectsProbed == probed
+	if client.stats.Installed == installed.Version {
+		client.stats.ObjectsMissing, client.stats.ObjectsProbed = missing, probed
+	}
+	client.mu.Unlock()
+	if same {
+		return
+	}
+	client.observe(ctx, "objects_reprobed", fmt.Sprintf("missing=%d probed=%t", missing, probed), nil)
+	_ = send(receiptMessage(client.identity.Incarnation, installed.Version, true, true, "", missing, probed))
 }
 
 // install swaps the view in atomically and records the install.

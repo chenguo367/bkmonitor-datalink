@@ -514,6 +514,83 @@ func TestTheWorkerCutsAStreamOnWhichTheLeaderAnswersNothing(t *testing.T) {
 	}
 }
 
+// lastReceipt is the newest receipt the scripted Leader received.
+func (leader *scriptedLeader) lastReceipt() *pb.Receipt {
+	leader.mu.Lock()
+	defer leader.mu.Unlock()
+	for index := len(leader.received) - 1; index >= 0; index-- {
+		if receipt := leader.received[index].GetReceipt(); receipt != nil {
+			return receipt
+		}
+	}
+	return nil
+}
+
+// Between publications the installed view is probed again on every
+// heartbeat: an object that goes missing with no install -- expired,
+// evicted -- is found, the Worker's count moves, and the Leader is told
+// with a receipt for the same version; a heartbeat that finds nothing
+// changed tells the Leader nothing.
+func TestTheWorkerReprobesTheInstalledViewOnTheHeartbeat(t *testing.T) {
+	desired := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w1"},
+		map[string]viewstream.Content{"qg-1": content("obj-1", "s1"), "qg-2": content("obj-2", "s2")})
+	snapshot := viewFrom(desired, "w1", 1)
+	leader := &scriptedLeader{}
+	for _, chunk := range viewstream.SnapshotChunks(snapshot, 0) {
+		leader.onHello = append(leader.onHello, &pb.LeaderMessage{Body: &pb.LeaderMessage_Snapshot{Snapshot: chunk}})
+	}
+	// The Leader answers heartbeats, so the stream is never cut as silent.
+	leader.replies = func(message *pb.WorkerMessage) []*pb.LeaderMessage {
+		if message.GetHeartbeat() == nil {
+			return nil
+		}
+		return []*pb.LeaderMessage{{Body: &pb.LeaderMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}}}}
+	}
+	dialer := &bufconnDialer{}
+	dialer.serveOn(t, "leader", leader)
+	discovery := &scriptedDiscovery{}
+	discovery.set("leader", true)
+	probe := &countingProbe{missing: map[string]struct{}{}}
+	observer := &sessionObserver{}
+	clock := &atomic.Int64{}
+	clock.Store(time.Unix(1000, 0).UnixMilli())
+	client, _ := startClientWithClock(t, discovery, probe, dialer, observer, clock)
+	eventually(t, "the snapshot is installed", func() bool {
+		view, ok := client.Installed()
+		return ok && view.Version.Revision == 1
+	})
+	eventually(t, "heartbeats and re-probes run", func() bool { return leader.got("heartbeat") >= 3 })
+	if receipts := leader.got("receipt_installed"); receipts != 1 {
+		t.Fatalf("receipts while nothing changed = %d, want the install's one", receipts)
+	}
+	if stats := client.Stats(); stats.ObjectsMissing != 0 || !stats.ObjectsProbed {
+		t.Fatalf("stats with everything present = %+v", stats)
+	}
+	// obj-2 expires from the catalog with no publication in between.
+	probe.mu.Lock()
+	probe.missing["obj-2"] = struct{}{}
+	probe.mu.Unlock()
+	eventually(t, "the re-probe finds it and tells the Leader", func() bool {
+		receipt := leader.lastReceipt()
+		return client.Stats().ObjectsMissing == 1 && receipt != nil && receipt.Installed && receipt.ObjectsMissing == 1 && receipt.ObjectsProbed && receipt.Version.Revision == 1
+	})
+	if receipts := leader.got("receipt_installed"); receipts != 2 {
+		t.Fatalf("receipts after the change = %d, want the install's and one for the change", receipts)
+	}
+	if observer.count("objects_reprobed", "") != 1 {
+		t.Fatalf("events = %+v, want one objects_reprobed", observer.events)
+	}
+	// The object comes back: one more receipt, then quiet again.
+	probe.mu.Lock()
+	delete(probe.missing, "obj-2")
+	probe.mu.Unlock()
+	eventually(t, "the return is reported", func() bool { return leader.got("receipt_installed") == 3 && client.Stats().ObjectsMissing == 0 })
+	eventually(t, "more heartbeats pass", func() bool { return leader.got("heartbeat") >= 8 })
+	if receipts := leader.got("receipt_installed"); receipts != 3 {
+		t.Fatalf("receipts after quiet heartbeats = %d, want still 3", receipts)
+	}
+}
+
 // The reconnect wait is full jitter under an exponential ceiling: never
 // above the ceiling for the attempt, never above the maximum, and not the
 // same every time.
