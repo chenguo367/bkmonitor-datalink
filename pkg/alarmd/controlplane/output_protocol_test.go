@@ -68,36 +68,55 @@ func TestAForcedNativeChoiceRefusesRatherThanFallsBack(t *testing.T) {
 
 // The strategy-level read applies the readers' own rule to an object, and
 // says which half decided: a frozen word is reported as frozen, and an object
-// from before the choice existed gets the revision rule, named as such. The
-// table pins that an object with a word never has the rule applied over it --
-// which is the whole point of freezing it.
+// from before the choice existed gets the revision rule, named as such.
+//
+// Two properties, and only two. A frozen word is reported whatever the rule
+// would say -- the compatibility case has a revision the rule would send the
+// other way, which is what makes it a test of the word winning. An object
+// with no word gets exactly what resolveWireFormat gives an unset choice,
+// asserted against that function and not against a literal: what the rule
+// resolves to is the rule's own contract, tested where it lives, and it has
+// changed before. Pinning its current answer here would make this test red
+// on every change to the rule while proving nothing about this read.
 func TestTheEffectiveFormatIsTheFrozenWordOrTheRevisionRuleNamedAsSuch(t *testing.T) {
+	// The word wins over the rule, not merely agrees with it: at least one
+	// frozen case below must be a word the rule would not give for that
+	// revision. Without one, the frozen half of the table is satisfied by a
+	// read that ignores the word and applies the rule.
+	disagreeing := 0
 	for name, test := range map[string]struct {
-		frozen    string
-		revision  int64
-		want      string
-		decidedBy string
+		frozen   string
+		revision int64
 	}{
-		"frozen standard raw event is reported frozen": {
-			frozen: contract.WireFormatStandardRawEvent, revision: 7, want: contract.WireFormatStandardRawEvent, decidedBy: WireFormatDecidedFrozen,
-		},
-		"frozen compatibility with a revision stays compatibility": {
-			frozen: contract.WireFormatPythonCompatible, revision: 7, want: contract.WireFormatPythonCompatible, decidedBy: WireFormatDecidedFrozen,
-		},
-		"no word and a revision is the trigger event by the rule": {
-			frozen: "", revision: 7, want: contract.WireFormatTriggerEvent, decidedBy: WireFormatDecidedByRevision,
-		},
-		"no word and no revision is compatibility by the rule": {
-			frozen: "", revision: 0, want: contract.WireFormatPythonCompatible, decidedBy: WireFormatDecidedByRevision,
-		},
+		"frozen standard raw event with a revision":    {frozen: contract.WireFormatStandardRawEvent, revision: 7},
+		"frozen compatibility with a revision":         {frozen: contract.WireFormatPythonCompatible, revision: 7},
+		"frozen trigger event with no revision":        {frozen: contract.WireFormatTriggerEvent, revision: 0},
+		"no word and a revision goes by the rule":      {frozen: "", revision: 7},
+		"no word and no revision goes by the rule too": {frozen: "", revision: 0},
 	} {
 		name, test := name, test
+		if byRule, _ := resolveWireFormat("", test.revision); test.frozen != "" && byRule != test.frozen {
+			disagreeing++
+		}
 		t.Run(name, func(t *testing.T) {
 			format, decidedBy := EffectiveWireFormat(test.frozen, test.revision)
-			if format != test.want || decidedBy != test.decidedBy {
-				t.Fatalf("EffectiveWireFormat(%q, %d) = %q by %q, want %q by %q", test.frozen, test.revision, format, decidedBy, test.want, test.decidedBy)
+			if test.frozen != "" {
+				if format != test.frozen || decidedBy != WireFormatDecidedFrozen {
+					t.Fatalf("EffectiveWireFormat(%q, %d) = %q by %q, want the frozen word, frozen", test.frozen, test.revision, format, decidedBy)
+				}
+				return
+			}
+			byRule, honoured := resolveWireFormat("", test.revision)
+			if !honoured {
+				t.Fatalf("resolveWireFormat(unset, %d) is not honoured; the unset choice is always honoured", test.revision)
+			}
+			if format != byRule || decidedBy != WireFormatDecidedByRevision {
+				t.Fatalf("EffectiveWireFormat(no word, %d) = %q by %q, want the rule's %q, by the rule", test.revision, format, decidedBy, byRule)
 			}
 		})
+	}
+	if disagreeing == 0 {
+		t.Fatal("no frozen case disagrees with the rule; the table cannot tell a read of the word from a read of the rule")
 	}
 }
 
