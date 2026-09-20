@@ -462,6 +462,9 @@ func (store *RedisStore) acquire(
 	case "NOT_DESIRED":
 		return Lease{}, ErrNotDesired
 	case "BUSY":
+		// values[2] is the deadline of the lease in the way, on the server's
+		// clock; nothing reads it yet. It is in the reply for a caller that
+		// wants to wait exactly that long instead of retrying blind.
 		return Lease{}, ErrLeaseBusy
 	case "PAUSED":
 		return Lease{}, ErrStaleFence
@@ -484,6 +487,17 @@ func (store *RedisStore) acquire(
 // the result is earlier than the server's instant by at least the request's
 // way in, and never later. A server instant already reached returns the
 // anchor itself, so a comparison with the caller's clock reads it as passed.
+//
+// The one thing this rests on is that the anchor was read before the server
+// read TIME, and that the caller later compares the result against the same
+// clock the anchor came from. time.Now() carries a monotonic reading and
+// Add keeps it, so the comparison is monotonic and a wall clock stepped
+// back does not make a lapsed lease look live. An anchor without one -- a
+// time.Unix/UnixMilli round trip, an injected clock that strips it -- is a
+// wall-clock anchor, and a step back after it would lengthen the lease in
+// the holder's eyes by the size of the step. Every production caller today
+// passes time.Now() through; this is the precondition written down, not a
+// defect found.
 func onCallerClock(anchor time.Time, serverNowMillis, serverInstantMillis int64) time.Time {
 	remaining := serverInstantMillis - serverNowMillis
 	if remaining <= 0 {

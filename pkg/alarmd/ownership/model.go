@@ -167,7 +167,12 @@ type AssignmentRecord struct {
 	RecordRevision       uint64
 	ControlEpoch         uint64
 	PlacementReason      PlacementReason
-	AssignedAt           time.Time
+	// AssignedAt is the leader's own account of when it decided, on the
+	// leader's clock, stored as given. It is not on the clock the record's
+	// lease deadline and EffectiveAt are on (Redis's, see FenceLua), so a
+	// difference between them is a difference between two clocks, not a
+	// duration; nothing should compute one.
+	AssignedAt time.Time
 	// ContentScope names what the desired worker is authorized to execute
 	// for this Query Group: the digest of its executable view. Empty until a
 	// leader has written one; the fence compares it only against writers
