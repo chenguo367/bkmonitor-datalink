@@ -42,6 +42,16 @@ func outputRejectionOf(t *testing.T, err error) *OutputRejectedError {
 	if rejected.OutputRejectionReason() != rejected.Reason || rejected.Reason == "" {
 		t.Fatalf("rejection reason = %q / %q, want one non-empty reason", rejected.OutputRejectionReason(), rejected.Reason)
 	}
+	// The two methods a reader outside this package goes through: the
+	// reason and the bare sentence, with the identities left to the trace.
+	var structured interface {
+		OutputRejectionReason() string
+		OutputRejectionDetail() string
+	}
+	if !errors.As(err, &structured) || structured.OutputRejectionDetail() != rejected.Detail || rejected.Detail == "" ||
+		strings.Contains(structured.OutputRejectionDetail(), "(event ") {
+		t.Fatalf("structured detail = %q, want the bare sentence %q without the identity suffix", structured.OutputRejectionDetail(), rejected.Detail)
+	}
 	return rejected
 }
 

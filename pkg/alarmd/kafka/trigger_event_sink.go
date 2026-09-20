@@ -100,12 +100,25 @@ func (err *OutputRejectedError) Error() string {
 }
 
 // OutputRejectionReason is how a caller tells this apart from every other
-// error without importing the type: the reason it names.
+// error without importing the type: the reason it names. Callers that
+// cannot import this package (the worker's observations, the fleet page)
+// read the reason and the detail through these two methods on a local
+// interface, so nobody slices the Error() text for them.
 func (err *OutputRejectedError) OutputRejectionReason() string {
 	if err == nil {
 		return ""
 	}
 	return err.Reason
+}
+
+// OutputRejectionDetail is the sentence that says why, from the converter
+// or the client, without the identities Error() appends; those travel on
+// the observation's trace fields.
+func (err *OutputRejectedError) OutputRejectionDetail() string {
+	if err == nil {
+		return ""
+	}
+	return err.Detail
 }
 
 func outputRejected(reason, detail, format string, event *contract.TriggerEventV1) *OutputRejectedError {
