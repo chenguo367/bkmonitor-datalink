@@ -140,6 +140,16 @@ type CatalogComposition struct {
 	// each object, every one of these is ACCEPTED in it, and putting them in
 	// twice would break the equation the partition exists to make checkable.
 	SuspendedNoDataObjects []ObjectDisposition
+	// RevisionedPlans counts the accepted Plans whose strategy carries an
+	// authoritative snapshot revision, and PlansTotal every accepted Plan.
+	// The revision is what makes a strategy publishable as the standard raw
+	// event under the automatic protocol choice: a deployment whose source
+	// publishes no revisions sends every event the Python-compatible way, and
+	// its standard output path is unreachable however the sink is wired. On a
+	// live deployment that fact took two lines of investigation and a Kafka
+	// read to establish, from a gate counter that only ever said not gated.
+	RevisionedPlans int
+	PlansTotal      int
 	// InertPlans counts the Plans whose schedule cannot hold the wait their
 	// data needs to land. Such a Plan is ACCEPTED, is scheduled, and executes
 	// -- and every round every one of its consumers is bound unavailable,
@@ -221,6 +231,10 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		composition.QueryGroups[label]++
 		composition.Plans[label] += len(group.Plans)
 		for _, plan := range group.Plans {
+			composition.PlansTotal++
+			if plan.Plan.StrategyRef.SnapshotRevision > 0 {
+				composition.RevisionedPlans++
+			}
 			if !plan.ScheduleSpec.AffordsSettlingWait() {
 				composition.InertPlans++
 			}

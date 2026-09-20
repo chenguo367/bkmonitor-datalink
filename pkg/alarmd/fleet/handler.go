@@ -224,6 +224,10 @@ type HealthResponse struct {
 	// values file on a machine the reader could not reach. Per strategy, the
 	// frozen format is on the directory route's effective_output.
 	OutputProtocols []OutputProtocolGroup `json:"output_protocols"`
+	// OutputPath is whether any event can leave as the standard raw event
+	// under those choices, from the leader's Plan counts: the first-screen
+	// sentence a two-line, one-Kafka-read investigation reduced to.
+	OutputPath OutputPathFacts `json:"output_path"`
 	// Cohorts is every evaluation period with its population and what the
 	// rows say about it, and Cooling the objects waiting in a query cooldown
 	// by whose line they are under: the join from a number read per period
@@ -852,6 +856,7 @@ func NewHandler(
 			Coverage:         view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			OutputProtocols: outputProtocolList(view.OutputProtocols),
+			OutputPath:      OutputPathOf(&view),
 			Degradations:    degradationList(view.Degradations),
 			Activation:      view.Activation, ActivationReplica: view.ActivationReplica,
 			Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,

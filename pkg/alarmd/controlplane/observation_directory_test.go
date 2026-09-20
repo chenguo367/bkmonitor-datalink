@@ -568,3 +568,20 @@ func TestObservationDirectoryReportsAHistoricalFrozenWordBesideWhatIsWritten(t *
 		t.Errorf("the historical read shows one word %q for both fields; the sink does not write that word", facts.WireFormat)
 	}
 }
+
+// The composition counts the Plans that carry an authoritative strategy
+// revision beside every Plan, from the frozen Plans themselves: a source
+// whose documents publish no revision composes to zero revisioned, and one
+// whose documents do composes to all of them. It is the number that decides
+// whether the standard output path is reachable under the automatic choice,
+// and it was established on a live deployment by a Kafka read instead.
+func TestTheCompositionCountsRevisionedPlansFromTheFrozenPlans(t *testing.T) {
+	without := controlplane.ComposeCatalog(objectCatalogTwoGroups(t, 80))
+	if without.PlansTotal != 2 || without.RevisionedPlans != 0 {
+		t.Fatalf("unrevisioned source = %d plans, %d revisioned; want 2 and 0", without.PlansTotal, without.RevisionedPlans)
+	}
+	with := controlplane.ComposeCatalog(revisionedCatalog(t, ""))
+	if with.PlansTotal != 2 || with.RevisionedPlans != 2 {
+		t.Fatalf("revisioned source = %d plans, %d revisioned; want 2 and 2", with.PlansTotal, with.RevisionedPlans)
+	}
+}
