@@ -1011,7 +1011,14 @@ return 'RELEASED'
 // extend the lease past that. A change with no live holder, or one that
 // arrives together with a change of desired worker, is written directly --
 // there is nobody to protect from it, or the old holder is already refused
-// by desired_worker_id. A pending change written twice with the same scope is
+// by desired_worker_id. So is the first scope a record ever gets: a record
+// that names nothing authorized nothing in particular, its fence admitted
+// every content, and there is no old content whose holder a deadline would
+// protect. Written as pending it would cap every lease in the fleet once on
+// the round the contract starts, and each Query Group would lose its lease
+// and hold its output for the last batch bound of it; written directly it
+// binds from now, which the holder -- on the content the record names, or
+// it would not be the current publication -- passes. A pending change written twice with the same scope is
 // left alone; a different scope replaces it and never moves effective_at_ms
 // earlier. Every scope the leader decides here bumps record_revision, so a
 // CAS reader sees the decision; assignment_generation counts changes of
@@ -1075,7 +1082,7 @@ if current_desired and current_desired == desired then
   end
   local lease_deadline = tonumber(redis.call('HGET', KEYS[3], 'deadline_ms') or '0')
   local holder = redis.call('HGET', KEYS[3], 'owner_id')
-  if holder and holder ~= '' and lease_deadline > now_ms then
+  if scope ~= '' and holder and holder ~= '' and lease_deadline > now_ms then
     local pending = redis.call('HGET', KEYS[2], 'pending_content_scope')
     if pending == wanted_scope then return reply() end
     local effective = lease_deadline + margin_ms

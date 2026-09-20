@@ -279,12 +279,15 @@ func TestAnEmptyScopeLeavesTheRecordsScopeAlone(t *testing.T) {
 	}
 }
 
-// The rollout case decision-016 §7.1 step 3 relies on: the first scope a
-// leader ever writes for a record whose holder is live is written as pending,
-// and until it takes effect the record still names no scope -- so a worker
-// that already declares what it executes is admitted whatever it declares,
-// and binds only when the record does.
-func TestTheFirstScopeUnderALiveLeaseIsPendingAndBindsNothingYet(t *testing.T) {
+// The first scope a record ever gets is written directly, live lease or
+// not, and binds from then on. A record that named nothing authorized
+// nothing in particular -- its fence admitted every content -- so there is
+// no old content whose holder a deadline would protect; and the holder is on
+// the content the record now names, or it would not be the current
+// publication. Written as pending it capped every lease in the fleet once on
+// the round the contract started, and each Query Group lost its lease and
+// held its output for the last batch bound of it.
+func TestTheFirstScopeUnderALiveLeaseIsWrittenDirectlyAndDoesNotCapTheLease(t *testing.T) {
 	store := newIntegrationStore(t)
 	ctx := context.Background()
 	now := time.UnixMilli(1_700_000_000_000)
@@ -297,32 +300,34 @@ func TestTheFirstScopeUnderALiveLeaseIsPendingAndBindsNothingYet(t *testing.T) {
 	if err != nil || lease.ContentScope != "" {
 		t.Fatalf("Acquire() before any scope = (%+v, %v)", lease, err)
 	}
-	wantEffective := serverDeadline(t, store, "query-group-1").Add(ContentSwitchMargin)
 	named := publishScope(t, store, authority, first.RecordRevision, "worker-1", "view-a", now.Add(time.Second))
-	if named.ContentScope != "" || named.PendingContentScope != "view-a" || !named.EffectiveAt.Equal(wantEffective) {
-		t.Fatalf("first scope under a live lease = %+v, want it pending until the lease deadline plus the margin, %v", named, wantEffective)
+	if named.ContentScope != "view-a" || named.ContentChangePending() || named.RecordRevision != first.RecordRevision+1 {
+		t.Fatalf("first scope under a live lease = %+v, want view-a written directly with nothing pending", named)
 	}
-	for _, declared := range []string{"view-a", "view-anything-else"} {
-		if err := store.CheckFenceForContentScope(ctx, lease.Fence, declared); err != nil {
-			t.Fatalf("CheckFenceForContentScope(%q) while the record names no current scope = %v, want valid", declared, err)
-		}
+	// The lease is not capped: a renewal for two minutes gets two minutes.
+	renewed, err := store.Renew(ctx, lease.Fence, now.Add(2*time.Second), 2*time.Minute)
+	if err != nil || renewed.ContentChangePending() || !renewed.Deadline.Equal(now.Add(2*time.Second+2*time.Minute)) ||
+		renewed.ContentScope != "view-a" {
+		t.Fatalf("Renew() after the first scope = (%+v, %v), want the full two minutes on view-a with nothing pending", renewed, err)
 	}
-	// A renewal that would reach past the effective time is capped there.
-	renewed, err := store.Renew(ctx, lease.Fence, now.Add(10*time.Second), 2*time.Minute)
-	if err != nil || !renewed.Deadline.Equal(renewed.EffectiveAt) || renewed.PendingContentScope != "view-a" {
-		t.Fatalf("Renew() = (%+v, %v), want the cap at the effective time and the pending scope named", renewed, err)
+	// And the record binds from now: the named content passes, another is
+	// refused, an undeclared write is still admitted.
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-a"); err != nil {
+		t.Fatalf("CheckFenceForContentScope(view-a) = %v, want valid", err)
 	}
-	if minted := serverDeadline(t, store, "query-group-1"); !minted.Equal(wantEffective) {
-		t.Fatalf("server deadline after the capped renewal = %v, want the effective time %v", minted, wantEffective)
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-anything-else"); !errors.Is(err, ErrContentScopeMoved) {
+		t.Fatalf("CheckFenceForContentScope(view-anything-else) = %v, want ErrContentScopeMoved", err)
 	}
-	elapseOnRedis(t, store, "query-group-1", time.Minute+ContentSwitchMargin+time.Second)
-	after := now.Add(time.Minute + ContentSwitchMargin + time.Second)
-	next, err := store.Acquire(ctx, "query-group-1", "worker-1", after, time.Minute)
-	if err != nil || next.ContentScope != "view-a" {
-		t.Fatalf("Acquire() after the first scope took effect = (%+v, %v), want view-a", next, err)
+	if err := store.CheckFence(ctx, lease.Fence); err != nil {
+		t.Fatalf("CheckFence() without a scope = %v, want valid", err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, next.Fence, "view-anything-else"); !errors.Is(err, ErrContentScopeMoved) {
-		t.Fatalf("a declared scope against the now-named record = %v, want ErrContentScopeMoved", err)
+	// A pending scope counts only with its effective time: the pair the
+	// promotion reads. A scope written alone is neither pending nor admitted.
+	if err := store.client.HSet(ctx, store.assignmentKey("query-group-1"), "pending_content_scope", "view-orphan").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-orphan"); !errors.Is(err, ErrContentScopeMoved) {
+		t.Fatalf("a pending scope without an effective time was admitted: %v", err)
 	}
 }
 
@@ -444,9 +449,16 @@ func TestWithdrawingTheContentScopeClearsItAtOnce(t *testing.T) {
 	}
 	// A withdrawal that moves the owner clears the scope the move would
 	// otherwise carry along.
+	// After a withdrawal the record names nothing again, so the next scope
+	// is a first scope and is written directly; a change on top of it under
+	// the live lease is pending, and that is what the move clears.
 	named := publishScope(t, store, authority, again.RecordRevision, "worker-1", "view-c", now.Add(3*time.Second))
-	if named.PendingContentScope != "view-c" {
-		t.Fatalf("record = %+v, want view-c pending under the live lease", named)
+	if named.ContentScope != "view-c" || named.ContentChangePending() {
+		t.Fatalf("record = %+v, want view-c written directly as a first scope", named)
+	}
+	named = publishScope(t, store, authority, named.RecordRevision, "worker-1", "view-d", now.Add(4*time.Second))
+	if named.ContentScope != "view-c" || named.PendingContentScope != "view-d" {
+		t.Fatalf("record = %+v, want view-d pending under the live lease", named)
 	}
 	moved := withdraw(named.RecordRevision, "worker-2")
 	if moved.DesiredWorkerID != "worker-2" || moved.ContentScope != "" || moved.ContentChangePending() ||

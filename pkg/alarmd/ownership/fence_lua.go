@@ -65,7 +65,11 @@ const ContentSwitchMargin = 5 * time.Second
 //	    moment it was written, so a writer that already executes it -- a
 //	    worker whose Segment cut over before the change fell due -- is ahead
 //	    of the record, not behind it. Refusing it would stall every Query
-//	    Group for one lease lifetime on every publication.
+//	    Group for one lease lifetime on every publication. A pending scope
+//	    counts only with its effective time, the same pair the promotion and
+//	    ContentChangePending read: a writer that one day wrote the scope
+//	    without the time would otherwise have written a scope the fence
+//	    admits and nothing ever promotes.
 //
 //	    The order is the meaning. CONTENT_MOVED is read by every caller as
 //	    "the lease is good, the view is behind, re-read" -- it is kept out of
@@ -121,8 +125,10 @@ local function fence_refusal(assignment_key, ownership_key, require_assignment, 
   if require_assignment == '1' and content_scope and content_scope ~= '' then
     local named = current_content_scope(assignment_key, now_ms)
     if named ~= '' and named ~= content_scope then
-      local pending = redis.call('HGET', assignment_key, 'pending_content_scope')
-      if not pending or pending ~= content_scope then return 'CONTENT_MOVED' end
+      local change = redis.call('HMGET', assignment_key, 'pending_content_scope', 'effective_at_ms')
+      local pending = change[1]
+      local effective = tonumber(change[2] or '0')
+      if not pending or pending ~= content_scope or effective <= 0 then return 'CONTENT_MOVED' end
     end
   end
   return nil
