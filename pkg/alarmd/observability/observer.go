@@ -1577,6 +1577,12 @@ type Observation struct {
 	ControlSourceRound    *ControlSourceRoundFacts
 	normalized            bool
 	stageReasonBucket     bool
+
+	// DurationKnown distinguishes a measured zero from an absent timer. Older
+	// producers with a positive Duration are also understood as measured.
+	DurationKnown          bool
+	EvaluationOwner        CostPlanIdentity
+	EvaluationRecordsKnown bool
 }
 
 type Observer interface {

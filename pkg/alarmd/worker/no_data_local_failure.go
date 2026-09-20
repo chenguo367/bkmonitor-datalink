@@ -94,8 +94,9 @@ func (stream *streamedExecution) observeNoDataLocalFailure(
 	stream.coordinator.ports.Observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
 		Result: observability.ResultDegraded, Operation: observability.Operation(stream.request.Operation),
-		Direction:  observability.DirectionInternal,
-		ReasonCode: observability.ReasonCode(outcome),
+		Direction:       observability.DirectionInternal,
+		ReasonCode:      observability.ReasonCode(outcome),
+		EvaluationOwner: costEvaluationOwner(due.Identity),
 		Trace: observability.TraceFields{
 			StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID,
 		},

@@ -195,7 +195,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// metric, for the same reason the rejections are: the page answers from the
 	// snapshot and has to be right one minute after a restart.
 	seriesPullTally := fleet.NewSeriesPullTally()
-	observer = observability.Multi(observer, external.AdditionalObserver, targetFlow, rejectionTally)
+	observationCapacity := config.DeriveObservationCapacity(config.DetectCapacityInputs(), cfg.PhaseTwo.Observation)
+	costSummary := observability.NewCostSummary(observationCostOptions(observationCapacity, fmt.Sprintf("%s:%d", cfg.PhaseTwo.Worker.ID, external.Now().UnixNano()), external.Now))
+	observer = observability.Multi(observer, external.AdditionalObserver, targetFlow, rejectionTally, costSummary)
 	observer = phaseTwoRuntimeObserver(observer)
 	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), cfg.CompilerLimits())
 	if err != nil {
@@ -769,8 +771,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// connection is the same: a diagnostic burst must not consume connections
 	// the pipeline sized for query permits, and the small pool below is what
 	// keeps that true.
-	diagnosticsClient, err := openProductionRedisWithHook(ctx,
-		phaseTwoDiagnosticsConnection(runtimeConnection), recorder.RedisHook("diagnostics"))
+	diagnosticsClient, err := openProductionRedisOptionsWithHook(ctx,
+		observationRedisOptions(runtimeConnection), recorder.RedisHook("diagnostics"))
 	if err != nil {
 		// Reaching the store is not a startup requirement: losing it costs the
 		// window read-back and nothing else, and refusing to start would let a
@@ -782,12 +784,35 @@ func openProductionPhaseTwoBundleWithDependencies(
 		diagnosticsClient = nil
 	}
 	var diagnostics *fleet.DiagnosticStore
+	var directory *controlplane.ObservationDirectory
+	var seriesSampler *observability.SeriesSampler
 	if diagnosticsClient != nil {
 		legacyClients = append(legacyClients, diagnosticsClient)
 		diagnostics, err = fleet.NewDiagnosticStore(diagnosticsClient,
 			productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "fleet"))
 		if err != nil {
 			return nil, err
+		}
+		if observationCapacity.DirectoryBytes > 0 {
+			directory, err = controlplane.NewObservationDirectory(repository, controlplane.DirectoryLimits{
+				WireBytes: observationCapacity.DirectoryReadBytes, Commands: observationCapacity.DirectoryCommands,
+				Entries:  observationCapacity.DirectoryBytes / controlplane.DirectoryEntryReservationBytes(),
+				Timeout:  min(time.Second, cfg.PhaseTwo.Control.ReconcileInterval.Duration()/2),
+				FreshFor: 3 * cfg.PhaseTwo.Control.RefreshInterval.Duration(),
+			}, diagnosticsClient)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if limits, enabled := observationSampleLimits(observationCapacity); enabled {
+			seriesSampler, err = observability.NewSeriesSampler(limits)
+			if err != nil {
+				return nil, err
+			}
+			if err = diagnostics.AttachSeriesSampler(seriesSampler, min(fleet.DiagnosticRecordsPerObject, observationCapacity.SampleRecordsPerMinute)); err != nil {
+				return nil, err
+			}
+			evaluator.SetSeriesSampler(seriesSampler)
 		}
 		// The writer outlives the constructor's context and is stopped with the
 		// rest of the Bundle's resources.
@@ -807,6 +832,23 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	fleetAPI = fleet.WithStrategyDirectory(fleetAPI, directory, external.Now)
+	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())
+	var costRefresh *observationCostRefresh
+	if diagnosticsClient != nil && observationCapacity.CostBytes > 0 {
+		limits := observationProjectionLimits(observationCapacity, cfg.PhaseTwo.Control.RefreshInterval.Duration())
+		projection, projectionErr := fleet.NewCostProjectionStore(diagnosticsClient, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "fleet"), limits)
+		if projectionErr != nil {
+			return nil, projectionErr
+		}
+		costRefresh = &observationCostRefresh{store: projection, registry: ownershipStore, reader: diagnosticsClient, cache: costCandidatesCache, limits: limits,
+			registryLimits: ownership.ObservationRegistryLimits{Bytes: int64(observationCapacity.CostBytes / 64), Commands: observationCapacity.DirectoryCommands / 2, Rows: observationCapacity.DirectoryCommands/2 - 2, Timeout: time.Second},
+			replica:        cfg.PhaseTwo.Worker.ID, interval: cfg.PhaseTwo.Control.RefreshInterval.Duration()}
+	}
+	fleetAPI = fleet.WithCostCandidates(fleetAPI, costCandidatesCache)
+	fleetAPI = fleet.WithSeriesSamples(fleetAPI, directory, windowStore, diagnostics, seriesSampler, external.Now)
+	observationRefresh := &observationRefresh{directory: directory, cost: costSummary, now: external.Now,
+		interval: cfg.PhaseTwo.Control.RefreshInterval.Duration(), entries: observationCapacity.DirectoryBytes / controlplane.DirectoryEntryReservationBytes()}
 	// The same judgment the page shows, exported so the host writes alert rules
 	// against it instead of reimplementing the arithmetic. The deadline is a
 	// ceiling on hanging, not a tuning knob: the read is one control plane fetch
@@ -828,12 +870,18 @@ func openProductionPhaseTwoBundleWithDependencies(
 	bundle, err := newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
 		Config: cfg, Health: health, Control: control, Ownership: productionOwnership,
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,
-		FleetAPI:                fleetAPI,
-		PublishFleet:            func(ctx context.Context) { publisher.publishOnce(ctx) },
+		FleetAPI: fleetAPI,
+		PublishFleet: func(ctx context.Context) {
+			observationRefresh.publish(ctx)
+			publisher.publishOnce(ctx)
+			if costRefresh != nil {
+				costRefresh.publish(ctx, external.Now(), costSummary.Snapshot())
+			}
+		},
 		RefreshOpenAlerts:       openAlertCopy.Refresh,
 		RefreshPlatformSettings: platformSettingsRefresher(platformSettings, hostStatus, recorder),
 		ApplyObservationWindows: observationWindowApplier{
-			store: windowStore, flow: targetFlow, now: external.Now,
+			store: windowStore, flow: targetFlow, samples: seriesSampler, now: external.Now,
 			observe: observationWindowObserver(observer),
 		}.applyOnce,
 		ProbeControlRedis: func(probeCtx context.Context) error {
@@ -924,6 +972,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.
+	observationRefresh.owned = bundle.ownedQueryGroups
 	bundle.applied = publisher.applied
 	bundle.capacity = publisher.capacity
 	// The first attempt runs now, so a broker that answers is open before the
