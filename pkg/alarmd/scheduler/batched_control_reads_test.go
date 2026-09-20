@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -186,5 +187,33 @@ func TestTheReadyWorkerIndexAnswersAsTheScanDid(t *testing.T) {
 		if scanned != testCase.want || indexed != testCase.want {
 			t.Fatalf("%s: scan = %v, index = %v, want %v", testCase.name, scanned, indexed, testCase.want)
 		}
+	}
+}
+
+// A ready set carrying the same worker twice is refused, and nothing is
+// published.
+//
+// Select refuses a duplicate worker identity, and that refusal is a statement
+// about the list it was handed. The round now also builds a map of that list
+// to answer incumbent lookups, and a map cannot carry a duplicate -- so
+// rebuilding Select's input from the map would drop the refusal silently,
+// leaving the round to place Query Groups over a ready set it had quietly
+// deduplicated. Nothing else in the suite notices: every other case supplies
+// a well-formed set, where the slice and the map hold the same workers.
+func TestARoundRefusesAReadySetThatNamesAWorkerTwice(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := roundStore(t, now, "a")
+	duplicated := append(store.workers, store.workers[0])
+	reconciler := roundReconciler(t, store)
+	_, _, err := reconciler.ReconcileRound(
+		context.Background(), ownership.PublicationAuthority{},
+		[]execution.QueryGroupIdentity{"query-group-1", "query-group-2"}, duplicated, now,
+	)
+	if err == nil || !strings.Contains(err.Error(), "duplicate worker identity") {
+		t.Fatalf("ReconcileRound() over a ready set naming a worker twice error = %v, want the duplicate "+
+			"identity refusal; Select is reading a list the round deduplicated for it", err)
+	}
+	if store.published != 0 {
+		t.Fatalf("the refused round published %d Assignments", store.published)
 	}
 }
