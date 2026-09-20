@@ -73,14 +73,40 @@ type Endpoint struct {
 	// the version was in the configuration the whole time and on no screen.
 	ProtocolVersion  string `json:"protocol_version,omitempty"`
 	HeadersSupported *bool  `json:"headers_supported,omitempty"`
-	// Checks is what this replica verified about the role at startup, each
-	// by name with its verdict and, when it failed, why. A configuration
-	// error has to be readable before the first message, not inferred from
-	// the first message failing.
+	// NegotiatedVersion is the protocol version the client actually speaks
+	// after asking the brokers what they accept, ProduceVersion the Produce
+	// request version it sends under it, and Brokers what each broker
+	// answered. Present on the output role once its sink has opened. The
+	// configured version above was on the page while every write to a
+	// deployment's brokers was being refused: the brokers were three minor
+	// versions older than the client had been built for, and the only
+	// request the readiness probe sends is one both sides agreed on.
+	NegotiatedVersion string           `json:"negotiated_version,omitempty"`
+	ProduceVersion    *int16           `json:"produce_version,omitempty"`
+	Brokers           []BrokerProtocol `json:"brokers,omitempty"`
+	// Checks is what this replica verified about the role, each by name with
+	// its verdict and, when it failed, why: the configuration checks at
+	// startup, and the brokers' own answer once the sink has asked them. A
+	// configuration error has to be readable before the first message, not
+	// inferred from the first message failing.
 	Checks []EndpointCheck `json:"checks,omitempty"`
 }
 
-// EndpointCheck is one startup verification of a role: the name from
+// BrokerProtocol is one broker's answer to which Produce request versions it
+// accepts, as the output sink heard it when it opened. Answered false is a
+// broker that closed the connection or errored on the question -- a broker
+// older than the question itself, or one not reachable from this replica --
+// and Error what the client said about it.
+type BrokerProtocol struct {
+	Address           string `json:"address"`
+	ID                int32  `json:"id"`
+	Answered          bool   `json:"answered"`
+	ProduceMinVersion int16  `json:"produce_min_version"`
+	ProduceMaxVersion int16  `json:"produce_max_version"`
+	Error             string `json:"error,omitempty"`
+}
+
+// EndpointCheck is one verification of a role: the name from
 // EndpointCheckNames, whether it passed, and the sentence when it did not.
 type EndpointCheck struct {
 	Name   string `json:"name"`
@@ -94,13 +120,20 @@ const (
 	// EndpointCheckBrokerVersion: the configured protocol version parses and
 	// is one the client supports.
 	EndpointCheckBrokerVersion = "broker_version"
-	// EndpointCheckRecordHeaders: the configured protocol version can carry
-	// the record headers the standard raw event needs.
+	// EndpointCheckRecordHeaders: the protocol version the client speaks can
+	// carry the record headers the standard raw event needs -- the negotiated
+	// version once the brokers have been asked, the configured one before.
 	EndpointCheckRecordHeaders = "record_headers"
+	// EndpointCheckProduceVersion: every broker answered which Produce request
+	// versions it accepts, and the one this client sends is among them. Not
+	// ok until the sink has opened and asked; a broker that refuses the
+	// version closes the connection on every write, and nothing the readiness
+	// probe sends would ever notice.
+	EndpointCheckProduceVersion = "produce_version_accepted"
 )
 
 // EndpointCheckNames is every name an EndpointCheck can carry.
-var EndpointCheckNames = []string{EndpointCheckBrokerVersion, EndpointCheckRecordHeaders}
+var EndpointCheckNames = []string{EndpointCheckBrokerVersion, EndpointCheckRecordHeaders, EndpointCheckProduceVersion}
 
 // WriterEvidence is what a replica found of the platform's writing under a
 // dependency it only reads: how much is there and how old it is. It is the
