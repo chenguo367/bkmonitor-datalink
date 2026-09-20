@@ -128,8 +128,8 @@ func TestStoreWritesOnlyChangedWindowsWithTTLAndRetriesFailedBatch(t *testing.T)
 	if len(backend.setBatches) != 1 || len(backend.setBatches[0]) != 1 {
 		t.Fatalf("SET batches = %+v, want one changed key", backend.setBatches)
 	}
-	if backend.setBatches[0][0].TTL != 5*time.Minute {
-		t.Fatalf("TTL = %v, want retention 4m + restart margin 1m", backend.setBatches[0][0].TTL)
+	if backend.setBatches[0][0].TTL != 5*time.Minute+30*time.Second {
+		t.Fatalf("TTL = %v, want retention 4m + restart margin 1m + half a step", backend.setBatches[0][0].TTL)
 	}
 	if loaded.Items[0].Window.Changed() {
 		t.Fatal("successful write did not mark window persisted")
