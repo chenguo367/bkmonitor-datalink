@@ -519,6 +519,13 @@ func NewFixedRouter(name string, backend Backend) (*FixedRouter, error) {
 	return &FixedRouter{target: StorageTarget{Name: name, Backend: backend}}, nil
 }
 
+func (router *FixedRouter) Targets() []StorageTarget {
+	if router == nil || router.target.Name == "" || router.target.Backend == nil {
+		return nil
+	}
+	return []StorageTarget{router.target}
+}
+
 func (router *FixedRouter) Route(_, _ string) (StorageTarget, error) {
 	if router == nil || router.target.Name == "" || router.target.Backend == nil {
 		return StorageTarget{}, fmt.Errorf("state: fixed storage router is not configured")

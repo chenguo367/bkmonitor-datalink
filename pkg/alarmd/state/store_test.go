@@ -573,6 +573,10 @@ func (router *fakeRouter) Route(_ string, strategyID string) (StorageTarget, err
 	return router.target, router.err
 }
 
+func (router *fakeRouter) Targets() []StorageTarget {
+	return []StorageTarget{router.target}
+}
+
 type fakeBackend struct {
 	values      map[string][]byte
 	mgetBatches [][]string

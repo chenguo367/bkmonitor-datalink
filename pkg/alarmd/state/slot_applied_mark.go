@@ -58,6 +58,9 @@ func NewSlotAppliedMarkStore(prefix string, router StorageRouter) (*SlotAppliedM
 	if prefix == "" || router == nil {
 		return nil, fmt.Errorf("state: slot-applied mark store needs a prefix and a router")
 	}
+	if err := probeBackendCapabilities("slot-applied mark store", router, slotAppliedMarkCapabilities); err != nil {
+		return nil, err
+	}
 	return &SlotAppliedMarkStore{prefix: prefix, router: router}, nil
 }
 

@@ -222,7 +222,10 @@ func TestLoadRuntimeBatchesReadsAndIsolatesInvalidItems(t *testing.T) {
 func TestLoadRuntimeFailedBatchIsRetryableAndLeavesNoWitness(t *testing.T) {
 	backend := newFakeBackend()
 	backend.readErr = errors.New("connection reset")
-	store := newBatchStore(t, backend, nil)
+	// The read-only fake would not pass the probe at open; the transport
+	// failure under test is reached through a router that listed a capable
+	// target and routes to this one.
+	store := capabilityStore(t, backend)
 	mutations := seriesMutations(t, 3, applyVersion(), 0)
 	loaded, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: preflightItems(mutations)})
 	if err != nil {
