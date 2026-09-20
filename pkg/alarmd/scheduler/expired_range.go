@@ -281,3 +281,83 @@ func (source *ProductionSlotSource) resumeExpiredRange(ctx context.Context, p ex
 	source.observeReplayExpiry(ctx, p.First.Contract.Slot.EvaluationTime, slot.Recovery)
 	return slot, true, nil
 }
+
+// rangeGateRefusal names which of the gate's conditions refused to let a
+// replay-expired Slot reach the range builder.
+//
+// The conditions are evaluated in the order the gate writes them, so the word
+// is the first one that was false -- the same one a reader stepping through
+// the source would blame. They are a closed set: every refusal lands on one of
+// them, and the caller reports the applied and post-build words for the rest,
+// so the family totals to "every round that gave up on a Slot".
+//
+// It is a separate function from the gate rather than the gate rewritten to
+// produce its own reason, because the gate decides and this only describes:
+// an instrument that restructures the decision it measures can change it.
+func rangeGateRefusal(
+	source *ProductionSlotSource,
+	load execution.ProgressLoadResult,
+	nextSlot execution.EvaluationTime,
+	ctx context.Context,
+	queryGroup execution.QueryGroupIdentity,
+) string {
+	switch {
+	case !source.expiredRangeEnabled:
+		return observability.RangeGateCreationDisabled
+	case load.Progress == nil:
+		return observability.RangeGateProgressMissing
+	case load.Progress.NextSlot != nextSlot:
+		return observability.RangeGateNextSlotMoved
+	case load.Progress.UnfinishedSlot != nil:
+		return observability.RangeGateUnfinishedSlotPresent
+	case ctx.Value(rangeFlightContextKey{}) != queryGroup:
+		return observability.RangeGateNoRangeFlight
+	default:
+		// The gate and this description disagree, which is a defect in one of
+		// them rather than a state of the Query Group. Naming it is what keeps
+		// the two from drifting silently.
+		return observability.RangeGateUnexplained
+	}
+}
+
+// observeRangeGate reports what became of the catch-up path on one round that
+// gave up on a Slot.
+//
+// Reported on every such round including the ones that did catch up, so the
+// family is total: the share that never reaches the builder is readable
+// against the share that does, from one sample, with no memory of a previous
+// round. Reporting only the refusals would answer "how many were refused"
+// without the denominator that says whether refusal is the normal case.
+func (source *ProductionSlotSource) observeRangeGate(
+	ctx context.Context,
+	evaluationTime execution.EvaluationTime,
+	outcome string,
+	load execution.ProgressLoadResult,
+	nextSlot execution.EvaluationTime,
+) {
+	if source.observer == nil {
+		return
+	}
+	// Observability is a fail-open side channel, as everywhere else here.
+	defer func() { _ = recover() }()
+	facts := &observability.RangeGateFacts{
+		Outcome: outcome, ExpectedNextSlot: int64(nextSlot),
+		RangeCreationEnabled: source.expiredRangeEnabled,
+	}
+	if load.Progress != nil {
+		facts.ProgressPresent = true
+		facts.ProgressNextSlot = int64(load.Progress.NextSlot)
+		if load.Progress.UnfinishedSlot != nil {
+			facts.UnfinishedSlotPresent = true
+			facts.UnfinishedSlotEvaluationTime = int64(load.Progress.UnfinishedSlot.Contract.Slot.EvaluationTime)
+		}
+	}
+	source.observer.Observe(ctx, observability.Observation{
+		Component: observability.ComponentScheduler, Stage: observability.StageRangeGateDecided,
+		Result: observability.ResultDegraded, Direction: observability.DirectionInternal,
+		Trace: observability.TraceFields{
+			QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime),
+		},
+		RangeGate: facts,
+	})
+}

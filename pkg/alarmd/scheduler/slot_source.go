@@ -525,11 +525,27 @@ func (source *ProductionSlotSource) Next(
 	}
 	if source.expiredRangeEnabled && load.Progress != nil && load.Progress.NextSlot == nextSlot && load.Progress.UnfinishedSlot == nil &&
 		ctx.Value(rangeFlightContextKey{}) == queryGroup && recovery.Disposition == ReplayExpired {
+		outcome := observability.RangeGateApplied
 		if rangeSlot, eligible, rangeErr := source.buildExpiredRange(ctx, slot, schedule, at); rangeErr != nil {
 			return FrozenSlot{}, false, SlotDueFacts{}, rangeErr
-		} else if eligible && rangeFitsProgress(*load.Progress, rangeSlot.ExpiredRange) {
+		} else if !eligible {
+			outcome = observability.RangeGateNotEligible
+		} else if !rangeFitsProgress(*load.Progress, rangeSlot.ExpiredRange) {
+			outcome = observability.RangeGateProofTooLarge
+		} else {
 			slot = rangeSlot
 		}
+		source.observeRangeGate(ctx, fact.Contract.Slot.EvaluationTime, outcome, load, nextSlot)
+	} else if recovery.Disposition == ReplayExpired {
+		// The Slot is being given up on and the one path that could catch the
+		// Query Group up was not taken. Which of the gate's conditions refused
+		// it is a local of this comparison and is kept nowhere: a Query Group
+		// shedding a Slot every round reports GAP_SKIPPED and nothing about
+		// why it never catches up, and four Query Groups sat at a constant
+		// four Slots behind for hours with no reading that could name the
+		// reason.
+		source.observeRangeGate(ctx, fact.Contract.Slot.EvaluationTime,
+			rangeGateRefusal(source, load, nextSlot, ctx, queryGroup), load, nextSlot)
 	}
 	if err := slot.Validate(queryGroup); err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, err
