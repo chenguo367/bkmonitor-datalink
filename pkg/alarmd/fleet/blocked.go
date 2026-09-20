@@ -385,6 +385,31 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 			blocked.Code = anomaly.Failure.Code
 		}
 	}
+	// A failure writing the round's events is read by its words, not by its
+	// code: the code says the ACK did not come and nothing about why. The
+	// broker not answering is the dependency's, unavailable; the client
+	// refusing to send is this deployment's, a contract, and no dependency
+	// is named for it -- pointing the reader at the broker for a refusal the
+	// client decided before any byte left is the reading that lost an
+	// afternoon. Words nobody has a signature for stay unlocated, on this
+	// deployment's side of the page.
+	if failureThisRound(anomaly) {
+		if failure, kind, isOutput := outputFailureOf(anomaly); isOutput {
+			blocked.Stage = StageCommit
+			blocked.DependencyEvidence = kind
+			switch kind {
+			case OutputFailureClientRejected:
+				blocked.Dependency, blocked.Class = DependencyNone, ClassContract
+			case OutputFailureBrokerError:
+				blocked.Dependency, blocked.Class = DependencyKafka, ClassUnavailable
+			default:
+				blocked.Dependency, blocked.Class = DependencyUnlocated, ClassUnlocated
+			}
+			if blocked.Code == "" {
+				blocked.Code = failure.Code
+			}
+		}
+	}
 	// The current round is the latest thing the row records: a skip record's
 	// time, the failing round's time, the latest round that said the reason,
 	// or when the reason began. Everything below is read from that round
@@ -445,6 +470,8 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 		blocked.Text, blocked.Operation = anomaly.LastError.Text, anomaly.LastError.Operation
 	case failureCurrent && anomaly.Failure.Detail != "":
 		blocked.Text = anomaly.Failure.Detail
+	case failureCurrent && anomaly.Failure.Text != "":
+		blocked.Text = anomaly.Failure.Text
 	}
 	if !latest.IsZero() {
 		at := latest

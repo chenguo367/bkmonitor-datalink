@@ -370,6 +370,23 @@ func boundedErrorText(text string) string {
 	return text[:cut] + "..."
 }
 
+// boundedErrorTail keeps the end of an error's words rather than the start.
+// A wrapped error is read from the outside in -- the worker's stage, the
+// sink's, the client's -- and the cause is the innermost, at the end; the
+// live chain of a client refusing to send was 300 bytes of wrapping before
+// the one sentence that decided it, and a head-bounded copy cut that
+// sentence in half.
+func boundedErrorTail(text string) string {
+	if len(text) <= lastErrorTextLimit {
+		return text
+	}
+	cut := len(text) - lastErrorTextLimit
+	for cut < len(text) && !utf8.RuneStart(text[cut]) {
+		cut++
+	}
+	return "..." + text[cut:]
+}
+
 // undecidableReason is a completion reason that means the detection window
 // could not decide recovery, rather than that anything went wrong.
 //
@@ -572,8 +589,12 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// did not happen" -- a span of Slots that were never evaluated and never
 	// will be -- was the one thing on this deployment with nothing on screen.
 	cursorAdvance := observation.CursorAdvance
+	// A failed event write is the same kind of fact as a query failure: no
+	// outcome of its own, and the only observation whose words say why the
+	// round's events did not go.
+	outputFailed := observation.Stage == observability.StageEventACKed && observation.Err != nil
 	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" &&
-		failure == nil && observation.QueryCooldown == nil && cursorAdvance == nil &&
+		failure == nil && !outputFailed && observation.QueryCooldown == nil && cursorAdvance == nil &&
 		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil && observation.GapProgress == nil &&
 		observation.NoDataMemoryRead == nil && observation.NoDataMemoryRenewal == nil {
 		return
@@ -791,6 +812,30 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			Code: failure.Code, Detail: failure.Detail, At: &seen, Slot: trace.EvaluationTime}
 		state.lastFailureSlot = trace.EvaluationTime
 		if internalFailure(failure.Category) {
+			copy := *state.lastFailure
+			state.internal = &copy
+		}
+	}
+	// The write of the round's events failing is a failure of its own stage,
+	// and the only observation that carries its words is this one: the
+	// terminal that follows names the round's reason and nothing else. Six
+	// objects failed every round for an afternoon with the row saying
+	// OUTPUT_ACK_UNKNOWN at "other" and the page saying the broker was
+	// unavailable, while the client had refused to send at all -- a sentence
+	// on this observation that reached no row. The words are kept, bounded
+	// and sanitized as the row's last error is; the reading decides from them
+	// whether the broker or this deployment's own client is the one that
+	// said no, and files the failure as internal only in the second case.
+	if outputFailed {
+		seen := at
+		code := string(observation.ReasonCode)
+		if !observability.ValidQueryFailureCode(code) {
+			code = ""
+		}
+		state.lastFailure = &FailureRef{Stage: observability.QueryFailureStageOutput, Category: observability.QueryFailureCategoryOutput,
+			Code: code, Text: boundedErrorTail(observability.SanitizeErrorText(observation.Err.Error())), At: &seen, Slot: trace.EvaluationTime}
+		state.lastFailureSlot = trace.EvaluationTime
+		if OutputFailureKind(state.lastFailure.Text) == OutputFailureClientRejected {
 			copy := *state.lastFailure
 			state.internal = &copy
 		}

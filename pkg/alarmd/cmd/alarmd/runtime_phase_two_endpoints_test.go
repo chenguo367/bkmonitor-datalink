@@ -327,3 +327,55 @@ func TestTheFleetPublishesTheOutputProtocolTheReconcilerWasConfiguredWith(t *tes
 		t.Fatalf("a publisher without a protocol published %+v", snapshot.OutputProtocol)
 	}
 }
+
+// The output role says what protocol version the client speaks and whether
+// that version can carry the record headers the standard raw event needs,
+// with the two checks decided from it -- so a client told the broker is older
+// than 0.11 is readable as such before the first event is refused, rather
+// than inferred from an afternoon of ACKs that never came.
+func TestTheOutputRoleSaysWhetherItsClientCanCarryHeaders(t *testing.T) {
+	for _, test := range []struct {
+		version string
+		parses  bool
+		headers bool
+	}{
+		{"0.10.2.0", true, false},
+		{"0.11.0.0", true, true},
+		{"2.6.0", true, true},
+		{"not-a-version", false, false},
+	} {
+		cfg := config.Default()
+		cfg.Kafka.Brokers = []string{"kafka-0:9092"}
+		cfg.Kafka.BrokerVersion = test.version
+		entry := outputKafkaEndpoint(cfg)
+		if entry.Role != fleet.EndpointOutputKafka || entry.ProtocolVersion != test.version {
+			t.Fatalf("%s: entry = %+v, want the output role at that version", test.version, entry)
+		}
+		checks := map[string]fleet.EndpointCheck{}
+		for _, check := range entry.Checks {
+			checks[check.Name] = check
+		}
+		if got := checks[fleet.EndpointCheckBrokerVersion]; got.OK != test.parses || (!test.parses && got.Detail == "") {
+			t.Fatalf("%s: broker_version check = %+v, want ok %t with a detail when not", test.version, got, test.parses)
+		}
+		if !test.parses {
+			if entry.HeadersSupported != nil {
+				t.Fatalf("%s: headers_supported = %v for a version that does not parse, want absent", test.version, *entry.HeadersSupported)
+			}
+			continue
+		}
+		if entry.HeadersSupported == nil || *entry.HeadersSupported != test.headers {
+			t.Fatalf("%s: headers_supported = %v, want %t", test.version, entry.HeadersSupported, test.headers)
+		}
+		record := checks[fleet.EndpointCheckRecordHeaders]
+		if record.OK != test.headers || (!test.headers && !strings.Contains(record.Detail, "0.11.0.0")) {
+			t.Fatalf("%s: record_headers check = %+v, want ok %t naming the version needed when not", test.version, record, test.headers)
+		}
+	}
+	// Every check name a role reports is in the closed list.
+	for _, name := range fleet.EndpointCheckNames {
+		if name != fleet.EndpointCheckBrokerVersion && name != fleet.EndpointCheckRecordHeaders {
+			t.Fatalf("unknown check name %q in EndpointCheckNames", name)
+		}
+	}
+}

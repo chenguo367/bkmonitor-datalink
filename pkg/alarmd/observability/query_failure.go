@@ -13,6 +13,10 @@ const (
 	QueryFailureStageStreamComplete = "stream_complete"
 	QueryFailureStageProvider       = "provider"
 	QueryFailureStageOther          = "other"
+	// QueryFailureStageOutput is the write of the round's events, after the
+	// evaluation: a failure there is the sink's, and the row reads it by the
+	// error's own words rather than by a query failure's detail grammar.
+	QueryFailureStageOutput = "output"
 
 	QueryFailureCategorySourceBackend      = "source_backend"
 	QueryFailureCategorySeriesIdentity     = "series_identity"
@@ -28,6 +32,8 @@ const (
 	// the result contract rejected.
 	QueryFailureCategoryEvaluation = "evaluation"
 	QueryFailureCategoryOther      = "other"
+	// QueryFailureCategoryOutput is a failure writing the round's events.
+	QueryFailureCategoryOutput = "output"
 
 	QueryFailureCodeOther = "OTHER"
 
@@ -41,11 +47,13 @@ const (
 var (
 	QueryFailureStages = []string{
 		QueryFailureStageExecute, QueryFailureStageStreamComplete, QueryFailureStageProvider, QueryFailureStageOther,
+		QueryFailureStageOutput,
 	}
 	QueryFailureCategories = []string{
 		QueryFailureCategorySourceBackend, QueryFailureCategorySeriesIdentity, QueryFailureCategoryBudget,
 		QueryFailureCategoryCompletionContract, QueryFailureCategoryNamedInput, QueryFailureCategoryProviderTransport,
 		QueryFailureCategoryAdmission, QueryFailureCategoryEvaluation, QueryFailureCategoryOther,
+		QueryFailureCategoryOutput,
 	}
 )
 

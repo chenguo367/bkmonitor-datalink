@@ -230,6 +230,16 @@ type FailureRef struct {
 	// [a-z0-9_=.-], so URLs, messages and response bodies are refused upstream
 	// rather than trimmed here.
 	Detail string `json:"detail,omitempty"`
+	// Text is the error's own words for a failure whose emitter reports an
+	// error and no detail -- the write of the round's events. Bounded and
+	// sanitized the way the row's last error is, and kept apart from Detail
+	// because Detail has a grammar (a bounded token the backend answered
+	// with) and this does not. It is the field that decides the reading of
+	// an output failure: the client refusing to send is not the broker
+	// failing to answer, and on a live deployment the two read identically
+	// for an afternoon because neither the row nor the window carried the
+	// sentence that told them apart.
+	Text string `json:"text,omitempty"`
 	// At is when this failure was observed. The reference is kept until a
 	// healthy completion, so on a row whose latest round ended some other
 	// way it describes an earlier round; the reading that names the current

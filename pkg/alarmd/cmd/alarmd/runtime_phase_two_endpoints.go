@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Shopify/sarama"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
@@ -98,8 +100,7 @@ func resolveEndpoints(cfg config.Config, sharing endpointSharing) []fleet.Endpoi
 	endpoints = append(endpoints,
 		fleet.Endpoint{Role: fleet.EndpointQueryBackend, Kind: "http", Address: cfg.PhaseTwo.Access.UQEndpoint,
 			Configured: cfg.PhaseTwo.Access.UQEndpoint != ""},
-		fleet.Endpoint{Role: fleet.EndpointOutputKafka, Kind: "kafka", Address: strings.Join(cfg.Kafka.Brokers, ","),
-			Prefix: cfg.Kafka.TriggerEvent.Topic, Configured: len(cfg.Kafka.Brokers) > 0},
+		outputKafkaEndpoint(cfg),
 	)
 	if sharing.compatOutputPresent {
 		endpoints = append(endpoints, redisEndpoint(fleet.EndpointCompatOutput, cfg.Kafka.LegacyAdapter.ServiceRedis,
@@ -213,6 +214,34 @@ func endpointFactsSource(
 // and the probe say the same thing about one process. Nil health -- a
 // publisher built without one -- publishes no fact rather than a made-up
 // ready.
+// outputKafkaEndpoint is the output role with what the client is configured
+// to speak and what that means for the standard raw event: the version, and
+// two checks decided from it before any message is sent. The client refuses
+// to produce a record header to a broker it has been told is older than
+// 0.11, and the standard raw event carries the tenant in a header, so a
+// version below that is every native event refused -- readable here, before
+// the first refusal, rather than inferred from an afternoon of ACKs that
+// never came.
+func outputKafkaEndpoint(cfg config.Config) fleet.Endpoint {
+	entry := fleet.Endpoint{Role: fleet.EndpointOutputKafka, Kind: "kafka", Address: strings.Join(cfg.Kafka.Brokers, ","),
+		Prefix: cfg.Kafka.TriggerEvent.Topic, Configured: len(cfg.Kafka.Brokers) > 0, ProtocolVersion: cfg.Kafka.BrokerVersion}
+	version, err := sarama.ParseKafkaVersion(cfg.Kafka.BrokerVersion)
+	if err != nil {
+		entry.Checks = append(entry.Checks, fleet.EndpointCheck{Name: fleet.EndpointCheckBrokerVersion,
+			Detail: "broker_version " + cfg.Kafka.BrokerVersion + " does not parse: " + err.Error()})
+		return entry
+	}
+	entry.Checks = append(entry.Checks, fleet.EndpointCheck{Name: fleet.EndpointCheckBrokerVersion, OK: true})
+	headers := version.IsAtLeast(sarama.V0_11_0_0)
+	entry.HeadersSupported = &headers
+	check := fleet.EndpointCheck{Name: fleet.EndpointCheckRecordHeaders, OK: headers}
+	if !headers {
+		check.Detail = "broker_version " + cfg.Kafka.BrokerVersion + " cannot carry record headers; the standard raw event carries the tenant in one, so every native event is refused by the client before it is sent (needs 0.11.0.0 or later)"
+	}
+	entry.Checks = append(entry.Checks, check)
+	return entry
+}
+
 func readinessFactsSource(health *phaseTwoApplicationHealth) func() *fleet.ReadinessFacts {
 	if health == nil {
 		return nil

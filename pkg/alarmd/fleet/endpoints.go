@@ -64,7 +64,43 @@ type Endpoint struct {
 	// Writer is what the replica found of the platform's writing under this
 	// role, for the roles that read a platform cache.
 	Writer *WriterEvidence `json:"writer,omitempty"`
+	// ProtocolVersion is the protocol version this replica's client speaks to
+	// the role, as configured, and HeadersSupported whether that version can
+	// carry record headers -- which the standard raw event does. Present on
+	// the output role only. A client told the broker is older than 0.11
+	// refuses every event with a header before any byte leaves, and on a live
+	// deployment that read for an afternoon as the broker being unavailable;
+	// the version was in the configuration the whole time and on no screen.
+	ProtocolVersion  string `json:"protocol_version,omitempty"`
+	HeadersSupported *bool  `json:"headers_supported,omitempty"`
+	// Checks is what this replica verified about the role at startup, each
+	// by name with its verdict and, when it failed, why. A configuration
+	// error has to be readable before the first message, not inferred from
+	// the first message failing.
+	Checks []EndpointCheck `json:"checks,omitempty"`
 }
+
+// EndpointCheck is one startup verification of a role: the name from
+// EndpointCheckNames, whether it passed, and the sentence when it did not.
+type EndpointCheck struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// The checks a replica reports on the output role. Closed: a reader shows
+// these words and no others.
+const (
+	// EndpointCheckBrokerVersion: the configured protocol version parses and
+	// is one the client supports.
+	EndpointCheckBrokerVersion = "broker_version"
+	// EndpointCheckRecordHeaders: the configured protocol version can carry
+	// the record headers the standard raw event needs.
+	EndpointCheckRecordHeaders = "record_headers"
+)
+
+// EndpointCheckNames is every name an EndpointCheck can carry.
+var EndpointCheckNames = []string{EndpointCheckBrokerVersion, EndpointCheckRecordHeaders}
 
 // WriterEvidence is what a replica found of the platform's writing under a
 // dependency it only reads: how much is there and how old it is. It is the
