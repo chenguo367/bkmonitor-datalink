@@ -493,9 +493,13 @@ var codeChecks = map[string]verdict{
 	"LEVEL_BUDGET_EXCEEDED": lands(CheckPlanUnevaluable),
 
 	// The backend was asked and did not answer usefully.
-	"QUERY_TIMEOUT":        lands(CheckBackendNotAnswering),
-	"QUERY_UNAVAILABLE":    lands(CheckBackendNotAnswering),
-	"QUERY_PARTIAL":        lands(CheckBackendNotAnswering),
+	"QUERY_TIMEOUT":     lands(CheckBackendNotAnswering),
+	"QUERY_UNAVAILABLE": lands(CheckBackendNotAnswering),
+	"QUERY_PARTIAL":     lands(CheckBackendNotAnswering),
+	// The backend answered and the dependency holds no rows: the data the
+	// algorithm compares against is missing, the same reading a series with
+	// no history point gets.
+	"QUERY_EMPTY":          lands(CheckSeriesDataMissing),
 	"PROVIDER_UNAVAILABLE": lands(CheckBackendNotAnswering),
 	"QUERY_NOT_READY":      lands(CheckBackendNotAnswering),
 	"LATE_OUT_OF_WINDOW":   lands(CheckBackendNotAnswering),

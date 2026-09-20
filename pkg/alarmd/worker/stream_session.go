@@ -1381,7 +1381,9 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	incomplete := make([]execution.NamedInputBinding, 0)
 	for _, input := range inputs {
 		for _, binding := range input.Inputs {
-			if binding.Completeness != execution.CompletenessFull {
+			// The same predicate the fold reads, so the marker proposed here
+			// covers exactly the Levels whose outcomes will name its reason.
+			if execution.InputIncompleteForGuard(binding) {
 				incomplete = append(incomplete, binding)
 			}
 		}

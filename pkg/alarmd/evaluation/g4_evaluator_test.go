@@ -116,10 +116,12 @@ func TestEvaluateSeriesPreservesActiveStateGuardReasonForEveryUnknownOutcome(t *
 			// a durable reason and the ring-ratio previous point is missing.
 			name: "warming guard and missing dependency point", plan: single,
 			status: execution.StateFoundWarming, completeness: execution.HistoryWarming, primary: g4Record(99, `80`, nil),
+			previous: []contract.CanonicalRecordV2{g4OtherSeriesRecord(39, `100`)},
 		},
 		{
 			name: "gapped guard and missing dependency point", plan: single,
 			status: execution.StateFoundGapped, completeness: execution.HistoryGapped, primary: g4Record(99, `80`, nil),
+			previous: []contract.CanonicalRecordV2{g4OtherSeriesRecord(39, `100`)},
 		},
 		{
 			// The loaded history already lets WARMING converge, so the evaluator
@@ -128,6 +130,7 @@ func TestEvaluateSeriesPreservesActiveStateGuardReasonForEveryUnknownOutcome(t *
 			name: "converged warming guard and missing dependency point", plan: single,
 			status: execution.StateFoundWarming, completeness: execution.HistoryWarming,
 			history: []execution.StateHistoryPoint{normal(single, "d", 39)}, primary: g4Record(99, `80`, nil),
+			previous: []contract.CanonicalRecordV2{g4OtherSeriesRecord(39, `100`)},
 		},
 		{
 			// Converged WARMING and a hole before the new record: the trigger sees
@@ -260,9 +263,16 @@ func g4Input(t *testing.T, request execution.EvaluationRequest, records map[stri
 		SeriesIdentity: execution.SeriesIdentityDigest(request.State.Items[0].Identity.SeriesIdentityDigest)}
 	for _, requirement := range algorithm.InputRequirements() {
 		dataset := execution.NewDataset(records[requirement.DatasetName])
-		ordinals := make([]uint32, dataset.Len())
-		for index := range ordinals {
-			ordinals[index] = uint32(index)
+		// The view is the series' own rows, as the worker hands it to the
+		// evaluator; the data state is the dataset's. A dataset holding only
+		// another series' rows is FULL with data and an empty view for this
+		// series, which is the per-series missing point and not an empty
+		// dependency.
+		ordinals := make([]uint32, 0, dataset.Len())
+		for index, record := range records[requirement.DatasetName] {
+			if execution.SeriesIdentityDigest(record.DimensionIdentity.Digest) == input.SeriesIdentity {
+				ordinals = append(ordinals, uint32(index))
+			}
 		}
 		view, err := execution.NewDatasetView(dataset, ordinals)
 		if err != nil {
@@ -352,6 +362,22 @@ func g4Requirement(t *testing.T, name string, role strategy.AlgorithmInputRole, 
 		LogicalQueryRef: "query-" + name, RelativeWindow: strategy.AlgorithmRelativeWindow{StartOffsetSeconds: start, EndOffsetSeconds: end, HalfOpen: true},
 		StepMillis: 60_000, AlignmentMillis: 60_000, ReadinessClass: strategy.AlgorithmReadinessFinalizedRequired,
 		InputProjection: projection, PointOffsetsSeconds: offsets, NamedPoints: points}
+}
+
+// g4OtherSeriesRecord is a dependency point that belongs to another series.
+// A dependency dataset holding it is FULL and carries data, and this series
+// still has no point in it -- the per-series shape, which the evaluator
+// guards with a Level state written for the series. A dataset holding nothing
+// at all is the other shape, a dependency that completed empty, and that one
+// is guarded by a Level marker the worker proposes; a test that means the
+// first must not build the second.
+func g4OtherSeriesRecord(sourceTime int64, value string) contract.CanonicalRecordV2 {
+	// Another identity by both the digest and the projection's identity
+	// field, so neither the series lookup nor the algorithm's own matching
+	// takes this point for the series under test.
+	record := g4Record(sourceTime, value, map[string]json.RawMessage{"host": json.RawMessage(`"other"`)})
+	record.DimensionIdentity = contract.DimensionIdentityV2{Digest: strings.Repeat("d", 64)}
+	return record
 }
 
 func g4Record(sourceTime int64, value string, dimensions map[string]json.RawMessage) contract.CanonicalRecordV2 {

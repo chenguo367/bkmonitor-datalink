@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -704,4 +705,60 @@ func TestEvaluatorKeepsPlanGapWithoutDurableState(t *testing.T) {
 			t.Fatalf("revision %q cleared a gap without durable state: %+v", revision, result.Plans[0])
 		}
 	}
+}
+
+// proposeRoundGuard does for a test what the worker does after Evaluate: when
+// the round's inputs are incomplete by the one definition the fold reads, the
+// Plan's result carries the gap marker that fold names, so the contract sees
+// the guard that will cover the outcome. Evaluate itself never proposes it --
+// the worker owns the marker -- so a test that validates an evaluation with an
+// incomplete input has to stand in for the worker or it validates a shape
+// production never produces.
+func proposeRoundGuard(t *testing.T, request execution.EvaluationRequest, result *execution.EvaluationResult) {
+	t.Helper()
+	due := request.Header.DuePlans[0]
+	var bindings []execution.NamedInputBinding
+	for _, input := range request.Inputs {
+		bindings = append(bindings, input.Inputs...)
+	}
+	reasons := execution.RoundGapScopeReasons(bindings, due.Identity)
+	if len(reasons) == 0 {
+		return
+	}
+	identity := execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}
+	marker, _ := request.Gaps.Find(identity)
+	version, err := execution.BuildApplyVersion(request.Header.Contract, due.StateApplyEpoch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var required uint32
+	for _, level := range due.CompiledPlan.Levels() {
+		if points := level.RequiredDetectHistoryPoints(); points > required {
+			required = points
+		}
+	}
+	scopes := make([]execution.GapScope, 0, len(reasons))
+	for scope := range reasons {
+		scopes = append(scopes, scope)
+	}
+	sort.Slice(scopes, func(i, j int) bool {
+		if scopes[i].HasLevel != scopes[j].HasLevel {
+			return !scopes[i].HasLevel
+		}
+		return scopes[i].LevelID < scopes[j].LevelID
+	})
+	mutations := make([]execution.GapScopeMutation, 0, len(scopes))
+	for _, scope := range scopes {
+		mutations = append(mutations, execution.GapScopeMutation{Scope: scope, Kind: execution.GapOpen,
+			ReasonCode: reasons[scope], RequiredFullSlots: required})
+	}
+	mutation, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{
+		Identity: identity, ExpectedMarkerRevision: marker.MarkerRevision,
+		ApplyVersion: version, ScheduleRevision: due.ScheduleRevision, Scopes: mutations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result.Plans[0].GuardBeforeEvents = []execution.PlanGapMutation{mutation}
+	result.Plans[0].GuardAfterState = nil
 }

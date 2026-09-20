@@ -56,6 +56,10 @@ var GapReasonFoldOrder = []string{
 	ReasonExecutionBudgetExhausted,
 	ReasonConfigDrift,
 	ReasonQueryPartial,
+	// Last: the query succeeded and returned nothing. It asks the least
+	// protection of any of these -- the Level is starved, not misinformed --
+	// so a scope that also has a PARTIAL input says PARTIAL.
+	ReasonQueryEmpty,
 }
 
 // FoldGapReason reduces the reasons of one gap scope's incomplete inputs to
