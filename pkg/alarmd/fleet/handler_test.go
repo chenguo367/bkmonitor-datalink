@@ -1016,3 +1016,82 @@ func TestTheListResponseSendsOnlyTheRowsItIsAbout(t *testing.T) {
 		t.Errorf("check=DETECTION_ABANDONED serves %v, want the one retained record as a row", rows)
 	}
 }
+
+// The verdict route carries each replica's own dependency record and says how
+// many replicas the one list it shows is one of; the list route, polled every
+// thirty seconds for rows, carries neither the per-replica lists nor a count
+// that pretends to. A reader asking "is every replica's output open" reads
+// the rows on the verdict route and nothing else.
+func TestTheVerdictRouteCarriesEachReplicasDependenciesAndTheListRouteDoesNot(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[0].TakenAt = now.Add(-5 * time.Second)
+	snapshots[0].Dependencies = []Endpoint{outputEntry(true, 1, "")}
+	snapshots[1].Dependencies = []Endpoint{outputEntry(false, 7, "kafka: dial tcp 10.0.0.1:9092: i/o timeout")}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas())
+
+	_, health := get(t, handler, "/api/health")
+	if health["dependencies_replica"] != "pod-a" || health["dependencies_replicas"].(float64) != 2 {
+		t.Fatalf("shown list = %v of %v replicas, want pod-a's, one of 2", health["dependencies_replica"], health["dependencies_replicas"])
+	}
+	rows, _ := health["per_replica"].([]any)
+	ready := map[string]bool{}
+	for _, item := range rows {
+		row := item.(map[string]any)
+		list, _ := row["dependencies"].([]any)
+		if len(list) != 1 {
+			t.Fatalf("%v row carries %v, want its one dependency entry", row["replica"], row["dependencies"])
+		}
+		entry := list[0].(map[string]any)
+		ready[row["replica"].(string)] = entry["ready"].(bool)
+	}
+	if !ready["pod-a"] || ready["pod-b"] {
+		t.Fatalf("per-replica readiness = %v, want pod-a open and pod-b not: each row its own record", ready)
+	}
+
+	_, list := get(t, handler, "/api/objects")
+	rows, _ = list["per_replica"].([]any)
+	if len(rows) != 2 {
+		t.Fatalf("list route per_replica = %d rows, want both replicas' counts still there", len(rows))
+	}
+	for _, item := range rows {
+		row := item.(map[string]any)
+		if _, present := row["dependencies"]; present {
+			t.Errorf("the list route ships %v's dependency record on every poll: %v", row["replica"], row["dependencies"])
+		}
+	}
+}
+
+// The verdict route carries each replica's readiness bits and the count of
+// replicas that answer no, so the question a rollout asks -- is every
+// replica ready, and on which bit is the one that is not -- is one read.
+func TestTheVerdictRouteCarriesEachReplicasReadiness(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[0].Readiness = &ReadinessFacts{State: "ready", Ready: true, ConfigLoaded: true, SchemaReady: true,
+		AssignmentReady: true, RuntimeStateReady: true, OutputSinkReady: true, SnapshotReady: true}
+	snapshots[1].Readiness = &ReadinessFacts{State: "not_ready", Ready: false, Reasons: []string{"KAFKA_UNAVAILABLE"},
+		ConfigLoaded: true, SchemaReady: true, AssignmentReady: true, RuntimeStateReady: true, OutputSinkReady: false, SnapshotReady: true}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas())
+	_, health := get(t, handler, "/api/health")
+	if health["replicas_not_ready"].(float64) != 1 {
+		t.Fatalf("replicas_not_ready = %v, want 1", health["replicas_not_ready"])
+	}
+	rows, _ := health["per_replica"].([]any)
+	bits := map[string]map[string]any{}
+	for _, item := range rows {
+		row := item.(map[string]any)
+		readiness, _ := row["readiness"].(map[string]any)
+		if readiness == nil {
+			t.Fatalf("%v row carries no readiness: %v", row["replica"], row)
+		}
+		bits[row["replica"].(string)] = readiness
+	}
+	if bits["pod-a"]["ready"] != true || bits["pod-a"]["output_sink_ready"] != true {
+		t.Errorf("pod-a readiness = %v, want ready with the output bit true", bits["pod-a"])
+	}
+	if bits["pod-b"]["ready"] != false || bits["pod-b"]["output_sink_ready"] != false || bits["pod-b"]["runtime_state_ready"] != true {
+		t.Errorf("pod-b readiness = %v, want not ready with the output bit the one that is false", bits["pod-b"])
+	}
+	if reasons, _ := bits["pod-b"]["reasons"].([]any); len(reasons) != 1 || reasons[0] != "KAFKA_UNAVAILABLE" {
+		t.Errorf("pod-b reasons = %v, want the process's one reason", bits["pod-b"]["reasons"])
+	}
+}

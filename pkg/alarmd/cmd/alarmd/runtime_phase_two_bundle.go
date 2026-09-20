@@ -918,6 +918,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 		source:           bundle.sourceFleetFacts,
 		endpoints: endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
 			bundle.sourceFleetFacts, events.State, external.Now),
+		// The same snapshot the readiness endpoint serves, so the fleet and
+		// the probe cannot disagree about one replica.
+		readiness: readinessFactsSource(health),
 	}
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.

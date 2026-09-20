@@ -218,6 +218,10 @@ type fleetPublisher struct {
 	// the tests that build a publisher by hand keep working.
 	source    func() *fleet.SourceFacts
 	endpoints func() []fleet.Endpoint
+	// readiness reports this replica's own readiness, bit by bit, from the
+	// same source its readiness endpoint answers from. Nil-safe and optional
+	// like the two above.
+	readiness func() *fleet.ReadinessFacts
 	// rebalance reports the control leader's latest rebalance planning
 	// round: how the ready replicas hold the objects and what the round
 	// would move. Nil on a follower; the aggregate takes the newest round
@@ -418,6 +422,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.endpoints != nil {
 		snapshot.Dependencies = publisher.endpoints()
+	}
+	if publisher.readiness != nil {
+		snapshot.Readiness = publisher.readiness()
 	}
 	// And the objects whose rounds end without a basis to decide recovery.
 	// Beside the anomalies for a different reason than the pool: not "this is
