@@ -203,6 +203,17 @@ var failureFacets = map[string]facets{
 	// what, not to the evaluation, which had finished.
 	"STATE_VERSION_CONFLICT": {StageCommit, ClassContract, DependencyNone},
 	"STATE_STALE_VERSION":    {StageCommit, ClassContract, DependencyNone},
+	// The ownership store refused this worker: at the commit step, since the
+	// fence is checked on the way to the writes (the admission before them,
+	// the fenced write itself), and REFUSED because the store answered and
+	// said no rather than not answering. The store is this deployment's
+	// Redis, but the refusal is about the lease and not about Redis, so no
+	// dependency is named -- pointing the reader at a Redis that is fine is
+	// what REDIS_UNAVAILABLE used to do for a capability that was missing.
+	"OWNERSHIP_STALE_FENCE": {StageCommit, ClassRefused, DependencyNone},
+	"OWNERSHIP_NOT_DESIRED": {StageCommit, ClassRefused, DependencyNone},
+	"OWNERSHIP_LEASE_BUSY":  {StageCommit, ClassRefused, DependencyNone},
+	"CONTENT_SCOPE_MOVED":   {StageCommit, ClassRefused, DependencyNone},
 
 	// A Plan this deployment keeps too little for.
 	"SNAPSHOT_RETENTION_INSUFFICIENT": {StageConfig, ClassRetention, DependencyNone},

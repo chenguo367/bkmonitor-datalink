@@ -455,6 +455,32 @@ var codeChecks = map[string]verdict{
 	// rounds reached here as internal_unknown and the row carried no code.
 	"STATE_VERSION_CONFLICT": lands(CheckDefect),
 	"STATE_STALE_VERSION":    lands(CheckDefect),
+	// The ownership store refused this deployment's own worker: its fence
+	// went stale, the assignment names another worker, another owner holds
+	// the lease, or the content scope moved under a fenced write. Each is a
+	// mechanism of this system's -- a handover, a lease expiring, a scope
+	// change taking effect -- and one round of any of them is that mechanism
+	// working. An object does not reach a line on one round: it takes
+	// DefaultDegradedRounds in a row, and a worker that keeps being refused
+	// for an object it keeps trying is this deployment's ownership loop
+	// disagreeing with its own store. Nobody outside can help with that, so
+	// it is ours, whichever of the four words it wears.
+	//
+	// One of the four has a lawful run: a lease held by an owner that went
+	// away without releasing stays BUSY to the next desired worker until the
+	// lease's TTL runs out, so a clean pod kill is up to LeaseTTL of BUSY in a
+	// row, and on a ten-second object three rounds is exactly that TTL. Today
+	// no producer puts any of the four on a Slot's terminal reason -- they are
+	// on the admission, lease and state lines and the refusals counter -- so
+	// this row is not reachable; the first producer to make it reachable
+	// (the content-scope work) has to bring the lease TTL onto the snapshot
+	// and gate this line on the reason having held longer than TTL plus one
+	// period, not on a round count. The mapping is kept so the code is
+	// decided rather than absorbed by the default.
+	"OWNERSHIP_STALE_FENCE": lands(CheckDefect),
+	"OWNERSHIP_NOT_DESIRED": lands(CheckDefect),
+	"OWNERSHIP_LEASE_BUSY":  lands(CheckDefect),
+	"CONTENT_SCOPE_MOVED":   lands(CheckDefect),
 	// A Plan this deployment cannot serve: it asks for a Snapshot kept longer
 	// than the retention, or leaves its own queries no time to run. Neither is
 	// weather and neither clears itself -- somebody changes the strategy or
