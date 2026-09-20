@@ -186,7 +186,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	beginStarted := time.Now()
 	begin, err := coordinator.ports.Progress.BeginSlot(ctx, execution.ProgressBeginRequest{
 		Identity:   execution.ProgressIdentity{QueryGroup: request.Contract.Slot.QueryGroup},
-		OwnerFence: request.OwnerFence, Projection: request.UnfinishedProjection(),
+		OwnerFence: request.OwnerFence, Projection: request.UnfinishedProjection(), ContentScope: request.ContentScope,
 	})
 	// Timed whichever way it went. A BeginSlot that fails says so; one that
 	// simply took twenty seconds used to say nothing at all, and an attempt
@@ -1054,6 +1054,16 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			}
 			sortTriggerEvents(events)
 			if err := coordinator.writeEvents(ctx, request.Operation, events); err != nil {
+				if reason, deferred := outputDeferralReason(err); deferred {
+					// The sink did not start the batch: the lease has less
+					// life left than one batch needs to land. Nothing is
+					// unknown and nothing is wrong with the content; the
+					// Plan waits, by that name, for the next renewal.
+					if retryPendingReason == "" {
+						retryPendingReason = reason
+					}
+					continue
+				}
 				if reason, rejected := outputRejectionReason(err); rejected {
 					// Decided in this process, from this Plan's own decisions
 					// or this deployment's own client: the same events meet
@@ -1080,7 +1090,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				continue
 			}
 			if len(accepted) > 0 {
-				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, retention, accepted, acceptedBytes)
+				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, accepted, acceptedBytes)
 				if err != nil {
 					return execution.SlotExecutionResult{}, err
 				}
@@ -1240,7 +1250,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	progressRequest := execution.ProgressCommitRequest{
 		Identity:   execution.ProgressIdentity{QueryGroup: request.Contract.Slot.QueryGroup},
 		OwnerFence: request.OwnerFence, ExpectedNextSlot: request.ExpectedNextSlot, Completion: completion,
-		Projection: request.UnfinishedProjection(),
+		Projection: request.UnfinishedProjection(), ContentScope: request.ContentScope,
 	}
 	if err := progressRequest.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid progress commit: %w", err)
@@ -1397,6 +1407,9 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 				rejection.Detail = detailed.OutputRejectionDetail()
 			}
 		}
+		if deferral, deferred := outputDeferralReason(err); deferred {
+			reason = deferral
+		}
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
@@ -1430,6 +1443,22 @@ func isRetryableOutputDependency(err error) bool {
 	}
 	var dependencyErr interface{ RetryableOutputDependency() }
 	return errors.As(err, &dependencyErr) && dependencyErr != nil
+}
+
+// outputDeferralReason reports whether the sink declined to start the batch
+// because the Slot's lease has less life left than the batch needs
+// (kafka.OutputDeferredError), and the reason it names. Retryable by
+// construction -- the next renewal changes the answer -- but not an unknown
+// acknowledgement: no broker was asked.
+func outputDeferralReason(err error) (execution.ReasonCode, bool) {
+	if err == nil {
+		return "", false
+	}
+	var deferral interface{ OutputDeferralReason() string }
+	if !errors.As(err, &deferral) || deferral == nil || deferral.OutputDeferralReason() == "" {
+		return "", false
+	}
+	return execution.ReasonCode(deferral.OutputDeferralReason()), true
 }
 
 // outputRejectionReason reports whether the sink refused to write the events
@@ -1532,6 +1561,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 	operation execution.Operation,
 	contractRef execution.FrozenExecutionContractRef,
 	fence execution.OwnerFence,
+	contentScope string,
 	retention []execution.StateRetentionRequirement,
 	mutations []execution.StateMutation,
 	encodedBytes []int64,
@@ -1553,7 +1583,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		var result execution.StateApplyResult
 		var err error
 		if useFence {
-			result, err = fenced.ApplyRuntimeFenced(ctx, applyRequest, execution.StateApplyFence{Fence: fence})
+			result, err = fenced.ApplyRuntimeFenced(ctx, applyRequest, execution.StateApplyFence{Fence: fence, ContentScope: contentScope})
 		} else {
 			result, err = coordinator.ports.State.ApplyRuntime(ctx, applyRequest)
 		}

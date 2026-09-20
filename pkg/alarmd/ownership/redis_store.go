@@ -245,7 +245,7 @@ func (store *RedisStore) PublishAssignment(
 	}, authority.Fence.OwnerID, authority.Fence.OwnerEpoch, authority.Fence.LeaseToken,
 		decision.ExpectedRecordRevision, string(decision.QueryGroup), decision.DesiredWorkerID,
 		string(decision.PlacementReason), decision.DecidedAt.UnixMilli(),
-		decision.ContentScope, ContentSwitchMargin.Milliseconds()).Result()
+		decision.ContentScope, ContentSwitchMargin.Milliseconds(), boolText(decision.WithdrawContentScope)).Result()
 	if err != nil {
 		return AssignmentRecord{}, err
 	}
@@ -1011,7 +1011,14 @@ return 'RELEASED'
 // extend the lease past that. A change with no live holder, or one that
 // arrives together with a change of desired worker, is written directly --
 // there is nobody to protect from it, or the old holder is already refused
-// by desired_worker_id. A pending change written twice with the same scope is
+// by desired_worker_id. So is the first scope a record ever gets: a record
+// that names nothing authorized nothing in particular, its fence admitted
+// every content, and there is no old content whose holder a deadline would
+// protect. Written as pending it would cap every lease in the fleet once on
+// the round the contract starts, and each Query Group would lose its lease
+// and hold its output for the last batch bound of it; written directly it
+// binds from now, which the holder -- on the content the record names, or
+// it would not be the current publication -- passes. A pending change written twice with the same scope is
 // left alone; a different scope replaces it and never moves effective_at_ms
 // earlier. Every scope the leader decides here bumps record_revision, so a
 // CAS reader sees the decision; assignment_generation counts changes of
@@ -1020,6 +1027,11 @@ return 'RELEASED'
 // does not bump it: that is the record settling a decision already
 // revisioned, not a new one, and bumping there would fail the leader's own
 // CAS against a revision it read moments ago.
+//
+// ARGV[11] is the withdrawal flag: '1' clears the record's scope and any
+// pending change directly, bumping record_revision when there was anything
+// to clear. Withdrawing the comparison refuses nobody, so it waits for no
+// deadline; it is exclusive with a named scope and checked before it.
 //
 // Replies are ten elements: desired worker, generation, revision, control
 // epoch, reason, assigned_at, query group, content scope, pending scope,
@@ -1043,6 +1055,7 @@ local reason = ARGV[7]
 local assigned_at = ARGV[8]
 local wanted_scope = ARGV[9] or ''
 local margin_ms = tonumber(ARGV[10] or '0')
+local withdraw = ARGV[11] == '1'
 local function reply()
   local f = redis.call('HMGET', KEYS[2], 'desired_worker_id', 'assignment_generation', 'record_revision',
     'control_epoch', 'placement_reason', 'assigned_at_ms', 'content_scope', 'pending_content_scope', 'effective_at_ms')
@@ -1050,6 +1063,14 @@ local function reply()
 end
 local current_desired = redis.call('HGET', KEYS[2], 'desired_worker_id')
 if current_desired and current_desired == desired then
+  if withdraw then
+    local named = redis.call('HMGET', KEYS[2], 'content_scope', 'pending_content_scope')
+    if (named[1] and named[1] ~= '') or (named[2] and named[2] ~= '') then
+      redis.call('HDEL', KEYS[2], 'content_scope', 'pending_content_scope', 'effective_at_ms')
+      redis.call('HSET', KEYS[2], 'record_revision', current_revision + 1)
+    end
+    return reply()
+  end
   if wanted_scope == '' then return reply() end
   local scope = current_content_scope(KEYS[2], now_ms)
   if scope == wanted_scope then
@@ -1061,7 +1082,7 @@ if current_desired and current_desired == desired then
   end
   local lease_deadline = tonumber(redis.call('HGET', KEYS[3], 'deadline_ms') or '0')
   local holder = redis.call('HGET', KEYS[3], 'owner_id')
-  if holder and holder ~= '' and lease_deadline > now_ms then
+  if scope ~= '' and holder and holder ~= '' and lease_deadline > now_ms then
     local pending = redis.call('HGET', KEYS[2], 'pending_content_scope')
     if pending == wanted_scope then return reply() end
     local effective = lease_deadline + margin_ms
@@ -1081,6 +1102,7 @@ redis.call('HSET', KEYS[2], 'query_group', query_group, 'desired_worker_id', des
   'assignment_generation', generation, 'record_revision', revision, 'control_epoch', leader_epoch,
   'placement_reason', reason, 'assigned_at_ms', assigned_at)
 if wanted_scope ~= '' then redis.call('HSET', KEYS[2], 'content_scope', wanted_scope) end
+if withdraw then redis.call('HDEL', KEYS[2], 'content_scope') end
 redis.call('HDEL', KEYS[2], 'pending_content_scope', 'effective_at_ms')
 return reply()
 `)

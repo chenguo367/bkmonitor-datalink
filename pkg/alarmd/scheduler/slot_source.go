@@ -519,7 +519,7 @@ func (source *ProductionSlotSource) Next(
 		RecoveryUntilUnixMilli:         recoveryUntil,
 		KeepUntilUnixMilli:             keepUntil,
 		Dispatch: SlotDispatchContext{Operation: operation, OwnerFence: currentFence,
-			AssignmentGeneration: currentAssignment.AssignmentGeneration},
+			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: string(schedule.Segment.ObjectDigest)},
 		ExpectedNextSlot: nextSlot,
 		Recovery:         recovery,
 	}
@@ -686,7 +686,11 @@ func (source *ProductionSlotSource) slotFromProjection(
 		Contract: projection.Contract, DuePlanTargets: projection.DuePlanTargets.Clone(),
 		EarliestQueryDeadlineUnixMilli: projection.EarliestQueryDeadlineUnixMilli,
 		RecoveryUntilUnixMilli:         recoveryUntil, KeepUntilUnixMilli: projection.KeepUntilUnixMilli,
-		Dispatch:         SlotDispatchContext{Operation: operation, OwnerFence: currentFence, AssignmentGeneration: currentAssignment.AssignmentGeneration},
+		// The content the first attempt froze under, from the projection it
+		// wrote down; a retry declares what it retries, not what the live
+		// Segment says now.
+		Dispatch: SlotDispatchContext{Operation: operation, OwnerFence: currentFence,
+			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: projection.ContentScope},
 		ExpectedNextSlot: projection.Contract.Slot.EvaluationTime, Recovery: recovery,
 		ShortPeriodCohort: source.cohortForSlot(ctx, projection.Contract.Slot.EvaluationTime),
 	}
@@ -753,7 +757,7 @@ func (source *ProductionSlotSource) snapshotUnavailableSlot(
 		RecoveryUntilUnixMilli:         recoveryUntil,
 		KeepUntilUnixMilli:             keepUntil,
 		Dispatch: SlotDispatchContext{Operation: operation, OwnerFence: currentFence,
-			AssignmentGeneration: currentAssignment.AssignmentGeneration},
+			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: string(schedule.Segment.ObjectDigest)},
 		ExpectedNextSlot: nextSlot,
 		Recovery:         recovery,
 	}

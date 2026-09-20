@@ -1230,6 +1230,7 @@ type recordingPorts struct {
 	// write fail as the sink's own refusal rather than a retryable dependency.
 	eventRejection *eventRejectionShape
 	beginErr       error
+	lastBegin      execution.ProgressBeginRequest
 	admissionCalls int
 	contractDrift  bool
 	alreadyApplied bool
@@ -1843,7 +1844,8 @@ func (ports *recordingPorts) CommitProgress(_ context.Context, request execution
 	return execution.ProgressCommitResult{Status: execution.ProgressCommitted}, ports.fail("progress_commit")
 }
 
-func (ports *recordingPorts) BeginSlot(_ context.Context, _ execution.ProgressBeginRequest) (execution.ProgressBeginResult, error) {
+func (ports *recordingPorts) BeginSlot(_ context.Context, request execution.ProgressBeginRequest) (execution.ProgressBeginResult, error) {
+	ports.lastBegin = request
 	if ports.beginErr != nil {
 		return execution.ProgressBeginResult{}, ports.beginErr
 	}

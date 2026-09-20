@@ -54,6 +54,11 @@ type SlotDispatchContext struct {
 	Operation            execution.Operation
 	OwnerFence           execution.OwnerFence
 	AssignmentGeneration uint64
+	// ContentScope is the content the Slot runs under, the ObjectDigest of
+	// the Segment it was frozen from; the Slot's fenced writes declare it
+	// (execution.SlotExecutionRequest.ContentScope). Empty for a Segment
+	// that predates content addressing.
+	ContentScope string
 }
 
 func (slot FrozenSlot) Validate(queryGroup execution.QueryGroupIdentity) error {
@@ -97,6 +102,14 @@ func (slot FrozenSlot) Validate(queryGroup execution.QueryGroupIdentity) error {
 
 type OwnerSession interface {
 	ValidateCurrent(context.Context, time.Time) (execution.OwnerFence, error)
+	// Deadline is the instant, on this process's clock, after which the
+	// Session no longer admits work on its lease; under a pending content
+	// change it is the change's effective time. The Runner hands it to the
+	// executor as the attempt's execution.LeaseAuthority, which the output
+	// sink consults before starting a batch (decision-016). Required, not
+	// discovered: a session without it would leave every batch admitted
+	// against no lease at all, with nothing failing to say so.
+	Deadline() time.Time
 	// ValidateCurrentWithAssignment is ValidateCurrent plus the Assignment
 	// record naming the fence owner, from one store round trip. The Runner
 	// opens every attempt with it and hands the result to the SlotSource, which
@@ -752,6 +765,7 @@ func (runner *Runner) runOneTracked(
 		KeepUntilUnixMilli:             slot.KeepUntilUnixMilli,
 		ReplayExpired:                  slot.Recovery.Disposition == ReplayExpired,
 		Operation:                      operation, AttemptNo: runner.attemptNo(slot), OwnerFence: fence, ExpectedNextSlot: slot.ExpectedNextSlot,
+		ContentScope: slot.Dispatch.ContentScope,
 	}
 	if err := request.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, false, err
@@ -768,7 +782,7 @@ func (runner *Runner) runOneTracked(
 		defer releaseAdmission()
 	}
 	decision = "execute"
-	result, err := runner.executor.Execute(ctx, request)
+	result, err := runner.executor.Execute(execution.ContextWithLeaseAuthority(ctx, runner.session), request)
 	if err != nil {
 		var deferred interface{ ReadinessReadyAt() time.Time }
 		if errors.As(err, &deferred) {

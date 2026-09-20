@@ -16,10 +16,12 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Shopify/sarama"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 )
@@ -37,6 +39,9 @@ type TriggerEventSink struct {
 	standardConverter StandardEventConverter
 	legacyTopic       string
 	maxLegacyBytes    int
+	// now is the clock the per-batch lease admission reads; time.Now in
+	// production, injected by tests that place the lease deadline.
+	now func() time.Time
 	// protocol is what the producer was opened with and why; nil for a sink
 	// built around a producer that was not opened by this package (tests),
 	// which is read as headers supported.
@@ -140,6 +145,51 @@ func (err *OutputRejectedError) OutputRejectionDetail() string {
 		return ""
 	}
 	return err.Detail
+}
+
+// OutputDeferredError is a batch the sink did not start because the lease
+// the Slot runs under has less life left than the batch needs to land.
+// Nothing was sent, so nothing is unknown: the caller keeps the Plan waiting
+// and retries after the next renewal, and the Slot ends with the lease if
+// none comes. It marks neither RetryableOutputDependency (no broker was
+// asked) nor a rejection (nothing about the content is wrong).
+type OutputDeferredError struct {
+	Remaining time.Duration
+	Needed    time.Duration
+}
+
+func (err *OutputDeferredError) Error() string {
+	if err == nil {
+		return "kafka trigger event sink: output deferred"
+	}
+	return fmt.Sprintf("kafka trigger event sink: %s: the lease has %s left and one batch needs %s to land",
+		contract.ReasonOutputLeaseExpiring, err.Remaining.Round(time.Millisecond), err.Needed)
+}
+
+// OutputDeferralReason is how a caller tells a deferral from every other
+// error without importing the type.
+func (err *OutputDeferredError) OutputDeferralReason() string {
+	if err == nil {
+		return ""
+	}
+	return contract.ReasonOutputLeaseExpiring
+}
+
+// admitAgainstLease is the per-batch admission of decision-016: before the
+// first byte, the batch's bound plus the margin must fit inside what is
+// left of the lease the Slot runs under. A context that carries no lease
+// authority admits as it always did.
+func admitAgainstLease(ctx context.Context, now func() time.Time) error {
+	authority, ok := execution.LeaseAuthorityFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	needed := OutputAdmissionMargin + OutputBatchBound
+	remaining := authority.Deadline().Sub(now())
+	if remaining < needed {
+		return &OutputDeferredError{Remaining: remaining, Needed: needed}
+	}
+	return nil
 }
 
 func outputRejected(reason, detail, format string, event *contract.TriggerEventV1) *OutputRejectedError {
@@ -320,7 +370,7 @@ func newTriggerEventSink(
 	}
 	return &TriggerEventSink{
 		core: core, legacyConverter: &legacyoutput.Converter{}, standardConverter: standard,
-		legacyTopic: "alarmd_0bkmonitor_backend_event", maxLegacyBytes: 524288,
+		legacyTopic: "alarmd_0bkmonitor_backend_event", maxLegacyBytes: 524288, now: time.Now,
 	}, nil
 }
 
@@ -336,6 +386,9 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 		return errors.New("kafka trigger event sink: context is required")
 	}
 	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := admitAgainstLease(ctx, sink.now); err != nil {
 		return err
 	}
 	messages := make([]*sarama.ProducerMessage, len(events))

@@ -118,3 +118,53 @@ func TestAnOutputRefusalIsNeverReadAsARetryableDependency(t *testing.T) {
 		t.Fatal("a dependency failure was read as an output refusal")
 	}
 }
+
+// deferredPlanEventError is what the sink returns for a batch it did not
+// start because the lease has less life left than the batch needs: it names
+// the reason and marks neither a dependency nor a rejection.
+type deferredPlanEventError struct{}
+
+func (*deferredPlanEventError) Error() string {
+	return "kafka trigger event sink: OUTPUT_LEASE_EXPIRING"
+}
+func (*deferredPlanEventError) OutputDeferralReason() string {
+	return contract.ReasonOutputLeaseExpiring
+}
+
+// A batch the sink held back for the lease is a Plan that waits: its State
+// is not applied and Progress does not move, like an unknown
+// acknowledgement, but under its own name -- no broker was asked -- and the
+// healthy sibling still runs and is applied.
+func TestFinalizePreparedKeepsAPlanWhoseOutputWasHeldForTheLeaseWaitingByName(t *testing.T) {
+	fixture := newPlanIsolationFixture(t, &deferredPlanEventError{})
+	result, err := fixture.coordinator.finalizePrepared(
+		context.Background(), fixture.request, fixture.header, fixture.bindings, fixture.loaded, fixture.evaluated,
+	)
+	if err != nil || result.Completed || result.Result != observability.ResultRetrying ||
+		result.ReasonCode != execution.ReasonCode(contract.ReasonOutputLeaseExpiring) {
+		t.Fatalf("finalizePrepared() result=%+v error=%v, want a retrying Slot named %s", result, err, contract.ReasonOutputLeaseExpiring)
+	}
+	if result.ReasonCode == execution.ReasonCode(contract.ReasonOutputACKUnknown) {
+		t.Fatal("a batch that was never sent was reported as an unknown acknowledgement")
+	}
+	if len(fixture.ports.eventAttempts) != 2 || fixture.ports.eventAttempts[1] != "healthy-event" {
+		t.Fatalf("event attempts=%v, want the held Plan and then the healthy sibling", fixture.ports.eventAttempts)
+	}
+	if len(fixture.base.stateApplied) != 1 || fixture.base.stateApplied[0] != fixture.healthyState {
+		t.Fatalf("applied State=%v, want only the healthy sibling's", fixture.base.stateApplied)
+	}
+	if fixture.base.progressCommits != 0 {
+		t.Fatalf("a waiting Slot committed Progress %d times", fixture.base.progressCommits)
+	}
+	var held *observability.Observation
+	for index := range fixture.observations {
+		observation := &fixture.observations[index]
+		if observation.Stage == observability.StageEventACKed && observation.Result == observability.ResultFailed {
+			held = observation
+			break
+		}
+	}
+	if held == nil || held.ReasonCode != execution.ReasonCode(contract.ReasonOutputLeaseExpiring) || held.Trace.StrategyID != "failed" {
+		t.Fatalf("held output observation=%+v, want %s on the held Plan", held, contract.ReasonOutputLeaseExpiring)
+	}
+}

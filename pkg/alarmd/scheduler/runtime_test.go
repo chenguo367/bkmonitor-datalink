@@ -296,11 +296,14 @@ type fakeSession struct {
 	fence      execution.OwnerFence
 	assignment ownership.AssignmentRecord
 	err        error
+	deadline   time.Time
 }
 
 func (session *fakeSession) ValidateCurrent(context.Context, time.Time) (execution.OwnerFence, error) {
 	return session.fence, session.err
 }
+
+func (session *fakeSession) Deadline() time.Time { return session.deadline }
 
 // The zero Assignment record is deliberate: this fake has no Assignment facts,
 // so the Runner has nothing worth handing to the source and the source reads

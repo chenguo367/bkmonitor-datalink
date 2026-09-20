@@ -175,6 +175,60 @@ type Reconciler struct {
 	store  AssignmentStore
 }
 
+// ContentScopePolicy is what a reconcile round does about the content
+// scope on each Assignment record (decision-016). The zero value leaves
+// scopes exactly as they are, so a caller that knows nothing about them
+// changes nothing.
+type ContentScopePolicy int
+
+const (
+	// ContentScopesUntouched: records keep whatever scope they carry.
+	ContentScopesUntouched ContentScopePolicy = iota
+	// ContentScopesDeclared: every ready worker takes part in the content
+	// contract, so each record is brought to the scope the current
+	// publication names for its Query Group (a pending change under a live
+	// lease, direct otherwise, by the store's rule).
+	ContentScopesDeclared
+	// ContentScopesWithdrawn: a ready worker does not take part, so every
+	// record that names or pends a scope has it withdrawn. Withdrawing
+	// refuses nobody and is written directly.
+	ContentScopesWithdrawn
+)
+
+// ContentScopes is a round's content policy and, when declaring, the scope
+// each Query Group should be on: the ObjectDigest the current publication
+// names for it. A Query Group absent from Digests is left untouched even
+// when declaring -- the round does not know its content, and an unknown
+// content is not a withdrawal.
+type ContentScopes struct {
+	Policy  ContentScopePolicy
+	Digests map[execution.QueryGroupIdentity]string
+}
+
+// wanted is the scope decision for one record that keeps its desired
+// worker: the scope to publish, whether to withdraw, and whether either is
+// needed at all.
+func (scopes ContentScopes) wanted(queryGroup execution.QueryGroupIdentity, current ownership.AssignmentRecord) (scope string, withdraw, needed bool) {
+	switch scopes.Policy {
+	case ContentScopesDeclared:
+		digest, known := scopes.Digests[queryGroup]
+		if !known || digest == "" {
+			return "", false, false
+		}
+		if current.ContentScope == digest || current.PendingContentScope == digest {
+			return "", false, false
+		}
+		return digest, false, true
+	case ContentScopesWithdrawn:
+		if current.ContentScope == "" && current.PendingContentScope == "" {
+			return "", false, false
+		}
+		return "", true, true
+	default:
+		return "", false, false
+	}
+}
+
 func NewReconciler(router *Router, store AssignmentStore) (*Reconciler, error) {
 	if router == nil || store == nil {
 		return nil, errors.New("alarmd scheduler: router and Assignment store are required")
@@ -231,7 +285,7 @@ func (reconciler *Reconciler) ReconcileWith(
 	if !hasCurrent && !errors.Is(err, ownership.ErrAssignmentAbsent) {
 		return ownership.AssignmentRecord{}, err
 	}
-	return reconciler.settle(ctx, authority, queryGroup, current, hasCurrent, indexReadyWorkers(workers), at)
+	return reconciler.settle(ctx, authority, queryGroup, current, hasCurrent, indexReadyWorkers(workers), at, ContentScopes{})
 }
 
 // ReconcileRound settles every Query Group of a round against one ready set,
@@ -254,6 +308,23 @@ func (reconciler *Reconciler) ReconcileRound(
 	workers []ownership.WorkerRegistration,
 	at time.Time,
 ) (map[execution.QueryGroupIdentity]ownership.AssignmentRecord, ownership.ControlReadStats, error) {
+	return reconciler.ReconcileRoundWithScopes(ctx, authority, queryGroups, workers, at, ContentScopes{})
+}
+
+// ReconcileRoundWithScopes is ReconcileRound with a content scope policy:
+// the same placement decisions, and beside them, for a record whose
+// desired worker stays, the scope the policy asks for (decision-016). A
+// scope publish is a decision like a placement -- same authority, same
+// expected-revision CAS on the record just read -- and it is the only
+// reason an eligible incumbent's record is written.
+func (reconciler *Reconciler) ReconcileRoundWithScopes(
+	ctx context.Context,
+	authority ownership.PublicationAuthority,
+	queryGroups []execution.QueryGroupIdentity,
+	workers []ownership.WorkerRegistration,
+	at time.Time,
+	scopes ContentScopes,
+) (map[execution.QueryGroupIdentity]ownership.AssignmentRecord, ownership.ControlReadStats, error) {
 	if reconciler == nil {
 		return nil, ownership.ControlReadStats{}, errors.New("alarmd scheduler: initialized reconciler is required")
 	}
@@ -265,7 +336,7 @@ func (reconciler *Reconciler) ReconcileRound(
 	settled := make(map[execution.QueryGroupIdentity]ownership.AssignmentRecord, len(queryGroups))
 	for _, queryGroup := range queryGroups {
 		existing, hasCurrent := current[queryGroup]
-		record, settleErr := reconciler.settle(ctx, authority, queryGroup, existing, hasCurrent, index, at)
+		record, settleErr := reconciler.settle(ctx, authority, queryGroup, existing, hasCurrent, index, at, scopes)
 		if settleErr != nil {
 			return nil, stats, settleErr
 		}
@@ -285,22 +356,42 @@ func (reconciler *Reconciler) settle(
 	hasCurrent bool,
 	workers readyWorkerIndex,
 	at time.Time,
+	scopes ContentScopes,
 ) (ownership.AssignmentRecord, error) {
 	expectedRevision := uint64(0)
 	if hasCurrent {
 		expectedRevision = current.RecordRevision
 	}
 	if hasCurrent && reconciler.router.incumbentEligibleIn(queryGroup, current.DesiredWorkerID, workers, at) {
-		return current, nil
+		scope, withdraw, needed := scopes.wanted(queryGroup, current)
+		if !needed {
+			return current, nil
+		}
+		return reconciler.store.PublishAssignment(
+			ctx, authority, ownership.AssignmentDecision{
+				QueryGroup: queryGroup, DesiredWorkerID: current.DesiredWorkerID,
+				ExpectedRecordRevision: expectedRevision, PlacementReason: current.PlacementReason, DecidedAt: at,
+				ContentScope: scope, WithdrawContentScope: withdraw,
+			},
+		)
 	}
 	selected, err := reconciler.router.Select(queryGroup, workers.ordered, at)
 	if err != nil {
 		return ownership.AssignmentRecord{}, err
 	}
-	return reconciler.store.PublishAssignment(
-		ctx, authority, ownership.AssignmentDecision{
-			QueryGroup: queryGroup, DesiredWorkerID: selected.WorkerID,
-			ExpectedRecordRevision: expectedRevision, PlacementReason: ownership.PlacementRendezvous, DecidedAt: at,
-		},
-	)
+	decision := ownership.AssignmentDecision{
+		QueryGroup: queryGroup, DesiredWorkerID: selected.WorkerID,
+		ExpectedRecordRevision: expectedRevision, PlacementReason: ownership.PlacementRendezvous, DecidedAt: at,
+	}
+	// A placement carries the content it places onto when the round
+	// declares scopes, so a Query Group is never placed without one and
+	// then named on the next round; and it withdraws when the round
+	// withdraws, so a move never carries a stale scope along.
+	switch scopes.Policy {
+	case ContentScopesDeclared:
+		decision.ContentScope = scopes.Digests[queryGroup]
+	case ContentScopesWithdrawn:
+		decision.WithdrawContentScope = true
+	}
+	return reconciler.store.PublishAssignment(ctx, authority, decision)
 }

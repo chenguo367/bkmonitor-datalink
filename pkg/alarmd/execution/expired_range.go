@@ -166,6 +166,11 @@ func (p ExpiredRangeProjectionV1) validateFacts() error {
 type ExpiredRangeRequest struct {
 	OwnerFence OwnerFence
 	Projection ExpiredRangeProjectionV1
+	// ContentScope is declared to the fence of this write: the ObjectDigest
+	// of the Segment the range lies on (Projection.Schedule.Segment), which
+	// the sealed projection already carries -- it is not a second sealed
+	// field, so proofs sealed before this existed still verify.
+	ContentScope string
 }
 
 func (r ExpiredRangeRequest) Validate() error {

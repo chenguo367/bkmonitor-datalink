@@ -63,6 +63,14 @@ type WorkerRegistration struct {
 	DeploymentProfile   string              `json:"deployment_profile"`
 	CapabilitiesDigest  string              `json:"capabilities_digest"`
 	ExpiresAt           time.Time           `json:"expires_at"`
+	// Capabilities names the control contracts this binary takes part in,
+	// by word (CapabilityContentScope, ...). A leader writes a contract's
+	// facts only once every ready worker declares it: the digest above says
+	// two workers are alike, this says what a worker can do, and a leader
+	// deciding whether to start a contract needs the second. Absent from a
+	// registration written by a binary from before it, which declares
+	// nothing -- the answer a rollout needs.
+	Capabilities []string `json:"capabilities,omitempty"`
 	// Applied and Load are the worker's acknowledgement and occupancy as of
 	// this heartbeat. Both are optional: a registration written by a worker
 	// that does not report them decodes with nil, which a reader takes as
@@ -143,6 +151,42 @@ func (worker WorkerRegistration) Validate() error {
 	return worker.Load.validate()
 }
 
+// CapabilityContentScope is the decision-016 content contract: a worker
+// that declares it names the content each Slot runs under on every fenced
+// write, and follows a pending content change from its renewal replies. A
+// leader writes content scopes into Assignment records only once every
+// ready worker declares it; until then, and again if one that does not
+// joins, the records carry no scope and the fence compares what it always
+// compared. The gate is about leaders as much as workers: a leader from
+// before this contract moves an owner without clearing a pending scope,
+// and the fleet it could be elected from is the ready set.
+const CapabilityContentScope = "content-scope.v1"
+
+// Declares reports whether the registration names the capability.
+func (worker WorkerRegistration) Declares(capability string) bool {
+	for _, declared := range worker.Capabilities {
+		if declared == capability {
+			return true
+		}
+	}
+	return false
+}
+
+// AllDeclare reports whether every worker in the set names the capability.
+// An empty set declares nothing: a contract is started for a fleet, not
+// for nobody.
+func AllDeclare(workers []WorkerRegistration, capability string) bool {
+	if len(workers) == 0 {
+		return false
+	}
+	for _, worker := range workers {
+		if !worker.Declares(capability) {
+			return false
+		}
+	}
+	return true
+}
+
 // PlacementReason says why an Assignment names the worker it names.
 // RENDEZVOUS is the sticky hash every Assignment carries today. REBALANCE is
 // a move the Control Leader makes to even the owned counts out after the
@@ -212,12 +256,22 @@ type AssignmentDecision struct {
 	// lease's deadline; with no live lease, or together with a change of
 	// desired worker, it is written directly.
 	ContentScope string
+	// WithdrawContentScope clears the record's scope and any pending change,
+	// so the fence compares the lease alone again. It is written directly,
+	// not as a pending change: withdrawing the comparison refuses nobody, so
+	// there is no holder to protect from it. It is the rollback path of the
+	// content contract and what a leader writes when a worker that does not
+	// declare the contract joins the fleet. Exclusive with ContentScope.
+	WithdrawContentScope bool
 }
 
 func (decision AssignmentDecision) Validate() error {
 	if decision.QueryGroup == "" || decision.DesiredWorkerID == "" || decision.DecidedAt.IsZero() ||
 		!decision.PlacementReason.valid() {
 		return errors.New("alarmd ownership: invalid Assignment decision")
+	}
+	if decision.WithdrawContentScope && decision.ContentScope != "" {
+		return errors.New("alarmd ownership: an Assignment decision cannot both name and withdraw a content scope")
 	}
 	return nil
 }

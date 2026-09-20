@@ -160,6 +160,14 @@ type SlotExecutionRequest struct {
 	OwnerFence       OwnerFence
 	ExpectedNextSlot EvaluationTime
 	ExpiredRange     *ExpiredRangeProjectionV1
+	// ContentScope names the execution content this Slot runs under: the
+	// ObjectDigest of the Schedule Segment it was frozen from (decision-016).
+	// Every fenced write the Slot makes -- State, Progress, the expired range
+	// -- declares it, and the store's fence refuses the write by name once
+	// the Assignment record has moved the Query Group to other content. Empty
+	// for a Segment written before Segments named their content, in which
+	// case the fence compares what it always compared and nothing more.
+	ContentScope string
 }
 
 func (request SlotExecutionRequest) Validate() error {
@@ -208,6 +216,7 @@ func (request SlotExecutionRequest) UnfinishedProjection() UnfinishedSlotProject
 		Contract: request.Contract, DuePlanTargets: request.DuePlanTargets.Clone(),
 		EarliestQueryDeadlineUnixMilli: request.EarliestQueryDeadlineUnixMilli,
 		KeepUntilUnixMilli:             request.KeepUntilUnixMilli,
+		ContentScope:                   request.ContentScope,
 	}
 }
 
@@ -3375,6 +3384,9 @@ type ProgressCommitRequest struct {
 	ExpectedNextSlot EvaluationTime
 	Completion       SlotCompletion
 	Projection       UnfinishedSlotProjection
+	// ContentScope is declared to the fence of this write; see
+	// SlotExecutionRequest.ContentScope.
+	ContentScope string
 }
 
 func (request ProgressCommitRequest) Validate() error {
@@ -3551,6 +3563,14 @@ type UnfinishedSlotProjection struct {
 	DuePlanTargets                 FrozenDuePlanTargets
 	EarliestQueryDeadlineUnixMilli int64
 	KeepUntilUnixMilli             int64
+	// ContentScope is the content the Slot was begun under
+	// (SlotExecutionRequest.ContentScope), kept so a retry from this
+	// projection declares the same content the first attempt did. It is
+	// metadata of the projection, like a Segment's ObjectDigest is of the
+	// Segment: it takes no part in Equal, so a projection begun by a binary
+	// that did not write it is still the same unfinished Slot. Omitted when
+	// empty, so records written before it existed re-encode unchanged.
+	ContentScope string `json:",omitempty"`
 }
 
 func (projection UnfinishedSlotProjection) Validate() error {
@@ -3583,6 +3603,9 @@ type ProgressBeginRequest struct {
 	Identity   ProgressIdentity
 	OwnerFence OwnerFence
 	Projection UnfinishedSlotProjection
+	// ContentScope is declared to the fence of this write; see
+	// SlotExecutionRequest.ContentScope.
+	ContentScope string
 }
 
 type ProgressBeginResult struct {

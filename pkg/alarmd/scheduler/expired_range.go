@@ -296,9 +296,10 @@ func (source *ProductionSlotSource) resumeExpiredRange(ctx context.Context, p ex
 		EarliestQueryDeadlineUnixMilli: p.Last.EarliestQueryDeadlineUnixMilli,
 		RecoveryUntilUnixMilli:         p.Last.EarliestQueryDeadlineUnixMilli + p.ReplayAgeMillis,
 		KeepUntilUnixMilli:             p.Last.KeepUntilUnixMilli,
-		Dispatch:                       SlotDispatchContext{Operation: execution.OperationNormal, OwnerFence: current, AssignmentGeneration: assignment.AssignmentGeneration},
-		ExpectedNextSlot:               p.First.Contract.Slot.EvaluationTime,
-		Recovery:                       SlotRecoveryFacts{Disposition: ReplayExpired, Reason: ReplayExpiredRange, Distance: 1},
+		Dispatch: SlotDispatchContext{Operation: execution.OperationNormal, OwnerFence: current, AssignmentGeneration: assignment.AssignmentGeneration,
+			ContentScope: string(p.Schedule.Segment.ObjectDigest)},
+		ExpectedNextSlot: p.First.Contract.Slot.EvaluationTime,
+		Recovery:         SlotRecoveryFacts{Disposition: ReplayExpired, Reason: ReplayExpiredRange, Distance: 1},
 	}
 	if err := slot.Validate(source.queryGroup); err != nil {
 		return FrozenSlot{}, false, err
