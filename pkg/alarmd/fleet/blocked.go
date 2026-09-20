@@ -403,18 +403,24 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 	// deployment's side of the page.
 	if failureThisRound(anomaly) {
 		if failure, kind, isOutput := outputFailureOf(anomaly); isOutput {
-			blocked.Stage = StageCommit
 			blocked.DependencyEvidence = kind
-			switch kind {
-			case OutputFailureClientRejected:
-				blocked.Dependency, blocked.Class = DependencyNone, ClassContract
-			case OutputFailureBrokerError:
-				blocked.Dependency, blocked.Class = DependencyKafka, ClassUnavailable
-			default:
-				blocked.Dependency, blocked.Class = DependencyUnlocated, ClassUnlocated
-			}
 			if blocked.Code == "" {
 				blocked.Code = failure.Code
+			}
+			// A code the sink named itself already has its reading in the
+			// table -- the two refusal words say commit, no dependency, and
+			// which class -- and the words only add which kind. A failure
+			// under the shared code is read here, by its words.
+			if !outputRejectionCodes[failure.Code] {
+				blocked.Stage = StageCommit
+				switch kind {
+				case OutputFailureClientRejected:
+					blocked.Dependency, blocked.Class = DependencyNone, ClassContract
+				case OutputFailureBrokerError:
+					blocked.Dependency, blocked.Class = DependencyKafka, ClassUnavailable
+				default:
+					blocked.Dependency, blocked.Class = DependencyUnlocated, ClassUnlocated
+				}
 			}
 		}
 	}

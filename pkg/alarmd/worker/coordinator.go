@@ -1380,17 +1380,30 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		}
 	})
 	reason := execution.ReasonCode(observability.ReasonNone)
+	var rejection *observability.OutputRejectionFacts
 	if err != nil {
 		reason = execution.ReasonCode(observability.ReasonInternalUnknown)
 		if isRetryableOutputDependency(err) {
 			reason = execution.ReasonCode(contract.ReasonOutputACKUnknown)
 		}
-		if rejection, rejected := outputRejectionReason(err); rejected {
-			reason = rejection
+		// The sink's own refusal is named by the sink: the reason word is the
+		// observation's reason, and the sentence travels as facts beside it
+		// rather than being read back out of the error chain.
+		if named, rejected := outputRejectionReason(err); rejected {
+			reason = named
+			rejection = &observability.OutputRejectionFacts{Reason: string(named)}
+			var detailed outputRejectionDetail
+			if errors.As(err, &detailed) {
+				rejection.Detail = detailed.OutputRejectionDetail()
+			}
 		}
 	}
-	coordinator.observeWithCounts(ctx, observability.ComponentOutput, observability.StageEventACKed, operation, started,
-		"", reason, observability.Counts{Events: int64(len(events))}, err)
+	coordinator.emitObservation(ctx, observability.Observation{
+		Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
+		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
+		ReasonCode: observability.ReasonCode(reason), Duration: time.Since(started),
+		Counts: observability.Counts{Events: int64(len(events))}, Err: err, OutputRejection: rejection,
+	})
 	if err != nil {
 		return fmt.Errorf("alarmd worker: acknowledge events: %w", err)
 	}
@@ -1401,6 +1414,14 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		coordinator.ports.OpenAlerts.Acknowledged(events)
 	}
 	return nil
+}
+
+// outputRejectionDetail is the sentence the sink's refusal carries beside its
+// reason word -- the converter's or the client's, without identity. Declared
+// here rather than imported so the coordinator names the shape it reads and
+// not the package that produces it, the way outputRejectionReason does.
+type outputRejectionDetail interface {
+	OutputRejectionDetail() string
 }
 
 func isRetryableOutputDependency(err error) bool {

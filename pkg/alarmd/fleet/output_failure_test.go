@@ -15,6 +15,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -128,5 +129,74 @@ func TestOutputFailureKindsAreClosedAndEachHasASignature(t *testing.T) {
 	}
 	if len(DependencyEvidences) != 5 {
 		t.Fatalf("DependencyEvidences = %v, want code, text and the three kinds", DependencyEvidences)
+	}
+}
+
+// statedRefusal runs an object through rounds whose event write the sink
+// refused on its own account -- reason word and bare sentence as facts on the
+// failed event write -- so the word alone has to decide.
+func statedRefusal(t *testing.T, word, sentence string) Anomaly {
+	t.Helper()
+	tracker := newTracker(t, &clock{at: now})
+	chain := "alarmd worker: acknowledge events: " + word + ": " + sentence + " (event evt-1, strategy 1001, business 2, format standard_raw_event)"
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		slot := int64(1_700_000_000 + 60*round)
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
+			Result: observability.ResultFailed, ReasonCode: observability.ReasonCode(word), Err: errors.New(chain),
+			OutputRejection: &observability.OutputRejectionFacts{Reason: word, Detail: sentence},
+			Trace:           observability.TraceFields{QueryGroupKey: "qg-rejected", EvaluationTime: slot},
+		})
+		tracker.Observe(context.Background(), observability.Observation{
+			ExecuteOutcome: "error", ReasonCode: observability.ReasonCode(word), Err: errors.New(chain),
+			Trace: observability.TraceFields{QueryGroupKey: "qg-rejected", EvaluationTime: slot},
+		})
+	}
+	anomalies := tracker.Anomalies()
+	if len(anomalies) != 1 {
+		t.Fatalf("anomalies = %+v", anomalies)
+	}
+	Attribute(anomalies, now)
+	return anomalies[0]
+}
+
+// When the sink states its own refusal, the row carries the sentence, not the
+// chain, and the reason word decides the kind whatever the sentence says --
+// for both of the sink's words, each with a sentence no signature matches.
+// Each word is its own case because each is its own table row: a word
+// dropped from the reading's list would fall back to the sentence, and with
+// an unsigned sentence read unknown while the table still said commit.
+func TestTheSinksOwnRefusalIsCarriedAsFactsAndDecidesTheKind(t *testing.T) {
+	for _, test := range []struct {
+		word, sentence string
+		class          Class
+	}{
+		// The converter's refusal in words no signature knows.
+		{contract.ReasonOutputConversionRejected, "two levels of one decision share the severity", ClassContract},
+		// The client's refusal in words no signature knows: the client's own
+		// message-size error, not its configuration error. Only the word can
+		// make this client_rejected.
+		{contract.ReasonOutputClientRejected, "Message was too large, the client refused it before sending", ClassConfig},
+	} {
+		t.Run(test.word, func(t *testing.T) {
+			if OutputFailureKind(test.sentence) != OutputFailureUnknown {
+				t.Fatalf("fixture sentence %q matches a signature; the test needs one no signature knows", test.sentence)
+			}
+			row := statedRefusal(t, test.word, test.sentence)
+			if row.Failure == nil || row.Failure.Code != test.word || row.Failure.Text != test.sentence {
+				t.Fatalf("failure = %+v, want the sink's word and its bare sentence, not the chain", row.Failure)
+			}
+			if row.Internal == nil {
+				t.Fatal("a refusal the sink stated was not filed as this deployment's own")
+			}
+			// The word decides the kind; the word's own reading in the table
+			// -- commit, no dependency, its class -- stands.
+			if b := row.Blocked; b == nil || b.DependencyEvidence != OutputFailureClientRejected || b.Dependency != DependencyNone || b.Class != test.class || b.Stage != StageCommit {
+				t.Fatalf("blocked = %+v, want client_rejected by the sink's own word with the word's reading (%s)", row.Blocked, test.class)
+			}
+			if row.Finding.Check != CheckDefect || row.Finding.Owner != OwnerAlarmd {
+				t.Fatalf("finding = %+v, want the sink's refusal on the defect line", row.Finding)
+			}
+		})
 	}
 }

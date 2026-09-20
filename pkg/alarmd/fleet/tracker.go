@@ -832,10 +832,25 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if !observability.ValidQueryFailureCode(code) {
 			code = ""
 		}
+		// The sink's own account first, when it gave one: its reason word
+		// and its sentence, apart from the chain. The chain's words are the
+		// fallback for a failure the sink did not name -- a broker that did
+		// not answer, wrapped by everything on the way up.
+		text := boundedErrorTail(observability.SanitizeErrorText(observation.Err.Error()))
+		if r := observation.OutputRejection; r != nil {
+			if r.Reason != "" && observability.ValidQueryFailureCode(r.Reason) {
+				code = r.Reason
+			}
+			if r.Detail != "" {
+				text = boundedErrorTail(observability.SanitizeErrorText(r.Detail))
+			}
+		}
 		state.lastFailure = &FailureRef{Stage: observability.QueryFailureStageOutput, Category: observability.QueryFailureCategoryOutput,
-			Code: code, Text: boundedErrorTail(observability.SanitizeErrorText(observation.Err.Error())), At: &seen, Slot: trace.EvaluationTime}
+			Code: code, Text: text, At: &seen, Slot: trace.EvaluationTime}
 		state.lastFailureSlot = trace.EvaluationTime
-		if OutputFailureKind(state.lastFailure.Text) == OutputFailureClientRejected {
+		// This deployment's own, when the sink said it refused or when the
+		// words say the client did.
+		if observation.OutputRejection != nil || OutputFailureKind(text) == OutputFailureClientRejected {
 			copy := *state.lastFailure
 			state.internal = &copy
 		}

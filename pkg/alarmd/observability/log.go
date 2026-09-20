@@ -195,6 +195,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.ShortPeriodCompletion; f != nil {
 		attributes = append(attributes, slog.Any("short_period_completion", f))
 	}
+	if r := observation.OutputRejection; r != nil {
+		attributes = append(attributes, slog.Any("output_rejection", r))
+	}
 	if f := observation.FrozenStateRenewal; f != nil {
 		// The eight numbers on the line, not only on the metric: the line is
 		// what a reader of one Slot has, and without them frozen_state_renewed
