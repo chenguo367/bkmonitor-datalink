@@ -443,6 +443,11 @@ var codeChecks = map[string]verdict{
 	// or the deployment changes.
 	"OUTPUT_CONVERSION_REJECTED": lands(CheckDefect),
 	"OUTPUT_CLIENT_REJECTED":     lands(CheckDefect),
+	// An output batch held back because the lease it would run under is
+	// about to end: one round of it is the mechanism working at a handover
+	// or a renewal hiccup; rounds of it mean the lease is not being renewed,
+	// which is the store or the leader, not the content.
+	"OUTPUT_LEASE_EXPIRING": lands(CheckDependencyDown),
 
 	// What this deployment persisted cannot be read back as written. Retrying
 	// reads the same bytes.

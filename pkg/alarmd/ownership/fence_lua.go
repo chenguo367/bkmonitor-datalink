@@ -56,8 +56,16 @@ const ContentSwitchMargin = 5 * time.Second
 //	    order: NOT_DESIRED when the assignment names another worker; STALE
 //	    for a lease that is paused, belongs to someone else, carries another
 //	    epoch or token, or has passed its deadline; CONTENT_MOVED, last, when
-//	    the lease holds but the caller declared a content scope and the
-//	    record names a different one.
+//	    the lease holds but the caller declared a content scope that is
+//	    neither the scope the record names now nor the one it has pending.
+//
+//	    The pending scope is admitted on purpose. A pending change protects
+//	    the holder of the old content until the moment it was promised, and
+//	    nothing more: the new content is the leader's decision from the
+//	    moment it was written, so a writer that already executes it -- a
+//	    worker whose Segment cut over before the change fell due -- is ahead
+//	    of the record, not behind it. Refusing it would stall every Query
+//	    Group for one lease lifetime on every publication.
 //
 //	    The order is the meaning. CONTENT_MOVED is read by every caller as
 //	    "the lease is good, the view is behind, re-read" -- it is kept out of
@@ -112,7 +120,10 @@ local function fence_refusal(assignment_key, ownership_key, require_assignment, 
      tonumber(redis.call('HGET', ownership_key, 'deadline_ms') or '0') <= now_ms then return 'STALE' end
   if require_assignment == '1' and content_scope and content_scope ~= '' then
     local named = current_content_scope(assignment_key, now_ms)
-    if named ~= '' and named ~= content_scope then return 'CONTENT_MOVED' end
+    if named ~= '' and named ~= content_scope then
+      local pending = redis.call('HGET', assignment_key, 'pending_content_scope')
+      if not pending or pending ~= content_scope then return 'CONTENT_MOVED' end
+    end
   end
   return nil
 end

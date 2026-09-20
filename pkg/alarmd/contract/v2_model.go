@@ -144,7 +144,13 @@ const (
 	// message over the client's own size cap. This deployment's wiring, not
 	// the broker's weather: a retry sends the same message to the same client
 	// and gets the same answer.
-	ReasonOutputClientRejected   = "OUTPUT_CLIENT_REJECTED"
+	ReasonOutputClientRejected = "OUTPUT_CLIENT_REJECTED"
+	// ReasonOutputLeaseExpiring: an output batch was not started because the
+	// Slot's lease has less life left than one batch needs to land
+	// (decision-016 per-batch admission). Nothing was sent; the Plan waits,
+	// and the Slot retries after the next renewal or ends with the lease.
+	// Named apart from OUTPUT_ACK_UNKNOWN because no broker was asked.
+	ReasonOutputLeaseExpiring    = "OUTPUT_LEASE_EXPIRING"
 	ReasonStateWriteRetryable    = "STATE_WRITE_RETRYABLE"
 	ReasonStateCorrupt           = "STATE_CORRUPT"
 	ReasonStateSchemaUnsupported = "STATE_SCHEMA_UNSUPPORTED"

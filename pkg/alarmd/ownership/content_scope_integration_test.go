@@ -123,12 +123,17 @@ func TestAContentChangeUnderALiveLeaseWaitsForItsDeadline(t *testing.T) {
 	if minted := serverDeadline(t, store, "query-group-1"); !minted.Equal(wantEffective) {
 		t.Fatalf("server deadline after the capped renewal = %v, want the effective time %v", minted, wantEffective)
 	}
-	// Until then the old content is still what the record authorizes.
+	// Until then the old content is still what the record authorizes -- and
+	// so is the new one already: a writer on the pending content is ahead
+	// of the record, not behind it. Only a third content is refused.
 	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-a"); err != nil {
 		t.Fatalf("CheckFenceForContentScope(view-a) before the effective time = %v, want valid", err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-b"); !errors.Is(err, ErrContentScopeMoved) {
-		t.Fatalf("CheckFenceForContentScope(view-b) before the effective time = %v, want ErrContentScopeMoved", err)
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-b"); err != nil {
+		t.Fatalf("CheckFenceForContentScope(view-b, the pending scope) before the effective time = %v, want valid", err)
+	}
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-c"); !errors.Is(err, ErrContentScopeMoved) {
+		t.Fatalf("CheckFenceForContentScope(view-c) before the effective time = %v, want ErrContentScopeMoved", err)
 	}
 	// At the effective time the capped lease has run out; the next holder
 	// is admitted to the new content, and the old content is refused.

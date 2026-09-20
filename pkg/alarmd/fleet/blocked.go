@@ -196,6 +196,12 @@ var failureFacets = map[string]facets{
 	// OUTPUT_ACK_UNKNOWN and send the reader to a Kafka that was up.
 	"OUTPUT_CONVERSION_REJECTED": {StageCommit, ClassContract, DependencyNone},
 	"OUTPUT_CLIENT_REJECTED":     {StageCommit, ClassConfig, DependencyNone},
+	// The Slot's lease had less life left than one output batch needs, so
+	// the batch was not started (decision-016 per-batch admission). The
+	// step is the commit; whether the lease is short because renewals are
+	// failing or because the Query Group is moving is the next question,
+	// and the ownership refusals answer it.
+	"OUTPUT_LEASE_EXPIRING": {StageCommit, ClassUnavailable, ""},
 
 	// This deployment in conflict with what it persisted.
 	"STATE_CORRUPT":              {StageCommit, ClassContract, DependencyNone},

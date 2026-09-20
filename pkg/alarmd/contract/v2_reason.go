@@ -140,6 +140,7 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// observation reasons, like the deterministic State refusals below.
 	ReasonOutputConversionRejected: {ReasonOutputConversionRejected, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonOutputClientRejected:     {ReasonOutputClientRejected, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonOutputLeaseExpiring:      {ReasonOutputLeaseExpiring, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonStateWriteRetryable:      {ReasonStateWriteRetryable, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonStateCorrupt:             {ReasonStateCorrupt, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonStateSchemaUnsupported:   {ReasonStateSchemaUnsupported, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},

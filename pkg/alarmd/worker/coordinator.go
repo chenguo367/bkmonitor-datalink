@@ -1054,6 +1054,16 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			}
 			sortTriggerEvents(events)
 			if err := coordinator.writeEvents(ctx, request.Operation, events); err != nil {
+				if reason, deferred := outputDeferralReason(err); deferred {
+					// The sink did not start the batch: the lease has less
+					// life left than one batch needs to land. Nothing is
+					// unknown and nothing is wrong with the content; the
+					// Plan waits, by that name, for the next renewal.
+					if retryPendingReason == "" {
+						retryPendingReason = reason
+					}
+					continue
+				}
 				if reason, rejected := outputRejectionReason(err); rejected {
 					// Decided in this process, from this Plan's own decisions
 					// or this deployment's own client: the same events meet
@@ -1388,6 +1398,9 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		if rejection, rejected := outputRejectionReason(err); rejected {
 			reason = rejection
 		}
+		if deferral, deferred := outputDeferralReason(err); deferred {
+			reason = deferral
+		}
 	}
 	coordinator.observeWithCounts(ctx, observability.ComponentOutput, observability.StageEventACKed, operation, started,
 		"", reason, observability.Counts{Events: int64(len(events))}, err)
@@ -1409,6 +1422,22 @@ func isRetryableOutputDependency(err error) bool {
 	}
 	var dependencyErr interface{ RetryableOutputDependency() }
 	return errors.As(err, &dependencyErr) && dependencyErr != nil
+}
+
+// outputDeferralReason reports whether the sink declined to start the batch
+// because the Slot's lease has less life left than the batch needs
+// (kafka.OutputDeferredError), and the reason it names. Retryable by
+// construction -- the next renewal changes the answer -- but not an unknown
+// acknowledgement: no broker was asked.
+func outputDeferralReason(err error) (execution.ReasonCode, bool) {
+	if err == nil {
+		return "", false
+	}
+	var deferral interface{ OutputDeferralReason() string }
+	if !errors.As(err, &deferral) || deferral == nil || deferral.OutputDeferralReason() == "" {
+		return "", false
+	}
+	return execution.ReasonCode(deferral.OutputDeferralReason()), true
 }
 
 // outputRejectionReason reports whether the sink refused to write the events

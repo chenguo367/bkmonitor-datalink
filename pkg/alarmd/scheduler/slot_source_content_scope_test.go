@@ -12,6 +12,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // decision-016 batch 2: a Slot declares the content it runs under -- the
@@ -104,4 +105,34 @@ func TestTheContentScopeTakesNoPartInProjectionIdentity(t *testing.T) {
 	if !base.Equal(declared) || !declared.Equal(base) {
 		t.Fatal("a projection with a content scope and the same projection without one must be the same unfinished Slot")
 	}
+}
+
+// The Runner hands the executor the Session as the attempt's lease
+// authority, so the output sink can ask how long the lease has left before
+// it starts a batch. Without this the sink finds no authority and admits
+// every batch against no lease at all.
+func TestTheRunnerHandsTheExecutorItsLeaseAuthority(t *testing.T) {
+	now := time.UnixMilli(1_700_000_000_000)
+	deadline := now.Add(25 * time.Second)
+	fence := execution.OwnerFence{QueryGroup: "query-group-1", OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "token-1"}
+	session := &fakeSession{fence: fence, deadline: deadline}
+	source := &fakeSlotSource{slot: frozenSlot("query-group-1")}
+	executor := &authorityRecordingExecutor{}
+	runner, err := NewRunner("query-group-1", session, source, executor, NewFlightCoordinator(), func() time.Time { return now })
+	if err != nil {
+		t.Fatalf("NewRunner() error = %v", err)
+	}
+	if _, _, err := runner.RunOne(context.Background()); err != nil {
+		t.Fatalf("RunOne() error = %v", err)
+	}
+	if executor.seen == nil || !executor.seen.Deadline().Equal(deadline) {
+		t.Fatalf("executor saw lease authority %v, want the Session's deadline %v", executor.seen, deadline)
+	}
+}
+
+type authorityRecordingExecutor struct{ seen execution.LeaseAuthority }
+
+func (executor *authorityRecordingExecutor) Execute(ctx context.Context, _ execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+	executor.seen, _ = execution.LeaseAuthorityFromContext(ctx)
+	return execution.SlotExecutionResult{Completed: true, Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone}, nil
 }
