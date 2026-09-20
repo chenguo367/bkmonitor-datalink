@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -866,6 +867,7 @@ func describeMissingGuard(
 		", level " + strconv.FormatUint(uint64(outcome.LevelID), 10) +
 		", outcomes for level " + strconv.Itoa(outcomesForLevel) +
 		", input full " + formatContractBool(stateInputAllowsAdvance(input, outcome)) +
+		", inputs " + describeAffectedInputs(input.Inputs, outcome) +
 		", round fold " + contractReasonOrNone(fold) +
 		", state series guard " + seriesGuard +
 		", state level guard " + levelGuard +
@@ -875,6 +877,50 @@ func describeMissingGuard(
 		", marker plan final " + markerReasonOrNone(finalMarkers, GapScope{}) +
 		", marker level final " + markerReasonOrNone(finalMarkers, GapScope{HasLevel: true, LevelID: outcome.LevelID}) +
 		", guard proposed " + formatContractBool(len(result.GuardBeforeEvents) != 0 || len(result.GuardAfterState) != 0) + ")"
+}
+
+// maxDescribedInputs bounds how many of the Level's bindings the refusal
+// spells out; the rest are counted. A Level rarely has more than a handful.
+const maxDescribedInputs = 6
+
+// describeAffectedInputs renders the bindings "input full" was decided over,
+// one term per binding, as scope:role:completeness/data/disposition, and
+// whether a quality or terminal fact localized the outcome to this record.
+// "input full no" alone could not say which of its four conjuncts failed;
+// the round fold reads only completeness, so a binding that is FULL yet
+// EMPTY, or degraded without being partial, is invisible to it and visible
+// here. Every value is a closed vocabulary.
+func describeAffectedInputs(all []NamedInputBinding, outcome LevelOutcome) string {
+	bindings := affectedBindingsOf(all, outcome.Plan, outcome.LevelID)
+	if len(bindings) == 0 {
+		return "none"
+	}
+	terms := make([]string, 0, len(bindings)+1)
+	for index, binding := range bindings {
+		if index == maxDescribedInputs {
+			terms = append(terms, "+"+strconv.Itoa(len(bindings)-index))
+			break
+		}
+		scope := "plan"
+		if binding.Consumer.HasLevel {
+			scope = "level"
+		}
+		terms = append(terms, scope+":"+string(binding.Role)+":"+string(binding.Completeness)+"/"+
+			inputDataStateOrUnknown(binding.DataState)+"/"+string(binding.Disposition))
+	}
+	localized, err := localizedInputOutcome(all, outcome.Plan, outcome)
+	localizedText := formatContractBool(err == nil && localized)
+	if err != nil {
+		localizedText = "error"
+	}
+	return "[" + strings.Join(terms, " ") + "] localized " + localizedText
+}
+
+func inputDataStateOrUnknown(state DataState) string {
+	if state == DataStateUnknown {
+		return "UNKNOWN"
+	}
+	return string(state)
 }
 
 func contractReasonOrNone(reason ReasonCode) string {

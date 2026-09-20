@@ -41,7 +41,8 @@ func TestDescribeMissingGuardRendersEachComparisonPerLevel(t *testing.T) {
 		StateResults: []StateEvaluation{{Mutation: StateMutation{Identity: identity}}},
 	}
 	input := InternalExecution{Inputs: []NamedInputBinding{{
-		Consumer: ConsumerRef{Plan: plan, LevelID: 5, HasLevel: true}, Completeness: CompletenessPartial, ReasonCode: "QUERY_PARTIAL",
+		Consumer: ConsumerRef{Plan: plan, LevelID: 5, HasLevel: true}, Role: InputRolePrimary,
+		Completeness: CompletenessPartial, DataState: DataStateData, Disposition: AccessDegraded, ReasonCode: "QUERY_PARTIAL",
 	}}}
 	loaded := map[GapScope]GapScopeState{{}: {Status: GapStatusGapped, ReasonCode: "GAP_SKIPPED"}}
 	final := map[GapScope]GapScopeState{{}: {Status: GapStatusGapped, ReasonCode: "GAP_SKIPPED"},
@@ -54,7 +55,7 @@ func TestDescribeMissingGuardRendersEachComparisonPerLevel(t *testing.T) {
 	got := describeMissingGuard(input, result, loaded, final, states, outcome)
 	for _, want := range []string{
 		"outcome UNKNOWN", "reason QUERY_PARTIAL", "level 5", "outcomes for level 2", "input full no",
-		"round fold QUERY_PARTIAL", "state series guard RECORD_INVALID", "state level guard GAPPED/GAP_SKIPPED",
+		"inputs [level:PRIMARY:PARTIAL/DATA/DEGRADED] localized no", "round fold QUERY_PARTIAL", "state series guard RECORD_INVALID", "state level guard GAPPED/GAP_SKIPPED",
 		"state written yes", "marker plan loaded GAPPED/GAP_SKIPPED", "marker level loaded none",
 		"marker plan final GAPPED/GAP_SKIPPED", "marker level final WARMING/QUERY_PARTIAL", "guard proposed no",
 	} {
@@ -64,12 +65,76 @@ func TestDescribeMissingGuardRendersEachComparisonPerLevel(t *testing.T) {
 	}
 	// No fold when the round's inputs for the Level are all FULL, and
 	// nothing found reads none, not empty.
-	input.Inputs[0].Completeness = CompletenessFull
+	input.Inputs[0].Completeness, input.Inputs[0].Disposition = CompletenessFull, AccessAvailable
 	bare := describeMissingGuard(input, PlanEvaluationResult{Plan: plan, LevelOutcomes: []LevelOutcome{outcome}}, nil, nil, nil, outcome)
 	for _, want := range []string{"outcomes for level 1", "round fold none", "state series guard none", "state level guard none",
-		"state written no", "marker plan loaded none", "marker level final none", "input full no"} {
+		"state written no", "marker plan loaded none", "marker level final none", "input full yes",
+		"inputs [level:PRIMARY:FULL/DATA/AVAILABLE] localized no"} {
 		if !strings.Contains(bare, want) {
 			t.Fatalf("bare description %q does not say %q", bare, want)
 		}
+	}
+}
+
+// The shape production produced on three Query Groups: every binding FULL,
+// so the round folds nothing and "input full no" was all the line could
+// say. The inputs term has to name the binding that closed the gate -- a
+// dependency that completed FULL and holds no rows -- because that is the
+// one fact the fold cannot see and the reader needs.
+func TestDescribeMissingGuardNamesTheFullButEmptyBinding(t *testing.T) {
+	plan := PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"}
+	series := SeriesIdentityDigest("series-a")
+	outcome := LevelOutcome{Plan: plan, LevelID: 1, SeriesIdentityDigest: series, Outcome: LevelOutcomeUnknown, ReasonCode: "HISTORY_WARMING"}
+	input := InternalExecution{Inputs: []NamedInputBinding{
+		{Consumer: ConsumerRef{Plan: plan, LevelID: 1, HasLevel: true}, Role: InputRolePrimary,
+			Completeness: CompletenessFull, DataState: DataStateData, Disposition: AccessAvailable},
+		{Consumer: ConsumerRef{Plan: plan, LevelID: 1, HasLevel: true}, Role: InputRoleAlgorithmDependency,
+			Completeness: CompletenessFull, DataState: DataStateEmpty, Disposition: AccessAvailable},
+		{Consumer: ConsumerRef{Plan: plan, LevelID: 2, HasLevel: true}, Role: InputRolePrimary,
+			Completeness: CompletenessUnavailable, Disposition: AccessUnavailable, ReasonCode: "QUERY_TIMEOUT"},
+	}}
+	got := describeMissingGuard(input, PlanEvaluationResult{Plan: plan, LevelOutcomes: []LevelOutcome{outcome}}, nil, nil, nil, outcome)
+	for _, want := range []string{
+		"input full no", "round fold none",
+		"inputs [level:PRIMARY:FULL/DATA/AVAILABLE level:ALGORITHM_DEPENDENCY:FULL/EMPTY/AVAILABLE] localized no",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("description %q does not say %q", got, want)
+		}
+	}
+	// The other Level's binding is not this outcome's; listing it would
+	// point the reader at a gate that was never consulted.
+	if strings.Contains(got, "QUERY_TIMEOUT") || strings.Contains(got, "UNAVAILABLE/") {
+		t.Fatalf("description %q lists a binding of another Level", got)
+	}
+	// A Plan-scope binding is consulted and says so; an absent data state
+	// reads UNKNOWN rather than an empty slot between two slashes.
+	input.Inputs = append(input.Inputs, NamedInputBinding{Consumer: ConsumerRef{Plan: plan}, Role: InputRolePrimary,
+		Completeness: CompletenessFull, Disposition: AccessAvailable})
+	got = describeMissingGuard(input, PlanEvaluationResult{Plan: plan, LevelOutcomes: []LevelOutcome{outcome}}, nil, nil, nil, outcome)
+	if !strings.Contains(got, "plan:PRIMARY:FULL/UNKNOWN/AVAILABLE]") {
+		t.Fatalf("description %q does not render the Plan-scope binding", got)
+	}
+	// A quality fact localized to this record is the fourth conjunct of
+	// "input full", and the only one the other terms cannot show: every
+	// binding reads FULL/DATA/AVAILABLE while the gate is closed.
+	localizedOutcome := outcome
+	localizedOutcome.ReasonCode, localizedOutcome.Record = "VALUE_INVALID", RecordAnchor{RecordID: "r1", SourceTime: 60}
+	input.Inputs[0].QualityFacts = []InputQualityFact{{ReasonCode: "VALUE_INVALID", ImpactScope: ImpactSeries,
+		RecordID: "r1", SourceTime: 60, SeriesIdentity: series}}
+	got = describeMissingGuard(input, PlanEvaluationResult{Plan: plan, LevelOutcomes: []LevelOutcome{localizedOutcome}}, nil, nil, nil, localizedOutcome)
+	if !strings.Contains(got, "] localized yes") {
+		t.Fatalf("description %q does not say the outcome was localized", got)
+	}
+	input.Inputs[0].QualityFacts = nil
+	// Past the bound the rest are counted, so a Level with many inputs
+	// cannot turn the line into a page.
+	for index := 0; index < maxDescribedInputs+2; index++ {
+		input.Inputs = append(input.Inputs, NamedInputBinding{Consumer: ConsumerRef{Plan: plan, LevelID: 1, HasLevel: true},
+			Role: InputRoleAlgorithmDependency, Completeness: CompletenessFull, DataState: DataStateData, Disposition: AccessAvailable})
+	}
+	got = describeMissingGuard(input, PlanEvaluationResult{Plan: plan, LevelOutcomes: []LevelOutcome{outcome}}, nil, nil, nil, outcome)
+	if !strings.Contains(got, " +5]") || strings.Count(got, "ALGORITHM_DEPENDENCY") > maxDescribedInputs {
+		t.Fatalf("description %q does not bound the inputs it lists", got)
 	}
 }
