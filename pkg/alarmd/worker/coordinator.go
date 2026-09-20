@@ -186,7 +186,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	beginStarted := time.Now()
 	begin, err := coordinator.ports.Progress.BeginSlot(ctx, execution.ProgressBeginRequest{
 		Identity:   execution.ProgressIdentity{QueryGroup: request.Contract.Slot.QueryGroup},
-		OwnerFence: request.OwnerFence, Projection: request.UnfinishedProjection(),
+		OwnerFence: request.OwnerFence, Projection: request.UnfinishedProjection(), ContentScope: request.ContentScope,
 	})
 	// Timed whichever way it went. A BeginSlot that fails says so; one that
 	// simply took twenty seconds used to say nothing at all, and an attempt
@@ -1080,7 +1080,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				continue
 			}
 			if len(accepted) > 0 {
-				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, retention, accepted, acceptedBytes)
+				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, accepted, acceptedBytes)
 				if err != nil {
 					return execution.SlotExecutionResult{}, err
 				}
@@ -1240,7 +1240,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	progressRequest := execution.ProgressCommitRequest{
 		Identity:   execution.ProgressIdentity{QueryGroup: request.Contract.Slot.QueryGroup},
 		OwnerFence: request.OwnerFence, ExpectedNextSlot: request.ExpectedNextSlot, Completion: completion,
-		Projection: request.UnfinishedProjection(),
+		Projection: request.UnfinishedProjection(), ContentScope: request.ContentScope,
 	}
 	if err := progressRequest.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid progress commit: %w", err)
@@ -1511,6 +1511,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 	operation execution.Operation,
 	contractRef execution.FrozenExecutionContractRef,
 	fence execution.OwnerFence,
+	contentScope string,
 	retention []execution.StateRetentionRequirement,
 	mutations []execution.StateMutation,
 	encodedBytes []int64,
@@ -1532,7 +1533,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		var result execution.StateApplyResult
 		var err error
 		if useFence {
-			result, err = fenced.ApplyRuntimeFenced(ctx, applyRequest, execution.StateApplyFence{Fence: fence})
+			result, err = fenced.ApplyRuntimeFenced(ctx, applyRequest, execution.StateApplyFence{Fence: fence, ContentScope: contentScope})
 		} else {
 			result, err = coordinator.ports.State.ApplyRuntime(ctx, applyRequest)
 		}

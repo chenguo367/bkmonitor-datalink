@@ -54,6 +54,11 @@ type SlotDispatchContext struct {
 	Operation            execution.Operation
 	OwnerFence           execution.OwnerFence
 	AssignmentGeneration uint64
+	// ContentScope is the content the Slot runs under, the ObjectDigest of
+	// the Segment it was frozen from; the Slot's fenced writes declare it
+	// (execution.SlotExecutionRequest.ContentScope). Empty for a Segment
+	// that predates content addressing.
+	ContentScope string
 }
 
 func (slot FrozenSlot) Validate(queryGroup execution.QueryGroupIdentity) error {
@@ -752,6 +757,7 @@ func (runner *Runner) runOneTracked(
 		KeepUntilUnixMilli:             slot.KeepUntilUnixMilli,
 		ReplayExpired:                  slot.Recovery.Disposition == ReplayExpired,
 		Operation:                      operation, AttemptNo: runner.attemptNo(slot), OwnerFence: fence, ExpectedNextSlot: slot.ExpectedNextSlot,
+		ContentScope: slot.Dispatch.ContentScope,
 	}
 	if err := request.Validate(); err != nil {
 		return execution.SlotExecutionResult{}, false, err
