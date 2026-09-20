@@ -842,9 +842,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.lastError = &LastError{Text: text, Type: fmt.Sprintf("%T", observation.Err),
 			EvaluationTime: trace.EvaluationTime, At: at, Attempts: attempts, Operation: string(observation.Operation)}
 	}
-	if trace.StrategyID != "" && len(state.strategies) < maxStrategiesPerQueryGroup {
-		state.strategies[StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}] = struct{}{}
-	}
+	recordStrategy(state.strategies, StrategyRef{StrategyID: trace.StrategyID, BusinessID: trace.BusinessID})
 
 	// The revisions this round ran under, from whichever observation carries
 	// them; read against the last completed round's when this one completes.
@@ -1411,6 +1409,35 @@ func (tracker *Tracker) Tracked() int {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	return len(tracker.groups)
+}
+
+// recordStrategy adds the strategy a trace names to an object's set, one entry
+// per strategy. Observations of one round do not all carry both halves of the
+// identity -- a trace that names the strategy and not its business arrived
+// from the query budget stage on a live deployment -- and keying the set by
+// the whole reference made that one strategy two rows on the page, one with
+// its business and one without. The entry that names the business is the one
+// kept: a later trace with the business replaces the one without, and a later
+// trace without it adds nothing to an entry that already has it. The bound
+// counts strategies, so a replacement never trips it.
+func recordStrategy(strategies map[StrategyRef]struct{}, ref StrategyRef) {
+	if ref.StrategyID == "" {
+		return
+	}
+	bare := StrategyRef{StrategyID: ref.StrategyID}
+	if ref.BusinessID == "" {
+		for known := range strategies {
+			if known.StrategyID == ref.StrategyID {
+				return
+			}
+		}
+	} else {
+		delete(strategies, bare)
+	}
+	if _, known := strategies[ref]; known || len(strategies) >= maxStrategiesPerQueryGroup {
+		return
+	}
+	strategies[ref] = struct{}{}
 }
 
 func sortStrategies(strategies []StrategyRef) {
