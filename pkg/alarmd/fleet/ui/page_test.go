@@ -753,8 +753,10 @@ func TestThePageHasWordingForEveryLoadState(t *testing.T) {
 		{"FAILURE_CLASS", stringsOf(fleet.Classes)},
 		{"EFFECT", stringsOf(fleet.Effects)},
 		{"RECOVERY_STATE", stringsOf(fleet.RecoveryStates)},
-		// And the status of a held gap guard on the object row.
+		// And the status of a held gap guard on the object row, and every
+		// reason one has been seen to carry.
 		{"GUARD_STATUS", fleet.GapGuardStatuses},
+		{"GUARD_REASON", fleet.GapGuardReasons},
 		// Which upkeep of an absence memory the store refused, and which
 		// stored shape a read of one found.
 		{"MEMORY_REFUSAL_KIND", fleet.NoDataMemoryRefusalKinds},

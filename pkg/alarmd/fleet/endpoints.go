@@ -55,6 +55,12 @@ type Endpoint struct {
 	// connection, whose health is the command record above.
 	Ready    *bool `json:"ready,omitempty"`
 	Attempts *int  `json:"attempts,omitempty"`
+	// ReadySinceAgeSeconds is how long an open role has been open. It is its
+	// own field because it is not a success: the sink records opening, not
+	// messages, and put in LastSuccessAgeSeconds it read on a live page as
+	// "last succeeded sixteen minutes ago" on a producer that had been
+	// sending every second since. Absent while not open.
+	ReadySinceAgeSeconds *float64 `json:"ready_since_age_seconds,omitempty"`
 	// Writer is what the replica found of the platform's writing under this
 	// role, for the roles that read a platform cache.
 	Writer *WriterEvidence `json:"writer,omitempty"`

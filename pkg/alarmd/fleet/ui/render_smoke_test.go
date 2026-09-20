@@ -376,7 +376,10 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	successAge, failureAge := 2.5, 3600.0
 	cmdbAge := 240.0
 	dependencies := []fleet.Endpoint{
-		{Role: fleet.EndpointStateRedis, Kind: "redis", Address: "redis.example:6379", Mode: "standalone", DB: &stateDB,
+		// The sentinel form the server writes -- master name, '@', sentinel
+		// list -- so the credential-shaped guard below is exercised on the
+		// one legitimate '@' an address can carry.
+		{Role: fleet.EndpointStateRedis, Kind: "redis", Address: "monitor@sentinel-0.example:26379,sentinel-1.example:26379", Mode: "sentinel", DB: &stateDB,
 			Prefix: "alarmd:phase2:g2:runtime:v1", Configured: true, LastSuccessAgeSeconds: &successAge},
 		{Role: fleet.EndpointStrategyCache, Kind: "redis", Address: "redis.example:6379", Mode: "standalone", DB: &cacheDB,
 			Prefix: "bk_monitorv3.ee.cache", Configured: true, LastSuccessAgeSeconds: &successAge,
@@ -387,8 +390,10 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			Writer: &fleet.WriterEvidence{Present: true, Count: 47788, AgeSeconds: &cmdbAge, State: "loaded"}},
 		{Role: fleet.EndpointDynamicConfig, Kind: "redis"},
 		{Role: fleet.EndpointQueryBackend, Kind: "http", Address: "http://unify-query.example:10205", Configured: true},
+		// The output sink's own record: open, since sixteen minutes, on the
+		// first attempt.
 		{Role: fleet.EndpointOutputKafka, Kind: "kafka", Address: "kafka-0.example:9092,kafka-1.example:9092",
-			Prefix: "0bkmonitor_backend_event", Configured: true},
+			Prefix: "0bkmonitor_backend_event", Configured: true, Ready: ptrBool(true), Attempts: ptrInt(1), ReadySinceAgeSeconds: ptrFloat(980)},
 		{Role: fleet.EndpointCompatOutput, Kind: "redis", Address: "redis.example:6379", Mode: "standalone", DB: &stateDB,
 			Prefix: "bk_monitorv3.ee.cache", Configured: true},
 	}
@@ -1043,6 +1048,12 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"DEPS ::", "策略缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache成功 3 秒前；失败 1 小时 0 分前：dial tcp: i/o timeout有：列出 62 条策略；写入方标记 last_updated 于 1 分 35 秒前更新"},
 		{"DEPS ::", "CMDB 主机缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache · 与 strategy_cache 共用连接成功 3 秒前有：47788 台主机，来源刷新于 4 分 0 秒前"},
 		{"DEPS ::", "平台动态配置（平台写、alarmd 读）未配置"},
+		// The sentinel address in words -- master name, then sentinels -- so
+		// the one '@' an address legitimately carries never reads as an account.
+		{"DEPS ::", "alarmd 自己的状态（目录、归属、进度、舰队）redis sentinel 主节点名 monitor，哨兵 sentinel-0.example:26379,sentinel-1.example:26379 · db 8 · alarmd:phase2:g2:runtime:v1成功 3 秒前"},
+		// The output sink says open-for-how-long, not last-message-succeeded.
+		{"DEPS ::", "告警输出 Kafka（topic 在前缀列）kafka kafka-0.example:9092,kafka-1.example:9092 · 0bkmonitor_backend_event就绪，已开 16 分 20 秒"},
+		{"DEPS ::", "告警输出那一行记的是连接层（producer 开着没开、开了多久），不按每条消息计"},
 		{"DEPS ::", "兼容输出用的服务 Redis（策略快照）redis standalone redis.example:6379 · db 8 · bk_monitorv3.ee.cache本进程还没对它发过命令"},
 		{"VAR degraded why ::", "策略缓存里有策略，但这一轮一条都没接受——整个部署没有在检测任何东西；不是没负载，是全部被扣在配置获取环节（副本 abcde）"},
 	} {
@@ -1418,6 +1429,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 // that came out empty.
 func ptrFloat(value float64) *float64    { return &value }
 func ptrInt(value int) *int              { return &value }
+func ptrBool(value bool) *bool           { return &value }
 func ptrTime(value time.Time) *time.Time { return &value }
 
 func lineStarting(text, prefix string) string {

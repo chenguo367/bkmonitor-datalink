@@ -166,8 +166,10 @@ func TestEndpointFactsReadTheSharedConnectionAndTheSourceRound(t *testing.T) {
 		output.LastFailure != sinkState.LastFailure || output.LastSuccessAgeSeconds != nil {
 		t.Errorf("output kafka = %+v, want not ready after 3 attempts with the last failure and no success age", output)
 	}
-	// Once open: ready, the success age is the time since it opened, the
-	// attempt count is how many it took, and the failure is gone.
+	// Once open: ready, the time since it opened on its own field, the
+	// attempt count is how many it took, and the failure is gone. No success
+	// age: opening is not a message acknowledged, and on the field that means
+	// one it read as a producer that last succeeded when it started.
 	sinkState = outputSinkState{Ready: true, Since: time.Now().Add(-40 * time.Second), Attempts: 4}
 	opened := endpointFactsSource(cfg, sharing, recorder, nil, nil, source, func() outputSinkState { return sinkState }, time.Now)()
 	for _, entry := range opened {
@@ -175,9 +177,9 @@ func TestEndpointFactsReadTheSharedConnectionAndTheSourceRound(t *testing.T) {
 			continue
 		}
 		if entry.Ready == nil || !*entry.Ready || entry.Attempts == nil || *entry.Attempts != 4 ||
-			entry.LastSuccessAgeSeconds == nil || *entry.LastSuccessAgeSeconds < 39 || *entry.LastSuccessAgeSeconds > 45 ||
-			entry.LastFailureAgeSeconds != nil || entry.LastFailure != "" {
-			t.Errorf("open output kafka = %+v, want ready, 4 attempts, ~40 s since open, no failure", entry)
+			entry.ReadySinceAgeSeconds == nil || *entry.ReadySinceAgeSeconds < 39 || *entry.ReadySinceAgeSeconds > 45 ||
+			entry.LastSuccessAgeSeconds != nil || entry.LastFailureAgeSeconds != nil || entry.LastFailure != "" {
+			t.Errorf("open output kafka = %+v, want ready, 4 attempts, ~40 s since open on ready_since, no success age, no failure", entry)
 		}
 	}
 	writer := byRole[fleet.EndpointStrategyCache].Writer
