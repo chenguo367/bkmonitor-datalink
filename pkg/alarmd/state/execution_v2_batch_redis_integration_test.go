@@ -118,7 +118,20 @@ func (fixture *redisBatchFixture) store(t *testing.T, prefix string, fenced bool
 }
 
 func (fixture *redisBatchFixture) applyFence(at time.Time) execution.StateApplyFence {
-	return execution.StateApplyFence{Fence: fixture.fence, At: at}
+	return execution.StateApplyFence{Fence: fixture.fence}
+}
+
+// lapseLease makes the fixture's lease look as Redis would hold it after
+// its minute had passed on the server's clock: the deadline is moved back
+// past now. The fence judges expiry on that clock and no other, so this is
+// the only way a test against a real server can produce a lapsed lease
+// without waiting for it.
+func (fixture *redisBatchFixture) lapseLease(t *testing.T) {
+	t.Helper()
+	key := fixture.owners.FenceKeys(fixture.fence.QueryGroup).OwnershipKey
+	if err := fixture.client.HIncrBy(context.Background(), key, "deadline_ms", -(2 * time.Minute).Milliseconds()).Err(); err != nil {
+		t.Fatalf("lapse lease: %v", err)
+	}
 }
 
 // loadInStreamBatches reads the way the worker does: one LoadRuntime per
@@ -220,21 +233,27 @@ func TestRedisFencedBatchApplyRejectsStaleOwnerLikeCheckFence(t *testing.T) {
 		name  string
 		fence execution.OwnerFence
 		at    time.Time
+		lapse bool
 		stale bool
 	}{
 		{name: "live lease", fence: fixture.fence, at: valid, stale: false},
 		{name: "different token", fence: wrongToken, at: valid, stale: true},
 		{name: "different epoch", fence: wrongEpoch, at: valid, stale: true},
-		{name: "expired deadline", fence: fixture.fence, at: fixture.leased.Add(2 * time.Minute), stale: true},
+		// Last, because it changes the record: the lease runs out on the
+		// server.
+		{name: "expired deadline", fence: fixture.fence, at: valid, lapse: true, stale: true},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			checked := fixture.owners.CheckFence(ctx, test.fence, test.at)
+			if test.lapse {
+				fixture.lapseLease(t)
+			}
+			checked := fixture.owners.CheckFence(ctx, test.fence)
 			if errors.Is(checked, ownership.ErrStaleFence) != test.stale {
 				t.Fatalf("CheckFence() = %v, want stale=%t", checked, test.stale)
 			}
 			loadInStreamBatches(t, store, preflightItems(mutations))
-			result, err := store.ApplyRuntimeFenced(ctx, request, execution.StateApplyFence{Fence: test.fence, At: test.at})
+			result, err := store.ApplyRuntimeFenced(ctx, request, execution.StateApplyFence{Fence: test.fence})
 			keys := make([]string, len(mutations))
 			for index, mutation := range mutations {
 				keys[index], _ = RuntimeStateKeyV2("fenced", mutation.Identity)

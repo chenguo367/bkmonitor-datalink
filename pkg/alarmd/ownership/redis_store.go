@@ -68,11 +68,19 @@ func NewRedisStoreWithClient(client redis.UniversalClient, prefix string) (*Redi
 	return &RedisStore{prefix: prefix, client: client}, nil
 }
 
+// Ping is the store's readiness: the server answers, and it runs the owner
+// fence. The second is not implied by the first -- a server that answers
+// PING and refuses a write after TIME would pass here and fail the first
+// lease -- so the fence itself is run once, on a key nothing else uses.
 func (store *RedisStore) Ping(ctx context.Context) error {
 	if store == nil || store.client == nil {
 		return errors.New("alarmd ownership: Redis store is required")
 	}
-	return store.client.Ping(ctx).Err()
+	if err := store.client.Ping(ctx).Err(); err != nil {
+		return err
+	}
+	_, err := ProbeFenceClock(ctx, store.client, store.prefix)
+	return err
 }
 
 func (store *RedisStore) Close() error {
@@ -234,7 +242,7 @@ func (store *RedisStore) PublishAssignment(
 	result, err := publishAssignmentScript.Run(ctx, store.client, []string{
 		store.ownershipKey(ControlLeaderIdentity), store.assignmentKey(decision.QueryGroup),
 		store.ownershipKey(decision.QueryGroup),
-	}, authority.Fence.OwnerID, authority.Fence.OwnerEpoch, authority.Fence.LeaseToken, decision.DecidedAt.UnixMilli(),
+	}, authority.Fence.OwnerID, authority.Fence.OwnerEpoch, authority.Fence.LeaseToken,
 		decision.ExpectedRecordRevision, string(decision.QueryGroup), decision.DesiredWorkerID,
 		string(decision.PlacementReason), decision.DecidedAt.UnixMilli(),
 		decision.ContentScope, ContentSwitchMargin.Milliseconds()).Result()
@@ -440,14 +448,13 @@ func (store *RedisStore) acquire(
 	if err != nil {
 		return Lease{}, err
 	}
-	deadline := at.Add(ttl)
 	result, err := acquireScript.Run(ctx, store.client, []string{
 		store.assignmentKey(queryGroup), store.ownershipKey(queryGroup),
-	}, boolText(requireAssignment), ownerID, at.UnixMilli(), deadline.UnixMilli(), token).Result()
+	}, boolText(requireAssignment), ownerID, ttl.Milliseconds(), token).Result()
 	if err != nil {
 		return Lease{}, err
 	}
-	values, err := scriptValues(result, 4)
+	values, err := scriptValues(result, 5)
 	if err != nil {
 		return Lease{}, err
 	}
@@ -455,6 +462,9 @@ func (store *RedisStore) acquire(
 	case "NOT_DESIRED":
 		return Lease{}, ErrNotDesired
 	case "BUSY":
+		// values[2] is the deadline of the lease in the way, on the server's
+		// clock; nothing reads it yet. It is in the reply for a caller that
+		// wants to wait exactly that long instead of retrying blind.
 		return Lease{}, ErrLeaseBusy
 	case "PAUSED":
 		return Lease{}, ErrStaleFence
@@ -463,12 +473,37 @@ func (store *RedisStore) acquire(
 			Fence: execution.OwnerFence{
 				QueryGroup: queryGroup, OwnerID: ownerID, OwnerEpoch: uint64(scriptInt(values[1])), LeaseToken: token,
 			},
-			Deadline:     time.UnixMilli(scriptInt(values[2])),
+			Deadline:     onCallerClock(at, scriptInt(values[4]), scriptInt(values[2])),
 			ContentScope: scriptText(values[3]),
 		}, nil
 	default:
 		return Lease{}, errors.New("alarmd ownership: invalid lease acquisition response")
 	}
+}
+
+// onCallerClock carries a server instant over to the caller's clock: the
+// duration still to run on the server, added to the instant the caller
+// passed in when it asked. That instant is from before the round trip, so
+// the result is earlier than the server's instant by at least the request's
+// way in, and never later. A server instant already reached returns the
+// anchor itself, so a comparison with the caller's clock reads it as passed.
+//
+// The one thing this rests on is that the anchor was read before the server
+// read TIME, and that the caller later compares the result against the same
+// clock the anchor came from. time.Now() carries a monotonic reading and
+// Add keeps it, so the comparison is monotonic and a wall clock stepped
+// back does not make a lapsed lease look live. An anchor without one -- a
+// time.Unix/UnixMilli round trip, an injected clock that strips it -- is a
+// wall-clock anchor, and a step back after it would lengthen the lease in
+// the holder's eyes by the size of the step. Every production caller today
+// passes time.Now() through; this is the precondition written down, not a
+// defect found.
+func onCallerClock(anchor time.Time, serverNowMillis, serverInstantMillis int64) time.Time {
+	remaining := serverInstantMillis - serverNowMillis
+	if remaining <= 0 {
+		return anchor
+	}
+	return anchor.Add(time.Duration(remaining) * time.Millisecond)
 }
 
 func (store *RedisStore) Renew(
@@ -490,14 +525,13 @@ func (store *RedisStore) renew(
 	if err := validateFence(fence); err != nil || at.IsZero() || ttl <= 0 {
 		return Lease{}, ErrStaleFence
 	}
-	deadline := at.Add(ttl)
 	result, err := renewScript.Run(ctx, store.client, []string{
 		store.assignmentKey(fence.QueryGroup), store.ownershipKey(fence.QueryGroup),
-	}, boolText(requireAssignment), fence.OwnerID, fence.OwnerEpoch, fence.LeaseToken, at.UnixMilli(), deadline.UnixMilli()).Result()
+	}, boolText(requireAssignment), fence.OwnerID, fence.OwnerEpoch, fence.LeaseToken, ttl.Milliseconds()).Result()
 	if err != nil {
 		return Lease{}, err
 	}
-	values, err := scriptValues(result, 5)
+	values, err := scriptValues(result, 6)
 	if err != nil {
 		return Lease{}, err
 	}
@@ -508,12 +542,16 @@ func (store *RedisStore) renew(
 		// The deadline the store wrote, not the one asked for: under a
 		// pending content change the store caps it at the change's
 		// effective time, and the holder must plan by the capped value.
+		// Both come back as server instants and are carried over to the
+		// caller's clock from the same anchor, so under the cap they are
+		// the same instant here as they are on the server.
+		serverNow := scriptInt(values[5])
 		lease := Lease{
-			Fence: fence, Deadline: time.UnixMilli(scriptInt(values[1])),
+			Fence: fence, Deadline: onCallerClock(at, serverNow, scriptInt(values[1])),
 			ContentScope: scriptText(values[2]), PendingContentScope: scriptText(values[3]),
 		}
 		if effective := scriptInt(values[4]); effective > 0 {
-			lease.EffectiveAt = time.UnixMilli(effective)
+			lease.EffectiveAt = onCallerClock(at, serverNow, effective)
 		}
 		return lease, nil
 	default:
@@ -521,8 +559,8 @@ func (store *RedisStore) renew(
 	}
 }
 
-func (store *RedisStore) CheckFence(ctx context.Context, fence execution.OwnerFence, at time.Time) error {
-	_, err := store.checkFence(ctx, fence, at, "")
+func (store *RedisStore) CheckFence(ctx context.Context, fence execution.OwnerFence) error {
+	_, err := store.checkFence(ctx, fence, "")
 	return err
 }
 
@@ -543,12 +581,11 @@ func (store *RedisStore) CheckFence(ctx context.Context, fence execution.OwnerFe
 func (store *RedisStore) CheckFenceWithAssignment(
 	ctx context.Context,
 	fence execution.OwnerFence,
-	at time.Time,
 ) (AssignmentRecord, error) {
 	if fence.QueryGroup == ControlLeaderIdentity {
 		return AssignmentRecord{}, errors.New("alarmd ownership: control leader identity has no Assignment record")
 	}
-	values, err := store.checkFence(ctx, fence, at, "")
+	values, err := store.checkFence(ctx, fence, "")
 	if err != nil {
 		return AssignmentRecord{}, err
 	}
@@ -562,29 +599,28 @@ func (store *RedisStore) CheckFenceWithAssignment(
 func (store *RedisStore) CheckFenceForContentScope(
 	ctx context.Context,
 	fence execution.OwnerFence,
-	at time.Time,
 	contentScope string,
 ) error {
-	_, err := store.checkFence(ctx, fence, at, contentScope)
+	_, err := store.checkFence(ctx, fence, contentScope)
 	return err
 }
 
-// checkFence returns the whole script reply so the two exported entry points
+// checkFence returns the whole script reply so the exported entry points
 // share one decision. Only a VALID fence yields values; every rejection is
-// mapped to the same error the caller has always seen.
+// mapped to the same error the caller has always seen. The caller names no
+// instant: the lease deadline is compared with Redis's clock in the script.
 func (store *RedisStore) checkFence(
 	ctx context.Context,
 	fence execution.OwnerFence,
-	at time.Time,
 	contentScope string,
 ) ([]interface{}, error) {
 	requireAssignment := fence.QueryGroup != ControlLeaderIdentity
-	if err := validateFence(fence); err != nil || at.IsZero() {
+	if err := validateFence(fence); err != nil {
 		return nil, ErrStaleFence
 	}
 	result, err := checkFenceScript.Run(ctx, store.client, []string{
 		store.assignmentKey(fence.QueryGroup), store.ownershipKey(fence.QueryGroup),
-	}, boolText(requireAssignment), fence.OwnerID, fence.OwnerEpoch, fence.LeaseToken, at.UnixMilli(), contentScope).Result()
+	}, boolText(requireAssignment), fence.OwnerID, fence.OwnerEpoch, fence.LeaseToken, contentScope).Result()
 	if err != nil {
 		return nil, err
 	}
@@ -623,7 +659,7 @@ func (store *RedisStore) FencedCompareAndSet(
 	ctx context.Context,
 	request FencedCASRequest,
 ) (FencedCASStatus, error) {
-	if err := validateFence(request.Fence); err != nil || request.At.IsZero() || request.Namespace == "" ||
+	if err := validateFence(request.Fence); err != nil || request.Namespace == "" ||
 		strings.ContainsAny(request.Namespace, "{} \t\r\n") || len(request.Value) == 0 || request.TTL < 0 ||
 		(request.ExpectedMissing && len(request.Expected) != 0) {
 		return "", errors.New("alarmd ownership: invalid fenced CAS request")
@@ -633,7 +669,7 @@ func (store *RedisStore) FencedCompareAndSet(
 		store.assignmentKey(request.Fence.QueryGroup), store.ownershipKey(request.Fence.QueryGroup),
 		store.controlKey(request.Fence.QueryGroup, request.Namespace),
 	}, boolText(requireAssignment), request.Fence.OwnerID, request.Fence.OwnerEpoch, request.Fence.LeaseToken,
-		request.At.UnixMilli(), boolText(request.ExpectedMissing), request.Expected, request.Value, request.TTL.Milliseconds(),
+		boolText(request.ExpectedMissing), request.Expected, request.Value, request.TTL.Milliseconds(),
 		request.ContentScope).Text()
 	if err != nil {
 		return "", err
@@ -837,32 +873,39 @@ func parseInt(value string) int64 {
 	return parsed
 }
 
-// acquireScript hands out a lease. A new lease starts on the content scope
-// the record names now: a pending change whose time has come is promoted
-// here, so the holder that follows a lapsed lease is on the new content from
-// its first Slot. The reply carries the scope so the holder knows what it was
-// admitted to execute.
+// acquireScript hands out a lease. The deadline is minted here, on the
+// server's clock, from the lifetime the caller asked for (ARGV[3], in
+// milliseconds); the caller never names an instant. A new lease starts on
+// the content scope the record names now: a pending change whose time has
+// come is promoted here, so the holder that follows a lapsed lease is on the
+// new content from its first Slot. The reply carries the scope so the holder
+// knows what it was admitted to execute, and the server instant so it can
+// keep the remaining duration on its own clock.
+//
+// Every branch returns five elements: status, epoch, deadline_ms, scope,
+// now_ms. BUSY carries the deadline of the lease that is in the way.
 var acquireScript = redis.NewScript(FenceLua + `
 local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
-local now_ms = tonumber(ARGV[3])
-local deadline_ms = tonumber(ARGV[4])
-local token = ARGV[5]
+local ttl_ms = tonumber(ARGV[3])
+local token = ARGV[4]
+local now_ms = redis_now_ms()
+local deadline_ms = now_ms + ttl_ms
 local scope = ''
 if require_assignment == '1' then
   local desired = redis.call('HGET', KEYS[1], 'desired_worker_id')
-  if not desired or desired ~= owner_id then return {'NOT_DESIRED', 0, 0, ''} end
+  if not desired or desired ~= owner_id then return {'NOT_DESIRED', 0, 0, '', now_ms} end
   scope = current_content_scope(KEYS[1], now_ms)
 end
 local disposition = redis.call('HGET', KEYS[2], 'execution_disposition')
-if disposition and disposition ~= 'ACTIVE' then return {'PAUSED', 0, 0, ''} end
+if disposition and disposition ~= 'ACTIVE' then return {'PAUSED', 0, 0, '', now_ms} end
 local current_owner = redis.call('HGET', KEYS[2], 'owner_id')
 local current_deadline = tonumber(redis.call('HGET', KEYS[2], 'deadline_ms') or '0')
-if current_owner and current_owner ~= '' and current_deadline > now_ms then return {'BUSY', 0, current_deadline, ''} end
+if current_owner and current_owner ~= '' and current_deadline > now_ms then return {'BUSY', 0, current_deadline, '', now_ms} end
 local epoch = tonumber(redis.call('HGET', KEYS[2], 'owner_epoch') or '0') + 1
 redis.call('HSET', KEYS[2], 'owner_id', owner_id, 'owner_epoch', epoch, 'lease_token', token,
   'deadline_ms', deadline_ms, 'execution_disposition', 'ACTIVE')
-return {'OWNED', epoch, deadline_ms, scope}
+return {'OWNED', epoch, deadline_ms, scope, now_ms}
 `)
 
 // renewScript extends a lease, and is where a holder learns about a content
@@ -874,16 +917,20 @@ return {'OWNED', epoch, deadline_ms, scope}
 // new content. A pending change whose time has already come is promoted
 // first and the renewal proceeds uncapped on the new scope.
 //
-// Every branch returns a five element array; rejections carry empty tails.
+// The new deadline is minted on the server's clock from the lifetime asked
+// for (ARGV[5], milliseconds), like acquire's. Every branch returns six
+// elements: status, deadline_ms, scope, pending scope, effective_at_ms,
+// now_ms; rejections carry empty tails.
 var renewScript = redis.NewScript(FenceLua + `
 local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
 local epoch = ARGV[3]
 local token = ARGV[4]
-local now_ms = tonumber(ARGV[5])
-local deadline_ms = tonumber(ARGV[6])
+local ttl_ms = tonumber(ARGV[5])
+local now_ms = redis_now_ms()
+local deadline_ms = now_ms + ttl_ms
 local refusal = fence_refusal(KEYS[1], KEYS[2], require_assignment, owner_id, epoch, token, '', now_ms)
-if refusal then return {refusal, 0, '', '', 0} end
+if refusal then return {refusal, 0, '', '', 0, now_ms} end
 local scope, pending, effective = '', '', 0
 if require_assignment == '1' then
   scope = current_content_scope(KEYS[1], now_ms)
@@ -895,7 +942,7 @@ if require_assignment == '1' then
   end
 end
 redis.call('HSET', KEYS[2], 'deadline_ms', deadline_ms)
-return {'RENEWED', deadline_ms, scope, pending, effective}
+return {'RENEWED', deadline_ms, scope, pending, effective, now_ms}
 `)
 
 // checkFenceScript answers both questions a fenced worker asks before it acts:
@@ -912,7 +959,7 @@ return {'RENEWED', deadline_ms, scope, pending, effective}
 // element is nil, so an unguarded record would silently shorten the reply for
 // the control leader identity, which carries no Assignment record at all.
 //
-// ARGV[6], when present and non-empty, is the content scope the caller is
+// ARGV[5], when present and non-empty, is the content scope the caller is
 // executing; the fence then also refuses a record that names another. The
 // reply's elements 8 to 10 carry the record's content scope, pending scope
 // and effective time, empty for a record that has none.
@@ -921,8 +968,8 @@ local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
 local epoch = ARGV[3]
 local token = ARGV[4]
-local now_ms = tonumber(ARGV[5])
-local content_scope = ARGV[6] or ''
+local content_scope = ARGV[5] or ''
+local now_ms = redis_now_ms()
 local empty = {'', '', '', '', '', '', '', '', ''}
 local refusal = fence_refusal(KEYS[1], KEYS[2], require_assignment, owner_id, epoch, token, content_scope, now_ms)
 if refusal then return {refusal, empty[1], empty[2], empty[3], empty[4], empty[5], empty[6], empty[7], empty[8], empty[9]} end
@@ -947,15 +994,20 @@ return 'RELEASED'
 `)
 
 // publishAssignmentScript writes a leader's decision under the leader fence
-// and the record's revision CAS. Beyond the desired worker it now carries the
-// content scope the decision authorizes (ARGV[10], empty leaves the record's
-// scope as it is) and the margin a pending change waits after the current
-// lease deadline (ARGV[11]); KEYS[3] is the Query Group's ownership hash,
-// read for that deadline.
+// and the record's revision CAS. ARGV is the leader fence (1 to 3), the
+// expected record revision (4), the query group, desired worker, placement
+// reason and decision time (5 to 8), then the content scope the decision
+// authorizes (ARGV[9], empty leaves the record's scope as it is) and the
+// margin a pending change waits after the current lease deadline
+// (ARGV[10]); KEYS[3] is the Query Group's ownership hash, read for that
+// deadline. Whether that lease is live, and whether a pending change has
+// fallen due, are judged on the server's clock, the one the deadline and
+// effective_at_ms were minted on; the decision time is what the leader says
+// about itself and is only stored.
 //
 // A content change for a desired worker that stays and holds a live lease
 // is written as pending: the record keeps authorizing the old scope until
-// effective_at_ms = max(lease deadline, now) + margin, and renewal will not
+// effective_at_ms = lease deadline + margin, and renewal will not
 // extend the lease past that. A change with no live holder, or one that
 // arrives together with a change of desired worker, is written directly --
 // there is nobody to protect from it, or the old holder is already refused
@@ -976,21 +1028,21 @@ var publishAssignmentScript = redis.NewScript(FenceLua + `
 local leader_id = ARGV[1]
 local leader_epoch = ARGV[2]
 local leader_token = ARGV[3]
-local now_ms = tonumber(ARGV[4])
+local now_ms = redis_now_ms()
 if fence_refusal('', KEYS[1], '0', leader_id, leader_epoch, leader_token, '', now_ms) then
   return {'STALE', 0, 0, 0, '', 0, '', '', '', 0}
 end
-local expected_revision = tonumber(ARGV[5])
+local expected_revision = tonumber(ARGV[4])
 local current_revision = tonumber(redis.call('HGET', KEYS[2], 'record_revision') or '0')
 if current_revision ~= expected_revision then
   return {'CONFLICT', 0, current_revision, 0, '', 0, '', '', '', 0}
 end
-local query_group = ARGV[6]
-local desired = ARGV[7]
-local reason = ARGV[8]
-local assigned_at = ARGV[9]
-local wanted_scope = ARGV[10] or ''
-local margin_ms = tonumber(ARGV[11] or '0')
+local query_group = ARGV[5]
+local desired = ARGV[6]
+local reason = ARGV[7]
+local assigned_at = ARGV[8]
+local wanted_scope = ARGV[9] or ''
+local margin_ms = tonumber(ARGV[10] or '0')
 local function reply()
   local f = redis.call('HMGET', KEYS[2], 'desired_worker_id', 'assignment_generation', 'record_revision',
     'control_epoch', 'placement_reason', 'assigned_at_ms', 'content_scope', 'pending_content_scope', 'effective_at_ms')
@@ -1033,29 +1085,29 @@ redis.call('HDEL', KEYS[2], 'pending_content_scope', 'effective_at_ms')
 return reply()
 `)
 
-// fencedCASScript writes one control value under the owner fence. ARGV[10],
-// when present and non-empty, is the content scope the caller is executing.
-// A fence refused for a moved scope answers CONTENT_MOVED rather than
-// STALE_OWNER: the lease is fine, the view is not, and the two send a worker
-// down different paths.
+// fencedCASScript writes one control value under the owner fence. ARGV is
+// the fence (1 to 4), expected-missing flag, expected value, new value and
+// TTL in milliseconds (5 to 8), then ARGV[9], which when present and
+// non-empty is the content scope the caller is executing. A fence refused
+// for a moved scope answers CONTENT_MOVED rather than STALE_OWNER: the lease
+// is fine, the view is not, and the two send a worker down different paths.
 var fencedCASScript = redis.NewScript(FenceLua + `
 local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
 local epoch = ARGV[3]
 local token = ARGV[4]
-local now_ms = tonumber(ARGV[5])
-local content_scope = ARGV[10] or ''
-local refusal = fence_refusal(KEYS[1], KEYS[2], require_assignment, owner_id, epoch, token, content_scope, now_ms)
+local content_scope = ARGV[9] or ''
+local refusal = fence_refusal(KEYS[1], KEYS[2], require_assignment, owner_id, epoch, token, content_scope, redis_now_ms())
 if refusal == 'CONTENT_MOVED' then return 'CONTENT_MOVED' end
 if refusal then return 'STALE_OWNER' end
 local current = redis.call('GET', KEYS[3])
-if ARGV[6] == '1' then
+if ARGV[5] == '1' then
   if current then return 'CONFLICT' end
-elseif not current or current ~= ARGV[7] then
+elseif not current or current ~= ARGV[6] then
   return 'CONFLICT'
 end
-local ttl_ms = tonumber(ARGV[9])
-if ttl_ms > 0 then redis.call('SET', KEYS[3], ARGV[8], 'PX', ttl_ms)
-else redis.call('SET', KEYS[3], ARGV[8]) end
+local ttl_ms = tonumber(ARGV[8])
+if ttl_ms > 0 then redis.call('SET', KEYS[3], ARGV[7], 'PX', ttl_ms)
+else redis.call('SET', KEYS[3], ARGV[7]) end
 return 'APPLIED'
 `)

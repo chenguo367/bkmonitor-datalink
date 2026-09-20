@@ -109,8 +109,9 @@ return 1
 // ARGV[1] expected missing ('1'/'0'); ARGV[2] SHA-1 hex of the expected value;
 // ARGV[3] new value; ARGV[4] TTL in milliseconds (0 keeps the key persistent);
 // ARGV[5] require assignment ('1'/'0'); ARGV[6] owner id; ARGV[7] owner epoch;
-// ARGV[8] lease token; ARGV[9] now in milliseconds; ARGV[10], optional, the
-// content scope the writer is executing (empty: not compared).
+// ARGV[8] lease token; ARGV[9], optional, the content scope the writer is
+// executing (empty: not compared). No instant is passed: the lease deadline
+// is compared with the server's clock, the one it was minted on.
 //
 // The fence itself is ownership.FenceLua, the same text every fenced script
 // runs; this script only maps its refusals. A moved content scope answers
@@ -120,7 +121,7 @@ return 1
 // when the key vanished, {'CONFLICT', current} when the current bytes differ.
 const compareAndSetByDigestScript = ownership.FenceLua + `
 if #KEYS == 3 then
-  local refusal = fence_refusal(KEYS[2], KEYS[3], ARGV[5], ARGV[6], ARGV[7], ARGV[8], ARGV[10] or '', tonumber(ARGV[9]))
+  local refusal = fence_refusal(KEYS[2], KEYS[3], ARGV[5], ARGV[6], ARGV[7], ARGV[8], ARGV[9] or '', redis_now_ms())
   if refusal == 'CONTENT_MOVED' then return {'CONTENT_MOVED'} end
   if refusal then return {'STALE_OWNER'} end
 end
@@ -141,13 +142,13 @@ return {'APPLIED'}
 
 // FenceGuard is the owner fence one batched write verifies inside Redis. It
 // combines the ownership store's key descriptor with the lease facts the
-// worker was admitted with and the instant the deadline is compared against.
+// worker was admitted with. It carries no instant: the deadline is compared
+// with Redis's own clock inside the script.
 type FenceGuard struct {
 	Keys       ownership.FenceKeys
 	OwnerID    string
 	OwnerEpoch uint64
 	LeaseToken string
-	NowMillis  int64
 	// ContentScope, when set, is the executable view the writer is acting
 	// on; the fence then also refuses an Assignment record that names
 	// another (decision-016). Empty keeps the five comparisons as they were.
@@ -156,7 +157,7 @@ type FenceGuard struct {
 
 func (guard FenceGuard) validate() error {
 	if guard.Keys.OwnershipKey == "" || (guard.Keys.RequireAssignment && guard.Keys.AssignmentKey == "") ||
-		guard.OwnerID == "" || guard.OwnerEpoch == 0 || guard.LeaseToken == "" || guard.NowMillis <= 0 {
+		guard.OwnerID == "" || guard.OwnerEpoch == 0 || guard.LeaseToken == "" {
 		return fmt.Errorf("state: invalid fence guard")
 	}
 	return nil
@@ -248,11 +249,22 @@ func (backend *RedisBackend) Address() string {
 	return backend.address
 }
 
+// Ping is readiness for this backend: the server answers, and it runs the
+// owner fence its batched writes carry (compareAndSetByDigestScript reads
+// TIME and then writes, which not every Redis accepts). The probe names a
+// key of its own that is never created, so it can share a server with the
+// ownership store without touching a key of either.
 func (backend *RedisBackend) Ping(ctx context.Context) error {
 	if backend == nil || backend.client == nil {
 		return fmt.Errorf("state: Redis backend is required")
 	}
-	return backend.client.Ping(ctx).Err()
+	if err := backend.client.Ping(ctx).Err(); err != nil {
+		return err
+	}
+	if _, err := ownership.ProbeFenceClock(ctx, backend.client, "alarmd-state"); err != nil {
+		return fmt.Errorf("state: %w", err)
+	}
+	return nil
 }
 
 func (backend *RedisBackend) MGet(ctx context.Context, keys []string) ([][]byte, error) {
@@ -492,7 +504,7 @@ func (backend *RedisBackend) evalFencedWrites(
 			if guard != nil {
 				keys = append(keys, guard.Keys.AssignmentKey, guard.Keys.OwnershipKey)
 				args = append(args, boolArg(guard.Keys.RequireAssignment), guard.OwnerID,
-					strconv.FormatUint(guard.OwnerEpoch, 10), guard.LeaseToken, guard.NowMillis, guard.ContentScope)
+					strconv.FormatUint(guard.OwnerEpoch, 10), guard.LeaseToken, guard.ContentScope)
 			}
 			if byDigest {
 				pipeline.EvalSha(ctx, compareAndSetByDigestSHA, keys, args...)

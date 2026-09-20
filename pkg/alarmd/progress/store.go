@@ -221,7 +221,7 @@ func (store *Store) BeginSlot(ctx context.Context, request execution.ProgressBeg
 		return execution.ProgressBeginResult{}, err
 	}
 	status, applyErr := store.options.Control.FencedCompareAndSet(ctx, ownership.FencedCASRequest{
-		Fence: request.OwnerFence, At: store.options.Now(), Namespace: name,
+		Fence: request.OwnerFence, Namespace: name,
 		ExpectedMissing: missing, Expected: raw, Value: encoded, TTL: 0,
 	})
 	switch status {
@@ -322,7 +322,7 @@ func (store *Store) CommitProgress(ctx context.Context, request execution.Progre
 		return execution.ProgressCommitResult{}, err
 	}
 	status, applyErr := store.options.Control.FencedCompareAndSet(ctx, ownership.FencedCASRequest{
-		Fence: request.OwnerFence, At: store.options.Now(), Namespace: name,
+		Fence: request.OwnerFence, Namespace: name,
 		ExpectedMissing: missing, Expected: raw, Value: encoded, TTL: 0,
 	})
 	switch status {
@@ -640,7 +640,7 @@ func (store *Store) SkipPrunedRange(ctx context.Context, request execution.Progr
 		return execution.ProgressSkipResult{}, err
 	}
 	status, applyErr := store.options.Control.FencedCompareAndSet(ctx, ownership.FencedCASRequest{
-		Fence: request.OwnerFence, At: store.options.Now(), Namespace: name,
+		Fence: request.OwnerFence, Namespace: name,
 		ExpectedMissing: false, Expected: raw, Value: encoded, TTL: 0,
 	})
 	switch status {

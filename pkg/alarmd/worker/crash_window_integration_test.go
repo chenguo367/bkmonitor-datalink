@@ -93,7 +93,7 @@ func TestG3ACrashWindowChild(t *testing.T) {
 	stateStore, stateBackend := openG3AStateStore(t, os.Getenv(g3aChildRedisAddress), os.Getenv(g3aChildStatePrefix))
 	t.Cleanup(func() { _ = stateBackend.Close() })
 	progressStore := openG3AProgressStore(t, ownerStore, os.Getenv(g3aChildProgressPrefix))
-	admitter, err := ownership.NewAdmitter(ownerStore, g3aActivePlanReader{}, time.Now)
+	admitter, err := ownership.NewAdmitter(ownerStore, g3aActivePlanReader{})
 	if err != nil {
 		t.Fatal(err)
 	}
