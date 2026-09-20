@@ -95,16 +95,12 @@ type AssignmentIndexPublication struct {
 // number lives in the index hash and is incremented server-side, so it
 // stays monotonic across Leaders. Set keys are hashes of round plus
 // content, written before the index field that names that round.
-var publishAssignmentIndexScript = redis.NewScript(`
+var publishAssignmentIndexScript = redis.NewScript(FenceLua + `
 local leader_id = ARGV[1]
 local leader_epoch = ARGV[2]
 local leader_token = ARGV[3]
 local now_ms = tonumber(ARGV[4])
-if redis.call('HGET', KEYS[1], 'execution_disposition') ~= 'ACTIVE' or
-   redis.call('HGET', KEYS[1], 'owner_id') ~= leader_id or
-   redis.call('HGET', KEYS[1], 'owner_epoch') ~= leader_epoch or
-   redis.call('HGET', KEYS[1], 'lease_token') ~= leader_token or
-   tonumber(redis.call('HGET', KEYS[1], 'deadline_ms') or '0') <= now_ms then
+if fence_refusal('', KEYS[1], '0', leader_id, leader_epoch, leader_token, '', now_ms) then
   return {'STALE', 0}
 end
 local ttl_ms = tonumber(ARGV[5])
