@@ -236,6 +236,9 @@ type fleetPublisher struct {
 	// census of the content scope on the Assignment records. Nil on a
 	// follower, like rebalance.
 	assignmentScope func() *fleet.AssignmentScopeFacts
+	// assignmentSweep reports the control leader's last sweep of retired
+	// Assignment records. Nil on a follower.
+	assignmentSweep func() *fleet.AssignmentSweepFacts
 	// platformSettings reports the state of this replica's copy of the
 	// platform's settings. Nil on a bundle that has none.
 	platformSettings func() *fleet.PlatformSettingsFacts
@@ -444,6 +447,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.assignmentScope != nil {
 		snapshot.AssignmentScope = publisher.assignmentScope()
+	}
+	if publisher.assignmentSweep != nil {
+		snapshot.AssignmentSweep = publisher.assignmentSweep()
 	}
 	if publisher.source != nil {
 		snapshot.Source = publisher.source()

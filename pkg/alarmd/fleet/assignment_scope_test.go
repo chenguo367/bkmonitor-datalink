@@ -102,3 +102,36 @@ func TestTheVerdictRouteCarriesTheNewestAssignmentScopeCensus(t *testing.T) {
 		t.Fatalf("assignment_scope present with no leader publishing one: %v", health["assignment_scope"])
 	}
 }
+
+// The sweep reaches the verdict route beside the census, from the newest
+// leader's snapshot: the census counts the round's own Query Groups and never
+// sees a retired record, so "swept and reclaimed six" has to stand next to
+// "2401 of 2401 current" or the six are known to nobody.
+func TestTheVerdictRouteCarriesTheNewestSweepBesideTheCensus(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[0].AssignmentSweep = &AssignmentSweepFacts{At: now.Add(-3 * time.Minute), Result: "success", Scanned: 2401}
+	snapshots[1].AssignmentSweep = &AssignmentSweepFacts{At: now.Add(-time.Minute), Result: "success", Scanned: 2407, Retired: 6, Reclaimed: 6, DurationSeconds: 0.04}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas())
+	_, health := get(t, handler, "/api/health")
+	sweep, _ := health["assignment_sweep"].(map[string]any)
+	if sweep == nil || sweep["result"] != "success" || sweep["scanned"] != 2407.0 || sweep["retired"] != 6.0 || sweep["reclaimed"] != 6.0 {
+		t.Fatalf("assignment_sweep = %v, want the newer leader's sweep", health["assignment_sweep"])
+	}
+	if health["assignment_sweep_replica"] != snapshots[1].Replica {
+		t.Fatalf("assignment_sweep_replica = %v, want %s", health["assignment_sweep_replica"], snapshots[1].Replica)
+	}
+	for index := range snapshots {
+		snapshots[index].AssignmentSweep = nil
+	}
+	handler = handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas())
+	_, health = get(t, handler, "/api/health")
+	if _, present := health["assignment_sweep"]; present {
+		t.Fatalf("assignment_sweep present with no leader publishing one: %v", health["assignment_sweep"])
+	}
+	// The sweep's own identity: every retired record was reclaimed, held or
+	// changed; a nil is not consistent.
+	if !(&AssignmentSweepFacts{Retired: 6, Reclaimed: 4, HeldByLease: 1, Changed: 1}).Consistent() ||
+		(&AssignmentSweepFacts{Retired: 6, Reclaimed: 4}).Consistent() || (*AssignmentSweepFacts)(nil).Consistent() {
+		t.Fatal("Consistent() on the sweep does not check retired == reclaimed + held + changed")
+	}
+}
