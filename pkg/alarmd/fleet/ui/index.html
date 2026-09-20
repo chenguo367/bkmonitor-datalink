@@ -1917,7 +1917,7 @@ function loadGroup(code, groupKey, body) {
     table.appendChild(thead);
     var tbody = document.createElement('tbody');
     var rows = objects.anomalies || [];
-    rows.forEach(function (anomaly) { tbody.appendChild(objectRow(anomaly)); });
+    rows.forEach(function (anomaly) { tbody.appendChild(objectRow(anomaly, code, groupKey)); });
     table.appendChild(tbody);
     body.appendChild(table);
     var total = (objects.page && objects.page.total) || 0;
@@ -1949,7 +1949,7 @@ function loadGroup(code, groupKey, body) {
 
 // One object: the four dimensions as values, where to go, and the evidence one
 // click away. No sentence on the row decides anything; the line above it did.
-function objectRow(anomaly) {
+function objectRow(anomaly, check, group) {
   var tr = document.createElement('tr');
   function cell(t, cls) {
     var td = document.createElement('td');
@@ -2067,6 +2067,13 @@ function objectRow(anomaly) {
   tr.appendChild(td);
   // The evidence, one click away.
   var more = document.createElement('td');
+  var detailLink = document.createElement('a');
+  detailLink.href = BASE + 'api/objects/' + encodeURIComponent(anomaly.query_group)
+    + (check ? '?check=' + encodeURIComponent(check) + '&group=' + encodeURIComponent(group || '') : '');
+  detailLink.textContent = '详情';
+  detailLink.target = '_blank';
+  detailLink.rel = 'noopener';
+  more.appendChild(detailLink);
   var details = document.createElement('details');
   var toggle = document.createElement('summary');
   toggle.textContent = '▸';
@@ -3980,12 +3987,10 @@ function loadRecords(queryGroup) {
       ' 分钟，窗口结束后仍可看一段时间。每轮里按发生顺序排。');
   }).catch(function (e) {
     runsHost.textContent = '';
-    // The detail route says not found when this object is neither in the anomaly
-    // list nor has any recorded output. For this panel that is not a failure --
-    // it is the same answer as an empty list, and showing it as a broken read
-    // sends the reader looking for a problem with the page.
+    // A 404 now means the complete active set excludes this object and no
+    // matching facts or records remain. Unknown membership is a read failure.
     if (e.status === 404) {
-      runsHost.textContent = '窗口开启后这个对象还没有产生记录。它按轮次产生，慢周期对象要等下一轮。';
+      runsHost.textContent = '当前活动集合中没有这个对象，也没有可读的观测记录。';
       return;
     }
     fail('recErr', e);

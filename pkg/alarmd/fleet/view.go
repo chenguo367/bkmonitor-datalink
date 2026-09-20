@@ -1438,9 +1438,13 @@ type WorkerAcknowledgement struct {
 
 // View is the aggregated answer returned to callers.
 type View struct {
-	Health   Health `json:"health"`
-	Expected *int   `json:"expected"`
-	Covered  int    `json:"covered"`
+	// expectation is the already-read authoritative active set. It is kept
+	// off the wire and shared read-only, so detail can distinguish a quiet
+	// active object from an absent one without another control-plane read.
+	expectation Expectation
+	Health      Health `json:"health"`
+	Expected    *int   `json:"expected"`
+	Covered     int    `json:"covered"`
 	// Determined is the subset of Covered whose owning replica has actually
 	// observed a conclusive round. Covered minus Determined is counted into
 	// Unknown, not into health.
@@ -1614,7 +1618,7 @@ type View struct {
 // the denominator locally would make three replicas out of four report full
 // coverage of nothing.
 func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas []string, now time.Time, freshness time.Duration) View {
-	view := View{Health: HealthHealthy, Anomalies: []Anomaly{}, Demoted: []Anomaly{},
+	view := View{expectation: expectation, Health: HealthHealthy, Anomalies: []Anomaly{}, Demoted: []Anomaly{},
 		Undecidable: []Anomaly{}, ByDesign: []Anomaly{},
 		Replicas: []string{}, PerReplica: []ReplicaView{}, Builds: []BuildGroup{}}
 	ownedByReplica := make([]string, 0, len(expectedReplicas))
