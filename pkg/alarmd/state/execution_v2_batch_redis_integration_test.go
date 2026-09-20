@@ -177,25 +177,7 @@ func TestRedisFencedBatchApplyStoresSequentialBytesWithinBoundedRoundTrips(t *te
 		t.Fatalf("fenced apply round trips: pipelines=%d mget=%d eval=%d, want 4 pipelines only", fixture.client.pipelines, fixture.client.mgets, fixture.client.evals)
 	}
 
-	for _, mutation := range mutations {
-		sequentialKey, _ := RuntimeStateKeyV2("sequential", mutation.Identity)
-		batchedKey, _ := RuntimeStateKeyV2("batched", mutation.Identity)
-		want, err := fixture.client.Get(ctx, sequentialKey).Bytes()
-		if err != nil {
-			t.Fatal(err)
-		}
-		got, err := fixture.client.Get(ctx, batchedKey).Bytes()
-		if err != nil {
-			t.Fatal(err)
-		}
-		if string(got) != string(want) {
-			t.Fatalf("stored bytes differ for %s", mutation.Identity.SeriesIdentityDigest)
-		}
-		ttl := fixture.client.PTTL(ctx, batchedKey).Val()
-		if ttl <= 0 || ttl > time.Hour {
-			t.Fatalf("batched TTL = %v", ttl)
-		}
-	}
+	requireMatchingRedisState(t, fixture, mutations, true)
 
 	// Crash between State apply and Progress commit: the replay preflights
 	// again and short-circuits with ALREADY_APPLIED without touching storage.
@@ -378,11 +360,46 @@ func TestRedisRuntimeStateHotModelRoundTrips(t *testing.T) {
 	if fixture.client.mgets != 16 || fixture.client.pipelines != 16 || fixture.client.evals != 0 {
 		t.Fatalf("batched round trips: mget=%d pipelines=%d eval=%d, want 16 + 16", fixture.client.mgets, fixture.client.pipelines, fixture.client.evals)
 	}
+	requireMatchingRedisState(t, fixture, mutations, false)
+}
+
+// Verification reads are batched independently of the measured production
+// calls. Every series still has its exact persisted bytes checked.
+func requireMatchingRedisState(t *testing.T, fixture *redisBatchFixture, mutations []execution.StateMutation, checkTTL bool) {
+	t.Helper()
+	ctx := context.Background()
+	keys := make([]string, 0, 2*len(mutations))
 	for _, mutation := range mutations {
 		sequentialKey, _ := RuntimeStateKeyV2("sequential", mutation.Identity)
 		batchedKey, _ := RuntimeStateKeyV2("batched", mutation.Identity)
-		if fixture.client.Get(ctx, sequentialKey).Val() != fixture.client.Get(ctx, batchedKey).Val() {
-			t.Fatalf("stored bytes differ for %s", mutation.Identity.SeriesIdentityDigest)
+		keys = append(keys, sequentialKey, batchedKey)
+	}
+	values, err := fixture.client.UniversalClient.MGet(ctx, keys...).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, mutation := range mutations {
+		want, got := values[2*index], values[2*index+1]
+		if want == nil || got == nil || got != want {
+			t.Fatalf("stored bytes differ or are missing for %s: sequential=%v batched=%v", mutation.Identity.SeriesIdentityDigest, want, got)
+		}
+	}
+	if !checkTTL {
+		return
+	}
+	ttls := make([]*redis.DurationCmd, len(mutations))
+	_, err = fixture.client.UniversalClient.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+		for index := range mutations {
+			ttls[index] = pipe.PTTL(ctx, keys[2*index+1])
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, reply := range ttls {
+		if ttl := reply.Val(); ttl <= 0 || ttl > time.Hour {
+			t.Fatalf("batched TTL for %s = %v", mutations[index].Identity.SeriesIdentityDigest, ttl)
 		}
 	}
 }
