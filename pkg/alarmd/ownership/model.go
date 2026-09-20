@@ -178,7 +178,9 @@ type AssignmentRecord struct {
 	// ContentScope, and switches to the pending one at EffectiveAt, which is
 	// never earlier than the lease deadline the current holder was renewed
 	// to plus ContentSwitchMargin. Renewal does not extend a lease past it.
-	// Both are zero when no change is pending.
+	// Both are zero when no change is pending. EffectiveAt is on Redis's
+	// clock, as the record holds it (FenceLua); a holder that needs it on
+	// its own clock reads it from the Lease its renewal returned.
 	PendingContentScope string
 	EffectiveAt         time.Time
 }
@@ -226,6 +228,15 @@ func (record AssignmentRecord) Validate() error {
 	return nil
 }
 
+// Lease is what a holder was admitted to, expressed on the holder's own
+// clock. The store mints deadlines on Redis's clock and judges expiry there
+// (FenceLua); what comes back to the holder is the remaining duration, added
+// to the instant the holder passed in when it asked -- an instant from before
+// the round trip, so the holder's deadline is always a little earlier than
+// the server's and never later. Deadline and EffectiveAt are therefore
+// comparable with the holder's clock and with nothing else; the same
+// instants as Redis holds them are on the AssignmentRecord, which stays on
+// Redis's clock.
 type Lease struct {
 	Fence    execution.OwnerFence
 	Deadline time.Time
@@ -233,8 +244,9 @@ type Lease struct {
 	// at the moment it was acquired or renewed, and PendingContentScope /
 	// EffectiveAt the change it will switch to, when one is pending. A
 	// renewal under a pending change is capped at EffectiveAt, which is how
-	// the holder learns it must be on the new content by then. All empty
-	// for the control leader identity, which has no Assignment record.
+	// the holder learns it must be on the new content by then: under the cap
+	// Deadline and EffectiveAt are the same instant. All empty for the
+	// control leader identity, which has no Assignment record.
 	ContentScope        string
 	PendingContentScope string
 	EffectiveAt         time.Time

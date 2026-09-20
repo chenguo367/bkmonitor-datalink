@@ -66,10 +66,13 @@ func TestRedisStorePublishesAssignmentOnlyWithLiveControlLeader(t *testing.T) {
 		t.Fatalf("unchanged assignment advanced versions: before=%+v after=%+v", record, unchanged)
 	}
 
+	// The leader's lease runs out on the server; its next decision is refused
+	// whatever instant the leader itself puts on it.
+	elapseOnRedis(t, store, ControlLeaderIdentity, time.Minute+time.Second)
 	_, err = store.PublishAssignment(
 		context.Background(), authority, AssignmentDecision{
 			QueryGroup: "query-group-2", DesiredWorkerID: worker.WorkerID,
-			ExpectedRecordRevision: 0, PlacementReason: PlacementRendezvous, DecidedAt: now.Add(2 * time.Minute),
+			ExpectedRecordRevision: 0, PlacementReason: PlacementRendezvous, DecidedAt: now.Add(2 * time.Second),
 		},
 	)
 	if !errors.Is(err, ErrStaleFence) {
@@ -176,6 +179,8 @@ func TestRedisStoreLeaseFenceIsMonotonicAndAssignmentBound(t *testing.T) {
 	if err != nil || !renewed.Deadline.Equal(now.Add(90*time.Second)) {
 		t.Fatalf("Renew() = (%+v, %v)", renewed, err)
 	}
+	// The renewed minute passes on the server.
+	elapseOnRedis(t, store, "query-group-1", time.Minute+time.Second)
 	if err := store.CheckFence(context.Background(), renewed.Fence, now.Add(91*time.Second)); !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("CheckFence(expired) error = %v, want ErrStaleFence", err)
 	}
@@ -211,6 +216,7 @@ func TestRedisStoreFencedCASRejectsExpiredSnapshotPublisher(t *testing.T) {
 	if err != nil || result != FencedCASApplied {
 		t.Fatalf("FencedCompareAndSet(first) = (%s, %v)", result, err)
 	}
+	elapseOnRedis(t, store, ControlLeaderIdentity, time.Minute+time.Second)
 	result, err = store.FencedCompareAndSet(context.Background(), FencedCASRequest{
 		Fence: authority.Fence, At: now.Add(2 * time.Minute), Namespace: "snapshot-active",
 		Expected: []byte("snapshot-1"), Value: []byte("snapshot-2"),
@@ -502,7 +508,9 @@ func TestRedisStoreOverlappingOwnersOldWriteIsRefused(t *testing.T) {
 			}
 			return now.Add(11 * time.Second)
 		}},
-		{name: "old worker vanishes and its lease expires", takeover: func(_ *testing.T, _ *RedisStore, _ Lease, now time.Time) time.Time {
+		{name: "old worker vanishes and its lease expires", takeover: func(t *testing.T, store *RedisStore, old Lease, now time.Time) time.Time {
+			t.Helper()
+			elapseOnRedis(t, store, old.Fence.QueryGroup, 61*time.Second)
 			return now.Add(61 * time.Second)
 		}},
 	} {

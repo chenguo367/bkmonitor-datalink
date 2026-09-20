@@ -279,7 +279,7 @@ func TestApplyRuntimePipelinesWitnessedItemsAndStoresSequentialBytes(t *testing.
 	}
 	for _, guard := range batched.guards {
 		if guard == nil || guard.Keys != testFenceKeys() || guard.OwnerID != "worker-1" || guard.OwnerEpoch != 3 ||
-			guard.LeaseToken != "lease-token" || guard.NowMillis != testApplyFence().At.UnixMilli() {
+			guard.LeaseToken != "lease-token" {
 			t.Fatalf("pipeline guard = %+v", guard)
 		}
 	}

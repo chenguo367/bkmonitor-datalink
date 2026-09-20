@@ -5,7 +5,13 @@
 
 package ownership
 
-import "time"
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/go-redis/redis/v8"
+)
 
 // ContentSwitchMargin is how long after the current lease deadline a pending
 // content scope takes effect. It covers the last batch a worker may have
@@ -22,7 +28,20 @@ const ContentSwitchMargin = 5 * time.Second
 // one that then admits a stale owner. decision-016 adds a sixth comparison
 // -- the content scope -- and it is added here once.
 //
-// It defines two functions and nothing else:
+// It defines three functions and nothing else:
+//
+//	redis_now_ms()
+//	    The instant the script is running, in milliseconds, read from the
+//	    server's own clock (TIME). Every deadline a fenced script mints and
+//	    every expiry it judges uses this instant and no other: a lease is
+//	    deadline_ms = redis_now_ms() + ttl when it is granted or renewed, and
+//	    it has lapsed when deadline_ms <= redis_now_ms() at the write. The
+//	    callers' clocks -- a leader's, a worker's -- never reach a comparison,
+//	    so a skewed or stepped clock on either cannot lengthen a lease, and
+//	    two writers racing on one record are judged by the one clock they
+//	    share. The caller is told the server instant in every reply that
+//	    carries a deadline, and keeps only the remaining duration, anchored
+//	    to its own clock from before the round trip.
 //
 //	current_content_scope(assignment_key, now_ms)
 //	    The content scope the assignment record names now. A pending scope
@@ -57,10 +76,18 @@ const ContentSwitchMargin = 5 * time.Second
 // argument shapes and the two record shapes coexist through a rolling
 // restart in either order.
 //
-// The clock is still the caller's now_ms. Judging expiry by the server's own
-// TIME is the next step of the same contract and changes every script and
-// every fake-clock test at once; it is not smuggled in beside a field.
+// TIME is a non-deterministic command. Redis before 5 refused a write after
+// one unless the script had opted into effects replication, and Redis from 5
+// on replicates effects by default; redis.replicate_commands() is that opt-in
+// on the old servers and a no-op that returns true on the new ones, so it is
+// called once at the top and the same text runs on both. ProbeFenceClock
+// verifies at startup that the server this store was given accepts it.
 const FenceLua = `
+redis.replicate_commands()
+local function redis_now_ms()
+  local now = redis.call('TIME')
+  return tonumber(now[1]) * 1000 + math.floor(tonumber(now[2]) / 1000)
+end
 local function current_content_scope(assignment_key, now_ms)
   local fields = redis.call('HMGET', assignment_key, 'content_scope', 'pending_content_scope', 'effective_at_ms')
   local scope = fields[1] or ''
@@ -90,3 +117,38 @@ local function fence_refusal(assignment_key, ownership_key, require_assignment, 
   return nil
 end
 `
+
+// fenceClockProbeLua does the two things every fenced script does, in the
+// order that matters: read TIME, then issue a write command. PEXPIRE on a
+// key that does not exist changes nothing and is still a write to the
+// script engine, so a server that refuses the sequence refuses this without
+// a key being touched. It runs once, at readiness, so it is sent as text.
+const fenceClockProbeLua = FenceLua + `
+redis.call('PEXPIRE', KEYS[1], 1)
+return redis_now_ms()
+`
+
+// FenceClockProber is the one command the probe needs; both Redis-backed
+// stores' clients have it.
+type FenceClockProber interface {
+	Eval(ctx context.Context, script string, keys []string, args ...interface{}) *redis.Cmd
+}
+
+// ProbeFenceClock runs one fence-shaped script on the client and returns
+// the server's clock reading, or a named error when the server will not run
+// the fence at all. It belongs to readiness: a store whose fence cannot run
+// on the Redis it was given is not a store, and the first lease is the wrong
+// place to learn that. The reading is a fact about the server, not a number
+// anything should be corrected by; the fence needs no offset because no
+// caller clock takes part in it.
+func ProbeFenceClock(ctx context.Context, client FenceClockProber, prefix string) (time.Time, error) {
+	if client == nil || prefix == "" {
+		return time.Time{}, fmt.Errorf("alarmd ownership: Redis client and prefix are required")
+	}
+	millis, err := client.Eval(ctx, fenceClockProbeLua, []string{prefix + ":fence-clock-probe"}).Int64()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("alarmd ownership: the owner fence cannot run on this Redis, "+
+			"it reads TIME and then writes (Redis 5 or later, or 3.2 or later with script effects replication): %w", err)
+	}
+	return time.UnixMilli(millis), nil
+}

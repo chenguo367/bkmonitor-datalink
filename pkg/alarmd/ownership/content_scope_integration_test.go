@@ -15,7 +15,10 @@ import (
 // decision-016, batch 1: the Assignment record names the content a lease is
 // admitted to execute, a content change under a live lease waits for that
 // lease's deadline, and the fence compares the scope only for writers that
-// declare one. Every test runs the real scripts against a real server.
+// declare one. Every test runs the real scripts against a real server;
+// deadlines and effective times are on that server's clock, so "the lease
+// lapses" is produced with elapseOnRedis and expected instants are read
+// from what the server holds (redis_clock_test.go).
 
 func publishScope(t *testing.T, store *RedisStore, authority PublicationAuthority, revision uint64, worker, scope string, at time.Time) AssignmentRecord {
 	t.Helper()
@@ -96,9 +99,11 @@ func TestAContentChangeUnderALiveLeaseWaitsForItsDeadline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The change is decided while worker-1 holds a lease to now+60s.
+	// The change is decided while worker-1 holds a lease for a minute; the
+	// effective time is that lease's deadline, as the server holds it, plus
+	// the margin.
+	wantEffective := serverDeadline(t, store, "query-group-1").Add(ContentSwitchMargin)
 	changed := publishScope(t, store, authority, first.RecordRevision, "worker-1", "view-b", now.Add(time.Second))
-	wantEffective := lease.Deadline.Add(ContentSwitchMargin)
 	if changed.ContentScope != "view-a" || changed.PendingContentScope != "view-b" || !changed.EffectiveAt.Equal(wantEffective) {
 		t.Fatalf("record after the change = %+v, want view-a current, view-b pending, effective at %v", changed, wantEffective)
 	}
@@ -106,16 +111,20 @@ func TestAContentChangeUnderALiveLeaseWaitsForItsDeadline(t *testing.T) {
 		t.Fatalf("revision/generation = %d/%d, want revision bumped to %d and generation unchanged at %d",
 			changed.RecordRevision, changed.AssignmentGeneration, first.RecordRevision+1, first.AssignmentGeneration)
 	}
-	// Renewal is capped at the effective time and says why.
-	renewed, err := store.Renew(ctx, lease.Fence, now.Add(10*time.Second), time.Minute)
+	// Renewal is capped at the effective time and says why: two minutes are
+	// asked for, and the lease ends at the effective time instead.
+	renewed, err := store.Renew(ctx, lease.Fence, now.Add(10*time.Second), 2*time.Minute)
 	if err != nil {
 		t.Fatalf("Renew() error = %v", err)
 	}
-	if !renewed.Deadline.Equal(wantEffective) || renewed.ContentScope != "view-a" || renewed.PendingContentScope != "view-b" || !renewed.EffectiveAt.Equal(wantEffective) {
-		t.Fatalf("Renew() under a pending change = %+v, want deadline capped at %v with the pending scope named", renewed, wantEffective)
+	if !renewed.Deadline.Equal(renewed.EffectiveAt) || renewed.ContentScope != "view-a" || renewed.PendingContentScope != "view-b" {
+		t.Fatalf("Renew() under a pending change = %+v, want deadline capped at the effective time with the pending scope named", renewed)
+	}
+	if minted := serverDeadline(t, store, "query-group-1"); !minted.Equal(wantEffective) {
+		t.Fatalf("server deadline after the capped renewal = %v, want the effective time %v", minted, wantEffective)
 	}
 	// Until then the old content is still what the record authorizes.
-	before := wantEffective.Add(-time.Second)
+	before := now.Add(11 * time.Second)
 	if err := store.CheckFenceForContentScope(ctx, lease.Fence, before, "view-a"); err != nil {
 		t.Fatalf("CheckFenceForContentScope(view-a) before the effective time = %v, want valid", err)
 	}
@@ -124,7 +133,8 @@ func TestAContentChangeUnderALiveLeaseWaitsForItsDeadline(t *testing.T) {
 	}
 	// At the effective time the capped lease has run out; the next holder
 	// is admitted to the new content, and the old content is refused.
-	after := wantEffective.Add(time.Second)
+	elapseOnRedis(t, store, "query-group-1", time.Minute+ContentSwitchMargin+time.Second)
+	after := now.Add(time.Minute + ContentSwitchMargin + time.Second)
 	if _, err := store.Renew(ctx, lease.Fence, after, time.Minute); !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("Renew() past the capped deadline = %v, want ErrStaleFence", err)
 	}
@@ -162,12 +172,11 @@ func TestAContentChangeWithNoHolderIsWrittenDirectly(t *testing.T) {
 		t.Fatalf("record with no holder = %+v, want view-b written directly with the revision bumped", changed)
 	}
 	// A lease that has lapsed is no holder either.
-	lease, err := store.Acquire(ctx, "query-group-1", "worker-1", now.Add(2*time.Second), time.Minute)
-	if err != nil {
+	if _, err := store.Acquire(ctx, "query-group-1", "worker-1", now.Add(2*time.Second), time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	lapsed := lease.Deadline.Add(time.Second)
-	direct := publishScope(t, store, authority, changed.RecordRevision, "worker-1", "view-c", lapsed)
+	elapseOnRedis(t, store, "query-group-1", time.Minute+time.Second)
+	direct := publishScope(t, store, authority, changed.RecordRevision, "worker-1", "view-c", now.Add(63*time.Second))
 	if direct.ContentScope != "view-c" || direct.ContentChangePending() {
 		t.Fatalf("record after a lapsed lease = %+v, want view-c written directly", direct)
 	}
@@ -284,9 +293,10 @@ func TestTheFirstScopeUnderALiveLeaseIsPendingAndBindsNothingYet(t *testing.T) {
 	if err != nil || lease.ContentScope != "" {
 		t.Fatalf("Acquire() before any scope = (%+v, %v)", lease, err)
 	}
+	wantEffective := serverDeadline(t, store, "query-group-1").Add(ContentSwitchMargin)
 	named := publishScope(t, store, authority, first.RecordRevision, "worker-1", "view-a", now.Add(time.Second))
-	if named.ContentScope != "" || named.PendingContentScope != "view-a" || !named.EffectiveAt.Equal(lease.Deadline.Add(ContentSwitchMargin)) {
-		t.Fatalf("first scope under a live lease = %+v, want it pending until the lease deadline plus the margin", named)
+	if named.ContentScope != "" || named.PendingContentScope != "view-a" || !named.EffectiveAt.Equal(wantEffective) {
+		t.Fatalf("first scope under a live lease = %+v, want it pending until the lease deadline plus the margin, %v", named, wantEffective)
 	}
 	before := now.Add(30 * time.Second)
 	for _, declared := range []string{"view-a", "view-anything-else"} {
@@ -295,11 +305,15 @@ func TestTheFirstScopeUnderALiveLeaseIsPendingAndBindsNothingYet(t *testing.T) {
 		}
 	}
 	// A renewal that would reach past the effective time is capped there.
-	renewed, err := store.Renew(ctx, lease.Fence, now.Add(10*time.Second), time.Minute)
-	if err != nil || !renewed.Deadline.Equal(named.EffectiveAt) || renewed.PendingContentScope != "view-a" {
-		t.Fatalf("Renew() = (%+v, %v), want the cap at %v and the pending scope named", renewed, err, named.EffectiveAt)
+	renewed, err := store.Renew(ctx, lease.Fence, now.Add(10*time.Second), 2*time.Minute)
+	if err != nil || !renewed.Deadline.Equal(renewed.EffectiveAt) || renewed.PendingContentScope != "view-a" {
+		t.Fatalf("Renew() = (%+v, %v), want the cap at the effective time and the pending scope named", renewed, err)
 	}
-	after := named.EffectiveAt.Add(time.Second)
+	if minted := serverDeadline(t, store, "query-group-1"); !minted.Equal(wantEffective) {
+		t.Fatalf("server deadline after the capped renewal = %v, want the effective time %v", minted, wantEffective)
+	}
+	elapseOnRedis(t, store, "query-group-1", time.Minute+ContentSwitchMargin+time.Second)
+	after := now.Add(time.Minute + ContentSwitchMargin + time.Second)
 	next, err := store.Acquire(ctx, "query-group-1", "worker-1", after, time.Minute)
 	if err != nil || next.ContentScope != "view-a" {
 		t.Fatalf("Acquire() after the first scope took effect = (%+v, %v), want view-a", next, err)
@@ -330,7 +344,8 @@ func TestADeadLeaseWithAMovedScopeIsReportedAsTheLeaseNotTheScope(t *testing.T) 
 	}
 	// The lease lapses; the leader, seeing no live holder, moves the scope
 	// directly.
-	lapsed := lease.Deadline.Add(time.Second)
+	elapseOnRedis(t, store, "query-group-1", time.Minute+time.Second)
+	lapsed := now.Add(time.Minute + time.Second)
 	moved := publishScope(t, store, authority, first.RecordRevision, "worker-1", "view-b", lapsed)
 	if moved.ContentScope != "view-b" || moved.ContentChangePending() {
 		t.Fatalf("record after the lapse = %+v, want view-b written directly", moved)

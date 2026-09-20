@@ -308,7 +308,7 @@ func (store *ExecutionStore) ApplyRuntimeFenced(
 		return store.applyRuntime(ctx, request, nil)
 	}
 	guard := &FenceGuard{Keys: store.options.FenceKeys.FenceKeys(fence.Fence.QueryGroup), OwnerID: fence.Fence.OwnerID,
-		OwnerEpoch: fence.Fence.OwnerEpoch, LeaseToken: fence.Fence.LeaseToken, NowMillis: fence.At.UnixMilli(), ContentScope: fence.ContentScope}
+		OwnerEpoch: fence.Fence.OwnerEpoch, LeaseToken: fence.Fence.LeaseToken, ContentScope: fence.ContentScope}
 	if err := guard.validate(); err != nil {
 		return execution.StateApplyResult{}, err
 	}
