@@ -33,11 +33,20 @@ const ContentSwitchMargin = 5 * time.Second
 //
 //	fence_refusal(assignment_key, ownership_key, require_assignment,
 //	              owner_id, epoch, token, content_scope, now_ms)
-//	    nil when the fence holds, otherwise why it does not: NOT_DESIRED when
-//	    the assignment names another worker, CONTENT_MOVED when the caller
-//	    declared a content scope and the record names a different one, STALE
+//	    nil when the fence holds, otherwise why it does not, decided in this
+//	    order: NOT_DESIRED when the assignment names another worker; STALE
 //	    for a lease that is paused, belongs to someone else, carries another
-//	    epoch or token, or has passed its deadline.
+//	    epoch or token, or has passed its deadline; CONTENT_MOVED, last, when
+//	    the lease holds but the caller declared a content scope and the
+//	    record names a different one.
+//
+//	    The order is the meaning. CONTENT_MOVED is read by every caller as
+//	    "the lease is good, the view is behind, re-read" -- it is kept out of
+//	    IsLeaseDecision for exactly that -- so it may only be said once the
+//	    lease has actually been found good. A worker whose lease lapsed
+//	    while the leader, seeing no live holder, wrote a new scope directly
+//	    would otherwise come back with CONTENT_MOVED in hand, keep the Query
+//	    Group and re-read, and the lost lease would never be reported.
 //
 // The content scope comparison is optional on both sides on purpose. A
 // caller that passes an empty scope -- every binary built before this field
@@ -68,16 +77,16 @@ local function fence_refusal(assignment_key, ownership_key, require_assignment, 
   if require_assignment == '1' then
     local desired = redis.call('HGET', assignment_key, 'desired_worker_id')
     if not desired or desired ~= owner_id then return 'NOT_DESIRED' end
-    if content_scope and content_scope ~= '' then
-      local named = current_content_scope(assignment_key, now_ms)
-      if named ~= '' and named ~= content_scope then return 'CONTENT_MOVED' end
-    end
   end
   if redis.call('HGET', ownership_key, 'execution_disposition') ~= 'ACTIVE' then return 'STALE' end
   if redis.call('HGET', ownership_key, 'owner_id') ~= owner_id or
      redis.call('HGET', ownership_key, 'owner_epoch') ~= epoch or
      redis.call('HGET', ownership_key, 'lease_token') ~= token or
      tonumber(redis.call('HGET', ownership_key, 'deadline_ms') or '0') <= now_ms then return 'STALE' end
+  if require_assignment == '1' and content_scope and content_scope ~= '' then
+    local named = current_content_scope(assignment_key, now_ms)
+    if named ~= '' and named ~= content_scope then return 'CONTENT_MOVED' end
+  end
   return nil
 end
 `

@@ -961,8 +961,13 @@ return 'RELEASED'
 // there is nobody to protect from it, or the old holder is already refused
 // by desired_worker_id. A pending change written twice with the same scope is
 // left alone; a different scope replaces it and never moves effective_at_ms
-// earlier. Every write of a scope bumps record_revision, so a CAS reader sees
-// it; assignment_generation counts changes of desired worker only.
+// earlier. Every scope the leader decides here bumps record_revision, so a
+// CAS reader sees the decision; assignment_generation counts changes of
+// desired worker only. The promotion of a pending scope when its time comes
+// (current_content_scope, run by whichever script reads the record next)
+// does not bump it: that is the record settling a decision already
+// revisioned, not a new one, and bumping there would fail the leader's own
+// CAS against a revision it read moments ago.
 //
 // Replies are ten elements: desired worker, generation, revision, control
 // epoch, reason, assigned_at, query group, content scope, pending scope,

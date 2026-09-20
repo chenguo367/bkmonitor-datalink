@@ -63,17 +63,32 @@ func TestRedisFencedBatchApplyRefusesAMovedContentScopeByName(t *testing.T) {
 	cases := []struct {
 		name  string
 		scope string
+		at    time.Time
 		moved bool
+		stale bool
 	}{
-		{name: "no scope declared keeps the old fence", scope: "", moved: false},
-		{name: "the named scope is admitted", scope: "view-a", moved: false},
-		{name: "another scope is refused", scope: "view-b", moved: true},
+		{name: "no scope declared keeps the old fence", scope: "", at: at},
+		{name: "the named scope is admitted", scope: "view-a", at: at},
+		{name: "another scope is refused", scope: "view-b", at: at, moved: true},
+		// Both false at once: the lease has run out and the scope is not
+		// the record's. The lease wins -- CONTENT_MOVED means "the lease
+		// is good", and here it is not.
+		{name: "a dead lease with a moved scope is stale, not moved", scope: "view-b", at: lease.Deadline.Add(time.Second), stale: true},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			loadInStreamBatches(t, store, preflightItems(mutations))
-			result, err := store.ApplyRuntimeFenced(ctx, request, execution.StateApplyFence{Fence: fixture.fence, At: at, ContentScope: test.scope})
+			result, err := store.ApplyRuntimeFenced(ctx, request, execution.StateApplyFence{Fence: fixture.fence, At: test.at, ContentScope: test.scope})
 			exists := fixture.client.Exists(ctx, keys...).Val()
+			if test.stale {
+				if !errors.Is(err, ownership.ErrStaleFence) || len(result.Items) != 0 || exists != 0 {
+					t.Fatalf("dead-lease apply = (%+v, %v) exists=%d, want ErrStaleFence and no keys", result, err, exists)
+				}
+				if errors.Is(err, ownership.ErrContentScopeMoved) {
+					t.Fatal("a dead lease was reported as a moved scope; the lost lease would go unreported")
+				}
+				return
+			}
 			if test.moved {
 				if !errors.Is(err, ownership.ErrContentScopeMoved) || len(result.Items) != 0 || exists != 0 {
 					t.Fatalf("moved-scope apply = (%+v, %v) exists=%d, want ErrContentScopeMoved and no keys", result, err, exists)

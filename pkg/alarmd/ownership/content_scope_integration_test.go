@@ -308,3 +308,68 @@ func TestTheFirstScopeUnderALiveLeaseIsPendingAndBindsNothingYet(t *testing.T) {
 		t.Fatalf("a declared scope against the now-named record = %v, want ErrContentScopeMoved", err)
 	}
 }
+
+// Both conditions false at once: the lease is gone and the scope has moved.
+// The answer has to be the lease, because CONTENT_MOVED is read everywhere
+// as "the lease is good, re-read" and is kept out of IsLeaseDecision for
+// that reason. This is the reachable production shape: worker-1's lease
+// lapses, the leader sees no live holder and writes the new scope directly,
+// and worker-1 comes back with a dead lease and the old scope in hand.
+func TestADeadLeaseWithAMovedScopeIsReportedAsTheLeaseNotTheScope(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	now := time.UnixMilli(1_700_000_000_000)
+	authority, err := store.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := publishScope(t, store, authority, 0, "worker-1", "view-a", now)
+	lease, err := store.Acquire(ctx, "query-group-1", "worker-1", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The lease lapses; the leader, seeing no live holder, moves the scope
+	// directly.
+	lapsed := lease.Deadline.Add(time.Second)
+	moved := publishScope(t, store, authority, first.RecordRevision, "worker-1", "view-b", lapsed)
+	if moved.ContentScope != "view-b" || moved.ContentChangePending() {
+		t.Fatalf("record after the lapse = %+v, want view-b written directly", moved)
+	}
+	for _, declared := range []string{"view-a", "view-b", ""} {
+		err := store.CheckFenceForContentScope(ctx, lease.Fence, lapsed, declared)
+		if !errors.Is(err, ErrStaleFence) {
+			t.Fatalf("dead lease, declared %q: CheckFenceForContentScope() = %v, want ErrStaleFence", declared, err)
+		}
+		if errors.Is(err, ErrContentScopeMoved) {
+			t.Fatalf("dead lease, declared %q: reported as a moved scope; the lost lease would go unreported", declared)
+		}
+	}
+	status, err := store.FencedCompareAndSet(ctx, FencedCASRequest{
+		Fence: lease.Fence, At: lapsed, Namespace: "progress", ExpectedMissing: true, Value: []byte("p1"), ContentScope: "view-a",
+	})
+	if status != FencedCASStaleOwner || !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("FencedCompareAndSet() on a dead lease with a moved scope = (%s, %v), want STALE_OWNER", status, err)
+	}
+	// The same with the lease held by someone else: worker-2 is desired now
+	// and holds it; worker-1's old fence with the old scope is STALE by the
+	// lease, not moved by the scope -- and NOT_DESIRED comes before both.
+	next, err := store.Acquire(ctx, "query-group-1", "worker-1", lapsed, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, lapsed.Add(time.Second), "view-a"); !errors.Is(err, ErrStaleFence) {
+		t.Fatalf("superseded epoch with a moved scope: CheckFenceForContentScope() = %v, want ErrStaleFence", err)
+	}
+	if err := store.CheckFenceForContentScope(ctx, next.Fence, lapsed.Add(time.Second), "view-a"); !errors.Is(err, ErrContentScopeMoved) {
+		t.Fatalf("live lease with a moved scope: CheckFenceForContentScope() = %v, want ErrContentScopeMoved", err)
+	}
+	if _, err := store.PublishAssignment(ctx, authority, AssignmentDecision{
+		QueryGroup: "query-group-1", DesiredWorkerID: "worker-2", ExpectedRecordRevision: moved.RecordRevision,
+		PlacementReason: PlacementRendezvous, DecidedAt: lapsed.Add(2 * time.Second), ContentScope: "view-c",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.CheckFenceForContentScope(ctx, next.Fence, lapsed.Add(3*time.Second), "view-b"); !errors.Is(err, ErrNotDesired) {
+		t.Fatalf("not desired with a moved scope: CheckFenceForContentScope() = %v, want ErrNotDesired", err)
+	}
+}
