@@ -25,6 +25,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
@@ -1323,6 +1324,12 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// cannot start the contract, and one that reads them from a fallback
 	// would name content the fleet is not executing.
 	ContentScopes func(context.Context) (map[execution.QueryGroupIdentity]string, error)
+	// ViewStream and ViewSource are decision-016's view stream: the round
+	// hands the stream the desired set it arrived at, built from what the
+	// source says the fleet executes. Both nil is a runtime without the
+	// stream, which every round tolerates.
+	ViewStream *viewstream.Server
+	ViewSource viewSource
 }
 
 type productionPhaseTwoOwnership struct {
@@ -1526,6 +1533,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	}
 	runtime.publishAssignmentIndex(ctx, authority, owners, workers, at)
 	runtime.sweepRetiredAssignments(ctx, authority, ordered)
+	runtime.publishView(ctx, authority, records, owners)
 	return nil
 }
 
@@ -2233,6 +2241,7 @@ func (runtime *productionPhaseTwoOwnership) clearControlAuthority(authority owne
 	defer runtime.mu.Unlock()
 	if runtime.authority.Fence == authority.Fence {
 		runtime.authority = ownership.PublicationAuthority{}
+		runtime.viewStepDown()
 	}
 }
 
@@ -2301,6 +2310,7 @@ func (runtime *productionPhaseTwoOwnership) ensureControlAuthority(
 		return ownership.PublicationAuthority{}, err
 	}
 	runtime.authority = authority
+	runtime.viewLead(authority.Fence.OwnerEpoch)
 	return authority, nil
 }
 

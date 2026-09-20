@@ -212,6 +212,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.DispatchTurnaway; f != nil {
 		attributes = append(attributes, slog.Any("dispatch_turnaway", f))
 	}
+	if f := observation.ViewStream; f != nil {
+		attributes = append(attributes, slog.Any("view_stream", f))
+	}
 	if f := observation.StateAlreadyApplied; f != nil && !f.Empty() {
 		for key, count := range f.Counts {
 			attributes = append(attributes, slog.Int64("state_already_applied_"+string(key.Site)+"_"+string(key.Kind), count))
@@ -765,6 +768,10 @@ func mandatoryLogStage(stage Stage) bool {
 		return true
 	case StageSnapshotRefreshed, StageSnapshotUnavailable, StageAssignmentAcquired, StageAssignmentLost,
 		StageTakeoverStarted, StageTakeoverCompleted:
+		return true
+	case StageAssignmentSwept, StageViewPublished, StageViewSession:
+		// Once per term, or once per Worker per connection: rare, and the
+		// only account there is of what happened. Never budgeted away.
 		return true
 	case StageSourceWithheld:
 		// Outside the repeated-line budget, and it has to be. That budget is

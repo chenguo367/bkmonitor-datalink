@@ -331,6 +331,14 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_dispatch_rotation_total":                      "variableLabels: {result}",
 		"bkmonitor_alarmd_local_view_object_bytes":                      "variableLabels: {kind}",
 		"bkmonitor_alarmd_local_view_query_groups":                      "variableLabels: {}",
+		"bkmonitor_alarmd_view_stream_leading":                          "variableLabels: {}",
+		"bkmonitor_alarmd_view_revision":                                "variableLabels: {}",
+		"bkmonitor_alarmd_view_stream_sessions":                         "variableLabels: {}",
+		"bkmonitor_alarmd_view_version_receivers":                       "variableLabels: {stage}",
+		"bkmonitor_alarmd_view_receipts_ignored_total":                  "variableLabels: {reason}",
+		"bkmonitor_alarmd_view_publications_total":                      "variableLabels: {result}",
+		"bkmonitor_alarmd_view_messages_sent_total":                     "variableLabels: {kind}",
+		"bkmonitor_alarmd_view_stream_refusals_total":                   "variableLabels: {}",
 		"bkmonitor_alarmd_dispatch_walk_total":                          "variableLabels: {result}",
 		"bkmonitor_alarmd_due_index_audit_overshoot_seconds":            "variableLabels: {cooldown}",
 		"bkmonitor_alarmd_schedule_prune_skipped_total":                 "variableLabels: {reason}",
@@ -773,6 +781,17 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// always present, zeros for an idle Worker.
 		fqName("local_view_object_bytes"): 2,
 		fqName("local_view_query_groups"): 1,
+		// The Leader's view stream: five stages, four ignore reasons, two
+		// publication results, three message kinds, and four single gauges
+		// or counters; all closed lists.
+		fqName("view_stream_leading"):         1,
+		fqName("view_revision"):               1,
+		fqName("view_stream_sessions"):        1,
+		fqName("view_version_receivers"):      5,
+		fqName("view_receipts_ignored_total"): 4,
+		fqName("view_publications_total"):     2,
+		fqName("view_messages_sent_total"):    3,
+		fqName("view_stream_refusals_total"):  1,
 		// Audited dispatches only -- one Query Group per generation -- which is
 		// why it is its own metric and not a cell on due_index_prediction_total,
 		// whose four cells mix a sampled population with a full one.

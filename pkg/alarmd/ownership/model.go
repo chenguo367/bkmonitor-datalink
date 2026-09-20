@@ -71,6 +71,15 @@ type WorkerRegistration struct {
 	// registration written by a binary from before it, which declares
 	// nothing -- the answer a rollout needs.
 	Capabilities []string `json:"capabilities,omitempty"`
+	// Endpoint is where this worker's control stream is served (host:port
+	// of its HTTP listener; the stream shares it), and StreamToken the
+	// secret a Worker opening a stream to this worker as Leader must
+	// present -- written by the worker into its own registration, so the
+	// registry is the trust root (decision-016). Both are absent from a
+	// registration written by a binary from before the stream, which
+	// neither serves nor joins it. The token is never logged.
+	Endpoint    string `json:"endpoint,omitempty"`
+	StreamToken string `json:"stream_token,omitempty"`
 	// Applied and Load are the worker's acknowledgement and occupancy as of
 	// this heartbeat. Both are optional: a registration written by a worker
 	// that does not report them decodes with nil, which a reader takes as
@@ -149,6 +158,14 @@ func (worker WorkerRegistration) Validate() error {
 		return errors.New("alarmd ownership: invalid dependency status")
 	}
 	return worker.Load.validate()
+}
+
+// ControlLeader is who holds the control leader lease, as the lease hash
+// names it: the worker id and the term. Read by a Worker looking for the
+// Leader's stream endpoint; the lease token is not part of it.
+type ControlLeader struct {
+	OwnerID    string
+	OwnerEpoch uint64
 }
 
 // CapabilityContentScope is the decision-016 content contract: a worker
