@@ -189,6 +189,14 @@ var failureFacets = map[string]facets{
 	// by name.
 	"ACTIVATION_MISSING": {StageConfig, ClassUnavailable, DependencyRedis},
 
+	// This deployment refusing its own output before any broker saw it: the
+	// converter would not represent the decision (its content), or the client
+	// would not send the record (its wiring, such as a protocol too old for
+	// the record's headers). Neither is Kafka's doing; both used to land on
+	// OUTPUT_ACK_UNKNOWN and send the reader to a Kafka that was up.
+	"OUTPUT_CONVERSION_REJECTED": {StageCommit, ClassContract, DependencyNone},
+	"OUTPUT_CLIENT_REJECTED":     {StageCommit, ClassConfig, DependencyNone},
+
 	// This deployment in conflict with what it persisted.
 	"STATE_CORRUPT":              {StageCommit, ClassContract, DependencyNone},
 	"STATE_SCHEMA_UNSUPPORTED":   {StageCommit, ClassContract, DependencyNone},

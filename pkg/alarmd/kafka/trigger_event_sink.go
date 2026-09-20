@@ -60,10 +60,115 @@ func (sink *TriggerEventSink) ConfigureLegacyOutput(converter LegacyEventConvert
 	return nil
 }
 
-// triggerEventDependencyError marks a conversion dependency or broker write whose ACK
-// failed or is unknown. Encoding and local lifecycle errors remain ordinary.
+// triggerEventDependencyError marks a broker write whose ACK failed or is
+// unknown: the message may or may not have landed, and only a replay of the
+// same event identity settles it. It is the only error from WriteBatch that
+// a caller should retry. What this process decides on its own -- a decision
+// the converter will not write, a message the client refuses before any
+// broker sees it -- is an OutputRejectedError, never this: it used to be
+// wrapped here too, and a deployment whose output was refused by its own
+// client for want of a protocol version read as a Kafka that was down,
+// retried every round, and committed no progress. Encoding and local
+// lifecycle errors remain ordinary.
 type triggerEventDependencyError struct {
 	err error
+}
+
+// OutputRejectedError is a decision this process will not write, decided
+// here and not at a broker. Reason is the completion code the Slot names
+// (contract.ReasonOutputConversionRejected or ReasonOutputClientRejected),
+// Detail the sentence that says why, from the converter or the client, and
+// the identities say which decision. It does not mark
+// RetryableOutputDependency on purpose: the same decision meets the same
+// refusal on every retry, so a caller finishes the Plan by this name
+// instead of waiting for a broker that was never asked.
+type OutputRejectedError struct {
+	Reason     string
+	Detail     string
+	EventID    string
+	StrategyID string
+	BusinessID string
+	Format     string
+}
+
+func (err *OutputRejectedError) Error() string {
+	if err == nil {
+		return "kafka trigger event sink: output rejected"
+	}
+	return fmt.Sprintf("kafka trigger event sink: %s: %s (event %s, strategy %s, business %s, format %s)",
+		err.Reason, err.Detail, err.EventID, err.StrategyID, err.BusinessID, err.Format)
+}
+
+// OutputRejectionReason is how a caller tells this apart from every other
+// error without importing the type: the reason it names.
+func (err *OutputRejectedError) OutputRejectionReason() string {
+	if err == nil {
+		return ""
+	}
+	return err.Reason
+}
+
+func outputRejected(reason, detail, format string, event *contract.TriggerEventV1) *OutputRejectedError {
+	rejected := &OutputRejectedError{Reason: reason, Detail: detail, Format: format}
+	if event != nil {
+		rejected.EventID = event.EventID
+		rejected.BusinessID = event.BusinessID
+		rejected.StrategyID = event.PlanRef.StrategyID
+	}
+	return rejected
+}
+
+// clientRejection reports whether a producer error is the client refusing
+// the message itself, before any network: Sarama returns a ConfigurationError
+// for a record it cannot encode on the configured protocol (headers before
+// 0.11) and ErrMessageSizeTooLarge for one over its own cap. A batch counts
+// as client-rejected only when every failed message in it was; one broker
+// failure among them keeps the whole batch a dependency failure, since the
+// others may have landed or not.
+func clientRejection(err error) (string, bool) {
+	var batch sarama.ProducerErrors
+	if errors.As(err, &batch) {
+		if len(batch) == 0 {
+			return "", false
+		}
+		details := make([]string, 0, len(batch))
+		for _, failure := range batch {
+			if failure == nil {
+				return "", false
+			}
+			detail, rejected := oneClientRejection(failure.Err)
+			if !rejected {
+				return "", false
+			}
+			details = append(details, detail)
+		}
+		return strings.Join(uniqueStrings(details), "; "), true
+	}
+	return oneClientRejection(err)
+}
+
+func oneClientRejection(err error) (string, bool) {
+	var configuration sarama.ConfigurationError
+	if errors.As(err, &configuration) {
+		return string(configuration), true
+	}
+	if errors.Is(err, sarama.ErrMessageSizeTooLarge) {
+		return sarama.ErrMessageSizeTooLarge.Error(), true
+	}
+	return "", false
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	unique := values[:0]
+	for _, value := range values {
+		if _, done := seen[value]; done {
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique
 }
 
 func (err *triggerEventDependencyError) Error() string {
@@ -190,7 +295,7 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 		if format == contract.WireFormatStandardRawEvent {
 			converted, convertErr := sink.standardConverter.Convert(&events[index])
 			if convertErr != nil {
-				return &triggerEventDependencyError{err: convertErr}
+				return outputRejected(contract.ReasonOutputConversionRejected, convertErr.Error(), format, &events[index])
 			}
 			// Keyed by the alert identity, so one alert's history stays on one
 			// partition and its trigger and its resolution arrive in order.
@@ -234,17 +339,25 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 		}
 		converted, err := sink.legacyConverter.ConvertBatch(ctx, batch)
 		if err != nil {
-			return &triggerEventDependencyError{err: fmt.Errorf("legacy conversion failed: %w", err)}
+			// The legacy converter writes its snapshot store on the way, and
+			// says so when that is what failed (legacyoutput.SnapshotStoreError
+			// marks RetryableOutputDependency); a cancelled context is the
+			// caller's. Everything else is the converter's own answer about
+			// these events, which it gives again on every retry.
+			if ctx.Err() != nil || isRetryableDependency(err) {
+				return &triggerEventDependencyError{err: fmt.Errorf("legacy conversion failed: %w", err)}
+			}
+			return outputRejected(contract.ReasonOutputConversionRejected, "legacy conversion failed: "+err.Error(), contract.WireFormatPythonCompatible, &batch[0])
 		}
 		if len(converted) != len(batch) {
-			return &triggerEventDependencyError{err: errors.New("legacy conversion result count mismatch")}
+			return outputRejected(contract.ReasonOutputConversionRejected, "legacy conversion result count mismatch", contract.WireFormatPythonCompatible, &batch[0])
 		}
 		for i, item := range converted {
 			if item.EventID != batch[i].EventID || len(item.Payload) == 0 || len(item.Payload) > sink.maxLegacyBytes || !json.Valid(item.Payload) || len(item.DedupeMD5) != 32 || strings.ToLower(item.DedupeMD5) != item.DedupeMD5 {
-				return &triggerEventDependencyError{err: errors.New("legacy conversion returned invalid event identity/payload")}
+				return outputRejected(contract.ReasonOutputConversionRejected, "legacy conversion returned invalid event identity/payload", contract.WireFormatPythonCompatible, &batch[i])
 			}
 			if _, err := hex.DecodeString(item.DedupeMD5); err != nil {
-				return &triggerEventDependencyError{err: err}
+				return outputRejected(contract.ReasonOutputConversionRejected, "legacy conversion returned a non-hex dedupe identity: "+err.Error(), contract.WireFormatPythonCompatible, &batch[i])
 			}
 			messages[indices[i]] = &sarama.ProducerMessage{Topic: sink.legacyTopic, Key: sarama.StringEncoder(item.DedupeMD5), Value: sarama.ByteEncoder(item.Payload)}
 		}
@@ -264,9 +377,27 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 		if errors.Is(err, ErrDecisionSinkClosed) || ctx.Err() != nil {
 			return publishErr
 		}
+		if detail, rejected := clientRejection(err); rejected {
+			// The client, not a broker: nothing was sent and nothing will
+			// be by retrying. Named for the first event of the batch; the
+			// detail is the client's own sentence.
+			return outputRejected(contract.ReasonOutputClientRejected, detail, string(contract.ResolveOutputWireFormat(events[0].WireFormat, eventRevision(events[0]))), &events[0])
+		}
 		return &triggerEventDependencyError{err: publishErr}
 	}
 	return nil
+}
+
+func isRetryableDependency(err error) bool {
+	var dependency interface{ RetryableOutputDependency() }
+	return errors.As(err, &dependency) && dependency != nil
+}
+
+func eventRevision(event contract.TriggerEventV1) int64 {
+	if event.StrategyRef == nil {
+		return 0
+	}
+	return event.StrategyRef.Revision
 }
 
 func (sink *TriggerEventSink) Shutdown(ctx context.Context) error {

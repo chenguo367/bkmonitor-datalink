@@ -133,12 +133,17 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// One Slot's own State, Event or Gap output exceeds the per-Slot cap the
 	// process can ever apply; the Slot completes deterministically. The code
 	// is observation-only: Progress records the coverage completion reason.
-	ReasonSlotBudgetExceeded:     {ReasonSlotBudgetExceeded, ReasonClassCoverage, ReasonDomainObservation},
-	ReasonOutputACKUnknown:       {ReasonOutputACKUnknown, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonStateWriteRetryable:    {ReasonStateWriteRetryable, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonStateCorrupt:           {ReasonStateCorrupt, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
-	ReasonStateSchemaUnsupported: {ReasonStateSchemaUnsupported, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
-	ReasonStateBudgetExceeded:    {ReasonStateBudgetExceeded, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonSlotBudgetExceeded: {ReasonSlotBudgetExceeded, ReasonClassCoverage, ReasonDomainObservation},
+	ReasonOutputACKUnknown:   {ReasonOutputACKUnknown, ReasonClassRetryable, ReasonDomainObservation},
+	// Deterministic output refusals decided in this process (see the codes):
+	// they name a Slot's terminal completion, so they are receipt as well as
+	// observation reasons, like the deterministic State refusals below.
+	ReasonOutputConversionRejected: {ReasonOutputConversionRejected, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonOutputClientRejected:     {ReasonOutputClientRejected, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonStateWriteRetryable:      {ReasonStateWriteRetryable, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonStateCorrupt:             {ReasonStateCorrupt, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonStateSchemaUnsupported:   {ReasonStateSchemaUnsupported, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
+	ReasonStateBudgetExceeded:      {ReasonStateBudgetExceeded, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	// Ownership refusals. A stale fence, an assignment naming another worker
 	// and a moved content scope are facts about the store the same attempt
 	// would meet again; a lease held by another owner is the one that a later

@@ -427,6 +427,15 @@ var codeChecks = map[string]verdict{
 	// deployment's store is keeping what it is given.
 	"ACTIVATION_MISSING": lands(CheckDependencyDown),
 
+	// This deployment refused its own output before a broker was asked: the
+	// converter would not write the decision, or the Kafka client would not
+	// send the record on the protocol it is built with. Both are decided from
+	// this process's own content and wiring, and a retry decides them the
+	// same way; the Plan completes by the name each round until the strategy
+	// or the deployment changes.
+	"OUTPUT_CONVERSION_REJECTED": lands(CheckDefect),
+	"OUTPUT_CLIENT_REJECTED":     lands(CheckDefect),
+
 	// What this deployment persisted cannot be read back as written. Retrying
 	// reads the same bytes.
 	"STATE_CORRUPT":            lands(CheckDefect),

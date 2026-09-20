@@ -893,7 +893,12 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	})
 	stateIndex := indexStatePreflight(loadedState)
 	var retryPendingReason execution.ReasonCode
-	var stateAdmissionTerminalReason execution.ReasonCode
+	// The first deterministic refusal that ends a Plan by name: a State
+	// admission that will not take its writes, or an output the sink will not
+	// write. Either finishes the Slot as TERMINAL with that name; the other
+	// Plans run, and Progress advances by the rule every terminal completion
+	// follows. Neither waits on anything, so neither is retried.
+	var deterministicTerminalReason execution.ReasonCode
 	// One reading per Slot rather than per Plan: the question is how many of
 	// this Slot's keys were read and not written, and a Plan is not a
 	// population anyone reads that against.
@@ -1038,8 +1043,8 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			events := make([]contract.TriggerEventV1, 0)
 			for index, mutation := range mutations {
 				if reason, terminal := rejected[mutation.Identity]; terminal {
-					if stateAdmissionTerminalReason == "" {
-						stateAdmissionTerminalReason = reason
+					if deterministicTerminalReason == "" {
+						deterministicTerminalReason = reason
 					}
 					continue
 				}
@@ -1049,6 +1054,20 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			}
 			sortTriggerEvents(events)
 			if err := coordinator.writeEvents(ctx, request.Operation, events); err != nil {
+				if reason, rejected := outputRejectionReason(err); rejected {
+					// Decided in this process, from this Plan's own decisions
+					// or this deployment's own client: the same events meet
+					// the same refusal on every retry. This Plan's State is
+					// not applied, because its output was not written and
+					// State follows the ACK; the Slot completes by the name,
+					// the sibling Plans go on, and Progress moves past it.
+					// Retrying instead would report a Kafka that is up as
+					// down, every round, and commit nothing.
+					if deterministicTerminalReason == "" {
+						deterministicTerminalReason = reason
+					}
+					continue
+				}
 				if !isRetryableOutputDependency(err) {
 					return execution.SlotExecutionResult{}, err
 				}
@@ -1129,10 +1148,10 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		completion.Result = evaluated.Result
 		completion.ReasonCode = evaluated.ReasonCode
 	}
-	if stateAdmissionTerminalReason != "" {
+	if deterministicTerminalReason != "" {
 		completion.Kind = execution.CompletionTerminal
 		completion.Result = observability.ResultTerminal
-		completion.ReasonCode = stateAdmissionTerminalReason
+		completion.ReasonCode = deterministicTerminalReason
 		// A terminal Slot is no longer an unavailable one, so whatever the
 		// traversal was about to say is now about a completion that did not
 		// happen. deriveCompletion reports no cause for TERMINAL for the same
@@ -1366,6 +1385,9 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		if isRetryableOutputDependency(err) {
 			reason = execution.ReasonCode(contract.ReasonOutputACKUnknown)
 		}
+		if rejection, rejected := outputRejectionReason(err); rejected {
+			reason = rejection
+		}
 	}
 	coordinator.observeWithCounts(ctx, observability.ComponentOutput, observability.StageEventACKed, operation, started,
 		"", reason, observability.Counts{Events: int64(len(events))}, err)
@@ -1387,6 +1409,23 @@ func isRetryableOutputDependency(err error) bool {
 	}
 	var dependencyErr interface{ RetryableOutputDependency() }
 	return errors.As(err, &dependencyErr) && dependencyErr != nil
+}
+
+// outputRejectionReason reports whether the sink refused to write the events
+// on its own account -- the converter would not represent them, or the client
+// refused them before any broker -- and the reason it names for the Slot's
+// completion (kafka.OutputRejectedError). Such an error is checked before the
+// dependency marker on purpose: it never carries that marker, and a sink that
+// gave it both would have a reader retry a refusal.
+func outputRejectionReason(err error) (execution.ReasonCode, bool) {
+	if err == nil {
+		return "", false
+	}
+	var rejection interface{ OutputRejectionReason() string }
+	if !errors.As(err, &rejection) || rejection == nil || rejection.OutputRejectionReason() == "" {
+		return "", false
+	}
+	return execution.ReasonCode(rejection.OutputRejectionReason()), true
 }
 
 // admitState admits one Plan's mutations in Store-sized chunks. It returns the
