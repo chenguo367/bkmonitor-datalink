@@ -164,6 +164,20 @@ func TestTheRefusalNamerAgreesWithTheGateConditionByCondition(t *testing.T) {
 			observability.RangeGateNoRangeFlight},
 		{"every condition holds, so the namer must not invent one", true, progress(nextSlot, false), flight, nextSlot,
 			observability.RangeGateUnexplained},
+		// Order, not just membership. The gate is one short-circuiting
+		// expression, so "which condition refused it" is only meaningful as
+		// "the first false one in the order the gate writes them" -- and a
+		// namer that checks the same five in a different order still returns
+		// a true statement about the round while blaming the wrong thing.
+		// Every pair below has two conditions false at once.
+		{"a moved cursor is blamed before a held Slot", true, progress(nextSlot+15, true), flight, nextSlot,
+			observability.RangeGateNextSlotMoved},
+		{"a held Slot is blamed before a missing flight", true, progress(nextSlot, true), context.Background(), nextSlot,
+			observability.RangeGateUnfinishedSlotPresent},
+		{"a missing Progress is blamed before a missing flight", true, execution.ProgressLoadResult{},
+			context.Background(), nextSlot, observability.RangeGateProgressMissing},
+		{"creation disabled is blamed before all of them", false, execution.ProgressLoadResult{},
+			context.Background(), nextSlot, observability.RangeGateCreationDisabled},
 	} {
 		source := &ProductionSlotSource{expiredRangeEnabled: testCase.enabled, queryGroup: queryGroup}
 		got := rangeGateRefusal(source, testCase.load, testCase.nextSlot, testCase.ctx, queryGroup)
