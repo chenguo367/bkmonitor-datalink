@@ -37,7 +37,8 @@ const noDataPresentAsOf = int64(1000)
 func noDataMutationV2(t *testing.T, expected uint64, groups ...execution.NoDataGroupMemory) execution.PlanNoDataMutation {
 	t.Helper()
 	return noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
-		Identity: noDataIdentityV2(), ExpectedMarkerRevision: expected, ApplyVersion: applyVersion(),
+		DerivedFrom: execution.NoDataRepresentationPerGroup,
+		Identity:    noDataIdentityV2(), ExpectedMarkerRevision: expected, ApplyVersion: applyVersion(),
 		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
 		PresentAsOf: noDataPresentAsOf, Memory: groups,
 	})
@@ -243,7 +244,8 @@ func TestNoDataApplyConflictsOnAStaleMarkerRevision(t *testing.T) {
 	// A second writer that still believes the record does not exist. Its apply
 	// version differs, so this is the marker check rather than the version one.
 	stale := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
-		Identity: noDataIdentityV2(), ExpectedMarkerRevision: 0,
+		DerivedFrom: execution.NoDataRepresentationPerGroup,
+		Identity:    noDataIdentityV2(), ExpectedMarkerRevision: 0,
 		ApplyVersion: execution.ApplyVersion{
 			StateApplyEpoch: applyVersion().StateApplyEpoch + 1,
 			EvaluationTime:  applyVersion().EvaluationTime + 60,

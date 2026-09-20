@@ -89,7 +89,12 @@ func NoDataMemoryReadable(schema NoDataMemorySchema) bool {
 // caller fills in separately eventually do, and the disagreement is a memory
 // that reads as already applied while holding something else.
 type PlanNoDataMemoryUpdate struct {
-	Identity               PlanNoDataIdentity
+	Identity PlanNoDataIdentity
+	// DerivedFrom is which record Loaded and ExpectedMarkerRevision came out
+	// of. See PlanNoDataMutation.DerivedFrom: it decides both whether the
+	// expected revision means anything to the record being written and whether
+	// the statement is a delta or the whole memory.
+	DerivedFrom            NoDataRepresentation
 	ExpectedMarkerRevision uint64
 	ApplyVersion           ApplyVersion
 	ScheduleRevision       PlanScheduleRevision
@@ -155,12 +160,22 @@ func BuildPlanNoDataMutation(update PlanNoDataMemoryUpdate) (PlanNoDataMutation,
 	mutation := PlanNoDataMutation{
 		Identity:               update.Identity,
 		SchemaVersion:          WrittenNoDataMemorySchema,
+		DerivedFrom:            update.DerivedFrom,
 		ExpectedMarkerRevision: update.ExpectedMarkerRevision,
 		ApplyVersion:           update.ApplyVersion,
 		ScheduleRevision:       update.ScheduleRevision,
 		RosterVersion:          update.RosterVersion,
 		PresentAsOf:            update.PresentAsOf,
 		GroupCount:             uint32(len(memory)),
+	}
+	if mutation.ReplacesWholeRecord() {
+		// Nothing to take a difference against. What was loaded describes
+		// another record -- the whole-memory one, or no record at all -- so the
+		// statement carries every group and the store replaces what it holds.
+		// Taking the difference anyway is the shape of the defect this guards:
+		// the groups that did not change since the blob would be left out, and
+		// the per-group record would be written holding only the ones that did.
+		loaded = nil
 	}
 	mutation.Set, mutation.Del = noDataMemoryDelta(memory, update.PresentAsOf, loaded, update.LoadedPresentAsOf)
 	memoryDigest, err := derivePlanNoDataMemoryDigest(mutation, memory)
@@ -213,6 +228,7 @@ func derivePlanNoDataStatementDigest(mutation PlanNoDataMutation) (MutationDiges
 	digest, err := contract.DeriveCanonicalDigestV2("alarmd-plan-no-data-statement-v2", struct {
 		Identity               PlanNoDataIdentity   `json:"identity"`
 		SchemaVersion          NoDataMemorySchema   `json:"schema_version"`
+		DerivedFrom            NoDataRepresentation `json:"derived_from"`
 		ExpectedMarkerRevision uint64               `json:"expected_marker_revision"`
 		ApplyVersion           ApplyVersion         `json:"apply_version"`
 		ScheduleRevision       PlanScheduleRevision `json:"schedule_revision"`
@@ -223,7 +239,8 @@ func derivePlanNoDataStatementDigest(mutation PlanNoDataMutation) (MutationDiges
 		Set                    []NoDataGroupDelta   `json:"set"`
 		Del                    []string             `json:"del"`
 	}{
-		mutation.Identity, mutation.SchemaVersion, mutation.ExpectedMarkerRevision, mutation.ApplyVersion,
+		mutation.Identity, mutation.SchemaVersion, mutation.DerivedFrom, mutation.ExpectedMarkerRevision,
+		mutation.ApplyVersion,
 		mutation.ScheduleRevision, mutation.RosterVersion, mutation.PresentAsOf, mutation.MemoryDigest,
 		mutation.GroupCount, mutation.Set, mutation.Del,
 	})
@@ -241,6 +258,21 @@ func (mutation PlanNoDataMutation) validateStatement() error {
 	if mutation.SchemaVersion != WrittenNoDataMemorySchema {
 		return fmt.Errorf("alarmd execution: Plan no-data mutation schema %d is not writable by this build",
 			mutation.SchemaVersion)
+	}
+	switch mutation.DerivedFrom {
+	case NoDataRepresentationNone, NoDataRepresentationWholeMemory, NoDataRepresentationPerGroup:
+	default:
+		// Not defaulted to the per-group value. That default would make an
+		// unset field mean "this is a delta against the stored record", which
+		// is the one reading that silently drops groups, and it would make the
+		// field's absence indistinguishable from a caller that meant it.
+		return fmt.Errorf(
+			"alarmd execution: Plan no-data mutation does not say which record it was derived from (%q)",
+			mutation.DerivedFrom)
+	}
+	if mutation.ReplacesWholeRecord() && len(mutation.Del) != 0 {
+		return errors.New(
+			"alarmd execution: a Plan no-data mutation that replaces the record has nothing to delete from it")
 	}
 	if mutation.RosterVersion == "" {
 		return errors.New("alarmd execution: Plan no-data mutation requires the roster version it was decided against")

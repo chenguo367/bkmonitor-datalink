@@ -100,6 +100,17 @@ type NoDataConflictFacts struct {
 	// nobody can act on.
 	Persisted MutationDigest
 	Proposed  MutationDigest
+	// ExpectedRevision is the revision the statement was derived against and
+	// StoredRevision the one the record holds. They are carried on every
+	// conflict, not only the ones about revisions: a reader looking at a wall
+	// of refusals needs to see whether the two are far apart, equal, or one of
+	// them zero, and that answer separates a race between writers from a
+	// statement derived against another record entirely.
+	ExpectedRevision uint64
+	StoredRevision   uint64
+	// DerivedFrom is the record the statement was built from, which is the one
+	// fact that tells a rollout apart from a race.
+	DerivedFrom NoDataRepresentation
 }
 
 // NoDataRepresentation names which stored shape a memory was read from.
@@ -246,11 +257,16 @@ type NoDataMemorySnapshot struct {
 	// write goes through -- and the difference is exactly what decides whether
 	// the cleanup may run.
 	Representation NoDataRepresentation
-	// PresentAsOf is the round the record says the Plan last had data in. A v1
-	// record does not hold one and reads as zero, which is right rather than
-	// missing: every group in a v1 record carries its own last-seen time, so
-	// nothing in it was compressed against a round and nothing is lost. The
-	// first v2 write after reading one simply writes each group out in full.
+	// PresentAsOf is the round the record says the Plan last had data in.
+	//
+	// A v1 record does not hold the field, and reading it as zero was wrong. It
+	// is not a record of a Plan that has never had data -- every group in it
+	// carries a last-seen time -- and zero is the one value that contradicts
+	// them all: the memory invariant is that no group was last seen after the
+	// Plan last had data, so a v1 record with any group in it failed to derive
+	// a mutation at all, on every round where nothing reported. It is derived
+	// instead, as the newest last-seen time the record holds, which is what the
+	// field means and what the v2 record would have stored.
 	PresentAsOf int64
 	Groups      []NoDataGroupMemory
 	ReasonCode  ReasonCode
@@ -299,9 +315,15 @@ func (result NoDataLoadResult) Find(identity PlanNoDataIdentity) (NoDataMemorySn
 }
 
 func noDataSnapshotHasPayload(snapshot NoDataMemorySnapshot) bool {
+	// The representation is not payload when it says NONE. It is the answer to
+	// "which record did this come from" for a snapshot that came from no
+	// record, and every snapshot carries it: the writer has to know which
+	// record a statement was derived from, and a field left empty for the
+	// no-record case gives that reader two spellings for one answer.
+	namesARecord := snapshot.Representation != "" && snapshot.Representation != NoDataRepresentationNone
 	return snapshot.MarkerRevision != 0 || snapshot.PersistedMutationDigest != "" ||
 		snapshot.PersistedApplyVersion != (ApplyVersion{}) || snapshot.LastScheduleRevision != "" ||
-		snapshot.RosterVersion != "" || snapshot.PresentAsOf != 0 || snapshot.Representation != "" ||
+		snapshot.RosterVersion != "" || snapshot.PresentAsOf != 0 || namesARecord ||
 		len(snapshot.Groups) != 0
 }
 

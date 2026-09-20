@@ -30,7 +30,11 @@ func (store *refusingNoDataStore) LoadNoData(
 	result := execution.NoDataLoadResult{Items: make([]execution.NoDataMemorySnapshot, len(request.Items))}
 	for index, item := range request.Items {
 		result.Items[index] = execution.NoDataMemorySnapshot{
+			// NONE rather than an unset field: the store stamps it, and a
+			// double that leaves it empty is standing in for a snapshot the
+			// store cannot produce.
 			Identity: item.Identity, Status: execution.NoDataMemoryMissing,
+			Representation: execution.NoDataRepresentationNone,
 		}
 	}
 	return result, nil
@@ -63,6 +67,7 @@ func noDataRefusalFixture(store *refusingNoDataStore) (*SlotExecutionCoordinator
 func refusedMemoryMutation(t *testing.T) execution.PlanNoDataMutation {
 	t.Helper()
 	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMemoryUpdate{
+		DerivedFrom: execution.NoDataRepresentationPerGroup,
 		Identity: execution.PlanNoDataIdentity{
 			Plan:            execution.PlanIdentity{TenantID: "tenant", BusinessID: "10", StrategyID: "8946"},
 			StateGeneration: "generation",

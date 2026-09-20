@@ -20,6 +20,7 @@ func noDataApplyVersion() ApplyVersion {
 // than deltas.
 func noDataUpdate(groups ...NoDataGroupMemory) PlanNoDataMemoryUpdate {
 	return PlanNoDataMemoryUpdate{
+		DerivedFrom: NoDataRepresentationPerGroup,
 		Identity: PlanNoDataIdentity{
 			Plan:            PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"},
 			StateGeneration: "generation-1",
@@ -311,6 +312,7 @@ func TestAGroupLastSeenBeforeThisRoundIsNotStoredAsPresent(t *testing.T) {
 // round - the cost this representation exists to remove.
 func TestAGroupStillPresentIsNotWrittenAgain(t *testing.T) {
 	update := PlanNoDataMemoryUpdate{
+		DerivedFrom: NoDataRepresentationPerGroup,
 		Identity: PlanNoDataIdentity{
 			Plan:            PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"},
 			StateGeneration: "generation-1",

@@ -82,9 +82,25 @@ func (store *ExecutionStore) loadOneNoData(
 	blob := store.loadOneNoDataBlob(ctx, request, item)
 	hash, renewal, consulted := store.loadOneNoDataHash(ctx, request, item)
 	if !consulted {
-		return blob, renewal
+		return representationStamped(blob), renewal
 	}
-	return newerNoDataMemory(blob, hash), renewal
+	return representationStamped(newerNoDataMemory(blob, hash)), renewal
+}
+
+// representationStamped gives every snapshot a representation, including the
+// ones that read no record.
+//
+// NONE is a value, not an absence, and it is stamped here rather than filled in
+// by each reader. It had been left empty and normalised at the one place that
+// counted it, which left every other reader holding a field with two spellings
+// for "no record" -- and the write path, which has to know which record a
+// statement was derived from, was the reader that could not tell the difference
+// between "no record" and "nobody said".
+func representationStamped(snapshot execution.NoDataMemorySnapshot) execution.NoDataMemorySnapshot {
+	if snapshot.Representation == "" {
+		snapshot.Representation = execution.NoDataRepresentationNone
+	}
+	return snapshot
 }
 
 // newerNoDataMemory picks between the two representations a Plan may have
@@ -311,8 +327,32 @@ func decodeNoData(raw []byte, identity execution.PlanNoDataIdentity) execution.N
 		PersistedApplyVersion: envelope.ApplyVersion, PersistedMutationDigest: envelope.MutationDigest,
 		Status: execution.NoDataMemoryFound, SchemaVersion: envelope.Version,
 		LastScheduleRevision: envelope.ScheduleRevision, RosterVersion: envelope.RosterVersion,
-		Groups: envelope.Groups,
+		Groups: envelope.Groups, PresentAsOf: wholeMemoryPresentAsOf(envelope.Groups),
 	}
+}
+
+// wholeMemoryPresentAsOf is the round a whole-memory record says the Plan last
+// had data in.
+//
+// The record has no such field -- it was added with the per-group shape, which
+// needs it to store a present group as one byte -- so it is derived from what
+// the record does hold. The newest last-seen time in it is the answer by
+// definition: a group's last-seen time is a round the Plan had data in, and
+// there is no later one to be found anywhere in the record.
+//
+// Reading the absent field as zero instead is what stopped every v1 Plan from
+// writing. Zero is not "no information"; it is the assertion that the Plan has
+// never had data, and it contradicts every group in the record. The derivation
+// then refused its own memory -- no group may be last seen after the Plan last
+// had data -- and the Plan kept evaluating while remembering nothing new.
+func wholeMemoryPresentAsOf(groups []execution.NoDataGroupMemory) int64 {
+	var newest int64
+	for _, group := range groups {
+		if group.LastSeen > newest {
+			newest = group.LastSeen
+		}
+	}
+	return newest
 }
 
 // ApplyNoData replaces one Plan's whole no-data memory per request item.
@@ -351,10 +391,13 @@ func (store *ExecutionStore) applyOneNoData(
 		return item
 	}
 	conflict := func(kind execution.StateVersionConflictKind, persisted execution.MutationDigest,
+		storedRevision uint64,
 	) execution.NoDataApplyItemResult {
 		item.Status = execution.NoDataConflict
 		item.Conflict = &execution.NoDataConflictFacts{
 			Kind: kind, Persisted: persisted, Proposed: mutation.MemoryDigest,
+			ExpectedRevision: mutation.ExpectedMarkerRevision, StoredRevision: storedRevision,
+			DerivedFrom: mutation.DerivedFrom,
 		}
 		return item
 	}
@@ -393,6 +436,11 @@ func (store *ExecutionStore) applyOneNoData(
 	if readErr != nil {
 		return retry()
 	}
+	// The revision this write leaves behind, counted on this record's own line.
+	// A first write to it starts at one whatever the statement was derived
+	// from: the whole-memory record's revisions are its own and carrying one
+	// over would claim a history this record does not have.
+	nextRevision := uint64(1)
 	if expectedHeader != nil {
 		previous, _, _ := decodeNoDataHashHeader(expectedHeader, mutation.Identity)
 		switch previous.Status {
@@ -420,24 +468,30 @@ func (store *ExecutionStore) applyOneNoData(
 			// is, and it lasts one window: the next round carries a newer
 			// apply version and passes on its own.
 			return conflict(execution.StateVersionConflictSameVersionOtherStatement,
-				previous.PersistedMutationDigest)
+				previous.PersistedMutationDigest, previous.MarkerRevision)
 		}
-		if previous.MarkerRevision != mutation.ExpectedMarkerRevision {
+		// A revision belongs to the record that issued it. Only a statement
+		// derived from this record has one to expect of it -- the two
+		// representations keep separate revision lines, and comparing one
+		// against the other refused every write in a fleet that was still
+		// moving off the whole-memory record.
+		if !mutation.ReplacesWholeRecord() && previous.MarkerRevision != mutation.ExpectedMarkerRevision {
 			// A delta is only meaningful against the revision it was derived
 			// from, so this is a conflict rather than something to reconcile.
 			kind := execution.StateVersionConflictRevisionMoved
 			if previous.MarkerRevision < mutation.ExpectedMarkerRevision {
 				kind = execution.StateVersionConflictRevisionReset
 			}
-			return conflict(kind, previous.PersistedMutationDigest)
+			return conflict(kind, previous.PersistedMutationDigest, previous.MarkerRevision)
 		}
-	} else if mutation.ExpectedMarkerRevision != 0 {
+		nextRevision = previous.MarkerRevision + 1
+	} else if mutation.ExpectedMarkerRevision != 0 && !mutation.ReplacesWholeRecord() {
 		// The caller read a record that is no longer there.
-		return conflict(execution.StateVersionConflictMissing, "")
+		return conflict(execution.StateVersionConflictMissing, "", 0)
 	}
 	header, encodeErr := json.Marshal(noDataHashHeader{
 		Schema: executionNoDataSchema, Version: mutation.SchemaVersion, Identity: mutation.Identity,
-		MarkerRevision: mutation.ExpectedMarkerRevision + 1, ApplyVersion: mutation.ApplyVersion,
+		MarkerRevision: nextRevision, ApplyVersion: mutation.ApplyVersion,
 		MemoryDigest: mutation.MemoryDigest, ScheduleRevision: mutation.ScheduleRevision,
 		RosterVersion: mutation.RosterVersion, PresentAsOf: mutation.PresentAsOf,
 	})
@@ -452,6 +506,11 @@ func (store *ExecutionStore) applyOneNoData(
 		Key: key, HeaderField: noDataHeaderField,
 		ExpectedMissing: expectedHeader == nil, Header: header,
 		Set: set, Del: deleted,
+		// A statement derived from another record carries the whole memory, so
+		// what this one holds goes first. Leaving it would keep every group the
+		// other record has since dropped, and no reader could tell the mixture
+		// from a memory somebody wrote.
+		Replace: mutation.ReplacesWholeRecord(),
 		// The floor, for the same reason a gap marker takes it: the load renews
 		// to whatever this Plan needs, and this only has to keep the key from
 		// being born without a lifetime at all.
@@ -468,7 +527,8 @@ func (store *ExecutionStore) applyOneNoData(
 		// Something wrote between the read above and this call. The header it
 		// left is classified exactly as a fresh read would classify it, so the
 		// answer does not depend on which of the two paths saw it.
-		return conflict(raceConflictKind(outcome.Current, mutation), currentMemoryDigest(outcome.Current))
+		return conflict(raceConflictKind(outcome.Current, mutation), currentMemoryDigest(outcome.Current),
+			currentMarkerRevision(outcome.Current))
 	default:
 		item.Status = execution.NoDataApplied
 	}
@@ -508,4 +568,17 @@ func currentMemoryDigest(current []byte) execution.MutationDigest {
 		return ""
 	}
 	return header.MemoryDigest
+}
+
+// currentMarkerRevision is the revision the record holds, for the conflict line
+// to compare against the one the statement expected. A header nobody can decode
+// reports zero, which is the same thing the absence of a record reports: both
+// mean this build cannot name a revision, and neither is a revision anybody
+// wrote.
+func currentMarkerRevision(current []byte) uint64 {
+	var header noDataHashHeader
+	if err := json.Unmarshal(current, &header); err != nil {
+		return 0
+	}
+	return header.MarkerRevision
 }

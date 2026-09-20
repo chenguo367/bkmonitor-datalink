@@ -123,7 +123,12 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 		return slot, nil
 	}
 	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMemoryUpdate{
-		Identity:               input.Identity,
+		Identity: input.Identity,
+		// Which record the revision and the loaded groups below came out of.
+		// Without it the statement claims to be a delta against the per-group
+		// record whatever it was actually derived from, and a Plan still on
+		// the whole-memory record can never write one.
+		DerivedFrom:            input.Snapshot.Representation,
 		ExpectedMarkerRevision: input.Snapshot.MarkerRevision,
 		ApplyVersion:           input.ApplyVersion,
 		ScheduleRevision:       input.ScheduleRevision,

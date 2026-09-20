@@ -322,6 +322,26 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("no_data_memory_outcome", facts.Outcome),
 			slog.Bool("no_data_memory_stored", facts.Stored),
 		)
+		if facts.DerivedFrom != "" {
+			attributes = append(attributes, slog.String("no_data_memory_derived_from", facts.DerivedFrom))
+		}
+		if conflict := facts.Conflict; conflict != nil {
+			// Which comparison failed and both sides of it. A conflict carries
+			// no reason code -- it is not a rejection -- so without these the
+			// line says the write was refused and nothing about why, which is
+			// what a fleet-wide refusal looked like for a day.
+			attributes = append(attributes,
+				slog.String("no_data_memory_conflict", conflict.Kind),
+				slog.Uint64("no_data_memory_expected_revision", conflict.ExpectedRevision),
+				slog.Uint64("no_data_memory_stored_revision", conflict.StoredRevision),
+			)
+			if conflict.Persisted != "" || conflict.Proposed != "" {
+				attributes = append(attributes,
+					slog.String("no_data_memory_persisted_digest", conflict.Persisted),
+					slog.String("no_data_memory_proposed_digest", conflict.Proposed),
+				)
+			}
+		}
 	}
 	if facts := observation.NoDataMemoryRefusal; facts != nil {
 		attributes = append(attributes, slog.String("no_data_memory_refusal", facts.Reason))

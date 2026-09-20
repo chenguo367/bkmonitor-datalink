@@ -74,6 +74,10 @@ type HashDeltaWrite struct {
 	// written one at a time would otherwise outlive the generation it belongs
 	// to, since only the key carries a lifetime.
 	TTL time.Duration
+	// Replace says Set is the whole record rather than a difference from it,
+	// so whatever the key holds is removed first. The header guard above still
+	// applies: a replace proves it read the record it is replacing.
+	Replace bool
 }
 
 type HashField struct {
@@ -101,7 +105,16 @@ type HashDeltaOutcome struct {
 // KEYS[1] the hash key. ARGV[1] header field name; ARGV[2] expected missing
 // ('1'/'0'); ARGV[3] SHA-1 hex of the expected header; ARGV[4] the new header;
 // ARGV[5] TTL in milliseconds (0 leaves the lifetime alone); ARGV[6] how many
-// field/value pairs follow; then that many pairs, then the fields to delete.
+// field/value pairs follow; ARGV[7] replace the whole record ('1'/'0'); then
+// that many pairs, then the fields to delete.
+//
+// Replace exists because a statement can be derived from a record other than
+// this one -- the whole-memory record a Plan has not yet moved off -- and such
+// a statement carries the entire memory rather than a difference. Applying it
+// on top of what the hash already holds would leave behind every group the
+// other record no longer has, which is not a memory anybody wrote. The delete
+// is inside the same script as the writes, so no reader ever sees the record
+// empty.
 //
 // Replies: {'APPLIED'}, or {'CONFLICT'} / {'CONFLICT', header}.
 //
@@ -117,8 +130,11 @@ else
   if not header then return {'CONFLICT'} end
   if redis.sha1hex(header) ~= ARGV[3] then return {'CONFLICT', header} end
 end
+if ARGV[7] == '1' then
+  redis.call('DEL', KEYS[1])
+end
 local pairs_count = tonumber(ARGV[6])
-local first = 7
+local first = 8
 local last = first + pairs_count * 2 - 1
 local chunk = 256
 local index = first
@@ -191,9 +207,9 @@ func (backend *RedisBackend) ApplyHashDelta(
 	if backend == nil || backend.client == nil {
 		return HashDeltaOutcome{}, fmt.Errorf("state: redis backend is not configured")
 	}
-	args := make([]interface{}, 0, 6+len(write.Set)*2+len(write.Del))
+	args := make([]interface{}, 0, 7+len(write.Set)*2+len(write.Del))
 	args = append(args, write.HeaderField, boolArg(write.ExpectedMissing), write.ExpectedDigest,
-		write.Header, write.TTL.Milliseconds(), len(write.Set))
+		write.Header, write.TTL.Milliseconds(), len(write.Set), boolArg(write.Replace))
 	for _, field := range write.Set {
 		args = append(args, field.Name, field.Value)
 	}
