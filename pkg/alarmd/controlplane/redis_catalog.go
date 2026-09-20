@@ -115,6 +115,9 @@ type RedisCatalogRepository struct {
 	contentMemo     publishedContentMemo
 	objectCache     *objectReadCache
 	objectFlights   objectReadFlights
+	// localView is what this Worker holds by content for the Query Groups it
+	// owns, sized from the bytes it read. See local_view.go.
+	localView localView
 	// manifestCache and latestPublication bound the two reads the per-Slot
 	// Segment freshness check makes. See segment_freshness_cache.go.
 	manifestCache              catalogManifestCache

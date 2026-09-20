@@ -327,7 +327,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			}
 			if !ok {
 				var obj QueryGroupObject
-				if cachedObject, hit := d.repository.objectCache.lookup(d.repository.queryGroupObjectKey(ref.ObjectDigest)); hit {
+				if cachedObject, _, hit := d.repository.objectCache.lookup(d.repository.queryGroupObjectKey(ref.ObjectDigest)); hit {
 					obj = cachedObject.(storedQueryGroupObject).object
 					err = nil
 				} else {
@@ -558,7 +558,7 @@ func (d *ObservationDirectory) EffectiveOutput(ctx context.Context, row Strategy
 	}
 	key := d.repository.outputContextKey(row.OutputContext)
 	var object OutputContextObject
-	if cached, hit := d.repository.objectCache.lookup(key); hit {
+	if cached, _, hit := d.repository.objectCache.lookup(key); hit {
 		object, hit = cached.(OutputContextObject)
 		if !hit {
 			return OutputFormatFacts{Reason: OutputContextCorrupt, OutputContextDigest: row.OutputContext}
