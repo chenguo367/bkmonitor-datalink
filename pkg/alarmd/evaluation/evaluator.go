@@ -47,6 +47,17 @@ func (e *Evaluator) Evaluate(ctx context.Context, request execution.EvaluationRe
 	case execution.PlanDecided:
 	case execution.PlanDecidedDegraded, execution.PlanUnavailable, execution.PlanReadinessGap:
 		result.Result, result.ReasonCode = observability.ResultDegraded, plan.ReasonCode
+		// A Plan degraded by a Level that ended TERMINAL reports TERMINAL in
+		// the aggregate, whatever its disposition says. That is the contract's
+		// rule and not a second opinion about it: a localized terminal outcome
+		// sets the expected aggregate to TERMINAL there, and a Plan reporting
+		// DEGRADED beside one was refused for disagreeing with itself.
+		for _, outcome := range plan.LevelOutcomes {
+			if outcome.Outcome == execution.LevelOutcomeTerminal {
+				result.Result = observability.Result(observability.ResultTerminal)
+				break
+			}
+		}
 	case execution.PlanTerminal:
 		result.Result, result.ReasonCode = observability.ResultTerminal, plan.ReasonCode
 	case execution.PlanRetryPending:
@@ -483,10 +494,27 @@ func (e *Evaluator) evaluateSeries(
 	// request rather than only its header.
 	legacy := execution.EvaluationRequest{Header: header, Inputs: inputs, State: stateResult, Gaps: gaps, OpenAlerts: openAlerts}
 	result := execution.PlanEvaluationResult{Plan: due.Identity, Disposition: execution.PlanDecided, ReasonCode: observability.ReasonNone}
+	// What the loads decide, before anything is evaluated. A load that failed
+	// or is terminal settles the Plan's disposition on its own; the outcome
+	// fold at the end only speaks when they did not.
+	loaded := dispositionFromLoads(view, gaps, due)
+	if loaded.decided {
+		result.Disposition, result.ReasonCode = loaded.disposition, loaded.reason
+	}
 	var final *execution.StateEvaluation
 	var events []contract.TriggerEventV1
 	var affected []execution.RecordAnchor
 	for _, record := range primaryRecords {
+		if loaded.constrains {
+			// The Plan's own gap marker could not be read, or is terminal. The
+			// guard state this round would be judged against is unknown, so
+			// every series is held where it is and nothing is written: a State
+			// advance decided without knowing the guard is the one write that
+			// cannot be taken back.
+			result.LevelOutcomes = append(result.LevelOutcomes,
+				constrainedOutcomes(due, record, first.SeriesIdentity, loaded.outcome, loaded.reason)...)
+			continue
+		}
 		one, runErr := e.evaluateRecordWith(ctx, legacy, due, record, view, converged, func() ([]detect.LevelFact, []detect.ProjectedValue, error) {
 			facts, projected, _, detectErr := e.detect.EvaluatePreparedSeriesRecord(ctx, prepared, ordered, record)
 			return facts, projected, detectErr
@@ -520,13 +548,99 @@ func (e *Evaluator) evaluateSeries(
 	} else if gapMutation != nil {
 		result.GuardAfterState = []execution.PlanGapMutation{*gapMutation}
 	}
-	for _, outcome := range result.LevelOutcomes {
-		if outcome.Outcome == execution.LevelOutcomeUnknown || outcome.Outcome == execution.LevelOutcomeTerminal {
-			result.Disposition, result.ReasonCode = execution.PlanDecidedDegraded, outcome.ReasonCode
-			break
+	// The outcome fold, and only when the loads left the disposition alone.
+	// It reads what the Levels concluded, which says nothing about whether the
+	// records those conclusions came from could be read at all: a series whose
+	// State load failed concludes UNKNOWN, and folding that to DECIDED_DEGRADED
+	// is how a Plan that has to be retried came to be reported as decided.
+	if !loaded.decided {
+		for _, outcome := range result.LevelOutcomes {
+			if outcome.Outcome == execution.LevelOutcomeUnknown || outcome.Outcome == execution.LevelOutcomeTerminal {
+				result.Disposition, result.ReasonCode = execution.PlanDecidedDegraded, outcome.ReasonCode
+				break
+			}
 		}
 	}
 	return result, nil
+}
+
+// loadDisposition is what a Plan's loads settle before anything is evaluated.
+//
+// constrains says every series of the Plan is held rather than evaluated. That
+// is the gap's doing, not the State's: a gap marker that could not be read or
+// is terminal leaves the guard state of the whole Plan unknown, and a Level
+// whose guard is unknown must not advance. A State load that failed is one
+// series' problem -- the others read their own keys and evaluate normally --
+// and constrainedRecord already holds that series where it is.
+type loadDisposition struct {
+	decided     bool
+	constrains  bool
+	disposition execution.PlanDisposition
+	reason      execution.ReasonCode
+	outcome     execution.LevelOutcomeKind
+}
+
+// dispositionFromLoads reads the two loads this round was handed.
+//
+// A failed State or gap load is retry-pending: the round can be run again and
+// is expected to succeed, and the contract requires that Plan to say so --
+// reporting it as decided is a Plan that will not be retried and whose result
+// was reached without the state it was supposed to read. A terminal gap marker
+// is TERMINAL instead: retrying reads the same broken marker.
+//
+// The State reason comes first when both loads failed, so the Plan names the
+// one closest to what it could not do. Retrying is idempotent either way; a
+// stable choice is what keeps the same round reporting the same reason.
+func dispositionFromLoads(
+	view execution.RuntimeStateView, gaps execution.GapLoadResult, due execution.DuePlan,
+) loadDisposition {
+	marker, found := gaps.Find(execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration})
+	if view.Status == execution.StateRetryableIO {
+		if found && marker.Status == execution.GapUnavailable {
+			// Both failed. The Plan is held whole -- the gap's doing -- and
+			// names the State's reason, which is the one this series met first.
+			return loadDisposition{decided: true, constrains: true,
+				disposition: execution.PlanRetryPending, reason: view.ReasonCode,
+				outcome: execution.LevelOutcomeUnknown}
+		}
+		return loadDisposition{decided: true,
+			disposition: execution.PlanRetryPending, reason: view.ReasonCode}
+	}
+	if !found {
+		return loadDisposition{}
+	}
+	switch marker.Status {
+	case execution.GapUnavailable:
+		return loadDisposition{decided: true, constrains: true,
+			disposition: execution.PlanRetryPending, reason: marker.ReasonCode,
+			outcome: execution.LevelOutcomeUnknown}
+	case execution.GapTerminal:
+		// Retryable outranks terminal wherever both are in play: a round that
+		// can succeed on its own should be given the chance, and a terminal
+		// marker is still terminal on the next round.
+		return loadDisposition{decided: true, constrains: true,
+			disposition: execution.PlanTerminal, reason: marker.ReasonCode,
+			outcome: execution.LevelOutcomeTerminal}
+	default:
+		return loadDisposition{}
+	}
+}
+
+// constrainedOutcomes is one record's Levels held where they are, each naming
+// the load that held them.
+func constrainedOutcomes(
+	due execution.DuePlan, record execution.RecordView, series execution.SeriesIdentityDigest,
+	kind execution.LevelOutcomeKind, reason execution.ReasonCode,
+) []execution.LevelOutcome {
+	outcomes := make([]execution.LevelOutcome, 0, len(due.CompiledPlan.Levels()))
+	for _, level := range due.CompiledPlan.Levels() {
+		outcomes = append(outcomes, execution.LevelOutcome{
+			Plan: due.Identity, LevelID: level.Definition().LevelID, SeriesIdentityDigest: series,
+			Record:  execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()},
+			Outcome: kind, ReasonCode: reason,
+		})
+	}
+	return outcomes
 }
 
 func commonPrimaryRecords(inputs []execution.SeriesEvaluationInputRequest, maxRecords uint64) ([]execution.RecordView, error) {

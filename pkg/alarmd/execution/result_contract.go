@@ -808,6 +808,17 @@ func validateDegradedGuardCoverage(
 			}
 			continue
 		}
+		if loadedStateGuardsTerminalOutcome(states, outcome) || loadedGapGuardsTerminalOutcome(gaps, outcome) {
+			// The blob this round read is itself the guard. A series whose
+			// stored state cannot be decoded produces a TERMINAL outcome
+			// naming that, and there is no marker to point at: the record is
+			// the persistent fact, read again identically on every round, and
+			// more durable than anything a writer could put beside it.
+			// Without this the contract refused the Level every round for as
+			// long as the bad record sat there, and the refusal named nothing
+			// anybody could clear.
+			continue
+		}
 		if finalStateGuardsOutcome(finalStates, outcome) || finalGapGuardsOutcome(finalMarkers, outcome) {
 			continue
 		}
@@ -1065,6 +1076,63 @@ func finalStateGuardsOutcome(states map[StateKeyIdentity]RuntimeStateView, outco
 				level.GapReasonCode == outcome.ReasonCode {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// loadedGapGuardsTerminalOutcome reports whether a TERMINAL outcome is covered
+// by the gap marker that caused it. A marker that loaded terminal is the
+// persistent fact behind every Level of the Plan being terminal, and there is
+// no marker to point at because the marker is the thing that is broken.
+//
+// Three conditions, and each is load-bearing -- see
+// loadedStateGuardsTerminalOutcome, which is the same rule for the other
+// record.
+func loadedGapGuardsTerminalOutcome(gaps GapLoadResult, outcome LevelOutcome) bool {
+	if outcome.Outcome != LevelOutcomeTerminal {
+		return false
+	}
+	for _, marker := range gaps.Items {
+		if marker.Identity.Plan != outcome.Plan {
+			continue
+		}
+		if marker.Status == GapTerminal && marker.ReasonCode == outcome.ReasonCode {
+			return true
+		}
+	}
+	return false
+}
+
+// loadedStateGuardsTerminalOutcome reports whether a TERMINAL outcome is
+// covered by the loaded record that caused it.
+//
+// Only TERMINAL, and only when the loaded view of that series says the record
+// could not be read and says it with the outcome's own reason. All three
+// matter. Widening it to any outcome would let a business UNKNOWN pass with no
+// guard at all; dropping the reason comparison would let a Level terminal for
+// one cause be covered by a record broken for another.
+//
+// The outcome-kind half cannot be reached through Validate today -- a
+// non-TERMINAL outcome beside a DeterministicInvalid series is already refused
+// by codeOutcomeInvalidSeriesNotTerminal above -- so all three are pinned at
+// the predicate in result_contract_internal_test.go. That rule is a separate
+// rule, and this line is what holds if it is ever relaxed.
+//
+// It reads the loaded views rather than the final ones on purpose: a series
+// whose record could not be decoded produces no mutation, so the two are the
+// same here -- and the loaded set is where the fact is, which is what this
+// rule is about.
+func loadedStateGuardsTerminalOutcome(states StatePreflightResult, outcome LevelOutcome) bool {
+	if outcome.Outcome != LevelOutcomeTerminal {
+		return false
+	}
+	for _, view := range states.Items {
+		if view.Identity.Plan != outcome.Plan || view.Identity.SeriesIdentityDigest != outcome.SeriesIdentityDigest {
+			continue
+		}
+		if view.Status == StateDeterministicInvalid && view.ReasonCode == outcome.ReasonCode {
+			return true
 		}
 	}
 	return false
