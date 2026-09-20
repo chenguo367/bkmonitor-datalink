@@ -265,6 +265,10 @@ type HealthResponse struct {
 	// for retired Query Groups, beside the census that cannot see them.
 	AssignmentSweep        *AssignmentSweepFacts `json:"assignment_sweep,omitempty"`
 	AssignmentSweepReplica string                `json:"assignment_sweep_replica,omitempty"`
+	// ViewStream is the Leader's account of the view stream, with its one
+	// sentence for the first screen, and ViewStreamReplica which replica.
+	ViewStream        *ViewStreamFacts `json:"view_stream,omitempty"`
+	ViewStreamReplica string           `json:"view_stream_replica,omitempty"`
 	// Source is what the leader's last round found at the strategy source,
 	// and SourceReplica which leader. On the verdict route because Expected
 	// is decided by it: an expected of 0 next to a source listing 81 is a
@@ -872,6 +876,7 @@ func NewHandler(
 			Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,
 			AssignmentScope: view.AssignmentScope, AssignmentScopeReplica: view.AssignmentScopeReplica,
 			AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
+			ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,
 			Source: view.Source, SourceReplica: view.SourceReplica,
 			Dependencies: dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 			DependenciesReplicas: view.DependenciesReplicas, ReplicasNotReady: view.ReplicasNotReady,

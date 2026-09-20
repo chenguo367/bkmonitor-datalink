@@ -239,6 +239,9 @@ type fleetPublisher struct {
 	// assignmentSweep reports the control leader's last sweep of retired
 	// Assignment records. Nil on a follower.
 	assignmentSweep func() *fleet.AssignmentSweepFacts
+	// viewStream reports this replica's account of the view stream: the
+	// Leader's ledger, or Leading false. Nil on a runtime without the stream.
+	viewStream func() *fleet.ViewStreamFacts
 	// platformSettings reports the state of this replica's copy of the
 	// platform's settings. Nil on a bundle that has none.
 	platformSettings func() *fleet.PlatformSettingsFacts
@@ -450,6 +453,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.assignmentSweep != nil {
 		snapshot.AssignmentSweep = publisher.assignmentSweep()
+	}
+	if publisher.viewStream != nil {
+		snapshot.ViewStream = publisher.viewStream()
 	}
 	if publisher.source != nil {
 		snapshot.Source = publisher.source()
