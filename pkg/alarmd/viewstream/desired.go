@@ -127,7 +127,12 @@ func (desired Desired) Fingerprint() uint64 {
 		}
 		if content, ok := desired.Content[identity]; ok {
 			write("c", string(content.ObjectDigest))
-			for _, ref := range content.OutputContexts {
+			// In Plan order, like the digest: a caller that hands the refs
+			// over in another order each round must not make every round
+			// look changed, or the skip this exists for never happens.
+			refs := append([]OutputContextRef(nil), content.OutputContexts...)
+			sort.Slice(refs, func(left, right int) bool { return planLess(refs[left].Plan, refs[right].Plan) })
+			for _, ref := range refs {
 				write(ref.Plan.TenantID, ref.Plan.BusinessID, ref.Plan.StrategyID, string(ref.Digest))
 			}
 		}

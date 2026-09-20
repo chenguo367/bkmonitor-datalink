@@ -110,6 +110,63 @@ func (store *RedisStore) RegisterWorker(ctx context.Context, worker WorkerRegist
 	return err
 }
 
+// ReadWorker reads one worker's registration: the registration and true,
+// or false when none is stored. It reads the key alone, not the registry
+// index, so an expired registration whose key is still there is returned
+// with its ExpiresAt for the caller to judge.
+func (store *RedisStore) ReadWorker(ctx context.Context, workerID string) (WorkerRegistration, bool, error) {
+	if store == nil || store.client == nil || workerID == "" {
+		return WorkerRegistration{}, false, errors.New("alarmd ownership: worker read needs a store and a worker")
+	}
+	payload, err := store.client.Get(ctx, store.workerKey(workerID)).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return WorkerRegistration{}, false, nil
+	}
+	if err != nil {
+		return WorkerRegistration{}, false, err
+	}
+	var worker WorkerRegistration
+	if err := json.Unmarshal(payload, &worker); err != nil {
+		return WorkerRegistration{}, false, fmt.Errorf("alarmd ownership: decode worker registration: %w", err)
+	}
+	if err := worker.Validate(); err != nil {
+		return WorkerRegistration{}, false, err
+	}
+	return worker, true, nil
+}
+
+// ReadControlLeader reads who holds the control leader lease and under
+// which term, from the lease hash's owner_id and owner_epoch alone -- the
+// token stays where it is. False when nobody holds it. Whether the lease
+// is live is not judged here: a Worker that finds a dead Leader learns so
+// from the connection, and a live one is renewed on Redis's clock, which
+// this caller does not have.
+func (store *RedisStore) ReadControlLeader(ctx context.Context) (ControlLeader, bool, error) {
+	if store == nil || store.client == nil {
+		return ControlLeader{}, false, errors.New("alarmd ownership: initialized store is required")
+	}
+	values, err := store.client.HMGet(ctx, store.ownershipKey(ControlLeaderIdentity), "owner_id", "owner_epoch").Result()
+	if err != nil {
+		return ControlLeader{}, false, err
+	}
+	if len(values) != 2 || values[0] == nil {
+		return ControlLeader{}, false, nil
+	}
+	owner, _ := values[0].(string)
+	if owner == "" {
+		return ControlLeader{}, false, nil
+	}
+	leader := ControlLeader{OwnerID: owner}
+	if text, ok := values[1].(string); ok && text != "" {
+		epoch, err := strconv.ParseUint(text, 10, 64)
+		if err != nil {
+			return ControlLeader{}, false, fmt.Errorf("alarmd ownership: control leader epoch %q: %w", text, err)
+		}
+		leader.OwnerEpoch = epoch
+	}
+	return leader, true, nil
+}
+
 // workerReadBatch bounds one registration pipeline, for the reason
 // assignmentReadBatch bounds the other one.
 const workerReadBatch = 512

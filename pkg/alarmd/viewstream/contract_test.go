@@ -372,6 +372,22 @@ func TestTheFingerprintMovesWheneverAProjectionWould(t *testing.T) {
 	if base().Fingerprint() != base().Fingerprint() {
 		t.Fatal("two builds of one desired set must have one fingerprint")
 	}
+	// The same output contexts in another order are the same content: the
+	// digest sorts them, and so must the fingerprint, or a round that hands
+	// the refs over in map order would look changed every time and the
+	// skip would never happen.
+	reordered := base()
+	reordered.Content["qg-2"] = content("obj-2", "s9", "s2")
+	ordered := base()
+	ordered.Content["qg-2"] = content("obj-2", "s2", "s9")
+	if reordered.Fingerprint() != ordered.Fingerprint() {
+		t.Fatal("output contexts in another order changed the fingerprint")
+	}
+	was, _ := ordered.Project("w2")
+	is, _ := reordered.Project("w2")
+	if was.Version.Digest != is.Version.Digest {
+		t.Fatal("output contexts in another order changed the digest; the fingerprint case above proves nothing")
+	}
 	for name, mutate := range map[string]func(*viewstream.Desired){
 		"publication snapshot": func(d *viewstream.Desired) { d.Publication.SnapshotRevision = "snap-x" },
 		"publication epoch":    func(d *viewstream.Desired) { d.Publication.PublicationEpoch++ },

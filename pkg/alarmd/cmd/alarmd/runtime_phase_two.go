@@ -34,6 +34,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	httpservice "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/service/http"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
@@ -220,6 +221,11 @@ func runPhaseTwoApplicationWithDependencies(
 		// The listener starts before this runtime does, so the API answers
 		// "not ready" until here rather than pretending to have no data.
 		server.SetAPI(bundle.dependencies.FleetAPI)
+	}
+	if err == nil && bundle != nil && bundle.dependencies.ControlStream != nil {
+		// The same for the control stream: a Worker that connects before
+		// this point is told the stream is not ready and tries again.
+		server.SetGRPC(bundle.dependencies.ControlStream)
 	}
 	if err != nil {
 		cancelRuntime()
@@ -465,8 +471,16 @@ type phaseTwoWorkerBundleDependencies struct {
 	// once at start and then once a minute.
 	RefreshPlatformSettings func(context.Context)
 	// PublishFleet writes this replica's contribution to them.
-	FleetAPI     http.Handler
-	PublishFleet func(context.Context)
+	FleetAPI http.Handler
+	// ControlStream serves decision-016's view stream over the HTTP
+	// listener (gRPC over h2c), and StreamIdentity is what this process
+	// writes into its registration for it. ViewStreamStats is the Leader's
+	// account of the stream for the metrics and the page. All absent for a
+	// runtime without the stream.
+	ControlStream   http.Handler
+	StreamIdentity  viewStreamIdentity
+	ViewStreamStats func() viewstream.Stats
+	PublishFleet    func(context.Context)
 	// ApplyObservationWindows makes the windows opened through that API take
 	// effect on this replica. It runs on the reconcile tick rather than on a
 	// timer of its own, so opening a window is bounded by a cadence the
@@ -2183,6 +2197,7 @@ func (bundle *phaseTwoWorkerBundle) register(ctx context.Context, readiness owne
 	}
 	registration, err := phaseTwoWorkerRegistration(
 		bundle.dependencies.Config, readiness, bundle.dependencies.Now(), bundle.appliedFacts(), bundle.loadFacts(),
+		bundle.dependencies.StreamIdentity,
 	)
 	if err != nil {
 		return err
@@ -2228,6 +2243,7 @@ func phaseTwoWorkerRegistration(
 	at time.Time,
 	applied *ownership.AppliedControlFacts,
 	load *ownership.WorkerLoad,
+	stream viewStreamIdentity,
 ) (ownership.WorkerRegistration, error) {
 	capabilitiesDigest, err := phaseTwoCapabilitiesDigest(cfg)
 	if err != nil {
@@ -2242,6 +2258,9 @@ func phaseTwoWorkerRegistration(
 		// The control contracts this binary takes part in. The leader
 		// starts a contract only when every ready worker declares it.
 		Capabilities: []string{ownership.CapabilityContentScope},
+		// Where this process serves the view stream and what a Worker must
+		// present to it (decision-016); empty for a process without one.
+		Endpoint: stream.Endpoint, StreamToken: stream.Token,
 	}
 	if err := registration.Validate(); err != nil {
 		return ownership.WorkerRegistration{}, err
@@ -3267,6 +3286,8 @@ type httpRuntime interface {
 	// SetAPI installs the observability API once the runtime that produces the
 	// object facts is open. The listener starts before that runtime does.
 	SetAPI(http.Handler)
+	// SetGRPC installs the control stream the same way.
+	SetGRPC(http.Handler)
 }
 
 // waitRuntimeComponent waits for one component's shutdown to report, up to the

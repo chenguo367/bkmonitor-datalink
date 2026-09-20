@@ -289,6 +289,10 @@ func (server *Server) Connect(stream pb.ControlService_ConnectServer) error {
 		previous.refuse(RefusalReplaced)
 	}
 	server.observeSession(ctx, "opened", receiver, "")
+	// The first turn of the send loop is now, not at the next publication
+	// or idle tick: a Worker that connects between publications gets its
+	// snapshot at once.
+	sess.poke()
 	go sess.receive()
 	reason := sess.send()
 	server.mu.Lock()

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+	"google.golang.org/grpc"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
 	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
@@ -38,6 +39,8 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
@@ -698,7 +701,20 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	// Only the static compatibility is read from this one; the heartbeat that
 	// carries acknowledgement and load is written by the bundle once it exists.
-	registration, err := phaseTwoWorkerRegistration(cfg, ownership.WorkerStarting, external.Now(), nil, nil)
+	// The view stream this process serves as Leader and joins as Worker
+	// (decision-016): one identity per process, written into the
+	// registration; one server, led and stepped down with the control
+	// authority; the desired set of every round published through it.
+	streamIdentity, err := newViewStreamIdentity(cfg.HTTP.Listen, cfg.Redis.Address)
+	if err != nil {
+		return nil, err
+	}
+	viewServer, err := viewstream.NewServer(viewStreamAdmission{registry: ownershipStore, now: external.Now}, observer,
+		viewstream.ServerOptions{Now: external.Now})
+	if err != nil {
+		return nil, err
+	}
+	registration, err := phaseTwoWorkerRegistration(cfg, ownership.WorkerStarting, external.Now(), nil, nil, streamIdentity)
 	if err != nil {
 		return nil, err
 	}
@@ -724,10 +740,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 		LeaseTTL:                  cfg.PhaseTwo.Ownership.LeaseTTL.Duration(),
 		ReconcileInterval:         cfg.PhaseTwo.Control.ReconcileInterval.Duration(),
 		ContentScopes:             currentContentScopes(repository),
+		ViewStream:                viewServer, ViewSource: repository,
 	})
 	if err != nil {
 		return nil, err
 	}
+	controlStream := grpc.NewServer()
+	pb.RegisterControlServiceServer(controlStream, viewServer)
+	recorder.SetViewStreamSource(func() metric.ViewStreamCounts { return viewStreamCounts(viewServer.Stats()) })
 	// The cutover names each changing Query Group's content in its record
 	// before it cuts the Segment that carries it (decision-016 batch 3).
 	activator.WithContentScopeWriter(productionOwnership)
@@ -879,7 +899,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	bundle, err := newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
 		Config: cfg, Health: health, Control: control, Ownership: productionOwnership,
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,
-		FleetAPI: fleetAPI,
+		FleetAPI:      fleetAPI,
+		ControlStream: controlStream, StreamIdentity: streamIdentity, ViewStreamStats: viewServer.Stats,
 		PublishFleet: func(ctx context.Context) {
 			observationRefresh.publish(ctx)
 			publisher.publishOnce(ctx)
@@ -899,6 +920,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		CloseResources: func(shutdownCtx context.Context) error {
 			stopDiagnosticWriter()
 			stopCMDBIndex()
+			viewServer.Close()
 			eventsClosed = true
 			closers := []error{events.Shutdown(shutdownCtx)}
 			if !runtimeClientIsSource {
