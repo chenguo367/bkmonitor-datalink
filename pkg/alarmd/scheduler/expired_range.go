@@ -8,8 +8,10 @@ import (
 	"math"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
@@ -47,6 +49,11 @@ func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first
 	// floor division and products involving unbounded absolute timestamps.
 	eligibility := &execution.ExpiredRangeEligibilityV2{Reason: execution.RangeAgeExpired}
 	steps := int64(0)
+	// Filled in only by the distance branch, because only that branch has
+	// these numbers. An age-expired range is bounded by the replay age and
+	// never compares steps, so zero-filling them here would put two numbers
+	// that were never computed next to two that were.
+	var distance *rangeDistanceReport
 	if at.UnixMilli() >= first.RecoveryUntilUnixMilli {
 		steps = (at.UnixMilli() - first.RecoveryUntilUnixMilli) / 1000 / spec.EvaluationIntervalSeconds
 	} else {
@@ -69,6 +76,23 @@ func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first
 		}
 		eligibility = &execution.ExpiredRangeEligibilityV2{Reason: execution.RangeDistanceExpired,
 			MaxReplaySlots: source.recovery.MaxReplaySlots, DistanceHead: execution.EvaluationTime(int64(start) + headSteps*spec.EvaluationIntervalSeconds)}
+		// The three numbers that decided it, taken here because here is the
+		// only place they exist. They are locals of this call: headSteps is
+		// derived from the clock against this Query Group's first unfinished
+		// Slot, deadlineSteps from that Slot's own query deadline, and steps
+		// is whichever of the two bound first. Nothing downstream keeps them,
+		// so a reader asking why a Query Group skipped four intervals rather
+		// than three has been reduced to arithmetic on the completion counts.
+		//
+		// Recomputing them later from the sealed proof would not answer the
+		// same question: the proof carries the range that was produced, not
+		// the two candidate bounds that produced it, and which of the two
+		// bound first is the whole finding.
+		distance = &rangeDistanceReport{
+			headSteps: headSteps, deadlineSteps: deadlineSteps,
+			firstEvaluationTime: start, intervalSeconds: spec.EvaluationIntervalSeconds,
+			maxReplaySlots: source.recovery.MaxReplaySlots,
+		}
 	}
 	if steps > math.MaxUint32-1 {
 		steps = math.MaxUint32 - 1
@@ -124,7 +148,84 @@ func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first
 	first.Contract, first.DuePlanTargets = proof.Last.Contract, proof.Last.DuePlanTargets.Clone()
 	first.EarliestQueryDeadlineUnixMilli, first.KeepUntilUnixMilli, first.RecoveryUntilUnixMilli = deadline, keep, recovery
 	first.ExpiredRange = &proof
+	// Reported once the range exists, with the steps the range was actually
+	// built to rather than the branch's candidate: steps is clamped twice
+	// after the branch, by the segment boundary and by the width of the
+	// count, and reporting the pre-clamp value would describe a range that
+	// was not created.
+	if distance != nil {
+		distance.steps, distance.count = steps, proof.Count
+		source.observeRangeDistanceExpiry(ctx, *distance)
+	}
 	return first, true, nil
+}
+
+// rangeDistanceReport is what the distance branch decided with, carried from
+// the branch to the point the range is sealed so the two can be reported
+// together.
+type rangeDistanceReport struct {
+	headSteps           int64
+	deadlineSteps       int64
+	steps               int64
+	count               uint32
+	firstEvaluationTime execution.EvaluationTime
+	intervalSeconds     int64
+	maxReplaySlots      uint32
+}
+
+// observeRangeDistanceExpiry reports one range given up on for distance, with
+// the numbers that decided its size.
+//
+// The reason this exists: a Query Group whose Slots are being skipped by
+// distance reports GAP_SKIPPED completions and nothing else, and the count of
+// those answers "how many" without any of "how far behind", "which of the two
+// bounds bound first" or "from which Slot". Those are three locals of one
+// call, discarded when it returns, so every question about the shape of the
+// skipping has been answered by arithmetic on completion counts -- which is
+// how a cohort skipping forty percent of its Slots went a day without a
+// mechanism.
+//
+// Both bounds travel, not just the one that won. Which of the two is smaller
+// is the finding: headSteps-MaxReplaySlots winning means the Query Group is
+// far behind the head, and deadlineSteps winning means it is only just past
+// its own deadline, and those are different problems with the same
+// completion kind.
+func (source *ProductionSlotSource) observeRangeDistanceExpiry(ctx context.Context, report rangeDistanceReport) {
+	if source.observer == nil {
+		return
+	}
+	// Observability is a fail-open side channel, as everywhere else here.
+	defer func() { _ = recover() }()
+	source.observer.Observe(ctx, observability.Observation{
+		Component: observability.ComponentScheduler, Stage: observability.StageRangeDistanceExpired,
+		Result: observability.ResultDegraded, Direction: observability.DirectionInternal,
+		ReasonCode: observability.ReasonCode(contract.ReasonGapSkipped),
+		Trace: observability.TraceFields{
+			QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(report.firstEvaluationTime),
+		},
+		RangeDistance: &observability.RangeDistanceFacts{
+			HeadSteps: report.headSteps, DeadlineSteps: report.deadlineSteps, Steps: report.steps,
+			SlotCount: report.count, FirstEvaluationTime: int64(report.firstEvaluationTime),
+			IntervalSeconds: report.intervalSeconds, MaxReplaySlots: report.maxReplaySlots,
+			BoundBy: report.boundBy(),
+		},
+	})
+}
+
+// boundBy names which of the two candidate bounds produced the range.
+//
+// Derived from the same two numbers that are reported beside it, so a reader
+// can check the label against them rather than take it on trust.
+func (report rangeDistanceReport) boundBy() string {
+	distanceBound := report.headSteps - int64(report.maxReplaySlots)
+	switch {
+	case distanceBound < report.deadlineSteps:
+		return observability.RangeBoundByDistance
+	case report.deadlineSteps < distanceBound:
+		return observability.RangeBoundByDeadline
+	default:
+		return observability.RangeBoundByBoth
+	}
 }
 
 func (source *ProductionSlotSource) resumeExpiredRange(ctx context.Context, p execution.ExpiredRangeProjectionV1, initial ownership.AssignmentRecord, fence execution.OwnerFence) (FrozenSlot, bool, error) {
