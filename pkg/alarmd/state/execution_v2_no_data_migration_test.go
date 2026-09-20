@@ -248,3 +248,92 @@ func fieldNames(record map[string][]byte) []string {
 	}
 	return names
 }
+
+// A Plan that has never written a memory reads no record, and what it reads has
+// to say so in the one spelling the writer accepts.
+//
+// The writer refuses a statement that does not name the record it was derived
+// from, and "no record" is one of the three names. A snapshot the store left
+// unstamped would therefore stop every new Plan's first write -- the same
+// outage as the one this change fixes, moved to the Plans that have nothing
+// stored yet. Only the real loader can show it: every double in the tree stamps
+// the field itself, which is exactly how the empty spelling survived to
+// production in the first place.
+func TestAPlanWithNoRecordReadsNoneAndWritesItsFirstMemory(t *testing.T) {
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	store := generationStore(t, backend)
+	snapshot := loadOneNoDataMemory(t, store)
+	if snapshot.Status != execution.NoDataMemoryMissing {
+		t.Fatalf("status = %q, want the record to be absent", snapshot.Status)
+	}
+	if snapshot.Representation != execution.NoDataRepresentationNone {
+		t.Fatalf("representation = %q, want %s from the real loader for a record that is not there",
+			snapshot.Representation, execution.NoDataRepresentationNone)
+	}
+	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMemoryUpdate{
+		Identity: noDataIdentityV2(), DerivedFrom: snapshot.Representation,
+		ExpectedMarkerRevision: snapshot.MarkerRevision, ApplyVersion: coexistenceApplyVersion(1),
+		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
+		PresentAsOf: 1000, Memory: []execution.NoDataGroupMemory{{GroupKey: "a", LastSeen: 1000}},
+		Loaded: snapshot.Groups, LoadedPresentAsOf: snapshot.PresentAsOf,
+	})
+	if err != nil {
+		t.Fatalf("the first memory of a new Plan does not derive: %v", err)
+	}
+	applied, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+		Contract: frozenRef(), Items: []execution.PlanNoDataMutation{mutation},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Items[0].Status != execution.NoDataApplied {
+		t.Fatalf("first write = %+v (%+v), want APPLIED", applied.Items[0].Status, applied.Items[0].Conflict)
+	}
+}
+
+// A replacing statement that loses a race says the record moved, not that it
+// was reset.
+//
+// The two names mean different incidents. Moved is another writer getting there
+// first, which is ordinary and self-correcting; reset says the key was deleted
+// and built again from nothing, which is a thing somebody goes and looks into.
+// A replacing statement expects no revision of this record, so comparing its
+// expected number against the record's produces the second name for the first
+// incident -- on the migration population, which is the whole fleet on the day
+// this ships and exactly the line its acceptance is read from.
+func TestAReplacingStatementThatLosesARaceReportsTheRecordMoved(t *testing.T) {
+	blobKey, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
+	if err != nil {
+		t.Fatal(err)
+	}
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	backend.values[blobKey] = wholeMemoryRecord(t, 7, applyVersion(),
+		execution.NoDataGroupMemory{GroupKey: "a", LastSeen: 940})
+	store := generationStore(t, backend)
+	snapshot := loadOneNoDataMemory(t, store)
+	mutation := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
+		Identity: noDataIdentityV2(), DerivedFrom: snapshot.Representation,
+		ExpectedMarkerRevision: snapshot.MarkerRevision, ApplyVersion: coexistenceApplyVersion(1),
+		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
+		PresentAsOf: snapshot.PresentAsOf, Memory: snapshot.Groups,
+		Loaded: snapshot.Groups, LoadedPresentAsOf: snapshot.PresentAsOf,
+	})
+	// Somebody wrote the per-group record between this writer's read of it and
+	// its write, which is the only way a replacing statement can be refused.
+	backend.conflict = true
+	applied, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+		Contract: frozenRef(), Items: []execution.PlanNoDataMutation{mutation},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := applied.Items[0]
+	if item.Status != execution.NoDataConflict || item.Conflict == nil {
+		t.Fatalf("write = %+v, want a conflict that names itself", item)
+	}
+	if item.Conflict.Kind != execution.StateVersionConflictRevisionMoved {
+		t.Fatalf("conflict kind = %q, want %q. The old record's revision is not this record's, so "+
+			"comparing them names an incident that did not happen",
+			item.Conflict.Kind, execution.StateVersionConflictRevisionMoved)
+	}
+}
