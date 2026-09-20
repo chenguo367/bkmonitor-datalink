@@ -1809,6 +1809,17 @@ func (dispatcher *phaseTwoRunnerDispatcher) handleResult(
 // Slot and is given the next sequence, as any first queueing is. A Runner
 // with no deadline either time keeps its place: it ranks after every dated
 // entry regardless, and the tie-break is all a new sequence would change.
+//
+// One consequence, stated so nobody reads the rule as stronger than it is:
+// the walk usually queues a Runner before it has frozen its next Slot, and
+// the deadline it reads then is the Runner's estimate from its due bound
+// (scheduler.Runner.NextDeadline), not the frozen value. The first deferred
+// return of that Slot reads the frozen deadline, which differs from the
+// estimate, so that return is given a new place. "The same Slot keeps its
+// sequence" therefore holds from the second deferral on; the first deferral
+// of a Slot queued on an estimate refreshes it once. Telling an estimate
+// from a frozen deadline would need the Runner to say which it gave, which
+// the interface does not carry; the deadline itself is right in both cases.
 func (dispatcher *phaseTwoRunnerDispatcher) queueEntry(scheduled phaseTwoScheduledRunner, readyAt time.Time) phaseTwoQueuedRunner {
 	deadline := scheduled.lifecycle.runner.NextDeadline()
 	if scheduled.place.sequence == 0 || !deadline.Equal(scheduled.place.deadline) {
