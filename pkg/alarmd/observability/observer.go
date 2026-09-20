@@ -85,6 +85,7 @@ const (
 	StageSlotSourceCompleted    = "slot_source_completed"
 	StageScheduleCursorAdvanced = "schedule_cursor_advanced"
 	StageReplayExpired          = "replay_expired"
+	StageRangeDistanceExpired   = "range_distance_expired"
 	StageSlotWait               = "slot_wait"
 	StageQueryAdmission         = "query_admission"
 	StageRestartRecovered       = "restart_recovered"
@@ -752,6 +753,72 @@ var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", 
 //
 // ReadyAtUnixMilli and DistanceBoundaryUnixMilli are the two instants the
 // third reason compared, and are zero for the others.
+// RangeBoundByDistance, RangeBoundByDeadline and RangeBoundByBoth name which
+// of the two candidate bounds produced an expired range.
+//
+// A closed set of three, because a reader partitioning the skipped population
+// by it needs every range to land in one of them, and because the two causes
+// call for opposite responses: bound by distance is a Query Group far behind
+// the head of its schedule, bound by deadline is one that is barely past its
+// own query deadline and is being given up on anyway.
+const (
+	RangeBoundByDistance = "distance"
+	RangeBoundByDeadline = "deadline"
+	RangeBoundByBoth     = "both"
+)
+
+// RangeBoundByValues is every value the label takes, for the partition to
+// pre-create and for a reader to bound the family by.
+var RangeBoundByValues = []string{RangeBoundByDistance, RangeBoundByDeadline, RangeBoundByBoth}
+
+// RangeDistanceFacts is one expired range given up on for distance, with the
+// numbers that decided how wide it is.
+//
+// These are locals of the call that builds the range and exist nowhere else:
+// the sealed proof carries the range that was produced, not the two candidate
+// bounds that produced it. Without them a Query Group shedding Slots reports
+// GAP_SKIPPED completions and nothing more, and every question about the
+// shape of the shedding -- how far behind, which bound bit first, from which
+// Slot -- can only be answered by arithmetic on completion counts. A cohort
+// skipping forty percent of its Slots went a day without a mechanism for
+// exactly that reason.
+//
+// Both bounds travel, not only the one that won, and BoundBy is derived from
+// the same two numbers reported beside it so a reader can check the label
+// rather than trust it.
+type RangeDistanceFacts struct {
+	// HeadSteps is how many intervals the clock is past the first unfinished
+	// Slot; DeadlineSteps how many it is past that Slot's own query deadline.
+	HeadSteps     int64 `json:"head_steps"`
+	DeadlineSteps int64 `json:"deadline_steps"`
+	// Steps is the width the range was actually built to, after the segment
+	// boundary and the count width have clamped it, and SlotCount the Slots
+	// it covers.
+	Steps     int64  `json:"steps"`
+	SlotCount uint32 `json:"slot_count"`
+	// FirstEvaluationTime is the Slot the range starts at, so the skipping can
+	// be followed Slot by Slot rather than only counted.
+	FirstEvaluationTime int64  `json:"first_evaluation_time"`
+	IntervalSeconds     int64  `json:"interval_seconds"`
+	MaxReplaySlots      uint32 `json:"max_replay_slots"`
+	BoundBy             string `json:"bound_by"`
+}
+
+func normalizeRangeDistanceFacts(facts *RangeDistanceFacts) *RangeDistanceFacts {
+	if facts == nil {
+		return nil
+	}
+	normalized := *facts
+	switch normalized.BoundBy {
+	case RangeBoundByDistance, RangeBoundByDeadline, RangeBoundByBoth:
+	default:
+		// An unnamed bound is a producer this build does not know about, not
+		// a reason to drop the rest of the numbers.
+		normalized.BoundBy = RangeBoundByBoth
+	}
+	return &normalized
+}
+
 type ReplayExpiryFacts struct {
 	Reason                    string
 	Distance                  uint32
@@ -1561,6 +1628,7 @@ type Observation struct {
 	ActiveQGSet           *ActiveQGSetFacts
 	ScheduleCutover       *ScheduleCutoverFacts
 	ReplayExpiry          *ReplayExpiryFacts
+	RangeDistance         *RangeDistanceFacts
 	SlotWait              *SlotWaitFacts
 	ObjectCatalog         *ObjectCatalogFacts
 	ObjectRead            *ObjectReadFacts
@@ -1678,6 +1746,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.LegacyMigration = normalizeLegacyQGMigrationFacts(observation.LegacyMigration)
 	observation.DrainingQG = normalizeDrainingQGFacts(observation.DrainingQG)
 	observation.Rebalance = normalizeRebalanceFacts(observation.Rebalance)
+	observation.RangeDistance = normalizeRangeDistanceFacts(observation.RangeDistance)
 	observation.AssignmentIndex = normalizeAssignmentIndexFacts(observation.AssignmentIndex)
 	observation.CursorAdvance = normalizeCursorAdvanceFacts(observation.CursorAdvance)
 	observation.SourceRefresh = normalizeSourceRefreshFacts(observation.Component, observation.Stage, observation.SourceRefresh)
@@ -2557,6 +2626,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageDispatchTurnaway},
 	{ComponentScheduler, StageRunnerCompleted}, {ComponentScheduler, StageSlotSourceCompleted},
 	{ComponentScheduler, StageScheduleCursorAdvanced}, {ComponentScheduler, StageReplayExpired},
+	{ComponentScheduler, StageRangeDistanceExpired},
 	{ComponentScheduler, StageSlotWait},
 	{ComponentAccess, StageQueryCompleted},
 	{ComponentAccess, StageQueryBudgetResolved},
