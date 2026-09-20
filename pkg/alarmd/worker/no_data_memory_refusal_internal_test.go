@@ -67,8 +67,9 @@ func noDataRefusalFixture(store *refusingNoDataStore) (*SlotExecutionCoordinator
 func refusedMemoryMutation(t *testing.T) execution.PlanNoDataMutation {
 	t.Helper()
 	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMemoryUpdate{
-		DerivedFrom:        execution.NoDataRepresentationPerGroup,
-		LoadedApplyVersion: execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 60, SlotDigest: "slot"},
+		DerivedFrom:            execution.NoDataRepresentationPerGroup,
+		LoadedApplyVersion:     execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 60, SlotDigest: "slot"},
+		ExpectedMarkerRevision: 1,
 		Identity: execution.PlanNoDataIdentity{
 			Plan:            execution.PlanIdentity{TenantID: "tenant", BusinessID: "10", StrategyID: "8946"},
 			StateGeneration: "generation",

@@ -287,8 +287,22 @@ func (mutation PlanNoDataMutation) validateStatement() error {
 		if mutation.LoadedApplyVersion != (ApplyVersion{}) {
 			return errors.New("alarmd execution: a Plan no-data mutation derived from no record cannot name a loaded version")
 		}
-	} else if err := mutation.LoadedApplyVersion.Validate(); err != nil {
-		return fmt.Errorf("alarmd execution: a Plan no-data mutation derived from a record must name the version it read: %w", err)
+		if mutation.ExpectedMarkerRevision != 0 {
+			return errors.New("alarmd execution: a Plan no-data mutation derived from no record cannot expect a revision")
+		}
+	} else {
+		if err := mutation.LoadedApplyVersion.Validate(); err != nil {
+			return fmt.Errorf("alarmd execution: a Plan no-data mutation derived from a record must name the version it read: %w", err)
+		}
+		// Every record found carries a revision of one or more; a statement
+		// that read one and expects zero is the shape the store would apply as
+		// a delta to a record it believes absent -- a per-group record written
+		// holding only the groups that changed. Not reachable today, because
+		// the decoders refuse a found record at revision zero, and refused
+		// here so that it stays unreachable when they change.
+		if mutation.ExpectedMarkerRevision == 0 {
+			return errors.New("alarmd execution: a Plan no-data mutation derived from a record must expect its revision")
+		}
 	}
 	if mutation.RosterVersion == "" {
 		return errors.New("alarmd execution: Plan no-data mutation requires the roster version it was decided against")

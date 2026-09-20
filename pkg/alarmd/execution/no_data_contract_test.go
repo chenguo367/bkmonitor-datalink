@@ -20,7 +20,7 @@ func noDataApplyVersion() ApplyVersion {
 // than deltas.
 func noDataUpdate(groups ...NoDataGroupMemory) PlanNoDataMemoryUpdate {
 	return PlanNoDataMemoryUpdate{
-		DerivedFrom: NoDataRepresentationPerGroup, LoadedApplyVersion: noDataApplyVersion(),
+		DerivedFrom: NoDataRepresentationPerGroup, LoadedApplyVersion: noDataApplyVersion(), ExpectedMarkerRevision: 1,
 		Identity: PlanNoDataIdentity{
 			Plan:            PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"},
 			StateGeneration: "generation-1",
@@ -125,6 +125,14 @@ func TestPlanNoDataMutationRefusesIncompletePayloads(t *testing.T) {
 		"record read, no loaded version": func(u *PlanNoDataMemoryUpdate) { u.LoadedApplyVersion = ApplyVersion{} },
 		"no record read, loaded version": func(u *PlanNoDataMemoryUpdate) {
 			u.DerivedFrom, u.Loaded, u.LoadedPresentAsOf = NoDataRepresentationNone, nil, 0
+		},
+		// A record read carries a revision of one or more; a statement that
+		// read one and expects zero would be applied as a delta to a record
+		// the store believes absent, which is the lost-groups shape.
+		"record read, no revision": func(u *PlanNoDataMemoryUpdate) { u.ExpectedMarkerRevision = 0 },
+		"no record read, a revision": func(u *PlanNoDataMemoryUpdate) {
+			u.DerivedFrom, u.LoadedApplyVersion, u.Loaded, u.LoadedPresentAsOf = NoDataRepresentationNone, ApplyVersion{}, nil, 0
+			u.ExpectedMarkerRevision = 3
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -347,7 +355,7 @@ func TestAGroupLastSeenBeforeThisRoundIsNotStoredAsPresent(t *testing.T) {
 // round - the cost this representation exists to remove.
 func TestAGroupStillPresentIsNotWrittenAgain(t *testing.T) {
 	update := PlanNoDataMemoryUpdate{
-		DerivedFrom: NoDataRepresentationPerGroup, LoadedApplyVersion: noDataApplyVersion(),
+		DerivedFrom: NoDataRepresentationPerGroup, LoadedApplyVersion: noDataApplyVersion(), ExpectedMarkerRevision: 1,
 		Identity: PlanNoDataIdentity{
 			Plan:            PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"},
 			StateGeneration: "generation-1",
