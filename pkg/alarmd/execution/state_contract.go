@@ -53,6 +53,11 @@ func SlotMutationCap(storeItems, processBudget uint64) uint64 {
 type StateApplyFence struct {
 	Fence OwnerFence
 	At    time.Time
+	// ContentScope, when set, names the executable view the writes were
+	// produced from; the store's fence then also refuses an Assignment
+	// record that has moved to another (decision-016). Empty leaves the
+	// fence exactly as it was before the field existed.
+	ContentScope string
 }
 
 func (fence StateApplyFence) Validate(contractRef FrozenExecutionContractRef) error {

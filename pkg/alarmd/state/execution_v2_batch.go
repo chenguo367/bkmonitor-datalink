@@ -270,17 +270,27 @@ func (pipeline *runtimeApplyPipeline) flush(ctx context.Context) error {
 		}
 		return nil
 	}
-	stale := false
+	stale, moved := false, false
 	for position, index := range pipeline.indexes {
 		outcome := outcomes[position]
 		if outcome.Err == nil && outcome.Status == FencedWriteStaleOwner {
 			stale = true
 			continue
 		}
+		if outcome.Err == nil && outcome.Status == FencedWriteContentMoved {
+			moved = true
+			continue
+		}
 		pipeline.result.Items[index] = pipeline.store.classifyFencedOutcome(pipeline.request.Contract, pipeline.request.Items[index], outcome)
 	}
 	if stale {
 		return fmt.Errorf("state: runtime state apply for %s: %w", pipeline.request.Contract.Slot.QueryGroup, ownership.ErrStaleFence)
+	}
+	if moved {
+		// Not a stale fence: the lease is live and the Query Group is still
+		// this worker's. What is behind is the view it wrote from, so the
+		// error names that and the caller re-reads rather than releases.
+		return fmt.Errorf("state: runtime state apply for %s: %w", pipeline.request.Contract.Slot.QueryGroup, ownership.ErrContentScopeMoved)
 	}
 	return nil
 }
@@ -298,7 +308,7 @@ func (store *ExecutionStore) ApplyRuntimeFenced(
 		return store.applyRuntime(ctx, request, nil)
 	}
 	guard := &FenceGuard{Keys: store.options.FenceKeys.FenceKeys(fence.Fence.QueryGroup), OwnerID: fence.Fence.OwnerID,
-		OwnerEpoch: fence.Fence.OwnerEpoch, LeaseToken: fence.Fence.LeaseToken, NowMillis: fence.At.UnixMilli()}
+		OwnerEpoch: fence.Fence.OwnerEpoch, LeaseToken: fence.Fence.LeaseToken, NowMillis: fence.At.UnixMilli(), ContentScope: fence.ContentScope}
 	if err := guard.validate(); err != nil {
 		return execution.StateApplyResult{}, err
 	}

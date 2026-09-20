@@ -22,6 +22,13 @@ var (
 	ErrStaleFence         = errors.New("alarmd ownership: owner fence is stale")
 	ErrAssignmentAbsent   = errors.New("alarmd ownership: assignment is absent")
 	ErrAssignmentConflict = errors.New("alarmd ownership: Assignment record revision conflict")
+	// ErrContentScopeMoved is the fence refusing a writer that declared the
+	// content scope it is executing when the Assignment record names another.
+	// The lease itself may be perfectly good: it is the view that is behind.
+	// It is therefore not a lease decision -- a worker that meets it keeps
+	// the Query Group and has to bring its view up to the record, not give
+	// the Query Group up.
+	ErrContentScopeMoved = errors.New("alarmd ownership: content scope has moved")
 )
 
 // IsLeaseDecision reports whether err is an authoritative answer from the
@@ -161,6 +168,25 @@ type AssignmentRecord struct {
 	ControlEpoch         uint64
 	PlacementReason      PlacementReason
 	AssignedAt           time.Time
+	// ContentScope names what the desired worker is authorized to execute
+	// for this Query Group: the digest of its executable view. Empty until a
+	// leader has written one; the fence compares it only against writers
+	// that declare theirs (decision-016).
+	ContentScope string
+	// PendingContentScope and EffectiveAt describe a content change that has
+	// been decided but not yet taken effect: the record still authorizes
+	// ContentScope, and switches to the pending one at EffectiveAt, which is
+	// never earlier than the lease deadline the current holder was renewed
+	// to plus ContentSwitchMargin. Renewal does not extend a lease past it.
+	// Both are zero when no change is pending.
+	PendingContentScope string
+	EffectiveAt         time.Time
+}
+
+// ContentChangePending reports whether the record carries a content change
+// that has not taken effect yet.
+func (record AssignmentRecord) ContentChangePending() bool {
+	return record.PendingContentScope != "" && !record.EffectiveAt.IsZero()
 }
 
 // AssignmentDecision is a Control Leader decision based on one observed
@@ -171,6 +197,14 @@ type AssignmentDecision struct {
 	ExpectedRecordRevision uint64
 	PlacementReason        PlacementReason
 	DecidedAt              time.Time
+	// ContentScope is the executable view this decision authorizes. Empty
+	// leaves whatever the record names untouched, so a leader that does not
+	// yet compute it publishes exactly as before. A non-empty scope that
+	// differs from the record's, for a desired worker that is unchanged and
+	// holds a live lease, is written as pending and takes effect after that
+	// lease's deadline; with no live lease, or together with a change of
+	// desired worker, it is written directly.
+	ContentScope string
 }
 
 func (decision AssignmentDecision) Validate() error {
@@ -195,6 +229,21 @@ func (record AssignmentRecord) Validate() error {
 type Lease struct {
 	Fence    execution.OwnerFence
 	Deadline time.Time
+	// ContentScope is what the Assignment record authorized this lease for
+	// at the moment it was acquired or renewed, and PendingContentScope /
+	// EffectiveAt the change it will switch to, when one is pending. A
+	// renewal under a pending change is capped at EffectiveAt, which is how
+	// the holder learns it must be on the new content by then. All empty
+	// for the control leader identity, which has no Assignment record.
+	ContentScope        string
+	PendingContentScope string
+	EffectiveAt         time.Time
+}
+
+// ContentChangePending reports whether the lease was renewed under a content
+// change that has not taken effect yet.
+func (lease Lease) ContentChangePending() bool {
+	return lease.PendingContentScope != "" && !lease.EffectiveAt.IsZero()
 }
 
 type PublicationAuthority struct {
@@ -208,6 +257,10 @@ const (
 	FencedCASApplied    FencedCASStatus = "APPLIED"
 	FencedCASConflict   FencedCASStatus = "CONFLICT"
 	FencedCASStaleOwner FencedCASStatus = "STALE_OWNER"
+	// FencedCASContentMoved is the fence refusing a writer whose declared
+	// content scope is no longer the one the Assignment record names. The
+	// error beside it is ErrContentScopeMoved, not ErrStaleFence.
+	FencedCASContentMoved FencedCASStatus = "CONTENT_MOVED"
 )
 
 type FencedCASRequest struct {
@@ -218,4 +271,8 @@ type FencedCASRequest struct {
 	Expected        []byte
 	Value           []byte
 	TTL             time.Duration
+	// ContentScope, when set, is the executable view the writer is acting
+	// on; the fence then also refuses a record that names another. Empty
+	// keeps the fence as it was before the field existed.
+	ContentScope string
 }

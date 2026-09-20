@@ -56,6 +56,9 @@ type redisBatchFixture struct {
 	owners  *ownership.RedisStore
 	fence   execution.OwnerFence
 	leased  time.Time
+	// authority is the control leader lease the fixture published under,
+	// for tests that publish again.
+	authority ownership.PublicationAuthority
 }
 
 func newRedisBatchFixture(t *testing.T) *redisBatchFixture {
@@ -94,7 +97,7 @@ func newRedisBatchFixture(t *testing.T) *redisBatchFixture {
 		t.Fatal(err)
 	}
 	client.reset()
-	return &redisBatchFixture{address: address, client: client, backend: backend, owners: owners, fence: lease.Fence, leased: now}
+	return &redisBatchFixture{address: address, client: client, backend: backend, owners: owners, fence: lease.Fence, leased: now, authority: authority}
 }
 
 func (fixture *redisBatchFixture) store(t *testing.T, prefix string, fenced bool) *ExecutionStore {

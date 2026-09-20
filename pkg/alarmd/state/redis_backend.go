@@ -109,21 +109,20 @@ return 1
 // ARGV[1] expected missing ('1'/'0'); ARGV[2] SHA-1 hex of the expected value;
 // ARGV[3] new value; ARGV[4] TTL in milliseconds (0 keeps the key persistent);
 // ARGV[5] require assignment ('1'/'0'); ARGV[6] owner id; ARGV[7] owner epoch;
-// ARGV[8] lease token; ARGV[9] now in milliseconds.
+// ARGV[8] lease token; ARGV[9] now in milliseconds; ARGV[10], optional, the
+// content scope the writer is executing (empty: not compared).
 //
-// Replies: {'APPLIED'}, {'STALE_OWNER'}, {'CONFLICT_MISSING'} when the key
-// vanished, {'CONFLICT', current} when the current bytes differ.
-const compareAndSetByDigestScript = `
+// The fence itself is ownership.FenceLua, the same text every fenced script
+// runs; this script only maps its refusals. A moved content scope answers
+// CONTENT_MOVED so the caller can tell a stale view from a stale lease.
+//
+// Replies: {'APPLIED'}, {'STALE_OWNER'}, {'CONTENT_MOVED'}, {'CONFLICT_MISSING'}
+// when the key vanished, {'CONFLICT', current} when the current bytes differ.
+const compareAndSetByDigestScript = ownership.FenceLua + `
 if #KEYS == 3 then
-  if ARGV[5] == '1' then
-    local desired = redis.call('HGET', KEYS[2], 'desired_worker_id')
-    if not desired or desired ~= ARGV[6] then return {'STALE_OWNER'} end
-  end
-  if redis.call('HGET', KEYS[3], 'execution_disposition') ~= 'ACTIVE' or
-     redis.call('HGET', KEYS[3], 'owner_id') ~= ARGV[6] or
-     redis.call('HGET', KEYS[3], 'owner_epoch') ~= ARGV[7] or
-     redis.call('HGET', KEYS[3], 'lease_token') ~= ARGV[8] or
-     tonumber(redis.call('HGET', KEYS[3], 'deadline_ms') or '0') <= tonumber(ARGV[9]) then return {'STALE_OWNER'} end
+  local refusal = fence_refusal(KEYS[2], KEYS[3], ARGV[5], ARGV[6], ARGV[7], ARGV[8], ARGV[10] or '', tonumber(ARGV[9]))
+  if refusal == 'CONTENT_MOVED' then return {'CONTENT_MOVED'} end
+  if refusal then return {'STALE_OWNER'} end
 end
 local current = redis.call('GET', KEYS[1])
 if ARGV[1] == '1' then
@@ -149,6 +148,10 @@ type FenceGuard struct {
 	OwnerEpoch uint64
 	LeaseToken string
 	NowMillis  int64
+	// ContentScope, when set, is the executable view the writer is acting
+	// on; the fence then also refuses an Assignment record that names
+	// another (decision-016). Empty keeps the five comparisons as they were.
+	ContentScope string
 }
 
 func (guard FenceGuard) validate() error {
@@ -177,6 +180,10 @@ const (
 	FencedWriteStaleOwner      FencedWriteStatus = "STALE_OWNER"
 	FencedWriteConflictMissing FencedWriteStatus = "CONFLICT_MISSING"
 	FencedWriteConflict        FencedWriteStatus = "CONFLICT"
+	// FencedWriteContentMoved is the fence refusing a writer whose declared
+	// content scope the Assignment record no longer names: the lease holds,
+	// the view is behind. Reported with ownership.ErrContentScopeMoved.
+	FencedWriteContentMoved FencedWriteStatus = "CONTENT_MOVED"
 )
 
 // FencedWriteOutcome is one per-key result. Current carries the bytes Redis
@@ -485,7 +492,7 @@ func (backend *RedisBackend) evalFencedWrites(
 			if guard != nil {
 				keys = append(keys, guard.Keys.AssignmentKey, guard.Keys.OwnershipKey)
 				args = append(args, boolArg(guard.Keys.RequireAssignment), guard.OwnerID,
-					strconv.FormatUint(guard.OwnerEpoch, 10), guard.LeaseToken, guard.NowMillis)
+					strconv.FormatUint(guard.OwnerEpoch, 10), guard.LeaseToken, guard.NowMillis, guard.ContentScope)
 			}
 			if byDigest {
 				pipeline.EvalSha(ctx, compareAndSetByDigestSHA, keys, args...)
@@ -523,7 +530,7 @@ func decodeFencedWriteReply(cmd redis.Cmder) FencedWriteOutcome {
 		return FencedWriteOutcome{Err: fmt.Errorf("state: Redis fenced write status %T is not text", items[0])}
 	}
 	switch FencedWriteStatus(code) {
-	case FencedWriteApplied, FencedWriteStaleOwner, FencedWriteConflictMissing:
+	case FencedWriteApplied, FencedWriteStaleOwner, FencedWriteContentMoved, FencedWriteConflictMissing:
 		return FencedWriteOutcome{Status: FencedWriteStatus(code)}
 	case FencedWriteConflict:
 		if len(items) != 2 {
