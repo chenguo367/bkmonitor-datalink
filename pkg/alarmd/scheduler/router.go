@@ -215,9 +215,16 @@ func (scopes ContentScopes) wanted(queryGroup execution.QueryGroupIdentity, curr
 		if !known || digest == "" {
 			return "", false, false
 		}
-		if current.ContentScope == digest || current.PendingContentScope == digest {
+		if current.PendingContentScope == digest {
 			return "", false, false
 		}
+		if current.ContentScope == digest && current.PendingContentScope == "" {
+			return "", false, false
+		}
+		// Either the record names other content, or it names this content
+		// with a change pending towards yet another -- a scope written ahead
+		// of a cutover that then did not happen. Publishing the current
+		// content again is how the store cancels that change.
 		return digest, false, true
 	case ContentScopesWithdrawn:
 		if current.ContentScope == "" && current.PendingContentScope == "" {

@@ -31,6 +31,7 @@ func TestAReconcileRoundBringsRecordsToTheContentTheyArePublishedWith(t *testing
 	}
 	digests := map[execution.QueryGroupIdentity]string{
 		"unnamed": "qg-object-1", "current": "qg-object-2", "pending": "qg-object-3", "moved": "qg-object-4b", "unknown-scope": "",
+		"stray-pending": "qg-object-7",
 	}
 	cases := []struct {
 		name    string
@@ -48,10 +49,15 @@ func TestAReconcileRoundBringsRecordsToTheContentTheyArePublishedWith(t *testing
 				// Content the round does not know is not a withdrawal.
 				"unknown-scope":   record("unknown-scope", "qg-object-5", ""),
 				"not-in-manifest": record("not-in-manifest", "qg-object-6", ""),
+				// On the published content but with a change pending towards
+				// other content -- a scope written ahead of a cutover that
+				// did not happen: republishing the current content cancels it.
+				"stray-pending": record("stray-pending", "qg-object-7", "qg-object-never-activated"),
 			},
 			want: map[execution.QueryGroupIdentity]ownership.AssignmentDecision{
-				"unnamed": {ContentScope: "qg-object-1"},
-				"moved":   {ContentScope: "qg-object-4b"},
+				"unnamed":       {ContentScope: "qg-object-1"},
+				"moved":         {ContentScope: "qg-object-4b"},
+				"stray-pending": {ContentScope: "qg-object-7"},
 			},
 		},
 		{

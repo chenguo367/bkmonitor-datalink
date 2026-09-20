@@ -728,6 +728,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// The cutover names each changing Query Group's content in its record
+	// before it cuts the Segment that carries it (decision-016 batch 3).
+	activator.WithContentScopeWriter(productionOwnership)
 	// Retention is derived from the publish cadence rather than fixed, because
 	// the cadence is configurable and the relationship between the two is what
 	// makes the states meaningful. A constant retention against a configurable
