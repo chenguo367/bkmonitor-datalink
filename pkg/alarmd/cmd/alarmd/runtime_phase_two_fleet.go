@@ -90,6 +90,7 @@ func (source registryReplicas) ReadyReplicas(ctx context.Context, at time.Time) 
 type observationWindowApplier struct {
 	store   *fleet.WindowStore
 	flow    *observability.TargetFlow
+	samples *observability.SeriesSampler
 	now     func() time.Time
 	observe func(applied, requested, dropped int, err error)
 }
@@ -101,6 +102,9 @@ func (applier observationWindowApplier) applyOnce(ctx context.Context) {
 			applier.observe(0, 0, 0, err)
 		}
 		return
+	}
+	if applier.samples != nil {
+		_ = applier.samples.Select(fleet.SampleSelections(windows))
 	}
 	requested := fleet.QueryGroups(windows)
 	selection := make([]string, 0, observability.TargetFlowMaxGroups)
