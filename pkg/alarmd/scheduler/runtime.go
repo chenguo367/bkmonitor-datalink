@@ -364,6 +364,12 @@ type Runner struct {
 	sourceNextAt   time.Time
 	dueBound       RunnerDueBound
 	queryCooldown  queryCooldownState
+	// heldBy is what the previous round did, carried forward so the next
+	// round's Slot can report what kept it from running. It is the Runner's
+	// own word -- the same one run_one_return_total counts -- and is read on
+	// the far side of the source call, which is why it has to survive the
+	// round that produced it rather than being passed down it.
+	heldBy observability.HeldByFacts
 	// nextDeadline is the query deadline of the Slot this Runner froze and did
 	// not complete -- deferred for readiness, refused admission, or failed and
 	// backing off -- so a dispatcher can order it against the others by when
@@ -631,7 +637,15 @@ func (runner *Runner) runOneTracked(
 	// that hangs leaves its old bound standing and falls behind the wall clock,
 	// where a scheme that cleared the entry on dispatch would show nothing at all.
 	var sourceFacts SlotDueFacts
-	defer func() { runner.recordDueBound(decision, sourceFacts) }()
+	defer func() {
+		runner.recordDueBound(decision, sourceFacts)
+		runner.rememberHeldBy(decision)
+	}()
+	// What the previous round did travels into this one, so a Slot that is
+	// given up on can name it on its own line. Injected before the source is
+	// called because the source is where the decision to give up is taken, and
+	// again available to the executor below, which reports the completion.
+	ctx = withHeldBy(ctx, runner.heldBy)
 	if err := ctx.Err(); err != nil {
 		decision = "cancelled"
 		return execution.SlotExecutionResult{}, false, err

@@ -2184,6 +2184,13 @@ func (executor observedProductionSlotExecutor) Execute(
 	if err == nil && result.Completed && result.CompletionKind != "" && observability.IsShortPeriodCohort(request.ShortPeriodCohort) {
 		shortCompletion = &observability.ShortPeriodCompletionFacts{Cohort: request.ShortPeriodCohort, CompletionKind: string(result.CompletionKind),
 			LagSeconds: time.Since(time.Unix(int64(request.Contract.Slot.EvaluationTime), 0)).Seconds(), AttemptNo: request.AttemptNo}
+		// Only on the completion that is a skip. On the ones that ran, the
+		// previous round's word answers a question nobody is asking, and
+		// carrying it there would make "held by X" look like a property of
+		// healthy Slots too.
+		if result.CompletionKind == execution.CompletionGapSkipped {
+			shortCompletion.HeldBy = scheduler.HeldByFromContext(ctx)
+		}
 	}
 	observedResult := result.Result
 	reason := result.ReasonCode

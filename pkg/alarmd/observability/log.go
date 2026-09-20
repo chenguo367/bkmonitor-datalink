@@ -311,6 +311,22 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.Int64("replay_distance_boundary", facts.DistanceBoundaryUnixMilli),
 			)
 		}
+		// Flat, like everything else on this line. The renderer here emits
+		// keys rather than objects, and a nested held_by would be written but
+		// unreadable by anything filtering this line -- which is the shape a
+		// reading has already been lost to once.
+		if held := facts.HeldBy; held != nil {
+			attributes = append(attributes,
+				slog.String("held_by", held.Decision),
+				slog.Int64("held_by_at", held.AtUnixMilli),
+			)
+			if held.Decision == "query_cooldown" {
+				attributes = append(attributes,
+					slog.Uint64("held_by_cooldown_failures", uint64(held.QueryCooldownFailures)),
+					slog.Int64("held_by_cooldown_until", held.QueryCooldownUntilMilli),
+				)
+			}
+		}
 	}
 	if facts := observation.SegmentContent; facts != nil {
 		attributes = append(attributes, slog.String("segment_content", facts.State))
