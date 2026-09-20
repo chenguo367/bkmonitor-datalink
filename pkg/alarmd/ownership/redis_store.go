@@ -102,48 +102,93 @@ func (store *RedisStore) RegisterWorker(ctx context.Context, worker WorkerRegist
 	return err
 }
 
-func (store *RedisStore) ListReadyWorkers(ctx context.Context, at time.Time) ([]WorkerRegistration, error) {
+// workerReadBatch bounds one registration pipeline, for the reason
+// assignmentReadBatch bounds the other one.
+const workerReadBatch = 512
+
+// ListReadyWorkers reads the registry index and then every registration it
+// names, the registrations in bounded pipelined batches.
+//
+// Every error here returns an error. That is not defensive style: the one
+// thing this function must never do is answer a failed read with a short
+// list. Its caller uses the returned set as "the workers that exist", and a
+// truncated set does not read as a failure anywhere downstream -- it reads as
+// workers having left, which is exactly the input that moves their Query
+// Groups somewhere else. A registry that could not be read has to stop the
+// round, and the only way to say so is the error.
+//
+// A registration key that is simply gone is a different fact, and it keeps
+// its old handling: the worker is dropped from the index rather than failing
+// the round, because the index outliving one registration is ordinary.
+func (store *RedisStore) ListReadyWorkers(
+	ctx context.Context,
+	at time.Time,
+) ([]WorkerRegistration, ControlReadStats, error) {
+	stats := ControlReadStats{}
 	if at.IsZero() {
-		return nil, errors.New("alarmd ownership: worker listing time is required")
+		return nil, stats, errors.New("alarmd ownership: worker listing time is required")
 	}
+	started := time.Now()
+	defer func() { stats.Duration = time.Since(started) }()
+	stats.RoundTrips++
 	if err := store.client.ZRemRangeByScore(ctx, store.workerRegistryKey(), "-inf", strconv.FormatInt(at.UnixMilli(), 10)).Err(); err != nil {
-		return nil, err
+		return nil, stats, err
 	}
+	stats.RoundTrips++
 	workerIDs, err := store.client.ZRangeByScore(ctx, store.workerRegistryKey(), &redis.ZRangeBy{
 		Min: "(" + strconv.FormatInt(at.UnixMilli(), 10), Max: "+inf",
 	}).Result()
 	if err != nil {
-		return nil, err
+		return nil, stats, err
 	}
+	stats.Keys = len(workerIDs)
 	workers := make([]WorkerRegistration, 0, len(workerIDs))
 	missing := make([]interface{}, 0)
-	for _, workerID := range workerIDs {
-		payload, getErr := store.client.Get(ctx, store.workerKey(workerID)).Bytes()
-		if errors.Is(getErr, redis.Nil) {
-			missing = append(missing, workerID)
-			continue
+	for start := 0; start < len(workerIDs); start += workerReadBatch {
+		end := start + workerReadBatch
+		if end > len(workerIDs) {
+			end = len(workerIDs)
 		}
-		if getErr != nil {
-			return nil, getErr
+		replies := make([]*redis.StringCmd, end-start)
+		stats.RoundTrips++
+		if _, pipeErr := store.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			for offset, workerID := range workerIDs[start:end] {
+				replies[offset] = pipe.Get(ctx, store.workerKey(workerID))
+			}
+			return nil
+		}); pipeErr != nil && !errors.Is(pipeErr, redis.Nil) {
+			return nil, stats, pipeErr
 		}
-		var worker WorkerRegistration
-		if err := json.Unmarshal(payload, &worker); err != nil {
-			return nil, fmt.Errorf("alarmd ownership: decode worker registration: %w", err)
-		}
-		if err := worker.Validate(); err != nil {
-			return nil, err
-		}
-		if worker.AssignmentReadiness == WorkerReady && worker.ExpiresAt.After(at) {
-			workers = append(workers, worker)
+		for offset, reply := range replies {
+			workerID := workerIDs[start+offset]
+			payload, getErr := reply.Bytes()
+			if errors.Is(getErr, redis.Nil) {
+				missing = append(missing, workerID)
+				continue
+			}
+			if getErr != nil {
+				return nil, stats, getErr
+			}
+			var worker WorkerRegistration
+			if decodeErr := json.Unmarshal(payload, &worker); decodeErr != nil {
+				return nil, stats, fmt.Errorf("alarmd ownership: decode worker registration: %w", decodeErr)
+			}
+			if validateErr := worker.Validate(); validateErr != nil {
+				return nil, stats, validateErr
+			}
+			if worker.AssignmentReadiness == WorkerReady && worker.ExpiresAt.After(at) {
+				workers = append(workers, worker)
+			}
 		}
 	}
 	if len(missing) > 0 {
+		stats.RoundTrips++
 		if err := store.client.ZRem(ctx, store.workerRegistryKey(), missing...).Err(); err != nil {
-			return nil, err
+			return nil, stats, err
 		}
 	}
 	sort.Slice(workers, func(left, right int) bool { return workers[left].WorkerID < workers[right].WorkerID })
-	return workers, nil
+	return workers, stats, nil
 }
 
 func (store *RedisStore) AcquireControlLeader(
@@ -227,6 +272,17 @@ func (store *RedisStore) ReadAssignment(
 	if err != nil {
 		return AssignmentRecord{}, err
 	}
+	return assignmentFromHash(queryGroup, values)
+}
+
+// assignmentFromHash is the one decoder both the single and the batched read
+// use. Two decoders for one record shape would be two things that must agree
+// about the same hash, and the batched path exists precisely to be used
+// instead of the other one.
+func assignmentFromHash(
+	queryGroup execution.QueryGroupIdentity,
+	values map[string]string,
+) (AssignmentRecord, error) {
 	if len(values) == 0 {
 		return AssignmentRecord{}, ErrAssignmentAbsent
 	}
@@ -240,6 +296,102 @@ func (store *RedisStore) ReadAssignment(
 		return AssignmentRecord{}, err
 	}
 	return record, nil
+}
+
+// ControlReadStats is what one control-plane read actually did on the wire.
+//
+// It is filled in by the code that issues the calls, not derived afterwards
+// from a client-side label: the question the round has to answer is "how many
+// round trips did this round spend", and a per-client counter cannot say which
+// round trips belonged to which round, nor separate the assignment reads from
+// everything else the same client is doing.
+type ControlReadStats struct {
+	// Keys is how many records were asked for.
+	Keys int
+	// RoundTrips is how many times the caller waited for Redis. One per
+	// pipelined batch plus each unpipelined command the read needs.
+	RoundTrips int
+	// Duration is the wall time those round trips took.
+	Duration time.Duration
+}
+
+// Add folds another read's stats into these, for a round that does more than
+// one of them.
+func (stats ControlReadStats) Add(other ControlReadStats) ControlReadStats {
+	return ControlReadStats{
+		Keys:       stats.Keys + other.Keys,
+		RoundTrips: stats.RoundTrips + other.RoundTrips,
+		Duration:   stats.Duration + other.Duration,
+	}
+}
+
+// assignmentReadBatch bounds one pipeline. A round over every Query Group of
+// the population would otherwise put the whole population in one buffer.
+const assignmentReadBatch = 512
+
+// ReadAssignments reads many Assignment records in bounded pipelined batches.
+//
+// The records are the same ones ReadAssignment returns, decoded by the same
+// function and validated the same way. What changes is the waiting: a round
+// that settles Q Query Groups spent Q round trips here and now spends
+// ceil(Q/512).
+//
+// A Query Group with no record is absent from the returned map, which is the
+// batched form of ErrAssignmentAbsent -- not an error, and not an empty
+// record either. A read that fails is an error and the map is nil. The
+// distinction is the whole point: absent means "never assigned, place it",
+// and a failed read means "we do not know", and a round that turned the
+// second into the first would republish every Assignment in the population
+// against a ready set it could not verify.
+func (store *RedisStore) ReadAssignments(
+	ctx context.Context,
+	queryGroups []execution.QueryGroupIdentity,
+) (map[execution.QueryGroupIdentity]AssignmentRecord, ControlReadStats, error) {
+	if store == nil || store.client == nil {
+		return nil, ControlReadStats{}, errors.New("alarmd ownership: initialized store is required")
+	}
+	stats := ControlReadStats{Keys: len(queryGroups)}
+	records := make(map[execution.QueryGroupIdentity]AssignmentRecord, len(queryGroups))
+	if len(queryGroups) == 0 {
+		return records, stats, nil
+	}
+	started := time.Now()
+	defer func() { stats.Duration = time.Since(started) }()
+	for start := 0; start < len(queryGroups); start += assignmentReadBatch {
+		end := start + assignmentReadBatch
+		if end > len(queryGroups) {
+			end = len(queryGroups)
+		}
+		replies := make([]*redis.StringStringMapCmd, end-start)
+		stats.RoundTrips++
+		if _, err := store.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			for offset, queryGroup := range queryGroups[start:end] {
+				if queryGroup == "" {
+					return errors.New("alarmd ownership: query group is required")
+				}
+				replies[offset] = pipe.HGetAll(ctx, store.assignmentKey(queryGroup))
+			}
+			return nil
+		}); err != nil && !errors.Is(err, redis.Nil) {
+			return nil, stats, err
+		}
+		for offset, reply := range replies {
+			queryGroup := queryGroups[start+offset]
+			values, err := reply.Result()
+			if err != nil && !errors.Is(err, redis.Nil) {
+				return nil, stats, err
+			}
+			record, decodeErr := assignmentFromHash(queryGroup, values)
+			if errors.Is(decodeErr, ErrAssignmentAbsent) {
+				continue
+			}
+			if decodeErr != nil {
+				return nil, stats, decodeErr
+			}
+			records[queryGroup] = record
+		}
+	}
+	return records, stats, nil
 }
 
 func (store *RedisStore) Acquire(
