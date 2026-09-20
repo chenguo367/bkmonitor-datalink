@@ -207,3 +207,28 @@ func endpointFactsSource(
 		return endpoints
 	}
 }
+
+// readinessFactsSource reads this replica's readiness from the same tracker
+// its readiness endpoint answers from, field for field, so the fleet snapshot
+// and the probe say the same thing about one process. Nil health -- a
+// publisher built without one -- publishes no fact rather than a made-up
+// ready.
+func readinessFactsSource(health *phaseTwoApplicationHealth) func() *fleet.ReadinessFacts {
+	if health == nil {
+		return nil
+	}
+	return func() *fleet.ReadinessFacts {
+		snapshot := health.HealthSnapshot()
+		facts := &fleet.ReadinessFacts{
+			State: string(snapshot.State), Ready: snapshot.Ready,
+			ConfigLoaded: snapshot.ConfigLoaded, SchemaReady: snapshot.SchemaReady,
+			AssignmentReady: snapshot.AssignmentReady, RuntimeStateReady: snapshot.RuntimeStateReady,
+			OutputSinkReady: snapshot.OutputSinkReady, SnapshotReady: snapshot.SnapshotReady,
+			Draining: snapshot.Draining,
+		}
+		for _, reason := range snapshot.Reasons {
+			facts.Reasons = append(facts.Reasons, string(reason))
+		}
+		return facts
+	}
+}

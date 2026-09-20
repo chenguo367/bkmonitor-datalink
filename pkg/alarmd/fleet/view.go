@@ -964,6 +964,46 @@ type Snapshot struct {
 	// Dependencies is every external system this replica resolved, with what
 	// it has seen of each. Absent on a build before this fact existed.
 	Dependencies []Endpoint `json:"dependencies,omitempty"`
+	// Readiness is this replica's own readiness, bit by bit, as its readiness
+	// endpoint answers it. Absent on a build before this fact existed.
+	Readiness *ReadinessFacts `json:"readiness,omitempty"`
+}
+
+// ReadinessFacts is one replica's readiness as its process reports it: the
+// state word, the one bit the probe answers on, and the bits that bit is made
+// of. The same facts the process serves on its readiness endpoint, on the
+// snapshot, so the question "is every replica ready, and which bit is the one
+// that is not" is answered from the fleet and not by asking each process --
+// which, on a live deployment, was the only way to read four of the six.
+//
+// Field names are the readiness endpoint's, so a reader who knows one knows
+// the other.
+type ReadinessFacts struct {
+	State string `json:"state"`
+	Ready bool   `json:"ready"`
+	// Reasons is what the process says stands between it and ready, bounded
+	// by the process; empty when ready.
+	Reasons           []string `json:"reasons,omitempty"`
+	ConfigLoaded      bool     `json:"config_loaded"`
+	SchemaReady       bool     `json:"schema_ready"`
+	AssignmentReady   bool     `json:"assignment_ready"`
+	RuntimeStateReady bool     `json:"runtime_state_ready"`
+	OutputSinkReady   bool     `json:"output_sink_ready"`
+	SnapshotReady     bool     `json:"snapshot_ready"`
+	// Draining is a replica on its way out: not ready by choice, and not a
+	// fault.
+	Draining bool `json:"draining"`
+}
+
+// copyReadiness is the facts as their own value, so a row cannot alias the
+// snapshot's.
+func copyReadiness(facts *ReadinessFacts) *ReadinessFacts {
+	if facts == nil {
+		return nil
+	}
+	copied := *facts
+	copied.Reasons = append([]string(nil), facts.Reasons...)
+	return &copied
 }
 
 // RebalanceFacts is one rebalance planning round on the control leader, as
@@ -1356,6 +1396,10 @@ type ReplicaView struct {
 	// published none (an older build). On the verdict route only; the list
 	// route drops it with the other rows it is not about.
 	Dependencies []Endpoint `json:"dependencies,omitempty"`
+	// Readiness is this replica's own, bit by bit, as its readiness endpoint
+	// answers. Absent when it published none (an older build), which is not
+	// "not ready": the count beside the rows leaves it out.
+	Readiness *ReadinessFacts `json:"readiness,omitempty"`
 }
 
 // BuildFacts is one process's build: the three labels of its build_info
@@ -1555,6 +1599,11 @@ type View struct {
 	Dependencies         []Endpoint `json:"dependencies,omitempty"`
 	DependenciesReplica  string     `json:"dependencies_replica,omitempty"`
 	DependenciesReplicas int        `json:"dependencies_replicas,omitempty"`
+	// ReplicasNotReady counts the counted replicas whose own readiness says
+	// not ready: up and publishing, and answering the probe with no. Which
+	// bit is on each replica's row. A replica that published no readiness is
+	// not counted -- an older build is not a replica that is not ready.
+	ReplicasNotReady int `json:"replicas_not_ready"`
 }
 
 // Aggregate folds the published snapshots into one view.
@@ -1736,6 +1785,12 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		// read cannot alias the snapshot's slice.
 		if len(snapshot.Dependencies) > 0 {
 			perReplica.Dependencies = append([]Endpoint(nil), snapshot.Dependencies...)
+		}
+		// And its own readiness, the same way. Counted as not ready only on
+		// its own word: a snapshot without the fact is an older build's.
+		perReplica.Readiness = copyReadiness(snapshot.Readiness)
+		if snapshot.Readiness != nil && !snapshot.Readiness.Ready {
+			view.ReplicasNotReady++
 		}
 		view.Builds = addToBuildGroup(view.Builds, snapshot.Build, replica)
 		view.Workers.Ready++

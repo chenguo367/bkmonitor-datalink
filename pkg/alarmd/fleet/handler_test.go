@@ -1060,3 +1060,38 @@ func TestTheVerdictRouteCarriesEachReplicasDependenciesAndTheListRouteDoesNot(t 
 		}
 	}
 }
+
+// The verdict route carries each replica's readiness bits and the count of
+// replicas that answer no, so the question a rollout asks -- is every
+// replica ready, and on which bit is the one that is not -- is one read.
+func TestTheVerdictRouteCarriesEachReplicasReadiness(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[0].Readiness = &ReadinessFacts{State: "ready", Ready: true, ConfigLoaded: true, SchemaReady: true,
+		AssignmentReady: true, RuntimeStateReady: true, OutputSinkReady: true, SnapshotReady: true}
+	snapshots[1].Readiness = &ReadinessFacts{State: "not_ready", Ready: false, Reasons: []string{"KAFKA_UNAVAILABLE"},
+		ConfigLoaded: true, SchemaReady: true, AssignmentReady: true, RuntimeStateReady: true, OutputSinkReady: false, SnapshotReady: true}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas())
+	_, health := get(t, handler, "/api/health")
+	if health["replicas_not_ready"].(float64) != 1 {
+		t.Fatalf("replicas_not_ready = %v, want 1", health["replicas_not_ready"])
+	}
+	rows, _ := health["per_replica"].([]any)
+	bits := map[string]map[string]any{}
+	for _, item := range rows {
+		row := item.(map[string]any)
+		readiness, _ := row["readiness"].(map[string]any)
+		if readiness == nil {
+			t.Fatalf("%v row carries no readiness: %v", row["replica"], row)
+		}
+		bits[row["replica"].(string)] = readiness
+	}
+	if bits["pod-a"]["ready"] != true || bits["pod-a"]["output_sink_ready"] != true {
+		t.Errorf("pod-a readiness = %v, want ready with the output bit true", bits["pod-a"])
+	}
+	if bits["pod-b"]["ready"] != false || bits["pod-b"]["output_sink_ready"] != false || bits["pod-b"]["runtime_state_ready"] != true {
+		t.Errorf("pod-b readiness = %v, want not ready with the output bit the one that is false", bits["pod-b"])
+	}
+	if reasons, _ := bits["pod-b"]["reasons"].([]any); len(reasons) != 1 || reasons[0] != "KAFKA_UNAVAILABLE" {
+		t.Errorf("pod-b reasons = %v, want the process's one reason", bits["pod-b"]["reasons"])
+	}
+}

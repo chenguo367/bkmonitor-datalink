@@ -245,6 +245,9 @@ type HealthResponse struct {
 	Dependencies         []Endpoint `json:"dependencies"`
 	DependenciesReplica  string     `json:"dependencies_replica,omitempty"`
 	DependenciesReplicas int        `json:"dependencies_replicas"`
+	// ReplicasNotReady is how many counted replicas answer their own
+	// readiness probe with no; which bit, on each per_replica row.
+	ReplicasNotReady int `json:"replicas_not_ready"`
 	// Overdue rides here rather than only in the list because the list can be
 	// paged or truncated, and "how many objects are not being evaluated" must
 	// not depend on how much of the list fitted.
@@ -785,8 +788,8 @@ func NewHandler(
 			Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,
 			Source: view.Source, SourceReplica: view.SourceReplica,
 			Dependencies: dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
-			DependenciesReplicas: view.DependenciesReplicas,
-			Overdue:              view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
+			DependenciesReplicas: view.DependenciesReplicas, ReplicasNotReady: view.ReplicasNotReady,
+			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
 			Gaps: view.Gaps, Capacity: view.Capacity,
 			Load: LoadOf(&view, now()),
 		})

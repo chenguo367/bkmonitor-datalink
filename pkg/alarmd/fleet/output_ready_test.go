@@ -182,3 +182,54 @@ func TestEachReplicaCarriesItsOwnDependencyRecord(t *testing.T) {
 		}
 	}
 }
+
+// Each replica's readiness rides on its own row, bit by bit, and the view
+// counts the replicas that answer their own probe with no. Four of the six
+// bits could only be read by asking each process on a live deployment; the
+// rows answer it from the fleet. A replica that published no readiness is an
+// older build, not a replica that is not ready, and the count leaves it out.
+func TestEachReplicaCarriesItsOwnReadinessAndTheViewCountsTheNotReady(t *testing.T) {
+	snapshots := idleSnapshots()
+	// pod-a published last and is ready on every bit.
+	snapshots[0].TakenAt = now.Add(-5 * time.Second)
+	snapshots[0].Readiness = &ReadinessFacts{State: "ready", Ready: true, ConfigLoaded: true, SchemaReady: true,
+		AssignmentReady: true, RuntimeStateReady: true, OutputSinkReady: true, SnapshotReady: true}
+	// pod-b is up, publishing, and not ready: its runtime state store has not
+	// answered, and it says so.
+	snapshots[1].Readiness = &ReadinessFacts{State: "not_ready", Ready: false, Reasons: []string{"REDIS_UNAVAILABLE"},
+		ConfigLoaded: true, SchemaReady: true, AssignmentReady: true, RuntimeStateReady: false, OutputSinkReady: true, SnapshotReady: true}
+	view := Aggregate(Expectation{QueryGroups: 0, Known: true}, snapshots, replicas(), now, freshness)
+	if view.ReplicasNotReady != 1 {
+		t.Fatalf("replicas not ready = %d, want 1: pod-b on its own word", view.ReplicasNotReady)
+	}
+	rows := map[string]ReplicaView{}
+	for _, row := range view.PerReplica {
+		rows[row.Replica] = row
+	}
+	a, b := rows["pod-a"], rows["pod-b"]
+	if a.Readiness == nil || !a.Readiness.Ready || !a.Readiness.RuntimeStateReady {
+		t.Errorf("pod-a row readiness = %+v, want its own: ready on every bit", a.Readiness)
+	}
+	if b.Readiness == nil || b.Readiness.Ready || b.Readiness.RuntimeStateReady || !b.Readiness.OutputSinkReady ||
+		len(b.Readiness.Reasons) != 1 || b.Readiness.Reasons[0] != "REDIS_UNAVAILABLE" {
+		t.Errorf("pod-b row readiness = %+v, want its own: not ready, runtime state the bit, one reason", b.Readiness)
+	}
+	// The row's facts are a copy: the reasons a later reader appends to the
+	// snapshot's slice do not reach the row.
+	snapshots[1].Readiness.Reasons[0] = "changed"
+	if b.Readiness.Reasons[0] == "changed" {
+		t.Error("the per-replica row aliases the snapshot's readiness")
+	}
+	// An older build publishes no readiness: no row fact, and not counted.
+	older := idleSnapshots()
+	older[0].Readiness = snapshots[0].Readiness
+	view = Aggregate(Expectation{QueryGroups: 0, Known: true}, older, replicas(), now, freshness)
+	if view.ReplicasNotReady != 0 {
+		t.Errorf("replicas not ready = %d, want 0: pod-b published no readiness, which is not a no", view.ReplicasNotReady)
+	}
+	for _, row := range view.PerReplica {
+		if row.Replica == "pod-b" && row.Readiness != nil {
+			t.Errorf("pod-b published no readiness and its row carries %+v", row.Readiness)
+		}
+	}
+}
