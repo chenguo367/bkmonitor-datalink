@@ -6,7 +6,11 @@
 package controlplane
 
 import (
+	"context"
+	"errors"
 	"sync"
+
+	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -97,4 +101,62 @@ func (repository *RedisCatalogRepository) LocalView(owned []execution.QueryGroup
 		}
 	}
 	return summed
+}
+
+// MissingObjects is how many of the named objects this Worker cannot read:
+// not in its cache and not stored under the catalog prefix. Asked by the
+// view stream's client once per install, for the objects the install
+// brought, so a Worker can say of a view it installed whether the content
+// it names is there to execute -- a fact of the view reported with the
+// receipt, never invented as present. The store is asked in one pipeline of
+// EXISTS for the objects the cache does not hold.
+func (repository *RedisCatalogRepository) MissingObjects(
+	ctx context.Context,
+	objects []execution.ObjectDigest,
+	contexts []execution.OutputContextDigest,
+) (int, error) {
+	if repository == nil || repository.client == nil {
+		return 0, errors.New("alarmd controlplane: Redis catalog repository is required")
+	}
+	keys := make([]string, 0, len(objects)+len(contexts))
+	seen := make(map[string]struct{}, cap(keys))
+	consider := func(key string) {
+		if _, dup := seen[key]; dup {
+			return
+		}
+		seen[key] = struct{}{}
+		if _, _, cached := repository.objectCache.lookup(key); cached {
+			return
+		}
+		keys = append(keys, key)
+	}
+	for _, digest := range objects {
+		if digest != "" {
+			consider(repository.queryGroupObjectKey(digest))
+		}
+	}
+	for _, digest := range contexts {
+		if digest != "" {
+			consider(repository.outputContextKey(digest))
+		}
+	}
+	missing := 0
+	for start := 0; start < len(keys); start += objectCatalogBatch {
+		batch := keys[start:minInt(start+objectCatalogBatch, len(keys))]
+		replies := make([]*redis.IntCmd, len(batch))
+		if _, err := repository.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			for index, key := range batch {
+				replies[index] = pipe.Exists(ctx, key)
+			}
+			return nil
+		}); err != nil {
+			return 0, activationDependencyIO(err)
+		}
+		for _, reply := range replies {
+			if reply.Val() == 0 {
+				missing++
+			}
+		}
+	}
+	return missing, nil
 }

@@ -769,7 +769,7 @@ func mandatoryLogStage(stage Stage) bool {
 	case StageSnapshotRefreshed, StageSnapshotUnavailable, StageAssignmentAcquired, StageAssignmentLost,
 		StageTakeoverStarted, StageTakeoverCompleted:
 		return true
-	case StageAssignmentSwept, StageViewPublished, StageViewSession:
+	case StageAssignmentSwept, StageViewPublished, StageViewSession, StageViewInstalled:
 		// Once per term, or once per Worker per connection: rare, and the
 		// only account there is of what happened. Never budgeted away.
 		return true

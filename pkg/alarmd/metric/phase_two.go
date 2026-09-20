@@ -120,6 +120,7 @@ type phaseTwoMetrics struct {
 	dispatchRotation                *dispatchRotationCollector
 	localView                       *localViewCollector
 	viewStream                      *viewStreamCollector
+	viewClient                      *viewClientCollector
 	legacyPodCache                  *prometheus.CounterVec
 	redisPool                       *redisPoolCollector
 	renewalGate                     *renewalGateCollector
@@ -538,6 +539,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.dispatchRotation = newDispatchRotationCollector()
 	metrics.localView = newLocalViewCollector()
 	metrics.viewStream = newViewStreamCollector()
+	metrics.viewClient = newViewClientCollector()
 	metrics.legacyPodCache = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "legacy_pod_cache_total", Help: "Existing Python Pod cache reads by bounded result."}, []string{"result"})
 	metrics.redisPool = newRedisPoolCollector()
 	metrics.renewalGate = newRenewalGateCollector()
@@ -988,7 +990,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.openAlertSet, m.controlSourceRounds, m.controlSource,
+		m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,

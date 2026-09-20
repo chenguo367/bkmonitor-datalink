@@ -748,6 +748,22 @@ func openProductionPhaseTwoBundleWithDependencies(
 	controlStream := grpc.NewServer()
 	pb.RegisterControlServiceServer(controlStream, viewServer)
 	recorder.SetViewStreamSource(func() metric.ViewStreamCounts { return viewStreamCounts(viewServer.Stats()) })
+	// This Worker's side of the same stream: it finds the Leader from the
+	// lease and the Leader's registration, installs what it is sent, and
+	// asks the catalog whether the objects a view names are there. In the
+	// shadow step nothing executes off the installed view.
+	incarnation, err := newViewStreamIncarnation()
+	if err != nil {
+		return nil, err
+	}
+	viewClient, err := viewstream.NewClient(
+		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
+		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now},
+	)
+	if err != nil {
+		return nil, err
+	}
+	recorder.SetViewClientSource(func() metric.ViewClientCounts { return viewClientCounts(viewClient.Stats()) })
 	// The cutover names each changing Query Group's content in its record
 	// before it cuts the Segment that carries it (decision-016 batch 3).
 	activator.WithContentScopeWriter(productionOwnership)
@@ -900,7 +916,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		Config: cfg, Health: health, Control: control, Ownership: productionOwnership,
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,
 		FleetAPI:      fleetAPI,
-		ControlStream: controlStream, StreamIdentity: streamIdentity, ViewStreamStats: viewServer.Stats,
+		ControlStream: controlStream, StreamIdentity: streamIdentity, ViewStreamStats: viewServer.Stats, ViewClient: viewClient,
 		PublishFleet: func(ctx context.Context) {
 			observationRefresh.publish(ctx)
 			publisher.publishOnce(ctx)
