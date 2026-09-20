@@ -326,12 +326,13 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if facts := observation.NoDataMemoryRefusal; facts != nil {
 		attributes = append(attributes, slog.String("no_data_memory_refusal", facts.Reason))
 		if facts.Record != "" {
-			// Both numbers together or neither. A reader given the size with
-			// no bound, or the bound with no size, cannot tell how far over it
-			// is, which is the only question this line exists to answer.
+			// Both numbers together or neither. A reader given the measurement
+			// with no bound, or the bound with no measurement, cannot tell how
+			// far over it is, which is the only question this line exists to
+			// answer.
 			attributes = append(attributes,
 				slog.String("no_data_memory_record", facts.Record),
-				slog.Int("no_data_memory_bytes", facts.Bytes),
+				slog.Int("no_data_memory_groups", facts.Groups),
 				slog.Int("no_data_memory_limit", facts.Limit),
 			)
 		}

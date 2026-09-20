@@ -611,7 +611,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			memory = &NoDataMemoryRefusal{FirstAt: at, Plan: plan}
 			state.noDataMemory[plan] = memory
 		}
-		memory.Reason, memory.Record, memory.Bytes, memory.Limit = refusal.Reason, refusal.Record, refusal.Bytes, refusal.Limit
+		memory.Reason, memory.Record, memory.Groups, memory.Limit =
+			refusal.Reason, refusal.Record, refusal.Groups, refusal.Limit
 		memory.LastAt = at
 		memory.Refusals++
 	}

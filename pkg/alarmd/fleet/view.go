@@ -253,9 +253,11 @@ type FailureRef struct {
 // refusal shown is the latest among the object's refused Plans and Plans
 // says how many of them are refused; the row's strategies name them all.
 type NoDataMemoryRefusal struct {
-	Reason   string      `json:"reason"`
-	Record   string      `json:"record,omitempty"`
-	Bytes    int         `json:"bytes,omitempty"`
+	Reason string `json:"reason"`
+	Record string `json:"record,omitempty"`
+	// Groups and Limit are the measurement behind a bound refusal. It used to
+	// be a byte count, which a memory held one field per group no longer has.
+	Groups   int         `json:"groups,omitempty"`
 	Limit    int         `json:"limit,omitempty"`
 	FirstAt  time.Time   `json:"first_at"`
 	LastAt   time.Time   `json:"last_at"`

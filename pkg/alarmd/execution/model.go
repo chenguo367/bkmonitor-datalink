@@ -1594,7 +1594,51 @@ type NoDataGroupMemory struct {
 	FirstAbsent int64  `json:"first_absent,omitempty"`
 }
 
-// PlanNoDataMutation replaces one Plan's whole no-data memory.
+// NoDataGroupAbsence is what a record holds about a group that was not seen in
+// the round PresentAsOf names: when it was last seen, and when it was first
+// called absent. Either may be zero - the whole-item group has never been seen
+// as a series and carries no LastSeen - but not both, because a group that
+// remembers nothing is not stored.
+type NoDataGroupAbsence struct {
+	LastSeen    int64 `json:"last_seen,omitempty"`
+	FirstAbsent int64 `json:"first_absent,omitempty"`
+}
+
+// NoDataGroupDelta is one group's stored value.
+//
+// Absent nil means the group was seen in the round PresentAsOf names, and that
+// is the whole value: its LastSeen is PresentAsOf and it has no first-absent.
+// Writing the timestamp per group instead would write the same number once per
+// group, which for a Plan with thousands of them is the difference the whole
+// representation change exists to remove.
+//
+// The compression is only valid for a group whose LastSeen really is
+// PresentAsOf. A group the roster stopped expecting while it was present keeps
+// its own older LastSeen and never gets a FirstAbsent - that is where a history
+// roster grows from - so it is written out in full, or its last-seen time would
+// silently follow the Plan's and its absence would read as shorter than it was.
+type NoDataGroupDelta struct {
+	GroupKey string              `json:"group_key"`
+	Absent   *NoDataGroupAbsence `json:"absent,omitempty"`
+}
+
+// PlanNoDataMutation changes one Plan's no-data memory.
+//
+// It is a delta, not the memory: Set carries the groups whose stored value
+// this round changes and Del the ones it removes, both relative to the record
+// at ExpectedMarkerRevision. That is why the expected revision is not advisory
+// here the way it is for a whole replacement - a delta applied to a different
+// version is a different memory, so a revision mismatch is a conflict rather
+// than something to be reconciled.
+//
+// It carries two digests because there are two questions and one value cannot
+// answer both. MemoryDigest identifies the memory the delta results in: two
+// rounds that reach the same memory carry the same one whatever they had to
+// change to get there, which is what lets the store answer "already applied"
+// without holding the memory. MutationDigest identifies this statement, covers
+// MemoryDigest, and is the only one the store can recompute - the memory is
+// deliberately not on the wire, so without it a payload could name any memory
+// digest it liked and the store would store it.
 type PlanNoDataMutation struct {
 	Identity               PlanNoDataIdentity
 	SchemaVersion          NoDataMemorySchema
@@ -1605,9 +1649,22 @@ type PlanNoDataMutation struct {
 	// the digest because the same group timestamps decided against a different
 	// roster are a different memory, and a reader comparing two records has no
 	// other way to tell.
-	RosterVersion  string
+	RosterVersion string
+	// PresentAsOf is the round this Plan last had data in, which every group
+	// written without an absence was seen in. It never moves backwards: a round
+	// that saw nothing carries the previous one forward.
+	PresentAsOf int64
+	// MemoryDigest is what the store keeps beside the record and compares the
+	// next statement against.
+	MemoryDigest   MutationDigest
 	MutationDigest MutationDigest
-	Groups         []NoDataGroupMemory
+	// GroupCount is how many groups the resulting memory holds. The store
+	// cannot count them - it holds the record and applies a delta to it without
+	// reading the groups - so the writer, which has the whole memory in hand,
+	// states the number the group bound is checked against.
+	GroupCount uint32
+	Set        []NoDataGroupDelta
+	Del        []string
 }
 
 type StateEvaluation struct {

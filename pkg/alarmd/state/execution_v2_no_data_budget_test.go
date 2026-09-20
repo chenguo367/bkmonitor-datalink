@@ -21,30 +21,76 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// A refusal about size says how big the record was and what it was measured
-// against, and which of the two records it measured.
+// The memory a Plan of real size holds is written, where the whole-memory
+// representation refused it.
 //
-// Without the numbers the refusal is not actionable: a record a little over
-// the bound is one object that has outgrown a single key, and one many times
-// over is something else entirely, and the reason code alone reads the same
-// for both. Which record matters for the same reason -- the record already in
-// the store being too large is a bound that moved or another build's write,
-// and the record this round would write being too large is this Plan having
-// grown.
-func TestNoDataApplySizeRefusalCarriesBothNumbers(t *testing.T) {
+// This is the defect the representation change exists to remove, so it is
+// pinned as a behaviour rather than left implied by the absence of a bound:
+// roughly three thousand groups, each carrying the two clocks that appear
+// exactly when absence is being detected, is what an object on the deployment
+// holds, and under one encoded value it was past half a megabyte and refused
+// every round - silently, because a Plan whose memory is refused goes on
+// evaluating and only stops remembering.
+func TestAMemoryTooLargeForOneValueIsWritten(t *testing.T) {
 	backend := &casMemoryBackend{values: make(map[string][]byte)}
 	store := generationStore(t, backend)
 	ctx := context.Background()
 
-	// Groups enough to put the encoded record past the fixture's 4096-byte
-	// bound, built the way a real memory is: one entry per group the item has
-	// seen, each holding its key and its clocks.
-	groups := make([]execution.NoDataGroupMemory, 0, 64)
-	for index := 0; index < 64; index++ {
+	groups := make([]execution.NoDataGroupMemory, 0, 3200)
+	for index := 0; index < 3200; index++ {
 		groups = append(groups, execution.NoDataGroupMemory{
 			GroupKey:    fmt.Sprintf("component=flink,data_set_id=%d_clustered,__NO_DATA_DIMENSION__=true", index),
-			LastSeen:    1789555680,
-			FirstAbsent: 1789555380,
+			LastSeen:    940,
+			FirstAbsent: 980,
+		})
+	}
+	mutation := noDataMutationV2(t, 0, groups...)
+	encoded, err := json.Marshal(groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(encoded) <= store.options.MaxValueBytes {
+		t.Fatalf("fixture: the memory encodes to %d bytes, inside the %d-byte bound one value had; "+
+			"this test is not exercising the size that used to be refused",
+			len(encoded), store.options.MaxValueBytes)
+	}
+	applied, err := store.ApplyNoData(ctx, execution.NoDataApplyRequest{
+		Contract: frozenRef(), Items: []execution.PlanNoDataMutation{mutation},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Items[0].Status != execution.NoDataApplied {
+		t.Fatalf("apply = %+v, want the memory stored: one field per group has no size bound",
+			applied.Items[0])
+	}
+	loaded, err := store.LoadNoData(ctx, execution.NoDataLoadRequest{
+		Contract: frozenRef(), Items: []execution.PlanNoDataLoadItem{noDataLoadItemV2()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(loaded.Items[0].Groups); got != len(groups) {
+		t.Fatalf("read back %d groups, want all %d", got, len(groups))
+	}
+}
+
+// The one bound left is on how many groups a memory holds, and a refusal on it
+// says the count and the bound.
+//
+// Without the numbers the refusal is not actionable: a Plan a little over the
+// guard is one whose expected set grew, and one many times over is a roster
+// derivation that has run away, and the reason code alone reads the same for
+// both.
+func TestNoDataApplyGroupRefusalCarriesBothNumbers(t *testing.T) {
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	store := boundedGroupStore(t, backend, 64)
+	ctx := context.Background()
+
+	groups := make([]execution.NoDataGroupMemory, 0, 65)
+	for index := 0; index < 65; index++ {
+		groups = append(groups, execution.NoDataGroupMemory{
+			GroupKey: fmt.Sprintf("data_set_id=%d", index), LastSeen: 940, FirstAbsent: 980,
 		})
 	}
 	applied, err := store.ApplyNoData(ctx, execution.NoDataApplyRequest{
@@ -59,43 +105,59 @@ func TestNoDataApplySizeRefusalCarriesBothNumbers(t *testing.T) {
 		t.Fatalf("apply = %+v, want a deterministic budget refusal", item)
 	}
 	if item.Size == nil {
-		t.Fatal("a size refusal carried no measurement; STATE_BUDGET_EXCEEDED on its own is not actionable")
+		t.Fatal("a bound refusal carried no measurement; STATE_BUDGET_EXCEEDED on its own is not actionable")
 	}
-	if item.Size.Record != execution.NoDataRecordNext {
-		t.Fatalf("measured record = %q, want the one this round would write", item.Size.Record)
+	if item.Size.Record != execution.NoDataRecordGroups {
+		t.Fatalf("measured record = %q, want the group count", item.Size.Record)
 	}
-	if item.Size.Limit != 4096 {
-		t.Fatalf("limit = %d, want the store's bound", item.Size.Limit)
-	}
-	if item.Size.Bytes <= item.Size.Limit {
-		t.Fatalf("bytes = %d, limit = %d; a refusal reported a size that fits", item.Size.Bytes, item.Size.Limit)
+	if item.Size.Groups != 65 || item.Size.Limit != 64 {
+		t.Fatalf("measurement = %+v, want 65 groups against a bound of 64", item.Size)
 	}
 	// Nothing was written. The refusal is the whole outcome, and a partial
 	// write would leave a record whose revision no later mutation expects.
-	key, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, written := backend.values[key]; written {
+	if len(backend.hashes[noDataHashKey(t)]) != 0 {
 		t.Fatal("a refused write left a record behind")
 	}
 }
 
-// The record already in the store is measured before it is decoded, and says
-// so.
-//
-// This is reachable only from outside this build's write path -- nothing it
-// writes exceeds the bound -- which is exactly why it is worth telling apart:
-// a reader who sees STORED knows the record was not put there by a write this
-// build made under this bound, and has somewhere different to look.
-func TestNoDataApplyNamesTheStoredRecordWhenItIsTheOneTooLarge(t *testing.T) {
-	backend := &casMemoryBackend{values: make(map[string][]byte)}
-	store := generationStore(t, backend)
-	key, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
+// boundedGroupStore is a store whose group guard is small enough for a test to
+// reach. The production default is two orders of magnitude above what any Plan
+// holds, which is what makes it a guard; a test that built 100,001 groups would
+// be measuring the test.
+func boundedGroupStore(t *testing.T, backend *casMemoryBackend, groups int) *ExecutionStore {
+	t.Helper()
+	router, err := NewFixedRouter("target", backend)
 	if err != nil {
 		t.Fatal(err)
 	}
-	backend.values[key] = make([]byte, 5000)
+	store, err := NewExecutionStore(ExecutionStoreOptions{
+		Prefix: "alarmd", Router: router, MaxValueBytes: 4096, MaxItemsPerCall: 4,
+		MinTTL: time.Minute, MaxTTL: 30 * 24 * time.Hour, RestartMargin: time.Minute,
+		MaxNoDataGroups: groups,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
+}
+
+// A write goes to the per-group record and leaves the whole-memory one exactly
+// as it found it.
+//
+// That asymmetry is the coexistence rule, and it is what makes the old record
+// safe to enumerate and delete later: nothing this build writes can put a Plan
+// back on it. A build that wrote both would leave two records per Plan with no
+// rule for which is the memory.
+func TestApplyWritesTheHashAndNeverTheWholeMemoryRecord(t *testing.T) {
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	store := generationStore(t, backend)
+	blobKey, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A whole-memory record an older build left behind, large enough that the
+	// write path would have refused it had it still been reading it.
+	backend.values[blobKey] = make([]byte, 5000)
 
 	applied, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
 		Contract: frozenRef(),
@@ -105,10 +167,14 @@ func TestNoDataApplyNamesTheStoredRecordWhenItIsTheOneTooLarge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	item := applied.Items[0]
-	if item.Size == nil || item.Size.Record != execution.NoDataRecordStored ||
-		item.Size.Bytes != 5000 || item.Size.Limit != 4096 {
-		t.Fatalf("apply = %+v size = %+v, want the stored record measured at 5000 against 4096", item, item.Size)
+	if applied.Items[0].Status != execution.NoDataApplied {
+		t.Fatalf("apply = %+v, want the write to have gone through to the hash", applied.Items[0])
+	}
+	if len(backend.values[blobKey]) != 5000 {
+		t.Fatal("the write touched the whole-memory record, which this build only reads")
+	}
+	if len(backend.hashes[noDataHashKey(t)]) == 0 {
+		t.Fatal("the write did not reach the per-group record")
 	}
 }
 
@@ -126,10 +192,6 @@ func TestEveryNoDataRefusalShapeIsPublished(t *testing.T) {
 		published[refusal] = true
 	}
 
-	key, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
-	if err != nil {
-		t.Fatal(err)
-	}
 	oneGroup := execution.NoDataGroupMemory{GroupKey: "a", FirstAbsent: 940}
 
 	for _, test := range []struct {
@@ -137,24 +199,16 @@ func TestEveryNoDataRefusalShapeIsPublished(t *testing.T) {
 		build func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation)
 	}{
 		{
-			name: "the record this round would write is too large",
+			name: "the memory holds more groups than the guard allows",
 			build: func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation) {
-				groups := make([]execution.NoDataGroupMemory, 0, 64)
-				for index := 0; index < 64; index++ {
+				groups := make([]execution.NoDataGroupMemory, 0, 3)
+				for index := 0; index < 3; index++ {
 					groups = append(groups, execution.NoDataGroupMemory{
-						GroupKey: fmt.Sprintf("component=flink,data_set_id=%d,__NO_DATA_DIMENSION__=true", index),
-						LastSeen: 1789555680, FirstAbsent: 1789555380,
+						GroupKey: fmt.Sprintf("data_set_id=%d", index), LastSeen: 940, FirstAbsent: 980,
 					})
 				}
-				return generationStore(t, &casMemoryBackend{values: make(map[string][]byte)}),
+				return boundedGroupStore(t, &casMemoryBackend{values: make(map[string][]byte)}, 2),
 					noDataMutationV2(t, 0, groups...)
-			},
-		},
-		{
-			name: "the record already stored is too large",
-			build: func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation) {
-				backend := &casMemoryBackend{values: map[string][]byte{key: make([]byte, 5000)}}
-				return generationStore(t, backend), noDataMutationV2(t, 0, oneGroup)
 			},
 		},
 		{
@@ -168,20 +222,14 @@ func TestEveryNoDataRefusalShapeIsPublished(t *testing.T) {
 		{
 			name: "the stored record is in a shape this build cannot read",
 			build: func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation) {
-				future, err := json.Marshal(noDataEnvelope{
-					Schema: executionNoDataSchema, Version: execution.MaxSupportedNoDataMemorySchema + 1,
-					Identity: noDataIdentityV2(), MarkerRevision: 9, ApplyVersion: applyVersion(),
-					MutationDigest: "digest", ScheduleRevision: "plan-r1", RosterVersion: "HISTORY/1",
-				})
-				if err != nil {
-					t.Fatal(err)
-				}
-				backend := &casMemoryBackend{values: map[string][]byte{key: future}}
+				backend := &casMemoryBackend{values: make(map[string][]byte), hashes: map[string]map[string][]byte{
+					noDataHashKey(t): {noDataHeaderField: futureHashHeader(t)},
+				}}
 				return generationStore(t, backend), noDataMutationV2(t, 9, oneGroup)
 			},
 		},
 		{
-			name: "the backend cannot compare and set",
+			name: "the backend cannot hold a hash",
 			build: func(t *testing.T) (*ExecutionStore, execution.PlanNoDataMutation) {
 				return capabilityStore(t, &readOnlyBackend{values: map[string][]byte{}}),
 					noDataMutationV2(t, 0, oneGroup)
@@ -230,6 +278,18 @@ func (*unreadableBackend) CompareAndSet(
 
 func (*unreadableBackend) RenewIfBelow(context.Context, string, time.Duration, time.Duration) (bool, error) {
 	return false, errors.New("state: the store did not answer")
+}
+
+func (*unreadableBackend) ReadHash(context.Context, string) (map[string][]byte, error) {
+	return nil, errors.New("state: the store did not answer")
+}
+
+func (*unreadableBackend) ReadHashField(context.Context, string, string) ([]byte, error) {
+	return nil, errors.New("state: the store did not answer")
+}
+
+func (*unreadableBackend) ApplyHashDelta(context.Context, HashDeltaWrite) (HashDeltaOutcome, error) {
+	return HashDeltaOutcome{}, errors.New("state: the store did not answer")
 }
 
 // Every status the store can return is in the list the two observation
@@ -341,13 +401,9 @@ func olderNoDataMutation(t *testing.T, groups ...execution.NoDataGroupMemory) ex
 	t.Helper()
 	older := applyVersion()
 	older.EvaluationTime--
-	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMutation{
-		Identity: noDataIdentityV2(), SchemaVersion: execution.NoDataMemorySchemaV1,
-		ExpectedMarkerRevision: 0, ApplyVersion: older, ScheduleRevision: "plan-r1",
-		RosterVersion: "TARGET_STATIC/1", Groups: groups,
+	return noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
+		Identity: noDataIdentityV2(), ExpectedMarkerRevision: 0, ApplyVersion: older,
+		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
+		PresentAsOf: noDataPresentAsOf, Memory: groups,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return mutation
 }

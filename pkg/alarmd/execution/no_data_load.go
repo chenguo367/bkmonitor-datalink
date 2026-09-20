@@ -78,25 +78,78 @@ type NoDataApplyItemResult struct {
 	// of the two records was measured -- and those are different situations
 	// with different remedies.
 	Size *NoDataRecordSize
+	// Conflict is set only by CONFLICT, and says which comparison refused.
+	// Without it every conflict reads the same, and two of them are not: a
+	// revision that moved is somebody else's write landing first, while one
+	// statement meeting another of its own version is two writers describing
+	// the same round differently, which no retry resolves on its own.
+	Conflict *NoDataConflictFacts
+}
+
+// NoDataConflictFacts names the comparison that refused a write and the two
+// statements it compared.
+type NoDataConflictFacts struct {
+	// Kind is the store-wide conflict vocabulary, not a second one. The same
+	// phenomenon in the runtime state store already has these names, and a
+	// no-data conflict that spelled them differently would make one question
+	// need two queries.
+	Kind StateVersionConflictKind
+	// Persisted and Proposed are the memory digests either side of the
+	// comparison, set when the conflict is about what the two say rather than
+	// about which came first. A conflict that names no values is a conflict
+	// nobody can act on.
+	Persisted MutationDigest
+	Proposed  MutationDigest
+}
+
+// NoDataRepresentation names which stored shape a memory was read from.
+type NoDataRepresentation string
+
+const (
+	// NoDataRepresentationNone is a memory that was not read: missing, or a
+	// read that failed. It is a value rather than an empty string so the
+	// partition adds up -- every load lands on exactly one of these, and a
+	// reader can check that against the number of Plans that were asked for.
+	NoDataRepresentationNone NoDataRepresentation = "NONE"
+	// NoDataRepresentationWholeMemory is the single-value record this build
+	// reads and no longer writes. A Plan on it has not written since the
+	// upgrade, or has been back to an older build since.
+	NoDataRepresentationWholeMemory NoDataRepresentation = "WHOLE_MEMORY"
+	// NoDataRepresentationPerGroup is the record this build writes.
+	NoDataRepresentationPerGroup NoDataRepresentation = "PER_GROUP"
+)
+
+// NoDataRepresentations is every value the label may take, for the metric to
+// pre-create and bound itself by. The zero reading is the one that matters
+// here: WHOLE_MEMORY falling to zero is what says the fleet has finished
+// rolling, and a series that is absent rather than zero cannot say that.
+var NoDataRepresentations = []NoDataRepresentation{
+	NoDataRepresentationNone, NoDataRepresentationWholeMemory, NoDataRepresentationPerGroup,
 }
 
 // NoDataRecordKind names which record a size refusal measured.
 type NoDataRecordKind string
 
 const (
-	// NoDataRecordStored is the record already in the store, measured before
-	// it is decoded. A Plan can only reach this if the bound moved or another
-	// build wrote the record, because no write of this build exceeds it.
-	NoDataRecordStored NoDataRecordKind = "STORED"
-	// NoDataRecordNext is the record this round would write.
-	NoDataRecordNext NoDataRecordKind = "NEXT"
+	// NoDataRecordGroups is how many groups the memory this round would store
+	// holds, against the bound on that number. It is the only measurement an
+	// apply refusal carries.
+	//
+	// It replaced a byte bound rather than joining one. A byte bound belonged
+	// to a memory held in a single value, and it was reached by an ordinary
+	// Plan with enough groups - silently, at the moment absence was being
+	// detected, which is when each group's entry grows. One field per group has
+	// no such bound, so nothing this build writes can be refused for its size,
+	// and the shape that used to report it is gone rather than kept as a label
+	// nothing can produce.
+	NoDataRecordGroups NoDataRecordKind = "GROUPS"
 )
 
-// NoDataRecordSize is the measurement behind a size refusal: which record, how
-// many bytes it holds, and the bound it was measured against.
+// NoDataRecordSize is the measurement behind a bound refusal: what was
+// measured, the measurement, and the bound it was taken against.
 type NoDataRecordSize struct {
 	Record NoDataRecordKind
-	Bytes  int
+	Groups int
 	Limit  int
 }
 
@@ -117,8 +170,7 @@ type NoDataRefusal struct {
 // by hand beside code that can produce anything is the shape that reads as a
 // bound while not being one.
 var NoDataRefusals = []NoDataRefusal{
-	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordStored},
-	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordNext},
+	{Reason: ReasonCode(contract.ReasonStateBudgetExceeded), Record: NoDataRecordGroups},
 	{Reason: ReasonCode(contract.ReasonStateCorrupt)},
 	{Reason: ReasonCode(contract.ReasonBackendCapabilityMissing)},
 	{Reason: ReasonCode(contract.ReasonStateSchemaUnsupported)},
@@ -183,12 +235,58 @@ type NoDataMemorySnapshot struct {
 	SchemaVersion        NoDataMemorySchema
 	LastScheduleRevision PlanScheduleRevision
 	RosterVersion        string
-	Groups               []NoDataGroupMemory
-	ReasonCode           ReasonCode
+	// Representation says which of the two stored shapes this snapshot was read
+	// from, and travels with the snapshot rather than being worked out again by
+	// a reader: the choice is made once, inside the store, from two records
+	// only it saw.
+	//
+	// It is the one reading that says how far the rollout has got. A fleet
+	// still on the whole-memory record and one fully moved over look identical
+	// from every other signal -- the memory is read, the Plan evaluates, the
+	// write goes through -- and the difference is exactly what decides whether
+	// the cleanup may run.
+	Representation NoDataRepresentation
+	// PresentAsOf is the round the record says the Plan last had data in. A v1
+	// record does not hold one and reads as zero, which is right rather than
+	// missing: every group in a v1 record carries its own last-seen time, so
+	// nothing in it was compressed against a round and nothing is lost. The
+	// first v2 write after reading one simply writes each group out in full.
+	PresentAsOf int64
+	Groups      []NoDataGroupMemory
+	ReasonCode  ReasonCode
+}
+
+// NoDataMemoryRenewal is one renewal that actually reached the store.
+//
+// It is reported beside the snapshots rather than on one, because it is not a
+// fact about the record: it is what was done to the key, and it is done for a
+// record this build cannot read just as much as for one it can -- a paused
+// Plan's memory must not expire while the rollback it is waiting out is still
+// going on.
+//
+// Renewal is the only thing keeping a steady Plan's memory alive under the
+// per-group representation: such a Plan writes nothing at all for as long as
+// its groups do not change, so a renewal that quietly stopped working would
+// expire every one of those memories, and the first anybody would hear of it is
+// every group of every quiet Plan starting again with no history.
+type NoDataMemoryRenewal struct {
+	Identity PlanNoDataIdentity
+	// Renewed is what the store answered: false means the key had enough life
+	// left, which is the ordinary case and not a failure.
+	Renewed    bool
+	TTLSeconds int64
+	// ReasonCode is empty on success. A renewal that failed names why, because
+	// "renewals are not happening" and "renewals are happening and the backend
+	// cannot do them" send a reader to different places.
+	ReasonCode ReasonCode
 }
 
 type NoDataLoadResult struct {
 	Items []NoDataMemorySnapshot
+	// Renewals holds one entry per load that reached the store, which is far
+	// fewer than the loads: the gate answers most of them from what this
+	// process already knows.
+	Renewals []NoDataMemoryRenewal
 }
 
 func (result NoDataLoadResult) Find(identity PlanNoDataIdentity) (NoDataMemorySnapshot, bool) {
@@ -203,7 +301,8 @@ func (result NoDataLoadResult) Find(identity PlanNoDataIdentity) (NoDataMemorySn
 func noDataSnapshotHasPayload(snapshot NoDataMemorySnapshot) bool {
 	return snapshot.MarkerRevision != 0 || snapshot.PersistedMutationDigest != "" ||
 		snapshot.PersistedApplyVersion != (ApplyVersion{}) || snapshot.LastScheduleRevision != "" ||
-		snapshot.RosterVersion != "" || len(snapshot.Groups) != 0
+		snapshot.RosterVersion != "" || snapshot.PresentAsOf != 0 || snapshot.Representation != "" ||
+		len(snapshot.Groups) != 0
 }
 
 func ValidateNoDataLoad(request NoDataLoadRequest, result NoDataLoadResult) error {
@@ -257,7 +356,34 @@ func validateNoDataSnapshot(item NoDataMemorySnapshot) error {
 		if item.RosterVersion == "" {
 			return errors.New("alarmd execution: found no-data memory requires the roster version it was decided against")
 		}
-		return validateNoDataGroups(item.Groups)
+		if item.PresentAsOf < 0 {
+			return errors.New("alarmd execution: found no-data memory has a negative present-as-of")
+		}
+		if item.Representation == NoDataRepresentationNone || item.Representation == "" {
+			// A record was read, so something read it. Leaving this unset would
+			// make a Plan on the old representation indistinguishable from one
+			// with no memory at all, and the count of the first is what says
+			// whether the rollout has finished.
+			return errors.New("alarmd execution: found no-data memory does not say which record it came from")
+		}
+		if err := validateNoDataGroups(item.Groups); err != nil {
+			return err
+		}
+		if item.SchemaVersion != NoDataMemorySchemaV2 {
+			return nil
+		}
+		// A v2 record stores a group with no absence as present, and present
+		// means exactly the round the header names. A decoded group that claims
+		// to have been seen later than the Plan last had data did not come out
+		// of that encoding, so the record was decoded wrong or written by
+		// something that does not hold the rule.
+		for _, group := range item.Groups {
+			if group.LastSeen > item.PresentAsOf {
+				return fmt.Errorf(
+					"alarmd execution: no-data group %q was last seen after the Plan last had data", group.GroupKey)
+			}
+		}
+		return nil
 	case NoDataMemoryUnreadable:
 		// The schema is the one fact kept, because it is what names the build
 		// that wrote the record. Everything else is refused: a payload in a
@@ -266,7 +392,14 @@ func validateNoDataSnapshot(item NoDataMemorySnapshot) error {
 		if noDataSnapshotHasPayload(item) {
 			return errors.New("alarmd execution: unreadable no-data memory carries a payload this build cannot read")
 		}
-		if NoDataMemoryReadable(item.SchemaVersion) {
+		// Schema zero is the second way a record is unreadable, and the two are
+		// deliberately one status. A record whose header is gone does not say
+		// what shape it is in, so this build cannot read it for the same reason
+		// it cannot read a newer one, and the right thing to do with it is the
+		// same: leave it exactly as it is and pause this Plan's no-data
+		// detection. Reading it anyway would take each group's last-seen time
+		// from a round nobody stated.
+		if item.SchemaVersion != 0 && NoDataMemoryReadable(item.SchemaVersion) {
 			return fmt.Errorf("alarmd execution: no-data memory schema %d is readable by this build and must not be "+
 				"reported unreadable", item.SchemaVersion)
 		}
