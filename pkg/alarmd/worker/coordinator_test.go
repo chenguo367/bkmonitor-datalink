@@ -1216,6 +1216,9 @@ type recordingPorts struct {
 	activatedGapMarkers             map[execution.PlanGapIdentity]execution.GapGuardSnapshot
 	progressActivationChecked       bool
 	admissionRejectAt               int
+	frozenRenewalRequests           []execution.FrozenStateRenewalRequest
+	frozenRenewalOutcome            execution.FrozenRenewalOutcome
+	frozenRenewalErr                error
 	stateLoadStatus                 execution.StateLoadStatus
 	stateRetryableFirstOnly         bool
 	stateLoadCalls                  int
@@ -2149,4 +2152,26 @@ func publicMethodNames(value reflect.Type) []string {
 		methods[index] = value.Method(index).Name
 	}
 	return methods
+}
+
+// RenewFrozenRuntime records what the Slot asked about and answers with what
+// the test set, so a test can put a renewal failure or a vanished key in front
+// of a whole Slot and read what the Slot then did.
+func (ports *recordingPorts) RenewFrozenRuntime(
+	_ context.Context, request execution.FrozenStateRenewalRequest,
+) (execution.FrozenStateRenewalResult, error) {
+	ports.record("frozen_state_renewal")
+	ports.frozenRenewalRequests = append(ports.frozenRenewalRequests, request)
+	if ports.frozenRenewalErr != nil {
+		return execution.FrozenStateRenewalResult{}, ports.frozenRenewalErr
+	}
+	outcome := ports.frozenRenewalOutcome
+	if outcome == "" {
+		outcome = execution.FrozenRenewalRenewed
+	}
+	result := execution.FrozenStateRenewalResult{Items: make([]execution.FrozenStateRenewalItem, len(request.Items))}
+	for index, item := range request.Items {
+		result.Items[index] = execution.FrozenStateRenewalItem{Identity: item.Identity, Outcome: outcome}
+	}
+	return result, nil
 }

@@ -416,6 +416,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_worker_no_data_memory_writes_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_reads_total"] = "variableLabels: {representation}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_renewals_total"] = "variableLabels: {result,reason}"
+	expected["bkmonitor_alarmd_worker_frozen_state_renewals_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_worker_gap_guard_scope_rounds_total"] = "variableLabels: {status,reason,progress}"
 	expected["bkmonitor_alarmd_worker_no_data_plans_seen_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_no_data_plans_by_hop_total"] = "variableLabels: {hop}"
@@ -895,6 +896,12 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// are the two the store maps its errors onto, so the bound is the shape of
 	// that mapping rather than a number chosen to fit.
 	bounds[fqName("worker_no_data_memory_renewals_total")] = 3
+	// One per outcome a renewal can have, and no more: the label is written
+	// only from the list execution publishes, and two of the four are read as
+	// zeros -- missing staying at zero is the mechanism having closed the
+	// silent loss, renewed staying at zero is it never having run -- so all
+	// four exist from startup.
+	bounds[fqName("worker_frozen_state_renewals_total")] = len(execution.FrozenRenewalOutcomes)
 	// Every held status against every reason this build can put on a scope
 	// plus the catch-all, against every place the count can stand. All three
 	// come from published lists, so a value added to any of them moves this

@@ -276,8 +276,14 @@ func (*unreadableBackend) CompareAndSet(
 	return false, errors.New("state: the store did not answer")
 }
 
-func (*unreadableBackend) RenewIfBelow(context.Context, string, time.Duration, time.Duration) (bool, error) {
-	return false, errors.New("state: the store did not answer")
+func (*unreadableBackend) RenewIfBelow(context.Context, string, time.Duration, time.Duration) (RenewalOutcome, error) {
+	return "", errors.New("state: the store did not answer")
+}
+
+func (*unreadableBackend) RenewManyIfBelow(
+	context.Context, []string, time.Duration, time.Duration,
+) ([]RenewalOutcome, error) {
+	return nil, errors.New("state: the store did not answer")
 }
 
 func (*unreadableBackend) ReadHash(context.Context, string) (map[string][]byte, error) {

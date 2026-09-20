@@ -78,15 +78,17 @@ return 1
 // renewIfBelowScript extends a key's life only when it is running out.
 //
 // PTTL answers -2 for a key that does not exist and -1 for one that exists with
-// no expiry. The first returns early. The second needs no branch of its own:
-// the threshold is never negative, so -1 is always below it and the key is
-// renewed - which is what a key that never expires needs, that being the state
-// this exists to end. A clause spelling that out would be implied by the
-// comparison below it, and a condition no test can be written against is a
-// condition that rots quietly.
+// no expiry. The first returns 2 rather than 0, so the caller can tell a key
+// that vanished from a key with life left; those two are the opposite readings
+// and one reply for both is how a lost record reads as a healthy one. The
+// second needs no branch of its own: the threshold is never negative, so -1 is
+// always below it and the key is renewed - which is what a key that never
+// expires needs, that being the state this exists to end. A clause spelling
+// that out would be implied by the comparison below it, and a condition no
+// test can be written against is a condition that rots quietly.
 const renewIfBelowScript = `
 local remaining = redis.call('PTTL', KEYS[1])
-if remaining == -2 then return 0 end
+if remaining == -2 then return 2 end
 if remaining >= tonumber(ARGV[2]) then return 0 end
 redis.call('PEXPIRE', KEYS[1], ARGV[1])
 return 1
@@ -327,21 +329,75 @@ func (backend *RedisBackend) CompareAndSet(
 // first time they are loaded, so the ones still in use repair themselves and
 // only the ones nothing loads any more are left for a one-off sweep.
 //
-// A missing key is left alone and reported as not renewed. Creating it here
-// would write a key with no value, which every reader would then classify as
-// corrupt state.
+// A missing key is left alone and reported as MISSING. Creating it here would
+// write a key with no value, which every reader would then classify as corrupt
+// state.
 func (backend *RedisBackend) RenewIfBelow(
 	ctx context.Context, key string, ttl, threshold time.Duration,
-) (bool, error) {
-	if backend == nil || backend.client == nil || key == "" || ttl <= 0 || threshold < 0 || threshold > ttl {
-		return false, fmt.Errorf("state: invalid Redis lifetime renewal")
-	}
-	result, err := backend.client.Eval(ctx, renewIfBelowScript, []string{key},
-		ttl.Milliseconds(), threshold.Milliseconds()).Int()
+) (RenewalOutcome, error) {
+	outcomes, err := backend.RenewManyIfBelow(ctx, []string{key}, ttl, threshold)
 	if err != nil {
-		return false, err
+		return "", err
 	}
-	return result == 1, nil
+	return outcomes[0], nil
+}
+
+// RenewManyIfBelow runs the same script for every key in one pipeline.
+//
+// One round trip rather than one per key, because the caller that needs this
+// is holding a whole Slot's frozen series at once. The largest query group in
+// production carries about 5,100 of them; sending those one at a time would
+// add seconds to a Slot that already takes twelve, and it would do it to the
+// Slot that is already the slowest one on the deployment.
+//
+// A transport failure fails the whole call: the pipeline's effect is then
+// unknown, and a renewal whose outcome is unknown must not be recorded as
+// either a renewal or a loss. A reply error on one key is that key's own
+// error, since the others were still answered.
+func (backend *RedisBackend) RenewManyIfBelow(
+	ctx context.Context, keys []string, ttl, threshold time.Duration,
+) ([]RenewalOutcome, error) {
+	if backend == nil || backend.client == nil || len(keys) == 0 || ttl <= 0 || threshold < 0 || threshold > ttl {
+		return nil, fmt.Errorf("state: invalid Redis lifetime renewal")
+	}
+	for _, key := range keys {
+		if key == "" {
+			return nil, fmt.Errorf("state: invalid Redis lifetime renewal")
+		}
+	}
+	cmds, err := backend.client.Pipelined(ctx, func(pipeline redis.Pipeliner) error {
+		for _, key := range keys {
+			pipeline.Eval(ctx, renewIfBelowScript, []string{key},
+				ttl.Milliseconds(), threshold.Milliseconds())
+		}
+		return nil
+	})
+	if err != nil && !isRedisReplyError(err) {
+		return nil, err
+	}
+	if len(cmds) != len(keys) {
+		return nil, fmt.Errorf("state: Redis pipeline returned %d replies for %d renewals", len(cmds), len(keys))
+	}
+	outcomes := make([]RenewalOutcome, len(keys))
+	for index, cmd := range cmds {
+		command, ok := cmd.(*redis.Cmd)
+		if !ok {
+			return nil, fmt.Errorf("state: Redis pipeline returned an unexpected reply for renewal %d", index)
+		}
+		result, err := command.Int()
+		if err != nil {
+			return nil, err
+		}
+		switch result {
+		case 1:
+			outcomes[index] = RenewalRenewed
+		case 2:
+			outcomes[index] = RenewalMissing
+		default:
+			outcomes[index] = RenewalFresh
+		}
+	}
+	return outcomes, nil
 }
 
 // CompareAndSetManyByDigest sends one EVAL per write in a single pipeline. A

@@ -869,6 +869,10 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	stateIndex := indexStatePreflight(loadedState)
 	var retryPendingReason execution.ReasonCode
 	var stateAdmissionTerminalReason execution.ReasonCode
+	// One reading per Slot rather than per Plan: the question is how many of
+	// this Slot's keys were read and not written, and a Plan is not a
+	// population anyone reads that against.
+	var frozenRenewals observability.FrozenStateRenewalFacts
 	for _, planResult := range planResults {
 		if _, changed := changedPlans[planResult.Plan]; changed {
 			continue
@@ -976,15 +980,29 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			coordinator.emitAlreadyApplied(ctx, request.Operation, alreadyApplied)
 		}
 
+		// The retention need travels with the Plan's mutations so the store
+		// sizes their TTL against the Plan frozen with this Slot. The frozen
+		// series below need it for the same reason and must get the same
+		// answer: a renewal computed from a different retention would give a
+		// key a different life from the one its write gave it.
+		frozen := frozenSeriesOf(planResult.Plan, loadedState, planResult.StateResults)
+		var retention []execution.StateRetentionRequirement
+		if len(mutations) > 0 || len(frozen) > 0 {
+			retention, err = execution.DeriveStateRetentionRequirement(due.CompiledPlan)
+			if err != nil {
+				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: %w", err)
+			}
+		}
+		// Before the writes, not after. A renewal is about the keys this Plan
+		// is not writing, so nothing below can change what it decides -- but
+		// an apply that fails returns from this function, and the keys that
+		// were about to expire would then go one more Slot without anyone
+		// asking about them, on the Slot that already went wrong.
+		coordinator.renewFrozenState(ctx, request, retention, frozen, &frozenRenewals)
+
 		if len(mutations) > 0 {
 			if err := coordinator.admit(ctx, request, due); err != nil {
 				return execution.SlotExecutionResult{}, err
-			}
-			// The retention need travels with the Plan's mutations so the store
-			// sizes their TTL against the Plan frozen with this Slot.
-			retention, err := execution.DeriveStateRetentionRequirement(due.CompiledPlan)
-			if err != nil {
-				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: %w", err)
 			}
 			rejected, encodedBytes, err := coordinator.admitState(ctx, request.Operation, request.Contract, retention, mutations)
 			if err != nil {
@@ -1041,6 +1059,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			retryPendingReason = planResult.ReasonCode
 		}
 	}
+	coordinator.observeFrozenStateRenewal(ctx, request.Operation, frozenRenewals)
 	// After every Plan's state and gap, inside the same sequenced scope. The
 	// memory only changes what the next round reports as a duration and which
 	// groups it expects, never whether this round fired - so it follows the

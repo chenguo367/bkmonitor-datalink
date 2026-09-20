@@ -97,10 +97,14 @@ func RenewGenerationKeyReporting(
 	if !gate.Ask(key) {
 		return RenewalAttempt{}, nil
 	}
-	renewed, err := backend.RenewIfBelow(ctx, key, ttl, GenerationScopedRenewalThreshold(ttl))
+	// Only RENEWED counts as renewed. MISSING reads as not renewed here, as it
+	// did when the backend answered with a bool: this path renews the memory a
+	// Plan is still loading, and a key that went missing between the read and
+	// the renewal is the runtime state renewal's subject, not this one's.
+	outcome, err := backend.RenewIfBelow(ctx, key, ttl, GenerationScopedRenewalThreshold(ttl))
 	if err != nil {
 		return RenewalAttempt{Asked: true, TTL: ttl}, err
 	}
 	gate.Answered(key, RenewalAskInterval(ttl))
-	return RenewalAttempt{Asked: true, Renewed: renewed, TTL: ttl}, nil
+	return RenewalAttempt{Asked: true, Renewed: outcome == RenewalRenewed, TTL: ttl}, nil
 }
