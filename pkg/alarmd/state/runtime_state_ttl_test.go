@@ -56,9 +56,11 @@ func ttlTestRetention(points uint32, interval, lateness time.Duration) []executi
 // round - is what left more than half of the stored keys alive long after
 // anything could read them.
 func TestRuntimeStateWriteTTLFollowsPlanRetention(t *testing.T) {
-	// Five one-minute points plus the store's one-minute restart margin.
+	// Five one-minute points plus the store's one-minute restart margin, moved
+	// half a step past the whole minute so the expiry never lands at the phase
+	// the Slot writes at.
 	retention := ttlTestRetention(5, time.Minute, 0)
-	const wantTTL = 6 * time.Minute
+	const wantTTL = 6*time.Minute + 30*time.Second
 	version := applyVersion()
 
 	t.Run("sequential path", func(t *testing.T) {
@@ -155,9 +157,16 @@ func TestDerivedStateTTLOutlivesTheWindowHorizon(t *testing.T) {
 						t.Fatalf("TTL %s does not outlive the retained horizon %s", ttl, horizon)
 					}
 					// Below MinTTL the clamp makes the TTL longer still, which
-					// keeps the ordering but not the exact difference.
-					if want := horizon + interval + restartMargin; ttl != want && ttl != minTTL {
-						t.Fatalf("TTL %s, want horizon plus one interval and the restart margin (%s)", ttl, want)
+					// keeps the ordering but not the exact difference. Above
+					// it the TTL is the horizon plus one interval and the
+					// margin, moved forward by under one interval to sit half a
+					// step off the write phase.
+					base := horizon + interval + restartMargin
+					if ttl != minTTL && (ttl < base || ttl >= base+interval) {
+						t.Fatalf("TTL %s, want horizon plus one interval and the restart margin (%s) moved forward by under one interval", ttl, base)
+					}
+					if ttl != minTTL && ttl%interval != interval/2 {
+						t.Fatalf("TTL %s sits %s into a %s step, want half a step: an expiry at the write phase is what a returning series meets between its read and its write", ttl, ttl%interval, interval)
 					}
 				})
 			}
@@ -435,5 +444,93 @@ func TestASeriesWhoseDataStopsEndsUpWarmingNotGapped(t *testing.T) {
 				"thing separating this from a series that has not lived long enough",
 				silent, summary.ValidPositions)
 		}
+	}
+}
+
+// TestAReturningSeriesMeetsItsKeyAliveOnBothSidesOfTheWrite is the mechanism
+// the half-step offset exists for, as a timeline.
+//
+// A Slot writes at a fixed phase inside its step. A series that stops
+// reporting leaves a key written at that phase, and when it returns after
+// exactly the TTL's worth of rounds the returning Slot reads a few seconds
+// before that phase and writes a few seconds after it. With the TTL a whole
+// number of steps the key expires at the phase itself: found at the read, gone
+// at the write, and the round fails as a version conflict that costs the Slot a
+// retry. With the expiry half a step away the key is alive on both sides of
+// the write for any Slot whose read-to-write span is under half a step, and a
+// series returning one round later than that meets no key at all, which is the
+// clean restart the TTL was always meant to produce.
+func TestAReturningSeriesMeetsItsKeyAliveOnBothSidesOfTheWrite(t *testing.T) {
+	const (
+		step          = time.Minute
+		restartMargin = 10 * time.Minute
+		writePhase    = 42 * time.Second // the phase the Slot writes at
+		readToWrite   = 9 * time.Second  // the widest span measured on the deployment
+	)
+	fingerprint := strings.Repeat("a", 64)
+	requirement := NewLevelRequirement(
+		execution.StateRetentionRequirement{LevelID: 1, RetentionPoints: 1, EvaluationInterval: step},
+		fingerprint, 1,
+	)
+	ttl, err := StateTTL([]LevelRequirement{requirement}, restartMargin, time.Minute, 30*24*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastWrite := writePhase
+	expiry := lastWrite + ttl
+	// The round the series returns in is the one whose write phase is the
+	// last whole step at or before the expiry.
+	returning := expiry - expiry%step + writePhase
+	if returning > expiry {
+		returning -= step
+	}
+	read, write := returning-readToWrite, returning
+	if !(read < expiry) {
+		t.Fatalf("the returning Slot's read at %s is after the expiry at %s; the shape under test needs the key found at the read", read, expiry)
+	}
+	if !(write < expiry) {
+		t.Fatalf("the key written at %s with TTL %s expires at %s, inside the returning Slot's read-to-write window [%s, %s]: "+
+			"found at the read, gone at the write, a version conflict for the clock's sake", lastWrite, ttl, expiry, read, write)
+	}
+	// One round later there is nothing to find, on either side of the write.
+	if late := returning + step - readToWrite; late < expiry {
+		t.Fatalf("a series returning one round later still finds its key at %s (expiry %s); the TTL outlives a whole extra round", late, expiry)
+	}
+}
+
+// The offset only ever moves a TTL forward. A base that already sits past
+// the half step is carried to the next half step, never pulled back to this
+// one: pulling back would put the expiry before the horizon the TTL was
+// derived to outlive.
+func TestTheHalfStepOffsetNeverShortensATTL(t *testing.T) {
+	step := time.Minute
+	requirement := []LevelRequirement{{EvaluationInterval: step}}
+	for _, tc := range []struct {
+		name string
+		base time.Duration
+		want time.Duration
+	}{
+		{"on the step", 11 * time.Minute, 11*time.Minute + 30*time.Second},
+		{"already half a step off", 11*time.Minute + 30*time.Second, 11*time.Minute + 30*time.Second},
+		{"just short of half", 11*time.Minute + 29*time.Second, 11*time.Minute + 30*time.Second},
+		{"past half", 11*time.Minute + 50*time.Second, 12*time.Minute + 30*time.Second},
+		{"one second before the next step", 11*time.Minute + 59*time.Second, 12*time.Minute + 30*time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := offsetFromTheStep(tc.base, requirement)
+			if got != tc.want {
+				t.Fatalf("offsetFromTheStep(%s) = %s, want %s", tc.base, got, tc.want)
+			}
+			if got < tc.base {
+				t.Fatalf("offsetFromTheStep(%s) = %s shortened the TTL", tc.base, got)
+			}
+			if got%step != step/2 {
+				t.Fatalf("offsetFromTheStep(%s) = %s is not half a step off", tc.base, got)
+			}
+		})
+	}
+	// No step, no offset: there is no phase to stay away from.
+	if got := offsetFromTheStep(11*time.Minute, nil); got != 11*time.Minute {
+		t.Fatalf("offsetFromTheStep with no requirement = %s, want the input unchanged", got)
 	}
 }

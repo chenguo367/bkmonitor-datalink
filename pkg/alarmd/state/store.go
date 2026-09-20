@@ -595,6 +595,7 @@ func StateTTL(requirements []LevelRequirement, restartMargin, minimum, maximum t
 			required = candidate
 		}
 	}
+	required = offsetFromTheStep(required, requirements)
 	if required < minimum {
 		required = minimum
 	}
@@ -602,6 +603,50 @@ func StateTTL(requirements []LevelRequirement, restartMargin, minimum, maximum t
 		return 0, fmt.Errorf("%w: required TTL %s exceeds maximum %s", ErrStateBudget, required, maximum)
 	}
 	return required, nil
+}
+
+// offsetFromTheStep moves a TTL to the next duration that sits half a step
+// past a whole number of steps, so a key never expires at the phase its Slot
+// runs at.
+//
+// A Slot runs at a fixed offset inside its step and writes its keys at that
+// offset every round, so a key's expiry -- one write plus the TTL -- lands at
+// the same offset some rounds later. A TTL that is a whole number of steps
+// puts the expiry exactly where the round's write happens: a series that
+// returns after exactly that many rounds is read a few seconds before its key
+// dies and written a few seconds after, and the write finds no key. That was
+// most of what a fleet read as STATE_VERSION_CONFLICT/missing: not a
+// competing writer, the clock. Half a step away from the write phase, the
+// expiry falls between two rounds for every Slot whose read-to-write span is
+// under half a step, whatever phase the Slot runs at; the cost is at most one
+// step of extra life per key, and less than 3% on the deployment it was
+// measured on.
+//
+// The step is the longest interval among the requirements: the compiler
+// holds every Level of a Plan to the Plan's own interval, so there is one.
+func offsetFromTheStep(ttl time.Duration, requirements []LevelRequirement) time.Duration {
+	var step time.Duration
+	for _, requirement := range requirements {
+		if requirement.EvaluationInterval > step {
+			step = requirement.EvaluationInterval
+		}
+	}
+	if step <= 0 {
+		return ttl
+	}
+	half := step / 2
+	remainder := ttl % step
+	if remainder == half {
+		return ttl
+	}
+	advance := half - remainder
+	if advance < 0 {
+		advance += step
+	}
+	if ttl > time.Duration(math.MaxInt64)-advance {
+		return ttl
+	}
+	return ttl + advance
 }
 
 func (store *Store) decodeLoaded(item routedLoad, value []byte) LoadedWindow {
