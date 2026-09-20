@@ -170,8 +170,14 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 	messages := make([]*sarama.ProducerMessage, len(events))
 	groups := make(map[string][]int)
 	for index := range events {
-		if err := contract.ValidateTriggerEventV1(&events[index]); err != nil {
-			return fmt.Errorf("kafka trigger event sink: validate event %d: %w", index, err)
+		// Standard events have already been validated when built; retain the
+		// converter's wire checks without rehashing the internal envelope.
+		// Historical and Python paths retain the validation formerly done by
+		// EncodeTriggerEventV1, but no longer encode that internal structure.
+		if events[index].WireFormat != contract.WireFormatStandardRawEvent {
+			if err := contract.ValidateTriggerEventV1(&events[index]); err != nil {
+				return fmt.Errorf("kafka trigger event sink: validate event %d: %w", index, err)
+			}
 		}
 		var revision int64
 		if events[index].StrategyRef != nil {
