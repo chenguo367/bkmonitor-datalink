@@ -922,6 +922,84 @@ type ReplayExpiryFacts struct {
 	AgeSeconds                float64
 	ReadyAtUnixMilli          int64
 	DistanceBoundaryUnixMilli int64
+	// HeldBy is what the round before this one did with the Query Group, when
+	// that round did not run its Slot.
+	HeldBy *HeldByFacts `json:"held_by,omitempty"`
+}
+
+// HeldByNothing is the word for a Slot that no previous round held: either the
+// round before it executed, or there was no round before it.
+//
+// It is a word rather than an absent field so the family is total. "Which
+// Slots were held, and by what" is a distribution, and a distribution whose
+// commonest case is a missing key cannot be read as one.
+const HeldByNothing = "none"
+
+// HeldByReadinessDeferred is the round that entered Execute and was handed
+// back by access with an instant to wait for. It is not one of the run
+// outcomes -- that reading folds it into execute_returned, because the round
+// did return from Execute -- but from the next Slot's point of view it is a
+// holder like any other, and the commonest one worth telling apart: "the data
+// was not ready yet" and "the query backend refuses this strategy" are
+// different problems with different owners.
+const HeldByReadinessDeferred = "query_readiness_deferred"
+
+// HeldByFacts is why the round before this one left the Slot unrun.
+//
+// Four Query Groups shed a Slot every round for hours and the completion line
+// said GAP_SKIPPED, which names the outcome and not one thing about the cause.
+// The cause was already recorded -- the Runner names its own decision on every
+// round -- but in a different line, of a different stage, at a different
+// timestamp, so reading it meant joining three tables by Query Group and
+// second. Carrying the previous round's word on the line that reports the
+// consequence is what makes the consequence answerable on its own.
+//
+// Decision takes the values run_one_return_total{outcome} takes, plus
+// HeldByNothing, deliberately: the two are then the same vocabulary and a
+// reader can go straight from "these Slots were skipped, held by X" to the
+// fleet-wide rate of X without translating between two word lists.
+type HeldByFacts struct {
+	Decision string `json:"decision"`
+	// AtUnixMilli is when that round reached its decision, so the gap between
+	// it and this Slot's own deadline is readable rather than assumed.
+	AtUnixMilli int64 `json:"at_ms"`
+	// The cooldown's own two numbers, present only when Decision names the
+	// cooldown. A cooldown that has failed sixteen times and one that has
+	// failed once are the same word and different situations, and the instant
+	// it runs to says whether this Slot ever had a chance.
+	QueryCooldownFailures   uint32 `json:"query_cooldown_failures,omitempty"`
+	QueryCooldownUntilMilli int64  `json:"query_cooldown_until_ms,omitempty"`
+	// ReadyAtUnixMilli is the instant access told the previous round to wait
+	// for, present only when Decision is the readiness deferral. The word
+	// alone says the data was not ready; this says until when, which is the
+	// difference between a Slot that missed its chance by a moment and one
+	// whose readiness lands past its own deadline every time.
+	ReadyAtUnixMilli int64 `json:"ready_at_ms,omitempty"`
+}
+
+// HeldByDecisions is every value Decision takes, for the partition to
+// pre-create and for a reader to bound the family by.
+var HeldByDecisions = append([]string{HeldByNothing, HeldByReadinessDeferred}, RunOutcomes...)
+
+func normalizeHeldByFacts(facts *HeldByFacts) *HeldByFacts {
+	if facts == nil {
+		return nil
+	}
+	normalized := *facts
+	if !ValidHeldByDecision(normalized.Decision) {
+		normalized.Decision = HeldByNothing
+	}
+	if normalized.Decision != "query_cooldown" {
+		normalized.QueryCooldownFailures, normalized.QueryCooldownUntilMilli = 0, 0
+	}
+	if normalized.Decision != HeldByReadinessDeferred {
+		normalized.ReadyAtUnixMilli = 0
+	}
+	return &normalized
+}
+
+func ValidHeldByDecision(value string) bool {
+	return value == HeldByNothing || value == HeldByReadinessDeferred || ValidRunOutcome(value)
 }
 
 // SlotWaitFacts is one blocking wait inside a Slot attempt, named and timed.
@@ -1898,6 +1976,11 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.ControlReads = normalizeControlReadFacts(observation.ControlReads)
 	observation.RangeDistance = normalizeRangeDistanceFacts(observation.RangeDistance)
 	observation.RangeGate = normalizeRangeGateFacts(observation.RangeGate)
+	if observation.ReplayExpiry != nil {
+		normalizedExpiry := *observation.ReplayExpiry
+		normalizedExpiry.HeldBy = normalizeHeldByFacts(normalizedExpiry.HeldBy)
+		observation.ReplayExpiry = &normalizedExpiry
+	}
 	observation.AssignmentIndex = normalizeAssignmentIndexFacts(observation.AssignmentIndex)
 	observation.CursorAdvance = normalizeCursorAdvanceFacts(observation.CursorAdvance)
 	observation.SourceRefresh = normalizeSourceRefreshFacts(observation.Component, observation.Stage, observation.SourceRefresh)
