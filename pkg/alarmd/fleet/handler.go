@@ -747,8 +747,16 @@ type ObjectRecoveryContext struct {
 }
 
 // NewHandler mounts the object API. The routes are deliberately few: a list,
-// one object, the health judgment, and the observation windows. Anything beyond
-// that needs a decision, not just a handler.
+// one object, the health judgment, the observation windows and the series
+// curves. Anything beyond that needs a decision, not just a handler -- and
+// the decisions taken so far are modes on those routes, not routes: the list
+// answers scope=strategies (the strategy directory) and scope=cost (the cost
+// candidates), the object answers samples= (criterion samples), and the
+// windows take mode=sample. Each is recorded in the observability handoff
+// contract, each is wrapped around this handler by the runtime rather than
+// added here, and each is off until an operator allocates the diagnostics a
+// share (phase_two.observation.memory_percent). A mode that is not in that
+// contract is a sixth capability wearing a query parameter.
 //
 // Windows are the one place this API writes. The write is scoped to diagnostics
 // -- it selects what gets recorded, never what gets evaluated -- and it is what
@@ -1019,11 +1027,11 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 // window recorded for it.
 //
 // The records ride here rather than on an endpoint of their own because the API
-// is capped at five capabilities: the cap exists so this page cannot grow into a
-// service that needs maintaining, and "read what my window produced" is part of
-// looking at one object, not a sixth thing. They are opt-in so a reader who did
-// not ask does not pay for them, and they outlive the window that produced them
-// -- an investigation does not end when the window expires.
+// is capped at five routes (see NewHandler): the cap exists so this page cannot
+// grow into a service that needs maintaining, and "read what my window produced"
+// is part of looking at one object, not a sixth thing. They are opt-in so a
+// reader who did not ask does not pay for them, and they outlive the window that
+// produced them -- an investigation does not end when the window expires.
 func objectDetail(response http.ResponseWriter, request *http.Request, service *Service,
 	now func() time.Time, stallAfter time.Duration, diagnostics *DiagnosticStore) {
 	queryGroup := strings.TrimPrefix(request.URL.Path, "/api/objects/")

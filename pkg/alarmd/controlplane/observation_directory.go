@@ -116,7 +116,12 @@ type StrategyDirectorySnapshot struct {
 	ReadCommands int                    `json:"read_commands"`
 	GroupsKnown  int                    `json:"groups_known"`
 	GroupsTotal  int                    `json:"groups_total"`
-	byStrategy   map[string][]int
+	// ManifestsFromIndex is how many of this refresh's manifests came from the
+	// process's own catalog index rather than the store: the count a reader
+	// checks to know the directory is riding the runtime's cache and not
+	// re-reading the manifest on every refresh.
+	ManifestsFromIndex int `json:"manifests_from_index"`
+	byStrategy         map[string][]int
 }
 
 // ObservationDirectory is a disposable read projection over the existing
@@ -222,8 +227,15 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 		s.Reason = "INVALID_PUBLICATION"
 		return
 	}
-	var activation ActivationState
-	if err = r.decode(ctx, d.repository.activationKey(), &activation); err != nil {
+	// The activation through the repository's header-checked cache, not a
+	// budgeted read of the body: the runtime already holds the parsed
+	// activation for the version it executes, a call costs the small header
+	// and length reads, and the body is fetched only when the version moved
+	// -- which the runtime would fetch on its next round anyway. Read on the
+	// directory's own budget it was the whole body every refresh, on every
+	// replica, for a diagnostics projection.
+	activation, err := d.repository.LoadActivation(ctx)
+	if err != nil {
 		fail(err)
 		return
 	}
@@ -254,15 +266,24 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	if len(publications) > 1 {
 		d.publicationCursor = publications[1]
 	}
-	_, cached := d.repository.catalogIndex.snapshot()
+	cachedRevision, cached := d.repository.catalogIndex.snapshot()
 	nextKnown := make(map[execution.ObjectDigest]catalogIndexEntry)
 	nextCursor := make(map[execution.SnapshotRevision]int)
 	retained := 0
 	retainedBytes := 0
 	s.Complete = true
 	for _, pub := range publications {
+		// The manifest of the publication this process executes is already in
+		// its catalog index, entry for entry: the index is replaced whole from
+		// the manifest when the content is loaded, so for that revision the
+		// index is the manifest and reading it again from the store is the
+		// same bytes over the wire every refresh. Only a publication this
+		// process has not loaded -- a carried one, or a cold start -- is read.
 		var manifest CatalogManifest
-		if err = r.decode(ctx, d.repository.catalogManifestKey(pub.SnapshotRevision), &manifest); err != nil {
+		if cachedRevision == pub.SnapshotRevision && len(cached) > 0 {
+			manifest = manifestFromIndex(pub.SnapshotRevision, cached)
+			s.ManifestsFromIndex++
+		} else if err = r.decode(ctx, d.repository.catalogManifestKey(pub.SnapshotRevision), &manifest); err != nil {
 			fail(err)
 			break
 		}
@@ -271,6 +292,9 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			s.Reason = "INVALID_MANIFEST"
 			break
 		}
+		// One order however the manifest arrived, so the cursor below means
+		// the same position from one refresh to the next.
+		sort.Slice(manifest.QueryGroups, func(i, j int) bool { return manifest.QueryGroups[i].QueryGroup < manifest.QueryGroups[j].QueryGroup })
 		s.GroupsTotal += len(manifest.QueryGroups)
 		start := d.cursor[pub.SnapshotRevision]
 		budgetFailed := false
@@ -396,6 +420,18 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	if s.Complete {
 		s.Reason = ""
 	}
+}
+
+// manifestFromIndex rebuilds a publication's manifest from the process's
+// catalog index for that revision: the index was replaced whole from the
+// manifest, so its keys and digests are the manifest's entries.
+func manifestFromIndex(revision execution.SnapshotRevision, index map[execution.QueryGroupIdentity]catalogIndexEntry) CatalogManifest {
+	manifest := CatalogManifest{SchemaVersion: catalogManifestSchemaVersion, SnapshotRevision: revision,
+		QueryGroups: make([]ManifestQueryGroup, 0, len(index))}
+	for group, entry := range index {
+		manifest.QueryGroups = append(manifest.QueryGroups, ManifestQueryGroup{QueryGroup: group, ObjectDigest: entry.Digest})
+	}
+	return manifest
 }
 
 func (d *ObservationDirectory) readGroup(ctx context.Context, r *directoryRead, digest execution.ObjectDigest) (QueryGroupObject, error) {

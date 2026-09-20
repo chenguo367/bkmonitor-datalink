@@ -177,12 +177,13 @@ func TestObservationDirectoryColdWarmPointConfigAndReadOnlyHTTP(t *testing.T) {
 }
 
 func TestObservationDirectoryColdBudgetMakesProgressWithoutHTTPReads(t *testing.T) {
-	h, d, at := directoryFixture(t, 4)
-	// Latest publication, activation, manifest,
-	// then exactly one cold object. A later tick reuses that identity projection.
+	h, d, at := directoryFixture(t, 3)
+	// Latest publication, manifest, then exactly one cold object; the
+	// activation comes through the repository's own cache and is not one of
+	// the directory's commands. A later tick reuses that identity projection.
 	d.Refresh(h.ctx, at)
 	first := d.Page(at, "", "", "", 0, 20)
-	if first.Complete || first.ReadCommands > 4 || len(first.Rows) != 1 {
+	if first.Complete || first.ReadCommands > 3 || len(first.Rows) != 1 {
 		t.Fatalf("first %+v", first)
 	}
 	d.Refresh(h.ctx, at.Add(time.Second))
@@ -229,5 +230,72 @@ func TestObservationDirectoryWireBudgetAndUnknownAreNotNotFound(t *testing.T) {
 	}
 	if _, err = d.ResolveCurrent(at, "", "", "missing", ""); !errors.Is(err, controlplane.ErrSnapshotUnavailable) {
 		t.Fatalf("resolve %v", err)
+	}
+}
+
+// The directory rides the runtime's own reads. A process that has loaded the
+// published content holds the manifest, entry for entry, in its catalog
+// index and the parsed activation behind a header check; the directory reads
+// neither the manifest nor the activation body on its own budget on such a
+// process, and its snapshot says so. A process that has not loaded the content
+// -- cold, or a carried publication -- reads the manifest, once. Read on the
+// directory's budget they were the whole manifest and activation every refresh
+// on every replica, for a diagnostics projection: the shape of the outbound
+// bandwidth this deployment already fell over once.
+func TestObservationDirectoryReusesTheRuntimesManifestAndActivation(t *testing.T) {
+	h := newObjectCatalogHarness(t)
+	pub := h.publish(t, catalogWithSchedule(t, objectCatalogTwoGroups(t, 80), 60, 0))
+	if _, err := indexReconciler(t, h.repository, sharedClock()).Ensure(h.ctx, pub.Publication); err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(1000, 0)
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	manifestKey := h.prefix + ":manifest:" + string(pub.Publication.SnapshotRevision)
+	activationKey := h.prefix + ":activation"
+
+	// Warm: the repository that loaded the content. Its index is the manifest.
+	if _, err := h.repository.LoadPublishedContent(h.ctx, pub.Publication); err != nil {
+		t.Fatal(err)
+	}
+	warmSpy := &directoryReadSpy{Cmdable: h.client, reads: map[string]int{}}
+	warm, err := controlplane.NewObservationDirectory(h.repository, limits, warmSpy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	warm.Refresh(h.ctx, at)
+	warmSnapshot := warm.Page(at, "", "", "", 0, 20)
+	if !warmSnapshot.Complete || len(warmSnapshot.Rows) != 2 || warmSnapshot.ManifestsFromIndex != 1 {
+		t.Fatalf("warm directory = complete %v, rows %d, manifests from index %d; want complete, 2 rows, 1 manifest from the index: %+v",
+			warmSnapshot.Complete, len(warmSnapshot.Rows), warmSnapshot.ManifestsFromIndex, warmSnapshot)
+	}
+	if warmSpy.reads[manifestKey] != 0 || warmSpy.reads[activationKey] != 0 {
+		t.Fatalf("warm directory read the manifest %d times and the activation body %d times on its own budget; want neither",
+			warmSpy.reads[manifestKey], warmSpy.reads[activationKey])
+	}
+
+	// Cold: a repository that has loaded nothing reads the manifest, once, and
+	// still not the activation body on its own budget.
+	coldSpy := &directoryReadSpy{Cmdable: h.client, reads: map[string]int{}}
+	cold, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, coldSpy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cold.Refresh(h.ctx, at)
+	coldSnapshot := cold.Page(at, "", "", "", 0, 20)
+	if !coldSnapshot.Complete || len(coldSnapshot.Rows) != 2 || coldSnapshot.ManifestsFromIndex != 0 {
+		t.Fatalf("cold directory = %+v, want complete, 2 rows, no manifest from an index it does not have", coldSnapshot)
+	}
+	if coldSpy.reads[manifestKey] != 1 || coldSpy.reads[activationKey] != 0 {
+		t.Fatalf("cold directory read the manifest %d times (want 1) and the activation body %d times (want 0)",
+			coldSpy.reads[manifestKey], coldSpy.reads[activationKey])
+	}
+	// The two agree on what they projected.
+	if len(warmSnapshot.Rows) != len(coldSnapshot.Rows) || warmSnapshot.Revision != coldSnapshot.Revision {
+		t.Fatalf("warm and cold projections differ: %+v vs %+v", warmSnapshot.Rows, coldSnapshot.Rows)
+	}
+	for i := range warmSnapshot.Rows {
+		if warmSnapshot.Rows[i].Identity != coldSnapshot.Rows[i].Identity || warmSnapshot.Rows[i].QueryGroup != coldSnapshot.Rows[i].QueryGroup {
+			t.Fatalf("row %d differs: %+v vs %+v", i, warmSnapshot.Rows[i], coldSnapshot.Rows[i])
+		}
 	}
 }

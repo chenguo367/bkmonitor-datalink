@@ -72,7 +72,7 @@ func TestObservationRegistryAndCostPaginationCannotStarveReplicas(t *testing.T) 
 
 func TestObservationCapacityCannotBlockExecutionAtSmallOrLargeResources(t *testing.T) {
 	for _, resources := range []config.CapacityInputs{{}, {CPUBudget: 1, MemoryLimitBytes: 2 << 20, MemorySource: "cgroup"}, {CPUBudget: 1, MemoryLimitBytes: 1 << 30, MemorySource: "cgroup"}, {CPUBudget: 64, MemoryLimitBytes: 64 << 30, MemorySource: "cgroup"}} {
-		capacity := config.DeriveObservationCapacity(resources)
+		capacity := config.DeriveObservationCapacity(resources, config.PhaseTwoObservationConfig{MemoryPercent: 3})
 		limits, enabled := observationSampleLimits(capacity)
 		if enabled {
 			if _, err := observability.NewSeriesSampler(limits); err != nil {

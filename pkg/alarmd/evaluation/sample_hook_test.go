@@ -203,6 +203,12 @@ func TestSeriesSampleOnlyFirstRecordDoesNotChangeProvisionalFold(t *testing.T) {
 func TestSeriesSampleUsesFinalGuardAndFreeze(t *testing.T) {
 	plan := compiledG4Plan(t, strategy.DetectorKindSimpleRingRatio, map[string]any{"floor": 20, "ceil": nil}, strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, IdentityFields: []string{"host"}})
 	record := g4Record(99, `80`, nil)
+	// The ring ratio's dependency is supplied too, so the only reason on the
+	// Level is the state's guard. Left empty, the dependency's QUERY_EMPTY
+	// competes with the guard for the outcome's reason, and what this test
+	// is about -- the sample copying the final guard rather than the
+	// preliminary detection -- is no longer the only thing the fixture asks.
+	previous := g4Record(39, `40`, nil)
 	for _, completeness := range []execution.HistoryCompleteness{execution.HistoryWarming, execution.HistoryGapped} {
 		req := requestFixtureForPlan(t, plan, []contract.CanonicalRecordV2{record}, nil)
 		req.State.Items[0].Status = execution.StateFoundWarming
@@ -211,10 +217,18 @@ func TestSeriesSampleUsesFinalGuardAndFreeze(t *testing.T) {
 		}
 		req.State.Items[0].Levels[0].HistoryCompleteness = completeness
 		req.State.Items[0].Levels[0].GapReasonCode = execution.ReasonCode(contract.ReasonSnapshotUnavailable)
-		req.Inputs = []execution.SeriesEvaluationInputRequest{g4Input(t, req, map[string][]contract.CanonicalRecordV2{"primary": {record}})}
+		req.Inputs = []execution.SeriesEvaluationInputRequest{g4Input(t, req, map[string][]contract.CanonicalRecordV2{"primary": {record}, "previous": {previous}})}
 		got, sample := equivalentSample(t, req)
 		l := sample.Levels[0]
-		if l.Outcome != "UNKNOWN" || l.Reason != string(got.Plans[0].LevelOutcomes[0].ReasonCode) || l.Reason == l.DetectReason || l.StateDisposition != trigger.StateFreeze || l.DecisionStatus != "not_evaluated" || l.TriggerObserved != nil || !l.HistoryForced {
+		// The guard holds the outcome UNKNOWN with its own reason while the
+		// detection underneath read NORMAL, and the history window still
+		// advances by the point it was given: the sample has to carry the
+		// final guard and the final disposition, not the preliminary
+		// detection. (A frozen state is the detection-unavailable path, which
+		// is the empty dependency this fixture no longer supplies.)
+		if l.Outcome != "UNKNOWN" || l.Reason != string(got.Plans[0].LevelOutcomes[0].ReasonCode) || l.Reason == l.DetectReason ||
+			l.Reason != string(contract.ReasonSnapshotUnavailable) || l.DetectResult != "NORMAL" ||
+			l.StateDisposition != trigger.StateAdvance || l.DecisionStatus != "not_evaluated" || l.TriggerObserved != nil || !l.HistoryForced {
 			t.Fatalf("sample copied preliminary detection instead of final guard: %+v", l)
 		}
 	}

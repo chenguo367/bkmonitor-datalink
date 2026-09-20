@@ -195,7 +195,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// metric, for the same reason the rejections are: the page answers from the
 	// snapshot and has to be right one minute after a restart.
 	seriesPullTally := fleet.NewSeriesPullTally()
-	observationCapacity := config.DeriveObservationCapacity(config.DetectCapacityInputs())
+	observationCapacity := config.DeriveObservationCapacity(config.DetectCapacityInputs(), cfg.PhaseTwo.Observation)
 	costSummary := observability.NewCostSummary(observationCostOptions(observationCapacity, fmt.Sprintf("%s:%d", cfg.PhaseTwo.Worker.ID, external.Now().UnixNano()), external.Now))
 	observer = observability.Multi(observer, external.AdditionalObserver, targetFlow, rejectionTally, costSummary)
 	observer = phaseTwoRuntimeObserver(observer)
