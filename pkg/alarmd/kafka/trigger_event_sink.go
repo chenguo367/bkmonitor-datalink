@@ -37,6 +37,27 @@ type TriggerEventSink struct {
 	standardConverter StandardEventConverter
 	legacyTopic       string
 	maxLegacyBytes    int
+	// protocol is what the producer was opened with and why; nil for a sink
+	// built around a producer that was not opened by this package (tests),
+	// which is read as headers supported.
+	protocol *ProtocolNegotiation
+}
+
+// ProtocolNegotiation is the protocol this sink's producer speaks and the
+// broker answers it was decided from, for readers; nil before the sink has
+// been opened by the opener. Every open negotiates afresh.
+func (sink *TriggerEventSink) ProtocolNegotiation() *ProtocolNegotiation {
+	if sink == nil || sink.protocol == nil {
+		return nil
+	}
+	copied := *sink.protocol
+	copied.Brokers = append([]BrokerProtocol(nil), sink.protocol.Brokers...)
+	return &copied
+}
+
+// headersSupported is whether the producer can send a record with headers.
+func (sink *TriggerEventSink) headersSupported() bool {
+	return sink.protocol == nil || sink.protocol.HeadersSupported
 }
 
 // ConfigureStandardOutput replaces the standard raw event converter, once, at
@@ -231,13 +252,21 @@ func PrepareTriggerEventSink(coordinates DecisionSinkConfig) (*TriggerEventSinkO
 	return &TriggerEventSinkOpener{coordinates: coordinates, config: config}, nil
 }
 
-// Open connects to the brokers and opens the producer. It may be called
-// again after a failure; each call is a fresh attempt.
+// Open negotiates the protocol with the brokers, then connects and opens
+// the producer on it. It may be called again after a failure; each call is
+// a fresh attempt and a fresh negotiation, so a cluster upgraded while the
+// sink was down is spoken to at its new version when the sink reopens.
 func (opener *TriggerEventSinkOpener) Open() (*TriggerEventSink, error) {
 	if opener == nil || opener.config == nil {
 		return nil, errors.New("kafka trigger event sink: opener is not prepared")
 	}
-	client, err := sarama.NewClient(opener.coordinates.Brokers, opener.config)
+	negotiation, err := NegotiateProtocol(opener.coordinates.Brokers, opener.config)
+	if err != nil {
+		return nil, &ProtocolNegotiationError{Negotiation: negotiation, Err: err}
+	}
+	config := *opener.config
+	config.Version = negotiation.Version()
+	client, err := sarama.NewClient(opener.coordinates.Brokers, &config)
 	if err != nil {
 		return nil, fmt.Errorf("kafka trigger event sink: open client: %w", err)
 	}
@@ -249,7 +278,31 @@ func (opener *TriggerEventSinkOpener) Open() (*TriggerEventSink, error) {
 	if err != nil {
 		return nil, errors.Join(err, producer.Close(), client.Close())
 	}
+	sink.protocol = &negotiation
 	return sink, nil
+}
+
+// ProtocolNegotiationError is an open that could not decide the protocol
+// because a broker did not answer. It carries the partial answers so the
+// state a reader sees says which broker, and is retried like any open
+// failure: the producer is not opened on a guess.
+type ProtocolNegotiationError struct {
+	Negotiation ProtocolNegotiation
+	Err         error
+}
+
+func (err *ProtocolNegotiationError) Error() string {
+	if err == nil || err.Err == nil {
+		return "kafka trigger event sink: protocol negotiation failed"
+	}
+	return "kafka trigger event sink: " + err.Err.Error()
+}
+
+func (err *ProtocolNegotiationError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Err
 }
 
 func newTriggerEventSink(
@@ -306,6 +359,17 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			return fmt.Errorf("kafka trigger event sink: unsupported output format %q", format)
 		}
 		if format == contract.WireFormatStandardRawEvent {
+			if !sink.headersSupported() {
+				// Decided before the converter runs and before the client
+				// is asked: the record would carry a header and the
+				// negotiated protocol has none. Named with the brokers'
+				// own answers, so the reader sees which cluster and why;
+				// the Python-compatible output on the same sink is not
+				// affected, it carries no header.
+				return outputRejected(contract.ReasonOutputClientRejected,
+					"the standard RawEvent carries the tenant in a record header and the brokers accept no Produce version that carries headers: "+sink.protocol.String(),
+					format, &events[index])
+			}
 			converted, convertErr := sink.standardConverter.Convert(&events[index])
 			if convertErr != nil {
 				return outputRejected(contract.ReasonOutputConversionRejected, convertErr.Error(), format, &events[index])
