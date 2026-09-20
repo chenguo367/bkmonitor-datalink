@@ -10,9 +10,30 @@
 package fleet
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
+
+func boolPtr(value bool) *bool { return &value }
+
+// cappedReplica is a replica whose output sink asked its brokers and came
+// away on a version below record headers, written the way the cmd writes it:
+// the negotiated version, the headers verdict, the brokers' answers and the
+// record_headers check carrying the sentence.
+func cappedReplica(name, negotiated string) ReplicaView {
+	produce := int16(2)
+	return ReplicaView{Replica: name, Dependencies: []Endpoint{{
+		Role: EndpointOutputKafka, ProtocolVersion: "0.11.0.0", NegotiatedVersion: negotiated, ProduceVersion: &produce,
+		HeadersSupported: boolPtr(false),
+		Brokers:          []BrokerProtocol{{Address: "broker-3:9092", ID: 3, Answered: true, ProduceMinVersion: 0, ProduceMaxVersion: 2}},
+		Checks: []EndpointCheck{
+			{Name: EndpointCheckBrokerVersion, OK: true},
+			{Name: EndpointCheckRecordHeaders, Detail: "broker-3:9092 (id 3) accepts Produce v0..v2; record headers need v3 (0.11.0.0), so the client speaks " + negotiated + " and no native event can leave"},
+			{Name: EndpointCheckProduceVersion, OK: true},
+		},
+	}}}
+}
 
 // Whether the standard raw event can leave is decided from two facts the
 // fleet already had and never put together: the leader's revisioned Plan
@@ -36,6 +57,7 @@ func TestTheOutputPathIsDecidedFromRevisionedPlansAndTheProtocolChoice(t *testin
 		view      View
 		reachable bool
 		reason    string
+		detail    string
 	}{
 		"no source round at all": {
 			view: View{OutputProtocols: groups("auto")}, reason: OutputPathSourceUnknown},
@@ -57,12 +79,38 @@ func TestTheOutputPathIsDecidedFromRevisionedPlansAndTheProtocolChoice(t *testin
 			view: View{Source: source(2401, 7, true), OutputProtocols: groups("", "legacy")}, reason: OutputPathProtocolLegacy},
 		"no replica published a choice at all": {
 			view: View{Source: source(2401, 7, true), OutputProtocols: groups("")}, reachable: true, reason: OutputPathReachable},
+		// The brokers' answer outranks the Plans: revisioned Plans exist and
+		// the client would publish them natively, but the version it came
+		// away with cannot carry the header.
+		"brokers cap the client below record headers, revisions or not": {
+			view:   View{Source: source(2401, 7, true), OutputProtocols: groups("auto"), PerReplica: []ReplicaView{cappedReplica("pod-a", "0.10.2.0")}},
+			reason: OutputPathProtocolUnsupportedByBroker, detail: "accepts Produce v0..v2"},
+		"one capped replica among ones that have not asked decides it": {
+			view: View{Source: source(2401, 7, true), OutputProtocols: groups("auto"),
+				PerReplica: []ReplicaView{{Replica: "pod-b", Dependencies: []Endpoint{{Role: EndpointOutputKafka}}}, cappedReplica("pod-a", "0.10.2.0")}},
+			reason: OutputPathProtocolUnsupportedByBroker, detail: "accepts Produce v0..v2"},
+		// A configured version below the line on a build that never asked is
+		// the configuration's reading, not the brokers'.
+		"headers unsupported by configuration alone is not the brokers' reason": {
+			view: View{Source: source(2401, 7, true), OutputProtocols: groups("auto"),
+				PerReplica: []ReplicaView{{Replica: "pod-a", Dependencies: []Endpoint{{Role: EndpointOutputKafka, ProtocolVersion: "0.10.2.0", HeadersSupported: boolPtr(false)}}}}},
+			reachable: true, reason: OutputPathReachable},
+		"brokers that take the header change nothing": {
+			view: View{Source: source(2401, 0, true), OutputProtocols: groups("auto"),
+				PerReplica: []ReplicaView{{Replica: "pod-a", Dependencies: []Endpoint{{Role: EndpointOutputKafka, NegotiatedVersion: "0.11.0.0", HeadersSupported: boolPtr(true)}}}}},
+			reason: OutputPathNoRevisionedPlans},
+		"forced legacy everywhere is the operator's reason before the brokers'": {
+			view:   View{Source: source(2401, 7, true), OutputProtocols: groups("legacy"), PerReplica: []ReplicaView{cappedReplica("pod-a", "0.10.2.0")}},
+			reason: OutputPathProtocolLegacy},
 	} {
 		name, test := name, test
 		t.Run(name, func(t *testing.T) {
 			facts := OutputPathOf(&test.view)
 			if facts.StandardRawEventReachable != test.reachable || facts.Reason != test.reason {
 				t.Fatalf("output path = %+v, want reachable %t, %s", facts, test.reachable, test.reason)
+			}
+			if test.detail == "" && facts.Detail != "" || test.detail != "" && !strings.Contains(facts.Detail, test.detail) {
+				t.Fatalf("output path detail = %q, want %q (the replica's own sentence about its brokers, and nothing for the other reasons)", facts.Detail, test.detail)
 			}
 			if test.view.Source != nil && test.view.Source.PlansKnown && (facts.Plans != test.view.Source.Plans || facts.RevisionedPlans != test.view.Source.RevisionedPlans) {
 				t.Fatalf("output path carries %d/%d plans, want the source's %d/%d", facts.Plans, facts.RevisionedPlans, test.view.Source.Plans, test.view.Source.RevisionedPlans)

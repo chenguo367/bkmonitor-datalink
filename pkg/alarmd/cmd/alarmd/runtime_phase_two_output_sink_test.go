@@ -200,6 +200,86 @@ func TestLazyOutputSinkCloseEndsTheRetry(t *testing.T) {
 	}
 }
 
+// negotiatingOpener fails its first attempt the way an open does when a broker
+// does not answer ApiVersions -- carrying the answers it did get -- and opens
+// the sink it was given on the next.
+type negotiatingOpener struct {
+	mu    sync.Mutex
+	calls int
+	sink  productionPhaseTwoEventSink
+}
+
+func (opener *negotiatingOpener) Open() (productionPhaseTwoEventSink, error) {
+	opener.mu.Lock()
+	defer opener.mu.Unlock()
+	opener.calls++
+	if opener.calls == 1 {
+		return nil, &enginekafka.ProtocolNegotiationError{
+			Negotiation: enginekafka.ProtocolNegotiation{
+				Configured: "0.10.2.0", Wanted: "0.11.0.0", Negotiated: "0.10.2.0", ProduceVersion: 2, WantedProduceVersion: 3,
+				Brokers: []enginekafka.BrokerProtocol{
+					{Address: "b1:9092", ID: -1, Answered: true, ProduceMinVersion: 0, ProduceMaxVersion: 2},
+					{Address: "b2:9092", ID: -1, ProduceMinVersion: -1, ProduceMaxVersion: -1, Error: "EOF"},
+				},
+			},
+			Err: errors.New("kafka: protocol negotiation: broker b2:9092 did not answer ApiVersions: EOF"),
+		}
+	}
+	return opener.sink, nil
+}
+
+// The sink's state carries the brokers' answer: an attempt that failed
+// because a broker did not answer keeps the partial answers, naming the
+// broker, and the sink opened afterwards replaces them with the agreement it
+// speaks under. Before the first attempt there is nothing, and that is a
+// different state from either.
+func TestLazyOutputSinkStateCarriesTheBrokersAnswer(t *testing.T) {
+	inner := &configuringPhaseTwoEventSink{}
+	inner.protocol = &enginekafka.ProtocolNegotiation{
+		Configured: "0.10.2.0", Wanted: "0.11.0.0", Negotiated: "0.11.0.0", ProduceVersion: 3, WantedProduceVersion: 3, HeadersSupported: true,
+		Brokers: []enginekafka.BrokerProtocol{
+			{Address: "b1:9092", ID: -1, Answered: true, ProduceMinVersion: 0, ProduceMaxVersion: 7},
+			{Address: "b2:9092", ID: -1, Answered: true, ProduceMinVersion: 0, ProduceMaxVersion: 7},
+		},
+	}
+	opener := &negotiatingOpener{sink: inner}
+	sink, err := newLazyOutputSink(opener, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sink.ProtocolNegotiation() != nil {
+		t.Fatal("a sink that has not tried claims an agreement")
+	}
+	if sink.tryOpen() {
+		t.Fatal("the first attempt opened")
+	}
+	partial := sink.State()
+	if partial.Ready || partial.Protocol == nil || len(partial.Protocol.Brokers) != 2 ||
+		partial.Protocol.Brokers[1].Answered || partial.Protocol.Brokers[1].Error != "EOF" || partial.Protocol.Negotiated != "0.10.2.0" {
+		t.Fatalf("state after a negotiation failure = %+v, want the partial answers naming b2", partial)
+	}
+	if !strings.Contains(partial.LastFailure, "b2:9092 did not answer") {
+		t.Fatalf("last failure = %q", partial.LastFailure)
+	}
+	if !sink.tryOpen() {
+		t.Fatal("the second attempt did not open")
+	}
+	opened := sink.State()
+	if !opened.Ready || opened.Protocol == nil || opened.Protocol.Negotiated != "0.11.0.0" || !opened.Protocol.HeadersSupported ||
+		len(opened.Protocol.Brokers) != 2 || !opened.Protocol.Brokers[1].Answered {
+		t.Fatalf("state after opening = %+v, want the open sink's agreement", opened)
+	}
+	// The state's copy is its own: the sink's later answer does not reach
+	// back into a state a reader already holds.
+	inner.protocol.Brokers[0].ProduceMaxVersion = 1
+	if opened.Protocol.Brokers[0].ProduceMaxVersion == 1 {
+		t.Fatal("the state shares the sink's broker list")
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // A replica whose output sink is not open stays up, reports not ready under
 // the dependency's name with output_sink_ready false, and registers as
 // starting so the rendezvous hands it no Query Groups; when the sink opens

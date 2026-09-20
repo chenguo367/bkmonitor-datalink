@@ -31,6 +31,10 @@ type OutputPathFacts struct {
 	// says why or why not, one of OutputPathReasons.
 	StandardRawEventReachable bool   `json:"standard_raw_event_reachable"`
 	Reason                    string `json:"reason"`
+	// Detail is the replica's own sentence when the reason is the brokers':
+	// which broker accepts what, and what the standard raw event needs. Empty
+	// for the other reasons, whose arithmetic is the fields above.
+	Detail string `json:"detail,omitempty"`
 }
 
 // The reasons the standard output path is or is not reachable. Closed: a
@@ -44,6 +48,11 @@ const (
 	// OutputPathProtocolLegacy: every replica that said runs the forced
 	// compatible choice, under which nothing is published natively.
 	OutputPathProtocolLegacy = "PROTOCOL_LEGACY"
+	// OutputPathProtocolUnsupportedByBroker: a replica asked its brokers which
+	// protocol they accept and came away on one that cannot carry the record
+	// header the standard raw event puts the tenant in. The compatible
+	// output still leaves; nothing native can, whatever the Plans carry.
+	OutputPathProtocolUnsupportedByBroker = "PROTOCOL_UNSUPPORTED_BY_BROKER"
 	// OutputPathSourceUnknown: no counted replica published a source round
 	// that reports Plan counts (an older build, or no leader heard from), so
 	// the question cannot be answered and is not answered as no.
@@ -51,7 +60,10 @@ const (
 )
 
 // OutputPathReasons is every word Reason can carry.
-var OutputPathReasons = []string{OutputPathReachable, OutputPathNoRevisionedPlans, OutputPathProtocolLegacy, OutputPathSourceUnknown}
+var OutputPathReasons = []string{
+	OutputPathReachable, OutputPathNoRevisionedPlans, OutputPathProtocolLegacy,
+	OutputPathProtocolUnsupportedByBroker, OutputPathSourceUnknown,
+}
 
 // OutputPathOf decides from the view's source round and protocol groups.
 // Protocol words are read as the control plane spells them; a replica that
@@ -75,6 +87,16 @@ func OutputPathOf(view *View) OutputPathFacts {
 	if reported > 0 && legacyOnly {
 		facts.Reason = OutputPathProtocolLegacy
 		return facts
+	}
+	// A replica whose brokers cannot take the header decides it for the
+	// deployment: the brokers are shared, and one replica that asked is
+	// enough to know. Its own sentence about them is the detail.
+	for _, replica := range view.PerReplica {
+		if output := endpointByRole(replica.Dependencies, EndpointOutputKafka); brokerCappedHeaders(output) {
+			facts.Reason = OutputPathProtocolUnsupportedByBroker
+			facts.Detail = checkDetail(output, EndpointCheckRecordHeaders)
+			return facts
+		}
 	}
 	// Auto publishes a revisioned strategy natively; native refuses an
 	// unrevisioned one; either way it is the revisioned Plans that can reach

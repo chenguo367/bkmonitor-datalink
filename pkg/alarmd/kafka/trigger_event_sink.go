@@ -24,6 +24,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // StandardEventConverter writes a decision as the standard raw event.
@@ -499,6 +500,11 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 		}
 	}
 	messages = published
+	// The count is the sink's to give: how many messages the batch became
+	// and how many events the protocol had no message for. A batch of
+	// recoveries under the Python-compatible protocol is zero messages and
+	// a success, and the caller's line has to be able to say so.
+	observability.ReportOutputWrite(ctx, len(messages), len(events)-len(messages))
 	if len(messages) == 0 {
 		return nil
 	}

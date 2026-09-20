@@ -1382,6 +1382,9 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		return nil
 	}
 	ctx = observability.ContextWithTraceFields(ctx, observability.TraceFields{StrategyID: events[0].PlanRef.StrategyID, BusinessID: events[0].BusinessID})
+	// The sink's own count of what it handed the broker, for the line: a
+	// batch the protocol has no message for is a success that wrote nothing.
+	ctx, outputWrite := observability.ContextWithOutputWriteReport(ctx)
 	started := time.Now()
 	err := coordinator.ports.Events.WriteBatch(ctx, events)
 	execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
@@ -1416,6 +1419,7 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		ReasonCode: observability.ReasonCode(reason), Duration: time.Since(started),
 		Counts: observability.Counts{Events: int64(len(events))}, Err: err, OutputRejection: rejection,
+		OutputWrite: outputWrite(),
 	})
 	if err != nil {
 		return fmt.Errorf("alarmd worker: acknowledge events: %w", err)

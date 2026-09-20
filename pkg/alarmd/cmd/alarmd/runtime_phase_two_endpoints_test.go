@@ -22,6 +22,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -334,54 +335,172 @@ func TestTheFleetPublishesTheOutputProtocolTheReconcilerWasConfiguredWith(t *tes
 	}
 }
 
-// The output role says what protocol version the client speaks and whether
-// that version can carry the record headers the standard raw event needs,
-// with the two checks decided from it -- so a client told the broker is older
-// than 0.11 is readable as such before the first event is refused, rather
-// than inferred from an afternoon of ACKs that never came.
-func TestTheOutputRoleSaysWhetherItsClientCanCarryHeaders(t *testing.T) {
-	for _, test := range []struct {
-		version string
-		parses  bool
-		headers bool
-	}{
-		{"0.10.2.0", true, false},
-		{"0.11.0.0", true, true},
-		{"2.6.0", true, true},
-		{"not-a-version", false, false},
-	} {
-		cfg := config.Default()
-		cfg.Kafka.Brokers = []string{"kafka-0:9092"}
-		cfg.Kafka.BrokerVersion = test.version
-		entry := outputKafkaEndpoint(cfg)
-		if entry.Role != fleet.EndpointOutputKafka || entry.ProtocolVersion != test.version {
-			t.Fatalf("%s: entry = %+v, want the output role at that version", test.version, entry)
-		}
+// The output role's protocol checks are decided by what the brokers answered,
+// not by the configuration. The configuration's own check is that its
+// version parses; the other two are present and failing until the sink has
+// asked, and thereafter read the answers: the live shape -- three brokers
+// that accept Produce up to v2 -- reads as a client speaking 0.10.2.0 that
+// every broker accepts and that cannot carry the record header, naming each
+// broker; brokers that take v3 read as headers supported; a broker that did
+// not answer fails both checks by name.
+func TestTheOutputRoleReadsTheBrokersAnswerNotTheConfiguration(t *testing.T) {
+	cfg := config.Default()
+	cfg.Kafka.Brokers = []string{"kafka-0:9092"}
+	entry := outputKafkaEndpoint(cfg)
+	if entry.Role != fleet.EndpointOutputKafka || entry.ProtocolVersion != cfg.Kafka.BrokerVersion {
+		t.Fatalf("entry = %+v, want the output role at the configured floor", entry)
+	}
+	if len(entry.Checks) != 1 || entry.Checks[0].Name != fleet.EndpointCheckBrokerVersion || !entry.Checks[0].OK {
+		t.Fatalf("static checks = %+v, want only the configuration's own, passing", entry.Checks)
+	}
+	if entry.HeadersSupported != nil || entry.NegotiatedVersion != "" || entry.ProduceVersion != nil {
+		t.Fatalf("static entry claims to know what the brokers speak: %+v", entry)
+	}
+	bad := cfg
+	bad.Kafka.BrokerVersion = "not-a-version"
+	if checks := outputKafkaEndpoint(bad).Checks; len(checks) != 1 || checks[0].OK || !strings.Contains(checks[0].Detail, "does not parse") {
+		t.Fatalf("a version that does not parse: checks = %+v", checks)
+	}
+
+	checksOf := func(entry fleet.Endpoint) map[string]fleet.EndpointCheck {
 		checks := map[string]fleet.EndpointCheck{}
 		for _, check := range entry.Checks {
+			if _, twice := checks[check.Name]; twice {
+				t.Fatalf("check %q written twice: %+v", check.Name, entry.Checks)
+			}
 			checks[check.Name] = check
 		}
-		if got := checks[fleet.EndpointCheckBrokerVersion]; got.OK != test.parses || (!test.parses && got.Detail == "") {
-			t.Fatalf("%s: broker_version check = %+v, want ok %t with a detail when not", test.version, got, test.parses)
-		}
-		if !test.parses {
-			if entry.HeadersSupported != nil {
-				t.Fatalf("%s: headers_supported = %v for a version that does not parse, want absent", test.version, *entry.HeadersSupported)
+		for _, check := range entry.Checks {
+			known := false
+			for _, name := range fleet.EndpointCheckNames {
+				known = known || name == check.Name
 			}
-			continue
+			if !known {
+				t.Fatalf("check %q is not in EndpointCheckNames", check.Name)
+			}
 		}
-		if entry.HeadersSupported == nil || *entry.HeadersSupported != test.headers {
-			t.Fatalf("%s: headers_supported = %v, want %t", test.version, entry.HeadersSupported, test.headers)
-		}
-		record := checks[fleet.EndpointCheckRecordHeaders]
-		if record.OK != test.headers || (!test.headers && !strings.Contains(record.Detail, "0.11.0.0")) {
-			t.Fatalf("%s: record_headers check = %+v, want ok %t naming the version needed when not", test.version, record, test.headers)
+		return checks
+	}
+
+	// Nobody asked yet: both rows there and failing, saying so.
+	before := entry
+	outputProtocolFacts(&before, nil)
+	checks := checksOf(before)
+	if record := checks[fleet.EndpointCheckRecordHeaders]; record.OK || !strings.Contains(record.Detail, "not been asked") {
+		t.Fatalf("record_headers before asking = %+v", record)
+	}
+	if produce := checks[fleet.EndpointCheckProduceVersion]; produce.OK || !strings.Contains(produce.Detail, "not asked yet") {
+		t.Fatalf("produce_version_accepted before asking = %+v", produce)
+	}
+	if before.HeadersSupported != nil {
+		t.Fatalf("headers_supported before asking = %v, want absent", *before.HeadersSupported)
+	}
+
+	// The live shape: three brokers at 0.10.2, the client came down to it.
+	old := func(addr string) enginekafka.BrokerProtocol {
+		return enginekafka.BrokerProtocol{Address: addr, ID: -1, Answered: true, ProduceMinVersion: 0, ProduceMaxVersion: 2}
+	}
+	capped := &enginekafka.ProtocolNegotiation{
+		Configured: "0.10.2.0", Wanted: "0.11.0.0", Negotiated: "0.10.2.0", ProduceVersion: 2, WantedProduceVersion: 3,
+		HeadersSupported: false, Brokers: []enginekafka.BrokerProtocol{old("b1:9092"), old("b2:9092"), old("b3:9092")},
+		Reason: enginekafka.ProtocolReasonUnsupportedByBroker,
+	}
+	live := entry
+	outputProtocolFacts(&live, capped)
+	if live.NegotiatedVersion != "0.10.2.0" || live.ProduceVersion == nil || *live.ProduceVersion != 2 ||
+		live.HeadersSupported == nil || *live.HeadersSupported || len(live.Brokers) != 3 || live.Brokers[2].Address != "b3:9092" || live.Brokers[2].ProduceMaxVersion != 2 {
+		t.Fatalf("live entry = %+v, want negotiated 0.10.2.0, Produce v2, no headers, three brokers", live)
+	}
+	checks = checksOf(live)
+	record := checks[fleet.EndpointCheckRecordHeaders]
+	if record.OK {
+		t.Fatalf("record_headers on capped brokers = %+v, want not ok", record)
+	}
+	for _, fragment := range []string{"b1:9092", "b2:9092", "b3:9092", "v0..v2", "v3 (0.11.0.0)", "speaks 0.10.2.0", "no native event"} {
+		if !strings.Contains(record.Detail, fragment) {
+			t.Fatalf("record_headers detail = %q, want it to say %q", record.Detail, fragment)
 		}
 	}
-	// Every check name a role reports is in the closed list.
-	for _, name := range fleet.EndpointCheckNames {
-		if name != fleet.EndpointCheckBrokerVersion && name != fleet.EndpointCheckRecordHeaders {
-			t.Fatalf("unknown check name %q in EndpointCheckNames", name)
+	if produce := checks[fleet.EndpointCheckProduceVersion]; !produce.OK || produce.Detail != "" {
+		t.Fatalf("produce_version_accepted = %+v, want ok: every broker accepts the v2 the client sends", produce)
+	}
+	if entry.Checks[0].Name != fleet.EndpointCheckBrokerVersion || len(entry.Checks) != 1 {
+		t.Fatalf("the static entry was written through: %+v", entry.Checks)
+	}
+
+	// Brokers that take the header.
+	modern := &enginekafka.ProtocolNegotiation{
+		Configured: "0.10.2.0", Wanted: "0.11.0.0", Negotiated: "0.11.0.0", ProduceVersion: 3, WantedProduceVersion: 3, HeadersSupported: true,
+		Brokers: []enginekafka.BrokerProtocol{{Address: "b1:9092", ID: -1, Answered: true, ProduceMinVersion: 0, ProduceMaxVersion: 7}},
+	}
+	fine := entry
+	outputProtocolFacts(&fine, modern)
+	checks = checksOf(fine)
+	if !checks[fleet.EndpointCheckRecordHeaders].OK || !checks[fleet.EndpointCheckProduceVersion].OK ||
+		fine.HeadersSupported == nil || !*fine.HeadersSupported || fine.NegotiatedVersion != "0.11.0.0" {
+		t.Fatalf("modern entry = %+v checks %+v, want both ok", fine, fine.Checks)
+	}
+
+	// One broker did not answer: the partial answers of a failed open.
+	partial := &enginekafka.ProtocolNegotiation{
+		Configured: "0.10.2.0", Wanted: "0.11.0.0", Negotiated: "0.10.2.0", ProduceVersion: 2, WantedProduceVersion: 3,
+		Brokers: []enginekafka.BrokerProtocol{old("b1:9092"), {Address: "b2:9092", ID: -1, ProduceMinVersion: -1, ProduceMaxVersion: -1, Error: "EOF"}},
+	}
+	silent := entry
+	outputProtocolFacts(&silent, partial)
+	checks = checksOf(silent)
+	if produce := checks[fleet.EndpointCheckProduceVersion]; produce.OK || !strings.Contains(produce.Detail, "b2:9092") || !strings.Contains(produce.Detail, "did not answer") || strings.Contains(produce.Detail, "b1:9092") {
+		t.Fatalf("produce_version_accepted with a silent broker = %+v, want it named alone", produce)
+	}
+	if record := checks[fleet.EndpointCheckRecordHeaders]; record.OK || !strings.Contains(record.Detail, "b2:9092 did not answer (EOF)") {
+		t.Fatalf("record_headers with a silent broker = %+v", record)
+	}
+}
+
+// The dependency list carries the brokers' answer from the sink's state, and
+// the two protocol rows are on the output entry whether or not a sink was
+// wired: absent, they read as passed.
+func TestEndpointFactsCarryTheBrokersAnswerFromTheSink(t *testing.T) {
+	cfg := config.Default()
+	cfg.Kafka.Brokers = []string{"kafka-0:9092"}
+	negotiation := &enginekafka.ProtocolNegotiation{
+		Configured: "0.10.2.0", Wanted: "0.11.0.0", Negotiated: "0.10.2.0", ProduceVersion: 2, WantedProduceVersion: 3,
+		Brokers: []enginekafka.BrokerProtocol{{Address: "kafka-0:9092", ID: -1, Answered: true, ProduceMinVersion: 0, ProduceMaxVersion: 2}},
+		Reason:  enginekafka.ProtocolReasonUnsupportedByBroker,
+	}
+	now := func() time.Time { return time.Unix(1_700_000_000, 0) }
+	for name, state := range map[string]func() outputSinkState{
+		"no sink wired": nil,
+		"sink open on the negotiated version": func() outputSinkState {
+			return outputSinkState{Ready: true, Since: now().Add(-time.Minute), Attempts: 1, Protocol: negotiation}
+		},
+		"sink not open, nobody asked": func() outputSinkState {
+			return outputSinkState{Attempts: 2, LastFailure: "dial tcp: refused", LastFailureAt: now()}
+		},
+	} {
+		endpoints := endpointFactsSource(cfg, endpointSharing{}, nil, nil, nil, func() *fleet.SourceFacts { return nil }, state, now)()
+		var output *fleet.Endpoint
+		for index := range endpoints {
+			if endpoints[index].Role == fleet.EndpointOutputKafka {
+				output = &endpoints[index]
+			}
+		}
+		if output == nil {
+			t.Fatalf("%s: no output entry in %+v", name, endpoints)
+		}
+		names := map[string]bool{}
+		for _, check := range output.Checks {
+			names[check.Name] = check.OK
+		}
+		if _, present := names[fleet.EndpointCheckRecordHeaders]; !present {
+			t.Fatalf("%s: record_headers row absent: %+v", name, output.Checks)
+		}
+		if _, present := names[fleet.EndpointCheckProduceVersion]; !present {
+			t.Fatalf("%s: produce_version_accepted row absent: %+v", name, output.Checks)
+		}
+		asked := state != nil && state().Protocol != nil
+		if names[fleet.EndpointCheckProduceVersion] != asked || (output.NegotiatedVersion != "") != asked {
+			t.Fatalf("%s: produce_version_accepted ok=%t negotiated=%q, want asked=%t", name, names[fleet.EndpointCheckProduceVersion], output.NegotiatedVersion, asked)
 		}
 	}
 }

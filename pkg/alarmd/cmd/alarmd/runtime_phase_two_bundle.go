@@ -50,6 +50,11 @@ type productionPhaseTwoEventSink interface {
 	execution.EventSink
 	ConfigureLegacyOutput(enginekafka.LegacyEventConverter, string, int) error
 	ConfigureStandardOutput(enginekafka.StandardEventConverter) error
+	// ProtocolNegotiation is what the sink and its brokers agreed to speak
+	// when it opened, or nil for a sink that asked nobody. Required rather
+	// than optional so a sink that forgets it is a compile error, not a
+	// dependency entry that quietly reads "not asked yet" forever.
+	ProtocolNegotiation() *enginekafka.ProtocolNegotiation
 	Shutdown(context.Context) error
 	Close() error
 }
