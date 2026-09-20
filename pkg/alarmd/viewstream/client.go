@@ -504,12 +504,16 @@ func (client *Client) reprobe(ctx context.Context, installed View, send func(*pb
 	}
 	missing, probed := client.probeMissing(ctx, installed.Entries)
 	client.mu.Lock()
-	same := client.stats.Installed == installed.Version && client.stats.ObjectsMissing == missing && client.stats.ObjectsProbed == probed
-	if client.stats.Installed == installed.Version {
+	current := client.stats.Installed == installed.Version
+	same := client.stats.ObjectsMissing == missing && client.stats.ObjectsProbed == probed
+	if current {
 		client.stats.ObjectsMissing, client.stats.ObjectsProbed = missing, probed
 	}
 	client.mu.Unlock()
-	if same {
+	// A newer version was installed while the probe ran: its own install
+	// probed it, and a receipt for the version just left would only land in
+	// the Leader's unknown_version count and read like a fault.
+	if !current || same {
 		return
 	}
 	client.observe(ctx, "objects_reprobed", fmt.Sprintf("missing=%d probed=%t", missing, probed), nil)

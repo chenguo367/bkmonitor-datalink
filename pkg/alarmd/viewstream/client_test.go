@@ -54,9 +54,20 @@ type countingProbe struct {
 	missing map[string]struct{}
 	err     error
 	asked   [][]execution.ObjectDigest
+	// hold, when set, blocks the next call until released, once; entered
+	// is closed when that call begins.
+	hold, entered chan struct{}
 }
 
 func (probe *countingProbe) MissingObjects(_ context.Context, objects []execution.ObjectDigest, contexts []execution.OutputContextDigest) (int, error) {
+	probe.mu.Lock()
+	hold, entered := probe.hold, probe.entered
+	probe.hold, probe.entered = nil, nil
+	probe.mu.Unlock()
+	if hold != nil {
+		close(entered)
+		<-hold
+	}
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
 	probe.asked = append(probe.asked, append([]execution.ObjectDigest(nil), objects...))
@@ -588,6 +599,64 @@ func TestTheWorkerReprobesTheInstalledViewOnTheHeartbeat(t *testing.T) {
 	eventually(t, "more heartbeats pass", func() bool { return leader.got("heartbeat") >= 8 })
 	if receipts := leader.got("receipt_installed"); receipts != 3 {
 		t.Fatalf("receipts after quiet heartbeats = %d, want still 3", receipts)
+	}
+
+	// A new version is installed while a re-probe of the old one is under
+	// way: the re-probe's answer is for a version the Worker no longer
+	// holds, and no receipt goes out for it -- it would only land in the
+	// Leader's unknown_version count and read like a fault. The new version
+	// replaces qg-2's object with one the catalog has, so the two answers
+	// differ: the old view has one missing, the new none.
+	next := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w1"},
+		map[string]viewstream.Content{"qg-1": content("obj-1", "s1"), "qg-2": content("obj-2b", "s2")})
+	before, after := snapshot, viewFrom(next, "w1", 2)
+	delta, err := viewstream.Diff(before, after)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold, entered := make(chan struct{}), make(chan struct{})
+	probe.mu.Lock()
+	probe.hold, probe.entered = hold, entered
+	probe.missing["obj-2"] = struct{}{}
+	probe.mu.Unlock()
+	// The next heartbeat's re-probe blocks; the Leader answers that
+	// heartbeat with the delta, which the Worker installs meanwhile.
+	deltaSent := false
+	leader.mu.Lock()
+	leader.replies = func(message *pb.WorkerMessage) []*pb.LeaderMessage {
+		if message.GetHeartbeat() == nil {
+			return nil
+		}
+		out := []*pb.LeaderMessage{{Body: &pb.LeaderMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}}}}
+		if !deltaSent {
+			deltaSent = true
+			out = append(out, &pb.LeaderMessage{Body: &pb.LeaderMessage_Delta{Delta: viewstream.DeltaToWire(delta)}})
+		}
+		return out
+	}
+	leader.mu.Unlock()
+	<-entered
+	eventually(t, "revision 2 is installed while the re-probe of 1 is held", func() bool {
+		view, ok := client.Installed()
+		return ok && view.Version.Revision == 2
+	})
+	close(hold)
+	eventually(t, "more heartbeats pass after the release", func() bool { return leader.got("heartbeat") >= 14 })
+	leader.mu.Lock()
+	staleReceipts := 0
+	for _, message := range leader.received {
+		if receipt := message.GetReceipt(); receipt != nil && receipt.Version.Revision == 1 && receipt.ObjectsMissing == 1 && receipt.Installed && len(leader.received) > 0 {
+			staleReceipts++
+		}
+	}
+	leader.mu.Unlock()
+	// One receipt for revision 1 named one missing object: the one sent when
+	// obj-2 first went missing. None came from the held re-probe.
+	if staleReceipts != 1 {
+		t.Fatalf("receipts for revision 1 with one object missing = %d, want only the earlier one; the held re-probe must not report a version the Worker no longer holds", staleReceipts)
+	}
+	if stats := client.Stats(); stats.Installed.Revision != 2 || stats.ObjectsMissing != 0 || !stats.ObjectsProbed {
+		t.Fatalf("stats after the race = %+v, want revision 2 with nothing missing, as its own install found; the stale probe must not overwrite it", stats)
 	}
 }
 
