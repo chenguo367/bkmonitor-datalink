@@ -65,6 +65,7 @@ func TestTheFirstWriteAfterReadingAWholeMemoryRecordMigratesIt(t *testing.T) {
 	// saw nothing does.
 	mutation := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
 		Identity: noDataIdentityV2(), DerivedFrom: snapshot.Representation,
+		LoadedApplyVersion:     snapshot.PersistedApplyVersion,
 		ExpectedMarkerRevision: snapshot.MarkerRevision, ApplyVersion: coexistenceApplyVersion(1),
 		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
 		PresentAsOf: snapshot.PresentAsOf, Memory: snapshot.Groups,
@@ -158,6 +159,7 @@ func TestAWriteDerivedFromTheOldRecordReplacesTheNewOne(t *testing.T) {
 	}
 	mutation := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
 		Identity: noDataIdentityV2(), DerivedFrom: snapshot.Representation,
+		LoadedApplyVersion:     snapshot.PersistedApplyVersion,
 		ExpectedMarkerRevision: snapshot.MarkerRevision, ApplyVersion: coexistenceApplyVersion(3),
 		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
 		PresentAsOf: snapshot.PresentAsOf, Memory: snapshot.Groups,
@@ -205,6 +207,7 @@ func TestAPerGroupStatementStillHasToMatchTheRecordsRevision(t *testing.T) {
 	store := generationStore(t, backend)
 	mutation := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
 		Identity: noDataIdentityV2(), DerivedFrom: execution.NoDataRepresentationPerGroup,
+		LoadedApplyVersion: applyVersion(),
 		// Derived against revision four while the record is at five: another
 		// writer moved it in between.
 		ExpectedMarkerRevision: 4, ApplyVersion: coexistenceApplyVersion(1),
@@ -272,6 +275,7 @@ func TestAPlanWithNoRecordReadsNoneAndWritesItsFirstMemory(t *testing.T) {
 	}
 	mutation, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMemoryUpdate{
 		Identity: noDataIdentityV2(), DerivedFrom: snapshot.Representation,
+		LoadedApplyVersion:     snapshot.PersistedApplyVersion,
 		ExpectedMarkerRevision: snapshot.MarkerRevision, ApplyVersion: coexistenceApplyVersion(1),
 		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
 		PresentAsOf: 1000, Memory: []execution.NoDataGroupMemory{{GroupKey: "a", LastSeen: 1000}},
@@ -313,6 +317,7 @@ func TestAReplacingStatementThatLosesARaceReportsTheRecordMoved(t *testing.T) {
 	snapshot := loadOneNoDataMemory(t, store)
 	mutation := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
 		Identity: noDataIdentityV2(), DerivedFrom: snapshot.Representation,
+		LoadedApplyVersion:     snapshot.PersistedApplyVersion,
 		ExpectedMarkerRevision: snapshot.MarkerRevision, ApplyVersion: coexistenceApplyVersion(1),
 		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
 		PresentAsOf: snapshot.PresentAsOf, Memory: snapshot.Groups,
@@ -336,4 +341,118 @@ func TestAReplacingStatementThatLosesARaceReportsTheRecordMoved(t *testing.T) {
 			"comparing them names an incident that did not happen",
 			item.Conflict.Kind, execution.StateVersionConflictRevisionMoved)
 	}
+}
+
+// A whole-record statement expects the version it read where a delta expects
+// the revision. Read none and met a record, or read the whole-memory record and
+// met a per-group record newer than it: somebody wrote between this Slot's read
+// and its write, and the statement is refused so the retry derives against
+// what is there. Met a per-group record the read already outranked: that is the
+// record the read decided to replace, and it is replaced.
+func TestAReplacingStatementExpectsTheVersionItRead(t *testing.T) {
+	blobKey, err := PlanNoDataKeyV2("alarmd", noDataIdentityV2())
+	if err != nil {
+		t.Fatal(err)
+	}
+	newRecord := func(version execution.ApplyVersion) map[string]map[string][]byte {
+		return map[string]map[string][]byte{
+			noDataHashKey(t): perGroupRecord(t, 2, version, 1000,
+				execution.NoDataGroupMemory{GroupKey: "late", LastSeen: 1000}),
+		}
+	}
+
+	t.Run("read none, met a record", func(t *testing.T) {
+		backend := &casMemoryBackend{values: make(map[string][]byte)}
+		store := generationStore(t, backend)
+		snapshot := loadOneNoDataMemory(t, store)
+		mutation := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
+			Identity: noDataIdentityV2(), DerivedFrom: snapshot.Representation,
+			LoadedApplyVersion:     snapshot.PersistedApplyVersion,
+			ExpectedMarkerRevision: snapshot.MarkerRevision, ApplyVersion: coexistenceApplyVersion(3),
+			ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
+			PresentAsOf: 1060, Memory: []execution.NoDataGroupMemory{{GroupKey: "mine", LastSeen: 1060}},
+		})
+		// Written by an older Slot after this one read nothing.
+		backend.hashes = newRecord(coexistenceApplyVersion(2))
+		applied, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+			Contract: frozenRef(), Items: []execution.PlanNoDataMutation{mutation},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		item := applied.Items[0]
+		if item.Status != execution.NoDataConflict || item.Conflict == nil ||
+			item.Conflict.Kind != execution.StateVersionConflictRevisionMoved {
+			t.Fatalf("write = %+v (%+v), want a revision_moved conflict: the record appeared after the read, "+
+				"and replacing it would take the round that wrote it out of the memory", item.Status, item.Conflict)
+		}
+		if _, gone := backend.hashes[noDataHashKey(t)]["g:late"]; !gone {
+			t.Fatal("the record written after the read was replaced")
+		}
+	})
+
+	t.Run("read the whole-memory record, met a newer per-group record", func(t *testing.T) {
+		backend := &casMemoryBackend{values: make(map[string][]byte)}
+		backend.values[blobKey] = wholeMemoryRecord(t, 4, coexistenceApplyVersion(1),
+			execution.NoDataGroupMemory{GroupKey: "kept", LastSeen: 940})
+		store := generationStore(t, backend)
+		snapshot := loadOneNoDataMemory(t, store)
+		if snapshot.Representation != execution.NoDataRepresentationWholeMemory {
+			t.Fatalf("representation = %q, want the whole-memory record", snapshot.Representation)
+		}
+		mutation := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
+			Identity: noDataIdentityV2(), DerivedFrom: snapshot.Representation,
+			LoadedApplyVersion:     snapshot.PersistedApplyVersion,
+			ExpectedMarkerRevision: snapshot.MarkerRevision, ApplyVersion: coexistenceApplyVersion(3),
+			ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
+			PresentAsOf: snapshot.PresentAsOf, Memory: snapshot.Groups,
+			Loaded: snapshot.Groups, LoadedPresentAsOf: snapshot.PresentAsOf,
+		})
+		backend.hashes = newRecord(coexistenceApplyVersion(2))
+		applied, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+			Contract: frozenRef(), Items: []execution.PlanNoDataMutation{mutation},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		item := applied.Items[0]
+		if item.Status != execution.NoDataConflict || item.Conflict == nil ||
+			item.Conflict.Kind != execution.StateVersionConflictRevisionMoved {
+			t.Fatalf("write = %+v (%+v), want a revision_moved conflict against a per-group record newer "+
+				"than the whole-memory record the statement was derived from", item.Status, item.Conflict)
+		}
+	})
+
+	t.Run("read the whole-memory record, met the older per-group record it outranked", func(t *testing.T) {
+		backend := &casMemoryBackend{values: make(map[string][]byte)}
+		backend.values[blobKey] = wholeMemoryRecord(t, 4, coexistenceApplyVersion(2),
+			execution.NoDataGroupMemory{GroupKey: "kept", LastSeen: 940})
+		backend.hashes = newRecord(coexistenceApplyVersion(1))
+		store := generationStore(t, backend)
+		snapshot := loadOneNoDataMemory(t, store)
+		if snapshot.Representation != execution.NoDataRepresentationWholeMemory {
+			t.Fatalf("representation = %q, want the newer whole-memory record", snapshot.Representation)
+		}
+		mutation := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
+			Identity: noDataIdentityV2(), DerivedFrom: snapshot.Representation,
+			LoadedApplyVersion:     snapshot.PersistedApplyVersion,
+			ExpectedMarkerRevision: snapshot.MarkerRevision, ApplyVersion: coexistenceApplyVersion(3),
+			ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
+			PresentAsOf: snapshot.PresentAsOf, Memory: snapshot.Groups,
+			Loaded: snapshot.Groups, LoadedPresentAsOf: snapshot.PresentAsOf,
+		})
+		applied, err := store.ApplyNoData(context.Background(), execution.NoDataApplyRequest{
+			Contract: frozenRef(), Items: []execution.PlanNoDataMutation{mutation},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if applied.Items[0].Status != execution.NoDataApplied {
+			t.Fatalf("write = %+v (%+v), want APPLIED: the per-group record is the one the read outranked",
+				applied.Items[0].Status, applied.Items[0].Conflict)
+		}
+		if _, kept := backend.hashes[noDataHashKey(t)]["g:late"]; kept {
+			t.Fatal("the outranked record's groups survived a whole-record replacement")
+		}
+	})
 }

@@ -233,3 +233,26 @@ func TestTheVerdictRouteCarriesTheSourceAndTheDependencies(t *testing.T) {
 		t.Errorf("a snapshot without the facts does not send them as absent: %s", text)
 	}
 }
+
+// The todo names the platform's lines apart from this deployment's, with the
+// strategies under them: they are in Checks, and "alarmd 已确认 N 类" with a
+// platform line among them tells the reader the wrong thing. The page used
+// to derive the split by walking the lines; a reader of the JSON had nothing
+// to read, and now reads what the page reads.
+func TestTheTodoNamesThePlatformsLinesApart(t *testing.T) {
+	view := &View{Source: blockedSource(now), SourceReplica: "pod-a"}
+	reports := ReportChecks(nil, nil, view, now)
+	todo := SummarizeTodo(reports, nil, view, now)
+	if todo.Checks != 1 || todo.PlatformChecks != 1 || todo.PlatformStrategies != 26 {
+		t.Fatalf("todo = checks %d, platform checks %d, platform strategies %d; want 1, 1, 26: the one line is the platform's, over 26 strategies",
+			todo.Checks, todo.PlatformChecks, todo.PlatformStrategies)
+	}
+	// A deployment's own standing beside it: two lines, one of them the
+	// platform's, and the platform count does not grow with ours.
+	view.Degradations = []Degradation{{Kind: DegradationOpenAlertSetStale, Replica: "pod-a"}}
+	reports = ReportChecks(nil, nil, view, now)
+	todo = SummarizeTodo(reports, nil, view, now)
+	if todo.Checks != 2 || todo.PlatformChecks != 1 || todo.PlatformStrategies != 26 {
+		t.Fatalf("todo = checks %d, platform checks %d, platform strategies %d; want 2, 1, 26", todo.Checks, todo.PlatformChecks, todo.PlatformStrategies)
+	}
+}

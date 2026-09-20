@@ -1662,8 +1662,22 @@ type PlanNoDataMutation struct {
 	// one carries the whole memory and replaces what is stored.
 	DerivedFrom            NoDataRepresentation
 	ExpectedMarkerRevision uint64
-	ApplyVersion           ApplyVersion
-	ScheduleRevision       PlanScheduleRevision
+	// LoadedApplyVersion is the apply version of the record this statement was
+	// derived against, and zero when it was derived against none.
+	//
+	// It is the guard a whole-record statement has where a delta has the
+	// revision. A delta proves at apply time that the record is the one it
+	// was derived from by expecting its revision; a statement derived from the
+	// other record has no revision of this one to expect, and without this
+	// field the only thing standing between it and a record somebody wrote
+	// after the read is the ordering of Slot versions -- which lets a write
+	// from an older Slot, landing between this Slot's read and its write, be
+	// replaced rather than met. Apply versions are the one currency both
+	// records share, so this is what a whole-record statement expects instead:
+	// the record it is replacing must not be newer than the one it read.
+	LoadedApplyVersion ApplyVersion
+	ApplyVersion       ApplyVersion
+	ScheduleRevision   PlanScheduleRevision
 	// RosterVersion names the derivation the expected set came from. It is in
 	// the digest because the same group timestamps decided against a different
 	// roster are a different memory, and a reader comparing two records has no
