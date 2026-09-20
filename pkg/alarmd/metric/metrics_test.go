@@ -305,8 +305,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_query_unavailable_attribution_total":          "variableLabels: {attribution}",
 		"bkmonitor_alarmd_slot_readiness_slack_seconds":                 "variableLabels: {}",
 		"bkmonitor_alarmd_slot_readiness_boundary_total":                "variableLabels: {boundary}",
-		"bkmonitor_alarmd_short_period_slot_execution_duration_seconds": "variableLabels: {cohort}",
-		"bkmonitor_alarmd_short_period_slot_completion_lag_seconds":     "variableLabels: {cohort}",
+		"bkmonitor_alarmd_short_period_slot_execution_duration_seconds": "variableLabels: {cohort,completion_kind}",
+		"bkmonitor_alarmd_short_period_slot_completion_lag_seconds":     "variableLabels: {cohort,completion_kind}",
 		"bkmonitor_alarmd_run_one_return_total":                         "variableLabels: {outcome}",
 		"bkmonitor_alarmd_expired_range_total":                          "variableLabels: {result}",
 		"bkmonitor_alarmd_expired_slots_finalized_total":                "variableLabels: {reason}",
@@ -731,9 +731,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// Unlabelled, so one histogram: eleven buckets plus +Inf, sum and count.
 		fqName("slot_readiness_slack_seconds"): histogramSeries(1, len(slotReadinessSlackBuckets)),
 		// unified, mixed, none, OTHER.
-		fqName("slot_readiness_boundary_total"):                4,
-		fqName("short_period_slot_execution_duration_seconds"): 24,
-		fqName("short_period_slot_completion_lag_seconds"):     24,
+		fqName("slot_readiness_boundary_total"): 4,
+		// Every cohort and completion kind exists from construction.
+		fqName("short_period_slot_execution_duration_seconds"): histogramSeries(len(observability.ShortPeriodCohorts)*len(observability.ShortPeriodCompletionKinds), len(shortPeriodBuckets)),
+		fqName("short_period_slot_completion_lag_seconds"):     histogramSeries(len(observability.ShortPeriodCohorts)*len(observability.ShortPeriodCompletionKinds), len(shortPeriodBuckets)),
 		fqName("run_one_return_total"):                         13,
 		fqName("expired_range_total"):                          4,
 		fqName("expired_slots_finalized_total"):                2,

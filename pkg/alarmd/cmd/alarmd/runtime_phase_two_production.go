@@ -2150,7 +2150,8 @@ func (executor observedProductionSlotExecutor) Execute(
 	result, err := executor.next.Execute(ctx, request)
 	var shortCompletion *observability.ShortPeriodCompletionFacts
 	if err == nil && result.Completed && result.CompletionKind != "" && observability.IsShortPeriodCohort(request.ShortPeriodCohort) {
-		shortCompletion = &observability.ShortPeriodCompletionFacts{Cohort: request.ShortPeriodCohort, CompletionKind: string(result.CompletionKind), LagSeconds: time.Since(time.Unix(int64(request.Contract.Slot.EvaluationTime), 0)).Seconds()}
+		shortCompletion = &observability.ShortPeriodCompletionFacts{Cohort: request.ShortPeriodCohort, CompletionKind: string(result.CompletionKind),
+			LagSeconds: time.Since(time.Unix(int64(request.Contract.Slot.EvaluationTime), 0)).Seconds(), AttemptNo: request.AttemptNo}
 	}
 	observedResult := result.Result
 	reason := result.ReasonCode
