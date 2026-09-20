@@ -408,7 +408,7 @@ func olderNoDataMutation(t *testing.T, groups ...execution.NoDataGroupMemory) ex
 	older := applyVersion()
 	older.EvaluationTime--
 	return noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
-		DerivedFrom: execution.NoDataRepresentationPerGroup,
+		DerivedFrom: execution.NoDataRepresentationNone,
 		Identity:    noDataIdentityV2(), ExpectedMarkerRevision: 0, ApplyVersion: older,
 		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
 		PresentAsOf: noDataPresentAsOf, Memory: groups,

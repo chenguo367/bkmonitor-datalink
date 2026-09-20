@@ -20,7 +20,7 @@ func noDataApplyVersion() ApplyVersion {
 // than deltas.
 func noDataUpdate(groups ...NoDataGroupMemory) PlanNoDataMemoryUpdate {
 	return PlanNoDataMemoryUpdate{
-		DerivedFrom: NoDataRepresentationPerGroup,
+		DerivedFrom: NoDataRepresentationPerGroup, LoadedApplyVersion: noDataApplyVersion(), ExpectedMarkerRevision: 1,
 		Identity: PlanNoDataIdentity{
 			Plan:            PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"},
 			StateGeneration: "generation-1",
@@ -118,6 +118,22 @@ func TestPlanNoDataMutationRefusesIncompletePayloads(t *testing.T) {
 		"duplicate in loaded":  func(u *PlanNoDataMemoryUpdate) { u.Loaded = append(u.Loaded, u.Memory[0], u.Memory[0]) },
 		"two records one key":  func(u *PlanNoDataMemoryUpdate) { u.Memory = append(u.Memory, u.Memory[0]) },
 		"present with no data": func(u *PlanNoDataMemoryUpdate) { u.PresentAsOf, u.Memory[0].FirstAbsent = 0, 0 },
+		// The loaded version goes with the record: derived from one, it names
+		// the version read; derived from none, it names nothing. Either way
+		// round, the store's "did the record move since the read" comparison
+		// would run against a value nobody read.
+		"record read, no loaded version": func(u *PlanNoDataMemoryUpdate) { u.LoadedApplyVersion = ApplyVersion{} },
+		"no record read, loaded version": func(u *PlanNoDataMemoryUpdate) {
+			u.DerivedFrom, u.Loaded, u.LoadedPresentAsOf = NoDataRepresentationNone, nil, 0
+		},
+		// A record read carries a revision of one or more; a statement that
+		// read one and expects zero would be applied as a delta to a record
+		// the store believes absent, which is the lost-groups shape.
+		"record read, no revision": func(u *PlanNoDataMemoryUpdate) { u.ExpectedMarkerRevision = 0 },
+		"no record read, a revision": func(u *PlanNoDataMemoryUpdate) {
+			u.DerivedFrom, u.LoadedApplyVersion, u.Loaded, u.LoadedPresentAsOf = NoDataRepresentationNone, ApplyVersion{}, nil, 0
+			u.ExpectedMarkerRevision = 3
+		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			update := noDataUpdate(NoDataGroupMemory{GroupKey: "a", LastSeen: 90, FirstAbsent: 100})
@@ -229,6 +245,33 @@ func TestPlanNoDataMutationDigestCoversThePresentRound(t *testing.T) {
 	}
 }
 
+// The statement digest covers the version the statement was derived against.
+// The store decides whether the record moved since the read from that value,
+// and a value the digest does not cover is one the apply-time check could run
+// against after the statement was altered in flight without anyone noticing.
+func TestPlanNoDataMutationDigestCoversTheLoadedVersion(t *testing.T) {
+	update := noDataUpdate(NoDataGroupMemory{GroupKey: "a", LastSeen: 90})
+	first, err := BuildPlanNoDataMutation(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	update.LoadedApplyVersion.EvaluationTime++
+	second, err := BuildPlanNoDataMutation(update)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.MutationDigest == second.MutationDigest {
+		t.Fatal("two statements derived against different versions produced one digest")
+	}
+	// And a statement whose loaded version was altered after it was built
+	// fails its own digest, which is the whole point of covering it.
+	altered := first
+	altered.LoadedApplyVersion.EvaluationTime++
+	if err := altered.ValidateDigest(); err == nil {
+		t.Fatal("a statement with its loaded version altered in flight validated against its digest")
+	}
+}
+
 // A group seen in the round the header names is stored as present and nothing
 // else, and that is where the whole representation change pays: a Plan with
 // thousands of groups writes the round once rather than once per group.
@@ -312,7 +355,7 @@ func TestAGroupLastSeenBeforeThisRoundIsNotStoredAsPresent(t *testing.T) {
 // round - the cost this representation exists to remove.
 func TestAGroupStillPresentIsNotWrittenAgain(t *testing.T) {
 	update := PlanNoDataMemoryUpdate{
-		DerivedFrom: NoDataRepresentationPerGroup,
+		DerivedFrom: NoDataRepresentationPerGroup, LoadedApplyVersion: noDataApplyVersion(), ExpectedMarkerRevision: 1,
 		Identity: PlanNoDataIdentity{
 			Plan:            PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"},
 			StateGeneration: "generation-1",

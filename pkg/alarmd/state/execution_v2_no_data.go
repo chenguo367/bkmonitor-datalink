@@ -484,6 +484,18 @@ func (store *ExecutionStore) applyOneNoData(
 			}
 			return conflict(kind, previous.PersistedMutationDigest, previous.MarkerRevision)
 		}
+		// A whole-record statement has no revision of this record to expect,
+		// so it expects the version instead: the record it replaces must not
+		// be newer than the one it was derived against. A statement derived
+		// from no record meets none; one derived from the whole-memory record
+		// may meet a per-group record the read already outranked, and no
+		// other. Anything newer was written between this Slot's read and its
+		// write, and replacing it would take the round that wrote it out of
+		// the memory -- the retry reads it and derives against it instead.
+		if mutation.ReplacesWholeRecord() && recordMovedSinceRead(previous.PersistedApplyVersion, mutation) {
+			return conflict(execution.StateVersionConflictRevisionMoved,
+				previous.PersistedMutationDigest, previous.MarkerRevision)
+		}
 		nextRevision = previous.MarkerRevision + 1
 	} else if mutation.ExpectedMarkerRevision != 0 && !mutation.ReplacesWholeRecord() {
 		// The caller read a record that is no longer there.
@@ -533,6 +545,18 @@ func (store *ExecutionStore) applyOneNoData(
 		item.Status = execution.NoDataApplied
 	}
 	return item
+}
+
+// recordMovedSinceRead says whether the per-group record a whole-record
+// statement is about to replace was written after the statement's read. Read
+// none, met one: moved. Read the whole-memory record, met a per-group record
+// newer than it: moved. Met one the read already outranked: not moved, and the
+// replacement is exactly what the read decided.
+func recordMovedSinceRead(persisted execution.ApplyVersion, mutation execution.PlanNoDataMutation) bool {
+	if mutation.DerivedFrom == execution.NoDataRepresentationNone {
+		return true
+	}
+	return execution.CompareApplyVersion(persisted, mutation.LoadedApplyVersion) == execution.ApplyVersionPersistedNewer
 }
 
 // raceConflictKind names a conflict discovered inside the write rather than by
