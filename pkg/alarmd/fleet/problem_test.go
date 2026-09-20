@@ -67,6 +67,45 @@ func TestALineFoldsOnTheProblemAndCountsTheCodesUnderIt(t *testing.T) {
 	}
 }
 
+// The second fact is read on a row under no line too. A warming object is
+// nobody's -- the window fills and it heals -- but a warming object whose
+// every round also ends in a state version conflict carries this
+// deployment's own failure, and the DEFECT line has to say so: on a live
+// deployment two such rows were skipped as nothing to report, so the line
+// read two while opening it listed four. The line and its rows come from
+// the same read, and they have to count the same objects.
+func TestAnInternalFailureOnARowUnderNoLineIsStillOnTheDefectLine(t *testing.T) {
+	at := now.Add(-time.Minute)
+	young := Anomaly{QueryGroup: "warming", Kind: KindDegradedRun, Cause: "LEVEL_OUTCOME_UNKNOWN",
+		CauseReason: "HISTORY_WARMING", ReasonLastAt: at, Since: now.Add(-time.Hour),
+		Coverage: &HistoryCoverage{Levels: 3, Short: 1, WorstValid: 7, WorstRequired: 9, ShortRounds: 2},
+		Internal: &FailureRef{Stage: "other", Category: "completion_contract", Code: "STATE_VERSION_CONFLICT"}}
+	rows := []Anomaly{young}
+	Attribute(rows, now)
+	if rows[0].Finding.Check != "" || rows[0].Finding.Owner != OwnerNobody {
+		t.Fatalf("the fixture is under %q / %s, want under no line: the test needs a row the column decided is nobody's",
+			rows[0].Finding.Check, rows[0].Finding.Owner)
+	}
+	view := View{Anomalies: rows}
+	reports := ReportChecks([][]Anomaly{rows}, nil, &view, now)
+	var defect *CheckReport
+	for index := range reports {
+		if reports[index].Code == CheckDefect {
+			defect = &reports[index]
+		}
+	}
+	if defect == nil {
+		t.Fatalf("checks = %+v, want a DEFECT line for the internal failure on a row under no line", reports)
+	}
+	if defect.Objects != 1 || len(defect.Groups) != 1 || defect.Groups[0].Key != "STATE_VERSION_CONFLICT" {
+		t.Fatalf("DEFECT line = %d objects, groups %+v, want one object folded on STATE_VERSION_CONFLICT", defect.Objects, defect.Groups)
+	}
+	// And the line's count is the count of the rows it opens.
+	if listed := UnderCheck(CheckDefect, "", &view, now); len(listed) != defect.Objects {
+		t.Fatalf("opening the DEFECT line lists %d rows, the line says %d", len(listed), defect.Objects)
+	}
+}
+
 // Where a problem is between failing and fixed, read from its objects'
 // rows within the recent window. The second accuracy constraint is the
 // UNCONFIRMED case: a failure that left the window is not a recovery, and

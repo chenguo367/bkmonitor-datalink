@@ -1099,15 +1099,19 @@ var GUARD_PROGRESS = {
   partial: '在计入',
   ready: '已达要求但保护没解除'
 };
-// The guard's trigger, in words where the page has them; a code the page has
-// no words for prints as itself, and the code is always on the hover.
+// The guard's trigger, in words. Held to the Go list of every reason a held
+// scope carries; a code outside it prints as itself, and the code is always
+// on the hover.
 var GUARD_REASON = {
   GAP_SKIPPED: '之前有轮次被跳过',
+  SNAPSHOT_UNAVAILABLE: '之前有轮次没拿到策略快照、没查就收尾',
   HISTORY_WARMING: '窗口从头预热',
   CONFIG_DRIFT: '配置变过',
   QUERY_UNAVAILABLE: '查询不可用',
   QUERY_TIMEOUT: '查询超时',
-  QUERY_PARTIAL: '查询结果不完整'
+  QUERY_PARTIAL: '查询结果不完整',
+  EXECUTION_BUDGET_EXHAUSTED: '那一轮的执行预算用完、结果不可信',
+  READINESS_BUDGET_INVALID: '就绪预算配置无效（要改配置才会解除）'
 };
 
 // The store's reasons for refusing to keep a memory alive, in words; a code
@@ -2779,7 +2783,7 @@ function renderDependencies(list, replica) {
     text('depBasis', '这个构建没有发布依赖坐标。');
     return;
   }
-  text('depBasis', '副本 ' + shortReplica(replica || '') + ' 解析到的坐标；地址不含账号口令。"最近一次"是本进程对这条连接的最近成功/失败，两个角色共用一条连接时读同一条。');
+  text('depBasis', '副本 ' + shortReplica(replica || '') + ' 解析到的坐标；地址不含账号口令。"最近一次"是本进程对这条连接的最近成功/失败，两个角色共用一条连接时读同一条；告警输出那一行记的是连接层（producer 开着没开、开了多久），不按每条消息计。');
   list.forEach(function (dep) {
     var tr = document.createElement('tr');
     var role = document.createElement('td');
@@ -2791,7 +2795,7 @@ function renderDependencies(list, replica) {
     if (!dep.configured) {
       where.textContent = '未配置';
     } else {
-      var bits = [dep.kind + ' ' + (dep.mode ? dep.mode + ' ' : '') + (dep.address || '（空地址）')];
+      var bits = [dep.kind + ' ' + (dep.mode ? dep.mode + ' ' : '') + addressWords(dep)];
       if (dep.db !== undefined && dep.db !== null) bits.push('db ' + dep.db);
       if (dep.prefix) bits.push(dep.prefix);
       if (dep.shared_with) bits.push('与 ' + (ENDPOINT[dep.shared_with] ? dep.shared_with : dep.shared_with) + ' 共用连接');
@@ -2800,6 +2804,14 @@ function renderDependencies(list, replica) {
     tr.appendChild(where);
     var seen = document.createElement('td');
     var seenParts = [];
+    if (dep.ready !== undefined && dep.ready !== null) {
+      // The output sink's own record: open for how long, on its own field,
+      // because opening is not a message acknowledged.
+      seenParts.push(dep.ready
+        ? '就绪' + (dep.ready_since_age_seconds !== undefined && dep.ready_since_age_seconds !== null ? '，已开 ' + elapsedLabel(dep.ready_since_age_seconds) : '')
+          + (dep.attempts > 1 ? '（第 ' + dep.attempts + ' 次才打开）' : '')
+        : '未就绪' + (dep.attempts ? '，已试 ' + dep.attempts + ' 次' : '') + '——这个副本不接检测任务');
+    }
     if (dep.last_success_age_seconds !== undefined && dep.last_success_age_seconds !== null) {
       seenParts.push('成功 ' + elapsedLabel(dep.last_success_age_seconds) + '前');
     }
@@ -2807,7 +2819,7 @@ function renderDependencies(list, replica) {
       seenParts.push('失败 ' + elapsedLabel(dep.last_failure_age_seconds) + '前：' + (dep.last_failure || '（无文本）'));
     }
     if (!seenParts.length) {
-      seenParts.push(dep.kind === 'redis' && dep.configured ? '本进程还没对它发过命令' : '这一列只对 Redis 连接有记录；查询后端与 Kafka 的失败在检查项里按对象归因');
+      seenParts.push(dep.kind === 'redis' && dep.configured ? '本进程还没对它发过命令' : '这一列只对 Redis 连接与告警输出有记录；查询后端的失败在检查项里按对象归因');
     }
     seen.textContent = seenParts.join('；');
     tr.appendChild(seen);
@@ -2816,6 +2828,20 @@ function renderDependencies(list, replica) {
     tr.appendChild(writer);
     host.appendChild(tr);
   });
+}
+
+// The address as words. A sentinel deployment's address is the master name
+// and the sentinel list, which the server joins as master@sentinels -- the
+// one shape a reader takes for user@host on a page that promises to carry no
+// account. Spelled out here so it cannot be read that way; the server's
+// form stays in the JSON.
+function addressWords(dep) {
+  if (!dep.address) return '（空地址）';
+  if (dep.mode === 'sentinel' && dep.address.indexOf('@') > 0) {
+    var split = dep.address.indexOf('@');
+    return '主节点名 ' + dep.address.slice(0, split) + '，哨兵 ' + dep.address.slice(split + 1);
+  }
+  return dep.address;
 }
 
 // The writer column, per role: what was found and how old it is, or that

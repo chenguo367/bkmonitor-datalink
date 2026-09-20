@@ -136,8 +136,10 @@ func endpointFactsSource(
 				ready := state.Ready
 				entry.Ready = &ready
 				if state.Ready {
+					// How long it has been open -- not a success record; the
+					// sink does not report messages here.
 					age := at.Sub(state.Since).Seconds()
-					entry.LastSuccessAgeSeconds = &age
+					entry.ReadySinceAgeSeconds = &age
 				}
 				if !state.LastFailureAt.IsZero() {
 					age := at.Sub(state.LastFailureAt).Seconds()

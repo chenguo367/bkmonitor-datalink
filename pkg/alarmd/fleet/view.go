@@ -397,6 +397,17 @@ var (
 	GapProgressValues = contract.GapScopeProgressValues
 )
 
+// GapGuardReasons is every reason a held scope has been seen to carry: the
+// contract's own set -- the query-result reasons and HISTORY_WARMING -- and
+// the two a query-free completion writes on the marker it leaves
+// (execution.ExpiredRangeProjectionV1.CompletionReason), which the contract
+// does not list and the metric folds into "other". The page holds its words
+// to this list, so a reason reaching the row prints as words and not as its
+// code: on a live deployment SNAPSHOT_UNAVAILABLE and EXECUTION_BUDGET_EXHAUSTED
+// were both on rows, and neither had words.
+var GapGuardReasons = append(contract.GapScopeReasons(),
+	contract.ReasonGapSkipped, contract.ReasonSnapshotUnavailable)
+
 // MaxGuardsPerRow bounds how many held scopes a row carries: the worst few,
 // gapped before warming, the least advanced first. A Query Group with many
 // Plans and levels can hold dozens, and the row is read for whether the

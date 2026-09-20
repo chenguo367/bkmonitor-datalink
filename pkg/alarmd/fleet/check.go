@@ -730,6 +730,23 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		for index := range column {
 			anomaly := &column[index]
 			check := anomaly.Finding.Check
+			// A failure of this deployment's own making under a line the
+			// column decided is a second fact, and it gets its second line:
+			// the pool object filed as HTTP 400 that also hit an aggregation
+			// conflict every round was invisible under the refusal. Read
+			// before the row's own line is, because "under no line" is a
+			// line the column decided too: a warming object -- nobody's,
+			// heals on its own -- whose every round also ended in a state
+			// version conflict was skipped here as nothing to report, while
+			// opening the DEFECT line listed it. The line said two and its
+			// rows were four.
+			if anomaly.Internal != nil && check != CheckDefect {
+				defect := ensure(CheckDefect)
+				defect.partial = defect.partial || columnPartial
+				addAs(defect, anomaly.Internal.Code, anomaly, anomaly.Internal.Code)
+				defect.current++
+				listed[underKey(CheckDefect, anomaly.QueryGroup)] = struct{}{}
+			}
 			if check == "" {
 				continue
 			}
@@ -750,17 +767,6 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				entry.demoted++
 			}
 			listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
-			// A failure of this deployment's own making under a line the
-			// column decided is a second fact, and it gets its second line:
-			// the pool object filed as HTTP 400 that also hit an aggregation
-			// conflict every round was invisible under the refusal.
-			if anomaly.Internal != nil && check != CheckDefect {
-				defect := ensure(CheckDefect)
-				defect.partial = defect.partial || columnPartial
-				addAs(defect, anomaly.Internal.Code, anomaly, anomaly.Internal.Code)
-				defect.current++
-				listed[underKey(CheckDefect, anomaly.QueryGroup)] = struct{}{}
-			}
 		}
 	}
 	// What this deployment gave up on and never evaluated, retained past the
