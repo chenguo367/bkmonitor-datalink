@@ -195,6 +195,12 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.ShortPeriodCompletion; f != nil {
 		attributes = append(attributes, slog.Any("short_period_completion", f))
 	}
+	if f := observation.FrozenStateRenewal; f != nil {
+		// The eight numbers on the line, not only on the metric: the line is
+		// what a reader of one Slot has, and without them frozen_state_renewed
+		// said a renewal happened and nothing about it.
+		attributes = append(attributes, slog.Any("frozen_state_renewal", f))
+	}
 	if f := observation.DispatchTurnaway; f != nil {
 		attributes = append(attributes, slog.Any("dispatch_turnaway", f))
 	}

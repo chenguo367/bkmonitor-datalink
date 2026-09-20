@@ -469,14 +469,17 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}, []string{"result"})
 	metrics.frozenStateCensus = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_frozen_state_census_total",
-		Help: "Where a Slot's series went, counted at the three places the decisions are made: due is " +
-			"what it meant to evaluate, read is what it issued a Runtime State preflight for, written is " +
+		Help: "Where a Slot's series went, counted at the three places the decisions are made, over one " +
+			"population: the series the Slot prepared for evaluation, real and synthetic no-data alike. due " +
+			"is what it meant to evaluate, read is what it issued a Runtime State preflight for, written is " +
 			"what it actually wrote. due-read is the series skipped before the State read -- a PRIMARY " +
 			"input that was incomplete never reaches the preflight, so those keys age with nothing " +
 			"touching them and a renewal that hangs on the read cannot reach them. read-written is the " +
-			"population worker_frozen_state_renewals_total covers. Both differences are needed and " +
-			"neither derives from the other; sizing that population instead from state_load minus " +
-			"state_apply, which holds several other things, put the estimate two orders of magnitude " +
+			"population worker_frozen_state_renewals_total covers. What none of the three can count: a " +
+			"Plan folded out of the Slot before any series was prepared -- a round-level gap, a Plan " +
+			"withheld at compile -- has keys that age too, and they are upstream of due. Both differences " +
+			"are needed and neither derives from the other; sizing that population instead from state_load " +
+			"minus state_apply, which holds several other things, put the estimate two orders of magnitude " +
 			"out and shipped a renewal that renewed almost nothing.",
 	}, []string{"stage"})
 	metrics.gapGuardScopeRounds = prometheus.NewCounterVec(prometheus.CounterOpts{

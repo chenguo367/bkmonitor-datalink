@@ -528,11 +528,14 @@ type ExecutionEvidenceFacts struct {
 // state_load and state_apply rates differ says the candidate set is wrong.
 type FrozenStateRenewalFacts struct {
 	// Due, Read and Written are where this Slot's series went, counted at the
-	// three places the decisions are made. Due minus Read is the series the
-	// Slot meant to evaluate and never read -- a PRIMARY input that was
-	// incomplete skips the State preflight entirely, so those keys age without
-	// anything touching them, and a renewal that hangs on the read cannot
-	// reach them. Read minus Written is the population the renewal does cover.
+	// three places the decisions are made, over one population: the series
+	// the Slot prepared, real and synthetic no-data alike. Due minus Read is
+	// the series the Slot meant to evaluate and never read -- a PRIMARY input
+	// that was incomplete skips the State preflight entirely, so those keys
+	// age without anything touching them, and a renewal that hangs on the
+	// read cannot reach them. Read minus Written is the population the
+	// renewal does cover. A Plan folded out of the Slot before any series was
+	// prepared is upstream of all three and counted by none.
 	//
 	// They are here because the first sizing of that population inferred it
 	// from state_load minus state_apply, and that difference holds several
