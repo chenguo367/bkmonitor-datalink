@@ -1115,9 +1115,9 @@ func loadedGapGuardsTerminalOutcome(gaps GapLoadResult, outcome LevelOutcome) bo
 //
 // The outcome-kind half cannot be reached through Validate today -- a
 // non-TERMINAL outcome beside a DeterministicInvalid series is already refused
-// at :199-204 -- so all three are pinned at the predicate in
-// result_contract_internal_test.go. That rule is a separate rule, and this line
-// is what holds if it is ever relaxed.
+// by codeOutcomeInvalidSeriesNotTerminal above -- so all three are pinned at
+// the predicate in result_contract_internal_test.go. That rule is a separate
+// rule, and this line is what holds if it is ever relaxed.
 //
 // It reads the loaded views rather than the final ones on purpose: a series
 // whose record could not be decoded produces no mutation, so the two are the

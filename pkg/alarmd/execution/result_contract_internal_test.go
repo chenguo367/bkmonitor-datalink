@@ -142,15 +142,17 @@ func TestDescribeMissingGuardNamesTheFullButEmptyBinding(t *testing.T) {
 // The two loaded-record exemptions are pinned here, at the predicate, rather
 // than through Validate.
 //
-// Not a preference. Two of the three conditions each predicate applies cannot
-// be told apart through the real contract: a non-TERMINAL outcome beside a
-// broken record is already refused at :199-204, which requires a
+// Not a preference. The outcome-kind condition cannot be told apart through
+// the real contract: a non-TERMINAL outcome beside a broken record is already
+// refused by codeOutcomeInvalidSeriesNotTerminal, which requires a
 // DeterministicInvalid series to produce a TERMINAL outcome carrying the view's
 // own reason, so a case built to widen the exemption past TERMINAL never
-// reaches it. The exemption still has to hold that line -- :199-204 is a
-// separate rule, and relaxing it later must not silently let a business UNKNOWN
-// through with no guard at all -- so the condition is nailed where it can be
-// seen: one cell per half.
+// reaches it. The exemption still has to hold that line -- that is a separate
+// rule, and relaxing it later must not silently let a business UNKNOWN through
+// with no guard at all -- so the condition is nailed where it can be seen.
+//
+// The load-status condition is not repeated here: the contract can express it,
+// and evaluation's TestATerminalOutcomeWithAReadableRecordIsStillRefused does.
 func TestTheLoadedRecordExemptionsReadKindStatusAndReason(t *testing.T) {
 	plan := PlanIdentity{TenantID: "t1", BusinessID: "b1", StrategyID: "s1"}
 	const series SeriesIdentityDigest = "series-1"

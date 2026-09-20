@@ -281,10 +281,10 @@ func TestATerminalOutcomeUnderABrokenMarkerMustNameItsReason(t *testing.T) {
 // widening the exemption past TERMINAL -- dropping the outcome-kind check while
 // keeping the status and reason ones -- survives every case in this file. It is
 // not a hole in the cases. The shape it would admit cannot be built through the
-// real contract at all: result_contract.go:199-204 already requires a
-// DeterministicInvalid series' outcome to be TERMINAL and to carry the view's
-// reason, so a non-TERMINAL outcome beside a broken record is refused there
-// before this exemption is ever consulted.
+// real contract at all: the rule behind codeOutcomeInvalidSeriesNotTerminal
+// already requires a DeterministicInvalid series' outcome to be TERMINAL and to
+// carry the view's reason, so a non-TERMINAL outcome beside a broken record is
+// refused there before this exemption is ever consulted.
 //
 // The check stays, because that upstream rule is a separate rule that a later
 // change could relax, and the day it does this is the line that keeps a
