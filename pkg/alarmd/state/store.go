@@ -44,6 +44,13 @@ type StorageTarget struct {
 // unrelated to Kafka partitions, dimensions, or process ownership.
 type StorageRouter interface {
 	Route(tenantID, strategyID string) (StorageTarget, error)
+	// Targets lists every target Route can return. A store checks the
+	// capabilities it needs against this list when it opens, so a backend
+	// that lacks one is refused as wiring rather than met on a Slot as a
+	// refusal that recurs every round. Required, not an optional extension:
+	// a router that could not be listed could not be checked, and the
+	// check is the point.
+	Targets() []StorageTarget
 }
 
 type StoreLimits struct {

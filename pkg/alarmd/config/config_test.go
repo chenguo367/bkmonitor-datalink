@@ -301,6 +301,10 @@ func (staticRouter) Route(_, _ string) (state.StorageTarget, error) {
 	return state.StorageTarget{Name: "primary", Backend: nil}, nil
 }
 
+func (staticRouter) Targets() []state.StorageTarget {
+	return []state.StorageTarget{{Name: "primary", Backend: nil}}
+}
+
 // withCompatibilityServiceRedis gives a configuration the service Redis the
 // built-in Python-compatible protocol needs. Every deployment needs it, because
 // a strategy without a frozen revision selects that protocol and its snapshot

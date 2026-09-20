@@ -113,6 +113,9 @@ func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 	if options.MaxNoDataGroups == 0 {
 		options.MaxNoDataGroups = DefaultMaxNoDataGroups
 	}
+	if err := probeBackendCapabilities("execution store", options.Router, executionStoreCapabilities); err != nil {
+		return nil, err
+	}
 	return &ExecutionStore{options: options, witnesses: newRuntimeWitnessCache(), renewals: newRenewalGate()}, nil
 }
 
