@@ -274,9 +274,13 @@ func (server *Server) Connect(stream pb.ControlService_ConnectServer) error {
 		server.count(func(c *serverCounters) { c.refusals++ })
 		return server.refuseStream(ctx, stream, receiver, reason)
 	}
+	// What the Hello says is installed counts as sent and installed for
+	// this session: a Worker that reconnects one revision behind gets the
+	// one-step delta, not the whole snapshot again.
+	installed := versionFromWire(hello.Installed)
 	sess := &session{server: server, stream: stream, receiver: receiver, wake: make(chan struct{}, 1),
 		outbound: make(chan *pb.LeaderMessage, 16), done: make(chan struct{}),
-		installed: versionFromWire(hello.Installed), lastHeard: server.now()}
+		installed: installed, sent: installed, lastHeard: server.now()}
 	server.mu.Lock()
 	if server.closed {
 		server.mu.Unlock()

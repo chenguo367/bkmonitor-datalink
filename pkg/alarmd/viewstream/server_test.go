@@ -315,6 +315,52 @@ func TestTheServerBringsEachWorkerToTheCurrentRevisionBySnapshotOrOneStep(t *tes
 	}
 }
 
+// A Worker that reconnects saying which revision it holds is brought
+// forward by one delta when that revision is the previous one, by a
+// snapshot when it is older or of another term, and by nothing when it is
+// the current one.
+func TestAReconnectingWorkerIsBroughtForwardFromWhatItSaysItHolds(t *testing.T) {
+	harness := startServer(t)
+	ctx := context.Background()
+	if err := harness.server.Lead(7); err != nil {
+		t.Fatal(err)
+	}
+	first := desiredAt(publicationA, map[string]string{"qg-1": "w1"}, map[string]viewstream.Content{"qg-1": content("obj-1", "s1")})
+	if _, err := harness.server.Publish(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	v1, _ := harness.server.Stats().Current, 0
+	w1 := harness.connect("w1", "t1", "i1", nil)
+	snap1 := w1.recvSnapshot()
+	if snap1.Version.Revision != v1.Revision {
+		t.Fatalf("first snapshot revision %d, want %d", snap1.Version.Revision, v1.Revision)
+	}
+	w1.cancel()
+	second := desiredAt(publicationA, map[string]string{"qg-1": "w1"}, map[string]viewstream.Content{"qg-1": content("obj-1b", "s1")})
+	if _, err := harness.server.Publish(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	// Back with revision 1 in hand: one delta to revision 2.
+	again := harness.connect("w1", "t1", "i1b", snap1.Version)
+	delta := again.recvDelta()
+	if delta.Base.Revision != 1 || delta.Target.Revision != 2 || len(delta.Upserts) != 1 {
+		t.Fatalf("reconnect one behind got %+v, want the 1 -> 2 delta", delta)
+	}
+	again.cancel()
+	// Back with revision 2 in hand: nothing until the next publication.
+	current := harness.connect("w1", "t1", "i1c", delta.Target)
+	current.send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}}})
+	if reply := current.recv(); reply.GetHeartbeat() == nil {
+		t.Fatalf("reconnect at the current revision got %+v before any heartbeat reply, want nothing but the heartbeat", reply)
+	}
+	current.cancel()
+	// Back with a version of another term: a snapshot.
+	stale := harness.connect("w1", "t1", "i1d", &pb.Version{ControlEpoch: 6, Revision: 2, Digest: delta.Target.Digest})
+	if snap := stale.recvSnapshot(); snap.Version.Revision != 2 {
+		t.Fatalf("reconnect from another term got %+v, want the current snapshot", snap)
+	}
+}
+
 // Every way a stream is refused says why: a bad token, an unknown Worker,
 // another protocol version, a first message that is not a Hello, a
 // registry that cannot be read, and a Leader that is not leading. A
