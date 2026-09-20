@@ -459,7 +459,7 @@ func TestEvaluatorWarmingAndGappedNeverEmitNormalOrRecovery(t *testing.T) {
 	}
 }
 
-func newEvaluator(t *testing.T) *Evaluator {
+func newEvaluator(t testing.TB) *Evaluator {
 	d, err := detect.NewEvaluator(detect.NewDefaultRegistry(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -471,11 +471,11 @@ func newEvaluator(t *testing.T) *Evaluator {
 	return e
 }
 
-func requestFixture(t *testing.T, value json.RawMessage, history []execution.StateHistoryPoint) execution.EvaluationRequest {
+func requestFixture(t testing.TB, value json.RawMessage, history []execution.StateHistoryPoint) execution.EvaluationRequest {
 	return requestFixtureForPlan(t, compiled(t), []contract.CanonicalRecordV2{{RecordID: strings.Repeat("b", 64), SourceTime: 100, BusinessID: "2", DimensionIdentity: contract.DimensionIdentityV2{Digest: strings.Repeat("c", 64)}, Values: map[string]json.RawMessage{"value": value}, Dimensions: map[string]json.RawMessage{}, ReceivedTime: 100}}, history)
 }
 
-func requestFixtureForPlan(t *testing.T, plan *strategy.CompiledPlan, records []contract.CanonicalRecordV2, history []execution.StateHistoryPoint) execution.EvaluationRequest {
+func requestFixtureForPlan(t testing.TB, plan *strategy.CompiledPlan, records []contract.CanonicalRecordV2, history []execution.StateHistoryPoint) execution.EvaluationRequest {
 	id := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"}
 	due := execution.DuePlan{Identity: id, CompiledPlan: plan, StateGeneration: "state-v1", StateApplyEpoch: 1, ScheduleRevision: "plan-schedule", CompletionDeadlineUnixMilli: 200000}
 	consumer := execution.ConsumerRef{Plan: id, LevelID: 5, HasLevel: true}
@@ -508,22 +508,22 @@ func requestFixtureForPlan(t *testing.T, plan *strategy.CompiledPlan, records []
 	return execution.EvaluationRequest{Header: execution.InternalExecutionHeader{ExecutionID: "execution", Contract: contractRef, DuePlans: []execution.DuePlan{due}, Requirements: []execution.DataRequirement{requirement}, EffectiveTimeFacts: []execution.BoundEffectiveTimeFact{{Consumer: consumer, SeriesIdentity: series, Fact: facts[0]}}, RequiredPhysicalQueries: []execution.PlannedPhysicalQueryRef{{Digest: "physical", QueryRevision: "query"}}, DeadlineUnixMilli: 200000}, Inputs: []execution.SeriesEvaluationInputRequest{{Contract: contractRef, Consumer: consumer, SeriesIdentity: series, RequirementIDs: []execution.RequirementID{"main"}, Inputs: []execution.NamedInputBinding{binding}}}, State: execution.StatePreflightResult{Items: []execution.RuntimeStateView{stateView}}, Gaps: execution.GapLoadResult{Items: []execution.GapGuardSnapshot{{Identity: execution.PlanGapIdentity{Plan: id, StateGeneration: "state-v1"}, Status: execution.GapMissing}}}}
 }
 
-func compiled(t *testing.T) *strategy.CompiledPlan {
+func compiled(t testing.TB) *strategy.CompiledPlan {
 	return compiledWindow(t, 1, 1)
 }
 
-func compiledWindow(t *testing.T, windowSize, requiredAnomalies uint32) *strategy.CompiledPlan {
+func compiledWindow(t testing.TB, windowSize, requiredAnomalies uint32) *strategy.CompiledPlan {
 	return compiledWindowWithUptime(t, windowSize, requiredAnomalies, false)
 }
 
-func compiledWindowWithUptime(t *testing.T, windowSize, requiredAnomalies uint32, uptime bool) *strategy.CompiledPlan {
+func compiledWindowWithUptime(t testing.TB, windowSize, requiredAnomalies uint32, uptime bool) *strategy.CompiledPlan {
 	return compiledWindowWithNoData(t, windowSize, requiredAnomalies, nil, uptime)
 }
 
 // compiledWindowWithNoData is the same fixture plan with no-data detection
 // optionally on, so a test can have a Plan that carries a no-data level without
 // changing anything else about it.
-func compiledWindowWithNoData(t *testing.T, windowSize, requiredAnomalies uint32, noData *contract.NoDataConfigV1, uptime bool) *strategy.CompiledPlan {
+func compiledWindowWithNoData(t testing.TB, windowSize, requiredAnomalies uint32, noData *contract.NoDataConfigV1, uptime bool) *strategy.CompiledPlan {
 	c, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{MaxPlanBytes: 1 << 20, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16, MaxConditionsPerAlgorithm: 64, MaxASTNodesPerLevel: 256, MaxTriggerWindowSize: 16, MaxRecoveryConsecutiveWindows: 16, MaxRequiredHistoryPoints: 32, MaxTriggerComputeCost: 1 << 20, MaxCompiledPlanBytes: 1 << 20, MaxCacheEntries: 16, MaxCacheBytes: 1 << 20, NegativeCacheTTL: time.Minute, BudgetRevision: "test"})
 	if err != nil {
 		t.Fatal(err)
