@@ -97,6 +97,10 @@ type activationSiblingPorts struct {
 	// Retention as it reached the store, per admission and per apply call.
 	admittedRetention [][]execution.StateRetentionRequirement
 	appliedRetention  [][]execution.StateRetentionRequirement
+	// frozenRenewals is what the Slot asked the store to keep alive, in the
+	// order it asked. Recorded rather than discarded because the candidate
+	// set is the one thing about this mechanism that fails silently.
+	frozenRenewals []execution.FrozenStateRenewalRequest
 }
 
 func (*activationSiblingPorts) Sequence(ctx context.Context, _ execution.SequencingScope, run func(context.Context) error) error {
@@ -193,4 +197,11 @@ func (*activationSiblingPorts) BeginSlot(context.Context, execution.ProgressBegi
 func (ports *activationSiblingPorts) CommitProgress(context.Context, execution.ProgressCommitRequest) (execution.ProgressCommitResult, error) {
 	ports.progressCommits++
 	return execution.ProgressCommitResult{}, errors.New("unexpected Progress commit")
+}
+
+func (ports *activationSiblingPorts) RenewFrozenRuntime(
+	_ context.Context, request execution.FrozenStateRenewalRequest,
+) (execution.FrozenStateRenewalResult, error) {
+	ports.frozenRenewals = append(ports.frozenRenewals, request)
+	return freshFrozenRenewals(request), nil
 }

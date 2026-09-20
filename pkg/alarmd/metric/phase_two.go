@@ -7,6 +7,7 @@ package metric
 
 import (
 	"math"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -57,6 +58,7 @@ type phaseTwoMetrics struct {
 	noDataMemoryRenewals            *prometheus.CounterVec
 	queryFreeCompletions            *prometheus.CounterVec
 	executionEvidenceWrites         *prometheus.CounterVec
+	frozenStateRenewals             *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
 	sourceWithheldLines             *prometheus.CounterVec
 	activeQGSetCount                prometheus.Gauge
@@ -449,6 +451,21 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"counted -- they would bury the ones that reached the store. A failure here does not " +
 			"fail the round; it means memories are on their way to expiring.",
 	}, []string{"result", "reason"})
+	metrics.frozenStateRenewals = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_frozen_state_renewals_total",
+		Help: "Runtime State keys a Slot read and did not write, by what the renewal found. A key's " +
+			"life is set by its write and by nothing else, so a series whose Levels stay frozen -- " +
+			"incomplete inputs, a held trigger -- has its state deleted while the Plan is still " +
+			"evaluating it every minute. missing is that loss, named for the first time: before " +
+			"this it either cost a whole Slot a version conflict, when the expiry landed inside the " +
+			"read-to-write window, or cost the series its history with nothing recording it at all. " +
+			"renewed is the mechanism working and should be steadily non-zero wherever freezes " +
+			"happen; fresh is a key with life to spare, including the ones decided without asking " +
+			"Redis; failed does not fail the Slot and means keys are on their way to expiring. The " +
+			"four sum to the keys read and not written, which worker_work_total answers " +
+			"independently as state_load minus state_apply -- the two disagreeing is the reading " +
+			"that says the candidate set is wrong rather than that nothing is frozen.",
+	}, []string{"result"})
 	metrics.gapGuardScopeRounds = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_gap_guard_scope_rounds_total",
 		Help: "One per held gap scope per round that read it, by status, by why it is held, and by " +
@@ -830,6 +847,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, result := range []string{string(observability.ResultSuccess), string(observability.ResultDegraded)} {
 		metrics.executionEvidenceWrites.WithLabelValues(result)
 	}
+	for _, outcome := range execution.FrozenRenewalOutcomes {
+		// Pre-created, because two of the four readings are zeros somebody
+		// acts on: missing staying at zero is what says the mechanism has
+		// closed the silent loss, and renewed staying at zero on a deployment
+		// that freezes series is what says it never ran. An absent series
+		// cannot say either.
+		metrics.frozenStateRenewals.WithLabelValues(frozenRenewalLabel(outcome))
+	}
 	for _, representation := range execution.NoDataRepresentations {
 		// Pre-created, because the reading this family exists for is a zero:
 		// WHOLE_MEMORY reaching zero and staying there is what says every Plan
@@ -897,7 +922,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
-		m.queryFreeCompletions, m.executionEvidenceWrites)...)
+		m.queryFreeCompletions, m.executionEvidenceWrites, m.frozenStateRenewals)...)
 }
 
 func (m phaseTwoMetrics) observe(observation observability.Observation) {
@@ -1108,6 +1133,19 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			string(observation.Result), string(observation.ReasonCode),
 		).Inc()
 	}
+	if facts := observation.FrozenStateRenewal; facts != nil {
+		// Added rather than incremented once: one observation carries a whole
+		// Slot's outcomes, and a Slot that renewed two hundred keys is not the
+		// same event as one that renewed one.
+		m.frozenStateRenewals.WithLabelValues(
+			frozenRenewalLabel(execution.FrozenRenewalRenewed)).Add(float64(facts.Renewed))
+		m.frozenStateRenewals.WithLabelValues(
+			frozenRenewalLabel(execution.FrozenRenewalFresh)).Add(float64(facts.Fresh))
+		m.frozenStateRenewals.WithLabelValues(
+			frozenRenewalLabel(execution.FrozenRenewalMissing)).Add(float64(facts.Missing))
+		m.frozenStateRenewals.WithLabelValues(
+			frozenRenewalLabel(execution.FrozenRenewalFailed)).Add(float64(facts.Failed))
+	}
 	if facts := observation.GapProgress; facts != nil {
 		m.gapGuardScopeRounds.WithLabelValues(
 			facts.Status, contract.NormalizeGapScopeReason(facts.Reason), facts.Progress,
@@ -1182,6 +1220,17 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if kind := phaseTwoProgressKind(observation.Stage); kind != "" && observation.Result == observability.ResultSuccess {
 		m.lastProgress.WithLabelValues(kind).Set(float64(time.Now().Unix()))
 	}
+}
+
+// frozenRenewalLabel is the label one renewal outcome is counted under.
+//
+// Lower case, unlike the contract value it comes from, because it reads beside
+// the other result labels of this subsystem rather than beside the Go
+// constant. Derived rather than written out as a second list: a map here would
+// be a place for a fifth outcome to be missing from, and the contract already
+// owns which outcomes exist.
+func frozenRenewalLabel(outcome execution.FrozenRenewalOutcome) string {
+	return strings.ToLower(string(outcome))
 }
 
 func (m phaseTwoMetrics) observeNoDataSlot(observation observability.Observation) {

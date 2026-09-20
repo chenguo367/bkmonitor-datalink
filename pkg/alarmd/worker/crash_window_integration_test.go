@@ -814,3 +814,23 @@ func reserveG3AAddress(t *testing.T) string {
 
 var _ execution.EventSink = (*g3aCrashEventSink)(nil)
 var _ execution.StateStore = (*g3aCrashStateStore)(nil)
+
+// freshFrozenRenewals is what a state double that is not about renewals
+// answers: one item per requested series, nothing renewed. The caller
+// validates that a store answered for exactly the series it was asked about,
+// so a double that answered for a different set would fail every Slot.
+func freshFrozenRenewals(request execution.FrozenStateRenewalRequest) execution.FrozenStateRenewalResult {
+	result := execution.FrozenStateRenewalResult{Items: make([]execution.FrozenStateRenewalItem, len(request.Items))}
+	for index, item := range request.Items {
+		result.Items[index] = execution.FrozenStateRenewalItem{
+			Identity: item.Identity, Outcome: execution.FrozenRenewalFresh,
+		}
+	}
+	return result
+}
+
+func (store *g3aCrashStateStore) RenewFrozenRuntime(
+	_ context.Context, request execution.FrozenStateRenewalRequest,
+) (execution.FrozenStateRenewalResult, error) {
+	return freshFrozenRenewals(request), nil
+}

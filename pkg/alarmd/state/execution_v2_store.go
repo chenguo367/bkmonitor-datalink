@@ -38,8 +38,35 @@ type CompareAndSetBackend interface {
 // not passed over: a renewal nobody performs leaves keys immortal, and the only
 // place that shows up is a Redis instance months later.
 type LifetimeBackend interface {
-	RenewIfBelow(context.Context, string, time.Duration, time.Duration) (bool, error)
+	RenewIfBelow(context.Context, string, time.Duration, time.Duration) (RenewalOutcome, error)
+	// RenewManyIfBelow is the same decision for a batch of keys, answered in
+	// one round trip rather than one per key. Both are required: a caller that
+	// holds one key must not pay for a slice, and a caller holding a Slot's
+	// worth of them must not pay for a round trip each.
+	RenewManyIfBelow(context.Context, []string, time.Duration, time.Duration) ([]RenewalOutcome, error)
 }
+
+// RenewalOutcome is what one renewal found when it looked.
+//
+// Three states, not a bool, because the third one is the reason this exists.
+// A renewal that finds no key is the moment a piece of state was lost without
+// anything noticing -- the Plan will rebuild it as a new series and report
+// nothing -- and a bool return spells that "not renewed", which is also what a
+// key with plenty of life left says. Those two readings are opposites and the
+// old signature could not tell them apart.
+type RenewalOutcome string
+
+const (
+	// RenewalRenewed is a key that was running out and now is not.
+	RenewalRenewed RenewalOutcome = "RENEWED"
+	// RenewalFresh is a key with more than the threshold still to live. No
+	// expiry was set; the round trip was still spent.
+	RenewalFresh RenewalOutcome = "FRESH"
+	// RenewalMissing is a key that was read this round and was gone by the
+	// time the renewal asked about it. Nothing recreates it here: writing a
+	// key with no value would only make every reader classify it as corrupt.
+	RenewalMissing RenewalOutcome = "MISSING"
+)
 
 type ExecutionStoreOptions struct {
 	Prefix          string
@@ -72,6 +99,14 @@ type ExecutionStore struct {
 	// generation-scoped keys it loads. Per store rather than per package so
 	// two stores in one process cannot answer for each other's keys.
 	renewals *renewalGate
+	// frozenRenewals is the same memory for Runtime State keys whose Level was
+	// frozen this round. A second table rather than a shared one because the
+	// two populations are sized differently -- generation-scoped keys are two
+	// per Plan, Runtime State keys are one per series, thousands for a single
+	// query group -- so one table would let a burst of series keys evict every
+	// Plan's entry, and the reset counter could not say which population
+	// overflowed.
+	frozenRenewals *renewalGate
 }
 
 type runtimeEnvelope struct {
@@ -116,7 +151,8 @@ func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 	if err := probeBackendCapabilities("execution store", options.Router, executionStoreCapabilities); err != nil {
 		return nil, err
 	}
-	return &ExecutionStore{options: options, witnesses: newRuntimeWitnessCache(), renewals: newRenewalGate()}, nil
+	return &ExecutionStore{options: options, witnesses: newRuntimeWitnessCache(),
+		renewals: newRenewalGate(), frozenRenewals: newRenewalGate()}, nil
 }
 
 // runtimeTTL derives how long the keys of one apply request have to survive

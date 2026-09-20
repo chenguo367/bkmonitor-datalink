@@ -175,3 +175,9 @@ func (*convergeObservingPorts) BeginSlot(context.Context, execution.ProgressBegi
 func (*convergeObservingPorts) CommitProgress(context.Context, execution.ProgressCommitRequest) (execution.ProgressCommitResult, error) {
 	return execution.ProgressCommitResult{Status: execution.ProgressCommitted}, nil
 }
+
+func (*convergeObservingPorts) RenewFrozenRuntime(
+	_ context.Context, request execution.FrozenStateRenewalRequest,
+) (execution.FrozenStateRenewalResult, error) {
+	return freshFrozenRenewals(request), nil
+}

@@ -153,6 +153,16 @@ const (
 	// signal: not the write family, which is correctly silent for such a Plan,
 	// and not the memory itself, which reads fine right up until it is gone.
 	StageNoDataMemoryRenewed = "no_data_memory_renewed"
+	// StageFrozenStateRenewed names the renewal of the Runtime State keys of
+	// the series a Slot read and did not write.
+	//
+	// The same shape of failure as the no-data memory above, on the other kind
+	// of key: a frozen series writes nothing, so nothing refreshes its life,
+	// and its state is deleted while the Plan is still evaluating it every
+	// minute. Its MISSING reading is the first signal that names that loss --
+	// before it, the loss either took a Slot's whole round as a version
+	// conflict or went entirely uncounted.
+	StageFrozenStateRenewed  = "frozen_state_renewed"
 	StageEvaluationCompleted = "evaluation_completed"
 	StageSideEffectAdmission = "side_effect_admission"
 	StageStateAdmission      = "state_admission"
@@ -505,6 +515,36 @@ type ExecutionEvidenceFacts struct {
 	PlansApplied int
 	PlansTotal   int
 }
+
+// FrozenStateRenewalFacts is what one Slot's renewal of frozen Runtime State
+// keys found.
+//
+// Frozen is the population the four outcomes are counted out of, and it is
+// here for the same reason StateWriteReuseFacts carries a total: every outcome
+// reading zero is the expected healthy state for a Slot with nothing frozen,
+// and it is also exactly what a renewal that never runs looks like. With the
+// population beside them, all-zero outcomes and a non-zero Frozen is a real
+// measurement, and all-zero outcomes with a zero Frozen while the deployment's
+// state_load and state_apply rates differ says the candidate set is wrong.
+type FrozenStateRenewalFacts struct {
+	Frozen  int `json:"frozen"`
+	Renewed int `json:"renewed"`
+	Fresh   int `json:"fresh"`
+	Missing int `json:"missing"`
+	Failed  int `json:"failed"`
+}
+
+// Record adds one Plan's renewal outcomes to the Slot's.
+func (facts *FrozenStateRenewalFacts) Record(renewed, fresh, missing, failed int) {
+	facts.Frozen += renewed + fresh + missing + failed
+	facts.Renewed += renewed
+	facts.Fresh += fresh
+	facts.Missing += missing
+	facts.Failed += failed
+}
+
+// Empty is a Slot that had no frozen series at all.
+func (facts FrozenStateRenewalFacts) Empty() bool { return facts.Frozen == 0 }
 
 type NoDataMemoryRefusalFacts struct {
 	// Reason is the store's reason code, so a refusal about size and one about
@@ -1476,6 +1516,7 @@ type Observation struct {
 	NoDataMemoryRead      *NoDataMemoryReadFacts
 	NoDataMemoryRenewal   *NoDataMemoryRenewalFacts
 	ExecutionEvidence     *ExecutionEvidenceFacts
+	FrozenStateRenewal    *FrozenStateRenewalFacts
 	SourceWithheld        *SourceWithheldFacts
 	NoDataCensus          *NoDataCensusFacts
 	SegmentContent        *SegmentContentFacts
@@ -2494,6 +2535,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentProgress, StageExecutionEvidenceWritten},
 	{ComponentState, StageNoDataMemoryRead},
 	{ComponentState, StageNoDataMemoryRenewed},
+	{ComponentState, StageFrozenStateRenewed},
 	{ComponentState, StageNoDataMemoryRefused},
 	{ComponentState, StageNoDataMemoryWritten},
 	{ComponentControlPlane, StageSourceWithheld},

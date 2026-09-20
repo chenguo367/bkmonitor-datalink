@@ -480,3 +480,9 @@ func TestApplyStateCountsVersionConflictsByKindAndNamesTheFirst(t *testing.T) {
 		t.Fatalf("conflict samples = %+v, want one per kind in first-seen order: missing(series 0), revision_moved(7 -> 9, PERSISTED_NEWER), other", facts.Samples)
 	}
 }
+
+func (store *chunkStore) RenewFrozenRuntime(
+	_ context.Context, request execution.FrozenStateRenewalRequest,
+) (execution.FrozenStateRenewalResult, error) {
+	return freshFrozenRenewals(request), nil
+}
