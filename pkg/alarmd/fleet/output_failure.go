@@ -9,7 +9,11 @@
 
 package fleet
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+)
 
 // Reading a failure to write the round's events.
 //
@@ -106,7 +110,7 @@ func OutputFailureKind(text string) string {
 // converter that could not build the message, a client that would not send
 // it. A failure under one of them is the client's whatever its sentence
 // says -- the sink decided that, and the sentence is for the reader.
-var outputRejectionCodes = map[string]bool{"OUTPUT_CONVERSION_REJECTED": true, "OUTPUT_CLIENT_REJECTED": true}
+var outputRejectionCodes = map[string]bool{contract.ReasonOutputConversionRejected: true, contract.ReasonOutputClientRejected: true}
 
 // outputFailureOf is the row's output failure when its failure is one and
 // is this round's evidence to read: the reference and its kind. The sink's
