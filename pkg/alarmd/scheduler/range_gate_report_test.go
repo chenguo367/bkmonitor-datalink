@@ -113,11 +113,14 @@ func TestARoundThatGivesUpOnASlotSaysWhatTheCatchUpPathDid(t *testing.T) {
 			t.Fatalf("Next() error = %v", err)
 		}
 		facts := observer.gate(t)
-		// Applied or a post-build word, but never a gate refusal: every gate
-		// condition holds in this fixture. Reporting the successful rounds is
-		// what gives the refusals a denominator.
+		// Applied or one of the builder's own words, but never a gate refusal:
+		// every gate condition holds in this fixture. Reporting the successful
+		// rounds is what gives the refusals a denominator.
 		switch facts.Outcome {
-		case observability.RangeGateApplied, observability.RangeGateNotEligible, observability.RangeGateProofTooLarge:
+		case observability.RangeGateApplied, observability.RangeGateProofTooLarge,
+			observability.RangeGateRecoveryDisabled, observability.RangeGatePlansMismatch,
+			observability.RangeGateDeadlineNotReached, observability.RangeGateStepsBelowOne,
+			observability.RangeGateFreezeFailed:
 		default:
 			t.Fatalf("outcome = %q, want the gate to have been passed; every one of its conditions holds here, "+
 				"so a refusal word means the description disagrees with the gate", facts.Outcome)

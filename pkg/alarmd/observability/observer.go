@@ -776,17 +776,30 @@ const (
 	RangeGateNextSlotMoved         = "next_slot_moved"
 	RangeGateUnfinishedSlotPresent = "unfinished_slot_present"
 	RangeGateNoRangeFlight         = "no_range_flight"
-	RangeGateNotEligible           = "not_eligible"
-	RangeGateProofTooLarge         = "proof_too_large"
-	RangeGateUnexplained           = "unexplained"
+	// The builder's own refusals. These six replaced one not_eligible bucket:
+	// a round that reached the builder and came back empty used to be
+	// indistinguishable from any other, and the six conditions behind it need
+	// different answers -- a schedule whose Plans disagree is a control-plane
+	// fact, a Slot whose deadline has not arrived is a round too early, and a
+	// range of fewer than two Slots is a Query Group that is not actually
+	// backlogged and has nothing to catch up.
+	RangeGateRecoveryDisabled   = "recovery_disabled"
+	RangeGatePlansMismatch      = "plans_mismatch"
+	RangeGateDeadlineNotReached = "deadline_not_reached"
+	RangeGateStepsBelowOne      = "steps_below_one"
+	RangeGateFreezeFailed       = "freeze_failed"
+	RangeGateProofTooLarge      = "proof_too_large"
+	RangeGateUnexplained        = "unexplained"
 )
 
 // RangeGateOutcomes is every value the outcome takes, for the partition to
 // pre-create and for a reader to bound the family by.
 var RangeGateOutcomes = []string{
 	RangeGateApplied, RangeGateCreationDisabled, RangeGateProgressMissing, RangeGateNextSlotMoved,
-	RangeGateUnfinishedSlotPresent, RangeGateNoRangeFlight, RangeGateNotEligible,
-	RangeGateProofTooLarge, RangeGateUnexplained,
+	RangeGateUnfinishedSlotPresent, RangeGateNoRangeFlight,
+	RangeGateRecoveryDisabled, RangeGatePlansMismatch, RangeGateDeadlineNotReached,
+	RangeGateStepsBelowOne, RangeGateFreezeFailed, RangeGateProofTooLarge,
+	RangeGateUnexplained,
 }
 
 // RangeGateFacts is one round that gave up on a Slot, and what the catch-up
@@ -809,6 +822,14 @@ type RangeGateFacts struct {
 	UnfinishedSlotPresent        bool  `json:"unfinished_slot_present"`
 	UnfinishedSlotEvaluationTime int64 `json:"unfinished_slot_evaluation_time"`
 	RangeCreationEnabled         bool  `json:"range_creation_enabled"`
+	// The two candidate bounds the builder's distance branch compared, when
+	// the refusal came from a branch that had computed them. BoundsKnown says
+	// so: the other refusals never compute these, and reporting zeroes for
+	// them would put two numbers that do not exist beside a word, which is
+	// what the reader would then divide the population by.
+	BoundsKnown   bool  `json:"bounds_known"`
+	DistanceBound int64 `json:"distance_bound"`
+	DeadlineBound int64 `json:"deadline_bound"`
 }
 
 func normalizeRangeGateFacts(facts *RangeGateFacts) *RangeGateFacts {
