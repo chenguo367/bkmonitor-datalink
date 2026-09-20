@@ -386,7 +386,16 @@ func TestClientReportsUnavailableForTransportProtocolAndDeadlineFailures(t *test
 func stalledResponseServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	release := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { <-release }))
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		// A broken attempt deadline must fail the assertions, not leave
+		// Execute blocked forever before cleanup can release the handler.
+		timer := time.NewTimer(2 * time.Second)
+		defer timer.Stop()
+		select {
+		case <-release:
+		case <-timer.C:
+		}
+	}))
 	t.Cleanup(func() {
 		close(release)
 		server.Close()
