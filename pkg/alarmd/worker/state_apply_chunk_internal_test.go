@@ -202,11 +202,8 @@ func TestApplyStateChunksAtTheStoreCallBound(t *testing.T) {
 				t.Fatalf("fenced calls = %d, want every chunk fenced", len(store.fences))
 			}
 			for index, fence := range store.fences {
-				if fence.Fence != fixture.fence || fence.At.IsZero() {
-					t.Fatalf("chunk %d fence = %+v, want the Slot owner fence with an instant", index, fence)
-				}
-				if index > 0 && !fence.At.After(store.fences[index-1].At) {
-					t.Fatalf("chunk %d reused the fence instant of the previous chunk", index)
+				if fence.Fence != fixture.fence {
+					t.Fatalf("chunk %d fence = %+v, want the Slot owner fence", index, fence)
 				}
 			}
 			applied := fixture.chunkObservations(observability.StageStateApplied)

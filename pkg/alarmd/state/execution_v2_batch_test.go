@@ -118,7 +118,6 @@ func testFenceKeys() ownership.FenceKeys {
 func testApplyFence() execution.StateApplyFence {
 	return execution.StateApplyFence{
 		Fence: execution.OwnerFence{QueryGroup: frozenRef().Slot.QueryGroup, OwnerID: "worker-1", OwnerEpoch: 3, LeaseToken: "lease-token"},
-		At:    time.Unix(1_700_000_000, 0),
 	}
 }
 

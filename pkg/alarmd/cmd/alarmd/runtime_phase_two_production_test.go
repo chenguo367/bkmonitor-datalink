@@ -2518,7 +2518,7 @@ func (store *fakePhaseTwoOwnershipStore) Renew(
 	return ownership.Lease{Fence: fence, Deadline: at.Add(ttl)}, nil
 }
 
-func (store *fakePhaseTwoOwnershipStore) CheckFence(context.Context, execution.OwnerFence, time.Time) error {
+func (store *fakePhaseTwoOwnershipStore) CheckFence(context.Context, execution.OwnerFence) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return store.checkErr
@@ -2527,7 +2527,6 @@ func (store *fakePhaseTwoOwnershipStore) CheckFence(context.Context, execution.O
 func (store *fakePhaseTwoOwnershipStore) CheckFenceWithAssignment(
 	context.Context,
 	execution.OwnerFence,
-	time.Time,
 ) (ownership.AssignmentRecord, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()

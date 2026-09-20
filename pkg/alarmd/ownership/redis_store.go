@@ -545,8 +545,8 @@ func (store *RedisStore) renew(
 	}
 }
 
-func (store *RedisStore) CheckFence(ctx context.Context, fence execution.OwnerFence, at time.Time) error {
-	_, err := store.checkFence(ctx, fence, at, "")
+func (store *RedisStore) CheckFence(ctx context.Context, fence execution.OwnerFence) error {
+	_, err := store.checkFence(ctx, fence, "")
 	return err
 }
 
@@ -567,12 +567,11 @@ func (store *RedisStore) CheckFence(ctx context.Context, fence execution.OwnerFe
 func (store *RedisStore) CheckFenceWithAssignment(
 	ctx context.Context,
 	fence execution.OwnerFence,
-	at time.Time,
 ) (AssignmentRecord, error) {
 	if fence.QueryGroup == ControlLeaderIdentity {
 		return AssignmentRecord{}, errors.New("alarmd ownership: control leader identity has no Assignment record")
 	}
-	values, err := store.checkFence(ctx, fence, at, "")
+	values, err := store.checkFence(ctx, fence, "")
 	if err != nil {
 		return AssignmentRecord{}, err
 	}
@@ -586,24 +585,23 @@ func (store *RedisStore) CheckFenceWithAssignment(
 func (store *RedisStore) CheckFenceForContentScope(
 	ctx context.Context,
 	fence execution.OwnerFence,
-	at time.Time,
 	contentScope string,
 ) error {
-	_, err := store.checkFence(ctx, fence, at, contentScope)
+	_, err := store.checkFence(ctx, fence, contentScope)
 	return err
 }
 
-// checkFence returns the whole script reply so the two exported entry points
+// checkFence returns the whole script reply so the exported entry points
 // share one decision. Only a VALID fence yields values; every rejection is
-// mapped to the same error the caller has always seen.
+// mapped to the same error the caller has always seen. The caller names no
+// instant: the lease deadline is compared with Redis's clock in the script.
 func (store *RedisStore) checkFence(
 	ctx context.Context,
 	fence execution.OwnerFence,
-	at time.Time,
 	contentScope string,
 ) ([]interface{}, error) {
 	requireAssignment := fence.QueryGroup != ControlLeaderIdentity
-	if err := validateFence(fence); err != nil || at.IsZero() {
+	if err := validateFence(fence); err != nil {
 		return nil, ErrStaleFence
 	}
 	result, err := checkFenceScript.Run(ctx, store.client, []string{
@@ -647,7 +645,7 @@ func (store *RedisStore) FencedCompareAndSet(
 	ctx context.Context,
 	request FencedCASRequest,
 ) (FencedCASStatus, error) {
-	if err := validateFence(request.Fence); err != nil || request.At.IsZero() || request.Namespace == "" ||
+	if err := validateFence(request.Fence); err != nil || request.Namespace == "" ||
 		strings.ContainsAny(request.Namespace, "{} \t\r\n") || len(request.Value) == 0 || request.TTL < 0 ||
 		(request.ExpectedMissing && len(request.Expected) != 0) {
 		return "", errors.New("alarmd ownership: invalid fenced CAS request")

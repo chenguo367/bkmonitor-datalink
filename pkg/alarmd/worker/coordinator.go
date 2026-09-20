@@ -1484,7 +1484,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		var result execution.StateApplyResult
 		var err error
 		if useFence {
-			result, err = fenced.ApplyRuntimeFenced(ctx, applyRequest, execution.StateApplyFence{Fence: fence, At: chunkStarted})
+			result, err = fenced.ApplyRuntimeFenced(ctx, applyRequest, execution.StateApplyFence{Fence: fence})
 		} else {
 			result, err = coordinator.ports.State.ApplyRuntime(ctx, applyRequest)
 		}

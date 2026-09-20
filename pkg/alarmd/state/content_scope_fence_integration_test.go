@@ -83,7 +83,7 @@ func TestRedisFencedBatchApplyRefusesAMovedContentScopeByName(t *testing.T) {
 				fixture.lapseLease(t)
 			}
 			loadInStreamBatches(t, store, preflightItems(mutations))
-			result, err := store.ApplyRuntimeFenced(ctx, request, execution.StateApplyFence{Fence: fixture.fence, At: test.at, ContentScope: test.scope})
+			result, err := store.ApplyRuntimeFenced(ctx, request, execution.StateApplyFence{Fence: fixture.fence, ContentScope: test.scope})
 			exists := fixture.client.Exists(ctx, keys...).Val()
 			if test.stale {
 				if !errors.Is(err, ownership.ErrStaleFence) || len(result.Items) != 0 || exists != 0 {
@@ -101,7 +101,7 @@ func TestRedisFencedBatchApplyRefusesAMovedContentScopeByName(t *testing.T) {
 				if errors.Is(err, ownership.ErrStaleFence) {
 					t.Fatal("a moved content scope was reported as a stale fence")
 				}
-				if checked := fixture.owners.CheckFence(ctx, fixture.fence, at); checked != nil {
+				if checked := fixture.owners.CheckFence(ctx, fixture.fence); checked != nil {
 					t.Fatalf("the lease itself is live, CheckFence() = %v", checked)
 				}
 				return

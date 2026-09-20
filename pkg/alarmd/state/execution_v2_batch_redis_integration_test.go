@@ -118,7 +118,7 @@ func (fixture *redisBatchFixture) store(t *testing.T, prefix string, fenced bool
 }
 
 func (fixture *redisBatchFixture) applyFence(at time.Time) execution.StateApplyFence {
-	return execution.StateApplyFence{Fence: fixture.fence, At: at}
+	return execution.StateApplyFence{Fence: fixture.fence}
 }
 
 // lapseLease makes the fixture's lease look as Redis would hold it after
@@ -248,12 +248,12 @@ func TestRedisFencedBatchApplyRejectsStaleOwnerLikeCheckFence(t *testing.T) {
 			if test.lapse {
 				fixture.lapseLease(t)
 			}
-			checked := fixture.owners.CheckFence(ctx, test.fence, test.at)
+			checked := fixture.owners.CheckFence(ctx, test.fence)
 			if errors.Is(checked, ownership.ErrStaleFence) != test.stale {
 				t.Fatalf("CheckFence() = %v, want stale=%t", checked, test.stale)
 			}
 			loadInStreamBatches(t, store, preflightItems(mutations))
-			result, err := store.ApplyRuntimeFenced(ctx, request, execution.StateApplyFence{Fence: test.fence, At: test.at})
+			result, err := store.ApplyRuntimeFenced(ctx, request, execution.StateApplyFence{Fence: test.fence})
 			keys := make([]string, len(mutations))
 			for index, mutation := range mutations {
 				keys[index], _ = RuntimeStateKeyV2("fenced", mutation.Identity)

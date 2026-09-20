@@ -65,8 +65,8 @@ func TestSlotExecutionCoordinatorAppliesStateThroughFencedStoreWithSlotFence(t *
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, fullTrace)
-	if len(fenced.fences) != 1 || fenced.fences[0].Fence != request.OwnerFence || fenced.fences[0].At.IsZero() {
-		t.Fatalf("fenced apply received %+v, want the Slot owner fence %+v with a comparison instant", fenced.fences, request.OwnerFence)
+	if len(fenced.fences) != 1 || fenced.fences[0].Fence != request.OwnerFence {
+		t.Fatalf("fenced apply received %+v, want the Slot owner fence %+v", fenced.fences, request.OwnerFence)
 	}
 	if fenced.fences[0].Validate(request.Contract) != nil {
 		t.Fatalf("coordinator handed over an invalid apply fence: %+v", fenced.fences[0])

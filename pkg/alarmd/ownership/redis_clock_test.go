@@ -103,7 +103,7 @@ func TestTheFenceJudgesExpiryOnRedisClockNotTheCallers(t *testing.T) {
 	}
 	// The anchor is not the caller telling the server what time it is.
 	farAhead := anchor.Add(time.Hour)
-	if err := store.CheckFence(ctx, lease.Fence, farAhead); err != nil {
+	if err := store.CheckFence(ctx, lease.Fence); err != nil {
 		t.Fatalf("CheckFence() from an instant past the deadline on the caller's clock = %v, want valid: the server's clock decides", err)
 	}
 	renewed, err := store.Renew(ctx, lease.Fence, farAhead, time.Minute)
@@ -117,7 +117,7 @@ func TestTheFenceJudgesExpiryOnRedisClockNotTheCallers(t *testing.T) {
 	// anchor, including the earliest one the caller ever used.
 	elapseOnRedis(t, store, "query-group-1", time.Minute+time.Second)
 	for _, at := range []time.Time{anchor, farAhead} {
-		if err := store.CheckFence(ctx, lease.Fence, at); !errors.Is(err, ErrStaleFence) {
+		if err := store.CheckFence(ctx, lease.Fence); !errors.Is(err, ErrStaleFence) {
 			t.Fatalf("CheckFence() anchored at %v after the server deadline passed = %v, want ErrStaleFence", at, err)
 		}
 		if _, err := store.Renew(ctx, lease.Fence, at, time.Minute); !errors.Is(err, ErrStaleFence) {

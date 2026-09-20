@@ -53,16 +53,16 @@ func TestAPublishedContentScopeIsWhatALeaseIsAdmittedTo(t *testing.T) {
 		t.Fatalf("Acquire() = (%+v, %v), want the record's content scope on the lease", lease, err)
 	}
 	at := now.Add(time.Second)
-	if err := store.CheckFence(ctx, lease.Fence, at); err != nil {
+	if err := store.CheckFence(ctx, lease.Fence); err != nil {
 		t.Fatalf("CheckFence() without a scope = %v, want the fence as it always was", err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, lease.Fence, at, "view-a"); err != nil {
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-a"); err != nil {
 		t.Fatalf("CheckFenceForContentScope(view-a) = %v, want valid", err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, lease.Fence, at, "view-b"); !errors.Is(err, ErrContentScopeMoved) {
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-b"); !errors.Is(err, ErrContentScopeMoved) {
 		t.Fatalf("CheckFenceForContentScope(view-b) = %v, want ErrContentScopeMoved", err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, lease.Fence, at, "view-b"); errors.Is(err, ErrStaleFence) {
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-b"); errors.Is(err, ErrStaleFence) {
 		t.Fatal("a moved content scope was reported as a stale fence; the lease is live and the two must not be confused")
 	}
 	renewed, err := store.Renew(ctx, lease.Fence, at, time.Minute)
@@ -70,7 +70,7 @@ func TestAPublishedContentScopeIsWhatALeaseIsAdmittedTo(t *testing.T) {
 		t.Fatalf("Renew() = (%+v, %v), want view-a, nothing pending and the full deadline", renewed, err)
 	}
 	status, err := store.FencedCompareAndSet(ctx, FencedCASRequest{
-		Fence: lease.Fence, At: at, Namespace: "progress", ExpectedMissing: true, Value: []byte("p1"), ContentScope: "view-b",
+		Fence: lease.Fence, Namespace: "progress", ExpectedMissing: true, Value: []byte("p1"), ContentScope: "view-b",
 	})
 	if status != FencedCASContentMoved || !errors.Is(err, ErrContentScopeMoved) {
 		t.Fatalf("FencedCompareAndSet(view-b) = (%s, %v), want CONTENT_MOVED", status, err)
@@ -79,7 +79,7 @@ func TestAPublishedContentScopeIsWhatALeaseIsAdmittedTo(t *testing.T) {
 		t.Fatal("a fenced write refused for a moved scope still wrote its value")
 	}
 	status, err = store.FencedCompareAndSet(ctx, FencedCASRequest{
-		Fence: lease.Fence, At: at, Namespace: "progress", ExpectedMissing: true, Value: []byte("p1"), ContentScope: "view-a",
+		Fence: lease.Fence, Namespace: "progress", ExpectedMissing: true, Value: []byte("p1"), ContentScope: "view-a",
 	})
 	if status != FencedCASApplied || err != nil {
 		t.Fatalf("FencedCompareAndSet(view-a) = (%s, %v), want applied", status, err)
@@ -124,11 +124,10 @@ func TestAContentChangeUnderALiveLeaseWaitsForItsDeadline(t *testing.T) {
 		t.Fatalf("server deadline after the capped renewal = %v, want the effective time %v", minted, wantEffective)
 	}
 	// Until then the old content is still what the record authorizes.
-	before := now.Add(11 * time.Second)
-	if err := store.CheckFenceForContentScope(ctx, lease.Fence, before, "view-a"); err != nil {
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-a"); err != nil {
 		t.Fatalf("CheckFenceForContentScope(view-a) before the effective time = %v, want valid", err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, lease.Fence, before, "view-b"); !errors.Is(err, ErrContentScopeMoved) {
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-b"); !errors.Is(err, ErrContentScopeMoved) {
 		t.Fatalf("CheckFenceForContentScope(view-b) before the effective time = %v, want ErrContentScopeMoved", err)
 	}
 	// At the effective time the capped lease has run out; the next holder
@@ -146,10 +145,10 @@ func TestAContentChangeUnderALiveLeaseWaitsForItsDeadline(t *testing.T) {
 	if err != nil || promoted.ContentScope != "view-b" || promoted.ContentChangePending() {
 		t.Fatalf("record after the switch = (%+v, %v), want view-b current and nothing pending", promoted, err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, next.Fence, after, "view-a"); !errors.Is(err, ErrContentScopeMoved) {
+	if err := store.CheckFenceForContentScope(ctx, next.Fence, "view-a"); !errors.Is(err, ErrContentScopeMoved) {
 		t.Fatalf("CheckFenceForContentScope(view-a) after the switch = %v, want ErrContentScopeMoved", err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, next.Fence, after, "view-b"); err != nil {
+	if err := store.CheckFenceForContentScope(ctx, next.Fence, "view-b"); err != nil {
 		t.Fatalf("CheckFenceForContentScope(view-b) after the switch = %v, want valid", err)
 	}
 	renewed, err = store.Renew(ctx, next.Fence, after.Add(time.Second), time.Minute)
@@ -267,10 +266,10 @@ func TestAnEmptyScopeLeavesTheRecordsScopeAlone(t *testing.T) {
 	if err != nil || lease.ContentScope != "" {
 		t.Fatalf("Acquire() on a record without a scope = (%+v, %v), want an empty scope", lease, err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, lease.Fence, now.Add(time.Second), "view-x"); err != nil {
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-x"); err != nil {
 		t.Fatalf("a declared scope against a record that names none = %v, want valid: nothing has been written to compare against", err)
 	}
-	if err := store.CheckFence(ctx, lease.Fence, now.Add(time.Second)); err != nil {
+	if err := store.CheckFence(ctx, lease.Fence); err != nil {
 		t.Fatalf("CheckFence() without a scope = %v, want valid", err)
 	}
 }
@@ -298,9 +297,8 @@ func TestTheFirstScopeUnderALiveLeaseIsPendingAndBindsNothingYet(t *testing.T) {
 	if named.ContentScope != "" || named.PendingContentScope != "view-a" || !named.EffectiveAt.Equal(wantEffective) {
 		t.Fatalf("first scope under a live lease = %+v, want it pending until the lease deadline plus the margin, %v", named, wantEffective)
 	}
-	before := now.Add(30 * time.Second)
 	for _, declared := range []string{"view-a", "view-anything-else"} {
-		if err := store.CheckFenceForContentScope(ctx, lease.Fence, before, declared); err != nil {
+		if err := store.CheckFenceForContentScope(ctx, lease.Fence, declared); err != nil {
 			t.Fatalf("CheckFenceForContentScope(%q) while the record names no current scope = %v, want valid", declared, err)
 		}
 	}
@@ -318,7 +316,7 @@ func TestTheFirstScopeUnderALiveLeaseIsPendingAndBindsNothingYet(t *testing.T) {
 	if err != nil || next.ContentScope != "view-a" {
 		t.Fatalf("Acquire() after the first scope took effect = (%+v, %v), want view-a", next, err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, next.Fence, after, "view-anything-else"); !errors.Is(err, ErrContentScopeMoved) {
+	if err := store.CheckFenceForContentScope(ctx, next.Fence, "view-anything-else"); !errors.Is(err, ErrContentScopeMoved) {
 		t.Fatalf("a declared scope against the now-named record = %v, want ErrContentScopeMoved", err)
 	}
 }
@@ -351,7 +349,7 @@ func TestADeadLeaseWithAMovedScopeIsReportedAsTheLeaseNotTheScope(t *testing.T) 
 		t.Fatalf("record after the lapse = %+v, want view-b written directly", moved)
 	}
 	for _, declared := range []string{"view-a", "view-b", ""} {
-		err := store.CheckFenceForContentScope(ctx, lease.Fence, lapsed, declared)
+		err := store.CheckFenceForContentScope(ctx, lease.Fence, declared)
 		if !errors.Is(err, ErrStaleFence) {
 			t.Fatalf("dead lease, declared %q: CheckFenceForContentScope() = %v, want ErrStaleFence", declared, err)
 		}
@@ -360,7 +358,7 @@ func TestADeadLeaseWithAMovedScopeIsReportedAsTheLeaseNotTheScope(t *testing.T) 
 		}
 	}
 	status, err := store.FencedCompareAndSet(ctx, FencedCASRequest{
-		Fence: lease.Fence, At: lapsed, Namespace: "progress", ExpectedMissing: true, Value: []byte("p1"), ContentScope: "view-a",
+		Fence: lease.Fence, Namespace: "progress", ExpectedMissing: true, Value: []byte("p1"), ContentScope: "view-a",
 	})
 	if status != FencedCASStaleOwner || !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("FencedCompareAndSet() on a dead lease with a moved scope = (%s, %v), want STALE_OWNER", status, err)
@@ -372,10 +370,10 @@ func TestADeadLeaseWithAMovedScopeIsReportedAsTheLeaseNotTheScope(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, lease.Fence, lapsed.Add(time.Second), "view-a"); !errors.Is(err, ErrStaleFence) {
+	if err := store.CheckFenceForContentScope(ctx, lease.Fence, "view-a"); !errors.Is(err, ErrStaleFence) {
 		t.Fatalf("superseded epoch with a moved scope: CheckFenceForContentScope() = %v, want ErrStaleFence", err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, next.Fence, lapsed.Add(time.Second), "view-a"); !errors.Is(err, ErrContentScopeMoved) {
+	if err := store.CheckFenceForContentScope(ctx, next.Fence, "view-a"); !errors.Is(err, ErrContentScopeMoved) {
 		t.Fatalf("live lease with a moved scope: CheckFenceForContentScope() = %v, want ErrContentScopeMoved", err)
 	}
 	if _, err := store.PublishAssignment(ctx, authority, AssignmentDecision{
@@ -384,7 +382,7 @@ func TestADeadLeaseWithAMovedScopeIsReportedAsTheLeaseNotTheScope(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.CheckFenceForContentScope(ctx, next.Fence, lapsed.Add(3*time.Second), "view-b"); !errors.Is(err, ErrNotDesired) {
+	if err := store.CheckFenceForContentScope(ctx, next.Fence, "view-b"); !errors.Is(err, ErrNotDesired) {
 		t.Fatalf("not desired with a moved scope: CheckFenceForContentScope() = %v, want ErrNotDesired", err)
 	}
 }

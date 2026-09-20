@@ -275,9 +275,11 @@ const (
 	FencedCASContentMoved FencedCASStatus = "CONTENT_MOVED"
 )
 
+// FencedCASRequest is one fenced write of a control value. It names no
+// instant: whether the fence's lease is live is decided on Redis's clock
+// inside the script (FenceLua), not from anything the writer says.
 type FencedCASRequest struct {
 	Fence           execution.OwnerFence
-	At              time.Time
 	Namespace       string
 	ExpectedMissing bool
 	Expected        []byte

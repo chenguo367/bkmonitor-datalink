@@ -648,7 +648,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		}
 	}
 	activation := productionPhaseTwoActivation{source: repository}
-	admitter, err := ownership.NewAdmitter(ownershipStore, activation, external.Now)
+	admitter, err := ownership.NewAdmitter(ownershipStore, activation)
 	if err != nil {
 		return nil, err
 	}
