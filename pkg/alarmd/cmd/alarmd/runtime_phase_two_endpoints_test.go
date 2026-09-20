@@ -277,3 +277,53 @@ func TestReadinessFactsAreTheProbesOwn(t *testing.T) {
 		t.Fatalf("a publisher without a readiness source published %+v", snapshot.Readiness)
 	}
 }
+
+// The protocol choice the fleet snapshot carries is the one the reconciler is
+// configured with -- the same accessor -- and says whether the deployment
+// spelled it. An empty configuration is auto by default and is published as
+// the word auto, not as an empty word: the empty word is what an older build
+// says by saying nothing, and the two must not read alike.
+func TestTheFleetPublishesTheOutputProtocolTheReconcilerWasConfiguredWith(t *testing.T) {
+	for name, test := range map[string]struct {
+		configured string
+		want       fleet.OutputProtocolFacts
+	}{
+		"unset is auto by default":   {configured: "", want: fleet.OutputProtocolFacts{Configured: "auto", Explicit: false}},
+		"auto spelled is explicit":   {configured: "auto", want: fleet.OutputProtocolFacts{Configured: "auto", Explicit: true}},
+		"native spelled is explicit": {configured: "native", want: fleet.OutputProtocolFacts{Configured: "native", Explicit: true}},
+	} {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			var cfg config.Config
+			cfg.PhaseTwo.Output.Protocol = test.configured
+			facts := fleetOutputProtocolFacts(cfg)
+			if facts == nil || *facts != test.want {
+				t.Fatalf("fleet protocol facts = %+v, want %+v", facts, test.want)
+			}
+			// The same word the reconciler is given, so the two cannot drift.
+			if facts.Configured != cfg.OutputProtocol() {
+				t.Fatalf("fleet publishes %q, the reconciler is configured with %q", facts.Configured, cfg.OutputProtocol())
+			}
+			publisher := fleetPublisher{
+				tracker: fleet.NewTracker(nil, "replica-1", time.Now), replica: "replica-1", now: time.Now,
+				owned:          func() []execution.QueryGroupIdentity { return nil },
+				outputProtocol: facts,
+			}
+			snapshot := publisher.snapshot(context.Background())
+			if snapshot.OutputProtocol == nil || *snapshot.OutputProtocol != test.want {
+				t.Fatalf("snapshot protocol = %+v, want %+v", snapshot.OutputProtocol, test.want)
+			}
+			// A copy, not the publisher's pointer.
+			if snapshot.OutputProtocol == publisher.outputProtocol {
+				t.Fatal("the snapshot aliases the publisher's protocol facts")
+			}
+		})
+	}
+	publisher := fleetPublisher{
+		tracker: fleet.NewTracker(nil, "replica-1", time.Now), replica: "replica-1", now: time.Now,
+		owned: func() []execution.QueryGroupIdentity { return nil },
+	}
+	if snapshot := publisher.snapshot(context.Background()); snapshot.OutputProtocol != nil {
+		t.Fatalf("a publisher without a protocol published %+v", snapshot.OutputProtocol)
+	}
+}

@@ -92,6 +92,13 @@ type StrategyDirectoryRow struct {
 	Publication      SnapshotPublicationRef        `json:"publication"`
 	Role             string                        `json:"role"`
 	Activation       *execution.PlanActivationFact `json:"activation,omitempty"`
+	// OutputContext names the output context this Plan renders by, which is
+	// where its frozen wire format lives: the execution object above is
+	// deliberately without it. Empty when the publication's manifest was not
+	// in hand at refresh and the runtime had not remembered the content
+	// either, which the output read reports as unknown rather than fetching a
+	// manifest to find out.
+	OutputContext execution.OutputContextDigest `json:"output_context_digest,omitempty"`
 }
 
 type StrategyDirectorySnapshot struct {
@@ -296,6 +303,16 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 		// the same position from one refresh to the next.
 		sort.Slice(manifest.QueryGroups, func(i, j int) bool { return manifest.QueryGroups[i].QueryGroup < manifest.QueryGroups[j].QueryGroup })
 		s.GroupsTotal += len(manifest.QueryGroups)
+		// Which output context each Plan renders by. A manifest read from the
+		// store names them; one rebuilt from the index does not, and the
+		// runtime's remembered content of the same publication does -- for
+		// free, the same way the index stood in for the manifest. A row whose
+		// publication neither has stays without one, and the read that wants
+		// it says so rather than fetching a manifest per request to find out.
+		contexts := manifestContextRefs(manifest)
+		if len(contexts) == 0 {
+			contexts = d.repository.rememberedContextRefs(pub)
+		}
 		start := d.cursor[pub.SnapshotRevision]
 		budgetFailed := false
 		for step := range manifest.QueryGroups {
@@ -354,7 +371,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			if !alreadyRetained {
 				entryBytes := len(string(ref.QueryGroup)) + len(string(ref.ObjectDigest))
 				for _, id := range entry.Plans {
-					entryBytes += DirectoryEntryReservationBytes() + len(id.TenantID) + len(id.BusinessID) + len(id.StrategyID)
+					entryBytes += DirectoryEntryReservationBytes() + len(id.TenantID) + len(id.BusinessID) + len(id.StrategyID) + len(string(contexts[id]))
 				}
 				if retainedBytes+entryBytes > d.limits.Entries*DirectoryEntryReservationBytes() {
 					fail(ErrObservationBudget)
@@ -366,7 +383,8 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			nextKnown[ref.ObjectDigest] = entry
 			s.GroupsKnown++
 			for _, id := range entry.Plans {
-				row := StrategyDirectoryRow{Identity: id, QueryGroup: ref.QueryGroup, ObjectDigest: ref.ObjectDigest, Publication: pub, Role: "PUBLISHED", QueryRevision: entry.QueryRevision, ScheduleRevision: entry.ScheduleRevision}
+				row := StrategyDirectoryRow{Identity: id, QueryGroup: ref.QueryGroup, ObjectDigest: ref.ObjectDigest, Publication: pub, Role: "PUBLISHED",
+					QueryRevision: entry.QueryRevision, ScheduleRevision: entry.ScheduleRevision, OutputContext: contexts[id]}
 				if a, exists := active[id]; exists && a.Publication == pub {
 					fact := a.Fact
 					row.Activation = &fact
@@ -432,6 +450,147 @@ func manifestFromIndex(revision execution.SnapshotRevision, index map[execution.
 		manifest.QueryGroups = append(manifest.QueryGroups, ManifestQueryGroup{QueryGroup: group, ObjectDigest: entry.Digest})
 	}
 	return manifest
+}
+
+// manifestContextRefs is the manifest's Plan -> output context naming as a
+// map; empty for a manifest rebuilt from the index, which carries none.
+func manifestContextRefs(manifest CatalogManifest) map[execution.PlanIdentity]execution.OutputContextDigest {
+	if len(manifest.Plans) == 0 {
+		return nil
+	}
+	contexts := make(map[execution.PlanIdentity]execution.OutputContextDigest, len(manifest.Plans))
+	for _, plan := range manifest.Plans {
+		contexts[plan.Plan] = plan.ContextDigest
+	}
+	return contexts
+}
+
+// rememberedContextRefs is the same naming out of the content this process
+// read last, when that content is the publication asked for. No read: the
+// memo is what an activation round already paid for.
+func (repository *RedisCatalogRepository) rememberedContextRefs(publication SnapshotPublicationRef) map[execution.PlanIdentity]execution.OutputContextDigest {
+	if repository == nil {
+		return nil
+	}
+	content, ok := repository.contentMemo.lookup(publication)
+	if !ok {
+		return nil
+	}
+	contexts := make(map[execution.PlanIdentity]execution.OutputContextDigest)
+	for _, group := range content.Groups {
+		for _, ref := range group.Refs {
+			contexts[ref.Plan] = ref.Digest
+		}
+	}
+	return contexts
+}
+
+// Why an output read could not say what a Plan publishes as. Closed: a
+// reader shows these words and no others.
+const (
+	// OutputContextRefNotRetained: the directory row carries no output
+	// context digest -- see StrategyDirectoryRow.OutputContext.
+	OutputContextRefNotRetained = "OUTPUT_CONTEXT_REF_NOT_RETAINED"
+	// OutputContextUnavailable: the object the row names is not in the store.
+	OutputContextUnavailable = "OUTPUT_CONTEXT_UNAVAILABLE"
+	// OutputContextCorrupt: bytes were there and did not hash to the digest
+	// that names them, or did not decode as an output context.
+	OutputContextCorrupt = "OUTPUT_CONTEXT_CORRUPT"
+	// OutputContextBudget: the observation allowance was spent before the
+	// read; the object is not known to be missing.
+	OutputContextBudget = "RESOURCE_BUDGET"
+	// OutputContextDependency: the store did not answer.
+	OutputContextDependency = "DEPENDENCY_UNAVAILABLE"
+)
+
+// OutputFormatReasons is every reason OutputFormatFacts can carry.
+var OutputFormatReasons = []string{OutputContextRefNotRetained, OutputContextUnavailable, OutputContextCorrupt, OutputContextBudget, OutputContextDependency}
+
+// OutputFormatFacts is what one Plan's events are published as, read off the
+// output context the control leader froze with the Plan -- not off the
+// deployment's current choice, which is a different fact. It answers the
+// question a forced choice leaves open and an automatic one leaves silent:
+// for this strategy, which format did the choice come out as.
+type OutputFormatFacts struct {
+	// Known is whether the object was read. False comes with a Reason and
+	// nothing else; the fields below are then not zero values of a fact but
+	// the absence of one.
+	Known  bool   `json:"known"`
+	Reason string `json:"reason,omitempty"`
+	// OutputContextDigest names the object read, so a reader can tell two
+	// answers about one strategy apart when the Plan was rebuilt between them.
+	OutputContextDigest execution.OutputContextDigest `json:"output_context_digest,omitempty"`
+	// WireFormat is the word frozen in the object. Empty on an object written
+	// before the choice existed, where the revision was the whole rule.
+	WireFormat string `json:"wire_format,omitempty"`
+	// EffectiveWireFormat is the format the sink writes for this Plan, and
+	// DecidedBy how that is known: FROZEN when the word above is there,
+	// REVISION_RULE when the rule the readers apply to an object without one
+	// decided it.
+	EffectiveWireFormat string `json:"effective_wire_format,omitempty"`
+	DecidedBy           string `json:"decided_by,omitempty"`
+	// SnapshotRevision is the frozen strategy revision the rule reads. Zero
+	// is the input that sends a strategy the compatible way under auto.
+	SnapshotRevision int64 `json:"snapshot_revision"`
+	// SignalType is what the events are observed from, frozen beside the
+	// format; empty when the build could not name it.
+	SignalType string `json:"signal_type,omitempty"`
+	// CompatibilityContext is whether the object carries the context the
+	// Python-compatible conversion reads. It is attached when the Plan
+	// publishes that protocol, so under a forced legacy choice a strategy with
+	// a revision has it and under native none does.
+	CompatibilityContext bool `json:"compatibility_context"`
+}
+
+// EffectiveOutput reads the output context a directory row names and says
+// what the Plan publishes as. One immutable object, on the observation
+// allowance, hashed against the digest that names it; the process's own
+// object cache answers first, which on the replica that renders this Plan is
+// every time. A row with no digest is answered as not retained, never by a
+// manifest read: that is the read the directory exists to not make per
+// request.
+func (d *ObservationDirectory) EffectiveOutput(ctx context.Context, row StrategyDirectoryRow) OutputFormatFacts {
+	if row.OutputContext == "" {
+		return OutputFormatFacts{Reason: OutputContextRefNotRetained}
+	}
+	key := d.repository.outputContextKey(row.OutputContext)
+	var object OutputContextObject
+	if cached, hit := d.repository.objectCache.lookup(key); hit {
+		object, hit = cached.(OutputContextObject)
+		if !hit {
+			return OutputFormatFacts{Reason: OutputContextCorrupt, OutputContextDigest: row.OutputContext}
+		}
+	} else {
+		ctx, cancel := context.WithTimeout(ctx, d.limits.Timeout)
+		defer cancel()
+		r := directoryRead{repository: d.repository, client: d.readClient, limits: d.limits}
+		payload, err := r.read(ctx, key)
+		switch {
+		case errors.Is(err, ErrObservationBudget):
+			return OutputFormatFacts{Reason: OutputContextBudget, OutputContextDigest: row.OutputContext}
+		case errors.Is(err, ErrSnapshotUnavailable):
+			return OutputFormatFacts{Reason: OutputContextUnavailable, OutputContextDigest: row.OutputContext}
+		case err != nil:
+			return OutputFormatFacts{Reason: OutputContextDependency, OutputContextDigest: row.OutputContext}
+		}
+		hash, err := contract.DeriveCanonicalDigestV2OverCanonical(outputContextContractVersion, payload)
+		if err != nil || hash != string(row.OutputContext) {
+			return OutputFormatFacts{Reason: OutputContextCorrupt, OutputContextDigest: row.OutputContext}
+		}
+		if err = json.Unmarshal(payload, &object); err != nil || object.ContractVersion != outputContextContractVersion {
+			return OutputFormatFacts{Reason: OutputContextCorrupt, OutputContextDigest: row.OutputContext}
+		}
+	}
+	if object.Identity != row.Identity {
+		return OutputFormatFacts{Reason: OutputContextCorrupt, OutputContextDigest: row.OutputContext}
+	}
+	format, decidedBy := EffectiveWireFormat(object.WireFormat, object.StrategyRef.SnapshotRevision)
+	return OutputFormatFacts{
+		Known: true, OutputContextDigest: row.OutputContext,
+		WireFormat: object.WireFormat, EffectiveWireFormat: format, DecidedBy: decidedBy,
+		SnapshotRevision: object.StrategyRef.SnapshotRevision, SignalType: object.SignalType,
+		CompatibilityContext: object.LegacyOutput != nil,
+	}
 }
 
 func (d *ObservationDirectory) readGroup(ctx context.Context, r *directoryRead, digest execution.ObjectDigest) (QueryGroupObject, error) {

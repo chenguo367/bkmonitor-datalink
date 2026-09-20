@@ -82,6 +82,12 @@ func WithStrategyDirectory(next http.Handler, directory *controlplane.Observatio
 			NextCursor      string `json:"next_cursor,omitempty"`
 			EffectiveConfig any    `json:"effective_config,omitempty"`
 			ConfigEvidence  string `json:"config_evidence,omitempty"`
+			// EffectiveOutput is what this Plan publishes as, read off the
+			// output context frozen with it. Beside the configuration because
+			// the execution object it comes from has no format in it on
+			// purpose, and the question "what did the deployment's choice come
+			// out as for this strategy" is asked with the configuration.
+			EffectiveOutput *controlplane.OutputFormatFacts `json:"effective_output,omitempty"`
 		}{StrategyDirectorySnapshot: snapshot, NextCursor: nextCursor}
 		if include := q.Get("include"); include != "" {
 			if include != "effective_config" || strategy == "" || offset != 0 {
@@ -117,6 +123,13 @@ func WithStrategyDirectory(next http.Handler, directory *controlplane.Observatio
 			}
 			body.EffectiveConfig = plan
 			body.ConfigEvidence = "activation_observed; not a historical Slot verdict"
+			// The same single flight, the same allowance: one more bounded
+			// point read, answered from the process's own cache on the replica
+			// that renders this Plan. Not known is an answer here, not a 503:
+			// the configuration above was read, and the output half says why
+			// it was not.
+			output := directory.EffectiveOutput(r.Context(), selected)
+			body.EffectiveOutput = &output
 		}
 		status := http.StatusOK
 		// An empty partial observation is UNKNOWN, not an authoritative 404.

@@ -969,6 +969,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 		// The same snapshot the readiness endpoint serves, so the fleet and
 		// the probe cannot disagree about one replica.
 		readiness: readinessFactsSource(health),
+		// The same word the reconciler above was configured with.
+		outputProtocol: fleetOutputProtocolFacts(cfg),
 	}
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.

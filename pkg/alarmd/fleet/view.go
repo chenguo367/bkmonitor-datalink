@@ -967,6 +967,41 @@ type Snapshot struct {
 	// Readiness is this replica's own readiness, bit by bit, as its readiness
 	// endpoint answers it. Absent on a build before this fact existed.
 	Readiness *ReadinessFacts `json:"readiness,omitempty"`
+	// OutputProtocol is the wire format choice this process runs with, as it
+	// read it from its configuration. Absent on a build before this fact
+	// existed, which the aggregate keeps apart from any choice.
+	OutputProtocol *OutputProtocolFacts `json:"output_protocol,omitempty"`
+}
+
+// OutputProtocolFacts is one process's output protocol choice: the word in
+// force -- auto, legacy or native, from controlplane.OutputProtocolChoices --
+// and whether the deployment spelled it or the process fell back to the
+// default. On the snapshot because the question "what protocol is this
+// deployment running" had, on a live deployment, no answer but the operator's
+// own values file on a machine the reader could not reach: the process knew,
+// and nothing published it.
+//
+// This is what the process was told, per replica; what any strategy publishes
+// as is decided once by the control leader when it builds the Plan and frozen
+// there, and read per strategy from the directory. Two replicas disagreeing
+// here is a rollout, or a values file that changed under one; neither is
+// folded into one deployment-level word.
+type OutputProtocolFacts struct {
+	Configured string `json:"configured"`
+	// Explicit is whether the configuration named the word, as against the
+	// process defaulting to it. Two deployments both running auto are not the
+	// same when one chose it and the other never chose.
+	Explicit bool `json:"explicit"`
+}
+
+// OutputProtocolGroup is one distinct choice and the counted replicas
+// running it, grouped the way builds are and for the same reason: a
+// deployment agreeing with itself shows one line, a rollout two. A replica
+// that reported no choice is its own group with an empty Configured, never
+// folded into a word it may not be running.
+type OutputProtocolGroup struct {
+	Protocol OutputProtocolFacts `json:"protocol"`
+	Replicas []string            `json:"replicas"`
 }
 
 // ReadinessFacts is one replica's readiness as its process reports it: the
@@ -1400,6 +1435,10 @@ type ReplicaView struct {
 	// answers. Absent when it published none (an older build), which is not
 	// "not ready": the count beside the rows leaves it out.
 	Readiness *ReadinessFacts `json:"readiness,omitempty"`
+	// OutputProtocol is the choice this replica runs with, as it published
+	// it. Absent when it published none (an older build), which the page says
+	// rather than filling in.
+	OutputProtocol *OutputProtocolFacts `json:"output_protocol,omitempty"`
 }
 
 // BuildFacts is one process's build: the three labels of its build_info
@@ -1577,6 +1616,13 @@ type View struct {
 	// first. One entry is a deployment that agrees with itself; more is a
 	// rollout, finished or not, and every total above is then a mix.
 	Builds []BuildGroup `json:"builds"`
+	// OutputProtocols is the distinct output protocol choices the counted
+	// replicas run with, grouped like Builds: one entry is a deployment that
+	// agrees with itself, more is a rollout or a values file that changed
+	// under some of them. A replica that published no choice is its own
+	// group with an empty word. What a given strategy publishes as is not
+	// here -- it is frozen per Plan and read from the directory.
+	OutputProtocols []OutputProtocolGroup `json:"output_protocols"`
 	// Activation is the control leader's standing on bringing the fleet's
 	// activation to the current publication, and ActivationReplica which
 	// replica said so. Absent when no counted replica has attempted it.
@@ -1796,6 +1842,14 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if snapshot.Readiness != nil && !snapshot.Readiness.Ready {
 			view.ReplicasNotReady++
 		}
+		// And the protocol choice it runs with, as its own value and grouped
+		// with the replicas that agree; a snapshot without it is an older
+		// build's and groups with the others that said nothing.
+		if snapshot.OutputProtocol != nil {
+			facts := *snapshot.OutputProtocol
+			perReplica.OutputProtocol = &facts
+		}
+		view.OutputProtocols = addToOutputProtocolGroup(view.OutputProtocols, snapshot.OutputProtocol, replica)
 		view.Builds = addToBuildGroup(view.Builds, snapshot.Build, replica)
 		view.Workers.Ready++
 		switch {
@@ -1967,6 +2021,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	}
 	Settle(&view)
 	sortBuildGroups(view.Builds)
+	sortOutputProtocolGroups(view.OutputProtocols)
 	return view
 }
 
@@ -2003,6 +2058,36 @@ func addToBuildGroup(groups []BuildGroup, build *BuildFacts, replica string) []B
 		}
 	}
 	return append(groups, BuildGroup{Build: facts, Replicas: []string{replica}})
+}
+
+// addToOutputProtocolGroup files a replica under the choice it published, or
+// under the empty one when it published none.
+func addToOutputProtocolGroup(groups []OutputProtocolGroup, protocol *OutputProtocolFacts, replica string) []OutputProtocolGroup {
+	facts := OutputProtocolFacts{}
+	if protocol != nil {
+		facts = *protocol
+	}
+	for index := range groups {
+		if groups[index].Protocol == facts {
+			groups[index].Replicas = append(groups[index].Replicas, replica)
+			return groups
+		}
+	}
+	return append(groups, OutputProtocolGroup{Protocol: facts, Replicas: []string{replica}})
+}
+
+// sortOutputProtocolGroups puts the choice most replicas run first, then
+// orders by word so two reads of an evenly split deployment list the same way.
+func sortOutputProtocolGroups(groups []OutputProtocolGroup) {
+	sort.SliceStable(groups, func(i, j int) bool {
+		if len(groups[i].Replicas) != len(groups[j].Replicas) {
+			return len(groups[i].Replicas) > len(groups[j].Replicas)
+		}
+		if groups[i].Protocol.Configured != groups[j].Protocol.Configured {
+			return groups[i].Protocol.Configured < groups[j].Protocol.Configured
+		}
+		return groups[i].Protocol.Explicit && !groups[j].Protocol.Explicit
+	})
 }
 
 // sortBuildGroups puts the build most replicas run first, then orders by

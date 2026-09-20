@@ -65,3 +65,56 @@ func TestAForcedNativeChoiceRefusesRatherThanFallsBack(t *testing.T) {
 		t.Fatal("a forced native choice must not fall back to the compatibility protocol")
 	}
 }
+
+// The strategy-level read applies the readers' own rule to an object, and
+// says which half decided: a frozen word is reported as frozen, and an object
+// from before the choice existed gets the revision rule, named as such. The
+// table pins that an object with a word never has the rule applied over it --
+// which is the whole point of freezing it.
+func TestTheEffectiveFormatIsTheFrozenWordOrTheRevisionRuleNamedAsSuch(t *testing.T) {
+	for name, test := range map[string]struct {
+		frozen    string
+		revision  int64
+		want      string
+		decidedBy string
+	}{
+		"frozen standard raw event is reported frozen": {
+			frozen: contract.WireFormatStandardRawEvent, revision: 7, want: contract.WireFormatStandardRawEvent, decidedBy: WireFormatDecidedFrozen,
+		},
+		"frozen compatibility with a revision stays compatibility": {
+			frozen: contract.WireFormatPythonCompatible, revision: 7, want: contract.WireFormatPythonCompatible, decidedBy: WireFormatDecidedFrozen,
+		},
+		"no word and a revision is the trigger event by the rule": {
+			frozen: "", revision: 7, want: contract.WireFormatTriggerEvent, decidedBy: WireFormatDecidedByRevision,
+		},
+		"no word and no revision is compatibility by the rule": {
+			frozen: "", revision: 0, want: contract.WireFormatPythonCompatible, decidedBy: WireFormatDecidedByRevision,
+		},
+	} {
+		name, test := name, test
+		t.Run(name, func(t *testing.T) {
+			format, decidedBy := EffectiveWireFormat(test.frozen, test.revision)
+			if format != test.want || decidedBy != test.decidedBy {
+				t.Fatalf("EffectiveWireFormat(%q, %d) = %q by %q, want %q by %q", test.frozen, test.revision, format, decidedBy, test.want, test.decidedBy)
+			}
+		})
+	}
+}
+
+// The exported list is the three words the reconciler accepts, in the same
+// spelling, so a reader pinned to the list cannot drift from what the
+// configuration validates.
+func TestTheExportedChoicesAreTheOnesTheReconcilerAccepts(t *testing.T) {
+	reconciler := &SourceReconciler{}
+	for _, word := range OutputProtocolChoices {
+		if err := reconciler.ConfigureOutputProtocol(word); err != nil {
+			t.Fatalf("ConfigureOutputProtocol(%q) = %v, want accepted", word, err)
+		}
+	}
+	if len(OutputProtocolChoices) != 3 {
+		t.Fatalf("choices = %v, want the three the configuration validates", OutputProtocolChoices)
+	}
+	if err := reconciler.ConfigureOutputProtocol("shadow"); err == nil {
+		t.Fatal("a word outside the list was accepted")
+	}
+}

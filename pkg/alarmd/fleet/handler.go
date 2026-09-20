@@ -210,6 +210,11 @@ type HealthResponse struct {
 	// thing to establish about any reading is what produced it; before this
 	// field that meant a PromQL query against build_info for each pod.
 	Builds []BuildGroup `json:"builds"`
+	// OutputProtocols is which output protocol choice each counted replica
+	// runs with, grouped the same way. Before this field the answer was in a
+	// values file on a machine the reader could not reach. Per strategy, the
+	// frozen format is on the directory route's effective_output.
+	OutputProtocols []OutputProtocolGroup `json:"output_protocols"`
 	// Degradations are the replica-level standings the verdict was decided
 	// on, and Activation the control leader's standing on the publication
 	// the fleet executes. Both decided the verdict before they were on this
@@ -750,9 +755,11 @@ type ObjectRecoveryContext struct {
 // one object, the health judgment, the observation windows and the series
 // curves. Anything beyond that needs a decision, not just a handler -- and
 // the decisions taken so far are modes on those routes, not routes: the list
-// answers scope=strategies (the strategy directory) and scope=cost (the cost
-// candidates), the object answers samples= (criterion samples), and the
-// windows take mode=sample. Each is recorded in the observability handoff
+// answers scope=strategies (the strategy directory, whose
+// include=effective_config carries the frozen Plan and, beside it, the output
+// format frozen with it) and scope=cost (the cost candidates), the object
+// answers samples= (criterion samples), and the windows take mode=sample.
+// Each is recorded in the observability handoff
 // contract, each is wrapped around this handler by the runtime rather than
 // added here, and each is off until an operator allocates the diagnostics a
 // share (phase_two.observation.memory_percent). A mode that is not in that
@@ -822,8 +829,9 @@ func NewHandler(
 			PrunedSkips:      prunedSkipList(view.PrunedSkips),
 			Coverage:         view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
-			Degradations: degradationList(view.Degradations),
-			Activation:   view.Activation, ActivationReplica: view.ActivationReplica,
+			OutputProtocols: outputProtocolList(view.OutputProtocols),
+			Degradations:    degradationList(view.Degradations),
+			Activation:      view.Activation, ActivationReplica: view.ActivationReplica,
 			Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,
 			Source: view.Source, SourceReplica: view.SourceReplica,
 			Dependencies: dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
@@ -834,6 +842,16 @@ func NewHandler(
 		})
 	})
 	return mux, nil
+}
+
+// outputProtocolList is the view's protocol groups as an empty list rather
+// than null, for the same reason as degradationList: no counted replica is
+// [] and is not the same statement as null.
+func outputProtocolList(groups []OutputProtocolGroup) []OutputProtocolGroup {
+	if groups == nil {
+		return []OutputProtocolGroup{}
+	}
+	return groups
 }
 
 // degradationList is the view's degradations as an empty list rather than
