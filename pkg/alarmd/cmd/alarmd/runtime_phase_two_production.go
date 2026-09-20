@@ -1424,22 +1424,25 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	// One ready set per round: every Query Group below is settled against
 	// the same workers, and a listing that fails fails the round before any
 	// Query Group is touched, exactly as a failed listing did before.
-	workers, err := runtime.reconciler.ListReadyWorkers(ctx, at)
+	workers, registryReads, err := runtime.reconciler.ListReadyWorkers(ctx, at)
 	if err != nil {
 		return err
 	}
-	owners := make(map[execution.QueryGroupIdentity]string, len(ordered))
-	records := make(map[execution.QueryGroupIdentity]ownership.AssignmentRecord, len(ordered))
-	for _, queryGroup := range ordered {
-		record, err := runtime.reconciler.ReconcileWith(ctx, authority, queryGroup, workers, at)
-		if err != nil {
-			if errors.Is(err, ownership.ErrStaleFence) {
-				runtime.clearControlAuthority(authority)
-			}
-			return err
+	// Every Query Group's record in one bounded batch, then the placement
+	// decisions over it. Reading them one at a time cost the round a Redis
+	// round trip per Query Group, all of it waiting, all of it before any
+	// decision could be taken.
+	records, assignmentReads, err := runtime.reconciler.ReconcileRound(ctx, authority, ordered, workers, at)
+	runtime.observeControlReads(ctx, assignmentReads, registryReads, len(ordered))
+	if err != nil {
+		if errors.Is(err, ownership.ErrStaleFence) {
+			runtime.clearControlAuthority(authority)
 		}
+		return err
+	}
+	owners := make(map[execution.QueryGroupIdentity]string, len(ordered))
+	for queryGroup, record := range records {
 		owners[queryGroup] = record.DesiredWorkerID
-		records[queryGroup] = record
 	}
 	// Placement first, correction second, both under this round's ready
 	// set: rendezvous only decides where a Query Group with no eligible
@@ -1565,6 +1568,35 @@ func (runtime *productionPhaseTwoOwnership) observeReadySet(
 // one so the plan can be checked against the Assignments by hand, and what
 // the round did with it -- published, paused for the ready set to settle,
 // or refused by the store for some of them.
+// observeControlReads reports what this round spent on the two control-plane
+// reads, whether or not the round went on to succeed.
+//
+// It is called before the error is handled on purpose. A round that failed
+// still spent its round trips, and the reading that matters most -- a round
+// that took far longer than the others -- is most likely to be one that then
+// failed. Reporting only on success would leave those out of the very
+// distribution somebody is looking at them in.
+func (runtime *productionPhaseTwoOwnership) observeControlReads(
+	ctx context.Context,
+	assignments ownership.ControlReadStats,
+	registry ownership.ControlReadStats,
+	queryGroups int,
+) {
+	facts := &observability.ControlReadFacts{
+		QueryGroups:            queryGroups,
+		AssignmentKeys:         assignments.Keys,
+		AssignmentRoundTrips:   assignments.RoundTrips,
+		AssignmentMilliseconds: float64(assignments.Duration.Nanoseconds()) / float64(time.Millisecond),
+		RegistryKeys:           registry.Keys,
+		RegistryRoundTrips:     registry.RoundTrips,
+		RegistryMilliseconds:   float64(registry.Duration.Nanoseconds()) / float64(time.Millisecond),
+	}
+	observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageControlReadsSpent,
+		Result: observability.ResultSuccess, Operation: observability.OperationLoad, ControlReads: facts,
+	})
+}
+
 func (runtime *productionPhaseTwoOwnership) observeRebalance(
 	ctx context.Context,
 	plan scheduler.RebalancePlan,

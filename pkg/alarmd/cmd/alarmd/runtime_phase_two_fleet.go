@@ -67,7 +67,7 @@ func (source registryReplicas) ReadyReplicas(ctx context.Context, at time.Time) 
 	if source.store == nil {
 		return nil, errors.New("alarmd fleet: ownership store is required")
 	}
-	workers, err := source.store.ListReadyWorkers(ctx, at)
+	workers, _, err := source.store.ListReadyWorkers(ctx, at)
 	if err != nil {
 		return nil, err
 	}

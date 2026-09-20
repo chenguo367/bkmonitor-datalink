@@ -11,6 +11,7 @@ package observability
 
 import (
 	"context"
+	"math"
 	"slices"
 	"sort"
 	"time"
@@ -72,6 +73,7 @@ const (
 	StageAssignmentAcquired     = "assignment_acquired"
 	StageAssignmentLost         = "assignment_lost"
 	StageRebalancePlanned       = "rebalance_planned"
+	StageControlReadsSpent      = "control_reads_spent"
 	StageAssignmentIndexWritten = "assignment_index_written"
 	StageAssignmentIndexRead    = "assignment_index_read"
 	StageTakeoverStarted        = "takeover_started"
@@ -947,6 +949,56 @@ type RebalanceFacts struct {
 	PausedForSeconds float64 `json:"paused_for_seconds"`
 }
 
+// ControlReadFacts is what one control round spent reading the records it
+// places Query Groups from.
+//
+// Round trips are counted where the calls are issued, not inferred from a
+// Redis client's own counters. A client-side total cannot say which round
+// trips belonged to which round, nor separate the assignment reads from every
+// other thing the same client does; and the number this is here to answer --
+// "did the round stop spending one round trip per Query Group" -- is exactly
+// a per-round, per-purpose number.
+//
+// Keys beside RoundTrips is what makes the reading falsifiable: keys rising
+// while round trips stay flat is the batch working, and both rising together
+// is a batch that is not batching. Either can be read off one sample, with no
+// memory of a previous round.
+type ControlReadFacts struct {
+	// QueryGroups is the round's population, the number the assignment read
+	// would have cost a round trip each before.
+	QueryGroups int `json:"query_groups"`
+	// AssignmentKeys and AssignmentRoundTrips are the records read to decide
+	// placement; RegistryKeys and RegistryRoundTrips the worker
+	// registrations behind the ready set.
+	AssignmentKeys         int     `json:"assignment_keys"`
+	AssignmentRoundTrips   int     `json:"assignment_round_trips"`
+	AssignmentMilliseconds float64 `json:"assignment_milliseconds"`
+	RegistryKeys           int     `json:"registry_keys"`
+	RegistryRoundTrips     int     `json:"registry_round_trips"`
+	RegistryMilliseconds   float64 `json:"registry_milliseconds"`
+}
+
+func normalizeControlReadFacts(facts *ControlReadFacts) *ControlReadFacts {
+	if facts == nil {
+		return nil
+	}
+	normalized := *facts
+	for _, count := range []*int{
+		&normalized.QueryGroups, &normalized.AssignmentKeys, &normalized.AssignmentRoundTrips,
+		&normalized.RegistryKeys, &normalized.RegistryRoundTrips,
+	} {
+		if *count < 0 {
+			*count = 0
+		}
+	}
+	for _, elapsed := range []*float64{&normalized.AssignmentMilliseconds, &normalized.RegistryMilliseconds} {
+		if *elapsed < 0 || math.IsNaN(*elapsed) || math.IsInf(*elapsed, 0) {
+			*elapsed = 0
+		}
+	}
+	return &normalized
+}
+
 func normalizeRebalanceFacts(facts *RebalanceFacts) *RebalanceFacts {
 	if facts == nil {
 		return nil
@@ -1569,6 +1621,7 @@ type Observation struct {
 	LegacyMigration       *LegacyQGMigrationFacts
 	DrainingQG            *DrainingQGFacts
 	Rebalance             *RebalanceFacts
+	ControlReads          *ControlReadFacts
 	AssignmentIndex       *AssignmentIndexFacts
 	CursorAdvance         *CursorAdvanceFacts
 	SourceRefresh         *SourceRefreshFacts
@@ -1678,6 +1731,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.LegacyMigration = normalizeLegacyQGMigrationFacts(observation.LegacyMigration)
 	observation.DrainingQG = normalizeDrainingQGFacts(observation.DrainingQG)
 	observation.Rebalance = normalizeRebalanceFacts(observation.Rebalance)
+	observation.ControlReads = normalizeControlReadFacts(observation.ControlReads)
 	observation.AssignmentIndex = normalizeAssignmentIndexFacts(observation.AssignmentIndex)
 	observation.CursorAdvance = normalizeCursorAdvanceFacts(observation.CursorAdvance)
 	observation.SourceRefresh = normalizeSourceRefreshFacts(observation.Component, observation.Stage, observation.SourceRefresh)
@@ -2547,6 +2601,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentControlPlane, StageFrozenPlanGeneration}, {ComponentControlPlane, StageActivationHold},
 	{ComponentOwnership, StageAssignmentAcquired}, {ComponentOwnership, StageAssignmentLost},
 	{ComponentOwnership, StageRebalancePlanned},
+	{ComponentOwnership, StageControlReadsSpent},
 	{ComponentOwnership, StageAssignmentIndexWritten}, {ComponentOwnership, StageAssignmentIndexRead},
 	{ComponentOwnership, StageTakeoverStarted}, {ComponentOwnership, StageTakeoverCompleted},
 	{ComponentOwnership, StageLeaseRenewed}, {ComponentOwnership, StageFenceChecked},

@@ -29,7 +29,7 @@ func TestRedisStorePublishesAssignmentOnlyWithLiveControlLeader(t *testing.T) {
 	if err := store.RegisterWorker(context.Background(), worker); err != nil {
 		t.Fatalf("RegisterWorker() error = %v", err)
 	}
-	ready, err := store.ListReadyWorkers(context.Background(), now)
+	ready, _, err := store.ListReadyWorkers(context.Background(), now)
 	if err != nil || len(ready) != 1 || ready[0].WorkerID != worker.WorkerID ||
 		ready[0].Compatibility() != worker.Compatibility() || ready[0].DependencyStatus != worker.DependencyStatus {
 		t.Fatalf("ListReadyWorkers() = (%+v, %v)", ready, err)
@@ -124,12 +124,12 @@ func TestRedisStoreWorkerRegistryExpiresPhysicalEntries(t *testing.T) {
 	if err := store.RegisterWorker(context.Background(), worker); err != nil {
 		t.Fatalf("RegisterWorker() error = %v", err)
 	}
-	ready, err := store.ListReadyWorkers(context.Background(), now)
+	ready, _, err := store.ListReadyWorkers(context.Background(), now)
 	if err != nil || len(ready) != 1 {
 		t.Fatalf("ListReadyWorkers(immediate) = (%+v, %v)", ready, err)
 	}
 	time.Sleep(250 * time.Millisecond)
-	ready, err = store.ListReadyWorkers(context.Background(), time.Now())
+	ready, _, err = store.ListReadyWorkers(context.Background(), time.Now())
 	if err != nil || len(ready) != 0 {
 		t.Fatalf("ListReadyWorkers(expired) = (%+v, %v)", ready, err)
 	}

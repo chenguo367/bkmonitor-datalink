@@ -91,6 +91,9 @@ type phaseTwoMetrics struct {
 	rebalanceGap                    *loadedGauge
 	assignmentMoves                 *prometheus.CounterVec
 	rebalancePaused                 *prometheus.CounterVec
+	controlReadRoundTrips           *prometheus.CounterVec
+	controlReadKeys                 *prometheus.CounterVec
+	controlReadDuration             *prometheus.HistogramVec
 	assignmentIndexStaleRounds      *loadedGauge
 	assignmentIndexWrites           *prometheus.CounterVec
 	assignmentIndexReads            *prometheus.CounterVec
@@ -133,6 +136,21 @@ type phaseTwoMetrics struct {
 }
 
 var activeQGSetDurationBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30}
+
+// controlReadDurationBuckets spans a single pipelined batch on a healthy
+// link through a reconcile round that is in trouble. The lower buckets are
+// where a batched read belongs; the upper ones exist so a round that went
+// back to waiting per Query Group is visible as a shape rather than as one
+// saturated top bucket.
+var controlReadDurationBuckets = []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10}
+
+// ControlReadKinds is every value the control-read label takes.
+//
+// Published so the series budget is derived from the same list the families
+// are pre-created from. A bound written out by hand beside a list is a second
+// derivation of one fact, and the two drift the first time a third read is
+// added: the budget test keeps passing against the number somebody typed.
+var ControlReadKinds = []string{"assignment", "registry"}
 
 // Timeline sizes from one Segment (about a kilobyte) up past the sizes that
 // made a publication cutover exceed the Redis write timeout.
@@ -631,6 +649,13 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.rebalancePaused = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "rebalance_paused_total", Help: "Rebalance rounds that planned moves and published none, by reason. reason=set_unstable is the ready set having changed within the stabilisation window, which is what a rolling update or a replica joining looks like; rising without end is a set that never settles."}, []string{"reason"})
 	metrics.assignmentMoves.WithLabelValues("rebalance")
 	metrics.rebalancePaused.WithLabelValues("set_unstable")
+	metrics.controlReadRoundTrips = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_read_round_trips_total", Help: "Redis round trips the Control Leader's reconcile round spent reading the records it places Query Groups from, by read: assignment (one Assignment record per Query Group of the population) or registry (the index plus one registration per ready worker). Counted where the calls are issued, so it is this round's own number and not a share of a client-wide total. Read it against control_read_keys_total on the same read: keys rising while round trips stay flat is the batch doing its job, both rising together is a batch that is not batching."}, []string{"read"})
+	metrics.controlReadKeys = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_read_keys_total", Help: "Records the Control Leader's reconcile round asked for, by read. The denominator for control_read_round_trips_total; before the reads were batched the two were equal by construction."}, []string{"read"})
+	metrics.controlReadDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_read_duration_seconds", Help: "Wall time one reconcile round spent inside each control-plane read, by read. Reported for failed rounds too: a round that took far longer than the others is the one most likely to have failed, and leaving those out would drop them from the distribution somebody is looking at them in.", Buckets: controlReadDurationBuckets}, []string{"read"})
+	for _, read := range ControlReadKinds {
+		metrics.controlReadRoundTrips.WithLabelValues(read)
+		metrics.controlReadKeys.WithLabelValues(read)
+	}
 	metrics.assignmentIndexStaleRounds = newLoadedGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "assignment_index_stale_rounds", Help: "Consecutive reconcile rounds in which this worker read the same Assignment index round number. Healthy values are zero and one: the Leader writes once per reconcile interval and workers read on their own interval of the same length, so a reader that runs just before the writer sees the previous round once. Two or more means the index has stopped advancing, which reads exactly like an unchanged fleet otherwise. Per worker; aggregate with max."})
 	metrics.assignmentIndexWrites = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "assignment_index_write_total", Help: "Assignment index rounds the Control Leader attempted, by result."}, []string{"result"})
 	metrics.assignmentIndexReads = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "assignment_index_read_total", Help: "Assignment index reads by this worker, by result: fresh (round advanced), stale (same round), missing (no index or no set), invalid (unreadable)."}, []string{"result"})
@@ -935,7 +960,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
-		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
+		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.controlCache, m.dispatchRotation, m.openAlertSet, m.controlSourceRounds, m.controlSource,
@@ -985,6 +1010,20 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if facts := observation.DrainingQG; facts != nil {
 		m.undrainedDrainingQueryGroups.Set(float64(facts.Undrained))
 		m.drainingCursorPrunedQueryGroups.Set(float64(facts.CursorPruned))
+	}
+	if facts := observation.ControlReads; facts != nil {
+		for read, spent := range map[string]struct {
+			keys       int
+			roundTrips int
+			elapsed    float64
+		}{
+			"assignment": {facts.AssignmentKeys, facts.AssignmentRoundTrips, facts.AssignmentMilliseconds},
+			"registry":   {facts.RegistryKeys, facts.RegistryRoundTrips, facts.RegistryMilliseconds},
+		} {
+			m.controlReadKeys.WithLabelValues(read).Add(float64(spent.keys))
+			m.controlReadRoundTrips.WithLabelValues(read).Add(float64(spent.roundTrips))
+			m.controlReadDuration.WithLabelValues(read).Observe(spent.elapsed / 1000)
+		}
 	}
 	if facts := observation.Rebalance; facts != nil && observation.Result == observability.ResultSuccess {
 		m.rebalancePlannedMoves.Set(float64(facts.PlannedMoves))

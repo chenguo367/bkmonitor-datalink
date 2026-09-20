@@ -2396,10 +2396,27 @@ func (store *fakePhaseTwoOwnershipStore) RegisterWorker(_ context.Context, worke
 	return nil
 }
 
-func (store *fakePhaseTwoOwnershipStore) ListReadyWorkers(context.Context, time.Time) ([]ownership.WorkerRegistration, error) {
+func (store *fakePhaseTwoOwnershipStore) ListReadyWorkers(
+	context.Context, time.Time,
+) ([]ownership.WorkerRegistration, ownership.ControlReadStats, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	return []ownership.WorkerRegistration{store.worker}, nil
+	return []ownership.WorkerRegistration{store.worker}, ownership.ControlReadStats{Keys: 1, RoundTrips: 1}, nil
+}
+
+func (store *fakePhaseTwoOwnershipStore) ReadAssignments(
+	_ context.Context,
+	queryGroups []execution.QueryGroupIdentity,
+) (map[execution.QueryGroupIdentity]ownership.AssignmentRecord, ownership.ControlReadStats, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	found := make(map[execution.QueryGroupIdentity]ownership.AssignmentRecord, len(queryGroups))
+	for _, queryGroup := range queryGroups {
+		if store.assignment.QueryGroup == queryGroup {
+			found[queryGroup] = store.assignment
+		}
+	}
+	return found, ownership.ControlReadStats{Keys: len(queryGroups), RoundTrips: 1}, nil
 }
 
 func (store *fakePhaseTwoOwnershipStore) ReadAssignment(context.Context, execution.QueryGroupIdentity) (ownership.AssignmentRecord, error) {
