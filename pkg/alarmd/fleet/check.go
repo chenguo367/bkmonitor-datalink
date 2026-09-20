@@ -1072,6 +1072,16 @@ type Todo struct {
 	// distinct objects under them.
 	Governance        int `json:"governance"`
 	GovernanceObjects int `json:"governance_objects"`
+	// PlatformChecks is how many of Checks are the platform's lines -- a
+	// strategy the platform wrote unusably, which the operator of this
+	// deployment goes and says so about -- and PlatformStrategies the
+	// strategies under them. They are in Checks, and named apart: a reader
+	// told "alarmd 已确认 10 类" who finds one owned by the platform's cache
+	// writer has been told the wrong thing, and the count of strategies is
+	// not a count of objects. The page derived this by walking the lines;
+	// a reader of the JSON had nothing to read.
+	PlatformChecks     int `json:"platform_checks"`
+	PlatformStrategies int `json:"platform_strategies"`
 }
 
 // SummarizeTodo counts the first screen. The reports say which lines exist;
@@ -1173,6 +1183,10 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 			todo.Undetermined++
 		case up:
 			todo.Checks++
+			if report.Owner == OwnerPlatform {
+				todo.PlatformChecks++
+				todo.PlatformStrategies += report.Strategies
+			}
 		}
 	}
 	return todo
