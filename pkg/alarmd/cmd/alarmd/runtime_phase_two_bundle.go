@@ -972,6 +972,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		platformSettings: platformSettingsFactsSource(platformSettings, external.Now),
 		activation:       bundle.activationFleetFacts,
 		rebalance:        bundle.rebalanceFleetFacts,
+		assignmentScope:  bundle.assignmentScopeFleetFacts,
 		source:           bundle.sourceFleetFacts,
 		endpoints: endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
 			bundle.sourceFleetFacts, events.State, external.Now),

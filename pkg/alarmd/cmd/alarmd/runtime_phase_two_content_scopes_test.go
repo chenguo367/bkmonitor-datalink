@@ -13,6 +13,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
@@ -195,5 +196,44 @@ func TestThePreCutoverWriterNamesChangedContentUnderTheFleetsGate(t *testing.T) 
 				t.Fatalf("decision = %+v, want the record's placement kept, revision 7 expected and scope %q", decision, test.wantScope)
 			}
 		})
+	}
+}
+
+// The round's census reaches the fleet snapshot with the policy in the
+// fleet's words -- every policy has one, and an unknown one reads as
+// untouched -- and as a copy the round's next write does not reach into.
+func TestTheRoundsAssignmentScopeCensusIsKeptForTheFleetInTheFleetsWords(t *testing.T) {
+	for policy, word := range map[scheduler.ContentScopePolicy]string{
+		scheduler.ContentScopesDeclared:  fleet.AssignmentScopePolicyDeclared,
+		scheduler.ContentScopesWithdrawn: fleet.AssignmentScopePolicyWithdrawn,
+		scheduler.ContentScopesUntouched: fleet.AssignmentScopePolicyUntouched,
+		scheduler.ContentScopePolicy(99): fleet.AssignmentScopePolicyUntouched,
+	} {
+		if got := assignmentScopePolicyWord(policy); got != word {
+			t.Fatalf("assignmentScopePolicyWord(%v) = %q, want %q", policy, got, word)
+		}
+	}
+	runtime := &productionPhaseTwoOwnership{}
+	if runtime.LastAssignmentScope() != nil || (*productionPhaseTwoOwnership)(nil).LastAssignmentScope() != nil {
+		t.Fatal("a runtime that has not reconciled claims a census")
+	}
+	at := time.Unix(1_700_000_000, 0)
+	scopes := scheduler.ContentScopes{Policy: scheduler.ContentScopesDeclared, Digests: map[execution.QueryGroupIdentity]string{"qg-1": "c1", "qg-2": "c2"}}
+	records := map[execution.QueryGroupIdentity]ownership.AssignmentRecord{
+		"qg-1": {QueryGroup: "qg-1", ContentScope: "c1"},
+		"qg-2": {QueryGroup: "qg-2"},
+	}
+	runtime.recordAssignmentScope(at, scopes, records)
+	first := runtime.LastAssignmentScope()
+	if first == nil || first.Policy != fleet.AssignmentScopePolicyDeclared || first.Total != 2 || first.Current != 1 || first.Undeclared != 1 || !first.At.Equal(at) || !first.Consistent() {
+		t.Fatalf("census = %+v, want a declaring round over one current and one undeclared record", first)
+	}
+	records["qg-2"] = ownership.AssignmentRecord{QueryGroup: "qg-2", ContentScope: "c2"}
+	runtime.recordAssignmentScope(at.Add(time.Second), scopes, records)
+	if first.Current != 1 {
+		t.Fatalf("the copy a reader holds moved with the next round: %+v", first)
+	}
+	if second := runtime.LastAssignmentScope(); second.Current != 2 || second.Undeclared != 0 || !second.At.After(first.At) {
+		t.Fatalf("second census = %+v, want both current", second)
 	}
 }
