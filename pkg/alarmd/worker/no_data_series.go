@@ -281,6 +281,14 @@ func (stream *streamedExecution) evaluateNoData(
 		if round.mutation != nil {
 			stream.noDataMutations = append(stream.noDataMutations, *round.mutation)
 		}
+		// The synthetic series go through the same batch the real ones do,
+		// preflight read included, and they are written like any other. They
+		// count in the same census, on both sides: counted on the written side
+		// only -- which is where a write is a write -- they put written above
+		// read on a live deployment by exactly their number, and the census
+		// read as a renewal covering a negative population.
+		stream.seriesCensus.Due += len(round.series)
+		stream.seriesCensus.Read += len(round.series)
 		for _, entry := range round.series {
 			pending = append(pending, entry)
 			if len(pending) >= batchLimit {

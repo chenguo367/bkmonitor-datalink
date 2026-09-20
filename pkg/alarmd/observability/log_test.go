@@ -365,3 +365,42 @@ func TestLoggingObserverWritesTheAttemptOnAShortPeriodCompletion(t *testing.T) {
 		t.Fatalf("short_period_completion = %#v, want attempt 2, FULL_COMPLETED, lag 17.5", completion)
 	}
 }
+
+// The frozen-state renewal line carries its eight numbers. They reached the
+// metric and not the line, so a reader of one Slot's log saw that a renewal
+// happened and nothing of what it found; a script matching *due* on the line
+// found due_plan_set_digest instead and read a false positive.
+func TestLoggingObserverWritesTheFrozenStateRenewalNumbers(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewBoundedLogPolicy(limiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := &FrozenStateRenewalFacts{}
+	facts.RecordCensus(12, 11, 7)
+	facts.Record(3, 1, 0, 0)
+	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+		Component: ComponentState, Stage: StageFrozenStateRenewed, Operation: OperationNormal, Result: ResultSuccess,
+		FrozenStateRenewal: facts,
+	})
+
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode frozen state renewal log: %v; log=%s", err, output.String())
+	}
+	renewal, ok := event["frozen_state_renewal"].(map[string]any)
+	if !ok {
+		t.Fatalf("no frozen_state_renewal on the line: %#v", event)
+	}
+	for field, want := range map[string]float64{"due": 12, "read": 11, "written": 7, "frozen": 4, "renewed": 3, "fresh": 1, "missing": 0, "failed": 0} {
+		if renewal[field] != want {
+			t.Fatalf("frozen_state_renewal[%q] = %v, want %v; line=%#v", field, renewal[field], want, renewal)
+		}
+	}
+}
