@@ -130,3 +130,40 @@ func TestOutputFailureKindsAreClosedAndEachHasASignature(t *testing.T) {
 		t.Fatalf("DependencyEvidences = %v, want code, text and the three kinds", DependencyEvidences)
 	}
 }
+
+// When the sink states its own refusal -- reason word and bare sentence as
+// facts on the failed event write -- the row carries the sentence, not the
+// chain, and the reason word decides the kind whatever the sentence says.
+func TestTheSinksOwnRefusalIsCarriedAsFactsAndDecidesTheKind(t *testing.T) {
+	tracker := newTracker(t, &clock{at: now})
+	chain := "alarmd worker: acknowledge events: OUTPUT_CONVERSION_REJECTED: a decision with no decided level has nothing to say (event evt-1, strategy 1001, business 2, format standard_raw_event)"
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		slot := int64(1_700_000_000 + 60*round)
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
+			Result: observability.ResultFailed, ReasonCode: "OUTPUT_CONVERSION_REJECTED", Err: errors.New(chain),
+			OutputRejection: &observability.OutputRejectionFacts{Reason: "OUTPUT_CONVERSION_REJECTED", Detail: "a decision with no decided level has nothing to say"},
+			Trace:           observability.TraceFields{QueryGroupKey: "qg-rejected", EvaluationTime: slot},
+		})
+		tracker.Observe(context.Background(), observability.Observation{
+			ExecuteOutcome: "error", ReasonCode: "OUTPUT_CONVERSION_REJECTED", Err: errors.New(chain),
+			Trace: observability.TraceFields{QueryGroupKey: "qg-rejected", EvaluationTime: slot},
+		})
+	}
+	anomalies := tracker.Anomalies()
+	if len(anomalies) != 1 {
+		t.Fatalf("anomalies = %+v", anomalies)
+	}
+	Attribute(anomalies, now)
+	row := anomalies[0]
+	if row.Failure == nil || row.Failure.Code != "OUTPUT_CONVERSION_REJECTED" || row.Failure.Text != "a decision with no decided level has nothing to say" {
+		t.Fatalf("failure = %+v, want the sink's word and its bare sentence, not the chain", row.Failure)
+	}
+	if row.Internal == nil {
+		t.Fatal("a refusal the sink stated was not filed as this deployment's own")
+	}
+	// The sentence carries no client signature; the reason word decides.
+	if b := row.Blocked; b == nil || b.DependencyEvidence != OutputFailureClientRejected || b.Dependency != DependencyNone || b.Class != ClassContract {
+		t.Fatalf("blocked = %+v, want client_rejected by the sink's own word", row.Blocked)
+	}
+}

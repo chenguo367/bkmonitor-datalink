@@ -1225,7 +1225,10 @@ type recordingPorts struct {
 	// failErr, when set, is what the failing stage wraps, so a test can hand
 	// the coordinator the store's own typed refusal rather than an anonymous
 	// error.
-	failErr        error
+	failErr error
+	// eventRejection, when set with failStage event_ack, makes the event
+	// write fail as the sink's own refusal rather than a retryable dependency.
+	eventRejection *eventRejectionShape
 	beginErr       error
 	admissionCalls int
 	contractDrift  bool
@@ -1744,10 +1747,32 @@ func (ports *recordingPorts) WriteBatch(_ context.Context, events []contract.Tri
 	ports.eventCount += len(events)
 	ports.lastEvents = append([]contract.TriggerEventV1(nil), events...)
 	if err := ports.fail("event_ack"); err != nil {
+		if ports.eventRejection != nil {
+			// The sink refusing to write, as the sink states it: not a
+			// retryable dependency, and named by reason word and sentence.
+			return &outputRejectedTestError{err: err, reason: ports.eventRejection.reason, detail: ports.eventRejection.detail}
+		}
 		return &retryableOutputTestError{err: err}
 	}
 	return nil
 }
+
+// outputRejectedTestError is the sink's refusal in the shape the sink's own
+// error has: an Error() that wraps the sentence with identity, and the two
+// methods the coordinator reads the reason word and the bare sentence from.
+type outputRejectedTestError struct {
+	err            error
+	reason, detail string
+}
+
+func (err *outputRejectedTestError) Error() string {
+	return err.reason + ": " + err.detail + " (event evt-1, strategy 1001, business 2, format standard_raw_event)"
+}
+func (err *outputRejectedTestError) Unwrap() error                 { return err.err }
+func (err *outputRejectedTestError) OutputRejectionReason() string { return err.reason }
+func (err *outputRejectedTestError) OutputRejectionDetail() string { return err.detail }
+
+type eventRejectionShape struct{ reason, detail string }
 
 type retryableOutputTestError struct{ err error }
 

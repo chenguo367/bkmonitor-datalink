@@ -520,6 +520,19 @@ type ExecutionEvidenceFacts struct {
 	PlansTotal   int
 }
 
+// OutputRejectionFacts is a refusal to write the round's events, as the sink
+// states it: which of its refusals (a converter that could not build the
+// message, a client that would not send it) and the sentence that decided
+// it. The sentence is the sink's own and carries no identity; the identity
+// is on the trace. It travels as facts because the words used to be read
+// out of an error chain three wrappers deep, bounded from whichever end
+// happened to keep them, and the two refusals were one code with a broker
+// that did not answer.
+type OutputRejectionFacts struct {
+	Reason string `json:"reason"`
+	Detail string `json:"detail"`
+}
+
 // FrozenStateRenewalFacts is what one Slot's renewal of frozen Runtime State
 // keys found.
 //
@@ -1782,9 +1795,15 @@ type TraceFields struct {
 }
 
 type Observation struct {
-	GapExtensions          []*GapExtensionFacts
-	GapConflict            *GapExtensionFacts
-	QueryCooldown          *QueryCooldownFacts
+	GapExtensions []*GapExtensionFacts
+	GapConflict   *GapExtensionFacts
+	QueryCooldown *QueryCooldownFacts
+	// OutputRejection is the sink's own account of refusing to write the
+	// round's events -- the reason word and the converter's or client's
+	// sentence, apart from the error chain that wraps them -- on a failed
+	// event_acked observation. Nil when the write failed for any other
+	// reason, or did not fail.
+	OutputRejection        *OutputRejectionFacts
 	RunOutcome             string
 	Attempted              bool
 	ExecuteOutcome         string
