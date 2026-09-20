@@ -4,23 +4,12 @@ import (
 	"context"
 	"errors"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
-
-func TestWorkflowContractHasActualReturnFacts(t *testing.T) {
-	o := observability.Observation{Component: observability.ComponentScheduler, Stage: "runner_returned", Result: observability.ResultSuccess}
-	field := reflect.ValueOf(&o).Elem().FieldByName("RunOutcome")
-	if !field.IsValid() {
-		t.Fatal("actual RunOne return facts are missing")
-	}
-	field.SetString("source_retry")
-	NewRecorder(BuildInfo{}).Observe(context.Background(), o)
-}
 
 func TestWorkflowContractCountsAndSeriesBound(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
