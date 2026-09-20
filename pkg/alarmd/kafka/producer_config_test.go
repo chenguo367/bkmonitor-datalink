@@ -75,13 +75,13 @@ func TestNewDecisionProducerConfigForcesAcknowledgementAndBounds(t *testing.T) {
 	}
 }
 
-// The floor of the protocol range is the header protocol, and it is one
-// number in one place. The standard RawEvent carries the tenant in a record
-// header, which the client can only send from 0.11.0.0: the producer built
-// at the floor speaks exactly that version without idempotence, and the
-// version this product used to be built with, 0.10.2.0, is refused with the
-// reason -- at configuration time, not on the first message.
-func TestNewDecisionProducerConfigFloorIsTheHeaderProtocol(t *testing.T) {
+// The floor of the protocol range is the oldest protocol the program works
+// against at all -- consumer groups, which the input needs -- and it is one
+// number in one place, parsed once. The producer built at the floor speaks
+// exactly that version without idempotence; a version below it is refused
+// with the reason at configuration time. Record headers are not the floor:
+// they are negotiated per cluster when the sink opens.
+func TestNewDecisionProducerConfigFloorIsTheOldestProtocolTheProgramSpeaks(t *testing.T) {
 	t.Parallel()
 
 	coordinates := validDecisionSinkConfig()
@@ -90,13 +90,8 @@ func TestNewDecisionProducerConfigFloorIsTheHeaderProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDecisionProducerConfig() error = %v", err)
 	}
-	if config.Version != sarama.V0_11_0_0 {
-		t.Fatalf("broker version = %s, want %s", config.Version, sarama.V0_11_0_0)
-	}
-	// The value the range check decides by is the value the error text
-	// names: one string, parsed once.
-	if minimumBrokerVersion != sarama.V0_11_0_0 || minimumBrokerVersion.String() != MinimumBrokerVersion {
-		t.Fatalf("parsed floor = %s, want it derived from %q", minimumBrokerVersion, MinimumBrokerVersion)
+	if config.Version != sarama.V0_10_2_0 {
+		t.Fatalf("broker version = %s, want %s", config.Version, sarama.V0_10_2_0)
 	}
 	if config.Producer.Idempotent {
 		t.Fatal("the producer at the floor must not require InitProducerID")
@@ -104,14 +99,21 @@ func TestNewDecisionProducerConfigFloorIsTheHeaderProtocol(t *testing.T) {
 	if config.Producer.RequiredAcks != sarama.WaitForAll {
 		t.Fatalf("required acks = %d, want WaitForAll", config.Producer.RequiredAcks)
 	}
+	// The values the checks decide by are the values the texts name: each
+	// string parsed once.
+	if minimumBrokerVersion != sarama.V0_10_2_0 || minimumBrokerVersion.String() != MinimumBrokerVersion ||
+		recordHeaderBrokerVersion != sarama.V0_11_0_0 || recordHeaderBrokerVersion.String() != RecordHeaderBrokerVersion {
+		t.Fatalf("parsed floor %s / header version %s, want them derived from %q / %q",
+			minimumBrokerVersion, recordHeaderBrokerVersion, MinimumBrokerVersion, RecordHeaderBrokerVersion)
+	}
 
-	coordinates.BrokerVersion = "0.10.2.0"
+	coordinates.BrokerVersion = "0.10.1.0"
 	_, err = NewDecisionProducerConfig(coordinates)
-	if err == nil || !strings.Contains(err.Error(), "record headers") || !strings.Contains(err.Error(), MinimumBrokerVersion) {
-		t.Fatalf("NewDecisionProducerConfig(0.10.2.0) error = %v, want a refusal naming record headers and %s", err, MinimumBrokerVersion)
+	if err == nil || !strings.Contains(err.Error(), "consumer groups") || !strings.Contains(err.Error(), MinimumBrokerVersion) {
+		t.Fatalf("NewDecisionProducerConfig(0.10.1.0) error = %v, want a refusal naming consumer groups and %s", err, MinimumBrokerVersion)
 	}
 	if _, err := NewDecisionProducerOnlyConfig(coordinates); err == nil {
-		t.Fatal("NewDecisionProducerOnlyConfig(0.10.2.0) = nil, want the same refusal on the producer-only path")
+		t.Fatal("NewDecisionProducerOnlyConfig(0.10.1.0) = nil, want the same refusal on the producer-only path")
 	}
 }
 

@@ -17,14 +17,14 @@ import (
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 )
 
-// The protocol the product is built with has to carry what the product
-// sends. The standard RawEvent puts the tenant in a record header; a client
-// built for 0.10.2.0 refuses such a record before any broker sees it
-// ("Producing headers requires Kafka at least v0.11"), which is how a
-// deployment whose Kafka was up produced nothing for 88 rounds. So this
-// opens the real sink with the default configuration against a broker and
-// sends one standard event: the produce request has to reach the broker, and
-// on the header-capable protocol.
+// The protocol the producer speaks is the cluster's, discovered when the
+// sink opens: built with a fixed version it either refused every record
+// with a header (0.10.2.0) or was cut off by every broker that stops at
+// Produce v2 (0.11.0.0). So this opens the real sink with the default
+// configuration against a broker that takes record batches and sends one
+// standard event: the produce request has to reach the broker on the
+// header-capable protocol, and the default configuration itself stays on
+// the floor the negotiation starts from.
 func TestDefaultKafkaProtocolCarriesTheStandardRawEventToTheBroker(t *testing.T) {
 	broker := sarama.NewMockBroker(t, 1)
 	defer broker.Close()
@@ -36,7 +36,8 @@ func TestDefaultKafkaProtocolCarriesTheStandardRawEventToTheBroker(t *testing.T)
 		"MetadataRequest": sarama.NewMockMetadataResponse(t).
 			SetBroker(broker.Addr(), broker.BrokerID()).
 			SetLeader(coordinates.OutputTopic, 0, broker.BrokerID()),
-		"ProduceRequest": sarama.NewMockProduceResponse(t).SetVersion(3),
+		"ApiVersionsRequest": sarama.NewMockWrapper(&sarama.ApiVersionsResponse{ApiVersions: []*sarama.ApiVersionsResponseBlock{{ApiKey: 0, MinVersion: 0, MaxVersion: 3}}}),
+		"ProduceRequest":     sarama.NewMockProduceResponse(t).SetVersion(3),
 	})
 
 	sink, err := enginekafka.OpenTriggerEventSink(coordinates)
@@ -47,7 +48,7 @@ func TestDefaultKafkaProtocolCarriesTheStandardRawEventToTheBroker(t *testing.T)
 
 	event := standardRawEventGolden(t)
 	if err := sink.WriteBatch(context.Background(), []contract.TriggerEventV1{event}); err != nil {
-		t.Fatalf("WriteBatch() of one standard RawEvent on the default protocol = %v, want it sent", err)
+		t.Fatalf("WriteBatch() of one standard RawEvent on the negotiated protocol = %v, want it sent", err)
 	}
 
 	var produced *sarama.ProduceRequest
@@ -63,19 +64,22 @@ func TestDefaultKafkaProtocolCarriesTheStandardRawEventToTheBroker(t *testing.T)
 		t.Fatalf("produce request version = %d, want the record-batch protocol (3 or later) that carries headers", produced.Version)
 	}
 	if cfg.Kafka.BrokerVersion != enginekafka.MinimumBrokerVersion {
-		t.Fatalf("default broker_version = %q, want the program's floor %q", cfg.Kafka.BrokerVersion, enginekafka.MinimumBrokerVersion)
+		t.Fatalf("default broker_version = %q, want the program's floor %q, from which the sink negotiates up", cfg.Kafka.BrokerVersion, enginekafka.MinimumBrokerVersion)
+	}
+	if negotiation := sink.ProtocolNegotiation(); negotiation == nil || negotiation.Negotiated != enginekafka.RecordHeaderBrokerVersion {
+		t.Fatalf("negotiation = %+v, want %s against a broker that takes record batches", negotiation, enginekafka.RecordHeaderBrokerVersion)
 	}
 }
 
-// And the same refusal cannot be met at runtime: a version below the floor
-// is refused when the configuration is validated, naming the header.
-func TestAKafkaProtocolBelowTheHeaderFloorIsRefusedAtValidation(t *testing.T) {
+// A version below the floor is refused when the configuration is validated,
+// naming what the floor is for.
+func TestAKafkaProtocolBelowTheFloorIsRefusedAtValidation(t *testing.T) {
 	cfg := Default()
 	cfg.Kafka.Brokers = []string{"127.0.0.1:9092"}
-	cfg.Kafka.BrokerVersion = "0.10.2.0"
+	cfg.Kafka.BrokerVersion = "0.10.1.0"
 	err := validatePhaseTwoKafkaOutput(cfg.Kafka)
-	if err == nil || !strings.Contains(err.Error(), "record headers") {
-		t.Fatalf("validatePhaseTwoKafkaOutput() with broker_version 0.10.2.0 = %v, want a refusal naming record headers", err)
+	if err == nil || !strings.Contains(err.Error(), "consumer groups") {
+		t.Fatalf("validatePhaseTwoKafkaOutput() with broker_version 0.10.1.0 = %v, want a refusal naming consumer groups", err)
 	}
 }
 
