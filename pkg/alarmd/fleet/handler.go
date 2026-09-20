@@ -239,9 +239,15 @@ type HealthResponse struct {
 	Source        *SourceFacts `json:"source"`
 	SourceReplica string       `json:"source_replica,omitempty"`
 	// Dependencies is where this deployment's external systems are and what
-	// one replica has seen of them, and DependenciesReplica which replica.
-	Dependencies        []Endpoint `json:"dependencies"`
-	DependenciesReplica string     `json:"dependencies_replica,omitempty"`
+	// one replica has seen of them, DependenciesReplica which replica, and
+	// DependenciesReplicas how many replicas published a list -- the one here
+	// is one of that many, and each replica's own is on its per_replica row.
+	Dependencies         []Endpoint `json:"dependencies"`
+	DependenciesReplica  string     `json:"dependencies_replica,omitempty"`
+	DependenciesReplicas int        `json:"dependencies_replicas"`
+	// ReplicasNotReady is how many counted replicas answer their own
+	// readiness probe with no; which bit, on each per_replica row.
+	ReplicasNotReady int `json:"replicas_not_ready"`
 	// Overdue rides here rather than only in the list because the list can be
 	// paged or truncated, and "how many objects are not being evaluated" must
 	// not depend on how much of the list fitted.
@@ -803,6 +809,7 @@ func NewHandler(
 			Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,
 			Source: view.Source, SourceReplica: view.SourceReplica,
 			Dependencies: dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
+			DependenciesReplicas: view.DependenciesReplicas, ReplicasNotReady: view.ReplicasNotReady,
 			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
 			Gaps: view.Gaps, Capacity: view.Capacity,
 			Load: LoadOf(&view, now()),
@@ -980,6 +987,12 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// for that column, and gets them paged.
 	view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory = []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}
 	view.GapSkips, view.PrunedSkips = map[string]SkippedSpan{}, map[string]PrunedSkip{}
+	// Each replica's dependency record is the verdict route's; here it would
+	// ride on every thirty-second poll for rows this request is not about.
+	// The copy is this request's own, so clearing it touches no other reader.
+	for index := range view.PerReplica {
+		view.PerReplica[index].Dependencies = nil
+	}
 	writeJSON(response, http.StatusOK, ListResponse{
 		Summary: summary,
 		View:    view, Replica: replica, Strategy: strategy, Business: business, Column: column,

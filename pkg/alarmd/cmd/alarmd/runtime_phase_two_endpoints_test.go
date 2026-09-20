@@ -20,8 +20,10 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // The one deployment shape the page went blind on: every platform cache on
@@ -226,5 +228,52 @@ func TestSourceFactsOfCarriesTheCompositionAndTheMarker(t *testing.T) {
 	without := sourceFactsOf(phaseTwoControlRefreshResult{Composition: composition}, at)
 	if without.ChangeSignalPresent || without.ChangeSignalAgeSeconds != nil {
 		t.Errorf("a round without a marker carries an age: %+v", without)
+	}
+}
+
+// The readiness the fleet snapshot carries is the readiness endpoint's, from
+// the same tracker, bit for bit: a process that is not ready because its
+// output is not open publishes exactly that, and the fleet cannot say ready
+// of a replica whose probe says no. No health source publishes no fact.
+func TestReadinessFactsAreTheProbesOwn(t *testing.T) {
+	if readinessFactsSource(nil) != nil {
+		t.Fatal("a publisher without a health source has a readiness fact to publish")
+	}
+	health := newPhaseTwoApplicationHealth()
+	health.Update(phaseTwoReadiness{
+		State: observability.HealthNotReady, Reasons: []observability.ReasonCode{observability.ReasonCode("KAFKA_UNAVAILABLE")},
+		SnapshotReady: true, AssignmentReady: true, RuntimeStateReady: true, OutputSinkReady: false,
+	})
+	probe := health.HealthSnapshot()
+	facts := readinessFactsSource(health)()
+	if facts.Ready != probe.Ready || facts.State != string(probe.State) ||
+		facts.ConfigLoaded != probe.ConfigLoaded || facts.SchemaReady != probe.SchemaReady ||
+		facts.AssignmentReady != probe.AssignmentReady || facts.RuntimeStateReady != probe.RuntimeStateReady ||
+		facts.OutputSinkReady != probe.OutputSinkReady || facts.SnapshotReady != probe.SnapshotReady ||
+		facts.Draining != probe.Draining {
+		t.Fatalf("fleet readiness = %+v, probe = %+v: the two disagree about one process", facts, probe)
+	}
+	if facts.Ready || facts.OutputSinkReady || !facts.RuntimeStateReady || len(facts.Reasons) != 1 || facts.Reasons[0] != "KAFKA_UNAVAILABLE" {
+		t.Fatalf("fleet readiness = %+v, want not ready on the output bit with the probe's one reason", facts)
+	}
+	// The sink opens: both say ready, and the reason is gone from both.
+	health.Update(phaseTwoReadiness{State: observability.HealthReady, SnapshotReady: true, AssignmentReady: true,
+		RuntimeStateReady: true, OutputSinkReady: true})
+	probe, facts = health.HealthSnapshot(), readinessFactsSource(health)()
+	if !facts.Ready || !probe.Ready || facts.OutputSinkReady != probe.OutputSinkReady || len(facts.Reasons) != len(probe.Reasons) {
+		t.Fatalf("after the sink opened: fleet %+v, probe %+v", facts, probe)
+	}
+	// And the publisher puts it on the snapshot as given.
+	publisher := fleetPublisher{
+		tracker: fleet.NewTracker(nil, "replica-1", time.Now), replica: "replica-1", now: time.Now,
+		owned:     func() []execution.QueryGroupIdentity { return nil },
+		readiness: readinessFactsSource(health),
+	}
+	if snapshot := publisher.snapshot(context.Background()); snapshot.Readiness == nil || !snapshot.Readiness.Ready {
+		t.Fatalf("snapshot readiness = %+v, want the probe's ready", snapshot.Readiness)
+	}
+	publisher.readiness = nil
+	if snapshot := publisher.snapshot(context.Background()); snapshot.Readiness != nil {
+		t.Fatalf("a publisher without a readiness source published %+v", snapshot.Readiness)
 	}
 }

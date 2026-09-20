@@ -33,6 +33,9 @@ type casMemoryBackend struct {
 	// written before lifetimes existed looks like.
 	remaining map[string]time.Duration
 	renewals  []renewalCall
+	// renewalErr makes the renewal path fail the way an unreachable Redis
+	// does: the batch's effect is unknown, so no key gets an outcome.
+	renewalErr error
 	// writeTTLs is the lifetime each write asked for, so a test can tell a key
 	// written with one from a key written to live forever.
 	writeTTLs map[string]time.Duration
@@ -43,6 +46,7 @@ type renewalCall struct {
 	TTL       time.Duration
 	Threshold time.Duration
 	Renewed   bool
+	Outcome   RenewalOutcome
 }
 
 func (backend *casMemoryBackend) MGet(_ context.Context, keys []string) ([][]byte, error) {
@@ -55,25 +59,47 @@ func (backend *casMemoryBackend) MGet(_ context.Context, keys []string) ([][]byt
 }
 
 func (backend *casMemoryBackend) RenewIfBelow(
-	_ context.Context, key string, ttl, threshold time.Duration,
-) (bool, error) {
-	call := renewalCall{Key: key, TTL: ttl, Threshold: threshold}
-	_, isValue := backend.values[key]
-	_, isHash := backend.hashes[key]
-	if isValue || isHash {
-		// The script's rule, restated here rather than assumed: a key with no
-		// expiry is renewed, and one with time left above the threshold is not.
-		left, hasExpiry := backend.remaining[key]
-		if !hasExpiry || left < threshold {
-			call.Renewed = true
-			if backend.remaining == nil {
-				backend.remaining = make(map[string]time.Duration)
-			}
-			backend.remaining[key] = ttl
-		}
+	ctx context.Context, key string, ttl, threshold time.Duration,
+) (RenewalOutcome, error) {
+	outcomes, err := backend.RenewManyIfBelow(ctx, []string{key}, ttl, threshold)
+	if err != nil {
+		return "", err
 	}
-	backend.renewals = append(backend.renewals, call)
-	return call.Renewed, nil
+	return outcomes[0], nil
+}
+
+// RenewManyIfBelow answers a batch the way the pipeline does: one outcome per
+// key, in order, every key decided on its own. The script's three replies are
+// restated here rather than assumed -- a key that is not there is MISSING, one
+// with no expiry or less than the threshold left is renewed, and anything else
+// is FRESH -- so a test can tell the reading that names a lost record from the
+// reading that says there was nothing to do.
+func (backend *casMemoryBackend) RenewManyIfBelow(
+	_ context.Context, keys []string, ttl, threshold time.Duration,
+) ([]RenewalOutcome, error) {
+	if backend.renewalErr != nil {
+		return nil, backend.renewalErr
+	}
+	outcomes := make([]RenewalOutcome, len(keys))
+	for index, key := range keys {
+		call := renewalCall{Key: key, TTL: ttl, Threshold: threshold, Outcome: RenewalMissing}
+		_, isValue := backend.values[key]
+		_, isHash := backend.hashes[key]
+		if isValue || isHash {
+			call.Outcome = RenewalFresh
+			left, hasExpiry := backend.remaining[key]
+			if !hasExpiry || left < threshold {
+				call.Renewed, call.Outcome = true, RenewalRenewed
+				if backend.remaining == nil {
+					backend.remaining = make(map[string]time.Duration)
+				}
+				backend.remaining[key] = ttl
+			}
+		}
+		backend.renewals = append(backend.renewals, call)
+		outcomes[index] = call.Outcome
+	}
+	return outcomes, nil
 }
 
 func TestIncrementalGapLoadStopsBeforeNextReadOnRejectionAndCancel(t *testing.T) {

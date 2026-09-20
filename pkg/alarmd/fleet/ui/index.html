@@ -2398,7 +2398,7 @@ function renderDeployment(deployment) {
     renderCoverage(deployment.coverage);
     renderReplicas(deployment.per_replica);
     renderSource(deployment.source, deployment.expected);
-    renderDependencies(deployment.dependencies || [], deployment.dependencies_replica);
+    renderDependencies(deployment.dependencies || [], deployment.dependencies_replica, deployment.dependencies_replicas);
     text('demotedHint', deployment.demoted_total
       ? '后端持续查不到，已降级不再反复查；不计入部署健康判定'
       : '当前没有对象被降级');
@@ -2783,14 +2783,14 @@ var ENDPOINT = {
   compat_output_redis: '兼容输出用的服务 Redis（策略快照）'
 };
 
-function renderDependencies(list, replica) {
+function renderDependencies(list, replica, replicasWithList) {
   var host = document.getElementById('depRows');
   host.textContent = '';
   if (!list.length) {
     text('depBasis', '这个构建没有发布依赖坐标。');
     return;
   }
-  text('depBasis', '副本 ' + shortReplica(replica || '') + ' 解析到的坐标；地址不含账号口令。"最近一次"是本进程对这条连接的最近成功/失败，两个角色共用一条连接时读同一条；告警输出那一行记的是连接层（producer 开着没开、开了多久），不按每条消息计。');
+  text('depBasis', '副本 ' + shortReplica(replica || '') + ' 解析到的坐标' + (replicasWithList > 1 ? '（' + replicasWithList + ' 个副本都发布了，这里显示最新发布的这一份；各副本自己的连接记录在 /api/health 的 per_replica[].dependencies）' : '') + '；地址不含账号口令。"最近一次"是本进程对这条连接的最近成功/失败，两个角色共用一条连接时读同一条；告警输出那一行记的是连接层（producer 开着没开、开了多久），不按每条消息计。');
   list.forEach(function (dep) {
     var tr = document.createElement('tr');
     var role = document.createElement('td');

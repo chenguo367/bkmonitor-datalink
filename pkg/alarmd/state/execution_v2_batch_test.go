@@ -48,14 +48,27 @@ func (backend *pipelineMemoryBackend) MGet(ctx context.Context, keys []string) (
 }
 
 func (backend *pipelineMemoryBackend) RenewIfBelow(
-	_ context.Context, key string, ttl, threshold time.Duration,
-) (bool, error) {
-	_ = threshold
-	if _, exists := backend.values[key]; !exists {
-		return false, nil
+	ctx context.Context, key string, ttl, threshold time.Duration,
+) (RenewalOutcome, error) {
+	outcomes, err := backend.RenewManyIfBelow(ctx, []string{key}, ttl, threshold)
+	if err != nil {
+		return "", err
 	}
-	_ = ttl
-	return true, nil
+	return outcomes[0], nil
+}
+
+func (backend *pipelineMemoryBackend) RenewManyIfBelow(
+	_ context.Context, keys []string, ttl, threshold time.Duration,
+) ([]RenewalOutcome, error) {
+	_, _ = ttl, threshold
+	outcomes := make([]RenewalOutcome, len(keys))
+	for index, key := range keys {
+		outcomes[index] = RenewalMissing
+		if _, exists := backend.values[key]; exists {
+			outcomes[index] = RenewalRenewed
+		}
+	}
+	return outcomes, nil
 }
 
 func (backend *pipelineMemoryBackend) CompareAndSet(ctx context.Context, key string, expected []byte, missing bool, value []byte, ttl time.Duration) (bool, error) {
@@ -222,7 +235,10 @@ func TestLoadRuntimeBatchesReadsAndIsolatesInvalidItems(t *testing.T) {
 func TestLoadRuntimeFailedBatchIsRetryableAndLeavesNoWitness(t *testing.T) {
 	backend := newFakeBackend()
 	backend.readErr = errors.New("connection reset")
-	store := newBatchStore(t, backend, nil)
+	// The read-only fake would not pass the probe at open; the transport
+	// failure under test is reached through a router that listed a capable
+	// target and routes to this one.
+	store := capabilityStore(t, backend)
 	mutations := seriesMutations(t, 3, applyVersion(), 0)
 	loaded, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: preflightItems(mutations)})
 	if err != nil {

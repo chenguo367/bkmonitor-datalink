@@ -623,7 +623,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			ActivationReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 			Rebalance:         rebalance, RebalanceReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
 			Source: source, SourceReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
-			Dependencies: dependencies, DependenciesReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde",
+			Dependencies: dependencies, DependenciesReplica: "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", DependenciesReplicas: 2,
 			// The tracker writes the exit count and the exit time on adjacent
 			// lines, so a deployment with exits always has this. Without it here
 			// the fixture described a deployment that cannot exist -- and the page
@@ -1054,6 +1054,8 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The output sink says open-for-how-long, not last-message-succeeded.
 		{"DEPS ::", "告警输出 Kafka（topic 在前缀列）kafka kafka-0.example:9092,kafka-1.example:9092 · 0bkmonitor_backend_event就绪，已开 16 分 20 秒"},
 		{"DEPS ::", "告警输出那一行记的是连接层（producer 开着没开、开了多久），不按每条消息计"},
+		// The shown list is one of two: the basis says so and where the others are.
+		{"DEPS ::", "副本 abcde 解析到的坐标（2 个副本都发布了，这里显示最新发布的这一份；各副本自己的连接记录在 /api/health 的 per_replica[].dependencies）"},
 		{"DEPS ::", "兼容输出用的服务 Redis（策略快照）redis standalone redis.example:6379 · db 8 · bk_monitorv3.ee.cache本进程还没对它发过命令"},
 		{"VAR degraded why ::", "策略缓存里有策略，但这一轮一条都没接受——整个部署没有在检测任何东西；不是没负载，是全部被扣在配置获取环节（副本 abcde）"},
 	} {

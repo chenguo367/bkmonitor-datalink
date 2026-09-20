@@ -705,3 +705,9 @@ func TestTheCensusIsZeroWhenNoPlanDetectsNoData(t *testing.T) {
 		t.Fatalf("census = %d on a Slot where no Plan detects no-data, want 0", stream.noDataPlansSeen)
 	}
 }
+
+func (failingStatePort) RenewFrozenRuntime(
+	_ context.Context, request execution.FrozenStateRenewalRequest,
+) (execution.FrozenStateRenewalResult, error) {
+	return freshFrozenRenewals(request), nil
+}

@@ -87,17 +87,35 @@ const GapScopeReasonOther = "other"
 // HISTORY_WARMING is added because it is the one reason a scope carries that
 // no query result produced: a warming scope is opened by the evaluation, not
 // by an input that failed.
+//
+// GapScopeQueryFreeReasons is the other producer, and leaving it out is what
+// sent 46.6% of the counter to "other" on the first deployment that read it:
+// a Slot that never queried writes its own reason straight onto the scope
+// rather than folding one out of inputs it does not have, and neither of the
+// two it writes is in any query result.
 func GapScopeReasons() []string {
-	reasons := make([]string, 0, len(GapReasonFoldOrder)+1)
+	reasons := make([]string, 0, len(GapReasonFoldOrder)+1+len(GapScopeQueryFreeReasons))
 	for _, definition := range ReasonCatalogV2() {
 		if definition.Domains&ReasonDomainQueryResult != 0 {
 			reasons = append(reasons, definition.Code)
 		}
 	}
 	reasons = append(reasons, ReasonHistoryWarming)
+	reasons = append(reasons, GapScopeQueryFreeReasons...)
 	sort.Strings(reasons)
 	return reasons
 }
+
+// GapScopeQueryFreeReasons is what a Slot that ran no query puts on a scope.
+//
+// These arrive by a different route from every other reason here. The fold
+// reduces the reasons of a scope's incomplete inputs, so it can only produce
+// reasons a query result carries; a query-free finalization has no inputs to
+// fold and writes the reason its own mode requires. The two the modes require
+// are these, and execution's own test scans every finalization mode against
+// this list rather than trusting it -- a mode added later that carries Plan
+// targets fails that scan instead of quietly landing in "other".
+var GapScopeQueryFreeReasons = []string{ReasonSnapshotUnavailable, ReasonGapSkipped}
 
 // NormalizeGapScopeReason bounds a scope's reason to the published set.
 func NormalizeGapScopeReason(code string) string {
