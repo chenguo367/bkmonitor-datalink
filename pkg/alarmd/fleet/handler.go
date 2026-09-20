@@ -690,12 +690,25 @@ func rank(counts map[string]int) Distribution {
 // page renders a zero or a blank, and the response carried the right number the
 // whole time.
 type DetailResponse struct {
-	Found      bool     `json:"found"`
-	Anomaly    *Anomaly `json:"anomaly,omitempty"`
-	Health     Health   `json:"health"`
-	Gaps       []Gap    `json:"gaps,omitempty"`
-	Complete   bool     `json:"view_complete"`
-	QueryGroup string   `json:"query_group"`
+	Found   bool     `json:"found"`
+	Anomaly *Anomaly `json:"anomaly,omitempty"`
+	// Anomaly is the first matching fact for old clients. Facts preserves
+	// coexisting facts, capped by MaxPageSize; FactsTotal reports the full count.
+	Facts      []Anomaly `json:"facts"`
+	FactsTotal int       `json:"facts_total"`
+	Check      Check     `json:"check,omitempty"`
+	Group      string    `json:"group,omitempty"`
+	// Existence is membership in the current authoritative active set, not
+	// whether an observation or historical record happens to be retained.
+	Existence       string                 `json:"existence"`
+	Runtime         string                 `json:"runtime"`
+	RecordsStatus   string                 `json:"records_status"`
+	RecordsScope    string                 `json:"records_scope,omitempty"`
+	RecoveryContext *ObjectRecoveryContext `json:"recovery_context,omitempty"`
+	Health          Health                 `json:"health"`
+	Gaps            []Gap                  `json:"gaps,omitempty"`
+	Complete        bool                   `json:"view_complete"`
+	QueryGroup      string                 `json:"query_group"`
 	// Records is what an observation window captured for this object, present
 	// only when the caller asked for it. Its health travels with it so an empty
 	// list can be read correctly: "nothing happened" and "nothing was recorded"
@@ -707,6 +720,14 @@ type DetailResponse struct {
 	// written into the page, so the sentence the page puts under them cannot
 	// outlive the constant it describes.
 	RetentionSeconds int `json:"retention_seconds,omitempty"`
+}
+
+// ObjectRecoveryContext is aggregate evidence about the selected check/group.
+// The publisher retains no object identities, so it cannot prove this QG recovered.
+type ObjectRecoveryContext struct {
+	Scope               string           `json:"scope"`
+	ObjectRecoveryKnown bool             `json:"object_recovery_known"`
+	Problem             RecoveredProblem `json:"problem"`
 }
 
 // NewHandler mounts the object API. The routes are deliberately few: a list,
@@ -850,12 +871,13 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// verdict and its per-replica breakdown over the pool instead -- and the
 	// response carries both. Which list a reader is paging cannot be allowed
 	// to change what the deployment's health is.
-	Decide(&view, now(), stallAfter)
+	at := now()
+	Decide(&view, at, stallAfter)
 	// The first screen, from every column before any of them is swapped in as
 	// the rows. Drawn here so the line a reader clicks and the rows it opens
 	// come from one read of the view -- and by the same call the metric
 	// collector makes, so the line and the series agree.
-	screen := Report(&view, now())
+	screen := Report(&view, at)
 	columns, truncated, checks, todo := screen.Columns, screen.Truncated, screen.Checks, screen.Todo
 	// Counted over every column for the same reason it survives a filter: these
 	// are the objects that will not recover on their own, and a number that
@@ -892,7 +914,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 				map[string]string{"error": "check must be one of " + strings.Join(checkNames(), ", ")})
 			return
 		}
-		view.Anomalies = UnderCheck(check, group, &view, now())
+		view.Anomalies = UnderCheck(check, group, &view, at)
 		view.AnomaliesTotal = len(view.Anomalies)
 		summaryPartial = truncated[ColumnAnomalies] || truncated[ColumnDemoted] ||
 			truncated[ColumnUndecidable] || truncated[ColumnByDesign]
@@ -939,7 +961,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// page. A reader's first question is whether a long list is one problem or
 	// many, and counting only the visible page would answer it with whatever
 	// happened to be on screen.
-	summary := summarize(view.Anomalies, now())
+	summary := summarize(view.Anomalies, at)
 	summary.Partial = summaryPartial
 	// Ordered after filtering and before paging, so page two of a newest-first
 	// read continues page one rather than resorting a slice of the list.
@@ -986,49 +1008,86 @@ func objectDetail(response http.ResponseWriter, request *http.Request, service *
 		writeJSON(response, http.StatusBadRequest, map[string]string{"error": "query group is required"})
 		return
 	}
+	check := Check(request.URL.Query().Get("check"))
+	group := request.URL.Query().Get("group")
+	if (check != "" && !knownCheck(string(check))) || (check == "" && group != "") {
+		writeJSON(response, http.StatusBadRequest, map[string]string{
+			"error": "check must be one of " + strings.Join(checkNames(), ", ") + "; group requires check"})
+		return
+	}
 	records, health, recordErr := objectRecords(request, queryGroup, diagnostics)
 	view := service.View(request.Context())
-	MarkStalled(view.Anomalies, now(), stallAfter)
-	// Stalling can only move an object towards ours, so the verdict is decided
-	// again with that known. Deciding it once, before the marking, would call a
-	// deployment with nothing but stuck objects healthy.
-	Settle(&view)
+	at := now()
+	Decide(&view, at, stallAfter)
 	body := DetailResponse{
 		Records: records, Diagnostics: health, RecordsError: recordErr,
-		Health:     view.Health,
-		Gaps:       view.Gaps,
-		Complete:   view.Health != HealthUnknown,
-		QueryGroup: queryGroup,
+		Check: check, Group: group, Facts: []Anomaly{},
+		Existence: objectExistence(queryGroup, view.expectation), Runtime: "not_observed",
+		RecordsStatus: "not_requested",
+		Health:        view.Health,
+		Gaps:          view.Gaps,
+		Complete:      view.Health != HealthUnknown,
+		QueryGroup:    queryGroup,
 	}
 	if health != nil {
 		body.RetentionSeconds = int(DiagnosticRetention / time.Second)
 	}
-	for index := range view.Anomalies {
-		if view.Anomalies[index].QueryGroup == queryGroup {
-			body.Found = true
-			body.Anomaly = &view.Anomalies[index]
-			writeJSON(response, http.StatusOK, body)
-			return
+	if request.URL.Query().Get("records") != "" {
+		body.RecordsScope = "historical"
+		switch {
+		case recordErr != "":
+			body.RecordsStatus = "unavailable"
+		case len(records) > 0:
+			body.RecordsStatus = "available"
+		default:
+			body.RecordsStatus = "empty"
 		}
 	}
-	// Absent from the anomaly list is not absent from the deployment, and an
-	// observation window is not restricted to objects that are going wrong --
-	// the ordinary reason to open one is an object behaving in a way nobody can
-	// explain yet. Those records have already been read by the time we get here,
-	// and refusing the response as a missing resource throws them away at the
-	// caller: the page's fetch treats a non-2xx as a failed read and shows the
-	// error instead of the very output the window was opened to produce.
-	//
-	// The status still says not found when there is nothing to return. This view
-	// holds anomalies rather than the owned set, so it cannot tell a healthy
-	// object from an identity belonging to no object at all, and with no records
-	// either there is nothing to say -- the body reports how far that answer can
-	// be trusted.
-	if len(records) > 0 {
+	walkObjectRows(check, group, queryGroup, &view, at, func(row Anomaly) {
+		body.FactsTotal++
+		if len(body.Facts) < MaxPageSize {
+			body.Facts = append(body.Facts, row)
+		}
+	})
+	if len(body.Facts) > 0 {
+		body.Anomaly = &body.Facts[0]
+		body.Runtime = "observed"
+	}
+	if check != "" && group != "" {
+		for _, problem := range view.Recovered {
+			if problem.Check == check && problem.Key == group {
+				body.RecoveryContext = &ObjectRecoveryContext{Scope: "check_group", Problem: problem}
+				break
+			}
+		}
+	}
+	body.Found = body.FactsTotal > 0 || body.Existence == "active"
+	if body.Found || len(records) > 0 {
 		writeJSON(response, http.StatusOK, body)
 		return
 	}
+	if body.Existence == "unknown" {
+		writeJSON(response, http.StatusServiceUnavailable, body)
+		return
+	}
 	writeJSON(response, http.StatusNotFound, body)
+}
+
+func objectExistence(queryGroup string, expectation Expectation) string {
+	if !expectation.Known {
+		return "unknown"
+	}
+	for _, id := range expectation.IDs {
+		if id == queryGroup {
+			return "active"
+		}
+	}
+	// Older sources can publish a count without IDs. A count is insufficient
+	// to prove this particular object absent, even with complete observations.
+	if len(expectation.IDs) != expectation.QueryGroups {
+		return "unknown"
+	}
+	return "absent"
 }
 
 func paging(request *http.Request) (int, int, error) {

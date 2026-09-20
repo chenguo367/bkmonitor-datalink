@@ -1655,6 +1655,15 @@ console.log('GROUPS BLOCKED :: ' + textOf(store['groups']));
 ctx.openCheck = '';
 
 // The four dimensions each row shows, read off the rendered cells.
+// Navigation retains the selected fold even when a secondary DEFECT fact
+// uses a different primary finding on the row. Special characters stay data.
+{
+  const tr = ctx.objectRow(data.anomalies[0], 'DEFECT', 'STATE/CONFLICT & retry');
+  const link = tr.children[tr.children.length - 1].children[0];
+  const expected = '/alarmd/api/objects/' + encodeURIComponent(data.anomalies[0].query_group)
+    + '?check=DEFECT&group=STATE%2FCONFLICT%20%26%20retry';
+  if (link.href !== expected) { console.error('detail link lost the selected context: ' + link.href); failed++; }
+}
 for (const row of data.anomalies) {
   let tr;
   try { tr = ctx.objectRow(row); }
