@@ -82,10 +82,10 @@ func TestAForcedNativeChoiceRefusesRatherThanFallsBack(t *testing.T) {
 // changed before. Pinning its current answer here would make this test red
 // on every change to the rule while proving nothing about this read.
 func TestTheEffectiveFormatIsTheFrozenWordOrTheRevisionRuleNamedAsSuch(t *testing.T) {
-	// The word wins over the rule, not merely agrees with it: at least one
-	// frozen case below must be a word the rule would not give for that
-	// revision. Without one, the frozen half of the table is satisfied by a
-	// read that ignores the word and applies the rule.
+	// The word wins over the choice rule, not merely agrees with it: at least
+	// one frozen case below must be a word the unset choice would not give
+	// for that revision. Without one, the frozen half of the table is
+	// satisfied by a read that ignores the word and applies the choice rule.
 	disagreeing := 0
 	for name, test := range map[string]struct {
 		frozen   string
@@ -94,32 +94,47 @@ func TestTheEffectiveFormatIsTheFrozenWordOrTheRevisionRuleNamedAsSuch(t *testin
 		"frozen standard raw event with a revision":    {frozen: contract.WireFormatStandardRawEvent, revision: 7},
 		"frozen compatibility with a revision":         {frozen: contract.WireFormatPythonCompatible, revision: 7},
 		"frozen trigger event with no revision":        {frozen: contract.WireFormatTriggerEvent, revision: 0},
+		"historical trigger event with a revision":     {frozen: contract.WireFormatTriggerEvent, revision: 7},
 		"no word and a revision goes by the rule":      {frozen: "", revision: 7},
 		"no word and no revision goes by the rule too": {frozen: "", revision: 0},
 	} {
 		name, test := name, test
-		if byRule, _ := resolveWireFormat("", test.revision); test.frozen != "" && byRule != test.frozen {
+		if byChoice, _ := resolveWireFormat("", test.revision); test.frozen != "" && byChoice != test.frozen {
 			disagreeing++
 		}
 		t.Run(name, func(t *testing.T) {
 			format, decidedBy := EffectiveWireFormat(test.frozen, test.revision)
-			if test.frozen != "" {
-				if format != test.frozen || decidedBy != WireFormatDecidedFrozen {
-					t.Fatalf("EffectiveWireFormat(%q, %d) = %q by %q, want the frozen word, frozen", test.frozen, test.revision, format, decidedBy)
+			// What the sink writes for this object: the readers' one rule,
+			// asked rather than assumed.
+			written := contract.ResolveOutputWireFormat(test.frozen, test.revision)
+			if format != written {
+				t.Fatalf("EffectiveWireFormat(%q, %d) = %q, the sink writes %q", test.frozen, test.revision, format, written)
+			}
+			switch {
+			case test.frozen == "":
+				if decidedBy != WireFormatDecidedByRevision {
+					t.Fatalf("no word, decided by %q, want %s", decidedBy, WireFormatDecidedByRevision)
 				}
-				return
-			}
-			byRule, honoured := resolveWireFormat("", test.revision)
-			if !honoured {
-				t.Fatalf("resolveWireFormat(unset, %d) is not honoured; the unset choice is always honoured", test.revision)
-			}
-			if format != byRule || decidedBy != WireFormatDecidedByRevision {
-				t.Fatalf("EffectiveWireFormat(no word, %d) = %q by %q, want the rule's %q, by the rule", test.revision, format, decidedBy, byRule)
+			case written == test.frozen:
+				if decidedBy != WireFormatDecidedFrozen {
+					t.Fatalf("word %q written as is, decided by %q, want %s", test.frozen, decidedBy, WireFormatDecidedFrozen)
+				}
+			default:
+				// The word and the written format differ: the read must say
+				// so, not report the word as if it were written.
+				if decidedBy != WireFormatDecidedHistorical {
+					t.Fatalf("word %q written as %q, decided by %q, want %s", test.frozen, written, decidedBy, WireFormatDecidedHistorical)
+				}
 			}
 		})
 	}
 	if disagreeing == 0 {
-		t.Fatal("no frozen case disagrees with the rule; the table cannot tell a read of the word from a read of the rule")
+		t.Fatal("no frozen case disagrees with the choice rule; the table cannot tell a read of the word from a read of the rule")
+	}
+	// The one word the readers map elsewhere is the historical one, and the
+	// table has it with a revision so the mapping is exercised.
+	if format, decidedBy := EffectiveWireFormat(contract.WireFormatTriggerEvent, 7); format != contract.WireFormatStandardRawEvent || decidedBy != WireFormatDecidedHistorical {
+		t.Fatalf("historical trigger event = %q by %q, want %s by %s", format, decidedBy, contract.WireFormatStandardRawEvent, WireFormatDecidedHistorical)
 	}
 }
 
