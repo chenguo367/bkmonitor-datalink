@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -385,5 +386,76 @@ func BenchmarkCostSummaryConcurrentReporting(b *testing.B) {
 				b.ReportMetric(float64(c.contentionDropped.Load())/float64(b.N), "drop/op")
 			})
 		}
+	}
+}
+
+// Run with -benchtime=35s or longer to include at least one 30s reconciliation
+// and six 5s publications. The producer is deliberately busy; no Redis or
+// application evaluation is included. Latency is sampled every 4096 calls.
+func BenchmarkCostSummaryNormalReporting(b *testing.B) {
+	for _, count := range []int{1000, 10000} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			c := NewCostSummary(CostSummaryOptions{ProcessID: "process", Window: 5 * time.Minute, GroupCapacity: count, PlanCapacity: count * 2, MetadataBytes: count * 128, TopN: 20})
+			groups := make([]CostGroup, count)
+			for i := range groups {
+				groups[i] = CostGroup{QueryGroupKey: fmt.Sprint(i), Members: []CostPlanIdentity{costA, costB}}
+			}
+			c.Reconcile(groups, true)
+			obs := costObservation(StageEvaluationCompleted)
+			obs.EvaluationOwner, obs.Counts.Records = costA, 100
+			var publications, reconciliations, maxPublish, maxReconcile atomic.Int64
+			stop, finished := make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(finished)
+				lastReconcile := time.Now()
+				ticker := time.NewTicker(5 * time.Second)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-stop:
+						return
+					case at := <-ticker.C:
+						if at.Sub(lastReconcile) >= 30*time.Second {
+							started := time.Now()
+							c.Reconcile(groups, true)
+							maxReconcile.Store(max(maxReconcile.Load(), time.Since(started).Nanoseconds()))
+							reconciliations.Add(1)
+							lastReconcile = at
+						}
+						started := time.Now()
+						c.Publish(at)
+						maxPublish.Store(max(maxPublish.Load(), time.Since(started).Nanoseconds()))
+						publications.Add(1)
+					}
+				}
+			}()
+			samples := make([]int64, 0, 65536)
+			b.ResetTimer()
+			for i := range b.N {
+				obs.Trace.QueryGroupKey = groups[i%count].QueryGroupKey
+				if i%4096 == 0 && len(samples) < cap(samples) {
+					started := time.Now()
+					c.Observe(context.Background(), obs)
+					samples = append(samples, time.Since(started).Nanoseconds())
+				} else {
+					c.Observe(context.Background(), obs)
+				}
+			}
+			b.StopTimer()
+			close(stop)
+			<-finished
+			sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+			b.ReportMetric(float64(c.contentionDropped.Load())/float64(b.N), "drop/op")
+			b.ReportMetric(float64(publications.Load()), "publications")
+			b.ReportMetric(float64(reconciliations.Load()), "reconciliations")
+			b.ReportMetric(float64(maxPublish.Load()), "max_publish_ns")
+			b.ReportMetric(float64(maxReconcile.Load()), "max_reconcile_ns")
+			if len(samples) > 0 {
+				b.ReportMetric(float64(samples[(len(samples)-1)*50/100]), "sample_p50_ns")
+				b.ReportMetric(float64(samples[(len(samples)-1)*95/100]), "sample_p95_ns")
+				b.ReportMetric(float64(samples[(len(samples)-1)*99/100]), "sample_p99_ns")
+				b.ReportMetric(float64(samples[len(samples)-1]), "sample_max_ns")
+			}
+		})
 	}
 }
