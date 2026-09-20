@@ -32,6 +32,23 @@ func (store *fakePhaseTwoOwnershipStore) ReadAssignedSet(context.Context, string
 	return ownership.AssignedSet{}, ownership.ErrAssignedSetAbsent
 }
 
+// SweepAssignments records the keep set each sweep was asked to respect and
+// sweeps nothing: the fakes hold one record and no retired ones.
+func (store *fakePhaseTwoOwnershipStore) SweepAssignments(_ context.Context, _ ownership.PublicationAuthority, keep map[execution.QueryGroupIdentity]struct{}) (ownership.AssignmentSweep, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	copied := make(map[execution.QueryGroupIdentity]struct{}, len(keep))
+	for queryGroup := range keep {
+		copied[queryGroup] = struct{}{}
+	}
+	store.sweeps = append(store.sweeps, copied)
+	return ownership.AssignmentSweep{Scanned: 1}, nil
+}
+
+func (store *rebalanceOwnershipStore) SweepAssignments(context.Context, ownership.PublicationAuthority, map[execution.QueryGroupIdentity]struct{}) (ownership.AssignmentSweep, error) {
+	return ownership.AssignmentSweep{}, nil
+}
+
 func (store *rebalanceOwnershipStore) PublishAssignmentIndex(_ context.Context, _ ownership.PublicationAuthority, _ time.Time, sets []ownership.AssignedSetWrite) (ownership.AssignmentIndexPublication, error) {
 	if store.indexErr != nil {
 		return ownership.AssignmentIndexPublication{}, store.indexErr

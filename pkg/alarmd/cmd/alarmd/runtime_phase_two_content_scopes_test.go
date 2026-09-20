@@ -197,3 +197,45 @@ func TestThePreCutoverWriterNamesChangedContentUnderTheFleetsGate(t *testing.T) 
 		})
 	}
 }
+
+// A round sweeps the retired Assignment records when something could have
+// been left behind since the last sweep -- the first round of a term, or a
+// Query Group of the last swept set gone -- and not otherwise: the sweep
+// walks every record, and a round whose set only grew has left nothing.
+func TestARoundSweepsRetiredAssignmentsOnlyWhenARecordCouldHaveBeenLeftBehind(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := &fakePhaseTwoOwnershipStore{now: now}
+	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+		Store: store, WorkerID: "worker-1", Now: func() time.Time { return now }, Observer: observability.NopObserver{},
+	}}
+	authority := func(epoch uint64) ownership.PublicationAuthority {
+		return ownership.PublicationAuthority{Fence: execution.OwnerFence{
+			QueryGroup: ownership.ControlLeaderIdentity, OwnerID: "worker-1", OwnerEpoch: epoch, LeaseToken: "t",
+		}, Deadline: now.Add(time.Minute)}
+	}
+	set := func(groups ...execution.QueryGroupIdentity) []execution.QueryGroupIdentity { return groups }
+
+	runtime.sweepRetiredAssignments(context.Background(), authority(1), set("a", "b"))
+	if len(store.sweeps) != 1 {
+		t.Fatalf("first round of a term swept %d times, want once", len(store.sweeps))
+	}
+	runtime.sweepRetiredAssignments(context.Background(), authority(1), set("a", "b"))
+	runtime.sweepRetiredAssignments(context.Background(), authority(1), set("a", "b", "c"))
+	if len(store.sweeps) != 1 {
+		t.Fatalf("rounds with the same or a grown set swept; %d sweeps, want still 1", len(store.sweeps))
+	}
+	runtime.sweepRetiredAssignments(context.Background(), authority(1), set("a", "c"))
+	if len(store.sweeps) != 2 {
+		t.Fatalf("a round that lost b swept %d times in total, want 2", len(store.sweeps))
+	}
+	if _, kept := store.sweeps[1]["b"]; kept {
+		t.Fatal("the sweep was asked to keep the Query Group that left")
+	}
+	if _, kept := store.sweeps[1]["c"]; !kept {
+		t.Fatal("the sweep was not asked to keep a Query Group the round runs")
+	}
+	runtime.sweepRetiredAssignments(context.Background(), authority(2), set("a", "c"))
+	if len(store.sweeps) != 3 {
+		t.Fatalf("a new term swept %d times in total, want 3", len(store.sweeps))
+	}
+}

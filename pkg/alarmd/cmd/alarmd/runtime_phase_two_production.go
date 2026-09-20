@@ -1269,6 +1269,7 @@ type productionPhaseTwoOwnershipStore interface {
 	ReadAssignedSet(context.Context, string) (ownership.AssignedSet, error)
 	AcquireControlLeader(context.Context, string, time.Time, time.Duration) (ownership.PublicationAuthority, error)
 	RenewControlLeader(context.Context, ownership.PublicationAuthority, time.Time, time.Duration) (ownership.PublicationAuthority, error)
+	SweepAssignments(context.Context, ownership.PublicationAuthority, map[execution.QueryGroupIdentity]struct{}) (ownership.AssignmentSweep, error)
 	Close() error
 }
 
@@ -1351,6 +1352,13 @@ type productionPhaseTwoOwnership struct {
 	readyEpoch     uint64
 	readySet       map[string]struct{}
 	readyChangedAt time.Time
+
+	// sweptSet is the Query Group set the last Assignment sweep ran against,
+	// under the fence epoch it ran in. A round sweeps when it is the first
+	// of a term or when a Query Group of the last swept set is gone: those
+	// are the only moments a record can newly be left behind.
+	sweptEpoch uint64
+	sweptSet   map[execution.QueryGroupIdentity]struct{}
 }
 
 // rebalanceStabilisation is how long the ready set must have been unchanged
@@ -1507,7 +1515,61 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		return err
 	}
 	runtime.publishAssignmentIndex(ctx, authority, owners, workers, at)
+	runtime.sweepRetiredAssignments(ctx, authority, ordered)
 	return nil
+}
+
+// sweepRetiredAssignments reclaims the Assignment records of Query Groups
+// this round no longer runs, when something could have been left behind
+// since the last sweep: the first round of a term, or a Query Group of the
+// last swept set missing from this one. Records carry no expiry, so without
+// this a retired Query Group's record and ownership hash stayed for good.
+// Advisory to the round: a failed sweep is reported and the round stands.
+func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
+	ctx context.Context,
+	authority ownership.PublicationAuthority,
+	queryGroups []execution.QueryGroupIdentity,
+) {
+	keep := make(map[execution.QueryGroupIdentity]struct{}, len(queryGroups))
+	for _, queryGroup := range queryGroups {
+		keep[queryGroup] = struct{}{}
+	}
+	runtime.mu.Lock()
+	due := runtime.sweptEpoch != authority.Fence.OwnerEpoch || runtime.sweptSet == nil
+	if !due {
+		for queryGroup := range runtime.sweptSet {
+			if _, still := keep[queryGroup]; !still {
+				due = true
+				break
+			}
+		}
+	}
+	runtime.mu.Unlock()
+	if !due {
+		return
+	}
+	sweep, err := runtime.dependencies.Store.SweepAssignments(ctx, authority, keep)
+	facts := &observability.AssignmentSweepFacts{Scanned: sweep.Scanned, Retired: sweep.Retired,
+		Reclaimed: sweep.Reclaimed, HeldByLease: sweep.HeldByLease, Changed: sweep.Changed}
+	if err != nil {
+		if errors.Is(err, ownership.ErrStaleFence) {
+			runtime.clearControlAuthority(authority)
+		}
+		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
+			Component: observability.ComponentOwnership, Stage: observability.StageAssignmentSwept,
+			Result: observability.ResultFailed, Operation: observability.OperationWrite, Duration: sweep.Duration,
+			ReasonCode: ownershipObservationReason(err), Err: err, AssignmentSweep: facts,
+		})
+		return
+	}
+	runtime.mu.Lock()
+	runtime.sweptEpoch, runtime.sweptSet = authority.Fence.OwnerEpoch, keep
+	runtime.mu.Unlock()
+	observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageAssignmentSwept,
+		Result: observability.ResultSuccess, Operation: observability.OperationWrite, Duration: sweep.Duration,
+		AssignmentSweep: facts,
+	})
 }
 
 // rebalanceOutcome is what one round did with the plan it computed.

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sort"
 	"strings"
 	"testing"
 
@@ -17,10 +18,35 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
+// scriptedAPIVersions plays a cluster: the bootstrap address answers
+// Metadata with every broker that has an answer or an error scripted, and
+// each broker answers ApiVersions from the script.
 type scriptedAPIVersions struct {
-	answers map[string]*sarama.ApiVersionsResponse
-	errs    map[string]error
-	asked   []string
+	answers     map[string]*sarama.ApiVersionsResponse
+	errs        map[string]error
+	metadataErr map[string]error
+	asked       []string
+	bootstraps  []string
+}
+
+func (client *scriptedAPIVersions) Brokers(bootstrap string, _ *sarama.Config) ([]clusterBroker, error) {
+	client.bootstraps = append(client.bootstraps, bootstrap)
+	if err := client.metadataErr[bootstrap]; err != nil {
+		return nil, err
+	}
+	addrs := make([]string, 0, len(client.answers)+len(client.errs))
+	for addr := range client.answers {
+		addrs = append(addrs, addr)
+	}
+	for addr := range client.errs {
+		addrs = append(addrs, addr)
+	}
+	sort.Strings(addrs)
+	listed := make([]clusterBroker, 0, len(addrs))
+	for index, addr := range addrs {
+		listed = append(listed, clusterBroker{ID: int32(index + 1), Address: addr})
+	}
+	return listed, nil
 }
 
 func (client *scriptedAPIVersions) ApiVersions(addr string, _ *sarama.Config) (*sarama.ApiVersionsResponse, error) {
@@ -81,9 +107,14 @@ func TestTheProtocolIsTheNewestVersionEveryBrokerAccepts(t *testing.T) {
 				brokers = append(brokers, addr)
 			}
 			client := &scriptedAPIVersions{answers: test.answers, errs: test.errs}
-			negotiation, err := negotiateProtocol(brokers, config, client)
+			// One bootstrap name, as a deployment configures it; the brokers
+			// come from the cluster's own metadata.
+			negotiation, err := negotiateProtocol([]string{"boot:9092"}, config, client)
 			if len(client.asked) != len(brokers) {
-				t.Fatalf("asked %v, want every broker %v", client.asked, brokers)
+				t.Fatalf("asked %v, want every broker the metadata listed %v", client.asked, brokers)
+			}
+			if negotiation.MetadataFrom != "boot:9092" && test.wantErr == "" {
+				t.Fatalf("metadata from %q, want the bootstrap that answered", negotiation.MetadataFrom)
 			}
 			if test.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
@@ -108,11 +139,37 @@ func TestTheProtocolIsTheNewestVersionEveryBrokerAccepts(t *testing.T) {
 					negotiation.Configured, negotiation.Wanted, negotiation.WantedProduceVersion, MinimumBrokerVersion, RecordHeaderBrokerVersion)
 			}
 			for _, broker := range negotiation.Brokers {
-				if !broker.Answered || broker.Error != "" {
-					t.Fatalf("broker row %+v, want answered with no error", broker)
+				if !broker.Answered || broker.Error != "" || broker.ID <= 0 {
+					t.Fatalf("broker row %+v, want answered with no error and the node id the metadata gave", broker)
 				}
 			}
 		})
+	}
+}
+
+// A bootstrap address that answers no Metadata decides nothing; the next
+// bootstrap address is tried, and when none answers the negotiation fails
+// with no brokers asked -- the producer is not opened on a guess.
+func TestTheBrokerListComesFromTheFirstBootstrapThatAnswers(t *testing.T) {
+	t.Parallel()
+
+	config := sinkConfigAtFloor()
+	client := &scriptedAPIVersions{
+		answers:     map[string]*sarama.ApiVersionsResponse{"a:9092": produceUpTo(3)},
+		metadataErr: map[string]error{"dead:9092": errors.New("dial tcp: connection refused")},
+	}
+	negotiation, err := negotiateProtocol([]string{"dead:9092", "boot:9092"}, config, client)
+	if err != nil || negotiation.MetadataFrom != "boot:9092" || len(client.bootstraps) != 2 || len(client.asked) != 1 {
+		t.Fatalf("negotiateProtocol() = (%s, %v), bootstraps asked %v, brokers asked %v; want the second bootstrap's metadata and one broker asked",
+			negotiation.String(), err, client.bootstraps, client.asked)
+	}
+	client = &scriptedAPIVersions{
+		answers:     map[string]*sarama.ApiVersionsResponse{"a:9092": produceUpTo(3)},
+		metadataErr: map[string]error{"dead:9092": errors.New("dial tcp: connection refused")},
+	}
+	_, err = negotiateProtocol([]string{"dead:9092"}, config, client)
+	if err == nil || !strings.Contains(err.Error(), "dead:9092 did not answer Metadata") || len(client.asked) != 0 {
+		t.Fatalf("negotiateProtocol() with no bootstrap answering = %v, brokers asked %v; want a failure naming the bootstrap and no broker asked", err, client.asked)
 	}
 }
 
@@ -268,6 +325,7 @@ func TestAnOpenWithoutAnAnswerFromEveryBrokerDoesNotGuess(t *testing.T) {
 	coordinates.Brokers = []string{broker.Addr()}
 	coordinates.BrokerVersion = MinimumBrokerVersion
 	broker.SetHandlerByMap(map[string]sarama.MockResponse{
+		"MetadataRequest":    sarama.NewMockMetadataResponse(t).SetBroker(broker.Addr(), broker.BrokerID()),
 		"ApiVersionsRequest": sarama.NewMockWrapper(&sarama.ApiVersionsResponse{Err: sarama.ErrUnsupportedVersion}),
 	})
 	opener, err := PrepareTriggerEventSink(coordinates)
@@ -276,7 +334,63 @@ func TestAnOpenWithoutAnAnswerFromEveryBrokerDoesNotGuess(t *testing.T) {
 	}
 	_, err = opener.Open()
 	var failed *ProtocolNegotiationError
-	if err == nil || !errors.As(err, &failed) || len(failed.Negotiation.Brokers) != 1 || failed.Negotiation.Brokers[0].Answered {
+	if err == nil || !errors.As(err, &failed) || len(failed.Negotiation.Brokers) != 1 || failed.Negotiation.Brokers[0].Answered ||
+		failed.Negotiation.Brokers[0].ID != broker.BrokerID() {
 		t.Fatalf("Open() = %v, want a ProtocolNegotiationError naming the broker that did not answer", err)
+	}
+}
+
+// The brokers asked are the ones the cluster's metadata names, not the
+// bootstrap list: a deployment configures one address, and the broker that
+// stops the cluster short of record headers may be one the bootstrap name
+// never resolves to. Here the bootstrap broker takes record batches and the
+// metadata names a second broker that does not; the negotiation lands on the
+// floor and names that second broker by node id.
+func TestTheNegotiationAsksEveryBrokerTheMetadataNamesNotJustTheBootstrap(t *testing.T) {
+	bootstrap := sarama.NewMockBroker(t, 1)
+	defer bootstrap.Close()
+	older := sarama.NewMockBroker(t, 2)
+	defer older.Close()
+	coordinates := validDecisionSinkConfig()
+	coordinates.Brokers = []string{bootstrap.Addr()}
+	coordinates.BrokerVersion = MinimumBrokerVersion
+	metadata := sarama.NewMockMetadataResponse(t).
+		SetBroker(bootstrap.Addr(), bootstrap.BrokerID()).
+		SetBroker(older.Addr(), older.BrokerID()).
+		SetLeader(coordinates.OutputTopic, 0, older.BrokerID())
+	bootstrap.SetHandlerByMap(map[string]sarama.MockResponse{
+		"MetadataRequest":    metadata,
+		"ApiVersionsRequest": sarama.NewMockWrapper(produceUpTo(7)),
+	})
+	older.SetHandlerByMap(map[string]sarama.MockResponse{
+		"MetadataRequest":    metadata,
+		"ApiVersionsRequest": sarama.NewMockWrapper(produceUpTo(2)),
+		"ProduceRequest":     sarama.NewMockProduceResponse(t).SetVersion(2),
+	})
+	opener, err := PrepareTriggerEventSink(coordinates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink, err := opener.Open()
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() { _ = sink.Close() }()
+	negotiation := sink.ProtocolNegotiation()
+	if negotiation == nil || negotiation.Negotiated != MinimumBrokerVersion || negotiation.HeadersSupported ||
+		negotiation.Reason != ProtocolReasonUnsupportedByBroker || len(negotiation.Brokers) != 2 {
+		t.Fatalf("negotiation = %+v, want the floor because the second broker stops at produce v2", negotiation)
+	}
+	var namedOlder bool
+	for _, broker := range negotiation.Brokers {
+		if broker.ID == older.BrokerID() && broker.Address == older.Addr() && broker.ProduceMaxVersion == 2 {
+			namedOlder = true
+		}
+	}
+	if !namedOlder {
+		t.Fatalf("brokers = %+v, want the older broker named by node id %d with produce max v2", negotiation.Brokers, older.BrokerID())
+	}
+	if negotiation.MetadataFrom != bootstrap.Addr() {
+		t.Fatalf("metadata from %q, want the bootstrap address %s", negotiation.MetadataFrom, bootstrap.Addr())
 	}
 }
