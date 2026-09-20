@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -37,6 +38,13 @@ const (
 	ReconnectMin = time.Second
 	ReconnectMax = 30 * time.Second
 )
+
+// DisconnectLeaderSilent is why a Worker cut a stream on which the Leader
+// answered nothing -- no heartbeat reply, no publication -- for
+// IdleTimeout: the mirror of the Leader's IDLE rule. Without it a Leader
+// that stopped answering would hold the Worker's only stream until TCP
+// gave up.
+const DisconnectLeaderSilent = "LEADER_SILENT"
 
 // Install failure words, the bounded vocabulary of Receipt.failure and
 // SnapshotRequest.reason.
@@ -104,12 +112,14 @@ type ClientStats struct {
 }
 
 // ClientOptions are the client's seams: the dialer a test replaces to reach
-// an in-memory Leader, and a clock.
+// an in-memory Leader, a clock, and how often the heartbeat and the
+// Leader-silence check run against it.
 type ClientOptions struct {
 	Dial func(ctx context.Context, endpoint string) (pb.ControlServiceClient, func() error, error)
 	Now  func() time.Time
 	// Sleep replaces the reconnect wait; a test drives it.
 	Sleep func(ctx context.Context, wait time.Duration) error
+	Tick  time.Duration
 }
 
 // Client keeps one stream to the Leader and the view it installed.
@@ -121,6 +131,7 @@ type Client struct {
 	dial      func(ctx context.Context, endpoint string) (pb.ControlServiceClient, func() error, error)
 	now       func() time.Time
 	sleep     func(ctx context.Context, wait time.Duration) error
+	tick      time.Duration
 	random    *rand.Rand
 
 	installed atomic.Pointer[View]
@@ -139,7 +150,7 @@ func NewClient(identity ClientIdentity, discovery Discovery, probe ObjectProbe, 
 		observer = observability.ObserverFunc(func(context.Context, observability.Observation) {})
 	}
 	client := &Client{identity: identity, discovery: discovery, probe: probe, observer: observer,
-		dial: options.Dial, now: options.Now, sleep: options.Sleep,
+		dial: options.Dial, now: options.Now, sleep: options.Sleep, tick: options.Tick,
 		random: rand.New(rand.NewSource(time.Now().UnixNano())),
 		stats:  ClientStats{Installs: map[string]uint64{}, InstallFailures: map[string]uint64{}, Refusals: map[string]uint64{}}}
 	if client.dial == nil {
@@ -147,6 +158,9 @@ func NewClient(identity ClientIdentity, discovery Discovery, probe ObjectProbe, 
 	}
 	if client.now == nil {
 		client.now = time.Now
+	}
+	if client.tick <= 0 {
+		client.tick = HeartbeatInterval
 	}
 	if client.sleep == nil {
 		client.sleep = func(ctx context.Context, wait time.Duration) error {
@@ -164,9 +178,14 @@ func NewClient(identity ClientIdentity, discovery Discovery, probe ObjectProbe, 
 }
 
 // dialLeader opens a plaintext HTTP/2 connection to the endpoint: the
-// stream shares the Leader's HTTP listener, which speaks h2c.
+// stream shares the Leader's HTTP listener, which speaks h2c. Keepalive is
+// the client's to run -- the Leader serves through http.Server and cannot
+// set it -- and it is the transport-level backstop under the protocol's
+// own heartbeat: a peer that vanished without a FIN is found by the ping
+// within Time + Timeout, and the stream ends instead of waiting out TCP.
 func dialLeader(_ context.Context, endpoint string) (pb.ControlServiceClient, func() error, error) {
-	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.NewClient(endpoint, grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{Time: 3 * HeartbeatInterval, Timeout: HeartbeatInterval}))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -307,16 +326,24 @@ func (client *Client) session(ctx context.Context, stream pb.ControlService_Conn
 		defer sendMu.Unlock()
 		return stream.Send(message)
 	}
+	var lastHeard atomic.Int64
+	lastHeard.Store(client.now().UnixNano())
+	var leaderSilent atomic.Bool
 	heartbeats := make(chan struct{})
 	go func() {
 		defer close(heartbeats)
-		ticker := time.NewTicker(HeartbeatInterval)
+		ticker := time.NewTicker(client.tick)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+				if client.now().Sub(time.Unix(0, lastHeard.Load())) > IdleTimeout {
+					leaderSilent.Store(true)
+					cancel()
+					return
+				}
 				installed, _ := client.Installed()
 				if err := send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Heartbeat{Heartbeat: &pb.Heartbeat{
 					SentAtMs: client.now().UnixMilli(), Installed: versionToWire(installed.Version)}}}); err != nil {
@@ -331,11 +358,15 @@ func (client *Client) session(ctx context.Context, stream pb.ControlService_Conn
 	for {
 		message, err := stream.Recv()
 		if err != nil {
+			if leaderSilent.Load() {
+				return DisconnectLeaderSilent, errors.New("alarmd viewstream: the Leader answered nothing for " + IdleTimeout.String())
+			}
 			if ctx.Err() != nil {
 				return "STREAM_CLOSED", nil
 			}
 			return "RECV_FAILED", err
 		}
+		lastHeard.Store(client.now().UnixNano())
 		switch body := message.Body.(type) {
 		case *pb.LeaderMessage_Refusal:
 			reason := body.Refusal.Reason

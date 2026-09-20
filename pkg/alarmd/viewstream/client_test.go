@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -124,8 +125,18 @@ func (dialer *bufconnDialer) serveOn(t *testing.T, name string, service pb.Contr
 
 func startClient(t *testing.T, discovery *scriptedDiscovery, probe viewstream.ObjectProbe, dialer *bufconnDialer, observer *sessionObserver) (*viewstream.Client, context.CancelFunc) {
 	t.Helper()
+	return startClientWithClock(t, discovery, probe, dialer, observer, nil)
+}
+
+func startClientWithClock(t *testing.T, discovery *scriptedDiscovery, probe viewstream.ObjectProbe, dialer *bufconnDialer, observer *sessionObserver, clock *atomic.Int64) (*viewstream.Client, context.CancelFunc) {
+	t.Helper()
+	options := viewstream.ClientOptions{Dial: dialer.dial}
+	if clock != nil {
+		options.Now = func() time.Time { return time.UnixMilli(clock.Load()) }
+		options.Tick = 20 * time.Millisecond
+	}
 	client, err := viewstream.NewClient(viewstream.ClientIdentity{WorkerID: "w1", Incarnation: "i1", StreamToken: "t1"}, discovery, probe, observer,
-		viewstream.ClientOptions{Dial: dialer.dial, Sleep: func(ctx context.Context, wait time.Duration) error {
+		viewstream.ClientOptions{Dial: dialer.dial, Now: options.Now, Tick: options.Tick, Sleep: func(ctx context.Context, wait time.Duration) error {
 			// A test does not wait out the jitter; it waits a tick so the loop
 			// cannot spin.
 			select {
@@ -321,6 +332,10 @@ func (leader *scriptedLeader) got(kind string) int {
 			if receipt := message.GetReceipt(); receipt != nil && receipt.Installed {
 				total++
 			}
+		case "heartbeat":
+			if message.GetHeartbeat() != nil {
+				total++
+			}
 		}
 	}
 	return total
@@ -442,6 +457,45 @@ func TestTheWorkerWaitsOutDiscoveryAndConnectsWhenALeaderAppears(t *testing.T) {
 		view, ok := client.Installed()
 		return ok && view.Version.Revision == 1
 	})
+}
+
+// A Leader that answers nothing -- no heartbeat reply, no publication --
+// for the idle bound loses the stream: the Worker cuts it as LEADER_SILENT,
+// goes back to discovery and connects again. Nothing installed is lost.
+func TestTheWorkerCutsAStreamOnWhichTheLeaderAnswersNothing(t *testing.T) {
+	desired := desiredAt(publicationA, map[string]string{"qg-1": "w1"}, map[string]viewstream.Content{"qg-1": content("obj-1", "s1")})
+	snapshot := viewFrom(desired, "w1", 1)
+	mute := &scriptedLeader{}
+	for _, chunk := range viewstream.SnapshotChunks(snapshot, 0) {
+		mute.onHello = append(mute.onHello, &pb.LeaderMessage{Body: &pb.LeaderMessage_Snapshot{Snapshot: chunk}})
+	}
+	dialer := &bufconnDialer{}
+	dialer.serveOn(t, "mute", mute)
+	discovery := &scriptedDiscovery{}
+	discovery.set("mute", true)
+	observer := &sessionObserver{}
+	clock := &atomic.Int64{}
+	clock.Store(time.Unix(1000, 0).UnixMilli())
+	client, _ := startClientWithClock(t, discovery, nil, dialer, observer, clock)
+	eventually(t, "the snapshot is installed", func() bool {
+		view, ok := client.Installed()
+		return ok && view.Version.Revision == 1
+	})
+	// Heartbeats go out and nothing comes back; then the clock passes the
+	// bound. The heartbeat is sent on the tick, so at least one goes out
+	// before the silence is judged, as it would on a real clock.
+	eventually(t, "a heartbeat is sent", func() bool { return mute.got("heartbeat") >= 1 })
+	clock.Add((viewstream.IdleTimeout + time.Second).Milliseconds())
+	eventually(t, "the silent Leader's stream is cut", func() bool {
+		return observer.count("disconnected", viewstream.DisconnectLeaderSilent) >= 1
+	})
+	eventually(t, "the Worker connects again", func() bool { return client.Stats().Connections >= 2 })
+	if view, ok := client.Installed(); !ok || view.Version.Revision != 1 {
+		t.Fatalf("the installed view was lost across the cut: %+v ok=%t", view, ok)
+	}
+	if mute.got("heartbeat") == 0 {
+		t.Fatal("no heartbeat was sent before the cut; the silence rule would then be about a stream that never spoke")
+	}
 }
 
 // The reconnect wait is full jitter under an exponential ceiling: never
