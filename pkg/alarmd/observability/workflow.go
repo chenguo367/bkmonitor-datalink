@@ -59,10 +59,21 @@ type DispatcherFacts struct {
 }
 type PermitWaitFacts struct{ Recovery bool }
 
+// RunOutcomes is every word one Runner round can end on. It is the list
+// ValidRunOutcome answers from, so a word added to one is added to both, and
+// it is exported because held_by reports the same vocabulary: the two are read
+// together and a second copy would be a second thing to keep in step.
+var RunOutcomes = []string{
+	"query_cooldown", "single_flight_busy", "ownership_rejected", "source_backoff", "source_retry",
+	"source_blocked", "source_not_due", "source_error", "operation_not_ready", "admission_denied",
+	"execute_returned", "cancelled", "panic", "other_error",
+}
+
 func ValidRunOutcome(value string) bool {
-	switch value {
-	case "query_cooldown", "single_flight_busy", "ownership_rejected", "source_backoff", "source_retry", "source_blocked", "source_not_due", "source_error", "operation_not_ready", "admission_denied", "execute_returned", "cancelled", "panic", "other_error":
-		return true
+	for _, known := range RunOutcomes {
+		if value == known {
+			return true
+		}
 	}
 	return false
 }

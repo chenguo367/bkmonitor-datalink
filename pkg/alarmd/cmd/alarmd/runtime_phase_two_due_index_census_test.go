@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -41,9 +42,13 @@ func TestDueIndexCensusCountsEveryEntryByItsCyclePosition(t *testing.T) {
 
 	// Seven objects owned, six with entries: one never evaluated.
 	census := index.Census(clock.at, 7)
+	// The same entries by period: five on the sixty-second period, one of them
+	// cooling and one overdue; the entry with no period under 0. Ordered by
+	// period so two censuses of one deployment list the same way.
 	want := fleet.ScheduleCensus{Waiting: 2, Cooling: 1, Late: 3, Overdue: 1, Never: 1,
-		OldestLateSeconds: 1000, MissingPeriod: 1}
-	if census != want {
+		OldestLateSeconds: 1000, MissingPeriod: 1,
+		Cohorts: []fleet.ScheduleCohort{{IntervalSeconds: 0, Objects: 1}, {IntervalSeconds: 60, Objects: 5, Cooling: 1, Overdue: 1}}}
+	if !reflect.DeepEqual(census, want) {
 		t.Errorf("census = %+v, want %+v", census, want)
 	}
 	// The wake facts for one object are the entry as it stands; an object with

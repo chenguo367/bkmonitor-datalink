@@ -869,6 +869,11 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 		ReplayExpiry: &observability.ReplayExpiryFacts{
 			Reason: string(facts.Reason), Distance: facts.Distance, AgeSeconds: facts.Age.Seconds(),
 			ReadyAtUnixMilli: facts.ReadyAtUnixMilli, DistanceBoundaryUnixMilli: facts.DistanceBoundaryUnixMilli,
+			// What the round before this one did with the Query Group. A Slot
+			// given up on for distance says nothing about how it got that far
+			// behind, and the four Query Groups that did this for hours were
+			// being held every round by something this line never named.
+			HeldBy: HeldByFromContext(ctx),
 		},
 	})
 }

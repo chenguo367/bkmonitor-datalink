@@ -54,6 +54,10 @@ type ListResponse struct {
 	Replica  string `json:"replica,omitempty"`
 	Strategy string `json:"strategy,omitempty"`
 	Business string `json:"business,omitempty"`
+	// Interval echoes the period filter, when one was asked for: the rows are
+	// the objects a per-period number was counted over. A pointer because 0
+	// is a real answer (objects whose period is not known).
+	Interval *int64 `json:"interval,omitempty"`
 	// Applied says a filter narrowed this response. An empty table means
 	// something different when it was filtered, and the caller cannot tell the
 	// two apart from the rows alone.
@@ -88,6 +92,11 @@ type ListResponse struct {
 	// Todo is the first screen's arithmetic: lines to act on, distinct
 	// objects under them now, and the record of past loss apart from both.
 	Todo Todo `json:"todo"`
+	// Cohorts and Cooling are the same as the verdict route's, on this
+	// response too because the first screen is drawn from this read: the
+	// join from a per-period number to its rows, and the cooldown line.
+	Cohorts []CohortView `json:"cohorts"`
+	Cooling CoolingFacts `json:"cooling"`
 	// Check and Group echo which line and which fold the rows are, when the
 	// request asked for one. Echoed rather than inferred from the request, like
 	// Column: the rows of one check under another's heading read as that
@@ -215,6 +224,12 @@ type HealthResponse struct {
 	// values file on a machine the reader could not reach. Per strategy, the
 	// frozen format is on the directory route's effective_output.
 	OutputProtocols []OutputProtocolGroup `json:"output_protocols"`
+	// Cohorts is every evaluation period with its population and what the
+	// rows say about it, and Cooling the objects waiting in a query cooldown
+	// by whose line they are under: the join from a number read per period
+	// to the objects it was counted over (the list route takes interval=).
+	Cohorts []CohortView `json:"cohorts"`
+	Cooling CoolingFacts `json:"cooling"`
 	// Degradations are the replica-level standings the verdict was decided
 	// on, and Activation the control leader's standing on the publication
 	// the fleet executes. Both decided the verdict before they were on this
@@ -813,7 +828,14 @@ func NewHandler(
 	}
 	mux.HandleFunc("/api/health", func(response http.ResponseWriter, request *http.Request) {
 		view := service.View(request.Context())
+		// The columns as the first screen partitions them, so the cohort and
+		// cooling arithmetic here is over the same rows, with the same
+		// findings, as the lines the list route draws.
+		at := now()
+		Decide(&view, at, stallAfter)
+		columns := Report(&view, at).Columns
 		writeJSON(response, http.StatusOK, HealthResponse{
+			Cohorts: cohortList(Cohorts(&view, columns)), Cooling: Cooling(&view, columns, at),
 			Health: view.Health, Expected: view.Expected, Covered: view.Covered,
 			Determined: view.Determined, Unknown: view.Unknown, Healthy: view.Healthy,
 			AnomaliesTotal: view.AnomaliesTotal, DemotedTotal: view.DemotedTotal,
@@ -842,6 +864,15 @@ func NewHandler(
 		})
 	})
 	return mux, nil
+}
+
+// cohortList is the cohorts as an empty list rather than null: no period seen
+// anywhere is [] and is not the same statement as null.
+func cohortList(cohorts []CohortView) []CohortView {
+	if cohorts == nil {
+		return []CohortView{}
+	}
+	return cohorts
 }
 
 // outputProtocolList is the view's protocol groups as an empty list rather
@@ -999,6 +1030,19 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	if business != "" {
 		view.Anomalies = filterByBusiness(view.Anomalies, business)
 	}
+	// The period a cohort number was counted over, so the number and its
+	// objects are one click apart. Refused when it is not a number: a typo
+	// that fell back would return the whole list under a cohort heading.
+	var interval *int64
+	if raw := request.URL.Query().Get("interval"); raw != "" {
+		seconds, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || seconds < 0 {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "interval must be a period in seconds, 0 for objects whose period is not known"})
+			return
+		}
+		interval = &seconds
+		view.Anomalies = filterByInterval(view.Anomalies, seconds)
+	}
 	total := len(view.Anomalies)
 	// Counted over the whole list this request is about, before it is cut into a
 	// page. A reader's first question is whether a long list is one problem or
@@ -1032,10 +1076,12 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	writeJSON(response, http.StatusOK, ListResponse{
 		Summary: summary,
 		View:    view, Replica: replica, Strategy: strategy, Business: business, Column: column,
-		Applied:           replica != "" || strategy != "" || business != "",
+		Interval:          interval,
+		Applied:           replica != "" || strategy != "" || business != "" || interval != nil,
 		StallAfterSeconds: int(stallAfter / time.Second),
 		StalledTotal:      stalledTotal,
 		Checks:            checks, Check: check, Group: group, Todo: todo,
+		Cohorts: cohortList(Cohorts(&view, columns)), Cooling: Cooling(&view, columns, at),
 		Order: order,
 		Page:  Page{Offset: offset, Limit: limit, Total: total},
 	})
