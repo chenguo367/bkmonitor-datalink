@@ -162,8 +162,13 @@ func TestTheSinksOwnRefusalIsCarriedAsFactsAndDecidesTheKind(t *testing.T) {
 	if row.Internal == nil {
 		t.Fatal("a refusal the sink stated was not filed as this deployment's own")
 	}
-	// The sentence carries no client signature; the reason word decides.
-	if b := row.Blocked; b == nil || b.DependencyEvidence != OutputFailureClientRejected || b.Dependency != DependencyNone || b.Class != ClassContract {
-		t.Fatalf("blocked = %+v, want client_rejected by the sink's own word", row.Blocked)
+	// The sentence carries no client signature; the reason word decides the
+	// kind, and the word's own reading in the table -- commit, contract, no
+	// dependency -- stands.
+	if b := row.Blocked; b == nil || b.DependencyEvidence != OutputFailureClientRejected || b.Dependency != DependencyNone || b.Class != ClassContract || b.Stage != StageCommit {
+		t.Fatalf("blocked = %+v, want client_rejected by the sink's own word with the word's reading", row.Blocked)
+	}
+	if row.Finding.Check != CheckDefect {
+		t.Fatalf("finding = %+v, want the sink's refusal on the defect line", row.Finding)
 	}
 }

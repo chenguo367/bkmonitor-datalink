@@ -113,9 +113,9 @@ func TestTheEventAckedLineCarriesTheSinksOwnRefusal(t *testing.T) {
 	fixture := buildFixture(t, true, "event_ack", observer, &observations)
 	fixture.ports.eventRejection = &eventRejectionShape{reason: "OUTPUT_CLIENT_REJECTED",
 		detail: "kafka: invalid configuration (Producing headers requires Kafka at least v0.11)"}
-	if _, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal)); err == nil {
-		t.Fatal("a refused event write completed the Slot without error")
-	}
+	// A stated refusal is terminal for the Plan and the Slot completes under
+	// the word; the line the refusal is read from is the event_acked one.
+	_, _ = fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 	var acked *observability.Observation
 	for index := range observations {
 		if observations[index].Stage == observability.StageEventACKed {
