@@ -541,6 +541,15 @@ func (store *ExecutionStore) applyOneNoData(
 func raceConflictKind(
 	current []byte, mutation execution.PlanNoDataMutation,
 ) execution.StateVersionConflictKind {
+	if mutation.ReplacesWholeRecord() {
+		// A replacing statement expects no revision of this record, so there is
+		// no comparison to name. What happened is the only thing that can: the
+		// record moved between this writer's read and its write. Comparing the
+		// numbers anyway reads the old record's seven against this record's one
+		// and reports a reset, which says the key was deleted and recreated --
+		// a different incident, and the one a reader would go looking for.
+		return execution.StateVersionConflictRevisionMoved
+	}
 	if len(current) == 0 {
 		if mutation.ExpectedMarkerRevision == 0 {
 			// The caller expected no record and one appeared.
