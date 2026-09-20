@@ -46,7 +46,11 @@ func cohortSnapshots() []Snapshot {
 	unknown := Anomaly{QueryGroup: "qg-unknown", Kind: KindBlockedRun, ReasonCode: "source_error", Replica: "pod-b",
 		Since: now.Add(-5 * time.Minute), SinceFrom: SinceBusinessState,
 		Strategies: []StrategyRef{{StrategyID: "78", BusinessID: "2"}}}
-	snapshots[0].Anomalies, snapshots[0].TotalAnomalies = []Anomaly{cooling, defect}, 2
+	// The live shape: the cooling object is in the demoted pool, not the
+	// anomaly column -- which is where the four fifteen-second objects the
+	// join was built for all were.
+	snapshots[0].Anomalies, snapshots[0].TotalAnomalies = []Anomaly{defect}, 1
+	snapshots[0].Demoted, snapshots[0].TotalDemoted = []Anomaly{cooling}, 1
 	snapshots[1].Anomalies, snapshots[1].TotalAnomalies = []Anomaly{skipped, unknown}, 2
 	return snapshots
 }
@@ -144,14 +148,34 @@ func TestCohortsWithoutACensusAreListedOnly(t *testing.T) {
 	}
 }
 
-// interval= opens the rows of one period and says it did; a period the rows
-// do not know is 0; anything that is not a period is refused.
+// interval= opens the rows of one period from every column and says it did
+// -- the cohort was counted over every column, and on the live deployment the
+// four objects it was built for were all in the demoted pool, so a filter on
+// the anomaly column alone answered zero under a cohort that said four. A
+// column named beside it narrows to that column; a period the rows do not
+// know is 0; anything that is not a period is refused.
 func TestTheListRouteOpensOnePeriodsRows(t *testing.T) {
 	handler := handlerWith(t, cohortSnapshots(), Expectation{QueryGroups: 949, Known: true}, replicas())
 	status, list := get(t, handler, "/api/objects?interval=15")
 	rows, _ := list["anomalies"].([]any)
-	if status != 200 || len(rows) != 2 || list["interval"] != 15.0 || list["filtered"] != true {
-		t.Fatalf("interval=15 -> %d rows %d interval %v filtered %v", status, len(rows), list["interval"], list["filtered"])
+	if status != 200 || len(rows) != 2 || list["interval"] != 15.0 || list["filtered"] != true || list["column"] != "" {
+		t.Fatalf("interval=15 -> %d rows %d interval %v filtered %v column %q; want both rows from across the columns", status, len(rows), list["interval"], list["filtered"], list["column"])
+	}
+	// The cohort the rows were opened from says the same two.
+	for _, item := range list["cohorts"].([]any) {
+		if cohort := item.(map[string]any); cohort["interval_seconds"] == 15.0 && cohort["listed"] != 2.0 {
+			t.Fatalf("cohort 15 s lists %v while interval=15 opened %d rows", cohort["listed"], len(rows))
+		}
+	}
+	// Named beside a column, the period narrows that column: the demoted
+	// pool holds the cooling one alone, the anomaly column the skipped one.
+	_, demoted := get(t, handler, "/api/objects?interval=15&column=demoted")
+	if rows, _ := demoted["anomalies"].([]any); len(rows) != 1 || rows[0].(map[string]any)["query_group"] != "qg-cooling" || demoted["column"] != ColumnDemoted {
+		t.Fatalf("interval=15&column=demoted = %v, want the cooling row alone under the demoted column", demoted["anomalies"])
+	}
+	_, anomalies := get(t, handler, "/api/objects?interval=15&column=anomalies")
+	if rows, _ := anomalies["anomalies"].([]any); len(rows) != 1 || rows[0].(map[string]any)["query_group"] != "qg-skipped" {
+		t.Fatalf("interval=15&column=anomalies = %v, want the skipped row alone", anomalies["anomalies"])
 	}
 	for _, item := range rows {
 		row := item.(map[string]any)
@@ -171,7 +195,7 @@ func TestTheListRouteOpensOnePeriodsRows(t *testing.T) {
 		t.Errorf("interval=fifteen -> %d, want 400", status)
 	}
 	_, all := get(t, handler, "/api/objects")
-	if rows, _ := all["anomalies"].([]any); len(rows) != 4 || all["filtered"] != false {
-		t.Errorf("no interval filter -> %d rows filtered %v, want all four unfiltered", len(rows), all["filtered"])
+	if rows, _ := all["anomalies"].([]any); len(rows) != 3 || all["filtered"] != false {
+		t.Errorf("no interval filter -> %d rows filtered %v, want the anomaly column's three, unfiltered", len(rows), all["filtered"])
 	}
 }

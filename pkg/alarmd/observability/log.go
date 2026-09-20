@@ -298,6 +298,20 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			attributes = append(attributes,
 				slog.Int64("range_gate_unfinished_evaluation_time", facts.UnfinishedSlotEvaluationTime))
 		}
+		// The two candidate bounds, on the refusals that computed them. They
+		// were on the facts and on no line: the word steps_below_one says the
+		// range would be shorter than two Slots and nothing about which of the
+		// two bounds held it there, which is the difference between a Query
+		// Group barely past its window and one whose deadline has only just
+		// passed. Not emitted as zeroes when they were never computed, for the
+		// same reason bounds_known exists at all.
+		if facts.BoundsKnown {
+			attributes = append(attributes,
+				slog.Bool("range_gate_bounds_known", true),
+				slog.Int64("range_gate_distance_bound", facts.DistanceBound),
+				slog.Int64("range_gate_deadline_bound", facts.DeadlineBound),
+			)
+		}
 	}
 	if facts := observation.ReplayExpiry; facts != nil {
 		// The reason on every expiry, and the two compared instants on the one
@@ -314,26 +328,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.Int64("replay_distance_boundary", facts.DistanceBoundaryUnixMilli),
 			)
 		}
-		// Flat, like everything else on this line. The renderer here emits
-		// keys rather than objects, and a nested held_by would be written but
-		// unreadable by anything filtering this line -- which is the shape a
-		// reading has already been lost to once.
-		if held := facts.HeldBy; held != nil {
-			attributes = append(attributes,
-				slog.String("held_by", held.Decision),
-				slog.Int64("held_by_at", held.AtUnixMilli),
-			)
-			if held.Decision == "query_cooldown" {
-				attributes = append(attributes,
-					slog.Uint64("held_by_cooldown_failures", uint64(held.QueryCooldownFailures)),
-					slog.Int64("held_by_cooldown_until", held.QueryCooldownUntilMilli),
-				)
-			}
-			if held.Decision == HeldByReadinessDeferred {
-				attributes = append(attributes, slog.Int64("held_by_ready_at", held.ReadyAtUnixMilli))
-			}
-		}
+		attributes = appendHeldByAttributes(attributes, facts.HeldBy)
 	}
+	attributes = appendHeldByAttributes(attributes, observation.HeldBy)
 	if facts := observation.SegmentContent; facts != nil {
 		attributes = append(attributes, slog.String("segment_content", facts.State))
 	}
@@ -812,4 +809,31 @@ func (w *serializedLogWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.next.Write(p)
+}
+
+// appendHeldByAttributes writes what held the previous round as flat keys.
+//
+// Flat, like everything else on these lines: the renderer emits keys rather
+// than objects, and a nested held_by is written but invisible to anything
+// filtering the line. It first shipped nested inside one cohort's bundle and
+// the lines that most needed it -- the sixty-second and slower Query Groups
+// being skipped -- had no bundle and therefore no cause on them at all.
+func appendHeldByAttributes(attributes []slog.Attr, held *HeldByFacts) []slog.Attr {
+	if held == nil {
+		return attributes
+	}
+	attributes = append(attributes,
+		slog.String("held_by", held.Decision),
+		slog.Int64("held_by_at", held.AtUnixMilli),
+	)
+	switch held.Decision {
+	case "query_cooldown":
+		attributes = append(attributes,
+			slog.Uint64("held_by_cooldown_failures", uint64(held.QueryCooldownFailures)),
+			slog.Int64("held_by_cooldown_until", held.QueryCooldownUntilMilli),
+		)
+	case HeldByReadinessDeferred:
+		attributes = append(attributes, slog.Int64("held_by_ready_at", held.ReadyAtUnixMilli))
+	}
+	return attributes
 }

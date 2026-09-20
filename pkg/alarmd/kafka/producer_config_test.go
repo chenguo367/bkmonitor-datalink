@@ -10,6 +10,7 @@
 package kafka
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -74,23 +75,38 @@ func TestNewDecisionProducerConfigForcesAcknowledgementAndBounds(t *testing.T) {
 	}
 }
 
-func TestNewDecisionProducerConfigSupportsDatalinkKafkaBaseline(t *testing.T) {
+// The floor of the protocol range is the header protocol, and it is one
+// number in one place. The standard RawEvent carries the tenant in a record
+// header, which the client can only send from 0.11.0.0: the producer built
+// at the floor speaks exactly that version without idempotence, and the
+// version this product used to be built with, 0.10.2.0, is refused with the
+// reason -- at configuration time, not on the first message.
+func TestNewDecisionProducerConfigFloorIsTheHeaderProtocol(t *testing.T) {
 	t.Parallel()
 
 	coordinates := validDecisionSinkConfig()
-	coordinates.BrokerVersion = "0.10.2.0"
+	coordinates.BrokerVersion = MinimumBrokerVersion
 	config, err := NewDecisionProducerConfig(coordinates)
 	if err != nil {
 		t.Fatalf("NewDecisionProducerConfig() error = %v", err)
 	}
-	if config.Version != sarama.V0_10_2_0 {
-		t.Fatalf("broker version = %s, want %s", config.Version, sarama.V0_10_2_0)
+	if config.Version != sarama.V0_11_0_0 {
+		t.Fatalf("broker version = %s, want %s", config.Version, sarama.V0_11_0_0)
 	}
 	if config.Producer.Idempotent {
-		t.Fatal("0.10.2-compatible Shadow producer must not require InitProducerID")
+		t.Fatal("the producer at the floor must not require InitProducerID")
 	}
 	if config.Producer.RequiredAcks != sarama.WaitForAll {
 		t.Fatalf("required acks = %d, want WaitForAll", config.Producer.RequiredAcks)
+	}
+
+	coordinates.BrokerVersion = "0.10.2.0"
+	_, err = NewDecisionProducerConfig(coordinates)
+	if err == nil || !strings.Contains(err.Error(), "record headers") || !strings.Contains(err.Error(), MinimumBrokerVersion) {
+		t.Fatalf("NewDecisionProducerConfig(0.10.2.0) error = %v, want a refusal naming record headers and %s", err, MinimumBrokerVersion)
+	}
+	if _, err := NewDecisionProducerOnlyConfig(coordinates); err == nil {
+		t.Fatal("NewDecisionProducerOnlyConfig(0.10.2.0) = nil, want the same refusal on the producer-only path")
 	}
 }
 

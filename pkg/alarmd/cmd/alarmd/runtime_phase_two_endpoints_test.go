@@ -208,6 +208,7 @@ func TestEndpointFactsReadTheSharedConnectionAndTheSourceRound(t *testing.T) {
 func TestSourceFactsOfCarriesTheCompositionAndTheMarker(t *testing.T) {
 	at := time.Unix(7000, 0)
 	composition := &controlplane.CatalogComposition{
+		PlansTotal: 5, RevisionedPlans: 2,
 		Objects: map[controlplane.Disposition]int{controlplane.DispositionAccepted: 0, controlplane.DispositionSourceIncomplete: 2},
 		WithheldObjects: []controlplane.ObjectDisposition{
 			{SourceID: "9", Scope: "STRATEGY", Disposition: controlplane.DispositionSourceIncomplete, Reason: "SOURCE_IDENTITY_UNAVAILABLE"},
@@ -220,6 +221,11 @@ func TestSourceFactsOfCarriesTheCompositionAndTheMarker(t *testing.T) {
 	}
 	if !facts.ChangeSignalPresent || facts.ChangeSignalAgeSeconds == nil || *facts.ChangeSignalAgeSeconds != 42 {
 		t.Errorf("marker = %v/%v, want present at 42", facts.ChangeSignalPresent, facts.ChangeSignalAgeSeconds)
+	}
+	// The Plan counts travel as the composition counted them, and say they
+	// were reported: a round from this build is not read as zero Plans.
+	if facts.Plans != 5 || facts.RevisionedPlans != 2 || !facts.PlansKnown {
+		t.Errorf("plans = %d revisioned %d known %t, want 5, 2, true", facts.Plans, facts.RevisionedPlans, facts.PlansKnown)
 	}
 	if len(facts.Withheld) != 2 || facts.Withheld[0].Samples[0].StrategyID != "9" ||
 		facts.Withheld[1].Samples[0].LevelID != 3 || facts.Withheld[1].Samples[0].FieldPath != "items" {

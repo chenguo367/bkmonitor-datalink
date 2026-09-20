@@ -224,6 +224,10 @@ type HealthResponse struct {
 	// values file on a machine the reader could not reach. Per strategy, the
 	// frozen format is on the directory route's effective_output.
 	OutputProtocols []OutputProtocolGroup `json:"output_protocols"`
+	// OutputPath is whether any event can leave as the standard raw event
+	// under those choices, from the leader's Plan counts: the first-screen
+	// sentence a two-line, one-Kafka-read investigation reduced to.
+	OutputPath OutputPathFacts `json:"output_path"`
 	// Cohorts is every evaluation period with its population and what the
 	// rows say about it, and Cooling the objects waiting in a query cooldown
 	// by whose line they are under: the join from a number read per period
@@ -852,6 +856,7 @@ func NewHandler(
 			Coverage:         view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			OutputProtocols: outputProtocolList(view.OutputProtocols),
+			OutputPath:      OutputPathOf(&view),
 			Degradations:    degradationList(view.Degradations),
 			Activation:      view.Activation, ActivationReplica: view.ActivationReplica,
 			Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,
@@ -915,7 +920,8 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// route because the two lists are two answers from one read: served apart,
 	// a reader could hold a pool from one moment beside anomalies from another
 	// and find objects in both, or in neither.
-	column := request.URL.Query().Get("column")
+	rawColumn := request.URL.Query().Get("column")
+	column := rawColumn
 	if column != "" && !knownColumn(column) {
 		writeJSON(response, http.StatusBadRequest, map[string]string{
 			"error": "column must be one of " + strings.Join(ObjectColumns, ", ")})
@@ -981,6 +987,18 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// opened a line.
 	check := Check(request.URL.Query().Get("check"))
 	group := request.URL.Query().Get("group")
+	// The period a cohort number was counted over, so the number and its
+	// objects are one click apart. Refused when it is not a number: a typo
+	// that fell back would return the whole list under a cohort heading.
+	var interval *int64
+	if raw := request.URL.Query().Get("interval"); raw != "" {
+		seconds, parseErr := strconv.ParseInt(raw, 10, 64)
+		if parseErr != nil || seconds < 0 {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "interval must be a period in seconds, 0 for objects whose period is not known"})
+			return
+		}
+		interval = &seconds
+	}
 	switch {
 	case check != "":
 		if !knownCheck(string(check)) {
@@ -990,6 +1008,22 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 		}
 		view.Anomalies = UnderCheck(check, group, &view, at)
 		view.AnomaliesTotal = len(view.Anomalies)
+		summaryPartial = truncated[ColumnAnomalies] || truncated[ColumnDemoted] ||
+			truncated[ColumnUndecidable] || truncated[ColumnByDesign]
+		column = ""
+	case interval != nil && rawColumn == "":
+		// Opening a cohort is navigation like opening a check: the cohort
+		// was counted over every column, so its rows come from every column.
+		// On the live deployment the four fifteen-second objects the join was
+		// built for were all in the demoted pool, and interval=15 on the
+		// anomaly column alone answered zero rows under a cohort that said
+		// four. A column named beside the interval narrows to that column.
+		rows := []Anomaly{}
+		for _, list := range columns {
+			rows = append(rows, list...)
+		}
+		view.Anomalies = rows
+		view.AnomaliesTotal = len(rows)
 		summaryPartial = truncated[ColumnAnomalies] || truncated[ColumnDemoted] ||
 			truncated[ColumnUndecidable] || truncated[ColumnByDesign]
 		column = ""
@@ -1030,18 +1064,8 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	if business != "" {
 		view.Anomalies = filterByBusiness(view.Anomalies, business)
 	}
-	// The period a cohort number was counted over, so the number and its
-	// objects are one click apart. Refused when it is not a number: a typo
-	// that fell back would return the whole list under a cohort heading.
-	var interval *int64
-	if raw := request.URL.Query().Get("interval"); raw != "" {
-		seconds, parseErr := strconv.ParseInt(raw, 10, 64)
-		if parseErr != nil || seconds < 0 {
-			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "interval must be a period in seconds, 0 for objects whose period is not known"})
-			return
-		}
-		interval = &seconds
-		view.Anomalies = filterByInterval(view.Anomalies, seconds)
+	if interval != nil {
+		view.Anomalies = filterByInterval(view.Anomalies, *interval)
 	}
 	total := len(view.Anomalies)
 	// Counted over the whole list this request is about, before it is cut into a

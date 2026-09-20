@@ -134,10 +134,19 @@ func TestARoundThatRanTheSlotIsRememberedAsHoldingNothing(t *testing.T) {
 			}
 		})
 	}
-	// And the word for nothing does not reach the line as a held Slot.
-	if HeldByFromContext(withHeldBy(context.Background(),
-		observability.HeldByFacts{Decision: observability.HeldByNothing})) != nil {
-		t.Fatal("a round that held nothing was carried onto the line as if it had")
+	// And the word for nothing reaches the line as a word. Returning nil for
+	// it was the defect production found: the key was simply absent, which a
+	// reader cannot tell from a build that does not report held_by at all,
+	// and the distribution lost its commonest value.
+	if held := HeldByFromContext(withHeldBy(context.Background(),
+		observability.HeldByFacts{Decision: observability.HeldByNothing})); held == nil ||
+		held.Decision != observability.HeldByNothing {
+		t.Fatalf("a round that held nothing produced %+v, want the word for it", held)
+	}
+	// Including the very first round, which has no round before it at all.
+	if held := HeldByFromContext(context.Background()); held == nil ||
+		held.Decision != observability.HeldByNothing {
+		t.Fatalf("the first round of all produced %+v, want the word for nothing", held)
 	}
 }
 
@@ -183,9 +192,10 @@ func TestTheRunnerCarriesItsPreviousDecisionIntoTheNextRound(t *testing.T) {
 	if len(source.seen) != 2 {
 		t.Fatalf("the source saw %d rounds, want 2", len(source.seen))
 	}
-	// Nothing ran before the first round, so it is held by nothing.
-	if source.seen[0] != nil {
-		t.Fatalf("first round carried %+v, want nothing: there was no round before it", source.seen[0])
+	// Nothing ran before the first round, and it says so with the word rather
+	// than with an absent key.
+	if source.seen[0] == nil || source.seen[0].Decision != observability.HeldByNothing {
+		t.Fatalf("first round carried %+v, want the word for nothing", source.seen[0])
 	}
 	// The first round found no due Slot, which is a word, and the second
 	// round has to be able to say it.

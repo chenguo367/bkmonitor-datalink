@@ -132,10 +132,38 @@ func (c *Converter) ConvertBatch(ctx context.Context, events []contract.TriggerE
 	}
 	// Validate every event before one bounded, de-duplicated snapshot write.
 	if err := c.Store.SaveBatch(ctx, snapshots); err != nil {
-		return nil, fmt.Errorf("save legacy snapshots: %w", err)
+		return nil, &SnapshotStoreError{Err: fmt.Errorf("save legacy snapshots: %w", err)}
 	}
 	return output, nil
 }
+
+// SnapshotStoreError is the snapshot store not taking the batch. It is the
+// one failure ConvertBatch returns that says nothing about the events: every
+// other error is the converter's own answer about their content, which it
+// gives again on every retry, while this one is a store that may answer next
+// time. The pod cache does not fail this way -- an unreachable cache takes
+// Python's no-instance branch and converts -- so the store is the only
+// dependency on this path. It marks RetryableOutputDependency so the sink and
+// the coordinator treat it as they treat a broker that did not acknowledge.
+type SnapshotStoreError struct {
+	Err error
+}
+
+func (err *SnapshotStoreError) Error() string {
+	if err == nil || err.Err == nil {
+		return "legacy snapshot store failed"
+	}
+	return err.Err.Error()
+}
+
+func (err *SnapshotStoreError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Err
+}
+
+func (err *SnapshotStoreError) RetryableOutputDependency() {}
 
 func convertEvent(ctx context.Context, event contract.TriggerEventV1, frozen preparedStrategy, now int64, pods PodResolver, pluginID string) (Event, error) {
 	if pluginID == "" {

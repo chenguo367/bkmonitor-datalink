@@ -132,11 +132,24 @@ const (
 	ReasonResourceHardStop             = "RESOURCE_HARD_STOP"
 	ReasonSlotBudgetExceeded           = "SLOT_BUDGET_EXCEEDED"
 	ReasonOutputACKUnknown             = "OUTPUT_ACK_UNKNOWN"
-	ReasonStateWriteRetryable          = "STATE_WRITE_RETRYABLE"
-	ReasonStateCorrupt                 = "STATE_CORRUPT"
-	ReasonStateSchemaUnsupported       = "STATE_SCHEMA_UNSUPPORTED"
-	ReasonStateBudgetExceeded          = "STATE_BUDGET_EXCEEDED"
-	ReasonAuditDrop                    = "AUDIT_DROP"
+	// ReasonOutputConversionRejected: the output converter would not write a
+	// decision (no frozen strategy revision, no series identity, no primary
+	// level, a business identity that is not a number, ...). Decided in this
+	// process from the decision's own content, so the same decision meets the
+	// same refusal on every round: the Plan completes terminally by this name,
+	// its sibling Plans run, and nothing waits on a broker.
+	ReasonOutputConversionRejected = "OUTPUT_CONVERSION_REJECTED"
+	// ReasonOutputClientRejected: the Kafka client refused a message before any
+	// broker saw it -- a protocol version too old for the record's headers, a
+	// message over the client's own size cap. This deployment's wiring, not
+	// the broker's weather: a retry sends the same message to the same client
+	// and gets the same answer.
+	ReasonOutputClientRejected   = "OUTPUT_CLIENT_REJECTED"
+	ReasonStateWriteRetryable    = "STATE_WRITE_RETRYABLE"
+	ReasonStateCorrupt           = "STATE_CORRUPT"
+	ReasonStateSchemaUnsupported = "STATE_SCHEMA_UNSUPPORTED"
+	ReasonStateBudgetExceeded    = "STATE_BUDGET_EXCEEDED"
+	ReasonAuditDrop              = "AUDIT_DROP"
 	// Ownership refusals, observation-only. The ownership store answers a
 	// fence check, a lease acquire or renew, or a fenced write with one of
 	// four typed errors; until these names existed every one of them was
