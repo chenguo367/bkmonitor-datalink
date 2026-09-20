@@ -79,6 +79,13 @@ const (
 	// Control Leader: how many named retired Query Groups and how many of
 	// those it reclaimed (AssignmentSweepFacts).
 	StageAssignmentSwept        = "assignment_swept"
+	// StageViewPublished names one publication of the Control Leader's
+	// desired set over the view stream (decision-016): the term revision
+	// it produced and how many Workers' views moved. StageViewSession names
+	// one Worker's stream opening, being refused or closing, with why
+	// (ViewStreamFacts).
+	StageViewPublished = "view_published"
+	StageViewSession   = "view_session"
 	StageAssignmentIndexRead    = "assignment_index_read"
 	StageTakeoverStarted        = "takeover_started"
 	StageTakeoverCompleted      = "takeover_completed"
@@ -1310,6 +1317,28 @@ type AssignmentSweepFacts struct {
 	Changed     int `json:"changed"`
 }
 
+// ViewStreamFacts describe one event of the view stream: a publication
+// (Event "published": Revision, Affected, and the four numbers of the
+// version it closed when Closed is set), or a session event (Event
+// "opened", "refused", "closed": WorkerID, Incarnation, Reason).
+type ViewStreamFacts struct {
+	Event        string `json:"event"`
+	WorkerID     string `json:"worker_id,omitempty"`
+	Incarnation  string `json:"incarnation,omitempty"`
+	ControlEpoch uint64 `json:"control_epoch"`
+	Revision     uint64 `json:"revision,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	Affected     int    `json:"affected,omitempty"`
+	// Closed is the revision whose ledger this publication closed, with
+	// its four numbers as they stood; zero when none was closed.
+	Closed    uint64 `json:"closed,omitempty"`
+	Expected  int    `json:"expected,omitempty"`
+	Sent      int    `json:"sent,omitempty"`
+	Acked     int    `json:"acked,omitempty"`
+	Installed int    `json:"installed,omitempty"`
+	Switched  int    `json:"switched,omitempty"`
+}
+
 type AssignmentIndexFacts struct {
 	Round        uint64 `json:"round"`
 	ControlEpoch uint64 `json:"control_epoch,omitempty"`
@@ -1914,6 +1943,7 @@ type Observation struct {
 	ControlReads         *ControlReadFacts
 	AssignmentIndex      *AssignmentIndexFacts
 	AssignmentSweep      *AssignmentSweepFacts
+	ViewStream           *ViewStreamFacts
 	CursorAdvance        *CursorAdvanceFacts
 	SourceRefresh        *SourceRefreshFacts
 	ActivationFailure    *ActivationFailureFacts
@@ -2903,6 +2933,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentOwnership, StageControlReadsSpent},
 	{ComponentOwnership, StageAssignmentIndexWritten}, {ComponentOwnership, StageAssignmentIndexRead},
 	{ComponentOwnership, StageAssignmentSwept},
+	{ComponentOwnership, StageViewPublished}, {ComponentOwnership, StageViewSession},
 	{ComponentOwnership, StageTakeoverStarted}, {ComponentOwnership, StageTakeoverCompleted},
 	{ComponentOwnership, StageLeaseRenewed}, {ComponentOwnership, StageFenceChecked},
 	{ComponentScheduler, StageScheduleDue}, {ComponentScheduler, StageSlotStarted},

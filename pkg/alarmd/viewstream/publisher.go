@@ -31,6 +31,10 @@ type Publisher struct {
 	current     map[string]View
 	previous    map[string]View
 	ledger      *Ledger
+	// fingerprint is Desired.Fingerprint of the last set projected, so a
+	// round that hands over the same set again costs one hash and no
+	// projection.
+	fingerprint uint64
 }
 
 func NewPublisher(controlEpoch uint64, now func() time.Time) (*Publisher, error) {
@@ -63,6 +67,10 @@ func (publisher *Publisher) Publish(desired Desired) (Published, error) {
 	}
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
+	fingerprint := desired.Fingerprint()
+	if publisher.revision > 0 && fingerprint == publisher.fingerprint {
+		return Published{Version: Key{ControlEpoch: publisher.epoch, Revision: publisher.revision}, Changed: false}, nil
+	}
 	// Every Worker the set names, and every Worker that still holds
 	// something: a Worker whose last Query Group moved away is projected
 	// once more, to an empty view, and not after.
@@ -84,6 +92,7 @@ func (publisher *Publisher) Publish(desired Desired) (Published, error) {
 		}
 		next[worker] = view
 	}
+	publisher.fingerprint = fingerprint
 	if len(affected) == 0 && publisher.revision > 0 {
 		return Published{Version: Key{ControlEpoch: publisher.epoch, Revision: publisher.revision}, Changed: false}, nil
 	}

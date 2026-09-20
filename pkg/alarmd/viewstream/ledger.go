@@ -290,9 +290,13 @@ func (ledger *Ledger) Lagging(stage string) []LaggingReceiver {
 	return lagging
 }
 
+// LaggingReceiver is one Worker short of a stage. Connected is filled by
+// the server from its session table: a lagging Worker with no stream is a
+// Worker that is gone or cannot reach the Leader, not one that is slow.
 type LaggingReceiver struct {
 	WorkerID       string
 	Incarnation    string
 	Failure        string
 	ObjectsMissing int
+	Connected      bool
 }

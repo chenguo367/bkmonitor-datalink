@@ -6,7 +6,9 @@
 package viewstream
 
 import (
+	"encoding/binary"
 	"errors"
+	"hash/fnv"
 	"sort"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -78,4 +80,57 @@ func (desired Desired) Workers() []string {
 	}
 	sort.Strings(workers)
 	return workers
+}
+
+// Fingerprint is a cheap identity of everything a projection depends on:
+// the publication and, per Query Group in sorted order, its assignment and
+// its content references. Two desired sets with one fingerprint project to
+// the same views for every Worker, so the publisher, which is handed the
+// desired set every reconcile round whether or not anything moved, can
+// skip projecting and hashing the round that changed nothing. FNV over a
+// few hundred kilobytes, not canonical JSON and SHA-256 over the same.
+func (desired Desired) Fingerprint() uint64 {
+	hash := fnv.New64a()
+	write := func(parts ...string) {
+		for _, part := range parts {
+			_, _ = hash.Write([]byte(part))
+			_, _ = hash.Write([]byte{0})
+		}
+	}
+	writeUint := func(value uint64) {
+		var buffer [8]byte
+		binary.LittleEndian.PutUint64(buffer[:], value)
+		_, _ = hash.Write(buffer[:])
+	}
+	writeUint(desired.ControlEpoch)
+	write(string(desired.Publication.SnapshotRevision))
+	writeUint(desired.Publication.PublicationEpoch)
+	writeUint(desired.Publication.ActivationRecordRevision)
+	identities := make([]execution.QueryGroupIdentity, 0, len(desired.Assignments)+len(desired.Content))
+	seen := make(map[execution.QueryGroupIdentity]struct{}, cap(identities))
+	for identity := range desired.Assignments {
+		identities = append(identities, identity)
+		seen[identity] = struct{}{}
+	}
+	for identity := range desired.Content {
+		if _, dup := seen[identity]; !dup {
+			identities = append(identities, identity)
+		}
+	}
+	sort.Slice(identities, func(left, right int) bool { return identities[left] < identities[right] })
+	for _, identity := range identities {
+		write("qg", string(identity))
+		if assignment, ok := desired.Assignments[identity]; ok {
+			write("a", assignment.DesiredWorkerID, assignment.ContentScope, assignment.PendingContentScope)
+			writeUint(assignment.Revision)
+			writeUint(uint64(assignment.EffectiveAtMs))
+		}
+		if content, ok := desired.Content[identity]; ok {
+			write("c", string(content.ObjectDigest))
+			for _, ref := range content.OutputContexts {
+				write(ref.Plan.TenantID, ref.Plan.BusinessID, ref.Plan.StrategyID, string(ref.Digest))
+			}
+		}
+	}
+	return hash.Sum64()
 }
