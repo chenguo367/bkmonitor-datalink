@@ -84,9 +84,32 @@ func TestNavigationSharedFactsKeepTheSelectedContext(t *testing.T) {
 			t.Fatalf("selected context replaced: %s %v", check, body)
 		}
 	}
+	// A context the object has left: no fact is substituted for it, and the
+	// response does not call an object with three facts on file "not
+	// observed" -- it says the object is observed and the context did not
+	// match, which is a stale click, not a quiet object.
 	_, body = get(t, h, "/api/objects/qg-shared?check=NO_DATA_PERSISTENT&group=old-group")
-	if body["facts_total"] != float64(0) || body["runtime"] != "not_observed" || body["existence"] != "active" {
+	if body["facts_total"] != float64(0) || body["existence"] != "active" {
 		t.Fatalf("stale context fell back to another fact: %v", body)
+	}
+	if body["runtime"] != "observed" || body["context_matched"] != false {
+		t.Fatalf("stale context read as an unobserved object: runtime=%v context_matched=%v", body["runtime"], body["context_matched"])
+	}
+	// A context that holds the object says so; a request without one says
+	// nothing about a context.
+	_, body = get(t, h, "/api/objects/qg-shared?check=NO_DATA_PERSISTENT")
+	if body["context_matched"] != true || body["runtime"] != "observed" {
+		t.Fatalf("matching context = %v / %v, want matched and observed", body["context_matched"], body["runtime"])
+	}
+	_, body = get(t, h, "/api/objects/qg-shared")
+	if _, present := body["context_matched"]; present {
+		t.Fatalf("a request naming no check carries context_matched: %v", body["context_matched"])
+	}
+	// And a quiet object under a named check is still not observed: the
+	// object has no fact anywhere, so the context's miss is not a stale click.
+	_, body = get(t, h, "/api/objects/qg-quiet?check=NO_DATA_PERSISTENT")
+	if body["runtime"] != "not_observed" || body["context_matched"] != false {
+		t.Fatalf("quiet object under a named check = runtime %v, context_matched %v; want not_observed, false", body["runtime"], body["context_matched"])
 	}
 }
 

@@ -706,8 +706,18 @@ type DetailResponse struct {
 	Group      string    `json:"group,omitempty"`
 	// Existence is membership in the current authoritative active set, not
 	// whether an observation or historical record happens to be retained.
-	Existence       string                 `json:"existence"`
-	Runtime         string                 `json:"runtime"`
+	Existence string `json:"existence"`
+	// Runtime says whether any fact about this object is held at all, under
+	// whatever line -- it is the object's, not the context's. A request that
+	// names a check the object is not under gets its facts under that check
+	// (none), and ContextMatched false: the object was observed, the line the
+	// reader clicked no longer holds it. Reading "not observed" there was a
+	// false statement about an object with three facts on file.
+	Runtime string `json:"runtime"`
+	// ContextMatched is present only when a check was named: whether the
+	// object has a fact under it. False with Runtime observed is a stale
+	// click, not a quiet object.
+	ContextMatched  *bool                  `json:"context_matched,omitempty"`
 	RecordsStatus   string                 `json:"records_status"`
 	RecordsScope    string                 `json:"records_scope,omitempty"`
 	RecoveryContext *ObjectRecoveryContext `json:"recovery_context,omitempty"`
@@ -1064,6 +1074,19 @@ func objectDetail(response http.ResponseWriter, request *http.Request, service *
 	})
 	if len(body.Facts) > 0 {
 		body.Anomaly = &body.Facts[0]
+	}
+	// Whether the object is observed is asked of every fact, not of the ones
+	// under the named check: a check the object has left still leaves the
+	// object observed, and the context says it did not match.
+	observed := body.FactsTotal > 0
+	if check != "" {
+		matched := observed
+		body.ContextMatched = &matched
+		if !observed {
+			walkObjectRows("", "", queryGroup, &view, at, func(Anomaly) { observed = true })
+		}
+	}
+	if observed {
 		body.Runtime = "observed"
 	}
 	if check != "" && group != "" {
