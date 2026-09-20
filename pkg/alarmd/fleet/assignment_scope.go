@@ -119,3 +119,33 @@ func (facts *AssignmentScopeFacts) Consistent() bool {
 	}
 	return facts.Total == facts.Declared+facts.Undeclared
 }
+
+// AssignmentSweepFacts is the leader's last sweep of the Assignment records:
+// what it walked, what it found retired and what it did about them, or why
+// it failed. The census above counts the round's own Query Groups and never
+// sees a retired record; the sweep is the only reading of those, and on one
+// deployment it ran, reclaimed six, and no line said so. With this beside
+// the census, "never swept", "swept and found nothing" and "swept and
+// reclaimed" are three different readings.
+type AssignmentSweepFacts struct {
+	At time.Time `json:"at"`
+	// Result is success or failed; Reason the failure's word when failed.
+	Result string `json:"result"`
+	Reason string `json:"reason,omitempty"`
+	// Scanned is how many records the key space held; Retired how many named
+	// a Query Group the leader no longer runs; of those, Reclaimed were
+	// deleted, HeldByLease left for a live lease, Changed left because the
+	// record moved under the sweep.
+	Scanned         int     `json:"scanned"`
+	Retired         int     `json:"retired"`
+	Reclaimed       int     `json:"reclaimed"`
+	HeldByLease     int     `json:"held_by_lease"`
+	Changed         int     `json:"changed"`
+	DurationSeconds float64 `json:"duration_seconds"`
+}
+
+// Consistent is the sweep's own identity: every retired record was
+// reclaimed, held or changed.
+func (facts *AssignmentSweepFacts) Consistent() bool {
+	return facts != nil && facts.Retired == facts.Reclaimed+facts.HeldByLease+facts.Changed
+}

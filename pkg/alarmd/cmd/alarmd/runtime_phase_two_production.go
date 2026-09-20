@@ -1347,6 +1347,9 @@ type productionPhaseTwoOwnership struct {
 	// lastAssignmentScope is the same round's census of the content scope
 	// on the records it settled, for the fleet snapshot. Nil until a round.
 	lastAssignmentScope *fleet.AssignmentScopeFacts
+	// lastAssignmentSweep is the latest sweep of retired records, success or
+	// failure, for the fleet snapshot. Nil until a sweep has run.
+	lastAssignmentSweep *fleet.AssignmentSweepFacts
 
 	// readySet is the ready set the last round reconciled against and when
 	// it last changed, remembered under the fence epoch it was observed in;
@@ -1558,19 +1561,35 @@ func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
 	sweep, err := runtime.dependencies.Store.SweepAssignments(ctx, authority, keep)
 	facts := &observability.AssignmentSweepFacts{Scanned: sweep.Scanned, Retired: sweep.Retired,
 		Reclaimed: sweep.Reclaimed, HeldByLease: sweep.HeldByLease, Changed: sweep.Changed}
+	// The same numbers for the fleet snapshot, success or failure: a sweep
+	// that ran and reclaimed six records on a live deployment was known
+	// only to the Pod's own memory.
+	sweptAt := time.Now()
+	if runtime.dependencies.Now != nil {
+		sweptAt = runtime.dependencies.Now()
+	}
+	published := &fleet.AssignmentSweepFacts{At: sweptAt, Result: string(observability.ResultSuccess),
+		Scanned: sweep.Scanned, Retired: sweep.Retired, Reclaimed: sweep.Reclaimed, HeldByLease: sweep.HeldByLease,
+		Changed: sweep.Changed, DurationSeconds: sweep.Duration.Seconds()}
 	if err != nil {
 		if errors.Is(err, ownership.ErrStaleFence) {
 			runtime.clearControlAuthority(authority)
 		}
+		reason := ownershipObservationReason(err)
+		published.Result, published.Reason = string(observability.ResultFailed), string(reason)
+		runtime.mu.Lock()
+		runtime.lastAssignmentSweep = published
+		runtime.mu.Unlock()
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 			Component: observability.ComponentOwnership, Stage: observability.StageAssignmentSwept,
 			Result: observability.ResultFailed, Operation: observability.OperationWrite, Duration: sweep.Duration,
-			ReasonCode: ownershipObservationReason(err), Err: err, AssignmentSweep: facts,
+			ReasonCode: reason, Err: err, AssignmentSweep: facts,
 		})
 		return
 	}
 	runtime.mu.Lock()
 	runtime.sweptEpoch, runtime.sweptSet = authority.Fence.OwnerEpoch, keep
+	runtime.lastAssignmentSweep = published
 	runtime.mu.Unlock()
 	observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageAssignmentSwept,
@@ -1816,6 +1835,22 @@ func (runtime *productionPhaseTwoOwnership) LastAssignmentScope() *fleet.Assignm
 		return nil
 	}
 	facts := *runtime.lastAssignmentScope
+	return &facts
+}
+
+// LastAssignmentSweep is the latest sweep of retired Assignment records on
+// this process, success or failure, for the fleet snapshot; nil until one
+// has run.
+func (runtime *productionPhaseTwoOwnership) LastAssignmentSweep() *fleet.AssignmentSweepFacts {
+	if runtime == nil {
+		return nil
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.lastAssignmentSweep == nil {
+		return nil
+	}
+	facts := *runtime.lastAssignmentSweep
 	return &facts
 }
 

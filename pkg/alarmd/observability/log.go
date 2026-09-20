@@ -447,6 +447,18 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Any("rebalance_moves", facts.Moves),
 		)
 	}
+	if facts := observation.AssignmentSweep; facts != nil {
+		// The five numbers of a sweep, zeros included: the line existed for a
+		// release with only its stage and result on it, and "swept" with
+		// nothing beside it could not be told from "swept nothing".
+		attributes = append(attributes,
+			slog.Int("assignment_sweep_scanned", facts.Scanned),
+			slog.Int("assignment_sweep_retired", facts.Retired),
+			slog.Int("assignment_sweep_reclaimed", facts.Reclaimed),
+			slog.Int("assignment_sweep_held_by_lease", facts.HeldByLease),
+			slog.Int("assignment_sweep_changed", facts.Changed),
+		)
+	}
 	if facts := observation.AssignmentIndex; facts != nil {
 		attributes = append(attributes,
 			slog.Uint64("assignment_index_round", facts.Round),

@@ -198,18 +198,32 @@ func TestBundleReadsTheRebalanceRoundOnlyFromARuntimeThatPlans(t *testing.T) {
 	if got := bundle.assignmentScopeFleetFacts(); got != nil {
 		t.Fatalf("assignmentScopeFleetFacts() from a runtime that does not plan = %+v, want nil", got)
 	}
+	sweep := &fleet.AssignmentSweepFacts{Result: "success", Scanned: 2407, Retired: 6, Reclaimed: 6}
+	bundle.dependencies.Ownership = &planningOwnershipRuntime{fakePhaseTwoOwnership: &fakePhaseTwoOwnership{}, sweep: sweep}
+	if got := bundle.assignmentSweepFleetFacts(); got == nil || *got != *sweep {
+		t.Fatalf("assignmentSweepFleetFacts() = %+v, want the runtime's sweep", got)
+	}
+	bundle.dependencies.Ownership = &fakePhaseTwoOwnership{}
+	if got := bundle.assignmentSweepFleetFacts(); got != nil {
+		t.Fatalf("assignmentSweepFleetFacts() from a runtime that does not plan = %+v, want nil", got)
+	}
 }
 
 type planningOwnershipRuntime struct {
 	*fakePhaseTwoOwnership
 	last  *fleet.RebalanceFacts
 	scope *fleet.AssignmentScopeFacts
+	sweep *fleet.AssignmentSweepFacts
 }
 
 func (runtime *planningOwnershipRuntime) LastRebalance() *fleet.RebalanceFacts { return runtime.last }
 
 func (runtime *planningOwnershipRuntime) LastAssignmentScope() *fleet.AssignmentScopeFacts {
 	return runtime.scope
+}
+
+func (runtime *planningOwnershipRuntime) LastAssignmentSweep() *fleet.AssignmentSweepFacts {
+	return runtime.sweep
 }
 
 // The fake is the source the bundle reads both facts from: a fake that

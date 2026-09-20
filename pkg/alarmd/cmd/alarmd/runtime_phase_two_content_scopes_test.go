@@ -286,3 +286,55 @@ func TestTheRoundsAssignmentScopeCensusIsKeptForTheFleetInTheFleetsWords(t *test
 		t.Fatalf("second census = %+v, want both current", second)
 	}
 }
+
+// The last sweep is kept for the fleet with its numbers, success or failure:
+// a sweep that ran and reclaimed six records on a live deployment was known
+// only to the Pod. Before any sweep there is nothing; after one, the five
+// numbers and when; after one that failed, the failure's word beside the
+// numbers it got that far with; and the copy a reader holds is its own.
+func TestTheLastSweepIsKeptForTheFleetWithItsNumbersAndItsFailure(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := &fakePhaseTwoOwnershipStore{now: now, sweep: ownership.AssignmentSweep{Scanned: 2407, Retired: 6, Reclaimed: 5, HeldByLease: 1, Duration: 40 * time.Millisecond}}
+	var observed []observability.Observation
+	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+		Store: store, WorkerID: "worker-1", Now: func() time.Time { return now },
+		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+			observed = append(observed, observation)
+		}),
+	}}
+	authority := func(epoch uint64) ownership.PublicationAuthority {
+		return ownership.PublicationAuthority{Fence: execution.OwnerFence{
+			QueryGroup: ownership.ControlLeaderIdentity, OwnerID: "worker-1", OwnerEpoch: epoch, LeaseToken: "t",
+		}, Deadline: now.Add(time.Minute)}
+	}
+	if runtime.LastAssignmentSweep() != nil || (*productionPhaseTwoOwnership)(nil).LastAssignmentSweep() != nil {
+		t.Fatal("a runtime that has not swept claims a sweep")
+	}
+	runtime.sweepRetiredAssignments(context.Background(), authority(1), []execution.QueryGroupIdentity{"a", "b"})
+	first := runtime.LastAssignmentSweep()
+	want := fleet.AssignmentSweepFacts{At: now, Result: "success", Scanned: 2407, Retired: 6, Reclaimed: 5, HeldByLease: 1, DurationSeconds: 0.04}
+	if first == nil || *first != want || !first.Consistent() {
+		t.Fatalf("sweep facts = %+v, want %+v", first, want)
+	}
+	// The line carries the same five numbers.
+	if len(observed) != 1 || observed[0].Stage != observability.StageAssignmentSwept || observed[0].AssignmentSweep == nil ||
+		observed[0].AssignmentSweep.Scanned != 2407 || observed[0].AssignmentSweep.Reclaimed != 5 {
+		t.Fatalf("observation = %+v, want assignment_swept with the sweep's numbers", observed)
+	}
+	// A reader's copy is its own.
+	first.Reclaimed = 99
+	if runtime.LastAssignmentSweep().Reclaimed != 5 {
+		t.Fatal("a reader's copy wrote through to the runtime's sweep")
+	}
+	// A new term sweeps again and fails: the fleet reads the failure's word
+	// and the numbers the sweep got that far with.
+	store.sweepErr, store.sweep = ownership.ErrStaleFence, ownership.AssignmentSweep{Scanned: 1200}
+	runtime.sweepRetiredAssignments(context.Background(), authority(2), []execution.QueryGroupIdentity{"a", "b"})
+	failed := runtime.LastAssignmentSweep()
+	if failed == nil || failed.Result != "failed" || failed.Reason == "" || failed.Reason == "none" || failed.Scanned != 1200 {
+		t.Fatalf("failed sweep facts = %+v, want failed with a reason word and the partial scan", failed)
+	}
+	if string(observed[len(observed)-1].ReasonCode) != failed.Reason {
+		t.Fatalf("fleet reason %q differs from the line's %q", failed.Reason, observed[len(observed)-1].ReasonCode)
+	}
+}

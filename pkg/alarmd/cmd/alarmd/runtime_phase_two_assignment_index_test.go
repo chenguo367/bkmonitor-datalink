@@ -42,7 +42,13 @@ func (store *fakePhaseTwoOwnershipStore) SweepAssignments(_ context.Context, _ o
 		copied[queryGroup] = struct{}{}
 	}
 	store.sweeps = append(store.sweeps, copied)
-	return ownership.AssignmentSweep{Scanned: 1}, nil
+	if store.sweepErr != nil {
+		return store.sweep, store.sweepErr
+	}
+	if store.sweep == (ownership.AssignmentSweep{}) {
+		return ownership.AssignmentSweep{Scanned: 1}, nil
+	}
+	return store.sweep, nil
 }
 
 func (store *rebalanceOwnershipStore) SweepAssignments(context.Context, ownership.PublicationAuthority, map[execution.QueryGroupIdentity]struct{}) (ownership.AssignmentSweep, error) {

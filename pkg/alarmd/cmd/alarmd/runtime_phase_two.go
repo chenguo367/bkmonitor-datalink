@@ -376,6 +376,9 @@ type phaseTwoRebalanceSource interface {
 	// on the records it settled. On the same interface as the plan, so a
 	// runtime that plans reports both or is a compile error.
 	LastAssignmentScope() *fleet.AssignmentScopeFacts
+	// LastAssignmentSweep is the latest sweep of retired records, success or
+	// failure, for the same reason.
+	LastAssignmentSweep() *fleet.AssignmentSweepFacts
 }
 
 // rebalanceFleetFacts is the latest rebalance planning round on this
@@ -404,6 +407,19 @@ func (bundle *phaseTwoWorkerBundle) assignmentScopeFleetFacts() *fleet.Assignmen
 		return nil
 	}
 	return source.LastAssignmentScope()
+}
+
+// assignmentSweepFleetFacts is the latest sweep of retired Assignment records
+// on this process, for the fleet snapshot; nil on a follower.
+func (bundle *phaseTwoWorkerBundle) assignmentSweepFleetFacts() *fleet.AssignmentSweepFacts {
+	if bundle == nil {
+		return nil
+	}
+	source, ok := bundle.dependencies.Ownership.(phaseTwoRebalanceSource)
+	if !ok {
+		return nil
+	}
+	return source.LastAssignmentSweep()
 }
 
 type phaseTwoQueryGroupLifecycle struct {

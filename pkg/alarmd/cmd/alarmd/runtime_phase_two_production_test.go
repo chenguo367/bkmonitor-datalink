@@ -2357,8 +2357,12 @@ func productionRequest(fact execution.FrozenSlotContractFact, operation executio
 }
 
 type fakePhaseTwoOwnershipStore struct {
-	mu                     sync.Mutex
-	now                    time.Time
+	mu  sync.Mutex
+	now time.Time
+	// sweepErr, when set, is what SweepAssignments fails with after
+	// recording the keep set; sweep is what it reports when it does not.
+	sweepErr               error
+	sweep                  ownership.AssignmentSweep
 	worker                 ownership.WorkerRegistration
 	assignment             ownership.AssignmentRecord
 	checkErr               error
