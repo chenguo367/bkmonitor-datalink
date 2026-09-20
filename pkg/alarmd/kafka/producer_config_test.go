@@ -93,6 +93,11 @@ func TestNewDecisionProducerConfigFloorIsTheHeaderProtocol(t *testing.T) {
 	if config.Version != sarama.V0_11_0_0 {
 		t.Fatalf("broker version = %s, want %s", config.Version, sarama.V0_11_0_0)
 	}
+	// The value the range check decides by is the value the error text
+	// names: one string, parsed once.
+	if minimumBrokerVersion != sarama.V0_11_0_0 || minimumBrokerVersion.String() != MinimumBrokerVersion {
+		t.Fatalf("parsed floor = %s, want it derived from %q", minimumBrokerVersion, MinimumBrokerVersion)
+	}
 	if config.Producer.Idempotent {
 		t.Fatal("the producer at the floor must not require InitProducerID")
 	}

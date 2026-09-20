@@ -25,9 +25,20 @@ import (
 //
 // The three places that used to each spell a lower bound take it from
 // here; a bound written three times is a bound that moves in two places.
+// The parsed form below is derived from this string, not written a second
+// time, for the same reason: a mutant that moved the string alone kept
+// deciding by the old parsed value while its error text named the new one.
 const MinimumBrokerVersion = "0.11.0.0"
 
-var minimumBrokerVersion = sarama.V0_11_0_0
+var minimumBrokerVersion = mustParseKafkaVersion(MinimumBrokerVersion)
+
+func mustParseKafkaVersion(value string) sarama.KafkaVersion {
+	version, err := sarama.ParseKafkaVersion(value)
+	if err != nil {
+		panic("kafka: MinimumBrokerVersion is not a Kafka version: " + err.Error())
+	}
+	return version
+}
 
 // ValidateBrokerVersion parses a broker version and checks it against the
 // range the program supports, naming the feature that sets the floor when
