@@ -117,6 +117,7 @@ func TestObservationCountsRemainSeparatedByStageDirectionAndResult(t *testing.T)
 			Result:    observability.ResultSuccess,
 			Direction: observability.DirectionInternal,
 			Counts:    observability.Counts{Records: 2},
+			Duration:  time.Second,
 		},
 		{
 			Component: observability.ComponentTrigger,
@@ -137,20 +138,7 @@ func TestObservationCountsRemainSeparatedByStageDirectionAndResult(t *testing.T)
 			t.Fatalf("stage count is missing %q:\n%s", want, got)
 		}
 	}
-}
-
-func TestMetricNamesAndLabelsMatchApprovedContract(t *testing.T) {
-	recorder := NewRecorder(BuildInfo{})
-	recorder.Observe(context.Background(), observability.Observation{
-		Component:  observability.ComponentTrigger,
-		Stage:      observability.StageTriggerCompleted,
-		Result:     observability.ResultSuccess,
-		Direction:  observability.DirectionOutput,
-		ReasonCode: observability.ReasonNone,
-		Duration:   time.Second,
-	})
-
-	got := scrape(t, recorder)
+	// The same scrape covers the exported base families after Observe.
 	wants := []string{
 		"bkmonitor_alarmd_build_info",
 		"bkmonitor_alarmd_observation_total",

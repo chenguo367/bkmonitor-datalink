@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -79,21 +80,26 @@ func TestEvaluatorRejectsRecordLimitBeforeCopyingPrimaryView(t *testing.T) {
 		}
 	}
 	evaluator := newEvaluator(t)
-	allocation := testing.Benchmark(func(b *testing.B) {
-		for index := 0; index < b.N; index++ {
-			_, err := evaluator.Evaluate(context.Background(), req)
-			if err == nil || !strings.Contains(err.Error(), "record budget exceeded") {
-				b.Fatalf("error=%v", err)
-			}
+	// Keep the byte bound that catches copying before rejection, without a
+	// benchmark's time-based calibration in the ordinary regression suite.
+	const runs = 100
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for index := 0; index < runs; index++ {
+		_, err := evaluator.Evaluate(context.Background(), req)
+		if err == nil || !strings.Contains(err.Error(), "record budget exceeded") {
+			t.Fatalf("error=%v", err)
 		}
-	})
-	if allocation.AllocedBytesPerOp() > 64<<10 {
-		t.Fatalf("oversized PRIMARY was copied before rejection: %d bytes/op", allocation.AllocedBytesPerOp())
+	}
+	runtime.ReadMemStats(&after)
+	if bytesPerOp := (after.TotalAlloc - before.TotalAlloc) / runs; bytesPerOp > 64<<10 {
+		t.Fatalf("oversized PRIMARY was copied before rejection: %d bytes/op", bytesPerOp)
 	}
 }
 
-// This measures one supported 500-record series, not the process heap or the
-// maximum combination of levels and history. The input is built outside timing.
+// Keep the supported 500-record shape and its folded state mutation. Capacity
+// measurement belongs in the opt-in profile, not a calibrated loop in this test.
 func TestEvaluatorRetainsSupportedRecordLimit(t *testing.T) {
 	records := make([]contract.CanonicalRecordV2, 500)
 	for i := range records {
@@ -106,18 +112,13 @@ func TestEvaluatorRetainsSupportedRecordLimit(t *testing.T) {
 	evaluator := newEvaluator(t)
 	evaluator.limits.MaxRecords = 500
 	evaluator.limits.Trigger.MaxEvidenceBytesPerEvent = 64 << 10
-	allocation := testing.Benchmark(func(b *testing.B) {
-		for i := 0; i < b.N; i++ {
-			result, err := evaluator.Evaluate(context.Background(), req)
-			if err != nil {
-				b.Fatal(err)
-			}
-			if len(result.Plans) != 1 || len(result.Plans[0].LevelOutcomes) != 500 || len(result.Plans[0].StateResults) != 1 || len(result.Plans[0].StateResults[0].Events) != 500 {
-				b.Fatal("supported series lost records or exceeded one folded state mutation")
-			}
-		}
-	})
-	t.Logf("500 records, one level, 4 KiB dimensions: %d bytes/op (total allocations, not live heap)", allocation.AllocedBytesPerOp())
+	result, err := evaluator.Evaluate(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Plans) != 1 || len(result.Plans[0].LevelOutcomes) != 500 || len(result.Plans[0].StateResults) != 1 || len(result.Plans[0].StateResults[0].Events) != 500 {
+		t.Fatal("supported series lost records or exceeded one folded state mutation")
+	}
 }
 
 func TestEvaluatorFoldsSameSeriesRecordsInSourceOrder(t *testing.T) {

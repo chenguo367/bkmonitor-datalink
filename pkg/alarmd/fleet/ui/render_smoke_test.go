@@ -740,7 +740,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	output, err := exec.Command(node, filepath.Join(dir, "smoke.js"), dir).CombinedOutput()
+	command := exec.Command(node, filepath.Join(dir, "smoke.js"), dir)
+	// The expected clock text uses UTC+8 and a 24-hour locale. Keep the
+	// subprocess deterministic without changing the page's browser locale.
+	command.Env = append(os.Environ(), "TZ=Asia/Shanghai", "LANG=en_GB.UTF-8", "LC_ALL=en_GB.UTF-8")
+	output, err := command.CombinedOutput()
 	text := strings.TrimSpace(string(output))
 	if dump := os.Getenv("FLEET_SMOKE_DUMP"); dump != "" {
 		// The whole rendering, for reading the sentences a change produced
@@ -1168,7 +1172,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"qg-no-data", "—", "无数据 · FULL_EMPTY_COMPLETED", "—"},
 		{"qg-plain", "—", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
 		{"qg-guard-held", "—", "完成 · CONFIG_DRIFT（保护沿用，非本轮）", "3 个窗口 · 短 1 · 空 0 · 新 0 · 连续 29 轮 · 最差 5/9（持久化保护要求的，可大于策略配置）"},
-		{"qg-stuck-slot", "— · 卡在 " + at.Add(-3*time.Minute).In(time.Local).Format("15:04:05") + " 这个 Slot，第 3 次失败", "失败 · error", "—"},
+		{"qg-stuck-slot", "— · 卡在 " + at.Add(-3*time.Minute).In(time.FixedZone("UTC+8", 8*60*60)).Format("15:04:05") + " 这个 Slot，第 3 次失败", "失败 · error", "—"},
 		{"qg-late", "迟到 12 秒", "完成 · HISTORY_WARMING", "—"},
 		{"qg-missed-turn", "超期 4 分 0 秒", "完成 · QUERY_TIMEOUT", "—"},
 		{"qg-never", "接管后未跑", "完成 · COMPLETED_WITH_UNAVAILABLE", "—"},
