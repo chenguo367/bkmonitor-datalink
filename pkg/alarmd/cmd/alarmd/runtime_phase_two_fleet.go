@@ -17,6 +17,7 @@ import (
 	"time"
 
 	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
@@ -234,6 +235,12 @@ type fleetPublisher struct {
 	// platformSettings reports the state of this replica's copy of the
 	// platform's settings. Nil on a bundle that has none.
 	platformSettings func() *fleet.PlatformSettingsFacts
+	// outputProtocol is the wire format choice this process runs with, read
+	// once from its configuration at assembly: the configuration does not
+	// change under a running process, and what it decides is frozen into
+	// each Plan by the control leader anyway. Nil on a publisher built by
+	// hand, and the snapshot then carries no choice.
+	outputProtocol *fleet.OutputProtocolFacts
 }
 
 // fleetOverdueWakeCeiling bounds how many parked objects one publish carries.
@@ -318,6 +325,16 @@ func (publisher *fleetPublisher) publishOnce(ctx context.Context) {
 // so the two types can differ in package without differing in content.
 func fleetBuildFacts(build metric.BuildInfo) fleet.BuildFacts {
 	return fleet.BuildFacts{Version: build.Version, Commit: build.Commit, SchemaVersion: build.SchemaVersion}
+}
+
+// fleetOutputProtocolFacts is the choice this process runs with: the word the
+// reconciler was configured with -- the same call, so the fleet cannot
+// publish one word while the Plans are built under another -- and whether the
+// configuration spelled it. Empty in the configuration is the default, auto,
+// and is published as auto with explicit false rather than as an empty word:
+// an empty word is what an older build publishes by publishing nothing.
+func fleetOutputProtocolFacts(cfg config.Config) *fleet.OutputProtocolFacts {
+	return &fleet.OutputProtocolFacts{Configured: cfg.OutputProtocol(), Explicit: cfg.PhaseTwo.Output.Protocol != ""}
 }
 
 // buildFacts is the build this publisher was given, or nil when it was given
@@ -429,6 +446,10 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.readiness != nil {
 		snapshot.Readiness = publisher.readiness()
+	}
+	if publisher.outputProtocol != nil {
+		facts := *publisher.outputProtocol
+		snapshot.OutputProtocol = &facts
 	}
 	// And the objects whose rounds end without a basis to decide recovery.
 	// Beside the anomalies for a different reason than the pool: not "this is

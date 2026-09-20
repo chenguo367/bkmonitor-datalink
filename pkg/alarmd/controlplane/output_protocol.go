@@ -17,6 +17,39 @@ const (
 	outputProtocolNative = "native"
 )
 
+// OutputProtocolChoices is the same three words as a list, for the readers
+// that show a replica's choice and need to know every word it can be. It is
+// the vocabulary the fleet publishes on a snapshot; a word outside it is a
+// build this reader does not know, not a fourth protocol.
+var OutputProtocolChoices = []string{outputProtocolAuto, outputProtocolLegacy, outputProtocolNative}
+
+// How a Plan's effective wire format was decided, as the strategy-level read
+// reports it.
+const (
+	// WireFormatDecidedFrozen: the output context carries the word the
+	// control leader froze when it built the Plan.
+	WireFormatDecidedFrozen = "FROZEN"
+	// WireFormatDecidedByRevision: the output context predates the choice and
+	// carries no word; the rule that was the whole behaviour then -- a frozen
+	// revision publishes natively -- decides, and every reader of the object
+	// applies the same rule.
+	WireFormatDecidedByRevision = "REVISION_RULE"
+)
+
+// EffectiveWireFormat is the format the sink writes for a Plan whose output
+// context says frozen, and how that was decided. It exists so the read that
+// explains "what did auto choose for this strategy" applies the one rule the
+// Plan readers apply, rather than re-deriving it from the deployment's
+// current choice -- which is a different fact, and can have changed since
+// the Plan was built.
+func EffectiveWireFormat(frozen string, snapshotRevision int64) (format, decidedBy string) {
+	if frozen != "" {
+		return frozen, WireFormatDecidedFrozen
+	}
+	format, _ = resolveWireFormat("", snapshotRevision)
+	return format, WireFormatDecidedByRevision
+}
+
 // resolveWireFormat turns the deployment's choice into the format this Plan
 // publishes, which is a different vocabulary on purpose: the choice says what a
 // deployment wants, the format says what bytes are written, and "auto" is not a
