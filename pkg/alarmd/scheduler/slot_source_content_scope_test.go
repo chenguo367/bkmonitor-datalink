@@ -33,7 +33,7 @@ func TestAFrozenSlotDeclaresItsSegmentsContent(t *testing.T) {
 		t.Fatalf("Next() due=%v error=%v", due, err)
 	}
 	if slot.Dispatch.ContentScope != "qg-object-a" {
-		t.Fatalf("frozen Slot content scope = %q, want the Segment's object digest", slot.Dispatch.ContentScope)
+		t.Fatalf("frozen Slot content scope = %q, want the open Segment's object digest", slot.Dispatch.ContentScope)
 	}
 }
 
@@ -51,10 +51,37 @@ func TestASegmentWithoutContentAddressingDeclaresNothing(t *testing.T) {
 	}
 }
 
+// A Slot under a closed Segment is a replay of a time that Segment covered,
+// executed under the content that governed it; it declares nothing and runs
+// under the lease alone. Declaring the old content would have the record
+// refuse every replay once a change took effect, and a Query Group
+// recovering across a publication would never catch up.
+func TestASlotUnderAClosedSegmentDeclaresNothing(t *testing.T) {
+	end := execution.EvaluationTime(120)
+	closed := schedulerSchedule(t, 60, 60, &end, "snapshot-1", 1)
+	closed.Segment.ObjectDigest = "qg-object-old"
+	open := schedulerSchedule(t, 60, 120, nil, "snapshot-2", 2)
+	open.Segment.ObjectDigest = "qg-object-new"
+	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{closed, open}}
+	source := newProductionSlotSourceForTest(t, catalog, missingProgress(), time.Unix(200, 0))
+
+	slot, due, _, err := source.Next(context.Background(), "query-group-1")
+	if err != nil || !due || slot.Contract.Slot.EvaluationTime != 60 {
+		t.Fatalf("Next() = (%+v, %t, %v), want the replayed Slot at 60", slot.Contract.Slot, due, err)
+	}
+	if slot.Dispatch.ContentScope != "" {
+		t.Fatalf("a replay under the closed Segment declared %q, want nothing", slot.Dispatch.ContentScope)
+	}
+	if got := declaredContentScope(open.Segment); got != "qg-object-new" {
+		t.Fatalf("the open Segment declares %q, want its digest", got)
+	}
+}
+
 // A retry rebuilt from the persisted projection declares the content the
-// first attempt was begun under, even when the live Segment has since moved
-// to other content: the retry retries that attempt.
-func TestARetryFromTheProjectionDeclaresTheContentItWasBegunUnder(t *testing.T) {
+// first attempt was begun under while that Segment is still the open one;
+// once the timeline has moved past it, the retry is a replay and declares
+// nothing -- and so does a retry that cannot read the timeline at all.
+func TestARetryFromTheProjectionDeclaresWhatItWasBegunUnderWhileTheSegmentIsOpen(t *testing.T) {
 	schedule := schedulerSchedule(t, 60, 60, nil, "snapshot-1", 1)
 	schedule.Segment.ObjectDigest = "qg-object-a"
 	catalog := &fakeSlotCatalog{t: t, schedules: []execution.FrozenQueryGroupSchedule{schedule}}
@@ -75,15 +102,27 @@ func TestARetryFromTheProjectionDeclaresTheContentItWasBegunUnder(t *testing.T) 
 	load := foundProgress(slot.ExpectedNextSlot, 0)
 	load.Progress.UnfinishedSlot = &projection
 	catalog.freezeErr = controlplane.ErrSnapshotUnavailable
-	// The live Segment has moved on; the retry must not pick that up.
-	catalog.schedules[0].Segment.ObjectDigest = "qg-object-b"
+
+	// Still the open Segment with that content: the retry declares it.
 	restarted := newProductionSlotSourceForTest(t, catalog, load, time.Unix(200, 0))
 	restored, due, _, err := restarted.Next(context.Background(), "query-group-1")
-	if err != nil || !due || restored.Contract != slot.Contract {
-		t.Fatalf("Next(restarted) = (%+v, %t, %v)", restored, due, err)
+	if err != nil || !due || restored.Contract != slot.Contract || restored.Dispatch.ContentScope != "qg-object-a" {
+		t.Fatalf("Next(restarted, Segment open) = (%+v, %t, %v), want the begun-under content declared", restored, due, err)
 	}
-	if restored.Dispatch.ContentScope != "qg-object-a" {
-		t.Fatalf("retry content scope = %q, want the content the attempt was begun under, qg-object-a", restored.Dispatch.ContentScope)
+
+	// The timeline has moved past it: the retry is a replay under the lease.
+	end := execution.EvaluationTime(120)
+	catalog.schedules[0].Segment.End = &end
+	later := schedulerSchedule(t, 60, 120, nil, "snapshot-2", 2)
+	later.Segment.ObjectDigest = "qg-object-b"
+	catalog.schedules = append(catalog.schedules, later)
+	replayed := newProductionSlotSourceForTest(t, catalog, load, time.Unix(200, 0))
+	restored, due, _, err = replayed.Next(context.Background(), "query-group-1")
+	if err != nil || !due || restored.Contract != slot.Contract {
+		t.Fatalf("Next(restarted, Segment closed) = (%+v, %t, %v)", restored, due, err)
+	}
+	if restored.Dispatch.ContentScope != "" {
+		t.Fatalf("a retry under a closed Segment declared %q, want nothing", restored.Dispatch.ContentScope)
 	}
 }
 

@@ -131,3 +131,69 @@ func TestCurrentContentScopesReadTheActivationsManifest(t *testing.T) {
 		t.Fatal("a failed activation read returned digests")
 	}
 }
+
+// The pre-cutover writer names the new content in the record of each
+// changing Query Group, under the same gate as the round and against the
+// revision it read; it names nothing for a fleet that does not all declare,
+// nothing for a Query Group with no record, and nothing for a record already
+// on or pending that content.
+func TestThePreCutoverWriterNamesChangedContentUnderTheFleetsGate(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	worker := func(declares bool) ownership.WorkerRegistration {
+		registration := ownership.WorkerRegistration{
+			WorkerID: "worker-1", AssignmentReadiness: ownership.WorkerReady, DependencyStatus: ownership.DependencyHealthy,
+			DeploymentProfile: "standard", CapabilitiesDigest: "d", ExpiresAt: now.Add(time.Minute),
+		}
+		if declares {
+			registration.Capabilities = []string{ownership.CapabilityContentScope}
+		}
+		return registration
+	}
+	record := func(scope, pending string) ownership.AssignmentRecord {
+		return ownership.AssignmentRecord{
+			QueryGroup: "query-group-1", DesiredWorkerID: "worker-1", AssignmentGeneration: 2, RecordRevision: 7, ControlEpoch: 1,
+			PlacementReason: ownership.PlacementRebalance, AssignedAt: now.Add(-time.Minute), ContentScope: scope, PendingContentScope: pending,
+		}
+	}
+	cases := []struct {
+		name      string
+		declares  bool
+		record    ownership.AssignmentRecord
+		changes   map[execution.QueryGroupIdentity]execution.ObjectDigest
+		wantScope string
+	}{
+		{name: "changed content is named", declares: true, record: record("old", ""), changes: map[execution.QueryGroupIdentity]execution.ObjectDigest{"query-group-1": "new"}, wantScope: "new"},
+		{name: "a fleet with a silent worker gets nothing", declares: false, record: record("old", ""), changes: map[execution.QueryGroupIdentity]execution.ObjectDigest{"query-group-1": "new"}},
+		{name: "a record already pending that content is left alone", declares: true, record: record("old", "new"), changes: map[execution.QueryGroupIdentity]execution.ObjectDigest{"query-group-1": "new"}},
+		{name: "a record already on that content is left alone", declares: true, record: record("new", ""), changes: map[execution.QueryGroupIdentity]execution.ObjectDigest{"query-group-1": "new"}},
+		{name: "a Query Group with no record is the round's to place", declares: true, record: record("old", ""), changes: map[execution.QueryGroupIdentity]execution.ObjectDigest{"query-group-2": "new"}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			store := &fakePhaseTwoOwnershipStore{now: now, worker: worker(test.declares), assignment: test.record}
+			reconciler, err := scheduler.NewReconciler(scheduler.NewRouter(nil), store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runtime := &productionPhaseTwoOwnership{reconciler: reconciler, dependencies: productionPhaseTwoOwnershipDependencies{
+				Store: store, WorkerID: "worker-1", Now: func() time.Time { return now }, ControlLeaderTTL: time.Minute,
+				Observer: observability.NopObserver{}, Reconcile: reconciler, ContentScopes: noContentScopes,
+			}}
+			runtime.PublishContentScopes(context.Background(), test.changes)
+			if test.wantScope == "" {
+				if len(store.decisions) != 0 {
+					t.Fatalf("published %+v, want nothing", store.decisions)
+				}
+				return
+			}
+			if len(store.decisions) != 1 {
+				t.Fatalf("published %+v, want exactly one scope decision", store.decisions)
+			}
+			decision := store.decisions[0]
+			if decision.QueryGroup != "query-group-1" || decision.ContentScope != test.wantScope || decision.WithdrawContentScope ||
+				decision.DesiredWorkerID != "worker-1" || decision.PlacementReason != ownership.PlacementRebalance || decision.ExpectedRecordRevision != 7 {
+				t.Fatalf("decision = %+v, want the record's placement kept, revision 7 expected and scope %q", decision, test.wantScope)
+			}
+		})
+	}
+}

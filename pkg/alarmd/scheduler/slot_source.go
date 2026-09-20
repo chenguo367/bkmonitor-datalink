@@ -519,7 +519,7 @@ func (source *ProductionSlotSource) Next(
 		RecoveryUntilUnixMilli:         recoveryUntil,
 		KeepUntilUnixMilli:             keepUntil,
 		Dispatch: SlotDispatchContext{Operation: operation, OwnerFence: currentFence,
-			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: string(schedule.Segment.ObjectDigest)},
+			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: declaredContentScope(schedule.Segment)},
 		ExpectedNextSlot: nextSlot,
 		Recovery:         recovery,
 	}
@@ -611,6 +611,45 @@ func shortPeriodCohort(schedule execution.FrozenQueryGroupSchedule, slot executi
 // nothing; a Slot must not fail to resume because the schedule under it could
 // not be read, which is a state a resumed Slot is more likely to be in than
 // any other.
+// declaredContentScope is the content a Slot frozen from the Segment
+// declares to its fenced writes (decision-016): the Segment's ObjectDigest
+// while the Segment is the open one, nothing once it is closed.
+//
+// The content scope guards one thing: a worker whose view of the timeline
+// is behind, executing a Slot under a Segment it still believes open when
+// the leader has since cut a new one. Such a Slot declares the old content
+// and the record, which by then names the new, refuses it. A Slot under a
+// Segment the worker itself knows to be closed is not that: it is a replay
+// of a time the closed Segment covered, executed under the content that
+// governed that time, which is what the timeline is for -- a recovery walks
+// old Segments for hours after a publication. Declaring the old content
+// there would have the record refuse every replay once the change took
+// effect, and the Query Group would never catch up. Replays run under the
+// lease alone, as they always have.
+func declaredContentScope(segment execution.ScheduleSegmentFact) string {
+	if segment.End != nil {
+		return ""
+	}
+	return string(segment.ObjectDigest)
+}
+
+// projectionContentScope is declaredContentScope for a Slot rebuilt from
+// its persisted projection: the content the first attempt froze under, if
+// the live timeline still has that Segment open with that content; nothing
+// otherwise, including when the timeline cannot be read -- a retry that
+// cannot tell is a replay under the lease alone, never a declared write on
+// content it cannot vouch for.
+func (source *ProductionSlotSource) projectionContentScope(ctx context.Context, projection execution.UnfinishedSlotProjection) string {
+	if projection.ContentScope == "" {
+		return ""
+	}
+	schedule, err := source.catalog.ReadFrozenSchedule(ctx, source.queryGroup, projection.Contract.Slot.EvaluationTime)
+	if err != nil || schedule.Segment.End != nil || string(schedule.Segment.ObjectDigest) != projection.ContentScope {
+		return ""
+	}
+	return projection.ContentScope
+}
+
 func (source *ProductionSlotSource) cohortForSlot(ctx context.Context, slot execution.EvaluationTime) string {
 	schedule, err := source.catalog.ReadFrozenSchedule(ctx, source.queryGroup, slot)
 	if err != nil {
@@ -687,10 +726,12 @@ func (source *ProductionSlotSource) slotFromProjection(
 		EarliestQueryDeadlineUnixMilli: projection.EarliestQueryDeadlineUnixMilli,
 		RecoveryUntilUnixMilli:         recoveryUntil, KeepUntilUnixMilli: projection.KeepUntilUnixMilli,
 		// The content the first attempt froze under, from the projection it
-		// wrote down; a retry declares what it retries, not what the live
-		// Segment says now.
+		// wrote down, declared only while that Segment is still the open one:
+		// a retry of a Slot the timeline has since moved past is a replay,
+		// and replays declare nothing (declaredContentScope).
 		Dispatch: SlotDispatchContext{Operation: operation, OwnerFence: currentFence,
-			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: projection.ContentScope},
+			AssignmentGeneration: currentAssignment.AssignmentGeneration,
+			ContentScope:         source.projectionContentScope(ctx, projection)},
 		ExpectedNextSlot: projection.Contract.Slot.EvaluationTime, Recovery: recovery,
 		ShortPeriodCohort: source.cohortForSlot(ctx, projection.Contract.Slot.EvaluationTime),
 	}
@@ -757,7 +798,7 @@ func (source *ProductionSlotSource) snapshotUnavailableSlot(
 		RecoveryUntilUnixMilli:         recoveryUntil,
 		KeepUntilUnixMilli:             keepUntil,
 		Dispatch: SlotDispatchContext{Operation: operation, OwnerFence: currentFence,
-			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: string(schedule.Segment.ObjectDigest)},
+			AssignmentGeneration: currentAssignment.AssignmentGeneration, ContentScope: declaredContentScope(schedule.Segment)},
 		ExpectedNextSlot: nextSlot,
 		Recovery:         recovery,
 	}

@@ -2375,6 +2375,9 @@ type fakePhaseTwoOwnershipStore struct {
 	renewCalls       int
 	renewLeaderErr   func() error
 	renewLeaderCalls int
+	// decisions is every Assignment decision published, in order, so a test
+	// can read what a publication was conditioned on and what it carried.
+	decisions []ownership.AssignmentDecision
 }
 
 func (store *fakePhaseTwoOwnershipStore) renewCount() int {
@@ -2436,10 +2439,12 @@ func (store *fakePhaseTwoOwnershipStore) PublishAssignment(
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	store.publishAssignmentCalls++
+	store.decisions = append(store.decisions, decision)
 	store.assignment = ownership.AssignmentRecord{
 		QueryGroup: decision.QueryGroup, DesiredWorkerID: decision.DesiredWorkerID,
 		AssignmentGeneration: 1, RecordRevision: 1, ControlEpoch: authority.Fence.OwnerEpoch,
 		PlacementReason: decision.PlacementReason, AssignedAt: decision.DecidedAt,
+		ContentScope: decision.ContentScope,
 	}
 	return store.assignment, nil
 }
