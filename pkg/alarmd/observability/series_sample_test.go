@@ -25,6 +25,25 @@ func sampleFixture(t testing.TB, capacity, records int) (*SeriesSampler, SeriesS
 	return s, v, c
 }
 
+func TestSeriesSampleBudgetIsIndependentOfLifecycleAllocation(t *testing.T) {
+	limits := SeriesSampleLimits{
+		RecordsPerMinute: 2 * TargetFlowMaxRecords,
+		BytesPerMinute:   2 * TargetFlowMaxBytes,
+		QueueCapacity:    1,
+	}
+	sampler, err := NewSeriesSampler(limits)
+	if err != nil {
+		t.Fatalf("resource-derived sample allocation above lifecycle limits was rejected: %v", err)
+	}
+	if sampler.Limits() != limits {
+		t.Fatalf("sample allocation changed: got %+v, want %+v", sampler.Limits(), limits)
+	}
+	limits.QueueCapacity = limits.RecordsPerMinute + 1
+	if _, err := NewSeriesSampler(limits); err == nil {
+		t.Fatal("queue capacity above the sample record budget was accepted")
+	}
+}
+
 func TestSeriesSampleDisabledAllocatesNothing(t *testing.T) {
 	s, v, c := sampleFixture(t, 1, 2)
 	cases := map[string]struct {

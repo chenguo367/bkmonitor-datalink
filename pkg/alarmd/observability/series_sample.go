@@ -174,8 +174,8 @@ func NewSeriesSampler(limits SeriesSampleLimits) (*SeriesSampler, error) {
 	if limits.RecordsPerMinute <= 0 || limits.BytesPerMinute < SeriesSampleMaxBytes || limits.QueueCapacity <= 0 {
 		return nil, errors.New("series sample: positive resource-derived record, byte and queue budgets are required")
 	}
-	if limits.RecordsPerMinute > TargetFlowMaxRecords-targetFlowCriticalReserveRecords || limits.BytesPerMinute > TargetFlowMaxBytes-targetFlowCriticalReserveBytes || limits.QueueCapacity > limits.RecordsPerMinute {
-		return nil, errors.New("series sample: allocation exceeds diagnostic ceiling")
+	if limits.QueueCapacity > limits.RecordsPerMinute {
+		return nil, errors.New("series sample: queue allocation exceeds record budget")
 	}
 	s := &SeriesSampler{limits: limits, pool: make(chan *SeriesSampleReservation, limits.QueueCapacity), queue: make(chan *SeriesSampleReservation, limits.QueueCapacity), now: time.Now, process: newProcessIdentity()}
 	for i := 0; i < limits.QueueCapacity; i++ {
