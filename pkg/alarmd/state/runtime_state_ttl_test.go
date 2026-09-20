@@ -534,3 +534,57 @@ func TestTheHalfStepOffsetNeverShortensATTL(t *testing.T) {
 		t.Fatalf("offsetFromTheStep with no requirement = %s, want the input unchanged", got)
 	}
 }
+
+// The offset survives both bounds, through StateTTL itself rather than the
+// helper. A floor that clamps a short retention up to a whole minute used to
+// land the TTL back on the step; a ceiling that the retention fit exactly used
+// to be pushed over and refused, and a Plan refused here is a Plan that stops
+// remembering. Under the ceiling the TTL steps back half a step instead.
+func TestTheHalfStepOffsetSurvivesTheFloorAndTheCeiling(t *testing.T) {
+	step := time.Minute
+	fingerprint := strings.Repeat("a", 64)
+	requirementOf := func(points uint32) []LevelRequirement {
+		return []LevelRequirement{NewLevelRequirement(
+			execution.StateRetentionRequirement{LevelID: 1, RetentionPoints: points, EvaluationInterval: step},
+			fingerprint, points)}
+	}
+	t.Run("clamped up to the floor", func(t *testing.T) {
+		// One point and no margin derive one minute; the floor is five.
+		ttl, err := StateTTL(requirementOf(1), 0, 5*time.Minute, 30*24*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ttl != 5*time.Minute+30*time.Second {
+			t.Fatalf("TTL = %s, want the floor moved half a step off the phase (5m30s)", ttl)
+		}
+	})
+	t.Run("fits the ceiling exactly", func(t *testing.T) {
+		// Eleven points and no margin derive eleven minutes; the ceiling is eleven.
+		ttl, err := StateTTL(requirementOf(11), 0, time.Minute, 11*time.Minute)
+		if err != nil {
+			t.Fatalf("a retention that fits the ceiling was refused: %v", err)
+		}
+		if ttl != 10*time.Minute+30*time.Second {
+			t.Fatalf("TTL = %s, want the previous half step under the ceiling (10m30s)", ttl)
+		}
+		if ttl%step != step/2 {
+			t.Fatalf("TTL %s is not half a step off", ttl)
+		}
+	})
+	t.Run("over the ceiling is still refused", func(t *testing.T) {
+		if _, err := StateTTL(requirementOf(12), 0, time.Minute, 11*time.Minute); !errors.Is(err, ErrStateBudget) {
+			t.Fatalf("StateTTL() error = %v, want the budget refusal", err)
+		}
+	})
+	t.Run("ceiling too tight to step back stays put", func(t *testing.T) {
+		// Derived two minutes, floor two minutes, ceiling two minutes: neither
+		// half step fits, and the bounds win over the phase.
+		ttl, err := StateTTL(requirementOf(2), 0, 2*time.Minute, 2*time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ttl != 2*time.Minute {
+			t.Fatalf("TTL = %s, want the bounds' 2m0s when no half step fits between them", ttl)
+		}
+	})
+}

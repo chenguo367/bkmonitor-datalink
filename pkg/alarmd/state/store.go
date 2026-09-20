@@ -595,14 +595,42 @@ func StateTTL(requirements []LevelRequirement, restartMargin, minimum, maximum t
 			required = candidate
 		}
 	}
-	required = offsetFromTheStep(required, requirements)
-	if required < minimum {
-		required = minimum
-	}
 	if required > maximum {
 		return 0, fmt.Errorf("%w: required TTL %s exceeds maximum %s", ErrStateBudget, required, maximum)
 	}
-	return required, nil
+	if required < minimum {
+		required = minimum
+	}
+	// The offset goes on after both bounds, so that neither bound can undo
+	// it. Before the floor, a short retention clamped up to a whole-minute
+	// floor lost the offset and kept the phase; before the ceiling, a
+	// retention that fit the ceiling exactly was pushed over it and refused,
+	// and a Plan refused here is a Plan that stops remembering. Under the
+	// ceiling the offset steps back to the previous half step instead: still
+	// past the horizon the TTL was derived to outlive, half a step less of the
+	// restart margin, and the Plan keeps its memory.
+	offset := offsetFromTheStep(required, requirements)
+	if offset > maximum {
+		if step := longestStep(requirements); step > 0 && offset-step >= minimum {
+			offset -= step
+		} else {
+			offset = required
+		}
+	}
+	return offset, nil
+}
+
+// longestStep is the step the offset keeps the expiry away from: the longest
+// interval among the requirements. The compiler holds every Level of a Plan to
+// the Plan's own interval, so there is one.
+func longestStep(requirements []LevelRequirement) time.Duration {
+	var step time.Duration
+	for _, requirement := range requirements {
+		if requirement.EvaluationInterval > step {
+			step = requirement.EvaluationInterval
+		}
+	}
+	return step
 }
 
 // offsetFromTheStep moves a TTL to the next duration that sits half a step
@@ -622,15 +650,12 @@ func StateTTL(requirements []LevelRequirement, restartMargin, minimum, maximum t
 // step of extra life per key, and less than 3% on the deployment it was
 // measured on.
 //
-// The step is the longest interval among the requirements: the compiler
-// holds every Level of a Plan to the Plan's own interval, so there is one.
+// Generation-scoped keys are not moved: GenerationScopedTTL lifts them to a
+// whole-day floor, they are renewed on every read, and nothing writes them at
+// a Slot's phase, so the property "TTL mod step == half a step" is one this
+// function gives Runtime State keys alone.
 func offsetFromTheStep(ttl time.Duration, requirements []LevelRequirement) time.Duration {
-	var step time.Duration
-	for _, requirement := range requirements {
-		if requirement.EvaluationInterval > step {
-			step = requirement.EvaluationInterval
-		}
-	}
+	step := longestStep(requirements)
 	if step <= 0 {
 		return ttl
 	}
