@@ -78,14 +78,14 @@ const (
 	// StageAssignmentSwept names one sweep of the Assignment records by the
 	// Control Leader: how many named retired Query Groups and how many of
 	// those it reclaimed (AssignmentSweepFacts).
-	StageAssignmentSwept        = "assignment_swept"
+	StageAssignmentSwept = "assignment_swept"
 	// StageViewPublished names one publication of the Control Leader's
 	// desired set over the view stream (decision-016): the term revision
 	// it produced and how many Workers' views moved. StageViewSession names
 	// one Worker's stream opening, being refused or closing, with why
 	// (ViewStreamFacts).
-	StageViewPublished = "view_published"
-	StageViewSession   = "view_session"
+	StageViewPublished          = "view_published"
+	StageViewSession            = "view_session"
 	StageAssignmentIndexRead    = "assignment_index_read"
 	StageTakeoverStarted        = "takeover_started"
 	StageTakeoverCompleted      = "takeover_completed"

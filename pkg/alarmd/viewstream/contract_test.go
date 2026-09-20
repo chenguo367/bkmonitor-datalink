@@ -373,13 +373,26 @@ func TestTheFingerprintMovesWheneverAProjectionWould(t *testing.T) {
 		t.Fatal("two builds of one desired set must have one fingerprint")
 	}
 	for name, mutate := range map[string]func(*viewstream.Desired){
-		"publication snapshot":  func(d *viewstream.Desired) { d.Publication.SnapshotRevision = "snap-x" },
-		"publication epoch":     func(d *viewstream.Desired) { d.Publication.PublicationEpoch++ },
-		"activation record":     func(d *viewstream.Desired) { d.Publication.ActivationRecordRevision++ },
-		"assignment worker":     func(d *viewstream.Desired) { a := d.Assignments["qg-1"]; a.DesiredWorkerID = "w2"; d.Assignments["qg-1"] = a },
-		"assignment revision":   func(d *viewstream.Desired) { a := d.Assignments["qg-1"]; a.Revision++; d.Assignments["qg-1"] = a },
-		"assignment scope":      func(d *viewstream.Desired) { a := d.Assignments["qg-1"]; a.ContentScope = "other"; d.Assignments["qg-1"] = a },
-		"assignment pending":    func(d *viewstream.Desired) { a := d.Assignments["qg-1"]; a.PendingContentScope = "p"; a.EffectiveAtMs = 5; d.Assignments["qg-1"] = a },
+		"publication snapshot": func(d *viewstream.Desired) { d.Publication.SnapshotRevision = "snap-x" },
+		"publication epoch":    func(d *viewstream.Desired) { d.Publication.PublicationEpoch++ },
+		"activation record":    func(d *viewstream.Desired) { d.Publication.ActivationRecordRevision++ },
+		"assignment worker": func(d *viewstream.Desired) {
+			a := d.Assignments["qg-1"]
+			a.DesiredWorkerID = "w2"
+			d.Assignments["qg-1"] = a
+		},
+		"assignment revision": func(d *viewstream.Desired) { a := d.Assignments["qg-1"]; a.Revision++; d.Assignments["qg-1"] = a },
+		"assignment scope": func(d *viewstream.Desired) {
+			a := d.Assignments["qg-1"]
+			a.ContentScope = "other"
+			d.Assignments["qg-1"] = a
+		},
+		"assignment pending": func(d *viewstream.Desired) {
+			a := d.Assignments["qg-1"]
+			a.PendingContentScope = "p"
+			a.EffectiveAtMs = 5
+			d.Assignments["qg-1"] = a
+		},
 		"content digest":        func(d *viewstream.Desired) { d.Content["qg-1"] = content("obj-1b", "s1") },
 		"content ref":           func(d *viewstream.Desired) { d.Content["qg-1"] = content("obj-1", "s1b") },
 		"content gone/draining": func(d *viewstream.Desired) { delete(d.Content, "qg-1") },
