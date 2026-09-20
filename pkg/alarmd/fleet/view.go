@@ -963,6 +963,10 @@ type Snapshot struct {
 	// records for retired Query Groups. Absent on every follower and on a
 	// leader that has not swept.
 	AssignmentSweep *AssignmentSweepFacts `json:"assignment_sweep,omitempty"`
+	// ViewStream is this replica's account of the view stream: the Leader's
+	// ledger when it leads, Leading false otherwise. Absent on a build before
+	// the stream existed.
+	ViewStream *ViewStreamFacts `json:"view_stream,omitempty"`
 	// Recovered is the problems whose listed objects completed healthily
 	// within RecoveredRetention, by line and fold: the positive evidence a
 	// RECOVERED reading is made of. Absent on a build before it existed.
@@ -1283,6 +1287,19 @@ var DegradationKinds = []DegradationKind{
 }
 
 // endpointByRole is the entry under role in a replica's list, or nil.
+// viewStreamPreferred is whether a snapshot's account of the view stream
+// displaces the one the view holds: a Leader's over a non-Leader's, and
+// among equals the newer.
+func viewStreamPreferred(held, candidate *ViewStreamFacts) bool {
+	if held == nil {
+		return true
+	}
+	if candidate.Leading != held.Leading {
+		return candidate.Leading
+	}
+	return candidate.At.After(held.At)
+}
+
 func endpointByRole(endpoints []Endpoint, role string) *Endpoint {
 	for index := range endpoints {
 		if endpoints[index].Role == role {
@@ -1661,6 +1678,12 @@ type View struct {
 	// AssignmentSweepReplica which one.
 	AssignmentSweep        *AssignmentSweepFacts `json:"assignment_sweep,omitempty"`
 	AssignmentSweepReplica string                `json:"assignment_sweep_replica,omitempty"`
+	// ViewStream is the Leader's account of the view stream -- the newest
+	// snapshot that says it leads; failing any, the newest that says it does
+	// not, so the page can say "no Leader is serving the stream" -- and
+	// ViewStreamReplica which replica.
+	ViewStream        *ViewStreamFacts `json:"view_stream,omitempty"`
+	ViewStreamReplica string           `json:"view_stream_replica,omitempty"`
 	// Source is the newest source round any counted replica published, and
 	// SourceReplica which one. Newest for the same reason Rebalance is: a
 	// replica that stopped being the leader keeps its last round.
@@ -1824,6 +1847,11 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if snapshot.AssignmentSweep != nil && (view.AssignmentSweep == nil || snapshot.AssignmentSweep.At.After(view.AssignmentSweep.At)) {
 			facts := *snapshot.AssignmentSweep
 			view.AssignmentSweep, view.AssignmentSweepReplica = &facts, replica
+		}
+		if snapshot.ViewStream != nil && viewStreamPreferred(view.ViewStream, snapshot.ViewStream) {
+			facts := *snapshot.ViewStream
+			facts.Lagging = append([]ViewStreamLagging(nil), snapshot.ViewStream.Lagging...)
+			view.ViewStream, view.ViewStreamReplica = &facts, replica
 		}
 		if snapshot.Source != nil && (view.Source == nil || snapshot.Source.At.After(view.Source.At)) {
 			facts := *snapshot.Source
