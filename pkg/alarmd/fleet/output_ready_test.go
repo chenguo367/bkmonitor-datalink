@@ -124,3 +124,61 @@ func TestAnOpenOrUnreportedOutputIsNoStanding(t *testing.T) {
 		}
 	}
 }
+
+// Each replica's own dependency record rides on its per-replica row, and the
+// one list the view shows says how many replicas it is one of. On a live
+// deployment "is every replica's output open" could not be answered from the
+// verdict route: the list shown was the replica that published last, and the
+// question had to be put to each process's readiness endpoint. The rows
+// answer it -- and the rows have to be each replica's own, not the shown
+// list copied under every name.
+func TestEachReplicaCarriesItsOwnDependencyRecord(t *testing.T) {
+	snapshots := idleSnapshots()
+	// pod-a published last, so its list is the one shown; its output is open.
+	snapshots[0].TakenAt = now.Add(-5 * time.Second)
+	snapshots[0].StartedAt = now.Add(-2 * time.Hour)
+	snapshots[0].Dependencies = []Endpoint{outputEntry(true, 1, "")}
+	// pod-b's is not, and its list is older.
+	snapshots[1].StartedAt = now.Add(-5 * time.Minute)
+	snapshots[1].Dependencies = []Endpoint{outputEntry(false, 12, "kafka: dial tcp 10.0.0.1:9092: i/o timeout")}
+	view := Aggregate(Expectation{QueryGroups: 0, Known: true}, snapshots, replicas(), now, freshness)
+	if view.DependenciesReplica != "pod-a" || view.DependenciesReplicas != 2 {
+		t.Fatalf("shown list is %q of %d replicas, want pod-a's, one of 2", view.DependenciesReplica, view.DependenciesReplicas)
+	}
+	rows := map[string]ReplicaView{}
+	for _, row := range view.PerReplica {
+		rows[row.Replica] = row
+	}
+	for replica, wantReady := range map[string]bool{"pod-a": true, "pod-b": false} {
+		row, present := rows[replica]
+		if !present {
+			t.Fatalf("no per-replica row for %s: rows = %+v", replica, view.PerReplica)
+		}
+		output := endpointByRole(row.Dependencies, EndpointOutputKafka)
+		if output == nil || output.Ready == nil {
+			t.Fatalf("%s row carries %+v, want its own output entry with the readiness fact", replica, row.Dependencies)
+		}
+		if *output.Ready != wantReady {
+			t.Errorf("%s row says output ready=%v, want %v: the row has to be this replica's own record, not the shown list", replica, *output.Ready, wantReady)
+		}
+	}
+	// The row's list is a copy: a later reader of the snapshot's slice cannot
+	// change what the row says.
+	snapshots[1].Dependencies[0].Address = "changed"
+	if rows["pod-b"].Dependencies[0].Address == "changed" {
+		t.Error("the per-replica row aliases the snapshot's slice")
+	}
+	// A replica that published none (an older build) carries none, and is
+	// not counted among those that did.
+	older := idleSnapshots()
+	older[0].Dependencies = []Endpoint{outputEntry(true, 1, "")}
+	view = Aggregate(Expectation{QueryGroups: 0, Known: true}, older, replicas(), now, freshness)
+	if view.DependenciesReplicas != 1 {
+		t.Errorf("replicas with a list = %d, want 1: pod-b published none", view.DependenciesReplicas)
+	}
+	for _, row := range view.PerReplica {
+		if row.Replica == "pod-b" && row.Dependencies != nil {
+			t.Errorf("pod-b published no dependencies and its row carries %+v", row.Dependencies)
+		}
+	}
+}

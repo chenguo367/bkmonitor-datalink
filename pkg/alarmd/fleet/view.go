@@ -1346,6 +1346,16 @@ type ReplicaView struct {
 	// Build is what this replica reported running. Absent when it reported
 	// none, which the page says rather than filling in.
 	Build *BuildFacts `json:"build,omitempty"`
+	// Dependencies is what this replica has seen of each external system: its
+	// own connection record and, for the output it opens, whether it is open.
+	// The deployment-level list is one replica's -- the newest snapshot's --
+	// and a question about one replica cannot be answered from it: on a live
+	// deployment the question "is every replica's output open" had to be put
+	// to each process's readiness endpoint, because the one list shown was
+	// the replica that happened to publish last. Absent when the replica
+	// published none (an older build). On the verdict route only; the list
+	// route drops it with the other rows it is not about.
+	Dependencies []Endpoint `json:"dependencies,omitempty"`
 }
 
 // BuildFacts is one process's build: the three labels of its build_info
@@ -1539,8 +1549,12 @@ type View struct {
 	// to, and DependenciesReplica which one: the newest snapshot's. Every
 	// replica renders the same coordinates; what differs is what each has
 	// seen of them, and the one shown is the one that published last.
-	Dependencies        []Endpoint `json:"dependencies,omitempty"`
-	DependenciesReplica string     `json:"dependencies_replica,omitempty"`
+	// DependenciesReplicas is how many counted replicas published a list, so
+	// the one shown is read as one of that many and not as the deployment's;
+	// each replica's own is on its PerReplica row.
+	Dependencies         []Endpoint `json:"dependencies,omitempty"`
+	DependenciesReplica  string     `json:"dependencies_replica,omitempty"`
+	DependenciesReplicas int        `json:"dependencies_replicas,omitempty"`
 }
 
 // Aggregate folds the published snapshots into one view.
@@ -1681,9 +1695,12 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			facts := *snapshot.Source
 			view.Source, view.SourceReplica = &facts, replica
 		}
-		if len(snapshot.Dependencies) > 0 && (view.Dependencies == nil || snapshot.TakenAt.After(dependenciesTakenAt)) {
-			view.Dependencies = append([]Endpoint(nil), snapshot.Dependencies...)
-			view.DependenciesReplica, dependenciesTakenAt = replica, snapshot.TakenAt
+		if len(snapshot.Dependencies) > 0 {
+			view.DependenciesReplicas++
+			if view.Dependencies == nil || snapshot.TakenAt.After(dependenciesTakenAt) {
+				view.Dependencies = append([]Endpoint(nil), snapshot.Dependencies...)
+				view.DependenciesReplica, dependenciesTakenAt = replica, snapshot.TakenAt
+			}
 		}
 		// Every replica's own output entry, not only the newest list's: a
 		// replica that cannot open its output is up, ready for nothing and
@@ -1714,6 +1731,11 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			UptimeSeconds: uptimeSeconds(snapshot.StartedAt, now), StartedAt: snapshot.StartedAt,
 			Truncated: snapshot.Truncated(), Capacity: snapshot.Capacity,
 			Build: snapshot.Build,
+		}
+		// This replica's own record of its dependencies, copied so a later
+		// read cannot alias the snapshot's slice.
+		if len(snapshot.Dependencies) > 0 {
+			perReplica.Dependencies = append([]Endpoint(nil), snapshot.Dependencies...)
 		}
 		view.Builds = addToBuildGroup(view.Builds, snapshot.Build, replica)
 		view.Workers.Ready++
