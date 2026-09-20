@@ -70,7 +70,14 @@ func TestARoundThatRanTheSlotIsRememberedAsHoldingNothing(t *testing.T) {
 		want     string
 	}{
 		{decision: "execute_returned", want: observability.HeldByNothing},
-		{decision: "query_readiness_deferred", want: observability.HeldByNothing},
+		{decision: "execution_returned", want: observability.HeldByNothing},
+		// Execute was entered and access handed it back with an instant to
+		// wait for: the Slot did not run, so this round held it. Folding it
+		// into "nothing held me" is how the commonest reason a short-period
+		// Slot misses its window stops being readable -- and it was one of the
+		// three candidates that had to be ruled out by hand the last time four
+		// Query Groups stalled.
+		{decision: "query_readiness_deferred", want: observability.HeldByReadinessDeferred},
 		{decision: "query_cooldown", want: "query_cooldown"},
 		{decision: "admission_denied", want: "admission_denied"},
 		{decision: "single_flight_busy", want: "single_flight_busy"},
@@ -88,6 +95,10 @@ func TestARoundThatRanTheSlotIsRememberedAsHoldingNothing(t *testing.T) {
 			// state, not off whatever a caller happened to pass.
 			cooldownUntil := time.Unix(1_700_124_240, 0)
 			runner.queryCooldown = queryCooldownState{failures: 14, until: cooldownUntil}
+			// And a readiness instant, for the same reason: every row has one
+			// available, so only the row that should carry it may.
+			readyAt := time.Unix(1_700_124_045, 0)
+			runner.sourceNextAt = readyAt
 			runner.rememberHeldBy(test.decision)
 			if runner.heldBy.Decision != test.want {
 				t.Fatalf("rememberHeldBy(%q) = %q, want %q", test.decision, runner.heldBy.Decision, test.want)
@@ -110,6 +121,17 @@ func TestARoundThatRanTheSlotIsRememberedAsHoldingNothing(t *testing.T) {
 				t.Fatalf("held_by = %+v, want no cooldown numbers beside a word that is not the cooldown",
 					runner.heldBy)
 			}
+			// Same rule for the readiness instant: the word that means "wait
+			// until" must say until when, and no other word may carry it.
+			if test.want == observability.HeldByReadinessDeferred {
+				if runner.heldBy.ReadyAtUnixMilli != readyAt.UnixMilli() {
+					t.Fatalf("held_by = %+v, want the instant access told the round to wait for (%d)",
+						runner.heldBy, readyAt.UnixMilli())
+				}
+			} else if runner.heldBy.ReadyAtUnixMilli != 0 {
+				t.Fatalf("held_by = %+v, want no readiness instant beside a word that is not the deferral",
+					runner.heldBy)
+			}
 		})
 	}
 	// And the word for nothing does not reach the line as a held Slot.
@@ -122,6 +144,7 @@ func TestARoundThatRanTheSlotIsRememberedAsHoldingNothing(t *testing.T) {
 // ctxRecordingSource remembers what the Runner carried into each round.
 type ctxRecordingSource struct {
 	seen []*observability.HeldByFacts
+	slot FrozenSlot
 }
 
 func (source *ctxRecordingSource) Next(
@@ -129,7 +152,10 @@ func (source *ctxRecordingSource) Next(
 	_ execution.QueryGroupIdentity,
 ) (FrozenSlot, bool, SlotDueFacts, error) {
 	source.seen = append(source.seen, HeldByFromContext(ctx))
-	return FrozenSlot{}, false, SlotDueFacts{}, nil
+	if source.slot.Contract.Slot.QueryGroup == "" {
+		return FrozenSlot{}, false, SlotDueFacts{}, nil
+	}
+	return source.slot, true, SlotDueFacts{}, nil
 }
 
 // The Runner actually carries its previous round's word into the next round.
@@ -170,5 +196,48 @@ func TestTheRunnerCarriesItsPreviousDecisionIntoTheNextRound(t *testing.T) {
 	if source.seen[1].AtUnixMilli != now.UnixMilli() {
 		t.Fatalf("held_by at = %d, want the instant the previous round decided (%d)",
 			source.seen[1].AtUnixMilli, now.UnixMilli())
+	}
+}
+
+// A Slot deferred for readiness is named as the holder of the Slot after it,
+// end to end through the Runner.
+//
+// The table above pins the word and the instant at the point they are chosen.
+// This is the round trip: Execute is entered, access hands the round back with
+// an instant to wait for, and the next round has to be able to say that is
+// what happened. Before this the deferral was folded into "nothing held me",
+// so the commonest reason a short-period Slot misses its window was the one
+// reason the line could not report.
+func TestAReadinessDeferralHoldsTheNextSlotAndSaysUntilWhen(t *testing.T) {
+	current := time.UnixMilli(1_700_000_000_000)
+	readyAt := current.Add(30 * time.Second)
+	now := current
+	slot := frozenSlot("query-group-1")
+	source := &ctxRecordingSource{slot: slot}
+	runner, err := NewRunner("query-group-1", &fakeSession{fence: slot.Dispatch.OwnerFence}, source,
+		&readinessDeferredExecutor{readyAt: readyAt}, NewFlightCoordinator(), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := runner.RunOne(context.Background()); err != nil {
+		t.Fatalf("deferred round: RunOne() error = %v", err)
+	}
+	// Past the instant the round was told to wait for, so the next round
+	// reaches the source instead of being stopped by the local backoff.
+	now = readyAt.Add(time.Second)
+	if _, _, err := runner.RunOne(context.Background()); err != nil {
+		t.Fatalf("second round: RunOne() error = %v", err)
+	}
+	if len(source.seen) != 2 {
+		t.Fatalf("the source saw %d rounds, want 2", len(source.seen))
+	}
+	held := source.seen[1]
+	if held == nil || held.Decision != observability.HeldByReadinessDeferred {
+		t.Fatalf("second round carried %+v, want the readiness deferral named as the holder", held)
+	}
+	if held.ReadyAtUnixMilli != readyAt.UnixMilli() {
+		t.Fatalf("held_by ready_at = %d, want the instant access gave the previous round (%d). The word alone "+
+			"says the data was not ready; only this says whether it would ever be ready in time",
+			held.ReadyAtUnixMilli, readyAt.UnixMilli())
 	}
 }

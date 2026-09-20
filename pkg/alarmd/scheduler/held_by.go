@@ -44,18 +44,25 @@ func HeldByFromContext(ctx context.Context) *observability.HeldByFacts {
 
 // rememberHeldBy stores this round's decision for the next one.
 //
-// A round that executed held nothing back, so it is remembered as the word for
-// that rather than as itself: the question the next Slot answers is "what kept
-// me from running", and "the previous round ran" is not an answer to it. Every
-// other word is kept exactly as run_one_return_total counts it, so the two
+// A round that ran the Slot held nothing back, so it is remembered as the word
+// for that rather than as itself: the question the next Slot answers is "what
+// kept me from running", and "the previous round ran" is not an answer to it.
+// Every other word is kept as run_one_return_total counts it, so the two
 // readings share one vocabulary.
+//
+// A readiness deferral is not a round that ran. Execute was entered and handed
+// back by access with an instant to wait for, and the Slot did not run -- so
+// "the readiness wait" is exactly the answer the next Slot needs, and folding
+// it into "nothing held me" is how it stops being available. It keeps its own
+// word and carries the instant it was told to wait for, taken from the same
+// accessor the due bound uses for this decision so the two cannot disagree.
 func (runner *Runner) rememberHeldBy(decision string) {
 	if runner == nil {
 		return
 	}
 	word := decision
 	switch decision {
-	case "execute", "execute_returned", "execution_returned", "query_readiness_deferred":
+	case "execute", "execute_returned", "execution_returned":
 		word = observability.HeldByNothing
 	}
 	if !observability.ValidHeldByDecision(word) {
@@ -69,6 +76,11 @@ func (runner *Runner) rememberHeldBy(decision string) {
 		facts.QueryCooldownFailures = runner.queryCooldown.failures
 		if until := runner.queryCooldown.until; !until.IsZero() {
 			facts.QueryCooldownUntilMilli = until.UnixMilli()
+		}
+	}
+	if word == observability.HeldByReadinessDeferred {
+		if readyAt := runner.NextReadyAt(); !readyAt.IsZero() {
+			facts.ReadyAtUnixMilli = readyAt.UnixMilli()
 		}
 	}
 	runner.heldBy = facts

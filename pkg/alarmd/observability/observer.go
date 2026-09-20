@@ -935,6 +935,15 @@ type ReplayExpiryFacts struct {
 // commonest case is a missing key cannot be read as one.
 const HeldByNothing = "none"
 
+// HeldByReadinessDeferred is the round that entered Execute and was handed
+// back by access with an instant to wait for. It is not one of the run
+// outcomes -- that reading folds it into execute_returned, because the round
+// did return from Execute -- but from the next Slot's point of view it is a
+// holder like any other, and the commonest one worth telling apart: "the data
+// was not ready yet" and "the query backend refuses this strategy" are
+// different problems with different owners.
+const HeldByReadinessDeferred = "query_readiness_deferred"
+
 // HeldByFacts is why the round before this one left the Slot unrun.
 //
 // Four Query Groups shed a Slot every round for hours and the completion line
@@ -960,11 +969,17 @@ type HeldByFacts struct {
 	// it runs to says whether this Slot ever had a chance.
 	QueryCooldownFailures   uint32 `json:"query_cooldown_failures,omitempty"`
 	QueryCooldownUntilMilli int64  `json:"query_cooldown_until_ms,omitempty"`
+	// ReadyAtUnixMilli is the instant access told the previous round to wait
+	// for, present only when Decision is the readiness deferral. The word
+	// alone says the data was not ready; this says until when, which is the
+	// difference between a Slot that missed its chance by a moment and one
+	// whose readiness lands past its own deadline every time.
+	ReadyAtUnixMilli int64 `json:"ready_at_ms,omitempty"`
 }
 
 // HeldByDecisions is every value Decision takes, for the partition to
 // pre-create and for a reader to bound the family by.
-var HeldByDecisions = append([]string{HeldByNothing}, RunOutcomes...)
+var HeldByDecisions = append([]string{HeldByNothing, HeldByReadinessDeferred}, RunOutcomes...)
 
 func normalizeHeldByFacts(facts *HeldByFacts) *HeldByFacts {
 	if facts == nil {
@@ -977,11 +992,14 @@ func normalizeHeldByFacts(facts *HeldByFacts) *HeldByFacts {
 	if normalized.Decision != "query_cooldown" {
 		normalized.QueryCooldownFailures, normalized.QueryCooldownUntilMilli = 0, 0
 	}
+	if normalized.Decision != HeldByReadinessDeferred {
+		normalized.ReadyAtUnixMilli = 0
+	}
 	return &normalized
 }
 
 func ValidHeldByDecision(value string) bool {
-	return value == HeldByNothing || ValidRunOutcome(value)
+	return value == HeldByNothing || value == HeldByReadinessDeferred || ValidRunOutcome(value)
 }
 
 // SlotWaitFacts is one blocking wait inside a Slot attempt, named and timed.

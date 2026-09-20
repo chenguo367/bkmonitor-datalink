@@ -326,6 +326,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 					slog.Int64("held_by_cooldown_until", held.QueryCooldownUntilMilli),
 				)
 			}
+			if held.Decision == HeldByReadinessDeferred {
+				attributes = append(attributes, slog.Int64("held_by_ready_at", held.ReadyAtUnixMilli))
+			}
 		}
 	}
 	if facts := observation.SegmentContent; facts != nil {
