@@ -45,6 +45,18 @@ type SourceFacts struct {
 	// Absent age with a present marker is a marker this build could not read.
 	ChangeSignalPresent    bool   `json:"change_signal_present"`
 	ChangeSignalAgeSeconds *int64 `json:"change_signal_age_seconds,omitempty"`
+	// Plans is how many Plans the round's Catalog holds and RevisionedPlans
+	// how many of them carry an authoritative strategy revision -- the fact
+	// that decides, under the automatic protocol choice, whether any event
+	// can go out as the standard raw event. Zero revisioned on a source that
+	// lists strategies is a deployment whose standard output path is
+	// unreachable, and that has to be one number on the first screen rather
+	// than a gate counter that only ever says not gated. Both absent (zero)
+	// on a build before they existed; PlansKnown says the round reported
+	// them.
+	Plans           int  `json:"plans,omitempty"`
+	RevisionedPlans int  `json:"revisioned_plans,omitempty"`
+	PlansKnown      bool `json:"plans_known,omitempty"`
 }
 
 // WithheldGroup is one (disposition, reason) pair the round withheld
