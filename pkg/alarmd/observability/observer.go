@@ -75,6 +75,10 @@ const (
 	StageRebalancePlanned       = "rebalance_planned"
 	StageControlReadsSpent      = "control_reads_spent"
 	StageAssignmentIndexWritten = "assignment_index_written"
+	// StageAssignmentSwept names one sweep of the Assignment records by the
+	// Control Leader: how many named retired Query Groups and how many of
+	// those it reclaimed (AssignmentSweepFacts).
+	StageAssignmentSwept        = "assignment_swept"
 	StageAssignmentIndexRead    = "assignment_index_read"
 	StageTakeoverStarted        = "takeover_started"
 	StageTakeoverCompleted      = "takeover_completed"
@@ -1294,6 +1298,18 @@ func normalizeRebalanceFacts(facts *RebalanceFacts) *RebalanceFacts {
 // but the record still assigns here. Reads is the number of records read
 // to decide, the count the index exists to shrink; FullRead marks a round
 // that read every record because no usable index was there.
+// AssignmentSweepFacts is what one Assignment sweep found and did: records
+// scanned, those naming Query Groups the leader no longer runs, and of those
+// the ones reclaimed, the ones left because a lease on them is still live,
+// and the ones left because they moved under the sweep.
+type AssignmentSweepFacts struct {
+	Scanned     int `json:"scanned"`
+	Retired     int `json:"retired"`
+	Reclaimed   int `json:"reclaimed"`
+	HeldByLease int `json:"held_by_lease"`
+	Changed     int `json:"changed"`
+}
+
 type AssignmentIndexFacts struct {
 	Round        uint64 `json:"round"`
 	ControlEpoch uint64 `json:"control_epoch,omitempty"`
@@ -1897,6 +1913,7 @@ type Observation struct {
 	Rebalance            *RebalanceFacts
 	ControlReads         *ControlReadFacts
 	AssignmentIndex      *AssignmentIndexFacts
+	AssignmentSweep      *AssignmentSweepFacts
 	CursorAdvance        *CursorAdvanceFacts
 	SourceRefresh        *SourceRefreshFacts
 	ActivationFailure    *ActivationFailureFacts
@@ -2885,6 +2902,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentOwnership, StageRebalancePlanned},
 	{ComponentOwnership, StageControlReadsSpent},
 	{ComponentOwnership, StageAssignmentIndexWritten}, {ComponentOwnership, StageAssignmentIndexRead},
+	{ComponentOwnership, StageAssignmentSwept},
 	{ComponentOwnership, StageTakeoverStarted}, {ComponentOwnership, StageTakeoverCompleted},
 	{ComponentOwnership, StageLeaseRenewed}, {ComponentOwnership, StageFenceChecked},
 	{ComponentScheduler, StageScheduleDue}, {ComponentScheduler, StageSlotStarted},

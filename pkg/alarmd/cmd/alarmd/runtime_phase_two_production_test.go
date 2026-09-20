@@ -2378,6 +2378,8 @@ type fakePhaseTwoOwnershipStore struct {
 	// decisions is every Assignment decision published, in order, so a test
 	// can read what a publication was conditioned on and what it carried.
 	decisions []ownership.AssignmentDecision
+	// sweeps is the keep set of every Assignment sweep asked of the store.
+	sweeps []map[execution.QueryGroupIdentity]struct{}
 }
 
 func (store *fakePhaseTwoOwnershipStore) renewCount() int {
