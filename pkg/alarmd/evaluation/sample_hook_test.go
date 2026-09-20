@@ -63,6 +63,12 @@ func equivalentSample(t *testing.T, req execution.EvaluationRequest) (execution.
 	if !reflect.DeepEqual(got, baseline) {
 		t.Fatal("sampling changed evaluator result/state/events")
 	}
+	// Stand in for the worker before validating: a round with an incomplete
+	// input has its Level marker proposed by the worker after Evaluate, and
+	// the contract accepts the outcome's reason against that marker. Without
+	// this the harness refuses a shape production produces every time a
+	// guarded series meets an empty dependency.
+	proposeRoundGuard(t, req, &got)
 	if err := got.Validate(req); err != nil {
 		t.Fatal(err)
 	}
@@ -231,6 +237,32 @@ func TestSeriesSampleUsesFinalGuardAndFreeze(t *testing.T) {
 			l.StateDisposition != trigger.StateAdvance || l.DecisionStatus != "not_evaluated" || l.TriggerObserved != nil || !l.HistoryForced {
 			t.Fatalf("sample copied preliminary detection instead of final guard: %+v", l)
 		}
+	}
+}
+
+// A guarded series whose dependency came back empty this round: the outcome
+// names the round's own reason, not the stored guard's. The marker the round
+// proposes is the guard that will cover this outcome, and the sample copies
+// that final reason. The stored guard stays in durable state untouched.
+func TestSeriesSampleUnderAGuardNamesTheRoundsOwnReason(t *testing.T) {
+	plan := compiledG4Plan(t, strategy.DetectorKindSimpleRingRatio, map[string]any{"floor": 20, "ceil": nil}, strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, IdentityFields: []string{"host"}})
+	record := g4Record(99, `80`, nil)
+	req := requestFixtureForPlan(t, plan, []contract.CanonicalRecordV2{record}, nil)
+	req.State.Items[0].Status = execution.StateFoundWarming
+	req.State.Items[0].Levels[0].HistoryCompleteness = execution.HistoryWarming
+	req.State.Items[0].Levels[0].GapReasonCode = execution.ReasonCode(contract.ReasonSnapshotUnavailable)
+	req.Inputs = []execution.SeriesEvaluationInputRequest{g4Input(t, req, map[string][]contract.CanonicalRecordV2{"primary": {record}, "previous": {}})}
+	got, sample := equivalentSample(t, req)
+	want := got.Plans[0].LevelOutcomes[0]
+	l := sample.Levels[0]
+	if want.Outcome != execution.LevelOutcomeUnknown || want.ReasonCode != execution.ReasonCode(contract.ReasonQueryEmpty) {
+		t.Fatalf("outcome %s/%s, want UNKNOWN/QUERY_EMPTY: the round's empty dependency is the guard covering it", want.Outcome, want.ReasonCode)
+	}
+	if l.Outcome != "UNKNOWN" || l.Reason != string(contract.ReasonQueryEmpty) || l.Reason == string(contract.ReasonSnapshotUnavailable) {
+		t.Fatalf("sample copied the stored guard instead of the round's own reason: %+v", l)
+	}
+	if len(got.Plans[0].StateResults) != 0 {
+		t.Fatalf("a guarded series with an empty dependency wrote state: %+v", got.Plans[0].StateResults)
 	}
 }
 
