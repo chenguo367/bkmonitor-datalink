@@ -266,6 +266,15 @@ func (ledger *Ledger) Record(receipt Receipt) Recorded {
 	return recorded
 }
 
+// countDigestMismatch counts a claim of a version of this term that names
+// a view the publisher never gave the claimant: the same fact as a receipt
+// with another digest, met at the Hello.
+func (ledger *Ledger) countDigestMismatch() {
+	ledger.mu.Lock()
+	ledger.ignored.DigestMismatch++
+	ledger.mu.Unlock()
+}
+
 // Counts of a version the ledger still follows; false for any other.
 func (ledger *Ledger) Counts(version Key) (Counts, bool) {
 	ledger.mu.Lock()

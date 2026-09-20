@@ -347,8 +347,35 @@ func TestAReconnectingWorkerIsBroughtForwardFromWhatItSaysItHolds(t *testing.T) 
 		t.Fatalf("reconnect one behind got %+v, want the 1 -> 2 delta", delta)
 	}
 	again.cancel()
+	// The receipt for revision 2 is lost with the stream; the Worker comes
+	// back saying it holds revision 2. The ledger credits the claim -- sent
+	// and installed, objects unprobed -- so the version is not short a
+	// receiver for a Worker that holds it, and installed-by-all is reported
+	// for the one expected receiver. A claim with another digest is refused
+	// as a receipt would be.
+	again.cancel()
+	forged := harness.connect("w1", "t1", "i1x", &pb.Version{ControlEpoch: 7, Revision: 2, Digest: "not-mine"})
+	_ = forged.recvSnapshot()
+	eventually(t, "the forged claim is ignored", func() bool { return harness.server.Stats().Ignored.DigestMismatch == 1 })
+	if counts := harness.server.Stats().Counts; counts.Installed != 0 {
+		t.Fatalf("a claim with another digest counted: %+v", counts)
+	}
+	forged.cancel()
 	// Back with revision 2 in hand: nothing until the next publication.
 	current := harness.connect("w1", "t1", "i1c", delta.Target)
+	eventually(t, "the claimed install is credited", func() bool {
+		stats := harness.server.Stats()
+		return stats.Counts.Installed == 1 && stats.Counts.Sent == 1 && stats.Counts.Expected == 1
+	})
+	// Two versions were each completed by a claim -- revision 1 by the
+	// reconnect that named it, revision 2 by this one -- and each is
+	// reported once.
+	if harness.observer.count("installed_by_all", "") != 2 {
+		t.Fatalf("installed_by_all reported %d times after the claims, want once per version", harness.observer.count("installed_by_all", ""))
+	}
+	if lagging := harness.server.Stats().Lagging; len(lagging) != 0 {
+		t.Fatalf("lagging after the claim = %+v, want nobody", lagging)
+	}
 	current.send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}}})
 	if reply := current.recv(); reply.GetHeartbeat() == nil {
 		t.Fatalf("reconnect at the current revision got %+v before any heartbeat reply, want nothing but the heartbeat", reply)
