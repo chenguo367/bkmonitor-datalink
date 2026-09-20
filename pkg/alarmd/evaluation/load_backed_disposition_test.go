@@ -241,12 +241,54 @@ func TestATerminalOutcomeWithAReadableRecordIsStillRefused(t *testing.T) {
 	}
 }
 
-// Not covered, and left uncovered on purpose rather than covered badly:
-// widening the exemption past TERMINAL (dropping the outcome-kind check while
-// keeping the status and reason ones) survives every test here. An attempt at
-// a case for it -- an UNKNOWN outcome on a series whose record is broken --
-// passed against the mutation too, because the hand-built result is refused by
-// a different rule first, so it proves nothing about this one. The shape is
-// unreachable from this evaluator (a broken record always yields TERMINAL), but
-// the contract validates results from any producer. Reported with the change
-// rather than papered over with a green that does not discriminate.
+// R3's third half: the marker covers the outcome it caused, not any terminal.
+//
+// The reason comparison is the difference between "a broken marker excuses this
+// Level" and "a broken marker excuses this Plan from having guards at all". A
+// Level terminal for one cause standing under a marker broken for another is a
+// Level nothing durable accounts for, and it has to be refused even though the
+// Plan beside it is terminal for the marker's own reason.
+func TestATerminalOutcomeUnderABrokenMarkerMustNameItsReason(t *testing.T) {
+	request := gapStatusRequest(t, execution.GapTerminal, contract.ReasonStateCorrupt)
+	result, err := newEvaluator(t).Evaluate(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Evaluate() error = %v", err)
+	}
+	if err := result.Validate(request); err != nil {
+		t.Fatalf("the contract refused the unmutated round, so what follows would prove nothing: %v", err)
+	}
+	plan := result.Plans[0]
+	if len(plan.LevelOutcomes) == 0 {
+		t.Fatal("the fixture produced no Level outcome to re-reason")
+	}
+	for index := range plan.LevelOutcomes {
+		if plan.LevelOutcomes[index].Outcome != execution.LevelOutcomeTerminal {
+			t.Fatalf("Level %d = %q, want the marker to have made it TERMINAL",
+				plan.LevelOutcomes[index].LevelID, plan.LevelOutcomes[index].Outcome)
+		}
+		plan.LevelOutcomes[index].ReasonCode = execution.ReasonCode(contract.ReasonRecordInvalid)
+	}
+	// The Plan keeps the marker's reason. Only the Levels now name a cause the
+	// marker does not, which is the one thing under test.
+	result.Plans[0] = plan
+	if err := result.Validate(request); err == nil {
+		t.Fatal("the contract accepted a TERMINAL Level naming RECORD_INVALID under a marker broken for " +
+			"STATE_CORRUPT; the exemption is reading the marker's status without its reason")
+	}
+}
+
+// Not reachable through the contract, and nailed one level down instead:
+// widening the exemption past TERMINAL -- dropping the outcome-kind check while
+// keeping the status and reason ones -- survives every case in this file. It is
+// not a hole in the cases. The shape it would admit cannot be built through the
+// real contract at all: result_contract.go:199-204 already requires a
+// DeterministicInvalid series' outcome to be TERMINAL and to carry the view's
+// reason, so a non-TERMINAL outcome beside a broken record is refused there
+// before this exemption is ever consulted.
+//
+// The check stays, because that upstream rule is a separate rule that a later
+// change could relax, and the day it does this is the line that keeps a
+// business UNKNOWN from passing unguarded. Since the contract cannot
+// discriminate it, the two predicates are pinned directly in
+// execution/result_contract_internal_test.go -- outcome kind, load status and
+// reason, one cell each.

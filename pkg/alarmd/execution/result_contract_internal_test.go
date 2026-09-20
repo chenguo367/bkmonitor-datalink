@@ -138,3 +138,73 @@ func TestDescribeMissingGuardNamesTheFullButEmptyBinding(t *testing.T) {
 		t.Fatalf("description %q does not bound the inputs it lists", got)
 	}
 }
+
+// The two loaded-record exemptions are pinned here, at the predicate, rather
+// than through Validate.
+//
+// Not a preference. Two of the three conditions each predicate applies cannot
+// be told apart through the real contract: a non-TERMINAL outcome beside a
+// broken record is already refused at :199-204, which requires a
+// DeterministicInvalid series to produce a TERMINAL outcome carrying the view's
+// own reason, so a case built to widen the exemption past TERMINAL never
+// reaches it. The exemption still has to hold that line -- :199-204 is a
+// separate rule, and relaxing it later must not silently let a business UNKNOWN
+// through with no guard at all -- so the condition is nailed where it can be
+// seen: one cell per half.
+func TestTheLoadedRecordExemptionsReadKindStatusAndReason(t *testing.T) {
+	plan := PlanIdentity{TenantID: "t1", BusinessID: "b1", StrategyID: "s1"}
+	const series SeriesIdentityDigest = "series-1"
+	outcomeOf := func(kind LevelOutcomeKind, reason ReasonCode) LevelOutcome {
+		return LevelOutcome{Plan: plan, LevelID: 1, SeriesIdentityDigest: series, Outcome: kind, ReasonCode: reason}
+	}
+	states := func(status StateLoadStatus, reason ReasonCode) StatePreflightResult {
+		return StatePreflightResult{Items: []RuntimeStateView{{
+			Identity: StateKeyIdentity{Plan: plan, StateGeneration: "g1", SeriesIdentityDigest: series},
+			Status:   status, ReasonCode: reason,
+		}}}
+	}
+	gaps := func(status GapLoadStatus, reason ReasonCode) GapLoadResult {
+		return GapLoadResult{Items: []GapGuardSnapshot{{
+			Identity: PlanGapIdentity{Plan: plan, StateGeneration: "g1"},
+			Status:   status, ReasonCode: reason,
+		}}}
+	}
+
+	stateCells := []struct {
+		name    string
+		outcome LevelOutcome
+		loaded  StatePreflightResult
+		want    bool
+	}{
+		{"an UNKNOWN outcome is not exempt even beside the record that names its reason",
+			outcomeOf(LevelOutcomeUnknown, "STATE_CORRUPT"), states(StateDeterministicInvalid, "STATE_CORRUPT"), false},
+		{"a TERMINAL outcome naming another cause is not covered by this record",
+			outcomeOf(LevelOutcomeTerminal, "RECORD_INVALID"), states(StateDeterministicInvalid, "STATE_CORRUPT"), false},
+		{"a TERMINAL outcome naming the record's own cause is covered",
+			outcomeOf(LevelOutcomeTerminal, "STATE_CORRUPT"), states(StateDeterministicInvalid, "STATE_CORRUPT"), true},
+	}
+	for _, cell := range stateCells {
+		if got := loadedStateGuardsTerminalOutcome(cell.loaded, cell.outcome); got != cell.want {
+			t.Fatalf("loadedStateGuardsTerminalOutcome = %v, want %v: %s", got, cell.want, cell.name)
+		}
+	}
+
+	gapCells := []struct {
+		name    string
+		outcome LevelOutcome
+		loaded  GapLoadResult
+		want    bool
+	}{
+		{"an UNKNOWN outcome is not exempt even beside the marker that names its reason",
+			outcomeOf(LevelOutcomeUnknown, "STATE_CORRUPT"), gaps(GapTerminal, "STATE_CORRUPT"), false},
+		{"a TERMINAL outcome naming another cause is not covered by this marker",
+			outcomeOf(LevelOutcomeTerminal, "RECORD_INVALID"), gaps(GapTerminal, "STATE_CORRUPT"), false},
+		{"a TERMINAL outcome naming the marker's own cause is covered",
+			outcomeOf(LevelOutcomeTerminal, "STATE_CORRUPT"), gaps(GapTerminal, "STATE_CORRUPT"), true},
+	}
+	for _, cell := range gapCells {
+		if got := loadedGapGuardsTerminalOutcome(cell.loaded, cell.outcome); got != cell.want {
+			t.Fatalf("loadedGapGuardsTerminalOutcome = %v, want %v: %s", got, cell.want, cell.name)
+		}
+	}
+}
