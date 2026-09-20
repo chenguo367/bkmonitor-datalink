@@ -84,8 +84,12 @@ const (
 	// it produced and how many Workers' views moved. StageViewSession names
 	// one Worker's stream opening, being refused or closing, with why
 	// (ViewStreamFacts).
-	StageViewPublished          = "view_published"
-	StageViewSession            = "view_session"
+	StageViewPublished = "view_published"
+	StageViewSession   = "view_session"
+	// StageViewInstalled names one install of a view by a Worker: the
+	// version, how many entries it holds and how many of their objects the
+	// Worker cannot read (ViewStreamFacts).
+	StageViewInstalled          = "view_installed"
 	StageAssignmentIndexRead    = "assignment_index_read"
 	StageTakeoverStarted        = "takeover_started"
 	StageTakeoverCompleted      = "takeover_completed"
@@ -1337,6 +1341,9 @@ type ViewStreamFacts struct {
 	Acked     int    `json:"acked,omitempty"`
 	Installed int    `json:"installed,omitempty"`
 	Switched  int    `json:"switched,omitempty"`
+	// ObjectsMissing is, on a Worker's install, how many objects of the
+	// installed view its catalog could not serve.
+	ObjectsMissing int `json:"objects_missing,omitempty"`
 }
 
 type AssignmentIndexFacts struct {
@@ -2933,7 +2940,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentOwnership, StageControlReadsSpent},
 	{ComponentOwnership, StageAssignmentIndexWritten}, {ComponentOwnership, StageAssignmentIndexRead},
 	{ComponentOwnership, StageAssignmentSwept},
-	{ComponentOwnership, StageViewPublished}, {ComponentOwnership, StageViewSession},
+	{ComponentOwnership, StageViewPublished}, {ComponentOwnership, StageViewSession}, {ComponentOwnership, StageViewInstalled},
 	{ComponentOwnership, StageTakeoverStarted}, {ComponentOwnership, StageTakeoverCompleted},
 	{ComponentOwnership, StageLeaseRenewed}, {ComponentOwnership, StageFenceChecked},
 	{ComponentScheduler, StageScheduleDue}, {ComponentScheduler, StageSlotStarted},

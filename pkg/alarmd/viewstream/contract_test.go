@@ -294,6 +294,18 @@ func TestTheLedgerCountsEachReceiverOncePerStageInOrder(t *testing.T) {
 	if counts, _ = ledger.Counts(v1); counts != (viewstream.Counts{Expected: 3, Sent: 1, Acked: 1, Installed: 1}) {
 		t.Fatalf("after complete receipts = %+v", counts)
 	}
+	// The object count of an installed receiver is what its probed receipts
+	// said; a receipt that did not probe -- a Hello standing in for a lost
+	// one -- leaves it where it was, and a receiver that never probed is
+	// counted apart from the sum, not as 0 in it.
+	ledger.Record(viewstream.Receipt{Receiver: w1, Version: version("w1", "d1"), Acked: true, Installed: true, ObjectsMissing: 3, ObjectsProbed: true})
+	if objects, ok := ledger.Objects(v1); !ok || objects != (viewstream.ObjectsSummary{Missing: 3, Probed: 1}) {
+		t.Fatalf("objects after a probed receipt = %+v ok=%t, want 3 missing over one probed receiver", objects, ok)
+	}
+	ledger.Record(viewstream.Receipt{Receiver: w1, Version: version("w1", "d1"), Acked: true, Installed: true})
+	if objects, _ := ledger.Objects(v1); objects != (viewstream.ObjectsSummary{Missing: 3, Probed: 1}) {
+		t.Fatalf("objects after an unprobed receipt = %+v, want the probed count kept", objects)
+	}
 	// A receipt before sent: acked is recorded but not counted until sent.
 	w2 := viewstream.Receiver{WorkerID: "w2", Incarnation: "i2"}
 	ledger.Record(viewstream.Receipt{Receiver: w2, Version: version("w2", "d2"), Acked: true})
@@ -325,13 +337,35 @@ func TestTheLedgerCountsEachReceiverOncePerStageInOrder(t *testing.T) {
 	if len(lagging) != 3 || lagging[0].WorkerID != "w1" || lagging[0].Incarnation != "i1b" || lagging[2].WorkerID != "w3" || lagging[2].Incarnation != "" {
 		t.Fatalf("lagging installed = %+v", lagging)
 	}
-	// Everyone switches: complete.
+	// Everyone installs, then switches: the receipt that completes the
+	// installed stage for the last expected receiver says so once, with
+	// the time from publication; later receipts do not say it again.
+	now = now.Add(7 * time.Second)
+	var completions []viewstream.Recorded
 	for _, receiver := range []viewstream.Receiver{{WorkerID: "w1", Incarnation: "i1b"}, w2, {WorkerID: "w3", Incarnation: "i3"}} {
 		ledger.MarkSent(v1, receiver)
-		ledger.Record(viewstream.Receipt{Receiver: receiver, Version: version(receiver.WorkerID, "d"+receiver.WorkerID[1:]), Acked: true, Installed: true, Switched: true})
+		recorded := ledger.Record(viewstream.Receipt{Receiver: receiver, Version: version(receiver.WorkerID, "d"+receiver.WorkerID[1:]), Acked: true, Installed: true, Switched: true})
+		if !recorded.Attributed {
+			t.Fatalf("receipt from %s not attributed", receiver.WorkerID)
+		}
+		if recorded.InstalledByAll {
+			completions = append(completions, recorded)
+		}
+	}
+	if len(completions) != 1 || completions[0].Version != v1 || completions[0].Expected != 3 || completions[0].Elapsed != 7*time.Second {
+		t.Fatalf("installed-by-all completions = %+v, want one for v1 with three expected after seven seconds", completions)
+	}
+	if again := ledger.Record(viewstream.Receipt{Receiver: w2, Version: version("w2", "d2"), Acked: true, Installed: true, Switched: true}); again.InstalledByAll || !again.Attributed {
+		t.Fatalf("a repeat after completion = %+v, want attributed and not completing again", again)
 	}
 	if counts, _ = ledger.Counts(v1); !counts.Complete() || counts != (viewstream.Counts{Expected: 3, Sent: 3, Acked: 3, Installed: 3, Switched: 3}) {
 		t.Fatalf("after everyone switched = %+v", counts)
+	}
+	// w1 restarted after its probed receipt, so its count went with the old
+	// process; nobody in the final round probed: three unprobed, sum 0 --
+	// and the sum is not read as three fleets with their objects.
+	if objects, _ := ledger.Objects(v1); objects != (viewstream.ObjectsSummary{Missing: 0, Probed: 0, Unprobed: 3}) {
+		t.Fatalf("objects at completion = %+v, want three unprobed and no sum", objects)
 	}
 	// Two more versions: the first is closed complete, the second, opened
 	// and never reported, is closed superseded with its counts, and neither

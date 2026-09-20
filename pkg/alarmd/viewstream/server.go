@@ -69,9 +69,11 @@ type Stats struct {
 	ControlEpoch uint64
 	Revision     uint64
 	Sessions     int
-	// Current is the four numbers of the current version; Key its identity.
+	// Current is the four numbers of the current version; Key its identity;
+	// Objects what its installed receivers said about their objects.
 	Current Key
 	Counts  Counts
+	Objects ObjectsSummary
 	Ignored Ignored
 	// Lagging lists the Workers that have not installed the current version.
 	Lagging []LaggingReceiver
@@ -239,6 +241,7 @@ func (server *Server) Stats() Stats {
 	stats.Leading, stats.ControlEpoch, stats.Revision = true, server.publisher.epoch, server.publisher.Revision()
 	if key, counts, ok := server.publisher.ledger.Current(); ok {
 		stats.Current, stats.Counts = key, counts
+		stats.Objects, _ = server.publisher.ledger.Objects(key)
 		stats.Lagging = server.publisher.ledger.Lagging("installed")
 		for index := range stats.Lagging {
 			_, connected := server.sessions[stats.Lagging[index].WorkerID]
@@ -274,9 +277,24 @@ func (server *Server) Connect(stream pb.ControlService_ConnectServer) error {
 		server.count(func(c *serverCounters) { c.refusals++ })
 		return server.refuseStream(ctx, stream, receiver, reason)
 	}
+	// What the Hello says is installed counts as sent and installed for
+	// this session -- a Worker that reconnects one revision behind gets the
+	// one-step delta, not the whole snapshot again -- and for the ledger:
+	// the receipt that said so may have been lost with the stream, and a
+	// version the ledger still follows must not stay short one receiver
+	// for a Worker that holds it. The claim goes through Record like a
+	// receipt, so a digest that is not this Worker's, or a version no
+	// longer followed, is refused the same way; what the Hello cannot
+	// say -- the objects missing -- is left unprobed, not 0.
+	installed := versionFromWire(hello.Installed)
+	if !server.recordClaimedInstall(ctx, receiver, installed) {
+		// A claim the publisher cannot vouch for: the session starts from
+		// nothing and the Worker gets a snapshot.
+		installed = Version{}
+	}
 	sess := &session{server: server, stream: stream, receiver: receiver, wake: make(chan struct{}, 1),
 		outbound: make(chan *pb.LeaderMessage, 16), done: make(chan struct{}),
-		installed: versionFromWire(hello.Installed), lastHeard: server.now()}
+		installed: installed, sent: installed, lastHeard: server.now()}
 	server.mu.Lock()
 	if server.closed {
 		server.mu.Unlock()
@@ -302,6 +320,34 @@ func (server *Server) Connect(stream pb.ControlService_ConnectServer) error {
 	server.mu.Unlock()
 	server.observeSession(ctx, "closed", receiver, reason)
 	return nil
+}
+
+// recordClaimedInstall credits a Worker's Hello with the version it says
+// it holds, when that is a view this publisher gave it: sent and
+// installed, objects unprobed. False when the claim is not one the
+// publisher can vouch for -- another term, a digest that is not this
+// Worker's, a revision no longer kept -- and the caller starts the session
+// from nothing. The ledger's own refusals still apply on the way.
+func (server *Server) recordClaimedInstall(ctx context.Context, receiver Receiver, installed Version) bool {
+	if installed.Revision == 0 {
+		return false
+	}
+	publisher := server.currentPublisher()
+	if publisher == nil || installed.ControlEpoch != publisher.epoch {
+		return false
+	}
+	if !publisher.Holds(receiver.WorkerID, installed) {
+		publisher.ledger.countDigestMismatch()
+		return false
+	}
+	if !publisher.ledger.MarkSent(installed.Key(), receiver) {
+		return false
+	}
+	recorded := publisher.ledger.Record(Receipt{Receiver: receiver, Version: installed, Acked: true, Installed: true})
+	if recorded.InstalledByAll {
+		server.observeInstalledByAll(ctx, recorded)
+	}
+	return recorded.Attributed
 }
 
 func (server *Server) admit(ctx context.Context, hello *pb.Hello) string {
@@ -341,6 +387,18 @@ func (server *Server) observeSession(ctx context.Context, event string, receiver
 		Component: observability.ComponentOwnership, Stage: observability.StageViewSession, Result: result,
 		ViewStream: &observability.ViewStreamFacts{Event: event, WorkerID: receiver.WorkerID, Incarnation: receiver.Incarnation,
 			ControlEpoch: epoch, Reason: reason},
+	})
+}
+
+// observeInstalledByAll reports the moment a version is installed by every
+// receiver it expected, with how long that took from its publication: the
+// fleet's time to hold one publication, per publication, on the line.
+func (server *Server) observeInstalledByAll(ctx context.Context, recorded Recorded) {
+	server.observer.Observe(ctx, observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageViewPublished,
+		Result: observability.ResultSuccess, Duration: recorded.Elapsed,
+		ViewStream: &observability.ViewStreamFacts{Event: "installed_by_all", ControlEpoch: recorded.Version.ControlEpoch,
+			Revision: recorded.Version.Revision, Expected: recorded.Expected, Installed: recorded.Expected},
 	})
 }
 
@@ -442,7 +500,9 @@ func (sess *session) receive() {
 				continue
 			}
 			if publisher := sess.server.currentPublisher(); publisher != nil {
-				publisher.ledger.Record(receipt)
+				if recorded := publisher.ledger.Record(receipt); recorded.InstalledByAll {
+					sess.server.observeInstalledByAll(sess.stream.Context(), recorded)
+				}
 			}
 			if receipt.Installed {
 				sess.mu.Lock()

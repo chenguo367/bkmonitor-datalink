@@ -151,7 +151,7 @@ func TestADeltaAndAReceiptSurviveTheWire(t *testing.T) {
 		t.Fatal("a two-step delta must be refused at the wire")
 	}
 	receipt := viewstream.Receipt{Receiver: viewstream.Receiver{WorkerID: "w1", Incarnation: "i1"}, Version: after.Version,
-		Acked: true, Installed: true, Failure: "", ObjectsMissing: 3}
+		Acked: true, Installed: true, Failure: "", ObjectsMissing: 3, ObjectsProbed: true}
 	payload, err = proto.Marshal(viewstream.ReceiptToWire(receipt))
 	if err != nil {
 		t.Fatal(err)

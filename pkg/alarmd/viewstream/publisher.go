@@ -161,6 +161,21 @@ func (publisher *Publisher) Step(workerID string, installed Version) (Delta, boo
 	return delta, true
 }
 
+// Holds reports whether version is a view this publisher gave workerID:
+// its current projection or the one before. A Worker claiming any other
+// version of this term -- a digest that is not its own, a revision no
+// longer kept -- is holding something the publisher cannot vouch for and
+// is sent a snapshot.
+func (publisher *Publisher) Holds(workerID string, version Version) bool {
+	publisher.mu.Lock()
+	defer publisher.mu.Unlock()
+	if current, ok := publisher.current[workerID]; ok && current.Version == version {
+		return true
+	}
+	previous, ok := publisher.previous[workerID]
+	return ok && previous.Version == version
+}
+
 // Ledger is the four numbers of the current version and the one before.
 func (publisher *Publisher) Ledger() *Ledger {
 	return publisher.ledger

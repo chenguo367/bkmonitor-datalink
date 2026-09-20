@@ -480,7 +480,10 @@ type phaseTwoWorkerBundleDependencies struct {
 	ControlStream   http.Handler
 	StreamIdentity  viewStreamIdentity
 	ViewStreamStats func() viewstream.Stats
-	PublishFleet    func(context.Context)
+	// ViewClient is this Worker's side of the stream, run with the
+	// maintenance goroutines and read by nothing in execution.
+	ViewClient   *viewstream.Client
+	PublishFleet func(context.Context)
 	// ApplyObservationWindows makes the windows opened through that API take
 	// effect on this replica. It runs on the reconcile tick rather than on a
 	// timer of its own, so opening a window is bounded by a cadence the
@@ -2282,6 +2285,10 @@ func (bundle *phaseTwoWorkerBundle) startMaintenance() {
 	if bundle.dependencies.RefreshPlatformSettings != nil {
 		bundle.maintenanceWG.Add(1)
 		go bundle.refreshPlatformSettings()
+	}
+	if bundle.dependencies.ViewClient != nil {
+		bundle.maintenanceWG.Add(1)
+		go bundle.runViewClient()
 	}
 }
 

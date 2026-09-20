@@ -206,3 +206,48 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 		report(err)
 	}
 }
+
+// viewStreamDiscovery finds the Leader's stream from the records that
+// already exist: the control leader lease names who leads, that worker's
+// own registration names where. A Leader whose registration carries no
+// endpoint is a binary from before the stream, and "not found" until it
+// is replaced.
+type viewStreamDiscovery struct {
+	store interface {
+		ReadControlLeader(context.Context) (ownership.ControlLeader, bool, error)
+		ReadWorker(context.Context, string) (ownership.WorkerRegistration, bool, error)
+	}
+}
+
+func (discovery viewStreamDiscovery) Leader(ctx context.Context) (viewstream.LeaderEndpoint, bool, error) {
+	if discovery.store == nil {
+		return viewstream.LeaderEndpoint{}, false, errors.New("phase-two view stream: ownership store is required")
+	}
+	leader, found, err := discovery.store.ReadControlLeader(ctx)
+	if err != nil || !found {
+		return viewstream.LeaderEndpoint{}, false, err
+	}
+	registration, found, err := discovery.store.ReadWorker(ctx, leader.OwnerID)
+	if err != nil || !found || registration.Endpoint == "" {
+		return viewstream.LeaderEndpoint{}, false, err
+	}
+	return viewstream.LeaderEndpoint{WorkerID: leader.OwnerID, ControlEpoch: leader.OwnerEpoch, Endpoint: registration.Endpoint}, true, nil
+}
+
+// newViewStreamIncarnation names this process for the stream: the id the
+// Leader's ledger tells one process of a Worker from the next. Random, so
+// two starts of one Pod within a second are two incarnations.
+func newViewStreamIncarnation() (string, error) {
+	raw := make([]byte, 8)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("phase-two view stream: mint incarnation: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+// runViewClient keeps the Worker's stream to the Leader up for the life of
+// the bundle. Its failures are its own: nothing in execution waits on it.
+func (bundle *phaseTwoWorkerBundle) runViewClient() {
+	defer bundle.maintenanceWG.Done()
+	_ = bundle.dependencies.ViewClient.Run(bundle.maintenanceCtx)
+}

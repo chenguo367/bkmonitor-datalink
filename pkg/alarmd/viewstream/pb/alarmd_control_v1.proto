@@ -160,8 +160,10 @@ message Delta {
 // it -- evidenced by the Assignment record's content_scope, read back on
 // lease renewal, equalling the view's; not by anything on this stream. A
 // stage not reached carries failure in the Worker's bounded words.
-// objects_missing is how many objects of the installed view the Worker
-// could not read, which is a fact of the view and not a failure to install.
+// objects_missing is how many objects of the whole installed view the
+// Worker could not read, a fact of the view and not a failure to install;
+// it means nothing unless objects_probed is set, because a Worker whose
+// probe failed knows nothing about its objects and does not say 0.
 message Receipt {
   string incarnation = 1;
   Version version = 2;
@@ -170,6 +172,7 @@ message Receipt {
   bool switched = 5;
   string failure = 6;
   uint32 objects_missing = 7;
+  bool objects_probed = 8;
 }
 
 // Heartbeat keeps the stream known alive in both directions and carries the

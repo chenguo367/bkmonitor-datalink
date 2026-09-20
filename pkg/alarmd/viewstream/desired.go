@@ -130,8 +130,11 @@ func (desired Desired) Fingerprint() uint64 {
 			// In Plan order, like the digest: a caller that hands the refs
 			// over in another order each round must not make every round
 			// look changed, or the skip this exists for never happens.
-			refs := append([]OutputContextRef(nil), content.OutputContexts...)
-			sort.Slice(refs, func(left, right int) bool { return planLess(refs[left].Plan, refs[right].Plan) })
+			refs := content.OutputContexts
+			if len(refs) > 1 {
+				refs = append([]OutputContextRef(nil), refs...)
+				sort.Slice(refs, func(left, right int) bool { return planLess(refs[left].Plan, refs[right].Plan) })
+			}
 			for _, ref := range refs {
 				write(ref.Plan.TenantID, ref.Plan.BusinessID, ref.Plan.StrategyID, string(ref.Digest))
 			}

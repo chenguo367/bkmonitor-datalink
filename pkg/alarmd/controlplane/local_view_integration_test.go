@@ -140,3 +140,56 @@ func TestTheLocalViewIsTheStoredBytesOfTheOwnedQueryGroupsLastSlots(t *testing.T
 		t.Fatalf("view after a Snapshot-served Slot = %+v, want empty", view)
 	}
 }
+
+// MissingObjects counts what the Worker can neither serve from its cache
+// nor find in the store: stored objects count zero whether cached or not,
+// an unknown digest counts one, and a digest named twice counts once.
+func TestMissingObjectsCountsWhatNeitherCacheNorStoreHolds(t *testing.T) {
+	ctx := context.Background()
+	client := newControlplaneRedis(t)
+	prefix := "alarmd:control:missing-objects"
+	repository, err := controlplane.NewRedisCatalogRepository(client, prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repository.ConfigureObjectCache(64, 1<<20); err != nil {
+		t.Fatal(err)
+	}
+	catalog := objectCatalogTwoGroups(t, 80)
+	if _, _, err := repository.PublishCatalog(ctx, catalog); err != nil {
+		t.Fatal(err)
+	}
+	first, err := controlplane.DeriveQueryGroupObjectDigest(catalog.QueryGroups[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := controlplane.DeriveQueryGroupObjectDigest(catalog.QueryGroups[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Nothing cached in a fresh process: the store answers, both present.
+	cold, err := controlplane.NewRedisCatalogRepository(client, prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if missing, err := cold.MissingObjects(ctx, []execution.ObjectDigest{first, second, first}, nil); err != nil || missing != 0 {
+		t.Fatalf("stored objects missing = %d (%v), want 0", missing, err)
+	}
+	if missing, err := cold.MissingObjects(ctx, []execution.ObjectDigest{first, "no-such-object"}, []execution.OutputContextDigest{"no-such-context"}); err != nil || missing != 2 {
+		t.Fatalf("with two unknown digests missing = %d (%v), want 2", missing, err)
+	}
+	// Cached: answered without the store; deleted from the store but cached
+	// still counts present, because the Worker can execute from what it holds.
+	if _, err := repository.LoadQueryGroupObject(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Del(ctx, prefix+":qgobj:"+string(first)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if missing, err := repository.MissingObjects(ctx, []execution.ObjectDigest{first}, nil); err != nil || missing != 0 {
+		t.Fatalf("cached object gone from the store missing = %d (%v), want 0", missing, err)
+	}
+	if missing, err := cold.MissingObjects(ctx, []execution.ObjectDigest{first}, nil); err != nil || missing != 1 {
+		t.Fatalf("uncached object gone from the store missing = %d (%v), want 1", missing, err)
+	}
+}

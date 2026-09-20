@@ -24,9 +24,11 @@ type Receiver struct {
 // but the ledger does not infer one from another: a receipt that asserts
 // switched without installed does not count as installed, and the Worker
 // resends the complete facts. Failure is why a stage was not reached, in
-// the Worker's bounded words; ObjectsMissing is how many of the view's
-// objects the Worker could not read when it installed, which is a fact of
-// the installed view and not a failure of installation.
+// the Worker's bounded words; ObjectsMissing is how many of the whole
+// installed view's objects the Worker could not read when it installed,
+// which is a fact of the installed view and not a failure of installation.
+// It means nothing unless ObjectsProbed: a Worker whose probe failed knows
+// nothing about its objects and does not say 0.
 type Receipt struct {
 	Receiver       Receiver
 	Version        Version
@@ -35,6 +37,7 @@ type Receipt struct {
 	Switched       bool
 	Failure        string
 	ObjectsMissing int
+	ObjectsProbed  bool
 }
 
 // Counts are the four numbers of one version, with the receivers the
@@ -85,12 +88,18 @@ type receiverState struct {
 	sent, acked, installed, switched bool
 	failure                          string
 	objectsMissing                   int
+	objectsProbed                    bool
 }
 
 type versionLedger struct {
 	version   Key
 	openedAt  time.Time
 	receivers map[string]*receiverState
+	// installedByAllAt is when the last expected receiver reported the
+	// version installed; zero until then. The interval from openedAt is
+	// how long the fleet took to hold one publication, which is the number
+	// decision-016 section 10 step 4 measures.
+	installedByAllAt time.Time
 }
 
 func (ledger *versionLedger) counts() Counts {
@@ -199,30 +208,43 @@ func (ledger *Ledger) MarkSent(version Key, receiver Receiver) bool {
 	return true
 }
 
+// Recorded is what one receipt did to the ledger: whether it was
+// attributed, and, when it was the receipt that completed the installed
+// stage for every expected receiver of its version, how long that took
+// from the version's publication. InstalledByAll is false for every other
+// receipt, including repeats after the completing one.
+type Recorded struct {
+	Attributed     bool
+	InstalledByAll bool
+	Version        Key
+	Expected       int
+	Elapsed        time.Duration
+}
+
 // Record attributes a receipt to its version and receiver, or counts why it
 // could not. Stages are recorded as asserted and counted in order, so a
 // receipt asserting a later stage without an earlier one moves nothing the
 // earlier gates; a Worker's later complete receipt does.
-func (ledger *Ledger) Record(receipt Receipt) bool {
+func (ledger *Ledger) Record(receipt Receipt) Recorded {
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
 	entry := ledger.find(receipt.Version.Key())
 	if entry == nil {
 		ledger.ignored.UnknownVersion++
-		return false
+		return Recorded{}
 	}
 	state, expected := entry.receivers[receipt.Receiver.WorkerID]
 	if !expected {
 		ledger.ignored.UnexpectedReceiver++
-		return false
+		return Recorded{}
 	}
 	if receipt.Version.Digest != state.digest {
 		ledger.ignored.DigestMismatch++
-		return false
+		return Recorded{}
 	}
 	if state.incarnation != "" && state.incarnation != receipt.Receiver.Incarnation {
 		ledger.ignored.StaleIncarnation++
-		return false
+		return Recorded{}
 	}
 	state.incarnation = receipt.Receiver.Incarnation
 	state.acked = state.acked || receipt.Acked
@@ -231,10 +253,63 @@ func (ledger *Ledger) Record(receipt Receipt) bool {
 	if receipt.Failure != "" {
 		state.failure = receipt.Failure
 	}
-	if receipt.Installed {
-		state.objectsMissing = receipt.ObjectsMissing
+	// An installed receipt that probed the objects is the current count; one
+	// that did not -- a Hello standing in for a lost receipt -- says nothing
+	// about them and leaves a count already in hand where it is.
+	if receipt.Installed && receipt.ObjectsProbed {
+		state.objectsMissing, state.objectsProbed = receipt.ObjectsMissing, true
 	}
-	return true
+	recorded := Recorded{Attributed: true, Version: entry.version, Expected: len(entry.receivers)}
+	if entry.installedByAllAt.IsZero() {
+		if counts := entry.counts(); counts.Expected > 0 && counts.Installed == counts.Expected {
+			entry.installedByAllAt = ledger.now()
+			recorded.InstalledByAll, recorded.Elapsed = true, entry.installedByAllAt.Sub(entry.openedAt)
+		}
+	}
+	return recorded
+}
+
+// countDigestMismatch counts a claim of a version of this term that names
+// a view the publisher never gave the claimant: the same fact as a receipt
+// with another digest, met at the Hello.
+func (ledger *Ledger) countDigestMismatch() {
+	ledger.mu.Lock()
+	ledger.ignored.DigestMismatch++
+	ledger.mu.Unlock()
+}
+
+// ObjectsSummary is what the installed receivers of a version said about
+// their objects: how many receivers probed, how many could not, and the
+// missing objects summed over those that probed. Unprobed receivers add
+// nothing to the sum and are counted apart, so a sum of 0 over a fleet
+// that mostly could not probe is not read as a fleet with its objects.
+type ObjectsSummary struct {
+	Missing  int
+	Probed   int
+	Unprobed int
+}
+
+// Objects summarizes the object counts of a version's installed receivers.
+func (ledger *Ledger) Objects(version Key) (ObjectsSummary, bool) {
+	ledger.mu.Lock()
+	defer ledger.mu.Unlock()
+	entry := ledger.find(version)
+	if entry == nil {
+		return ObjectsSummary{}, false
+	}
+	summary := ObjectsSummary{}
+	for _, state := range entry.receivers {
+		if !(state.sent && state.acked && state.installed) {
+			continue
+		}
+		if state.objectsProbed {
+			summary.Probed++
+			summary.Missing += state.objectsMissing
+		} else {
+			summary.Unprobed++
+		}
+	}
+	return summary, true
 }
 
 // Counts of a version the ledger still follows; false for any other.
@@ -284,7 +359,8 @@ func (ledger *Ledger) Lagging(stage string) []LaggingReceiver {
 		if reached {
 			continue
 		}
-		lagging = append(lagging, LaggingReceiver{WorkerID: worker, Incarnation: state.incarnation, Failure: state.failure, ObjectsMissing: state.objectsMissing})
+		lagging = append(lagging, LaggingReceiver{WorkerID: worker, Incarnation: state.incarnation, Failure: state.failure,
+			ObjectsMissing: state.objectsMissing, ObjectsProbed: state.objectsProbed})
 	}
 	sort.Slice(lagging, func(left, right int) bool { return lagging[left].WorkerID < lagging[right].WorkerID })
 	return lagging
@@ -293,10 +369,13 @@ func (ledger *Ledger) Lagging(stage string) []LaggingReceiver {
 // LaggingReceiver is one Worker short of a stage. Connected is filled by
 // the server from its session table: a lagging Worker with no stream is a
 // Worker that is gone or cannot reach the Leader, not one that is slow.
+// ObjectsMissing is read only when ObjectsProbed; a page renders the pair
+// as a number or as unknown, never 0 for unknown.
 type LaggingReceiver struct {
 	WorkerID       string
 	Incarnation    string
 	Failure        string
 	ObjectsMissing int
+	ObjectsProbed  bool
 	Connected      bool
 }

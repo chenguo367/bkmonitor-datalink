@@ -302,6 +302,107 @@ func TestTheServerBringsEachWorkerToTheCurrentRevisionBySnapshotOrOneStep(t *tes
 	if harness.observer.count("published", "") != 2 || harness.observer.count("opened", "") != 3 {
 		t.Fatalf("events = %+v", harness.observer.events)
 	}
+	// w3 installs revision 2 too: the version is installed by all three,
+	// and the Leader says so once with the time it took.
+	w1.receipt("i1", delta1.Target, true)
+	w2.receipt("i2", delta2.Target, true)
+	w3.receipt("i3", snap3.Version, true)
+	eventually(t, "installed by all is reported once", func() bool { return harness.observer.count("installed_by_all", "") == 1 })
+	w3.receipt("i3", snap3.Version, true)
+	time.Sleep(20 * time.Millisecond)
+	if harness.observer.count("installed_by_all", "") != 1 {
+		t.Fatalf("installed_by_all reported %d times, want once", harness.observer.count("installed_by_all", ""))
+	}
+}
+
+// A Worker that reconnects saying which revision it holds is brought
+// forward by one delta when that revision is the previous one, by a
+// snapshot when it is older or of another term, and by nothing when it is
+// the current one.
+func TestAReconnectingWorkerIsBroughtForwardFromWhatItSaysItHolds(t *testing.T) {
+	harness := startServer(t)
+	ctx := context.Background()
+	if err := harness.server.Lead(7); err != nil {
+		t.Fatal(err)
+	}
+	first := desiredAt(publicationA, map[string]string{"qg-1": "w1"}, map[string]viewstream.Content{"qg-1": content("obj-1", "s1")})
+	if _, err := harness.server.Publish(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	v1, _ := harness.server.Stats().Current, 0
+	w1 := harness.connect("w1", "t1", "i1", nil)
+	snap1 := w1.recvSnapshot()
+	if snap1.Version.Revision != v1.Revision {
+		t.Fatalf("first snapshot revision %d, want %d", snap1.Version.Revision, v1.Revision)
+	}
+	w1.cancel()
+	second := desiredAt(publicationA, map[string]string{"qg-1": "w1"}, map[string]viewstream.Content{"qg-1": content("obj-1b", "s1")})
+	if _, err := harness.server.Publish(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	// Back with revision 1 in hand: one delta to revision 2.
+	again := harness.connect("w1", "t1", "i1b", snap1.Version)
+	delta := again.recvDelta()
+	if delta.Base.Revision != 1 || delta.Target.Revision != 2 || len(delta.Upserts) != 1 {
+		t.Fatalf("reconnect one behind got %+v, want the 1 -> 2 delta", delta)
+	}
+	again.cancel()
+	// The receipt for revision 2 is lost with the stream; the Worker comes
+	// back saying it holds revision 2. The ledger credits the claim -- sent
+	// and installed, objects unprobed -- so the version is not short a
+	// receiver for a Worker that holds it, and installed-by-all is reported
+	// for the one expected receiver. Back with revision 2 in hand: nothing
+	// until the next publication.
+	again.cancel()
+	current := harness.connect("w1", "t1", "i1c", delta.Target)
+	eventually(t, "the claimed install is credited", func() bool {
+		stats := harness.server.Stats()
+		return stats.Counts.Installed == 1 && stats.Counts.Sent == 1 && stats.Counts.Expected == 1
+	})
+	// The same process comes back claiming revision 2 under a digest that is
+	// not its view: not credited, counted as a digest mismatch, given a
+	// snapshot -- and the record it already holds on revision 2 stays as it
+	// was. The claim never reaches the ledger as a receipt would not.
+	current.cancel()
+	forged := harness.connect("w1", "t1", "i1c", &pb.Version{ControlEpoch: 7, Revision: 2, Digest: "not-mine"})
+	_ = forged.recvSnapshot()
+	eventually(t, "the forged claim is ignored", func() bool { return harness.server.Stats().Ignored.DigestMismatch == 1 })
+	if counts := harness.server.Stats().Counts; counts.Installed != 1 || counts.Sent != 1 {
+		t.Fatalf("after a forged claim from the same process the record reads %+v, want installed 1 and sent 1 untouched", counts)
+	}
+	forged.cancel()
+	// A new incarnation of the Worker is a restart, forged claim or not: the
+	// old process's stages are void, the new one starts from sent. That is
+	// the ledger's rule for a restart, applied at the snapshot it is given,
+	// and not something a claim's digest decides.
+	restarted := harness.connect("w1", "t1", "i1x", &pb.Version{ControlEpoch: 7, Revision: 2, Digest: "not-mine"})
+	_ = restarted.recvSnapshot()
+	eventually(t, "the restart voids the old process's install", func() bool {
+		counts := harness.server.Stats().Counts
+		return counts.Sent == 1 && counts.Installed == 0 && harness.server.Stats().Ignored.DigestMismatch == 2
+	})
+	restarted.cancel()
+	current = harness.connect("w1", "t1", "i1c", delta.Target)
+	eventually(t, "the old process's claim is credited again", func() bool { return harness.server.Stats().Counts.Installed == 1 })
+	// Two versions were each completed by a claim -- revision 1 by the
+	// reconnect that named it, revision 2 by this one -- and each is
+	// reported once.
+	if harness.observer.count("installed_by_all", "") != 2 {
+		t.Fatalf("installed_by_all reported %d times after the claims, want once per version", harness.observer.count("installed_by_all", ""))
+	}
+	if lagging := harness.server.Stats().Lagging; len(lagging) != 0 {
+		t.Fatalf("lagging after the claim = %+v, want nobody", lagging)
+	}
+	current.send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Heartbeat{Heartbeat: &pb.Heartbeat{}}})
+	if reply := current.recv(); reply.GetHeartbeat() == nil {
+		t.Fatalf("reconnect at the current revision got %+v before any heartbeat reply, want nothing but the heartbeat", reply)
+	}
+	current.cancel()
+	// Back with a version of another term: a snapshot.
+	stale := harness.connect("w1", "t1", "i1d", &pb.Version{ControlEpoch: 6, Revision: 2, Digest: delta.Target.Digest})
+	if snap := stale.recvSnapshot(); snap.Version.Revision != 2 {
+		t.Fatalf("reconnect from another term got %+v, want the current snapshot", snap)
+	}
 }
 
 // Every way a stream is refused says why: a bad token, an unknown Worker,
