@@ -1315,6 +1315,13 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// terminated; moving after it settles is one convergence.
 	LeaseTTL          time.Duration
 	ReconcileInterval time.Duration
+	// ContentScopes reads the content each Query Group is currently
+	// published with -- the ObjectDigest the current activation's manifest
+	// names for it -- for the reconcile round to write into Assignment
+	// records (decision-016). Required: a leader that cannot read them
+	// cannot start the contract, and one that reads them from a fallback
+	// would name content the fleet is not executing.
+	ContentScopes func(context.Context) (map[execution.QueryGroupIdentity]string, error)
 }
 
 type productionPhaseTwoOwnership struct {
@@ -1369,6 +1376,9 @@ func newProductionPhaseTwoOwnership(
 	if dependencies.LeaseTTL <= 0 || dependencies.ReconcileInterval <= 0 {
 		return nil, errors.New("phase-two rebalance stabilisation inputs are required")
 	}
+	if dependencies.ContentScopes == nil {
+		return nil, errors.New("phase-two content scope reader is required")
+	}
 	return &productionPhaseTwoOwnership{
 		dependencies: dependencies, reconciler: dependencies.Reconcile, flights: dependencies.Flights,
 	}, nil
@@ -1402,6 +1412,32 @@ func (runtime *productionPhaseTwoOwnership) TryAcquireControlLeader(
 	return err == nil, err
 }
 
+// contentScopesFor is the round's content policy. Declaring needs the
+// current content in hand; a failed read is reported and the round leaves
+// scopes as they are, because a round that withdrew on a read failure would
+// turn a Redis blip into a fleet-wide rollback of the contract.
+func (runtime *productionPhaseTwoOwnership) contentScopesFor(
+	ctx context.Context,
+	workers []ownership.WorkerRegistration,
+) (scheduler.ContentScopes, error) {
+	if !ownership.AllDeclare(workers, ownership.CapabilityContentScope) {
+		return scheduler.ContentScopes{Policy: scheduler.ContentScopesWithdrawn}, nil
+	}
+	digests, err := runtime.dependencies.ContentScopes(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
+			return scheduler.ContentScopes{}, err
+		}
+		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
+			Component: observability.ComponentOwnership, Stage: observability.StageAssignmentAcquired,
+			Result: observability.ResultDegraded, Operation: observability.OperationTransition,
+			Direction: observability.DirectionInternal, ReasonCode: observability.ReasonInternalUnknown, Err: err,
+		})
+		return scheduler.ContentScopes{}, nil
+	}
+	return scheduler.ContentScopes{Policy: scheduler.ContentScopesDeclared, Digests: digests}, nil
+}
+
 func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	ctx context.Context,
 	queryGroups []execution.QueryGroupIdentity,
@@ -1428,11 +1464,22 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	if err != nil {
 		return err
 	}
+	// The content contract's gate, decided once per round on the same ready
+	// set the placements use: every ready worker declares it, and the round
+	// brings each record to the content its Query Group is published with;
+	// one does not, and the round withdraws every scope (decision-016
+	// section 7.1.1). A leader that cannot read the current content this
+	// round declares nothing and withdraws nothing -- unknown is not a
+	// withdrawal -- and says so once per round.
+	scopes, err := runtime.contentScopesFor(ctx, workers)
+	if err != nil {
+		return err
+	}
 	// Every Query Group's record in one bounded batch, then the placement
 	// decisions over it. Reading them one at a time cost the round a Redis
 	// round trip per Query Group, all of it waiting, all of it before any
 	// decision could be taken.
-	records, assignmentReads, err := runtime.reconciler.ReconcileRound(ctx, authority, ordered, workers, at)
+	records, assignmentReads, err := runtime.reconciler.ReconcileRoundWithScopes(ctx, authority, ordered, workers, at, scopes)
 	runtime.observeControlReads(ctx, assignmentReads, registryReads, len(ordered))
 	if err != nil {
 		if errors.Is(err, ownership.ErrStaleFence) {

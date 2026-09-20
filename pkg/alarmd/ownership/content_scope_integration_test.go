@@ -391,3 +391,72 @@ func TestADeadLeaseWithAMovedScopeIsReportedAsTheLeaseNotTheScope(t *testing.T) 
 		t.Fatalf("not desired with a moved scope: CheckFenceForContentScope() = %v, want ErrNotDesired", err)
 	}
 }
+
+// Withdrawing the content scope is the contract's rollback and what a leader
+// writes when a worker that does not take part joins: it clears the scope
+// and any pending change at once, because a comparison that is no longer
+// made refuses nobody and needs no deadline; it bumps the revision when it
+// changed anything and not when there was nothing to clear; and it goes with
+// a move too, so a moved Query Group carries no stale scope along.
+func TestWithdrawingTheContentScopeClearsItAtOnce(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	now := time.UnixMilli(1_700_000_000_000)
+	authority, err := store.AcquireControlLeader(ctx, "control-1", now, 10*time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := publishScope(t, store, authority, 0, "worker-1", "view-a", now)
+	lease, err := store.Acquire(ctx, "query-group-1", "worker-1", now, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := publishScope(t, store, authority, first.RecordRevision, "worker-1", "view-b", now.Add(time.Second))
+	if !pending.ContentChangePending() {
+		t.Fatalf("record = %+v, want a pending change to withdraw", pending)
+	}
+	withdraw := func(revision uint64, worker string) AssignmentRecord {
+		record, err := store.PublishAssignment(ctx, authority, AssignmentDecision{
+			QueryGroup: "query-group-1", DesiredWorkerID: worker, ExpectedRecordRevision: revision,
+			PlacementReason: PlacementRendezvous, DecidedAt: now.Add(2 * time.Second), WithdrawContentScope: true,
+		})
+		if err != nil {
+			t.Fatalf("PublishAssignment(withdraw) error = %v", err)
+		}
+		return record
+	}
+	cleared := withdraw(pending.RecordRevision, "worker-1")
+	if cleared.ContentScope != "" || cleared.ContentChangePending() || cleared.RecordRevision != pending.RecordRevision+1 ||
+		cleared.DesiredWorkerID != "worker-1" || cleared.AssignmentGeneration != pending.AssignmentGeneration {
+		t.Fatalf("withdrawn record = %+v, want no scope, nothing pending, revision bumped once, placement untouched", cleared)
+	}
+	// The live holder was not waited for: every declared scope is admitted
+	// again at once, and so is an undeclared write.
+	for _, declared := range []string{"view-a", "view-b", "view-anything", ""} {
+		if err := store.CheckFenceForContentScope(ctx, lease.Fence, declared); err != nil {
+			t.Fatalf("after the withdrawal, declared %q: CheckFenceForContentScope() = %v, want valid", declared, err)
+		}
+	}
+	// Withdrawing again changes nothing, not even the revision.
+	again := withdraw(cleared.RecordRevision, "worker-1")
+	if again.RecordRevision != cleared.RecordRevision {
+		t.Fatalf("a second withdrawal bumped the revision: %d -> %d", cleared.RecordRevision, again.RecordRevision)
+	}
+	// A withdrawal that moves the owner clears the scope the move would
+	// otherwise carry along.
+	named := publishScope(t, store, authority, again.RecordRevision, "worker-1", "view-c", now.Add(3*time.Second))
+	if named.PendingContentScope != "view-c" {
+		t.Fatalf("record = %+v, want view-c pending under the live lease", named)
+	}
+	moved := withdraw(named.RecordRevision, "worker-2")
+	if moved.DesiredWorkerID != "worker-2" || moved.ContentScope != "" || moved.ContentChangePending() ||
+		moved.AssignmentGeneration != named.AssignmentGeneration+1 {
+		t.Fatalf("withdrawal with a move = %+v, want worker-2 with no scope and the generation bumped", moved)
+	}
+	if _, err := store.PublishAssignment(ctx, authority, AssignmentDecision{
+		QueryGroup: "query-group-1", DesiredWorkerID: "worker-2", ExpectedRecordRevision: moved.RecordRevision,
+		PlacementReason: PlacementRendezvous, DecidedAt: now, ContentScope: "view-d", WithdrawContentScope: true,
+	}); err == nil {
+		t.Fatal("a decision that both names and withdraws a scope was accepted")
+	}
+}

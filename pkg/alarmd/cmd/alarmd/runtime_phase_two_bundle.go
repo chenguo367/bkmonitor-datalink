@@ -718,6 +718,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		PublicationDelayAllowance: phaseTwoPublicationDelayAllowance(cfg),
 		LeaseTTL:                  cfg.PhaseTwo.Ownership.LeaseTTL.Duration(),
 		ReconcileInterval:         cfg.PhaseTwo.Control.ReconcileInterval.Duration(),
+		ContentScopes:             currentContentScopes(repository),
 	})
 	if err != nil {
 		return nil, err

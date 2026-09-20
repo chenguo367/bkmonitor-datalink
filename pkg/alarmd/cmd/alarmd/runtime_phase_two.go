@@ -2205,6 +2205,9 @@ func phaseTwoWorkerRegistration(
 		CapabilitiesDigest: capabilitiesDigest,
 		ExpiresAt:          at.Add(cfg.PhaseTwo.Worker.RegistrationTTL.Duration()),
 		Applied:            applied, Load: load,
+		// The control contracts this binary takes part in. The leader
+		// starts a contract only when every ready worker declares it.
+		Capabilities: []string{ownership.CapabilityContentScope},
 	}
 	if err := registration.Validate(); err != nil {
 		return ownership.WorkerRegistration{}, err
