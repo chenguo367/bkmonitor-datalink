@@ -879,9 +879,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// Interrupted bookkeeping on the record side: the running count and
 		// the latest, the loss said rather than left blank, and its own next
 		// step and recovery words rather than the gap records'.
-		{"HISTORY ::", "2 个对象已检测、告警已发，只是记账前被打断。累计 9 个 Slot（3 个对象），最近 17:30:00。损失：无告警损失，只影响\"最近完成\"读数与缺口统计——其中 1 个最近 1 小时内还发生过，最后一次 17:59:30"},
-		{"HISTORY ::", "下一步：这些对象不用处理，检测做过了、告警也发了。看的是趋势：累计数在一段时间里连续涨，是控制面 Redis 写失败"},
-		{"HISTORY ::", "恢复标准：不是故障状态，是记录：累计数只增不减，看\"最近\"是否还在前进；停下来就是记账恢复了"},
+		{"HISTORY ::", "2 个对象检测已执行、输出阶段已完成，完成记账未获确认。当前可观测副本自各自启动以来累计 9 个 Slot（3 个对象），最近 17:30:00。影响：完成记账未获确认；不能据此判断下游告警送达——其中 1 个最近 1 小时内还发生过，最后一次 17:59:30"},
+		{"HISTORY ::", "下一步：核对同对象、同一 Slot 的最后失败步骤与后续 Progress 提交，定位受阻环节及依赖；持续新增时优先排查，单次记录也不能直接归因为瞬时抖动"},
+		{"HISTORY ::", "恢复标准：累计数来自当前可观测副本自各自启动以来的记录，重启或副本缺席会改变合计；停止增长仅表示未再观察到。确认恢复须看到同对象后续 Progress 成功提交"},
 		{"HISTORY ::", "下一步：已停止，不用让它停；那段永久没检测"},
 		{"HISTORY ::", "恢复标准：记录不会归零；看的是同一对象有没有再跳过"},
 		// A loss in progress on a ten-second object names its mechanism on
@@ -923,14 +923,14 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"PENDING ::", "恢复所需的老序列数据不完整（1 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出"},
 		{"PENDING ::", "恢复标准：分出归属后转到对应行（策略侧或 alarmd）；不是等它消失"},
 		{"HISTORY COUNT ::", "漏检记录 2 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
-		{"HISTORY COUNT ::", "；记账被打断（检测做过了）：累计 9 个 Slot（3 个对象），最近 17:30:00"},
+		{"HISTORY COUNT ::", "；记账被打断（检测做过了）：当前可观测副本自各自启动以来累计 9 个 Slot（3 个对象），最近 17:30:00"},
 		// The two records: every Slot executed whole, said so with no Blocked
 		// reading and its kind renamed; one short of that, said how far.
-		{"SKIP qg-bookkept ::", "种类：留存的记账中断记录（检测做过了）结果码：GAP_SKIPPED记账前被打断的时段：17:26:00 – 17:29:00，4 个 Slot，记录于 17:30:00，60 秒周期。已停止（10 分钟以上没有再跳过）；这段每个时间点都已检测、告警已发（2/2 个策略），只是记账前被打断——无告警损失"},
+		{"SKIP qg-bookkept ::", "种类：留存的记账中断记录（检测做过了）结果码：GAP_SKIPPED记账前被打断的时段：17:26:00 – 17:29:00，4 个 Slot，记录于 17:30:00，60 秒周期。已停止（10 分钟以上没有再跳过）；这段每个时间点都已检测（2/2 个策略），输出阶段已完成，完成记账未获确认；此证据不判断下游告警送达"},
 		{"SKIP qg-half-executed ::", "没检测的时段：16:48:00 – 16:50:00，3 个 Slot，记录于 16:50:00，60 秒周期。已停止（10 分钟以上没有再跳过）；其中 1 个时间点已检测完、1 个只检测了部分策略（最近一个 1/2）、1 个没有找到已检测的证据（滚动期间老版本不留证据，全部副本到新版前不算确认），其余未检测的策略那段不补"},
 		// The object row whose latest completion found its Slot executed
 		// whole: what the earlier attempt did, and no Blocked reading.
-		{"PROOF qg-bookkept-row ::", "结果码：GAP_SKIPPED成因：REPLAY_EXPIRED下一层原因：GAP_SKIPPED早先那次尝试：早先那次尝试已检测全部策略、告警已发，只是没写下\"完成\"这一笔（2/2 个策略）"},
+		{"PROOF qg-bookkept-row ::", "结果码：GAP_SKIPPED成因：REPLAY_EXPIRED下一层原因：GAP_SKIPPED早先那次尝试：早先那次尝试已检测全部策略，输出阶段已完成，完成记账未获确认（2/2 个策略）"},
 		// The silent loss: the line on the work list with its sentence, and
 		// the row with the refusal's reason, the two numbers it compared,
 		// since when, and no claim of recovery.
@@ -1661,6 +1661,15 @@ console.log('GROUPS BLOCKED :: ' + textOf(store['groups']));
 ctx.openCheck = '';
 
 // The four dimensions each row shows, read off the rendered cells.
+// Navigation retains the selected fold even when a secondary DEFECT fact
+// uses a different primary finding on the row. Special characters stay data.
+{
+  const tr = ctx.objectRow(data.anomalies[0], 'DEFECT', 'STATE/CONFLICT & retry');
+  const link = tr.children[tr.children.length - 1].children[0];
+  const expected = '/alarmd/api/objects/' + encodeURIComponent(data.anomalies[0].query_group)
+    + '?check=DEFECT&group=STATE%2FCONFLICT%20%26%20retry';
+  if (link.href !== expected) { console.error('detail link lost the selected context: ' + link.href); failed++; }
+}
 for (const row of data.anomalies) {
   let tr;
   try { tr = ctx.objectRow(row); }

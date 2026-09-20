@@ -112,7 +112,11 @@ func TestDetailReturnsTheObjectWhenTheViewIsComplete(t *testing.T) {
 // Absent from an incomplete view is not the same as healthy, and the response
 // has to let a caller tell those apart.
 func TestDetailSaysWhetherNotFoundCanBeTrusted(t *testing.T) {
-	complete := handlerWith(t, snapshotsWithAnomalies(3), Expectation{QueryGroups: 949, Known: true}, replicas())
+	ids := make([]string, 949)
+	for index := range ids {
+		ids[index] = fmt.Sprintf("qg-%03d", index)
+	}
+	complete := handlerWith(t, snapshotsWithAnomalies(3), Expectation{QueryGroups: 949, Known: true, IDs: ids}, replicas())
 	status, body := get(t, complete, "/api/objects/qg-absent")
 	if status != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", status)
@@ -131,11 +135,11 @@ func TestDetailSaysWhetherNotFoundCanBeTrusted(t *testing.T) {
 		t.Fatal(err)
 	}
 	status, body = get(t, incompleteHandler, "/api/objects/qg-absent")
-	if status != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", status)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", status)
 	}
-	if body["view_complete"] != false || body["health"] != string(HealthUnknown) {
-		t.Fatalf("body = %+v, want not-found marked untrustworthy", body)
+	if body["view_complete"] != false || body["health"] != string(HealthUnknown) || body["existence"] != "unknown" {
+		t.Fatalf("body = %+v, want unknown membership", body)
 	}
 }
 

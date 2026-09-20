@@ -1229,26 +1229,63 @@ func checkNames() []string {
 // total is how many it holds.
 func UnderCheck(check Check, group string, view *View, now time.Time) []Anomaly {
 	list := []Anomaly{}
+	walkObjectRows(check, group, "", view, now, func(row Anomaly) { list = append(list, row) })
+	// Loss records are read newest first; current problems oldest first.
+	if check == CheckDetectionAbandoned || check == CheckTimelinePruned || check == CheckBookkeepingAbandoned {
+		SortAnomaliesNewestFirst(list)
+	} else {
+		sortOldestFirst(list)
+	}
+	return list
+}
+
+// walkObjectRows is the shared list/detail resolver. Empty check keeps all
+// facts, in column order followed by retained records, for legacy detail URLs.
+// A selected check never falls back to another fact about the same object.
+func walkObjectRows(check Check, group, queryGroup string, view *View, now time.Time, visit func(Anomaly)) {
 	listed := map[string]struct{}{}
-	demoted := demotedObjects(view)
+	// Detail only needs this object's demotion and retained records. Narrow
+	// those maps before resolving losses, rather than materializing every
+	// retained row just to return one object.
+	selected := *view
+	if queryGroup != "" {
+		selected.Demoted = nil
+		for _, row := range view.Demoted {
+			if row.QueryGroup == queryGroup {
+				selected.Demoted = append(selected.Demoted, row)
+			}
+		}
+		selected.GapSkips = map[string]SkippedSpan{}
+		if skip, ok := view.GapSkips[queryGroup]; ok {
+			selected.GapSkips[queryGroup] = skip
+		}
+		selected.PrunedSkips = map[string]PrunedSkip{}
+		if skip, ok := view.PrunedSkips[queryGroup]; ok {
+			selected.PrunedSkips[queryGroup] = skip
+		}
+	}
+	demoted := demotedObjects(&selected)
 	for _, column := range [][]Anomaly{view.Anomalies, view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory} {
 		for _, anomaly := range column {
+			if queryGroup != "" && anomaly.QueryGroup != queryGroup {
+				continue
+			}
 			// Under DEFECT a row is also the one whose column filed it
 			// elsewhere but which carries a failure of this deployment's own
 			// making: listed by that failure's code, the second fact.
 			if check == CheckDefect && anomaly.Finding.Check != check && anomaly.Internal != nil {
 				listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
 				if group == "" || anomaly.Internal.Code == group {
-					list = append(list, anomaly)
+					visit(anomaly)
 				}
 				continue
 			}
-			if anomaly.Finding.Check != check {
+			if check != "" && anomaly.Finding.Check != check {
 				continue
 			}
 			// Marked as listed before the group narrows, so an object in
 			// another group is not re-listed from its retained skip.
-			listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
+			listed[underKey(anomaly.Finding.Check, anomaly.QueryGroup)] = struct{}{}
 			if group != "" && anomaly.Finding.Group != group {
 				continue
 			}
@@ -1261,27 +1298,16 @@ func UnderCheck(check Check, group string, view *View, now time.Time) []Anomaly 
 					anomaly.Skip, anomaly.Loss = &record, LossWhileDemoted
 				}
 			}
-			list = append(list, anomaly)
+			visit(anomaly)
 		}
 	}
-	rows, _ := skippedRows(view, listed, now)
+	rows, _ := skippedRows(&selected, listed, now)
 	for _, row := range rows {
-		if row.Finding.Check != check || (group != "" && row.Finding.Group != group) {
+		if (check != "" && row.Finding.Check != check) || (group != "" && row.Finding.Group != group) {
 			continue
 		}
-		list = append(list, row)
+		visit(row)
 	}
-	// Oldest first: on one line every owner is the same, so age is the only
-	// order left, and the oldest is the one to look at. The two lines that
-	// keep records of past loss are the exception: the record grows, and
-	// what a reader can act on is the newest entry -- who was just lost and
-	// which span -- not the oldest.
-	if check == CheckDetectionAbandoned || check == CheckTimelinePruned || check == CheckBookkeepingAbandoned {
-		SortAnomaliesNewestFirst(list)
-	} else {
-		sortOldestFirst(list)
-	}
-	return list
 }
 
 // skipReasonNone is the fold of a skip that followed no failure of its
