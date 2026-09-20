@@ -22,8 +22,9 @@ type Limits struct {
 }
 
 type Evaluator struct {
-	detect *detect.Evaluator
-	limits Limits
+	detect  *detect.Evaluator
+	limits  Limits
+	samples *observability.SeriesSampler
 }
 
 func New(detector *detect.Evaluator, limits Limits) (*Evaluator, error) {
@@ -164,7 +165,7 @@ func countOpenAlertGate(counts *execution.OpenAlertGateCounts, gate trigger.Reco
 
 type recordDetector func() ([]detect.LevelFact, []detect.ProjectedValue, error)
 
-func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView, view execution.RuntimeStateView, guardConvergence map[uint32]bool, run recordDetector) (recordResult, error) {
+func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView, view execution.RuntimeStateView, guardConvergence map[uint32]bool, sample *observability.SeriesSampleReservation, run recordDetector) (recordResult, error) {
 	series := execution.SeriesIdentityDigest(record.DimensionIdentityDigest())
 	identity := execution.StateKeyIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration, SeriesIdentityDigest: series}
 	if view.Identity != identity {
@@ -191,6 +192,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 	if err != nil {
 		return recordResult{}, err
 	}
+	captureSampleFacts(sample, facts, projected)
 	point := state.StatePoint{RecordID: record.RecordID(), SourceTime: record.SourceTime(), Levels: make([]state.PointLevelFact, len(facts))}
 	for i, f := range facts {
 		point.Levels[i] = state.PointLevelFact{LevelID: f.Definition.LevelID, DetectFingerprint: f.DetectFingerprint, Result: stateFact(f.Result)}
@@ -273,6 +275,13 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			return recordResult{}, errors.New("alarmd evaluation: EffectiveTime fact missing")
 		}
 		effective[i] = trigger.LevelEffectiveTimeFact{LevelID: l.Definition().LevelID, Fact: fact}
+		if sampled := sample.Level(l.Definition().LevelID); sampled != nil {
+			sampled.HistoryCompleteness = summary.Completeness
+			sampled.HistoryValid, sampled.HistoryRequired = summary.ValidPositions, summary.RequiredPositions
+			sampled.HistoryStart, sampled.HistoryEnd = summary.WindowStart, summary.WindowEnd
+			sampled.HistoryForced, sampled.Fresh = completeness != "", fresh
+			sampled.EffectiveStatus = string(fact.Status())
+		}
 	}
 	tfacts := make([]trigger.DetectionFact, len(facts))
 	for i, f := range facts {
@@ -401,6 +410,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		}
 		result.state = &execution.StateEvaluation{Mutation: mutation, Events: events}
 	}
+	captureSampleDecision(sample, tr)
 	return result, nil
 }
 
@@ -504,7 +514,7 @@ func (e *Evaluator) evaluateSeries(
 	var final *execution.StateEvaluation
 	var events []contract.TriggerEventV1
 	var affected []execution.RecordAnchor
-	for _, record := range primaryRecords {
+	for recordIndex, record := range primaryRecords {
 		if loaded.constrains {
 			// The Plan's own gap marker could not be read, or is terminal. The
 			// guard state this round would be judged against is unknown, so
@@ -515,13 +525,21 @@ func (e *Evaluator) evaluateSeries(
 				constrainedOutcomes(due, record, first.SeriesIdentity, loaded.outcome, loaded.reason)...)
 			continue
 		}
-		one, runErr := e.evaluateRecordWith(ctx, legacy, due, record, view, converged, func() ([]detect.LevelFact, []detect.ProjectedValue, error) {
+		// A sample is reserved only for a record that is going to be evaluated:
+		// a constrained round above writes nothing and has nothing to sample.
+		var sample *observability.SeriesSampleReservation
+		if recordIndex == 0 && e.samples != nil {
+			sample = e.reserveSeriesSample(ctx, header, due, ordered, record, view)
+		}
+		one, runErr := e.evaluateRecordWith(ctx, legacy, due, record, view, converged, sample, func() ([]detect.LevelFact, []detect.ProjectedValue, error) {
 			facts, projected, _, detectErr := e.detect.EvaluatePreparedSeriesRecord(ctx, prepared, ordered, record)
 			return facts, projected, detectErr
 		})
 		if runErr != nil {
+			sample.Cancel()
 			return execution.PlanEvaluationResult{}, runErr
 		}
+		finishSeriesSample(sample, one)
 		result.LevelOutcomes = append(result.LevelOutcomes, one.outcomes...)
 		countRecoveryGate(&result.RecoveryGate, one.gate)
 		countOpenAlertGate(&result.OpenAlertGate, one.gate)
