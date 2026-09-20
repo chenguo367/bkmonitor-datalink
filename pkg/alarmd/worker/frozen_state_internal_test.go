@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -400,4 +401,49 @@ func frozenRenewalContract() execution.FrozenExecutionContractRef {
 
 func frozenRenewalRetention() []execution.StateRetentionRequirement {
 	return []execution.StateRetentionRequirement{{LevelID: 1, RetentionPoints: 5, EvaluationInterval: time.Minute}}
+}
+
+// A Slot says where its series went even when it froze none of them.
+//
+// This is the reading the census exists for. A replica whose candidate set was
+// computed wrongly and a replica with genuinely nothing frozen both published
+// an empty outcome family and no line at all, and separating them took a
+// deployment and a wrong estimate. With the census, a Slot that read every
+// series it meant to evaluate and wrote them all says so in three numbers, and
+// zero frozen beside them is a measurement rather than a silence.
+func TestASlotReportsWhereItsSeriesWentEvenWithNothingFrozen(t *testing.T) {
+	fixture := newPlanIsolationFixture(t, nil)
+	// No FOUND views, so nothing is a renewal candidate: the fixture's two
+	// series are both written.
+	if _, err := fixture.coordinator.finalizePrepared(
+		context.Background(), fixture.request, fixture.header, fixture.bindings, fixture.loaded, fixture.evaluated,
+	); err != nil && !isProgressContractError(err) {
+		t.Fatalf("finalizePrepared() error = %v", err)
+	}
+	var facts *observability.FrozenStateRenewalFacts
+	for _, observation := range fixture.observations {
+		if observation.Stage == observability.StageFrozenStateRenewed {
+			facts = observation.FrozenStateRenewal
+		}
+	}
+	if facts == nil {
+		t.Fatal("the Slot reported no census. A Slot that froze nothing and a Slot whose candidate set " +
+			"is wrong both report nothing, and that is the reading this exists to end")
+	}
+	if facts.Frozen != 0 {
+		t.Fatalf("frozen = %d, want none: no view in this fixture was found", facts.Frozen)
+	}
+	if facts.Due != len(fixture.loaded.Items) || facts.Read != len(fixture.loaded.Items) {
+		t.Fatalf("census = %+v, want due and read to be the %d series the Slot had",
+			facts, len(fixture.loaded.Items))
+	}
+	if facts.Written != 2 {
+		t.Fatalf("written = %d, want the two series whose mutations were applied", facts.Written)
+	}
+}
+
+// isProgressContractError lets this test drive the finalizer for its census
+// without also standing up a valid Progress commit, which it is not about.
+func isProgressContractError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "invalid progress commit")
 }

@@ -273,7 +273,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		var executeErr error
 		result, executeErr = coordinator.finalizePreparedWithGaps(
 			sequenceCtx, request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
-			stream.noDataMutations, stream.queryEvidence.availability(),
+			stream.noDataMutations, stream.queryEvidence.availability(), stream.seriesCensus,
 		)
 		return executeErr
 	})
@@ -834,6 +834,9 @@ func (coordinator *SlotExecutionCoordinator) finalizePrepared(
 	return coordinator.finalizePreparedWithGaps(
 		ctx, request, header, bindings, loadedState, execution.GapLoadResult{}, evaluated, nil,
 		execution.QueryAvailabilityUnknown,
+		// The census a caller with no stream can state: the loaded views are
+		// the series it read, and it meant to evaluate exactly those.
+		seriesCensus{Due: len(loadedState.Items), Read: len(loadedState.Items)},
 	)
 }
 
@@ -847,6 +850,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	evaluated execution.EvaluationResult,
 	noDataMemory []execution.PlanNoDataMutation,
 	queryAvailability execution.QueryAvailability,
+	census seriesCensus,
 ) (execution.SlotExecutionResult, error) {
 	var err error
 	activationRequest := duePlanActivationRequest(request.Contract, header.DuePlans)
@@ -1060,6 +1064,11 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				if err != nil {
 					return execution.SlotExecutionResult{}, err
 				}
+				// Counted after the write, not from the mutations built: a
+				// key whose write was refused is a key that did not have its
+				// life refreshed, and it belongs on the other side of the
+				// census.
+				census.Written += len(accepted) - len(rejectedApply)
 				for _, mutation := range accepted {
 					reason, terminal := rejectedApply[mutation.Identity]
 					if !terminal {
@@ -1079,6 +1088,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			retryPendingReason = planResult.ReasonCode
 		}
 	}
+	frozenRenewals.RecordCensus(census.Due, census.Read, census.Written)
 	coordinator.observeFrozenStateRenewal(ctx, request.Operation, frozenRenewals)
 	// After every Plan's state and gap, inside the same sequenced scope. The
 	// memory only changes what the next round reports as a duration and which

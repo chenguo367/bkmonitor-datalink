@@ -343,6 +343,12 @@ func TestSlotExecutionCoordinatorOrdersRequiredSideEffects(t *testing.T) {
 		observability.StageEventACKed,
 		observability.StageStateApplied,
 		observability.StageGapGuardCommitted,
+		// The Slot's series census, reported on every Slot that had anything
+		// due rather than only when something was frozen. It writes nothing
+		// and sits after the writes it is counting; a Slot that stopped
+		// reporting it would be a Slot nobody could tell from one with an
+		// empty candidate set.
+		observability.StageFrozenStateRenewed,
 		observability.StageSideEffectAdmission,
 		observability.StageProgressCommitted,
 	}
@@ -1040,10 +1046,20 @@ func TestSlotExecutionCoordinatorKeepsEventACKUnknownRetryable(t *testing.T) {
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	assertTrace(t, fixture.trace, fullTrace[:9])
-	last := (*fixture.observations)[len(*fixture.observations)-1]
-	if last.Stage != observability.StageEventACKed || last.Result != observability.ResultFailed ||
-		last.ReasonCode != execution.ReasonCode(contract.ReasonOutputACKUnknown) {
-		t.Fatalf("event ACK observation=%+v", last)
+	// The ACK failure is the last thing that happened to this Plan, rather
+	// than the last line of the Slot: the Slot still reports its series census
+	// on the way out, which writes nothing. What the test is actually about --
+	// that nothing after the failure advanced state or Progress -- is asserted
+	// directly below.
+	var acked *observability.Observation
+	for index := range *fixture.observations {
+		if observation := (*fixture.observations)[index]; observation.Stage == observability.StageEventACKed {
+			acked = &(*fixture.observations)[index]
+		}
+	}
+	if acked == nil || acked.Result != observability.ResultFailed ||
+		acked.ReasonCode != execution.ReasonCode(contract.ReasonOutputACKUnknown) {
+		t.Fatalf("event ACK observation=%+v", acked)
 	}
 	if fixture.ports.stateApplyCalls != 0 || !isZeroProgressCommit(fixture.ports.lastProgress) {
 		t.Fatalf("unknown event ACK advanced state/progress: state=%d progress=%+v",

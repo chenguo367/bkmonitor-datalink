@@ -527,6 +527,21 @@ type ExecutionEvidenceFacts struct {
 // measurement, and all-zero outcomes with a zero Frozen while the deployment's
 // state_load and state_apply rates differ says the candidate set is wrong.
 type FrozenStateRenewalFacts struct {
+	// Due, Read and Written are where this Slot's series went, counted at the
+	// three places the decisions are made. Due minus Read is the series the
+	// Slot meant to evaluate and never read -- a PRIMARY input that was
+	// incomplete skips the State preflight entirely, so those keys age without
+	// anything touching them, and a renewal that hangs on the read cannot
+	// reach them. Read minus Written is the population the renewal does cover.
+	//
+	// They are here because the first sizing of that population inferred it
+	// from state_load minus state_apply, and that difference holds several
+	// other things; the estimate came out two orders of magnitude high and the
+	// mechanism shipped renewing almost nothing. These three are measured, not
+	// inferred, and one of them cannot be derived from the other two.
+	Due     int `json:"due"`
+	Read    int `json:"read"`
+	Written int `json:"written"`
 	Frozen  int `json:"frozen"`
 	Renewed int `json:"renewed"`
 	Fresh   int `json:"fresh"`
@@ -543,8 +558,17 @@ func (facts *FrozenStateRenewalFacts) Record(renewed, fresh, missing, failed int
 	facts.Failed += failed
 }
 
-// Empty is a Slot that had no frozen series at all.
-func (facts FrozenStateRenewalFacts) Empty() bool { return facts.Frozen == 0 }
+// RecordCensus states where the Slot's series went.
+func (facts *FrozenStateRenewalFacts) RecordCensus(due, read, written int) {
+	facts.Due, facts.Read, facts.Written = due, read, written
+}
+
+// Empty is a Slot that neither meant to evaluate a series nor froze one.
+//
+// A Slot with series due reports even when nothing was frozen, which is the
+// whole point of the census: an all-zero outcome family and no census at all
+// read identically, and telling them apart took a deployment.
+func (facts FrozenStateRenewalFacts) Empty() bool { return facts.Due == 0 && facts.Frozen == 0 }
 
 type NoDataMemoryRefusalFacts struct {
 	// Reason is the store's reason code, so a refusal about size and one about
