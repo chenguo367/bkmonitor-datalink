@@ -23,15 +23,23 @@ type fencedStatePorts struct {
 	*recordingPorts
 	fences     []execution.StateApplyFence
 	staleFence bool
+	// refusal, when set, is the store's typed refusal every apply answers
+	// with, wrapped the way the state package wraps it; staleFence is the
+	// older spelling of refusal = ErrStaleFence.
+	refusal error
 }
 
 func (ports *fencedStatePorts) ApplyRuntimeFenced(
 	ctx context.Context, request execution.StateApplyRequest, fence execution.StateApplyFence,
 ) (execution.StateApplyResult, error) {
 	ports.fences = append(ports.fences, fence)
-	if ports.staleFence {
+	refusal := ports.refusal
+	if ports.staleFence && refusal == nil {
+		refusal = ownership.ErrStaleFence
+	}
+	if refusal != nil {
 		ports.record("state_apply")
-		return execution.StateApplyResult{}, fmt.Errorf("state: runtime state apply: %w", ownership.ErrStaleFence)
+		return execution.StateApplyResult{}, fmt.Errorf("state: runtime state apply: %w", refusal)
 	}
 	return ports.recordingPorts.ApplyRuntime(ctx, request)
 }

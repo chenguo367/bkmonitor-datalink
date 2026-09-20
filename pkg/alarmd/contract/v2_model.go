@@ -137,6 +137,19 @@ const (
 	ReasonStateSchemaUnsupported       = "STATE_SCHEMA_UNSUPPORTED"
 	ReasonStateBudgetExceeded          = "STATE_BUDGET_EXCEEDED"
 	ReasonAuditDrop                    = "AUDIT_DROP"
+	// Ownership refusals, observation-only. The ownership store answers a
+	// fence check, a lease acquire or renew, or a fenced write with one of
+	// four typed errors; until these names existed every one of them was
+	// observed as internal_unknown, and which of the four a deployment was
+	// seeing -- a fence gone stale, a Query Group assigned elsewhere, a lease
+	// held by another worker, or a content scope that moved under a write --
+	// could only be told apart by reading the error sentence off a rate-limited
+	// log line. They are names for the observation; the store's error values
+	// and the callers' retry decisions do not change.
+	ReasonOwnershipStaleFence = "OWNERSHIP_STALE_FENCE"
+	ReasonOwnershipNotDesired = "OWNERSHIP_NOT_DESIRED"
+	ReasonOwnershipLeaseBusy  = "OWNERSHIP_LEASE_BUSY"
+	ReasonContentScopeMoved   = "CONTENT_SCOPE_MOVED"
 
 	CompatibilityModeLegacyGroupOfOne = "LEGACY_GROUP_OF_ONE"
 

@@ -3079,10 +3079,7 @@ func (bundle *phaseTwoWorkerBundle) observeOwnership(
 	queryGroup execution.QueryGroupIdentity,
 	err error,
 ) {
-	reason := observability.ReasonNone
-	if err != nil {
-		reason = observability.ReasonInternalUnknown
-	}
+	reason := ownershipObservationReason(err)
 	observeRuntime(ctx, bundle.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: stage, Result: result,
 		Operation: observability.OperationTransition, Direction: observability.DirectionInternal,
@@ -3090,6 +3087,21 @@ func (bundle *phaseTwoWorkerBundle) observeOwnership(
 			QueryGroupKey: string(queryGroup), OwnerID: bundle.dependencies.Config.PhaseTwo.Worker.ID,
 		}, Err: err,
 	})
+}
+
+// ownershipObservationReason is the reason an ownership observation carries
+// for err: none for no error, the store's own refusal word for one of its
+// four refusals, internal_unknown for anything else. Every ownership site
+// used to say internal_unknown for all four, and which refusal a deployment
+// was seeing could only be read off the error text of a rate-limited log.
+func ownershipObservationReason(err error) observability.ReasonCode {
+	if err == nil {
+		return observability.ReasonNone
+	}
+	if reason, ok := ownership.RefusalReason(err); ok {
+		return observability.ReasonCode(reason)
+	}
+	return observability.ReasonInternalUnknown
 }
 
 func phaseTwoRuntimeObserver(observer observability.Observer) observability.Observer {

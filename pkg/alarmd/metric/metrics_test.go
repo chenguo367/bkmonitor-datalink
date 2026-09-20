@@ -27,6 +27,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 )
 
@@ -259,6 +260,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_state_version_conflict_total":                 "variableLabels: {site,kind}",
 		"bkmonitor_alarmd_worker_owned_query_groups":                    "variableLabels: {worker_role}",
 		"bkmonitor_alarmd_ownership_transition_total":                   "variableLabels: {transition,result,reason_class}",
+		"bkmonitor_alarmd_ownership_refusals_total":                     "variableLabels: {site,refusal}",
 		"bkmonitor_alarmd_source_observation_total":                     "variableLabels: {source_kind,result,reason_class}",
 		"bkmonitor_alarmd_source_refresh_total":                         "variableLabels: {status}",
 		"bkmonitor_alarmd_source_compile_total":                         "variableLabels: {result}",
@@ -670,6 +672,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("activation_failure_total"):              len(observability.AllActivationFailureStages()) * len(observability.AllActivationFailureClasses()),
 		fqName("worker_owned_query_groups"):             1,
 		fqName("ownership_transition_total"):            len(phaseTwoOwnershipTransitions) * metricReasonSets(observability.ComponentOwnership),
+		fqName("ownership_refusals_total"):              len(ownershipRefusalSites) * len(ownership.RefusalReasons),
 		fqName("capacity_budget"):                       len(phaseTwoBudgets) - 1,
 		fqName("container_memory_limit_bytes"):          len(capacitySources) + 1,
 		fqName("container_cpu_cores"):                   len(capacitySources) + 1,

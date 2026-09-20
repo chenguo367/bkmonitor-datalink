@@ -24,6 +24,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
 type Ports struct {
@@ -1284,7 +1285,15 @@ func (coordinator *SlotExecutionCoordinator) admitPlan(
 			err = fmt.Errorf("admission denied: %s", result.ReasonCode)
 		}
 	}
-	coordinator.observe(ctx, observability.ComponentState, observability.StageSideEffectAdmission, request.Operation, started, "", result.ReasonCode, err)
+	// A fence refusal comes back as the store's typed error with no reason
+	// on the result; without naming it here the admission line -- and the
+	// fence_checked line relayed from it -- said internal_unknown for a
+	// stale fence, a Query Group assigned elsewhere and a moved scope alike.
+	reason := result.ReasonCode
+	if named, ok := ownership.RefusalReason(err); ok && reason == "" {
+		reason = execution.ReasonCode(named)
+	}
+	coordinator.observe(ctx, observability.ComponentState, observability.StageSideEffectAdmission, request.Operation, started, "", reason, err)
 	if err != nil {
 		return fmt.Errorf("alarmd worker: side-effect admission: %w", err)
 	}
@@ -1565,6 +1574,14 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		// refusal it was, while the terminal line for the same round named it.
 		if named, ok := StateConflictReason(err); ok {
 			reason = named
+		}
+		// A fenced write the store refused is the store's typed error too: a
+		// stale fence, or a content scope that moved under the write. Named
+		// the same way, so the three numbers a scope move is verified by --
+		// old scope written before it took effect, old scope refused after,
+		// new scope written -- are readable from this line's reason.
+		if named, ok := ownership.RefusalReason(err); ok {
+			reason = execution.ReasonCode(named)
 		}
 		totals.keys += int64(len(chunkItems))
 		totals.bytes += chunkBytes
