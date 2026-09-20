@@ -525,13 +525,18 @@ func (source *ProductionSlotSource) Next(
 	}
 	if source.expiredRangeEnabled && load.Progress != nil && load.Progress.NextSlot == nextSlot && load.Progress.UnfinishedSlot == nil &&
 		ctx.Value(rangeFlightContextKey{}) == queryGroup && recovery.Disposition == ReplayExpired {
-		outcome := observability.RangeGateApplied
-		if rangeSlot, eligible, rangeErr := source.buildExpiredRange(ctx, slot, schedule, at); rangeErr != nil {
+		outcome := refusedRange(observability.RangeGateApplied)
+		if rangeSlot, refusal, rangeErr := source.buildExpiredRange(ctx, slot, schedule, at); rangeErr != nil {
 			return FrozenSlot{}, false, SlotDueFacts{}, rangeErr
-		} else if !eligible {
-			outcome = observability.RangeGateNotEligible
+		} else if refusal.word != "" {
+			outcome = refusal
 		} else if !rangeFitsProgress(*load.Progress, rangeSlot.ExpiredRange) {
-			outcome = observability.RangeGateProofTooLarge
+			// The builder sealed a proof and this round cannot store it beside
+			// the Progress record. Same word the builder uses when the seal
+			// itself refuses the size, because to a reader they are one
+			// situation: the range that would catch this Query Group up does
+			// not fit in what carries it.
+			outcome = refusedRange(observability.RangeGateProofTooLarge)
 		} else {
 			slot = rangeSlot
 		}
@@ -545,7 +550,7 @@ func (source *ProductionSlotSource) Next(
 		// four Slots behind for hours with no reading that could name the
 		// reason.
 		source.observeRangeGate(ctx, fact.Contract.Slot.EvaluationTime,
-			rangeGateRefusal(source, load, nextSlot, ctx, queryGroup), load, nextSlot)
+			refusedRange(rangeGateRefusal(source, load, nextSlot, ctx, queryGroup)), load, nextSlot)
 	}
 	if err := slot.Validate(queryGroup); err != nil {
 		return FrozenSlot{}, false, SlotDueFacts{}, err
@@ -815,17 +820,26 @@ func (source *ProductionSlotSource) classifyRecovery(
 		return "", SlotRecoveryFacts{}, err
 	}
 	facts := SlotRecoveryFacts{Disposition: ReplayEligible, Distance: distance, Age: age, RecheckAtUnixMilli: recheckAt}
-	if distance > source.recovery.MaxReplaySlots {
-		facts.Disposition = ReplayExpired
-		facts.Reason = ReplayExpiredByDistance
-		source.observeReplayExpiry(ctx, evaluationTime, facts)
-		return execution.OperationNormal, facts, nil
-	}
+	// The contradiction is decided before the distance, and the order is the
+	// meaning. Both can be true of the same Slot, and they are not two ways of
+	// saying one thing: distance says the Query Group fell behind and the gap
+	// is accepted, the contradiction says two rules were derived from settings
+	// that disagree and somebody can fix it. Deciding distance first hides the
+	// second inside the first exactly when it is permanent -- a Query Group
+	// held past its own window on every Slot is always also too far by the
+	// time anyone looks, so it reports the accepted gap forever and the
+	// fixable defect is never once named.
 	expired, err := source.replayWaitOutlastsDistance(ctx, evaluationTime, deadline, &facts)
 	if err != nil {
 		return "", SlotRecoveryFacts{}, err
 	}
 	if expired {
+		source.observeReplayExpiry(ctx, evaluationTime, facts)
+		return execution.OperationNormal, facts, nil
+	}
+	if distance > source.recovery.MaxReplaySlots {
+		facts.Disposition = ReplayExpired
+		facts.Reason = ReplayExpiredByDistance
 		source.observeReplayExpiry(ctx, evaluationTime, facts)
 		return execution.OperationNormal, facts, nil
 	}
@@ -894,9 +908,18 @@ func (source *ProductionSlotSource) replayWaitOutlastsDistance(
 	// outlast the boundary and the walk below is not worth its reads. This is
 	// the ordinary case -- it is what a healthy deployment does on every
 	// replay -- and the walk happens only when the arithmetic cannot rule the
-	// contradiction out. A recheck instant of zero means the schedule retires
-	// before the limit, so there is no boundary to outlast.
-	if facts.RecheckAtUnixMilli == 0 || readyAt < facts.RecheckAtUnixMilli {
+	// contradiction out.
+	//
+	// The shortcut applies only inside the limit. Past it the recheck instant
+	// is zero because the distance walk stopped at the limit rather than
+	// because the schedule retires, and reading zero as "no boundary to
+	// outlast" is what made this guard silent on exactly the Query Groups it
+	// was written for: one permanently held past its window is also past the
+	// limit by the time anyone looks, so the shortcut fired on every round and
+	// the contradiction was never computed once. Past the limit the Slot is
+	// being given up on anyway, so the walk it costs is affordable.
+	if facts.Distance <= source.recovery.MaxReplaySlots &&
+		(facts.RecheckAtUnixMilli == 0 || readyAt < facts.RecheckAtUnixMilli) {
 		return false, nil
 	}
 	boundary, bounded, err := source.replayDistanceBoundary(ctx, evaluationTime)

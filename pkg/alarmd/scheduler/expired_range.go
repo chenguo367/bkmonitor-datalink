@@ -31,18 +31,41 @@ func WithExpiredRangeCreation(enabled bool) ProductionSlotSourceOption {
 
 func (source *ProductionSlotSource) RangeCreationEnabled() bool { return source.expiredRangeEnabled }
 
-func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first FrozenSlot, schedule execution.FrozenQueryGroupSchedule, at time.Time) (FrozenSlot, bool, error) {
-	if source.recovery == nil || len(schedule.Plans) == 0 {
-		return FrozenSlot{}, false, nil
+// rangeBuildRefusal is why the builder produced no range, and the two
+// candidate bounds behind it when the branch that computes them was reached.
+//
+// The bounds are carried rather than recomputed because they are locals of one
+// call and because which of the two bound first is the finding: a steps_below_one
+// with the head bound at zero is a Query Group barely past its window, and the
+// same word with the deadline bound at zero is a Slot whose own query deadline
+// has only just passed. Told apart they are two different situations; told as
+// one word they are the bucket this replaced.
+type rangeBuildRefusal struct {
+	word          string
+	boundsKnown   bool
+	distanceBound int64
+	deadlineBound int64
+}
+
+func refusedRange(word string) rangeBuildRefusal { return rangeBuildRefusal{word: word} }
+
+// buildExpiredRange returns the range, or the word for why there is none. An
+// empty word means a range was built.
+func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first FrozenSlot, schedule execution.FrozenQueryGroupSchedule, at time.Time) (FrozenSlot, rangeBuildRefusal, error) {
+	if source.recovery == nil {
+		return FrozenSlot{}, refusedRange(observability.RangeGateRecoveryDisabled), nil
+	}
+	if len(schedule.Plans) == 0 {
+		return FrozenSlot{}, refusedRange(observability.RangeGatePlansMismatch), nil
 	}
 	spec := schedule.Plans[0].Spec
 	for _, plan := range schedule.Plans {
 		if plan.Spec.EvaluationIntervalSeconds != spec.EvaluationIntervalSeconds || plan.Spec.Alignment != spec.Alignment {
-			return FrozenSlot{}, false, nil
+			return FrozenSlot{}, refusedRange(observability.RangeGatePlansMismatch), nil
 		}
 	}
 	if len(first.DuePlanTargets.Plans) != len(schedule.Plans) {
-		return FrozenSlot{}, false, nil
+		return FrozenSlot{}, refusedRange(observability.RangeGatePlansMismatch), nil
 	}
 	start := first.Contract.Slot.EvaluationTime
 	// Subtract from the already validated first deadline, avoiding negative
@@ -60,7 +83,7 @@ func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first
 		// Prove the suffix using this real homogeneous segment. At cutovers we
 		// conservatively stop unless this segment alone witnesses K successors.
 		if at.UnixMilli() < first.EarliestQueryDeadlineUnixMilli {
-			return FrozenSlot{}, false, nil
+			return FrozenSlot{}, refusedRange(observability.RangeGateDeadlineNotReached), nil
 		}
 		headSteps := (at.Unix() - int64(start)) / spec.EvaluationIntervalSeconds
 		if schedule.Segment.End != nil {
@@ -104,32 +127,38 @@ func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first
 		}
 	}
 	if steps < 1 {
-		return FrozenSlot{}, false, nil
+		refusal := refusedRange(observability.RangeGateStepsBelowOne)
+		if distance != nil {
+			refusal.boundsKnown = true
+			refusal.distanceBound = distance.headSteps - int64(distance.maxReplaySlots)
+			refusal.deadlineBound = distance.deadlineSteps
+		}
+		return FrozenSlot{}, refusal, nil
 	}
 	if steps > (math.MaxInt64-int64(start))/spec.EvaluationIntervalSeconds {
-		return FrozenSlot{}, false, ErrSlotContractDrift
+		return FrozenSlot{}, rangeBuildRefusal{}, ErrSlotContractDrift
 	}
 	last := execution.EvaluationTime(int64(start) + steps*spec.EvaluationIntervalSeconds)
 	freeze := execution.FreezeSlotContractRequest{QueryGroup: source.queryGroup, ScheduleRevision: schedule.Segment.ScheduleRevision,
 		ScheduleSegmentStart: schedule.Segment.Start, EvaluationTime: last, DuePlans: schedule.DuePlanRefs(last)}
 	fact, err := source.catalog.FreezeSlotContract(ctx, freeze)
 	if err != nil {
-		return FrozenSlot{}, false, nil
+		return FrozenSlot{}, refusedRange(observability.RangeGateFreezeFailed), nil
 	} // no pending or Guard yet: original single Slot remains valid.
 	if err := fact.Validate(freeze); err != nil {
-		return FrozenSlot{}, false, &SourceBlockedError{Err: err}
+		return FrozenSlot{}, rangeBuildRefusal{}, &SourceBlockedError{Err: err}
 	}
 	targets, deadline, err := frozenSlotExecutionFacts(fact)
 	if err != nil {
-		return FrozenSlot{}, false, err
+		return FrozenSlot{}, rangeBuildRefusal{}, err
 	}
 	recovery, keep, err := source.recoveryBoundaries(deadline)
 	if err != nil {
-		return FrozenSlot{}, false, err
+		return FrozenSlot{}, rangeBuildRefusal{}, err
 	}
 	next, err := source.catalog.NextSlotAfter(ctx, source.queryGroup, last)
 	if err != nil {
-		return FrozenSlot{}, false, err
+		return FrozenSlot{}, rangeBuildRefusal{}, err
 	}
 	proof, err := execution.SealExpiredRange(execution.ExpiredRangeProjectionV1{
 		Schedule: schedule, First: execution.UnfinishedSlotProjection{Contract: first.Contract, DuePlanTargets: first.DuePlanTargets,
@@ -141,9 +170,9 @@ func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first
 	})
 	if err != nil {
 		if errors.Is(err, execution.ErrExpiredRangeProofTooLarge) {
-			return FrozenSlot{}, false, nil
+			return FrozenSlot{}, refusedRange(observability.RangeGateProofTooLarge), nil
 		}
-		return FrozenSlot{}, false, &SourceBlockedError{Err: err}
+		return FrozenSlot{}, rangeBuildRefusal{}, &SourceBlockedError{Err: err}
 	}
 	first.Contract, first.DuePlanTargets = proof.Last.Contract, proof.Last.DuePlanTargets.Clone()
 	first.EarliestQueryDeadlineUnixMilli, first.KeepUntilUnixMilli, first.RecoveryUntilUnixMilli = deadline, keep, recovery
@@ -157,7 +186,7 @@ func (source *ProductionSlotSource) buildExpiredRange(ctx context.Context, first
 		distance.steps, distance.count = steps, proof.Count
 		source.observeRangeDistanceExpiry(ctx, *distance)
 	}
-	return first, true, nil
+	return first, rangeBuildRefusal{}, nil
 }
 
 // rangeDistanceReport is what the distance branch decided with, carried from
@@ -331,7 +360,7 @@ func rangeGateRefusal(
 func (source *ProductionSlotSource) observeRangeGate(
 	ctx context.Context,
 	evaluationTime execution.EvaluationTime,
-	outcome string,
+	outcome rangeBuildRefusal,
 	load execution.ProgressLoadResult,
 	nextSlot execution.EvaluationTime,
 ) {
@@ -341,8 +370,11 @@ func (source *ProductionSlotSource) observeRangeGate(
 	// Observability is a fail-open side channel, as everywhere else here.
 	defer func() { _ = recover() }()
 	facts := &observability.RangeGateFacts{
-		Outcome: outcome, ExpectedNextSlot: int64(nextSlot),
+		Outcome: outcome.word, ExpectedNextSlot: int64(nextSlot),
 		RangeCreationEnabled: source.expiredRangeEnabled,
+		BoundsKnown:          outcome.boundsKnown,
+		DistanceBound:        outcome.distanceBound,
+		DeadlineBound:        outcome.deadlineBound,
 	}
 	if load.Progress != nil {
 		facts.ProgressPresent = true
