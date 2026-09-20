@@ -340,14 +340,26 @@ func revisionedCatalog(t *testing.T, outputProtocol string) controlplane.Catalog
 
 // The strategy-level output read reports the word the control leader froze
 // with the Plan, not what the deployment's choice would resolve to now: a
-// deployment that built under native and then reads under auto must be told
-// standard_raw_event, because that is what the sink writes for this Plan. The
-// read has to work both where the directory rode the runtime's index (the
-// executing replica, whose remembered content names the output contexts) and
-// where it read the manifest from the store (a cold or follower replica), and
-// has to name its gap when a row carries no digest or the object is gone.
+// deployment that built under a forced choice and then reads under auto must
+// be told the forced word, because that is what the sink writes for this
+// Plan. The read has to work both where the directory rode the runtime's
+// index (the executing replica, whose remembered content names the output
+// contexts) and where it read the manifest from the store (a cold or follower
+// replica), and has to name its gap when a row carries no digest or the
+// object is gone.
+//
+// The table's two forced choices are the discriminator: a read that
+// re-derived the format from the automatic rule would report the rule's word,
+// so at least one frozen word here must differ from it. Which one differs
+// depends on what the rule resolves an unset choice to, and that is the
+// rule's own contract, tested where it lives; this test asks the rule rather
+// than assuming its answer, and requires only that the table still tells the
+// two reads apart.
 func TestObservationDirectoryReadsTheFrozenOutputFormatNotTheCurrentChoice(t *testing.T) {
-	for name, test := range map[string]struct {
+	// What the automatic rule says for a revisioned strategy, which is what a
+	// read that re-derived the format would report.
+	byRule, _ := controlplane.EffectiveWireFormat("", 7)
+	table := map[string]struct {
 		protocol   string
 		wireFormat string
 		compat     bool
@@ -359,7 +371,17 @@ func TestObservationDirectoryReadsTheFrozenOutputFormatNotTheCurrentChoice(t *te
 		// for a revisioned strategy, so it is the case that tells the two
 		// reads apart.
 		"legacy freezes compatibility with context": {protocol: "legacy", wireFormat: contract.WireFormatPythonCompatible, compat: true},
-	} {
+	}
+	discriminating := 0
+	for _, test := range table {
+		if test.wireFormat != byRule {
+			discriminating++
+		}
+	}
+	if discriminating == 0 {
+		t.Fatalf("no fixture discriminates: the rule and every frozen word agree on %q", byRule)
+	}
+	for name, test := range table {
 		name, test := name, test
 		t.Run(name, func(t *testing.T) {
 			h := newObjectCatalogHarness(t)
@@ -369,12 +391,6 @@ func TestObservationDirectoryReadsTheFrozenOutputFormatNotTheCurrentChoice(t *te
 			}
 			at := time.Unix(1000, 0)
 			limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
-			// What the automatic rule would say for a revisioned strategy, which
-			// is what a read that re-derived the format would report.
-			byRule, _ := controlplane.EffectiveWireFormat("", 7)
-			if byRule == test.wireFormat {
-				t.Fatalf("fixture cannot discriminate: the rule and the frozen word agree on %q", byRule)
-			}
 			check := func(t *testing.T, label string, d *controlplane.ObservationDirectory, wantFromIndex int) {
 				t.Helper()
 				d.Refresh(h.ctx, at)
@@ -396,9 +412,6 @@ func TestObservationDirectoryReadsTheFrozenOutputFormatNotTheCurrentChoice(t *te
 					}
 					if facts.WireFormat != test.wireFormat || facts.EffectiveWireFormat != test.wireFormat || facts.DecidedBy != controlplane.WireFormatDecidedFrozen {
 						t.Fatalf("%s output for %s = %+v, want frozen %q", label, row.Identity.StrategyID, facts, test.wireFormat)
-					}
-					if facts.EffectiveWireFormat == byRule {
-						t.Fatalf("%s output reports the rule's %q, not the frozen word", label, byRule)
 					}
 					if facts.SnapshotRevision != 7 || facts.CompatibilityContext != test.compat || facts.OutputContextDigest != row.OutputContext {
 						t.Fatalf("%s output facts = %+v, want revision 7, compatibility context %t, the row's digest", label, facts, test.compat)
