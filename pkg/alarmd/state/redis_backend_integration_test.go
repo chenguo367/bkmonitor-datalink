@@ -43,7 +43,7 @@ func TestRedisBackendStoreRoundTripTTLAndReconnect(t *testing.T) {
 		t.Fatalf("MGet(cancelled) error = %v, want context.Canceled", err)
 	}
 
-	router, err := NewFixedRouter("monitor-01", backend)
+	router, err := NewFixedRouter("state-01", backend)
 	if err != nil {
 		t.Fatalf("NewFixedRouter() error = %v", err)
 	}
