@@ -42,7 +42,7 @@ func TestAPreflightBatchIsBoundedByWhatItWillMove(t *testing.T) {
 	// Nothing read for this Query Group yet. The bound is the only one that
 	// holds whatever its records turn out to be: the batch budget over the
 	// largest value the store accepts.
-	first := store.runtimeLoadBatchLimit(group)
+	first := store.runtimeLoadBatchLimit(group, 0, false)
 	if want := int(runtimeLoadBatchBytes / (512 << 10)); first != want {
 		t.Fatalf("first batch limit = %d, want %d - the only shape-independent bound there is", first, want)
 	}
@@ -51,8 +51,8 @@ func TestAPreflightBatchIsBoundedByWhatItWillMove(t *testing.T) {
 	}
 
 	// The shape that produced this decision: records of about 345 KiB.
-	store.observeValueBytes(group, 249, 249*345*1024)
-	limit := store.runtimeLoadBatchLimit(group)
+	store.commitValueBytes(group, 345*1024, true)
+	limit := store.runtimeLoadBatchLimit(group, 0, false)
 	if expected := uint64(limit) * mustExpect(t, store, group); expected > runtimeLoadBatchBytes {
 		t.Fatalf("a batch of %d records of %d bytes is %d, over the %d bound",
 			limit, mustExpect(t, store, group), expected, runtimeLoadBatchBytes)
@@ -62,15 +62,15 @@ func TestAPreflightBatchIsBoundedByWhatItWillMove(t *testing.T) {
 	// is what the batch will move, so learning is what buys back the batch size
 	// the safe first call gave up.
 	small := sizedStore()
-	small.observeValueBytes("qg-small", 1000, 1000*2048)
-	if limit := small.runtimeLoadBatchLimit("qg-small"); limit != runtimeLoadBatchItems {
+	small.commitValueBytes("qg-small", 2048, true)
+	if limit := small.runtimeLoadBatchLimit("qg-small", 0, false); limit != runtimeLoadBatchItems {
 		t.Fatalf("batch limit = %d for 2 KiB records, want the full item bound %d", limit, runtimeLoadBatchItems)
 	}
 
 	// A single record over the whole batch budget is still read, alone.
 	huge := sizedStore()
-	huge.observeValueBytes("qg-huge", 1, runtimeLoadBatchBytes*2)
-	if limit := huge.runtimeLoadBatchLimit("qg-huge"); limit != 1 {
+	huge.commitValueBytes("qg-huge", runtimeLoadBatchBytes*2, true)
+	if limit := huge.runtimeLoadBatchLimit("qg-huge", 0, false); limit != 1 {
 		t.Fatalf("batch limit = %d for a record larger than the batch budget, want 1", limit)
 	}
 }
@@ -90,20 +90,20 @@ func TestTheRecordSizeIsLearnedPerQueryGroup(t *testing.T) {
 	// Twenty ordinary reads, as a busy replica produces between two Slots of
 	// the heavy object.
 	for range 20 {
-		store.observeValueBytes(ordinary, 256, 256*3*1024)
+		store.commitValueBytes(ordinary, 3*1024, true)
 	}
-	store.observeValueBytes(heavy, 249, 249*345*1024)
+	store.commitValueBytes(heavy, 345*1024, true)
 
 	// Interleaved again, which is what a real replica does.
 	for range 20 {
-		store.observeValueBytes(ordinary, 256, 256*3*1024)
+		store.commitValueBytes(ordinary, 3*1024, true)
 	}
 
-	if limit := store.runtimeLoadBatchLimit(ordinary); limit != runtimeLoadBatchItems {
+	if limit := store.runtimeLoadBatchLimit(ordinary, 0, false); limit != runtimeLoadBatchItems {
 		t.Fatalf("ordinary batch limit = %d, want the full item bound: the heavy object must not shrink "+
 			"everyone else's batches either", limit)
 	}
-	heavyLimit := store.runtimeLoadBatchLimit(heavy)
+	heavyLimit := store.runtimeLoadBatchLimit(heavy, 0, false)
 	if moved := uint64(heavyLimit) * mustExpect(t, store, heavy); moved > runtimeLoadBatchBytes {
 		t.Fatalf("heavy batch of %d keys moves %d, over the %d bound; twenty ordinary reads in between "+
 			"must not raise what this Query Group is allowed to ask for", heavyLimit, moved, runtimeLoadBatchBytes)
@@ -178,14 +178,14 @@ func TestTheLearnedRecordSizeFollowsAStrategyThatGrew(t *testing.T) {
 	store := sizedStore()
 	const group = execution.QueryGroupIdentity("qg")
 	for range 20 {
-		store.observeValueBytes(group, 100, 100*4096)
+		store.commitValueBytes(group, 4096, true)
 	}
 	small := mustExpect(t, store, group)
 	if small == 0 {
 		t.Fatal("nothing learned from twenty batches")
 	}
 	for range 20 {
-		store.observeValueBytes(group, 100, 100*345*1024)
+		store.commitValueBytes(group, 345*1024, true)
 	}
 	if grown := mustExpect(t, store, group); grown <= small*10 {
 		t.Fatalf("expected bytes went from %d to %d after the records grew 86x; a bound that lags this "+
@@ -198,12 +198,87 @@ func TestTheLearnedRecordSizeFollowsAStrategyThatGrew(t *testing.T) {
 func TestTheLearnedSizeTableIsBounded(t *testing.T) {
 	store := sizedStore()
 	for index := range runtimeValueSizeGroups + 64 {
-		store.observeValueBytes(execution.QueryGroupIdentity(string(rune('a'+index%26))+string(rune(index))), 10, 10*4096)
+		store.commitValueBytes(execution.QueryGroupIdentity(string(rune('a'+index%26))+string(rune(index))), 4096, true)
 	}
 	store.valueSizes.mu.RLock()
 	size := len(store.valueSizes.bytes)
 	store.valueSizes.mu.RUnlock()
 	if size > runtimeValueSizeGroups {
 		t.Fatalf("learned sizes for %d Query Groups, over the %d bound", size, runtimeValueSizeGroups)
+	}
+}
+
+// The bound is built from the round's largest record, not its mean.
+//
+// One round's keys are not a uniform population - a Query Group holds every
+// shape its Plans produce, and during a representation migration it holds two
+// populations tens of times apart. A mean is pulled down by the many small
+// records, the batch grows to match, and the few large ones in it move more
+// than the budget allows. The two answers have to be different numbers here or
+// this case cannot tell which statistic is in force.
+func TestTheBatchBoundComesFromTheLargestRecordNotTheMean(t *testing.T) {
+	store := newBatchStore(t, newPipelineMemoryBackend(), nil)
+	group := execution.QueryGroupIdentity("qg-mixed")
+
+	const small, large = 4 * 1024, 512 * 1024
+	// Ninety-nine small records and one large one: the mean is about 9 KiB and
+	// the largest is 512 KiB, so the two size a batch fifty-six times apart.
+	byMean := store.runtimeLoadBatchLimit(group, (99*small+large)/100, true)
+	byLargest := store.runtimeLoadBatchLimit(group, large, true)
+	if byMean == byLargest {
+		t.Fatalf("mean and largest both allow %d keys, so this case cannot separate them", byMean)
+	}
+	if byLargest > byMean {
+		t.Fatalf("the largest allows %d keys and the mean %d; a bound sized by the largest cannot be the "+
+			"looser of the two", byLargest, byMean)
+	}
+	if moved := uint64(byLargest) * large; moved > runtimeLoadBatchBytes {
+		t.Fatalf("a batch of %d keys of the largest record moves %d bytes, over the %d bound",
+			byLargest, moved, runtimeLoadBatchBytes)
+	}
+}
+
+// The bound comes back down when the records do.
+//
+// Scoped to the round for this reason. A high-water mark, or one reset only
+// when the state generation changes, never falls for a strategy whose
+// generation is stable - so a Query Group whose records shrank, which is
+// exactly what changing their representation does, would stay on the batch
+// its largest record ever needed for as long as the process ran, and the
+// learning this bound exists for would be dead.
+func TestTheBatchBoundFallsWhenTheRecordsShrink(t *testing.T) {
+	store := newBatchStore(t, newPipelineMemoryBackend(), nil)
+	group := execution.QueryGroupIdentity("qg-shrinking")
+
+	store.commitValueBytes(group, 345*1024, true)
+	wide := store.runtimeLoadBatchLimit(group, 0, false)
+
+	// The next round reads the same keys and they are fifty times smaller.
+	store.commitValueBytes(group, 7*1024, true)
+	after := store.runtimeLoadBatchLimit(group, 0, false)
+
+	if after <= wide {
+		t.Fatalf("the batch limit was %d when the records were 345 KiB and %d after they shrank to 7 KiB; "+
+			"a bound that only ever rises stops being a measurement of the population", wide, after)
+	}
+}
+
+// A round that did not come back leaves the bound where it was.
+func TestARoundThatDidNotComeBackLeavesTheBoundAlone(t *testing.T) {
+	store := newBatchStore(t, newPipelineMemoryBackend(), nil)
+	group := execution.QueryGroupIdentity("qg-failing")
+
+	store.commitValueBytes(group, 345*1024, true)
+	before, ok := store.expectedValueBytes(group)
+	if !ok || before == 0 {
+		t.Fatal("the first commit taught nothing, so a failed round teaching nothing would be the same " +
+			"number and this case could not tell the two apart")
+	}
+	store.commitValueBytes(group, 4*1024, false)
+	after, _ := store.expectedValueBytes(group)
+	if after != before {
+		t.Fatalf("a round that did not come back moved the bound from %d to %d; every failure would let the "+
+			"next batch be at least as large, which is the wrong direction from the only evidence there is",
+			before, after)
 	}
 }

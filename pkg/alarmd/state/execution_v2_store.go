@@ -200,6 +200,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	}
 	result := execution.StatePreflightResult{Items: make([]execution.RuntimeStateView, len(request.Items))}
 	batch := &runtimeLoadBatch{}
+	roundLargest, anyRead := 0, false
 	for index, item := range request.Items {
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
 		key, err := RuntimeStateKeyV2(store.options.Prefix, item.Identity)
@@ -211,15 +212,33 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			result.Items[index] = runtimeLoadFailure(view, err)
 			continue
 		}
-		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.runtimeLoadBatchLimit(request.Contract.Slot.QueryGroup)) {
-			result.LoadedBytes += store.loadRuntimeBatch(ctx, request, batch, result.Items)
+		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.runtimeLoadBatchLimit(request.Contract.Slot.QueryGroup, roundLargest, anyRead)) {
+			bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items)
+			result.LoadedBytes += bytes
+			if read {
+				anyRead = true
+				if largest > roundLargest {
+					roundLargest = largest
+				}
+			}
 			batch.reset()
 		}
 		batch.target = target
 		batch.indexes = append(batch.indexes, index)
 		batch.keys = append(batch.keys, key)
 	}
-	result.LoadedBytes += store.loadRuntimeBatch(ctx, request, batch, result.Items)
+	bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items)
+	result.LoadedBytes += bytes
+	if read {
+		anyRead = true
+		if largest > roundLargest {
+			roundLargest = largest
+		}
+	}
+	// One commit for the whole preflight: the round read every key of the
+	// Query Group, so this is a complete measurement of the population rather
+	// than whatever the last batch happened to hold.
+	store.commitValueBytes(request.Contract.Slot.QueryGroup, roundLargest, anyRead)
 	return execution.ClassifyStatePreflight(request, result)
 }
 
