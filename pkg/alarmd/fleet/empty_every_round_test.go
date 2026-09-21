@@ -11,6 +11,7 @@ package fleet
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -86,7 +87,7 @@ func TestObjectsEmptyEveryRoundAreListedAfterAnHourNotAfterARoundCount(t *testin
 		t.Fatalf("not listed after %d empty rounds over an hour: %+v", fifty+more, tracker.NoData())
 	}
 	if row.EmptyEveryRound == nil || row.EmptyEveryRound.Rounds != fifty+more || !row.EmptyEveryRound.Since.Equal(started) ||
-		!row.EmptyEveryRound.NeverSawData || row.EmptyEveryRound.Cause != EmptyEveryRoundCauseUnknown ||
+		!row.EmptyEveryRound.NeverSawData || !row.EmptyEveryRound.SinceIsLowerBound || row.EmptyEveryRound.Cause != EmptyEveryRoundCauseUnknown ||
 		!row.Since.Equal(started) || row.SinceFrom != SinceSnapshotContinuity || row.ReasonCode != "FULL_EMPTY_COMPLETED" ||
 		len(row.Strategies) != 1 || row.Strategies[0].StrategyID != "4101" {
 		t.Errorf("row = %+v facts %+v, want %d rounds since %s, never saw data, CAUSE_UNKNOWN, strategy 4101",
@@ -298,5 +299,66 @@ func TestTheVerdictRouteListsEmptyEveryRoundAsTheStrategysLine(t *testing.T) {
 	}
 	if _, blocked := row["blocked"]; blocked {
 		t.Errorf("row carries a blocked reading: %v; nothing is stuck anywhere", row["blocked"])
+	}
+}
+
+// The no-data lines fold by strategy, one object to a group, and a
+// population of groups of one cannot show that the runs began together. The
+// onset fold can: minutes by objects, largest first, the bound's remainder
+// summed, and how many distinct minutes there were -- one is one event,
+// hundreds are hundreds of quiet sources. A live deployment's 327 empty
+// runs in two minutes were the two minutes a release began recording them.
+func TestTheNoDataLinesFoldByOnsetMinuteAsWellAsByStrategy(t *testing.T) {
+	at := time.Date(2026, 9, 21, 14, 0, 0, 0, time.UTC)
+	release := time.Date(2026, 9, 21, 7, 39, 0, 0, time.UTC)
+	rows := []Anomaly{}
+	add := func(group string, since time.Time, kind string) {
+		rows = append(rows, Anomaly{QueryGroup: group, Kind: kind, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: "pod-a",
+			Since: since, Strategies: []StrategyRef{{StrategyID: group, BusinessID: "7"}}})
+	}
+	// Three hundred that began in the release's two minutes, seconds apart.
+	for i := 0; i < 300; i++ {
+		add(fmt.Sprintf("qg-r%03d", i), release.Add(time.Duration(i%2)*time.Minute).Add(time.Duration(i%50)*time.Second), KindEmptyEveryRound)
+	}
+	// Twelve quiet sources of their own, one to a minute, and two rows
+	// that carry no start at all.
+	for i := 0; i < 12; i++ {
+		add(fmt.Sprintf("qg-q%02d", i), at.Add(-time.Duration(i+1)*time.Hour), KindEmptyEveryRound)
+	}
+	add("qg-unstarted-a", time.Time{}, KindEmptyEveryRound)
+	add("qg-unstarted-b", time.Time{}, KindEmptyEveryRound)
+	view := &View{NoData: rows}
+	Attribute(view.NoData, at)
+	var report *CheckReport
+	for _, candidate := range ReportChecks([][]Anomaly{nil, nil, nil, nil}, nil, view, at) {
+		if candidate.Code == CheckEmptyEveryRound {
+			report = &candidate
+		}
+	}
+	if report == nil || report.Objects != 314 || len(report.Groups) != 314 {
+		t.Fatalf("report = %+v, want the line over 314 objects in 314 strategy folds", report)
+	}
+	fold := report.Onsets
+	if fold == nil || fold.Distinct != 14 || len(fold.Minutes) != MaxOnsetFold || fold.Other != 12-(MaxOnsetFold-2) || fold.WithoutOnset != 2 {
+		t.Fatalf("onsets = %+v, want 14 distinct minutes, %d listed, the rest of the quiet ones under other, two without a start", fold, MaxOnsetFold)
+	}
+	// The fold adds up to the line, so the reader's subtraction leaves nothing.
+	listed := fold.Other + fold.WithoutOnset
+	for _, minute := range fold.Minutes {
+		listed += minute.Objects
+	}
+	if listed != report.Objects {
+		t.Fatalf("fold adds up to %d, the line to %d", listed, report.Objects)
+	}
+	if fold.Minutes[0].Objects != 150 || !fold.Minutes[0].Minute.Equal(release) || fold.Minutes[1].Objects != 150 ||
+		!fold.Minutes[1].Minute.Equal(release.Add(time.Minute)) || fold.Minutes[2].Objects != 1 {
+		t.Fatalf("minutes = %+v, want the release's two minutes of 150 first, then the quiet ones at one each", fold.Minutes)
+	}
+	// A line with no no-data rows carries no fold, and the record lines
+	// never do.
+	for _, candidate := range ReportChecks([][]Anomaly{nil, nil, nil, nil}, nil, &View{}, at) {
+		if candidate.Onsets != nil {
+			t.Fatalf("%s carries an onset fold with nothing to fold", candidate.Code)
+		}
 	}
 }

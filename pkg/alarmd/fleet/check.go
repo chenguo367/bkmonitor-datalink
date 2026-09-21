@@ -461,6 +461,17 @@ type CheckReport struct {
 	// rejection, or nothing tried. It is what replaced inferring the
 	// mechanism from the object's period.
 	SkipReasons map[string]int `json:"skip_reasons,omitempty"`
+	// Onsets, on the two no-data lines, is the objects by the minute their
+	// run began, largest minutes first and at most MaxOnsetFold of them with
+	// the rest summed under Other and the rows with no start under
+	// WithoutOnset, so the fold adds up to the line: a reader who subtracts
+	// the minutes from the count must not read the remainder as a sample
+	// dropped. The strategy fold cannot show that many
+	// runs began together; this is the fold that separates one event from
+	// many quiet sources. A minute that is the minute a release began
+	// recording the runs is a lower bound, not an event, and the rows say
+	// so (EmptyEveryRoundFacts.SinceIsLowerBound).
+	Onsets *OnsetFold `json:"onsets,omitempty"`
 	// Recovered is the objects that recovered from this line within
 	// RecoveredRetention, over its folds; RecoveredLast the latest of them.
 	// Not in Objects or Current: they are not under the line now. A line with
@@ -493,6 +504,53 @@ type CheckReport struct {
 	// the capability line names how many strategies fall under each kind of
 	// cause, so the page cannot state one cause for every reason.
 	Line string `json:"line,omitempty"`
+}
+
+// OnsetFold is the objects of a line by the minute their run began.
+type OnsetFold struct {
+	Minutes []OnsetMinute `json:"minutes"`
+	// Other is the objects in minutes past the bound, summed.
+	Other int `json:"other,omitempty"`
+	// WithoutOnset is the line's objects whose row carries no start. With
+	// Minutes and Other it adds up to the line's objects.
+	WithoutOnset int `json:"without_onset,omitempty"`
+	// Distinct is how many different minutes there were, bound or not: one
+	// is one event, hundreds are hundreds of quiet sources.
+	Distinct int `json:"distinct"`
+}
+
+// OnsetMinute is one minute of an onset fold.
+type OnsetMinute struct {
+	Minute  time.Time `json:"minute"`
+	Objects int       `json:"objects"`
+}
+
+// MaxOnsetFold bounds the minutes an onset fold lists.
+const MaxOnsetFold = 8
+
+// onsetFold orders the minutes by objects, then by time, and cuts to the
+// bound; nil when the line has no rows of the kinds that carry a start.
+func onsetFold(onsets map[time.Time]int, withoutOnset int) *OnsetFold {
+	if len(onsets) == 0 && withoutOnset == 0 {
+		return nil
+	}
+	fold := &OnsetFold{Distinct: len(onsets), WithoutOnset: withoutOnset}
+	for minute, objects := range onsets {
+		fold.Minutes = append(fold.Minutes, OnsetMinute{Minute: minute, Objects: objects})
+	}
+	sort.Slice(fold.Minutes, func(i, j int) bool {
+		if fold.Minutes[i].Objects != fold.Minutes[j].Objects {
+			return fold.Minutes[i].Objects > fold.Minutes[j].Objects
+		}
+		return fold.Minutes[i].Minute.Before(fold.Minutes[j].Minute)
+	})
+	if len(fold.Minutes) > MaxOnsetFold {
+		for _, minute := range fold.Minutes[MaxOnsetFold:] {
+			fold.Other += minute.Objects
+		}
+		fold.Minutes = fold.Minutes[:MaxOnsetFold]
+	}
+	return fold
 }
 
 // CheckGroup is one fold of a check's objects: the objects sharing one key.
@@ -705,6 +763,12 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		// summed over its groups, where the object lines count distinct
 		// strategies behind objects.
 		sourceStrategies int
+		// onsets is the no-data lines' objects by the minute their run
+		// began, for the fold that tells one event from many; withoutOnset
+		// the rows of those lines that carry no start, so the fold's sum
+		// and the line's count can be read against each other.
+		onsets       map[time.Time]int
+		withoutOnset int
 	}
 	tallies := map[Check]*tally{}
 	ensure := func(check Check) *tally {
@@ -837,8 +901,28 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				if row.Finding.Check == "" {
 					continue
 				}
-				add(ensure(row.Finding.Check), row.Finding.Group, row)
-				ensure(row.Finding.Check).current++
+				entry := ensure(row.Finding.Check)
+				add(entry, row.Finding.Group, row)
+				entry.current++
+				// These lines fold by strategy, one object to a group, and
+				// three hundred groups of one cannot show that three
+				// hundred runs began in the same two minutes. The onset
+				// fold can: a platform event is one minute with hundreds,
+				// a population of quiet sources is hundreds of minutes with
+				// one. On a live deployment 327 of 366 empty runs began in
+				// two minutes -- the minutes a release began recording
+				// them, a lower bound and not an event, and the fold is
+				// what shows either.
+				if row.Kind == KindEmptyEveryRound || row.Kind == KindNoData {
+					if row.Since.IsZero() {
+						entry.withoutOnset++
+					} else {
+						if entry.onsets == nil {
+							entry.onsets = map[time.Time]int{}
+						}
+						entry.onsets[row.Since.UTC().Truncate(time.Minute)]++
+					}
+				}
 			}
 		}
 	}
@@ -992,7 +1076,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			Partial: entry.partial, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
 			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour,
 			Consequence: entry.skipped, SkipReasons: entry.reasons, Rebalance: entry.rebalance,
-			Recovered: entry.recovered}
+			Recovered: entry.recovered, Onsets: onsetFold(entry.onsets, entry.withoutOnset)}
 		if check.SourceStanding() {
 			report.Strategies = entry.sourceStrategies
 		}

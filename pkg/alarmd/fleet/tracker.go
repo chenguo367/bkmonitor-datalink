@@ -1715,7 +1715,7 @@ func (tracker *Tracker) NoData() []Anomaly {
 			anomaly.Kind = KindEmptyEveryRound
 			anomaly.Since, anomaly.SinceFrom = time.Unix(state.emptySinceSlot, 0).UTC(), state.emptySlotFrom
 			anomaly.EmptyEveryRound = &EmptyEveryRoundFacts{
-				Rounds: state.emptyRuns, Since: anomaly.Since, NeverSawData: true,
+				Rounds: state.emptyRuns, Since: anomaly.Since, NeverSawData: true, SinceIsLowerBound: true,
 				Cause: EmptyEveryRoundCauseUnknown,
 			}
 		default:
