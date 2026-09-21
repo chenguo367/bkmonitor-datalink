@@ -109,6 +109,12 @@ type WorkerLoad struct {
 	Waiting          int     `json:"waiting"`
 	MemoryUsedBytes  uint64  `json:"memory_used_bytes,omitempty"`
 	MemoryLimitBytes uint64  `json:"memory_limit_bytes,omitempty"`
+	// RetainedPoolBytes is this Worker's retained-byte pool, the limit its
+	// Slots' retained bytes are held under, as the Worker derived it: what
+	// the Control Leader judges the byte constraint against (decision-020
+	// section 5.7). Zero from a Worker that does not report it, which the
+	// Leader reads as "not judged", not as "no pool".
+	RetainedPoolBytes uint64 `json:"retained_pool_bytes,omitempty"`
 }
 
 func (load *WorkerLoad) validate() error {
@@ -215,10 +221,17 @@ type PlacementReason string
 const (
 	PlacementRendezvous PlacementReason = "RENDEZVOUS"
 	PlacementRebalance  PlacementReason = "REBALANCE"
+	// PlacementByteConstraint is a move the Control Leader makes because
+	// the holder's Query Groups' retained-byte peaks summed past its pool's
+	// share (decision-020 section 5.7). Accepted by readers first; the
+	// writer still says REBALANCE until every reader accepts this word,
+	// so a rollout never has a new Leader publish a record an old Worker
+	// refuses.
+	PlacementByteConstraint PlacementReason = "BYTE_CONSTRAINT"
 )
 
 func (reason PlacementReason) valid() bool {
-	return reason == PlacementRendezvous || reason == PlacementRebalance
+	return reason == PlacementRendezvous || reason == PlacementRebalance || reason == PlacementByteConstraint
 }
 
 type AssignmentRecord struct {

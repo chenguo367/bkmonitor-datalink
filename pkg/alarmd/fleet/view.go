@@ -1662,6 +1662,44 @@ type RebalanceFacts struct {
 	Conflicts        int     `json:"conflicts,omitempty"`
 	Paused           bool    `json:"paused,omitempty"`
 	PausedForSeconds float64 `json:"paused_for_seconds,omitempty"`
+	// Bytes is the same round's byte-constraint planning (decision-020
+	// section 5.7): each judged Worker's sum of its Query Groups' per-Slot
+	// retained-byte peaks, who was over the share, and what moved for it.
+	Bytes *ByteConstraintFacts `json:"bytes,omitempty"`
+}
+
+// ByteConstraintFacts is the Leader's byte-constraint round for the page:
+// retained bytes are a capacity constraint on placement, judged only where
+// the numbers are known. PoolUnknown Workers registered no pool and Unread
+// Query Groups have no reported peak; both are said rather than read as
+// "no pressure".
+type ByteConstraintFacts struct {
+	SharePercent   int              `json:"share_percent"`
+	Judged         int              `json:"judged"`
+	PoolUnknown    []string         `json:"pool_unknown,omitempty"`
+	Unread         int              `json:"unread"`
+	Sums           []ByteSumSample  `json:"sums,omitempty"`
+	Overloaded     []string         `json:"overloaded,omitempty"`
+	Unplaceable    []string         `json:"unplaceable,omitempty"`
+	PlannedMoves   int              `json:"planned_moves"`
+	PublishedMoves int              `json:"published_moves"`
+	Conflicts      int              `json:"conflicts"`
+	Paused         bool             `json:"paused"`
+	Moves          []ByteMoveSample `json:"moves,omitempty"`
+}
+
+// ByteSumSample is one judged Worker's sum of peaks before the round's moves.
+type ByteSumSample struct {
+	WorkerID     string `json:"worker_id"`
+	PeakSumBytes uint64 `json:"retained_bytes_peak_sum"`
+}
+
+// ByteMoveSample is one byte-constraint move with the peak it was judged by.
+type ByteMoveSample struct {
+	QueryGroup string `json:"query_group"`
+	From       string `json:"from"`
+	To         string `json:"to"`
+	Bytes      uint64 `json:"bytes"`
 }
 
 // Skewed is the one reading the fleet takes: the scheduler would move

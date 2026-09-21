@@ -800,8 +800,12 @@ func openProductionPhaseTwoBundleWithDependencies(
 			ViewStream: &observability.ViewStreamFacts{Event: "endpoint_unadvertised", WorkerID: cfg.PhaseTwo.Worker.ID, Reason: streamIdentity.Unadvertised},
 		})
 	}
+	// The Leader's ledger of what each Worker's heartbeat reports its
+	// Query Groups cost, fed by the stream and judged by the reconcile
+	// round for the byte constraint (decision-020 section 5.7).
+	costs := scheduler.NewCostLedger(external.Now)
 	viewServer, err := viewstream.NewServer(viewStreamAdmission{registry: ownershipStore, now: external.Now}, observer,
-		viewstream.ServerOptions{Now: external.Now})
+		viewstream.ServerOptions{Now: external.Now, Costs: costLedgerSink{ledger: costs}})
 	if err != nil {
 		return nil, err
 	}
@@ -834,7 +838,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		LeaseTTL:                  cfg.PhaseTwo.Ownership.LeaseTTL.Duration(),
 		ReconcileInterval:         cfg.PhaseTwo.Control.ReconcileInterval.Duration(),
 		ContentScopes:             currentContentScopes(repository),
-		ViewStream:                viewServer, ViewSource: repository,
+		ViewStream:                viewServer, ViewSource: repository, Costs: costs,
 	})
 	if err != nil {
 		return nil, err

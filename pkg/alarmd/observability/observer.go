@@ -1319,6 +1319,38 @@ type RebalanceFacts struct {
 	Conflicts        int     `json:"conflicts"`
 	Paused           bool    `json:"paused"`
 	PausedForSeconds float64 `json:"paused_for_seconds"`
+	// Bytes is the same round's byte-constraint planning (decision-020
+	// section 5.7), which runs before the count correction above.
+	Bytes *ByteConstraintFacts `json:"bytes,omitempty"`
+}
+
+// ByteConstraintFacts is one round's byte-constraint planning: retained
+// bytes are a capacity constraint on placement, and a Worker whose Query
+// Groups' per-Slot peaks sum past SharePercent of its pool gives its
+// largest one to the Worker with the most headroom. What was not judged is
+// said as such - PoolUnknown Workers registered no pool, Unread Query
+// Groups have no reported peak - so a round that moved nothing can be told
+// from a round that could judge nothing.
+type ByteConstraintFacts struct {
+	SharePercent   int              `json:"share_percent"`
+	Judged         int              `json:"judged"`
+	PoolUnknown    []string         `json:"pool_unknown,omitempty"`
+	Unread         int              `json:"unread"`
+	Overloaded     []string         `json:"overloaded,omitempty"`
+	Unplaceable    []string         `json:"unplaceable,omitempty"`
+	PlannedMoves   int              `json:"planned_moves"`
+	PublishedMoves int              `json:"published_moves"`
+	Conflicts      int              `json:"conflicts"`
+	Paused         bool             `json:"paused"`
+	Moves          []ByteMoveSample `json:"moves,omitempty"`
+}
+
+// ByteMoveSample is one byte-constraint move with the peak it was judged by.
+type ByteMoveSample struct {
+	QueryGroup string `json:"query_group"`
+	From       string `json:"from"`
+	To         string `json:"to"`
+	Bytes      uint64 `json:"bytes"`
 }
 
 // ControlReadFacts is what one control round spent reading the records it
