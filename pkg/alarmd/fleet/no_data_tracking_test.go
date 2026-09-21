@@ -115,6 +115,7 @@ func TestTheRowCarriesEachPlansLastDecidingWordAndWhereItsHorizonCameFrom(t *tes
 	want := NoDataTrackingSummary{
 		Plans: 3, HorizonNone: 1, HorizonPlatform: 1, HorizonStrategy: 1,
 		Expected: 19, Absent: 4, ExpiredThisRound: 0, Suppressed: 2, LastDecidedAt: now.Add(time.Minute),
+		HorizonSourceBasis: NoDataHorizonSourceBasis,
 	}
 	if *summary != want {
 		t.Fatalf("summary = %+v, want %+v", *summary, want)
@@ -213,7 +214,7 @@ func TestTheFleetSumsTheReplicasNoDataTrackingAccounts(t *testing.T) {
 	}
 	view := Aggregate(Expectation{Known: true}, snapshots, all, now, freshness)
 	want := NoDataTrackingSummary{Plans: 3, HorizonPlatform: 2, HorizonNone: 1, Expected: 12, Absent: 7, Suppressed: 1,
-		LastDecidedAt: now.Add(time.Minute)}
+		LastDecidedAt: now.Add(time.Minute), HorizonSourceBasis: NoDataHorizonSourceBasis}
 	if view.NoDataTracking == nil || *view.NoDataTracking != want {
 		t.Fatalf("merged = %+v, want %+v", view.NoDataTracking, want)
 	}
@@ -249,6 +250,10 @@ func TestHealthResponseCarriesTheNoDataTrackingLine(t *testing.T) {
 	}
 	if tracking["last_decided_at"] == nil {
 		t.Fatalf("no_data_tracking carries no last_decided_at: %v", tracking)
+	}
+	// The wire says the source was inferred, so nobody reads it as frozen.
+	if tracking["horizon_source_basis"] != NoDataHorizonSourceBasis {
+		t.Fatalf("no_data_tracking.horizon_source_basis = %v, want %s", tracking["horizon_source_basis"], NoDataHorizonSourceBasis)
 	}
 	silent := handlerWith(t, healthySnapshots(), Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
 	if body := requestJSON(t, silent, "/api/health"); body["no_data_tracking"] != nil {
