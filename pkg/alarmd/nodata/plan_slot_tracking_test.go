@@ -150,3 +150,64 @@ func TestAnExhaustedPlanThatIsStillExhaustedWritesNothing(t *testing.T) {
 		t.Fatalf("an exhausted Plan produced %d synthetic series, want none", len(result.Series))
 	}
 }
+
+// wholeItemRosterVersion is what an item with no no-data dimensions derives its
+// expected set to.
+func wholeItemRosterVersion(t *testing.T) (string, RosterSource) {
+	t.Helper()
+	roster, err := BuildRoster(RosterRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return roster.Version, roster.Source
+}
+
+// An exhausted Plan in whole-item mode writes the round its data came back.
+//
+// This is the same rule as the evaluation-level case, taken through the seam
+// that builds the mutation, because the two halves of it live on opposite sides
+// of that seam. Clearing the mark is the evaluation's answer; the present-as-of
+// that makes the clearing legal is computed here, and the contract layer refuses
+// a memory that cleared the mark without the present-as-of advancing. Stated
+// only on the evaluation side, the rule reads as satisfied while every write
+// this Plan makes is refused.
+func TestWholeItemDataLetsAnExhaustedPlanWriteAgain(t *testing.T) {
+	version, source := wholeItemRosterVersion(t)
+	snapshot := execution.NoDataMemorySnapshot{
+		Identity: planSlotIdentity(), Status: execution.NoDataMemoryFound,
+		Representation: execution.NoDataRepresentationPerGroup,
+		MarkerRevision: 4, SchemaVersion: execution.NoDataMemorySchemaV3,
+		PersistedApplyVersion:   execution.ApplyVersion{StateApplyEpoch: 6, EvaluationTime: 940, SlotDigest: "slot"},
+		PersistedMutationDigest: "digest", LastScheduleRevision: "revision-1",
+		RosterVersion: version, TrackingExhaustedAt: 900,
+	}
+	input := planSlotInput(snapshot, presentSeries())
+	// No no-data dimensions and no target: every series projects onto the
+	// whole-item group, which is the mode an exhausted history Plan lands in
+	// when its agg_dimension is emptied.
+	input.NoData.AggDimension = nil
+	input.Scope = nil
+	input.TrackingHorizonSeconds = trackingHorizon
+
+	result, err := EvaluatePlanSlot(input)
+	if err != nil {
+		t.Fatalf("an exhausted Plan whose data came back could not write: %v", err)
+	}
+	if result.Facts.RosterSource != source {
+		t.Fatalf("roster source = %q, want %q", result.Facts.RosterSource, source)
+	}
+	if result.Mutation == nil {
+		t.Fatal("the round the data came back wrote nothing, so the record goes on stating the exhaustion")
+	}
+	if result.Mutation.TrackingExhaustedAt != 0 {
+		t.Fatalf("mutation carries tracking-exhausted %d, want it cleared", result.Mutation.TrackingExhaustedAt)
+	}
+	if result.Mutation.PresentAsOf != input.EvaluationTime {
+		t.Fatalf("present-as-of = %d, want this round (%d): the contract layer refuses a cleared mark "+
+			"without it, so the clearing above would never reach the store",
+			result.Mutation.PresentAsOf, input.EvaluationTime)
+	}
+	if result.Mutation.GroupCount != 0 {
+		t.Fatalf("group count = %d, want none: the whole-item group is never remembered", result.Mutation.GroupCount)
+	}
+}
