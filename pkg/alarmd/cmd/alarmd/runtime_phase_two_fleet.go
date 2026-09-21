@@ -712,6 +712,14 @@ func fleetVerdictOf(view fleet.View, at time.Time) metric.FleetVerdict {
 	for _, kind := range fleet.DegradationKinds {
 		verdict.Degradations = append(verdict.Degradations, metric.FleetCount{Value: string(kind), Count: replicas[kind]})
 	}
+	// The retained records by what each is, the same walk the lines make,
+	// every kind at least at zero; and how many recent ones were judged
+	// against no restart anchor.
+	losses, graceUnknown := fleet.LossCensus(&view, at)
+	for _, loss := range fleet.Losses {
+		verdict.Losses = append(verdict.Losses, metric.FleetCount{Value: string(loss), Count: losses[loss]})
+	}
+	verdict.Losses = append(verdict.Losses, metric.FleetCount{Value: "GRACE_UNKNOWN", Count: graceUnknown})
 	return verdict
 }
 

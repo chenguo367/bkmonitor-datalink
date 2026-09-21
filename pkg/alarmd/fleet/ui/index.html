@@ -767,8 +767,9 @@ function blockedKeyLabel(key, group) {
 // The window the first two are decided on comes from the response.
 var LOSS = {
   WHILE_DEMOTED: '在被拒期间跳过（冷却让旧轮次超出重放范围，首要原因是查询不可用）',
-  AFTER_RESTART: '滚动后的追赶（副本启动 {g} 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）',
-  ONGOING: '仍在发生（最近 {w} 分钟内跳过）',
+  AFTER_RESTART: '滚动后的追赶（副本启动或首次接手该对象 {g} 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）',
+  AFTER_COOLDOWN: '冷却期间跳过、对象现已出冷却池（记录自带 held_by=query_cooldown：是冷却让旧轮次超出重放范围，首要原因是查询不可用，不是容量；对象已恢复查询，不会再新增）',
+  ONGOING: '仍在发生（最近 {w} 分钟内跳过，且不是冷却、不是滚动追赶）',
   HISTORICAL: '已停止（{w} 分钟以上没有再跳过）'
 };
 
@@ -1595,7 +1596,13 @@ function todoSentence(todo, pending, governance, t) {
       + (t.ongoing_newest ? '，最近一次 ' + momentLabel(t.ongoing_newest) : '') + '）');
   }
   if (t.after_restart) {
-    loss.push('另有 ' + t.after_restart + ' 个是滚动后的追赶漏检（副本启动 ' + restartGraceMinutes() + ' 分钟内），看它还有没有新增');
+    loss.push('另有 ' + t.after_restart + ' 个是滚动后的追赶漏检（副本启动或首次接手 ' + restartGraceMinutes() + ' 分钟内），看它还有没有新增');
+  }
+  if (t.after_cooldown) {
+    loss.push('另有 ' + t.after_cooldown + ' 个是冷却期间的跳过、对象现已出冷却池（不是容量，不会再新增）');
+  }
+  if (t.restart_grace_unknown) {
+    loss.push(t.restart_grace_unknown + ' 条记录没有副本启动/接手时刻可对照，按时间窗直接判了（旧副本没发这两个时刻）');
   }
   if (t.while_demoted) {
     loss.push('被拒的对象里 ' + t.while_demoted + ' 个在冷却期间跳过了检测'
@@ -3122,8 +3129,9 @@ function renderLoad(load) {
     (LOSS_STATE[loss.state] || '漏检：（页面没有这个状态的文案：' + loss.state + '，请上报）')
       .replace('{ongoing}', String(loss.ongoing || 0)).replace('{w}', w)
       .replace('{restart}', loss.after_restart
-        ? '，另有 ' + loss.after_restart + ' 个是滚动后的追赶（副本启动 '
+        ? '，另有 ' + loss.after_restart + ' 个是滚动后的追赶（副本启动或首次接手 '
           + Math.round((loss.restart_grace_seconds || 300) / 60) + ' 分钟内），看它还有没有新增、不由它问容量' : '')
+      + (loss.after_cooldown ? '；另有 ' + loss.after_cooldown + ' 个是冷却期间的跳过、对象已出冷却池（不是容量）' : '')
       + (loss.while_demoted_recent ? '；另有 ' + loss.while_demoted_recent + ' 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）' : ''),
     rebalanceWords(BOTTLENECK[bottleneck.resource] || '瓶颈：（页面没有这个状态的文案：' + bottleneck.resource + '，请上报）', bottleneck.skew)
       .replace('{rejections}', String(bottleneck.budget_rejections || 0))
