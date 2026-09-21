@@ -436,6 +436,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 					OverNamed: stats.DeltaAudit.OverNamed, Missed: stats.DeltaAudit.Missed,
 				}},
 			{Object: "catalog_index", Hits: stats.Index.Hits, Misses: stats.Index.Misses},
+			// A timeline read answered by the Worker's revision hint
+			// (decision-016 batch 4): a hit is no Redis command at all, a
+			// miss is one body read, a refresh is a hint the body did not
+			// bear and the read went the header way. Header reads for
+			// hinted Query Groups are what batch 4 removes; the header's
+			// own object above is where that has to fall.
+			{Object: "timeline_by_revision", Hits: stats.HintedTimeline.Hits, Misses: stats.HintedTimeline.Misses,
+				Refreshes: stats.HintedTimeline.Refreshes},
 			{Object: "timeline", Hits: stats.Timeline.Hits, Misses: stats.Timeline.Misses,
 				Refreshes: stats.Timeline.Refreshes, Evictions: occupancy.Evictions,
 				Occupancy: &metric.ControlCacheOccupancy{

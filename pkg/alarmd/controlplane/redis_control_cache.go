@@ -332,6 +332,38 @@ func (cache *controlReadCache) lookupTimeline(
 
 // storeTimeline charges the entry from the payload the object was decoded
 // from. payloadLen is the sizing input, not something the entry keeps.
+// lookupTimelineAtRevision answers a hinted read from whatever the cache
+// holds for the Query Group, on any version: the hint is the caller's own
+// proof of freshness, so the version namespace does not gate it, and a
+// cached body at the hinted revision is the timeline whatever header the
+// cache last entered.
+func (cache *controlReadCache) lookupTimelineAtRevision(
+	queryGroup execution.QueryGroupIdentity, revision uint64,
+) (persistedScheduleTimeline, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	element, ok := cache.timelines[queryGroup]
+	if !ok || element.Value.(*cachedTimeline).timeline.RecordRevision != revision {
+		return persistedScheduleTimeline{}, false
+	}
+	cache.order.MoveToFront(element)
+	return element.Value.(*cachedTimeline).timeline, true
+}
+
+// storeTimelineAtCurrentVersion stores a body a hinted read fetched, under
+// whatever version the cache is on, without entering a new one: the hinted
+// read learned nothing about the header.
+func (cache *controlReadCache) storeTimelineAtCurrentVersion(
+	queryGroup execution.QueryGroupIdentity,
+	timeline persistedScheduleTimeline,
+	payloadLen int,
+) {
+	cache.mu.Lock()
+	version := cache.version
+	cache.mu.Unlock()
+	cache.storeTimeline(version, queryGroup, timeline, payloadLen)
+}
+
 func (cache *controlReadCache) storeTimeline(
 	version string,
 	queryGroup execution.QueryGroupIdentity,
@@ -417,7 +449,13 @@ type ControlReadCacheObjectStats struct {
 type ControlReadCacheStats struct {
 	Activation ControlReadCacheObjectStats
 	Timeline   ControlReadCacheObjectStats
-	Version    ControlReadCacheObjectStats
+	// HintedTimeline is timeline reads answered by a Worker's revision hint
+	// (decision-016 batch 4): Hits from the cache with no Redis command,
+	// Misses by one read of the body, Refreshes when the body was at another
+	// revision and the read went the header way. Header reads for hinted
+	// Query Groups are what batch 4 removes; this is where that shows.
+	HintedTimeline ControlReadCacheObjectStats
+	Version        ControlReadCacheObjectStats
 	// Delta counts header changes: Hits crossed one keeping the timelines the
 	// activation did not change, Misses dropped every cached timeline because
 	// no usable delta was found.
@@ -463,7 +501,11 @@ func (counters *controlReadObjectCounters) snapshot() ControlReadCacheObjectStat
 type controlReadCounters struct {
 	activation controlReadObjectCounters
 	timeline   controlReadObjectCounters
-	version    controlReadObjectCounters
+	// hinted counts timeline reads answered by a revision hint: hits from
+	// the cache, misses by one body read, refreshes when the body was not
+	// at the hinted revision and the read took the header path instead.
+	hinted  controlReadObjectCounters
+	version controlReadObjectCounters
 	// delta counts header changes by how the cache crossed them: hits kept
 	// the timelines the activation's delta did not name, misses dropped every
 	// timeline because no usable delta was found or it said full.
@@ -507,11 +549,12 @@ func (repository *RedisCatalogRepository) ControlReadCacheStats() ControlReadCac
 		return ControlReadCacheStats{}
 	}
 	return ControlReadCacheStats{
-		Activation: repository.controlReads.activation.snapshot(),
-		Timeline:   repository.controlReads.timeline.snapshot(),
-		Version:    repository.controlReads.version.snapshot(),
-		Delta:      repository.controlReads.delta.snapshot(),
-		DeltaSkips: repository.controlReads.deltaSkips.Load(),
+		Activation:     repository.controlReads.activation.snapshot(),
+		Timeline:       repository.controlReads.timeline.snapshot(),
+		HintedTimeline: repository.controlReads.hinted.snapshot(),
+		Version:        repository.controlReads.version.snapshot(),
+		Delta:          repository.controlReads.delta.snapshot(),
+		DeltaSkips:     repository.controlReads.deltaSkips.Load(),
 		DeltaAudit: ControlDeltaAuditStats{
 			Samples: repository.controlReads.audit.samples.Load(), Agreed: repository.controlReads.audit.agreed.Load(),
 			OverNamed: repository.controlReads.audit.overNamed.Load(), Missed: repository.controlReads.audit.missed.Load(),

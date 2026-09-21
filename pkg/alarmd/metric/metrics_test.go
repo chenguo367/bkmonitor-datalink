@@ -708,10 +708,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("worker_query_permits_waiting"):          len(phaseTwoReadyQueueKinds),
 		fqName("worker_query_permit_budget"):            len(phaseTwoReadyQueueKinds),
 		fqName("worker_query_admission_total"):          len(phaseTwoQueryInflightKinds) * len(phaseTwoQueryAdmissionResults),
-		// Four cached objects: version, snapshot, activation, timeline; four
-		// outcomes each. Only an object bounded by a derived budget reports
-		// occupancy, which today is the timeline alone.
-		fqName("control_cache_total"):        16,
+		// Cached objects: version, activation, activation delta, catalog
+		// index, timeline, timeline by revision, and the key segment memos;
+		// four outcomes each. Only an object bounded by a derived budget
+		// reports occupancy, which today is the timeline alone.
+		fqName("control_cache_total"):        40,
 		fqName("control_cache_entries"):      4,
 		fqName("control_cache_bytes"):        4,
 		fqName("control_cache_bytes_limit"):  4,

@@ -1890,7 +1890,7 @@ func (runtime *RedisCatalogRuntime) ReadInitialFrozenSchedule(
 	ctx context.Context,
 	queryGroup execution.QueryGroupIdentity,
 ) (execution.FrozenQueryGroupSchedule, error) {
-	timeline, err := runtime.repository.loadScheduleTimeline(ctx, queryGroup)
+	timeline, err := runtime.repository.loadScheduleTimelineHinted(ctx, queryGroup)
 	if err != nil {
 		return execution.FrozenQueryGroupSchedule{}, err
 	}
@@ -1935,7 +1935,7 @@ func (runtime *RedisCatalogRuntime) ReadScheduleRetirement(
 	if runtime == nil || runtime.repository == nil || queryGroup == "" {
 		return 0, false, errors.New("alarmd controlplane: valid Query Group retirement read is required")
 	}
-	timeline, err := runtime.repository.loadScheduleTimeline(ctx, queryGroup)
+	timeline, err := runtime.repository.loadScheduleTimelineHinted(ctx, queryGroup)
 	if err != nil {
 		return 0, false, err
 	}
@@ -2014,7 +2014,7 @@ func (runtime *RedisCatalogRuntime) readPersistedSegmentAfter(
 	if runtime == nil || runtime.repository == nil || evaluationTime <= 0 {
 		return persistedScheduleSegment{}, errors.New("alarmd controlplane: valid Catalog runtime and EvaluationTime are required")
 	}
-	timeline, err := runtime.repository.loadScheduleTimeline(ctx, queryGroup)
+	timeline, err := runtime.repository.loadScheduleTimelineHinted(ctx, queryGroup)
 	if err != nil {
 		return persistedScheduleSegment{}, err
 	}
@@ -2034,7 +2034,7 @@ func (runtime *RedisCatalogRuntime) readPersistedSuccessor(
 	if runtime == nil || runtime.repository == nil || queryGroup == "" || segmentEnd <= 0 {
 		return persistedScheduleSegment{}, errors.New("alarmd controlplane: valid Schedule successor read is required")
 	}
-	timeline, err := runtime.repository.loadScheduleTimeline(ctx, queryGroup)
+	timeline, err := runtime.repository.loadScheduleTimelineHinted(ctx, queryGroup)
 	if err != nil {
 		return persistedScheduleSegment{}, err
 	}
@@ -2468,7 +2468,7 @@ func (runtime *RedisCatalogRuntime) readPersistedSegment(
 	if runtime == nil || runtime.repository == nil || evaluationTime <= 0 {
 		return persistedScheduleSegment{}, errors.New("alarmd controlplane: valid Catalog runtime and EvaluationTime are required")
 	}
-	timeline, err := runtime.repository.loadScheduleTimeline(ctx, queryGroup)
+	timeline, err := runtime.repository.loadScheduleTimelineHinted(ctx, queryGroup)
 	if err != nil {
 		return persistedScheduleSegment{}, err
 	}
@@ -2566,4 +2566,24 @@ func equalDuePlanRefs(left, right []execution.FrozenPlanScheduleRef) bool {
 		}
 	}
 	return true
+}
+
+// loadScheduleTimelineHinted reads a timeline by the caller's revision hint
+// when it carries one, and by the activation header otherwise. A hint the
+// body does not bear falls back to the header path: the hint was stale, and
+// the cost of that is one probe, never a wrong Segment.
+func (repository *RedisCatalogRepository) loadScheduleTimelineHinted(
+	ctx context.Context,
+	queryGroup execution.QueryGroupIdentity,
+) (persistedScheduleTimeline, error) {
+	if hint := timelineRevisionHint(ctx); hint > 0 {
+		timeline, err := repository.loadScheduleTimelineAtRevision(ctx, queryGroup, hint)
+		if err == nil {
+			return timeline, nil
+		}
+		if !errors.Is(err, errTimelineRevisionMoved) {
+			return persistedScheduleTimeline{}, err
+		}
+	}
+	return repository.loadScheduleTimeline(ctx, queryGroup)
 }
