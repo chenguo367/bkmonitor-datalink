@@ -96,6 +96,11 @@ const (
 	dispositionConfigRejected        = "CONFIG_REJECTED"
 	dispositionStaleConfig           = "STALE_CONFIG"
 	dispositionCapabilityUnsupported = "UNSUPPORTED_PHASE2_CAPABILITY"
+	// The source took the strategy out of its active set: the last good
+	// Plan runs one more round under PENDING_REMOVAL, and the round after
+	// that records REMOVED with no Plan. Neither is a refusal.
+	dispositionPendingRemoval = "PENDING_REMOVAL"
+	dispositionRemoved        = "REMOVED"
 )
 
 // WithheldObject is one withheld record as the control plane hands it over.

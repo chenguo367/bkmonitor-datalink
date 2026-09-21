@@ -488,6 +488,11 @@ type CheckReport struct {
 	// count of Slots executed and then closed without their Progress, the
 	// objects, and the latest -- the trend the records cannot carry.
 	Bookkeeping *BookkeepingFacts `json:"bookkeeping,omitempty"`
+	// Line is the line's sentence, composed here for the lines whose
+	// sentence depends on what is under them rather than on the line alone:
+	// the capability line names how many strategies fall under each kind of
+	// cause, so the page cannot state one cause for every reason.
+	Line string `json:"line,omitempty"`
 }
 
 // CheckGroup is one fold of a check's objects: the objects sharing one key.
@@ -513,9 +518,14 @@ type CheckGroup struct {
 	// Disposition and Samples are on a source standing's fold: which
 	// disposition the control plane gave the strategies in it, and a bounded
 	// sample of which strategies. Strategies above holds the count; there are
-	// no objects to open, because none of these became one.
-	Disposition string           `json:"disposition,omitempty"`
-	Samples     []WithheldSample `json:"samples,omitempty"`
+	// no objects to open, because none of these became one. Words is what
+	// the fold's reason means and what to do about it, decided per reason;
+	// on the line of strategies this deployment cannot run, where one
+	// sentence for every reason once sent an operator to a parameter no
+	// reason under it was about.
+	Disposition string               `json:"disposition,omitempty"`
+	Samples     []WithheldSample     `json:"samples,omitempty"`
+	Words       *WithheldReasonWords `json:"words,omitempty"`
 	// Codes counts the reason codes under a fold on the Blocked reading: the
 	// secondary key, so "commit, Redis, unavailable" can still say it was
 	// REDIS_UNAVAILABLE 60 and STATE_WRITE_RETRYABLE 26.
@@ -960,8 +970,13 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 					// strategies not detecting is not inflated by ones that are.
 					key = withheld.Disposition + "/" + withheld.Reason
 				}
-				entry.groups[key] = &CheckGroup{Key: key, Strategies: withheld.Count, Replicas: []string{view.SourceReplica},
+				group := &CheckGroup{Key: key, Strategies: withheld.Count, Replicas: []string{view.SourceReplica},
 					Disposition: withheld.Disposition, Samples: withheld.Samples}
+				if check == CheckCapabilityUnsupported {
+					words := WithheldWordsOf(withheld.Reason)
+					group.Words = &words
+				}
+				entry.groups[key] = group
 			}
 		}
 	}
@@ -1017,6 +1032,9 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			}
 			return report.Groups[i].Key < report.Groups[j].Key
 		})
+		if check == CheckCapabilityUnsupported {
+			report.Line = capabilityLine(report.Strategies, report.Groups)
+		}
 		reports = append(reports, report)
 	}
 	sort.Slice(reports, func(i, j int) bool {

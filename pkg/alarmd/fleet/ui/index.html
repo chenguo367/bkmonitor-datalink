@@ -671,7 +671,10 @@ var CHECK = {
   // not accept, before any became an object. {s} is withheld records, {g}
   // reasons; there is no {n}, because none of these is an object.
   SOURCE_INCOMPLETE:     '策略缓存里 {s} 条策略的文档不满足合同，没有进入检测（{g} 种原因）——是写入方写的内容缺东西，不是策略配置错',
-  CAPABILITY_UNSUPPORTED: '{s} 条策略这个部署跑不了（{g} 种原因）——快照保留期或完成偏移不够，是 alarmd 部署参数',
+  // The sentence for this line is composed by the server (report.line) by
+  // kind of cause under it; this template is the fallback for a server that
+  // did not send one, and names no cause -- the reasons under the line do.
+  CAPABILITY_UNSUPPORTED: '{s} 条策略这个部署跑不了（{g} 种原因）——处理办法按原因组看',
   CONFIG_REJECTED:       '{s} 条策略的定义编译不过（{g} 种原因）——按原因组看是哪个字段；带 STALE_CONFIG 的那组仍按上一版配置在跑',
   // The three standings. {since}, {c}, {applied} and {published} come from
   // the leader's activation facts on the report, not from counts; the split
@@ -807,7 +810,7 @@ var DEGRADATION = {
 // the reader to look for something that does not.
 var EVIDENCE = {
   SOURCE_INCOMPLETE:     '展开按原因看策略样本：SOURCE_IDENTITY_UNAVAILABLE = 文档顶层缺 bk_tenant_id / space_uid；SOURCE_OBJECT_INCOMPLETE = ID 在 strategy_ids 里但 strategy_<id> 不存在；依赖面板"策略缓存"行给缓存 Redis 地址与 last_updated；指标 catalog_withheld_objects{disposition="SOURCE_INCOMPLETE",reason}；日志 source_withheld',
-  CAPABILITY_UNSUPPORTED: '展开按原因看策略样本与要求的值：SNAPSHOT_RETENTION_INSUFFICIENT / COMPLETION_OFFSET_BELOW_RESERVE = 策略要的窗口或完成偏移超出本部署的保留/预留；*_NOT_MIGRATED = 该算法/时间条件/查询字段还没迁到 Go 侧；UNSUPPORTED_TARGET_PLAN = 文档 items[i] 带了 target_plan 字段（field_path 指到它），本构建不解释这个字段，整条策略具名拒绝、不回退旧 target、不保留旧 Plan——写入方上线目标计划之前这格应恒为 0，出现即写入方先于本构建。指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}，reason 原样显示不落 other',
+  CAPABILITY_UNSUPPORTED: '展开按原因看：每组带服务端给的"这是什么 / 谁能处理 / 下一步"（words.kind ∈ DEPLOYMENT_PARAMETER 部署参数不够 · BUILD_CAPABILITY 本构建不支持 · WRITER_AHEAD 写入方超前于本构建 · STRATEGY_DEFINITION 策略定义超出护栏 · UNKNOWN_REASON 页面还没有说明）与策略样本、field_path。指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}，reason 原样显示不落 other',
   CONFIG_REJECTED:       '展开按原因看策略样本与字段路径（field_path 是编译器拒绝的那个字段）；指标 catalog_withheld_objects{disposition="CONFIG_REJECTED",reason}',
   CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
   OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡这一轮（计划/发出/暂停）在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_gap、assignment_moves_total{reason=rebalance}、rebalance_paused_total{reason=set_unstable}',
@@ -836,7 +839,7 @@ var EVIDENCE = {
 
 var NEXT = {
   SOURCE_INCOMPLETE:     '找策略缓存的写入方（bk-monitor 后台的 cache 进程，或替代它的模块）：缺身份字段的要写方按合同补 bk_tenant_id / space_uid（bk-monitor 主线 2026-08-31 起的缓存刷新才写）；ID 列表残留的要写方清掉已删除策略的 ID（2026-09-11 起的刷新会清）。Pod 外一句判据：在缓存 Redis 上 GET <前缀>.strategy_<任一 id>，顶层有 "space_uid" 才算过。alarmd 这边不用改，写方修好后下一轮刷新（最多 6 分钟）自动接受',
-  CAPABILITY_UNSUPPORTED: '改 alarmd 部署参数：按原因组看是快照保留期还是完成偏移不够，调到要求的值后下一轮刷新自动接受',
+  CAPABILITY_UNSUPPORTED: '按原因组各自的"下一步"：部署参数不够的调参数、下一轮刷新自动接受；本构建不支持的等带该能力的构建，改参数没有用；写入方超前的等解释该字段的构建或写入方改文档；策略定义超出护栏的先收策略，护栏不是工作上限',
   CONFIG_REJECTED:       '交策略侧：按原因组与字段路径改策略定义；alarmd 这边不用改，改好后下一轮刷新自动接受。STALE_CONFIG 组的策略仍在按上一版跑，不算漏检',
   CUTOVER_FAILING:       '先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效',
   OWNERSHIP_SKEWED:      '不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。{rebalance}；在均分回来之前，持有多的那个副本上的漏检与超时不按容量处理、不据此扩副本或加资源',
@@ -869,7 +872,7 @@ var NEXT = {
 // by disappearing.
 var RECOVERY = {
   SOURCE_INCOMPLETE:     '写方修好后一轮刷新：这一行的策略数降到 0、"应有"从 0 涨上来、对象开始出现在各栏；这一行消失',
-  CAPABILITY_UNSUPPORTED: '参数改好后一轮刷新：这一行消失，"应有"涨上来',
+  CAPABILITY_UNSUPPORTED: '参数调好或新构建上线后一轮刷新：该原因组消失，"应有"涨上来',
   CONFIG_REJECTED:       '策略改好后一轮刷新：该策略离开这一组；这一行只在全部改好后消失',
   CUTOVER_FAILING:       '执行版本追上目标发布（两者一致）且之后一轮激活成功；这一行消失',
   OWNERSHIP_SKEWED:      'Leader 的再平衡计划移动数归零（最多与最少之差回到均分的 {stop}% 以内，这是调度器自己的容差）；这一行消失',
@@ -913,6 +916,9 @@ var RESULT = {COMPLETED: '完成', ERROR: '失败', REFUSED: '被拒绝', NO_DAT
 // now, or what is on record. The same line can be in both sections with a
 // different number in each.
 function checkSentence(report, count) {
+  // A sentence the server composed from what is under the line wins over
+  // the template: the template can only say one thing of every reason.
+  if (report.line) return report.line;
   var words = CHECK[report.code];
   if (!words) {
     // Loudly. A check this table has no words for is a defect, and a blank
@@ -1342,7 +1348,10 @@ function renderBrief(deployment) {
   var detail = truncated.length
     ? '明细不全：' + truncated.length + ' 个副本的异常清单被截断，下面的分组数和策略数是样本'
     : '异常明细完整';
-  text('briefBlind', '状态覆盖：' + (blind.length ? blind.join('；') : '全部对象都有结论') + '。' + detail);
+  // "Every object has a conclusion" over zero objects is true of nothing;
+  // said as what it is.
+  var covered = deployment.covered || 0;
+  text('briefBlind', '状态覆盖：' + (blind.length ? blind.join('；') : (covered ? '全部对象都有结论' : '没有对象在检测（0 个），无所谓结论')) + '。' + detail);
 }
 
 // Which build the numbers came from. Held to the Go grouping: one group per
@@ -1470,6 +1479,11 @@ function scheduleSentence(deployment) {
   if (census.never) now.push(census.never + ' 个接管后还没跑第一轮');
   if (now.length) parts.push('现在 ' + now.join('、'));
   if (census.missing_period) parts.push(census.missing_period + ' 个对象周期未知，迟到没法判超期');
+  // Nothing to keep up with: no object is detecting, and "keeping up" would
+  // claim a pace of work that is not happening.
+  if (!(deployment.covered || 0) && !census.completed_1h && !census.overdue && !census.waiting && !census.late && !census.never) {
+    return '执行情况：没有对象在检测（应有 ' + (deployment.expected === null || deployment.expected === undefined ? '未知' : deployment.expected) + '）——过去 1 小时没有轮次返回' + activationClause(deployment.activation);
+  }
   return '执行情况：' + (behind ? '跟不上' : (census.overdue ? '有超期但在追' : '跟得上')) + '——' + parts.join('；')
     + activationClause(deployment.activation);
 }
@@ -1588,7 +1602,11 @@ function todoSentence(todo, pending, governance, t) {
   // owned by the platform's cache writer has been told the wrong thing. The
   // split is the server's, on the todo, so the JSON says what the page says.
   var platform = t.platform_checks || 0;
-  var parts = ['现在要处理 ' + (todo.length ? t.checks + ' 类（' + t.objects + ' 个对象，去重'
+  // Lines counted by strategy have no objects: said in strategies, so a
+  // reader is not told "0 objects" of five strategies that cannot run.
+  var byStrategy = 0;
+  todo.forEach(function (report) { if (!report.objects && report.strategies) byStrategy += report.strategies; });
+  var parts = ['现在要处理 ' + (todo.length ? t.checks + ' 类（' + (t.objects ? t.objects + ' 个对象，去重' : (byStrategy ? byStrategy + ' 条策略、0 个对象' : '0 个对象'))
                  + (platform ? '；其中平台写入方 ' + platform + ' 类（' + (t.platform_strategies || 0) + ' 条策略），按策略计不按对象计' : '') + '）' : '没有'),
                '待归因 ' + (pending.length ? t.undetermined + ' 类（' + t.undetermined_objects + ' 个对象）' : '没有'),
                '业务侧已确认 ' + (governance.length ? t.governance + ' 类（' + t.governance_objects + ' 个对象）在运营治理' : '没有')];
@@ -1864,6 +1882,9 @@ function renderGroups() {
     details.appendChild(label);
     var body = document.createElement('div');
     details.appendChild(body);
+    if (group.words) {
+      body.appendChild(reasonWords(group.words));
+    }
     if (group.samples) {
       body.appendChild(sampleList(group));
     }
@@ -1879,6 +1900,62 @@ function renderGroups() {
     }
     host.appendChild(details);
   });
+}
+
+// A target plan's resolution in words: the plan-level state, each selector
+// that did not answer whole with the resolver's reason, the dangling
+// topology nodes and the stale age. Both tables are held to the resolver's
+// closed lists (targetplan.ResolutionStates, SelectorReasons).
+var RESOLUTION_STATE = {
+  Complete: '目标完整解析',
+  Incomplete: '目标不完整——有 selector 丢了成员，检测只覆盖解析到的部分',
+  Unavailable: '目标不可用——有 selector 解析不出，这一轮不做无数据判定'
+};
+var SELECTOR_REASON = {
+  none: '正常',
+  key_missing: '分组缓存里没有这个键（写入方没渲染或键名不对）',
+  json_invalid: '分组缓存的值不是合法 JSON',
+  structure_invalid: '分组缓存的值结构不符合合同',
+  model_mismatch: '分组成员的模型与计划不一致',
+  read_failed: '读分组缓存失败（Redis 读错误）',
+  stale: '分组缓存刷新失败，用的是保留的旧快照（超过 10 分钟即不可用）',
+  index_unavailable: '主机索引不可用，拓扑节点无法核对',
+  node_missing: '拓扑节点在主机索引里不存在',
+  node_in_other_business: '拓扑节点下的主机只属于别的业务',
+  members_dropped: '成员逐条校验有丢弃（模型、实例、汇总列出、host_id 规则）',
+  source_unwired: '本部署没有接这种 selector 的来源',
+  model_representation_unresolved: '按模型实例（model_inst_id）给出的静态成员，主机缓存里查不到对应主机身份——不是主机模型，或缓存没带规范身份字段'
+};
+function targetResolutionWords(resolution) {
+  var parts = [RESOLUTION_STATE[resolution.state] || resolution.state];
+  (resolution.failures || []).forEach(function (failure) {
+    var words = failure.kind + ' ' + failure.id + '：' + (SELECTOR_REASON[failure.reason] || failure.reason);
+    if (failure.dropped) words += '（丢弃 ' + failure.dropped + '，保留 ' + (failure.kept || 0) + '）';
+    parts.push(words);
+  });
+  if (resolution.nodes_missing && resolution.nodes_missing.length) parts.push('索引里不存在的节点：' + resolution.nodes_missing.join('、'));
+  if (resolution.nodes_foreign && resolution.nodes_foreign.length) parts.push('只属于别的业务的节点：' + resolution.nodes_foreign.join('、'));
+  if (resolution.stale_age_seconds) parts.push('用的快照已过期 ' + elapsedLabel(resolution.stale_age_seconds));
+  return parts.join('；');
+}
+
+// What a withheld reason means, who can act and the next step, as the
+// server decided per reason. The kind is a closed word with its own label;
+// an unknown reason says so and sends nobody to a parameter.
+var WITHHELD_KIND = {
+  DEPLOYMENT_PARAMETER: 'alarmd 部署参数',
+  BUILD_CAPABILITY: '本构建能力（等新构建，改参数没有用）',
+  WRITER_AHEAD: '写入方超前于本构建',
+  STRATEGY_DEFINITION: '策略侧（先收策略；护栏不是工作上限）',
+  UNKNOWN_REASON: '原因待查（页面还没有说明）'
+};
+function reasonWords(words) {
+  var wrap = document.createElement('div');
+  wrap.className = 'basis';
+  var p = document.createElement('p');
+  p.textContent = '这是什么：' + words.what + '。谁处理：' + (WITHHELD_KIND[words.kind] || words.kind) + '。下一步：' + words.next;
+  wrap.appendChild(p);
+  return wrap;
 }
 
 // The strategies a source standing's group names: a bounded sample with the
@@ -2145,6 +2222,16 @@ function objectRow(anomaly, check, group) {
       + (restored.completed_at && new Date(restored.completed_at).getTime() > 0 ? '（提交于 ' + momentLabel(restored.completed_at) + '）' : '')
       + nextNote + configNote,
       '进度提交时留下的上一轮摘要；本进程跑完一轮后这一行换成自己的');
+    // What each target-plan Plan's target resolved to in that round: the
+    // composed state, every selector that did not answer whole with why,
+    // the topology nodes the cache does not list or lists under another
+    // business, and how stale the newest snapshot was. The words are the
+    // resolver's closed lists; a reader who sees "Unavailable" needs the
+    // selector and the reason, not the state alone.
+    (restored.target_resolutions || []).forEach(function (resolution) {
+      line('目标解析（策略 ' + resolution.strategy_id + '）', targetResolutionWords(resolution),
+        '上一轮按 target_plan 解析目标的结果；指标 target_plan_resolution_total{state} 与 target_selector_resolutions_total{kind,state,reason}');
+    });
   }
   // What the latest completion found about an earlier attempt at its Slot,
   // when it was closed without a query. A row that reads GAP_SKIPPED with
