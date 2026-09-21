@@ -804,7 +804,7 @@ var DEGRADATION = {
 // the reader to look for something that does not.
 var EVIDENCE = {
   SOURCE_INCOMPLETE:     '展开按原因看策略样本：SOURCE_IDENTITY_UNAVAILABLE = 文档顶层缺 bk_tenant_id / space_uid；SOURCE_OBJECT_INCOMPLETE = ID 在 strategy_ids 里但 strategy_<id> 不存在；依赖面板"策略缓存"行给缓存 Redis 地址与 last_updated；指标 catalog_withheld_objects{disposition="SOURCE_INCOMPLETE",reason}；日志 source_withheld',
-  CAPABILITY_UNSUPPORTED: '展开按原因看策略样本与要求的值；指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}',
+  CAPABILITY_UNSUPPORTED: '展开按原因看策略样本与要求的值：SNAPSHOT_RETENTION_INSUFFICIENT / COMPLETION_OFFSET_BELOW_RESERVE = 策略要的窗口或完成偏移超出本部署的保留/预留；*_NOT_MIGRATED = 该算法/时间条件/查询字段还没迁到 Go 侧；UNSUPPORTED_TARGET_PLAN = 文档 items[i] 带了 target_plan 字段（field_path 指到它），本构建不解释这个字段，整条策略具名拒绝、不回退旧 target、不保留旧 Plan——写入方上线目标计划之前这格应恒为 0，出现即写入方先于本构建。指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}，reason 原样显示不落 other',
   CONFIG_REJECTED:       '展开按原因看策略样本与字段路径（field_path 是编译器拒绝的那个字段）；指标 catalog_withheld_objects{disposition="CONFIG_REJECTED",reason}',
   CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
   OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡这一轮（计划/发出/暂停）在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_gap、assignment_moves_total{reason=rebalance}、rebalance_paused_total{reason=set_unstable}',

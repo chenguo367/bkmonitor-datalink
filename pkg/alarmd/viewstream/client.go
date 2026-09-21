@@ -551,8 +551,11 @@ func (client *Client) observe(ctx context.Context, event, reason string, err err
 		result = observability.ResultDegraded
 	}
 	installed, _ := client.Installed()
+	// The reason is the line's reason_code when it is one of the stream's
+	// words; an endpoint or a detail stays in the facts.
 	client.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageViewSession, Result: result, Err: err,
+		ReasonCode: observability.ViewStreamReasonCode(reason),
 		ViewStream: &observability.ViewStreamFacts{Event: event, WorkerID: client.identity.WorkerID, Incarnation: client.identity.Incarnation,
 			ControlEpoch: installed.Version.ControlEpoch, Revision: installed.Version.Revision, Reason: reason},
 	})

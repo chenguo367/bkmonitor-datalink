@@ -2781,6 +2781,9 @@ func NormalizeReason(reason ReasonCode, result Result) ReasonCode {
 	if _, ok := activationFailureReasonSet[reason]; ok {
 		return reason
 	}
+	if _, ok := viewStreamReasonSet[reason]; ok {
+		return reason
+	}
 	return ReasonOther
 }
 
@@ -3018,10 +3021,48 @@ func joinReasons(groups ...[]ReasonCode) []ReasonCode {
 	return joined
 }
 
+// ViewStreamReasons is the closed list of words a view_session line may carry
+// as its reason: why a Worker found no Leader, why a stream ended, why an
+// install was refused, why the Leader refused a Hello. They are the view
+// stream's own constants, repeated here because this package is the
+// vocabulary's owner and cannot import the stream; a test on the stream side
+// holds its constants to this list. Before this the line's reason_code read
+// reason_not_reported on every discovery miss and the one word that said
+// what happened -- NO_LEADER -- was two levels down in the facts, where a
+// count by reason cannot reach it.
+var ViewStreamReasons = []ReasonCode{
+	// Discovery and the stream's end, on the Worker. The three ways a Leader
+	// is not found are three words -- no lease, a lease whose holder has no
+	// registration, a registration that advertises no endpoint -- because on
+	// a live deployment they shared one, and the one word sent the reader to
+	// the lease when the endpoint was what was missing.
+	"NO_LEADER", "LEADER_UNREGISTERED", "LEADER_NO_ENDPOINT", "DISCOVERY_FAILED", "LEADER_SILENT", "STREAM_CLOSED", "RECV_FAILED",
+	// A process that cannot advertise an endpoint of its own, said once at
+	// startup rather than by every other Worker every discovery.
+	"LISTENER_UNPARSABLE", "NO_ROUTE",
+	// An install the Worker refused.
+	"DELTA_BASE_MISMATCH", "DELTA_DIGEST_MISMATCH", "SNAPSHOT_INVALID", "SNAPSHOT_INCOMPLETE", "VIEW_FOR_ANOTHER_WORKER",
+	"OBJECTS_NOT_PROBED",
+	// A Hello the Leader refused, or why it closed the stream.
+	"NOT_LEADER", "UNKNOWN_WORKER", "BAD_TOKEN", "PROTOCOL_VERSION", "REGISTRY_UNAVAILABLE", "HELLO_EXPECTED",
+	"REPLACED_BY_NEW_STREAM", "IDLE", "SHUTDOWN",
+}
+
+// ViewStreamReasonCode is the reason as the line's reason_code: the word when
+// it is one of ViewStreamReasons, empty otherwise. The stream's emitters put
+// an endpoint or a free-text detail in the same slot on other events, and
+// those stay in the facts, where they are not a bounded code.
+func ViewStreamReasonCode(reason string) ReasonCode {
+	if _, ok := viewStreamReasonSet[ReasonCode(reason)]; ok {
+		return ReasonCode(reason)
+	}
+	return ""
+}
+
 var allCommonReasons = joinReasons(unclassifiedReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 var allResourceReasons = joinReasons(
 	unclassifiedReasons, resourceOnlyReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
@@ -3032,6 +3073,7 @@ var directionSet = makeDirectionSet(allDirections)
 var commonReasonSet = makeReasonSet(joinReasons(unclassifiedReasons, []ReasonCode{ReasonStateAlreadyAppliedBeforeEvaluation}))
 var resourceReasonSet = makeReasonSet(resourceOnlyReasons)
 var activationFailureReasonSet = makeReasonSet(activationFailureReasons)
+var viewStreamReasonSet = makeReasonSet(ViewStreamReasons)
 var contractObservationReasons, contractObservationReasonSet, contractObservationMetricReasonByCode = loadContractObservationReasons()
 
 func makeComponentStageSet(values []ComponentStage) map[ComponentStage]struct{} {

@@ -385,6 +385,7 @@ func (server *Server) observeSession(ctx context.Context, event string, receiver
 	}
 	server.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentOwnership, Stage: observability.StageViewSession, Result: result,
+		ReasonCode: observability.ViewStreamReasonCode(reason),
 		ViewStream: &observability.ViewStreamFacts{Event: event, WorkerID: receiver.WorkerID, Incarnation: receiver.Incarnation,
 			ControlEpoch: epoch, Reason: reason},
 	})

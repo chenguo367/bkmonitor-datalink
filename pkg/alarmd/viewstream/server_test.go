@@ -49,6 +49,9 @@ func (admission *tokenAdmission) Admit(_ context.Context, workerID, token string
 type sessionObserver struct {
 	mu     sync.Mutex
 	events []observability.ViewStreamFacts
+	// coded is the reason_code each event was observed with, in step with
+	// events: the line's bounded word, apart from the facts' free reason.
+	coded []observability.ReasonCode
 }
 
 func (observer *sessionObserver) Observe(_ context.Context, observation observability.Observation) {
@@ -58,6 +61,20 @@ func (observer *sessionObserver) Observe(_ context.Context, observation observab
 	observer.mu.Lock()
 	defer observer.mu.Unlock()
 	observer.events = append(observer.events, *observation.ViewStream)
+	observer.coded = append(observer.coded, observation.ReasonCode)
+}
+
+// codes counts one event's observations by the reason_code they carried.
+func (observer *sessionObserver) codes(event string) map[string]int {
+	observer.mu.Lock()
+	defer observer.mu.Unlock()
+	codes := map[string]int{}
+	for index, fact := range observer.events {
+		if fact.Event == event {
+			codes[string(observer.coded[index])]++
+		}
+	}
+	return codes
 }
 
 func (observer *sessionObserver) count(event, reason string) int {
@@ -457,6 +474,11 @@ func TestTheServerRefusesInWords(t *testing.T) {
 	}
 	if harness.observer.count("refused", viewstream.RefusalBadToken) != 1 || harness.observer.count("opened", "") != 0 {
 		t.Fatalf("events = %+v", harness.observer.events)
+	}
+	// Each refusal's line carries its word as reason_code, not a placeholder.
+	if codes := harness.observer.codes("refused"); codes[viewstream.RefusalBadToken] != 1 || codes[viewstream.RefusalHelloExpected] != 1 ||
+		codes[""] > 0 || codes[string(observability.ReasonNotReported)] > 0 {
+		t.Fatalf("refusal reason codes = %v, want each refusal's own word", codes)
 	}
 }
 
