@@ -320,10 +320,13 @@ func TestTheNoDataLinesFoldByOnsetMinuteAsWellAsByStrategy(t *testing.T) {
 	for i := 0; i < 300; i++ {
 		add(fmt.Sprintf("qg-r%03d", i), release.Add(time.Duration(i%2)*time.Minute).Add(time.Duration(i%50)*time.Second), KindEmptyEveryRound)
 	}
-	// Twelve quiet sources of their own, one to a minute.
+	// Twelve quiet sources of their own, one to a minute, and two rows
+	// that carry no start at all.
 	for i := 0; i < 12; i++ {
 		add(fmt.Sprintf("qg-q%02d", i), at.Add(-time.Duration(i+1)*time.Hour), KindEmptyEveryRound)
 	}
+	add("qg-unstarted-a", time.Time{}, KindEmptyEveryRound)
+	add("qg-unstarted-b", time.Time{}, KindEmptyEveryRound)
 	view := &View{NoData: rows}
 	Attribute(view.NoData, at)
 	var report *CheckReport
@@ -332,12 +335,20 @@ func TestTheNoDataLinesFoldByOnsetMinuteAsWellAsByStrategy(t *testing.T) {
 			report = &candidate
 		}
 	}
-	if report == nil || report.Objects != 312 || len(report.Groups) != 312 {
-		t.Fatalf("report = %+v, want the line over 312 objects in 312 strategy folds", report)
+	if report == nil || report.Objects != 314 || len(report.Groups) != 314 {
+		t.Fatalf("report = %+v, want the line over 314 objects in 314 strategy folds", report)
 	}
 	fold := report.Onsets
-	if fold == nil || fold.Distinct != 14 || len(fold.Minutes) != MaxOnsetFold || fold.Other != 12-(MaxOnsetFold-2) {
-		t.Fatalf("onsets = %+v, want 14 distinct minutes, %d listed, the rest of the quiet ones under other", fold, MaxOnsetFold)
+	if fold == nil || fold.Distinct != 14 || len(fold.Minutes) != MaxOnsetFold || fold.Other != 12-(MaxOnsetFold-2) || fold.WithoutOnset != 2 {
+		t.Fatalf("onsets = %+v, want 14 distinct minutes, %d listed, the rest of the quiet ones under other, two without a start", fold, MaxOnsetFold)
+	}
+	// The fold adds up to the line, so the reader's subtraction leaves nothing.
+	listed := fold.Other + fold.WithoutOnset
+	for _, minute := range fold.Minutes {
+		listed += minute.Objects
+	}
+	if listed != report.Objects {
+		t.Fatalf("fold adds up to %d, the line to %d", listed, report.Objects)
 	}
 	if fold.Minutes[0].Objects != 150 || !fold.Minutes[0].Minute.Equal(release) || fold.Minutes[1].Objects != 150 ||
 		!fold.Minutes[1].Minute.Equal(release.Add(time.Minute)) || fold.Minutes[2].Objects != 1 {

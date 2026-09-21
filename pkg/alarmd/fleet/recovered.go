@@ -39,10 +39,13 @@ type RecoveredProblem struct {
 	// Objects is the distinct objects this replica saw recover from the fold
 	// within the retention, each counted from its own recovery: an object
 	// that recovered seventy minutes ago is not in it, whatever the fold's
-	// other objects did since. Across replicas the counts add, and an object
-	// that recovered on one replica, moved, and recovered on another is in
-	// both -- the snapshot carries no object identities to tell, and the
-	// page says the sum is a sum.
+	// other objects did since. Across replicas the count is exact when both
+	// sides name every object they count (Samples covers them) -- the
+	// merge then counts distinct identities -- and a sum otherwise, in which
+	// an object that recovered on one replica, moved, and recovered on
+	// another is in twice; Samples is distinct either way, so on a large
+	// fold Objects can exceed the identities named and that is the sum, not
+	// a truncated sample.
 	Objects int `json:"objects"`
 	// FirstFailure is the earliest onset among them, LastFailure the latest
 	// round any of them was seen failing before it recovered.
@@ -52,8 +55,9 @@ type RecoveredProblem struct {
 	FirstRecovery time.Time `json:"first_recovery"`
 	LastRecovery  time.Time `json:"last_recovery"`
 	// Samples names up to MaxRecoveredSample of the objects, most recent
-	// recovery first, with the strategies each one serves. Objects above is
-	// the count; a fold of two objects names both. Without them a fold that
+	// recovery first, with the strategies each one serves. A fold within the
+	// bound names every object it counts; a larger one names the most recent
+	// few and Objects says how many there are. Without them a fold that
 	// has ended is a count and a pair of clocks, and the question a reader
 	// has of it -- which two, and what failed -- was answered from the logs
 	// or not at all once the objects' own rows had let the failure go.
@@ -224,7 +228,13 @@ func (tracker *Tracker) recordRecoveryUnder(queryGroup string, check Check, key 
 		tracker.recovered[id] = fold
 	}
 	fold.objects[queryGroup] = at
-	fold.strategies[queryGroup] = append([]StrategyRef(nil), strategies...)
+	// Kept from the last recovery that named them: a row that carries no
+	// strategy names -- an object seen only through Query Group observations
+	// -- does not erase the names an earlier recovery of the same object
+	// recorded.
+	if len(strategies) > 0 {
+		fold.strategies[queryGroup] = append([]StrategyRef(nil), strategies...)
+	}
 	fold.problem.Objects = len(fold.objects)
 	if !since.IsZero() && (fold.problem.FirstFailure.IsZero() || since.Before(fold.problem.FirstFailure)) {
 		fold.problem.FirstFailure = since
@@ -309,7 +319,16 @@ func mergeRecovered(view *View, problems []RecoveredProblem) {
 			if existing.Check != problem.Check || existing.Key != problem.Key {
 				continue
 			}
+			// Exact when both sides name every object they count: the
+			// identities are here now, so the reason the count was a sum --
+			// no way to tell an object seen on two replicas from two objects
+			// -- no longer holds for folds within the sample bound. A larger
+			// fold still adds, and says so in the field's comment.
+			fullyNamed := len(existing.Samples) == existing.Objects && len(problem.Samples) == problem.Objects
 			existing.Objects += problem.Objects
+			if fullyNamed {
+				existing.Objects = distinctRecovered(existing.Samples, problem.Samples)
+			}
 			if !problem.FirstFailure.IsZero() && (existing.FirstFailure.IsZero() || problem.FirstFailure.Before(existing.FirstFailure)) {
 				existing.FirstFailure = problem.FirstFailure
 			}
@@ -360,4 +379,17 @@ func mergeRecoveredSamples(left, right []RecoveredSample) []RecoveredSample {
 		}
 	}
 	return merged
+}
+
+// distinctRecovered is how many different objects two fully named sample
+// lists hold between them.
+func distinctRecovered(left, right []RecoveredSample) int {
+	seen := map[string]struct{}{}
+	for _, sample := range left {
+		seen[sample.QueryGroup] = struct{}{}
+	}
+	for _, sample := range right {
+		seen[sample.QueryGroup] = struct{}{}
+	}
+	return len(seen)
 }

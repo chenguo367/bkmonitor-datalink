@@ -463,7 +463,10 @@ type CheckReport struct {
 	SkipReasons map[string]int `json:"skip_reasons,omitempty"`
 	// Onsets, on the two no-data lines, is the objects by the minute their
 	// run began, largest minutes first and at most MaxOnsetFold of them with
-	// the rest summed under Other. The strategy fold cannot show that many
+	// the rest summed under Other and the rows with no start under
+	// WithoutOnset, so the fold adds up to the line: a reader who subtracts
+	// the minutes from the count must not read the remainder as a sample
+	// dropped. The strategy fold cannot show that many
 	// runs began together; this is the fold that separates one event from
 	// many quiet sources. A minute that is the minute a release began
 	// recording the runs is a lower bound, not an event, and the rows say
@@ -508,6 +511,9 @@ type OnsetFold struct {
 	Minutes []OnsetMinute `json:"minutes"`
 	// Other is the objects in minutes past the bound, summed.
 	Other int `json:"other,omitempty"`
+	// WithoutOnset is the line's objects whose row carries no start. With
+	// Minutes and Other it adds up to the line's objects.
+	WithoutOnset int `json:"without_onset,omitempty"`
 	// Distinct is how many different minutes there were, bound or not: one
 	// is one event, hundreds are hundreds of quiet sources.
 	Distinct int `json:"distinct"`
@@ -523,12 +529,12 @@ type OnsetMinute struct {
 const MaxOnsetFold = 8
 
 // onsetFold orders the minutes by objects, then by time, and cuts to the
-// bound; nil when there is nothing to fold.
-func onsetFold(onsets map[time.Time]int) *OnsetFold {
-	if len(onsets) == 0 {
+// bound; nil when the line has no rows of the kinds that carry a start.
+func onsetFold(onsets map[time.Time]int, withoutOnset int) *OnsetFold {
+	if len(onsets) == 0 && withoutOnset == 0 {
 		return nil
 	}
-	fold := &OnsetFold{Distinct: len(onsets)}
+	fold := &OnsetFold{Distinct: len(onsets), WithoutOnset: withoutOnset}
 	for minute, objects := range onsets {
 		fold.Minutes = append(fold.Minutes, OnsetMinute{Minute: minute, Objects: objects})
 	}
@@ -758,8 +764,11 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		// strategies behind objects.
 		sourceStrategies int
 		// onsets is the no-data lines' objects by the minute their run
-		// began, for the fold that tells one event from many.
-		onsets map[time.Time]int
+		// began, for the fold that tells one event from many; withoutOnset
+		// the rows of those lines that carry no start, so the fold's sum
+		// and the line's count can be read against each other.
+		onsets       map[time.Time]int
+		withoutOnset int
 	}
 	tallies := map[Check]*tally{}
 	ensure := func(check Check) *tally {
@@ -904,11 +913,15 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				// two minutes -- the minutes a release began recording
 				// them, a lower bound and not an event, and the fold is
 				// what shows either.
-				if (row.Kind == KindEmptyEveryRound || row.Kind == KindNoData) && !row.Since.IsZero() {
-					if entry.onsets == nil {
-						entry.onsets = map[time.Time]int{}
+				if row.Kind == KindEmptyEveryRound || row.Kind == KindNoData {
+					if row.Since.IsZero() {
+						entry.withoutOnset++
+					} else {
+						if entry.onsets == nil {
+							entry.onsets = map[time.Time]int{}
+						}
+						entry.onsets[row.Since.UTC().Truncate(time.Minute)]++
 					}
-					entry.onsets[row.Since.UTC().Truncate(time.Minute)]++
 				}
 			}
 		}
@@ -1063,7 +1076,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			Partial: entry.partial, Demoted: entry.demoted, Activation: entry.activation, Replica: entry.replica,
 			Current: entry.current, Retained: entry.retained, RetainedLastHour: entry.lastHour,
 			Consequence: entry.skipped, SkipReasons: entry.reasons, Rebalance: entry.rebalance,
-			Recovered: entry.recovered, Onsets: onsetFold(entry.onsets)}
+			Recovered: entry.recovered, Onsets: onsetFold(entry.onsets, entry.withoutOnset)}
 		if check.SourceStanding() {
 			report.Strategies = entry.sourceStrategies
 		}

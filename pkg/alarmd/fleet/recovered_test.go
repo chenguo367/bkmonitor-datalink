@@ -290,8 +290,10 @@ func TestARecoveredFoldNamesItsObjects(t *testing.T) {
 			fold = &view.Recovered[index]
 		}
 	}
-	if fold == nil || fold.Objects != 6 || len(fold.Samples) != MaxRecoveredSample {
-		t.Fatalf("merged fold = %+v, want the summed count and %d samples", fold, MaxRecoveredSample)
+	// Both replicas named every object they counted, so the merge counts
+	// distinct identities: five, not the sum of six, with qg-a once.
+	if fold == nil || fold.Objects != 5 || len(fold.Samples) != MaxRecoveredSample {
+		t.Fatalf("merged fold = %+v, want five distinct objects and %d samples", fold, MaxRecoveredSample)
 	}
 	order := []string{}
 	for _, entry := range fold.Samples {
@@ -299,5 +301,32 @@ func TestARecoveredFoldNamesItsObjects(t *testing.T) {
 	}
 	if strings.Join(order, ",") != "qg-a,qg-b,qg-c,qg-d" || !fold.Samples[0].RecoveredAt.Equal(now.Add(-30*time.Second)) {
 		t.Fatalf("merged samples = %v (qg-a at %v), want qg-a once at its most recent recovery, then b, c, d and the bound", order, fold.Samples[0].RecoveredAt)
+	}
+	// A fold larger than the bound on either side is not fully named, and
+	// its count stays the sum the field says it is.
+	snapshots = healthySnapshots()
+	snapshots[0].Recovered = []RecoveredProblem{{Check: CheckDefect, Key: "COMMIT/NONE/CONTRACT", Objects: 40, FirstRecovery: now, LastRecovery: now,
+		Samples: []RecoveredSample{sample("qg-a", time.Minute), sample("qg-b", 2*time.Minute), sample("qg-c", 3*time.Minute), sample("qg-d", 4*time.Minute)}}}
+	snapshots[1].Recovered = []RecoveredProblem{{Check: CheckDefect, Key: "COMMIT/NONE/CONTRACT", Objects: 2, FirstRecovery: now, LastRecovery: now,
+		Samples: []RecoveredSample{sample("qg-a", 30*time.Second), sample("qg-z", 5*time.Minute)}}}
+	view = Aggregate(Expectation{QueryGroups: 949, Known: true}, snapshots, replicas(), now, freshness)
+	for _, candidate := range view.Recovered {
+		if candidate.Check == CheckDefect && candidate.Objects != 42 {
+			t.Fatalf("large fold merged to %d objects, want the sum 42: forty objects are not named and cannot be made distinct", candidate.Objects)
+		}
+	}
+	// A recovery that names no strategies does not erase the names an
+	// earlier recovery of the same object recorded: the fold is asked
+	// directly, because a tracker row always carries the names once it has
+	// seen them, and the case is a row that never did.
+	tracker = newTracker(t, at)
+	tracker.recordRecoveryUnder("qg-named", CheckDefect, "COMMIT/NONE/CONTRACT", now, now, now, []StrategyRef{{StrategyID: "4101", BusinessID: "2"}})
+	tracker.recordRecoveryUnder("qg-named", CheckDefect, "COMMIT/NONE/CONTRACT", now, now, now.Add(time.Minute), nil)
+	for _, problem := range tracker.Recovered() {
+		for _, entry := range problem.Samples {
+			if entry.QueryGroup == "qg-named" && (len(entry.Strategies) != 1 || !entry.RecoveredAt.Equal(now.Add(time.Minute))) {
+				t.Fatalf("a second recovery with no strategy names erased the first's, or the recovery time did not move: %+v", entry)
+			}
+		}
 	}
 }
