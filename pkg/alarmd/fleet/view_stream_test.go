@@ -84,6 +84,13 @@ func TestTheVerdictRouteCarriesTheLeadersViewStream(t *testing.T) {
 	if stream, _ := health["view_stream"].(map[string]any); stream["installed"] != 64.0 || health["view_stream_replica"] != snapshots[0].Replica {
 		t.Fatalf("view_stream = %v replica %v, want the newer Leader's", health["view_stream"], health["view_stream_replica"])
 	}
+	// Nobody lagging is an empty list on the wire, not null: the copy the
+	// aggregate makes must stay a list when there is nothing to copy.
+	if stream, _ := health["view_stream"].(map[string]any); stream["lagging"] == nil {
+		t.Fatalf("view_stream.lagging = null with nobody lagging: %v", health["view_stream"])
+	} else if list, ok := stream["lagging"].([]any); !ok || len(list) != 0 {
+		t.Fatalf("view_stream.lagging = %v, want an empty list", stream["lagging"])
+	}
 
 	// No Leader among the counted replicas: the newest follower's account.
 	snapshots[0].ViewStream, snapshots[1].ViewStream = follower, &ViewStreamFacts{At: now.Add(-3 * time.Minute), Leading: false}

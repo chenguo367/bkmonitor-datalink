@@ -1864,7 +1864,10 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 		if snapshot.ViewStream != nil && viewStreamPreferred(view.ViewStream, snapshot.ViewStream) {
 			facts := *snapshot.ViewStream
-			facts.Lagging = append([]ViewStreamLagging(nil), snapshot.ViewStream.Lagging...)
+			// A copy that stays a list: appending nothing to a nil slice is
+			// nil, and nil is null on the wire, which a page reading
+			// lagging.length cannot use. Nobody lagging is an empty list.
+			facts.Lagging = append(make([]ViewStreamLagging, 0, len(snapshot.ViewStream.Lagging)), snapshot.ViewStream.Lagging...)
 			view.ViewStream, view.ViewStreamReplica = &facts, replica
 		}
 		if snapshot.Source != nil && (view.Source == nil || snapshot.Source.At.After(view.Source.At)) {
