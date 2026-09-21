@@ -96,6 +96,7 @@ func frozenSeriesOf(
 		}
 		frozen = append(frozen, execution.FrozenSeriesState{
 			Identity: view.Identity, LastApplied: view.PersistedApplyVersion.EvaluationTime,
+			Representation: view.Representation,
 		})
 	}
 	if len(frozen) == 0 {

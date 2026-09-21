@@ -161,7 +161,7 @@ func TestProductionPhaseTwoBundleReRunsChunkedSlotIdempotently(t *testing.T) {
 	}
 	queryGroup := bundle.queryGroups[0]
 	productionOwnership := bundle.dependencies.Ownership.(*productionPhaseTwoOwnership)
-	keyPattern := cfg.Redis.StatePrefix + ":runtime:v2:*"
+	keyPattern := cfg.Redis.StatePrefix + ":runtime3:v2:*"
 
 	// Attempt 1: chunk 1 written, chunk 2 refused, Progress not committed.
 	failSecondChunk.Store(true)

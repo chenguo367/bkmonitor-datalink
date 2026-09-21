@@ -341,7 +341,7 @@ func runControlledG4Golden(
 	if progress.LastFullSlot != execution.EvaluationTime(base+60) || progress.NextSlot != execution.EvaluationTime(base+120) {
 		t.Fatalf("controlled Progress=%+v", progress)
 	}
-	stateKeys, err := redisClient.Keys(ctx, cfg.Redis.StatePrefix+":runtime:v2:*").Result()
+	stateKeys, err := redisClient.Keys(ctx, cfg.Redis.StatePrefix+":runtime3:v2:*").Result()
 	if err != nil || len(stateKeys) == 0 {
 		t.Fatalf("controlled Runtime State keys=%v error=%v", stateKeys, err)
 	}

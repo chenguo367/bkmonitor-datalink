@@ -127,7 +127,7 @@ func testApplyFence() execution.StateApplyFence {
 
 func seriesIdentity(index int) execution.StateKeyIdentity {
 	identity := stateIdentityV2()
-	identity.SeriesIdentityDigest = execution.SeriesIdentityDigest(fmt.Sprintf("series-%05d", index))
+	identity.SeriesIdentityDigest = seriesDigest(fmt.Sprintf("series-%05d", index))
 	return identity
 }
 
@@ -135,11 +135,10 @@ func seriesMutation(t *testing.T, identity execution.StateKeyIdentity, version e
 	t.Helper()
 	at := int64(version.EvaluationTime)
 	mutation, err := execution.BuildStateMutation(execution.StateMutation{Identity: identity, ExpectedBlobRevision: revision, ApplyVersion: version,
-		AffectedRecords: []execution.RecordAnchor{{RecordID: "r1", SourceTime: at}},
+		AffectedRecords: []execution.RecordAnchor{derivedAnchor(t, identity, at)},
 		Levels: []execution.RuntimeLevelStateMutation{{LevelID: 1, LevelStateCompatibility: "compat", HistoryCompleteness: execution.HistoryFull,
 			WarmupRequirementRef: "warm" + padding, LastProcessedEventTime: at}},
-		Points: []execution.StateHistoryPoint{{RecordID: "r1", SourceTime: at,
-			Levels: []execution.StateLevelFact{{LevelID: 1, DetectFingerprint: "detect", Result: execution.LevelFactNormal}}}}})
+		Points: []execution.StateHistoryPoint{derivedPoint(t, identity, at, "detect", execution.LevelFactNormal)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,27 +362,27 @@ func TestApplyRuntimeClassifiesValueChangedBetweenPreflightAndApply(t *testing.T
 	vanished := seriesMutation(t, seriesIdentity(3), newer, 1, "")
 	recreated := seriesMutation(t, seriesIdentity(4), newer, 3, "")
 	for _, mutation := range []execution.StateMutation{movedRevision, movedBytes, vanished} {
-		key, _ := RuntimeStateKeyV2("alarmd", mutation.Identity)
-		backend.values[key], _ = encodeRuntime(seriesMutation(t, mutation.Identity, version, 0, ""), 1)
+		key, _ := RuntimeStateKeyV3("alarmd", mutation.Identity)
+		backend.values[key], _ = encodeRuntimePacked(seriesMutation(t, mutation.Identity, version, 0, ""), 1)
 	}
-	key4, _ := RuntimeStateKeyV2("alarmd", recreated.Identity)
-	backend.values[key4], _ = encodeRuntime(seriesMutation(t, recreated.Identity, version, 2, ""), 3)
+	key4, _ := RuntimeStateKeyV3("alarmd", recreated.Identity)
+	backend.values[key4], _ = encodeRuntimePacked(seriesMutation(t, recreated.Identity, version, 2, ""), 3)
 	items := preflightItems([]execution.StateMutation{missingThenWritten, movedRevision, movedBytes, vanished, recreated})
 	if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: items}); err != nil {
 		t.Fatalf("LoadRuntime() error = %v", err)
 	}
 
 	// Another writer moves every key after preflight.
-	key0, _ := RuntimeStateKeyV2("alarmd", missingThenWritten.Identity)
-	backend.values[key0], _ = encodeRuntime(seriesMutation(t, missingThenWritten.Identity, version, 0, "other"), 1)
-	key1, _ := RuntimeStateKeyV2("alarmd", movedRevision.Identity)
-	backend.values[key1], _ = encodeRuntime(seriesMutation(t, movedRevision.Identity, version, 1, ""), 2)
-	key2, _ := RuntimeStateKeyV2("alarmd", movedBytes.Identity)
-	backend.values[key2], _ = encodeRuntime(seriesMutation(t, movedBytes.Identity, older, 0, "other"), 1)
-	key3, _ := RuntimeStateKeyV2("alarmd", vanished.Identity)
+	key0, _ := RuntimeStateKeyV3("alarmd", missingThenWritten.Identity)
+	backend.values[key0], _ = encodeRuntimePacked(seriesMutation(t, missingThenWritten.Identity, version, 0, "other"), 1)
+	key1, _ := RuntimeStateKeyV3("alarmd", movedRevision.Identity)
+	backend.values[key1], _ = encodeRuntimePacked(seriesMutation(t, movedRevision.Identity, version, 1, ""), 2)
+	key2, _ := RuntimeStateKeyV3("alarmd", movedBytes.Identity)
+	backend.values[key2], _ = encodeRuntimePacked(seriesMutation(t, movedBytes.Identity, older, 0, "other"), 1)
+	key3, _ := RuntimeStateKeyV3("alarmd", vanished.Identity)
 	delete(backend.values, key3)
 	// The key was gone and written fresh: revision 3 at preflight, 1 now.
-	backend.values[key4], _ = encodeRuntime(seriesMutation(t, recreated.Identity, version, 0, "other"), 1)
+	backend.values[key4], _ = encodeRuntimePacked(seriesMutation(t, recreated.Identity, version, 0, "other"), 1)
 	snapshot := map[string]string{}
 	for key, value := range backend.values {
 		snapshot[key] = string(value)
@@ -454,7 +453,7 @@ func TestApplyRuntimeRepeatedKeyFallsBackToSequentialPath(t *testing.T) {
 	if backend.pipelines != 0 || backend.casCalls != 3 {
 		t.Fatalf("repeated key must use the sequential path: pipelines=%d cas=%d", backend.pipelines, backend.casCalls)
 	}
-	key, _ := RuntimeStateKeyV2("alarmd", first.Identity)
+	key, _ := RuntimeStateKeyV3("alarmd", first.Identity)
 	view := decodeRuntime(backend.values[key], first.Identity, frozenRef(), second.ApplyVersion)
 	if view.BlobRevision != 2 || view.PersistedMutationDigest != second.MutationDigest {
 		t.Fatalf("later duplicate did not observe the earlier write: %+v", view)
@@ -646,8 +645,8 @@ func TestApplyRuntimeTheSameWriteSentAgainUnchangedIsAlreadyApplied(t *testing.T
 		// witness from preflight still says missing, so the re-sent copy goes
 		// to the pipeline and meets them there.
 		for _, mutation := range mutations {
-			key, _ := RuntimeStateKeyV2("alarmd", mutation.Identity)
-			backend.values[key], _ = encodeRuntime(mutation, 1)
+			key, _ := RuntimeStateKeyV3("alarmd", mutation.Identity)
+			backend.values[key], _ = encodeRuntimePacked(mutation, 1)
 		}
 		snapshot := snapshotOf(backend)
 		result, err := store.ApplyRuntimeFenced(context.Background(), request, testApplyFence())
@@ -725,7 +724,7 @@ func TestApplyRuntimeRepeatedKeyWithTheSameStatementIsNamedRepeatedKey(t *testin
 	if later.Status != execution.StateApplyAlreadyApplied || later.AlreadyApplied != execution.StateAlreadyAppliedRepeatedKey || later.StoredBlobRevision != 1 {
 		t.Fatalf("later copy = %+v, want ALREADY_APPLIED kind repeated_key at stored revision 1: the request itself wrote this key, no client re-sent it", later)
 	}
-	key, _ := RuntimeStateKeyV2("alarmd", first.Identity)
+	key, _ := RuntimeStateKeyV3("alarmd", first.Identity)
 	view := decodeRuntime(backend.values[key], first.Identity, frozenRef(), first.ApplyVersion)
 	if view.BlobRevision != 1 {
 		t.Fatalf("the later copy rewrote the key: revision %d, want 1", view.BlobRevision)
@@ -777,12 +776,12 @@ func TestApplyRuntimeSequentialAndWitnessedConflictsNameTheComparison(t *testing
 		reset := seriesMutation(t, seriesIdentity(1), version, 3, "")
 		moved := seriesMutation(t, seriesIdentity(2), version, 1, "")
 		otherStatement := seriesMutation(t, seriesIdentity(3), version, 1, "")
-		keyReset, _ := RuntimeStateKeyV2("alarmd", reset.Identity)
-		backend.values[keyReset], _ = encodeRuntime(seriesMutation(t, reset.Identity, version, 0, "fresh"), 1)
-		keyMoved, _ := RuntimeStateKeyV2("alarmd", moved.Identity)
-		backend.values[keyMoved], _ = encodeRuntime(seriesMutation(t, moved.Identity, version, 1, "theirs"), 2)
-		keyOther, _ := RuntimeStateKeyV2("alarmd", otherStatement.Identity)
-		backend.values[keyOther], _ = encodeRuntime(seriesMutation(t, otherStatement.Identity, version, 0, "theirs"), 1)
+		keyReset, _ := RuntimeStateKeyV3("alarmd", reset.Identity)
+		backend.values[keyReset], _ = encodeRuntimePacked(seriesMutation(t, reset.Identity, version, 0, "fresh"), 1)
+		keyMoved, _ := RuntimeStateKeyV3("alarmd", moved.Identity)
+		backend.values[keyMoved], _ = encodeRuntimePacked(seriesMutation(t, moved.Identity, version, 1, "theirs"), 2)
+		keyOther, _ := RuntimeStateKeyV3("alarmd", otherStatement.Identity)
+		backend.values[keyOther], _ = encodeRuntimePacked(seriesMutation(t, otherStatement.Identity, version, 0, "theirs"), 1)
 		result, err := store.ApplyRuntime(context.Background(), execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
 			Items: []execution.StateMutation{expired, reset, moved, otherStatement}})
 		if err != nil {

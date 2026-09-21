@@ -62,11 +62,24 @@ type FenceKeyResolver interface {
 // compare without reading the value again: the digest of the bytes it saw plus
 // the persisted version facts the old re-read path classified against.
 type runtimeWitness struct {
+	// The record the evaluator read: the newer of the two representations,
+	// or missing when neither key held one. The version rule classifies the
+	// mutation against these, because they are what the mutation's expected
+	// revision and version were taken from.
 	missing        bool
 	digest         string
 	blobRevision   uint64
 	applyVersion   execution.ApplyVersion
 	mutationDigest execution.MutationDigest
+	// The framed key on its own, whatever the evaluator read from. Every
+	// write goes to the framed key, so the compare-and-set expects these -
+	// missing means create, otherwise the exact bytes seen - and the record
+	// written continues framedRevision, never the envelope's count. A
+	// revision belongs to one representation; reading the envelope's into a
+	// write on the framed key is what made every first write a conflict.
+	framedMissing  bool
+	framedDigest   string
+	framedRevision uint64
 }
 
 type runtimeSlotWitnesses struct {
@@ -187,8 +200,15 @@ func classifyWitnessedMutation(witness runtimeWitness, mutation execution.StateM
 // sequential path produces. A conflict carries the current bytes and is
 // classified exactly as a fresh read would be; a write that the version rule
 // would still allow but whose bytes moved under us is a CAS conflict.
+//
+// The conflict is on the framed key, and the revision the write expected there
+// is expectedFramed - the framed key's own count, not the mutation's expected
+// revision, which belongs to whichever representation the evaluator read. The
+// version rule is applied in the framed key's revision space so that a plain
+// race on that key is named as one, rather than as a reset or a move between
+// two counts that were never comparable.
 func (store *ExecutionStore) classifyFencedOutcome(
-	contractRef execution.FrozenExecutionContractRef, mutation execution.StateMutation, outcome FencedWriteOutcome,
+	contractRef execution.FrozenExecutionContractRef, mutation execution.StateMutation, outcome FencedWriteOutcome, expectedFramed uint64,
 ) execution.StateApplyItemResult {
 	item := execution.StateApplyItemResult{Identity: mutation.Identity}
 	if outcome.Err != nil {
@@ -199,7 +219,7 @@ func (store *ExecutionStore) classifyFencedOutcome(
 	case FencedWriteApplied:
 		item.Status = execution.StateApplied
 	case FencedWriteConflictMissing:
-		if mutation.ExpectedBlobRevision != 0 {
+		if expectedFramed != 0 {
 			item.MarkVersionConflict(execution.StateVersionConflictMissing, execution.RuntimeStateView{})
 		} else {
 			item.Status, item.ReasonCode = execution.StateApplyCASConflict, execution.ReasonCode(contract.ReasonStateWriteRetryable)
@@ -216,7 +236,9 @@ func (store *ExecutionStore) classifyFencedOutcome(
 			return item
 		}
 		view.VersionComparison = execution.CompareApplyVersion(view.PersistedApplyVersion, mutation.ApplyVersion)
-		classified := execution.ClassifyStateMutationDetail(view, mutation)
+		framedExpectation := mutation
+		framedExpectation.ExpectedBlobRevision = expectedFramed
+		classified := execution.ClassifyStateMutationDetail(view, framedExpectation)
 		switch classified.Disposition {
 		case execution.StateAlreadyApplied:
 			item.Status, item.AlreadyApplied, item.StoredBlobRevision = execution.StateApplyAlreadyApplied, classified.AlreadyApplied, view.BlobRevision
@@ -245,11 +267,14 @@ type runtimeApplyPipeline struct {
 	target  string
 	indexes []int
 	writes  []FencedWrite
-	bytes   int
+	// expected is the framed key's revision each write was built against,
+	// zero when the key was missing: what a conflict reply is read against.
+	expected []uint64
+	bytes    int
 }
 
 func (pipeline *runtimeApplyPipeline) add(
-	ctx context.Context, backend FencedBatchBackend, target string, index int, write FencedWrite,
+	ctx context.Context, backend FencedBatchBackend, target string, index int, write FencedWrite, expected uint64,
 ) error {
 	if len(pipeline.writes) > 0 && (pipeline.target != target || len(pipeline.writes) >= runtimeApplyBatchItems ||
 		pipeline.bytes+len(write.Value) > runtimeApplyBatchBytes) {
@@ -260,12 +285,13 @@ func (pipeline *runtimeApplyPipeline) add(
 	pipeline.backend, pipeline.target = backend, target
 	pipeline.indexes = append(pipeline.indexes, index)
 	pipeline.writes = append(pipeline.writes, write)
+	pipeline.expected = append(pipeline.expected, expected)
 	pipeline.bytes += len(write.Value)
 	return nil
 }
 
 func (pipeline *runtimeApplyPipeline) reset() {
-	pipeline.indexes, pipeline.writes, pipeline.bytes = pipeline.indexes[:0], pipeline.writes[:0], 0
+	pipeline.indexes, pipeline.writes, pipeline.expected, pipeline.bytes = pipeline.indexes[:0], pipeline.writes[:0], pipeline.expected[:0], 0
 }
 
 // flush exchanges the staged batch. When the exchange itself fails every
@@ -296,7 +322,7 @@ func (pipeline *runtimeApplyPipeline) flush(ctx context.Context) error {
 			moved = true
 			continue
 		}
-		pipeline.result.Items[index] = pipeline.store.classifyFencedOutcome(pipeline.request.Contract, pipeline.request.Items[index], outcome)
+		pipeline.result.Items[index] = pipeline.store.classifyFencedOutcome(pipeline.request.Contract, pipeline.request.Items[index], outcome, pipeline.expected[position])
 	}
 	if stale {
 		return fmt.Errorf("state: runtime state apply for %s: %w", pipeline.request.Contract.Slot.QueryGroup, ownership.ErrStaleFence)
@@ -353,7 +379,9 @@ func (store *ExecutionStore) applyRuntime(
 	seen := make(map[string]struct{}, len(request.Items))
 	duplicate := false
 	for index, mutation := range request.Items {
-		keys[index], keyErrors[index] = RuntimeStateKeyV2(store.options.Prefix, mutation.Identity)
+		// Every write goes to the framed key. The envelope is read, never
+		// written, and expires on its own TTL once nothing writes it.
+		keys[index], keyErrors[index] = RuntimeStateKeyV3(store.options.Prefix, mutation.Identity)
 		if keyErrors[index] != nil {
 			continue
 		}
@@ -414,15 +442,15 @@ func (store *ExecutionStore) applyRuntime(
 			result.Items[index] = classified
 			continue
 		}
-		encoded, err := encodeRuntime(mutation, mutation.ExpectedBlobRevision+1)
-		if err != nil || len(encoded) > store.options.MaxValueBytes {
-			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
+		encoded, refusal := store.encodeForWrite(mutation, witness.framedRevision+1)
+		if refusal != "" {
+			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(refusal)
 			result.Items[index] = item
 			continue
 		}
-		write := FencedWrite{Key: keys[index], ExpectedMissing: witness.missing, ExpectedDigest: witness.digest,
+		write := FencedWrite{Key: keys[index], ExpectedMissing: witness.framedMissing, ExpectedDigest: witness.framedDigest,
 			Value: encoded, TTL: ttl}
-		if err := pipeline.add(ctx, batchBackend, target.Name, index, write); err != nil {
+		if err := pipeline.add(ctx, batchBackend, target.Name, index, write, witness.framedRevision); err != nil {
 			return execution.StateApplyResult{}, err
 		}
 	}
@@ -437,51 +465,41 @@ func (store *ExecutionStore) applyRuntime(
 // serves callers without a preflight witness and requests with repeated keys.
 func (store *ExecutionStore) applyRuntimeSequential(
 	ctx context.Context, contractRef execution.FrozenExecutionContractRef, mutation execution.StateMutation,
-	key string, ttl time.Duration, backend CompareAndSetBackend,
+	framedKey string, ttl time.Duration, backend CompareAndSetBackend,
 ) execution.StateApplyItemResult {
 	item := execution.StateApplyItemResult{Identity: mutation.Identity}
-	values, err := backend.MGet(ctx, []string{key})
+	envelopeKey, err := RuntimeStateKeyV2(store.options.Prefix, mutation.Identity)
+	if err != nil {
+		item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
+		return item
+	}
+	values, err := backend.MGet(ctx, []string{envelopeKey, framedKey})
 	if err != nil {
 		item.Status, item.ReasonCode = execution.StateApplyRetryable, execution.ReasonCode(contract.ReasonRedisUnavailable)
 		return item
 	}
-	var raw []byte
-	if len(values) == 1 {
-		raw = values[0]
+	var envelopeRaw, framedRaw []byte
+	if len(values) == 2 {
+		envelopeRaw, framedRaw = values[0], values[1]
 	}
-	if raw != nil {
-		if len(raw) > store.options.MaxValueBytes {
-			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
-			return item
-		}
-		view := decodeRuntime(raw, mutation.Identity, contractRef, mutation.ApplyVersion)
-		if view.Status == execution.StateDeterministicInvalid {
-			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, view.ReasonCode
-			return item
-		}
-		view.VersionComparison = execution.CompareApplyVersion(view.PersistedApplyVersion, mutation.ApplyVersion)
-		classified := execution.ClassifyStateMutationDetail(view, mutation)
-		switch classified.Disposition {
-		case execution.StateAlreadyApplied:
-			item.Status, item.AlreadyApplied, item.StoredBlobRevision = execution.StateApplyAlreadyApplied, classified.AlreadyApplied, view.BlobRevision
-			return item
-		case execution.StateStaleVersion:
-			item.Status = execution.StateApplyStale
-			return item
-		case execution.StateVersionConflict:
-			item.MarkVersionConflict(classified.VersionConflict, view)
-			return item
-		}
-	} else if mutation.ExpectedBlobRevision != 0 {
-		item.MarkVersionConflict(execution.StateVersionConflictMissing, execution.RuntimeStateView{})
+	// The same reading LoadRuntime makes, so a series that reaches this path
+	// without a witness is classified exactly as it would have been with one.
+	view := store.readStoredRecord(execution.StatePreflightRequest{Contract: contractRef},
+		execution.StatePreflightItem{Identity: mutation.Identity, ApplyVersion: mutation.ApplyVersion}, envelopeRaw, framedRaw)
+	witness, _ := store.witnesses.take(contractRef.Slot, mutation.Identity)
+	if view.Status == execution.StateDeterministicInvalid {
+		item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, view.ReasonCode
 		return item
 	}
-	encoded, err := encodeRuntime(mutation, mutation.ExpectedBlobRevision+1)
-	if err != nil || len(encoded) > store.options.MaxValueBytes {
-		item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
+	if classified, proceed := classifyWitnessedMutation(witness, mutation); !proceed {
+		return classified
+	}
+	encoded, refusal := store.encodeForWrite(mutation, witness.framedRevision+1)
+	if refusal != "" {
+		item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(refusal)
 		return item
 	}
-	applied, err := backend.CompareAndSet(ctx, key, raw, raw == nil, encoded, ttl)
+	applied, err := backend.CompareAndSet(ctx, framedKey, framedRaw, framedRaw == nil, encoded, ttl)
 	if err != nil {
 		item.Status, item.ReasonCode = execution.StateApplyRetryable, execution.ReasonCode(contract.ReasonStateWriteRetryable)
 	} else if !applied {
@@ -490,6 +508,21 @@ func (store *ExecutionStore) applyRuntimeSequential(
 		item.Status = execution.StateApplied
 	}
 	return item
+}
+
+// encodeForWrite frames the record every write stores, naming the refusal
+// when it cannot: a record that disagrees with the framed contract is
+// STATE_CORRUPT - the producer sent something no representation can hold -
+// and one that frames but does not fit is the budget.
+func (store *ExecutionStore) encodeForWrite(mutation execution.StateMutation, revision uint64) ([]byte, string) {
+	encoded, err := encodeRuntimePacked(mutation, revision)
+	switch {
+	case errors.Is(err, ErrPackedContract):
+		return nil, contract.ReasonStateCorrupt
+	case err != nil || len(encoded) > store.options.MaxValueBytes:
+		return nil, contract.ReasonStateBudgetExceeded
+	}
+	return encoded, ""
 }
 
 // runtimeValueSizeGroups bounds how many Query Groups the store remembers a
@@ -720,26 +753,78 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			views[index] = runtimeLoadFailure(view, err)
 			continue
 		}
-		raw := values[position]
-		switch {
-		case raw == nil:
-			store.witnesses.remember(request.Contract.Slot, item.Identity, runtimeWitness{missing: true})
-		case len(raw) > store.options.MaxValueBytes:
-			view.BlobRevision, view.Status, view.ReasonCode = 1, execution.StateDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
-		default:
-			loaded += int64(len(raw))
-			if len(raw) > largest {
-				largest = len(raw)
-			}
-			view = decodeRuntime(raw, item.Identity, request.Contract, item.ApplyVersion)
-			if view.Status != execution.StateDeterministicInvalid {
-				store.witnesses.remember(request.Contract.Slot, item.Identity, runtimeWitness{digest: ExpectedValueDigest(raw),
-					blobRevision: view.BlobRevision, applyVersion: view.PersistedApplyVersion, mutationDigest: view.PersistedMutationDigest})
-			}
+		envelopeRaw, framedRaw := values[2*position], values[2*position+1]
+		weight := len(envelopeRaw) + len(framedRaw)
+		loaded += int64(weight)
+		if weight > largest {
+			largest = weight
 		}
-		views[index] = view
+		views[index] = store.readStoredRecord(request, item, envelopeRaw, framedRaw)
 	}
 	return loaded, largest, err == nil
+}
+
+// readStoredRecord turns the two values one series may hold into the one view
+// the evaluator reads, and remembers what the apply path will need.
+//
+// The view is the newer of the two records (chooseRuntimeView), because a
+// Query Group bounces between binaries during a rollout and an old owner
+// writes the envelope after a new one wrote the framed record. The witness
+// carries that record's version facts for the version rule and, separately,
+// the framed key's own facts for the compare-and-set, since that is the key
+// every write goes to. A framed record that does not decode is not chosen
+// but is still witnessed by its bytes, so the next whole write replaces it
+// rather than conflicting with it forever.
+func (store *ExecutionStore) readStoredRecord(
+	request execution.StatePreflightRequest, item execution.StatePreflightItem, envelopeRaw, framedRaw []byte,
+) execution.RuntimeStateView {
+	oversize := func() execution.RuntimeStateView {
+		return execution.RuntimeStateView{Identity: item.Identity, BlobRevision: 1, Status: execution.StateDeterministicInvalid,
+			ReasonCode: execution.ReasonCode(contract.ReasonStateBudgetExceeded)}
+	}
+	if len(envelopeRaw) > store.options.MaxValueBytes || len(framedRaw) > store.options.MaxValueBytes {
+		return oversize()
+	}
+	witness := runtimeWitness{missing: true, framedMissing: framedRaw == nil}
+	var envelope, framed *execution.RuntimeStateView
+	var invalid *execution.RuntimeStateView
+	if envelopeRaw != nil {
+		decoded := decodeRuntime(envelopeRaw, item.Identity, request.Contract, item.ApplyVersion)
+		if decoded.Status == execution.StateDeterministicInvalid {
+			invalid = &decoded
+		} else {
+			envelope = &decoded
+		}
+	}
+	if framedRaw != nil {
+		witness.framedDigest = ExpectedValueDigest(framedRaw)
+		decoded := decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
+		if decoded.Status == execution.StateDeterministicInvalid {
+			invalid = &decoded
+		} else {
+			framed = &decoded
+			witness.framedRevision = decoded.BlobRevision
+		}
+	}
+	chosen, source := chooseRuntimeView(framed, envelope)
+	if source == runtimeViewNone {
+		if invalid != nil {
+			// Whatever was there does not read. Not witnessed: the apply path
+			// re-reads and refuses it by name, as it did before two keys.
+			return *invalid
+		}
+		store.witnesses.remember(request.Contract.Slot, item.Identity, witness)
+		return execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
+	}
+	witness.missing = false
+	witness.blobRevision, witness.applyVersion, witness.mutationDigest = chosen.BlobRevision, chosen.PersistedApplyVersion, chosen.PersistedMutationDigest
+	if source == runtimeViewFramed {
+		witness.digest = witness.framedDigest
+	} else {
+		witness.digest = ExpectedValueDigest(envelopeRaw)
+	}
+	store.witnesses.remember(request.Contract.Slot, item.Identity, witness)
+	return chosen
 }
 
 var _ execution.FencedStateStore = (*ExecutionStore)(nil)

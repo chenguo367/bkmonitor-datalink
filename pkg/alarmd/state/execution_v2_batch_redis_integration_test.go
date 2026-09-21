@@ -258,7 +258,7 @@ func TestRedisFencedBatchApplyRejectsStaleOwnerLikeCheckFence(t *testing.T) {
 			result, err := store.ApplyRuntimeFenced(ctx, request, execution.StateApplyFence{Fence: test.fence})
 			keys := make([]string, len(mutations))
 			for index, mutation := range mutations {
-				keys[index], _ = RuntimeStateKeyV2("fenced", mutation.Identity)
+				keys[index], _ = RuntimeStateKeyV3("fenced", mutation.Identity)
 			}
 			exists := fixture.client.Exists(ctx, keys...).Val()
 			if test.stale {
@@ -284,8 +284,8 @@ func TestRedisFencedBatchApplyDetectsValueChangedAfterPreflight(t *testing.T) {
 	store := fixture.store(t, "fenced", true)
 	mutations := seriesMutations(t, 2, applyVersion(), 0)
 	loadInStreamBatches(t, store, preflightItems(mutations))
-	key, _ := RuntimeStateKeyV2("fenced", mutations[1].Identity)
-	other, _ := encodeRuntime(seriesMutation(t, mutations[1].Identity, applyVersion(), 0, "other"), 1)
+	key, _ := RuntimeStateKeyV3("fenced", mutations[1].Identity)
+	other, _ := encodeRuntimePacked(seriesMutation(t, mutations[1].Identity, applyVersion(), 0, "other"), 1)
 	if err := fixture.client.Set(ctx, key, other, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
@@ -401,8 +401,8 @@ func requireMatchingRedisState(t *testing.T, fixture *redisBatchFixture, mutatio
 	ctx := context.Background()
 	keys := make([]string, 0, 2*len(mutations))
 	for _, mutation := range mutations {
-		sequentialKey, _ := RuntimeStateKeyV2("sequential", mutation.Identity)
-		batchedKey, _ := RuntimeStateKeyV2("batched", mutation.Identity)
+		sequentialKey, _ := RuntimeStateKeyV3("sequential", mutation.Identity)
+		batchedKey, _ := RuntimeStateKeyV3("batched", mutation.Identity)
 		keys = append(keys, sequentialKey, batchedKey)
 	}
 	values, err := fixture.client.UniversalClient.MGet(ctx, keys...).Result()
