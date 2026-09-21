@@ -124,6 +124,10 @@ type activationProtectionRequiredError struct {
 	// whole path reported the completion and dropped the one field that says
 	// which of the conditions folded into UNAVAILABLE actually happened.
 	completionCause execution.CompletionAttribution
+	// guardReason is the word the Guards written for activations carry:
+	// classified over those Plans alone, since a Plan that is gone gets no
+	// Guard and its word must not land on the Guard of one that came back.
+	guardReason execution.ReasonCode
 }
 
 func (*activationProtectionRequiredError) Error() string {
@@ -572,6 +576,27 @@ func classifyActivationChange(
 	return change
 }
 
+// guardReasonFor is the word the Guards written for the given activations
+// carry: the change classified over the Plans those activations name, which
+// are the ones getting a Guard. A Slot's completion word is the max over
+// every due Plan and can be PLAN_NOT_ACTIVE for a Plan that is gone, but a
+// gone Plan gets no Guard, and that word on the Guard of a Plan that came
+// back would misname it - and it is not a Guard scope word at all, so the
+// fold would rank it first and the page has no words for it.
+func guardReasonFor(
+	duePlans []execution.DuePlan,
+	activations execution.PlanActivationResult,
+	loadedGaps execution.GapLoadResult,
+) execution.ReasonCode {
+	guarded := make([]execution.DuePlan, 0, len(duePlans))
+	for _, due := range duePlans {
+		if fact, found := activations.Find(due.Identity); found && fact.Selection != execution.ActivationNone {
+			guarded = append(guarded, due)
+		}
+	}
+	return classifyActivationChange(guarded, activations, loadedGaps).reason()
+}
+
 // generationSeenBefore reports whether the loaded Guards hold a marker for
 // the due Plan's state generation: a generation that has run before.
 func generationSeenBefore(loadedGaps execution.GapLoadResult, due execution.DuePlan) bool {
@@ -687,12 +712,18 @@ func (coordinator *SlotExecutionCoordinator) convergeNormalActivation(
 	request execution.SlotExecutionRequest,
 	protection activationProtectionRequiredError,
 ) (execution.SlotExecutionResult, error) {
-	// The word the protection was raised under travels with its completion:
-	// the retry, the Guard the converge writes and the completion it commits
-	// all say the same one of CONFIG_DRIFT, PLAN_REACTIVATED or PLAN_NOT_ACTIVE.
+	// The words the protection was raised under travel with it: the retry
+	// says the Slot's word, the Guard the converge writes says the word for
+	// the Plans getting a Guard, and the completion it commits is the one it
+	// was handed. The two differ only on a Slot where one Plan is gone and
+	// another came back.
 	reason := protection.completion.ReasonCode
 	if reason == "" {
 		reason = execution.ReasonCode(contract.ReasonConfigDrift)
+	}
+	guardReason := protection.guardReason
+	if guardReason == "" {
+		guardReason = reason
 	}
 	result := activationRetry(reason)
 	var changedActivations *execution.PlanActivationResult
@@ -703,7 +734,7 @@ func (coordinator *SlotExecutionCoordinator) convergeNormalActivation(
 			alreadyProtected, err := coordinator.ensureActivatedPlanGaps(
 				sequenceCtx,
 				request,
-				reason,
+				guardReason,
 				protection.activations,
 				false,
 			)
@@ -1032,7 +1063,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		// version is newer than the marker's.
 		change := classifyActivationChange(header.DuePlans, guardActivations, loadedGaps)
 		if _, err := coordinator.ensureActivatedPlanGaps(
-			ctx, request, change.reason(), forced, false,
+			ctx, request, guardReasonFor(header.DuePlans, forced, loadedGaps), forced, false,
 		); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
@@ -1351,6 +1382,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			activations:       changedActivations,
 			completion:        completion,
 			completionCause:   attribution,
+			guardReason:       guardReasonFor(header.DuePlans, changedActivations, loadedGaps),
 		}
 	}
 	progressActivations, err := coordinator.loadActivations(ctx, activationRequest)
@@ -1360,12 +1392,14 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	if !guardActivations.SameSelections(progressActivations) {
 		driftCompletion, driftCause := activationChangeCompletion(request.Contract, &primary,
 			classifyActivationChange(header.DuePlans, progressActivations, loadedGaps))
+		changedSelected := changedSelectedActivations(guardActivations, progressActivations)
 		return execution.SlotExecutionResult{}, &activationProtectionRequiredError{
 			activationRequest: activationRequest,
 			currentFacts:      progressActivations,
-			activations:       changedSelectedActivations(guardActivations, progressActivations),
+			activations:       changedSelected,
 			completion:        driftCompletion,
 			completionCause:   execution.CompletionAttribution{Cause: driftCause},
+			guardReason:       guardReasonFor(header.DuePlans, changedSelected, loadedGaps),
 		}
 	}
 	if err := coordinator.admitDuePlans(ctx, request, header.DuePlans); err != nil {

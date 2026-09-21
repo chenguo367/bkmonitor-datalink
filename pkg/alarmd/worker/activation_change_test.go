@@ -102,3 +102,35 @@ func TestActivationChangeIsClassifiedFromTheSameComparisonAsDrift(t *testing.T) 
 		})
 	}
 }
+
+// On a Slot where one Plan is gone and another came back, the Slot's word is
+// PLAN_NOT_ACTIVE but the Guard is written only for the Plan that came back,
+// and its word is that Plan's: PLAN_REACTIVATED. The Slot's word on that
+// Guard would misname it, and it is not a Guard scope word at all - the
+// fold ranks an unlisted word first and the page has no words for it.
+func TestTheGuardWordIsClassifiedOverThePlansGettingAGuard(t *testing.T) {
+	gone := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "1001"}
+	back := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "1002"}
+	duePlans := []execution.DuePlan{
+		{Identity: gone, StateGeneration: "gen-1", StateApplyEpoch: 7, ScheduleRevision: "sched-1"},
+		{Identity: back, StateGeneration: "gen-1", StateApplyEpoch: 7, ScheduleRevision: "sched-1"},
+	}
+	returned := execution.PlanActivationResult{Facts: []execution.PlanActivationFact{{
+		Plan: back, Selection: execution.ActivationCurrent,
+		Selected: execution.ActivatedPlan{Identity: back, StateGeneration: "gen-1", StateApplyEpoch: 9, ScheduleRevision: "sched-1"},
+	}}}
+	if change := classifyActivationChange(duePlans, returned, execution.GapLoadResult{}); change != activationChangeNotActive {
+		t.Fatalf("the Slot's change = %d, want the gone Plan's PLAN_NOT_ACTIVE to outrank the returned one", change)
+	}
+	if reason := guardReasonFor(duePlans, returned, execution.GapLoadResult{}); string(reason) != contract.ReasonPlanReactivated {
+		t.Fatalf("the Guard's word = %s, want %s: only the Plan that came back gets a Guard", reason, contract.ReasonPlanReactivated)
+	}
+	// And the Guard's word is a word the fold ranks and the scope vocabulary
+	// names, which the Slot's word here is not.
+	if contract.NormalizeGapScopeReason(contract.ReasonPlanReactivated) != contract.ReasonPlanReactivated {
+		t.Fatalf("%s is not a Guard scope word", contract.ReasonPlanReactivated)
+	}
+	if contract.NormalizeGapScopeReason(contract.ReasonPlanNotActive) == contract.ReasonPlanNotActive {
+		t.Fatalf("%s is a Guard scope word; the case assumes it is not", contract.ReasonPlanNotActive)
+	}
+}
