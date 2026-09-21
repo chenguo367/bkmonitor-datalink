@@ -216,6 +216,10 @@ type queryGroupState struct {
 	// guard is silent -- and advances the generation.
 	guards   map[string]*gapGuardState
 	guardGen int
+	// firstSeenAt is when this process first saw a round of the object: the
+	// anchor a restart's catch-up is judged from on the skip record, since a
+	// replica starts working an object well after its process starts.
+	firstSeenAt time.Time
 	// reasonKey names the current result and reason as one string, reasonSince
 	// is when that pair first held and reasonRuns how many consecutive rounds
 	// it has held for. It is the object's own clock for "how long has it been
@@ -633,6 +637,9 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		tracker.groups[queryGroup] = state
 	}
 	at := tracker.now()
+	if state.firstSeenAt.IsZero() {
+		state.firstSeenAt = at
+	}
 	// A refused absence-memory write is not a round either: the round it
 	// happened in was fine and is reported separately. Recorded on the object
 	// with the store's reason and the size it measured, and it does not
@@ -773,11 +780,15 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	}
 	if completion == "GAP_SKIPPED" {
 		if state.gapSkip == nil || state.lastCompleted != "GAP_SKIPPED" {
-			state.gapSkip = &SkippedSpan{FirstSlot: trace.EvaluationTime, Replica: tracker.replica}
+			state.gapSkip = &SkippedSpan{FirstSlot: trace.EvaluationTime, Replica: tracker.replica, FirstSeenAt: state.firstSeenAt}
 		}
 		state.gapSkip.LastSlot = trace.EvaluationTime
 		state.gapSkip.Slots++
 		state.gapSkip.At = at
+		// What held the Slot before it was given up, as the completion says:
+		// the record's own fact, read for the loss ahead of where the object
+		// sits when the record is read.
+		state.gapSkip.HeldBy = heldByOf(observation)
 		tracker.noteSkipEvidence(queryGroup, state, at)
 		// The last step before the skip, when it was this Slot's: a permit
 		// deadline missed says the retry came too late, a budget rejection
@@ -1137,6 +1148,20 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			state.sinceFrom = SinceProcessStart
 		}
 	}
+}
+
+// heldByOf is the decision that held the completed Slot, from wherever the
+// completion carries it; empty for none, so the record's field stays absent
+// when nothing held the Slot.
+func heldByOf(observation observability.Observation) string {
+	facts := observation.HeldBy
+	if facts == nil && observation.ReplayExpiry != nil {
+		facts = observation.ReplayExpiry.HeldBy
+	}
+	if facts == nil || facts.Decision == "" || facts.Decision == observability.HeldByNothing {
+		return ""
+	}
+	return facts.Decision
 }
 
 // noteReason advances the object's own clock: a new result-and-reason pair

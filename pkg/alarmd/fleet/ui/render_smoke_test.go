@@ -888,7 +888,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// the row; the refused object's record carries its period too.
 		// The mechanism is the last step before the skip, on the row, not
 		// inferred from the period: this one retried after its deadline.
-		{"SKIP qg-losing-now ::", "，10 秒周期。仍在发生（最近 10 分钟内跳过）跳过前最后一步：错过查询截止时间（重试到达时冻结的截止已过）"},
+		{"SKIP qg-losing-now ::", "，10 秒周期。仍在发生（最近 10 分钟内跳过，且不是冷却、不是滚动追赶）跳过前最后一步：错过查询截止时间（重试到达时冻结的截止已过）"},
 		{"SKIP qg-restart-catchup ::", "跳过前最后一步：这一 Slot 没有尝试过，直接越过了重放范围"},
 		// The internal conflict beside the refusal, on the row and as a
 		// second fact on the DEFECT line -- the refusal still has the object.
@@ -984,14 +984,14 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// clock: a loss in progress is still blocked, a stopped one is
 		// history, and a record fold does not claim this process never saw
 		// its objects succeed -- that is not the record's question.
-		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过）） · 1 个对象 · 仍然受阻（最近窗口内还在失败） · 首次 17:57:00 · 最近失败 17:57:00 · 1 条策略 · 1 个业务"},
+		{"GROUPS LOSS ::", "ONGOING（仍在发生（最近 10 分钟内跳过，且不是冷却、不是滚动追赶）） · 1 个对象 · 仍然受阻（最近窗口内还在失败） · 首次 17:57:00 · 最近失败 17:57:00 · 1 条策略 · 1 个业务"},
 		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 2 个对象 · 留有历史影响（历史检测缺口，那段未检测的时间不补） · 首次 16:50:00 · 最后一次 17:00:00"},
 		{"GROUPS LOSS ::", "HISTORICAL（已停止（10 分钟以上没有再跳过）） · 2 个对象"},
-		{"GROUPS LOSS ::", "AFTER_RESTART（滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）） · 1 个对象"},
-		{"SKIP qg-restart-catchup ::", "，10 秒周期。滚动后的追赶（副本启动 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）"},
+		{"GROUPS LOSS ::", "AFTER_RESTART（滚动后的追赶（副本启动或首次接手该对象 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）） · 1 个对象"},
+		{"SKIP qg-restart-catchup ::", "，10 秒周期。滚动后的追赶（副本启动或首次接手该对象 5 分钟内跳过；每次滚动都有，通常几分钟内结束——是否结束看这一组还有没有新增）"},
 		{"SKIP qg-demoted-rejected ::", "3 个 Slot，记录于 "},
 		{"SKIP qg-demoted-rejected ::", "。在被拒期间跳过（冷却让旧轮次超出重放范围，首要原因是查询不可用）"},
-		{"SKIP qg-losing-now ::", "。仍在发生（最近 10 分钟内跳过）"},
+		{"SKIP qg-losing-now ::", "。仍在发生（最近 10 分钟内跳过，且不是冷却、不是滚动追赶）"},
 		// The operating judgment from the fixture's own census, capacity and
 		// records: keeping up, no backlog, one loss in progress, and -- since
 		// something is being lost -- the queued permits named as the
@@ -999,7 +999,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// estimates headroom.
 		{"LOAD ::", "按时完成：跟得上，没有对象超期"},
 		{"LOAD ::", "积压：没有，30 分 0 秒 前也没有"},
-		{"LOAD ::", "漏检：正在发生——1 个对象最近 10 分钟内跳过了检测，另有 1 个是滚动后的追赶（副本启动 5 分钟内），看它还有没有新增、不由它问容量；另有 1 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）"},
+		{"LOAD ::", "漏检：正在发生——1 个对象最近 10 分钟内跳过了检测，另有 1 个是滚动后的追赶（副本启动或首次接手 5 分钟内），看它还有没有新增、不由它问容量；另有 1 个被拒的对象在冷却期间跳过（首要原因是查询不可用，不是容量）"},
 		// Behind (a loss in progress) while the leader's round would move
 		// objects: the split is the constraint, named before the permits it
 		// fills, and the sentence says what the build does about it.
@@ -1124,7 +1124,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
 		"需要处理：现在要处理 11 类（18 个对象，去重；其中平台写入方 1 类（60 条策略），按策略计不按对象计）；待归因 5 类（17 个对象）；业务侧已确认 4 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
-		"另有 1 个是滚动后的追赶漏检（副本启动 5 分钟内），看它还有没有新增",
+		"另有 1 个是滚动后的追赶漏检（副本启动或首次接手 5 分钟内），看它还有没有新增",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 2 个对象另列",
 		// On time, and on a stale publication: both true at once, and the
 		// first sentence says both.

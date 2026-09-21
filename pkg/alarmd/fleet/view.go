@@ -1864,7 +1864,10 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 		if snapshot.ViewStream != nil && viewStreamPreferred(view.ViewStream, snapshot.ViewStream) {
 			facts := *snapshot.ViewStream
-			facts.Lagging = append([]ViewStreamLagging(nil), snapshot.ViewStream.Lagging...)
+			// A copy that stays a list: appending nothing to a nil slice is
+			// nil, and nil is null on the wire, which a page reading
+			// lagging.length cannot use. Nobody lagging is an empty list.
+			facts.Lagging = append(make([]ViewStreamLagging, 0, len(snapshot.ViewStream.Lagging)), snapshot.ViewStream.Lagging...)
 			view.ViewStream, view.ViewStreamReplica = &facts, replica
 		}
 		if snapshot.Source != nil && (view.Source == nil || snapshot.Source.At.After(view.Source.At)) {
@@ -2501,6 +2504,30 @@ type SkippedSpan struct {
 	// detection at all -- it is bookkeeping that was interrupted -- and is
 	// filed as such.
 	Evidence *SkipEvidence `json:"evidence,omitempty"`
+	// HeldBy is what the skipped Slot's previous round decided, as the
+	// completion that gave the Slot up reported it: query_cooldown is a
+	// Slot the cooldown held until it fell past the replay range, which is
+	// the cooldown's consequence whether or not the object is still in the
+	// pool when the record is read. Empty on a record from a build before
+	// the field, or a skip nothing held. It is the record's own fact, so
+	// the loss is decided from it rather than from where the object sits
+	// now: an object whose cooldown ended thirty seconds ago carried a
+	// cooldown's skip that read as detection lost to capacity.
+	HeldBy string `json:"held_by,omitempty"`
+	// FirstSeenAt is when this replica first saw a round of this object in
+	// this process -- when it actually started working it, which after a
+	// rollout is a lease expiry, a catalog load and a reconcile round later
+	// than the process start. The restart's catch-up is judged from here as
+	// well as from the process start; zero on a record from a build before
+	// the field.
+	FirstSeenAt time.Time `json:"first_seen_at,omitempty"`
+	// RestartOffsetSeconds and TakeoverOffsetSeconds are how long after the
+	// replica's process start, and after it first saw the object, this
+	// record was made: filled when the record is read, so a reader can see
+	// which anchor the restart grace was judged against and by how much.
+	// Absent when the anchor is unknown.
+	RestartOffsetSeconds  *float64 `json:"restart_offset_seconds,omitempty"`
+	TakeoverOffsetSeconds *float64 `json:"takeover_offset_seconds,omitempty"`
 }
 
 // ExecutionEvidence is one completion's reading of an earlier attempt, as

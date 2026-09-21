@@ -796,7 +796,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		for _, row := range rows {
 			entry := ensure(row.Finding.Check)
 			add(entry, row.Finding.Group, &row)
-			if (row.Loss == LossOngoing || row.Loss == LossAfterRestart) && row.Finding.Check != CheckBookkeepingAbandoned {
+			if (row.Loss == LossOngoing || row.Loss == LossAfterRestart || row.Loss == LossAfterCooldown) && row.Finding.Check != CheckBookkeepingAbandoned {
 				entry.current++
 				if entry.reasons == nil {
 					entry.reasons = map[string]int{}
@@ -1064,6 +1064,16 @@ type Todo struct {
 	OngoingNewest       *time.Time `json:"ongoing_newest,omitempty"`
 	AfterRestart        int        `json:"after_restart"`
 	RestartGraceSeconds int        `json:"restart_grace_seconds"`
+	// AfterCooldown is the recent records whose Slot a query cooldown held
+	// on an object that has since left the pool: the cooldown's consequence
+	// with no line to fold onto, named apart from Ongoing because it asks
+	// no capacity question.
+	AfterCooldown int `json:"after_cooldown"`
+	// RestartGraceUnknown is the recent records judged against no anchor --
+	// a publisher that sent neither its process start nor when it first saw
+	// the object -- and so read by age alone. Counted rather than silent:
+	// such a publisher would otherwise make every recent skip read ONGOING.
+	RestartGraceUnknown int `json:"restart_grace_unknown"`
 	// WhileDemoted is the distinct objects in the demoted pool that also
 	// skipped detection there, and how many within the window: the
 	// cooldown's consequence, counted on the lines the objects are under.
@@ -1135,11 +1145,17 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 		// stopped loss is the record.
 		var ongoingNewest, retainedNewest time.Time
 		whileDemoted := map[string]struct{}{}
-		lossRecords(view, now, func(queryGroup string, check, _ Check, _ string, skip SkippedSpan, loss Loss) {
+		lossRecords(view, now, func(queryGroup string, check, _ Check, _ string, skip SkippedSpan, loss Loss, graceUnknown bool) {
 			if check == CheckBookkeepingAbandoned {
 				// Not a loss of detection in progress or on record: the
 				// bookkeeping line counts these itself.
 				return
+			}
+			if graceUnknown && now.Sub(skip.At) <= RecentSkipWindow {
+				// Judged without an anchor: counted, so a publisher that
+				// sends none cannot make every recent skip read ONGOING in
+				// silence.
+				todo.RestartGraceUnknown++
 			}
 			switch loss {
 			case LossOngoing:
@@ -1151,6 +1167,11 @@ func SummarizeTodo(reports []CheckReport, columns [][]Anomaly, view *View, now t
 			case LossAfterRestart:
 				ours[queryGroup] = struct{}{}
 				todo.AfterRestart++
+			case LossAfterCooldown:
+				// The cooldown's, like WHILE_DEMOTED, with no line left to
+				// fold onto: on the record line, named apart, not this
+				// deployment's work.
+				todo.AfterCooldown++
 			case LossWhileDemoted:
 				whileDemoted[queryGroup] = struct{}{}
 				if now.Sub(skip.At) <= RecentSkipWindow {
@@ -1346,7 +1367,7 @@ func underKey(check Check, queryGroup string) string {
 func skippedRows(view *View, listed map[string]struct{}, now time.Time) ([]Anomaly, map[Check]*Consequence) {
 	rows := []Anomaly{}
 	consequences := map[Check]*Consequence{}
-	lossRecords(view, now, func(queryGroup string, check, line Check, reason string, skip SkippedSpan, loss Loss) {
+	lossRecords(view, now, func(queryGroup string, check, line Check, reason string, skip SkippedSpan, loss Loss, _ bool) {
 		if loss == LossWhileDemoted {
 			if consequences[line] == nil {
 				consequences[line] = &Consequence{}

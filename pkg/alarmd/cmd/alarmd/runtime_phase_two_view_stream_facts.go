@@ -42,8 +42,15 @@ func viewStreamFacts(stats viewstream.Stats, at time.Time) *fleet.ViewStreamFact
 	}
 	facts.Lagging = make([]fleet.ViewStreamLagging, 0, len(stats.Lagging))
 	for _, lagging := range stats.Lagging {
-		facts.Lagging = append(facts.Lagging, fleet.ViewStreamLagging{WorkerID: lagging.WorkerID, Incarnation: lagging.Incarnation,
-			Failure: lagging.Failure, ObjectsMissing: lagging.ObjectsMissing, Connected: lagging.Connected})
+		entry := fleet.ViewStreamLagging{WorkerID: lagging.WorkerID, Incarnation: lagging.Incarnation,
+			Failure: lagging.Failure, ObjectsProbed: lagging.ObjectsProbed, Connected: lagging.Connected}
+		// The count is a number only when the Worker probed; unprobed is
+		// null on the wire, never a 0 that reads as nothing missing.
+		if lagging.ObjectsProbed {
+			missing := lagging.ObjectsMissing
+			entry.ObjectsMissing = &missing
+		}
+		facts.Lagging = append(facts.Lagging, entry)
 	}
 	facts.Line = fleet.ViewStreamLine(facts)
 	return facts
