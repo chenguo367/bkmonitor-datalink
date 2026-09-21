@@ -18,6 +18,7 @@ import (
 	"os"
 	"runtime"
 	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -159,6 +160,25 @@ type PlatformCacheConfig struct {
 	// platform settings copy says not_configured rather than reading the
 	// wrong instance as "nothing published".
 	DynamicConfig *RedisConnectionConfig `yaml:"dynamic_config,omitempty"`
+	// DynamicGroupKeyPrefix is the fork's own Redis key prefix, under which
+	// its dynamic group module writes "<prefix>dynamic_group:<id>" on the
+	// same instance as the CMDB cache. It is a deployment coordinate
+	// rendered from the fork's setting, spelled exactly as the writer spells
+	// it, separator included; alarmd derives nothing from it and has no
+	// default for it. Absent means the deployment has no such writer and no
+	// group is read (every dynamic group selector resolves unavailable by
+	// name); present and empty is a rendering that went wrong and is
+	// refused rather than read as a prefix.
+	DynamicGroupKeyPrefix *string `yaml:"dynamic_group_key_prefix,omitempty"`
+}
+
+// DynamicGroupKeyPrefix is the fork's key prefix for its dynamic group
+// cache, and whether the deployment renders one.
+func (c Config) DynamicGroupKeyPrefix() (string, bool) {
+	if c.PlatformCache.DynamicGroupKeyPrefix == nil {
+		return "", false
+	}
+	return *c.PlatformCache.DynamicGroupKeyPrefix, true
 }
 
 type Config struct {
@@ -598,6 +618,9 @@ func (c Config) validateGoAccessRuntime() error {
 	}
 	if err := c.CMDBCacheRedis().validate("platform_cache.cmdb"); err != nil {
 		return err
+	}
+	if prefix, rendered := c.DynamicGroupKeyPrefix(); rendered && strings.TrimSpace(prefix) == "" {
+		return errors.New("platform_cache.dynamic_group_key_prefix is rendered but empty; leave it out where no dynamic group cache is written")
 	}
 	if err := validateRuntimePrefixIsolation(c.Redis.StatePrefix, c.PhaseTwo.Control.StrategyCachePrefix); err != nil {
 		return err

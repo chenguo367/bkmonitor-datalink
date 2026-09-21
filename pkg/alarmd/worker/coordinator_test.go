@@ -1866,7 +1866,7 @@ func (ports *recordingPorts) record(stage string) { *ports.trace = append(*ports
 
 func isZeroProgressCommit(request execution.ProgressCommitRequest) bool {
 	return request.Identity == (execution.ProgressIdentity{}) && request.OwnerFence == (execution.OwnerFence{}) &&
-		request.ExpectedNextSlot == 0 && request.Completion == (execution.SlotCompletion{}) && request.Projection.IsZero()
+		request.ExpectedNextSlot == 0 && reflect.DeepEqual(request.Completion, execution.SlotCompletion{}) && request.Projection.IsZero()
 }
 func (ports *recordingPorts) fail(stage string) error {
 	if ports.failStage == stage {
@@ -2118,6 +2118,11 @@ func compiledPlanForTest(t testing.TB) *strategy.CompiledPlan {
 }
 
 func compiledPlanForStrategyTest(t testing.TB, strategyID string) *strategy.CompiledPlan {
+	return compiledPlanWithTargetForTest(t, strategyID, nil)
+}
+
+// compiledPlanWithTargetForTest is the test Plan carrying a target plan.
+func compiledPlanWithTargetForTest(t testing.TB, strategyID string, target *contract.TargetPlanV1) *strategy.CompiledPlan {
 	if t != nil {
 		t.Helper()
 	}
@@ -2137,7 +2142,7 @@ func compiledPlanForStrategyTest(t testing.TB, strategyID string) *strategy.Comp
 		MultiValueAlignment: "SINGLE_VALUE", DataUnit: "percent", MissingValuePolicy: contract.MissingValuePolicyRequired,
 	}
 	plan := contract.EvaluationPlanV2{
-		PlanID: strategyID, StrategyRef: ref, InputProjection: projection,
+		PlanID: strategyID, StrategyRef: ref, InputProjection: projection, TargetPlan: target,
 		StrategyIR: contract.StrategyIRV2{
 			Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2}, StrategyRef: ref,
 			InputProjection: projection,

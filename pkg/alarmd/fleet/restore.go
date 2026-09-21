@@ -58,6 +58,27 @@ type RestoredState struct {
 }
 
 // RestoredRound is the persisted summary of the last committed round.
+// RestoredTargetResolution is one Plan's target plan resolution as the
+// round's summary recorded it: the composed state, the selectors that did
+// not answer whole, the dangling topology nodes and the stale age.
+type RestoredTargetResolution struct {
+	StrategyID      string                    `json:"strategy_id"`
+	State           string                    `json:"state"`
+	Failures        []RestoredSelectorFailure `json:"failures,omitempty"`
+	NodesMissing    []string                  `json:"nodes_missing,omitempty"`
+	NodesForeign    []string                  `json:"nodes_foreign,omitempty"`
+	StaleAgeSeconds int64                     `json:"stale_age_seconds,omitempty"`
+}
+
+// RestoredSelectorFailure names one selector that did not answer whole.
+type RestoredSelectorFailure struct {
+	Kind    string `json:"kind"`
+	ID      string `json:"id"`
+	Reason  string `json:"reason"`
+	Dropped int    `json:"dropped,omitempty"`
+	Kept    int    `json:"kept,omitempty"`
+}
+
 type RestoredRound struct {
 	// Slot is the evaluation time the round completed, not the one it moved
 	// to; CompletedAt is the commit's clock -- how long ago anything last
@@ -66,6 +87,11 @@ type RestoredRound struct {
 	CompletedAt time.Time `json:"completed_at"`
 	Kind        string    `json:"kind"`
 	ReasonCode  string    `json:"reason_code,omitempty"`
+	// TargetResolutions is what each target-plan Plan's target resolved to
+	// in that round (decision-017), for the object page's checks:
+	// TARGET_SELECTOR_UNAVAILABLE, TARGET_MEMBERS_DROPPED, TARGET_NODE_MISSING
+	// and TARGET_EMPTY are read off it. Empty for rounds without such a Plan.
+	TargetResolutions []RestoredTargetResolution `json:"target_resolutions,omitempty"`
 	// Revisions the round ran under. They seed the tracker's "last completed
 	// round" triple, so the first round this process completes under other
 	// revisions reports the configuration as changed since, the same way a

@@ -43,7 +43,7 @@ func objectCatalogTwoGroupsWithTargetPlan(t *testing.T) controlplane.Catalog {
 	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{
 		{SourceID: "1001", Document: documents[0], Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}},
 		{SourceID: "1002", Document: documentB, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "3", SpaceScope: "bkcc__3"}},
-	}, Planner: planner})
+	}, Planner: planner, TargetSources: controlplane.TargetSources{DynamicGroups: true}})
 	if err != nil {
 		t.Fatal(err)
 	}

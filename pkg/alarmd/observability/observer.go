@@ -123,7 +123,11 @@ const (
 	StageStatePreflight         = "state_preflight"
 	StageGapLoaded              = "gap_loaded"
 	StageNoDataDecided          = "no_data_decided"
-	StageSourceWithheld         = "source_withheld"
+	// StageTargetResolved names what one Plan's target plan resolved to in
+	// one Slot: the state the admission filter and the absence judgement
+	// both read, and each selector's answer by name (decision-017).
+	StageTargetResolved = "target_resolved"
+	StageSourceWithheld = "source_withheld"
 	// StageNoDataSuspended names a strategy that is being evaluated and whose
 	// absence detection is not. It is deliberately not source_withheld: that
 	// stage means the strategy is not running, and a reader who has learned
@@ -394,6 +398,32 @@ type Counts struct {
 	Bytes      int64
 	Keys       int64
 	StateBytes int64
+}
+
+// TargetResolutionFacts is one Plan's target plan resolved for one Slot:
+// the composed state, the age of a snapshot served past a failed refresh,
+// and every selector's answer by name. It is the one place the reader
+// learns why a target plan's Plan admitted what it admitted and whether its
+// absence was judged.
+type TargetResolutionFacts struct {
+	StrategyID string
+	State      string
+	// StaleAgeSeconds is non-zero when a selector answered from a snapshot
+	// kept past a failed refresh: resolved_from_stale_snapshot.
+	StaleAgeSeconds int64
+	Selectors       []TargetSelectorFacts
+}
+
+// TargetSelectorFacts is one selector's answer.
+type TargetSelectorFacts struct {
+	Kind, ID, State, Reason string
+	Kept, Dropped           int
+	// NodeMissing marks a topology reference to a node the topology cache
+	// does not list: TARGET_NODE_MISSING on the object page. NodeForeign
+	// marks one whose node holds hosts under another business only:
+	// TARGET_NODE_FOREIGN.
+	NodeMissing bool
+	NodeForeign bool
 }
 
 // NoDataSlotFacts is what happened to one Plan's no-data detection in one Slot.
@@ -1905,6 +1935,7 @@ type Observation struct {
 	SourceKind            SourceKind
 	QueryPermit           *QueryPermitFacts
 	NoDataSlot            *NoDataSlotFacts
+	TargetResolution      *TargetResolutionFacts
 	NoDataStall           *NoDataStallFacts
 	GapProgress           *GapProgressFacts
 	NoDataMemoryRefusal   *NoDataMemoryRefusalFacts
@@ -2963,6 +2994,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentState, StageStatePreflight}, {ComponentState, StageGapLoaded},
 	{ComponentState, StageGapGuardProgress},
 	{ComponentEvaluation, StageNoDataDecided},
+	{ComponentAccess, StageTargetResolved},
 	{ComponentProgress, StageExecutionEvidenceWritten},
 	{ComponentState, StageNoDataMemoryRead},
 	{ComponentState, StageNoDataMemoryRenewed},

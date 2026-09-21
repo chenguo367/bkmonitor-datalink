@@ -201,3 +201,31 @@ func hostDisableMonitorStateCount(filters []admission.Filter) int {
 	}
 	return 0
 }
+
+// buildTargetResolver assembles what resolves a target plan's dynamic
+// references (decision-017): the dynamic group store, when the deployment
+// renders the fork's key prefix, and the host index for topology nodes.
+// Without the prefix there is no group store, and every dynamic group
+// selector resolves unavailable by name rather than empty; topology
+// references still resolve against the host index.
+//
+// The group store reads the fork's cache on the connection the CMDB cache
+// is read on - the deployment publishes both there - and refreshes the
+// referenced groups on the host index's cadence with its staleness bound.
+func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
+	prefix, rendered := cfg.DynamicGroupKeyPrefix()
+	if !rendered {
+		return cmdbcache.NewTargetResolver(nil, hosts, time.Now), nil, nil
+	}
+	reader, err := cmdbcache.NewGroupReader(client, prefix)
+	if err != nil {
+		return nil, nil, err
+	}
+	groups, err := cmdbcache.NewGroupStore(reader, cmdbcache.GroupStoreOptions{
+		RefreshInterval: cmdbIndexRefreshInterval, MaxAge: cmdbIndexStalenessBound,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return cmdbcache.NewTargetResolver(groups, hosts, time.Now), groups, nil
+}

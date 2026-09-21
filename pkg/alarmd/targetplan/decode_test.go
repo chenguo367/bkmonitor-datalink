@@ -150,7 +150,7 @@ func TestEveryDeviationFromTheProtocolIsRefusedAtItsField(t *testing.T) {
 		"extra field":              {document: with(set("generation", 3)), reason: targetplan.ReasonUnsupported, path: "generation"},
 		"static targets missing":   {document: with(del("static_targets")), reason: targetplan.ReasonUnsupported, path: "static_targets"},
 		"static targets not array": {document: with(set("static_targets", map[string]any{})), reason: targetplan.ReasonUnsupported, path: "static_targets"},
-		"host target extra key":    {document: with(set("static_targets", []any{map[string]any{"bk_host_id": 101, "ip": "10.0.0.1"}})), reason: targetplan.ReasonUnsupported, path: "static_targets[0].ip"},
+		"host target extra key":    {document: with(set("static_targets", []any{map[string]any{"bk_host_id": 101, "ip": "192.0.2.1"}})), reason: targetplan.ReasonUnsupported, path: "static_targets[0].ip"},
 		"host target zero":         {document: with(set("static_targets", []any{map[string]any{"bk_host_id": 0}})), reason: targetplan.ReasonUnsupported, path: "static_targets[0].bk_host_id"},
 		"host target text":         {document: with(set("static_targets", []any{map[string]any{"bk_host_id": "host-a"}})), reason: targetplan.ReasonUnsupported, path: "static_targets[0].bk_host_id"},
 		"host target of model shape": {document: with(set("static_targets", []any{map[string]any{"model_id": "cw-Host", "model_inst_id": "101"}})),

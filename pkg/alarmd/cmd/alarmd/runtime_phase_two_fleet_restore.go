@@ -70,6 +70,15 @@ func restoredRoundOf(summary *execution.LastCompletionSummary) *fleet.RestoredRo
 	if completedAt, err := time.Parse(time.RFC3339Nano, summary.CompletedAt); err == nil {
 		round.CompletedAt = completedAt
 	}
+	for _, resolution := range summary.TargetResolutions {
+		restored := fleet.RestoredTargetResolution{StrategyID: resolution.StrategyID, State: resolution.State,
+			NodesMissing: resolution.NodesMissing, NodesForeign: resolution.NodesForeign, StaleAgeSeconds: resolution.StaleAgeSeconds}
+		for _, failure := range resolution.Failures {
+			restored.Failures = append(restored.Failures, fleet.RestoredSelectorFailure{
+				Kind: failure.Kind, ID: failure.ID, Reason: failure.Reason, Dropped: failure.Dropped, Kept: failure.Kept})
+		}
+		round.TargetResolutions = append(round.TargetResolutions, restored)
+	}
 	return round
 }
 

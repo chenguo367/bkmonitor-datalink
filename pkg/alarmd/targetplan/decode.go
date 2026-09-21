@@ -300,7 +300,7 @@ func decodeStaticTarget(
 		if err != nil {
 			return "", err
 		}
-		return ModelInstanceKey(plan.Identity, model, instance), nil
+		return plan.Identity.MemberKey(model, instance), nil
 	default:
 		if err := onlyKeys(fields, path, "model_id", "model_inst_id", "match"); err != nil {
 			return "", err
@@ -325,18 +325,6 @@ func decodeStaticTarget(
 		}
 		return contract.TargetPlanMemberKey(parts...), nil
 	}
-}
-
-// ModelInstanceKey is the member key of an object-model instance under the
-// plan's identity: the instance alone behind a model gate, or "model|inst"
-// when the record carries the model code itself. A group member and a
-// topology host go through this same function, so the three sources of a
-// member and the record cannot spell the key differently.
-func ModelInstanceKey(identity contract.TargetPlanIdentityV1, model, instance string) string {
-	if identity.ModelDimension != "" {
-		return contract.TargetPlanMemberKey(instance)
-	}
-	return contract.TargetPlanMemberKey(model, instance)
 }
 
 func memberModelInstance(fields map[string]json.RawMessage, path, planModel string) (string, string, *Error) {

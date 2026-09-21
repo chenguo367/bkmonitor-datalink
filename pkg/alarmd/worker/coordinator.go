@@ -25,6 +25,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
 type Ports struct {
@@ -60,6 +61,23 @@ type Ports struct {
 	// window reads as never evaluated. A deployment without it loses a reading,
 	// not a detection.
 	ExecutionEvidence execution.SlotExecutionEvidenceStore
+	// Targets resolves a Plan's target plan for one Slot (decision-017). It
+	// is optional the way ExecutionEvidence is, and for a safer reason: a
+	// worker without it does not run target-plan Plans on no target, it
+	// admits none of their records (target_plan_unresolved) and judges none
+	// of their absence (SKIPPED_TARGET_SELECTOR_UNAVAILABLE), both by name.
+	// Plans without a target plan never touch it.
+	Targets TargetResolver
+}
+
+// TargetResolver resolves one target plan for one Slot. cmdbcache's
+// resolver implements it; it reads nothing from Redis on the Slot path but
+// a group's first reference.
+type TargetResolver interface {
+	// Resolve answers one plan for one Slot; interval is the Plan's
+	// evaluation period, which bounds how long its groups are kept without
+	// being asked for.
+	Resolve(ctx context.Context, plan *contract.TargetPlanV1, interval time.Duration) *targetplan.Resolution
 }
 
 type SlotExecutionCoordinator struct {
@@ -274,7 +292,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		var executeErr error
 		result, executeErr = coordinator.finalizePreparedWithGaps(
 			sequenceCtx, request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
-			stream.noDataMutations, stream.queryEvidence.availability(), stream.seriesCensus,
+			stream.noDataMutations, stream.queryEvidence.availability(), stream.seriesCensus, stream.targetSummaries(),
 		)
 		return executeErr
 	})
@@ -838,6 +856,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePrepared(
 		// The census a caller with no stream can state: the loaded views are
 		// the series it read, and it meant to evaluate exactly those.
 		seriesCensus{Due: len(loadedState.Items), Read: len(loadedState.Items)},
+		nil,
 	)
 }
 
@@ -852,6 +871,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	noDataMemory []execution.PlanNoDataMutation,
 	queryAvailability execution.QueryAvailability,
 	census seriesCensus,
+	targets []execution.TargetResolutionSummary,
 ) (execution.SlotExecutionResult, error) {
 	var err error
 	activationRequest := duePlanActivationRequest(request.Contract, header.DuePlans)
@@ -1136,7 +1156,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	if err != nil {
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: derive PRIMARY input fact: %w", err)
 	}
-	completion := execution.SlotCompletion{Contract: request.Contract, Primary: &primary}
+	completion := execution.SlotCompletion{Contract: request.Contract, Primary: &primary, TargetResolutions: targets}
 	// Observation only. The cause is deliberately not put on
 	// completion.ReasonCode, which is persisted and decides how consecutive gaps
 	// fold into a Progress gap summary; changing that is a separate decision

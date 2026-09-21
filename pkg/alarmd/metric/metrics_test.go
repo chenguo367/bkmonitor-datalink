@@ -29,6 +29,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
 func TestRecorderUsesPrivateRegistries(t *testing.T) {
@@ -423,6 +424,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_withheld_objects"] = "variableLabels: {disposition,reason}"
 	expected["bkmonitor_alarmd_catalog_no_data_plans"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_target_plan_resolution_total"] = "variableLabels: {state}"
+	expected["bkmonitor_alarmd_target_selector_resolutions_total"] = "variableLabels: {kind,state,reason}"
 	expected["bkmonitor_alarmd_worker_no_data_persistent_skips_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_refusals_total"] = "variableLabels: {reason,record}"
 	expected["bkmonitor_alarmd_worker_no_data_memory_writes_total"] = "variableLabels: {outcome}"
@@ -925,6 +928,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// created at startup so a zero on the one that never resolves on its own
 	// can be told from a label nothing ever wrote.
 	bounds[fqName("worker_no_data_slot_plans_total")] = len(nodata.SlotOutcomes)
+	bounds[fqName("target_plan_resolution_total")] = len(targetplan.ResolutionStates)
+	// Three kinds by four states by the closed reasons; cells are created on
+	// observation because most triples cannot happen.
+	bounds[fqName("target_selector_resolutions_total")] = 3 * len(targetplan.SelectorStates) * len(targetplan.SelectorReasons)
 	// Every outcome but EVALUATED: a Plan that evaluated has not stalled, so
 	// that pair cannot happen and a label for it would be a zero that means
 	// nothing rather than one that means "nothing has stopped".

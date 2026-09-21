@@ -81,7 +81,14 @@ type BuildRequest struct {
 	// Plan this build produces. Empty means the revision decides, which is what
 	// the process did before the choice existed.
 	OutputProtocol string
-	LastGood       *PublishedSnapshot
+	// TargetSources says which sources the deployment has for a target
+	// plan's dynamic references. A Plan that references a source the
+	// deployment does not have is withheld by name at compile time
+	// (DYNAMIC_GROUP_SOURCE_UNCONFIGURED): a deployment fact is not a
+	// runtime fact, and reporting it every Slot as an unavailable selector
+	// would dress a configuration gap up as a cache outage.
+	TargetSources TargetSources
+	LastGood      *PublishedSnapshot
 	// PreviousDispositions is the published source audit of LastGood. It is the
 	// only memory of the removal grace cycle: a strategy absent from the
 	// observed set is retained once with PENDING_REMOVAL and dropped when the
@@ -108,6 +115,20 @@ type FrozenPlan struct {
 	ScheduleRevision     execution.PlanScheduleRevision
 	RequirementTemplates []execution.DataRequirementTemplate                    `json:"RequirementTemplates,omitempty"`
 	QueryPlans           map[execution.LogicalQueryRef]execution.QueryPlanFacts `json:"QueryPlans,omitempty"`
+}
+
+// TargetSources is what the deployment renders for a target plan's dynamic
+// references: a dynamic group cache prefix, or not. Topology references
+// resolve against the CMDB host cache every deployment has.
+type TargetSources struct {
+	DynamicGroups bool
+}
+
+func (sources TargetSources) key() string {
+	if sources.DynamicGroups {
+		return "dynamic_groups"
+	}
+	return ""
 }
 
 // planCompileFacts is what compiling one item produced besides the Plan: the
@@ -179,7 +200,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
-	request.Cache.beginRound(request.OutputProtocol, compilerIdentity)
+	request.Cache.beginRound(request.OutputProtocol, compilerIdentity, request.TargetSources.key())
 	observationID, err := deriveObservationID(request.Strategies)
 	if err != nil {
 		return Catalog{}, err
@@ -278,7 +299,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			catalog.Dispositions = append(catalog.Dispositions, disposition)
 			continue
 		}
-		candidate, err := request.Cache.build(ctx, planner, source, request.OutputProtocol)
+		candidate, err := request.Cache.build(ctx, planner, source, request.OutputProtocol, request.TargetSources)
 		if err != nil {
 			if len(candidate.dispositions) > 0 {
 				catalog.Dispositions = append(catalog.Dispositions, candidate.dispositions...)
@@ -409,6 +430,7 @@ type CandidateCache struct {
 	mu       sync.Mutex
 	protocol string
 	compiler string
+	sources  string
 	entries  map[string]cachedCandidate
 	seen     map[string]struct{}
 	compiled int
@@ -433,15 +455,15 @@ func NewCandidateCache() *CandidateCache {
 // and the full round is exactly what that change asks for: every strategy
 // recompiled under the new setting, so every plan's revision moves and the
 // cutover carries the new Catalog out.
-func (cache *CandidateCache) beginRound(protocol, compiler string) {
+func (cache *CandidateCache) beginRound(protocol, compiler, sources string) {
 	if cache == nil {
 		return
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if cache.protocol != protocol || cache.compiler != compiler {
+	if cache.protocol != protocol || cache.compiler != compiler || cache.sources != sources {
 		cache.entries = make(map[string]cachedCandidate)
-		cache.protocol, cache.compiler = protocol, compiler
+		cache.protocol, cache.compiler, cache.sources = protocol, compiler, sources
 	}
 	cache.seen = make(map[string]struct{}, len(cache.entries))
 	cache.compiled, cache.reused = 0, 0
@@ -452,13 +474,13 @@ func (cache *CandidateCache) beginRound(protocol, compiler string) {
 // candidate: a document the compiler rejects is rejected the same way every
 // round, and recompiling it each time only to reject it again is the cost
 // this cache exists to remove.
-func (cache *CandidateCache) build(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, protocol string) (sourceCandidate, error) {
+func (cache *CandidateCache) build(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, protocol string, sources TargetSources) (sourceCandidate, error) {
 	if cache == nil {
-		return buildCandidate(ctx, planner, source, protocol)
+		return buildCandidate(ctx, planner, source, protocol, sources)
 	}
 	digest, err := strategyDigest(source)
 	if err != nil {
-		return buildCandidate(ctx, planner, source, protocol)
+		return buildCandidate(ctx, planner, source, protocol, sources)
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -469,7 +491,7 @@ func (cache *CandidateCache) build(ctx context.Context, planner PrimaryQueryComp
 		cache.reused++
 		return entry.candidate, entry.err
 	}
-	candidate, err := buildCandidate(ctx, planner, source, protocol)
+	candidate, err := buildCandidate(ctx, planner, source, protocol, sources)
 	cache.entries[digest] = cachedCandidate{candidate: candidate, err: err}
 	cache.compiled++
 	return candidate, err
@@ -613,11 +635,21 @@ type sourceCandidate struct {
 	dispositions []ObjectDisposition
 }
 
-func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, outputProtocol string) (sourceCandidate, error) {
+func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, outputProtocol string, sources TargetSources) (sourceCandidate, error) {
 	candidate := sourceCandidate{}
 	targetPlanDocument := compileTargetPlanDocument(source)
 	if targetPlanDocument.refusal != nil {
 		return sourceCandidate{dispositions: []ObjectDisposition{*targetPlanDocument.refusal}}, errors.New("alarmd controlplane: target_plan refused: " + targetPlanDocument.refusal.Reason)
+	}
+	if targetPlanDocument.plan != nil && len(targetPlanDocument.plan.DynamicGroups) > 0 && !sources.DynamicGroups {
+		// The plan reads a dynamic group cache this deployment does not
+		// render a prefix for. Withheld here, once, as a deployment fact;
+		// the Plans that reference no group are untouched.
+		refusal := ObjectDisposition{
+			SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
+			Reason: "DYNAMIC_GROUP_SOURCE_UNCONFIGURED", FieldPath: fmt.Sprintf("items[%d].target_plan.dynamic_groups", targetPlanDocument.position),
+		}
+		return sourceCandidate{dispositions: []ObjectDisposition{refusal}}, errors.New("alarmd controlplane: target_plan references dynamic groups and the deployment renders no dynamic group cache prefix")
 	}
 	if err := source.Identity.validate(); err != nil {
 		return sourceCandidate{}, err
