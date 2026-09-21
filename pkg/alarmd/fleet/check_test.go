@@ -54,10 +54,13 @@ import (
 // data to have been seen, so five strategies aggregating below their
 // source's period read HEALTHY for a day; the data side's line and this one
 // have different owners doing different things, so it is not a fold of the
-// first.
+// first. Twenty-seven since the source's active set flapping: the platform's
+// list dropping strategies and listing them again, which one round's
+// dispositions call REMOVED and only an account across rounds can call
+// what it is -- a standing over the leader's account, folded by the hour.
 func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
-	if got := len(Checks()); got != 26 || len(checkAnswers) != 26 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 26: a new check has to "+
+	if got := len(Checks()); got != 27 || len(checkAnswers) != 27 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 27: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -164,6 +167,10 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckConfigRejected: {Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_REJECTED": 1, "STALE_CONFIG": 1},
 			[]WithheldObject{{StrategyID: "9", Scope: "LEVEL", LevelID: 2, Disposition: "CONFIG_REJECTED", Reason: "LEVEL_INVALID", FieldPath: "items[0].algorithms[0]"},
 				{StrategyID: "10", Scope: "STRATEGY", Disposition: "STALE_CONFIG", Reason: "LEVEL_INVALID"}}), SourceReplica: "pod-a"},
+		// The set flapping: the leader's account across rounds, with one
+		// hour in which a dropped strategy was listed again.
+		CheckSourceSetFlapping: {Source: sourceFactsWithSet(at, &SourceSetFacts{Since: at.Add(-3 * time.Hour),
+			Hours: []SourceSetHour{{Hour: now.UTC().Truncate(time.Hour), Dropped: 1, Reactivated: 1, LongestAbsentSeconds: 390, Samples: []string{"11"}}}}), SourceReplica: "pod-a"},
 	}
 	for want, view := range standings {
 		reports := ReportChecks(nil, nil, &view, now)
@@ -951,4 +958,12 @@ func TestTheReplicaStartReachesTheViewFromItsSnapshot(t *testing.T) {
 	if len(reports) != 1 || len(reports[0].Groups) != 1 || reports[0].Groups[0].Key != string(LossAfterRestart) {
 		t.Fatalf("reports = %+v, want the record folded as the restart's catch-up", reports)
 	}
+}
+
+// sourceFactsWithSet is a round's source facts with nothing withheld and the
+// given account of the set.
+func sourceFactsWithSet(at time.Time, set *SourceSetFacts) *SourceFacts {
+	facts := NewSourceFacts(at, map[string]int{"ACCEPTED": 3}, nil)
+	facts.Set = set
+	return facts
 }

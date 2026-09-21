@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"fmt"
 	"sort"
 	"time"
 )
@@ -106,6 +107,14 @@ const (
 	CheckSourceIncomplete      Check = "SOURCE_INCOMPLETE"
 	CheckCapabilityUnsupported Check = "CAPABILITY_UNSUPPORTED"
 	CheckConfigRejected        Check = "CONFIG_REJECTED"
+	// The source's active set dropping strategies and listing them again:
+	// the platform's list, read across rounds. One round's dispositions say
+	// REMOVED, which reads as a strategy deleted; the account across rounds
+	// said the list lost 99 entries for six minutes at the top of every hour,
+	// 22 strategies removed and re-placed each time with four Slots of each
+	// lost. Folded by the hour the strategies came back, over the last day,
+	// so "every hour" is one line and not a word on one round.
+	CheckSourceSetFlapping Check = "SOURCE_SET_FLAPPING"
 )
 
 // sourceChecks maps a withheld disposition to the standing that carries it.
@@ -126,9 +135,11 @@ type GroupBy string
 const (
 	GroupByReplica    GroupBy = "replica"
 	GroupByReasonCode GroupBy = "reason_code"
-	GroupByDetail     GroupBy = "detail"
-	GroupByStrategy   GroupBy = "strategy"
-	GroupByGapKind    GroupBy = "gap_kind"
+	// GroupByHour folds by the clock hour an event fell in, UTC.
+	GroupByHour     GroupBy = "hour"
+	GroupByDetail   GroupBy = "detail"
+	GroupByStrategy GroupBy = "strategy"
+	GroupByGapKind  GroupBy = "gap_kind"
 	// GroupByCause folds on what the window counts say happened: the reason
 	// the detection could not use the record, or that the series are a mix of
 	// new and old. It is the fold for the one check whose objects share a
@@ -149,7 +160,7 @@ const (
 // GroupBys is the closed list of folds, for the page's completeness test:
 // a fold the page has no words for renders as its key on the line a reader
 // opens a check with.
-var GroupBys = []GroupBy{GroupByReplica, GroupByReasonCode, GroupByDetail, GroupByStrategy, GroupByGapKind, GroupByCause, GroupByDegradation, GroupByLoss, GroupByBlocked}
+var GroupBys = []GroupBy{GroupByReplica, GroupByReasonCode, GroupByDetail, GroupByStrategy, GroupByGapKind, GroupByCause, GroupByDegradation, GroupByLoss, GroupByBlocked, GroupByHour}
 
 // checkAnswers is the closed table: who acts on each check and what its
 // objects fold on. Twenty rows, and a test holds the count there. A check
@@ -161,6 +172,7 @@ var checkAnswers = map[Check]struct {
 	GroupBy GroupBy
 }{
 	CheckSourceIncomplete:      {OwnerPlatform, GroupByReasonCode},
+	CheckSourceSetFlapping:     {OwnerPlatform, GroupByHour},
 	CheckCapabilityUnsupported: {OwnerAlarmd, GroupByReasonCode},
 	CheckConfigRejected:        {OwnerStrategy, GroupByReasonCode},
 	CheckCutoverFailing:        {OwnerAlarmd, GroupByReasonCode},
@@ -208,6 +220,7 @@ var checkOrder = []Check{
 	// never reaches anything below, and a reader who starts at the bottom
 	// would find nothing there to explain an empty deployment.
 	CheckSourceIncomplete,
+	CheckSourceSetFlapping,
 	CheckCapabilityUnsupported,
 	CheckCutoverFailing,
 	CheckReplicaDegraded,
@@ -250,7 +263,8 @@ func (check Check) Standing() bool {
 // samples; nothing under it can be listed as an object, because none of
 // these ever became one.
 func (check Check) SourceStanding() bool {
-	return check == CheckSourceIncomplete || check == CheckCapabilityUnsupported || check == CheckConfigRejected
+	return check == CheckSourceIncomplete || check == CheckCapabilityUnsupported || check == CheckConfigRejected ||
+		check == CheckSourceSetFlapping
 }
 
 // Checks lists every check the table answers, in the order the page lists
@@ -1069,6 +1083,29 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 	if view != nil && view.BookkeepingAbandoned != nil && view.BookkeepingAbandoned.Slots > 0 {
 		ensure(CheckBookkeepingAbandoned)
 	}
+	// The set flapping: the hours of the last day in which the source listed
+	// strategies again after dropping them, one fold per hour with the
+	// strategies that came back. A standing over the leader's account, not
+	// over object rows; the strategies under grace right now are on the
+	// source facts for the first screen, not a fold here -- a fold is a
+	// thing that happened, and grace is a thing that is happening.
+	if view != nil && view.Source != nil && view.Source.Set != nil {
+		for _, hour := range view.Source.Set.Hours {
+			if hour.Reactivated == 0 || now.Sub(hour.Hour) > 24*time.Hour {
+				continue
+			}
+			entry := ensure(CheckSourceSetFlapping)
+			entry.replica = view.SourceReplica
+			entry.sourceStrategies += hour.Reactivated
+			key := hour.Hour.UTC().Format("2006-01-02T15Z")
+			group := &CheckGroup{Key: key, Strategies: hour.Reactivated, Replicas: []string{view.SourceReplica},
+				Text: sourceSetHourText(hour)}
+			for _, strategyID := range hour.Samples {
+				group.Samples = append(group.Samples, WithheldSample{StrategyID: strategyID, Scope: "STRATEGY"})
+			}
+			entry.groups[key] = group
+		}
+	}
 	reports := make([]CheckReport, 0, len(tallies))
 	for check, entry := range tallies {
 		report := CheckReport{Code: check, Owner: checkAnswers[check].Owner, GroupBy: checkAnswers[check].GroupBy,
@@ -1118,6 +1155,11 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		})
 		if check == CheckCapabilityUnsupported {
 			report.Line = capabilityLine(report.Strategies, report.Groups)
+		}
+		if check == CheckSourceSetFlapping && view != nil && view.Source != nil && view.Source.Set != nil {
+			// Newest hour first: the question is "is it still happening".
+			sort.Slice(report.Groups, func(i, j int) bool { return report.Groups[i].Key > report.Groups[j].Key })
+			report.Line = sourceSetLine(report.Strategies, len(report.Groups), view.Source.Set)
 		}
 		reports = append(reports, report)
 	}
@@ -1501,4 +1543,31 @@ func skippedRows(view *View, listed map[string]struct{}, now time.Time) ([]Anoma
 	})
 	sort.Slice(rows, func(i, j int) bool { return rows[i].QueryGroup < rows[j].QueryGroup })
 	return rows, consequences
+}
+
+// sourceSetHourText is one hour's fold as a sentence fragment: how many
+// came back and how long the longest was gone.
+func sourceSetHourText(hour SourceSetHour) string {
+	text := fmt.Sprintf("%d 条策略回到活动集", hour.Reactivated)
+	if hour.LongestAbsentSeconds > 0 {
+		text += fmt.Sprintf("，最长缺席 %.0f 分钟", hour.LongestAbsentSeconds/60)
+	}
+	if hour.Removed > 0 {
+		text += fmt.Sprintf("，其中 %d 条已被移除后重新放置", hour.Removed)
+	}
+	return text
+}
+
+// sourceSetLine is the line's sentence: how often in the last day the
+// source's list dropped strategies and listed them again, and what is under
+// grace right now.
+func sourceSetLine(strategies, hours int, set *SourceSetFacts) string {
+	line := fmt.Sprintf("上游活动集近 24 小时有 %d 个小时掉过策略又列回来，共 %d 条次", hours, strategies)
+	if set.PendingRemoval > 0 {
+		line += fmt.Sprintf("；此刻 %d 条在宽限中", set.PendingRemoval)
+	}
+	if set.ReactivatedThisHour > 0 {
+		line += fmt.Sprintf("；本小时已回来 %d 条", set.ReactivatedThisHour)
+	}
+	return line + fmt.Sprintf("（账自 %s 起）", set.Since.UTC().Format("01-02 15:04Z"))
 }
