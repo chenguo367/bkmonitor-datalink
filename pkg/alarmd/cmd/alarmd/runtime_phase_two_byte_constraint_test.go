@@ -158,11 +158,17 @@ func TestProductionLeaderMovesForTheByteConstraintBeforeItCorrectsTheCounts(t *t
 			t.Fatalf("decision %+v, want REBALANCE until every reader accepts BYTE_CONSTRAINT", decision)
 		}
 	}
-	// The ledger kept only what the round's owners agree with: the moved
-	// Query Groups have no reading until their new holders report them.
+	// The ledger follows the round's owners: the moved Query Groups' readings
+	// are carried over to their new holders as provisional until those
+	// holders report them, so no destination looks empty next round.
 	entries := costs.Entries()
-	if len(entries) != 1 || entries[0].WorkerID != "worker-1" || after[entries[0].QueryGroup] != "worker-1" {
-		t.Fatalf("ledger after round 2 = %+v, want only the Query Group still on worker-1", entries)
+	if len(entries) != 3 {
+		t.Fatalf("ledger after round 2 = %+v, want every Query Group under its holder", entries)
+	}
+	for _, entry := range entries {
+		if after[entry.QueryGroup] != entry.WorkerID || entry.Provisional != (entry.WorkerID != "worker-1") {
+			t.Fatalf("ledger entry %+v: want it under the round's owner, provisional where it moved", entry)
+		}
 	}
 	// The fleet snapshot carries the same round.
 	if published := production.LastRebalance(); published == nil || published.Bytes == nil || published.Bytes.PublishedMoves != 1 ||
@@ -170,16 +176,25 @@ func TestProductionLeaderMovesForTheByteConstraintBeforeItCorrectsTheCounts(t *t
 		t.Fatalf("fleet rebalance facts = %+v, want the byte round with worker-1's sum", published)
 	}
 
-	// Round three: the new holders have not reported, so the moved Query
-	// Groups are unread and count nothing; nothing is over the share and
-	// nothing moves.
+	// Round three: the new holders have not reported, but the carried-over
+	// readings keep every sum whole - nothing unread, nothing unsettled,
+	// nothing over the share, nothing moves.
 	at = at.Add(5 * time.Second)
 	if err := production.PublishAssignments(context.Background(), groups, at); err != nil {
 		t.Fatalf("PublishAssignments(round 3) error = %v", err)
 	}
 	facts = lastPlanned(t)
-	if facts.Bytes.Unread != 2 || len(facts.Bytes.Overloaded) != 0 || facts.Bytes.PlannedMoves != 0 || facts.PlannedMoves != 0 {
-		t.Fatalf("round 3 facts = %+v (bytes %+v), want two unread, nothing overloaded, nothing moved", facts, facts.Bytes)
+	if facts.Bytes.Unread != 0 || len(facts.Bytes.Unsettled) != 0 || len(facts.Bytes.Overloaded) != 0 || facts.Bytes.PlannedMoves != 0 || facts.PlannedMoves != 0 {
+		t.Fatalf("round 3 facts = %+v (bytes %+v), want nothing unread, unsettled, overloaded or moved", facts, facts.Bytes)
+	}
+	if published := production.LastRebalance(); published == nil || published.Bytes == nil || len(published.Bytes.Sums) != 3 {
+		t.Fatalf("fleet byte facts after round 3 = %+v", published)
+	} else {
+		for _, sum := range published.Bytes.Sums {
+			if sum.PeakSumBytes != peak {
+				t.Fatalf("round 3 sums = %+v, want one peak on each worker, the moved ones carried over", published.Bytes.Sums)
+			}
+		}
 	}
 }
 

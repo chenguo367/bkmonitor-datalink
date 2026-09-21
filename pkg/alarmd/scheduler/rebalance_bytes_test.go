@@ -116,6 +116,49 @@ func TestRouterPlanByteMovesJudgesOnlyWhatIsKnownAndSaysWhatIsNot(t *testing.T) 
 	}
 }
 
+// A Worker holding a Query Group with no reading has a sum that is a lower
+// bound: it can be judged overloaded on its known part, but it is not a
+// destination - the room it appears to have may be exactly what it does
+// not. Two overloaded Workers and one that looks empty because nothing on
+// it has reported: nothing moves to it, and the round says which Workers
+// were unsettled. The Worker a move just landed on is the first such case
+// in production, until its heartbeat reports the new Query Group.
+func TestRouterPlanByteMovesDoesNotLandOnAWorkerWithUnreadQueryGroups(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	live := now.Add(time.Minute)
+	workers := []ownership.WorkerRegistration{byteWorker("a", 1000, live), byteWorker("b", 1000, live), byteWorker("c", 1000, live)}
+	owners := map[execution.QueryGroupIdentity]string{"a-1": "a", "a-2": "a", "b-1": "b", "b-2": "b", "c-unread": "c"}
+	readings := ByteReadings{Pool: map[string]uint64{"a": 1000, "b": 1000, "c": 1000},
+		Peak: map[execution.QueryGroupIdentity]uint64{"a-1": 500, "a-2": 400, "b-1": 500, "b-2": 400}}
+	plan := NewRouter(nil).PlanByteMoves(owners, workers, readings, now)
+	if !reflect.DeepEqual(plan.Overloaded, []string{"a", "b"}) || !reflect.DeepEqual(plan.Unsettled, []string{"c"}) || plan.Unread != 1 {
+		t.Fatalf("plan = %+v, want a and b overloaded and c unsettled", plan)
+	}
+	for _, move := range plan.Moves {
+		if move.To == "c" {
+			t.Fatalf("moves = %+v: a Query Group landed on the unsettled worker, whose room is unknown", plan.Moves)
+		}
+	}
+	// Neither a nor b has room for the other's, so both are unplaceable
+	// this round rather than one of them filling c.
+	if len(plan.Moves) != 0 || !reflect.DeepEqual(plan.Unplaceable, []string{"a", "b"}) {
+		t.Fatalf("plan = %+v, want no move and both named unplaceable", plan)
+	}
+	// Once c's Query Group reports, c is a destination like any other.
+	readings.Peak["c-unread"] = 100
+	settled := NewRouter(nil).PlanByteMoves(owners, workers, readings, now)
+	if len(settled.Unsettled) != 0 || len(settled.Moves) != 2 || settled.Moves[0].To != "c" || settled.Moves[1].To != "a" {
+		t.Fatalf("plan once c reported = %+v, want a's 500 on c and b's 400 in the room a has left", settled)
+	}
+	// An overloaded Worker's own unread Query Group does not keep it from
+	// being judged: its known part is already past the share.
+	owners["a-unread"] = "a"
+	judged := NewRouter(nil).PlanByteMoves(owners, workers, readings, now)
+	if !reflect.DeepEqual(judged.Overloaded, []string{"a", "b"}) || !reflect.DeepEqual(judged.Unsettled, []string{"a"}) {
+		t.Fatalf("plan with a's own unread = %+v, want a still judged overloaded and named unsettled", judged)
+	}
+}
+
 // Largest first, first that fits: a Query Group too large for any other
 // Worker does not leave its Worker stuck behind it; the round moves the
 // next largest that fits somewhere. A Worker none of whose Query Groups

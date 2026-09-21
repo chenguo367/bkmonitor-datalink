@@ -44,21 +44,30 @@ func TestCostLedgerReadsTheHoldersReportAndClearsByTheRoster(t *testing.T) {
 		t.Fatalf("peaks after a partial heartbeat = %v, want qg-1 kept and qg-2 replaced", readings.Peak)
 	}
 
-	// qg-1 moves to b. Retain drops a's entry for it and b's stray one is
-	// the roster's holder now - but a report is a report of what that
-	// Worker ran, and b never ran qg-1 when it said 999: the test pins that
-	// Retain keeps b's entry, since the ledger cannot know, and the next
-	// heartbeat from b - first report unconditional - replaces it.
+	// qg-1 moves to b. Retain drops a's entry for it; b already holds one of
+	// its own (the stray 999 it reported), which stands. qg-2 moves to c,
+	// which has never reported it: a's reading is carried over to c as
+	// provisional, so c's sum includes it from this round rather than
+	// reading empty until c's heartbeat replaces it.
 	owners["qg-1"] = "b"
+	owners["qg-2"] = "c"
 	ledger.Retain(owners)
 	entries := ledger.Entries()
 	want := []CostEntry{
-		{QueryGroupCostReport: QueryGroupCostReport{QueryGroup: "qg-2", RetainedBytesPeak: 250}, WorkerID: "a", ReportedAt: now},
 		{QueryGroupCostReport: QueryGroupCostReport{QueryGroup: "qg-1", RetainedBytesPeak: 999}, WorkerID: "b", ReportedAt: now},
 		{QueryGroupCostReport: QueryGroupCostReport{QueryGroup: "qg-3", RetainedBytesPeak: 400}, WorkerID: "b", ReportedAt: now},
+		{QueryGroupCostReport: QueryGroupCostReport{QueryGroup: "qg-2", RetainedBytesPeak: 250}, WorkerID: "c", ReportedAt: now, Provisional: true},
 	}
 	if !reflect.DeepEqual(entries, want) {
 		t.Fatalf("entries after Retain = %+v, want %+v", entries, want)
+	}
+	if readings := ledger.Readings(owners, workers); readings.Peak["qg-2"] != 250 {
+		t.Fatalf("peaks after the move = %v, want qg-2's carried-over 250 read on c", readings.Peak)
+	}
+	// c reports qg-2 itself: the provisional entry is replaced by c's own.
+	ledger.Record("c", []QueryGroupCostReport{{QueryGroup: "qg-2", RetainedBytesPeak: 260}})
+	if entries := ledger.Entries(); entries[2].Provisional || entries[2].RetainedBytesPeak != 260 {
+		t.Fatalf("entries after c's own report = %+v, want the provisional one replaced", entries)
 	}
 	// qg-2 retires: gone from the roster, gone from the ledger.
 	delete(owners, "qg-2")
@@ -67,7 +76,7 @@ func TestCostLedgerReadsTheHoldersReportAndClearsByTheRoster(t *testing.T) {
 		t.Fatalf("peaks after the retirement = %v", readings.Peak)
 	}
 	if entries := ledger.Entries(); len(entries) != 2 || entries[0].WorkerID != "b" {
-		t.Fatalf("entries after the retirement = %+v, want a's emptied out", entries)
+		t.Fatalf("entries after the retirement = %+v, want a's and c's emptied out", entries)
 	}
 	// A nil ledger reads pools and no peaks, and refuses nothing.
 	var none *CostLedger
