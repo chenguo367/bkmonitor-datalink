@@ -789,7 +789,8 @@ func (coordinator *SlotExecutionCoordinator) applyActivatedPlanGaps(
 				return fmt.Errorf("activated Plan gap redo did not converge: %s", item.Status)
 			}
 			if item.Status != execution.GapGuardApplied && item.Status != execution.GapGuardAlreadyApplied {
-				return fmt.Errorf("activated Plan gap guard did not complete: %s", item.Status)
+				return &GapApplyRefusal{Stage: "activated Plan gap guard did not complete", Status: item.Status,
+					Site: GapSiteBeforeEvents, Plan: item.Identity.Plan, StateGeneration: item.Identity.StateGeneration}
 			}
 			return nil
 		}, extensions...)
@@ -838,6 +839,12 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 					actual[index] = item.Identity
 					reason = item.ReasonCode
 					if err = accept(item); err != nil {
+						// The revision this Slot expected is on the mutation,
+						// not on the store's answer, so it is filled in here
+						// rather than in each accept: a refusal that says only
+						// which status happened sends a reader looking for a
+						// second writer with nothing to identify it by.
+						err = withExpectedMarkerRevision(err, chunkItems)
 						break
 					}
 				}
@@ -965,8 +972,17 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		// which never enter the evaluator.
 		planResult.GuardBeforeEvents = uncommittedGapMutations(loadedGaps, planResult.GuardBeforeEvents)
 		planResult.GuardAfterState = uncommittedGapMutations(loadedGaps, planResult.GuardAfterState)
+		// Recorded, not refused, and read here because this is the first place
+		// the Slot's whole evaluation is in hand: the contract's rule that one
+		// Plan carries one gap statement per Slot is checked on each series
+		// batch's result, and the accumulation across batches can assemble a
+		// shape no batch produced. Measuring it before changing anything on
+		// its account is deliberate - the shape has to be counted before a
+		// merge rule is written for it, and refusing here would turn a Slot
+		// the retry recovers into one that does not run.
+		coordinator.observeDuplicatedGapStatements(ctx, request, planResult)
 
-		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardBeforeEvents); err != nil {
+		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardBeforeEvents, GapSiteBeforeEvents); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
 
@@ -1157,7 +1173,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			}
 		}
 		coordinator.observeGapScheduleRestart(ctx, request.Operation, loadedGaps, planResult.GuardAfterState)
-		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardAfterState); err != nil {
+		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardAfterState, GapSiteAfterState); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
 		if planResult.Disposition == execution.PlanRetryPending && retryPendingReason == "" {
@@ -1405,11 +1421,13 @@ func (coordinator *SlotExecutionCoordinator) applyGap(
 	operation execution.Operation,
 	contractRef execution.FrozenExecutionContractRef,
 	items []execution.PlanGapMutation,
+	site string,
 ) error {
 	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, "gap guard",
 		func(item execution.GapGuardApplyItemResult) error {
 			if item.Status != execution.GapGuardApplied && item.Status != execution.GapGuardAlreadyApplied {
-				return fmt.Errorf("gap guard did not complete: %s", item.Status)
+				return &GapApplyRefusal{Stage: "gap guard did not complete", Status: item.Status, Site: site,
+					Plan: item.Identity.Plan, StateGeneration: item.Identity.StateGeneration}
 			}
 			return nil
 		})

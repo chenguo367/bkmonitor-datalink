@@ -1255,6 +1255,9 @@ func (ports *recordingPorts) LoadActivations(
 }
 
 type recordingPorts struct {
+	// refuseGapStage refuses one of the Slot's two gap applies ("gap_before"
+	// or "gap_after"), so a case can tell which of them a refusal came from.
+	refuseGapStage string
 	// finalizationMode lets a test put the Slot on the query-free path, which
 	// is where the evidence is read. Empty means the ordinary query path.
 	finalizationMode execution.FinalizationMode
@@ -1737,6 +1740,9 @@ func (ports *recordingPorts) ApplyGap(_ context.Context, request execution.GapGu
 	items := make([]execution.GapGuardApplyItemResult, len(request.Items))
 	for index, item := range request.Items {
 		items[index] = execution.GapGuardApplyItemResult{Identity: item.Identity, Status: execution.GapGuardApplied}
+		if ports.refuseGapStage != "" && ports.refuseGapStage == stage {
+			items[index].Status = execution.GapGuardConflict
+		}
 		if ports.persistActivatedGaps && item.Identity.StateGeneration != "state-v1" {
 			if ports.activatedGapMarkers == nil {
 				ports.activatedGapMarkers = make(map[execution.PlanGapIdentity]execution.GapGuardSnapshot)

@@ -145,6 +145,32 @@ const (
 	// left the attempt reading as an unclassified internal error, on every
 	// round, for a Query Group that would never get past it.
 	ReasonGapGuardConflict = "GAP_GUARD_CONFLICT"
+	// The gap marker store's three refusals at apply time, named apart from
+	// GAP_GUARD_CONFLICT above. That one is this Slot comparing the persisted
+	// marker against what it proposes and refusing before it writes; these are
+	// the store refusing the write itself, which means the marker moved
+	// between this Slot's read and its write - a different question with a
+	// different answer, because it names a second writer rather than a
+	// disagreement this Slot could see on its own.
+	//
+	// Until these existed all three returned a bare error, so every one of
+	// them was observed as internal_unknown: an unclassified defect that a
+	// same-Slot retry then "recovered" from, which is how a Query Group
+	// conflicting on every other Slot for half an hour read as healthy.
+	// Observation-only; the store's statuses and the retry decision are
+	// unchanged.
+	// ReasonGapGuardDuplicatedAcrossBatches names one Plan carrying more than
+	// one gap marker statement in a single Slot, which the evaluation contract
+	// forbids and the accumulation across series batches can nonetheless
+	// assemble: EvaluationResult.Validate runs on each batch's result, and
+	// appendProvisional then appends to the two guard lists independently, so
+	// two batches contributing one statement each produce a shape no single
+	// batch could. Recorded rather than refused, so the shape can be counted
+	// before anything is changed on its account.
+	ReasonGapGuardDuplicatedAcrossBatches = "GAP_GUARD_DUPLICATED_ACROSS_BATCHES"
+	ReasonGapApplyConflict                = "GAP_APPLY_CONFLICT"
+	ReasonGapApplyStaleVersion            = "GAP_APPLY_STALE_VERSION"
+	ReasonGapWriteRetryable               = "GAP_WRITE_RETRYABLE"
 	// State version refusals are observation-only names; they do not change
 	// the state store's status contract or the scheduler's retry decision.
 	ReasonStateVersionConflict = "STATE_VERSION_CONFLICT"
