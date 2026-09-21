@@ -6,6 +6,8 @@
 package admission
 
 import (
+	"strings"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
@@ -56,6 +58,28 @@ type TargetPlanFilter struct{}
 
 func (TargetPlanFilter) Name() string { return "target_plan" }
 
+// hostIDCandidates are the host ids a record may be matched by: the
+// bk_host_id dimension when it carries one, and the bare host ids among its
+// host identities (the same dimension as the identity fuller records it,
+// and the id the host cache taught it). Address identities are not ids.
+func hostIDCandidates(facts *Facts) []string {
+	candidates := make([]string, 0, 2)
+	seen := make(map[string]struct{}, 2)
+	if id := dimensionText(facts.Dimensions, contract.HostIdentityDimension); id != "" {
+		candidates, seen[id] = append(candidates, id), struct{}{}
+	}
+	for _, candidate := range facts.HostKeys() {
+		if candidate == "" || strings.Contains(candidate, contract.TargetPlanKeySeparator) {
+			continue
+		}
+		if _, duplicate := seen[candidate]; duplicate {
+			continue
+		}
+		candidates, seen[candidate] = append(candidates, candidate), struct{}{}
+	}
+	return candidates
+}
+
 func (TargetPlanFilter) Admit(plan PlanContext, facts *Facts) Decision {
 	target := plan.TargetPlan
 	if target == nil {
@@ -66,6 +90,26 @@ func (TargetPlanFilter) Admit(plan PlanContext, facts *Facts) Decision {
 	}
 	if facts == nil {
 		facts = &Facts{}
+	}
+	if target.Identity.HostIdentity {
+		// The key is the record's host identity: bk_host_id when the record
+		// carries it, and every host id the fullers taught the record - the
+		// one the host cache resolves from its address. Reading the dimension
+		// alone would drop every collected metric that names its host by
+		// address, under a reason that says the writer was at fault. The
+		// address form of the identity is skipped: members are held under
+		// host ids.
+		placed := false
+		for _, candidate := range hostIDCandidates(facts) {
+			placed = true
+			if target.Members.Contains(target.Identity.HostKey(candidate)) {
+				return Decision{Admit: true}
+			}
+		}
+		if !placed {
+			return Decision{Reason: TargetPlanReasonKeyMissing}
+		}
+		return Decision{Reason: TargetPlanReasonOutOfTarget}
 	}
 	key, ok := target.Identity.Key(func(name string) string { return dimensionText(facts.Dimensions, name) })
 	if !ok {

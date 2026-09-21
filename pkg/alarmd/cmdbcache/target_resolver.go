@@ -50,6 +50,9 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 	for _, key := range plan.StaticKeys {
 		resolution.Static[key] = struct{}{}
 	}
+	if len(plan.StaticMembers) > 0 {
+		resolution.Selectors = append(resolution.Selectors, resolver.resolveStaticMembers(plan))
+	}
 	for _, id := range plan.DynamicGroups {
 		resolution.Selectors = append(resolution.Selectors, resolver.resolveGroup(ctx, plan, id, interval))
 	}
@@ -102,6 +105,50 @@ func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract
 	return result
 }
 
+// resolveStaticMembers maps the static (model, instance) members of a plan
+// read by host identity to host ids through the host cache.
+//
+// A member the cache knows as a host is that host's id. A member it does
+// not know is dropped and counted, as a group member that fails validation
+// is. When it knows none of them the selector is Unavailable by name: the
+// plan's model is not one the cache lists hosts under - a non-host model the
+// writer named no model_match for - or the writer has not put the canonical
+// identity on the host records at all (ModelledHosts is zero). Both are
+// "these members cannot be placed against the data", and neither is an
+// empty target; reading them as one would stop the Plan's detection with
+// nothing on the page.
+func (resolver *TargetResolver) resolveStaticMembers(plan *contract.TargetPlanV1) targetplan.SelectorResult {
+	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindStatic, ID: plan.ModelID, Reason: targetplan.ReasonNone}
+	if resolver == nil || resolver.hosts == nil {
+		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonSourceUnwired
+		return result
+	}
+	index := resolver.hosts.Current()
+	if index == nil || index.Hosts() == 0 || resolver.now().Sub(index.BuiltAt()) > resolver.hosts.maxAge {
+		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonIndexUnavailable
+		return result
+	}
+	members := make(map[string]struct{}, len(plan.StaticMembers))
+	for _, member := range plan.StaticMembers {
+		host, found := index.LookupModelInstance(member.ModelID, member.ModelInstID)
+		if !found || host.HostID == "" {
+			result.Dropped++
+			continue
+		}
+		members[plan.Identity.HostKey(host.HostID)] = struct{}{}
+	}
+	result.Members, result.Kept = members, len(members)
+	switch {
+	case len(members) == 0:
+		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonModelUnresolved
+	case result.Dropped > 0:
+		result.State, result.Reason = targetplan.SelectorIncomplete, targetplan.ReasonMembersDropped
+	default:
+		result.State = targetplan.SelectorOK
+	}
+	return result
+}
+
 func (resolver *TargetResolver) resolveTopology(plan *contract.TargetPlanV1, node contract.TargetPlanTopologyV1) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindTopology, ID: node.Key(), Reason: targetplan.ReasonNone}
 	if resolver == nil || resolver.hosts == nil {
@@ -146,6 +193,16 @@ func (resolver *TargetResolver) resolveTopology(plan *contract.TargetPlanV1, nod
 				// record, or it is another model's: the host cannot be named
 				// under this rule.
 				result.Dropped++
+				continue
+			}
+			if plan.Identity.HostIdentity {
+				// Read by host identity: the host is held under its id, which
+				// is what the record's host identity carries.
+				if host.HostID == "" {
+					result.Dropped++
+					continue
+				}
+				members[plan.Identity.HostKey(host.HostID)] = struct{}{}
 				continue
 			}
 			members[plan.Identity.MemberKey(host.ModelID, host.ModelInstID)] = struct{}{}

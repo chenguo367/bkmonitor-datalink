@@ -348,9 +348,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			Help: "Selectors of target plans resolved, once per selector per Plan per Slot, by kind, state and the " +
 				"closed reason behind an Unavailable or Incomplete state: key_missing, json_invalid, " +
 				"structure_invalid, model_mismatch, read_failed, stale, index_unavailable, node_missing, " +
-				"node_in_other_business, members_dropped, source_unwired. OKEmpty with node_missing is a topology " +
-				"reference to a node the topology cache does not list; OKEmpty with node_in_other_business is one " +
-				"whose node is listed but hosts machines under another business only.",
+				"node_in_other_business, members_dropped, source_unwired, model_representation_unresolved. OKEmpty " +
+				"with node_missing is a topology reference to a node the topology cache does not list; OKEmpty with " +
+				"node_in_other_business is one whose node is listed but hosts machines under another business only; " +
+				"static Unavailable with model_representation_unresolved is a model_inst_id plan whose members the " +
+				"host cache knows no host for - a non-host model without a model_match, or a host cache without the " +
+				"canonical identity on its records.",
 		}, []string{"kind", "state", "reason"}),
 		noDataSlotPlans: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_slot_plans_total",
@@ -914,6 +917,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorUnavailable), targetplan.ReasonIndexUnavailable},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorOKEmpty), targetplan.ReasonNodeMissing},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorOKEmpty), targetplan.ReasonNodeForeign},
+		{targetplan.SelectorKindStatic, string(targetplan.SelectorUnavailable), targetplan.ReasonModelUnresolved},
 	} {
 		metrics.targetSelectorResolutions.WithLabelValues(cell[0], cell[1], cell[2])
 	}

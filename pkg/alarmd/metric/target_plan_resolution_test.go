@@ -27,6 +27,10 @@ import (
 func TestTheSelectorCellsAnOperatorActsOnArePublishedAtZeroAsOneSet(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
 
+	// Spelled out rather than built from targetplan's constants: this is the
+	// set an operator queries by these words, so a constant renamed must not
+	// move it and a constant's value changed must fail it. The resolver's
+	// own tests go through the constants and are blind to the value.
 	want := []string{
 		"dynamic_group|Unavailable|key_missing",
 		"dynamic_group|Unavailable|read_failed",
@@ -35,6 +39,7 @@ func TestTheSelectorCellsAnOperatorActsOnArePublishedAtZeroAsOneSet(t *testing.T
 		"dynamic_topology|Unavailable|index_unavailable",
 		"dynamic_topology|OKEmpty|node_missing",
 		"dynamic_topology|OKEmpty|node_in_other_business",
+		"static|Unavailable|model_representation_unresolved",
 	}
 	sort.Strings(want)
 	got := selectorCells(t, r)

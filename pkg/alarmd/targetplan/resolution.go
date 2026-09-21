@@ -49,12 +49,20 @@ const (
 	ReasonNodeForeign      = "node_in_other_business"
 	ReasonMembersDropped   = "members_dropped"
 	ReasonSourceUnwired    = "source_unwired"
+	// ReasonModelUnresolved is a static selector of a model_inst_id plan read
+	// by host identity whose members the host cache knows no host for: a
+	// model that is not the host model, or a host cache the writer has not
+	// put the canonical (model, instance) identity on. Either way the members
+	// cannot be placed against the data and are named rather than read as
+	// an empty target. The plan-level word is TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED.
+	ReasonModelUnresolved = "model_representation_unresolved"
 )
 
 // SelectorReasons is the closed list, for the metric.
 var SelectorReasons = []string{
 	ReasonNone, ReasonKeyMissing, ReasonJSONInvalid, ReasonStructureInvalid, ReasonModelMismatch, ReasonReadFailed,
 	ReasonStale, ReasonIndexUnavailable, ReasonNodeMissing, ReasonNodeForeign, ReasonMembersDropped, ReasonSourceUnwired,
+	ReasonModelUnresolved,
 }
 
 // SelectorResult is one selector's answer: its members in the plan's key

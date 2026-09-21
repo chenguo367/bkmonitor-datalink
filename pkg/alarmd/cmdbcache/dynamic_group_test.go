@@ -50,7 +50,7 @@ const hostGroup = `{"model_id":"cw-Host","bk_obj_id":"cw-Host","model_inst_ids":
 		{"model_id":"cw-Host","model_inst_id":"104","bk_host_id":104}]}`
 
 func hostPlan(rule contract.TargetPlanRule) *contract.TargetPlanV1 {
-	identity := contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}
+	identity := contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}
 	if rule == contract.TargetPlanRuleModelInstID {
 		identity = contract.TargetPlanIdentityV1{Dimensions: []string{"cw_object_model_inst_id"}, ModelDimension: "cw_object_model_id", ModelValue: "17"}
 	}

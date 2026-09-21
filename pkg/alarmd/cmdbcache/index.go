@@ -93,9 +93,35 @@ type Index struct {
 	// reference to a node that does not exist can be told apart from a node
 	// that exists and holds no host. Nil when the topology cache was not
 	// read; empty when it was read and holds nothing.
-	topoNodes         map[string]struct{}
+	topoNodes map[string]struct{}
+	// byModelInstance is every host that carries the canonical (model,
+	// instance) identity, keyed "model|instance": how a model_inst_id target
+	// read by host identity finds the host a static member names.
+	// modelledHosts counts them, so a cache the writer has not put the
+	// identity on can be told from a model the cache knows no host of.
+	byModelInstance   map[string]*HostFacts
+	modelledHosts     int
 	builtAt           time.Time
 	sourceRefreshedAt time.Time
+}
+
+// LookupModelInstance finds the host carrying the canonical (model,
+// instance) identity, and false when the cache lists none.
+func (index *Index) LookupModelInstance(model, instance string) (*HostFacts, bool) {
+	if index == nil || model == "" || instance == "" {
+		return nil, false
+	}
+	facts, found := index.byModelInstance[model+"|"+instance]
+	return facts, found
+}
+
+// ModelledHosts is how many hosts carry the canonical (model, instance)
+// identity. Zero on a cache whose writer does not put it on hosts.
+func (index *Index) ModelledHosts() int {
+	if index == nil {
+		return 0
+	}
+	return index.modelledHosts
 }
 
 // TopologyAnswer is what the index says about one dynamic topology
@@ -290,6 +316,7 @@ func newIndexBuilder(now time.Time) *indexBuilder {
 		index: &Index{
 			byIdentity: make(map[string]*HostFacts), serviceInstances: make(map[string]*ServiceInstanceFacts),
 			byNode: make(map[string][]*HostFacts), hostedNodes: make(map[string]struct{}), builtAt: now,
+			byModelInstance: make(map[string]*HostFacts),
 		},
 		seen: make(map[string]*HostFacts),
 	}
@@ -359,6 +386,10 @@ func (builder *indexBuilder) addFields(fields []string) {
 		builder.index.hosts++
 		builder.index.byIdentity[identity] = facts
 		builder.addToNodes(facts)
+		if facts.ModelID != "" && facts.ModelInstID != "" && facts.HostID != "" {
+			builder.index.modelledHosts++
+			builder.index.byModelInstance[facts.ModelID+"|"+facts.ModelInstID] = facts
+		}
 	}
 }
 

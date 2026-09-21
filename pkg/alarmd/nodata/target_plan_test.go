@@ -16,7 +16,7 @@ import (
 func hostTargetPlan(static ...string) *contract.TargetPlanV1 {
 	keys := append([]string{}, static...)
 	return &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
-		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, StaticKeys: keys, DynamicGroups: []string{"1001"}}
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: keys, DynamicGroups: []string{"1001"}}
 }
 
 func targetPlanSlotPlan(plan *contract.TargetPlanV1, dimensions []string) *contract.EvaluationPlanV2 {
@@ -143,7 +143,7 @@ func TestEvaluateSlotJudgesATargetPlanOnlyAgainstACompleteResolution(t *testing.
 // and opens nothing.
 func TestAConfirmedEmptyTargetPlanClosesOpenAbsencesOnceAndNeverTheWholeItem(t *testing.T) {
 	plan := targetPlanSlotPlan(&contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
-		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, StaticKeys: []string{}, DynamicGroups: []string{"1001"}}, []string{"bk_host_id"})
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{}, DynamicGroups: []string{"1001"}}, []string{"bk_host_id"})
 	left := hostIDGroup(t, "102")
 	memory := map[string]GroupMemory{left.Key(): {FirstAbsent: 940}, WholeItemGroup().Key(): {FirstAbsent: 900}}
 	result, outcome, err := EvaluateSlot(SlotInput{

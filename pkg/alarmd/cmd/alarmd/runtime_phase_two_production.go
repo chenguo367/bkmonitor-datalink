@@ -1366,12 +1366,22 @@ type productionPhaseTwoOwnership struct {
 	readySet       map[string]struct{}
 	readyChangedAt time.Time
 
-	// sweptSet is the Query Group set the last Assignment sweep ran against,
-	// under the fence epoch it ran in. A round sweeps when it is the first
-	// of a term or when a Query Group of the last swept set is gone: those
-	// are the only moments a record can newly be left behind.
+	// lastSet is the Query Group set the last round ran, under the fence
+	// epoch it ran in, and sweepOwed whether the last sweep left retired
+	// records behind because a lease still held them. A round sweeps when
+	// it is the first of a term, when a Query Group of the last round's set
+	// is gone, or when a sweep is owed: those are the moments a record can
+	// be left behind or still be waiting.
+	//
+	// The last round's set, not the last swept set: a Query Group that
+	// arrived after a sweep and left before the next one was in no swept
+	// set, so measured against that it never left, and its record stayed
+	// for good. And owed, because a record a lease still held is reclaimed
+	// only by a later sweep, which nothing else asked for once the set was
+	// remembered as swept.
 	sweptEpoch uint64
-	sweptSet   map[execution.QueryGroupIdentity]struct{}
+	lastSet    map[execution.QueryGroupIdentity]struct{}
+	sweepOwed  bool
 }
 
 // rebalanceStabilisation is how long the ready set must have been unchanged
@@ -1538,9 +1548,10 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 }
 
 // sweepRetiredAssignments reclaims the Assignment records of Query Groups
-// this round no longer runs, when something could have been left behind
-// since the last sweep: the first round of a term, or a Query Group of the
-// last swept set missing from this one. Records carry no expiry, so without
+// this round no longer runs, when something could have been left behind or
+// still be waiting: the first round of a term, a Query Group of the last
+// round's set missing from this one, or a sweep owed because the last one
+// found records a lease still held. Records carry no expiry, so without
 // this a retired Query Group's record and ownership hash stayed for good.
 // Advisory to the round: a failed sweep is reported and the round stands.
 func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
@@ -1553,15 +1564,18 @@ func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
 		keep[queryGroup] = struct{}{}
 	}
 	runtime.mu.Lock()
-	due := runtime.sweptEpoch != authority.Fence.OwnerEpoch || runtime.sweptSet == nil
+	due := runtime.sweptEpoch != authority.Fence.OwnerEpoch || runtime.lastSet == nil || runtime.sweepOwed
 	if !due {
-		for queryGroup := range runtime.sweptSet {
+		for queryGroup := range runtime.lastSet {
 			if _, still := keep[queryGroup]; !still {
 				due = true
 				break
 			}
 		}
 	}
+	// Remembered every round, swept or not, so the next round measures
+	// what left against what this round ran.
+	runtime.sweptEpoch, runtime.lastSet = authority.Fence.OwnerEpoch, keep
 	runtime.mu.Unlock()
 	if !due {
 		return
@@ -1586,6 +1600,8 @@ func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
 		reason := ownershipObservationReason(err)
 		published.Result, published.Reason = string(observability.ResultFailed), string(reason)
 		runtime.mu.Lock()
+		// A sweep that failed reclaimed nothing; the next round owes it.
+		runtime.sweepOwed = true
 		runtime.lastAssignmentSweep = published
 		runtime.mu.Unlock()
 		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
@@ -1596,7 +1612,10 @@ func (runtime *productionPhaseTwoOwnership) sweepRetiredAssignments(
 		return
 	}
 	runtime.mu.Lock()
-	runtime.sweptEpoch, runtime.sweptSet = authority.Fence.OwnerEpoch, keep
+	// Records a lease still held are not reclaimed until it lapses, and no
+	// set change will ask for the sweep that does it: the next round is
+	// asked here.
+	runtime.sweepOwed = sweep.HeldByLease > 0
 	runtime.lastAssignmentSweep = published
 	runtime.mu.Unlock()
 	observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{

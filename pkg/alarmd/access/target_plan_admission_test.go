@@ -33,7 +33,7 @@ func hostIDSeries(t *testing.T, id string) *execution.Dataset {
 // a Plan with no scope would. A Plan without a target plan is unchanged.
 func TestPlanScopesCarryTheTargetPlanAndTheExecutionsResolution(t *testing.T) {
 	target := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
-		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, StaticKeys: []string{"101"}}
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{"101"}}
 	identity := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "2002"}
 	due := []execution.DuePlan{{Identity: identity, CompiledPlan: compilePlanWithTargetPlan(t, "2002", target)}}
 
@@ -70,7 +70,7 @@ func TestATargetPlanSeriesIsAdmittedAgainstTheConsumersResolution(t *testing.T) 
 	_, frozen := frozenExecution(t)
 	requirement := frozen.Requirements[0]
 	plan := requirement.Consumers[0].Consumer.Plan
-	identity := contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}
+	identity := contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}
 
 	var decisions []string
 	consumer := &admissionConsumer{}

@@ -21,7 +21,7 @@ import (
 func TestTheCompiledPlanCarriesTheTargetPlanAndRefusesTwoFormsOrABrokenOne(t *testing.T) {
 	compiler := newTestCompiler(t)
 	target := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
-		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, StaticKeys: []string{"101"}}
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{"101"}}
 	plan := validPlan()
 	plan.TargetPlan = target
 	result, err := compiler.Compile(context.Background(), validRequest(plan))
