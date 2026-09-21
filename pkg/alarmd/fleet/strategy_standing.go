@@ -153,6 +153,10 @@ type StrategyPlanStanding struct {
 	// Rows is what the fleet lists the object under, every row: an object
 	// under no row is healthy for the equation and appears as none.
 	Rows []Anomaly `json:"rows"`
+	// Config is the Plan's key configuration, redacted, read from the
+	// frozen object on request (include=config) and absent otherwise. See
+	// StrategyPlanConfigs for what it carries and what it refuses.
+	Config *StrategyPlanConfigs `json:"config,omitempty"`
 }
 
 // StrategyStandingOf composes the answer from the lookup and the fleet's
@@ -306,12 +310,16 @@ func shortObjectName(queryGroup string) string {
 	return queryGroup
 }
 
-// WithStrategyStanding serves GET /api/strategies/{id}[?tenant=&business=]
+// WithStrategyStanding serves GET /api/strategies/{id}[?tenant=&business=&include=config]
 // in front of the fleet API. A process without a publication forwards the
 // request to the Leader once; a forwarded request that lands on a process
-// without one is refused rather than forwarded again.
+// without one is refused rather than forwarded again. include=config adds
+// each Plan's redacted configuration, one bounded object read per Plan; the
+// words the parameter accepts are closed, and an unknown one is refused
+// rather than ignored, so a reader cannot ask for something and get an
+// answer that silently lacks it.
 func WithStrategyStanding(next http.Handler, service *Service, lookup StrategyLookupFunc, forward LeaderForward,
-	replica string, now func() time.Time, stallAfter time.Duration) http.Handler {
+	loader StrategyObjectLoader, replica string, now func() time.Time, stallAfter time.Duration) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if !strings.HasPrefix(request.URL.Path, "/api/strategies/") {
 			next.ServeHTTP(response, request)
@@ -345,14 +353,42 @@ func WithStrategyStanding(next http.Handler, service *Service, lookup StrategyLo
 			return
 		}
 		query := request.URL.Query()
+		includes, unknown := includeWordsOf(query.Get("include"))
+		if unknown != "" {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "INCLUDE_UNKNOWN", "include": unknown, "accepted": IncludeConfig})
+			return
+		}
 		var view *View
 		if service != nil {
 			current := service.View(request.Context())
 			Decide(&current, now(), stallAfter)
 			view = &current
 		}
-		writeJSON(response, http.StatusOK, StrategyStandingOf(strategyID, query.Get("tenant"), query.Get("business"), replica, facts, view, now()))
+		standing := StrategyStandingOf(strategyID, query.Get("tenant"), query.Get("business"), replica, facts, view, now())
+		if includes[IncludeConfig] {
+			attachStrategyConfigs(request.Context(), &standing, loader)
+		}
+		writeJSON(response, http.StatusOK, standing)
 	})
+}
+
+// includeWordsOf parses the include parameter: comma-separated words from
+// the closed list, and the first word outside it.
+func includeWordsOf(raw string) (words map[string]bool, unknown string) {
+	words = map[string]bool{}
+	for _, word := range strings.Split(raw, ",") {
+		word = strings.TrimSpace(word)
+		switch word {
+		case "":
+		case IncludeConfig:
+			words[word] = true
+		default:
+			if unknown == "" {
+				unknown = word
+			}
+		}
+	}
+	return words, unknown
 }
 
 // forwardedHeader marks a request a follower handed to the Leader, so it
