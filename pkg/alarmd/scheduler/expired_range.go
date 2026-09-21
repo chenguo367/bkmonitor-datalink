@@ -386,9 +386,13 @@ func (source *ProductionSlotSource) observeRangeGate(
 			facts.UnfinishedSlotEvaluationTime = int64(load.Progress.UnfinishedSlot.Contract.Slot.EvaluationTime)
 		}
 	}
+	// The word is the line's reason_code as well as a fact: with the reason
+	// left empty a degraded result read as reason_not_reported, on a line
+	// that had reported, and the stage counter could not count by it.
 	source.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageRangeGateDecided,
-		Result: observability.ResultDegraded, Direction: observability.DirectionInternal,
+		Result: observability.ResultDegraded, ReasonCode: observability.ReasonCode(outcome.word),
+		Direction: observability.DirectionInternal,
 		Trace: observability.TraceFields{
 			QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime),
 		},

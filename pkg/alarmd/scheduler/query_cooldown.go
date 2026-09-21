@@ -5,6 +5,7 @@ import (
 	"hash/fnv"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -131,10 +132,31 @@ func (runner *Runner) emitQueryCooldown(ctx context.Context, event string) {
 	}
 	defer func() { _ = recover() }()
 	state := runner.queryCooldown
+	result, reason := queryCooldownOutcome(event)
 	runner.flights.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageQueryCooldown,
+		Result: result, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Trace: observability.TraceFields{QueryGroupKey: string(runner.queryGroup)},
 		QueryCooldown: &observability.QueryCooldownFacts{Event: event, Until: state.until,
 			LastQueryAt: state.lastQueryAt, Failures: state.failures},
 	})
+}
+
+// queryCooldownOutcome is the result and reason a cooldown transition carries
+// on its line. The transition used to carry neither: the line's result read
+// _other and its reason reason_not_reported, while the event word sat in the
+// facts. Entering or extending the cooldown is the Query Group degraded by
+// its query being unavailable; leaving it on a query that answered is normal
+// dispatch resumed, and the reason it resumed from travels with it; leaving
+// it because the configuration changed or the policy was switched off is
+// neither, and carries no reason.
+func queryCooldownOutcome(event string) (observability.Result, observability.ReasonCode) {
+	switch event {
+	case "entered", "extended":
+		return observability.ResultDegraded, observability.ReasonCode(contract.ReasonQueryUnavailable)
+	case "recovered":
+		return observability.ResultResumed, observability.ReasonCode(contract.ReasonQueryUnavailable)
+	default:
+		return observability.ResultSuccess, observability.ReasonNone
+	}
 }

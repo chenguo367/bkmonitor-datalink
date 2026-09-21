@@ -907,10 +907,14 @@ func (source *ProductionSlotSource) observeReplayExpiry(
 	}
 	// Observability is a fail-open side channel, as everywhere else.
 	defer func() { _ = recover() }()
+	// The reason is the line's reason_code as well as a fact: left empty, a
+	// degraded result read as reason_not_reported on a line that had named
+	// its reason one level down.
 	source.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageReplayExpired,
-		Result: observability.ResultDegraded, Direction: observability.DirectionInternal,
-		Trace: observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
+		Result: observability.ResultDegraded, ReasonCode: observability.ReasonCode(facts.Reason),
+		Direction: observability.DirectionInternal,
+		Trace:     observability.TraceFields{QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime)},
 		ReplayExpiry: &observability.ReplayExpiryFacts{
 			Reason: string(facts.Reason), Distance: facts.Distance, AgeSeconds: facts.Age.Seconds(),
 			ReadyAtUnixMilli: facts.ReadyAtUnixMilli, DistanceBoundaryUnixMilli: facts.DistanceBoundaryUnixMilli,
