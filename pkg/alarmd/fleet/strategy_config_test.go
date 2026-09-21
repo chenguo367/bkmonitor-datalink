@@ -265,16 +265,25 @@ func TestIncludeConfigNamesWhyAPlanHasNoConfig(t *testing.T) {
 			t.Fatalf("config = %v, want %s", config, ConfigLoaderNotWired)
 		}
 	})
-	t.Run("object unreadable", func(t *testing.T) {
-		loader := &configLoader{err: errors.New("redis: connection refused")}
-		handler := configHandler(t, map[string]StrategyLookupFacts{"4101": {Available: true, Found: true, Plans: plans(planA)}}, loader.load)
-		_, body := get(t, handler, "/api/strategies/4101?include=config")
-		config := body["plans"].([]any)[0].(map[string]any)["config"].(map[string]any)
-		if config["refusal"] != ConfigObjectUnreadable {
-			t.Fatalf("config = %v, want %s", config, ConfigObjectUnreadable)
-		}
-		if wire, _ := json.Marshal(body); strings.Contains(string(wire), "connection refused") {
-			t.Fatalf("the store's error text reached the wire: %s", wire)
+	t.Run("the store did not answer, the object is not there, the bytes are not the object", func(t *testing.T) {
+		for _, test := range []struct {
+			err  error
+			want string
+		}{
+			{errors.New("redis: connection refused"), ConfigObjectUnreadable},
+			{fmt.Errorf("load: %w", controlplane.ErrCatalogObjectUnavailable), ConfigObjectMissing},
+			{fmt.Errorf("%w: not a Query Group object of this contract", controlplane.ErrCatalogObjectCorrupt), ConfigObjectCorrupt},
+		} {
+			loader := &configLoader{err: test.err}
+			handler := configHandler(t, map[string]StrategyLookupFacts{"4101": {Available: true, Found: true, Plans: plans(planA)}}, loader.load)
+			_, body := get(t, handler, "/api/strategies/4101?include=config")
+			config := body["plans"].([]any)[0].(map[string]any)["config"].(map[string]any)
+			if config["refusal"] != test.want {
+				t.Fatalf("for %v config = %v, want %s", test.err, config, test.want)
+			}
+			if wire, _ := json.Marshal(body); strings.Contains(string(wire), "connection refused") || strings.Contains(string(wire), "not a Query Group") {
+				t.Fatalf("the store's error text reached the wire: %s", wire)
+			}
 		}
 	})
 	t.Run("plan without a digest, and an object without the strategy's Plan", func(t *testing.T) {

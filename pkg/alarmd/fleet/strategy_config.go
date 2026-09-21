@@ -58,13 +58,21 @@ const (
 
 	ConfigLoaderNotWired    = "LOADER_NOT_WIRED"
 	ConfigReadBoundExceeded = "READ_BOUND_EXCEEDED"
-	ConfigObjectUnreadable  = "OBJECT_UNREADABLE"
-	ConfigPlanNotInObject   = "PLAN_NOT_IN_OBJECT"
-	ConfigNoObjectDigest    = "NO_OBJECT_DIGEST"
+	// The three ways a read comes back without an object, told apart
+	// because they are three different people's problems: the store did
+	// not answer (a dependency), the digest the catalog names is not in the
+	// store (the Leader's publication and the store disagree -- the Worker
+	// cannot run this Plan either), the bytes under it are not the object
+	// (corruption).
+	ConfigObjectUnreadable = "OBJECT_UNREADABLE"
+	ConfigObjectMissing    = "OBJECT_MISSING"
+	ConfigObjectCorrupt    = "OBJECT_CORRUPT"
+	ConfigPlanNotInObject  = "PLAN_NOT_IN_OBJECT"
+	ConfigNoObjectDigest   = "NO_OBJECT_DIGEST"
 )
 
 // ConfigRefusals is the closed list, for the page's wording table.
-var ConfigRefusals = []string{ConfigLoaderNotWired, ConfigReadBoundExceeded, ConfigObjectUnreadable, ConfigPlanNotInObject, ConfigNoObjectDigest}
+var ConfigRefusals = []string{ConfigLoaderNotWired, ConfigReadBoundExceeded, ConfigObjectUnreadable, ConfigObjectMissing, ConfigObjectCorrupt, ConfigPlanNotInObject, ConfigNoObjectDigest}
 
 // StrategyPlanConfigs is what one Plan reference's include=config carries:
 // the Plans of this strategy inside the object (one per item), or the reason
@@ -430,7 +438,7 @@ func attachStrategyConfigs(ctx context.Context, standing *StrategyStanding, load
 			reads++
 			object, err := loader(ctx, plan.ObjectDigest)
 			if err != nil {
-				configs.Refusal = ConfigObjectUnreadable
+				configs.Refusal = configReadRefusal(err)
 				if errors.Is(err, context.DeadlineExceeded) {
 					// The deadline is the request's: every Plan after this
 					// one would wait on the same store, so they are told the
@@ -442,5 +450,18 @@ func attachStrategyConfigs(ctx context.Context, standing *StrategyStanding, load
 			}
 		}
 		plan.Config = &configs
+	}
+}
+
+// configReadRefusal names why a read came back without an object, from the
+// repository's typed errors; anything else is the store not answering.
+func configReadRefusal(err error) string {
+	switch {
+	case errors.Is(err, controlplane.ErrCatalogObjectUnavailable):
+		return ConfigObjectMissing
+	case errors.Is(err, controlplane.ErrCatalogObjectCorrupt):
+		return ConfigObjectCorrupt
+	default:
+		return ConfigObjectUnreadable
 	}
 }
