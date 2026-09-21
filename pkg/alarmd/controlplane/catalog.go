@@ -664,6 +664,15 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 			SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
 			Reason: "TARGET_PLAN_MISSING", FieldPath: "items[0].target",
 		}}}, errors.New("TARGET_PLAN_MISSING: the item's target is a selection document and no target_plan accompanies it")
+	case item.Target.unreadable:
+		// A target this reader cannot make out is refused the way a target
+		// value it cannot read is, and for the same reason: kept on the last
+		// good Plan, the strategy would go on alerting on a target nobody
+		// can show it was pointed at.
+		return sourceCandidate{dispositions: []ObjectDisposition{{
+			SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
+			Reason: "UNSUPPORTED_TARGET_SCOPE", FieldPath: "items[0].target",
+		}}}, errors.New("TARGET_SCOPE_UNSUPPORTED: the item's target could not be decoded")
 	default:
 		scope, err := compileTargetScope(item.Target.groups, item.QueryConfigs)
 		if err != nil {
@@ -911,15 +920,20 @@ type legacyItem struct {
 
 // legacyTarget is the item's target as the strategy cache stores it: the
 // platform's list of condition groups, or, once the writer has moved the
-// strategy to the selection protocol, an object. The object is not read
-// here - the target then travels as target_plan - but it must not fail the
-// decode of the whole strategy either, because a decode failure retains the
-// strategy's last good Plan, and that Plan was compiled from the old target.
+// strategy to the selection protocol, an object, or something this reader
+// cannot make out. None of the three fails the decode of the whole
+// strategy: a decode failure retains the strategy's last good Plan, and
+// that Plan was compiled from the old target - the one outcome a target
+// change must never produce. What each shape means is decided where the
+// target is compiled, and only when no target_plan stands in for it.
 type legacyTarget struct {
 	groups [][]legacyTargetCondition
 	// selection is true when the target was an object: the new selection
 	// protocol, which this compiler reads only through target_plan.
 	selection bool
+	// unreadable is true when the target was neither absent, an object nor
+	// a list this reader could decode.
+	unreadable bool
 }
 
 func (target *legacyTarget) UnmarshalJSON(raw []byte) error {
@@ -936,7 +950,8 @@ func (target *legacyTarget) UnmarshalJSON(raw []byte) error {
 	decoder := json.NewDecoder(strings.NewReader(trimmed))
 	decoder.UseNumber()
 	if err := decoder.Decode(&groups); err != nil {
-		return err
+		*target = legacyTarget{unreadable: true}
+		return nil
 	}
 	*target = legacyTarget{groups: groups}
 	return nil

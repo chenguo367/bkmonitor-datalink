@@ -94,11 +94,8 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 		"static_targets", "dynamic_groups", "dynamic_topologies", "model_match"); err != nil {
 		return nil, err
 	}
-	if !isJSONNumber(fields["schema_version"]) {
-		return nil, unsupported("schema_version", "must be the integer 1")
-	}
-	version, err := integerText(fields["schema_version"])
-	if err != nil || version != "1" {
+	if strings.TrimSpace(string(fields["schema_version"])) != "1" {
+		// Spelled exactly as the protocol spells it: not "1", not 1.0.
 		return nil, unsupported("schema_version", "must be the integer 1")
 	}
 	modelID, err := nonEmptyText(fields["model_id"])
@@ -468,16 +465,14 @@ func scalarText(raw json.RawMessage) (string, error) {
 		return "", fmt.Errorf("must be a string or a number")
 	}
 	value := strings.TrimSpace(number.String())
-	if parsed, err := strconv.ParseFloat(value, 64); err == nil && parsed == float64(int64(parsed)) {
-		return strconv.FormatInt(int64(parsed), 10), nil
+	if !strings.ContainsAny(value, ".eE") {
+		// An integer literal is its own text, however long: nothing on a key
+		// path rounds an id through a float.
+		return value, nil
 	}
-	return value, nil
-}
-
-// isJSONNumber reports whether the raw value is a JSON number rather than
-// text: the version is the one field read as the protocol spells it, with
-// no tolerance for a quoted digit.
-func isJSONNumber(raw json.RawMessage) bool {
-	trimmed := strings.TrimSpace(string(raw))
-	return trimmed != "" && (trimmed[0] == '-' || (trimmed[0] >= '0' && trimmed[0] <= '9'))
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed != float64(int64(parsed)) || parsed > 1<<53 || parsed < -(1<<53) {
+		return "", fmt.Errorf("must be an integer")
+	}
+	return strconv.FormatInt(int64(parsed), 10), nil
 }

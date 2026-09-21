@@ -1,5 +1,5 @@
 {
-  "note": "target_plan documents as the strategy cache writer at its first review actually emitted them (PLAN cases only); expect is this decoder's verdict on each - the two disagreeing is the point of keeping the file",
+  "note": "target_plan documents as the strategy cache writer at its first review actually emitted them (PLAN cases only); expect is this decoder's verdict on each - the two disagreeing is the point of keeping the file; one synthetic case (marked) is a writer case with the missing business added, so the accepted shape of the intersection-to-union defect is on file before the writer fixes the field that hid it",
   "cases": [
     {
       "case": "5.3 host system metric",
@@ -447,6 +447,41 @@
       "expect": {
         "reason": "TARGET_PLAN_EMPTY",
         "path": ""
+      }
+    },
+    {
+      "case": "one group, host instance AND topology node, business added (what the writer will emit once bk_biz_id is fixed)",
+      "synthetic": true,
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "bk_host_id": 101
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": [
+          {
+            "bk_obj_id": "set",
+            "bk_inst_id": 12,
+            "bk_biz_id": 2
+          }
+        ]
+      },
+      "expect": {
+        "accepted": true,
+        "rule": "host_id",
+        "static_keys": [
+          "101"
+        ],
+        "groups": [],
+        "topologies": [
+          "2|set|12"
+        ],
+        "writer_defect": "the group's intersection (host 101 AND under set 12) became a union (host 101 OR under set 12); the plan is valid and wider than the strategy, and no reader can see it"
       }
     }
   ]

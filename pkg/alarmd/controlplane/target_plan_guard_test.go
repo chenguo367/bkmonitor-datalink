@@ -175,31 +175,44 @@ func TestAValidTargetPlanIsFrozenAndTheLegacyTargetIsNotRead(t *testing.T) {
 	items[0]["target_plan"] = json.RawMessage(`{"schema_version":1,"model_id":"cw-Host","target_rule":"host_id","failure_policy":"no_match",
 		"static_targets":[{"bk_host_id":42},{"bk_host_id":7}],"dynamic_groups":[{"dynamic_group_id":"1001"}],
 		"dynamic_topologies":[{"bk_biz_id":2,"bk_obj_id":"set","bk_inst_id":12}]}`)
-	// The old compiler refuses this field; it is not consulted.
-	items[0]["target"] = json.RawMessage(`[[{"field":"host_set_template","method":"eq","value":[{"bk_obj_id":"set","bk_inst_id":1}]}]]`)
-	document["items"], err = json.Marshal(items)
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed := originals[1]
-	changed.Document, err = json.Marshal(document)
-	if err != nil {
-		t.Fatal(err)
-	}
-	planner := &recordingPlanner{facts: queryFacts(t)}
-	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
-		Strategies: []controlplane.SourceStrategy{originals[0], changed}, Planner: planner,
-	})
-	if err != nil {
-		t.Fatal(err)
+	// The old target is not consulted in any of its shapes: a field the old
+	// compiler refuses, a selection object, and a list the old decoder cannot
+	// read at all - which, read, would have retained the last good Plan.
+	var catalog controlplane.Catalog
+	for _, legacy := range []string{
+		`[[{"field":"host_set_template","method":"eq","value":[{"bk_obj_id":"set","bk_inst_id":1}]}]]`,
+		`{"schema_version":1,"model_id":"cw-Host","selectors":[]}`,
+		`[[{"field":5}]]`,
+	} {
+		items[0]["target"] = json.RawMessage(legacy)
+		document["items"], err = json.Marshal(items)
+		if err != nil {
+			t.Fatal(err)
+		}
+		changed := originals[1]
+		changed.Document, err = json.Marshal(document)
+		if err != nil {
+			t.Fatal(err)
+		}
+		planner := &recordingPlanner{facts: queryFacts(t)}
+		catalog, err = controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+			Strategies: []controlplane.SourceStrategy{originals[0], changed}, Planner: planner,
+			LastGood: &controlplane.PublishedSnapshot{Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1}, QueryGroups: previous.QueryGroups},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if catalog.RetainedStaleRevisions != 0 {
+			t.Fatalf("legacy target %s: the last good Plan was retained beside a target plan", legacy)
+		}
+		for _, disposition := range catalog.Dispositions {
+			if disposition.Disposition != controlplane.DispositionAccepted {
+				t.Fatalf("legacy target %s: disposition %+v, want every strategy accepted", legacy, disposition)
+			}
+		}
 	}
 	if got := catalogStrategyIDs(catalog); !reflect.DeepEqual(got, []string{"1001", "1002"}) {
 		t.Fatalf("catalog = %v, dispositions %+v; want both strategies", got, catalog.Dispositions)
-	}
-	for _, disposition := range catalog.Dispositions {
-		if disposition.Disposition != controlplane.DispositionAccepted {
-			t.Fatalf("disposition %+v, want every strategy accepted", disposition)
-		}
 	}
 	var frozen *controlplane.FrozenPlan
 	var sibling *controlplane.FrozenPlan
@@ -259,10 +272,12 @@ func TestAValidTargetPlanIsFrozenAndTheLegacyTargetIsNotRead(t *testing.T) {
 }
 
 // A target that has moved to the selection protocol without a target_plan
-// beside it is the writer switching protocols out of order. It is refused
-// by name - not compiled as a strategy with no target, not kept on the last
-// good Plan of the old target.
-func TestASelectionTargetWithoutATargetPlanIsRefusedByName(t *testing.T) {
+// beside it is the writer switching protocols out of order, and a target
+// list the old decoder cannot read is a document nobody can show the
+// target of. Both are refused by name - not compiled as a strategy with no
+// target, not kept on the last good Plan of the old target, which is what a
+// whole-document decode failure used to do.
+func TestASelectionOrUnreadableTargetWithoutATargetPlanIsRefusedByName(t *testing.T) {
 	payload, err := os.ReadFile("testdata/two_threshold_strategies.json")
 	if err != nil {
 		t.Fatal(err)
@@ -290,29 +305,34 @@ func TestASelectionTargetWithoutATargetPlanIsRefusedByName(t *testing.T) {
 	if err := json.Unmarshal(document["items"], &items); err != nil {
 		t.Fatal(err)
 	}
-	items[0]["target"] = json.RawMessage(`{"schema_version":1,"model_id":"cw-Host","selectors":[{"type":"instances","instances":[{"model_id":"cw-Host","model_inst_id":"101","entity_uid":"cw-Host|101"}]}]}`)
-	document["items"], _ = json.Marshal(items)
-	changed := originals[1]
-	changed.Document, _ = json.Marshal(document)
-	planner := &recordingPlanner{facts: queryFacts(t)}
-	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
-		Strategies: []controlplane.SourceStrategy{originals[0], changed}, Planner: planner,
-		LastGood: &controlplane.PublishedSnapshot{Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1}, QueryGroups: previous.QueryGroups},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := catalogStrategyIDs(catalog); !reflect.DeepEqual(got, []string{"1001"}) || planner.calls != 1 {
-		t.Fatalf("selection target was executed or retained: plans=%v compilations=%d dispositions=%+v", got, planner.calls, catalog.Dispositions)
-	}
-	found := false
-	for _, disposition := range catalog.Dispositions {
-		if disposition.SourceID == "1002" && disposition.Disposition == controlplane.DispositionUnsupported &&
-			disposition.Reason == "TARGET_PLAN_MISSING" && disposition.FieldPath == "items[0].target" {
-			found = true
+	for legacy, reason := range map[string]string{
+		`{"schema_version":1,"model_id":"cw-Host","selectors":[{"type":"instances","instances":[{"model_id":"cw-Host","model_inst_id":"101","entity_uid":"cw-Host|101"}]}]}`: "TARGET_PLAN_MISSING",
+		`[[{"field":5}]]`: "UNSUPPORTED_TARGET_SCOPE",
+	} {
+		items[0]["target"] = json.RawMessage(legacy)
+		document["items"], _ = json.Marshal(items)
+		changed := originals[1]
+		changed.Document, _ = json.Marshal(document)
+		planner := &recordingPlanner{facts: queryFacts(t)}
+		catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+			Strategies: []controlplane.SourceStrategy{originals[0], changed}, Planner: planner,
+			LastGood: &controlplane.PublishedSnapshot{Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1}, QueryGroups: previous.QueryGroups},
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	if !found {
-		t.Fatalf("selection target was not refused by name: %+v", catalog.Dispositions)
+		if got := catalogStrategyIDs(catalog); !reflect.DeepEqual(got, []string{"1001"}) || planner.calls != 1 || catalog.RetainedStaleRevisions != 0 {
+			t.Fatalf("target %s was executed or retained: plans=%v compilations=%d retained=%d dispositions=%+v", legacy, got, planner.calls, catalog.RetainedStaleRevisions, catalog.Dispositions)
+		}
+		found := false
+		for _, disposition := range catalog.Dispositions {
+			if disposition.SourceID == "1002" && disposition.Disposition == controlplane.DispositionUnsupported &&
+				disposition.Reason == reason && disposition.FieldPath == "items[0].target" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("target %s was not refused as %s: %+v", legacy, reason, catalog.Dispositions)
+		}
 	}
 }

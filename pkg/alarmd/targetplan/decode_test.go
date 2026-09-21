@@ -142,6 +142,8 @@ func TestEveryDeviationFromTheProtocolIsRefusedAtItsField(t *testing.T) {
 		"array":                    {document: json.RawMessage(`[]`), reason: targetplan.ReasonUnsupported, path: ""},
 		"unknown version":          {document: with(set("schema_version", 2)), reason: targetplan.ReasonUnsupported, path: "schema_version"},
 		"version as text":          {document: with(set("schema_version", "1")), reason: targetplan.ReasonUnsupported, path: "schema_version"},
+		"version as a float":       {document: with(set("schema_version", json.RawMessage(`1.0`))), reason: targetplan.ReasonUnsupported, path: "schema_version"},
+		"host id as a float":       {document: with(set("static_targets", []any{map[string]any{"bk_host_id": json.RawMessage(`1.5`)}})), reason: targetplan.ReasonUnsupported, path: "static_targets[0].bk_host_id"},
 		"unknown rule":             {document: with(set("target_rule", "service_instance")), reason: targetplan.ReasonUnsupported, path: "target_rule"},
 		"other failure policy":     {document: with(set("failure_policy", "match_all")), reason: targetplan.ReasonUnsupported, path: "failure_policy"},
 		"model missing":            {document: with(del("model_id")), reason: targetplan.ReasonUnsupported, path: "model_id"},
@@ -220,8 +222,8 @@ func TestTheWritersObservedPlansGetTheVerdictsTheContractGives(t *testing.T) {
 	if err := json.Unmarshal(raw, &file); err != nil {
 		t.Fatal(err)
 	}
-	if len(file.Cases) != 18 {
-		t.Fatalf("fixture holds %d cases, want the writer's 18 PLAN cases", len(file.Cases))
+	if len(file.Cases) != 19 {
+		t.Fatalf("fixture holds %d cases, want the writer's 18 PLAN cases and the one synthetic case", len(file.Cases))
 	}
 	// The writer's queries carried the platform's default identity pair and
 	// no model_match, which is what makes every model_inst_id plan fall to
@@ -255,7 +257,21 @@ func TestTheWritersObservedPlansGetTheVerdictsTheContractGives(t *testing.T) {
 			}
 		})
 	}
-	if accepted != 8 || refused != 10 {
-		t.Fatalf("accepted %d refused %d, want 8 and 10: every model_inst_id plan without a model_match, every topology without a business and every empty plan is refused", accepted, refused)
+	if accepted != 9 || refused != 10 {
+		t.Fatalf("accepted %d refused %d, want 9 (8 of the writer's, the synthetic one) and 10: every model_inst_id plan without a model_match, every topology without a business and every empty plan is refused", accepted, refused)
+	}
+}
+
+// Ids are text on a key path: an integer literal, however long, is kept as
+// written and never rounded through a float.
+func TestLargeIntegerIdsAreKeptAsWritten(t *testing.T) {
+	plan, err := targetplan.Decode(json.RawMessage(`{"schema_version":1,"model_id":"cw-Host","target_rule":"host_id","failure_policy":"no_match",
+		"static_targets":[{"bk_host_id":9007199254740993},{"bk_host_id":"9007199254740995"}],
+		"dynamic_groups":[{"dynamic_group_id":9007199254740997}],"dynamic_topologies":[]}`), targetplan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(plan.StaticKeys, ",") != "9007199254740993,9007199254740995" || strings.Join(plan.DynamicGroups, ",") != "9007199254740997" {
+		t.Fatalf("keys %v groups %v were not kept as written", plan.StaticKeys, plan.DynamicGroups)
 	}
 }
