@@ -2427,15 +2427,17 @@ func (executor observedProductionSlotExecutor) Execute(
 		// The reason is asked as well as the kind, because the line reports the
 		// reason and the two do not have to agree.
 		//
-		// A Slot that ran - queried, evaluated, wrote its state - and then found
-		// at commit time that its cursor had moved on reports GAP_SKIPPED
-		// through the reason while its completion kind is whatever the run
-		// produced. Gating only on the kind left exactly that population
-		// without a cause field: a Query Group skipping every round showed
-		// GAP_SKIPPED and nothing about why, which is the reading this field
-		// was added to provide. A cause that is absent precisely in the state
-		// it exists to explain is worse than no field, because its absence
-		// cannot be told from a build that does not report it.
+		// A Slot that ran - queried, evaluated, wrote its state - and whose
+		// Level outcomes are all UNKNOWN completes COMPLETED_WITH_UNAVAILABLE
+		// and copies GAP_SKIPPED up from the Level into the reason, while its
+		// completion kind is whatever the run produced (read on a deployment:
+		// a warming Query Group, 249 Levels UNKNOWN, every round shaped so).
+		// Gating only on the kind left exactly that population without a
+		// cause field: a Query Group skipping every round showed GAP_SKIPPED
+		// and nothing about why, which is the reading this field was added
+		// to provide. A cause that is absent precisely in the state it exists
+		// to explain is worse than no field, because its absence cannot be
+		// told from a build that does not report it.
 		heldBy = scheduler.HeldByFromContext(ctx)
 	}
 	observedResult := result.Result
