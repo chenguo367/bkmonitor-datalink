@@ -117,6 +117,80 @@ func PackedEncodedUpperBoundV1(levelCount, pointCount int) (int, error) {
 	return base + pointCount*perPoint, nil
 }
 
+// RuntimeEnvelopeUpperBoundV2 is the shape-only upper bound for the persisted
+// Runtime State record, the JSON envelope execution v2 actually writes.
+//
+// It exists beside PackedEncodedUpperBoundV1 because the two representations
+// are not within a constant factor of each other and only one of them is what
+// the store holds. The packed blob spends 19 bytes on a point; the JSON record
+// spends about 234 for one Level and 353 for two, because it repeats per point
+// what the packed form hoists: a 64-character record id whose first 16 bytes
+// are all anyone reads, and a 64-character detect fingerprint that is compared
+// for equality against the Level's own and then discarded - a value that is
+// identical for every point of a Level by construction, since a point whose
+// fingerprint differs is an invariant violation.
+//
+// That difference has a consequence nobody wrote down. MaxValueBytes is the
+// codec's byte budget, sized for the packed form, and it is applied unchanged
+// to the record that costs 12 to 18 times more per point. So the point ceiling
+// the configuration states - 4096, in both the compiler and the codec - cannot
+// be reached in the representation in use: the real one is about 2200 points
+// for one Level and about 1480 for two. A strategy configured between those
+// compiles cleanly and then has every state write refused as budget exceeded,
+// per series, silently, for as long as it exists.
+//
+// Deriving the compile-time ceiling from this function is what keeps the two
+// in step. When the record becomes the packed form the arithmetic changes here
+// and the stated 4096 becomes reachable again, with nothing else to revisit.
+func RuntimeEnvelopeUpperBoundV2(levelCount, pointCount int) (int, error) {
+	if levelCount < 0 || pointCount < 0 {
+		return 0, fmt.Errorf("state: encoded shape must be non-negative")
+	}
+	// Per point: the object keys and punctuation, a 64-character record id, and
+	// a source time at its widest. Per Level fact inside a point: the keys, a
+	// Level id at its widest, a 64-character fingerprint and a result.
+	const (
+		envelopeOverhead = 1 << 10
+		perLevelState    = 128
+		perPointFixed    = 126
+		perPointPerLevel = 123
+	)
+	base := envelopeOverhead
+	if levelCount > (math.MaxInt-base)/perLevelState {
+		return 0, ErrStateBudget
+	}
+	base += levelCount * perLevelState
+	perPoint := perPointFixed
+	if levelCount > (math.MaxInt-perPoint)/perPointPerLevel {
+		return 0, ErrStateBudget
+	}
+	perPoint += levelCount * perPointPerLevel
+	if pointCount > (math.MaxInt-base)/perPoint {
+		return 0, ErrStateBudget
+	}
+	return base + pointCount*perPoint, nil
+}
+
+// MaxRuntimeEnvelopePoints is the most retained points a Plan with this many
+// Levels can store before the record crosses valueBytes. It is the compile-time
+// ceiling, derived from the representation rather than stated beside it.
+func MaxRuntimeEnvelopePoints(levelCount, valueBytes int) (int, error) {
+	if levelCount <= 0 || valueBytes <= 0 {
+		return 0, fmt.Errorf("state: level count and value budget must be positive")
+	}
+	low, high := 0, valueBytes
+	for low < high {
+		mid := (low + high + 1) / 2
+		size, err := RuntimeEnvelopeUpperBoundV2(levelCount, mid)
+		if err != nil || size > valueBytes {
+			high = mid - 1
+			continue
+		}
+		low = mid
+	}
+	return low, nil
+}
+
 func (codec *Codec) Encode(window *Window) ([]byte, error) {
 	if codec == nil || window == nil {
 		return nil, fmt.Errorf("%w: codec and window are required", ErrCorruptState)

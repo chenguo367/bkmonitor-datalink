@@ -292,3 +292,46 @@ func TestTheMutationGuardrailIsNotDerivedFromMemory(t *testing.T) {
 			"that is the budget that is supposed to track memory", retainedSeen)
 	}
 }
+
+// The compile-time point ceiling comes from the representation the store
+// writes, and it is below the limit the configuration states.
+//
+// That gap is the finding: max_required_history_points is 4096, the record runs
+// out around 2100 points for one Level, and nothing anywhere held the smaller
+// number - so a Plan configured between them compiled cleanly and then had
+// every state write refused, per series, with nothing to say why. Deriving it
+// here rather than writing it beside the configured one is what keeps them from
+// drifting when the representation changes.
+func TestTheRetainedPointCeilingComesFromTheRepresentation(t *testing.T) {
+	cfg := completePhaseTwoProductionConfig(validGoAccessConfigObject().withDerivedCapacity(containerShapes()[0]))
+	limits := cfg.CompilerLimits()
+	if len(limits.MaxRetainedPointsByLevels) <= limits.MaxLevelsPerPlan {
+		t.Fatalf("ceilings %v do not cover every Level count a Plan may compile, including the extra "+
+			"Level a no-data Plan adds", limits.MaxRetainedPointsByLevels)
+	}
+	single := limits.MaxRetainedPointsByLevels[1]
+	if single == 0 {
+		t.Fatal("no ceiling derived for a single-Level Plan")
+	}
+	if single >= limits.MaxRequiredHistoryPoints {
+		t.Fatalf("derived ceiling %d is not below the configured %d; if the stated limit were reachable "+
+			"there would be nothing here to fix", single, limits.MaxRequiredHistoryPoints)
+	}
+	// More Levels share one record, so each one leaves room for fewer points.
+	for count := 2; count < len(limits.MaxRetainedPointsByLevels); count++ {
+		previous, current := limits.MaxRetainedPointsByLevels[count-1], limits.MaxRetainedPointsByLevels[count]
+		if current == 0 || previous == 0 {
+			continue
+		}
+		if current >= previous {
+			t.Fatalf("ceiling for %d Levels (%d) is not below the one for %d (%d); every Level writes its "+
+				"facts on every point, so it has to fall", count, current, count-1, previous)
+		}
+	}
+	// The strategy behind decision-019 retains 1469 points on one Level, and
+	// this must not stop it: a bound that refuses what runs today is a worse
+	// failure than the one it prevents.
+	if single < 1469 {
+		t.Fatalf("single-Level ceiling %d would refuse a 1469-point window that stores cleanly today", single)
+	}
+}

@@ -49,12 +49,23 @@ type Limits struct {
 	MaxTriggerWindowSize          uint32
 	MaxRecoveryConsecutiveWindows uint32
 	MaxRequiredHistoryPoints      uint32
-	MaxTriggerComputeCost         uint64
-	MaxCompiledPlanBytes          int
-	MaxCacheEntries               int
-	MaxCacheBytes                 int
-	NegativeCacheTTL              time.Duration
-	BudgetRevision                string
+	// MaxRetainedPointsByLevels is the most retained points a Plan may keep,
+	// indexed by how many Levels share one stored record. Index 0 is unused;
+	// an index past the end means no ceiling is stated for that shape.
+	//
+	// It is a table rather than one number because the stored record holds
+	// every Level's facts on every point, so what fits depends on the Level
+	// count: about 2100 points for one Level and about 1400 for two, against a
+	// MaxRequiredHistoryPoints of 4096 that neither shape can reach. Derived
+	// from the representation by whoever builds these limits, so the two move
+	// together instead of one being written down beside the other.
+	MaxRetainedPointsByLevels []uint32
+	MaxTriggerComputeCost     uint64
+	MaxCompiledPlanBytes      int
+	MaxCacheEntries           int
+	MaxCacheBytes             int
+	NegativeCacheTTL          time.Duration
+	BudgetRevision            string
 }
 
 type StateSemantics struct {

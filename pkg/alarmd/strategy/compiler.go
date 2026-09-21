@@ -222,6 +222,9 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 	sort.Slice(compiled.levels, func(left, right int) bool {
 		return compiled.levels[left].definition.LevelID < compiled.levels[right].definition.LevelID
 	})
+	if terminal := c.checkRetainedPointsFit(compiled); terminal != nil {
+		return CompileResult{planTerminal: terminal}, nil
+	}
 	stateHash, err := c.deriveStateCompatibilityHash(request, compiled.levels)
 	if err != nil {
 		return CompileResult{}, fmt.Errorf("strategy: derive state compatibility: %w", err)
@@ -831,4 +834,40 @@ func contains(values []string, target string) bool {
 		}
 	}
 	return false
+}
+
+// checkRetainedPointsFit refuses a Plan whose retained window cannot be stored
+// in the representation the store actually writes.
+//
+// The ceiling depends on the Level count, so it cannot be decided while
+// compiling one Level: every Level's facts are recorded on every point of one
+// shared record, so a window that fits alone may not fit beside a second Level.
+//
+// Refused here rather than discovered at write time. Nothing above this stops
+// it: MaxRequiredHistoryPoints is 4096 and the representation runs out at about
+// 2100 for one Level, so a Plan configured between the two compiles cleanly,
+// activates, evaluates - and has every state write refused as budget exceeded,
+// per series, with no alert and nothing in the strategy to suggest why. A
+// deterministic refusal at compile time is the same verdict delivered where
+// someone can act on it.
+func (c *PlanCompiler) checkRetainedPointsFit(compiled *CompiledPlan) *Terminal {
+	levels := compiled.levels
+	if compiled.noDataLevel != nil {
+		levels = append(append([]CompiledLevel(nil), levels...), *compiled.noDataLevel)
+	}
+	if len(levels) == 0 || len(levels) >= len(c.limits.MaxRetainedPointsByLevels) {
+		return nil
+	}
+	ceiling := c.limits.MaxRetainedPointsByLevels[len(levels)]
+	if ceiling == 0 {
+		return nil
+	}
+	for _, level := range levels {
+		if level.stateRequirement.RetentionPoints > ceiling {
+			// The window is what an operator set, so the path names it rather
+			// than the storage arithmetic that decided it does not fit.
+			return &Terminal{ReasonCode: contract.ReasonPlanBudgetExceeded, FieldPath: "level.state_requirement"}
+		}
+	}
+	return nil
 }
