@@ -75,3 +75,29 @@ func TestTheWireFormatIsOnTheEvaluationAndACKLines(t *testing.T) {
 		}
 	}
 }
+
+// The ACK line renders the sink's breakdown under one key per bucket that
+// counted, so a reader of one line sees which protocol dropped which kind.
+func TestTheACKLineRendersWhichProtocolDroppedWhichKind(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	withheldObserver(t, &output).Observe(context.Background(), Observation{
+		Component: ComponentOutput, Stage: StageEventACKed, Result: ResultSuccess,
+		Trace: TraceFields{StrategyID: "4101", QueryGroupKey: "qg-wire", EvaluationTime: 600},
+		OutputWrite: &OutputWriteFacts{Published: 2, WithoutMessage: 3, WithoutMessageBy: []OutputWithoutMessage{
+			{Format: contract.WireFormatPythonCompatible, EventKind: contract.TriggerEventRecovery, Events: 3},
+			{Format: contract.WireFormatStandardRawEvent, EventKind: contract.TriggerEventRecovery, Events: 0},
+		}},
+	})
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode ACK log: %v; log=%s", err, output.String())
+	}
+	if event["events_without_message"] != float64(3) || event["events_without_message_python_compatible_recovery"] != float64(3) {
+		t.Fatalf("ACK line = %#v, want events_without_message 3 and the python_compatible/recovery bucket 3", event)
+	}
+	if _, present := event["events_without_message_standard_raw_event_recovery"]; present {
+		t.Fatalf("a bucket that counted nothing is on the line: %#v", event)
+	}
+}

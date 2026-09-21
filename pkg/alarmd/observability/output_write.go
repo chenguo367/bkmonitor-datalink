@@ -9,7 +9,10 @@
 
 package observability
 
-import "context"
+import (
+	"context"
+	"sort"
+)
 
 // What the sink did with the round's events, as the sink counts it.
 //
@@ -30,6 +33,40 @@ import "context"
 type OutputWriteFacts struct {
 	Published      int64 `json:"messages_published"`
 	WithoutMessage int64 `json:"events_without_message"`
+	// WithoutMessageBy is WithoutMessage split by the event's wire format and
+	// kind, as the sink decided each: which protocol had no message for
+	// which kind of event. Under the Python-compatible protocol that is
+	// every recovery -- an envelope assembled from the records and dropped
+	// at the sink -- and how many of those a deployment builds is the
+	// number that decides whether the open-alert gate should run for that
+	// protocol too. Summed over the buckets it equals WithoutMessage; absent
+	// on a report from a sink that gave no breakdown.
+	WithoutMessageBy []OutputWithoutMessage `json:"events_without_message_by,omitempty"`
+}
+
+// OutputWithoutMessage is one bucket of events the protocol had no message
+// for: the resolved wire format, the event kind, and how many.
+type OutputWithoutMessage struct {
+	Format    string `json:"format"`
+	EventKind string `json:"event_kind"`
+	Events    int64  `json:"events"`
+}
+
+// The event kinds the without-message metric is created for at startup;
+// EventKindOther folds a kind this build does not name.
+const EventKindOther = "_other"
+
+// OutputEventKinds is every kind a metric cell is created for.
+var OutputEventKinds = []string{"ABNORMAL", "RECOVERY", EventKindOther}
+
+// NormalizeOutputEventKind folds an event kind onto the bounded label set.
+func NormalizeOutputEventKind(kind string) string {
+	switch kind {
+	case "ABNORMAL", "RECOVERY":
+		return kind
+	default:
+		return EventKindOther
+	}
 }
 
 type outputWriteReport struct {
@@ -58,9 +95,10 @@ func ContextWithOutputWriteReport(ctx context.Context) (context.Context, func() 
 }
 
 // ReportOutputWrite is the sink's count of one batch: messages handed to its
-// client, events that produced none. A no-op when the caller gave no place
-// for it.
-func ReportOutputWrite(ctx context.Context, published, withoutMessage int) {
+// client, events that produced none, and the latter by format and kind. A
+// no-op when the caller gave no place for it. The breakdown is sorted so two
+// reports of the same batch read the same.
+func ReportOutputWrite(ctx context.Context, published, withoutMessage int, withoutMessageBy []OutputWithoutMessage) {
 	if ctx == nil {
 		return
 	}
@@ -68,6 +106,13 @@ func ReportOutputWrite(ctx context.Context, published, withoutMessage int) {
 	if report == nil {
 		return
 	}
-	report.facts = OutputWriteFacts{Published: int64(published), WithoutMessage: int64(withoutMessage)}
+	buckets := append([]OutputWithoutMessage(nil), withoutMessageBy...)
+	sort.Slice(buckets, func(i, j int) bool {
+		if buckets[i].Format != buckets[j].Format {
+			return buckets[i].Format < buckets[j].Format
+		}
+		return buckets[i].EventKind < buckets[j].EventKind
+	})
+	report.facts = OutputWriteFacts{Published: int64(published), WithoutMessage: int64(withoutMessage), WithoutMessageBy: buckets}
 	report.reported = true
 }

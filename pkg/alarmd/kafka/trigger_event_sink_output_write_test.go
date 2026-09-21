@@ -54,6 +54,11 @@ func TestTheSinkCountsTheMessagesABatchBecame(t *testing.T) {
 	}
 	if facts := read(); facts == nil || facts.Published != 0 || facts.WithoutMessage != 3 {
 		t.Fatalf("count for three recoveries = %+v, want 0 messages, 3 events without one", facts)
+	} else if len(facts.WithoutMessageBy) != 1 || facts.WithoutMessageBy[0] != (observability.OutputWithoutMessage{
+		Format: contract.WireFormatPythonCompatible, EventKind: contract.TriggerEventRecovery, Events: 3}) {
+		// The breakdown names which protocol had no message for which kind:
+		// the three were recoveries under the Python-compatible protocol.
+		t.Fatalf("breakdown for three recoveries = %+v, want one bucket python_compatible/RECOVERY = 3", facts.WithoutMessageBy)
 	}
 
 	ctx, read = observability.ContextWithOutputWriteReport(context.Background())
@@ -65,6 +70,10 @@ func TestTheSinkCountsTheMessagesABatchBecame(t *testing.T) {
 	}
 	if facts := read(); facts == nil || facts.Published != 2 || facts.WithoutMessage != 1 {
 		t.Fatalf("count for two anomalies and a recovery = %+v, want 2 and 1", facts)
+	} else if len(facts.WithoutMessageBy) != 1 || facts.WithoutMessageBy[0].EventKind != contract.TriggerEventRecovery || facts.WithoutMessageBy[0].Events != 1 {
+		// The anomalies became messages and are in no bucket; only the
+		// recovery is, and the buckets sum to WithoutMessage.
+		t.Fatalf("breakdown for two anomalies and a recovery = %+v, want the one recovery and nothing for the anomalies", facts.WithoutMessageBy)
 	}
 
 	// A caller that gave no place for the count is served as before.

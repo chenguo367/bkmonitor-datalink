@@ -84,3 +84,50 @@ func TestCatalogPlansByWireFormatArePublishedFromTheComposition(t *testing.T) {
 		t.Fatalf("values = %v, want 12 python_compatible and a published 0 standard_raw_event", values)
 	}
 }
+
+// Every format × kind is a series from startup, and each ACK line adds the
+// sink's breakdown to its cells: the recoveries the Python-compatible
+// protocol dropped land under python_compatible/RECOVERY, a kind or format
+// the build does not name folds, and a line without a breakdown adds nothing.
+func TestOutputEventsWithoutMessageAreSeriesFromStartupAndSumTheSinksBreakdown(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	const family = "bkmonitor_alarmd_output_events_without_message_total"
+	cells := len(observability.WireFormats) * len(observability.OutputEventKinds)
+	if before := gatherFamily(t, r, family); len(before) != cells {
+		t.Fatalf("%d series before any ACK, want every format x kind (%d) so a protocol that dropped nothing reads as zero", len(before), cells)
+	}
+	ctx := context.Background()
+	r.Observe(ctx, observability.Observation{
+		Component: observability.ComponentOutput, Stage: observability.StageEventACKed, Result: observability.ResultSuccess,
+		OutputWrite: &observability.OutputWriteFacts{Published: 2, WithoutMessage: 4, WithoutMessageBy: []observability.OutputWithoutMessage{
+			{Format: contract.WireFormatPythonCompatible, EventKind: contract.TriggerEventRecovery, Events: 3},
+			{Format: contract.WireFormatPythonCompatible, EventKind: "SOMETHING_NEW", Events: 1},
+		}},
+	})
+	r.Observe(ctx, observability.Observation{
+		Component: observability.ComponentOutput, Stage: observability.StageEventACKed, Result: observability.ResultDegraded,
+		OutputWrite: &observability.OutputWriteFacts{Published: 0, WithoutMessage: 2, WithoutMessageBy: []observability.OutputWithoutMessage{
+			{Format: contract.WireFormatPythonCompatible, EventKind: contract.TriggerEventRecovery, Events: 2},
+		}},
+	})
+	// A sink from before the breakdown: counts, no buckets. Nothing to add.
+	r.Observe(ctx, observability.Observation{
+		Component: observability.ComponentOutput, Stage: observability.StageEventACKed, Result: observability.ResultSuccess,
+		OutputWrite: &observability.OutputWriteFacts{Published: 1, WithoutMessage: 7},
+	})
+	count := func(format, kind string) float64 {
+		return testutil.ToFloat64(r.phaseTwo.outputEventsWithoutMessage.WithLabelValues(format, kind))
+	}
+	if got := count(contract.WireFormatPythonCompatible, contract.TriggerEventRecovery); got != 5 {
+		t.Fatalf("python_compatible/RECOVERY = %v, want 5", got)
+	}
+	if got := count(contract.WireFormatPythonCompatible, observability.EventKindOther); got != 1 {
+		t.Fatalf("python_compatible/_other = %v, want the 1 unknown kind folded", got)
+	}
+	if got := count(contract.WireFormatStandardRawEvent, contract.TriggerEventRecovery); got != 0 {
+		t.Fatalf("standard_raw_event/RECOVERY = %v, want 0", got)
+	}
+	if after := gatherFamily(t, r, family); len(after) != cells {
+		t.Fatalf("%d series after the lines, want the same %d: an unknown kind folds rather than creating a cell", len(after), cells)
+	}
+}
