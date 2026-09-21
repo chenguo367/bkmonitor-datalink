@@ -240,8 +240,11 @@ var failureFacets = map[string]facets{
 	// Read at evaluate: it is what the evaluation produced, whatever the
 	// commit then did with it.
 	"GAP_GUARD_DUPLICATED_ACROSS_BATCHES": {StageEvaluate, ClassContract, DependencyNone},
-	"GAP_APPLY_CONFLICT":                  {StageCommit, ClassContract, DependencyNone},
-	"GAP_APPLY_STALE_VERSION":             {StageCommit, ClassContract, DependencyNone},
+	// Also read at evaluate, and for the same reason: this is the Slot's own
+	// merge of what its batches produced, before anything is written.
+	"GAP_GUARD_DISAGREE":      {StageEvaluate, ClassContract, DependencyNone},
+	"GAP_APPLY_CONFLICT":      {StageCommit, ClassContract, DependencyNone},
+	"GAP_APPLY_STALE_VERSION": {StageCommit, ClassContract, DependencyNone},
 	// The write did not land. Unavailable rather than contract, and against
 	// Redis: nothing here disagreed with anything, the store did not answer.
 	"GAP_WRITE_RETRYABLE": {StageCommit, ClassUnavailable, DependencyRedis},

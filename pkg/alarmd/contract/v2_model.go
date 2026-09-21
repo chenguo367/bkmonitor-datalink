@@ -175,9 +175,24 @@ const (
 	// batch could. Recorded rather than refused, so the shape can be counted
 	// before anything is changed on its account.
 	ReasonGapGuardDuplicatedAcrossBatches = "GAP_GUARD_DUPLICATED_ACROSS_BATCHES"
-	ReasonGapApplyConflict                = "GAP_APPLY_CONFLICT"
-	ReasonGapApplyStaleVersion            = "GAP_APPLY_STALE_VERSION"
-	ReasonGapWriteRetryable               = "GAP_WRITE_RETRYABLE"
+	// ReasonGapGuardDisagree names two series batches of one Slot saying
+	// different things about one Plan's gap marker: clearing it with different
+	// content, or expecting it at different revisions.
+	//
+	// It is the one refusal the Slot-wide merge cannot resolve. A clear is
+	// derived from the marker the Slot loaded rather than from the batch, so
+	// every batch that proposes one proposes the same one; two that differ
+	// mean two batches read different markers for one Plan in one Slot, and
+	// there is no winner to pick - whichever were kept, the other batch's
+	// series were evaluated against a marker the Slot then denies.
+	//
+	// Named because it reaches the completion line, and a refusal with no word
+	// arrives there as an error nobody can group, count, or tell apart from
+	// the next unnamed one.
+	ReasonGapGuardDisagree     = "GAP_GUARD_DISAGREE"
+	ReasonGapApplyConflict     = "GAP_APPLY_CONFLICT"
+	ReasonGapApplyStaleVersion = "GAP_APPLY_STALE_VERSION"
+	ReasonGapWriteRetryable    = "GAP_WRITE_RETRYABLE"
 	// State version refusals are observation-only names; they do not change
 	// the state store's status contract or the scheduler's retry decision.
 	ReasonStateVersionConflict = "STATE_VERSION_CONFLICT"

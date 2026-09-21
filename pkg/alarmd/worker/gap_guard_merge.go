@@ -14,6 +14,39 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
+// GapGuardDisagreement is two series batches of one Slot saying different
+// things about one Plan's gap marker.
+//
+// A typed error rather than a sentence because it reaches the completion line,
+// and a refusal with no word arrives there as an error nobody can group, count
+// or tell apart from the next unnamed one - which is how a Query Group
+// conflicting every other Slot for half an hour once read as an unclassified
+// defect.
+type GapGuardDisagreement struct {
+	// Detail says what disagreed, for a human reading the error. The reason
+	// code is what the line carries.
+	Detail string
+}
+
+func (disagreement *GapGuardDisagreement) Error() string {
+	return "alarmd worker: " + disagreement.Detail
+}
+
+// GapGuardDisagreeReason returns the bounded reason when err is the merge
+// refusing two batches that disagree, so an observer names it rather than
+// calling it unknown.
+func GapGuardDisagreeReason(err error) (execution.ReasonCode, bool) {
+	var disagreement *GapGuardDisagreement
+	if !errors.As(err, &disagreement) || disagreement == nil {
+		return "", false
+	}
+	return execution.ReasonCode(contract.ReasonGapGuardDisagree), true
+}
+
+func gapGuardDisagree(format string, args ...any) error {
+	return &GapGuardDisagreement{Detail: fmt.Sprintf(format, args...)}
+}
+
 // mergeGapGuardStatements folds one series batch's gap marker statements into
 // the ones the Slot has accumulated.
 //
@@ -140,15 +173,15 @@ func identicalGapStatements(statements []execution.PlanGapMutation) bool {
 // foldGapScopeMutation merges two batches' statements about one scope.
 func foldGapScopeMutation(existing, candidate execution.GapScopeMutation) (execution.GapScopeMutation, error) {
 	if existing.Kind != candidate.Kind {
-		return execution.GapScopeMutation{}, fmt.Errorf(
-			"alarmd worker: two series batches propose %s and %s for one gap scope",
+		return execution.GapScopeMutation{}, gapGuardDisagree(
+			"two series batches propose %s and %s for one gap scope",
 			existing.Kind, candidate.Kind)
 	}
 	if existing.RequiredFullSlots != candidate.RequiredFullSlots {
 		// Derived from the compiled Plan, which is one object for the Slot, so
 		// a disagreement means the batches did not evaluate the same Plan.
-		return execution.GapScopeMutation{}, fmt.Errorf(
-			"alarmd worker: two series batches require %d and %d FULL warmup slots for one gap scope",
+		return execution.GapScopeMutation{}, gapGuardDisagree(
+			"two series batches require %d and %d FULL warmup slots for one gap scope",
 			existing.RequiredFullSlots, candidate.RequiredFullSlots)
 	}
 	existing.ReasonCode = execution.ReasonCode(contract.FoldGapReason(
@@ -180,16 +213,16 @@ func agreedGapClearStatement(current, next []execution.PlanGapMutation) ([]execu
 	base := combined[0]
 	for _, statement := range combined[1:] {
 		if statement.Identity != base.Identity {
-			return nil, errors.New("alarmd worker: two series batches clear different Plan gap markers")
+			return nil, gapGuardDisagree("two series batches clear different Plan gap markers")
 		}
 		if statement.MutationDigest != base.MutationDigest {
-			return nil, fmt.Errorf(
-				"alarmd worker: two series batches clear one Plan gap marker differently (%s and %s)",
+			return nil, gapGuardDisagree(
+				"two series batches clear one Plan gap marker differently (%s and %s)",
 				base.MutationDigest, statement.MutationDigest)
 		}
 		if statement.ExpectedMarkerRevision != base.ExpectedMarkerRevision {
-			return nil, fmt.Errorf(
-				"alarmd worker: two series batches clear one Plan gap marker expecting revision %d and %d",
+			return nil, gapGuardDisagree(
+				"two series batches clear one Plan gap marker expecting revision %d and %d",
 				base.ExpectedMarkerRevision, statement.ExpectedMarkerRevision)
 		}
 	}
@@ -201,14 +234,14 @@ func agreedGapClearStatement(current, next []execution.PlanGapMutation) ([]execu
 func gapStatementsAgreeOutsideScopes(base, candidate execution.PlanGapMutation) error {
 	switch {
 	case candidate.Identity != base.Identity:
-		return errors.New("alarmd worker: two series batches open different Plan gap markers")
+		return gapGuardDisagree("two series batches open different Plan gap markers")
 	case candidate.ExpectedMarkerRevision != base.ExpectedMarkerRevision:
-		return fmt.Errorf("alarmd worker: two series batches open one Plan gap marker expecting revision %d and %d",
+		return gapGuardDisagree("two series batches open one Plan gap marker expecting revision %d and %d",
 			base.ExpectedMarkerRevision, candidate.ExpectedMarkerRevision)
 	case candidate.ApplyVersion != base.ApplyVersion:
-		return errors.New("alarmd worker: two series batches open one Plan gap marker under different apply versions")
+		return gapGuardDisagree("two series batches open one Plan gap marker under different apply versions")
 	case candidate.ScheduleRevision != base.ScheduleRevision:
-		return errors.New("alarmd worker: two series batches open one Plan gap marker under different schedule revisions")
+		return gapGuardDisagree("two series batches open one Plan gap marker under different schedule revisions")
 	}
 	return nil
 }

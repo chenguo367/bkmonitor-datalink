@@ -516,8 +516,12 @@ var codeChecks = map[string]verdict{
 	// it against the deployment would put objects on the page for something
 	// nobody has decided is their problem.
 	"GAP_GUARD_DUPLICATED_ACROSS_BATCHES": isNormal,
-	"GAP_APPLY_CONFLICT":                  lands(CheckDefect),
-	"GAP_APPLY_STALE_VERSION":             lands(CheckDefect),
+	// A refusal, unlike the reading above, and deterministic: the Slot did not
+	// complete, and re-running it from the same markers reaches the same
+	// disagreement. The object is not detecting, so it belongs on the page.
+	"GAP_GUARD_DISAGREE":      lands(CheckDefect),
+	"GAP_APPLY_CONFLICT":      lands(CheckDefect),
+	"GAP_APPLY_STALE_VERSION": lands(CheckDefect),
 	// The write did not land at all. That is the store not answering, which is
 	// the dependency's line, beside STATE_WRITE_RETRYABLE above.
 	"GAP_WRITE_RETRYABLE": lands(CheckDependencyDown),

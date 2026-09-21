@@ -138,11 +138,16 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// Deterministic: the same batches produce the same shape again. It is a
 	// reading rather than a refusal, so nothing retries on its account.
 	ReasonGapGuardDuplicatedAcrossBatches: {ReasonGapGuardDuplicatedAcrossBatches, ReasonClassDeterministic, ReasonDomainObservation},
-	ReasonGapApplyConflict:                {ReasonGapApplyConflict, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonGapApplyStaleVersion:            {ReasonGapApplyStaleVersion, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonGapWriteRetryable:               {ReasonGapWriteRetryable, ReasonClassRetryable, ReasonDomainObservation},
-	ReasonStateVersionConflict:            {ReasonStateVersionConflict, ReasonClassDeterministic, ReasonDomainObservation},
-	ReasonStateStaleVersion:               {ReasonStateStaleVersion, ReasonClassDeterministic, ReasonDomainObservation},
+	// Deterministic rather than retryable: the disagreement is between two
+	// batches of this Slot's own evaluation, so the same Slot run again from
+	// the same markers reaches it again. A retry would spend a round to be
+	// refused identically.
+	ReasonGapGuardDisagree:     {ReasonGapGuardDisagree, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonGapApplyConflict:     {ReasonGapApplyConflict, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonGapApplyStaleVersion: {ReasonGapApplyStaleVersion, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonGapWriteRetryable:    {ReasonGapWriteRetryable, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonStateVersionConflict: {ReasonStateVersionConflict, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonStateStaleVersion:    {ReasonStateStaleVersion, ReasonClassDeterministic, ReasonDomainObservation},
 	// Deterministic: the Plan asks for more than this deployment has, and it
 	// will ask for the same on every round until one of the two changes.
 	ReasonSnapshotRetentionInsufficient: {
