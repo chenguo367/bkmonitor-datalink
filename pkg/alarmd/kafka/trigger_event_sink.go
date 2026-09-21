@@ -499,16 +499,15 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 	// the nil slots are compacted away: this is the only place that knows
 	// which slot stayed empty and why, and the caller must not re-derive the
 	// protocol's rule to find out.
-	withoutMessageBy := map[observability.OutputWithoutMessage]int64{}
+	withoutMessageBy := map[withoutMessageKey]int64{}
 	for index, message := range messages {
 		if message == nil {
-			withoutMessageBy[observability.OutputWithoutMessage{Format: formats[index], EventKind: events[index].EventKind}]++
+			withoutMessageBy[withoutMessageKey{format: formats[index], eventKind: events[index].EventKind}]++
 		}
 	}
 	buckets := make([]observability.OutputWithoutMessage, 0, len(withoutMessageBy))
-	for bucket, count := range withoutMessageBy {
-		bucket.Events = count
-		buckets = append(buckets, bucket)
+	for key, count := range withoutMessageBy {
+		buckets = append(buckets, observability.OutputWithoutMessage{Format: key.format, EventKind: key.eventKind, Events: count})
 	}
 	published := messages[:0]
 	for _, message := range messages {
@@ -565,4 +564,16 @@ func (sink *TriggerEventSink) Close() error {
 		return nil
 	}
 	return sink.core.Close()
+}
+
+// withoutMessageKey is what an event the protocol had no message for is
+// bucketed by: its resolved format and its kind, and nothing else. A type of
+// its own rather than the reported bucket with the count left zero, so that
+// which fields take part in the bucketing is said by the type -- a field
+// added to the reported bucket later cannot split the buckets, and the sum
+// over them would go on equalling the total while the buckets quietly
+// multiplied, which no assertion on the total would catch.
+type withoutMessageKey struct {
+	format    string
+	eventKind string
 }
