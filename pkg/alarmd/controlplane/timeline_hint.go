@@ -83,3 +83,43 @@ var errTimelineRevisionMoved = errors.New("alarmd controlplane: the timeline is 
 func TimelineRevisionHint(ctx context.Context) uint64 {
 	return timelineRevisionHint(ctx)
 }
+
+// activationsFromTimeline answers a Plan activation request from the Query
+// Group's timeline: the Segment the contract's Slot falls in must be the one
+// the contract names, a closed Segment makes every Plan historical, and an
+// open one answers with its own activation records - which are the records
+// the activation state carries for the Query Group, written from one list
+// in the cutover's one script.
+func activationsFromTimeline(request execution.PlanActivationRequest, timeline persistedScheduleTimeline) (execution.PlanActivationResult, error) {
+	contractRef := request.Contract
+	for _, segment := range timeline.Segments {
+		schedule := segment.Schedule
+		if !schedule.Segment.Contains(contractRef.Slot.EvaluationTime) {
+			continue
+		}
+		if schedule.Segment.Start != contractRef.ScheduleSegmentStart ||
+			schedule.Segment.ScheduleRevision != contractRef.ScheduleRevision ||
+			schedule.Segment.Publication.SnapshotRevision != contractRef.SnapshotRevision ||
+			schedule.Segment.QueryRevision != contractRef.QueryRevision {
+			return execution.PlanActivationResult{}, errors.New("alarmd controlplane: activation request does not reference its persisted Schedule Segment")
+		}
+		historical := schedule.Segment.End != nil
+		byPlan := make(map[execution.PlanIdentity]execution.PlanActivationFact, len(segment.Plans))
+		for _, record := range segment.Plans {
+			byPlan[record.Fact.Plan] = record.Fact
+		}
+		result := execution.PlanActivationResult{Contract: contractRef, Facts: make([]execution.PlanActivationFact, 0, len(request.Plans))}
+		for _, plan := range request.Plans {
+			fact, found := byPlan[plan]
+			if historical || !found {
+				fact = execution.PlanActivationFact{Plan: plan, Selection: execution.ActivationNone}
+			}
+			result.Facts = append(result.Facts, fact)
+		}
+		if err := result.Validate(request); err != nil {
+			return execution.PlanActivationResult{}, err
+		}
+		return result, nil
+	}
+	return execution.PlanActivationResult{}, errors.New("alarmd controlplane: activation request has no persisted Schedule Segment")
+}

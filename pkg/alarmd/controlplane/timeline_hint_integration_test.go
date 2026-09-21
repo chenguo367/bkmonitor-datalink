@@ -111,3 +111,86 @@ func TestAHintedTimelineReadSkipsTheHeaderUntilTheHintGoesStale(t *testing.T) {
 		t.Fatalf("the right hint after a move was not served hinted: %+v -> %+v", before.HintedTimeline, after.HintedTimeline)
 	}
 }
+
+// A hinted activation request is answered from the Query Group's timeline
+// with the same facts the header path answers, reading no header; after a
+// cutover the closed Segment's Slot is historical on both paths.
+func TestAHintedActivationRequestIsAnsweredFromTheTimelineWithoutTheHeader(t *testing.T) {
+	client := newControlplaneRedis(t)
+	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:hint-activation", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	catalog := validCatalog(t, 80)
+	snapshot, _, err := repository.PublishCatalog(ctx, catalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	group := catalog.QueryGroups[0]
+	plan := group.Plans[0]
+	schedule := frozenSchedule(t, snapshot.Publication, group, 60, nil)
+	state := activationState(t, 1, snapshot, schedule, nil)
+	if err := repository.CompareAndSetInitialScheduleActivation(ctx, controlplane.ActivationExpectation{}, state,
+		[]execution.InitialScheduleActivationFact{{Segment: schedule.Segment}}); err != nil {
+		t.Fatal(err)
+	}
+	contract := execution.FrozenExecutionContractRef{
+		Slot:             execution.SlotIdentity{QueryGroup: group.Identity, EvaluationTime: 60},
+		SnapshotRevision: snapshot.Publication.SnapshotRevision, QueryRevision: group.QueryPlan.QueryRevision,
+		ScheduleRevision: group.ScheduleRevision, ScheduleSegmentStart: 60, DuePlanSetDigest: "due-plans-v1",
+	}
+	missing := execution.PlanIdentity{TenantID: "tenant-a", BusinessID: "2", StrategyID: "9999"}
+	request := execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanIdentity{plan.Identity, missing}}
+	byHeader, err := repository.LoadActivations(ctx, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byHeader.Facts[0].Selection == execution.ActivationNone {
+		t.Fatal("the fixture's Plan is not active on the header path, so the two paths cannot be told apart")
+	}
+	before := repository.ControlReadCacheStats()
+	hinted := controlplane.WithTimelineRevisionHint(ctx, 1)
+	byTimeline, err := repository.LoadActivations(hinted, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(byTimeline.Facts) != 2 || byTimeline.Facts[0] != byHeader.Facts[0] || byTimeline.Facts[1].Selection != execution.ActivationNone {
+		t.Fatalf("hinted activations = %+v, want the header path's %+v", byTimeline.Facts, byHeader.Facts)
+	}
+	after := repository.ControlReadCacheStats()
+	if after.Version.Hits+after.Version.Misses+after.Version.Refreshes != before.Version.Hits+before.Version.Misses+before.Version.Refreshes {
+		t.Fatalf("a hinted activation request probed the header: version reads %+v -> %+v", before.Version, after.Version)
+	}
+	// A contract naming another Segment than the timeline holds is refused on
+	// the hinted path as on the header path.
+	wrong := request
+	wrong.Contract.ScheduleSegmentStart = 61
+	if _, err := repository.LoadActivations(hinted, wrong); err == nil {
+		t.Fatal("a contract that does not reference its persisted Segment was answered on the hinted path")
+	}
+
+	// After the cutover the Slot at 60 is in a closed Segment: historical,
+	// every Plan ActivationNone, with the right hint (2) and without.
+	newCatalog := catalogWithSchedule(t, catalog, 120, 30)
+	newSnapshot, _, err := repository.PublishCatalog(ctx, newCatalog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	boundary := execution.EvaluationTime(180)
+	oldClosed := frozenSchedule(t, snapshot.Publication, group, 60, &boundary)
+	newOpen := frozenSchedule(t, newSnapshot.Publication, newCatalog.QueryGroups[0], boundary, nil)
+	newActivation := activationState(t, 2, newSnapshot, newOpen, nil)
+	if err := repository.CompareAndSetScheduleCutover(ctx, controlplane.ActivationExpectation{RecordRevision: state.RecordRevision, Current: state.Current},
+		newActivation, []execution.ScheduleCutoverFact{{OldSegment: oldClosed.Segment, NewSegment: newOpen.Segment}}); err != nil {
+		t.Fatal(err)
+	}
+	historical, err := repository.LoadActivations(controlplane.WithTimelineRevisionHint(ctx, 2), request)
+	if err != nil || historical.Facts[0].Selection != execution.ActivationNone {
+		t.Fatalf("hinted activations for a closed Segment = (%+v, %v), want ActivationNone", historical.Facts, err)
+	}
+	byHeaderAfter, err := repository.LoadActivations(ctx, request)
+	if err != nil || byHeaderAfter.Facts[0].Selection != execution.ActivationNone {
+		t.Fatalf("header activations for a closed Segment = (%+v, %v), want ActivationNone", byHeaderAfter.Facts, err)
+	}
+}
