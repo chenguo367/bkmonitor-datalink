@@ -436,8 +436,10 @@ func PackedFrameUpperBoundV2(levelCount, pointCount int) (int, error) {
 		frameOverhead    = 4 + 2 + binary.MaxVarintLen64
 		envelopeOverhead = 4 << 10
 		perLevelState    = 512 + 80
-		// {"index":N,"record_id":"<64 hex>"}, without the index digits.
-		perLegacyRecordID = 1 + 8 + 1 + 13 + 1 + 64 + 1 + 1
+		// {"index":N,"record_id":"<id>"}, without the index digits. The id
+		// width is MaxLegacyRecordIDLength, which the encoder refuses beyond,
+		// so this is a bound rather than an assumption about the data.
+		perLegacyRecordID = 1 + 8 + 1 + 13 + 1 + MaxLegacyRecordIDLength + 1 + 1
 		// The field name and its brackets, once.
 		legacyTableOverhead = len(`"legacy_record_ids":[],`)
 	)

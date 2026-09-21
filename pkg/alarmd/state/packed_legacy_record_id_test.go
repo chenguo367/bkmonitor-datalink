@@ -155,6 +155,73 @@ func TestALegacyRecordIDSurvivesApplyAndLoad(t *testing.T) {
 	}
 }
 
+// An inherited id wider than the bound costs it at is refused by name.
+//
+// The bound prices every carried id at MaxLegacyRecordIDLength, and that is the
+// whole basis of the compile-time ceiling. If the encoder carried a wider one
+// the bound would stop being a bound the moment it appeared - the same silent
+// shape as before it counted the table at all, except arriving one stored id at
+// a time instead of all at once. So the width is enforced where the carry
+// happens, and the refusal says what was over and by how much rather than
+// leaving the next reader to measure it.
+//
+// It refuses rather than truncating because a truncated id is a different
+// record: the point would read back as one that was never written.
+func TestAnInheritedRecordIDWiderThanTheBoundIsRefusedByName(t *testing.T) {
+	identity := packedIdentity()
+	old := packedPoint(t, identity, 1758400000, execution.LevelFactNormal)
+	// One character past the width, so the case pins the boundary and not
+	// merely "something very long".
+	old.RecordID = strings.Repeat("a", MaxLegacyRecordIDLength+1)
+	fresh := packedPoint(t, identity, 1758400060, execution.LevelFactNormal)
+
+	mutation := packedMutation(t, []execution.StateHistoryPoint{old, fresh}, 1)
+	// Inherited, not this round's - otherwise the not-derived rule refuses it
+	// first and this case never reaches the width at all.
+	mutation.AffectedRecords = []execution.RecordAnchor{{RecordID: fresh.RecordID, SourceTime: fresh.SourceTime}}
+
+	_, err := encodeRuntimePacked(mutation, 7)
+	if !errors.Is(err, ErrPackedContract) || PackedRefusalRule(err) != PackedRuleLegacyRecordIDTooLong {
+		t.Fatalf("encode error = %v (rule %q), want the framed-record refusal naming %s",
+			err, PackedRefusalRule(err), PackedRuleLegacyRecordIDTooLong)
+	}
+}
+
+// An inherited id at exactly the width is carried.
+//
+// The pair of this case and the one above is what makes the check a boundary
+// rather than a direction: every id production has written is exactly this
+// wide, so a check that refused at the width would refuse the entire population
+// the carry exists for, and no case asserting "wide ids are refused" would
+// notice.
+func TestAnInheritedRecordIDAtExactlyTheBoundIsCarried(t *testing.T) {
+	identity := packedIdentity()
+	old := packedPoint(t, identity, 1758400000, execution.LevelFactNormal)
+	old.RecordID = strings.Repeat("a", MaxLegacyRecordIDLength)
+	if old.RecordID == packedPoint(t, identity, 1758400000, execution.LevelFactNormal).RecordID {
+		t.Fatal("the fixture's id equals the derived one, so it would never reach the carry")
+	}
+	fresh := packedPoint(t, identity, 1758400060, execution.LevelFactNormal)
+
+	mutation := packedMutation(t, []execution.StateHistoryPoint{old, fresh}, 1)
+	mutation.AffectedRecords = []execution.RecordAnchor{{RecordID: fresh.RecordID, SourceTime: fresh.SourceTime}}
+
+	raw, legacy, err := encodeRuntimePackedCounted(mutation, 7)
+	if err != nil {
+		t.Fatalf("encode: %v; an id at the width the bound prices is the population the carry is for", err)
+	}
+	if legacy != 1 {
+		t.Fatalf("carried %d ids, want 1: the case has to reach the carry to say anything about it", legacy)
+	}
+	view, err := decodeRuntimePacked(raw, identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.History[0].RecordID != old.RecordID {
+		t.Fatalf("carried id came back as %q, want %q", view.History[0].RecordID, old.RecordID)
+	}
+}
+
 // The upper bound covers a record whose history is entirely ids the decode
 // cannot rebuild.
 //
