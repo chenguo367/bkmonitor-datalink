@@ -24,8 +24,12 @@ type PlanSlotInput struct {
 	// worker holds the compiled form rather than the frozen one, and passing a
 	// half-filled Plan across so this could read two fields off it would put an
 	// object in the code that looks like a Plan and is not one.
-	NoData           *contract.NoDataConfigV1
-	Scope            *contract.TargetScopeV2
+	NoData *contract.NoDataConfigV1
+	Scope  *contract.TargetScopeV2
+	// Plan is the target's second frozen form, and TargetResolution what the
+	// worker resolved it to this Slot; both nil for a Plan without one.
+	Plan             *contract.TargetPlanV1
+	TargetResolution *TargetResolution
 	Identity         execution.PlanNoDataIdentity
 	Snapshot         execution.NoDataMemorySnapshot
 	ApplyVersion     execution.ApplyVersion
@@ -77,15 +81,16 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 
 	memory := loadedMemory(input.Snapshot)
 	result, outcome, err := EvaluateSlot(SlotInput{
-		Plan:           &contract.EvaluationPlanV2{NoData: input.NoData, TargetScope: input.Scope},
-		EvaluationTime: input.EvaluationTime,
-		PeriodSeconds:  input.PeriodSeconds,
-		Completeness:   input.Completeness,
-		Series:         input.Series,
-		KnownHosts:     input.KnownHosts,
-		HostsResolved:  input.HostsResolved,
-		OutOfBusiness:  input.OutOfBusiness,
-		Memory:         memory,
+		Plan:             &contract.EvaluationPlanV2{NoData: input.NoData, TargetScope: input.Scope, TargetPlan: input.Plan},
+		EvaluationTime:   input.EvaluationTime,
+		PeriodSeconds:    input.PeriodSeconds,
+		Completeness:     input.Completeness,
+		Series:           input.Series,
+		KnownHosts:       input.KnownHosts,
+		HostsResolved:    input.HostsResolved,
+		OutOfBusiness:    input.OutOfBusiness,
+		TargetResolution: input.TargetResolution,
+		Memory:           memory,
 	})
 	if err != nil {
 		return PlanSlotResult{}, err

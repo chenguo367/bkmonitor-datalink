@@ -359,13 +359,18 @@ func (repository *RedisCatalogRepository) loadQueryGroupObjects(
 		if err != nil {
 			return nil, activationDependencyIO(err)
 		}
-		hashed, err := contract.DeriveCanonicalDigestV2OverCanonical(queryGroupObjectContractVersion, payload)
+		domain, err := queryGroupObjectDomain(payload)
+		if err != nil {
+			repository.observeObjectRead(ctx, objectReadKindQueryGroup, objectReadInvalid)
+			return nil, fmt.Errorf("%w: %v", ErrCatalogObjectCorrupt, err)
+		}
+		hashed, err := contract.DeriveCanonicalDigestV2OverCanonical(domain, payload)
 		if err != nil || hashed != string(entry.ObjectDigest) {
 			repository.observeObjectRead(ctx, objectReadKindQueryGroup, objectReadInvalid)
 			return nil, ErrCatalogObjectCorrupt
 		}
 		var object QueryGroupObject
-		if err := json.Unmarshal(payload, &object); err != nil || object.ContractVersion != queryGroupObjectContractVersion || object.Identity == "" {
+		if err := json.Unmarshal(payload, &object); err != nil || !knownQueryGroupObjectVersion(object.ContractVersion) || object.Identity == "" {
 			repository.observeObjectRead(ctx, objectReadKindQueryGroup, objectReadInvalid)
 			return nil, fmt.Errorf("%w: not a Query Group object of this contract", ErrCatalogObjectCorrupt)
 		}

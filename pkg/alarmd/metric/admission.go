@@ -15,7 +15,7 @@ var admissionResults = map[string]struct{}{"admitted": {}, "rejected": {}}
 
 // The reason vocabulary is closed on purpose: it is a metric label, and a
 // free-form reason turns one series into as many as there are strings.
-var admissionFilters = map[string]struct{}{"target_scope": {}, "host_status": {}, "none": {}}
+var admissionFilters = map[string]struct{}{"target_scope": {}, "target_plan": {}, "host_status": {}, "none": {}}
 var admissionReasons = map[string]struct{}{
 	"in_scope": {}, "out_of_scope": {}, "scope_empty": {}, "plan_not_indexed": {}, "none": {},
 	// Target scope on object identity: a record that built no identity is a
@@ -25,6 +25,11 @@ var admissionReasons = map[string]struct{}{
 	// apart from out_of_scope so the first is alertable and the second is
 	// readable against in_scope.
 	"object_identity_missing": {}, "object_identity_unmatched": {},
+	// Target plan: a record that carries no key is a defect on the writing or
+	// querying side, a record outside the resolved members is the filter
+	// working, and a target nobody resolved is this process not filtering -
+	// the third is structurally unreachable and alertable if it ever counts.
+	"in_target": {}, "target_key_missing": {}, "out_of_target": {}, "target_plan_unresolved": {},
 	// Host status: the reasons matter separately because they call for
 	// different actions - a disabled host is the filter working, an unknown
 	// host is a CMDB gap, and unavailable facts mean it is not filtering.

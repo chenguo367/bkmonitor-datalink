@@ -153,7 +153,7 @@ func (repository *RedisCatalogRepository) observeObjectRead(ctx context.Context,
 // it and a hit is by far the common path.
 func (repository *RedisCatalogRepository) loadObject(
 	ctx context.Context,
-	kind, key, domain, digest string,
+	kind, key string, domain func([]byte) (string, error), digest string,
 	decode func([]byte) (any, error),
 ) (any, int, error) {
 	if repository == nil || repository.client == nil || digest == "" {
@@ -205,7 +205,7 @@ func (repository *RedisCatalogRepository) loadObject(
 
 func (repository *RedisCatalogRepository) readObject(
 	ctx context.Context,
-	kind, key, domain, digest string,
+	kind, key string, domain func([]byte) (string, error), digest string,
 	decode func([]byte) (any, error),
 ) (any, int, error) {
 	payload, err := repository.client.Get(ctx, key).Bytes()
@@ -216,7 +216,15 @@ func (repository *RedisCatalogRepository) readObject(
 	if err != nil {
 		return nil, 0, activationDependencyIO(err)
 	}
-	hashed, err := contract.DeriveCanonicalDigestV2OverCanonical(domain, payload)
+	// The domain is read off the bytes for an object whose contract has more
+	// than one version, so an object of a version this build does not know
+	// is refused by name here rather than failing the digest check.
+	name, err := domain(payload)
+	if err != nil {
+		repository.observeObjectRead(ctx, kind, objectReadInvalid)
+		return nil, 0, fmt.Errorf("%w: %v", ErrCatalogObjectCorrupt, err)
+	}
+	hashed, err := contract.DeriveCanonicalDigestV2OverCanonical(name, payload)
 	if err != nil || hashed != digest {
 		repository.observeObjectRead(ctx, kind, objectReadInvalid)
 		return nil, 0, ErrCatalogObjectCorrupt
@@ -275,13 +283,13 @@ func (repository *RedisCatalogRepository) LoadQueryGroupObject(ctx context.Conte
 func (repository *RedisCatalogRepository) loadStoredQueryGroupObject(
 	ctx context.Context, digest execution.ObjectDigest,
 ) (storedQueryGroupObject, int, error) {
-	value, size, err := repository.loadObject(ctx, objectReadKindQueryGroup, repository.queryGroupObjectKey(digest), queryGroupObjectContractVersion, string(digest),
+	value, size, err := repository.loadObject(ctx, objectReadKindQueryGroup, repository.queryGroupObjectKey(digest), queryGroupObjectDomain, string(digest),
 		func(payload []byte) (any, error) {
 			var object QueryGroupObject
 			if err := json.Unmarshal(payload, &object); err != nil {
 				return nil, err
 			}
-			if object.ContractVersion != queryGroupObjectContractVersion || object.Identity == "" {
+			if !knownQueryGroupObjectVersion(object.ContractVersion) || object.Identity == "" {
 				return nil, errors.New("not a Query Group object of this contract")
 			}
 			return storedQueryGroupObject{
@@ -302,7 +310,7 @@ func (repository *RedisCatalogRepository) LoadOutputContext(ctx context.Context,
 
 // loadOutputContext returns the decoded context and its stored size.
 func (repository *RedisCatalogRepository) loadOutputContext(ctx context.Context, digest execution.OutputContextDigest) (OutputContextObject, int, error) {
-	value, size, err := repository.loadObject(ctx, objectReadKindOutputContext, repository.outputContextKey(digest), outputContextContractVersion, string(digest),
+	value, size, err := repository.loadObject(ctx, objectReadKindOutputContext, repository.outputContextKey(digest), constantDomain(outputContextContractVersion), string(digest),
 		func(payload []byte) (any, error) {
 			var object OutputContextObject
 			if err := json.Unmarshal(payload, &object); err != nil {
@@ -324,7 +332,7 @@ func (repository *RedisCatalogRepository) loadOutputContext(ctx context.Context,
 // each of its Plans back together into the QueryGroup the rest of the module
 // reads. PlanRevision is left empty; nothing reads it.
 func AssembleQueryGroup(object QueryGroupObject, contexts map[execution.PlanIdentity]OutputContextObject) (QueryGroup, error) {
-	if object.ContractVersion != queryGroupObjectContractVersion || object.Identity == "" {
+	if !knownQueryGroupObjectVersion(object.ContractVersion) || object.Identity == "" {
 		return QueryGroup{}, errors.New("alarmd controlplane: not a Query Group object of this contract")
 	}
 	group := QueryGroup{Identity: object.Identity, QueryPlan: object.QueryPlan, MembershipDigest: object.MembershipDigest,
@@ -345,7 +353,7 @@ func AssembleQueryGroup(object QueryGroupObject, contexts map[execution.PlanIden
 			Plan: contract.EvaluationPlanV2{
 				PlanID: plan.PlanID, StrategyRef: context.StrategyRef, InputProjection: plan.InputProjection,
 				SourceCompatibility: context.SourceCompatibility, OutputIdentity: plan.OutputIdentity,
-				SubjectFacts: context.SubjectFacts, LegacyOutput: context.LegacyOutput, TargetScope: plan.TargetScope,
+				SubjectFacts: context.SubjectFacts, LegacyOutput: context.LegacyOutput, TargetScope: plan.TargetScope, TargetPlan: plan.TargetPlan,
 				NoData:     plan.NoData,
 				StrategyIR: strategyIR, WireFormat: context.WireFormat, SignalType: context.SignalType,
 				TerminalReasonCode: plan.TerminalReasonCode,
@@ -475,4 +483,10 @@ func (repository *RedisCatalogRepository) observeAssembledBytes(
 			Hop: observability.NoDataHopAssembledBytes, Plans: occurrences,
 		},
 	})
+}
+
+// constantDomain is the digest domain of an object whose contract has one
+// version.
+func constantDomain(version string) func([]byte) (string, error) {
+	return func([]byte) (string, error) { return version, nil }
 }

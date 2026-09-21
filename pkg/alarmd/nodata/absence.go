@@ -25,6 +25,11 @@ const (
 	RosterTargetTopo    RosterSource = "TARGET_TOPO"
 	RosterTargetService RosterSource = "TARGET_SERVICE"
 	RosterHistory       RosterSource = "HISTORY"
+	// RosterTargetPlan is declared for an item whose target is a target_plan
+	// and whose no-data dimensions are exactly the dimensions that target's
+	// record key is read from: the expected set is the members the worker
+	// resolved the plan to in this same Slot, static and dynamic alike.
+	RosterTargetPlan RosterSource = "TARGET_PLAN"
 	// RosterWhole is declared by the roster derivation for an item that expects
 	// no group by design: the backend's host scenario returns None when the
 	// no-data dimensions do not name bk_target_ip while a target is configured,
@@ -154,6 +159,18 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 	// history roster grows from. The declared roster source is left as it is:
 	// an empty roster that was declared TARGET_STATIC is a target that resolved
 	// to no host, and rewriting it to WHOLE would hide exactly that.
+	if len(input.Roster.Groups) == 0 && input.Roster.Source == RosterTargetPlan {
+		// A target plan that resolved, completely, to no member expects
+		// nothing and says nothing about the item as a whole: the whole-item
+		// absence is the old target's reading and is not claimed for the
+		// new form. What a confirmed-empty target does decide is that every
+		// member whose absence was open has left the target, so those
+		// absences close once, here - a whole-item absence an earlier build
+		// left open among them - and nothing is opened.
+		closeDroppedAbsences(&result, input)
+		delete(result.Memory, whole)
+		return result
+	}
 	if len(input.Roster.Groups) == 0 {
 		if len(input.Present) == 0 {
 			result.Verdicts[whole] = VerdictAnomaly

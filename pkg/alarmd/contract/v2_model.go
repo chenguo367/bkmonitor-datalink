@@ -303,6 +303,10 @@ type EvaluationPlanV2 struct {
 	// means "a scope existed and was dropped" - compilation rejects the Plan
 	// in that case rather than publish one that alerts outside its target.
 	TargetScope *TargetScopeV2 `json:"target_scope,omitempty"`
+	// TargetPlan is the same target in its second frozen form, compiled from
+	// the strategy cache's target_plan document. A Plan carries at most one
+	// of the two; both absent means the strategy names no target.
+	TargetPlan *TargetPlanV1 `json:"target_plan,omitempty"`
 	// NoData is the item's no-data detection setting. Absent means the item
 	// does not detect no-data; see NoDataConfigV1 for why enablement is the
 	// presence of the section rather than a field inside it.
@@ -390,10 +394,11 @@ func (plan EvaluationPlanV2) MarshalJSON() ([]byte, error) {
 		SubjectFacts        *MonitorSubjectFacts   `json:"subject_facts,omitempty"`
 		LegacyOutput        *LegacyOutputContext   `json:"legacy_output,omitempty"`
 		TargetScope         *TargetScopeV2         `json:"target_scope,omitempty"`
+		TargetPlan          *TargetPlanV1          `json:"target_plan,omitempty"`
 		NoData              *NoDataConfigV1        `json:"no_data,omitempty"`
 		StrategyIR          StrategyIRV2           `json:"strategy_ir"`
 		WireFormat          string                 `json:"wire_format,omitempty"`
-	}{plan.PlanID, plan.StrategyRef, plan.InputProjection, plan.SourceCompatibility, plan.OutputIdentity, plan.SubjectFacts, plan.LegacyOutput, plan.TargetScope, plan.NoData, plan.StrategyIR, plan.WireFormat})
+	}{plan.PlanID, plan.StrategyRef, plan.InputProjection, plan.SourceCompatibility, plan.OutputIdentity, plan.SubjectFacts, plan.LegacyOutput, plan.TargetScope, plan.TargetPlan, plan.NoData, plan.StrategyIR, plan.WireFormat})
 }
 
 type PlanSetV2 struct {

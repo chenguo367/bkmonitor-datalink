@@ -180,7 +180,9 @@ func publishCMDBIndexHealth(recorder *metric.Recorder, store *cmdbcache.Store) {
 // here is the list in force there. It follows the copy when the platform
 // changes it, through the filter's own swap, without a restart.
 func seriesAdmissionFilters(hostStatus *dynamicHostStatusFilter, reporter *admission.IdentityReporter) []admission.Filter {
-	filters := []admission.Filter{admission.TargetScopeFilter{Reporter: reporter}}
+	// The two target filters are told apart by which frozen form the Plan
+	// carries; a Plan carries at most one, so at most one of them decides.
+	filters := []admission.Filter{admission.TargetScopeFilter{Reporter: reporter}, admission.TargetPlanFilter{}}
 	if hostStatus != nil {
 		filters = append(filters, hostStatus)
 	}

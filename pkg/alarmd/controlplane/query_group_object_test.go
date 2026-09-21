@@ -311,7 +311,7 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			// level it also carries is read at output, but a fact is placed
 			// where it is decided, not everywhere it is read.
 			execution: []string{
-				"plan_id", "input_projection", "output_identity", "target_scope", "no_data", "terminal_reason_code",
+				"plan_id", "input_projection", "output_identity", "target_scope", "target_plan", "no_data", "terminal_reason_code",
 			},
 			// signal_type sits with wire_format: both describe the event this
 			// Plan publishes rather than what the Slot executes, and both are

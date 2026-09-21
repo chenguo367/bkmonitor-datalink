@@ -112,6 +112,8 @@ func (stream *streamedExecution) noDataRoundFor(
 	decided, err := nodata.EvaluatePlanSlot(nodata.PlanSlotInput{
 		NoData:           config,
 		Scope:            due.CompiledPlan.TargetScope(),
+		Plan:             due.CompiledPlan.TargetPlan(),
+		TargetResolution: stream.targetResolutions[identity.Plan].absenceView(),
 		Identity:         identity,
 		Snapshot:         snapshot,
 		ApplyVersion:     version,

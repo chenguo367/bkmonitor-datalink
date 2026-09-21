@@ -1,0 +1,453 @@
+{
+  "note": "target_plan documents as the strategy cache writer at its first review actually emitted them (PLAN cases only); expect is this decoder's verdict on each - the two disagreeing is the point of keeping the file",
+  "cases": [
+    {
+      "case": "5.3 host system metric",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "bk_host_id": 101
+          },
+          {
+            "bk_host_id": 102
+          }
+        ],
+        "dynamic_groups": [
+          {
+            "dynamic_group_id": "1001"
+          }
+        ],
+        "dynamic_topologies": [
+          {
+            "bk_obj_id": "set",
+            "bk_inst_id": 12,
+            "bk_biz_id": 2
+          }
+        ]
+      },
+      "expect": {
+        "accepted": true,
+        "rule": "host_id",
+        "static_keys": [
+          "101",
+          "102"
+        ],
+        "groups": [
+          "1001"
+        ],
+        "topologies": [
+          "2|set|12"
+        ]
+      }
+    },
+    {
+      "case": "5.5 non-host CMDB model (cw_dynamic_group)",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-MySQL",
+        "target_rule": "model_inst_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "model_id": "cw-MySQL",
+            "model_inst_id": "mysql-prod-01"
+          }
+        ],
+        "dynamic_groups": [
+          {
+            "dynamic_group_id": "2001"
+          }
+        ],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "reason": "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED",
+        "path": "model_match"
+      }
+    },
+    {
+      "case": "5.6 k8s cluster",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-K8s_Cluster",
+        "target_rule": "k8s_cluster",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "model_id": "cw-K8s_Cluster",
+            "model_inst_id": "cluster-a",
+            "match": {
+              "bcs_cluster_id": "cluster-a"
+            }
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "accepted": true,
+        "rule": "k8s_cluster",
+        "static_keys": [
+          "cluster-a"
+        ]
+      }
+    },
+    {
+      "case": "5.6 k8s node",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-K8s_Node",
+        "target_rule": "k8s_node",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "model_id": "cw-K8s_Node",
+            "model_inst_id": "cluster-a|node-01",
+            "match": {
+              "bcs_cluster_id": "cluster-a",
+              "node": "node-01"
+            }
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "accepted": true,
+        "rule": "k8s_node",
+        "static_keys": [
+          "cluster-a|node-01"
+        ]
+      }
+    },
+    {
+      "case": "5.6 k8s workload",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-K8s_Workload",
+        "target_rule": "k8s_workload",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "model_id": "cw-K8s_Workload",
+            "model_inst_id": "cluster-a|prod|Deployment|web",
+            "match": {
+              "bcs_cluster_id": "cluster-a",
+              "namespace": "prod",
+              "workload_kind": "Deployment",
+              "workload_name": "web"
+            }
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "accepted": true,
+        "rule": "k8s_workload",
+        "static_keys": [
+          "cluster-a|prod|Deployment|web"
+        ]
+      }
+    },
+    {
+      "case": "9.1 empty target, host scenario, system query",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "reason": "TARGET_PLAN_EMPTY",
+        "path": ""
+      }
+    },
+    {
+      "case": "9.1 target key absent, host scenario, system query",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "reason": "TARGET_PLAN_EMPTY",
+        "path": ""
+      }
+    },
+    {
+      "case": "two groups (OR) of host instances",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "bk_host_id": 101
+          },
+          {
+            "bk_host_id": 102
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "accepted": true,
+        "rule": "host_id",
+        "static_keys": [
+          "101",
+          "102"
+        ]
+      }
+    },
+    {
+      "case": "host instances excluded with method neq",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "bk_host_id": 101
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "accepted": true,
+        "rule": "host_id",
+        "static_keys": [
+          "101"
+        ],
+        "writer_defect": "the excluded list became an included one; the plan is valid and means the opposite, which no reader can see"
+      }
+    },
+    {
+      "case": "5.4 collected metric, query carries host dims",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "model_inst_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "model_id": "cw-Host",
+            "model_inst_id": "101"
+          },
+          {
+            "model_id": "cw-Host",
+            "model_inst_id": "102"
+          }
+        ],
+        "dynamic_groups": [
+          {
+            "dynamic_group_id": "1001"
+          }
+        ],
+        "dynamic_topologies": [
+          {
+            "bk_obj_id": "set",
+            "bk_inst_id": 12,
+            "bk_biz_id": 2
+          }
+        ]
+      },
+      "expect": {
+        "reason": "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED",
+        "path": "model_match"
+      }
+    },
+    {
+      "case": "5.4 collected metric, canonical model dims, static only",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "model_inst_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "model_id": "cw-Host",
+            "model_inst_id": "101"
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "reason": "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED",
+        "path": "model_match"
+      }
+    },
+    {
+      "case": "eq on host instances",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "bk_host_id": 101
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "accepted": true,
+        "rule": "host_id",
+        "static_keys": [
+          "101"
+        ]
+      }
+    },
+    {
+      "case": "neq on the same host instances",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "bk_host_id": 101
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "accepted": true,
+        "rule": "host_id",
+        "static_keys": [
+          "101"
+        ],
+        "writer_defect": "byte-identical to the eq case"
+      }
+    },
+    {
+      "case": "one group, host instance AND topology node (intersection in the legacy scope)",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "bk_host_id": 101
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": [
+          {
+            "bk_obj_id": "set",
+            "bk_inst_id": 12
+          }
+        ]
+      },
+      "expect": {
+        "reason": "UNSUPPORTED_TARGET_PLAN",
+        "path": "dynamic_topologies[0].bk_biz_id",
+        "writer_defect": "the intersection became a union, and the topology reference names no business"
+      }
+    },
+    {
+      "case": "two groups, host instance OR topology node (union in the legacy scope)",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "bk_host_id": 101
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": [
+          {
+            "bk_obj_id": "set",
+            "bk_inst_id": 12
+          }
+        ]
+      },
+      "expect": {
+        "reason": "UNSUPPORTED_TARGET_PLAN",
+        "path": "dynamic_topologies[0].bk_biz_id"
+      }
+    },
+    {
+      "case": "topology node without bk_biz_id",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [],
+        "dynamic_groups": [],
+        "dynamic_topologies": [
+          {
+            "bk_obj_id": "set",
+            "bk_inst_id": 12
+          }
+        ]
+      },
+      "expect": {
+        "reason": "UNSUPPORTED_TARGET_PLAN",
+        "path": "dynamic_topologies[0].bk_biz_id"
+      }
+    },
+    {
+      "case": "result_table_id named system_load (prefix test)",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "model_inst_id",
+        "failure_policy": "no_match",
+        "static_targets": [
+          {
+            "model_id": "cw-Host",
+            "model_inst_id": "101"
+          }
+        ],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "reason": "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED",
+        "path": "model_match"
+      }
+    },
+    {
+      "case": "empty target, scenario host_process",
+      "target_plan": {
+        "schema_version": 1,
+        "model_id": "cw-Host",
+        "target_rule": "host_id",
+        "failure_policy": "no_match",
+        "static_targets": [],
+        "dynamic_groups": [],
+        "dynamic_topologies": []
+      },
+      "expect": {
+        "reason": "TARGET_PLAN_EMPTY",
+        "path": ""
+      }
+    }
+  ]
+}

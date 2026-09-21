@@ -240,7 +240,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	// The monitoring targets of this execution's plans are indexed once, not
 	// per series: one query commonly delivers thousands of series and every
 	// one of them would otherwise repeat the same lookup.
-	scopes := buildPlanScopes(prepared.Header.DuePlans)
+	scopes := buildPlanScopes(prepared.Header.DuePlans, consumer.ResolvedTargets())
 	// Only one permit acquisition per Source is pending at a time. Queries
 	// already admitted run independently; all attempts join before returning.
 	queryCtx, cancel := context.WithCancel(ctx)
@@ -923,6 +923,11 @@ func (adapter *seriesAdapter) admittedPlans(batch execution.ProviderSeriesBatch)
 					// That is the case worth separating from an ordinary
 					// admission: it is what a degraded CMDB cache looks like.
 					adapter.observe(filter, "admitted", reason)
+				case plan.TargetPlan != nil:
+					// Admitted by the target plan filter: counted under its
+					// own name so the two forms' admission ratios can be read
+					// apart.
+					adapter.observe("target_plan", "admitted", "in_target")
 				default:
 					adapter.observe("target_scope", "admitted", "in_scope")
 				}

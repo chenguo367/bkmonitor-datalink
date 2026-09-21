@@ -6,6 +6,9 @@
 package controlplane
 
 import (
+	"encoding/json"
+	"errors"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -29,8 +32,51 @@ import (
 // column.
 const (
 	queryGroupObjectContractVersion = "alarmd-query-group-object-v1"
-	outputContextContractVersion    = "alarmd-output-context-v1"
+	// queryGroupObjectContractVersionV2 is written on an object whose Plan
+	// carries a target_plan. The version is the digest domain and the first
+	// thing a reader checks, so a reader that predates the field refuses the
+	// object by name instead of decoding it without its target and running
+	// the Plan on everything. Objects without the field keep v1, and with it
+	// every digest they had.
+	queryGroupObjectContractVersionV2 = "alarmd-query-group-object-v2"
+	outputContextContractVersion      = "alarmd-output-context-v1"
 )
+
+// queryGroupObjectVersion is the contract version an object is written
+// under: v2 as soon as one of its Plans carries the target's second frozen
+// form, v1 otherwise.
+func queryGroupObjectVersion(plans []QueryGroupPlanObject) string {
+	for _, plan := range plans {
+		if plan.TargetPlan != nil {
+			return queryGroupObjectContractVersionV2
+		}
+	}
+	return queryGroupObjectContractVersion
+}
+
+// knownQueryGroupObjectVersion reports whether this build reads objects of
+// that contract version.
+func knownQueryGroupObjectVersion(version string) bool {
+	return version == queryGroupObjectContractVersion || version == queryGroupObjectContractVersionV2
+}
+
+// queryGroupObjectDomain reads the contract version a stored object declares
+// and returns it as the domain its digest was derived in. A version this
+// build does not know is refused here, before the bytes are trusted for
+// anything: the digest check that follows would otherwise be made in the
+// wrong domain and read as corruption.
+func queryGroupObjectDomain(payload []byte) (string, error) {
+	var header struct {
+		ContractVersion string `json:"object_contract_version"`
+	}
+	if err := json.Unmarshal(payload, &header); err != nil {
+		return "", err
+	}
+	if !knownQueryGroupObjectVersion(header.ContractVersion) {
+		return "", errors.New("not a Query Group object of this contract")
+	}
+	return header.ContractVersion, nil
+}
 
 // QueryGroupObject is the execution content of one Query Group.
 type QueryGroupObject struct {
@@ -66,6 +112,11 @@ type QueryGroupPlanObject struct {
 	InputProjection contract.InputProjectionV2      `json:"input_projection"`
 	OutputIdentity  *contract.MonitorOutputIdentity `json:"output_identity,omitempty"`
 	TargetScope     *contract.TargetScopeV2         `json:"target_scope,omitempty"`
+	// TargetPlan is the target's second frozen form. It is execution content
+	// like TargetScope, and it is what moves an object onto the v2 contract:
+	// a reader that does not know the field would otherwise run the Plan on
+	// no target at all.
+	TargetPlan *contract.TargetPlanV1 `json:"target_plan,omitempty"`
 	// NoData is execution content: absence is judged while the Slot runs, and
 	// Continuous is the trigger window the synthetic series is read with. It is
 	// omitted when the item does not detect no-data, which keeps the digest of
@@ -104,13 +155,14 @@ type OutputContextObject struct {
 // the source document.
 func BuildQueryGroupObject(group QueryGroup) QueryGroupObject {
 	object := QueryGroupObject{
-		ContractVersion: queryGroupObjectContractVersion, Identity: group.Identity,
+		Identity:         group.Identity,
 		ScheduleRevision: group.ScheduleRevision, QueryPlan: group.QueryPlan,
 		MembershipDigest: group.MembershipDigest, Plans: make([]QueryGroupPlanObject, 0, len(group.Plans)),
 	}
 	for _, plan := range group.Plans {
 		object.Plans = append(object.Plans, buildQueryGroupPlanObject(plan))
 	}
+	object.ContractVersion = queryGroupObjectVersion(object.Plans)
 	return object
 }
 
@@ -123,7 +175,7 @@ func buildQueryGroupPlanObject(plan FrozenPlan) QueryGroupPlanObject {
 		RequirementTemplates: plan.RequirementTemplates, QueryPlans: plan.QueryPlans,
 		PlanID: plan.Plan.PlanID, Strategy: strategyIdentity(plan.Plan.StrategyRef),
 		InputProjection: plan.Plan.InputProjection, OutputIdentity: plan.Plan.OutputIdentity,
-		TargetScope: plan.Plan.TargetScope, NoData: plan.Plan.NoData, StrategyIR: strategyIR,
+		TargetScope: plan.Plan.TargetScope, TargetPlan: plan.Plan.TargetPlan, NoData: plan.Plan.NoData, StrategyIR: strategyIR,
 		TerminalReasonCode: plan.Plan.TerminalReasonCode,
 	}
 }
@@ -138,7 +190,8 @@ func strategyIdentity(ref contract.StrategyRefV2) contract.StrategyRefV2 {
 // Two Query Groups with equal digests execute identically; a publication that
 // leaves a Query Group's digest where it was has not changed that Query Group.
 func DeriveQueryGroupObjectDigest(group QueryGroup) (execution.ObjectDigest, error) {
-	digest, err := contract.DeriveCanonicalDigestV2(queryGroupObjectContractVersion, BuildQueryGroupObject(group))
+	object := BuildQueryGroupObject(group)
+	digest, err := contract.DeriveCanonicalDigestV2(object.ContractVersion, object)
 	return execution.ObjectDigest(digest), err
 }
 
