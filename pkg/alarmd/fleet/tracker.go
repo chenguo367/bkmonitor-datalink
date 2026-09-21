@@ -368,12 +368,20 @@ type queryGroupState struct {
 	// error from an earlier round's by Slot rather than by clock.
 	lastRoundSlot int64
 	// internal is the last failure of this deployment's own making seen in
-	// the current run -- a contract or evaluation error -- kept until a
-	// healthy completion and published beside the row's finding. The
-	// object's line is decided by its column (a pool object is the
-	// refusal's), and an internal error under it was invisible: a live row
-	// filed as HTTP 400 had also hit an aggregation conflict every round.
+	// the current run -- a contract or evaluation error -- kept until the
+	// stage it failed in passes (or a healthy completion, which is that too)
+	// and published beside the row's finding. The object's line is decided
+	// by its column (a pool object is the refusal's), and an internal error
+	// under it was invisible: a live row filed as HTTP 400 had also hit an
+	// aggregation conflict every round.
 	internal *FailureRef
+	// internalEndedRound says whether the round internal was seen on ended
+	// there, without completing. It decides what a later completion at the
+	// same Slot means: after a round that failed outright, a completion at
+	// that Slot is the retry getting through the failed stage; after a round
+	// that carried the failure as a fact and still completed degraded, a
+	// completion at that Slot is that same round, and proves nothing.
+	internalEndedRound bool
 	// previousWorstValid and noProgressRounds say whether a short window is
 	// filling: the worst level's valid count last round, and how many
 	// consecutive rounds it has not risen. A window at 8/24 that was 7/24
@@ -659,8 +667,13 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// outcome of its own, and the only observation whose words say why the
 	// round's events did not go.
 	outputFailed := observation.Stage == observability.StageEventACKed && observation.Err != nil
+	// A write of the round's events that went through is the one observation
+	// that proves an output failure of this deployment's own making has
+	// passed; it carries nothing else the tracker keeps, and is read for that
+	// alone below.
+	outputACKed := observation.Stage == observability.StageEventACKed && observation.Err == nil
 	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" &&
-		failure == nil && !outputFailed && observation.QueryCooldown == nil && cursorAdvance == nil &&
+		failure == nil && !outputFailed && !outputACKed && observation.QueryCooldown == nil && cursorAdvance == nil &&
 		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil && observation.GapProgress == nil &&
 		observation.NoDataMemoryRead == nil && observation.NoDataMemoryRenewal == nil {
 		return
@@ -677,6 +690,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	at := tracker.now()
 	if state.firstSeenAt.IsZero() {
 		state.firstSeenAt = at
+	}
+	// The round's events went to the sink: for an object whose own failure
+	// was the client refusing to send, this is the failed stage passing.
+	if outputACKed && defectPassedByOutput(state.internal, state.internalEndedRound, trace.EvaluationTime) {
+		tracker.noteDefectPassed(queryGroup, state, at)
 	}
 	// A refused absence-memory write is not a round either: the round it
 	// happened in was fine and is reported separately. Recorded on the object
@@ -887,6 +905,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if internalFailure(failure.Category) {
 			copy := *state.lastFailure
 			state.internal = &copy
+			state.internalEndedRound = false
 		}
 	}
 	// The write of the round's events failing is a failure of its own stage,
@@ -926,6 +945,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if observation.OutputRejection != nil || OutputFailureKind(text) == OutputFailureClientRejected {
 			copy := *state.lastFailure
 			state.internal = &copy
+			state.internalEndedRound = false
 		}
 	}
 	// The observation that ends a failed round can name the failure itself,
@@ -955,6 +975,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			state.lastFailureSlot = trace.EvaluationTime
 			copy := *state.lastFailure
 			state.internal = &copy
+			state.internalEndedRound = true
 		}
 	}
 	// The error's own words, kept beside the classification, from the one
@@ -994,6 +1015,14 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			}
 		}
 		state.guardGen++
+		// A round that ran through the pipeline at or after the Slot the
+		// object's own failure was on is that failure passing, whatever the
+		// round found about the data. Read before the healthy completion is,
+		// which also ends the failure: the fold is recorded from the failure
+		// while it is still there.
+		if defectPassedByCompletion(state.internal, state.internalEndedRound, completion, trace.EvaluationTime) {
+			tracker.noteDefectPassed(queryGroup, state, at)
+		}
 		if healthyCompletion(completion) {
 			// The one moment recovery has positive evidence: the object that
 			// was a row completed healthily. Remembered under the line and
@@ -1156,6 +1185,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	case failedExecution(executeOutcome):
 		state.determined = true
 		state.lastRoundSlot = trace.EvaluationTime
+		// The round this failure was seen on ended here without completing;
+		// a completion at this Slot later is a retry that got through.
+		if state.internal != nil && state.internal.Slot == trace.EvaluationTime {
+			state.internalEndedRound = true
+		}
 		failureCode := ""
 		if state.lastFailure != nil {
 			failureCode = state.lastFailure.Code

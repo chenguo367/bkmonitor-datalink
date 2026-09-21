@@ -1637,10 +1637,12 @@ func TestTheWindowSaysWhetherItIsFilling(t *testing.T) {
 }
 
 // A failure of this deployment's own making -- a contract or evaluation
-// error -- stays on the row until a healthy completion, beside the finding
-// the column decided: a pool object filed under the refusal that also hit an
-// aggregation conflict is listed under DEFECT as well, by that conflict, and
-// the refusal line still has it. A backend failure is not internal.
+// error -- stays on the row until the stage it failed in passes (here, a
+// healthy completion; the rounds carry no Slot, so the same round completing
+// degraded is not that), beside the finding the column decided: a pool
+// object filed under the refusal that also hit an aggregation conflict is
+// listed under DEFECT as well, by that conflict, and the refusal line still
+// has it. A backend failure is not internal.
 func TestAnInternalFailureIsASecondFactUnderDefect(t *testing.T) {
 	at := &clock{at: now}
 	tracker := newTracker(t, at)
