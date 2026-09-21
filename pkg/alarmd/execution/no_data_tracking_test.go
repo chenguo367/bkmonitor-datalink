@@ -127,14 +127,23 @@ func TestTheBuilderRefusesAnImpossibleTrackingFact(t *testing.T) {
 		}
 	}
 
-	// The clearing round is accepted once data has actually arrived, or the
-	// refusal above would forbid recovery rather than forbid recomputing. Two
-	// branches that answer the same way prove nothing about the rule between
-	// them, which is why this is here and not left to the refusals.
-	cleared := clearedWithoutData
-	cleared.PresentAsOf = 91
-	if _, err := BuildPlanNoDataMutation(cleared); err != nil {
+	// The two rounds that legitimately clear the fact. Without these the pair
+	// of refusals above would be satisfied by forbidding every clearing, which
+	// is a different rule that reads the same from the refusals alone.
+	byData := clearedWithoutData
+	byData.PresentAsOf = 91
+	if _, err := BuildPlanNoDataMutation(byData); err != nil {
 		t.Fatalf("a round where data arrived could not clear the fact: %v", err)
+	}
+	// The roster has groups again and nothing has reported - an exhausted Plan
+	// that gained an explicit target. The check on the other side requires the
+	// fact to be cleared here, so this one must allow it; written without this
+	// case between them the two refusals closed on the same round and the Plan
+	// could never write again.
+	byRoster := clearedWithoutData
+	byRoster.Memory = []NoDataGroupMemory{{GroupKey: "host-1", FirstAbsent: 90}}
+	if _, err := BuildPlanNoDataMutation(byRoster); err != nil {
+		t.Fatalf("an exhausted Plan whose roster came back could not write at all: %v", err)
 	}
 }
 

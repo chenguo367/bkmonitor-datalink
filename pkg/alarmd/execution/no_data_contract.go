@@ -183,15 +183,25 @@ func BuildPlanNoDataMutation(update PlanNoDataMemoryUpdate) (PlanNoDataMutation,
 			update.TrackingExhaustedAt, len(memory))
 	}
 	if update.LoadedTrackingExhaustedAt != 0 && update.TrackingExhaustedAt == 0 &&
-		update.PresentAsOf <= update.LoadedPresentAsOf {
+		update.PresentAsOf <= update.LoadedPresentAsOf && len(memory) == 0 {
 		// Raising the horizon must not revive what it stopped, and the Plan-level
-		// fact is stopped the same way a group is. The one thing that clears it
-		// is data arriving, which moves the round this Plan last had data in; a
-		// round that cleared it without that is a round that recomputed the fact
-		// from a setting instead of reading what was decided.
+		// fact is stopped the same way a group is. There are exactly two rounds
+		// that legitimately clear it: one where data arrived, which moves the
+		// round this Plan last had data in, and one where the roster has groups
+		// again, which is where the check above requires it to be cleared and
+		// where the fact has no reader left anyway. What remains - a memory
+		// still empty, no data, and the fact gone - is a round that recomputed
+		// it from a setting instead of reading what was decided.
+		//
+		// The group clause is not decoration. Without it this refusal and the
+		// one above close on the same round: a Plan whose roster was exhausted
+		// and which gains an explicit target has groups and no data, so keeping
+		// the fact is refused there and clearing it was refused here, and the
+		// Plan could never write again.
 		return PlanNoDataMutation{}, fmt.Errorf(
-			"alarmd execution: a Plan no-data memory exhausted at %d was cleared without data arriving "+
-				"(present-as-of stayed at %d)", update.LoadedTrackingExhaustedAt, update.PresentAsOf)
+			"alarmd execution: a Plan no-data memory exhausted at %d was cleared while still empty and "+
+				"without data arriving (present-as-of stayed at %d)",
+			update.LoadedTrackingExhaustedAt, update.PresentAsOf)
 	}
 	if update.PresentAsOf < update.LoadedPresentAsOf {
 		// The Plan cannot have last had data earlier than the record already
