@@ -21,22 +21,28 @@ import (
 )
 
 // What the Slot resolved is handed to the source for admission and to the
-// no-data round for absence from one holder: an unavailable resolution is
-// left out of the memberships (its filter then admits nothing) and read by
-// absence as unavailable; a complete or incomplete one is both; nothing
-// resolved is nil on both sides.
+// no-data round for absence from one holder. Every resolution is handed to
+// admission, the unavailable one included: the members its static list and
+// its other selectors did resolve still admit their records, and only
+// absence reads it as unavailable. A Plan nothing resolved at all is left
+// out, and its filter admits nothing.
 func TestOneResolutionServesAdmissionAndAbsence(t *testing.T) {
 	complete := execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "1"}
 	incomplete := execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "2"}
 	unavailable := execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "3"}
+	unresolved := execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "4"}
 	stream := &streamedExecution{targetResolutions: map[execution.PlanIdentity]*resolvedTarget{
 		complete:    {absence: nodata.TargetResolution{State: nodata.TargetResolutionComplete, Members: []string{"101"}}, members: map[string]struct{}{"101": {}}},
 		incomplete:  {absence: nodata.TargetResolution{State: nodata.TargetResolutionIncomplete, Members: []string{"101"}}, members: map[string]struct{}{"101": {}}},
-		unavailable: {absence: nodata.TargetResolution{State: nodata.TargetResolutionUnavailable}, members: map[string]struct{}{"101": {}}},
+		unavailable: {absence: nodata.TargetResolution{State: nodata.TargetResolutionUnavailable, Members: []string{"101"}}, members: map[string]struct{}{"101": {}}},
+		unresolved:  {absence: nodata.TargetResolution{State: nodata.TargetResolutionUnavailable}, unresolved: true},
 	}}
 	memberships := stream.ResolvedTargets()
-	if len(memberships) != 2 || memberships[complete] == nil || memberships[incomplete] == nil || memberships[unavailable] != nil {
-		t.Fatalf("memberships = %v, want the complete and incomplete resolutions only", memberships)
+	if len(memberships) != 3 || memberships[complete] == nil || memberships[incomplete] == nil || memberships[unavailable] == nil || memberships[unresolved] != nil {
+		t.Fatalf("memberships = %v, want every resolution but the unresolved Plan", memberships)
+	}
+	if !memberships[unavailable].Contains("101") {
+		t.Fatal("the members an unavailable plan did resolve do not admit their records")
 	}
 	if !memberships[complete].Contains("101") || memberships[complete].Contains("102") {
 		t.Fatal("membership does not answer from the resolved members")
@@ -149,8 +155,14 @@ func TestBeginResolvesEachTargetPlanOnceForBothViews(t *testing.T) {
 		t.Fatalf("resolver called %d times, want once per target-plan Plan", len(resolver.calls))
 	}
 	memberships := stream.ResolvedTargets()
-	if len(memberships) != 1 || memberships[one] == nil || !memberships[one].Contains("101") || !memberships[one].Contains("1") || memberships[one].Contains("2") {
-		t.Fatalf("memberships = %v, want the complete Plan's members only", memberships)
+	if len(memberships) != 2 || memberships[one] == nil || !memberships[one].Contains("101") || !memberships[one].Contains("1") || memberships[one].Contains("2") {
+		t.Fatalf("memberships = %v, want both resolved Plans with their own members", memberships)
+	}
+	// The unavailable Plan's static member still admits its records: the
+	// group that could not be read contributes nothing, the static list is
+	// not thereby unknown.
+	if memberships[two] == nil || !memberships[two].Contains("2") || memberships[two].Contains("101") {
+		t.Fatalf("unavailable Plan's membership = %v, want its static member and nothing from the unread group", memberships[two])
 	}
 	if view := stream.targetResolutions[one].absenceView(); view.State != nodata.TargetResolutionComplete || len(view.Members) != 2 {
 		t.Fatalf("absence view of the complete Plan = %+v", view)

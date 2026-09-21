@@ -171,3 +171,38 @@ func TestTheGroupStoreReadsOnFirstReferenceAndKeepsSnapshotsAcrossAFailedRefresh
 		t.Fatalf("refresh read %v, want every referenced id in one MGET", last)
 	}
 }
+
+// A reference nobody has asked for within the staleness bound is forgotten
+// at the next refresh, snapshot and all: it stops being read every refresh
+// and stops counting in the health once the writer withdraws it. One that
+// is still asked for stays.
+func TestAGroupNobodyAsksForAgesOutOfTheStore(t *testing.T) {
+	client := &groupClient{values: map[string]string{"cw:dynamic_group:live": hostGroup, "cw:dynamic_group:gone": hostGroup}}
+	reader, _ := NewGroupReader(client, "cw:")
+	now := time.Unix(1000, 0)
+	store, err := NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Group(context.Background(), "live")
+	store.Group(context.Background(), "gone")
+	for minute := 1; minute <= 11; minute++ {
+		now = now.Add(time.Minute)
+		store.Group(context.Background(), "live")
+		if err := store.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	last := client.calls[len(client.calls)-1]
+	if !reflect.DeepEqual(last, []string{"cw:dynamic_group:live"}) {
+		t.Fatalf("the last refresh read %v, want the live reference only", last)
+	}
+	if health := store.Health(); health.Referenced != 1 || health.Loaded != 1 {
+		t.Fatalf("health = %+v, want the aged-out reference gone", health)
+	}
+	// Asked for again, it is read again on the spot.
+	reads := len(client.calls)
+	if lookup := store.Group(context.Background(), "gone"); lookup.Snapshot == nil || lookup.Snapshot.Unavailable != "" || len(client.calls) != reads+1 {
+		t.Fatalf("re-reference: lookup %+v reads %d", lookup, len(client.calls)-reads)
+	}
+}

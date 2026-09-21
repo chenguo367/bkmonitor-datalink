@@ -256,9 +256,14 @@ type GroupStore struct {
 	maxAge   time.Duration
 	now      func() time.Time
 
-	mu            sync.RWMutex
-	snapshots     map[string]*GroupSnapshot
-	referenced    map[string]struct{}
+	mu        sync.RWMutex
+	snapshots map[string]*GroupSnapshot
+	// referenced is when each id was last asked for. A reference ages out
+	// after the staleness bound without being asked: a Plan that runs asks
+	// every Slot, so an id nobody asks for is one no active Plan references
+	// any more, and keeping it would read it every refresh and count it in
+	// the health as a standing failure once the writer withdraws it.
+	referenced    map[string]time.Time
 	lastFailureAt time.Time
 	lastError     error
 	failures      uint64
@@ -288,7 +293,7 @@ func NewGroupStore(reader *GroupReader, options GroupStoreOptions) (*GroupStore,
 		now = time.Now
 	}
 	return &GroupStore{reader: reader, interval: options.RefreshInterval, maxAge: options.MaxAge, now: now,
-		snapshots: make(map[string]*GroupSnapshot), referenced: make(map[string]struct{})}, nil
+		snapshots: make(map[string]*GroupSnapshot), referenced: make(map[string]time.Time)}, nil
 }
 
 // MaxAge is the bound past which a held snapshot is not served.
@@ -304,22 +309,20 @@ func (store *GroupStore) Group(ctx context.Context, id string) GroupLookup {
 	if store == nil {
 		return GroupLookup{ReadErr: errors.New("alarmd cmdbcache: no group store")}
 	}
-	store.mu.RLock()
+	now := store.now()
+	store.mu.Lock()
+	store.referenced[id] = now
 	snapshot, held := store.snapshots[id]
 	failedAt := store.lastFailureAt
-	store.mu.RUnlock()
+	store.mu.Unlock()
 	if !held {
-		store.mu.Lock()
-		store.referenced[id] = struct{}{}
-		store.mu.Unlock()
 		reads, err := store.reader.Read(ctx, []string{id})
 		if err != nil {
 			return GroupLookup{ReadErr: err}
 		}
-		snapshot = store.publish(id, reads[id], store.now())
+		snapshot = store.publish(id, reads[id], now)
 		failedAt = time.Time{}
 	}
-	now := store.now()
 	return GroupLookup{Snapshot: snapshot, Age: now.Sub(snapshot.ReadAt), RefreshFailed: failedAt.After(snapshot.ReadAt)}
 }
 
@@ -339,14 +342,22 @@ func (store *GroupStore) publish(id string, read GroupRead, at time.Time) *Group
 // Refresh re-reads every referenced group. A transport failure keeps every
 // snapshot and is recorded, so the next lookups say they are served past a
 // failed refresh; a missing key replaces the snapshot with an unavailable
-// one - the writer withdrew or never wrote it, and that is an answer.
+// one - the writer withdrew or never wrote it, and that is an answer. A
+// reference nobody has asked for within the staleness bound is forgotten
+// first, snapshot and all.
 func (store *GroupStore) Refresh(ctx context.Context) error {
-	store.mu.RLock()
+	now := store.now()
+	store.mu.Lock()
 	ids := make([]string, 0, len(store.referenced))
-	for id := range store.referenced {
+	for id, askedAt := range store.referenced {
+		if now.Sub(askedAt) > store.maxAge {
+			delete(store.referenced, id)
+			delete(store.snapshots, id)
+			continue
+		}
 		ids = append(ids, id)
 	}
-	store.mu.RUnlock()
+	store.mu.Unlock()
 	sort.Strings(ids)
 	reads, err := store.reader.Read(ctx, ids)
 	if err != nil {

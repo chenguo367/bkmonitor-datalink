@@ -22,6 +22,11 @@ type resolvedTarget struct {
 	absence nodata.TargetResolution
 	members map[string]struct{}
 	facts   execution.TargetResolutionSummary
+	// unresolved is true when nothing resolved the plan at all - no resolver
+	// on this worker - as opposed to a resolution one of whose selectors
+	// could not answer. Only the first admits nothing; the second admits the
+	// members that did resolve.
+	unresolved bool
 }
 
 // summary is what the round's completion carries for this Plan.
@@ -51,15 +56,21 @@ func (target *resolvedTarget) absenceView() *nodata.TargetResolution {
 
 // ResolvedTargets hands the source what Begin resolved, so the records it
 // admits are filtered against the same members absence is judged against.
-// A Plan whose resolution is unavailable is left out: its filter then admits
-// nothing, which is what "the target is not known" has to mean for records.
+//
+// Every resolution is handed over, whatever its state: a selector that
+// could not answer contributes no members, and the members the static list
+// and the other selectors did resolve still admit their records - "no
+// match" is per selector, and a group key gone missing must not stop the
+// static hosts beside it from being detected. Only a Plan nothing resolved
+// at all is left out; its filter then admits nothing, under the name that
+// says so.
 func (stream *streamedExecution) ResolvedTargets() execution.TargetMemberships {
 	if len(stream.targetResolutions) == 0 {
 		return nil
 	}
 	targets := make(execution.TargetMemberships, len(stream.targetResolutions))
 	for identity, resolution := range stream.targetResolutions {
-		if resolution == nil || resolution.absence.State == nodata.TargetResolutionUnavailable {
+		if resolution == nil || resolution.unresolved {
 			continue
 		}
 		targets[identity] = resolution
@@ -89,14 +100,17 @@ func (stream *streamedExecution) resolveTargetPlans(ctx context.Context) {
 		if resolver != nil {
 			resolution = resolver.Resolve(ctx, plan)
 		}
-		if resolution == nil {
+		unresolved := resolution == nil
+		if unresolved {
 			// Nothing resolved it: unavailable by name, and the source is
 			// what is missing.
 			resolution = &targetplan.Resolution{Selectors: []targetplan.SelectorResult{{
 				Kind: targetplan.SelectorKindStatic, State: targetplan.SelectorUnavailable, Reason: targetplan.ReasonSourceUnwired}}}
 			resolution.Compose()
 		}
-		stream.targetResolutions[due.Identity] = newResolvedTarget(resolution)
+		target := newResolvedTarget(resolution)
+		target.unresolved = unresolved
+		stream.targetResolutions[due.Identity] = target
 		stream.observeTargetResolution(ctx, due, resolution)
 	}
 }
@@ -109,21 +123,18 @@ func newResolvedTarget(resolution *targetplan.Resolution) *resolvedTarget {
 	switch resolution.State {
 	case targetplan.ResolutionComplete:
 		target.absence.State = nodata.TargetResolutionComplete
-		target.absence.Members = resolution.Members()
 	case targetplan.ResolutionIncomplete:
 		target.absence.State = nodata.TargetResolutionIncomplete
-		target.absence.Members = resolution.Members()
 	default:
 		target.absence.State = nodata.TargetResolutionUnavailable
 	}
-	target.members = make(map[string]struct{}, len(resolution.Static))
-	for key := range resolution.Static {
+	target.absence.Members = resolution.Members()
+	// One union, read twice: the absence view lists it and the filter
+	// indexes it, so the two cannot disagree about who the members are.
+	members := resolution.Members()
+	target.members = make(map[string]struct{}, len(members))
+	for _, key := range members {
 		target.members[key] = struct{}{}
-	}
-	for index := range resolution.Selectors {
-		for key := range resolution.Selectors[index].Members {
-			target.members[key] = struct{}{}
-		}
 	}
 	target.facts = execution.TargetResolutionSummary{
 		State: string(resolution.State), NodesMissing: append([]string(nil), resolution.NodesMissing...),

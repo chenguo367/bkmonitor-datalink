@@ -129,6 +129,13 @@ func TestTheResolverAnswersEachSelectorByTheRulingsTable(t *testing.T) {
 	if resolution.Contains("503") {
 		t.Fatal("a host of another business resolved under the reference's business")
 	}
+	// The topology cache lists nodes without a business, so a reference to
+	// set 12 under a business that has no host there is a known node with
+	// no host - not a dangling one. Stated here so the limit is on record.
+	other := resolver.Resolve(context.Background(), plan(contract.TargetPlanRuleHostID, nil, contract.TargetPlanTopologyV1{BusinessID: "9", ObjectID: "set", InstanceID: "12"}))
+	if got := selector(other, targetplan.SelectorKindTopology, "9|set|12"); got.State != targetplan.SelectorOKEmpty || got.NodeMissing || got.Reason != targetplan.ReasonNone {
+		t.Fatalf("known node under a business with no host there = %+v", got)
+	}
 	// The Slot path reads nothing: every group above was read once, on its
 	// first reference, and resolving them all again issues no command.
 	reads := len(client.calls)

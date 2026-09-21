@@ -901,8 +901,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, state := range targetplan.ResolutionStates {
 		metrics.targetPlanResolutions.WithLabelValues(string(state))
 	}
-	// The selector cells are created on first observation: three kinds by
-	// four states by eleven reasons is mostly pairs that cannot happen.
+	// The selector cells are created on first observation - three kinds by
+	// four states by the reasons is mostly triples that cannot happen - but
+	// the ones an operator acts on are created at zero, so a zero there is
+	// "has not happened" rather than "nothing ever counted here".
+	for _, cell := range [][3]string{
+		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonKeyMissing},
+		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonReadFailed},
+		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonStale},
+		{targetplan.SelectorKindGroup, string(targetplan.SelectorIncomplete), targetplan.ReasonMembersDropped},
+		{targetplan.SelectorKindTopology, string(targetplan.SelectorUnavailable), targetplan.ReasonIndexUnavailable},
+		{targetplan.SelectorKindTopology, string(targetplan.SelectorOKEmpty), targetplan.ReasonNodeMissing},
+	} {
+		metrics.targetSelectorResolutions.WithLabelValues(cell[0], cell[1], cell[2])
+	}
 	for _, outcome := range nodata.SlotOutcomes {
 		if outcome == nodata.OutcomeEvaluated {
 			// A Plan that evaluated has not stalled, so the label would be a

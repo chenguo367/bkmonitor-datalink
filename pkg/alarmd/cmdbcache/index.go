@@ -108,8 +108,12 @@ type TopologyAnswer struct {
 }
 
 // Topology answers a dynamic topology reference from the reverse index. The
-// business is part of the key: the same node id under two businesses is two
-// nodes, and the reference names which.
+// hosts are read under the reference's business: the same node id under two
+// businesses holds two host sets, and the reference names which. Whether
+// the node exists is answered without the business, because the topology
+// cache's field is "obj|inst" alone; a reference to a node that exists in
+// another business therefore reads as a known node with no host here, not
+// as a dangling one.
 func (index *Index) Topology(businessID, objectID, instanceID string) TopologyAnswer {
 	if index == nil || index.hosts == 0 || index.topoNodes == nil {
 		return TopologyAnswer{}
