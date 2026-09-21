@@ -208,10 +208,27 @@ func validateLevelOutcome(
 	guardReasons := loadedGuardReasons(plan.Identity, outcome.LevelID, stateIdentity, states, gaps)
 	if len(guardReasons) != 0 {
 		switch outcome.Outcome {
-		case LevelOutcomeNormal, LevelOutcomeRecovery:
+		case LevelOutcomeNormal:
 			if !loadedSeriesWarmingCompleted(outcome, plan, stateResults, states, gaps) {
-				return resultContractViolation(codeOutcomeBusinessUnderActiveGuard, "active Runtime State or Plan gap guard forbids NORMAL and RECOVERY")
+				return resultContractViolation(codeOutcomeBusinessUnderActiveGuard, "active Runtime State or Plan gap guard forbids NORMAL")
 			}
+		case LevelOutcomeRecovery:
+			// A guard forbids calling the Level normal. It does not forbid
+			// closing what was opened, and it used to: a Level under a guard
+			// could not recover until its window was FULL again, which for a
+			// strategy whose window outlasts the interval between releases is
+			// never (decision-022).
+			//
+			// Nothing is checked here in its place, deliberately. The evidence
+			// for a recovery is counted where it is observed -- the trigger
+			// walks the positions it actually saw -- and checked again on the
+			// event contract, which refuses a RECOVERY whose own window
+			// evidence does not carry it. A third reading here would have to
+			// re-derive the same relation from the loaded state, and the one
+			// it used to derive was "the mutation writes the Level FULL",
+			// which is the very condition a hole in the window makes
+			// unreachable. Removing it takes away a check that was reading the
+			// wrong quantity, not a check of this.
 		case LevelOutcomeUnknown:
 			if !loadedSeriesWarmingCompleted(outcome, plan, stateResults, states, gaps) {
 				// Either the reason the guard is already up for, or the

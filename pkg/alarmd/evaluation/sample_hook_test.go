@@ -207,14 +207,21 @@ func TestSeriesSampleOnlyFirstRecordDoesNotChangeProvisionalFold(t *testing.T) {
 }
 
 func TestSeriesSampleUsesFinalGuardAndFreeze(t *testing.T) {
-	plan := compiledG4Plan(t, strategy.DetectorKindSimpleRingRatio, map[string]any{"floor": 20, "ceil": nil}, strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, IdentityFields: []string{"host"}})
-	record := g4Record(99, `80`, nil)
+	// Two positions wide at a threshold of one, so the single record leaves a
+	// hole that could itself have been the anomaly: the window never answers,
+	// no recovery is reached, and the outcome stays UNKNOWN under the guard.
+	// At one of one - what this used to compile - the record is a whole
+	// observed window, which since decision-022 recovers, and a RECOVERY
+	// carries no reason for the sample to have copied.
+	plan := compiledG4PlanWithTrigger(t, strategy.DetectorKindSimpleRingRatio, map[string]any{"floor": 20, "ceil": nil}, strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, IdentityFields: []string{"host"}}, 2, 1)
+	// Late enough that a two position window still starts after zero.
+	record := g4Record(159, `80`, nil)
 	// The ring ratio's dependency is supplied too, so the only reason on the
 	// Level is the state's guard. Left empty, the dependency's QUERY_EMPTY
 	// competes with the guard for the outcome's reason, and what this test
 	// is about -- the sample copying the final guard rather than the
 	// preliminary detection -- is no longer the only thing the fixture asks.
-	previous := g4Record(39, `40`, nil)
+	previous := g4Record(99, `40`, nil)
 	for _, completeness := range []execution.HistoryCompleteness{execution.HistoryWarming, execution.HistoryGapped} {
 		req := requestFixtureForPlan(t, plan, []contract.CanonicalRecordV2{record}, nil)
 		req.State.Items[0].Status = execution.StateFoundWarming

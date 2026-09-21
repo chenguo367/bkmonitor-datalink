@@ -802,6 +802,55 @@ func TestEvaluationAcceptsLoadedGappedWithExclusiveFinalFullProof(t *testing.T) 
 	}
 }
 
+// A guard forbids calling a Level normal. It does not forbid closing what was
+// opened, and this layer no longer pretends to decide that: decision-022
+// section 9.3 moved the recovery evidence check to the event contract, which
+// is the only layer that holds the evidence.
+//
+// That move is deliberate and has to stay readable, because the shape here is
+// the one that hides a missing check: this layer cannot reject an unevidenced
+// RECOVERY, and nothing in this package says why. The quantities the event
+// contract weighs - ObservedConsecutiveMisses, SkippedWindows,
+// OldestWindowStart - live on contract.RecoveryWindowEvidenceV1 and appear
+// nowhere in execution outside test fixtures, so a check written here could
+// only re-derive the relation from the loaded state, and the one it used to
+// derive ("the mutation writes the Level FULL") is exactly what a hole in the
+// window makes unreachable. The NORMAL cases above are the guard this layer
+// does own.
+func TestEvaluationAcceptsRecoveryUnderALoadedGuard(t *testing.T) {
+	t.Run("mutation remains warming", func(t *testing.T) {
+		result, request := loadedSeriesWarmingCompletion(t, execution.LevelOutcomeRecovery)
+		mutation := result.Plans[0].StateResults[0].Mutation
+		mutation.Levels = append([]execution.RuntimeLevelStateMutation(nil), mutation.Levels...)
+		mutation.Levels[0].HistoryCompleteness = execution.HistoryWarming
+		mutation.Levels[0].GapReasonCode = execution.ReasonCode(contract.ReasonHistoryWarming)
+		mutation.MutationDigest = ""
+		result.Plans[0].StateResults[0].Mutation = mustStateMutation(mutation)
+		if err := result.Validate(request); err != nil {
+			t.Fatalf("a Level still WARMING may close what is open, got %v", err)
+		}
+	})
+
+	for _, scope := range []execution.GapScope{{}, {HasLevel: true, LevelID: 5}} {
+		name := "plan gap"
+		if scope.HasLevel {
+			name = "level gap"
+		}
+		t.Run(name, func(t *testing.T) {
+			result, request := loadedSeriesWarmingCompletion(t, execution.LevelOutcomeRecovery)
+			request.Gaps.Items[0].Status = execution.GapFound
+			request.Gaps.Items[0].MarkerRevision = 1
+			request.Gaps.Items[0].Scopes = []execution.GapScopeState{{
+				Scope: scope, Status: execution.GapStatusGapped,
+				ReasonCode: execution.ReasonCode(contract.ReasonHistoryGapped), RequiredFullSlots: 1,
+			}}
+			if err := result.Validate(request); err != nil {
+				t.Fatalf("a loaded %s may not hold an open alert open, got %v", name, err)
+			}
+		})
+	}
+}
+
 func TestEvaluationRejectsLoadedSeriesWarmingWithoutExclusiveFinalFullProof(t *testing.T) {
 	t.Run("no final mutation", func(t *testing.T) {
 		result, request := loadedSeriesWarmingCompletion(t, execution.LevelOutcomeNormal)
@@ -812,7 +861,7 @@ func TestEvaluationRejectsLoadedSeriesWarmingWithoutExclusiveFinalFullProof(t *t
 	})
 
 	t.Run("mutation remains warming", func(t *testing.T) {
-		result, request := loadedSeriesWarmingCompletion(t, execution.LevelOutcomeRecovery)
+		result, request := loadedSeriesWarmingCompletion(t, execution.LevelOutcomeNormal)
 		mutation := result.Plans[0].StateResults[0].Mutation
 		mutation.Levels = append([]execution.RuntimeLevelStateMutation(nil), mutation.Levels...)
 		mutation.Levels[0].HistoryCompleteness = execution.HistoryWarming
@@ -820,7 +869,7 @@ func TestEvaluationRejectsLoadedSeriesWarmingWithoutExclusiveFinalFullProof(t *t
 		mutation.MutationDigest = ""
 		result.Plans[0].StateResults[0].Mutation = mustStateMutation(mutation)
 		if err := result.Validate(request); err == nil || !strings.Contains(err.Error(), "active Runtime State or Plan gap guard") {
-			t.Fatalf("a WARMING final mutation must not clear loaded WARMING for RECOVERY, got %v", err)
+			t.Fatalf("a WARMING final mutation must not clear loaded WARMING for NORMAL, got %v", err)
 		}
 	})
 
@@ -857,7 +906,7 @@ func TestEvaluationRejectsLoadedSeriesWarmingWithoutExclusiveFinalFullProof(t *t
 			name = "level gap"
 		}
 		t.Run(name, func(t *testing.T) {
-			result, request := loadedSeriesWarmingCompletion(t, execution.LevelOutcomeRecovery)
+			result, request := loadedSeriesWarmingCompletion(t, execution.LevelOutcomeNormal)
 			request.Gaps.Items[0].Status = execution.GapFound
 			request.Gaps.Items[0].MarkerRevision = 1
 			request.Gaps.Items[0].Scopes = []execution.GapScopeState{{
@@ -865,7 +914,7 @@ func TestEvaluationRejectsLoadedSeriesWarmingWithoutExclusiveFinalFullProof(t *t
 				ReasonCode: execution.ReasonCode(contract.ReasonHistoryGapped), RequiredFullSlots: 1,
 			}}
 			if err := result.Validate(request); err == nil || !strings.Contains(err.Error(), "active Runtime State or Plan gap guard") {
-				t.Fatalf("loaded %s must continue to reject RECOVERY at the guard, got %v", name, err)
+				t.Fatalf("loaded %s must continue to reject NORMAL at the guard, got %v", name, err)
 			}
 		})
 	}

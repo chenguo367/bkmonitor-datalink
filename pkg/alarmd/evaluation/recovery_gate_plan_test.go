@@ -39,7 +39,20 @@ func TestEvaluatorCountsAHeldRecoveryEnvelopeOnThePlan(t *testing.T) {
 		{name: "both Levels complete send the envelope and count nothing", siblingWarm: false, wantHeld: 0, wantEnvelopes: 1},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
-			plan := compiledTwoLevels(t)
+			// The held arm needs a sibling that genuinely cannot answer, not
+			// merely one under a guard. Since decision-022 a guarded Level
+			// whose recovery window is fully observed recovers, so a sibling
+			// asking for one window would close the envelope rather than hold
+			// it. Asking for two consecutive windows is what the loaded
+			// history cannot give: the older of the two was anomalous, so the
+			// run of misses ends there and the Level stays unavailable, which
+			// is the state this gate is about.
+			plan := compiledTwoLevelsShaped(t, "50", "50", func(p *contract.EvaluationPlanV2) {
+				if !arm.siblingWarm {
+					return
+				}
+				p.StrategyIR.Levels[1].RecoveryPlan.Config = json.RawMessage(`{"enabled":true,"consecutive_windows":2}`)
+			})
 			history := []execution.StateHistoryPoint{{RecordID: strings.Repeat("a", 64), SourceTime: 40, Levels: []execution.StateLevelFact{
 				{LevelID: 5, DetectFingerprint: plan.Levels()[0].Fingerprints().Detect, Result: execution.LevelFactAnomalous},
 				{LevelID: 6, DetectFingerprint: plan.Levels()[1].Fingerprints().Detect, Result: execution.LevelFactAnomalous},

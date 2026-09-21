@@ -320,27 +320,82 @@ func evaluateLevelV2(
 	result := ""
 	if fact.Result == DetectionAnomalous && observedAnomalies >= triggerPlan.RequiredAnomalies {
 		result = contract.LevelResultAbnormal
-	} else if summary.Completeness != HistoryFull {
-		outcome.UnavailableReason = historyReasonV2(summary.Completeness)
-		outcome.HistoryCompleteness = summary.Completeness
-		return outcome, contract.LevelResultV1{}, nil
 	}
-	observedMisses := uint32(0)
+	// The recovery walk runs before the completeness gate, and only recovery
+	// does. A window short of positions cannot say a Level is normal, but it
+	// can say the Level has been observed normal for long enough to close what
+	// is open: an alert stays open until a recovery closes it, so making
+	// recovery wait for a full window means a three minute hole keeps every
+	// open alert of a Plan with a day-long window open for a day. Decided at
+	// decision-022: recovery reads observed positions, NORMAL is unchanged and
+	// still requires FULL.
+	observedMisses, skippedWindows := uint32(0), uint32(0)
 	oldestWindowStart := triggerStart
 	if recoveryPlan.Enabled && result == "" {
-		for offset := uint32(0); offset < recoveryPlan.ConsecutiveWindows; offset++ {
+		// How far back an observed position may still count: the retained
+		// window and no further. It is not a separate bound -- the window
+		// holds exactly RequiredDetectHistoryPoints positions (the compiler
+		// sets RetentionPoints to the same number), so nothing older than that
+		// exists to be read. A second, wider bound would be a bound nothing
+		// can reach, and its branches would be code no round runs.
+		//
+		// Computed from the plan the same way the compiler computes it, not
+		// read off the summary: the summary is supplied by the history, and a
+		// history that leaves the field zero would silently bound the walk to
+		// nothing rather than to the window.
+		retained := triggerPlan.WindowSize
+		if recoveryPlan.ConsecutiveWindows > 0 {
+			retained += recoveryPlan.ConsecutiveWindows - 1
+		}
+		for offset := uint32(0); observedMisses < recoveryPlan.ConsecutiveWindows && offset < retained; offset++ {
 			shift, ok := multiplyUint32ToInt64(offset, triggerPlan.StepSeconds)
-			if !ok || shift > request.Record.SourceTime {
+			if !ok {
 				return LevelOutcomeV2{}, contract.LevelResultV1{}, invariantV2("calculate Recovery window", definition.LevelID, errors.New("window time overflow"))
+			}
+			// Reaching the start of time is a stop, not a fault. Before this
+			// walk could skip, the offset count kept it inside the history and
+			// getting here meant the configuration was impossible, so it was
+			// an invariant violation; a walk that steps over holes reaches it
+			// on ordinary histories.
+			if shift > request.Record.SourceTime {
+				break
 			}
 			windowEnd := request.Record.SourceTime - shift
 			windowStart, ok := windowStartV2(windowEnd, triggerPlan.WindowSize, triggerPlan.StepSeconds)
 			if !ok {
-				return LevelOutcomeV2{}, contract.LevelResultV1{}, invariantV2("calculate Recovery window", definition.LevelID, errors.New("window time overflow"))
+				// No window can be formed this far back, so there is nothing
+				// left to observe. Same stop as the two above, and for the
+				// same reason they changed: a walk that can skip reaches here
+				// on ordinary histories, where the fixed-length one could only
+				// arrive by misconfiguration.
+				break
 			}
 			oldestWindowStart = windowStart
-			if history.CountAnomalies(windowStart, windowEnd) >= triggerPlan.RequiredAnomalies {
+			// A window nobody observed is evidence of neither recovery nor its
+			// opposite. Counting it as a miss, which is what happened before,
+			// built recoveries on absence; breaking on it would make a single
+			// hole cost the whole run. It is stepped over, and said so on the
+			// evidence.
+			//
+			// Which of the three it is has to be decided with the holes in
+			// hand. CountAnomalies returns the same small number for a quiet
+			// window and for a window that was never observed, so the anomaly
+			// count alone cannot tell "this did not trigger" from "there was
+			// not enough here to say". Only when every hole could have been
+			// anomalous and the window still would not have reached the
+			// threshold is the miss an observation rather than an absence.
+			anomalies := history.CountAnomalies(windowStart, windowEnd)
+			if anomalies >= triggerPlan.RequiredAnomalies {
 				break
+			}
+			observed := history.CountObserved(windowStart, windowEnd)
+			holes := uint32(0)
+			if observed < triggerPlan.WindowSize {
+				holes = triggerPlan.WindowSize - observed
+			}
+			if anomalies+holes >= triggerPlan.RequiredAnomalies {
+				skippedWindows++
+				continue
 			}
 			observedMisses++
 		}
@@ -348,6 +403,11 @@ func evaluateLevelV2(
 	if result == "" && recoveryPlan.Enabled && observedMisses >= recoveryPlan.ConsecutiveWindows {
 		result = contract.LevelResultRecovery
 	} else if result == "" {
+		if summary.Completeness != HistoryFull {
+			outcome.UnavailableReason = historyReasonV2(summary.Completeness)
+			outcome.HistoryCompleteness = summary.Completeness
+			return outcome, contract.LevelResultV1{}, nil
+		}
 		result = contract.LevelResultNormal
 	}
 
@@ -361,6 +421,7 @@ func evaluateLevelV2(
 		Recovery: contract.RecoveryWindowEvidenceV1{
 			Enabled: recoveryPlan.Enabled, RequiredConsecutiveWindows: recoveryPlan.ConsecutiveWindows,
 			ObservedConsecutiveMisses: observedMisses, OldestWindowStart: oldestWindowStart,
+			SkippedWindows: skippedWindows,
 		},
 		HistoryCompleteness: summary.Completeness,
 		WindowEvidence: contract.WindowEvidenceV1{
