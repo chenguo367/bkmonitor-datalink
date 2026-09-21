@@ -397,6 +397,26 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 			blocked.Code = code
 		}
 	}
+	// A Slot the query cooldown held until it fell past the replay range is
+	// the cooldown's, and the cooldown is the query failure's: the reading
+	// the KindQueryCooldown row gets, whatever Slot the failure was seen on,
+	// because the holder says the skip is its doing. By its own outcome the
+	// round read SCHEDULE / capacity, which is where the check sent the
+	// reader while the backend was answering every probe with a status
+	// saying the field did not exist.
+	if anomaly.HeldBy == heldByCooldown {
+		blocked.Stage, blocked.Class = StageQuery, ClassUnavailable
+		blocked.Dependency, blocked.DependencyEvidence = DependencyQueryBackend, dependencyByCode
+		if queryRejected(anomaly.Failure) {
+			blocked.Class = ClassRefused
+		}
+		if anomaly.Failure != nil {
+			blocked.Code, blocked.Text = anomaly.Failure.Code, anomaly.Failure.Detail
+			if blocked.Text == "" {
+				blocked.Text = anomaly.Failure.Text
+			}
+		}
+	}
 	// A failure the pipeline classified but no code read: the category says
 	// which step raised it, and only that -- when the failure is this
 	// round's. A failure kept from an earlier Slot names no step for this one.

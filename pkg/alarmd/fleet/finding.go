@@ -118,10 +118,17 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 		return CheckEmptyEveryRound, true, false
 	case anomaly.Kind == KindNoDataMemoryRefused:
 		return CheckNoDataMemoryRefused, true, false
-	case anomaly.Kind == KindQueryCooldown:
+	case anomaly.Kind == KindQueryCooldown, anomaly.HeldBy == heldByCooldown:
 		// Cooldown is what this deployment does about a backend that keeps not
 		// answering; the line is the backend's, unless the backend answered and
-		// refused.
+		// refused. A round the cooldown held until its Slot fell past the
+		// replay range is the same line: the skip is the cooldown's
+		// consequence and the cooldown is the failure's. Read by the round's
+		// own outcome it was "detection abandoned", this deployment's, for
+		// capacity -- and the same object moved back to the failure's line on
+		// the next probe and out again on the next skip. The failure is read
+		// whatever Slot it was seen on, because the holder says the skip is
+		// its doing.
 		if queryRejected(anomaly.Failure) {
 			return refusalCheck(anomaly.Failure), true, false
 		}

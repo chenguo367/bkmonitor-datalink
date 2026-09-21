@@ -1437,6 +1437,13 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	}
 	anomaly.Guards, anomaly.GuardsTotal = worstGuards(state.guards)
 	anomaly.NoDataMemoryUpkeep = latestUpkeep(state)
+	// The holder of the latest round's Slot, when that round gave it up. The
+	// span keeps the word from the completion that wrote it; the row carries
+	// it only while the skip is the latest round -- a round since, run or
+	// failed, has its own reason and the skip is the span's record alone.
+	if state.gapSkip != nil && state.reasonCode == "GAP_SKIPPED" && state.gapSkip.LastSlot == state.lastRoundSlot {
+		anomaly.HeldBy = state.gapSkip.HeldBy
+	}
 	if state.lastEvidence != nil {
 		evidence := *state.lastEvidence
 		anomaly.ExecutionEvidence = &evidence
