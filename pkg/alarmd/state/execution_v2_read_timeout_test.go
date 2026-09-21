@@ -49,6 +49,27 @@ func TestAReadThatRanOutOfTimeIsNotTheDependencyBeingDown(t *testing.T) {
 		}
 	}
 
+	// A dial that timed out is the dependency not being reachable - a black
+	// hole, a partition, a server that is gone - and it is the one timeout that
+	// really is the dependency's. Named as ours it lands in the fleet view as
+	// this deployment's doing and points the page at a read size that had
+	// nothing to do with it: the same misattribution, aimed the other way.
+	dial := runtimeLoadFailure(execution.RuntimeStateView{}, &net.OpError{
+		Op: "dial", Net: "tcp", Err: timeoutError{},
+	})
+	if dial.ReasonCode != execution.ReasonCode(contract.ReasonRedisUnavailable) {
+		t.Fatalf("a dial timeout = %q, want %q: nothing was read, so no read was too large",
+			dial.ReasonCode, contract.ReasonRedisUnavailable)
+	}
+	// A read on an established connection still is ours, so the check above is
+	// about dialling rather than about net.OpError.
+	read := runtimeLoadFailure(execution.RuntimeStateView{}, &net.OpError{
+		Op: "read", Net: "tcp", Err: timeoutError{},
+	})
+	if read.ReasonCode != execution.ReasonCode(contract.ReasonStateReadTimeout) {
+		t.Fatalf("a read timeout = %q, want %q", read.ReasonCode, contract.ReasonStateReadTimeout)
+	}
+
 	// The other branch still exists, or the case above is satisfied by naming
 	// everything a timeout.
 	refused := runtimeLoadFailure(execution.RuntimeStateView{}, errors.New("connection refused"))

@@ -492,61 +492,103 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	return item
 }
 
-// expectedValueBytes is what one record has been costing, learned from the
-// reads that came back.
+// runtimeValueSizeGroups bounds how many Query Groups the store remembers a
+// record size for. Past it the table is dropped and relearned, which costs one
+// safe-sized batch per Query Group and never more than that.
+const runtimeValueSizeGroups = 4096
+
+// expectedValueBytes is what one record of this Query Group has been costing,
+// learned from the reads that came back.
 //
-// Learned rather than configured because nothing knows it in advance: record
-// size is a property of each strategy's retention and Level count, it changes
-// when either is edited, and a number in a file would be wrong for most Query
-// Groups on the replica. Learned rather than computed from the limits, because
-// the limit is the ceiling - sizing every batch against 512 KiB would cut
-// batches to 16 keys for the vast majority of records that are nowhere near
-// it.
+// Per Query Group, because record size is a property of one strategy's
+// retention and Level count and nothing else. A process-wide average is the
+// number that is wrong for every Query Group at once: a replica holding two
+// thousand ordinary objects of a few KiB and one object of 345 KiB averages to
+// a few KiB, so the one object that needs a small batch is the one that gets
+// the largest - which is the shape this bound exists for, unbounded by the
+// bound meant to catch it.
 //
-// Zero until something has been read, and then the batch is bounded by items
-// alone: the first read after a restart is the one with nothing to go on. That
-// is the same exposure as before this existed, for one call, and the reading it
-// produces bounds the rest.
-func (store *ExecutionStore) expectedValueBytes() uint64 {
-	return store.observedValueBytes.Load()
+// Zero until this Query Group has been read.
+func (store *ExecutionStore) expectedValueBytes(group execution.QueryGroupIdentity) (uint64, bool) {
+	store.valueSizes.mu.RLock()
+	defer store.valueSizes.mu.RUnlock()
+	size, learned := store.valueSizes.bytes[group]
+	return size, learned
 }
 
-// observeValueBytes folds one batch's result into that average.
+// observeValueBytes folds one batch's result into that Query Group's average.
 //
-// A plain mean over everything ever read would take a long time to notice a
-// strategy whose retention was just raised, which is exactly when the bound
-// matters, so recent reads weigh more. It only has to be good enough to keep a
-// batch off a cliff, not to be accurate.
-func (store *ExecutionStore) observeValueBytes(keys int, loaded int64) {
+// Called only for a batch that came back. A failed read has loaded zero bytes,
+// and folding that in teaches the opposite of what the failure shows: the
+// average falls, the next batch is allowed to be at least as large, and the
+// read that was already too big to finish is reissued at the same size. An
+// instrument that learns "smaller" from the event it exists to catch reports
+// the reverse of the truth precisely when it is consulted.
+//
+// Recent reads weigh more, because the moment this matters is right after a
+// strategy's retention was raised, and a lifetime mean is slowest exactly then.
+func (store *ExecutionStore) observeValueBytes(group execution.QueryGroupIdentity, keys int, loaded int64) {
 	if keys <= 0 || loaded < 0 {
 		return
 	}
+	// Zero bytes off a batch that came back is a reading, not a blank. Every
+	// key missing is what a strategy that has not written state yet looks like,
+	// and it is the common case on a cold replica - refusing to learn from it
+	// would leave those Query Groups on the safe small batch for as long as
+	// they stay cold, which for a thousand keys is a hundred round trips where
+	// four would do. A read that did not come back is the one that teaches
+	// nothing, and that is decided by its error, not by its size.
 	sample := uint64(loaded) / uint64(keys)
-	previous := store.observedValueBytes.Load()
-	if previous == 0 {
-		store.observedValueBytes.Store(sample)
+	store.valueSizes.mu.Lock()
+	defer store.valueSizes.mu.Unlock()
+	if store.valueSizes.bytes == nil {
+		store.valueSizes.bytes = make(map[execution.QueryGroupIdentity]uint64, 64)
+	}
+	previous, learned := store.valueSizes.bytes[group]
+	if !learned {
+		if len(store.valueSizes.bytes) >= runtimeValueSizeGroups {
+			// Relearn rather than grow without bound or evict by some rule
+			// nobody can predict. Every Query Group pays one safe-sized batch
+			// and is back where it was.
+			store.valueSizes.bytes = make(map[execution.QueryGroupIdentity]uint64, 64)
+		}
+		store.valueSizes.bytes[group] = sample
 		return
 	}
-	store.observedValueBytes.Store((previous*3 + sample) / 4)
+	store.valueSizes.bytes[group] = (previous*3 + sample) / 4
 }
 
-// runtimeLoadBatchItems bounded by what those records are expected to weigh.
-func (store *ExecutionStore) runtimeLoadBatchLimit() int {
-	expected := store.expectedValueBytes()
+// runtimeLoadBatchLimit is how many keys of this Query Group one MGET may ask
+// for: the item bound, reduced to what those records are expected to weigh.
+//
+// A Query Group nothing has been read for yet gets the only bound that holds
+// whatever its records turn out to be - the batch budget divided by the largest
+// value the store will accept. That is 16 keys at the shipped limits, which is
+// small for the great majority of records nowhere near that size, and it is the
+// right price for exactly one call: the alternative is to guess, and the guess
+// that matters is the one made for the object whose records are enormous.
+func (store *ExecutionStore) runtimeLoadBatchLimit(group execution.QueryGroupIdentity) int {
+	expected, learned := store.expectedValueBytes(group)
+	if !learned {
+		expected = uint64(store.options.MaxValueBytes)
+	}
 	if expected == 0 {
+		// Either nothing bounds a value here, or this Query Group's records
+		// have been coming back empty. Both are the item bound.
 		return runtimeLoadBatchItems
 	}
 	limit := int(runtimeLoadBatchBytes / expected)
-	if limit < 1 {
+	switch {
+	case limit < 1:
 		// One key per call. A single record over the whole batch budget is
 		// still read - refusing it here would stop a Plan the store accepts -
 		// and it is read alone rather than beside others.
 		return 1
-	}
-	if limit > runtimeLoadBatchItems {
+	case limit > runtimeLoadBatchItems:
 		return runtimeLoadBatchItems
+	default:
+		return limit
 	}
-	return limit
 }
 
 // runtimeLoadBatch collects consecutive same-target keys for one MGET.
@@ -598,6 +640,16 @@ func isReadTimeout(err error) bool {
 	if err == nil {
 		return false
 	}
+	// A dial that timed out is the dependency not being reachable - a black
+	// hole, a partition, a server that is gone - and it is the one timeout that
+	// really is REDIS_UNAVAILABLE. Folding it in here would send it to the
+	// fleet view as this deployment's own doing and point the page at a read
+	// size that had nothing to do with it, which is the same misattribution
+	// this naming exists to end, aimed the other way.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return false
+	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
 		return true
 	}
@@ -619,7 +671,12 @@ func (store *ExecutionStore) loadRuntimeBatch(
 	if err == nil && len(values) != len(batch.keys) {
 		err = fmt.Errorf("state: invalid backend read cardinality")
 	}
-	defer func() { store.observeValueBytes(len(batch.keys), loaded) }()
+	// Only a batch that came back teaches anything; see observeValueBytes.
+	defer func() {
+		if err == nil {
+			store.observeValueBytes(request.Contract.Slot.QueryGroup, len(batch.keys), loaded)
+		}
+	}()
 	for position, index := range batch.indexes {
 		item := request.Items[index]
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}

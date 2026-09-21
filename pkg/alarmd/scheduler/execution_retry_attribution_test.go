@@ -11,21 +11,24 @@ import (
 	"testing"
 )
 
-// A failed state read schedules a retry of the Slot - unless the attempt spent
-// so long failing that the Slot's own deadline went first.
+// A failed state read schedules a retry of the Slot, and cancellation does not.
 //
-// This is the pair the retry stacking turned on. With the client taking one
-// attempt, a 3 s read timeout returns while the completion context is still
-// live, the error reaches here as an ordinary failure, and the Slot is parked
-// for a retry that re-reads current state. With the client's default three
-// retries the same failure takes 12 s, which on a short-period Plan - a 10 s or
-// 15 s interval with a 30 s completion offset - outlives the deadline, and an
-// expired context is the first thing this refuses. Nothing records the attempt
-// and nothing retries the Slot.
+// This is what the Slot-level retry guarantees, and it is why the Redis
+// client's own retries are redundant rather than load-bearing: the layer above
+// already records a failed attempt, parks the Query Group with exponential
+// backoff and no attempt cap, and re-reads current state on the way back. The
+// client's three resend the same request to the same server and buy nothing -
+// they only make the attempt take 12 s instead of 3.
 //
-// Both halves are stated because either alone is satisfied by the wrong rule:
-// always backing off would lose cancellation, never backing off would lose
-// every retry.
+// The completion deadline is deliberately not part of this. It is derived
+// inside the coordinator and never reaches here, so a Slot that blew it still
+// returns an ordinary error to a live runner context and is still retried:
+// the completion deadline bounds one attempt, recovery_until bounds the
+// retrying, and they are two bounds on purpose.
+//
+// Both directions are stated because either alone is satisfied by the wrong
+// rule: always backing off would lose cancellation, never backing off would
+// lose every retry.
 func TestAFailedStateReadBacksOffUnlessItOutlivedTheSlot(t *testing.T) {
 	readTimedOut := errors.New("alarmd worker: series state preflight: state: Redis MGET: i/o timeout")
 
@@ -34,11 +37,11 @@ func TestAFailedStateReadBacksOffUnlessItOutlivedTheSlot(t *testing.T) {
 			"never retried - the read is retryable and the next attempt re-reads current state")
 	}
 
-	expired, cancel := context.WithCancel(context.Background())
+	stopped, cancel := context.WithCancel(context.Background())
 	cancel()
-	if executionErrorBacksOff(expired, readTimedOut) {
-		t.Fatal("the same failure backed off after the Slot's context had already gone; a cancelled Slot " +
-			"is not a failed attempt of it")
+	if executionErrorBacksOff(stopped, readTimedOut) {
+		t.Fatal("the same failure backed off after the runner's own context had gone; a Slot abandoned " +
+			"because the process is stopping or the lease was withdrawn is not a failed attempt of it")
 	}
 	if executionErrorBacksOff(context.Background(), context.Canceled) {
 		t.Fatal("cancellation counted as a failed attempt of the frozen Slot")

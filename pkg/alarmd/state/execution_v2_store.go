@@ -11,7 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -108,10 +108,13 @@ type ExecutionStore struct {
 	// Plan's entry, and the reset counter could not say which population
 	// overflowed.
 	frozenRenewals *renewalGate
-	// observedValueBytes is what one stored record has been costing, learned
-	// from the reads that returned, so a preflight batch can be bounded by what
-	// it is expected to move rather than by key count alone.
-	observedValueBytes atomic.Uint64
+	// valueSizes is what one stored record has been costing, per Query Group,
+	// learned from the reads that returned - so a preflight batch is bounded by
+	// what it is expected to move rather than by key count alone.
+	valueSizes struct {
+		mu    sync.RWMutex
+		bytes map[execution.QueryGroupIdentity]uint64
+	}
 }
 
 type runtimeEnvelope struct {
@@ -208,7 +211,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			result.Items[index] = runtimeLoadFailure(view, err)
 			continue
 		}
-		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.runtimeLoadBatchLimit()) {
+		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.runtimeLoadBatchLimit(request.Contract.Slot.QueryGroup)) {
 			result.LoadedBytes += store.loadRuntimeBatch(ctx, request, batch, result.Items)
 			batch.reset()
 		}

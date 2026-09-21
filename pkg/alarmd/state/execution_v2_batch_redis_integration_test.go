@@ -175,8 +175,10 @@ func TestRedisFencedBatchApplyStoresSequentialBytesWithinBoundedRoundTrips(t *te
 	batched := fixture.store(t, "batched", true)
 	fixture.client.reset()
 	loaded := loadInStreamBatches(t, batched, items)
-	if fixture.client.mgets != 4 {
-		t.Fatalf("preflight MGET round trips = %d, want ceil(1000/256) = 4", fixture.client.mgets)
+	// One safe batch of 16 for a Query Group nothing has been read for, then
+	// the item bound once its record size is known.
+	if fixture.client.mgets != 5 {
+		t.Fatalf("preflight MGET round trips = %d, want 1 safe batch of 16 + ceil(984/256) = 5", fixture.client.mgets)
 	}
 	for index, view := range loaded.Items {
 		if view.Status != execution.StateMissingWarming {
@@ -379,8 +381,15 @@ func TestRedisRuntimeStateHotModelRoundTrips(t *testing.T) {
 	if oldTrips != 3*series {
 		t.Fatalf("old path round trips = %d, want %d", oldTrips, 3*series)
 	}
-	if fixture.client.mgets != 16 || fixture.client.pipelines != 16 || fixture.client.evals != 0 {
-		t.Fatalf("batched round trips: mget=%d pipelines=%d eval=%d, want 16 + 16", fixture.client.mgets, fixture.client.pipelines, fixture.client.evals)
+	// One safe batch, then the item bound. A Query Group nothing has been read
+	// for yet is bounded by the batch budget over the largest value the store
+	// accepts, because that is the only bound that holds whatever its records
+	// turn out to be; the first batch teaches their real size and the rest run
+	// at the item bound. The extra round trip is that one call, per Query
+	// Group, and it is what stops a Query Group whose records grew to 345 KiB
+	// from asking for 86 MB in one MGET.
+	if fixture.client.mgets != 17 || fixture.client.pipelines != 16 || fixture.client.evals != 0 {
+		t.Fatalf("batched round trips: mget=%d pipelines=%d eval=%d, want 17 + 16", fixture.client.mgets, fixture.client.pipelines, fixture.client.evals)
 	}
 	requireMatchingRedisState(t, fixture, mutations, false)
 }

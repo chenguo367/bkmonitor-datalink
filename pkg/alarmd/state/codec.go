@@ -150,8 +150,11 @@ func RuntimeEnvelopeUpperBoundV2(levelCount, pointCount int) (int, error) {
 	// a source time at its widest. Per Level fact inside a point: the keys, a
 	// Level id at its widest, a 64-character fingerprint and a result.
 	const (
-		envelopeOverhead = 1 << 10
-		perLevelState    = 128
+		// The envelope around the history: identity, apply version, digests, the
+		// series guard and the keys naming them, each at its widest.
+		envelopeOverhead = 4 << 10
+		// One Level entry outside the points: three 64-character refs and a time.
+		perLevelState    = 512
 		perPointFixed    = 126
 		perPointPerLevel = 123
 	)

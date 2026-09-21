@@ -8,6 +8,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 
@@ -30,10 +31,35 @@ func envelopeOfShape(t *testing.T, points, levels int) int {
 	mutations := make([]execution.RuntimeLevelStateMutation, levels)
 	for l := range mutations {
 		mutations[l] = execution.RuntimeLevelStateMutation{LevelID: uint32(l + 1),
-			LevelStateCompatibility: "COMPATIBLE", HistoryCompleteness: execution.HistoryFull}
+			LevelStateCompatibility: strings.Repeat("C", 64), HistoryCompleteness: execution.HistoryWarming,
+			GapReasonCode:        execution.ReasonCode(strings.Repeat("G", 64)),
+			WarmupRequirementRef: strings.Repeat("W", 64), LastProcessedEventTime: math.MaxInt64}
 	}
-	raw, err := json.Marshal(runtimeEnvelope{Schema: executionStateSchemaV2, BlobRevision: 7,
-		Levels: mutations, History: history})
+	// Filled to the widest each field can be, not left at its zero value. The
+	// bound has to hold for the record the store actually writes, and a fixture
+	// that leaves the identity, the apply version, the digests and the Level
+	// refs empty measures a record no Plan produces - so margin that exists
+	// only because the fixture was thin reads as margin in the bound.
+	guard := execution.StateGuardFact{
+		Status: execution.HistoryWarming, ReasonCode: execution.ReasonCode(strings.Repeat("R", 64)),
+		WarmupRequirementRef: strings.Repeat("w", 64),
+	}
+	raw, err := json.Marshal(runtimeEnvelope{
+		Schema: executionStateSchemaV2,
+		Identity: execution.StateKeyIdentity{
+			Plan: execution.PlanIdentity{TenantID: strings.Repeat("t", 64),
+				BusinessID: strings.Repeat("9", 20), StrategyID: strings.Repeat("9", 20)},
+			StateGeneration:      execution.StateGeneration(strings.Repeat("g", 64)),
+			SeriesIdentityDigest: execution.SeriesIdentityDigest(strings.Repeat("s", 64)),
+		},
+		BlobRevision: math.MaxUint64,
+		ApplyVersion: execution.ApplyVersion{StateApplyEpoch: math.MaxUint64, EvaluationTime: math.MaxInt64,
+			SlotDigest: execution.SlotIdentityDigest(strings.Repeat("d", 64))},
+		MutationDigest: execution.MutationDigest(strings.Repeat("m", 64)),
+		LastEventTime:  math.MaxInt64,
+		SeriesGuard:    &guard,
+		Levels:         mutations, History: history,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

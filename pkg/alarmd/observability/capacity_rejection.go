@@ -84,9 +84,17 @@ type SlotBudgetUsageFacts struct {
 	RetainedBytes  uint64 `json:"retained_bytes"`
 	Series         uint64 `json:"series"`
 
-	StateMutationsLimit uint64 `json:"state_mutations_limit"`
-	GapMutationsLimit   uint64 `json:"gap_mutations_limit"`
-	EventsLimit         uint64 `json:"events_limit"`
-	RetainedBytesLimit  uint64 `json:"retained_bytes_limit"`
-	SeriesLimit         uint64 `json:"series_limit"`
+	// The limits stay off the row and are carried for readers that hold the
+	// facts rather than the log line.
+	//
+	// They are process constants: every Slot on a replica is measured against
+	// the same five, they are already published once per process, and repeating
+	// them on every completion row doubles the row for nothing. At one row per
+	// object per Slot that is most of a gigabyte a day to restate numbers that
+	// did not change.
+	StateMutationsLimit uint64 `json:"-"`
+	GapMutationsLimit   uint64 `json:"-"`
+	EventsLimit         uint64 `json:"-"`
+	RetainedBytesLimit  uint64 `json:"-"`
+	SeriesLimit         uint64 `json:"-"`
 }

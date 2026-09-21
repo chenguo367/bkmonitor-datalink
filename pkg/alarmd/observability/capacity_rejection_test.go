@@ -125,8 +125,14 @@ func TestTheCompletionRowCarriesBudgetUsageOnASuccess(t *testing.T) {
 	if usage["state_mutations"] != float64(19539) || usage["retained_bytes"] != float64(68681728) {
 		t.Fatalf("slot_budget_usage = %v, want what this Slot took", usage)
 	}
-	// The limits travel with it: a usage nobody can compare is not a reading.
-	if usage["state_mutations_limit"] != float64(524288) || usage["retained_bytes_limit"] != float64(1073741824) {
-		t.Fatalf("slot_budget_usage = %v, want the limits it was measured against", usage)
+	// The limits are deliberately not on the row. They are process constants
+	// measured against by every Slot on the replica and published once per
+	// process; restating them on each completion row would roughly double it,
+	// which at one row per object per Slot is most of a gigabyte a day for
+	// numbers that did not change.
+	for _, absent := range []string{"state_mutations_limit", "retained_bytes_limit", "events_limit"} {
+		if _, present := usage[absent]; present {
+			t.Fatalf("%s reached the completion row: %v", absent, usage)
+		}
 	}
 }

@@ -57,16 +57,17 @@ func productionRedisOptions(connection config.RedisConnectionConfig) *redis.Univ
 		// Execute records a failed attempt of the frozen Slot, which is parked
 		// in the delayed queue with exponential backoff and no attempt cap, and
 		// the retry re-reads current state rather than resending the same
-		// bytes. The client's own retries add nothing to that and multiply what
-		// it costs - the default three turns a 3 s read timeout into 12 s of a
-		// worker held on a read that fails identically every time.
+		// bytes. The client's own retries add no reliability to that - the same
+		// request goes to the same server - and they multiply what it costs:
+		// the default three turns a 3 s read timeout into 12 s.
 		//
-		// Worse than wasteful on short-period Plans. Their completion context
-		// carries a hard deadline, and 12 s spent inside it means the Slot dies
-		// with the context already expired - which is the first condition
-		// executionErrorBacksOff refuses, so no attempt is recorded and no
-		// retry is scheduled at all. Stacking the two retry layers converted a
-		// retryable failure into one nothing retries.
+		// Twelve seconds is the damage, and it is paid twice. The worker is
+		// held that long on a read that fails identically every attempt, and on
+		// a short-period Plan it is most of the completion window, so the Slot
+		// spends its budget waiting rather than evaluating. The retry itself
+		// still happens either way: the context executionErrorBacksOff judges
+		// is the runner's, and the completion deadline is derived inside the
+		// coordinator and does not reach it.
 		MaxRetries: -1,
 	}
 }
