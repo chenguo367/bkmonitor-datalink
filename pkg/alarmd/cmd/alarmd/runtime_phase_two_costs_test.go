@@ -193,3 +193,27 @@ func TestAnEntryCutByTheBoundIsSentInFull(t *testing.T) {
 		t.Fatalf("the entry did not go out whole on the next ask: %+v", costs)
 	}
 }
+
+// The first reading of a Query Group is sent even when it is all zeros.
+//
+// The threshold compares a reading against what was last sent; for an object
+// never sent there is nothing to compare against, and "moved by a tenth of
+// nothing" is false. A first reading of a nonzero peak passes the threshold
+// anyway (a move away from zero always counts), so the cases above cannot
+// tell "first readings are always sent" from "first readings pass the
+// threshold": only a cold object, peak 0 and no compute, separates them. The
+// Leader needs that object in its candidates as much as any other - an
+// object it never heard of cannot be placed.
+func TestAColdQueryGroupsFirstReadingIsSent(t *testing.T) {
+	source := newWorkerCostSource(nil, nil)
+	source.boundByOwned(func() int { return 4 })
+	first := source.report([]observability.CostRetainedPeak{{QueryGroupKey: "qg-cold"}})
+	if len(first) != 1 || first[0].QueryGroup != "qg-cold" || first[0].RetainedBytesPeak != 0 || first[0].CostPerSecondMilli != 0 {
+		t.Fatalf("first report = %+v, want the cold object once with zero peak and zero rate: an object the "+
+			"Leader never hears of cannot be placed", first)
+	}
+	// And not again while it stays cold.
+	if again := source.report([]observability.CostRetainedPeak{{QueryGroupKey: "qg-cold"}}); len(again) != 0 {
+		t.Fatalf("a cold object was reported again without moving: %+v", again)
+	}
+}
