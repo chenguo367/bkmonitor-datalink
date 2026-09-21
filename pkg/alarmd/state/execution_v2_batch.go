@@ -25,6 +25,19 @@ import (
 const (
 	// runtimeLoadBatchItems bounds the keys carried by one MGET.
 	runtimeLoadBatchItems = execution.StatePreflightBatchItems
+	// runtimeLoadBatchBytes bounds what one MGET is expected to return.
+	//
+	// The apply side has had a byte bound since it was written, and the reason
+	// given there applies unchanged here: with MaxValueBytes up to 512 KiB, an
+	// item bound alone lets one call carry 128 MiB. The read side was given
+	// only the item bound, and a Query Group whose records had grown to 345 KiB
+	// each duly asked for 86 MB in a single MGET - which does not fit a 3 s
+	// read timeout, failed identically on every attempt, and took the whole
+	// Slot with it.
+	//
+	// Sized like the apply side's, since the two move the same records through
+	// the same connection.
+	runtimeLoadBatchBytes = 8 << 20
 	// runtimeApplyBatchItems bounds the compare-and-set calls in one pipeline
 	// round trip.
 	runtimeApplyBatchItems = 256
@@ -479,6 +492,63 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	return item
 }
 
+// expectedValueBytes is what one record has been costing, learned from the
+// reads that came back.
+//
+// Learned rather than configured because nothing knows it in advance: record
+// size is a property of each strategy's retention and Level count, it changes
+// when either is edited, and a number in a file would be wrong for most Query
+// Groups on the replica. Learned rather than computed from the limits, because
+// the limit is the ceiling - sizing every batch against 512 KiB would cut
+// batches to 16 keys for the vast majority of records that are nowhere near
+// it.
+//
+// Zero until something has been read, and then the batch is bounded by items
+// alone: the first read after a restart is the one with nothing to go on. That
+// is the same exposure as before this existed, for one call, and the reading it
+// produces bounds the rest.
+func (store *ExecutionStore) expectedValueBytes() uint64 {
+	return store.observedValueBytes.Load()
+}
+
+// observeValueBytes folds one batch's result into that average.
+//
+// A plain mean over everything ever read would take a long time to notice a
+// strategy whose retention was just raised, which is exactly when the bound
+// matters, so recent reads weigh more. It only has to be good enough to keep a
+// batch off a cliff, not to be accurate.
+func (store *ExecutionStore) observeValueBytes(keys int, loaded int64) {
+	if keys <= 0 || loaded < 0 {
+		return
+	}
+	sample := uint64(loaded) / uint64(keys)
+	previous := store.observedValueBytes.Load()
+	if previous == 0 {
+		store.observedValueBytes.Store(sample)
+		return
+	}
+	store.observedValueBytes.Store((previous*3 + sample) / 4)
+}
+
+// runtimeLoadBatchItems bounded by what those records are expected to weigh.
+func (store *ExecutionStore) runtimeLoadBatchLimit() int {
+	expected := store.expectedValueBytes()
+	if expected == 0 {
+		return runtimeLoadBatchItems
+	}
+	limit := int(runtimeLoadBatchBytes / expected)
+	if limit < 1 {
+		// One key per call. A single record over the whole batch budget is
+		// still read - refusing it here would stop a Plan the store accepts -
+		// and it is read alone rather than beside others.
+		return 1
+	}
+	if limit > runtimeLoadBatchItems {
+		return runtimeLoadBatchItems
+	}
+	return limit
+}
+
 // runtimeLoadBatch collects consecutive same-target keys for one MGET.
 type runtimeLoadBatch struct {
 	target  StorageTarget
@@ -549,6 +619,7 @@ func (store *ExecutionStore) loadRuntimeBatch(
 	if err == nil && len(values) != len(batch.keys) {
 		err = fmt.Errorf("state: invalid backend read cardinality")
 	}
+	defer func() { store.observeValueBytes(len(batch.keys), loaded) }()
 	for position, index := range batch.indexes {
 		item := request.Items[index]
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
