@@ -8,6 +8,7 @@ package state
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -280,5 +281,58 @@ func TestARoundThatDidNotComeBackLeavesTheBoundAlone(t *testing.T) {
 		t.Fatalf("a round that did not come back moved the bound from %d to %d; every failure would let the "+
 			"next batch be at least as large, which is the wrong direction from the only evidence there is",
 			before, after)
+	}
+}
+
+// The bound is the round's largest record, not the last batch's.
+//
+// A round reads a Query Group in several batches, and after the first batch
+// that came back the running largest sizes the ones after it, so a large
+// record read early puts the small ones that follow into one wide batch.
+// The largest of that last batch is then small. Committing it would hand the
+// next round a bound sized by the small records, and its first batch would
+// take the large one beside as many small ones as the small size allows -
+// the over-budget read this bound exists to prevent, arriving one round late
+// and on exactly the mixed population the bound was rewritten for. The other
+// cases drive the accounting function directly and cannot see the fold
+// across batches; this one goes through the load.
+func TestTheRoundCommitsItsLargestRecordNotTheLastBatchs(t *testing.T) {
+	backend := newPipelineMemoryBackend()
+	store := newBatchStore(t, backend, nil)
+	group := frozenRef().Slot.QueryGroup
+
+	// Sixty series: the first carries a record far larger than the rest, so
+	// it lands in the first batch (eight keys while nothing is learned, at
+	// MaxValueBytes 1 MiB); the running largest then allows forty keys, so
+	// the small ones fill a second batch inside the loop and a third at the
+	// end - two batches after the large one, both small, so a fold that
+	// keeps only the latest batch's largest is small at the commit whichever
+	// of the two sites it happens at.
+	const largePadding = 200 * 1024
+	mutations := make([]execution.StateMutation, 60)
+	for index := range mutations {
+		padding := ""
+		if index == 0 {
+			padding = strings.Repeat("x", largePadding)
+		}
+		mutations[index] = seriesMutation(t, seriesIdentity(index), applyVersion(), 0, padding)
+	}
+	applied, err := store.ApplyRuntime(context.Background(), execution.StateApplyRequest{
+		Contract: frozenRef(), Retention: testRetention(), Items: mutations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAllStatus(t, applied, execution.StateApplied)
+
+	if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{
+		Contract: frozenRef(), Items: preflightItems(mutations),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	learned := mustExpect(t, store, group)
+	if learned < largePadding {
+		t.Fatalf("the round read a %d-byte record and committed %d; a bound taken from the last batch "+
+			"lets the next round put that record beside a batch sized for the small ones", largePadding, learned)
 	}
 }
