@@ -628,7 +628,10 @@ var codeChecks = map[string]verdict{
 
 	// The strategy's own configuration, or a change to it. Outside its own
 	// effective time is the configuration doing what it was written to do.
-	"CONFIG_DRIFT":            lands(CheckConfigUnresolved),
+	"CONFIG_DRIFT": lands(CheckConfigUnresolved),
+	// The same selection coming back after a PLAN_NOT_ACTIVE stretch: nothing
+	// changed for anyone to resolve, and the next Slot runs as before.
+	"PLAN_REACTIVATED":        isNormal,
 	"EFFECTIVE_TIME_INACTIVE": isNormal,
 	"EFFECTIVE_TIME_UNKNOWN":  lands(CheckConfigUnresolved),
 

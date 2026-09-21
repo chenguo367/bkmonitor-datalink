@@ -82,6 +82,7 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonRequiredValueNormalizationFailed: {ReasonRequiredValueNormalizationFailed, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 
 	ReasonConfigDrift:      {ReasonConfigDrift, ReasonClassCoverage, reasonQueryDomainsV2},
+	ReasonPlanReactivated:  {ReasonPlanReactivated, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryPartial:     {ReasonQueryPartial, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryEmpty:       {ReasonQueryEmpty, ReasonClassCoverage, reasonQueryDomainsV2},
 	ReasonQueryTimeout:     {ReasonQueryTimeout, ReasonClassCoverage, reasonQueryDomainsV2},

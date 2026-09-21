@@ -101,7 +101,22 @@ const (
 	// about the active set, and it reads as data loss when it is not: the
 	// Slots are not replayed on purpose, because replaying them would produce
 	// alerts for a strategy that did not exist while they passed.
-	ReasonPlanNotActive         = "PLAN_NOT_ACTIVE"
+	//
+	// The Slot the stretch ends at - the one that ran with the Plan back -
+	// carries PLAN_REACTIVATED below: the other half of this skip. The two
+	// words tell one story at its two Slots, and neither is the whole of it.
+	ReasonPlanNotActive = "PLAN_NOT_ACTIVE"
+	// ReasonPlanReactivated names a Slot that ran while its Plan's activation
+	// changed under it with the Plan itself unchanged: the same identity,
+	// schedule revision and state generation, only the activation epoch
+	// moved, which is a Plan that left the active set and came back - the
+	// Slot after a PLAN_NOT_ACTIVE stretch. The Slot completes as a partial
+	// gap the way CONFIG_DRIFT does, and is told apart from it because the
+	// two send a reader to different places: drift is an edit someone made
+	// and the next Slot runs under the new selection; this is the same
+	// selection returning, and the stretch before it is the PLAN_NOT_ACTIVE
+	// skip, not something to look for in the strategy.
+	ReasonPlanReactivated       = "PLAN_REACTIVATED"
 	ReasonEffectiveTimeInactive = "EFFECTIVE_TIME_INACTIVE"
 	ReasonEffectiveTimeUnknown  = "EFFECTIVE_TIME_UNKNOWN"
 	ReasonHistoryWarming        = "HISTORY_WARMING"

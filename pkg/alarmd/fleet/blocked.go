@@ -319,6 +319,7 @@ var failureFacets = map[string]facets{
 
 	// The strategy's own configuration.
 	"CONFIG_DRIFT":            {StageConfig, ClassConfig, DependencyNone},
+	"PLAN_REACTIVATED":        {StageConfig, ClassConfig, DependencyNone},
 	"EFFECTIVE_TIME_INACTIVE": {StageConfig, ClassConfig, DependencyNone},
 	"EFFECTIVE_TIME_UNKNOWN":  {StageConfig, ClassConfig, DependencyNone},
 
