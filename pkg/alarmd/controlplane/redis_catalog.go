@@ -136,7 +136,13 @@ type RedisCatalogRepository struct {
 	// names; later cutovers then read only the Query Groups whose content
 	// changed. See content_cutover.go.
 	contentCutoverVerified atomic.Bool
-	observer               observability.Observer
+	// assignmentRecordKey names the Assignment record of a Query Group, on
+	// the same Redis the timelines are on, so a cutover writes each rewritten
+	// timeline's revision onto its record in the same script that writes the
+	// timeline (decision-016 batch 4). Nil writes none: a deployment without
+	// the ownership store beside the catalog carries no such word.
+	assignmentRecordKey func(execution.QueryGroupIdentity) string
+	observer            observability.Observer
 }
 
 // ConfigureDrainingTermination bounds how long a retired Query Group may stay
@@ -1015,4 +1021,18 @@ func (publisher *SnapshotPublisher) publishAudit(
 		return PublishedSnapshot{}, false, err
 	}
 	return snapshot, created, nil
+}
+
+// WithAssignmentRecordKey tells the repository where each Query Group's
+// Assignment record lives, so a cutover that rewrites a timeline writes the
+// timeline's new revision onto the record in the same script. The record's
+// word on the revision is what a holder's renewal brings back and what the
+// executable view previews; written anywhere but beside the timeline, the
+// two could be read apart. A record that does not exist is not created: a
+// Query Group placed later carries the revision on its placement.
+func (repository *RedisCatalogRepository) WithAssignmentRecordKey(key func(execution.QueryGroupIdentity) string) *RedisCatalogRepository {
+	if repository != nil {
+		repository.assignmentRecordKey = key
+	}
+	return repository
 }

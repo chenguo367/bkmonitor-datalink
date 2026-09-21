@@ -130,14 +130,25 @@ elseif not header or header ~= ARGV[1] then
   return 0
 end
 if redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end
-for index = 4, #KEYS do
+local timelines = tonumber(ARGV[6])
+local last_timeline = 3 + timelines
+for index = 4, last_timeline do
   if redis.call('EXISTS', KEYS[index]) == 1 then return 0 end
 end
 redis.call('PEXPIRE', KEYS[3], ARGV[5])
 redis.call('SET', KEYS[1], ARGV[2])
 redis.call('SET', KEYS[2], ARGV[3])
-for index = 4, #KEYS do
-  redis.call('SET', KEYS[index], ARGV[index + 2], 'PX', ARGV[5])
+for index = 4, last_timeline do
+  redis.call('SET', KEYS[index], ARGV[index + 3], 'PX', ARGV[5])
+end
+-- Each rewritten timeline's revision goes onto its Assignment record in
+-- this same write, where the record exists; the keys follow the timelines
+-- and the revisions follow the payloads.
+for offset = 1, #KEYS - last_timeline do
+  local record = KEYS[last_timeline + offset]
+  if redis.call('EXISTS', record) == 1 then
+    redis.call('HSET', record, 'timeline_record_revision', ARGV[6 + timelines + offset])
+  end
 end
 return 1
 `
@@ -159,9 +170,11 @@ const compareAndSetCutoverSchedulesScript = `
 local header = redis.call('GET', KEYS[1])
 if not header or header ~= ARGV[1] then return 0 end
 if redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end
-for index = 5, #KEYS do
+local timelines = tonumber(ARGV[7])
+local last_timeline = 4 + timelines
+for index = 5, last_timeline do
   local current = redis.call('GET', KEYS[index])
-  local expected_index = 2 * index - 3
+  local expected_index = 2 * index - 2
   local expected = ARGV[expected_index]
   if expected == '' then
     if current then return 0 end
@@ -173,9 +186,18 @@ redis.call('PEXPIRE', KEYS[3], ARGV[5])
 redis.call('SET', KEYS[1], ARGV[2])
 redis.call('SET', KEYS[2], ARGV[3])
 redis.call('SET', KEYS[4], ARGV[6], 'PX', ARGV[5])
-for index = 5, #KEYS do
-  local next_index = 2 * index - 2
+for index = 5, last_timeline do
+  local next_index = 2 * index - 1
   redis.call('SET', KEYS[index], ARGV[next_index], 'PX', ARGV[5])
+end
+-- Each rewritten timeline's revision goes onto its Assignment record in
+-- this same write, where the record exists; the keys follow the timelines
+-- and the revisions follow the payloads.
+for offset = 1, #KEYS - last_timeline do
+  local record = KEYS[last_timeline + offset]
+  if redis.call('EXISTS', record) == 1 then
+    redis.call('HSET', record, 'timeline_record_revision', ARGV[7 + 2 * timelines + offset])
+  end
 end
 return 1
 `
@@ -256,7 +278,7 @@ func (repository *RedisCatalogRepository) persistActivationRefUpgrade(ctx contex
 	changed, err := repository.client.Eval(ctx, compareAndSetCutoverSchedulesScript,
 		[]string{repository.activationHeaderKey(), repository.activationKey(), repository.activeQGSetKey(next.ActiveQGSetRef.Digest),
 			repository.activationDeltaKey(next.RecordRevision)},
-		expectedHeader, nextHeader, payload, activePayload, repository.ttl.Milliseconds(), delta).Int()
+		expectedHeader, nextHeader, payload, activePayload, repository.ttl.Milliseconds(), delta, 0).Int()
 	if err != nil {
 		return activationDependencyIO(fmt.Errorf("persist activation ref upgrade: %w", err))
 	}
@@ -1040,7 +1062,7 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 		return err
 	}
 	keys := []string{repository.activationHeaderKey(), repository.activationKey(), repository.activeQGSetKey(ref.Digest)}
-	args := []interface{}{expectedHeader, nextHeader, activationPayload, activePayload, repository.ttl.Milliseconds()}
+	args := []interface{}{expectedHeader, nextHeader, activationPayload, activePayload, repository.ttl.Milliseconds(), len(timelines)}
 	sort.Slice(timelines, func(i, j int) bool { return timelines[i].QueryGroup < timelines[j].QueryGroup })
 	for _, timeline := range timelines {
 		if err := validateScheduleTimeline(timeline); err != nil {
@@ -1052,6 +1074,12 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 		}
 		keys = append(keys, repository.scheduleTimelineKey(timeline.QueryGroup))
 		args = append(args, payload)
+	}
+	if repository.assignmentRecordKey != nil {
+		for _, timeline := range timelines {
+			keys = append(keys, repository.assignmentRecordKey(timeline.QueryGroup))
+			args = append(args, timeline.RecordRevision)
+		}
 	}
 	changed, err := repository.client.Eval(ctx, compareAndSetInitialSchedulesScript, keys, args...).Int()
 	if err != nil {
@@ -1126,7 +1154,7 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 	}
 	keys := []string{repository.activationHeaderKey(), repository.activationKey(), repository.activeQGSetKey(ref.Digest),
 		repository.activationDeltaKey(next.RecordRevision)}
-	args := []interface{}{expectedHeader, nextHeader, activationPayload, activePayload, repository.ttl.Milliseconds(), deltaPayload}
+	args := []interface{}{expectedHeader, nextHeader, activationPayload, activePayload, repository.ttl.Milliseconds(), deltaPayload, len(updates)}
 	payloadBytes := len(expectedHeader) + len(nextHeader) + len(activationPayload) + len(activePayload) + len(deltaPayload)
 	timelineBytes := make([]int, 0, len(updates))
 	for _, update := range updates {
@@ -1139,6 +1167,12 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 		args = append(args, fence, payload)
 		payloadBytes += len(fence) + len(payload)
 		timelineBytes = append(timelineBytes, len(payload))
+	}
+	if repository.assignmentRecordKey != nil {
+		for _, update := range updates {
+			keys = append(keys, repository.assignmentRecordKey(update.next.QueryGroup))
+			args = append(args, update.next.RecordRevision)
+		}
 	}
 	cutover.persisted(payloadBytes, timelineBytes)
 	changed, err := repository.client.Eval(ctx, compareAndSetCutoverSchedulesScript, keys, args...).Int()
