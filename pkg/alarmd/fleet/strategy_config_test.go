@@ -35,6 +35,14 @@ var (
 	secretPromQL        = `sum(rate(cpu_usage{host="host-0xdeadbeef"}[5m]))`
 	secretQueryString   = "host:host-0xdeadbeef AND level:error"
 	secretThreshold     = `{"threshold":86.5,"method":"gte"}`
+	secretMetricMerge   = "a * 100 / b"
+	secretTriggerNote   = "SEED-trigger-note"
+	secretRecoveryNote  = "SEED-recovery-note"
+	secretPromQLMatch   = `{host="host-0xdeadbeef"}`
+	secretModelValue    = "model-value-SEED"
+	secretKeepColumn    = "keep-SEED"
+	secretOffsetForward = "offset-SEED"
+	secretArgument      = "arg-SEED"
 )
 
 // configObject is one Query Group object holding two Plans of strategy 4101
@@ -44,8 +52,10 @@ func configObject() controlplane.QueryGroupObject {
 	clause := model.QueryClause{
 		ReferenceName: "a", DataSource: "bk_monitor", Driver: "uq", TableID: "system.cpu_summary", FieldName: "usage",
 		FieldSemantics: "gauge", TimeField: "time", Dimensions: []string{"bk_target_ip", "bk_target_cloud_id"},
-		Functions:       []model.QueryFunction{{Method: "avg", Dimensions: []string{"bk_target_ip"}}, {Method: "rate", Window: "5m", Arguments: []model.QueryScalar{{Kind: model.QueryScalarNumber, NumberValue: "0.99"}}}},
-		TimeAggregation: model.QueryFunction{Method: "avg_over_time", Window: "60s"},
+		Functions:   []model.QueryFunction{{Method: "avg", Dimensions: []string{"bk_target_ip"}}, {Method: "rate", Window: "5m", Arguments: []model.QueryScalar{{Kind: model.QueryScalarNumber, NumberValue: "0.99"}, {Kind: model.QueryScalarString, StringValue: secretArgument}}}},
+		KeepColumns: []string{secretKeepColumn}, OffsetForward: secretOffsetForward,
+		SourceConditions: &model.QueryConditions{Fields: []model.QueryConditionField{{Field: "src", Operator: "eq", Values: []model.QueryScalar{{Kind: model.QueryScalarString, StringValue: secretConditionHost}}}}},
+		TimeAggregation:  model.QueryFunction{Method: "avg_over_time", Window: "60s"},
 		Conditions: model.QueryConditions{Fields: []model.QueryConditionField{
 			{Field: "bk_target_ip", Operator: "eq", Values: []model.QueryScalar{{Kind: model.QueryScalarString, StringValue: "192.0.2.41"}, {Kind: model.QueryScalarString, StringValue: "192.0.2.42"}}},
 			{Field: "hostname", Operator: "contains", Values: []model.QueryScalar{{Kind: model.QueryScalarString, StringValue: secretConditionHost}}},
@@ -64,7 +74,7 @@ func configObject() controlplane.QueryGroupObject {
 			}},
 			QueryPlans: map[model.LogicalQueryRef]model.QueryPlanFacts{"a": {QueryList: []model.QueryClause{clause}}},
 			TargetPlan: &contract.TargetPlanV1{SchemaVersion: 1, Rule: contract.TargetPlanRuleHostID,
-				Identity:      contract.TargetPlanIdentityV1{Dimensions: []string{"bk_target_ip", "bk_target_cloud_id"}},
+				Identity:      contract.TargetPlanIdentityV1{Dimensions: []string{"bk_target_ip", "bk_target_cloud_id"}, ModelDimension: "bk_obj_id", ModelValue: secretModelValue},
 				StaticKeys:    []string{secretTargetKey, "192.0.2.42|0", "192.0.2.43|0"},
 				StaticMembers: []contract.TargetPlanMemberV1{{ModelID: "host", ModelInstID: secretMember}},
 				DynamicGroups: []string{secretGroup}, DynamicTopologies: []contract.TargetPlanTopologyV1{{BusinessID: business, ObjectID: "set", InstanceID: "12"}}},
@@ -72,16 +82,16 @@ func configObject() controlplane.QueryGroupObject {
 			StrategyIR: contract.StrategyIRV2{Levels: []contract.LevelIRV2{{
 				Definition: contract.LevelDefinitionV2{LevelID: 1, LevelCode: "fatal", Priority: 3}, Connector: "and",
 				DetectPlan:   contract.DetectPlanV2{Algorithms: []contract.AlgorithmIRV2{{Type: "Threshold", Version: 1, Config: json.RawMessage(secretThreshold)}}},
-				TriggerPlan:  contract.TypedPlanV1{Type: "count", Version: 1, Config: json.RawMessage(`{"check_window_size":5,"trigger_count":3}`)},
-				RecoveryPlan: contract.TypedPlanV1{Type: "count", Version: 1, Config: json.RawMessage(`{"check_window_size":5}`)},
+				TriggerPlan:  contract.TypedPlanV1{Type: "N_OF_M", Version: 1, Config: json.RawMessage(`{"window_size":5,"required_anomalies":3,"step_seconds":60,"note":"` + secretTriggerNote + `"}`)},
+				RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1, Config: json.RawMessage(`{"enabled":true,"consecutive_windows":5,"note":"` + secretRecoveryNote + `"}`)},
 			}}},
 		}
 	}
 	return controlplane.QueryGroupObject{
 		Identity: "qg-4101-a",
 		QueryPlan: model.QueryPlanFacts{Provider: "uq", TenantID: "default", BusinessID: "2", SpaceScope: "bkcc__2",
-			SourceSemantics: []string{"time_series"}, QueryDelaySeconds: 10, StepMillis: 60000, MetricMerge: "a",
-			PromQL: &model.PromQLQuery{Expression: secretPromQL}},
+			SourceSemantics: []string{"time_series"}, QueryDelaySeconds: 10, StepMillis: 60000, MetricMerge: secretMetricMerge,
+			PromQL: &model.PromQLQuery{Expression: secretPromQL, Match: secretPromQLMatch}},
 		Plans: []controlplane.QueryGroupPlanObject{plan("4101", "2", "plan-4101-item-1"), plan("4101", "2", "plan-4101-item-2"), plan("4199", "2", "plan-4199")},
 	}
 }
@@ -100,7 +110,8 @@ func TestTheConfigProjectionCarriesNamesAndCountsAndNoValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(wire)
-	for _, secret := range []string{secretTargetKey, "192.0.2.42", secretMember, secretGroup, secretConditionHost, secretPromQL, secretQueryString, "86.5", "0.99", `"12"`} {
+	for _, secret := range []string{secretTargetKey, "192.0.2.42", secretMember, secretGroup, secretConditionHost, secretPromQL, secretQueryString, "86.5", "0.99", `"12"`,
+		secretMetricMerge, secretTriggerNote, secretRecoveryNote, secretPromQLMatch, secretModelValue, secretKeepColumn, secretOffsetForward, secretArgument, "SEED"} {
 		if strings.Contains(text, secret) {
 			t.Fatalf("the wire carries a value the strategy was written against (%q):\n%s", secret, text)
 		}
@@ -112,12 +123,15 @@ func TestTheConfigProjectionCarriesNamesAndCountsAndNoValue(t *testing.T) {
 	if item.Query.Provider != "uq" || item.Query.Business != "2" || item.Query.PromQL == nil || !item.Query.PromQL.Present || item.Query.PromQL.ExpressionBytes != len(secretPromQL) {
 		t.Fatalf("query = %+v, want the provider, the business and the expression's size only", item.Query)
 	}
+	if item.Query.MetricMerge == nil || !item.Query.MetricMerge.Present || item.Query.MetricMerge.Bytes != len(secretMetricMerge) {
+		t.Fatalf("metric merge = %+v, want present and its size only: it is an expression the author wrote", item.Query.MetricMerge)
+	}
 	if len(item.Query.Clauses) != 1 {
 		t.Fatalf("clauses = %+v, want the one clause of logical query a", item.Query.Clauses)
 	}
 	clause := item.Query.Clauses[0]
 	if clause.Reference != "a" || clause.TableID != "system.cpu_summary" || clause.Field != "usage" || len(clause.Dimensions) != 2 ||
-		len(clause.Functions) != 2 || clause.Functions[1].Window != "5m" || clause.Functions[1].Arguments != 1 ||
+		len(clause.Functions) != 2 || clause.Functions[1].Window != "5m" || clause.Functions[1].Arguments != 2 ||
 		clause.TimeAggregation == nil || clause.TimeAggregation.Method != "avg_over_time" {
 		t.Fatalf("clause = %+v", clause)
 	}
@@ -136,9 +150,25 @@ func TestTheConfigProjectionCarriesNamesAndCountsAndNoValue(t *testing.T) {
 		t.Fatalf("no_data = %+v", item.NoData)
 	}
 	if len(item.Levels) != 1 || item.Levels[0].LevelID != 1 || len(item.Levels[0].Algorithms) != 1 ||
-		item.Levels[0].Algorithms[0].Type != "Threshold" || item.Levels[0].Algorithms[0].ConfigBytes != len(secretThreshold) ||
-		item.Levels[0].Trigger.Config != `{"check_window_size":5,"trigger_count":3}` {
-		t.Fatalf("levels = %+v, want the algorithm by type and size, the trigger window as written", item.Levels)
+		item.Levels[0].Algorithms[0].Type != "Threshold" || item.Levels[0].Algorithms[0].ConfigBytes != len(secretThreshold) {
+		t.Fatalf("levels = %+v, want the algorithm by type and size", item.Levels)
+	}
+	trigger, recovery := item.Levels[0].Trigger, item.Levels[0].Recovery
+	if trigger.Type != "N_OF_M" || trigger.WindowSize == nil || *trigger.WindowSize != 5 || trigger.RequiredAnomalies == nil || *trigger.RequiredAnomalies != 3 ||
+		trigger.StepSeconds == nil || *trigger.StepSeconds != 60 || trigger.UnknownKeys != 1 {
+		t.Fatalf("trigger = %+v, want the three window counts by key and one unknown key counted, not carried", trigger)
+	}
+	if recovery.Type != "CONTINUOUS_TRIGGER_MISS" || recovery.Enabled == nil || !*recovery.Enabled || recovery.ConsecutiveWindows == nil || *recovery.ConsecutiveWindows != 5 || recovery.UnknownKeys != 1 {
+		t.Fatalf("recovery = %+v, want enabled and the window by key and one unknown key counted", recovery)
+	}
+	// A known key holding a value that is not a count is unknown too, and a
+	// document that is not an object is said to be undecodable, not carried.
+	odd := typedPlanConfigOf(contract.TypedPlanV1{Type: "N_OF_M", Version: 1, Config: json.RawMessage(`{"window_size":"` + secretTriggerNote + `","required_anomalies":-1,"step_seconds":60.5}`)})
+	if odd.WindowSize != nil || odd.RequiredAnomalies != nil || odd.StepSeconds != nil || odd.UnknownKeys != 3 {
+		t.Fatalf("odd trigger = %+v, want no count read and three unknown", odd)
+	}
+	if text := typedPlanConfigOf(contract.TypedPlanV1{Type: "N_OF_M", Version: 1, Config: json.RawMessage(`"` + secretTriggerNote + `"`)}); !text.Undecodable {
+		t.Fatalf("a document that is not an object = %+v, want undecodable", text)
 	}
 	if len(item.Requirements) != 1 || item.Requirements[0].WindowStart != -300 || item.Requirements[0].Points != 5 || item.Requirements[0].ConsumerLevelID != 1 {
 		t.Fatalf("requirements = %+v", item.Requirements)

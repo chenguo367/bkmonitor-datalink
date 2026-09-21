@@ -11,6 +11,7 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"time"
@@ -108,16 +109,18 @@ type StrategyScheduleConfig struct {
 
 // StrategyQueryConfig is what the Plan reads, by identifier and shape.
 type StrategyQueryConfig struct {
-	Provider          string                `json:"provider,omitempty"`
-	Tenant            string                `json:"tenant,omitempty"`
-	Business          string                `json:"business,omitempty"`
-	SpaceScope        string                `json:"space_scope,omitempty"`
-	SourceSemantics   []string              `json:"source_semantics,omitempty"`
-	QueryDelaySeconds int64                 `json:"query_delay_seconds,omitempty"`
-	StepMillis        int64                 `json:"step_millis,omitempty"`
-	MetricMerge       string                `json:"metric_merge,omitempty"`
-	Timezone          string                `json:"timezone,omitempty"`
-	Clauses           []StrategyQueryClause `json:"clauses"`
+	Provider          string   `json:"provider,omitempty"`
+	Tenant            string   `json:"tenant,omitempty"`
+	Business          string   `json:"business,omitempty"`
+	SpaceScope        string   `json:"space_scope,omitempty"`
+	SourceSemantics   []string `json:"source_semantics,omitempty"`
+	QueryDelaySeconds int64    `json:"query_delay_seconds,omitempty"`
+	StepMillis        int64    `json:"step_millis,omitempty"`
+	// MetricMerge is the expression the clauses are combined with, written
+	// by the strategy's author: present and how long, never the text.
+	MetricMerge *StrategyRedactedTextInfo `json:"metric_merge,omitempty"`
+	Timezone    string                    `json:"timezone,omitempty"`
+	Clauses     []StrategyQueryClause     `json:"clauses"`
 	// PromQL says an expression is frozen, and how long it is; never the
 	// expression.
 	PromQL *StrategyPromQLConfig `json:"promql,omitempty"`
@@ -226,9 +229,12 @@ type StrategyNoDataConfig struct {
 
 // StrategyLevelConfig is one level: its definition, how its algorithms
 // combine, the algorithms by type and version, and the trigger and recovery
-// plans by type and version. Algorithm configuration is a size; trigger and
-// recovery configuration are the window counts themselves, small and not a
-// value anybody wrote a secret into.
+// plans by type, version and the window counts the compiler defines. The
+// algorithm configuration is a size. The trigger and recovery configuration
+// is an open document -- json.RawMessage, whatever a plan type puts there
+// -- so it is read by the keys this build's compiler defines and nothing
+// else reaches the wire: a closed guard cannot cover an open input, and a
+// plan type that one day carries text would otherwise carry it here.
 type StrategyLevelConfig struct {
 	LevelID    uint32                  `json:"level_id"`
 	LevelCode  string                  `json:"level_code,omitempty"`
@@ -248,11 +254,22 @@ type StrategyAlgorithmInfo struct {
 }
 
 // StrategyTypedPlanConfig is a trigger or recovery plan by type and version,
-// with its configuration as written.
+// with the window counts the compiler defines for the two plan types this
+// build has (N_OF_M: window_size, required_anomalies, step_seconds;
+// CONTINUOUS_TRIGGER_MISS: enabled, consecutive_windows). A key outside them
+// is counted under UnknownKeys and its value dropped, so a reader knows the
+// document had more than the projection shows.
 type StrategyTypedPlanConfig struct {
-	Type    string `json:"type,omitempty"`
-	Version uint32 `json:"version,omitempty"`
-	Config  string `json:"config,omitempty"`
+	Type               string  `json:"type,omitempty"`
+	Version            uint32  `json:"version,omitempty"`
+	WindowSize         *uint32 `json:"window_size,omitempty"`
+	RequiredAnomalies  *uint32 `json:"required_anomalies,omitempty"`
+	StepSeconds        *uint32 `json:"step_seconds,omitempty"`
+	Enabled            *bool   `json:"enabled,omitempty"`
+	ConsecutiveWindows *uint32 `json:"consecutive_windows,omitempty"`
+	UnknownKeys        int     `json:"unknown_keys,omitempty"`
+	// Undecodable says the document was not a JSON object at all.
+	Undecodable bool `json:"undecodable,omitempty"`
 }
 
 // StrategyRequirementRef is one data requirement of the Plan: which level
@@ -326,7 +343,49 @@ func strategyPlanConfigOf(object controlplane.QueryGroupObject, plan controlplan
 }
 
 func typedPlanConfigOf(plan contract.TypedPlanV1) StrategyTypedPlanConfig {
-	return StrategyTypedPlanConfig{Type: plan.Type, Version: plan.Version, Config: string(plan.Config)}
+	config := StrategyTypedPlanConfig{Type: plan.Type, Version: plan.Version}
+	if len(plan.Config) == 0 {
+		return config
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(plan.Config, &document); err != nil {
+		config.Undecodable = true
+		return config
+	}
+	for key, raw := range document {
+		switch key {
+		case "window_size":
+			config.WindowSize = typedPlanCount(raw, &config.UnknownKeys)
+		case "required_anomalies":
+			config.RequiredAnomalies = typedPlanCount(raw, &config.UnknownKeys)
+		case "step_seconds":
+			config.StepSeconds = typedPlanCount(raw, &config.UnknownKeys)
+		case "consecutive_windows":
+			config.ConsecutiveWindows = typedPlanCount(raw, &config.UnknownKeys)
+		case "enabled":
+			var enabled bool
+			if json.Unmarshal(raw, &enabled) == nil {
+				config.Enabled = &enabled
+			} else {
+				config.UnknownKeys++
+			}
+		default:
+			config.UnknownKeys++
+		}
+	}
+	return config
+}
+
+// typedPlanCount reads one window count; a value that is not a whole
+// non-negative number is not a count and is counted as unknown instead.
+func typedPlanCount(raw json.RawMessage, unknown *int) *uint32 {
+	var value float64
+	if json.Unmarshal(raw, &value) != nil || value < 0 || value != float64(uint32(value)) {
+		*unknown++
+		return nil
+	}
+	count := uint32(value)
+	return &count
 }
 
 // strategyQueryConfigOf reads the object's query plan, and the Plan's own
@@ -336,7 +395,10 @@ func strategyQueryConfigOf(shared model.QueryPlanFacts, own map[model.LogicalQue
 	config := StrategyQueryConfig{
 		Provider: string(shared.Provider), Tenant: shared.TenantID, Business: shared.BusinessID, SpaceScope: shared.SpaceScope,
 		SourceSemantics: append([]string(nil), shared.SourceSemantics...), QueryDelaySeconds: shared.QueryDelaySeconds,
-		StepMillis: shared.StepMillis, MetricMerge: shared.MetricMerge, Timezone: shared.Timezone, Clauses: []StrategyQueryClause{},
+		StepMillis: shared.StepMillis, Timezone: shared.Timezone, Clauses: []StrategyQueryClause{},
+	}
+	if shared.MetricMerge != "" {
+		config.MetricMerge = &StrategyRedactedTextInfo{Present: true, Bytes: len(shared.MetricMerge)}
 	}
 	if shared.PromQL != nil {
 		config.PromQL = &StrategyPromQLConfig{Present: true, ExpressionBytes: len(shared.PromQL.Expression)}
