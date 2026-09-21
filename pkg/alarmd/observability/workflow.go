@@ -66,7 +66,7 @@ type PermitWaitFacts struct{ Recovery bool }
 var RunOutcomes = []string{
 	"query_cooldown", "single_flight_busy", "ownership_rejected", "source_backoff", "source_retry",
 	"source_blocked", "source_not_due", "source_error", "operation_not_ready", "admission_denied",
-	"execute_returned", "cancelled", "panic", "other_error",
+	"execute_returned", "cancelled", "panic", "other_error", "view_not_executable",
 }
 
 func ValidRunOutcome(value string) bool {

@@ -139,6 +139,13 @@ const (
 	ReasonSnapshotRetryPending       = "SNAPSHOT_RETRY_PENDING"
 	ReasonSlotSourceRetry            = "SLOT_SOURCE_RETRY"
 	ReasonBlockedExactSetUnavailable = "BLOCKED_EXACT_SET_UNAVAILABLE"
+	// ReasonViewNotExecutable names a round the Worker did not run because
+	// its installed executable view does not yet agree with the Assignment
+	// record on the Query Group's content or timeline, or does not carry it
+	// (decision-016 batch 4b). The record's word arrives by renewal and the
+	// view's by delta, so the next round asks again; a Worker held here past
+	// the view's propagation delay is one the stream is not reaching.
+	ReasonViewNotExecutable = "VIEW_NOT_EXECUTABLE"
 	// ReasonGapGuardConflict names a Slot refused because the Plan gap marker
 	// already persisted for its ApplyVersion neither matches what this Slot
 	// proposes nor already protects it. Without a name of its own the refusal
