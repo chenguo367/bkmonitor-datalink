@@ -172,6 +172,11 @@ var failureFacets = map[string]facets{
 	// Skipped and pruned spans: the scheduler's decision about time.
 	"GAP_SKIPPED":     {StageSchedule, ClassCapacity, DependencyNone},
 	"SCHEDULE_PRUNED": {StageSchedule, ClassRetention, DependencyNone},
+	// Also the scheduler's decision about time, but neither retention nor
+	// capacity: the times were there and the Plan was not. CONFIG, because
+	// what decided it was the active set - which Plans this deployment was
+	// told to run.
+	"PLAN_NOT_ACTIVE": {StageSchedule, ClassConfig, DependencyNone},
 
 	// The stores and infrastructure this deployment depends on.
 	"REDIS_UNAVAILABLE": {StageCommit, ClassUnavailable, DependencyRedis},
@@ -240,8 +245,11 @@ var failureFacets = map[string]facets{
 	// Read at evaluate: it is what the evaluation produced, whatever the
 	// commit then did with it.
 	"GAP_GUARD_DUPLICATED_ACROSS_BATCHES": {StageEvaluate, ClassContract, DependencyNone},
-	"GAP_APPLY_CONFLICT":                  {StageCommit, ClassContract, DependencyNone},
-	"GAP_APPLY_STALE_VERSION":             {StageCommit, ClassContract, DependencyNone},
+	// Also read at evaluate, and for the same reason: this is the Slot's own
+	// merge of what its batches produced, before anything is written.
+	"GAP_GUARD_DISAGREE":      {StageEvaluate, ClassContract, DependencyNone},
+	"GAP_APPLY_CONFLICT":      {StageCommit, ClassContract, DependencyNone},
+	"GAP_APPLY_STALE_VERSION": {StageCommit, ClassContract, DependencyNone},
 	// The write did not land. Unavailable rather than contract, and against
 	// Redis: nothing here disagreed with anything, the store did not answer.
 	"GAP_WRITE_RETRYABLE": {StageCommit, ClassUnavailable, DependencyRedis},

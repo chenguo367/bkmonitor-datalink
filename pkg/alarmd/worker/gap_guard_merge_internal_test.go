@@ -148,6 +148,65 @@ func TestTwoBatchesClearingOneMarkerDifferentlyAreRefused(t *testing.T) {
 	if !strings.Contains(err.Error(), "clear one Plan gap marker differently") {
 		t.Fatalf("refusal = %v, want it to say the two batches disagreed about the clear", err)
 	}
+	// And it carries the word, because this refusal reaches the completion
+	// line. Without one it arrives there as an error nobody can group or
+	// count - which is how a Query Group conflicting every other Slot for
+	// half an hour once read as an unclassified defect.
+	reason, named := GapGuardDisagreeReason(err)
+	if !named || string(reason) != contract.ReasonGapGuardDisagree {
+		t.Fatalf("GapGuardDisagreeReason() = (%q, %t), want %s",
+			reason, named, contract.ReasonGapGuardDisagree)
+	}
+}
+
+// Every refusal the merge makes carries the word, not only the one above.
+//
+// The accessor reads the error's type, so a refusal built any other way is
+// unnamed at the line while looking named in the code that raised it. Each
+// shape below is a different construction site.
+func TestEveryMergeRefusalIsNamed(t *testing.T) {
+	scope := execution.GapScope{LevelID: 1, HasLevel: true}
+	open := gapMergeStatement(t, execution.GapOpen, contract.ReasonQueryUnavailable, 3, scope)
+	clear := gapMergeStatement(t, execution.GapClear, "", 0, execution.GapScope{})
+
+	otherRevision := open
+	otherRevision.ExpectedMarkerRevision++
+	weakerWarmup := gapMergeStatement(t, execution.GapOpen, contract.ReasonQueryUnavailable, 4, scope)
+	otherClear := gapMergeStatement(t, execution.GapClear, "", 0, scope)
+	clearRevision := clear
+	clearRevision.ExpectedMarkerRevision++
+
+	for name, pair := range map[string]struct {
+		have, next execution.PlanEvaluationResult
+	}{
+		"opens expecting different revisions": {
+			execution.PlanEvaluationResult{GuardBeforeEvents: []execution.PlanGapMutation{open}},
+			execution.PlanEvaluationResult{GuardBeforeEvents: []execution.PlanGapMutation{otherRevision}},
+		},
+		"one scope with two warmup requirements": {
+			execution.PlanEvaluationResult{GuardBeforeEvents: []execution.PlanGapMutation{open}},
+			execution.PlanEvaluationResult{GuardBeforeEvents: []execution.PlanGapMutation{weakerWarmup}},
+		},
+		"clears of different content": {
+			execution.PlanEvaluationResult{GuardAfterState: []execution.PlanGapMutation{clear}},
+			execution.PlanEvaluationResult{GuardAfterState: []execution.PlanGapMutation{otherClear}},
+		},
+		"clears expecting different revisions": {
+			execution.PlanEvaluationResult{GuardAfterState: []execution.PlanGapMutation{clear}},
+			execution.PlanEvaluationResult{GuardAfterState: []execution.PlanGapMutation{clearRevision}},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			plan := pair.have
+			err := mergeGapGuardStatements(&plan, pair.next)
+			if err == nil {
+				t.Fatal("merged, want a refusal")
+			}
+			if _, named := GapGuardDisagreeReason(err); !named {
+				t.Fatalf("refusal %v carries no word, so the line reports it as unknown", err)
+			}
+		})
+	}
 }
 
 // Two batches clearing the same content while expecting different revisions

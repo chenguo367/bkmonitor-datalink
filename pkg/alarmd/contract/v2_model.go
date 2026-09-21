@@ -88,7 +88,20 @@ const (
 	// ReasonSchedulePruned names a Progress cursor moved past a part of the
 	// Schedule timeline that was pruned before the cursor could be evaluated.
 	// The skipped Slots were never observed, which is a coverage fact.
-	ReasonSchedulePruned        = "SCHEDULE_PRUNED"
+	ReasonSchedulePruned = "SCHEDULE_PRUNED"
+	// ReasonPlanNotActive names Slots the cursor moved past because no Plan was
+	// due at them: the schedule held those times and the timeline still does,
+	// but the Plan had left the activation and came back, so for that stretch
+	// there was nothing to run.
+	//
+	// Separate from SCHEDULE_PRUNED, which it used to arrive as, because the
+	// two send a reader to opposite places. Pruned means the times are gone
+	// from the timeline and no read will ever find them - a retention answer.
+	// This means the times are there and the Plan was not, which is a question
+	// about the active set, and it reads as data loss when it is not: the
+	// Slots are not replayed on purpose, because replaying them would produce
+	// alerts for a strategy that did not exist while they passed.
+	ReasonPlanNotActive         = "PLAN_NOT_ACTIVE"
 	ReasonEffectiveTimeInactive = "EFFECTIVE_TIME_INACTIVE"
 	ReasonEffectiveTimeUnknown  = "EFFECTIVE_TIME_UNKNOWN"
 	ReasonHistoryWarming        = "HISTORY_WARMING"
@@ -175,9 +188,24 @@ const (
 	// batch could. Recorded rather than refused, so the shape can be counted
 	// before anything is changed on its account.
 	ReasonGapGuardDuplicatedAcrossBatches = "GAP_GUARD_DUPLICATED_ACROSS_BATCHES"
-	ReasonGapApplyConflict                = "GAP_APPLY_CONFLICT"
-	ReasonGapApplyStaleVersion            = "GAP_APPLY_STALE_VERSION"
-	ReasonGapWriteRetryable               = "GAP_WRITE_RETRYABLE"
+	// ReasonGapGuardDisagree names two series batches of one Slot saying
+	// different things about one Plan's gap marker: clearing it with different
+	// content, or expecting it at different revisions.
+	//
+	// It is the one refusal the Slot-wide merge cannot resolve. A clear is
+	// derived from the marker the Slot loaded rather than from the batch, so
+	// every batch that proposes one proposes the same one; two that differ
+	// mean two batches read different markers for one Plan in one Slot, and
+	// there is no winner to pick - whichever were kept, the other batch's
+	// series were evaluated against a marker the Slot then denies.
+	//
+	// Named because it reaches the completion line, and a refusal with no word
+	// arrives there as an error nobody can group, count, or tell apart from
+	// the next unnamed one.
+	ReasonGapGuardDisagree     = "GAP_GUARD_DISAGREE"
+	ReasonGapApplyConflict     = "GAP_APPLY_CONFLICT"
+	ReasonGapApplyStaleVersion = "GAP_APPLY_STALE_VERSION"
+	ReasonGapWriteRetryable    = "GAP_WRITE_RETRYABLE"
 	// State version refusals are observation-only names; they do not change
 	// the state store's status contract or the scheduler's retry decision.
 	ReasonStateVersionConflict = "STATE_VERSION_CONFLICT"

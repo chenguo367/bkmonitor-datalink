@@ -2523,6 +2523,13 @@ func (executor observedProductionSlotExecutor) Execute(
 			if conflict, named := worker.StateConflictReason(err); named {
 				reason = observability.ReasonCode(conflict)
 			}
+			// Two series batches disagreeing about one Plan's gap marker. The
+			// Slot-wide merge resolves every other difference between batches
+			// and refuses only this one, so without a word here the one shape
+			// it cannot resolve is also the one nobody can count.
+			if disagree, named := worker.GapGuardDisagreeReason(err); named {
+				reason = observability.ReasonCode(disagree)
+			}
 			// The gap marker store's own refusals, which are not the same as
 			// the conflict above: that one is this Slot refusing before it
 			// writes, these are the store refusing the write because the

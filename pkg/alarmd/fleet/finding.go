@@ -433,6 +433,14 @@ var codeChecks = map[string]verdict{
 	// itself, and it is the retention's doing rather than the capacity's.
 	"GAP_SKIPPED":     lands(CheckDetectionAbandoned),
 	"SCHEDULE_PRUNED": lands(CheckTimelinePruned),
+	// Under no line. The Plan was not in the active set while those Slots went
+	// by, so there was nothing to run and nothing was lost: replaying them
+	// would produce alerts for a strategy that did not exist at the time.
+	// Putting it under a line would ask somebody to act on a stretch that is
+	// already over and was correct while it lasted. It still carries its own
+	// word rather than the pruned one, because a reader asking where the
+	// rounds went is owed the active set and not retention.
+	"PLAN_NOT_ACTIVE": isNormal,
 
 	// This deployment's own stores and infrastructure did not answer. Retrying
 	// may help, and nobody outside can help.
@@ -516,8 +524,12 @@ var codeChecks = map[string]verdict{
 	// it against the deployment would put objects on the page for something
 	// nobody has decided is their problem.
 	"GAP_GUARD_DUPLICATED_ACROSS_BATCHES": isNormal,
-	"GAP_APPLY_CONFLICT":                  lands(CheckDefect),
-	"GAP_APPLY_STALE_VERSION":             lands(CheckDefect),
+	// A refusal, unlike the reading above, and deterministic: the Slot did not
+	// complete, and re-running it from the same markers reaches the same
+	// disagreement. The object is not detecting, so it belongs on the page.
+	"GAP_GUARD_DISAGREE":      lands(CheckDefect),
+	"GAP_APPLY_CONFLICT":      lands(CheckDefect),
+	"GAP_APPLY_STALE_VERSION": lands(CheckDefect),
 	// The write did not land at all. That is the store not answering, which is
 	// the dependency's line, beside STATE_WRITE_RETRYABLE above.
 	"GAP_WRITE_RETRYABLE": lands(CheckDependencyDown),
