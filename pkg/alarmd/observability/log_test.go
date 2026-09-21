@@ -457,3 +457,47 @@ func TestTheViewSessionLineCarriesTheStreamsWordAsItsReasonCode(t *testing.T) {
 		}
 	}
 }
+
+// The completion line carries the completion the Slot reached as its own
+// top-level key, one word for each completion the store knows, and no key at
+// all when the Slot reached none. The Observation field was pinned by the
+// executor's case; this one pins the line, because a word the line drops is
+// absent in exactly the way an older build's silence is, and the two cannot
+// be told apart by the reader.
+func TestLoggingObserverWritesTheCompletionKindTheSlotReached(t *testing.T) {
+	t.Parallel()
+
+	render := func(kind string) map[string]any {
+		var output bytes.Buffer
+		limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 1})
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, err := NewBoundedLogPolicy(limiter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+			Component: ComponentScheduler, Stage: StageSlotCompleted, Operation: OperationRetry, Result: ResultSuccess,
+			SlotCompletionKind: kind,
+		})
+		var event map[string]any
+		if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+			t.Fatalf("decode completion log: %v; log=%s", err, output.String())
+		}
+		return event
+	}
+	for _, kind := range []string{
+		"FULL_COMPLETED", "FULL_EMPTY_COMPLETED", "COMPLETED_WITH_PARTIAL_GAP", "COMPLETED_WITH_UNAVAILABLE",
+		"COMPLETED_WITH_TERMINAL", "GAP_SKIPPED", "SNAPSHOT_UNAVAILABLE",
+	} {
+		if got := render(kind)["completion_kind"]; got != kind {
+			t.Errorf("a completion of kind %s rendered completion_kind=%v; the key is absent for the reader exactly "+
+				"as it is on a build that does not report it", kind, got)
+		}
+	}
+	if got, present := render("")["completion_kind"]; present {
+		t.Errorf("a Slot that reached no completion rendered completion_kind=%v; the key is for completions, "+
+			"and a word here would be one the store never produced", got)
+	}
+}
