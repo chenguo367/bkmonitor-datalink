@@ -1120,22 +1120,31 @@ function windowFillWords(fill, wireFormats) {
   return shape + reading + '；' + shortfallCostWords(wireFormats);
 }
 
-// What a short window costs the row's Plans, by their wire format. All
-// Python-compatible: nothing downstream. Any standard raw event: recovery
-// waits. Format not yet seen on the row: the general statement, marked so.
+// What a short window costs the row's Plans, by their wire format. Every
+// branch is decided by a word it names: all Python-compatible, nothing
+// downstream; any standard raw event, recovery waits; anything else --
+// no format seen yet, or a word this page does not know -- "cannot say".
+// Not "not standard, therefore Python": that reads a word the page has never
+// heard of as the one branch that tells the reader to stop looking, which
+// is the branch a wrong answer costs the most on. The same rule the metric
+// side keeps with _other.
 function shortfallCostWords(wireFormats) {
   var formats = (wireFormats || []).map(function (entry) { return entry.wire_format; });
-  if (!formats.length) {
-    return '异常照常触发；恢复是否要等窗口补齐取决于输出格式（这一行还没见到该策略的评估行，说不出）';
-  }
+  var python = formats.filter(function (f) { return f === 'python_compatible'; }).length;
   var standard = formats.filter(function (f) { return f === 'standard_raw_event'; }).length;
-  if (!standard) {
+  if (formats.length && python === formats.length) {
     return '异常照常触发；这些策略走 Python 兼容路径，alarmd 不发恢复、下游按异常点缺席判恢复——窗口没补齐对下游没有影响';
   }
-  if (standard === formats.length) {
+  if (standard && standard === formats.length) {
     return '异常照常触发，只有恢复要等窗口补齐（标准原始事件线由 alarmd 发恢复）';
   }
-  return '异常照常触发；' + standard + '/' + formats.length + ' 条策略走标准原始事件线、恢复要等窗口补齐，其余走 Python 兼容路径、窗口没补齐对下游没有影响';
+  if (standard) {
+    return '异常照常触发；' + standard + '/' + formats.length + ' 条策略走标准原始事件线、恢复要等窗口补齐，'
+      + (python ? python + ' 条走 Python 兼容路径、窗口没补齐对下游没有影响' : '')
+      + (python + standard < formats.length ? '，另有 ' + (formats.length - python - standard) + ' 条格式这一页不认识、说不出' : '');
+  }
+  return '异常照常触发；恢复是否要等窗口补齐取决于输出格式（'
+    + (formats.length ? '这些策略的格式这一页不认识' : '这一行还没见到该策略的评估行') + '，说不出）';
 }
 
 // The last step before a skip, in words. Held to nothing: the codes are the
