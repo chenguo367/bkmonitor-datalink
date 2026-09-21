@@ -832,9 +832,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// view and the lease the renewal last brought, whether the Query Group
 	// is executed from the view; the receipt counts those that are.
 	viewGate := newViewExecutionGate()
+	workerCosts := newWorkerCostSource(costSummary)
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
-		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate},
+		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate,
+			Costs: workerCosts},
 	)
 	if err != nil {
 		return nil, err
@@ -1128,6 +1130,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.
 	observationRefresh.owned = bundle.ownedQueryGroups
+	workerCosts.boundByOwned(func() int { return len(bundle.ownedQueryGroups()) })
 	bundle.applied = publisher.applied
 	bundle.capacity = publisher.capacity
 	// The first attempt runs now, so a broker that answers is open before the

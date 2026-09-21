@@ -677,3 +677,41 @@ func (c *CostSummary) Snapshot() CostSnapshot {
 	}
 	return out
 }
+
+// CostRetainedPeak is one observed Query Group's retained-byte peak over the
+// window, by the key the caller reconciled it under.
+type CostRetainedPeak struct {
+	QueryGroupKey     string
+	RetainedBytesPeak uint64
+}
+
+// RetainedPeaks is every observed group's retained-byte peak over the window.
+//
+// The same number Publish sums into Retained.PeakSumBytes, taken the same way
+// -- the larger of the two windows, because the window the reading is for is
+// the one that has not finished rotating. Exposed per group so the Worker's
+// heartbeat reports what the read-only column shows, from one derivation
+// rather than two: a second accumulator over the same observations would
+// answer the same question with a different number, and the difference would
+// be invisible on both pages.
+//
+// Read-only. It does not rotate the windows, so calling it between Publish
+// ticks neither advances nor disturbs them.
+func (c *CostSummary) RetainedPeaks() []CostRetainedPeak {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.enabled {
+		return nil
+	}
+	peaks := make([]CostRetainedPeak, 0, len(c.groups))
+	for key, g := range c.groups {
+		if peak := max(g.windows.current.RetainedBytesPeak, g.windows.previous.RetainedBytesPeak); peak > 0 {
+			peaks = append(peaks, CostRetainedPeak{QueryGroupKey: key, RetainedBytesPeak: peak})
+		}
+	}
+	sort.Slice(peaks, func(i, j int) bool { return peaks[i].QueryGroupKey < peaks[j].QueryGroupKey })
+	return peaks
+}

@@ -2445,6 +2445,7 @@ func (executor observedProductionSlotExecutor) Execute(
 	// the ones whose Slots are being skipped -- have no such bundle, so their
 	// completion lines named the outcome and never the cause.
 	var heldBy *observability.HeldByFacts
+	var gapApplySite string
 	if result.CompletionKind == execution.CompletionGapSkipped || request.ReplayExpired ||
 		result.ReasonCode == execution.ReasonCode(contract.ReasonGapSkipped) {
 		// The reason is asked as well as the kind, because the line reports the
@@ -2503,6 +2504,12 @@ func (executor observedProductionSlotExecutor) Execute(
 			// as an unclassified defect that the same-Slot retry then cleared.
 			if refusal, named := worker.GapApplyReason(err); named {
 				reason = observability.ReasonCode(refusal)
+				// The site goes on the line as its own field, not only inside
+				// the error text. Which of the Slot's two applies refused is
+				// the question this refusal exists to answer, and an answer
+				// that has to be parsed out of a sentence is one nobody can
+				// group or count by.
+				gapApplySite = worker.GapApplySiteOf(err)
 			}
 		}
 	} else if observedResult == "" {
@@ -2511,7 +2518,7 @@ func (executor observedProductionSlotExecutor) Execute(
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
-		HeldBy: heldBy,
+		HeldBy: heldBy, GapApplySite: gapApplySite,
 		// The completion the Slot reached, beside the reason it reports. They
 		// are separate fields and disagree in the case this line is hardest to
 		// read: a Slot whose Level outcomes are UNKNOWN completes
