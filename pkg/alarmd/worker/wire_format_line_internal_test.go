@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -82,25 +83,49 @@ func TestTheACKLineCountsTheBatchByWireFormat(t *testing.T) {
 
 // The evaluation line names the format the Plan's events go out as, resolved
 // the way the sink resolves it: a Plan with no revision and no word is
-// Python-compatible, and the historical word resolves to the standard raw
-// event rather than being printed as itself.
+// Python-compatible, and one with a revision and no word is the standard raw
+// event. Two Plans that resolve differently, on both evaluation lines -- the
+// per-series one and the completion-only one -- so a line that printed a
+// constant, or the frozen word as written, would show.
 func TestTheEvaluationLineNamesTheResolvedWireFormat(t *testing.T) {
-	plan := noDataWiredPlan(t)
-	if got := planWireFormat(plan); got != contract.WireFormatPythonCompatible {
-		t.Fatalf("an unrevisioned Plan with no word resolves to %q, want %q", got, contract.WireFormatPythonCompatible)
-	}
 	if got := planWireFormat(execution.DuePlan{}); got != "" {
 		t.Fatalf("a due Plan without a compiled Plan names %q, want nothing", got)
 	}
-	recorded := []observability.Observation{}
-	stream := noDataWiredStream(t, plan, &emptyNoDataStore{})
-	stream.coordinator.ports.Observer = observability.ObserverFunc(
-		func(_ context.Context, observation observability.Observation) {
-			recorded = append(recorded, observation)
+	unrevisioned := noDataWiredPlan(t)
+	revisioned := unrevisioned
+	revisioned.Identity.StrategyID = "4102"
+	revisioned.CompiledPlan = noDataPreflightPlanWithRef(t,
+		contract.StrategyRefV2{TenantID: "tenant", StrategyID: "4102", Revision: "strategy-v1", SnapshotRevision: 7}, nil)
+	for _, testCase := range []struct {
+		name string
+		due  execution.DuePlan
+		want string
+	}{
+		{name: "no revision, no word", due: unrevisioned, want: contract.WireFormatPythonCompatible},
+		{name: "revision, no word", due: revisioned, want: contract.WireFormatStandardRawEvent},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := planWireFormat(testCase.due); got != testCase.want {
+				t.Fatalf("planWireFormat = %q, want %q", got, testCase.want)
+			}
+			recorded := []observability.Observation{}
+			stream := noDataWiredStream(t, testCase.due, &emptyNoDataStore{})
+			stream.coordinator.ports.Observer = observability.ObserverFunc(
+				func(_ context.Context, observation observability.Observation) {
+					recorded = append(recorded, observation)
+				})
+			stream.observeCompletionOnlyPlan(context.Background(), testCase.due, execution.EvaluationResult{Result: observability.ResultSuccess})
+			stream.observeEvaluationCompleted(context.Background(), time.Now(), testCase.due, "series-1", nil,
+				execution.EvaluationResult{Result: observability.ResultSuccess})
+			if len(recorded) != 2 {
+				t.Fatalf("recorded %d observations, want the two evaluation lines", len(recorded))
+			}
+			for _, observation := range recorded {
+				if observation.Stage != observability.StageEvaluationCompleted || observation.OutputWireFormat != testCase.want ||
+					observation.Trace.StrategyID != testCase.due.Identity.StrategyID {
+					t.Fatalf("evaluation line = %+v, want wire format %q beside strategy %s", observation, testCase.want, testCase.due.Identity.StrategyID)
+				}
+			}
 		})
-	stream.observeCompletionOnlyPlan(context.Background(), plan, execution.EvaluationResult{Result: observability.ResultSuccess})
-	if len(recorded) != 1 || recorded[0].Stage != observability.StageEvaluationCompleted ||
-		recorded[0].OutputWireFormat != contract.WireFormatPythonCompatible || recorded[0].Trace.StrategyID != plan.Identity.StrategyID {
-		t.Fatalf("evaluation line = %+v, want the Plan's resolved wire format beside its strategy", recorded)
 	}
 }

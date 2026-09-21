@@ -610,4 +610,26 @@ func TestTheCompositionCountsPlansByTheWireFormatTheSinkResolves(t *testing.T) {
 	if total != with.PlansTotal {
 		t.Fatalf("by-format counts sum to %d, want the %d Plans: the counts must partition", total, with.PlansTotal)
 	}
+	// Plans frozen before the word existed carry none, and one frozen under
+	// the historical spelling carries a word the sink never writes: both are
+	// counted under what the sink resolves them to, not under _other and not
+	// under the historical word.
+	historical := revisionedCatalog(t, "")
+	for index := range historical.QueryGroups {
+		for planIndex := range historical.QueryGroups[index].Plans {
+			historical.QueryGroups[index].Plans[planIndex].Plan.WireFormat = contract.WireFormatTriggerEvent
+		}
+	}
+	unworded := objectCatalogTwoGroups(t, 80)
+	for index := range unworded.QueryGroups {
+		for planIndex := range unworded.QueryGroups[index].Plans {
+			unworded.QueryGroups[index].Plans[planIndex].Plan.WireFormat = ""
+		}
+	}
+	if got := controlplane.ComposeCatalog(historical).PlansByWireFormat; got[contract.WireFormatStandardRawEvent] != 2 || got[observability.WireFormatOther] != 0 {
+		t.Fatalf("historical word by wire format = %v, want 2 standard_raw_event and nothing under _other", got)
+	}
+	if got := controlplane.ComposeCatalog(unworded).PlansByWireFormat; got[contract.WireFormatPythonCompatible] != 2 || got[observability.WireFormatOther] != 0 {
+		t.Fatalf("no word, no revision by wire format = %v, want 2 python_compatible and nothing under _other", got)
+	}
 }
