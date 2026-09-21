@@ -671,6 +671,10 @@ var CHECK = {
   // not accept, before any became an object. {s} is withheld records, {g}
   // reasons; there is no {n}, because none of these is an object.
   SOURCE_INCOMPLETE:     '策略缓存里 {s} 条策略的文档不满足合同，没有进入检测（{g} 种原因）——是写入方写的内容缺东西，不是策略配置错',
+  // Composed by the server (report.line): how many hours of the last day the
+  // platform's list dropped strategies and listed them again, and what is
+  // under grace now. {s} is strategy-returns, {g} hours. Fallback only.
+  SOURCE_SET_FLAPPING:   '上游活动集近 24 小时有 {g} 个小时掉过策略又列回来，共 {s} 条次——是上游列表在抖，不是策略被删；抖动期间这些策略的对象被移除再重新放置，中间的 Slot 没有检测',
   // The sentence for this line is composed by the server (report.line) by
   // kind of cause under it; this template is the fallback for a server that
   // did not send one, and names no cause -- the reasons under the line do.
@@ -709,7 +713,8 @@ var CHECK = {
 
 // What the objects of a check are folded on, in words.
 var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症状', strategy: '策略', gap_kind: '缺口', cause: '情况',
-                degradation: '超界的状态', loss: '损失是什么', blocked: '卡在哪一步 · 依赖 · 类型（原因码在组内计数）'};
+                degradation: '超界的状态', loss: '损失是什么', blocked: '卡在哪一步 · 依赖 · 类型（原因码在组内计数）',
+                hour: '回到活动集的那个小时（UTC）'};
 
 // Where a problem is between failing and fixed, from the server's reading
 // of its objects' rows -- never from the dependency's own health. Held to
@@ -809,6 +814,7 @@ var DEGRADATION = {
 // not log the full request text, so it says what exists instead of sending
 // the reader to look for something that does not.
 var EVIDENCE = {
+  SOURCE_SET_FLAPPING:   '展开按小时看：每组是那个小时回到活动集的策略数、最长缺席时长与策略样本；首屏"来源"块的 set.pending_removal / pending_removal_samples[].absent_since 是此刻宽限中的策略与各自缺席起点，set.hours[] 是整份按小时的账（自 set.since 起，leader 进程重启后重新计）；日志 snapshot_refreshed 行的 retired/added_query_groups 与 assignment_swept 行是同一件事在对象层的样子',
   SOURCE_INCOMPLETE:     '展开按原因看策略样本：SOURCE_IDENTITY_UNAVAILABLE = 文档顶层缺 bk_tenant_id / space_uid；SOURCE_OBJECT_INCOMPLETE = ID 在 strategy_ids 里但 strategy_<id> 不存在；依赖面板"策略缓存"行给缓存 Redis 地址与 last_updated；指标 catalog_withheld_objects{disposition="SOURCE_INCOMPLETE",reason}；日志 source_withheld',
   CAPABILITY_UNSUPPORTED: '展开按原因看：每组带服务端给的"这是什么 / 谁能处理 / 下一步"（words.kind ∈ DEPLOYMENT_PARAMETER 部署参数不够 · BUILD_CAPABILITY 本构建不支持 · WRITER_AHEAD 写入方超前于本构建 · STRATEGY_DEFINITION 策略定义超出护栏 · UNKNOWN_REASON 页面还没有说明）与策略样本、field_path。指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}，reason 原样显示不落 other',
   CONFIG_REJECTED:       '展开按原因看策略样本与字段路径（field_path 是编译器拒绝的那个字段）；指标 catalog_withheld_objects{disposition="CONFIG_REJECTED",reason}',
@@ -838,6 +844,7 @@ var EVIDENCE = {
 };
 
 var NEXT = {
+  SOURCE_SET_FLAPPING:   '交平台侧：找上游 strategy_ids 列表的写入方，问为什么这些小时的列表少了这批策略又回来（每小时同一分钟出现是定时任务的形状）；alarmd 这边不改策略、不改配置——宽限期（目录 AbsenceGracePeriod）已让 ≤10 分钟的缺席不再移除 Plan，超过宽限的缺席仍按删除处理',
   SOURCE_INCOMPLETE:     '找策略缓存的写入方（bk-monitor 后台的 cache 进程，或替代它的模块）：缺身份字段的要写方按合同补 bk_tenant_id / space_uid（bk-monitor 主线 2026-08-31 起的缓存刷新才写）；ID 列表残留的要写方清掉已删除策略的 ID（2026-09-11 起的刷新会清）。Pod 外一句判据：在缓存 Redis 上 GET <前缀>.strategy_<任一 id>，顶层有 "space_uid" 才算过。alarmd 这边不用改，写方修好后下一轮刷新（最多 6 分钟）自动接受',
   CAPABILITY_UNSUPPORTED: '按原因组各自的"下一步"：部署参数不够的调参数、下一轮刷新自动接受；本构建不支持的等带该能力的构建，改参数没有用；写入方超前的等解释该字段的构建或写入方改文档；策略定义超出护栏的先收策略，护栏不是工作上限',
   CONFIG_REJECTED:       '交策略侧：按原因组与字段路径改策略定义；alarmd 这边不用改，改好后下一轮刷新自动接受。STALE_CONFIG 组的策略仍在按上一版跑，不算漏检',
@@ -871,6 +878,7 @@ var NEXT = {
 // not go to zero, and a refusal recovers by being handed to its owner, not
 // by disappearing.
 var RECOVERY = {
+  SOURCE_SET_FLAPPING:   '上游列表稳定后：24 小时内不再有新的小时组出现，这一行随最后一组滚出 24 小时窗而消失；宽限中的计数回到 0',
   SOURCE_INCOMPLETE:     '写方修好后一轮刷新：这一行的策略数降到 0、"应有"从 0 涨上来、对象开始出现在各栏；这一行消失',
   CAPABILITY_UNSUPPORTED: '参数调好或新构建上线后一轮刷新：该原因组消失，"应有"涨上来',
   CONFIG_REJECTED:       '策略改好后一轮刷新：该策略离开这一组；这一行只在全部改好后消失',
@@ -1515,7 +1523,8 @@ function loadChecks() {
 // Held to the Go list of standings by a test.
 function isStanding(report) {
   return report.code === 'CUTOVER_FAILING' || report.code === 'REPLICA_DEGRADED' || report.code === 'OWNERSHIP_SKEWED'
-    || report.code === 'SOURCE_INCOMPLETE' || report.code === 'CAPABILITY_UNSUPPORTED' || report.code === 'CONFIG_REJECTED';
+    || report.code === 'SOURCE_INCOMPLETE' || report.code === 'CAPABILITY_UNSUPPORTED' || report.code === 'CONFIG_REJECTED'
+    || report.code === 'SOURCE_SET_FLAPPING';
 }
 
 // The first screen: the checks this reader acts on now; folded away, the
