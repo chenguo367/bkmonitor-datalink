@@ -109,13 +109,13 @@ func TestDuplicateGapDoesNotAccumulateReservations(t *testing.T) {
 	if err := stream.mergeProvisional(context.Background(), result, 0); err != nil {
 		t.Fatal(err)
 	}
-	before := stream.retained
+	before := stream.retainedTotal()
 	for range 100 {
 		if err := stream.mergeProvisional(context.Background(), result, 0); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if stream.retained != before || coordinator.reservations.gaps != 1 {
+	if stream.retainedTotal() != before || coordinator.reservations.gaps != 1 {
 		t.Fatal("shared duplicate gap was charged repeatedly")
 	}
 }

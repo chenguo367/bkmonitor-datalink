@@ -113,7 +113,7 @@ func (stream *streamedExecution) mergeProvisional(ctx context.Context, next exec
 	stream.effects.states += delta.states
 	stream.effects.events += delta.events
 	stream.effects.gaps += delta.gaps
-	stream.retained += retained
+	stream.retainBytes(retainPhaseOutput, retained)
 	return nil
 }
 
@@ -179,8 +179,8 @@ func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, 
 	// than remaining, because a share measured against what happens to be free
 	// means a different thing every round - the same object would fit or not by
 	// the luck of who else is running, and nobody could act on the answer.
-	if share := coordinator.qgShareBytes(); share > 0 && stream.retained+retained > share {
-		return shareRejection(phase, stream.retained, retained, share, stream.ownBudgetUsage(coordinator.budget))
+	if share := coordinator.qgShareBytes(); share > 0 && stream.retainedTotal()+retained > share {
+		return shareRejection(phase, stream.retainedTotal(), retained, share, stream.ownBudgetUsage(coordinator.budget))
 	}
 	if retained > coordinator.budget.MaxRetainedBytes-reservation.retainedBytes {
 		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, reservation.retainedBytes, retained, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))

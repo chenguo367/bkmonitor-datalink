@@ -3930,6 +3930,18 @@ type SlotBudgetUsage struct {
 	RetainedBytes  uint64
 	Series         uint64
 
+	// RetainedBytes split by what the memory was held for. They sum to
+	// RetainedBytes.
+	//
+	// The total on its own says a replica is near the pool's ceiling without
+	// saying what to do about it: the input bytes fall by reading fewer series
+	// per Slot, the output bytes by the state representation, and the gap bytes
+	// by neither. One number covering three unrelated causes is why the pool
+	// was read as a single wall for as long as it was.
+	RetainedInputBytes  uint64
+	RetainedGapBytes    uint64
+	RetainedOutputBytes uint64
+
 	// The limits each was measured against, carried with the usage rather than
 	// looked up by the reporter. A usage without its limit is not a reading,
 	// and the two have to come from one producer: read separately they can

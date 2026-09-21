@@ -136,3 +136,59 @@ func TestTheCompletionRowCarriesBudgetUsageOnASuccess(t *testing.T) {
 		}
 	}
 }
+
+// The row says which phase held the retained bytes, under the names a reader
+// queries by.
+//
+// The names are asserted off the rendered row rather than off the struct
+// because the row is where they are a contract. A field the encoder publishes
+// under its Go name renders, reads as present and carries the right number,
+// and every dashboard asking for it gets nothing back.
+func TestTheCompletionRowSaysWhichPhaseHeldTheRetainedBytes(t *testing.T) {
+	var output bytes.Buffer
+	limiter, _ := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 10})
+	policy, _ := NewBoundedLogPolicy(limiter)
+	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+		Component: ComponentScheduler, Stage: StageSlotCompleted, Result: ResultSuccess,
+		Direction: DirectionInternal,
+		SlotBudgetUsage: &SlotBudgetUsageFacts{
+			RetainedBytes: 68681728, RetainedInputBytes: 1638400,
+			RetainedGapBytes: 32768, RetainedOutputBytes: 67010560,
+		},
+	})
+	var row map[string]any
+	if err := json.Unmarshal(output.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	usage, present := row["slot_budget_usage"].(map[string]any)
+	if !present {
+		t.Fatalf("a successful Slot reported no budget usage: %v", row)
+	}
+	// Distinct values, so a row that carries one phase's number under another
+	// phase's name fails here rather than reading as plausible.
+	for name, want := range map[string]float64{
+		"retained_input_bytes": 1638400, "retained_gap_bytes": 32768, "retained_output_bytes": 67010560,
+	} {
+		if usage[name] != want {
+			t.Fatalf("%s = %v, want %v; the row is what a reader splits the pool by", name, usage[name], want)
+		}
+	}
+	// Zero is reported rather than omitted. A phase that is nothing on most
+	// Slots and the whole budget on a few is the one worth finding, and a phase
+	// whose zeros are absent has no denominator to be occasional against.
+	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+		Component: ComponentScheduler, Stage: StageSlotCompleted, Result: ResultSuccess,
+		Direction: DirectionInternal, SlotBudgetUsage: &SlotBudgetUsageFacts{RetainedBytes: 4096, RetainedInputBytes: 4096},
+	})
+	lines := bytes.Split(bytes.TrimSpace(output.Bytes()), []byte("\n"))
+	var quiet map[string]any
+	if err := json.Unmarshal(lines[len(lines)-1], &quiet); err != nil {
+		t.Fatal(err)
+	}
+	quietUsage, _ := quiet["slot_budget_usage"].(map[string]any)
+	for _, name := range []string{"retained_gap_bytes", "retained_output_bytes"} {
+		if value, present := quietUsage[name]; !present || value != float64(0) {
+			t.Fatalf("%s = %v (present=%t) on a Slot that held none, want an explicit zero", name, value, present)
+		}
+	}
+}

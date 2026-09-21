@@ -84,6 +84,18 @@ type SlotBudgetUsageFacts struct {
 	RetainedBytes  uint64 `json:"retained_bytes"`
 	Series         uint64 `json:"series"`
 
+	// RetainedBytes split by what the memory was held for, summing to it.
+	//
+	// These stay on the row where the limits do not, because the limits are
+	// process constants a reader can look up once while these are this Slot's
+	// own and vary round to round. Reported at every value including zero: a
+	// phase that is usually nothing and occasionally the whole budget is the
+	// one worth finding, and omitting its zeros would leave it with no
+	// denominator to be occasional against.
+	RetainedInputBytes  uint64 `json:"retained_input_bytes"`
+	RetainedGapBytes    uint64 `json:"retained_gap_bytes"`
+	RetainedOutputBytes uint64 `json:"retained_output_bytes"`
+
 	// The limits stay off the row and are carried for readers that hold the
 	// facts rather than the log line.
 	//

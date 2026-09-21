@@ -26,7 +26,7 @@ func (stream *streamedExecution) retainTargetBytes(ctx context.Context, count in
 	if err := stream.reserveProvisionalAt(ctx, 0, retained, stream.reservationPhase("normal_gap")); err != nil {
 		return err
 	}
-	stream.retained += retained
+	stream.retainBytes(retainPhaseGap, retained)
 	return nil
 }
 
@@ -58,7 +58,7 @@ func (stream *streamedExecution) loadGapFacts(ctx context.Context, request execu
 			return err
 		}
 		stream.gapFacts++
-		stream.retained += retained
+		stream.retainBytes(retainPhaseGap, retained)
 		stream.gaps.Items = append(stream.gaps.Items, snapshot)
 		return nil
 	})
@@ -82,7 +82,7 @@ func (stream *streamedExecution) retainGapMutation(ctx context.Context, mutation
 		return err
 	}
 	stream.effects.gaps++
-	stream.retained += retained
+	stream.retainBytes(retainPhaseGap, retained)
 	return nil
 }
 

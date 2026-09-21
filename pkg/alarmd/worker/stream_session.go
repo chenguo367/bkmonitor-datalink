@@ -59,10 +59,49 @@ type streamedExecution struct {
 	evaluated            execution.EvaluationResult
 	delivered            []execution.SeriesDelivery
 	series               uint64
-	retained             uint64
-	effects              effectCounts
-	gapFacts             uint64
-	began                bool
+	// retainedByPhase is this execution's retained bytes split by what they
+	// were retained for. The total is the sum rather than a counter of its
+	// own: a sixth budget's worth of memory arriving with no phase attached
+	// is the failure this split exists to prevent, and a parallel total can
+	// be incremented by a site that names no phase while every assertion on
+	// the total still passes.
+	retainedByPhase [retainPhaseCount]uint64
+	effects         effectCounts
+	gapFacts        uint64
+	began           bool
+}
+
+// retainPhase says which part of a Slot a retained byte was held for. The
+// three names are the ones the reservation path already reports on a refusal
+// (normal_input / normal_gap / normal_output), so a rejection line and a
+// completion row describe the same three quantities.
+type retainPhase int
+
+const (
+	retainPhaseInput retainPhase = iota
+	retainPhaseGap
+	retainPhaseOutput
+	retainPhaseCount
+)
+
+// retainBytes records retained bytes against the phase that retained them.
+//
+// The only way to add to this execution's retention. An out-of-range phase
+// panics here rather than being dropped into the total unattributed.
+func (stream *streamedExecution) retainBytes(phase retainPhase, retained uint64) {
+	stream.retainedByPhase[phase] += retained
+}
+
+// retainedTotal is what this execution holds across all phases.
+func (stream *streamedExecution) retainedTotal() uint64 {
+	if stream == nil {
+		return 0
+	}
+	var total uint64
+	for _, retained := range stream.retainedByPhase {
+		total += retained
+	}
+	return total
 }
 
 type streamedInputKey struct {
@@ -145,7 +184,7 @@ func (stream *streamedExecution) ConsumeSeries(ctx context.Context, batch execut
 		return err
 	}
 	stream.series += batch.Delivery.Series
-	stream.retained += retained
+	stream.retainBytes(retainPhaseInput, retained)
 	folded := make(map[*execution.Dataset]foldedDataset)
 	for _, binding := range batch.Inputs {
 		key := streamedInputKey{consumer: binding.Consumer, series: series, requirement: binding.RequirementID}
@@ -231,8 +270,8 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.gapFacts = 0
 	stream.coordinator.releaseEffects(stream.effects)
 	stream.effects = effectCounts{}
-	stream.coordinator.releaseProvisional(stream.series, stream.retained)
-	stream.series, stream.retained = 0, 0
+	stream.coordinator.releaseProvisional(stream.series, stream.retainedTotal())
+	stream.series, stream.retainedByPhase = 0, [retainPhaseCount]uint64{}
 }
 
 func streamedRetainedSize(bindings []execution.NamedInputBinding, delivery execution.SeriesDelivery) (uint64, error) {
