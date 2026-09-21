@@ -722,6 +722,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		held.guard.Status, held.guard.Reason = progress.Status, progress.Reason
 		held.guard.Required, held.guard.Observed = progress.Required, progress.Observed
 		held.guard.Progress = progress.Progress
+		held.guard.Measure = GuardObservedMeasure
 		held.guard.LastAt = at
 		held.guard.Rounds++
 		held.gen = state.guardGen
@@ -1146,7 +1147,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if facts := observation.HistoryCoverage; facts != nil {
 			state.coverage = &HistoryCoverage{
 				Levels: facts.Levels, Short: facts.Short, Empty: facts.Empty,
-				WorstValid: facts.WorstValid, WorstRequired: facts.WorstRequired,
+				WorstValid: facts.WorstValid, WorstRequired: facts.WorstRequired, Measure: CoverageValidMeasure,
 				ShortRounds: state.shortRounds, EmptyRounds: state.emptyRounds,
 				Guarded: facts.Guarded, HeldFullRounds: state.heldFullRounds,
 				Fresh: facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,

@@ -1272,11 +1272,15 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 	if len(rows) != 1 || rows[0].Coverage == nil {
 		t.Fatalf("rows = %+v, want one undecidable object carrying coverage", rows)
 	}
+	if rows[0].Coverage.Measure != CoverageValidMeasure {
+		t.Fatalf("coverage measure = %q, want %q on every row that carries a window count", rows[0].Coverage.Measure, CoverageValidMeasure)
+	}
 	published := reflect.ValueOf(rows[0].Coverage).Elem()
 	// The run counters and the round-over-round progress are the tracker's
-	// own: one round cannot supply them.
+	// own: one round cannot supply them. Measure is the row's word for what
+	// WorstValid counts, a constant of the field and not of the round.
 	rowOnly := map[string]bool{"ShortRounds": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true,
-		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true}
+		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "Measure": true}
 	for i := 0; i < published.NumField(); i++ {
 		name := published.Type().Field(i).Name
 		if rowOnly[name] {
