@@ -397,6 +397,23 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 			blocked.Code = code
 		}
 	}
+	// A completed round whose completeness a durable guard held is the
+	// window's, as checkOf reads it, and not the guard's trigger word's: the
+	// trigger is the reason every UNKNOWN outcome reports until the guard
+	// releases, and read through the code table a round that ran, queried
+	// and wrote its state under a guard set off by one skipped Slot said
+	// SCHEDULE / capacity for the eighty rounds the window took to refill --
+	// the reader was sent to the scheduler for a Level that was counting up.
+	// The window words already read EVALUATE and unlocated; the trigger
+	// stays as the code so the row says which guard. A code the table files
+	// as this deployment's own defect keeps its reading, as it keeps the
+	// line.
+	if verdict, decided := codeVerdict(anomaly); !failedExecution(anomaly.ReasonCode) && !(decided && verdict == CheckDefect) {
+		if held, _ := guardHeld(anomaly); held {
+			blocked.Stage, blocked.Class = StageEvaluate, ClassUnlocated
+			blocked.Dependency, blocked.DependencyEvidence = DependencyNone, dependencyByCode
+		}
+	}
 	// A Slot the query cooldown held until it fell past the replay range is
 	// the cooldown's, and the cooldown is the query failure's: the reading
 	// the KindQueryCooldown row gets, whatever Slot the failure was seen on,
