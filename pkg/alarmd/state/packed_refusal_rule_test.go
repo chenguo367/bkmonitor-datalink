@@ -270,3 +270,62 @@ func TestTheApplyPathNamesItsRefusals(t *testing.T) {
 		t.Fatalf("an applied record carries %+v, want no rule", result.Items[0])
 	}
 }
+
+// The rule reaches the apply result on both apply paths - the pipelined path
+// a preflight witness sends a write down, and the sequential path a write
+// without one takes. Production refuses on apply, not admission (admission
+// passed the same bytes moments earlier), so a rule that only reaches the
+// admission result is one the operator never sees.
+func TestTheRefusalRuleReachesTheApplyResultOnBothPaths(t *testing.T) {
+	underived := func(t *testing.T, identity execution.StateKeyIdentity) execution.StateMutation {
+		t.Helper()
+		point := derivedPoint(t, identity, 60, "detect", execution.LevelFactNormal)
+		point.RecordID = strings.Repeat("ff", 32)
+		mutation, err := execution.BuildStateMutation(execution.StateMutation{
+			Identity: identity, ApplyVersion: applyVersion(),
+			AffectedRecords: []execution.RecordAnchor{derivedAnchor(t, identity, 60)},
+			Levels: []execution.RuntimeLevelStateMutation{{LevelID: 1, LevelStateCompatibility: "compat",
+				HistoryCompleteness: execution.HistoryFull, WarmupRequirementRef: "warm", LastProcessedEventTime: 60}},
+			Points: []execution.StateHistoryPoint{point},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return mutation
+	}
+	requireRule := func(t *testing.T, item execution.StateApplyItemResult) {
+		t.Helper()
+		if item.Status != execution.StateApplyDeterministicInvalid || item.ReasonCode != execution.ReasonCode(contract.ReasonStateCorrupt) {
+			t.Fatalf("apply = %+v, want a deterministic invalid STATE_CORRUPT", item)
+		}
+		if item.RefusalRule != PackedRuleRecordIDNotDerived {
+			t.Fatalf("rule = %q, want %q on the apply result: the path production refuses on", item.RefusalRule, PackedRuleRecordIDNotDerived)
+		}
+	}
+	t.Run("pipelined, with a preflight witness", func(t *testing.T) {
+		backend := newPipelineMemoryBackend()
+		store := newBatchStore(t, backend, fixedFenceKeys{testFenceKeys()})
+		mutation := underived(t, seriesIdentity(0))
+		if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(),
+			Items: preflightItems([]execution.StateMutation{mutation})}); err != nil {
+			t.Fatal(err)
+		}
+		result, err := store.ApplyRuntimeFenced(context.Background(), execution.StateApplyRequest{Contract: frozenRef(),
+			Retention: testRetention(), Items: []execution.StateMutation{mutation}}, testApplyFence())
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireRule(t, result.Items[0])
+	})
+	t.Run("sequential, without a witness", func(t *testing.T) {
+		backend := newPipelineMemoryBackend()
+		store := newBatchStore(t, backend, nil)
+		mutation := underived(t, seriesIdentity(1))
+		result, err := store.ApplyRuntime(context.Background(), execution.StateApplyRequest{Contract: frozenRef(),
+			Retention: testRetention(), Items: []execution.StateMutation{mutation}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		requireRule(t, result.Items[0])
+	})
+}
