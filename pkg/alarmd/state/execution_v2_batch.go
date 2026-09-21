@@ -800,6 +800,15 @@ func (store *ExecutionStore) readStoredRecord(
 		witness.framedDigest = ExpectedValueDigest(framedRaw)
 		decoded := decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
 		if decoded.Status == execution.StateDeterministicInvalid {
+			if decoded.ReasonCode == execution.ReasonCode(contract.ReasonStateSchemaUnsupported) {
+				// A frame this binary does not know is a newer binary's
+				// record, not garbage. Falling back to the envelope here and
+				// writing whole over the frame would roll the series back
+				// silently on every cross-frame-version rollback; a refusal
+				// by name is the honest answer, and it is what the envelope
+				// key already gets for the same shape.
+				return decoded
+			}
 			invalid = &decoded
 		} else {
 			framed = &decoded

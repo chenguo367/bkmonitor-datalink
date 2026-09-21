@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
@@ -209,5 +210,42 @@ func TestAConflictOnTheFramedKeyIsNamedInItsOwnRevisionSpace(t *testing.T) {
 	if item.Status != execution.StateApplyVersionConflict || item.VersionConflict != execution.StateVersionConflictRevisionMoved {
 		t.Fatalf("item = %+v, want VERSION_CONFLICT named revision_moved: the framed key went from missing to revision 1, "+
 			"and the envelope's revision 9 is not a number that key ever had", item)
+	}
+}
+
+// A frame this binary does not know is a newer binary's record. It is refused
+// by name, not replaced by the envelope beside it - a whole write over it
+// would roll the series back silently on every cross-frame-version rollback.
+func TestANewerFrameIsRefusedByNameNotReplacedByTheEnvelope(t *testing.T) {
+	backend := newPipelineMemoryBackend()
+	store := newBatchStore(t, backend, nil)
+	identity := seriesIdentity(0)
+	envelopeKey, _ := RuntimeStateKeyV2("alarmd", identity)
+	framedKey, _ := RuntimeStateKeyV3("alarmd", identity)
+	backend.values[envelopeKey], _ = encodeRuntime(seriesMutation(t, identity, applyVersion(), 0, ""), 5)
+	framed, _ := encodeRuntimePacked(seriesMutation(t, identity, applyVersion(), 0, ""), 2)
+	framed[4] = packedFrameSchemaV1 + 1 // a frame schema this binary does not read
+	backend.values[framedKey] = framed
+	framedBefore := string(framed)
+
+	next := execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 120, SlotDigest: "slot-2"}
+	loaded, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(),
+		Items: []execution.StatePreflightItem{{Identity: identity, ApplyVersion: next}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := loaded.Items[0]
+	if view.Status != execution.StateDeterministicInvalid || view.ReasonCode != execution.ReasonCode(contract.ReasonStateSchemaUnsupported) {
+		t.Fatalf("loaded view = %s (%s), want DETERMINISTIC_INVALID STATE_SCHEMA_UNSUPPORTED: the envelope must not be "+
+			"read in place of a frame a newer binary wrote", view.Status, view.ReasonCode)
+	}
+	applied, err := store.ApplyRuntime(context.Background(), execution.StateApplyRequest{Contract: frozenRef(),
+		Retention: testRetention(), Items: []execution.StateMutation{seriesMutation(t, identity, next, 5, "")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Items[0].Status != execution.StateApplyDeterministicInvalid || string(backend.values[framedKey]) != framedBefore {
+		t.Fatalf("apply = %+v, framed changed = %v; a newer binary's frame must not be written over", applied.Items[0],
+			string(backend.values[framedKey]) != framedBefore)
 	}
 }
