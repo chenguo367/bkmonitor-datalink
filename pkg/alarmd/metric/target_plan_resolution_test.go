@@ -27,6 +27,10 @@ import (
 func TestTheSelectorCellsAnOperatorActsOnArePublishedAtZeroAsOneSet(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
 
+	// Spelled out rather than built from targetplan's constants: this is the
+	// set an operator queries by these words, so a constant renamed must not
+	// move it and a constant's value changed must fail it. The resolver's
+	// own tests go through the constants and are blind to the value.
 	want := []string{
 		"dynamic_group|Unavailable|key_missing",
 		"dynamic_group|Unavailable|read_failed",
