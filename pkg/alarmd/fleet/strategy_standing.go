@@ -107,8 +107,9 @@ const (
 	// StandingRetainedLastGood: the new configuration was withheld and the
 	// Plans are the last good ones, still detecting on the old.
 	StandingRetainedLastGood StrategyStandingKind = "RETAINED_LAST_GOOD"
-	// StandingNotListed: the source never listed the strategy in the
-	// publication answered from.
+	// StandingNotListed: the source does not list the strategy in the
+	// publication answered from -- never did, or took it out and the Plan
+	// has been withdrawn (a REMOVED disposition, which is not a refusal).
 	StandingNotListed StrategyStandingKind = "NOT_LISTED"
 )
 
@@ -192,13 +193,21 @@ func strategyStandingKindOf(standing StrategyStanding) StrategyStandingKind {
 	if !standing.Found {
 		return StandingNotListed
 	}
-	withheld := 0
+	withheld, removed := 0, 0
 	for _, disposition := range standing.Dispositions {
 		if disposition.Disposition != dispositionAccepted {
 			withheld++
 		}
+		if disposition.Disposition == dispositionRemoved {
+			removed++
+		}
 	}
 	switch {
+	case len(standing.Plans) == 0 && removed > 0 && removed == len(standing.Dispositions):
+		// The source took it out and the Plan is gone: not listed, and
+		// not a refusal -- a reader sent to "why was it withheld" would
+		// look for a reason that is not there.
+		return StandingNotListed
 	case standing.Retained:
 		return StandingRetainedLastGood
 	case len(standing.Plans) == 0:
@@ -208,6 +217,21 @@ func strategyStandingKindOf(standing StrategyStanding) StrategyStandingKind {
 	default:
 		return StandingDetecting
 	}
+}
+
+// removedFromSource reports whether the dispositions say the source took
+// the strategy out: REMOVED (the Plan is withdrawn) or PENDING_REMOVAL (one
+// more round on the last good Plan).
+func removedFromSource(standing StrategyStanding) (removed, pending bool) {
+	for _, disposition := range standing.Dispositions {
+		switch disposition.Disposition {
+		case dispositionRemoved:
+			removed = true
+		case dispositionPendingRemoval:
+			pending = true
+		}
+	}
+	return removed, pending
 }
 
 // strategyStandingLine is the sentence: the standing, the objects and who
@@ -248,8 +272,12 @@ func strategyStandingLine(standing StrategyStanding) string {
 		}
 		objects = append(objects, object)
 	}
+	removed, pending := removedFromSource(standing)
 	switch standing.Standing {
 	case StandingNotListed:
+		if removed {
+			return "策略 " + standing.StrategyID + "：策略源已把它移出活动集，上一轮已撤下——不是被扣，是源里没有了"
+		}
 		return "策略 " + standing.StrategyID + "：这一轮的策略源没有列出它——不是被扣，是源里没有"
 	case StandingWithheld:
 		return fmt.Sprintf("策略 %s：未生效，%d 项全部被扣住：%s", standing.StrategyID, len(withheld), strings.Join(withheld, "；"))
@@ -257,6 +285,13 @@ func strategyStandingLine(standing StrategyStanding) string {
 		return fmt.Sprintf("策略 %s：部分生效——%d 个对象在检测：%s；%d 项被扣住：%s",
 			standing.StrategyID, len(objects), strings.Join(objects, "、"), len(withheld), strings.Join(withheld, "；"))
 	case StandingRetainedLastGood:
+		if pending {
+			// Retained for a different reason: nothing was refused, the
+			// source took the strategy out, and the last good Plan runs
+			// one more round before it is withdrawn.
+			return fmt.Sprintf("策略 %s：策略源已把它移出活动集，上一次生效的配置再检测一轮后撤下——%d 个对象：%s",
+				standing.StrategyID, len(objects), strings.Join(objects, "、"))
+		}
 		return fmt.Sprintf("策略 %s：新配置被扣住，仍按上一次生效的配置检测——%d 个对象：%s；扣住的原因：%s",
 			standing.StrategyID, len(objects), strings.Join(objects, "、"), strings.Join(withheld, "；"))
 	default:
