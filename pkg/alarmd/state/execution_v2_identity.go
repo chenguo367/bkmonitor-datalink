@@ -195,3 +195,31 @@ func executionKey(prefix, kind string, plan execution.PlanIdentity, generation e
 	}
 	return strings.Join(parts, ":")
 }
+
+// RuntimeStateKeyV3 names the same series' state in the framed representation.
+//
+// A second key name rather than a second value format under one name. An old
+// binary reads the value at the name it knows and hands it to a JSON decoder;
+// handed a framed record it would report STATE_CORRUPT for every series it
+// owns, every round, for as long as the rolling window lasted - a deterministic
+// failure rather than a recoverable one, and the binary that does it is already
+// deployed and cannot be taught otherwise. Under a second name it finds nothing
+// instead, which is StateMissingWarming: defined, self-healing, and the same
+// state a genuinely new series is in.
+//
+// The abandoned name needs no cleanup pass. Runtime keys carry a TTL derived
+// from the Plan's retention, so a key nothing writes any more expires on its
+// own.
+func RuntimeStateKeyV3(prefix string, identity execution.StateKeyIdentity) (string, error) {
+	if err := validatePlanIdentity(prefix, identity.Plan, identity.StateGeneration); err != nil {
+		return "", err
+	}
+	if identity.SeriesIdentityDigest == "" {
+		return "", identityError("series identity digest is required")
+	}
+	series, err := contract.DeriveCanonicalDigestV2("alarmd-runtime-series-v2", identity.SeriesIdentityDigest)
+	if err != nil {
+		return "", fmt.Errorf("state: derive series digest: %w", err)
+	}
+	return executionKey(prefix, "runtime3", identity.Plan, identity.StateGeneration, series), nil
+}
