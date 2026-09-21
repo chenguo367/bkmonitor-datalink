@@ -27,12 +27,15 @@ func deferredSlot(stage Stage, queryGroup string) Observation {
 	}
 }
 
-// A Query Group deferred every round writes one line an hour, on either of
-// the two stages that say QUERY_NOT_READY, and that line carries how many
-// lines of both stages were merged into it since the previous one. The
-// policy's own window (a minute, one line) does not apply to the pacing word:
-// under it the same Query Group would have written sixty lines an hour.
-func TestARoutinePacingReasonKeepsOneLineAnHourPerQueryGroupAcrossItsStages(t *testing.T) {
+// A Query Group deferred every round writes one line an hour per stage that
+// says QUERY_NOT_READY, and each line carries how many lines of its own stage
+// were merged into it since the previous one. Per stage, because the sample
+// is the positive control for a reader who greps one stage: one bucket for
+// both would hand that reader zero lines in the hours the other stage's line
+// came first, which is what a dead emitter also gives. The policy's own
+// window (a minute, one line) does not apply to the pacing word: under it the
+// same Query Group would have written sixty lines an hour per stage.
+func TestARoutinePacingReasonKeepsOneLineAnHourPerQueryGroupAndStage(t *testing.T) {
 	t.Parallel()
 
 	now := time.Unix(1_000, 0)
@@ -44,6 +47,10 @@ func TestARoutinePacingReasonKeepsOneLineAnHourPerQueryGroupAcrossItsStages(t *t
 	if !first.Allowed || !first.Sampled || first.Suppressed != 0 {
 		t.Fatalf("first deferral of the hour=%+v, want admitted as the sample with nothing merged", first)
 	}
+	// The other stage of the same round has its own hour, and its own sample.
+	if got := limiter.Admit(deferredSlot(StageSlotCompleted, "qg-a")); !got.Allowed || !got.Sampled || got.Suppressed != 0 {
+		t.Fatalf("first completion deferral of the hour=%+v, want its own sample", got)
+	}
 	// Fifty-nine more rounds inside the hour, two stages each: none admitted.
 	for round := 1; round < 60; round++ {
 		now = now.Add(time.Minute)
@@ -53,15 +60,18 @@ func TestARoutinePacingReasonKeepsOneLineAnHourPerQueryGroupAcrossItsStages(t *t
 			}
 		}
 	}
-	// The hour turns on the sixtieth round; its first line is the sample and
-	// carries the 59 rounds x 2 stages merged since the previous one.
+	// The hour turns on the sixtieth round; each stage's first line is its
+	// sample and carries the 59 rounds of its own stage merged since.
 	now = now.Add(time.Minute)
 	second := limiter.Admit(deferredSlot(StageSlotCompleted, "qg-a"))
-	if !second.Allowed || !second.Sampled || second.Suppressed != 118 {
-		t.Fatalf("sample after an hour=%+v, want admitted with 118 merged (59 rounds x 2 stages)", second)
+	if !second.Allowed || !second.Sampled || second.Suppressed != 59 {
+		t.Fatalf("completion sample after an hour=%+v, want admitted with the 59 completion lines merged", second)
+	}
+	if got := limiter.Admit(deferredSlot(StageQueryCompleted, "qg-a")); !got.Allowed || !got.Sampled || got.Suppressed != 59 {
+		t.Fatalf("query sample after an hour=%+v, want admitted with the 59 query lines merged, not the completion's", got)
 	}
 	if got := limiter.Admit(deferredSlot(StageQueryCompleted, "qg-a")); got.Allowed {
-		t.Fatalf("second line of the new hour admitted: %+v", got)
+		t.Fatalf("second query line of the new hour admitted: %+v", got)
 	}
 	// Another Query Group has its own hour, and another reason on the same
 	// Query Group keeps the policy's window: a minute later it is admitted

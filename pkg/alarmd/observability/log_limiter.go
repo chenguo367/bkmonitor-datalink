@@ -45,8 +45,8 @@ type LogAdmission struct {
 // a retrying result is an exceptional line to the policy: every Slot of every
 // Query Group wrote two of them per round, about two thirds of the log, all
 // saying the same thing the stage counter already counts. They do not go to
-// the log any more -- except one per Query Group per hour, carrying how many
-// were merged into it since the previous one. That one line is the positive
+// the log any more -- except one per Query Group per stage per hour, carrying
+// how many were merged into it since the previous one. That one line is the positive
 // control: a negative reading over a window ("no deferrals for this Query
 // Group") has to be able to show the emitter was alive, and a count of zero
 // lines cannot, silence being what a dead emitter also produces. The bound
@@ -263,7 +263,15 @@ func (l *ScopedLogLimiter) Admit(observation Observation) LogAdmission {
 	if sampled {
 		window, maxEvents = sample.Window, sample.MaxEvents
 	}
-	bucket := l.bucketFor(reasonKey, observation.Trace.QueryGroupKey)
+	// A sampled bucket is per stage as well: the sample is the positive
+	// control for a reader who greps one stage, and two stages sharing one
+	// hourly line would hand that reader zero lines in the hours the other
+	// stage's line came first -- the same reading a dead emitter gives.
+	scope := observation.Trace.QueryGroupKey
+	if sampled && scope != "" {
+		scope += "\x00" + string(observation.Stage)
+	}
+	bucket := l.bucketFor(reasonKey, scope)
 	if bucket.windowStart.IsZero() || now.Before(bucket.windowStart) || now.Sub(bucket.windowStart) >= window {
 		bucket.windowStart = now
 		bucket.used = 0
