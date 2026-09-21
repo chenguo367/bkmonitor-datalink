@@ -388,7 +388,7 @@ func TestBuildCatalogRejectsMultipleItemsWithoutSilentlySelectingFirst(t *testin
 	}
 }
 
-func TestBuildCatalogAbsentSourceGetsOneGraceCycleBeforeRemoval(t *testing.T) {
+func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.T) {
 	payload, err := os.ReadFile("testdata/two_threshold_strategies.json")
 	if err != nil {
 		t.Fatal(err)
@@ -413,48 +413,80 @@ func TestBuildCatalogAbsentSourceGetsOneGraceCycleBeforeRemoval(t *testing.T) {
 		Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1},
 		QueryGroups: previous.QueryGroups,
 	}
-	pendingRemoval := controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
+	// The grace is a period, not a round: the active set is a list another
+	// program writes, and it has been seen to lose entries for minutes with
+	// the strategies unchanged. A strategy absent from it keeps executing
+	// under PENDING_REMOVAL, stamped with when it was first found absent,
+	// until it has been absent for the whole period; only then is it REMOVED.
+	t0 := time.Unix(1_700_000_000, 0)
+	within := t0.Add(controlplane.AbsenceGracePeriod - time.Minute)
+	expired := t0.Add(controlplane.AbsenceGracePeriod)
+	pendingAt := func(since time.Time) controlplane.ObjectDisposition {
+		return controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
+			Disposition: controlplane.DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET", AbsentSince: since.Unix()}
+	}
+	removedAt := func(since time.Time) controlplane.ObjectDisposition {
+		return controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
+			Disposition: controlplane.DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET", AbsentSince: since.Unix()}
+	}
+	// A PENDING_REMOVAL written by a build before the grace was a period
+	// carries no moment.
+	pendingUnstamped := controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
 		Disposition: controlplane.DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET"}
-	removed := controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
-		Disposition: controlplane.DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET"}
 	sourceIncomplete := controlplane.ObjectDisposition{SourceID: "1002", Scope: "STRATEGY",
 		Disposition: controlplane.DispositionSourceIncomplete, Reason: "SOURCE_READ_INCOMPLETE"}
+	withPrevious := func(extra ...controlplane.ObjectDisposition) []controlplane.ObjectDisposition {
+		return append(append([]controlplane.ObjectDisposition(nil), previous.Dispositions...), extra...)
+	}
 	for _, test := range []struct {
 		name         string
 		strategies   []controlplane.SourceStrategy
 		previous     []controlplane.ObjectDisposition
+		pending      map[string]int64
+		now          time.Time
 		wantPlans    []string
 		wantStrategy *controlplane.ObjectDisposition
 	}{
 		{
-			name: "absent once is retained with PENDING_REMOVAL", strategies: onlyFirst,
-			previous: previous.Dispositions, wantPlans: []string{"1001", "1002"}, wantStrategy: &pendingRemoval,
+			name: "first found absent is retained with PENDING_REMOVAL stamped now", strategies: onlyFirst,
+			previous: previous.Dispositions, now: t0, wantPlans: []string{"1001", "1002"}, wantStrategy: ptr(pendingAt(t0)),
 		},
 		{
-			name: "absent without any audit history is retained with PENDING_REMOVAL", strategies: onlyFirst,
-			previous: nil, wantPlans: []string{"1001", "1002"}, wantStrategy: &pendingRemoval,
+			name: "absent without any audit history is retained with PENDING_REMOVAL stamped now", strategies: onlyFirst,
+			previous: nil, now: t0, wantPlans: []string{"1001", "1002"}, wantStrategy: ptr(pendingAt(t0)),
 		},
 		{
-			name: "absent twice leaves the Catalog with REMOVED", strategies: onlyFirst,
-			previous:  append(append([]controlplane.ObjectDisposition(nil), previous.Dispositions...), pendingRemoval),
-			wantPlans: []string{"1001"}, wantStrategy: &removed,
+			name: "still absent inside the grace keeps executing under the same stamp", strategies: onlyFirst,
+			previous: withPrevious(pendingAt(t0)), now: within, wantPlans: []string{"1001", "1002"}, wantStrategy: ptr(pendingAt(t0)),
 		},
 		{
-			name: "present again after PENDING_REMOVAL is accepted without a removal fact", strategies: both,
-			previous:  append(append([]controlplane.ObjectDisposition(nil), previous.Dispositions...), pendingRemoval),
-			wantPlans: []string{"1001", "1002"},
+			name: "absent for the whole grace leaves the Catalog with REMOVED", strategies: onlyFirst,
+			previous: withPrevious(pendingAt(t0)), now: expired, wantPlans: []string{"1001"}, wantStrategy: ptr(removedAt(t0)),
+		},
+		{
+			name: "the unconfirmed candidate's stamp counts where the audit has none", strategies: onlyFirst,
+			previous: previous.Dispositions, pending: map[string]int64{"1002": t0.Unix()}, now: expired,
+			wantPlans: []string{"1001"}, wantStrategy: ptr(removedAt(t0)),
+		},
+		{
+			name: "a grace stamped by an older build restarts from now rather than expiring", strategies: onlyFirst,
+			previous: withPrevious(pendingUnstamped), now: expired, wantPlans: []string{"1001", "1002"}, wantStrategy: ptr(pendingAt(expired)),
+		},
+		{
+			name: "present again inside the grace is accepted without a removal fact", strategies: both,
+			previous: withPrevious(pendingAt(t0)), now: within, wantPlans: []string{"1001", "1002"},
 		},
 		{
 			name:       "SOURCE_INCOMPLETE still retains even after PENDING_REMOVAL",
 			strategies: []controlplane.SourceStrategy{both[0], {SourceID: "1002", Identity: identity, SourceDisposition: &sourceIncomplete}},
-			previous:   append(append([]controlplane.ObjectDisposition(nil), previous.Dispositions...), pendingRemoval),
+			previous:   withPrevious(pendingAt(t0)), now: expired,
 			wantPlans:  []string{"1001", "1002"}, wantStrategy: &sourceIncomplete,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
 				Strategies: test.strategies, Planner: &recordingPlanner{facts: queryFacts(t)},
-				LastGood: lastGood, PreviousDispositions: test.previous,
+				LastGood: lastGood, PreviousDispositions: test.previous, PendingAbsences: test.pending, Now: test.now,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -479,7 +511,15 @@ func TestBuildCatalogAbsentSourceGetsOneGraceCycleBeforeRemoval(t *testing.T) {
 			}
 		})
 	}
+	// The two answers the grace separates: with the period gone the strategy
+	// absent for nine minutes would already have left. Pinned here so the
+	// constant cannot be shortened to a round without this case saying so.
+	if controlplane.AbsenceGracePeriod < 2*time.Minute {
+		t.Fatalf("AbsenceGracePeriod = %s: a grace shorter than the observed flutter is the one-round grace back", controlplane.AbsenceGracePeriod)
+	}
 }
+
+func ptr[T any](value T) *T { return &value }
 
 func catalogStrategyIDs(catalog controlplane.Catalog) []string {
 	ids := make([]string, 0)

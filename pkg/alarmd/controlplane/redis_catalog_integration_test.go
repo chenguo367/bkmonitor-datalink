@@ -3065,20 +3065,25 @@ func TestScheduleActivationReconcilerProjectsQueryIdentityChangeAsIndependentNew
 	}
 }
 
-// TestSourceReconcilerRemovesAbsentStrategyAfterOnePublishedGraceCycle drives
-// the real source reconciler against the legacy Redis strategy source. It
-// proves that the removal grace memory survives the UNCHANGED refresh path:
-// the audit published there carries PENDING_REMOVAL while the snapshot still
-// holds the Plan, and the next refresh drops the Plan with REMOVED.
-func TestSourceReconcilerRemovesAbsentStrategyAfterOnePublishedGraceCycle(t *testing.T) {
+// TestSourceReconcilerRemovesAbsentStrategyAfterTheGracePeriod drives the
+// real source reconciler against the legacy Redis strategy source. It proves
+// that the removal grace memory survives the candidate confirmation and the
+// UNCHANGED refresh path: the audit published there carries PENDING_REMOVAL
+// stamped with when the strategy was first found absent while the snapshot
+// still holds the Plan, every refresh inside the grace period keeps both,
+// and the first refresh past the period drops the Plan with REMOVED. A
+// strategy back inside the period - the shape of an upstream list that
+// loses entries for minutes at a time - is accepted with no removal fact
+// and its Plan never left.
+func TestSourceReconcilerRemovesAbsentStrategyAfterTheGracePeriod(t *testing.T) {
 	for _, test := range []struct {
-		name            string
-		separateGroup   bool
-		returnsInCycle3 bool
+		name          string
+		separateGroup bool
+		returns       bool
 	}{
 		{name: "removed Plan leaves its shared Query Group without draining"},
 		{name: "removed Plan retires its own Query Group into draining", separateGroup: true},
-		{name: "strategy returning after PENDING_REMOVAL is accepted without a removal fact", returnsInCycle3: true},
+		{name: "strategy returning inside the grace is accepted without a removal fact", returns: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -3111,6 +3116,12 @@ func TestSourceReconcilerRemovesAbsentStrategyAfterOnePublishedGraceCycle(t *tes
 			compiler, semantics := runtimePlanCompiler(t)
 			reconciler, err := controlplane.NewSourceReconciler(repository, compiler, semantics)
 			if err != nil {
+				t.Fatal(err)
+			}
+			// The source reconciler's clock, which the removal grace is
+			// measured on; the activator's own clock is separate below.
+			sourceNow := time.Unix(1_700_000_000, 0)
+			if err := reconciler.ConfigureClock(func() time.Time { return sourceNow }); err != nil {
 				t.Fatal(err)
 			}
 			at := time.Unix(60, 0)
@@ -3168,10 +3179,11 @@ func TestSourceReconcilerRemovesAbsentStrategyAfterOnePublishedGraceCycle(t *tes
 				sort.Strings(ids)
 				return ids
 			}
+			absentSince := sourceNow.Unix()
 			pendingRemoval := []controlplane.ObjectDisposition{{SourceID: "1002", Scope: "STRATEGY",
-				Disposition: controlplane.DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET"}}
+				Disposition: controlplane.DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET", AbsentSince: absentSince}}
 			removed := []controlplane.ObjectDisposition{{SourceID: "1002", Scope: "STRATEGY",
-				Disposition: controlplane.DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET"}}
+				Disposition: controlplane.DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET", AbsentSince: absentSince}}
 
 			// Cycle 1: both strategies are observed, published and activated.
 			first := settle()
@@ -3202,7 +3214,8 @@ func TestSourceReconcilerRemovesAbsentStrategyAfterOnePublishedGraceCycle(t *tes
 			}
 
 			// Cycle 2: strategy 1002 disappears upstream. The snapshot is unchanged
-			// because the Plan is retained, but the audit records the grace fact.
+			// because the Plan is retained, but the audit records the grace fact
+			// stamped with this moment.
 			setStrategyIDs(`[1001]`)
 			second := settle()
 			if second.Status != controlplane.SourceRefreshUnchanged || second.Publication != first.Publication {
@@ -3219,9 +3232,24 @@ func TestSourceReconcilerRemovesAbsentStrategyAfterOnePublishedGraceCycle(t *tes
 				t.Fatalf("cycle 2 activation=(%+v,%v), want unchanged", state, err)
 			}
 
-			if test.returnsInCycle3 {
-				// Cycle 3: the strategy is observed again before its grace cycle
-				// expired. It is accepted normally and the grace fact disappears.
+			// Every refresh inside the grace keeps the Plan and the same stamp:
+			// the audit does not move, so the refresh is UNCHANGED.
+			sourceNow = sourceNow.Add(controlplane.AbsenceGracePeriod - 2*time.Minute)
+			inside := settle()
+			if inside.Status != controlplane.SourceRefreshUnchanged || inside.Publication != first.Publication {
+				t.Fatalf("refresh inside the grace = %+v, want UNCHANGED at %+v", inside, first.Publication)
+			}
+			if plans, _ := publishedPlans(inside.Publication); !reflect.DeepEqual(plans, []string{"1001", "1002"}) {
+				t.Fatalf("snapshot plans inside the grace=%v, want the retained Plan", plans)
+			}
+			if dispositions := strategyDispositions("1002"); !reflect.DeepEqual(dispositions, pendingRemoval) {
+				t.Fatalf("strategy dispositions inside the grace=%+v, want the same %+v", dispositions, pendingRemoval)
+			}
+
+			if test.returns {
+				// Cycle 3: the strategy is observed again before the grace
+				// expired. It is accepted normally and the grace fact disappears;
+				// its Plan never left, so nothing is re-acquired.
 				setStrategyIDs(`[1001,1002]`)
 				third := settle()
 				if third.Status != controlplane.SourceRefreshUnchanged || third.Publication != first.Publication {
@@ -3236,8 +3264,10 @@ func TestSourceReconcilerRemovesAbsentStrategyAfterOnePublishedGraceCycle(t *tes
 				return
 			}
 
-			// Cycle 3: still absent, the grace cycle is spent. The Plan leaves the
-			// snapshot, the audit records REMOVED and activation follows.
+			// Cycle 3: still absent past the grace period. The Plan leaves the
+			// snapshot, the audit records REMOVED with the moment the absence
+			// began, and activation follows.
+			sourceNow = sourceNow.Add(2 * time.Minute)
 			third := settle()
 			if third.Status != controlplane.SourceRefreshPublished || third.Publication == first.Publication {
 				t.Fatalf("cycle 3 = %+v, want a new PUBLISHED snapshot", third)
@@ -3275,6 +3305,111 @@ func TestSourceReconcilerRemovesAbsentStrategyAfterOnePublishedGraceCycle(t *tes
 				t.Fatalf("cycle 4 strategy dispositions=%+v, want none", dispositions)
 			}
 		})
+	}
+}
+
+// An absence that arrives in the same round as a change to the snapshot goes
+// through the two-round candidate confirmation, and the confirming round has
+// to stamp the absence with the same moment the candidate did: the
+// confirmation key covers the dispositions, so a candidate whose grace stamp
+// moved by one refresh interval never confirms, and the changed strategy
+// never publishes for as long as the other stays absent. The candidate
+// carries its stamps so the next round can repeat them.
+func TestSourceReconcilerConfirmsACandidateThatCarriesAGraceStamp(t *testing.T) {
+	ctx := context.Background()
+	client := newControlplaneRedis(t)
+	documents := realThresholdDocuments(t)
+	setStrategyIDs := func(ids string) {
+		t.Helper()
+		if err := client.Set(ctx, "bkmonitor.cache.strategy_ids", ids, 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setDocument := func(id string, document json.RawMessage) {
+		t.Helper()
+		if err := client.Set(ctx, "bkmonitor.cache.strategy_"+id, string(document), 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setStrategyIDs(`[1001,1002]`)
+	setDocument("1001", documents[0])
+	setDocument("1002", documents[1])
+	source := newRedisStrategySource(t, client)
+	planner, err := controlplane.NewLegacyPrimaryQueryCompiler("uq-primary-v1", "UTC", testLegacyQueryRuntimeFacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:grace-candidate", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, semantics := runtimePlanCompiler(t)
+	reconciler, err := controlplane.NewSourceReconciler(repository, compiler, semantics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sourceNow := time.Unix(1_700_000_000, 0)
+	if err := reconciler.ConfigureClock(func() time.Time { return sourceNow }); err != nil {
+		t.Fatal(err)
+	}
+	refresh := func() controlplane.SourceRefreshResult {
+		t.Helper()
+		result, err := reconciler.Refresh(ctx, source, planner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	// Cycle 1: both published (candidate, then confirmation).
+	if first := refresh(); first.Status != controlplane.SourceRefreshPendingConfirmation {
+		t.Fatalf("cycle 1 first refresh = %+v, want a pending candidate", first)
+	}
+	first := refresh()
+	if first.Status != controlplane.SourceRefreshPublished {
+		t.Fatalf("cycle 1 = %+v, want PUBLISHED", first)
+	}
+	// Cycle 2: 1001 changes and 1002 disappears in the same round, so the
+	// snapshot moves and the round is a candidate.
+	setDocument("1001", withResultTable(t, documents[0], "system.mem"))
+	setStrategyIDs(`[1001]`)
+	absentAt := sourceNow
+	if candidate := refresh(); candidate.Status != controlplane.SourceRefreshPendingConfirmation {
+		t.Fatalf("cycle 2 first refresh = %+v, want a pending candidate", candidate)
+	}
+	// One refresh interval later the confirming round stamps the same moment.
+	sourceNow = sourceNow.Add(time.Minute)
+	confirmed := refresh()
+	if confirmed.Status != controlplane.SourceRefreshPublished || confirmed.Publication == first.Publication {
+		t.Fatalf("cycle 2 confirming refresh = %+v, want a new PUBLISHED snapshot; a candidate whose grace stamp moved never confirms", confirmed)
+	}
+	audit, err := repository.LoadLatestAudit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var graced []controlplane.ObjectDisposition
+	for _, disposition := range audit.Dispositions {
+		if disposition.Scope == "STRATEGY" && disposition.SourceID == "1002" {
+			graced = append(graced, disposition)
+		}
+	}
+	want := []controlplane.ObjectDisposition{{SourceID: "1002", Scope: "STRATEGY",
+		Disposition: controlplane.DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET", AbsentSince: absentAt.Unix()}}
+	if !reflect.DeepEqual(graced, want) {
+		t.Fatalf("published grace fact = %+v, want %+v stamped when the absence was first seen", graced, want)
+	}
+	snapshot, err := loadPublishedSnapshot(ctx, repository, confirmed.Publication)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 0)
+	for _, group := range snapshot.QueryGroups {
+		for _, plan := range group.Plans {
+			ids = append(ids, plan.Identity.StrategyID)
+		}
+	}
+	sort.Strings(ids)
+	if !reflect.DeepEqual(ids, []string{"1001", "1002"}) {
+		t.Fatalf("published plans = %v, want the changed 1001 and the retained 1002", ids)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -93,12 +94,40 @@ type BuildRequest struct {
 	// before the settings existed.
 	NoDataPolicy NoDataPolicy
 	LastGood     *PublishedSnapshot
-	// PreviousDispositions is the published source audit of LastGood. It is the
-	// only memory of the removal grace cycle: a strategy absent from the
-	// observed set is retained once with PENDING_REMOVAL and dropped when the
-	// previous audit already carries that fact. Nil means no grace history.
+	// PreviousDispositions is the published source audit of LastGood: the
+	// memory of the removal grace, which is where a strategy absent from the
+	// observed set was first found absent (PENDING_REMOVAL.AbsentSince). Nil
+	// means no grace history.
 	PreviousDispositions []ObjectDisposition
+	// PendingAbsences is the same memory from the candidate the previous
+	// round left unconfirmed, by source id: the first round of an absence
+	// publishes a candidate, and the round that confirms it has to stamp the
+	// same moment or the candidate never confirms. Nil means none pending.
+	PendingAbsences map[string]int64
+	// Now is the round's clock, what an absence is measured against. Zero
+	// means the wall clock.
+	Now time.Time
 }
+
+// AbsenceGracePeriod is how long a LastGood strategy absent from the
+// observed active set keeps executing before its Plan leaves the Catalog.
+//
+// A period rather than one round because the active set is read from a
+// list another program writes, and that list has been seen to lose entries
+// for minutes at a time with the strategies unchanged: one deployment's
+// hourly full refresh dropped 99 ids for about six and a half minutes every
+// hour, and a one-round grace removed 22 Plans, swept their assignments and
+// re-acquired them five minutes later, with every Slot in between missing
+// and written off as CONFIG_DRIFT - eight percent of the hour blind, for a
+// configuration that never changed. The writer's flutter is the writer's to
+// fix; the reader still must not turn it into a detection gap, because the
+// next writer will flutter too.
+//
+// Ten minutes is the observed flutter with room to spare, and a program
+// constant rather than a setting: an operator does not know this number
+// better than the program. What it costs is that a strategy really removed
+// runs for up to ten minutes longer.
+const AbsenceGracePeriod = 10 * time.Minute
 
 type FrozenPlan struct {
 	Identity        execution.PlanIdentity
@@ -217,6 +246,13 @@ type ObjectDisposition struct {
 	// came from the same field, and finding out which took compiling the
 	// documents again offline. Empty when the refusal is not about a field.
 	FieldPath string
+	// AbsentSince is when a strategy under PENDING_REMOVAL was first found
+	// absent from the observed active set, in Unix seconds; the removal
+	// grace is measured from it. Zero on every other disposition, and on a
+	// PENDING_REMOVAL written by a build before the grace was a period -
+	// which the next build reads as absent since now, so a rollout can only
+	// lengthen a grace, never cut one short.
+	AbsentSince int64 `json:",omitempty"`
 }
 
 type Catalog struct {
@@ -368,16 +404,27 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	}
 	// Reaching this point means the upstream strategy id list was read
 	// completely; per-source incompleteness is already expressed above through
-	// SourceDisposition. A LastGood strategy absent from the observed set gets
-	// exactly one published grace cycle before its Plan leaves the Catalog.
-	pendingRemoval := indexPendingRemoval(request.PreviousDispositions)
+	// SourceDisposition. A LastGood strategy absent from the observed set
+	// keeps executing under PENDING_REMOVAL until it has been absent for the
+	// whole grace period, and only then leaves the Catalog with REMOVED. The
+	// moment it was first found absent travels on the disposition, so every
+	// round of the grace publishes the same audit and the candidate confirms.
+	now := request.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+	absentSince := indexAbsentSince(request.PreviousDispositions, request.PendingAbsences)
 	for sourceID := range lastGood {
 		if _, found := observed[sourceID]; found {
 			continue
 		}
-		if _, graced := pendingRemoval[sourceID]; graced {
+		since, graced := absentSince[sourceID]
+		if !graced {
+			since = now.Unix()
+		}
+		if now.Unix()-since >= int64(AbsenceGracePeriod/time.Second) {
 			catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
-				Disposition: DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET"})
+				Disposition: DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET", AbsentSince: since})
 			continue
 		}
 		retained, err := retainLastGood(sourceID)
@@ -386,7 +433,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 		}
 		if retained {
 			catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
-				Disposition: DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET"})
+				Disposition: DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET", AbsentSince: since})
 		}
 	}
 
@@ -622,14 +669,35 @@ func lastGoodRefusal(facts execution.QueryPlanFacts) string {
 	}
 }
 
-func indexPendingRemoval(dispositions []ObjectDisposition) map[string]struct{} {
-	result := make(map[string]struct{})
+// indexAbsentSince is when each strategy under grace was first found
+// absent: from the published audit's PENDING_REMOVAL dispositions, and from
+// the unconfirmed candidate where the audit does not say. A PENDING_REMOVAL
+// without a moment - written by a build before the grace was a period - is
+// left out, and the caller stamps it absent since now.
+func indexAbsentSince(dispositions []ObjectDisposition, pending map[string]int64) map[string]int64 {
+	result := make(map[string]int64, len(dispositions)+len(pending))
+	for sourceID, since := range pending {
+		if sourceID != "" && since > 0 {
+			result[sourceID] = since
+		}
+	}
 	for _, disposition := range dispositions {
-		if disposition.Scope == "STRATEGY" && disposition.Disposition == DispositionPendingRemoval && disposition.SourceID != "" {
-			result[disposition.SourceID] = struct{}{}
+		if disposition.Scope == "STRATEGY" && disposition.Disposition == DispositionPendingRemoval &&
+			disposition.SourceID != "" && disposition.AbsentSince > 0 {
+			result[disposition.SourceID] = disposition.AbsentSince
 		}
 	}
 	return result
+}
+
+// AbsencesOf is the removal-grace memory of an audit, by source id: what a
+// candidate built from it carries into the next round.
+func AbsencesOf(dispositions []ObjectDisposition) map[string]int64 {
+	absences := indexAbsentSince(dispositions, nil)
+	if len(absences) == 0 {
+		return nil
+	}
+	return absences
 }
 
 func shouldRetainLastGood(dispositions []ObjectDisposition) bool {
