@@ -91,3 +91,41 @@ func TestAnOrdinaryCompletionDoesNotCarryTheCause(t *testing.T) {
 			observations[1].HeldBy)
 	}
 }
+
+// The completion line says which completion the Slot reached, not only the
+// reason it reports.
+//
+// The two disagree in the case that is hardest to read: a Slot whose Level
+// outcomes are all UNKNOWN completes COMPLETED_WITH_UNAVAILABLE and copies
+// GAP_SKIPPED up from the Level. On the reason alone that is the same line as
+// a Slot given up on before it ran, and the two want opposite investigations -
+// one is the Levels not reaching a verdict, the other the scheduler shedding
+// work.
+func TestACompletionLineSaysWhichCompletionItReached(t *testing.T) {
+	var observations []observability.Observation
+	executor := observedProductionSlotExecutor{
+		next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+			return execution.SlotExecutionResult{
+				Completed: true, CompletionKind: execution.CompletionUnavailable,
+				Result:     observability.ResultDegraded,
+				ReasonCode: execution.ReasonCode(contract.ReasonGapSkipped),
+			}, nil
+		}),
+		observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+			observations = append(observations, observation)
+		}),
+	}
+	if _, err := executor.Execute(context.Background(), execution.SlotExecutionRequest{}); err != nil {
+		t.Fatalf("Execute() error=%v", err)
+	}
+	completion := observations[1]
+	if completion.SlotCompletionKind != string(execution.CompletionUnavailable) {
+		t.Fatalf("the line carries completion_kind=%q, want %q; with only the reason on it, a Slot whose "+
+			"Levels reached no verdict cannot be told from one the scheduler gave up on",
+			completion.SlotCompletionKind, execution.CompletionUnavailable)
+	}
+	if completion.ReasonCode == observability.ReasonCode(completion.SlotCompletionKind) {
+		t.Fatal("the fixture has the reason and the kind saying the same thing, so this case cannot " +
+			"show that they are separate fields")
+	}
+}

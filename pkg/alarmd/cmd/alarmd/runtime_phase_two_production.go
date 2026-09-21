@@ -2477,9 +2477,16 @@ func (executor observedProductionSlotExecutor) Execute(
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
-		HeldBy:         heldBy,
-		ExecuteOutcome: executeReturnOutcome(result, err),
-		Result:         observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
+		HeldBy: heldBy,
+		// The completion the Slot reached, beside the reason it reports. They
+		// are separate fields and disagree in the case this line is hardest to
+		// read: a Slot whose Level outcomes are UNKNOWN completes
+		// COMPLETED_WITH_UNAVAILABLE and copies GAP_SKIPPED up from the Level,
+		// which is indistinguishable on the reason alone from a Slot that was
+		// given up on before it ran.
+		SlotCompletionKind: string(result.CompletionKind),
+		ExecuteOutcome:     executeReturnOutcome(result, err),
+		Result:             observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Duration: time.Since(started), Trace: trace, Err: observedErr,
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 	})
