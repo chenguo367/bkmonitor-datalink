@@ -120,10 +120,11 @@ type PlanNoDataMemoryUpdate struct {
 	// PresentAsOf is the round this Plan last had data in: this round's time
 	// when anything reported, and otherwise LoadedPresentAsOf carried forward.
 	PresentAsOf int64
-	// TrackingExhaustedAt and LoadedTrackingExhaustedAt are this round's value
-	// and the record's, for the same reason PresentAsOf has both: the delta has
-	// to know whether the Plan-level fact moved, and a round that only flips
-	// this fact changes nothing else in the memory.
+	// TrackingExhaustedAt is this round's Plan-level fact and
+	// LoadedTrackingExhaustedAt the one the record held. The second is not
+	// decoration: the builder refuses a round that clears the fact without data
+	// having arrived, and that question cannot be asked without knowing what
+	// was there before. See the checks in BuildPlanNoDataMutation.
 	TrackingExhaustedAt       int64
 	LoadedTrackingExhaustedAt int64
 	// Memory is the whole memory after this round, in any order.
@@ -156,6 +157,41 @@ func BuildPlanNoDataMutation(update PlanNoDataMemoryUpdate) (PlanNoDataMutation,
 	}
 	if update.PresentAsOf < 0 || update.LoadedPresentAsOf < 0 {
 		return PlanNoDataMutation{}, errors.New("alarmd execution: no-data present-as-of must not be negative")
+	}
+	if update.TrackingExhaustedAt < 0 || update.LoadedTrackingExhaustedAt < 0 {
+		return PlanNoDataMutation{}, errors.New(
+			"alarmd execution: no-data tracking-exhausted-at must not be negative")
+	}
+	if update.TrackingExhaustedAt != 0 && len(memory) != 0 {
+		// Exhausted means the roster was emptied by the horizon, and emptied is
+		// the whole of what the fact says. A history roster expires by deleting
+		// its groups, and an explicitly expected group is suppressed rather than
+		// deleted and so never exhausts anything - which leaves no round that
+		// legitimately states both.
+		//
+		// It follows that a round which finds groups must clear the fact, and
+		// not only a round that saw data: a Plan whose roster was exhausted and
+		// which then gains an explicit target has groups again while nothing has
+		// reported. Clearing it there costs nothing, because with a non-empty
+		// roster the fact has no reader - it exists to tell an emptied roster
+		// from a Plan that never had groups, and that question is only asked
+		// when the roster is empty. This refusal is what makes forgetting that
+		// loud: the Plan's every write fails by name instead of the fact
+		// quietly outliving what it described.
+		return PlanNoDataMutation{}, fmt.Errorf(
+			"alarmd execution: a Plan no-data memory exhausted at %d still holds %d groups",
+			update.TrackingExhaustedAt, len(memory))
+	}
+	if update.LoadedTrackingExhaustedAt != 0 && update.TrackingExhaustedAt == 0 &&
+		update.PresentAsOf <= update.LoadedPresentAsOf {
+		// Raising the horizon must not revive what it stopped, and the Plan-level
+		// fact is stopped the same way a group is. The one thing that clears it
+		// is data arriving, which moves the round this Plan last had data in; a
+		// round that cleared it without that is a round that recomputed the fact
+		// from a setting instead of reading what was decided.
+		return PlanNoDataMutation{}, fmt.Errorf(
+			"alarmd execution: a Plan no-data memory exhausted at %d was cleared without data arriving "+
+				"(present-as-of stayed at %d)", update.LoadedTrackingExhaustedAt, update.PresentAsOf)
 	}
 	if update.PresentAsOf < update.LoadedPresentAsOf {
 		// The Plan cannot have last had data earlier than the record already

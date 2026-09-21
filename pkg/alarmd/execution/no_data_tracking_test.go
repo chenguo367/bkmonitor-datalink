@@ -16,10 +16,12 @@ import "testing"
 // nothing else about the memory moves when it is set. A round that only
 // exhausts the roster states exactly the same groups as the round before it.
 func TestTheDigestCoversThePlanLevelTrackingFact(t *testing.T) {
-	group := NoDataGroupMemory{GroupKey: "a", LastSeen: 80, FirstAbsent: 85}
-
-	tracked := noDataUpdate(group)
-	exhausted := noDataUpdate(group)
+	// Both memories are empty, because a memory holding groups cannot state the
+	// fact at all. That is the point: with the groups equal and empty, the fact
+	// is the only thing between these two rounds, so a digest that does not
+	// cover it makes them one memory.
+	tracked := noDataUpdate()
+	exhausted := noDataUpdate()
 	exhausted.TrackingExhaustedAt = 90
 
 	first, err := BuildPlanNoDataMutation(tracked)
@@ -95,6 +97,66 @@ func TestASuppressedGroupThatDidNotChangeIsNotWrittenAgain(t *testing.T) {
 	}
 	if len(built.Set) != 0 || len(built.Del) != 0 {
 		t.Fatalf("a round that changed nothing wrote %d sets and %d deletes", len(built.Set), len(built.Del))
+	}
+}
+
+// The Plan-level fact is refused in the two shapes that would let a horizon
+// change reach back into what it already decided, and in the one shape that is
+// not a time. Each case states a round the builder must not turn into a write.
+func TestTheBuilderRefusesAnImpossibleTrackingFact(t *testing.T) {
+	group := NoDataGroupMemory{GroupKey: "a", LastSeen: 80, FirstAbsent: 85}
+
+	exhaustedWithGroups := noDataUpdate(group)
+	exhaustedWithGroups.TrackingExhaustedAt = 90
+
+	clearedWithoutData := noDataUpdate()
+	clearedWithoutData.LoadedTrackingExhaustedAt = 90
+	clearedWithoutData.LoadedPresentAsOf = 90
+	clearedWithoutData.PresentAsOf = 90
+
+	negative := noDataUpdate(group)
+	negative.TrackingExhaustedAt = -1
+
+	for name, update := range map[string]PlanNoDataMemoryUpdate{
+		"exhausted while still holding groups": exhaustedWithGroups,
+		"cleared without data arriving":        clearedWithoutData,
+		"not a time at all":                    negative,
+	} {
+		if _, err := BuildPlanNoDataMutation(update); err == nil {
+			t.Fatalf("%s: built a mutation, want a refusal", name)
+		}
+	}
+
+	// The clearing round is accepted once data has actually arrived, or the
+	// refusal above would forbid recovery rather than forbid recomputing. Two
+	// branches that answer the same way prove nothing about the rule between
+	// them, which is why this is here and not left to the refusals.
+	cleared := clearedWithoutData
+	cleared.PresentAsOf = 91
+	if _, err := BuildPlanNoDataMutation(cleared); err != nil {
+		t.Fatalf("a round where data arrived could not clear the fact: %v", err)
+	}
+}
+
+// The compressed "present" form says a group was seen in the round the header
+// names and carries nothing else, so a suppressed group must never take it.
+// Today a suppressed group always carries a first-absent too and either test
+// would keep it out; this states the rule against a group where the two
+// disagree, so the guard is what holds rather than the coincidence.
+func TestASuppressedGroupIsNeverCompressedIntoPresent(t *testing.T) {
+	contradictory := NoDataGroupMemory{GroupKey: "a", LastSeen: 90, SuppressedAt: 90}
+	value := noDataGroupValue(contradictory, 90)
+	if value.Absent == nil {
+		t.Fatal("a group carrying a suppression was written as present, which stores neither fact")
+	}
+	if value.Absent.SuppressedAt != 90 {
+		t.Fatalf("written in full but without the suppression: %+v", value.Absent)
+	}
+	// The coincidence itself, so removing the first-absent half of the guard is
+	// not silently equivalent either.
+	present := NoDataGroupMemory{GroupKey: "a", LastSeen: 90}
+	if noDataGroupValue(present, 90).Absent != nil {
+		t.Fatal("an ordinary present group stopped being compressed")
 	}
 }
 

@@ -7,6 +7,7 @@ package state
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -67,6 +68,86 @@ func TestTheStoredFormCarriesTheTrackingFactsBothWays(t *testing.T) {
 	}
 }
 
+// The two facts have to survive the path production uses, which is not the
+// path the encoder test above drives. That one calls the encode and decode
+// helpers directly, so it says the helpers agree with each other and nothing
+// about whether the store's own header write carries the Plan-level fact -
+// and the store builds its header by listing fields, like everything else on
+// this path. Deleting that one field left every package green until this
+// existed.
+func TestTheTrackingFactsSurviveTheStore(t *testing.T) {
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	store := generationStore(t, backend)
+	ctx := context.Background()
+
+	suppressed := execution.NoDataGroupMemory{GroupKey: "a", FirstAbsent: 940, SuppressedAt: 960}
+	first := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
+		DerivedFrom: execution.NoDataRepresentationNone,
+		Identity:    noDataIdentityV2(), ApplyVersion: applyVersion(),
+		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
+		PresentAsOf: noDataPresentAsOf, Memory: []execution.NoDataGroupMemory{suppressed},
+	})
+	applied, err := store.ApplyNoData(ctx, execution.NoDataApplyRequest{
+		Contract: frozenRef(), Items: []execution.PlanNoDataMutation{first},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Items[0].Status != execution.NoDataApplied {
+		t.Fatalf("apply = %+v, want it applied", applied.Items[0])
+	}
+	loaded, err := store.LoadNoData(ctx, execution.NoDataLoadRequest{
+		Contract: frozenRef(), Items: []execution.PlanNoDataLoadItem{noDataLoadItemV2()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := loaded.Items[0]
+	if len(snapshot.Groups) != 1 || snapshot.Groups[0].SuppressedAt != 960 {
+		t.Fatalf("a suppressed group came back as %+v; through the store it reads as still tracked",
+			snapshot.Groups)
+	}
+	if snapshot.TrackingExhaustedAt != 0 {
+		t.Fatalf("a Plan nobody exhausted came back exhausted at %d", snapshot.TrackingExhaustedAt)
+	}
+
+	// The last tracked group goes, and the Plan-level fact takes its place.
+	// This is the shape the horizon leaves behind, and the one the next round
+	// reads to tell an exhausted roster from a Plan that never had groups.
+	second := noDataMutationFrom(t, execution.PlanNoDataMemoryUpdate{
+		DerivedFrom: execution.NoDataRepresentationPerGroup, LoadedApplyVersion: applyVersion(),
+		ExpectedMarkerRevision: snapshot.MarkerRevision,
+		Identity:               noDataIdentityV2(), ApplyVersion: execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 120, SlotDigest: "slot"},
+		ScheduleRevision: "plan-r1", RosterVersion: "TARGET_STATIC/1",
+		PresentAsOf: noDataPresentAsOf, TrackingExhaustedAt: 970,
+		Loaded: []execution.NoDataGroupMemory{suppressed}, LoadedPresentAsOf: noDataPresentAsOf,
+	})
+	applied, err = store.ApplyNoData(ctx, execution.NoDataApplyRequest{
+		Contract: frozenRef(), Items: []execution.PlanNoDataMutation{second},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Items[0].Status != execution.NoDataApplied {
+		t.Fatalf("apply = %+v, want it applied", applied.Items[0])
+	}
+	loaded, err = store.LoadNoData(ctx, execution.NoDataLoadRequest{
+		Contract: frozenRef(), Items: []execution.PlanNoDataLoadItem{noDataLoadItemV2()},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot = loaded.Items[0]
+	if snapshot.TrackingExhaustedAt != 970 {
+		t.Fatalf("the exhausted roster came back with tracking-exhausted %d, want 970; "+
+			"an empty roster that reads as never exhausted becomes a whole-item absence next round",
+			snapshot.TrackingExhaustedAt)
+	}
+	if len(snapshot.Groups) != 0 {
+		t.Fatalf("the exhausted roster still holds %+v", snapshot.Groups)
+	}
+}
+
 // A record written before these fields existed decodes with both at zero,
 // which reads as still tracking and not exhausted. Nothing migrates it; the
 // first round under this build decides, from the horizon, what it should be.
@@ -83,6 +164,11 @@ func TestARecordWrittenBeforeTheTrackingFactsDecodesAsStillTracking(t *testing.T
 	}
 	if group.SuppressedAt != 0 {
 		t.Fatalf("an old group decodes as suppressed at %d", group.SuppressedAt)
+	}
+	// A suppression that is not a time is refused with the timestamps beside
+	// it, rather than read as some round before the epoch.
+	if _, ok := decodeNoDataGroupValue("a", []byte(`{"first_absent":85,"suppressed_at":-1}`), 90); ok {
+		t.Fatal("a negative suppression decoded")
 	}
 	// Built by leaving the new fields unset rather than by hand-writing the
 	// JSON: omitempty then produces exactly the bytes a v2 build wrote, and the
