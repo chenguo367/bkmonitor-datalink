@@ -1072,6 +1072,11 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"DEPS ::", "副本 abcde 解析到的坐标（2 个副本都发布了，这里显示最新发布的这一份；各副本自己的连接记录在 /api/health 的 per_replica[].dependencies）"},
 		{"DEPS ::", "兼容输出用的服务 Redis（策略快照）redis standalone redis.example:6379 · db 8 · bk_monitorv3.ee.cache本进程还没对它发过命令"},
 		{"VAR degraded why ::", "策略缓存里有策略，但这一轮一条都没接受，且没有任何对象在检测——整个部署没有在检测任何东西；不是没负载，是全部被扣在配置获取环节（副本 abcde）"},
+		{"NOTHING-RUNNING CHECKS ::", "5 条策略这个部署跑不了（1 种原因）——本构建不支持 5 条；处理办法按原因组看"},
+		{"NOTHING-RUNNING GROUPS ::", "这是什么：策略目标按模型实例（model_inst_id）给出而不带 model_match，本构建不会把它反查成主机身份，整条策略不进检测。谁处理：本构建能力（等新构建，改参数没有用）。下一步：等带主机模型反查的构建（读方缺的一支），策略与部署参数都不用改"},
+		{"NOTHING-RUNNING TODO ::", "现在要处理 1 类（5 条策略、0 个对象）"},
+		{"NOTHING-RUNNING BRIEF ::", "执行情况：没有对象在检测（应有 0）——过去 1 小时没有轮次返回"},
+		{"NOTHING-RUNNING BLIND ::", "状态覆盖：没有对象在检测（0 个），无所谓结论"},
 	} {
 		if line := lineStarting(text, want.line); !strings.Contains(line, want.says) {
 			t.Errorf("%s does not say %q:\n%s", want.line, want.says, line)
@@ -1659,6 +1664,32 @@ console.log('BASIS CUTOVER :: ' + textOf(store['detailBasis']));
 ctx.openCheck = 'REPLICA_DEGRADED';
 ctx.renderChecks(data.checks);
 console.log('GROUPS DEGRADED :: ' + textOf(store['groups']));
+// A deployment where nothing runs: five strategies withheld for a target
+// this build cannot resolve, no objects, no rounds. The line's sentence is
+// the server's, by kind of cause; the group carries what the reason means
+// and the next step; and the three sentences that used to speak of objects
+// and pace say there are none, instead of "every object has a conclusion",
+// "keeping up" and "0 objects" of five strategies.
+ctx.openCheck = 'CAPABILITY_UNSUPPORTED';
+ctx.latestTodo = {checks: 1, objects: 0, undetermined: 0, undetermined_objects: 0, governance: 0, governance_objects: 0};
+ctx.renderChecks([{code: 'CAPABILITY_UNSUPPORTED', owner: 'ALARMD', group_by: 'reason_code', objects: 0, strategies: 5, businesses: 0, current: 0,
+  line: '5 条策略这个部署跑不了（1 种原因）——本构建不支持 5 条；处理办法按原因组看',
+  groups: [{key: 'TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED', objects: 0, strategies: 5, replicas: ['bk-monitor-alarmd-trigger-5bdb679ddf-abcde'],
+    disposition: 'UNSUPPORTED_PHASE2_CAPABILITY',
+    samples: [{strategy_id: '25', scope: 'PLAN', field_path: 'items[0].target_plan.model_match'}],
+    words: {kind: 'BUILD_CAPABILITY', what: '策略目标按模型实例（model_inst_id）给出而不带 model_match，本构建不会把它反查成主机身份，整条策略不进检测',
+            next: '等带主机模型反查的构建（读方缺的一支），策略与部署参数都不用改'}}]}]);
+console.log('NOTHING-RUNNING CHECKS :: ' + textOf(store['checkRows']));
+console.log('NOTHING-RUNNING GROUPS :: ' + textOf(store['groups']));
+console.log('NOTHING-RUNNING TODO :: ' + textOf(store['briefTodo']));
+ctx.renderDeployment(Object.assign({}, data.health, {health: 'DEGRADED', expected: 0, covered: 0, determined: 0, unknown: 0, healthy: 0,
+  anomalies_total: 0, demoted_total: 0, undecidable_total: 0, by_design_total: 0, gaps: [], unattributed: 0,
+  schedule: {waiting: 0, late: 0, overdue: 0, never: 0, completed_1h: 0, on_time_1h: 0, completed_6h: 0, on_time_6h: 0}}));
+console.log('NOTHING-RUNNING BRIEF :: ' + textOf(store['briefSchedule']));
+console.log('NOTHING-RUNNING BLIND :: ' + textOf(store['briefBlind']));
+ctx.latestTodo = data.todo;
+ctx.renderChecks(data.checks);
+ctx.renderDeployment(data.health);
 // The record line's folds name what each loss is, and the refusal line
 // carries what its demoted objects lost there.
 ctx.openCheck = 'DETECTION_ABANDONED';
