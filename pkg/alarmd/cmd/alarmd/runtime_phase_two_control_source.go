@@ -277,11 +277,19 @@ func sourceFactsOf(result phaseTwoControlRefreshResult, at time.Time) *fleet.Sou
 func sourceSetRoundOf(composition *controlplane.CatalogComposition, at time.Time) fleet.SourceSetRound {
 	round := fleet.SourceSetRound{At: at, Listed: composition.ListedStrategies}
 	for _, object := range composition.WithheldObjects {
+		absent := fleet.AbsentStrategy{StrategyID: object.SourceID}
+		if object.AbsentSince > 0 {
+			// The catalog's own word on when the strategy was first found
+			// absent: the true start, kept on the published audit across
+			// leader restarts, where this process's first sight is only a
+			// lower bound.
+			absent.AbsentSince = time.Unix(object.AbsentSince, 0).UTC()
+		}
 		switch object.Disposition {
 		case controlplane.DispositionPendingRemoval:
-			round.PendingRemoval = append(round.PendingRemoval, object.SourceID)
+			round.PendingRemoval = append(round.PendingRemoval, absent)
 		case controlplane.DispositionRemoved:
-			round.Removed = append(round.Removed, object.SourceID)
+			round.Removed = append(round.Removed, absent)
 		}
 	}
 	return round
