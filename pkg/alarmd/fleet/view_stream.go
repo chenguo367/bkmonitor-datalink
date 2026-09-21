@@ -70,11 +70,19 @@ type ViewStreamIgnored struct {
 
 // ViewStreamLagging is one Worker behind the current version.
 type ViewStreamLagging struct {
-	WorkerID       string `json:"worker_id"`
-	Incarnation    string `json:"incarnation,omitempty"`
-	Failure        string `json:"failure,omitempty"`
-	ObjectsMissing int    `json:"objects_missing"`
-	Connected      bool   `json:"connected"`
+	WorkerID    string `json:"worker_id"`
+	Incarnation string `json:"incarnation,omitempty"`
+	Failure     string `json:"failure,omitempty"`
+	// ObjectsProbed says the Worker probed its installed view against its
+	// catalog and reported what was missing; ObjectsMissing is that count,
+	// and is null -- not 0 -- while ObjectsProbed is false. A Worker whose
+	// probe failed or that has not installed anything knows nothing about
+	// its objects, and a 0 there read as "nothing missing" on a page that
+	// did not look at the flag. The Worker's own gauge says the same with
+	// NaN; here JSON says it with null.
+	ObjectsProbed  bool `json:"objects_probed"`
+	ObjectsMissing *int `json:"objects_missing"`
+	Connected      bool `json:"connected"`
 }
 
 // viewStreamLineLagging is how many lagging Workers the line names before

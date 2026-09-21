@@ -10,6 +10,7 @@
 package main
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
@@ -28,25 +29,49 @@ func TestTheViewStreamAccountReachesTheFleetFieldForField(t *testing.T) {
 		Leading: true, ControlEpoch: 7, Revision: 12, Sessions: 63,
 		Counts:  viewstream.Counts{Expected: 64, Sent: 64, Acked: 63, Installed: 62, Switched: 0},
 		Ignored: viewstream.Ignored{UnknownVersion: 1, UnexpectedReceiver: 2, DigestMismatch: 3, StaleIncarnation: 4},
+		// Three cells for the objects: probed with some missing, probed with
+		// none missing, and not probed -- the last is the one that used to
+		// read as 0.
 		Lagging: []viewstream.LaggingReceiver{
-			{WorkerID: "w17", Incarnation: "i-17", ObjectsMissing: 40, Connected: false},
-			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", ObjectsMissing: 2, Connected: true},
+			{WorkerID: "w17", Incarnation: "i-17", ObjectsMissing: 40, ObjectsProbed: true, Connected: false},
+			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", ObjectsMissing: 0, ObjectsProbed: true, Connected: true},
+			{WorkerID: "w31", Incarnation: "i-31", ObjectsMissing: 0, ObjectsProbed: false, Connected: true},
 		},
 		Publications: 100, PublicationsSkipped: 5, SnapshotChunksSent: 20, DeltasSent: 80, EmptyDeltasSent: 60, Refusals: 1,
 	}
+	forty, zero := 40, 0
 	want := &fleet.ViewStreamFacts{
 		At: at, Leading: true, ControlEpoch: 7, Revision: 12, Sessions: 63,
 		Expected: 64, Sent: 64, Acked: 63, Installed: 62, Switched: 0,
 		Ignored: fleet.ViewStreamIgnored{UnknownVersion: 1, UnexpectedReceiver: 2, DigestMismatch: 3, StaleIncarnation: 4},
 		Lagging: []fleet.ViewStreamLagging{
-			{WorkerID: "w17", Incarnation: "i-17", ObjectsMissing: 40, Connected: false},
-			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", ObjectsMissing: 2, Connected: true},
+			{WorkerID: "w17", Incarnation: "i-17", ObjectsProbed: true, ObjectsMissing: &forty, Connected: false},
+			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", ObjectsProbed: true, ObjectsMissing: &zero, Connected: true},
+			{WorkerID: "w31", Incarnation: "i-31", ObjectsProbed: false, ObjectsMissing: nil, Connected: true},
 		},
 		Publications: 100, PublicationsSkipped: 5, SnapshotChunksSent: 20, DeltasSent: 80, EmptyDeltasSent: 60, Refusals: 1,
-		Line: "视图已装载 62/64，版本 12；落后：w17（未连接）、w23（DELTA_DIGEST_MISMATCH）",
+		Line: "视图已装载 62/64，版本 12；落后：w17（未连接）、w23（DELTA_DIGEST_MISMATCH） 等 3 个",
 	}
-	if got := viewStreamFacts(stats, at); !reflect.DeepEqual(got, want) {
+	got := viewStreamFacts(stats, at)
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("viewStreamFacts() = %+v\nwant %+v", got, want)
+	}
+	// On the wire: a number, a zero, and null -- never 0 for unprobed.
+	encoded, err := json.Marshal(got.Lagging)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire []map[string]any
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire[0]["objects_missing"] != 40.0 || wire[0]["objects_probed"] != true ||
+		wire[1]["objects_missing"] != 0.0 || wire[1]["objects_probed"] != true ||
+		wire[2]["objects_missing"] != nil || wire[2]["objects_probed"] != false {
+		t.Fatalf("lagging on the wire = %s, want 40 / 0 / null with objects_probed true / true / false", encoded)
+	}
+	if _, present := wire[2]["objects_missing"]; !present {
+		t.Fatalf("unprobed row omits objects_missing instead of carrying null: %s", encoded)
 	}
 	follower := viewStreamFacts(viewstream.Stats{Sessions: 0}, at)
 	if follower.Leading || follower.Line != "非 leader，不服务视图流" || follower.Lagging == nil {
