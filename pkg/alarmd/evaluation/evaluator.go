@@ -77,7 +77,7 @@ func planGapRecoveryMutation(
 	if !hasStateMutation {
 		return nil, nil
 	}
-	identity := execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}
+	identity := due.GapIdentity()
 	gap, found := request.Gaps.Find(identity)
 	if !found || gap.Status != execution.GapFound {
 		return nil, nil
@@ -612,7 +612,7 @@ type loadDisposition struct {
 func dispositionFromLoads(
 	view execution.RuntimeStateView, gaps execution.GapLoadResult, due execution.DuePlan,
 ) loadDisposition {
-	marker, found := gaps.Find(execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration})
+	marker, found := gaps.Find(due.GapIdentity())
 	if view.Status == execution.StateRetryableIO {
 		if found && marker.Status == execution.GapUnavailable {
 			// Both failed. The Plan is held whole -- the gap's doing -- and
@@ -823,7 +823,7 @@ func levelState(v execution.RuntimeStateView, id uint32) (execution.RuntimeLevel
 	return execution.RuntimeLevelStateView{}, false
 }
 func gapCompleteness(gaps execution.GapLoadResult, due execution.DuePlan, levelID uint32) (string, execution.ReasonCode, bool) {
-	gap, ok := gaps.Find(execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration})
+	gap, ok := gaps.Find(due.GapIdentity())
 	if !ok || gap.Status != execution.GapFound {
 		return "", "", false
 	}

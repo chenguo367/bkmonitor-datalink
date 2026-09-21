@@ -65,7 +65,7 @@ func resumedSeriesResult(header execution.InternalExecutionHeader, due execution
 			}
 		}
 	}
-	gap, found := gaps.Find(execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration})
+	gap, found := gaps.Find(due.GapIdentity())
 	if found && gap.Status != execution.GapMissing {
 		if gap.Status != execution.GapFound && gap.Status != execution.GapClearedTombstone {
 			return execution.EvaluationResult{}, fmt.Errorf("alarmd worker: resumed Plan gap is not readable: %s", gap.Status)

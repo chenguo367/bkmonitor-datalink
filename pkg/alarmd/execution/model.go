@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -265,8 +266,68 @@ const (
 	InputRoleAlgorithmDependency InputRole = "ALGORITHM_DEPENDENCY"
 )
 
+// ShardRef is a Plan's second coordinate: which piece of a strategy that
+// compilation split across Query Groups this Plan is. The zero ShardRef is a
+// strategy that is not split, which is every strategy until compilation
+// starts splitting them; a split strategy is the same PlanIdentity N times,
+// each with its own ShardRef.
+//
+// It is a coordinate beside the PlanIdentity, not part of it. The identity
+// goes into the output layer's event identity and fingerprints, where a
+// split must stay invisible: the alert for a series is the same alert
+// whichever piece evaluated it. The shard reaches exactly the records that
+// are per Plan rather than per series - the gap marker and the no-data
+// memory - because those are the ones N pieces would otherwise share, and
+// sharing them is not a degradation: each piece would load the others'
+// roster and report every group in it absent, every round.
+//
+// MatcherDigest is the canonical digest of the piece's matcher, the
+// condition that selects its series. It is what the keys carry: a re-split
+// that changes the matcher is a new piece with fresh per-Plan records, and a
+// piece whose matcher did not change keeps its own.
+type ShardRef struct {
+	Dimension     string `json:"dimension,omitempty"`
+	Index         int    `json:"index,omitempty"`
+	Count         int    `json:"count,omitempty"`
+	MatcherDigest string `json:"matcher_digest,omitempty"`
+}
+
+// IsZero reports a Plan that is not a piece of a split strategy.
+func (shard ShardRef) IsZero() bool { return shard == ShardRef{} }
+
+// Validate accepts the zero ShardRef and otherwise requires a whole
+// coordinate: a piece knows its dimension, its place among at least two, and
+// its matcher. A strategy split into one piece is not split, and a piece
+// with no matcher digest would key its records on nothing that separates it
+// from its siblings.
+func (shard ShardRef) Validate() error {
+	if shard.IsZero() {
+		return nil
+	}
+	if shard.Dimension == "" {
+		return errors.New("alarmd execution: shard dimension is required")
+	}
+	if shard.Count < 2 {
+		return fmt.Errorf("alarmd execution: shard count %d must be at least two", shard.Count)
+	}
+	if shard.Index < 0 || shard.Index >= shard.Count {
+		return fmt.Errorf("alarmd execution: shard index %d is outside of %d pieces", shard.Index, shard.Count)
+	}
+	if !shardDigestPattern.MatchString(shard.MatcherDigest) {
+		return errors.New("alarmd execution: shard matcher digest must be a canonical sha256 digest")
+	}
+	return nil
+}
+
+var shardDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
 type DuePlan struct {
-	Identity                    PlanIdentity
+	Identity PlanIdentity
+	// Shard is the Plan's piece of a split strategy; zero for one that is
+	// not split. It travels with the Plan so that every per-Plan record the
+	// execution names is named through GapIdentity and NoDataIdentity below,
+	// and no site composes a per-Plan identity without it.
+	Shard                       ShardRef
 	CompiledPlan                *strategy.CompiledPlan
 	StateGeneration             StateGeneration
 	StateApplyEpoch             StateApplyEpoch
@@ -352,6 +413,10 @@ type StateKeyIdentity struct {
 type PlanGapIdentity struct {
 	Plan            PlanIdentity
 	StateGeneration StateGeneration
+	// Shard is the piece of a split strategy this marker belongs to; zero
+	// for a Plan that is not split. Two pieces of one strategy are two
+	// markers.
+	Shard ShardRef
 }
 
 // PlanNoDataIdentity names one Plan's no-data memory. It is keyed the same way
@@ -361,6 +426,20 @@ type PlanGapIdentity struct {
 type PlanNoDataIdentity struct {
 	Plan            PlanIdentity
 	StateGeneration StateGeneration
+	// Shard is the piece of a split strategy this memory belongs to; zero
+	// for a Plan that is not split. Each piece remembers only the groups it
+	// evaluates, so N pieces are N memories.
+	Shard ShardRef
+}
+
+// GapIdentity names this Plan's gap marker, shard included.
+func (due DuePlan) GapIdentity() PlanGapIdentity {
+	return PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration, Shard: due.Shard}
+}
+
+// NoDataIdentity names this Plan's no-data memory, shard included.
+func (due DuePlan) NoDataIdentity() PlanNoDataIdentity {
+	return PlanNoDataIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration, Shard: due.Shard}
 }
 
 type ApplyVersion struct {
@@ -724,8 +803,11 @@ func (input InternalExecution) Validate(expected FrozenExecutionContractRef) err
 	if len(gapIdentities) != len(plans) {
 		return errors.New("alarmd execution: every due Plan requires exactly one gap preflight")
 	}
-	for identity, due := range plans {
-		if _, found := gapIdentities[PlanGapIdentity{Plan: identity, StateGeneration: due.StateGeneration}]; !found {
+	// Matched on the whole identity, shard included: a preflight that names
+	// the Plan and the generation but another piece of the strategy loaded
+	// another piece's marker, and is missing for this one.
+	for _, due := range plans {
+		if _, found := gapIdentities[due.GapIdentity()]; !found {
 			return errors.New("alarmd execution: due Plan is missing its gap preflight")
 		}
 	}
@@ -2135,7 +2217,7 @@ func buildEvaluationInternalExecution(request EvaluationRequest) (InternalExecut
 			input.EffectiveTimeFacts = append(input.EffectiveTimeFacts, fact)
 		}
 	}
-	input.GapPreflight = []PlanGapLoadItem{{Identity: PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration},
+	input.GapPreflight = []PlanGapLoadItem{{Identity: due.GapIdentity(),
 		ApplyVersion: version, ScheduleRevision: due.ScheduleRevision}}
 	return input, nil
 }

@@ -1245,6 +1245,27 @@ func TestInternalExecutionDataStateMatchesDatasetCardinality(t *testing.T) {
 	}
 }
 
+// The gap preflight of a piece of a split strategy is the piece's own. A
+// preflight that names the Plan and the generation but another piece - or no
+// piece - loaded another marker, and the execution would judge this piece's
+// warming against it.
+func TestGapPreflightMustNameTheDuePlansOwnPiece(t *testing.T) {
+	piece := execution.ShardRef{Dimension: "bk_target_ip", Index: 1, Count: 2, MatcherDigest: strings.Repeat("d", 64)}
+	input := validInternalExecution()
+	input.DuePlans[0].Shard = piece
+	if err := input.Validate(frozenContract()); err == nil {
+		t.Fatal("a piece's execution accepted the unsplit Plan's gap preflight")
+	}
+	input.GapPreflight[0].Identity.Shard = execution.ShardRef{Dimension: "bk_target_ip", Index: 0, Count: 2, MatcherDigest: strings.Repeat("e", 64)}
+	if err := input.Validate(frozenContract()); err == nil {
+		t.Fatal("a piece's execution accepted a sibling piece's gap preflight")
+	}
+	input.GapPreflight[0].Identity = input.DuePlans[0].GapIdentity()
+	if err := input.Validate(frozenContract()); err != nil {
+		t.Fatalf("a piece's execution refused its own gap preflight: %v", err)
+	}
+}
+
 func TestStoreAndProgressReceiptStatusReasonContracts(t *testing.T) {
 	stateIdentity := validStateMutation().Identity
 	gapIdentity := validInternalExecution().GapPreflight[0].Identity

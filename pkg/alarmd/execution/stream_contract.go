@@ -181,7 +181,7 @@ func buildSeriesInternalExecution(header InternalExecutionHeader, batch SeriesEx
 			return InternalExecution{}, err
 		}
 		input.GapPreflight = append(input.GapPreflight, PlanGapLoadItem{
-			Identity:     PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration},
+			Identity:     due.GapIdentity(),
 			ApplyVersion: version, ScheduleRevision: due.ScheduleRevision,
 		})
 	}
