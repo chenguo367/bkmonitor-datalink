@@ -2872,6 +2872,11 @@ type StateAdmissionItemResult struct {
 	// EncodedBytes is the stored size of an admitted mutation as the store
 	// measured it; it is observation input only and zero when unknown.
 	EncodedBytes int
+	// RefusalRule names which rule refused a deterministic invalid mutation,
+	// from the store's bounded list; empty for every other status. Eight rules
+	// share STATE_CORRUPT, and a line that carries only the reason sends a
+	// reader to read all eight producers.
+	RefusalRule string
 }
 
 type StateAdmissionResult struct {
@@ -2914,6 +2919,12 @@ type StateApplyItemResult struct {
 	Identity   StateKeyIdentity
 	Status     StateApplyStatus
 	ReasonCode ReasonCode
+	// RefusalRule names which rule refused a deterministic invalid write, from
+	// the store's bounded list; empty for every other status. The reason says
+	// the record could not be stored, and there are eight ways for that to be
+	// true with eight different producers to go and look at - a line that
+	// carries only STATE_CORRUPT sends a reader to read all eight.
+	RefusalRule string
 	// AlreadyApplied says how an ALREADY_APPLIED was decided and
 	// VersionConflict how a STATE_VERSION_CONFLICT was; each is empty for
 	// every other status. StoredBlobRevision is the revision the key was found

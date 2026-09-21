@@ -270,14 +270,16 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 		item := execution.StateAdmissionItemResult{Identity: mutation.Identity, Status: execution.StateAdmissionAccepted}
 		if err := mutation.ValidateDigest(); err != nil {
 			item.Status, item.ReasonCode = execution.StateAdmissionDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
+			item.RefusalRule = PackedRuleMutationDigestMismatch
 			result.Items[index] = item
 			continue
 		}
 		// Sized in the representation the write stores. The revision only
 		// widens one varint in the header, so any revision measures the same.
-		encoded, refusal := store.encodeForWrite(mutation, mutation.ExpectedBlobRevision+1)
+		encoded, refusal, rule := store.encodeForWrite(mutation, mutation.ExpectedBlobRevision+1)
 		if refusal != "" {
 			item.Status, item.ReasonCode = execution.StateAdmissionDeterministicInvalid, execution.ReasonCode(refusal)
+			item.RefusalRule = rule
 		} else {
 			item.EncodedBytes = len(encoded)
 		}

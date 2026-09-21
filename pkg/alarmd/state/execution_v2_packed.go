@@ -55,6 +55,73 @@ type packedHeader struct {
 // bytes would be refused again.
 var ErrPackedContract = errors.New("state: runtime record cannot be framed")
 
+// The rules a framed write can be refused by, as bounded names.
+//
+// A closed vocabulary rather than the error's sentence: the refusal reaches
+// the admission line, and a line carrying free text cannot be grouped or
+// counted, and carries whatever the values happened to be. Every rule below
+// appears in exactly one refusal, and PackedRuleNames is what a reader may
+// see - a rule added without a name here reaches the line as empty, which the
+// case on that list refuses.
+const (
+	PackedRuleLevelNotInMutation   = "level_not_in_mutation"
+	PackedRuleNoDetectFingerprint  = "no_detect_fingerprint"
+	PackedRuleTwoFingerprints      = "two_fingerprints_for_one_level"
+	PackedRuleDuplicateLevel       = "duplicate_level"
+	PackedRuleSourceTimeNotRising  = "source_time_not_rising"
+	PackedRuleRecordIDUnderivable  = "record_id_underivable"
+	PackedRuleRecordIDNotDerived   = "record_id_not_derived"
+	PackedRuleUnencodableFactState = "unencodable_fact_state"
+	// PackedRuleMutationDigestMismatch is not one of the framing rules: the
+	// store refuses the mutation before it frames anything, because the digest
+	// the producer computed does not cover the content it sent. It is named
+	// here because it reaches the line under the same reason as the eight, and
+	// an unnamed ninth way is exactly what makes the other eight worth naming.
+	PackedRuleMutationDigestMismatch = "mutation_digest_mismatch"
+	// PackedRuleIdentityKeyUnderivable is the store refusing before it frames
+	// or writes anything: the mutation's identity does not produce a key. Its
+	// own name rather than sharing the digest's, because the two send a reader
+	// to different places - one to what the producer computed, one to the
+	// identity it computed it for.
+	PackedRuleIdentityKeyUnderivable = "identity_key_underivable"
+)
+
+// PackedRuleNames is every rule a framed write can be refused by.
+var PackedRuleNames = []string{
+	PackedRuleLevelNotInMutation, PackedRuleNoDetectFingerprint, PackedRuleTwoFingerprints,
+	PackedRuleDuplicateLevel, PackedRuleSourceTimeNotRising, PackedRuleRecordIDUnderivable,
+	PackedRuleRecordIDNotDerived, PackedRuleUnencodableFactState, PackedRuleMutationDigestMismatch,
+	PackedRuleIdentityKeyUnderivable,
+}
+
+// PackedContractRefusal is a framed write refused by one named rule. The
+// sentence stays for a human reading the error; the rule is what the line
+// carries.
+type PackedContractRefusal struct {
+	Rule   string
+	Detail string
+}
+
+func (err *PackedContractRefusal) Error() string {
+	return fmt.Sprintf("%s: %s (%s)", ErrPackedContract.Error(), err.Detail, err.Rule)
+}
+
+func (err *PackedContractRefusal) Unwrap() error { return ErrPackedContract }
+
+// PackedRefusalRule is the rule that refused a framed write, empty when err is
+// not one of those refusals.
+func PackedRefusalRule(err error) string {
+	var refusal *PackedContractRefusal
+	if !errors.As(err, &refusal) || refusal == nil {
+		return ""
+	}
+	return refusal.Rule
+}
+
+func packedRefusal(rule, format string, args ...any) error {
+	return &PackedContractRefusal{Rule: rule, Detail: fmt.Sprintf(format, args...)}
+}
+
 // levelFingerprints picks each Level's one detect fingerprint out of the points
 // and refuses a mutation whose points disagree with each other.
 //
@@ -73,20 +140,20 @@ func levelFingerprints(mutation execution.StateMutation, levels []execution.Runt
 		for _, fact := range point.Levels {
 			index, known := position[fact.LevelID]
 			if !known {
-				return nil, fmt.Errorf("%w: point at %d names Level %d, which the mutation does not carry",
-					ErrPackedContract, point.SourceTime, fact.LevelID)
+				return nil, packedRefusal(PackedRuleLevelNotInMutation,
+					"point at %d names Level %d, which the mutation does not carry", point.SourceTime, fact.LevelID)
 			}
 			if fact.DetectFingerprint == "" {
-				return nil, fmt.Errorf("%w: point at %d carries no detect fingerprint for Level %d",
-					ErrPackedContract, point.SourceTime, fact.LevelID)
+				return nil, packedRefusal(PackedRuleNoDetectFingerprint,
+					"point at %d carries no detect fingerprint for Level %d", point.SourceTime, fact.LevelID)
 			}
 			if fingerprints[index] == "" {
 				fingerprints[index] = fact.DetectFingerprint
 				continue
 			}
 			if fingerprints[index] != fact.DetectFingerprint {
-				return nil, fmt.Errorf("%w: Level %d has two detect fingerprints in one record",
-					ErrPackedContract, fact.LevelID)
+				return nil, packedRefusal(PackedRuleTwoFingerprints,
+					"Level %d has two detect fingerprints in one record", fact.LevelID)
 			}
 		}
 	}
@@ -99,7 +166,7 @@ func encodeRuntimePacked(mutation execution.StateMutation, revision uint64) ([]b
 	sort.Slice(levels, func(i, j int) bool { return levels[i].LevelID < levels[j].LevelID })
 	for index := 1; index < len(levels); index++ {
 		if levels[index].LevelID == levels[index-1].LevelID {
-			return nil, fmt.Errorf("%w: Level %d appears twice", ErrPackedContract, levels[index].LevelID)
+			return nil, packedRefusal(PackedRuleDuplicateLevel, "Level %d appears twice", levels[index].LevelID)
 		}
 	}
 	fingerprints, err := levelFingerprints(mutation, levels)
@@ -139,18 +206,18 @@ func encodeRuntimePacked(mutation execution.StateMutation, revision uint64) ([]b
 	previous := int64(0)
 	for pointIndex, point := range mutation.Points {
 		if point.SourceTime < 0 || (pointIndex > 0 && point.SourceTime <= previous) {
-			return nil, fmt.Errorf("%w: points must rise strictly by source time", ErrPackedContract)
+			return nil, packedRefusal(PackedRuleSourceTimeNotRising, "points must rise strictly by source time")
 		}
 		// The id is not stored. It is checked here against the derivation every
 		// producer uses, so a producer that stops deriving it is refused where
 		// it writes rather than read back as a different record later.
 		expected, deriveErr := contract.DeriveRecordIDV2(string(mutation.Identity.SeriesIdentityDigest), point.SourceTime)
 		if deriveErr != nil {
-			return nil, fmt.Errorf("%w: derive record id at %d: %v", ErrPackedContract, point.SourceTime, deriveErr)
+			return nil, packedRefusal(PackedRuleRecordIDUnderivable, "derive record id at %d: %v", point.SourceTime, deriveErr)
 		}
 		if point.RecordID != expected {
-			return nil, fmt.Errorf("%w: point at %d carries a record id the series identity and source time "+
-				"do not derive", ErrPackedContract, point.SourceTime)
+			return nil, packedRefusal(PackedRuleRecordIDNotDerived,
+				"point at %d carries a record id the series identity and source time do not derive", point.SourceTime)
 		}
 		delta := uint64(point.SourceTime)
 		if pointIndex > 0 {
@@ -173,7 +240,7 @@ func encodeRuntimePacked(mutation execution.StateMutation, revision uint64) ([]b
 			case execution.LevelFactError:
 				setBit(anomalous, position, true)
 			default:
-				return nil, fmt.Errorf("%w: Level %d fact result %q", ErrPackedContract, fact.LevelID, fact.Result)
+				return nil, packedRefusal(PackedRuleUnencodableFactState, "Level %d fact result %q", fact.LevelID, fact.Result)
 			}
 		}
 		buffer = append(buffer, present...)
