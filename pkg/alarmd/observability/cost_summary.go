@@ -362,6 +362,11 @@ func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 		c.retained.rotate(epoch)
 		addRetainedStop(&c.retained.current, o)
 	}
+	// Learned only from a row that carries it: a completion whose stream was
+	// never built reports the zero account, and a zero read as the pool would
+	// clear a limit already learned and collapse the share to nothing in the
+	// very round a Slot failed to start. Under real configuration the pool is
+	// never zero, so zero can only be that row.
 	if usage := o.SlotBudgetUsage; usage != nil && usage.RetainedBytesLimit > 0 {
 		c.retainedLimit = usage.RetainedBytesLimit
 	}
@@ -440,12 +445,15 @@ func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
 		// one object with no peak. The refusal names what the Slot held and
 		// the addition that crossed the line; their sum is the least it would
 		// have retained had it run through, and it is that Slot's peak.
-		if f := o.CapacityRejection; f != nil {
-			demand := f.Requested
-			if f.OwnUsed != nil {
-				demand += *f.OwnUsed
-			}
-			s.RetainedBytesPeak = max(s.RetainedBytesPeak, demand)
+		//
+		// OwnUsed absent is not zero and not unknown: it is a nested holder
+		// of a query-free finalization, whose figure does not describe the
+		// execution (ownReservation withholds it for that reason), and an
+		// increment folded in without it is not the same quantity as the
+		// other samples. Skipped, rather than folded as a smaller number that
+		// the max happens to hide.
+		if f := o.CapacityRejection; f != nil && f.OwnUsed != nil {
+			s.RetainedBytesPeak = max(s.RetainedBytesPeak, *f.OwnUsed+f.Requested)
 		}
 	case StageStatePreflight, StageStateApplied:
 		s.StateCalls++

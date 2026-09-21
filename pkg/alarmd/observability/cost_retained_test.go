@@ -75,6 +75,16 @@ func TestTheReplicasRetainedReadingIsTheSumOfPeaksAgainstThePoolWithItsRefusals(
 	// Neither of these is a refusal of this pool, and neither moves a peak.
 	refused("bimodal", contract.ReasonSlotBudgetExceeded, CapacityBudgetRetainedBytes, 900*mib, 900*mib)
 	refused("bimodal", contract.ReasonResourceHardStop, CapacityBudgetSeries, 900*mib, 900*mib)
+	// A nested holder's refusal withholds its own figure: not comparable to
+	// the other samples, so not a peak -- and not folded as the increment
+	// alone either, which the max would merely happen to hide.
+	c.Observe(ctx, Observation{Component: ComponentResource, Stage: StageResourceHard, Result: ResultPaused,
+		ReasonCode: ReasonCode(contract.ReasonResourceHardStop), CapacityBudget: CapacityBudgetRetainedBytes, Err: errors.New("budget"),
+		CapacityRejection: &CapacityRejectionFacts{Phase: "query_free", Requested: 900 * mib, SharedUsed: 1 << 30, Limit: 1 << 30},
+		Trace:             TraceFields{QueryGroupKey: "steady", EvaluationTime: 590}})
+	// A completion whose stream was never built carries the zero account:
+	// it does not unlearn the pool.
+	completed("quiet", 0, 0)
 	c.Publish(now)
 	s := c.Snapshot()
 	r := s.Retained
@@ -87,8 +97,8 @@ func TestTheReplicasRetainedReadingIsTheSumOfPeaksAgainstThePoolWithItsRefusals(
 	if !r.LimitKnown || r.LimitBytes != 1<<30 || r.PeakShare != float64(wantSum)/float64(1<<30) {
 		t.Fatalf("limit/share = %+v, want the pool the rows carried and %d/1024 MiB", r, wantSum/mib)
 	}
-	if r.HardStops != 13 || r.ShareStops != 1 {
-		t.Fatalf("refusals = %d pool / %d share, want 13 / 1: the per-Slot cap and another budget's refusal are not this pool's", r.HardStops, r.ShareStops)
+	if r.HardStops != 14 || r.ShareStops != 1 {
+		t.Fatalf("refusals = %d pool / %d share, want 14 / 1: the per-Slot cap and another budget's refusal are not this pool's, the nested holder's is", r.HardStops, r.ShareStops)
 	}
 	// The same numbers on the object rows, and the ranking that says which
 	// objects the sum is made of, largest peak first.
@@ -103,6 +113,9 @@ func TestTheReplicasRetainedReadingIsTheSumOfPeaksAgainstThePoolWithItsRefusals(
 	}
 	if rows["starved"].Current.RetainedBytesPeak != 350*mib || rows["starved"].Current.RetainedHardStops != 8 || rows["starved"].Current.RunReturns != 0 {
 		t.Fatalf("starved row = %+v, want a 350 MiB peak from its refusals alone, 8 of them (5 went to the stranger), and no completion", rows["starved"].Current)
+	}
+	if rows["steady"].Current.RetainedBytesPeak != 300*mib || rows["steady"].Current.RetainedHardStops != 1 {
+		t.Fatalf("steady row = %+v, want its 300 MiB completion peak untouched by the nested holder's 900 MiB increment, and that refusal counted", rows["steady"].Current)
 	}
 	for _, ranking := range s.Rankings {
 		if ranking.Scope != "query_group" || ranking.Dimension != "retained_bytes_peak" {
