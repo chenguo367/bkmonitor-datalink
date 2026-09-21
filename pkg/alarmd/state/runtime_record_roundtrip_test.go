@@ -75,6 +75,15 @@ func TestALoadedRecordGivesBackEveryPointItWasGiven(t *testing.T) {
 	}
 	view := loaded.Items[0]
 
+	// Asked before the history is counted, because a record the load path
+	// refused comes back with an empty history too, and reporting that as
+	// "points went missing" names the wrong thing: the fields inside the point
+	// are load-bearing enough that dropping one can cost the whole record, and
+	// the case should say which of the two happened.
+	if view.Status != execution.StateFoundReady {
+		t.Fatalf("the record came back %s (%s) rather than readable; it was refused on load, not merely "+
+			"returned short", view.Status, view.ReasonCode)
+	}
 	if len(view.History) != len(points) {
 		t.Fatalf("wrote %d points and read back %d; a point every Level found unusable is still a point the "+
 			"result contract reads to justify carrying an unknown outcome forward", len(points), len(view.History))
