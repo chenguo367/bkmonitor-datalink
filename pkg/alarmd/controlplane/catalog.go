@@ -263,6 +263,10 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 				(disposition.Disposition != DispositionSourceIncomplete && disposition.Disposition != DispositionConfigRejected) {
 				return Catalog{}, errors.New("alarmd controlplane: invalid source disposition")
 			}
+			if refusal := unsupportedTargetPlan(source); refusal != nil {
+				catalog.Dispositions = append(catalog.Dispositions, disposition, *refusal)
+				continue
+			}
 			retained, err := retainLastGood(source.SourceID)
 			if err != nil {
 				return Catalog{}, err
@@ -610,6 +614,9 @@ type sourceCandidate struct {
 
 func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, outputProtocol string) (sourceCandidate, error) {
 	candidate := sourceCandidate{}
+	if refusal := unsupportedTargetPlan(source); refusal != nil {
+		return sourceCandidate{dispositions: []ObjectDisposition{*refusal}}, errors.New("alarmd controlplane: target_plan is not supported")
+	}
 	if err := source.Identity.validate(); err != nil {
 		return sourceCandidate{}, err
 	}
@@ -1108,6 +1115,34 @@ func decodeLegacyStrategy(document json.RawMessage) (legacyStrategy, error) {
 		}
 	}
 	return value, nil
+}
+
+// Presence selects the new target protocol, even for null or malformed values.
+// Until that protocol is supported, refusing it must precede legacy decoding:
+// its display-only target may be an object, which the legacy decoder rejects
+// as a configuration error and would otherwise retain the old target's Plan.
+// Ordinary sources are checked inside the candidate cache; incomplete sources
+// also check before their separate last-good retention path.
+func unsupportedTargetPlan(source SourceStrategy) *ObjectDisposition {
+	var document struct {
+		Items []json.RawMessage `json:"items"`
+	}
+	if err := json.Unmarshal(source.Document, &document); err != nil {
+		return nil // An unreadable source keeps its existing failure semantics.
+	}
+	for index, raw := range document.Items {
+		var item struct {
+			TargetPlan json.RawMessage `json:"target_plan"`
+		}
+		if err := json.Unmarshal(raw, &item); err != nil || len(item.TargetPlan) == 0 {
+			continue
+		}
+		return &ObjectDisposition{
+			SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
+			Reason: "UNSUPPORTED_TARGET_PLAN", FieldPath: fmt.Sprintf("items[%d].target_plan", index),
+		}
+	}
+	return nil
 }
 
 type compiledPlanInputs struct {
