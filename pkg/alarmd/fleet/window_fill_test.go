@@ -60,13 +60,22 @@ func TestAFlatShortCountIsCountedApartFromAFallingOne(t *testing.T) {
 	if fallingRow[0].Coverage.UnchangedRounds != 0 {
 		t.Fatalf("falling window's unchanged rounds = %d, want 0: the count moved every round", fallingRow[0].Coverage.UnchangedRounds)
 	}
-	// A round that is not short ends the run, like every other run counter.
-	flat.Observe(ctx, observability.Observation{ProgressCompletionKind: "FULL_COMPLETED",
-		HistoryCoverage: &observability.HistoryCoverageFacts{Levels: 249, Short: 0},
-		Trace:           observability.TraceFields{StrategyID: "4101", EvaluationTime: 900}})
-	shortRound(ctx, flat, 960, 1466, 1469)
-	if rows := anyColumn(flat); len(rows) == 1 && rows[0].Coverage != nil && rows[0].Coverage.UnchangedRounds != 0 {
-		t.Fatalf("after a full round the flat count = %d, want 0", rows[0].Coverage.UnchangedRounds)
+	// A round with nothing short ends the run, like every other run counter
+	// -- read on the round itself, which is still listed when the guard holds
+	// a full window: a stale flat count on a row whose window is full would
+	// project a fill for a window with nothing to fill.
+	flat.Observe(ctx, observability.Observation{
+		ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionCause: "LEVEL_OUTCOME_UNKNOWN",
+		ProgressCompletionReason: "GAP_SKIPPED",
+		HistoryCoverage:          &observability.HistoryCoverageFacts{Levels: 249, Short: 0, Guarded: 249},
+		Trace:                    observability.TraceFields{StrategyID: "4101", EvaluationTime: 900}})
+	rows := anyColumn(flat)
+	if len(rows) != 1 || rows[0].Coverage == nil {
+		t.Fatalf("rows after the full round = %+v, want the object still listed under its guard with coverage", rows)
+	}
+	if rows[0].Coverage.UnchangedRounds != 0 || rows[0].Coverage.NoProgressRounds != 0 {
+		t.Fatalf("after a round with nothing short the counts = flat %d / no-progress %d, want 0 / 0",
+			rows[0].Coverage.UnchangedRounds, rows[0].Coverage.NoProgressRounds)
 	}
 }
 
