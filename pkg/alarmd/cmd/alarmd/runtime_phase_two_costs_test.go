@@ -55,8 +55,8 @@ func TestTheCostThresholdIsMeasuredAgainstWhatWasSent(t *testing.T) {
 	if len(costs) != 1 || costs[0].RetainedBytesPeak != steps[2] {
 		t.Fatalf("the drifted reading was withheld: %+v", costs)
 	}
-	if source.reported[group] != steps[2] {
-		t.Fatalf("what was sent was recorded as %d, want %d", source.reported[group], steps[2])
+	if source.reported[group].peak != steps[2] {
+		t.Fatalf("what was sent was recorded as %d, want %d", source.reported[group].peak, steps[2])
 	}
 }
 
@@ -77,54 +77,95 @@ func TestACostReadingAppearingOrGoingIsAlwaysReported(t *testing.T) {
 	}
 }
 
-// The rate is not derived until there are two readings and a span to divide.
+// An ask that cannot derive a rate carries the last one that could, not a
+// number it made up and not a zero.
 //
-// Every case here returns "not reported" rather than a number, because the
-// value decides which object moves: a rate that is quietly low leaves an
-// object exactly where it should not be, and there is no reading that says so.
-func TestTheCostRateIsNotGuessedBeforeItCanBeDerived(t *testing.T) {
+// Every case seeds a derivable rate first and then creates the condition, so
+// "carried the last value" and "reset to zero" give different answers. Run on
+// a fresh source they would not: the last value is zero there, and an
+// implementation that zeroed on every rotation would pass every case while
+// sending the Leader a not-reported and a recovery on a fixed cadence for an
+// object whose cost never moved.
+func TestAnUndeivableAskCarriesTheLastDerivedRate(t *testing.T) {
 	const second = time.Second
+	// Half a second of compute per second of schedule.
+	seedFirst := observability.CostRetainedPeak{ComputeWallNS: 0}
+	seedSecond := observability.CostRetainedPeak{ComputeWallNS: int64(second / 2)}
+
 	for _, testCase := range []struct {
-		name     string
-		first    observability.CostRetainedPeak
-		second   observability.CostRetainedPeak
-		elapsed  time.Duration
-		wantZero bool
+		name    string
+		reading observability.CostRetainedPeak
+		elapsed time.Duration
 	}{
-		{name: "the first ask has nothing to difference against",
-			first: observability.CostRetainedPeak{ComputeWallNS: int64(second)}, elapsed: second, wantZero: true},
-		{name: "a window carrying an unmeasured observation is short by an unknown amount",
-			first:   observability.CostRetainedPeak{ComputeWallNS: 0},
-			second:  observability.CostRetainedPeak{ComputeWallNS: int64(second), ComputeWallUnknown: 1},
-			elapsed: second, wantZero: true},
-		{name: "a window that rotated makes the difference negative, which is not a rate of zero",
-			first:   observability.CostRetainedPeak{ComputeWallNS: int64(10 * second)},
-			second:  observability.CostRetainedPeak{ComputeWallNS: int64(second)},
-			elapsed: second, wantZero: true},
-		{name: "no span to divide by",
-			first:   observability.CostRetainedPeak{ComputeWallNS: 0},
-			second:  observability.CostRetainedPeak{ComputeWallNS: int64(second)},
-			elapsed: 0, wantZero: true},
-		// The control: with two readings, a span, and nothing unmeasured, the
-		// rate is derived. Without it every case above would pass on a source
-		// that never reports anything at all.
-		{name: "two readings a second apart over a second of schedule",
-			first:   observability.CostRetainedPeak{ComputeWallNS: 0},
-			second:  observability.CostRetainedPeak{ComputeWallNS: int64(second / 2)},
-			elapsed: second, wantZero: false},
+		{name: "the window rotated, so the difference is negative",
+			reading: observability.CostRetainedPeak{ComputeWallNS: 0}, elapsed: second},
+		{name: "the window carries an observation that was never measured",
+			reading: observability.CostRetainedPeak{ComputeWallNS: int64(second), ComputeWallUnknown: 1}, elapsed: second},
+		{name: "there is no span to divide by",
+			reading: observability.CostRetainedPeak{ComputeWallNS: int64(second)}, elapsed: 0},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			source := newWorkerCostSource(nil, nil)
 			group := execution.QueryGroupIdentity("qg-1")
-			source.advanceCost(group, testCase.first, testCase.elapsed)
-			got := source.advanceCost(group, testCase.second, testCase.elapsed)
-			if (got == 0) != testCase.wantZero {
-				t.Fatalf("rate = %d, want zero = %t", got, testCase.wantZero)
+			source.advanceCost(group, seedFirst, second)
+			seeded := source.advanceCost(group, seedSecond, second)
+			if seeded != 500 {
+				t.Fatalf("the seed derived %d, want 500 milli; without a derived rate this case cannot "+
+					"tell carrying it forward from resetting to zero", seeded)
 			}
-			if !testCase.wantZero && got != 500 {
-				t.Fatalf("rate = %d, want 500 milli: half a second of compute per second of schedule", got)
+			if got := source.advanceCost(group, testCase.reading, testCase.elapsed); got != seeded {
+				t.Fatalf("rate = %d, want the last derived %d carried forward", got, seeded)
 			}
 		})
+	}
+}
+
+// Before any rate has been derived there is nothing to carry, and the Query
+// Group reports zero - which the Leader reads as unreported.
+func TestTheFirstAskForAQueryGroupReportsNoRate(t *testing.T) {
+	source := newWorkerCostSource(nil, nil)
+	got := source.advanceCost(execution.QueryGroupIdentity("qg-1"),
+		observability.CostRetainedPeak{ComputeWallNS: int64(time.Second)}, time.Second)
+	if got != 0 {
+		t.Fatalf("the first ask reported %d, want zero: there is no earlier reading to difference against", got)
+	}
+}
+
+// A rate that moves is reported even when the retained bytes do not.
+//
+// The threshold watched only the peak at first, so an object whose bytes held
+// steady while its compute tripled kept the Leader on the cost of its first
+// reading - and the Leader places objects by that number.
+func TestARateThatMovesIsReportedWhenTheBytesDoNot(t *testing.T) {
+	const second = time.Second
+	source := newWorkerCostSource(nil, nil)
+	source.boundByOwned(func() int { return 4 })
+	const peak = uint64(4096)
+
+	// Two asks to seed a rate, both carrying the same peak.
+	source.report([]observability.CostRetainedPeak{{QueryGroupKey: "qg-1", RetainedBytesPeak: peak}})
+	source.lastAsked = source.now().Add(-second)
+	first := source.report([]observability.CostRetainedPeak{
+		{QueryGroupKey: "qg-1", RetainedBytesPeak: peak, ComputeWallNS: int64(second / 10)}})
+	if len(first) != 1 || first[0].CostPerSecondMilli == 0 {
+		t.Fatalf("the seeding ask did not report a rate: %+v", first)
+	}
+	sent := first[0].CostPerSecondMilli
+
+	// The peak does not move; the compute does, by far more than a tenth.
+	source.lastAsked = source.now().Add(-second)
+	next := source.report([]observability.CostRetainedPeak{
+		{QueryGroupKey: "qg-1", RetainedBytesPeak: peak, ComputeWallNS: int64(second/10) + int64(second/2)}})
+	if len(next) != 1 {
+		t.Fatalf("a Query Group whose cost moved while its bytes held steady was withheld; the Leader "+
+			"keeps placing it on %d", sent)
+	}
+	if next[0].CostPerSecondMilli == sent {
+		t.Fatalf("the reported rate did not move from %d, so this case cannot show the threshold "+
+			"watching it", sent)
+	}
+	if next[0].RetainedBytesPeak != peak {
+		t.Fatalf("peak = %d, want it unchanged at %d", next[0].RetainedBytesPeak, peak)
 	}
 }
 

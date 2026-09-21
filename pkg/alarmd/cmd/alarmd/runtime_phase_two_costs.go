@@ -44,11 +44,16 @@ type workerCostSource struct {
 	// built, so it is read under the lock: the heartbeat can ask for costs
 	// from the moment the client starts.
 	ownedBound func() int
-	// reported is the last value sent for each Query Group, which is what the
-	// threshold is measured against - not the last value read. Measuring
+	// reported is what was last sent for each Query Group, which is what the
+	// threshold is measured against - not what was last read. Measuring
 	// against the last read would let a reading drift past the threshold in
 	// steps that are each under it, and never be sent.
-	reported map[execution.QueryGroupIdentity]uint64
+	//
+	// Both dimensions, because either can move on its own: an object whose
+	// retained bytes hold steady while its compute triples is one the Leader
+	// must hear about, and a threshold that watched only the bytes would leave
+	// it placed on the cost of its first reading forever.
+	reported map[execution.QueryGroupIdentity]reportedCost
 	// cost is the smoothed cost per second and what it was last derived from.
 	cost map[execution.QueryGroupIdentity]*costRate
 	// lastAsked is when Costs was last answered, which is the span the wall
@@ -57,6 +62,12 @@ type workerCostSource struct {
 	// were taken across.
 	lastAsked time.Time
 	now       func() time.Time
+}
+
+// reportedCost is what was last sent for one Query Group.
+type reportedCost struct {
+	peak  uint64
+	milli uint64
 }
 
 // costRate is one Query Group's smoothed cost and the reading it was last
@@ -77,7 +88,7 @@ func newWorkerCostSource(summary *observability.CostSummary, now func() time.Tim
 		now = time.Now
 	}
 	return &workerCostSource{summary: summary, now: now,
-		reported: make(map[execution.QueryGroupIdentity]uint64),
+		reported: make(map[execution.QueryGroupIdentity]reportedCost),
 		cost:     make(map[execution.QueryGroupIdentity]*costRate)}
 }
 
@@ -125,7 +136,8 @@ func (source *workerCostSource) report(peaks []observability.CostRetainedPeak) [
 		group := execution.QueryGroupIdentity(peak.QueryGroupKey)
 		milli := source.advanceCost(group, peak, elapsed)
 		last, sent := source.reported[group]
-		if sent && !costReadingMoved(last, peak.RetainedBytesPeak) {
+		if sent && !costReadingMoved(last.peak, peak.RetainedBytesPeak) &&
+			!costReadingMoved(last.milli, milli) {
 			continue
 		}
 		costs = append(costs, viewstream.QueryGroupCost{
@@ -150,7 +162,7 @@ func (source *workerCostSource) report(peaks []observability.CostRetainedPeak) [
 	// unreported and goes out whole next time rather than being remembered as
 	// sent.
 	for _, cost := range costs {
-		source.reported[cost.QueryGroup] = cost.RetainedBytesPeak
+		source.reported[cost.QueryGroup] = reportedCost{peak: cost.RetainedBytesPeak, milli: cost.CostPerSecondMilli}
 	}
 	return costs
 }
@@ -158,13 +170,23 @@ func (source *workerCostSource) report(peaks []observability.CostRetainedPeak) [
 // advanceCost folds this ask's compute wall into the Query Group's smoothed
 // cost per second of schedule, and returns what to report.
 //
-// Zero means not reported, which is what the Leader reads it as, and it is
-// returned in every case the rate cannot be derived: the first ask for this
-// Query Group, an ask with no span to divide by, a window carrying
-// observations whose duration was never measured, and a window that rotated
-// between two asks. A guessed rate here is worse than none - the number it
-// feeds decides which object moves, and a rate that is quietly low leaves an
-// object exactly where it should not be.
+// Four asks cannot derive a rate: the first one for a Query Group, one with no
+// span to divide by, one whose window carries observations that were never
+// measured, and one where the window rotated between the two ends of the
+// difference. None of them invents a number - what they return is the last
+// rate that WAS derivable, and zero only while there has never been one.
+//
+// Carrying the last value forward rather than reporting zero is deliberate.
+// The window rotates every few minutes by construction, so zeroing on rotation
+// would send the Leader a "not reported" and then a recovery on a fixed
+// cadence, for an object whose cost never moved - manufacturing exactly the
+// change the threshold exists to filter out. The last derived rate is the
+// honest answer to "what does this object cost": it is a measurement that was
+// taken, just not in this window.
+//
+// What none of them do is guess. The number decides which object moves, and a
+// rate invented low leaves an object exactly where it should not be with
+// nothing on any page saying so.
 func (source *workerCostSource) advanceCost(
 	group execution.QueryGroupIdentity, reading observability.CostRetainedPeak, elapsed time.Duration,
 ) uint64 {
@@ -177,6 +199,8 @@ func (source *workerCostSource) advanceCost(
 	seeded := rate.seeded
 	rate.lastWallNS, rate.seeded = wall, true
 	switch {
+	// Each of these leaves rate.milli untouched, so the value returned is the
+	// last one that was derived from a measured window.
 	case !seeded, elapsed <= 0, reading.ComputeWallUnknown > 0, wall < previous:
 		return rate.milli
 	}
