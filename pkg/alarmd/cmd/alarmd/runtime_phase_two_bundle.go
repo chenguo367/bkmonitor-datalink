@@ -907,7 +907,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// clients find it.
 	fleetAPI = fleet.WithStrategyStanding(fleetAPI, fleetService, strategyLookupSource(reconciler),
 		leaderForwarder(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil),
-		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
+		strategyObjectLoader(repository), strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
 	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())
 	var costRefresh *observationCostRefresh
 	if diagnosticsClient != nil && observationCapacity.CostBytes > 0 {

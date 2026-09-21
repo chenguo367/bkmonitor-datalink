@@ -36,7 +36,7 @@ func standingHandler(t *testing.T, lookup StrategyLookupFunc, forward LeaderForw
 	if err != nil {
 		t.Fatal(err)
 	}
-	return WithStrategyStanding(handler, service, lookup, forward, "pod-a", func() time.Time { return now }, 0)
+	return WithStrategyStanding(handler, service, lookup, forward, nil, "pod-a", func() time.Time { return now }, 0)
 }
 
 func plans(refs ...StrategyPlanRef) []StrategyPlanRef { return refs }

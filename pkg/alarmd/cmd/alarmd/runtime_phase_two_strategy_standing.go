@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
@@ -54,6 +55,18 @@ func strategyLookupFactsOf(lookup controlplane.StrategyLookup) fleet.StrategyLoo
 		})
 	}
 	return facts
+}
+
+// strategyObjectLoader is the catalog's point read of one Query Group
+// object by digest, for include=config: the same read the Worker makes to
+// run the object, once per Plan the reader asked about, and nothing else.
+func strategyObjectLoader(repository *controlplane.RedisCatalogRepository) fleet.StrategyObjectLoader {
+	if repository == nil {
+		return nil
+	}
+	return func(ctx context.Context, objectDigest string) (controlplane.QueryGroupObject, error) {
+		return repository.LoadQueryGroupObject(ctx, execution.ObjectDigest(objectDigest))
+	}
 }
 
 // leaderDiscovery is the one question the forwarder asks: who leads, and
