@@ -80,7 +80,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			item.Cause, item.CauseReason = "", "QUERY_TIMEOUT"
 			item.ReasonSince, item.ReasonLastAt = at.Add(-4*time.Minute), at.Add(-4*time.Minute)
 			item.Restored = &fleet.RestoredRound{Slot: at.Add(-5 * time.Minute), CompletedAt: at.Add(-4 * time.Minute),
-				Kind: "COMPLETED_WITH_UNAVAILABLE", ReasonCode: "QUERY_TIMEOUT", SnapshotRevision: "s1"}
+				Kind: "COMPLETED_WITH_UNAVAILABLE", ReasonCode: "QUERY_TIMEOUT", SnapshotRevision: "s1",
+				// The round's target resolution for one target-plan Plan: a
+				// static selector the host cache could not place, a group that
+				// dropped members, two dangling nodes, a stale snapshot.
+				TargetResolutions: []fleet.RestoredTargetResolution{{StrategyID: "1234", State: "Unavailable",
+					Failures: []fleet.RestoredSelectorFailure{
+						{Kind: "static", ID: "members", Reason: "model_representation_unresolved"},
+						{Kind: "dynamic_group", ID: "17", Reason: "members_dropped", Dropped: 3, Kept: 40}},
+					NodesMissing: []string{"module:88"}, NodesForeign: []string{"set:9"}, StaleAgeSeconds: 200}}}
 			item.Wake = &fleet.WakeFacts{Known: true, DueAt: at.Add(3 * time.Minute), IntervalSeconds: 60}
 		}),
 		anomaly("qg-preexisting", func(item *fleet.Anomaly) {
@@ -904,6 +912,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// commit's clock, the next round -- said as before this process took
 		// over, so the reason is not taken for a live one.
 		{"RESTORED qg-restored-with-cause ::", "最近一次检测未完整完成：COMPLETED_WITH_UNAVAILABLE（QUERY_TIMEOUT）。结果来自本进程接手前的 17:55:00 轮次（提交于 17:56:00）；下一轮预计 18:03:00"},
+		{"RESTORED qg-restored-with-cause ::", "目标解析（策略 1234）：目标不可用——有 selector 解析不出，这一轮不做无数据判定；static members：按模型实例（model_inst_id）给出的静态成员，主机缓存里查不到对应主机身份——不是主机模型，或缓存没带规范身份字段；dynamic_group 17：成员逐条校验有丢弃（模型、实例、汇总列出、host_id 规则）（丢弃 3，保留 40）；索引里不存在的节点：module:88；只属于别的业务的节点：set:9；用的快照已过期 3 分 20 秒"},
 		{"BLOCKED qg-stale-error ::", "卡在哪一步：数据查询（依赖待定位）：超时 QUERY_TIMEOUT；影响：结果待确认（这一轮结束了但结果不能采信）；本进程没见过它成功完成"},
 		{"BLOCKED qg-losing-now ::", "卡在哪一步：调度接管（alarmd 自身（预算、截止、定义），由原因码判定）：容量不足 GAP_SKIPPED；影响：确认漏检（跳过记录已持久化，那段不补）"},
 		{"BLOCKED qg-rejected ::", "卡在哪一步：数据查询（查询后端，由原因码判定）：被拒绝 "},

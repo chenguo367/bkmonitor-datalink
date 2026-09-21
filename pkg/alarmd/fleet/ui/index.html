@@ -1902,6 +1902,43 @@ function renderGroups() {
   });
 }
 
+// A target plan's resolution in words: the plan-level state, each selector
+// that did not answer whole with the resolver's reason, the dangling
+// topology nodes and the stale age. Both tables are held to the resolver's
+// closed lists (targetplan.ResolutionStates, SelectorReasons).
+var RESOLUTION_STATE = {
+  Complete: '目标完整解析',
+  Incomplete: '目标不完整——有 selector 丢了成员，检测只覆盖解析到的部分',
+  Unavailable: '目标不可用——有 selector 解析不出，这一轮不做无数据判定'
+};
+var SELECTOR_REASON = {
+  none: '正常',
+  key_missing: '分组缓存里没有这个键（写入方没渲染或键名不对）',
+  json_invalid: '分组缓存的值不是合法 JSON',
+  structure_invalid: '分组缓存的值结构不符合合同',
+  model_mismatch: '分组成员的模型与计划不一致',
+  read_failed: '读分组缓存失败（Redis 读错误）',
+  stale: '分组缓存刷新失败，用的是保留的旧快照（超过 10 分钟即不可用）',
+  index_unavailable: '主机索引不可用，拓扑节点无法核对',
+  node_missing: '拓扑节点在主机索引里不存在',
+  node_in_other_business: '拓扑节点下的主机只属于别的业务',
+  members_dropped: '成员逐条校验有丢弃（模型、实例、汇总列出、host_id 规则）',
+  source_unwired: '本部署没有接这种 selector 的来源',
+  model_representation_unresolved: '按模型实例（model_inst_id）给出的静态成员，主机缓存里查不到对应主机身份——不是主机模型，或缓存没带规范身份字段'
+};
+function targetResolutionWords(resolution) {
+  var parts = [RESOLUTION_STATE[resolution.state] || resolution.state];
+  (resolution.failures || []).forEach(function (failure) {
+    var words = failure.kind + ' ' + failure.id + '：' + (SELECTOR_REASON[failure.reason] || failure.reason);
+    if (failure.dropped) words += '（丢弃 ' + failure.dropped + '，保留 ' + (failure.kept || 0) + '）';
+    parts.push(words);
+  });
+  if (resolution.nodes_missing && resolution.nodes_missing.length) parts.push('索引里不存在的节点：' + resolution.nodes_missing.join('、'));
+  if (resolution.nodes_foreign && resolution.nodes_foreign.length) parts.push('只属于别的业务的节点：' + resolution.nodes_foreign.join('、'));
+  if (resolution.stale_age_seconds) parts.push('用的快照已过期 ' + elapsedLabel(resolution.stale_age_seconds));
+  return parts.join('；');
+}
+
 // What a withheld reason means, who can act and the next step, as the
 // server decided per reason. The kind is a closed word with its own label;
 // an unknown reason says so and sends nobody to a parameter.
@@ -2184,6 +2221,16 @@ function objectRow(anomaly, check, group) {
       + (restored.completed_at && new Date(restored.completed_at).getTime() > 0 ? '（提交于 ' + momentLabel(restored.completed_at) + '）' : '')
       + nextNote + configNote,
       '进度提交时留下的上一轮摘要；本进程跑完一轮后这一行换成自己的');
+    // What each target-plan Plan's target resolved to in that round: the
+    // composed state, every selector that did not answer whole with why,
+    // the topology nodes the cache does not list or lists under another
+    // business, and how stale the newest snapshot was. The words are the
+    // resolver's closed lists; a reader who sees "Unavailable" needs the
+    // selector and the reason, not the state alone.
+    (restored.target_resolutions || []).forEach(function (resolution) {
+      line('目标解析（策略 ' + resolution.strategy_id + '）', targetResolutionWords(resolution),
+        '上一轮按 target_plan 解析目标的结果；指标 target_plan_resolution_total{state} 与 target_selector_resolutions_total{kind,state,reason}');
+    });
   }
   // What the latest completion found about an earlier attempt at its Slot,
   // when it was closed without a query. A row that reads GAP_SKIPPED with

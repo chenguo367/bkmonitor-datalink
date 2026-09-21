@@ -14,6 +14,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 	"regexp"
 	"strings"
 	"testing"
@@ -827,6 +828,38 @@ func TestThePageHasWordingForEveryGuardProgress(t *testing.T) {
 	for _, value := range fleet.GapProgressValues {
 		if !worded[value] {
 			t.Errorf("GUARD_PROGRESS has no words for %s", value)
+		}
+	}
+}
+
+// The resolver's two closed lists have words on the page, and the page has
+// words for nothing the resolver does not produce: a selector that could not
+// be resolved reaches the object row as its reason word, and a word with no
+// entry renders as the word.
+func TestThePageHasWordingForEveryTargetResolutionStateAndSelectorReason(t *testing.T) {
+	body := string(page)
+	for _, table := range []struct {
+		name   string
+		values []string
+	}{
+		{"RESOLUTION_STATE", stringsOf(targetplan.ResolutionStates)},
+		{"SELECTOR_REASON", targetplan.SelectorReasons},
+	} {
+		found := regexp.MustCompile(`var ` + table.name + ` = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+		if found == nil {
+			t.Fatalf("the page has no %s wording table", table.name)
+		}
+		worded := map[string]bool{}
+		for _, entry := range regexp.MustCompile(`(?m)^  ([A-Za-z_]+):`).FindAllStringSubmatch(found[1], -1) {
+			worded[entry[1]] = true
+			if !containsString(table.values, entry[1]) {
+				t.Errorf("%s has words for %s, which the resolver never produces", table.name, entry[1])
+			}
+		}
+		for _, value := range table.values {
+			if !worded[value] {
+				t.Errorf("%s has no words for %s: the row would render the word itself", table.name, value)
+			}
 		}
 	}
 }
