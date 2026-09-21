@@ -1599,10 +1599,19 @@ type PlanGapMutation struct {
 // it would under-report an outage that was running the whole time. There is a
 // test that fails when a field is added here, so that adding one is a decision
 // rather than an oversight.
+//
+// SuppressedAt is the third field, added for the limited tracking horizon
+// (decision-018), and it is a timestamp for the same reason the other two are.
+// It names the round in which this group's absence stopped being tracked, so
+// it survives a build that skipped rounds exactly as they do. It is stored
+// rather than recomputed from FirstAbsent against the horizon in force now,
+// because the horizon is a setting: recomputing would reopen every stopped
+// absence the moment somebody raised it.
 type NoDataGroupMemory struct {
-	GroupKey    string `json:"group_key"`
-	LastSeen    int64  `json:"last_seen,omitempty"`
-	FirstAbsent int64  `json:"first_absent,omitempty"`
+	GroupKey     string `json:"group_key"`
+	LastSeen     int64  `json:"last_seen,omitempty"`
+	FirstAbsent  int64  `json:"first_absent,omitempty"`
+	SuppressedAt int64  `json:"suppressed_at,omitempty"`
 }
 
 // NoDataGroupAbsence is what a record holds about a group that was not seen in
@@ -1613,6 +1622,12 @@ type NoDataGroupMemory struct {
 type NoDataGroupAbsence struct {
 	LastSeen    int64 `json:"last_seen,omitempty"`
 	FirstAbsent int64 `json:"first_absent,omitempty"`
+	// SuppressedAt names the round this group's absence stopped being tracked,
+	// and zero means it is still tracked. A suppressed group is still absent -
+	// it keeps both timestamps above - so it is never written in the compressed
+	// present form, and a reader that ignored this field would resume producing
+	// its absence.
+	SuppressedAt int64 `json:"suppressed_at,omitempty"`
 }
 
 // NoDataGroupDelta is one group's stored value.
@@ -1696,6 +1711,14 @@ type PlanNoDataMutation struct {
 	// written without an absence was seen in. It never moves backwards: a round
 	// that saw nothing carries the previous one forward.
 	PresentAsOf int64
+	// TrackingExhaustedAt names the round in which the last group of a history
+	// roster stopped being tracked, and zero means the roster has not been
+	// exhausted. It is a Plan-level fact because what it decides is Plan-level:
+	// an empty history roster otherwise means "this Plan has no groups", which
+	// is the reading that turns the next round into a whole-item absence. The
+	// two are told apart by nothing else - a roster exhausted by the horizon
+	// and a roster that never held anything are both empty.
+	TrackingExhaustedAt int64
 	// MemoryDigest is what the store keeps beside the record and compares the
 	// next statement against.
 	MemoryDigest   MutationDigest
