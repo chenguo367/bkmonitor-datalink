@@ -58,6 +58,11 @@ type SourceFacts struct {
 	Plans           int  `json:"plans,omitempty"`
 	RevisionedPlans int  `json:"revisioned_plans,omitempty"`
 	PlansKnown      bool `json:"plans_known,omitempty"`
+	// Set is the account of the source's active set across rounds -- what
+	// one round's dispositions cannot say: which strategies are under grace
+	// and since when, and how often the set drops strategies and lists them
+	// again, by the hour. Absent on a build before it.
+	Set *SourceSetFacts `json:"set,omitempty"`
 }
 
 // WithheldGroup is one (disposition, reason) pair the round withheld

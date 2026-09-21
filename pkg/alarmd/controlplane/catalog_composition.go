@@ -10,6 +10,9 @@
 package controlplane
 
 import (
+	"slices"
+	"sort"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 )
@@ -106,6 +109,13 @@ type CatalogComposition struct {
 	// the shape where the page says forty and the log names thirty-nine and
 	// nothing is wrong with either.
 	WithheldObjects []ObjectDisposition
+	// AcceptedStrategies names every strategy the round accepted, once each,
+	// sorted. It is the other half of WithheldObjects: a reader that keeps
+	// the strategies the source dropped needs the round's accepted set to
+	// tell "back in the list" from "gone for good" -- a strategy the grace
+	// cycle removed has no disposition at all the round after, and its
+	// absence from the withheld records reads the same as its return.
+	AcceptedStrategies []string
 	// NoDataPlans counts the Plans that detect no-data, by where their expected
 	// set comes from. Only accepted Plans are in it - a Plan that was withheld
 	// is in Withheld under the reason that withheld it.
@@ -289,6 +299,7 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		}
 		composition.Objects[kind]++
 		if kind == DispositionAccepted {
+			composition.AcceptedStrategies = append(composition.AcceptedStrategies, disposition.SourceID)
 			continue
 		}
 		composition.Withheld[WithheldKey{Disposition: kind, Reason: disposition.Reason}]++
@@ -299,6 +310,10 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		withheld.Disposition = kind
 		composition.WithheldObjects = append(composition.WithheldObjects, withheld)
 	}
+	// Once each: a strategy is accepted at the strategy scope and again for
+	// each of its Plans.
+	sort.Strings(composition.AcceptedStrategies)
+	composition.AcceptedStrategies = slices.Compact(composition.AcceptedStrategies)
 	return composition
 }
 

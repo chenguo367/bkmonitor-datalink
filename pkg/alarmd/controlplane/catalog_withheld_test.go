@@ -164,3 +164,19 @@ func TestTheRetentionWithheldReasonsArePublishedAtZero(t *testing.T) {
 			"partition, or it stops adding up against catalog_objects", total)
 	}
 }
+
+// The composition names the strategies the round accepted, once each and
+// sorted, beside the withheld records: a reader keeping the strategies the
+// source dropped needs the round's accepted set to tell "listed again" from
+// "gone" -- a removed strategy has no disposition at all the round after.
+func TestCompositionNamesTheAcceptedStrategiesOnceEach(t *testing.T) {
+	composition := ComposeCatalog(Catalog{Dispositions: []ObjectDisposition{
+		{SourceID: "s-2", Scope: "STRATEGY", Disposition: DispositionAccepted},
+		{SourceID: "s-2", Scope: "PLAN", Disposition: DispositionAccepted},
+		{SourceID: "s-1", Scope: "STRATEGY", Disposition: DispositionAccepted},
+		{SourceID: "s-3", Scope: "STRATEGY", Disposition: DispositionPendingRemoval, Reason: "REMOVED_FROM_ACTIVE_SET"},
+	}})
+	if got := composition.AcceptedStrategies; len(got) != 2 || got[0] != "s-1" || got[1] != "s-2" {
+		t.Fatalf("accepted = %v, want s-1, s-2 once each and sorted; the graced one is withheld, not accepted", got)
+	}
+}
