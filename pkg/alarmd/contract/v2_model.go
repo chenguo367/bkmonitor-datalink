@@ -95,6 +95,35 @@ const (
 	ReasonHistoryGapped         = "HISTORY_GAPPED"
 	ReasonKafkaUnavailable      = "KAFKA_UNAVAILABLE"
 	ReasonRedisUnavailable      = "REDIS_UNAVAILABLE"
+	// ReasonStateReadTimeout names a Runtime State read this process issued
+	// that did not come back inside its own timeout. It is not
+	// REDIS_UNAVAILABLE, and the difference is the whole point: the dependency
+	// answered every other caller on the same connection that second. What
+	// happened is that one read of ours was too big to finish in the time we
+	// gave it, which is our shape to fix and not the dependency's health.
+	//
+	// Named because the refusal it replaced sent every reader to the wrong
+	// place. The state read that produced it was 86 MB for a single Query
+	// Group, it timed out identically on every attempt, and it arrived in the
+	// fleet view as a Redis outage - so the investigation began at a
+	// dependency that was fine, while the row carried nothing about how much
+	// had been asked for.
+	ReasonStateReadTimeout = "STATE_READ_TIMEOUT"
+	// ReasonQGBudgetShareExceeded names one Query Group's Slot asking for more
+	// of the process pool than any single object may hold.
+	//
+	// Separate from RESOURCE_HARD_STOP because the two call for different work
+	// and one word made them indistinguishable. A hard stop is somebody else
+	// having filled the pool: this Slot unwinds and the next attempt succeeds
+	// once capacity frees. This is the object being too large for one replica
+	// whoever else is running - waiting changes nothing, and what has to change
+	// is the strategy's shape.
+	//
+	// Without a share at all, one object may legitimately take the whole pool
+	// and starve every other Query Group on the replica. Placement spreads
+	// large objects across replicas; nothing stops one from filling the replica
+	// it lands on.
+	ReasonQGBudgetShareExceeded = "QG_BUDGET_SHARE_EXCEEDED"
 	ReasonProviderUnavailable   = "PROVIDER_UNAVAILABLE"
 	ReasonProgressBeginRejected = "PROGRESS_BEGIN_REJECTED"
 	ReasonProgressBeginFailed   = "PROGRESS_BEGIN_FAILED"

@@ -60,7 +60,10 @@ func TestBudgetRejectionOutputAndQueryFreeOwnership(t *testing.T) {
 	for _, normal := range []bool{true, false} {
 		co := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxSeries: 10, MaxRetainedBytes: 100, MaxStateMutations: 10, MaxEvents: 10, MaxGapMutations: 10}}
 		co.reservations.retainedBytes = 80
-		stream := &streamedExecution{coordinator: co, began: normal, retained: 30}
+		// Twenty rather than thirty: one Query Group may hold half the pool, so
+		// at thirty this execution crosses its own share and the shared-pool
+		// rejection this case is about never happens.
+		stream := &streamedExecution{coordinator: co, began: normal, retained: 20}
 		err := co.acquireEffects(effectCounts{states: 1}, 25, stream, stream.reservationPhase("normal_output"))
 		var exceeded *provisionalBudgetExceededError
 		if !errors.As(err, &exceeded) {
@@ -71,7 +74,7 @@ func TestBudgetRejectionOutputAndQueryFreeOwnership(t *testing.T) {
 			t.Fatalf("facts=%+v", facts)
 		}
 		if normal {
-			if facts.Phase != "normal_output" || facts.OwnUsed == nil || *facts.OwnUsed != 30 {
+			if facts.Phase != "normal_output" || facts.OwnUsed == nil || *facts.OwnUsed != 20 {
 				t.Fatalf("normal=%+v", facts)
 			}
 		} else if facts.Phase != "query_free" || facts.OwnUsed != nil {

@@ -154,6 +154,7 @@ func (c Config) CompilerLimits() strategy.Limits {
 		MaxTriggerWindowSize:          c.Limits.Trigger.MaxTriggerWindowSize,
 		MaxRecoveryConsecutiveWindows: c.Limits.Trigger.MaxRecoveryConsecutiveWindows,
 		MaxRequiredHistoryPoints:      v.MaxRequiredHistoryPoints,
+		MaxRetainedPointsByLevels:     c.retainedPointCeilings(),
 		MaxTriggerComputeCost:         c.Limits.Trigger.MaxComputeCost,
 		MaxCompiledPlanBytes:          v.MaxCompiledPlanBytes,
 		MaxCacheEntries:               v.MaxCacheEntries, MaxCacheBytes: v.MaxCacheBytes,
@@ -244,4 +245,36 @@ func (c LimitsConfig) validate() error {
 		return errors.New("state store cannot admit one maximum encoded window")
 	}
 	return nil
+}
+
+// retainedPointCeilings is how many retained points fit one stored Runtime
+// State record, by how many Levels share it.
+//
+// Derived from the representation the store writes rather than stated beside
+// it. The configured max_required_history_points is 4096 and the record runs
+// out at roughly 2100 points for one Level and 1400 for two, so the number in
+// the file describes a limit that cannot be reached and the real one was
+// written nowhere: a Plan configured between them compiled, activated, and
+// then had every state write refused per series with nothing to say why.
+//
+// When the record's representation changes, this follows it - the ceilings
+// rise and the configured limit becomes the binding one again, with nothing
+// else to revisit.
+func (c Config) retainedPointCeilings() []uint32 {
+	levels := c.Limits.Compiler.MaxLevelsPerPlan
+	if levels <= 0 {
+		return nil
+	}
+	// One past MaxLevelsPerPlan: a Plan that detects no-data compiles a Level
+	// for it beside the ones the strategy declares, and that Level's facts are
+	// written on the same points as the rest.
+	ceilings := make([]uint32, levels+2)
+	for count := 1; count < len(ceilings); count++ {
+		points, err := state.MaxRuntimeEnvelopePoints(count, c.Limits.Codec.MaxEncodedBytes)
+		if err != nil || points <= 0 {
+			continue
+		}
+		ceilings[count] = uint32(points)
+	}
+	return ceilings
 }

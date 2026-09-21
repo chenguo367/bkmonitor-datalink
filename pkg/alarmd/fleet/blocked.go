@@ -174,13 +174,23 @@ var failureFacets = map[string]facets{
 	"SCHEDULE_PRUNED": {StageSchedule, ClassRetention, DependencyNone},
 
 	// The stores and infrastructure this deployment depends on.
-	"REDIS_UNAVAILABLE":      {StageCommit, ClassUnavailable, DependencyRedis},
-	"KAFKA_UNAVAILABLE":      {StageCommit, ClassUnavailable, DependencyKafka},
-	"STATE_WRITE_RETRYABLE":  {StageCommit, ClassUnavailable, ""},
-	"OUTPUT_ACK_UNKNOWN":     {StageCommit, ClassUnavailable, DependencyKafka},
-	"SNAPSHOT_UNAVAILABLE":   {StageConfig, ClassUnavailable, ""},
-	"SNAPSHOT_RETRY_PENDING": {StageConfig, ClassUnavailable, ""},
-	"ACTIVATION_READ_FAILED": {StageConfig, ClassUnavailable, ""},
+	"REDIS_UNAVAILABLE": {StageCommit, ClassUnavailable, DependencyRedis},
+	// Deliberately not a dependency. The store answered every other caller on
+	// the same connection that second; what ran out was the time this process
+	// gave one of its own reads. Attributing it to Redis is what sent an
+	// investigation to a healthy dependency while the read that caused it went
+	// unmeasured, so it is named for the stage that issued it and carries no
+	// dependency at all.
+	"STATE_READ_TIMEOUT": {StageEvaluate, ClassCapacity, DependencyNone},
+	// The object is too big for one replica's share; no dependency is involved
+	// and waiting does not help.
+	"QG_BUDGET_SHARE_EXCEEDED": {StageEvaluate, ClassCapacity, DependencyNone},
+	"KAFKA_UNAVAILABLE":        {StageCommit, ClassUnavailable, DependencyKafka},
+	"STATE_WRITE_RETRYABLE":    {StageCommit, ClassUnavailable, ""},
+	"OUTPUT_ACK_UNKNOWN":       {StageCommit, ClassUnavailable, DependencyKafka},
+	"SNAPSHOT_UNAVAILABLE":     {StageConfig, ClassUnavailable, ""},
+	"SNAPSHOT_RETRY_PENDING":   {StageConfig, ClassUnavailable, ""},
+	"ACTIVATION_READ_FAILED":   {StageConfig, ClassUnavailable, ""},
 	// The store answered and the activation record was not in it: the
 	// configuration step with nothing to load. The code names the record
 	// and the store it lives in, so the dependency is named by it; whether

@@ -148,10 +148,10 @@ func (coordinator *SlotExecutionCoordinator) acquireProvisional(series, retained
 	coordinator.reservations.mu.Lock()
 	defer coordinator.reservations.mu.Unlock()
 	if series > coordinator.budget.MaxSeries-coordinator.reservations.series {
-		return budgetRejection(observability.CapacityBudgetSeries, phase, coordinator.reservations.series, series, coordinator.budget.MaxSeries, stream.ownBudget(observability.CapacityBudgetSeries))
+		return budgetRejection(observability.CapacityBudgetSeries, phase, coordinator.reservations.series, series, coordinator.budget.MaxSeries, stream.ownBudget(observability.CapacityBudgetSeries), stream.ownBudgetUsage(coordinator.budget))
 	}
 	if retainedBytes > coordinator.budget.MaxRetainedBytes-coordinator.reservations.retainedBytes {
-		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, coordinator.reservations.retainedBytes, retainedBytes, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes))
+		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, coordinator.reservations.retainedBytes, retainedBytes, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))
 	}
 	coordinator.reservations.series += series
 	coordinator.reservations.retainedBytes += retainedBytes
@@ -274,7 +274,10 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	}
 	if err := stream.complete(ctx, completion); err != nil {
 		coordinator.observeQueryFailure(ctx, request.Operation, started, "stream_complete", err)
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid query result: %w", err)
+		// Not "invalid query result": the query is only one of the things
+		// this step does, and the failure that brought 163 Slots down in a
+		// day was a state read of ours timing out, with the query fine.
+		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: complete Slot: %w", err)
 	}
 	execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
 		if c.InputCompleted != nil {
@@ -284,7 +287,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	queryResult, queryReason := provisionalResult(stream.evaluated)
 	coordinator.observeQueryCompleted(ctx, request.Operation, started, queryResult, queryReason, completion, stream.evaluated)
 	if len(stream.evaluated.Plans) == 0 {
-		return execution.SlotExecutionResult{Result: queryResult, ReasonCode: queryReason}, nil
+		return execution.SlotExecutionResult{Result: queryResult, ReasonCode: queryReason, Usage: stream.budgetUsage()}, nil
 	}
 
 	var result execution.SlotExecutionResult
@@ -307,7 +310,27 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		}
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: execute frozen Slot: %w", err)
 	}
+	// Filled at the one exit that has both the finished result and the stream
+	// that produced it. A Slot that ends any other way has no usage to report
+	// rather than a usage of zero, and the two must not arrive as one number.
+	result.Usage = stream.budgetUsage()
 	return result, nil
+}
+
+// budgetUsage is what this execution took of each budget, for the completion
+// row. It reads the same counters the rejection path reports, so a completion
+// and a refusal of the same Slot describe the same quantities.
+func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
+	if stream == nil {
+		return execution.SlotBudgetUsage{}
+	}
+	budget := stream.coordinator.budget
+	return execution.SlotBudgetUsage{
+		StateMutations: stream.effects.states, GapMutations: stream.effects.gaps,
+		Events: stream.effects.events, RetainedBytes: stream.retained, Series: stream.series,
+		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
+		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
+	}
 }
 
 func isReadinessDeferred(err error) bool {
@@ -1856,7 +1879,13 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 	var exceeded *provisionalBudgetExceededError
 	if errors.As(err, &exceeded) {
 		observation.CapacityRejection = exceeded.facts
-		if exceeded.slot {
+		switch {
+		case exceeded.share:
+			// This object is over the share any one of them may hold. Not a
+			// pause either, and not the same action as a Slot over the
+			// per-Slot cap: the strategy has to be sharded.
+			observation.ReasonCode = observability.ReasonCode(contract.ReasonQGBudgetShareExceeded)
+		case exceeded.slot:
 			// The Slot itself is too large for this process: not a pause that
 			// resumes when shared capacity frees up.
 			observation.ReasonCode = observability.ReasonCode(contract.ReasonSlotBudgetExceeded)
@@ -1864,6 +1893,25 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 	}
 	defer func() { _ = recover() }()
 	coordinator.ports.Observer.Observe(ctx, observation)
+}
+
+// qgShareBytes is the most of the retained-byte pool one Query Group's Slot may
+// hold: half of it.
+//
+// A share exists because acquireEffects otherwise only asks whether the pool
+// has room, so one object may legitimately take all of it and every other Query
+// Group on the replica starves. Placement spreads large objects across
+// replicas, which makes that less likely; it does not stop one object from
+// filling the replica it lands on.
+//
+// Half rather than a smaller fraction because the share has to leave the
+// largest object that legitimately exists able to run: on a 4 GiB replica half
+// the pool is 512 MiB, and the strategies this was measured on need 65 to 134
+// MiB. A strategy that does not fit in half a replica's pool is one that has to
+// be sharded, and refusing it by name is better than letting it fill the pool
+// and take its neighbours down with it.
+func (coordinator *SlotExecutionCoordinator) qgShareBytes() uint64 {
+	return coordinator.budget.MaxRetainedBytes / 2
 }
 
 func summarizeStateLoad(result execution.StatePreflightResult) (observability.Result, observability.ReasonCode) {

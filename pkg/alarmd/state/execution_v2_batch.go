@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -23,6 +25,19 @@ import (
 const (
 	// runtimeLoadBatchItems bounds the keys carried by one MGET.
 	runtimeLoadBatchItems = execution.StatePreflightBatchItems
+	// runtimeLoadBatchBytes bounds what one MGET is expected to return.
+	//
+	// The apply side has had a byte bound since it was written, and the reason
+	// given there applies unchanged here: with MaxValueBytes up to 512 KiB, an
+	// item bound alone lets one call carry 128 MiB. The read side was given
+	// only the item bound, and a Query Group whose records had grown to 345 KiB
+	// each duly asked for 86 MB in a single MGET - which does not fit a 3 s
+	// read timeout, failed identically on every attempt, and took the whole
+	// Slot with it.
+	//
+	// Sized like the apply side's, since the two move the same records through
+	// the same connection.
+	runtimeLoadBatchBytes = 8 << 20
 	// runtimeApplyBatchItems bounds the compare-and-set calls in one pipeline
 	// round trip.
 	runtimeApplyBatchItems = 256
@@ -477,6 +492,105 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	return item
 }
 
+// runtimeValueSizeGroups bounds how many Query Groups the store remembers a
+// record size for. Past it the table is dropped and relearned, which costs one
+// safe-sized batch per Query Group and never more than that.
+const runtimeValueSizeGroups = 4096
+
+// expectedValueBytes is what one record of this Query Group has been costing,
+// learned from the reads that came back.
+//
+// Per Query Group, because record size is a property of one strategy's
+// retention and Level count and nothing else. A process-wide average is the
+// number that is wrong for every Query Group at once: a replica holding two
+// thousand ordinary objects of a few KiB and one object of 345 KiB averages to
+// a few KiB, so the one object that needs a small batch is the one that gets
+// the largest - which is the shape this bound exists for, unbounded by the
+// bound meant to catch it.
+//
+// Zero until this Query Group has been read.
+func (store *ExecutionStore) expectedValueBytes(group execution.QueryGroupIdentity) (uint64, bool) {
+	store.valueSizes.mu.RLock()
+	defer store.valueSizes.mu.RUnlock()
+	size, learned := store.valueSizes.bytes[group]
+	return size, learned
+}
+
+// observeValueBytes folds one batch's result into that Query Group's average.
+//
+// Called only for a batch that came back. A failed read has loaded zero bytes,
+// and folding that in teaches the opposite of what the failure shows: the
+// average falls, the next batch is allowed to be at least as large, and the
+// read that was already too big to finish is reissued at the same size. An
+// instrument that learns "smaller" from the event it exists to catch reports
+// the reverse of the truth precisely when it is consulted.
+//
+// Recent reads weigh more, because the moment this matters is right after a
+// strategy's retention was raised, and a lifetime mean is slowest exactly then.
+func (store *ExecutionStore) observeValueBytes(group execution.QueryGroupIdentity, keys int, loaded int64) {
+	if keys <= 0 || loaded < 0 {
+		return
+	}
+	// Zero bytes off a batch that came back is a reading, not a blank. Every
+	// key missing is what a strategy that has not written state yet looks like,
+	// and it is the common case on a cold replica - refusing to learn from it
+	// would leave those Query Groups on the safe small batch for as long as
+	// they stay cold, which for a thousand keys is a hundred round trips where
+	// four would do. A read that did not come back is the one that teaches
+	// nothing, and that is decided by its error, not by its size.
+	sample := uint64(loaded) / uint64(keys)
+	store.valueSizes.mu.Lock()
+	defer store.valueSizes.mu.Unlock()
+	if store.valueSizes.bytes == nil {
+		store.valueSizes.bytes = make(map[execution.QueryGroupIdentity]uint64, 64)
+	}
+	previous, learned := store.valueSizes.bytes[group]
+	if !learned {
+		if len(store.valueSizes.bytes) >= runtimeValueSizeGroups {
+			// Relearn rather than grow without bound or evict by some rule
+			// nobody can predict. Every Query Group pays one safe-sized batch
+			// and is back where it was.
+			store.valueSizes.bytes = make(map[execution.QueryGroupIdentity]uint64, 64)
+		}
+		store.valueSizes.bytes[group] = sample
+		return
+	}
+	store.valueSizes.bytes[group] = (previous*3 + sample) / 4
+}
+
+// runtimeLoadBatchLimit is how many keys of this Query Group one MGET may ask
+// for: the item bound, reduced to what those records are expected to weigh.
+//
+// A Query Group nothing has been read for yet gets the only bound that holds
+// whatever its records turn out to be - the batch budget divided by the largest
+// value the store will accept. That is 16 keys at the shipped limits, which is
+// small for the great majority of records nowhere near that size, and it is the
+// right price for exactly one call: the alternative is to guess, and the guess
+// that matters is the one made for the object whose records are enormous.
+func (store *ExecutionStore) runtimeLoadBatchLimit(group execution.QueryGroupIdentity) int {
+	expected, learned := store.expectedValueBytes(group)
+	if !learned {
+		expected = uint64(store.options.MaxValueBytes)
+	}
+	if expected == 0 {
+		// Either nothing bounds a value here, or this Query Group's records
+		// have been coming back empty. Both are the item bound.
+		return runtimeLoadBatchItems
+	}
+	limit := int(runtimeLoadBatchBytes / expected)
+	switch {
+	case limit < 1:
+		// One key per call. A single record over the whole batch budget is
+		// still read - refusing it here would stop a Plan the store accepts -
+		// and it is read alone rather than beside others.
+		return 1
+	case limit > runtimeLoadBatchItems:
+		return runtimeLoadBatchItems
+	default:
+		return limit
+	}
+}
+
 // runtimeLoadBatch collects consecutive same-target keys for one MGET.
 type runtimeLoadBatch struct {
 	target  StorageTarget
@@ -488,16 +602,59 @@ func (batch *runtimeLoadBatch) reset() {
 	batch.indexes, batch.keys = batch.indexes[:0], batch.keys[:0]
 }
 
-// runtimeLoadFailure keeps the original per-key error mapping: an identity
-// error is deterministic-invalid corrupt state, anything else is retryable IO.
+// runtimeLoadFailure maps one failed read to a refusal.
+//
+// It used to have two buckets - an identity error was deterministic-invalid
+// corrupt state, and "anything else" was retryable IO named after the
+// dependency. A read of ours that did not fit its own timeout fell into the
+// second, so the fleet view reported a Redis outage for a Redis that was
+// answering every other caller. A timeout is now named for what it is: this
+// process asked for more than it left time to receive.
 func runtimeLoadFailure(view execution.RuntimeStateView, err error) execution.RuntimeStateView {
 	var identityErr *IdentityError
-	if errors.As(err, &identityErr) {
+	switch {
+	case errors.As(err, &identityErr):
 		view.BlobRevision, view.Status, view.ReasonCode = 1, execution.StateDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
-	} else {
+	case isReadTimeout(err):
+		view.Status, view.ReasonCode = execution.StateRetryableIO, execution.ReasonCode(contract.ReasonStateReadTimeout)
+	default:
 		view.Status, view.ReasonCode = execution.StateRetryableIO, execution.ReasonCode(contract.ReasonRedisUnavailable)
 	}
 	return view
+}
+
+// IsStateReadTimeout is isReadTimeout for callers outside this package, so the
+// worker names a failed preflight with the same test the store classifies one
+// with rather than a second opinion about what a timeout looks like.
+func IsStateReadTimeout(err error) bool { return isReadTimeout(err) }
+
+// isReadTimeout reports whether a read failed by running out of time rather
+// than by the dependency refusing or dropping it.
+//
+// Both shapes are checked because they arrive by different routes and only one
+// of them is a context: the client enforces its own read timeout and returns a
+// net error marked Timeout, while a deadline on the call returns the context
+// error. A build that checked only the context would keep calling the common
+// case - the client timeout - a dependency outage.
+func isReadTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	// A dial that timed out is the dependency not being reachable - a black
+	// hole, a partition, a server that is gone - and it is the one timeout that
+	// really is REDIS_UNAVAILABLE. Folding it in here would send it to the
+	// fleet view as this deployment's own doing and point the page at a read
+	// size that had nothing to do with it, which is the same misattribution
+	// this naming exists to end, aimed the other way.
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // loadRuntimeBatch reads one MGET batch and classifies every value on its own,
@@ -506,14 +663,20 @@ func runtimeLoadFailure(view execution.RuntimeStateView, err error) execution.Ru
 // whole batch retryable, exactly as the failed single reads did.
 func (store *ExecutionStore) loadRuntimeBatch(
 	ctx context.Context, request execution.StatePreflightRequest, batch *runtimeLoadBatch, views []execution.RuntimeStateView,
-) {
+) (loaded int64) {
 	if len(batch.indexes) == 0 {
-		return
+		return 0
 	}
 	values, err := batch.target.Backend.MGet(ctx, batch.keys)
 	if err == nil && len(values) != len(batch.keys) {
 		err = fmt.Errorf("state: invalid backend read cardinality")
 	}
+	// Only a batch that came back teaches anything; see observeValueBytes.
+	defer func() {
+		if err == nil {
+			store.observeValueBytes(request.Contract.Slot.QueryGroup, len(batch.keys), loaded)
+		}
+	}()
 	for position, index := range batch.indexes {
 		item := request.Items[index]
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
@@ -528,6 +691,7 @@ func (store *ExecutionStore) loadRuntimeBatch(
 		case len(raw) > store.options.MaxValueBytes:
 			view.BlobRevision, view.Status, view.ReasonCode = 1, execution.StateDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
 		default:
+			loaded += int64(len(raw))
 			view = decodeRuntime(raw, item.Identity, request.Contract, item.ApplyVersion)
 			if view.Status != execution.StateDeterministicInvalid {
 				store.witnesses.remember(request.Contract.Slot, item.Identity, runtimeWitness{digest: ExpectedValueDigest(raw),
@@ -536,6 +700,7 @@ func (store *ExecutionStore) loadRuntimeBatch(
 		}
 		views[index] = view
 	}
+	return loaded
 }
 
 var _ execution.FencedStateStore = (*ExecutionStore)(nil)

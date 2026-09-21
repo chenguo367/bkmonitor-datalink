@@ -105,8 +105,16 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonRecordTooLarge:        {ReasonRecordTooLarge, ReasonClassCoverage, ReasonDomainSummary | ReasonDomainObservation},
 	ReasonAuditDrop:             {ReasonAuditDrop, ReasonClassCoverage, ReasonDomainObservation},
 
-	ReasonKafkaUnavailable:      {ReasonKafkaUnavailable, ReasonClassRetryable, ReasonDomainSummary | ReasonDomainObservation},
-	ReasonRedisUnavailable:      {ReasonRedisUnavailable, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonKafkaUnavailable: {ReasonKafkaUnavailable, ReasonClassRetryable, ReasonDomainSummary | ReasonDomainObservation},
+	ReasonRedisUnavailable: {ReasonRedisUnavailable, ReasonClassRetryable, ReasonDomainObservation},
+	// Retryable: the Slot is retried by the scheduler, and a smaller read or a
+	// quieter link can succeed. Retryable does not make it the dependency's
+	// fault, which is why it has its own word.
+	ReasonStateReadTimeout: {ReasonStateReadTimeout, ReasonClassRetryable, ReasonDomainObservation},
+	// Deterministic: retrying reproduces it exactly. The Slot is over the share
+	// every time until the strategy's shape changes, so calling it retryable
+	// would have the scheduler back off and re-run it forever.
+	ReasonQGBudgetShareExceeded: {ReasonQGBudgetShareExceeded, ReasonClassDeterministic, ReasonDomainObservation},
 	ReasonProviderUnavailable:   {ReasonProviderUnavailable, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonProgressBeginRejected: {ReasonProgressBeginRejected, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonProgressBeginFailed:   {ReasonProgressBeginFailed, ReasonClassDeterministic, ReasonDomainObservation},

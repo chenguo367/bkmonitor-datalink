@@ -1931,6 +1931,7 @@ type Observation struct {
 	Err                   error
 	CapacityBudget        CapacityBudget
 	CapacityRejection     *CapacityRejectionFacts
+	SlotBudgetUsage       *SlotBudgetUsageFacts
 	SourceKind            SourceKind
 	QueryPermit           *QueryPermitFacts
 	NoDataSlot            *NoDataSlotFacts

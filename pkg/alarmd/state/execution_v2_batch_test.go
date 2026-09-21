@@ -29,6 +29,7 @@ type pipelineMemoryBackend struct {
 	casCalls     int
 	staleOwner   bool
 	failPipeline error
+	failMGet     error
 	guards       []*FenceGuard
 }
 
@@ -38,6 +39,9 @@ func newPipelineMemoryBackend() *pipelineMemoryBackend {
 
 func (backend *pipelineMemoryBackend) MGet(ctx context.Context, keys []string) ([][]byte, error) {
 	backend.mgetCalls++
+	if backend.failMGet != nil {
+		return nil, backend.failMGet
+	}
 	values, err := backend.casMemoryBackend.MGet(ctx, keys)
 	for index, key := range keys {
 		if _, found := backend.values[key]; !found {
@@ -197,8 +201,15 @@ func TestLoadRuntimeBatchesReadsAndIsolatesInvalidItems(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadRuntime() error = %v", err)
 	}
-	if backend.mgetCalls != 3 {
-		t.Fatalf("MGET round trips = %d, want ceil(600/256) = 3", backend.mgetCalls)
+	// One safe batch, then the item bound. A Query Group nothing has been read
+	// for yet is bounded by the batch budget over the largest value the store
+	// accepts, because that is the only bound that holds whatever its records
+	// turn out to be; the first batch teaches their real size and the rest run
+	// at the item bound. The extra round trip is that one call, per Query
+	// Group, and it is what stops a Query Group whose records grew to 345 KiB
+	// from asking for 86 MB in one MGET.
+	if backend.mgetCalls != 4 {
+		t.Fatalf("MGET round trips = %d, want 1 safe batch of 16 + ceil(584/256) = 4", backend.mgetCalls)
 	}
 	for index, view := range loaded.Items {
 		want := execution.StateMissingWarming
@@ -264,15 +275,24 @@ func TestApplyRuntimePipelinesWitnessedItemsAndStoresSequentialBytes(t *testing.
 	if _, err := batchedStore.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: preflightItems(mutations)}); err != nil {
 		t.Fatalf("LoadRuntime() error = %v", err)
 	}
-	if batched.mgetCalls != 4 {
-		t.Fatalf("preflight MGET round trips = %d, want ceil(1000/256) = 4", batched.mgetCalls)
+	// One safe batch, then the item bound. A Query Group nothing has been read
+	// for yet is bounded by the batch budget over the largest value the store
+	// accepts, because that is the only bound that holds whatever its records
+	// turn out to be; the first batch teaches their real size and the rest run
+	// at the item bound. The extra round trip is that one call, per Query
+	// Group, and it is what stops a Query Group whose records grew to 345 KiB
+	// from asking for 86 MB in one MGET.
+	if batched.mgetCalls != 5 {
+		t.Fatalf("preflight MGET round trips = %d, want 1 safe batch of 16 + ceil(984/256) = 5", batched.mgetCalls)
 	}
 	result, err := batchedStore.ApplyRuntimeFenced(context.Background(), request, testApplyFence())
 	if err != nil {
 		t.Fatalf("ApplyRuntimeFenced() error = %v", err)
 	}
 	requireAllStatus(t, result, execution.StateApplied)
-	if batched.pipelines != 4 || batched.pipelineKeys != 1000 || batched.casCalls != 0 || batched.mgetCalls != 4 {
+	// The MGETs are the preflight's five above; the apply itself re-reads
+	// nothing, which is what this counts.
+	if batched.pipelines != 4 || batched.pipelineKeys != 1000 || batched.casCalls != 0 || batched.mgetCalls != 5 {
 		t.Fatalf("apply round trips: pipelines=%d keys=%d cas=%d mget=%d, want 4 pipelines carrying 1000 keys and no re-read",
 			batched.pipelines, batched.pipelineKeys, batched.casCalls, batched.mgetCalls)
 	}
