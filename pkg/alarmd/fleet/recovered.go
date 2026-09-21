@@ -51,7 +51,26 @@ type RecoveredProblem struct {
 	// FirstRecovery and LastRecovery bound when they recovered.
 	FirstRecovery time.Time `json:"first_recovery"`
 	LastRecovery  time.Time `json:"last_recovery"`
+	// Samples names up to MaxRecoveredSample of the objects, most recent
+	// recovery first, with the strategies each one serves. Objects above is
+	// the count; a fold of two objects names both. Without them a fold that
+	// has ended is a count and a pair of clocks, and the question a reader
+	// has of it -- which two, and what failed -- was answered from the logs
+	// or not at all once the objects' own rows had let the failure go.
+	Samples []RecoveredSample `json:"samples,omitempty"`
 }
+
+// RecoveredSample is one recovered object of a fold, by identity.
+type RecoveredSample struct {
+	QueryGroup  string        `json:"query_group"`
+	Strategies  []StrategyRef `json:"strategies,omitempty"`
+	RecoveredAt time.Time     `json:"recovered_at"`
+}
+
+// MaxRecoveredSample bounds the identities a recovered fold names: enough to
+// name the two or three objects a fold usually holds, and a bound on the
+// fold that holds two hundred.
+const MaxRecoveredSample = 4
 
 // recoveredFold is the tracker's own record of one fold: the objects by
 // identity with each one's latest recovery, so an object that recovers twice
@@ -60,6 +79,9 @@ type RecoveredProblem struct {
 type recoveredFold struct {
 	problem RecoveredProblem
 	objects map[string]time.Time
+	// strategies is what each recovered object served when it recovered,
+	// for the fold's samples.
+	strategies map[string][]StrategyRef
 }
 
 func recoveredID(check Check, key string) string { return string(check) + "\x00" + key }
@@ -125,7 +147,7 @@ func (tracker *Tracker) noteDefectPassed(queryGroup string, state *queryGroupSta
 			since = *failure.At
 		}
 	}
-	tracker.recordRecoveryUnder(queryGroup, check, key, since, lastFailure, at)
+	tracker.recordRecoveryUnder(queryGroup, check, key, since, lastFailure, at, row.Strategies)
 	state.internal = nil
 }
 
@@ -184,22 +206,25 @@ func (tracker *Tracker) recordRecovery(queryGroup string, row Anomaly, at time.T
 	if row.Blocked != nil && row.Blocked.At != nil && row.Blocked.At.After(lastFailure) {
 		lastFailure = *row.Blocked.At
 	}
-	tracker.recordRecoveryUnder(queryGroup, row.Finding.Check, row.Finding.Group, row.Since, lastFailure, at)
+	tracker.recordRecoveryUnder(queryGroup, row.Finding.Check, row.Finding.Group, row.Since, lastFailure, at, row.Strategies)
 }
 
 // recordRecoveryUnder files one object's recovery under a line and fold, with
-// when the object's problem began and was last seen failing.
-func (tracker *Tracker) recordRecoveryUnder(queryGroup string, check Check, key string, since, lastFailure, at time.Time) {
+// when the object's problem began and was last seen failing, and which
+// strategies it served.
+func (tracker *Tracker) recordRecoveryUnder(queryGroup string, check Check, key string, since, lastFailure, at time.Time, strategies []StrategyRef) {
 	if tracker.recovered == nil {
 		tracker.recovered = map[string]*recoveredFold{}
 	}
 	id := recoveredID(check, key)
 	fold := tracker.recovered[id]
 	if fold == nil {
-		fold = &recoveredFold{problem: RecoveredProblem{Check: check, Key: key, FirstRecovery: at}, objects: map[string]time.Time{}}
+		fold = &recoveredFold{problem: RecoveredProblem{Check: check, Key: key, FirstRecovery: at},
+			objects: map[string]time.Time{}, strategies: map[string][]StrategyRef{}}
 		tracker.recovered[id] = fold
 	}
 	fold.objects[queryGroup] = at
+	fold.strategies[queryGroup] = append([]StrategyRef(nil), strategies...)
 	fold.problem.Objects = len(fold.objects)
 	if !since.IsZero() && (fold.problem.FirstFailure.IsZero() || since.Before(fold.problem.FirstFailure)) {
 		fold.problem.FirstFailure = since
@@ -229,6 +254,7 @@ func (tracker *Tracker) Recovered() []RecoveredProblem {
 		for queryGroup, recoveredAt := range fold.objects {
 			if now.Sub(recoveredAt) > RecoveredRetention {
 				delete(fold.objects, queryGroup)
+				delete(fold.strategies, queryGroup)
 			}
 		}
 		fold.problem.Objects = len(fold.objects)
@@ -236,7 +262,9 @@ func (tracker *Tracker) Recovered() []RecoveredProblem {
 			delete(tracker.recovered, id)
 			continue
 		}
-		problems = append(problems, fold.problem)
+		problem := fold.problem
+		problem.Samples = recoveredSamples(fold)
+		problems = append(problems, problem)
 	}
 	sort.Slice(problems, func(i, j int) bool {
 		if problems[i].Check != problems[j].Check {
@@ -245,6 +273,26 @@ func (tracker *Tracker) Recovered() []RecoveredProblem {
 		return problems[i].Key < problems[j].Key
 	})
 	return problems
+}
+
+// recoveredSamples names the fold's most recently recovered objects, at
+// most MaxRecoveredSample, most recent first and by identity on a tie so
+// two reads of one fold name the same objects.
+func recoveredSamples(fold *recoveredFold) []RecoveredSample {
+	samples := make([]RecoveredSample, 0, len(fold.objects))
+	for queryGroup, recoveredAt := range fold.objects {
+		samples = append(samples, RecoveredSample{QueryGroup: queryGroup, Strategies: fold.strategies[queryGroup], RecoveredAt: recoveredAt})
+	}
+	sort.Slice(samples, func(i, j int) bool {
+		if !samples[i].RecoveredAt.Equal(samples[j].RecoveredAt) {
+			return samples[i].RecoveredAt.After(samples[j].RecoveredAt)
+		}
+		return samples[i].QueryGroup < samples[j].QueryGroup
+	})
+	if len(samples) > MaxRecoveredSample {
+		samples = samples[:MaxRecoveredSample]
+	}
+	return samples
 }
 
 // mergeRecovered folds one replica's recovered problems into the view's,
@@ -274,6 +322,10 @@ func mergeRecovered(view *View, problems []RecoveredProblem) {
 			if problem.LastRecovery.After(existing.LastRecovery) {
 				existing.LastRecovery = problem.LastRecovery
 			}
+			// The samples merge the way the count does: the replicas' most
+			// recent, cut to the bound, an object seen on two replicas kept
+			// once. The count stays a sum, as the page says it is.
+			existing.Samples = mergeRecoveredSamples(existing.Samples, problem.Samples)
 			merged = true
 			break
 		}
@@ -281,4 +333,31 @@ func mergeRecovered(view *View, problems []RecoveredProblem) {
 			view.Recovered = append(view.Recovered, problem)
 		}
 	}
+}
+
+// mergeRecoveredSamples joins two replicas' samples of one fold: most recent
+// first, one entry per object, at most MaxRecoveredSample.
+func mergeRecoveredSamples(left, right []RecoveredSample) []RecoveredSample {
+	all := append(append([]RecoveredSample(nil), left...), right...)
+	// Ordered before the objects are made unique, so the entry kept for an
+	// object seen on two replicas is its most recent recovery.
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].RecoveredAt.Equal(all[j].RecoveredAt) {
+			return all[i].RecoveredAt.After(all[j].RecoveredAt)
+		}
+		return all[i].QueryGroup < all[j].QueryGroup
+	})
+	seen := map[string]bool{}
+	merged := make([]RecoveredSample, 0, len(all))
+	for _, sample := range all {
+		if seen[sample.QueryGroup] {
+			continue
+		}
+		seen[sample.QueryGroup] = true
+		merged = append(merged, sample)
+		if len(merged) == MaxRecoveredSample {
+			break
+		}
+	}
+	return merged
 }
