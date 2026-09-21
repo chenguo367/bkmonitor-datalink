@@ -60,9 +60,11 @@ func CostSummaryCapacityBytes(o CostSummaryOptions) int64 {
 		return 0
 	}
 	groups, plans := int64(o.GroupCapacity), int64(o.PlanCapacity)
-	rows := min(groups+plans, 12*int64(o.TopN))
+	// Two scopes times the dimensions, TopN rows each.
+	rankingRows := int64(2 * len(costDimensions) * o.TopN)
+	rows := min(groups+plans, rankingRows)
 	return 2*(groups*(int64(unsafe.Sizeof(costGroupState{}))+256)+plans*(int64(unsafe.Sizeof(costPlanState{}))+256)+int64(o.MetadataBytes)) +
-		3*(rows*int64(unsafe.Sizeof(CostContributor{}))+plans*int64(unsafe.Sizeof(CostPlanIdentity{}))+12*int64(o.TopN)*8)
+		3*(rows*int64(unsafe.Sizeof(CostContributor{}))+plans*int64(unsafe.Sizeof(CostPlanIdentity{}))+rankingRows*8)
 }
 
 type CostWall struct {
@@ -91,12 +93,18 @@ type CostScalars struct {
 	StateCalls               uint64   `json:"state_calls"`
 	StateKeys                uint64   `json:"state_keys"`
 	StateKeysUnknown         uint64   `json:"state_keys_unknown"`
-	StateWall                CostWall `json:"state_wall"`
-	RunWall                  CostWall `json:"run_wall"`
-	MaxLagNS                 int64    `json:"max_lag_ns"`
-	LagMeasured              uint64   `json:"lag_measured"`
-	LagUnknown               uint64   `json:"lag_unknown"`
-	LastProgressUnix         int64    `json:"last_progress_unix"`
+	// StateBytes is the encoded state the calls carried, as the store
+	// measured it; a call that reported keys and no bytes counts under
+	// StateBytesUnknown rather than as zero bytes. The dimension that says
+	// which object is the 86 MB one: keys alone read 249 keys as small.
+	StateBytes        uint64   `json:"state_bytes"`
+	StateBytesUnknown uint64   `json:"state_bytes_unknown"`
+	StateWall         CostWall `json:"state_wall"`
+	RunWall           CostWall `json:"run_wall"`
+	MaxLagNS          int64    `json:"max_lag_ns"`
+	LagMeasured       uint64   `json:"lag_measured"`
+	LagUnknown        uint64   `json:"lag_unknown"`
+	LastProgressUnix  int64    `json:"last_progress_unix"`
 }
 
 type costWindows struct {
@@ -358,11 +366,24 @@ func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
 		} else {
 			s.StateKeysUnknown++
 		}
+		if o.Counts.StateBytes > 0 {
+			s.StateBytes += uint64(o.Counts.StateBytes)
+		} else {
+			s.StateBytesUnknown++
+		}
 		addWall(&s.StateWall, o)
 	}
 }
 
-var costDimensions = [...]string{"evaluation_records", "evaluation_wall_observed", "state_calls", "state_keys", "run_wall", "lag"}
+// costDimensions are the rankings a snapshot carries, per scope. query_wall
+// and state_bytes were added for the two questions the others could not
+// answer: which object's query is the slow one (run wall contains the wait
+// for readiness and the state work), and which object's state is the big
+// one (state_keys read a 249-key, 86 MB object as small).
+var costDimensions = [...]string{"evaluation_records", "evaluation_wall_observed", "state_calls", "state_keys", "run_wall", "lag", "query_wall", "state_bytes"}
+
+// CostDimensions is the closed list, for readers that bound a ranking by it.
+func CostDimensions() []string { return append([]string(nil), costDimensions[:]...) }
 
 func costRank(w costWindows, dimension int) int64 {
 	a, b := w.current, w.previous
@@ -377,8 +398,12 @@ func costRank(w costWindows, dimension int) int64 {
 		return int64(a.StateKeys + b.StateKeys)
 	case 4:
 		return a.RunWall.ObservedNS + b.RunWall.ObservedNS
-	default:
+	case 5:
 		return max(a.MaxLagNS, b.MaxLagNS)
+	case 6:
+		return a.QueryWall.ObservedNS + b.QueryWall.ObservedNS
+	default:
+		return int64(a.StateBytes + b.StateBytes)
 	}
 }
 
