@@ -908,6 +908,15 @@ type StatePreflightRequest struct {
 
 type StatePreflightResult struct {
 	Items []RuntimeStateView
+	// LoadedBytes is how much this preflight actually read back.
+	//
+	// It is reported on every successful load rather than only when one fails,
+	// because a read that has grown too big to finish stops producing the
+	// number on exactly the rounds worth seeing: the read did not come back, so
+	// there are no bytes to count. A size only visible while everything works
+	// is what lets a state read reach 86 MB per Slot unremarked and then arrive
+	// as a dependency outage.
+	LoadedBytes int64
 }
 
 func (result StatePreflightResult) Find(identity StateKeyIdentity) (RuntimeStateView, bool) {

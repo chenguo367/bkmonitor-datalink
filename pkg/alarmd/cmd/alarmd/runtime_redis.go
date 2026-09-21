@@ -53,6 +53,21 @@ func productionRedisOptions(connection config.RedisConnectionConfig) *redis.Univ
 		DB: connection.DB, DialTimeout: connection.DialTimeout.Duration(), ReadTimeout: connection.ReadTimeout.Duration(),
 		WriteTimeout: connection.WriteTimeout.Duration(),
 		PoolSize:     connection.EffectivePoolSize(0),
+		// One attempt. The scheduler already owns retrying: a Go error from
+		// Execute records a failed attempt of the frozen Slot, which is parked
+		// in the delayed queue with exponential backoff and no attempt cap, and
+		// the retry re-reads current state rather than resending the same
+		// bytes. The client's own retries add nothing to that and multiply what
+		// it costs - the default three turns a 3 s read timeout into 12 s of a
+		// worker held on a read that fails identically every time.
+		//
+		// Worse than wasteful on short-period Plans. Their completion context
+		// carries a hard deadline, and 12 s spent inside it means the Slot dies
+		// with the context already expired - which is the first condition
+		// executionErrorBacksOff refuses, so no attempt is recorded and no
+		// retry is scheduled at all. Stacking the two retry layers converted a
+		// retryable failure into one nothing retries.
+		MaxRetries: -1,
 	}
 }
 

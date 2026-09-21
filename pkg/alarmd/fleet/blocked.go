@@ -174,7 +174,14 @@ var failureFacets = map[string]facets{
 	"SCHEDULE_PRUNED": {StageSchedule, ClassRetention, DependencyNone},
 
 	// The stores and infrastructure this deployment depends on.
-	"REDIS_UNAVAILABLE":      {StageCommit, ClassUnavailable, DependencyRedis},
+	"REDIS_UNAVAILABLE": {StageCommit, ClassUnavailable, DependencyRedis},
+	// Deliberately not a dependency. The store answered every other caller on
+	// the same connection that second; what ran out was the time this process
+	// gave one of its own reads. Attributing it to Redis is what sent an
+	// investigation to a healthy dependency while the read that caused it went
+	// unmeasured, so it is named for the stage that issued it and carries no
+	// dependency at all.
+	"STATE_READ_TIMEOUT":     {StageEvaluate, ClassCapacity, DependencyNone},
 	"KAFKA_UNAVAILABLE":      {StageCommit, ClassUnavailable, DependencyKafka},
 	"STATE_WRITE_RETRYABLE":  {StageCommit, ClassUnavailable, ""},
 	"OUTPUT_ACK_UNKNOWN":     {StageCommit, ClassUnavailable, DependencyKafka},

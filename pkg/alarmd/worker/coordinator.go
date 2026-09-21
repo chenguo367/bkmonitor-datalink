@@ -274,7 +274,10 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	}
 	if err := stream.complete(ctx, completion); err != nil {
 		coordinator.observeQueryFailure(ctx, request.Operation, started, "stream_complete", err)
-		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: invalid query result: %w", err)
+		// Not "invalid query result": the query is only one of the things
+		// this step does, and the failure that brought 163 Slots down in a
+		// day was a state read of ours timing out, with the query fine.
+		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: complete Slot: %w", err)
 	}
 	execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
 		if c.InputCompleted != nil {

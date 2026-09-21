@@ -95,6 +95,20 @@ const (
 	ReasonHistoryGapped         = "HISTORY_GAPPED"
 	ReasonKafkaUnavailable      = "KAFKA_UNAVAILABLE"
 	ReasonRedisUnavailable      = "REDIS_UNAVAILABLE"
+	// ReasonStateReadTimeout names a Runtime State read this process issued
+	// that did not come back inside its own timeout. It is not
+	// REDIS_UNAVAILABLE, and the difference is the whole point: the dependency
+	// answered every other caller on the same connection that second. What
+	// happened is that one read of ours was too big to finish in the time we
+	// gave it, which is our shape to fix and not the dependency's health.
+	//
+	// Named because the refusal it replaced sent every reader to the wrong
+	// place. The state read that produced it was 86 MB for a single Query
+	// Group, it timed out identically on every attempt, and it arrived in the
+	// fleet view as a Redis outage - so the investigation began at a
+	// dependency that was fine, while the row carried nothing about how much
+	// had been asked for.
+	ReasonStateReadTimeout      = "STATE_READ_TIMEOUT"
 	ReasonProviderUnavailable   = "PROVIDER_UNAVAILABLE"
 	ReasonProgressBeginRejected = "PROGRESS_BEGIN_REJECTED"
 	ReasonProgressBeginFailed   = "PROGRESS_BEGIN_FAILED"

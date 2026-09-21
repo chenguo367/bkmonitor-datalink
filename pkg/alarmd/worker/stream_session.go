@@ -1341,13 +1341,26 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 		loaded, err = execution.ClassifyStatePreflight(stateRequest, loaded)
 	}
 	if err != nil {
-		stream.coordinator.observe(ctx, observability.ComponentState, observability.StageStatePreflight,
-			stream.request.Operation, started, "", "", err)
+		// The read's own facts, because they are the ones that decide what to
+		// do. A read that did not come back has no byte count - that is why the
+		// size is reported on the rounds that succeed - so the line carries how
+		// many keys were asked for and how long the attempt took, which is what
+		// separates "the dependency is down" from "we asked for too much".
+		//
+		// This branch is for a request the store refused outright. A read that
+		// timed out arrives instead as per-item views the store has already
+		// named, and summarizeStateLoad carries that name onto the row below,
+		// which is why the naming lives with the classification rather than
+		// being decided a second time here.
+		stream.coordinator.observeWithCounts(ctx, observability.ComponentState, observability.StageStatePreflight,
+			stream.request.Operation, started, "", "",
+			observability.Counts{Keys: int64(len(stateItems))}, err)
 		return fmt.Errorf("alarmd worker: series state preflight: %w", err)
 	}
 	stateResult, stateReason := summarizeStateLoad(loaded)
 	stream.coordinator.observeWithCounts(ctx, observability.ComponentState, observability.StageStatePreflight,
-		stream.request.Operation, started, stateResult, stateReason, observability.Counts{Keys: int64(len(loaded.Items))}, nil)
+		stream.request.Operation, started, stateResult, stateReason,
+		observability.Counts{Keys: int64(len(loaded.Items)), StateBytes: loaded.LoadedBytes}, nil)
 	for index, entry := range batch {
 		if err := stream.evaluateLoadedSeries(ctx, entry, loaded.Items[index]); err != nil {
 			return err

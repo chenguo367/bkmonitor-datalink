@@ -423,7 +423,12 @@ var codeChecks = map[string]verdict{
 
 	// This deployment's own stores and infrastructure did not answer. Retrying
 	// may help, and nobody outside can help.
-	"REDIS_UNAVAILABLE":      lands(CheckDependencyDown),
+	"REDIS_UNAVAILABLE": lands(CheckDependencyDown),
+	// Not DEPENDENCY_DOWN: this deployment asked for more than it left time to
+	// receive, and the fix is the size of the read rather than the health of
+	// the store. Landing it with the dependencies is what made 163 of these in
+	// one day read as a Redis incident.
+	"STATE_READ_TIMEOUT":     lands(CheckDefect),
 	"KAFKA_UNAVAILABLE":      lands(CheckDependencyDown),
 	"STATE_WRITE_RETRYABLE":  lands(CheckDependencyDown),
 	"OUTPUT_ACK_UNKNOWN":     lands(CheckDependencyDown),

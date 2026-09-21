@@ -204,14 +204,14 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			continue
 		}
 		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= runtimeLoadBatchItems) {
-			store.loadRuntimeBatch(ctx, request, batch, result.Items)
+			result.LoadedBytes += store.loadRuntimeBatch(ctx, request, batch, result.Items)
 			batch.reset()
 		}
 		batch.target = target
 		batch.indexes = append(batch.indexes, index)
 		batch.keys = append(batch.keys, key)
 	}
-	store.loadRuntimeBatch(ctx, request, batch, result.Items)
+	result.LoadedBytes += store.loadRuntimeBatch(ctx, request, batch, result.Items)
 	return execution.ClassifyStatePreflight(request, result)
 }
 

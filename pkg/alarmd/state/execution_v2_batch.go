@@ -9,6 +9,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"os"
 	"sync"
 	"time"
 
@@ -488,16 +490,49 @@ func (batch *runtimeLoadBatch) reset() {
 	batch.indexes, batch.keys = batch.indexes[:0], batch.keys[:0]
 }
 
-// runtimeLoadFailure keeps the original per-key error mapping: an identity
-// error is deterministic-invalid corrupt state, anything else is retryable IO.
+// runtimeLoadFailure maps one failed read to a refusal.
+//
+// It used to have two buckets - an identity error was deterministic-invalid
+// corrupt state, and "anything else" was retryable IO named after the
+// dependency. A read of ours that did not fit its own timeout fell into the
+// second, so the fleet view reported a Redis outage for a Redis that was
+// answering every other caller. A timeout is now named for what it is: this
+// process asked for more than it left time to receive.
 func runtimeLoadFailure(view execution.RuntimeStateView, err error) execution.RuntimeStateView {
 	var identityErr *IdentityError
-	if errors.As(err, &identityErr) {
+	switch {
+	case errors.As(err, &identityErr):
 		view.BlobRevision, view.Status, view.ReasonCode = 1, execution.StateDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
-	} else {
+	case isReadTimeout(err):
+		view.Status, view.ReasonCode = execution.StateRetryableIO, execution.ReasonCode(contract.ReasonStateReadTimeout)
+	default:
 		view.Status, view.ReasonCode = execution.StateRetryableIO, execution.ReasonCode(contract.ReasonRedisUnavailable)
 	}
 	return view
+}
+
+// IsStateReadTimeout is isReadTimeout for callers outside this package, so the
+// worker names a failed preflight with the same test the store classifies one
+// with rather than a second opinion about what a timeout looks like.
+func IsStateReadTimeout(err error) bool { return isReadTimeout(err) }
+
+// isReadTimeout reports whether a read failed by running out of time rather
+// than by the dependency refusing or dropping it.
+//
+// Both shapes are checked because they arrive by different routes and only one
+// of them is a context: the client enforces its own read timeout and returns a
+// net error marked Timeout, while a deadline on the call returns the context
+// error. A build that checked only the context would keep calling the common
+// case - the client timeout - a dependency outage.
+func isReadTimeout(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 // loadRuntimeBatch reads one MGET batch and classifies every value on its own,
@@ -506,9 +541,9 @@ func runtimeLoadFailure(view execution.RuntimeStateView, err error) execution.Ru
 // whole batch retryable, exactly as the failed single reads did.
 func (store *ExecutionStore) loadRuntimeBatch(
 	ctx context.Context, request execution.StatePreflightRequest, batch *runtimeLoadBatch, views []execution.RuntimeStateView,
-) {
+) (loaded int64) {
 	if len(batch.indexes) == 0 {
-		return
+		return 0
 	}
 	values, err := batch.target.Backend.MGet(ctx, batch.keys)
 	if err == nil && len(values) != len(batch.keys) {
@@ -528,6 +563,7 @@ func (store *ExecutionStore) loadRuntimeBatch(
 		case len(raw) > store.options.MaxValueBytes:
 			view.BlobRevision, view.Status, view.ReasonCode = 1, execution.StateDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
 		default:
+			loaded += int64(len(raw))
 			view = decodeRuntime(raw, item.Identity, request.Contract, item.ApplyVersion)
 			if view.Status != execution.StateDeterministicInvalid {
 				store.witnesses.remember(request.Contract.Slot, item.Identity, runtimeWitness{digest: ExpectedValueDigest(raw),
@@ -536,6 +572,7 @@ func (store *ExecutionStore) loadRuntimeBatch(
 		}
 		views[index] = view
 	}
+	return loaded
 }
 
 var _ execution.FencedStateStore = (*ExecutionStore)(nil)
