@@ -642,11 +642,16 @@ func (tracker *Tracker) SetPlatformNoDataHorizon(read func() int64) {
 	tracker.platformHorizon = read
 }
 
-// horizonSourceOf reads where a Plan's effective horizon came from. The Plan
-// carries the number and not its origin; see NoDataHorizonSources for why
-// the comparison is the honest reading and where it is ambiguous.
-func (tracker *Tracker) horizonSourceOf(horizon int64) string {
+// horizonSourceOf reads where a Plan's effective horizon came from: what
+// compilation froze beside the number when the line carries it, and the
+// comparison against the platform's horizon only for a line that does not -
+// a Plan compiled before the source was frozen, or a Worker from before the
+// line carried it. See NoDataHorizonSources for why the comparison is only
+// the fallback and where it is ambiguous.
+func (tracker *Tracker) horizonSourceOf(horizon int64, frozen string) string {
 	switch {
+	case frozen == NoDataHorizonPlatform || frozen == NoDataHorizonStrategy:
+		return frozen
 	case tracker.platformHorizon == nil:
 		return NoDataHorizonUnknown
 	case horizon <= 0:
@@ -815,7 +820,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		}
 		state.noDataTracking[plan] = &NoDataTracking{
 			Plan:           plan,
-			HorizonSeconds: absence.HorizonSeconds, HorizonSource: tracker.horizonSourceOf(absence.HorizonSeconds),
+			HorizonSeconds: absence.HorizonSeconds, HorizonSource: tracker.horizonSourceOf(absence.HorizonSeconds, absence.HorizonSource),
 			RosterSource: absence.RosterSource, Expected: absence.Expected, Present: absence.Present,
 			Absent: absence.Absent, ExpiredThisRound: absence.Expired, Suppressed: absence.Suppressed,
 			Dropped: absence.Dropped, EvaluationTime: trace.EvaluationTime, DecidedAt: at,

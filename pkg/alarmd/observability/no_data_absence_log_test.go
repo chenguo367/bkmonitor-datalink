@@ -29,7 +29,7 @@ func TestTheAbsenceLineRendersEveryCountUnderItsOwnKey(t *testing.T) {
 		Component: ComponentEvaluation, Stage: StageNoDataDecided, Result: ResultSuccess,
 		Trace: TraceFields{StrategyID: "4101", BusinessID: "7", QueryGroupKey: "qg-absence", EvaluationTime: 600},
 		NoDataAbsence: &NoDataAbsenceFacts{
-			Outcome: "EVALUATED", HorizonSeconds: 3600, RosterSource: "TARGET_STATIC",
+			Outcome: "EVALUATED", HorizonSeconds: 3600, HorizonSource: "STRATEGY", RosterSource: "TARGET_STATIC",
 			Expected: 10, Present: 6, Absent: 2, Unavailable: 0, Dropped: 0, Expired: 1, Suppressed: 1,
 		},
 	})
@@ -42,6 +42,7 @@ func TestTheAbsenceLineRendersEveryCountUnderItsOwnKey(t *testing.T) {
 		"strategy_id":             "4101",
 		"no_data_outcome":         "EVALUATED",
 		"no_data_horizon_seconds": float64(3600),
+		"no_data_horizon_source":  "STRATEGY",
 		"no_data_roster_source":   "TARGET_STATIC",
 		"no_data_expected":        float64(10),
 		"no_data_present":         float64(6),

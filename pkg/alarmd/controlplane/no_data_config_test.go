@@ -283,37 +283,61 @@ func TestNoDataRosterUnsupportedNamesOnlyWhatThisBuildCannotDerive(t *testing.T)
 }
 
 // The effective horizon is settled at compile time from the deployment default
-// and the item's own override, and frozen into the Plan.
+// and the item's own override, and frozen into the Plan with the word saying
+// which of the two it came from.
 //
 // Settled here so that exactly one place decides it. Every layer below - the
 // worker, the slot, the evaluator - takes the number it is given; if any of
 // them also consulted a setting, two of them would answer differently the
 // moment either input changed, and the one that wins would depend on which
 // layer a reader happened to look at.
+//
+// The source is frozen for the same reason and one more: the number alone
+// cannot say. An item that states exactly the platform's value and one that
+// inherited it carry the same number, and a reader inferring the source by
+// comparison reads both as the platform's - until the platform's value
+// moves, when it reads every Plan compiled under the old value as the
+// strategy's own. The row where the item states the platform's exact value
+// is the one that comparison can never get right.
 func TestTheEffectiveHorizonIsSettledWhereThePlanIsFrozen(t *testing.T) {
 	item := func(section string) legacyItem { return noDataItem(t, section) }
 
 	for name, test := range map[string]struct {
-		section  string
-		platform int64
-		want     int64
-		because  string
+		section    string
+		platform   int64
+		want       int64
+		wantSource contract.NoDataHorizonSource
+		because    string
 	}{
 		"the deployment's default applies to an item that says nothing": {
 			section: `{"is_enabled":true,"continuous":5}`, platform: 600, want: 600,
-			because: "configuring the horizon platform-wide is the ordinary way to configure it",
+			wantSource: contract.NoDataHorizonSourcePlatform,
+			because:    "configuring the horizon platform-wide is the ordinary way to configure it",
 		},
 		"the item's own horizon wins over the deployment's": {
 			section: `{"is_enabled":true,"continuous":5,"tracking_horizon_seconds":120}`, platform: 600, want: 120,
-			because: "an item that states one has said what it wants",
+			wantSource: contract.NoDataHorizonSourceStrategy,
+			because:    "an item that states one has said what it wants",
+		},
+		"the item's own horizon is its own even at exactly the deployment's value": {
+			section: `{"is_enabled":true,"continuous":5,"tracking_horizon_seconds":600}`, platform: 600, want: 600,
+			wantSource: contract.NoDataHorizonSourceStrategy,
+			because:    "the item will keep 600 when the deployment moves to 1200; a reader comparing values would say PLATFORM",
 		},
 		"no horizon anywhere is what every deployment had before the setting": {
 			section: `{"is_enabled":true,"continuous":5}`, platform: 0, want: 0,
-			because: "a deployment that set none leaves tracking unlimited, the behaviour this replaces",
+			wantSource: "",
+			because:    "a deployment that set none leaves tracking unlimited, the behaviour this replaces",
+		},
+		"the item's own horizon while the deployment has none": {
+			section: `{"is_enabled":true,"continuous":5,"tracking_horizon_seconds":120}`, platform: 0, want: 120,
+			wantSource: contract.NoDataHorizonSourceStrategy,
+			because:    "the source names whose number it is, not whether the platform had one to compare against",
 		},
 		"a quoted horizon is read as a number like every other number here": {
 			section: `{"is_enabled":true,"continuous":5,"tracking_horizon_seconds":"900"}`, platform: 600, want: 900,
-			because: "the section is a bare dict and the backend reads its numbers with int()",
+			wantSource: contract.NoDataHorizonSourceStrategy,
+			because:    "the section is a bare dict and the backend reads its numbers with int()",
 		},
 	} {
 		test := test
@@ -325,6 +349,10 @@ func TestTheEffectiveHorizonIsSettledWhereThePlanIsFrozen(t *testing.T) {
 			if config.TrackingHorizonSeconds != test.want {
 				t.Fatalf("frozen horizon = %d, want %d: %s",
 					config.TrackingHorizonSeconds, test.want, test.because)
+			}
+			if config.TrackingHorizonSource != test.wantSource {
+				t.Fatalf("frozen horizon source = %q, want %q: %s",
+					config.TrackingHorizonSource, test.wantSource, test.because)
 			}
 		})
 	}

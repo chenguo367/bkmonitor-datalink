@@ -1290,6 +1290,9 @@ func frozenNoDataConfig(item legacyItem, policy NoDataPolicy) (*contract.NoDataC
 	// naming where the configuration is checked, rather than a silent switch
 	// back to the unbounded tracking this whole decision exists to end.
 	config.TrackingHorizonSeconds = policy.TrackingHorizonSeconds
+	if policy.TrackingHorizonSeconds > 0 {
+		config.TrackingHorizonSource = contract.NoDataHorizonSourcePlatform
+	}
 	horizon, stated, err := legacyNoDataNumber("tracking_horizon_seconds", source.TrackingHorizonSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("alarmd controlplane: item %d %w", item.ID, err)
@@ -1299,7 +1302,11 @@ func frozenNoDataConfig(item legacyItem, policy NoDataPolicy) (*contract.NoDataC
 			return nil, fmt.Errorf("alarmd controlplane: item %d no_data_config tracking_horizon_seconds "+
 				"must be a positive number of seconds; remove the field to inherit the platform's", item.ID)
 		}
+		// The source is frozen beside the number: a reader of the Plan does
+		// not have to compare it against the platform's current value to
+		// know whose it is.
 		config.TrackingHorizonSeconds = int64(horizon)
+		config.TrackingHorizonSource = contract.NoDataHorizonSourceStrategy
 	}
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("alarmd controlplane: item %d no_data_config: %w", item.ID, err)
