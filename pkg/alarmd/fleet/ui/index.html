@@ -2802,6 +2802,7 @@ var ENDPOINT = {
   strategy_cache: '策略缓存（平台写、alarmd 读）',
   cmdb_cache: 'CMDB 主机缓存（平台写、alarmd 读）',
   dynamic_config: '平台动态配置（平台写、alarmd 读）',
+  open_alert_set: '未恢复时序指纹集合（告警消费方写、alarmd 读；恢复门据此判有没有可恢复的告警）',
   query_backend: '查询后端（unify-query）',
   output_kafka: '告警输出 Kafka（topic 在前缀列）',
   compat_output_redis: '兼容输出用的服务 Redis（策略快照）'
@@ -2900,8 +2901,62 @@ function writerWords(dep) {
         + (w.state && w.state !== 'loaded' ? '（' + w.state + '）' : '');
     case 'dynamic_config':
       return (w.present ? '有：已加载' + (age ? '，' + age : '') : '没有') + (w.state ? '（' + w.state + '）' : '');
+    case 'open_alert_set':
+      return openAlertSetWords(dep);
   }
   return w.present ? '有' : '没有';
+}
+
+// The reader's account of the alert consumer's publication, as one sentence:
+// whether it has ever been read, the publisher's own heartbeat and cycle,
+// the fingerprint version on both sides (a mismatch is a publication every
+// lookup misses, which reads exactly like "no open alert"), what is held,
+// and -- the part the object list never shows -- whether the recovery gate
+// has been answering on the consumer's word or on the copy's own.
+var OPEN_ALERT_MODE = {
+  never_loaded: '从未读到发布',
+  authoritative: '以消费方的发布为准',
+  self_maintained: '发布不可用，按本副本自己的记录放行/扣留'
+};
+var OPEN_ALERT_UNAVAILABLE = {
+  read_error: '读不到（Redis 读失败）',
+  heartbeat_missing: '心跳键不存在——消费方没有在这个地址、这个前缀下发布',
+  heartbeat_unreadable: '心跳字段读不出',
+  heartbeat_stale: '心跳过期（超过 3 个发布周期没更新）',
+  fingerprint_version: '指纹版本与本端不同——每次查询都会落空，读起来像"没有未恢复告警"'
+};
+var OPEN_ALERT_ANSWER = {
+  authoritative_member: '发布里有',
+  authoritative_absent: '发布里没有',
+  recently_sent: '本副本刚发过',
+  not_yet_loaded: '首轮未装载',
+  self_maintained: '按本副本记录',
+  passed_through: '直接放行'
+};
+function openAlertSetWords(dep) {
+  var a = dep.open_alert_set;
+  var w = dep.writer;
+  if (!a) return w && w.present ? '有' : '没有';
+  var parts = [];
+  if (a.heartbeat_age_seconds !== undefined && a.heartbeat_age_seconds !== null) {
+    parts.push('有：消费方心跳 ' + elapsedLabel(a.heartbeat_age_seconds) + '前（周期 ' + a.cycle_seconds + ' s，指纹版本 ' + a.fingerprint_version
+      + (a.fingerprint_version !== a.reader_fingerprint_version ? '≠本端 ' + a.reader_fingerprint_version : '') + '）');
+    parts.push('跟踪 ' + a.tracked_sets + ' 条策略、发布覆盖 ' + a.loaded_sets + ' 条、未恢复指纹 ' + a.members + ' 个');
+  } else {
+    parts.push('没有：' + (OPEN_ALERT_MODE[a.mode] || a.mode) + '（心跳键 alarmd:open_alerts:heartbeat）');
+  }
+  var mode = OPEN_ALERT_MODE[a.mode] || a.mode;
+  if (a.unavailable_reason) mode += '：' + (OPEN_ALERT_UNAVAILABLE[a.unavailable_reason] || a.unavailable_reason);
+  if (a.stale_beyond_bound) mode += '，已超过设计的暴露时长';
+  parts.push('当前 ' + mode);
+  var answers = [];
+  var total = 0;
+  Object.keys(OPEN_ALERT_ANSWER).forEach(function (key) {
+    var n = a.lookups && a.lookups[key];
+    if (n) { answers.push(OPEN_ALERT_ANSWER[key] + ' ' + n); total += n; }
+  });
+  parts.push(total ? '恢复门查过 ' + total + ' 次：' + answers.join('、') : '恢复门还没查过');
+  return parts.join('；');
 }
 
 function renderReplicas(rows) {

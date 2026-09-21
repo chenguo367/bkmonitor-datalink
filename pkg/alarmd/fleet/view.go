@@ -1221,19 +1221,55 @@ type ControlSourceFacts struct {
 }
 
 // OpenAlertSetFacts is what a replica says about its copy of the consumer's
-// open alert set. Mode is one of never_loaded, authoritative and
-// self_maintained. StaleBeyondBound is the one fact the verdict reads: the
-// copy had the consumer's publication and has been without it for longer
-// than the staleness bound, so the gate has been working from the replica's
-// own knowledge past the exposure it was designed for. A copy that never
-// loaded is not stale -- the publisher may not be deployed -- and the mode
-// says so without degrading anything.
+// open alert set -- the fingerprints of the series the consumer holds an
+// open alert on, published by the consumer under a fixed key contract and
+// read by every replica to decide whether a recovery has anything to
+// recover. Mode is one of never_loaded, authoritative and self_maintained.
+// StaleBeyondBound is the one fact the verdict reads: the copy had the
+// consumer's publication and has been without it for longer than the
+// staleness bound, so the gate has been working from the replica's own
+// knowledge past the exposure it was designed for. A copy that never loaded
+// is not stale -- the publisher may not be deployed -- and the mode says so
+// without degrading anything.
+//
+// The rest is the reader's account of the publisher, for the dependency
+// table: a deployment whose dependency list named every Redis and Kafka it
+// touched had no row for this one, so whether the consumer's publication was
+// there at all -- and whether the gate was passing recoveries on the
+// consumer's word or on its own -- could not be read anywhere.
 type OpenAlertSetFacts struct {
 	Mode             string `json:"mode"`
 	StaleBeyondBound bool   `json:"stale_beyond_bound"`
 	// AuthoritativeAgeSeconds is how long ago the last publication was read.
 	// Absent until there has been one; a zero here would read as "just now".
 	AuthoritativeAgeSeconds *float64 `json:"authoritative_age_seconds,omitempty"`
+	// Available says the copy is answering from a fresh publication now;
+	// UnavailableReason why not, in the reader's closed words (read_error,
+	// heartbeat_missing, heartbeat_unreadable, heartbeat_stale,
+	// fingerprint_version), empty while available or never loaded.
+	Available         bool   `json:"available"`
+	UnavailableReason string `json:"unavailable_reason,omitempty"`
+	// The publisher's heartbeat as last read: how old its last cycle is by
+	// its own clock, its cycle length, and the fingerprint version it
+	// computed the members under -- beside the version this reader computes
+	// under, because the two disagreeing is a publication every lookup
+	// misses, which reads exactly like "no open alert". Absent until a
+	// heartbeat has been read.
+	HeartbeatAgeSeconds      *float64 `json:"heartbeat_age_seconds,omitempty"`
+	CycleSeconds             int64    `json:"cycle_seconds,omitempty"`
+	FingerprintVersion       string   `json:"fingerprint_version,omitempty"`
+	ReaderFingerprintVersion string   `json:"reader_fingerprint_version"`
+	// TrackedSets is how many strategies this replica asks the publication
+	// about, LoadedSets how many of those the last publication covered, and
+	// Members the fingerprints held across them.
+	TrackedSets int `json:"tracked_sets"`
+	LoadedSets  int `json:"loaded_sets"`
+	Members     int `json:"members"`
+	// Lookups counts how the gate's questions were answered since the process
+	// started, by the reader's closed answer words: the authoritative ones
+	// against the copy's own. A gate that has answered every question on its
+	// own knowledge reads here, and nowhere on the object list.
+	Lookups map[string]uint64 `json:"lookups,omitempty"`
 }
 
 // DegradationKind names a replica-level condition that degrades the verdict
