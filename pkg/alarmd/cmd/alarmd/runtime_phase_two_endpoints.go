@@ -172,6 +172,11 @@ func endpointFactsSource(
 						entry.LastFailureAgeSeconds = &age
 						entry.LastFailure = health.LastFailure
 					}
+					if health.ScriptCacheMisses > 0 {
+						age := at.Sub(health.LastScriptCacheMissAt).Seconds()
+						entry.ScriptCacheMisses = health.ScriptCacheMisses
+						entry.LastScriptCacheMissAgeSeconds = &age
+					}
 				}
 			}
 			switch entry.Role {

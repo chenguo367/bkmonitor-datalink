@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -501,6 +502,48 @@ func TestEndpointFactsCarryTheBrokersAnswerFromTheSink(t *testing.T) {
 		asked := state != nil && state().Protocol != nil
 		if names[fleet.EndpointCheckProduceVersion] != asked || (output.NegotiatedVersion != "") != asked {
 			t.Fatalf("%s: produce_version_accepted ok=%t negotiated=%q, want asked=%t", name, names[fleet.EndpointCheckProduceVersion], output.NegotiatedVersion, asked)
+		}
+	}
+}
+
+// A NOSCRIPT reply on the shared connection is on every role that reads it,
+// as a script cache miss with its own count and clock, and the failure
+// column stays empty: a live dependency table carried "NOSCRIPT No matching
+// script" as the last failure of three roles for as long as nothing else
+// failed. A connection that never saw one carries neither field.
+func TestEndpointFactsKeepScriptCacheMissesOutOfTheFailureColumn(t *testing.T) {
+	cfg := config.Default()
+	cfg.Redis.Address = "redis:6379"
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	hook := recorder.RedisHook("source")
+	ctx, _ := hook.BeforeProcess(context.Background(), nil)
+	miss := redis.NewCmd(ctx, "evalsha", "deadbeef", 1, "k")
+	miss.SetErr(errors.New("NOSCRIPT No matching script. Please use EVAL."))
+	_ = hook.AfterProcess(ctx, miss)
+	sharing := endpointSharing{runtimeIsSource: true, cmdbSharedWith: fleet.EndpointStrategyCache}
+	// The hook stamps with the wall clock, so the facts read the same clock
+	// and the age is asserted small rather than exact.
+	facts := endpointFactsSource(cfg, sharing, recorder, nil, nil, func() *fleet.SourceFacts { return nil }, nil, time.Now)()
+	for _, entry := range facts {
+		if entry.Kind != "redis" || !entry.Configured {
+			continue
+		}
+		if entry.ScriptCacheMisses != 1 || entry.LastScriptCacheMissAgeSeconds == nil ||
+			*entry.LastScriptCacheMissAgeSeconds < 0 || *entry.LastScriptCacheMissAgeSeconds > 5 {
+			t.Errorf("%s = misses %d age %v, want 1 miss a moment ago", entry.Role, entry.ScriptCacheMisses, entry.LastScriptCacheMissAgeSeconds)
+		}
+		if entry.LastFailure != "" || entry.LastFailureAgeSeconds != nil {
+			t.Errorf("%s carries the NOSCRIPT reply as a failure: %q", entry.Role, entry.LastFailure)
+		}
+	}
+	// A connection with no miss: neither field, not zero.
+	clean := metric.NewRecorder(metric.BuildInfo{})
+	cleanHook := clean.RedisHook("source")
+	cctx, _ := cleanHook.BeforeProcess(context.Background(), nil)
+	_ = cleanHook.AfterProcess(cctx, redis.NewStringCmd(cctx, "get", "a"))
+	for _, entry := range endpointFactsSource(cfg, sharing, clean, nil, nil, func() *fleet.SourceFacts { return nil }, nil, time.Now)() {
+		if entry.Kind == "redis" && entry.Configured && (entry.ScriptCacheMisses != 0 || entry.LastScriptCacheMissAgeSeconds != nil) {
+			t.Errorf("%s reports script cache misses nobody recorded: %+v", entry.Role, entry)
 		}
 	}
 }

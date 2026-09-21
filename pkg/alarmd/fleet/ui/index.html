@@ -2830,6 +2830,14 @@ function renderDependencies(list, replica, replicasWithList) {
     if (dep.last_failure_age_seconds !== undefined && dep.last_failure_age_seconds !== null) {
       seenParts.push('失败 ' + elapsedLabel(dep.last_failure_age_seconds) + '前：' + (dep.last_failure || '（无文本）'));
     }
+    // A script cache miss is not a failure: the server said it has not got
+    // the script and the client sent it. One after startup is the normal
+    // way a script gets loaded; one long after is a server that lost its
+    // cache, i.e. a restart or a failover this process saw no other sign of.
+    if (dep.script_cache_misses) {
+      seenParts.push('脚本缓存未命中 ' + dep.script_cache_misses + ' 次（最近 '
+        + elapsedLabel(dep.last_script_cache_miss_age_seconds) + '前；不是失败——启动后首次 EVALSHA 的正常装载，若发生在运行很久之后则是 Redis 重启或切主）');
+    }
     if (!seenParts.length) {
       seenParts.push(dep.kind === 'redis' && dep.configured ? '本进程还没对它发过命令' : '这一列只对 Redis 连接与告警输出有记录；查询后端的失败在检查项里按对象归因');
     }
