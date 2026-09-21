@@ -58,3 +58,48 @@ func TestATerminalCompletionIsListedOnItsFirstRound(t *testing.T) {
 		t.Fatalf("at the threshold rows = %+v, want the degraded object", rows)
 	}
 }
+
+// Terminal and a non-terminal degraded completion alternating: the row is
+// listed on the terminal round, off on the skip -- the latest round is not a
+// deterministic refusal -- and back on the next terminal, where it also
+// reaches the degraded threshold and stays. Leaving the list because the
+// latest round changed is not a recovery: only a healthy completion is, and
+// the run's recovery record has nothing in it throughout.
+func TestATerminalRowAlternatingWithASkipFlickersOnceAndRecordsNoRecovery(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	round := func(kind, cause, reason string) {
+		at.at = at.at.Add(time.Hour)
+		tracker.Observe(context.Background(), observability.Observation{
+			ProgressCompletionKind: kind, ProgressCompletionCause: cause, ProgressCompletionReason: reason,
+			Trace: observability.TraceFields{QueryGroupKey: "qg-alternating", StrategyID: "4101", BusinessID: "10", EvaluationTime: at.at.Unix()},
+		})
+	}
+	listed := func() bool {
+		for _, row := range tracker.Anomalies() {
+			if row.QueryGroup == "qg-alternating" {
+				return true
+			}
+		}
+		return false
+	}
+	round("COMPLETED_WITH_TERMINAL", "LEVEL_OUTCOME_TERMINAL", "STATE_CORRUPT")
+	if !listed() {
+		t.Fatal("first terminal round: not listed")
+	}
+	round("GAP_SKIPPED", "LEVEL_OUTCOME_UNKNOWN", "GAP_SKIPPED")
+	if listed() {
+		t.Fatal("a skipped round after one terminal round: listed, but the latest round is not a deterministic refusal and the threshold is not reached")
+	}
+	round("COMPLETED_WITH_TERMINAL", "LEVEL_OUTCOME_TERMINAL", "STATE_CORRUPT")
+	if !listed() {
+		t.Fatal("second terminal round: not listed")
+	}
+	round("GAP_SKIPPED", "LEVEL_OUTCOME_UNKNOWN", "GAP_SKIPPED")
+	if !listed() {
+		t.Fatal("past the degraded threshold a skipped round takes the row off: the flicker is bounded to the rounds before it")
+	}
+	if recovered := tracker.Recovered(); len(recovered) != 0 {
+		t.Fatalf("leaving the list on a changed latest round was recorded as a recovery: %+v", recovered)
+	}
+}
