@@ -7,6 +7,7 @@ package worker
 
 import (
 	"context"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
@@ -98,7 +99,8 @@ func (stream *streamedExecution) resolveTargetPlans(ctx context.Context) {
 		}
 		var resolution *targetplan.Resolution
 		if resolver != nil {
-			resolution = resolver.Resolve(ctx, plan)
+			interval := time.Duration(due.CompiledPlan.EvaluationSemantics().EvaluationInterval) * time.Second
+			resolution = resolver.Resolve(ctx, plan, interval)
 		}
 		unresolved := resolution == nil
 		if unresolved {

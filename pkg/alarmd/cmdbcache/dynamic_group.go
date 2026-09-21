@@ -258,15 +258,18 @@ type GroupStore struct {
 
 	mu        sync.RWMutex
 	snapshots map[string]*GroupSnapshot
-	// referenced is when each id was last asked for. A reference ages out
-	// after two refresh intervals without being asked: a Plan that runs asks
-	// every Slot, so an id nobody asks for is one no active Plan references
-	// any more, and keeping it would read it every refresh and count it in
-	// the health as a standing failure once the writer withdraws it. A Plan
-	// on a longer interval than that re-reads its groups on its Slot, one
-	// round trip, which is the cost of not knowing the catalog here.
-	referenced    map[string]time.Time
+	// referenced is, per id, when it was last asked for and the longest
+	// evaluation interval among the Plans that asked. A reference ages out
+	// when nobody has asked for it within max(two refresh intervals, twice
+	// that longest interval): a Plan asks every Slot, so an id nobody asks
+	// for within two of its Slots is one no active Plan references any more,
+	// and keeping it would read it every refresh and count it in the health
+	// as a standing failure once the writer withdraws it. The horizon
+	// follows the Plan's own interval so that a Plan on a long period never
+	// pays a round trip on its Slot for a group that aged out between them.
+	referenced    map[string]groupReference
 	lastFailureAt time.Time
+	syncReads     uint64
 	lastError     error
 	failures      uint64
 	refreshes     uint64
@@ -295,7 +298,7 @@ func NewGroupStore(reader *GroupReader, options GroupStoreOptions) (*GroupStore,
 		now = time.Now
 	}
 	return &GroupStore{reader: reader, interval: options.RefreshInterval, maxAge: options.MaxAge, now: now,
-		snapshots: make(map[string]*GroupSnapshot), referenced: make(map[string]time.Time)}, nil
+		snapshots: make(map[string]*GroupSnapshot), referenced: make(map[string]groupReference)}, nil
 }
 
 // MaxAge is the bound past which a held snapshot is not served.
@@ -306,16 +309,32 @@ func (store *GroupStore) MaxAge() time.Duration {
 	return store.maxAge
 }
 
-// Group answers one id, reading it first when it is not held.
-func (store *GroupStore) Group(ctx context.Context, id string) GroupLookup {
+// groupReference is one id's registration: when it was last asked for and
+// the longest evaluation interval among the Plans that asked.
+type groupReference struct {
+	askedAt  time.Time
+	interval time.Duration
+}
+
+// Group answers one id for a Plan evaluated every interval, reading it
+// first when it is not held.
+func (store *GroupStore) Group(ctx context.Context, id string, interval time.Duration) GroupLookup {
 	if store == nil {
 		return GroupLookup{ReadErr: errors.New("alarmd cmdbcache: no group store")}
 	}
 	now := store.now()
 	store.mu.Lock()
-	store.referenced[id] = now
+	reference := store.referenced[id]
+	reference.askedAt = now
+	if interval > reference.interval {
+		reference.interval = interval
+	}
+	store.referenced[id] = reference
 	snapshot, held := store.snapshots[id]
 	failedAt := store.lastFailureAt
+	if !held {
+		store.syncReads++
+	}
 	store.mu.Unlock()
 	if !held {
 		reads, err := store.reader.Read(ctx, []string{id})
@@ -345,14 +364,18 @@ func (store *GroupStore) publish(id string, read GroupRead, at time.Time) *Group
 // snapshot and is recorded, so the next lookups say they are served past a
 // failed refresh; a missing key replaces the snapshot with an unavailable
 // one - the writer withdrew or never wrote it, and that is an answer. A
-// reference nobody has asked for within two refresh intervals is forgotten
-// first, snapshot and all.
+// reference nobody has asked for within its horizon is forgotten first,
+// snapshot and all.
 func (store *GroupStore) Refresh(ctx context.Context) error {
 	now := store.now()
 	store.mu.Lock()
 	ids := make([]string, 0, len(store.referenced))
-	for id, askedAt := range store.referenced {
-		if now.Sub(askedAt) > 2*store.interval {
+	for id, reference := range store.referenced {
+		horizon := 2 * store.interval
+		if 2*reference.interval > horizon {
+			horizon = 2 * reference.interval
+		}
+		if now.Sub(reference.askedAt) > horizon {
 			delete(store.referenced, id)
 			delete(store.snapshots, id)
 			continue
@@ -407,6 +430,9 @@ type GroupHealth struct {
 	RefreshFailed     bool
 	ConsecutiveErrors uint64
 	Refreshes         uint64
+	// SyncReads counts the reads made on a Slot path for an id not held:
+	// one per first reference, and none after, is the reading.
+	SyncReads uint64
 }
 
 func (store *GroupStore) Health() GroupHealth {
@@ -416,7 +442,7 @@ func (store *GroupStore) Health() GroupHealth {
 	store.mu.RLock()
 	defer store.mu.RUnlock()
 	health := GroupHealth{Referenced: len(store.referenced), RefreshFailed: store.lastError != nil,
-		ConsecutiveErrors: store.failures, Refreshes: store.refreshes}
+		ConsecutiveErrors: store.failures, Refreshes: store.refreshes, SyncReads: store.syncReads}
 	for _, snapshot := range store.snapshots {
 		if snapshot.Unavailable != "" {
 			health.Unavailable++

@@ -102,7 +102,7 @@ func TestTheResolverAnswersEachSelectorByTheRulingsTable(t *testing.T) {
 		"unavailable beside ok composes to unavailable": {plan: plan(contract.TargetPlanRuleHostID, []string{"absent"}, set12), kind: targetplan.SelectorKindTopology, id: "2|set|12", state: targetplan.SelectorOK, reason: targetplan.ReasonNone, members: []string{"501", "502"}, whole: targetplan.ResolutionUnavailable},
 	} {
 		t.Run(name, func(t *testing.T) {
-			resolution := resolver.Resolve(context.Background(), test.plan)
+			resolution := resolver.Resolve(context.Background(), test.plan, time.Minute)
 			got := selector(resolution, test.kind, test.id)
 			if got.State != test.state || got.Reason != test.reason || !reflect.DeepEqual(sortedKeys(got.Members), nonNil(test.members)) {
 				t.Fatalf("selector = state %s reason %s members %v, want %s %s %v", got.State, got.Reason, sortedKeys(got.Members), test.state, test.reason, test.members)
@@ -125,7 +125,7 @@ func TestTheResolverAnswersEachSelectorByTheRulingsTable(t *testing.T) {
 	}
 	// The host of another business under the same node is not a member of
 	// the business-2 reference.
-	resolution := resolver.Resolve(context.Background(), plan(contract.TargetPlanRuleHostID, nil, set12))
+	resolution := resolver.Resolve(context.Background(), plan(contract.TargetPlanRuleHostID, nil, set12), time.Minute)
 	if resolution.Contains("503") {
 		t.Fatal("a host of another business resolved under the reference's business")
 	}
@@ -134,7 +134,7 @@ func TestTheResolverAnswersEachSelectorByTheRulingsTable(t *testing.T) {
 	// host there while another business does is a reference written against
 	// the wrong business: empty, resolved, and named apart from a dangling
 	// node and from a node that holds no host anywhere.
-	other := resolver.Resolve(context.Background(), plan(contract.TargetPlanRuleHostID, nil, contract.TargetPlanTopologyV1{BusinessID: "9", ObjectID: "set", InstanceID: "12"}))
+	other := resolver.Resolve(context.Background(), plan(contract.TargetPlanRuleHostID, nil, contract.TargetPlanTopologyV1{BusinessID: "9", ObjectID: "set", InstanceID: "12"}), time.Minute)
 	if got := selector(other, targetplan.SelectorKindTopology, "9|set|12"); got.State != targetplan.SelectorOKEmpty || !got.NodeForeign || got.NodeMissing || got.Reason != targetplan.ReasonNodeForeign {
 		t.Fatalf("known node hosted under another business = %+v", got)
 	}
@@ -145,7 +145,7 @@ func TestTheResolverAnswersEachSelectorByTheRulingsTable(t *testing.T) {
 	// first reference, and resolving them all again issues no command.
 	reads := len(client.calls)
 	for _, id := range []string{"ok", "empty", "badjson", "nomember", "mysql", "alldrop", "absent"} {
-		resolver.Resolve(context.Background(), plan(contract.TargetPlanRuleHostID, []string{id}, set12, set13, set99))
+		resolver.Resolve(context.Background(), plan(contract.TargetPlanRuleHostID, []string{id}, set12, set13, set99), time.Minute)
 	}
 	if len(client.calls) != reads {
 		t.Fatalf("resolving referenced groups again read Redis %d more times", len(client.calls)-reads)
@@ -171,19 +171,19 @@ func TestTheResolverNeverReadsUnavailableAsEmpty(t *testing.T) {
 	target.DynamicGroups = []string{"ok"}
 	target.DynamicTopologies = []contract.TargetPlanTopologyV1{set12}
 
-	first := resolver.Resolve(context.Background(), target)
+	first := resolver.Resolve(context.Background(), target, time.Minute)
 	if first.State != targetplan.ResolutionIncomplete || first.StaleAge != 0 {
 		t.Fatalf("first resolution = %s stale %s", first.State, first.StaleAge)
 	}
 	client.err = errors.New("connection refused")
 	now = now.Add(2 * time.Minute)
 	_ = groups.Refresh(context.Background())
-	stale := resolver.Resolve(context.Background(), target)
+	stale := resolver.Resolve(context.Background(), target, time.Minute)
 	if group := selector(stale, targetplan.SelectorKindGroup, "ok"); group.State != targetplan.SelectorIncomplete || group.StaleAge != 2*time.Minute || stale.StaleAge != 2*time.Minute {
 		t.Fatalf("after a failed refresh the group answered %s with stale age %s (plan %s)", group.State, group.StaleAge, stale.StaleAge)
 	}
 	now = now.Add(9 * time.Minute)
-	tooOld := resolver.Resolve(context.Background(), target)
+	tooOld := resolver.Resolve(context.Background(), target, time.Minute)
 	if group := selector(tooOld, targetplan.SelectorKindGroup, "ok"); group.State != targetplan.SelectorUnavailable || group.Reason != targetplan.ReasonStale {
 		t.Fatalf("past the staleness bound the group answered %s %s", group.State, group.Reason)
 	}
@@ -194,7 +194,7 @@ func TestTheResolverNeverReadsUnavailableAsEmpty(t *testing.T) {
 		t.Fatalf("an unavailable plan still contained members: %s", tooOld.State)
 	}
 
-	unwired := NewTargetResolver(nil, nil, clock).Resolve(context.Background(), target)
+	unwired := NewTargetResolver(nil, nil, clock).Resolve(context.Background(), target, time.Minute)
 	for _, candidate := range unwired.Selectors {
 		if candidate.State != targetplan.SelectorUnavailable || candidate.Reason != targetplan.ReasonSourceUnwired {
 			t.Fatalf("unwired source answered %+v", candidate)

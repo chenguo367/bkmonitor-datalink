@@ -74,7 +74,10 @@ type Ports struct {
 // resolver implements it; it reads nothing from Redis on the Slot path but
 // a group's first reference.
 type TargetResolver interface {
-	Resolve(ctx context.Context, plan *contract.TargetPlanV1) *targetplan.Resolution
+	// Resolve answers one plan for one Slot; interval is the Plan's
+	// evaluation period, which bounds how long its groups are kept without
+	// being asked for.
+	Resolve(ctx context.Context, plan *contract.TargetPlanV1, interval time.Duration) *targetplan.Resolution
 }
 
 type SlotExecutionCoordinator struct {

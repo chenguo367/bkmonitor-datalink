@@ -128,7 +128,7 @@ func TestTheGroupStoreReadsOnFirstReferenceAndKeepsSnapshotsAcrossAFailedRefresh
 	if err != nil {
 		t.Fatal(err)
 	}
-	lookup := store.Group(context.Background(), "1001")
+	lookup := store.Group(context.Background(), "1001", time.Minute)
 	if lookup.ReadErr != nil || lookup.Snapshot == nil || lookup.Snapshot.Unavailable != "" || lookup.Age != 0 || lookup.RefreshFailed {
 		t.Fatalf("first lookup = %+v", lookup)
 	}
@@ -136,10 +136,10 @@ func TestTheGroupStoreReadsOnFirstReferenceAndKeepsSnapshotsAcrossAFailedRefresh
 		t.Fatalf("calls = %v, want one MGET of the writer's key", client.calls)
 	}
 	now = now.Add(30 * time.Second)
-	if again := store.Group(context.Background(), "1001"); len(client.calls) != 1 || again.Age != 30*time.Second {
+	if again := store.Group(context.Background(), "1001", time.Minute); len(client.calls) != 1 || again.Age != 30*time.Second {
 		t.Fatalf("second lookup read again or misreported its age: calls=%d age=%s", len(client.calls), again.Age)
 	}
-	missing := store.Group(context.Background(), "2002")
+	missing := store.Group(context.Background(), "2002", time.Minute)
 	if missing.Snapshot == nil || missing.Snapshot.Unavailable != targetplan.ReasonKeyMissing {
 		t.Fatalf("missing key lookup = %+v, want unavailable key_missing", missing)
 	}
@@ -149,7 +149,7 @@ func TestTheGroupStoreReadsOnFirstReferenceAndKeepsSnapshotsAcrossAFailedRefresh
 	if err := store.Refresh(context.Background()); err == nil {
 		t.Fatal("a failed refresh reported success")
 	}
-	served := store.Group(context.Background(), "1001")
+	served := store.Group(context.Background(), "1001", time.Minute)
 	if served.Snapshot == nil || served.Snapshot.Unavailable != "" || !served.RefreshFailed || served.Age != 90*time.Second {
 		t.Fatalf("lookup after a failed refresh = %+v, want the old snapshot, marked as served past a failed refresh", served)
 	}
@@ -163,7 +163,7 @@ func TestTheGroupStoreReadsOnFirstReferenceAndKeepsSnapshotsAcrossAFailedRefresh
 	if err := store.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	gone := store.Group(context.Background(), "1001")
+	gone := store.Group(context.Background(), "1001", time.Minute)
 	if gone.Snapshot.Unavailable != targetplan.ReasonKeyMissing || gone.RefreshFailed || gone.Age != 0 {
 		t.Fatalf("lookup after the key went missing = %+v, want unavailable key_missing from a fresh read", gone)
 	}
@@ -172,42 +172,81 @@ func TestTheGroupStoreReadsOnFirstReferenceAndKeepsSnapshotsAcrossAFailedRefresh
 	}
 }
 
-// A reference nobody has asked for within two refresh intervals is
-// forgotten at the next refresh, snapshot and all: a withdrawn reference
-// is read once more at most and stops counting in the health. One that is
-// still asked for stays.
-func TestAGroupNobodyAsksForAgesOutOfTheStore(t *testing.T) {
-	client := &groupClient{values: map[string]string{"cw:dynamic_group:live": hostGroup, "cw:dynamic_group:gone": hostGroup}}
+// A reference ages out when nobody has asked for it within its horizon -
+// max(two refresh intervals, twice the longest interval of the Plans that
+// asked) - so a withdrawn reference is read once more at most and stops
+// counting in the health, while a Plan on a ten-minute period never reads
+// on its Slot for a group that aged out between two of its Slots: three
+// Slots of such a Plan cost one synchronous read, the first.
+func TestAGroupAgesOutByTheReferencingPlansIntervalAndNeverCostsItsSlotARead(t *testing.T) {
+	client := &groupClient{values: map[string]string{"cw:dynamic_group:slow": hostGroup, "cw:dynamic_group:gone": hostGroup}}
 	reader, _ := NewGroupReader(client, "cw:")
 	now := time.Unix(1000, 0)
 	store, err := NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.Group(context.Background(), "live")
-	store.Group(context.Background(), "gone")
-	reads := make([][]string, 0, 3)
-	for minute := 1; minute <= 3; minute++ {
-		now = now.Add(time.Minute)
-		store.Group(context.Background(), "live")
+	store.Group(context.Background(), "gone", time.Minute)
+	slots := 0
+	for minute := 0; minute <= 30; minute++ {
+		if minute%10 == 0 {
+			// The ten-minute Plan's Slot: it asks, and never reads.
+			if lookup := store.Group(context.Background(), "slow", 10*time.Minute); lookup.Snapshot == nil || lookup.Snapshot.Unavailable != "" {
+				t.Fatalf("minute %d: slow lookup = %+v", minute, lookup)
+			}
+			slots++
+		}
 		if err := store.Refresh(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		reads = append(reads, client.calls[len(client.calls)-1])
+		now = now.Add(time.Minute)
 	}
-	// Still read at the first two refreshes after the last ask, gone at the
-	// third.
-	if !reflect.DeepEqual(reads, [][]string{
-		{"cw:dynamic_group:gone", "cw:dynamic_group:live"}, {"cw:dynamic_group:gone", "cw:dynamic_group:live"}, {"cw:dynamic_group:live"},
-	}) {
-		t.Fatalf("refresh reads = %v", reads)
+	if slots != 4 || store.Health().SyncReads != 2 {
+		t.Fatalf("slots %d sync reads %d, want four Slots and two synchronous reads: the first reference of each group and no other", slots, store.Health().SyncReads)
+	}
+	// The one-minute reference nobody asked for again was read at the
+	// refreshes within its two-minute horizon and dropped at the first one
+	// past it, never read again after that; the ten-minute one was read at
+	// every refresh.
+	readsOfGone, readsOfSlow := 0, 0
+	for _, call := range client.calls {
+		for _, key := range call {
+			switch key {
+			case "cw:dynamic_group:gone":
+				readsOfGone++
+			case "cw:dynamic_group:slow":
+				readsOfSlow++
+			}
+		}
+	}
+	if readsOfGone != 4 || readsOfSlow != 32 {
+		t.Fatalf("reads of the withdrawn reference %d (want its first read and the three refreshes within its horizon), of the slow Plan's %d (want its first read and every refresh)", readsOfGone, readsOfSlow)
 	}
 	if health := store.Health(); health.Referenced != 1 || health.Loaded != 1 {
-		t.Fatalf("health = %+v, want the aged-out reference gone", health)
+		t.Fatalf("health = %+v, want the withdrawn reference gone", health)
 	}
-	// Asked for again, it is read again on the spot.
-	before := len(client.calls)
-	if lookup := store.Group(context.Background(), "gone"); lookup.Snapshot == nil || lookup.Snapshot.Unavailable != "" || len(client.calls) != before+1 {
-		t.Fatalf("re-reference: lookup %+v reads %d", lookup, len(client.calls)-before)
+	// The slow Plan stops asking: its reference outlives two of its Slots
+	// and is gone at the refresh after that.
+	for minute := 0; minute <= 21; minute++ {
+		if err := store.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		now = now.Add(time.Minute)
+	}
+	if health := store.Health(); health.Referenced != 0 {
+		t.Fatalf("health after the slow Plan stopped asking = %+v", health)
+	}
+	// Read at the twenty refreshes within its horizon and at none after; a
+	// refresh with nothing referenced issues no command at all.
+	readsOfSlow = 0
+	for _, call := range client.calls {
+		for _, key := range call {
+			if key == "cw:dynamic_group:slow" {
+				readsOfSlow++
+			}
+		}
+	}
+	if readsOfSlow != 52 {
+		t.Fatalf("reads of the slow Plan's group after it stopped asking = %d, want 32 + 20", readsOfSlow)
 	}
 }

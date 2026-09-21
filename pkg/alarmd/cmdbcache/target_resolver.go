@@ -38,8 +38,11 @@ func NewTargetResolver(groups *GroupStore, hosts *Store, now func() time.Time) *
 	return &TargetResolver{groups: groups, hosts: hosts, now: now}
 }
 
-// Resolve answers one plan for one Slot.
-func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.TargetPlanV1) *targetplan.Resolution {
+// Resolve answers one plan for one Slot. The interval is the Plan's
+// evaluation period; a group it references is kept for twice that without
+// being asked, so the Plan never reads on its Slot for a group that aged
+// out between two of its Slots.
+func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.TargetPlanV1, interval time.Duration) *targetplan.Resolution {
 	if plan == nil {
 		return nil
 	}
@@ -48,7 +51,7 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 		resolution.Static[key] = struct{}{}
 	}
 	for _, id := range plan.DynamicGroups {
-		resolution.Selectors = append(resolution.Selectors, resolver.resolveGroup(ctx, plan, id))
+		resolution.Selectors = append(resolution.Selectors, resolver.resolveGroup(ctx, plan, id, interval))
 	}
 	for _, node := range plan.DynamicTopologies {
 		resolution.Selectors = append(resolution.Selectors, resolver.resolveTopology(plan, node))
@@ -57,13 +60,13 @@ func (resolver *TargetResolver) Resolve(ctx context.Context, plan *contract.Targ
 	return resolution
 }
 
-func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract.TargetPlanV1, id string) targetplan.SelectorResult {
+func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract.TargetPlanV1, id string, interval time.Duration) targetplan.SelectorResult {
 	result := targetplan.SelectorResult{Kind: targetplan.SelectorKindGroup, ID: id, Reason: targetplan.ReasonNone}
 	if resolver == nil || resolver.groups == nil {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonSourceUnwired
 		return result
 	}
-	lookup := resolver.groups.Group(ctx, id)
+	lookup := resolver.groups.Group(ctx, id, interval)
 	if lookup.ReadErr != nil || lookup.Snapshot == nil {
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonReadFailed
 		return result

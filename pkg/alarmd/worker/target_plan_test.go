@@ -61,11 +61,13 @@ func TestOneResolutionServesAdmissionAndAbsence(t *testing.T) {
 
 type scriptedTargetResolver struct {
 	calls       []*contract.TargetPlanV1
+	intervals   []time.Duration
 	resolutions map[string]*targetplan.Resolution
 }
 
-func (resolver *scriptedTargetResolver) Resolve(_ context.Context, plan *contract.TargetPlanV1) *targetplan.Resolution {
+func (resolver *scriptedTargetResolver) Resolve(_ context.Context, plan *contract.TargetPlanV1, interval time.Duration) *targetplan.Resolution {
 	resolver.calls = append(resolver.calls, plan)
+	resolver.intervals = append(resolver.intervals, interval)
 	return resolver.resolutions[plan.StaticKeys[0]]
 }
 
@@ -152,8 +154,8 @@ func TestBeginResolvesEachTargetPlanOnceForBothViews(t *testing.T) {
 		}},
 	}
 	stream.resolveTargetPlans(context.Background())
-	if len(resolver.calls) != 2 {
-		t.Fatalf("resolver called %d times, want once per target-plan Plan", len(resolver.calls))
+	if len(resolver.calls) != 2 || resolver.intervals[0] != time.Minute || resolver.intervals[1] != time.Minute {
+		t.Fatalf("resolver called %d times with intervals %v, want once per target-plan Plan with the Plan's evaluation interval", len(resolver.calls), resolver.intervals)
 	}
 	memberships := stream.ResolvedTargets()
 	if len(memberships) != 2 || memberships[one] == nil || !memberships[one].Contains("101") || !memberships[one].Contains("1") || memberships[one].Contains("2") {
