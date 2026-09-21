@@ -47,6 +47,7 @@ var SinceSources = []SinceSource{
 	SinceProcessStart,
 	SinceRestoredLastFull,
 	SinceRestoredAtRestart,
+	SinceRestoredEmptyRun,
 	SinceRefusedFuture,
 }
 
@@ -61,6 +62,7 @@ var SinceSources = []SinceSource{
 var RestoredSinceSources = []SinceSource{
 	SinceRestoredLastFull,
 	SinceRestoredAtRestart,
+	SinceRestoredEmptyRun,
 }
 
 // BoundedSinceSources are the provenances whose timestamp is a bound rather
@@ -82,6 +84,7 @@ var BoundedSinceSources = []SinceSource{
 	SinceProcessStart,
 	SinceRestoredAtRestart,
 	SinceRestoredLastFull,
+	SinceRestoredEmptyRun,
 	SinceRefusedFuture,
 }
 

@@ -1218,6 +1218,8 @@ func (source *ProductionSlotSource) advancePrunedCursor(
 	resumed := execution.ScheduleProgress{
 		Identity: request.Identity, NextSlot: earliest, LastCompletionKind: execution.CompletionGapSkipped,
 		CurrentOrRecentGap: execution.PrunedSkipGap(progress.NextSlot, earliest),
+		// What the store wrote: a skip keeps both facts about records.
+		LastDataSlot: progress.LastDataSlot, EmptyRunSinceSlot: progress.EmptyRunSinceSlot,
 	}
 	return resumed, true, nil
 }

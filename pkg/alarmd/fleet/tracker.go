@@ -199,6 +199,23 @@ type queryGroupState struct {
 	emptyRuns  int
 	emptySince time.Time
 	sawData    bool
+	// emptySinceSlot and lastEmptySlot bound the run of empty completions on
+	// the source's own clock: the Slot of the first empty round of the run and
+	// of the latest. The "every round" line gates on their distance, Slot to
+	// Slot, and on nothing else: the object's question is whether the source
+	// has been silent for an hour of its time, not how long this process has
+	// watched -- and a gate that mixed the two clocks would list an object two
+	// hours behind and catching up after its first restored empty round, the
+	// one case it most needs to get right. Only records end this run; a gap
+	// or a failed round between two empty ones is not evidence of records.
+	// emptySinceFrom and emptySlotFrom say who dated each start -- this
+	// process watching, or the record the object was restored from -- one for
+	// the consecutive run above and one for the Slot run, because a failed
+	// round restarts the first and not the second.
+	emptySinceSlot int64
+	lastEmptySlot  int64
+	emptySinceFrom SinceSource
+	emptySlotFrom  SinceSource
 	// noDataMemory is the refused absence-memory write of each of this
 	// object's Plans still refused, by Plan, with how often and since when.
 	// A Plan's entry is kept until a write for that Plan is seen to store;
@@ -979,11 +996,22 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if completion == "FULL_EMPTY_COMPLETED" {
 			if state.emptyRuns == 0 {
 				state.emptySince = at
+				state.emptySinceFrom = SinceSnapshotContinuity
 			}
 			state.emptyRuns++
+			if state.emptySinceSlot == 0 {
+				state.emptySinceSlot = trace.EvaluationTime
+				state.emptySlotFrom = SinceSnapshotContinuity
+			}
+			state.lastEmptySlot = trace.EvaluationTime
 		} else {
 			state.emptyRuns = 0
 			if completion == "FULL_COMPLETED" {
+				// Seen retires the Slot run for good: the line asks for no
+				// round known to have had records, and never reads the
+				// run's bounds again once one has. They are left as they
+				// are rather than cleared, so nothing here looks like it
+				// decides what "seen" already has.
 				state.sawData = true
 			}
 		}
@@ -1577,15 +1605,24 @@ func sortStrategies(strategies []StrategyRef) {
 // A source that only speaks when something happens looks exactly like one
 // that stopped, and only the run that follows records says which; that is
 // why the two are told apart by whether records were ever seen, and why the
-// second waits an hour rather than a few rounds. A restart resets what this
-// process has seen: the last committed round is restored, and only a round
-// that completed with records restores "seen"; a restored empty round says
-// nothing about the rounds before it, so the hour starts again from the first
-// empty round this process watches.
+// second waits an hour rather than a few rounds.
+//
+// The hour is measured on the source's clock, first empty Slot to latest
+// empty Slot, and on that clock alone. It is the object's question -- has
+// this source been silent for an hour of its time -- not "how long has this
+// process watched"; and a gate that read the start from one clock and the
+// end from the other would fail on the case it most needs to get right: an
+// object two hours behind and catching up passes it after its first empty
+// round. The same rule makes two hours of empty Slots replayed in a minute
+// list the object, which is correct: that hour of source time was empty.
+//
+// A restart restores the run from the object's record -- the last Slot known
+// to have had records, and the first empty Slot of the run -- so the hour
+// survives a release rather than starting again at every one; a record from
+// before those facts were kept restores only what its last round says.
 func (tracker *Tracker) NoData() []Anomaly {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
-	now := tracker.now()
 	anomalies := make([]Anomaly, 0)
 	for queryGroup, state := range tracker.groups {
 		if state.emptyRuns == 0 {
@@ -1593,18 +1630,20 @@ func (tracker *Tracker) NoData() []Anomaly {
 		}
 		anomaly := Anomaly{
 			QueryGroup: queryGroup, ReasonCode: "FULL_EMPTY_COMPLETED",
-			Since: state.emptySince, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
+			Since: state.emptySince, SinceFrom: state.emptySinceFrom, Replica: tracker.replica,
 		}
 		switch {
 		case state.sawData && state.emptyRuns >= tracker.degradedRounds:
 			anomaly.Kind = KindNoData
-		case !state.sawData && state.currentKind == "" && now.Sub(state.emptySince) >= tracker.emptyEveryRoundAfter:
+		case !state.sawData && state.currentKind == "" && state.emptySinceSlot != 0 &&
+			time.Duration(state.lastEmptySlot-state.emptySinceSlot)*time.Second >= tracker.emptyEveryRoundAfter:
 			// currentKind empty is "every round": a blocked or failing run
 			// after the empty completions does not reset emptyRuns, and an
 			// object in such a run is on its own line, not on this one.
 			anomaly.Kind = KindEmptyEveryRound
+			anomaly.Since, anomaly.SinceFrom = time.Unix(state.emptySinceSlot, 0).UTC(), state.emptySlotFrom
 			anomaly.EmptyEveryRound = &EmptyEveryRoundFacts{
-				Rounds: state.emptyRuns, Since: state.emptySince, NeverSawData: true,
+				Rounds: state.emptyRuns, Since: anomaly.Since, NeverSawData: true,
 				Cause: EmptyEveryRoundCauseUnknown,
 			}
 		default:
