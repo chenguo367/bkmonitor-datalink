@@ -79,6 +79,11 @@ type Stats struct {
 	Ignored Ignored
 	// Lagging lists the Workers that have not installed the current version.
 	Lagging []LaggingReceiver
+	// NotSwitched lists the Workers that installed the current version but
+	// do not yet execute every one of its Query Groups from it, each with
+	// the count it does (decision-016 batch 4). Empty is every installed
+	// Worker switched; in the shadow step it is every installed Worker.
+	NotSwitched []LaggingReceiver
 	// Counters since the process started.
 	Publications        uint64
 	PublicationsSkipped uint64
@@ -254,6 +259,16 @@ func (server *Server) Stats() Stats {
 		stats.Current, stats.Counts = key, counts
 		stats.Objects, _ = server.publisher.ledger.Objects(key)
 		stats.Lagging = server.publisher.ledger.Lagging("installed")
+		installed := make(map[string]struct{}, len(stats.Lagging))
+		for _, lagging := range stats.Lagging {
+			installed[lagging.WorkerID] = struct{}{}
+		}
+		for _, receiver := range server.publisher.ledger.Lagging("switched") {
+			if _, short := installed[receiver.WorkerID]; short {
+				continue
+			}
+			stats.NotSwitched = append(stats.NotSwitched, receiver)
+		}
 		for index := range stats.Lagging {
 			_, connected := server.sessions[stats.Lagging[index].WorkerID]
 			stats.Lagging[index].Connected = connected

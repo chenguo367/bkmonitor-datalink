@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -118,6 +119,9 @@ type ClientStats struct {
 	// ObjectsProbed: a probe that failed leaves the count unknown, not 0.
 	ObjectsMissing int
 	ObjectsProbed  bool
+	// SwitchedQueryGroups is how many of the installed view's Query Groups
+	// this Worker executes from it, as last reported.
+	SwitchedQueryGroups int
 	// Counters since the process started. Installs is by kind: snapshot,
 	// delta, empty_delta.
 	Installs           map[string]uint64
@@ -141,6 +145,19 @@ type ClientOptions struct {
 	// Costs is asked on every heartbeat for what to report; nil reports
 	// nothing (decision-020 section 5.2).
 	Costs CostSource
+	// Switched is asked on every receipt for how many of the installed
+	// view's Query Groups this Worker executes from it; nil reports zero and
+	// never claims switched, which is the shadow step.
+	Switched SwitchedSource
+}
+
+// SwitchedSource is what a receipt asks for the count of Query Groups the
+// Worker executes from the installed view (decision-016 batch 4): the entry
+// is in the view with content, the renewal's content scope is the entry's
+// object digest, and the renewal's timeline revision is the entry's. The
+// receipt says switched when the count reaches the view's entry count.
+type SwitchedSource interface {
+	SwitchedQueryGroups() int
 }
 
 // Client keeps one stream to the Leader and the view it installed.
@@ -155,6 +172,7 @@ type Client struct {
 	tick      time.Duration
 	random    *rand.Rand
 	costs     CostSource
+	switched  SwitchedSource
 
 	installed atomic.Pointer[View]
 	mu        sync.Mutex
@@ -173,8 +191,9 @@ func NewClient(identity ClientIdentity, discovery Discovery, probe ObjectProbe, 
 	}
 	client := &Client{identity: identity, discovery: discovery, probe: probe, observer: observer,
 		dial: options.Dial, now: options.Now, sleep: options.Sleep, tick: options.Tick, costs: options.Costs,
-		random: rand.New(rand.NewSource(time.Now().UnixNano())),
-		stats:  ClientStats{Installs: map[string]uint64{}, InstallFailures: map[string]uint64{}, Refusals: map[string]uint64{}}}
+		switched: options.Switched,
+		random:   rand.New(rand.NewSource(time.Now().UnixNano())),
+		stats:    ClientStats{Installs: map[string]uint64{}, InstallFailures: map[string]uint64{}, Refusals: map[string]uint64{}}}
 	if client.dial == nil {
 		client.dial = dialLeader
 	}
@@ -222,6 +241,23 @@ func (client *Client) Installed() (View, bool) {
 		return View{}, false
 	}
 	return *view, true
+}
+
+// Entry is the installed view's entry for one Query Group, and whether the
+// view carries it. Entries are kept sorted by Query Group, so this is a
+// binary search over the installed view rather than an index maintained
+// beside it.
+func (client *Client) Entry(queryGroup execution.QueryGroupIdentity) (Entry, bool) {
+	view := client.installed.Load()
+	if view == nil {
+		return Entry{}, false
+	}
+	entries := view.Entries
+	index := sort.Search(len(entries), func(i int) bool { return entries[i].QueryGroup >= queryGroup })
+	if index == len(entries) || entries[index].QueryGroup != queryGroup {
+		return Entry{}, false
+	}
+	return entries[index], true
 }
 
 // Stats for the metrics.
@@ -443,7 +479,7 @@ func (client *Client) installSnapshot(ctx context.Context, chunks []*pb.Snapshot
 	}
 	missing, probed := client.probeMissing(ctx, view.Entries)
 	client.install(ctx, view, missing, probed, "snapshot")
-	_ = send(receiptMessage(client.identity.Incarnation, view.Version, true, true, "", missing, probed))
+	_ = send(client.switchedReceipt(view, missing, probed))
 }
 
 func (client *Client) installDelta(ctx context.Context, wire *pb.Delta, send func(*pb.WorkerMessage) error) {
@@ -479,7 +515,7 @@ func (client *Client) installDelta(ctx context.Context, wire *pb.Delta, send fun
 		kind = "empty_delta"
 	}
 	client.install(ctx, next, missing, probed, kind)
-	_ = send(receiptMessage(client.identity.Incarnation, next.Version, true, true, "", missing, probed))
+	_ = send(client.switchedReceipt(next, missing, probed))
 }
 
 func (client *Client) requestSnapshot(send func(*pb.WorkerMessage) error, reason string) {
@@ -529,15 +565,26 @@ func (client *Client) probeMissing(ctx context.Context, entries []Entry) (int, b
 // the same version with the new count, which the ledger takes as the
 // current objects-missing of an installed receiver and nothing more.
 func (client *Client) reprobe(ctx context.Context, installed View, send func(*pb.WorkerMessage) error) {
-	if client.probe == nil {
-		return
+	client.mu.Lock()
+	missing, probed := client.stats.ObjectsMissing, client.stats.ObjectsProbed
+	client.mu.Unlock()
+	if client.probe != nil {
+		missing, probed = client.probeMissing(ctx, installed.Entries)
 	}
-	missing, probed := client.probeMissing(ctx, installed.Entries)
+	// The switched count is read on the same cadence: a Query Group's three
+	// checks come and go with renewals and deltas between heartbeats, and the
+	// Leader's four numbers follow the receipts, not the checks.
+	switched := 0
+	if client.switched != nil {
+		switched = client.switched.SwitchedQueryGroups()
+	}
 	client.mu.Lock()
 	current := client.stats.Installed == installed.Version
-	same := client.stats.ObjectsMissing == missing && client.stats.ObjectsProbed == probed
+	same := client.stats.ObjectsMissing == missing && client.stats.ObjectsProbed == probed &&
+		client.stats.SwitchedQueryGroups == switched
 	if current {
 		client.stats.ObjectsMissing, client.stats.ObjectsProbed = missing, probed
+		client.stats.SwitchedQueryGroups = switched
 	}
 	client.mu.Unlock()
 	// A newer version was installed while the probe ran: its own install
@@ -546,8 +593,10 @@ func (client *Client) reprobe(ctx context.Context, installed View, send func(*pb
 	if !current || same {
 		return
 	}
-	client.observe(ctx, "objects_reprobed", fmt.Sprintf("missing=%d probed=%t", missing, probed), nil)
-	_ = send(receiptMessage(client.identity.Incarnation, installed.Version, true, true, "", missing, probed))
+	if client.probe != nil {
+		client.observe(ctx, "objects_reprobed", fmt.Sprintf("missing=%d probed=%t", missing, probed), nil)
+	}
+	_ = send(client.switchedReceipt(installed, missing, probed))
 }
 
 // install swaps the view in atomically and records the install.
@@ -573,6 +622,28 @@ func receiptMessage(incarnation string, version Version, acked, installed bool, 
 		Receiver: Receiver{Incarnation: incarnation}, Version: version, Acked: acked, Installed: installed,
 		Failure: failure, ObjectsMissing: missing, ObjectsProbed: probed,
 	})}}
+}
+
+// switchedReceipt is an installed receipt that also says how many of the
+// view's Query Groups the Worker executes from it, and switched when that is
+// all of them. Without a source it is the shadow step's receipt: zero, not
+// switched.
+func (client *Client) switchedReceipt(view View, missing int, probed bool) *pb.WorkerMessage {
+	message := receiptMessage(client.identity.Incarnation, view.Version, true, true, "", missing, probed)
+	if client.switched == nil {
+		return message
+	}
+	count := client.switched.SwitchedQueryGroups()
+	if count < 0 {
+		count = 0
+	}
+	if count > len(view.Entries) {
+		count = len(view.Entries)
+	}
+	receipt := message.GetReceipt()
+	receipt.SwitchedQueryGroups = uint32(count)
+	receipt.Switched = count == len(view.Entries)
+	return message
 }
 
 func (client *Client) observe(ctx context.Context, event, reason string, err error) {

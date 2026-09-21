@@ -809,3 +809,60 @@ func TestTheHeartbeatCarriesTheWorkersCostsToTheLeadersSink(t *testing.T) {
 		return len(got) == 1 && got[0] == costs[0]
 	})
 }
+
+type scriptedSwitched struct{ count atomic.Int64 }
+
+func (source *scriptedSwitched) SwitchedQueryGroups() int { return int(source.count.Load()) }
+
+// The receipt says how many of the view's Query Groups the Worker executes
+// from it and claims switched only when that is all of them; the count moves
+// between heartbeats without a new version, and the Leader can read how far
+// short of switched a Worker is.
+func TestTheReceiptCountsTheQueryGroupsExecutedFromTheViewAndClaimsSwitchedOnlyForAll(t *testing.T) {
+	harness := startServer(t)
+	ctx := context.Background()
+	if err := harness.server.Lead(7); err != nil {
+		t.Fatal(err)
+	}
+	first := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w1"},
+		map[string]viewstream.Content{"qg-1": content("obj-1", "s1"), "qg-2": content("obj-2", "s2")})
+	if _, err := harness.server.Publish(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	dialer := &bufconnDialer{}
+	dialer.serveOn(t, "leader-a", harness.server)
+	discovery := &scriptedDiscovery{}
+	discovery.set("leader-a", true)
+	switched := &scriptedSwitched{}
+	switched.count.Store(1)
+	clock := &atomic.Int64{}
+	clock.Store(time.Unix(1000, 0).UnixMilli())
+	client, err := viewstream.NewClient(viewstream.ClientIdentity{WorkerID: "w1", Incarnation: "i1", StreamToken: "t1"}, discovery, nil, &sessionObserver{},
+		viewstream.ClientOptions{Dial: dialer.dial, Tick: 20 * time.Millisecond, Switched: switched,
+			Now: func() time.Time { return time.UnixMilli(clock.Load()) },
+			Sleep: func(ctx context.Context, wait time.Duration) error {
+				time.Sleep(5 * time.Millisecond)
+				return ctx.Err()
+			}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = client.Run(runCtx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	eventually(t, "one of two executed from the view, not switched", func() bool {
+		stats := harness.server.Stats()
+		lagging := harness.server.Stats().NotSwitched
+		return stats.Counts.Installed == 1 && stats.Counts.Switched == 0 &&
+			len(lagging) == 1 && lagging[0].WorkerID == "w1" && lagging[0].SwitchedQueryGroups == 1
+	})
+	// The second Query Group's checks come good between heartbeats: the next
+	// receipt claims switched with no new version.
+	switched.count.Store(2)
+	eventually(t, "both executed from the view, switched", func() bool {
+		stats := harness.server.Stats()
+		return stats.Counts.Switched == 1 && stats.Revision == 1 && client.Stats().SwitchedQueryGroups == 2
+	})
+}
