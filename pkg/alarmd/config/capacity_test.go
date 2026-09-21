@@ -294,14 +294,20 @@ func TestTheMutationGuardrailIsNotDerivedFromMemory(t *testing.T) {
 }
 
 // The compile-time point ceiling comes from the representation the store
-// writes, and it is below the limit the configuration states.
+// writes, and under the framed record the configured limit is the binding one.
 //
-// That gap is the finding: max_required_history_points is 4096, the record runs
-// out around 2100 points for one Level, and nothing anywhere held the smaller
-// number - so a Plan configured between them compiled cleanly and then had
-// every state write refused, per series, with nothing to say why. Deriving it
-// here rather than writing it beside the configured one is what keeps them from
-// drifting when the representation changes.
+// The original finding was a gap the other way: max_required_history_points is
+// 4096, the JSON envelope ran out around 2100 points for one Level, and nothing
+// anywhere held the smaller number - so a Plan configured between them compiled
+// cleanly and then had every state write refused, per series, with nothing to
+// say why. Deriving the ceiling here rather than writing it beside the
+// configured one is what let it follow the representation when the store
+// started writing framed records, which is what closed the gap.
+//
+// So the assertion is now that 4096 is reachable at every Level count a Plan
+// may compile. It is not a formality: if a later representation change put the
+// ceiling back under the configured limit, the silent per-series refusal comes
+// back exactly as it was, and this is the case that would say so.
 func TestTheRetainedPointCeilingComesFromTheRepresentation(t *testing.T) {
 	cfg := completePhaseTwoProductionConfig(validGoAccessConfigObject().withDerivedCapacity(containerShapes()[0]))
 	limits := cfg.CompilerLimits()
@@ -313,9 +319,20 @@ func TestTheRetainedPointCeilingComesFromTheRepresentation(t *testing.T) {
 	if single == 0 {
 		t.Fatal("no ceiling derived for a single-Level Plan")
 	}
-	if single >= limits.MaxRequiredHistoryPoints {
-		t.Fatalf("derived ceiling %d is not below the configured %d; if the stated limit were reachable "+
-			"there would be nothing here to fix", single, limits.MaxRequiredHistoryPoints)
+	// Every Level count, not just one: the binding ceiling is the lowest, which
+	// is the most crowded record, and a case that only reads the single-Level
+	// number would pass while a Plan at the configured limit was refused for
+	// having more Levels than the case looked at.
+	for count := 1; count < len(limits.MaxRetainedPointsByLevels); count++ {
+		ceiling := limits.MaxRetainedPointsByLevels[count]
+		if ceiling == 0 {
+			continue
+		}
+		if ceiling < limits.MaxRequiredHistoryPoints {
+			t.Fatalf("ceiling for %d Levels is %d, below the configured %d: a Plan asking for the limit it "+
+				"is allowed to ask for would compile and then have every state write refused per series",
+				count, ceiling, limits.MaxRequiredHistoryPoints)
+		}
 	}
 	// More Levels share one record, so each one leaves room for fewer points.
 	for count := 2; count < len(limits.MaxRetainedPointsByLevels); count++ {
