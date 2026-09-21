@@ -144,6 +144,9 @@ func (snapshot *GroupSnapshot) Keys(plan *contract.TargetPlanV1) (map[string]str
 		return nil, 0
 	}
 	signature := string(plan.Rule) + "\x00" + plan.ModelID + "\x00" + strings.Join(plan.Identity.Dimensions, ",") + "\x00" + plan.Identity.ModelDimension + "\x00" + plan.Identity.ModelValue
+	if plan.Identity.HostIdentity {
+		signature += "\x00host"
+	}
 	snapshot.mu.Lock()
 	defer snapshot.mu.Unlock()
 	if cached, found := snapshot.keys[signature]; found {
@@ -155,13 +158,16 @@ func (snapshot *GroupSnapshot) Keys(plan *contract.TargetPlanV1) (map[string]str
 			built.dropped++
 			continue
 		}
-		switch plan.Rule {
-		case contract.TargetPlanRuleHostID:
+		switch {
+		case plan.Rule == contract.TargetPlanRuleHostID || plan.Identity.HostIdentity:
+			// Held under the host id: the host_id rule's key, and the key of
+			// a model_inst_id plan read by host identity. A member the
+			// writer put no host id on cannot be placed and is dropped.
 			if member.HostID == "" {
 				built.dropped++
 				continue
 			}
-			built.members[contract.TargetPlanMemberKey(member.HostID)] = struct{}{}
+			built.members[plan.Identity.HostKey(member.HostID)] = struct{}{}
 		default:
 			built.members[plan.Identity.MemberKey(member.ModelID, member.ModelInstID)] = struct{}{}
 		}

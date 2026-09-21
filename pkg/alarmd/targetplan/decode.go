@@ -38,11 +38,20 @@ const (
 	// dynamic reference. It would match nothing; refusing it puts it on the
 	// first screen where a strategy that can never alert belongs.
 	ReasonEmpty = "TARGET_PLAN_EMPTY"
-	// ReasonModelRepresentationUnresolved is a model_inst_id plan whose
-	// record key cannot be built: the writer named no model_match and no
-	// query configuration names a dimension that carries the model code, so
-	// the plan's model code would be compared with the data's model id and
-	// never match. Refusing is what makes that visible.
+	// ReasonModelRepresentationUnresolved names a model_inst_id target whose
+	// members cannot be placed against the data: the writer named no
+	// model_match, no query configuration names a dimension carrying the
+	// model code, and the host cache knows none of the members as a host.
+	// The plan's model code would be compared with the data's model id and
+	// never match, so the members are named unresolved rather than read as
+	// an empty target.
+	//
+	// It is decided at resolution, not at compile: a host's canonical
+	// identity is (model, instance) too, and the protocol names hosts that
+	// way on every collected metric without a model_match. Whether the
+	// members are hosts is a fact of the host cache, so the decoder freezes
+	// such a plan as read by host identity and the worker's resolution says,
+	// per Slot and by this name, when the cache does not know them.
 	ReasonModelRepresentationUnresolved = "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED"
 )
 
@@ -128,14 +137,23 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 		return nil, unsupported("static_targets", "%s", err)
 	}
 	keys := make([]string, 0, len(statics))
+	seenMembers := make(map[contract.TargetPlanMemberV1]struct{}, len(statics))
 	for index, element := range statics {
-		key, err := decodeStaticTarget(rule, ruleDimensions, plan, element, fmt.Sprintf("static_targets[%d]", index))
+		key, member, err := decodeStaticTarget(rule, ruleDimensions, plan, element, fmt.Sprintf("static_targets[%d]", index))
 		if err != nil {
 			return nil, err
+		}
+		if member != nil {
+			if _, duplicate := seenMembers[*member]; !duplicate {
+				seenMembers[*member] = struct{}{}
+				plan.StaticMembers = append(plan.StaticMembers, *member)
+			}
+			continue
 		}
 		keys = append(keys, key)
 	}
 	plan.StaticKeys = contract.CanonicalTargetScopeKeys(keys)
+	contract.SortTargetPlanMembers(plan.StaticMembers)
 
 	groups, err := arrayElements(fields["dynamic_groups"])
 	if err != nil {
@@ -202,7 +220,7 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 	}
 	contract.SortTargetPlanTopologies(plan.DynamicTopologies)
 
-	if len(plan.StaticKeys) == 0 && len(plan.DynamicGroups) == 0 && len(plan.DynamicTopologies) == 0 {
+	if len(plan.StaticKeys) == 0 && len(plan.StaticMembers) == 0 && len(plan.DynamicGroups) == 0 && len(plan.DynamicTopologies) == 0 {
 		return nil, &Error{Reason: ReasonEmpty, Detail: "the plan names no static target and no dynamic reference"}
 	}
 	if err := plan.Validate(); err != nil {
@@ -215,17 +233,22 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 
 // decodeIdentity decides how a record key is read for the rule.
 //
-// The fixed-dimension rules read their dimensions and nothing else. The
+// The fixed-dimension rules read their dimensions and nothing else; host_id
+// reads the record's host identity, which is bk_host_id when the record
+// carries it and the id the host cache teaches it otherwise. The
 // model_inst_id rule reads the data's representation of the plan's model,
-// and there are exactly two ways the strategy can say what that is: the
-// writer names it (model_match: the dimension and the value the data
-// carries for this plan's model, so the key is the instance alone behind a
-// model gate), or a query configuration names an identity pair whose model
-// dimension is not the platform default, which is the fork's way of
-// pointing at a dimension that carries the model code (so the key is
-// "code|instance" and compares with the members as written). Neither
-// present is a plan whose members can never match the data, and it is
-// refused rather than frozen.
+// and the strategy can say what that is in two ways: the writer names it
+// (model_match: the dimension and the value the data carries for this
+// plan's model, so the key is the instance alone behind a model gate), or a
+// query configuration names an identity pair whose model dimension is not
+// the platform default, which is the fork's way of pointing at a dimension
+// that carries the model code (so the key is "code|instance" and compares
+// with the members as written). With neither, the members are read as
+// hosts: a host's canonical identity is (model, instance) as well, the
+// protocol names hosts that way on every collected metric and never sends a
+// model_match for them, and the host cache is what says whether a member is
+// a host. So the plan is frozen as read by host identity, and the worker's
+// resolution names, per Slot, the members the cache does not know.
 func decodeIdentity(
 	rule contract.TargetPlanRule, ruleDimensions []string, modelMatch json.RawMessage, options Options,
 ) (contract.TargetPlanIdentityV1, *Error) {
@@ -233,7 +256,7 @@ func decodeIdentity(
 		if len(modelMatch) != 0 {
 			return contract.TargetPlanIdentityV1{}, unsupported("model_match", "only %s carries a model match", contract.TargetPlanRuleModelInstID)
 		}
-		return contract.TargetPlanIdentityV1{Dimensions: ruleDimensions}, nil
+		return contract.TargetPlanIdentityV1{Dimensions: ruleDimensions, HostIdentity: rule == contract.TargetPlanRuleHostID}, nil
 	}
 	pairs := options.ObjectIdentities
 	if len(pairs) == 0 {
@@ -268,62 +291,64 @@ func decodeIdentity(
 			return contract.TargetPlanIdentityV1{Dimensions: []string{pair[0], pair[1]}}, nil
 		}
 	}
-	return contract.TargetPlanIdentityV1{}, &Error{
-		Reason: ReasonModelRepresentationUnresolved, Path: "model_match",
-		Detail: "the plan's model is a code and the data's " + DefaultObjectModelDimension + " is not; name the data's value in model_match or point target_identity at a dimension carrying the code",
-	}
+	return contract.TargetPlanIdentityV1{Dimensions: []string{contract.HostIdentityDimension}, HostIdentity: true}, nil
 }
 
-// decodeStaticTarget reads one static target into its member key.
+// decodeStaticTarget reads one static target into its member key, or, on a
+// model_inst_id plan read by host identity, into the (model, instance)
+// member the worker maps to a host id once per Slot.
 func decodeStaticTarget(
 	rule contract.TargetPlanRule, ruleDimensions []string, plan *contract.TargetPlanV1, element json.RawMessage, path string,
-) (string, *Error) {
+) (string, *contract.TargetPlanMemberV1, *Error) {
 	fields, err := objectFields(element)
 	if err != nil {
-		return "", unsupported(path, "%s", err)
+		return "", nil, unsupported(path, "%s", err)
 	}
 	switch rule {
 	case contract.TargetPlanRuleHostID:
 		if err := onlyKeys(fields, path, "bk_host_id"); err != nil {
-			return "", err
+			return "", nil, err
 		}
 		host, err := integerText(fields["bk_host_id"])
 		if err != nil {
-			return "", unsupported(path+".bk_host_id", "%s", err)
+			return "", nil, unsupported(path+".bk_host_id", "%s", err)
 		}
-		return contract.TargetPlanMemberKey(host), nil
+		return contract.TargetPlanMemberKey(host), nil, nil
 	case contract.TargetPlanRuleModelInstID:
 		if err := onlyKeys(fields, path, "model_id", "model_inst_id"); err != nil {
-			return "", err
+			return "", nil, err
 		}
 		model, instance, err := memberModelInstance(fields, path, plan.ModelID)
 		if err != nil {
-			return "", err
+			return "", nil, err
 		}
-		return plan.Identity.MemberKey(model, instance), nil
+		if plan.Identity.HostIdentity {
+			return "", &contract.TargetPlanMemberV1{ModelID: model, ModelInstID: instance}, nil
+		}
+		return plan.Identity.MemberKey(model, instance), nil, nil
 	default:
 		if err := onlyKeys(fields, path, "model_id", "model_inst_id", "match"); err != nil {
-			return "", err
+			return "", nil, err
 		}
 		if _, _, err := memberModelInstance(fields, path, plan.ModelID); err != nil {
-			return "", err
+			return "", nil, err
 		}
 		match, err2 := objectFields(fields["match"])
 		if err2 != nil {
-			return "", unsupported(path+".match", "%s", err2)
+			return "", nil, unsupported(path+".match", "%s", err2)
 		}
 		if err := onlyKeys(match, path+".match", ruleDimensions...); err != nil {
-			return "", err
+			return "", nil, err
 		}
 		parts := make([]string, 0, len(ruleDimensions))
 		for _, dimension := range ruleDimensions {
 			value, err := nonEmptyText(match[dimension])
 			if err != nil {
-				return "", unsupported(path+".match."+dimension, "%s", err)
+				return "", nil, unsupported(path+".match."+dimension, "%s", err)
 			}
 			parts = append(parts, value)
 		}
-		return contract.TargetPlanMemberKey(parts...), nil
+		return contract.TargetPlanMemberKey(parts...), nil, nil
 	}
 }
 

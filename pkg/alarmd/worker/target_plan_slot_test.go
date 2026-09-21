@@ -23,7 +23,7 @@ func TestASlotResolvesItsTargetPlansAtBeginAndCommitsTheSummary(t *testing.T) {
 	plans, requirements := baseDuePlanAndRequirements()
 	plans[0].CompiledPlan = compiledPlanWithTargetForTest(t, plans[0].Identity.StrategyID, &contract.TargetPlanV1{
 		SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
-		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, StaticKeys: []string{"101"}, DynamicGroups: []string{"1001"},
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{"101"}, DynamicGroups: []string{"1001"},
 	})
 	fixture, request := newCompletionOnlyFixture(t, plans, requirements, nil)
 	result, err := fixture.coordinator.Execute(context.Background(), request)

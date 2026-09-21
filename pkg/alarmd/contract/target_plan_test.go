@@ -91,7 +91,7 @@ func TestAMemberKeySplitsBackIntoTheGroupTheDataReportsUnder(t *testing.T) {
 func TestTheFrozenTargetPlanRefusesItsOwnDefects(t *testing.T) {
 	valid := func() TargetPlanV1 {
 		return TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: TargetPlanRuleHostID,
-			Identity: TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, StaticKeys: []string{"101", "102"},
+			Identity: TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{"101", "102"},
 			DynamicGroups: []string{"1001"}, DynamicTopologies: []TargetPlanTopologyV1{{BusinessID: "2", ObjectID: "set", InstanceID: "12"}}}
 	}
 	if err := (&TargetPlanV1{}).Validate(); err == nil {
@@ -121,6 +121,30 @@ func TestTheFrozenTargetPlanRefusesItsOwnDefects(t *testing.T) {
 		"model gate dimension is a key": func(p *TargetPlanV1) {
 			p.Rule = TargetPlanRuleModelInstID
 			p.Identity = TargetPlanIdentityV1{Dimensions: []string{"cw_object_model_id"}, ModelDimension: "cw_object_model_id", ModelValue: "17"}
+		},
+		// The host_id rule has one reading, the record's host identity: a
+		// plan of it read by the dimension alone would be told apart by
+		// nothing on the page and would drop every record named by address.
+		"host rule read by dimension only": func(p *TargetPlanV1) { p.Identity.HostIdentity = false },
+		"host identity on a k8s rule": func(p *TargetPlanV1) {
+			p.Rule, p.Identity = TargetPlanRuleK8sCluster, TargetPlanIdentityV1{Dimensions: []string{"bcs_cluster_id"}, HostIdentity: true}
+			p.DynamicGroups, p.DynamicTopologies = nil, nil
+		},
+		"host identity reading another dimension": func(p *TargetPlanV1) { p.Identity.Dimensions = []string{"host"} },
+		"static members on the host rule": func(p *TargetPlanV1) {
+			p.StaticMembers = []TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "101"}}
+		},
+		"static members beside static keys": func(p *TargetPlanV1) {
+			p.Rule = TargetPlanRuleModelInstID
+			p.StaticMembers = []TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "101"}}
+		},
+		"static member of another model": func(p *TargetPlanV1) {
+			p.Rule, p.StaticKeys = TargetPlanRuleModelInstID, []string{}
+			p.StaticMembers = []TargetPlanMemberV1{{ModelID: "cw-MySQL", ModelInstID: "101"}}
+		},
+		"unsorted static members": func(p *TargetPlanV1) {
+			p.Rule, p.StaticKeys = TargetPlanRuleModelInstID, []string{}
+			p.StaticMembers = []TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "102"}, {ModelID: "cw-Host", ModelInstID: "101"}}
 		},
 	} {
 		t.Run(name, func(t *testing.T) {

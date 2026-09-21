@@ -60,19 +60,34 @@ func TestTheTargetPlanFilterAdmitsByTheRecordKeyAndNeverWithoutAResolution(t *te
 	}
 }
 
-// The host rule reads bk_host_id exactly: a record that names its host by
-// address, or whose CMDB enrichment learned the host id, is not thereby in
-// the target - only the dimension the rule names is read.
-func TestTheHostIDRuleReadsOnlyTheHostIDDimension(t *testing.T) {
-	plan := PlanContext{TargetPlan: &TargetPlanContext{Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, Members: memberSet{"101": {}}}}
+// A host-identity target reads the record's host identity, however the
+// record came by it: the bk_host_id dimension, or the id the CMDB fuller
+// taught a record that names its host by address. Collected metrics name
+// their host by address, and a rule that read the dimension alone would
+// drop every one of them under a reason that blames the writer. A record
+// with no host id at all cannot be placed.
+func TestAHostIdentityTargetReadsTheRecordsHostIdentityHoweverItCameByIt(t *testing.T) {
+	plan := PlanContext{TargetPlan: &TargetPlanContext{Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, Members: memberSet{"101": {}}}}
 	byID := recordFacts(map[string]string{"bk_host_id": "101"})
 	if decision := (TargetPlanFilter{}).Admit(plan, byID); !decision.Admit {
 		t.Fatalf("record naming bk_host_id 101 = %+v", decision)
 	}
 	byAddress := recordFacts(map[string]string{"bk_target_ip": "192.0.2.1", "bk_target_cloud_id": "0"})
-	byAddress.AddHostKey("101") // what the CMDB fuller would teach it
-	if decision := (TargetPlanFilter{}).Admit(plan, byAddress); decision.Admit || decision.Reason != TargetPlanReasonKeyMissing {
-		t.Fatalf("record named by address, host id learned from CMDB = %+v; the host rule reads the dimension only", decision)
+	byAddress.AddHostKey("192.0.2.1|0")
+	byAddress.AddHostKey("101") // what the CMDB fuller teaches it
+	if decision := (TargetPlanFilter{}).Admit(plan, byAddress); !decision.Admit {
+		t.Fatalf("record named by address, host id learned from CMDB = %+v; the host identity is read however it came", decision)
+	}
+	otherHost := recordFacts(map[string]string{"bk_target_ip": "192.0.2.2", "bk_target_cloud_id": "0"})
+	otherHost.AddHostKey("192.0.2.2|0")
+	otherHost.AddHostKey("202")
+	if decision := (TargetPlanFilter{}).Admit(plan, otherHost); decision.Admit || decision.Reason != TargetPlanReasonOutOfTarget {
+		t.Fatalf("record of another host = %+v, want out_of_target", decision)
+	}
+	unplaced := recordFacts(map[string]string{"bk_target_ip": "192.0.2.3", "bk_target_cloud_id": "0"})
+	unplaced.AddHostKey("192.0.2.3|0") // the address alone: CMDB did not know it
+	if decision := (TargetPlanFilter{}).Admit(plan, unplaced); decision.Admit || decision.Reason != TargetPlanReasonKeyMissing {
+		t.Fatalf("record with no host id = %+v, want target_key_missing", decision)
 	}
 }
 
@@ -84,7 +99,7 @@ func TestBothTargetFiltersSitOnTheChainAndOnlyTheCarriedFormDecides(t *testing.T
 	dimensions := map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"101"`), "bk_target_ip": json.RawMessage(`"192.0.2.1"`)}
 	before, _ := json.Marshal(dimensions)
 	facts := chain.Enrich(dimensions)
-	planForm := PlanContext{TargetPlan: &TargetPlanContext{Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, Members: memberSet{"102": {}}}}
+	planForm := PlanContext{TargetPlan: &TargetPlanContext{Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, Members: memberSet{"102": {}}}}
 	if admitted, filter, reason := chain.Admit(planForm, &facts); admitted || filter != "target_plan" || reason != TargetPlanReasonOutOfTarget {
 		t.Fatalf("target plan form: Admit() = %v %s %s", admitted, filter, reason)
 	}

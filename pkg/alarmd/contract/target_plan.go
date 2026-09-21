@@ -37,6 +37,13 @@ type TargetPlanV1 struct {
 	// StaticKeys are the member keys of the static targets, already in the
 	// key form the rule defines, sorted and unique.
 	StaticKeys []string `json:"static_keys"`
+	// StaticMembers are the static targets of a model_inst_id plan read by
+	// host identity: the (model, instance) pairs as the writer spelled them,
+	// sorted and unique, which the worker maps to host ids through the host
+	// cache once per Slot. They are not keys - the key is the host id, and
+	// only the cache knows it - so they live apart from StaticKeys, which is
+	// empty on such a plan.
+	StaticMembers []TargetPlanMemberV1 `json:"static_members,omitempty"`
 	// DynamicGroups are the dynamic group ids referenced, sorted and unique.
 	DynamicGroups []string `json:"dynamic_groups,omitempty"`
 	// DynamicTopologies are the topology node references, sorted and unique.
@@ -75,7 +82,28 @@ type TargetPlanIdentityV1 struct {
 	Dimensions     []string `json:"dimensions"`
 	ModelDimension string   `json:"model_dimension,omitempty"`
 	ModelValue     string   `json:"model_value,omitempty"`
+	// HostIdentity says the key is the record's host id, read from the
+	// host identities the admission facts carry (the bk_host_id dimension
+	// when the record has one, and otherwise the id the host cache teaches
+	// the record from its address) rather than from a dimension by name.
+	// It is the identity of the host_id rule, and of a model_inst_id plan
+	// whose members are hosts: the writer names those by (model, instance)
+	// and the host cache maps them to host ids. Dimensions is bk_host_id on
+	// such an identity, which is how a no-data group of it is addressed.
+	HostIdentity bool `json:"host_identity,omitempty"`
 }
+
+// TargetPlanMemberV1 is one static member of a model_inst_id plan as the
+// writer spelled it: the model code and the instance id.
+type TargetPlanMemberV1 struct {
+	ModelID     string `json:"model_id"`
+	ModelInstID string `json:"model_inst_id"`
+}
+
+// HostIdentityDimension is the dimension a host-identity target's no-data
+// group is addressed by, and the one dimension a record carries its host id
+// under when it carries one at all.
+const HostIdentityDimension = "bk_host_id"
 
 // TargetPlanTopologyV1 is one dynamic topology reference: the business the
 // node is read under and the node itself. All three are text because that
@@ -97,7 +125,7 @@ type targetPlanRuleFacts struct {
 }
 
 var targetPlanRules = map[TargetPlanRule]targetPlanRuleFacts{
-	TargetPlanRuleHostID:      {Dimensions: []string{"bk_host_id"}, Dynamic: true},
+	TargetPlanRuleHostID:      {Dimensions: []string{HostIdentityDimension}, Dynamic: true},
 	TargetPlanRuleModelInstID: {Dynamic: true},
 	TargetPlanRuleK8sCluster:  {Dimensions: []string{"bcs_cluster_id"}},
 	TargetPlanRuleK8sNode:     {Dimensions: []string{"bcs_cluster_id", "node"}},
@@ -261,6 +289,36 @@ func (plan *TargetPlanV1) Validate() error {
 	if err := canonicalTargetPlanList("static keys", plan.StaticKeys); err != nil {
 		return err
 	}
+	if plan.Identity.HostIdentity {
+		if plan.Rule != TargetPlanRuleHostID && plan.Rule != TargetPlanRuleModelInstID {
+			return fmt.Errorf("alarmd contract: rule %s does not read a host identity", plan.Rule)
+		}
+		if plan.Identity.ModelDimension != "" || strings.Join(plan.Identity.Dimensions, ",") != HostIdentityDimension {
+			return fmt.Errorf("alarmd contract: a host identity reads %s and carries no model gate", HostIdentityDimension)
+		}
+	} else if plan.Rule == TargetPlanRuleHostID {
+		// One reading per rule. A host_id plan read by the bk_host_id
+		// dimension alone would drop every record that names its host by
+		// address, and the two readings would be told apart by nothing on
+		// the page.
+		return fmt.Errorf("alarmd contract: rule %s reads the record's host identity", TargetPlanRuleHostID)
+	}
+	if len(plan.StaticMembers) > 0 {
+		if plan.Rule != TargetPlanRuleModelInstID || !plan.Identity.HostIdentity {
+			return errors.New("alarmd contract: static members belong to a model_inst_id plan read by host identity")
+		}
+		if len(plan.StaticKeys) > 0 {
+			return errors.New("alarmd contract: a plan carries static members or static keys, not both")
+		}
+		for index, member := range plan.StaticMembers {
+			if member.ModelID != plan.ModelID || strings.TrimSpace(member.ModelInstID) == "" {
+				return errors.New("alarmd contract: a static member names the plan's model and a non-empty instance")
+			}
+			if index > 0 && !plan.StaticMembers[index-1].less(member) {
+				return errors.New("alarmd contract: static members must be canonically ordered and unique")
+			}
+		}
+	}
 	if err := canonicalTargetPlanList("dynamic groups", plan.DynamicGroups); err != nil {
 		return err
 	}
@@ -275,10 +333,28 @@ func (plan *TargetPlanV1) Validate() error {
 			return errors.New("alarmd contract: topology references must be canonically ordered and unique")
 		}
 	}
-	if len(plan.StaticKeys) == 0 && len(plan.DynamicGroups) == 0 && len(plan.DynamicTopologies) == 0 {
+	if len(plan.StaticKeys) == 0 && len(plan.StaticMembers) == 0 && len(plan.DynamicGroups) == 0 && len(plan.DynamicTopologies) == 0 {
 		return errors.New("alarmd contract: a target plan that names nothing matches nothing and is refused at compile time")
 	}
 	return nil
+}
+
+func (member TargetPlanMemberV1) less(other TargetPlanMemberV1) bool {
+	if member.ModelID != other.ModelID {
+		return member.ModelID < other.ModelID
+	}
+	return member.ModelInstID < other.ModelInstID
+}
+
+// SortTargetPlanMembers orders members canonically, in place.
+func SortTargetPlanMembers(members []TargetPlanMemberV1) {
+	sort.Slice(members, func(left, right int) bool { return members[left].less(members[right]) })
+}
+
+// HostKey is the key a host-identity target holds a host under, and the key
+// such a target reads off a record's host identity.
+func (identity TargetPlanIdentityV1) HostKey(hostID string) string {
+	return TargetPlanMemberKey(hostID)
 }
 
 func (node TargetPlanTopologyV1) less(other TargetPlanTopologyV1) bool {

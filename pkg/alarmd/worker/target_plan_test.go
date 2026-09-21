@@ -129,7 +129,7 @@ func targetPlanCompiledPlan(t *testing.T, strategyID string, target *contract.Ta
 func TestBeginResolvesEachTargetPlanOnceForBothViews(t *testing.T) {
 	host := func(static string) *contract.TargetPlanV1 {
 		return &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
-			Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, StaticKeys: []string{static}, DynamicGroups: []string{"1001"}}
+			Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{static}, DynamicGroups: []string{"1001"}}
 	}
 	complete := &targetplan.Resolution{Static: map[string]struct{}{"1": {}}, Selectors: []targetplan.SelectorResult{
 		{Kind: targetplan.SelectorKindGroup, ID: "1001", State: targetplan.SelectorOK, Reason: targetplan.ReasonNone, Members: map[string]struct{}{"101": {}}, Kept: 1}}}
@@ -227,7 +227,7 @@ func TestAnUnreadableSelectorPausesAbsenceAndNotTheStaticMembers(t *testing.T) {
 		{Kind: targetplan.SelectorKindGroup, ID: "1001", State: targetplan.SelectorUnavailable, Reason: targetplan.ReasonKeyMissing}}}
 	resolution.Compose()
 	target := newResolvedTarget(resolution)
-	identity := contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}
+	identity := contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}
 	filter := admission.TargetPlanFilter{}
 	record := func(host string) *admission.Facts {
 		return &admission.Facts{Dimensions: map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"` + host + `"`)}}

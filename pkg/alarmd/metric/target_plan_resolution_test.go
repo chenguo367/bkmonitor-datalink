@@ -39,6 +39,7 @@ func TestTheSelectorCellsAnOperatorActsOnArePublishedAtZeroAsOneSet(t *testing.T
 		"dynamic_topology|Unavailable|index_unavailable",
 		"dynamic_topology|OKEmpty|node_missing",
 		"dynamic_topology|OKEmpty|node_in_other_business",
+		"static|Unavailable|model_representation_unresolved",
 	}
 	sort.Strings(want)
 	got := selectorCells(t, r)

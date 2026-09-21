@@ -1,5 +1,5 @@
 {
-  "note": "target_plan documents as the strategy cache writer at its first review actually emitted them (PLAN cases only); expect is this decoder's verdict on each - the two disagreeing is the point of keeping the file; one synthetic case (marked) is a writer case with the missing business added, so the accepted shape of the intersection-to-union defect is on file before the writer fixes the field that hid it",
+  "note": "target_plan documents as the strategy cache writer at its first review actually emitted them (PLAN cases only); expect is this decoder's verdict on each - the two disagreeing is the point of keeping the file; one synthetic case (marked) is a writer case with the missing business added, so the accepted shape of the intersection-to-union defect is on file before the writer fixes the field that hid it A model_inst_id plan without a model_match is accepted as read by host identity since the host-model exemption of decision-013 was applied; whether its members are hosts is decided per Slot against the host cache.",
   "cases": [
     {
       "case": "5.3 host system metric",
@@ -41,7 +41,8 @@
         ],
         "topologies": [
           "2|set|12"
-        ]
+        ],
+        "host_identity": true
       }
     },
     {
@@ -65,8 +66,18 @@
         "dynamic_topologies": []
       },
       "expect": {
-        "reason": "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED",
-        "path": "model_match"
+        "accepted": true,
+        "rule": "model_inst_id",
+        "host_identity": true,
+        "static_keys": [],
+        "static_members": [
+          "cw-MySQL|mysql-prod-01"
+        ],
+        "groups": [
+          "2001"
+        ],
+        "topologies": [],
+        "resolution_note": "read by host identity: the members are hosts if the host cache knows them by (model, instance); a model the cache knows no host of is TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED at resolution, not here"
       }
     },
     {
@@ -210,7 +221,8 @@
         "static_keys": [
           "101",
           "102"
-        ]
+        ],
+        "host_identity": true
       }
     },
     {
@@ -234,7 +246,8 @@
         "static_keys": [
           "101"
         ],
-        "writer_defect": "the excluded list became an included one; the plan is valid and means the opposite, which no reader can see"
+        "writer_defect": "the excluded list became an included one; the plan is valid and means the opposite, which no reader can see",
+        "host_identity": true
       }
     },
     {
@@ -268,8 +281,21 @@
         ]
       },
       "expect": {
-        "reason": "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED",
-        "path": "model_match"
+        "accepted": true,
+        "rule": "model_inst_id",
+        "host_identity": true,
+        "static_keys": [],
+        "static_members": [
+          "cw-Host|101",
+          "cw-Host|102"
+        ],
+        "groups": [
+          "1001"
+        ],
+        "topologies": [
+          "2|set|12"
+        ],
+        "resolution_note": "read by host identity: the members are hosts if the host cache knows them by (model, instance); a model the cache knows no host of is TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED at resolution, not here"
       }
     },
     {
@@ -289,8 +315,16 @@
         "dynamic_topologies": []
       },
       "expect": {
-        "reason": "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED",
-        "path": "model_match"
+        "accepted": true,
+        "rule": "model_inst_id",
+        "host_identity": true,
+        "static_keys": [],
+        "static_members": [
+          "cw-Host|101"
+        ],
+        "groups": [],
+        "topologies": [],
+        "resolution_note": "read by host identity: the members are hosts if the host cache knows them by (model, instance); a model the cache knows no host of is TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED at resolution, not here"
       }
     },
     {
@@ -313,7 +347,8 @@
         "rule": "host_id",
         "static_keys": [
           "101"
-        ]
+        ],
+        "host_identity": true
       }
     },
     {
@@ -337,7 +372,8 @@
         "static_keys": [
           "101"
         ],
-        "writer_defect": "byte-identical to the eq case"
+        "writer_defect": "byte-identical to the eq case",
+        "host_identity": true
       }
     },
     {
@@ -429,8 +465,16 @@
         "dynamic_topologies": []
       },
       "expect": {
-        "reason": "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED",
-        "path": "model_match"
+        "accepted": true,
+        "rule": "model_inst_id",
+        "host_identity": true,
+        "static_keys": [],
+        "static_members": [
+          "cw-Host|101"
+        ],
+        "groups": [],
+        "topologies": [],
+        "resolution_note": "read by host identity: the members are hosts if the host cache knows them by (model, instance); a model the cache knows no host of is TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED at resolution, not here"
       }
     },
     {
@@ -481,7 +525,8 @@
         "topologies": [
           "2|set|12"
         ],
-        "writer_defect": "the group's intersection (host 101 AND under set 12) became a union (host 101 OR under set 12); the plan is valid and wider than the strategy, and no reader can see it"
+        "writer_defect": "the group's intersection (host 101 AND under set 12) became a union (host 101 OR under set 12); the plan is valid and wider than the strategy, and no reader can see it",
+        "host_identity": true
       }
     }
   ]

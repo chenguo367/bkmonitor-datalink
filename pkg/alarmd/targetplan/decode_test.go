@@ -33,9 +33,26 @@ func TestTheProtocolSamplesFreezeIntoTheirRuleKeys(t *testing.T) {
 				"dynamic_groups":[{"dynamic_group_id":"1001"},{"dynamic_group_id":1001}],
 				"dynamic_topologies":[{"bk_biz_id":2,"bk_obj_id":"set","bk_inst_id":12},{"bk_biz_id":2,"bk_obj_id":"module","bk_inst_id":31}]}`,
 			want: contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
-				Identity:   contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}},
+				Identity:   contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true},
 				StaticKeys: []string{"101", "102"}, DynamicGroups: []string{"1001"},
 				DynamicTopologies: []contract.TargetPlanTopologyV1{{BusinessID: "2", ObjectID: "module", InstanceID: "31"}, {BusinessID: "2", ObjectID: "set", InstanceID: "12"}}},
+		},
+		"5.4 host collected metric, as the protocol writes it": {
+			// No model_match and the platform's default identity pair: the
+			// members are read as hosts, (model, instance) as the writer
+			// spelled them, and the host cache maps them to host ids per
+			// Slot. The key is the record's host identity.
+			document: `{"schema_version":1,"model_id":"cw-Host","target_rule":"model_inst_id","failure_policy":"no_match",
+				"static_targets":[{"model_id":"cw-Host","model_inst_id":"102"},{"model_id":"cw-Host","model_inst_id":"101"},{"model_id":"cw-Host","model_inst_id":101}],
+				"dynamic_groups":[{"dynamic_group_id":"1001"}],
+				"dynamic_topologies":[{"bk_biz_id":2,"bk_obj_id":"set","bk_inst_id":12}]}`,
+			options: targetplan.Options{ObjectIdentities: defaultPairs},
+			want: contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleModelInstID,
+				Identity:          contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true},
+				StaticKeys:        []string{},
+				StaticMembers:     []contract.TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "101"}, {ModelID: "cw-Host", ModelInstID: "102"}},
+				DynamicGroups:     []string{"1001"},
+				DynamicTopologies: []contract.TargetPlanTopologyV1{{BusinessID: "2", ObjectID: "set", InstanceID: "12"}}},
 		},
 		"5.4 host collected metric, model named by the writer": {
 			document: `{"schema_version":1,"model_id":"cw-Host","target_rule":"model_inst_id","failure_policy":"no_match",
@@ -178,8 +195,12 @@ func TestEveryDeviationFromTheProtocolIsRefusedAtItsField(t *testing.T) {
 			reason: targetplan.ReasonUnsupported, path: "model_match.model"},
 		"model target of another model": {document: with(modelInst, set("static_targets", []any{map[string]any{"model_id": "cw-Redis", "model_inst_id": "r1"}})),
 			reason: targetplan.ReasonUnsupported, path: "static_targets[0].model_id"},
-		"nothing named":                   {document: with(set("static_targets", []any{})), reason: targetplan.ReasonEmpty, path: ""},
-		"model representation unresolved": {document: with(modelInst, del("model_match")), reason: targetplan.ReasonModelRepresentationUnresolved, path: "model_match"},
+		"nothing named": {document: with(set("static_targets", []any{})), reason: targetplan.ReasonEmpty, path: ""},
+		// A model_inst_id plan with neither model_match nor a code
+		// dimension is not a deviation any more: it is the protocol's own
+		// spelling of a host target, frozen as read by host identity and
+		// decided against the host cache per Slot (see the positive samples
+		// and the resolver's tests). It stays out of this table on purpose.
 	} {
 		t.Run(name, func(t *testing.T) {
 			plan, err := targetplan.Decode(test.document, targetplan.Options{ObjectIdentities: [][2]string{{"cw_object_model_id", "cw_object_model_inst_id"}}})
@@ -209,13 +230,15 @@ func TestTheWritersObservedPlansGetTheVerdictsTheContractGives(t *testing.T) {
 			Case       string          `json:"case"`
 			TargetPlan json.RawMessage `json:"target_plan"`
 			Expect     struct {
-				Accepted   bool     `json:"accepted"`
-				Reason     string   `json:"reason"`
-				Path       string   `json:"path"`
-				Rule       string   `json:"rule"`
-				StaticKeys []string `json:"static_keys"`
-				Groups     []string `json:"groups"`
-				Topologies []string `json:"topologies"`
+				Accepted      bool     `json:"accepted"`
+				Reason        string   `json:"reason"`
+				Path          string   `json:"path"`
+				Rule          string   `json:"rule"`
+				HostIdentity  bool     `json:"host_identity"`
+				StaticKeys    []string `json:"static_keys"`
+				StaticMembers []string `json:"static_members"`
+				Groups        []string `json:"groups"`
+				Topologies    []string `json:"topologies"`
 			} `json:"expect"`
 		} `json:"cases"`
 	}
@@ -226,8 +249,9 @@ func TestTheWritersObservedPlansGetTheVerdictsTheContractGives(t *testing.T) {
 		t.Fatalf("fixture holds %d cases, want the writer's 18 PLAN cases and the one synthetic case", len(file.Cases))
 	}
 	// The writer's queries carried the platform's default identity pair and
-	// no model_match, which is what makes every model_inst_id plan fall to
-	// the representation refusal.
+	// no model_match - the writer never sends one - so every model_inst_id
+	// plan is frozen as read by host identity, and whether its members are
+	// hosts is the host cache's answer per Slot, not the decoder's.
 	options := targetplan.Options{ObjectIdentities: [][2]string{{"cw_object_model_id", "cw_object_model_inst_id"}}}
 	accepted, refused := 0, 0
 	for _, test := range file.Cases {
@@ -251,14 +275,20 @@ func TestTheWritersObservedPlansGetTheVerdictsTheContractGives(t *testing.T) {
 			for _, node := range plan.DynamicTopologies {
 				topologies = append(topologies, node.Key())
 			}
-			if string(plan.Rule) != test.Expect.Rule || strings.Join(plan.StaticKeys, ",") != strings.Join(test.Expect.StaticKeys, ",") ||
+			members := make([]string, 0, len(plan.StaticMembers))
+			for _, member := range plan.StaticMembers {
+				members = append(members, member.ModelID+"|"+member.ModelInstID)
+			}
+			if string(plan.Rule) != test.Expect.Rule || plan.Identity.HostIdentity != test.Expect.HostIdentity ||
+				strings.Join(plan.StaticKeys, ",") != strings.Join(test.Expect.StaticKeys, ",") || strings.Join(members, ",") != strings.Join(test.Expect.StaticMembers, ",") ||
 				strings.Join(plan.DynamicGroups, ",") != strings.Join(test.Expect.Groups, ",") || strings.Join(topologies, ",") != strings.Join(test.Expect.Topologies, ",") {
-				t.Fatalf("frozen %+v, want rule %s static %v groups %v topologies %v", *plan, test.Expect.Rule, test.Expect.StaticKeys, test.Expect.Groups, test.Expect.Topologies)
+				t.Fatalf("frozen %+v, want rule %s host identity %v static %v members %v groups %v topologies %v", *plan, test.Expect.Rule,
+					test.Expect.HostIdentity, test.Expect.StaticKeys, test.Expect.StaticMembers, test.Expect.Groups, test.Expect.Topologies)
 			}
 		})
 	}
-	if accepted != 9 || refused != 10 {
-		t.Fatalf("accepted %d refused %d, want 9 (8 of the writer's, the synthetic one) and 10: every model_inst_id plan without a model_match, every topology without a business and every empty plan is refused", accepted, refused)
+	if accepted != 13 || refused != 6 {
+		t.Fatalf("accepted %d refused %d, want 13 (12 of the writer's, the synthetic one) and 6: every topology without a business and every empty plan is refused; a model_inst_id plan without a model_match is read by host identity and decided per Slot", accepted, refused)
 	}
 }
 

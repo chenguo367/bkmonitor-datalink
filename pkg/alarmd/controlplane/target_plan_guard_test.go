@@ -182,7 +182,7 @@ func TestAValidTargetPlanIsFrozenAndTheLegacyTargetIsNotRead(t *testing.T) {
 	// and a list the old decoder cannot read at all - which, read, would have
 	// retained the last good Plan.
 	want := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID,
-		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}, StaticKeys: []string{"42", "7"},
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, StaticKeys: []string{"42", "7"},
 		DynamicGroups:     []string{"1001"},
 		DynamicTopologies: []contract.TargetPlanTopologyV1{{BusinessID: "2", ObjectID: "set", InstanceID: "12"}}}
 	frozenPlanOf := func(catalog controlplane.Catalog, strategyID string) *controlplane.FrozenPlan {
@@ -425,5 +425,78 @@ func TestATargetPlanReferencingGroupsIsWithheldWhereNoGroupSourceIsRendered(t *t
 	// again and is accepted, rather than the cached refusal being served.
 	if got := catalogStrategyIDs(build(groups, controlplane.TargetSources{DynamicGroups: true})); !reflect.DeepEqual(got, []string{"1001", "1002"}) {
 		t.Fatalf("catalog with a group source = %v, want the Plan accepted", got)
+	}
+}
+
+// The writer's host plans compile. A model_inst_id plan without a
+// model_match - which the writer never sends - was refused as
+// TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED and stopped the detection of
+// every host strategy on the deployment; decision-013 had exempted the host
+// model from that refusal and the compiler had not applied the exemption.
+// The plan is now frozen as read by host identity, with the writer's
+// (model, instance) members kept for the worker to map through the host
+// cache, and whether they are hosts is said per Slot, not here.
+func TestAWriterHostPlanWithoutAModelMatchCompilesAsReadByHostIdentity(t *testing.T) {
+	payload, err := os.ReadFile("testdata/two_threshold_strategies.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var documents []json.RawMessage
+	if err := json.Unmarshal(payload, &documents); err != nil {
+		t.Fatal(err)
+	}
+	identity := controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(documents[1], &document); err != nil {
+		t.Fatal(err)
+	}
+	var items []map[string]json.RawMessage
+	if err := json.Unmarshal(document["items"], &items); err != nil {
+		t.Fatal(err)
+	}
+	// Verbatim the writer's "5.4 collected metric, query carries host dims"
+	// plan: the host model, the canonical members, a group and a node, no
+	// model_match.
+	items[0]["target_plan"] = json.RawMessage(`{"schema_version":1,"model_id":"cw-Host","target_rule":"model_inst_id","failure_policy":"no_match",
+		"static_targets":[{"model_id":"cw-Host","model_inst_id":"101"},{"model_id":"cw-Host","model_inst_id":"102"}],
+		"dynamic_groups":[{"dynamic_group_id":"1001"}],"dynamic_topologies":[{"bk_obj_id":"set","bk_inst_id":12,"bk_biz_id":2}]}`)
+	document["items"], err = json.Marshal(items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed := controlplane.SourceStrategy{SourceID: "1002", Identity: identity}
+	changed.Document, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+		Strategies:    []controlplane.SourceStrategy{{SourceID: "1001", Document: documents[0], Identity: identity}, changed},
+		Planner:       &recordingPlanner{facts: queryFacts(t)},
+		TargetSources: controlplane.TargetSources{DynamicGroups: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, disposition := range catalog.Dispositions {
+		if disposition.Disposition != controlplane.DispositionAccepted {
+			t.Fatalf("disposition %+v, want the writer's host plan accepted: refusing it here stops the strategy's detection", disposition)
+		}
+	}
+	want := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleModelInstID,
+		Identity:          contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true},
+		StaticKeys:        []string{},
+		StaticMembers:     []contract.TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "101"}, {ModelID: "cw-Host", ModelInstID: "102"}},
+		DynamicGroups:     []string{"1001"},
+		DynamicTopologies: []contract.TargetPlanTopologyV1{{BusinessID: "2", ObjectID: "set", InstanceID: "12"}}}
+	var frozen *controlplane.FrozenPlan
+	for index := range catalog.QueryGroups {
+		for planIndex := range catalog.QueryGroups[index].Plans {
+			if plan := &catalog.QueryGroups[index].Plans[planIndex]; plan.Identity.StrategyID == "1002" {
+				frozen = plan
+			}
+		}
+	}
+	if frozen == nil || !reflect.DeepEqual(frozen.Plan.TargetPlan, want) || frozen.Plan.TargetScope != nil {
+		t.Fatalf("frozen plan = %+v, want the target plan %+v read by host identity and no scope", frozen, want)
 	}
 }
