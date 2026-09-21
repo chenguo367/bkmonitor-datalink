@@ -61,8 +61,11 @@ func TestTheProductionLeaderServesItsDesiredSetOverTheViewStream(t *testing.T) {
 		t.Fatalf("control leader = %+v found=%t err=%v, want this replica with a term", leader, found, err)
 	}
 
+	// The fixture serves the control stream once it runs a Slot, so this
+	// replica's own Worker may already hold a session; the manual stream
+	// below replaces it under the same Worker id.
 	stats := bundle.dependencies.ViewStreamStats()
-	if !stats.Leading || stats.ControlEpoch != leader.OwnerEpoch || stats.Revision == 0 || stats.Counts.Expected != 1 || stats.Sessions != 0 {
+	if !stats.Leading || stats.ControlEpoch != leader.OwnerEpoch || stats.Revision == 0 || stats.Counts.Expected != 1 || stats.Sessions > 1 {
 		t.Fatalf("stream stats after the first round = %+v, want leading in term %d with a revision and one expected receiver", stats, leader.OwnerEpoch)
 	}
 
@@ -221,6 +224,10 @@ func (source failingViewSource) LoadPublishedContent(context.Context, controlpla
 	return controlplane.PublishedContent{}, source.err
 }
 
+func (source failingViewSource) DrainingContent(context.Context, execution.QueryGroupIdentity) (execution.ObjectDigest, []execution.OutputContextRef, bool, error) {
+	return "", nil, false, source.err
+}
+
 type staticViewSource struct{}
 
 func (staticViewSource) LoadActivation(context.Context) (controlplane.ActivationState, error) {
@@ -229,4 +236,8 @@ func (staticViewSource) LoadActivation(context.Context) (controlplane.Activation
 
 func (staticViewSource) LoadPublishedContent(context.Context, controlplane.SnapshotPublicationRef) (controlplane.PublishedContent, error) {
 	return controlplane.PublishedContent{}, nil
+}
+
+func (staticViewSource) DrainingContent(context.Context, execution.QueryGroupIdentity) (execution.ObjectDigest, []execution.OutputContextRef, bool, error) {
+	return "", nil, false, nil
 }

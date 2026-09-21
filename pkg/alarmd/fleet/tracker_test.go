@@ -221,6 +221,31 @@ func TestBlockedRoundsUseTheLowerThreshold(t *testing.T) {
 	}
 }
 
+// A round the Worker's executable view did not allow produced nothing, like
+// a source it could not read: the object gets a blocked-run row under that
+// word after the blocked threshold, and a healthy round clears it. Without
+// the word in the vocabulary the tracker said nothing, and a Query Group
+// refused on every round (decision-016 batch 4b) had no row.
+func TestRoundsTheViewDidNotAllowAreBlockedRuns(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	for round := 0; round < DefaultBlockedRounds; round++ {
+		tracker.Observe(context.Background(), runOutcome("qg-1", "view_not_executable"))
+	}
+	anomalies := tracker.Anomalies()
+	if len(anomalies) != 1 || anomalies[0].Kind != KindBlockedRun || anomalies[0].ReasonCode != "view_not_executable" {
+		t.Fatalf("anomalies = %+v, want one blocked run under view_not_executable", anomalies)
+	}
+	Attribute(anomalies, now)
+	if anomalies[0].Finding.Check != CheckDependencyDown {
+		t.Fatalf("a round the view did not allow is under %s, want %s", anomalies[0].Finding.Check, CheckDependencyDown)
+	}
+	tracker.Observe(context.Background(), completion("qg-1", "FULL_COMPLETED", "8930"))
+	if anomalies := tracker.Anomalies(); len(anomalies) != 0 {
+		t.Fatalf("anomalies = %+v, want the run cleared once the view allowed a round", anomalies)
+	}
+}
+
 // Rounds that were simply not due say nothing about health and must neither
 // start nor clear a run, or a quiet query group would look broken.
 func TestRoundsThatSayNothingDoNotAffectTheRun(t *testing.T) {

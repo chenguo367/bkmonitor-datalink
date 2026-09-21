@@ -143,8 +143,12 @@ const (
 var (
 	// HealthyCompletions end a round with a result.
 	HealthyCompletions = []string{"FULL_COMPLETED", "FULL_EMPTY_COMPLETED"}
-	// BlockedOutcomes are rounds that produced nothing at all.
-	BlockedOutcomes = []string{"source_blocked", "source_error", "source_retry", "panic", "other_error"}
+	// BlockedOutcomes are rounds that produced nothing at all. A round the
+	// Worker's executable view did not allow (decision-016 batch 4b) is one
+	// of them: the object stops being checked until the view and the
+	// records agree, and the row has to say so or a Query Group refused on
+	// every round would have no row at all.
+	BlockedOutcomes = []string{"source_blocked", "source_error", "source_retry", "view_not_executable", "panic", "other_error"}
 	// FailedExecutions are rounds that reached execution and did not finish.
 	FailedExecutions = []string{"error", "retrying", "incomplete"}
 )

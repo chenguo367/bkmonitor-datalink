@@ -83,3 +83,74 @@ var errTimelineRevisionMoved = errors.New("alarmd controlplane: the timeline is 
 func TimelineRevisionHint(ctx context.Context) uint64 {
 	return timelineRevisionHint(ctx)
 }
+
+// activationsFromTimeline answers a Plan activation request from the Query
+// Group's timeline: the Segment the contract's Slot falls in must be the one
+// the contract names, a closed Segment makes every Plan historical, and an
+// open one answers with its own activation records - which are the records
+// the activation state carries for the Query Group, written from one list
+// in the cutover's one script.
+func activationsFromTimeline(request execution.PlanActivationRequest, timeline persistedScheduleTimeline) (execution.PlanActivationResult, error) {
+	contractRef := request.Contract
+	for _, segment := range timeline.Segments {
+		schedule := segment.Schedule
+		if !schedule.Segment.Contains(contractRef.Slot.EvaluationTime) {
+			continue
+		}
+		if schedule.Segment.Start != contractRef.ScheduleSegmentStart ||
+			schedule.Segment.ScheduleRevision != contractRef.ScheduleRevision ||
+			schedule.Segment.Publication.SnapshotRevision != contractRef.SnapshotRevision ||
+			schedule.Segment.QueryRevision != contractRef.QueryRevision {
+			return execution.PlanActivationResult{}, errors.New("alarmd controlplane: activation request does not reference its persisted Schedule Segment")
+		}
+		historical := schedule.Segment.End != nil
+		byPlan := make(map[execution.PlanIdentity]execution.PlanActivationFact, len(segment.Plans))
+		for _, record := range segment.Plans {
+			byPlan[record.Fact.Plan] = record.Fact
+		}
+		result := execution.PlanActivationResult{Contract: contractRef, Facts: make([]execution.PlanActivationFact, 0, len(request.Plans))}
+		for _, plan := range request.Plans {
+			fact, found := byPlan[plan]
+			if historical || !found {
+				fact = execution.PlanActivationFact{Plan: plan, Selection: execution.ActivationNone}
+			}
+			result.Facts = append(result.Facts, fact)
+		}
+		if err := result.Validate(request); err != nil {
+			return execution.PlanActivationResult{}, err
+		}
+		return result, nil
+	}
+	return execution.PlanActivationResult{}, errors.New("alarmd controlplane: activation request has no persisted Schedule Segment")
+}
+
+// DrainingContent is what a Query Group the current publication no longer
+// carries still executes: the content its timeline's last Segment names,
+// with the output context refs in force at the end of it. A draining Query
+// Group is one whose timeline has retired; it keeps its assignment until
+// Progress reaches the retired boundary, and the Slots left before that
+// boundary - the backlog at the retirement, a replay - are run from that
+// content. The executable view carries it so a Worker executing from the
+// view (decision-016 batch 4b) can finish them. Nothing when the timeline
+// is absent or its last Segment names no content.
+func (repository *RedisCatalogRepository) DrainingContent(ctx context.Context, queryGroup execution.QueryGroupIdentity) (execution.ObjectDigest, []execution.OutputContextRef, bool, error) {
+	timeline, err := repository.loadScheduleTimeline(ctx, queryGroup)
+	if errors.Is(err, ErrScheduleUnavailable) {
+		return "", nil, false, nil
+	}
+	if err != nil {
+		return "", nil, false, err
+	}
+	if len(timeline.Segments) == 0 {
+		return "", nil, false, nil
+	}
+	segment := timeline.Segments[len(timeline.Segments)-1].Schedule.Segment
+	if segment.ObjectDigest == "" {
+		return "", nil, false, nil
+	}
+	refs := segment.OutputContextRefs
+	if count := len(segment.OutputContextRevisions); count > 0 {
+		refs = segment.OutputContextRevisions[count-1].Refs
+	}
+	return segment.ObjectDigest, append([]execution.OutputContextRef(nil), refs...), true, nil
+}

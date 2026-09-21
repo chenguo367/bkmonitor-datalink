@@ -66,7 +66,7 @@ type PermitWaitFacts struct{ Recovery bool }
 var RunOutcomes = []string{
 	"query_cooldown", "single_flight_busy", "ownership_rejected", "source_backoff", "source_retry",
 	"source_blocked", "source_not_due", "source_error", "operation_not_ready", "admission_denied",
-	"execute_returned", "cancelled", "panic", "other_error",
+	"execute_returned", "cancelled", "panic", "other_error", "view_not_executable",
 }
 
 func ValidRunOutcome(value string) bool {
@@ -77,9 +77,15 @@ func ValidRunOutcome(value string) bool {
 	}
 	return false
 }
+
+// ValidExecuteOutcome is every word an executor return is classified as.
+// view_not_executable is a return the executable view refused (decision-016
+// batch 4b): the round did not run, and it is not among the fleet's failed
+// executions - the Runner's own outcome says blocked - nor among the
+// errors, which a reader may count as this deployment failing.
 func ValidExecuteOutcome(value string) bool {
 	switch value {
-	case "completed", "readiness_deferred", "retrying", "cancelled", "error", "incomplete":
+	case "completed", "readiness_deferred", "view_not_executable", "retrying", "cancelled", "error", "incomplete":
 		return true
 	}
 	return false

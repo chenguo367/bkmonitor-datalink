@@ -769,6 +769,23 @@ func (repository *RedisCatalogRepository) LoadActivations(ctx context.Context, r
 	if repository == nil || repository.client == nil {
 		return execution.PlanActivationResult{}, errors.New("alarmd controlplane: Redis catalog repository is required")
 	}
+	// A request carrying the Worker's timeline revision hint is answered
+	// from the Query Group's own timeline (decision-016 batch 4b): the open
+	// Segment's activation records are the same records the activation
+	// state carries for that Query Group - the cutover writes both from one
+	// list in one script - and a closed Segment's Slot is historical either
+	// way. Answering from the timeline reads no activation header, which is
+	// the poll batch 4 removes; a hint the timeline does not bear falls back
+	// to the header path inside loadScheduleTimelineHinted.
+	if timelineRevisionHint(ctx) > 0 {
+		timeline, err := repository.loadScheduleTimelineHinted(ctx, request.Contract.Slot.QueryGroup)
+		if err == nil {
+			return activationsFromTimeline(request, timeline)
+		}
+		if !errors.Is(err, ErrScheduleUnavailable) {
+			return execution.PlanActivationResult{}, err
+		}
+	}
 	// One header probe covers both the activation and the Schedule timeline of
 	// this authorization; both were persisted under that same header.
 	version, err := repository.readControlVersion(ctx)

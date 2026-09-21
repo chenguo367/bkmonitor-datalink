@@ -237,8 +237,10 @@ func dialLeader(_ context.Context, endpoint string) (pb.ControlServiceClient, fu
 	return pb.NewControlServiceClient(conn), conn.Close, nil
 }
 
-// Installed is the view this Worker holds, if any. Read by the metrics
-// and, in the shadow step, by nothing else.
+// Installed is the view this Worker holds, if any. Read by the metrics;
+// execution reads it through Entry. It is replaced only by an install and
+// never cleared by a disconnect: a Worker that lost its Leader keeps
+// executing from the view it holds until the records move past it.
 func (client *Client) Installed() (View, bool) {
 	view := client.installed.Load()
 	if view == nil {
@@ -248,9 +250,9 @@ func (client *Client) Installed() (View, bool) {
 }
 
 // Entry is the installed view's entry for one Query Group, and whether the
-// view carries it. Entries are kept sorted by Query Group, so this is a
-// binary search over the installed view rather than an index maintained
-// beside it.
+// view carries it: what the execution gate reads per Slot (decision-016
+// batch 4). Entries are kept sorted by Query Group, so this is a binary
+// search over the installed view rather than an index maintained beside it.
 func (client *Client) Entry(queryGroup execution.QueryGroupIdentity) (Entry, bool) {
 	view := client.installed.Load()
 	if view == nil {

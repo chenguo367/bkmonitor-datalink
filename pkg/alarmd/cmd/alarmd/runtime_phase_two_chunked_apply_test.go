@@ -167,7 +167,7 @@ func TestProductionPhaseTwoBundleReRunsChunkedSlotIdempotently(t *testing.T) {
 	failSecondChunk.Store(true)
 	clock.Store(base + 1)
 	firstStarted := time.Now()
-	if err := bundle.runScheduledOnce(ctx); err != nil {
+	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(first attempt) error = %v", err)
 	}
 	firstElapsed := time.Since(firstStarted)
@@ -203,7 +203,7 @@ func TestProductionPhaseTwoBundleReRunsChunkedSlotIdempotently(t *testing.T) {
 	// on wall time.
 	clock.Store(base + 1 + int64(cfg.PhaseTwo.Scheduler.RetryMinDelay.Duration()/time.Second))
 	secondStarted := time.Now()
-	if err := bundle.runScheduledOnce(ctx); err != nil {
+	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(retry) error = %v", err)
 	}
 	secondElapsed := time.Since(secondStarted)

@@ -802,7 +802,7 @@ func testProductionFullTargetFlow(t *testing.T, diagnostic bool) {
 		bundle.dependencies.TargetFlow = f
 	}
 	clock.Store(base + 1)
-	if err := bundle.runScheduledOnce(ctx); err != nil {
+	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatalf("phase-two production Slot error = %v", err)
 	}
 	if uqCalls.Load() != 1 {
@@ -1005,7 +1005,7 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingEventACKIsRetr
 	}
 	bundle.mu.Unlock()
 	clock.Store(base + 1)
-	if err := bundle.runScheduledOnce(ctx); err != nil {
+	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(retryable sibling) error = %v", err)
 	}
 	if uqCalls.Load() != 2 {
@@ -1156,7 +1156,7 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingInitialFreezeL
 	clock.Store((base + 1) * 1000)
 	healthy := queryGroupsByStrategy["1002"]
 	failed := queryGroupsByStrategy["1001"]
-	healthyResult, healthyAttempted, err := bundle.runners[healthy].runner.RunOne(ctx)
+	healthyResult, healthyAttempted, err := settledRunner(bundle, healthy).RunOne(ctx)
 	if err != nil || !healthyAttempted || !healthyResult.Completed {
 		t.Fatalf("healthy RunOne() = (%+v, %t, %v)", healthyResult, healthyAttempted, err)
 	}
@@ -1178,7 +1178,7 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingInitialFreezeL
 	if err := repository.ConfigureObjectCache(1, 1); err != nil {
 		t.Fatal(err)
 	}
-	failedResult, failedAttempted, failedErr := bundle.runners[failed].runner.RunOne(ctx)
+	failedResult, failedAttempted, failedErr := settledRunner(bundle, failed).RunOne(ctx)
 	if failedErr != nil || !failedAttempted || failedResult.Completed || failedResult.Result != observability.ResultRetrying ||
 		failedResult.ReasonCode != execution.ReasonCode(contract.ReasonSlotSourceRetry) {
 		t.Fatalf("failed RunOne() = (%+v, %t, %v)", failedResult, failedAttempted, failedErr)
@@ -1206,7 +1206,7 @@ func TestProductionPhaseTwoBundleKeepsHealthyQueryGroupWhenSiblingInitialFreezeL
 		t.Fatal(err)
 	}
 	clock.Store((base + int64((30*time.Minute)/time.Second)) * 1000)
-	recoveredResult, recoveredAttempted, err := bundle.runners[failed].runner.RunOne(ctx)
+	recoveredResult, recoveredAttempted, err := settledRunner(bundle, failed).RunOne(ctx)
 	if err != nil || !recoveredAttempted || !recoveredResult.Completed ||
 		recoveredResult.ReasonCode != execution.ReasonCode(contract.ReasonSnapshotUnavailable) {
 		t.Fatalf("RunOne(recovered after deadline) = (%+v, %t, %v)", recoveredResult, recoveredAttempted, err)
@@ -1343,7 +1343,7 @@ func TestProductionPhaseTwoBundleDrainsExpiredRetiredBacklogWithoutProjection(t 
 	}
 
 	clock.Store((int64(retiredBoundary) + int64((30*time.Minute)/time.Second)) * 1000)
-	result, attempted, err := bundle.runners[retired].runner.RunOne(ctx)
+	result, attempted, err := settledRunner(bundle, retired).RunOne(ctx)
 	if err != nil || !attempted || !result.Completed ||
 		result.ReasonCode != execution.ReasonCode(contract.ReasonSnapshotUnavailable) {
 		t.Fatalf("RunOne(expired retired backlog) = (%+v, %t, %v)", result, attempted, err)
@@ -1470,7 +1470,7 @@ func TestProductionPhaseTwoBundleSharesOneProcessRecoveryPermitBudgetAcrossOwned
 	clock.Store(time.Unix(base, 0).Add(500 * time.Millisecond).UnixMilli())
 
 	tickDone := make(chan error, 1)
-	go func() { tickDone <- bundle.runScheduledOnce(ctx) }()
+	go func() { tickDone <- runScheduledOnceSettled(ctx, bundle) }()
 	select {
 	case <-firstEntered:
 	case err := <-tickDone:
@@ -1491,7 +1491,7 @@ func TestProductionPhaseTwoBundleSharesOneProcessRecoveryPermitBudgetAcrossOwned
 	if err := <-tickDone; err != nil {
 		t.Fatalf("production tick error = %v", err)
 	}
-	if err := bundle.runScheduledOnce(ctx); err != nil {
+	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatalf("second production tick error = %v", err)
 	}
 	if uqCalls.Load() != 2 || maxInflight.Load() != 1 {
@@ -1574,7 +1574,7 @@ func TestProductionPhaseTwoBundleCommitsBudgetExhaustedRecoveryCompletionWithout
 
 	clock.Store(time.Unix(base, 0).Add(500 * time.Millisecond).UnixMilli())
 	for tick := 1; tick <= 2; tick++ {
-		if err := bundle.runScheduledOnce(ctx); err != nil {
+		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 			t.Fatalf("budget-exhausted production tick %d error = %v", tick, err)
 		}
 	}
@@ -1711,9 +1711,7 @@ func TestProductionPhaseTwoBundleLetsNormalUseRemainingProcessPermitDuringRecove
 		}
 		queryGroupsByStrategy[schedule.Plans[0].Identity.StrategyID] = queryGroup
 	}
-	bundle.mu.RLock()
-	normalRunner := bundle.runners[queryGroupsByStrategy["1002"]].runner
-	bundle.mu.RUnlock()
+	normalRunner := settledRunner(bundle, queryGroupsByStrategy["1002"])
 	if _, attempted, runErr := normalRunner.RunOne(ctx); runErr != nil || !attempted {
 		t.Fatalf("prepare normal Query Group attempted=%t error=%v", attempted, runErr)
 	}
@@ -1724,7 +1722,7 @@ func TestProductionPhaseTwoBundleLetsNormalUseRemainingProcessPermitDuringRecove
 	clock.Store(time.Unix(base+1, 0).Add(2 * time.Millisecond).UnixMilli())
 
 	tickDone := make(chan error, 1)
-	go func() { tickDone <- bundle.runScheduledOnce(ctx) }()
+	go func() { tickDone <- runScheduledOnceSettled(ctx, bundle) }()
 	waitSignal(t, recoveryEntered, "recovery Query Group UQ")
 	waitSignal(t, normalEntered, "normal Query Group UQ while recovery is inflight")
 	release()
@@ -1850,7 +1848,7 @@ func TestProductionPhaseTwoBundleCompletesIncompleteAccessWithoutStoppingHealthy
 	}
 
 	clock.Store(base)
-	if err := bundle.runScheduledOnce(ctx); err != nil {
+	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(partial sibling) error = %v", err)
 	}
 	failed := loadPhaseTwoProgress(t, ctx, productionOwnership, queryGroupsByStrategy["1001"])
@@ -1881,7 +1879,7 @@ func TestProductionPhaseTwoBundleCompletesIncompleteAccessWithoutStoppingHealthy
 	}
 
 	clock.Store(base + 1)
-	if err := bundle.runScheduledOnce(ctx); err != nil {
+	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(unavailable sibling) error = %v", err)
 	}
 	failed = loadPhaseTwoProgress(t, ctx, productionOwnership, queryGroupsByStrategy["1001"])
@@ -1895,7 +1893,7 @@ func TestProductionPhaseTwoBundleCompletesIncompleteAccessWithoutStoppingHealthy
 	}
 
 	clock.Store(base + 2)
-	if err := bundle.runScheduledOnce(ctx); err != nil {
+	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatalf("runScheduledOnce(recovered sibling) error = %v", err)
 	}
 	recovered := loadPhaseTwoProgress(t, ctx, productionOwnership, queryGroupsByStrategy["1001"])
@@ -2419,10 +2417,10 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 		var result execution.SlotExecutionResult
 		var attempted bool
 		if strategyID == "1002" {
-			result, attempted, err = bundle.runners[queryGroupsByStrategy[strategyID]].runner.RunOne(ctx)
+			result, attempted, err = settledRunner(bundle, queryGroupsByStrategy[strategyID]).RunOne(ctx)
 		} else {
 			var denied bool
-			result, attempted, denied, err = bundle.runners[queryGroupsByStrategy[strategyID]].runner.RunOneAdmitted(ctx, func(execution.Operation) (func(), bool) { return func() {}, true })
+			result, attempted, denied, err = settledRunner(bundle, queryGroupsByStrategy[strategyID]).RunOneAdmitted(ctx, func(execution.Operation) (func(), bool) { return func() {}, true })
 			if denied {
 				t.Fatal("denied")
 			}
@@ -2453,8 +2451,16 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 		}
 		// Guard and Progress re-read the activation before acting; each re-read
 		// probes the live header and transfers no activation body.
-		if activationBodyReads != 0 || headerProbes < 2 {
-			t.Fatalf("RunOne(%s) activation body reads=%d header probes=%d, want 0 body reads and at least two probes", strategyID, activationBodyReads, headerProbes)
+		// Batch 4b of decision-016: a Query Group executed from the installed
+		// view reads its timeline by the revision the record and the view
+		// agree on and its activation from that timeline, so a RunOne
+		// probes the activation header zero times. Under batch 4a and before,
+		// the same round probed it at least twice; that number is what
+		// batch 4 was built to take away, so it is asserted gone rather than
+		// merely allowed to fall.
+		if activationBodyReads != 0 || headerProbes != 0 {
+			t.Fatalf("RunOne(%s) activation body reads=%d header probes=%d, want 0 body reads and 0 probes: a Query Group "+
+				"executed from the view reads no activation header", strategyID, activationBodyReads, headerProbes)
 		}
 		if timelineBodyReads > 1 {
 			t.Fatalf("RunOne(%s) timeline body reads=%d, want at most the first touch of this Query Group", strategyID, timelineBodyReads)
@@ -2468,9 +2474,13 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 			headerProbes, headerBytes, epochProbes, lengthProbes)
 	}
 	statsAfter := repository.ControlReadCacheStats()
-	if statsAfter.Activation.Hits-statsBefore.Activation.Hits < 4 ||
-		statsAfter.Activation.Refreshes != statsBefore.Activation.Refreshes {
-		t.Fatalf("cache stats before=%+v after=%+v, want only activation hits during two RunOnes", statsBefore, statsAfter)
+	// The activation cache is not consulted at all by a hinted round: the
+	// two RunOnes leave its hits where they were and the hinted timeline
+	// object is what moved.
+	if statsAfter.Activation.Hits != statsBefore.Activation.Hits ||
+		statsAfter.Activation.Refreshes != statsBefore.Activation.Refreshes ||
+		statsAfter.HintedTimeline.Hits+statsAfter.HintedTimeline.Misses <= statsBefore.HintedTimeline.Hits+statsBefore.HintedTimeline.Misses {
+		t.Fatalf("cache stats before=%+v after=%+v, want the activation cache untouched and hinted timeline reads during two RunOnes", statsBefore, statsAfter)
 	}
 	beforeDeferredCalls := uqCalls.Load()
 	beforeDeferred, err := redisClient.SlowLogGet(ctx, 1).Result()
@@ -2481,7 +2491,7 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 	if len(beforeDeferred) > 0 {
 		deferredLastID = beforeDeferred[0].ID
 	}
-	deferredResult, deferredAttempted, err := bundle.runners[queryGroupsByStrategy["1002"]].runner.RunOne(ctx)
+	deferredResult, deferredAttempted, err := settledRunner(bundle, queryGroupsByStrategy["1002"]).RunOne(ctx)
 	if err != nil || !deferredAttempted || deferredResult.Completed || uqCalls.Load() != beforeDeferredCalls {
 		t.Fatalf("expected readiness deferral before Query: %+v %v calls=%d", deferredResult, err, uqCalls.Load())
 	}
@@ -2507,7 +2517,7 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 		t.Fatal(err)
 	}
 	clock.Store(bundle.runners[queryGroupsByStrategy["1002"]].runner.NextReadyAt().UnixMilli())
-	reentry, _, err := bundle.runners[queryGroupsByStrategy["1002"]].runner.RunOne(ctx)
+	reentry, _, err := settledRunner(bundle, queryGroupsByStrategy["1002"]).RunOne(ctx)
 	if err != nil || reentry.Completed || reentry.ReasonCode != execution.ReasonCode(contract.ReasonSnapshotRetryPending) || uqCalls.Load() != beforeDeferredCalls {
 		t.Fatalf("deferred reentry result=%+v error=%v clock=%v", reentry, err, now())
 	}

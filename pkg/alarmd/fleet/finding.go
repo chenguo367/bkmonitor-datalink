@@ -560,6 +560,7 @@ var codeChecks = map[string]verdict{
 	// inside the system and never reached the runner.
 	"BLOCKED_EXACT_SET_UNAVAILABLE": lands(CheckDependencyDown),
 	"SLOT_SOURCE_RETRY":             lands(CheckDependencyDown),
+	"VIEW_NOT_EXECUTABLE":           lands(CheckDependencyDown),
 	"PROGRESS_BEGIN_FAILED":         lands(CheckDependencyDown),
 	"PROGRESS_BEGIN_REJECTED":       lands(CheckDependencyDown),
 
