@@ -455,7 +455,15 @@ type NoDataTrackingSummary struct {
 	// Zero once every Plan has been recompiled and every Worker rolled; a
 	// count above zero says how much of the by-source partition still rests
 	// on the comparison.
-	HorizonSourceInferred int `json:"horizon_source_inferred"`
+	//
+	// A pointer, because the count exists for the rollout and a rollout is
+	// when a replica from before the count publishes a summary without it:
+	// read as zero, that replica's Plans -- every one of them inferred, since
+	// its build knew no frozen word -- would be the ones missing from exactly
+	// the number that is meant to say how many are left. Absent is therefore
+	// read as "all of this replica's Plans", and only a replica that counted
+	// says a number.
+	HorizonSourceInferred *int `json:"horizon_source_inferred,omitempty"`
 }
 
 // add folds one Plan's word, or another replica's whole summary, in.
@@ -472,7 +480,15 @@ func (summary *NoDataTrackingSummary) add(other NoDataTrackingSummary) {
 	if other.LastDecidedAt.After(summary.LastDecidedAt) {
 		summary.LastDecidedAt = other.LastDecidedAt
 	}
-	summary.HorizonSourceInferred += other.HorizonSourceInferred
+	inferred := other.Plans
+	if other.HorizonSourceInferred != nil {
+		inferred = *other.HorizonSourceInferred
+	}
+	total := inferred
+	if summary.HorizonSourceInferred != nil {
+		total += *summary.HorizonSourceInferred
+	}
+	summary.HorizonSourceInferred = &total
 }
 
 // summaryOf is one Plan's word as a summary of one.
@@ -481,9 +497,11 @@ func (tracking NoDataTracking) summaryOf() NoDataTrackingSummary {
 		Plans: 1, Expected: tracking.Expected, Absent: tracking.Absent,
 		ExpiredThisRound: tracking.ExpiredThisRound, Suppressed: tracking.Suppressed, LastDecidedAt: tracking.DecidedAt,
 	}
+	inferred := 0
 	if tracking.HorizonSourceBasis != NoDataHorizonSourceFrozen {
-		summary.HorizonSourceInferred = 1
+		inferred = 1
 	}
+	summary.HorizonSourceInferred = &inferred
 	switch tracking.HorizonSource {
 	case NoDataHorizonNone:
 		summary.HorizonNone = 1
