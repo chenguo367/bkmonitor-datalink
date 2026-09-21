@@ -159,9 +159,12 @@ func (coordinator *SlotExecutionCoordinator) recordExecutionEvidence(
 	writeCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), executionEvidenceWriteTimeout)
 	defer cancel()
 	now := time.Now()
+	// The mark lives to the Slot's keep-until, not its recovery-until: the
+	// finalization that reads it runs after the replay window closes, and a
+	// mark that ended where its reader begins was never there to be read.
 	err := coordinator.ports.ExecutionEvidence.Record(
 		writeCtx, request.Contract.Slot, request.DuePlanTargets.Plans, applied,
-		time.UnixMilli(request.RecoveryUntilUnixMilli), now,
+		time.UnixMilli(request.KeepUntilUnixMilli), now,
 	)
 	result := observability.Result(observability.ResultSuccess)
 	reason := observability.ReasonCode(observability.ReasonNone)

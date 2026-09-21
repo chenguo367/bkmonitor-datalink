@@ -3383,8 +3383,14 @@ func (evidence ExecutionEvidence) FullyApplied() bool {
 // a read failure is UNREADABLE and must not stop a Slot that has already missed
 // its window from finishing.
 type SlotExecutionEvidenceStore interface {
+	// Record writes the mark with a lifetime ending at keepUntil: the Slot's
+	// own keep-until, which is the instant after which nothing about the Slot
+	// is read. The query-free finalization that reads the mark runs once the
+	// replay window has closed, at recovery-until or after it, so a lifetime
+	// ending at recovery-until expired the mark at the moment its reader
+	// arrived.
 	Record(ctx context.Context, slot SlotIdentity, duePlans []PlanIdentity,
-		applied []PlanIdentity, recoveryUntil time.Time, now time.Time) error
+		applied []PlanIdentity, keepUntil time.Time, now time.Time) error
 	Read(ctx context.Context, slot SlotIdentity, duePlans []PlanIdentity) (ExecutionEvidence, error)
 }
 
