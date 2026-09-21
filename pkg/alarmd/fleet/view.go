@@ -99,6 +99,13 @@ const (
 	// starts at the handover, so the duration is a lower bound -- possibly a
 	// far lower one -- rather than a measurement.
 	SinceRestoredAtRestart SinceSource = "RESTORED_AT_RESTART"
+	// SinceRestoredEmptyRun is the first empty Slot of the object's run of
+	// empty rounds as its record kept it, read back after a restart. It is a
+	// Slot on the source's clock, not a moment this process watched, and it
+	// is a lower bound on the run: a record that could not date the run took
+	// the earliest empty Slot it could still prove, which is no earlier than
+	// the run really began.
+	SinceRestoredEmptyRun SinceSource = "RESTORED_EMPTY_RUN"
 	// SinceRefusedFuture marks a row whose start time was later than the moment
 	// it was read. Nothing can have started after now, so the timestamp was
 	// refused and the clock reset to the read.

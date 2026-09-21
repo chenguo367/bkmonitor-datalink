@@ -614,6 +614,7 @@ var SINCE_SOURCE = {
   PROCESS_START: '本副本接手时它就已经这样了——"已持续"是本进程看了多久，不是它坏了多久，只会更久',
   RESTORED_LAST_FULL: '上次完整跑完的时刻；真正变坏的时刻没保留，所以实际没这么久',
   RESTORED_AT_RESTART: '本进程接手的时刻；之前有多久没人知道，只会比这更久',
+  RESTORED_EMPTY_RUN: '对象记录里空跑起始的 Slot（源时间），重启后接着算；记录若只能证到更晚的一轮就取那一轮，所以实际只会更早',
   REFUSED_FUTURE: '记录的时刻比现在还晚，已拒绝——这是缺陷，请上报'
 };
 
@@ -631,6 +632,7 @@ var SINCE_BOUND = {
   PROCESS_START: '≥ ',
   RESTORED_AT_RESTART: '≥ ',
   RESTORED_LAST_FULL: '≤ ',
+  RESTORED_EMPTY_RUN: '≥ ',
   REFUSED_FUTURE: '? '
 };
 
@@ -694,7 +696,7 @@ var CHECK = {
   QUERY_REFUSED:         '后端拒绝了 {n} 个对象的查询（{g} 种原因，{b} 个业务）——后端读了查询并回了状态码，是查询构造、策略引用还是后端规则还分不出',
   QUERY_TARGET_MISSING:  '{n} 个对象的查询被后端回"表或字段不存在"（{g} 种回答，{s} 条策略，{b} 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错',
   NO_DATA_PERSISTENT:    '{n} 个对象持续没有数据（{s} 条策略）',
-  EMPTY_EVERY_ROUND:     '{n} 个对象每一轮都查不到数据、从未有过数据（{s} 条策略）：检测在跑，但没有任何东西可判',
+  EMPTY_EVERY_ROUND:     '{n} 个对象每一轮都查不到数据、没有任何一轮已知有过数据（{s} 条策略）：检测在跑，但没有任何东西可判',
   SERIES_CHURNING:       '{n} 个对象的序列活不过检测窗口（{s} 条策略），恢复判不了',
   SERIES_DATA_MISSING:   '{n} 个对象恢复所需的老序列数据不完整（{s} 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出',
   WINDOW_UNDECIDED:      '{n} 个对象的窗口填不满，还分不出是谁的（{g} 种情况，{s} 条策略）',
@@ -825,7 +827,7 @@ var EVIDENCE = {
   CONFIG_UNRESOLVED:     '对象行 config_changed 与快照/查询/调度三版本是否变了',
   BACKEND_NOT_ANSWERING: '分组的症状（超时/5xx）；对象行的冷却到期时刻与失败次数；超时的还要看查询预算与后端耗时，这两样不在页面上',
   NO_DATA_PERSISTENT:    '对象行连续空轮数，与"有过数据"（进过索引）',
-  EMPTY_EVERY_ROUND:     '对象行"每轮都空"：连续空轮数、起始时刻、评估周期（interval_seconds）、never_saw_data=true、原因 CAUSE_UNKNOWN（本版不猜）；与 NO_DATA_PERSISTENT 的区别只在"有没有过数据"。JSON：no_data[].kind=EMPTY_EVERY_ROUND、empty_every_round{rounds, since, interval_seconds, never_saw_data, cause}、首屏 empty_every_round_total',
+  EMPTY_EVERY_ROUND:     '对象行"每轮都空"：连续空轮数（重启后只从恢复的那一轮起数，是下界）、空跑起始 Slot（源时间）、评估周期（interval_seconds）、never_saw_data=true（没有任何一轮已知有过数据——本进程没见过、对象记录里也没有）、原因 CAUSE_UNKNOWN（本版不猜）；与 NO_DATA_PERSISTENT 的区别只在"有没有已知有数据的轮"。一小时的门按 Slot 对 Slot 量：最近一次空轮的 Slot 减空跑起始 Slot ≥ 1 h，不掺墙钟——问的是"这个源在它自己的时间上空了一小时没有"，不是"我们看了多久"；两种时钟混在一条判据里，落后两小时正在追赶的对象恢复后第一轮就过门，恰是最该判对的场景。反过来，两小时的空 Slot 一分钟回放完也会列出，那一小时源时间确实是空的。JSON：no_data[].kind=EMPTY_EVERY_ROUND、empty_every_round{rounds, since, interval_seconds, never_saw_data, cause}、首屏 empty_every_round_total',
   SERIES_DATA_MISSING:   '对象行窗口计数：老序列缺点的比例；同一行若带超时或保护，缺点可能是 alarmd 没取到而不是数据没到',
   SERIES_CHURNING:       '对象行窗口计数：新序列占比与活不过窗口的轮数',
   PLAN_UNEVALUABLE:      '分组的策略与原因码',
@@ -887,7 +889,7 @@ var RECOVERY = {
   CONFIG_UNRESOLVED:     '下一轮按新配置完成，对象离开这一行',
   BACKEND_NOT_ANSWERING: '分出是哪一环后转到对应行；应答恢复后冷却到期自动重试成功，对象离开降级池（降级池"出过"数在涨）',
   NO_DATA_PERSISTENT:    '数据恢复后下一轮非空',
-  EMPTY_EVERY_ROUND:     '任一轮查到数据即消失（此后再空就走 NO_DATA_PERSISTENT）；副本重启后重新起算一小时——重启只恢复最后一轮的结论，最后一轮非空才算"有过数据"',
+  EMPTY_EVERY_ROUND:     '任一轮查到数据即消失（此后再空就走 NO_DATA_PERSISTENT）。副本重启不再清零：对象记录带着"最近一次有数据的 Slot"和"本轮空跑起始 Slot"，恢复时接着算，起算来源标 RESTORED_EMPTY_RUN；只有引入这两个字段之前写的记录、或混版滚动期被旧二进制回写过的记录，才退回"只按最后一轮起算"，最后一轮非空才算已知有过数据',
   SERIES_DATA_MISSING:   '分出是没到还是没取到后转到对应行；老序列补上点后窗口填满',
   SERIES_CHURNING:       '序列稳定活过窗口后窗口填满',
   PLAN_UNEVALUABLE:      '策略改定义后下一轮可算',

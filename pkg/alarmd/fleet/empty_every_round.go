@@ -25,8 +25,12 @@ import "time"
 // than guessing across it.
 type EmptyEveryRoundFacts struct {
 	// Rounds is how many consecutive rounds completed with no records, and
-	// Since when that run began. Rounds is a count of completions, not of
-	// periods: a period the object was not due for counts nothing.
+	// Since the Slot the run of empty rounds began at, on the source's clock
+	// -- the same clock the hour is measured on, and the value the object's
+	// record carries across a restart. Rounds is a count of completions this
+	// process saw, not of periods: a period the object was not due for counts
+	// nothing, and a run restored from the record counts the restored round
+	// alone, so after a restart it is a lower bound.
 	Rounds int       `json:"rounds"`
 	Since  time.Time `json:"since"`
 	// IntervalSeconds is the object's evaluation period from the due index,
@@ -36,8 +40,11 @@ type EmptyEveryRoundFacts struct {
 	IntervalSeconds int64 `json:"interval_seconds,omitempty"`
 	// NeverSawData is always true on this row and is written out so a reader
 	// of the JSON does not have to know that from the kind: the row's whole
-	// claim is that records were never seen, and it is the one fact that
-	// separates it from a NO_DATA row.
+	// claim is that no round is known to have returned records -- none this
+	// process watched, none the object's record names -- and it is the one
+	// fact that separates it from a NO_DATA row. "Known" is the word: a
+	// record that lost the fact during a mixed-version roll reads the same as
+	// one that never had it, and the row says the most it can.
 	NeverSawData bool `json:"never_saw_data"`
 	// Cause is one of EmptyEveryRoundCauses. Only CAUSE_UNKNOWN is produced:
 	// the two explanations a reader should check -- the source has no data,

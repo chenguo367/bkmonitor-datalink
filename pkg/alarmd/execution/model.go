@@ -3559,6 +3559,24 @@ type ScheduleProgress struct {
 	// since the upgrade -- and it is why the field is a pointer rather than a
 	// zero-valued struct that would read as a completion at Slot zero.
 	LastCompletion *LastCompletionSummary `json:"last_completion,omitempty"`
+	// LastDataSlot is the most recent round that completed with records
+	// (FULL_COMPLETED), and EmptyRunSinceSlot the first round of the run of
+	// empty completions (FULL_EMPTY_COMPLETED) the cursor is in -- zero when
+	// the last round was not empty. They are the two facts the fleet page
+	// restores a never-had-data object from after a restart: LastFullSlot
+	// cannot serve, because an empty round is complete too and advances it.
+	// Without them every release restarted the hour an object has to be empty
+	// before it is listed, and two releases under an hour apart left the line
+	// blank for the whole day.
+	//
+	// Both are Slot times, not the commit's clock, so a retry of the same Slot
+	// writes the same bytes. Both are omitted at zero, which keeps a record
+	// that never had them byte-identical to what the build before wrote. Zero
+	// is also what a build without the fields writes back when it commits the
+	// object during a mixed-version roll, so a zero says "nothing recorded",
+	// and the reader that treats it as "never" is taking a lower bound.
+	LastDataSlot      EvaluationTime `json:",omitempty"`
+	EmptyRunSinceSlot EvaluationTime `json:",omitempty"`
 }
 
 // LastCompletionSummary is one committed round, as the commit already knew it.

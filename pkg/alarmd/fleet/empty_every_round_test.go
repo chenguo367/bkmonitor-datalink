@@ -14,18 +14,30 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // emptyRounds completes the object empty every period for the whole span,
 // advancing the tracker's clock, and returns how many rounds it completed.
+// Each round is stamped with its Slot, the clock's time when it ran: the hour
+// the line waits is measured Slot to Slot, and a round without one is a round
+// on no clock.
 func emptyRounds(tracker *Tracker, at *clock, queryGroup string, period, span time.Duration) int {
 	rounds := 0
 	for elapsed := time.Duration(0); elapsed <= span; elapsed += period {
-		tracker.Observe(context.Background(), completion(queryGroup, "FULL_EMPTY_COMPLETED", "4101"))
+		tracker.Observe(context.Background(), emptyAt(queryGroup, "4101", at.at))
 		rounds++
 		at.at = at.at.Add(period)
 	}
 	return rounds
+}
+
+// emptyAt is one empty completion of the object at the given Slot.
+func emptyAt(queryGroup, strategy string, slot time.Time) observability.Observation {
+	observed := completion(queryGroup, "FULL_EMPTY_COMPLETED", strategy)
+	observed.Trace.EvaluationTime = slot.Unix()
+	return observed
 }
 
 func rowsOfKind(rows []Anomaly, kind string) map[string]Anomaly {
@@ -137,11 +149,12 @@ func TestObjectsEmptyEveryRoundAreListedAfterAnHourNotAfterARoundCount(t *testin
 	}
 }
 
-// A restart restores only the last committed round. One that completed with
-// records restores "seen", and the object is the data side's an hour later,
-// not this line's; one that completed empty says nothing about the rounds
-// before it, and the hour starts from the first empty round this process
-// watches -- not from the restored round's clock.
+// A record from before the run facts were kept restores only its last
+// committed round. One that completed with records restores "seen", and the
+// object is the data side's an hour later, not this line's; one that completed
+// empty says nothing about the rounds before it, and the hour starts from the
+// first empty round this process watches -- not from the restored round's
+// clock. The record that carries the facts is the next test.
 func TestARestoredRoundWithRecordsCountsAsSeenAndAnEmptyOneDoesNot(t *testing.T) {
 	at := &clock{at: now}
 	tracker := newTracker(t, at)
@@ -201,7 +214,7 @@ func TestABlockedRunAfterTheEmptyRoundsTakesTheObjectOffTheLine(t *testing.T) {
 	}
 	// The run ends with an empty completion: every round that completed was
 	// empty again, and the hour it already has stands.
-	tracker.Observe(context.Background(), completion("qg-then-blocked", "FULL_EMPTY_COMPLETED", "4101"))
+	tracker.Observe(context.Background(), emptyAt("qg-then-blocked", "4101", at.at))
 	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-then-blocked"]; !listed {
 		t.Error("not listed again once the rounds complete empty")
 	}

@@ -37,19 +37,35 @@ func progressRestoreSource(store *progress.Store) func(context.Context, executio
 		if result.Progress == nil {
 			return fleet.RestoredState{}, nil
 		}
-		restored := fleet.RestoredState{
-			LastCompletion: string(result.Progress.LastCompletionKind),
-			NextSlot:       time.Unix(int64(result.Progress.NextSlot), 0),
-		}
-		// Zero means no round has ever completed in full, which is a different
-		// statement from "it last completed in full at the epoch". Converting it
-		// would hand the tracker a timestamp from 1970 and an age to match.
-		if result.Progress.LastFullSlot > 0 {
-			restored.LastFullSlot = time.Unix(int64(result.Progress.LastFullSlot), 0)
-		}
-		restored.LastRound = restoredRoundOf(result.Progress.LastCompletion)
-		return restored, nil
+		return restoredStateOf(*result.Progress), nil
 	}
+}
+
+// restoredStateOf maps one Progress record onto what the tracker restores
+// from. Every Slot on the record is zero for "the record names none" -- a
+// record from before the field existed, or one a build without it wrote back
+// during a mixed-version roll -- and none of them is turned into a timestamp
+// at the epoch: the tracker would read an age of decades off it.
+func restoredStateOf(progress execution.ScheduleProgress) fleet.RestoredState {
+	restored := fleet.RestoredState{
+		LastCompletion: string(progress.LastCompletionKind),
+		NextSlot:       time.Unix(int64(progress.NextSlot), 0),
+	}
+	// Zero means no round has ever completed in full, which is a different
+	// statement from "it last completed in full at the epoch".
+	if progress.LastFullSlot > 0 {
+		restored.LastFullSlot = time.Unix(int64(progress.LastFullSlot), 0)
+	}
+	// The same for the two facts about records: the last Slot known to have
+	// had them, and the first Slot of the run of empty rounds.
+	if progress.LastDataSlot > 0 {
+		restored.LastDataSlot = time.Unix(int64(progress.LastDataSlot), 0)
+	}
+	if progress.EmptyRunSinceSlot > 0 {
+		restored.EmptyRunSince = time.Unix(int64(progress.EmptyRunSinceSlot), 0)
+	}
+	restored.LastRound = restoredRoundOf(progress.LastCompletion)
+	return restored
 }
 
 // restoredRoundOf maps the commit's summary of the last round onto what the
