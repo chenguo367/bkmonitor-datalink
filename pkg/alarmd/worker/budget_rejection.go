@@ -3,10 +3,38 @@ package worker
 import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 
 // Called only on rejection while the shared reservation lock is held.
-func budgetRejection(kind observability.CapacityBudget, phase string, shared, requested, limit uint64, own *uint64) error {
+func budgetRejection(
+	kind observability.CapacityBudget, phase string, shared, requested, limit uint64, own *uint64,
+	usage []observability.CapacityBudgetUsage,
+) error {
 	return &provisionalBudgetExceededError{budget: kind, facts: &observability.CapacityRejectionFacts{
-		Phase: phase, OwnUsed: own, SharedUsed: shared, Requested: requested, Limit: limit,
+		Phase: phase, OwnUsed: own, SharedUsed: shared, Requested: requested, Limit: limit, Usage: usage,
 	}}
+}
+
+// ownBudgetUsage is what this execution had taken of every budget, each beside
+// the limit it is measured against.
+//
+// Every budget, not the one that refused: a rejection that reports only the
+// budget it hit cannot be read against the others, and the whole question this
+// reporting exists to answer is whether the budget that refused was the one
+// under real pressure. A count at its ceiling beside a byte budget at a tenth
+// of its own is a different incident from both at once, and they arrive as the
+// same line without this.
+func (stream *streamedExecution) ownBudgetUsage(budget ProvisionalBudget) []observability.CapacityBudgetUsage {
+	if stream == nil || !stream.began {
+		// Same reason ownReservation withholds a value: a nested owner's counts
+		// are not the execution's, and publishing them as its own would be
+		// worse than publishing nothing.
+		return nil
+	}
+	return []observability.CapacityBudgetUsage{
+		{Budget: observability.CapacityBudgetStateMutations, OwnUsed: stream.effects.states, Limit: budget.MaxStateMutations},
+		{Budget: observability.CapacityBudgetEvents, OwnUsed: stream.effects.events, Limit: budget.MaxEvents},
+		{Budget: observability.CapacityBudgetGapMutations, OwnUsed: stream.effects.gaps, Limit: budget.MaxGapMutations},
+		{Budget: observability.CapacityBudgetRetainedBytes, OwnUsed: stream.retained, Limit: budget.MaxRetainedBytes},
+		{Budget: observability.CapacityBudgetSeries, OwnUsed: stream.series, Limit: budget.MaxSeries},
+	}
 }
 
 // slotBudgetRejection describes the Slot's own output exceeding a per-Slot
@@ -24,6 +52,11 @@ func (stream *streamedExecution) slotBudgetRejection(kind observability.Capacity
 	}
 	return &provisionalBudgetExceededError{budget: kind, slot: true, facts: &observability.CapacityRejectionFacts{
 		Phase: stream.reservationPhase("slot_output"), OwnUsed: stream.ownReservation(used), Requested: requested, Limit: limit,
+		// The per-Slot caps this was judged against, not the process budget:
+		// a Slot refused by its own cap is a different incident from one
+		// refused by the shared pool, and reporting the pool's limits here
+		// would describe the wrong comparison.
+		Usage: stream.ownBudgetUsage(budget),
 	}}
 }
 

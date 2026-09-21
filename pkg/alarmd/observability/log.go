@@ -241,6 +241,17 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		if f.OwnUsed != nil {
 			attributes = append(attributes, slog.Uint64("capacity_own_used", *f.OwnUsed))
 		}
+		// Every budget's own usage, so the refusal can be read against the ones
+		// that did not refuse. capacity_budget names which was reached; without
+		// these the line cannot say whether the rest were anywhere near theirs.
+		for _, usage := range f.Usage {
+			attributes = append(attributes,
+				slog.Uint64("capacity_own_"+string(usage.Budget), usage.OwnUsed),
+				slog.Uint64("capacity_limit_"+string(usage.Budget), usage.Limit))
+		}
+	}
+	if f := observation.SlotBudgetUsage; f != nil {
+		attributes = append(attributes, slog.Any("slot_budget_usage", f))
 	}
 	if observation.CapacityBudget != "" {
 		attributes = append(attributes, slog.String("capacity_budget", string(observation.CapacityBudget)))

@@ -2468,6 +2468,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		ExecuteOutcome: executeReturnOutcome(result, err),
 		Result:         observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Duration: time.Since(started), Trace: trace, Err: observedErr,
+		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 	})
 	observability.EmitTargetFlow(ctx, "execution_outcome", trace, observability.TargetFlowFacts{ExecutionOutcomeKnown: true, Attempted: true, Completed: result.Completed, Completion: string(result.CompletionKind)})
 	return result, err
@@ -2708,4 +2709,17 @@ func publishedComposition(
 		return nil
 	}
 	return &composition
+}
+
+// slotBudgetUsageFacts pairs what a Slot used with the budgets it was admitted
+// against. Both halves arrive from the execution that produced them, so the
+// row is readable against the numbers that were in force when it was written
+// rather than against a configuration a reader looks up later.
+func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBudgetUsageFacts {
+	return &observability.SlotBudgetUsageFacts{
+		StateMutations: usage.StateMutations, GapMutations: usage.GapMutations, Events: usage.Events,
+		RetainedBytes: usage.RetainedBytes, Series: usage.Series,
+		StateMutationsLimit: usage.StateMutationsLimit, GapMutationsLimit: usage.GapMutationsLimit,
+		EventsLimit: usage.EventsLimit, RetainedBytesLimit: usage.RetainedBytesLimit, SeriesLimit: usage.SeriesLimit,
+	}
 }

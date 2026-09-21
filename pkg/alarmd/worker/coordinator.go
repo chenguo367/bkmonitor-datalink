@@ -148,10 +148,10 @@ func (coordinator *SlotExecutionCoordinator) acquireProvisional(series, retained
 	coordinator.reservations.mu.Lock()
 	defer coordinator.reservations.mu.Unlock()
 	if series > coordinator.budget.MaxSeries-coordinator.reservations.series {
-		return budgetRejection(observability.CapacityBudgetSeries, phase, coordinator.reservations.series, series, coordinator.budget.MaxSeries, stream.ownBudget(observability.CapacityBudgetSeries))
+		return budgetRejection(observability.CapacityBudgetSeries, phase, coordinator.reservations.series, series, coordinator.budget.MaxSeries, stream.ownBudget(observability.CapacityBudgetSeries), stream.ownBudgetUsage(coordinator.budget))
 	}
 	if retainedBytes > coordinator.budget.MaxRetainedBytes-coordinator.reservations.retainedBytes {
-		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, coordinator.reservations.retainedBytes, retainedBytes, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes))
+		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, coordinator.reservations.retainedBytes, retainedBytes, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))
 	}
 	coordinator.reservations.series += series
 	coordinator.reservations.retainedBytes += retainedBytes
@@ -284,7 +284,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	queryResult, queryReason := provisionalResult(stream.evaluated)
 	coordinator.observeQueryCompleted(ctx, request.Operation, started, queryResult, queryReason, completion, stream.evaluated)
 	if len(stream.evaluated.Plans) == 0 {
-		return execution.SlotExecutionResult{Result: queryResult, ReasonCode: queryReason}, nil
+		return execution.SlotExecutionResult{Result: queryResult, ReasonCode: queryReason, Usage: stream.budgetUsage()}, nil
 	}
 
 	var result execution.SlotExecutionResult
@@ -307,7 +307,27 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		}
 		return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: execute frozen Slot: %w", err)
 	}
+	// Filled at the one exit that has both the finished result and the stream
+	// that produced it. A Slot that ends any other way has no usage to report
+	// rather than a usage of zero, and the two must not arrive as one number.
+	result.Usage = stream.budgetUsage()
 	return result, nil
+}
+
+// budgetUsage is what this execution took of each budget, for the completion
+// row. It reads the same counters the rejection path reports, so a completion
+// and a refusal of the same Slot describe the same quantities.
+func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
+	if stream == nil {
+		return execution.SlotBudgetUsage{}
+	}
+	budget := stream.coordinator.budget
+	return execution.SlotBudgetUsage{
+		StateMutations: stream.effects.states, GapMutations: stream.effects.gaps,
+		Events: stream.effects.events, RetainedBytes: stream.retained, Series: stream.series,
+		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
+		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
+	}
 }
 
 func isReadinessDeferred(err error) bool {

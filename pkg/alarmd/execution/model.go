@@ -3896,4 +3896,36 @@ type SlotExecutionResult struct {
 	Result         Result
 	ReasonCode     ReasonCode
 	SourceRetry    bool
+	// Usage is what this Slot took of each budget, carried out so the
+	// completion row can report it.
+	//
+	// Every round for every object, not only the rounds that were refused. A
+	// number that exists only on rejections has no distribution: it shows the
+	// bad tail and nothing to compare it against, so "this is the budget under
+	// pressure" and "this budget is nowhere near its limit" read the same -
+	// which is how a count standing in for memory went a year without anyone
+	// being able to see that the memory it stood for was never reached.
+	Usage SlotBudgetUsage
+}
+
+// SlotBudgetUsage is one Slot's own consumption of the budgets it was admitted
+// against. Zero is a Slot that took none, not a Slot that was not measured:
+// every completed Slot fills it.
+type SlotBudgetUsage struct {
+	StateMutations uint64
+	GapMutations   uint64
+	Events         uint64
+	RetainedBytes  uint64
+	Series         uint64
+
+	// The limits each was measured against, carried with the usage rather than
+	// looked up by the reporter. A usage without its limit is not a reading,
+	// and the two have to come from one producer: read separately they can
+	// describe different moments, and the budget in force when the Slot ran is
+	// the only one the usage means anything against.
+	StateMutationsLimit uint64
+	GapMutationsLimit   uint64
+	EventsLimit         uint64
+	RetainedBytesLimit  uint64
+	SeriesLimit         uint64
 }

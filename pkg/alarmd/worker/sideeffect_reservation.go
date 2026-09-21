@@ -166,12 +166,12 @@ func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, 
 			case observability.CapacityBudgetGapMutations:
 				used, requested, limit = reservation.gaps, delta.gaps, coordinator.budget.MaxGapMutations
 			}
-			return budgetRejection(exceeded.budget, phase, used, requested, limit, stream.ownBudget(exceeded.budget))
+			return budgetRejection(exceeded.budget, phase, used, requested, limit, stream.ownBudget(exceeded.budget), stream.ownBudgetUsage(coordinator.budget))
 		}
 		return err
 	}
 	if retained > coordinator.budget.MaxRetainedBytes-reservation.retainedBytes {
-		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, reservation.retainedBytes, retained, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes))
+		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, reservation.retainedBytes, retained, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))
 	}
 	reservation.states += delta.states
 	reservation.events += delta.events
