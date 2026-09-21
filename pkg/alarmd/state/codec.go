@@ -383,3 +383,85 @@ func validPointBitmaps(valid, anomalous []byte, levelCount int) bool {
 	unused := byte(0xff << uint(levelCount%8))
 	return valid[len(valid)-1]&unused == 0 && anomalous[len(anomalous)-1]&unused == 0
 }
+
+// ALD2 is the framed record: the envelope's scalar fields stay JSON and only
+// the history is packed.
+//
+// The history is the one part that grows with the window, and it is where the
+// JSON record spends 234 bytes a point for one Level and 1068 for eight. The
+// scalar fields are O(1) plus O(Levels) and are left exactly as they were,
+// with their existing encoding and their existing validation: inventing a
+// binary encoding for them would buy nothing measurable and would put every
+// one of those checks through a second implementation.
+const (
+	packedFrameMagic          = "ALD2"
+	packedFrameSchemaV1  byte = 1
+	packedFrameCodecNone byte = 0
+	packedFrameHeaderLen      = 6
+)
+
+// PackedFrameUpperBoundV2 is the shape-only upper bound for the framed record.
+//
+// Per point: a uvarint source-time delta and three bitmaps of one bit per
+// Level. Three rather than the packed window's two, because the window records
+// only whether a Level had a usable value and this record has to give back the
+// fact it was handed - UNAVAILABLE and ERROR are different facts, and a point
+// no Level found usable is still a point the result contract reads.
+//
+// No record id is counted. Within one key the series identity digest is fixed
+// and every producer derives the id from it and the source time, so the id is
+// reconstructed at decode rather than stored.
+func PackedFrameUpperBoundV2(levelCount, pointCount int) (int, error) {
+	if levelCount < 0 || pointCount < 0 {
+		return 0, fmt.Errorf("state: encoded shape must be non-negative")
+	}
+	// The JSON header, at the widths RuntimeEnvelopeUpperBoundV2 measured it
+	// at, plus one 64-character detect fingerprint per Level that the envelope
+	// used to repeat on every point.
+	const (
+		frameOverhead    = 4 + 2 + binary.MaxVarintLen64
+		envelopeOverhead = 4 << 10
+		perLevelState    = 512 + 80
+	)
+	bitmapBytes := (levelCount + 7) / 8
+	base := frameOverhead + envelopeOverhead
+	if levelCount > (math.MaxInt-base)/perLevelState {
+		return 0, ErrStateBudget
+	}
+	base += levelCount * perLevelState
+	perPoint := binary.MaxVarintLen64
+	if bitmapBytes > (math.MaxInt-perPoint)/3 {
+		return 0, ErrStateBudget
+	}
+	perPoint += 3 * bitmapBytes
+	if pointCount > (math.MaxInt-base)/perPoint {
+		return 0, ErrStateBudget
+	}
+	return base + pointCount*perPoint, nil
+}
+
+// MaxPackedFramePoints is the most retained points a Plan with this many Levels
+// can store before the framed record crosses valueBytes.
+//
+// The counterpart of MaxRuntimeEnvelopePoints, and the function the compile
+// time ceiling reads once the store writes this representation. It must not be
+// read before then: it admits windows the JSON record cannot hold, and a Plan
+// admitted on this bound while the store still writes the other one compiles
+// cleanly and has every state write refused, per series, silently - which is
+// the defect decision-019 exists to have removed.
+func MaxPackedFramePoints(levelCount, valueBytes int) (int, error) {
+	if levelCount <= 0 || valueBytes <= 0 {
+		return 0, fmt.Errorf("state: level count and value budget must be positive")
+	}
+	low, high := 0, valueBytes
+	for low < high {
+		mid := (low + high + 1) / 2
+		size, err := PackedFrameUpperBoundV2(levelCount, mid)
+		if err != nil || size > valueBytes {
+			high = mid - 1
+			continue
+		}
+		low = mid
+	}
+	return low, nil
+}

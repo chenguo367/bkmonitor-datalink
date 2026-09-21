@@ -527,35 +527,49 @@ func (store *ExecutionStore) expectedValueBytes(group execution.QueryGroupIdenti
 //
 // Recent reads weigh more, because the moment this matters is right after a
 // strategy's retention was raised, and a lifetime mean is slowest exactly then.
-func (store *ExecutionStore) observeValueBytes(group execution.QueryGroupIdentity, keys int, loaded int64) {
-	if keys <= 0 || loaded < 0 {
+func (store *ExecutionStore) commitValueBytes(group execution.QueryGroupIdentity, largest int, read bool) {
+	if !read || largest < 0 {
+		// A read that did not come back teaches nothing. Folded in, a failed
+		// batch would lower the bound and the read that was already too big to
+		// finish would be reissued at the same size or larger - an instrument
+		// that learns "smaller" from the event it exists to catch.
 		return
 	}
-	// Zero bytes off a batch that came back is a reading, not a blank. Every
-	// key missing is what a strategy that has not written state yet looks like,
-	// and it is the common case on a cold replica - refusing to learn from it
-	// would leave those Query Groups on the safe small batch for as long as
-	// they stay cold, which for a thousand keys is a hundred round trips where
-	// four would do. A read that did not come back is the one that teaches
-	// nothing, and that is decided by its error, not by its size.
-	sample := uint64(loaded) / uint64(keys)
+	// The largest single record this round, not the mean of them.
+	//
+	// A bound sized by a mean is wrong whenever the population is not uniform,
+	// and one round's keys are not: a Query Group holds records of every shape
+	// its Plans produce, and during a representation migration it holds two
+	// populations tens of times apart. The mean is pulled down by the many
+	// small ones, the batch grows to match, and the few large ones in it blow
+	// the budget. The largest is the only statistic a bound can be built from.
+	//
+	// Scoped to the round rather than kept forever. A preflight reads every key
+	// of the Query Group, so this round's largest is a complete measurement of
+	// the population, and next round's bound is built from it. Keeping a
+	// high-water mark instead would never come down: a strategy whose records
+	// shrank - which is exactly what a migration does - would stay on the
+	// smallest batch for as long as the process ran, and the learning this
+	// bound exists for would be dead.
+	sample := uint64(largest)
+	if sample > 0 {
+		// A record grows by a point or two between rounds; the bound is built
+		// with room for that rather than being exactly last round's largest,
+		// so ordinary growth does not spend a round over budget.
+		sample += sample / 16
+	}
 	store.valueSizes.mu.Lock()
 	defer store.valueSizes.mu.Unlock()
 	if store.valueSizes.bytes == nil {
 		store.valueSizes.bytes = make(map[execution.QueryGroupIdentity]uint64, 64)
 	}
-	previous, learned := store.valueSizes.bytes[group]
-	if !learned {
-		if len(store.valueSizes.bytes) >= runtimeValueSizeGroups {
-			// Relearn rather than grow without bound or evict by some rule
-			// nobody can predict. Every Query Group pays one safe-sized batch
-			// and is back where it was.
-			store.valueSizes.bytes = make(map[execution.QueryGroupIdentity]uint64, 64)
-		}
-		store.valueSizes.bytes[group] = sample
-		return
+	if _, known := store.valueSizes.bytes[group]; !known && len(store.valueSizes.bytes) >= runtimeValueSizeGroups {
+		// Relearn rather than grow without bound or evict by some rule nobody
+		// can predict. Every Query Group pays one safe-sized batch and is back
+		// where it was.
+		store.valueSizes.bytes = make(map[execution.QueryGroupIdentity]uint64, 64)
 	}
-	store.valueSizes.bytes[group] = (previous*3 + sample) / 4
+	store.valueSizes.bytes[group] = sample
 }
 
 // runtimeLoadBatchLimit is how many keys of this Query Group one MGET may ask
@@ -567,8 +581,36 @@ func (store *ExecutionStore) observeValueBytes(group execution.QueryGroupIdentit
 // small for the great majority of records nowhere near that size, and it is the
 // right price for exactly one call: the alternative is to guess, and the guess
 // that matters is the one made for the object whose records are enormous.
-func (store *ExecutionStore) runtimeLoadBatchLimit(group execution.QueryGroupIdentity) int {
+// roundLargest is the largest record this preflight has seen so far. Against
+// a committed bound it can only tighten: the batches of one round are sized
+// by the bound, so the first batch is whatever keys came first, and a first
+// batch of small records says nothing about the keys not yet read - the
+// committed bound is the last complete measurement of them, and a round that
+// replaced it with its own first sixteen would size its second batch for
+// 4 KiB records and read 512 KiB ones with it, sixteen times the budget in
+// one call. That is the mixed population this bound exists for: a Query
+// Group whose records are changing representation holds both sizes at once,
+// and so does one whose series differ in age. For a Query Group nothing is
+// committed for, the running largest is the only measurement there is, and
+// it is what makes a cold Query Group cheap: the first batch is the safe
+// sixteen keys, and every batch after it is sized by what those turned out
+// to weigh.
+func (store *ExecutionStore) runtimeLoadBatchLimit(group execution.QueryGroupIdentity, roundLargest int, roundRead bool) int {
 	expected, learned := store.expectedValueBytes(group)
+	if roundRead {
+		// Including a largest of zero. A round whose keys all came back empty
+		// has measured this Query Group - that is what a strategy which has
+		// not written state yet looks like, and it is the common case on a
+		// cold replica - and refusing to count it would leave every such
+		// Query Group on the safe sixteen keys for as long as it stayed cold,
+		// which for a thousand keys is sixty round trips where four would do.
+		// A round that did not come back is the one that measures nothing, and
+		// that is what roundRead is false for.
+		if !learned || uint64(roundLargest) > expected {
+			expected = uint64(roundLargest)
+		}
+		learned = true
+	}
 	if !learned {
 		expected = uint64(store.options.MaxValueBytes)
 	}
@@ -663,20 +705,14 @@ func isReadTimeout(err error) bool {
 // whole batch retryable, exactly as the failed single reads did.
 func (store *ExecutionStore) loadRuntimeBatch(
 	ctx context.Context, request execution.StatePreflightRequest, batch *runtimeLoadBatch, views []execution.RuntimeStateView,
-) (loaded int64) {
+) (loaded int64, largest int, read bool) {
 	if len(batch.indexes) == 0 {
-		return 0
+		return 0, 0, false
 	}
 	values, err := batch.target.Backend.MGet(ctx, batch.keys)
 	if err == nil && len(values) != len(batch.keys) {
 		err = fmt.Errorf("state: invalid backend read cardinality")
 	}
-	// Only a batch that came back teaches anything; see observeValueBytes.
-	defer func() {
-		if err == nil {
-			store.observeValueBytes(request.Contract.Slot.QueryGroup, len(batch.keys), loaded)
-		}
-	}()
 	for position, index := range batch.indexes {
 		item := request.Items[index]
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
@@ -692,6 +728,9 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			view.BlobRevision, view.Status, view.ReasonCode = 1, execution.StateDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
 		default:
 			loaded += int64(len(raw))
+			if len(raw) > largest {
+				largest = len(raw)
+			}
 			view = decodeRuntime(raw, item.Identity, request.Contract, item.ApplyVersion)
 			if view.Status != execution.StateDeterministicInvalid {
 				store.witnesses.remember(request.Contract.Slot, item.Identity, runtimeWitness{digest: ExpectedValueDigest(raw),
@@ -700,7 +739,7 @@ func (store *ExecutionStore) loadRuntimeBatch(
 		}
 		views[index] = view
 	}
-	return loaded
+	return loaded, largest, err == nil
 }
 
 var _ execution.FencedStateStore = (*ExecutionStore)(nil)
