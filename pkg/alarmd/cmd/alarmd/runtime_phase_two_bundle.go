@@ -705,9 +705,17 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// (decision-016): one identity per process, written into the
 	// registration; one server, led and stepped down with the control
 	// authority; the desired set of every round published through it.
-	streamIdentity, err := newViewStreamIdentity(cfg.HTTP.Listen, cfg.Redis.Address)
+	streamIdentity, err := newViewStreamIdentity(cfg.HTTP.Listen, viewStreamRoutes(cfg.RuntimeStoreRedis())...)
 	if err != nil {
 		return nil, err
+	}
+	if streamIdentity.Unadvertised != "" {
+		// Said once here, by the process that cannot be reached, rather than
+		// on every other Worker at every reconnect as LEADER_NO_ENDPOINT.
+		observer.Observe(ctx, observability.Observation{
+			Component: observability.ComponentOwnership, Stage: observability.StageViewSession, Result: observability.ResultDegraded,
+			ViewStream: &observability.ViewStreamFacts{Event: "endpoint_unadvertised", WorkerID: cfg.PhaseTwo.Worker.ID, Reason: streamIdentity.Unadvertised},
+		})
 	}
 	viewServer, err := viewstream.NewServer(viewStreamAdmission{registry: ownershipStore, now: external.Now}, observer,
 		viewstream.ServerOptions{Now: external.Now})

@@ -15,6 +15,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -69,6 +70,10 @@ func (admission viewStreamAdmission) Admit(ctx context.Context, workerID, token 
 type viewStreamIdentity struct {
 	Endpoint string
 	Token    string
+	// Unadvertised names why Endpoint is empty, so a process that serves
+	// the stream without being reachable says so once at start instead of
+	// every other Worker saying it every reconnect.
+	Unadvertised string
 }
 
 // newViewStreamIdentity derives the endpoint from the HTTP listener's port
@@ -78,7 +83,16 @@ type viewStreamIdentity struct {
 // address advertises that address. An endpoint that cannot be derived is
 // left empty: the process serves the stream but is not advertised, which
 // a Worker reads as "the Leader has no endpoint" and reports.
-func newViewStreamIdentity(listen, redisAddress string) (viewStreamIdentity, error) {
+// The routes are the addresses this process dials Redis at; for a wildcard
+// bind the endpoint's host is the local address the kernel would route to
+// the first of them that resolves. A Sentinel deployment has no Redis
+// address, only sentinel addresses, and a process handed the empty address
+// alone advertised no endpoint at all: every Worker's discovery then found
+// the Leader's lease, read its registration, saw no endpoint and reported
+// NO_LEADER on a fleet whose Leader was publishing (#216). When no route
+// resolves, the first global unicast address of an interface is used; only
+// a process with neither is left unadvertised, and the bundle says so.
+func newViewStreamIdentity(listen string, routes ...string) (viewStreamIdentity, error) {
 	token := make([]byte, 32)
 	if _, err := rand.Read(token); err != nil {
 		return viewStreamIdentity{}, fmt.Errorf("phase-two view stream: mint token: %w", err)
@@ -86,16 +100,42 @@ func newViewStreamIdentity(listen, redisAddress string) (viewStreamIdentity, err
 	identity := viewStreamIdentity{Token: hex.EncodeToString(token)}
 	host, port, err := net.SplitHostPort(listen)
 	if err != nil || port == "" {
+		identity.Unadvertised = "LISTENER_UNPARSABLE"
 		return identity, nil
 	}
 	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = outboundAddress(redisAddress)
+		host = ""
+		for _, route := range routes {
+			if host = outboundAddress(route); host != "" {
+				break
+			}
+		}
+		if host == "" {
+			host = interfaceAddress()
+		}
 	}
 	if host == "" {
+		identity.Unadvertised = "NO_ROUTE"
 		return identity, nil
 	}
 	identity.Endpoint = net.JoinHostPort(host, port)
 	return identity, nil
+}
+
+// viewStreamRoutes lists the addresses a Redis connection dials, in the
+// order the endpoint derivation should try them: the Redis address when
+// there is one, then the sentinels.
+func viewStreamRoutes(connection config.RedisConnectionConfig) []string {
+	routes := make([]string, 0, 1+len(connection.SentinelAddress))
+	if connection.Address != "" {
+		routes = append(routes, connection.Address)
+	}
+	for _, sentinel := range connection.SentinelAddress {
+		if sentinel != "" {
+			routes = append(routes, sentinel)
+		}
+	}
+	return routes
 }
 
 // outboundAddress is the local address a UDP socket toward target would
@@ -115,6 +155,24 @@ func outboundAddress(target string) string {
 		return ""
 	}
 	return local.IP.String()
+}
+
+// interfaceAddress is the first global unicast address of any interface,
+// the address a Pod is reachable at when no route could be asked about.
+// Empty when the process has none, which on a Pod means no network.
+func interfaceAddress() string {
+	addresses, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, address := range addresses {
+		network, ok := address.(*net.IPNet)
+		if !ok || network.IP == nil || !network.IP.IsGlobalUnicast() {
+			continue
+		}
+		return network.IP.String()
+	}
+	return ""
 }
 
 // viewSource is what the round needs of the catalog to build the desired
@@ -219,19 +277,34 @@ type viewStreamDiscovery struct {
 	}
 }
 
-func (discovery viewStreamDiscovery) Leader(ctx context.Context) (viewstream.LeaderEndpoint, bool, error) {
+// Leader names each way of not finding one apart: the three are read by
+// different people. No lease is the control plane between terms; a lease
+// naming a Worker without a live registration is a Leader that died with
+// its lease; a registration without an endpoint is a Leader that could not
+// work out its own address (#216: every Worker reported the third as if it
+// were the first).
+func (discovery viewStreamDiscovery) Leader(ctx context.Context) (viewstream.LeaderEndpoint, string, error) {
 	if discovery.store == nil {
-		return viewstream.LeaderEndpoint{}, false, errors.New("phase-two view stream: ownership store is required")
+		return viewstream.LeaderEndpoint{}, "", errors.New("phase-two view stream: ownership store is required")
 	}
 	leader, found, err := discovery.store.ReadControlLeader(ctx)
-	if err != nil || !found {
-		return viewstream.LeaderEndpoint{}, false, err
+	if err != nil {
+		return viewstream.LeaderEndpoint{}, "", err
+	}
+	if !found {
+		return viewstream.LeaderEndpoint{}, viewstream.MissNoLeader, nil
 	}
 	registration, found, err := discovery.store.ReadWorker(ctx, leader.OwnerID)
-	if err != nil || !found || registration.Endpoint == "" {
-		return viewstream.LeaderEndpoint{}, false, err
+	if err != nil {
+		return viewstream.LeaderEndpoint{}, "", err
 	}
-	return viewstream.LeaderEndpoint{WorkerID: leader.OwnerID, ControlEpoch: leader.OwnerEpoch, Endpoint: registration.Endpoint}, true, nil
+	if !found {
+		return viewstream.LeaderEndpoint{}, viewstream.MissLeaderUnregistered, nil
+	}
+	if registration.Endpoint == "" {
+		return viewstream.LeaderEndpoint{}, viewstream.MissLeaderNoEndpoint, nil
+	}
+	return viewstream.LeaderEndpoint{WorkerID: leader.OwnerID, ControlEpoch: leader.OwnerEpoch, Endpoint: registration.Endpoint}, "", nil
 }
 
 // newViewStreamIncarnation names this process for the stream: the id the

@@ -347,7 +347,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_view_snapshot_request_total":                  "variableLabels: {}",
 		"bkmonitor_alarmd_view_client_refusal_total":                    "variableLabels: {reason}",
 		"bkmonitor_alarmd_view_client_connection_total":                 "variableLabels: {}",
-		"bkmonitor_alarmd_view_discovery_miss_total":                    "variableLabels: {}",
+		"bkmonitor_alarmd_view_discovery_miss_total":                    "variableLabels: {reason}",
 		"bkmonitor_alarmd_dispatch_walk_total":                          "variableLabels: {result}",
 		"bkmonitor_alarmd_due_index_audit_overshoot_seconds":            "variableLabels: {cooldown}",
 		"bkmonitor_alarmd_schedule_prune_skipped_total":                 "variableLabels: {reason}",
@@ -810,7 +810,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("view_snapshot_request_total"):  1,
 		fqName("view_client_refusal_total"):    len(viewClientRefusals) + 1,
 		fqName("view_client_connection_total"): 1,
-		fqName("view_discovery_miss_total"):    1,
+		fqName("view_discovery_miss_total"):    len(viewClientDiscoveryMisses) + 1,
 		// Audited dispatches only -- one Query Group per generation -- which is
 		// why it is its own metric and not a cell on due_index_prediction_total,
 		// whose four cells mix a sampled population with a full one.

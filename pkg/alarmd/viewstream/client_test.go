@@ -33,11 +33,17 @@ type scriptedDiscovery struct {
 	asked  int
 }
 
-func (discovery *scriptedDiscovery) Leader(context.Context) (viewstream.LeaderEndpoint, bool, error) {
+func (discovery *scriptedDiscovery) Leader(context.Context) (viewstream.LeaderEndpoint, string, error) {
 	discovery.mu.Lock()
 	defer discovery.mu.Unlock()
 	discovery.asked++
-	return discovery.leader, discovery.found, discovery.err
+	if discovery.err != nil {
+		return viewstream.LeaderEndpoint{}, "", discovery.err
+	}
+	if !discovery.found {
+		return viewstream.LeaderEndpoint{}, viewstream.MissNoLeader, nil
+	}
+	return discovery.leader, "", nil
 }
 
 func (discovery *scriptedDiscovery) set(endpoint string, found bool) {
@@ -452,7 +458,7 @@ func TestTheWorkerWaitsOutDiscoveryAndConnectsWhenALeaderAppears(t *testing.T) {
 	discovery := &scriptedDiscovery{}
 	observer := &sessionObserver{}
 	client, _ := startClient(t, discovery, nil, dialer, observer)
-	eventually(t, "discovery is asked more than once", func() bool { return client.Stats().DiscoveryMisses >= 3 })
+	eventually(t, "discovery is asked more than once", func() bool { return client.Stats().DiscoveryMisses[viewstream.MissNoLeader] >= 3 })
 	if _, ok := client.Installed(); ok {
 		t.Fatal("installed a view without a Leader")
 	}

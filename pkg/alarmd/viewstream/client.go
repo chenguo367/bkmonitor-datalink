@@ -69,8 +69,24 @@ type LeaderEndpoint struct {
 // Leader, or a Leader that advertises no endpoint" -- a binary from before
 // the stream -- which the client waits out.
 type Discovery interface {
-	Leader(context.Context) (LeaderEndpoint, bool, error)
+	// Leader returns the Leader to connect to, or the reason there is none
+	// (one of the Miss words) and no error, or an error when the lookup
+	// itself failed.
+	Leader(context.Context) (LeaderEndpoint, string, error)
 }
+
+// The ways a discovery finds no Leader, each a cell of its own on the miss
+// counter: they are read by different people and mended in different
+// places. DISCOVERY_FAILED is the lookup erroring.
+const (
+	MissNoLeader           = "NO_LEADER"
+	MissLeaderUnregistered = "LEADER_UNREGISTERED"
+	MissLeaderNoEndpoint   = "LEADER_NO_ENDPOINT"
+	MissDiscoveryFailed    = "DISCOVERY_FAILED"
+)
+
+// DiscoveryMissReasons is the closed set, for the metric.
+var DiscoveryMissReasons = []string{MissNoLeader, MissLeaderUnregistered, MissLeaderNoEndpoint, MissDiscoveryFailed}
 
 // ObjectProbe says how many of a view's objects the Worker cannot read
 // from its catalog. Asked about the whole installed view at every install
@@ -109,7 +125,8 @@ type ClientStats struct {
 	SnapshotsRequested uint64
 	Refusals           map[string]uint64
 	Connections        uint64
-	DiscoveryMisses    uint64
+	// DiscoveryMisses is by reason, one of DiscoveryMissReasons.
+	DiscoveryMisses map[string]uint64
 }
 
 // ClientOptions are the client's seams: the dialer a test replaces to reach
@@ -211,6 +228,7 @@ func (client *Client) Stats() ClientStats {
 	stats.Installs = copyCounts(client.stats.Installs)
 	stats.InstallFailures = copyCounts(client.stats.InstallFailures)
 	stats.Refusals = copyCounts(client.stats.Refusals)
+	stats.DiscoveryMisses = copyCounts(client.stats.DiscoveryMisses)
 	return stats
 }
 
@@ -269,16 +287,20 @@ func (client *Client) backoff(attempt int) time.Duration {
 // serveOnce runs one connection to its end. connected says whether a
 // stream was opened and admitted; err why it ended, nil for a clean end.
 func (client *Client) serveOnce(ctx context.Context) (connected bool, err error) {
-	leader, found, err := client.discovery.Leader(ctx)
-	if err != nil || !found {
+	leader, miss, err := client.discovery.Leader(ctx)
+	if err != nil {
+		miss = MissDiscoveryFailed
+	} else if miss == "" && leader.Endpoint == "" {
+		miss = MissLeaderNoEndpoint
+	}
+	if miss != "" {
 		client.mu.Lock()
-		client.stats.DiscoveryMisses++
-		client.mu.Unlock()
-		reason := "NO_LEADER"
-		if err != nil {
-			reason = "DISCOVERY_FAILED"
+		if client.stats.DiscoveryMisses == nil {
+			client.stats.DiscoveryMisses = make(map[string]uint64, len(DiscoveryMissReasons))
 		}
-		client.observe(ctx, "discovery_missed", reason, err)
+		client.stats.DiscoveryMisses[miss]++
+		client.mu.Unlock()
+		client.observe(ctx, "discovery_missed", miss, err)
 		return false, err
 	}
 	service, closeConn, err := client.dial(ctx, leader.Endpoint)
