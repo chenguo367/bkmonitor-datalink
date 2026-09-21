@@ -143,6 +143,14 @@ const (
 var (
 	// HealthyCompletions end a round with a result.
 	HealthyCompletions = []string{"FULL_COMPLETED", "FULL_EMPTY_COMPLETED"}
+	// TerminalCompletions end a round with a deterministic refusal on at
+	// least one of its series: the same round run again gives the same
+	// refusal, so one is as much evidence as three. Listed on the first,
+	// where a degraded completion waits for DefaultDegradedRounds -- an
+	// hourly strategy whose state the store refused on every round from a
+	// release onward took three hours to reach the page, and the third hour
+	// was bought with nothing.
+	TerminalCompletions = []string{"COMPLETED_WITH_TERMINAL"}
 	// BlockedOutcomes are rounds that produced nothing at all. A round the
 	// Worker's executable view did not allow (decision-016 batch 4b) is one
 	// of them: the object stops being checked until the view and the
@@ -1411,9 +1419,15 @@ func columnOf(state *queryGroupState) string {
 // or the object is exposed by the pool: the one predicate for "is this a
 // row", shared by the list and by the recovery that ends a row.
 func (tracker *Tracker) over(state *queryGroupState) bool {
-	over := (state.currentKind == KindDegradedRun && state.degradedRuns >= tracker.degradedRounds) ||
+	over := (state.currentKind == KindDegradedRun && (state.degradedRuns >= tracker.degradedRounds || terminalCompletion(state.lastCompleted))) ||
 		(state.currentKind == KindBlockedRun && state.blockedRuns >= tracker.blockedRounds)
 	return over || state.queryCooldown != nil || (state.cooldownExposed && state.inAnomalyRun)
+}
+
+// terminalCompletion reports whether a completion kind is a deterministic
+// refusal, which is listed on its first round.
+func terminalCompletion(kind string) bool {
+	return inVocabulary(kind, TerminalCompletions)
 }
 
 // rowOf is the object's row as the list publishes it. Caller holds the lock.
