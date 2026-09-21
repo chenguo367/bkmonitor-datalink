@@ -29,49 +29,61 @@ func TestTheViewStreamAccountReachesTheFleetFieldForField(t *testing.T) {
 		Leading: true, ControlEpoch: 7, Revision: 12, Sessions: 63,
 		Counts:  viewstream.Counts{Expected: 64, Sent: 64, Acked: 63, Installed: 62, Switched: 0},
 		Ignored: viewstream.Ignored{UnknownVersion: 1, UnexpectedReceiver: 2, DigestMismatch: 3, StaleIncarnation: 4},
-		// Three cells for the objects: probed with some missing, probed with
-		// none missing, and not probed -- the last is the one that used to
-		// read as 0.
 		Lagging: []viewstream.LaggingReceiver{
-			{WorkerID: "w17", Incarnation: "i-17", ObjectsMissing: 40, ObjectsProbed: true, Connected: false},
-			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", ObjectsMissing: 0, ObjectsProbed: true, Connected: true},
-			{WorkerID: "w31", Incarnation: "i-31", ObjectsMissing: 0, ObjectsProbed: false, Connected: true},
+			{WorkerID: "w17", Incarnation: "i-17", Connected: false},
+			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", Connected: true},
+			{WorkerID: "w31", Incarnation: "i-31", Connected: true},
 		},
+		// The installed Workers' word on their objects: sixty probed, one
+		// of them missing forty; one could not probe, and is named.
+		Objects:      viewstream.ObjectsSummary{Probed: 60, Unprobed: 1, Missing: 40, UnprobedWorkers: []string{"w40"}},
 		Publications: 100, PublicationsSkipped: 5, SnapshotChunksSent: 20, DeltasSent: 80, EmptyDeltasSent: 60, Refusals: 1,
 	}
-	forty, zero := 40, 0
 	want := &fleet.ViewStreamFacts{
 		At: at, Leading: true, ControlEpoch: 7, Revision: 12, Sessions: 63,
 		Expected: 64, Sent: 64, Acked: 63, Installed: 62, Switched: 0,
 		Ignored: fleet.ViewStreamIgnored{UnknownVersion: 1, UnexpectedReceiver: 2, DigestMismatch: 3, StaleIncarnation: 4},
 		Lagging: []fleet.ViewStreamLagging{
-			{WorkerID: "w17", Incarnation: "i-17", ObjectsProbed: true, ObjectsMissing: &forty, Connected: false},
-			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", ObjectsProbed: true, ObjectsMissing: &zero, Connected: true},
-			{WorkerID: "w31", Incarnation: "i-31", ObjectsProbed: false, ObjectsMissing: nil, Connected: true},
+			{WorkerID: "w17", Incarnation: "i-17", Connected: false},
+			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", Connected: true},
+			{WorkerID: "w31", Incarnation: "i-31", Connected: true},
 		},
+		Objects:      fleet.ViewStreamObjects{Probed: 60, Unprobed: 1, Missing: 40, UnprobedWorkers: []string{"w40"}},
 		Publications: 100, PublicationsSkipped: 5, SnapshotChunksSent: 20, DeltasSent: 80, EmptyDeltasSent: 60, Refusals: 1,
-		Line: "视图已装载 62/64，版本 12；落后：w17（未连接）、w23（DELTA_DIGEST_MISMATCH） 等 3 个",
+		Line: "视图已装载 62/64，版本 12；缺对象 40（60 个副本探到）；1 个副本未探到对象（w40）；落后：w17（未连接）、w23（DELTA_DIGEST_MISMATCH） 等 3 个",
 	}
 	got := viewStreamFacts(stats, at)
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("viewStreamFacts() = %+v\nwant %+v", got, want)
 	}
-	// On the wire: a number, a zero, and null -- never 0 for unprobed.
-	encoded, err := json.Marshal(got.Lagging)
+	// On the wire the lagging rows carry no object fields -- a Worker short
+	// of installed has probed nothing -- and the objects clause names the
+	// Worker that could not probe as a list, empty rather than null when
+	// every Worker probed.
+	encoded, err := json.Marshal(got)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var wire []map[string]any
+	var wire struct {
+		Lagging []map[string]any `json:"lagging"`
+		Objects map[string]any   `json:"objects"`
+	}
 	if err := json.Unmarshal(encoded, &wire); err != nil {
 		t.Fatal(err)
 	}
-	if wire[0]["objects_missing"] != 40.0 || wire[0]["objects_probed"] != true ||
-		wire[1]["objects_missing"] != 0.0 || wire[1]["objects_probed"] != true ||
-		wire[2]["objects_missing"] != nil || wire[2]["objects_probed"] != false {
-		t.Fatalf("lagging on the wire = %s, want 40 / 0 / null with objects_probed true / true / false", encoded)
+	for _, row := range wire.Lagging {
+		if _, present := row["objects_probed"]; present {
+			t.Fatalf("a lagging row carries objects_probed, a probe that never happened: %s", encoded)
+		}
 	}
-	if _, present := wire[2]["objects_missing"]; !present {
-		t.Fatalf("unprobed row omits objects_missing instead of carrying null: %s", encoded)
+	if wire.Objects["probed"] != 60.0 || wire.Objects["unprobed"] != 1.0 || wire.Objects["missing"] != 40.0 ||
+		!reflect.DeepEqual(wire.Objects["unprobed_workers"], []any{"w40"}) {
+		t.Fatalf("objects on the wire = %v, want probed 60 / unprobed 1 / missing 40 / unprobed_workers [w40]", wire.Objects)
+	}
+	allProbed := viewStreamFacts(viewstream.Stats{Leading: true, Counts: viewstream.Counts{Expected: 4, Sent: 4, Acked: 4, Installed: 4},
+		Objects: viewstream.ObjectsSummary{Probed: 4}}, at)
+	if allProbed.Objects.UnprobedWorkers == nil || allProbed.Line != "视图已装载 4/4，版本 0" {
+		t.Fatalf("every Worker probed = %+v, want an empty list of unprobed Workers and a line with no objects clause", allProbed)
 	}
 	follower := viewStreamFacts(viewstream.Stats{Sessions: 0}, at)
 	if follower.Leading || follower.Line != "非 leader，不服务视图流" || follower.Lagging == nil {
