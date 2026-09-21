@@ -514,6 +514,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// And the running count of Slots executed and then closed without their
 	// Progress: the records keep one span per object and cannot carry it.
 	snapshot.BookkeepingAbandoned = publisher.tracker.BookkeepingAbandoned()
+	// And what the no-data Plans' last deciding rounds counted, over every
+	// tracked object: whether the tracking horizon is doing anything.
+	snapshot.NoDataTracking = publisher.tracker.NoDataTrackingSummary()
 	// Where every listed object is in its cycle, and the census over all of
 	// them. From the same index and the same instant as the overdue facts, so
 	// the row and the sentence above it cannot read two clocks.

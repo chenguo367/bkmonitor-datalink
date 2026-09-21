@@ -498,6 +498,41 @@ type NoDataStallFacts struct {
 	Outcome string
 }
 
+// NoDataAbsenceFacts is what one Plan's no-data round decided about its
+// groups, on the round it decided: the counts the evaluation reports, and the
+// horizon it decided them against.
+//
+// One line per Plan per Slot that judged, carrying the counts as the round
+// counted them at the site of each decision. Nothing here is a difference
+// between this round's memory and the last: a difference reads zero in the
+// round that failed to load the memory, which is the round most worth
+// reporting. Expired is the absences this round stopped tracking; Suppressed
+// the groups it met already stopped -- the standing size of what the horizon
+// is holding down, which is the number a deployment that switched the horizon
+// on has no other way to see. Absent is the groups still tracked and reported
+// absent this round. HorizonSeconds is the Plan's effective horizon as
+// compilation froze it, zero for none: the same round key that recompiles a
+// Plan when the platform's changes is what keeps this current.
+type NoDataAbsenceFacts struct {
+	Outcome        string
+	HorizonSeconds int64
+	RosterSource   string
+	Expected       uint64
+	Present        uint64
+	Absent         uint64
+	Unavailable    uint64
+	Dropped        uint64
+	Expired        uint64
+	Suppressed     uint64
+}
+
+// NoDataAbsenceOutcomes is every count the absence line carries, in the order
+// the metric creates them, so a label nothing ever wrote can be told from one
+// that wrote zero.
+var NoDataAbsenceOutcomes = []string{
+	"expected", "present", "absent", "unavailable", "dropped", "expired", "suppressed",
+}
+
 // NoDataMemoryRefusalFacts is one Plan's refused absence-memory write: why the
 // store said no and, when the refusal was about size, the two numbers it
 // compared.
@@ -1966,6 +2001,7 @@ type Observation struct {
 	NoDataSlot            *NoDataSlotFacts
 	TargetResolution      *TargetResolutionFacts
 	NoDataStall           *NoDataStallFacts
+	NoDataAbsence         *NoDataAbsenceFacts
 	GapProgress           *GapProgressFacts
 	NoDataMemoryRefusal   *NoDataMemoryRefusalFacts
 	NoDataMemoryWrite     *NoDataMemoryWriteFacts
@@ -2103,6 +2139,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.HistoryCoverage = normalizeHistoryCoverageFacts(observation.HistoryCoverage)
 	observation.QueryPermit = normalizeQueryPermitFacts(observation.QueryPermit)
 	observation.NoDataSlot = normalizeNoDataSlotFacts(observation.NoDataSlot)
+	observation.NoDataAbsence = normalizeNoDataAbsenceFacts(observation.NoDataAbsence)
 	observation.SourceWithheld = normalizeSourceWithheldFacts(observation.SourceWithheld)
 	observation.NoDataCensus = normalizeNoDataCensusFacts(observation.NoDataCensus)
 	observation.SegmentContent = normalizeSegmentContentFacts(observation.SegmentContent)
@@ -2723,6 +2760,21 @@ func normalizeNoDataSlotFacts(facts *NoDataSlotFacts) *NoDataSlotFacts {
 	normalized := *facts
 	if normalized.Plans < 0 {
 		normalized.Plans = 0
+	}
+	return &normalized
+}
+
+// normalizeNoDataAbsenceFacts drops facts that name no outcome and clamps a
+// negative horizon to none. The counts are unsigned and are kept as counted:
+// an outcome this build does not know is kept for the same reason the Slot
+// facts keep one.
+func normalizeNoDataAbsenceFacts(facts *NoDataAbsenceFacts) *NoDataAbsenceFacts {
+	if facts == nil || facts.Outcome == "" {
+		return nil
+	}
+	normalized := *facts
+	if normalized.HorizonSeconds < 0 {
+		normalized.HorizonSeconds = 0
 	}
 	return &normalized
 }

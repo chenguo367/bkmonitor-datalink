@@ -257,6 +257,10 @@ type queryGroupState struct {
 	// renewal that reached the store. Positive evidence, kept apart from the
 	// refusals above; the row carries the Plan attempted most recently.
 	upkeep map[StrategyRef]*NoDataMemoryUpkeep
+	// noDataTracking is what the last deciding no-data round of each of this
+	// object's Plans counted, by Plan. Replaced whole on every deciding
+	// round; a Plan that stops deciding keeps its last word, dated.
+	noDataTracking map[StrategyRef]*NoDataTracking
 	// guards is the held gap scopes reported for this object, by Plan and
 	// scope, with the completion generation each was last reported in. A
 	// completion prunes the scopes the round did not report -- a released
@@ -579,6 +583,10 @@ type Tracker struct {
 	noDataAfter          time.Duration
 	maxTracked           int
 	now                  func() time.Time
+	// platformHorizon reads the deployment's no-data tracking horizon, the
+	// number a Plan's effective horizon is read against to say where it came
+	// from; nil is a tracker that was not told it at all.
+	platformHorizon func() int64
 
 	mu     sync.Mutex
 	groups map[string]*queryGroupState
@@ -618,6 +626,35 @@ func NewTracker(next observability.Observer, replica string, now func() time.Tim
 		maxTracked:           DefaultTrackedQueryGroups,
 		now:                  now,
 		groups:               make(map[string]*queryGroupState),
+	}
+}
+
+// SetPlatformNoDataHorizon tells the tracker how to read the deployment's
+// no-data tracking horizon, so a Plan's effective horizon can be read as the
+// platform's, the strategy's own, or none. Read through the same seam the
+// reconciler freezes it through rather than captured as a value, so the two
+// cannot disagree about what the platform's number is. Zero is a deployment
+// that configured none. Until this is called every row reads the source as
+// unknown rather than guessing.
+func (tracker *Tracker) SetPlatformNoDataHorizon(read func() int64) {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	tracker.platformHorizon = read
+}
+
+// horizonSourceOf reads where a Plan's effective horizon came from. The Plan
+// carries the number and not its origin; see NoDataHorizonSources for why
+// the comparison is the honest reading and where it is ambiguous.
+func (tracker *Tracker) horizonSourceOf(horizon int64) string {
+	switch {
+	case tracker.platformHorizon == nil:
+		return NoDataHorizonUnknown
+	case horizon <= 0:
+		return NoDataHorizonNone
+	case horizon == tracker.platformHorizon():
+		return NoDataHorizonPlatform
+	default:
+		return NoDataHorizonStrategy
 	}
 }
 
@@ -763,6 +800,26 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		upkeep := state.upkeepOf(plan)
 		readAt := at
 		upkeep.Representation, upkeep.LastReadAt = read.Representation, &readAt
+	}
+	// What the Plan's no-data round decided, on the round it decided. Not a
+	// round of the object either: the Slot it belongs to completes on its
+	// own. The whole word is replaced -- the counts are that round's, not a
+	// running total -- and the source of the horizon is read here, against
+	// the platform's, because the Plan carries only the number. The emitter
+	// names the Plan on every line, which is what gets the observation past
+	// the anonymous-round return above; a line without one has no Plan to
+	// file under and is not recorded.
+	if absence := observation.NoDataAbsence; absence != nil && plan.StrategyID != "" {
+		if state.noDataTracking == nil {
+			state.noDataTracking = map[StrategyRef]*NoDataTracking{}
+		}
+		state.noDataTracking[plan] = &NoDataTracking{
+			Plan:           plan,
+			HorizonSeconds: absence.HorizonSeconds, HorizonSource: tracker.horizonSourceOf(absence.HorizonSeconds),
+			RosterSource: absence.RosterSource, Expected: absence.Expected, Present: absence.Present,
+			Absent: absence.Absent, ExpiredThisRound: absence.Expired, Suppressed: absence.Suppressed,
+			Dropped: absence.Dropped, EvaluationTime: trace.EvaluationTime, DecidedAt: at,
+		}
 	}
 	// A renewal that reached the store. Success -- whether or not it set a
 	// new lifetime; "enough life left" is the ordinary answer -- is the one
@@ -1456,6 +1513,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	}
 	anomaly.Guards, anomaly.GuardsTotal = worstGuards(state.guards)
 	anomaly.NoDataMemoryUpkeep = latestUpkeep(state)
+	anomaly.NoDataTracking = noDataTrackingRows(state)
 	// The holder of the latest round's Slot, when that round gave it up. The
 	// span keeps the word from the completion that wrote it; the row carries
 	// it only while the skip is the latest round -- a round since, run or
@@ -1803,6 +1861,44 @@ func latestUpkeep(state *queryGroupState) *NoDataMemoryUpkeep {
 	copied := *latest
 	copied.Plans = len(state.upkeep)
 	return &copied
+}
+
+// noDataTrackingRows is every Plan's last deciding word, smallest strategy
+// first, copied so the row does not alias the tracker's state.
+func noDataTrackingRows(state *queryGroupState) []NoDataTracking {
+	if len(state.noDataTracking) == 0 {
+		return nil
+	}
+	rows := make([]NoDataTracking, 0, len(state.noDataTracking))
+	for _, tracking := range state.noDataTracking {
+		rows = append(rows, *tracking)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Plan.StrategyID != rows[j].Plan.StrategyID {
+			return rows[i].Plan.StrategyID < rows[j].Plan.StrategyID
+		}
+		return rows[i].Plan.BusinessID < rows[j].Plan.BusinessID
+	})
+	return rows
+}
+
+// NoDataTrackingSummary is what every tracked object's no-data Plans last
+// counted, summed: over all tracked objects, listed or not, because the
+// horizon acts on healthy objects as much as on listed ones and the question
+// is fleet-wide. Nil while no Plan has decided.
+func (tracker *Tracker) NoDataTrackingSummary() *NoDataTrackingSummary {
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	var summary *NoDataTrackingSummary
+	for _, state := range tracker.groups {
+		for _, tracking := range state.noDataTracking {
+			if summary == nil {
+				summary = &NoDataTrackingSummary{}
+			}
+			summary.add(tracking.summaryOf())
+		}
+	}
+	return summary
 }
 
 // NoDataMemory is every object one of whose Plans the store has refused an

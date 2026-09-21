@@ -762,6 +762,8 @@ func TestThePageHasWordingForEveryLoadState(t *testing.T) {
 		// stored shape a read of one found.
 		{"MEMORY_REFUSAL_KIND", fleet.NoDataMemoryRefusalKinds},
 		{"MEMORY_REPRESENTATION", fleet.NoDataMemoryRepresentations},
+		// And where a Plan's no-data tracking horizon is read as coming from.
+		{"HORIZON_SOURCE", fleet.NoDataHorizonSources},
 		// And what a query-free completion found about an earlier attempt.
 		{"EXECUTION_EVIDENCE", fleet.ExecutionEvidenceReadings},
 	}
