@@ -27,7 +27,7 @@ func TestOneQueryGroupCannotTakeTheWholePool(t *testing.T) {
 		MaxSeries: 10, MaxRetainedBytes: 100, MaxStateMutations: 10, MaxEvents: 10, MaxGapMutations: 10,
 	}}
 	// An empty pool, so nothing but the share can refuse this.
-	stream := &streamedExecution{coordinator: co, began: true, retained: 40}
+	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(40)}
 	err := co.acquireEffects(effectCounts{states: 1}, 20, stream, stream.reservationPhase("normal_output"))
 
 	var exceeded *provisionalBudgetExceededError
@@ -55,7 +55,7 @@ func TestOneQueryGroupCannotTakeTheWholePool(t *testing.T) {
 
 	// Inside the share the same execution proceeds, so the case above is a
 	// share and not a refusal of everything.
-	fits := &streamedExecution{coordinator: co, began: true, retained: 20}
+	fits := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(20)}
 	if err := co.acquireEffects(effectCounts{states: 1}, 20, fits, fits.reservationPhase("normal_output")); err != nil {
 		t.Fatalf("an object inside its share was refused: %v", err)
 	}
@@ -70,7 +70,7 @@ func TestTheShareIsMeasuredInBytesNotMutations(t *testing.T) {
 		MaxSeries: 1000, MaxRetainedBytes: 1000, MaxStateMutations: 1000, MaxEvents: 1000, MaxGapMutations: 1000,
 	}}
 	// Far inside every count budget, far over the byte share.
-	stream := &streamedExecution{coordinator: co, began: true, retained: 400}
+	stream := &streamedExecution{coordinator: co, began: true, retainedByPhase: retainedSeed(400)}
 	err := co.acquireEffects(effectCounts{states: 1}, 200, stream, stream.reservationPhase("normal_output"))
 	var exceeded *provisionalBudgetExceededError
 	if !errors.As(err, &exceeded) || !exceeded.share {

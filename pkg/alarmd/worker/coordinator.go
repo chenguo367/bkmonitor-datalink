@@ -327,7 +327,10 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 	budget := stream.coordinator.budget
 	return execution.SlotBudgetUsage{
 		StateMutations: stream.effects.states, GapMutations: stream.effects.gaps,
-		Events: stream.effects.events, RetainedBytes: stream.retained, Series: stream.series,
+		Events: stream.effects.events, RetainedBytes: stream.retainedTotal(), Series: stream.series,
+		RetainedInputBytes:  stream.retainedByPhase[retainPhaseInput],
+		RetainedGapBytes:    stream.retainedByPhase[retainPhaseGap],
+		RetainedOutputBytes: stream.retainedByPhase[retainPhaseOutput],
 		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 	}

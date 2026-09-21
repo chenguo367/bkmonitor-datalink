@@ -20,13 +20,13 @@ func TestIncrementalEffectsKeepLoadedFactsAndRejectedMergeSeparate(t *testing.T)
 	if err := stream.mergeProvisional(context.Background(), first, 0); err != nil {
 		t.Fatal(err)
 	}
-	beforeBytes := stream.retained
+	beforeBytes := stream.retainedTotal()
 	tooMany := sideEffectTestResult("state", "qg")
 	tooMany.Plans[0].StateResults = append(tooMany.Plans[0].StateResults, execution.StateEvaluation{})
 	if err := stream.mergeProvisional(context.Background(), tooMany, 100); err == nil {
 		t.Fatal("local limit accepted")
 	}
-	if stream.effects.states != 1 || co.reservations.states != 1 || stream.retained != beforeBytes || len(stream.evaluated.Plans[0].StateResults) != 1 {
+	if stream.effects.states != 1 || co.reservations.states != 1 || stream.retainedTotal() != beforeBytes || len(stream.evaluated.Plans[0].StateResults) != 1 {
 		t.Fatal("failed reservation mutated owner")
 	}
 	if err := stream.mergeProvisional(context.Background(), first, 0); err != nil {
