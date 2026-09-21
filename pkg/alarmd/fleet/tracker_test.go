@@ -1130,39 +1130,54 @@ func TestGapSkipsAreRetainedPastTheRoundsThatFollow(t *testing.T) {
 	}
 }
 
-// An object whose query returns no records for the degraded-rounds threshold,
-// after having returned some, is listed as no-data: healthy for the equation,
-// the data side's to look at. One that never returned records is not on that
-// line -- a source that only speaks when something happens looks the same
-// until it speaks -- and a round with records ends the run. (Never having
-// spoken for an hour is its own line; empty_every_round_test.go.)
+// An object whose query returns no records for the degraded-rounds threshold
+// and for an hour of the source's clock since records were last seen, after
+// having returned some, is listed as no-data: healthy for the equation, the
+// data side's to look at. Both gates, because either alone lists a source that
+// is fine: a source that reports every ten minutes over a sixty-second object
+// completes nine empty rounds between two with records, and a slow object
+// spans the hour in two. One that never returned records is not on this line
+// -- a source that only speaks when something happens looks the same until it
+// speaks -- and a round with records ends the run. (Never having spoken for an
+// hour is its own line; empty_every_round_test.go.)
 func TestNoDataIsListedOnlyAfterDataStopped(t *testing.T) {
 	at := &clock{at: now}
 	tracker := newTracker(t, at)
-	empty := func(queryGroup string) {
-		tracker.Observe(context.Background(), completion(queryGroup, "FULL_EMPTY_COMPLETED", "8930"))
-	}
+	minute := time.Minute
 	// Never had data: not on the data side's line however many rounds.
 	for round := 0; round < DefaultDegradedRounds+2; round++ {
-		empty("qg-silent-by-nature")
+		tracker.Observe(context.Background(), emptyAt("qg-silent-by-nature", "8930", at.at.Add(time.Duration(round)*minute)))
 	}
-	// Had data, then stopped.
-	tracker.Observe(context.Background(), completion("qg-stopped", "FULL_COMPLETED", "8930"))
-	at.at = at.at.Add(time.Minute)
-	for round := 0; round < DefaultDegradedRounds; round++ {
-		empty("qg-stopped")
+	// Had data, then stopped: sixty-one empty minutes.
+	tracker.Observe(context.Background(), dataAt("qg-stopped", "8930", at.at))
+	at.at = at.at.Add(minute)
+	stoppedSince := at.at
+	for round := 0; round <= 60; round++ {
+		tracker.Observe(context.Background(), emptyAt("qg-stopped", "8930", stoppedSince.Add(time.Duration(round)*minute)))
 	}
 	// Had data, empty for one round short of the threshold.
-	tracker.Observe(context.Background(), completion("qg-blip", "FULL_COMPLETED", "8930"))
+	tracker.Observe(context.Background(), dataAt("qg-blip", "8930", at.at))
 	for round := 0; round < DefaultDegradedRounds-1; round++ {
-		empty("qg-blip")
+		tracker.Observe(context.Background(), emptyAt("qg-blip", "8930", at.at.Add(time.Duration(round+1)*minute)))
 	}
+	// Had data, empty for the threshold of rounds, three minutes: the count
+	// is met and the hour is not. This is the source that reports every ten
+	// minutes, three minutes after a report.
+	tracker.Observe(context.Background(), dataAt("qg-three-minutes", "8930", at.at))
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), emptyAt("qg-three-minutes", "8930", at.at.Add(time.Duration(round+1)*minute)))
+	}
+	// Had data, two empty rounds spanning the hour: a slow object, the hour
+	// is met and the count is not.
+	tracker.Observe(context.Background(), dataAt("qg-slow", "8930", at.at))
+	tracker.Observe(context.Background(), emptyAt("qg-slow", "8930", at.at.Add(35*minute)))
+	tracker.Observe(context.Background(), emptyAt("qg-slow", "8930", at.at.Add(70*minute)))
 	listed := tracker.NoData()
 	if len(listed) != 1 || listed[0].QueryGroup != "qg-stopped" {
-		t.Fatalf("no-data = %+v, want only qg-stopped", listed)
+		t.Fatalf("no-data = %+v, want only qg-stopped: the count alone (qg-three-minutes) and the hour alone (qg-slow) list nothing", listed)
 	}
 	if listed[0].Kind != KindNoData || listed[0].ReasonCode != "FULL_EMPTY_COMPLETED" ||
-		!listed[0].Since.Equal(now.Add(time.Minute)) || listed[0].SinceFrom != SinceSnapshotContinuity {
+		!listed[0].Since.Equal(stoppedSince) || listed[0].SinceFrom != SinceSnapshotContinuity {
 		t.Errorf("no-data row = %+v, want kind NO_DATA since the first empty round", listed[0])
 	}
 	if len(listed[0].Strategies) != 1 {
@@ -1172,19 +1187,51 @@ func TestNoDataIsListedOnlyAfterDataStopped(t *testing.T) {
 	if len(tracker.Anomalies())+len(tracker.Undecidable())+len(tracker.ByDesign())+len(tracker.Demoted()) != 0 {
 		t.Error("a no-data object is in a column of the health equation")
 	}
+
+	// A source that reports every ten minutes over a sixty-second object,
+	// for two hours: nine empty rounds between reports, never an hour
+	// without records, on neither line. Then the reports stop: an hour
+	// later it is the data side's, measured from the last report.
+	slot := at.at
+	for report := 0; report < 12; report++ {
+		tracker.Observe(context.Background(), dataAt("qg-every-ten-minutes", "8931", slot))
+		for round := 1; round < 10; round++ {
+			tracker.Observe(context.Background(), emptyAt("qg-every-ten-minutes", "8931", slot.Add(time.Duration(round)*minute)))
+		}
+		slot = slot.Add(10 * minute)
+		rows := tracker.NoData()
+		if _, listed := rowsOfKind(rows, KindNoData)["qg-every-ten-minutes"]; listed {
+			t.Fatalf("report %d: a source that reports every ten minutes is on the data side's line", report)
+		}
+		if _, listed := rowsOfKind(rows, KindEmptyEveryRound)["qg-every-ten-minutes"]; listed {
+			t.Fatalf("report %d: a source that reports every ten minutes is listed as never having", report)
+		}
+	}
+	lastReport := slot.Add(-10 * minute)
+	for round := 1; round <= 60; round++ {
+		tracker.Observe(context.Background(), emptyAt("qg-every-ten-minutes", "8931", lastReport.Add(time.Duration(round)*minute)))
+		_, listed := rowsOfKind(tracker.NoData(), KindNoData)["qg-every-ten-minutes"]
+		if want := round >= 60; listed != want {
+			t.Fatalf("%d minutes after the last report: listed = %v, want %v -- the hour is measured from the Slot records were last seen at", round, listed, want)
+		}
+	}
+
 	// Records coming back end the run.
-	tracker.Observe(context.Background(), completion("qg-stopped", "FULL_COMPLETED", "8930"))
-	if len(tracker.NoData()) != 0 {
-		t.Errorf("no-data = %+v after records returned, want none", tracker.NoData())
+	tracker.Observe(context.Background(), dataAt("qg-stopped", "8930", stoppedSince.Add(61*minute)))
+	if len(tracker.NoData()) != 1 {
+		t.Errorf("no-data = %+v after records returned, want only the ten-minute source that stopped", tracker.NoData())
 	}
 	// A degraded round with records ends it too: the query answered with
 	// something, and that something is what the degraded row is about.
-	for round := 0; round < DefaultDegradedRounds; round++ {
-		empty("qg-stopped")
+	for round := 0; round <= 60; round++ {
+		tracker.Observe(context.Background(), emptyAt("qg-stopped", "8930", stoppedSince.Add(time.Duration(62+round)*minute)))
+	}
+	if _, listed := rowsOfKind(tracker.NoData(), KindNoData)["qg-stopped"]; !listed {
+		t.Fatal("qg-stopped is not listed after another hour of empty rounds")
 	}
 	tracker.Observe(context.Background(), completion("qg-stopped", "COMPLETED_WITH_UNAVAILABLE", "8930"))
-	if len(tracker.NoData()) != 0 {
-		t.Errorf("no-data = %+v after a degraded round with records, want none", tracker.NoData())
+	if _, listed := rowsOfKind(tracker.NoData(), KindNoData)["qg-stopped"]; listed {
+		t.Errorf("no-data = %+v after a degraded round with records, want qg-stopped off the line", tracker.NoData())
 	}
 }
 

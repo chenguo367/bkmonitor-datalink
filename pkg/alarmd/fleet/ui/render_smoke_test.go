@@ -389,6 +389,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			Prefix: "bk_monitorv3.ee.cache", Configured: true, SharedWith: fleet.EndpointStrategyCache, LastSuccessAgeSeconds: &successAge,
 			Writer: &fleet.WriterEvidence{Present: true, Count: 47788, AgeSeconds: &cmdbAge, State: "loaded"}},
 		{Role: fleet.EndpointDynamicConfig, Kind: "redis"},
+		// The consumer's publication: read once, its heartbeat now stale,
+		// the gate answering on the copy's own record for the last question.
+		{Role: fleet.EndpointOpenAlertSet, Kind: "redis", Address: "monitor@sentinel-0.example:26379,sentinel-1.example:26379", Mode: "sentinel", DB: &stateDB,
+			Prefix: "alarmd:open_alerts:", Configured: true, SharedWith: fleet.EndpointStateRedis, LastSuccessAgeSeconds: &successAge,
+			Writer: &fleet.WriterEvidence{Present: true, Count: 517, AgeSeconds: ptrFloat(200), State: "self_maintained:heartbeat_stale"},
+			OpenAlertSet: &fleet.OpenAlertSetFacts{Mode: "self_maintained", StaleBeyondBound: false, AuthoritativeAgeSeconds: ptrFloat(190),
+				Available: false, UnavailableReason: "heartbeat_stale", HeartbeatAgeSeconds: ptrFloat(200), CycleSeconds: 60,
+				FingerprintVersion: "md5_v1", ReaderFingerprintVersion: "md5_v1", TrackedSets: 6, LoadedSets: 6, Members: 517,
+				Lookups: map[string]uint64{"authoritative_member": 3, "authoritative_absent": 12, "self_maintained": 1}}},
 		{Role: fleet.EndpointQueryBackend, Kind: "http", Address: "http://unify-query.example:10205", Configured: true},
 		// The output sink's own record: open, since sixteen minutes, on the
 		// first attempt.
@@ -1052,6 +1061,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"DEPS ::", "策略缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache成功 3 秒前；失败 1 小时 0 分前：dial tcp: i/o timeout有：列出 62 条策略；写入方标记 last_updated 于 1 分 35 秒前更新"},
 		{"DEPS ::", "CMDB 主机缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache · 与 strategy_cache 共用连接成功 3 秒前有：47788 台主机，来源刷新于 4 分 0 秒前"},
 		{"DEPS ::", "平台动态配置（平台写、alarmd 读）未配置"},
+		{"DEPS ::", "未恢复时序指纹集合（告警消费方写、alarmd 读；恢复门据此判有没有可恢复的告警）redis sentinel 主节点名 monitor，哨兵 sentinel-0.example:26379,sentinel-1.example:26379 · db 8 · alarmd:open_alerts: · 与 state_redis 共用连接成功 3 秒前有：消费方心跳 3 分 20 秒前（周期 60 s，指纹版本 md5_v1）；跟踪 6 条策略、发布覆盖 6 条、未恢复指纹 517 个；当前 发布不可用，按本副本自己的记录放行/扣留：心跳过期（超过 3 个发布周期没更新）；恢复门查过 16 次：发布里有 3、发布里没有 12、按本副本记录 1"},
 		// The sentinel address in words -- master name, then sentinels -- so
 		// the one '@' an address legitimately carries never reads as an account.
 		{"DEPS ::", "alarmd 自己的状态（目录、归属、进度、舰队）redis sentinel 主节点名 monitor，哨兵 sentinel-0.example:26379,sentinel-1.example:26379 · db 8 · alarmd:phase2:g2:runtime:v1成功 3 秒前"},

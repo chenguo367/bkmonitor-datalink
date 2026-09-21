@@ -532,6 +532,19 @@ var codeChecks = map[string]verdict{
 	"READINESS_BUDGET_INVALID":   lands(CheckDetectionAbandoned),
 	"RECORD_TOO_LARGE":           lands(CheckDetectionAbandoned),
 	"RESOURCE_HARD_STOP":         lands(CheckDetectionAbandoned),
+	// The per-Slot capacity budgets, as the query failure names the one that
+	// rejected: observability.CapacityBudgetFailureCode, one word per budget
+	// and OTHER for a budget it does not know. The round's own reason for
+	// the same rejection is RESOURCE_HARD_STOP above; the failure's word is
+	// read first and used to fall through the table -- the row landed on
+	// the fault line as "EVALUATE/UNLOCATED/UNLOCATED" and marked the
+	// deployment degraded, for a rejection this deployment decided.
+	"BUDGET_SERIES":          lands(CheckDetectionAbandoned),
+	"BUDGET_RETAINED_BYTES":  lands(CheckDetectionAbandoned),
+	"BUDGET_STATE_MUTATIONS": lands(CheckDetectionAbandoned),
+	"BUDGET_EVENTS":          lands(CheckDetectionAbandoned),
+	"BUDGET_GAP_MUTATIONS":   lands(CheckDetectionAbandoned),
+	"BUDGET_OTHER":           lands(CheckDetectionAbandoned),
 
 	// Budgets the strategy compiler applies to a definition. The compiler is
 	// their only producer, emitting them when a definition does not fit within

@@ -248,7 +248,16 @@ var failureFacets = map[string]facets{
 	"READINESS_BUDGET_INVALID":   {StageSchedule, ClassCapacity, DependencyNone},
 	"RECORD_TOO_LARGE":           {StageEvaluate, ClassCapacity, DependencyNone},
 	"RESOURCE_HARD_STOP":         {StageEvaluate, ClassCapacity, DependencyNone},
-	"QUERY_PERMIT_DEADLINE":      {StageQuery, ClassTimeout, DependencyNone},
+	// The budget's own word for the same rejection (finding.go has the why).
+	// Series and retained bytes are bounds on what the query returns, hit on
+	// the stream; the other three on what evaluating it would write.
+	"BUDGET_SERIES":          {StageQuery, ClassCapacity, DependencyNone},
+	"BUDGET_RETAINED_BYTES":  {StageQuery, ClassCapacity, DependencyNone},
+	"BUDGET_STATE_MUTATIONS": {StageEvaluate, ClassCapacity, DependencyNone},
+	"BUDGET_EVENTS":          {StageEvaluate, ClassCapacity, DependencyNone},
+	"BUDGET_GAP_MUTATIONS":   {StageEvaluate, ClassCapacity, DependencyNone},
+	"BUDGET_OTHER":           {StageEvaluate, ClassCapacity, DependencyNone},
+	"QUERY_PERMIT_DEADLINE":  {StageQuery, ClassTimeout, DependencyNone},
 
 	// Budgets the compiler applies to a definition.
 	"PLAN_BUDGET_EXCEEDED":  {StageConfig, ClassConfig, DependencyNone},

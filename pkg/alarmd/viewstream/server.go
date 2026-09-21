@@ -343,7 +343,7 @@ func (server *Server) recordClaimedInstall(ctx context.Context, receiver Receive
 	if !publisher.ledger.MarkSent(installed.Key(), receiver) {
 		return false
 	}
-	recorded := publisher.ledger.Record(Receipt{Receiver: receiver, Version: installed, Acked: true, Installed: true})
+	recorded := publisher.ledger.RecordClaimed(receiver, installed)
 	if recorded.InstalledByAll {
 		server.observeInstalledByAll(ctx, recorded)
 	}

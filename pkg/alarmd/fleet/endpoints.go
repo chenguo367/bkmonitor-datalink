@@ -75,6 +75,10 @@ type Endpoint struct {
 	// Writer is what the replica found of the platform's writing under this
 	// role, for the roles that read a platform cache.
 	Writer *WriterEvidence `json:"writer,omitempty"`
+	// OpenAlertSet is the reader's full account of the consumer's open alert
+	// publication, on the role that reads it; Writer above is the short form
+	// every reading role has.
+	OpenAlertSet *OpenAlertSetFacts `json:"open_alert_set,omitempty"`
 	// ProtocolVersion is the protocol version this replica's client speaks to
 	// the role, as configured, and HeadersSupported whether that version can
 	// carry record headers -- which the standard raw event does. Present on
@@ -172,15 +176,20 @@ const (
 	EndpointStrategyCache = "strategy_cache"
 	EndpointCMDBCache     = "cmdb_cache"
 	EndpointDynamicConfig = "dynamic_config"
-	EndpointOutputKafka   = "output_kafka"
-	EndpointQueryBackend  = "query_backend"
-	EndpointCompatOutput  = "compat_output_redis"
+	// EndpointOpenAlertSet is the consumer's publication of the series it
+	// holds open alerts on, read under a fixed key contract on the state
+	// Redis: the recovery gate's word on whether there is anything to
+	// recover. Written by the alert consumer, not the platform.
+	EndpointOpenAlertSet = "open_alert_set"
+	EndpointOutputKafka  = "output_kafka"
+	EndpointQueryBackend = "query_backend"
+	EndpointCompatOutput = "compat_output_redis"
 )
 
 // EndpointRoles is the closed list, in the order the page shows them: the
-// replica's own storage first, then what it reads of the platform's, then
-// where its work goes and where its queries go.
+// replica's own storage first, then what it reads of the platform's and the
+// consumer's, then where its work goes and where its queries go.
 var EndpointRoles = []string{
-	EndpointStateRedis, EndpointStrategyCache, EndpointCMDBCache, EndpointDynamicConfig,
+	EndpointStateRedis, EndpointStrategyCache, EndpointCMDBCache, EndpointDynamicConfig, EndpointOpenAlertSet,
 	EndpointQueryBackend, EndpointOutputKafka, EndpointCompatOutput,
 }

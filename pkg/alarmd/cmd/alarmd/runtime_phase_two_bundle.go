@@ -1046,7 +1046,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		viewStream:       viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
 		source:           bundle.sourceFleetFacts,
 		endpoints: endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
-			bundle.sourceFleetFacts, events.State, external.Now),
+			bundle.sourceFleetFacts, events.State, openAlertSetFactsSource(openAlertCopy, external.Now), external.Now),
 		// The same snapshot the readiness endpoint serves, so the fleet and
 		// the probe cannot disagree about one replica.
 		readiness: readinessFactsSource(health),
@@ -1310,10 +1310,29 @@ func (port openAlertCopyPort) Acknowledged(events []contract.TriggerEventV1) {
 func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func() *fleet.OpenAlertSetFacts {
 	return func() *fleet.OpenAlertSetFacts {
 		stats := cache.Stats()
-		facts := &fleet.OpenAlertSetFacts{Mode: string(stats.Mode), StaleBeyondBound: cache.StaleBeyondBound()}
+		at := now()
+		facts := &fleet.OpenAlertSetFacts{Mode: string(stats.Mode), StaleBeyondBound: cache.StaleBeyondBound(),
+			Available: stats.Available, UnavailableReason: string(stats.UnavailableReason),
+			ReaderFingerprintVersion: openalerts.FingerprintVersion,
+			TrackedSets:              stats.Tracked, LoadedSets: stats.Loaded, Members: stats.Members}
 		if !stats.LoadedAt.IsZero() {
-			age := now().Sub(stats.LoadedAt).Seconds()
+			age := at.Sub(stats.LoadedAt).Seconds()
 			facts.AuthoritativeAgeSeconds = &age
+		}
+		// The publisher's heartbeat as last read, by its own clock. A copy
+		// that never read one carries none: a zero would read as a cycle
+		// completed at the epoch.
+		if !stats.Heartbeat.PublishedAt.IsZero() {
+			age := at.Sub(stats.Heartbeat.PublishedAt).Seconds()
+			facts.HeartbeatAgeSeconds = &age
+			facts.CycleSeconds = int64(stats.Heartbeat.Cycle / time.Second)
+			facts.FingerprintVersion = stats.Heartbeat.FingerprintVersion
+		}
+		// Every answer word, zero included: a word missing from the map
+		// cannot be told from one never given.
+		facts.Lookups = make(map[string]uint64, len(openalerts.Answers))
+		for _, answer := range openalerts.Answers {
+			facts.Lookups[string(answer)] = stats.Lookups[answer]
 		}
 		return facts
 	}

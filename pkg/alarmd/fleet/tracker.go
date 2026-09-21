@@ -103,6 +103,18 @@ const (
 	// spoken at least once if it speaks at all, and short enough that the
 	// line is on the page the same day the strategy is created.
 	DefaultEmptyEveryRoundAfter = time.Hour
+	// DefaultNoDataAfter is how long, on the source's clock, an object that
+	// did return records must have gone without them -- latest empty Slot
+	// minus the Slot records were last seen at -- before its empty rounds
+	// are read as data that stopped. The same hour as the line above, and
+	// for the same reason: a source that reports every ten minutes over a
+	// sixty-second object completes nine empty rounds between two with
+	// records, and a round count alone listed every such source as stopped
+	// within three minutes of each report. The round count still applies
+	// on top -- one hour of Slots in three rounds is a slow object, not a
+	// stopped one -- so the two lines share one clock and one threshold and
+	// differ only in whether records were ever seen.
+	DefaultNoDataAfter = time.Hour
 	// maxStrategiesPerQueryGroup bounds how many strategies one object records.
 	// Query groups are keyed by query semantics, so several strategies can share
 	// one; the bound keeps a pathological group from growing without limit.
@@ -216,6 +228,12 @@ type queryGroupState struct {
 	lastEmptySlot  int64
 	emptySinceFrom SinceSource
 	emptySlotFrom  SinceSource
+	// lastDataSlot is the Slot records were last seen at, on the source's
+	// clock: the other end of the data side's hour. Zero until a round with
+	// records is watched or restored; sawData without it is a round that
+	// carried no Slot, which no emitter produces, and the data side's line
+	// then waits for one that does rather than measuring from nothing.
+	lastDataSlot int64
 	// noDataMemory is the refused absence-memory write of each of this
 	// object's Plans still refused, by Plan, with how often and since when.
 	// A Plan's entry is kept until a write for that Plan is seen to store;
@@ -535,8 +553,10 @@ type Tracker struct {
 	degradedRounds int
 	blockedRounds  int
 	// emptyEveryRoundAfter is how long an object that never returned records
-	// must have completed every round empty before NoData lists it as such.
+	// must have completed every round empty before NoData lists it as such;
+	// noDataAfter how long one that did must have gone without them.
 	emptyEveryRoundAfter time.Duration
+	noDataAfter          time.Duration
 	maxTracked           int
 	now                  func() time.Time
 
@@ -574,6 +594,7 @@ func NewTracker(next observability.Observer, replica string, now func() time.Tim
 		degradedRounds:       DefaultDegradedRounds,
 		blockedRounds:        DefaultBlockedRounds,
 		emptyEveryRoundAfter: DefaultEmptyEveryRoundAfter,
+		noDataAfter:          DefaultNoDataAfter,
 		maxTracked:           DefaultTrackedQueryGroups,
 		now:                  now,
 		groups:               make(map[string]*queryGroupState),
@@ -1011,8 +1032,12 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				// round known to have had records, and never reads the
 				// run's bounds again once one has. They are left as they
 				// are rather than cleared, so nothing here looks like it
-				// decides what "seen" already has.
+				// decides what "seen" already has. The data side's clock
+				// starts here instead.
 				state.sawData = true
+				if trace.EvaluationTime > state.lastDataSlot {
+					state.lastDataSlot = trace.EvaluationTime
+				}
 			}
 		}
 		if healthyCompletion(completion) {
@@ -1633,7 +1658,12 @@ func (tracker *Tracker) NoData() []Anomaly {
 			Since: state.emptySince, SinceFrom: state.emptySinceFrom, Replica: tracker.replica,
 		}
 		switch {
-		case state.sawData && state.emptyRuns >= tracker.degradedRounds:
+		case state.sawData && state.emptyRuns >= tracker.degradedRounds && state.lastDataSlot != 0 &&
+			time.Duration(state.lastEmptySlot-state.lastDataSlot)*time.Second >= tracker.noDataAfter:
+			// The data side's hour, on the same clock as the line below:
+			// the rounds are enough and the Slots span the hour since
+			// records were last seen. Either alone lists a source that
+			// speaks every ten minutes, or a slow one, as stopped.
 			anomaly.Kind = KindNoData
 		case !state.sawData && state.currentKind == "" && state.emptySinceSlot != 0 &&
 			time.Duration(state.lastEmptySlot-state.emptySinceSlot)*time.Second >= tracker.emptyEveryRoundAfter:

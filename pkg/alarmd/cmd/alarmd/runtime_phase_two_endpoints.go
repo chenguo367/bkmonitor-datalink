@@ -21,6 +21,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 )
 
@@ -56,6 +57,10 @@ func (sharing endpointSharing) redisClientForRole(role string) string {
 			return sharing.redisClientForRole(sharing.dynamicSharedWith)
 		}
 		return "dynamic_config"
+	case fleet.EndpointOpenAlertSet:
+		// Read through the state store's client: the publication lives on
+		// the state Redis under its own fixed prefix.
+		return sharing.redisClientForRole(fleet.EndpointStateRedis)
 	case fleet.EndpointCompatOutput:
 		return "legacy_output"
 	}
@@ -99,7 +104,13 @@ func resolveEndpoints(cfg config.Config, sharing endpointSharing) []fleet.Endpoi
 	} else {
 		endpoints = append(endpoints, fleet.Endpoint{Role: fleet.EndpointDynamicConfig, Kind: "redis"})
 	}
-	endpoints = append(endpoints,
+	// The consumer's open alert publication: the same instance and database
+	// as this replica's own state, under the contract's fixed prefix rather
+	// than the state prefix, because the writer is another service that
+	// must not have to learn this deployment's configuration.
+	openAlerts := redisEndpoint(fleet.EndpointOpenAlertSet, cfg.RuntimeStoreRedis(), openalerts.KeyPrefix)
+	openAlerts.SharedWith = fleet.EndpointStateRedis
+	endpoints = append(endpoints, openAlerts,
 		fleet.Endpoint{Role: fleet.EndpointQueryBackend, Kind: "http", Address: cfg.PhaseTwo.Access.UQEndpoint,
 			Configured: cfg.PhaseTwo.Access.UQEndpoint != ""},
 		outputKafkaEndpoint(cfg),
@@ -121,7 +132,8 @@ func resolveEndpoints(cfg config.Config, sharing endpointSharing) []fleet.Endpoi
 func endpointFactsSource(
 	cfg config.Config, sharing endpointSharing, recorder *metric.Recorder,
 	cmdb *cmdbcache.Store, settings *platformsettings.Cache,
-	source func() *fleet.SourceFacts, outputSink func() outputSinkState, now func() time.Time,
+	source func() *fleet.SourceFacts, outputSink func() outputSinkState, openAlerts func() *fleet.OpenAlertSetFacts,
+	now func() time.Time,
 ) func() []fleet.Endpoint {
 	static := resolveEndpoints(cfg, sharing)
 	return func() []fleet.Endpoint {
@@ -216,6 +228,23 @@ func endpointFactsSource(
 						writer.AgeSeconds = &age
 					}
 					entry.Writer = writer
+				}
+			case fleet.EndpointOpenAlertSet:
+				if openAlerts != nil {
+					if facts := openAlerts(); facts != nil {
+						// The short form every reading role has: present once
+						// a publication was read, the members as the count,
+						// the publisher's own heartbeat as the age, the mode
+						// -- or why it is unavailable -- as the state. The
+						// full account rides beside it.
+						writer := &fleet.WriterEvidence{Present: facts.AuthoritativeAgeSeconds != nil, Count: facts.Members,
+							AgeSeconds: facts.HeartbeatAgeSeconds, State: facts.Mode}
+						if facts.UnavailableReason != "" {
+							writer.State = facts.Mode + ":" + facts.UnavailableReason
+						}
+						entry.Writer = writer
+						entry.OpenAlertSet = facts
+					}
 				}
 			}
 		}

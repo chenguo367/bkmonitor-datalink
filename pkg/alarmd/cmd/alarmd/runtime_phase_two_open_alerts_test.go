@@ -40,6 +40,18 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 	if facts == nil || facts.Mode != string(openalerts.ModeNeverLoaded) || facts.StaleBeyondBound || facts.AuthoritativeAgeSeconds != nil {
 		t.Fatalf("facts before any read = %+v, want never_loaded, not stale, no age", facts)
 	}
+	// The reader's account before any read: no heartbeat and so no age,
+	// cycle or publisher version -- not zeros; the reader's own version;
+	// every answer word present at zero.
+	if facts.Available || facts.HeartbeatAgeSeconds != nil || facts.CycleSeconds != 0 || facts.FingerprintVersion != "" ||
+		facts.ReaderFingerprintVersion != openalerts.FingerprintVersion || facts.TrackedSets != 0 || facts.Members != 0 {
+		t.Fatalf("account before any read = %+v, want nothing of the publisher and the reader's own version", facts)
+	}
+	for _, answer := range openalerts.Answers {
+		if count, present := facts.Lookups[string(answer)]; !present || count != 0 {
+			t.Fatalf("lookups before any lookup = %v, want every answer word at zero", facts.Lookups)
+		}
+	}
 
 	port := openAlertCopyPort{cache: cache}
 	port.TrackPlans([]execution.PlanIdentity{{TenantID: "default", BusinessID: "2", StrategyID: "1001"}})
@@ -58,5 +70,23 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 	}
 	if stats := cache.Stats(); stats.Tracked != 1 {
 		t.Fatalf("tracked = %d, want the one Plan the worker named", stats.Tracked)
+	}
+	// The account after the read: the publisher's heartbeat by its own
+	// clock, its cycle and version, one set tracked and loaded with its one
+	// member, and the lookup above counted under the authoritative word.
+	if !facts.Available || facts.UnavailableReason != "" || facts.HeartbeatAgeSeconds == nil || *facts.HeartbeatAgeSeconds != 45 ||
+		facts.CycleSeconds != 60 || facts.FingerprintVersion != openalerts.FingerprintVersion ||
+		facts.TrackedSets != 1 || facts.LoadedSets != 1 || facts.Members != 1 || facts.Lookups[string(openalerts.AnswerMember)] != 1 {
+		t.Fatalf("account after a read = %+v, want available, heartbeat 45 s old, cycle 60, one set with one member, one authoritative_member lookup", facts)
+	}
+	// The publisher stops: past the staleness bound the copy is on its own
+	// and the account says why, with the last heartbeat still dated.
+	source.publication = openalerts.Publication{}
+	at = at.Add(10 * time.Minute)
+	cache.Refresh(context.Background())
+	facts = openAlertSetFactsSource(cache, now)()
+	if facts.Available || facts.Mode != string(openalerts.ModeSelfMaintained) || facts.UnavailableReason != string(openalerts.UnavailableHeartbeatMissing) ||
+		facts.HeartbeatAgeSeconds == nil || *facts.HeartbeatAgeSeconds != 645 {
+		t.Fatalf("account after the publisher stopped = %+v, want self_maintained for heartbeat_missing with the last heartbeat 645 s old", facts)
 	}
 }
