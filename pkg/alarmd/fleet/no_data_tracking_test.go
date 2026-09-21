@@ -116,8 +116,12 @@ func TestTheRowCarriesEachPlansLastDecidingWordAndWhereItsHorizonCameFrom(t *tes
 		Plans: 3, HorizonNone: 1, HorizonPlatform: 1, HorizonStrategy: 1,
 		Expected: 19, Absent: 4, ExpiredThisRound: 0, Suppressed: 2, LastDecidedAt: now.Add(time.Minute),
 		// Every line here carried no frozen word, so every source was inferred.
-		HorizonSourceInferred: 3,
+		HorizonSourceInferred: ptr(3),
 	}
+	if summary.HorizonSourceInferred == nil || *summary.HorizonSourceInferred != 3 {
+		t.Fatalf("summary counts %v inferred, want 3", summary.HorizonSourceInferred)
+	}
+	summary.HorizonSourceInferred, want.HorizonSourceInferred = nil, nil
 	if *summary != want {
 		t.Fatalf("summary = %+v, want %+v", *summary, want)
 	}
@@ -179,8 +183,8 @@ func TestTheHorizonSourceIsReadAgainstThePlatformsAndSaysUnknownWhenNotTold(t *t
 			if row.NoDataTracking[0].HorizonSourceBasis != wantBasis {
 				t.Fatalf("basis = %s, want %s", row.NoDataTracking[0].HorizonSourceBasis, wantBasis)
 			}
-			if inferred := tracker.NoDataTrackingSummary().HorizonSourceInferred; inferred != wantInferred {
-				t.Fatalf("summary counts %d inferred, want %d", inferred, wantInferred)
+			if inferred := tracker.NoDataTrackingSummary().HorizonSourceInferred; inferred == nil || *inferred != wantInferred {
+				t.Fatalf("summary counts %v inferred, want %d", inferred, wantInferred)
 			}
 			summary := tracker.NoDataTrackingSummary()
 			counted := map[string]int{
@@ -232,15 +236,23 @@ func TestTheFleetSumsTheReplicasNoDataTrackingAccounts(t *testing.T) {
 	all := []string{"pod-a", "pod-b", "pod-c"}
 	snapshots := []Snapshot{
 		{Replica: "pod-a", TakenAt: now, NoDataTracking: &NoDataTrackingSummary{Plans: 2, HorizonPlatform: 2,
-			Expected: 8, Absent: 3, Suppressed: 1, LastDecidedAt: now, HorizonSourceInferred: 1}},
+			Expected: 8, Absent: 3, Suppressed: 1, LastDecidedAt: now, HorizonSourceInferred: ptr(1)}},
+		// A replica from before the count: its summary carries none, and every
+		// one of its Plans was read by inference, because its build knew no
+		// frozen word. Read as zero it would be the Plans missing from exactly
+		// the number meant to say how many are left.
 		{Replica: "pod-b", TakenAt: now, NoDataTracking: &NoDataTrackingSummary{Plans: 1, HorizonNone: 1,
 			Expected: 4, Absent: 4, LastDecidedAt: now.Add(time.Minute)}},
 		{Replica: "pod-c", TakenAt: now},
 	}
 	view := Aggregate(Expectation{Known: true}, snapshots, all, now, freshness)
 	want := NoDataTrackingSummary{Plans: 3, HorizonPlatform: 2, HorizonNone: 1, Expected: 12, Absent: 7, Suppressed: 1,
-		LastDecidedAt: now.Add(time.Minute), HorizonSourceInferred: 1}
-	if view.NoDataTracking == nil || *view.NoDataTracking != want {
+		LastDecidedAt: now.Add(time.Minute)}
+	if view.NoDataTracking == nil || view.NoDataTracking.HorizonSourceInferred == nil || *view.NoDataTracking.HorizonSourceInferred != 2 {
+		t.Fatalf("merged inferred = %v, want 2: pod-a's one and all of pod-b's", view.NoDataTracking)
+	}
+	view.NoDataTracking.HorizonSourceInferred = nil
+	if *view.NoDataTracking != want {
 		t.Fatalf("merged = %+v, want %+v", view.NoDataTracking, want)
 	}
 	// Replicas with no account: the fleet has none either, rather than an
@@ -258,7 +270,7 @@ func ptr[T any](value T) *T { return &value }
 func TestHealthResponseCarriesTheNoDataTrackingLine(t *testing.T) {
 	snapshots := healthySnapshots()
 	snapshots[0].NoDataTracking = &NoDataTrackingSummary{Plans: 2, HorizonPlatform: 2, Expected: 8, Absent: 3, Suppressed: 1,
-		ExpiredThisRound: 1, LastDecidedAt: now, HorizonSourceInferred: 1}
+		ExpiredThisRound: 1, LastDecidedAt: now, HorizonSourceInferred: ptr(1)}
 	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
 	body := requestJSON(t, handler, "/api/health")
 	tracking, ok := body["no_data_tracking"].(map[string]any)
