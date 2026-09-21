@@ -79,6 +79,7 @@ type phaseTwoMetrics struct {
 	scheduleCutoverDuration         *prometheus.HistogramVec
 	scheduleCutovers                *prometheus.CounterVec
 	replayExpiries                  *prometheus.CounterVec
+	rangeGateDecisions              *prometheus.CounterVec
 	scheduleCutoverQueryGroups      *prometheus.CounterVec
 	scheduleCutoverTimelinesRead    prometheus.Gauge
 	queryFailures                   *prometheus.CounterVec
@@ -660,6 +661,23 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, reason := range observability.ReplayExpiryReasons {
 		metrics.replayExpiries.WithLabelValues(reason)
 	}
+	// The word each round that gave up on a Slot puts on its range_gate line,
+	// as a series: the log had the thirteen words and the metric had none, so
+	// "which refusal is holding the Query Groups that never catch up" could
+	// be read from one Slot's line and from no counter. Every outcome from
+	// startup, applied included -- the rounds that did reach the builder are
+	// the denominator the refusals are read against.
+	metrics.rangeGateDecisions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "range_gate_total",
+		Help: "Rounds that gave up on a Slot, by what the catch-up path did with it. applied is a " +
+			"range built and handed on; every other word is the condition that refused one, the same " +
+			"word the round's range_gate_decided line carries as reason_code. Read the refusals " +
+			"against applied: a Query Group whose rounds are all refused for one condition is a " +
+			"Query Group that never catches up, and this says which condition.",
+	}, []string{"outcome"})
+	for _, outcome := range observability.RangeGateOutcomes {
+		metrics.rangeGateDecisions.WithLabelValues(outcome)
+	}
 	metrics.scheduleCutoverTimelinesRead = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_timelines_read", Help: "Schedule timelines the last publication cutover read to decide. Equal to the population on the first cutover of a Control Leader process, the changed set afterwards."})
 	// The failure code itself is an open vocabulary and stays in the log and
 	// the fleet view; the counter carries the bounded stage and category so a
@@ -1026,7 +1044,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
-		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries,
+		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries, m.rangeGateDecisions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
@@ -1156,6 +1174,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.ReplayExpiry; facts != nil {
 		m.replayExpiries.WithLabelValues(facts.Reason).Inc()
+	}
+	if facts := observation.RangeGate; facts != nil {
+		// The normalized word: an outcome outside the list has already been
+		// folded to unexplained, so the label set is the list and no more.
+		m.rangeGateDecisions.WithLabelValues(facts.Outcome).Inc()
 	}
 	m.observeSlotWait(observation)
 	if facts := observation.ScheduleCutover; facts != nil {

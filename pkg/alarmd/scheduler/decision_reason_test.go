@@ -42,8 +42,8 @@ func TestTheRangeGateAndReplayExpiryLinesCarryTheirWordAsTheReasonCode(t *testin
 			if observation.RangeGate == nil || normalized.ReasonCode != observability.ReasonCode(observation.RangeGate.Outcome) {
 				t.Fatalf("range gate line reason=%q, want the outcome word %+v", normalized.ReasonCode, observation.RangeGate)
 			}
-			if normalized.ReasonCode != observability.RangeGateNoRangeFlight {
-				t.Fatalf("range gate outcome=%q, want %s: the fixture has no range flight", normalized.ReasonCode, observability.RangeGateNoRangeFlight)
+			if normalized.ReasonCode != observability.RangeGateNoRangeFlight || normalized.Result != observability.ResultDegraded {
+				t.Fatalf("range gate line=%s/%s, want degraded/%s: the fixture has no range flight, and a refusal is degraded", normalized.Result, normalized.ReasonCode, observability.RangeGateNoRangeFlight)
 			}
 		case observability.StageReplayExpired:
 			expiry++
@@ -118,6 +118,46 @@ func TestACooldownTransitionCarriesAResultAndAReason(t *testing.T) {
 		}
 		if normalized.Result == observability.ResultOther || unclassified(normalized.ReasonCode) {
 			t.Fatalf("line %d (%s) reads as unclassified: %s/%s", i, want[i].event, normalized.Result, normalized.ReasonCode)
+		}
+	}
+}
+
+// A round that reached the builder and got its range is the denominator the
+// refusals are read against, not a refusal: its line says success with the
+// word, where the refusal words say degraded.
+func TestARangeAppliedIsASuccessLineAndARefusalIsDegraded(t *testing.T) {
+	observer := &gateObserver{}
+	source, ctx := fourBehindSource(t, observer, true)
+	if _, _, _, err := source.Next(ctx, "query-group-1"); err != nil {
+		t.Fatalf("Next() error = %v", err)
+	}
+	var lines int
+	for _, observation := range observer.seen {
+		if observation.Stage != observability.StageRangeGateDecided {
+			continue
+		}
+		lines++
+		normalized := observability.NormalizeObservation(observation)
+		wantResult := observability.Result(observability.ResultDegraded)
+		if observation.RangeGate.Outcome == observability.RangeGateApplied {
+			wantResult = observability.ResultSuccess
+		}
+		if normalized.Result != wantResult || normalized.ReasonCode != observability.ReasonCode(observation.RangeGate.Outcome) {
+			t.Fatalf("range gate line=%s/%s for outcome %q, want %s with the word", normalized.Result, normalized.ReasonCode, observation.RangeGate.Outcome, wantResult)
+		}
+	}
+	if lines != 1 {
+		t.Fatalf("range gate lines=%d, want one", lines)
+	}
+	// The classifier alone, for the branch the fixture may not take: applied
+	// is success, and every other word on the list is degraded.
+	for _, outcome := range observability.RangeGateOutcomes {
+		result := observability.Result(observability.ResultDegraded)
+		if outcome == observability.RangeGateApplied {
+			result = observability.ResultSuccess
+		}
+		if got := rangeGateResult(outcome); got != result {
+			t.Fatalf("rangeGateResult(%q)=%s, want %s", outcome, got, result)
 		}
 	}
 }

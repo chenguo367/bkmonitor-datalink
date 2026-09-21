@@ -388,14 +388,26 @@ func (source *ProductionSlotSource) observeRangeGate(
 	}
 	// The word is the line's reason_code as well as a fact: with the reason
 	// left empty a degraded result read as reason_not_reported, on a line
-	// that had reported, and the stage counter could not count by it.
+	// that had reported.
 	source.observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageRangeGateDecided,
-		Result: observability.ResultDegraded, ReasonCode: observability.ReasonCode(outcome.word),
+		Result: rangeGateResult(outcome.word), ReasonCode: observability.ReasonCode(outcome.word),
 		Direction: observability.DirectionInternal,
 		Trace: observability.TraceFields{
 			QueryGroupKey: string(source.queryGroup), EvaluationTime: int64(evaluationTime),
 		},
 		RangeGate: facts,
 	})
+}
+
+// rangeGateResult is the result a round's range_gate line carries for its
+// word. A round that reached the builder and got its range is not degraded
+// -- it is the round the refusals are read against -- and says success;
+// every refusal word is degraded. It used to say degraded for all thirteen,
+// so a line reading degraded/applied contradicted itself.
+func rangeGateResult(word string) observability.Result {
+	if word == observability.RangeGateApplied {
+		return observability.ResultSuccess
+	}
+	return observability.Result(observability.ResultDegraded)
 }
