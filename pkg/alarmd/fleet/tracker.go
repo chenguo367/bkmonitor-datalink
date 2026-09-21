@@ -648,18 +648,18 @@ func (tracker *Tracker) SetPlatformNoDataHorizon(read func() int64) {
 // a Plan compiled before the source was frozen, or a Worker from before the
 // line carried it. See NoDataHorizonSources for why the comparison is only
 // the fallback and where it is ambiguous.
-func (tracker *Tracker) horizonSourceOf(horizon int64, frozen string) string {
+func (tracker *Tracker) horizonSourceOf(horizon int64, frozen string) (source, basis string) {
 	switch {
 	case frozen == NoDataHorizonPlatform || frozen == NoDataHorizonStrategy:
-		return frozen
+		return frozen, NoDataHorizonSourceFrozen
 	case tracker.platformHorizon == nil:
-		return NoDataHorizonUnknown
+		return NoDataHorizonUnknown, NoDataHorizonSourceInferred
 	case horizon <= 0:
-		return NoDataHorizonNone
+		return NoDataHorizonNone, NoDataHorizonSourceInferred
 	case horizon == tracker.platformHorizon():
-		return NoDataHorizonPlatform
+		return NoDataHorizonPlatform, NoDataHorizonSourceInferred
 	default:
-		return NoDataHorizonStrategy
+		return NoDataHorizonStrategy, NoDataHorizonSourceInferred
 	}
 }
 
@@ -818,9 +818,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		if state.noDataTracking == nil {
 			state.noDataTracking = map[StrategyRef]*NoDataTracking{}
 		}
+		source, basis := tracker.horizonSourceOf(absence.HorizonSeconds, absence.HorizonSource)
 		state.noDataTracking[plan] = &NoDataTracking{
 			Plan:           plan,
-			HorizonSeconds: absence.HorizonSeconds, HorizonSource: tracker.horizonSourceOf(absence.HorizonSeconds, absence.HorizonSource),
+			HorizonSeconds: absence.HorizonSeconds, HorizonSource: source, HorizonSourceBasis: basis,
 			RosterSource: absence.RosterSource, Expected: absence.Expected, Present: absence.Present,
 			Absent: absence.Absent, ExpiredThisRound: absence.Expired, Suppressed: absence.Suppressed,
 			Dropped: absence.Dropped, EvaluationTime: trace.EvaluationTime, DecidedAt: at,
