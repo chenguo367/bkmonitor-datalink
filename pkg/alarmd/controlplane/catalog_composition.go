@@ -269,7 +269,7 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 			case plan.Plan.NoData == nil:
 				composition.NoDataNotConfigured++
 			default:
-				class, err := nodata.ClassifyRoster(plan.Plan.TargetScope, plan.Plan.NoData.AggDimension)
+				class, err := nodata.ClassifyTarget(plan.Plan.TargetScope, plan.Plan.TargetPlan, plan.Plan.NoData.AggDimension)
 				if err != nil {
 					composition.NoDataPlansUnclassified++
 					continue
@@ -306,6 +306,7 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 // the partition to pre-create and for a reader to bound the family by.
 var NoDataRosterSources = []nodata.RosterSource{
 	nodata.RosterTargetStatic,
+	nodata.RosterTargetPlan,
 	nodata.RosterHistory,
 	nodata.RosterWhole,
 	SuspendedNoDataConfigInvalid,

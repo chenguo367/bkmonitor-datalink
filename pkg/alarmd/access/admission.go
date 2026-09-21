@@ -32,15 +32,24 @@ type AdmissionObserver func(filter, result, reason string)
 // execution. It is built once per execution rather than looked up per series.
 type planScopes map[execution.PlanIdentity]admission.PlanContext
 
-func buildPlanScopes(duePlans []execution.DuePlan) planScopes {
+func buildPlanScopes(duePlans []execution.DuePlan, targets execution.TargetMemberships) planScopes {
 	scopes := make(planScopes, len(duePlans))
 	for _, due := range duePlans {
-		scopes[due.Identity] = admission.PlanContext{
+		context := admission.PlanContext{
 			TenantID:    due.Identity.TenantID,
 			BusinessID:  due.Identity.BusinessID,
 			StrategyID:  due.Identity.StrategyID,
 			TargetScope: admission.TargetScopeFromContract(due.CompiledPlan.TargetScope()),
 		}
+		if plan := due.CompiledPlan.TargetPlan(); plan != nil {
+			// The resolution is the Slot's, looked up by Plan; a Plan the Slot
+			// did not resolve keeps Members nil and admits nothing.
+			context.TargetPlan = &admission.TargetPlanContext{Identity: plan.Identity}
+			if members, resolved := targets[due.Identity]; resolved && members != nil {
+				context.TargetPlan.Members = members
+			}
+		}
+		scopes[due.Identity] = context
 	}
 	return scopes
 }

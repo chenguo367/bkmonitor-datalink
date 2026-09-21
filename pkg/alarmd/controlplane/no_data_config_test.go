@@ -256,7 +256,7 @@ func TestNoDataRosterUnsupportedNamesOnlyWhatThisBuildCannotDerive(t *testing.T)
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			reason := noDataRosterUnsupported(test.scope, test.config)
+			reason := noDataRosterUnsupported(test.scope, nil, test.config)
 			if test.unsupported && reason == "" {
 				t.Fatal("noDataRosterUnsupported() said this build can derive an expected set it cannot")
 			}

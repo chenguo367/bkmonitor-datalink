@@ -15,6 +15,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
 const SourceAlgorithmTypePingUnreachable = "PingUnreachable"
@@ -263,8 +264,8 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 				(disposition.Disposition != DispositionSourceIncomplete && disposition.Disposition != DispositionConfigRejected) {
 				return Catalog{}, errors.New("alarmd controlplane: invalid source disposition")
 			}
-			if refusal := unsupportedTargetPlan(source); refusal != nil {
-				catalog.Dispositions = append(catalog.Dispositions, disposition, *refusal)
+			if compiled := compileTargetPlanDocument(source); compiled.refusal != nil {
+				catalog.Dispositions = append(catalog.Dispositions, disposition, *compiled.refusal)
 				continue
 			}
 			retained, err := retainLastGood(source.SourceID)
@@ -614,8 +615,9 @@ type sourceCandidate struct {
 
 func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, outputProtocol string) (sourceCandidate, error) {
 	candidate := sourceCandidate{}
-	if refusal := unsupportedTargetPlan(source); refusal != nil {
-		return sourceCandidate{dispositions: []ObjectDisposition{*refusal}}, errors.New("alarmd controlplane: target_plan is not supported")
+	targetPlanDocument := compileTargetPlanDocument(source)
+	if targetPlanDocument.refusal != nil {
+		return sourceCandidate{dispositions: []ObjectDisposition{*targetPlanDocument.refusal}}, errors.New("alarmd controlplane: target_plan refused: " + targetPlanDocument.refusal.Reason)
 	}
 	if err := source.Identity.validate(); err != nil {
 		return sourceCandidate{}, err
@@ -646,12 +648,40 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	// the outcome: a rejected configuration retains the last good Plan, and
 	// that Plan predates the target filter, so the strategy would go on
 	// alerting outside its target with nothing to show for it.
-	targetScope, err := compileTargetScope(item.Target, item.QueryConfigs)
-	if err != nil {
+	var targetScope *contract.TargetScopeV2
+	var targetPlan *contract.TargetPlanV1
+	switch {
+	case targetPlanDocument.present:
+		// The new protocol is the whole target: the item's old target, whatever
+		// shape it now has, is display data and is not read.
+		targetPlan = targetPlanDocument.plan
+	case item.Target.selection:
+		// The strategy's target has moved to the selection protocol without a
+		// target_plan beside it. That is the writer switching protocols out
+		// of order, and it is refused by name rather than compiled as a
+		// strategy with no target, or kept on the last Plan of the old one.
 		return sourceCandidate{dispositions: []ObjectDisposition{{
 			SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
-			Reason: targetScopeDispositionReason(err),
-		}}}, err
+			Reason: "TARGET_PLAN_MISSING", FieldPath: "items[0].target",
+		}}}, errors.New("TARGET_PLAN_MISSING: the item's target is a selection document and no target_plan accompanies it")
+	case item.Target.unreadable:
+		// A target this reader cannot make out is refused the way a target
+		// value it cannot read is, and for the same reason: kept on the last
+		// good Plan, the strategy would go on alerting on a target nobody
+		// can show it was pointed at.
+		return sourceCandidate{dispositions: []ObjectDisposition{{
+			SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
+			Reason: "UNSUPPORTED_TARGET_SCOPE", FieldPath: "items[0].target",
+		}}}, errors.New("TARGET_SCOPE_UNSUPPORTED: the item's target could not be decoded")
+	default:
+		scope, err := compileTargetScope(item.Target.groups, item.QueryConfigs)
+		if err != nil {
+			return sourceCandidate{dispositions: []ObjectDisposition{{
+				SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
+				Reason: targetScopeDispositionReason(err),
+			}}}, err
+		}
+		targetScope = scope
 	}
 	primaryExpression, identityFields := primaryQueryContract(item)
 	functions := append([]json.RawMessage(nil), item.Functions...)
@@ -695,7 +725,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		compiledInputs.osRestartHistory = &history
 	}
 	plan, compiled, dispositions, err := compilePlan(
-		legacy, item, source.Identity, facts.Normalization.DatasetContract, source.SourceID, &compiledInputs, targetScope,
+		legacy, item, source.Identity, facts.Normalization.DatasetContract, source.SourceID, &compiledInputs, targetScope, targetPlan,
 	)
 	if err != nil {
 		candidate.dispositions = append(candidate.dispositions, dispositions...)
@@ -880,12 +910,51 @@ type legacyItem struct {
 	// Target is the strategy's monitoring scope. It was silently ignored here
 	// until 2026-09-09, which is how alarmd came to alert on hosts outside
 	// every scoped strategy's target while Python filtered them out.
-	Target [][]legacyTargetCondition `json:"target"`
+	Target legacyTarget `json:"target"`
 	// NoDataConfig is the item's no-data setting. A pointer so that "the
 	// strategy cache carried no section" is distinguishable from "it carried
 	// one with everything at zero"; the two mean different things and the
 	// second is a malformed entry rather than a disabled item.
 	NoDataConfig json.RawMessage `json:"no_data_config"`
+}
+
+// legacyTarget is the item's target as the strategy cache stores it: the
+// platform's list of condition groups, or, once the writer has moved the
+// strategy to the selection protocol, an object, or something this reader
+// cannot make out. None of the three fails the decode of the whole
+// strategy: a decode failure retains the strategy's last good Plan, and
+// that Plan was compiled from the old target - the one outcome a target
+// change must never produce. What each shape means is decided where the
+// target is compiled, and only when no target_plan stands in for it.
+type legacyTarget struct {
+	groups [][]legacyTargetCondition
+	// selection is true when the target was an object: the new selection
+	// protocol, which this compiler reads only through target_plan.
+	selection bool
+	// unreadable is true when the target was neither absent, an object nor
+	// a list this reader could decode.
+	unreadable bool
+}
+
+func (target *legacyTarget) UnmarshalJSON(raw []byte) error {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		*target = legacyTarget{}
+		return nil
+	}
+	if strings.HasPrefix(trimmed, "{") {
+		*target = legacyTarget{selection: true}
+		return nil
+	}
+	var groups [][]legacyTargetCondition
+	decoder := json.NewDecoder(strings.NewReader(trimmed))
+	decoder.UseNumber()
+	if err := decoder.Decode(&groups); err != nil {
+		*target = legacyTarget{unreadable: true}
+		return nil
+	}
+	*target = legacyTarget{groups: groups}
+	return nil
 }
 
 // legacyNoDataConfig is the no_data_config the strategy cache stores.
@@ -1003,11 +1072,11 @@ const defaultNoDataLevel uint32 = 2
 // second predicate that agrees today is a predicate that can drift tomorrow,
 // and the drift is silent in both directions: a Plan that errors every round,
 // or a Plan that quietly expects nothing.
-func noDataRosterUnsupported(scope *contract.TargetScopeV2, config *contract.NoDataConfigV1) string {
+func noDataRosterUnsupported(scope *contract.TargetScopeV2, plan *contract.TargetPlanV1, config *contract.NoDataConfigV1) string {
 	if config == nil {
 		return ""
 	}
-	if _, err := nodata.ClassifyRoster(scope, config.AggDimension); err != nil {
+	if _, err := nodata.ClassifyTarget(scope, plan, config.AggDimension); err != nil {
 		var unsupported *nodata.RosterUnsupportedError
 		if errors.As(err, &unsupported) {
 			return unsupported.Reason
@@ -1117,32 +1186,55 @@ func decodeLegacyStrategy(document json.RawMessage) (legacyStrategy, error) {
 	return value, nil
 }
 
-// Presence selects the new target protocol, even for null or malformed values.
-// Until that protocol is supported, refusing it must precede legacy decoding:
-// its display-only target may be an object, which the legacy decoder rejects
-// as a configuration error and would otherwise retain the old target's Plan.
-// Ordinary sources are checked inside the candidate cache; incomplete sources
-// also check before their separate last-good retention path.
-func unsupportedTargetPlan(source SourceStrategy) *ObjectDisposition {
+// compiledTargetPlan is what the target_plan document of one strategy came
+// to: the frozen form when it read, the disposition refusing it when it did
+// not, and neither when the strategy carries no such field.
+type compiledTargetPlan struct {
+	present  bool
+	plan     *contract.TargetPlanV1
+	refusal  *ObjectDisposition
+	position int
+}
+
+// compileTargetPlanDocument reads the strategy's target_plan, if it has one.
+//
+// Presence selects the new target protocol, even for null or malformed
+// values, and it is read before the legacy decoder sees the document: the
+// item's display-only target may by then be an object, which the legacy
+// decoder rejects as a configuration error and would otherwise retain the
+// old target's Plan. A target_plan that does not read is refused by name and
+// field, and the strategy is never compiled from its old target instead.
+// Ordinary sources are checked inside the candidate cache; incomplete
+// sources also check before their separate last-good retention path.
+func compileTargetPlanDocument(source SourceStrategy) compiledTargetPlan {
 	var document struct {
 		Items []json.RawMessage `json:"items"`
 	}
 	if err := json.Unmarshal(source.Document, &document); err != nil {
-		return nil // An unreadable source keeps its existing failure semantics.
+		return compiledTargetPlan{} // An unreadable source keeps its existing failure semantics.
 	}
 	for index, raw := range document.Items {
 		var item struct {
-			TargetPlan json.RawMessage `json:"target_plan"`
+			TargetPlan   json.RawMessage   `json:"target_plan"`
+			QueryConfigs []json.RawMessage `json:"query_configs"`
 		}
 		if err := json.Unmarshal(raw, &item); err != nil || len(item.TargetPlan) == 0 {
 			continue
 		}
-		return &ObjectDisposition{
-			SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
-			Reason: "UNSUPPORTED_TARGET_PLAN", FieldPath: fmt.Sprintf("items[%d].target_plan", index),
+		field := fmt.Sprintf("items[%d].target_plan", index)
+		plan, refusal := targetplan.Decode(item.TargetPlan, targetplan.Options{ObjectIdentities: objectIdentityPairs(item.QueryConfigs)})
+		if refusal != nil {
+			if refusal.Path != "" {
+				field += "." + refusal.Path
+			}
+			return compiledTargetPlan{present: true, position: index, refusal: &ObjectDisposition{
+				SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
+				Reason: refusal.Reason, FieldPath: field,
+			}}
 		}
+		return compiledTargetPlan{present: true, position: index, plan: plan}
 	}
-	return nil
+	return compiledTargetPlan{}
 }
 
 type compiledPlanInputs struct {
@@ -1186,6 +1278,7 @@ func compilePlan(
 	sourceID string,
 	inputs *compiledPlanInputs,
 	targetScope *contract.TargetScopeV2,
+	targetPlan *contract.TargetPlanV1,
 ) (contract.EvaluationPlanV2, planCompileFacts, []ObjectDisposition, error) {
 	if hasJSONValue(source.Priority) || source.PriorityGroupKey != "" {
 		return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, errors.New("alarmd controlplane: G1 does not support priority semantics")
@@ -1323,6 +1416,7 @@ func compilePlan(
 	ir := contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2, Minor: 0}, RequiredFeatures: []string{}, StrategyRef: ref, ExecutionSemantics: semantics, InputProjection: projection, Levels: levels}
 	plan := contract.EvaluationPlanV2{PlanID: strategyID, StrategyRef: ref, InputProjection: projection, SourceCompatibility: &contract.SourceCompatibilityV2{ItemID: strconv.FormatInt(item.ID, 10)}, StrategyIR: ir}
 	plan.TargetScope = targetScope
+	plan.TargetPlan = targetPlan
 	// A no-data configuration this build cannot compile suspends no-data
 	// detection for this Plan and nothing else.
 	//
@@ -1339,7 +1433,7 @@ func compilePlan(
 		suspended, noData = contract.ReasonNoDataConfigInvalid, nil
 	}
 	plan.NoData = noData
-	if reason := noDataRosterUnsupported(targetScope, noData); suspended == "" && reason != "" {
+	if reason := noDataRosterUnsupported(targetScope, targetPlan, noData); suspended == "" && reason != "" {
 		// Decided here rather than every round. The expected set is a function
 		// of the target's shape and the no-data dimensions, both frozen here,
 		// so a Slot would reach the same answer with no new information - and

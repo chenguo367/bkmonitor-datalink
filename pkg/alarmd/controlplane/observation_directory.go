@@ -601,12 +601,16 @@ func (d *ObservationDirectory) readGroup(ctx context.Context, r *directoryRead, 
 	if err != nil {
 		return QueryGroupObject{}, err
 	}
-	hash, err := contract.DeriveCanonicalDigestV2OverCanonical(queryGroupObjectContractVersion, payload)
+	domain, err := queryGroupObjectDomain(payload)
+	if err != nil {
+		return QueryGroupObject{}, ErrCatalogObjectCorrupt
+	}
+	hash, err := contract.DeriveCanonicalDigestV2OverCanonical(domain, payload)
 	if err != nil || hash != string(digest) {
 		return QueryGroupObject{}, ErrCatalogObjectCorrupt
 	}
 	var obj QueryGroupObject
-	if err = json.Unmarshal(payload, &obj); err != nil || obj.ContractVersion != queryGroupObjectContractVersion {
+	if err = json.Unmarshal(payload, &obj); err != nil || !knownQueryGroupObjectVersion(obj.ContractVersion) {
 		return QueryGroupObject{}, ErrCatalogObjectCorrupt
 	}
 	return obj, nil

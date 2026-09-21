@@ -498,6 +498,7 @@ type CompiledPlan struct {
 	resourceEstimate    ResourceEstimate
 	datasetDigest       string
 	targetScope         *contract.TargetScopeV2
+	targetPlan          *contract.TargetPlanV1
 	noData              *contract.NoDataConfigV1
 	noDataLevel         *CompiledLevel
 }
@@ -567,6 +568,17 @@ func (p *CompiledPlan) TargetScope() *contract.TargetScopeV2 {
 		return nil
 	}
 	return p.targetScope
+}
+
+// TargetPlan is the target's second frozen form, for a Plan compiled from a
+// target_plan document. Nil for every other Plan. A Plan with neither this
+// nor TargetScope names no target; a Plan with this and no resolution for
+// it admits nothing, which is the filter's rule, not this accessor's.
+func (p *CompiledPlan) TargetPlan() *contract.TargetPlanV1 {
+	if p == nil {
+		return nil
+	}
+	return p.targetPlan
 }
 
 func (p *CompiledPlan) StrategyRef() contract.StrategyRefV2 {

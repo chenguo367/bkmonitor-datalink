@@ -136,6 +136,7 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 		normalizers:         make(map[string]NumericNormalizerSpec),
 		datasetDigest:       datasetDigest,
 		targetScope:         request.Plan.TargetScope,
+		targetPlan:          request.Plan.TargetPlan,
 		noData:              request.Plan.NoData,
 	}
 	terminals := make([]Terminal, 0)
@@ -254,6 +255,15 @@ func (c *PlanCompiler) validatePlan(request CompileRequest) *Terminal {
 	}
 	if plan.OutputIdentity != nil && (plan.OutputIdentity.DimensionFields == nil || plan.OutputIdentity.DynamicDimensions != request.DatasetContract.DynamicDimensions) {
 		return &Terminal{ReasonCode: contract.ReasonPlanInvalid, FieldPath: "output_identity.dimension_fields"}
+	}
+	// A target has one frozen form. A Plan carrying both would be filtered
+	// by whichever the worker happened to read first, and a target plan that
+	// does not validate is a compiler defect this side must not run.
+	if plan.TargetScope != nil && plan.TargetPlan != nil {
+		return &Terminal{ReasonCode: contract.ReasonPlanInvalid, FieldPath: "target_plan"}
+	}
+	if err := plan.TargetPlan.Validate(); err != nil {
+		return &Terminal{ReasonCode: contract.ReasonPlanInvalid, FieldPath: "target_plan"}
 	}
 	strategy := plan.StrategyIR
 	if plan.PlanID == "" || plan.PlanID != plan.StrategyRef.StrategyID || plan.StrategyRef != strategy.StrategyRef || plan.StrategyRef.SnapshotRevision < 0 ||

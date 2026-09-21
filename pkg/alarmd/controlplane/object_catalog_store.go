@@ -135,7 +135,8 @@ func buildObjectCatalogContent(catalog Catalog) (objectCatalogContent, error) {
 		contexts: make(map[execution.OutputContextDigest][]byte, len(catalog.QueryGroups)),
 	}
 	for _, group := range catalog.QueryGroups {
-		payload, err := contract.CanonicalJSONV2(BuildQueryGroupObject(group))
+		object := BuildQueryGroupObject(group)
+		payload, err := contract.CanonicalJSONV2(object)
 		if err != nil {
 			return objectCatalogContent{}, fmt.Errorf("alarmd controlplane: encode Query Group object: %w", err)
 		}
@@ -144,7 +145,7 @@ func buildObjectCatalogContent(catalog Catalog) (objectCatalogContent, error) {
 			return objectCatalogContent{}, err
 		}
 		content.noDataPlans += published
-		digest, err := contract.DeriveCanonicalDigestV2OverCanonical(queryGroupObjectContractVersion, payload)
+		digest, err := contract.DeriveCanonicalDigestV2OverCanonical(object.ContractVersion, payload)
 		if err != nil {
 			return objectCatalogContent{}, err
 		}

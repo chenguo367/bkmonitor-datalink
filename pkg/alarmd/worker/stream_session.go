@@ -41,6 +41,12 @@ type streamedExecution struct {
 	noData         execution.NoDataLoadResult
 	noDataHosts    map[execution.PlanNoDataIdentity]nodata.HostResolution
 	noDataOutcomes []nodata.SlotOutcome
+	// targetResolutions is what this Slot resolved each target-plan Plan's
+	// target to, by Plan. Absence and admission both read it, so one Slot
+	// cannot admit a record under one view of the target and judge absence
+	// under another. A Plan with a target plan and no entry here is read as
+	// unresolved by both, never as unscoped or as empty.
+	targetResolutions map[execution.PlanIdentity]*resolvedTarget
 	// seriesCensus is where this Slot's series went, counted where each
 	// decision is made rather than inferred afterwards. See seriesCensus.
 	seriesCensus seriesCensus
@@ -958,6 +964,7 @@ func (stream *streamedExecution) resolveNoDataRosterHosts() error {
 		candidates, err := nodata.HostCandidates(nodata.RosterRequest{
 			AggDimension: config.AggDimension,
 			Scope:        due.CompiledPlan.TargetScope(),
+			Plan:         due.CompiledPlan.TargetPlan(),
 			Memory:       memory,
 		})
 		if err != nil {
