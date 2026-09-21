@@ -69,6 +69,14 @@ func TestAStrategysStandingIsAnsweredFromTheLookupAndTheFleetsView(t *testing.T)
 			Plans:        plans(planB),
 			Dispositions: []StrategyDisposition{{Scope: "PLAN", Disposition: "STALE_CONFIG", Reason: "QUERY_CONFIG_INVALID", FieldPath: "items[0].query_configs[0]"}}},
 		"4105": {Available: true, Found: false, Publication: StrategyPublication{SnapshotRevision: "s1", Epoch: 7}},
+		// Taken out by the source: one more round on the last good Plan,
+		// then withdrawn. Neither is a refusal, and the sentence says which
+		// round it is in.
+		"4106": {Available: true, Found: true, Retained: true, Publication: StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
+			Plans:        plans(planA),
+			Dispositions: []StrategyDisposition{{Scope: "STRATEGY", Disposition: "PENDING_REMOVAL", Reason: "REMOVED_FROM_ACTIVE_SET"}}},
+		"4107": {Available: true, Found: true, Publication: StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
+			Dispositions: []StrategyDisposition{{Scope: "STRATEGY", Disposition: "REMOVED", Reason: "ABSENT_FROM_ACTIVE_SET"}}},
 	}
 	handler := standingHandler(t, func(id string) StrategyLookupFacts { return facts[id] }, nil)
 
@@ -140,8 +148,22 @@ func TestAStrategysStandingIsAnsweredFromTheLookupAndTheFleetsView(t *testing.T)
 	if line, _ := body["line"].(string); !strings.Contains(line, "策略源没有列出它——不是被扣") {
 		t.Errorf("4105 line = %q", line)
 	}
+	_, body = get(t, handler, "/api/strategies/4106")
+	if body["standing"] != string(StandingRetainedLastGood) {
+		t.Fatalf("4106 standing = %v, want RETAINED_LAST_GOOD for the grace round", body["standing"])
+	}
+	if line, _ := body["line"].(string); !strings.Contains(line, "策略源已把它移出活动集，上一次生效的配置再检测一轮后撤下") || strings.Contains(line, "被扣住") {
+		t.Errorf("4106 line = %q, want the grace round said as the source's removal, not as a refusal", line)
+	}
+	status, body = get(t, handler, "/api/strategies/4107")
+	if status != http.StatusOK || body["standing"] != string(StandingNotListed) || body["found"] != true {
+		t.Fatalf("4107: status %d body %v, want NOT_LISTED (found, since the round recorded the removal) and not WITHHELD", status, body)
+	}
+	if line, _ := body["line"].(string); !strings.Contains(line, "上一轮已撤下") || strings.Contains(line, "被扣住") {
+		t.Errorf("4107 line = %q, want the withdrawal said, not a refusal", line)
+	}
 	// Every standing produced is on the closed list.
-	for _, id := range []string{"4101", "4102", "4103", "4104", "4105"} {
+	for _, id := range []string{"4101", "4102", "4103", "4104", "4105", "4106", "4107"} {
 		_, body = get(t, handler, "/api/strategies/"+id)
 		listed := false
 		for _, kind := range StrategyStandingKinds {
