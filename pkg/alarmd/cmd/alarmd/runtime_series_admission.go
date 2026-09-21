@@ -209,8 +209,7 @@ func hostDisableMonitorStateCount(filters []admission.Filter) int {
 // selector resolves unavailable by name rather than empty; topology
 // references still resolve against the host index.
 //
-// The group store reads the fork's cache on the connection the CMDB cache
-// is read on - the deployment publishes both there - and refreshes the
+// The group store reads its configured target group connection and refreshes the
 // referenced groups on the host index's cadence with its staleness bound.
 func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
 	prefix, rendered := cfg.DynamicGroupKeyPrefix()

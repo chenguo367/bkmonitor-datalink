@@ -160,10 +160,13 @@ type PlatformCacheConfig struct {
 	// platform settings copy says not_configured rather than reading the
 	// wrong instance as "nothing published".
 	DynamicConfig *RedisConnectionConfig `yaml:"dynamic_config,omitempty"`
+	// TargetGroup locates the dynamic target group cache. Prefix-only legacy
+	// configurations retain their historical CMDB connection.
+	TargetGroup *RedisConnectionConfig `yaml:"target_group,omitempty"`
 	// DynamicGroupKeyPrefix is the fork's own Redis key prefix, under which
 	// its dynamic group module writes "<prefix>dynamic_group:<id>" on the
-	// same instance as the CMDB cache. It is a deployment coordinate
-	// rendered from the fork's setting, spelled exactly as the writer spells
+	// instance selected by TargetGroup (historically CMDB). It is a deployment
+	// coordinate rendered from the fork's setting, spelled exactly as the writer spells
 	// it, separator included; alarmd derives nothing from it and has no
 	// default for it. Absent means the deployment has no such writer and no
 	// group is read (every dynamic group selector resolves unavailable by
@@ -290,7 +293,7 @@ func redisPoolCPUBudget() int {
 func (c Config) WithResolvedRedisPoolSize() Config {
 	cpuBudget := redisPoolCPUBudget()
 	c.Redis.PoolSize = c.Redis.Connection().EffectivePoolSize(cpuBudget)
-	for _, platform := range []**RedisConnectionConfig{&c.PlatformCache.Strategy, &c.PlatformCache.CMDB} {
+	for _, platform := range []**RedisConnectionConfig{&c.PlatformCache.Strategy, &c.PlatformCache.CMDB, &c.PlatformCache.DynamicConfig, &c.PlatformCache.TargetGroup} {
 		if *platform == nil {
 			continue
 		}
@@ -366,6 +369,18 @@ func (c Config) DynamicConfigRedis() (RedisConnectionConfig, bool) {
 	return c.PlatformCache.DynamicConfig.clone(), true
 }
 
+// TargetGroupRedis returns the explicit location, or the historical CMDB
+// location for prefix-only configurations. Without a prefix no groups are read.
+func (c Config) TargetGroupRedis() (RedisConnectionConfig, bool) {
+	if c.PlatformCache.DynamicGroupKeyPrefix == nil {
+		return RedisConnectionConfig{}, false
+	}
+	if c.PlatformCache.TargetGroup != nil {
+		return c.PlatformCache.TargetGroup.clone(), true
+	}
+	return c.CMDBCacheRedis(), true
+}
+
 // resolvePlatformCacheRedis writes down which connection each platform cache
 // actually resolved to, rather than leaving it to be worked out again at every
 // call site. The resolved configuration is what a release check reads and what
@@ -375,9 +390,9 @@ func (c *Config) resolvePlatformCacheRedis() {
 	if c == nil || c.Input.Mode != InputModeGoAccess {
 		return
 	}
-	for _, cache := range []**RedisConnectionConfig{&c.PlatformCache.Strategy, &c.PlatformCache.CMDB, &c.PlatformCache.DynamicConfig} {
+	for _, cache := range []**RedisConnectionConfig{&c.PlatformCache.Strategy, &c.PlatformCache.CMDB, &c.PlatformCache.DynamicConfig, &c.PlatformCache.TargetGroup} {
 		if *cache == nil {
-			if cache == &c.PlatformCache.DynamicConfig {
+			if cache == &c.PlatformCache.DynamicConfig || cache == &c.PlatformCache.TargetGroup {
 				continue
 			}
 			resolved := c.Redis.Connection()
@@ -621,6 +636,14 @@ func (c Config) validateGoAccessRuntime() error {
 	}
 	if prefix, rendered := c.DynamicGroupKeyPrefix(); rendered && strings.TrimSpace(prefix) == "" {
 		return errors.New("platform_cache.dynamic_group_key_prefix is rendered but empty; leave it out where no dynamic group cache is written")
+	}
+	if c.PlatformCache.TargetGroup != nil && c.PlatformCache.DynamicGroupKeyPrefix == nil {
+		return errors.New("platform_cache.target_group requires platform_cache.dynamic_group_key_prefix")
+	}
+	if connection, configured := c.TargetGroupRedis(); configured {
+		if err := connection.validate("platform_cache.target_group"); err != nil {
+			return err
+		}
 	}
 	if err := validateRuntimePrefixIsolation(c.Redis.StatePrefix, c.PhaseTwo.Control.StrategyCachePrefix); err != nil {
 		return err
