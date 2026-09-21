@@ -366,6 +366,50 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	}
 	attributes = appendHeldByAttributes(attributes, observation.HeldBy)
 	attributes = appendSlotCompletionKind(attributes, observation.SlotCompletionKind)
+	if facts := observation.HistoryCoverage; facts != nil {
+		// The window's shortfall is the first number anyone reading a
+		// HISTORY_GAPPED or HISTORY_WARMING completion needs, and until now
+		// it reached the object page and nothing else: the facts rode the
+		// observation and were never rendered, so a log reader had to go and
+		// click. Levels, short and empty are on every line -- levels above
+		// zero with short at zero is "every window was complete", and it has
+		// to be a line that says so rather than a line missing the fields.
+		// The worst pair belongs to the worst short window and is normalised
+		// away when none is short, so it is rendered only then; the optional
+		// counts only when they say something.
+		attributes = append(attributes,
+			slog.Uint64("history_levels", uint64(facts.Levels)),
+			slog.Uint64("history_short", uint64(facts.Short)),
+			slog.Uint64("history_empty", uint64(facts.Empty)),
+		)
+		if facts.Short > 0 {
+			attributes = append(attributes,
+				slog.Uint64("history_worst_valid", uint64(facts.WorstValid)),
+				slog.Uint64("history_worst_required", uint64(facts.WorstRequired)),
+			)
+		}
+		if facts.Guarded > 0 {
+			attributes = append(attributes, slog.Uint64("history_guarded", uint64(facts.Guarded)))
+		}
+		if facts.Fresh > 0 || facts.ShortFresh > 0 {
+			attributes = append(attributes,
+				slog.Uint64("history_fresh", uint64(facts.Fresh)),
+				slog.Uint64("history_short_fresh", uint64(facts.ShortFresh)),
+			)
+		}
+		if facts.Abnormal > 0 || facts.AbnormalOnIncomplete > 0 {
+			attributes = append(attributes,
+				slog.Uint64("history_abnormal", uint64(facts.Abnormal)),
+				slog.Uint64("history_abnormal_on_incomplete", uint64(facts.AbnormalOnIncomplete)),
+			)
+		}
+		if facts.Unusable > 0 || facts.UnusableReason != "" {
+			attributes = append(attributes,
+				slog.Uint64("history_unusable", uint64(facts.Unusable)),
+				slog.String("history_unusable_reason", facts.UnusableReason),
+			)
+		}
+	}
 	if facts := observation.SegmentContent; facts != nil {
 		attributes = append(attributes, slog.String("segment_content", facts.State))
 	}
