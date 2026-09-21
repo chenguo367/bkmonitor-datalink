@@ -1128,11 +1128,18 @@ local function reply()
   return {f[1], f[2], f[3], f[4], f[5], f[6], query_group, f[7] or '', f[8] or '', tonumber(f[9] or '0'), tonumber(f[10] or '0')}
 end
 -- The timeline revision is the Query Group's, not the decision's: written
--- whenever a decision names it and left alone otherwise, and it does not
--- move record_revision - the cutover that writes it beside the timeline
--- itself does not either, and a reader compares it to the view, not to the
--- record's revision.
-if timeline > 0 then redis.call('HSET', KEYS[2], 'timeline_record_revision', timeline) end
+-- when a decision names one newer than the record holds and left alone
+-- otherwise, and it does not move record_revision - the cutover that writes
+-- it beside the timeline itself does not either, and a reader compares it
+-- to the view, not to the record's revision. Newer only, because the
+-- decision's number is a copy read from the catalog a moment ago while the
+-- cutover writes the number it just wrote to the timeline: a copy that lost
+-- that race would put the record behind the timeline, and nothing rewrites
+-- a timeline whose content did not change.
+if timeline > 0 then
+  local have = tonumber(redis.call('HGET', KEYS[2], 'timeline_record_revision') or '0')
+  if timeline > have then redis.call('HSET', KEYS[2], 'timeline_record_revision', timeline) end
+end
 local current_desired = redis.call('HGET', KEYS[2], 'desired_worker_id')
 if current_desired and current_desired == desired then
   if withdraw then

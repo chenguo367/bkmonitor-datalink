@@ -69,6 +69,16 @@ func TestTheTimelineRevisionTravelsWithTheRenewalAndOutlivesDecisions(t *testing
 	if err != nil || renewed.TimelineRecordRevision != 8 {
 		t.Fatalf("Renew() after the move = (%+v, %v), want timeline revision 8", renewed, err)
 	}
+	// A decision carrying an older number than the record holds - a copy read
+	// from the catalog before a cutover stamped the record - does not put the
+	// record behind the timeline.
+	behind, err := store.PublishAssignment(ctx, authority, AssignmentDecision{
+		QueryGroup: "query-group-1", DesiredWorkerID: "worker-1", ExpectedRecordRevision: moved.RecordRevision,
+		PlacementReason: PlacementRendezvous, DecidedAt: now.Add(5 * time.Second), ContentScope: "view-a", TimelineRecordRevision: 7,
+	})
+	if err != nil || behind.TimelineRecordRevision != 8 {
+		t.Fatalf("a decision naming timeline revision 7 against a record at 8 gave %+v (%v), want 8 kept", behind, err)
+	}
 	// A record no leader wrote the number to says so with zero, and the
 	// renewal carries the zero: zero is "not said", which no timeline is.
 	unsaid, err := store.PublishAssignment(ctx, authority, AssignmentDecision{

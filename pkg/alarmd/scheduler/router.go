@@ -186,8 +186,10 @@ type TimelineRevisionSource interface {
 
 // WithTimelineRevisions gives the reconciler where to read a timeline's
 // revision from. It is asked only for a Query Group whose record does not
-// exist or does not say - a placement, or a record from before the field -
-// so the cost is one timeline read per such record, not per round.
+// exist or does not say - a placement, a record from before the field, or a
+// Query Group with no timeline yet, which is asked again each round until
+// it has one. The reads go through the control cache, and the Query Groups
+// in that state are few.
 func (reconciler *Reconciler) WithTimelineRevisions(source TimelineRevisionSource) *Reconciler {
 	if reconciler != nil {
 		reconciler.timelines = source
