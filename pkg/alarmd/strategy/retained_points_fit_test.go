@@ -6,6 +6,9 @@
 package strategy
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -64,5 +67,57 @@ func TestAWindowTheRecordCannotHoldIsRefusedAtCompileTime(t *testing.T) {
 	// the table means unknown, which must not read as zero.
 	if compiler.checkRetainedPointsFit(planOfLevels(9000, 9000, 9000, 9000, 9000)) != nil {
 		t.Fatal("a Level count with no ceiling stated was refused; an absent entry is not a ceiling of zero")
+	}
+}
+
+// The same rule through Compile, because the check only protects anything if
+// the compile path runs it.
+//
+// Stated only against the function, the rule reads as satisfied while the call
+// is missing from Compile - a mutation removing that call left the whole
+// package green. The refusal has to be observed where a Plan actually arrives.
+func TestCompileRefusesAWindowTheRecordCannotHold(t *testing.T) {
+	windowed := func(points uint32) contract.LevelIRV2 {
+		level := validLevel(1, 1, "50")
+		level.TriggerPlan.Config = json.RawMessage(
+			fmt.Sprintf(`{"window_size":%d,"required_anomalies":1,"step_seconds":60}`, points))
+		return level
+	}
+	compile := func(t *testing.T, ceilings []uint32, points uint32) CompileResult {
+		t.Helper()
+		limits := testLimits()
+		limits.MaxRetainedPointsByLevels = ceilings
+		compiler, err := NewCompiler(NewDefaultAlgorithmCompilerRegistry(), limits)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := validPlan()
+		plan.StrategyIR.Levels = []contract.LevelIRV2{windowed(points)}
+		result, err := compiler.Compile(context.Background(), validRequest(plan))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	ceilings := []uint32{0, 2100, 1405, 1056}
+	if _, ok := compile(t, ceilings, 1469).Plan(); !ok {
+		t.Fatal("a single-Level Plan retaining 1469 points was refused by Compile; it stores cleanly today")
+	}
+
+	over := compile(t, ceilings, 2500)
+	if _, ok := over.Plan(); ok {
+		t.Fatal("Compile admitted a window the stored record cannot hold; every state write this Plan " +
+			"makes would be refused, per series, with nothing to say why")
+	}
+	terminal := over.PlanTerminal()
+	if terminal == nil || terminal.ReasonCode != contract.ReasonPlanBudgetExceeded {
+		t.Fatalf("plan terminal = %+v, want %q", terminal, contract.ReasonPlanBudgetExceeded)
+	}
+
+	// With no ceilings stated, Compile admits it: the refusal comes from the
+	// derived table rather than from a number hidden in the compiler.
+	if _, ok := compile(t, nil, 2500).Plan(); !ok {
+		t.Fatal("Compile refused a 2500-point window with no ceiling stated for any Level count")
 	}
 }
