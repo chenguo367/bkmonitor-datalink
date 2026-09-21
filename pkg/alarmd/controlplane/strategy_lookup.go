@@ -41,11 +41,16 @@ type StrategyLookup struct {
 	Plans []StrategyPlanRef
 	// Dispositions are every disposition the round recorded for the
 	// strategy: ACCEPTED for the items that became Plans, and the withheld
-	// ones with their reason and field path. A strategy whose Plans are the
-	// last good ones retained under a refusal has a Plan and a non-accepted
-	// disposition at once; Retained says so.
+	// ones with their reason and field path.
 	Dispositions []ObjectDisposition
-	Retained     bool
+	// Retained says the strategy's Plans are the last good ones kept in
+	// place of a document the round could not compile: the dispositions
+	// the compiler produces for exactly that, STALE_CONFIG (the last good
+	// Plan retained under a refusal) and PENDING_REMOVAL (kept one round
+	// past its removal). A strategy with one item accepted and another
+	// withheld is not retained - its Plan is the current one - so any other
+	// non-accepted disposition beside a Plan says nothing about retention.
+	Retained bool
 }
 
 // StrategyPlanRef is where one Plan of a strategy runs, and under what.
@@ -119,11 +124,18 @@ func (index *strategyIndex) lookup(strategyID string) StrategyLookup {
 	answer.Dispositions = append([]ObjectDisposition(nil), index.dispositions[strategyID]...)
 	answer.Found = len(answer.Plans) > 0 || len(answer.Dispositions) > 0
 	for _, disposition := range answer.Dispositions {
-		if disposition.Disposition != DispositionAccepted && len(answer.Plans) > 0 {
+		if len(answer.Plans) > 0 && retainingDisposition(disposition.Disposition) {
 			answer.Retained = true
 		}
 	}
 	return answer
+}
+
+// retainingDisposition is a disposition under which the Plans on record are
+// the last good ones and not this round's: the two the compiler produces
+// when it keeps a Plan it could not rebuild.
+func retainingDisposition(disposition Disposition) bool {
+	return disposition == DispositionStaleConfig || disposition == DispositionPendingRemoval
 }
 
 // strategyLookupState is the reconciler's published index and its lock.

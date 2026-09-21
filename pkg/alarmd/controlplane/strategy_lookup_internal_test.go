@@ -62,3 +62,42 @@ func TestALookupDuringAReplacementReadsOnePublicationWhole(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// Retained is the compiler's own word for a Plan kept in place of a document
+// it could not rebuild, and nothing else: a strategy with one item accepted
+// and another withheld has a current Plan and is not retained, while one
+// under STALE_CONFIG or PENDING_REMOVAL is.
+func TestRetainedIsTheCompilersWordForALastGoodPlanKeptInPlace(t *testing.T) {
+	plan := execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "7"}
+	groups := []QueryGroup{{Identity: "qg", Plans: []FrozenPlan{{Identity: plan}}}}
+	for name, test := range map[string]struct {
+		dispositions []ObjectDisposition
+		retained     bool
+	}{
+		"one item accepted, another withheld": {dispositions: []ObjectDisposition{
+			{SourceID: "7", Scope: "PLAN", Disposition: DispositionAccepted},
+			{SourceID: "7", Scope: "PLAN", Disposition: DispositionUnsupported, Reason: "UNSUPPORTED_TARGET_PLAN"},
+		}},
+		"no-data half suspended beside an accepted Plan": {dispositions: []ObjectDisposition{
+			{SourceID: "7", Scope: "PLAN", Disposition: DispositionAccepted},
+			{SourceID: "7", Scope: "LEVEL", LevelID: 1, Disposition: DispositionCompatibilityIgnored, Reason: "NO_DATA_ROSTER_UNSUPPORTED"},
+		}},
+		"last good kept under a refusal": {dispositions: []ObjectDisposition{
+			{SourceID: "7", Scope: "PLAN", Disposition: DispositionStaleConfig, Reason: "PLAN_INVALID"},
+		}, retained: true},
+		"kept one round past removal": {dispositions: []ObjectDisposition{
+			{SourceID: "7", Scope: "PLAN", Disposition: DispositionPendingRemoval},
+		}, retained: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			answer := buildStrategyIndex(SnapshotPublicationRef{SnapshotRevision: "rev"}, groups, test.dispositions).lookup("7")
+			if !answer.Found || len(answer.Plans) != 1 || answer.Retained != test.retained {
+				t.Fatalf("lookup = found %v plans %d retained %v, want retained %v", answer.Found, len(answer.Plans), answer.Retained, test.retained)
+			}
+		})
+	}
+	// Without a Plan there is nothing retained, whatever the disposition.
+	if answer := buildStrategyIndex(SnapshotPublicationRef{}, nil, []ObjectDisposition{{SourceID: "7", Disposition: DispositionStaleConfig}}).lookup("7"); answer.Retained || !answer.Found {
+		t.Fatalf("a strategy with no Plan = %+v, want found and not retained", answer)
+	}
+}
