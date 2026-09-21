@@ -137,6 +137,13 @@ type persistedSourceCandidate struct {
 	ConfirmationKey  string `json:"confirmation_key"`
 	ObservationID    string `json:"observation_id"`
 	SnapshotRevision string `json:"snapshot_revision"`
+	// Absences is the candidate's removal-grace memory: when each strategy
+	// it holds under PENDING_REMOVAL was first found absent. The round that
+	// confirms the candidate rebuilds the Catalog and must stamp the same
+	// moments, or its dispositions differ from the candidate's and nothing
+	// ever confirms. Absent from a candidate written before the grace was a
+	// period, which the next round reads as no memory.
+	Absences map[string]int64 `json:"absences,omitempty"`
 }
 
 // SourceReconciler confirms changed Legacy observations across independent
@@ -313,8 +320,21 @@ func (reconciler *SourceReconciler) Refresh(
 	if audit != nil {
 		previousDispositions = audit.Dispositions
 	}
+	// The candidate the previous round left unconfirmed, read before the
+	// build: its grace memory is what the build stamps again so the two
+	// rounds agree and the candidate can confirm. A missing candidate is no
+	// memory, and the confirmation below reads the same load.
+	pending, pendingErr := reconciler.loadPending(ctx)
+	if pendingErr != nil && !errors.Is(pendingErr, redis.Nil) {
+		return SourceRefreshResult{}, exitAt(SourceRefreshExitCandidate, pendingErr)
+	}
+	var pendingAbsences map[string]int64
+	if pendingErr == nil {
+		pendingAbsences = pending.Absences
+	}
 	catalog, err := BuildCatalog(ctx, BuildRequest{
 		Strategies: cycle.strategies, Planner: planner, LastGood: current, PreviousDispositions: previousDispositions,
+		PendingAbsences: pendingAbsences, Now: reconciler.now(),
 		OutputProtocol: reconciler.outputProtocol, TargetSources: reconciler.targetSources, Cache: reconciler.candidates,
 	})
 	if err != nil {
@@ -386,15 +406,12 @@ func (reconciler *SourceReconciler) Refresh(
 		}
 	}
 
-	pending, err := reconciler.loadPending(ctx)
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return SourceRefreshResult{}, exitAt(SourceRefreshExitCandidate, err)
-	}
-	if err == nil && pending.ConfirmationKey == confirmationKey {
+	if pendingErr == nil && pending.ConfirmationKey == confirmationKey {
 		return reconciler.publish(ctx, current, catalog, SourceRefreshPublished)
 	}
 	if err := reconciler.savePending(ctx, persistedSourceCandidate{SchemaVersion: sourceCandidateSchemaVersion,
-		ConfirmationKey: confirmationKey, ObservationID: catalog.ObservationID, SnapshotRevision: string(catalog.SnapshotRevision)}); err != nil {
+		ConfirmationKey: confirmationKey, ObservationID: catalog.ObservationID, SnapshotRevision: string(catalog.SnapshotRevision),
+		Absences: AbsencesOf(catalog.Dispositions)}); err != nil {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitCandidate, err)
 	}
 	pendingResult := SourceRefreshResult{Status: SourceRefreshPendingConfirmation, Observation: catalog.ObservationID}
