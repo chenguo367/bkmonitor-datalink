@@ -128,7 +128,15 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonBlockedExactSetUnavailable: {ReasonBlockedExactSetUnavailable, ReasonClassDeterministic, ReasonDomainObservation},
 	// Deterministic: the persisted marker and the proposed one are both facts,
 	// and repeating the attempt compares the same two facts again.
-	ReasonGapGuardConflict:     {ReasonGapGuardConflict, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonGapGuardConflict: {ReasonGapGuardConflict, ReasonClassDeterministic, ReasonDomainObservation},
+	// Conflict and stale version are retryable rather than deterministic: both
+	// say the marker moved, and re-reading it is what resolves them - which is
+	// what the same-Slot retry was already doing before the refusals had
+	// names. GAP_GUARD_CONFLICT above stays deterministic because it is this
+	// Slot's own comparison, and re-running it reaches the same answer.
+	ReasonGapApplyConflict:     {ReasonGapApplyConflict, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonGapApplyStaleVersion: {ReasonGapApplyStaleVersion, ReasonClassRetryable, ReasonDomainObservation},
+	ReasonGapWriteRetryable:    {ReasonGapWriteRetryable, ReasonClassRetryable, ReasonDomainObservation},
 	ReasonStateVersionConflict: {ReasonStateVersionConflict, ReasonClassDeterministic, ReasonDomainObservation},
 	ReasonStateStaleVersion:    {ReasonStateStaleVersion, ReasonClassDeterministic, ReasonDomainObservation},
 	// Deterministic: the Plan asks for more than this deployment has, and it

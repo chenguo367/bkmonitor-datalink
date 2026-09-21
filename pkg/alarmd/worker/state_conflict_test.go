@@ -20,6 +20,12 @@ func TestStateConflictReasonSurvivesWrappers(t *testing.T) {
 		for _, test := range []struct{ status, want string }{
 			{string(execution.StateVersionConflict), contract.ReasonStateVersionConflict},
 			{string(execution.StateStaleVersion), contract.ReasonStateStaleVersion},
+			// The apply path's transient write failure. It went unnamed only
+			// because it is not one of the preflight's two statuses, and
+			// arrived on the completion line as internal_unknown - the word
+			// for a site that could not classify its own failure - which is
+			// not what a retryable IO error is.
+			{string(execution.StateApplyRetryable), contract.ReasonStateWriteRetryable},
 		} {
 			t.Run(stage+"/"+test.status, func(t *testing.T) {
 				cause := &worker.StateConflictError{Stage: stage, Status: test.status}
@@ -33,9 +39,17 @@ func TestStateConflictReasonSurvivesWrappers(t *testing.T) {
 			})
 		}
 	}
+	// The rule that has not changed: a name comes from the status value, never
+	// from the error's text. An error that merely says the words is not the
+	// thing, or any wrapped message anywhere could claim the word.
+	//
+	// CAS_CONFLICT stays here deliberately rather than by omission - it needs a
+	// word of its own and there is no reading yet to say what that word should
+	// distinguish from STATE_VERSION_CONFLICT. When one arrives it moves up to
+	// the table above, and this list is what makes that a decision somebody has
+	// to take rather than a status that quietly never got named.
 	for _, err := range []error{nil, errors.New("STATE_VERSION_CONFLICT"),
-		&worker.StateConflictError{Status: string(execution.StateApplyCASConflict)},
-		&worker.StateConflictError{Status: string(execution.StateApplyRetryable)}} {
+		&worker.StateConflictError{Status: string(execution.StateApplyCASConflict)}} {
 		if got, ok := worker.StateConflictReason(err); ok || got != "" {
 			t.Fatalf("unclassified error %v was named %q", err, got)
 		}

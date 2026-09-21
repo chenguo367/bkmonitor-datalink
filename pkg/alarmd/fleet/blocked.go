@@ -227,6 +227,21 @@ var failureFacets = map[string]facets{
 	// what, not to the evaluation, which had finished.
 	"STATE_VERSION_CONFLICT": {StageCommit, ClassContract, DependencyNone},
 	"STATE_STALE_VERSION":    {StageCommit, ClassContract, DependencyNone},
+	// The Plan gap marker moved under the Slot writing it. Commit rather than
+	// evaluate, for the same reason the two state refusals above are: the
+	// evaluation had finished and what is in conflict is the write, so a
+	// reader is sent to what was committing against what.
+	//
+	// Apart from GAP_GUARD_CONFLICT above, which stays at evaluate: that one is
+	// this Slot comparing the persisted marker against what it proposes and
+	// refusing before it writes, and the answer to it is in the evaluation. The
+	// two below say the marker changed between this Slot's read and its write,
+	// so the question is who else wrote it.
+	"GAP_APPLY_CONFLICT":      {StageCommit, ClassContract, DependencyNone},
+	"GAP_APPLY_STALE_VERSION": {StageCommit, ClassContract, DependencyNone},
+	// The write did not land. Unavailable rather than contract, and against
+	// Redis: nothing here disagreed with anything, the store did not answer.
+	"GAP_WRITE_RETRYABLE": {StageCommit, ClassUnavailable, DependencyRedis},
 	// The ownership store refused this worker: at the commit step, since the
 	// fence is checked on the way to the writes (the admission before them,
 	// the fenced write itself), and REFUSED because the store answered and

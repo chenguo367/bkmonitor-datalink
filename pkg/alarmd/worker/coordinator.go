@@ -789,7 +789,8 @@ func (coordinator *SlotExecutionCoordinator) applyActivatedPlanGaps(
 				return fmt.Errorf("activated Plan gap redo did not converge: %s", item.Status)
 			}
 			if item.Status != execution.GapGuardApplied && item.Status != execution.GapGuardAlreadyApplied {
-				return fmt.Errorf("activated Plan gap guard did not complete: %s", item.Status)
+				return &GapApplyRefusal{Stage: "activated Plan gap guard did not complete", Status: item.Status,
+					Plan: item.Identity.Plan, StateGeneration: item.Identity.StateGeneration}
 			}
 			return nil
 		}, extensions...)
@@ -838,6 +839,12 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 					actual[index] = item.Identity
 					reason = item.ReasonCode
 					if err = accept(item); err != nil {
+						// The revision this Slot expected is on the mutation,
+						// not on the store's answer, so it is filled in here
+						// rather than in each accept: a refusal that says only
+						// which status happened sends a reader looking for a
+						// second writer with nothing to identify it by.
+						err = withExpectedMarkerRevision(err, chunkItems)
 						break
 					}
 				}
@@ -1409,7 +1416,8 @@ func (coordinator *SlotExecutionCoordinator) applyGap(
 	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, "gap guard",
 		func(item execution.GapGuardApplyItemResult) error {
 			if item.Status != execution.GapGuardApplied && item.Status != execution.GapGuardAlreadyApplied {
-				return fmt.Errorf("gap guard did not complete: %s", item.Status)
+				return &GapApplyRefusal{Stage: "gap guard did not complete", Status: item.Status,
+					Plan: item.Identity.Plan, StateGeneration: item.Identity.StateGeneration}
 			}
 			return nil
 		})

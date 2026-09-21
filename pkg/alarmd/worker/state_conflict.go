@@ -50,8 +50,22 @@ func (err *StateConflictError) Error() string {
 	return text
 }
 
-// StateConflictReason recognizes only the two version refusals. Other state
-// errors retain their existing classification rather than being guessed from text.
+// StateConflictReason names the statuses this build has a word for, from the
+// status value rather than from the error's text.
+//
+// Reading the text is the thing this must never do: an error that merely says
+// "STATE_VERSION_CONFLICT" in a sentence is not a state conflict, and naming it
+// one would let any wrapped message anywhere claim the word. That rule is why
+// the unnamed cases below are unnamed, and it is unchanged.
+//
+// What changed is which statuses have words. The preflight produces two; the
+// apply path reuses this error with a wider set, and RETRYABLE_IO went unnamed
+// only because it was not in the preflight's two - not because a transient
+// write failure is unclassifiable. It has had a word in the vocabulary all
+// along. CAS_CONFLICT is still unnamed: it needs a word of its own and there is
+// no reading yet to say what that word should distinguish, and inventing one
+// here would be guessing at a distinction rather than recording it.
+
 func StateConflictReason(err error) (execution.ReasonCode, bool) {
 	var conflict *StateConflictError
 	if !errors.As(err, &conflict) || conflict == nil {
@@ -62,6 +76,12 @@ func StateConflictReason(err error) (execution.ReasonCode, bool) {
 		return execution.ReasonCode(contract.ReasonStateVersionConflict), true
 	case string(execution.StateStaleVersion):
 		return execution.ReasonCode(contract.ReasonStateStaleVersion), true
+	// The apply path reaches here with statuses the preflight never produces.
+	// RETRYABLE_IO had a name in the vocabulary already and still arrived as
+	// internal_unknown, because nothing mapped it: a transient write failure
+	// and a site that could not classify its own failure were the same word.
+	case string(execution.StateApplyRetryable):
+		return execution.ReasonCode(contract.ReasonStateWriteRetryable), true
 	default:
 		return "", false
 	}
