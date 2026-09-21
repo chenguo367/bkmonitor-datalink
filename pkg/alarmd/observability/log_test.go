@@ -404,3 +404,56 @@ func TestLoggingObserverWritesTheFrozenStateRenewalNumbers(t *testing.T) {
 		}
 	}
 }
+
+// A view_session line carries the stream's own word as its reason_code, so a
+// count by reason reaches it: every discovery miss on a live deployment read
+// reason_not_reported with the one word that said what happened -- NO_LEADER
+// -- two levels down in the facts. An endpoint or a detail in the same slot
+// is not a word and is not promoted; a degraded line with none of the words
+// still says the site did not report one.
+func TestTheViewSessionLineCarriesTheStreamsWordAsItsReasonCode(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		reason string
+		result Result
+		want   string
+	}{
+		{"NO_LEADER", ResultDegraded, "NO_LEADER"},
+		{"DELTA_DIGEST_MISMATCH", ResultDegraded, "DELTA_DIGEST_MISMATCH"},
+		{"NOT_LEADER", ResultDegraded, "NOT_LEADER"},
+		{"10.0.0.1:9000", ResultDegraded, string(ReasonNotReported)},
+		{"10.0.0.1:9000", ResultSuccess, string(ReasonNone)},
+	} {
+		var output bytes.Buffer
+		limiter, err := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 10})
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy, err := NewBoundedLogPolicy(limiter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+			Component: ComponentOwnership, Stage: StageViewSession, Result: test.result,
+			ReasonCode: ViewStreamReasonCode(test.reason),
+			ViewStream: &ViewStreamFacts{Event: "discovery_missed", WorkerID: "w1", Reason: test.reason},
+		})
+		var event map[string]any
+		if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+			t.Fatalf("decode view_session log for %q: %v; log=%s", test.reason, err, output.String())
+		}
+		if event["reason_code"] != test.want {
+			t.Errorf("reason %q result %s: reason_code = %v, want %s (event %v)", test.reason, test.result, event["reason_code"], test.want, event)
+		}
+		facts, _ := event["view_stream"].(map[string]any)
+		if facts == nil || facts["reason"] != test.reason {
+			t.Errorf("reason %q: the facts no longer carry it as given: %v", test.reason, event["view_stream"])
+		}
+	}
+	// Every word in the list is admitted by the normaliser as itself.
+	for _, word := range ViewStreamReasons {
+		if got := NormalizeReason(word, ResultDegraded); got != word {
+			t.Errorf("NormalizeReason(%s) = %s, want the word itself", word, got)
+		}
+	}
+}

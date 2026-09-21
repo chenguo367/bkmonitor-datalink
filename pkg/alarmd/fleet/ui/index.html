@@ -251,7 +251,7 @@ details.group table{margin:6px 0 0 12px}
     <p class="note">
       <b>判定规则</b>：证据不全 → <span class="s b-UNKNOWN">UNKNOWN</span>；
       证据齐全且<b>「没跑成待查」里有归到 alarmd 的</b> → <span class="s b-DEGRADED">DEGRADED</span>；
-      副本级运行状态超出设计界，或<b>策略缓存里有策略却一条都没被接受</b>（SOURCE_BLOCKED：不是没负载，是全被扣在配置获取环节）→ <span class="s b-DEGRADED">DEGRADED</span>；
+      副本级运行状态超出设计界，或<b>策略缓存里有策略却一条都没被接受、且因此没有任何对象在检测</b>（SOURCE_BLOCKED：不是没负载，是全被扣在配置获取环节）→ <span class="s b-DEGRADED">DEGRADED</span>；缓存一条都不能用但对象仍按已生效配置在跑，只在“应有”格说明缓存不能用于更新，不降级；
       证据齐全且一个都没有 → <span class="s b-HEALTHY">HEALTHY</span>。
       <br><b>判定看的不是整栏</b>：「没跑成待查」是待处理清单，里面既有 alarmd 自己的，也有数据源没答、
       策略配置写不了的。只有归到 alarmd 的那部分进判定——整栏进判定的话，别人家的故障面越大 alarmd 看着越差，
@@ -694,6 +694,7 @@ var CHECK = {
   QUERY_REFUSED:         '后端拒绝了 {n} 个对象的查询（{g} 种原因，{b} 个业务）——后端读了查询并回了状态码，是查询构造、策略引用还是后端规则还分不出',
   QUERY_TARGET_MISSING:  '{n} 个对象的查询被后端回"表或字段不存在"（{g} 种回答，{s} 条策略，{b} 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错',
   NO_DATA_PERSISTENT:    '{n} 个对象持续没有数据（{s} 条策略）',
+  EMPTY_EVERY_ROUND:     '{n} 个对象每一轮都查不到数据、从未有过数据（{s} 条策略）：检测在跑，但没有任何东西可判',
   SERIES_CHURNING:       '{n} 个对象的序列活不过检测窗口（{s} 条策略），恢复判不了',
   SERIES_DATA_MISSING:   '{n} 个对象恢复所需的老序列数据不完整（{s} 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出',
   WINDOW_UNDECIDED:      '{n} 个对象的窗口填不满，还分不出是谁的（{g} 种情况，{s} 条策略）',
@@ -784,7 +785,7 @@ function lossWords(key) {
 
 // The replica-level standings, in words. Held to the Go list.
 var DEGRADATION = {
-  SOURCE_BLOCKED: '策略缓存里有策略，但这一轮一条都没接受——整个部署没有在检测任何东西；不是没负载，是全部被扣在配置获取环节',
+  SOURCE_BLOCKED: '策略缓存里有策略，但这一轮一条都没接受，且没有任何对象在检测——整个部署没有在检测任何东西；不是没负载，是全部被扣在配置获取环节',
   ACTIVATION_BEHIND: '控制面变更没有生效：源发布了新内容，激活跟不上去，舰队在执行旧发布',
   CONTROL_SOURCE_STALE: '策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录',
   CONTROL_LEADER_ABSENT: '副本拿不到控制面 leader 租约、也不知道谁持有，超过设计允许的时间——可能没人在刷新',
@@ -803,7 +804,7 @@ var DEGRADATION = {
 // the reader to look for something that does not.
 var EVIDENCE = {
   SOURCE_INCOMPLETE:     '展开按原因看策略样本：SOURCE_IDENTITY_UNAVAILABLE = 文档顶层缺 bk_tenant_id / space_uid；SOURCE_OBJECT_INCOMPLETE = ID 在 strategy_ids 里但 strategy_<id> 不存在；依赖面板"策略缓存"行给缓存 Redis 地址与 last_updated；指标 catalog_withheld_objects{disposition="SOURCE_INCOMPLETE",reason}；日志 source_withheld',
-  CAPABILITY_UNSUPPORTED: '展开按原因看策略样本与要求的值；指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}',
+  CAPABILITY_UNSUPPORTED: '展开按原因看策略样本与要求的值：SNAPSHOT_RETENTION_INSUFFICIENT / COMPLETION_OFFSET_BELOW_RESERVE = 策略要的窗口或完成偏移超出本部署的保留/预留；*_NOT_MIGRATED = 该算法/时间条件/查询字段还没迁到 Go 侧；UNSUPPORTED_TARGET_PLAN = 文档 items[i] 带了 target_plan 字段（field_path 指到它），本构建不解释这个字段，整条策略具名拒绝、不回退旧 target、不保留旧 Plan——写入方上线目标计划之前这格应恒为 0，出现即写入方先于本构建。指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}，reason 原样显示不落 other',
   CONFIG_REJECTED:       '展开按原因看策略样本与字段路径（field_path 是编译器拒绝的那个字段）；指标 catalog_withheld_objects{disposition="CONFIG_REJECTED",reason}',
   CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
   OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡这一轮（计划/发出/暂停）在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_gap、assignment_moves_total{reason=rebalance}、rebalance_paused_total{reason=set_unstable}',
@@ -823,6 +824,7 @@ var EVIDENCE = {
   CONFIG_UNRESOLVED:     '对象行 config_changed 与快照/查询/调度三版本是否变了',
   BACKEND_NOT_ANSWERING: '分组的症状（超时/5xx）；对象行的冷却到期时刻与失败次数；超时的还要看查询预算与后端耗时，这两样不在页面上',
   NO_DATA_PERSISTENT:    '对象行连续空轮数，与"有过数据"（进过索引）',
+  EMPTY_EVERY_ROUND:     '对象行"每轮都空"：连续空轮数、起始时刻、评估周期（interval_seconds）、never_saw_data=true、原因 CAUSE_UNKNOWN（本版不猜）；与 NO_DATA_PERSISTENT 的区别只在"有没有过数据"。JSON：no_data[].kind=EMPTY_EVERY_ROUND、empty_every_round{rounds, since, interval_seconds, never_saw_data, cause}、首屏 empty_every_round_total',
   SERIES_DATA_MISSING:   '对象行窗口计数：老序列缺点的比例；同一行若带超时或保护，缺点可能是 alarmd 没取到而不是数据没到',
   SERIES_CHURNING:       '对象行窗口计数：新序列占比与活不过窗口的轮数',
   PLAN_UNEVALUABLE:      '分组的策略与原因码',
@@ -851,6 +853,7 @@ var NEXT = {
   CONFIG_UNRESOLVED:     '按策略看：config_changed 为真才是最近改过，下一轮按新配置跑；为假的不在这一行',
   BACKEND_NOT_ANSWERING: '先查查询链路：超时看查询预算、网络、后端耗时哪一环超了；5xx 看后端；核实是后端的再交数据侧。alarmd 已降频不再反复查',
   NO_DATA_PERSISTENT:    '交数据侧：按策略看是数据停了还是采集停了',
+  EMPTY_EVERY_ROUND:     '交策略侧，两个候选逐个核：① 数据源本身没有数据（这个查询在源上就查不到东西）；② 数据源上报周期比策略聚合周期长（如 15 s 聚合跑 30 s 上报的源，每个窗口都是空的）→ 对照上报周期与 agg_interval，把聚合周期抬到不小于上报周期。页面读不到 Plan 的聚合窗口和源的分辨率，所以原因只给 CAUSE_UNKNOWN、不替你判',
   SERIES_DATA_MISSING:   '先看同一行有没有超时或保护：有的先按那个查（缺点可能是 alarmd 没取到）；没有的再按策略给数据负责人',
   SERIES_CHURNING:       '交策略侧：序列活不过检测窗口，通常是聚合维度太细',
   PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略',
@@ -883,6 +886,7 @@ var RECOVERY = {
   CONFIG_UNRESOLVED:     '下一轮按新配置完成，对象离开这一行',
   BACKEND_NOT_ANSWERING: '分出是哪一环后转到对应行；应答恢复后冷却到期自动重试成功，对象离开降级池（降级池"出过"数在涨）',
   NO_DATA_PERSISTENT:    '数据恢复后下一轮非空',
+  EMPTY_EVERY_ROUND:     '任一轮查到数据即消失（此后再空就走 NO_DATA_PERSISTENT）；副本重启后重新起算一小时——重启只恢复最后一轮的结论，最后一轮非空才算"有过数据"',
   SERIES_DATA_MISSING:   '分出是没到还是没取到后转到对应行；老序列补上点后窗口填满',
   SERIES_CHURNING:       '序列稳定活过窗口后窗口填满',
   PLAN_UNEVALUABLE:      '策略改定义后下一轮可算',
@@ -2398,7 +2402,7 @@ function renderDeployment(deployment) {
     text('poolFlowHint', flow.join('；'));
     renderCoverage(deployment.coverage);
     renderReplicas(deployment.per_replica);
-    renderSource(deployment.source, deployment.expected);
+    renderSource(deployment.source, deployment.expected, deployment.source_standing);
     renderDependencies(deployment.dependencies || [], deployment.dependencies_replica, deployment.dependencies_replicas);
     text('demotedHint', deployment.demoted_total
       ? '后端持续查不到，已降级不再反复查；不计入部署健康判定'
@@ -2747,17 +2751,27 @@ function share(count, owned) {
 // expected count it decides. An expected of 0 is two different deployments:
 // one with nothing to detect, and one holding everything at the
 // configuration step -- and the number alone is the same in both.
-function renderSource(source, expected) {
+// standing is the server's reading of the source against the run: its two
+// sentences are used as published, so the page and the JSON say one thing.
+// A cache that accepts nothing while objects run on the last accepted
+// configuration is "cannot update", not "not detecting".
+function renderSource(source, expected, standing) {
   if (!source) {
     text('expectedHint', expected === 0 ? '策略缓存的读数没有发布（旧构建，或还没有 leader 跑过一轮），说不出这个 0 是没策略还是全被扣住' : '');
     return;
   }
   var withheld = (source.withheld || []);
-  var parts = ['策略缓存列出 ' + source.listed + ' 条，接受 ' + source.accepted + ' 条'];
+  var parts = [];
+  if (standing && standing.cache) {
+    parts.push('运行状态：' + standing.run);
+    parts.push('配置详情：' + standing.cache);
+  } else {
+    parts.push('策略缓存列出 ' + source.listed + ' 条，接受 ' + source.accepted + ' 条');
+  }
   if (withheld.length) {
     parts.push('扣住 ' + withheld.map(function (g) { return g.count + ' 条 ' + g.disposition + '/' + g.reason; }).join('、'));
   }
-  if (source.listed && !source.accepted) {
+  if (!standing && source.listed && !source.accepted) {
     parts.push('不是没负载，是全部被扣在配置获取环节——看首屏第一行');
   }
   if (source.change_signal_present) {
@@ -2825,6 +2839,14 @@ function renderDependencies(list, replica, replicasWithList) {
     }
     if (dep.last_failure_age_seconds !== undefined && dep.last_failure_age_seconds !== null) {
       seenParts.push('失败 ' + elapsedLabel(dep.last_failure_age_seconds) + '前：' + (dep.last_failure || '（无文本）'));
+    }
+    // A script cache miss is not a failure: the server said it has not got
+    // the script and the client sent it. One after startup is the normal
+    // way a script gets loaded; one long after is a server that lost its
+    // cache, i.e. a restart or a failover this process saw no other sign of.
+    if (dep.script_cache_misses) {
+      seenParts.push('脚本缓存未命中 ' + dep.script_cache_misses + ' 次（最近 '
+        + elapsedLabel(dep.last_script_cache_miss_age_seconds) + '前；不是失败——启动后首次 EVALSHA 的正常装载，若发生在运行很久之后则是 Redis 重启或切主）');
     }
     if (!seenParts.length) {
       seenParts.push(dep.kind === 'redis' && dep.configured ? '本进程还没对它发过命令' : '这一列只对 Redis 连接与告警输出有记录；查询后端的失败在检查项里按对象归因');
@@ -3021,7 +3043,8 @@ var KIND_TEXT = {
   BLOCKED_RUN: '被阻塞',
   OVERDUE_WAKE: '没被调度',
   SKIPPED_SPAN: '留存的漏检记录',
-  NO_DATA: '持续无数据'
+  NO_DATA: '持续无数据',
+  EMPTY_EVERY_ROUND: '每轮都无数据'
 };
 function kindText(kind) { return KIND_TEXT[kind] || kind || '—'; }
 

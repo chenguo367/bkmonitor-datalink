@@ -80,11 +80,21 @@ const (
 	// under it said 待确认 -- one page, two verdicts on the same objects.
 	CheckQueryTargetMissing Check = "QUERY_TARGET_MISSING"
 	CheckNoDataPersistent   Check = "NO_DATA_PERSISTENT"
-	CheckSeriesChurning     Check = "SERIES_CHURNING"
-	CheckSeriesDataMissing  Check = "SERIES_DATA_MISSING"
-	CheckWindowUndecided    Check = "WINDOW_UNDECIDED"
-	CheckPlanUnevaluable    Check = "PLAN_UNEVALUABLE"
-	CheckConfigUnresolved   Check = "CONFIG_UNRESOLVED"
+	// EmptyEveryRound is the strategy's half of no-data: an object this
+	// process has never seen return records and whose every round for an
+	// hour completed empty. Kept apart from NO_DATA_PERSISTENT -- data that
+	// stopped, the data side's -- because the two owners do two different
+	// things: the data side goes to see why the data stopped, the strategy's
+	// owner checks whether there is anything to detect at this period at all.
+	// Five strategies aggregating at fifteen seconds over a source that
+	// reports every thirty were HEALTHY on the page for a day for want of
+	// this line.
+	CheckEmptyEveryRound   Check = "EMPTY_EVERY_ROUND"
+	CheckSeriesChurning    Check = "SERIES_CHURNING"
+	CheckSeriesDataMissing Check = "SERIES_DATA_MISSING"
+	CheckWindowUndecided   Check = "WINDOW_UNDECIDED"
+	CheckPlanUnevaluable   Check = "PLAN_UNEVALUABLE"
+	CheckConfigUnresolved  Check = "CONFIG_UNRESOLVED"
 	// The three source standings: strategies the control leader's round
 	// listed and did not accept, before any of them could be an object. They
 	// fold the source's withheld groups rather than object rows, one line per
@@ -169,6 +179,7 @@ var checkAnswers = map[Check]struct {
 
 	CheckNoDataPersistent: {OwnerData, GroupByStrategy},
 
+	CheckEmptyEveryRound:    {OwnerStrategy, GroupByStrategy},
 	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
 	CheckPlanUnevaluable:    {OwnerStrategy, GroupByStrategy},
 	CheckQueryTargetMissing: {OwnerStrategy, GroupByDetail},
@@ -217,6 +228,7 @@ var checkOrder = []Check{
 	CheckBackendNotAnswering,
 	CheckSeriesDataMissing,
 	CheckNoDataPersistent,
+	CheckEmptyEveryRound,
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,
@@ -393,7 +405,7 @@ func resultOf(anomaly Anomaly) Result {
 	switch {
 	case anomaly.Kind == KindOverdueWake, anomaly.Kind == KindSkippedSpan:
 		return ""
-	case anomaly.Kind == KindNoData:
+	case anomaly.Kind == KindNoData, anomaly.Kind == KindEmptyEveryRound:
 		return ResultNoData
 	case anomaly.Kind == KindNoDataMemoryRefused:
 		// The round completed; what was refused was the memory beside it.

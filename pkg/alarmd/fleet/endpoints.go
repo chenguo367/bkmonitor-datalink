@@ -49,6 +49,17 @@ type Endpoint struct {
 	LastSuccessAgeSeconds *float64 `json:"last_success_age_seconds,omitempty"`
 	LastFailureAgeSeconds *float64 `json:"last_failure_age_seconds,omitempty"`
 	LastFailure           string   `json:"last_failure,omitempty"`
+	// ScriptCacheMisses is how many times the server answered EVALSHA with
+	// NOSCRIPT and the client sent the script body instead, and
+	// LastScriptCacheMissAgeSeconds how long since the last. Not a failure
+	// and not in LastFailure: it is how a script gets loaded after this
+	// process, the server or the sentinel's master changes, and it sat in
+	// the failure column of a live dependency table for as long as nothing
+	// else failed. A miss long after the process started is a server that
+	// lost its cache -- a restart or a failover -- which is worth its own
+	// clock. Absent on a connection that has never seen one.
+	ScriptCacheMisses             int      `json:"script_cache_misses,omitempty"`
+	LastScriptCacheMissAgeSeconds *float64 `json:"last_script_cache_miss_age_seconds,omitempty"`
 	// Ready and Attempts are for a role the replica opens rather than calls:
 	// whether it is open now, and how many attempts it has made, which for
 	// an open one is how many it took. Absent for the roles read through a

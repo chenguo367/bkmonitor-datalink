@@ -767,6 +767,9 @@ type Anomaly struct {
 	// stored shape and the last renewal. Absent until a renewal reached the
 	// store or a read said what it read.
 	NoDataMemoryUpkeep *NoDataMemoryUpkeep `json:"no_data_memory_upkeep,omitempty"`
+	// EmptyEveryRound is on rows of KindEmptyEveryRound: the run of empty
+	// completions, whole, with what the row can say about why.
+	EmptyEveryRound *EmptyEveryRoundFacts `json:"empty_every_round,omitempty"`
 	// ConfigChanged says the object's snapshot, query or schedule revision
 	// differs between its last two completed rounds: the configuration it
 	// runs under actually changed. It is the one fact that tells a
@@ -901,9 +904,12 @@ type Snapshot struct {
 	// GapSkips are the objects that skipped a run of Slots past the replay
 	// window, retained for the same reason.
 	GapSkips map[string]SkippedSpan `json:"gap_skips,omitempty"`
-	// NoData is the objects whose query has returned no records for a run of
-	// rounds after having returned some. In no column -- their rounds complete
-	// -- and listed so the data side's line can name them.
+	// NoData is the objects whose query is returning no records, in two kinds
+	// the rows carry: KindNoData, records returned once and none for a run
+	// of rounds since, and KindEmptyEveryRound, never any in this process and
+	// none for an hour. In no column -- their rounds complete -- and listed
+	// so the data side's line can name the first and the strategy's line the
+	// second.
 	NoData []Anomaly `json:"no_data,omitempty"`
 	// NoDataMemory is the objects one of whose Plans the store refused an
 	// absence memory for. In no column -- the rounds complete -- and listed
@@ -1586,6 +1592,11 @@ type View struct {
 	PrunedSkips map[string]PrunedSkip  `json:"pruned_skips,omitempty"`
 	GapSkips    map[string]SkippedSpan `json:"gap_skips,omitempty"`
 	NoData      []Anomaly              `json:"no_data,omitempty"`
+	// EmptyEveryRoundTotal is how many distinct objects in NoData are of
+	// KindEmptyEveryRound: the first screen's one number for the strategies
+	// whose every round is empty. Counted here rather than left to the page,
+	// so the number beside the line and the rows under it cannot disagree.
+	EmptyEveryRoundTotal int `json:"empty_every_round_total"`
 	// NoDataMemory is the objects whose absence memory the store refuses,
 	// from every counted replica. In no column and in no total, like NoData.
 	NoDataMemory []Anomaly `json:"no_data_memory,omitempty"`
@@ -1689,6 +1700,9 @@ type View struct {
 	// replica that stopped being the leader keeps its last round.
 	Source        *SourceFacts `json:"source,omitempty"`
 	SourceReplica string       `json:"source_replica,omitempty"`
+	// SourceStanding is Source read against what the deployment executes,
+	// with the two sentences for the first screen. Nil without a round.
+	SourceStanding *SourceStanding `json:"source_standing,omitempty"`
 	// Dependencies is what one counted replica resolved its external systems
 	// to, and DependenciesReplica which one: the newest snapshot's. Every
 	// replica renders the same coordinates; what differs is what each has
@@ -2075,10 +2089,17 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	Attribute(view.ByDesign, now)
 	Attribute(view.NoData, now)
 	Attribute(view.NoDataMemory, now)
+	view.EmptyEveryRoundTotal = countEmptyEveryRound(view.NoData)
 	// Decided on the newest source round rather than inside the replica loop:
 	// a source is one thing, and after a leader change two replicas carry a
-	// round each, of which only the newest says what the source is now.
-	if view.Source.Blocked() {
+	// round each, of which only the newest says what the source is now. And
+	// decided against what the deployment executes: a source accepting
+	// nothing degrades the verdict only when nothing runs because of it. A
+	// deployment running its last accepted configuration is detecting; what
+	// it has is a cache that cannot update the run, which the standing says
+	// and the badge does not.
+	view.SourceStanding = sourceStandingOf(view.Source, executingObjects(&view))
+	if view.SourceStanding != nil && view.SourceStanding.Kind == SourceBlocked {
 		view.Degradations = append(view.Degradations, Degradation{Kind: DegradationSourceBlocked,
 			Replica: view.SourceReplica, Stage: "catalog", Text: sourceBlockedText(view.Source)})
 	}
@@ -2086,6 +2107,19 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	sortBuildGroups(view.Builds)
 	sortOutputProtocolGroups(view.OutputProtocols)
 	return view
+}
+
+// executingObjects is how many objects the deployment runs, for the source
+// standing: the catalogue's count when it is known, or what the replicas
+// own, whichever is more -- an object owned but not in the catalogue is
+// still being run, and one in the catalogue nobody owns yet is still going
+// to be.
+func executingObjects(view *View) int {
+	executing := view.Covered
+	if view.Expected != nil && *view.Expected > executing {
+		executing = *view.Expected
+	}
+	return executing
 }
 
 // sourceBlockedText is the one sentence a blocked source's degradation

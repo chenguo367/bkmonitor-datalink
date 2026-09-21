@@ -113,6 +113,14 @@ func (tracker *Tracker) Restore(queryGroup string, restored RestoredState, at ti
 	}
 	state.determined = true
 	state.lastCompleted = restored.LastCompletion
+	// A committed round that completed with records is records seen, as far
+	// as this process can vouch for anything it did not watch: it is what
+	// keeps a sparse source from being listed as never having spoken an hour
+	// after every release. A committed empty round says nothing either way
+	// about the rounds before it, and leaves "seen" unset.
+	if round := restored.LastRound; round != nil && round.Kind == "FULL_COMPLETED" {
+		state.sawData = true
+	}
 	if round := restored.LastRound; round != nil && healthyCompletion(restored.LastCompletion) && !round.CompletedAt.IsZero() {
 		// The commit recorded a healthy round: that is a success this process
 		// can vouch for when the object fails later, even though it did not

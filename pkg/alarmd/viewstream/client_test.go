@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/test/bufconn"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
 )
@@ -716,5 +717,31 @@ func TestTheReconnectWaitIsJitteredUnderAnExponentialCeiling(t *testing.T) {
 	}
 	if wait := viewstream.BackoffsForTest(client, 0, 1)[0]; wait != 0 {
 		t.Fatalf("attempt 0 waited %s, want none", wait)
+	}
+}
+
+// The stream's reason words are the vocabulary's: every constant the client
+// and the server put in a line's reason is admitted as itself, and the lines
+// carry it as reason_code. The vocabulary cannot import this package, so this
+// is where the two lists are held together.
+func TestEveryStreamReasonWordIsInTheVocabularyAndOnTheLine(t *testing.T) {
+	for _, word := range []string{
+		"NO_LEADER", "DISCOVERY_FAILED", "STREAM_CLOSED", "RECV_FAILED", viewstream.DisconnectLeaderSilent,
+		viewstream.FailureDeltaBaseMismatch, viewstream.FailureDeltaDigest, viewstream.FailureSnapshotInvalid,
+		viewstream.FailureSnapshotIncomplete, viewstream.FailureWrongWorker,
+		viewstream.RefusalNotLeader, viewstream.RefusalUnknownWorker, viewstream.RefusalBadToken, viewstream.RefusalProtocolVersion,
+		viewstream.RefusalRegistryUnavailable, viewstream.RefusalHelloExpected, viewstream.RefusalReplaced, viewstream.RefusalIdle, viewstream.RefusalShutdown,
+	} {
+		if observability.ViewStreamReasonCode(word) != observability.ReasonCode(word) {
+			t.Errorf("%s is a stream reason the vocabulary does not admit: the line would say reason_not_reported", word)
+		}
+	}
+	// And a discovery miss reaches the observer with the word as its code.
+	discovery := &scriptedDiscovery{}
+	observer := &sessionObserver{}
+	startClient(t, discovery, nil, &bufconnDialer{}, observer)
+	eventually(t, "a discovery miss is observed", func() bool { return observer.codes("discovery_missed")["NO_LEADER"] >= 1 })
+	if codes := observer.codes("discovery_missed"); codes[string(observability.ReasonNotReported)] > 0 || codes[""] > 0 {
+		t.Errorf("discovery misses observed without the word as reason_code: %v", codes)
 	}
 }
