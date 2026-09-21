@@ -109,13 +109,19 @@ type CatalogComposition struct {
 	// the shape where the page says forty and the log names thirty-nine and
 	// nothing is wrong with either.
 	WithheldObjects []ObjectDisposition
-	// AcceptedStrategies names every strategy the round accepted, once each,
-	// sorted. It is the other half of WithheldObjects: a reader that keeps
-	// the strategies the source dropped needs the round's accepted set to
-	// tell "back in the list" from "gone for good" -- a strategy the grace
+	// ListedStrategies names every strategy the source listed this round,
+	// once each, sorted: every disposition but the two that mean the source
+	// no longer lists the strategy (PENDING_REMOVAL, REMOVED). A reader that
+	// keeps the strategies the source dropped needs the round's listed set
+	// to tell "back in the list" from "gone for good" -- a strategy the grace
 	// cycle removed has no disposition at all the round after, and its
 	// absence from the withheld records reads the same as its return.
-	AcceptedStrategies []string
+	// Listed rather than accepted, because a strategy that is back but
+	// compiles no Plan this round (STALE_CONFIG running its last good one,
+	// CONFIG_REJECTED, a compatibility word) is back in the list all the
+	// same, and a disposition added later lands on this side by default --
+	// the side that clears an absence, not the side that invents one.
+	ListedStrategies []string
 	// NoDataPlans counts the Plans that detect no-data, by where their expected
 	// set comes from. Only accepted Plans are in it - a Plan that was withheld
 	// is in Withheld under the reason that withheld it.
@@ -298,8 +304,10 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 			kind = DispositionOther
 		}
 		composition.Objects[kind]++
+		if kind != DispositionPendingRemoval && kind != DispositionRemoved && disposition.SourceID != "" {
+			composition.ListedStrategies = append(composition.ListedStrategies, disposition.SourceID)
+		}
 		if kind == DispositionAccepted {
-			composition.AcceptedStrategies = append(composition.AcceptedStrategies, disposition.SourceID)
 			continue
 		}
 		composition.Withheld[WithheldKey{Disposition: kind, Reason: disposition.Reason}]++
@@ -310,10 +318,10 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		withheld.Disposition = kind
 		composition.WithheldObjects = append(composition.WithheldObjects, withheld)
 	}
-	// Once each: a strategy is accepted at the strategy scope and again for
-	// each of its Plans.
-	sort.Strings(composition.AcceptedStrategies)
-	composition.AcceptedStrategies = slices.Compact(composition.AcceptedStrategies)
+	// Once each: a strategy has a disposition at the strategy scope and one
+	// for each of its Plans or levels.
+	sort.Strings(composition.ListedStrategies)
+	composition.ListedStrategies = slices.Compact(composition.ListedStrategies)
 	return composition
 }
 

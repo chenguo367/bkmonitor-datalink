@@ -263,10 +263,10 @@ func sourceFactsOf(result phaseTwoControlRefreshResult, at time.Time) *fleet.Sou
 }
 
 // sourceSetRoundOf is the composition's word on the active set for the
-// ledger: the strategies accepted, and the ones the grace cycle holds or
-// has removed, by their dispositions.
+// ledger: the strategies the source listed, and the ones the grace cycle
+// holds or has removed, by their dispositions.
 func sourceSetRoundOf(composition *controlplane.CatalogComposition, at time.Time) fleet.SourceSetRound {
-	round := fleet.SourceSetRound{At: at, Accepted: composition.AcceptedStrategies}
+	round := fleet.SourceSetRound{At: at, Listed: composition.ListedStrategies}
 	for _, object := range composition.WithheldObjects {
 		switch object.Disposition {
 		case controlplane.DispositionPendingRemoval:

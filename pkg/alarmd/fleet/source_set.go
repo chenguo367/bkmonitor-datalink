@@ -45,10 +45,12 @@ type SourceSetLedger struct {
 }
 
 // SourceSetRound is one round's word on the set, as the composition has it:
-// the strategies accepted, the ones under grace, and the ones removed.
+// the strategies the source listed -- whatever became of them this round,
+// accepted or refused, a strategy in the list is in the list -- the ones
+// under grace, and the ones removed.
 type SourceSetRound struct {
 	At             time.Time
-	Accepted       []string
+	Listed         []string
 	PendingRemoval []string
 	Removed        []string
 }
@@ -123,9 +125,13 @@ func (ledger *SourceSetLedger) hour(at time.Time) *SourceSetHour {
 }
 
 // NoteRound folds one round in. A strategy under grace or removed that the
-// ledger did not know goes absent at this round; one the round accepted that
-// the ledger knew as absent is a reactivation; one absent longer than the
-// return window is forgotten, as a strategy that was deleted.
+// ledger did not know goes absent at this round; one the source listed again
+// that the ledger knew as absent is a reactivation, whether or not it
+// compiled a Plan this round -- a strategy back in the list under
+// STALE_CONFIG is back, and counting it as still absent put a running
+// strategy on the first screen as one waiting to be removed; one absent
+// longer than the return window is forgotten, as a strategy that was
+// deleted.
 func (ledger *SourceSetLedger) NoteRound(round SourceSetRound) {
 	if ledger == nil || round.At.IsZero() {
 		return
@@ -149,7 +155,7 @@ func (ledger *SourceSetLedger) NoteRound(round SourceSetRound) {
 		}
 	}
 	returned := []string{}
-	for _, strategyID := range round.Accepted {
+	for _, strategyID := range round.Listed {
 		since, known := ledger.absent[strategyID]
 		if !known {
 			continue

@@ -37,10 +37,10 @@ func TestTheSourceSetAccountTellsAFlapFromARemoval(t *testing.T) {
 	gone := []string{"deleted-1"}
 	all := append(append([]string{}, stayed...), flapping...)
 	// 18:59: everything listed.
-	ledger.NoteRound(SourceSetRound{At: start, Accepted: append(append([]string{}, all...), gone...)})
+	ledger.NoteRound(SourceSetRound{At: start, Listed: append(append([]string{}, all...), gone...)})
 	// 19:01: the list lost 22 and the deleted one; grace.
 	at := start.Add(2 * time.Minute)
-	ledger.NoteRound(SourceSetRound{At: at, Accepted: stayed, PendingRemoval: append(append([]string{}, flapping...), gone...)})
+	ledger.NoteRound(SourceSetRound{At: at, Listed: stayed, PendingRemoval: append(append([]string{}, flapping...), gone...)})
 	facts := ledger.Facts(at)
 	if facts.PendingRemoval != 23 || facts.Removed != 0 || len(facts.PendingRemovalSamples) != SourceSetSampleLimit ||
 		!facts.PendingRemovalSamples[0].AbsentSince.Equal(at) {
@@ -51,21 +51,21 @@ func TestTheSourceSetAccountTellsAFlapFromARemoval(t *testing.T) {
 	// the first round, and nothing is dropped twice.
 	firstAbsent := at
 	at = start.Add(3 * time.Minute)
-	ledger.NoteRound(SourceSetRound{At: at, Accepted: stayed, PendingRemoval: append(append([]string{}, flapping...), gone...)})
+	ledger.NoteRound(SourceSetRound{At: at, Listed: stayed, PendingRemoval: append(append([]string{}, flapping...), gone...)})
 	facts = ledger.Facts(at)
 	if facts.PendingRemoval != 23 || !facts.PendingRemovalSamples[0].AbsentSince.Equal(firstAbsent) || facts.Hours[0].Dropped != 23 {
 		t.Fatalf("a second round under grace moved absent_since or dropped again: %+v / %+v", facts.PendingRemovalSamples[0], facts.Hours[0])
 	}
 	// 19:03: still absent, and the grace is over for them.
 	at = start.Add(4 * time.Minute)
-	ledger.NoteRound(SourceSetRound{At: at, Accepted: stayed, Removed: append(append([]string{}, flapping...), gone...)})
+	ledger.NoteRound(SourceSetRound{At: at, Listed: stayed, Removed: append(append([]string{}, flapping...), gone...)})
 	facts = ledger.Facts(at)
 	if facts.PendingRemoval != 0 || facts.Removed != 23 {
 		t.Fatalf("removed: %+v", facts)
 	}
 	// 19:07:45: the 22 are listed again; the deleted one is not.
 	at = start.Add(8*time.Minute + 45*time.Second)
-	ledger.NoteRound(SourceSetRound{At: at, Accepted: all})
+	ledger.NoteRound(SourceSetRound{At: at, Listed: all})
 	facts = ledger.Facts(at)
 	if facts.PendingRemoval != 0 || facts.Removed != 1 || facts.ReactivatedThisHour != 22 {
 		t.Fatalf("after the return: %+v", facts)
@@ -82,9 +82,9 @@ func TestTheSourceSetAccountTellsAFlapFromARemoval(t *testing.T) {
 	// deleted strategy, absent past the return window, is forgotten rather
 	// than reported as removed forever.
 	at = start.Add(time.Hour + 2*time.Minute)
-	ledger.NoteRound(SourceSetRound{At: at, Accepted: stayed, PendingRemoval: flapping})
+	ledger.NoteRound(SourceSetRound{At: at, Listed: stayed, PendingRemoval: flapping})
 	at = start.Add(time.Hour + 8*time.Minute)
-	ledger.NoteRound(SourceSetRound{At: at, Accepted: all})
+	ledger.NoteRound(SourceSetRound{At: at, Listed: all})
 	facts = ledger.Facts(at)
 	if len(facts.Hours) != 2 || facts.Hours[0].Hour.Hour() != 20 || facts.Hours[0].Reactivated != 22 || facts.Hours[1].Hour.Hour() != 19 {
 		t.Fatalf("two hours, newest first: %+v", facts.Hours)
@@ -93,12 +93,12 @@ func TestTheSourceSetAccountTellsAFlapFromARemoval(t *testing.T) {
 		t.Fatalf("the deleted strategy is still within the return window: %+v", facts)
 	}
 	at = start.Add(7 * time.Hour)
-	ledger.NoteRound(SourceSetRound{At: at, Accepted: all})
+	ledger.NoteRound(SourceSetRound{At: at, Listed: all})
 	if facts = ledger.Facts(at); facts.Removed != 0 || facts.PendingRemoval != 0 {
 		t.Fatalf("past the return window the deleted strategy is forgotten: %+v", facts)
 	}
 	// Coming back after the window is not a flap.
-	ledger.NoteRound(SourceSetRound{At: at.Add(time.Minute), Accepted: append(append([]string{}, all...), gone...)})
+	ledger.NoteRound(SourceSetRound{At: at.Add(time.Minute), Listed: append(append([]string{}, all...), gone...)})
 	if facts = ledger.Facts(at.Add(time.Minute)); facts.ReactivatedThisHour != 0 {
 		t.Fatalf("a return after the window counted as a reactivation: %+v", facts)
 	}
@@ -150,5 +150,38 @@ func TestTheSourceSetLineFoldsByTheHourTheStrategiesCameBack(t *testing.T) {
 		if candidate.Code == CheckSourceSetFlapping {
 			t.Fatalf("an account with no returns made a line: %+v", candidate)
 		}
+	}
+}
+
+// A strategy back in the list is back whether or not it compiled a Plan this
+// round: one that returns under STALE_CONFIG is a reactivation and leaves
+// the pending count, where reading only the accepted set kept it there as a
+// running strategy "waiting to be removed" for six hours. And a strategy the
+// source really dropped -- graced, removed, never listed again -- stays
+// removed and is never read as back.
+func TestAStrategyBackInTheListIsBackWhateverBecameOfItThisRound(t *testing.T) {
+	start := time.Date(2026, 9, 22, 10, 0, 0, 0, time.UTC)
+	ledger := NewSourceSetLedger(func() time.Time { return start })
+	// Round 1: two strategies dropped.
+	ledger.NoteRound(SourceSetRound{At: start, Listed: []string{"keep"}, PendingRemoval: []string{"stale-back", "gone"}})
+	// Round 2, six minutes later: stale-back is listed again but compiles
+	// no Plan (its round-level word would be STALE_CONFIG); gone is still
+	// absent and past the grace.
+	at := start.Add(6 * time.Minute)
+	ledger.NoteRound(SourceSetRound{At: at, Listed: []string{"keep", "stale-back"}, Removed: []string{"gone"}})
+	facts := ledger.Facts(at)
+	if facts.PendingRemoval != 0 || facts.Removed != 1 || facts.ReactivatedThisHour != 1 {
+		t.Fatalf("after the return under stale config: %+v, want nothing pending, one removed, one reactivated", facts)
+	}
+	for _, sample := range facts.PendingRemovalSamples {
+		if sample.StrategyID == "stale-back" {
+			t.Fatalf("a strategy back in the list is still named as waiting to be removed: %+v", sample)
+		}
+	}
+	// Rounds later, gone is still not listed: removed, not back.
+	at = start.Add(30 * time.Minute)
+	ledger.NoteRound(SourceSetRound{At: at, Listed: []string{"keep", "stale-back"}})
+	if facts = ledger.Facts(at); facts.Removed != 1 || facts.Hours[0].Reactivated != 1 {
+		t.Fatalf("a strategy never listed again was read as back, or the one return was lost: %+v", facts)
 	}
 }
