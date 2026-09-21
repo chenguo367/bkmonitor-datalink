@@ -778,7 +778,13 @@ type HistoryCoverage struct {
 //
 // Beside either reading: an anomaly still fires on a short window -- the
 // trigger decides ABNORMAL before it reads completeness -- and only the
-// recovery waits for the window to fill.
+// recovery waits for the window to fill. What that costs depends on the
+// Plans' wire format, which the row carries beside this: the
+// Python-compatible exit publishes anomaly points and nothing else, so on
+// such a Plan alarmd's recovery never leaves and the consumer decides
+// recovery from the absence of anomalies -- a short window changes nothing
+// downstream. Only a standard raw event Plan waits. The page words the cost
+// per row from WireFormats; this struct states the mechanism.
 type WindowFill struct {
 	// Holes is required − valid on the worst window; Required the window's
 	// length in positions; PeriodSeconds the object's evaluation period, so
