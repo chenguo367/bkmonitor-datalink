@@ -480,12 +480,15 @@ func mergeProvisional(target *execution.EvaluationResult, next execution.Evaluat
 	if err := checkEffectCounts(effectCounts{previous.states + delta.states, previous.events + delta.events, previous.gaps + delta.gaps}, budget); err != nil {
 		return err
 	}
-	appendProvisional(target, next)
-	return nil
+	return appendProvisional(target, next)
 }
 
 // appendProvisional is called only after contract and capacity checks succeed.
-func appendProvisional(target *execution.EvaluationResult, next execution.EvaluationResult) {
+//
+// It can still refuse, for the one thing those checks cannot see: they run on
+// each batch's own result, and two batches disagreeing about a Plan's gap
+// marker is a shape no single batch has.
+func appendProvisional(target *execution.EvaluationResult, next execution.EvaluationResult) error {
 	if target.Contract == (execution.FrozenExecutionContractRef{}) {
 		target.Contract, target.Result, target.ReasonCode = next.Contract, next.Result, next.ReasonCode
 	} else if resultRank(next.Result) > resultRank(target.Result) {
@@ -514,9 +517,11 @@ func appendProvisional(target *execution.EvaluationResult, next execution.Evalua
 		// the whole Slot's, and reporting only the final series would make a
 		// query group of five hundred series look like a query group of one.
 		plan.HistoryCoverage.Merge(nextPlan.HistoryCoverage)
-		plan.GuardBeforeEvents = appendUniqueGapMutations(plan.GuardBeforeEvents, nextPlan.GuardBeforeEvents)
-		plan.GuardAfterState = appendUniqueGapMutations(plan.GuardAfterState, nextPlan.GuardAfterState)
+		if err := mergeGapGuardStatements(plan, nextPlan); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 type provisionalBudgetExceededError struct {

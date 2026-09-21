@@ -107,9 +107,13 @@ func (stream *streamedExecution) mergeProvisional(ctx context.Context, next exec
 		}
 		return err
 	}
-	// The contract check and shared reservation make this append infallible.
+	// The contract check and shared reservation cover everything this append
+	// can refuse except one: two batches disagreeing about a Plan's gap
+	// marker, which is a shape neither batch's own result contains.
 	// Loaded Gap facts remain independently accounted in stream.gapFacts.
-	appendProvisional(&stream.evaluated, next)
+	if err := appendProvisional(&stream.evaluated, next); err != nil {
+		return err
+	}
 	stream.effects.states += delta.states
 	stream.effects.events += delta.events
 	stream.effects.gaps += delta.gaps

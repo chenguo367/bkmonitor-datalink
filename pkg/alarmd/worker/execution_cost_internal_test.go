@@ -42,7 +42,18 @@ func TestIncrementalEffectsKeepLoadedFactsAndRejectedMergeSeparate(t *testing.T)
 	}
 }
 
-func TestIncrementalEffectsPreserveGapIdentityAndDigest(t *testing.T) {
+// Repeating a Plan's gap statement across batches leaves one statement, and
+// the running effect count follows it.
+//
+// This used to assert the opposite half: statements differing by digest or by
+// state generation each survived, three of them here. That was the dedup this
+// merge replaces - three statements for one marker is the shape the result
+// contract forbids Slot-wide, so keeping them was keeping the defect and
+// counting it accurately. What has to survive is the counting property: the
+// incremental count and a count of the merged result must not diverge,
+// whatever the merge decides, because the reservation released at the end is
+// the incremental one.
+func TestIncrementalEffectsFollowTheMergedGapStatement(t *testing.T) {
 	co := &SlotExecutionCoordinator{budget: sideEffectTestBudget("state")}
 	stream := &streamedExecution{coordinator: co}
 	defer stream.releaseProvisional()
@@ -51,18 +62,16 @@ func TestIncrementalEffectsPreserveGapIdentityAndDigest(t *testing.T) {
 	if err := stream.mergeProvisional(context.Background(), first, 0); err != nil {
 		t.Fatal(err)
 	}
-	next := sideEffectTestResult("gap", "qg")
 	one := first.Plans[0].GuardBeforeEvents[0]
-	two := one
-	two.MutationDigest = "two"
-	other := one
-	other.Identity.StateGeneration = "another"
-	next.Plans[0].GuardBeforeEvents = []execution.PlanGapMutation{one, one, two, two, other}
+	next := sideEffectTestResult("gap", "qg")
+	next.Plans[0].GuardBeforeEvents = []execution.PlanGapMutation{one, one}
 	if err := stream.mergeProvisional(context.Background(), next, 0); err != nil {
 		t.Fatal(err)
 	}
-	if stream.effects.gaps != 3 || !reflect.DeepEqual(stream.evaluated.Plans[0].GuardBeforeEvents, []execution.PlanGapMutation{one, two, other}) {
-		t.Fatal("identity/digest dedup changed")
+	if stream.effects.gaps != 1 ||
+		!reflect.DeepEqual(stream.evaluated.Plans[0].GuardBeforeEvents, []execution.PlanGapMutation{one}) {
+		t.Fatalf("Slot carries %+v after three statements of one marker, want the one they agree on",
+			stream.evaluated.Plans[0].GuardBeforeEvents)
 	}
 	if stream.effects != countEffects(stream.evaluated) {
 		t.Fatal("increment diverged")
