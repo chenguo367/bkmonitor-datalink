@@ -171,12 +171,28 @@ func (stream *streamedExecution) noDataCompletedSeries(
 	if err != nil {
 		return completedSeries{}, fmt.Errorf("alarmd worker: derive no-data series identity: %w", err)
 	}
+	// The record id comes from the same derivation a real record's does, for
+	// the same reason the identity digest above does.
+	//
+	// Every record that reaches the platform through the reader carries
+	// DeriveRecordIDV2(dimension identity digest, source time), and the reader
+	// refuses one that does not. A synthetic record is built here rather than
+	// read, so nothing was enforcing it, and this one used to carry the
+	// dimension digest itself - a value that is the same for every source time
+	// of the series. That makes the invariant "within one state key the record
+	// id is a function of the source time" false for exactly these series, and
+	// anything that derives an id rather than storing it would refuse every
+	// no-data write.
+	recordID, err := contract.DeriveRecordIDV2(digest, synthetic.SourceTime)
+	if err != nil {
+		return completedSeries{}, fmt.Errorf("alarmd worker: derive no-data record id: %w", err)
+	}
 	level := view.CompiledPlan.Levels()[0]
 	consumer := execution.ConsumerRef{
 		Plan: view.Identity, LevelID: level.Definition().LevelID, HasLevel: true,
 	}
 	record := contract.CanonicalRecordV2{
-		RecordID:          digest,
+		RecordID:          recordID,
 		SourceTime:        synthetic.SourceTime,
 		BusinessID:        view.Identity.BusinessID,
 		DimensionIdentity: contract.DimensionIdentityV2{Fields: identityFields, Digest: digest},
