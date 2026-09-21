@@ -48,6 +48,12 @@ type ViewStreamFacts struct {
 	// Lagging is every Worker that has not installed the current version,
 	// sorted by Worker; Connected false is a Worker with no stream open.
 	Lagging []ViewStreamLagging `json:"lagging"`
+	// NotSwitched lists the Workers that installed the current version but
+	// do not yet execute every one of its Query Groups from it, each with
+	// the count it does (decision-016 batch 4). Empty is every installed
+	// Worker switched; in the shadow step it is every installed Worker. The
+	// batch 4a drill reads this going empty after a rollout and a cutover.
+	NotSwitched []ViewStreamLagging `json:"not_switched"`
 	// Objects is what the Workers that installed the current version said
 	// about their objects, the Leader's account of it: how many probed and
 	// reported, how many could not, the missing objects summed over those
@@ -88,6 +94,10 @@ type ViewStreamLagging struct {
 	Incarnation string `json:"incarnation,omitempty"`
 	Failure     string `json:"failure,omitempty"`
 	Connected   bool   `json:"connected"`
+	// SwitchedQueryGroups is the Worker's latest count of Query Groups it
+	// executes from the view; meaningful on NotSwitched, where it is how far
+	// short of switched the Worker is.
+	SwitchedQueryGroups int `json:"switched_query_groups,omitempty"`
 }
 
 // ViewStreamObjects is the installed Workers' word on their objects. Probed

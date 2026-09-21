@@ -46,6 +46,11 @@ func viewStreamFacts(stats viewstream.Stats, at time.Time) *fleet.ViewStreamFact
 		facts.Lagging = append(facts.Lagging, fleet.ViewStreamLagging{WorkerID: lagging.WorkerID, Incarnation: lagging.Incarnation,
 			Failure: lagging.Failure, Connected: lagging.Connected})
 	}
+	facts.NotSwitched = make([]fleet.ViewStreamLagging, 0, len(stats.NotSwitched))
+	for _, receiver := range stats.NotSwitched {
+		facts.NotSwitched = append(facts.NotSwitched, fleet.ViewStreamLagging{WorkerID: receiver.WorkerID, Incarnation: receiver.Incarnation,
+			Connected: receiver.Connected, SwitchedQueryGroups: receiver.SwitchedQueryGroups})
+	}
 	// The installed Workers' word on their objects, names included; the
 	// list is empty rather than null when every one of them probed.
 	facts.Objects = fleet.ViewStreamObjects{Probed: stats.Objects.Probed, Unprobed: stats.Objects.Unprobed, Missing: stats.Objects.Missing,
