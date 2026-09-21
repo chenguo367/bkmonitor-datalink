@@ -32,6 +32,10 @@ func TestEachGapApplySiteReportsItsOwnName(t *testing.T) {
 		// events; the ordinary Slot writes none, so a case built on it would
 		// pass with the applies never reached.
 		{stage: "gap_before", want: worker.GapSiteBeforeEvents, degraded: true},
+		// The ordinary Slot writes its gap after the state, and only that
+		// case reaches the second call: without it, the second site could be
+		// handed the first site's name and every case above would stay green.
+		{stage: "gap_after", want: worker.GapSiteAfterState, degraded: false},
 	} {
 		t.Run(testCase.stage, func(t *testing.T) {
 			fixture := newFixture(t, true, "")
