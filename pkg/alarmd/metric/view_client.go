@@ -30,7 +30,8 @@ type ViewClientCounts struct {
 	SnapshotsRequested uint64
 	Refusals           map[string]uint64
 	Connections        uint64
-	DiscoveryMisses    uint64
+	// DiscoveryMisses is by reason: viewClientDiscoveryMisses.
+	DiscoveryMisses map[string]uint64
 }
 
 // viewClientInstallFailures and viewClientRefusals are the closed label
@@ -40,6 +41,10 @@ var (
 	viewClientInstallKinds    = []string{"snapshot", "delta", "empty_delta"}
 	viewClientInstallFailures = []string{"DELTA_BASE_MISMATCH", "DELTA_DIGEST_MISMATCH", "SNAPSHOT_INVALID", "SNAPSHOT_INCOMPLETE", "VIEW_FOR_ANOTHER_WORKER"}
 	viewClientRefusals        = []string{"NOT_LEADER", "UNKNOWN_WORKER", "BAD_TOKEN", "PROTOCOL_VERSION", "REGISTRY_UNAVAILABLE", "HELLO_EXPECTED", "REPLACED_BY_NEW_STREAM", "IDLE", "SHUTDOWN"}
+	// viewClientDiscoveryMisses tells "no control leader lease" from "the
+	// Leader's registration advertises no endpoint": #216 counted the second
+	// as the first on every Worker while the Leader published.
+	viewClientDiscoveryMisses = []string{"NO_LEADER", "LEADER_UNREGISTERED", "LEADER_NO_ENDPOINT", "DISCOVERY_FAILED"}
 )
 
 type viewClientCollector struct {
@@ -91,8 +96,10 @@ func newViewClientCollector() *viewClientCollector {
 			"Streams this Worker opened and had admitted. Rising without the Leader changing is a stream that keeps "+
 				"dropping; the view_session log line says with what reason.", nil, nil),
 		discoveryMisses: prometheus.NewDesc(name("view_discovery_miss_total"),
-			"Attempts that found no Leader to connect to: no control leader lease, a Leader whose registration "+
-				"advertises no endpoint (a binary from before the stream), or a registry that could not be read.", nil, nil),
+			"Attempts that found no Leader to connect to, by reason: NO_LEADER is no control leader lease; "+
+				"LEADER_UNREGISTERED a lease naming a Worker with no live registration; LEADER_NO_ENDPOINT a Leader "+
+				"whose registration advertises no endpoint (it could not work out its own address, or predates the "+
+				"stream); DISCOVERY_FAILED a registry that could not be read.", []string{"reason"}, nil),
 	}
 }
 
@@ -133,7 +140,7 @@ func (c *viewClientCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.objectsMissing, prometheus.GaugeValue, objectsMissing)
 	ch <- prometheus.MustNewConstMetric(c.snapshots, prometheus.CounterValue, float64(counts.SnapshotsRequested))
 	ch <- prometheus.MustNewConstMetric(c.connections, prometheus.CounterValue, float64(counts.Connections))
-	ch <- prometheus.MustNewConstMetric(c.discoveryMisses, prometheus.CounterValue, float64(counts.DiscoveryMisses))
+	emitClosed(ch, c.discoveryMisses, viewClientDiscoveryMisses, counts.DiscoveryMisses)
 	emitClosed(ch, c.installs, viewClientInstallKinds, counts.Installs)
 	emitClosed(ch, c.installFailures, viewClientInstallFailures, counts.InstallFailures)
 	emitClosed(ch, c.refusals, viewClientRefusals, counts.Refusals)
