@@ -294,6 +294,10 @@ type productionSourceReconciler interface {
 		controlplane.StrategySource,
 		controlplane.PrimaryQueryCompiler,
 	) (controlplane.SourceRefreshResult, error)
+	// StepDown forgets the catalog memory a Leader answers strategy
+	// lookups from. Called on every follower tick, so a process that lost
+	// the lease stops answering from its old term.
+	StepDown()
 }
 
 type productionInitialScheduleActivator interface {
@@ -439,6 +443,9 @@ func (runtime *productionPhaseTwoControl) LoadActive(
 	if runtime == nil {
 		return phaseTwoControlRefreshResult{}, errors.New("phase-two production Control is not initialized")
 	}
+	// This tick runs as a follower: whatever this process published in an
+	// earlier term is not its to answer from any more.
+	runtime.dependencies.Reconciler.StepDown()
 	state, err := runtime.dependencies.Repository.LoadActivation(ctx)
 	if err != nil {
 		reason := "read_failed"

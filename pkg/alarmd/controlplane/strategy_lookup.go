@@ -24,9 +24,10 @@ import (
 // them side by side.
 //
 // Answered from the Leader's memory of its last publication: no Redis read,
-// no background work. A process that has published nothing - a follower, or
-// a Leader before its first round - answers Available false, and the caller
-// asks the Leader instead.
+// no background work. A process that holds no publication of its own - a
+// follower, a Leader before its first completed round, or a former Leader
+// after it stepped down - answers Available false, and the caller asks the
+// Leader instead.
 type StrategyLookup struct {
 	// Available says this process holds a publication to answer from.
 	Available bool
@@ -162,10 +163,24 @@ func (state *strategyLookupState) lookup(strategyID string) StrategyLookup {
 
 // LookupStrategy answers one strategy's standing from the catalog this
 // process last published. Safe to call from any goroutine while rounds run;
-// a process that has published nothing answers Available false.
+// a process that holds no publication of its own answers Available false.
 func (reconciler *SourceReconciler) LookupStrategy(strategyID string) StrategyLookup {
 	if reconciler == nil {
 		return StrategyLookup{}
 	}
 	return reconciler.strategies.lookup(strategyID)
+}
+
+// StepDown forgets the index: called on every tick this process runs as a
+// follower, so a Leader that lost its lease stops answering from the
+// publication it made in its term. Without it a former Leader kept
+// answering as if it still published -- a strategy created after the
+// hand-over read as "the source never listed it", from a replica no longer
+// in a position to say. The next round this process completes as Leader
+// builds the index again.
+func (reconciler *SourceReconciler) StepDown() {
+	if reconciler == nil {
+		return
+	}
+	reconciler.strategies.replace(nil)
 }

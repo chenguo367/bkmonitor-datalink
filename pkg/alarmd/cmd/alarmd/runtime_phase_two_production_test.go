@@ -836,6 +836,10 @@ func TestProductionPhaseTwoControlConfirmsColdStartBeforeInitialActivation(t *te
 	}
 }
 
+// A follower tick loads the active set and, first, steps the reconciler's
+// catalog memory down: a process on this path is not the Leader, and what
+// it published in an earlier term is not its to answer strategy lookups
+// from.
 func TestProductionPhaseTwoControlLoadsAllActiveQueryGroups(t *testing.T) {
 	publication := controlplane.SnapshotPublicationRef{SnapshotRevision: "snapshot-1", PublicationEpoch: 1}
 	repository := &fakeProductionCatalogRepository{
@@ -844,8 +848,9 @@ func TestProductionPhaseTwoControlLoadsAllActiveQueryGroups(t *testing.T) {
 			{Identity: "query-group-2"}, {Identity: "query-group-1"},
 		}},
 	}
+	reconciler := &fakeSourceReconciler{}
 	control, err := newProductionPhaseTwoControl(productionPhaseTwoControlDependencies{
-		Source: fakeStrategySource{}, Planner: fakePrimaryQueryCompiler{}, Reconciler: &fakeSourceReconciler{},
+		Source: fakeStrategySource{}, Planner: fakePrimaryQueryCompiler{}, Reconciler: reconciler,
 		Activator: &fakeInitialScheduleActivator{}, Repository: repository, Schedules: &fakeScheduleProjection{},
 		Progress: &fakeProductionProgressReader{}, RefreshInterval: time.Second,
 		Wait: func(context.Context, time.Duration) error { return nil },
@@ -857,6 +862,9 @@ func TestProductionPhaseTwoControlLoadsAllActiveQueryGroups(t *testing.T) {
 	if err != nil || result.Status != phaseTwoControlHealthy ||
 		!reflect.DeepEqual(result.QueryGroups, []execution.QueryGroupIdentity{"query-group-1", "query-group-2"}) {
 		t.Fatalf("LoadActive() = %#v, %v", result, err)
+	}
+	if reconciler.stepDowns != 1 || reconciler.calls != 0 {
+		t.Fatalf("a follower tick stepped the reconciler down %d times and refreshed %d times, want 1 and 0", reconciler.stepDowns, reconciler.calls)
 	}
 }
 
@@ -1725,10 +1733,13 @@ func TestProductionPhaseTwoControlKeepsLastGoodAcrossFailedCutoverAndRecovery(t 
 }
 
 type fakeSourceReconciler struct {
-	results []controlplane.SourceRefreshResult
-	errs    []error
-	calls   int
+	results   []controlplane.SourceRefreshResult
+	errs      []error
+	calls     int
+	stepDowns int
 }
+
+func (reconciler *fakeSourceReconciler) StepDown() { reconciler.stepDowns++ }
 
 func (reconciler *fakeSourceReconciler) Refresh(
 	context.Context,

@@ -634,9 +634,9 @@ func (reconciler *SourceReconciler) currentSnapshot(ctx context.Context, publica
 	}
 	reconciler.lastGood = &snapshot
 	// Assembled from the objects, so the dispositions of the round that
-	// published it are not known here; the round that follows replaces this
-	// with its own. Until then a lookup answers the Plans and no
-	// dispositions, which is what this process knows.
-	reconciler.strategies.replace(buildStrategyIndex(snapshot.Publication, snapshot.QueryGroups, nil))
+	// published it are not known here, and a lookup index without them
+	// would answer "the source never listed it" for every strategy that
+	// round withheld. No index is published from here: this process answers
+	// nothing until a round it completes builds one with the dispositions.
 	return snapshot, nil
 }
