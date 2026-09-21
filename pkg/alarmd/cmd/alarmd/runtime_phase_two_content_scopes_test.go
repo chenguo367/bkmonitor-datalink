@@ -338,3 +338,67 @@ func TestTheLastSweepIsKeptForTheFleetWithItsNumbersAndItsFailure(t *testing.T) 
 		t.Fatalf("fleet reason %q differs from the line's %q", failed.Reason, observed[len(observed)-1].ReasonCode)
 	}
 }
+
+// A sweep that found records a lease still held has not reclaimed them, and
+// nothing about the set will ask for the sweep that does: the next round is
+// asked, round after round, until a sweep finds nothing held. A sweep that
+// failed is owed the same way. A Query Group that arrived after a sweep and
+// left before the next is measured against the last round's set, not the
+// last swept set, so its leaving is seen and its record reclaimed.
+func TestASweepThatLeftRecordsHeldOrFailedIsOwedAndAnArrivalThatLeavesIsSwept(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := &fakePhaseTwoOwnershipStore{now: now}
+	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+		Store: store, WorkerID: "worker-1", Now: func() time.Time { return now }, Observer: observability.NopObserver{},
+	}}
+	authority := ownership.PublicationAuthority{Fence: execution.OwnerFence{
+		QueryGroup: ownership.ControlLeaderIdentity, OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "t",
+	}, Deadline: now.Add(time.Minute)}
+	set := func(groups ...execution.QueryGroupIdentity) []execution.QueryGroupIdentity { return groups }
+
+	// The first sweep of the term finds one retired record a lease still
+	// holds. The set does not change, and the next two rounds sweep anyway;
+	// the third finds it reclaimed and the rounds after it stop.
+	store.sweep = ownership.AssignmentSweep{Scanned: 3, Retired: 1, HeldByLease: 1}
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a", "b"))
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a", "b"))
+	if len(store.sweeps) != 2 {
+		t.Fatalf("a round after a sweep that left a record held swept %d times in total, want 2: the record is reclaimed only by a later sweep", len(store.sweeps))
+	}
+	store.sweep = ownership.AssignmentSweep{Scanned: 3, Retired: 1, Reclaimed: 1}
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a", "b"))
+	store.sweep = ownership.AssignmentSweep{Scanned: 2}
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a", "b"))
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a", "b"))
+	if len(store.sweeps) != 3 {
+		t.Fatalf("rounds after the held record was reclaimed swept; %d sweeps in total, want 3", len(store.sweeps))
+	}
+
+	// c arrives (no sweep: nothing left) and leaves the next round: the
+	// leaving is seen against the last round's set, and c is not kept.
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a", "b", "c"))
+	if len(store.sweeps) != 3 {
+		t.Fatalf("an arrival swept; %d sweeps in total, want still 3", len(store.sweeps))
+	}
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a", "b"))
+	if len(store.sweeps) != 4 {
+		t.Fatalf("a Query Group that arrived after the last sweep and left was not swept; %d sweeps in total, want 4", len(store.sweeps))
+	}
+	if _, kept := store.sweeps[3]["c"]; kept {
+		t.Fatal("the sweep was asked to keep the Query Group that left")
+	}
+
+	// A sweep that fails is owed: the next round, same set, sweeps again.
+	store.sweepErr = errors.New("the store did not answer")
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a"))
+	store.sweepErr = nil
+	store.sweep = ownership.AssignmentSweep{Scanned: 1}
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a"))
+	if len(store.sweeps) != 6 {
+		t.Fatalf("a failed sweep was not retried by the next round; %d sweeps in total, want 6", len(store.sweeps))
+	}
+	runtime.sweepRetiredAssignments(context.Background(), authority, set("a"))
+	if len(store.sweeps) != 6 {
+		t.Fatalf("a round after a sweep that found nothing held swept; %d sweeps in total, want still 6", len(store.sweeps))
+	}
+}
