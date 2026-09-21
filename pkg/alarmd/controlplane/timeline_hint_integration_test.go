@@ -194,3 +194,69 @@ func TestAHintedActivationRequestIsAnsweredFromTheTimelineWithoutTheHeader(t *te
 		t.Fatalf("header activations for a closed Segment = (%+v, %v), want ActivationNone", byHeaderAfter.Facts, err)
 	}
 }
+
+// A retired timeline is what a draining Query Group runs its backlog from:
+// DrainingContent serves its last Segment's content until the timeline is
+// gone, and says nothing for a Query Group that has none. A Worker
+// executing from the view reads the retired backlog from this; a draining
+// Query Group the view carried without content was refused as no_content
+// on every round and never drained.
+func TestDrainingContentServesTheRetiredTimelinesLastSegment(t *testing.T) {
+	ctx := context.Background()
+	client := newControlplaneRedis(t)
+	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:draining-content", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	progress := &activationProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{}}
+	compiler, semantics := runtimePlanCompiler(t)
+	at := time.Unix(60, 0)
+	reconciler, err := controlplane.NewScheduleActivationReconcilerWithProgress(
+		repository, compiler, semantics, progress, func() time.Time { return at },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publish := func(sourceID, tableID string, boundary int64) execution.QueryGroupIdentity {
+		t.Helper()
+		catalog := catalogWithStrategyQueryTable(t, sourceID, tableID)
+		snapshot, _, err := repository.PublishCatalog(ctx, catalog)
+		if err != nil {
+			t.Fatal(err)
+		}
+		at = time.Unix(boundary, 0)
+		if _, err := reconciler.Ensure(ctx, snapshot.Publication); err != nil {
+			t.Fatalf("activation at %d: %v", boundary, err)
+		}
+		return catalog.QueryGroups[0].Identity
+	}
+	cpu := publish("1001", "system.cpu", 60)
+	mem := publish("1002", "system.mem", 90)
+	if cpu == mem {
+		t.Fatal("the fixture needs the retired and the live Query Group to differ")
+	}
+	runtime, err := controlplane.NewRedisCatalogRuntime(repository, compiler, semantics, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retiredAt, retired, err := runtime.ReadScheduleRetirement(ctx, cpu)
+	if err != nil || !retired || retiredAt != 90 {
+		t.Fatalf("retirement of the replaced Query Group = (%d, %t, %v), want retired at 90", retiredAt, retired, err)
+	}
+	segment, err := runtime.ReadFrozenSchedule(ctx, cpu, 60)
+	if err != nil || segment.Segment.ObjectDigest == "" {
+		t.Fatalf("retired Segment = (%+v, %v), want one that names its content", segment.Segment, err)
+	}
+
+	digest, refs, draining, err := repository.DrainingContent(ctx, cpu)
+	if err != nil || !draining || digest != segment.Segment.ObjectDigest {
+		t.Fatalf("DrainingContent(retired) = (%q, %v, %t, %v), want the retired Segment's content %q", digest, refs, draining, err, segment.Segment.ObjectDigest)
+	}
+	if len(refs) != len(segment.Segment.OutputContextRefs) {
+		t.Fatalf("DrainingContent(retired) refs = %v, want the Segment's %v", refs, segment.Segment.OutputContextRefs)
+	}
+	digest, refs, draining, err = repository.DrainingContent(ctx, "never-activated")
+	if err != nil || draining || digest != "" || refs != nil {
+		t.Fatalf("DrainingContent(absent) = (%q, %v, %t, %v), want nothing", digest, refs, draining, err)
+	}
+}
