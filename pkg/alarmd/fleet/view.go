@@ -384,6 +384,18 @@ type NoDataTracking struct {
 // recompiled to the new value and goes on reading as platform. Unknown is a
 // tracker that was not told the platform's horizon, and says so rather than
 // guessing.
+//
+// That last step -- the inheriting Plan being recompiled -- is not this
+// package's to guarantee. It holds because the platform's horizon is part of
+// the control leader's candidate-cache round key (controlplane
+// NoDataPolicy.key(), read into beginRound): a changed leaf changes the key,
+// empties the cache and recompiles every Plan, so a Plan can carry a stale
+// inherited value for one compilation round at most. Take the horizon out of
+// that key and inherited Plans keep the old value for as long as they live,
+// and every one of them reads here as STRATEGY -- the page would say these
+// strategies set their own horizon when none of them did. The reading is
+// inferred from the value; NoDataHorizonSourceBasis says so on the wire so a
+// reader does not take it for a fact the contract froze.
 const (
 	NoDataHorizonNone     = "NONE"
 	NoDataHorizonPlatform = "PLATFORM"
@@ -393,6 +405,12 @@ const (
 
 // NoDataHorizonSources is the closed list, for the page's wording table.
 var NoDataHorizonSources = []string{NoDataHorizonNone, NoDataHorizonPlatform, NoDataHorizonStrategy, NoDataHorizonUnknown}
+
+// NoDataHorizonSourceBasis is how every horizon source on the wire was
+// decided: by comparing the Plan's frozen value with the platform's leaf. It
+// is stated rather than implied so the source is not read as something the
+// Plan's contract carries.
+const NoDataHorizonSourceBasis = "INFERRED_BY_VALUE"
 
 // NoDataTrackingSummary is the fleet's one line on the tracking horizon: over
 // every no-data Plan whose last deciding round this process (or, merged, the
@@ -417,6 +435,9 @@ type NoDataTrackingSummary struct {
 	Suppressed       uint64 `json:"suppressed"`
 	// LastDecidedAt is the latest deciding round seen.
 	LastDecidedAt time.Time `json:"last_decided_at,omitempty"`
+	// HorizonSourceBasis is NoDataHorizonSourceBasis: how the three by-source
+	// counts, and every row's horizon_source, were decided.
+	HorizonSourceBasis string `json:"horizon_source_basis"`
 }
 
 // add folds one Plan's word, or another replica's whole summary, in.
@@ -433,6 +454,7 @@ func (summary *NoDataTrackingSummary) add(other NoDataTrackingSummary) {
 	if other.LastDecidedAt.After(summary.LastDecidedAt) {
 		summary.LastDecidedAt = other.LastDecidedAt
 	}
+	summary.HorizonSourceBasis = NoDataHorizonSourceBasis
 }
 
 // summaryOf is one Plan's word as a summary of one.
@@ -440,6 +462,7 @@ func (tracking NoDataTracking) summaryOf() NoDataTrackingSummary {
 	summary := NoDataTrackingSummary{
 		Plans: 1, Expected: tracking.Expected, Absent: tracking.Absent,
 		ExpiredThisRound: tracking.ExpiredThisRound, Suppressed: tracking.Suppressed, LastDecidedAt: tracking.DecidedAt,
+		HorizonSourceBasis: NoDataHorizonSourceBasis,
 	}
 	switch tracking.HorizonSource {
 	case NoDataHorizonNone:
