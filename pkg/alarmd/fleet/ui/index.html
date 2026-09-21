@@ -1102,15 +1102,40 @@ function windowProgress(coverage) {
 // rollout's worth each time a rollout punches a new hole, and the words say
 // so rather than counting down as if nothing could move it. Not sliding is
 // the same positions missing for longer than the window is long, which no
-// waiting fills. Both end the same way: anomalies fire on a short window,
-// only recovery waits.
-function windowFillWords(fill) {
+// waiting fills. Both end with what the shortfall costs, and that depends
+// on the Plans' wire format: anomalies fire on a short window whatever the
+// format; recovery waits for the window only on the standard raw event
+// line, because the Python-compatible exit carries anomaly points and
+// nothing else -- alarmd's recovery never leaves it, and the consumer
+// decides recovery from the absence of anomalies. On a Python-compatible
+// strategy a short window therefore changes nothing downstream, and a line
+// that said "recovery waits" would send somebody to wait for something the
+// consumer never receives.
+function windowFillWords(fill, wireFormats) {
   var shape = '窗内 ' + fill.holes + ' 个空位（窗长 ' + fill.required + ' 个点 = ' + elapsedLabel(fill.span_seconds)
     + '，周期 ' + fill.period_seconds + ' s），最差窗口的有效点数已连续 ' + fill.unchanged_rounds + ' 轮没变';
   var reading = fill.sliding
     ? '：是滚动重启打的洞在随窗口滑动，最晚 ' + momentLabel(fill.latest_fill_by) + ' 滑出补齐（上界；再滚动一次会再打洞、这个时刻往后退——窗长比两次滚动的间隔长，就一直到不了）'
     : '，已超过窗长 ' + fill.required + ' 轮：不是洞在滑，是最新的点持续没到（数据晚到或稀疏源），等不满';
-  return shape + reading + '；异常照常触发，只有恢复要等窗口补齐';
+  return shape + reading + '；' + shortfallCostWords(wireFormats);
+}
+
+// What a short window costs the row's Plans, by their wire format. All
+// Python-compatible: nothing downstream. Any standard raw event: recovery
+// waits. Format not yet seen on the row: the general statement, marked so.
+function shortfallCostWords(wireFormats) {
+  var formats = (wireFormats || []).map(function (entry) { return entry.wire_format; });
+  if (!formats.length) {
+    return '异常照常触发；恢复是否要等窗口补齐取决于输出格式（这一行还没见到该策略的评估行，说不出）';
+  }
+  var standard = formats.filter(function (f) { return f === 'standard_raw_event'; }).length;
+  if (!standard) {
+    return '异常照常触发；这些策略走 Python 兼容路径，alarmd 不发恢复、下游按异常点缺席判恢复——窗口没补齐对下游没有影响';
+  }
+  if (standard === formats.length) {
+    return '异常照常触发，只有恢复要等窗口补齐（标准原始事件线由 alarmd 发恢复）';
+  }
+  return '异常照常触发；' + standard + '/' + formats.length + ' 条策略走标准原始事件线、恢复要等窗口补齐，其余走 Python 兼容路径、窗口没补齐对下游没有影响';
 }
 
 // The last step before a skip, in words. Held to nothing: the codes are the
@@ -2280,7 +2305,7 @@ function objectRow(anomaly, check, group) {
       '完成行上的原因码来自持久化守卫存的 GapReasonCode（守卫立起时写入），滚动重启会重置"自何时"，起点只会更早');
   }
   if (anomaly.window_fill) {
-    line('窗口当前状态', windowFillWords(anomaly.window_fill),
+    line('窗口当前状态', windowFillWords(anomaly.window_fill, anomaly.wire_formats),
       '从"最差窗口有效点数连续几轮没变"推：k 轮没变说明这 k 轮没打新洞，最新的洞至少 k 轮前打的、最多再过 required−k 轮滑出——是上界；'
       + '每次滚动重启会再打洞、k 归零、这个时刻往后退。连续不变的轮数已 ≥ 窗长时不是洞在滑，是最新点持续没到');
   }

@@ -1534,11 +1534,15 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
 }
 
-// planWireFormat is the format the Plan's events go out as, resolved the
-// way the sink resolves it, for the evaluation line: the word was frozen
-// into the Plan and carried on every event and reached no log, so the one
-// question "how many strategies publish the standard raw event" had no line
-// to answer it from.
+// planWireFormat is the format the Plan's events go out as, for the
+// evaluation line: the word was frozen into the Plan and carried on every
+// event and reached no log, so the one question "how many strategies
+// publish the standard raw event" had no line to answer it from.
+//
+// Already resolved: CompiledPlan.WireFormat is
+// contract.ResolveOutputWireFormat over the frozen word and the revision,
+// the same call the sink and the leader's composition make, so an empty or
+// historical frozen word never reaches the line as itself.
 func planWireFormat(due execution.DuePlan) string {
 	if due.CompiledPlan == nil {
 		return ""
