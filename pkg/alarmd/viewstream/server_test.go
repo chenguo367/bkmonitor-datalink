@@ -707,4 +707,22 @@ func TestAStepLargerThanOneMessageIsSentAsAChunkedSnapshot(t *testing.T) {
 	if stats.DeltasSent != 2 || stats.DeltasOversized != 1 || stats.SnapshotChunksSent != 1+uint64(first.Chunks) {
 		t.Fatalf("stats = %+v, want two deltas sent, one oversized, and the first snapshot plus %d chunks", stats, first.Chunks)
 	}
+
+	// The snapshot moved the session on: once the Worker installs it, the
+	// next small step is one delta from revision 4, not a snapshot again.
+	// A session that replaced the delta but did not record the snapshot as
+	// sent would answer this step with the snapshot a second time.
+	w1.receipt("i1", first.Version, true)
+	eventually(t, "installed revision 4", func() bool {
+		return harness.server.Stats().Revision == 4 && harness.server.Stats().Counts.Installed == 1
+	})
+	assign["qg-after"], published["qg-after"] = "w1", content("obj-after", "s-after")
+	if _, err := harness.server.Publish(ctx, desiredAt(publicationA, assign, published)); err != nil {
+		t.Fatal(err)
+	}
+	after := w1.recvDelta()
+	if after.Base.Revision != 4 || after.Target.Revision != 5 || len(after.Upserts) != 1 {
+		t.Fatalf("step after the snapshot = base %d target %d with %d upserts, want one delta 4 -> 5",
+			after.Base.Revision, after.Target.Revision, len(after.Upserts))
+	}
 }
