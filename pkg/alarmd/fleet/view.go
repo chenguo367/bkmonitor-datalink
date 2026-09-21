@@ -718,6 +718,97 @@ type HistoryCoverage struct {
 	PreviousWorstValid uint32 `json:"previous_worst_valid,omitempty"`
 	PreviousKnown      bool   `json:"previous_known,omitempty"`
 	NoProgressRounds   uint32 `json:"no_progress_rounds,omitempty"`
+	// UnchangedRounds is how many consecutive rounds the worst valid count
+	// has been exactly the count before -- flat, as against not risen. A
+	// falling count is a window being emptied one hole per round; a flat
+	// short count is a fixed set of holes sliding through a window that
+	// fills as fast as it drains. NoProgressRounds reads the same for both.
+	UnchangedRounds uint32 `json:"unchanged_rounds,omitempty"`
+}
+
+// WindowFill is what the row can say about a short window whose worst valid
+// count has been flat for WindowFillSteadyRounds rounds: how many positions
+// it is short by, how long the window is, and -- from the flatness alone --
+// the latest the shortfall can last if it is holes sliding through.
+//
+// The projection rests on one fact and reads no history: a count flat for k
+// rounds means no new hole was punched in those k rounds, so the newest hole
+// is at least k rounds old and leaves the window within required − k more.
+// It is an upper bound, stated as one, and it moves in exactly one
+// direction unless a new hole is punched -- at which point the count drops,
+// k resets, and the bound moves back by as much. That is the honest shape
+// of it: a window longer than the gap between rollouts gets a new hole per
+// rollout and the bound recedes each time, and the row shows that happening
+// rather than a countdown that quietly restarts.
+//
+// A count flat for at least as many rounds as the window is long is not
+// holes sliding: a hole punched that long ago has left. That is the other
+// reading, and it is on the row as Sliding false: the same positions have
+// been missing every round for longer than the window, which is the newest
+// points not arriving -- data late or sparse -- and no amount of waiting
+// fills it.
+//
+// Beside either reading: an anomaly still fires on a short window -- the
+// trigger decides ABNORMAL before it reads completeness -- and only the
+// recovery waits for the window to fill.
+type WindowFill struct {
+	// Holes is required − valid on the worst window; Required the window's
+	// length in positions; PeriodSeconds the object's evaluation period, so
+	// SpanSeconds = Required × PeriodSeconds is how long the window is in
+	// time. Measure names what the positions are.
+	Holes         uint32 `json:"holes"`
+	Required      uint32 `json:"required"`
+	PeriodSeconds int64  `json:"period_seconds"`
+	SpanSeconds   int64  `json:"span_seconds"`
+	Measure       string `json:"measure"`
+	// UnchangedRounds is how many rounds the count has been flat.
+	UnchangedRounds uint32 `json:"unchanged_rounds"`
+	// Sliding says the flat run is shorter than the window, so the shortfall
+	// can still be holes sliding through; LatestFillBy is then the latest the
+	// last of them leaves, from the flatness alone. Absent when not sliding.
+	Sliding      bool       `json:"sliding"`
+	LatestFillBy *time.Time `json:"latest_fill_by,omitempty"`
+	// AnomaliesStillFire is stated rather than left to the reader: the
+	// trigger decides ABNORMAL before completeness, so a short window holds
+	// up recovery and nothing else.
+	AnomaliesStillFire bool `json:"anomalies_still_fire"`
+}
+
+// WindowFillSteadyRounds is how many rounds the worst valid count must have
+// been flat before the row projects from it: one round says nothing, two is
+// a coincidence, three is a run.
+const WindowFillSteadyRounds = 3
+
+// WindowFillMinSpan is the shortest window the row bothers to project for:
+// a window that fills within the hour fills before anyone reads the row.
+const WindowFillMinSpan = time.Hour
+
+// WindowFillOf reads the fill projection off a row, given the object's
+// period, or nil when the row has nothing to project from: no coverage,
+// nothing short, a count not flat for WindowFillSteadyRounds, no period, or
+// a window shorter than WindowFillMinSpan.
+func WindowFillOf(anomaly Anomaly, periodSeconds int64, now time.Time) *WindowFill {
+	coverage := anomaly.Coverage
+	if coverage == nil || coverage.Short == 0 || coverage.WorstValid >= coverage.WorstRequired ||
+		coverage.UnchangedRounds < WindowFillSteadyRounds || periodSeconds <= 0 {
+		return nil
+	}
+	span := int64(coverage.WorstRequired) * periodSeconds
+	if time.Duration(span)*time.Second < WindowFillMinSpan {
+		return nil
+	}
+	fill := &WindowFill{
+		Holes: coverage.WorstRequired - coverage.WorstValid, Required: coverage.WorstRequired,
+		PeriodSeconds: periodSeconds, SpanSeconds: span, Measure: coverage.Measure,
+		UnchangedRounds: coverage.UnchangedRounds, AnomaliesStillFire: true,
+	}
+	if coverage.UnchangedRounds < coverage.WorstRequired {
+		fill.Sliding = true
+		remaining := int64(coverage.WorstRequired-coverage.UnchangedRounds) * periodSeconds
+		by := now.Add(time.Duration(remaining) * time.Second)
+		fill.LatestFillBy = &by
+	}
+	return fill
 }
 
 // Churning reports series that have never survived long enough to be seen
@@ -849,6 +940,15 @@ type Anomaly struct {
 	// the index has no entry, which means no round has returned since that
 	// replica took the object over.
 	Wake *WakeFacts `json:"wake,omitempty"`
+	// WindowFill is on rows whose worst window has been short by a flat
+	// count for WindowFillSteadyRounds rounds and is at least
+	// WindowFillMinSpan long: the shortfall, the window, and whether it can
+	// still be holes sliding through with the latest they leave, or the same
+	// points missing for longer than the window. Read beside CauseReason,
+	// which is the word the guard was raised under -- history -- while this
+	// is the window now. Attached at publication, from the same index the
+	// period comes from.
+	WindowFill *WindowFill `json:"window_fill,omitempty"`
 	// Skip is the span of Slots never evaluated, on a row of KindSkippedSpan
 	// -- and on an object row whose object also holds a record, so the row
 	// says what the object lost while under its line. Slots is zero when the

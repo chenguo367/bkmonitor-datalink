@@ -533,6 +533,10 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 				if facts := column[index].EmptyEveryRound; facts != nil {
 					facts.IntervalSeconds = wake.IntervalSeconds
 				}
+				// What a flat short window says about itself, given the
+				// period: holes sliding through with the latest they leave,
+				// or the same points missing for longer than the window.
+				column[index].WindowFill = fleet.WindowFillOf(column[index], wake.IntervalSeconds, at)
 			}
 		}
 		// And the period behind each retained record, from the same index: a

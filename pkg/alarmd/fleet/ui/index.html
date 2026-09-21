@@ -1096,6 +1096,23 @@ function windowProgress(coverage) {
   return text;
 }
 
+// A flat short window, in words: the shortfall and the window, then the one
+// of two readings the flat run supports. Sliding is holes moving through the
+// window with the latest they leave -- an upper bound that recedes by a
+// rollout's worth each time a rollout punches a new hole, and the words say
+// so rather than counting down as if nothing could move it. Not sliding is
+// the same positions missing for longer than the window is long, which no
+// waiting fills. Both end the same way: anomalies fire on a short window,
+// only recovery waits.
+function windowFillWords(fill) {
+  var shape = '窗内 ' + fill.holes + ' 个空位（窗长 ' + fill.required + ' 个点 = ' + elapsedLabel(fill.span_seconds)
+    + '，周期 ' + fill.period_seconds + ' s），最差窗口的有效点数已连续 ' + fill.unchanged_rounds + ' 轮没变';
+  var reading = fill.sliding
+    ? '：是滚动重启打的洞在随窗口滑动，最晚 ' + momentLabel(fill.latest_fill_by) + ' 滑出补齐（上界；再滚动一次会再打洞、这个时刻往后退——窗长比两次滚动的间隔长，就一直到不了）'
+    : '，已超过窗长 ' + fill.required + ' 轮：不是洞在滑，是最新的点持续没到（数据晚到或稀疏源），等不满';
+  return shape + reading + '；异常照常触发，只有恢复要等窗口补齐';
+}
+
 // The last step before a skip, in words. Held to nothing: the codes are the
 // emitters' and a new one prints as itself.
 var SKIP_REASON = {
@@ -2240,6 +2257,26 @@ function objectRow(anomaly, check, group) {
   line('结果码', anomaly.reason_code);
   line('成因', anomaly.cause);
   line('下一层原因', anomaly.cause_reason);
+  // Two lines for a guarded window, because its one word says two things
+  // that were read as one: the reason is the word the guard was raised
+  // under -- history, stamped onto every completion since -- and the window
+  // is what is short now. A GAP_SKIPPED carried for two hours read as "skipped
+  // again this round" twice over before the two were pulled apart.
+  if (coverage && coverage.guarded > 0 && anomaly.cause_reason) {
+    var raisedSince = anomaly.since_from === 'PROCESS_START'
+      ? '自本进程接手时就已立起（' + momentLabel(anomaly.since) + '，真正立起更早）'
+      : anomaly.since_from === 'RESTORED_AT_RESTART' || anomaly.since_from === 'RESTORED_EMPTY_RUN'
+        ? '不晚于 ' + momentLabel(anomaly.since) + '（重启后恢复的记录）'
+        : anomaly.since ? '立起于 ' + momentLabel(anomaly.since) : '';
+    line('守卫立起的原因（历史）', anomaly.cause_reason + (raisedSince ? '，' + raisedSince : '')
+      + '；这个词是守卫立起那一次的原因，之后每一轮完成都沿用它，不代表这一轮又发生了它',
+      '完成行上的原因码来自持久化守卫存的 GapReasonCode（守卫立起时写入），滚动重启会重置"自何时"，起点只会更早');
+  }
+  if (anomaly.window_fill) {
+    line('窗口当前状态', windowFillWords(anomaly.window_fill),
+      '从"最差窗口有效点数连续几轮没变"推：k 轮没变说明这 k 轮没打新洞，最新的洞至少 k 轮前打的、最多再过 required−k 轮滑出——是上界；'
+      + '每次滚动重启会再打洞、k 归零、这个时刻往后退。连续不变的轮数已 ≥ 窗长时不是洞在滑，是最新点持续没到');
+  }
   if (f) {
     line('后端症状', symptomText(f.detail), f.detail);
     line('失败在哪', FAILURE_CATEGORY[f.category] || f.category,

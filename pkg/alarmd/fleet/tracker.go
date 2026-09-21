@@ -405,6 +405,17 @@ type queryGroupState struct {
 	// is only advice for the first.
 	previousWorstValid uint32
 	noProgressRounds   uint32
+	// unchangedRounds is how many consecutive rounds the worst valid count
+	// has been exactly the count before. Its own counter beside
+	// noProgressRounds because "not risen" covers two windows that need
+	// different words: one whose count is falling -- every round adds a hole
+	// and drops a good point, the window is being emptied -- and one whose
+	// count is flat -- a fixed set of holes sliding through a window that is
+	// otherwise filling as fast as it drains. Read on a live object, the
+	// no-progress count was 115 for both readings and could not tell them
+	// apart; the flat count could, and it is what the fill projection rests
+	// on.
+	unchangedRounds uint32
 	// lastError is the last round that returned an error, verbatim, with the
 	// Slot it was on and how many rounds in a row have failed on that Slot.
 	// Cleared by a healthy completion, like everything else about a run.
@@ -1208,12 +1219,17 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// ends the comparison, like every other run counter here.
 		previous := state.previousWorstValid
 		if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 {
-			state.noProgressRounds, state.previousWorstValid = 0, 0
+			state.noProgressRounds, state.previousWorstValid, state.unchangedRounds = 0, 0, 0
 		} else {
 			if state.coverage != nil && facts.WorstValid <= previous {
 				state.noProgressRounds++
 			} else {
 				state.noProgressRounds = 0
+			}
+			if state.coverage != nil && facts.WorstValid == previous {
+				state.unchangedRounds++
+			} else {
+				state.unchangedRounds = 0
 			}
 			state.previousWorstValid = facts.WorstValid
 		}
@@ -1228,7 +1244,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				Fresh: facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,
 				Unusable: facts.Unusable, UnusableReason: facts.UnusableReason,
 				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
-				NoProgressRounds: state.noProgressRounds,
+				NoProgressRounds: state.noProgressRounds, UnchangedRounds: state.unchangedRounds,
 			}
 			if hadCoverage && facts.Short != 0 {
 				state.coverage.PreviousWorstValid, state.coverage.PreviousKnown = previous, true
