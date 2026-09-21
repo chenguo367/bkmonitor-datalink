@@ -384,7 +384,7 @@ func startNoDataFixtureOn(t *testing.T, protocol string) *noDataFixture {
 		t.Fatalf("Query Groups = %v, want one", bundle.queryGroups)
 	}
 	queryGroup := bundle.queryGroups[0]
-	fixture.runner = bundle.runners[queryGroup].runner
+	fixture.runner = settledRunner(bundle, queryGroup)
 	fixture.events = events
 
 	// The Plan must actually carry no-data detection, or every round below

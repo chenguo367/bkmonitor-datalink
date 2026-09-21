@@ -16,6 +16,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
@@ -33,12 +34,16 @@ import (
 // The first is the view's word, the second and third the record's, brought
 // by the renewal. A view the record does not vouch for - a delta a
 // partitioned old Leader pushed, an entry ahead of a record not yet stamped
-// - fails on the record's side and the Slot reads the control plane the way
-// it always did. When the three hold, the read carries the timeline
-// revision as a hint and the catalog answers it without the activation
-// header, which is the poll batch 4 removes; the cache and the body are the
-// third party of check 3, and a body at another revision falls back to the
-// header on its own (controlplane.WithTimelineRevisionHint).
+// - fails on the record's side, and the Slot is not run: the round ends as
+// view_not_executable with the gate's word, and the Runner comes back on
+// its backoff, by which time a renewal or a delta has usually moved one
+// side (batch 4b; batch 4a read the control plane the old way instead, and
+// that binary is what a rollback is). When the three hold, the read
+// carries the timeline revision as a hint and the catalog answers it
+// without the activation header, which is the poll batch 4 removes; the
+// cache and the body are the third party of check 3, and a body at another
+// revision falls back to the header on its own
+// (controlplane.WithTimelineRevisionHint).
 //
 // The outcomes are counted per Query Group so the receipt can say how many
 // the Worker executes from the view, and by word so the drill can read
@@ -187,36 +192,86 @@ type viewGatedCatalog struct {
 	session    *ownership.Session
 }
 
-func (catalog *viewGatedCatalog) gated(ctx context.Context) context.Context {
-	lease, held := catalog.session.Current()
-	revision, outcome := catalog.gate.judge(catalog.queryGroup, lease, held)
-	catalog.gate.record(catalog.queryGroup, outcome)
+// gated is the three checks for one read: the hinted context when they
+// hold, the named refusal when they do not.
+func (catalog *viewGatedCatalog) gated(ctx context.Context) (context.Context, error) {
+	return gateContext(ctx, catalog.gate, catalog.queryGroup, catalog.session)
+}
+
+func gateContext(ctx context.Context, gate *viewExecutionGate, queryGroup execution.QueryGroupIdentity, session *ownership.Session) (context.Context, error) {
+	lease, held := session.Current()
+	revision, outcome := gate.judge(queryGroup, lease, held)
+	gate.record(queryGroup, outcome)
 	if revision == 0 {
-		return ctx
+		return ctx, &scheduler.ViewNotExecutableError{Reason: string(outcome)}
 	}
-	return controlplane.WithTimelineRevisionHint(ctx, revision)
+	return controlplane.WithTimelineRevisionHint(ctx, revision), nil
 }
 
 func (catalog *viewGatedCatalog) ReadInitialFrozenSchedule(ctx context.Context, queryGroup execution.QueryGroupIdentity) (execution.FrozenQueryGroupSchedule, error) {
-	return catalog.next.ReadInitialFrozenSchedule(catalog.gated(ctx), queryGroup)
+	ctx, err := catalog.gated(ctx)
+	if err != nil {
+		return execution.FrozenQueryGroupSchedule{}, err
+	}
+	return catalog.next.ReadInitialFrozenSchedule(ctx, queryGroup)
 }
 
 func (catalog *viewGatedCatalog) ReadFrozenSchedule(ctx context.Context, queryGroup execution.QueryGroupIdentity, at execution.EvaluationTime) (execution.FrozenQueryGroupSchedule, error) {
-	return catalog.next.ReadFrozenSchedule(catalog.gated(ctx), queryGroup, at)
+	ctx, err := catalog.gated(ctx)
+	if err != nil {
+		return execution.FrozenQueryGroupSchedule{}, err
+	}
+	return catalog.next.ReadFrozenSchedule(ctx, queryGroup, at)
 }
 
 func (catalog *viewGatedCatalog) ReadSuccessorFrozenSchedule(ctx context.Context, queryGroup execution.QueryGroupIdentity, at execution.EvaluationTime) (execution.FrozenQueryGroupSchedule, error) {
-	return catalog.next.ReadSuccessorFrozenSchedule(catalog.gated(ctx), queryGroup, at)
+	ctx, err := catalog.gated(ctx)
+	if err != nil {
+		return execution.FrozenQueryGroupSchedule{}, err
+	}
+	return catalog.next.ReadSuccessorFrozenSchedule(ctx, queryGroup, at)
 }
 
 func (catalog *viewGatedCatalog) ReadScheduleRetirement(ctx context.Context, queryGroup execution.QueryGroupIdentity) (execution.EvaluationTime, bool, error) {
-	return catalog.next.ReadScheduleRetirement(catalog.gated(ctx), queryGroup)
+	ctx, err := catalog.gated(ctx)
+	if err != nil {
+		return 0, false, err
+	}
+	return catalog.next.ReadScheduleRetirement(ctx, queryGroup)
 }
 
 func (catalog *viewGatedCatalog) NextSlotAfter(ctx context.Context, queryGroup execution.QueryGroupIdentity, at execution.EvaluationTime) (execution.EvaluationTime, error) {
-	return catalog.next.NextSlotAfter(catalog.gated(ctx), queryGroup, at)
+	ctx, err := catalog.gated(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return catalog.next.NextSlotAfter(ctx, queryGroup, at)
 }
 
 func (catalog *viewGatedCatalog) FreezeSlotContract(ctx context.Context, request execution.FreezeSlotContractRequest) (execution.FrozenSlotContractFact, error) {
-	return catalog.next.FreezeSlotContract(catalog.gated(ctx), request)
+	ctx, err := catalog.gated(ctx)
+	if err != nil {
+		return execution.FrozenSlotContractFact{}, err
+	}
+	return catalog.next.FreezeSlotContract(ctx, request)
+}
+
+// viewGatedExecutor carries the hint into the execution of a Slot the source
+// froze under it: the activation read and a re-freeze inside execution read
+// the same timeline the source did, without the header. A Slot that reaches
+// execution passed the gate at the source moments ago; a lease that moved
+// since is refused here by name rather than executed the old way.
+type viewGatedExecutor struct {
+	next       scheduler.Executor
+	gate       *viewExecutionGate
+	queryGroup execution.QueryGroupIdentity
+	session    *ownership.Session
+}
+
+func (executor *viewGatedExecutor) Execute(ctx context.Context, request execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+	ctx, err := gateContext(ctx, executor.gate, executor.queryGroup, executor.session)
+	if err != nil {
+		return execution.SlotExecutionResult{}, err
+	}
+	return executor.next.Execute(ctx, request)
 }

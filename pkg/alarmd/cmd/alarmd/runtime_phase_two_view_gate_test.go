@@ -11,12 +11,15 @@ package main
 
 import (
 	"context"
+	"errors"
+	"strconv"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
@@ -71,6 +74,14 @@ func TestTheViewGateFailsEachCheckOnItsOwnAndPassesOnlyAllThree(t *testing.T) {
 	}
 }
 
+// hintCapturingExecutor reports the hint its context carried as the result's
+// reason, so a test can read what execution would have read with.
+type hintCapturingExecutor struct{}
+
+func (hintCapturingExecutor) Execute(ctx context.Context, _ execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+	return execution.SlotExecutionResult{ReasonCode: execution.ReasonCode("hint:" + strconv.FormatUint(controlplane.TimelineRevisionHint(ctx), 10))}, nil
+}
+
 type hintCapturingCatalog struct {
 	productionPhaseTwoSlotCatalog
 	hints []uint64
@@ -82,8 +93,10 @@ func (catalog *hintCapturingCatalog) NextSlotAfter(ctx context.Context, _ execut
 }
 
 // The gated catalog carries the hint on a read the gate lets through and
-// none on one it does not, decides per read, counts the latest outcome per
-// Query Group for the receipt, and forgets a Query Group let go.
+// refuses by name one it does not (batch 4b: the Runner ends the round as
+// view_not_executable rather than reading the control plane the old way),
+// decides per read, counts the latest outcome per Query Group for the
+// receipt, and forgets a Query Group let go.
 func TestTheGatedCatalogHintsOnlyWhenTheGateLetsTheReadThrough(t *testing.T) {
 	gate := newViewExecutionGate()
 	entry := viewstream.Entry{QueryGroup: "qg-1", Content: &viewstream.Content{ObjectDigest: "obj-a"},
@@ -108,15 +121,32 @@ func TestTheGatedCatalogHintsOnlyWhenTheGateLetsTheReadThrough(t *testing.T) {
 		t.Fatal("a Query Group the version does not name counted toward its switched")
 	}
 	// The view moves on to a timeline the record has not confirmed: the next
-	// read carries no hint and the count falls, with no new version needed.
+	// read is refused by the gate's word, reaches no catalog, and the count
+	// falls, with no new version needed.
 	moved := entry
 	moved.Assignment.TimelineRecordRevision = 13
 	gate.attach(mapView{"qg-1": moved})
-	if _, err := catalog.NextSlotAfter(context.Background(), "qg-1", 120); err != nil {
-		t.Fatal(err)
+	var refused *scheduler.ViewNotExecutableError
+	if _, err := catalog.NextSlotAfter(context.Background(), "qg-1", 120); !errors.As(err, &refused) || refused.Reason != string(viewGateTimelineMismatch) {
+		t.Fatalf("a read the gate refused returned %v, want ViewNotExecutableError{%s}", err, viewGateTimelineMismatch)
 	}
-	if len(next.hints) != 2 || next.hints[1] != 0 {
-		t.Fatalf("a read the gate refused carried hints %v, want the second 0", next.hints)
+	if len(next.hints) != 1 {
+		t.Fatalf("a refused read reached the catalog: hints %v", next.hints)
+	}
+	// Execution under the same gate is refused the same way, and carries the
+	// hint when let through.
+	executor := &viewGatedExecutor{next: hintCapturingExecutor{}, gate: gate, queryGroup: "qg-1", session: session}
+	if _, err := executor.Execute(context.Background(), execution.SlotExecutionRequest{}); !errors.As(err, &refused) {
+		t.Fatalf("execution under a refusing gate returned %v, want ViewNotExecutableError", err)
+	}
+	gate.attach(mapView{"qg-1": entry})
+	result, err := executor.Execute(context.Background(), execution.SlotExecutionRequest{})
+	if err != nil || result.ReasonCode != "hint:12" {
+		t.Fatalf("execution under a passing gate = (%+v, %v), want the hint 12 in its context", result, err)
+	}
+	gate.attach(mapView{"qg-1": moved})
+	if _, err := catalog.NextSlotAfter(context.Background(), "qg-1", 120); err == nil {
+		t.Fatal("the gate let a read through after the view moved again")
 	}
 	if gate.SwitchedQueryGroups([]execution.QueryGroupIdentity{"qg-1"}) != 0 || gate.Counts()[string(viewGateTimelineMismatch)] != 1 {
 		t.Fatalf("after a refused read the gate counts %d switched, %v", gate.SwitchedQueryGroups([]execution.QueryGroupIdentity{"qg-1"}), gate.Counts())

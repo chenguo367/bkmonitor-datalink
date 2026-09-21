@@ -2289,9 +2289,11 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		return nil, err
 	}
 	var catalog productionPhaseTwoSlotCatalog = runtime.dependencies.Catalog
+	var executor scheduler.Executor = &observedProductionSlotExecutor{next: runtime.dependencies.Executor, observer: runtime.dependencies.Observer}
 	release := func() {}
 	if runtime.viewGate != nil {
 		catalog = &viewGatedCatalog{next: catalog, gate: runtime.viewGate, queryGroup: queryGroup, session: session}
+		executor = &viewGatedExecutor{next: executor, gate: runtime.viewGate, queryGroup: queryGroup, session: session}
 		release = func() { runtime.viewGate.forget(queryGroup) }
 	}
 	source, err := scheduler.NewProductionSlotSource(
@@ -2310,9 +2312,8 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		return nil, err
 	}
 	observedSource := &observedProductionSlotSource{next: source, observer: runtime.dependencies.Observer}
-	observedExecutor := &observedProductionSlotExecutor{next: runtime.dependencies.Executor, observer: runtime.dependencies.Observer}
 	runner, err := scheduler.NewRunner(
-		queryGroup, session, observedSource, observedExecutor, runtime.flights, runtime.dependencies.Now,
+		queryGroup, session, observedSource, executor, runtime.flights, runtime.dependencies.Now,
 	)
 	if err != nil {
 		_ = session.Release(ctx)

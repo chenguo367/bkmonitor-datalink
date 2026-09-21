@@ -154,7 +154,7 @@ func TestProductionPhaseTwoG4UnavailableQueryGroupDoesNotStopHealthySibling(t *t
 		t.Fatal(err)
 	}
 	clock.Store(base + 1)
-	if err := bundle.runScheduledOnce(ctx); err != nil {
+	if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 		t.Fatalf("run controlled sibling Slot: %v", err)
 	}
 
@@ -290,7 +290,7 @@ func runControlledG4Golden(
 	}
 	for _, evaluationTime := range []int64{base, base + 60} {
 		clock.Store(evaluationTime + 1)
-		if err := bundle.runScheduledOnce(ctx); err != nil {
+		if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 			t.Fatalf("run controlled Slot %d: %v", evaluationTime, err)
 		}
 	}

@@ -139,7 +139,7 @@ func TestProductionRemainingAlgorithms(t *testing.T) {
 				}
 				for _, slot := range []int64{base, base + 60} {
 					clock.Store(slot + 1)
-					if err := bundle.runScheduledOnce(ctx); err != nil {
+					if err := runScheduledOnceSettled(ctx, bundle); err != nil {
 						t.Fatal(err)
 					}
 				}
