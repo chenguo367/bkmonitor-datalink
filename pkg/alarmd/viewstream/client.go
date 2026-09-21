@@ -154,10 +154,14 @@ type ClientOptions struct {
 // SwitchedSource is what a receipt asks for the count of Query Groups the
 // Worker executes from the installed view (decision-016 batch 4): the entry
 // is in the view with content, the renewal's content scope is the entry's
-// object digest, and the renewal's timeline revision is the entry's. The
-// receipt says switched when the count reaches the view's entry count.
+// object digest, and the renewal's timeline revision is the entry's. It is
+// asked about the version's own entries, never about everything the Worker
+// runs: a Query Group a delta just moved away is still run and still
+// executable until its next read, and counting it against a version that
+// no longer names it would call the version switched at the one moment it
+// is not. The receipt says switched when the count reaches the entry count.
 type SwitchedSource interface {
-	SwitchedQueryGroups() int
+	SwitchedQueryGroups(of []execution.QueryGroupIdentity) int
 }
 
 // Client keeps one stream to the Leader and the view it installed.
@@ -574,10 +578,7 @@ func (client *Client) reprobe(ctx context.Context, installed View, send func(*pb
 	// The switched count is read on the same cadence: a Query Group's three
 	// checks come and go with renewals and deltas between heartbeats, and the
 	// Leader's four numbers follow the receipts, not the checks.
-	switched := 0
-	if client.switched != nil {
-		switched = client.switched.SwitchedQueryGroups()
-	}
+	switched := client.switchedIn(installed)
 	client.mu.Lock()
 	current := client.stats.Installed == installed.Version
 	same := client.stats.ObjectsMissing == missing && client.stats.ObjectsProbed == probed &&
@@ -633,17 +634,29 @@ func (client *Client) switchedReceipt(view View, missing int, probed bool) *pb.W
 	if client.switched == nil {
 		return message
 	}
-	count := client.switched.SwitchedQueryGroups()
-	if count < 0 {
-		count = 0
-	}
-	if count > len(view.Entries) {
-		count = len(view.Entries)
-	}
+	count := client.switchedIn(view)
 	receipt := message.GetReceipt()
 	receipt.SwitchedQueryGroups = uint32(count)
 	receipt.Switched = count == len(view.Entries)
 	return message
+}
+
+// switchedIn asks the source about this view's entries and keeps the answer
+// inside them: a source that answers more than the view has is not
+// clamped into "all of them", it is a source that counted something else.
+func (client *Client) switchedIn(view View) int {
+	if client.switched == nil {
+		return 0
+	}
+	entries := make([]execution.QueryGroupIdentity, 0, len(view.Entries))
+	for _, entry := range view.Entries {
+		entries = append(entries, entry.QueryGroup)
+	}
+	count := client.switched.SwitchedQueryGroups(entries)
+	if count < 0 || count > len(entries) {
+		return 0
+	}
+	return count
 }
 
 func (client *Client) observe(ctx context.Context, event, reason string, err error) {

@@ -61,6 +61,7 @@ type viewGateOutcome string
 const (
 	viewGateExecutable       viewGateOutcome = "executable"
 	viewGateNotInView        viewGateOutcome = "not_in_view"
+	viewGateNoContent        viewGateOutcome = "no_content"
 	viewGateScopeMismatch    viewGateOutcome = "scope_mismatch"
 	viewGateTimelineUnsaid   viewGateOutcome = "timeline_unsaid"
 	viewGateTimelineMismatch viewGateOutcome = "timeline_stale"
@@ -70,7 +71,7 @@ const (
 // viewGateOutcomes is the closed vocabulary the gate reports in, for the
 // metric's series bound and for a reader who wants the list.
 var viewGateOutcomes = []viewGateOutcome{
-	viewGateExecutable, viewGateNotInView, viewGateScopeMismatch, viewGateTimelineUnsaid, viewGateTimelineMismatch, viewGateNoLease,
+	viewGateExecutable, viewGateNotInView, viewGateNoContent, viewGateScopeMismatch, viewGateTimelineUnsaid, viewGateTimelineMismatch, viewGateNoLease,
 }
 
 func newViewExecutionGate() *viewExecutionGate {
@@ -103,8 +104,16 @@ func (gate *viewExecutionGate) judge(queryGroup execution.QueryGroupIdentity, le
 		return 0, viewGateNotInView
 	}
 	entry, inView := view.Entry(queryGroup)
-	if !inView || entry.Content == nil {
+	if !inView {
 		return 0, viewGateNotInView
+	}
+	// In the view without content: a draining Query Group, or one whose
+	// Segment carries no object. It is never going to be executed from the
+	// view, and a fleet with such entries never reaches switched == installed
+	// - its own word, so a reader does not go looking at the stream for a
+	// Query Group the stream delivered.
+	if entry.Content == nil {
+		return 0, viewGateNoContent
 	}
 	digest := string(entry.Content.ObjectDigest)
 	if lease.ContentScope != digest && lease.PendingContentScope != digest {
@@ -134,14 +143,18 @@ func (gate *viewExecutionGate) forget(queryGroup execution.QueryGroupIdentity) {
 	gate.mu.Unlock()
 }
 
-// SwitchedQueryGroups is how many Query Groups this Worker executes from
-// the view as of their latest Slot read; the receipt's count.
-func (gate *viewExecutionGate) SwitchedQueryGroups() int {
+// SwitchedQueryGroups is how many of the given Query Groups - a version's
+// own entries - this Worker executes from the view as of their latest Slot
+// read; the receipt's count. Asked over the version's entries rather than
+// over everything the gate remembers, because a Query Group a delta moved
+// away stays executable in the gate until its next read, and it must not
+// count for a version that no longer names it.
+func (gate *viewExecutionGate) SwitchedQueryGroups(of []execution.QueryGroupIdentity) int {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
 	count := 0
-	for _, outcome := range gate.outcomes {
-		if outcome == viewGateExecutable {
+	for _, queryGroup := range of {
+		if gate.outcomes[queryGroup] == viewGateExecutable {
 			count++
 		}
 	}

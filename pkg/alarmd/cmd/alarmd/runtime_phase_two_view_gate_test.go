@@ -49,7 +49,7 @@ func TestTheViewGateFailsEachCheckOnItsOwnAndPassesOnlyAllThree(t *testing.T) {
 		{"all three hold", "qg-1", good, true, viewGateExecutable, 12},
 		{"no lease", "qg-1", good, false, viewGateNoLease, 0},
 		{"not in the view", "qg-2", good, true, viewGateNotInView, 0},
-		{"in the view without content", "qg-draining", good, true, viewGateNotInView, 0},
+		{"in the view without content", "qg-draining", good, true, viewGateNoContent, 0},
 		{"renewal names another scope", "qg-1", ownership.Lease{ContentScope: "obj-old", TimelineRecordRevision: 12}, true, viewGateScopeMismatch, 0},
 		{"renewal names the scope as pending", "qg-1", ownership.Lease{ContentScope: "obj-old", PendingContentScope: "obj-a", TimelineRecordRevision: 12}, true, viewGateExecutable, 12},
 		{"record has not said the timeline", "qg-1", ownership.Lease{ContentScope: "obj-a"}, true, viewGateTimelineUnsaid, 0},
@@ -99,8 +99,13 @@ func TestTheGatedCatalogHintsOnlyWhenTheGateLetsTheReadThrough(t *testing.T) {
 	if len(next.hints) != 1 || next.hints[0] != 12 {
 		t.Fatalf("a read the gate let through carried hints %v, want [12]", next.hints)
 	}
-	if gate.SwitchedQueryGroups() != 1 || gate.Counts()[string(viewGateExecutable)] != 1 {
-		t.Fatalf("after an executable read the gate counts %d switched, %v", gate.SwitchedQueryGroups(), gate.Counts())
+	if gate.SwitchedQueryGroups([]execution.QueryGroupIdentity{"qg-1"}) != 1 || gate.Counts()[string(viewGateExecutable)] != 1 {
+		t.Fatalf("after an executable read the gate counts %d switched, %v", gate.SwitchedQueryGroups([]execution.QueryGroupIdentity{"qg-1"}), gate.Counts())
+	}
+	// Asked about a version that does not name qg-1, the executable qg-1
+	// does not count: the count is of the version's entries.
+	if gate.SwitchedQueryGroups([]execution.QueryGroupIdentity{"qg-9"}) != 0 {
+		t.Fatal("a Query Group the version does not name counted toward its switched")
 	}
 	// The view moves on to a timeline the record has not confirmed: the next
 	// read carries no hint and the count falls, with no new version needed.
@@ -113,11 +118,11 @@ func TestTheGatedCatalogHintsOnlyWhenTheGateLetsTheReadThrough(t *testing.T) {
 	if len(next.hints) != 2 || next.hints[1] != 0 {
 		t.Fatalf("a read the gate refused carried hints %v, want the second 0", next.hints)
 	}
-	if gate.SwitchedQueryGroups() != 0 || gate.Counts()[string(viewGateTimelineMismatch)] != 1 {
-		t.Fatalf("after a refused read the gate counts %d switched, %v", gate.SwitchedQueryGroups(), gate.Counts())
+	if gate.SwitchedQueryGroups([]execution.QueryGroupIdentity{"qg-1"}) != 0 || gate.Counts()[string(viewGateTimelineMismatch)] != 1 {
+		t.Fatalf("after a refused read the gate counts %d switched, %v", gate.SwitchedQueryGroups([]execution.QueryGroupIdentity{"qg-1"}), gate.Counts())
 	}
 	gate.forget("qg-1")
-	if counts := gate.Counts(); counts[string(viewGateTimelineMismatch)] != 0 || gate.SwitchedQueryGroups() != 0 {
+	if counts := gate.Counts(); counts[string(viewGateTimelineMismatch)] != 0 {
 		t.Fatalf("a forgotten Query Group still counts: %v", counts)
 	}
 }

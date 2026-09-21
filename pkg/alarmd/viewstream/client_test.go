@@ -810,9 +810,39 @@ func TestTheHeartbeatCarriesTheWorkersCostsToTheLeadersSink(t *testing.T) {
 	})
 }
 
-type scriptedSwitched struct{ count atomic.Int64 }
+// scriptedSwitched answers like the Worker's gate: executable is a set of
+// Query Groups, and the count is of those among the entries asked about.
+type scriptedSwitched struct {
+	mu         sync.Mutex
+	executable map[execution.QueryGroupIdentity]struct{}
+	// overcount makes the source answer more than it was asked about, the
+	// way a source counting the wrong population would.
+	overcount bool
+}
 
-func (source *scriptedSwitched) SwitchedQueryGroups() int { return int(source.count.Load()) }
+func (source *scriptedSwitched) set(groups ...execution.QueryGroupIdentity) {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	source.executable = map[execution.QueryGroupIdentity]struct{}{}
+	for _, group := range groups {
+		source.executable[group] = struct{}{}
+	}
+}
+
+func (source *scriptedSwitched) SwitchedQueryGroups(of []execution.QueryGroupIdentity) int {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.overcount {
+		return len(of) + 1
+	}
+	count := 0
+	for _, group := range of {
+		if _, ok := source.executable[group]; ok {
+			count++
+		}
+	}
+	return count
+}
 
 // The receipt says how many of the view's Query Groups the Worker executes
 // from it and claims switched only when that is all of them; the count moves
@@ -834,7 +864,7 @@ func TestTheReceiptCountsTheQueryGroupsExecutedFromTheViewAndClaimsSwitchedOnlyF
 	discovery := &scriptedDiscovery{}
 	discovery.set("leader-a", true)
 	switched := &scriptedSwitched{}
-	switched.count.Store(1)
+	switched.set("qg-1")
 	clock := &atomic.Int64{}
 	clock.Store(time.Unix(1000, 0).UnixMilli())
 	client, err := viewstream.NewClient(viewstream.ClientIdentity{WorkerID: "w1", Incarnation: "i1", StreamToken: "t1"}, discovery, nil, &sessionObserver{},
@@ -860,9 +890,43 @@ func TestTheReceiptCountsTheQueryGroupsExecutedFromTheViewAndClaimsSwitchedOnlyF
 	})
 	// The second Query Group's checks come good between heartbeats: the next
 	// receipt claims switched with no new version.
-	switched.count.Store(2)
+	switched.set("qg-1", "qg-2")
 	eventually(t, "both executed from the view, switched", func() bool {
 		stats := harness.server.Stats()
 		return stats.Counts.Switched == 1 && stats.Revision == 1 && client.Stats().SwitchedQueryGroups == 2
+	})
+
+	// A delta moves qg-2 away. The Worker still runs it until its next read
+	// and the gate still calls it executable; the new version names one
+	// entry, and only that entry counts - a version is switched by its own
+	// entries, not by everything the Worker runs. qg-1 alone is 1 of 1:
+	// switched; had qg-2 counted, 2 of 1 would have read as switched too,
+	// for the wrong reason, so the gate is made to lose qg-1 as well.
+	switched.set("qg-2")
+	second := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w2"},
+		map[string]viewstream.Content{"qg-1": content("obj-1", "s1"), "qg-2": content("obj-2", "s2")})
+	if _, err := harness.server.Publish(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the moved-away Query Group does not count for the new version", func() bool {
+		stats := harness.server.Stats()
+		return stats.Revision == 2 && stats.Counts.Installed == 1 && stats.Counts.Switched == 0 &&
+			len(stats.NotSwitched) == 1 && stats.NotSwitched[0].SwitchedQueryGroups == 0
+	})
+
+	// A source that answers more than the version has is counting the
+	// wrong population; that is not "all of them", it is nothing.
+	switched.mu.Lock()
+	switched.overcount = true
+	switched.mu.Unlock()
+	third := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-3": "w1"},
+		map[string]viewstream.Content{"qg-1": content("obj-1", "s1"), "qg-3": content("obj-3", "s3")})
+	if _, err := harness.server.Publish(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "an overcounting source claims nothing", func() bool {
+		stats := harness.server.Stats()
+		return stats.Revision == 3 && stats.Counts.Installed == 1 && stats.Counts.Switched == 0 &&
+			len(stats.NotSwitched) == 1 && stats.NotSwitched[0].SwitchedQueryGroups == 0
 	})
 }

@@ -49,7 +49,7 @@ var (
 	// Leader's registration advertises no endpoint": #216 counted the second
 	// as the first on every Worker while the Leader published.
 	viewClientDiscoveryMisses = []string{"NO_LEADER", "LEADER_UNREGISTERED", "LEADER_NO_ENDPOINT", "DISCOVERY_FAILED"}
-	viewGateOutcomes          = []string{"executable", "not_in_view", "scope_mismatch", "timeline_unsaid", "timeline_stale", "no_lease"}
+	viewGateOutcomes          = []string{"executable", "not_in_view", "no_content", "scope_mismatch", "timeline_unsaid", "timeline_stale", "no_lease"}
 )
 
 type viewClientCollector struct {
@@ -110,7 +110,9 @@ func newViewClientCollector() *viewClientCollector {
 			"Query Groups this Worker runs, by the latest outcome of the executable-view check made at each Slot "+
 				"read (decision-016 batch 4): executable (the view carries it, the renewal's content scope and "+
 				"timeline revision are the entry's, and the read skipped the activation header), not_in_view, "+
-				"scope_mismatch (the renewal's scope is not the entry's), timeline_unsaid (the record or the view has "+
+				"no_content (in the view but with nothing to execute - draining, or a Segment without an object - "+
+				"never executed from the view), scope_mismatch (the renewal's scope is not the entry's), "+
+				"timeline_unsaid (the record or the view has "+
 				"no timeline revision yet), timeline_stale (the two disagree - expected only inside the view's "+
 				"propagation delay after a cutover), no_lease. A gauge of the Query Groups held now; executable "+
 				"reaching the total is what the receipt reports as switched.",
