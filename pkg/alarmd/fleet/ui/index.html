@@ -251,7 +251,7 @@ details.group table{margin:6px 0 0 12px}
     <p class="note">
       <b>判定规则</b>：证据不全 → <span class="s b-UNKNOWN">UNKNOWN</span>；
       证据齐全且<b>「没跑成待查」里有归到 alarmd 的</b> → <span class="s b-DEGRADED">DEGRADED</span>；
-      副本级运行状态超出设计界，或<b>策略缓存里有策略却一条都没被接受</b>（SOURCE_BLOCKED：不是没负载，是全被扣在配置获取环节）→ <span class="s b-DEGRADED">DEGRADED</span>；
+      副本级运行状态超出设计界，或<b>策略缓存里有策略却一条都没被接受、且因此没有任何对象在检测</b>（SOURCE_BLOCKED：不是没负载，是全被扣在配置获取环节）→ <span class="s b-DEGRADED">DEGRADED</span>；缓存一条都不能用但对象仍按已生效配置在跑，只在“应有”格说明缓存不能用于更新，不降级；
       证据齐全且一个都没有 → <span class="s b-HEALTHY">HEALTHY</span>。
       <br><b>判定看的不是整栏</b>：「没跑成待查」是待处理清单，里面既有 alarmd 自己的，也有数据源没答、
       策略配置写不了的。只有归到 alarmd 的那部分进判定——整栏进判定的话，别人家的故障面越大 alarmd 看着越差，
@@ -785,7 +785,7 @@ function lossWords(key) {
 
 // The replica-level standings, in words. Held to the Go list.
 var DEGRADATION = {
-  SOURCE_BLOCKED: '策略缓存里有策略，但这一轮一条都没接受——整个部署没有在检测任何东西；不是没负载，是全部被扣在配置获取环节',
+  SOURCE_BLOCKED: '策略缓存里有策略，但这一轮一条都没接受，且没有任何对象在检测——整个部署没有在检测任何东西；不是没负载，是全部被扣在配置获取环节',
   ACTIVATION_BEHIND: '控制面变更没有生效：源发布了新内容，激活跟不上去，舰队在执行旧发布',
   CONTROL_SOURCE_STALE: '策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录',
   CONTROL_LEADER_ABSENT: '副本拿不到控制面 leader 租约、也不知道谁持有，超过设计允许的时间——可能没人在刷新',
@@ -2402,7 +2402,7 @@ function renderDeployment(deployment) {
     text('poolFlowHint', flow.join('；'));
     renderCoverage(deployment.coverage);
     renderReplicas(deployment.per_replica);
-    renderSource(deployment.source, deployment.expected);
+    renderSource(deployment.source, deployment.expected, deployment.source_standing);
     renderDependencies(deployment.dependencies || [], deployment.dependencies_replica, deployment.dependencies_replicas);
     text('demotedHint', deployment.demoted_total
       ? '后端持续查不到，已降级不再反复查；不计入部署健康判定'
@@ -2751,17 +2751,27 @@ function share(count, owned) {
 // expected count it decides. An expected of 0 is two different deployments:
 // one with nothing to detect, and one holding everything at the
 // configuration step -- and the number alone is the same in both.
-function renderSource(source, expected) {
+// standing is the server's reading of the source against the run: its two
+// sentences are used as published, so the page and the JSON say one thing.
+// A cache that accepts nothing while objects run on the last accepted
+// configuration is "cannot update", not "not detecting".
+function renderSource(source, expected, standing) {
   if (!source) {
     text('expectedHint', expected === 0 ? '策略缓存的读数没有发布（旧构建，或还没有 leader 跑过一轮），说不出这个 0 是没策略还是全被扣住' : '');
     return;
   }
   var withheld = (source.withheld || []);
-  var parts = ['策略缓存列出 ' + source.listed + ' 条，接受 ' + source.accepted + ' 条'];
+  var parts = [];
+  if (standing && standing.cache) {
+    parts.push('运行状态：' + standing.run);
+    parts.push('配置详情：' + standing.cache);
+  } else {
+    parts.push('策略缓存列出 ' + source.listed + ' 条，接受 ' + source.accepted + ' 条');
+  }
   if (withheld.length) {
     parts.push('扣住 ' + withheld.map(function (g) { return g.count + ' 条 ' + g.disposition + '/' + g.reason; }).join('、'));
   }
-  if (source.listed && !source.accepted) {
+  if (!standing && source.listed && !source.accepted) {
     parts.push('不是没负载，是全部被扣在配置获取环节——看首屏第一行');
   }
   if (source.change_signal_present) {

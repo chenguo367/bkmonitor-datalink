@@ -283,6 +283,10 @@ type HealthResponse struct {
 	// with only the 0 concludes there is nothing to detect.
 	Source        *SourceFacts `json:"source"`
 	SourceReplica string       `json:"source_replica,omitempty"`
+	// SourceStanding is Source read against what the deployment executes:
+	// whether the cache can update the run, and the two sentences the first
+	// screen shows for the run and for the cache. Absent without a round.
+	SourceStanding *SourceStanding `json:"source_standing,omitempty"`
 	// Dependencies is where this deployment's external systems are and what
 	// one replica has seen of them, DependenciesReplica which replica, and
 	// DependenciesReplicas how many replicas published a list -- the one here
@@ -885,7 +889,7 @@ func NewHandler(
 			AssignmentScope: view.AssignmentScope, AssignmentScopeReplica: view.AssignmentScopeReplica,
 			AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
 			ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,
-			Source: view.Source, SourceReplica: view.SourceReplica,
+			Source: view.Source, SourceReplica: view.SourceReplica, SourceStanding: view.SourceStanding,
 			Dependencies: dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 			DependenciesReplicas: view.DependenciesReplicas, ReplicasNotReady: view.ReplicasNotReady,
 			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,

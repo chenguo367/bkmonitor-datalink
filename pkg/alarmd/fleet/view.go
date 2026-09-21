@@ -1700,6 +1700,9 @@ type View struct {
 	// replica that stopped being the leader keeps its last round.
 	Source        *SourceFacts `json:"source,omitempty"`
 	SourceReplica string       `json:"source_replica,omitempty"`
+	// SourceStanding is Source read against what the deployment executes,
+	// with the two sentences for the first screen. Nil without a round.
+	SourceStanding *SourceStanding `json:"source_standing,omitempty"`
 	// Dependencies is what one counted replica resolved its external systems
 	// to, and DependenciesReplica which one: the newest snapshot's. Every
 	// replica renders the same coordinates; what differs is what each has
@@ -2089,8 +2092,14 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	view.EmptyEveryRoundTotal = countEmptyEveryRound(view.NoData)
 	// Decided on the newest source round rather than inside the replica loop:
 	// a source is one thing, and after a leader change two replicas carry a
-	// round each, of which only the newest says what the source is now.
-	if view.Source.Blocked() {
+	// round each, of which only the newest says what the source is now. And
+	// decided against what the deployment executes: a source accepting
+	// nothing degrades the verdict only when nothing runs because of it. A
+	// deployment running its last accepted configuration is detecting; what
+	// it has is a cache that cannot update the run, which the standing says
+	// and the badge does not.
+	view.SourceStanding = sourceStandingOf(view.Source, executingObjects(&view))
+	if view.SourceStanding != nil && view.SourceStanding.Kind == SourceBlocked {
 		view.Degradations = append(view.Degradations, Degradation{Kind: DegradationSourceBlocked,
 			Replica: view.SourceReplica, Stage: "catalog", Text: sourceBlockedText(view.Source)})
 	}
@@ -2098,6 +2107,19 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	sortBuildGroups(view.Builds)
 	sortOutputProtocolGroups(view.OutputProtocols)
 	return view
+}
+
+// executingObjects is how many objects the deployment runs, for the source
+// standing: the catalogue's count when it is known, or what the replicas
+// own, whichever is more -- an object owned but not in the catalogue is
+// still being run, and one in the catalogue nobody owns yet is still going
+// to be.
+func executingObjects(view *View) int {
+	executing := view.Covered
+	if view.Expected != nil && *view.Expected > executing {
+		executing = *view.Expected
+	}
+	return executing
 }
 
 // sourceBlockedText is the one sentence a blocked source's degradation
