@@ -42,7 +42,13 @@ func observationCostOptions(capacity config.ObservationCapacity, process string,
 		o.GroupCapacity = groups
 		o.PlanCapacity = groups * 2
 		o.MetadataBytes = collectorBytes / 8
-		o.TopN = min(20, groups, max(1, (capacity.CostBytes/16)/(12*4096)))
+		// TopN rows of every ranking -- two scopes times the dimensions -- at
+		// about a contributor row each, inside the projection's publish share.
+		// The dimension count is the summary's own, not a literal: it was a
+		// literal 12 from the six dimensions the summary began with, and
+		// stayed 12 when two more were added.
+		rankings := 2 * len(observability.CostDimensions())
+		o.TopN = min(20, groups, max(1, (capacity.CostBytes/16)/(rankings*4096)))
 		if observability.CostSummaryCapacityBytes(o) <= int64(collectorBytes) {
 			return o
 		}
