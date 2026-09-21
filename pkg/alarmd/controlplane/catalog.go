@@ -1211,14 +1211,26 @@ func frozenNoDataConfig(item legacyItem, policy NoDataPolicy) (*contract.NoDataC
 	}
 	// The effective horizon is frozen here, so a Slot reads one number and
 	// never has to know whether it came from the item or the deployment. An
-	// item that states its own uses it - including a stated zero, which is how
-	// an item opts out of a platform horizon and keeps tracking indefinitely.
+	// item that states its own uses it; stating nothing inherits the
+	// deployment's.
+	//
+	// A stated zero is refused rather than taken as an opt-out. The contract
+	// is to give every group a finite horizon, so there is no opting out to
+	// express, and the horizon has no value meaning "forever" for a zero to
+	// stand in for. An item that wants the platform's horizon says nothing,
+	// which is already how it is said - so a written zero is a mistake worth
+	// naming where the configuration is checked, rather than a silent switch
+	// back to the unbounded tracking this whole decision exists to end.
 	config.TrackingHorizonSeconds = policy.TrackingHorizonSeconds
 	horizon, stated, err := legacyNoDataNumber("tracking_horizon_seconds", source.TrackingHorizonSeconds)
 	if err != nil {
 		return nil, fmt.Errorf("alarmd controlplane: item %d %w", item.ID, err)
 	}
 	if stated {
+		if horizon == 0 {
+			return nil, fmt.Errorf("alarmd controlplane: item %d no_data_config tracking_horizon_seconds "+
+				"must be a positive number of seconds; remove the field to inherit the platform's", item.ID)
+		}
 		config.TrackingHorizonSeconds = int64(horizon)
 	}
 	if err := config.Validate(); err != nil {

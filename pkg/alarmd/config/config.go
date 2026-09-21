@@ -353,11 +353,19 @@ func (c Config) OutputProtocol() string {
 }
 
 // NoDataTrackingHorizonSeconds is the deployment's default horizon for how
-// long one absent group stays tracked. Zero tracks indefinitely, which is the
-// behaviour a deployment that says nothing keeps. A strategy stating its own
-// overrides it, including a stated zero.
-func (c Config) NoDataTrackingHorizonSeconds() int64 {
-	return c.PhaseTwo.NoData.TrackingHorizonSeconds
+// long one absent group stays tracked, and whether it set one at all.
+//
+// A deployment states a horizon by writing the leaf, and states that it has
+// none by leaving it out; the value itself never means "no horizon", which is
+// why this reports presence separately instead of returning a zero that would
+// have to carry both. Absent, absence stays tracked indefinitely - the
+// behaviour every Plan had before the horizon existed. A strategy stating its
+// own overrides it.
+func (c Config) NoDataTrackingHorizonSeconds() (int64, bool) {
+	if c.PhaseTwo.NoData.TrackingHorizonSeconds == nil {
+		return 0, false
+	}
+	return *c.PhaseTwo.NoData.TrackingHorizonSeconds, true
 }
 
 // CMDBCacheRedis is where the platform's host cache is read from.

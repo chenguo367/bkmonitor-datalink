@@ -58,7 +58,13 @@ func noDataHorizonOfFirstDuePlan(t *testing.T, horizon int64) int64 {
 	t.Helper()
 	ctx := context.Background()
 	fixture := startCutoverFixtureWith(t,
-		func(cfg *config.Config) { cfg.PhaseTwo.NoData.TrackingHorizonSeconds = horizon },
+		func(cfg *config.Config) {
+			// Absent rather than zero for the unconfigured deployment: the
+			// leaf is read by presence, and a written zero is refused.
+			if horizon != 0 {
+				cfg.PhaseTwo.NoData.TrackingHorizonSeconds = &horizon
+			}
+		},
 		observability.Discard(observability.ComponentRuntime),
 		enableNoDataOnCutoverStrategies,
 	)

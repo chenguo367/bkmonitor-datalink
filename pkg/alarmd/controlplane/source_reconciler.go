@@ -247,11 +247,14 @@ func (reconciler *SourceReconciler) ConfigureTargetSources(sources TargetSources
 // whose own document happens to change next, and reads as applied while doing
 // nothing. Reading it per round is what lets the round key see the change.
 //
-// Configuring nothing leaves the zero policy, whose horizon of zero means
-// absence is tracked indefinitely - what every Plan did before the horizon
-// existed. So a deployment that says nothing is not opted in, which is the
-// direction that cannot surprise anyone: a horizon stops no-data alerts after
-// it, and one arrived at by default would silence a real outage.
+// Configuring nothing leaves the zero policy, whose horizon of zero means the
+// deployment set none, so absence is tracked indefinitely - what every Plan
+// did before the horizon existed. The deployment says that by not writing the
+// setting rather than by writing a zero, which its own configuration refuses;
+// the zero only ever stands for absence by the time it reaches here. So a
+// deployment that says nothing is not opted in, which is the direction that
+// cannot surprise anyone: a horizon stops no-data alerts after it, and one
+// arrived at by default would silence a real outage.
 func (reconciler *SourceReconciler) ConfigureNoDataPolicy(policy func() NoDataPolicy) error {
 	if reconciler == nil {
 		return errors.New("alarmd controlplane: no source reconciler")

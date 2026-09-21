@@ -492,7 +492,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// setting without every strategy document having to change for the new
 	// value to reach its Plan.
 	if err := reconciler.ConfigureNoDataPolicy(func() controlplane.NoDataPolicy {
-		return controlplane.NoDataPolicy{TrackingHorizonSeconds: cfg.NoDataTrackingHorizonSeconds()}
+		// An absent leaf is no platform horizon, and the zero that stands for
+		// it here never travels as an operator's value: the config refuses a
+		// written zero, so this one can only have come from absence.
+		horizon, _ := cfg.NoDataTrackingHorizonSeconds()
+		return controlplane.NoDataPolicy{TrackingHorizonSeconds: horizon}
 	}); err != nil {
 		return nil, err
 	}
