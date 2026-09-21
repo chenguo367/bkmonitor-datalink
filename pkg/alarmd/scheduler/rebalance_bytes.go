@@ -34,7 +34,15 @@ import (
 // The constraint is judged only where the numbers are known: a Worker that
 // registered no pool is not judged and is listed as such, and a Query
 // Group with no reported peak counts nothing and is counted as unread. An
-// unknown is reported, never read as "no pressure".
+// unknown is reported, never read as "no pressure" - on either side of a
+// move. A Worker with an unread Query Group has a sum that is a lower
+// bound: enough to say it is overloaded when its known part already is,
+// not enough to say it has room, so it is not a destination this round.
+// Unread is a passing state - a Worker reports a Query Group's first
+// reading on its next heartbeat, unconditionally - and the ledger carries
+// a moved Query Group's last reading over to its new holder as provisional
+// in the meantime, so the Worker a move just landed on is not the emptiest
+// Worker in the fleet by the next round.
 const byteConstraintPercent = 80
 
 // ByteConstraintPercent is the share above, for a reader that reports a
@@ -102,9 +110,12 @@ type BytePlan struct {
 	Judged      int
 	PoolUnknown []string
 	// Unread is how many Query Groups on judged Workers have no reported
-	// peak. They count nothing toward their Worker's sum.
-	Unread int
-	Sum    map[string]uint64
+	// peak. They count nothing toward their Worker's sum, and Unsettled
+	// names the judged Workers holding one: their sums are lower bounds,
+	// and they are not destinations this round.
+	Unread    int
+	Unsettled []string
+	Sum       map[string]uint64
 	// Overloaded names the judged Workers over the constraint before the
 	// moves; Unplaceable the ones among them the round found no move for -
 	// no Query Group of theirs with a reading fits any other judged Worker.
@@ -153,6 +164,7 @@ func (router *Router) PlanByteMoves(
 	sort.Strings(judged)
 	plan.Judged = len(judged)
 	owned := make(map[string][]execution.QueryGroupIdentity, len(judged))
+	unreadBy := make(map[string]int, len(judged))
 	for queryGroup, owner := range owners {
 		if _, isJudged := plan.Sum[owner]; !isJudged {
 			continue
@@ -160,10 +172,16 @@ func (router *Router) PlanByteMoves(
 		peak, read := readings.peak(queryGroup)
 		if !read {
 			plan.Unread++
+			unreadBy[owner]++
 			continue
 		}
 		plan.Sum[owner] += peak
 		owned[owner] = append(owned[owner], queryGroup)
+	}
+	for _, workerID := range judged {
+		if unreadBy[workerID] > 0 {
+			plan.Unsettled = append(plan.Unsettled, workerID)
+		}
 	}
 	if len(judged) < 2 {
 		for _, workerID := range judged {
@@ -198,7 +216,7 @@ func (router *Router) PlanByteMoves(
 			if peak == 0 {
 				break
 			}
-			destination := router.byteDestination(queryGroup, workerID, judged, ready, readings, sum, peak, at)
+			destination := router.byteDestination(queryGroup, workerID, judged, ready, readings, sum, unreadBy, peak, at)
 			if destination == "" {
 				continue
 			}
@@ -216,7 +234,9 @@ func (router *Router) PlanByteMoves(
 }
 
 // byteDestination is the judged Worker with the most headroom that the
-// Query Group fits and is eligible for, or "" when there is none.
+// Query Group fits and is eligible for, or "" when there is none. A Worker
+// with an unread Query Group is not one: its sum is a lower bound, and the
+// room it appears to have may be exactly what it does not.
 func (router *Router) byteDestination(
 	queryGroup execution.QueryGroupIdentity,
 	from string,
@@ -224,12 +244,13 @@ func (router *Router) byteDestination(
 	ready map[string]ownership.WorkerRegistration,
 	readings ByteReadings,
 	sum map[string]uint64,
+	unreadBy map[string]int,
 	peak uint64,
 	at time.Time,
 ) string {
 	destination, headroom := "", uint64(0)
 	for _, workerID := range judged {
-		if workerID == from {
+		if workerID == from || unreadBy[workerID] > 0 {
 			continue
 		}
 		pool, _ := readings.pool(workerID)

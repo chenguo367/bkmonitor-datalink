@@ -25,10 +25,15 @@ type QueryGroupCostReport struct {
 }
 
 // CostEntry is what the ledger holds for one Query Group on one Worker.
+// Provisional marks a reading carried over from the Query Group's previous
+// holder when it moved: the peak is the Query Group's, not the Worker's,
+// and the new holder's sum must include it from the round it lands rather
+// than read empty until the holder's next heartbeat replaces it.
 type CostEntry struct {
 	QueryGroupCostReport
-	WorkerID   string
-	ReportedAt time.Time
+	WorkerID    string
+	ReportedAt  time.Time
+	Provisional bool
 }
 
 // CostLedger is the Control Leader's memory of what each Worker reported
@@ -73,10 +78,13 @@ func (ledger *CostLedger) Record(workerID string, reports []QueryGroupCostReport
 	}
 }
 
-// Retain keeps only the entries the roster agrees with - the Query Group is
-// desired on the Worker that reported it - and drops the rest: a Query
-// Group that moved, retired, or was reported by a Worker that no longer
-// owns it. Called once per Leader round with the round's final owners.
+// Retain brings the ledger to the roster: an entry for a Query Group the
+// roster no longer names is dropped, and an entry a Worker other than the
+// roster's holder made is carried over to the holder as provisional unless
+// the holder has reported it itself. Called once per Leader round with the
+// round's final owners. The carry-over is what keeps a move from making
+// its destination look empty: the peak is the Query Group's property, and
+// the Worker it just landed on holds it from this round on.
 func (ledger *CostLedger) Retain(owners map[execution.QueryGroupIdentity]string) {
 	if ledger == nil {
 		return
@@ -84,11 +92,26 @@ func (ledger *CostLedger) Retain(owners map[execution.QueryGroupIdentity]string)
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
 	for workerID, byGroup := range ledger.entries {
-		for queryGroup := range byGroup {
-			if owners[queryGroup] != workerID {
-				delete(byGroup, queryGroup)
+		for queryGroup, entry := range byGroup {
+			holder := owners[queryGroup]
+			if holder == workerID {
+				continue
 			}
+			delete(byGroup, queryGroup)
+			if holder == "" {
+				continue
+			}
+			if _, reported := ledger.entries[holder][queryGroup]; reported {
+				continue
+			}
+			if ledger.entries[holder] == nil {
+				ledger.entries[holder] = map[execution.QueryGroupIdentity]CostEntry{}
+			}
+			entry.WorkerID, entry.Provisional = holder, true
+			ledger.entries[holder][queryGroup] = entry
 		}
+	}
+	for workerID, byGroup := range ledger.entries {
 		if len(byGroup) == 0 {
 			delete(ledger.entries, workerID)
 		}
