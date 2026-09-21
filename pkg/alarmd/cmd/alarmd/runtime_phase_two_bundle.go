@@ -439,6 +439,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	_, dynamicGroups := cfg.DynamicGroupKeyPrefix()
+	if err := reconciler.ConfigureTargetSources(controlplane.TargetSources{DynamicGroups: dynamicGroups}); err != nil {
+		return nil, err
+	}
 	if err := reconciler.ConfigureOutputProtocol(cfg.OutputProtocol()); err != nil {
 		return nil, err
 	}
@@ -549,6 +553,16 @@ func openProductionPhaseTwoBundleWithDependencies(
 		}
 	}()
 	go maintainCMDBIndex(cmdbIndexCtx, cmdbIndex, recorder)
+	// What a target plan's dynamic references resolve against, once per
+	// Plan per Slot (decision-017). The group store, when there is one,
+	// refreshes on the same cadence as the host index and stops with it.
+	targetResolver, groupStore, err := buildTargetResolver(cfg, cmdbClient, cmdbIndex)
+	if err != nil {
+		return nil, err
+	}
+	if groupStore != nil {
+		go groupStore.Run(cmdbIndexCtx)
+	}
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
 		MinReadyDelay:       cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
 		Now:                 external.Now,
@@ -690,6 +704,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		NoData: executionStore, Hosts: cmdbcache.NewHostBusinessLookup(cmdbIndex), State: executionStore, Progress: progressStore, Observer: observer,
 		ExecutionEvidence: slotAppliedMarks,
 		OpenAlerts:        openAlertCopyPort{cache: openAlertCopy},
+		Targets:           targetResolver,
 	}
 	coordinator, err := worker.NewSlotExecutionCoordinator(workerPorts, worker.ProvisionalBudget{
 		MaxSeries: cfg.PhaseTwo.Coordinator.MaxSeries, MaxRetainedBytes: cfg.PhaseTwo.Coordinator.MaxRetainedBytes,

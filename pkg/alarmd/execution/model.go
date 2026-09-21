@@ -3376,6 +3376,33 @@ type SlotCompletion struct {
 	// be worked around: a completion written by a build from before this
 	// existed has none, and the fold treats that exactly as it did before.
 	Evidence *ExecutionEvidence
+	// TargetResolutions is what each target-plan Plan's target resolved to
+	// in this round, for the Plans that have one; empty otherwise. It rides
+	// on the completion so the round's summary, and the object page that
+	// reads it, can say whether the Plan's records were filtered against a
+	// complete target and why absence was or was not judged.
+	TargetResolutions []TargetResolutionSummary
+}
+
+// TargetResolutionSummary is one Plan's target plan resolution in one round,
+// reduced to what a reader of the round needs: the composed state, the
+// selectors that did not answer whole, dangling topology nodes, and the age
+// of a snapshot served past a failed refresh (decision-017).
+type TargetResolutionSummary struct {
+	StrategyID      string                  `json:"strategy_id"`
+	State           string                  `json:"state"`
+	Failures        []TargetSelectorFailure `json:"failures,omitempty"`
+	NodesMissing    []string                `json:"nodes_missing,omitempty"`
+	StaleAgeSeconds int64                   `json:"stale_age_seconds,omitempty"`
+}
+
+// TargetSelectorFailure names one selector that did not answer whole.
+type TargetSelectorFailure struct {
+	Kind    string `json:"kind"`
+	ID      string `json:"id"`
+	Reason  string `json:"reason"`
+	Dropped int    `json:"dropped,omitempty"`
+	Kept    int    `json:"kept,omitempty"`
 }
 
 type ProgressCommitRequest struct {
@@ -3556,6 +3583,10 @@ type LastCompletionSummary struct {
 	// same Slot: a summary carrying a Slot number and no contract cannot be
 	// told from one written by a different generation of the same Query Group.
 	Contract FrozenExecutionContractRef `json:"contract"`
+	// TargetResolutions is the round's target plan resolutions, for the
+	// Plans that have one. Omitted when none has, so a record written before
+	// the field existed re-encodes unchanged.
+	TargetResolutions []TargetResolutionSummary `json:"target_resolutions,omitempty"`
 }
 
 type UnfinishedSlotProjection struct {

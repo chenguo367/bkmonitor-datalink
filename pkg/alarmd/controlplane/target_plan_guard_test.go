@@ -215,7 +215,8 @@ func TestAValidTargetPlanIsFrozenAndTheLegacyTargetIsNotRead(t *testing.T) {
 		planner := &recordingPlanner{facts: queryFacts(t)}
 		catalog, err = controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
 			Strategies: []controlplane.SourceStrategy{originals[0], changed}, Planner: planner,
-			LastGood: &controlplane.PublishedSnapshot{Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1}, QueryGroups: previous.QueryGroups},
+			TargetSources: controlplane.TargetSources{DynamicGroups: true},
+			LastGood:      &controlplane.PublishedSnapshot{Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1}, QueryGroups: previous.QueryGroups},
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -354,5 +355,75 @@ func TestASelectionOrUnreadableTargetWithoutATargetPlanIsRefusedByName(t *testin
 		if !found {
 			t.Fatalf("target %s was not refused as %s: %+v", legacy, reason, catalog.Dispositions)
 		}
+	}
+}
+
+// A target plan that references a dynamic group in a deployment that renders
+// no dynamic group cache prefix is withheld at compile time, by a name that
+// says configuration: reporting it every Slot as an unavailable selector
+// would dress the gap up as a cache outage. A plan that references no group
+// is untouched either way, and rendering the prefix changes the round's
+// cache key so the withheld Plans are recompiled rather than served stale.
+func TestATargetPlanReferencingGroupsIsWithheldWhereNoGroupSourceIsRendered(t *testing.T) {
+	payload, err := os.ReadFile("testdata/two_threshold_strategies.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var documents []json.RawMessage
+	if err := json.Unmarshal(payload, &documents); err != nil {
+		t.Fatal(err)
+	}
+	identity := controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}
+	withPlan := func(plan string) controlplane.SourceStrategy {
+		var document map[string]json.RawMessage
+		if err := json.Unmarshal(documents[1], &document); err != nil {
+			t.Fatal(err)
+		}
+		var items []map[string]json.RawMessage
+		if err := json.Unmarshal(document["items"], &items); err != nil {
+			t.Fatal(err)
+		}
+		items[0]["target_plan"] = json.RawMessage(plan)
+		document["items"], _ = json.Marshal(items)
+		raw, _ := json.Marshal(document)
+		return controlplane.SourceStrategy{SourceID: "1002", Document: raw, Identity: identity}
+	}
+	groups := withPlan(`{"schema_version":1,"model_id":"cw-Host","target_rule":"host_id","failure_policy":"no_match",
+		"static_targets":[{"bk_host_id":42}],"dynamic_groups":[{"dynamic_group_id":"1001"}],"dynamic_topologies":[]}`)
+	topology := withPlan(`{"schema_version":1,"model_id":"cw-Host","target_rule":"host_id","failure_policy":"no_match",
+		"static_targets":[{"bk_host_id":42}],"dynamic_groups":[],"dynamic_topologies":[{"bk_biz_id":2,"bk_obj_id":"set","bk_inst_id":12}]}`)
+	cache := controlplane.NewCandidateCache()
+	build := func(source controlplane.SourceStrategy, sources controlplane.TargetSources) controlplane.Catalog {
+		t.Helper()
+		catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+			Strategies: []controlplane.SourceStrategy{{SourceID: "1001", Document: documents[0], Identity: identity}, source},
+			Planner:    &recordingPlanner{facts: queryFacts(t)}, TargetSources: sources, Cache: cache,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return catalog
+	}
+	withheld := build(groups, controlplane.TargetSources{})
+	if got := catalogStrategyIDs(withheld); !reflect.DeepEqual(got, []string{"1001"}) {
+		t.Fatalf("catalog without a group source = %v, want the group-referencing Plan withheld", got)
+	}
+	found := false
+	for _, disposition := range withheld.Dispositions {
+		if disposition.SourceID == "1002" && disposition.Disposition == controlplane.DispositionUnsupported &&
+			disposition.Reason == "DYNAMIC_GROUP_SOURCE_UNCONFIGURED" && disposition.FieldPath == "items[0].target_plan.dynamic_groups" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("not withheld by the configuration's name: %+v", withheld.Dispositions)
+	}
+	if got := catalogStrategyIDs(build(topology, controlplane.TargetSources{})); !reflect.DeepEqual(got, []string{"1001", "1002"}) {
+		t.Fatalf("a topology-only plan was withheld without a group source: %v", got)
+	}
+	// Rendering the prefix is a new round key: the same document compiles
+	// again and is accepted, rather than the cached refusal being served.
+	if got := catalogStrategyIDs(build(groups, controlplane.TargetSources{DynamicGroups: true})); !reflect.DeepEqual(got, []string{"1001", "1002"}) {
+		t.Fatalf("catalog with a group source = %v, want the Plan accepted", got)
 	}
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
 type phaseTwoMetrics struct {
@@ -50,6 +51,8 @@ type phaseTwoMetrics struct {
 	ownershipTransitions            *prometheus.CounterVec
 	queryAdmission                  *prometheus.CounterVec
 	noDataSlotPlans                 *prometheus.CounterVec
+	targetPlanResolutions           *prometheus.CounterVec
+	targetSelectorResolutions       *prometheus.CounterVec
 	noDataStalls                    *prometheus.CounterVec
 	noDataMemoryRefusals            *prometheus.CounterVec
 	noDataMemoryWrites              *prometheus.CounterVec
@@ -331,6 +334,23 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"took effect and nothing before. Counted once per observation, not per key: a fenced batch " +
 				"refused as a whole is one.",
 		}, []string{"site", "refusal"}),
+		targetPlanResolutions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "target_plan_resolution_total",
+			Help: "Target plans resolved, once per Plan per Slot, by the composed state the admission filter and " +
+				"the absence judgement both read: Complete is every selector answered and every member validated; " +
+				"Incomplete is every selector answered with members dropped in validation, so the records of the kept " +
+				"members are admitted and absence is not judged; Unavailable is at least one selector that could not " +
+				"be resolved, so the other selectors' members are admitted and absence is not judged. A rising " +
+				"Unavailable with a steady Complete is one Plan's selector, not the caches.",
+		}, []string{"state"}),
+		targetSelectorResolutions: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "target_selector_resolutions_total",
+			Help: "Selectors of target plans resolved, once per selector per Plan per Slot, by kind, state and the " +
+				"closed reason behind an Unavailable or Incomplete state: key_missing, json_invalid, " +
+				"structure_invalid, model_mismatch, read_failed, stale, index_unavailable, node_missing, " +
+				"members_dropped, source_unwired. OKEmpty with node_missing is a topology reference to a node " +
+				"the topology cache does not list.",
+		}, []string{"kind", "state", "reason"}),
 		noDataSlotPlans: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_slot_plans_total",
 			Help: "Plans that detect no-data, counted once per Slot by what happened to that detection. " +
@@ -878,6 +898,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range nodata.SlotOutcomes {
 		metrics.noDataSlotPlans.WithLabelValues(string(outcome))
 	}
+	for _, state := range targetplan.ResolutionStates {
+		metrics.targetPlanResolutions.WithLabelValues(string(state))
+	}
+	// The selector cells are created on first observation: three kinds by
+	// four states by eleven reasons is mostly pairs that cannot happen.
 	for _, outcome := range nodata.SlotOutcomes {
 		if outcome == nodata.OutcomeEvaluated {
 			// A Plan that evaluated has not stalled, so the label would be a
@@ -979,7 +1004,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.targetPlanResolutions, m.targetSelectorResolutions, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -1192,6 +1217,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.observeNoDataSlot(observation)
 		m.observeNoDataStall(observation)
 	}
+	if facts := observation.TargetResolution; facts != nil {
+		m.observeTargetResolution(facts)
+	}
 	if facts := observation.NoDataMemoryRefusal; facts != nil {
 		m.noDataMemoryRefusals.WithLabelValues(facts.Reason, facts.Record).Inc()
 	}
@@ -1333,6 +1361,37 @@ var frozenCensusStages = []string{frozenCensusDue, frozenCensusRead, frozenCensu
 // owns which outcomes exist.
 func frozenRenewalLabel(outcome execution.FrozenRenewalOutcome) string {
 	return strings.ToLower(string(outcome))
+}
+
+// observeTargetResolution counts one Plan's resolution and each of its
+// selectors. The labels are closed by the resolver's own lists; a word off
+// them lands on other rather than opening a series.
+func (m phaseTwoMetrics) observeTargetResolution(facts *observability.TargetResolutionFacts) {
+	state := "other"
+	for _, known := range targetplan.ResolutionStates {
+		if string(known) == facts.State {
+			state = facts.State
+		}
+	}
+	m.targetPlanResolutions.WithLabelValues(state).Inc()
+	for _, selector := range facts.Selectors {
+		kind, selectorState, reason := "other", "other", "other"
+		switch selector.Kind {
+		case targetplan.SelectorKindStatic, targetplan.SelectorKindGroup, targetplan.SelectorKindTopology:
+			kind = selector.Kind
+		}
+		for _, known := range targetplan.SelectorStates {
+			if string(known) == selector.State {
+				selectorState = selector.State
+			}
+		}
+		for _, known := range targetplan.SelectorReasons {
+			if known == selector.Reason {
+				reason = selector.Reason
+			}
+		}
+		m.targetSelectorResolutions.WithLabelValues(kind, selectorState, reason).Inc()
+	}
 }
 
 func (m phaseTwoMetrics) observeNoDataSlot(observation observability.Observation) {

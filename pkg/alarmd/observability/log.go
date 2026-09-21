@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -347,6 +348,26 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("no_data_outcome", facts.Outcome),
 			slog.Int("no_data_outcome_plans", facts.Plans),
 		)
+	}
+	if facts := observation.TargetResolution; facts != nil {
+		attributes = append(attributes,
+			slog.String("strategy_id", facts.StrategyID),
+			slog.String("target_resolution", facts.State),
+			slog.Int("target_selectors", len(facts.Selectors)),
+		)
+		if facts.StaleAgeSeconds > 0 {
+			attributes = append(attributes, slog.Int64("resolved_from_stale_snapshot_age_seconds", facts.StaleAgeSeconds))
+		}
+		for _, selector := range facts.Selectors {
+			if selector.State == "OK" && !selector.NodeMissing {
+				continue
+			}
+			// Only the selectors with something to say are on the line: an
+			// unavailable or incomplete one, an empty one, a dangling node.
+			attributes = append(attributes, slog.String("target_selector",
+				selector.Kind+" "+selector.ID+" "+selector.State+" "+selector.Reason+
+					" kept="+strconv.Itoa(selector.Kept)+" dropped="+strconv.Itoa(selector.Dropped)))
+		}
 	}
 	if facts := observation.GapProgress; facts != nil {
 		// Both numbers, on every line. The question these answer is "how far

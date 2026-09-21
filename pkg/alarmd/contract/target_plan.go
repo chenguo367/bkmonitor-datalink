@@ -162,6 +162,18 @@ func (identity TargetPlanIdentityV1) Key(dimension func(name string) string) (st
 	return TargetPlanMemberKey(parts...), true
 }
 
+// MemberKey is the key of an object-model member under this identity: the
+// instance alone behind a model gate, "model|instance" when the record
+// carries the model code itself. A static target, a group member and a
+// topology host all go through here, so the three sources and the record
+// cannot spell the key differently.
+func (identity TargetPlanIdentityV1) MemberKey(model, instance string) string {
+	if identity.ModelDimension != "" {
+		return TargetPlanMemberKey(instance)
+	}
+	return TargetPlanMemberKey(model, instance)
+}
+
 // RosterDimensions is the set of dimensions a no-data group of this target
 // is addressed by: the key dimensions plus the model gate's dimension when
 // there is one. A no-data roster can be built for the target exactly when

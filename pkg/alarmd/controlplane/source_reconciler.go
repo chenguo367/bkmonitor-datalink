@@ -149,6 +149,7 @@ type SourceReconciler struct {
 	stateSemantics  strategy.StateSemantics
 	validateCatalog CatalogAdmission
 	outputProtocol  string
+	targetSources   TargetSources
 	// candidates carries the compiler's output from one round to the next,
 	// so a round compiles only the documents that changed. It lives on the
 	// reconciler because that is the object that survives between rounds; a
@@ -210,6 +211,17 @@ func (reconciler *SourceReconciler) ConfigureOutputProtocol(protocol string) err
 	default:
 		return errors.New("alarmd controlplane: unknown output protocol")
 	}
+}
+
+// ConfigureTargetSources says which sources the deployment renders for a
+// target plan's dynamic references, once, at assembly, for the same reason
+// the output protocol is set rather than passed.
+func (reconciler *SourceReconciler) ConfigureTargetSources(sources TargetSources) error {
+	if reconciler == nil {
+		return errors.New("alarmd controlplane: no source reconciler")
+	}
+	reconciler.targetSources = sources
+	return nil
 }
 
 // CatalogAdmission is the deployment's say over a Catalog the compiler built.
@@ -299,7 +311,7 @@ func (reconciler *SourceReconciler) Refresh(
 	}
 	catalog, err := BuildCatalog(ctx, BuildRequest{
 		Strategies: cycle.strategies, Planner: planner, LastGood: current, PreviousDispositions: previousDispositions,
-		OutputProtocol: reconciler.outputProtocol, Cache: reconciler.candidates,
+		OutputProtocol: reconciler.outputProtocol, TargetSources: reconciler.targetSources, Cache: reconciler.candidates,
 	})
 	if err != nil {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitBuildCatalog, err)

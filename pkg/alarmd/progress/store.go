@@ -301,11 +301,12 @@ func (store *Store) CommitProgress(ctx context.Context, request execution.Progre
 		// merge with what was stored: a summary of the previous round kept
 		// beside this one would be two answers to a question that has one.
 		LastCompletion: &execution.LastCompletionSummary{
-			Slot:        request.ExpectedNextSlot,
-			CompletedAt: store.options.Now().UTC().Format(time.RFC3339),
-			Kind:        request.Completion.Kind,
-			ReasonCode:  request.Completion.ReasonCode,
-			Contract:    request.Completion.Contract,
+			Slot:              request.ExpectedNextSlot,
+			CompletedAt:       store.options.Now().UTC().Format(time.RFC3339),
+			Kind:              request.Completion.Kind,
+			ReasonCode:        request.Completion.ReasonCode,
+			Contract:          request.Completion.Contract,
+			TargetResolutions: request.Completion.TargetResolutions,
 		}}
 	if !missing {
 		next.LastFullSlot = current.LastFullSlot

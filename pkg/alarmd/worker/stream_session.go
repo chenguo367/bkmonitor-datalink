@@ -117,6 +117,10 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 		return fmt.Errorf("alarmd worker: prepare EffectiveTime facts: %w", err)
 	}
 	stream.effective = effective
+	// The target plans are resolved here, before any series arrives: the
+	// source reads the memberships right after Begin to filter the records,
+	// and the absence judgement at completion reads the same resolutions.
+	stream.resolveTargetPlans(ctx)
 	execution.CaptureSlotCoverage(ctx, func(c *execution.SlotCoverageCapture) {
 		if c.Prepared != nil {
 			c.Prepared(header, effective)
