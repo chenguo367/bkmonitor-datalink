@@ -7,6 +7,7 @@ package worker
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -143,4 +144,85 @@ func TestTheDuplicatedStatementReadingDoesNotFailTheSlot(t *testing.T) {
 	if seen[0].Result == observability.ResultFailed {
 		t.Fatalf("the reading published result %q for a Slot that completed", seen[0].Result)
 	}
+}
+
+// refusingGapStore answers every apply with one refusal.
+type refusingGapStore struct{ status execution.GapGuardApplyStatus }
+
+func (store *refusingGapStore) LoadGaps(
+	context.Context, execution.GapLoadRequest,
+) (execution.GapLoadResult, error) {
+	return execution.GapLoadResult{}, nil
+}
+
+func (store *refusingGapStore) LoadGapsInto(
+	context.Context, execution.GapLoadRequest, func(execution.GapGuardSnapshot) error,
+) error {
+	return nil
+}
+
+func (store *refusingGapStore) ApplyGap(
+	_ context.Context, request execution.GapGuardApplyRequest,
+) (execution.GapGuardApplyResult, error) {
+	result := execution.GapGuardApplyResult{Items: make([]execution.GapGuardApplyItemResult, len(request.Items))}
+	for index, item := range request.Items {
+		result.Items[index] = execution.GapGuardApplyItemResult{Identity: item.Identity, Status: store.status}
+	}
+	return result, nil
+}
+
+// A refusal names the apply site it came from.
+//
+// The Slot has two gap apply calls and both write the same Plan-level key, so
+// the site is what separates "this Slot's other call moved the marker" from "a
+// writer in another process did". Driven through applyGap with each site in
+// turn, because a case that only reads the constants would pass while both
+// call sites passed the same one.
+func TestAGapRefusalNamesTheApplySiteItCameFrom(t *testing.T) {
+	// First, that the two sites are two values. Everything below compares a
+	// refusal against the constant it was given, so one constant spelled the
+	// same as the other would satisfy every case while telling a reader the
+	// Slot's two writes came from one place - which is the one thing the
+	// field exists to distinguish.
+	if GapSiteBeforeEvents == GapSiteAfterState {
+		t.Fatalf("both apply sites are named %q, so a refusal cannot say which one it came from",
+			GapSiteBeforeEvents)
+	}
+	for _, site := range []string{GapSiteBeforeEvents, GapSiteAfterState} {
+		t.Run(site, func(t *testing.T) {
+			coordinator := &SlotExecutionCoordinator{
+				budget: sideEffectTestBudget("gap"),
+				ports: Ports{GapGuard: &refusingGapStore{status: execution.GapGuardConflict},
+					NoData: SharedNoDataStore, Hosts: SharedHostBusiness,
+					Observer: observability.ObserverFunc(func(context.Context, observability.Observation) {})},
+			}
+			mutation := gapStatement("7", "aa", 3)
+			err := coordinator.applyGap(context.Background(), execution.OperationNormal,
+				execution.FrozenExecutionContractRef{}, []execution.PlanGapMutation{mutation}, site)
+			if err == nil {
+				t.Fatal("a refused apply returned no error")
+			}
+			refusal, named := gapRefusalOf(err)
+			if !named {
+				t.Fatalf("the refusal did not survive the wrappers: %v", err)
+			}
+			if refusal.Site != site {
+				t.Fatalf("site = %q, want %q: a refusal that names the wrong call sends a reader "+
+					"looking for another process when it was this Slot's other write", refusal.Site, site)
+			}
+			// The revision is filled in from the mutation, not the store's
+			// answer, so the two halves of the comparison are on one line.
+			if refusal.ExpectedRevision != mutation.ExpectedMarkerRevision {
+				t.Fatalf("expected revision = %d, want %d", refusal.ExpectedRevision, mutation.ExpectedMarkerRevision)
+			}
+		})
+	}
+}
+
+func gapRefusalOf(err error) (*GapApplyRefusal, bool) {
+	var refusal *GapApplyRefusal
+	if !errors.As(err, &refusal) {
+		return nil, false
+	}
+	return refusal, true
 }
