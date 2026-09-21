@@ -3100,6 +3100,17 @@ const (
 	// primary fact this derivation reads; it is listed here so the ranking
 	// covers every cause a completion can carry.
 	CauseConfigDrift CompletionCause = "CONFIG_DRIFT"
+	// CausePlanReactivated is the same shape as CONFIG_DRIFT - the activated
+	// Plans changed while the Slot was executing - when what changed is the
+	// Plan coming back rather than being edited: identity, schedule revision
+	// and state generation unchanged, only the activation epoch moved. Nobody
+	// needs to look here either, and the reader is sent to the PLAN_NOT_ACTIVE
+	// stretch before it rather than to the strategy.
+	CausePlanReactivated CompletionCause = "PLAN_REACTIVATED"
+	// CausePlanNotActive is the same shape when the Plan the Slot was frozen
+	// with is not in the activation at all any more: the Slot ran after its
+	// Plan left the active set. Still a partial gap, still nothing to fix.
+	CausePlanNotActive CompletionCause = "PLAN_NOT_ACTIVE"
 )
 
 // DeriveCompletionKind reports the completion kind alone, which is what the
@@ -3280,7 +3291,7 @@ func causeRank(cause CompletionCause) int {
 		return 3
 	case CausePrimaryInputPartial:
 		return 2
-	case CauseConfigDrift:
+	case CauseConfigDrift, CausePlanReactivated, CausePlanNotActive:
 		return 1
 	default:
 		return 0

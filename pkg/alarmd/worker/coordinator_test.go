@@ -551,6 +551,39 @@ func TestSlotExecutionCoordinatorForceWarmingDriftProtectsThenConvergesAlreadyAp
 	}
 }
 
+// The same Plan back in the activation under a frozen Slot - identity,
+// generation and schedule revision as frozen, the epoch moved and warming
+// restarted - is protected and converged exactly as a drift is, under
+// PLAN_REACTIVATED throughout: the retry, the Guard's scope reason and the
+// committed completion all carry the one word. A reader following the Slot
+// sees a Plan that came back, not an edit to go and look for.
+func TestSlotExecutionCoordinatorConvergesAReenteredPlanUnderPlanReactivated(t *testing.T) {
+	fixture := newFixture(t, true, "")
+	fixture.ports.activationChangeAt = 1
+	fixture.ports.activationReentry = true
+	fixture.ports.persistActivatedGaps = true
+	fixture.ports.persistReentryGaps = true
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if err != nil || result.Completed || result.Result != observability.ResultRetrying ||
+		result.ReasonCode != execution.ReasonCode(contract.ReasonPlanReactivated) {
+		t.Fatalf("Execute() result=%+v error=%v, want a retrying %s", result, err, contract.ReasonPlanReactivated)
+	}
+	if len(fixture.ports.gapMutations) != 1 || fixture.ports.gapMutations[0].Scopes[0].ReasonCode != execution.ReasonCode(contract.ReasonPlanReactivated) {
+		t.Fatalf("the Guard written for the re-entry = %+v, want its scope under %s", fixture.ports.gapMutations, contract.ReasonPlanReactivated)
+	}
+	result, err = fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if err != nil || !result.Completed || result.Result != observability.ResultDegraded ||
+		result.ReasonCode != execution.ReasonCode(contract.ReasonPlanReactivated) ||
+		fixture.ports.lastProgress.Completion.Kind != execution.CompletionPartialGap ||
+		fixture.ports.lastProgress.Completion.ReasonCode != execution.ReasonCode(contract.ReasonPlanReactivated) {
+		t.Fatalf("second Execute() result=%+v error=%v Progress=%+v, want the partial gap committed under %s",
+			result, err, fixture.ports.lastProgress, contract.ReasonPlanReactivated)
+	}
+	if fixture.ports.eventCount != 0 || fixture.ports.stateApplyCalls != 0 {
+		t.Fatalf("a re-entry emitted old side effects: events=%d state applies=%d", fixture.ports.eventCount, fixture.ports.stateApplyCalls)
+	}
+}
+
 func TestSlotExecutionCoordinatorSatisfiedForceWarmingDoesNotBlockNormalSideEffects(t *testing.T) {
 	fixture := newFixture(t, true, "")
 	fixture.ports.activationForceWarming = true
@@ -595,9 +628,12 @@ func TestSlotExecutionCoordinatorConvergesCurrentActivationSelectionChange(t *te
 		fixture.ports.activationChangeAt = 2
 		fixture.ports.activationSelection = execution.ActivationNone
 
+		// The Plan left the activation under the Slot: the same partial gap
+		// the drift produces, under the word for a Plan that is gone rather
+		// than edited.
 		result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 		if err != nil || !result.Completed || result.Result != observability.ResultDegraded ||
-			result.ReasonCode != execution.ReasonCode(contract.ReasonConfigDrift) ||
+			result.ReasonCode != execution.ReasonCode(contract.ReasonPlanNotActive) ||
 			fixture.ports.lastProgress.Completion.Kind != execution.CompletionPartialGap {
 			t.Fatalf("Execute() result=%+v error=%v Progress=%+v", result, err, fixture.ports.lastProgress)
 		}
@@ -607,19 +643,26 @@ func TestSlotExecutionCoordinatorConvergesCurrentActivationSelectionChange(t *te
 	})
 }
 
-func TestSlotExecutionCoordinatorCompletesHistoricalPlanAsConfigDriftWhenActivationIsNone(t *testing.T) {
+// A Slot frozen with a Plan the activation no longer names completes as a
+// partial gap under PLAN_NOT_ACTIVE - the same shape the drift produces, the
+// word for a Plan that is gone rather than edited - with no side effects and
+// no invented Guard. It carried CONFIG_DRIFT until a strategy list that
+// dropped entries for minutes every hour showed the two are read in opposite
+// ways: drift sends a reader to the strategy, this sends them to the active
+// set.
+func TestSlotExecutionCoordinatorCompletesHistoricalPlanAsPlanNotActiveWhenActivationIsNone(t *testing.T) {
 	fixture := newFixture(t, true, "")
 	fixture.ports.activationChangeAt = 1
 	fixture.ports.activationSelection = execution.ActivationNone
 
 	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
 	if err != nil || !result.Completed || result.Result != observability.ResultDegraded ||
-		result.ReasonCode != execution.ReasonCode(contract.ReasonConfigDrift) ||
+		result.ReasonCode != execution.ReasonCode(contract.ReasonPlanNotActive) ||
 		fixture.ports.lastProgress.Completion.Kind != execution.CompletionPartialGap {
 		t.Fatalf("Execute() result=%+v error=%v Progress=%+v", result, err, fixture.ports.lastProgress)
 	}
 	if fixture.ports.eventCount != 0 || fixture.ports.stateApplyCalls != 0 || len(fixture.ports.gapMutations) != 0 {
-		t.Fatalf("historical CONFIG_DRIFT emitted side effects or a new activation Guard: events=%d state=%d gaps=%+v",
+		t.Fatalf("historical PLAN_NOT_ACTIVE emitted side effects or a new activation Guard: events=%d state=%d gaps=%+v",
 			fixture.ports.eventCount, fixture.ports.stateApplyCalls, fixture.ports.gapMutations)
 	}
 }
@@ -1233,6 +1276,15 @@ func (ports *recordingPorts) LoadActivations(
 					ForceWarming: ports.activationForceWarming,
 				},
 			}
+			if ports.activationReentry {
+				// The same Plan back in the activation: generation and
+				// schedule revision as frozen, only the epoch moved and the
+				// warming restarted.
+				facts[index].Selected = execution.ActivatedPlan{
+					Identity: plan, StateGeneration: "state-v1", StateApplyEpoch: 2,
+					ScheduleRevision: "plan-schedule-v1", RequiredFullSlots: 1, ForceWarming: true,
+				}
+			}
 			if selection == execution.ActivationNone {
 				facts[index].Selected = execution.ActivatedPlan{}
 			}
@@ -1307,15 +1359,21 @@ type recordingPorts struct {
 	activationChangeAt              int
 	activationSecondChangeAt        int
 	activationForceWarming          bool
-	activationSelection             execution.ActivationSelection
-	persistActivatedGaps            bool
-	activatedGapMarkers             map[execution.PlanGapIdentity]execution.GapGuardSnapshot
-	progressActivationChecked       bool
-	admissionRejectAt               int
-	frozenRenewalRequests           []execution.FrozenStateRenewalRequest
-	frozenRenewalOutcome            execution.FrozenRenewalOutcome
-	frozenRenewalErr                error
-	stateLoadStatus                 execution.StateLoadStatus
+	// activationReentry makes the activation change at activationChangeAt a
+	// re-entry of the same Plan rather than an edit; persistReentryGaps lets
+	// the Guard written for it - under the frozen generation, which the fake
+	// otherwise answers statically - be found by the next load.
+	activationReentry         bool
+	persistReentryGaps        bool
+	activationSelection       execution.ActivationSelection
+	persistActivatedGaps      bool
+	activatedGapMarkers       map[execution.PlanGapIdentity]execution.GapGuardSnapshot
+	progressActivationChecked bool
+	admissionRejectAt         int
+	frozenRenewalRequests     []execution.FrozenStateRenewalRequest
+	frozenRenewalOutcome      execution.FrozenRenewalOutcome
+	frozenRenewalErr          error
+	stateLoadStatus           execution.StateLoadStatus
 	// stateLoadedBytes is what the fake store says a preflight read back.
 	stateLoadedBytes        int64
 	stateRetryableFirstOnly bool
@@ -1743,7 +1801,7 @@ func (ports *recordingPorts) ApplyGap(_ context.Context, request execution.GapGu
 		if ports.refuseGapStage != "" && ports.refuseGapStage == stage {
 			items[index].Status = execution.GapGuardConflict
 		}
-		if ports.persistActivatedGaps && item.Identity.StateGeneration != "state-v1" {
+		if ports.persistActivatedGaps && (item.Identity.StateGeneration != "state-v1" || ports.persistReentryGaps) {
 			if ports.activatedGapMarkers == nil {
 				ports.activatedGapMarkers = make(map[execution.PlanGapIdentity]execution.GapGuardSnapshot)
 			}
