@@ -47,12 +47,24 @@ type SourceSetLedger struct {
 // SourceSetRound is one round's word on the set, as the composition has it:
 // the strategies the source listed -- whatever became of them this round,
 // accepted or refused, a strategy in the list is in the list -- the ones
-// under grace, and the ones removed.
+// under grace, and the ones removed, each with the catalog's own word on
+// when it was first found absent.
 type SourceSetRound struct {
 	At             time.Time
 	Listed         []string
-	PendingRemoval []string
-	Removed        []string
+	PendingRemoval []AbsentStrategy
+	Removed        []AbsentStrategy
+}
+
+// AbsentStrategy is one strategy the source did not list this round, with
+// when the catalog first found it absent (zero when the catalog did not
+// say: a disposition from before the field, or one this build cannot read).
+// The catalog's moment is the true start of the absence and survives a
+// leader restart on the published audit; this process's first sight of the
+// strategy under grace is only a lower bound on it.
+type AbsentStrategy struct {
+	StrategyID  string
+	AbsentSince time.Time
 }
 
 // SourceSetHour is one hour of the account.
@@ -138,19 +150,13 @@ func (ledger *SourceSetLedger) NoteRound(round SourceSetRound) {
 	}
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
-	for _, strategyID := range round.PendingRemoval {
-		if _, known := ledger.absent[strategyID]; !known {
-			ledger.absent[strategyID] = round.At
-			ledger.hour(round.At).Dropped++
-		}
+	for _, strategy := range round.PendingRemoval {
+		ledger.noteAbsent(strategy, round.At)
 	}
-	for _, strategyID := range round.Removed {
-		if _, known := ledger.absent[strategyID]; !known {
-			ledger.absent[strategyID] = round.At
-			ledger.hour(round.At).Dropped++
-		}
-		if !ledger.removed[strategyID] {
-			ledger.removed[strategyID] = true
+	for _, strategy := range round.Removed {
+		ledger.noteAbsent(strategy, round.At)
+		if !ledger.removed[strategy.StrategyID] {
+			ledger.removed[strategy.StrategyID] = true
 			ledger.hour(round.At).Removed++
 		}
 	}
@@ -183,6 +189,35 @@ func (ledger *SourceSetLedger) NoteRound(round SourceSetRound) {
 		if round.At.Sub(key) > time.Duration(SourceSetHours)*time.Hour {
 			delete(ledger.hours, key)
 		}
+	}
+}
+
+// noteAbsent records a strategy the round did not list. The start of the
+// absence is the catalog's word when it has one -- the moment the strategy
+// was first found absent, carried on the disposition and on the published
+// audit across leader restarts -- and this round otherwise, which is the
+// first this process saw of it and a lower bound on the truth. An absence
+// already known keeps the earliest start it has been given: a ledger that
+// began after the strategy went absent learns the true start from the
+// catalog's word on a later round, and never moves it later.
+func (ledger *SourceSetLedger) noteAbsent(strategy AbsentStrategy, at time.Time) {
+	since := at
+	if !strategy.AbsentSince.IsZero() && strategy.AbsentSince.Before(at) {
+		since = strategy.AbsentSince
+	}
+	known, seen := ledger.absent[strategy.StrategyID]
+	if !seen {
+		ledger.absent[strategy.StrategyID] = since
+		// Dropped is counted in the hour the absence began, which for a
+		// leader that took over mid-grace is an hour before its account did:
+		// the hourly fold then says when the list lost the strategy, not when
+		// this process heard of it, and "every hour at :01" reads as such
+		// across a leader change.
+		ledger.hour(since).Dropped++
+		return
+	}
+	if since.Before(known) {
+		ledger.absent[strategy.StrategyID] = since
 	}
 }
 
