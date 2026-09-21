@@ -608,7 +608,13 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("error", SanitizeErrorText(observation.Err.Error())),
 		)
 	}
-	if admission.Suppressed > 0 {
+	if admission.Sampled {
+		// The one line a pacing bucket keeps per window says it is that line,
+		// and carries the merged count even when it is zero: on this line a
+		// missing count would read the same as "not counted", and the count is
+		// what the line is kept for.
+		attributes = append(attributes, slog.Bool("sampled", true), slog.Uint64("suppressed_logs", admission.Suppressed))
+	} else if admission.Suppressed > 0 {
 		attributes = append(attributes, slog.Uint64("suppressed_logs", admission.Suppressed))
 	}
 	if admission.SuppressedEvicted > 0 {
