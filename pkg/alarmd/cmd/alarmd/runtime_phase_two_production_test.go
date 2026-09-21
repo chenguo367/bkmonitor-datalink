@@ -2342,9 +2342,24 @@ func TestObservedProductionSlotExecutorDoesNotReportReadinessDeferralAsFailure(t
 		t.Fatalf("Execute() error=%v, want wrapped readiness error", err)
 	}
 	if len(observations) != 2 || observations[1].Stage != observability.StageSlotCompleted ||
-		observations[1].Result != observability.ResultRetrying ||
-		observations[1].ReasonCode != observability.ReasonNone || observations[1].Err != nil {
+		observations[1].Result != observability.ResultRetrying || observations[1].Err != nil {
 		t.Fatalf("readiness observations=%+v, want non-failure retrying completion", observations)
+	}
+	// A deferral is the normal pacing of a Slot, and it has to say so on the
+	// completion line as the query line does. It used to carry no reason,
+	// which on a retrying result normalizes to reason_not_reported: on a live
+	// deployment that was every Query Group's most frequent slot_completed
+	// line, and the reason label of the stage counter with it, reading as a
+	// site that failed to report.
+	completed := observability.NormalizeObservation(observations[1])
+	if completed.ReasonCode != observability.ReasonCode(contract.ReasonQueryNotReady) {
+		t.Fatalf("deferral reason=%q, want %s as the query stage says it", completed.ReasonCode, contract.ReasonQueryNotReady)
+	}
+	if completed.ReasonCode == observability.ReasonNotReported || completed.ReasonCode == observability.ReasonInternalUnknown || completed.ReasonCode == observability.ReasonOther {
+		t.Fatalf("deferral normalizes to %q: the line reads as a fault", completed.ReasonCode)
+	}
+	if metricReason := observability.NormalizeMetricReason(observability.ComponentScheduler, observations[1].ReasonCode, observations[1].Result); metricReason == observability.ReasonNotReported {
+		t.Fatalf("deferral metric reason=%q, want a named class", metricReason)
 	}
 }
 

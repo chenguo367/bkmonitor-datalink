@@ -2814,6 +2814,9 @@ func NormalizeReason(reason ReasonCode, result Result) ReasonCode {
 	if _, ok := viewStreamReasonSet[reason]; ok {
 		return reason
 	}
+	if _, ok := schedulerDecisionReasonSet[reason]; ok {
+		return reason
+	}
 	return ReasonOther
 }
 
@@ -3090,10 +3093,30 @@ func ViewStreamReasonCode(reason string) ReasonCode {
 	return ""
 }
 
+// SchedulerDecisionReasons is the closed list of words the scheduler's own
+// decisions carry as their reason_code: why a round gave up on a Slot at the
+// range gate (RangeGateOutcomes) and why a replay expired
+// (ReplayExpiryReasons). Both words already travelled on their lines, in the
+// facts (range_gate, replay_expiry_reason), with the reason field left empty
+// -- which a degraded result normalizes to reason_not_reported, the word for
+// a site that failed to report, on lines whose site had reported one level
+// down, where a count by reason cannot reach it. The lists are the same ones
+// the metric partitions pre-create, so a word here is a word a series counts.
+var SchedulerDecisionReasons = func() []ReasonCode {
+	reasons := make([]ReasonCode, 0, len(RangeGateOutcomes)+len(ReplayExpiryReasons))
+	for _, outcome := range RangeGateOutcomes {
+		reasons = append(reasons, ReasonCode(outcome))
+	}
+	for _, reason := range ReplayExpiryReasons {
+		reasons = append(reasons, ReasonCode(reason))
+	}
+	return reasons
+}()
+
 var allCommonReasons = joinReasons(unclassifiedReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 var allResourceReasons = joinReasons(
 	unclassifiedReasons, resourceOnlyReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
@@ -3105,6 +3128,7 @@ var commonReasonSet = makeReasonSet(joinReasons(unclassifiedReasons, []ReasonCod
 var resourceReasonSet = makeReasonSet(resourceOnlyReasons)
 var activationFailureReasonSet = makeReasonSet(activationFailureReasons)
 var viewStreamReasonSet = makeReasonSet(ViewStreamReasons)
+var schedulerDecisionReasonSet = makeReasonSet(SchedulerDecisionReasons)
 var contractObservationReasons, contractObservationReasonSet, contractObservationMetricReasonByCode = loadContractObservationReasons()
 
 func makeComponentStageSet(values []ComponentStage) map[ComponentStage]struct{} {
