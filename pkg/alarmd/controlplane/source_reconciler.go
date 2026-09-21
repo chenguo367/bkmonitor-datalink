@@ -179,6 +179,10 @@ type SourceReconciler struct {
 	namedWithheld []ObjectDisposition
 	// namedSuspended is the same memory for suspended no-data halves.
 	namedSuspended []ObjectDisposition
+	// strategies is the last publication indexed by strategy id, for
+	// LookupStrategy; replaced whole at the end of each round that published
+	// or confirmed one.
+	strategies strategyLookupState
 }
 
 // ConfigureClock sets the clock the reconciler paces its periodic full reads
@@ -607,8 +611,9 @@ func (repository *RedisCatalogRepository) sourceCandidateKey() string {
 // rememberLastGood keeps the content of a publication this process just
 // made, so the next round's last-good catalog costs no read at all.
 func (reconciler *SourceReconciler) rememberLastGood(publication SnapshotPublicationRef, catalog Catalog) {
-	reconciler.lastGood = &PublishedSnapshot{SchemaVersion: snapshotSchemaVersion, Publication: publication,
-		QueryGroups: append([]QueryGroup(nil), catalog.QueryGroups...)}
+	groups := append([]QueryGroup(nil), catalog.QueryGroups...)
+	reconciler.lastGood = &PublishedSnapshot{SchemaVersion: snapshotSchemaVersion, Publication: publication, QueryGroups: groups}
+	reconciler.strategies.replace(buildStrategyIndex(publication, groups, catalog.Dispositions))
 }
 
 // currentSnapshot is the content of the latest publication: from memory
@@ -628,5 +633,10 @@ func (reconciler *SourceReconciler) currentSnapshot(ctx context.Context, publica
 		return PublishedSnapshot{}, err
 	}
 	reconciler.lastGood = &snapshot
+	// Assembled from the objects, so the dispositions of the round that
+	// published it are not known here; the round that follows replaces this
+	// with its own. Until then a lookup answers the Plans and no
+	// dispositions, which is what this process knows.
+	reconciler.strategies.replace(buildStrategyIndex(snapshot.Publication, snapshot.QueryGroups, nil))
 	return snapshot, nil
 }
