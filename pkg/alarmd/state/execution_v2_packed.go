@@ -78,6 +78,12 @@ const (
 	// here because it reaches the line under the same reason as the eight, and
 	// an unnamed ninth way is exactly what makes the other eight worth naming.
 	PackedRuleMutationDigestMismatch = "mutation_digest_mismatch"
+	// PackedRuleIdentityKeyUnderivable is the store refusing before it frames
+	// or writes anything: the mutation's identity does not produce a key. Its
+	// own name rather than sharing the digest's, because the two send a reader
+	// to different places - one to what the producer computed, one to the
+	// identity it computed it for.
+	PackedRuleIdentityKeyUnderivable = "identity_key_underivable"
 )
 
 // PackedRuleNames is every rule a framed write can be refused by.
@@ -85,6 +91,7 @@ var PackedRuleNames = []string{
 	PackedRuleLevelNotInMutation, PackedRuleNoDetectFingerprint, PackedRuleTwoFingerprints,
 	PackedRuleDuplicateLevel, PackedRuleSourceTimeNotRising, PackedRuleRecordIDUnderivable,
 	PackedRuleRecordIDNotDerived, PackedRuleUnencodableFactState, PackedRuleMutationDigestMismatch,
+	PackedRuleIdentityKeyUnderivable,
 }
 
 // PackedContractRefusal is a framed write refused by one named rule. The

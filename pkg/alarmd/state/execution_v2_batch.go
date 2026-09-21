@@ -397,8 +397,18 @@ func (store *ExecutionStore) applyRuntime(
 	written := make(map[string]struct{}, len(request.Items))
 	for index, mutation := range request.Items {
 		item := execution.StateApplyItemResult{Identity: mutation.Identity}
-		if err := mutation.ValidateDigest(); err != nil || keyErrors[index] != nil {
+		// Two refusals, not one. Both reach the line as STATE_CORRUPT, and
+		// which one happened is the difference between reading what the
+		// producer computed and reading the identity it computed it for.
+		if err := mutation.ValidateDigest(); err != nil {
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
+			item.RefusalRule = PackedRuleMutationDigestMismatch
+			result.Items[index] = item
+			continue
+		}
+		if keyErrors[index] != nil {
+			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
+			item.RefusalRule = PackedRuleIdentityKeyUnderivable
 			result.Items[index] = item
 			continue
 		}
@@ -472,6 +482,7 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	envelopeKey, err := RuntimeStateKeyV2(store.options.Prefix, mutation.Identity)
 	if err != nil {
 		item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
+		item.RefusalRule = PackedRuleIdentityKeyUnderivable
 		return item
 	}
 	values, err := backend.MGet(ctx, []string{envelopeKey, framedKey})

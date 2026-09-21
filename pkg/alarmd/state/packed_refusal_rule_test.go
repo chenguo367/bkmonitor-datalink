@@ -103,7 +103,7 @@ func TestThePublishedRuleListIsExactlyWhatCanBeReported(t *testing.T) {
 		}
 		published[rule] = true
 	}
-	if len(PackedRuleNames) != 9 {
+	if len(PackedRuleNames) != 10 {
 		t.Fatalf("the list holds %d rules; every refusal that reaches the line under STATE_CORRUPT needs "+
 			"exactly one, so a change to either has to change this number on purpose", len(PackedRuleNames))
 	}
@@ -188,5 +188,85 @@ func TestTheRefusalRuleReachesTheAdmissionResult(t *testing.T) {
 	}
 	if accepted.Items[0].Status != execution.StateAdmissionAccepted || accepted.Items[0].RefusalRule != "" {
 		t.Fatalf("an admitted record carries %+v, want no rule", accepted.Items[0])
+	}
+}
+
+// The apply path names its refusals too.
+//
+// The admission case alone was not enough, and the gap it left was the one
+// that matters: a Slot reaches apply only after admission accepted it, so a
+// producer that changes the record between the two steps is refused here, and
+// that is the shape a rollout produces. Both refusals on this path reported
+// STATE_CORRUPT with no rule, and the batch branch folded two causes into one
+// condition so neither could have been named without splitting it.
+func TestTheApplyPathNamesItsRefusals(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		rule     string
+		corrupt  func(execution.StateMutation) execution.StateMutation
+		identity func() execution.StateKeyIdentity
+	}{
+		{name: "the digest does not cover what was sent", rule: PackedRuleMutationDigestMismatch,
+			corrupt: func(m execution.StateMutation) execution.StateMutation {
+				// Edited after the digest was computed, which is exactly what a
+				// producer changing the record between admission and apply does.
+				m.Points[0].SourceTime += 30
+				return m
+			}},
+		{name: "the identity does not produce a key", rule: PackedRuleIdentityKeyUnderivable,
+			// Built with this identity rather than edited into it, so the
+			// digest covers it and the record reaches key derivation instead
+			// of being refused by the digest one branch earlier. A business
+			// identity the key scheme will not accept but the mutation
+			// builder will: the two validate different things, which is the
+			// gap this refusal exists for.
+			identity: func() execution.StateKeyIdentity {
+				identity := seriesIdentity(0)
+				identity.Plan.BusinessID = "007"
+				return identity
+			}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			backend := &casMemoryBackend{values: make(map[string][]byte)}
+			store := newBatchStore(t, backend, nil)
+			identity := seriesIdentity(0)
+			if testCase.identity != nil {
+				identity = testCase.identity()
+			}
+			mutation := seriesMutation(t, identity, applyVersion(), 0, "")
+			if testCase.corrupt != nil {
+				mutation = testCase.corrupt(mutation)
+			}
+
+			result, err := store.ApplyRuntimeFenced(context.Background(),
+				execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
+					Items: []execution.StateMutation{mutation}}, testApplyFence())
+			if err != nil {
+				t.Fatal(err)
+			}
+			item := result.Items[0]
+			if item.Status != execution.StateApplyDeterministicInvalid ||
+				item.ReasonCode != execution.ReasonCode(contract.ReasonStateCorrupt) {
+				t.Fatalf("apply = %+v, want a deterministic invalid STATE_CORRUPT", item)
+			}
+			if item.RefusalRule != testCase.rule {
+				t.Fatalf("rule = %q, want %q: on this path the reason alone leaves a reader with nothing "+
+					"to tell the two causes apart", item.RefusalRule, testCase.rule)
+			}
+		})
+	}
+
+	// The control: an uncorrupted record applies and carries no rule, so the
+	// field's presence means a refusal rather than meaning this build sets it.
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	store := newBatchStore(t, backend, nil)
+	result, err := store.ApplyRuntimeFenced(context.Background(),
+		execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
+			Items: seriesMutations(t, 1, applyVersion(), 0)}, testApplyFence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Items[0].Status != execution.StateApplied || result.Items[0].RefusalRule != "" {
+		t.Fatalf("an applied record carries %+v, want no rule", result.Items[0])
 	}
 }
