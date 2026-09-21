@@ -46,7 +46,14 @@ func packedMutation(t *testing.T, points []execution.StateHistoryPoint, levelCou
 			LevelStateCompatibility: "COMPATIBLE", HistoryCompleteness: execution.HistoryFull,
 			WarmupRequirementRef: strings.Repeat("9f", 32), LastProcessedEventTime: 1758400000}
 	}
-	return execution.StateMutation{Identity: packedIdentity(), ApplyVersion: execution.ApplyVersion{
+	// Every point counted as this round's, which is what the refusal cases
+	// mean by "the producer sent this": a point the round did not produce is
+	// history, and history that does not derive is stored rather than refused.
+	affected := make([]execution.RecordAnchor, 0, len(points))
+	for _, point := range points {
+		affected = append(affected, execution.RecordAnchor{RecordID: point.RecordID, SourceTime: point.SourceTime})
+	}
+	return execution.StateMutation{Identity: packedIdentity(), AffectedRecords: affected, ApplyVersion: execution.ApplyVersion{
 		StateApplyEpoch: 3, EvaluationTime: 1758400000, SlotDigest: execution.SlotIdentityDigest(strings.Repeat("7e", 32))},
 		MutationDigest: execution.MutationDigest(strings.Repeat("5a", 32)), Levels: levels, Points: points}
 }

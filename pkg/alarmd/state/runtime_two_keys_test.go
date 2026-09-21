@@ -224,7 +224,11 @@ func TestANewerFrameIsRefusedByNameNotReplacedByTheEnvelope(t *testing.T) {
 	framedKey, _ := RuntimeStateKeyV3("alarmd", identity)
 	backend.values[envelopeKey], _ = encodeRuntime(seriesMutation(t, identity, applyVersion(), 0, ""), 5)
 	framed, _ := encodeRuntimePacked(seriesMutation(t, identity, applyVersion(), 0, ""), 2)
-	framed[4] = packedFrameSchemaV1 + 1 // a frame schema this binary does not read
+	// One past the newest schema this build reads, which has to be kept one
+	// past it: written as an offset from an older constant this silently
+	// became a schema the build DOES read the moment a newer one was added,
+	// and the case went on passing while testing nothing.
+	framed[4] = packedFrameSchemaV2 + 1
 	backend.values[framedKey] = framed
 	framedBefore := string(framed)
 

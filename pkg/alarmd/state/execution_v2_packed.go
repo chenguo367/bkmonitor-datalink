@@ -48,6 +48,23 @@ type packedHeader struct {
 	SeriesGuard    *execution.StateGuardFact  `json:"series_guard,omitempty"`
 	Levels         []packedLevel              `json:"levels"`
 	PointCount     int                        `json:"point_count"`
+	// LegacyRecordIDs carries the ids of points the derivation cannot rebuild,
+	// by their position in the history. Absent for every record whose points
+	// all derive, which is the ordinary case and costs those records nothing.
+	//
+	// It exists because the envelope stored ids verbatim and never checked
+	// them, so state written before this representation can hold points whose
+	// id is not DeriveRecordIDV2(series, source time). Rebuilding those from
+	// the derivation would hand back a different record than was stored, and
+	// refusing them refuses the whole record on every round for as long as the
+	// point is retained - which is a Plan that never writes state again.
+	LegacyRecordIDs []packedLegacyRecordID `json:"legacy_record_ids,omitempty"`
+}
+
+// packedLegacyRecordID is one stored id the derivation cannot rebuild.
+type packedLegacyRecordID struct {
+	Index    int    `json:"index"`
+	RecordID string `json:"record_id"`
 }
 
 // ErrPackedContract is a write refused for disagreeing with what the framed
@@ -162,16 +179,24 @@ func levelFingerprints(mutation execution.StateMutation, levels []execution.Runt
 
 // encodeRuntimePacked writes the framed record.
 func encodeRuntimePacked(mutation execution.StateMutation, revision uint64) ([]byte, error) {
+	encoded, _, err := encodeRuntimePackedCounted(mutation, revision)
+	return encoded, err
+}
+
+// encodeRuntimePackedCounted also reports how many of the record's points
+// carried an id the derivation could not rebuild, which is how the deployment
+// learns how much such state it holds and which objects hold it.
+func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint64) ([]byte, int, error) {
 	levels := append([]execution.RuntimeLevelStateMutation(nil), mutation.Levels...)
 	sort.Slice(levels, func(i, j int) bool { return levels[i].LevelID < levels[j].LevelID })
 	for index := 1; index < len(levels); index++ {
 		if levels[index].LevelID == levels[index-1].LevelID {
-			return nil, packedRefusal(PackedRuleDuplicateLevel, "Level %d appears twice", levels[index].LevelID)
+			return nil, 0, packedRefusal(PackedRuleDuplicateLevel, "Level %d appears twice", levels[index].LevelID)
 		}
 	}
 	fingerprints, err := levelFingerprints(mutation, levels)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	last := int64(0)
 	for _, level := range levels {
@@ -179,51 +204,55 @@ func encodeRuntimePacked(mutation execution.StateMutation, revision uint64) ([]b
 			last = level.LastProcessedEventTime
 		}
 	}
-	header := packedHeader{
-		Schema: executionStateSchemaV3, Identity: mutation.Identity, BlobRevision: revision,
-		ApplyVersion: mutation.ApplyVersion, MutationDigest: mutation.MutationDigest, LastEventTime: last,
-		SeriesGuard: mutation.SeriesGuard, Levels: make([]packedLevel, len(levels)), PointCount: len(mutation.Points),
-	}
-	for index, level := range levels {
-		header.Levels[index] = packedLevel{Mutation: level, DetectFingerprint: fingerprints[index]}
-	}
-	headerBytes, err := json.Marshal(header)
-	if err != nil {
-		return nil, err
-	}
-
-	buffer := make([]byte, 0, len(headerBytes)+packedFrameHeaderLen+binary.MaxVarintLen64)
-	buffer = append(buffer, packedFrameMagic...)
-	buffer = append(buffer, packedFrameSchemaV1, packedFrameCodecNone)
-	buffer = appendUvarint(buffer, uint64(len(headerBytes)))
-	buffer = append(buffer, headerBytes...)
-
 	bitmapBytes := (len(levels) + 7) / 8
 	index := make(map[uint32]int, len(levels))
 	for position, level := range levels {
 		index[level.LevelID] = position
 	}
+	// The anchors this round touched, which is what separates a point this
+	// write is responsible for from one it inherited.
+	affected := make(map[execution.RecordAnchor]struct{}, len(mutation.AffectedRecords))
+	for _, anchor := range mutation.AffectedRecords {
+		affected[anchor] = struct{}{}
+	}
+	var legacy []packedLegacyRecordID
+	var points []byte
 	previous := int64(0)
 	for pointIndex, point := range mutation.Points {
 		if point.SourceTime < 0 || (pointIndex > 0 && point.SourceTime <= previous) {
-			return nil, packedRefusal(PackedRuleSourceTimeNotRising, "points must rise strictly by source time")
+			return nil, 0, packedRefusal(PackedRuleSourceTimeNotRising, "points must rise strictly by source time")
 		}
 		// The id is not stored. It is checked here against the derivation every
 		// producer uses, so a producer that stops deriving it is refused where
 		// it writes rather than read back as a different record later.
 		expected, deriveErr := contract.DeriveRecordIDV2(string(mutation.Identity.SeriesIdentityDigest), point.SourceTime)
 		if deriveErr != nil {
-			return nil, packedRefusal(PackedRuleRecordIDUnderivable, "derive record id at %d: %v", point.SourceTime, deriveErr)
+			return nil, 0, packedRefusal(PackedRuleRecordIDUnderivable, "derive record id at %d: %v", point.SourceTime, deriveErr)
 		}
 		if point.RecordID != expected {
-			return nil, packedRefusal(PackedRuleRecordIDNotDerived,
-				"point at %d carries a record id the series identity and source time do not derive", point.SourceTime)
+			// A point this round produced must derive: that is the check that
+			// catches a producer which has stopped deriving, and it has to
+			// refuse where the write happens or the record reads back as a
+			// different one later.
+			//
+			// A point already in the history is not this round's to refuse.
+			// The envelope stored ids verbatim and never checked them, so
+			// state written before this representation can hold one that does
+			// not derive, and refusing it refuses every write this Plan makes
+			// from now on - the record is rewritten whole every round, so the
+			// point never ages out of the refusal either. Its id is stored
+			// instead, which is what the envelope did for every point.
+			if _, thisRound := affected[execution.RecordAnchor{RecordID: point.RecordID, SourceTime: point.SourceTime}]; thisRound {
+				return nil, 0, packedRefusal(PackedRuleRecordIDNotDerived,
+					"point at %d carries a record id the series identity and source time do not derive", point.SourceTime)
+			}
+			legacy = append(legacy, packedLegacyRecordID{Index: pointIndex, RecordID: point.RecordID})
 		}
 		delta := uint64(point.SourceTime)
 		if pointIndex > 0 {
 			delta = uint64(point.SourceTime - previous)
 		}
-		buffer = appendUvarint(buffer, delta)
+		points = appendUvarint(points, delta)
 		present := make([]byte, bitmapBytes)
 		valid := make([]byte, bitmapBytes)
 		anomalous := make([]byte, bitmapBytes)
@@ -240,15 +269,43 @@ func encodeRuntimePacked(mutation execution.StateMutation, revision uint64) ([]b
 			case execution.LevelFactError:
 				setBit(anomalous, position, true)
 			default:
-				return nil, packedRefusal(PackedRuleUnencodableFactState, "Level %d fact result %q", fact.LevelID, fact.Result)
+				return nil, 0, packedRefusal(PackedRuleUnencodableFactState, "Level %d fact result %q", fact.LevelID, fact.Result)
 			}
 		}
-		buffer = append(buffer, present...)
-		buffer = append(buffer, valid...)
-		buffer = append(buffer, anomalous...)
+		points = append(points, present...)
+		points = append(points, valid...)
+		points = append(points, anomalous...)
 		previous = point.SourceTime
 	}
-	return buffer, nil
+
+	// The header is built after the points, because only encoding them says
+	// which ids the derivation could not rebuild.
+	header := packedHeader{
+		Schema: executionStateSchemaV3, Identity: mutation.Identity, BlobRevision: revision,
+		ApplyVersion: mutation.ApplyVersion, MutationDigest: mutation.MutationDigest, LastEventTime: last,
+		SeriesGuard: mutation.SeriesGuard, Levels: make([]packedLevel, len(levels)),
+		PointCount: len(mutation.Points), LegacyRecordIDs: legacy,
+	}
+	for index, level := range levels {
+		header.Levels[index] = packedLevel{Mutation: level, DetectFingerprint: fingerprints[index]}
+	}
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Only a record that needs the table is written at the newer schema, so a
+	// build that knows only the older one goes on reading every record that
+	// does not - and refuses these few by name instead of the population.
+	schema := packedFrameSchemaV1
+	if len(legacy) > 0 {
+		schema = packedFrameSchemaV2
+	}
+	buffer := make([]byte, 0, len(headerBytes)+len(points)+packedFrameHeaderLen+binary.MaxVarintLen64)
+	buffer = append(buffer, packedFrameMagic...)
+	buffer = append(buffer, schema, packedFrameCodecNone)
+	buffer = appendUvarint(buffer, uint64(len(headerBytes)))
+	buffer = append(buffer, headerBytes...)
+	return append(buffer, points...), len(legacy), nil
 }
 
 // packedFrame reports whether these bytes are a framed record rather than the
@@ -265,7 +322,7 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 	if !packedFrame(raw) {
 		return execution.RuntimeStateView{}, fmt.Errorf("%w: not a framed record", ErrCorruptState)
 	}
-	if raw[4] != packedFrameSchemaV1 || raw[5] != packedFrameCodecNone {
+	if (raw[4] != packedFrameSchemaV1 && raw[4] != packedFrameSchemaV2) || raw[5] != packedFrameCodecNone {
 		return execution.RuntimeStateView{}, fmt.Errorf("%w: frame schema %d codec %d", ErrUnsupportedState, raw[4], raw[5])
 	}
 	headerLen, rest, err := consumeUvarint(raw[packedFrameHeaderLen:])
@@ -281,6 +338,16 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 	}
 	if header.Schema != executionStateSchemaV3 {
 		return execution.RuntimeStateView{}, fmt.Errorf("%w: schema %q", ErrUnsupportedState, header.Schema)
+	}
+	legacyByIndex := make(map[int]string, len(header.LegacyRecordIDs))
+	for _, entry := range header.LegacyRecordIDs {
+		if entry.Index < 0 || entry.Index >= header.PointCount || entry.RecordID == "" {
+			return execution.RuntimeStateView{}, fmt.Errorf("%w: legacy record id at %d", ErrCorruptState, entry.Index)
+		}
+		if _, duplicate := legacyByIndex[entry.Index]; duplicate {
+			return execution.RuntimeStateView{}, fmt.Errorf("%w: legacy record id %d listed twice", ErrCorruptState, entry.Index)
+		}
+		legacyByIndex[entry.Index] = entry.RecordID
 	}
 	if header.Identity != identity || header.BlobRevision == 0 {
 		return execution.RuntimeStateView{}, fmt.Errorf("%w: identity or revision", ErrCorruptState)
@@ -313,9 +380,16 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 		}
 		present, valid, anomalous := rest[:bitmapBytes], rest[bitmapBytes:2*bitmapBytes], rest[2*bitmapBytes:3*bitmapBytes]
 		rest = rest[3*bitmapBytes:]
-		recordID, deriveErr := contract.DeriveRecordIDV2(string(identity.SeriesIdentityDigest), sourceTime)
-		if deriveErr != nil {
-			return execution.RuntimeStateView{}, fmt.Errorf("%w: derive record id: %v", ErrCorruptState, deriveErr)
+		// The stored id wins where there is one: a point the derivation cannot
+		// rebuild carries its id in the header, and handing back the derived
+		// one instead would return a different record than was written.
+		recordID, stored := legacyByIndex[point]
+		if !stored {
+			derived, deriveErr := contract.DeriveRecordIDV2(string(identity.SeriesIdentityDigest), sourceTime)
+			if deriveErr != nil {
+				return execution.RuntimeStateView{}, fmt.Errorf("%w: derive record id: %v", ErrCorruptState, deriveErr)
+			}
+			recordID = derived
 		}
 		facts := make([]execution.StateLevelFact, 0, len(header.Levels))
 		for position, level := range header.Levels {

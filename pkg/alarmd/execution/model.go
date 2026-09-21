@@ -2873,10 +2873,13 @@ type StateAdmissionItemResult struct {
 	// measured it; it is observation input only and zero when unknown.
 	EncodedBytes int
 	// RefusalRule names which rule refused a deterministic invalid mutation,
-	// from the store's bounded list; empty for every other status. Eight rules
-	// share STATE_CORRUPT, and a line that carries only the reason sends a
-	// reader to read all eight producers.
+	// from the store's bounded list; empty for every other status. Several
+	// rules share STATE_CORRUPT, and a line that carries only the reason sends
+	// a reader to read every producer.
 	RefusalRule string
+	// LegacyRecordIDs is how many of the mutation's points carried an id the
+	// derivation could not rebuild, so the id had to be stored.
+	LegacyRecordIDs int
 }
 
 type StateAdmissionResult struct {
@@ -2921,10 +2924,15 @@ type StateApplyItemResult struct {
 	ReasonCode ReasonCode
 	// RefusalRule names which rule refused a deterministic invalid write, from
 	// the store's bounded list; empty for every other status. The reason says
-	// the record could not be stored, and there are eight ways for that to be
-	// true with eight different producers to go and look at - a line that
-	// carries only STATE_CORRUPT sends a reader to read all eight.
+	// the record could not be stored, and there are several ways for that to
+	// be true with different producers to go and look at - a line that carries
+	// only STATE_CORRUPT sends a reader to read all of them.
 	RefusalRule string
+	// LegacyRecordIDs is how many of the written record's points carried an id
+	// the derivation could not rebuild, so the id had to be stored. It says
+	// how much state predates the derivation and which objects hold it, which
+	// is what decides whether that state is worth chasing.
+	LegacyRecordIDs int
 	// AlreadyApplied says how an ALREADY_APPLIED was decided and
 	// VersionConflict how a STATE_VERSION_CONFLICT was; each is empty for
 	// every other status. StoredBlobRevision is the revision the key was found

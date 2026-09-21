@@ -394,8 +394,13 @@ func validPointBitmaps(valid, anomalous []byte, levelCount int) bool {
 // binary encoding for them would buy nothing measurable and would put every
 // one of those checks through a second implementation.
 const (
-	packedFrameMagic          = "ALD2"
-	packedFrameSchemaV1  byte = 1
+	packedFrameMagic         = "ALD2"
+	packedFrameSchemaV1 byte = 1
+	// packedFrameSchemaV2 marks a frame whose header carries record ids the
+	// derivation cannot rebuild. Only records that need the table are written
+	// at v2, so a build that knows only v1 goes on reading every other record
+	// and refuses these few by name rather than the whole population.
+	packedFrameSchemaV2  byte = 2
 	packedFrameCodecNone byte = 0
 	packedFrameHeaderLen      = 6
 )
