@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -158,6 +159,52 @@ func TestRunnerBacksOffQGLocalSourceFailureAndAutomaticallyRechecks(t *testing.T
 	}
 	if operation != execution.OperationNormal {
 		t.Fatalf("operation after source retry = %s, want %s", operation, execution.OperationNormal)
+	}
+}
+
+// A source refusing because the executable view does not yet allow the
+// Query Group (decision-016 batch 4b) ends the round by name: retrying,
+// VIEW_NOT_EXECUTABLE, on the blocked source's backoff, executing nothing.
+// Once the view allows it the next round runs the Slot as normal.
+func TestRunnerNamesARoundTheViewDoesNotAllowAndComesBack(t *testing.T) {
+	clock := newMutableClock(time.Unix(200, 0))
+	fence := execution.OwnerFence{QueryGroup: "query-group-1", OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "token-1"}
+	source := &fakeSlotSource{err: &ViewNotExecutableError{Reason: "timeline_stale"}}
+	flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executor := &blockingExecutor{}
+	runner, err := NewRunner("query-group-1", &fakeSession{fence: fence}, source, executor, flights, clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, attempted, err := runner.RunOne(context.Background())
+	if err != nil || !attempted || result.Completed || result.Result != observability.ResultRetrying ||
+		result.ReasonCode != execution.ReasonCode(contract.ReasonViewNotExecutable) || !result.SourceRetry {
+		t.Fatalf("RunOne(view not executable) = (%+v, %t, %v), want a retrying %s", result, attempted, err, contract.ReasonViewNotExecutable)
+	}
+	if executor.calls != 0 {
+		t.Fatalf("executor calls = %d, want none while the view does not allow the Query Group", executor.calls)
+	}
+	if bound := runner.DueBound(); !bound.Deferred || bound.NotDueUntilUnix <= clock.Now().Unix() {
+		t.Fatalf("due bound after the refusal = %+v, want deferred to the backoff", bound)
+	}
+	if _, attempted, err = runner.RunOne(context.Background()); err != nil || attempted || source.calls != 1 {
+		t.Fatalf("RunOne(within backoff) attempted=%t calls=%d err=%v, want no second ask inside the backoff", attempted, source.calls, err)
+	}
+	clock.Advance(testRecoveryLimits().RetryMinDelay)
+	source.err = nil
+	source.slot = frozenSlot("query-group-1")
+	var operation execution.Operation
+	if _, attempted, denied, runErr := runner.RunOneAdmitted(context.Background(), func(actual execution.Operation) (func(), bool) {
+		operation = actual
+		return func() {}, true
+	}); runErr != nil || denied || !attempted || source.calls != 2 {
+		t.Fatalf("RunOne(view allows) attempted=%t denied=%t calls=%d err=%v", attempted, denied, source.calls, runErr)
+	}
+	if operation != execution.OperationNormal {
+		t.Fatalf("operation once the view allows = %s, want %s", operation, execution.OperationNormal)
 	}
 }
 
