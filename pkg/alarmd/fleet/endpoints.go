@@ -176,6 +176,7 @@ const (
 	EndpointStrategyCache = "strategy_cache"
 	EndpointCMDBCache     = "cmdb_cache"
 	EndpointDynamicConfig = "dynamic_config"
+	EndpointTargetGroup   = "target_group"
 	// EndpointOpenAlertSet is the consumer's publication of the series it
 	// holds open alerts on, read under a fixed key contract on the state
 	// Redis: the recovery gate's word on whether there is anything to
@@ -190,6 +191,6 @@ const (
 // replica's own storage first, then what it reads of the platform's and the
 // consumer's, then where its work goes and where its queries go.
 var EndpointRoles = []string{
-	EndpointStateRedis, EndpointStrategyCache, EndpointCMDBCache, EndpointDynamicConfig, EndpointOpenAlertSet,
+	EndpointStateRedis, EndpointStrategyCache, EndpointCMDBCache, EndpointDynamicConfig, EndpointTargetGroup, EndpointOpenAlertSet,
 	EndpointQueryBackend, EndpointOutputKafka, EndpointCompatOutput,
 }

@@ -307,6 +307,36 @@ func openProductionPhaseTwoBundleWithDependencies(
 			}()
 		}
 	}
+	var targetGroupClient redis.UniversalClient
+	targetGroupClientOwned := false
+	targetGroupConnection, targetGroupConfigured := cfg.TargetGroupRedis()
+	if targetGroupConfigured {
+		switch {
+		case reflect.DeepEqual(targetGroupConnection, cmdbConnection):
+			targetGroupClient = cmdbClient
+			sharing.targetGroupSharedWith = fleet.EndpointCMDBCache
+		case reflect.DeepEqual(targetGroupConnection, sourceConnection):
+			targetGroupClient = controlClient
+			sharing.targetGroupSharedWith = fleet.EndpointStrategyCache
+		case reflect.DeepEqual(targetGroupConnection, runtimeConnection):
+			targetGroupClient = runtimeClient
+			sharing.targetGroupSharedWith = fleet.EndpointStateRedis
+		case dynamicConfigConfigured && reflect.DeepEqual(targetGroupConnection, dynamicConfigConnection):
+			targetGroupClient = dynamicConfigClient
+			sharing.targetGroupSharedWith = fleet.EndpointDynamicConfig
+		default:
+			targetGroupClient, err = openProductionRedisWithHook(ctx, targetGroupConnection, recorder.RedisHook("target_group"))
+			if err != nil {
+				return nil, err
+			}
+			targetGroupClientOwned = true
+			defer func() {
+				if resultErr != nil {
+					resultErr = errors.Join(resultErr, targetGroupClient.Close())
+				}
+			}()
+		}
+	}
 	// Report each pool by its role. Where two roles resolve to one connection
 	// there is a single client, and reporting it twice would double count the
 	// same connections.
@@ -320,6 +350,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 		}
 		if dynamicConfigClientOwned {
 			counts = append(counts, redisPoolCounts("dynamic_config", dynamicConfigConnection.PoolSize, dynamicConfigClient))
+		}
+		if targetGroupClientOwned {
+			counts = append(counts, redisPoolCounts("target_group", targetGroupConnection.PoolSize, targetGroupClient))
 		}
 		return counts
 	})
@@ -556,7 +589,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// What a target plan's dynamic references resolve against, once per
 	// Plan per Slot (decision-017). The group store, when there is one,
 	// refreshes on the same cadence as the host index and stops with it.
-	targetResolver, groupStore, err := buildTargetResolver(cfg, cmdbClient, cmdbIndex)
+	targetResolver, groupStore, err := buildTargetResolver(cfg, targetGroupClient, cmdbIndex)
 	if err != nil {
 		return nil, err
 	}
@@ -974,6 +1007,12 @@ func openProductionPhaseTwoBundleWithDependencies(
 			}
 			if cmdbClientOwned {
 				closers = append(closers, cmdbClient.Close())
+			}
+			if dynamicConfigClientOwned {
+				closers = append(closers, dynamicConfigClient.Close())
+			}
+			if targetGroupClientOwned {
+				closers = append(closers, targetGroupClient.Close())
 			}
 			return errors.Join(append(closers, closeLegacyClients())...)
 		},

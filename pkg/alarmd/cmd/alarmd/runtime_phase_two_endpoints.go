@@ -30,11 +30,12 @@ import (
 // says so beside the address, and reads that connection's health for the
 // role, because a role with no client of its own has no health of its own.
 type endpointSharing struct {
-	runtimeIsSource     bool
-	cmdbSharedWith      string
-	dynamicSharedWith   string
-	dynamicConfigured   bool
-	compatOutputPresent bool
+	runtimeIsSource       bool
+	cmdbSharedWith        string
+	dynamicSharedWith     string
+	targetGroupSharedWith string
+	dynamicConfigured     bool
+	compatOutputPresent   bool
 }
 
 // redisClientForRole is the hook client name whose health a role reads.
@@ -57,6 +58,11 @@ func (sharing endpointSharing) redisClientForRole(role string) string {
 			return sharing.redisClientForRole(sharing.dynamicSharedWith)
 		}
 		return "dynamic_config"
+	case fleet.EndpointTargetGroup:
+		if sharing.targetGroupSharedWith != "" {
+			return sharing.redisClientForRole(sharing.targetGroupSharedWith)
+		}
+		return "target_group"
 	case fleet.EndpointOpenAlertSet:
 		// Read through the state store's client: the publication lives on
 		// the state Redis under its own fixed prefix.
@@ -97,6 +103,14 @@ func resolveEndpoints(cfg config.Config, sharing endpointSharing) []fleet.Endpoi
 		endpoints[0].SharedWith = fleet.EndpointStrategyCache
 	}
 	endpoints[2].SharedWith = sharing.cmdbSharedWith
+	if groups, configured := cfg.TargetGroupRedis(); configured {
+		prefix, _ := cfg.DynamicGroupKeyPrefix()
+		entry := redisEndpoint(fleet.EndpointTargetGroup, groups, prefix)
+		entry.SharedWith = sharing.targetGroupSharedWith
+		endpoints = append(endpoints, entry)
+	} else {
+		endpoints = append(endpoints, fleet.Endpoint{Role: fleet.EndpointTargetGroup, Kind: "redis"})
+	}
 	if dynamic, configured := cfg.DynamicConfigRedis(); configured {
 		entry := redisEndpoint(fleet.EndpointDynamicConfig, dynamic, cfg.PhaseTwo.PlatformSettings.RedisKeyPrefix)
 		entry.SharedWith = sharing.dynamicSharedWith

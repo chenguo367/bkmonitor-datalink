@@ -24,9 +24,9 @@ import (
 // The dynamic group cache is the fork's own: one String per group under
 // "<redis_key_prefix>dynamic_group:<id>", JSON, written by the dynamic group
 // module on its own cadence with a seven-day expiry. alarmd reads it from
-// the connection it reads the host cache on - the deployment publishes both
-// there - and only for the groups active Plans reference: tens to hundreds
-// of GETs a minute, never a scan of the inverse hash that lists every
+// configured target group connection (legacy prefix-only configurations use
+// the host cache connection), and only for the groups active Plans reference:
+// tens to hundreds of GETs a minute, never a scan of the inverse hash that lists every
 // instance of a model.
 
 // GroupClient is the one command the reader issues: MGET over the
