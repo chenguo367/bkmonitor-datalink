@@ -344,6 +344,30 @@ type PhaseTwoRuntimeConfig struct {
 	Canonical        PhaseTwoCanonicalConfig        `yaml:"canonical"`
 	PlatformSettings PhaseTwoPlatformSettingsConfig `yaml:"platform_settings"`
 	Observation      PhaseTwoObservationConfig      `yaml:"observation"`
+	NoData           PhaseTwoNoDataConfig           `yaml:"no_data"`
+}
+
+// PhaseTwoNoDataConfig is the deployment's say over how long one absent group
+// goes on being reported before detection stops tracking it.
+//
+// It is here rather than derived because nothing in the process knows the
+// answer. The horizon is a statement about how long a group that stopped
+// reporting stays interesting to the people carrying the pager - a host
+// decommissioned on purpose and one that fell over look identical to
+// detection, and only the deployment knows which its population is mostly
+// made of. Everything the horizon then costs is derived from it.
+type PhaseTwoNoDataConfig struct {
+	// TrackingHorizonSeconds is the platform default every Plan that does not
+	// state its own inherits. A strategy may state its own, including a stated
+	// zero, which is how one opts out of a platform horizon.
+	//
+	// Zero -- the default -- tracks absence indefinitely, which is what every
+	// Plan did before the horizon existed, so a deployment that says nothing
+	// keeps the behaviour it has. That direction is deliberate and is not
+	// symmetric with the other one: a horizon stops no-data alerts once it
+	// passes, so one arrived at by default rather than by decision would
+	// silence a genuine outage and look like quiet.
+	TrackingHorizonSeconds int64 `yaml:"tracking_horizon_seconds,omitempty"`
 }
 
 // PhaseTwoObservationConfig is the operator's allocation to the strategy
@@ -371,6 +395,18 @@ const ObservationMemoryPercentMax = 25
 func (c PhaseTwoObservationConfig) validate() error {
 	if c.MemoryPercent < 0 || c.MemoryPercent > ObservationMemoryPercentMax {
 		return fmt.Errorf("phase_two.observation.memory_percent %d must be between 0 (off) and %d", c.MemoryPercent, ObservationMemoryPercentMax)
+	}
+	return nil
+}
+
+func (c PhaseTwoNoDataConfig) validate() error {
+	// Refused here as well as in the contract because this is where an
+	// operator's typo is still a startup failure they can read. Reaching the
+	// contract means it is already inside a compiled Plan, where the same
+	// mistake is a refused strategy rather than a refused deployment.
+	if c.TrackingHorizonSeconds < 0 {
+		return fmt.Errorf("phase_two.no_data.tracking_horizon_seconds %d must not be negative",
+			c.TrackingHorizonSeconds)
 	}
 	return nil
 }
@@ -536,6 +572,9 @@ func (c PhaseTwoRuntimeConfig) validate() error {
 		return fmt.Errorf("phase_two platform_settings.redis_key_prefix: %w", err)
 	}
 	if err := c.Observation.validate(); err != nil {
+		return err
+	}
+	if err := c.NoData.validate(); err != nil {
 		return err
 	}
 	for name, list := range map[string]*[]string{

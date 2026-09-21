@@ -11,8 +11,11 @@ package controlplane_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 )
 
@@ -66,4 +69,108 @@ func TestAChangedPlatformHorizonRecompilesEveryPlan(t *testing.T) {
 	if compiled, reused := cache.Stats(); compiled != 2 || reused != 0 {
 		t.Fatalf("horizon removed compiled=%d reused=%d, want every Plan recompiled without it", compiled, reused)
 	}
+}
+
+// The deployment's horizon reaches a Plan the reconciler published.
+//
+// The case above drives BuildCatalog with the policy handed to it, which is
+// the one caller that cannot tell whether production has such a caller at all.
+// It does not: the reconciler is what builds Catalogs in a running process, and
+// until it passed the policy the horizon was a field every layer carried and
+// nothing ever set. Everything downstream of it - the frozen config, the
+// per-Plan override, the memory fields, the expiry sites - was complete and
+// idle, because a horizon of zero means track indefinitely, so the feature read
+// as off rather than as unwired.
+//
+// So this case starts at the reconciler deliberately. Asserting anywhere below
+// it passes with the seam still cut.
+func TestTheDeploymentHorizonReachesAPublishedPlan(t *testing.T) {
+	ctx := context.Background()
+	client := newControlplaneRedis(t)
+	document := withItemNoData(t, realThresholdDocuments(t)[0])
+	if err := client.Set(ctx, "bkmonitor.cache.strategy_ids", `[1001]`, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Set(ctx, "bkmonitor.cache.strategy_1001", string(document), 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	planner, err := controlplane.NewLegacyPrimaryQueryCompiler("uq-primary-v1", "UTC", testLegacyQueryRuntimeFacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:no-data-horizon", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, stateSemantics := runtimePlanCompiler(t)
+
+	publish := func(policy func(*controlplane.SourceReconciler)) contract.EvaluationPlanV2 {
+		t.Helper()
+		reconciler, err := controlplane.NewSourceReconciler(repository, compiler, stateSemantics)
+		if err != nil {
+			t.Fatal(err)
+		}
+		policy(reconciler)
+		if _, err := reconciler.Refresh(ctx, newRedisStrategySource(t, client), planner); err != nil {
+			t.Fatal(err)
+		}
+		published, err := reconciler.Refresh(ctx, newRedisStrategySource(t, client), planner)
+		if err != nil || published.Status != controlplane.SourceRefreshPublished {
+			t.Fatalf("publish = (%#v, %v)", published, err)
+		}
+		snapshot, err := loadPublishedSnapshot(ctx, repository, published.Publication)
+		if err != nil {
+			t.Fatal(err)
+		}
+		plan := plansByStrategy(snapshot)["1001"].Plan
+		if plan.NoData == nil {
+			t.Fatal("the published Plan detects no no-data at all, so this case cannot say anything about " +
+				"the horizon it carries")
+		}
+		return plan
+	}
+
+	configured := publish(func(reconciler *controlplane.SourceReconciler) {
+		if err := reconciler.ConfigureNoDataPolicy(func() controlplane.NoDataPolicy {
+			return controlplane.NoDataPolicy{TrackingHorizonSeconds: 600}
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if configured.NoData.TrackingHorizonSeconds != 600 {
+		t.Fatalf("the published Plan carries horizon %d, want the deployment's 600. A Plan built without the "+
+			"deployment's policy carries zero, which is indistinguishable from a deployment that chose to "+
+			"track indefinitely", configured.NoData.TrackingHorizonSeconds)
+	}
+
+	// A deployment that configures nothing keeps the behaviour it had. This is
+	// the other answer the branch has to give: without it the case above passes
+	// on a reconciler that hands every Plan a horizon from somewhere else, and
+	// the default this feature ships with - off - would go unasserted.
+	silent := publish(func(*controlplane.SourceReconciler) {})
+	if silent.NoData.TrackingHorizonSeconds != 0 {
+		t.Fatalf("a deployment that configured no horizon published %d; absence must stay tracked "+
+			"indefinitely, because a horizon stops no-data alerts and one nobody asked for hides an outage",
+			silent.NoData.TrackingHorizonSeconds)
+	}
+}
+
+// withItemNoData turns on no-data detection for the document's first item, the
+// way the platform stores it: the section's presence is the enablement.
+func withItemNoData(t *testing.T, document json.RawMessage) json.RawMessage {
+	t.Helper()
+	var value map[string]any
+	if err := json.Unmarshal(document, &value); err != nil {
+		t.Fatal(err)
+	}
+	item := value["items"].([]any)[0].(map[string]any)
+	if section, present := item["no_data_config"]; present && section != nil {
+		t.Fatal("the fixture already configures no-data, so this helper would be deciding nothing")
+	}
+	item["no_data_config"] = map[string]any{"is_enabled": true, "continuous": 3}
+	payload, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return payload
 }

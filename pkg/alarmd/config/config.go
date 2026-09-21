@@ -352,6 +352,14 @@ func (c Config) OutputProtocol() string {
 	return c.PhaseTwo.Output.protocol()
 }
 
+// NoDataTrackingHorizonSeconds is the deployment's default horizon for how
+// long one absent group stays tracked. Zero tracks indefinitely, which is the
+// behaviour a deployment that says nothing keeps. A strategy stating its own
+// overrides it, including a stated zero.
+func (c Config) NoDataTrackingHorizonSeconds() int64 {
+	return c.PhaseTwo.NoData.TrackingHorizonSeconds
+}
+
 // CMDBCacheRedis is where the platform's host cache is read from.
 func (c Config) CMDBCacheRedis() RedisConnectionConfig {
 	if c.PlatformCache.CMDB != nil {

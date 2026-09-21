@@ -487,6 +487,15 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err := reconciler.ConfigureOutputProtocol(cfg.OutputProtocol()); err != nil {
 		return nil, err
 	}
+	// Read per round rather than captured as a value: the reconciler's round
+	// key covers the horizon, so the seam is what lets a deployment move the
+	// setting without every strategy document having to change for the new
+	// value to reach its Plan.
+	if err := reconciler.ConfigureNoDataPolicy(func() controlplane.NoDataPolicy {
+		return controlplane.NoDataPolicy{TrackingHorizonSeconds: cfg.NoDataTrackingHorizonSeconds()}
+	}); err != nil {
+		return nil, err
+	}
 	if err := reconciler.ConfigureClock(external.Now); err != nil {
 		return nil, err
 	}
