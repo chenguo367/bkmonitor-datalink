@@ -419,9 +419,8 @@ type TargetSelectorFacts struct {
 	Kind, ID, State, Reason string
 	Kept, Dropped           int
 	// NodeMissing marks a topology reference to a node the topology cache
-	// does not list: TARGET_NODE_MISSING on the object page. NodeForeign
-	// marks one whose node holds hosts under another business only:
-	// TARGET_NODE_FOREIGN.
+	// does not list; NodeForeign one whose node holds hosts under another
+	// business only. Both are carried to the object row as they are.
 	NodeMissing bool
 	NodeForeign bool
 }

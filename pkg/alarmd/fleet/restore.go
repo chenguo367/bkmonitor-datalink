@@ -99,9 +99,10 @@ type RestoredRound struct {
 	Kind        string    `json:"kind"`
 	ReasonCode  string    `json:"reason_code,omitempty"`
 	// TargetResolutions is what each target-plan Plan's target resolved to
-	// in that round (decision-017), for the object page's checks:
-	// TARGET_SELECTOR_UNAVAILABLE, TARGET_MEMBERS_DROPPED, TARGET_NODE_MISSING
-	// and TARGET_EMPTY are read off it. Empty for rounds without such a Plan.
+	// in that round (decision-017): the data the object row reads its
+	// target facts from -- state, each failed selector with its reason and
+	// counts, the nodes missing or foreign, the stale age. Empty for rounds
+	// without such a Plan.
 	TargetResolutions []RestoredTargetResolution `json:"target_resolutions,omitempty"`
 	// Revisions the round ran under. They seed the tracker's "last completed
 	// round" triple, so the first round this process completes under other
