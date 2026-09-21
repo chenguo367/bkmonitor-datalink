@@ -428,13 +428,16 @@ var codeChecks = map[string]verdict{
 	// receive, and the fix is the size of the read rather than the health of
 	// the store. Landing it with the dependencies is what made 163 of these in
 	// one day read as a Redis incident.
-	"STATE_READ_TIMEOUT":     lands(CheckDefect),
-	"KAFKA_UNAVAILABLE":      lands(CheckDependencyDown),
-	"STATE_WRITE_RETRYABLE":  lands(CheckDependencyDown),
-	"OUTPUT_ACK_UNKNOWN":     lands(CheckDependencyDown),
-	"SNAPSHOT_UNAVAILABLE":   lands(CheckDependencyDown),
-	"SNAPSHOT_RETRY_PENDING": lands(CheckDependencyDown),
-	"ACTIVATION_READ_FAILED": lands(CheckDependencyDown),
+	"STATE_READ_TIMEOUT": lands(CheckDefect),
+	// Not a defect and not a dependency: this strategy asks for more of one
+	// replica than any single object may hold, and the answer is to shard it.
+	"QG_BUDGET_SHARE_EXCEEDED": lands(CheckPlanUnevaluable),
+	"KAFKA_UNAVAILABLE":        lands(CheckDependencyDown),
+	"STATE_WRITE_RETRYABLE":    lands(CheckDependencyDown),
+	"OUTPUT_ACK_UNKNOWN":       lands(CheckDependencyDown),
+	"SNAPSHOT_UNAVAILABLE":     lands(CheckDependencyDown),
+	"SNAPSHOT_RETRY_PENDING":   lands(CheckDependencyDown),
+	"ACTIVATION_READ_FAILED":   lands(CheckDependencyDown),
 	// The store answered and the activation record was not in it. That is the
 	// infrastructure losing state rather than refusing a read, but it lands
 	// here for the same reason the rest do: nobody outside this deployment can

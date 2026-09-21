@@ -96,3 +96,19 @@ func (stream *streamedExecution) ownBudget(kind observability.CapacityBudget) *u
 	}
 	return stream.ownReservation(value)
 }
+
+// shareRejection describes one Query Group's Slot over the share a single
+// object may hold of the process pool.
+//
+// Reported in bytes, never in mutations. The same byte figure converts to
+// counts that differ eightfold by strategy shape, so a share stated as a count
+// would mean a different amount of memory for every strategy it was applied to
+// - which is the substitution this whole decision exists to undo.
+func shareRejection(phase string, own, requested, share uint64, usage []observability.CapacityBudgetUsage) error {
+	return &provisionalBudgetExceededError{
+		budget: observability.CapacityBudgetRetainedBytes, share: true,
+		facts: &observability.CapacityRejectionFacts{
+			Phase: phase, OwnUsed: &own, Requested: requested, Limit: share, Usage: usage,
+		},
+	}
+}

@@ -487,6 +487,11 @@ type provisionalBudgetExceededError struct {
 	// retry in this process can satisfy; a shared reservation rejection is
 	// left false because concurrent Slots free their share.
 	slot bool
+	// share marks this Query Group's Slot exceeding the share one object may
+	// hold of the pool. Like slot it is not a pause - no amount of freed
+	// capacity makes this object fit - but the action differs: the strategy has
+	// to be sharded rather than the process resized.
+	share bool
 }
 
 func (err *provisionalBudgetExceededError) Error() string {

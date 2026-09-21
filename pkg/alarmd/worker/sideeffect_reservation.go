@@ -170,6 +170,18 @@ func (coordinator *SlotExecutionCoordinator) acquireEffects(delta effectCounts, 
 		}
 		return err
 	}
+	// The share is checked before the pool, and against this execution's own
+	// total rather than against what is left.
+	//
+	// Order matters: with the pool nearly full, an object over its share is
+	// refused by the pool first and reported as somebody else's doing, which is
+	// the attribution this whole distinction exists to fix. Own total rather
+	// than remaining, because a share measured against what happens to be free
+	// means a different thing every round - the same object would fit or not by
+	// the luck of who else is running, and nobody could act on the answer.
+	if share := coordinator.qgShareBytes(); share > 0 && stream.retained+retained > share {
+		return shareRejection(phase, stream.retained, retained, share, stream.ownBudgetUsage(coordinator.budget))
+	}
 	if retained > coordinator.budget.MaxRetainedBytes-reservation.retainedBytes {
 		return budgetRejection(observability.CapacityBudgetRetainedBytes, phase, reservation.retainedBytes, retained, coordinator.budget.MaxRetainedBytes, stream.ownBudget(observability.CapacityBudgetRetainedBytes), stream.ownBudgetUsage(coordinator.budget))
 	}

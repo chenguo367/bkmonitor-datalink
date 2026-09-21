@@ -1879,7 +1879,13 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 	var exceeded *provisionalBudgetExceededError
 	if errors.As(err, &exceeded) {
 		observation.CapacityRejection = exceeded.facts
-		if exceeded.slot {
+		switch {
+		case exceeded.share:
+			// This object is over the share any one of them may hold. Not a
+			// pause either, and not the same action as a Slot over the
+			// per-Slot cap: the strategy has to be sharded.
+			observation.ReasonCode = observability.ReasonCode(contract.ReasonQGBudgetShareExceeded)
+		case exceeded.slot:
 			// The Slot itself is too large for this process: not a pause that
 			// resumes when shared capacity frees up.
 			observation.ReasonCode = observability.ReasonCode(contract.ReasonSlotBudgetExceeded)
@@ -1887,6 +1893,25 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 	}
 	defer func() { _ = recover() }()
 	coordinator.ports.Observer.Observe(ctx, observation)
+}
+
+// qgShareBytes is the most of the retained-byte pool one Query Group's Slot may
+// hold: half of it.
+//
+// A share exists because acquireEffects otherwise only asks whether the pool
+// has room, so one object may legitimately take all of it and every other Query
+// Group on the replica starves. Placement spreads large objects across
+// replicas, which makes that less likely; it does not stop one object from
+// filling the replica it lands on.
+//
+// Half rather than a smaller fraction because the share has to leave the
+// largest object that legitimately exists able to run: on a 4 GiB replica half
+// the pool is 512 MiB, and the strategies this was measured on need 65 to 134
+// MiB. A strategy that does not fit in half a replica's pool is one that has to
+// be sharded, and refusing it by name is better than letting it fill the pool
+// and take its neighbours down with it.
+func (coordinator *SlotExecutionCoordinator) qgShareBytes() uint64 {
+	return coordinator.budget.MaxRetainedBytes / 2
 }
 
 func summarizeStateLoad(result execution.StatePreflightResult) (observability.Result, observability.ReasonCode) {

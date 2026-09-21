@@ -108,7 +108,22 @@ const (
 	// fleet view as a Redis outage - so the investigation began at a
 	// dependency that was fine, while the row carried nothing about how much
 	// had been asked for.
-	ReasonStateReadTimeout      = "STATE_READ_TIMEOUT"
+	ReasonStateReadTimeout = "STATE_READ_TIMEOUT"
+	// ReasonQGBudgetShareExceeded names one Query Group's Slot asking for more
+	// of the process pool than any single object may hold.
+	//
+	// Separate from RESOURCE_HARD_STOP because the two call for different work
+	// and one word made them indistinguishable. A hard stop is somebody else
+	// having filled the pool: this Slot unwinds and the next attempt succeeds
+	// once capacity frees. This is the object being too large for one replica
+	// whoever else is running - waiting changes nothing, and what has to change
+	// is the strategy's shape.
+	//
+	// Without a share at all, one object may legitimately take the whole pool
+	// and starve every other Query Group on the replica. Placement spreads
+	// large objects across replicas; nothing stops one from filling the replica
+	// it lands on.
+	ReasonQGBudgetShareExceeded = "QG_BUDGET_SHARE_EXCEEDED"
 	ReasonProviderUnavailable   = "PROVIDER_UNAVAILABLE"
 	ReasonProgressBeginRejected = "PROGRESS_BEGIN_REJECTED"
 	ReasonProgressBeginFailed   = "PROGRESS_BEGIN_FAILED"

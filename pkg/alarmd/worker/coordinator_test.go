@@ -221,8 +221,11 @@ func TestSlotExecutionCoordinatorBudgetsRetainedSeriesAndBytes(t *testing.T) {
 }
 
 func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndReleasesReservation(t *testing.T) {
+	// Two MiB so the pool is what this case is about. One Query Group may hold
+	// half the pool, so at 1 MiB a single 600 KiB batch is over its share and
+	// the cumulative pool rejection below would never be the thing that fired.
 	fixture := newFixtureWithBudget(t, worker.ProvisionalBudget{
-		MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10,
+		MaxSeries: 100, MaxRetainedBytes: 2 << 20, MaxStateMutations: 100, MaxEvents: 100, MaxGapMutations: 10,
 	})
 	fixture.ports.reverseStateReceipts = true
 	fixture.ports.queryDeliveryBytes = []uint64{600 << 10, 600 << 10}
@@ -234,7 +237,14 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 	if fixture.ports.eventCount != 0 || fixture.ports.stateApplyCalls != 0 || !isZeroProgressCommit(fixture.ports.lastProgress) {
 		t.Fatal("retained-byte rejection reached Event, State or Progress")
 	}
-	assertCapacityRejection(t, fixture.observations, observability.CapacityBudgetRetainedBytes)
+	// The share, not the pool. One Query Group may hold half the retained-byte
+	// budget, so a single object's cumulative payload always crosses its share
+	// before it can reach the pool - the pool's own retained-byte refusal needs
+	// two Query Groups running at once. The property this case is about is
+	// unchanged: a rejected cumulative payload reaches no side effect and
+	// releases what it had taken.
+	assertCapacityRejectionReason(t, fixture.observations,
+		observability.CapacityBudgetRetainedBytes, contract.ReasonQGBudgetShareExceeded)
 
 	var rejection *observability.CapacityRejectionFacts
 	for _, observation := range *fixture.observations {
@@ -242,12 +252,16 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 			rejection = observation.CapacityRejection
 		}
 	}
-	if rejection == nil || rejection.Phase != "normal_input" || rejection.OwnUsed == nil ||
-		*rejection.OwnUsed != rejection.SharedUsed || rejection.SharedUsed < 600<<10 ||
-		rejection.Requested < 600<<10 || rejection.Limit != 1<<20 {
+	// A share rejection is about this object alone, so it carries its own total
+	// and the share it crossed, and no shared usage: nothing another Query
+	// Group did is part of why this one was refused, and reporting a pool
+	// figure here would point the reader at a neighbour that is not involved.
+	// Limit is half the 2 MiB budget.
+	if rejection == nil || rejection.Phase != "normal_output" || rejection.OwnUsed == nil ||
+		*rejection.OwnUsed < 600<<10 || rejection.SharedUsed != 0 || rejection.Limit != 1<<20 {
 		t.Fatalf("missing exact failed-reservation facts: %+v", rejection)
 	}
-	usedAtRejection := rejection.SharedUsed
+	usedAtRejection := *rejection.OwnUsed
 
 	// A complete single-series execution fitting the same budget proves the
 	// failed attempt released its accepted first-batch reservation.
@@ -257,7 +271,7 @@ func TestSlotExecutionCoordinatorRejectsCumulativeUQPayloadBeforeSideEffectsAndR
 	if err != nil || !result.Completed {
 		t.Fatalf("Execute() after rejection result=%+v error=%v", result, err)
 	}
-	if rejection.SharedUsed != usedAtRejection || *rejection.OwnUsed != usedAtRejection {
+	if *rejection.OwnUsed != usedAtRejection {
 		t.Fatal("rejection snapshot changed after healthy execution completed")
 	}
 }
@@ -297,13 +311,20 @@ func TestSlotExecutionCoordinatorReleasesProcessReservationAfterQueryExit(t *tes
 
 func assertCapacityRejection(t *testing.T, observations *[]observability.Observation, want observability.CapacityBudget) {
 	t.Helper()
+	assertCapacityRejectionReason(t, observations, want, contract.ReasonResourceHardStop)
+}
+
+func assertCapacityRejectionReason(
+	t *testing.T, observations *[]observability.Observation, want observability.CapacityBudget, reason string,
+) {
+	t.Helper()
 	for _, observation := range *observations {
 		if observation.Stage == observability.StageResourceHard && observation.Result == observability.ResultPaused {
 			if observation.CapacityBudget != want {
 				t.Fatalf("capacity budget = %q, want %q", observation.CapacityBudget, want)
 			}
-			if observation.ReasonCode != observability.ReasonCode(contract.ReasonResourceHardStop) {
-				t.Fatalf("capacity rejection reason = %q, want %q", observation.ReasonCode, contract.ReasonResourceHardStop)
+			if observation.ReasonCode != observability.ReasonCode(reason) {
+				t.Fatalf("capacity rejection reason = %q, want %q", observation.ReasonCode, reason)
 			}
 			return
 		}
