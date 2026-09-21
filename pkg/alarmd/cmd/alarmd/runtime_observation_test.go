@@ -98,3 +98,25 @@ func TestObservationRedisHasIndependentPoolAndNoHiddenRetries(t *testing.T) {
 		t.Fatalf("diagnostics can consume unbounded attempts or execution pool %+v", o)
 	}
 }
+
+// TopN is derived from the rankings the summary publishes -- two scopes
+// times its dimensions -- not from a count of the dimensions it once had:
+// at a budget where the literal for six dimensions gave one row more than
+// the eight the summary has, the derived TopN follows the list.
+func TestCostTopNFollowsTheSummarysDimensionCount(t *testing.T) {
+	rankings := 2 * len(observability.CostDimensions())
+	// A CostBytes chosen so that CostBytes/16 is exactly 20 rows of the true
+	// ranking count: fewer rows under any larger ranking count, more under
+	// the old literal of twelve rankings.
+	costBytes := 16 * rankings * 4096 * 20
+	capacity := config.ObservationCapacity{CostBytes: costBytes, DirectoryCommands: 64, SampleRecordsPerMinute: 60, SampleBytesPerMinute: 1 << 20, SampleBufferBytes: 1 << 20}
+	o := observationCostOptions(capacity, "process-a", time.Now)
+	if o.TopN != 20 {
+		t.Fatalf("TopN=%d at a budget of exactly 20 rows per ranking (%d rankings), want 20", o.TopN, rankings)
+	}
+	smaller := capacity
+	smaller.CostBytes = costBytes - 16*rankings*4096
+	if o := observationCostOptions(smaller, "process-a", time.Now); o.TopN != 19 {
+		t.Fatalf("TopN=%d one ranking-row short of 20, want 19: the derivation does not follow the dimension count", o.TopN)
+	}
+}
