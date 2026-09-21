@@ -38,21 +38,6 @@ const (
 	// dynamic reference. It would match nothing; refusing it puts it on the
 	// first screen where a strategy that can never alert belongs.
 	ReasonEmpty = "TARGET_PLAN_EMPTY"
-	// ReasonModelRepresentationUnresolved names a model_inst_id target whose
-	// members cannot be placed against the data: the writer named no
-	// model_match, no query configuration names a dimension carrying the
-	// model code, and the host cache knows none of the members as a host.
-	// The plan's model code would be compared with the data's model id and
-	// never match, so the members are named unresolved rather than read as
-	// an empty target.
-	//
-	// It is decided at resolution, not at compile: a host's canonical
-	// identity is (model, instance) too, and the protocol names hosts that
-	// way on every collected metric without a model_match. Whether the
-	// members are hosts is a fact of the host cache, so the decoder freezes
-	// such a plan as read by host identity and the worker's resolution says,
-	// per Slot and by this name, when the cache does not know them.
-	ReasonModelRepresentationUnresolved = "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED"
 )
 
 // Error is one refusal: the bounded reason, the path inside target_plan of

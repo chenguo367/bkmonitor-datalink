@@ -54,7 +54,9 @@ const (
 	// model that is not the host model, or a host cache the writer has not
 	// put the canonical (model, instance) identity on. Either way the members
 	// cannot be placed against the data and are named rather than read as
-	// an empty target. The plan-level word is TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED.
+	// an empty target. This is the only word for it: the compiler freezes
+	// such a plan as read by host identity and refuses nothing, so a
+	// catalog disposition never carries the model question.
 	ReasonModelUnresolved = "model_representation_unresolved"
 )
 
@@ -125,8 +127,9 @@ type Resolution struct {
 	State     ResolutionState
 	Failures  []Failure
 	// NodesMissing lists topology references whose node the cache does not
-	// list, for the TARGET_NODE_MISSING check; NodesForeign those whose node
-	// holds hosts under another business only, for TARGET_NODE_FOREIGN.
+	// list; NodesForeign those whose node holds hosts under another
+	// business only. Both reach the object row's target_resolutions; how
+	// the page names them is the page's.
 	NodesMissing []string
 	NodesForeign []string
 	// StaleAge is the largest StaleAge among the selectors, for the facts.
