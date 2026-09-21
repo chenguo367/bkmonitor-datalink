@@ -45,6 +45,12 @@ type SlotInput struct {
 	// nothing resolved it, which is read as unavailable and never as empty.
 	TargetResolution *TargetResolution
 	Memory           map[string]GroupMemory
+	// TrackingHorizonSeconds and TrackingExhaustedAt are the horizon in force
+	// for this Plan and the Plan-level fact the record held. They are carried
+	// rather than derived: the horizon lives in the Plan the catalog froze and
+	// the fact lives in the memory, and this seam is where the two meet.
+	TrackingHorizonSeconds int64
+	TrackingExhaustedAt    int64
 }
 
 // SlotOutcome says what happened to one no-data Plan in one Slot. Every Plan
@@ -250,13 +256,15 @@ func EvaluateSlot(input SlotInput) (AbsenceResult, SlotOutcome, error) {
 		outcome = OutcomeSkippedQueryNotFull
 	}
 	return Evaluate(AbsenceInput{
-		EvaluationTime: input.EvaluationTime,
-		PeriodSeconds:  input.PeriodSeconds,
-		Completeness:   input.Completeness,
-		Present:        tally.Groups,
-		Dropped:        tally.Dropped,
-		Roster:         roster,
-		Memory:         input.Memory,
-		OutOfBusiness:  input.OutOfBusiness,
+		EvaluationTime:         input.EvaluationTime,
+		PeriodSeconds:          input.PeriodSeconds,
+		Completeness:           input.Completeness,
+		Present:                tally.Groups,
+		Dropped:                tally.Dropped,
+		Roster:                 roster,
+		Memory:                 input.Memory,
+		OutOfBusiness:          input.OutOfBusiness,
+		TrackingHorizonSeconds: input.TrackingHorizonSeconds,
+		TrackingExhaustedAt:    input.TrackingExhaustedAt,
 	}), outcome, nil
 }
