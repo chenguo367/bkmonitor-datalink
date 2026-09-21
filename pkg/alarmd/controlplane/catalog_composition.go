@@ -15,6 +15,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // SupportedSourceSemantics is every data source a query can be compiled from,
@@ -166,6 +167,14 @@ type CatalogComposition struct {
 	// read to establish, from a gate counter that only ever said not gated.
 	RevisionedPlans int
 	PlansTotal      int
+	// PlansByWireFormat counts the accepted Plans by the wire format their
+	// events are published as, resolved the way the sink resolves it from
+	// the frozen word and the revision. Every format the build names is
+	// present at zero, and a word it does not name lands under _other, so
+	// the counts partition PlansTotal. This is the number that answers "how
+	// many strategies publish the standard raw event"; before it the answer
+	// was a Kafka read.
+	PlansByWireFormat map[string]int
 	// InertPlans counts the Plans whose schedule cannot hold the wait their
 	// data needs to land. Such a Plan is ACCEPTED, is scheduled, and executes
 	// -- and every round every one of its consumers is bound unavailable,
@@ -239,6 +248,10 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 	for _, source := range NoDataRosterSources {
 		composition.NoDataPlans[source] = 0
 	}
+	composition.PlansByWireFormat = make(map[string]int, len(observability.WireFormats))
+	for _, format := range observability.WireFormats {
+		composition.PlansByWireFormat[format] = 0
+	}
 	for _, key := range AlwaysReportedWithheld {
 		composition.Withheld[key] = 0
 	}
@@ -251,6 +264,8 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 			if plan.Plan.StrategyRef.SnapshotRevision > 0 {
 				composition.RevisionedPlans++
 			}
+			composition.PlansByWireFormat[observability.NormalizeWireFormat(
+				contract.ResolveOutputWireFormat(plan.Plan.WireFormat, plan.Plan.StrategyRef.SnapshotRevision))]++
 			if !plan.ScheduleSpec.AffordsSettlingWait() {
 				composition.InertPlans++
 			}

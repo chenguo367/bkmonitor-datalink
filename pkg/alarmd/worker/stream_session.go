@@ -1529,8 +1529,21 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 		Trace:                observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID, DimensionIdentityDigest: string(series)},
 		AlgorithmEvaluations: evaluations, AlgorithmInputs: namedInputs,
 		RecoveryGates: recoveryGateFacts(due, evaluated), OpenAlertGates: openAlertGateFacts(due, evaluated),
+		OutputWireFormat: planWireFormat(due),
 	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
+}
+
+// planWireFormat is the format the Plan's events go out as, resolved the
+// way the sink resolves it, for the evaluation line: the word was frozen
+// into the Plan and carried on every event and reached no log, so the one
+// question "how many strategies publish the standard raw event" had no line
+// to answer it from.
+func planWireFormat(due execution.DuePlan) string {
+	if due.CompiledPlan == nil {
+		return ""
+	}
+	return due.CompiledPlan.WireFormat()
 }
 
 func costEvaluationOwner(identity execution.PlanIdentity) observability.CostPlanIdentity {
@@ -1600,8 +1613,9 @@ func (stream *streamedExecution) observeCompletionOnlyPlan(
 		Result: evaluated.Result, Operation: observability.Operation(stream.request.Operation),
 		Direction: observability.DirectionInternal, ReasonCode: evaluated.ReasonCode,
 		EvaluationOwner: costEvaluationOwner(due.Identity), EvaluationRecordsKnown: true,
-		Trace:           observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID},
-		AlgorithmInputs: stream.completionOnlyAlgorithmInputFacts(due),
+		Trace:            observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID},
+		AlgorithmInputs:  stream.completionOnlyAlgorithmInputFacts(due),
+		OutputWireFormat: planWireFormat(due),
 	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
 }

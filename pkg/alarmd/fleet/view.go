@@ -337,6 +337,16 @@ type NoDataMemoryUpkeep struct {
 	Plans int `json:"plans,omitempty"`
 }
 
+// PlanWireFormat is the wire format one Plan's events are published as, as
+// the Plan's last evaluation line said it, with when this process last saw
+// it. The word is the sink's resolved one -- python_compatible or
+// standard_raw_event -- never the historical spelling frozen in the Plan.
+type PlanWireFormat struct {
+	Plan       StrategyRef `json:"plan"`
+	WireFormat string      `json:"wire_format"`
+	LastSeenAt time.Time   `json:"last_seen_at"`
+}
+
 // NoDataTracking is what one Plan's last deciding no-data round counted, on
 // the object row: the horizon it decided against and where that came from,
 // the roster it judged, and the three counts the horizon is read from --
@@ -1081,6 +1091,14 @@ type Anomaly struct {
 	// stored shape and the last renewal. Absent until a renewal reached the
 	// store or a read said what it read.
 	NoDataMemoryUpkeep *NoDataMemoryUpkeep `json:"no_data_memory_upkeep,omitempty"`
+	// WireFormats is on every row of an object whose Plans this process has
+	// seen evaluate: the wire format each Plan's events are published as, by
+	// Plan, smallest strategy first, from the Plan's own evaluation line.
+	// Absent until a Plan evaluates. This is the one place the word is
+	// readable without the object catalog: the directory route's
+	// effective_output needs the catalog in memory, and a deployment that
+	// keeps none had no way to answer which strategies publish which way.
+	WireFormats []PlanWireFormat `json:"wire_formats,omitempty"`
 	// NoDataTracking is on every row of an object one of whose Plans this
 	// process has seen a no-data round decide: what the last deciding round
 	// of each such Plan counted, by Plan, smallest strategy first. Absent

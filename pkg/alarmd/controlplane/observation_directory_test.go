@@ -16,6 +16,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 func directoryFixture(t *testing.T, commands int) (*objectCatalogHarness, *controlplane.ObservationDirectory, time.Time) {
@@ -583,5 +584,30 @@ func TestTheCompositionCountsRevisionedPlansFromTheFrozenPlans(t *testing.T) {
 	with := controlplane.ComposeCatalog(revisionedCatalog(t, ""))
 	if with.PlansTotal != 2 || with.RevisionedPlans != 2 {
 		t.Fatalf("revisioned source = %d plans, %d revisioned; want 2 and 2", with.PlansTotal, with.RevisionedPlans)
+	}
+}
+
+// The composition counts every Plan by the wire format its events go out
+// as, resolved the way the sink resolves it, every format present at zero:
+// an unrevisioned source composes to all Python-compatible and none standard,
+// and a revisioned one to the reverse. The number that answers "how many
+// strategies publish the standard raw event" is this one; before it the
+// answer was a Kafka read, and a log search for the word found no line.
+func TestTheCompositionCountsPlansByTheWireFormatTheSinkResolves(t *testing.T) {
+	without := controlplane.ComposeCatalog(objectCatalogTwoGroups(t, 80))
+	if got := without.PlansByWireFormat; got[contract.WireFormatPythonCompatible] != 2 || got[contract.WireFormatStandardRawEvent] != 0 ||
+		got[observability.WireFormatOther] != 0 || len(got) != len(observability.WireFormats) {
+		t.Fatalf("unrevisioned source by wire format = %v, want 2 python_compatible and every other format at zero", got)
+	}
+	with := controlplane.ComposeCatalog(revisionedCatalog(t, ""))
+	if got := with.PlansByWireFormat; got[contract.WireFormatStandardRawEvent] != 2 || got[contract.WireFormatPythonCompatible] != 0 {
+		t.Fatalf("revisioned source by wire format = %v, want 2 standard_raw_event and 0 python_compatible", got)
+	}
+	total := 0
+	for _, count := range with.PlansByWireFormat {
+		total += count
+	}
+	if total != with.PlansTotal {
+		t.Fatalf("by-format counts sum to %d, want the %d Plans: the counts must partition", total, with.PlansTotal)
 	}
 }

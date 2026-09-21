@@ -64,6 +64,7 @@ type phaseTwoMetrics struct {
 	noDataMemoryRenewals            *prometheus.CounterVec
 	queryFreeCompletions            *prometheus.CounterVec
 	executionEvidenceWrites         *prometheus.CounterVec
+	outputEventsByWireFormat        *prometheus.CounterVec
 	frozenStateRenewals             *prometheus.CounterVec
 	frozenStateCensus               *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
@@ -655,6 +656,21 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"one that never needed a mark. A failure here does not fail the Slot -- it means a later " +
 			"query-free completion will have no evidence and record a gap it does not owe.",
 	}, []string{"result"})
+	metrics.outputEventsByWireFormat = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "output_events_by_wire_format_total",
+		Help: "Events handed to the output sink, by the wire format they were published as: " +
+			"python_compatible is the event the Python alert builder reads, standard_raw_event the raw " +
+			"event the alert pipeline consumes, _other an event whose word this build does not name or " +
+			"that carried none. Counted on every event_acked, the refused batches included -- a batch " +
+			"the broker would not take still was what it was -- so read it beside " +
+			"event_acked's result for what actually landed. Every format is created at startup: a " +
+			"standard_raw_event that reads zero is a deployment where no event went the standard way, " +
+			"and it reads zero rather than not at all. The leader's catalog_plans_by_wire_format says " +
+			"how many Plans would publish each way; this says how many events did.",
+	}, []string{"format"})
+	for _, format := range observability.WireFormats {
+		metrics.outputEventsByWireFormat.WithLabelValues(format)
+	}
 	for _, reason := range controlplane.CutoverReasons {
 		metrics.scheduleCutovers.WithLabelValues("failure", reason)
 	}
@@ -1096,7 +1112,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
-		m.queryFreeCompletions, m.executionEvidenceWrites, m.frozenStateRenewals, m.frozenStateCensus)...)
+		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.frozenStateRenewals, m.frozenStateCensus)...)
 }
 
 func (m phaseTwoMetrics) observe(observation observability.Observation) {
@@ -1314,6 +1330,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if observation.Stage == observability.StageExecutionEvidenceWritten {
 		m.executionEvidenceWrites.WithLabelValues(string(observation.Result)).Inc()
+	}
+	if observation.Stage == observability.StageEventACKed {
+		for format, count := range observation.OutputWireFormats {
+			m.outputEventsByWireFormat.WithLabelValues(observability.NormalizeWireFormat(format)).Add(float64(count))
+		}
 	}
 	if observation.Stage == observability.StageProgressCommitted &&
 		(observation.ProgressCompletionKind == string(execution.CompletionGapSkipped) ||
