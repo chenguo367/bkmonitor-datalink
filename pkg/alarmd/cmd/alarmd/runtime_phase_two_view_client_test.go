@@ -110,6 +110,23 @@ func TestTheProductionWorkerExecutesFromTheViewAndRefusesWhenItGoesStale(t *test
 	if counts := fixture.production.viewGate.Counts(); counts["timeline_stale"] != 1 {
 		t.Fatalf("gate outcomes after the stale round = %v, want this Query Group counted timeline_stale", counts)
 	}
+	// The refusal reached the log by name with the gate's word, and the
+	// Runner's outcome the fleet reads says the same.
+	var dueLines, runnerLines int
+	for _, observation := range fixture.observed() {
+		switch {
+		case observation.Stage == observability.StageScheduleDue && observation.ReasonCode == observability.ReasonCode(contract.ReasonViewNotExecutable):
+			if observation.Result != observability.ResultRetrying || observation.Err == nil || !strings.Contains(observation.Err.Error(), "timeline_stale") {
+				t.Fatalf("schedule_due refusal line = %+v, want retrying with the gate's word timeline_stale", observation)
+			}
+			dueLines++
+		case observation.Stage == observability.StageRunnerReturned && observation.RunOutcome == "view_not_executable":
+			runnerLines++
+		}
+	}
+	if dueLines != 1 || runnerLines != 1 {
+		t.Fatalf("refusal lines: schedule_due %d, runner_returned{view_not_executable} %d, want one each", dueLines, runnerLines)
+	}
 
 	// Given back: the Worker reconnects, installs the new view by snapshot
 	// and the Slot completes on the new Segment.

@@ -2289,13 +2289,16 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 		return nil, err
 	}
 	var catalog productionPhaseTwoSlotCatalog = runtime.dependencies.Catalog
-	var executor scheduler.Executor = &observedProductionSlotExecutor{next: runtime.dependencies.Executor, observer: runtime.dependencies.Observer}
+	var executor scheduler.Executor = runtime.dependencies.Executor
 	release := func() {}
 	if runtime.viewGate != nil {
 		catalog = &viewGatedCatalog{next: catalog, gate: runtime.viewGate, queryGroup: queryGroup, session: session}
+		// Inside the observed executor, so a refusal at execution is a
+		// slot_completed line with the gate's word like any other outcome.
 		executor = &viewGatedExecutor{next: executor, gate: runtime.viewGate, queryGroup: queryGroup, session: session}
 		release = func() { runtime.viewGate.forget(queryGroup) }
 	}
+	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer}
 	source, err := scheduler.NewProductionSlotSource(
 		queryGroup, runtime.dependencies.WorkerID, session,
 		catalog, runtime.dependencies.Progress, runtime.dependencies.Now,
@@ -2394,7 +2397,19 @@ func (source observedProductionSlotSource) Next(
 	slot, due, facts, err := source.next.Next(ctx, queryGroup)
 	var retry *scheduler.SourceRetryError
 	var blocked *scheduler.SourceBlockedError
-	if errors.As(err, &retry) || errors.As(err, &blocked) {
+	var notExecutable *scheduler.ViewNotExecutableError
+	if errors.As(err, &notExecutable) {
+		// The view did not allow the round (decision-016 batch 4b). The
+		// line carries the gate's own word for which of its checks failed;
+		// the fleet reads the reason code, and a Query Group refused on
+		// every round is a blocked run under it.
+		observeRuntime(ctx, source.observer, observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageScheduleDue,
+			Result: observability.Result(observability.ResultRetrying), ReasonCode: observability.ReasonCode(contract.ReasonViewNotExecutable),
+			Direction: observability.DirectionInternal,
+			Trace:     observability.TraceFields{QueryGroupKey: string(queryGroup)}, Err: notExecutable,
+		})
+	} else if errors.As(err, &retry) || errors.As(err, &blocked) {
 		reason := observability.ReasonCode(contract.ReasonBlockedExactSetUnavailable)
 		var cause error
 		if retry != nil {
@@ -2467,8 +2482,15 @@ func (executor observedProductionSlotExecutor) Execute(
 	observedResult := result.Result
 	reason := result.ReasonCode
 	observedErr := err
+	var notExecutable *scheduler.ViewNotExecutableError
 	if err != nil {
-		if _, deferred := access.ReadinessDeferredAt(err); deferred {
+		if errors.As(err, &notExecutable) {
+			// The view did not allow the round at execution (decision-016
+			// batch 4b): retrying by name, with the gate's word, not a
+			// failure of this deployment.
+			observedResult = observability.ResultRetrying
+			reason = observability.ReasonCode(contract.ReasonViewNotExecutable)
+		} else if _, deferred := access.ReadinessDeferredAt(err); deferred {
 			// The Slot's data is not in yet: the normal pacing of every Slot,
 			// and the single highest-volume completion line alarmd writes. The
 			// query stage already names it QUERY_NOT_READY; this line said

@@ -219,6 +219,9 @@ func TestABlockedRoundIsADefectWhenItPanicked(t *testing.T) {
 		"source_error":   CheckDependencyDown,
 		"source_retry":   CheckDependencyDown,
 		"source_blocked": CheckDependencyDown,
+		// The view the Worker executes from did not allow the round: the
+		// control plane withheld, as with a source it could not read.
+		"view_not_executable": CheckDependencyDown,
 	} {
 		list := []Anomaly{{Kind: KindBlockedRun, ReasonCode: code}}
 		Attribute(list, now)

@@ -13,11 +13,14 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
@@ -190,4 +193,60 @@ func openViewGateTestSession(t *testing.T, store *ownership.RedisStore, queryGro
 	}
 	t.Cleanup(func() { _ = session.Release(ctx) })
 	return session
+}
+
+// A refusal from the gate reaches the log on both paths with the gate's
+// word for which check failed: the source's schedule_due line and the
+// executor's slot_completed line both say retrying VIEW_NOT_EXECUTABLE and
+// carry the word, and neither reads as a failure of this deployment. Before
+// this, the source observer matched only a retrying or blocked source and
+// wrote nothing, and the refusal at execution was an internal_unknown
+// failure with the error swallowed.
+func TestARefusalFromTheGateIsObservedByNameOnBothPaths(t *testing.T) {
+	refusal := &scheduler.ViewNotExecutableError{Reason: "scope_mismatch"}
+	var observations []observability.Observation
+	observer := observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+		observations = append(observations, observation)
+	})
+	source := observedProductionSlotSource{
+		next: slotSourceFunc(func(context.Context, execution.QueryGroupIdentity) (scheduler.FrozenSlot, bool, scheduler.SlotDueFacts, error) {
+			return scheduler.FrozenSlot{}, false, scheduler.SlotDueFacts{}, refusal
+		}),
+		observer: observer,
+	}
+	if _, _, _, err := source.Next(context.Background(), "query-group-1"); !errors.Is(err, refusal) {
+		t.Fatalf("Next() error = %v, want the refusal passed through", err)
+	}
+	due := observationAt(t, observations, observability.StageScheduleDue)
+	if due.Result != observability.ResultRetrying || due.ReasonCode != observability.ReasonCode(contract.ReasonViewNotExecutable) ||
+		due.Err == nil || !strings.Contains(due.Err.Error(), "scope_mismatch") || due.Trace.QueryGroupKey != "query-group-1" {
+		t.Fatalf("schedule_due line = %+v, want retrying %s carrying the gate's word", due, contract.ReasonViewNotExecutable)
+	}
+
+	observations = nil
+	executor := observedProductionSlotExecutor{
+		next: slotExecutorFunc(func(context.Context, execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+			return execution.SlotExecutionResult{}, refusal
+		}),
+		observer: observer,
+	}
+	if _, err := executor.Execute(context.Background(), execution.SlotExecutionRequest{}); !errors.Is(err, refusal) {
+		t.Fatalf("Execute() error = %v, want the refusal passed through", err)
+	}
+	completed := observationAt(t, observations, observability.StageSlotCompleted)
+	if completed.Result != observability.ResultRetrying || completed.ReasonCode != observability.ReasonCode(contract.ReasonViewNotExecutable) ||
+		completed.Err == nil || !strings.Contains(completed.Err.Error(), "scope_mismatch") {
+		t.Fatalf("slot_completed line = %+v, want retrying %s carrying the gate's word", completed, contract.ReasonViewNotExecutable)
+	}
+}
+
+func observationAt(t *testing.T, observations []observability.Observation, stage observability.Stage) observability.Observation {
+	t.Helper()
+	for _, observation := range observations {
+		if observation.Stage == stage {
+			return observation
+		}
+	}
+	t.Fatalf("no %s observation in %+v", stage, observations)
+	return observability.Observation{}
 }

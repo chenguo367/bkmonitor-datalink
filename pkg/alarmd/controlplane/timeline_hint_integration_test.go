@@ -11,6 +11,7 @@ package controlplane_test
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -167,8 +168,10 @@ func TestAHintedActivationRequestIsAnsweredFromTheTimelineWithoutTheHeader(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(byTimeline.Facts) != 2 || byTimeline.Facts[0] != byHeader.Facts[0] || byTimeline.Facts[1].Selection != execution.ActivationNone {
-		t.Fatalf("hinted activations = %+v, want the header path's %+v", byTimeline.Facts, byHeader.Facts)
+	// The two paths are two implementations of one answer; the whole result
+	// is compared so that a change to one of them shows here.
+	if !reflect.DeepEqual(byTimeline, byHeader) || byTimeline.Facts[1].Selection != execution.ActivationNone {
+		t.Fatalf("hinted activations = %+v, want the header path's %+v", byTimeline, byHeader)
 	}
 	if headers, activations := hook.count("get", "header"), hook.bodyReads("activation"); headers != 0 || activations != 0 {
 		t.Fatalf("a hinted activation request read the header %d times and the activation body %d times, want neither", headers, activations)

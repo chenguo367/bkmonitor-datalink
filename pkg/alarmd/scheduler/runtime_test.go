@@ -208,6 +208,66 @@ func TestRunnerNamesARoundTheViewDoesNotAllowAndComesBack(t *testing.T) {
 	}
 }
 
+// The same refusal from the executor - the lease moved between the source's
+// reads and execution - ends the round by the same name, on the source's
+// backoff, without counting an attempt of the Slot; once the view allows it
+// the Slot runs as attempt one.
+func TestRunnerNamesAnExecutionTheViewDoesNotAllowWithoutCountingAnAttempt(t *testing.T) {
+	clock := newMutableClock(time.Unix(200, 0))
+	slot := frozenSlot("query-group-1")
+	source := &fakeSlotSource{slot: slot}
+	executor := &refusingExecutor{err: &ViewNotExecutableError{Reason: "scope_mismatch"}}
+	flights, err := NewFlightCoordinatorWithRecovery(testRecoveryLimits(), clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outcomes []string
+	flights.observer = observability.ObserverFunc(func(_ context.Context, o observability.Observation) {
+		if o.Stage == observability.StageRunnerReturned {
+			outcomes = append(outcomes, o.RunOutcome)
+		}
+	})
+	runner, err := NewRunner("query-group-1", &fakeSession{fence: slot.Dispatch.OwnerFence}, source, executor, flights, clock.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, attempted, err := runner.RunOne(context.Background())
+	if err != nil || !attempted || result.Completed || result.Result != observability.ResultRetrying ||
+		result.ReasonCode != execution.ReasonCode(contract.ReasonViewNotExecutable) || !result.SourceRetry {
+		t.Fatalf("RunOne(executor refuses) = (%+v, %t, %v), want a retrying %s", result, attempted, err, contract.ReasonViewNotExecutable)
+	}
+	if executor.calls != 1 || runner.attempt != nil {
+		t.Fatalf("executor calls = %d, attempt = %+v: a round the view did not allow must not count as a failed attempt of the Slot", executor.calls, runner.attempt)
+	}
+	if len(outcomes) != 1 || outcomes[0] != "view_not_executable" {
+		t.Fatalf("runner outcomes = %v, want view_not_executable", outcomes)
+	}
+	if _, attempted, err = runner.RunOne(context.Background()); err != nil || attempted || executor.calls != 1 {
+		t.Fatalf("RunOne(within backoff) attempted=%t calls=%d err=%v, want no second execution inside the backoff", attempted, executor.calls, err)
+	}
+	clock.Advance(testRecoveryLimits().RetryMinDelay)
+	executor.err = nil
+	if _, attempted, err = runner.RunOne(context.Background()); err != nil || !attempted || executor.calls != 2 || executor.lastAttempt != 1 {
+		t.Fatalf("RunOne(view allows) attempted=%t calls=%d attempt=%d err=%v, want the Slot run as attempt one", attempted, executor.calls, executor.lastAttempt, err)
+	}
+}
+
+// refusingExecutor returns its error until it is cleared, then completes.
+type refusingExecutor struct {
+	err         error
+	calls       int
+	lastAttempt uint32
+}
+
+func (executor *refusingExecutor) Execute(_ context.Context, request execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+	executor.calls++
+	executor.lastAttempt = request.AttemptNo
+	if executor.err != nil {
+		return execution.SlotExecutionResult{}, executor.err
+	}
+	return execution.SlotExecutionResult{Completed: true, CompletionKind: execution.CompletionFull, Result: observability.ResultSuccess}, nil
+}
+
 func TestRunnerNextReadyAtUsesLatestSourceOrExecutionBackoff(t *testing.T) {
 	base := time.Unix(200, 0)
 	tests := []struct {
