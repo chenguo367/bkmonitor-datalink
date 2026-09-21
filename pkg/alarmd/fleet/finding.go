@@ -229,11 +229,17 @@ func decisionCodes(anomaly Anomaly) []string {
 	if anomaly.Failure != nil {
 		failureCode = anomaly.Failure.Code
 	}
+	if !failureThisRound(anomaly) {
+		// The comment above promised this for both branches and the code
+		// kept it for one: a completed round read the failure's code
+		// whatever Slot it was from, so one failed round's word decided
+		// every degraded round after it until a healthy completion cleared
+		// the failure -- a state-version conflict that failed one Slot kept
+		// the object on DEFECT for as long as its series stayed short.
+		failureCode = ""
+	}
 	if failedExecution(anomaly.ReasonCode) {
-		if failureThisRound(anomaly) {
-			return []string{failureCode, anomaly.ReasonCode}
-		}
-		return []string{anomaly.ReasonCode}
+		return []string{failureCode, anomaly.ReasonCode}
 	}
 	return []string{anomaly.CauseReason, string(anomaly.Cause), failureCode, anomaly.ReasonCode}
 }
