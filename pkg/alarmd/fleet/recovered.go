@@ -13,6 +13,7 @@ import (
 	"sort"
 	"time"
 
+	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -137,12 +138,15 @@ func (tracker *Tracker) noteDefectPassed(queryGroup string, state *queryGroupSta
 // after the round completes, and only a write that went through proves that
 // stage.
 func defectPassedByCompletion(failure *FailureRef, endedRound bool, kind string, slot int64) bool {
-	if failure == nil || failure.Category == observability.QueryFailureCategoryOutput {
+	if failure == nil || failure.Category == observability.QueryFailureCategoryOutput || kind == "" {
 		return false
 	}
-	switch kind {
-	case "GAP_SKIPPED", "SNAPSHOT_UNAVAILABLE", "":
-		return false
+	// The two kinds that never ran are the module's own list, not a copy
+	// kept here: a third query-free kind would otherwise count as a run.
+	for _, queryFree := range model.QueryFreeCompletionKinds {
+		if kind == string(queryFree) {
+			return false
+		}
 	}
 	return laterThanFailure(failure, endedRound, slot)
 }

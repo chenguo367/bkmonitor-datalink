@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -281,7 +282,7 @@ func TestAFailureFromAnEarlierSlotDoesNotDecideACompletedRoundsLine(t *testing.T
 		d.tick()
 		d.tracker.Observe(context.Background(), observability.Observation{
 			ProgressCompletionKind: "GAP_SKIPPED",
-			Trace: observability.TraceFields{QueryGroupKey: d.group, StrategyID: "4101", BusinessID: "2", EvaluationTime: defectSlot + 60*int64(round)},
+			Trace:                  observability.TraceFields{QueryGroupKey: d.group, StrategyID: "4101", BusinessID: "2", EvaluationTime: defectSlot + 60*int64(round)},
 		})
 	}
 	rows := d.tracker.Anomalies()
@@ -294,5 +295,40 @@ func TestAFailureFromAnEarlierSlotDoesNotDecideACompletedRoundsLine(t *testing.T
 	}
 	if rows[0].Internal == nil || rows[0].Internal.Code != "STATE_VERSION_CONFLICT" {
 		t.Fatalf("internal = %+v, want the conflict kept: a skipped Slot never ran through the failed stage", rows[0].Internal)
+	}
+}
+
+// Every completion kind, on which side of the proof it falls: a round that
+// ran through the pipeline -- the five kinds a Slot ends in after being
+// evaluated, a terminal among them (the store answered DETERMINISTIC_INVALID;
+// the state stage was reached) -- proves the failed stage passed; the two
+// kinds a Slot ends in without being evaluated do not. A kind left out of the
+// first list keeps a one-off failure on every object that completes that way
+// for as long as it does. The full list is the one the completion line is
+// held to, the query-free pair the module's own.
+func TestEveryCompletionKindIsOnOneSideOfTheProof(t *testing.T) {
+	queryFree := map[string]bool{}
+	for _, kind := range model.QueryFreeCompletionKinds {
+		queryFree[string(kind)] = true
+	}
+	if len(queryFree) != 2 || !queryFree["GAP_SKIPPED"] || !queryFree["SNAPSHOT_UNAVAILABLE"] {
+		t.Fatalf("query-free kinds = %v, want the two that never run", model.QueryFreeCompletionKinds)
+	}
+	proved := 0
+	for _, kind := range observability.ShortPeriodCompletionKinds {
+		failure := &FailureRef{Category: observability.QueryFailureCategoryCompletionContract, Code: "STATE_VERSION_CONFLICT", Slot: defectSlot}
+		want := !queryFree[kind]
+		if got := defectPassedByCompletion(failure, true, kind, defectSlot+60); got != want {
+			t.Fatalf("a later %s completion proves the failure passed = %v, want %v", kind, got, want)
+		}
+		if want {
+			proved++
+		}
+	}
+	if proved != 5 {
+		t.Fatalf("kinds that prove the stage passed = %d, want the five evaluated kinds (FULL, FULL_EMPTY, PARTIAL_GAP, UNAVAILABLE, TERMINAL)", proved)
+	}
+	if defectPassedByCompletion(&FailureRef{Category: observability.QueryFailureCategoryCompletionContract, Slot: defectSlot}, true, "", defectSlot+60) {
+		t.Fatal("no completion at all was read as a run")
 	}
 }
