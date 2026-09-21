@@ -581,14 +581,20 @@ func (store *ExecutionStore) commitValueBytes(group execution.QueryGroupIdentity
 // small for the great majority of records nowhere near that size, and it is the
 // right price for exactly one call: the alternative is to guess, and the guess
 // that matters is the one made for the object whose records are enormous.
-// roundLargest is the largest record this preflight has seen so far, which
-// takes precedence over what the last round committed: within a round it is
-// direct evidence about the population being read, and because it only rises
-// the batch it allows only ever shrinks - the safe direction. It also restores
-// the widening that makes a cold Query Group cheap: the first batch is the
-// safe sixteen keys, and every batch after it is sized by what those sixteen
-// turned out to weigh, rather than the whole preflight paying sixteen keys a
-// call because nothing is committed yet.
+// roundLargest is the largest record this preflight has seen so far. Against
+// a committed bound it can only tighten: the batches of one round are sized
+// by the bound, so the first batch is whatever keys came first, and a first
+// batch of small records says nothing about the keys not yet read - the
+// committed bound is the last complete measurement of them, and a round that
+// replaced it with its own first sixteen would size its second batch for
+// 4 KiB records and read 512 KiB ones with it, sixteen times the budget in
+// one call. That is the mixed population this bound exists for: a Query
+// Group whose records are changing representation holds both sizes at once,
+// and so does one whose series differ in age. For a Query Group nothing is
+// committed for, the running largest is the only measurement there is, and
+// it is what makes a cold Query Group cheap: the first batch is the safe
+// sixteen keys, and every batch after it is sized by what those turned out
+// to weigh.
 func (store *ExecutionStore) runtimeLoadBatchLimit(group execution.QueryGroupIdentity, roundLargest int, roundRead bool) int {
 	expected, learned := store.expectedValueBytes(group)
 	if roundRead {
@@ -600,7 +606,10 @@ func (store *ExecutionStore) runtimeLoadBatchLimit(group execution.QueryGroupIde
 		// which for a thousand keys is sixty round trips where four would do.
 		// A round that did not come back is the one that measures nothing, and
 		// that is what roundRead is false for.
-		expected, learned = uint64(roundLargest), true
+		if !learned || uint64(roundLargest) > expected {
+			expected = uint64(roundLargest)
+		}
+		learned = true
 	}
 	if !learned {
 		expected = uint64(store.options.MaxValueBytes)

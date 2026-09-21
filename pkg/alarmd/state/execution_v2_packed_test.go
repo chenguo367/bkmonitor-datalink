@@ -69,6 +69,14 @@ func TestAFramedRecordGivesBackEveryPointFieldForField(t *testing.T) {
 		// carrying an unknown outcome forward.
 		packedPoint(t, identity, 1758400120, execution.LevelFactUnavailable, execution.LevelFactUnavailable),
 		packedPoint(t, identity, 1758400180, execution.LevelFactAnomalous, execution.LevelFactError),
+		// The fifth state: a point one Level has no fact for at all. The
+		// present bitmap is the only thing that keeps it from coming back as
+		// UNAVAILABLE, and a fixture where every Level has a fact at every
+		// point never reads that bitmap.
+		packedPoint(t, identity, 1758400240, execution.LevelFactNormal),
+	}
+	if last := points[len(points)-1]; len(last.Levels) != 1 {
+		t.Fatalf("the fixture's last point carries %d Level facts, want one so a Level is absent", len(last.Levels))
 	}
 	mutation := packedMutation(t, points, 2)
 

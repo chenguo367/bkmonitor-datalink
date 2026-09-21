@@ -282,3 +282,45 @@ func TestARoundThatDidNotComeBackLeavesTheBoundAlone(t *testing.T) {
 			before, after)
 	}
 }
+
+// The running largest tightens a committed bound and never loosens it.
+//
+// The batches of one round are sized by the bound, so the first batch is
+// whatever keys came first. A first batch of small records says nothing
+// about the keys not yet read; the committed bound is the last complete
+// measurement of them. A round that let its first sixteen replace it would
+// size its second batch for 4 KiB records and read 512 KiB ones with it -
+// the mixed population this bound exists for, a Query Group whose records
+// are changing representation, or whose series differ in age.
+func TestTheRunningLargestOnlyTightensACommittedBound(t *testing.T) {
+	store := newBatchStore(t, newPipelineMemoryBackend(), nil)
+	group := execution.QueryGroupIdentity("qg-mixed-round")
+
+	const small, large = 4 * 1024, 512 * 1024
+	store.commitValueBytes(group, large, true)
+	committed := store.runtimeLoadBatchLimit(group, 0, false)
+	afterSmall := store.runtimeLoadBatchLimit(group, small, true)
+	if committed >= runtimeLoadBatchItems {
+		t.Fatalf("the committed bound allows %d keys, the item cap; the fixture cannot show a widening past it", committed)
+	}
+	if afterSmall > committed {
+		t.Fatalf("a first batch of %d-byte records widened the batch from %d to %d keys while the round's "+
+			"unread keys may still weigh %d bytes each; the running largest may only tighten a committed bound",
+			small, committed, afterSmall, large)
+	}
+	// Within the same round a larger record than committed still tightens.
+	if tighter := store.runtimeLoadBatchLimit(group, 2*large, true); tighter >= committed {
+		t.Fatalf("a %d-byte record read this round left the batch at %d keys, committed %d; the running "+
+			"largest is direct evidence and must tighten", 2*large, tighter, committed)
+	}
+	// A Query Group nothing is committed for is sized by what its first batch
+	// weighed, which is what keeps a cold one cheap.
+	cold := execution.QueryGroupIdentity("qg-cold")
+	if first := store.runtimeLoadBatchLimit(cold, 0, false); first != runtimeLoadBatchBytes/store.options.MaxValueBytes {
+		t.Fatalf("an unmeasured Query Group's first batch is %d keys, want the safe %d", first, runtimeLoadBatchBytes/store.options.MaxValueBytes)
+	}
+	if widened := store.runtimeLoadBatchLimit(cold, small, true); widened <= runtimeLoadBatchBytes/store.options.MaxValueBytes {
+		t.Fatalf("an unmeasured Query Group whose first batch weighed %d bytes stayed at %d keys; nothing is "+
+			"committed to tighten against, so the running largest is the bound", small, widened)
+	}
+}
