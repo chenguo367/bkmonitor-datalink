@@ -745,3 +745,67 @@ func TestEveryStreamReasonWordIsInTheVocabularyAndOnTheLine(t *testing.T) {
 		t.Errorf("discovery misses observed without the word as reason_code: %v", codes)
 	}
 }
+
+type recordingCostSink struct {
+	mu    sync.Mutex
+	costs map[string][]viewstream.QueryGroupCost
+}
+
+func (sink *recordingCostSink) RecordCosts(workerID string, costs []viewstream.QueryGroupCost) {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.costs == nil {
+		sink.costs = map[string][]viewstream.QueryGroupCost{}
+	}
+	sink.costs[workerID] = append([]viewstream.QueryGroupCost(nil), costs...)
+}
+
+type scriptedCostSource struct{ costs []viewstream.QueryGroupCost }
+
+func (source scriptedCostSource) Costs() []viewstream.QueryGroupCost { return source.costs }
+
+// What the Worker's cost source says rides on its heartbeat and reaches the
+// Leader's sink under the Worker's name. The two ends are interfaces the
+// producer and the consumer implement on their own sides; this pins the
+// wire between them, so neither can be built against a heartbeat that does
+// not carry what the other expects.
+func TestTheHeartbeatCarriesTheWorkersCostsToTheLeadersSink(t *testing.T) {
+	sink := &recordingCostSink{}
+	admit := &tokenAdmission{tokens: map[string]string{"w1": "t1"}}
+	server, err := viewstream.NewServer(admit, &sessionObserver{}, viewstream.ServerOptions{Tick: 20 * time.Millisecond, Costs: sink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Close)
+	if err := server.Lead(7); err != nil {
+		t.Fatal(err)
+	}
+	dialer := &bufconnDialer{}
+	dialer.serveOn(t, "leader-a", server)
+	discovery := &scriptedDiscovery{}
+	discovery.set("leader-a", true)
+	costs := []viewstream.QueryGroupCost{{QueryGroup: "qg-1", RetainedBytesPeak: 175 << 20, CostPerSecondMilli: 570}}
+	client, err := viewstream.NewClient(viewstream.ClientIdentity{WorkerID: "w1", Incarnation: "i1", StreamToken: "t1"}, discovery, nil, &sessionObserver{},
+		viewstream.ClientOptions{Dial: dialer.dial, Tick: 20 * time.Millisecond, Costs: scriptedCostSource{costs: costs},
+			Sleep: func(ctx context.Context, wait time.Duration) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(5 * time.Millisecond):
+					return nil
+				}
+			}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = client.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	eventually(t, "the Leader's sink holds w1's costs", func() bool {
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+		got := sink.costs["w1"]
+		return len(got) == 1 && got[0] == costs[0]
+	})
+}

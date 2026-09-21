@@ -138,6 +138,9 @@ type ClientOptions struct {
 	// Sleep replaces the reconnect wait; a test drives it.
 	Sleep func(ctx context.Context, wait time.Duration) error
 	Tick  time.Duration
+	// Costs is asked on every heartbeat for what to report; nil reports
+	// nothing (decision-020 section 5.2).
+	Costs CostSource
 }
 
 // Client keeps one stream to the Leader and the view it installed.
@@ -151,6 +154,7 @@ type Client struct {
 	sleep     func(ctx context.Context, wait time.Duration) error
 	tick      time.Duration
 	random    *rand.Rand
+	costs     CostSource
 
 	installed atomic.Pointer[View]
 	mu        sync.Mutex
@@ -168,7 +172,7 @@ func NewClient(identity ClientIdentity, discovery Discovery, probe ObjectProbe, 
 		observer = observability.ObserverFunc(func(context.Context, observability.Observation) {})
 	}
 	client := &Client{identity: identity, discovery: discovery, probe: probe, observer: observer,
-		dial: options.Dial, now: options.Now, sleep: options.Sleep, tick: options.Tick,
+		dial: options.Dial, now: options.Now, sleep: options.Sleep, tick: options.Tick, costs: options.Costs,
 		random: rand.New(rand.NewSource(time.Now().UnixNano())),
 		stats:  ClientStats{Installs: map[string]uint64{}, InstallFailures: map[string]uint64{}, Refusals: map[string]uint64{}}}
 	if client.dial == nil {
@@ -368,8 +372,12 @@ func (client *Client) session(ctx context.Context, stream pb.ControlService_Conn
 					return
 				}
 				installed, has := client.Installed()
+				var costs []QueryGroupCost
+				if client.costs != nil {
+					costs = client.costs.Costs()
+				}
 				if err := send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Heartbeat{Heartbeat: &pb.Heartbeat{
-					SentAtMs: client.now().UnixMilli(), Installed: versionToWire(installed.Version)}}}); err != nil {
+					SentAtMs: client.now().UnixMilli(), Installed: versionToWire(installed.Version), Costs: CostsToWire(costs)}}}); err != nil {
 					cancel()
 					return
 				}

@@ -55,7 +55,7 @@ func entryToWire(entry Entry) *pb.Entry {
 	wire := &pb.Entry{QueryGroup: string(entry.QueryGroup), Assignment: &pb.Assignment{
 		DesiredWorkerId: entry.Assignment.DesiredWorkerID, Revision: entry.Assignment.Revision,
 		ContentScope: entry.Assignment.ContentScope, PendingContentScope: entry.Assignment.PendingContentScope,
-		EffectiveAtMs: entry.Assignment.EffectiveAtMs,
+		EffectiveAtMs: entry.Assignment.EffectiveAtMs, TimelineRecordRevision: entry.Assignment.TimelineRecordRevision,
 	}}
 	if entry.Content != nil {
 		content := &pb.Content{ObjectDigest: string(entry.Content.ObjectDigest)}
@@ -79,7 +79,7 @@ func entryFromWire(wire *pb.Entry) (Entry, error) {
 		entry.Assignment = Assignment{
 			DesiredWorkerID: wire.Assignment.DesiredWorkerId, Revision: wire.Assignment.Revision,
 			ContentScope: wire.Assignment.ContentScope, PendingContentScope: wire.Assignment.PendingContentScope,
-			EffectiveAtMs: wire.Assignment.EffectiveAtMs,
+			EffectiveAtMs: wire.Assignment.EffectiveAtMs, TimelineRecordRevision: wire.Assignment.TimelineRecordRevision,
 		}
 	}
 	if wire.Content != nil {
@@ -229,6 +229,7 @@ func ReceiptToWire(receipt Receipt) *pb.Receipt {
 		Incarnation: receipt.Receiver.Incarnation, Version: versionToWire(receipt.Version),
 		Acked: receipt.Acked, Installed: receipt.Installed, Switched: receipt.Switched,
 		Failure: receipt.Failure, ObjectsMissing: uint32(receipt.ObjectsMissing), ObjectsProbed: receipt.ObjectsProbed,
+		SwitchedQueryGroups: uint32(receipt.SwitchedQueryGroups),
 	}
 }
 
@@ -240,5 +241,36 @@ func ReceiptFromWire(workerID string, wire *pb.Receipt) (Receipt, error) {
 		Receiver: Receiver{WorkerID: workerID, Incarnation: wire.Incarnation}, Version: versionFromWire(wire.Version),
 		Acked: wire.Acked, Installed: wire.Installed, Switched: wire.Switched,
 		Failure: wire.Failure, ObjectsMissing: int(wire.ObjectsMissing), ObjectsProbed: wire.ObjectsProbed,
+		SwitchedQueryGroups: int(wire.SwitchedQueryGroups),
 	}, nil
+}
+
+// CostsToWire encodes a heartbeat's costs.
+func CostsToWire(costs []QueryGroupCost) []*pb.QueryGroupCost {
+	if len(costs) == 0 {
+		return nil
+	}
+	wire := make([]*pb.QueryGroupCost, 0, len(costs))
+	for _, cost := range costs {
+		wire = append(wire, &pb.QueryGroupCost{QueryGroup: string(cost.QueryGroup),
+			RetainedBytesPeak: cost.RetainedBytesPeak, CostPerSecondMilli: cost.CostPerSecondMilli})
+	}
+	return wire
+}
+
+// CostsFromWire decodes a heartbeat's costs, dropping entries that name no
+// Query Group: a cost with no owner is not a reading.
+func CostsFromWire(wire []*pb.QueryGroupCost) []QueryGroupCost {
+	if len(wire) == 0 {
+		return nil
+	}
+	costs := make([]QueryGroupCost, 0, len(wire))
+	for _, cost := range wire {
+		if cost == nil || cost.QueryGroup == "" {
+			continue
+		}
+		costs = append(costs, QueryGroupCost{QueryGroup: execution.QueryGroupIdentity(cost.QueryGroup),
+			RetainedBytesPeak: cost.RetainedBytesPeak, CostPerSecondMilli: cost.CostPerSecondMilli})
+	}
+	return costs
 }

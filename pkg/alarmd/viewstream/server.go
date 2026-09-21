@@ -101,6 +101,7 @@ type Server struct {
 	pb.UnimplementedControlServiceServer
 	admission Admission
 	observer  observability.Observer
+	costs     CostSink
 	now       func() time.Time
 	// tick is how often a session checks for idleness; HeartbeatInterval in
 	// production, shorter in a test that drives the clock.
@@ -118,6 +119,9 @@ type Server struct {
 type ServerOptions struct {
 	Now  func() time.Time
 	Tick time.Duration
+	// Costs receives each heartbeat's Query Group costs with the Worker they
+	// came from; nil discards them (decision-020 section 5.2).
+	Costs CostSink
 }
 
 func NewServer(admission Admission, observer observability.Observer, options ServerOptions) (*Server, error) {
@@ -135,7 +139,7 @@ func NewServer(admission Admission, observer observability.Observer, options Ser
 	if tick <= 0 {
 		tick = HeartbeatInterval
 	}
-	return &Server{admission: admission, observer: observer, now: now, tick: tick, sessions: map[string]*session{}}, nil
+	return &Server{admission: admission, observer: observer, costs: options.Costs, now: now, tick: tick, sessions: map[string]*session{}}, nil
 }
 
 // Lead starts a term: a new publisher, and every open session is woken so
@@ -527,6 +531,11 @@ func (sess *session) receive() {
 			sess.mu.Unlock()
 			sess.poke()
 		case *pb.WorkerMessage_Heartbeat:
+			if sink := sess.server.costs; sink != nil {
+				if costs := CostsFromWire(body.Heartbeat.Costs); len(costs) > 0 {
+					sink.RecordCosts(sess.receiver.WorkerID, costs)
+				}
+			}
 			sess.enqueue(&pb.LeaderMessage{Body: &pb.LeaderMessage_Heartbeat{Heartbeat: &pb.Heartbeat{
 				SentAtMs: sess.server.now().UnixMilli(), Installed: versionToWire(sess.currentSent())}}})
 		case *pb.WorkerMessage_ObjectRequest:

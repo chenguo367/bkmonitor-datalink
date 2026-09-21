@@ -38,6 +38,11 @@ type Receipt struct {
 	Failure        string
 	ObjectsMissing int
 	ObjectsProbed  bool
+	// SwitchedQueryGroups is how many of the version's Query Groups the
+	// Worker executes from the view; Switched is this reaching the version's
+	// entry count. Carried so the Leader can say how many are not, per
+	// Worker, rather than only that some are.
+	SwitchedQueryGroups int
 }
 
 // Counts are the four numbers of one version, with the receivers the
@@ -89,6 +94,9 @@ type receiverState struct {
 	failure                          string
 	objectsMissing                   int
 	objectsProbed                    bool
+	// switchedQueryGroups is the Worker's latest count of Query Groups it
+	// executes from the view, whether or not that reached switched.
+	switchedQueryGroups int
 }
 
 type versionLedger struct {
@@ -269,6 +277,9 @@ func (ledger *Ledger) record(receipt Receipt, objectsReported bool) Recorded {
 	state.acked = state.acked || receipt.Acked
 	state.installed = state.installed || receipt.Installed
 	state.switched = state.switched || receipt.Switched
+	if receipt.Installed {
+		state.switchedQueryGroups = receipt.SwitchedQueryGroups
+	}
 	if receipt.Failure != "" {
 		state.failure = receipt.Failure
 	}
@@ -388,7 +399,8 @@ func (ledger *Ledger) Lagging(stage string) []LaggingReceiver {
 		if reached {
 			continue
 		}
-		lagging = append(lagging, LaggingReceiver{WorkerID: worker, Incarnation: state.incarnation, Failure: state.failure})
+		lagging = append(lagging, LaggingReceiver{WorkerID: worker, Incarnation: state.incarnation, Failure: state.failure,
+			SwitchedQueryGroups: state.switchedQueryGroups})
 	}
 	sort.Slice(lagging, func(left, right int) bool { return lagging[left].WorkerID < lagging[right].WorkerID })
 	return lagging
@@ -408,4 +420,8 @@ type LaggingReceiver struct {
 	Incarnation string
 	Failure     string
 	Connected   bool
+	// SwitchedQueryGroups is the Worker's latest count of Query Groups it
+	// executes from the view; read against the Worker's entry count on the
+	// switched stage, it is how far short of switched the Worker is.
+	SwitchedQueryGroups int
 }
