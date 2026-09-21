@@ -150,6 +150,15 @@ type SourceReconciler struct {
 	validateCatalog CatalogAdmission
 	outputProtocol  string
 	targetSources   TargetSources
+	// noDataPolicy is read once per round rather than held as a value, so the
+	// deployment can decide whether the horizon is fixed for the process or
+	// follows something that moves while it runs. The round key covers it
+	// either way, which is what makes a changed horizon reach Plans whose own
+	// document did not change.
+	//
+	// Nil means the zero policy, which is a horizon of zero: absence tracked
+	// indefinitely, the behaviour every Plan had before the horizon existed.
+	noDataPolicy func() NoDataPolicy
 	// candidates carries the compiler's output from one round to the next,
 	// so a round compiles only the documents that changed. It lives on the
 	// reconciler because that is the object that survives between rounds; a
@@ -226,6 +235,40 @@ func (reconciler *SourceReconciler) ConfigureTargetSources(sources TargetSources
 	}
 	reconciler.targetSources = sources
 	return nil
+}
+
+// ConfigureNoDataPolicy says what the deployment's no-data settings are for
+// every Plan that does not state its own.
+//
+// A function rather than a value because the horizon is the deployment's to
+// change, and decision-018 section 5.1 is about a horizon that moves while the
+// process runs: the candidate cache is keyed by the strategy document, so a
+// changed default that is not in the round key reaches only the strategies
+// whose own document happens to change next, and reads as applied while doing
+// nothing. Reading it per round is what lets the round key see the change.
+//
+// Configuring nothing leaves the zero policy, whose horizon of zero means the
+// deployment set none, so absence is tracked indefinitely - what every Plan
+// did before the horizon existed. The deployment says that by not writing the
+// setting rather than by writing a zero, which its own configuration refuses;
+// the zero only ever stands for absence by the time it reaches here. So a
+// deployment that says nothing is not opted in, which is the direction that
+// cannot surprise anyone: a horizon stops no-data alerts after it, and one
+// arrived at by default would silence a real outage.
+func (reconciler *SourceReconciler) ConfigureNoDataPolicy(policy func() NoDataPolicy) error {
+	if reconciler == nil {
+		return errors.New("alarmd controlplane: no source reconciler")
+	}
+	reconciler.noDataPolicy = policy
+	return nil
+}
+
+// effectiveNoDataPolicy is the policy this round builds under.
+func (reconciler *SourceReconciler) effectiveNoDataPolicy() NoDataPolicy {
+	if reconciler == nil || reconciler.noDataPolicy == nil {
+		return NoDataPolicy{}
+	}
+	return reconciler.noDataPolicy()
 }
 
 // CatalogAdmission is the deployment's say over a Catalog the compiler built.
@@ -316,6 +359,7 @@ func (reconciler *SourceReconciler) Refresh(
 	catalog, err := BuildCatalog(ctx, BuildRequest{
 		Strategies: cycle.strategies, Planner: planner, LastGood: current, PreviousDispositions: previousDispositions,
 		OutputProtocol: reconciler.outputProtocol, TargetSources: reconciler.targetSources, Cache: reconciler.candidates,
+		NoDataPolicy: reconciler.effectiveNoDataPolicy(),
 	})
 	if err != nil {
 		return SourceRefreshResult{}, exitAt(SourceRefreshExitBuildCatalog, err)

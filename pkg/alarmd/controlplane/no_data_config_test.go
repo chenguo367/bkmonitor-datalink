@@ -11,10 +11,25 @@ package controlplane
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
+
+// noDataItem decodes one item carrying this no_data_config section, through
+// the same decoder the strategy cache goes through.
+func noDataItem(t *testing.T, section string) legacyItem {
+	t.Helper()
+	document := json.RawMessage(`{"id":1,"bk_biz_id":2,"update_time":1700000000,"items":[{"id":11,` +
+		`"query_md5":"m","expression":"a","query_configs":[{}],` +
+		`"algorithms":[{"level":1,"type":"Threshold"}],"no_data_config":` + section + `}]}`)
+	decoded, err := decodeLegacyStrategy(document)
+	if err != nil {
+		t.Fatalf("decode strategy = %v", err)
+	}
+	return decoded.Items[0]
+}
 
 // The item's setting is read off the strategy cache exactly as the backend
 // reads it. Each case names the read site it mirrors, so a change here has to
@@ -276,17 +291,7 @@ func TestNoDataRosterUnsupportedNamesOnlyWhatThisBuildCannotDerive(t *testing.T)
 // moment either input changed, and the one that wins would depend on which
 // layer a reader happened to look at.
 func TestTheEffectiveHorizonIsSettledWhereThePlanIsFrozen(t *testing.T) {
-	item := func(section string) legacyItem {
-		t.Helper()
-		document := json.RawMessage(`{"id":1,"bk_biz_id":2,"update_time":1700000000,"items":[{"id":11,` +
-			`"query_md5":"m","expression":"a","query_configs":[{}],` +
-			`"algorithms":[{"level":1,"type":"Threshold"}],"no_data_config":` + section + `}]}`)
-		decoded, err := decodeLegacyStrategy(document)
-		if err != nil {
-			t.Fatalf("decode strategy = %v", err)
-		}
-		return decoded.Items[0]
-	}
+	item := func(section string) legacyItem { return noDataItem(t, section) }
 
 	for name, test := range map[string]struct {
 		section  string
@@ -302,17 +307,9 @@ func TestTheEffectiveHorizonIsSettledWhereThePlanIsFrozen(t *testing.T) {
 			section: `{"is_enabled":true,"continuous":5,"tracking_horizon_seconds":120}`, platform: 600, want: 120,
 			because: "an item that states one has said what it wants",
 		},
-		// Stated zero and absent are different inputs. Reading a stated zero as
-		// "unset" would leave an item that asked to keep tracking on the
-		// platform's horizon, which is the opposite of what it asked for, and
-		// there would be no way to express the opt-out at all.
-		"a stated zero opts out of the deployment's horizon": {
-			section: `{"is_enabled":true,"continuous":5,"tracking_horizon_seconds":0}`, platform: 600, want: 0,
-			because: "a stated zero is an opt-out, not an absent field",
-		},
 		"no horizon anywhere is what every deployment had before the setting": {
 			section: `{"is_enabled":true,"continuous":5}`, platform: 0, want: 0,
-			because: "zero means unlimited tracking, which is the behaviour this replaced",
+			because: "a deployment that set none leaves tracking unlimited, the behaviour this replaces",
 		},
 		"a quoted horizon is read as a number like every other number here": {
 			section: `{"is_enabled":true,"continuous":5,"tracking_horizon_seconds":"900"}`, platform: 600, want: 900,
@@ -330,5 +327,30 @@ func TestTheEffectiveHorizonIsSettledWhereThePlanIsFrozen(t *testing.T) {
 					config.TrackingHorizonSeconds, test.want, test.because)
 			}
 		})
+	}
+}
+
+// An item stating a zero horizon is refused by name.
+//
+// It is not an opt-out, because there is nothing to opt out of: the decision
+// is to give every group a finite horizon, and the horizon has no value
+// meaning "forever" for a zero to stand in for. An item that wants the
+// platform's horizon states nothing, which is already how that is said - so a
+// written zero is a mistake, and taking it as a request would switch that item
+// back to the unbounded tracking this decision exists to end, silently and on
+// the strength of a character.
+//
+// The platform horizon is set here so the case cannot pass by there being no
+// horizon to fall back to.
+func TestAnItemStatingAZeroHorizonIsRefused(t *testing.T) {
+	config, err := frozenNoDataConfig(
+		noDataItem(t, `{"is_enabled":true,"continuous":5,"tracking_horizon_seconds":0}`),
+		NoDataPolicy{TrackingHorizonSeconds: 600},
+	)
+	if err == nil {
+		t.Fatalf("frozenNoDataConfig() = %+v, want a refusal: a zero horizon is not an opt-out", config)
+	}
+	if !strings.Contains(err.Error(), "tracking_horizon_seconds") {
+		t.Fatalf("refusal = %v, want it to name the field whoever wrote it has to fix", err)
 	}
 }

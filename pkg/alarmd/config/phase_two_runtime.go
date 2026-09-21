@@ -344,6 +344,37 @@ type PhaseTwoRuntimeConfig struct {
 	Canonical        PhaseTwoCanonicalConfig        `yaml:"canonical"`
 	PlatformSettings PhaseTwoPlatformSettingsConfig `yaml:"platform_settings"`
 	Observation      PhaseTwoObservationConfig      `yaml:"observation"`
+	NoData           PhaseTwoNoDataConfig           `yaml:"no_data"`
+}
+
+// PhaseTwoNoDataConfig is the deployment's say over how long one absent group
+// goes on being reported before detection stops tracking it.
+//
+// It is here rather than derived because nothing in the process knows the
+// answer. The horizon is a statement about how long a group that stopped
+// reporting stays interesting to the people carrying the pager - a host
+// decommissioned on purpose and one that fell over look identical to
+// detection, and only the deployment knows which its population is mostly
+// made of. Everything the horizon then costs is derived from it.
+type PhaseTwoNoDataConfig struct {
+	// TrackingHorizonSeconds is the platform default every Plan that does not
+	// state its own inherits. Positive seconds; there is no value meaning
+	// "track forever", so the leaf is read by presence and not by its value.
+	//
+	// A pointer for that reason. An absent leaf is a deployment that has not
+	// set a platform horizon, and absence is the only way to say so: with a
+	// plain integer, "not written" and "written as zero" are the same value,
+	// and the zero would be carrying a second meaning nobody wrote - which is
+	// how this feature spent three batches looking configured while never
+	// running. Present, it must be at least one second, and both zero and a
+	// negative are refused by name rather than read as an intention.
+	//
+	// Absence leaves absence tracked indefinitely, which is what every Plan
+	// did before the horizon existed, so a deployment that says nothing keeps
+	// the behaviour it has. The asymmetry is deliberate: a horizon stops
+	// no-data alerts once it passes, so one arrived at by default rather than
+	// by decision would silence a genuine outage and look like quiet.
+	TrackingHorizonSeconds *int64 `yaml:"tracking_horizon_seconds,omitempty"`
 }
 
 // PhaseTwoObservationConfig is the operator's allocation to the strategy
@@ -371,6 +402,26 @@ const ObservationMemoryPercentMax = 25
 func (c PhaseTwoObservationConfig) validate() error {
 	if c.MemoryPercent < 0 || c.MemoryPercent > ObservationMemoryPercentMax {
 		return fmt.Errorf("phase_two.observation.memory_percent %d must be between 0 (off) and %d", c.MemoryPercent, ObservationMemoryPercentMax)
+	}
+	return nil
+}
+
+func (c PhaseTwoNoDataConfig) validate() error {
+	// Refused here as well as in the contract because this is where an
+	// operator's typo is still a startup failure they can read. Reaching the
+	// contract means it is already inside a compiled Plan, where the same
+	// mistake is a refused strategy rather than a refused deployment.
+	//
+	// Zero is refused rather than read as "no horizon" because a deployment
+	// with no horizon says so by not writing the leaf. Accepting zero here
+	// would give the value a second meaning, and the operator who wrote it
+	// meant something - most likely "off", which is what deleting the leaf
+	// already says, and conceivably "immediately", which the horizon has no
+	// way to mean.
+	if c.TrackingHorizonSeconds != nil && *c.TrackingHorizonSeconds < 1 {
+		return fmt.Errorf("phase_two.no_data.tracking_horizon_seconds %d must be a positive number of "+
+			"seconds; omit the key entirely to leave absence tracked indefinitely",
+			*c.TrackingHorizonSeconds)
 	}
 	return nil
 }
@@ -536,6 +587,9 @@ func (c PhaseTwoRuntimeConfig) validate() error {
 		return fmt.Errorf("phase_two platform_settings.redis_key_prefix: %w", err)
 	}
 	if err := c.Observation.validate(); err != nil {
+		return err
+	}
+	if err := c.NoData.validate(); err != nil {
 		return err
 	}
 	for name, list := range map[string]*[]string{
