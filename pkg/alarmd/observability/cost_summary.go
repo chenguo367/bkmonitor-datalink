@@ -103,10 +103,13 @@ type CostScalars struct {
 	StateBytesUnknown uint64   `json:"state_bytes_unknown"`
 	StateWall         CostWall `json:"state_wall"`
 	// RetainedBytesPeak is the largest retained-byte usage one Slot of the
-	// object reported in the window, from the completion row's own account
-	// of the five budgets. A peak, not a sum or a mean: the pool is broken by
-	// peaks, and a mean over a bimodal object is the wrong statistic. Zero
-	// when no completion in the window carried the account.
+	// object reported in the window: from the completion row's own account of
+	// the five budgets, and from a refusal of the retained-byte budget, what
+	// the Slot held plus the addition it was refused -- a refused Slot has no
+	// completion row, and without its refusal the object that fills the pool
+	// every round would be the one object with no peak. A peak, not a sum or
+	// a mean: the pool is broken by peaks, and a mean over a bimodal object
+	// is the wrong statistic. Zero when no row in the window carried either.
 	RetainedBytesPeak uint64 `json:"retained_bytes_peak"`
 	// RetainedHardStops and RetainedShareStops are this object's refusals on
 	// the retained-byte budget in the window: the pool full of everyone's
@@ -195,8 +198,9 @@ type CostRanking struct {
 // CostRetainedReading is one process's answer to the placement question:
 // if every object this replica evaluated in the window peaked in the same
 // round, how much of the retained-byte pool would they hold. It is the sum
-// over those objects of each one's largest per-Slot retained bytes, against
-// the pool -- an upper bound on the simultaneous peak, not a utilization.
+// over those objects of each one's largest per-Slot retained bytes -- the
+// bytes a refused Slot asked for included -- against the pool: an upper
+// bound on the simultaneous peak, not a utilization.
 // The peaks need not coincide, so the share can pass 1 with no refusal, and
 // the pool can refuse at a share under 1 when the ones that do coincide are
 // enough. What the pool actually held when it refused is capacity_shared_used
@@ -428,7 +432,21 @@ func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
 		s.QueryScopes++
 		addWall(&s.QueryWall, o)
 	case StageResourceHard:
-		addRetainedStop(s, o)
+		if !addRetainedStop(s, o) {
+			return
+		}
+		// A Slot the pool refused has no completion row, so read from
+		// completions alone the object that fills the pool every round is the
+		// one object with no peak. The refusal names what the Slot held and
+		// the addition that crossed the line; their sum is the least it would
+		// have retained had it run through, and it is that Slot's peak.
+		if f := o.CapacityRejection; f != nil {
+			demand := f.Requested
+			if f.OwnUsed != nil {
+				demand += *f.OwnUsed
+			}
+			s.RetainedBytesPeak = max(s.RetainedBytesPeak, demand)
+		}
 	case StageStatePreflight, StageStateApplied:
 		s.StateCalls++
 		if o.Counts.Keys > 0 {
@@ -447,14 +465,17 @@ func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
 
 // addRetainedStop counts one refusal of the retained-byte budget by which
 // refusal it was: the pool full, or this object over its share. A refusal
-// under any other word on this budget is the per-Slot cap and is neither.
-func addRetainedStop(s *CostScalars, o Observation) {
+// under any other word on this budget is neither, and reports so.
+func addRetainedStop(s *CostScalars, o Observation) bool {
 	switch string(o.ReasonCode) {
 	case contract.ReasonResourceHardStop:
 		s.RetainedHardStops++
 	case contract.ReasonQGBudgetShareExceeded:
 		s.RetainedShareStops++
+	default:
+		return false
 	}
+	return true
 }
 
 // costDimensions are the rankings a snapshot carries, per scope. query_wall
