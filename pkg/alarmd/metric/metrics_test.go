@@ -426,6 +426,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_objects"] = "variableLabels: {disposition}"
 	expected["bkmonitor_alarmd_catalog_withheld_objects"] = "variableLabels: {disposition,reason}"
 	expected["bkmonitor_alarmd_catalog_no_data_plans"] = "variableLabels: {source}"
+	expected["bkmonitor_alarmd_catalog_plans_by_wire_format"] = "variableLabels: {format}"
+	expected["bkmonitor_alarmd_output_events_by_wire_format_total"] = "variableLabels: {format}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_absences_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_target_plan_resolution_total"] = "variableLabels: {state}"
@@ -934,6 +936,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// bucket: a source outside the list cannot be produced, because the same
 	// list is what the classification returns.
 	bounds[fqName("catalog_no_data_plans")] = len(controlplane.NoDataRosterSources)
+	bounds[fqName("catalog_plans_by_wire_format")] = len(observability.WireFormats)
+	bounds[fqName("output_events_by_wire_format_total")] = len(observability.WireFormats)
 	// The four outcomes a no-data Plan can land on, and no more: the label is
 	// filled from the same list the evaluation publishes, and all four are
 	// created at startup so a zero on the one that never resolves on its own

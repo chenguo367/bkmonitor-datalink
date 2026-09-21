@@ -1958,7 +1958,13 @@ type Observation struct {
 	// had no message for. Nil when the sink did not count -- and left
 	// absent rather than read as zero, because a success with zero messages
 	// is a real state this field exists to name.
-	OutputWrite            *OutputWriteFacts
+	OutputWrite *OutputWriteFacts
+	// OutputWireFormat is the wire format the Plan's events are published
+	// as, on the evaluation line of the Plan that decided them (empty when
+	// the line is not a Plan's); OutputWireFormats how many events of an
+	// event_acked batch went out as each.
+	OutputWireFormat       string
+	OutputWireFormats      OutputWireFormatCounts
 	RunOutcome             string
 	Attempted              bool
 	ExecuteOutcome         string

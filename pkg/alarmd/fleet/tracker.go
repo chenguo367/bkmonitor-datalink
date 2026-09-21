@@ -261,6 +261,9 @@ type queryGroupState struct {
 	// object's Plans counted, by Plan. Replaced whole on every deciding
 	// round; a Plan that stops deciding keeps its last word, dated.
 	noDataTracking map[StrategyRef]*NoDataTracking
+	// wireFormats is the wire format each of this object's Plans last said
+	// its events go out as, by Plan, from the Plan's evaluation line.
+	wireFormats map[StrategyRef]*PlanWireFormat
 	// guards is the held gap scopes reported for this object, by Plan and
 	// scope, with the completion generation each was last reported in. A
 	// completion prunes the scopes the round did not report -- a released
@@ -816,6 +819,15 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		upkeep := state.upkeepOf(plan)
 		readAt := at
 		upkeep.Representation, upkeep.LastReadAt = read.Representation, &readAt
+	}
+	// The wire format the Plan's events go out as, from its evaluation line.
+	// Not a round either; the word is the Plan's and changes only when the
+	// Plan is recompiled, so the latest line's word is the current one.
+	if format := observation.OutputWireFormat; format != "" && plan.StrategyID != "" {
+		if state.wireFormats == nil {
+			state.wireFormats = map[StrategyRef]*PlanWireFormat{}
+		}
+		state.wireFormats[plan] = &PlanWireFormat{Plan: plan, WireFormat: format, LastSeenAt: at}
 	}
 	// What the Plan's no-data round decided, on the round it decided. Not a
 	// round of the object either: the Slot it belongs to completes on its
@@ -1536,6 +1548,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	anomaly.Guards, anomaly.GuardsTotal = worstGuards(state.guards)
 	anomaly.NoDataMemoryUpkeep = latestUpkeep(state)
 	anomaly.NoDataTracking = noDataTrackingRows(state)
+	anomaly.WireFormats = wireFormatRows(state)
 	// The holder of the latest round's Slot, when that round gave it up. The
 	// span keeps the word from the completion that wrote it; the row carries
 	// it only while the skip is the latest round -- a round since, run or
@@ -1921,6 +1934,25 @@ func (tracker *Tracker) NoDataTrackingSummary() *NoDataTrackingSummary {
 		}
 	}
 	return summary
+}
+
+// wireFormatRows is every Plan's wire format, smallest strategy first,
+// copied so the row does not alias the tracker's state.
+func wireFormatRows(state *queryGroupState) []PlanWireFormat {
+	if len(state.wireFormats) == 0 {
+		return nil
+	}
+	rows := make([]PlanWireFormat, 0, len(state.wireFormats))
+	for _, format := range state.wireFormats {
+		rows = append(rows, *format)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Plan.StrategyID != rows[j].Plan.StrategyID {
+			return rows[i].Plan.StrategyID < rows[j].Plan.StrategyID
+		}
+		return rows[i].Plan.BusinessID < rows[j].Plan.BusinessID
+	})
+	return rows
 }
 
 // NoDataMemory is every object one of whose Plans the store has refused an

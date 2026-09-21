@@ -1176,6 +1176,13 @@ var MEMORY_REPRESENTATION = {
   PER_GROUP: '按组存的新格式'
 };
 
+// The wire format a Plan's events go out as, in words. Held to nothing: the
+// words are the contract's and a new one prints as itself.
+var WIRE_FORMAT = {
+  python_compatible: 'Python 兼容事件（走 Python 告警构建器）',
+  standard_raw_event: '标准原始事件（走告警流水线标准线）'
+};
+
 // Where a Plan's no-data tracking horizon is read as coming from. Held to
 // the Go list. PLATFORM is the deployment's leaf; a strategy stating exactly
 // the platform's value reads as PLATFORM until the platform's changes.
@@ -2378,6 +2385,16 @@ function objectRow(anomaly, check, group) {
     line('无数据记忆维护', memoryUpkeepWords(anomaly.no_data_memory_upkeep),
       '记忆有有效期，靠每次读到时续期保活：每隔有效期的四分之一问一次存储，剩余不到一半才真的续。"最近一次问"在前进就是维护在工作；写入次数不涨是正常的（组不变就不写），别拿它判断记忆是否还活着。'
       + '指标 worker_no_data_memory_renewals_total{result,reason}、worker_no_data_memory_reads_total{representation}');
+  }
+  // Which way each Plan's events go out, from the Plan's own evaluation
+  // line. Readable without the object catalog, which is what makes it the
+  // answer on a deployment that keeps none.
+  if (anomaly.wire_formats && anomaly.wire_formats.length) {
+    line('输出格式', anomaly.wire_formats.map(function (entry) {
+      return '策略 ' + entry.plan.strategy_id + '：' + (WIRE_FORMAT[entry.wire_format] || entry.wire_format);
+    }).join('；'),
+      '每条策略的事件按哪种格式发出，取自该策略最近一次评估行（冻进 Plan、按 snapshot revision 解析后的词）：python_compatible 走 Python 告警构建器兼容路径，standard_raw_event 走标准原始事件线。'
+      + '指标 catalog_plans_by_wire_format{format}（leader 数 Plan）、output_events_by_wire_format_total{format}（副本数事件）；日志 evaluation_completed 行 wire_format、event_acked 行 wire_format_events_*');
   }
   // What each no-data Plan's last deciding round counted. This is the line
   // that says whether a tracking horizon is doing anything: the number it

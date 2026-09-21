@@ -326,3 +326,43 @@ func TestTheRowsTrackingEntriesAreOrderedByStrategy(t *testing.T) {
 		}
 	}
 }
+
+// The row carries the wire format each Plan's events go out as, from the
+// Plan's own evaluation line, smallest strategy first; a later line for the
+// same Plan replaces the word. This is the one place the word is readable
+// without the object catalog.
+func TestTheRowCarriesEachPlansWireFormatFromItsEvaluationLine(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-wire"})
+	evaluated := func(strategy, format string) {
+		tracker.Observe(ctx, observability.Observation{
+			Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
+			Result: observability.ResultSuccess, Direction: observability.DirectionInternal,
+			Trace:            observability.TraceFields{StrategyID: strategy, BusinessID: "2", EvaluationTime: 600},
+			OutputWireFormat: format,
+		})
+	}
+	evaluated("s-2", "standard_raw_event")
+	evaluated("s-1", "python_compatible")
+	// A line that names no format -- a failed evaluation -- changes nothing.
+	tracker.Observe(ctx, observability.Observation{
+		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
+		Trace: observability.TraceFields{StrategyID: "s-1", BusinessID: "2", EvaluationTime: 600}, Err: context.Canceled,
+	})
+	row := objectRow(t, tracker, "qg-wire")
+	if len(row.WireFormats) != 2 || row.WireFormats[0].Plan.StrategyID != "s-1" || row.WireFormats[0].WireFormat != "python_compatible" ||
+		row.WireFormats[1].Plan.StrategyID != "s-2" || row.WireFormats[1].WireFormat != "standard_raw_event" ||
+		!row.WireFormats[0].LastSeenAt.Equal(now) {
+		t.Fatalf("wire formats = %+v, want s-1 python_compatible then s-2 standard_raw_event, seen now", row.WireFormats)
+	}
+	at.at = at.at.Add(time.Minute)
+	evaluated("s-2", "python_compatible")
+	row = objectRow(t, tracker, "qg-wire")
+	if len(row.WireFormats) != 2 || row.WireFormats[1].WireFormat != "python_compatible" || !row.WireFormats[1].LastSeenAt.Equal(now.Add(time.Minute)) {
+		t.Fatalf("after a recompiled Plan's line the entry = %+v, want the new word and time, still one entry", row.WireFormats)
+	}
+	if listed := tracker.Anomalies(); len(listed) != 0 {
+		t.Fatalf("the object is listed as %+v; an evaluation line alone must not list it", listed)
+	}
+}

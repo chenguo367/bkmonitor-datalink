@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -211,6 +212,17 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		// Both numbers, zero included: a success that handed the broker
 		// nothing is the case this exists to tell from a write.
 		attributes = append(attributes, slog.Int64("messages_published", w.Published), slog.Int64("events_without_message", w.WithoutMessage))
+	}
+	if observation.OutputWireFormat != "" {
+		attributes = append(attributes, slog.String("wire_format", observation.OutputWireFormat))
+	}
+	if counts := observation.OutputWireFormats; len(counts) > 0 {
+		// One key per format the batch carried, under the format's own
+		// name: a grep for standard_raw_event finds the batches that sent
+		// one, and finds nothing only when none did.
+		for _, format := range sortedWireFormats(counts) {
+			attributes = append(attributes, slog.Int64("wire_format_events_"+format, counts[format]))
+		}
 	}
 	if f := observation.FrozenStateRenewal; f != nil {
 		// The eight numbers on the line, not only on the metric: the line is
@@ -955,4 +967,15 @@ func appendHeldByAttributes(attributes []slog.Attr, held *HeldByFacts) []slog.At
 		attributes = append(attributes, slog.Int64("held_by_ready_at", held.ReadyAtUnixMilli))
 	}
 	return attributes
+}
+
+// sortedWireFormats is the batch's formats in one order, so two lines with
+// the same counts read the same.
+func sortedWireFormats(counts OutputWireFormatCounts) []string {
+	formats := make([]string, 0, len(counts))
+	for format := range counts {
+		formats = append(formats, format)
+	}
+	sort.Strings(formats)
+	return formats
 }
