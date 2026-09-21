@@ -216,6 +216,13 @@ func (ws *workerStream) receipt(incarnation string, version *pb.Version, install
 	}}})
 }
 
+// probedReceipt is an installed receipt that carries what the probe found.
+func (ws *workerStream) probedReceipt(incarnation string, version *pb.Version, missing uint32) {
+	ws.send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Receipt{Receipt: &pb.Receipt{
+		Incarnation: incarnation, Version: version, Acked: true, Installed: true, ObjectsProbed: true, ObjectsMissing: missing,
+	}}})
+}
+
 func eventually(t *testing.T, what string, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -555,4 +562,45 @@ func TestTheServerKeepsOneSessionPerWorkerAndDropsTheSilent(t *testing.T) {
 	if harness.observer.count("closed", viewstream.RefusalIdle) != 1 || harness.observer.count("closed", viewstream.RefusalReplaced) != 1 {
 		t.Fatalf("events = %+v", harness.observer.events)
 	}
+}
+
+// A Worker's claim at its Hello says nothing about its objects. The Worker
+// reports a probe that found three missing, loses its stream, and comes
+// back claiming the version it holds: the claim credits the install and
+// leaves the probe's count where it was. Read as a receipt -- which is what
+// the same claim looks like on the wire, an installed receipt with the
+// probe flag unset -- it would have turned the count into "could not
+// probe" on every reconnect, until the next heartbeat's probe put it back.
+func TestAHelloClaimLeavesTheProbedCountWhereItWas(t *testing.T) {
+	harness := startServer(t)
+	ctx := context.Background()
+	if err := harness.server.Lead(7); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := harness.server.Publish(ctx, desiredAt(publicationA, map[string]string{"qg-1": "w1"},
+		map[string]viewstream.Content{"qg-1": content("obj-1", "s1")})); err != nil {
+		t.Fatal(err)
+	}
+	w1 := harness.connect("w1", "t1", "i1", nil)
+	snapshot := w1.recvSnapshot()
+	w1.probedReceipt("i1", snapshot.Version, 3)
+	eventually(t, "the probed receipt is on the account", func() bool {
+		objects := harness.server.Stats().Objects
+		return objects.Probed == 1 && objects.Missing == 3
+	})
+	w1.cancel()
+	again := harness.connect("w1", "t1", "i1", snapshot.Version)
+	eventually(t, "the claim is credited", func() bool { return harness.server.Stats().Counts.Installed == 1 })
+	if objects := harness.server.Stats().Objects; objects.Probed != 1 || objects.Missing != 3 || objects.Unprobed != 0 {
+		t.Fatalf("objects after the Hello claim = %+v, want the probe's 3 missing over one probed Worker left as it was", objects)
+	}
+	// The same Worker's next receipt says its probe failed: that is the
+	// Worker's word on its objects and it stands.
+	again.send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Receipt{Receipt: &pb.Receipt{
+		Incarnation: "i1", Version: snapshot.Version, Acked: true, Installed: true, ObjectsProbed: false}}})
+	eventually(t, "the failed probe is on the account", func() bool {
+		objects := harness.server.Stats().Objects
+		return objects.Probed == 0 && objects.Unprobed == 1 && objects.Missing == 0
+	})
+	again.cancel()
 }
