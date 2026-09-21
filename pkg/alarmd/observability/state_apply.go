@@ -24,6 +24,12 @@ type StateApplyChunkFacts struct {
 	// repeats. The reason says the record could not be stored; this says which
 	// of the ways it could not, which is which producer to go and read.
 	RefusalRules []string `json:"refusal_rules,omitempty"`
+	// LegacyRecordIDs is how many points across this chunk's records carried an
+	// id the derivation could not rebuild. Zero on every chunk whose state was
+	// written by a build that derived them, which is the population this says
+	// nothing about; non-zero says how much state predates that and, with the
+	// object on the same line, which objects hold it.
+	LegacyRecordIDs int `json:"legacy_record_ids,omitempty"`
 }
 
 func normalizeStateApplyChunk(o Observation) *StateApplyChunkFacts {

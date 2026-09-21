@@ -452,13 +452,14 @@ func (store *ExecutionStore) applyRuntime(
 			result.Items[index] = classified
 			continue
 		}
-		encoded, refusal, rule := store.encodeForWrite(mutation, witness.framedRevision+1)
+		encoded, refusal, rule, legacyIDs := store.encodeForWrite(mutation, witness.framedRevision+1)
 		if refusal != "" {
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(refusal)
 			item.RefusalRule = rule
 			result.Items[index] = item
 			continue
 		}
+		item.LegacyRecordIDs = legacyIDs
 		write := FencedWrite{Key: keys[index], ExpectedMissing: witness.framedMissing, ExpectedDigest: witness.framedDigest,
 			Value: encoded, TTL: ttl}
 		if err := pipeline.add(ctx, batchBackend, target.Name, index, write, witness.framedRevision); err != nil {
@@ -506,12 +507,13 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	if classified, proceed := classifyWitnessedMutation(witness, mutation); !proceed {
 		return classified
 	}
-	encoded, refusal, rule := store.encodeForWrite(mutation, witness.framedRevision+1)
+	encoded, refusal, rule, legacyIDs := store.encodeForWrite(mutation, witness.framedRevision+1)
 	if refusal != "" {
 		item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(refusal)
 		item.RefusalRule = rule
 		return item
 	}
+	item.LegacyRecordIDs = legacyIDs
 	applied, err := backend.CompareAndSet(ctx, framedKey, framedRaw, framedRaw == nil, encoded, ttl)
 	if err != nil {
 		item.Status, item.ReasonCode = execution.StateApplyRetryable, execution.ReasonCode(contract.ReasonStateWriteRetryable)
@@ -527,19 +529,19 @@ func (store *ExecutionStore) applyRuntimeSequential(
 // when it cannot: a record that disagrees with the framed contract is
 // STATE_CORRUPT - the producer sent something no representation can hold -
 // and one that frames but does not fit is the budget.
-func (store *ExecutionStore) encodeForWrite(mutation execution.StateMutation, revision uint64) ([]byte, string, string) {
-	encoded, err := encodeRuntimePacked(mutation, revision)
+func (store *ExecutionStore) encodeForWrite(mutation execution.StateMutation, revision uint64) ([]byte, string, string, int) {
+	encoded, legacy, err := encodeRuntimePackedCounted(mutation, revision)
 	switch {
 	case errors.Is(err, ErrPackedContract):
 		// The rule travels with the reason. Eight rules share STATE_CORRUPT,
 		// and which one refused is the difference between a producer that
 		// stopped deriving record ids and one that sent two fingerprints for
 		// a Level - different code, different fix.
-		return nil, contract.ReasonStateCorrupt, PackedRefusalRule(err)
+		return nil, contract.ReasonStateCorrupt, PackedRefusalRule(err), 0
 	case err != nil || len(encoded) > store.options.MaxValueBytes:
-		return nil, contract.ReasonStateBudgetExceeded, ""
+		return nil, contract.ReasonStateBudgetExceeded, "", 0
 	}
-	return encoded, "", ""
+	return encoded, "", "", legacy
 }
 
 // runtimeValueSizeGroups bounds how many Query Groups the store remembers a

@@ -246,6 +246,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		if len(f.RefusalRules) > 0 {
 			attributes = append(attributes, slog.String("state_refusal_rules", strings.Join(f.RefusalRules, ",")))
 		}
+		if f.LegacyRecordIDs > 0 {
+			attributes = append(attributes, slog.Int("state_legacy_record_ids", f.LegacyRecordIDs))
+		}
 	}
 	if f := observation.CapacityRejection; f != nil {
 		attributes = append(attributes, slog.String("capacity_phase", f.Phase), slog.Uint64("capacity_shared_used", f.SharedUsed), slog.Uint64("capacity_requested", f.Requested), slog.Uint64("capacity_limit", f.Limit))

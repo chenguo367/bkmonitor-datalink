@@ -855,7 +855,7 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 		}
 		totals.keys += int64(len(chunkItems))
 		coordinator.observeChunk(ctx, observability.StageGapGuardCommitted, operation, chunkStarted, started, "", reason,
-			chunk, totals, observability.Counts{}, err, nil, nil, extensions...)
+			chunk, totals, observability.Counts{}, err, nil, nil, 0, extensions...)
 		return err
 	})
 }
@@ -1569,6 +1569,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 		var reason execution.ReasonCode
 		var chunkBytes int64
 		rejected := 0
+		chunkLegacyIDs := 0
 		var refusalRules []string
 		if err == nil {
 			if err = result.Validate(); err == nil {
@@ -1589,6 +1590,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 					case execution.StateAdmissionAccepted:
 						encodedBytes[position[item.Identity]] = int64(item.EncodedBytes)
 						chunkBytes += int64(item.EncodedBytes)
+						chunkLegacyIDs += item.LegacyRecordIDs
 					case execution.StateAdmissionDeterministicInvalid:
 						deterministic[item.Identity] = item.ReasonCode
 						refusalRules = addRefusalRule(refusalRules, item.RefusalRule)
@@ -1606,7 +1608,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 		totals.keys += int64(len(chunkItems))
 		totals.bytes += chunkBytes
 		coordinator.observeChunk(ctx, observability.StageStateAdmission, operation, chunkStarted, started, observationResult, reason,
-			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, nil, refusalRules)
+			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, nil, refusalRules, chunkLegacyIDs)
 		return err
 	})
 	if err != nil {
@@ -1684,6 +1686,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		var reason execution.ReasonCode
 		var conflicts observability.StateVersionConflictFacts
 		var applyRefusalRules []string
+		chunkLegacyIDs := 0
 		rejected := 0
 		if err == nil {
 			if err = result.Validate(); err == nil {
@@ -1703,6 +1706,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 						// because this is the only place that knows; the Plan
 						// is decided from the count when every chunk has run.
 						landed[item.Identity.Plan]++
+						chunkLegacyIDs += item.LegacyRecordIDs
 					case execution.StateApplyAlreadyApplied:
 						// Written by an earlier attempt at this Slot, so not
 						// counted for this one: that attempt left its own mark
@@ -1781,7 +1785,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		}
 		coordinator.observeChunk(ctx, observability.StageStateApplied, operation, chunkStarted, started, observationResult, reason,
 			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, conflictFacts,
-			applyRefusalRules)
+			applyRefusalRules, chunkLegacyIDs)
 		return err
 	})
 	if !alreadyApplied.Empty() {

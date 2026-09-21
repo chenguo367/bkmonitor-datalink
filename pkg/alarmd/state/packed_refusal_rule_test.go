@@ -56,6 +56,8 @@ func TestEveryFramedRefusalNamesItsRule(t *testing.T) {
 		}},
 		{rule: PackedRuleRecordIDNotDerived, mutate: func(m execution.StateMutation) execution.StateMutation {
 			m.Points[0].RecordID = strings.Repeat("ff", 32)
+			// The anchor moves with it, so the point stays this round's.
+			m.AffectedRecords = []execution.RecordAnchor{{RecordID: m.Points[0].RecordID, SourceTime: m.Points[0].SourceTime}}
 			return m
 		}},
 		{rule: PackedRuleRecordIDUnderivable, mutate: func(m execution.StateMutation) execution.StateMutation {
@@ -142,9 +144,13 @@ func TestTheRefusalRuleReachesTheAdmissionResult(t *testing.T) {
 	// not exercise the seam this case is about.
 	point := derivedPoint(t, stateIdentityV2(), 60, "detect", execution.LevelFactNormal)
 	point.RecordID = strings.Repeat("ff", 32)
+	// Anchored as this round's, which is what makes it the producer's to
+	// answer for: an unanchored point is history, and history that does not
+	// derive is carried rather than refused.
+	thisRound := execution.RecordAnchor{RecordID: point.RecordID, SourceTime: point.SourceTime}
 	mutation, err := execution.BuildStateMutation(execution.StateMutation{
 		Identity: stateIdentityV2(), ApplyVersion: applyVersion(),
-		AffectedRecords: []execution.RecordAnchor{derivedAnchor(t, stateIdentityV2(), 60)},
+		AffectedRecords: []execution.RecordAnchor{thisRound},
 		Levels: []execution.RuntimeLevelStateMutation{{LevelID: 1, LevelStateCompatibility: "compat",
 			HistoryCompleteness: execution.HistoryFull, WarmupRequirementRef: "warm", LastProcessedEventTime: 60}},
 		Points: []execution.StateHistoryPoint{point},
@@ -283,7 +289,10 @@ func TestTheRefusalRuleReachesTheApplyResultOnBothPaths(t *testing.T) {
 		point.RecordID = strings.Repeat("ff", 32)
 		mutation, err := execution.BuildStateMutation(execution.StateMutation{
 			Identity: identity, ApplyVersion: applyVersion(),
-			AffectedRecords: []execution.RecordAnchor{derivedAnchor(t, identity, 60)},
+			// Anchored as this round's: the refusal is about a producer that
+			// stopped deriving, and only a point this round produced is the
+			// producer's to answer for.
+			AffectedRecords: []execution.RecordAnchor{{RecordID: point.RecordID, SourceTime: point.SourceTime}},
 			Levels: []execution.RuntimeLevelStateMutation{{LevelID: 1, LevelStateCompatibility: "compat",
 				HistoryCompleteness: execution.HistoryFull, WarmupRequirementRef: "warm", LastProcessedEventTime: 60}},
 			Points: []execution.StateHistoryPoint{point},
