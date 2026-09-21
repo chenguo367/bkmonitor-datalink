@@ -127,12 +127,26 @@ func TestTheRecordSizeIsLearnedPerQueryGroup(t *testing.T) {
 // about records that are not there, and "did not come back" is no reading at
 // all, and the two are told apart by the error. Written against the function,
 // the case cannot see which of them is in force.
+//
+// The records are written first, and that is what makes this a test. Read
+// against keys the backend does not hold, the estimate learns zero - and a
+// failed batch that taught zero would leave it at zero too, so both answers
+// are the same number and removing the guard changes nothing. A guard case has
+// to make the two branches disagree before a mutant can fail it.
 func TestAFailedBatchTeachesNothing(t *testing.T) {
 	backend := newPipelineMemoryBackend()
 	store := newBatchStore(t, backend, nil)
 	group := frozenRef().Slot.QueryGroup
 
 	mutations := seriesMutations(t, 4, applyVersion(), 0)
+	applied, err := store.ApplyRuntime(context.Background(), execution.StateApplyRequest{
+		Contract: frozenRef(), Retention: testRetention(), Items: mutations,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireAllStatus(t, applied, execution.StateApplied)
+
 	request := execution.StatePreflightRequest{Contract: frozenRef(), Items: preflightItems(mutations)}
 	if _, err := store.LoadRuntime(context.Background(), request); err != nil {
 		t.Fatal(err)
@@ -140,6 +154,10 @@ func TestAFailedBatchTeachesNothing(t *testing.T) {
 	learned, ok := store.expectedValueBytes(group)
 	if !ok {
 		t.Fatal("a read that came back taught nothing")
+	}
+	if learned == 0 {
+		t.Fatal("the records read back as empty, so a failed batch teaching zero would be the same " +
+			"answer and this case could not tell the two apart")
 	}
 
 	backend.failMGet = errors.New("i/o timeout")
