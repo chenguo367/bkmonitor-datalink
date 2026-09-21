@@ -348,8 +348,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			Help: "Selectors of target plans resolved, once per selector per Plan per Slot, by kind, state and the " +
 				"closed reason behind an Unavailable or Incomplete state: key_missing, json_invalid, " +
 				"structure_invalid, model_mismatch, read_failed, stale, index_unavailable, node_missing, " +
-				"members_dropped, source_unwired. OKEmpty with node_missing is a topology reference to a node " +
-				"the topology cache does not list.",
+				"node_in_other_business, members_dropped, source_unwired. OKEmpty with node_missing is a topology " +
+				"reference to a node the topology cache does not list; OKEmpty with node_in_other_business is one " +
+				"whose node is listed but hosts machines under another business only.",
 		}, []string{"kind", "state", "reason"}),
 		noDataSlotPlans: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_slot_plans_total",
