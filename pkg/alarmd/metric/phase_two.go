@@ -51,6 +51,7 @@ type phaseTwoMetrics struct {
 	ownershipTransitions            *prometheus.CounterVec
 	queryAdmission                  *prometheus.CounterVec
 	noDataSlotPlans                 *prometheus.CounterVec
+	noDataAbsences                  *prometheus.CounterVec
 	targetPlanResolutions           *prometheus.CounterVec
 	targetSelectorResolutions       *prometheus.CounterVec
 	noDataStalls                    *prometheus.CounterVec
@@ -377,6 +378,23 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"while the leader reports Plans is what a Plan losing its no-data section between the " +
 				"leader and the worker looks like, and it looks like nothing else: the Plans still " +
 				"execute, nothing fails, and every label here reads as a computed zero.",
+		}, []string{"outcome"}),
+		noDataAbsences: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_absences_total",
+			Help: "Groups of the Plans that detect no-data, summed over every Slot that judged them, by what " +
+				"the round counted each group as. expected is the roster's size and present what arrived; " +
+				"absent is the groups tracked and reported absent this round; unavailable the groups a round " +
+				"that did not see the whole period could not judge; dropped the series whose dimensions did " +
+				"not match the item. expired is the absences the tracking horizon stopped this round and " +
+				"suppressed the groups the round met already stopped -- the standing size of what the horizon " +
+				"is holding down. Read the last two against each other: expired moving is the horizon acting, " +
+				"suppressed is what it has acted on and is still holding; a deployment that switched the " +
+				"horizon on and reads zero on both has a horizon nothing reached. Both are counted where each " +
+				"group is decided, never by differencing one round's memory against the last, so the round " +
+				"that failed to load its memory does not read as a quiet one. Every label is created at " +
+				"startup so a zero can be told from a label nothing ever wrote. Read absent + expired + " +
+				"suppressed against the fleet page's per-object line, which carries the same counts per " +
+				"Plan for the round it last decided.",
 		}, []string{"outcome"}),
 		noDataPlansSeen: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_plans_seen_total",
@@ -939,6 +957,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range nodata.SlotOutcomes {
 		metrics.noDataSlotPlans.WithLabelValues(string(outcome))
 	}
+	for _, outcome := range observability.NoDataAbsenceOutcomes {
+		metrics.noDataAbsences.WithLabelValues(outcome)
+	}
 	for _, state := range targetplan.ResolutionStates {
 		metrics.targetPlanResolutions.WithLabelValues(string(state))
 	}
@@ -1059,7 +1080,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
 		m.queryAdmission,
-		m.noDataSlotPlans, m.targetPlanResolutions, m.targetSelectorResolutions, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
+		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
@@ -1280,6 +1301,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		observation.Stage == observability.StageNoDataDecided {
 		m.observeNoDataSlot(observation)
 		m.observeNoDataStall(observation)
+		m.observeNoDataAbsence(observation)
 	}
 	if facts := observation.TargetResolution; facts != nil {
 		m.observeTargetResolution(facts)
@@ -1464,6 +1486,23 @@ func (m phaseTwoMetrics) observeNoDataSlot(observation observability.Observation
 		return
 	}
 	m.noDataSlotPlans.WithLabelValues(facts.Outcome).Add(float64(facts.Plans))
+}
+
+// observeNoDataAbsence adds one judging Plan's group counts to each cell. The
+// zeros are added too, which changes nothing in the counter and everything in
+// what a flat zero means: the label was written by a round that counted none.
+func (m phaseTwoMetrics) observeNoDataAbsence(observation observability.Observation) {
+	facts := observation.NoDataAbsence
+	if facts == nil {
+		return
+	}
+	for outcome, count := range map[string]uint64{
+		"expected": facts.Expected, "present": facts.Present, "absent": facts.Absent,
+		"unavailable": facts.Unavailable, "dropped": facts.Dropped,
+		"expired": facts.Expired, "suppressed": facts.Suppressed,
+	} {
+		m.noDataAbsences.WithLabelValues(outcome).Add(float64(count))
+	}
 }
 
 // observeNoDataStall counts one Plan the round it stopped, not every round it

@@ -287,6 +287,11 @@ type HealthResponse struct {
 	// whether the cache can update the run, and the two sentences the first
 	// screen shows for the run and for the cache. Absent without a round.
 	SourceStanding *SourceStanding `json:"source_standing,omitempty"`
+	// NoDataTracking is the fleet's one line on the no-data tracking horizon:
+	// how many Plans decide against which kind of horizon and what their last
+	// deciding rounds counted, summed over the counted replicas. Absent when
+	// no replica reports a deciding round.
+	NoDataTracking *NoDataTrackingSummary `json:"no_data_tracking,omitempty"`
 	// Dependencies is where this deployment's external systems are and what
 	// one replica has seen of them, DependenciesReplica which replica, and
 	// DependenciesReplicas how many replicas published a list -- the one here
@@ -890,7 +895,8 @@ func NewHandler(
 			AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
 			ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,
 			Source: view.Source, SourceReplica: view.SourceReplica, SourceStanding: view.SourceStanding,
-			Dependencies: dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
+			NoDataTracking: view.NoDataTracking,
+			Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 			DependenciesReplicas: view.DependenciesReplicas, ReplicasNotReady: view.ReplicasNotReady,
 			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
 			Gaps: view.Gaps, Capacity: view.Capacity,

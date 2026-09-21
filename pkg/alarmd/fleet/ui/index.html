@@ -230,6 +230,11 @@ details.group table{margin:6px 0 0 12px}
         <div class="v" id="poolExits">–</div>
         <div class="k" id="poolFlowHint"></div>
       </div>
+      <div class="cell wide" id="noDataTrackingCell" hidden>
+        <div class="k">无数据追踪期限压着的组</div>
+        <div class="v" id="noDataSuppressed">–</div>
+        <div class="k" id="noDataTrackingHint"></div>
+      </div>
     </div>
     <ul class="gaps" id="gaps"></ul>
     <p class="basis" id="prunedSkips" hidden></p>
@@ -1152,6 +1157,33 @@ var MEMORY_REPRESENTATION = {
   WHOLE_MEMORY: '整份存的旧格式（升级后还没写过）',
   PER_GROUP: '按组存的新格式'
 };
+
+// Where a Plan's no-data tracking horizon is read as coming from. Held to
+// the Go list. PLATFORM is the deployment's leaf; a strategy stating exactly
+// the platform's value reads as PLATFORM until the platform's changes.
+var HORIZON_SOURCE = {
+  NONE: '没有期限（无限期追踪，特性未开）',
+  PLATFORM: '平台默认',
+  STRATEGY: '策略自己设的',
+  UNKNOWN: '本副本没被告知平台默认，说不清来源'
+};
+
+// One Plan's last deciding no-data round, in the round's own counts: which
+// horizon it decided against, what it expected and saw, and the three the
+// horizon is read from. "Still tracked" is the absences still producing;
+// "stopped this round" and "held down" are what the horizon did and is doing.
+function noDataTrackingWords(tracking) {
+  var parts = [];
+  parts.push('策略 ' + tracking.plan.strategy_id
+    + '：期限 ' + (tracking.horizon_seconds ? elapsedLabel(tracking.horizon_seconds) : '无')
+    + '（' + (HORIZON_SOURCE[tracking.horizon_source] || tracking.horizon_source) + '）');
+  parts.push('期待 ' + tracking.expected + ' 个组' + (tracking.roster_source ? '（名册来源 ' + tracking.roster_source + '）' : '')
+    + '，本轮到了 ' + tracking.present + '，在追踪的缺失 ' + tracking.absent
+    + '，本轮到期停追 ' + tracking.expired_this_round + '，已停追压着 ' + tracking.suppressed
+    + (tracking.dropped ? '，维度不匹配丢弃 ' + tracking.dropped : ''));
+  parts.push('判定于 ' + momentLabel(tracking.evaluation_time * 1000));
+  return parts.join('；');
+}
 
 function memoryUpkeepWords(upkeep) {
   var parts = [];
@@ -2297,6 +2329,19 @@ function objectRow(anomaly, check, group) {
       '记忆有有效期，靠每次读到时续期保活：每隔有效期的四分之一问一次存储，剩余不到一半才真的续。"最近一次问"在前进就是维护在工作；写入次数不涨是正常的（组不变就不写），别拿它判断记忆是否还活着。'
       + '指标 worker_no_data_memory_renewals_total{result,reason}、worker_no_data_memory_reads_total{representation}');
   }
+  // What each no-data Plan's last deciding round counted. This is the line
+  // that says whether a tracking horizon is doing anything: the number it
+  // decided against, how many absences it stopped this round and how many it
+  // is holding down. A horizon nothing reached reads 0 / 0 here, which is
+  // the reading -- not the absence of a line.
+  if (anomaly.no_data_tracking && anomaly.no_data_tracking.length) {
+    anomaly.no_data_tracking.forEach(function (tracking) {
+      line('无数据追踪', noDataTrackingWords(tracking),
+        '每条无数据策略最近一次判定的原样计数，不做前后轮相减。"在追踪的缺失"是还在产出无数据异常的组；"本轮到期停追"是这一轮追踪期限到了、停止产出的组；"已停追压着"是之前就停了、这一轮又遇到的组，就是期限正压着的规模。'
+        + '停追不会发恢复：数据再来才会重新开始追踪。期限为"无"时后两个数恒为 0。'
+        + '指标 worker_no_data_absences_total{outcome}');
+    });
+  }
   // A failure of this deployment's own making beside the finding the column
   // decided: the row is on its line for the column's reason and under
   // DEFECT for this one, and neither hides the other.
@@ -2508,6 +2553,7 @@ function renderDeployment(deployment) {
     renderCoverage(deployment.coverage);
     renderReplicas(deployment.per_replica);
     renderSource(deployment.source, deployment.expected, deployment.source_standing);
+    renderNoDataTracking(deployment.no_data_tracking);
     renderDependencies(deployment.dependencies || [], deployment.dependencies_replica, deployment.dependencies_replicas);
     text('demotedHint', deployment.demoted_total
       ? '后端持续查不到，已降级不再反复查；不计入部署健康判定'
@@ -2886,6 +2932,37 @@ function renderSource(source, expected, standing) {
     parts.push('写入方没有留 last_updated 标记（每 6 分钟全量重读）');
   }
   text('expectedHint', parts.join('；'));
+}
+
+// The one line on the no-data tracking horizon: how many Plans decide against
+// which kind of horizon, and what their last deciding rounds counted. Hidden
+// while no replica has a deciding round on record -- a build before the fact,
+// or a fleet with no no-data Plan -- rather than shown as zeros, because zeros
+// here are a reading: a horizon switched on that reaches nothing.
+function renderNoDataTracking(tracking) {
+  var cell = document.getElementById('noDataTrackingCell');
+  if (!tracking || !tracking.plans) {
+    cell.hidden = true;
+    return;
+  }
+  cell.hidden = false;
+  text('noDataSuppressed', String(tracking.suppressed));
+  var sources = [];
+  if (tracking.horizon_platform) sources.push(tracking.horizon_platform + ' 条用平台默认期限');
+  if (tracking.horizon_strategy) sources.push(tracking.horizon_strategy + ' 条用策略自己设的期限');
+  if (tracking.horizon_none) sources.push(tracking.horizon_none + ' 条没有期限（无限期追踪）');
+  if (tracking.horizon_unknown) sources.push(tracking.horizon_unknown + ' 条来源说不清（副本没被告知平台默认）');
+  var parts = [tracking.plans + ' 条无数据策略有过判定：' + sources.join('、')];
+  parts.push('各自最近一轮合计：期待 ' + tracking.expected + ' 个组，在追踪的缺失 ' + tracking.absent
+    + '，本轮到期停追 ' + tracking.expired_this_round + '，已停追压着 ' + tracking.suppressed);
+  if (tracking.horizon_none === tracking.plans) {
+    parts.push('全部无期限，后两个数恒为 0——特性没开，不是没起作用');
+  } else if (!tracking.expired_this_round && !tracking.suppressed) {
+    parts.push('有期限而两个数都是 0：期限还没有够到任何一个缺失（缺失都比期限年轻），或者刚开');
+  }
+  if (tracking.last_decided_at) parts.push('最近判定 ' + momentLabel(tracking.last_decided_at));
+  parts.push('对象页每条策略一行原样计数；指标 worker_no_data_absences_total{outcome}');
+  text('noDataTrackingHint', parts.join('；'));
 }
 
 // The dependency table: one line per role, in the server's order, with the

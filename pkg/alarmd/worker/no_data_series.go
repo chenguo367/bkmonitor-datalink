@@ -34,6 +34,11 @@ type noDataRound struct {
 	series   []completedSeries
 	mutation *execution.PlanNoDataMutation
 	outcome  nodata.SlotOutcome
+	// facts is what the round counted about the Plan's groups, and horizon
+	// the Plan's frozen tracking horizon it counted them against. Carried out
+	// for the observation line; the decision itself is in the outcome.
+	facts   nodata.AbsenceFacts
+	horizon int64
 }
 
 // seriesDimensionsFor is the dimensions of every series this Slot saw for one
@@ -135,7 +140,10 @@ func (stream *streamedExecution) noDataRoundFor(
 	if err != nil {
 		return noDataRound{}, derivationFailed(err)
 	}
-	round := noDataRound{mutation: decided.Mutation, outcome: decided.Outcome}
+	round := noDataRound{
+		mutation: decided.Mutation, outcome: decided.Outcome,
+		facts: decided.Facts, horizon: config.TrackingHorizonSeconds,
+	}
 	if len(decided.Series) == 0 {
 		return round, nil
 	}
@@ -302,6 +310,7 @@ func (stream *streamedExecution) evaluateNoData(
 		}
 		stream.noDataStateMutations += uint64(len(round.series))
 		stream.recordNoDataOutcome(ctx, due, round.outcome)
+		stream.observeNoDataAbsence(ctx, due, round)
 		if round.mutation != nil {
 			stream.noDataMutations = append(stream.noDataMutations, *round.mutation)
 		}
@@ -504,6 +513,41 @@ func (stream *streamedExecution) observeNoDataOutcomes(ctx context.Context) {
 			NoDataSlot: &observability.NoDataSlotFacts{Outcome: string(outcome), Plans: plans},
 		})
 	}
+}
+
+// observeNoDataAbsence reports what one Plan's round decided about its groups,
+// on the round it decided.
+//
+// Only a round that judged has anything to say: the skipped outcomes have
+// their partition line and counted nothing, and a line of zeros under them
+// would read as a Plan with no groups. One line per judging Plan per Slot,
+// the same volume as the memory write beside it, bounded the same way.
+//
+// The counts are the evaluation's own, counted where each group was decided.
+// This is what turns a horizon that has been switched on into a number: how
+// many absences it stopped this round, how many it is holding down, and
+// against which horizon -- which before this line lived only inside the
+// persisted memory and the alerts that stopped arriving.
+func (stream *streamedExecution) observeNoDataAbsence(
+	ctx context.Context, due execution.DuePlan, round noDataRound,
+) {
+	if round.outcome != nodata.OutcomeEvaluated {
+		return
+	}
+	facts := round.facts
+	stream.coordinator.emitObservation(ctx, observability.Observation{
+		Component: observability.ComponentEvaluation, Stage: observability.StageNoDataDecided,
+		Operation: observability.Operation(stream.request.Operation),
+		Direction: observability.DirectionInternal, Result: observability.ResultSuccess,
+		Trace: observability.TraceFields{
+			StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID,
+		},
+		NoDataAbsence: &observability.NoDataAbsenceFacts{
+			Outcome: string(round.outcome), HorizonSeconds: round.horizon, RosterSource: string(facts.RosterSource),
+			Expected: facts.Expected, Present: facts.Present, Absent: facts.Absent, Unavailable: facts.Unavailable,
+			Dropped: facts.Dropped, Expired: facts.Expired, Suppressed: facts.Suppressed,
+		},
+	})
 }
 
 // noDataPointGrid refuses a Slot whose synthetic points would not land on the

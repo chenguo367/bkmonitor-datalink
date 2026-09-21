@@ -225,6 +225,9 @@ type StrategyNoDataConfig struct {
 	Continuous   uint32   `json:"continuous"`
 	Level        uint32   `json:"level"`
 	AggDimension []string `json:"agg_dimension,omitempty"`
+	// TrackingHorizonSeconds is the effective horizon compilation froze into
+	// the Plan, the platform's or the item's own; zero is none.
+	TrackingHorizonSeconds int64 `json:"tracking_horizon_seconds,omitempty"`
 }
 
 // StrategyLevelConfig is one level: its definition, how its algorithms
@@ -317,7 +320,8 @@ func strategyPlanConfigOf(object controlplane.QueryGroupObject, plan controlplan
 	}
 	if plan.NoData != nil {
 		config.NoData = &StrategyNoDataConfig{Continuous: plan.NoData.Continuous, Level: plan.NoData.Level,
-			AggDimension: append([]string(nil), plan.NoData.AggDimension...)}
+			AggDimension:           append([]string(nil), plan.NoData.AggDimension...),
+			TrackingHorizonSeconds: plan.NoData.TrackingHorizonSeconds}
 	}
 	for _, level := range plan.StrategyIR.Levels {
 		entry := StrategyLevelConfig{

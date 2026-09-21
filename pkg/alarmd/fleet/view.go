@@ -337,6 +337,123 @@ type NoDataMemoryUpkeep struct {
 	Plans int `json:"plans,omitempty"`
 }
 
+// NoDataTracking is what one Plan's last deciding no-data round counted, on
+// the object row: the horizon it decided against and where that came from,
+// the roster it judged, and the three counts the horizon is read from --
+// the groups still tracked and reported absent, the absences the round
+// stopped, and the groups it met already stopped.
+//
+// It answers the question a deployment that switched the horizon on has no
+// other way to ask: is it doing anything, to which Plans, against which
+// number. Before this the answer lived in the persisted memory and in the
+// alerts that stopped arriving, and a horizon that reached nothing read
+// exactly like one that was never configured.
+type NoDataTracking struct {
+	Plan StrategyRef `json:"plan"`
+	// HorizonSeconds is the Plan's effective horizon as compilation froze it,
+	// zero when it has none; HorizonSource says where the tracker reads it
+	// as coming from, one of NoDataHorizonSources.
+	HorizonSeconds int64  `json:"horizon_seconds"`
+	HorizonSource  string `json:"horizon_source"`
+	// RosterSource is the derivation of the expected set, as the round
+	// declared it; Expected its size and Present how many arrived.
+	RosterSource string `json:"roster_source,omitempty"`
+	Expected     uint64 `json:"expected"`
+	Present      uint64 `json:"present"`
+	// Absent is the groups still tracked and reported absent by that round;
+	// ExpiredThisRound the absences it stopped tracking; Suppressed the
+	// groups it met already stopped -- what the horizon is holding down.
+	Absent           uint64 `json:"absent"`
+	ExpiredThisRound uint64 `json:"expired_this_round"`
+	Suppressed       uint64 `json:"suppressed"`
+	// Dropped is the series the round refused as not matching the item.
+	Dropped uint64 `json:"dropped,omitempty"`
+	// EvaluationTime is the Slot that decided; DecidedAt when this process
+	// saw it.
+	EvaluationTime int64     `json:"evaluation_time"`
+	DecidedAt      time.Time `json:"decided_at"`
+}
+
+// Where a Plan's effective horizon is read as coming from. The Plan carries
+// the number and not its origin, so the tracker reads the origin against the
+// platform's own horizon: none when the Plan has no horizon, platform when it
+// equals the deployment's, strategy otherwise. A strategy that states exactly
+// the platform's value reads as platform -- the same number, the same
+// behaviour -- until the platform's changes, at which point the Plan keeps
+// its own and reads as strategy; a Plan inheriting the platform's is
+// recompiled to the new value and goes on reading as platform. Unknown is a
+// tracker that was not told the platform's horizon, and says so rather than
+// guessing.
+const (
+	NoDataHorizonNone     = "NONE"
+	NoDataHorizonPlatform = "PLATFORM"
+	NoDataHorizonStrategy = "STRATEGY"
+	NoDataHorizonUnknown  = "UNKNOWN"
+)
+
+// NoDataHorizonSources is the closed list, for the page's wording table.
+var NoDataHorizonSources = []string{NoDataHorizonNone, NoDataHorizonPlatform, NoDataHorizonStrategy, NoDataHorizonUnknown}
+
+// NoDataTrackingSummary is the fleet's one line on the tracking horizon: over
+// every no-data Plan whose last deciding round this process (or, merged, the
+// counted replicas) saw, how many Plans decide against which kind of horizon,
+// and the sum of what those last rounds counted. The counts are the latest
+// round of each Plan and not a running total, so they say what the horizon
+// is holding down now, not what it ever did; the counter family says that.
+type NoDataTrackingSummary struct {
+	// Plans is the no-data Plans with a deciding round on record; the
+	// three by-source counts partition them, with Unknown for a tracker not
+	// told the platform's horizon.
+	Plans           int `json:"plans"`
+	HorizonNone     int `json:"horizon_none"`
+	HorizonPlatform int `json:"horizon_platform"`
+	HorizonStrategy int `json:"horizon_strategy"`
+	HorizonUnknown  int `json:"horizon_unknown,omitempty"`
+	// Expected, Absent, ExpiredThisRound and Suppressed are the sums of the
+	// same fields over each Plan's last deciding round.
+	Expected         uint64 `json:"expected"`
+	Absent           uint64 `json:"absent"`
+	ExpiredThisRound uint64 `json:"expired_this_round"`
+	Suppressed       uint64 `json:"suppressed"`
+	// LastDecidedAt is the latest deciding round seen.
+	LastDecidedAt time.Time `json:"last_decided_at,omitempty"`
+}
+
+// add folds one Plan's word, or another replica's whole summary, in.
+func (summary *NoDataTrackingSummary) add(other NoDataTrackingSummary) {
+	summary.Plans += other.Plans
+	summary.HorizonNone += other.HorizonNone
+	summary.HorizonPlatform += other.HorizonPlatform
+	summary.HorizonStrategy += other.HorizonStrategy
+	summary.HorizonUnknown += other.HorizonUnknown
+	summary.Expected += other.Expected
+	summary.Absent += other.Absent
+	summary.ExpiredThisRound += other.ExpiredThisRound
+	summary.Suppressed += other.Suppressed
+	if other.LastDecidedAt.After(summary.LastDecidedAt) {
+		summary.LastDecidedAt = other.LastDecidedAt
+	}
+}
+
+// summaryOf is one Plan's word as a summary of one.
+func (tracking NoDataTracking) summaryOf() NoDataTrackingSummary {
+	summary := NoDataTrackingSummary{
+		Plans: 1, Expected: tracking.Expected, Absent: tracking.Absent,
+		ExpiredThisRound: tracking.ExpiredThisRound, Suppressed: tracking.Suppressed, LastDecidedAt: tracking.DecidedAt,
+	}
+	switch tracking.HorizonSource {
+	case NoDataHorizonNone:
+		summary.HorizonNone = 1
+	case NoDataHorizonPlatform:
+		summary.HorizonPlatform = 1
+	case NoDataHorizonStrategy:
+		summary.HorizonStrategy = 1
+	default:
+		summary.HorizonUnknown = 1
+	}
+	return summary
+}
+
 // LastError is the last error a round of this object returned.
 //
 // Text is the error's own words, sanitised and bounded by the same limit the
@@ -803,6 +920,11 @@ type Anomaly struct {
 	// stored shape and the last renewal. Absent until a renewal reached the
 	// store or a read said what it read.
 	NoDataMemoryUpkeep *NoDataMemoryUpkeep `json:"no_data_memory_upkeep,omitempty"`
+	// NoDataTracking is on every row of an object one of whose Plans this
+	// process has seen a no-data round decide: what the last deciding round
+	// of each such Plan counted, by Plan, smallest strategy first. Absent
+	// until a round decides.
+	NoDataTracking []NoDataTracking `json:"no_data_tracking,omitempty"`
 	// EmptyEveryRound is on rows of KindEmptyEveryRound: the run of empty
 	// completions, whole, with what the row can say about why.
 	EmptyEveryRound *EmptyEveryRoundFacts `json:"empty_every_round,omitempty"`
@@ -1020,6 +1142,11 @@ type Snapshot struct {
 	// run of them is what a control-plane store failing writes looks like,
 	// and the trend has to be readable. Absent before the fact existed.
 	BookkeepingAbandoned *BookkeepingFacts `json:"bookkeeping_abandoned,omitempty"`
+	// NoDataTracking is this replica's account of what its no-data Plans'
+	// last deciding rounds counted, over every tracked object and not only
+	// the listed ones. Absent before the fact existed or while no Plan has
+	// decided.
+	NoDataTracking *NoDataTrackingSummary `json:"no_data_tracking,omitempty"`
 	// Source is what the control leader's last refresh round found at the
 	// strategy source: how many strategies it listed, how many were accepted,
 	// and what kept the rest out. Absent on every follower and on a build
@@ -1687,10 +1814,14 @@ type View struct {
 	// each replica counted them (an object that moved counts on both), and
 	// the latest. Absent when no replica reports the fact.
 	BookkeepingAbandoned *BookkeepingFacts `json:"bookkeeping_abandoned,omitempty"`
-	DemotionEntries      int               `json:"demotion_entries"`
-	DemotionExtensions   int               `json:"demotion_extensions"`
-	DemotionExits        int               `json:"demotion_exits"`
-	LastDemotionExit     time.Time         `json:"last_demotion_exit,omitempty"`
+	// NoDataTracking sums the replicas' accounts of what their no-data Plans
+	// last counted: the first screen's one line on whether the tracking
+	// horizon is doing anything. Absent when no replica reports the fact.
+	NoDataTracking     *NoDataTrackingSummary `json:"no_data_tracking,omitempty"`
+	DemotionEntries    int                    `json:"demotion_entries"`
+	DemotionExtensions int                    `json:"demotion_extensions"`
+	DemotionExits      int                    `json:"demotion_exits"`
+	LastDemotionExit   time.Time              `json:"last_demotion_exit,omitempty"`
 	// DemotedDue counts pooled objects whose own cooldown window has already
 	// elapsed at the moment of this read: they are due to be tried again and are
 	// still in the pool.
@@ -1902,6 +2033,12 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			if facts.LastAt.After(view.BookkeepingAbandoned.LastAt) {
 				view.BookkeepingAbandoned.LastAt = facts.LastAt
 			}
+		}
+		if summary := snapshot.NoDataTracking; summary != nil && summary.Plans > 0 {
+			if view.NoDataTracking == nil {
+				view.NoDataTracking = &NoDataTrackingSummary{}
+			}
+			view.NoDataTracking.add(*summary)
 		}
 		if snapshot.LastDemotionExit.After(view.LastDemotionExit) {
 			view.LastDemotionExit = snapshot.LastDemotionExit

@@ -375,6 +375,24 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Int("no_data_outcome_plans", facts.Plans),
 		)
 	}
+	if facts := observation.NoDataAbsence; facts != nil {
+		// Every count, zeros included: the horizon a deployment has switched
+		// on shows up here as expired and suppressed moving off zero, and a
+		// line that omitted the zeros would leave "nothing expired" and "this
+		// build does not report expiry" indistinguishable.
+		attributes = append(attributes,
+			slog.String("no_data_outcome", facts.Outcome),
+			slog.Int64("no_data_horizon_seconds", facts.HorizonSeconds),
+			slog.String("no_data_roster_source", facts.RosterSource),
+			slog.Uint64("no_data_expected", facts.Expected),
+			slog.Uint64("no_data_present", facts.Present),
+			slog.Uint64("no_data_absent", facts.Absent),
+			slog.Uint64("no_data_unavailable", facts.Unavailable),
+			slog.Uint64("no_data_dropped", facts.Dropped),
+			slog.Uint64("no_data_expired", facts.Expired),
+			slog.Uint64("no_data_suppressed", facts.Suppressed),
+		)
+	}
 	if facts := observation.TargetResolution; facts != nil {
 		attributes = append(attributes,
 			slog.String("strategy_id", facts.StrategyID),
