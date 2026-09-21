@@ -74,6 +74,25 @@ type NoDataConfigV1 struct {
 	// item's thresholds declare. Python defaults it to 2 when the field is
 	// absent, and compilation applies that default rather than passing zero on.
 	Level uint32 `json:"level"`
+	// TrackingHorizonSeconds is how long one group's absence goes on being
+	// tracked before this item stops tracking it, frozen into the Plan by
+	// compilation from the platform default and the item's own override.
+	//
+	// Zero means no horizon - absences are tracked for as long as they last -
+	// and that is the meaning the evaluator already gives it, so an item that
+	// says nothing keeps the behaviour it had before the horizon existed. The
+	// field carries seconds rather than periods because the evaluator compares
+	// it against evaluation times, and a period-valued horizon would change
+	// length whenever the item's interval changed.
+	//
+	// It lives here rather than anywhere else in the object because this
+	// section is already inside the digest domain, is omitempty so an item
+	// without a horizon is byte-identical to before, and its serialised name
+	// does not produce a second "no_data": token - the no-data census counts
+	// that token in the stored bytes rather than parsing it, so a second one
+	// would break the ledger's equality in a way that reads as a no-data
+	// defect rather than a naming one.
+	TrackingHorizonSeconds int64 `json:"no_data_tracking_horizon_seconds,omitempty"`
 }
 
 // Validate rejects a section that cannot produce a decision, and normalises the
@@ -95,6 +114,13 @@ func (config *NoDataConfigV1) Validate() error {
 	}
 	if config.Level < 1 || config.Level > 3 {
 		return fmt.Errorf("no_data_config level %d is outside 1..3", config.Level)
+	}
+	// A negative horizon is refused rather than clamped. Zero already means
+	// "no horizon", so clamping a negative to zero would turn a configuration
+	// mistake into the setting that disables the feature, silently and in the
+	// direction that looks healthy.
+	if config.TrackingHorizonSeconds < 0 {
+		return fmt.Errorf("no_data_config tracking horizon %d must not be negative", config.TrackingHorizonSeconds)
 	}
 	seen := make(map[string]struct{}, len(config.AggDimension))
 	deduplicated := config.AggDimension[:0]
