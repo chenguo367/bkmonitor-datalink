@@ -72,7 +72,7 @@ func restoredRoundOf(summary *execution.LastCompletionSummary) *fleet.RestoredRo
 	}
 	for _, resolution := range summary.TargetResolutions {
 		restored := fleet.RestoredTargetResolution{StrategyID: resolution.StrategyID, State: resolution.State,
-			NodesMissing: resolution.NodesMissing, StaleAgeSeconds: resolution.StaleAgeSeconds}
+			NodesMissing: resolution.NodesMissing, NodesForeign: resolution.NodesForeign, StaleAgeSeconds: resolution.StaleAgeSeconds}
 		for _, failure := range resolution.Failures {
 			restored.Failures = append(restored.Failures, fleet.RestoredSelectorFailure{
 				Kind: failure.Kind, ID: failure.ID, Reason: failure.Reason, Dropped: failure.Dropped, Kept: failure.Kept})

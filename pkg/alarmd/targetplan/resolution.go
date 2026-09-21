@@ -46,6 +46,7 @@ const (
 	ReasonStale            = "stale"
 	ReasonIndexUnavailable = "index_unavailable"
 	ReasonNodeMissing      = "node_missing"
+	ReasonNodeForeign      = "node_in_other_business"
 	ReasonMembersDropped   = "members_dropped"
 	ReasonSourceUnwired    = "source_unwired"
 )
@@ -53,7 +54,7 @@ const (
 // SelectorReasons is the closed list, for the metric.
 var SelectorReasons = []string{
 	ReasonNone, ReasonKeyMissing, ReasonJSONInvalid, ReasonStructureInvalid, ReasonModelMismatch, ReasonReadFailed,
-	ReasonStale, ReasonIndexUnavailable, ReasonNodeMissing, ReasonMembersDropped, ReasonSourceUnwired,
+	ReasonStale, ReasonIndexUnavailable, ReasonNodeMissing, ReasonNodeForeign, ReasonMembersDropped, ReasonSourceUnwired,
 }
 
 // SelectorResult is one selector's answer: its members in the plan's key
@@ -76,6 +77,10 @@ type SelectorResult struct {
 	// NodeMissing is a topology reference to a node the topology cache does
 	// not list: a dangling configuration, reported beside the empty answer.
 	NodeMissing bool
+	// NodeForeign is a topology reference to a node that holds hosts only
+	// under another business than the reference names: a reference written
+	// against the wrong business, reported beside the empty answer.
+	NodeForeign bool
 }
 
 // ResolutionState is the whole target plan's state, composed from its
@@ -112,8 +117,10 @@ type Resolution struct {
 	State     ResolutionState
 	Failures  []Failure
 	// NodesMissing lists topology references whose node the cache does not
-	// list, for the TARGET_NODE_MISSING check.
+	// list, for the TARGET_NODE_MISSING check; NodesForeign those whose node
+	// holds hosts under another business only, for TARGET_NODE_FOREIGN.
 	NodesMissing []string
+	NodesForeign []string
 	// StaleAge is the largest StaleAge among the selectors, for the facts.
 	StaleAge time.Duration
 }
@@ -166,6 +173,7 @@ func (resolution *Resolution) Compose() {
 	resolution.State = ResolutionComplete
 	resolution.Failures = resolution.Failures[:0]
 	resolution.NodesMissing = resolution.NodesMissing[:0]
+	resolution.NodesForeign = resolution.NodesForeign[:0]
 	resolution.StaleAge = 0
 	for _, selector := range resolution.Selectors {
 		switch selector.State {
@@ -180,6 +188,9 @@ func (resolution *Resolution) Compose() {
 		}
 		if selector.NodeMissing {
 			resolution.NodesMissing = append(resolution.NodesMissing, selector.ID)
+		}
+		if selector.NodeForeign {
+			resolution.NodesForeign = append(resolution.NodesForeign, selector.ID)
 		}
 		if selector.StaleAge > resolution.StaleAge {
 			resolution.StaleAge = selector.StaleAge

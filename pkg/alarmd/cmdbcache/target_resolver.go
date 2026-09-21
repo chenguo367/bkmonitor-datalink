@@ -119,6 +119,15 @@ func (resolver *TargetResolver) resolveTopology(plan *contract.TargetPlanV1, nod
 		result.State, result.Reason = targetplan.SelectorOKEmpty, targetplan.ReasonNodeMissing
 		return result
 	}
+	if answer.HostedElsewhere {
+		// The node exists and holds hosts, under another business than the
+		// reference names: a reference written against the wrong business.
+		// Zero members, resolved and empty for absence, named apart from a
+		// node that holds no host anywhere.
+		result.NodeForeign = true
+		result.State, result.Reason = targetplan.SelectorOKEmpty, targetplan.ReasonNodeForeign
+		return result
+	}
 	members := make(map[string]struct{}, len(answer.Hosts))
 	for _, host := range answer.Hosts {
 		switch plan.Rule {

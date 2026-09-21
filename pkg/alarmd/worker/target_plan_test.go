@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
@@ -209,5 +210,36 @@ func TestBeginResolvesEachTargetPlanOnceForBothViews(t *testing.T) {
 	last := observations[len(observations)-1]
 	if last.TargetResolution == nil || last.TargetResolution.Selectors[0].Reason != targetplan.ReasonSourceUnwired {
 		t.Fatalf("the unwired resolution did not say so: %+v", last.TargetResolution)
+	}
+}
+
+// The leader's three-way assertion for a plan one of whose selectors could
+// not be read: the static member's record is still admitted, a record the
+// unread group would have named is rejected as outside the target - not as
+// unresolved - and absence is paused by the selector's name. All three read
+// the same holder.
+func TestAnUnreadableSelectorPausesAbsenceAndNotTheStaticMembers(t *testing.T) {
+	resolution := &targetplan.Resolution{Static: map[string]struct{}{"101": {}}, Selectors: []targetplan.SelectorResult{
+		{Kind: targetplan.SelectorKindGroup, ID: "1001", State: targetplan.SelectorUnavailable, Reason: targetplan.ReasonKeyMissing}}}
+	resolution.Compose()
+	target := newResolvedTarget(resolution)
+	identity := contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}}
+	filter := admission.TargetPlanFilter{}
+	record := func(host string) *admission.Facts {
+		return &admission.Facts{Dimensions: map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"` + host + `"`)}}
+	}
+	context := admission.PlanContext{TargetPlan: &admission.TargetPlanContext{Identity: identity, Members: target}}
+	if decision := filter.Admit(context, record("101")); !decision.Admit {
+		t.Fatalf("the static member was not admitted: %+v", decision)
+	}
+	if decision := filter.Admit(context, record("202")); decision.Admit || decision.Reason != admission.TargetPlanReasonOutOfTarget {
+		t.Fatalf("a record of the unread group = %+v, want out_of_target, not unresolved", decision)
+	}
+	plan := &contract.EvaluationPlanV2{PlanID: "1", NoData: &contract.NoDataConfigV1{Continuous: 3, Level: 2, AggDimension: []string{"bk_host_id"}},
+		TargetPlan: &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-Host", Rule: contract.TargetPlanRuleHostID, Identity: identity, StaticKeys: []string{"101"}, DynamicGroups: []string{"1001"}}}
+	result, outcome, err := nodata.EvaluateSlot(nodata.SlotInput{Plan: plan, EvaluationTime: 1000, PeriodSeconds: 60,
+		Completeness: execution.CompletenessFull, TargetResolution: target.absenceView(), Memory: map[string]nodata.GroupMemory{}})
+	if err != nil || outcome != nodata.OutcomeSkippedTargetSelectorUnavailable || len(result.Verdicts) != 0 {
+		t.Fatalf("absence = %q %v verdicts %v, want paused by the selector's name", outcome, err, result.Verdicts)
 	}
 }

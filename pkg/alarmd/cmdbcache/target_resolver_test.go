@@ -129,12 +129,17 @@ func TestTheResolverAnswersEachSelectorByTheRulingsTable(t *testing.T) {
 	if resolution.Contains("503") {
 		t.Fatal("a host of another business resolved under the reference's business")
 	}
-	// The topology cache lists nodes without a business, so a reference to
-	// set 12 under a business that has no host there is a known node with
-	// no host - not a dangling one. Stated here so the limit is on record.
+	// The topology cache lists nodes without a business. A node belongs to
+	// one business, so a reference to set 12 under a business that has no
+	// host there while another business does is a reference written against
+	// the wrong business: empty, resolved, and named apart from a dangling
+	// node and from a node that holds no host anywhere.
 	other := resolver.Resolve(context.Background(), plan(contract.TargetPlanRuleHostID, nil, contract.TargetPlanTopologyV1{BusinessID: "9", ObjectID: "set", InstanceID: "12"}))
-	if got := selector(other, targetplan.SelectorKindTopology, "9|set|12"); got.State != targetplan.SelectorOKEmpty || got.NodeMissing || got.Reason != targetplan.ReasonNone {
-		t.Fatalf("known node under a business with no host there = %+v", got)
+	if got := selector(other, targetplan.SelectorKindTopology, "9|set|12"); got.State != targetplan.SelectorOKEmpty || !got.NodeForeign || got.NodeMissing || got.Reason != targetplan.ReasonNodeForeign {
+		t.Fatalf("known node hosted under another business = %+v", got)
+	}
+	if !reflect.DeepEqual(other.NodesForeign, []string{"9|set|12"}) || len(other.NodesMissing) != 0 || other.State != targetplan.ResolutionComplete {
+		t.Fatalf("foreign node resolution = foreign %v missing %v state %s", other.NodesForeign, other.NodesMissing, other.State)
 	}
 	// The Slot path reads nothing: every group above was read once, on its
 	// first reference, and resolving them all again issues no command.

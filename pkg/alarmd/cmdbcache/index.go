@@ -85,6 +85,10 @@ type Index struct {
 	// "biz|obj|inst": the hosts a dynamic topology reference resolves to.
 	// Built once per load so a resolution is a lookup, never a scan.
 	byNode map[string][]*HostFacts
+	// hostedNodes are the "obj|inst" nodes that hold a host under any
+	// business, so a reference under the wrong business can be told from a
+	// node that holds no host anywhere.
+	hostedNodes map[string]struct{}
 	// topoNodes are the "obj|inst" fields of the topology cache, read so a
 	// reference to a node that does not exist can be told apart from a node
 	// that exists and holds no host. Nil when the topology cache was not
@@ -104,7 +108,12 @@ type TopologyAnswer struct {
 	// node the cache does not list is a dangling configuration, not an
 	// empty node.
 	NodeKnown bool
-	Hosts     []*HostFacts
+	// HostedElsewhere says the node holds hosts, but under another business
+	// than the reference names: a node belongs to exactly one business, so
+	// this is a reference written against the wrong business, not an empty
+	// node either.
+	HostedElsewhere bool
+	Hosts           []*HostFacts
 }
 
 // Topology answers a dynamic topology reference from the reverse index. The
@@ -118,8 +127,11 @@ func (index *Index) Topology(businessID, objectID, instanceID string) TopologyAn
 	if index == nil || index.hosts == 0 || index.topoNodes == nil {
 		return TopologyAnswer{}
 	}
-	_, known := index.topoNodes[objectID+"|"+instanceID]
-	return TopologyAnswer{Resolved: true, NodeKnown: known, Hosts: index.byNode[businessID+"|"+objectID+"|"+instanceID]}
+	node := objectID + "|" + instanceID
+	_, known := index.topoNodes[node]
+	hosts := index.byNode[businessID+"|"+node]
+	_, hosted := index.hostedNodes[node]
+	return TopologyAnswer{Resolved: true, NodeKnown: known, HostedElsewhere: len(hosts) == 0 && hosted, Hosts: hosts}
 }
 
 // TopologyNodes is how many nodes the topology cache listed, for health.
@@ -277,7 +289,7 @@ func newIndexBuilder(now time.Time) *indexBuilder {
 	return &indexBuilder{
 		index: &Index{
 			byIdentity: make(map[string]*HostFacts), serviceInstances: make(map[string]*ServiceInstanceFacts),
-			byNode: make(map[string][]*HostFacts), builtAt: now,
+			byNode: make(map[string][]*HostFacts), hostedNodes: make(map[string]struct{}), builtAt: now,
 		},
 		seen: make(map[string]*HostFacts),
 	}
@@ -302,6 +314,7 @@ func (builder *indexBuilder) addToNodes(facts *HostFacts) {
 	for _, node := range facts.TopoNodes {
 		key := facts.BusinessID + "|" + node
 		builder.index.byNode[key] = append(builder.index.byNode[key], facts)
+		builder.index.hostedNodes[node] = struct{}{}
 	}
 }
 

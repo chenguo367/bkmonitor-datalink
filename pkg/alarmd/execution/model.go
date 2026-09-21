@@ -3393,6 +3393,7 @@ type TargetResolutionSummary struct {
 	State           string                  `json:"state"`
 	Failures        []TargetSelectorFailure `json:"failures,omitempty"`
 	NodesMissing    []string                `json:"nodes_missing,omitempty"`
+	NodesForeign    []string                `json:"nodes_foreign,omitempty"`
 	StaleAgeSeconds int64                   `json:"stale_age_seconds,omitempty"`
 }
 

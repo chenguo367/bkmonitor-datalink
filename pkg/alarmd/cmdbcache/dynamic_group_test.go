@@ -172,10 +172,10 @@ func TestTheGroupStoreReadsOnFirstReferenceAndKeepsSnapshotsAcrossAFailedRefresh
 	}
 }
 
-// A reference nobody has asked for within the staleness bound is forgotten
-// at the next refresh, snapshot and all: it stops being read every refresh
-// and stops counting in the health once the writer withdraws it. One that
-// is still asked for stays.
+// A reference nobody has asked for within two refresh intervals is
+// forgotten at the next refresh, snapshot and all: a withdrawn reference
+// is read once more at most and stops counting in the health. One that is
+// still asked for stays.
 func TestAGroupNobodyAsksForAgesOutOfTheStore(t *testing.T) {
 	client := &groupClient{values: map[string]string{"cw:dynamic_group:live": hostGroup, "cw:dynamic_group:gone": hostGroup}}
 	reader, _ := NewGroupReader(client, "cw:")
@@ -186,23 +186,28 @@ func TestAGroupNobodyAsksForAgesOutOfTheStore(t *testing.T) {
 	}
 	store.Group(context.Background(), "live")
 	store.Group(context.Background(), "gone")
-	for minute := 1; minute <= 11; minute++ {
+	reads := make([][]string, 0, 3)
+	for minute := 1; minute <= 3; minute++ {
 		now = now.Add(time.Minute)
 		store.Group(context.Background(), "live")
 		if err := store.Refresh(context.Background()); err != nil {
 			t.Fatal(err)
 		}
+		reads = append(reads, client.calls[len(client.calls)-1])
 	}
-	last := client.calls[len(client.calls)-1]
-	if !reflect.DeepEqual(last, []string{"cw:dynamic_group:live"}) {
-		t.Fatalf("the last refresh read %v, want the live reference only", last)
+	// Still read at the first two refreshes after the last ask, gone at the
+	// third.
+	if !reflect.DeepEqual(reads, [][]string{
+		{"cw:dynamic_group:gone", "cw:dynamic_group:live"}, {"cw:dynamic_group:gone", "cw:dynamic_group:live"}, {"cw:dynamic_group:live"},
+	}) {
+		t.Fatalf("refresh reads = %v", reads)
 	}
 	if health := store.Health(); health.Referenced != 1 || health.Loaded != 1 {
 		t.Fatalf("health = %+v, want the aged-out reference gone", health)
 	}
 	// Asked for again, it is read again on the spot.
-	reads := len(client.calls)
-	if lookup := store.Group(context.Background(), "gone"); lookup.Snapshot == nil || lookup.Snapshot.Unavailable != "" || len(client.calls) != reads+1 {
-		t.Fatalf("re-reference: lookup %+v reads %d", lookup, len(client.calls)-reads)
+	before := len(client.calls)
+	if lookup := store.Group(context.Background(), "gone"); lookup.Snapshot == nil || lookup.Snapshot.Unavailable != "" || len(client.calls) != before+1 {
+		t.Fatalf("re-reference: lookup %+v reads %d", lookup, len(client.calls)-before)
 	}
 }

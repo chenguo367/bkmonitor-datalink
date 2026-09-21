@@ -359,7 +359,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			attributes = append(attributes, slog.Int64("resolved_from_stale_snapshot_age_seconds", facts.StaleAgeSeconds))
 		}
 		for _, selector := range facts.Selectors {
-			if selector.State == "OK" && !selector.NodeMissing {
+			if selector.State == "OK" && !selector.NodeMissing && !selector.NodeForeign {
 				continue
 			}
 			// Only the selectors with something to say are on the line: an

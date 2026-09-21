@@ -259,10 +259,12 @@ type GroupStore struct {
 	mu        sync.RWMutex
 	snapshots map[string]*GroupSnapshot
 	// referenced is when each id was last asked for. A reference ages out
-	// after the staleness bound without being asked: a Plan that runs asks
+	// after two refresh intervals without being asked: a Plan that runs asks
 	// every Slot, so an id nobody asks for is one no active Plan references
 	// any more, and keeping it would read it every refresh and count it in
-	// the health as a standing failure once the writer withdraws it.
+	// the health as a standing failure once the writer withdraws it. A Plan
+	// on a longer interval than that re-reads its groups on its Slot, one
+	// round trip, which is the cost of not knowing the catalog here.
 	referenced    map[string]time.Time
 	lastFailureAt time.Time
 	lastError     error
@@ -343,14 +345,14 @@ func (store *GroupStore) publish(id string, read GroupRead, at time.Time) *Group
 // snapshot and is recorded, so the next lookups say they are served past a
 // failed refresh; a missing key replaces the snapshot with an unavailable
 // one - the writer withdrew or never wrote it, and that is an answer. A
-// reference nobody has asked for within the staleness bound is forgotten
+// reference nobody has asked for within two refresh intervals is forgotten
 // first, snapshot and all.
 func (store *GroupStore) Refresh(ctx context.Context) error {
 	now := store.now()
 	store.mu.Lock()
 	ids := make([]string, 0, len(store.referenced))
 	for id, askedAt := range store.referenced {
-		if now.Sub(askedAt) > store.maxAge {
+		if now.Sub(askedAt) > 2*store.interval {
 			delete(store.referenced, id)
 			delete(store.snapshots, id)
 			continue

@@ -138,7 +138,7 @@ func newResolvedTarget(resolution *targetplan.Resolution) *resolvedTarget {
 	}
 	target.facts = execution.TargetResolutionSummary{
 		State: string(resolution.State), NodesMissing: append([]string(nil), resolution.NodesMissing...),
-		StaleAgeSeconds: int64(resolution.StaleAge.Seconds()),
+		NodesForeign: append([]string(nil), resolution.NodesForeign...), StaleAgeSeconds: int64(resolution.StaleAge.Seconds()),
 	}
 	for _, failure := range resolution.Failures {
 		target.facts.Failures = append(target.facts.Failures, execution.TargetSelectorFailure{
@@ -160,7 +160,7 @@ func (stream *streamedExecution) observeTargetResolution(ctx context.Context, du
 	for _, selector := range resolution.Selectors {
 		facts.Selectors = append(facts.Selectors, observability.TargetSelectorFacts{
 			Kind: selector.Kind, ID: selector.ID, State: string(selector.State), Reason: selector.Reason,
-			Kept: selector.Kept, Dropped: selector.Dropped, NodeMissing: selector.NodeMissing,
+			Kept: selector.Kept, Dropped: selector.Dropped, NodeMissing: selector.NodeMissing, NodeForeign: selector.NodeForeign,
 		})
 	}
 	result := observability.Result(observability.ResultSuccess)
