@@ -149,7 +149,19 @@ func TestAHintedActivationRequestIsAnsweredFromTheTimelineWithoutTheHeader(t *te
 	if byHeader.Facts[0].Selection == execution.ActivationNone {
 		t.Fatal("the fixture's Plan is not active on the header path, so the two paths cannot be told apart")
 	}
-	before := repository.ControlReadCacheStats()
+	// Counted on the Redis wire: the repository's own version counters tick
+	// only inside a control version scope, and a request without one reads
+	// the header live and silently.
+	hook := newControlReadCountingHook()
+	client.AddHook(hook)
+	hook.reset()
+	if _, err := repository.LoadActivations(ctx, request); err != nil {
+		t.Fatal(err)
+	}
+	if hook.count("get", "header") == 0 {
+		t.Fatal("the header path did not read the header on the wire, so the hinted path cannot be told from it")
+	}
+	hook.reset()
 	hinted := controlplane.WithTimelineRevisionHint(ctx, 1)
 	byTimeline, err := repository.LoadActivations(hinted, request)
 	if err != nil {
@@ -158,9 +170,8 @@ func TestAHintedActivationRequestIsAnsweredFromTheTimelineWithoutTheHeader(t *te
 	if len(byTimeline.Facts) != 2 || byTimeline.Facts[0] != byHeader.Facts[0] || byTimeline.Facts[1].Selection != execution.ActivationNone {
 		t.Fatalf("hinted activations = %+v, want the header path's %+v", byTimeline.Facts, byHeader.Facts)
 	}
-	after := repository.ControlReadCacheStats()
-	if after.Version.Hits+after.Version.Misses+after.Version.Refreshes != before.Version.Hits+before.Version.Misses+before.Version.Refreshes {
-		t.Fatalf("a hinted activation request probed the header: version reads %+v -> %+v", before.Version, after.Version)
+	if headers, activations := hook.count("get", "header"), hook.bodyReads("activation"); headers != 0 || activations != 0 {
+		t.Fatalf("a hinted activation request read the header %d times and the activation body %d times, want neither", headers, activations)
 	}
 	// A contract naming another Segment than the timeline holds is refused on
 	// the hinted path as on the header path.
