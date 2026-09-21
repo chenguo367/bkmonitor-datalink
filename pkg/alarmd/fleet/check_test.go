@@ -47,9 +47,17 @@ import (
 // that never happened. It is the one visible face of a control-plane store
 // failing writes, and it is not a loss of detection, so it is its own line on
 // the record side.
+//
+// Twenty-six since the strategy's half of no-data: an object this process
+// has never seen return records and whose every round for an hour completed
+// empty. FULL_EMPTY is a healthy completion and the no-data line waits for
+// data to have been seen, so five strategies aggregating below their
+// source's period read HEALTHY for a day; the data side's line and this one
+// have different owners doing different things, so it is not a fold of the
+// first.
 func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
-	if got := len(Checks()); got != 25 || len(checkAnswers) != 25 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 25: a new check has to "+
+	if got := len(Checks()); got != 26 || len(checkAnswers) != 26 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 26: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -116,6 +124,7 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckQueryRefused:        {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "http_status=400"}},
 		CheckQueryTargetMissing:  {Kind: KindQueryCooldown, Failure: &FailureRef{Code: "QUERY_UNAVAILABLE", Detail: "response=status_space_table_id_field_is_not_exists"}},
 		CheckNoDataPersistent:    {Kind: KindNoData},
+		CheckEmptyEveryRound:     {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseUnknown}},
 		CheckNoDataMemoryRefused: {Kind: KindNoDataMemoryRefused, ReasonCode: "STATE_BUDGET_EXCEEDED"},
 		CheckSeriesChurning: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Fresh: 4, ShortFresh: 4, FreshRounds: 40}},

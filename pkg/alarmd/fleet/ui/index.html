@@ -694,6 +694,7 @@ var CHECK = {
   QUERY_REFUSED:         '后端拒绝了 {n} 个对象的查询（{g} 种原因，{b} 个业务）——后端读了查询并回了状态码，是查询构造、策略引用还是后端规则还分不出',
   QUERY_TARGET_MISSING:  '{n} 个对象的查询被后端回"表或字段不存在"（{g} 种回答，{s} 条策略，{b} 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错',
   NO_DATA_PERSISTENT:    '{n} 个对象持续没有数据（{s} 条策略）',
+  EMPTY_EVERY_ROUND:     '{n} 个对象每一轮都查不到数据、从未有过数据（{s} 条策略）：检测在跑，但没有任何东西可判',
   SERIES_CHURNING:       '{n} 个对象的序列活不过检测窗口（{s} 条策略），恢复判不了',
   SERIES_DATA_MISSING:   '{n} 个对象恢复所需的老序列数据不完整（{s} 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出',
   WINDOW_UNDECIDED:      '{n} 个对象的窗口填不满，还分不出是谁的（{g} 种情况，{s} 条策略）',
@@ -823,6 +824,7 @@ var EVIDENCE = {
   CONFIG_UNRESOLVED:     '对象行 config_changed 与快照/查询/调度三版本是否变了',
   BACKEND_NOT_ANSWERING: '分组的症状（超时/5xx）；对象行的冷却到期时刻与失败次数；超时的还要看查询预算与后端耗时，这两样不在页面上',
   NO_DATA_PERSISTENT:    '对象行连续空轮数，与"有过数据"（进过索引）',
+  EMPTY_EVERY_ROUND:     '对象行"每轮都空"：连续空轮数、起始时刻、评估周期（interval_seconds）、never_saw_data=true、原因 CAUSE_UNKNOWN（本版不猜）；与 NO_DATA_PERSISTENT 的区别只在"有没有过数据"。JSON：no_data[].kind=EMPTY_EVERY_ROUND、empty_every_round{rounds, since, interval_seconds, never_saw_data, cause}、首屏 empty_every_round_total',
   SERIES_DATA_MISSING:   '对象行窗口计数：老序列缺点的比例；同一行若带超时或保护，缺点可能是 alarmd 没取到而不是数据没到',
   SERIES_CHURNING:       '对象行窗口计数：新序列占比与活不过窗口的轮数',
   PLAN_UNEVALUABLE:      '分组的策略与原因码',
@@ -851,6 +853,7 @@ var NEXT = {
   CONFIG_UNRESOLVED:     '按策略看：config_changed 为真才是最近改过，下一轮按新配置跑；为假的不在这一行',
   BACKEND_NOT_ANSWERING: '先查查询链路：超时看查询预算、网络、后端耗时哪一环超了；5xx 看后端；核实是后端的再交数据侧。alarmd 已降频不再反复查',
   NO_DATA_PERSISTENT:    '交数据侧：按策略看是数据停了还是采集停了',
+  EMPTY_EVERY_ROUND:     '交策略侧，两个候选逐个核：① 数据源本身没有数据（这个查询在源上就查不到东西）；② 数据源上报周期比策略聚合周期长（如 15 s 聚合跑 30 s 上报的源，每个窗口都是空的）→ 对照上报周期与 agg_interval，把聚合周期抬到不小于上报周期。页面读不到 Plan 的聚合窗口和源的分辨率，所以原因只给 CAUSE_UNKNOWN、不替你判',
   SERIES_DATA_MISSING:   '先看同一行有没有超时或保护：有的先按那个查（缺点可能是 alarmd 没取到）；没有的再按策略给数据负责人',
   SERIES_CHURNING:       '交策略侧：序列活不过检测窗口，通常是聚合维度太细',
   PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略',
@@ -883,6 +886,7 @@ var RECOVERY = {
   CONFIG_UNRESOLVED:     '下一轮按新配置完成，对象离开这一行',
   BACKEND_NOT_ANSWERING: '分出是哪一环后转到对应行；应答恢复后冷却到期自动重试成功，对象离开降级池（降级池"出过"数在涨）',
   NO_DATA_PERSISTENT:    '数据恢复后下一轮非空',
+  EMPTY_EVERY_ROUND:     '任一轮查到数据即消失（此后再空就走 NO_DATA_PERSISTENT）；副本重启后重新起算一小时——重启只恢复最后一轮的结论，最后一轮非空才算"有过数据"',
   SERIES_DATA_MISSING:   '分出是没到还是没取到后转到对应行；老序列补上点后窗口填满',
   SERIES_CHURNING:       '序列稳定活过窗口后窗口填满',
   PLAN_UNEVALUABLE:      '策略改定义后下一轮可算',
@@ -3021,7 +3025,8 @@ var KIND_TEXT = {
   BLOCKED_RUN: '被阻塞',
   OVERDUE_WAKE: '没被调度',
   SKIPPED_SPAN: '留存的漏检记录',
-  NO_DATA: '持续无数据'
+  NO_DATA: '持续无数据',
+  EMPTY_EVERY_ROUND: '每轮都无数据'
 };
 function kindText(kind) { return KIND_TEXT[kind] || kind || '—'; }
 

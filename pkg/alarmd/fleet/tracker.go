@@ -56,6 +56,16 @@ const (
 	// that was written, a group that goes absent after that is never recorded
 	// as first absent, and its no-data alert never fires.
 	KindNoDataMemoryRefused = "NO_DATA_MEMORY_REFUSED"
+	// KindEmptyEveryRound is an object whose every round in this process has
+	// completed with no records, for at least EmptyEveryRoundAfter, and that
+	// this process has never seen return any. It is the other half of
+	// KindNoData: data that stopped is the data side's, data that never came
+	// is usually the strategy's -- a query over a source that has nothing
+	// there, or an aggregation period shorter than the source reports at, so
+	// that every window is empty however the data flows. Five such strategies
+	// read HEALTHY on the page for a day, because FULL_EMPTY is a healthy
+	// completion and the line for no-data waits for data to have been seen.
+	KindEmptyEveryRound = "EMPTY_EVERY_ROUND"
 )
 
 // ReasonWakeMissed is the reason code carried by an overdue object. The other
@@ -83,6 +93,16 @@ const (
 	// worth reporting. Blocked rounds produce nothing at all, so the bar is
 	// lower than for degraded ones.
 	DefaultBlockedRounds = 2
+	// DefaultEmptyEveryRoundAfter is how long an object must have completed
+	// every round empty, never having returned records in this process,
+	// before it is listed. A duration and not a round count, against the
+	// rule above: the objects this exists for run every fifteen seconds, and
+	// three empty rounds of those is forty-five seconds -- a source that
+	// merely reports each minute would be listed on the first pass. An hour
+	// is long enough for any source in the deployed population to have
+	// spoken at least once if it speaks at all, and short enough that the
+	// line is on the page the same day the strategy is created.
+	DefaultEmptyEveryRoundAfter = time.Hour
 	// maxStrategiesPerQueryGroup bounds how many strategies one object records.
 	// Query groups are keyed by query semantics, so several strategies can share
 	// one; the bound keeps a pathological group from growing without limit.
@@ -493,8 +513,11 @@ type Tracker struct {
 	replica        string
 	degradedRounds int
 	blockedRounds  int
-	maxTracked     int
-	now            func() time.Time
+	// emptyEveryRoundAfter is how long an object that never returned records
+	// must have completed every round empty before NoData lists it as such.
+	emptyEveryRoundAfter time.Duration
+	maxTracked           int
+	now                  func() time.Time
 
 	mu     sync.Mutex
 	groups map[string]*queryGroupState
@@ -525,13 +548,14 @@ func NewTracker(next observability.Observer, replica string, now func() time.Tim
 		now = time.Now
 	}
 	return &Tracker{
-		next:           next,
-		replica:        replica,
-		degradedRounds: DefaultDegradedRounds,
-		blockedRounds:  DefaultBlockedRounds,
-		maxTracked:     DefaultTrackedQueryGroups,
-		now:            now,
-		groups:         make(map[string]*queryGroupState),
+		next:                 next,
+		replica:              replica,
+		degradedRounds:       DefaultDegradedRounds,
+		blockedRounds:        DefaultBlockedRounds,
+		emptyEveryRoundAfter: DefaultEmptyEveryRoundAfter,
+		maxTracked:           DefaultTrackedQueryGroups,
+		now:                  now,
+		groups:               make(map[string]*queryGroupState),
 	}
 }
 
@@ -1513,25 +1537,53 @@ func sortStrategies(strategies []StrategyRef) {
 	}
 }
 
-// NoData is every object whose query has returned no records for at least the
-// degraded-rounds threshold after having returned some. Under no column: the
-// rounds complete and the health equation counts the object as healthy, which
-// it is as far as this deployment goes. It is the data side's line.
+// NoData is every object whose query is returning no records, in two kinds
+// that are two different conversations. KindNoData is an object that has
+// returned records in this process and has now returned none for at least the
+// degraded-rounds threshold: the data stopped, which is the data side's line.
+// KindEmptyEveryRound is an object that has never returned records in this
+// process and has completed every round empty for at least
+// emptyEveryRoundAfter: the data never came, which is usually the strategy's
+// -- a source with nothing there, or an aggregation period the source never
+// fills. Under no column either way: the rounds complete and the health
+// equation counts the object as healthy, which it is as far as this
+// deployment goes.
 //
-// Objects that have never returned records in this process are not listed. A
-// source that only speaks when something happens looks exactly like one that
-// stopped, and only the run that follows records says which.
+// A source that only speaks when something happens looks exactly like one
+// that stopped, and only the run that follows records says which; that is
+// why the two are told apart by whether records were ever seen, and why the
+// second waits an hour rather than a few rounds. A restart resets what this
+// process has seen: the last committed round is restored, and only a round
+// that completed with records restores "seen"; a restored empty round says
+// nothing about the rounds before it, so the hour starts again from the first
+// empty round this process watches.
 func (tracker *Tracker) NoData() []Anomaly {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
+	now := tracker.now()
 	anomalies := make([]Anomaly, 0)
 	for queryGroup, state := range tracker.groups {
-		if !state.sawData || state.emptyRuns < tracker.degradedRounds {
+		if state.emptyRuns == 0 {
 			continue
 		}
 		anomaly := Anomaly{
-			QueryGroup: queryGroup, Kind: KindNoData, ReasonCode: "FULL_EMPTY_COMPLETED",
+			QueryGroup: queryGroup, ReasonCode: "FULL_EMPTY_COMPLETED",
 			Since: state.emptySince, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
+		}
+		switch {
+		case state.sawData && state.emptyRuns >= tracker.degradedRounds:
+			anomaly.Kind = KindNoData
+		case !state.sawData && state.currentKind == "" && now.Sub(state.emptySince) >= tracker.emptyEveryRoundAfter:
+			// currentKind empty is "every round": a blocked or failing run
+			// after the empty completions does not reset emptyRuns, and an
+			// object in such a run is on its own line, not on this one.
+			anomaly.Kind = KindEmptyEveryRound
+			anomaly.EmptyEveryRound = &EmptyEveryRoundFacts{
+				Rounds: state.emptyRuns, Since: state.emptySince, NeverSawData: true,
+				Cause: EmptyEveryRoundCauseUnknown,
+			}
+		default:
+			continue
 		}
 		for strategy := range state.strategies {
 			anomaly.Strategies = append(anomaly.Strategies, strategy)

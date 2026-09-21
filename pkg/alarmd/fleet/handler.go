@@ -142,6 +142,13 @@ type HealthResponse struct {
 	// made on purpose. Reported for the same reason as the column above: it
 	// makes the anomaly count smaller, so it has to be visible beside it.
 	ByDesignTotal int `json:"by_design_total"`
+	// EmptyEveryRoundTotal is the objects this deployment has never seen
+	// return records and whose every round for an hour completed empty. Not
+	// part of the partition above -- those objects are in Healthy, which
+	// they are as far as this deployment goes -- and reported beside it
+	// because a strategy with nothing to detect at its period reads as a
+	// healthy one everywhere else on this response.
+	EmptyEveryRoundTotal int `json:"empty_every_round_total"`
 	// Ours and Unattributed are the two numbers the verdict is actually
 	// decided on, and they were not on this response at all.
 	//
@@ -858,11 +865,12 @@ func NewHandler(
 			Determined: view.Determined, Unknown: view.Unknown, Healthy: view.Healthy,
 			AnomaliesTotal: view.AnomaliesTotal, DemotedTotal: view.DemotedTotal,
 			UndecidableTotal: view.UndecidableTotal, ByDesignTotal: view.ByDesignTotal,
-			Ours:             OursCount(view.Anomalies),
-			Unattributed:     UnattributedCount(view.Anomalies),
-			Impact:           ImpactOf(view, now()),
-			StrategyLinkBase: strategyLinkBase,
-			DemotedDue:       view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
+			EmptyEveryRoundTotal: view.EmptyEveryRoundTotal,
+			Ours:                 OursCount(view.Anomalies),
+			Unattributed:         UnattributedCount(view.Anomalies),
+			Impact:               ImpactOf(view, now()),
+			StrategyLinkBase:     strategyLinkBase,
+			DemotedDue:           view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
 			DemotionEntries:    view.DemotionEntries,
 			DemotionExtensions: view.DemotionExtensions, DemotionExits: view.DemotionExits,
 			LastDemotionExit: momentOrNil(view.LastDemotionExit),

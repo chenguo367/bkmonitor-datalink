@@ -524,6 +524,12 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 			for index := range column {
 				wake := publisher.schedule.WakeOf(column[index].QueryGroup)
 				column[index].Wake = &wake
+				// The period beside the run of empty rounds, from the same
+				// index: the number a reader holds the source's reporting
+				// period against is on the row that asks the question.
+				if facts := column[index].EmptyEveryRound; facts != nil {
+					facts.IntervalSeconds = wake.IntervalSeconds
+				}
 			}
 		}
 		// And the period behind each retained record, from the same index: a

@@ -114,6 +114,8 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 		return CheckSlotsOverdue, true, false
 	case anomaly.Kind == KindNoData:
 		return CheckNoDataPersistent, true, false
+	case anomaly.Kind == KindEmptyEveryRound:
+		return CheckEmptyEveryRound, true, false
 	case anomaly.Kind == KindNoDataMemoryRefused:
 		return CheckNoDataMemoryRefused, true, false
 	case anomaly.Kind == KindQueryCooldown:

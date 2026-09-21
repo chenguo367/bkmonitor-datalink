@@ -767,6 +767,9 @@ type Anomaly struct {
 	// stored shape and the last renewal. Absent until a renewal reached the
 	// store or a read said what it read.
 	NoDataMemoryUpkeep *NoDataMemoryUpkeep `json:"no_data_memory_upkeep,omitempty"`
+	// EmptyEveryRound is on rows of KindEmptyEveryRound: the run of empty
+	// completions, whole, with what the row can say about why.
+	EmptyEveryRound *EmptyEveryRoundFacts `json:"empty_every_round,omitempty"`
 	// ConfigChanged says the object's snapshot, query or schedule revision
 	// differs between its last two completed rounds: the configuration it
 	// runs under actually changed. It is the one fact that tells a
@@ -901,9 +904,12 @@ type Snapshot struct {
 	// GapSkips are the objects that skipped a run of Slots past the replay
 	// window, retained for the same reason.
 	GapSkips map[string]SkippedSpan `json:"gap_skips,omitempty"`
-	// NoData is the objects whose query has returned no records for a run of
-	// rounds after having returned some. In no column -- their rounds complete
-	// -- and listed so the data side's line can name them.
+	// NoData is the objects whose query is returning no records, in two kinds
+	// the rows carry: KindNoData, records returned once and none for a run
+	// of rounds since, and KindEmptyEveryRound, never any in this process and
+	// none for an hour. In no column -- their rounds complete -- and listed
+	// so the data side's line can name the first and the strategy's line the
+	// second.
 	NoData []Anomaly `json:"no_data,omitempty"`
 	// NoDataMemory is the objects one of whose Plans the store refused an
 	// absence memory for. In no column -- the rounds complete -- and listed
@@ -1586,6 +1592,11 @@ type View struct {
 	PrunedSkips map[string]PrunedSkip  `json:"pruned_skips,omitempty"`
 	GapSkips    map[string]SkippedSpan `json:"gap_skips,omitempty"`
 	NoData      []Anomaly              `json:"no_data,omitempty"`
+	// EmptyEveryRoundTotal is how many distinct objects in NoData are of
+	// KindEmptyEveryRound: the first screen's one number for the strategies
+	// whose every round is empty. Counted here rather than left to the page,
+	// so the number beside the line and the rows under it cannot disagree.
+	EmptyEveryRoundTotal int `json:"empty_every_round_total"`
 	// NoDataMemory is the objects whose absence memory the store refuses,
 	// from every counted replica. In no column and in no total, like NoData.
 	NoDataMemory []Anomaly `json:"no_data_memory,omitempty"`
@@ -2075,6 +2086,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	Attribute(view.ByDesign, now)
 	Attribute(view.NoData, now)
 	Attribute(view.NoDataMemory, now)
+	view.EmptyEveryRoundTotal = countEmptyEveryRound(view.NoData)
 	// Decided on the newest source round rather than inside the replica loop:
 	// a source is one thing, and after a leader change two replicas carry a
 	// round each, of which only the newest says what the source is now.
