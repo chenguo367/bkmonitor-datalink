@@ -21,6 +21,7 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -48,8 +49,23 @@ func runScheduledOnceSettled(ctx context.Context, bundle *phaseTwoWorkerBundle) 
 // listener, and the Worker's own view client has nothing to install from
 // until one is served on the address its registration advertises. Kept for
 // the life of the test process rather than closed per case, because the
-// helper has no test to hang a cleanup on.
+// helper has no test to hang a cleanup on. A case about a Worker whose
+// Leader is unreachable withholds it (withholdControlStreamForTest), and
+// the settling helpers leave it withheld until the case gives it back.
 var controlStreamServers sync.Map
+
+type testControlStream struct {
+	server   *http.Server
+	listener *trackedListener
+	withheld bool
+}
+
+func (stream *testControlStream) stop() {
+	if stream.server != nil {
+		_ = stream.server.Close()
+		stream.listener.closeAll()
+	}
+}
 
 func reserveBundleAddress() string {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -68,8 +84,9 @@ func serveControlStreamForTest(bundle *phaseTwoWorkerBundle) {
 	if _, served := controlStreamServers.Load(bundle); served {
 		return
 	}
-	address := bundle.dependencies.Config.HTTP.Listen
-	listener, err := net.Listen("tcp", address)
+	// Connections are tracked so a case can cut them: h2c hijacks the
+	// connection, and http.Server.Close does not reach a hijacked one.
+	listener, err := listenTracked(bundle.dependencies.Config.HTTP.Listen)
 	if err != nil {
 		return
 	}
@@ -81,11 +98,25 @@ func serveControlStreamForTest(bundle *phaseTwoWorkerBundle) {
 		http.NotFound(response, request)
 	}), &http2.Server{})
 	server := &http.Server{Handler: handler, ReadHeaderTimeout: 5 * time.Second}
-	if _, raced := controlStreamServers.LoadOrStore(bundle, server); raced {
+	if _, raced := controlStreamServers.LoadOrStore(bundle, &testControlStream{server: server, listener: listener}); raced {
 		_ = listener.Close()
 		return
 	}
 	go func() { _ = server.Serve(listener) }()
+}
+
+// withholdControlStreamForTest takes the bundle's control stream away --
+// listener and every connection on it -- and keeps the settling helpers
+// from standing it up again until restoreControlStreamForTest.
+func withholdControlStreamForTest(bundle *phaseTwoWorkerBundle) {
+	if previous, served := controlStreamServers.Swap(bundle, &testControlStream{withheld: true}); served {
+		previous.(*testControlStream).stop()
+	}
+}
+
+func restoreControlStreamForTest(bundle *phaseTwoWorkerBundle) {
+	controlStreamServers.Delete(bundle)
+	serveControlStreamForTest(bundle)
 }
 
 func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wait time.Duration) bool {
@@ -97,6 +128,7 @@ func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wai
 	serveControlStreamForTest(bundle)
 	deadline := time.Now().Add(wait)
 	for {
+		renewLapsedRegistrationForTest(ctx, bundle, ownership)
 		if viewSettled(ctx, bundle, ownership) {
 			return true
 		}
@@ -105,6 +137,25 @@ func settleExecutableView(ctx context.Context, bundle *phaseTwoWorkerBundle, wai
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// renewLapsedRegistrationForTest re-registers the Worker when its own
+// registration has lapsed by the bundle's clock. A fixture moves that clock
+// by half an hour in one store; the renewal loop runs on the wall clock and
+// takes an interval to notice, while the stream's admission reads the
+// registration by the moved clock and refuses the Worker's own session as
+// unknown until then. A production clock never moves past the registration
+// TTL between two renewals; this is the renewal the loop would have run.
+func renewLapsedRegistrationForTest(ctx context.Context, bundle *phaseTwoWorkerBundle, production *productionPhaseTwoOwnership) {
+	registry, ok := production.dependencies.Store.(viewStreamRegistry)
+	if !ok {
+		return
+	}
+	registration, found, err := registry.ReadWorker(ctx, bundle.dependencies.Config.PhaseTwo.Worker.ID)
+	if err != nil || (found && registration.ExpiresAt.After(bundle.dependencies.Now())) {
+		return
+	}
+	_ = bundle.register(ctx, ownership.WorkerReady)
 }
 
 func viewSettled(ctx context.Context, bundle *phaseTwoWorkerBundle, ownership *productionPhaseTwoOwnership) bool {
@@ -117,7 +168,16 @@ func viewSettled(ctx context.Context, bundle *phaseTwoWorkerBundle, ownership *p
 	bundle.mu.RUnlock()
 	for _, group := range groups {
 		entry, inView := bundle.dependencies.ViewClient.Entry(group)
-		if !inView || entry.Content == nil || entry.Assignment.TimelineRecordRevision == 0 {
+		if !inView {
+			return false
+		}
+		// In the view without content: draining with nothing left to run, or
+		// a Segment that names none. The view has spoken; there is nothing to
+		// wait for, and a case about that Query Group reads its own word.
+		if entry.Content == nil {
+			continue
+		}
+		if entry.Assignment.TimelineRecordRevision == 0 {
 			return false
 		}
 		record, err := ownership.dependencies.Store.ReadAssignment(ctx, group)

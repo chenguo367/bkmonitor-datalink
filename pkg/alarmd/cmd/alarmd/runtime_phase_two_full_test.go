@@ -1711,9 +1711,7 @@ func TestProductionPhaseTwoBundleLetsNormalUseRemainingProcessPermitDuringRecove
 		}
 		queryGroupsByStrategy[schedule.Plans[0].Identity.StrategyID] = queryGroup
 	}
-	bundle.mu.RLock()
-	normalRunner := bundle.runners[queryGroupsByStrategy["1002"]].runner
-	bundle.mu.RUnlock()
+	normalRunner := settledRunner(bundle, queryGroupsByStrategy["1002"])
 	if _, attempted, runErr := normalRunner.RunOne(ctx); runErr != nil || !attempted {
 		t.Fatalf("prepare normal Query Group attempted=%t error=%v", attempted, runErr)
 	}
@@ -2453,8 +2451,16 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 		}
 		// Guard and Progress re-read the activation before acting; each re-read
 		// probes the live header and transfers no activation body.
-		if activationBodyReads != 0 || headerProbes < 2 {
-			t.Fatalf("RunOne(%s) activation body reads=%d header probes=%d, want 0 body reads and at least two probes", strategyID, activationBodyReads, headerProbes)
+		// Batch 4b of decision-016: a Query Group executed from the installed
+		// view reads its timeline by the revision the record and the view
+		// agree on and its activation from that timeline, so a RunOne
+		// probes the activation header zero times. Under batch 4a and before,
+		// the same round probed it at least twice; that number is what
+		// batch 4 was built to take away, so it is asserted gone rather than
+		// merely allowed to fall.
+		if activationBodyReads != 0 || headerProbes != 0 {
+			t.Fatalf("RunOne(%s) activation body reads=%d header probes=%d, want 0 body reads and 0 probes: a Query Group "+
+				"executed from the view reads no activation header", strategyID, activationBodyReads, headerProbes)
 		}
 		if timelineBodyReads > 1 {
 			t.Fatalf("RunOne(%s) timeline body reads=%d, want at most the first touch of this Query Group", strategyID, timelineBodyReads)
@@ -2468,9 +2474,13 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 			headerProbes, headerBytes, epochProbes, lengthProbes)
 	}
 	statsAfter := repository.ControlReadCacheStats()
-	if statsAfter.Activation.Hits-statsBefore.Activation.Hits < 4 ||
-		statsAfter.Activation.Refreshes != statsBefore.Activation.Refreshes {
-		t.Fatalf("cache stats before=%+v after=%+v, want only activation hits during two RunOnes", statsBefore, statsAfter)
+	// The activation cache is not consulted at all by a hinted round: the
+	// two RunOnes leave its hits where they were and the hinted timeline
+	// object is what moved.
+	if statsAfter.Activation.Hits != statsBefore.Activation.Hits ||
+		statsAfter.Activation.Refreshes != statsBefore.Activation.Refreshes ||
+		statsAfter.HintedTimeline.Hits+statsAfter.HintedTimeline.Misses <= statsBefore.HintedTimeline.Hits+statsBefore.HintedTimeline.Misses {
+		t.Fatalf("cache stats before=%+v after=%+v, want the activation cache untouched and hinted timeline reads during two RunOnes", statsBefore, statsAfter)
 	}
 	beforeDeferredCalls := uqCalls.Load()
 	beforeDeferred, err := redisClient.SlowLogGet(ctx, 1).Result()

@@ -180,6 +180,10 @@ func interfaceAddress() string {
 type viewSource interface {
 	LoadActivation(context.Context) (controlplane.ActivationState, error)
 	LoadPublishedContent(context.Context, controlplane.SnapshotPublicationRef) (controlplane.PublishedContent, error)
+	// DrainingContent is what a Query Group the publication no longer
+	// carries still executes from its timeline's last Segment; false when
+	// there is nothing left to execute.
+	DrainingContent(context.Context, execution.QueryGroupIdentity) (execution.ObjectDigest, []execution.OutputContextRef, bool, error)
 }
 
 // viewLead and viewStepDown follow the control leader authority: a term
@@ -241,6 +245,29 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 	for identity, entry := range published.Groups {
 		content := viewstream.Content{ObjectDigest: entry.Digest, OutputContexts: make([]viewstream.OutputContextRef, 0, len(entry.Refs))}
 		for _, ref := range entry.Refs {
+			content.OutputContexts = append(content.OutputContexts, viewstream.OutputContextRef{Plan: ref.Plan, Digest: ref.Digest})
+		}
+		desired.Content[identity] = content
+	}
+	// A Query Group assigned but no longer published is draining: its
+	// timeline keeps the Segment its remaining Slots run in, and the view
+	// previews that Segment's content so a Worker executing from the view
+	// finishes them (decision-016 batch 4b). Read only for the draining
+	// ones, which are few and go away as their timelines retire.
+	for identity := range records {
+		if _, published := desired.Content[identity]; published {
+			continue
+		}
+		digest, refs, draining, err := source.DrainingContent(ctx, identity)
+		if err != nil {
+			report(fmt.Errorf("read draining content %s: %w", identity, err))
+			return
+		}
+		if !draining {
+			continue
+		}
+		content := viewstream.Content{ObjectDigest: digest, OutputContexts: make([]viewstream.OutputContextRef, 0, len(refs))}
+		for _, ref := range refs {
 			content.OutputContexts = append(content.OutputContexts, viewstream.OutputContextRef{Plan: ref.Plan, Digest: ref.Digest})
 		}
 		desired.Content[identity] = content
