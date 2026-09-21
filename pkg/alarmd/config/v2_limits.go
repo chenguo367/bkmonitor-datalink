@@ -251,15 +251,22 @@ func (c LimitsConfig) validate() error {
 // State record, by how many Levels share it.
 //
 // Derived from the representation the store writes rather than stated beside
-// it. The configured max_required_history_points is 4096 and the record runs
-// out at roughly 2100 points for one Level and 1400 for two, so the number in
-// the file describes a limit that cannot be reached and the real one was
-// written nowhere: a Plan configured between them compiled, activated, and
-// then had every state write refused per series with nothing to say why.
+// it. Under the JSON envelope the configured max_required_history_points of
+// 4096 was unreachable - the record ran out at roughly 2100 points for one
+// Level and 1400 for two - so the number in the file described a limit that
+// could not be reached and the real one was written nowhere: a Plan configured
+// between them compiled, activated, and then had every state write refused per
+// series with nothing to say why.
 //
-// When the record's representation changes, this follows it - the ceilings
-// rise and the configured limit becomes the binding one again, with nothing
-// else to revisit.
+// It follows the framed record now that the store writes one, which is the
+// case this was built to handle. The ceilings rise by more than an order of
+// magnitude and the configured limit becomes the binding one again: 4096
+// points is reachable at every Level count, so a Plan is bounded by what it
+// asked for rather than by the shape of the value it is stored in. That is
+// the intended end state, not a reason to leave the derivation behind - a
+// ceiling that has stopped binding is exactly a ceiling nobody notices has
+// moved, and the next representation or the next configured limit puts it
+// back in play with nothing else to revisit.
 func (c Config) retainedPointCeilings() []uint32 {
 	levels := c.Limits.Compiler.MaxLevelsPerPlan
 	if levels <= 0 {
@@ -270,7 +277,7 @@ func (c Config) retainedPointCeilings() []uint32 {
 	// written on the same points as the rest.
 	ceilings := make([]uint32, levels+2)
 	for count := 1; count < len(ceilings); count++ {
-		points, err := state.MaxRuntimeEnvelopePoints(count, c.Limits.Codec.MaxEncodedBytes)
+		points, err := state.MaxPackedFramePoints(count, c.Limits.Codec.MaxEncodedBytes)
 		if err != nil || points <= 0 {
 			continue
 		}
