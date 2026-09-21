@@ -500,6 +500,27 @@ var codeChecks = map[string]verdict{
 	// rounds reached here as internal_unknown and the row carried no code.
 	"STATE_VERSION_CONFLICT": lands(CheckDefect),
 	"STATE_STALE_VERSION":    lands(CheckDefect),
+	// The Plan gap marker moved between this Slot's read and its write. Same
+	// reading as the two above and for the same reason: both sides of the
+	// comparison are this system's own writes, so the question the row should
+	// send a reader to is which two Slots were writing the same Plan-level
+	// marker. A defect rather than a dependency - the store answered, it
+	// answered no.
+	//
+	// These are what a same-Slot retry then clears, which is why they need a
+	// name more than most: the round completes, the object looks recovered,
+	// and the only trace that a second writer exists is this code.
+	// A reading, not a refusal: the Slot completed, and what this says is that
+	// its evaluation produced a shape the contract forbids. It puts the object
+	// under no line, deliberately -- until the shape is understood, counting
+	// it against the deployment would put objects on the page for something
+	// nobody has decided is their problem.
+	"GAP_GUARD_DUPLICATED_ACROSS_BATCHES": isNormal,
+	"GAP_APPLY_CONFLICT":                  lands(CheckDefect),
+	"GAP_APPLY_STALE_VERSION":             lands(CheckDefect),
+	// The write did not land at all. That is the store not answering, which is
+	// the dependency's line, beside STATE_WRITE_RETRYABLE above.
+	"GAP_WRITE_RETRYABLE": lands(CheckDependencyDown),
 	// The ownership store refused this deployment's own worker: its fence
 	// went stale, the assignment names another worker, another owner holds
 	// the lease, or the content scope moved under a fenced write. Each is a

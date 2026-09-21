@@ -453,6 +453,26 @@ type NoDataSlotFacts struct {
 // changes. A converging guard moves k every round and a stuck one does not,
 // and the stuck one is what somebody is looking for -- a changed-only rule
 // would say nothing about exactly the case this exists for.
+// GapStatementFacts is one Plan's gap marker statements within one Slot, when
+// there is more than one of them.
+//
+// The two lists are reported apart because they are two different defects: a
+// statement in each is the accumulation across series batches assembling a
+// shape no batch produced, and two in one list is one batch or one merge
+// producing two statements for one key. The digests are what let two Slots'
+// lines be compared, and the expected revisions are what say whether the
+// second statement could ever have applied after the first.
+type GapStatementFacts struct {
+	// Shape is "across_lists" or "within_one_list".
+	Shape string
+	// BeforeEvents and AfterState are each list's "digest@expected_revision",
+	// in a stable order.
+	BeforeEvents []string
+	AfterState   []string
+	// Statements is how many there were in total.
+	Statements int
+}
+
 type GapProgressFacts struct {
 	// Scope is "plan" or the level id, so the two kinds are not told apart by
 	// a zero.
@@ -1876,6 +1896,10 @@ type TraceFields struct {
 }
 
 type Observation struct {
+	// GapStatements, when set, says one Plan carried more than one gap marker
+	// statement in a single Slot. A reading rather than a refusal: the Slot
+	// went on, and this is what says the shape happened.
+	GapStatements *GapStatementFacts
 	GapExtensions []*GapExtensionFacts
 	GapConflict   *GapExtensionFacts
 	QueryCooldown *QueryCooldownFacts

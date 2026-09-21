@@ -2495,6 +2495,15 @@ func (executor observedProductionSlotExecutor) Execute(
 			if conflict, named := worker.StateConflictReason(err); named {
 				reason = observability.ReasonCode(conflict)
 			}
+			// The gap marker store's own refusals, which are not the same as
+			// the conflict above: that one is this Slot refusing before it
+			// writes, these are the store refusing the write because the
+			// marker moved under it. Both were internal_unknown, so a Query
+			// Group conflicting on every other Slot for half an hour arrived
+			// as an unclassified defect that the same-Slot retry then cleared.
+			if refusal, named := worker.GapApplyReason(err); named {
+				reason = observability.ReasonCode(refusal)
+			}
 		}
 	} else if observedResult == "" {
 		observedResult = observability.ResultSuccess

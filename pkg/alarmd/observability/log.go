@@ -389,6 +389,13 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 					" kept="+strconv.Itoa(selector.Kept)+" dropped="+strconv.Itoa(selector.Dropped)))
 		}
 	}
+	if facts := observation.GapStatements; facts != nil {
+		attributes = append(attributes,
+			slog.String("gap_statements_shape", facts.Shape),
+			slog.Int("gap_statements", facts.Statements),
+			slog.String("gap_statements_before_events", strings.Join(facts.BeforeEvents, ",")),
+			slog.String("gap_statements_after_state", strings.Join(facts.AfterState, ",")))
+	}
 	if facts := observation.GapProgress; facts != nil {
 		// Both numbers, on every line. The question these answer is "how far
 		// has this guard got", and k alone answers it only for a reader who
