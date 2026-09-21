@@ -2430,8 +2430,16 @@ func (executor observedProductionSlotExecutor) Execute(
 	observedErr := err
 	if err != nil {
 		if _, deferred := access.ReadinessDeferredAt(err); deferred {
+			// The Slot's data is not in yet: the normal pacing of every Slot,
+			// and the single highest-volume completion line alarmd writes. The
+			// query stage already names it QUERY_NOT_READY; this line said
+			// nothing, and an empty reason on a retrying result normalizes to
+			// reason_not_reported -- the word reserved for a site that failed
+			// to report -- so the most common line in the log, and the
+			// slot_completed reason label with it, read as a defect at this
+			// site on every round of every Query Group.
 			observedResult = observability.ResultRetrying
-			reason = observability.ReasonNone
+			reason = observability.ReasonCode(contract.ReasonQueryNotReady)
 			observedErr = nil
 		} else {
 			observedResult = observability.ResultFailed
