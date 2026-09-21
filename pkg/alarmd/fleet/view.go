@@ -404,7 +404,21 @@ type GapGuard struct {
 	LastAt          time.Time `json:"last_at"`
 	Rounds          int       `json:"rounds"`
 	UnchangedRounds int       `json:"unchanged_rounds"`
+	// Measure says what Observed counts: the points that arrived since the
+	// guard's trigger, so it climbs one per round while the window beside it
+	// on the row (HistoryCoverage.WorstValid) holds points from either side
+	// of the trigger and can stand still as one leaves for each that
+	// arrives. Two numbers on one row against the same Required, one moving
+	// and one not, read as a contradiction until each says what it counts;
+	// a note beside them is copied away and the numbers are not.
+	Measure string `json:"observed_measure"`
 }
+
+// GuardObservedMeasure is the word GapGuard.Measure carries.
+const GuardObservedMeasure = "points_since_trigger"
+
+// CoverageValidMeasure is the word HistoryCoverage.Measure carries.
+const CoverageValidMeasure = "points_in_window"
 
 // GapGuardStatuses and GapProgressValues are the closed vocabularies a held
 // scope's Status and Progress take, as the emitter defines them; here for the
@@ -441,9 +455,13 @@ type HistoryCoverage struct {
 	// arriving", which report the same reason and need opposite responses.
 	Empty uint32 `json:"empty"`
 	// WorstValid and WorstRequired are one window's pair -- the worst one --
-	// never a minimum of one field beside a maximum of the other.
+	// never a minimum of one field beside a maximum of the other. Measure
+	// says what WorstValid counts: the valid points in the window as it
+	// stands, either side of any guard's trigger, which is why it can hold
+	// still while a guard on the same row counts up (see GapGuard.Measure).
 	WorstValid    uint32 `json:"worst_valid"`
 	WorstRequired uint32 `json:"worst_required"`
+	Measure       string `json:"valid_measure"`
 	// ShortRounds is how many consecutive rounds have reported a short window,
 	// counted by this process and therefore no older than it.
 	//
