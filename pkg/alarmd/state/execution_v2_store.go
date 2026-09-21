@@ -270,6 +270,7 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 		item := execution.StateAdmissionItemResult{Identity: mutation.Identity, Status: execution.StateAdmissionAccepted}
 		if err := mutation.ValidateDigest(); err != nil {
 			item.Status, item.ReasonCode = execution.StateAdmissionDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
+			item.RefusalRule = PackedRuleMutationDigestMismatch
 			result.Items[index] = item
 			continue
 		}

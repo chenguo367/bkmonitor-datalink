@@ -72,13 +72,19 @@ const (
 	PackedRuleRecordIDUnderivable  = "record_id_underivable"
 	PackedRuleRecordIDNotDerived   = "record_id_not_derived"
 	PackedRuleUnencodableFactState = "unencodable_fact_state"
+	// PackedRuleMutationDigestMismatch is not one of the framing rules: the
+	// store refuses the mutation before it frames anything, because the digest
+	// the producer computed does not cover the content it sent. It is named
+	// here because it reaches the line under the same reason as the eight, and
+	// an unnamed ninth way is exactly what makes the other eight worth naming.
+	PackedRuleMutationDigestMismatch = "mutation_digest_mismatch"
 )
 
 // PackedRuleNames is every rule a framed write can be refused by.
 var PackedRuleNames = []string{
 	PackedRuleLevelNotInMutation, PackedRuleNoDetectFingerprint, PackedRuleTwoFingerprints,
 	PackedRuleDuplicateLevel, PackedRuleSourceTimeNotRising, PackedRuleRecordIDUnderivable,
-	PackedRuleRecordIDNotDerived, PackedRuleUnencodableFactState,
+	PackedRuleRecordIDNotDerived, PackedRuleUnencodableFactState, PackedRuleMutationDigestMismatch,
 }
 
 // PackedContractRefusal is a framed write refused by one named rule. The

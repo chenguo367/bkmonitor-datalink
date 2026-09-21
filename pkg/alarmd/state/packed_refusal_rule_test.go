@@ -1,9 +1,11 @@
 package state
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -101,9 +103,9 @@ func TestThePublishedRuleListIsExactlyWhatCanBeReported(t *testing.T) {
 		}
 		published[rule] = true
 	}
-	if len(PackedRuleNames) != 8 {
-		t.Fatalf("the list holds %d rules; every refusal in encodeRuntimePacked needs exactly one, so a "+
-			"change to either has to change this number on purpose", len(PackedRuleNames))
+	if len(PackedRuleNames) != 9 {
+		t.Fatalf("the list holds %d rules; every refusal that reaches the line under STATE_CORRUPT needs "+
+			"exactly one, so a change to either has to change this number on purpose", len(PackedRuleNames))
 	}
 	// A refusal this build does not name reports nothing rather than a
 	// neighbouring rule, so an unnamed rule shows up as a reason with no rule
@@ -113,5 +115,78 @@ func TestThePublishedRuleListIsExactlyWhatCanBeReported(t *testing.T) {
 	}
 	if rule := PackedRefusalRule(nil); rule != "" {
 		t.Fatalf("a nil error was given the rule %q", rule)
+	}
+}
+
+// The rule reaches the admission result, which is the path the line reads.
+//
+// encodeRuntimePacked naming its rule is not enough: encodeForWrite had the
+// error in hand and returned only the reason, so the rule was discarded one
+// call above the line that needed it and every refusal still arrived as a bare
+// STATE_CORRUPT. What this asserts is the seam that was broken, not the
+// function that was already right.
+func TestTheRefusalRuleReachesTheAdmissionResult(t *testing.T) {
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	router, _ := NewFixedRouter("state-01", backend)
+	store, _ := NewExecutionStore(ExecutionStoreOptions{Prefix: "alarmd", Router: router,
+		MaxValueBytes: 1 << 20, MaxItemsPerCall: 4, MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute})
+
+	// A record id the series identity and source time do not derive. Applied
+	// before the digest is computed, so the record is internally consistent
+	// and reaches the framing rules: mutating afterwards breaks the digest and
+	// the store refuses it one branch earlier, under a different rule.
+	//
+	// This rule rather than one of the structural ones because
+	// BuildStateMutation refuses those itself - a point naming a Level the
+	// mutation does not carry never gets as far as the encoder, so it could
+	// not exercise the seam this case is about.
+	point := derivedPoint(t, stateIdentityV2(), 60, "detect", execution.LevelFactNormal)
+	point.RecordID = strings.Repeat("ff", 32)
+	mutation, err := execution.BuildStateMutation(execution.StateMutation{
+		Identity: stateIdentityV2(), ApplyVersion: applyVersion(),
+		AffectedRecords: []execution.RecordAnchor{derivedAnchor(t, stateIdentityV2(), 60)},
+		Levels: []execution.RuntimeLevelStateMutation{{LevelID: 1, LevelStateCompatibility: "compat",
+			HistoryCompleteness: execution.HistoryFull, WarmupRequirementRef: "warm", LastProcessedEventTime: 60}},
+		Points: []execution.StateHistoryPoint{point},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	admission, err := store.AdmitRuntime(context.Background(),
+		execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
+			Items: []execution.StateMutation{mutation}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := admission.Items[0]
+	if item.Status != execution.StateAdmissionDeterministicInvalid ||
+		item.ReasonCode != execution.ReasonCode(contract.ReasonStateCorrupt) {
+		t.Fatalf("admission = %+v, want a deterministic invalid STATE_CORRUPT", item)
+	}
+	if item.RefusalRule != PackedRuleRecordIDNotDerived {
+		t.Fatalf("rule = %q, want %q: the reason alone sends a reader to read every producer",
+			item.RefusalRule, PackedRuleRecordIDNotDerived)
+	}
+	// The control: a record that frames carries no rule, so the field's
+	// presence means a refusal rather than meaning this build sets it.
+	good, err := execution.BuildStateMutation(execution.StateMutation{
+		Identity: stateIdentityV2(), ApplyVersion: applyVersion(),
+		AffectedRecords: []execution.RecordAnchor{derivedAnchor(t, stateIdentityV2(), 60)},
+		Levels: []execution.RuntimeLevelStateMutation{{LevelID: 1, LevelStateCompatibility: "compat",
+			HistoryCompleteness: execution.HistoryFull, WarmupRequirementRef: "warm", LastProcessedEventTime: 60}},
+		Points: []execution.StateHistoryPoint{derivedPoint(t, stateIdentityV2(), 60, "detect", execution.LevelFactNormal)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := store.AdmitRuntime(context.Background(),
+		execution.StateApplyRequest{Contract: frozenRef(), Retention: testRetention(),
+			Items: []execution.StateMutation{good}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.Items[0].Status != execution.StateAdmissionAccepted || accepted.Items[0].RefusalRule != "" {
+		t.Fatalf("an admitted record carries %+v, want no rule", accepted.Items[0])
 	}
 }
