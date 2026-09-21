@@ -95,9 +95,13 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonExecutionBudgetExhausted: {
 		ReasonExecutionBudgetExhausted, ReasonClassCoverage, ReasonDomainQueryResult | ReasonDomainObservation,
 	},
-	ReasonSnapshotUnavailable:   {ReasonSnapshotUnavailable, ReasonClassCoverage, ReasonDomainObservation},
-	ReasonGapSkipped:            {ReasonGapSkipped, ReasonClassCoverage, ReasonDomainObservation},
-	ReasonSchedulePruned:        {ReasonSchedulePruned, ReasonClassCoverage, ReasonDomainObservation},
+	ReasonSnapshotUnavailable: {ReasonSnapshotUnavailable, ReasonClassCoverage, ReasonDomainObservation},
+	ReasonGapSkipped:          {ReasonGapSkipped, ReasonClassCoverage, ReasonDomainObservation},
+	ReasonSchedulePruned:      {ReasonSchedulePruned, ReasonClassCoverage, ReasonDomainObservation},
+	// Coverage, like the pruned skip beside it: Slots passed without being
+	// evaluated. Not deterministic, because nothing was refused - the active
+	// set simply did not hold the Plan while they went by.
+	ReasonPlanNotActive:         {ReasonPlanNotActive, ReasonClassCoverage, ReasonDomainObservation},
 	ReasonEffectiveTimeInactive: {ReasonEffectiveTimeInactive, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonEffectiveTimeUnknown:  {ReasonEffectiveTimeUnknown, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonHistoryWarming:        {ReasonHistoryWarming, ReasonClassCoverage, ReasonDomainReceipt | ReasonDomainObservation},

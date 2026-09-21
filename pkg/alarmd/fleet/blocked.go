@@ -172,6 +172,11 @@ var failureFacets = map[string]facets{
 	// Skipped and pruned spans: the scheduler's decision about time.
 	"GAP_SKIPPED":     {StageSchedule, ClassCapacity, DependencyNone},
 	"SCHEDULE_PRUNED": {StageSchedule, ClassRetention, DependencyNone},
+	// Also the scheduler's decision about time, but neither retention nor
+	// capacity: the times were there and the Plan was not. CONFIG, because
+	// what decided it was the active set - which Plans this deployment was
+	// told to run.
+	"PLAN_NOT_ACTIVE": {StageSchedule, ClassConfig, DependencyNone},
 
 	// The stores and infrastructure this deployment depends on.
 	"REDIS_UNAVAILABLE": {StageCommit, ClassUnavailable, DependencyRedis},

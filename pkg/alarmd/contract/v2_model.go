@@ -88,7 +88,20 @@ const (
 	// ReasonSchedulePruned names a Progress cursor moved past a part of the
 	// Schedule timeline that was pruned before the cursor could be evaluated.
 	// The skipped Slots were never observed, which is a coverage fact.
-	ReasonSchedulePruned        = "SCHEDULE_PRUNED"
+	ReasonSchedulePruned = "SCHEDULE_PRUNED"
+	// ReasonPlanNotActive names Slots the cursor moved past because no Plan was
+	// due at them: the schedule held those times and the timeline still does,
+	// but the Plan had left the activation and came back, so for that stretch
+	// there was nothing to run.
+	//
+	// Separate from SCHEDULE_PRUNED, which it used to arrive as, because the
+	// two send a reader to opposite places. Pruned means the times are gone
+	// from the timeline and no read will ever find them - a retention answer.
+	// This means the times are there and the Plan was not, which is a question
+	// about the active set, and it reads as data loss when it is not: the
+	// Slots are not replayed on purpose, because replaying them would produce
+	// alerts for a strategy that did not exist while they passed.
+	ReasonPlanNotActive         = "PLAN_NOT_ACTIVE"
 	ReasonEffectiveTimeInactive = "EFFECTIVE_TIME_INACTIVE"
 	ReasonEffectiveTimeUnknown  = "EFFECTIVE_TIME_UNKNOWN"
 	ReasonHistoryWarming        = "HISTORY_WARMING"
