@@ -201,7 +201,7 @@ func TestAStrategyBackInTheListIsBackWhateverBecameOfItThisRound(t *testing.T) {
 // without the word leaves this round as the lower bound.
 func TestTheAbsenceStartsWhenTheCatalogSaysNotWhenTheLedgerFirstSaw(t *testing.T) {
 	ledgerStart := time.Date(2026, 9, 22, 10, 5, 0, 0, time.UTC)
-	trueStart := ledgerStart.Add(-4 * time.Minute)
+	trueStart := ledgerStart.Add(-8 * time.Minute)
 	ledger := NewSourceSetLedger(func() time.Time { return ledgerStart })
 	// A new leader's first round: the strategy is already under grace, and
 	// the disposition carries when the old leader first found it absent.
@@ -221,6 +221,18 @@ func TestTheAbsenceStartsWhenTheCatalogSaysNotWhenTheLedgerFirstSaw(t *testing.T
 	if !since["unsaid"].Equal(ledgerStart) {
 		t.Fatalf("a disposition without the word: absent since %v, want this round %v as the lower bound", since["unsaid"], ledgerStart)
 	}
+	// The drop is counted in the hour the absence began -- the hour before
+	// this account did -- not the hour this process heard of it.
+	dropped := map[time.Time]int{}
+	for _, hour := range facts.Hours {
+		dropped[hour.Hour] = hour.Dropped
+	}
+	if trueStart.Truncate(time.Hour).Equal(ledgerStart.Truncate(time.Hour)) {
+		t.Fatal("fixture: the catalog's start has to fall in the hour before the account's")
+	}
+	if dropped[trueStart.Truncate(time.Hour)] != 1 || dropped[ledgerStart.Truncate(time.Hour)] != 1 {
+		t.Fatalf("dropped by hour = %v, want the graced one in the hour of its start (%v) and the unsaid one in this round's", dropped, trueStart.Truncate(time.Hour))
+	}
 	// The next round carries the word for the one that lacked it -- earlier
 	// than the ledger's sight -- and a later moment for the other; the
 	// earlier is taken, the later ignored.
@@ -238,7 +250,7 @@ func TestTheAbsenceStartsWhenTheCatalogSaysNotWhenTheLedgerFirstSaw(t *testing.T
 	// And the return measures against the true start.
 	at = ledgerStart.Add(3 * time.Minute)
 	ledger.NoteRound(SourceSetRound{At: at, Listed: []string{"keep", "graced", "unsaid"}})
-	if facts = ledger.Facts(at); facts.Hours[0].LongestAbsentSeconds != (7 * time.Minute).Seconds() {
-		t.Fatalf("longest absence = %v s, want 7 minutes from the catalog's start", facts.Hours[0].LongestAbsentSeconds)
+	if facts = ledger.Facts(at); facts.Hours[0].LongestAbsentSeconds != (11 * time.Minute).Seconds() {
+		t.Fatalf("longest absence = %v s, want 11 minutes from the catalog's start", facts.Hours[0].LongestAbsentSeconds)
 	}
 }

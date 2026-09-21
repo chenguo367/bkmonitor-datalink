@@ -208,10 +208,12 @@ func (ledger *SourceSetLedger) noteAbsent(strategy AbsentStrategy, at time.Time)
 	known, seen := ledger.absent[strategy.StrategyID]
 	if !seen {
 		ledger.absent[strategy.StrategyID] = since
-		// Dropped is counted in the hour the ledger learned of it: the
-		// account is this process's, and an hour before it began has no
-		// bucket to count in.
-		ledger.hour(at).Dropped++
+		// Dropped is counted in the hour the absence began, which for a
+		// leader that took over mid-grace is an hour before its account did:
+		// the hourly fold then says when the list lost the strategy, not when
+		// this process heard of it, and "every hour at :01" reads as such
+		// across a leader change.
+		ledger.hour(since).Dropped++
 		return
 	}
 	if since.Before(known) {
