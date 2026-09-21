@@ -18,7 +18,7 @@ func TestWorkflowContractCountsAndSeriesBound(t *testing.T) {
 	for _, out := range runs {
 		r.Observe(ctx, observability.Observation{Component: observability.ComponentScheduler, Stage: observability.StageRunnerReturned, RunOutcome: out, Attempted: out == "source_retry"})
 	}
-	for _, out := range []string{"completed", "readiness_deferred", "retrying", "cancelled", "error", "incomplete"} {
+	for _, out := range []string{"completed", "readiness_deferred", "view_not_executable", "retrying", "cancelled", "error", "incomplete"} {
 		r.Observe(ctx, observability.Observation{Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted, ExecuteOutcome: out})
 	}
 	kinds := []string{"FULL_COMPLETED", "FULL_EMPTY_COMPLETED", "COMPLETED_WITH_PARTIAL_GAP", "COMPLETED_WITH_UNAVAILABLE", "COMPLETED_WITH_TERMINAL", "GAP_SKIPPED", "SNAPSHOT_UNAVAILABLE"}
@@ -80,7 +80,9 @@ func TestWorkflowContractCountsAndSeriesBound(t *testing.T) {
 			}
 		}
 	}
-	if count != 74 {
-		t.Fatalf("new series=%d want74 (including +Inf,sum,count, no created)", count)
+	// 75: the executor's view_not_executable return (decision-016 batch 4b)
+	// is one more execute_return_total series.
+	if count != 75 {
+		t.Fatalf("new series=%d want75 (including +Inf,sum,count, no created)", count)
 	}
 }

@@ -2688,6 +2688,10 @@ func executeReturnOutcome(result execution.SlotExecutionResult, err error) strin
 		if _, ok := access.ReadinessDeferredAt(err); ok {
 			return "readiness_deferred"
 		}
+		var notExecutable *scheduler.ViewNotExecutableError
+		if errors.As(err, &notExecutable) {
+			return "view_not_executable"
+		}
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return "cancelled"
 		}
