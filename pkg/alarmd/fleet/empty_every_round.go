@@ -33,6 +33,15 @@ type EmptyEveryRoundFacts struct {
 	// alone, so after a restart it is a lower bound.
 	Rounds int       `json:"rounds"`
 	Since  time.Time `json:"since"`
+	// SinceIsLowerBound is always true on this row and is written out for the
+	// same reason NeverSawData is: no round is known to have returned
+	// records, so nothing anchors the run's start from below -- Since is the
+	// first empty Slot any recording process saw, and the source may have
+	// been silent long before it. On a live deployment 327 rows carried the
+	// same two minutes, which were the minutes a release began recording
+	// the runs; read as onsets they were one event, and they were not. The
+	// page reads this row's Since as "at least since".
+	SinceIsLowerBound bool `json:"since_is_lower_bound"`
 	// IntervalSeconds is the object's evaluation period from the due index,
 	// copied onto the row by the publisher; zero when the index has no entry.
 	// It is the number a reader compares the source's reporting period
