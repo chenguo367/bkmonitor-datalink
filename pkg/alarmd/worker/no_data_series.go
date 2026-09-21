@@ -39,6 +39,9 @@ type noDataRound struct {
 	// for the observation line; the decision itself is in the outcome.
 	facts   nodata.AbsenceFacts
 	horizon int64
+	// horizonSource is where that horizon came from, as compilation froze it
+	// beside the number; empty for none.
+	horizonSource string
 }
 
 // seriesDimensionsFor is the dimensions of every series this Slot saw for one
@@ -142,7 +145,7 @@ func (stream *streamedExecution) noDataRoundFor(
 	}
 	round := noDataRound{
 		mutation: decided.Mutation, outcome: decided.Outcome,
-		facts: decided.Facts, horizon: config.TrackingHorizonSeconds,
+		facts: decided.Facts, horizon: config.TrackingHorizonSeconds, horizonSource: string(config.TrackingHorizonSource),
 	}
 	if len(decided.Series) == 0 {
 		return round, nil
@@ -543,8 +546,9 @@ func (stream *streamedExecution) observeNoDataAbsence(
 			StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID,
 		},
 		NoDataAbsence: &observability.NoDataAbsenceFacts{
-			Outcome: string(round.outcome), HorizonSeconds: round.horizon, RosterSource: string(facts.RosterSource),
-			Expected: facts.Expected, Present: facts.Present, Absent: facts.Absent, Unavailable: facts.Unavailable,
+			Outcome: string(round.outcome), HorizonSeconds: round.horizon, HorizonSource: round.horizonSource,
+			RosterSource: string(facts.RosterSource),
+			Expected:     facts.Expected, Present: facts.Present, Absent: facts.Absent, Unavailable: facts.Unavailable,
 			Dropped: facts.Dropped, Expired: facts.Expired, Suppressed: facts.Suppressed,
 		},
 	})

@@ -115,7 +115,8 @@ func TestTheRowCarriesEachPlansLastDecidingWordAndWhereItsHorizonCameFrom(t *tes
 	want := NoDataTrackingSummary{
 		Plans: 3, HorizonNone: 1, HorizonPlatform: 1, HorizonStrategy: 1,
 		Expected: 19, Absent: 4, ExpiredThisRound: 0, Suppressed: 2, LastDecidedAt: now.Add(time.Minute),
-		HorizonSourceBasis: NoDataHorizonSourceBasis,
+		// Every line here carried no frozen word, so every source was inferred.
+		HorizonSourceInferred: 3,
 	}
 	if *summary != want {
 		t.Fatalf("summary = %+v, want %+v", *summary, want)
@@ -125,16 +126,24 @@ func TestTheRowCarriesEachPlansLastDecidingWordAndWhereItsHorizonCameFrom(t *tes
 	}
 }
 
-// A strategy horizon reads as the strategy's own the moment it differs from
-// the platform's, and a tracker not told the platform's horizon says unknown
-// rather than guessing: the same 3600 is platform under one reading and
-// unknown under the other, and none is none whatever the platform says.
+// The source is what compilation froze beside the horizon when the line
+// carries it; the comparison against the platform's horizon is only the
+// fallback for a line that does not (a Plan compiled before the source was
+// frozen, or an older Worker). Under the fallback a strategy horizon reads
+// as the strategy's own the moment it differs from the platform's, and a
+// tracker not told the platform's horizon says unknown rather than
+// guessing: the same 3600 is platform under one reading and unknown under
+// the other, and none is none whatever the platform says. The frozen word
+// wins where the fallback would read otherwise: a strategy that stated
+// exactly the platform's value is STRATEGY, and a Plan that inherited the
+// platform's is PLATFORM even where the tracker was not told the platform's.
 func TestTheHorizonSourceIsReadAgainstThePlatformsAndSaysUnknownWhenNotTold(t *testing.T) {
 	ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-src"})
 	for _, testCase := range []struct {
 		name     string
 		platform *int64
 		horizon  int64
+		frozen   string
 		want     string
 	}{
 		{name: "equal to the platform's", platform: ptr(int64(3600)), horizon: 3600, want: NoDataHorizonPlatform},
@@ -144,6 +153,9 @@ func TestTheHorizonSourceIsReadAgainstThePlatformsAndSaysUnknownWhenNotTold(t *t
 		{name: "set while the platform has none", platform: ptr(int64(0)), horizon: 600, want: NoDataHorizonStrategy},
 		{name: "not told the platform's", platform: nil, horizon: 3600, want: NoDataHorizonUnknown},
 		{name: "not told the platform's, none", platform: nil, horizon: 0, want: NoDataHorizonUnknown},
+		{name: "frozen STRATEGY at exactly the platform's value", platform: ptr(int64(3600)), horizon: 3600, frozen: NoDataHorizonStrategy, want: NoDataHorizonStrategy},
+		{name: "frozen PLATFORM while not told the platform's", platform: nil, horizon: 3600, frozen: NoDataHorizonPlatform, want: NoDataHorizonPlatform},
+		{name: "frozen PLATFORM after the platform's value moved", platform: ptr(int64(7200)), horizon: 3600, frozen: NoDataHorizonPlatform, want: NoDataHorizonPlatform},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			at := &clock{at: now}
@@ -152,10 +164,23 @@ func TestTheHorizonSourceIsReadAgainstThePlatformsAndSaysUnknownWhenNotTold(t *t
 				platform := *testCase.platform
 				tracker.SetPlatformNoDataHorizon(func() int64 { return platform })
 			}
-			absenceDecided(ctx, tracker, "s-1", 600, observability.NoDataAbsenceFacts{HorizonSeconds: testCase.horizon, Expected: 1})
+			absenceDecided(ctx, tracker, "s-1", 600, observability.NoDataAbsenceFacts{HorizonSeconds: testCase.horizon, HorizonSource: testCase.frozen, Expected: 1})
 			row := objectRow(t, tracker, "qg-src")
 			if len(row.NoDataTracking) != 1 || row.NoDataTracking[0].HorizonSource != testCase.want {
 				t.Fatalf("tracking = %+v, want source %s", row.NoDataTracking, testCase.want)
+			}
+			// The row says which way it was read, and the fleet counts the
+			// inferred ones: the frozen word makes both say frozen, anything
+			// else is the comparison and is counted as such.
+			wantBasis, wantInferred := NoDataHorizonSourceInferred, 1
+			if testCase.frozen != "" {
+				wantBasis, wantInferred = NoDataHorizonSourceFrozen, 0
+			}
+			if row.NoDataTracking[0].HorizonSourceBasis != wantBasis {
+				t.Fatalf("basis = %s, want %s", row.NoDataTracking[0].HorizonSourceBasis, wantBasis)
+			}
+			if inferred := tracker.NoDataTrackingSummary().HorizonSourceInferred; inferred != wantInferred {
+				t.Fatalf("summary counts %d inferred, want %d", inferred, wantInferred)
 			}
 			summary := tracker.NoDataTrackingSummary()
 			counted := map[string]int{
@@ -207,14 +232,14 @@ func TestTheFleetSumsTheReplicasNoDataTrackingAccounts(t *testing.T) {
 	all := []string{"pod-a", "pod-b", "pod-c"}
 	snapshots := []Snapshot{
 		{Replica: "pod-a", TakenAt: now, NoDataTracking: &NoDataTrackingSummary{Plans: 2, HorizonPlatform: 2,
-			Expected: 8, Absent: 3, Suppressed: 1, LastDecidedAt: now}},
+			Expected: 8, Absent: 3, Suppressed: 1, LastDecidedAt: now, HorizonSourceInferred: 1}},
 		{Replica: "pod-b", TakenAt: now, NoDataTracking: &NoDataTrackingSummary{Plans: 1, HorizonNone: 1,
 			Expected: 4, Absent: 4, LastDecidedAt: now.Add(time.Minute)}},
 		{Replica: "pod-c", TakenAt: now},
 	}
 	view := Aggregate(Expectation{Known: true}, snapshots, all, now, freshness)
 	want := NoDataTrackingSummary{Plans: 3, HorizonPlatform: 2, HorizonNone: 1, Expected: 12, Absent: 7, Suppressed: 1,
-		LastDecidedAt: now.Add(time.Minute), HorizonSourceBasis: NoDataHorizonSourceBasis}
+		LastDecidedAt: now.Add(time.Minute), HorizonSourceInferred: 1}
 	if view.NoDataTracking == nil || *view.NoDataTracking != want {
 		t.Fatalf("merged = %+v, want %+v", view.NoDataTracking, want)
 	}
@@ -233,7 +258,7 @@ func ptr[T any](value T) *T { return &value }
 func TestHealthResponseCarriesTheNoDataTrackingLine(t *testing.T) {
 	snapshots := healthySnapshots()
 	snapshots[0].NoDataTracking = &NoDataTrackingSummary{Plans: 2, HorizonPlatform: 2, Expected: 8, Absent: 3, Suppressed: 1,
-		ExpiredThisRound: 1, LastDecidedAt: now}
+		ExpiredThisRound: 1, LastDecidedAt: now, HorizonSourceInferred: 1}
 	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
 	body := requestJSON(t, handler, "/api/health")
 	tracking, ok := body["no_data_tracking"].(map[string]any)
@@ -251,9 +276,10 @@ func TestHealthResponseCarriesTheNoDataTrackingLine(t *testing.T) {
 	if tracking["last_decided_at"] == nil {
 		t.Fatalf("no_data_tracking carries no last_decided_at: %v", tracking)
 	}
-	// The wire says the source was inferred, so nobody reads it as frozen.
-	if tracking["horizon_source_basis"] != NoDataHorizonSourceBasis {
-		t.Fatalf("no_data_tracking.horizon_source_basis = %v, want %s", tracking["horizon_source_basis"], NoDataHorizonSourceBasis)
+	// The wire says how many sources are still inferred, so nobody reads the
+	// partition as wholly frozen while old Plans remain.
+	if got, _ := tracking["horizon_source_inferred"].(float64); got != 1 {
+		t.Fatalf("no_data_tracking.horizon_source_inferred = %v, want 1", tracking["horizon_source_inferred"])
 	}
 	silent := handlerWith(t, healthySnapshots(), Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
 	if body := requestJSON(t, silent, "/api/health"); body["no_data_tracking"] != nil {

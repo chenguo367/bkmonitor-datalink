@@ -383,6 +383,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		attributes = append(attributes,
 			slog.String("no_data_outcome", facts.Outcome),
 			slog.Int64("no_data_horizon_seconds", facts.HorizonSeconds),
+			slog.String("no_data_horizon_source", facts.HorizonSource),
 			slog.String("no_data_roster_source", facts.RosterSource),
 			slog.Uint64("no_data_expected", facts.Expected),
 			slog.Uint64("no_data_present", facts.Present),

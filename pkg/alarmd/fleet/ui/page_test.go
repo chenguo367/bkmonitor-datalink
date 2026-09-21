@@ -764,6 +764,7 @@ func TestThePageHasWordingForEveryLoadState(t *testing.T) {
 		{"MEMORY_REPRESENTATION", fleet.NoDataMemoryRepresentations},
 		// And where a Plan's no-data tracking horizon is read as coming from.
 		{"HORIZON_SOURCE", fleet.NoDataHorizonSources},
+		{"HORIZON_SOURCE_BASIS", fleet.NoDataHorizonSourceBases},
 		// And what a query-free completion found about an earlier attempt.
 		{"EXECUTION_EVIDENCE", fleet.ExecutionEvidenceReadings},
 	}

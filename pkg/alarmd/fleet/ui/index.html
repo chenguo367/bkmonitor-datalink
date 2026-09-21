@@ -1164,9 +1164,18 @@ var MEMORY_REPRESENTATION = {
 // the platform's value reads as PLATFORM until the platform's changes.
 var HORIZON_SOURCE = {
   NONE: '没有期限（无限期追踪，特性未开）',
-  PLATFORM: '平台默认——按值推断：策略的值等于平台叶子就读作平台',
-  STRATEGY: '策略自己设的——按值推断：与平台叶子不同',
+  PLATFORM: '平台默认',
+  STRATEGY: '策略自己设的',
   UNKNOWN: '本副本没被告知平台默认，说不清来源'
+};
+// How the row read the source. Held to the Go list. FROZEN is the word
+// compilation put beside the horizon; INFERRED_BY_VALUE is the fallback for
+// a Plan compiled before that word existed or a line from an older Worker:
+// the value compared with the platform's leaf, which reads a strategy set to
+// exactly the platform's value as PLATFORM until the platform's moves.
+var HORIZON_SOURCE_BASIS = {
+  FROZEN: '编译时冻进 Plan 的',
+  INFERRED_BY_VALUE: '按值推断的（旧编译或旧副本：策略的值等于平台叶子就读作平台），重编译后变为冻结'
 };
 
 // One Plan's last deciding no-data round, in the round's own counts: which
@@ -1177,7 +1186,10 @@ function noDataTrackingWords(tracking) {
   var parts = [];
   parts.push('策略 ' + tracking.plan.strategy_id
     + '：期限 ' + (tracking.horizon_seconds ? elapsedLabel(tracking.horizon_seconds) : '无')
-    + '（' + (HORIZON_SOURCE[tracking.horizon_source] || tracking.horizon_source) + '）');
+    + '（' + (HORIZON_SOURCE[tracking.horizon_source] || tracking.horizon_source)
+    + (tracking.horizon_source !== 'NONE' && tracking.horizon_source_basis
+        ? '，来源' + (HORIZON_SOURCE_BASIS[tracking.horizon_source_basis] || tracking.horizon_source_basis) : '')
+    + '）');
   parts.push('期待 ' + tracking.expected + ' 个组' + (tracking.roster_source ? '（名册来源 ' + tracking.roster_source + '）' : '')
     + '，那一轮到了 ' + tracking.present + '，在追踪的缺失 ' + tracking.absent
     + '，那一轮到期停追 ' + tracking.expired_this_round + '，已停追压着 ' + tracking.suppressed
@@ -2338,8 +2350,8 @@ function objectRow(anomaly, check, group) {
   if (anomaly.no_data_tracking && anomaly.no_data_tracking.length) {
     anomaly.no_data_tracking.forEach(function (tracking) {
       line('无数据追踪', noDataTrackingWords(tracking),
-        '每条无数据策略最近一次判定的原样计数，不做前后轮相减。"在追踪的缺失"是还在产出无数据异常的组；"那一轮到期停追"是那一轮追踪期限到了、停止产出的组；"已停追压着"是之前就停了、那一轮又遇到的组，就是期限正压着的规模。期限来源按值推断（策略的值与平台叶子比），不是合同冻的。'
-        + '停追不会发恢复：数据再来才会重新开始追踪。期限为"无"时后两个数恒为 0。'
+        '每条无数据策略最近一次判定的原样计数，不做前后轮相减。"在追踪的缺失"是还在产出无数据异常的组；"那一轮到期停追"是那一轮追踪期限到了、停止产出的组；"已停追压着"是之前就停了、那一轮又遇到的组，就是期限正压着的规模。'
+        + '停追不会发恢复：数据再来才会重新开始追踪。期限为"无"时后两个数恒为 0。来源写"按值推断"的是旧编译或旧副本的行，重编译后会变为冻结词。'
         + '指标 worker_no_data_absences_total{outcome}');
     });
   }
@@ -2953,7 +2965,10 @@ function renderNoDataTracking(tracking) {
   if (tracking.horizon_strategy) sources.push(tracking.horizon_strategy + ' 条用策略自己设的期限');
   if (tracking.horizon_none) sources.push(tracking.horizon_none + ' 条没有期限（无限期追踪）');
   if (tracking.horizon_unknown) sources.push(tracking.horizon_unknown + ' 条来源说不清（副本没被告知平台默认）');
-  var parts = [tracking.plans + ' 条无数据策略有过判定：' + sources.join('、') + '（来源按值推断，不是合同冻的）'];
+  var parts = [tracking.plans + ' 条无数据策略有过判定：' + sources.join('、')
+    + (tracking.horizon_source_inferred
+        ? '（其中 ' + tracking.horizon_source_inferred + ' 条的来源仍是按值推断的——旧编译或旧副本，重编译后会变为冻结词；为 0 才全是合同冻的）'
+        : '（来源全部是编译时冻进 Plan 的）')];
   parts.push('各策略最近一轮合计（不同周期的策略"最近一轮"落在不同时刻，这不是某一个时间窗）：期待 ' + tracking.expected
     + ' 个组，在追踪的缺失 ' + tracking.absent + '，最近一轮到期停追 ' + tracking.expired_this_round + '，已停追压着 ' + tracking.suppressed);
   if (tracking.horizon_none === tracking.plans) {

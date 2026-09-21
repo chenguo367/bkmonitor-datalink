@@ -516,14 +516,18 @@ type NoDataStallFacts struct {
 type NoDataAbsenceFacts struct {
 	Outcome        string
 	HorizonSeconds int64
-	RosterSource   string
-	Expected       uint64
-	Present        uint64
-	Absent         uint64
-	Unavailable    uint64
-	Dropped        uint64
-	Expired        uint64
-	Suppressed     uint64
+	// HorizonSource is where the horizon came from as compilation froze it
+	// beside the number: PLATFORM or STRATEGY, empty for no horizon and for
+	// a Plan compiled before the source was frozen.
+	HorizonSource string
+	RosterSource  string
+	Expected      uint64
+	Present       uint64
+	Absent        uint64
+	Unavailable   uint64
+	Dropped       uint64
+	Expired       uint64
+	Suppressed    uint64
 }
 
 // NoDataAbsenceOutcomes is every count the absence line carries, in the order

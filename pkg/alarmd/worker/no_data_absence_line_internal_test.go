@@ -26,10 +26,17 @@ func absenceLinesOf(
 ) (noDataRound, []observability.NoDataAbsenceFacts, []observability.Observation) {
 	t.Helper()
 	plan := noDataWiredPlan(t)
-	plan.CompiledPlan = noDataPreflightPlan(t, "7", &contract.NoDataConfigV1{
+	config := &contract.NoDataConfigV1{
 		Continuous: 1, Level: 2, AggDimension: []string{"bk_target_ip", "bk_target_cloud_id"},
 		TrackingHorizonSeconds: horizon,
-	})
+	}
+	if horizon > 0 {
+		// The strategy's own rather than the platform's so that the line
+		// cannot pass by carrying whichever word a reader would infer from
+		// the number.
+		config.TrackingHorizonSource = contract.NoDataHorizonSourceStrategy
+	}
+	plan.CompiledPlan = noDataPreflightPlan(t, "7", config)
 	stream := noDataWiredStream(t, plan, &horizonNoDataStore{groups: groups, present: present})
 	recorded := []observability.Observation{}
 	stream.coordinator.ports.Observer = observability.ObserverFunc(
@@ -88,6 +95,10 @@ func TestARoundThatJudgedSaysWhatItCountedAgainstWhichHorizon(t *testing.T) {
 	if line.HorizonSeconds != horizon {
 		t.Fatalf("line horizon = %d, want the Plan's %d", line.HorizonSeconds, horizon)
 	}
+	if line.HorizonSource != string(contract.NoDataHorizonSourceStrategy) {
+		t.Fatalf("line horizon source = %q, want the Plan's frozen %q: a reader of the line must not have to "+
+			"compare the number against the platform's to know whose it is", line.HorizonSource, contract.NoDataHorizonSourceStrategy)
+	}
 	if line.Expired != 2 {
 		t.Fatalf("line expired = %d, want the 2 absences the horizon outlived (facts %+v)", line.Expired, round.facts)
 	}
@@ -102,8 +113,9 @@ func TestARoundThatJudgedSaysWhatItCountedAgainstWhichHorizon(t *testing.T) {
 		t.Fatalf("line roster source = %q, want %q", line.RosterSource, nodata.RosterHistory)
 	}
 	fromRound := observability.NoDataAbsenceFacts{
-		Outcome: string(round.outcome), HorizonSeconds: round.horizon, RosterSource: string(round.facts.RosterSource),
-		Expected: round.facts.Expected, Present: round.facts.Present, Absent: round.facts.Absent,
+		Outcome: string(round.outcome), HorizonSeconds: round.horizon, HorizonSource: round.horizonSource,
+		RosterSource: string(round.facts.RosterSource),
+		Expected:     round.facts.Expected, Present: round.facts.Present, Absent: round.facts.Absent,
 		Unavailable: round.facts.Unavailable, Dropped: round.facts.Dropped,
 		Expired: round.facts.Expired, Suppressed: round.facts.Suppressed,
 	}
@@ -118,8 +130,8 @@ func TestARoundThatJudgedSaysWhatItCountedAgainstWhichHorizon(t *testing.T) {
 	if len(control) != 1 {
 		t.Fatalf("control emitted %d absence lines, want one", len(control))
 	}
-	if control[0].HorizonSeconds != 0 || control[0].Expired != 0 || control[0].Absent != 3 {
-		t.Fatalf("control line = %+v, want horizon 0, expired 0, absent 3", control[0])
+	if control[0].HorizonSeconds != 0 || control[0].HorizonSource != "" || control[0].Expired != 0 || control[0].Absent != 3 {
+		t.Fatalf("control line = %+v, want horizon 0 from nowhere, expired 0, absent 3", control[0])
 	}
 }
 

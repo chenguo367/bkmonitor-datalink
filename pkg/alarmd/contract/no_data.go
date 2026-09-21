@@ -93,7 +93,31 @@ type NoDataConfigV1 struct {
 	// would break the ledger's equality in a way that reads as a no-data
 	// defect rather than a naming one.
 	TrackingHorizonSeconds int64 `json:"no_data_tracking_horizon_seconds,omitempty"`
+	// TrackingHorizonSource says where the horizon above came from, frozen
+	// beside it: PLATFORM for a Plan that inherited the deployment's default,
+	// STRATEGY for one whose item stated its own. Empty when there is no
+	// horizon, and on a Plan compiled before the source was frozen - which
+	// the next compilation replaces, since a new build is a new compiler
+	// identity and the candidate cache recompiles under it.
+	//
+	// Frozen rather than inferred because the number alone cannot say: a
+	// strategy that states exactly the platform's value is indistinguishable
+	// from one that inherited it until the platform's value moves, and a
+	// reader comparing against the platform's current value reads a Plan
+	// compiled under the previous value as STRATEGY. The same digest domain
+	// as the horizon, so a Plan whose source changed with its value unchanged
+	// is a different object, as it should be: it will follow a different
+	// value next.
+	TrackingHorizonSource NoDataHorizonSource `json:"no_data_tracking_horizon_source,omitempty"`
 }
+
+// NoDataHorizonSource is where a Plan's effective no-data horizon came from.
+type NoDataHorizonSource string
+
+const (
+	NoDataHorizonSourcePlatform NoDataHorizonSource = "PLATFORM"
+	NoDataHorizonSourceStrategy NoDataHorizonSource = "STRATEGY"
+)
 
 // Validate rejects a section that cannot produce a decision, and normalises the
 // one thing that is a restatement rather than a defect. A zero Continuous would
@@ -121,6 +145,18 @@ func (config *NoDataConfigV1) Validate() error {
 	// direction that looks healthy.
 	if config.TrackingHorizonSeconds < 0 {
 		return fmt.Errorf("no_data_config tracking horizon %d must not be negative", config.TrackingHorizonSeconds)
+	}
+	// The source is a closed word beside a positive horizon. An empty source
+	// beside a positive horizon is accepted: that is a Plan compiled before
+	// the source was frozen, read until it is recompiled. A source beside no
+	// horizon says where nothing came from, and is refused.
+	switch config.TrackingHorizonSource {
+	case "", NoDataHorizonSourcePlatform, NoDataHorizonSourceStrategy:
+	default:
+		return fmt.Errorf("no_data_config tracking horizon source %q is not PLATFORM or STRATEGY", config.TrackingHorizonSource)
+	}
+	if config.TrackingHorizonSource != "" && config.TrackingHorizonSeconds == 0 {
+		return fmt.Errorf("no_data_config tracking horizon source %q beside no horizon", config.TrackingHorizonSource)
 	}
 	seen := make(map[string]struct{}, len(config.AggDimension))
 	deduplicated := config.AggDimension[:0]
