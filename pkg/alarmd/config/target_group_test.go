@@ -18,10 +18,19 @@ func TestTargetGroupConfiguration(t *testing.T) {
 	}
 	prefix := "groups:"
 	cfg.PlatformCache.DynamicGroupKeyPrefix = &prefix
+	// The CMDB cache must live somewhere other than the state Redis here,
+	// or "preserve the CMDB location" and "fall back to the state Redis"
+	// read the same address and this assertion cannot tell them apart.
+	cmdb := RedisConnectionConfig{Mode: RedisModeStandalone, Address: "cmdb-cache:6379", DB: 5}
+	cfg.PlatformCache.CMDB = &cmdb
 	legacy, configured := cfg.TargetGroupRedis()
-	if !configured || !reflect.DeepEqual(legacy, cfg.CMDBCacheRedis()) {
-		t.Fatal("prefix-only configuration must preserve the CMDB location")
+	if !configured || !reflect.DeepEqual(legacy, cfg.CMDBCacheRedis()) || legacy.Address != cmdb.Address || legacy.DB != cmdb.DB {
+		t.Fatalf("prefix-only configuration must preserve the CMDB location, got %+v", legacy)
 	}
+	if legacy.Address == cfg.Redis.Address {
+		t.Fatal("fixture: CMDB and state Redis must differ for this assertion to discriminate")
+	}
+	cfg.PlatformCache.CMDB = nil
 	connection := RedisConnectionConfig{Mode: RedisModeStandalone, Address: "groups:6379", DB: 3}
 	cfg.PlatformCache.TargetGroup = &connection
 	cfg.resolvePlatformCacheRedis()
