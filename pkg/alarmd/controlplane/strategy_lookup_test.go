@@ -12,6 +12,7 @@ package controlplane_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
@@ -130,5 +131,115 @@ func TestLookupStrategyAnswersAcceptedAndWithheldStrategiesFromTheLastPublicatio
 
 	if missing := reconciler.LookupStrategy("4242"); !missing.Available || missing.Found || len(missing.Plans) != 0 || len(missing.Dispositions) != 0 {
 		t.Fatalf("a strategy the source never listed = %+v, want available and not found", missing)
+	}
+}
+
+// Three processes hold no publication of their own and answer nothing,
+// rather than answering wrong: a Leader that took over and assembled the
+// previous Leader's publication but has not completed a round -- an index
+// built from the objects alone would call every withheld strategy "never
+// listed"; a former Leader after it stepped down; and, for contrast, the
+// same process once a round it completes builds the index again, with the
+// dispositions.
+func TestAProcessWithoutAPublicationOfItsOwnAnswersNothingRatherThanNotListed(t *testing.T) {
+	client := newControlplaneRedis(t)
+	ctx := context.Background()
+	documents := realThresholdDocuments(t)
+	if err := client.Set(ctx, "bkmonitor.cache.strategy_ids", `[1001,1002]`, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	for id, document := range map[string]json.RawMessage{"1001": documents[0], "1002": documents[1]} {
+		if err := client.Set(ctx, "bkmonitor.cache.strategy_"+id, string(document), 0).Err(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := newRedisStrategySource(t, client)
+	planner, err := controlplane.NewLegacyPrimaryQueryCompiler("uq-primary-v1", "UTC", testLegacyQueryRuntimeFacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository, err := controlplane.NewRedisCatalogRepository(client, "alarmd:control:lookup-stepdown", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withhold1001 := func(catalog controlplane.Catalog) (controlplane.Catalog, error) {
+		groups := make([]controlplane.QueryGroup, 0, len(catalog.QueryGroups))
+		for _, group := range catalog.QueryGroups {
+			kept := make([]controlplane.FrozenPlan, 0, len(group.Plans))
+			for _, plan := range group.Plans {
+				if plan.Identity.StrategyID == "1001" {
+					catalog.Dispositions = append(catalog.Dispositions, controlplane.ObjectDisposition{
+						SourceID: "1001", Scope: "PLAN", Disposition: controlplane.DispositionUnsupported,
+						Reason: "SNAPSHOT_RETENTION_INSUFFICIENT", FieldPath: "items[0]",
+					})
+					continue
+				}
+				kept = append(kept, plan)
+			}
+			if len(kept) == 0 {
+				continue
+			}
+			group.Plans = kept
+			groups = append(groups, group)
+		}
+		catalog.QueryGroups = groups
+		return catalog, nil
+	}
+	newReconciler := func(validate func(controlplane.Catalog) (controlplane.Catalog, error)) *controlplane.SourceReconciler {
+		compiler, stateSemantics := runtimePlanCompiler(t)
+		reconciler, err := controlplane.NewSourceReconciler(repository, compiler, stateSemantics, validate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reconciler
+	}
+	first := newReconciler(withhold1001)
+	if result, err := first.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshPendingConfirmation {
+		t.Fatalf("first refresh = (%#v, %v)", result, err)
+	}
+	published, err := first.Refresh(ctx, source, planner)
+	if err != nil || published.Status != controlplane.SourceRefreshPublished {
+		t.Fatalf("publish = (%#v, %v)", published, err)
+	}
+	if answer := first.LookupStrategy("1001"); !answer.Available || !answer.Found {
+		t.Fatalf("the Leader that published answers %+v, want the withheld strategy found", answer)
+	}
+
+	// The former Leader steps down: nothing, not its old publication.
+	first.StepDown()
+	if answer := first.LookupStrategy("1001"); answer.Available || answer.Found {
+		t.Fatalf("a former Leader answers %+v, want not available", answer)
+	}
+
+	// A new Leader assembles the publication it inherited and then fails
+	// its round before completing it: nothing, not "never listed".
+	rounds := 0
+	second := newReconciler(func(catalog controlplane.Catalog) (controlplane.Catalog, error) {
+		rounds++
+		if rounds == 1 {
+			return controlplane.Catalog{}, errors.New("this round does not complete")
+		}
+		return withhold1001(catalog)
+	})
+	if _, err := second.Refresh(ctx, source, planner); err == nil {
+		t.Fatal("the new Leader's first round completed, want it cut short after the inherited publication was assembled")
+	}
+	if answer := second.LookupStrategy("1001"); answer.Available || answer.Found {
+		t.Fatalf("a Leader before its first completed round answers %+v, want not available", answer)
+	}
+	// The round it completes builds the index with the dispositions.
+	if result, err := second.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshUnchanged {
+		t.Fatalf("the new Leader's completed round = (%#v, %v), want unchanged", result, err)
+	}
+	answer := second.LookupStrategy("1001")
+	if !answer.Available || !answer.Found || answer.Publication != published.Publication || len(answer.Dispositions) == 0 {
+		t.Fatalf("the new Leader after its first completed round answers %+v, want the withheld strategy found under the same publication with its disposition", answer)
+	}
+	// And the former Leader, running a round again, answers again.
+	if result, err := first.Refresh(ctx, source, planner); err != nil || result.Status != controlplane.SourceRefreshUnchanged {
+		t.Fatalf("the former Leader's round = (%#v, %v)", result, err)
+	}
+	if answer := first.LookupStrategy("1001"); !answer.Available || !answer.Found {
+		t.Fatalf("a re-elected Leader answers %+v, want the withheld strategy found again", answer)
 	}
 }
