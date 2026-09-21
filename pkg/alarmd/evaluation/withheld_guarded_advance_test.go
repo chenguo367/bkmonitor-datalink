@@ -46,10 +46,17 @@ func TestWarmingLevelIsHeldBackWhenItsDependencyHasNoData(t *testing.T) {
 	if err := result.Validate(request); err != nil {
 		t.Fatalf("warming round with complete inputs: %v", err)
 	}
+	// What this round is here for is the point it records; the second round is
+	// the subject. The outcome is a RECOVERY rather than the UNKNOWN it used to
+	// be, and correctly so since decision-022: the window is two wide and needs
+	// two anomalies, and it holds one observed non-anomalous position and one
+	// hole, so even had the hole been anomalous the window would not have
+	// fired. The window answered, and an answered window is evidence whether or
+	// not the history behind it is complete.
 	warming := result.Plans[0]
-	if len(warming.StateResults) != 1 || warming.LevelOutcomes[0].Outcome != execution.LevelOutcomeUnknown ||
-		warming.LevelOutcomes[0].ReasonCode != execution.ReasonCode(contract.ReasonHistoryWarming) {
-		t.Fatalf("first round = %+v, want an UNKNOWN warming outcome that recorded its point", warming)
+	if len(warming.StateResults) != 1 || warming.LevelOutcomes[0].Outcome != execution.LevelOutcomeRecovery ||
+		len(warming.StateResults[0].Mutation.Points) != 1 {
+		t.Fatalf("first round = %+v, want a recovery that recorded its point", warming)
 	}
 	mutation := warming.StateResults[0].Mutation
 

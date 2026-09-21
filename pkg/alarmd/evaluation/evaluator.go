@@ -331,6 +331,29 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 	for i, o := range tr.LevelOutcomes {
 		kind := execution.LevelOutcomeKind(o.Result)
 		reason := execution.ReasonCode(observability.ReasonNone)
+		// A recovery reached on a round whose own inputs were incomplete is
+		// held, and carries the reason of the guard this round proposes.
+		//
+		// decision-022 relaxed one gate and only one: an incomplete *history*
+		// no longer stands in the way of closing what is open, because the
+		// recovery walk now reads the positions it actually observed. The
+		// completeness of *this round's inputs* is a different question with
+		// the same shape, and the trigger cannot see it - it is handed facts,
+		// not the bindings they were detected from. The newest position the
+		// walk counts is this record's own fact, so a fact detected on a
+		// dependency that came back empty would be counted as observed
+		// evidence when it is exactly the thing that was not observed.
+		//
+		// ABNORMAL is deliberately not held here: a degraded input may still
+		// have crossed a threshold, and refusing to say so is the one
+		// direction of this rule that loses an alert.
+		if kind == execution.LevelOutcomeRecovery {
+			if folded, proposed := execution.RoundGuardReasonForLevel(
+				evaluationBindings(request), due.Identity, o.LevelID,
+			); proposed {
+				kind, reason = execution.LevelOutcomeUnknown, folded
+			}
+		}
 		if kind == "" {
 			kind = execution.LevelOutcomeUnknown
 			reason = execution.ReasonCode(o.UnavailableReason)

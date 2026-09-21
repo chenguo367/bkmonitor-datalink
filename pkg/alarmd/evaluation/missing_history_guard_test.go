@@ -89,7 +89,13 @@ func TestMissingHistoryFromFullPersistsCurrentFactAndConvergesAfterReplay(t *tes
 		}
 		currentMutation := current.StateResults[0].Mutation
 		if i < 2 {
-			if current.LevelOutcomes[0].Outcome != execution.LevelOutcomeUnknown || currentMutation.Levels[0].HistoryCompleteness != execution.HistoryGapped {
+			// The guard is what this case is about and it is unchanged: the
+			// Level stays GAPPED until its detection window is whole again.
+			// The business outcome is a separate question - these rounds each
+			// answer their own recovery window, so since decision-022 they
+			// close what is open while staying guarded. Before, the guard
+			// answered both and this read UNKNOWN.
+			if current.LevelOutcomes[0].Outcome != execution.LevelOutcomeRecovery || currentMutation.Levels[0].HistoryCompleteness != execution.HistoryGapped {
 				t.Fatalf("guard cleared before window refilled %+v", current)
 			}
 		} else if current.LevelOutcomes[0].Outcome == execution.LevelOutcomeUnknown || currentMutation.Levels[0].HistoryCompleteness != execution.HistoryFull || currentMutation.Levels[0].GapReasonCode != "" {

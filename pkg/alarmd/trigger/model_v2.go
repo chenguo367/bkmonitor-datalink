@@ -129,6 +129,21 @@ type HistoryView interface {
 	// whether the range held one at all. Zero is a valid source time, so the
 	// answer cannot be carried by the value alone.
 	FirstAnomaly(fromTime, untilTime int64) (int64, bool)
+	// CountObserved reports how many positions in the range the window actually
+	// holds. It separates "nothing was seen here" from "something was seen and
+	// it was not anomalous", which CountAnomalies alone cannot: that returns
+	// zero for both.
+	//
+	// The recovery walk needs the count, not a yes/no on one position. A window
+	// mostly made of holes counts few anomalies for the same reason an empty
+	// one does, so "did this window trigger" can only be answered once the
+	// holes are counted alongside the anomalies.
+	//
+	// Required rather than an optional interface on purpose. An implementation
+	// that silently lacked it would have every position read as unobserved,
+	// and the recovery walk would step over a whole window of real data
+	// looking for evidence it already had.
+	CountObserved(fromTime, untilTime int64) uint32
 }
 
 type LevelHistory struct {

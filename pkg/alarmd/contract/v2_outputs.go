@@ -379,8 +379,44 @@ func validateSuccessfulLevelResultsV1(results []LevelResultV1) error {
 		if result.Result != expectedResult {
 			return invalid("trigger_event.level_results.result", "does not match current Detect result and trigger/recovery window evidence")
 		}
-		if window.HistoryCompleteness != "FULL" && result.Result != LevelResultAbnormal {
-			return invalid("trigger_event.level_results.result", "WARMING and GAPPED history permit only monotonic ABNORMAL")
+		// An incomplete window may escalate, and may close what it opened, but
+		// may not call the Level normal.
+		//
+		// It used to permit ABNORMAL alone. That was sound in one direction --
+		// anomalies counted across a hole are a lower bound, so an incomplete
+		// window never over-fires -- and the cost was in the other: an alert
+		// opened on an incomplete window could not close until the window was
+		// FULL again, and a window that stays short holds it open for ever.
+		// The cost is now measured rather than assumed: of 3305 enabled
+		// strategies, 35 have a window longer than the interval between
+		// releases and so never reach FULL at all, and one of them was holding
+		// nine anomalous series with three missing positions out of 1469. That
+		// is why decision-022 overturned it; it was a deliberate trade made
+		// without those numbers.
+		//
+		// RECOVERY is admitted only with the evidence for it, which is checked
+		// above and repeated in the condition rather than assumed: a Level
+		// claiming recovery on an incomplete window and carrying no recovery
+		// evidence is still refused whole. NORMAL stays refused, so the
+		// monotonic half of the rule is intact -- an incomplete window cannot
+		// say a Level is fine, only that what it opened is over.
+		if window.HistoryCompleteness != "FULL" {
+			switch {
+			case result.Result == LevelResultAbnormal:
+			case result.Result == LevelResultRecovery && recoverySatisfied:
+			default:
+				return invalid("trigger_event.level_results.result",
+					"WARMING and GAPPED history permit only ABNORMAL and evidenced RECOVERY")
+			}
+		}
+		// The recovery walk reaches back from the Slot's own record, so a
+		// window that claims to have started after it is evidence of nothing
+		// this event can be checked against. The walk's time bound is the
+		// writer's to enforce: the period is not on this evidence, so a reader
+		// cannot recompute how far back the walk was allowed to go.
+		if window.Recovery.Enabled && window.Recovery.OldestWindowStart > window.SourceTime {
+			return invalid("trigger_event.level_results.decision_window.recovery",
+				"recovery window starts after the record it was reached from")
 		}
 		previous = result.LevelID
 	}

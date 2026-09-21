@@ -669,6 +669,16 @@ type RecoveryWindowEvidenceV1 struct {
 	RequiredConsecutiveWindows uint32 `json:"required_consecutive_windows"`
 	ObservedConsecutiveMisses  uint32 `json:"observed_consecutive_misses"`
 	OldestWindowStart          int64  `json:"oldest_window_start"`
+	// SkippedPositions is how many positions the walk stepped over because
+	// nothing was observed at them.
+	//
+	// They are neither misses nor anomalies. Counting them as misses, which is
+	// what happened before decision-022, built recoveries on absence; breaking
+	// on them would let one hole cost the whole run. Saying how many were
+	// stepped over is what keeps the other two numbers readable: without it,
+	// a run of five misses spanning an hour and one spanning a week look the
+	// same on the evidence.
+	SkippedPositions uint32 `json:"skipped_positions,omitempty"`
 }
 
 type WindowEvidenceV1 struct {

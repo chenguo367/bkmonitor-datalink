@@ -629,6 +629,33 @@ func (window *Window) latestSourceTime() (int64, bool) {
 	return window.points[len(window.points)-1].sourceTime, true
 }
 
+// CountObserved reports how many positions in the range this Level actually
+// saw: a point exists there and its fact was usable for this Level.
+//
+// It answers "how much was seen here", which is a different question from
+// every other reader of this window. The anomaly reads ask what the data said
+// and return zero both for a range that was quiet and for a range nobody
+// observed; this one separates those two. Recovery rests on windows that were
+// observed and not anomalous, and a window nobody observed is evidence of
+// neither - so its holes have to be counted, not read as quiet.
+func (view HistoryView) CountObserved(fromTime, untilTime int64) uint32 {
+	if view.window == nil || fromTime > untilTime {
+		return 0
+	}
+	var count uint32
+	start := sort.Search(len(view.window.points), func(index int) bool { return view.window.points[index].sourceTime >= fromTime })
+	for index := start; index < len(view.window.points); index++ {
+		point := view.window.points[index]
+		if point.sourceTime > untilTime {
+			break
+		}
+		if bitSet(point.valid, view.levelIndex) {
+			count++
+		}
+	}
+	return count
+}
+
 func (view HistoryView) pointAt(sourceTime int64) (pointState, bool) {
 	position := sort.Search(len(view.window.points), func(index int) bool { return view.window.points[index].sourceTime >= sourceTime })
 	if position == len(view.window.points) || view.window.points[position].sourceTime != sourceTime {
