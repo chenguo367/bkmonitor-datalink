@@ -389,3 +389,58 @@ func TestFleetPublisherPutsThePeriodOnEmptyEveryRoundRows(t *testing.T) {
 		t.Fatalf("row for the unindexed object = %+v (facts %+v), want listed with no period", row, row.EmptyEveryRound)
 	}
 }
+
+// The fill projection is attached where the period is: at publication, from
+// the same index the row's wake comes from. A flat short window on an
+// indexed object carries it; the same window on an object the index has no
+// entry for has no period to project with and carries none.
+func TestFleetPublisherProjectsTheFillOfAFlatShortWindow(t *testing.T) {
+	clock := &dueIndexClock{at: time.Unix(20_000, 0)}
+	dispatcher := dueIndexDispatcher(clock, metric.NewRecorder(metric.BuildInfo{}), 8, 8,
+		map[execution.QueryGroupIdentity]walkRunner{"qg-60s": {}})
+	index := dispatcher.dueIndex
+	index.Record("qg-60s", dispatcher.bundle.runners["qg-60s"], index.versionEpoch,
+		scheduler.RunnerDueBound{NotDueUntilUnix: 20_060, IntervalSeconds: 60}, time.Unix(19_990, 0))
+	tracker := fleet.NewTracker(nil, "replica-1", clock.now)
+	// Five rounds short by the same three positions of a 1469-position
+	// window, on both objects.
+	for _, name := range []string{"qg-60s", "qg-unindexed"} {
+		for round := 0; round < 5; round++ {
+			clock.at = time.Unix(20_000-int64(5-round)*60, 0)
+			tracker.Observe(context.Background(), observability.Observation{
+				ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionCause: "LEVEL_OUTCOME_UNKNOWN",
+				ProgressCompletionReason: "GAP_SKIPPED",
+				HistoryCoverage:          &observability.HistoryCoverageFacts{Levels: 249, Short: 249, WorstValid: 1466, WorstRequired: 1469, Guarded: 249},
+				Trace:                    observability.TraceFields{QueryGroupKey: name, StrategyID: "4101", EvaluationTime: clock.at.Unix()},
+			})
+		}
+	}
+	clock.at = time.Unix(20_000, 0)
+	publisher := fleetPublisher{
+		tracker: tracker, replica: "replica-1", now: clock.now,
+		owned: func() []execution.QueryGroupIdentity {
+			return []execution.QueryGroupIdentity{"qg-60s", "qg-unindexed"}
+		},
+		schedule: index,
+	}
+	snapshot := publisher.snapshot(context.Background())
+	byObject := map[string]fleet.Anomaly{}
+	for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Undecidable, snapshot.Demoted, snapshot.ByDesign} {
+		for _, row := range column {
+			byObject[row.QueryGroup] = row
+		}
+	}
+	row, listed := byObject["qg-60s"]
+	if !listed || row.Coverage == nil || row.Coverage.UnchangedRounds != 4 {
+		t.Fatalf("row for the indexed object = %+v, want it listed with the flat count at 4", row)
+	}
+	fill := row.WindowFill
+	wantBy := time.Unix(20_000, 0).Add(time.Duration(1469-4) * time.Minute)
+	if fill == nil || fill.Holes != 3 || fill.PeriodSeconds != 60 || fill.SpanSeconds != 1469*60 || !fill.Sliding ||
+		fill.LatestFillBy == nil || !fill.LatestFillBy.Equal(wantBy) {
+		t.Fatalf("fill on the indexed object = %+v, want 3 sliding holes at 60 s, latest by %v", fill, wantBy)
+	}
+	if row := byObject["qg-unindexed"]; row.WindowFill != nil {
+		t.Fatalf("the unindexed object carries %+v, want no projection without a period", row.WindowFill)
+	}
+}

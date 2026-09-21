@@ -1305,7 +1305,7 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 	// own: one round cannot supply them. Measure is the row's word for what
 	// WorstValid counts, a constant of the field and not of the round.
 	rowOnly := map[string]bool{"ShortRounds": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true,
-		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "Measure": true}
+		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "UnchangedRounds": true, "Measure": true}
 	for i := 0; i < published.NumField(); i++ {
 		name := published.Type().Field(i).Name
 		if rowOnly[name] {
