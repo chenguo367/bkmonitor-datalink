@@ -467,6 +467,52 @@ func TestEvaluatorV2IncompleteWindowAllowsAbnormalAndEvidencedRecovery(t *testin
 	}
 }
 
+// The walk keeps going past a window it could not answer, and it may reach as
+// far back as the history is retained to do it.
+//
+// Both halves need a run whose last answered window lies *behind* a skipped
+// one. Every other case in this file has its answered windows before the first
+// skip, where stepping over a window and stopping at it are the same thing and
+// a walk bounded at the required number of windows reaches just as far.
+//
+// Window 3, threshold 2, two consecutive windows required, so the history is
+// retained for 3+2-1 = 4 window offsets. Positions 360 and 300 are observed,
+// 240 and 180 are not, 120 and 60 are:
+//
+//	offset 0  {240,300,360}  2 observed, 1 hole   answered, miss 1
+//	offset 1  {180,240,300}  1 observed, 2 holes  cannot answer, stepped over
+//	offset 2  {120,180,240}  1 observed, 2 holes  cannot answer, stepped over
+//	offset 3  { 60,120,180}  2 observed, 1 hole   answered, miss 2 -> RECOVERY
+//
+// Stopping at offset 1 leaves one miss, and so does a walk that only looks at
+// two offsets. Either way the answer changes, which is what makes this case
+// worth its fixture.
+func TestEvaluatorV2RecoveryWalkPassesSkippedWindowsToReachTheRetainedOnes(t *testing.T) {
+	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 3, 2, 2, nil)})
+	level := plan.Levels()[0]
+	history := pointHistory{step: 60, points: map[int64]bool{60: false, 120: false, 300: false, 360: false}}
+	request := requestV2(t, plan, 360, []DetectionFact{factV2(level, DetectionNormal)},
+		[]LevelHistory{{LevelID: 5, View: history}}, activeFactsV2(t, plan, 360))
+	result, err := EvaluateV2(request)
+	if err != nil {
+		t.Fatalf("EvaluateV2() error = %v", err)
+	}
+	if result.RecordResult != contract.LevelResultRecovery {
+		t.Fatalf("record result = %q, want RECOVERY: the walk stopped at the first window it could not "+
+			"answer, or would not look past the windows it strictly needed", result.RecordResult)
+	}
+	recovery := result.LevelOutcomes[0].DecisionWindow.Recovery
+	if recovery.ObservedConsecutiveMisses != 2 || recovery.SkippedWindows != 2 {
+		t.Fatalf("recovery evidence = %+v, want two answered windows and two stepped over", recovery)
+	}
+	// The oldest window reached is offset 3's, which only exists because the
+	// history is retained for the trigger window as well as the recovery run.
+	if want := int64(180 - 3*60 + 1); recovery.OldestWindowStart != want {
+		t.Fatalf("oldest window start = %d, want %d: the walk did not reach the last retained window",
+			recovery.OldestWindowStart, want)
+	}
+}
+
 func TestEvaluatorV2AllInactiveIsSuppressedNotNormal(t *testing.T) {
 	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(1, 1, 1, 1, 1, staticUptimeV2())})
 	level := plan.Levels()[0]

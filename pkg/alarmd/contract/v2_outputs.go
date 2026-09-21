@@ -409,15 +409,11 @@ func validateSuccessfulLevelResultsV1(results []LevelResultV1) error {
 					"WARMING and GAPPED history permit only ABNORMAL and evidenced RECOVERY")
 			}
 		}
-		// The recovery walk reaches back from the Slot's own record, so a
-		// window that claims to have started after it is evidence of nothing
-		// this event can be checked against. The walk's time bound is the
-		// writer's to enforce: the period is not on this evidence, so a reader
-		// cannot recompute how far back the walk was allowed to go.
-		if window.Recovery.Enabled && window.Recovery.OldestWindowStart > window.SourceTime {
-			return invalid("trigger_event.level_results.decision_window.recovery",
-				"recovery window starts after the record it was reached from")
-		}
+		// A recovery window starting after the record it was reached from is
+		// refused with the rest of the bounded window evidence above, by the
+		// same OldestWindowStart > SourceTime comparison. It is not repeated
+		// here: a second copy is a branch no event can reach, and the walk's
+		// own comments call that code no round runs.
 		previous = result.LevelID
 	}
 	return nil

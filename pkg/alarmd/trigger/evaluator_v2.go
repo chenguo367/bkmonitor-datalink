@@ -329,7 +329,7 @@ func evaluateLevelV2(
 	// open alert of a Plan with a day-long window open for a day. Decided at
 	// decision-022: recovery reads observed positions, NORMAL is unchanged and
 	// still requires FULL.
-	observedMisses, skippedPositions := uint32(0), uint32(0)
+	observedMisses, skippedWindows := uint32(0), uint32(0)
 	oldestWindowStart := triggerStart
 	if recoveryPlan.Enabled && result == "" {
 		// How far back an observed position may still count: the retained
@@ -394,7 +394,7 @@ func evaluateLevelV2(
 				holes = triggerPlan.WindowSize - observed
 			}
 			if anomalies+holes >= triggerPlan.RequiredAnomalies {
-				skippedPositions++
+				skippedWindows++
 				continue
 			}
 			observedMisses++
@@ -421,7 +421,7 @@ func evaluateLevelV2(
 		Recovery: contract.RecoveryWindowEvidenceV1{
 			Enabled: recoveryPlan.Enabled, RequiredConsecutiveWindows: recoveryPlan.ConsecutiveWindows,
 			ObservedConsecutiveMisses: observedMisses, OldestWindowStart: oldestWindowStart,
-			SkippedPositions: skippedPositions,
+			SkippedWindows: skippedWindows,
 		},
 		HistoryCompleteness: summary.Completeness,
 		WindowEvidence: contract.WindowEvidenceV1{

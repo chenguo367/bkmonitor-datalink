@@ -810,7 +810,7 @@ func TestEvaluationAcceptsLoadedGappedWithExclusiveFinalFullProof(t *testing.T) 
 // That move is deliberate and has to stay readable, because the shape here is
 // the one that hides a missing check: this layer cannot reject an unevidenced
 // RECOVERY, and nothing in this package says why. The quantities the event
-// contract weighs - ObservedConsecutiveMisses, SkippedPositions,
+// contract weighs - ObservedConsecutiveMisses, SkippedWindows,
 // OldestWindowStart - live on contract.RecoveryWindowEvidenceV1 and appear
 // nowhere in execution outside test fixtures, so a check written here could
 // only re-derive the relation from the loaded state, and the one it used to

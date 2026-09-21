@@ -669,16 +669,23 @@ type RecoveryWindowEvidenceV1 struct {
 	RequiredConsecutiveWindows uint32 `json:"required_consecutive_windows"`
 	ObservedConsecutiveMisses  uint32 `json:"observed_consecutive_misses"`
 	OldestWindowStart          int64  `json:"oldest_window_start"`
-	// SkippedPositions is how many positions the walk stepped over because
-	// nothing was observed at them.
+	// SkippedWindows is how many windows the walk stepped over because they
+	// held too little to answer: their observed anomalies plus their holes
+	// reached the trigger's threshold, so an anomaly in the holes could have
+	// fired them and "did not trigger" is not something they said.
 	//
-	// They are neither misses nor anomalies. Counting them as misses, which is
-	// what happened before decision-022, built recoveries on absence; breaking
-	// on them would let one hole cost the whole run. Saying how many were
-	// stepped over is what keeps the other two numbers readable: without it,
-	// a run of five misses spanning an hour and one spanning a week look the
-	// same on the evidence.
-	SkippedPositions uint32 `json:"skipped_positions,omitempty"`
+	// Windows, the unit the walk moves in, not positions - one per offset the
+	// walk passed over. A single missing position can put several consecutive
+	// windows out of reach, so the two counts are not interchangeable and the
+	// name has to say which one this is.
+	//
+	// A skipped window is neither a miss nor an anomaly. Counting them as
+	// misses, which is what happened before decision-022, built recoveries on
+	// absence; breaking on them would let one hole cost the whole run. Saying
+	// how many were stepped over is what keeps the other two numbers readable:
+	// without it, a run of five misses spanning an hour and one spanning a
+	// week look the same on the evidence.
+	SkippedWindows uint32 `json:"skipped_windows,omitempty"`
 }
 
 type WindowEvidenceV1 struct {
