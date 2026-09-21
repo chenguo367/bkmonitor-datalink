@@ -154,3 +154,43 @@ func TestALegacyRecordIDSurvivesApplyAndLoad(t *testing.T) {
 		t.Fatalf("the fresh point came back as %q, want %q", history[1].RecordID, fresh.RecordID)
 	}
 }
+
+// The upper bound covers a record whose history is entirely ids the decode
+// cannot rebuild.
+//
+// It is the bound the compile-time ceiling is derived from, so a shape it
+// under-reports is a Plan admitted at a size the write then refuses - the
+// silent per-series refusal the ceiling exists to prevent. Before the header
+// table was counted the bound reported a seventh of what such a record
+// actually takes.
+func TestTheUpperBoundCoversARecordOfNothingButLegacyIDs(t *testing.T) {
+	identity := packedIdentity()
+	const count = 4096
+	points := make([]execution.StateHistoryPoint, count)
+	for index := range points {
+		points[index] = packedPoint(t, identity, 1758400000+int64(index)*60, execution.LevelFactNormal)
+		if index < count-1 {
+			points[index].RecordID = string(identity.SeriesIdentityDigest)
+		}
+	}
+	fresh := points[count-1]
+	mutation := packedMutation(t, points, 1)
+	mutation.AffectedRecords = []execution.RecordAnchor{{RecordID: fresh.RecordID, SourceTime: fresh.SourceTime}}
+
+	raw, legacy, err := encodeRuntimePackedCounted(mutation, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacy != count-1 {
+		t.Fatalf("carried %d ids, want %d: without them this case does not reach the shape it is about",
+			legacy, count-1)
+	}
+	bound, err := PackedFrameUpperBoundV2(1, count)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(raw) > bound {
+		t.Fatalf("the record is %d bytes against an upper bound of %d; a bound below the real size admits "+
+			"a Plan whose every write is then refused", len(raw), bound)
+	}
+}

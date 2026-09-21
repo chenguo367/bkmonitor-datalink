@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"strconv"
 )
 
 var (
@@ -413,9 +414,17 @@ const (
 // fact it was handed - UNAVAILABLE and ERROR are different facts, and a point
 // no Level found usable is still a point the result contract reads.
 //
-// No record id is counted. Within one key the series identity digest is fixed
-// and every producer derives the id from it and the source time, so the id is
-// reconstructed at decode rather than stored.
+// Every point is costed as if its id had to be stored. Most do not - within one
+// key the id derives from the series digest and the source time, and a derived
+// id is not stored at all - but state written before that derivation existed
+// carries ids the decode cannot rebuild, and those go in the header table.
+//
+// Counted at the worst case rather than at the common one because this is what
+// the compile time ceiling is taken from, and a ceiling that admits a Plan the
+// write then refuses is the failure the ceiling exists to prevent. Measured:
+// one entry costs 90 bytes plus the index digits, and a 4096 point record whose
+// history is entirely such ids reaches 76.5% of a 512 KiB budget while this
+// function, before counting them, reported a seventh of that.
 func PackedFrameUpperBoundV2(levelCount, pointCount int) (int, error) {
 	if levelCount < 0 || pointCount < 0 {
 		return 0, fmt.Errorf("state: encoded shape must be non-negative")
@@ -427,9 +436,13 @@ func PackedFrameUpperBoundV2(levelCount, pointCount int) (int, error) {
 		frameOverhead    = 4 + 2 + binary.MaxVarintLen64
 		envelopeOverhead = 4 << 10
 		perLevelState    = 512 + 80
+		// {"index":N,"record_id":"<64 hex>"}, without the index digits.
+		perLegacyRecordID = 1 + 8 + 1 + 13 + 1 + 64 + 1 + 1
+		// The field name and its brackets, once.
+		legacyTableOverhead = len(`"legacy_record_ids":[],`)
 	)
 	bitmapBytes := (levelCount + 7) / 8
-	base := frameOverhead + envelopeOverhead
+	base := frameOverhead + envelopeOverhead + legacyTableOverhead
 	if levelCount > (math.MaxInt-base)/perLevelState {
 		return 0, ErrStateBudget
 	}
@@ -439,6 +452,10 @@ func PackedFrameUpperBoundV2(levelCount, pointCount int) (int, error) {
 		return 0, ErrStateBudget
 	}
 	perPoint += 3 * bitmapBytes
+	// The index is at most as wide as the point count it indexes, which is
+	// exact rather than a generous constant: a wider allowance would lower the
+	// ceiling for every record to pay for digits no record can reach.
+	perPoint += perLegacyRecordID + len(strconv.Itoa(max(pointCount, 1)))
 	if pointCount > (math.MaxInt-base)/perPoint {
 		return 0, ErrStateBudget
 	}
