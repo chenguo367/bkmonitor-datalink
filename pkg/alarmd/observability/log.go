@@ -243,6 +243,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.StateApplyChunk; f != nil {
 		attributes = append(attributes, slog.Int("chunk_index", f.Index), slog.Int("chunk_count", f.Count),
 			slog.Int64("applied_keys", f.AppliedKeys), slog.Int64("applied_bytes", f.AppliedBytes), slog.Int64("elapsed_ms", f.ElapsedMillis))
+		if len(f.RefusalRules) > 0 {
+			attributes = append(attributes, slog.String("state_refusal_rules", strings.Join(f.RefusalRules, ",")))
+		}
 	}
 	if f := observation.CapacityRejection; f != nil {
 		attributes = append(attributes, slog.String("capacity_phase", f.Phase), slog.Uint64("capacity_shared_used", f.SharedUsed), slog.Uint64("capacity_requested", f.Requested), slog.Uint64("capacity_limit", f.Limit))

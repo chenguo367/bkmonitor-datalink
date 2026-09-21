@@ -855,7 +855,7 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 		}
 		totals.keys += int64(len(chunkItems))
 		coordinator.observeChunk(ctx, observability.StageGapGuardCommitted, operation, chunkStarted, started, "", reason,
-			chunk, totals, observability.Counts{}, err, nil, extensions...)
+			chunk, totals, observability.Counts{}, err, nil, nil, extensions...)
 		return err
 	})
 }
@@ -1569,6 +1569,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 		var reason execution.ReasonCode
 		var chunkBytes int64
 		rejected := 0
+		var refusalRules []string
 		if err == nil {
 			if err = result.Validate(); err == nil {
 				actual := make([]execution.StateKeyIdentity, len(result.Items))
@@ -1590,6 +1591,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 						chunkBytes += int64(item.EncodedBytes)
 					case execution.StateAdmissionDeterministicInvalid:
 						deterministic[item.Identity] = item.ReasonCode
+						refusalRules = addRefusalRule(refusalRules, item.RefusalRule)
 						rejected++
 					default:
 						err = fmt.Errorf("state admission did not complete: %s", item.Status)
@@ -1604,7 +1606,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 		totals.keys += int64(len(chunkItems))
 		totals.bytes += chunkBytes
 		coordinator.observeChunk(ctx, observability.StageStateAdmission, operation, chunkStarted, started, observationResult, reason,
-			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, nil)
+			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, nil, refusalRules)
 		return err
 	})
 	if err != nil {
@@ -1681,6 +1683,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		}
 		var reason execution.ReasonCode
 		var conflicts observability.StateVersionConflictFacts
+		var applyRefusalRules []string
 		rejected := 0
 		if err == nil {
 			if err = result.Validate(); err == nil {
@@ -1716,6 +1719,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 							string(item.Identity.SeriesIdentityDigest), expectedRevisions[item.Identity], item.StoredBlobRevision)
 					case execution.StateApplyDeterministicInvalid:
 						deterministic[item.Identity] = item.ReasonCode
+						applyRefusalRules = addRefusalRule(applyRefusalRules, item.RefusalRule)
 						rejected++
 					case execution.StateApplyStale, execution.StateApplyVersionConflict:
 						// Every refused item is counted by the comparison
@@ -1776,7 +1780,8 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 			conflictFacts = &conflicts
 		}
 		coordinator.observeChunk(ctx, observability.StageStateApplied, operation, chunkStarted, started, observationResult, reason,
-			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, conflictFacts)
+			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, conflictFacts,
+			applyRefusalRules)
 		return err
 	})
 	if !alreadyApplied.Empty() {
