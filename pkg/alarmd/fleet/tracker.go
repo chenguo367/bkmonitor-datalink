@@ -724,7 +724,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	if trace.StrategyID == "" && completion == "" && runOutcome == "" && executeOutcome == "" &&
 		failure == nil && !outputFailed && !outputACKed && observation.QueryCooldown == nil && cursorAdvance == nil &&
 		observation.NoDataMemoryRefusal == nil && observation.NoDataMemoryWrite == nil && observation.GapProgress == nil &&
-		observation.NoDataMemoryRead == nil && observation.NoDataMemoryRenewal == nil && observation.NoDataAbsence == nil {
+		observation.NoDataMemoryRead == nil && observation.NoDataMemoryRenewal == nil {
 		return
 	}
 
@@ -805,7 +805,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// round of the object either: the Slot it belongs to completes on its
 	// own. The whole word is replaced -- the counts are that round's, not a
 	// running total -- and the source of the horizon is read here, against
-	// the platform's, because the Plan carries only the number.
+	// the platform's, because the Plan carries only the number. The emitter
+	// names the Plan on every line, which is what gets the observation past
+	// the anonymous-round return above; a line without one has no Plan to
+	// file under and is not recorded.
 	if absence := observation.NoDataAbsence; absence != nil && plan.StrategyID != "" {
 		if state.noDataTracking == nil {
 			state.noDataTracking = map[StrategyRef]*NoDataTracking{}

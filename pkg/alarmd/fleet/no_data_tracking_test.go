@@ -226,3 +226,60 @@ func TestTheFleetSumsTheReplicasNoDataTrackingAccounts(t *testing.T) {
 }
 
 func ptr[T any](value T) *T { return &value }
+
+// The verdict route carries the fleet's line, so the first screen can show
+// it; without a replica reporting one it is absent rather than empty.
+func TestHealthResponseCarriesTheNoDataTrackingLine(t *testing.T) {
+	snapshots := healthySnapshots()
+	snapshots[0].NoDataTracking = &NoDataTrackingSummary{Plans: 2, HorizonPlatform: 2, Expected: 8, Absent: 3, Suppressed: 1,
+		ExpiredThisRound: 1, LastDecidedAt: now}
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
+	body := requestJSON(t, handler, "/api/health")
+	tracking, ok := body["no_data_tracking"].(map[string]any)
+	if !ok {
+		t.Fatalf("health response carried no no_data_tracking, so the first screen's line renders empty: %v", body)
+	}
+	for field, want := range map[string]float64{
+		"plans": 2, "horizon_platform": 2, "horizon_none": 0, "horizon_strategy": 0,
+		"expected": 8, "absent": 3, "expired_this_round": 1, "suppressed": 1,
+	} {
+		if got, _ := tracking[field].(float64); got != want {
+			t.Fatalf("no_data_tracking.%s = %v, want %v: %v", field, tracking[field], want, tracking)
+		}
+	}
+	if tracking["last_decided_at"] == nil {
+		t.Fatalf("no_data_tracking carries no last_decided_at: %v", tracking)
+	}
+	silent := handlerWith(t, healthySnapshots(), Expectation{QueryGroups: 2, Known: true}, []string{"pod-a", "pod-b"})
+	if body := requestJSON(t, silent, "/api/health"); body["no_data_tracking"] != nil {
+		t.Fatalf("with no replica reporting one, the response carries %v; want the key absent", body["no_data_tracking"])
+	}
+}
+
+// The row's entries are in one order every time, smallest strategy first:
+// twelve Plans reported largest first come out smallest first.
+func TestTheRowsTrackingEntriesAreOrderedByStrategy(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	tracker.SetPlatformNoDataHorizon(func() int64 { return 3600 })
+	ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-order"})
+	want := []string{}
+	for index := 12; index >= 1; index-- {
+		strategy := "s-" + string(rune('a'+index-1))
+		want = append([]string{strategy}, want...)
+		absenceDecided(ctx, tracker, strategy, 600, observability.NoDataAbsenceFacts{HorizonSeconds: 3600, Expected: 1})
+	}
+	row := objectRow(t, tracker, "qg-order")
+	got := []string{}
+	for _, tracking := range row.NoDataTracking {
+		got = append(got, tracking.Plan.StrategyID)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("row carries %d entries, want %d", len(got), len(want))
+	}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("entries ordered %v, want %v", got, want)
+		}
+	}
+}

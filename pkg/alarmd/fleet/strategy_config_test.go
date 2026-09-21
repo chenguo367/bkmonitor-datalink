@@ -78,7 +78,7 @@ func configObject() controlplane.QueryGroupObject {
 				StaticKeys:    []string{secretTargetKey, "192.0.2.42|0", "192.0.2.43|0"},
 				StaticMembers: []contract.TargetPlanMemberV1{{ModelID: "host", ModelInstID: secretMember}},
 				DynamicGroups: []string{secretGroup}, DynamicTopologies: []contract.TargetPlanTopologyV1{{BusinessID: business, ObjectID: "set", InstanceID: "12"}}},
-			NoData: &contract.NoDataConfigV1{Continuous: 5, Level: 2, AggDimension: []string{"bk_target_ip"}},
+			NoData: &contract.NoDataConfigV1{Continuous: 5, Level: 2, AggDimension: []string{"bk_target_ip"}, TrackingHorizonSeconds: 3600},
 			StrategyIR: contract.StrategyIRV2{Levels: []contract.LevelIRV2{{
 				Definition: contract.LevelDefinitionV2{LevelID: 1, LevelCode: "fatal", Priority: 3}, Connector: "and",
 				DetectPlan:   contract.DetectPlanV2{Algorithms: []contract.AlgorithmIRV2{{Type: "Threshold", Version: 1, Config: json.RawMessage(secretThreshold)}}},
@@ -146,8 +146,9 @@ func TestTheConfigProjectionCarriesNamesAndCountsAndNoValue(t *testing.T) {
 		len(item.Target.Plan.IdentityDimensions) != 2 {
 		t.Fatalf("target = %+v, want the plan's rule, identity dimensions and member counts", item.Target)
 	}
-	if item.NoData == nil || item.NoData.Continuous != 5 || item.NoData.Level != 2 || len(item.NoData.AggDimension) != 1 {
-		t.Fatalf("no_data = %+v", item.NoData)
+	if item.NoData == nil || item.NoData.Continuous != 5 || item.NoData.Level != 2 || len(item.NoData.AggDimension) != 1 ||
+		item.NoData.TrackingHorizonSeconds != 3600 {
+		t.Fatalf("no_data = %+v, want the frozen tracking horizon beside the window and level", item.NoData)
 	}
 	if len(item.Levels) != 1 || item.Levels[0].LevelID != 1 || len(item.Levels[0].Algorithms) != 1 ||
 		item.Levels[0].Algorithms[0].Type != "Threshold" || item.Levels[0].Algorithms[0].ConfigBytes != len(secretThreshold) {

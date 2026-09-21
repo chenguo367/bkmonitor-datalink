@@ -178,3 +178,63 @@ func TestARoundThatDidNotJudgeEmitsNoAbsenceLine(t *testing.T) {
 		t.Fatalf("a round that did not judge emitted %d observations: %+v", len(recorded), recorded)
 	}
 }
+
+// The line is emitted from the round's own pass, once for the Plan that
+// judged and not for the Plan the budget skipped: read through evaluateNoData
+// rather than the emitter, because a call site that was never wired reads the
+// same as one that was under a test that calls the emitter itself.
+func TestTheAbsenceLineComesOutOfTheRoundsOwnPass(t *testing.T) {
+	first := noDataWiredPlan(t)
+	second := first
+	second.Identity.StrategyID = "8"
+	second.CompiledPlan = noDataPreflightPlan(t, "8", &contract.NoDataConfigV1{
+		Continuous: 1, Level: 2, AggDimension: []string{"bk_target_ip", "bk_target_cloud_id"},
+	})
+	duePlans := []execution.DuePlan{first, second}
+	recorded := []observability.Observation{}
+	stream := &streamedExecution{
+		coordinator: &SlotExecutionCoordinator{
+			ports: Ports{NoData: &emptyNoDataStore{}, Hosts: SharedHostBusiness, State: failingStatePort{},
+				Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+					recorded = append(recorded, observation)
+				})},
+			// One mutation for the whole Slot: the first Plan judges and its
+			// series fits, the second is skipped by the budget.
+			budget: ProvisionalBudget{MaxSeries: 100, MaxRetainedBytes: 1 << 20, MaxGapMutations: 10, MaxStateMutations: 1},
+		},
+		header: execution.InternalExecutionHeader{Contract: noDataPreflightContract(t, duePlans), DuePlans: duePlans},
+	}
+	if err := stream.loadNoDataMemory(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// The batch fails on purpose - this fixture has no evaluator - and that is
+	// after both Plans have been decided and their lines emitted.
+	if err := stream.evaluateNoData(context.Background(), nil, 16); err == nil {
+		t.Fatal("fixture: the batch was expected to fail, so its success means this read something else")
+	}
+	lines := map[string]observability.NoDataAbsenceFacts{}
+	for _, observation := range recorded {
+		if observation.NoDataAbsence == nil {
+			continue
+		}
+		if observation.Stage != observability.StageNoDataDecided {
+			t.Fatalf("the absence line came out under stage %q, want %q", observation.Stage, observability.StageNoDataDecided)
+		}
+		if _, twice := lines[observation.Trace.StrategyID]; twice {
+			t.Fatalf("strategy %s got two absence lines in one Slot", observation.Trace.StrategyID)
+		}
+		lines[observation.Trace.StrategyID] = *observation.NoDataAbsence
+	}
+	if len(lines) != 1 {
+		t.Fatalf("absence lines by strategy = %+v, want exactly one, for the Plan that judged", lines)
+	}
+	line, judged := lines[first.Identity.StrategyID]
+	if !judged {
+		t.Fatalf("the line names %v, want the judging Plan %s", lines, first.Identity.StrategyID)
+	}
+	// A whole-item absence with nothing expected and nothing arriving: one
+	// absent, which is the reading a fresh Plan on an empty store gives.
+	if line.Outcome != string(nodata.OutcomeEvaluated) || line.Absent != 1 || line.Expected != 0 || line.Present != 0 {
+		t.Fatalf("line = %+v, want EVALUATED with the whole-item absence counted once", line)
+	}
+}
