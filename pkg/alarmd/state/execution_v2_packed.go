@@ -101,14 +101,38 @@ const (
 	// to different places - one to what the producer computed, one to the
 	// identity it computed it for.
 	PackedRuleIdentityKeyUnderivable = "identity_key_underivable"
+	// PackedRuleLegacyRecordIDTooLong is an inherited id too wide for the
+	// upper bound the compile-time ceiling is derived from. Every id this
+	// deployment has ever written is 64 hexadecimal characters - the
+	// derivation produces that, and so does the dimension digest the pre
+	// derivation producer stored - so the bound costs each carried id at that
+	// width. Refusing anything wider is what makes that a property of the
+	// writer rather than an assumption about the data: without it one wider id
+	// would put a record over a ceiling that had already admitted its Plan,
+	// and the bound would quietly stop being a bound again.
+	PackedRuleLegacyRecordIDTooLong = "legacy_record_id_too_long"
 )
+
+// MaxLegacyRecordIDLength is the width the upper bound costs a carried id at,
+// and the width the encoder refuses beyond.
+//
+// Not a round number chosen for comfort: it is the widest id the ceiling can
+// afford. Every extra character is paid once per point, so raising this lowers
+// the derived ceiling for every record. Measured against a 512 KiB budget, a
+// nine Level Plan admits 4680 points at this width and 4085 at 80 - below the
+// configured max_required_history_points of 4096, which would make the ceiling
+// refuse Plans that run today. So a wider id is not something this record can
+// be made to hold by relaxing the check; it does not fit, and the refusal says
+// so. The config ceiling baseline moves if this constant does, which is the
+// coupling being relied on rather than repeated here.
+const MaxLegacyRecordIDLength = 64
 
 // PackedRuleNames is every rule a framed write can be refused by.
 var PackedRuleNames = []string{
 	PackedRuleLevelNotInMutation, PackedRuleNoDetectFingerprint, PackedRuleTwoFingerprints,
 	PackedRuleDuplicateLevel, PackedRuleSourceTimeNotRising, PackedRuleRecordIDUnderivable,
 	PackedRuleRecordIDNotDerived, PackedRuleUnencodableFactState, PackedRuleMutationDigestMismatch,
-	PackedRuleIdentityKeyUnderivable,
+	PackedRuleIdentityKeyUnderivable, PackedRuleLegacyRecordIDTooLong,
 }
 
 // PackedContractRefusal is a framed write refused by one named rule. The
@@ -245,6 +269,11 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 			if _, thisRound := affected[execution.RecordAnchor{RecordID: point.RecordID, SourceTime: point.SourceTime}]; thisRound {
 				return nil, 0, packedRefusal(PackedRuleRecordIDNotDerived,
 					"point at %d carries a record id the series identity and source time do not derive", point.SourceTime)
+			}
+			if len(point.RecordID) > MaxLegacyRecordIDLength {
+				return nil, 0, packedRefusal(PackedRuleLegacyRecordIDTooLong,
+					"point at %d carries a %d character record id, over the %d the bound is derived from",
+					point.SourceTime, len(point.RecordID), MaxLegacyRecordIDLength)
 			}
 			legacy = append(legacy, packedLegacyRecordID{Index: pointIndex, RecordID: point.RecordID})
 		}

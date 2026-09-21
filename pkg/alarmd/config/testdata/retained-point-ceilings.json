@@ -9,17 +9,40 @@
   "packed": {
     "representation": "ALD2 framed record, the one the store writes",
     "derived_by": "state.MaxPackedFramePoints(levelCount, max_encoded_bytes)",
-    "ceilings": [0, 39968, 39922, 39876, 39831, 39785, 39740, 39694, 39649, 32178],
+    "ceilings": [
+      0,
+      4855,
+      4850,
+      4844,
+      4839,
+      4833,
+      4828,
+      4822,
+      4816,
+      4680
+    ],
     "notes": [
-      "A Level costs three bits per point here - the present, valid and anomalous bitmaps - so the table barely falls as Levels are added.",
-      "The step at nine Levels is the bitmaps widening from one byte to two, which costs three bytes on every point at once. It is a property of the encoding, not of the configuration.",
-      "Every entry is far above max_required_history_points, so the configured limit is the binding one at every Level count. That is the end state decision-021 was for: before it, the ceiling bound first and was written nowhere."
+      "Every point is costed as if its record id had to be stored in the header table. Most ids are not stored - they derive from the series digest and the source time - but state written before that derivation exists carries ids the decode cannot rebuild, and those go in the table.",
+      "Costed at the worst case because this is what the compile-time ceiling is taken from, and a ceiling that admits a Plan the write then refuses is the failure the ceiling exists to prevent. Before the table was counted this column read 39968 for one Level, while a 4096-point record whose history was entirely such ids reached 76.5% of the budget.",
+      "A Level costs three bits per point - the present, valid and anomalous bitmaps - so the table still barely falls as Levels are added. The step at nine Levels is the bitmaps widening from one byte to two.",
+      "Every entry is still above max_required_history_points, so the configured limit is the binding one at every Level count, which is the property the derivation exists to keep. The margin at the most crowded Level count is about 14%."
     ]
   },
   "envelope": {
     "representation": "the JSON runtime envelope, what the store wrote before decision-021",
     "derived_by": "state.MaxRuntimeEnvelopePoints(levelCount, max_encoded_bytes)",
-    "ceilings": [0, 2087, 1395, 1047, 838, 698, 598, 523, 464, 418],
+    "ceilings": [
+      0,
+      2087,
+      1395,
+      1047,
+      838,
+      698,
+      598,
+      523,
+      464,
+      418
+    ],
     "notes": [
       "Kept for the comparison rather than because anything reads it. A single-Level Plan went from 2087 points to 39968, and an eight-Level one from 464 to 39649 - the second is the ratio that matters, because a crowded record is where the old ceiling bit first.",
       "Under this table a Plan configured at the permitted 4096 points compiled, activated, and then had every state write refused per series."
