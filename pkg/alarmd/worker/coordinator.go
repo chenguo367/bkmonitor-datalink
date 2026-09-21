@@ -1596,6 +1596,30 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 	deterministic := make(map[execution.StateKeyIdentity]execution.ReasonCode)
 	var totals applyTotals
 	var alreadyApplied observability.StateAlreadyAppliedFacts
+	// A Plan is applied by this attempt when this attempt wrote every one of
+	// its keys, and not before. Its keys go in chunks; a chunk that fails
+	// stops the loop with the earlier chunks written and the later ones never
+	// sent, and a Plan noted as applied off its first chunk would have its
+	// Slot finalized as evaluated while the series of its unsent keys sit one
+	// Slot behind. So the keys are counted as they land, and the Plan is
+	// decided once, when the loop is over, from the count against the whole
+	// list: any key failed, refused, already there or never sent leaves the
+	// count short, and the Plan is recorded as not this attempt's.
+	landed := make(map[execution.PlanIdentity]int, 1)
+	expected := make(map[execution.PlanIdentity]int, 1)
+	for _, mutation := range mutations {
+		expected[mutation.Identity.Plan]++
+	}
+	defer func() {
+		recorder := appliedPlansFrom(ctx)
+		for plan, keys := range expected {
+			if landed[plan] == keys {
+				recorder.recordApplied(plan)
+			} else {
+				recorder.recordIncomplete(plan)
+			}
+		}
+	}()
 	err := forEachChunk(ctx, len(mutations), coordinator.applyChunkItems(coordinator.budget.MaxStateMutations), func(chunk applyChunk) error {
 		chunkItems := mutations[chunk.start:chunk.end]
 		expectedRevisions := make(map[execution.StateKeyIdentity]uint64, len(chunkItems))
@@ -1628,11 +1652,15 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 				for _, item := range result.Items {
 					switch item.Status {
 					case execution.StateApplied:
-						// This attempt wrote this Plan's state. Noted here
-						// because this is the only place that knows, and used
-						// only if the attempt then fails to write its Progress.
-						appliedPlansFrom(ctx).recordApplied(item.Identity.Plan)
+						// One of this Plan's keys is in the store. Counted here
+						// because this is the only place that knows; the Plan
+						// is decided from the count when every chunk has run.
+						landed[item.Identity.Plan]++
 					case execution.StateApplyAlreadyApplied:
+						// Written by an earlier attempt at this Slot, so not
+						// counted for this one: that attempt left its own mark
+						// if it got the Plan whole, and a Plan with any key it
+						// did not write is not one this attempt can vouch for.
 						// The store says how it decided; a store that does not
 						// is read as stable, so a missing kind cannot pose as
 						// the one reading this family exists to catch.
