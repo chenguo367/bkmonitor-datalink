@@ -450,7 +450,7 @@ func noDataPreflightForHeader(header execution.InternalExecutionHeader) ([]execu
 			return nil, err
 		}
 		items = append(items, execution.PlanNoDataLoadItem{
-			Identity:     execution.PlanNoDataIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration},
+			Identity:     due.NoDataIdentity(),
 			ApplyVersion: version, ScheduleRevision: due.ScheduleRevision, Retention: retention,
 		})
 	}
@@ -465,7 +465,7 @@ func gapPreflightForHeader(header execution.InternalExecutionHeader) ([]executio
 			return nil, err
 		}
 		items = append(items, execution.PlanGapLoadItem{
-			Identity:     execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration},
+			Identity:     due.GapIdentity(),
 			ApplyVersion: version, ScheduleRevision: due.ScheduleRevision,
 		})
 	}
@@ -848,7 +848,7 @@ func (stream *streamedExecution) validateCompletionOnlyExactSet(
 func (stream *streamedExecution) loadGaps(ctx context.Context) error {
 	var targetBytes uint64
 	for _, due := range stream.header.DuePlans {
-		targetBytes += retainedObjectBytes(execution.PlanGapLoadItem{Identity: execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}})
+		targetBytes += retainedObjectBytes(execution.PlanGapLoadItem{Identity: due.GapIdentity()})
 	}
 	if err := stream.retainTargetBytes(ctx, len(stream.header.DuePlans), targetBytes); err != nil {
 		return err
@@ -1003,7 +1003,7 @@ func (stream *streamedExecution) resolveNoDataRosterHosts() error {
 		if config == nil {
 			continue
 		}
-		identity := execution.PlanNoDataIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}
+		identity := due.NoDataIdentity()
 		snapshot, found := stream.noData.Find(identity)
 		if !found {
 			continue
@@ -2032,7 +2032,7 @@ func (stream *streamedExecution) gapMutationForReasons(
 	due execution.DuePlan,
 	reasons map[execution.GapScope]execution.ReasonCode,
 ) (execution.PlanGapMutation, error) {
-	identity := execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}
+	identity := due.GapIdentity()
 	marker, found := stream.gaps.Find(identity)
 	if !found {
 		return execution.PlanGapMutation{}, errors.New("alarmd worker: Plan gap marker is absent from validated result")

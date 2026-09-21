@@ -102,7 +102,7 @@ func (stream *streamedExecution) noDataRoundFor(
 	if config == nil {
 		return noDataRound{outcome: nodata.OutcomeNone}, nil
 	}
-	identity := execution.PlanNoDataIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration}
+	identity := due.NoDataIdentity()
 	snapshot, found := stream.noData.Find(identity)
 	if !found {
 		return noDataRound{}, derivationFailed(fmt.Errorf(

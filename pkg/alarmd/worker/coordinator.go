@@ -600,7 +600,7 @@ func guardReasonFor(
 // generationSeenBefore reports whether the loaded Guards hold a marker for
 // the due Plan's state generation: a generation that has run before.
 func generationSeenBefore(loadedGaps execution.GapLoadResult, due execution.DuePlan) bool {
-	marker, found := loadedGaps.Find(execution.PlanGapIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration})
+	marker, found := loadedGaps.Find(due.GapIdentity())
 	return found && (marker.Status == execution.GapFound || marker.Status == execution.GapClearedTombstone)
 }
 
