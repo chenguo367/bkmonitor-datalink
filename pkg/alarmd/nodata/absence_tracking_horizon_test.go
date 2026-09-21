@@ -247,3 +247,92 @@ func TestClearingTheFactNeedsAMemoryToClearItWith(t *testing.T) {
 			"held over a non-empty memory the contract layer refuses the write", result.TrackingExhaustedAt)
 	}
 }
+
+// Data arriving restarts tracking from nothing, suppression included.
+//
+// The present branch writes a whole new entry rather than updating the one it
+// found, and that is the only thing that clears a suppression. Keeping the old
+// entry and merely refreshing LastSeen reads as a smaller change and passes
+// every other case here: the difference only shows a round later, when the
+// group goes absent again and is met as still stopped. A group that recovered
+// and failed again would never be reported again, and nothing would ever heal
+// it - which is the shape of under-reporting this whole decision exists to
+// bound, arrived at from the opposite direction.
+func TestDataArrivingRestartsTrackingFromNothing(t *testing.T) {
+	group := hostGroup(t, "10.0.0.1")
+	stopped := map[string]GroupMemory{group.Key(): {FirstAbsent: 800, SuppressedAt: 920}}
+
+	back := evaluate(t, horizonRound(1000, staticRoster("v1", group), groupSet(group), stopped))
+	wantVerdicts(t, back, map[string]Verdict{group.Key(): VerdictNormal})
+	wantMemory(t, back, group.Key(), GroupMemory{LastSeen: 1000})
+	wantTrackingFacts(t, back, 0, 0)
+
+	// Gone again, one round later: too soon for the horizon, so it must be
+	// reported. Held over, the suppression would silence it here for good.
+	again := evaluate(t, horizonRound(1060, staticRoster("v1", group), nil, back.Memory))
+	wantVerdicts(t, again, map[string]Verdict{group.Key(): VerdictAnomaly})
+	if again.Facts.Absent != 1 {
+		t.Fatalf("absent = %d, want the recovered group reported when it failed again", again.Facts.Absent)
+	}
+	wantTrackingFacts(t, again, 0, 0)
+	wantMemory(t, again, group.Key(), GroupMemory{LastSeen: 1000, FirstAbsent: 1060})
+}
+
+// The same, for a history roster that the horizon had emptied: the group comes
+// back, is only remembered, is judged from the next round, and is reported when
+// it fails again.
+func TestAnExhaustedHistoryPlanTracksAGroupThatComesBack(t *testing.T) {
+	group := hostGroup(t, "10.0.0.1")
+	exhausted := horizonRound(1000, Roster{Version: "v1", Source: RosterHistory, Groups: nil},
+		groupSet(group), map[string]GroupMemory{})
+	exhausted.TrackingExhaustedAt = 920
+
+	back := evaluate(t, exhausted)
+	wantMemory(t, back, group.Key(), GroupMemory{LastSeen: 1000})
+	if back.TrackingExhaustedAt != 0 {
+		t.Fatalf("tracking-exhausted = %d, want it cleared once a group came back", back.TrackingExhaustedAt)
+	}
+
+	// Second round: the group is in the history roster now and reported.
+	second := evaluate(t, horizonRound(1060, historyRoster("v2", group), groupSet(group), back.Memory))
+	wantVerdicts(t, second, map[string]Verdict{group.Key(): VerdictNormal})
+
+	third := evaluate(t, horizonRound(1120, historyRoster("v2", group), nil, second.Memory))
+	wantVerdicts(t, third, map[string]Verdict{group.Key(): VerdictAnomaly})
+	wantTrackingFacts(t, third, 0, 0)
+}
+
+// An exhausted Plan whose data comes back only under the whole-item group
+// clears the mark, even though the memory it produces is still empty.
+//
+// The whole-item group is never remembered, so "the memory holds a group
+// again" cannot be the only way out. Without this the mark is carried forever
+// and the whole-item absence it describes is never reported again - reachable
+// by emptying a history Plan's no-data agg_dimension, which leaves
+// StateGeneration and therefore the memory key unchanged.
+func TestWholeItemDataClearsTheExhaustionMark(t *testing.T) {
+	whole := WholeItemGroup()
+	input := horizonRound(1000, Roster{Version: "v1", Source: RosterHistory, Groups: nil},
+		groupSet(whole), map[string]GroupMemory{})
+	input.TrackingExhaustedAt = 900
+
+	back := evaluate(t, input)
+	wantVerdicts(t, back, map[string]Verdict{whole.Key(): VerdictNormal})
+	if len(back.Memory) != 0 {
+		t.Fatalf("memory = %+v, want it still empty: the whole-item group is never remembered", back.Memory)
+	}
+	if back.TrackingExhaustedAt != 0 {
+		t.Fatalf("tracking-exhausted = %d, want it cleared by data arriving; carried over an empty memory "+
+			"the whole-item absence is never reported again and nothing heals it", back.TrackingExhaustedAt)
+	}
+
+	// The round after, with nothing arriving, opens the whole-item absence
+	// again - which is the behaviour the carried mark suppressed.
+	next := horizonRound(1060, Roster{Version: "v1", Source: RosterHistory, Groups: nil}, nil, back.Memory)
+	next.TrackingExhaustedAt = back.TrackingExhaustedAt
+	after := evaluate(t, next)
+	wantVerdicts(t, after, map[string]Verdict{whole.Key(): VerdictAnomaly})
+	if after.Facts.Absent != 1 {
+		t.Fatalf("absent = %d, want the whole-item absence reported", after.Facts.Absent)
+	}
+}

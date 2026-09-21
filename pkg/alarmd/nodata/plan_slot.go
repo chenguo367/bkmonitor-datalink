@@ -128,7 +128,7 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 	})
 
 	groups := storedGroups(result.Memory)
-	presentAsOf := presentAsOf(groups, input.Snapshot.PresentAsOf, input.EvaluationTime)
+	presentAsOf := presentAsOf(groups, input.Snapshot.PresentAsOf, input.EvaluationTime, result.WholeItemPresent)
 	if sameStoredGroups(groups, input.Snapshot.Groups) && input.Snapshot.RosterVersion == result.Roster.Version &&
 		presentAsOf == input.Snapshot.PresentAsOf &&
 		result.TrackingExhaustedAt == input.Snapshot.TrackingExhaustedAt {
@@ -189,14 +189,26 @@ func EvaluatePlanSlot(input PlanSlotInput) (PlanSlotResult, error) {
 // have to decide what "had data" means for a series that arrived for a group
 // the roster had already dropped, and the memory has already decided that.
 //
+// The one group the memory cannot answer for is the whole-item group. It is
+// never written - it is not a series, and a LastSeen would carry it into a
+// history roster as one - so a round whose only data arrived under it produces
+// an empty memory and would read as a round with no data at all. For that
+// group the round's own present count is the only witness there is, and it has
+// to be used: the contract layer refuses a memory that cleared the exhaustion
+// mark without the present-as-of advancing, so a Plan exhausted as history
+// whose data comes back under the whole-item group could never write again.
+//
 // With nothing seen, the stored value is carried forward. It must never go
 // backwards: it is the last-seen time of every group stored as present, so
 // moving it back would move those groups' clocks back with it.
-func presentAsOf(groups []execution.NoDataGroupMemory, stored int64, evaluationTime int64) int64 {
+func presentAsOf(groups []execution.NoDataGroupMemory, stored int64, evaluationTime int64, wholeItemPresent bool) int64 {
 	for _, group := range groups {
 		if group.FirstAbsent == 0 && group.LastSeen == evaluationTime {
 			return evaluationTime
 		}
+	}
+	if wholeItemPresent {
+		return evaluationTime
 	}
 	return stored
 }

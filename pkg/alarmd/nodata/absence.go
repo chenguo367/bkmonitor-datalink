@@ -162,6 +162,12 @@ type AbsenceResult struct {
 	// remembered nothing carries the fact rather than clearing it, because
 	// clearing it over an empty memory is the other refusal.
 	TrackingExhaustedAt int64
+	// WholeItemPresent says the item reported under the whole-item group this
+	// round. It is the one arrival the memory cannot record - that group is not
+	// a series and is never written - so the caller needs it stated: it is what
+	// tells a round where data came back from a round where nothing did, when
+	// both produce the same empty memory.
+	WholeItemPresent bool
 }
 
 // Evaluate decides, for one Slot, which expected groups are absent.
@@ -188,14 +194,31 @@ func Evaluate(input AbsenceInput) AbsenceResult {
 	// while the memory is empty, and the contract layer enforces both halves of
 	// that by name: a memory stating the fact while holding groups is refused,
 	// and so is one that cleared it without data arriving. A round may
-	// therefore clear the fact only when it produced a memory to clear it
-	// with.
+	// therefore clear the fact when it produced a memory to clear it with.
+	//
+	// Data arriving clears it too, even when the memory stays empty. There is
+	// exactly one group that is never written to the memory - the whole-item
+	// group, which rememberPresent skips because it is not a series - so an
+	// exhausted Plan whose data comes back only under that group would other-
+	// wise carry the fact forever: the memory it produces is empty, the fact is
+	// carried, and the whole-item absence it describes is never reported again.
+	// That is reachable rather than theoretical: the no-data agg_dimension is
+	// not in deriveStateCompatibilityHash's closure (strategy/compiler.go:315-346
+	// closes over the dataset's identity fields, not this), so emptying it
+	// leaves StateGeneration - and therefore the memory key - unchanged, and an
+	// exhausted history Plan carries its mark straight into whole-item mode.
 	//
 	// Written per branch instead, this is nine separate returns each having to
 	// remember a rule about a field most of them never touch, and the ones that
 	// forget do not fail here: they fail in the contract layer, on every write
 	// that Plan ever attempts again.
-	if len(result.Memory) != 0 {
+	// "Data arrived" is not the same as "something was present". A group that
+	// belongs to another business is present and is deliberately dropped rather
+	// than remembered, so counting it here would clear the mark over an empty
+	// memory - the other refusal. The whole-item group is the only one that is
+	// both this item's own and never written down.
+	_, result.WholeItemPresent = input.Present[WholeItemGroup().Key()]
+	if len(result.Memory) != 0 || result.WholeItemPresent {
 		result.TrackingExhaustedAt = 0
 		return result
 	}
