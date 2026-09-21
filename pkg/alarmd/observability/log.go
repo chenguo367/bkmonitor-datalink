@@ -212,6 +212,13 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		// Both numbers, zero included: a success that handed the broker
 		// nothing is the case this exists to tell from a write.
 		attributes = append(attributes, slog.Int64("messages_published", w.Published), slog.Int64("events_without_message", w.WithoutMessage))
+		// The breakdown under its own keys, only the buckets that counted:
+		// which protocol dropped which kind, readable from the line itself.
+		for _, bucket := range w.WithoutMessageBy {
+			if bucket.Events > 0 {
+				attributes = append(attributes, slog.Int64("events_without_message_"+bucket.Format+"_"+strings.ToLower(bucket.EventKind), bucket.Events))
+			}
+		}
 	}
 	if observation.OutputWireFormat != "" {
 		attributes = append(attributes, slog.String("wire_format", observation.OutputWireFormat))

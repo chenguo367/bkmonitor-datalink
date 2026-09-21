@@ -393,6 +393,7 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 		return err
 	}
 	messages := make([]*sarama.ProducerMessage, len(events))
+	formats := make([]string, len(events))
 	groups := make(map[string][]int)
 	for index := range events {
 		// Standard events have already been validated when built; retain the
@@ -409,6 +410,7 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			revision = events[index].StrategyRef.Revision
 		}
 		format := contract.ResolveOutputWireFormat(events[index].WireFormat, revision)
+		formats[index] = format
 		if format != contract.WireFormatStandardRawEvent && format != contract.WireFormatPythonCompatible {
 			return fmt.Errorf("kafka trigger event sink: unsupported output format %q", format)
 		}
@@ -493,6 +495,20 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			messages[indices[i]] = &sarama.ProducerMessage{Topic: sink.legacyTopic, Key: sarama.StringEncoder(item.DedupeMD5), Value: sarama.ByteEncoder(item.Payload)}
 		}
 	}
+	// Which events the protocol had no message for, by format and kind, before
+	// the nil slots are compacted away: this is the only place that knows
+	// which slot stayed empty and why, and the caller must not re-derive the
+	// protocol's rule to find out.
+	withoutMessageBy := map[withoutMessageKey]int64{}
+	for index, message := range messages {
+		if message == nil {
+			withoutMessageBy[withoutMessageKey{format: formats[index], eventKind: events[index].EventKind}]++
+		}
+	}
+	buckets := make([]observability.OutputWithoutMessage, 0, len(withoutMessageBy))
+	for key, count := range withoutMessageBy {
+		buckets = append(buckets, observability.OutputWithoutMessage{Format: key.format, EventKind: key.eventKind, Events: count})
+	}
 	published := messages[:0]
 	for _, message := range messages {
 		if message != nil {
@@ -504,7 +520,7 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 	// and how many events the protocol had no message for. A batch of
 	// recoveries under the Python-compatible protocol is zero messages and
 	// a success, and the caller's line has to be able to say so.
-	observability.ReportOutputWrite(ctx, len(messages), len(events)-len(messages))
+	observability.ReportOutputWrite(ctx, len(messages), len(events)-len(messages), buckets)
 	if len(messages) == 0 {
 		return nil
 	}
@@ -548,4 +564,16 @@ func (sink *TriggerEventSink) Close() error {
 		return nil
 	}
 	return sink.core.Close()
+}
+
+// withoutMessageKey is what an event the protocol had no message for is
+// bucketed by: its resolved format and its kind, and nothing else. A type of
+// its own rather than the reported bucket with the count left zero, so that
+// which fields take part in the bucketing is said by the type -- a field
+// added to the reported bucket later cannot split the buckets, and the sum
+// over them would go on equalling the total while the buckets quietly
+// multiplied, which no assertion on the total would catch.
+type withoutMessageKey struct {
+	format    string
+	eventKind string
 }

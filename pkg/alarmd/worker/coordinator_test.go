@@ -1861,7 +1861,7 @@ func (ports *recordingPorts) WriteBatch(ctx context.Context, events []contract.T
 	ports.eventCount += len(events)
 	ports.lastEvents = append([]contract.TriggerEventV1(nil), events...)
 	if ports.outputWrite != nil {
-		observability.ReportOutputWrite(ctx, int(ports.outputWrite.Published), int(ports.outputWrite.WithoutMessage))
+		observability.ReportOutputWrite(ctx, int(ports.outputWrite.Published), int(ports.outputWrite.WithoutMessage), ports.outputWrite.WithoutMessageBy)
 	}
 	if err := ports.fail("event_ack"); err != nil {
 		if ports.eventRejection != nil {
