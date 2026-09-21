@@ -810,7 +810,7 @@ var DEGRADATION = {
 // the reader to look for something that does not.
 var EVIDENCE = {
   SOURCE_INCOMPLETE:     '展开按原因看策略样本：SOURCE_IDENTITY_UNAVAILABLE = 文档顶层缺 bk_tenant_id / space_uid；SOURCE_OBJECT_INCOMPLETE = ID 在 strategy_ids 里但 strategy_<id> 不存在；依赖面板"策略缓存"行给缓存 Redis 地址与 last_updated；指标 catalog_withheld_objects{disposition="SOURCE_INCOMPLETE",reason}；日志 source_withheld',
-  CAPABILITY_UNSUPPORTED: '展开按原因看：每组带服务端给的"这是什么 / 谁能处理 / 下一步"（words.kind ∈ DEPLOYMENT_PARAMETER 部署参数不够 · BUILD_CAPABILITY 本构建不支持 · WRITER_AHEAD 写入方超前于本构建 · UNKNOWN_REASON 页面还没有说明）与策略样本、field_path。指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}，reason 原样显示不落 other',
+  CAPABILITY_UNSUPPORTED: '展开按原因看：每组带服务端给的"这是什么 / 谁能处理 / 下一步"（words.kind ∈ DEPLOYMENT_PARAMETER 部署参数不够 · BUILD_CAPABILITY 本构建不支持 · WRITER_AHEAD 写入方超前于本构建 · STRATEGY_DEFINITION 策略定义超出护栏 · UNKNOWN_REASON 页面还没有说明）与策略样本、field_path。指标 catalog_withheld_objects{disposition="UNSUPPORTED_PHASE2_CAPABILITY",reason}，reason 原样显示不落 other',
   CONFIG_REJECTED:       '展开按原因看策略样本与字段路径（field_path 是编译器拒绝的那个字段）；指标 catalog_withheld_objects{disposition="CONFIG_REJECTED",reason}',
   CUTOVER_FAILING:       '展开这一行：最近一次激活失败原文、阶段/类别、连续轮数；日志 activation_failed（reason_code = 阶段/类别）',
   OWNERSHIP_SKEWED:      '副本表的"持有"列与"已运行"列（持有少的那个若比同构建的其它副本晚启动很久，就是中途重启过，原因看容器上一次退出）；Leader 的再平衡这一轮（计划/发出/暂停）在这一行的句子里；指标 worker_owned_query_groups{pod}、rebalance_gap、assignment_moves_total{reason=rebalance}、rebalance_paused_total{reason=set_unstable}',
@@ -839,7 +839,7 @@ var EVIDENCE = {
 
 var NEXT = {
   SOURCE_INCOMPLETE:     '找策略缓存的写入方（bk-monitor 后台的 cache 进程，或替代它的模块）：缺身份字段的要写方按合同补 bk_tenant_id / space_uid（bk-monitor 主线 2026-08-31 起的缓存刷新才写）；ID 列表残留的要写方清掉已删除策略的 ID（2026-09-11 起的刷新会清）。Pod 外一句判据：在缓存 Redis 上 GET <前缀>.strategy_<任一 id>，顶层有 "space_uid" 才算过。alarmd 这边不用改，写方修好后下一轮刷新（最多 6 分钟）自动接受',
-  CAPABILITY_UNSUPPORTED: '按原因组各自的"下一步"：部署参数不够的调参数、下一轮刷新自动接受；本构建不支持的等带该能力的构建，改参数没有用；写入方超前的等解释该字段的构建或写入方改文档',
+  CAPABILITY_UNSUPPORTED: '按原因组各自的"下一步"：部署参数不够的调参数、下一轮刷新自动接受；本构建不支持的等带该能力的构建，改参数没有用；写入方超前的等解释该字段的构建或写入方改文档；策略定义超出护栏的先收策略，护栏不是工作上限',
   CONFIG_REJECTED:       '交策略侧：按原因组与字段路径改策略定义；alarmd 这边不用改，改好后下一轮刷新自动接受。STALE_CONFIG 组的策略仍在按上一版跑，不算漏检',
   CUTOVER_FAILING:       '先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效',
   OWNERSHIP_SKEWED:      '不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。{rebalance}；在均分回来之前，持有多的那个副本上的漏检与超时不按容量处理、不据此扩副本或加资源',
@@ -1946,6 +1946,7 @@ var WITHHELD_KIND = {
   DEPLOYMENT_PARAMETER: 'alarmd 部署参数',
   BUILD_CAPABILITY: '本构建能力（等新构建，改参数没有用）',
   WRITER_AHEAD: '写入方超前于本构建',
+  STRATEGY_DEFINITION: '策略侧（先收策略；护栏不是工作上限）',
   UNKNOWN_REASON: '原因待查（页面还没有说明）'
 };
 function reasonWords(words) {

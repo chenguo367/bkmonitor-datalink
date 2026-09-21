@@ -1082,7 +1082,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"DEPS ::", "兼容输出用的服务 Redis（策略快照）redis standalone redis.example:6379 · db 8 · bk_monitorv3.ee.cache本进程还没对它发过命令"},
 		{"VAR degraded why ::", "策略缓存里有策略，但这一轮一条都没接受，且没有任何对象在检测——整个部署没有在检测任何东西；不是没负载，是全部被扣在配置获取环节（副本 abcde）"},
 		{"NOTHING-RUNNING CHECKS ::", "5 条策略这个部署跑不了（1 种原因）——本构建不支持 5 条；处理办法按原因组看"},
-		{"NOTHING-RUNNING GROUPS ::", "这是什么：策略目标按模型实例（model_inst_id）给出而不带 model_match，本构建不会把它反查成主机身份，整条策略不进检测。谁处理：本构建能力（等新构建，改参数没有用）。下一步：等带主机模型反查的构建（读方缺的一支），策略与部署参数都不用改"},
+		{"NOTHING-RUNNING GROUPS ::", "这是什么：该检测算法还没迁到 Go 侧，本构建不评估它。谁处理：本构建能力（等新构建，改参数没有用）。下一步：等带该算法的构建；改部署参数没有用"},
 		{"NOTHING-RUNNING TODO ::", "现在要处理 1 类（5 条策略、0 个对象）"},
 		{"NOTHING-RUNNING BRIEF ::", "执行情况：没有对象在检测（应有 0）——过去 1 小时没有轮次返回"},
 		{"NOTHING-RUNNING BLIND ::", "状态覆盖：没有对象在检测（0 个），无所谓结论"},
@@ -1683,11 +1683,11 @@ ctx.openCheck = 'CAPABILITY_UNSUPPORTED';
 ctx.latestTodo = {checks: 1, objects: 0, undetermined: 0, undetermined_objects: 0, governance: 0, governance_objects: 0};
 ctx.renderChecks([{code: 'CAPABILITY_UNSUPPORTED', owner: 'ALARMD', group_by: 'reason_code', objects: 0, strategies: 5, businesses: 0, current: 0,
   line: '5 条策略这个部署跑不了（1 种原因）——本构建不支持 5 条；处理办法按原因组看',
-  groups: [{key: 'TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED', objects: 0, strategies: 5, replicas: ['bk-monitor-alarmd-trigger-5bdb679ddf-abcde'],
+  groups: [{key: 'ALGORITHM_NOT_MIGRATED', objects: 0, strategies: 5, replicas: ['bk-monitor-alarmd-trigger-5bdb679ddf-abcde'],
     disposition: 'UNSUPPORTED_PHASE2_CAPABILITY',
-    samples: [{strategy_id: '25', scope: 'PLAN', field_path: 'items[0].target_plan.model_match'}],
-    words: {kind: 'BUILD_CAPABILITY', what: '策略目标按模型实例（model_inst_id）给出而不带 model_match，本构建不会把它反查成主机身份，整条策略不进检测',
-            next: '等带主机模型反查的构建（读方缺的一支），策略与部署参数都不用改'}}]}]);
+    samples: [{strategy_id: '25', scope: 'PLAN', field_path: 'items[0].algorithms[0]'}],
+    words: {kind: 'BUILD_CAPABILITY', what: '该检测算法还没迁到 Go 侧，本构建不评估它',
+            next: '等带该算法的构建；改部署参数没有用'}}]}]);
 console.log('NOTHING-RUNNING CHECKS :: ' + textOf(store['checkRows']));
 console.log('NOTHING-RUNNING GROUPS :: ' + textOf(store['groups']));
 console.log('NOTHING-RUNNING TODO :: ' + textOf(store['briefTodo']));

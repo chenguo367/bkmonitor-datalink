@@ -59,7 +59,7 @@ func TestAStrategysStandingIsAnsweredFromTheLookupAndTheFleetsView(t *testing.T)
 			Dispositions: []StrategyDisposition{{Scope: "PLAN", Disposition: "ACCEPTED"}}},
 		"4102": {Available: true, Found: true, Publication: StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
 			Dispositions: []StrategyDisposition{
-				{Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED", FieldPath: "items[0].target_plan.model_match"}}},
+				{Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "ALGORITHM_NOT_MIGRATED", FieldPath: "items[0].algorithms[0]"}}},
 		"4103": {Available: true, Found: true, Publication: StrategyPublication{SnapshotRevision: "s1", Epoch: 7},
 			Plans: plans(planA),
 			Dispositions: []StrategyDisposition{
@@ -117,7 +117,7 @@ func TestAStrategysStandingIsAnsweredFromTheLookupAndTheFleetsView(t *testing.T)
 	if status != http.StatusOK || body["standing"] != string(StandingWithheld) {
 		t.Fatalf("4102: status %d standing %v, want WITHHELD", status, body["standing"])
 	}
-	if line, _ := body["line"].(string); !strings.Contains(line, "未生效，1 项全部被扣住：PLAN：UNSUPPORTED_PHASE2_CAPABILITY/TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED（items[0].target_plan.model_match）") {
+	if line, _ := body["line"].(string); !strings.Contains(line, "未生效，1 项全部被扣住：PLAN：UNSUPPORTED_PHASE2_CAPABILITY/ALGORITHM_NOT_MIGRATED（items[0].algorithms[0]）") {
 		t.Errorf("4102 line = %q", line)
 	}
 

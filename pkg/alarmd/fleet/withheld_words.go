@@ -44,13 +44,21 @@ const (
 	// WithheldWriterAhead: the source wrote a document shape this build does
 	// not read yet -- the writer went first.
 	WithheldWriterAhead WithheldKind = "WRITER_AHEAD"
+	// WithheldStrategyDefinition: the strategy as written exceeds a compile
+	// guardrail of this deployment -- levels per Plan, algorithms per level,
+	// Plan bytes, trigger compute. The guardrail is a value in the
+	// deployment's limits and has a default, but it is a guardrail against a
+	// runaway definition and not a working ceiling: the next step is to
+	// shrink the strategy, and raising the limit is the strategy owner's
+	// case to make, not the first move.
+	WithheldStrategyDefinition WithheldKind = "STRATEGY_DEFINITION"
 	// WithheldUnknownReason: a reason word this table does not know. The
 	// page says so; it does not guess a cause.
 	WithheldUnknownReason WithheldKind = "UNKNOWN_REASON"
 )
 
 // WithheldKinds is the closed list.
-var WithheldKinds = []WithheldKind{WithheldDeploymentParameter, WithheldBuildCapability, WithheldWriterAhead, WithheldUnknownReason}
+var WithheldKinds = []WithheldKind{WithheldDeploymentParameter, WithheldBuildCapability, WithheldWriterAhead, WithheldStrategyDefinition, WithheldUnknownReason}
 
 // WithheldReasonWords is one reason's meaning: who acts, what happened, and
 // the next step, in the words the page shows.
@@ -89,9 +97,6 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 	"UNSUPPORTED_TARGET_SCOPE_UNRESOLVABLE": {Kind: WithheldBuildCapability,
 		What: "策略的目标范围本构建解析不了",
 		Next: "等能解析它的构建；改部署参数没有用"},
-	"TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED": {Kind: WithheldBuildCapability,
-		What: "策略目标按模型实例（model_inst_id）给出而不带 model_match，本构建不会把它反查成主机身份，整条策略不进检测",
-		Next: "等带主机模型反查的构建（读方缺的一支），策略与部署参数都不用改"},
 	"UNSUPPORTED_TARGET_VALUE_SHAPE": {Kind: WithheldBuildCapability,
 		What: "策略目标值的写法本构建读不出键",
 		Next: "等能读该值形状的构建；改部署参数没有用"},
@@ -114,8 +119,22 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 		What: "查询里的函数还没迁到 Go 侧",
 		Next: "等带该函数的构建；改部署参数没有用"},
 	"UNSUPPORTED_TARGET_PLAN": {Kind: WithheldWriterAhead,
-		What: "策略文档带了 target_plan 字段（field_path 指到它），本构建不解释这个字段，整条策略具名拒绝、不回退旧 target、不保留旧 Plan",
-		Next: "写入方先于本构建上线了目标计划：升级到解释该字段的构建；在那之前这格应恒为 0"},
+		What: "target_plan 里 field_path 指到的字段本解码器读不了（缺字段、多字段、类型不对、未知的 version 或 rule），整条策略具名拒绝、不回退旧 target、不保留旧 Plan；本构建解释 target_plan，只是拒这一个字段",
+		Next: "写入方按协议核该字段；若是本构建还没有的新字段，等解释它的构建"},
+	// The runtime compiler's terminals, filed under the same disposition by
+	// controlplane.CompilerTerminalDisposition. ALGORITHM_UNSUPPORTED and
+	// ALGORITHM_NOT_MIGRATED are two producers and two words: the first is
+	// the runtime compiler meeting an algorithm it has no evaluator for, the
+	// second the legacy compiler meeting one not yet ported.
+	"ALGORITHM_UNSUPPORTED": {Kind: WithheldBuildCapability,
+		What: "运行时编译器没有这个检测算法的评估器",
+		Next: "等带该算法的构建；改部署参数没有用"},
+	"PLAN_BUDGET_EXCEEDED": {Kind: WithheldStrategyDefinition,
+		What: "策略编译出的 Plan 超出本部署的护栏（层级数 limits.compiler.max_levels_per_plan、Plan 字节数 max_plan_bytes、触发计算量 limits.trigger.max_compute_cost；field_path 指到超的那一处）",
+		Next: "先收策略（减层级、减触发计算），护栏是防失控的不是工作上限；确有必要再由策略侧提出抬对应的 limits 值"},
+	"LEVEL_BUDGET_EXCEEDED": {Kind: WithheldStrategyDefinition,
+		What: "某一层级的算法数超出本部署的护栏（limits.compiler.max_algorithms_per_level；field_path 指到 level.detect_plan.algorithms）",
+		Next: "先收该层级的算法数，护栏是防失控的不是工作上限；确有必要再由策略侧提出抬 max_algorithms_per_level"},
 	"TARGET_PLAN_EMPTY": {Kind: WithheldWriterAhead,
 		What: "写入方给的 target_plan 既没有静态目标也没有动态引用，永远匹配不到任何东西",
 		Next: "写入方核这条策略的目标计划；alarmd 与部署参数都不用改"},
@@ -180,5 +199,6 @@ var withheldKindWords = map[WithheldKind]string{
 	WithheldDeploymentParameter: "部署参数不够",
 	WithheldBuildCapability:     "本构建不支持",
 	WithheldWriterAhead:         "写入方超前于本构建",
+	WithheldStrategyDefinition:  "策略定义超出护栏",
 	WithheldUnknownReason:       "原因待查",
 }

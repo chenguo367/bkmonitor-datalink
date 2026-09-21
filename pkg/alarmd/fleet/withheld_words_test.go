@@ -15,6 +15,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 )
 
 // Every reason the control plane attaches to the capability disposition has
@@ -57,17 +59,39 @@ func TestEveryCapabilityReasonHasWordsAndEveryWordIsAReason(t *testing.T) {
 			}
 		}
 	}
-	// Reasons that belong to other dispositions come through the same
-	// constructors' neighbours; the ones this line never sees are left out.
-	notCapability := map[string]bool{"UNSUPPORTED_TARGET_SCOPE_UNRESOLVABLE": false}
+	// The runtime compiler's terminals are a third producer, filed by
+	// CompilerTerminalDisposition and spelled nowhere the regexes above
+	// read: every reason constant of the contract goes through it, and the
+	// ones it files under the capability disposition are produced.
+	reasonConstant := regexp.MustCompile(`(?m)^\s*Reason[A-Za-z0-9]+\s*=\s*"([A-Z][A-Z0-9_]+)"`)
+	entries, err := os.ReadDir("../contract")
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminals := 0
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
+			continue
+		}
+		source, err := os.ReadFile(filepath.Join("../contract", entry.Name()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, match := range reasonConstant.FindAllStringSubmatch(string(source), -1) {
+			if disposition, known := controlplane.CompilerTerminalDisposition(match[1]); known && disposition == controlplane.DispositionUnsupported {
+				produced[match[1]] = true
+				terminals++
+			}
+		}
+	}
+	if terminals < 3 {
+		t.Fatalf("read %d compiler terminals filed under the capability disposition, want at least the three the compiler produces", terminals)
+	}
 	if len(produced) < 8 {
 		t.Fatalf("read %d reasons from the source, too few to be the set: %v", len(produced), produced)
 	}
 	for reason := range produced {
 		if _, known := withheldReasonWords[reason]; !known {
-			if _, excused := notCapability[reason]; excused {
-				continue
-			}
 			t.Errorf("the control plane withholds under %q and the page has no words for it: it would read as unknown", reason)
 		}
 	}
@@ -92,11 +116,11 @@ func TestEveryCapabilityReasonHasWordsAndEveryWordIsAReason(t *testing.T) {
 // reason on this line, and what an operator was sent to change.
 func TestTheCapabilityLineNamesTheKindsUnderItAndNotOneCauseForAll(t *testing.T) {
 	facts := NewSourceFacts(now, map[string]int{"UNSUPPORTED_PHASE2_CAPABILITY": 7, "ACCEPTED": 40}, []WithheldObject{
-		{StrategyID: "25", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED", FieldPath: "items[0].target_plan.model_match"},
-		{StrategyID: "351", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED", FieldPath: "items[0].target_plan.model_match"},
-		{StrategyID: "387", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED", FieldPath: "items[0].target_plan.model_match"},
-		{StrategyID: "472", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED", FieldPath: "items[0].target_plan.model_match"},
-		{StrategyID: "474", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED", FieldPath: "items[0].target_plan.model_match"},
+		{StrategyID: "25", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "ALGORITHM_NOT_MIGRATED", FieldPath: "items[0].algorithms[0]"},
+		{StrategyID: "351", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "ALGORITHM_NOT_MIGRATED", FieldPath: "items[0].algorithms[0]"},
+		{StrategyID: "387", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "ALGORITHM_NOT_MIGRATED", FieldPath: "items[0].algorithms[0]"},
+		{StrategyID: "472", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "ALGORITHM_NOT_MIGRATED", FieldPath: "items[0].algorithms[0]"},
+		{StrategyID: "474", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "ALGORITHM_NOT_MIGRATED", FieldPath: "items[0].algorithms[0]"},
 		{StrategyID: "600", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "SNAPSHOT_RETENTION_INSUFFICIENT"},
 		{StrategyID: "601", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "NEW_WORD_NOBODY_EXPLAINED"},
 	})
@@ -124,9 +148,18 @@ func TestTheCapabilityLineNamesTheKindsUnderItAndNotOneCauseForAll(t *testing.T)
 	for _, group := range line.Groups {
 		words[group.Key] = group.Words
 	}
-	if model := words["TARGET_PLAN_MODEL_REPRESENTATION_UNRESOLVED"]; model == nil || model.Kind != WithheldBuildCapability ||
-		!strings.Contains(model.What, "model_inst_id") || !strings.Contains(model.Next, "都不用改") {
-		t.Errorf("model representation words = %+v, want this build's gap with nothing for the operator to change", model)
+	if algorithm := words["ALGORITHM_NOT_MIGRATED"]; algorithm == nil || algorithm.Kind != WithheldBuildCapability ||
+		!strings.Contains(algorithm.Next, "改部署参数没有用") {
+		t.Errorf("algorithm words = %+v, want this build's gap with nothing for the operator to change", algorithm)
+	}
+	// The compiler's terminals under the same disposition: a budget it
+	// guards with is the strategy's to shrink first, not a parameter to
+	// raise, and an algorithm it has no evaluator for is the build's.
+	for reason, kind := range map[string]WithheldKind{"PLAN_BUDGET_EXCEEDED": WithheldStrategyDefinition,
+		"LEVEL_BUDGET_EXCEEDED": WithheldStrategyDefinition, "ALGORITHM_UNSUPPORTED": WithheldBuildCapability} {
+		if words := WithheldWordsOf(reason); words.Kind != kind || (kind == WithheldStrategyDefinition && !strings.Contains(words.Next, "先收")) {
+			t.Errorf("%s words = %+v, want kind %s", reason, words, kind)
+		}
 	}
 	if retention := words["SNAPSHOT_RETENTION_INSUFFICIENT"]; retention == nil || retention.Kind != WithheldDeploymentParameter || !strings.Contains(retention.Next, "快照保留期") {
 		t.Errorf("retention words = %+v, want the deployment parameter", retention)
