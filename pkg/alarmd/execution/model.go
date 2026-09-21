@@ -887,9 +887,28 @@ type RuntimeLevelStateView struct {
 	LastProcessedEventTime  int64
 }
 
+// StateRepresentation names the on-disk shape a Runtime State record was read
+// in. Two shapes coexist while records migrate from the JSON envelope to the
+// framed record: the envelope lives under the runtime key, the framed record
+// under runtime3, and a series may hold either or both. The renewal path
+// needs to know which key holds the record it is keeping alive, and the page
+// needs to know how far the migration has gone; the write path does not
+// branch on it - every write is a whole framed record under runtime3.
+type StateRepresentation string
+
+const (
+	// StateRepresentationEnvelope is the JSON envelope under the runtime key.
+	StateRepresentationEnvelope StateRepresentation = "envelope"
+	// StateRepresentationFramed is the framed record under runtime3.
+	StateRepresentationFramed StateRepresentation = "framed"
+)
+
 type RuntimeStateView struct {
-	Identity                StateKeyIdentity
-	BlobRevision            uint64
+	Identity     StateKeyIdentity
+	BlobRevision uint64
+	// Representation is the shape the record was read in, and so the key it
+	// lives under. Empty for a view that was not loaded from storage.
+	Representation          StateRepresentation
 	PersistedApplyVersion   ApplyVersion
 	PersistedMutationDigest MutationDigest
 	LastProcessedEventTime  int64

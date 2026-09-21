@@ -35,19 +35,16 @@ func TestALoadedRecordGivesBackEveryPointItWasGiven(t *testing.T) {
 	// found usable. The packed representation cannot store that point at all,
 	// and cannot tell the two unusable kinds apart, so a fixture carrying only
 	// NORMAL would pass over both losses.
+	identity := seriesIdentity(0)
 	points := []execution.StateHistoryPoint{
-		{RecordID: "r1", SourceTime: at, Levels: []execution.StateLevelFact{
-			{LevelID: 1, DetectFingerprint: "detect", Result: execution.LevelFactNormal}}},
-		{RecordID: "r2", SourceTime: at + 60, Levels: []execution.StateLevelFact{
-			{LevelID: 1, DetectFingerprint: "detect", Result: execution.LevelFactAnomalous}}},
-		{RecordID: "r3", SourceTime: at + 120, Levels: []execution.StateLevelFact{
-			{LevelID: 1, DetectFingerprint: "detect", Result: execution.LevelFactError}}},
-		{RecordID: "r4", SourceTime: at + 180, Levels: []execution.StateLevelFact{
-			{LevelID: 1, DetectFingerprint: "detect", Result: execution.LevelFactUnavailable}}},
+		derivedPoint(t, identity, at, "detect", execution.LevelFactNormal),
+		derivedPoint(t, identity, at+60, "detect", execution.LevelFactAnomalous),
+		derivedPoint(t, identity, at+120, "detect", execution.LevelFactError),
+		derivedPoint(t, identity, at+180, "detect", execution.LevelFactUnavailable),
 	}
 	mutation, err := execution.BuildStateMutation(execution.StateMutation{
-		Identity: seriesIdentity(0), ExpectedBlobRevision: 0, ApplyVersion: version,
-		AffectedRecords: []execution.RecordAnchor{{RecordID: "r1", SourceTime: at}},
+		Identity: identity, ExpectedBlobRevision: 0, ApplyVersion: version,
+		AffectedRecords: []execution.RecordAnchor{derivedAnchor(t, identity, at)},
 		Levels: []execution.RuntimeLevelStateMutation{{LevelID: 1, LevelStateCompatibility: "compat",
 			HistoryCompleteness: execution.HistoryFull, WarmupRequirementRef: "warm", LastProcessedEventTime: at}},
 		Points: points,

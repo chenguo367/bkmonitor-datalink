@@ -1352,7 +1352,7 @@ func (ports *recordingPorts) Execute(ctx context.Context, request execution.Quer
 	if ports.reverseStateReceipts {
 		input.Inputs[0].Dataset = execution.NewDataset([]contract.CanonicalRecordV2{
 			{
-				RecordID: strings.Repeat("b", 64), SourceTime: 1_788_000_000, BusinessID: "2",
+				RecordID: derivedTestRecordID(), SourceTime: 1_788_000_000, BusinessID: "2",
 				DimensionIdentity: contract.DimensionIdentityV2{Digest: strings.Repeat("c", 64)},
 				Values:            map[string]json.RawMessage{"value": json.RawMessage(`50.1`)}, Dimensions: map[string]json.RawMessage{},
 				ReceivedTime: 1_788_000_000,
@@ -1490,7 +1490,7 @@ func (ports *recordingPorts) Evaluate(_ context.Context, request execution.Evalu
 	ports.record("evaluate")
 	ports.lastEvaluation = request
 	seriesDigest := string(request.State.Items[0].Identity.SeriesIdentityDigest)
-	recordID := strings.Repeat("b", 64)
+	recordID := derivedTestRecordID()
 	if seriesDigest == strings.Repeat("d", 64) {
 		recordID = strings.Repeat("f", 64)
 	}
@@ -1541,7 +1541,7 @@ func (ports *recordingPorts) Evaluate(_ context.Context, request execution.Evalu
 		outcomes := make([]execution.LevelOutcome, 0, len(request.State.Items))
 		stateResults := make([]execution.StateEvaluation, 0, len(request.State.Items))
 		for _, state := range request.State.Items {
-			recordID := strings.Repeat("b", 64)
+			recordID := derivedTestRecordID()
 			if state.Identity.SeriesIdentityDigest == execution.SeriesIdentityDigest(strings.Repeat("d", 64)) {
 				recordID = strings.Repeat("f", 64)
 			}
@@ -1961,6 +1961,18 @@ func planIdentity() execution.PlanIdentity {
 	return execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"}
 }
 
+// derivedTestRecordID is the record id the fixtures' series (digest c*64) and
+// source time derive. The store frames every record it writes and refuses a
+// point whose id is not the one its series and source time derive, so a
+// fixture cannot carry an arbitrary 64-character id any more.
+func derivedTestRecordID() string {
+	id, err := contract.DeriveRecordIDV2(strings.Repeat("c", 64), 1_788_000_000)
+	if err != nil {
+		panic(err)
+	}
+	return id
+}
+
 func validInternalExecution() execution.InternalExecution {
 	plan := planIdentity()
 	plans, requirements := baseDuePlanAndRequirements()
@@ -1970,7 +1982,7 @@ func validInternalExecution() execution.InternalExecution {
 	applyVersion := frozenApplyVersion()
 	consumer := requirements[0].Consumers[0].Consumer
 	dataset := execution.NewDataset([]contract.CanonicalRecordV2{{
-		RecordID: strings.Repeat("b", 64), SourceTime: 1_788_000_000, BusinessID: "2",
+		RecordID: derivedTestRecordID(), SourceTime: 1_788_000_000, BusinessID: "2",
 		DimensionIdentity: contract.DimensionIdentityV2{Digest: strings.Repeat("c", 64)},
 		Values:            map[string]json.RawMessage{"value": json.RawMessage(`50.1`)}, Dimensions: map[string]json.RawMessage{},
 		ReceivedTime: 1_788_000_000,
@@ -2046,11 +2058,11 @@ func effectiveTimeFactForTest(plan *strategy.CompiledPlan) strategy.EffectiveTim
 }
 
 func validStateMutation() execution.StateMutation {
-	return stateMutationForTest(strings.Repeat("c", 64), strings.Repeat("b", 64), execution.LevelFactAnomalous)
+	return stateMutationForTest(strings.Repeat("c", 64), derivedTestRecordID(), execution.LevelFactAnomalous)
 }
 
 func partialStateMutationForTest() execution.StateMutation {
-	mutation := stateMutationForTest(strings.Repeat("c", 64), strings.Repeat("b", 64), execution.LevelFactAnomalous)
+	mutation := stateMutationForTest(strings.Repeat("c", 64), derivedTestRecordID(), execution.LevelFactAnomalous)
 	seriesWarmup, err := execution.DeriveRuntimeSeriesWarmupRequirementRef(compiledPlanForTest(nil))
 	if err != nil {
 		panic(err)
@@ -2099,7 +2111,7 @@ func stateMutationForTest(seriesDigest, recordID string, factResult execution.Le
 func validLevelOutcome(kind execution.LevelOutcomeKind, reason execution.ReasonCode, partial bool) execution.LevelOutcome {
 	outcome := execution.LevelOutcome{
 		Plan: planIdentity(), LevelID: 5, SeriesIdentityDigest: execution.SeriesIdentityDigest(strings.Repeat("c", 64)),
-		Record:  execution.RecordAnchor{RecordID: strings.Repeat("b", 64), SourceTime: 1_788_000_000},
+		Record:  execution.RecordAnchor{RecordID: derivedTestRecordID(), SourceTime: 1_788_000_000},
 		Outcome: kind, ReasonCode: reason,
 	}
 	if partial {
@@ -2116,7 +2128,7 @@ func validLevelOutcome(kind execution.LevelOutcomeKind, reason execution.ReasonC
 }
 
 func validTriggerEvent() contract.TriggerEventV1 {
-	return validTriggerEventFor(strings.Repeat("b", 64), strings.Repeat("c", 64))
+	return validTriggerEventFor(derivedTestRecordID(), strings.Repeat("c", 64))
 }
 
 func validTriggerEventFor(recordID, seriesDigest string) contract.TriggerEventV1 {

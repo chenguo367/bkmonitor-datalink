@@ -30,6 +30,11 @@ import (
 // store that can act on it.
 type FrozenSeriesState struct {
 	Identity StateKeyIdentity
+	// Representation is the shape the record was read in, which decides the
+	// key the renewal touches: a framed record lives under runtime3 and an
+	// envelope under runtime, and renewing the other key keeps nothing alive.
+	// Required: the store refuses an item that does not say, by name.
+	Representation StateRepresentation
 	// LastApplied is the evaluation time of the write that stored what was
 	// read, in Unix seconds. It is the only thing anyone knows about the key's
 	// age without asking Redis, and it is exact: the TTL was set by that same

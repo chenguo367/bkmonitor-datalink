@@ -203,7 +203,11 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	roundLargest, anyRead := 0, false
 	for index, item := range request.Items {
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
-		key, err := RuntimeStateKeyV2(store.options.Prefix, item.Identity)
+		envelopeKey, err := RuntimeStateKeyV2(store.options.Prefix, item.Identity)
+		var framedKey string
+		if err == nil {
+			framedKey, err = RuntimeStateKeyV3(store.options.Prefix, item.Identity)
+		}
 		var target StorageTarget
 		if err == nil {
 			target, err = store.options.Router.Route(item.Identity.Plan.TenantID, item.Identity.Plan.StrategyID)
@@ -225,7 +229,10 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 		}
 		batch.target = target
 		batch.indexes = append(batch.indexes, index)
-		batch.keys = append(batch.keys, key)
+		// Both keys of one series travel in the same call, envelope first:
+		// the batch bound counts series, and the bytes it bounds are the sum
+		// of whatever both keys hold.
+		batch.keys = append(batch.keys, envelopeKey, framedKey)
 	}
 	bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items)
 	result.LoadedBytes += bytes
@@ -266,9 +273,11 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 			result.Items[index] = item
 			continue
 		}
-		encoded, err := encodeRuntime(mutation, mutation.ExpectedBlobRevision+1)
-		if err != nil || len(encoded) > store.options.MaxValueBytes {
-			item.Status, item.ReasonCode = execution.StateAdmissionDeterministicInvalid, execution.ReasonCode(contract.ReasonStateBudgetExceeded)
+		// Sized in the representation the write stores. The revision only
+		// widens one varint in the header, so any revision measures the same.
+		encoded, refusal := store.encodeForWrite(mutation, mutation.ExpectedBlobRevision+1)
+		if refusal != "" {
+			item.Status, item.ReasonCode = execution.StateAdmissionDeterministicInvalid, execution.ReasonCode(refusal)
 		} else {
 			item.EncodedBytes = len(encoded)
 		}
@@ -284,6 +293,11 @@ func (store *ExecutionStore) ApplyRuntime(ctx context.Context, request execution
 	return store.applyRuntime(ctx, request, nil)
 }
 
+// encodeRuntime writes the JSON envelope: what every binary before the framed
+// record wrote under the runtime key. No production path writes it any more;
+// it stays so a test can seed the key an earlier binary would have left, and
+// so the baseline that records what the envelope costs keeps measuring the
+// real thing.
 func encodeRuntime(mutation execution.StateMutation, revision uint64) ([]byte, error) {
 	levels := append([]execution.RuntimeLevelStateMutation(nil), mutation.Levels...)
 	sort.Slice(levels, func(i, j int) bool { return levels[i].LevelID < levels[j].LevelID })
@@ -297,49 +311,78 @@ func encodeRuntime(mutation execution.StateMutation, revision uint64) ([]byte, e
 		mutation.MutationDigest, last, mutation.SeriesGuard, levels, mutation.Points})
 }
 
+// decodeRuntime reads a stored record in whichever representation it was
+// written and classifies it against the candidate the caller is about to
+// apply. The shape is read from the bytes, not from the key they came from:
+// the framed record announces itself with its magic, and everything else is
+// the JSON envelope. The view says which one it was.
 func decodeRuntime(raw []byte, identity execution.StateKeyIdentity, contractRef execution.FrozenExecutionContractRef, candidate execution.ApplyVersion) execution.RuntimeStateView {
 	invalid := func(reason string) execution.RuntimeStateView {
 		return execution.RuntimeStateView{Identity: identity, BlobRevision: 1, Status: execution.StateDeterministicInvalid,
 			ReasonCode: execution.ReasonCode(reason)}
 	}
-	var value runtimeEnvelope
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return invalid(contract.ReasonStateCorrupt)
-	}
-	if value.Schema != executionStateSchemaV2 {
-		return invalid(contract.ReasonStateSchemaUnsupported)
-	}
-	if value.Identity != identity || value.BlobRevision == 0 {
-		return invalid(contract.ReasonStateCorrupt)
-	}
-	levels := make([]execution.RuntimeLevelStateView, len(value.Levels))
-	status := execution.StateFoundReady
-	for i, level := range value.Levels {
-		levels[i] = execution.RuntimeLevelStateView{LevelID: level.LevelID, LevelStateCompatibility: level.LevelStateCompatibility,
-			HistoryCompleteness: level.HistoryCompleteness, GapReasonCode: level.GapReasonCode,
-			WarmupRequirementRef: level.WarmupRequirementRef, LastProcessedEventTime: level.LastProcessedEventTime}
-		if level.HistoryCompleteness == execution.HistoryGapped {
-			status = execution.StateFoundGapped
-		} else if level.HistoryCompleteness == execution.HistoryWarming && status != execution.StateFoundGapped {
-			status = execution.StateFoundWarming
+	var view execution.RuntimeStateView
+	if packedFrame(raw) {
+		decoded, err := decodeRuntimePacked(raw, identity)
+		switch {
+		case errors.Is(err, ErrUnsupportedState):
+			return invalid(contract.ReasonStateSchemaUnsupported)
+		case err != nil:
+			return invalid(contract.ReasonStateCorrupt)
 		}
-	}
-	if value.SeriesGuard != nil {
-		if value.SeriesGuard.Status == execution.HistoryGapped {
-			status = execution.StateFoundGapped
-		} else if value.SeriesGuard.Status == execution.HistoryWarming && status != execution.StateFoundGapped {
-			status = execution.StateFoundWarming
+		view = decoded
+		view.Representation = execution.StateRepresentationFramed
+	} else {
+		var value runtimeEnvelope
+		if err := json.Unmarshal(raw, &value); err != nil {
+			return invalid(contract.ReasonStateCorrupt)
 		}
+		if value.Schema != executionStateSchemaV2 {
+			return invalid(contract.ReasonStateSchemaUnsupported)
+		}
+		if value.Identity != identity || value.BlobRevision == 0 {
+			return invalid(contract.ReasonStateCorrupt)
+		}
+		levels := make([]execution.RuntimeLevelStateView, len(value.Levels))
+		for i, level := range value.Levels {
+			levels[i] = execution.RuntimeLevelStateView{LevelID: level.LevelID, LevelStateCompatibility: level.LevelStateCompatibility,
+				HistoryCompleteness: level.HistoryCompleteness, GapReasonCode: level.GapReasonCode,
+				WarmupRequirementRef: level.WarmupRequirementRef, LastProcessedEventTime: level.LastProcessedEventTime}
+		}
+		view = execution.RuntimeStateView{Identity: identity, BlobRevision: value.BlobRevision,
+			Representation:        execution.StateRepresentationEnvelope,
+			PersistedApplyVersion: value.ApplyVersion, PersistedMutationDigest: value.MutationDigest,
+			LastProcessedEventTime: value.LastEventTime, SeriesGuard: value.SeriesGuard, Levels: levels, History: value.History}
 	}
-	view := execution.RuntimeStateView{Identity: identity, BlobRevision: value.BlobRevision,
-		PersistedApplyVersion: value.ApplyVersion, PersistedMutationDigest: value.MutationDigest,
-		LastProcessedEventTime: value.LastEventTime, SeriesGuard: value.SeriesGuard, Levels: levels, History: value.History, Status: status}
+	view.Status = storedLoadStatus(view.Levels, view.SeriesGuard)
 	classified, err := execution.ClassifyStatePreflight(execution.StatePreflightRequest{Contract: contractRef,
 		Items: []execution.StatePreflightItem{{Identity: identity, ApplyVersion: candidate}}}, execution.StatePreflightResult{Items: []execution.RuntimeStateView{view}})
 	if err != nil {
 		return invalid(contract.ReasonStateCorrupt)
 	}
 	return classified.Items[0]
+}
+
+// storedLoadStatus is what the Levels and the series guard say about a record
+// that was found: gapped wins over warming wins over ready, the same reading
+// for both representations.
+func storedLoadStatus(levels []execution.RuntimeLevelStateView, guard *execution.StateGuardFact) execution.StateLoadStatus {
+	status := execution.StateFoundReady
+	for _, level := range levels {
+		if level.HistoryCompleteness == execution.HistoryGapped {
+			status = execution.StateFoundGapped
+		} else if level.HistoryCompleteness == execution.HistoryWarming && status != execution.StateFoundGapped {
+			status = execution.StateFoundWarming
+		}
+	}
+	if guard != nil {
+		if guard.Status == execution.HistoryGapped {
+			status = execution.StateFoundGapped
+		} else if guard.Status == execution.HistoryWarming && status != execution.StateFoundGapped {
+			status = execution.StateFoundWarming
+		}
+	}
+	return status
 }
 
 // readOneRenewing reads one generation-scoped key and, when it is there and its
