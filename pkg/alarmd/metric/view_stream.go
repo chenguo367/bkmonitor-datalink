@@ -25,7 +25,7 @@ type ViewStreamCounts struct {
 	// Receipts ignored since the term began, by why.
 	IgnoredUnknownVersion, IgnoredUnexpectedReceiver, IgnoredDigestMismatch, IgnoredStaleIncarnation int
 	// Counters since the process started.
-	Publications, PublicationsSkipped, SnapshotChunksSent, DeltasSent, EmptyDeltasSent, Refusals uint64
+	Publications, PublicationsSkipped, SnapshotChunksSent, DeltasSent, EmptyDeltasSent, DeltasOversized, Refusals uint64
 }
 
 type viewStreamCollector struct {
@@ -38,6 +38,7 @@ type viewStreamCollector struct {
 	ignored      *prometheus.Desc
 	publications *prometheus.Desc
 	sent         *prometheus.Desc
+	oversized    *prometheus.Desc
 	refusals     *prometheus.Desc
 }
 
@@ -77,6 +78,12 @@ func newViewStreamCollector() *viewStreamCollector {
 				"revision gets one delta; one further behind or newly connected gets a snapshot; one whose projection "+
 				"did not move gets an empty delta and installs by receipt.",
 			[]string{"kind"}, nil),
+		oversized: prometheus.NewDesc(name("view_deltas_oversized_total"),
+			"Deltas not sent because one message of them would have exceeded the stream's 1 MiB message bound; each "+
+				"was replaced by the chunked snapshot of the same revision, counted under view_messages_sent_total. "+
+				"Expected on a large view when a Worker joins or a rebalance moves thousands of Query Groups at once; "+
+				"rising every publication means the delta path is out of reach for that Worker and every step costs a "+
+				"snapshot.", nil, nil),
 		refusals: prometheus.NewDesc(name("view_stream_refusals_total"),
 			"Streams this Leader refused at Hello, for any of the protocol's reasons; the reason is on the view_session log line.", nil, nil),
 	}
@@ -101,6 +108,7 @@ func (c *viewStreamCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.ignored
 	ch <- c.publications
 	ch <- c.sent
+	ch <- c.oversized
 	ch <- c.refusals
 }
 
@@ -124,6 +132,7 @@ func (c *viewStreamCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.sent, prometheus.CounterValue, float64(counts.SnapshotChunksSent), "snapshot_chunk")
 	ch <- prometheus.MustNewConstMetric(c.sent, prometheus.CounterValue, float64(counts.DeltasSent), "delta")
 	ch <- prometheus.MustNewConstMetric(c.sent, prometheus.CounterValue, float64(counts.EmptyDeltasSent), "empty_delta")
+	ch <- prometheus.MustNewConstMetric(c.oversized, prometheus.CounterValue, float64(counts.DeltasOversized))
 	ch <- prometheus.MustNewConstMetric(c.refusals, prometheus.CounterValue, float64(counts.Refusals))
 	if !counts.Leading {
 		return

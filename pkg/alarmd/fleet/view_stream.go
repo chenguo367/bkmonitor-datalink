@@ -61,7 +61,10 @@ type ViewStreamFacts struct {
 	SnapshotChunksSent  uint64 `json:"snapshot_chunks_sent"`
 	DeltasSent          uint64 `json:"deltas_sent"`
 	EmptyDeltasSent     uint64 `json:"empty_deltas_sent"`
-	Refusals            uint64 `json:"refusals"`
+	// DeltasOversized is deltas replaced by a chunked snapshot because one
+	// message of them would have exceeded the stream's message bound.
+	DeltasOversized uint64 `json:"deltas_oversized"`
+	Refusals        uint64 `json:"refusals"`
 	// Line is the one sentence for the first screen, composed here so the
 	// page and any other reader say the same thing.
 	Line string `json:"line"`

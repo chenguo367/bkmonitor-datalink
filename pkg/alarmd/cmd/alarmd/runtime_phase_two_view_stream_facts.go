@@ -38,7 +38,8 @@ func viewStreamFacts(stats viewstream.Stats, at time.Time) *fleet.ViewStreamFact
 		Ignored: fleet.ViewStreamIgnored{UnknownVersion: stats.Ignored.UnknownVersion, UnexpectedReceiver: stats.Ignored.UnexpectedReceiver,
 			DigestMismatch: stats.Ignored.DigestMismatch, StaleIncarnation: stats.Ignored.StaleIncarnation},
 		Publications: stats.Publications, PublicationsSkipped: stats.PublicationsSkipped, SnapshotChunksSent: stats.SnapshotChunksSent,
-		DeltasSent: stats.DeltasSent, EmptyDeltasSent: stats.EmptyDeltasSent, Refusals: stats.Refusals,
+		DeltasSent: stats.DeltasSent, EmptyDeltasSent: stats.EmptyDeltasSent, DeltasOversized: stats.DeltasOversized,
+		Refusals: stats.Refusals,
 	}
 	facts.Lagging = make([]fleet.ViewStreamLagging, 0, len(stats.Lagging))
 	for _, lagging := range stats.Lagging {
