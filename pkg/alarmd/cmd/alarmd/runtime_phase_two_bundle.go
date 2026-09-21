@@ -436,6 +436,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 					OverNamed: stats.DeltaAudit.OverNamed, Missed: stats.DeltaAudit.Missed,
 				}},
 			{Object: "catalog_index", Hits: stats.Index.Hits, Misses: stats.Index.Misses},
+			// A timeline read answered by the Worker's revision hint
+			// (decision-016 batch 4): a hit is no Redis command at all, a
+			// miss is one body read, a refresh is a hint the body did not
+			// bear and the read went the header way. Header reads for
+			// hinted Query Groups are what batch 4 removes; the header's
+			// own object above is where that has to fall.
+			{Object: "timeline_by_revision", Hits: stats.HintedTimeline.Hits, Misses: stats.HintedTimeline.Misses,
+				Refreshes: stats.HintedTimeline.Refreshes},
 			{Object: "timeline", Hits: stats.Timeline.Hits, Misses: stats.Timeline.Misses,
 				Refreshes: stats.Timeline.Refreshes, Evictions: occupancy.Evictions,
 				Occupancy: &metric.ControlCacheOccupancy{
@@ -497,6 +505,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err := ownershipStore.Ping(ctx); err != nil {
 		return nil, err
 	}
+	// A cutover stamps each rewritten timeline's revision on the Query
+	// Group's Assignment record in the same script (decision-016 batch 4);
+	// both live on the runtime Redis, and the catalog learns the record
+	// keys here rather than guessing the ownership prefix.
+	repository.WithAssignmentRecordKey(ownershipStore.AssignmentKey)
 
 	stateBackend, err := state.NewRedisBackendWithClient(productionRedisAddress(runtimeConnection), runtimeClient)
 	if err != nil {
@@ -782,6 +795,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// A placement names the timeline revision on the record it creates, read
+	// from the catalog; a record that already says it is not asked about.
+	assignmentReconciler.WithTimelineRevisions(repository)
 	var executor scheduler.Executor = coordinator
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		ExpiredRangeEnabled: cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled,
@@ -812,14 +828,24 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// Batch 4a of decision-016: each Slot read decides, from the installed
+	// view and the lease the renewal last brought, whether the Query Group
+	// is executed from the view; the receipt counts those that are.
+	viewGate := newViewExecutionGate()
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
-		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now},
+		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate},
 	)
 	if err != nil {
 		return nil, err
 	}
-	recorder.SetViewClientSource(func() metric.ViewClientCounts { return viewClientCounts(viewClient.Stats()) })
+	viewGate.attach(viewClient)
+	productionOwnership.WithViewExecutionGate(viewGate)
+	recorder.SetViewClientSource(func() metric.ViewClientCounts {
+		counts := viewClientCounts(viewClient.Stats())
+		counts.ExecutedFromView = viewGate.Counts()
+		return counts
+	})
 	// The cutover names each changing Query Group's content in its record
 	// before it cuts the Segment that carries it (decision-016 batch 3).
 	activator.WithContentScopeWriter(productionOwnership)

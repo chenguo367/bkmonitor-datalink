@@ -341,6 +341,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_view_messages_sent_total":                     "variableLabels: {kind}",
 		"bkmonitor_alarmd_view_stream_refusals_total":                   "variableLabels: {}",
 		"bkmonitor_alarmd_view_deltas_oversized_total":                  "variableLabels: {}",
+		"bkmonitor_alarmd_view_executed_query_groups":                   "variableLabels: {outcome}",
 		"bkmonitor_alarmd_view_client_connected":                        "variableLabels: {}",
 		"bkmonitor_alarmd_view_installed_revision":                      "variableLabels: {}",
 		"bkmonitor_alarmd_view_objects_missing":                         "variableLabels: {}",
@@ -708,10 +709,11 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("worker_query_permits_waiting"):          len(phaseTwoReadyQueueKinds),
 		fqName("worker_query_permit_budget"):            len(phaseTwoReadyQueueKinds),
 		fqName("worker_query_admission_total"):          len(phaseTwoQueryInflightKinds) * len(phaseTwoQueryAdmissionResults),
-		// Four cached objects: version, snapshot, activation, timeline; four
-		// outcomes each. Only an object bounded by a derived budget reports
-		// occupancy, which today is the timeline alone.
-		fqName("control_cache_total"):        16,
+		// Cached objects: version, activation, activation delta, catalog
+		// index, timeline, timeline by revision, and the key segment memos;
+		// four outcomes each. Only an object bounded by a derived budget
+		// reports occupancy, which today is the timeline alone.
+		fqName("control_cache_total"):        40,
 		fqName("control_cache_entries"):      4,
 		fqName("control_cache_bytes"):        4,
 		fqName("control_cache_bytes_limit"):  4,
@@ -808,6 +810,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("view_messages_sent_total"):    3,
 		fqName("view_stream_refusals_total"):  1,
 		fqName("view_deltas_oversized_total"): 1,
+		fqName("view_executed_query_groups"):  len(viewGateOutcomes),
 		// The Worker's side: closed failure and refusal words plus other.
 		fqName("view_client_connected"):        1,
 		fqName("view_installed_revision"):      1,

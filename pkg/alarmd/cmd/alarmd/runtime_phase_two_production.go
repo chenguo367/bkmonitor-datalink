@@ -1343,6 +1343,10 @@ type productionPhaseTwoOwnership struct {
 	dependencies productionPhaseTwoOwnershipDependencies
 	reconciler   *scheduler.Reconciler
 	flights      *scheduler.FlightCoordinator
+	// viewGate decides, per Slot read, whether a Query Group is executed
+	// from the installed view (decision-016 batch 4); nil is the shadow
+	// step, every read the control plane's way.
+	viewGate *viewExecutionGate
 
 	mu        sync.Mutex
 	authority ownership.PublicationAuthority
@@ -2284,9 +2288,15 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	if err != nil {
 		return nil, err
 	}
+	var catalog productionPhaseTwoSlotCatalog = runtime.dependencies.Catalog
+	release := func() {}
+	if runtime.viewGate != nil {
+		catalog = &viewGatedCatalog{next: catalog, gate: runtime.viewGate, queryGroup: queryGroup, session: session}
+		release = func() { runtime.viewGate.forget(queryGroup) }
+	}
 	source, err := scheduler.NewProductionSlotSource(
 		queryGroup, runtime.dependencies.WorkerID, session,
-		runtime.dependencies.Catalog, runtime.dependencies.Progress, runtime.dependencies.Now,
+		catalog, runtime.dependencies.Progress, runtime.dependencies.Now,
 		scheduler.WithRecoveryLimits(runtime.dependencies.RecoveryLimits),
 		scheduler.WithPostRecoveryTerminalDelay(runtime.dependencies.PostRecoveryTerminalDelay),
 		scheduler.WithQueryDeadlineReserve(runtime.dependencies.QueryDeadlineReserve),
@@ -2310,7 +2320,16 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	}
 	return &productionPhaseTwoQueryGroup{
 		session: session, runner: runner, observer: runtime.dependencies.Observer, now: runtime.dependencies.Now,
+		release: release,
 	}, nil
+}
+
+// WithViewExecutionGate makes every Query Group opened from now on read the
+// control plane through the gate.
+func (runtime *productionPhaseTwoOwnership) WithViewExecutionGate(gate *viewExecutionGate) {
+	if runtime != nil {
+		runtime.viewGate = gate
+	}
 }
 
 func (runtime *productionPhaseTwoOwnership) Close() error {
@@ -2345,6 +2364,10 @@ type productionPhaseTwoQueryGroup struct {
 	runner   *scheduler.Runner
 	observer observability.Observer
 	now      func() time.Time
+	// release is what letting the Query Group go must also do: the view gate
+	// forgets it, so it counts neither as executed from the view nor as
+	// short of it.
+	release func()
 }
 
 type observedProductionSlotSource struct {
@@ -2597,6 +2620,9 @@ func (runtime *productionPhaseTwoQueryGroup) clock() time.Time {
 }
 
 func (runtime *productionPhaseTwoQueryGroup) Release(ctx context.Context) error {
+	if runtime.release != nil {
+		runtime.release()
+	}
 	return runtime.session.Release(ctx)
 }
 

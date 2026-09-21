@@ -27,8 +27,9 @@ func TestTheViewStreamAccountReachesTheFleetFieldForField(t *testing.T) {
 	at := time.Unix(1_700_000_000, 0)
 	stats := viewstream.Stats{
 		Leading: true, ControlEpoch: 7, Revision: 12, Sessions: 63,
-		Counts:  viewstream.Counts{Expected: 64, Sent: 64, Acked: 63, Installed: 62, Switched: 0},
-		Ignored: viewstream.Ignored{UnknownVersion: 1, UnexpectedReceiver: 2, DigestMismatch: 3, StaleIncarnation: 4},
+		Counts:      viewstream.Counts{Expected: 64, Sent: 64, Acked: 63, Installed: 62, Switched: 0},
+		Ignored:     viewstream.Ignored{UnknownVersion: 1, UnexpectedReceiver: 2, DigestMismatch: 3, StaleIncarnation: 4},
+		NotSwitched: []viewstream.LaggingReceiver{{WorkerID: "w05", Incarnation: "i-05", Connected: true, SwitchedQueryGroups: 597}},
 		Lagging: []viewstream.LaggingReceiver{
 			{WorkerID: "w17", Incarnation: "i-17", Connected: false},
 			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", Connected: true},
@@ -42,7 +43,8 @@ func TestTheViewStreamAccountReachesTheFleetFieldForField(t *testing.T) {
 	want := &fleet.ViewStreamFacts{
 		At: at, Leading: true, ControlEpoch: 7, Revision: 12, Sessions: 63,
 		Expected: 64, Sent: 64, Acked: 63, Installed: 62, Switched: 0,
-		Ignored: fleet.ViewStreamIgnored{UnknownVersion: 1, UnexpectedReceiver: 2, DigestMismatch: 3, StaleIncarnation: 4},
+		Ignored:     fleet.ViewStreamIgnored{UnknownVersion: 1, UnexpectedReceiver: 2, DigestMismatch: 3, StaleIncarnation: 4},
+		NotSwitched: []fleet.ViewStreamLagging{{WorkerID: "w05", Incarnation: "i-05", Connected: true, SwitchedQueryGroups: 597}},
 		Lagging: []fleet.ViewStreamLagging{
 			{WorkerID: "w17", Incarnation: "i-17", Connected: false},
 			{WorkerID: "w23", Incarnation: "i-23", Failure: "DELTA_DIGEST_MISMATCH", Connected: true},

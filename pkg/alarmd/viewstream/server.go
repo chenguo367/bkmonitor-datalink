@@ -79,6 +79,11 @@ type Stats struct {
 	Ignored Ignored
 	// Lagging lists the Workers that have not installed the current version.
 	Lagging []LaggingReceiver
+	// NotSwitched lists the Workers that installed the current version but
+	// do not yet execute every one of its Query Groups from it, each with
+	// the count it does (decision-016 batch 4). Empty is every installed
+	// Worker switched; in the shadow step it is every installed Worker.
+	NotSwitched []LaggingReceiver
 	// Counters since the process started.
 	Publications        uint64
 	PublicationsSkipped uint64
@@ -101,6 +106,7 @@ type Server struct {
 	pb.UnimplementedControlServiceServer
 	admission Admission
 	observer  observability.Observer
+	costs     CostSink
 	now       func() time.Time
 	// tick is how often a session checks for idleness; HeartbeatInterval in
 	// production, shorter in a test that drives the clock.
@@ -118,6 +124,9 @@ type Server struct {
 type ServerOptions struct {
 	Now  func() time.Time
 	Tick time.Duration
+	// Costs receives each heartbeat's Query Group costs with the Worker they
+	// came from; nil discards them (decision-020 section 5.2).
+	Costs CostSink
 }
 
 func NewServer(admission Admission, observer observability.Observer, options ServerOptions) (*Server, error) {
@@ -135,7 +144,7 @@ func NewServer(admission Admission, observer observability.Observer, options Ser
 	if tick <= 0 {
 		tick = HeartbeatInterval
 	}
-	return &Server{admission: admission, observer: observer, now: now, tick: tick, sessions: map[string]*session{}}, nil
+	return &Server{admission: admission, observer: observer, costs: options.Costs, now: now, tick: tick, sessions: map[string]*session{}}, nil
 }
 
 // Lead starts a term: a new publisher, and every open session is woken so
@@ -250,6 +259,16 @@ func (server *Server) Stats() Stats {
 		stats.Current, stats.Counts = key, counts
 		stats.Objects, _ = server.publisher.ledger.Objects(key)
 		stats.Lagging = server.publisher.ledger.Lagging("installed")
+		installed := make(map[string]struct{}, len(stats.Lagging))
+		for _, lagging := range stats.Lagging {
+			installed[lagging.WorkerID] = struct{}{}
+		}
+		for _, receiver := range server.publisher.ledger.Lagging("switched") {
+			if _, short := installed[receiver.WorkerID]; short {
+				continue
+			}
+			stats.NotSwitched = append(stats.NotSwitched, receiver)
+		}
 		for index := range stats.Lagging {
 			_, connected := server.sessions[stats.Lagging[index].WorkerID]
 			stats.Lagging[index].Connected = connected
@@ -527,6 +546,11 @@ func (sess *session) receive() {
 			sess.mu.Unlock()
 			sess.poke()
 		case *pb.WorkerMessage_Heartbeat:
+			if sink := sess.server.costs; sink != nil {
+				if costs := CostsFromWire(body.Heartbeat.Costs); len(costs) > 0 {
+					sink.RecordCosts(sess.receiver.WorkerID, costs)
+				}
+			}
 			sess.enqueue(&pb.LeaderMessage{Body: &pb.LeaderMessage_Heartbeat{Heartbeat: &pb.Heartbeat{
 				SentAtMs: sess.server.now().UnixMilli(), Installed: versionToWire(sess.currentSent())}}})
 		case *pb.WorkerMessage_ObjectRequest:

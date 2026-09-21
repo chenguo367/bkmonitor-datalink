@@ -745,3 +745,188 @@ func TestEveryStreamReasonWordIsInTheVocabularyAndOnTheLine(t *testing.T) {
 		t.Errorf("discovery misses observed without the word as reason_code: %v", codes)
 	}
 }
+
+type recordingCostSink struct {
+	mu    sync.Mutex
+	costs map[string][]viewstream.QueryGroupCost
+}
+
+func (sink *recordingCostSink) RecordCosts(workerID string, costs []viewstream.QueryGroupCost) {
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if sink.costs == nil {
+		sink.costs = map[string][]viewstream.QueryGroupCost{}
+	}
+	sink.costs[workerID] = append([]viewstream.QueryGroupCost(nil), costs...)
+}
+
+type scriptedCostSource struct{ costs []viewstream.QueryGroupCost }
+
+func (source scriptedCostSource) Costs() []viewstream.QueryGroupCost { return source.costs }
+
+// What the Worker's cost source says rides on its heartbeat and reaches the
+// Leader's sink under the Worker's name. The two ends are interfaces the
+// producer and the consumer implement on their own sides; this pins the
+// wire between them, so neither can be built against a heartbeat that does
+// not carry what the other expects.
+func TestTheHeartbeatCarriesTheWorkersCostsToTheLeadersSink(t *testing.T) {
+	sink := &recordingCostSink{}
+	admit := &tokenAdmission{tokens: map[string]string{"w1": "t1"}}
+	server, err := viewstream.NewServer(admit, &sessionObserver{}, viewstream.ServerOptions{Tick: 20 * time.Millisecond, Costs: sink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(server.Close)
+	if err := server.Lead(7); err != nil {
+		t.Fatal(err)
+	}
+	dialer := &bufconnDialer{}
+	dialer.serveOn(t, "leader-a", server)
+	discovery := &scriptedDiscovery{}
+	discovery.set("leader-a", true)
+	costs := []viewstream.QueryGroupCost{{QueryGroup: "qg-1", RetainedBytesPeak: 175 << 20, CostPerSecondMilli: 570}}
+	client, err := viewstream.NewClient(viewstream.ClientIdentity{WorkerID: "w1", Incarnation: "i1", StreamToken: "t1"}, discovery, nil, &sessionObserver{},
+		viewstream.ClientOptions{Dial: dialer.dial, Tick: 20 * time.Millisecond, Costs: scriptedCostSource{costs: costs},
+			Sleep: func(ctx context.Context, wait time.Duration) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(5 * time.Millisecond):
+					return nil
+				}
+			}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = client.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+	eventually(t, "the Leader's sink holds w1's costs", func() bool {
+		sink.mu.Lock()
+		defer sink.mu.Unlock()
+		got := sink.costs["w1"]
+		return len(got) == 1 && got[0] == costs[0]
+	})
+}
+
+// scriptedSwitched answers like the Worker's gate: executable is a set of
+// Query Groups, and the count is of those among the entries asked about.
+type scriptedSwitched struct {
+	mu         sync.Mutex
+	executable map[execution.QueryGroupIdentity]struct{}
+	// overcount makes the source answer more than it was asked about, the
+	// way a source counting the wrong population would.
+	overcount bool
+}
+
+func (source *scriptedSwitched) set(groups ...execution.QueryGroupIdentity) {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	source.executable = map[execution.QueryGroupIdentity]struct{}{}
+	for _, group := range groups {
+		source.executable[group] = struct{}{}
+	}
+}
+
+func (source *scriptedSwitched) SwitchedQueryGroups(of []execution.QueryGroupIdentity) int {
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	if source.overcount {
+		return len(of) + 1
+	}
+	count := 0
+	for _, group := range of {
+		if _, ok := source.executable[group]; ok {
+			count++
+		}
+	}
+	return count
+}
+
+// The receipt says how many of the view's Query Groups the Worker executes
+// from it and claims switched only when that is all of them; the count moves
+// between heartbeats without a new version, and the Leader can read how far
+// short of switched a Worker is.
+func TestTheReceiptCountsTheQueryGroupsExecutedFromTheViewAndClaimsSwitchedOnlyForAll(t *testing.T) {
+	harness := startServer(t)
+	ctx := context.Background()
+	if err := harness.server.Lead(7); err != nil {
+		t.Fatal(err)
+	}
+	first := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w1"},
+		map[string]viewstream.Content{"qg-1": content("obj-1", "s1"), "qg-2": content("obj-2", "s2")})
+	if _, err := harness.server.Publish(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	dialer := &bufconnDialer{}
+	dialer.serveOn(t, "leader-a", harness.server)
+	discovery := &scriptedDiscovery{}
+	discovery.set("leader-a", true)
+	switched := &scriptedSwitched{}
+	switched.set("qg-1")
+	clock := &atomic.Int64{}
+	clock.Store(time.Unix(1000, 0).UnixMilli())
+	client, err := viewstream.NewClient(viewstream.ClientIdentity{WorkerID: "w1", Incarnation: "i1", StreamToken: "t1"}, discovery, nil, &sessionObserver{},
+		viewstream.ClientOptions{Dial: dialer.dial, Tick: 20 * time.Millisecond, Switched: switched,
+			Now: func() time.Time { return time.UnixMilli(clock.Load()) },
+			Sleep: func(ctx context.Context, wait time.Duration) error {
+				time.Sleep(5 * time.Millisecond)
+				return ctx.Err()
+			}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runCtx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { defer close(done); _ = client.Run(runCtx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	eventually(t, "one of two executed from the view, not switched", func() bool {
+		stats := harness.server.Stats()
+		lagging := harness.server.Stats().NotSwitched
+		return stats.Counts.Installed == 1 && stats.Counts.Switched == 0 &&
+			len(lagging) == 1 && lagging[0].WorkerID == "w1" && lagging[0].SwitchedQueryGroups == 1
+	})
+	// The second Query Group's checks come good between heartbeats: the next
+	// receipt claims switched with no new version.
+	switched.set("qg-1", "qg-2")
+	eventually(t, "both executed from the view, switched", func() bool {
+		stats := harness.server.Stats()
+		return stats.Counts.Switched == 1 && stats.Revision == 1 && client.Stats().SwitchedQueryGroups == 2
+	})
+
+	// A delta moves qg-2 away. The Worker still runs it until its next read
+	// and the gate still calls it executable; the new version names one
+	// entry, and only that entry counts - a version is switched by its own
+	// entries, not by everything the Worker runs. qg-1 alone is 1 of 1:
+	// switched; had qg-2 counted, 2 of 1 would have read as switched too,
+	// for the wrong reason, so the gate is made to lose qg-1 as well.
+	switched.set("qg-2")
+	second := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-2": "w2"},
+		map[string]viewstream.Content{"qg-1": content("obj-1", "s1"), "qg-2": content("obj-2", "s2")})
+	if _, err := harness.server.Publish(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the moved-away Query Group does not count for the new version", func() bool {
+		stats := harness.server.Stats()
+		return stats.Revision == 2 && stats.Counts.Installed == 1 && stats.Counts.Switched == 0 &&
+			len(stats.NotSwitched) == 1 && stats.NotSwitched[0].SwitchedQueryGroups == 0
+	})
+
+	// A source that answers more than the version has is counting the
+	// wrong population; that is not "all of them", it is nothing.
+	switched.mu.Lock()
+	switched.overcount = true
+	switched.mu.Unlock()
+	third := desiredAt(publicationA, map[string]string{"qg-1": "w1", "qg-3": "w1"},
+		map[string]viewstream.Content{"qg-1": content("obj-1", "s1"), "qg-3": content("obj-3", "s3")})
+	if _, err := harness.server.Publish(ctx, third); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "an overcounting source claims nothing", func() bool {
+		stats := harness.server.Stats()
+		return stats.Revision == 3 && stats.Counts.Installed == 1 && stats.Counts.Switched == 0 &&
+			len(stats.NotSwitched) == 1 && stats.NotSwitched[0].SwitchedQueryGroups == 0
+	})
+}

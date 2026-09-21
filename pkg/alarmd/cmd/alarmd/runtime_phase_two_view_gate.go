@@ -1,0 +1,222 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2025 Tencent. All rights reserved.
+// Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://opensource.org/licenses/MIT
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+// an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+
+package main
+
+import (
+	"context"
+	"sync"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
+)
+
+// The Worker's side of decision-016 batch 4: whether one Query Group is
+// executed from the installed view, decided afresh at every catalog read a
+// Slot makes, by three checks that need no state of their own.
+//
+//  1. The installed view carries the Query Group, with content.
+//  2. The lease's renewal brought back the content scope the entry names -
+//     or names it as pending, which is the Worker ahead of the record, not
+//     behind it (016 section 7.1.1 item 5).
+//  3. The lease's renewal brought back the timeline revision the entry
+//     names, and it is not zero: zero is the record not saying.
+//
+// The first is the view's word, the second and third the record's, brought
+// by the renewal. A view the record does not vouch for - a delta a
+// partitioned old Leader pushed, an entry ahead of a record not yet stamped
+// - fails on the record's side and the Slot reads the control plane the way
+// it always did. When the three hold, the read carries the timeline
+// revision as a hint and the catalog answers it without the activation
+// header, which is the poll batch 4 removes; the cache and the body are the
+// third party of check 3, and a body at another revision falls back to the
+// header on its own (controlplane.WithTimelineRevisionHint).
+//
+// The outcomes are counted per Query Group so the receipt can say how many
+// the Worker executes from the view, and by word so the drill can read
+// which check is failing and for how long: timeline_stale only inside the
+// view's propagation delay is the reading batch 4a is accepted on.
+type viewExecutionGate struct {
+	view installedView
+
+	mu       sync.Mutex
+	outcomes map[execution.QueryGroupIdentity]viewGateOutcome
+}
+
+// installedView is the one thing the gate asks of the view client.
+type installedView interface {
+	Entry(execution.QueryGroupIdentity) (viewstream.Entry, bool)
+}
+
+type viewGateOutcome string
+
+const (
+	viewGateExecutable       viewGateOutcome = "executable"
+	viewGateNotInView        viewGateOutcome = "not_in_view"
+	viewGateNoContent        viewGateOutcome = "no_content"
+	viewGateScopeMismatch    viewGateOutcome = "scope_mismatch"
+	viewGateTimelineUnsaid   viewGateOutcome = "timeline_unsaid"
+	viewGateTimelineMismatch viewGateOutcome = "timeline_stale"
+	viewGateNoLease          viewGateOutcome = "no_lease"
+)
+
+// viewGateOutcomes is the closed vocabulary the gate reports in, for the
+// metric's series bound and for a reader who wants the list.
+var viewGateOutcomes = []viewGateOutcome{
+	viewGateExecutable, viewGateNotInView, viewGateNoContent, viewGateScopeMismatch, viewGateTimelineUnsaid, viewGateTimelineMismatch, viewGateNoLease,
+}
+
+func newViewExecutionGate() *viewExecutionGate {
+	return &viewExecutionGate{outcomes: map[execution.QueryGroupIdentity]viewGateOutcome{}}
+}
+
+// attach gives the gate the installed view to read. The client is built
+// with the gate as its switched source, so the gate exists first.
+func (gate *viewExecutionGate) attach(view installedView) {
+	gate.mu.Lock()
+	gate.view = view
+	gate.mu.Unlock()
+}
+
+func (gate *viewExecutionGate) installed() installedView {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return gate.view
+}
+
+// judge is the three checks for one Query Group against the lease its
+// session holds now. It returns the timeline revision to hint with when
+// the Query Group is executed from the view, and the outcome either way.
+func (gate *viewExecutionGate) judge(queryGroup execution.QueryGroupIdentity, lease ownership.Lease, held bool) (uint64, viewGateOutcome) {
+	if !held {
+		return 0, viewGateNoLease
+	}
+	view := gate.installed()
+	if view == nil {
+		return 0, viewGateNotInView
+	}
+	entry, inView := view.Entry(queryGroup)
+	if !inView {
+		return 0, viewGateNotInView
+	}
+	// In the view without content: a draining Query Group, or one whose
+	// Segment carries no object. It is never going to be executed from the
+	// view, and a fleet with such entries never reaches switched == installed
+	// - its own word, so a reader does not go looking at the stream for a
+	// Query Group the stream delivered.
+	if entry.Content == nil {
+		return 0, viewGateNoContent
+	}
+	digest := string(entry.Content.ObjectDigest)
+	if lease.ContentScope != digest && lease.PendingContentScope != digest {
+		return 0, viewGateScopeMismatch
+	}
+	if lease.TimelineRecordRevision == 0 || entry.Assignment.TimelineRecordRevision == 0 {
+		return 0, viewGateTimelineUnsaid
+	}
+	if lease.TimelineRecordRevision != entry.Assignment.TimelineRecordRevision {
+		return 0, viewGateTimelineMismatch
+	}
+	return entry.Assignment.TimelineRecordRevision, viewGateExecutable
+}
+
+// record keeps the latest outcome for a Query Group this Worker runs.
+func (gate *viewExecutionGate) record(queryGroup execution.QueryGroupIdentity, outcome viewGateOutcome) {
+	gate.mu.Lock()
+	gate.outcomes[queryGroup] = outcome
+	gate.mu.Unlock()
+}
+
+// forget drops a Query Group the Worker no longer runs, so a released
+// Query Group neither counts as executed from the view nor as short of it.
+func (gate *viewExecutionGate) forget(queryGroup execution.QueryGroupIdentity) {
+	gate.mu.Lock()
+	delete(gate.outcomes, queryGroup)
+	gate.mu.Unlock()
+}
+
+// SwitchedQueryGroups is how many of the given Query Groups - a version's
+// own entries - this Worker executes from the view as of their latest Slot
+// read; the receipt's count. Asked over the version's entries rather than
+// over everything the gate remembers, because a Query Group a delta moved
+// away stays executable in the gate until its next read, and it must not
+// count for a version that no longer names it.
+func (gate *viewExecutionGate) SwitchedQueryGroups(of []execution.QueryGroupIdentity) int {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	count := 0
+	for _, queryGroup := range of {
+		if gate.outcomes[queryGroup] == viewGateExecutable {
+			count++
+		}
+	}
+	return count
+}
+
+// Counts is the Query Groups by latest outcome, for the metric.
+func (gate *viewExecutionGate) Counts() map[string]int {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	counts := make(map[string]int, len(viewGateOutcomes))
+	for _, outcome := range viewGateOutcomes {
+		counts[string(outcome)] = 0
+	}
+	for _, outcome := range gate.outcomes {
+		counts[string(outcome)]++
+	}
+	return counts
+}
+
+// viewGatedCatalog is one Query Group's catalog reader: every read a Slot
+// makes passes through the gate, and a read the gate lets through carries
+// the timeline revision hint. The gate decides per read rather than per
+// Slot because the reads of one Slot are few and a renewal can land
+// between them; the hint each read carries is the one true at that read.
+type viewGatedCatalog struct {
+	next       productionPhaseTwoSlotCatalog
+	gate       *viewExecutionGate
+	queryGroup execution.QueryGroupIdentity
+	session    *ownership.Session
+}
+
+func (catalog *viewGatedCatalog) gated(ctx context.Context) context.Context {
+	lease, held := catalog.session.Current()
+	revision, outcome := catalog.gate.judge(catalog.queryGroup, lease, held)
+	catalog.gate.record(catalog.queryGroup, outcome)
+	if revision == 0 {
+		return ctx
+	}
+	return controlplane.WithTimelineRevisionHint(ctx, revision)
+}
+
+func (catalog *viewGatedCatalog) ReadInitialFrozenSchedule(ctx context.Context, queryGroup execution.QueryGroupIdentity) (execution.FrozenQueryGroupSchedule, error) {
+	return catalog.next.ReadInitialFrozenSchedule(catalog.gated(ctx), queryGroup)
+}
+
+func (catalog *viewGatedCatalog) ReadFrozenSchedule(ctx context.Context, queryGroup execution.QueryGroupIdentity, at execution.EvaluationTime) (execution.FrozenQueryGroupSchedule, error) {
+	return catalog.next.ReadFrozenSchedule(catalog.gated(ctx), queryGroup, at)
+}
+
+func (catalog *viewGatedCatalog) ReadSuccessorFrozenSchedule(ctx context.Context, queryGroup execution.QueryGroupIdentity, at execution.EvaluationTime) (execution.FrozenQueryGroupSchedule, error) {
+	return catalog.next.ReadSuccessorFrozenSchedule(catalog.gated(ctx), queryGroup, at)
+}
+
+func (catalog *viewGatedCatalog) ReadScheduleRetirement(ctx context.Context, queryGroup execution.QueryGroupIdentity) (execution.EvaluationTime, bool, error) {
+	return catalog.next.ReadScheduleRetirement(catalog.gated(ctx), queryGroup)
+}
+
+func (catalog *viewGatedCatalog) NextSlotAfter(ctx context.Context, queryGroup execution.QueryGroupIdentity, at execution.EvaluationTime) (execution.EvaluationTime, error) {
+	return catalog.next.NextSlotAfter(catalog.gated(ctx), queryGroup, at)
+}
+
+func (catalog *viewGatedCatalog) FreezeSlotContract(ctx context.Context, request execution.FreezeSlotContractRequest) (execution.FrozenSlotContractFact, error) {
+	return catalog.next.FreezeSlotContract(catalog.gated(ctx), request)
+}

@@ -134,6 +134,21 @@ func TestTheProductionLeaderServesItsDesiredSetOverTheViewStream(t *testing.T) {
 		if entry.QueryGroup == string(fixture.queryGroup) && entry.Content.ObjectDigest != string(fixture.initialSchedule.Segment.ObjectDigest) {
 			t.Fatalf("entry %s names %s, its open Segment names %s", entry.QueryGroup, entry.Content.ObjectDigest, fixture.initialSchedule.Segment.ObjectDigest)
 		}
+		// The view previews the record's timeline revision, and the record
+		// says the timeline's own: the two the Worker compares are one
+		// number from the day the Query Group is placed (decision-016
+		// batch 4).
+		timeline, err := fixture.repository.TimelineRecordRevision(ctx, execution.QueryGroupIdentity(entry.QueryGroup))
+		if err != nil || timeline == 0 {
+			t.Fatalf("timeline revision of %s = (%d, %v), want the activated timeline's", entry.QueryGroup, timeline, err)
+		}
+		if entry.Assignment.TimelineRecordRevision != timeline {
+			t.Fatalf("entry %s previews timeline revision %d, the timeline is at %d", entry.QueryGroup, entry.Assignment.TimelineRecordRevision, timeline)
+		}
+		record, err := store.ReadAssignment(ctx, execution.QueryGroupIdentity(entry.QueryGroup))
+		if err != nil || record.TimelineRecordRevision != timeline {
+			t.Fatalf("record of %s says timeline revision %d (%v), the timeline is at %d", entry.QueryGroup, record.TimelineRecordRevision, err, timeline)
+		}
 	}
 	// The receipt is counted for the one expected receiver.
 	if err := stream.Send(&pb.WorkerMessage{Body: &pb.WorkerMessage_Receipt{Receipt: &pb.Receipt{

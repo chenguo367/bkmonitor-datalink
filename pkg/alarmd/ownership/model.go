@@ -249,6 +249,15 @@ type AssignmentRecord struct {
 	// its own clock reads it from the Lease its renewal returned.
 	PendingContentScope string
 	EffectiveAt         time.Time
+	// TimelineRecordRevision is the revision of this Query Group's Schedule
+	// timeline record as the leader last wrote it, copied here so a holder
+	// learns it from the same renewal that brings its content scope. The
+	// timeline is the authority on which Segment is open; this is the
+	// record's word on which timeline that is, and the executable view the
+	// holder installed previews the same number (decision-016 batch 4). Zero
+	// on a record no leader has written it to yet: a reader treats zero as
+	// "not said", never as revision zero, which no timeline has.
+	TimelineRecordRevision uint64
 }
 
 // ContentChangePending reports whether the record carries a content change
@@ -280,6 +289,11 @@ type AssignmentDecision struct {
 	// content contract and what a leader writes when a worker that does not
 	// declare the contract joins the fleet. Exclusive with ContentScope.
 	WithdrawContentScope bool
+	// TimelineRecordRevision, when not zero, is written to the record as the
+	// revision of the Query Group's timeline; zero leaves whatever the record
+	// holds. A placement names it so a Query Group's first record carries
+	// the number the cutover would otherwise have been the only writer of.
+	TimelineRecordRevision uint64
 }
 
 func (decision AssignmentDecision) Validate() error {
@@ -326,6 +340,10 @@ type Lease struct {
 	ContentScope        string
 	PendingContentScope string
 	EffectiveAt         time.Time
+	// TimelineRecordRevision is the record's word on which timeline revision
+	// the Query Group is on, as of this renewal; zero when the record does
+	// not say. See AssignmentRecord.TimelineRecordRevision.
+	TimelineRecordRevision uint64
 }
 
 // ContentChangePending reports whether the lease was renewed under a content
