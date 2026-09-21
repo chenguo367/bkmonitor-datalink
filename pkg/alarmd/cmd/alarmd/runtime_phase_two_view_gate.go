@@ -60,7 +60,7 @@ type viewExecutionGate struct {
 	// the records and the view within a second and the leases within a
 	// renewal interval; without this every Query Group rechecked in that
 	// window was refused once or more, a burst per Worker per cutover.
-	renewals, renewalsSettled uint64
+	renewals, renewalsSettled, renewalsFailed uint64
 }
 
 // installedView is the one thing the gate asks of the view client.
@@ -149,23 +149,29 @@ func (gate *viewExecutionGate) judgeAgainstView(queryGroup execution.QueryGroupI
 	return viewRevision, viewGateExecutable, viewRevision
 }
 
-// noteRenewal counts a lease renewed ahead of its interval for the gate.
-func (gate *viewExecutionGate) noteRenewal(settled bool) {
+// noteRenewal counts a lease renewal the gate made ahead of its interval:
+// settled when the check passed on the renewed lease, failed when the
+// renewal itself returned an error, unsettled otherwise.
+func (gate *viewExecutionGate) noteRenewal(settled, failed bool) {
 	gate.mu.Lock()
 	gate.renewals++
-	if settled {
+	switch {
+	case failed:
+		gate.renewalsFailed++
+	case settled:
 		gate.renewalsSettled++
 	}
 	gate.mu.Unlock()
 }
 
-// Renewals is how many leases the gate renewed ahead of their interval
-// because the view was ahead of the lease, and how many of those settled
-// the check, for the metrics.
-func (gate *viewExecutionGate) Renewals() (uint64, uint64) {
+// Renewals is the gate's early lease renewals for the metrics: how many
+// were made, how many settled the check, and how many failed to renew at
+// all. A renewal that failed says nothing about the view against the
+// record, so it is not counted among the unsettled.
+func (gate *viewExecutionGate) Renewals() (made, settled, failed uint64) {
 	gate.mu.Lock()
 	defer gate.mu.Unlock()
-	return gate.renewals, gate.renewalsSettled
+	return gate.renewals, gate.renewalsSettled, gate.renewalsFailed
 }
 
 // record keeps the latest outcome for a Query Group this Worker runs.
@@ -252,11 +258,12 @@ func gateContext(ctx context.Context, gate *viewExecutionGate, queryGroup execut
 	lease, held := session.Current()
 	revision, outcome, viewRevision := gate.judgeAgainstView(queryGroup, lease, held)
 	if outcome == viewGateTimelineMismatch && lease.TimelineRecordRevision < viewRevision && renew != nil {
-		if err := renew(ctx); err == nil {
+		err := renew(ctx)
+		if err == nil {
 			lease, held = session.Current()
 			revision, outcome, _ = gate.judgeAgainstView(queryGroup, lease, held)
 		}
-		gate.noteRenewal(outcome == viewGateExecutable)
+		gate.noteRenewal(outcome == viewGateExecutable, err != nil)
 	}
 	gate.record(queryGroup, outcome)
 	if revision == 0 {

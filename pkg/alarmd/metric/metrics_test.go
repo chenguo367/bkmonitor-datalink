@@ -812,8 +812,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("view_stream_refusals_total"):  1,
 		fqName("view_deltas_oversized_total"): 1,
 		fqName("view_executed_query_groups"):  len(viewGateOutcomes),
-		// settled and unsettled, with the gate.
-		fqName("view_gate_lease_renewal_total"): 2,
+		// settled, unsettled and failed, with the gate.
+		fqName("view_gate_lease_renewal_total"): 3,
 		// The Worker's side: closed failure and refusal words plus other.
 		fqName("view_client_connected"):        1,
 		fqName("view_installed_revision"):      1,

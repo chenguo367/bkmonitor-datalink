@@ -213,8 +213,8 @@ func TestTheGateRenewsTheLeaseOnceWhenTheViewIsAheadOfIt(t *testing.T) {
 	if lease, _ := session.Current(); lease.TimelineRecordRevision != 13 {
 		t.Fatalf("the lease says %d after the early renewal, want 13", lease.TimelineRecordRevision)
 	}
-	if made, settled := gate.Renewals(); made != 1 || settled != 1 {
-		t.Fatalf("gate renewals = (%d, %d), want one made and settled", made, settled)
+	if made, settled, failed := gate.Renewals(); made != 1 || settled != 1 || failed != 0 {
+		t.Fatalf("gate renewals = (%d, %d, %d), want one made and settled", made, settled, failed)
 	}
 	if counts := gate.Counts(); counts[string(viewGateExecutable)] != 1 {
 		t.Fatalf("gate counts after the settled renewal = %v", counts)
@@ -229,8 +229,22 @@ func TestTheGateRenewsTheLeaseOnceWhenTheViewIsAheadOfIt(t *testing.T) {
 	if _, err := catalog.NextSlotAfter(ctx, "qg-1", 120); !errors.As(err, &refused) || refused.Reason != string(viewGateTimelineMismatch) {
 		t.Fatalf("a read with the view ahead of the record = %v, want ViewNotExecutableError{%s}", err, viewGateTimelineMismatch)
 	}
-	if made, settled := gate.Renewals(); renewals != 2 || made != 2 || settled != 1 {
-		t.Fatalf("renewals %d, gate (%d, %d): want the renewal made and not settled", renewals, made, settled)
+	if made, settled, failed := gate.Renewals(); renewals != 2 || made != 2 || settled != 1 || failed != 0 {
+		t.Fatalf("renewals %d, gate (%d, %d, %d): want the renewal made and not settled", renewals, made, settled, failed)
+	}
+	// A renewal that fails says nothing about the view against the record:
+	// refused as it stood, counted as failed rather than unsettled.
+	gate.attach(mapView{"qg-1": moved})
+	failing := &viewGatedCatalog{next: next, gate: gate, queryGroup: "qg-1", session: session,
+		renew: func(context.Context) error { return errors.New("store unreachable") }}
+	// The lease says 13 and the view 13 now; make the view ahead again so
+	// the gate has a renewal to make.
+	gate.attach(mapView{"qg-1": ahead})
+	if _, err := failing.NextSlotAfter(ctx, "qg-1", 120); !errors.As(err, &refused) {
+		t.Fatalf("a read whose renewal failed = %v, want refused as it stood", err)
+	}
+	if made, settled, failed := gate.Renewals(); made != 3 || settled != 1 || failed != 1 {
+		t.Fatalf("gate renewals after a failed one = (%d, %d, %d), want it counted as failed, not unsettled", made, settled, failed)
 	}
 	// The lease ahead of the view - the delta has not arrived - is left to
 	// the delta: refused, and no renewal made.

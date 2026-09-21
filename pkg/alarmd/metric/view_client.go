@@ -37,9 +37,11 @@ type ViewClientCounts struct {
 	// the check's word; nil before the gate exists.
 	ExecutedFromView map[string]int
 	// GateRenewals is leases the check renewed ahead of their interval
-	// because the view was ahead of the lease, and how many of those
-	// settled the check (decision-016 batch 4b).
-	GateRenewals, GateRenewalsSettled uint64
+	// because the view was ahead of the lease; how many of those settled
+	// the check, and how many failed to renew at all (decision-016 batch
+	// 4b). The rest were renewed and still refused: the view ahead of the
+	// record.
+	GateRenewals, GateRenewalsSettled, GateRenewalsFailed uint64
 }
 
 // viewClientInstallFailures and viewClientRefusals are the closed label
@@ -126,9 +128,10 @@ func newViewClientCollector() *viewClientCollector {
 			"Leases the executable-view check renewed ahead of their interval because the view named a newer timeline "+
 				"revision than the lease had brought (decision-016 batch 4b: the record moved, the lease had not "+
 				"caught up), by result: settled (the record agreed with the view and the read went through), "+
-				"unsettled (the view was ahead of the record too, and the read was refused timeline_stale). A burst "+
-				"of settled renewals per cutover is the interval's worth of Query Groups rechecked in it; unsettled "+
-				"rising is a view ahead of the records.",
+				"unsettled (renewed, and the view was ahead of the record too: refused timeline_stale), failed "+
+				"(the renewal itself returned an error, which says nothing about the view: refused as it stood). "+
+				"A burst of settled renewals per cutover is the interval's worth of Query Groups rechecked in it; "+
+				"unsettled rising is a view ahead of the records; failed rising is the store, not the view.",
 			[]string{"result"}, nil),
 	}
 }
@@ -179,7 +182,8 @@ func (c *viewClientCollector) Collect(ch chan<- prometheus.Metric) {
 			ch <- prometheus.MustNewConstMetric(c.executed, prometheus.GaugeValue, float64(counts.ExecutedFromView[outcome]), outcome)
 		}
 		ch <- prometheus.MustNewConstMetric(c.renewals, prometheus.CounterValue, float64(counts.GateRenewalsSettled), "settled")
-		ch <- prometheus.MustNewConstMetric(c.renewals, prometheus.CounterValue, float64(counts.GateRenewals-counts.GateRenewalsSettled), "unsettled")
+		ch <- prometheus.MustNewConstMetric(c.renewals, prometheus.CounterValue, float64(counts.GateRenewals-counts.GateRenewalsSettled-counts.GateRenewalsFailed), "unsettled")
+		ch <- prometheus.MustNewConstMetric(c.renewals, prometheus.CounterValue, float64(counts.GateRenewalsFailed), "failed")
 	}
 }
 
