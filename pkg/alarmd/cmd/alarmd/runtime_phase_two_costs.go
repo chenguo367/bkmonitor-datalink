@@ -3,6 +3,7 @@ package main
 import (
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -13,6 +14,11 @@ import (
 // reported again. decision-020 section 5.2: the heartbeat carries what
 // changed, not the whole roster every tick.
 const costReportThresholdPercent = 10
+
+// costEWMAWeightPercent is how much of a new reading enters the smoothed cost.
+// Low enough that one slow round does not move an object, high enough that a
+// genuine change is reported within a few heartbeats.
+const costEWMAWeightPercent = 30
 
 // workerCostSource is what this Worker's heartbeat reports of what its Query
 // Groups cost, for the Leader's byte-feasibility moves.
@@ -43,11 +49,36 @@ type workerCostSource struct {
 	// against the last read would let a reading drift past the threshold in
 	// steps that are each under it, and never be sent.
 	reported map[execution.QueryGroupIdentity]uint64
+	// cost is the smoothed cost per second and what it was last derived from.
+	cost map[execution.QueryGroupIdentity]*costRate
+	// lastAsked is when Costs was last answered, which is the span the wall
+	// difference is a rate over. The heartbeat's own cadence rather than a
+	// configured period: it is the only interval both ends of the difference
+	// were taken across.
+	lastAsked time.Time
+	now       func() time.Time
 }
 
-func newWorkerCostSource(summary *observability.CostSummary) *workerCostSource {
-	return &workerCostSource{summary: summary,
-		reported: make(map[execution.QueryGroupIdentity]uint64)}
+// costRate is one Query Group's smoothed cost and the reading it was last
+// advanced from.
+type costRate struct {
+	// lastWallNS is the window's compute wall at the previous ask, so the
+	// difference is what was spent since. The summary's window rotates under
+	// this, which makes a difference negative; a negative difference is
+	// dropped rather than clamped to zero, because zero is a rate and "the
+	// window rotated" is not a reading at all.
+	lastWallNS int64
+	seeded     bool
+	milli      uint64
+}
+
+func newWorkerCostSource(summary *observability.CostSummary, now func() time.Time) *workerCostSource {
+	if now == nil {
+		now = time.Now
+	}
+	return &workerCostSource{summary: summary, now: now,
+		reported: make(map[execution.QueryGroupIdentity]uint64),
+		cost:     make(map[execution.QueryGroupIdentity]*costRate)}
 }
 
 // boundByOwned sets what bounds the report: how many Query Groups this Worker
@@ -72,25 +103,34 @@ func (source *workerCostSource) Costs() []viewstream.QueryGroupCost {
 	if source == nil || source.summary == nil {
 		return nil
 	}
-	peaks := source.summary.RetainedPeaks()
+	return source.report(source.summary.RetainedPeaks())
+}
+
+// report decides what to send from one set of readings. Separate from Costs so
+// the decision can be exercised without a live summary behind it: what is
+// under test here is which entries go out, not where the readings came from.
+func (source *workerCostSource) report(peaks []observability.CostRetainedPeak) []viewstream.QueryGroupCost {
 	if len(peaks) == 0 {
 		return nil
 	}
 	source.mu.Lock()
 	defer source.mu.Unlock()
 
+	at := source.now()
+	elapsed := at.Sub(source.lastAsked)
+	source.lastAsked = at
+
 	costs := make([]viewstream.QueryGroupCost, 0, len(peaks))
 	for _, peak := range peaks {
 		group := execution.QueryGroupIdentity(peak.QueryGroupKey)
+		milli := source.advanceCost(group, peak, elapsed)
 		last, sent := source.reported[group]
 		if sent && !costReadingMoved(last, peak.RetainedBytesPeak) {
 			continue
 		}
 		costs = append(costs, viewstream.QueryGroupCost{
 			QueryGroup: group, RetainedBytesPeak: peak.RetainedBytesPeak,
-			// CostPerSecondMilli stays zero until the Worker reports it:
-			// zero is "not reported", and the Leader's byte moves read only
-			// the peak.
+			CostPerSecondMilli: milli,
 		})
 	}
 	// Largest first, so a report cut to the bound carries the objects that
@@ -113,6 +153,42 @@ func (source *workerCostSource) Costs() []viewstream.QueryGroupCost {
 		source.reported[cost.QueryGroup] = cost.RetainedBytesPeak
 	}
 	return costs
+}
+
+// advanceCost folds this ask's compute wall into the Query Group's smoothed
+// cost per second of schedule, and returns what to report.
+//
+// Zero means not reported, which is what the Leader reads it as, and it is
+// returned in every case the rate cannot be derived: the first ask for this
+// Query Group, an ask with no span to divide by, a window carrying
+// observations whose duration was never measured, and a window that rotated
+// between two asks. A guessed rate here is worse than none - the number it
+// feeds decides which object moves, and a rate that is quietly low leaves an
+// object exactly where it should not be.
+func (source *workerCostSource) advanceCost(
+	group execution.QueryGroupIdentity, reading observability.CostRetainedPeak, elapsed time.Duration,
+) uint64 {
+	rate := source.cost[group]
+	if rate == nil {
+		rate = &costRate{}
+		source.cost[group] = rate
+	}
+	previous, wall := rate.lastWallNS, reading.ComputeWallNS
+	seeded := rate.seeded
+	rate.lastWallNS, rate.seeded = wall, true
+	switch {
+	case !seeded, elapsed <= 0, reading.ComputeWallUnknown > 0, wall < previous:
+		return rate.milli
+	}
+	spent := wall - previous
+	// Thousandths of a second of compute per second of schedule.
+	sample := uint64(spent * 1000 / elapsed.Nanoseconds())
+	if rate.milli == 0 {
+		rate.milli = sample
+		return rate.milli
+	}
+	rate.milli = (rate.milli*(100-costEWMAWeightPercent) + sample*costEWMAWeightPercent) / 100
+	return rate.milli
 }
 
 // costReadingMoved reports whether a reading has moved by the threshold.

@@ -678,11 +678,24 @@ func (c *CostSummary) Snapshot() CostSnapshot {
 	return out
 }
 
-// CostRetainedPeak is one observed Query Group's retained-byte peak over the
-// window, by the key the caller reconciled it under.
+// CostRetainedPeak is one observed Query Group's cost reading over the window,
+// by the key the caller reconciled it under.
 type CostRetainedPeak struct {
 	QueryGroupKey     string
 	RetainedBytesPeak uint64
+	// ComputeWallNS is the evaluation and state wall this object spent: the
+	// work this replica did for it. Query wall is deliberately not in it -
+	// it contains the streaming callbacks and overlaps evaluation, so adding
+	// the two double counts, and what it measures is the backend waiting
+	// rather than this replica working. Run wall is not either: it contains
+	// the readiness wait, which would report an object that spends half its
+	// period waiting for data as the most expensive thing on the replica.
+	ComputeWallNS int64
+	// ComputeWallUnknown is how many of those observations carried no
+	// duration. A window with any of them cannot be divided into a rate: the
+	// numerator is short by an unknown amount, and a rate that is quietly low
+	// is the one that leaves an object where it is.
+	ComputeWallUnknown uint64
 }
 
 // RetainedPeaks is every observed group's retained-byte peak over the window.
@@ -708,8 +721,14 @@ func (c *CostSummary) RetainedPeaks() []CostRetainedPeak {
 	}
 	peaks := make([]CostRetainedPeak, 0, len(c.groups))
 	for key, g := range c.groups {
-		if peak := max(g.windows.current.RetainedBytesPeak, g.windows.previous.RetainedBytesPeak); peak > 0 {
-			peaks = append(peaks, CostRetainedPeak{QueryGroupKey: key, RetainedBytesPeak: peak})
+		reading := CostRetainedPeak{QueryGroupKey: key,
+			RetainedBytesPeak: max(g.windows.current.RetainedBytesPeak, g.windows.previous.RetainedBytesPeak)}
+		for _, s := range [2]CostScalars{g.windows.current, g.windows.previous} {
+			reading.ComputeWallNS += s.EvaluationWall.ObservedNS + s.StateWall.ObservedNS
+			reading.ComputeWallUnknown += s.EvaluationWall.Unknown + s.StateWall.Unknown
+		}
+		if reading.RetainedBytesPeak > 0 || reading.ComputeWallNS > 0 {
+			peaks = append(peaks, reading)
 		}
 	}
 	sort.Slice(peaks, func(i, j int) bool { return peaks[i].QueryGroupKey < peaks[j].QueryGroupKey })

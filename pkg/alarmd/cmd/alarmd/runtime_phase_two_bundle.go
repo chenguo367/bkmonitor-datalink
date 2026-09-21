@@ -832,7 +832,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// view and the lease the renewal last brought, whether the Query Group
 	// is executed from the view; the receipt counts those that are.
 	viewGate := newViewExecutionGate()
-	workerCosts := newWorkerCostSource(costSummary)
+	workerCosts := newWorkerCostSource(costSummary, external.Now)
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
 		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate,
