@@ -1561,6 +1561,12 @@ type WorkerAcknowledgement struct {
 
 // View is the aggregated answer returned to callers.
 type View struct {
+	// ownerOf is which counted replica listed each object as owned, for a
+	// reader asking about one object by name. Built from the same owned sets
+	// the coverage comparison reads; an object no complete set lists is not
+	// in it, which the strategy standing reports as such rather than as
+	// nobody's.
+	ownerOf map[string]string
 	// expectation is the already-read authoritative active set. It is kept
 	// off the wire and shared read-only, so detail can distinguish a quiet
 	// active object from an absent one without another control-plane read.
@@ -1816,6 +1822,13 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			// A replica that published a short set cannot be compared, and a
 			// zero from an incomparable read is not "none".
 			setsComplete = false
+		} else {
+			if view.ownerOf == nil {
+				view.ownerOf = make(map[string]string, snapshot.Owned)
+			}
+			for _, object := range snapshot.OwnedObjects {
+				view.ownerOf[object] = replica
+			}
 		}
 		view.Determined += snapshot.Determined
 		view.AnomaliesTotal += snapshot.TotalAnomalies

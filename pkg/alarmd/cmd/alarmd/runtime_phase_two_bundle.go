@@ -901,6 +901,13 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	fleetAPI = fleet.WithStrategyDirectory(fleetAPI, directory, external.Now)
+	// One strategy's standing by id, from the Leader's catalog memory: no
+	// Redis, no copy, no background work; a follower forwards the one
+	// request to the Leader's listener, found the way the view stream's
+	// clients find it.
+	fleetAPI = fleet.WithStrategyStanding(fleetAPI, fleetService, strategyLookupSource(reconciler),
+		leaderForwarder(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil),
+		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
 	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())
 	var costRefresh *observationCostRefresh
 	if diagnosticsClient != nil && observationCapacity.CostBytes > 0 {
