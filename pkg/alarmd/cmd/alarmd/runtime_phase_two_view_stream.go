@@ -249,6 +249,7 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 		assignment := viewstream.Assignment{
 			DesiredWorkerID: record.DesiredWorkerID, Revision: record.RecordRevision,
 			ContentScope: record.ContentScope, PendingContentScope: record.PendingContentScope,
+			TimelineRecordRevision: record.TimelineRecordRevision,
 		}
 		if !record.EffectiveAt.IsZero() {
 			assignment.EffectiveAtMs = record.EffectiveAt.UnixMilli()

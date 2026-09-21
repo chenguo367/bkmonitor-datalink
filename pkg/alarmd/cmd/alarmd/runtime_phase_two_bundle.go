@@ -497,6 +497,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err := ownershipStore.Ping(ctx); err != nil {
 		return nil, err
 	}
+	// A cutover stamps each rewritten timeline's revision on the Query
+	// Group's Assignment record in the same script (decision-016 batch 4);
+	// both live on the runtime Redis, and the catalog learns the record
+	// keys here rather than guessing the ownership prefix.
+	repository.WithAssignmentRecordKey(ownershipStore.AssignmentKey)
 
 	stateBackend, err := state.NewRedisBackendWithClient(productionRedisAddress(runtimeConnection), runtimeClient)
 	if err != nil {
@@ -782,6 +787,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// A placement names the timeline revision on the record it creates, read
+	// from the catalog; a record that already says it is not asked about.
+	assignmentReconciler.WithTimelineRevisions(repository)
 	var executor scheduler.Executor = coordinator
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		ExpiredRangeEnabled: cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled,

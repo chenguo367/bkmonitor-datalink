@@ -1036,3 +1036,19 @@ func (repository *RedisCatalogRepository) WithAssignmentRecordKey(key func(execu
 	}
 	return repository
 }
+
+// TimelineRecordRevision is the revision the Query Group's Schedule timeline
+// record is at, read through the control cache like every other timeline
+// read; zero and no error when the Query Group has no timeline yet. It is
+// what a placement writes onto the Assignment record it creates, so the
+// record's word starts true rather than empty (decision-016 batch 4).
+func (repository *RedisCatalogRepository) TimelineRecordRevision(ctx context.Context, queryGroup execution.QueryGroupIdentity) (uint64, error) {
+	timeline, err := repository.loadScheduleTimeline(ctx, queryGroup)
+	if errors.Is(err, ErrScheduleUnavailable) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return timeline.RecordRevision, nil
+}

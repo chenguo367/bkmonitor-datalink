@@ -1205,3 +1205,10 @@ if ttl_ms > 0 then redis.call('SET', KEYS[3], ARGV[7], 'PX', ttl_ms)
 else redis.call('SET', KEYS[3], ARGV[7]) end
 return 'APPLIED'
 `)
+
+// AssignmentKey is the Redis key of a Query Group's Assignment record, for
+// the catalog repository that stamps timeline revisions onto records in the
+// same script that writes the timelines (decision-016 batch 4).
+func (store *RedisStore) AssignmentKey(queryGroup execution.QueryGroupIdentity) string {
+	return store.assignmentKey(queryGroup)
+}

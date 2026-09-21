@@ -41,23 +41,23 @@ func TestACutoverStampsTheTimelineRevisionOnTheAssignmentRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 	queryGroup := oldCatalog.QueryGroups[0].Identity
-	// The record exists before the initial activation, as a placed Query
-	// Group's does; its other fields are whatever the ownership store wrote.
-	if err := client.HSet(ctx, recordKey(queryGroup), "desired_worker_id", "w1", "record_revision", "3").Err(); err != nil {
-		t.Fatal(err)
-	}
+	// No record yet: the Query Group has not been placed. The initial
+	// activation writes its timeline and must not conjure a record for it -
+	// a record with only this field would read as a placed Query Group with
+	// no worker.
 	oldOpen := frozenSchedule(t, oldSnapshot.Publication, oldCatalog.QueryGroups[0], 60, nil)
 	oldActivation := activationState(t, 1, oldSnapshot, oldOpen, nil)
 	if err := repository.CompareAndSetInitialScheduleActivation(ctx, controlplane.ActivationExpectation{}, oldActivation,
 		[]execution.InitialScheduleActivationFact{{Segment: oldOpen.Segment}}); err != nil {
 		t.Fatal(err)
 	}
-	stamped, err := client.HGet(ctx, recordKey(queryGroup), "timeline_record_revision").Result()
-	if err != nil || stamped != "1" {
-		t.Fatalf("after the initial activation the record says timeline revision %q (%v), want 1", stamped, err)
+	if exists, err := client.Exists(ctx, recordKey(queryGroup)).Result(); err != nil || exists != 0 {
+		t.Fatalf("the initial activation created the record (exists=%d, %v); a record is a placement's to create", exists, err)
 	}
-	if revision, err := client.HGet(ctx, recordKey(queryGroup), "record_revision").Result(); err != nil || revision != "3" {
-		t.Fatalf("the record's own revision moved to %q (%v); the timeline revision is the Query Group's, not a decision", revision, err)
+	// Placed since, with whatever the ownership store writes; the cutover
+	// then stamps the record that exists.
+	if err := client.HSet(ctx, recordKey(queryGroup), "desired_worker_id", "w1", "record_revision", "3").Err(); err != nil {
+		t.Fatal(err)
 	}
 
 	newCatalog := catalogWithSchedule(t, oldCatalog, 120, 30)
@@ -75,15 +75,11 @@ func TestACutoverStampsTheTimelineRevisionOnTheAssignmentRecord(t *testing.T) {
 	}, newActivation, []execution.ScheduleCutoverFact{cutover}); err != nil {
 		t.Fatal(err)
 	}
-	stamped, err = client.HGet(ctx, recordKey(queryGroup), "timeline_record_revision").Result()
+	stamped, err := client.HGet(ctx, recordKey(queryGroup), "timeline_record_revision").Result()
 	if err != nil || stamped != "2" {
 		t.Fatalf("after the cutover the record says timeline revision %q (%v), want 2", stamped, err)
 	}
-
-	// A Query Group whose record does not exist gets none: the cutover does
-	// not create records, and a placement later names the revision itself.
-	other := execution.QueryGroupIdentity("qg-never-placed")
-	if exists, err := client.Exists(ctx, recordKey(other)).Result(); err != nil || exists != 0 {
-		t.Fatalf("a record the cutover had no business creating exists=%d (%v)", exists, err)
+	if revision, err := client.HGet(ctx, recordKey(queryGroup), "record_revision").Result(); err != nil || revision != "3" {
+		t.Fatalf("the record's own revision moved to %q (%v); the timeline revision is the Query Group's, not a decision", revision, err)
 	}
 }
