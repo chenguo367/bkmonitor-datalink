@@ -46,6 +46,16 @@ func TestTheSourceSetAccountTellsAFlapFromARemoval(t *testing.T) {
 		!facts.PendingRemovalSamples[0].AbsentSince.Equal(at) {
 		t.Fatalf("under grace: %+v", facts)
 	}
+	// 19:02: still under grace. The grace runs for minutes now, so the same
+	// strategies are PENDING_REMOVAL round after round: absent since stays
+	// the first round, and nothing is dropped twice.
+	firstAbsent := at
+	at = start.Add(3 * time.Minute)
+	ledger.NoteRound(SourceSetRound{At: at, Accepted: stayed, PendingRemoval: append(append([]string{}, flapping...), gone...)})
+	facts = ledger.Facts(at)
+	if facts.PendingRemoval != 23 || !facts.PendingRemovalSamples[0].AbsentSince.Equal(firstAbsent) || facts.Hours[0].Dropped != 23 {
+		t.Fatalf("a second round under grace moved absent_since or dropped again: %+v / %+v", facts.PendingRemovalSamples[0], facts.Hours[0])
+	}
 	// 19:03: still absent, and the grace is over for them.
 	at = start.Add(4 * time.Minute)
 	ledger.NoteRound(SourceSetRound{At: at, Accepted: stayed, Removed: append(append([]string{}, flapping...), gone...)})
