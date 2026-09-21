@@ -480,7 +480,7 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 			name:       "SOURCE_INCOMPLETE still retains even after PENDING_REMOVAL",
 			strategies: []controlplane.SourceStrategy{both[0], {SourceID: "1002", Identity: identity, SourceDisposition: &sourceIncomplete}},
 			previous:   withPrevious(pendingAt(t0)), now: expired,
-			wantPlans:  []string{"1001", "1002"}, wantStrategy: &sourceIncomplete,
+			wantPlans: []string{"1001", "1002"}, wantStrategy: &sourceIncomplete,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
