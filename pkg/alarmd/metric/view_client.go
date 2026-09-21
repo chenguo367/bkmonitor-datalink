@@ -36,6 +36,10 @@ type ViewClientCounts struct {
 	// outcome of the executable-view check (decision-016 batch 4), keyed by
 	// the check's word; nil before the gate exists.
 	ExecutedFromView map[string]int
+	// GateRenewals is leases the check renewed ahead of their interval
+	// because the view was ahead of the lease, and how many of those
+	// settled the check (decision-016 batch 4b).
+	GateRenewals, GateRenewalsSettled uint64
 }
 
 // viewClientInstallFailures and viewClientRefusals are the closed label
@@ -65,6 +69,7 @@ type viewClientCollector struct {
 	connections     *prometheus.Desc
 	discoveryMisses *prometheus.Desc
 	executed        *prometheus.Desc
+	renewals        *prometheus.Desc
 }
 
 func newViewClientCollector() *viewClientCollector {
@@ -117,6 +122,14 @@ func newViewClientCollector() *viewClientCollector {
 				"propagation delay after a cutover), no_lease. A gauge of the Query Groups held now; executable "+
 				"reaching the total is what the receipt reports as switched.",
 			[]string{"outcome"}, nil),
+		renewals: prometheus.NewDesc(name("view_gate_lease_renewal_total"),
+			"Leases the executable-view check renewed ahead of their interval because the view named a newer timeline "+
+				"revision than the lease had brought (decision-016 batch 4b: the record moved, the lease had not "+
+				"caught up), by result: settled (the record agreed with the view and the read went through), "+
+				"unsettled (the view was ahead of the record too, and the read was refused timeline_stale). A burst "+
+				"of settled renewals per cutover is the interval's worth of Query Groups rechecked in it; unsettled "+
+				"rising is a view ahead of the records.",
+			[]string{"result"}, nil),
 	}
 }
 
@@ -131,7 +144,7 @@ func (r *Recorder) SetViewClientSource(source func() ViewClientCounts) {
 }
 
 func (c *viewClientCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, desc := range []*prometheus.Desc{c.connected, c.installed, c.objectsMissing, c.installs, c.installFailures, c.snapshots, c.refusals, c.connections, c.discoveryMisses, c.executed} {
+	for _, desc := range []*prometheus.Desc{c.connected, c.installed, c.objectsMissing, c.installs, c.installFailures, c.snapshots, c.refusals, c.connections, c.discoveryMisses, c.executed, c.renewals} {
 		ch <- desc
 	}
 }
@@ -165,6 +178,8 @@ func (c *viewClientCollector) Collect(ch chan<- prometheus.Metric) {
 		for _, outcome := range viewGateOutcomes {
 			ch <- prometheus.MustNewConstMetric(c.executed, prometheus.GaugeValue, float64(counts.ExecutedFromView[outcome]), outcome)
 		}
+		ch <- prometheus.MustNewConstMetric(c.renewals, prometheus.CounterValue, float64(counts.GateRenewalsSettled), "settled")
+		ch <- prometheus.MustNewConstMetric(c.renewals, prometheus.CounterValue, float64(counts.GateRenewals-counts.GateRenewalsSettled), "unsettled")
 	}
 }
 

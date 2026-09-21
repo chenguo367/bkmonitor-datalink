@@ -844,6 +844,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	recorder.SetViewClientSource(func() metric.ViewClientCounts {
 		counts := viewClientCounts(viewClient.Stats())
 		counts.ExecutedFromView = viewGate.Counts()
+		counts.GateRenewals, counts.GateRenewalsSettled = viewGate.Renewals()
 		return counts
 	})
 	// The cutover names each changing Query Group's content in its record

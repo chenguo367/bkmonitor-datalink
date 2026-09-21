@@ -54,6 +54,13 @@ type viewExecutionGate struct {
 
 	mu       sync.Mutex
 	outcomes map[execution.QueryGroupIdentity]viewGateOutcome
+	// renewals counts the leases renewed ahead of their interval because
+	// the view said a newer timeline revision than the lease had brought,
+	// and how many of those renewals settled the check. A cutover moves
+	// the records and the view within a second and the leases within a
+	// renewal interval; without this every Query Group rechecked in that
+	// window was refused once or more, a burst per Worker per cutover.
+	renewals, renewalsSettled uint64
 }
 
 // installedView is the one thing the gate asks of the view client.
@@ -101,36 +108,64 @@ func (gate *viewExecutionGate) installed() installedView {
 // session holds now. It returns the timeline revision to hint with when
 // the Query Group is executed from the view, and the outcome either way.
 func (gate *viewExecutionGate) judge(queryGroup execution.QueryGroupIdentity, lease ownership.Lease, held bool) (uint64, viewGateOutcome) {
+	revision, outcome, _ := gate.judgeAgainstView(queryGroup, lease, held)
+	return revision, outcome
+}
+
+// judgeAgainstView is judge with the view's own timeline revision for the
+// Query Group beside the verdict: what a caller compares the lease against
+// to know which side is behind when the two disagree.
+func (gate *viewExecutionGate) judgeAgainstView(queryGroup execution.QueryGroupIdentity, lease ownership.Lease, held bool) (uint64, viewGateOutcome, uint64) {
 	if !held {
-		return 0, viewGateNoLease
+		return 0, viewGateNoLease, 0
 	}
 	view := gate.installed()
 	if view == nil {
-		return 0, viewGateNotInView
+		return 0, viewGateNotInView, 0
 	}
 	entry, inView := view.Entry(queryGroup)
 	if !inView {
-		return 0, viewGateNotInView
+		return 0, viewGateNotInView, 0
 	}
+	viewRevision := entry.Assignment.TimelineRecordRevision
 	// In the view without content: a draining Query Group, or one whose
 	// Segment carries no object. It is never going to be executed from the
 	// view, and a fleet with such entries never reaches switched == installed
 	// - its own word, so a reader does not go looking at the stream for a
 	// Query Group the stream delivered.
 	if entry.Content == nil {
-		return 0, viewGateNoContent
+		return 0, viewGateNoContent, viewRevision
 	}
 	digest := string(entry.Content.ObjectDigest)
 	if lease.ContentScope != digest && lease.PendingContentScope != digest {
-		return 0, viewGateScopeMismatch
+		return 0, viewGateScopeMismatch, viewRevision
 	}
-	if lease.TimelineRecordRevision == 0 || entry.Assignment.TimelineRecordRevision == 0 {
-		return 0, viewGateTimelineUnsaid
+	if lease.TimelineRecordRevision == 0 || viewRevision == 0 {
+		return 0, viewGateTimelineUnsaid, viewRevision
 	}
-	if lease.TimelineRecordRevision != entry.Assignment.TimelineRecordRevision {
-		return 0, viewGateTimelineMismatch
+	if lease.TimelineRecordRevision != viewRevision {
+		return 0, viewGateTimelineMismatch, viewRevision
 	}
-	return entry.Assignment.TimelineRecordRevision, viewGateExecutable
+	return viewRevision, viewGateExecutable, viewRevision
+}
+
+// noteRenewal counts a lease renewed ahead of its interval for the gate.
+func (gate *viewExecutionGate) noteRenewal(settled bool) {
+	gate.mu.Lock()
+	gate.renewals++
+	if settled {
+		gate.renewalsSettled++
+	}
+	gate.mu.Unlock()
+}
+
+// Renewals is how many leases the gate renewed ahead of their interval
+// because the view was ahead of the lease, and how many of those settled
+// the check, for the metrics.
+func (gate *viewExecutionGate) Renewals() (uint64, uint64) {
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	return gate.renewals, gate.renewalsSettled
 }
 
 // record keeps the latest outcome for a Query Group this Worker runs.
@@ -190,17 +225,39 @@ type viewGatedCatalog struct {
 	gate       *viewExecutionGate
 	queryGroup execution.QueryGroupIdentity
 	session    *ownership.Session
+	renew      leaseRenewal
 }
 
 // gated is the three checks for one read: the hinted context when they
 // hold, the named refusal when they do not.
 func (catalog *viewGatedCatalog) gated(ctx context.Context) (context.Context, error) {
-	return gateContext(ctx, catalog.gate, catalog.queryGroup, catalog.session)
+	return gateContext(ctx, catalog.gate, catalog.queryGroup, catalog.session, catalog.renew)
 }
 
-func gateContext(ctx context.Context, gate *viewExecutionGate, queryGroup execution.QueryGroupIdentity, session *ownership.Session) (context.Context, error) {
+// leaseRenewal renews the session's lease now, ahead of its interval.
+type leaseRenewal func(context.Context) error
+
+// gateContext judges one read. When the only thing wrong is that the view
+// names a newer timeline revision than the lease last brought, the record
+// has moved and the lease has not caught up yet - a cutover moves the
+// records and the view within a second and the leases within a renewal
+// interval - so the lease is renewed once, now, and the check is judged
+// again on what the record says; the record is the authority and the
+// renewal is only early. A lease that is ahead of the view is left to the
+// delta, and every other mismatch is refused as it is. Without the early
+// renewal, every Query Group rechecked in the interval after a cutover
+// was refused once or more, a burst per Worker per cutover that the fleet
+// read as blocked runs.
+func gateContext(ctx context.Context, gate *viewExecutionGate, queryGroup execution.QueryGroupIdentity, session *ownership.Session, renew leaseRenewal) (context.Context, error) {
 	lease, held := session.Current()
-	revision, outcome := gate.judge(queryGroup, lease, held)
+	revision, outcome, viewRevision := gate.judgeAgainstView(queryGroup, lease, held)
+	if outcome == viewGateTimelineMismatch && lease.TimelineRecordRevision < viewRevision && renew != nil {
+		if err := renew(ctx); err == nil {
+			lease, held = session.Current()
+			revision, outcome, _ = gate.judgeAgainstView(queryGroup, lease, held)
+		}
+		gate.noteRenewal(outcome == viewGateExecutable)
+	}
 	gate.record(queryGroup, outcome)
 	if revision == 0 {
 		return ctx, &scheduler.ViewNotExecutableError{Reason: string(outcome)}
@@ -266,10 +323,11 @@ type viewGatedExecutor struct {
 	gate       *viewExecutionGate
 	queryGroup execution.QueryGroupIdentity
 	session    *ownership.Session
+	renew      leaseRenewal
 }
 
 func (executor *viewGatedExecutor) Execute(ctx context.Context, request execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
-	ctx, err := gateContext(ctx, executor.gate, executor.queryGroup, executor.session)
+	ctx, err := gateContext(ctx, executor.gate, executor.queryGroup, executor.session, executor.renew)
 	if err != nil {
 		return execution.SlotExecutionResult{}, err
 	}

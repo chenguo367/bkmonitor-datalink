@@ -2292,10 +2292,14 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	var executor scheduler.Executor = runtime.dependencies.Executor
 	release := func() {}
 	if runtime.viewGate != nil {
-		catalog = &viewGatedCatalog{next: catalog, gate: runtime.viewGate, queryGroup: queryGroup, session: session}
+		// The early renewal the gate makes when the view is ahead of the
+		// lease: the same renewal the session's maintenance makes on its
+		// interval, at this moment instead.
+		renew := func(ctx context.Context) error { return session.Renew(ctx, runtime.dependencies.Now(), ttl) }
+		catalog = &viewGatedCatalog{next: catalog, gate: runtime.viewGate, queryGroup: queryGroup, session: session, renew: renew}
 		// Inside the observed executor, so a refusal at execution is a
 		// slot_completed line with the gate's word like any other outcome.
-		executor = &viewGatedExecutor{next: executor, gate: runtime.viewGate, queryGroup: queryGroup, session: session}
+		executor = &viewGatedExecutor{next: executor, gate: runtime.viewGate, queryGroup: queryGroup, session: session, renew: renew}
 		release = func() { runtime.viewGate.forget(queryGroup) }
 	}
 	executor = &observedProductionSlotExecutor{next: executor, observer: runtime.dependencies.Observer}

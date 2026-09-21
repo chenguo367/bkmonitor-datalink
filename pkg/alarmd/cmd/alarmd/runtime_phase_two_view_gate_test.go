@@ -160,6 +160,97 @@ func TestTheGatedCatalogHintsOnlyWhenTheGateLetsTheReadThrough(t *testing.T) {
 	}
 }
 
+// When the view names a newer timeline revision than the lease last
+// brought, the record has moved and the lease has not caught up: the gate
+// renews the lease once, now, and judges again on what the record says -
+// executable when the record agrees with the view, refused when the view
+// is ahead of the record too. A cutover moves the records and the view
+// within a second and the leases within a renewal interval; without the
+// early renewal every Query Group rechecked in that interval was refused,
+// a burst per Worker per cutover. Without a renewal to make, the gate
+// refuses as before.
+func TestTheGateRenewsTheLeaseOnceWhenTheViewIsAheadOfIt(t *testing.T) {
+	ctx := context.Background()
+	gate := newViewExecutionGate()
+	entry := viewstream.Entry{QueryGroup: "qg-1", Content: &viewstream.Content{ObjectDigest: "obj-a"},
+		Assignment: viewstream.Assignment{DesiredWorkerID: "w1", Revision: 3, ContentScope: "obj-a", TimelineRecordRevision: 12}}
+	gate.attach(mapView{"qg-1": entry})
+	store := newViewGateTestStore(t)
+	session, authority := openViewGateTestSessionWithAuthority(t, store, "qg-1", 12, "obj-a")
+	now := time.UnixMilli(1_700_000_000_000)
+	renewals := 0
+	renew := func(ctx context.Context) error {
+		renewals++
+		return session.Renew(ctx, now.Add(time.Duration(renewals)*time.Second), time.Minute)
+	}
+	next := &hintCapturingCatalog{}
+	catalog := &viewGatedCatalog{next: next, gate: gate, queryGroup: "qg-1", session: session, renew: renew}
+
+	// The record moves to 13 (a cutover stamped it) and the view says so;
+	// the lease still says 12 until its next renewal.
+	record, err := store.ReadAssignment(ctx, "qg-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PublishAssignment(ctx, authority, ownership.AssignmentDecision{
+		QueryGroup: "qg-1", DesiredWorkerID: "worker-1", PlacementReason: ownership.PlacementRendezvous, DecidedAt: now,
+		ContentScope: "obj-a", TimelineRecordRevision: 13, ExpectedRecordRevision: record.RecordRevision,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	moved := entry
+	moved.Assignment.TimelineRecordRevision = 13
+	gate.attach(mapView{"qg-1": moved})
+	if lease, _ := session.Current(); lease.TimelineRecordRevision != 12 {
+		t.Fatalf("the lease already says %d; the case needs it behind the view", lease.TimelineRecordRevision)
+	}
+	if _, err := catalog.NextSlotAfter(ctx, "qg-1", 60); err != nil {
+		t.Fatalf("a read with the view ahead of the lease and the record agreeing = %v, want the lease renewed and the read let through", err)
+	}
+	if renewals != 1 || len(next.hints) != 1 || next.hints[0] != 13 {
+		t.Fatalf("renewals %d, hints %v: want one early renewal and the read hinted at the record's 13", renewals, next.hints)
+	}
+	if lease, _ := session.Current(); lease.TimelineRecordRevision != 13 {
+		t.Fatalf("the lease says %d after the early renewal, want 13", lease.TimelineRecordRevision)
+	}
+	if made, settled := gate.Renewals(); made != 1 || settled != 1 {
+		t.Fatalf("gate renewals = (%d, %d), want one made and settled", made, settled)
+	}
+	if counts := gate.Counts(); counts[string(viewGateExecutable)] != 1 {
+		t.Fatalf("gate counts after the settled renewal = %v", counts)
+	}
+
+	// The view moves on to 14 with the record still at 13: the renewal
+	// brings 13 back, and the read is refused by the gate's word.
+	ahead := entry
+	ahead.Assignment.TimelineRecordRevision = 14
+	gate.attach(mapView{"qg-1": ahead})
+	var refused *scheduler.ViewNotExecutableError
+	if _, err := catalog.NextSlotAfter(ctx, "qg-1", 120); !errors.As(err, &refused) || refused.Reason != string(viewGateTimelineMismatch) {
+		t.Fatalf("a read with the view ahead of the record = %v, want ViewNotExecutableError{%s}", err, viewGateTimelineMismatch)
+	}
+	if made, settled := gate.Renewals(); renewals != 2 || made != 2 || settled != 1 {
+		t.Fatalf("renewals %d, gate (%d, %d): want the renewal made and not settled", renewals, made, settled)
+	}
+	// The lease ahead of the view - the delta has not arrived - is left to
+	// the delta: refused, and no renewal made.
+	behind := entry
+	behind.Assignment.TimelineRecordRevision = 12
+	gate.attach(mapView{"qg-1": behind})
+	if _, err := catalog.NextSlotAfter(ctx, "qg-1", 120); !errors.As(err, &refused) {
+		t.Fatalf("a read with the lease ahead of the view = %v, want a refusal", err)
+	}
+	if renewals != 2 {
+		t.Fatalf("renewals %d: a lease ahead of the view must not renew", renewals)
+	}
+	// And with nothing to renew with, the same read is refused outright.
+	gate.attach(mapView{"qg-1": ahead})
+	plain := &viewGatedCatalog{next: next, gate: gate, queryGroup: "qg-1", session: session}
+	if _, err := plain.NextSlotAfter(ctx, "qg-1", 120); !errors.As(err, &refused) || renewals != 2 {
+		t.Fatalf("a read without a renewal to make = %v (renewals %d), want refused without renewing", err, renewals)
+	}
+}
+
 func newViewGateTestStore(t *testing.T) *ownership.RedisStore {
 	t.Helper()
 	_, client := startPhaseTwoRedis(t)
@@ -174,6 +265,15 @@ func newViewGateTestStore(t *testing.T) *ownership.RedisStore {
 // content scope and timeline revision, then opens worker-1's session on it,
 // so the session's lease carries both from the record.
 func openViewGateTestSession(t *testing.T, store *ownership.RedisStore, queryGroup execution.QueryGroupIdentity, timeline uint64, scope string) *ownership.Session {
+	t.Helper()
+	session, _ := openViewGateTestSessionWithAuthority(t, store, queryGroup, timeline, scope)
+	return session
+}
+
+// openViewGateTestSessionWithAuthority is openViewGateTestSession with the
+// Leader authority the record was published under, for a case that moves
+// the record afterwards.
+func openViewGateTestSessionWithAuthority(t *testing.T, store *ownership.RedisStore, queryGroup execution.QueryGroupIdentity, timeline uint64, scope string) (*ownership.Session, ownership.PublicationAuthority) {
 	t.Helper()
 	ctx := context.Background()
 	now := time.UnixMilli(1_700_000_000_000)
@@ -192,7 +292,7 @@ func openViewGateTestSession(t *testing.T, store *ownership.RedisStore, queryGro
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = session.Release(ctx) })
-	return session
+	return session, authority
 }
 
 // A refusal from the gate reaches the log on both paths with the gate's
