@@ -174,3 +174,40 @@ func TestAFrozenSeriesIsRenewedUnderTheKeyItsRecordLivesIn(t *testing.T) {
 		})
 	}
 }
+
+// A conflict met on the framed key is named in the framed key's own revision
+// space. The write was built from an envelope at revision 9 and expected the
+// framed key to be missing; another writer created it at revision 1 with a
+// different statement. That is a move on the framed key (0 -> 1), and
+// reading it against the envelope's 9 would call it a reset (9 -> 1) - a
+// kind that says a key was recreated lower, which nothing did.
+func TestAConflictOnTheFramedKeyIsNamedInItsOwnRevisionSpace(t *testing.T) {
+	backend := newPipelineMemoryBackend()
+	store := newBatchStore(t, backend, fixedFenceKeys{testFenceKeys()})
+	identity := seriesIdentity(0)
+	envelopeKey, _ := RuntimeStateKeyV2("alarmd", identity)
+	framedKey, _ := RuntimeStateKeyV3("alarmd", identity)
+	older := execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 30, SlotDigest: "slot-0"}
+	next := execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 120, SlotDigest: "slot-2"}
+	backend.values[envelopeKey], _ = encodeRuntime(seriesMutation(t, identity, older, 0, "env"), 9)
+
+	mutation := seriesMutation(t, identity, next, 9, "")
+	if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(),
+		Items: preflightItems([]execution.StateMutation{mutation})}); err != nil {
+		t.Fatal(err)
+	}
+	// Another writer lands the framed key first, at the same version with a
+	// different statement.
+	backend.values[framedKey], _ = encodeRuntimePacked(seriesMutation(t, identity, next, 0, "theirs"), 1)
+
+	result, err := store.ApplyRuntimeFenced(context.Background(), execution.StateApplyRequest{Contract: frozenRef(),
+		Retention: testRetention(), Items: []execution.StateMutation{mutation}}, testApplyFence())
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := result.Items[0]
+	if item.Status != execution.StateApplyVersionConflict || item.VersionConflict != execution.StateVersionConflictRevisionMoved {
+		t.Fatalf("item = %+v, want VERSION_CONFLICT named revision_moved: the framed key went from missing to revision 1, "+
+			"and the envelope's revision 9 is not a number that key ever had", item)
+	}
+}
