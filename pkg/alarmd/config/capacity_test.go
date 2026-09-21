@@ -245,3 +245,50 @@ func TestGoRuntimeBudgetRefusesAGuessedContainer(t *testing.T) {
 		t.Fatalf("go runtime budget from an unnamed memory source = %+v, want none", derived)
 	}
 }
+
+// The mutation guardrail does not come from memory any more, and the only way
+// to state that is to show it not moving when memory does.
+//
+// It used to be retained bytes divided by an assumed 32 KiB per mutation, so a
+// container with twice the memory admitted twice the mutations. Measuring what
+// a mutation actually costs found 3.5 KiB for a light shape against 28.9 KiB
+// for a heavy one - a 9x spread around that one constant - which made the
+// count, not the byte budget, the thing deciding throughput, and made it decide
+// differently for shapes that use the same memory.
+//
+// The bound that reads "between one Store call and the chunked product" is
+// satisfied by both the old derivation and the new one, so it cannot say which
+// is in force. This can: every container shape gets the same guardrail while
+// the byte budget it used to be derived from keeps tracking the container.
+func TestTheMutationGuardrailIsNotDerivedFromMemory(t *testing.T) {
+	shapes := containerShapes()
+	if len(shapes) < 2 {
+		t.Fatal("this case needs two container shapes to compare")
+	}
+	var guardrail uint64
+	retainedSeen := make(map[uint64]struct{}, len(shapes))
+	for _, inputs := range shapes {
+		cfg := completePhaseTwoProductionConfig(validGoAccessConfigObject().withDerivedCapacity(inputs))
+		budgets := cfg.PhaseTwo.Coordinator
+		chunked := uint64(cfg.Limits.Store.MaxKeysPerBatch) * execution.StateApplyMaxChunks
+		if budgets.MaxStateMutations != chunked {
+			t.Fatalf("%d MiB: state guardrail %d, want the chunked apply product %d",
+				inputs.MemoryLimitBytes>>20, budgets.MaxStateMutations, chunked)
+		}
+		if guardrail == 0 {
+			guardrail = budgets.MaxStateMutations
+		} else if budgets.MaxStateMutations != guardrail {
+			t.Fatalf("%d MiB: state guardrail %d, want the same %d every shape derives; "+
+				"a guardrail that moves with the container is still a memory budget",
+				inputs.MemoryLimitBytes>>20, budgets.MaxStateMutations, guardrail)
+		}
+		retainedSeen[budgets.MaxRetainedBytes] = struct{}{}
+	}
+	// The other half: the working limit does still follow the container, so the
+	// case above is about where the count comes from rather than about a
+	// derivation that stopped reading its inputs altogether.
+	if len(retainedSeen) < 2 {
+		t.Fatalf("retained byte budgets %v, want them to differ across container shapes: "+
+			"that is the budget that is supposed to track memory", retainedSeen)
+	}
+}
