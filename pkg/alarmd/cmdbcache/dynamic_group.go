@@ -260,13 +260,14 @@ type GroupStore struct {
 	snapshots map[string]*GroupSnapshot
 	// referenced is, per id, when it was last asked for and the longest
 	// evaluation interval among the Plans that asked. A reference ages out
-	// when nobody has asked for it within max(two refresh intervals, twice
+	// when nobody has asked for it within max(the staleness bound, twice
 	// that longest interval): a Plan asks every Slot, so an id nobody asks
-	// for within two of its Slots is one no active Plan references any more,
-	// and keeping it would read it every refresh and count it in the health
-	// as a standing failure once the writer withdraws it. The horizon
-	// follows the Plan's own interval so that a Plan on a long period never
-	// pays a round trip on its Slot for a group that aged out between them.
+	// for that long is one no active Plan references any more, and keeping
+	// it would read it every refresh and count it in the health as a
+	// standing failure once the writer withdraws it. The bound keeps every
+	// Plan on a period up to the staleness bound at zero Slot-path reads,
+	// and the registered interval keeps the longer ones there too; no
+	// horizon runs close to a Slot's own cadence.
 	referenced    map[string]groupReference
 	lastFailureAt time.Time
 	syncReads     uint64
@@ -371,7 +372,7 @@ func (store *GroupStore) Refresh(ctx context.Context) error {
 	store.mu.Lock()
 	ids := make([]string, 0, len(store.referenced))
 	for id, reference := range store.referenced {
-		horizon := 2 * store.interval
+		horizon := store.maxAge
 		if 2*reference.interval > horizon {
 			horizon = 2 * reference.interval
 		}

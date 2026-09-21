@@ -172,81 +172,79 @@ func TestTheGroupStoreReadsOnFirstReferenceAndKeepsSnapshotsAcrossAFailedRefresh
 	}
 }
 
-// A reference ages out when nobody has asked for it within its horizon -
-// max(two refresh intervals, twice the longest interval of the Plans that
-// asked) - so a withdrawn reference is read once more at most and stops
-// counting in the health, while a Plan on a ten-minute period never reads
-// on its Slot for a group that aged out between two of its Slots: three
-// Slots of such a Plan cost one synchronous read, the first.
-func TestAGroupAgesOutByTheReferencingPlansIntervalAndNeverCostsItsSlotARead(t *testing.T) {
-	client := &groupClient{values: map[string]string{"cw:dynamic_group:slow": hostGroup, "cw:dynamic_group:gone": hostGroup}}
+// per's table as a test. Plans on 60 s to 900 s periods ask for their
+// group every Slot for an hour under per-minute refreshes: each group costs
+// exactly one read on a Slot path, its first, whatever the period - the
+// reference is kept for max(the staleness bound, twice the Plan's period)
+// without being asked, so no horizon runs close to a Slot's own cadence.
+// Once a Plan stops asking, its group leaves the refresh and the health
+// within that same horizon.
+func TestAGroupCostsItsPlanOneSlotReadWhateverThePeriodAndAgesOutAfterIt(t *testing.T) {
+	periods := []time.Duration{60 * time.Second, 120 * time.Second, 300 * time.Second, 600 * time.Second, 900 * time.Second}
+	client := &groupClient{values: map[string]string{}}
+	for _, period := range periods {
+		client.values["cw:dynamic_group:"+period.String()] = hostGroup
+	}
 	reader, _ := NewGroupReader(client, "cw:")
 	now := time.Unix(1000, 0)
 	store, err := NewGroupStore(reader, GroupStoreOptions{RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.Group(context.Background(), "gone", time.Minute)
-	slots := 0
-	for minute := 0; minute <= 30; minute++ {
-		if minute%10 == 0 {
-			// The ten-minute Plan's Slot: it asks, and never reads.
-			if lookup := store.Group(context.Background(), "slow", 10*time.Minute); lookup.Snapshot == nil || lookup.Snapshot.Unavailable != "" {
-				t.Fatalf("minute %d: slow lookup = %+v", minute, lookup)
+	start := now
+	for elapsed := time.Duration(0); elapsed <= time.Hour; elapsed += time.Minute {
+		for _, period := range periods {
+			if elapsed%period != 0 {
+				continue
 			}
-			slots++
+			if lookup := store.Group(context.Background(), period.String(), period); lookup.Snapshot == nil || lookup.Snapshot.Unavailable != "" {
+				t.Fatalf("%s at %s: lookup = %+v", period, elapsed, lookup)
+			}
 		}
+		if err := store.Refresh(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		now = start.Add(elapsed + time.Minute)
+	}
+	if health := store.Health(); health.SyncReads != uint64(len(periods)) || health.Referenced != len(periods) {
+		t.Fatalf("after an hour: %+v, want one Slot-path read per group and every group still referenced", health)
+	}
+	// Every Plan stops asking. Each group leaves the refresh once
+	// max(10 min, 2 x its period) has passed without an ask, and never after
+	// the 900 s Plan's 30 min horizon is anything read.
+	readsBefore := map[string]int{}
+	countReads := func() map[string]int {
+		counts := map[string]int{}
+		for _, call := range client.calls {
+			for _, key := range call {
+				counts[key]++
+			}
+		}
+		return counts
+	}
+	readsBefore = countReads()
+	lastAsk := now.Add(-time.Minute)
+	for elapsed := time.Duration(0); elapsed <= 40*time.Minute; elapsed += time.Minute {
 		if err := store.Refresh(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 		now = now.Add(time.Minute)
 	}
-	if slots != 4 || store.Health().SyncReads != 2 {
-		t.Fatalf("slots %d sync reads %d, want four Slots and two synchronous reads: the first reference of each group and no other", slots, store.Health().SyncReads)
-	}
-	// The one-minute reference nobody asked for again was read at the
-	// refreshes within its two-minute horizon and dropped at the first one
-	// past it, never read again after that; the ten-minute one was read at
-	// every refresh.
-	readsOfGone, readsOfSlow := 0, 0
-	for _, call := range client.calls {
-		for _, key := range call {
-			switch key {
-			case "cw:dynamic_group:gone":
-				readsOfGone++
-			case "cw:dynamic_group:slow":
-				readsOfSlow++
-			}
+	readsAfter := countReads()
+	for _, period := range periods {
+		horizon := 10 * time.Minute
+		if 2*period > horizon {
+			horizon = 2 * period
+		}
+		key := "cw:dynamic_group:" + period.String()
+		// Refreshes at ages 1..horizon minutes still read it; the one past
+		// the horizon drops it.
+		want := int(horizon / time.Minute)
+		if got := readsAfter[key] - readsBefore[key]; got != want {
+			t.Fatalf("%s: read %d more times after its Plan stopped asking at %s, want %d (its horizon %s)", period, got, lastAsk, want, horizon)
 		}
 	}
-	if readsOfGone != 4 || readsOfSlow != 32 {
-		t.Fatalf("reads of the withdrawn reference %d (want its first read and the three refreshes within its horizon), of the slow Plan's %d (want its first read and every refresh)", readsOfGone, readsOfSlow)
-	}
-	if health := store.Health(); health.Referenced != 1 || health.Loaded != 1 {
-		t.Fatalf("health = %+v, want the withdrawn reference gone", health)
-	}
-	// The slow Plan stops asking: its reference outlives two of its Slots
-	// and is gone at the refresh after that.
-	for minute := 0; minute <= 21; minute++ {
-		if err := store.Refresh(context.Background()); err != nil {
-			t.Fatal(err)
-		}
-		now = now.Add(time.Minute)
-	}
-	if health := store.Health(); health.Referenced != 0 {
-		t.Fatalf("health after the slow Plan stopped asking = %+v", health)
-	}
-	// Read at the twenty refreshes within its horizon and at none after; a
-	// refresh with nothing referenced issues no command at all.
-	readsOfSlow = 0
-	for _, call := range client.calls {
-		for _, key := range call {
-			if key == "cw:dynamic_group:slow" {
-				readsOfSlow++
-			}
-		}
-	}
-	if readsOfSlow != 52 {
-		t.Fatalf("reads of the slow Plan's group after it stopped asking = %d, want 32 + 20", readsOfSlow)
+	if health := store.Health(); health.Referenced != 0 || health.Loaded != 0 {
+		t.Fatalf("health after every Plan stopped asking = %+v, want nothing referenced or held", health)
 	}
 }

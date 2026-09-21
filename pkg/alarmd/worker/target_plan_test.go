@@ -219,7 +219,9 @@ func TestBeginResolvesEachTargetPlanOnceForBothViews(t *testing.T) {
 // not be read: the static member's record is still admitted, a record the
 // unread group would have named is rejected as outside the target - not as
 // unresolved - and absence is paused by the selector's name. All three read
-// the same holder.
+// the same holder, handed to the filter directly: that the holder reaches
+// the source through ResolvedTargets whatever its state is the two tests
+// above's to guard, not this one's.
 func TestAnUnreadableSelectorPausesAbsenceAndNotTheStaticMembers(t *testing.T) {
 	resolution := &targetplan.Resolution{Static: map[string]struct{}{"101": {}}, Selectors: []targetplan.SelectorResult{
 		{Kind: targetplan.SelectorKindGroup, ID: "1001", State: targetplan.SelectorUnavailable, Reason: targetplan.ReasonKeyMissing}}}
