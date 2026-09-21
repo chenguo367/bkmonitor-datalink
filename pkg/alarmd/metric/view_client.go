@@ -32,6 +32,10 @@ type ViewClientCounts struct {
 	Connections        uint64
 	// DiscoveryMisses is by reason: viewClientDiscoveryMisses.
 	DiscoveryMisses map[string]uint64
+	// ExecutedFromView is the Query Groups this Worker runs by the latest
+	// outcome of the executable-view check (decision-016 batch 4), keyed by
+	// the check's word; nil before the gate exists.
+	ExecutedFromView map[string]int
 }
 
 // viewClientInstallFailures and viewClientRefusals are the closed label
@@ -45,6 +49,7 @@ var (
 	// Leader's registration advertises no endpoint": #216 counted the second
 	// as the first on every Worker while the Leader published.
 	viewClientDiscoveryMisses = []string{"NO_LEADER", "LEADER_UNREGISTERED", "LEADER_NO_ENDPOINT", "DISCOVERY_FAILED"}
+	viewGateOutcomes          = []string{"executable", "not_in_view", "scope_mismatch", "timeline_unsaid", "timeline_stale", "no_lease"}
 )
 
 type viewClientCollector struct {
@@ -59,6 +64,7 @@ type viewClientCollector struct {
 	refusals        *prometheus.Desc
 	connections     *prometheus.Desc
 	discoveryMisses *prometheus.Desc
+	executed        *prometheus.Desc
 }
 
 func newViewClientCollector() *viewClientCollector {
@@ -100,6 +106,15 @@ func newViewClientCollector() *viewClientCollector {
 				"LEADER_UNREGISTERED a lease naming a Worker with no live registration; LEADER_NO_ENDPOINT a Leader "+
 				"whose registration advertises no endpoint (it could not work out its own address, or predates the "+
 				"stream); DISCOVERY_FAILED a registry that could not be read.", []string{"reason"}, nil),
+		executed: prometheus.NewDesc(name("view_executed_query_groups"),
+			"Query Groups this Worker runs, by the latest outcome of the executable-view check made at each Slot "+
+				"read (decision-016 batch 4): executable (the view carries it, the renewal's content scope and "+
+				"timeline revision are the entry's, and the read skipped the activation header), not_in_view, "+
+				"scope_mismatch (the renewal's scope is not the entry's), timeline_unsaid (the record or the view has "+
+				"no timeline revision yet), timeline_stale (the two disagree - expected only inside the view's "+
+				"propagation delay after a cutover), no_lease. A gauge of the Query Groups held now; executable "+
+				"reaching the total is what the receipt reports as switched.",
+			[]string{"outcome"}, nil),
 	}
 }
 
@@ -114,7 +129,7 @@ func (r *Recorder) SetViewClientSource(source func() ViewClientCounts) {
 }
 
 func (c *viewClientCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, desc := range []*prometheus.Desc{c.connected, c.installed, c.objectsMissing, c.installs, c.installFailures, c.snapshots, c.refusals, c.connections, c.discoveryMisses} {
+	for _, desc := range []*prometheus.Desc{c.connected, c.installed, c.objectsMissing, c.installs, c.installFailures, c.snapshots, c.refusals, c.connections, c.discoveryMisses, c.executed} {
 		ch <- desc
 	}
 }
@@ -144,6 +159,11 @@ func (c *viewClientCollector) Collect(ch chan<- prometheus.Metric) {
 	emitClosed(ch, c.installs, viewClientInstallKinds, counts.Installs)
 	emitClosed(ch, c.installFailures, viewClientInstallFailures, counts.InstallFailures)
 	emitClosed(ch, c.refusals, viewClientRefusals, counts.Refusals)
+	if counts.ExecutedFromView != nil {
+		for _, outcome := range viewGateOutcomes {
+			ch <- prometheus.MustNewConstMetric(c.executed, prometheus.GaugeValue, float64(counts.ExecutedFromView[outcome]), outcome)
+		}
+	}
 }
 
 // emitClosed emits one series per word of the closed set, zero included,

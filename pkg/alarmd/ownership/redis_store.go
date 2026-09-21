@@ -516,7 +516,7 @@ func (store *RedisStore) acquire(
 	if err != nil {
 		return Lease{}, err
 	}
-	values, err := scriptValues(result, 5)
+	values, err := scriptValues(result, 6)
 	if err != nil {
 		return Lease{}, err
 	}
@@ -535,8 +535,9 @@ func (store *RedisStore) acquire(
 			Fence: execution.OwnerFence{
 				QueryGroup: queryGroup, OwnerID: ownerID, OwnerEpoch: uint64(scriptInt(values[1])), LeaseToken: token,
 			},
-			Deadline:     onCallerClock(at, scriptInt(values[4]), scriptInt(values[2])),
-			ContentScope: scriptText(values[3]),
+			Deadline:               onCallerClock(at, scriptInt(values[4]), scriptInt(values[2])),
+			ContentScope:           scriptText(values[3]),
+			TimelineRecordRevision: uint64(scriptInt(values[5])),
 		}, nil
 	default:
 		return Lease{}, errors.New("alarmd ownership: invalid lease acquisition response")
@@ -954,21 +955,22 @@ local ttl_ms = tonumber(ARGV[3])
 local token = ARGV[4]
 local now_ms = redis_now_ms()
 local deadline_ms = now_ms + ttl_ms
-local scope = ''
+local scope, timeline = '', 0
 if require_assignment == '1' then
   local desired = redis.call('HGET', KEYS[1], 'desired_worker_id')
-  if not desired or desired ~= owner_id then return {'NOT_DESIRED', 0, 0, '', now_ms} end
+  if not desired or desired ~= owner_id then return {'NOT_DESIRED', 0, 0, '', now_ms, 0} end
   scope = current_content_scope(KEYS[1], now_ms)
+  timeline = tonumber(redis.call('HGET', KEYS[1], 'timeline_record_revision') or '0')
 end
 local disposition = redis.call('HGET', KEYS[2], 'execution_disposition')
-if disposition and disposition ~= 'ACTIVE' then return {'PAUSED', 0, 0, '', now_ms} end
+if disposition and disposition ~= 'ACTIVE' then return {'PAUSED', 0, 0, '', now_ms, 0} end
 local current_owner = redis.call('HGET', KEYS[2], 'owner_id')
 local current_deadline = tonumber(redis.call('HGET', KEYS[2], 'deadline_ms') or '0')
-if current_owner and current_owner ~= '' and current_deadline > now_ms then return {'BUSY', 0, current_deadline, '', now_ms} end
+if current_owner and current_owner ~= '' and current_deadline > now_ms then return {'BUSY', 0, current_deadline, '', now_ms, 0} end
 local epoch = tonumber(redis.call('HGET', KEYS[2], 'owner_epoch') or '0') + 1
 redis.call('HSET', KEYS[2], 'owner_id', owner_id, 'owner_epoch', epoch, 'lease_token', token,
   'deadline_ms', deadline_ms, 'execution_disposition', 'ACTIVE')
-return {'OWNED', epoch, deadline_ms, scope, now_ms}
+return {'OWNED', epoch, deadline_ms, scope, now_ms, timeline}
 `)
 
 // renewScript extends a lease, and is where a holder learns about a content

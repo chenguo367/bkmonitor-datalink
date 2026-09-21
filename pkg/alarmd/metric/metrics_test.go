@@ -341,6 +341,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_view_messages_sent_total":                     "variableLabels: {kind}",
 		"bkmonitor_alarmd_view_stream_refusals_total":                   "variableLabels: {}",
 		"bkmonitor_alarmd_view_deltas_oversized_total":                  "variableLabels: {}",
+		"bkmonitor_alarmd_view_executed_query_groups":                   "variableLabels: {outcome}",
 		"bkmonitor_alarmd_view_client_connected":                        "variableLabels: {}",
 		"bkmonitor_alarmd_view_installed_revision":                      "variableLabels: {}",
 		"bkmonitor_alarmd_view_objects_missing":                         "variableLabels: {}",
@@ -809,6 +810,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("view_messages_sent_total"):    3,
 		fqName("view_stream_refusals_total"):  1,
 		fqName("view_deltas_oversized_total"): 1,
+		fqName("view_executed_query_groups"):  len(viewGateOutcomes),
 		// The Worker's side: closed failure and refusal words plus other.
 		fqName("view_client_connected"):        1,
 		fqName("view_installed_revision"):      1,

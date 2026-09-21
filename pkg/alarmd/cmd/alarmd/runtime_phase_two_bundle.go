@@ -828,14 +828,24 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// Batch 4a of decision-016: each Slot read decides, from the installed
+	// view and the lease the renewal last brought, whether the Query Group
+	// is executed from the view; the receipt counts those that are.
+	viewGate := newViewExecutionGate()
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
-		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now},
+		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate},
 	)
 	if err != nil {
 		return nil, err
 	}
-	recorder.SetViewClientSource(func() metric.ViewClientCounts { return viewClientCounts(viewClient.Stats()) })
+	viewGate.attach(viewClient)
+	productionOwnership.WithViewExecutionGate(viewGate)
+	recorder.SetViewClientSource(func() metric.ViewClientCounts {
+		counts := viewClientCounts(viewClient.Stats())
+		counts.ExecutedFromView = viewGate.Counts()
+		return counts
+	})
 	// The cutover names each changing Query Group's content in its record
 	// before it cuts the Segment that carries it (decision-016 batch 3).
 	activator.WithContentScopeWriter(productionOwnership)

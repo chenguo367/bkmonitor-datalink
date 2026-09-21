@@ -77,3 +77,9 @@ func (repository *RedisCatalogRepository) loadScheduleTimelineAtRevision(
 }
 
 var errTimelineRevisionMoved = errors.New("alarmd controlplane: the timeline is not at the hinted revision")
+
+// TimelineRevisionHint reads the hint a context carries, zero for none. For
+// the callers that build the context and want to see what they built.
+func TimelineRevisionHint(ctx context.Context) uint64 {
+	return timelineRevisionHint(ctx)
+}

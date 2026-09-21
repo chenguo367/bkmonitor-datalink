@@ -39,8 +39,8 @@ func TestTheTimelineRevisionTravelsWithTheRenewalAndOutlivesDecisions(t *testing
 		t.Fatalf("ReadAssignment() = (%+v, %v), want timeline revision 7", read, err)
 	}
 	lease, err := store.Acquire(ctx, "query-group-1", "worker-1", now, time.Minute)
-	if err != nil {
-		t.Fatal(err)
+	if err != nil || lease.TimelineRecordRevision != 7 {
+		t.Fatalf("Acquire() = (%+v, %v), want timeline revision 7 from the first lease, not only from a renewal", lease, err)
 	}
 	renewed, err := store.Renew(ctx, lease.Fence, now.Add(time.Second), time.Minute)
 	if err != nil || renewed.TimelineRecordRevision != 7 || renewed.ContentScope != "view-a" {
