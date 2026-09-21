@@ -85,6 +85,20 @@ func withExpectedMarkerRevision(err error, mutations []execution.PlanGapMutation
 	return err
 }
 
+// GapApplySiteOf returns which of the Slot's two gap applies refused, empty
+// when err is not one of the store's refusals.
+//
+// Separate from GapApplyReason because the two answer different questions and
+// a line carries both: the reason says what the store did, the site says which
+// of this Slot's two writes it did it to.
+func GapApplySiteOf(err error) string {
+	var refusal *GapApplyRefusal
+	if !errors.As(err, &refusal) || refusal == nil {
+		return ""
+	}
+	return refusal.Site
+}
+
 // GapApplyReason returns the bounded reason when err is one of the gap marker
 // store's refusals, so an observer can name it instead of calling it unknown.
 //

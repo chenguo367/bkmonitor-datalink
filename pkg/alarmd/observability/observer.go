@@ -1899,6 +1899,11 @@ type Observation struct {
 	// GapStatements, when set, says one Plan carried more than one gap marker
 	// statement in a single Slot. A reading rather than a refusal: the Slot
 	// went on, and this is what says the shape happened.
+	// GapApplySite is which of the Slot's two gap applies refused, empty when
+	// none did. Its own field rather than only inside the error text: which
+	// write refused is what separates this Slot's other call from a writer in
+	// another process, and that cannot be grouped or counted out of a sentence.
+	GapApplySite  string
 	GapStatements *GapStatementFacts
 	GapExtensions []*GapExtensionFacts
 	GapConflict   *GapExtensionFacts

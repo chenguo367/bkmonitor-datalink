@@ -389,6 +389,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 					" kept="+strconv.Itoa(selector.Kept)+" dropped="+strconv.Itoa(selector.Dropped)))
 		}
 	}
+	if observation.GapApplySite != "" {
+		attributes = append(attributes, slog.String("gap_apply_site", observation.GapApplySite))
+	}
 	if facts := observation.GapStatements; facts != nil {
 		attributes = append(attributes,
 			slog.String("gap_statements_shape", facts.Shape),

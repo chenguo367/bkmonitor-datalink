@@ -192,3 +192,43 @@ func TestTheCompletionRowSaysWhichPhaseHeldTheRetainedBytes(t *testing.T) {
 		}
 	}
 }
+
+// The completion line carries which of the Slot's two gap applies refused, as
+// its own key.
+//
+// Asserted on the rendered line rather than on the Observation, because that
+// is where the field is a contract. The first version of this carried the site
+// on the error struct only: the reason code reached the line and the site
+// stayed inside the error's sentence, so 63 refusals in a quarter of an hour
+// said what the store did and nothing about which of the two writes it did it
+// to - which was the one thing the field was added to answer.
+func TestTheCompletionRowSaysWhichGapApplyRefused(t *testing.T) {
+	var output bytes.Buffer
+	limiter, _ := NewWindowLogLimiter(WindowLogLimiterConfig{Window: time.Hour, MaxEvents: 10})
+	policy, _ := NewBoundedLogPolicy(limiter)
+	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+		Component: ComponentScheduler, Stage: StageSlotCompleted, Result: ResultFailed,
+		Direction: DirectionInternal, ReasonCode: "GAP_APPLY_CONFLICT", GapApplySite: "after_state",
+	})
+	var row map[string]any
+	if err := json.Unmarshal(output.Bytes(), &row); err != nil {
+		t.Fatal(err)
+	}
+	if row["gap_apply_site"] != "after_state" {
+		t.Fatalf("gap_apply_site = %v, want the site as its own key: %v", row["gap_apply_site"], row)
+	}
+	// A completion that refused nothing carries no site, so the key's presence
+	// means a refusal rather than meaning the line was rendered by this build.
+	output.Reset()
+	NewLoggingObserver(New("alarmd", &output), policy).Observe(context.Background(), Observation{
+		Component: ComponentScheduler, Stage: StageSlotCompleted, Result: ResultSuccess,
+		Direction: DirectionInternal,
+	})
+	var healthy map[string]any
+	if err := json.Unmarshal(output.Bytes(), &healthy); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := healthy["gap_apply_site"]; present {
+		t.Fatalf("a completion that refused nothing carries a site: %v", healthy)
+	}
+}
