@@ -351,6 +351,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		attributes = appendHeldByAttributes(attributes, facts.HeldBy)
 	}
 	attributes = appendHeldByAttributes(attributes, observation.HeldBy)
+	attributes = appendSlotCompletionKind(attributes, observation.SlotCompletionKind)
 	if facts := observation.SegmentContent; facts != nil {
 		attributes = append(attributes, slog.String("segment_content", facts.State))
 	}
@@ -880,6 +881,19 @@ func (w *serializedLogWriter) Write(p []byte) (int, error) {
 // filtering the line. It first shipped nested inside one cohort's bundle and
 // the lines that most needed it -- the sixty-second and slower Query Groups
 // being skipped -- had no bundle and therefore no cause on them at all.
+// appendSlotCompletionKind writes the completion the Slot reached, when it is
+// a word this build publishes.
+//
+// Guarded rather than written through: the line carries a closed vocabulary
+// everywhere else, and a value nobody can enumerate turns a filterable key
+// into free text.
+func appendSlotCompletionKind(attributes []slog.Attr, kind string) []slog.Attr {
+	if !ValidProgressCompletionKind(kind) {
+		return attributes
+	}
+	return append(attributes, slog.String("completion_kind", kind))
+}
+
 func appendHeldByAttributes(attributes []slog.Attr, held *HeldByFacts) []slog.Attr {
 	if held == nil {
 		return attributes

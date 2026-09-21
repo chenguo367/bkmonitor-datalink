@@ -1967,7 +1967,18 @@ type Observation struct {
 	// Group on a sixty-second or longer period -- which is most of the ones
 	// whose Slots are being skipped -- has no such bundle, so their
 	// completion lines carried no cause at all.
-	HeldBy               *HeldByFacts
+	HeldBy *HeldByFacts
+	// SlotCompletionKind is the completion the Slot reached, beside the reason
+	// the line reports.
+	//
+	// Separate fields, not required to agree, and they disagree in the case
+	// this line is hardest to read: a Slot whose Level outcomes are UNKNOWN
+	// completes COMPLETED_WITH_UNAVAILABLE and copies GAP_SKIPPED up from the
+	// Level. On the reason alone that is the same line as a Slot given up on
+	// before it ran, and the two want opposite investigations. Its own field
+	// rather than ProgressCompletionKind, which target flow reads to fill
+	// Completion on a line that already emits its own.
+	SlotCompletionKind   string
 	RangeDistance        *RangeDistanceFacts
 	RangeGate            *RangeGateFacts
 	SlotWait             *SlotWaitFacts

@@ -2422,7 +2422,22 @@ func (executor observedProductionSlotExecutor) Execute(
 	// the ones whose Slots are being skipped -- have no such bundle, so their
 	// completion lines named the outcome and never the cause.
 	var heldBy *observability.HeldByFacts
-	if result.CompletionKind == execution.CompletionGapSkipped || request.ReplayExpired {
+	if result.CompletionKind == execution.CompletionGapSkipped || request.ReplayExpired ||
+		result.ReasonCode == execution.ReasonCode(contract.ReasonGapSkipped) {
+		// The reason is asked as well as the kind, because the line reports the
+		// reason and the two do not have to agree.
+		//
+		// A Slot that ran - queried, evaluated, wrote its state - and whose
+		// Level outcomes are all UNKNOWN completes COMPLETED_WITH_UNAVAILABLE
+		// and copies GAP_SKIPPED up from the Level into the reason, while its
+		// completion kind is whatever the run produced (read on a deployment:
+		// a warming Query Group, 249 Levels UNKNOWN, every round shaped so).
+		// Gating only on the kind left exactly that population without a
+		// cause field: a Query Group skipping every round showed GAP_SKIPPED
+		// and nothing about why, which is the reading this field was added
+		// to provide. A cause that is absent precisely in the state it exists
+		// to explain is worse than no field, because its absence cannot be
+		// told from a build that does not report it.
 		heldBy = scheduler.HeldByFromContext(ctx)
 	}
 	observedResult := result.Result
@@ -2464,9 +2479,16 @@ func (executor observedProductionSlotExecutor) Execute(
 	observeRuntime(ctx, executor.observer, observability.Observation{
 		Component: observability.ComponentScheduler, Stage: observability.StageSlotCompleted,
 		Operation: observability.Operation(request.Operation), ShortPeriodCompletion: shortCompletion,
-		HeldBy:         heldBy,
-		ExecuteOutcome: executeReturnOutcome(result, err),
-		Result:         observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
+		HeldBy: heldBy,
+		// The completion the Slot reached, beside the reason it reports. They
+		// are separate fields and disagree in the case this line is hardest to
+		// read: a Slot whose Level outcomes are UNKNOWN completes
+		// COMPLETED_WITH_UNAVAILABLE and copies GAP_SKIPPED up from the Level,
+		// which is indistinguishable on the reason alone from a Slot that was
+		// given up on before it ran.
+		SlotCompletionKind: string(result.CompletionKind),
+		ExecuteOutcome:     executeReturnOutcome(result, err),
+		Result:             observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Duration: time.Since(started), Trace: trace, Err: observedErr,
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
 	})
