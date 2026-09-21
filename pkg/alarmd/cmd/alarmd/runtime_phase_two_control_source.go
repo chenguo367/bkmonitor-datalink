@@ -265,6 +265,15 @@ func sourceFactsOf(result phaseTwoControlRefreshResult, at time.Time) *fleet.Sou
 // sourceSetRoundOf is the composition's word on the active set for the
 // ledger: the strategies the source listed, and the ones the grace cycle
 // holds or has removed, by their dispositions.
+//
+// The two sides are disjoint by construction: the catalog gives
+// PENDING_REMOVAL and REMOVED only to a strategy the round did not observe
+// in the source (catalog.go, the grace loop starts with "observed ->
+// continue"), and every observed strategy gets its own disposition and so
+// lands in Listed. The ledger relies on that: it clears an absence on Listed
+// after it records one on PendingRemoval, and a strategy on both sides would
+// have its grace quietly erased -- the page then says a strategy about to be
+// dropped is fine. Anyone changing that loop changes this too.
 func sourceSetRoundOf(composition *controlplane.CatalogComposition, at time.Time) fleet.SourceSetRound {
 	round := fleet.SourceSetRound{At: at, Listed: composition.ListedStrategies}
 	for _, object := range composition.WithheldObjects {
