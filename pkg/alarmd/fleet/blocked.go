@@ -397,6 +397,43 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 			blocked.Code = code
 		}
 	}
+	// A completed round whose completeness a durable guard held is the
+	// window's, as checkOf reads it, and not the guard's trigger word's: the
+	// trigger is the reason every UNKNOWN outcome reports until the guard
+	// releases, and read through the code table a round that ran, queried
+	// and wrote its state under a guard set off by one skipped Slot said
+	// SCHEDULE / capacity for the eighty rounds the window took to refill --
+	// the reader was sent to the scheduler for a Level that was counting up.
+	// The window words already read EVALUATE and unlocated; the trigger
+	// stays as the code so the row says which guard. A code the table files
+	// as this deployment's own defect keeps its reading, as it keeps the
+	// line.
+	if verdict, decided := codeVerdict(anomaly); !failedExecution(anomaly.ReasonCode) && !(decided && verdict == CheckDefect) {
+		if held, _ := guardHeld(anomaly); held {
+			blocked.Stage, blocked.Class = StageEvaluate, ClassUnlocated
+			blocked.Dependency, blocked.DependencyEvidence = DependencyNone, dependencyByCode
+		}
+	}
+	// A Slot the query cooldown held until it fell past the replay range is
+	// the cooldown's, and the cooldown is the query failure's: the reading
+	// the KindQueryCooldown row gets, whatever Slot the failure was seen on,
+	// because the holder says the skip is its doing. By its own outcome the
+	// round read SCHEDULE / capacity, which is where the check sent the
+	// reader while the backend was answering every probe with a status
+	// saying the field did not exist.
+	if anomaly.HeldBy == heldByCooldown {
+		blocked.Stage, blocked.Class = StageQuery, ClassUnavailable
+		blocked.Dependency, blocked.DependencyEvidence = DependencyQueryBackend, dependencyByCode
+		if queryRejected(anomaly.Failure) {
+			blocked.Class = ClassRefused
+		}
+		if anomaly.Failure != nil {
+			blocked.Code, blocked.Text = anomaly.Failure.Code, anomaly.Failure.Detail
+			if blocked.Text == "" {
+				blocked.Text = anomaly.Failure.Text
+			}
+		}
+	}
 	// A failure the pipeline classified but no code read: the category says
 	// which step raised it, and only that -- when the failure is this
 	// round's. A failure kept from an earlier Slot names no step for this one.

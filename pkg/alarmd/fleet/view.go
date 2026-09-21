@@ -646,6 +646,17 @@ type Anomaly struct {
 	// wrong -- or the retryable class, which clears on its own. Neither is what
 	// the column heading claims, and the cause alone cannot tell them apart.
 	CauseReason string `json:"cause_reason,omitempty"`
+	// HeldBy is what held the latest round's Slot, on a row whose latest
+	// round gave the Slot up (GAP_SKIPPED): the completion's own word, the
+	// vocabulary of run_one_return_total{outcome} plus the readiness
+	// deferral. query_cooldown is the one the check reads -- a Slot the
+	// cooldown held until it fell past the replay range is the cooldown's
+	// consequence, and the cooldown is the failure's, so the row stays on
+	// the failure's line instead of moving to "detection abandoned" on every
+	// round the object is skipped and back on every round it is probed.
+	// Empty on a row whose latest round ran, and on one from a completion
+	// that named no holder.
+	HeldBy string `json:"held_by,omitempty"`
 	// Coverage is how short the detection windows were, when the reason was
 	// about the window. It is here because HISTORY_WARMING describes two
 	// situations that need opposite responses and reads identically in both:

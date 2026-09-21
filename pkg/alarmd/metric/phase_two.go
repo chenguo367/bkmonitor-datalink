@@ -80,6 +80,7 @@ type phaseTwoMetrics struct {
 	scheduleCutovers                *prometheus.CounterVec
 	replayExpiries                  *prometheus.CounterVec
 	rangeGateDecisions              *prometheus.CounterVec
+	statePreflights                 *prometheus.CounterVec
 	scheduleCutoverQueryGroups      *prometheus.CounterVec
 	scheduleCutoverTimelinesRead    prometheus.Gauge
 	queryFailures                   *prometheus.CounterVec
@@ -678,6 +679,24 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range observability.RangeGateOutcomes {
 		metrics.rangeGateDecisions.WithLabelValues(outcome)
 	}
+	// The preflight's result and reason, as a series: the log line and the
+	// fleet's object row named them per object, and fleet-wide there was
+	// only the duration histogram's count, which says how many reads ran and
+	// nothing about how they ended. Every cell from startup, so a read that
+	// has never timed out reads as zero rather than as an absent family.
+	metrics.statePreflights = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_preflight_total",
+		Help: "Runtime State preflight reads by how they ended: success when every series' state came back; " +
+			"degraded when some did not for a retryable reason (STATE_READ_TIMEOUT is this process's own read " +
+			"deadline, REDIS_UNAVAILABLE the store not answering); terminal when some cannot be read " +
+			"(STATE_CORRUPT, STATE_BUDGET_EXCEEDED); failed when the store refused the request outright. One " +
+			"per preflight call, not per series; the series it covered are in worker_work_total{work_kind=\"state_load\"}.",
+	}, []string{"result", "reason"})
+	for _, result := range observability.StatePreflightResults {
+		for _, reason := range observability.StatePreflightReasons {
+			metrics.statePreflights.WithLabelValues(string(result), string(reason))
+		}
+	}
 	metrics.scheduleCutoverTimelinesRead = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_timelines_read", Help: "Schedule timelines the last publication cutover read to decide. Equal to the population on the first cutover of a Control Leader process, the changed set afterwards."})
 	// The failure code itself is an open vocabulary and stays in the log and
 	// the fleet view; the counter carries the bounded stage and category so a
@@ -1044,7 +1063,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
-		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries, m.rangeGateDecisions,
+		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries, m.rangeGateDecisions, m.statePreflights,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
@@ -1179,6 +1198,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		// The normalized word: an outcome outside the list has already been
 		// folded to unexplained, so the label set is the list and no more.
 		m.rangeGateDecisions.WithLabelValues(facts.Outcome).Inc()
+	}
+	if observation.Component == observability.ComponentState && observation.Stage == observability.StageStatePreflight {
+		result, reason := observability.NormalizeStatePreflight(observation.Result, observation.ReasonCode)
+		m.statePreflights.WithLabelValues(string(result), string(reason)).Inc()
 	}
 	m.observeSlotWait(observation)
 	if facts := observation.ScheduleCutover; facts != nil {

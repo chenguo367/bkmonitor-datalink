@@ -2980,6 +2980,19 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentRuntime, StageLegacyPodCache},
 	{ComponentControlPlane, StageSnapshotRefreshed}, {ComponentControlPlane, StageSnapshotUnavailable},
 	{ComponentControlPlane, StageActivationFailed},
+	// The catalog's three stages were emitted from the day the catalog
+	// existed and listed nowhere, so NormalizeComponentStage folded every one
+	// of them to (_other, _other) and the generic counter admitted them as
+	// such: object_read fires once per catalog object read, hit included, and
+	// on a live replica that was 300 lines a second into the one cell of
+	// observation_total that exists to say "an emitter nobody classified is
+	// running" -- with 822,000 in it, a real unclassified emitter would not
+	// have moved the needle. Listed here they keep their names and stay out
+	// of the generic family, as every other phase-two stage does; their own
+	// families (object_read_total, object_catalog_objects_total,
+	// schedule_cutover_total) were counting them all along.
+	{ComponentControlPlane, StageObjectCatalog}, {ComponentControlPlane, StageObjectRead},
+	{ComponentControlPlane, StageScheduleCutover},
 	{ComponentControlPlane, StageActiveQGSet}, {ComponentControlPlane, StageLegacyQGMigration},
 	{ComponentControlPlane, StageDrainingQGReconciled},
 	{ComponentControlPlane, StageFrozenPlanGeneration}, {ComponentControlPlane, StageActivationHold},

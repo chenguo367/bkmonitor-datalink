@@ -148,6 +148,14 @@ func (l *LoggingObserver) Observe(ctx context.Context, observation Observation) 
 			}
 		}
 	}
+	// A catalog object read is the same kind of fact: one per read, hit
+	// included, three hundred a second on a live replica, and complete in
+	// object_read_total{kind,result}. It was never written before it had a
+	// name -- an unlisted stage is not a workflow stage -- and getting its
+	// name must not turn it into the largest line in the log.
+	if observation.Component == ComponentControlPlane && observation.Stage == StageObjectRead {
+		return
+	}
 	if l == nil || l.logger == nil || l.logger.next == nil || l.policy == nil {
 		return
 	}

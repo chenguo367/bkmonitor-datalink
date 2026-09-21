@@ -2067,12 +2067,24 @@ func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx contex
 	}
 	defer func() { _ = recover() }()
 	coverageFacts := historyCoverageFacts(coverage)
+	// What held the Slot before it was given up, on the completion that gives
+	// it up. The Runner names the holder on every round and the runtime's
+	// completion line carried it; this line, which is the one the fleet reads
+	// the round from, did not, so the fleet's record of every skipped Slot
+	// said what happened and never what held it -- and a Slot the query
+	// cooldown held until it fell past the replay range read as this
+	// deployment giving detection up for capacity.
+	var heldBy *observability.HeldByFacts
+	if kind == string(execution.CompletionGapSkipped) {
+		heldBy = observability.HeldByFromContext(ctx)
+	}
 	coordinator.ports.Observer.Observe(ctx, observability.Observation{
 		Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		Result: result, ReasonCode: reason, Duration: time.Since(started), ProgressCompletionKind: kind,
 		ProgressCompletionCause: cause, ProgressCompletionReason: causeReason,
 		HistoryCoverage: coverageFacts, ExecutionEvidence: executionEvidenceFacts(evidence),
+		HeldBy: heldBy,
 	})
 }
 
