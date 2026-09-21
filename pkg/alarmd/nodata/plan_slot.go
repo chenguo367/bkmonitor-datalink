@@ -45,11 +45,14 @@ type PlanSlotInput struct {
 	// Plan, in seconds, zero meaning the deployment configured none and
 	// tracking is unlimited.
 	//
-	// It arrives here rather than being read off NoData because the horizon is
-	// resolved from three layers - platform default, dynamic config, strategy
-	// override - and only the caller has seen all three. Reading a field off
-	// the Plan here would make this the fourth place that decides what the
-	// effective horizon is.
+	// It arrives as its own field rather than being read off NoData here
+	// because the horizon is resolved from several layers - deployment default
+	// and the item's own override - and that resolution belongs in exactly one
+	// place. Compilation is that place: it settles the layers once and freezes
+	// the effective number into the Plan, and the caller forwards it. Reading
+	// the field off the Plan here as well would make this a second place that
+	// decides what the effective horizon is, and the two would disagree the
+	// moment either changed.
 	TrackingHorizonSeconds int64
 }
 

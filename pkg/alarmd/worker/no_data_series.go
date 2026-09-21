@@ -125,6 +125,12 @@ func (stream *streamedExecution) noDataRoundFor(
 		KnownHosts:       hosts.Known,
 		HostsResolved:    hosts.Resolved,
 		OutOfBusiness:    hosts.OutOfBusiness,
+		// Forwarded from the Plan, not resolved here. Compilation has already
+		// settled the deployment default against the item's override and
+		// frozen the one number, so this Slot reads what was in force when the
+		// Plan was built rather than what the deployment says right now -
+		// which is what lets a retried Slot reach the same answer.
+		TrackingHorizonSeconds: config.TrackingHorizonSeconds,
 	})
 	if err != nil {
 		return noDataRound{}, derivationFailed(err)

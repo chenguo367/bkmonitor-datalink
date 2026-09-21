@@ -88,7 +88,11 @@ type BuildRequest struct {
 	// runtime fact, and reporting it every Slot as an unavailable selector
 	// would dress a configuration gap up as a cache outage.
 	TargetSources TargetSources
-	LastGood      *PublishedSnapshot
+	// NoDataPolicy is the deployment's no-data settings, frozen into every Plan
+	// that does not override them. The zero value is what the process did
+	// before the settings existed.
+	NoDataPolicy NoDataPolicy
+	LastGood     *PublishedSnapshot
 	// PreviousDispositions is the published source audit of LastGood. It is the
 	// only memory of the removal grace cycle: a strategy absent from the
 	// observed set is retained once with PENDING_REMOVAL and dropped when the
@@ -129,6 +133,40 @@ func (sources TargetSources) key() string {
 		return "dynamic_groups"
 	}
 	return ""
+}
+
+// NoDataPolicy is what the deployment says about no-data detection for every
+// item that does not say it itself. Today that is one setting: how long an
+// absence goes on being tracked.
+//
+// It is its own build input rather than part of the compiler's identity. The
+// compiler identity closes over query compilation facts - event storage, data
+// access, CMDB tables, the disk and network filters - and a tracking horizon
+// changes no query's compiled result. Folding it in would buy cache
+// invalidation by giving "query compiler identity" a second meaning, and tie a
+// no-data policy to whichever compiler the deployment happens to use.
+type NoDataPolicy struct {
+	// TrackingHorizonSeconds is the platform default horizon. Zero means no
+	// horizon, which is what every deployment had before the setting existed.
+	TrackingHorizonSeconds int64
+}
+
+// key is this policy's contribution to the round key, in the same shape as
+// TargetSources.key.
+//
+// A platform default that changed has to empty the candidate cache, because
+// the cache is keyed by the strategy document and the document is exactly what
+// did not change. Without this the new default reaches only the strategies
+// whose own document happens to change next - every other Plan keeps compiling
+// with the old horizon, the object bytes stay put, the digest does not move,
+// and the setting reads as applied while doing nothing. That is the default
+// way to configure it, so without this key the feature is off by default and
+// looks on.
+func (policy NoDataPolicy) key() string {
+	if policy.TrackingHorizonSeconds == 0 {
+		return ""
+	}
+	return "no_data_horizon=" + strconv.FormatInt(policy.TrackingHorizonSeconds, 10)
 }
 
 // planCompileFacts is what compiling one item produced besides the Plan: the
@@ -200,7 +238,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	if err != nil {
 		return Catalog{}, err
 	}
-	request.Cache.beginRound(request.OutputProtocol, compilerIdentity, request.TargetSources.key())
+	request.Cache.beginRound(request.OutputProtocol, compilerIdentity, request.TargetSources.key(), request.NoDataPolicy.key())
 	observationID, err := deriveObservationID(request.Strategies)
 	if err != nil {
 		return Catalog{}, err
@@ -299,7 +337,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			catalog.Dispositions = append(catalog.Dispositions, disposition)
 			continue
 		}
-		candidate, err := request.Cache.build(ctx, planner, source, request.OutputProtocol, request.TargetSources)
+		candidate, err := request.Cache.build(ctx, planner, source, request.OutputProtocol, request.TargetSources, request.NoDataPolicy)
 		if err != nil {
 			if len(candidate.dispositions) > 0 {
 				catalog.Dispositions = append(catalog.Dispositions, candidate.dispositions...)
@@ -427,14 +465,15 @@ func compilerForRound(planner PrimaryQueryCompiler) (PrimaryQueryCompiler, strin
 // loop); the mutex only keeps a stray concurrent build from corrupting the
 // maps.
 type CandidateCache struct {
-	mu       sync.Mutex
-	protocol string
-	compiler string
-	sources  string
-	entries  map[string]cachedCandidate
-	seen     map[string]struct{}
-	compiled int
-	reused   int
+	mu           sync.Mutex
+	protocol     string
+	compiler     string
+	sources      string
+	noDataPolicy string
+	entries      map[string]cachedCandidate
+	seen         map[string]struct{}
+	compiled     int
+	reused       int
 }
 
 type cachedCandidate struct {
@@ -455,15 +494,17 @@ func NewCandidateCache() *CandidateCache {
 // and the full round is exactly what that change asks for: every strategy
 // recompiled under the new setting, so every plan's revision moves and the
 // cutover carries the new Catalog out.
-func (cache *CandidateCache) beginRound(protocol, compiler, sources string) {
+func (cache *CandidateCache) beginRound(protocol, compiler, sources, noDataPolicy string) {
 	if cache == nil {
 		return
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	if cache.protocol != protocol || cache.compiler != compiler || cache.sources != sources {
+	if cache.protocol != protocol || cache.compiler != compiler || cache.sources != sources ||
+		cache.noDataPolicy != noDataPolicy {
 		cache.entries = make(map[string]cachedCandidate)
 		cache.protocol, cache.compiler, cache.sources = protocol, compiler, sources
+		cache.noDataPolicy = noDataPolicy
 	}
 	cache.seen = make(map[string]struct{}, len(cache.entries))
 	cache.compiled, cache.reused = 0, 0
@@ -474,13 +515,13 @@ func (cache *CandidateCache) beginRound(protocol, compiler, sources string) {
 // candidate: a document the compiler rejects is rejected the same way every
 // round, and recompiling it each time only to reject it again is the cost
 // this cache exists to remove.
-func (cache *CandidateCache) build(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, protocol string, sources TargetSources) (sourceCandidate, error) {
+func (cache *CandidateCache) build(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, protocol string, sources TargetSources, policy NoDataPolicy) (sourceCandidate, error) {
 	if cache == nil {
-		return buildCandidate(ctx, planner, source, protocol, sources)
+		return buildCandidate(ctx, planner, source, protocol, sources, policy)
 	}
 	digest, err := strategyDigest(source)
 	if err != nil {
-		return buildCandidate(ctx, planner, source, protocol, sources)
+		return buildCandidate(ctx, planner, source, protocol, sources, policy)
 	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
@@ -491,7 +532,7 @@ func (cache *CandidateCache) build(ctx context.Context, planner PrimaryQueryComp
 		cache.reused++
 		return entry.candidate, entry.err
 	}
-	candidate, err := buildCandidate(ctx, planner, source, protocol, sources)
+	candidate, err := buildCandidate(ctx, planner, source, protocol, sources, policy)
 	cache.entries[digest] = cachedCandidate{candidate: candidate, err: err}
 	cache.compiled++
 	return candidate, err
@@ -635,7 +676,7 @@ type sourceCandidate struct {
 	dispositions []ObjectDisposition
 }
 
-func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, outputProtocol string, sources TargetSources) (sourceCandidate, error) {
+func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, outputProtocol string, sources TargetSources, policy NoDataPolicy) (sourceCandidate, error) {
 	candidate := sourceCandidate{}
 	targetPlanDocument := compileTargetPlanDocument(source)
 	if targetPlanDocument.refusal != nil {
@@ -757,7 +798,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		compiledInputs.osRestartHistory = &history
 	}
 	plan, compiled, dispositions, err := compilePlan(
-		legacy, item, source.Identity, facts.Normalization.DatasetContract, source.SourceID, &compiledInputs, targetScope, targetPlan,
+		legacy, item, source.Identity, facts.Normalization.DatasetContract, source.SourceID, &compiledInputs, targetScope, targetPlan, policy,
 	)
 	if err != nil {
 		candidate.dispositions = append(candidate.dispositions, dispositions...)
@@ -1010,6 +1051,10 @@ type legacyNoDataConfig struct {
 	Continuous   json.RawMessage   `json:"continuous"`
 	AggDimension []json.RawMessage `json:"agg_dimension"`
 	Level        json.RawMessage   `json:"level"`
+	// TrackingHorizonSeconds is this item's own horizon, overriding the
+	// deployment's. Absent means the deployment's applies; a stated zero is an
+	// opt-out and is not the same as absent.
+	TrackingHorizonSeconds json.RawMessage `json:"tracking_horizon_seconds"`
 }
 
 // legacyNoDataEnabled reads is_enabled the way the backend's truthiness test
@@ -1123,7 +1168,7 @@ func noDataRosterUnsupported(scope *contract.TargetScopeV2, plan *contract.Targe
 // cannot be validated is an error rather than a silent disable: the strategy
 // asked for the detection, and dropping it quietly is the failure mode that
 // looks like nothing happened.
-func frozenNoDataConfig(item legacyItem) (*contract.NoDataConfigV1, error) {
+func frozenNoDataConfig(item legacyItem, policy NoDataPolicy) (*contract.NoDataConfigV1, error) {
 	raw := strings.TrimSpace(string(item.NoDataConfig))
 	if raw == "" || raw == "null" {
 		return nil, nil
@@ -1163,6 +1208,18 @@ func frozenNoDataConfig(item legacyItem) (*contract.NoDataConfigV1, error) {
 	}
 	if stated {
 		config.Level = level
+	}
+	// The effective horizon is frozen here, so a Slot reads one number and
+	// never has to know whether it came from the item or the deployment. An
+	// item that states its own uses it - including a stated zero, which is how
+	// an item opts out of a platform horizon and keeps tracking indefinitely.
+	config.TrackingHorizonSeconds = policy.TrackingHorizonSeconds
+	horizon, stated, err := legacyNoDataNumber("tracking_horizon_seconds", source.TrackingHorizonSeconds)
+	if err != nil {
+		return nil, fmt.Errorf("alarmd controlplane: item %d %w", item.ID, err)
+	}
+	if stated {
+		config.TrackingHorizonSeconds = int64(horizon)
 	}
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("alarmd controlplane: item %d no_data_config: %w", item.ID, err)
@@ -1311,6 +1368,7 @@ func compilePlan(
 	inputs *compiledPlanInputs,
 	targetScope *contract.TargetScopeV2,
 	targetPlan *contract.TargetPlanV1,
+	policy NoDataPolicy,
 ) (contract.EvaluationPlanV2, planCompileFacts, []ObjectDisposition, error) {
 	if hasJSONValue(source.Priority) || source.PriorityGroupKey != "" {
 		return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, errors.New("alarmd controlplane: G1 does not support priority semantics")
@@ -1460,7 +1518,7 @@ func compilePlan(
 	// over the half they may not have known was configured. The half that is
 	// off is named here, counted in the composition, and listed by strategy.
 	suspended := ""
-	noData, err := frozenNoDataConfig(item)
+	noData, err := frozenNoDataConfig(item, policy)
 	if err != nil {
 		suspended, noData = contract.ReasonNoDataConfigInvalid, nil
 	}
