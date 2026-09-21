@@ -15,11 +15,17 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
 )
 
-// SnapshotChunkBytes bounds one Snapshot message. A view larger than it is
-// sent in chunks that share the version and are installed together. Well
-// under gRPC's default 4 MiB message bound; on the deployment measured a
-// whole view is a few hundred kilobytes and travels as one chunk.
-const SnapshotChunkBytes = 1 << 20
+// MessageBytes bounds one message of the stream, whichever kind. A view
+// larger than it is sent as snapshot chunks that share the version and are
+// installed together; a delta larger than it is not sent at all, the
+// Worker gets the snapshot instead. Well under gRPC's default 4 MiB receive
+// bound, which is the wall this one keeps every message away from; on the
+// deployment measured a whole view is a few hundred kilobytes and travels
+// as one chunk.
+const MessageBytes = 1 << 20
+
+// SnapshotChunkBytes is the bound a snapshot chunk is cut to.
+const SnapshotChunkBytes = MessageBytes
 
 func versionToWire(version Version) *pb.Version {
 	return &pb.Version{ControlEpoch: version.ControlEpoch, Revision: version.Revision, Digest: version.Digest}

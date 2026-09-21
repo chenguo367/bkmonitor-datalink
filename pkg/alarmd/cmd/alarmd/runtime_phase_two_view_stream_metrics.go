@@ -20,7 +20,7 @@ func viewStreamCounts(stats viewstream.Stats) metric.ViewStreamCounts {
 		IgnoredDigestMismatch: stats.Ignored.DigestMismatch, IgnoredStaleIncarnation: stats.Ignored.StaleIncarnation,
 		Publications: stats.Publications, PublicationsSkipped: stats.PublicationsSkipped,
 		SnapshotChunksSent: stats.SnapshotChunksSent, DeltasSent: stats.DeltasSent, EmptyDeltasSent: stats.EmptyDeltasSent,
-		Refusals: stats.Refusals,
+		DeltasOversized: stats.DeltasOversized, Refusals: stats.Refusals,
 	}
 }
 

@@ -12,6 +12,8 @@ import (
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
 )
@@ -83,11 +85,15 @@ type Stats struct {
 	SnapshotChunksSent  uint64
 	DeltasSent          uint64
 	EmptyDeltasSent     uint64
-	Refusals            uint64
+	// DeltasOversized counts the deltas that were not sent because one
+	// message of them would have exceeded MessageBytes; each was replaced
+	// by the chunked snapshot of the same revision.
+	DeltasOversized uint64
+	Refusals        uint64
 }
 
 type serverCounters struct {
-	publications, publicationsSkipped, snapshotChunks, deltas, emptyDeltas, refusals uint64
+	publications, publicationsSkipped, snapshotChunks, deltas, emptyDeltas, deltasOversized, refusals uint64
 }
 
 // Server implements pb.ControlServiceServer for the Leader.
@@ -234,7 +240,8 @@ func (server *Server) Stats() Stats {
 	stats := Stats{Sessions: len(server.sessions),
 		Publications: server.counters.publications, PublicationsSkipped: server.counters.publicationsSkipped,
 		SnapshotChunksSent: server.counters.snapshotChunks, DeltasSent: server.counters.deltas,
-		EmptyDeltasSent: server.counters.emptyDeltas, Refusals: server.counters.refusals}
+		EmptyDeltasSent: server.counters.emptyDeltas, DeltasOversized: server.counters.deltasOversized,
+		Refusals: server.counters.refusals}
 	if server.publisher == nil {
 		return stats
 	}
@@ -614,21 +621,34 @@ func (sess *session) publish(publisher *Publisher) error {
 	}
 	if !wantSnapshot && installed.ControlEpoch == publisher.epoch && installed == sent {
 		if delta, ok := publisher.Step(sess.receiver.WorkerID, installed); ok {
-			if err := sess.stream.Send(&pb.LeaderMessage{Body: &pb.LeaderMessage_Delta{Delta: DeltaToWire(delta)}}); err != nil {
-				return err
-			}
-			publisher.ledger.MarkSent(delta.Target.Key(), sess.receiver)
-			sess.server.count(func(c *serverCounters) {
-				if delta.Empty() {
-					c.emptyDeltas++
-				} else {
-					c.deltas++
+			if wire := DeltaToWire(delta); proto.Size(wire) > MessageBytes {
+				// A delta is one message, and a snapshot is as many as its
+				// size needs. A step that adds most of a large view - the
+				// first publication after a Worker joins, a rebalance that
+				// hands it thousands of Query Groups - is a delta larger than
+				// the receiver accepts; sending it would be refused there,
+				// and on reconnect the Worker still holds the previous
+				// revision, so the same delta would be built and refused
+				// again, and the Worker never advances. The snapshot below
+				// carries the same target in chunks the receiver takes.
+				sess.server.count(func(c *serverCounters) { c.deltasOversized++ })
+			} else {
+				if err := sess.stream.Send(&pb.LeaderMessage{Body: &pb.LeaderMessage_Delta{Delta: wire}}); err != nil {
+					return err
 				}
-			})
-			sess.mu.Lock()
-			sess.sent = delta.Target
-			sess.mu.Unlock()
-			return nil
+				publisher.ledger.MarkSent(delta.Target.Key(), sess.receiver)
+				sess.server.count(func(c *serverCounters) {
+					if delta.Empty() {
+						c.emptyDeltas++
+					} else {
+						c.deltas++
+					}
+				})
+				sess.mu.Lock()
+				sess.sent = delta.Target
+				sess.mu.Unlock()
+				return nil
+			}
 		}
 	}
 	snapshot, ok := publisher.Snapshot(sess.receiver.WorkerID)
