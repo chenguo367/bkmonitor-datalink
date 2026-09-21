@@ -160,9 +160,15 @@ func (tracker *Tracker) Restore(queryGroup string, restored RestoredState, at ti
 	// the most such a record can say.
 	if round := restored.LastRound; round != nil && round.Kind == "FULL_COMPLETED" {
 		state.sawData = true
+		if !round.Slot.IsZero() {
+			state.lastDataSlot = round.Slot.Unix()
+		}
 	}
 	if !restored.LastDataSlot.IsZero() {
 		state.sawData = true
+		if slot := restored.LastDataSlot.Unix(); slot > state.lastDataSlot {
+			state.lastDataSlot = slot
+		}
 	}
 	// The run of empty rounds the record's last round belongs to, dated by the
 	// record on the source's clock. Restoring it is what lets the hour the

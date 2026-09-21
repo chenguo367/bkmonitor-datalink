@@ -33,9 +33,16 @@ func emptyRounds(tracker *Tracker, at *clock, queryGroup string, period, span ti
 	return rounds
 }
 
-// emptyAt is one empty completion of the object at the given Slot.
+// emptyAt is one empty completion of the object at the given Slot, and
+// dataAt one that returned records: the two ends of the data side's hour.
 func emptyAt(queryGroup, strategy string, slot time.Time) observability.Observation {
 	observed := completion(queryGroup, "FULL_EMPTY_COMPLETED", strategy)
+	observed.Trace.EvaluationTime = slot.Unix()
+	return observed
+}
+
+func dataAt(queryGroup, strategy string, slot time.Time) observability.Observation {
+	observed := completion(queryGroup, "FULL_COMPLETED", strategy)
 	observed.Trace.EvaluationTime = slot.Unix()
 	return observed
 }
@@ -104,7 +111,7 @@ func TestObjectsEmptyEveryRoundAreListedAfterAnHourNotAfterARoundCount(t *testin
 	// Returned records once, then empty for two hours: the data side's line
 	// only. The two kinds are told apart by whether records were ever seen,
 	// and the hour does not move an object from one to the other.
-	tracker.Observe(context.Background(), completion("qg-stopped", "FULL_COMPLETED", "8930"))
+	tracker.Observe(context.Background(), dataAt("qg-stopped", "8930", at.at))
 	emptyRounds(tracker, at, "qg-stopped", period, 2*time.Hour)
 	rows := tracker.NoData()
 	if _, listed := rowsOfKind(rows, KindEmptyEveryRound)["qg-stopped"]; listed {
@@ -121,7 +128,7 @@ func TestObjectsEmptyEveryRoundAreListedAfterAnHourNotAfterARoundCount(t *testin
 	// gate, "never saw data" is its predicate, and the second is what keeps
 	// a slow object that did see data off it.
 	slow := 35 * time.Minute // two empty rounds, seventy minutes: past the hour, below the round count
-	tracker.Observe(context.Background(), completion("qg-slow-seen", "FULL_COMPLETED", "8931"))
+	tracker.Observe(context.Background(), dataAt("qg-slow-seen", "8931", at.at))
 	if few := emptyRounds(tracker, at, "qg-slow-seen", slow, 61*time.Minute); few >= DefaultDegradedRounds {
 		t.Fatalf("slow object completed %d empty rounds, want fewer than the data side's %d so only the predicate decides", few, DefaultDegradedRounds)
 	}
@@ -135,7 +142,7 @@ func TestObjectsEmptyEveryRoundAreListedAfterAnHourNotAfterARoundCount(t *testin
 
 	// Records arriving end it, and the object is then the data side's when
 	// its rounds go empty again.
-	tracker.Observe(context.Background(), completion("qg-15s-young", "FULL_COMPLETED", "4101"))
+	tracker.Observe(context.Background(), dataAt("qg-15s-young", "4101", at.at))
 	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-15s-young"]; listed {
 		t.Error("still listed after a round with records")
 	}

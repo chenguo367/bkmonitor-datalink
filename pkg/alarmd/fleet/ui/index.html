@@ -826,7 +826,7 @@ var EVIDENCE = {
   WINDOW_UNDECIDED:      '对象行的窗口计数：短窗/满窗、保护与最初触发',
   CONFIG_UNRESOLVED:     '对象行 config_changed 与快照/查询/调度三版本是否变了',
   BACKEND_NOT_ANSWERING: '分组的症状（超时/5xx）；对象行的冷却到期时刻与失败次数；超时的还要看查询预算与后端耗时，这两样不在页面上',
-  NO_DATA_PERSISTENT:    '对象行连续空轮数，与"有过数据"（进过索引）',
+  NO_DATA_PERSISTENT:    '对象行连续空轮数 ≥3，且源时间上"最近一次空轮的 Slot − 最后一次有数据的 Slot" ≥ 1 h（与 EMPTY_EVERY_ROUND 同一把尺：一个时钟一个阈值，只差"有没有过数据"）；只看轮数会把每 10 min 上报一次的源在三分钟内列成"数据停了"，只看小时会把慢周期对象两轮就列上。最后一次有数据的 Slot 随对象记录跨重启恢复',
   EMPTY_EVERY_ROUND:     '对象行"每轮都空"：连续空轮数（重启后只从恢复的那一轮起数，是下界）、空跑起始 Slot（源时间）、评估周期（interval_seconds）、never_saw_data=true（没有任何一轮已知有过数据——本进程没见过、对象记录里也没有）、原因 CAUSE_UNKNOWN（本版不猜）；与 NO_DATA_PERSISTENT 的区别只在"有没有已知有数据的轮"。一小时的门按 Slot 对 Slot 量：最近一次空轮的 Slot 减空跑起始 Slot ≥ 1 h，不掺墙钟——问的是"这个源在它自己的时间上空了一小时没有"，不是"我们看了多久"；两种时钟混在一条判据里，落后两小时正在追赶的对象恢复后第一轮就过门，恰是最该判对的场景。反过来，两小时的空 Slot 一分钟回放完也会列出，那一小时源时间确实是空的。JSON：no_data[].kind=EMPTY_EVERY_ROUND、empty_every_round{rounds, since, interval_seconds, never_saw_data, cause}、首屏 empty_every_round_total',
   SERIES_DATA_MISSING:   '对象行窗口计数：老序列缺点的比例；同一行若带超时或保护，缺点可能是 alarmd 没取到而不是数据没到',
   SERIES_CHURNING:       '对象行窗口计数：新序列占比与活不过窗口的轮数',

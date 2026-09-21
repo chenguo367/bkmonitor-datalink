@@ -93,7 +93,7 @@ func TestTheHourAnObjectHasBeenEmptySurvivesARestartThroughItsRecord(t *testing.
 
 	// Records arriving end the restored run like any other, and the next
 	// empty round starts a new one on this process's clock.
-	tracker.Observe(context.Background(), completion("qg-restored-run", "FULL_COMPLETED", "4101"))
+	tracker.Observe(context.Background(), dataAt("qg-restored-run", "4101", at.at))
 	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-restored-run"]; listed {
 		t.Error("still listed after a round with records")
 	}

@@ -167,12 +167,13 @@ func TestFleetPublisherCarriesTheCensusAndWakeFacts(t *testing.T) {
 		}
 	}
 	// And one whose data stopped, so the no-data list is published and its
-	// row carries wake facts like every other.
+	// row carries wake facts like every other: records at one Slot, then
+	// empty rounds whose Slots span the data side's hour.
 	tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "FULL_COMPLETED",
-		Trace: observability.TraceFields{QueryGroupKey: "query-group-c", StrategyID: "1", BusinessID: "2"}})
+		Trace: observability.TraceFields{QueryGroupKey: "query-group-c", StrategyID: "1", BusinessID: "2", EvaluationTime: 20_000 - 3660}})
 	for i := 0; i < fleet.DefaultDegradedRounds; i++ {
 		tracker.Observe(context.Background(), observability.Observation{ProgressCompletionKind: "FULL_EMPTY_COMPLETED",
-			Trace: observability.TraceFields{QueryGroupKey: "query-group-c", StrategyID: "1", BusinessID: "2"}})
+			Trace: observability.TraceFields{QueryGroupKey: "query-group-c", StrategyID: "1", BusinessID: "2", EvaluationTime: int64(20_000 - 120 + 60*i)}})
 	}
 	publisher := fleetPublisher{
 		tracker: tracker, replica: "replica-1", now: clock.now,
