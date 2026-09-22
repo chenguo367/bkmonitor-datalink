@@ -105,7 +105,7 @@ func TestThePublishedRuleListIsExactlyWhatCanBeReported(t *testing.T) {
 		}
 		published[rule] = true
 	}
-	if len(PackedRuleNames) != 11 {
+	if len(PackedRuleNames) != 12 {
 		t.Fatalf("the list holds %d rules; every refusal that reaches the line under STATE_CORRUPT needs "+
 			"exactly one, so a change to either has to change this number on purpose", len(PackedRuleNames))
 	}

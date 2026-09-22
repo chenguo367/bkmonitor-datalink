@@ -2166,12 +2166,18 @@ func stateMutationForTest(seriesDigest, recordID string, factResult execution.Le
 			RecordID: recordID, SourceTime: 1_788_000_000,
 			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: refs[0].DetectFingerprint, Result: factResult}},
 		}},
+		RetentionPoints: testPlanRetentionPoints,
 	})
 	if err != nil {
 		panic(err)
 	}
 	return mutation
 }
+
+// testPlanRetentionPoints is what compiledPlanForTest asks to retain. The
+// result contract derives the same number from the compiled Plan and compares,
+// so a fixture that guessed it would be refused rather than quietly accepted.
+const testPlanRetentionPoints = 1
 
 func validLevelOutcome(kind execution.LevelOutcomeKind, reason execution.ReasonCode, partial bool) execution.LevelOutcome {
 	outcome := execution.LevelOutcome{

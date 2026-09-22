@@ -557,6 +557,13 @@ func (e *Evaluator) evaluateSeries(
 	var final *execution.StateEvaluation
 	var events []contract.TriggerEventV1
 	var affected []execution.RecordAnchor
+	// The history as the store holds it, kept apart from the provisional view
+	// the records build on each other. A Slot with several records advances the
+	// view record by record, but the mutation that leaves the Slot describes one
+	// write against the record that was loaded, so its base is this one and its
+	// points are every point the Slot added.
+	baseHistory := view.History
+	var delta []execution.StateHistoryPoint
 	for recordIndex, record := range primaryRecords {
 		if loaded.constrains {
 			// The Plan's own gap marker could not be read, or is terminal. The
@@ -588,7 +595,20 @@ func (e *Evaluator) evaluateSeries(
 		countOpenAlertGate(&result.OpenAlertGate, one.gate)
 		result.HistoryCoverage.Merge(one.coverage)
 		if one.state != nil {
-			view = applyProvisional(view, one.state.Mutation)
+			for _, point := range one.state.Mutation.Points {
+				if delta, err = appendHistoryPoint(delta, point); err != nil {
+					return execution.PlanEvaluationResult{}, err
+				}
+			}
+			// Only when another record of this Slot will read it. The view is
+			// the merged window, and materializing one per record of a Slot
+			// that has a single record puts back the per-round allocation this
+			// mutation shape exists to remove.
+			if recordIndex+1 < len(primaryRecords) {
+				if view, err = applyProvisional(view, one.state.Mutation); err != nil {
+					return execution.PlanEvaluationResult{}, err
+				}
+			}
 			final = one.state
 			events = append(events, one.state.Events...)
 			affected = append(affected, execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()})
@@ -597,6 +617,7 @@ func (e *Evaluator) evaluateSeries(
 	if final != nil {
 		mutation := final.Mutation
 		mutation.AffectedRecords = affected
+		mutation.BaseHistory, mutation.Points = baseHistory, delta
 		mutation, err = execution.BuildStateMutation(mutation)
 		if err != nil {
 			return execution.PlanEvaluationResult{}, err
@@ -888,15 +909,23 @@ func gapCompleteness(gaps execution.GapLoadResult, due execution.DuePlan, levelI
 	}
 	return "", "", false
 }
-func applyProvisional(view execution.RuntimeStateView, mutation execution.StateMutation) execution.RuntimeStateView {
+
+// applyProvisional is the window the next record of this Slot reads: what the
+// store would hold if this mutation landed. It materializes the merge, which
+// is why the caller only asks for it when there is a next record.
+func applyProvisional(view execution.RuntimeStateView, mutation execution.StateMutation) (execution.RuntimeStateView, error) {
+	merged, err := execution.MergedHistory(mutation.BaseHistory, mutation.Points, mutation.RetentionPoints)
+	if err != nil {
+		return execution.RuntimeStateView{}, err
+	}
 	view.BlobRevision = mutation.ExpectedBlobRevision
-	view.History = append([]execution.StateHistoryPoint(nil), mutation.Points...)
+	view.History = merged
 	view.Levels = make([]execution.RuntimeLevelStateView, len(mutation.Levels))
 	for i, l := range mutation.Levels {
 		view.Levels[i] = execution.RuntimeLevelStateView{LevelID: l.LevelID, LevelStateCompatibility: l.LevelStateCompatibility, HistoryCompleteness: l.HistoryCompleteness, GapReasonCode: l.GapReasonCode, WarmupRequirementRef: l.WarmupRequirementRef, LastProcessedEventTime: l.LastProcessedEventTime}
 	}
 	view.SeriesGuard = mutation.SeriesGuard
-	return view
+	return view, nil
 }
 func effectiveFact(h execution.InternalExecutionHeader, p execution.PlanIdentity, l uint32, s execution.SeriesIdentityDigest) (strategy.EffectiveTimeFact, bool) {
 	for _, f := range h.EffectiveTimeFacts {
@@ -1016,27 +1045,41 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 			lf = append(lf, execution.StateLevelFact{LevelID: f.Definition.LevelID, DetectFingerprint: f.DetectFingerprint, Result: execution.LevelFactResult(f.Result)})
 		}
 	}
-	points, err := appendHistoryPoint(view.History, execution.StateHistoryPoint{
+	point, err := deltaHistoryPoint(view.History, execution.StateHistoryPoint{
 		RecordID: record.RecordID(), SourceTime: record.SourceTime(), Levels: lf})
 	if err != nil {
 		return execution.StateMutation{}, err
 	}
-	var retain uint32
-	for _, l := range due.CompiledPlan.Levels() {
-		if l.StateRequirement().RetentionPoints > retain {
-			retain = l.StateRequirement().RetentionPoints
-		}
-	}
-	if uint32(len(points)) > retain {
-		points = points[len(points)-int(retain):]
-	}
+	retain := planRetentionPoints(due)
 	version, versionErr := execution.BuildApplyVersion(request.Header.Contract, due.StateApplyEpoch)
 	if versionErr != nil {
 		return execution.StateMutation{}, versionErr
 	}
 	// Provisional: only the mutation that survives the series is digested, by
 	// evaluateSeries, once its full affected-record set is known.
-	return execution.BuildProvisionalStateMutation(execution.StateMutation{Identity: view.Identity, ExpectedBlobRevision: view.BlobRevision, ApplyVersion: version, AffectedRecords: []execution.RecordAnchor{{RecordID: record.RecordID(), SourceTime: record.SourceTime()}}, Levels: levels, Points: points})
+	//
+	// One point, not the window. The record this write leaves behind is the
+	// loaded history with this point merged in, bounded by the retention, and
+	// the store builds it while it serializes - see execution.WalkMergedHistory.
+	return execution.BuildProvisionalStateMutation(execution.StateMutation{Identity: view.Identity, ExpectedBlobRevision: view.BlobRevision, ApplyVersion: version, AffectedRecords: []execution.RecordAnchor{{RecordID: record.RecordID(), SourceTime: record.SourceTime()}}, Levels: levels, Points: []execution.StateHistoryPoint{point}, RetentionPoints: retain, BaseHistory: view.History})
+}
+
+// planRetentionPoints is the bound in force for this Plan's record: the
+// largest any of its Levels asks for, since one record holds every Level's
+// window. Derived here and asserted equal by the result contract, which reads
+// the compiled Plan the same way, so the mutation cannot carry a bound the
+// Plan does not ask for.
+func planRetentionPoints(due execution.DuePlan) uint32 {
+	var retain uint32
+	if due.CompiledPlan == nil {
+		return 0
+	}
+	for _, l := range due.CompiledPlan.Levels() {
+		if l.StateRequirement().RetentionPoints > retain {
+			retain = l.StateRequirement().RetentionPoints
+		}
+	}
+	return retain
 }
 
 // appendHistoryPoint places a freshly evaluated point into the loaded history
@@ -1059,24 +1102,37 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 // left to surface as a broken invariant. Anything else keeps its position by
 // SourceTime, so a record that arrives out of order lands where it belongs.
 func appendHistoryPoint(history []execution.StateHistoryPoint, point execution.StateHistoryPoint) ([]execution.StateHistoryPoint, error) {
-	position := sort.Search(len(history), func(index int) bool { return history[index].SourceTime >= point.SourceTime })
-	if position < len(history) && history[position].SourceTime == point.SourceTime {
-		if history[position].RecordID != point.RecordID {
-			return nil, &namedEvaluationError{code: "STATE_RECORD_IDENTITY_CONFLICT",
-				err: fmt.Errorf("alarmd evaluation: record identity conflict at source time %d", point.SourceTime)}
-		}
-		merged := append([]execution.StateHistoryPoint(nil), history...)
-		levels, err := mergeLevelFacts(merged[position].Levels, point.Levels)
-		if err != nil {
-			return nil, err
-		}
-		merged[position].Levels = levels
-		return merged, nil
+	placed, err := deltaHistoryPoint(history, point)
+	if err != nil {
+		return nil, err
 	}
-	placed := make([]execution.StateHistoryPoint, 0, len(history)+1)
-	placed = append(placed, history[:position]...)
-	placed = append(placed, point)
-	return append(placed, history[position:]...), nil
+	return execution.MergedHistory(history, []execution.StateHistoryPoint{placed}, 0)
+}
+
+// deltaHistoryPoint is the same rule stated as one point rather than a window:
+// what this round adds at this source time, which is the fresh point itself
+// unless the history already holds that position, in which case it is the
+// stored facts and the fresh ones together.
+//
+// The mutation carries this and the store merges it back, so the disagreement
+// between a stored fact and a fresh one for the same record has to be named
+// here - the store sees the merged point and can no longer tell that two
+// evaluations of one record disagreed about a Level.
+func deltaHistoryPoint(history []execution.StateHistoryPoint, point execution.StateHistoryPoint) (execution.StateHistoryPoint, error) {
+	position := sort.Search(len(history), func(index int) bool { return history[index].SourceTime >= point.SourceTime })
+	if position == len(history) || history[position].SourceTime != point.SourceTime {
+		return point, nil
+	}
+	if history[position].RecordID != point.RecordID {
+		return execution.StateHistoryPoint{}, &namedEvaluationError{code: "STATE_RECORD_IDENTITY_CONFLICT",
+			err: fmt.Errorf("alarmd evaluation: record identity conflict at source time %d", point.SourceTime)}
+	}
+	levels, err := mergeLevelFacts(history[position].Levels, point.Levels)
+	if err != nil {
+		return execution.StateHistoryPoint{}, err
+	}
+	point.Levels = levels
+	return point, nil
 }
 
 // mergeLevelFacts keeps one fact per Level. A Level the stored point already

@@ -1446,7 +1446,42 @@ type StateMutation struct {
 	AffectedRecords      []RecordAnchor
 	SeriesGuard          *StateGuardFact
 	Levels               []RuntimeLevelStateMutation
-	Points               []StateHistoryPoint
+	// Points is what this round adds to the record, not the record it means to
+	// leave behind. Ordinarily one point; a record whose source time the loaded
+	// history already holds still produces one, carrying that point's Level
+	// facts merged with the fresh ones.
+	//
+	// It used to be the whole retained window, rebuilt and digested every round
+	// for every series. The digest is derived over this field, so a window of
+	// 1469 points cost 11 ms and 5.5 MB of canonical encoding per series per
+	// round - measured, and the largest single item in the profile. What the
+	// write stores is unchanged: BaseHistory merged with these points, bounded
+	// by RetentionPoints, at serialization time.
+	Points []StateHistoryPoint
+	// RetentionPoints is the bound in force this round, the largest of the
+	// Plan's Levels. It travels with the mutation rather than being read back
+	// from the record because the bound changes: a Plan that raises it must not
+	// have the round that raises it truncated by the value the previous round
+	// stored. It is part of the digest for the reason every field there is - it
+	// decides the bytes the write leaves behind, and two statements that differ
+	// only in it are not the same statement.
+	RetentionPoints uint32
+	// BaseHistory is the loaded record this Delta applies to: the history read
+	// at preflight, referenced rather than copied.
+	//
+	// Not part of the digest, and deliberately so. ExpectedBlobRevision already
+	// names the record these points were read from, and the compare-and-set
+	// refuses a write whose stored bytes are no longer the ones preflight saw,
+	// so the base is pinned by the revision and not by the statement. Digesting
+	// it would put the whole window back into the hash and undo the change that
+	// introduced this field.
+	//
+	// The consequence is that equal digests no longer fix the bytes written -
+	// the result is f(BaseHistory, Points, RetentionPoints). What makes a skip
+	// safe is that the merge is idempotent by source time, not that the digest
+	// covers the outcome, and that is pinned by its own tests rather than left
+	// to the reader.
+	BaseHistory []StateHistoryPoint
 	// sealedDigest is written by BuildStateMutation and read by ValidateDigest.
 	// It is unexported so that no encoder and no caller outside this package can
 	// reach it, and it never takes part in the digest.
