@@ -794,6 +794,147 @@ type HistoryCoverage struct {
 	// short count is a fixed set of holes sliding through a window that
 	// fills as fast as it drains. NoProgressRounds reads the same for both.
 	UnchangedRounds uint32 `json:"unchanged_rounds,omitempty"`
+	// WorstWindow names the window the worst pair belongs to (series and
+	// Level, as WindowRow.Key), and WorstWindowChanged says it is not the
+	// window the pair belonged to the round before. The round-over-round
+	// counters above compare the worst pair across rounds, and the pair
+	// moves between series: on a live object it read 8 of 9, then 6, then
+	// 4, over a round with one series, then two, then three -- three
+	// windows, read as one losing points. The counters reset when the
+	// window changes, and this says when they did.
+	WorstWindow        string `json:"worst_window,omitempty"`
+	WorstWindowChanged bool   `json:"worst_window_changed,omitempty"`
+	// Windows names the worst short windows of the last round, each hole
+	// read against the rounds this process remembers for the object: whose
+	// minute it is. It is the answer to the question the counts leave open
+	// -- which minutes, and did this side ask for them.
+	Windows []WindowRow `json:"windows,omitempty"`
+	// RoundsRemembered is how many recent rounds the holes were read against,
+	// and RoundsKept the most this process keeps per object. A hole older
+	// than the remembered rounds reads NOT_IN_MEMORY, which is a limit of
+	// the reader, not a finding about the round.
+	RoundsRemembered int `json:"rounds_remembered,omitempty"`
+	RoundsKept       int `json:"rounds_kept,omitempty"`
+}
+
+// HoleCause is whose a missing position is, read from the round of that
+// minute as this process remembers it. The closed list the page words.
+type HoleCause string
+
+const (
+	// The round of that minute ran, its query answered whole and carried
+	// records, and this series was not among them: the data's, as far as the
+	// query could see at the time. Late-arriving data reads the same until
+	// it arrives.
+	HoleAnsweredWithoutSeries HoleCause = "ROUND_ANSWERED_WITHOUT_SERIES"
+	// The round ran, the query answered whole and carried no record at all:
+	// the whole object had no data that minute, not this series alone.
+	HoleAnsweredEmpty HoleCause = "ROUND_ANSWERED_EMPTY"
+	// The round's query did not answer whole -- partial, unavailable, or the
+	// Slot skipped without a query -- so the minute was never seen whole.
+	// This side's or its dependency's, and the reason names which.
+	HoleInputIncomplete HoleCause = "ROUND_INPUT_INCOMPLETE"
+	// A record arrived at that minute and the Level could not use it: the
+	// strategy's or the detection's, and the row's unusable reason says why.
+	HolePointUnusable HoleCause = "POINT_UNUSABLE"
+	// No round this process remembers evaluated that minute: before this
+	// process took the object, older than the rounds kept, or a hole listed
+	// beyond the listing bound. A limit of the reader, not a finding.
+	HoleNotInMemory HoleCause = "NOT_IN_MEMORY"
+)
+
+// HoleCauses is the closed list, for the page's completeness check.
+var HoleCauses = []HoleCause{HoleAnsweredWithoutSeries, HoleAnsweredEmpty, HoleInputIncomplete, HolePointUnusable, HoleNotInMemory}
+
+// WindowVerdict is what a window's holes say together about whose the
+// shortfall is. Decided here from the causes, so the page states a verdict
+// the code reached and not a distinction it leaves the reader to draw.
+type WindowVerdict string
+
+const (
+	// Every hole is a minute the query answered whole without this series:
+	// the data was not there when asked for.
+	VerdictDataAbsentWhenQueried WindowVerdict = "DATA_ABSENT_WHEN_QUERIED"
+	// At least one hole is a minute this side did not see whole. Outranks
+	// the rest: a window with one such hole cannot be handed to the data
+	// owner as theirs.
+	VerdictInputIncomplete WindowVerdict = "INPUT_INCOMPLETE"
+	// No incomplete round, and at least one hole is a record the Level
+	// could not use.
+	VerdictPointsUnusable WindowVerdict = "POINTS_UNUSABLE"
+	// Nothing this side did wrong is on record, and at least one hole is a
+	// minute this process cannot speak for.
+	VerdictUnknown WindowVerdict = "UNKNOWN"
+)
+
+// WindowVerdicts is the closed list, for the page's completeness check.
+var WindowVerdicts = []WindowVerdict{VerdictDataAbsentWhenQueried, VerdictInputIncomplete, VerdictPointsUnusable, VerdictUnknown}
+
+// WindowRow is one short window of the last round, by identity, with each
+// listed hole read against the object's remembered rounds.
+type WindowRow struct {
+	// Key is the series digest and Level joined, the identity a reader
+	// follows across rounds; Series and Level are the same two apart.
+	Key      string    `json:"key"`
+	Series   string    `json:"series"`
+	Level    uint32    `json:"level"`
+	Valid    uint32    `json:"valid"`
+	Required uint32    `json:"required"`
+	End      time.Time `json:"end"`
+	Guarded  bool      `json:"guarded,omitempty"`
+	// GuardReason is the reason the guard holding this window was raised
+	// with -- per window, which is what "最初触发" on a row of several
+	// windows could not be.
+	GuardReason string `json:"guard_reason,omitempty"`
+	Fresh       bool   `json:"fresh,omitempty"`
+	// Holes are the listed empty positions, oldest first, each with whose
+	// minute it is. MissingTotal and UnusableTotal count every hole, listed
+	// or not.
+	Holes         []WindowHole     `json:"holes,omitempty"`
+	MissingTotal  uint32           `json:"missing_total"`
+	UnusableTotal uint32           `json:"unusable_total"`
+	HolesBy       WindowHoleCounts `json:"holes_by"`
+	Verdict       WindowVerdict    `json:"verdict"`
+}
+
+// WindowHole is one empty position and the round of its minute.
+type WindowHole struct {
+	At    time.Time `json:"at"`
+	Cause HoleCause `json:"cause"`
+	// Round is the completion kind of the remembered round at that minute
+	// and Reason its reason, when one is remembered; Inferred says the
+	// round was matched by the object's fixed offset between Slot and
+	// record time rather than by a record time it reported -- a round that
+	// carried no record reports none.
+	Round    string `json:"round,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	Inferred bool   `json:"inferred,omitempty"`
+}
+
+// WindowHoleCounts is the holes of one window by cause, over every hole:
+// the listed ones by their cause, the unlisted as NotInMemory.
+type WindowHoleCounts struct {
+	AnsweredWithoutSeries uint32 `json:"answered_without_series"`
+	AnsweredEmpty         uint32 `json:"answered_empty"`
+	InputIncomplete       uint32 `json:"input_incomplete"`
+	Unusable              uint32 `json:"unusable"`
+	NotInMemory           uint32 `json:"not_in_memory"`
+}
+
+// verdictOf reads the counts into the one word: this side's incomplete
+// rounds first, then unusable records, then the data's only when every hole
+// is accounted for as the data's, else unknown.
+func verdictOf(counts WindowHoleCounts) WindowVerdict {
+	switch {
+	case counts.InputIncomplete > 0:
+		return VerdictInputIncomplete
+	case counts.Unusable > 0:
+		return VerdictPointsUnusable
+	case counts.NotInMemory > 0:
+		return VerdictUnknown
+	default:
+		return VerdictDataAbsentWhenQueried
+	}
 }
 
 // WindowFill is what the row can say about a short window whose worst valid

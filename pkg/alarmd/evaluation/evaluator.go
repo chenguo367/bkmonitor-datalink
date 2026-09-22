@@ -267,8 +267,24 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		// time the summary is returned the forced value and the computed one are
 		// the same field.
 		coverage.Observe(summary.ValidPositions, summary.RequiredPositions, completeness != "", fresh)
+		if record.SourceTime() > coverage.End {
+			coverage.End = record.SourceTime()
+		}
 		if reason, unusableHere := unusable[l.Definition().LevelID]; unusableHere {
 			coverage.ObserveUnusable(reason)
+		}
+		// The short window by name: which series, and which of its positions
+		// are empty. Walked only for a short window, from the same window the
+		// summary counted, and bounded there.
+		if summary.ValidPositions < summary.RequiredPositions {
+			holes := h.Holes(record.SourceTime(), summary.RequiredPositions, execution.MaxWindowHolesListed)
+			coverage.ObserveWindow(execution.WindowCoverage{
+				LevelID: l.Definition().LevelID, Series: series,
+				Valid: summary.ValidPositions, Required: summary.RequiredPositions, End: record.SourceTime(),
+				Missing: holes.Missing, MissingTotal: holes.MissingTotal,
+				Unusable: holes.Unusable, UnusableTotal: holes.UnusableTotal,
+				Guarded: completeness != "", GuardReason: durableGuardReasons[l.Definition().LevelID], Fresh: fresh,
+			})
 		}
 		fact, found := effectiveFact(request.Header, due.Identity, l.Definition().LevelID, series)
 		if !found {

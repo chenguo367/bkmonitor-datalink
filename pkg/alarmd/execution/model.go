@@ -2050,6 +2050,101 @@ type HistoryCoverage struct {
 	// data's.
 	Unusable       uint32
 	UnusableReason string
+	// Windows names the worst of the short windows: which series and Level,
+	// how full, and which positions are empty -- the minutes the counts
+	// above add up and lose. Worst shortfall first, at most
+	// MaxCoverageWindows of them; a round with more short windows than that
+	// says so in Short, and the rest are counted and not named.
+	//
+	// Without the names the worst pair moves between series from round to
+	// round and reads as one window losing points: on a live object 8 of 9,
+	// then 6, then 4, over a round with one series, then two, then three.
+	// And without the positions "which minutes" was a question for the logs,
+	// which the page told the reader to go and answer by hand.
+	Windows []WindowCoverage
+	// End is the newest record source time any window of this run ended at
+	// -- the minute this round evaluated. Carried on every run that
+	// summarised a window, full or short, so the round can be matched to
+	// the minute a later hole names.
+	End int64
+}
+
+// MaxCoverageWindows bounds how many short windows a round names, and
+// MaxWindowHolesListed how many empty positions each names. A window's
+// shortfall can be in the thousands (a day-long window at a minute), so the
+// totals travel and the lists are the oldest few.
+const (
+	MaxCoverageWindows   = 8
+	MaxWindowHolesListed = 16
+)
+
+// WindowCoverage is one short window of the round, by identity.
+type WindowCoverage struct {
+	LevelID  uint32
+	Series   SeriesIdentityDigest
+	Valid    uint32
+	Required uint32
+	// End is the source time the window ends at: the record evaluated this
+	// round, which is also the newest position.
+	End int64
+	// Missing are positions with no point at all, oldest first, and
+	// MissingTotal how many there are; Unusable and UnusableTotal the same
+	// for positions with a point the Level could not use.
+	Missing       []int64
+	MissingTotal  uint32
+	Unusable      []int64
+	UnusableTotal uint32
+	// Guarded says the verdict reported for this window was held over from a
+	// guard, and GuardReason the reason that guard was established with --
+	// per window, because a round's one reason is the fold over its windows
+	// and moves with them.
+	Guarded     bool
+	GuardReason ReasonCode
+	// Fresh says no runtime state was loaded for this window's series.
+	Fresh bool
+}
+
+// Shortfall is how many positions the window is missing.
+func (window WindowCoverage) Shortfall() uint32 {
+	if window.Required <= window.Valid {
+		return 0
+	}
+	return window.Required - window.Valid
+}
+
+// ObserveWindow names one short window, keeping the MaxCoverageWindows worst
+// by shortfall, ties by series and Level so the same round names the same
+// windows however its records were ordered. A window that is not short is
+// not a hole and is not kept.
+func (coverage *HistoryCoverage) ObserveWindow(window WindowCoverage) {
+	if coverage == nil || window.Required == 0 || window.Shortfall() == 0 {
+		return
+	}
+	position := len(coverage.Windows)
+	for position > 0 && worseWindow(window, coverage.Windows[position-1]) {
+		position--
+	}
+	if position >= MaxCoverageWindows {
+		return
+	}
+	coverage.Windows = append(coverage.Windows, WindowCoverage{})
+	copy(coverage.Windows[position+1:], coverage.Windows[position:])
+	coverage.Windows[position] = window
+	if len(coverage.Windows) > MaxCoverageWindows {
+		coverage.Windows = coverage.Windows[:MaxCoverageWindows]
+	}
+}
+
+// worseWindow orders windows for the bound: larger shortfall first, then by
+// series and Level.
+func worseWindow(left, right WindowCoverage) bool {
+	if left.Shortfall() != right.Shortfall() {
+		return left.Shortfall() > right.Shortfall()
+	}
+	if left.Series != right.Series {
+		return left.Series < right.Series
+	}
+	return left.LevelID < right.LevelID
 }
 
 // ObserveUnusable records one Level whose detection could not use this
@@ -2124,6 +2219,12 @@ func (coverage *HistoryCoverage) Merge(other HistoryCoverage) {
 	}
 	if other.Short > 0 && other.WorstRequired-other.WorstValid > coverage.WorstRequired-coverage.WorstValid {
 		coverage.WorstValid, coverage.WorstRequired = other.WorstValid, other.WorstRequired
+	}
+	for _, window := range other.Windows {
+		coverage.ObserveWindow(window)
+	}
+	if other.End > coverage.End {
+		coverage.End = other.End
 	}
 }
 

@@ -2015,7 +2015,15 @@ type Observation struct {
 	// lifetime is shorter than the window, which is short on every round for
 	// ever and by design will never produce a recovery. Both report the same
 	// reason on every round, so without the counts the two are one population.
-	HistoryCoverage       *HistoryCoverageFacts
+	HistoryCoverage *HistoryCoverageFacts
+	// PrimaryInput is what the Slot's PRIMARY query answered with, on the
+	// completion line: whether it answered whole, and whether it carried any
+	// records. It is the fact that says whose a hole is. A series missing
+	// from a round whose query answered whole and carried records was not in
+	// the result -- the data's; one missing from a round whose query did not
+	// answer was never asked for -- this side's. Nil when the completion
+	// carried no primary fact (a Slot skipped without a query).
+	PrimaryInput          *PrimaryInputFacts
 	Dispatcher            *DispatcherFacts
 	DispatchTurnaway      *DispatchTurnawayFacts
 	PermitWait            *PermitWaitFacts
@@ -2174,6 +2182,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.CapacityRejection = normalizeCapacityRejection(observation)
 	observation.QueryCooldown = normalizeQueryCooldownFacts(observation.QueryCooldown)
 	observation.HistoryCoverage = normalizeHistoryCoverageFacts(observation.HistoryCoverage)
+	observation.PrimaryInput = normalizePrimaryInputFacts(observation.PrimaryInput)
 	observation.QueryPermit = normalizeQueryPermitFacts(observation.QueryPermit)
 	observation.NoDataSlot = normalizeNoDataSlotFacts(observation.NoDataSlot)
 	observation.NoDataAbsence = normalizeNoDataAbsenceFacts(observation.NoDataAbsence)

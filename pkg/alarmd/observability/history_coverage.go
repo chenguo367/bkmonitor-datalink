@@ -91,6 +91,47 @@ type HistoryCoverageFacts struct {
 	// arrive is never evaluated and never reaches a window at all.
 	Unusable       uint32 `json:"unusable,omitempty"`
 	UnusableReason string `json:"unusable_reason,omitempty"`
+	// Windows names the worst of the short windows -- which series and Level,
+	// how full, which positions are empty -- worst first, at most
+	// MaxHistoryWindows of them. The counts above are the fold over every
+	// window; these are the ones a reader would ask about next. Short above
+	// their number says the rest were counted and not named.
+	Windows []HistoryWindowFact `json:"windows,omitempty"`
+	// End is the newest record source time any window of this run ended at:
+	// the minute this round evaluated, on every run that summarised a
+	// window. It is what lets a later hole at that minute be matched to
+	// this round.
+	End int64 `json:"end,omitempty"`
+}
+
+// MaxHistoryWindows and MaxHistoryWindowHoles are the bounds the evaluator
+// names windows and holes under; facts beyond them did not come from it.
+const (
+	MaxHistoryWindows     = 8
+	MaxHistoryWindowHoles = 16
+)
+
+// HistoryWindowFact is one short window by identity: the series digest and
+// Level, the pair, the source time it ends at, and its holes. Missing are the
+// positions no record of the series was ever applied at -- the series was
+// not in that round's result, or the round never ran -- and Unusable the
+// positions holding a record the Level could not use. Both oldest first and
+// bounded; the totals count them all. Guarded and GuardReason say the verdict
+// on this window is held by a guard and under which reason it was raised;
+// Fresh that no state was loaded for the series this round.
+type HistoryWindowFact struct {
+	Series        string  `json:"series"`
+	Level         uint32  `json:"level"`
+	Valid         uint32  `json:"valid"`
+	Required      uint32  `json:"required"`
+	End           int64   `json:"end"`
+	Missing       []int64 `json:"missing,omitempty"`
+	MissingTotal  uint32  `json:"missing_total"`
+	Unusable      []int64 `json:"unusable,omitempty"`
+	UnusableTotal uint32  `json:"unusable_total"`
+	Guarded       bool    `json:"guarded,omitempty"`
+	GuardReason   string  `json:"guard_reason,omitempty"`
+	Fresh         bool    `json:"fresh,omitempty"`
 }
 
 // Shortfall is how many points the worst window was missing. Zero when
@@ -147,6 +188,32 @@ func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) *HistoryCoverage
 		// Nothing was actually short in the pair, whatever Short says. Keeping
 		// the counts and clearing the pair is the honest half-answer.
 		copied.WorstValid, copied.WorstRequired = 0, 0
+	}
+	// The named windows are short windows of this run: no more of them than
+	// were short, none of them full, each with holes that add up to its own
+	// shortfall and lists no longer than their totals or the bound. A list
+	// that breaks any of these did not come from walking these windows, and
+	// the same rule as above applies -- the whole facts go, not the list,
+	// because the pair and the names claim to describe the same window.
+	if uint32(len(copied.Windows)) > copied.Short || len(copied.Windows) > MaxHistoryWindows {
+		return nil
+	}
+	windows := make([]HistoryWindowFact, 0, len(copied.Windows))
+	for _, window := range copied.Windows {
+		if window.Series == "" || window.Required == 0 || window.Valid >= window.Required ||
+			window.MissingTotal+window.UnusableTotal != window.Required-window.Valid ||
+			uint32(len(window.Missing)) > window.MissingTotal || uint32(len(window.Unusable)) > window.UnusableTotal ||
+			len(window.Missing) > MaxHistoryWindowHoles || len(window.Unusable) > MaxHistoryWindowHoles ||
+			(window.GuardReason != "" && !window.Guarded) {
+			return nil
+		}
+		window.Missing = append([]int64(nil), window.Missing...)
+		window.Unusable = append([]int64(nil), window.Unusable...)
+		windows = append(windows, window)
+	}
+	copied.Windows = windows
+	if len(copied.Windows) == 0 {
+		copied.Windows = nil
 	}
 	return &copied
 }

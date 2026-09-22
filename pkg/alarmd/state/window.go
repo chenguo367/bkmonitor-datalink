@@ -419,6 +419,63 @@ func (view HistoryView) SummarizeContext(ctx context.Context, endTime int64, req
 	return summary
 }
 
+// WindowHoles is which positions of a window hold no valid point for its
+// Level: Missing are positions with no point at all -- no record of this
+// series was ever applied at that source time -- and Unusable are positions
+// with a point whose valid bit is off for the Level, a record that arrived and
+// the detection could not use. Both lists are oldest first and bounded; the
+// totals count every such position whether listed or not.
+type WindowHoles struct {
+	Missing       []int64
+	MissingTotal  uint32
+	Unusable      []int64
+	UnusableTotal uint32
+}
+
+// Holes names the positions Summarize counts as not valid, for the same window
+// -- the required positions ending at endTime -- listing at most limit of each
+// kind. Summarize answers how many; this answers which, which is the question
+// a reader of a short window has next and could not answer from the counts:
+// whether the empty positions are the same minutes on every round, whether
+// they are the minutes this process's own rounds did not run, and whether a
+// point was ever there. The walk and its refusals are Summarize's, so the two
+// describe one window; a request Summarize would not walk yields no holes and
+// zero totals, which a caller reads as "not asked", not "none".
+func (view HistoryView) Holes(endTime int64, requiredPositions uint32, limit int) WindowHoles {
+	holes := WindowHoles{}
+	if requiredPositions == 0 {
+		requiredPositions = view.requirement.RequiredPoints
+	}
+	interval := int64(view.requirement.EvaluationInterval / time.Second)
+	if requiredPositions == 0 || requiredPositions > view.requirement.RetentionPoints || interval <= 0 || endTime < 0 ||
+		uint64(requiredPositions-1) > uint64(math.MaxInt64/interval) {
+		return holes
+	}
+	offset := int64(requiredPositions-1) * interval
+	if offset > endTime {
+		return holes
+	}
+	for expected := endTime - offset; ; expected += interval {
+		point, exists := view.pointAt(expected)
+		switch {
+		case !exists:
+			holes.MissingTotal++
+			if len(holes.Missing) < limit {
+				holes.Missing = append(holes.Missing, expected)
+			}
+		case !bitSet(point.valid, view.levelIndex):
+			holes.UnusableTotal++
+			if len(holes.Unusable) < limit {
+				holes.Unusable = append(holes.Unusable, expected)
+			}
+		}
+		if expected == endTime {
+			break
+		}
+	}
+	return holes
+}
+
 func (view HistoryView) CountAnomalies(fromTime, untilTime int64) uint32 {
 	var count uint32
 	view.ForEachAnomaly(fromTime, untilTime, func(int64) bool {

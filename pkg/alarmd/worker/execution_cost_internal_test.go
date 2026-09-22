@@ -160,7 +160,7 @@ func TestSlotWindowCoverageAccumulatesAcrossSeriesRatherThanBeingReplaced(t *tes
 
 	got := stream.evaluated.Plans[0].HistoryCoverage
 	want := execution.HistoryCoverage{Levels: 9, Short: 3, WorstValid: 2, WorstRequired: 14}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("slot coverage = %+v, want %+v", got, want)
 	}
 }
