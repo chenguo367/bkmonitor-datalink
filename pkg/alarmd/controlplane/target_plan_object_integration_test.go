@@ -121,7 +121,7 @@ func TestAnObjectCarryingATargetPlanIsWrittenAndReadUnderTheV2Contract(t *testin
 			// A reader that only knows v1 keys the object by the version
 			// before anything else; this build does the same for a version
 			// it does not know, so the refusal is by name, not by digest.
-			foreign := strings.Replace(string(payload), wantVersion, "alarmd-query-group-object-v3", 1)
+			foreign := strings.Replace(string(payload), wantVersion, "alarmd-query-group-object-v999", 1)
 			if err := harness.client.Set(harness.ctx, harness.prefix+":qgobj:"+string(digest), foreign, 0).Err(); err != nil {
 				t.Fatal(err)
 			}

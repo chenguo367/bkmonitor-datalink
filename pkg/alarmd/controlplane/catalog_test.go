@@ -152,7 +152,6 @@ func TestG1DoesNotSilentlyDropUnsupportedLegacySemantics(t *testing.T) {
 	identity := controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}
 	for _, test := range []struct{ name, prefix, trigger string }{
 		{name: "priority semantics", prefix: `"priority":1,"priority_group_key":"group",`, trigger: ""},
-		{name: "non-default uptime", prefix: "", trigger: `,"uptime":{"time_ranges":[{"start":"09:00","end":"18:00"}]}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			document := json.RawMessage(fmt.Sprintf(base, test.prefix, test.trigger))

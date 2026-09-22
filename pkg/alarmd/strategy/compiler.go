@@ -139,6 +139,10 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 		targetPlan:          request.Plan.TargetPlan,
 		noData:              request.Plan.NoData,
 	}
+	compiled.effectiveRules, err = compileEffectiveRules(request.Plan.EffectiveTimeSnapshot, request.Plan.StrategyRef.TenantID)
+	if err != nil {
+		return CompileResult{planTerminal: &Terminal{ReasonCode: err.Error(), FieldPath: "effective_time_snapshot"}}, nil
+	}
 	terminals := make([]Terminal, 0)
 	if request.Plan.OutputIdentity != nil {
 		compiled.outputIdentity = &contract.MonitorOutputIdentity{DimensionFields: append([]string{}, request.Plan.OutputIdentity.DimensionFields...), DynamicDimensions: request.Plan.OutputIdentity.DynamicDimensions}
@@ -222,6 +226,37 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 	sort.Slice(compiled.levels, func(left, right int) bool {
 		return compiled.levels[left].definition.LevelID < compiled.levels[right].definition.LevelID
 	})
+	if len(compiled.levels) > 0 {
+		requirement := compiled.levels[0].effectiveTime
+		for _, level := range compiled.levels {
+			if level.effectiveTime.digest != requirement.digest {
+				return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_LEVEL_MISMATCH", FieldPath: "strategy_ir.levels"}}, nil
+			}
+		}
+		if compiled.noDataLevel != nil {
+			compiled.noDataLevel.effectiveTime = requirement.clone()
+		}
+		if compiled.effectiveRules != nil {
+			for _, id := range append(requirement.ActiveCalendarIDs(), requirement.InactiveCalendarIDs()...) {
+				if _, exists := compiled.effectiveRules.calendars[id]; !exists {
+					return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_CALENDAR_MISSING", FieldPath: "effective_time_snapshot.calendars"}}, nil
+				}
+			}
+		}
+	}
+	if len(compiled.levels) == 0 && compiled.noDataLevel != nil && len(request.Plan.StrategyIR.Levels) > 0 {
+		// Detector rejection must not turn a surviving no-data level into an
+		// always-active level. Its uptime still belongs to the source strategy.
+		var config triggerPlanConfigV1
+		if json.Unmarshal(request.Plan.StrategyIR.Levels[0].TriggerPlan.Config, &config) != nil {
+			return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_INVALID", FieldPath: "strategy_ir.levels.trigger_plan"}}, nil
+		}
+		requirement, err := compileEffectiveTimeRequirement(config.Uptime, config.TimezoneRef)
+		if err != nil {
+			return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_INVALID", FieldPath: "strategy_ir.levels.trigger_plan.uptime"}}, nil
+		}
+		compiled.noDataLevel.effectiveTime = requirement
+	}
 	if terminal := c.checkRetainedPointsFit(compiled); terminal != nil {
 		return CompileResult{planTerminal: terminal}, nil
 	}
@@ -840,6 +875,9 @@ func compileResourceEstimate(plan *CompiledPlan) error {
 		return fmt.Errorf("strategy: estimate compiled Plan bytes: %w", err)
 	}
 	aggregate.CompiledBytes = len(encoded)
+	if plan.effectiveRules != nil {
+		aggregate.CompiledBytes += plan.effectiveRules.bytes
+	}
 	if plan.legacyOutput != nil {
 		aggregate.CompiledBytes += plan.legacyOutput.SizeBytes()
 	}

@@ -45,7 +45,7 @@ func TestCompilerCompilesEffectiveTimeRequirements(t *testing.T) {
 
 	calendarPlan := validPlan()
 	calendarPlan.StrategyIR.Levels[0].TriggerPlan.Config = triggerConfigWithUptime("BUSINESS_LOCAL", map[string]any{
-		"time_ranges":      []any{},
+		"time_ranges":      []any{map[string]any{"start": "00:00", "end": "23:59"}},
 		"active_calendars": []any{int64(9), int64(3)},
 		"calendars":        []any{int64(8)},
 	})

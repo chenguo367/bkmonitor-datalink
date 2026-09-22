@@ -393,11 +393,13 @@ type SourceCompatibilityV2 struct {
 }
 
 type EvaluationPlanV2 struct {
-	PlanID              string                 `json:"plan_id"`
-	StrategyRef         StrategyRefV2          `json:"strategy_ref"`
-	InputProjection     InputProjectionV2      `json:"input_projection"`
-	SourceCompatibility *SourceCompatibilityV2 `json:"source_compatibility,omitempty"`
-	OutputIdentity      *MonitorOutputIdentity `json:"output_identity,omitempty"`
+	// EffectiveTimeSnapshot freezes the publisher's complete calendar rules.
+	EffectiveTimeSnapshot json.RawMessage        `json:"effective_time_snapshot,omitempty"`
+	PlanID                string                 `json:"plan_id"`
+	StrategyRef           StrategyRefV2          `json:"strategy_ref"`
+	InputProjection       InputProjectionV2      `json:"input_projection"`
+	SourceCompatibility   *SourceCompatibilityV2 `json:"source_compatibility,omitempty"`
+	OutputIdentity        *MonitorOutputIdentity `json:"output_identity,omitempty"`
 	// SubjectFacts are the strategy facts the subject projection reads when a
 	// record's own dimensions do not name its object. Absent means the
 	// projection answers from the dimensions alone.
@@ -491,19 +493,20 @@ func (plan EvaluationPlanV2) MarshalJSON() ([]byte, error) {
 		}{plan.PlanID, plan.StrategyRef, plan.TerminalReasonCode})
 	}
 	return json.Marshal(struct {
-		PlanID              string                 `json:"plan_id"`
-		StrategyRef         StrategyRefV2          `json:"strategy_ref"`
-		InputProjection     InputProjectionV2      `json:"input_projection"`
-		SourceCompatibility *SourceCompatibilityV2 `json:"source_compatibility,omitempty"`
-		OutputIdentity      *MonitorOutputIdentity `json:"output_identity,omitempty"`
-		SubjectFacts        *MonitorSubjectFacts   `json:"subject_facts,omitempty"`
-		LegacyOutput        *LegacyOutputContext   `json:"legacy_output,omitempty"`
-		TargetScope         *TargetScopeV2         `json:"target_scope,omitempty"`
-		TargetPlan          *TargetPlanV1          `json:"target_plan,omitempty"`
-		NoData              *NoDataConfigV1        `json:"no_data,omitempty"`
-		StrategyIR          StrategyIRV2           `json:"strategy_ir"`
-		WireFormat          string                 `json:"wire_format,omitempty"`
-	}{plan.PlanID, plan.StrategyRef, plan.InputProjection, plan.SourceCompatibility, plan.OutputIdentity, plan.SubjectFacts, plan.LegacyOutput, plan.TargetScope, plan.TargetPlan, plan.NoData, plan.StrategyIR, plan.WireFormat})
+		EffectiveTimeSnapshot json.RawMessage        `json:"effective_time_snapshot,omitempty"`
+		PlanID                string                 `json:"plan_id"`
+		StrategyRef           StrategyRefV2          `json:"strategy_ref"`
+		InputProjection       InputProjectionV2      `json:"input_projection"`
+		SourceCompatibility   *SourceCompatibilityV2 `json:"source_compatibility,omitempty"`
+		OutputIdentity        *MonitorOutputIdentity `json:"output_identity,omitempty"`
+		SubjectFacts          *MonitorSubjectFacts   `json:"subject_facts,omitempty"`
+		LegacyOutput          *LegacyOutputContext   `json:"legacy_output,omitempty"`
+		TargetScope           *TargetScopeV2         `json:"target_scope,omitempty"`
+		TargetPlan            *TargetPlanV1          `json:"target_plan,omitempty"`
+		NoData                *NoDataConfigV1        `json:"no_data,omitempty"`
+		StrategyIR            StrategyIRV2           `json:"strategy_ir"`
+		WireFormat            string                 `json:"wire_format,omitempty"`
+	}{plan.EffectiveTimeSnapshot, plan.PlanID, plan.StrategyRef, plan.InputProjection, plan.SourceCompatibility, plan.OutputIdentity, plan.SubjectFacts, plan.LegacyOutput, plan.TargetScope, plan.TargetPlan, plan.NoData, plan.StrategyIR, plan.WireFormat})
 }
 
 type PlanSetV2 struct {

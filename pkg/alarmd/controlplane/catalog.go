@@ -1055,15 +1055,16 @@ func lessPlanIdentity(left, right execution.PlanIdentity) bool {
 }
 
 type legacyStrategy struct {
-	ID               int64           `json:"id"`
-	BusinessID       int64           `json:"bk_biz_id"`
-	UpdateTime       json.Number     `json:"update_time"`
-	SnapshotRevision json.RawMessage `json:"strategy_revision,omitempty"`
-	Priority         json.RawMessage `json:"priority"`
-	PriorityGroupKey string          `json:"priority_group_key"`
-	Labels           []string        `json:"labels"`
-	Items            []legacyItem    `json:"items"`
-	Detects          []legacyDetect  `json:"detects"`
+	EffectiveTimeSnapshot json.RawMessage `json:"effective_time_snapshot,omitempty"`
+	ID                    int64           `json:"id"`
+	BusinessID            int64           `json:"bk_biz_id"`
+	UpdateTime            json.Number     `json:"update_time"`
+	SnapshotRevision      json.RawMessage `json:"strategy_revision,omitempty"`
+	Priority              json.RawMessage `json:"priority"`
+	PriorityGroupKey      string          `json:"priority_group_key"`
+	Labels                []string        `json:"labels"`
+	Items                 []legacyItem    `json:"items"`
+	Detects               []legacyDetect  `json:"detects"`
 }
 type legacyItem struct {
 	TimeDelay    int64             `json:"time_delay"`
@@ -1547,12 +1548,17 @@ func compilePlan(
 		levelIDs = append(levelIDs, int(level))
 	}
 	sort.Ints(levelIDs)
-	for _, rawLevel := range levelIDs {
-		detect, ok := detectByLevel[uint32(rawLevel)]
-		if ok && !isAlwaysActiveUptime(detect.Trigger.Uptime) {
-			disposition := ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionUnsupported, Reason: "EFFECTIVE_TIME_NOT_MIGRATED"}
-			return contract.EvaluationPlanV2{}, planCompileFacts{}, []ObjectDisposition{disposition}, errors.New("alarmd controlplane: non-default uptime unsupported")
+	var effectiveDigest string
+	for _, detect := range source.Detects {
+		requirement, err := strategy.CompileUptime(detect.Trigger.Uptime)
+		if err != nil || (effectiveDigest != "" && effectiveDigest != requirement.Digest()) {
+			reason := "EFFECTIVE_TIME_INVALID"
+			if err == nil {
+				reason = "EFFECTIVE_TIME_LEVEL_MISMATCH"
+			}
+			return contract.EvaluationPlanV2{}, planCompileFacts{}, []ObjectDisposition{{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: reason}}, fmt.Errorf("alarmd controlplane: %s", reason)
 		}
+		effectiveDigest = requirement.Digest()
 	}
 	levels := make([]contract.LevelIRV2, 0, len(levelIDs))
 	dispositions := make([]ObjectDisposition, 0)
@@ -1614,7 +1620,12 @@ func compilePlan(
 			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "RECOVERY_CONFIG_INVALID"})
 			continue
 		}
-		trigger, _ := json.Marshal(map[string]any{"required_anomalies": detect.Trigger.Count, "step_seconds": interval, "window_size": detect.Trigger.CheckWindow})
+		triggerFields := map[string]any{"required_anomalies": detect.Trigger.Count, "step_seconds": interval, "window_size": detect.Trigger.CheckWindow}
+		if len(detect.Trigger.Uptime) > 0 && string(detect.Trigger.Uptime) != "null" {
+			triggerFields["uptime"] = detect.Trigger.Uptime
+			triggerFields["timezone_ref"] = "BUSINESS_LOCAL"
+		}
+		trigger, _ := json.Marshal(triggerFields)
 		recovery, _ := json.Marshal(map[string]any{"consecutive_windows": recoveryConfig.CheckWindow, "enabled": recoveryEnabled})
 		connector := contract.LevelConnectorAND
 		if strings.EqualFold(detect.Connector, "or") {
@@ -1630,6 +1641,7 @@ func compilePlan(
 	ir := contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2, Minor: 0}, RequiredFeatures: []string{}, StrategyRef: ref, ExecutionSemantics: semantics, InputProjection: projection, Levels: levels}
 	plan := contract.EvaluationPlanV2{PlanID: strategyID, StrategyRef: ref, InputProjection: projection, SourceCompatibility: &contract.SourceCompatibilityV2{ItemID: strconv.FormatInt(item.ID, 10)}, StrategyIR: ir}
 	plan.TargetScope = targetScope
+	plan.EffectiveTimeSnapshot = append(json.RawMessage(nil), source.EffectiveTimeSnapshot...)
 	plan.TargetPlan = targetPlan
 	// A no-data configuration this build cannot compile suspends no-data
 	// detection for this Plan and nothing else.

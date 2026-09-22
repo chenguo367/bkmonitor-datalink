@@ -11,6 +11,7 @@ package strategy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sort"
 	"strconv"
@@ -203,6 +204,10 @@ func newEffectiveTimeFact(status, requirementDigest, factRevision string, validF
 }
 
 func compileEffectiveTimeRequirement(uptime *uptimeConfigV1, timezoneRef string) (EffectiveTimeRequirement, error) {
+	// Python short-circuits before looking at calendar IDs for an empty range.
+	if uptime != nil && uptime.TimeRanges != nil && len(*uptime.TimeRanges) == 0 {
+		uptime, timezoneRef = nil, ""
+	}
 	requirement := EffectiveTimeRequirement{kind: EffectiveTimeAlways, version: 1}
 	if uptime == nil && timezoneRef != "" {
 		return EffectiveTimeRequirement{}, errors.New("effective time: timezone_ref requires uptime")
@@ -224,7 +229,7 @@ func compileEffectiveTimeRequirement(uptime *uptimeConfigV1, timezoneRef string)
 			}
 			timeRange := TimeRange{startMinute: start, endMinute: end}
 			if _, duplicate := seenRanges[timeRange]; duplicate {
-				return EffectiveTimeRequirement{}, errors.New("effective time: duplicate range")
+				continue
 			}
 			seenRanges[timeRange] = struct{}{}
 			ranges = append(ranges, timeRange)
@@ -270,7 +275,19 @@ func compileEffectiveTimeRequirement(uptime *uptimeConfigV1, timezoneRef string)
 }
 
 func parseClockMinute(value string) (uint16, bool) {
+	for _, character := range value {
+		if character != ':' && (character < '0' || character > '9') {
+			return 0, false
+		}
+	}
 	parts := strings.Split(value, ":")
+	if len(parts) == 3 {
+		second, err := strconv.Atoi(parts[2])
+		if len(parts[2]) != 2 || err != nil || second < 0 || second > 59 {
+			return 0, false
+		}
+		parts = parts[:2]
+	}
 	if len(parts) != 2 || len(parts[0]) != 2 || len(parts[1]) != 2 {
 		return 0, false
 	}
@@ -285,15 +302,31 @@ func parseClockMinute(value string) (uint16, bool) {
 	return uint16(hour*60 + minute), true
 }
 
+// CompileUptime normalizes the Python uptime shape without resolving dependencies.
+func CompileUptime(raw json.RawMessage) (EffectiveTimeRequirement, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return compileEffectiveTimeRequirement(nil, "")
+	}
+	var value uptimeConfigV1
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return EffectiveTimeRequirement{}, err
+	}
+	return compileEffectiveTimeRequirement(&value, businessLocalTimezoneRef)
+}
+
 func normalizeCalendarIDs(ids []int64) ([]int64, error) {
 	result := append([]int64(nil), ids...)
 	sort.Slice(result, func(left, right int) bool { return result[left] < result[right] })
-	for index, id := range result {
-		if id <= 0 || (index > 0 && result[index-1] == id) {
-			return nil, errors.New("effective time: invalid or duplicate calendar ID")
+	unique := result[:0]
+	for _, id := range result {
+		if id <= 0 {
+			return nil, errors.New("effective time: invalid calendar ID")
+		}
+		if len(unique) == 0 || unique[len(unique)-1] != id {
+			unique = append(unique, id)
 		}
 	}
-	return result, nil
+	return unique, nil
 }
 
 func matchesTimeRanges(minute int, ranges []TimeRange) bool {

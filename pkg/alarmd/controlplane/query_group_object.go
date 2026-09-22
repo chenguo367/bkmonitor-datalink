@@ -39,6 +39,7 @@ const (
 	// the Plan on everything. Objects without the field keep v1, and with it
 	// every digest they had.
 	queryGroupObjectContractVersionV2 = "alarmd-query-group-object-v2"
+	queryGroupObjectContractVersionV3 = "alarmd-query-group-object-v3"
 	outputContextContractVersion      = "alarmd-output-context-v1"
 )
 
@@ -46,6 +47,11 @@ const (
 // under: v2 as soon as one of its Plans carries the target's second frozen
 // form, v1 otherwise.
 func queryGroupObjectVersion(plans []QueryGroupPlanObject) string {
+	for _, plan := range plans {
+		if len(plan.EffectiveTimeSnapshot) > 0 {
+			return queryGroupObjectContractVersionV3
+		}
+	}
 	for _, plan := range plans {
 		if plan.TargetPlan != nil {
 			return queryGroupObjectContractVersionV2
@@ -57,7 +63,7 @@ func queryGroupObjectVersion(plans []QueryGroupPlanObject) string {
 // knownQueryGroupObjectVersion reports whether this build reads objects of
 // that contract version.
 func knownQueryGroupObjectVersion(version string) bool {
-	return version == queryGroupObjectContractVersion || version == queryGroupObjectContractVersionV2
+	return version == queryGroupObjectContractVersion || version == queryGroupObjectContractVersionV2 || version == queryGroupObjectContractVersionV3
 }
 
 // queryGroupObjectDomain reads the contract version a stored object declares
@@ -99,13 +105,14 @@ type QueryGroupObject struct {
 // places that assign it are its only references. It is not a field waiting
 // for a consumer; it is the old revision, and the ObjectDigest replaces it.
 type QueryGroupPlanObject struct {
-	Identity             execution.PlanIdentity                                 `json:"plan_identity"`
-	StateGeneration      execution.StateGeneration                              `json:"state_generation,omitempty"`
-	ScheduleSpec         execution.ScheduleSpec                                 `json:"schedule_spec"`
-	ScheduleRevision     execution.PlanScheduleRevision                         `json:"plan_schedule_revision"`
-	RequirementTemplates []execution.DataRequirementTemplate                    `json:"requirement_templates,omitempty"`
-	QueryPlans           map[execution.LogicalQueryRef]execution.QueryPlanFacts `json:"query_plans,omitempty"`
-	PlanID               string                                                 `json:"plan_id"`
+	EffectiveTimeSnapshot json.RawMessage                                        `json:"effective_time_snapshot,omitempty"`
+	Identity              execution.PlanIdentity                                 `json:"plan_identity"`
+	StateGeneration       execution.StateGeneration                              `json:"state_generation,omitempty"`
+	ScheduleSpec          execution.ScheduleSpec                                 `json:"schedule_spec"`
+	ScheduleRevision      execution.PlanScheduleRevision                         `json:"plan_schedule_revision"`
+	RequirementTemplates  []execution.DataRequirementTemplate                    `json:"requirement_templates,omitempty"`
+	QueryPlans            map[execution.LogicalQueryRef]execution.QueryPlanFacts `json:"query_plans,omitempty"`
+	PlanID                string                                                 `json:"plan_id"`
 	// Strategy is the source identity only. The revision and the Python
 	// snapshot revision that StrategyRefV2 also carries are output context.
 	Strategy        contract.StrategyRefV2          `json:"strategy"`
@@ -176,7 +183,8 @@ func buildQueryGroupPlanObject(plan FrozenPlan) QueryGroupPlanObject {
 		PlanID: plan.Plan.PlanID, Strategy: strategyIdentity(plan.Plan.StrategyRef),
 		InputProjection: plan.Plan.InputProjection, OutputIdentity: plan.Plan.OutputIdentity,
 		TargetScope: plan.Plan.TargetScope, TargetPlan: plan.Plan.TargetPlan, NoData: plan.Plan.NoData, StrategyIR: strategyIR,
-		TerminalReasonCode: plan.Plan.TerminalReasonCode,
+		EffectiveTimeSnapshot: append(json.RawMessage(nil), plan.Plan.EffectiveTimeSnapshot...),
+		TerminalReasonCode:    plan.Plan.TerminalReasonCode,
 	}
 }
 

@@ -27,7 +27,26 @@ func prepareAlwaysEffectiveTimeFacts(
 	ctx context.Context,
 	header execution.InternalExecutionHeader,
 ) (map[execution.ConsumerRef]strategy.EffectiveTimeFact, error) {
-	return prepareAlwaysEffectiveTimeFactsWithProvider(ctx, header, strategy.NewStaticScheduleProvider(nil))
+	return PrepareEffectiveTimeFacts(ctx, header, nil)
+}
+
+// PrepareEffectiveTimeFacts runs once per Plan/Slot, before binding real series.
+// legacy is consulted only by Plans without a complete frozen snapshot.
+func PrepareEffectiveTimeFacts(ctx context.Context, header execution.InternalExecutionHeader, legacy strategy.EffectiveTimeProvider) (map[execution.ConsumerRef]strategy.EffectiveTimeFact, error) {
+	facts := make(map[execution.ConsumerRef]strategy.EffectiveTimeFact)
+	for _, due := range header.DuePlans {
+		if due.CompiledPlan == nil {
+			return nil, errors.New("alarmd worker: EffectiveTime target references an unknown Plan")
+		}
+		fact, err := due.CompiledPlan.ResolveEffectiveTimeWithProvider(ctx, int64(header.Contract.Slot.EvaluationTime), due.Identity.BusinessID, legacy)
+		if err != nil {
+			return nil, err
+		}
+		for _, level := range levelsNeedingEffectiveTime(due) {
+			facts[execution.ConsumerRef{Plan: due.Identity, LevelID: level.Definition().LevelID, HasLevel: true}] = fact
+		}
+	}
+	return facts, nil
 }
 
 func prepareAlwaysEffectiveTimeFactsWithProvider(
