@@ -236,6 +236,24 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			attributes = append(attributes, slog.Int64("wire_format_events_"+format, counts[format]))
 		}
 	}
+	if counts := observation.OutputEventKinds; len(counts) > 0 {
+		// The same events once more by kind, under the format's and the
+		// kind's own names, so a search for the recovery that should have
+		// left on the standard line finds the batch it left in.
+		keys := make([]OutputEventKindKey, 0, len(counts))
+		for key := range counts {
+			keys = append(keys, key)
+		}
+		sort.Slice(keys, func(i, j int) bool {
+			if keys[i].Format != keys[j].Format {
+				return keys[i].Format < keys[j].Format
+			}
+			return keys[i].EventKind < keys[j].EventKind
+		})
+		for _, key := range keys {
+			attributes = append(attributes, slog.Int64("wire_format_events_"+key.Format+"_"+strings.ToLower(key.EventKind), counts[key]))
+		}
+	}
 	if f := observation.FrozenStateRenewal; f != nil {
 		// The eight numbers on the line, not only on the metric: the line is
 		// what a reader of one Slot has, and without them frozen_state_renewed

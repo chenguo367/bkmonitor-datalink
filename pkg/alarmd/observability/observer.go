@@ -1981,6 +1981,9 @@ type Observation struct {
 	// event_acked batch went out as each.
 	OutputWireFormat  string
 	OutputWireFormats OutputWireFormatCounts
+	// OutputEventKinds is OutputWireFormats split by event kind, on the same
+	// event_acked observation.
+	OutputEventKinds OutputEventKindCounts
 	// PlanSeriesMatched is how many PRIMARY series this Slot's query bound to
 	// the Plan an evaluation line is about, on every evaluation line of that
 	// Plan and on the completion-only line of a Plan bound to none. A Plan

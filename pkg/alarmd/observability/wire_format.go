@@ -43,3 +43,16 @@ func NormalizeWireFormat(format string) string {
 // Group's Slot and its Plans may publish differently, so the line carries
 // counts rather than one word.
 type OutputWireFormatCounts map[string]int64
+
+// OutputEventKindCounts is how many events of a batch there were of each
+// kind under each wire format, on an event_acked observation: the same
+// events as OutputWireFormatCounts, split once more. It is what says
+// whether a RECOVERY left on the standard line after the window that held
+// it filled -- the format alone counts the recovery and the anomaly as one.
+type OutputEventKindCounts map[OutputEventKindKey]int64
+
+// OutputEventKindKey is one bucket of OutputEventKindCounts.
+type OutputEventKindKey struct {
+	Format    string
+	EventKind string
+}
