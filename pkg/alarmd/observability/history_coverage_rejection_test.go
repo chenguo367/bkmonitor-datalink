@@ -10,6 +10,7 @@
 package observability
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -85,6 +86,40 @@ func TestEveryCoverageRejectionHasItsOwnRule(t *testing.T) {
 	}
 	if got, rejected := normalizeHistoryCoverageFacts(&HistoryCoverageFacts{}); got != nil || rejected != nil {
 		t.Fatalf("all-zero facts: %+v / %+v, want dropped as no coverage, not refused", got, rejected)
+	}
+}
+
+// The "summarised nothing" exit is the one place normalize drops a set without
+// naming a rule, so it must hold only for a set that is zero in every field.
+// Each field of the struct is set alone and fed through: a set with one thing
+// in it is either accepted or refused, never dropped as no coverage. The
+// fields come from the struct itself, so a field added to it and not to
+// reportsNothing goes red here instead of falling through the exit -- as six
+// did once: a reason with no unusable Level rode out as "no coverage", and the
+// page showed every window full.
+func TestNoSingleFieldFactSetIsSwallowedAsNoCoverage(t *testing.T) {
+	t.Parallel()
+	structType := reflect.TypeOf(HistoryCoverageFacts{})
+	for index := 0; index < structType.NumField(); index++ {
+		name := structType.Field(index).Name
+		value := reflect.New(structType).Elem()
+		target := value.Field(index)
+		switch target.Kind() {
+		case reflect.Uint32:
+			target.SetUint(3)
+		case reflect.Int64:
+			target.SetInt(1_788_000_000)
+		case reflect.String:
+			target.SetString("QUERY_REFUSED")
+		case reflect.Slice:
+			target.Set(reflect.ValueOf([]HistoryWindowFact{namedWindow()}))
+		default:
+			t.Fatalf("%s: no lone value for kind %s; give the kind one here so the field is checked", name, target.Kind())
+		}
+		facts := value.Interface().(HistoryCoverageFacts)
+		if kept, rejected := normalizeHistoryCoverageFacts(&facts); kept == nil && rejected == nil {
+			t.Errorf("%s alone was swallowed as no coverage: reportsNothing does not read it", name)
+		}
 	}
 }
 

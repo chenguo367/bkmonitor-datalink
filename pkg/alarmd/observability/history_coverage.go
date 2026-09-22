@@ -195,6 +195,23 @@ type CoverageRejection struct {
 	Series string                `json:"series,omitempty"`
 }
 
+// reportsNothing says whether every field of the set is zero: a run that
+// summarised no window and said nothing else about one either. It names every
+// field on purpose -- the struct holds a slice, so Go will not compare it to
+// its zero value -- and the test that feeds each field alone through
+// normalize is what catches a field added to the struct and not to this list.
+// A set that is zero on the counts but carries a worst pair, a verdict count,
+// a reason or an end minute is not a run that summarised nothing: it is a
+// contradiction, and falls through to the rule that names it.
+func (f HistoryCoverageFacts) reportsNothing() bool {
+	return f.Levels == 0 && f.Short == 0 && f.Empty == 0 &&
+		f.WorstValid == 0 && f.WorstRequired == 0 &&
+		f.Guarded == 0 && f.Fresh == 0 && f.ShortFresh == 0 &&
+		f.Abnormal == 0 && f.AbnormalOnIncomplete == 0 &&
+		f.Unusable == 0 && f.UnusableReason == "" &&
+		len(f.Windows) == 0 && f.End == 0
+}
+
 func rejectCoverage(rule CoverageRejectionRule) (*HistoryCoverageFacts, *CoverageRejection) {
 	return nil, &CoverageRejection{Rule: rule}
 }
@@ -231,8 +248,7 @@ func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) (*HistoryCoverag
 	// the field's own comment calls a meaningful statement; it is dropped
 	// as no coverage, not refused. Zero windows with something counted on
 	// them is the contradiction.
-	if copied.Levels == 0 && copied.Short == 0 && copied.Empty == 0 && copied.Guarded == 0 && copied.Fresh == 0 &&
-		copied.ShortFresh == 0 && copied.Unusable == 0 && len(copied.Windows) == 0 {
+	if copied.reportsNothing() {
 		return nil, nil
 	}
 	switch {
