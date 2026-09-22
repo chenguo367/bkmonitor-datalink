@@ -154,6 +154,17 @@ func (c *LegacyEffectiveTime) Refresh(ctx context.Context, tenant, business stri
 		return errors.New("legacy effective time cache is unavailable")
 	}
 	now := c.now()
+	// Nothing due and nothing to prune is answered under the read lock. The
+	// maintenance loop asks once a second for every legacy Plan it holds,
+	// and the resolution on the Slot path reads under the same lock; a write
+	// lock taken only to find out there is nothing to do was that many
+	// writers a second against the detection path.
+	c.mu.RLock()
+	idle := now.Sub(c.pruned) < legacyReadInterval
+	c.mu.RUnlock()
+	if idle && !c.due(tenant, business, ids) {
+		return nil
+	}
 	key := tenant + "\x00" + business
 	c.mu.Lock()
 	if now.Sub(c.pruned) >= legacyReadInterval {
@@ -190,6 +201,8 @@ func (c *LegacyEffectiveTime) Refresh(ctx context.Context, tenant, business stri
 			return err
 		}
 		if value.Tenant == "" {
+			// constants/common.py DEFAULT_TENANT_ID, as the Python business
+			// cache reader fills it in.
 			value.Tenant = "system"
 		}
 		if value.Tenant != tenant {
@@ -259,6 +272,8 @@ func countLegacyOccurrences(raw []byte, tenant string) (int, error) {
 	occurrences := 0
 	for _, day := range days {
 		if day.Tenant == "" {
+			// constants/common.py DEFAULT_TENANT_ID, the value the Python
+			// reader fills in for a day without a tenant.
 			day.Tenant = "system"
 		}
 		if day.Tenant != tenant {

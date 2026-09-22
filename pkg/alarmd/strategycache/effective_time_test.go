@@ -349,3 +349,28 @@ func TestLegacyEffectiveTimeTenantAndTimezone(t *testing.T) {
 		})
 	}
 }
+
+// A refresh with nothing due takes no write lock: it is asked once a second
+// for every legacy Plan a replica holds, and the resolution on the Slot path
+// reads under the same lock.
+func TestARefreshWithNothingDueTakesNoWriteLock(t *testing.T) {
+	cache, source, _ := effectiveCacheFixture(t)
+	if err := cache.Refresh(context.Background(), "tenant-a", "2", []int64{7}); err != nil {
+		t.Fatal(err)
+	}
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	done := make(chan error, 1)
+	go func() { done <- cache.Refresh(context.Background(), "tenant-a", "2", []int64{7}) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a refresh with nothing due waited for the write lock behind a reader")
+	}
+	if source.calls != 2 {
+		t.Fatalf("a refresh with nothing due read Redis: %d calls", source.calls)
+	}
+}
