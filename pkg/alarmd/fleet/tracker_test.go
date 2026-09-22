@@ -1834,4 +1834,25 @@ func TestThePartialRoundRunsAreCountedAndEndOnTheFirstOrdinaryRound(t *testing.T
 		t.Fatalf("constrained rounds = %d, resumed = %d after a round that summarised its windows, want both runs ended",
 			got.ConstrainedRounds, got.ResumedRounds)
 	}
+	// A round can be both at once -- some series resumed, the State of
+	// others unreadable -- and then the two runs advance together and
+	// separately. One counter derived from the other would read the same
+	// while only one kind occurs, and differently here.
+	for round := 0; round < 2; round++ {
+		tracker.Observe(context.Background(), partialRound("qg-partial", 100, 149))
+	}
+	if got := coverage(); got.ConstrainedRounds != 2 || got.ResumedRounds != 2 {
+		t.Fatalf("constrained rounds = %d, resumed = %d on two rounds that were both, want two and two", got.ConstrainedRounds, got.ResumedRounds)
+	}
+
+	// A healthy round resets the object's run, and the next partial round
+	// starts its count over rather than continuing the one before it.
+	tracker.Observe(context.Background(), completion("qg-partial", "FULL_COMPLETED", "8930"))
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		tracker.Observe(context.Background(), partialRound("qg-partial", 0, 249))
+	}
+	if got := coverage(); got.ConstrainedRounds != uint32(DefaultDegradedRounds) || got.ResumedRounds != 0 {
+		t.Fatalf("constrained rounds = %d, resumed = %d after a healthy round, want the run started over at %d rather than continuing the earlier one",
+			got.ConstrainedRounds, got.ResumedRounds, DefaultDegradedRounds)
+	}
 }
