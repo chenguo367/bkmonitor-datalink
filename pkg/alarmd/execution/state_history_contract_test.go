@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -299,5 +300,41 @@ func BenchmarkValidateStateHistoryAddition(b *testing.B) {
 		if err := validateStateHistoryReplacement(loaded, mutation, points+1); err != nil {
 			b.Fatalf("valid addition rejected: %v", err)
 		}
+	}
+}
+
+// A point sharing a source time with a loaded one is a landing position only
+// when it is the same record. Two different records at one source time are a
+// record identity conflict, and the merge names it under that name.
+//
+// Both readings refuse the mutation, which is why this is a test about the
+// name rather than about whether it is refused. Treating the pair as a landing
+// position makes the contract ask whether the addition carries the stored
+// Level facts, and the answer to that question is the reason a reader is
+// shown - a fact that went missing, when what actually happened is that two
+// records claim one minute.
+func TestOneSourceTimeWithTwoRecordsIsNotALandingPosition(t *testing.T) {
+	loaded := []StateHistoryPoint{{RecordID: "stored", SourceTime: 10, Levels: []StateLevelFact{
+		{LevelID: 5, DetectFingerprint: "detect-v1", Result: LevelFactNormal},
+		{LevelID: 6, DetectFingerprint: "detect-v1", Result: LevelFactNormal},
+	}}}
+	mutation := StateMutation{
+		AffectedRecords: []RecordAnchor{{RecordID: "fresh", SourceTime: 10}},
+		Points:          []StateHistoryPoint{stateHistoryPoint("fresh", 10, LevelFactNormal)},
+		RetentionPoints: 3,
+		BaseHistory:     loaded,
+	}
+	// The contract lets it through: the addition is this batch's, ordered, and
+	// lands on no position of the loaded record.
+	if err := validateStateHistoryReplacement(loaded, mutation, 3); err != nil {
+		t.Fatalf("a different record at a held source time was refused as a landing position (%v); the "+
+			"pair is a record identity conflict and has to reach the merge to be named as one", err)
+	}
+	// And the merge names it.
+	err := WalkMergedHistory(mutation.BaseHistory, mutation.Points, mutation.RetentionPoints,
+		func(StateHistoryPoint) error { return nil })
+	var conflict *HistoryRecordIdentityConflict
+	if !errors.As(err, &conflict) || conflict.SourceTime != 10 {
+		t.Fatalf("the merge answered %v, want the record identity conflict at source time 10", err)
 	}
 }
