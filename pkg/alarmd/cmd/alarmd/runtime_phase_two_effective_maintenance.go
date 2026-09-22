@@ -16,6 +16,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
@@ -101,6 +102,7 @@ const (
 	closeOutcomeLegacyUnavailable    = string(observability.EffectiveCloseLegacyUnavailable)
 	closeOutcomeUnavailable          = string(observability.EffectiveCloseUnavailable)
 	closeOutcomeUnsupportedRunner    = string(observability.EffectiveCloseUnsupportedRunner)
+	closeOutcomeViewNotExecutable    = string(observability.EffectiveCloseViewNotExecutable)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -281,7 +283,15 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 		})
 		cancel()
 		if err != nil {
-			m.observe(ctx, qg, closeOutcomeUnavailable, err, 0)
+			// The view not allowing the read yet is a rollout's shape, every
+			// owned Query Group once in a replica's first seconds; the store
+			// not answering is not. Under one word the first hid the second.
+			var notExecutable *scheduler.ViewNotExecutableError
+			if errors.As(err, &notExecutable) {
+				m.observe(ctx, qg, closeOutcomeViewNotExecutable, err, 0)
+			} else {
+				m.observe(ctx, qg, closeOutcomeUnavailable, err, 0)
+			}
 		}
 	}
 

@@ -1566,6 +1566,7 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 		Trace:                observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID, DimensionIdentityDigest: string(series)},
 		AlgorithmEvaluations: evaluations, AlgorithmInputs: namedInputs,
 		RecoveryGates: recoveryGateFacts(due, evaluated), OpenAlertGates: openAlertGateFacts(due, evaluated),
+		LevelOutcomes:    levelOutcomeFacts(due, evaluated),
 		OutputWireFormat: planWireFormat(due), PlanSeriesMatched: stream.planSeriesMatched(due),
 	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
@@ -1619,6 +1620,37 @@ func (stream *streamedExecution) observeEvaluationFailure(ctx context.Context, s
 
 // openAlertGateFacts carries what the second recovery gate did with the
 // Plan's RECOVERY records, one fact per outcome that counted something.
+// levelOutcomeFacts is what the evaluation concluded per Level outcome and,
+// for the outcomes that carry one, per reason: the line's own reason is the
+// Plan's fold, one word for the worst Level, so a Level suppressed by its
+// effective time or held on a warming window had no name on the line unless
+// it was that word. Sorted by outcome then reason so the line is stable.
+func levelOutcomeFacts(due execution.DuePlan, evaluated execution.EvaluationResult) []observability.LevelOutcomeFact {
+	if len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
+		return nil
+	}
+	type cell struct{ outcome, reason string }
+	counts := make(map[cell]uint64)
+	for _, outcome := range evaluated.Plans[0].LevelOutcomes {
+		key := cell{outcome: string(outcome.Outcome)}
+		if outcome.Outcome == execution.LevelOutcomeUnknown || outcome.Outcome == execution.LevelOutcomeTerminal {
+			key.reason = string(outcome.ReasonCode)
+		}
+		counts[key]++
+	}
+	facts := make([]observability.LevelOutcomeFact, 0, len(counts))
+	for key, count := range counts {
+		facts = append(facts, observability.LevelOutcomeFact{Outcome: key.outcome, Reason: key.reason, Count: count})
+	}
+	sort.Slice(facts, func(i, j int) bool {
+		if facts[i].Outcome != facts[j].Outcome {
+			return facts[i].Outcome < facts[j].Outcome
+		}
+		return facts[i].Reason < facts[j].Reason
+	})
+	return facts
+}
+
 func openAlertGateFacts(due execution.DuePlan, evaluated execution.EvaluationResult) []observability.OpenAlertGateFact {
 	if len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
 		return nil

@@ -119,6 +119,7 @@ type phaseTwoMetrics struct {
 	levelAbnormal                   *prometheus.CounterVec
 	historyCoverageRejected         *prometheus.CounterVec
 	historyCoverageUnsummarised     *prometheus.CounterVec
+	levelOutcomes                   *prometheus.CounterVec
 	recoveryPastLevelWithoutRecov   prometheus.Counter
 	openAlertGate                   *prometheus.CounterVec
 	openAlertSet                    *openAlertSetCollector
@@ -893,6 +894,31 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, cause := range []string{"resumed", "constrained"} {
 		metrics.historyCoverageUnsummarised.WithLabelValues(cause)
 	}
+	// Level outcomes by kind and, for the two kinds that carry one, by
+	// reason. The evaluation line's reason is the Plan's fold - one word for
+	// the worst Level - so a Level suppressed by its effective time or held
+	// on a warming window had no cell anywhere unless it was that word.
+	// Every cell is created at start over the closed lists: the business
+	// outcomes with no reason, UNKNOWN and TERMINAL over the observation
+	// catalog and other.
+	metrics.levelOutcomes = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "level_outcome_total",
+		Help: "Level outcomes the evaluation concluded, by outcome kind and, for UNKNOWN and TERMINAL, by reason. " +
+			"NORMAL, ABNORMAL and RECOVERY carry no reason. UNKNOWN by reason is the reading for a Level that was not " +
+			"judged: EFFECTIVE_TIME_INACTIVE is its configured hours, EFFECTIVE_TIME_UNKNOWN a schedule that could not " +
+			"be resolved, HISTORY_WARMING a window not yet full, GAP_* a guard. This counts Level outcomes per series " +
+			"per evaluation, not alerts and not strategies; read a reason against level_outcome_total summed over " +
+			"every cell for its share.",
+	}, []string{"outcome", "reason"})
+	for _, outcome := range observability.LevelOutcomeKinds {
+		if outcome == "UNKNOWN" || outcome == "TERMINAL" {
+			for _, reason := range observability.LevelOutcomeReasons() {
+				metrics.levelOutcomes.WithLabelValues(outcome, reason)
+			}
+			continue
+		}
+		metrics.levelOutcomes.WithLabelValues(outcome, "")
+	}
 	metrics.levelAbnormal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "level_abnormal_total",
 		Help: "Level verdicts of ABNORMAL, by whether the detection window they were reached on was " +
@@ -1192,7 +1218,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.effectiveClose, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
@@ -1389,6 +1415,13 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if facts := observation.HistoryCoverage; facts != nil && facts.Abnormal > 0 {
 		m.levelAbnormal.WithLabelValues("full").Add(float64(facts.Abnormal - facts.AbnormalOnIncomplete))
 		m.levelAbnormal.WithLabelValues("incomplete").Add(float64(facts.AbnormalOnIncomplete))
+	}
+	for _, fact := range observation.LevelOutcomes {
+		reason := ""
+		if fact.Outcome == "UNKNOWN" || fact.Outcome == "TERMINAL" {
+			reason = observability.LevelOutcomeReasonLabel(fact.Reason)
+		}
+		m.levelOutcomes.WithLabelValues(fact.Outcome, reason).Add(float64(fact.Count))
 	}
 	for _, fact := range observation.RecoveryGates {
 		switch fact.Cause {

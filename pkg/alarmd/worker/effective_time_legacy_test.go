@@ -13,11 +13,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 	"github.com/go-redis/redis/v8"
@@ -102,5 +104,37 @@ func TestASlotOnAPythonCalendarIsJudgedNotFrozen(t *testing.T) {
 	}
 	if got := facts[consumer].Status(); got != strategy.EffectiveTimeInactive {
 		t.Fatalf("an alerting calendar with no occurrence gives %s, want INACTIVE", got)
+	}
+}
+
+// The evaluation line names what each Level concluded and why: the line's
+// own reason is the Plan's fold, one word for the worst Level, so a Level
+// suppressed by its effective time or held on a warming window had no name
+// anywhere on the line. Counted per outcome, and for the outcomes that carry
+// a reason, per reason.
+func TestTheEvaluationLineNamesWhatEachLevelConcluded(t *testing.T) {
+	identity := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "10"}
+	due := execution.DuePlan{Identity: identity}
+	evaluated := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{
+		Plan: identity,
+		LevelOutcomes: []execution.LevelOutcome{
+			{Plan: identity, LevelID: 1, Outcome: execution.LevelOutcomeUnknown, ReasonCode: execution.ReasonCode(contract.ReasonEffectiveTimeInactive)},
+			{Plan: identity, LevelID: 2, Outcome: execution.LevelOutcomeUnknown, ReasonCode: execution.ReasonCode(contract.ReasonEffectiveTimeInactive)},
+			{Plan: identity, LevelID: 3, Outcome: execution.LevelOutcomeUnknown, ReasonCode: execution.ReasonCode(contract.ReasonHistoryWarming)},
+			{Plan: identity, LevelID: 4, Outcome: execution.LevelOutcomeNormal},
+		},
+	}}}
+	facts := levelOutcomeFacts(due, evaluated)
+	want := []observability.LevelOutcomeFact{
+		{Outcome: "NORMAL", Count: 1},
+		{Outcome: "UNKNOWN", Reason: contract.ReasonEffectiveTimeInactive, Count: 2},
+		{Outcome: "UNKNOWN", Reason: contract.ReasonHistoryWarming, Count: 1},
+	}
+	if !reflect.DeepEqual(facts, want) {
+		t.Fatalf("facts = %+v, want %+v", facts, want)
+	}
+	// A result for another Plan is not this line's to describe.
+	if other := levelOutcomeFacts(execution.DuePlan{Identity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "11"}}, evaluated); other != nil {
+		t.Fatalf("facts for another Plan = %+v", other)
 	}
 }
