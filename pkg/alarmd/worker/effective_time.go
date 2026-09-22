@@ -38,11 +38,18 @@ func PrepareEffectiveTimeFacts(ctx context.Context, header execution.InternalExe
 		if due.CompiledPlan == nil {
 			return nil, errors.New("alarmd worker: EffectiveTime target references an unknown Plan")
 		}
-		fact, err := due.CompiledPlan.ResolveEffectiveTimeWithProvider(ctx, int64(header.Contract.Slot.EvaluationTime), due.Identity.BusinessID, legacy)
-		if err != nil {
-			return nil, err
-		}
+		byRequirement := make(map[string]strategy.EffectiveTimeFact)
 		for _, level := range levelsNeedingEffectiveTime(due) {
+			requirement := level.EffectiveTimeRequirement()
+			fact, ok := byRequirement[requirement.Digest()]
+			if !ok {
+				var err error
+				fact, err = due.CompiledPlan.ResolveEffectiveTimeRequirement(ctx, strategy.EffectiveTimeRequest{TenantID: due.Identity.TenantID, BusinessID: due.Identity.BusinessID, EvaluationTime: int64(header.Contract.Slot.EvaluationTime), Requirement: requirement}, legacy)
+				if err != nil {
+					return nil, err
+				}
+				byRequirement[requirement.Digest()] = fact
+			}
 			facts[execution.ConsumerRef{Plan: due.Identity, LevelID: level.Definition().LevelID, HasLevel: true}] = fact
 		}
 	}

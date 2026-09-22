@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"os"
 	"strings"
 	"testing"
@@ -15,6 +16,44 @@ func ruleSecond(value string) int64 {
 		panic(err)
 	}
 	return t.Unix()
+}
+
+func TestMaintenanceEffectiveTimeRequiresEveryLevelInactive(t *testing.T) {
+	plan := validPlan()
+	first := plan.StrategyIR.Levels[0]
+	first.TriggerPlan.Config = triggerConfigWithUptime("BUSINESS_LOCAL", map[string]any{"time_ranges": []any{map[string]any{"start": "09:00", "end": "10:00"}}})
+	second := first
+	second.Definition.LevelID = 2
+	second.Definition.Priority = 2
+	second.TriggerPlan.Config = triggerConfigWithUptime("BUSINESS_LOCAL", map[string]any{"time_ranges": []any{map[string]any{"start": "11:00", "end": "12:00"}}})
+	plan.StrategyIR.Levels = append(plan.StrategyIR.Levels[:0], first, second)
+	plan.NoData = &contract.NoDataConfigV1{Continuous: 1, Level: 2}
+	plan.EffectiveTimeSnapshot = json.RawMessage(`{"schema_version":1,"status":"READY","business_timezone":"UTC","calendars":[]}`)
+	compiled := mustCompilePlan(t, newTestCompiler(t), plan)
+	if compiled.NoDataLevel().EffectiveTimeRequirementDigest() != compiled.Levels()[1].EffectiveTimeRequirementDigest() {
+		t.Fatal("no-data did not inherit its matching level")
+	}
+	for _, tt := range []struct {
+		at   string
+		want string
+	}{{"2026-09-22T09:30:00Z", EffectiveTimeActive}, {"2026-09-22T10:30:00Z", EffectiveTimeInactive}, {"2026-09-22T11:30:00Z", EffectiveTimeActive}} {
+		fact, err := compiled.ResolveEffectiveTime(context.Background(), ruleSecond(tt.at))
+		if err != nil || fact.Status() != tt.want {
+			t.Fatalf("%s: %s %v want %s", tt.at, fact.Status(), err, tt.want)
+		}
+	}
+	plan.EffectiveTimeSnapshot = nil
+	compiled = mustCompilePlan(t, newTestCompiler(t), plan)
+	fact, err := compiled.ResolveEffectiveTime(context.Background(), ruleSecond("2026-09-22T10:30:00Z"))
+	if err != nil || fact.Status() != EffectiveTimeUnknown {
+		t.Fatalf("unknown levels: %s %v", fact.Status(), err)
+	}
+	plan.StrategyIR.Levels[0].TriggerPlan.Config = validPlan().StrategyIR.Levels[0].TriggerPlan.Config
+	compiled = mustCompilePlan(t, newTestCompiler(t), plan)
+	fact, err = compiled.ResolveEffectiveTime(context.Background(), ruleSecond("2026-09-22T10:30:00Z"))
+	if err != nil || fact.Status() != EffectiveTimeActive {
+		t.Fatalf("ACTIVE plus UNKNOWN cannot close: %s %v", fact.Status(), err)
+	}
 }
 func ruleItem(start, end int64, kind, zone, repeat string) effectiveItem {
 	return effectiveItem{ID: 1, Start: &start, End: &end, TimeKind: kind, Timezone: zone, Repeat: json.RawMessage(repeat)}

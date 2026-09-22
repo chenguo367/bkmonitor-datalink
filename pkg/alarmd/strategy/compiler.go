@@ -226,29 +226,19 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 	sort.Slice(compiled.levels, func(left, right int) bool {
 		return compiled.levels[left].definition.LevelID < compiled.levels[right].definition.LevelID
 	})
-	if len(compiled.levels) > 0 {
-		requirement := compiled.levels[0].effectiveTime
-		for _, level := range compiled.levels {
-			if level.effectiveTime.digest != requirement.digest {
-				return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_LEVEL_MISMATCH", FieldPath: "strategy_ir.levels"}}, nil
+	if compiled.noDataLevel != nil && len(request.Plan.StrategyIR.Levels) > 0 {
+		// No-data follows its corresponding source level's uptime, even when
+		// that level's detector was rejected. Missing levels use the first
+		// source trigger, as the legacy strategy-wide uptime fallback does.
+		raw := request.Plan.StrategyIR.Levels[0]
+		for _, candidate := range request.Plan.StrategyIR.Levels {
+			if candidate.Definition.LevelID == compiled.noDataLevel.definition.LevelID {
+				raw = candidate
+				break
 			}
 		}
-		if compiled.noDataLevel != nil {
-			compiled.noDataLevel.effectiveTime = requirement.clone()
-		}
-		if compiled.effectiveRules != nil {
-			for _, id := range append(requirement.ActiveCalendarIDs(), requirement.InactiveCalendarIDs()...) {
-				if _, exists := compiled.effectiveRules.calendars[id]; !exists {
-					return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_CALENDAR_MISSING", FieldPath: "effective_time_snapshot.calendars"}}, nil
-				}
-			}
-		}
-	}
-	if len(compiled.levels) == 0 && compiled.noDataLevel != nil && len(request.Plan.StrategyIR.Levels) > 0 {
-		// Detector rejection must not turn a surviving no-data level into an
-		// always-active level. Its uptime still belongs to the source strategy.
 		var config triggerPlanConfigV1
-		if json.Unmarshal(request.Plan.StrategyIR.Levels[0].TriggerPlan.Config, &config) != nil {
+		if json.Unmarshal(raw.TriggerPlan.Config, &config) != nil {
 			return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_INVALID", FieldPath: "strategy_ir.levels.trigger_plan"}}, nil
 		}
 		requirement, err := compileEffectiveTimeRequirement(config.Uptime, config.TimezoneRef)
@@ -256,6 +246,20 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 			return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_INVALID", FieldPath: "strategy_ir.levels.trigger_plan.uptime"}}, nil
 		}
 		compiled.noDataLevel.effectiveTime = requirement
+	}
+	if compiled.effectiveRules != nil {
+		levels := append([]CompiledLevel(nil), compiled.levels...)
+		if compiled.noDataLevel != nil {
+			levels = append(levels, *compiled.noDataLevel)
+		}
+		for _, level := range levels {
+			requirement := level.effectiveTime
+			for _, id := range append(requirement.ActiveCalendarIDs(), requirement.InactiveCalendarIDs()...) {
+				if _, exists := compiled.effectiveRules.calendars[id]; !exists {
+					return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_CALENDAR_MISSING", FieldPath: "effective_time_snapshot.calendars"}}, nil
+				}
+			}
+		}
 	}
 	if terminal := c.checkRetainedPointsFit(compiled); terminal != nil {
 		return CompileResult{planTerminal: terminal}, nil

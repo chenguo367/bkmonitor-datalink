@@ -302,6 +302,35 @@ func TestEffectiveRuleBudgetIsolatesNeighborPlan(t *testing.T) {
 	}
 }
 
+func TestPrepareEffectiveTimeFactsPreservesDifferentLevelRequirements(t *testing.T) {
+	identity := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "1"}
+	compiled := compileEffectiveTimePlanForTest(t, identity, []uint32{1, 2}, true, func(plan *contract.EvaluationPlanV2) {
+		plan.StrategyIR.Levels[1].TriggerPlan.Config = json.RawMessage(`{"window_size":1,"required_anomalies":1,"step_seconds":60,"timezone_ref":"BUSINESS_LOCAL","uptime":{"time_ranges":[{"start":"18:00","end":"19:00"}]}}`)
+		plan.NoData = &contract.NoDataConfigV1{Continuous: 1, Level: 2}
+		plan.EffectiveTimeSnapshot = json.RawMessage(`{"schema_version":1,"status":"READY","business_timezone":"UTC","calendars":[]}`)
+	})
+	at := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC).Unix()
+	header := execution.InternalExecutionHeader{Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{EvaluationTime: execution.EvaluationTime(at)}}, DuePlans: []execution.DuePlan{{Identity: identity, CompiledPlan: compiled}}}
+	facts, err := PrepareEffectiveTimeFacts(context.Background(), header, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, level := range compiled.Levels() {
+		fact := facts[execution.ConsumerRef{Plan: identity, LevelID: level.Definition().LevelID, HasLevel: true}]
+		want := strategy.EffectiveTimeActive
+		if level.Definition().LevelID == 2 {
+			want = strategy.EffectiveTimeInactive
+		}
+		if fact.Status() != want || fact.RequirementDigest() != level.EffectiveTimeRequirementDigest() {
+			t.Fatalf("level %d: %+v want %s", level.Definition().LevelID, fact, want)
+		}
+	}
+	maintenance, err := compiled.ResolveEffectiveTime(context.Background(), at)
+	if err != nil || maintenance.Status() != strategy.EffectiveTimeActive {
+		t.Fatalf("maintenance incorrectly closes mixed levels: %s %v", maintenance.Status(), err)
+	}
+}
+
 func TestEffectiveTimeAllRejectedAndNoDataOnlyStayLocal(t *testing.T) {
 	for _, withNoData := range []bool{false, true} {
 		bad := execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "1"}

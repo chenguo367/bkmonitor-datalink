@@ -1548,17 +1548,12 @@ func compilePlan(
 		levelIDs = append(levelIDs, int(level))
 	}
 	sort.Ints(levelIDs)
-	var effectiveDigest string
 	for _, detect := range source.Detects {
-		requirement, err := strategy.CompileUptime(detect.Trigger.Uptime)
-		if err != nil || (effectiveDigest != "" && effectiveDigest != requirement.Digest()) {
+		_, err := strategy.CompileUptime(detect.Trigger.Uptime)
+		if err != nil {
 			reason := "EFFECTIVE_TIME_INVALID"
-			if err == nil {
-				reason = "EFFECTIVE_TIME_LEVEL_MISMATCH"
-			}
 			return contract.EvaluationPlanV2{}, planCompileFacts{}, []ObjectDisposition{{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: reason}}, fmt.Errorf("alarmd controlplane: %s", reason)
 		}
-		effectiveDigest = requirement.Digest()
 	}
 	levels := make([]contract.LevelIRV2, 0, len(levelIDs))
 	dispositions := make([]ObjectDisposition, 0)

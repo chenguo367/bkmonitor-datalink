@@ -228,15 +228,44 @@ func (p *CompiledPlan) ResolveEffectiveTimeWithProvider(ctx context.Context, eva
 		return EffectiveTimeFact{}, errors.New("effective time: Plan is missing")
 	}
 	request := EffectiveTimeRequest{TenantID: p.strategyRef.TenantID, BusinessID: businessID, EvaluationTime: evaluationTime}
-	if len(p.levels) > 0 {
-		request.Requirement = p.levels[0].effectiveTime
-	} else if p.noDataLevel != nil {
-		request.Requirement = p.noDataLevel.effectiveTime
-	} else {
+	levels := append([]CompiledLevel(nil), p.levels...)
+	if p.noDataLevel != nil {
+		levels = append(levels, *p.noDataLevel)
+	}
+	if len(levels) == 0 {
 		request.Requirement, _ = compileEffectiveTimeRequirement(nil, "")
 		return unknownEffectiveTimeFact(request)
 	}
-	return p.resolveEffectiveRequirement(ctx, request, legacy)
+	seen := make(map[string]bool, len(levels))
+	status := EffectiveTimeInactive
+	var facts []EffectiveTimeFact
+	var bindings []string
+	for _, level := range levels {
+		request.Requirement = level.effectiveTime
+		if seen[request.Requirement.digest] {
+			continue
+		}
+		seen[request.Requirement.digest] = true
+		fact, err := p.resolveEffectiveRequirement(ctx, request, legacy)
+		if err != nil {
+			return EffectiveTimeFact{}, err
+		}
+		facts = append(facts, fact)
+		bindings = append(bindings, fact.FactDigest())
+		if fact.Status() == EffectiveTimeActive {
+			status = EffectiveTimeActive
+		} else if fact.Status() == EffectiveTimeUnknown && status != EffectiveTimeActive {
+			status = EffectiveTimeUnknown
+		}
+	}
+	if len(facts) == 1 {
+		return facts[0], nil
+	}
+	digest, err := contract.DeriveCanonicalDigestV2("effective-time-maintenance-levels-v1", bindings)
+	if err != nil {
+		return EffectiveTimeFact{}, err
+	}
+	return newEffectiveTimeFact(status, digest, digest, evaluationTime, evaluationTime+1)
 }
 
 // ResolveEffectiveTimeRequirement includes the no-data level while using the

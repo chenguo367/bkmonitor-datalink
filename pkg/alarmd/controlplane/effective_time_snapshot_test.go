@@ -78,25 +78,33 @@ func TestEffectiveTimeSourceProjectionRoundTripAndStateIdentity(t *testing.T) {
 	}
 }
 
-func TestEffectiveTimeMultipleLevelsMismatchIsNamed(t *testing.T) {
+func TestEffectiveTimeMultipleLevelsKeepTheirOwnUptime(t *testing.T) {
 	document := map[string]any{}
 	if err := json.Unmarshal(realThresholdDocuments(t)[0], &document); err != nil {
 		t.Fatal(err)
 	}
 	detects := document["detects"].([]any)
-	document["detects"] = append(detects, map[string]any{"level": 99, "trigger_config": map[string]any{"count": 1, "check_window": 1, "uptime": map[string]any{"time_ranges": []any{map[string]any{"start": "09:00", "end": "10:00"}}}}})
+	document["detects"] = append(detects, map[string]any{"level": 2, "trigger_config": map[string]any{"count": 1, "check_window": 1, "uptime": map[string]any{"time_ranges": []any{map[string]any{"start": "09:00", "end": "10:00"}}}}})
+	item := document["items"].([]any)[0].(map[string]any)
+	algorithms := item["algorithms"].([]any)
+	copyAlgorithm := map[string]any{}
+	for key, value := range algorithms[0].(map[string]any) {
+		copyAlgorithm[key] = value
+	}
+	copyAlgorithm["level"] = 2
+	item["algorithms"] = append(algorithms, copyAlgorithm)
 	encoded, _ := json.Marshal(document)
 	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{{SourceID: "1001", Document: encoded, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}}}, Planner: &recordingPlanner{facts: queryFacts(t)}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(catalog.QueryGroups) != 0 {
-		t.Fatal("different per-level uptime accepted")
+	if len(catalog.QueryGroups) != 1 {
+		t.Fatalf("different per-level uptime refused: %+v", catalog.Dispositions)
 	}
-	for _, d := range catalog.Dispositions {
-		if d.Reason == "EFFECTIVE_TIME_LEVEL_MISMATCH" {
-			return
-		}
+	group := catalog.QueryGroups[0]
+	compiled := compileWithEvaluationCore(t, group.Plans[0].Plan, group.QueryPlan.Normalization.DatasetContract)
+	levels := compiled.Levels()
+	if len(levels) != 2 || levels[0].EffectiveTimeRequirement().Kind() != strategy.EffectiveTimeAlways || levels[1].EffectiveTimeRequirement().Kind() != strategy.EffectiveTimeStaticSchedule {
+		t.Fatalf("lost level requirements: %+v", levels)
 	}
-	t.Fatalf("missing named disposition: %+v", catalog.Dispositions)
 }
