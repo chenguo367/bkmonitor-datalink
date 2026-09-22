@@ -132,3 +132,57 @@ func TestThisBuildDeclaresTheSplitContract(t *testing.T) {
 		t.Fatalf("registration declares %v, want both contracts", registration.Capabilities)
 	}
 }
+
+// Losing the Control Leader authority tells whoever asked to be told. The
+// readings that belong to the role are taken off the scrape there; the six
+// paths that give the authority up all go through this one method, so the
+// call has to be in it and not in each of them.
+func TestGivingUpTheControlLeaderAuthorityReportsTheStepDown(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	store := &rebalanceOwnershipStore{
+		fakePhaseTwoOwnershipStore: &fakePhaseTwoOwnershipStore{now: now, renewed: make(chan struct{})},
+		assignments:                map[execution.QueryGroupIdentity]ownership.AssignmentRecord{},
+	}
+	limits := validGoAccessRuntimeConfig().PhaseTwo.Scheduler.RecoveryLimits()
+	flights, err := scheduler.NewFlightCoordinatorWithRecovery(limits, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	eligibility, err := scheduler.NewStaticWorkerEligibility(ownership.WorkerCompatibility{DeploymentProfile: "shadow", CapabilitiesDigest: "capabilities"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reconciler, err := scheduler.NewReconciler(scheduler.NewRouter(eligibility), store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steppedDown := 0
+	production, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
+		Store: store, WorkerID: "worker-1", Catalog: unavailableSlotCatalog{},
+		Progress: unavailableScheduleProgress{}, Executor: rejectingSlotExecutor{}, Now: func() time.Time { return now },
+		ControlLeaderTTL: time.Hour, Observer: observability.NopObserver{}, Reconcile: reconciler, Flights: flights,
+		RecoveryLimits: limits, PostRecoveryTerminalDelay: time.Minute, QueryDeadlineReserve: 5 * time.Second,
+		SnapshotRetention: time.Hour, PublicationDelayAllowance: time.Minute, SettlingWait: 30 * time.Second,
+		LeaseTTL: 30 * time.Second, ReconcileInterval: 5 * time.Second, ContentScopes: noContentScopes,
+		Costs: scheduler.NewCostLedger(func() time.Time { return now }), SteppedDownAsLeader: func() { steppedDown++ },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority, err := production.ensureControlAuthority(context.Background(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if steppedDown != 0 {
+		t.Fatalf("acquiring the authority reported %d step-downs", steppedDown)
+	}
+	// Another authority's fence does not give this one up.
+	production.clearControlAuthority(ownership.PublicationAuthority{Fence: execution.OwnerFence{QueryGroup: "another", OwnerID: "worker-9"}})
+	if steppedDown != 0 {
+		t.Fatalf("another fence's release reported %d step-downs", steppedDown)
+	}
+	production.clearControlAuthority(authority)
+	if steppedDown != 1 {
+		t.Fatalf("giving up the authority reported %d step-downs, want one", steppedDown)
+	}
+}

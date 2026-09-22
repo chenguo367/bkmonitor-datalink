@@ -179,6 +179,13 @@ type RuntimeLevelContractRef struct {
 // another contract, on every build alike, with no formula skew to name it -
 // a refusal of every loaded record for good, not for a rollout. The test
 // beside this file changes each input and asserts both move.
+//
+// That covers what the two formulas read. What they are is covered by a
+// second test, which freezes both digests of a fixed Plan: a new digest
+// domain here, or a field added to or renamed in either hashed shape,
+// moves these references without moving the generation, and no input
+// change can catch it. Change either formula and move the generation in
+// the same release.
 func DeriveRuntimeLevelContractRefs(plan *strategy.CompiledPlan) ([]RuntimeLevelContractRef, error) {
 	if plan == nil || plan.StateCompatibilityHash() == "" {
 		return nil, errors.New("alarmd execution: compiled state contract is required")

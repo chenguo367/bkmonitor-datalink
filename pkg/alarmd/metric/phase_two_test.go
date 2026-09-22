@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
@@ -625,5 +626,47 @@ func TestTheUnawareReplicaGaugeFollowsTheRoundsSplitGate(t *testing.T) {
 	observe(nil)
 	if got := testutil.ToFloat64(recorder.phaseTwo.shardUnawareReadyReplicas); got != 0 {
 		t.Fatalf("shard_unaware_ready_replicas = %v after the roll, want 0", got)
+	}
+}
+
+// A replica that stops being the Control Leader takes its leader-round
+// readings off the scrape. They are aggregated across replicas with max, so
+// a replica that kept its last reading outranks the Leader that has a
+// current one - a fleet whose split gate has cleared would still read as
+// held, and a rebalance that is done would still read as planning moves.
+// Its own per-replica readings stay: those are still true.
+func TestSteppingDownAsLeaderTakesTheLeaderReadingsOffTheScrape(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{})
+	recorder.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned, Result: observability.ResultSuccess,
+		Operation: observability.OperationLoad,
+		Rebalance: &observability.RebalanceFacts{PlannedMoves: 3, MostOwned: 9, LeastOwned: 4,
+			ShardAware: &observability.ShardAwareFacts{Ready: 3, Unaware: []string{"worker-2"}}},
+	})
+	recorder.phaseTwo.undrainedDrainingQueryGroups.Set(2)
+	leaderReadings := []string{"bkmonitor_alarmd_rebalance_planned_moves", "bkmonitor_alarmd_rebalance_gap", "bkmonitor_alarmd_shard_unaware_ready_replicas"}
+	scraped := scrape(t, recorder)
+	for _, reading := range leaderReadings {
+		if !strings.Contains(scraped, reading+" ") {
+			t.Fatalf("%s is absent while this replica leads:\n%s", reading, scraped)
+		}
+	}
+	recorder.ControlLeaderStepDown()
+	scraped = scrape(t, recorder)
+	for _, reading := range leaderReadings {
+		if strings.Contains(scraped, reading+" ") {
+			t.Fatalf("%s survived the step-down; a stale leader reading wins a max across replicas:\n%s", reading, scraped)
+		}
+	}
+	if !strings.Contains(scraped, "bkmonitor_alarmd_undrained_draining_query_groups ") {
+		t.Fatalf("a per-replica reading was taken off with the leader's:\n%s", scraped)
+	}
+	// Leading again publishes them again.
+	recorder.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned, Result: observability.ResultSuccess,
+		Operation: observability.OperationLoad, Rebalance: &observability.RebalanceFacts{PlannedMoves: 1},
+	})
+	if scraped = scrape(t, recorder); !strings.Contains(scraped, "bkmonitor_alarmd_rebalance_planned_moves ") {
+		t.Fatalf("a replica that leads again does not publish its readings:\n%s", scraped)
 	}
 }
