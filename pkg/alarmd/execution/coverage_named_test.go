@@ -39,6 +39,9 @@ func TestTheNamedWindowsAreTheWorstFewWorstFirst(t *testing.T) {
 			target = &right
 		}
 		target.Levels++
+		if int64(shortfall) > target.End {
+			target.End = int64(shortfall)
+		}
 		target.ObserveWindow(WindowCoverage{Series: SeriesIdentityDigest("s"), LevelID: shortfall, Valid: 20 - shortfall, Required: 20, End: int64(shortfall)})
 	}
 	left.Merge(right)
