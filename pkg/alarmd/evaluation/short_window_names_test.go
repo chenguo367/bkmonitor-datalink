@@ -43,6 +43,9 @@ func TestEvaluationNamesTheShortWindowAndItsEmptyPositions(t *testing.T) {
 	if coverage.Short != 1 || len(coverage.Windows) != 1 {
 		t.Fatalf("short = %d, windows named = %d, want the one short window named", coverage.Short, len(coverage.Windows))
 	}
+	if coverage.End != 300 {
+		t.Fatalf("end = %d, want the record's minute 300 on the run", coverage.End)
+	}
 	window := coverage.Windows[0]
 	if window.Series != execution.SeriesIdentityDigest(strings.Repeat("c", 64)) || window.LevelID != 5 || window.End != 300 {
 		t.Fatalf("window = %+v, want series c, Level 5, ending at the record's source time 300", window)

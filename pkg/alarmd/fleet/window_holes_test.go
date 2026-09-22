@@ -155,6 +155,49 @@ func TestTheWindowVerdictIsDecidedFromItsHoles(t *testing.T) {
 	if windowRows(rounds, nil) != nil || windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1}) != nil {
 		t.Fatal("rows were made for a round that named no window")
 	}
+	// A minute both a reported round and an inferred one claim is the
+	// reported round's: a minute a round reported is a fact, an inferred
+	// one an arithmetic.
+	rounds = []roundMark{
+		{slot: 300, end: 240, endInferred: true, kind: "FULL_EMPTY_COMPLETED", primary: primary("FULL", "EMPTY")},
+		{slot: 300, end: 240, kind: "FULL_COMPLETED", primary: primary("FULL", "DATA")},
+		{slot: 360, end: 240, endInferred: true, kind: "FULL_EMPTY_COMPLETED", primary: primary("FULL", "EMPTY")},
+	}
+	rows = windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{window([]int64{240}, 1, nil, 0)}})
+	if hole := rows[0].Holes[0]; hole.Cause != HoleAnsweredWithoutSeries || hole.Inferred || hole.Round != "FULL_COMPLETED" {
+		t.Fatalf("hole = %+v, want the reported round over the inferred ones either side of it", hole)
+	}
+}
+
+// The ring is bounded: an object that has run for hours remembers its last
+// RecentRoundsKept rounds and says so, and a hole older than those reads
+// as beyond memory rather than as anything about the round.
+func TestTheRoundRingIsBounded(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-ring"})
+	for i := int64(0); i < 2*RecentRoundsKept; i++ {
+		round(ctx, tracker, 600+60*i, "FULL_COMPLETED", "", "", primary("FULL", "DATA"), &observability.HistoryCoverageFacts{Levels: 1, End: 540 + 60*i})
+	}
+	last := int64(600 + 60*(2*RecentRoundsKept))
+	// The ring holds the degraded rounds below and the last healthy rounds
+	// before them; the oldest remembered minute is that many rounds back.
+	oldestRemembered := 540 + 60*int64(2*RecentRoundsKept-(RecentRoundsKept-DefaultDegradedRounds))
+	short := &observability.HistoryCoverageFacts{Levels: 1, Short: 1, WorstValid: 1, WorstRequired: 40, End: last - 60,
+		Windows: []observability.HistoryWindowFact{{Series: "c", Level: 1, Valid: 1, Required: 40, End: last - 60,
+			// One minute before memory, and the oldest remembered minute.
+			Missing: []int64{oldestRemembered - 60, oldestRemembered}, MissingTotal: 39}}}
+	for i := 0; i < DefaultDegradedRounds; i++ {
+		round(ctx, tracker, last, "COMPLETED_WITH_UNAVAILABLE", "LEVEL_OUTCOME_UNKNOWN", "HISTORY_GAPPED", primary("FULL", "DATA"), short)
+	}
+	coverage := anyColumn(tracker)[0].Coverage
+	if coverage.RoundsRemembered != RecentRoundsKept {
+		t.Fatalf("rounds remembered = %d, want the bound %d", coverage.RoundsRemembered, RecentRoundsKept)
+	}
+	holes := coverage.Windows[0].Holes
+	if holes[0].Cause != HoleNotInMemory || holes[1].Cause != HoleAnsweredWithoutSeries {
+		t.Fatalf("holes = %+v, want the minute before memory unknown and the oldest remembered minute read", holes)
+	}
 }
 
 // The round-over-round counters compare one window's pair with itself. When
