@@ -89,6 +89,150 @@ type StrategyDisposition struct {
 // process's catalog memory.
 type StrategyLookupFunc func(strategyID string) StrategyLookupFacts
 
+// CatalogAbsenceFacts is the control plane's state read live at the moment a
+// point read found no catalog to answer from -- the raw facts, not a
+// verdict: this package decides the word, so one place decides it and a test
+// can put every state in front of it.
+//
+// It exists because the refusal used to name two causes from a nil pointer.
+// A deployment whose Leader had failed every refresh round for half an hour
+// answered "not the Leader, or the Leader before its first round" to every
+// id asked for, while the same process's first screen carried the exit those
+// rounds were stopping at. The reader was handed a guess, and both halves of
+// it were false.
+type CatalogAbsenceFacts struct {
+	// Known says a refresh round has reported its outcome to this process.
+	// Before the first one there is a role and nothing else.
+	Known bool
+	// Role is the control plane's own word: leader, follower or unacquired.
+	Role string
+	// Exit is where the latest failed round stopped, empty when the latest
+	// round did not fail, and Text is what it said.
+	Exit string
+	Text string
+	// FailingSeconds is how long this process has been failing its rounds,
+	// absent when it is not. A count of rounds would read better and is not
+	// recorded anywhere; the age is what exists, and deriving the count from
+	// it would be arithmetic presented as a measurement.
+	FailingSeconds *float64
+	// DirectoryMounted says this process also serves the strategy directory,
+	// which answers the same question from the store rather than from the
+	// published catalog. It is the way out while the catalog is absent, and
+	// it is only offered when the route is actually mounted here.
+	DirectoryMounted bool
+}
+
+// CatalogAbsenceFunc reads that state. Nil leaves the refusal saying it does
+// not know, which is the truth for a deployment that did not wire it.
+type CatalogAbsenceFunc func() CatalogAbsenceFacts
+
+// CatalogAbsenceReason is the one word for why a point read has no catalog.
+// Closed.
+type CatalogAbsenceReason string
+
+const (
+	// CatalogAbsenceNotLeader: this replica does not lead, and the request
+	// could not be handed to the one that does.
+	CatalogAbsenceNotLeader CatalogAbsenceReason = "NOT_LEADER"
+	// CatalogAbsenceFirstRoundPending: this replica leads and no refresh
+	// round has reported yet.
+	CatalogAbsenceFirstRoundPending CatalogAbsenceReason = "FIRST_ROUND_PENDING"
+	// CatalogAbsencePublishFailing: this replica leads and its refresh rounds
+	// are failing, with the exit they stop at.
+	CatalogAbsencePublishFailing CatalogAbsenceReason = "PUBLISH_FAILING"
+	// CatalogAbsenceIndexMissing: this replica leads, its latest round did
+	// not fail, and it still holds no index. Nothing is known to be wrong, so
+	// none of the words above is true -- and folding this into one of them
+	// would report a failure that is not happening. A rising count here is a
+	// defect in the publish path, not a deployment state.
+	CatalogAbsenceIndexMissing CatalogAbsenceReason = "INDEX_MISSING"
+	// CatalogAbsenceUnknown: the control plane's state could not be read.
+	CatalogAbsenceUnknown CatalogAbsenceReason = "UNKNOWN"
+)
+
+// CatalogAbsenceReasons is the closed list, for the page's wording table.
+var CatalogAbsenceReasons = []CatalogAbsenceReason{CatalogAbsenceNotLeader, CatalogAbsenceFirstRoundPending,
+	CatalogAbsencePublishFailing, CatalogAbsenceIndexMissing, CatalogAbsenceUnknown}
+
+// CatalogAbsence is the refusal a point read returns when there is no
+// catalog: the word, the sentence, and the facts the word was decided from,
+// so a reader that does not know the word still learns what happened.
+type CatalogAbsence struct {
+	Error  string               `json:"error"`
+	Reason CatalogAbsenceReason `json:"reason"`
+	// Detail is the sentence, composed here so the page, the CLI and a
+	// person reading the raw body are told the same thing.
+	Detail         string   `json:"detail"`
+	Replica        string   `json:"replica,omitempty"`
+	Role           string   `json:"role,omitempty"`
+	Exit           string   `json:"exit,omitempty"`
+	Text           string   `json:"text,omitempty"`
+	FailingSeconds *float64 `json:"failing_seconds,omitempty"`
+	// Next names the route that answers the same question while this one
+	// cannot, and is absent when this process does not serve it. Absent is
+	// the honest answer: a way out that is not mounted is not a way out.
+	Next string `json:"next,omitempty"`
+}
+
+// strategyDirectoryRoute is where the same question is answered from the
+// store rather than from the published catalog.
+const strategyDirectoryRoute = "/api/objects?scope=strategies"
+
+// controlRoleLeader and controlExitNone are the control plane's words as
+// they arrive here. Spelled out rather than imported: this package does not
+// depend on the control plane, and the test that pins the spelling against
+// the control plane's own constants is what keeps the two in step.
+const (
+	controlRoleLeader = "leader"
+	controlExitNone   = "none"
+)
+
+// catalogAbsenceOf decides the word and writes the sentence.
+//
+// The order is the order the states exclude each other in: a replica that
+// does not lead has nothing else to say, a leader with a failing round says
+// which exit, a leader with no round yet says so, and a leader whose rounds
+// are fine and still has no index is the state none of the words covers --
+// which gets its own word rather than the nearest one.
+func catalogAbsenceOf(facts CatalogAbsenceFacts, replica string, wired bool) CatalogAbsence {
+	absence := CatalogAbsence{Error: "NOT_PUBLISHED", Replica: replica, Role: facts.Role}
+	if facts.DirectoryMounted {
+		absence.Next = strategyDirectoryRoute
+	}
+	switch {
+	case !wired || facts.Role == "":
+		absence.Reason, absence.Role = CatalogAbsenceUnknown, ""
+		absence.Detail = "这个副本手上没有已发布的目录，也读不到控制面此刻的状态，说不出是哪一种。"
+	case facts.Role != controlRoleLeader:
+		absence.Reason = CatalogAbsenceNotLeader
+		absence.Detail = "这个副本不是 leader（" + facts.Role + "），只有 leader 手上有已发布的目录；转发给 leader 也没成功。"
+	case facts.Exit != "" && facts.Exit != controlExitNone:
+		absence.Reason, absence.Exit, absence.Text = CatalogAbsencePublishFailing, facts.Exit, facts.Text
+		absence.FailingSeconds = facts.FailingSeconds
+		absence.Detail = "这个副本是 leader，但它的目录刷新每轮都停在 " + facts.Exit + "，一次都没发布成功" +
+			failingForClause(facts.FailingSeconds) + "。策略还在按上一份能跑的配置检测，只是按 ID 查不到。"
+	case !facts.Known:
+		absence.Reason = CatalogAbsenceFirstRoundPending
+		absence.Detail = "这个副本刚成为 leader，第一轮目录刷新还没出结果。"
+	default:
+		absence.Reason = CatalogAbsenceIndexMissing
+		absence.Detail = "这个副本是 leader，最近一轮目录刷新没有失败，手上却没有目录——这是程序缺陷，不是部署状态。"
+	}
+	if absence.Next != "" {
+		absence.Detail += "同一个问题可以用 " + strategyDirectoryRoute + " 从存储直接查。"
+	}
+	return absence
+}
+
+// failingForClause is the "for so long" half of the sentence, and is empty
+// when the age is not known or under a minute rather than reading as zero.
+func failingForClause(seconds *float64) string {
+	if seconds == nil || *seconds < 60 {
+		return ""
+	}
+	return "（已经 " + strconv.FormatInt(int64(*seconds)/60, 10) + " 分钟）"
+}
+
 // LeaderForward hands a request this process cannot answer to the Leader.
 // It reports whether it did -- the response is then already written -- or,
 // when there is no Leader to hand it to, the closed word for why (the view
@@ -382,7 +526,7 @@ func shortObjectName(queryGroup string) string {
 // rather than ignored, so a reader cannot ask for something and get an
 // answer that silently lacks it.
 func WithStrategyStanding(next http.Handler, service *Service, lookup StrategyLookupFunc, forward LeaderForward,
-	loader StrategyObjectLoader, replica string, now func() time.Time, stallAfter time.Duration) http.Handler {
+	loader StrategyObjectLoader, absence CatalogAbsenceFunc, replica string, now func() time.Time, stallAfter time.Duration) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/api/strategies" {
 			serveStrategyList(response, request, service, now, stallAfter)
@@ -415,8 +559,13 @@ func WithStrategyStanding(next http.Handler, service *Service, lookup StrategyLo
 					return
 				}
 			}
-			writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "NOT_PUBLISHED",
-				"reason": "this replica has published no catalog: not the Leader, or the Leader before its first round"})
+			// Why there is no catalog, read from the control plane now
+			// rather than guessed from the nil the lookup returned.
+			state, wired := CatalogAbsenceFacts{}, false
+			if absence != nil {
+				state, wired = absence(), true
+			}
+			writeJSON(response, http.StatusServiceUnavailable, catalogAbsenceOf(state, replica, wired))
 			return
 		}
 		query := request.URL.Query()

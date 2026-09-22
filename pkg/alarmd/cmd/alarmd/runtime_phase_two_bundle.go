@@ -1004,6 +1004,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 		go diagnostics.Run(diagnosticsCtx)
 		targetFlow.SetSink(diagnostics.Record)
 	}
+	// Declared before the API is wrapped: the strategy point read's refusal
+	// reads the control plane's live state through it, and the wrapping
+	// happens before the bundle that owns that state is built.
+	var bundle *phaseTwoWorkerBundle
 	fleetAPI, err := fleet.NewHandler(fleetService, windowStore, external.Now, stallAfter,
 		fleetRangeProvider(queryClient, cfg.PhaseTwo.Access.SelfMetricsSpaceUID), diagnostics,
 		cfg.PhaseTwo.Access.MonitorWebBaseURL)
@@ -1017,7 +1021,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// clients find it.
 	fleetAPI = fleet.WithStrategyStanding(fleetAPI, fleetService, strategyLookupSource(reconciler),
 		leaderForwarder(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil),
-		strategyObjectLoader(repository), strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
+		strategyObjectLoader(repository), catalogAbsenceSource(func() *phaseTwoWorkerBundle { return bundle }, directory != nil),
+		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
 	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())
 	var costRefresh *observationCostRefresh
 	if diagnosticsClient != nil && observationCapacity.CostBytes > 0 {
@@ -1052,7 +1057,6 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	var publisher fleetPublisher
-	var bundle *phaseTwoWorkerBundle
 	fleetAPI, closeCLI := buildPhaseTwoCLI(cfg, fleetAPI, repository, progressStore, platformSettings, func() *observability.RuntimeConfigFacts {
 		if bundle == nil {
 			return nil

@@ -57,6 +57,59 @@ func strategyLookupFactsOf(lookup controlplane.StrategyLookup) fleet.StrategyLoo
 	return facts
 }
 
+// catalogAbsenceSource reads why this process holds no published catalog,
+// live, from the same state the first screen's control source facts are
+// built from. The fleet decides the word from these facts; this only hands
+// them over, plus whether the strategy directory -- the other route that
+// answers the same question, from the store -- is mounted on this process.
+//
+// Read live rather than from the fleet snapshot on purpose: the snapshot is
+// a published copy up to a publication interval old, and the two states this
+// refusal most has to tell apart (leading, not leading) are exactly the ones
+// that change at a hand-over.
+// The bundle is taken as a getter because the API is wrapped before the
+// bundle that owns the state exists; by the time a request arrives it does.
+//
+// That shape -- a variable declared before the handler and assigned after,
+// read from a listener goroutine that is already running -- is the shape of
+// an unsynchronised read, and the reason it is not one lives in another
+// package. The listener starts first (runtime_phase_two.go, "go
+// server.Run"), the bundle is assigned inside the call on the line below it,
+// and the API is installed on the line after that call returns, through
+// Server.SetAPI -- which stores into an atomic.Pointer that the serving
+// goroutine loads before it can reach any handler (service/http/server.go).
+// The atomic pair carries the assignment with it: a request that arrives
+// before SetAPI cannot reach this handler at all, and one that reaches it
+// has the assignment. Verified under -race over this package and the fleet.
+//
+// Written out because the next reader will stop at the declaration and the
+// fact that settles it is two files away. The nil branch below is not
+// standing in for that ordering -- it is for the readers wired before the
+// bundle exists at all, which is the truth rather than a role invented here.
+func catalogAbsenceSource(bundleOf func() *phaseTwoWorkerBundle, directoryMounted bool) fleet.CatalogAbsenceFunc {
+	if bundleOf == nil {
+		return nil
+	}
+	return func() fleet.CatalogAbsenceFacts {
+		bundle := bundleOf()
+		if bundle == nil {
+			// Wired, and with nothing to report yet: the word for that is
+			// the one for "could not be read", not a role invented here.
+			return fleet.CatalogAbsenceFacts{DirectoryMounted: directoryMounted}
+		}
+		view := bundle.controlSourceView()
+		facts := fleet.CatalogAbsenceFacts{
+			Known: view.known, Role: string(view.role), Exit: view.lastFailureExit, Text: view.lastFailure,
+			DirectoryMounted: directoryMounted,
+		}
+		if !view.degradedSince.IsZero() {
+			seconds := view.now.Sub(view.degradedSince).Seconds()
+			facts.FailingSeconds = &seconds
+		}
+		return facts
+	}
+}
+
 // strategyObjectLoader is the catalog's point read of one Query Group
 // object by digest, for include=config: the same read the Worker makes to
 // run the object, once per Plan the reader asked about, and nothing else.
