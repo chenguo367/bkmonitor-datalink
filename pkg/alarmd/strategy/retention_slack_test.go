@@ -59,6 +59,17 @@ func TestRetentionSlackIsDerivedFromTheWalkAndItsTwoGates(t *testing.T) {
 			because: "the arithmetic comes to -1 and the floor is one spare position",
 		},
 		{
+			// The floor's own boundary, which the row above cannot reach: an
+			// arithmetic of -1 is lifted to one by a floor at zero just as it is
+			// by a floor at one. Only a Level the derivation lands exactly on
+			// zero separates them - and it is the case the floor exists for,
+			// since a Level both gates admit that retains nothing would be
+			// counted among those paying while paying nothing.
+			name: "arithmetic landing exactly on zero", window: 3, required: 2, recovery: 2, interval: 600,
+			want:    1,
+			because: "3 + 1 + 2 - 6 is zero, and a Level both gates admit retains at least one spare position",
+		},
+		{
 			name: "interval that does not divide the tolerance", window: 30, required: 1, recovery: 1440, interval: 90,
 			want:    36,
 			because: "600s is 6.67 positions at 90s and a hole occupies the seventh",
