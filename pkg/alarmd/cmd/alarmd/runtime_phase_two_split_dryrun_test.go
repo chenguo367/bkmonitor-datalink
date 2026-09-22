@@ -115,6 +115,71 @@ func TestARoundWithTooManyOverShareObjectsWorksOutTheWorstAndCountsTheRest(t *te
 	}
 }
 
+// A Query Group carrying several Plans says so on every line it produces,
+// and divides its bytes among them.
+//
+// The number is what says how soft the byte estimate is: an object whose
+// peak is one Plan's is a reading, and one shared among four is an
+// apportionment. A line that always claimed one would present the second as
+// the first.
+func TestAGroupOfSeveralPlansSaysSoAndDividesItsBytes(t *testing.T) {
+	first := execution.PlanCensusIdentity{
+		Plan:            execution.PlanIdentity{TenantID: "system", BusinessID: "2", StrategyID: "4101"},
+		StateGeneration: "generation",
+	}
+	second := execution.PlanCensusIdentity{
+		Plan:            execution.PlanIdentity{TenantID: "system", BusinessID: "2", StrategyID: "4102"},
+		StateGeneration: "generation",
+	}
+	entry := func(values int) execution.DimensionCensusEntry {
+		e := execution.DimensionCensusEntry{Dimension: "ip"}
+		for index := 0; index < values; index++ {
+			e.Values = append(e.Values, execution.DimensionValueCount{
+				Value: fmt.Sprintf("ip-%04d", index), Series: 10})
+		}
+		return e
+	}
+	source := &fakeSplitSource{
+		plans: map[execution.QueryGroupIdentity][]execution.PlanCensusIdentity{"qg": {first, second}},
+		censuses: map[execution.PlanCensusIdentity]execution.DimensionCensus{
+			first: {Identity: first, Source: execution.DimensionCensusFromRound,
+				ObservedAt: splitDryRunTestClock().Unix(), Series: 6000,
+				Dimensions: []execution.DimensionCensusEntry{entry(600)}},
+			second: {Identity: second, Source: execution.DimensionCensusFromRound,
+				ObservedAt: splitDryRunTestClock().Unix(), Series: 2000,
+				Dimensions: []execution.DimensionCensusEntry{entry(200)}},
+		},
+	}
+
+	facts := splitDryRunObservations(t, source, 4*splitTestPool)
+
+	if len(facts) != 2 {
+		t.Fatalf("%d observations, want one per Plan", len(facts))
+	}
+	for _, fact := range facts {
+		if fact.PlansInGroup != 2 {
+			t.Fatalf("plans in group = %d for strategy %s, want 2: an apportioned peak presented as a "+
+				"Plan's own reading is a split sized from somebody else's bytes",
+				fact.PlansInGroup, fact.StrategyID)
+		}
+	}
+	// Three quarters of the series are the first Plan's, so three quarters of
+	// the bytes are what it is answerable for - and the pieces it is planned
+	// into follow from that number, not from the group's.
+	byStrategy := map[string]observability.SplitPlanFacts{}
+	for _, fact := range facts {
+		byStrategy[fact.StrategyID] = fact
+	}
+	if byStrategy["4101"].PeakBytes <= byStrategy["4102"].PeakBytes {
+		t.Fatalf("the Plan with three quarters of the series was given %d bytes against the other's %d",
+			byStrategy["4101"].PeakBytes, byStrategy["4102"].PeakBytes)
+	}
+	if byStrategy["4101"].Shards <= byStrategy["4102"].Shards {
+		t.Fatalf("the heavier Plan was planned into %d pieces and the lighter into %d",
+			byStrategy["4101"].Shards, byStrategy["4102"].Shards)
+	}
+}
+
 // A Query Group carrying one Plan hands it the whole peak. A Query Group
 // carrying several divides the peak by the only reading that says how they
 // share it, and a Plan with no census in such a group gets nothing rather

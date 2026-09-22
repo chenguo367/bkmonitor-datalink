@@ -107,11 +107,12 @@ func splitCandidates(
 		if !known || peak == 0 {
 			continue
 		}
-		pool, reported := pools[owner]
-		if !reported {
-			continue
-		}
-		share := pool / 2
+		// One test of the share, not two. A holder that reported no pool and
+		// a pool too small to halve are the same answer - this object is not
+		// judged - and writing them as two checks leaves neither of them
+		// load-bearing: deleting the first changed nothing, because a missing
+		// pool reads as zero and a share of zero is already refused here.
+		share := pools[owner] / 2
 		if share == 0 || peak <= share {
 			continue
 		}
