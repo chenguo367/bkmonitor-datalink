@@ -10,7 +10,11 @@
 package observability
 
 import (
+	"bytes"
+	"context"
+	"log/slog"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -183,5 +187,33 @@ func TestARunThatSummarisedNothingAndSaysWhyIsAccepted(t *testing.T) {
 	if _, rejected := normalizeHistoryCoverageFacts(&contradiction); rejected == nil ||
 		rejected.Rule != CoverageRejectLevelsZero {
 		t.Errorf("a short count with no window summarised was not refused under LEVELS_ZERO: %+v", rejected)
+	}
+}
+
+// A round that summarised no window still says how much of its object it
+// described. The counts go on the line under their own condition, because the
+// block that carries the window facts is gated on a named window -- and the
+// round these counts exist for has none, so it is silent there by
+// construction.
+func TestARoundThatSummarisedNoWindowStillSaysWhyOnTheLine(t *testing.T) {
+	line := func(facts *HistoryCoverageFacts) string {
+		buffer := &bytes.Buffer{}
+		logger := &Logger{component: "worker", next: slog.New(slog.NewTextHandler(buffer, nil))}
+		logger.logObservation(context.Background(), Observation{
+			Component: ComponentEvaluation, Stage: StageSlotCompleted, Result: ResultSuccess,
+			HistoryCoverage: facts,
+		}, LogAdmission{})
+		return buffer.String()
+	}
+	described := line(&HistoryCoverageFacts{Resumed: 227})
+	for _, want := range []string{"history_resumed=227", "history_levels=0"} {
+		if !strings.Contains(described, want) {
+			t.Errorf("the line lacks %q:\n%s", want, described)
+		}
+	}
+	// A round with nothing to explain does not carry the pair at all.
+	quiet := line(&HistoryCoverageFacts{Levels: 9})
+	if strings.Contains(quiet, "history_resumed") || strings.Contains(quiet, "history_constrained") {
+		t.Errorf("a round that summarised every window carries the pair:\n%s", quiet)
 	}
 }
