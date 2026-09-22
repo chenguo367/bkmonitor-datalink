@@ -249,12 +249,26 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		// are empty -- from the walk above, so the named holes and the
 		// shortfall are one count.
 		if summary.ValidPositions < summary.RequiredPositions {
+			// The guard's reason belongs to a window whose verdict the guard
+			// held. A Level loaded WARMING or GAPPED keeps its reason in
+			// durableGuardReasons after its guard converges, and from that
+			// round the live window decides -- so the reason passed
+			// unconditionally described a verdict no guard held, and the
+			// reader refused the whole run's coverage under
+			// WINDOW_GUARD_REASON_UNGUARDED for it. It fired twenty to thirty
+			// times per ten minutes on a running deployment: that many runs
+			// reported no coverage at all, on the converging round of a Level
+			// whose live window was still short.
+			guardReason := execution.ReasonCode("")
+			if completeness != "" {
+				guardReason = durableGuardReasons[l.Definition().LevelID]
+			}
 			coverage.ObserveWindow(execution.WindowCoverage{
 				LevelID: l.Definition().LevelID, Series: series,
 				Valid: summary.ValidPositions, Required: summary.RequiredPositions, End: record.SourceTime(),
 				Missing: holes.Missing, MissingTotal: holes.MissingTotal,
 				Unusable: holes.Unusable, UnusableTotal: holes.UnusableTotal,
-				Guarded: completeness != "", GuardReason: durableGuardReasons[l.Definition().LevelID], Fresh: fresh,
+				Guarded: completeness != "", GuardReason: guardReason, Fresh: fresh,
 			})
 		}
 		fact, found := effectiveFact(request.Header, due.Identity, l.Definition().LevelID, series)

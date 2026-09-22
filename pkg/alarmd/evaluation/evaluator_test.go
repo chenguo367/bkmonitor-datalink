@@ -968,3 +968,60 @@ func TestAnInactiveLevelOnAWarmingWindowCarriesTheWarmingReason(t *testing.T) {
 		t.Fatalf("an inactive Level emitted events: %+v", plan.StateResults[0].Events)
 	}
 }
+
+// A window's guard reason is the reason the verdict reported for that window
+// was held with. On the round a guard converges, the live window decides and
+// nothing is held -- but the reason stayed in the evaluator's per-Level map
+// and rode out on the window anyway, so the window said "not guarded" and
+// named a guard in the same breath. The coverage reader refuses that pair
+// (WINDOW_GUARD_REASON_UNGUARDED) and drops the whole run's coverage for it:
+// on a running deployment it fired twenty to thirty times per ten minutes,
+// each one a run that reported no coverage at all.
+//
+// The fixture is the one round where both are true: the loaded history forms
+// the required full window at the last processed record, so the guard
+// converges, and the new record sits one step past a hole, so the live
+// window is still short and a window fact is emitted.
+func TestAConvergingGuardLeavesNoReasonOnAnUnguardedWindow(t *testing.T) {
+	plan := compiledWindow(t, 3, 2)
+	series := strings.Repeat("c", 64)
+	point := func(id string, sourceTime int64) execution.StateHistoryPoint {
+		return execution.StateHistoryPoint{RecordID: strings.Repeat(id, 64), SourceTime: sourceTime,
+			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: plan.Levels()[0].Fingerprints().Detect, Result: execution.LevelFactNormal}}}
+	}
+	history := []execution.StateHistoryPoint{point("a", 120), point("b", 180), point("d", 240)}
+	request := requestFixtureForPlan(t, plan, []contract.CanonicalRecordV2{{RecordID: strings.Repeat("f", 64), SourceTime: 360, BusinessID: "2",
+		DimensionIdentity: contract.DimensionIdentityV2{Digest: series}, Values: map[string]json.RawMessage{"value": json.RawMessage(`10`)},
+		Dimensions: map[string]json.RawMessage{}, ReceivedTime: 360}}, history)
+	request.State.Items[0].Status = execution.StateFoundWarming
+	request.State.Items[0].Levels[0].HistoryCompleteness = execution.HistoryWarming
+	request.State.Items[0].Levels[0].GapReasonCode = execution.ReasonCode(contract.ReasonHistoryWarming)
+	request.State.Items[0].Levels[0].LastProcessedEventTime = history[len(history)-1].SourceTime
+
+	result, err := newEvaluator(t).Evaluate(context.Background(), request)
+	if err != nil {
+		t.Fatalf("Evaluate()=%v", err)
+	}
+	coverage := result.Plans[0].HistoryCoverage
+	windows := coverage.Windows
+	if len(windows) == 0 {
+		t.Fatalf("no window was summarised: this case needs a short window on the converging round (coverage=%+v)", coverage)
+	}
+	// The round this test is about: the guard has converged, so no window
+	// reports a held verdict. Without that the pair below cannot happen and
+	// the fixture is not exercising the case.
+	held := 0
+	for _, window := range windows {
+		if window.Guarded {
+			held++
+		}
+	}
+	if held != 0 {
+		t.Fatalf("%d of %d windows still report a held verdict: the guard did not converge, so this fixture does not reach the case", held, len(windows))
+	}
+	for _, window := range windows {
+		if window.GuardReason != "" {
+			t.Fatalf("an unguarded window names the guard %q: the reader refuses the pair and the run reports no coverage at all", window.GuardReason)
+		}
+	}
+}
