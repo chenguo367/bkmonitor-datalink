@@ -1122,6 +1122,12 @@ type StatePreflightResult struct {
 	// leaves on its own TTL, and a Query Group whose count has reached zero
 	// and stayed there is one whose second read is buying nothing.
 	EnvelopeReads int
+	// EnvelopePreferred is how many of those series had both records and the
+	// older one was the newer statement. It answers a different question from
+	// EnvelopeReads: that one says how much of the migration is left, this one
+	// says whether anything is still writing the older representation, which
+	// is what the frame-first read gives up.
+	EnvelopePreferred int
 }
 
 func (result StatePreflightResult) Find(identity StateKeyIdentity) (RuntimeStateView, bool) {
@@ -1178,7 +1184,7 @@ func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflight
 	// number a deployment reads to learn whether the compatibility pass is
 	// still buying anything.
 	classified := StatePreflightResult{Items: make([]RuntimeStateView, len(result.Items)),
-		LoadedBytes: result.LoadedBytes, EnvelopeReads: result.EnvelopeReads}
+		LoadedBytes: result.LoadedBytes, EnvelopeReads: result.EnvelopeReads, EnvelopePreferred: result.EnvelopePreferred}
 	seen := make(map[StateKeyIdentity]struct{}, len(result.Items))
 	for index, view := range result.Items {
 		candidate, ok := wanted[view.Identity]

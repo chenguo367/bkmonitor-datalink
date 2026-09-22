@@ -495,8 +495,19 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	if len(values) == 2 {
 		envelopeRaw, framedRaw = values[0], values[1]
 	}
-	// The same reading LoadRuntime makes, so a series that reaches this path
-	// without a witness is classified exactly as it would have been with one.
+	// Both keys, and the newer of the two records, which is what LoadRuntime
+	// did before its read was split in two. It differs from the load in one
+	// shape only: a series with both records where the envelope is the newer
+	// statement reads as the envelope here and as the frame there.
+	//
+	// It is left differing rather than split to match. This path runs for a
+	// series without a preflight witness - a repeated key, or a caller with no
+	// preflight - and it re-reads in order to compare against exact bytes, so
+	// the second key costs it a value it already has the round trip for. The
+	// load's split exists to stop fetching a 344 KB record for every series of
+	// every Slot; there is no such multiplier here. What both of them give up
+	// is named where the load gives it up, and whether it happens at all is
+	// read from EnvelopePreferred.
 	view := store.readStoredRecord(execution.StatePreflightRequest{Contract: contractRef},
 		execution.StatePreflightItem{Identity: mutation.Identity, ApplyVersion: mutation.ApplyVersion}, envelopeRaw, framedRaw)
 	witness, _ := store.witnesses.take(contractRef.Slot, mutation.Identity)
@@ -685,6 +696,50 @@ func (store *ExecutionStore) runtimeLoadBatchLimit(group execution.QueryGroupIde
 	}
 }
 
+// envelopeLoadBatchLimit bounds the second pass, and deliberately learns
+// nothing from the first.
+//
+// The first pass measures frames. On the one round shape the envelope read
+// exists for - a series that has an envelope and no frame - every frame comes
+// back empty, and a largest of zero reads as "this Query Group's records are
+// empty", which is the item bound: 256 keys in one call. The records about to
+// be asked for are the largest ones the store holds, so that bound asks for
+// 249 envelopes of 344 KB in a single MGET, ten times the batch budget, and
+// the read dies on its deadline. It does not recover either: a failed read
+// commits no size, so the next round sends the same call again. The symptom
+// this split exists to remove would have moved into the pass that only runs
+// while the migration is unfinished.
+//
+// So the envelope pass is bounded by what the store accepts as a value rather
+// than by anything this round saw - sixteen keys per call under the production
+// limit, which is what the first read of any cold Query Group has always been
+// bounded by. It is a conservative bound for a pass that should be empty and
+// is meant to disappear; a per-representation memory would earn back the
+// difference for the fleets that are mid-migration, and is worth doing only if
+// one of them is slow enough to notice.
+func (store *ExecutionStore) envelopeLoadBatchLimit(largest int, read bool) int {
+	expected := uint64(store.options.MaxValueBytes)
+	if read {
+		// Measured, including a largest of zero: within one representation a
+		// round of empty values is a measurement, and it is what a Query Group
+		// whose older keys have already expired looks like. That reading is
+		// only trusted here because it came from the envelopes themselves.
+		expected = uint64(largest)
+	}
+	if expected == 0 {
+		return runtimeLoadBatchItems
+	}
+	limit := int(runtimeLoadBatchBytes / expected)
+	switch {
+	case limit < 1:
+		return 1
+	case limit > runtimeLoadBatchItems:
+		return runtimeLoadBatchItems
+	default:
+		return limit
+	}
+}
+
 // runtimeLoadBatch collects consecutive same-target keys for one MGET.
 type runtimeLoadBatch struct {
 	target  StorageTarget
@@ -700,6 +755,10 @@ type runtimeLoadPass struct {
 	envelopes bool
 	pending   []int
 	frames    map[int][]byte
+	// envelopePreferred counts the series where both records were there and
+	// the older one was the newer statement - the shape the first pass stops
+	// looking for.
+	envelopePreferred int
 }
 
 func (batch *runtimeLoadBatch) reset() {
@@ -817,7 +876,17 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			// The frame's bytes travel with it so the two are classified
 			// together, which is the shape this decision has always had when
 			// both records existed.
-			views[index] = store.readStoredRecord(request, item, raw, pass.frames[index])
+			view := store.readStoredRecord(request, item, raw, pass.frames[index])
+			// An envelope that won against a frame that was there is the shape
+			// the first pass no longer looks for. Counting it here is what says
+			// whether anything still writes the older representation: a series
+			// with no frame at all is the migration, and says nothing about a
+			// writer. Zero across a deployment is the evidence that the first
+			// pass gives up nothing; anything else is a writer still at work.
+			if pass.frames[index] != nil && view.Representation == execution.StateRepresentationEnvelope {
+				pass.envelopePreferred++
+			}
+			views[index] = view
 			continue
 		}
 		classified, needsEnvelope := store.readFramedRecord(request, item, raw)
@@ -839,6 +908,13 @@ func (store *ExecutionStore) loadRuntimeBatch(
 // knows how to refuse on its own. A frame written by a newer binary is not one
 // of them - that refusal is the honest answer whatever the older key holds,
 // and it is the answer the pair of keys already produced.
+//
+// The size check is the frame's alone, where the pair of keys was refused if
+// either exceeded the limit. A series whose envelope is oversize and whose
+// frame is not is now read rather than refused - the readable record answers
+// and the unreadable one is not fetched. That is the more usable side of a
+// refusal that existed to keep a value nobody could write back from being
+// classified as good, and the envelope is not written back by anything.
 func (store *ExecutionStore) readFramedRecord(
 	request execution.StatePreflightRequest, item execution.StatePreflightItem, framedRaw []byte,
 ) (execution.RuntimeStateView, bool) {

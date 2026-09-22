@@ -9,6 +9,7 @@ package state
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -303,6 +304,9 @@ func TestTheEnvelopeIsReadOnlyForSeriesWhoseFrameCannotAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			if test.name == "the frame answers" && loaded.EnvelopePreferred != 0 {
+				t.Fatalf("EnvelopePreferred = %d with no envelope read at all", loaded.EnvelopePreferred)
+			}
 			if loaded.EnvelopeReads != test.wantReads {
 				t.Fatalf("EnvelopeReads = %d, want %d", loaded.EnvelopeReads, test.wantReads)
 			}
@@ -317,5 +321,86 @@ func TestTheEnvelopeIsReadOnlyForSeriesWhoseFrameCannotAnswer(t *testing.T) {
 				t.Fatalf("LoadedBytes = %d, want at least the envelope's %d: the fallback did not read it", loaded.LoadedBytes, envelopeBytes)
 			}
 		})
+	}
+}
+
+// The envelope pass keeps every call inside the batch budget, however large
+// the older records turn out to be.
+//
+// The shape this guards is the one the envelope read exists for: series that
+// have an envelope and no frame. Every frame comes back empty, and a bound
+// taken from that reads as "this Query Group's records are empty" - the item
+// bound - which asks for every envelope in one call. Those are the largest
+// records the store holds, so the call is an order of magnitude past the
+// budget and dies on its deadline; a failed read commits no size, so the next
+// round sends the same call again. The symptom this split exists to remove
+// would have moved into the pass that only runs while the migration is
+// unfinished.
+func TestTheEnvelopePassKeepsEveryCallInsideTheBatchBudget(t *testing.T) {
+	backend := newPipelineMemoryBackend()
+	store := newBatchStore(t, backend, nil)
+	const series = 60
+	// Records the size of the ones this was measured on: a long window is a
+	// few hundred KiB as an envelope.
+	padding := strings.Repeat("p", 340<<10)
+	mutations := make([]execution.StateMutation, series)
+	for index := range mutations {
+		mutations[index] = seriesMutation(t, seriesIdentity(index), applyVersion(), 0, padding)
+		key, _ := RuntimeStateKeyV2("alarmd", mutations[index].Identity)
+		backend.values[key], _ = encodeRuntime(mutations[index], 1)
+	}
+	backend.recordKeyCounts = true
+
+	loaded, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(),
+		Items: preflightItems(mutations)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EnvelopeReads != series {
+		t.Fatalf("EnvelopeReads = %d, want %d: every series here is answered by the envelope", loaded.EnvelopeReads, series)
+	}
+	for index, bytes := range backend.byteCounts {
+		if bytes > int(runtimeLoadBatchBytes) {
+			t.Fatalf("an MGET carried %d bytes over %d keys, past the %d byte budget: the envelope pass took a bound that was "+
+				"not measured on envelopes (keys %v, bytes %v)",
+				bytes, backend.keyCounts[index], runtimeLoadBatchBytes, backend.keyCounts, backend.byteCounts)
+		}
+	}
+	for _, view := range loaded.Items {
+		if view.Representation != execution.StateRepresentationEnvelope {
+			t.Fatalf("view = %s, want every series read from its envelope", view.Representation)
+		}
+	}
+}
+
+// A series whose envelope is the newer statement is counted, so a deployment
+// can read whether anything still writes the older representation rather than
+// assuming nothing does. The frame is still the view - that is the rule this
+// read follows - and the count is the evidence for or against it.
+func TestAnEnvelopeThatWinsAgainstAFrameIsCounted(t *testing.T) {
+	older := execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 30, SlotDigest: "slot-0"}
+	newer := applyVersion()
+	backend := newPipelineMemoryBackend()
+	store := newBatchStore(t, backend, nil)
+	identity := seriesIdentity(0)
+	envelopeKey, _ := RuntimeStateKeyV2("alarmd", identity)
+	framedKey, _ := RuntimeStateKeyV3("alarmd", identity)
+	// The frame is unreadable, so the envelope is fetched and compared; a
+	// readable frame is never compared against the envelope at all, which is
+	// the change this count exists to watch.
+	backend.values[framedKey] = []byte("not-json")
+	backend.values[envelopeKey], _ = encodeRuntime(seriesMutation(t, identity, newer, 0, "env"), 9)
+
+	loaded, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(),
+		Items: []execution.StatePreflightItem{{Identity: identity, ApplyVersion: older}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EnvelopeReads != 1 || loaded.EnvelopePreferred != 1 {
+		t.Fatalf("EnvelopeReads = %d, EnvelopePreferred = %d, want 1 and 1: the envelope answered for a series whose frame could not",
+			loaded.EnvelopeReads, loaded.EnvelopePreferred)
+	}
+	if loaded.Items[0].Representation != execution.StateRepresentationEnvelope {
+		t.Fatalf("view = %s, want the envelope: it is the only record that read", loaded.Items[0].Representation)
 	}
 }

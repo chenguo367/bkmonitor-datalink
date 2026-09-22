@@ -1447,7 +1447,7 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 	stream.coordinator.observeWithCounts(ctx, observability.ComponentState, observability.StageStatePreflight,
 		stream.request.Operation, started, stateResult, stateReason,
 		observability.Counts{Keys: int64(len(loaded.Items)), StateBytes: loaded.LoadedBytes,
-			EnvelopeReads: int64(loaded.EnvelopeReads)}, nil)
+			EnvelopeReads: int64(loaded.EnvelopeReads), EnvelopePreferred: int64(loaded.EnvelopePreferred)}, nil)
 	for index, entry := range batch {
 		if err := stream.evaluateLoadedSeries(ctx, entry, loaded.Items[index]); err != nil {
 			return err
