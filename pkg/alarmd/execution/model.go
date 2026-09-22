@@ -2839,7 +2839,12 @@ func (err *StateContractMismatchError) QueryFailure() (string, string) {
 
 // QueryFailureCodeStateContractMismatch is the failure code a
 // StateContractMismatchError reports.
-const QueryFailureCodeStateContractMismatch = "STATE_LEVEL_CONTRACT_MISMATCH"
+//
+// The same string as the observation reason, taken from the one declaration
+// rather than written out again: the query failure facts and the completion
+// line both name this failure, and two spellings of one word are two rows a
+// reader cannot add together.
+const QueryFailureCodeStateContractMismatch = contract.ReasonStateLevelContractMismatch
 
 func validateLoadedStateContracts(plan DuePlan, states StatePreflightResult, levelContracts *runtimeLevelContracts) error {
 	for _, state := range states.Items {

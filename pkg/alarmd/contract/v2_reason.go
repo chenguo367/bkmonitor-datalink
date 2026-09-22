@@ -175,6 +175,12 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonStateCorrupt:             {ReasonStateCorrupt, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonStateSchemaUnsupported:   {ReasonStateSchemaUnsupported, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
 	ReasonStateBudgetExceeded:      {ReasonStateBudgetExceeded, ReasonClassDeterministic, ReasonDomainReceipt | ReasonDomainObservation},
+	// Observation only, and deterministic: the same Plan meeting the same
+	// stored record decides the same way, so a retry of the Slot is not what
+	// resolves either of them. Not receipt reasons - no write was refused, the
+	// evaluation was.
+	ReasonStateLevelContractMismatch: {ReasonStateLevelContractMismatch, ReasonClassDeterministic, ReasonDomainObservation},
+	ReasonTriggerInvariant:           {ReasonTriggerInvariant, ReasonClassDeterministic, ReasonDomainObservation},
 	// Ownership refusals. A stale fence, an assignment naming another worker
 	// and a moved content scope are facts about the store the same attempt
 	// would meet again; a lease held by another owner is the one that a later

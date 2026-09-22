@@ -26,7 +26,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
 )
 
 type productionFrozenCatalog interface {
@@ -2509,42 +2508,7 @@ func (executor observedProductionSlotExecutor) Execute(
 			observedErr = nil
 		} else {
 			observedResult = observability.ResultFailed
-			reason = observability.ReasonInternalUnknown
-			if errors.Is(err, access.ErrFrozenQueryPlanUnavailable) {
-				reason = observability.ReasonContractDeterministic
-			}
-			// A gap guard conflict is a classifiable refusal, and it repeats on
-			// every round for the same Query Group. internal_unknown is where a
-			// site that looked at a failure and could not name it puts things;
-			// this one has a name and carries the two values it compared.
-			if conflict, named := worker.GapGuardConflictReason(err); named {
-				reason = observability.ReasonCode(conflict)
-			}
-			if conflict, named := worker.StateConflictReason(err); named {
-				reason = observability.ReasonCode(conflict)
-			}
-			// Two series batches disagreeing about one Plan's gap marker. The
-			// Slot-wide merge resolves every other difference between batches
-			// and refuses only this one, so without a word here the one shape
-			// it cannot resolve is also the one nobody can count.
-			if disagree, named := worker.GapGuardDisagreeReason(err); named {
-				reason = observability.ReasonCode(disagree)
-			}
-			// The gap marker store's own refusals, which are not the same as
-			// the conflict above: that one is this Slot refusing before it
-			// writes, these are the store refusing the write because the
-			// marker moved under it. Both were internal_unknown, so a Query
-			// Group conflicting on every other Slot for half an hour arrived
-			// as an unclassified defect that the same-Slot retry then cleared.
-			if refusal, named := worker.GapApplyReason(err); named {
-				reason = observability.ReasonCode(refusal)
-				// The site goes on the line as its own field, not only inside
-				// the error text. Which of the Slot's two applies refused is
-				// the question this refusal exists to answer, and an answer
-				// that has to be parsed out of a sentence is one nobody can
-				// group or count by.
-				gapApplySite = worker.GapApplySiteOf(err)
-			}
+			reason, gapApplySite = slotFailureReason(err)
 		}
 	} else if observedResult == "" {
 		observedResult = observability.ResultSuccess
