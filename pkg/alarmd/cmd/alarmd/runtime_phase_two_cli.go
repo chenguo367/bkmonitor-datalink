@@ -7,11 +7,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 
+	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
@@ -58,7 +60,11 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 		return native, func() error { return nil }
 	}
 	var clients []redis.UniversalClient
+	var closeQuery func()
 	closeClients := func() error {
+		if closeQuery != nil {
+			closeQuery()
+		}
 		var errs []error
 		for _, client := range clients {
 			errs = append(errs, client.Close())
@@ -102,6 +108,19 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	ops := append(obchannel.NativeOperations(native), obchannel.StoreOperations(obevidence.New(options))...)
 	ops = append(ops, cliRuntimeOperation(facts, settings))
+	// A diagnostic query has independent sockets, no retries and no production
+	// query permits. It never occupies the execution client's connection pool.
+	queryTransport := &http.Transport{Proxy: http.ProxyFromEnvironment,
+		DialContext:     (&net.Dialer{Timeout: obchannel.RequestTimeout}).DialContext,
+		MaxConnsPerHost: 1, MaxIdleConns: 1, MaxIdleConnsPerHost: 1,
+		IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: obchannel.RequestTimeout,
+		ResponseHeaderTimeout: obchannel.RequestTimeout}
+	closeQuery = queryTransport.CloseIdleConnections
+	queryClient, _ := accessuq.NewDiagnosticClient(cfg.PhaseTwo.Access.UQEndpoint, cfg.PhaseTwo.Access.QuerySource,
+		&http.Client{Transport: queryTransport, Timeout: obchannel.RequestTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+	ops = append(ops, obchannel.SlotOperations(obchannel.SlotOptions{Resolve: newCLISlotResolver(cfg, diagnosticRuntime),
+		Evidence: newCLISlotEvidenceReader(cfg, diagnosticRuntime), UQ: queryClient})...)
 	var router *evidenceroute.Router
 	channelOptions := obchannel.Options{Auth: manager, EnvironmentID: cfg.CLI.EnvironmentID, Replica: cfg.PhaseTwo.Worker.ID, Incarnation: control.Incarnation, Build: version + "/" + commit, Concurrency: 1, Operations: ops}
 	if control.Server != nil {
