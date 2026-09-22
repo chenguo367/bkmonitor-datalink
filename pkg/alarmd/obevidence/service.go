@@ -75,13 +75,14 @@ type Omission struct {
 type Limits struct {
 	// Dynamic-config child records share these request totals; they are not
 	// independent costs and must not be summed.
-	Scope            string `json:"scope"`
-	MaxCommands      int    `json:"max_commands"`
-	MaxDocumentBytes int    `json:"max_document_bytes"`
-	MaxBytes         int    `json:"max_bytes"`
-	DeadlineMS       int64  `json:"deadline_ms"`
-	Commands         int    `json:"commands"`
-	Bytes            int    `json:"bytes"`
+	Scope                  string `json:"scope"`
+	MaxCommands            int    `json:"max_commands"`
+	MaxDocumentBytes       int    `json:"max_document_bytes"`
+	DocumentReadLimitBytes int    `json:"document_read_limit_bytes"`
+	MaxBytes               int    `json:"max_bytes"`
+	DeadlineMS             int64  `json:"deadline_ms"`
+	Commands               int    `json:"commands"`
+	Bytes                  int    `json:"bytes"`
 }
 type Result struct {
 	Status string `json:"status"`

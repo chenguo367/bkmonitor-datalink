@@ -44,6 +44,9 @@ func readMany(ctx context.Context, source string, binding RedisBinding, keys []s
 	values := make([]*redis.StringCmd, len(keys))
 	// Reserve the overflow sentinel for every document before issuing reads.
 	limit := min(MaxDocumentBytes, MaxBytes/len(keys)-1)
+	for i := range results {
+		results[i].Limits.DocumentReadLimitBytes = limit
+	}
 	_, _ = binding.Client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		for i, key := range keys {
 			types[i] = pipe.Type(ctx, key)

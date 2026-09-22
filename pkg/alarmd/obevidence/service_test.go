@@ -260,7 +260,7 @@ func TestTargetGroupAndDynamicConfigUseConfiguredKeys(t *testing.T) {
 	}
 	log.reset()
 	r = service.Store(ctx, StoreRequest{Family: FamilyDynamicConfig})
-	if r.Status != "partial" || r.Complete || r.Limits.Bytes > MaxBytes {
+	if r.Status != "partial" || r.Complete || r.Limits.Bytes > MaxBytes || r.Limits.DocumentReadLimitBytes != MaxBytes/(len(platformsettings.Fields)+1)-1 {
 		t.Fatalf("multi-document budget: %+v", r)
 	}
 	log.assertBounded(t)
