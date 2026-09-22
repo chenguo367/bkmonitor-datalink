@@ -89,3 +89,43 @@ func TestAPendingStateHistoryIsChargedForItsArraysNotItsSharedStrings(t *testing
 			got, wantPerMutation)
 	}
 }
+
+// And the Slot's own accounting reads it, on both the paths that charge a
+// series.
+//
+// The case above proves the sizer computes the right number; it cannot prove
+// anybody calls it. newEffectBytes has two branches - the first series of a
+// Plan and every series after it - and each charges state results separately,
+// so leaving either on the generic sizer leaves a Slot charged for borrowed
+// strings on half its series. Both are driven from here with the same pair of
+// windows: identical but for string length, so a branch still following string
+// content answers differently for the two.
+func TestTheSlotChargesBothItsFirstSeriesAndTheRestForArraysOnly(t *testing.T) {
+	const points, levels = 512, 2
+	identity := execution.PlanIdentity{TenantID: "default", BusinessID: "2", StrategyID: "1001"}
+	result := func(stringLength int) execution.EvaluationResult {
+		return execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{
+			Plan: identity, StateResults: stateResultWithHistory(points, levels, stringLength),
+		}}}
+	}
+	empty := execution.EvaluationResult{}
+	alreadyHolding := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{Plan: identity}}}
+
+	for _, path := range []struct {
+		name    string
+		current execution.EvaluationResult
+	}{
+		{"first series of the Plan", empty},
+		{"a series after the first", alreadyHolding},
+	} {
+		short := newEffectBytes(path.current, result(1))
+		long := newEffectBytes(path.current, result(64))
+		if short != long {
+			t.Fatalf("%s: a window of 1-byte strings is charged %d and one of 64-byte strings %d; this branch "+
+				"still charges the Slot for string content shared with the loaded history", path.name, short, long)
+		}
+		if short == 0 {
+			t.Fatalf("%s: charged nothing at all for a %d point window", path.name, points)
+		}
+	}
+}
