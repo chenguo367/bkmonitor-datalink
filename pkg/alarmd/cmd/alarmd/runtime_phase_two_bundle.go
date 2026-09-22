@@ -215,7 +215,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 	seriesPullTally := fleet.NewSeriesPullTally()
 	observationCapacity := config.DeriveObservationCapacity(config.DetectCapacityInputs(), cfg.PhaseTwo.Observation)
 	costSummary := observability.NewCostSummary(observationCostOptions(observationCapacity, fmt.Sprintf("%s:%d", cfg.PhaseTwo.Worker.ID, external.Now().UnixNano()), external.Now))
-	observer = observability.Multi(observer, external.AdditionalObserver, targetFlow, rejectionTally, costSummary)
+	// The census beside the summary, not instead of it: the summary is the
+	// bounded diagnostic; the census is every owned Query Group's peak for
+	// the heartbeat, which has to be a census.
+	retainedPeaks := observability.NewRetainedPeakCensus(5*time.Minute, external.Now)
+	observer = observability.Multi(observer, external.AdditionalObserver, targetFlow, rejectionTally, costSummary, retainedPeaks)
 	observer = phaseTwoRuntimeObserver(observer)
 	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), cfg.CompilerLimits())
 	if err != nil {
@@ -871,7 +875,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// view and the lease the renewal last brought, whether the Query Group
 	// is executed from the view; the receipt counts those that are.
 	viewGate := newViewExecutionGate()
-	workerCosts := newWorkerCostSource(costSummary, external.Now)
+	workerCosts := newWorkerCostSource(retainedPeaks, external.Now)
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
 		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate,
@@ -1190,7 +1194,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.
 	observationRefresh.owned = bundle.ownedQueryGroups
-	workerCosts.boundByOwned(func() int { return len(bundle.ownedQueryGroups()) })
+	workerCosts.boundByOwned(bundle.ownedQueryGroups)
 	bundle.applied = publisher.applied
 	bundle.capacity = publisher.capacity
 	// The first attempt runs now, so a broker that answers is open before the

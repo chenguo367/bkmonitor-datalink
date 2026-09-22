@@ -23,12 +23,15 @@ const costEWMAWeightPercent = 30
 // workerCostSource is what this Worker's heartbeat reports of what its Query
 // Groups cost, for the Leader's byte-feasibility moves.
 //
-// The retained-byte peak is read from the process's cost summary rather than
-// accumulated here. It is the same number the read-only column shows, taken by
-// the same expression over the same two windows, so the Leader's per-Worker
-// sum and that column agree by construction. A second accumulator over the
-// same observations would answer the same question with its own number, and
-// nothing on either page would show which one was wrong.
+// The retained-byte peak is read from the process's retained-peak census: one
+// small entry per Query Group the replica completed a Slot for, taken by the
+// same expression over the same two windows the cost summary uses. It was
+// read from the summary itself, and the summary's roster is a capacity - 327
+// groups on a 4 GiB replica - admitted in directory order: a replica owning
+// 600 Query Groups reported 327 of them and the Leader, which never moves to
+// a Worker with an unread object, could not move anything. The Leader's
+// per-Worker sum is the sum of these readings, so its page and this report
+// agree by construction; the summary's own column stays the summary's.
 //
 // The window is deliberately the summary's, not the last round's. The question
 // the Leader asks of this number is whether a replica's objects fit at once in
@@ -38,12 +41,13 @@ const costEWMAWeightPercent = 30
 // the cost of high is at most one extra move, bounded to one per replica per
 // round and stopping once the replica is back under its share.
 type workerCostSource struct {
-	summary *observability.CostSummary
-	mu      sync.Mutex
+	census retainedPeakSource
+	mu     sync.Mutex
 	// owned is set after the bundle exists, which is after the view client is
 	// built, so it is read under the lock: the heartbeat can ask for costs
-	// from the moment the client starts.
-	ownedBound func() int
+	// from the moment the client starts. It is the roster: what bounds the
+	// report, and what the census is pruned to before each one.
+	owned func() []execution.QueryGroupIdentity
 	// reported is what was last sent for each Query Group, which is what the
 	// threshold is measured against - not what was last read. Measuring
 	// against the last read would let a reading drift past the threshold in
@@ -83,22 +87,46 @@ type costRate struct {
 	milli      uint64
 }
 
-func newWorkerCostSource(summary *observability.CostSummary, now func() time.Time) *workerCostSource {
+// retainedPeakSource is what the report reads: the census in production,
+// and whatever a test hands in.
+type retainedPeakSource interface {
+	RetainedPeaks() []observability.CostRetainedPeak
+	Retain(owned []string)
+}
+
+func newWorkerCostSource(census retainedPeakSource, now func() time.Time) *workerCostSource {
 	if now == nil {
 		now = time.Now
 	}
-	return &workerCostSource{summary: summary, now: now,
+	return &workerCostSource{census: census, now: now,
 		reported: make(map[execution.QueryGroupIdentity]reportedCost),
 		cost:     make(map[execution.QueryGroupIdentity]*costRate)}
 }
 
-// boundByOwned sets what bounds the report: how many Query Groups this Worker
-// holds. Until it is set the report is bounded only by what the summary holds,
-// which is the resource budget's group capacity.
-func (source *workerCostSource) boundByOwned(owned func() int) {
+// boundByOwned sets the roster: the Query Groups this Worker holds. Until it
+// is set the report is bounded only by what the census holds.
+func (source *workerCostSource) boundByOwned(owned func() []execution.QueryGroupIdentity) {
 	source.mu.Lock()
 	defer source.mu.Unlock()
-	source.ownedBound = owned
+	source.owned = owned
+}
+
+// SessionStarted is the view client telling the source it has a new stream
+// to a Leader. Everything reported before was reported to whichever Leader
+// was listening then, and the Leader listening now may have started with an
+// empty ledger: after a rolling restart it has, and a Worker that kept
+// treating its readings as already sent re-sent only the ones that moved by
+// a tenth - which on a steady replica is almost none, so the new Leader read
+// most objects as unread for as long as they stayed steady, and the
+// byte-feasibility moves never had a destination. Every reading is
+// unreported again from here.
+func (source *workerCostSource) SessionStarted() {
+	if source == nil {
+		return
+	}
+	source.mu.Lock()
+	defer source.mu.Unlock()
+	source.reported = make(map[execution.QueryGroupIdentity]reportedCost, len(source.reported))
 }
 
 // Costs is asked once per heartbeat for the entries worth sending.
@@ -111,10 +139,21 @@ func (source *workerCostSource) boundByOwned(owned func() int) {
 // as it stayed steady - which is exactly the object that is safe to move and
 // would never be considered.
 func (source *workerCostSource) Costs() []viewstream.QueryGroupCost {
-	if source == nil || source.summary == nil {
+	if source == nil || source.census == nil {
 		return nil
 	}
-	return source.report(source.summary.RetainedPeaks())
+	source.mu.Lock()
+	owned := source.owned
+	source.mu.Unlock()
+	if owned != nil {
+		roster := owned()
+		keys := make([]string, len(roster))
+		for index, group := range roster {
+			keys[index] = string(group)
+		}
+		source.census.Retain(keys)
+	}
+	return source.report(source.census.RetainedPeaks())
 }
 
 // report decides what to send from one set of readings. Separate from Costs so
@@ -153,8 +192,8 @@ func (source *workerCostSource) report(peaks []observability.CostRetainedPeak) [
 		}
 		return costs[i].QueryGroup < costs[j].QueryGroup
 	})
-	if source.ownedBound != nil {
-		if bound := source.ownedBound(); bound >= 0 && len(costs) > bound {
+	if source.owned != nil {
+		if bound := len(source.owned()); len(costs) > bound {
 			costs = costs[:bound]
 		}
 	}

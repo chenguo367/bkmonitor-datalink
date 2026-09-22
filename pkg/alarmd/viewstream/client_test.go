@@ -760,9 +760,17 @@ func (sink *recordingCostSink) RecordCosts(workerID string, costs []viewstream.Q
 	sink.costs[workerID] = append([]viewstream.QueryGroupCost(nil), costs...)
 }
 
-type scriptedCostSource struct{ costs []viewstream.QueryGroupCost }
+type scriptedCostSource struct {
+	costs    []viewstream.QueryGroupCost
+	sessions *atomic.Int32
+}
 
 func (source scriptedCostSource) Costs() []viewstream.QueryGroupCost { return source.costs }
+func (source scriptedCostSource) SessionStarted() {
+	if source.sessions != nil {
+		source.sessions.Add(1)
+	}
+}
 
 // What the Worker's cost source says rides on its heartbeat and reaches the
 // Leader's sink under the Worker's name. The two ends are interfaces the
@@ -785,8 +793,9 @@ func TestTheHeartbeatCarriesTheWorkersCostsToTheLeadersSink(t *testing.T) {
 	discovery := &scriptedDiscovery{}
 	discovery.set("leader-a", true)
 	costs := []viewstream.QueryGroupCost{{QueryGroup: "qg-1", RetainedBytesPeak: 175 << 20, CostPerSecondMilli: 570}}
+	var sessions atomic.Int32
 	client, err := viewstream.NewClient(viewstream.ClientIdentity{WorkerID: "w1", Incarnation: "i1", StreamToken: "t1"}, discovery, nil, &sessionObserver{},
-		viewstream.ClientOptions{Dial: dialer.dial, Tick: 20 * time.Millisecond, Costs: scriptedCostSource{costs: costs},
+		viewstream.ClientOptions{Dial: dialer.dial, Tick: 20 * time.Millisecond, Costs: scriptedCostSource{costs: costs, sessions: &sessions},
 			Sleep: func(ctx context.Context, wait time.Duration) error {
 				select {
 				case <-ctx.Done():
@@ -808,6 +817,12 @@ func TestTheHeartbeatCarriesTheWorkersCostsToTheLeadersSink(t *testing.T) {
 		got := sink.costs["w1"]
 		return len(got) == 1 && got[0] == costs[0]
 	})
+	// The source was told the stream began, once, before the first
+	// heartbeat rode on it: what it reports from here is to this Leader,
+	// whatever it reported to the last one.
+	if sessions.Load() != 1 {
+		t.Fatalf("the cost source was told of %d stream starts, want one for the one stream", sessions.Load())
+	}
 }
 
 // scriptedSwitched answers like the Worker's gate: executable is a set of
