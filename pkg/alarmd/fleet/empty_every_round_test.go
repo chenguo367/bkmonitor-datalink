@@ -362,3 +362,110 @@ func TestTheNoDataLinesFoldByOnsetMinuteAsWellAsByStrategy(t *testing.T) {
 		}
 	}
 }
+
+// The hour this line waits for has to be an hour of empty completions, near
+// enough. An object that completed empty long ago, then spent a day on
+// rounds that produced no completion at all -- a contract failure on every
+// one -- and then began completing empty again is at the start of a new run,
+// not an hour into an old one.
+//
+// On the acceptance release this was three hundred objects at once. A build
+// that turned those failures into empty completions put every one of them on
+// this line in its first minutes, each row carrying fifty-two rounds of this
+// process's evidence beside a start a day earlier, and the count went from
+// two hundred to five hundred with nothing about the deployment having
+// changed for the worse. A blip does not cost the hour -- the object was
+// completing empty either side of it -- and the test above holds that.
+func TestAnHourOfEmptyRoundsIsNotInheritedAcrossADayOfNoCompletions(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	// An hour of empty rounds: listed.
+	emptyRounds(tracker, at, "qg-interrupted", time.Minute, 61*time.Minute)
+	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-interrupted"]; !listed {
+		t.Fatal("not listed after an hour of empty rounds")
+	}
+	// A day of rounds that produced no completion at all. The object is on
+	// the failing line while they last, and this line does not carry it.
+	for round := 0; round < DefaultBlockedRounds; round++ {
+		tracker.Observe(context.Background(), runOutcome("qg-interrupted", "source_error"))
+	}
+	at.at = at.at.Add(24 * time.Hour)
+	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-interrupted"]; listed {
+		t.Fatal("listed as empty every round while its rounds produced no completion")
+	}
+	// The first empty completion after the day: the run continues, and the
+	// hour starts again here rather than being inherited from before the
+	// interruption.
+	tracker.Observe(context.Background(), emptyAt("qg-interrupted", "4101", at.at))
+	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-interrupted"]; listed {
+		t.Fatal("the first empty round after a day of no completions was listed on an inherited hour")
+	}
+	// An hour of them from here on, and it is listed again -- dated from the
+	// round that began this run, not from the one before the interruption.
+	firstAfter := at.at
+	at.at = at.at.Add(time.Minute)
+	emptyRounds(tracker, at, "qg-interrupted", time.Minute, 61*time.Minute)
+	row, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-interrupted"]
+	if !listed {
+		t.Fatal("not listed after an hour of empty rounds following the interruption")
+	}
+	if row.Since.Before(firstAfter) {
+		t.Fatalf("since = %s, want no earlier than the round that began this run (%s)", row.Since, firstAfter)
+	}
+}
+
+// Every period in the deployed population, twelve hours of nothing but empty
+// rounds, and the object is listed on all of them. The hole the test above
+// looks for is a hole by the object's own cadence; an object evaluated less
+// often than the hour this line waits for produces one empty round an hour
+// and a bit apart, and every one of those is its ordinary pace.
+//
+// Measured against the hour instead, the periods past it went silent for
+// good: the run's start was cleared each round, the Slot-to-Slot distance
+// never left zero, and twelve hours in which not one record came back put
+// nothing on the page. One minute either side of the hour decided it, which
+// is what a predicate measured against its own constant looks like.
+func TestAnObjectSlowerThanTheWindowIsStillListed(t *testing.T) {
+	for _, period := range []time.Duration{15 * time.Second, 30 * time.Minute, time.Hour, 61 * time.Minute, 2 * time.Hour} {
+		at := &clock{at: now}
+		tracker := newTracker(t, at)
+		rounds := emptyRounds(tracker, at, "qg-slow", period, 12*time.Hour)
+		row, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-slow"]
+		if !listed {
+			t.Errorf("period %s: twelve hours of empty rounds (%d of them), not listed", period, rounds)
+			continue
+		}
+		if row.EmptyEveryRound == nil || row.EmptyEveryRound.Rounds != rounds {
+			t.Errorf("period %s: row counts %+v, want all %d rounds", period, row.EmptyEveryRound, rounds)
+		}
+	}
+}
+
+// A hole is still a hole for a slow object: three of its own cycles with
+// nothing completed is the same evidence gap the fast objects are held to,
+// and the run starts again where the object did.
+func TestASlowObjectLosesItsHeadStartOverThreeOfItsOwnCycles(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	period := 2 * time.Hour
+	emptyRounds(tracker, at, "qg-slow-stalled", period, 12*time.Hour)
+	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-slow-stalled"]; !listed {
+		t.Fatal("not listed after twelve hours of empty rounds")
+	}
+	// A day with no completion at all: twelve of this object's cycles.
+	at.at = at.at.Add(24 * time.Hour)
+	resumed := at.at
+	tracker.Observe(context.Background(), emptyAt("qg-slow-stalled", "4101", resumed))
+	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-slow-stalled"]; listed {
+		t.Fatal("the first empty round after a day of no completions was listed on an inherited run")
+	}
+	at.at = resumed.Add(period)
+	tracker.Observe(context.Background(), emptyAt("qg-slow-stalled", "4101", at.at))
+	row, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-slow-stalled"]
+	if !listed {
+		t.Fatal("not listed a cycle after the run started again")
+	}
+	if row.Since.Before(resumed) {
+		t.Fatalf("since = %s, want no earlier than the round that began this run (%s)", row.Since, resumed)
+	}
+}
