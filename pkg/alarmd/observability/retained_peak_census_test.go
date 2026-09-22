@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 func slotCompletion(group string, retained uint64) Observation {
@@ -104,5 +106,81 @@ func TestTheRosterPrunesTheCensus(t *testing.T) {
 	peaks := census.RetainedPeaks()
 	if len(peaks) != 1 || peaks[0].QueryGroupKey != "qg-2" {
 		t.Fatalf("after the roster kept qg-2 the census reads %+v", peaks)
+	}
+}
+
+// A Query Group that stopped completing Slots ages out of its two windows on
+// the read, exactly as the summary rotates it on Publish: the window just
+// past is kept as the previous one, anything older is gone, and a group with
+// nothing in either window is not a reading. Before this the census rotated
+// only when a group was observed, so an idle group reported the last thing it
+// did for as long as it was owned - a sum that read high on every replica
+// with an idle object, in the direction of one more move.
+func TestAnIdleQueryGroupAgesOutOfTheCensusOnRead(t *testing.T) {
+	now := time.Unix(600, 0)
+	census := NewRetainedPeakCensus(time.Minute, func() time.Time { return now })
+	census.Observe(context.Background(), slotCompletion("qg-1", 900))
+	now = now.Add(time.Minute)
+	census.Observe(context.Background(), slotCompletion("qg-1", 100))
+	// One window later: the 900 is the previous window's, still read.
+	now = now.Add(time.Minute)
+	if peaks := census.RetainedPeaks(); len(peaks) != 1 || peaks[0].RetainedBytesPeak != 100 {
+		t.Fatalf("one window after the last Slot the census reads %+v, want the last window's 100 as the previous window", peaks)
+	}
+	// Two windows later: both windows are past, nothing to read.
+	now = now.Add(time.Minute)
+	if peaks := census.RetainedPeaks(); len(peaks) != 0 {
+		t.Fatalf("two windows after the last Slot the census still reads %+v", peaks)
+	}
+	// And a group that skips a window loses its previous window: the
+	// cross-window branch, not the adjacent one.
+	census.Observe(context.Background(), slotCompletion("qg-1", 500))
+	now = now.Add(2 * time.Minute)
+	census.Observe(context.Background(), slotCompletion("qg-1", 50))
+	if peaks := census.RetainedPeaks(); len(peaks) != 1 || peaks[0].RetainedBytesPeak != 50 {
+		t.Fatalf("after a skipped window the census reads %+v, want only the current window's 50", peaks)
+	}
+}
+
+// A pool refusal counts as the object's peak only for the two refusals the
+// summary counts - the pool full and this object over its share - and never
+// for a Slot refused for its own size, which says nothing about the pool.
+func TestOnlyThePoolsOwnRefusalsCountAsAPeak(t *testing.T) {
+	now := time.Unix(600, 0)
+	census := NewRetainedPeakCensus(time.Minute, func() time.Time { return now })
+	own := uint64(300)
+	refusal := func(reason string) Observation {
+		return Observation{Stage: StageResourceHard, Component: ComponentResource, CapacityBudget: CapacityBudgetRetainedBytes,
+			ReasonCode: ReasonCode(reason), Trace: TraceFields{QueryGroupKey: "qg-" + reason},
+			CapacityRejection: &CapacityRejectionFacts{OwnUsed: &own, Requested: 200}}
+	}
+	for _, reason := range []string{contract.ReasonResourceHardStop, contract.ReasonQGBudgetShareExceeded, contract.ReasonSlotBudgetExceeded} {
+		census.Observe(context.Background(), refusal(reason))
+	}
+	peaks := census.RetainedPeaks()
+	if len(peaks) != 2 {
+		t.Fatalf("peaks = %+v, want the two pool refusals and not the Slot's own", peaks)
+	}
+	for _, peak := range peaks {
+		if peak.RetainedBytesPeak != 500 {
+			t.Fatalf("a pool refusal reads %+v, want own plus requested", peak)
+		}
+	}
+}
+
+// The census is bounded far above any owned count, and an observation past
+// the bound is counted as overflow rather than admitted: a replica no roster
+// has pruned cannot grow it without limit, and the count says so.
+func TestTheCensusIsBoundedAndCountsWhatItDrops(t *testing.T) {
+	now := time.Unix(600, 0)
+	census := NewRetainedPeakCensus(time.Minute, func() time.Time { return now })
+	for i := 0; i < RetainedPeakCensusMaxGroups+3; i++ {
+		census.Observe(context.Background(), slotCompletion(fmt.Sprintf("qg-%d", i), 1))
+	}
+	if got := census.Overflow(); got != 3 {
+		t.Fatalf("overflow = %d, want the three past the bound", got)
+	}
+	if got := len(census.RetainedPeaks()); got != RetainedPeakCensusMaxGroups {
+		t.Fatalf("the census holds %d groups, want the bound", got)
 	}
 }
