@@ -17,10 +17,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -32,6 +35,22 @@ const (
 	MaxRequestBytes  = 64 << 10
 	MaxResponseBytes = 2 << 20
 	RequestTimeout   = 3 * time.Second
+	// InvokesPerSessionPerMinute is one session's budget of executed
+	// invocations in a clock minute. Every native invocation is one whole
+	// fleet snapshot read on the replica that answers, bounded only per
+	// request (MaxResponseBytes, RequestTimeout) and by the one execution
+	// slot; nothing bounded how many of them one credential could line up,
+	// so a looping client held the slot against every other session for as
+	// long as it looped. An investigation asks a handful of questions a
+	// minute; thirty is well above that and caps a loop at thirty
+	// snapshot reads a minute. Discovery, description, refused inputs and
+	// refused budgets do not spend it: they read no evidence.
+	InvokesPerSessionPerMinute = 30
+	// sessionWindowSweep is how many sessions the gate remembers before it
+	// forgets the ones whose minute has passed. Sessions are minted at most
+	// a few a minute by the authorization gate and live an hour, so the
+	// map is small; this keeps it so if that ever changes.
+	sessionWindowSweep = 1024
 )
 
 type Authorizer interface {
@@ -123,7 +142,49 @@ type Channel struct {
 	revision  string
 	slots     chan struct{}
 	httpSlots chan struct{}
+	// windows is each session's spend of its invocation budget in the
+	// current clock minute, keyed by session ID; see allowInvoke.
+	windowsMu sync.Mutex
+	windows   map[string]*sessionWindow
 }
+
+// sessionWindow is one session's count of executed invocations in one clock
+// minute; a new minute starts the count over.
+type sessionWindow struct {
+	minute int64
+	count  int
+}
+
+// allowInvoke spends one of the session's invocations for this minute and
+// says whether there was one to spend, with the seconds left in the minute
+// when there was not. Same shape as the authorization gate's rate window,
+// per session rather than per process, because the thing being protected --
+// the one execution slot and the snapshot read behind it -- is shared by
+// every session, and one session must not be able to spend it all.
+func (c *Channel) allowInvoke(sessionID string) (allowed bool, retryAfter time.Duration) {
+	now := c.options.Now()
+	minute := now.Unix() / 60
+	c.windowsMu.Lock()
+	defer c.windowsMu.Unlock()
+	if len(c.windows) >= sessionWindowSweep {
+		for id, window := range c.windows {
+			if window.minute != minute {
+				delete(c.windows, id)
+			}
+		}
+	}
+	window := c.windows[sessionID]
+	if window == nil || window.minute != minute {
+		window = &sessionWindow{minute: minute}
+		c.windows[sessionID] = window
+	}
+	if window.count >= InvokesPerSessionPerMinute {
+		return false, time.Unix((minute+1)*60, 0).Sub(now)
+	}
+	window.count++
+	return true, 0
+}
+
 type request struct {
 	Version   string `json:"channel_version"`
 	Mode      string `json:"mode"`
@@ -174,7 +235,8 @@ func New(options Options) (*Channel, error) {
 	if options.Concurrency > 4 {
 		options.Concurrency = 4
 	}
-	c := &Channel{options: options, ops: make(map[string]Operation), slots: make(chan struct{}, options.Concurrency), httpSlots: make(chan struct{}, 4)}
+	c := &Channel{options: options, ops: make(map[string]Operation), slots: make(chan struct{}, options.Concurrency), httpSlots: make(chan struct{}, 4),
+		windows: make(map[string]*sessionWindow)}
 	for _, op := range options.Operations {
 		if op.ID == "" || op.Run == nil || op.Summary == "" {
 			return nil, errors.New("invalid OB operation registration")
@@ -287,7 +349,9 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			op := c.ops[id]
 			rows = append(rows, map[string]any{"operation": id, "summary": op.Summary, "effect": "read", "required_scope": cliauth.ScopeReadonly, "authorized": true, "availability": available(op), "next_call": map[string]string{"mode": "describe", "operation": id}})
 		}
-		c.write(w, 200, Response{Status: "ok", Summary: "Discover operations, describe one, then invoke it in this environment.", Result: map[string]any{"operations": rows}, Evidence: Evidence{Complete: true}, Meta: meta})
+		c.write(w, 200, Response{Status: "ok", Summary: "Discover operations, describe one, then invoke it in this environment.",
+			Result:   map[string]any{"operations": rows, "budget": map[string]any{"invokes_per_session_per_minute": InvokesPerSessionPerMinute}},
+			Evidence: Evidence{Complete: true}, Meta: meta})
 		return
 	case "describe", "invoke":
 	default:
@@ -316,6 +380,15 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	availability := available(op)
 	if !availability.Available {
 		fail(503, "operation_unavailable", availability.Reason)
+		return
+	}
+	// The session's own budget, spent only by an invocation that would
+	// execute: a refused input or an unavailable operation cost nothing and
+	// counts for nothing. Spent before the slot, so a session over budget
+	// never contends for it, and before admission, so it never renews.
+	if allowed, retryAfter := c.allowInvoke(session.ID); !allowed {
+		w.Header().Set("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+		fail(429, "rate_limited", fmt.Sprintf("This session has spent its %d invocations for this minute; retry when the minute turns.", InvokesPerSessionPerMinute))
 		return
 	}
 	select {
