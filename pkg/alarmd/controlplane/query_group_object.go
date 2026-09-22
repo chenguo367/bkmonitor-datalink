@@ -151,14 +151,21 @@ type QueryGroupObject struct {
 // places that assign it are its only references. It is not a field waiting
 // for a consumer; it is the old revision, and the ObjectDigest replaces it.
 type QueryGroupPlanObject struct {
-	EffectiveTimeSnapshot json.RawMessage                                        `json:"effective_time_snapshot,omitempty"`
-	Identity              execution.PlanIdentity                                 `json:"plan_identity"`
-	StateGeneration       execution.StateGeneration                              `json:"state_generation,omitempty"`
-	ScheduleSpec          execution.ScheduleSpec                                 `json:"schedule_spec"`
-	ScheduleRevision      execution.PlanScheduleRevision                         `json:"plan_schedule_revision"`
-	RequirementTemplates  []execution.DataRequirementTemplate                    `json:"requirement_templates,omitempty"`
-	QueryPlans            map[execution.LogicalQueryRef]execution.QueryPlanFacts `json:"query_plans,omitempty"`
-	PlanID                string                                                 `json:"plan_id"`
+	EffectiveTimeSnapshot json.RawMessage           `json:"effective_time_snapshot,omitempty"`
+	Identity              execution.PlanIdentity    `json:"plan_identity"`
+	StateGeneration       execution.StateGeneration `json:"state_generation,omitempty"`
+	// LevelContractRefs are the Leader's Level contract references, beside
+	// the generation they were derived with. Omitted when nil: an object
+	// written before the field keeps its bytes and its digest, and a reader
+	// that predates the field decodes past it and derives its own, which is
+	// what it did before.
+	LevelContractRefs       []LevelContractRefObject                               `json:"level_contract_refs,omitempty"`
+	NoDataLevelContractRefs []LevelContractRefObject                               `json:"no_data_level_contract_refs,omitempty"`
+	ScheduleSpec            execution.ScheduleSpec                                 `json:"schedule_spec"`
+	ScheduleRevision        execution.PlanScheduleRevision                         `json:"plan_schedule_revision"`
+	RequirementTemplates    []execution.DataRequirementTemplate                    `json:"requirement_templates,omitempty"`
+	QueryPlans              map[execution.LogicalQueryRef]execution.QueryPlanFacts `json:"query_plans,omitempty"`
+	PlanID                  string                                                 `json:"plan_id"`
 	// Strategy is the source identity only. The revision and the Python
 	// snapshot revision that StrategyRefV2 also carries are output context.
 	Strategy        contract.StrategyRefV2          `json:"strategy"`
@@ -227,12 +234,49 @@ func BuildQueryGroupObject(group QueryGroup) QueryGroupObject {
 	return object
 }
 
+// LevelContractRefObject is one Level contract reference as the object
+// stores it. A type of its own rather than the execution type because that
+// type's canonical encoding is the series warmup digest's input
+// (alarmd-series-warmup-requirement-v1): tagging its fields for the object
+// would move every stored series guard.
+type LevelContractRefObject struct {
+	LevelID                 uint32 `json:"level_id"`
+	LevelStateCompatibility string `json:"level_state_compatibility"`
+	WarmupRequirementRef    string `json:"warmup_requirement_ref"`
+	DetectFingerprint       string `json:"detect_fingerprint"`
+}
+
+func levelContractRefObjects(refs []execution.RuntimeLevelContractRef) []LevelContractRefObject {
+	if len(refs) == 0 {
+		return nil
+	}
+	objects := make([]LevelContractRefObject, len(refs))
+	for index, ref := range refs {
+		objects[index] = LevelContractRefObject{LevelID: ref.LevelID, LevelStateCompatibility: ref.LevelStateCompatibility,
+			WarmupRequirementRef: ref.WarmupRequirementRef, DetectFingerprint: ref.DetectFingerprint}
+	}
+	return objects
+}
+
+func levelContractRefsOf(objects []LevelContractRefObject) []execution.RuntimeLevelContractRef {
+	if len(objects) == 0 {
+		return nil
+	}
+	refs := make([]execution.RuntimeLevelContractRef, len(objects))
+	for index, object := range objects {
+		refs[index] = execution.RuntimeLevelContractRef{LevelID: object.LevelID, LevelStateCompatibility: object.LevelStateCompatibility,
+			WarmupRequirementRef: object.WarmupRequirementRef, DetectFingerprint: object.DetectFingerprint}
+	}
+	return refs
+}
+
 func buildQueryGroupPlanObject(plan FrozenPlan) QueryGroupPlanObject {
 	strategyIR := plan.Plan.StrategyIR
 	strategyIR.StrategyRef = strategyIdentity(strategyIR.StrategyRef)
 	return QueryGroupPlanObject{
-		Identity: plan.Identity, StateGeneration: plan.StateGeneration,
-		ScheduleSpec: plan.ScheduleSpec, ScheduleRevision: plan.ScheduleRevision,
+		Identity: plan.Identity, StateGeneration: plan.StateGeneration, LevelContractRefs: levelContractRefObjects(plan.LevelContractRefs),
+		NoDataLevelContractRefs: levelContractRefObjects(plan.NoDataLevelContractRefs),
+		ScheduleSpec:            plan.ScheduleSpec, ScheduleRevision: plan.ScheduleRevision,
 		RequirementTemplates: plan.RequirementTemplates, QueryPlans: plan.QueryPlans,
 		PlanID: plan.Plan.PlanID, Strategy: strategyIdentity(plan.Plan.StrategyRef),
 		InputProjection: plan.Plan.InputProjection, OutputIdentity: plan.Plan.OutputIdentity,

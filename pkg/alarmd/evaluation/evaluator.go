@@ -988,7 +988,7 @@ func evaluationBindings(request execution.EvaluationRequest) []execution.NamedIn
 }
 
 func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView, view execution.RuntimeStateView, facts []detect.LevelFact, outcomes []trigger.LevelOutcomeV2, summaries map[uint32]execution.HistoryCompleteness, durableGuardReasons, missingInputGuards map[uint32]execution.ReasonCode) (execution.StateMutation, error) {
-	refs, err := execution.DeriveRuntimeLevelContractRefs(due.CompiledPlan)
+	refs, err := execution.LevelContractRefsFor(due, view.Levels)
 	if err != nil {
 		return execution.StateMutation{}, err
 	}
