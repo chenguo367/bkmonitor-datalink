@@ -16,6 +16,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
@@ -237,9 +239,17 @@ func splitDryRunObservations(t *testing.T, source splitCensusSource, peak uint64
 func splitDryRunFacts(
 	t *testing.T, source splitCensusSource, peak uint64,
 ) ([]observability.SplitPlanFacts, []observability.SplitRoundFacts) {
+	facts, rounds, _ := splitDryRunAllFacts(t, source, peak)
+	return facts, rounds
+}
+
+func splitDryRunAllFacts(
+	t *testing.T, source splitCensusSource, peak uint64,
+) ([]observability.SplitPlanFacts, []observability.SplitRoundFacts, []observability.ShardQueryFacts) {
 	t.Helper()
 	var facts []observability.SplitPlanFacts
 	var rounds []observability.SplitRoundFacts
+	var queries []observability.ShardQueryFacts
 	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
 		SplitCensus: source,
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
@@ -249,6 +259,9 @@ func splitDryRunFacts(
 			if observation.SplitRound != nil {
 				rounds = append(rounds, *observation.SplitRound)
 			}
+			if observation.ShardQuery != nil {
+				queries = append(queries, *observation.ShardQuery)
+			}
 		}),
 	}}
 	runtime.dryRunSplits(context.Background(),
@@ -256,7 +269,7 @@ func splitDryRunFacts(
 		splitTestWorkers(map[string]uint64{"worker-a": splitTestPool}),
 		scheduler.ByteReadings{Peak: map[execution.QueryGroupIdentity]uint64{"qg": peak}},
 		splitDryRunTestClock())
-	return facts, rounds
+	return facts, rounds, queries
 }
 
 // An object whose Plans this round could not read is reported as a reading
@@ -394,5 +407,132 @@ func TestTheRoundsCountsNeverRideOnAnObjectsFacts(t *testing.T) {
 				"would read the fleet's skipped count as one Plan's group size",
 				fact.PlansInGroup, rounds[0].Skipped)
 		}
+	}
+}
+
+// splitDryRunQueries is one logical query that groups by the split dimension,
+// with whatever conditions the strategy came with.
+func splitDryRunQueries(t *testing.T, conditions execution.QueryConditions) map[execution.LogicalQueryRef]execution.QueryPlanFacts {
+	t.Helper()
+	facts, err := execution.BuildQueryPlanFacts(execution.QueryPlanFacts{
+		Provider: execution.ProviderUQ, ProviderRouteRef: "uq-primary", TenantID: "system",
+		BusinessID: "2", SpaceScope: "bkcc__2",
+		QueryList: []execution.QueryClause{{
+			DataSource: "bk_monitor", Driver: "influxdb", TableID: "system.cpu", FieldName: "usage",
+			TimeField: "time", ReferenceName: "a", Dimensions: []string{"ip"},
+			Conditions:      conditions,
+			Functions:       []execution.QueryFunction{{Method: "default", Position: 0}},
+			TimeAggregation: execution.QueryFunction{Method: "avg", Position: 0},
+		}},
+		MetricMerge: "a", StepMillis: 60000, AlignmentMillis: 60000,
+		Normalization: execution.DatasetNormalizationSpec{
+			DatasetContract: contract.DatasetContractV2{SchemaDigest: "schema", NormalizationDigest: "normalization",
+				IdentityFields: []string{"ip"}, SourceTimeField: "time", ReceivedTimeField: "received_time"},
+			SourceTimeUnit: execution.TimeUnitMillisecond, CanonicalSourceTimeUnit: execution.TimeUnitSecond,
+			SeriesIdentityMode: execution.SeriesIdentityUQGroupKeysValuesV1, GroupKeyRule: execution.GroupKeyStripTableSuffixV1,
+			ValueSelectionMode: execution.ValueSelectionResultOrFirstReferenceV1, CanonicalValueField: "value",
+			ReceivedTimeMode: execution.ReceivedTimeProviderReceivedAt, Version: "v1"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return map[execution.LogicalQueryRef]execution.QueryPlanFacts{"q-a": facts}
+}
+
+func splitDryRunPlannedSource(
+	t *testing.T, queries map[execution.LogicalQueryRef]execution.QueryPlanFacts,
+) *fakeSplitSource {
+	t.Helper()
+	plan := execution.PlanCensusIdentity{
+		Plan:            execution.PlanIdentity{TenantID: "system", BusinessID: "2", StrategyID: "4101"},
+		StateGeneration: "generation",
+	}
+	entry := execution.DimensionCensusEntry{Dimension: "ip"}
+	for index := 0; index < 600; index++ {
+		entry.Values = append(entry.Values, execution.DimensionValueCount{
+			Value: fmt.Sprintf("ip-%04d", index), Series: 10})
+	}
+	return &fakeSplitSource{
+		plans: map[execution.QueryGroupIdentity][]splitCandidatePlan{
+			"qg": {{Census: plan, EvaluationIntervalSeconds: 60, Queries: queries}}},
+		censuses: map[execution.PlanCensusIdentity]execution.DimensionCensus{plan: {
+			Identity: plan, Source: execution.DimensionCensusFromRound,
+			ObservedAt: splitDryRunTestClock().Unix(), Series: 6000,
+			Dimensions: []execution.DimensionCensusEntry{entry},
+		}},
+	}
+}
+
+// An object a split was planned for is also asked whether its own query can
+// express that split, on the same line.
+//
+// The two answers are separate questions with separate vocabularies, and a
+// reader needs both: a strategy can be perfectly worth splitting and
+// impossible to cut. Read against the catalog's own census of every Plan,
+// this is what says whether value lists miss precisely the strategies that
+// need splitting - which is the number that decides whether hashing is the
+// main road.
+func TestAPlannedSplitIsAlsoAskedWhetherTheQueryCanExpressIt(t *testing.T) {
+	source := splitDryRunPlannedSource(t, splitDryRunQueries(t, execution.QueryConditions{}))
+
+	facts, _, queries := splitDryRunAllFacts(t, source, 3*splitTestPool)
+
+	if len(facts) != 1 || facts[0].Outcome != observability.SplitOutcomePlanned {
+		t.Fatalf("split facts = %+v, want one planned split", facts)
+	}
+	if len(queries) != 1 {
+		t.Fatalf("%d shard-query answers for one planned split, want one beside it", len(queries))
+	}
+	if queries[0].Outcome != observability.ShardQueriesBuilt {
+		t.Fatalf("outcome = %q, want the queries built; facts = %+v", queries[0].Outcome, queries[0])
+	}
+	if queries[0].Shards != facts[0].Shards || queries[0].Built != facts[0].Shards {
+		t.Fatalf("the transform built %d of %d pieces for a split planned into %d",
+			queries[0].Built, queries[0].Shards, facts[0].Shards)
+	}
+}
+
+// A strategy whose own conditions are disjunctive is planned and then found
+// impossible to cut, and both facts reach the line.
+//
+// This is the pair the design question rests on. The planner says the split
+// would be even; the transform says a flat condition list cannot express it.
+// Reported as one it "could not split" alone, a reader would go looking for
+// a census problem.
+func TestAnObjectWorthSplittingAndImpossibleToCutReportsBoth(t *testing.T) {
+	disjunctive := execution.QueryConditions{
+		Fields: []execution.QueryConditionField{
+			{Field: "env", Operator: "contains",
+				Values: []execution.QueryScalar{{Kind: execution.QueryScalarString, StringValue: "prod"}}},
+			{Field: "env", Operator: "contains",
+				Values: []execution.QueryScalar{{Kind: execution.QueryScalarString, StringValue: "staging"}}},
+		},
+		Connectors: []string{"or"},
+	}
+	source := splitDryRunPlannedSource(t, splitDryRunQueries(t, disjunctive))
+
+	facts, _, queries := splitDryRunAllFacts(t, source, 3*splitTestPool)
+
+	if facts[0].Outcome != observability.SplitOutcomePlanned {
+		t.Fatalf("split outcome = %q, want the planner to still say it is worth splitting: whether the "+
+			"query can express it is a different question and must not change this one", facts[0].Outcome)
+	}
+	if len(queries) != 1 || queries[0].Outcome != observability.ShardQueriesDisjunctive {
+		t.Fatalf("shard-query answers = %+v, want one saying the conditions are disjunctive", queries)
+	}
+}
+
+// An object no split was planned for is not asked the question at all.
+//
+// Asked anyway it would answer NOT_PLANNED for every object under its share,
+// which is a count of the ordinary case wearing the clothes of a refusal.
+func TestAnObjectWithNoPlannedSplitIsNotAskedAboutItsQueries(t *testing.T) {
+	source := splitDryRunPlannedSource(t, splitDryRunQueries(t, execution.QueryConditions{}))
+
+	_, _, queries := splitDryRunAllFacts(t, source, splitTestPool/4)
+
+	if len(queries) != 0 {
+		t.Fatalf("%d shard-query answers for an object under its share, want none: every object that does "+
+			"not need splitting would otherwise be counted as one that could not be split", len(queries))
 	}
 }

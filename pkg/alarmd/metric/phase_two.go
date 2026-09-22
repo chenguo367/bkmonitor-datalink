@@ -129,6 +129,7 @@ type phaseTwoMetrics struct {
 	dimensionCensusWrites           *prometheus.CounterVec
 	splitPlans                      *prometheus.CounterVec
 	splitRoundObjects               *prometheus.CounterVec
+	shardQueries                    *prometheus.CounterVec
 	dimensionCensusValues           *prometheus.CounterVec
 	recoveryPastLevelWithoutRecov   prometheus.Counter
 	openAlertGate                   *prometheus.CounterVec
@@ -969,6 +970,27 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, disposition := range splitRoundDispositions {
 		metrics.splitRoundObjects.WithLabelValues(disposition)
 	}
+	// Whether the objects a split was planned for could express it. The
+	// catalog's own census (shardable_*) says how much of the whole fleet a
+	// value list could cut; this says how much of the population that
+	// actually needs cutting can be cut, and the two are read together: if
+	// the objects over their share are disjunctive far more often than the
+	// fleet at large, then value lists miss precisely the strategies the
+	// split exists for.
+	metrics.shardQueries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "shard_query_total",
+		Help: "Planned splits this Leader tried to express as queries, by what the strategy's own query " +
+			"allowed. BUILT is a split the queries express. DISJUNCTIVE is the structural one: a condition " +
+			"list is flat, so a matcher appended after an 'or' changes what the existing conditions mean, " +
+			"and such a strategy cannot be cut by a value list at all - read it against the catalog's " +
+			"shardable_disjunctive to see whether the objects that need splitting are the ones value lists " +
+			"cannot serve. NOT_STRUCTURED is PromQL, DIMENSION_NOT_QUERYABLE a dimension the query does not " +
+			"group by, TOO_MANY_VALUES a matcher past the value bound, NOT_PLANNED and NO_QUERIES nothing " +
+			"to build from, and INVALID this build producing facts the query contract refuses.",
+	}, []string{"outcome"})
+	for _, outcome := range observability.ShardQueryOutcomes() {
+		metrics.shardQueries.WithLabelValues(outcome)
+	}
 	// What the dimension census did, by where its values came from and what
 	// the store said (decision-020 section 4.7.3). Two families rather than
 	// one: how many censuses were taken is a different question from how
@@ -1339,7 +1361,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.effectiveClose, m.absentClose, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
@@ -1522,6 +1544,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.algorithmEvaluations.WithLabelValues(
 			string(fact.SourceAlgorithmFamily), string(fact.Result),
 		).Inc()
+	}
+	if facts := observation.ShardQuery; facts != nil {
+		m.shardQueries.WithLabelValues(facts.Outcome).Inc()
 	}
 	if facts := observation.SplitRound; facts != nil {
 		m.splitRoundObjects.WithLabelValues("over_share").Add(float64(facts.OverShare))

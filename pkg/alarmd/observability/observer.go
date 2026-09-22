@@ -2329,6 +2329,12 @@ type Observation struct {
 	// Shardability is the catalog counted by whether a value-list split
 	// could be expressed at all, once per publication.
 	Shardability *ShardabilityFacts
+	// ShardQuery is whether that object's own query could express the split
+	// the planner decided on. Beside SplitPlan and not folded into it: one
+	// says whether the pieces would be even, the other whether the strategy
+	// can be cut at all, and a strategy can be worth splitting and
+	// impossible to express.
+	ShardQuery *ShardQueryFacts
 	// SplitPlan is one object's split decision as the Leader's dry run
 	// reached it; SplitRound is what that round looked at. Two structures
 	// because they have two subjects - one object, and one round.
