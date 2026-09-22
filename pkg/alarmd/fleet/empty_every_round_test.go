@@ -468,4 +468,94 @@ func TestASlowObjectLosesItsHeadStartOverThreeOfItsOwnCycles(t *testing.T) {
 	if row.Since.Before(resumed) {
 		t.Fatalf("since = %s, want no earlier than the round that began this run (%s)", row.Since, resumed)
 	}
+	// And a second stall is caught like the first. It is here because the
+	// obvious thing to do with a hole is to keep it as the object's cadence,
+	// and that would leave the bar at a day for the rest of the run: this
+	// stall is a day long again, and against a day-long cadence it is not
+	// three of anything.
+	secondStall := at.at.Add(24 * time.Hour)
+	at.at = secondStall
+	tracker.Observe(context.Background(), emptyAt("qg-slow-stalled", "4101", secondStall))
+	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-slow-stalled"]; listed {
+		t.Fatal("a second day-long stall was not read as a hole: the first one stayed on as the object's cadence")
+	}
+}
+
+// A round arriving far sooner than the object's pace -- a catch-up, a retry,
+// a burst after a restart -- must not become the pace. If it does, the next
+// ordinary round is measured against it, reads as a hole, and the run loses
+// its start: the row stays on the page and its Since moves later, so "how
+// long has this been empty" comes back smaller than the truth. That is worse
+// than the row going missing, because the number that replaces it looks
+// exactly as credible as the right one.
+//
+// Both halves are asserted, and the Since half is the point.
+func TestACatchUpRoundDoesNotRewriteHowLongTheObjectHasBeenEmpty(t *testing.T) {
+	for name, catchUps := range map[string]int{"one catch-up round": 1, "two in a row": 2} {
+		at := &clock{at: now}
+		tracker := newTracker(t, at)
+		period := 2 * time.Hour
+		emptyRounds(tracker, at, "qg-catch-up", period, 12*time.Hour)
+		settled, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-catch-up"]
+		if !listed {
+			t.Fatalf("%s: not listed after twelve hours of empty rounds", name)
+		}
+		since := settled.Since
+		// emptyRounds leaves the clock a period past the round it last ran,
+		// so the catch-up rounds are placed from that round's own Slot --
+		// measured from the clock they would be a period apart, which is the
+		// pace and not a catch-up at all.
+		slot := at.at.Add(-period)
+		for round := 0; round < catchUps; round++ {
+			slot = slot.Add(time.Minute)
+			at.at = slot
+			tracker.Observe(context.Background(), emptyAt("qg-catch-up", "4101", slot))
+		}
+		// And one ordinary round after them.
+		slot = slot.Add(period)
+		at.at = slot
+		tracker.Observe(context.Background(), emptyAt("qg-catch-up", "4101", slot))
+		row, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-catch-up"]
+		if !listed {
+			t.Errorf("%s: dropped off the line by an ordinary round after it", name)
+			continue
+		}
+		if !row.Since.Equal(since) {
+			t.Errorf("%s: since moved %s -> %s, want the run's own start kept; a catch-up round became the pace and the next ordinary round read as a hole",
+				name, since, row.Since)
+		}
+	}
+}
+
+// The run a record hands over is trusted while its own evidence is
+// continuous, and only then. A record whose latest empty round is a day old
+// describes a run this process watched none of, and the day between that
+// round and the first one watched here is a hole whatever the record's start
+// says -- the production shape being a build that turned a day of contract
+// failures into empty completions, after which every such object was listed
+// on an hour it had inherited rather than watched.
+//
+// The object stays in the run; it is the head start it loses.
+func TestARestoredRunWhoseLatestRoundIsADayOldStartsAgainHere(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	restoredEmptyRun(t, tracker, "qg-stale-record", now, now.Add(-24*time.Hour), now.Add(-48*time.Hour), time.Time{})
+	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-stale-record"]; !listed {
+		t.Fatal("the record's own two days are not listed on restore")
+	}
+	// The first round watched here, a day after the record's latest.
+	tracker.Observe(context.Background(), emptyAt("qg-stale-record", "4101", now))
+	if _, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-stale-record"]; listed {
+		t.Fatal("listed on the record's start across a day this process did not watch")
+	}
+	// And it earns its way back on with an hour of its own.
+	at.at = now.Add(time.Minute)
+	emptyRounds(tracker, at, "qg-stale-record", time.Minute, 61*time.Minute)
+	row, listed := rowsOfKind(tracker.NoData(), KindEmptyEveryRound)["qg-stale-record"]
+	if !listed {
+		t.Fatal("not listed after an hour of rounds watched here")
+	}
+	if row.Since.Before(now) {
+		t.Errorf("since = %s, want no earlier than the first round watched here (%s)", row.Since, now)
+	}
 }
