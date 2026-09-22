@@ -121,13 +121,24 @@ func TestAnObjectCarryingATargetPlanIsWrittenAndReadUnderTheV2Contract(t *testin
 			// A reader that only knows v1 keys the object by the version
 			// before anything else; this build does the same for a version
 			// it does not know, so the refusal is by name, not by digest.
+			// A later version of this contract is refused as newer, which
+			// is a rollout; a version that is not of this contract at all
+			// is refused as not an object.
 			foreign := strings.Replace(string(payload), wantVersion, "alarmd-query-group-object-v999", 1)
 			if err := harness.client.Set(harness.ctx, harness.prefix+":qgobj:"+string(digest), foreign, 0).Err(); err != nil {
 				t.Fatal(err)
 			}
 			fresh := harness.newRepository(t)
+			if _, err := fresh.LoadQueryGroupObject(harness.ctx, digest); !errors.Is(err, controlplane.ErrCatalogObjectContractNewer) || errors.Is(err, controlplane.ErrCatalogObjectCorrupt) {
+				t.Fatalf("an object of a later contract loaded or was refused as something else: %v", err)
+			}
+			foreign = strings.Replace(string(payload), wantVersion, "alarmd-target-group-object-v1", 1)
+			if err := harness.client.Set(harness.ctx, harness.prefix+":qgobj:"+string(digest), foreign, 0).Err(); err != nil {
+				t.Fatal(err)
+			}
+			fresh = harness.newRepository(t)
 			if _, err := fresh.LoadQueryGroupObject(harness.ctx, digest); !errors.Is(err, controlplane.ErrCatalogObjectCorrupt) || !strings.Contains(err.Error(), "of this contract") {
-				t.Fatalf("an object of an unknown contract loaded or failed for another reason: %v", err)
+				t.Fatalf("an object of another contract loaded or failed for another reason: %v", err)
 			}
 		}
 	}

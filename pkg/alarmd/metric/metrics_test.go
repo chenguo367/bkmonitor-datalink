@@ -414,6 +414,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_unavailable_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_open_alert_set_refresh_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_open_alert_set_lookup_total"] = "variableLabels: {answer}"
+	expected["bkmonitor_alarmd_effective_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_open_alert_set_entries"] = "variableLabels: {kind}"
 	expected["bkmonitor_alarmd_open_alert_set_tracked_strategies"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_open_alert_set_evictions_total"] = "variableLabels: {}"
@@ -916,6 +917,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_unavailable_total")] = len(openalerts.UnavailableReasons)
 	bounds[fqName("open_alert_set_refresh_total")] = 3
 	bounds[fqName("open_alert_set_lookup_total")] = len(openalerts.Answers)
+	bounds[fqName("effective_close_total")] = len(observability.EffectiveCloseOutcomes)
 	bounds[fqName("open_alert_set_entries")] = 3
 	bounds[fqName("open_alert_set_tracked_strategies")] = 1
 	bounds[fqName("open_alert_set_evictions_total")] = 1

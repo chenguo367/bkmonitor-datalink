@@ -1095,6 +1095,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
 		capacity: linkdBudget, sourceID: cfg.PhaseTwo.Linkd.EventSourceID, legacy: legacyTime.Provider(), legacyCache: legacyTime}
 	bundle.dependencies.RunEffectiveTime = maintenance.run
+	recorder.SetEffectiveCloseSource(maintenance.Stats)
 	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.
 	//
@@ -1441,7 +1442,7 @@ func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func
 		stats := cache.Stats()
 		at := now()
 		facts := &fleet.OpenAlertSetFacts{Mode: string(stats.Mode), StaleBeyondBound: cache.StaleBeyondBound(),
-			IndexProtocol: stats.IndexProtocol, SubscriptionReady: stats.SubscriptionReady, CalibratedSets: stats.Calibrated,
+			IndexProtocol: stats.IndexProtocol, CalibrationConfigured: stats.CalibrationConfigured, SubscriptionReady: stats.SubscriptionReady, CalibratedSets: stats.Calibrated,
 			PendingReads: stats.PendingReads, PendingReconciles: stats.PendingReconciles, MemberBytes: stats.MemberBytes,
 			Available: stats.Available, UnavailableReason: string(stats.UnavailableReason),
 			ReaderFingerprintVersion: openalerts.FingerprintVersion,

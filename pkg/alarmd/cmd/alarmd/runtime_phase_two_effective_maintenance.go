@@ -61,20 +61,62 @@ func (runtime *productionPhaseTwoQueryGroup) withMaintenance(ctx context.Context
 	return run(execution.ContextWithLeaseAuthority(ctx, runtime.session), check)
 }
 
+// maintenanceLease is the lease as this replica holds it, read from memory:
+// the content scope and timeline revision the Assignment last authorized.
+// The maintenance loop reads the Query Group's Plans again only when one of
+// the two moves, which is the only way its Plans can change.
+func (runtime *productionPhaseTwoQueryGroup) maintenanceLease() (string, uint64, bool) {
+	lease, accepting := runtime.session.Current()
+	return lease.ContentScope, lease.TimelineRecordRevision, accepting
+}
+
 var errMaintenanceBusy = errors.New("detection is executing this Query Group")
 
 type maintenanceCatalog interface {
-	CurrentPlans(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) ([]controlplane.MaintenancePlan, error)
+	CurrentPlans(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (controlplane.MaintenancePlans, error)
 }
 type closeWriter interface {
 	WriteCloseBatch(context.Context, []linkdoutput.CloseRequest) error
 }
 type maintenanceRunner interface {
 	withMaintenance(context.Context, func(context.Context, func(context.Context) error) error) error
+	maintenanceLease() (contentScope string, timelineRevision uint64, accepting bool)
 }
 
 type legacyRefresher interface {
 	Refresh(context.Context, string, string, []int64) error
+}
+
+// The outcomes are the observability package's closed list; the names here
+// are the ones this file reads by.
+const (
+	closeOutcomeAcked                = string(observability.EffectiveCloseAcked)
+	closeOutcomeMetadataMissing      = string(observability.EffectiveCloseMetadataMissing)
+	closeOutcomePrecheckFailed       = string(observability.EffectiveClosePrecheckFailed)
+	closeOutcomeSendFailed           = string(observability.EffectiveCloseSendFailed)
+	closeOutcomeMaintenanceBusy      = string(observability.EffectiveCloseMaintenanceBusy)
+	closeOutcomePlanUncompilable     = string(observability.EffectiveClosePlanUncompilable)
+	closeOutcomeIdentityInvalid      = string(observability.EffectiveCloseIdentityInvalid)
+	closeOutcomeEffectiveTimeUnknown = string(observability.EffectiveCloseEffectiveTimeUnknown)
+	closeOutcomeLegacyUnavailable    = string(observability.EffectiveCloseLegacyUnavailable)
+	closeOutcomeUnavailable          = string(observability.EffectiveCloseUnavailable)
+	closeOutcomeUnsupportedRunner    = string(observability.EffectiveCloseUnsupportedRunner)
+)
+
+// maintenanceGroup is what the loop knows about one owned Query Group from
+// memory: the Plans of its last read, split by what each needs, and the
+// lease the read was made under. Nothing here is read from the store per
+// tick; the store is read again when the lease moves.
+type maintenanceGroup struct {
+	contentScope     string
+	timelineRevision uint64
+	// legacy are the Plans on a schedule with no frozen snapshot, whose
+	// calendar and timezone entries this replica keeps warm.
+	legacy []controlplane.MaintenancePlan
+	// closable are the Plans whose alerts this replica closes when every
+	// Level is inactive: on the standard wire, with a schedule, and compiled
+	// in full.
+	closable []controlplane.MaintenancePlan
 }
 
 type effectiveMaintenance struct {
@@ -93,10 +135,36 @@ type effectiveMaintenance struct {
 	// ACK suppresses only immediate repeat sends. It never deletes the
 	// external member or declares Linkd closed; reconciliation confirms that.
 	sent             map[string]time.Time
-	cursor           execution.QueryGroupIdentity
+	groups           map[execution.QueryGroupIdentity]*maintenanceGroup
+	readCursor       execution.QueryGroupIdentity
 	planCursor       map[execution.QueryGroupIdentity]int
 	legacyCursor     map[execution.QueryGroupIdentity]int
 	metadataReported map[openalerts.StrategyKey]time.Time
+	countsMu         sync.Mutex
+	counts           map[string]uint64
+}
+
+// Stats is the outcome counts, for the metric that reports every cell.
+func (m *effectiveMaintenance) Stats() map[string]uint64 {
+	m.countsMu.Lock()
+	defer m.countsMu.Unlock()
+	counts := make(map[string]uint64, len(observability.EffectiveCloseOutcomes))
+	for _, outcome := range observability.EffectiveCloseOutcomes {
+		counts[string(outcome)] = m.counts[string(outcome)]
+	}
+	return counts
+}
+
+func (m *effectiveMaintenance) count(outcome string, n int) {
+	if n <= 0 {
+		return
+	}
+	m.countsMu.Lock()
+	if m.counts == nil {
+		m.counts = make(map[string]uint64, len(observability.EffectiveCloseOutcomes))
+	}
+	m.counts[outcome] += uint64(n)
+	m.countsMu.Unlock()
 }
 
 func (m *effectiveMaintenance) run(ctx context.Context) {
@@ -112,6 +180,15 @@ func (m *effectiveMaintenance) run(ctx context.Context) {
 	}
 }
 
+// step is one tick. It touches the store for two things only: the Plans of
+// a Query Group whose lease moved since they were last read, at most
+// GroupBatch of those per tick, and a close batch that is ready to send.
+// Everything else - which Query Groups have a schedule at all, which Plans
+// need their legacy entries kept warm, whether every Level is inactive right
+// now - is answered from memory. Before this the loop read every owned Query
+// Group's Plans from the store on every tick, whether or not one of them had
+// a schedule: on a deployment where none did, that was a constant read rate
+// against the control store that answered nothing.
 func (m *effectiveMaintenance) step(ctx context.Context) {
 	ctx, cancelStep := context.WithTimeout(ctx, 5*time.Second)
 	defer cancelStep()
@@ -136,6 +213,7 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 		m.planCursor = make(map[execution.QueryGroupIdentity]int)
 		m.legacyCursor = make(map[execution.QueryGroupIdentity]int)
 		m.metadataReported = make(map[openalerts.StrategyKey]time.Time)
+		m.groups = make(map[execution.QueryGroupIdentity]*maintenanceGroup)
 	}
 	if m.sent == nil {
 		m.sent = make(map[string]time.Time)
@@ -143,6 +221,11 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 	for qg := range m.byGroup {
 		if _, keep := owned[qg]; !keep {
 			m.releaseGroupLocked(qg)
+		}
+	}
+	for qg := range m.groups {
+		if _, keep := owned[qg]; !keep {
+			delete(m.groups, qg)
 		}
 	}
 	for key := range m.calibrationRequested {
@@ -165,44 +248,120 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 		groups = append(groups, qg)
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i] < groups[j] })
-	start := sort.Search(len(groups), func(i int) bool { return groups[i] > m.cursor })
-	for n := 0; n < min(m.capacity.GroupBatch, len(groups)); n++ {
+
+	// Which Query Groups need their Plans read: the ones the loop has not
+	// read yet and the ones whose lease moved since. Answered from memory.
+	runners := make(map[execution.QueryGroupIdentity]maintenanceRunner, len(groups))
+	stale := make([]execution.QueryGroupIdentity, 0)
+	for _, qg := range groups {
+		runner, ok := owned[qg].(maintenanceRunner)
+		if !ok {
+			m.observe(ctx, qg, closeOutcomeUnsupportedRunner, errors.New("owner runner lacks maintenance capability"), 0)
+			continue
+		}
+		runners[qg] = runner
+		scope, revision, accepting := runner.maintenanceLease()
+		if !accepting {
+			continue
+		}
+		if known := m.groups[qg]; known == nil || known.contentScope != scope || known.timelineRevision != revision {
+			stale = append(stale, qg)
+		}
+	}
+	start := sort.Search(len(stale), func(i int) bool { return stale[i] > m.readCursor })
+	for n := 0; n < min(m.capacity.GroupBatch, len(stale)); n++ {
 		if ctx.Err() != nil {
 			return
 		}
-		qg := groups[(start+n)%len(groups)]
-		m.cursor = qg
-		runner, ok := owned[qg].(maintenanceRunner)
-		if !ok {
-			m.observe(ctx, qg, "unsupported_runner", errors.New("owner runner lacks maintenance capability"), 0)
+		qg := stale[(start+n)%len(stale)]
+		m.readCursor = qg
+		round, cancel := context.WithTimeout(ctx, 5*time.Second)
+		err := runners[qg].withMaintenance(round, func(round context.Context, _ func(context.Context) error) error {
+			return m.readGroup(round, qg, runners[qg])
+		})
+		cancel()
+		if err != nil {
+			m.observe(ctx, qg, closeOutcomeUnavailable, err, 0)
+		}
+	}
+
+	for _, qg := range groups {
+		if ctx.Err() != nil {
+			return
+		}
+		known := m.groups[qg]
+		runner := runners[qg]
+		if known == nil || runner == nil {
 			continue
 		}
-		round, cancel := context.WithTimeout(ctx, 5*time.Second)
-		err := runner.withMaintenance(round, func(round context.Context, check func(context.Context) error) error { return m.group(round, qg, check) })
-		cancel()
-		if err != nil && !errors.Is(err, errMaintenanceBusy) {
-			m.observe(ctx, qg, "unavailable", err, 0)
-		}
+		m.refreshLegacy(ctx, qg, known.legacy)
+		m.closeInactive(ctx, qg, runner, known.closable)
 	}
 }
 
-func (m *effectiveMaintenance) group(ctx context.Context, qg execution.QueryGroupIdentity, check func(context.Context) error) error {
+// readGroup reads the Query Group's activated Plans under the lease the
+// caller holds, records what each needs, and registers every Plan's strategy
+// with the open alert index. It is the one store read of the loop.
+func (m *effectiveMaintenance) readGroup(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner) error {
+	scope, revision, accepting := runner.maintenanceLease()
+	if !accepting {
+		return errors.New("maintenance owner is not accepting")
+	}
 	at := m.bundle.dependencies.Now()
-	plans, err := m.catalog.CurrentPlans(ctx, qg, execution.EvaluationTime(at.Unix()))
+	read, err := m.catalog.CurrentPlans(ctx, qg, execution.EvaluationTime(at.Unix()))
 	if err != nil {
 		return err
 	} // Keep known tracking on transient reads.
-	keys := make([]openalerts.StrategyKey, 0, len(plans))
-	for _, plan := range plans {
+	m.count(closeOutcomePlanUncompilable, read.Uncompilable)
+	keys := make([]openalerts.StrategyKey, 0, len(read.Plans))
+	for _, plan := range read.Plans {
 		keys = append(keys, openalerts.StrategyKey{TenantID: plan.Identity.TenantID, StrategyID: plan.Identity.StrategyID})
 	}
 	if err := m.registerKeys(qg, keys, true); err != nil {
 		return err
 	}
+	known := &maintenanceGroup{contentScope: scope, timelineRevision: revision}
+	for _, plan := range read.Plans {
+		if !planHasSchedule(plan.Compiled) {
+			continue
+		}
+		if !plan.Compiled.HasEffectiveTimeSnapshot() {
+			known.legacy = append(known.legacy, plan)
+		}
+		if !plan.CloseUnavailable && plan.Compiled.WireFormat() == contract.WireFormatStandardRawEvent {
+			known.closable = append(known.closable, plan)
+		}
+	}
+	m.groups[qg] = known
+	return nil
+}
 
-	// At most one bounded legacy refresh per group per round. Modern snapshot
-	// plans must still make progress when a legacy dependency is slow.
-	m.refreshLegacy(ctx, qg, plans)
+// planHasSchedule reports whether any Level of the Plan, the no-data Level
+// included, is on a schedule other than ALWAYS. A Plan with none needs
+// nothing from this loop: no entry to keep warm, no inactive state to close
+// on.
+func planHasSchedule(plan *strategy.CompiledPlan) bool {
+	levels := plan.Levels()
+	if level := plan.NoDataLevel(); level != nil {
+		levels = append(levels, *level)
+	}
+	for _, level := range levels {
+		if level.EffectiveTimeRequirement().Kind() != strategy.EffectiveTimeAlways {
+			return true
+		}
+	}
+	return false
+}
+
+// closeInactive closes the current alerts of every Plan whose Levels are all
+// inactive now. The judgement is from memory; the store is touched only
+// when a batch is ready to send, for the owner check before the send and
+// the send itself.
+func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plans []controlplane.MaintenancePlan) {
+	if len(plans) == 0 {
+		return
+	}
+	at := m.bundle.dependencies.Now()
 	start := m.planCursor[qg]
 	remaining := m.capacity.CloseBatch
 	for n := 0; n < len(plans); n++ {
@@ -210,14 +369,11 @@ func (m *effectiveMaintenance) group(ctx context.Context, qg execution.QueryGrou
 		plan := plans[i]
 		m.planCursor[qg] = (i + 1) % len(plans)
 		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		if plan.CloseUnavailable || plan.Compiled.WireFormat() != contract.WireFormatStandardRawEvent {
-			continue
+			return
 		}
 		fact, err := plan.Compiled.ResolveEffectiveTimeWithProvider(ctx, at.Unix(), plan.Identity.BusinessID, m.legacy)
 		if err != nil {
-			m.observe(ctx, qg, "effective_time_unknown", err, 0)
+			m.observe(ctx, qg, closeOutcomeEffectiveTimeUnknown, err, 0)
 			continue
 		}
 		if fact.Status() != strategy.EffectiveTimeInactive {
@@ -240,25 +396,23 @@ func (m *effectiveMaintenance) group(ctx context.Context, qg execution.QueryGrou
 		}
 		business, err := strconv.ParseInt(plan.Identity.BusinessID, 10, 64)
 		if err != nil {
-			m.observe(ctx, qg, "close_identity_invalid", err, 0)
+			m.observe(ctx, qg, closeOutcomeIdentityInvalid, err, 0)
 			continue
 		}
 		ref := plan.Compiled.StrategyRef()
 		strategyID, err := strconv.ParseInt(ref.StrategyID, 10, 64)
 		if err != nil {
-			m.observe(ctx, qg, "close_identity_invalid", err, 0)
+			m.observe(ctx, qg, closeOutcomeIdentityInvalid, err, 0)
 			continue
 		}
 		batch := make([]linkdoutput.CloseRequest, 0, m.capacity.CloseBatch)
+		withoutSeverity := 0
 		for _, alert := range alerts {
 			if alert.EventSourceID != m.sourceID {
 				continue
 			}
 			if alert.Severity == "" {
-				if at.Sub(m.metadataReported[key]) >= time.Minute {
-					m.metadataReported[key] = at
-					m.observe(ctx, qg, "close_metadata_missing", errors.New("Linkd reconciliation does not expose active severity"), 0)
-				}
+				withoutSeverity++
 				continue
 			}
 			sentKey := key.TenantID + "\x00" + alert.EventSourceID + "\x00" + alert.AlertID
@@ -271,23 +425,54 @@ func (m *effectiveMaintenance) group(ctx context.Context, qg execution.QueryGrou
 				break
 			}
 		}
+		if withoutSeverity > 0 {
+			// Counted per alert on every tick they stay open and unclosable;
+			// the log line stays at one per strategy per minute.
+			m.count(closeOutcomeMetadataMissing, withoutSeverity)
+			if at.Sub(m.metadataReported[key]) >= time.Minute {
+				m.metadataReported[key] = at
+				m.observe(ctx, qg, closeOutcomeMetadataMissing, errors.New("Linkd reconciliation does not expose active severity"), withoutSeverity)
+			}
+		}
 		if len(batch) == 0 {
 			continue
 		}
+		sent, err := m.sendClose(ctx, qg, runner, plan, key, batch)
+		if err != nil {
+			return
+		}
+		remaining -= sent
+		if remaining == 0 {
+			return
+		}
+	}
+}
+
+// sendClose sends one batch under the Query Group's flight and owner check.
+// Each way it can not send is named: the flight busy, the owner check
+// refusing, the boundary having moved to active, the producer failing.
+func (m *effectiveMaintenance) sendClose(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plan controlplane.MaintenancePlan, key openalerts.StrategyKey, batch []linkdoutput.CloseRequest) (int, error) {
+	sent := 0
+	round, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	err := runner.withMaintenance(round, func(round context.Context, check func(context.Context) error) error {
 		// Recheck current ownership and rules immediately before side effects;
 		// never retry an old inactive judgment across an active boundary.
-		if err := check(ctx); err != nil {
-			return err
+		if err := check(round); err != nil {
+			if errors.Is(err, errMaintenanceBusy) {
+				return err
+			}
+			return fmt.Errorf("%w: %w", errClosePrecheck, err)
 		}
 		now := m.bundle.dependencies.Now()
-		fact, err = plan.Compiled.ResolveEffectiveTimeWithProvider(ctx, now.Unix(), plan.Identity.BusinessID, m.legacy)
+		fact, err := plan.Compiled.ResolveEffectiveTimeWithProvider(round, now.Unix(), plan.Identity.BusinessID, m.legacy)
 		if err != nil || fact.Status() != strategy.EffectiveTimeInactive {
-			continue
+			return nil
 		}
 		// Sarama's synchronous ACK wait follows the existing producer timeout;
 		// a context deadline cannot cancel a message already handed to Kafka.
-		if err := m.writer.WriteCloseBatch(ctx, batch); err != nil {
-			return fmt.Errorf("inactive close: %w", err)
+		if err := m.writer.WriteCloseBatch(round, batch); err != nil {
+			return fmt.Errorf("%w: %w", errCloseSend, err)
 		}
 		for _, request := range batch {
 			if len(m.sent) < m.capacity.LocalEntries {
@@ -295,52 +480,72 @@ func (m *effectiveMaintenance) group(ctx context.Context, qg execution.QueryGrou
 			}
 		}
 		m.requestCalibration(key, now)
-		m.observe(ctx, qg, "close_acked", nil, len(batch))
-		remaining -= len(batch)
-		if remaining == 0 {
-			break
-		}
+		sent = len(batch)
+		m.observe(ctx, qg, closeOutcomeAcked, nil, sent)
+		return nil
+	})
+	switch {
+	case err == nil:
+	case errors.Is(err, errMaintenanceBusy):
+		m.observe(ctx, qg, closeOutcomeMaintenanceBusy, err, 0)
+	case errors.Is(err, errClosePrecheck):
+		m.observe(ctx, qg, closeOutcomePrecheckFailed, err, 0)
+	case errors.Is(err, errCloseSend):
+		m.observe(ctx, qg, closeOutcomeSendFailed, err, 0)
+	default:
+		m.observe(ctx, qg, closeOutcomeUnavailable, err, 0)
 	}
-	return nil
+	if err != nil && !errors.Is(err, errMaintenanceBusy) && !errors.Is(err, errCloseSend) {
+		// The owner check refused: the Plans were read under a lease that
+		// has moved. Read them again before the next judgement rather than
+		// judging on what an older lease authorized. A busy flight and a
+		// failed send say nothing about the lease.
+		delete(m.groups, qg)
+	}
+	return sent, err
 }
 
+var (
+	errClosePrecheck = errors.New("inactive close: owner check before send")
+	errCloseSend     = errors.New("inactive close: send")
+)
+
+// refreshLegacy keeps the legacy entries of the Query Group's Plans warm:
+// every Plan on a schedule without a frozen snapshot, within one bounded
+// round. A Plan whose entries were read within the minute costs nothing
+// here, so the round's store reads are the entries that are due, shared
+// across the Plans that name the same business or calendar.
 func (m *effectiveMaintenance) refreshLegacy(ctx context.Context, qg execution.QueryGroupIdentity, plans []controlplane.MaintenancePlan) {
 	if m.legacyCache == nil || len(plans) == 0 {
 		return
 	}
+	round, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
 	start := m.legacyCursor[qg]
 	for n := 0; n < len(plans); n++ {
 		i := (start + n) % len(plans)
 		plan := plans[i]
-		if plan.Compiled.HasEffectiveTimeSnapshot() {
-			continue
+		if round.Err() != nil {
+			// Continue from here next tick; what was refreshed stays fresh
+			// for its minute.
+			m.legacyCursor[qg] = i
+			return
 		}
 		levels := plan.Compiled.Levels()
 		if level := plan.Compiled.NoDataLevel(); level != nil {
 			levels = append(levels, *level)
 		}
-		needed := false
 		var ids []int64
 		for _, level := range levels {
 			r := level.EffectiveTimeRequirement()
-			if r.Kind() != strategy.EffectiveTimeAlways {
-				needed = true
-			}
 			ids = append(ids, r.ActiveCalendarIDs()...)
 			ids = append(ids, r.InactiveCalendarIDs()...)
 		}
-		if !needed {
-			continue
+		if err := m.legacyCache.Refresh(round, plan.Identity.TenantID, plan.Identity.BusinessID, ids); err != nil {
+			m.observe(ctx, qg, closeOutcomeLegacyUnavailable, err, 0)
 		}
-		m.legacyCursor[qg] = (i + 1) % len(plans)
-		round, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-		err := m.legacyCache.Refresh(round, plan.Identity.TenantID, plan.Identity.BusinessID, ids)
-		cancel()
-		if err != nil {
-			m.observe(ctx, qg, "legacy_effective_time_unavailable", err, 0)
-		}
-		return
 	}
+	m.legacyCursor[qg] = 0
 }
 
 // registerExecutedPlans uses the same ownership registry as background
@@ -352,7 +557,7 @@ func (m *effectiveMaintenance) registerExecutedPlans(qg execution.QueryGroupIden
 		keys = append(keys, openalerts.StrategyKey{TenantID: p.TenantID, StrategyID: p.StrategyID})
 	}
 	if err := m.registerKeys(qg, keys, false); err != nil {
-		m.observe(context.Background(), qg, "unavailable", err, 0)
+		m.observe(context.Background(), qg, closeOutcomeUnavailable, err, 0)
 	}
 }
 func (m *effectiveMaintenance) registerKeys(qg execution.QueryGroupIdentity, keys []openalerts.StrategyKey, replace bool) error {
@@ -433,11 +638,17 @@ func (m *effectiveMaintenance) requestCalibration(key openalerts.StrategyKey, at
 	m.cache.RequestReconcile(key)
 }
 
-func (m *effectiveMaintenance) observe(ctx context.Context, qg execution.QueryGroupIdentity, reason string, err error, count int) {
+// observe writes the line and counts the outcome. count is what the outcome
+// is measured in - alerts for close_acked and close_metadata_missing - and
+// one for the outcomes that are events in their own right.
+func (m *effectiveMaintenance) observe(ctx context.Context, qg execution.QueryGroupIdentity, outcome string, err error, count int) {
 	result := observability.ResultSuccess
 	if err != nil {
 		result = observability.ResultDegraded
 	}
+	if outcome != closeOutcomeMetadataMissing {
+		m.count(outcome, max(count, 1))
+	}
 	m.bundle.dependencies.Observer.Observe(ctx, observability.Observation{Component: observability.ComponentRuntime, Stage: observability.StageEffectiveTimeMaintenance, Result: observability.Result(result),
-		ReasonCode: observability.ReasonCode(reason), Trace: observability.TraceFields{QueryGroupKey: string(qg)}, Counts: observability.Counts{Events: int64(count)}, Err: err})
+		ReasonCode: observability.ReasonCode(outcome), Trace: observability.TraceFields{QueryGroupKey: string(qg)}, Counts: observability.Counts{Events: int64(count)}, Err: err})
 }

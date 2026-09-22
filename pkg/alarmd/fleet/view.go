@@ -1824,15 +1824,19 @@ type ControlSourceFacts struct {
 // there at all -- and whether the gate was passing recoveries on the
 // consumer's word or on its own -- could not be read anywhere.
 type OpenAlertSetFacts struct {
-	IndexProtocol       bool     `json:"index_protocol,omitempty"`
-	IndexReadAgeSeconds *float64 `json:"index_read_age_seconds,omitempty"`
-	SubscriptionReady   bool     `json:"subscription_ready,omitempty"`
-	CalibratedSets      int      `json:"calibrated_sets,omitempty"`
-	PendingReads        int      `json:"pending_reads,omitempty"`
-	PendingReconciles   int      `json:"pending_reconciles,omitempty"`
-	MemberBytes         int      `json:"member_bytes,omitempty"`
-	Mode                string   `json:"mode"`
-	StaleBeyondBound    bool     `json:"stale_beyond_bound"`
+	IndexProtocol bool `json:"index_protocol,omitempty"`
+	// CalibrationConfigured is whether a reconciler is bound; false is a
+	// reading, not an absence: with the index protocol and no calibration,
+	// membership is known and no close is ever sent.
+	CalibrationConfigured bool     `json:"calibration_configured"`
+	IndexReadAgeSeconds   *float64 `json:"index_read_age_seconds,omitempty"`
+	SubscriptionReady     bool     `json:"subscription_ready,omitempty"`
+	CalibratedSets        int      `json:"calibrated_sets,omitempty"`
+	PendingReads          int      `json:"pending_reads,omitempty"`
+	PendingReconciles     int      `json:"pending_reconciles,omitempty"`
+	MemberBytes           int      `json:"member_bytes,omitempty"`
+	Mode                  string   `json:"mode"`
+	StaleBeyondBound      bool     `json:"stale_beyond_bound"`
 	// AuthoritativeAgeSeconds is how long ago the last publication was read.
 	// Absent until there has been one; a zero here would read as "just now".
 	AuthoritativeAgeSeconds *float64 `json:"authoritative_age_seconds,omitempty"`

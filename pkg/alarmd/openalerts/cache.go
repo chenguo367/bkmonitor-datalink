@@ -136,7 +136,12 @@ type Stats struct {
 	SubscriptionReady               bool
 	MemberBytes                     int
 	IndexProtocol                   bool
-	Calibrated                      int
+	// CalibrationConfigured says a reconciler is bound: without one the
+	// index knows members but never their severity, so no close is ever
+	// sent, and a deployment has to be able to read that as "off" rather
+	// than wonder why nothing closes.
+	CalibrationConfigured bool
+	Calibrated            int
 }
 
 type member struct {

@@ -360,6 +360,10 @@ func (repository *RedisCatalogRepository) loadQueryGroupObjects(
 			return nil, activationDependencyIO(err)
 		}
 		domain, err := queryGroupObjectDomain(payload)
+		if errors.Is(err, ErrCatalogObjectContractNewer) {
+			repository.observeObjectRead(ctx, objectReadKindQueryGroup, objectReadNewer)
+			return nil, err
+		}
 		if err != nil {
 			repository.observeObjectRead(ctx, objectReadKindQueryGroup, objectReadInvalid)
 			return nil, fmt.Errorf("%w: %v", ErrCatalogObjectCorrupt, err)

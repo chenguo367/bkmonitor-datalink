@@ -684,7 +684,7 @@ func (cache *Cache) ActiveAlerts(key StrategyKey) []Alert {
 func (cache *Cache) indexStats() Stats {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	stats := Stats{Mode: ModeSelfMaintained, IndexProtocol: true, Tracked: len(cache.index.entries), Added: len(cache.added), Removed: len(cache.removed), Evictions: cache.evictions,
+	stats := Stats{Mode: ModeSelfMaintained, IndexProtocol: true, CalibrationConfigured: cache.index.options.Reconciler != nil, Tracked: len(cache.index.entries), Added: len(cache.added), Removed: len(cache.removed), Evictions: cache.evictions,
 		Refreshes: map[string]uint64{}, Unavailable: map[UnavailableReason]uint64{}, Lookups: map[Answer]uint64{}}
 	all := len(cache.index.entries) > 0
 	for _, entry := range cache.index.entries {

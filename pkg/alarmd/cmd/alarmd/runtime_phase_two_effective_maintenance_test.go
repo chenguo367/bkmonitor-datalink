@@ -22,11 +22,18 @@ import (
 )
 
 type maintenanceTestCatalog struct {
-	plans []controlplane.MaintenancePlan
+	plans        []controlplane.MaintenancePlan
+	uncompilable int
+	reads        int
+	err          error
 }
 
-func (c maintenanceTestCatalog) CurrentPlans(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) ([]controlplane.MaintenancePlan, error) {
-	return c.plans, nil
+func (c *maintenanceTestCatalog) CurrentPlans(context.Context, execution.QueryGroupIdentity, execution.EvaluationTime) (controlplane.MaintenancePlans, error) {
+	c.reads++
+	if c.err != nil {
+		return controlplane.MaintenancePlans{}, c.err
+	}
+	return controlplane.MaintenancePlans{Plans: c.plans, Uncompilable: c.uncompilable}, nil
 }
 
 type maintenanceTestIndex struct{ alerts []openalerts.Alert }
@@ -60,13 +67,21 @@ func (w *maintenanceTestWriter) WriteCloseBatch(_ context.Context, requests []li
 
 type maintenanceTestRunner struct {
 	fakePhaseTwoQueryGroup
-	check   func(context.Context) error
-	lastErr error
+	check    func(context.Context) error
+	lastErr  error
+	scope    string
+	revision uint64
+	entered  int
 }
 
 func (r *maintenanceTestRunner) withMaintenance(ctx context.Context, run func(context.Context, func(context.Context) error) error) error {
+	r.entered++
 	r.lastErr = run(ctx, r.check)
 	return r.lastErr
+}
+
+func (r *maintenanceTestRunner) maintenanceLease() (string, uint64, bool) {
+	return r.scope, r.revision, true
 }
 
 type maintenanceTestFixture struct {
@@ -84,9 +99,9 @@ func (f *maintenanceTestFixture) advance(d time.Duration) {
 	f.at = f.at.Add(d)
 }
 
-func newMaintenanceTestFixture(t *testing.T, snapshot string, at time.Time, alerts []openalerts.Alert) *maintenanceTestFixture {
+func newMaintenanceTestFixture(t *testing.T, snapshot string, at time.Time, alerts []openalerts.Alert, mutate ...func(*contract.EvaluationPlanV2)) *maintenanceTestFixture {
 	t.Helper()
-	f := &maintenanceTestFixture{at: at, writer: &maintenanceTestWriter{}, runner: &maintenanceTestRunner{check: func(context.Context) error { return nil }}}
+	f := &maintenanceTestFixture{at: at, writer: &maintenanceTestWriter{}, runner: &maintenanceTestRunner{check: func(context.Context) error { return nil }, scope: "obj-a", revision: 1}}
 	catalog := productionG4Catalog(t, 123, "Threshold", "usage", "system.cpu", []string{"host"}, [][]map[string]any{{{"method": "gte", "threshold": 50}}})
 	group := catalog.QueryGroups[0]
 	p := group.Plans[0]
@@ -96,6 +111,9 @@ func newMaintenanceTestFixture(t *testing.T, snapshot string, at time.Time, aler
 	p.Plan.StrategyIR.StrategyRef.SnapshotRevision = 4
 	p.Plan.StrategyIR.Levels[0].TriggerPlan.Config = json.RawMessage(`{"window_size":1,"required_anomalies":1,"step_seconds":60,"timezone_ref":"BUSINESS_LOCAL","uptime":{"time_ranges":[{"start":"09:00","end":"17:00"}],"active_calendars":[],"calendars":[]}}`)
 	p.Plan.EffectiveTimeSnapshot = json.RawMessage(snapshot)
+	for _, m := range mutate {
+		m(&p.Plan)
+	}
 	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), config.Default().CompilerLimits())
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +149,7 @@ func newMaintenanceTestFixture(t *testing.T, snapshot string, at time.Time, aler
 		time.Sleep(time.Millisecond)
 	}
 	bundle := &phaseTwoWorkerBundle{dependencies: phaseTwoWorkerBundleDependencies{Now: f.now, Observer: observability.NopObserver{}}, runners: map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle{group.Identity: {runner: f.runner}}}
-	f.m = &effectiveMaintenance{bundle: bundle, catalog: maintenanceTestCatalog{plans: []controlplane.MaintenancePlan{{Identity: p.Identity, Compiled: compiled}}}, cache: cache, writer: f.writer, sourceID: "native", capacity: config.LinkdCapacity{GroupBatch: 2, CloseBatch: 5, LocalEntries: 100}}
+	f.m = &effectiveMaintenance{bundle: bundle, catalog: &maintenanceTestCatalog{plans: []controlplane.MaintenancePlan{{Identity: p.Identity, Compiled: compiled}}}, cache: cache, writer: f.writer, sourceID: "native", capacity: config.LinkdCapacity{GroupBatch: 2, CloseBatch: 5, LocalEntries: 100}}
 	return f
 }
 
@@ -289,7 +307,7 @@ func TestEffectiveMaintenanceRealSessionRejectsLostFenceAndChangedTimeline(t *te
 
 func TestEffectiveMaintenanceSharesExecutionTrackingWithoutLosingACK(t *testing.T) {
 	f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(8, 0), nil)
-	plan := f.m.catalog.(maintenanceTestCatalog).plans[0].Identity
+	plan := f.m.catalog.(*maintenanceTestCatalog).plans[0].Identity
 	var qg execution.QueryGroupIdentity
 	for id := range f.m.bundle.runners {
 		qg = id

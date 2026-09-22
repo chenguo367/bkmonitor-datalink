@@ -8,6 +8,8 @@ package controlplane
 import (
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -41,7 +43,29 @@ const (
 	queryGroupObjectContractVersionV2 = "alarmd-query-group-object-v2"
 	queryGroupObjectContractVersionV3 = "alarmd-query-group-object-v3"
 	outputContextContractVersion      = "alarmd-output-context-v1"
+
+	// The two contracts' version strings are a prefix and a number, and the
+	// number is how a reader tells an object of a later contract from bytes
+	// that are not an object at all: later is a rollout, the rest is
+	// corruption. The latest numbers are the ones the known-version checks
+	// above accept; a version bump moves both.
+	queryGroupObjectContractPrefix = "alarmd-query-group-object-v"
+	queryGroupObjectContractLatest = 3
+	outputContextContractPrefix    = "alarmd-output-context-v"
+	outputContextContractLatest    = 1
 )
+
+// newerContractVersion reports whether version names a later version of the
+// contract whose versions are prefix followed by a number, latest being the
+// last one this build reads.
+func newerContractVersion(version, prefix string, latest int) bool {
+	number, found := strings.CutPrefix(version, prefix)
+	if !found {
+		return false
+	}
+	parsed, err := strconv.Atoi(number)
+	return err == nil && parsed > latest
+}
 
 // queryGroupObjectVersion is the contract version an object is written
 // under: v2 as soon as one of its Plans carries the target's second frozen
@@ -79,7 +103,29 @@ func queryGroupObjectDomain(payload []byte) (string, error) {
 		return "", err
 	}
 	if !knownQueryGroupObjectVersion(header.ContractVersion) {
+		if newerContractVersion(header.ContractVersion, queryGroupObjectContractPrefix, queryGroupObjectContractLatest) {
+			return "", ErrCatalogObjectContractNewer
+		}
 		return "", errors.New("not a Query Group object of this contract")
+	}
+	return header.ContractVersion, nil
+}
+
+// outputContextDomain is queryGroupObjectDomain for output contexts: the one
+// version this build reads is the domain, a later version is refused as
+// newer, anything else is not an output context.
+func outputContextDomain(payload []byte) (string, error) {
+	var header struct {
+		ContractVersion string `json:"output_context_contract_version"`
+	}
+	if err := json.Unmarshal(payload, &header); err != nil {
+		return "", err
+	}
+	if header.ContractVersion != outputContextContractVersion {
+		if newerContractVersion(header.ContractVersion, outputContextContractPrefix, outputContextContractLatest) {
+			return "", ErrCatalogObjectContractNewer
+		}
+		return "", errors.New("not an output context of this contract")
 	}
 	return header.ContractVersion, nil
 }

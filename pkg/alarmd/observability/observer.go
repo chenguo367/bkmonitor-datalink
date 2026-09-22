@@ -1209,7 +1209,7 @@ type ObjectReadFacts struct {
 // ObjectReadFacts; a value outside them is reported as "other".
 var (
 	ObjectReadKinds   = []string{"query_group", "output_context", "segment", "manifest"}
-	ObjectReadResults = []string{"hit", "miss", "share", "missing", "invalid", "object", "legacy_segment", "segment_without_ref", "object_missing", "object_invalid", "object_mismatch"}
+	ObjectReadResults = []string{"hit", "miss", "share", "missing", "invalid", "newer", "object", "legacy_segment", "segment_without_ref", "object_missing", "object_invalid", "object_newer", "object_mismatch"}
 )
 
 // StateGenerationSkewFacts report a due Plan whose state generation, as the
@@ -3230,10 +3230,54 @@ var allDirections = []Direction{DirectionInput, DirectionOutput, DirectionIntern
 // change what counts as a resource reason.
 var unclassifiedReasons = []ReasonCode{ReasonNone, ReasonInternalUnknown, ReasonNotReported}
 
+// The effective-time maintenance's outcomes: the closed list of what one
+// maintenance step does to a Query Group, an alert or a close batch. They
+// are the reason of its log line and the outcome label of
+// effective_close_total, which pre-creates every cell; before the counter
+// existed the whole close chain normalized to reason_code=other on the
+// metrics side and had no cell of its own.
+const (
+	// EffectiveCloseAcked counts alerts closed, one per alert the broker
+	// acknowledged.
+	EffectiveCloseAcked ReasonCode = "close_acked"
+	// EffectiveCloseMetadataMissing counts alerts that could not be closed
+	// because the reconciliation exposes no severity for them, once per
+	// evaluation they stay open and unclosable.
+	EffectiveCloseMetadataMissing ReasonCode = "close_metadata_missing"
+	// EffectiveClosePrecheckFailed is the owner and content check before a
+	// send refusing: the fence, the content scope or the timeline moved.
+	EffectiveClosePrecheckFailed ReasonCode = "close_precheck_failed"
+	// EffectiveCloseSendFailed is the producer not acknowledging a batch.
+	EffectiveCloseSendFailed ReasonCode = "close_send_failed"
+	// EffectiveCloseMaintenanceBusy is a close that could not take the Query
+	// Group's flight because a Slot was executing. Once is nothing; on every
+	// tick it is a Query Group whose close never happens, which used to be
+	// the same silence as a Query Group with nothing to close.
+	EffectiveCloseMaintenanceBusy ReasonCode = "maintenance_busy"
+	// EffectiveClosePlanUncompilable counts activated Plans the maintenance
+	// read could not compile and so cannot judge.
+	EffectiveClosePlanUncompilable ReasonCode = "maintenance_plan_uncompilable"
+	EffectiveCloseIdentityInvalid  ReasonCode = "close_identity_invalid"
+	// EffectiveCloseEffectiveTimeUnknown is a Plan whose effective time could
+	// not be resolved at all.
+	EffectiveCloseEffectiveTimeUnknown ReasonCode = "effective_time_unknown"
+	EffectiveCloseLegacyUnavailable    ReasonCode = "legacy_effective_time_unavailable"
+	// EffectiveCloseUnavailable is the Query Group's Plans not readable, or
+	// its owner not accepting.
+	EffectiveCloseUnavailable       ReasonCode = "unavailable"
+	EffectiveCloseUnsupportedRunner ReasonCode = "unsupported_runner"
+)
+
+// EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
+// cell and for a reader to bound the family by.
+var EffectiveCloseOutcomes = []ReasonCode{
+	EffectiveCloseAcked, EffectiveCloseMetadataMissing, EffectiveClosePrecheckFailed, EffectiveCloseSendFailed,
+	EffectiveCloseMaintenanceBusy, EffectiveClosePlanUncompilable, EffectiveCloseIdentityInvalid,
+	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
+}
+
 // Maintenance details are bounded log reasons, not new metric label dimensions.
-var effectiveMaintenanceReasons = []ReasonCode{
-	"unsupported_runner", "unavailable", "legacy_effective_time_unavailable", "effective_time_unknown",
-	"close_identity_invalid", "close_metadata_missing", "close_acked"}
+var effectiveMaintenanceReasons = EffectiveCloseOutcomes
 var contractClassReasons = []ReasonCode{
 	ReasonContractDeterministic, ReasonContractRetryable, ReasonContractCoverage,
 }
