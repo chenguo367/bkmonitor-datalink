@@ -1205,6 +1205,11 @@ type Anomaly struct {
 	// from it, which is what keeps the verdict and the first screen from
 	// classifying one object two ways.
 	Finding Finding `json:"finding"`
+	// Standing is the row in the product vocabulary: the two words a reader
+	// sees, decided from the finding and the row's facts by the rules in
+	// words.go, with the check as their coordinate. Set when the row is
+	// listed, after every fact it reads is on the row.
+	Standing *Standing `json:"standing,omitempty"`
 	// Unclassified says this object is counted against the deployment because
 	// no rule matched, not because a rule said so. A release that adds a
 	// vocabulary of failure codes puts every one of them here until somebody

@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -321,6 +322,10 @@ func shortObjectName(queryGroup string) string {
 func WithStrategyStanding(next http.Handler, service *Service, lookup StrategyLookupFunc, forward LeaderForward,
 	loader StrategyObjectLoader, replica string, now func() time.Time, stallAfter time.Duration) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/api/strategies" {
+			serveStrategyList(response, request, service, now, stallAfter)
+			return
+		}
 		if !strings.HasPrefix(request.URL.Path, "/api/strategies/") {
 			next.ServeHTTP(response, request)
 			return
@@ -397,3 +402,67 @@ const forwardedHeader = "X-Alarmd-Forwarded"
 
 // ForwardedHeader is the header's name, for the runtime's forwarder.
 func ForwardedHeader() string { return forwardedHeader }
+
+// serveStrategyList is GET /api/strategies[?state=&action=&limit=]: one
+// line per strategy over the fleet's view, most severe first, with the
+// vocabulary the words are rendered from. The filter words are the closed
+// lists' own; an unknown one is refused, not ignored, so a reader cannot
+// ask for a column and get every column.
+func serveStrategyList(response http.ResponseWriter, request *http.Request, service *Service, now func() time.Time, stallAfter time.Duration) {
+	if request.Method != http.MethodGet {
+		response.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if service == nil {
+		writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "FLEET_NOT_WIRED"})
+		return
+	}
+	query := request.URL.Query()
+	state, action := StateWord(query.Get("state")), ActionWord(query.Get("action"))
+	if state != "" && !knownStateWord(state) {
+		writeJSON(response, http.StatusBadRequest, map[string]any{"error": "STATE_UNKNOWN", "state": state, "accepted": StateWords})
+		return
+	}
+	if action != "" && !knownActionWord(action) {
+		writeJSON(response, http.StatusBadRequest, map[string]any{"error": "ACTION_UNKNOWN", "action": action, "accepted": ActionWords})
+		return
+	}
+	limit := MaxStrategyLines
+	if raw := query.Get("limit"); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 {
+			writeJSON(response, http.StatusBadRequest, map[string]string{"error": "LIMIT_INVALID", "limit": raw})
+			return
+		}
+		if parsed < limit {
+			limit = parsed
+		}
+	}
+	current := service.View(request.Context())
+	Decide(&current, now(), stallAfter)
+	lines := FilterStrategyLines(StrategyLines(&current, now()), state, action)
+	body := StrategyListResponse{Words: ProductWords(), Strategies: lines, Total: len(lines), State: state, Action: action}
+	if len(lines) > limit {
+		body.Strategies, body.Truncated = lines[:limit], true
+	}
+	body.Listed = len(body.Strategies)
+	writeJSON(response, http.StatusOK, body)
+}
+
+func knownStateWord(word StateWord) bool {
+	for _, known := range StateWords {
+		if known == word {
+			return true
+		}
+	}
+	return false
+}
+
+func knownActionWord(word ActionWord) bool {
+	for _, known := range ActionWords {
+		if known == word {
+			return true
+		}
+	}
+	return false
+}
