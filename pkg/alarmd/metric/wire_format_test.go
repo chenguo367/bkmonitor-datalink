@@ -131,3 +131,48 @@ func TestOutputEventsWithoutMessageAreSeriesFromStartupAndSumTheSinksBreakdown(t
 		t.Fatalf("%d series after the lines, want the same %d: an unknown kind folds rather than creating a cell", len(after), cells)
 	}
 }
+
+// Every format x kind is a series from startup, and each ACK line adds its
+// kinds to the cells; an unknown kind folds; a line that is not an ACK adds
+// nothing. The standard-line recovery is its own cell: the question this
+// family exists for.
+func TestOutputEventsByKindAreSeriesFromStartupAndSumTheACKLines(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	const family = "bkmonitor_alarmd_output_events_by_kind_total"
+	cells := len(observability.WireFormats) * len(observability.OutputEventKinds)
+	if before := gatherFamily(t, r, family); len(before) != cells {
+		t.Fatalf("%d series before any ACK, want every format x kind (%d)", len(before), cells)
+	}
+	ctx := context.Background()
+	r.Observe(ctx, observability.Observation{
+		Component: observability.ComponentOutput, Stage: observability.StageEventACKed, Result: observability.ResultSuccess,
+		OutputEventKinds: observability.OutputEventKindCounts{
+			{Format: contract.WireFormatStandardRawEvent, EventKind: contract.TriggerEventRecovery}: 2,
+			{Format: contract.WireFormatStandardRawEvent, EventKind: contract.TriggerEventAbnormal}: 5,
+			{Format: contract.WireFormatPythonCompatible, EventKind: "SOMETHING_NEW"}:               1,
+		},
+	})
+	r.Observe(ctx, observability.Observation{
+		Component: observability.ComponentOutput, Stage: observability.StageEventACKed, Result: observability.ResultDegraded,
+		OutputEventKinds: observability.OutputEventKindCounts{{Format: contract.WireFormatStandardRawEvent, EventKind: contract.TriggerEventRecovery}: 3},
+	})
+	r.Observe(ctx, observability.Observation{
+		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
+		OutputEventKinds: observability.OutputEventKindCounts{{Format: contract.WireFormatStandardRawEvent, EventKind: contract.TriggerEventRecovery}: 100},
+	})
+	count := func(format, kind string) float64 {
+		return testutil.ToFloat64(r.phaseTwo.outputEventsByKind.WithLabelValues(format, kind))
+	}
+	if got := count(contract.WireFormatStandardRawEvent, contract.TriggerEventRecovery); got != 5 {
+		t.Fatalf("standard_raw_event/RECOVERY = %v, want 5 (2 taken + 3 refused)", got)
+	}
+	if got := count(contract.WireFormatStandardRawEvent, contract.TriggerEventAbnormal); got != 5 {
+		t.Fatalf("standard_raw_event/ABNORMAL = %v, want 5", got)
+	}
+	if got := count(contract.WireFormatPythonCompatible, observability.EventKindOther); got != 1 {
+		t.Fatalf("python_compatible/_other = %v, want the unknown kind folded", got)
+	}
+	if after := gatherFamily(t, r, family); len(after) != cells {
+		t.Fatalf("%d series after, want the same %d", len(after), cells)
+	}
+}

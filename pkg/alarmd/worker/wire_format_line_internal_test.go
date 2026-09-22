@@ -48,10 +48,10 @@ func TestTheACKLineCountsTheBatchByWireFormat(t *testing.T) {
 				}),
 			}}
 			events := []contract.TriggerEventV1{
-				{WireFormat: contract.WireFormatPythonCompatible, PlanRef: contract.RuntimePlanRefV1{StrategyID: "4101"}},
-				{WireFormat: contract.WireFormatPythonCompatible, PlanRef: contract.RuntimePlanRefV1{StrategyID: "4101"}},
-				{WireFormat: contract.WireFormatStandardRawEvent, PlanRef: contract.RuntimePlanRefV1{StrategyID: "4102"}},
-				{PlanRef: contract.RuntimePlanRefV1{StrategyID: "4103"}},
+				{WireFormat: contract.WireFormatPythonCompatible, EventKind: contract.TriggerEventAbnormal, PlanRef: contract.RuntimePlanRefV1{StrategyID: "4101"}},
+				{WireFormat: contract.WireFormatPythonCompatible, EventKind: contract.TriggerEventRecovery, PlanRef: contract.RuntimePlanRefV1{StrategyID: "4101"}},
+				{WireFormat: contract.WireFormatStandardRawEvent, EventKind: contract.TriggerEventRecovery, PlanRef: contract.RuntimePlanRefV1{StrategyID: "4102"}},
+				{EventKind: contract.TriggerEventAbnormal, PlanRef: contract.RuntimePlanRefV1{StrategyID: "4103"}},
 			}
 			err := coordinator.writeEvents(context.Background(), execution.OperationNormal, events)
 			if (err != nil) != (testCase.err != nil) {
@@ -75,6 +75,32 @@ func TestTheACKLineCountsTheBatchByWireFormat(t *testing.T) {
 			for format, count := range want {
 				if acked.OutputWireFormats[format] != count {
 					t.Fatalf("counts = %v, want %v", acked.OutputWireFormats, want)
+				}
+			}
+			// The same events once more by kind: the python recovery and
+			// the standard recovery are told apart from the anomalies, and
+			// the kinds under a format sum to the format's count.
+			wantKinds := observability.OutputEventKindCounts{
+				{Format: contract.WireFormatPythonCompatible, EventKind: contract.TriggerEventAbnormal}: 1,
+				{Format: contract.WireFormatPythonCompatible, EventKind: contract.TriggerEventRecovery}: 1,
+				{Format: contract.WireFormatStandardRawEvent, EventKind: contract.TriggerEventRecovery}: 1,
+				{Format: observability.WireFormatOther, EventKind: contract.TriggerEventAbnormal}:       1,
+			}
+			if len(acked.OutputEventKinds) != len(wantKinds) {
+				t.Fatalf("kinds = %v, want %v", acked.OutputEventKinds, wantKinds)
+			}
+			for key, count := range wantKinds {
+				if acked.OutputEventKinds[key] != count {
+					t.Fatalf("kinds = %v, want %v", acked.OutputEventKinds, wantKinds)
+				}
+			}
+			byFormat := map[string]int64{}
+			for key, count := range acked.OutputEventKinds {
+				byFormat[key.Format] += count
+			}
+			for format, count := range acked.OutputWireFormats {
+				if byFormat[format] != count {
+					t.Fatalf("kinds under %s sum to %d, want the format's %d", format, byFormat[format], count)
 				}
 			}
 		})

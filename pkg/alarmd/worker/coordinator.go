@@ -1626,6 +1626,7 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 	// event carries beside it. On the line whether the write succeeded or
 	// not: a batch the broker refused still says what it was.
 	formats := observability.OutputWireFormatCounts{}
+	kinds := observability.OutputEventKindCounts{}
 	for _, event := range events {
 		format := event.WireFormat
 		if format == "" {
@@ -1634,13 +1635,14 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 			format = observability.WireFormatOther
 		}
 		formats[format]++
+		kinds[observability.OutputEventKindKey{Format: format, EventKind: event.EventKind}]++
 	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		ReasonCode: observability.ReasonCode(reason), Duration: time.Since(started),
 		Counts: observability.Counts{Events: int64(len(events))}, Err: err, OutputRejection: rejection,
-		OutputWrite: outputWrite(), OutputWireFormats: formats,
+		OutputWrite: outputWrite(), OutputWireFormats: formats, OutputEventKinds: kinds,
 	})
 	if err != nil {
 		return fmt.Errorf("alarmd worker: acknowledge events: %w", err)

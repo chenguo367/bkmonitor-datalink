@@ -64,10 +64,20 @@ func TestTheWireFormatIsOnTheEvaluationAndACKLines(t *testing.T) {
 		Component: ComponentOutput, Stage: StageEventACKed, Result: ResultSuccess,
 		Trace:             TraceFields{StrategyID: "4101", QueryGroupKey: "qg-wire", EvaluationTime: 600},
 		OutputWireFormats: OutputWireFormatCounts{contract.WireFormatPythonCompatible: 12, contract.WireFormatStandardRawEvent: 1},
+		OutputEventKinds: OutputEventKindCounts{
+			{Format: contract.WireFormatPythonCompatible, EventKind: contract.TriggerEventAbnormal}: 12,
+			{Format: contract.WireFormatStandardRawEvent, EventKind: contract.TriggerEventRecovery}: 1,
+		},
 	})
 	event = map[string]any{}
 	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
 		t.Fatalf("decode ACK log: %v; log=%s", err, output.String())
+	}
+	// The kinds under their own keys beside the formats: the standard-line
+	// recovery is findable by name.
+	if event["wire_format_events_standard_raw_event_recovery"] != float64(1) || event["wire_format_events_python_compatible_abnormal"] != float64(12) {
+		t.Fatalf("ACK line kinds = %#v / %#v, want 1 and 12; event=%#v",
+			event["wire_format_events_standard_raw_event_recovery"], event["wire_format_events_python_compatible_abnormal"], event)
 	}
 	if event["wire_format_events_python_compatible"] != float64(12) || event["wire_format_events_standard_raw_event"] != float64(1) {
 		t.Fatalf("ACK line counts = %#v / %#v, want 12 and 1; event=%#v",

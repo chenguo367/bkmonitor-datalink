@@ -429,6 +429,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_catalog_plans_by_wire_format"] = "variableLabels: {format}"
 	expected["bkmonitor_alarmd_output_events_by_wire_format_total"] = "variableLabels: {format}"
 	expected["bkmonitor_alarmd_output_events_without_message_total"] = "variableLabels: {format,event_kind}"
+	expected["bkmonitor_alarmd_output_events_by_kind_total"] = "variableLabels: {format,event_kind}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_absences_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_target_plan_resolution_total"] = "variableLabels: {state}"
@@ -940,6 +941,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("catalog_plans_by_wire_format")] = len(observability.WireFormats)
 	bounds[fqName("output_events_by_wire_format_total")] = len(observability.WireFormats)
 	bounds[fqName("output_events_without_message_total")] = len(observability.WireFormats) * len(observability.OutputEventKinds)
+	bounds[fqName("output_events_by_kind_total")] = len(observability.WireFormats) * len(observability.OutputEventKinds)
 	// The four outcomes a no-data Plan can land on, and no more: the label is
 	// filled from the same list the evaluation publishes, and all four are
 	// created at startup so a zero on the one that never resolves on its own

@@ -66,6 +66,7 @@ type phaseTwoMetrics struct {
 	executionEvidenceWrites         *prometheus.CounterVec
 	outputEventsByWireFormat        *prometheus.CounterVec
 	outputEventsWithoutMessage      *prometheus.CounterVec
+	outputEventsByKind              *prometheus.CounterVec
 	frozenStateRenewals             *prometheus.CounterVec
 	frozenStateCensus               *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
@@ -692,6 +693,25 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.outputEventsWithoutMessage.WithLabelValues(format, kind)
 		}
 	}
+	metrics.outputEventsByKind = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "output_events_by_kind_total",
+		Help: "Events handed to the output sink, by the wire format they were published as and their " +
+			"kind: output_events_by_wire_format_total split once more, the same events counted at the " +
+			"same site. It exists for one question the format alone cannot answer: whether a RECOVERY " +
+			"left on the standard raw event line -- after a window that held a series filled, the " +
+			"recovery the trigger then decides is an event of this kind under that format, and a " +
+			"deployment reading only the format count sees the anomaly and the recovery as one number. " +
+			"Read {format=\"standard_raw_event\",event_kind=\"RECOVERY\"} against " +
+			"output_events_without_message_total for the same pair: on the standard line every " +
+			"recovery becomes a message, so the difference is what the broker was handed. Counted on " +
+			"every event_acked, refused batches included. Every format and kind is created at startup; " +
+			"an unnamed kind or format folds to _other.",
+	}, []string{"format", "event_kind"})
+	for _, format := range observability.WireFormats {
+		for _, kind := range observability.OutputEventKinds {
+			metrics.outputEventsByKind.WithLabelValues(format, kind)
+		}
+	}
 	for _, reason := range controlplane.CutoverReasons {
 		metrics.scheduleCutovers.WithLabelValues("failure", reason)
 	}
@@ -1133,7 +1153,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
-		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.frozenStateRenewals, m.frozenStateCensus)...)
+		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.frozenStateRenewals, m.frozenStateCensus)...)
 }
 
 func (m phaseTwoMetrics) observe(observation observability.Observation) {
@@ -1355,6 +1375,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if observation.Stage == observability.StageEventACKed {
 		for format, count := range observation.OutputWireFormats {
 			m.outputEventsByWireFormat.WithLabelValues(observability.NormalizeWireFormat(format)).Add(float64(count))
+		}
+		for key, count := range observation.OutputEventKinds {
+			m.outputEventsByKind.WithLabelValues(
+				observability.NormalizeWireFormat(key.Format), observability.NormalizeOutputEventKind(key.EventKind),
+			).Add(float64(count))
 		}
 		if write := observation.OutputWrite; write != nil {
 			for _, bucket := range write.WithoutMessageBy {
