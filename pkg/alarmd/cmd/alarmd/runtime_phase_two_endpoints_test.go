@@ -609,3 +609,19 @@ func TestTheOpenAlertPublicationHasADependencyRowWithTheReadersAccount(t *testin
 		}
 	}
 }
+
+func TestOpenAlertIndexReadDoesNotBecomeWriterHeartbeat(t *testing.T) {
+	cfg := config.Default()
+	age := 2.0
+	account := &fleet.OpenAlertSetFacts{IndexProtocol: true, IndexReadAgeSeconds: &age, SubscriptionReady: true, Members: 3}
+	rows := endpointFactsSource(cfg, endpointSharing{}, nil, nil, nil, func() *fleet.SourceFacts { return nil }, nil, func() *fleet.OpenAlertSetFacts { return account }, time.Now)()
+	for _, row := range rows {
+		if row.Role == fleet.EndpointOpenAlertSet {
+			if row.Writer != nil || row.OpenAlertSet != account {
+				t.Fatalf("reader evidence claimed a writer: %+v", row)
+			}
+			return
+		}
+	}
+	t.Fatal("missing open alert endpoint")
+}

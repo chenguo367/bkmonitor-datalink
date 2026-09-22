@@ -1455,9 +1455,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	// even if no record of this round asks about it. The constructor requires
 	// the port; the guard is for tests that build the struct.
 	if openAlerts := stream.coordinator.ports.OpenAlerts; openAlerts != nil {
-		if due.CompiledPlan.WireFormat() == contract.WireFormatStandardRawEvent {
-			openAlerts.TrackPlans(stream.header.Contract.Slot.QueryGroup, []execution.PlanIdentity{due.Identity})
-		}
+		openAlerts.TrackPlans(stream.header.Contract.Slot.QueryGroup, []execution.PlanIdentity{due.Identity})
 		request.OpenAlerts = openAlerts
 	}
 	started := time.Now()

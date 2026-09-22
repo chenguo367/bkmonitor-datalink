@@ -194,9 +194,7 @@ func (m *effectiveMaintenance) group(ctx context.Context, qg execution.QueryGrou
 	} // Keep known tracking on transient reads.
 	keys := make([]openalerts.StrategyKey, 0, len(plans))
 	for _, plan := range plans {
-		if plan.Compiled.WireFormat() == contract.WireFormatStandardRawEvent {
-			keys = append(keys, openalerts.StrategyKey{TenantID: plan.Identity.TenantID, StrategyID: plan.Identity.StrategyID})
-		}
+		keys = append(keys, openalerts.StrategyKey{TenantID: plan.Identity.TenantID, StrategyID: plan.Identity.StrategyID})
 	}
 	if err := m.registerKeys(qg, keys, true); err != nil {
 		return err

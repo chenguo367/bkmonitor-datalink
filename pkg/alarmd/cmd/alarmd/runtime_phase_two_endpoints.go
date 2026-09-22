@@ -31,6 +31,7 @@ import (
 // role, because a role with no client of its own has no health of its own.
 type endpointSharing struct {
 	runtimeIsSource       bool
+	linkdDedicated        bool
 	cmdbSharedWith        string
 	dynamicSharedWith     string
 	targetGroupSharedWith string
@@ -64,8 +65,9 @@ func (sharing endpointSharing) redisClientForRole(role string) string {
 		}
 		return "target_group"
 	case fleet.EndpointOpenAlertSet:
-		// Read through the state store's client: the publication lives on
-		// the state Redis under its own fixed prefix.
+		if sharing.linkdDedicated {
+			return "linkd"
+		}
 		return sharing.redisClientForRole(fleet.EndpointStateRedis)
 	case fleet.EndpointCompatOutput:
 		return "legacy_output"
@@ -151,6 +153,7 @@ func endpointFactsSource(
 	source func() *fleet.SourceFacts, outputSink func() outputSinkState, openAlerts func() *fleet.OpenAlertSetFacts,
 	now func() time.Time,
 ) func() []fleet.Endpoint {
+	sharing.linkdDedicated = cfg.PhaseTwo.Linkd.Connection != nil && !reflect.DeepEqual(*cfg.PhaseTwo.Linkd.Connection, cfg.RuntimeStoreRedis())
 	static := resolveEndpoints(cfg, sharing)
 	return func() []fleet.Endpoint {
 		at := now()
@@ -255,14 +258,15 @@ func endpointFactsSource(
 						// full account rides beside it.
 						writer := &fleet.WriterEvidence{Present: facts.AuthoritativeAgeSeconds != nil, Count: facts.Members,
 							AgeSeconds: facts.HeartbeatAgeSeconds, State: facts.Mode}
-						if facts.IndexProtocol {
-							writer.Present = facts.IndexReadAgeSeconds != nil
-							writer.AgeSeconds = facts.IndexReadAgeSeconds
-						}
 						if facts.UnavailableReason != "" {
 							writer.State = facts.Mode + ":" + facts.UnavailableReason
 						}
 						entry.Writer = writer
+						// A successful read is not evidence of a recent writer.
+						// The index protocol has no publisher heartbeat.
+						if facts.IndexProtocol {
+							entry.Writer = nil
+						}
 						entry.OpenAlertSet = facts
 					}
 				}
