@@ -1554,6 +1554,13 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	// those moves and under the same readings, so it neither undoes them
 	// nor fills a destination past its share.
 	stable, remaining := runtime.observeReadySet(authority, workers, at)
+	// The split contract's gate (decision-020 section 4.7.7), decided on
+	// the same ready set: no split is published this round unless every
+	// ready worker declares it, and the replicas that do not are named on
+	// the round's facts. Nothing asks for a split yet; the gate and its
+	// reading exist so a roll can be watched going 0 -> n -> 0 before one
+	// does.
+	shardGate := ownership.ShardSplitAdmission(workers)
 	readings := runtime.dependencies.Costs.Readings(owners, workers)
 	bytePlan := runtime.reconciler.PlanByteMoves(owners, workers, readings, at)
 	byteMoves := make([]scheduler.RebalanceMove, 0, len(bytePlan.Moves))
@@ -1565,7 +1572,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		owners[move.QueryGroup] = move.To
 	}
 	if err != nil {
-		runtime.observeRebalance(ctx, scheduler.RebalancePlan{Owned: map[string]int{}}, rebalanceOutcome{}, bytePlan, byteOutcome, at)
+		runtime.observeRebalance(ctx, scheduler.RebalancePlan{Owned: map[string]int{}}, rebalanceOutcome{}, bytePlan, byteOutcome, shardGate, at)
 		return err
 	}
 	plan := runtime.reconciler.PlanRebalanceWithBytes(owners, workers, readings, at)
@@ -1573,7 +1580,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	for _, move := range outcome.applied {
 		owners[move.QueryGroup] = move.To
 	}
-	runtime.observeRebalance(ctx, plan, outcome, bytePlan, byteOutcome, at)
+	runtime.observeRebalance(ctx, plan, outcome, bytePlan, byteOutcome, shardGate, at)
 	if err != nil {
 		return err
 	}
@@ -1808,6 +1815,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 	outcome rebalanceOutcome,
 	bytePlan scheduler.BytePlan,
 	byteOutcome rebalanceOutcome,
+	shardGate ownership.ShardSplitGate,
 	at time.Time,
 ) {
 	facts := &observability.RebalanceFacts{
@@ -1815,7 +1823,8 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		MostOwned: plan.MostOwned, LeastOwned: plan.LeastOwned, Batch: plan.Batch, PlannedMoves: len(plan.Moves),
 		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts,
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
-		Bytes: byteConstraintFacts(bytePlan, byteOutcome),
+		Bytes:      byteConstraintFacts(bytePlan, byteOutcome),
+		ShardAware: &observability.ShardAwareFacts{Ready: shardGate.Ready, Unaware: shardGate.Unaware},
 	}
 	workerIDs := make([]string, 0, len(plan.Owned))
 	for workerID := range plan.Owned {
@@ -1849,6 +1858,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		published.MostOwnedBy, published.LeastOwnedBy = plan.Moves[0].From, plan.Moves[0].To
 	}
 	published.Bytes = fleetByteConstraintFacts(bytePlan, byteOutcome)
+	published.ShardAware = &fleet.ShardAwareFacts{Ready: shardGate.Ready, Unaware: shardGate.Unaware}
 	runtime.mu.Lock()
 	runtime.lastRebalance = published
 	runtime.mu.Unlock()

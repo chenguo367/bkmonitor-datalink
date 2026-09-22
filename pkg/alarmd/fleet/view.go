@@ -1682,6 +1682,19 @@ type RebalanceFacts struct {
 	// section 5.7): each judged Worker's sum of its Query Groups' per-Slot
 	// retained-byte peaks, who was over the share, and what moved for it.
 	Bytes *ByteConstraintFacts `json:"bytes,omitempty"`
+	// ShardAware is the same round's split gate (decision-020 section
+	// 4.7.7): the ready workers that do not declare the split contract, by
+	// id, and how many splits were held for it. Across a roll the list
+	// goes 0 -> n -> 0; after it, empty for good, and a rollback puts the
+	// rolled-back replica back on it.
+	ShardAware *ShardAwareFacts `json:"shard_aware,omitempty"`
+}
+
+// ShardAwareFacts is the Leader's split gate for the page.
+type ShardAwareFacts struct {
+	Ready      int      `json:"ready"`
+	Unaware    []string `json:"unaware,omitempty"`
+	SplitsHeld int      `json:"splits_held"`
 }
 
 // ByteConstraintFacts is the Leader's byte-constraint round for the page:
