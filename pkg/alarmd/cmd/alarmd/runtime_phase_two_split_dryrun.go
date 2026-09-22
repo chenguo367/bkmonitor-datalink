@@ -68,13 +68,17 @@ func (runtime *productionPhaseTwoOwnership) dryRunSplits(
 	if source == nil {
 		return
 	}
-	candidates, overflow := splitCandidates(owners, workers, readings)
+	candidates, skipped := splitCandidates(owners, workers, readings)
 	for _, candidate := range candidates {
 		runtime.dryRunSplit(ctx, source, candidate, at.Unix())
 	}
-	if overflow > 0 {
-		runtime.observeSplitOverflow(ctx, overflow)
-	}
+	// Every round, not only the rounds that skipped something: the three
+	// counts are each other's denominator, and a skipped count on its own
+	// cannot say whether a zero means nothing was left out or nothing was
+	// looked at.
+	runtime.observeSplitRound(ctx, observability.SplitRoundFacts{
+		OverShare: len(candidates) + skipped, Examined: len(candidates), Skipped: skipped,
+	})
 }
 
 // splitCandidate is one object the byte readings put over the share a single
@@ -193,7 +197,12 @@ func attributedPeakBytes(
 	if !read || counted == 0 || census.Series == 0 {
 		return 0
 	}
-	return peak / counted * uint64(census.Series)
+	// Multiplied before it is divided, like every other share in this
+	// decision: taken the other way round the quotient is truncated before it
+	// is scaled, and the error is multiplied by the series count. It cannot
+	// overflow here - a retained peak is bounded by the pool and a census by
+	// its own value bound, so the product stays far inside uint64.
+	return peak * uint64(census.Series) / counted
 }
 
 func (runtime *productionPhaseTwoOwnership) observeSplitPlan(
@@ -214,17 +223,27 @@ func (runtime *productionPhaseTwoOwnership) observeSplitPlan(
 	})
 }
 
-// observeSplitOverflow says how many over-share objects this round did not
-// work a split out for. Non-zero is not a split problem: it is a round where
-// far more objects are over their share than a split trigger should ever
-// name, and the readings to look at are the pools and the peaks.
-func (runtime *productionPhaseTwoOwnership) observeSplitOverflow(ctx context.Context, overflow int) {
+// observeSplitRound says what this round looked at: how many objects were
+// over their share, how many a split was worked out for, and how many were
+// left.
+//
+// Its own line with its own structure, never an object's. These counts used
+// to ride out on SplitPlanFacts.PlansInGroup - a field that means "how many
+// Plans share this object's bytes, so how soft this estimate is" - which gave
+// one field name two subjects: a reader filtering it for soft estimates
+// caught this line and read the fleet's skipped count as one Plan's group
+// size. Left in the object's outcome counter it also put a round hitting its
+// bound in the same bucket as an object missing a number.
+func (runtime *productionPhaseTwoOwnership) observeSplitRound(
+	ctx context.Context, facts observability.SplitRoundFacts,
+) {
+	result := observability.ResultSuccess
+	if facts.Skipped > 0 {
+		result = observability.ResultDegraded
+	}
 	observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
 		Component: observability.ComponentControlPlane, Stage: observability.StageSplitPlanned,
-		Result: observability.ResultDegraded, Direction: observability.DirectionInternal,
-		ReasonCode: observability.ReasonCode(observability.ReasonInternalUnknown),
-		SplitPlan: &observability.SplitPlanFacts{
-			Outcome: observability.SplitOutcomeNoReading, DryRun: true, PlansInGroup: overflow,
-		},
+		Result: observability.Result(result), Direction: observability.DirectionInternal,
+		SplitRound: &facts,
 	})
 }

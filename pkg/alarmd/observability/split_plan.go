@@ -57,6 +57,19 @@ const (
 	// no peak, or a census of no series. Never read as "no pressure": an
 	// unknown is reported as an unknown.
 	SplitOutcomeNoReading = "NO_READING"
+	// SplitOutcomeUnrecognised is a decision this build cannot name: the
+	// planner reached an outcome that is not in this vocabulary.
+	//
+	// Its own word rather than folded into NO_READING, which is where it
+	// started. The two have different owners and different answers: a
+	// missing number is a state of the deployment - a pool not reported, a
+	// census not written - and something an operator can go and look at,
+	// while an unrecognised outcome is a defect in this build and something
+	// only a change of code fixes. Folded together, a counter that should
+	// send someone to the source reads like one more environmental
+	// condition, and it would rise on a deployment where nothing is wrong
+	// with the deployment at all.
+	SplitOutcomeUnrecognised = "OUTCOME_UNRECOGNISED"
 )
 
 // SplitOutcomes is the label set the split metrics are pre-created with, so
@@ -67,6 +80,7 @@ func SplitOutcomes() []string {
 		SplitOutcomePlanned, SplitOutcomeUnderShare, SplitOutcomeNoCensus,
 		SplitOutcomeCensusStale, SplitOutcomeValueTooHeavy, SplitOutcomeTailTooLarge,
 		SplitOutcomeSkewUnreachable, SplitOutcomeTooFewValues, SplitOutcomeNoReading,
+		SplitOutcomeUnrecognised,
 	}
 }
 
@@ -90,9 +104,34 @@ func normalizeSplitPlanFacts(facts *SplitPlanFacts) *SplitPlanFacts {
 		}
 	}
 	if !known {
-		copied.Outcome = SplitOutcomeNoReading
+		copied.Outcome = SplitOutcomeUnrecognised
 	}
 	return &copied
+}
+
+// SplitRoundFacts is what one round of the split dry run looked at, as
+// opposed to what it decided about any one object.
+//
+// Its own structure because it has a different subject. The outcome words
+// belong to an object - this strategy was not split, and here is the shape
+// that stopped it - and a round-level count has no business wearing one: a
+// reader filtering for objects whose byte estimate was shared among several
+// Plans would otherwise catch a line whose number is how many objects the
+// whole fleet skipped.
+//
+// Reported every round rather than only when something was skipped, so the
+// counts carry their own denominator. Skipped alone cannot say whether a
+// zero means nothing was left out or nothing was looked at.
+type SplitRoundFacts struct {
+	// OverShare is how many objects this round's readings put past the share
+	// a single object may hold.
+	OverShare int `json:"over_share"`
+	// Examined is how many of them a split was worked out for, and Skipped
+	// the rest. Skipped is not a split problem: it is a round finding far
+	// more over-share objects than a split trigger should ever name, and the
+	// readings to look at then are the pools and the peaks.
+	Examined int `json:"examined"`
+	Skipped  int `json:"skipped"`
 }
 
 // SplitPlanFacts is one object's split decision as a dry run reports it: what
@@ -153,6 +192,11 @@ type SplitPlanFacts struct {
 	// PlansInGroup is how many Plans the Query Group whose bytes were read
 	// carries. One means the peak is this Plan's; more means it was shared
 	// out among them, and the estimate is that much softer.
+	//
+	// One object's fact, and only ever that. It carried a round-level count
+	// for a while - how many over-share objects the round had skipped - and
+	// a reader filtering on it for soft estimates would have caught that
+	// line and read the fleet's skipped count as this Plan's group size.
 	PlansInGroup int `json:"plans_in_group"`
 	// DryRun is true while the planner only reports. It is on the line rather
 	// than implied by the build, because the line is the only place a reader

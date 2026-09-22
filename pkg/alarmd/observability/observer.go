@@ -2312,8 +2312,10 @@ type Observation struct {
 	// warming window had no name on the line unless it was that word.
 	LevelOutcomes []LevelOutcomeFact
 	// SplitPlan is one object's split decision as the Leader's dry run
-	// reached it.
-	SplitPlan *SplitPlanFacts
+	// reached it; SplitRound is what that round looked at. Two structures
+	// because they have two subjects - one object, and one round.
+	SplitPlan  *SplitPlanFacts
+	SplitRound *SplitRoundFacts
 	// DimensionCensus is one candidate Plan's census as this Slot wrote it.
 	DimensionCensus    *DimensionCensusFacts
 	ControlSourceRound *ControlSourceRoundFacts

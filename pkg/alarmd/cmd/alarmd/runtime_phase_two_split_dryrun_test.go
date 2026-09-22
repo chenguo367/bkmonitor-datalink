@@ -230,12 +230,24 @@ func (source *fakeSplitSource) ReadCensus(
 
 func splitDryRunObservations(t *testing.T, source splitCensusSource, peak uint64) []observability.SplitPlanFacts {
 	t.Helper()
+	facts, _ := splitDryRunFacts(t, source, peak)
+	return facts
+}
+
+func splitDryRunFacts(
+	t *testing.T, source splitCensusSource, peak uint64,
+) ([]observability.SplitPlanFacts, []observability.SplitRoundFacts) {
+	t.Helper()
 	var facts []observability.SplitPlanFacts
+	var rounds []observability.SplitRoundFacts
 	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
 		SplitCensus: source,
 		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			if observation.SplitPlan != nil {
 				facts = append(facts, *observation.SplitPlan)
+			}
+			if observation.SplitRound != nil {
+				rounds = append(rounds, *observation.SplitRound)
 			}
 		}),
 	}}
@@ -244,7 +256,7 @@ func splitDryRunObservations(t *testing.T, source splitCensusSource, peak uint64
 		splitTestWorkers(map[string]uint64{"worker-a": splitTestPool}),
 		scheduler.ByteReadings{Peak: map[execution.QueryGroupIdentity]uint64{"qg": peak}},
 		splitDryRunTestClock())
-	return facts
+	return facts, rounds
 }
 
 // An object whose Plans this round could not read is reported as a reading
@@ -308,3 +320,79 @@ func TestTheDryRunReportsEveryPlanAsADryRun(t *testing.T) {
 // splitDryRunTestClock is the round's clock, fixed so a census taken "now" is
 // not aged out by the time the assertion runs.
 func splitDryRunTestClock() time.Time { return time.Unix(1_700_000_000, 0) }
+
+// The round reports what it looked at every round, not only when it skipped
+// something.
+//
+// The three counts are each other's denominator: a skipped count on its own
+// cannot say whether a zero means nothing was left out or nothing was looked
+// at, and those are the two states a reader most needs to separate before
+// trusting a dry run.
+func TestTheRoundReportsWhatItLookedAtEvenWhenItSkippedNothing(t *testing.T) {
+	plan := execution.PlanCensusIdentity{
+		Plan:            execution.PlanIdentity{TenantID: "system", BusinessID: "2", StrategyID: "4101"},
+		StateGeneration: "generation",
+	}
+	source := &fakeSplitSource{plans: map[execution.QueryGroupIdentity][]execution.PlanCensusIdentity{"qg": {plan}}}
+
+	_, rounds := splitDryRunFacts(t, source, 3*splitTestPool)
+
+	if len(rounds) != 1 {
+		t.Fatalf("%d round observations, want exactly one per round", len(rounds))
+	}
+	if rounds[0].OverShare != 1 || rounds[0].Examined != 1 || rounds[0].Skipped != 0 {
+		t.Fatalf("round = %+v, want one object over its share, examined, none skipped", rounds[0])
+	}
+
+	// And an object under its share leaves the counts at zero rather than
+	// leaving the line out: no line at all is how "the dry run did not run"
+	// looks, which is the opposite reading.
+	_, quiet := splitDryRunFacts(t, source, splitTestPool/4)
+	if len(quiet) != 1 {
+		t.Fatalf("%d round observations for a quiet round, want one", len(quiet))
+	}
+	if quiet[0].OverShare != 0 || quiet[0].Examined != 0 {
+		t.Fatalf("quiet round = %+v, want zeros", quiet[0])
+	}
+}
+
+// The round's counts never travel on an object's structure. They did once,
+// in the field that says how many Plans share an object's bytes, which gave
+// one field two subjects.
+func TestTheRoundsCountsNeverRideOnAnObjectsFacts(t *testing.T) {
+	owners := map[execution.QueryGroupIdentity]string{}
+	peaks := map[execution.QueryGroupIdentity]uint64{}
+	for index := 0; index < splitDryRunMaxObjects+3; index++ {
+		identity := execution.QueryGroupIdentity(fmt.Sprintf("qg-%02d", index))
+		owners[identity] = "worker-a"
+		peaks[identity] = splitTestPool/2 + uint64(index) + 1
+	}
+	var facts []observability.SplitPlanFacts
+	var rounds []observability.SplitRoundFacts
+	runtime := &productionPhaseTwoOwnership{dependencies: productionPhaseTwoOwnershipDependencies{
+		SplitCensus: &fakeSplitSource{},
+		Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
+			if observation.SplitPlan != nil {
+				facts = append(facts, *observation.SplitPlan)
+			}
+			if observation.SplitRound != nil {
+				rounds = append(rounds, *observation.SplitRound)
+			}
+		}),
+	}}
+	runtime.dryRunSplits(context.Background(), owners,
+		splitTestWorkers(map[string]uint64{"worker-a": splitTestPool}),
+		scheduler.ByteReadings{Peak: peaks}, splitDryRunTestClock())
+
+	if len(rounds) != 1 || rounds[0].Skipped != 3 {
+		t.Fatalf("rounds = %+v, want one saying three were skipped", rounds)
+	}
+	for _, fact := range facts {
+		if fact.PlansInGroup > 1 {
+			t.Fatalf("an object's line claims %d Plans share its bytes; the round skipped %d objects and "+
+				"that number must not appear here - a reader filtering this field for soft estimates "+
+				"would read the fleet's skipped count as one Plan's group size",
+				fact.PlansInGroup, rounds[0].Skipped)
+		}
+	}
+}

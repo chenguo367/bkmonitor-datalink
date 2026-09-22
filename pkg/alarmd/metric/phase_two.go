@@ -22,6 +22,12 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
+// splitRoundDispositions is what one round can do with an over-share object,
+// and the label set the round family is pre-created with. Written once and
+// read by both the pre-creation and the test that counts it, so a
+// disposition added in one place cannot be missing from the other.
+var splitRoundDispositions = []string{"over_share", "examined", "skipped"}
+
 type phaseTwoMetrics struct {
 	workflow                        workflowMetrics
 	shortPeriod                     shortPeriodMetrics
@@ -122,6 +128,7 @@ type phaseTwoMetrics struct {
 	levelOutcomes                   *prometheus.CounterVec
 	dimensionCensusWrites           *prometheus.CounterVec
 	splitPlans                      *prometheus.CounterVec
+	splitRoundObjects               *prometheus.CounterVec
 	dimensionCensusValues           *prometheus.CounterVec
 	recoveryPastLevelWithoutRecov   prometheus.Counter
 	openAlertGate                   *prometheus.CounterVec
@@ -946,6 +953,21 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range observability.SplitOutcomes() {
 		metrics.splitPlans.WithLabelValues(outcome)
 	}
+	// What each round of the dry run looked at, as opposed to what it decided
+	// about any one object. A separate family for a separate subject: a
+	// round's counts wearing an object's outcome word is how one label comes
+	// to have two meanings.
+	metrics.splitRoundObjects = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "split_round_objects_total",
+		Help: "Objects each split dry run round met, by what the round did with them. over_share is how " +
+			"many the readings put past the share a single object may hold, examined how many a split was " +
+			"worked out for, and skipped the rest. Read skipped against over_share: standing skips are not " +
+			"a split problem but a round finding far more over-share objects than a split trigger should " +
+			"ever name, and the readings to look at then are the pools and the peaks.",
+	}, []string{"disposition"})
+	for _, disposition := range splitRoundDispositions {
+		metrics.splitRoundObjects.WithLabelValues(disposition)
+	}
 	// What the dimension census did, by where its values came from and what
 	// the store said (decision-020 section 4.7.3). Two families rather than
 	// one: how many censuses were taken is a different question from how
@@ -1315,7 +1337,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.effectiveClose, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
@@ -1498,6 +1520,11 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.algorithmEvaluations.WithLabelValues(
 			string(fact.SourceAlgorithmFamily), string(fact.Result),
 		).Inc()
+	}
+	if facts := observation.SplitRound; facts != nil {
+		m.splitRoundObjects.WithLabelValues("over_share").Add(float64(facts.OverShare))
+		m.splitRoundObjects.WithLabelValues("examined").Add(float64(facts.Examined))
+		m.splitRoundObjects.WithLabelValues("skipped").Add(float64(facts.Skipped))
 	}
 	if facts := observation.SplitPlan; facts != nil {
 		// By outcome and nothing else. How many pieces THIS strategy would be

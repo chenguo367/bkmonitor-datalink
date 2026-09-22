@@ -102,10 +102,15 @@ func TestASplitOutcomeOutsideTheVocabularyIsNamed(t *testing.T) {
 	t.Parallel()
 
 	event := splitPlanEvent(t, &SplitPlanFacts{Outcome: "INVENTED"})
-	if event["split_outcome"] != SplitOutcomeNoReading {
+	if event["split_outcome"] != SplitOutcomeUnrecognised {
 		t.Fatalf("split_outcome = %#v, want %q: the metric's labels are pre-created from the vocabulary, "+
 			"and one arriving at runtime is how a bounded label set stops being bounded",
-			event["split_outcome"], SplitOutcomeNoReading)
+			event["split_outcome"], SplitOutcomeUnrecognised)
+	}
+	if event["split_outcome"] == SplitOutcomeNoReading {
+		t.Fatal("an unrecognised outcome was reported as a missing number: the first is this build's " +
+			"defect and only a change of code fixes it, the second is a state of the deployment " +
+			"somebody can go and look at")
 	}
 	loose := &SplitPlanFacts{Outcome: "INVENTED"}
 	if normalizeSplitPlanFacts(loose).Outcome == loose.Outcome {
@@ -125,5 +130,39 @@ func TestEveryDeclaredSplitOutcomeSurvivesNormalize(t *testing.T) {
 		if got := normalizeSplitPlanFacts(&SplitPlanFacts{Outcome: outcome}); got.Outcome != outcome {
 			t.Fatalf("normalize held the declared outcome %q down to %q", outcome, got.Outcome)
 		}
+	}
+}
+
+// The round's own line carries its three counts, and carries them every
+// round: skipped on its own cannot say whether a zero means nothing was left
+// out or nothing was looked at.
+func TestTheSplitRoundLineCarriesItsCountsAndTheirDenominator(t *testing.T) {
+	t.Parallel()
+
+	var output bytes.Buffer
+	withheldObserver(t, &output).Observe(context.Background(), Observation{
+		Component: ComponentControlPlane, Stage: StageSplitPlanned, Result: ResultSuccess,
+		SplitRound: &SplitRoundFacts{OverShare: 13, Examined: 8, Skipped: 5},
+	})
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode split round log: %v; log=%s", err, output.String())
+	}
+	for field, value := range map[string]any{
+		"split_round_over_share": float64(13),
+		"split_round_examined":   float64(8),
+		"split_round_skipped":    float64(5),
+	} {
+		if got, present := event[field]; !present || got != value {
+			t.Fatalf("event[%q] = %#v (present=%v), want %#v", field, got, present, value)
+		}
+	}
+	// And it is not an object's line: a reader filtering for objects whose
+	// estimate was shared among several Plans must not catch this one.
+	if _, present := event["split_plans_in_group"]; present {
+		t.Fatalf("the round's line carries an object's field: %#v", event)
+	}
+	if _, present := event["split_outcome"]; present {
+		t.Fatalf("the round's line wears an object's outcome word: %#v", event)
 	}
 }

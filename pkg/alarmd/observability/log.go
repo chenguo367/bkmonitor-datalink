@@ -805,6 +805,16 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Bool("split_dry_run", facts.DryRun),
 		)
 	}
+	if facts := observation.SplitRound; facts != nil {
+		// The round's own three, with their denominator: skipped alone
+		// cannot say whether a zero means nothing was left out or nothing
+		// was looked at.
+		attributes = append(attributes,
+			slog.Int("split_round_over_share", facts.OverShare),
+			slog.Int("split_round_examined", facts.Examined),
+			slog.Int("split_round_skipped", facts.Skipped),
+		)
+	}
 	if facts := observation.DimensionCensus; facts != nil {
 		// The gate's two numbers go out with the census itself: a census that
 		// appears, or stops appearing, is a candidate decision, and the
