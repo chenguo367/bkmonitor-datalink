@@ -71,11 +71,50 @@ func TestAStrategyIsOneLineOverEveryObjectThatRunsIt(t *testing.T) {
 	}
 }
 
+// The evidence clause is one number and where the holes fall, by the
+// verdict's own order; a row with nothing short supplies none.
+func TestTheEvidenceClauseSaysWhereTheHolesFall(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		coverage *HistoryCoverage
+		want     string
+	}{
+		"nothing short":    {&HistoryCoverage{Levels: 2}, ""},
+		"no window named":  {&HistoryCoverage{Levels: 2, Short: 1, WorstValid: 6, WorstRequired: 9}, "最差窗口 6/9"},
+		"the data's":       {shortWindows(6, 9, VerdictDataAbsentWhenQueried), "最差窗口 6/9，缺的 3 分钟查询都正常返回、序列不在结果里"},
+		"incomplete first": {shortWindows(6, 9, VerdictInputIncomplete, VerdictPointsUnusable), "最差窗口 6/9，缺的分钟里 1 分钟本侧没查全"},
+		"unusable next":    {shortWindows(6, 9, VerdictPointsUnusable, VerdictUnknown), "最差窗口 6/9，1 分钟的记录检测用不了"},
+		"unknown last":     {shortWindows(6, 9, VerdictUnknown, VerdictDataAbsentWhenQueried), "最差窗口 6/9，缺的分钟里 1 分钟说不出是谁的"},
+	} {
+		if got := evidenceClause(Anomaly{Coverage: testCase.coverage}); got != testCase.want {
+			t.Errorf("%s: clause = %q, want %q", name, got, testCase.want)
+		}
+	}
+	if got := evidenceClause(Anomaly{}); got != "" {
+		t.Errorf("no coverage: clause = %q", got)
+	}
+}
+
 // The list endpoint: one line per strategy with the vocabulary beside it,
 // filtered by words from the closed lists and refused for words outside
 // them, bounded by the limit and saying so.
 func TestTheStrategyListIsServedWithItsWords(t *testing.T) {
-	handler := standingHandler(t, func(string) StrategyLookupFacts { return StrategyLookupFacts{} }, nil)
+	snapshots := healthySnapshots()
+	snapshots[0].Owned, snapshots[0].Determined = 1, 1
+	snapshots[0].OwnedObjects = []string{"qg-other"}
+	snapshots[1].Owned, snapshots[1].Determined = 1, 1
+	snapshots[1].OwnedObjects = []string{"qg-two-strategies"}
+	row := anomaly("qg-two-strategies")
+	row.Replica = "pod-b"
+	row.Strategies = []StrategyRef{{StrategyID: "8930", BusinessID: "2"}, {StrategyID: "8931", BusinessID: "2"}}
+	snapshots[1].Anomalies = []Anomaly{row}
+	snapshots[1].TotalAnomalies = 1
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 2, Known: true, IDs: []string{"qg-other", "qg-two-strategies"}}},
+		stubRegistry{replicas: replicas()}, stubSnapshots{snapshots: snapshots})
+	plain, err := NewHandler(service, nil, func() time.Time { return now }, 0, nil, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := WithStrategyStanding(plain, service, func(string) StrategyLookupFacts { return StrategyLookupFacts{} }, nil, nil, "pod-a", func() time.Time { return now }, 0)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/strategies?limit=1", nil))
 	if response.Code != http.StatusOK {
@@ -88,8 +127,8 @@ func TestTheStrategyListIsServedWithItsWords(t *testing.T) {
 	if len(body.Words.State) != len(StateWords) || len(body.Words.Action) != len(ActionWords) {
 		t.Fatalf("words = %+v, want the whole vocabulary on the response", body.Words)
 	}
-	if body.Listed != 1 || body.Total < 1 {
-		t.Fatalf("listed/total = %d/%d, want the one line the fixture's row makes", body.Listed, body.Total)
+	if body.Listed != 1 || body.Total != 2 || !body.Truncated {
+		t.Fatalf("listed/total/truncated = %d/%d/%v, want 1 of the 2 lines the row's two strategies make, and said so", body.Listed, body.Total, body.Truncated)
 	}
 	if body.Strategies[0].StrategyID != "8930" || body.Strategies[0].Line == "" {
 		t.Fatalf("line = %+v", body.Strategies[0])

@@ -110,11 +110,12 @@ func TestTheUndecidedWindowsWordsAreDecidedByTheirHoles(t *testing.T) {
 		action   ActionWord
 		rule     StandingRule
 	}{
-		"every hole the data's":     {shortWindows(6, 9, VerdictDataAbsentWhenQueried, VerdictDataAbsentWhenQueried), StateDataAbsent, ActionDataCheck, RuleWindowVerdict},
-		"one minute not seen whole": {shortWindows(6, 9, VerdictDataAbsentWhenQueried, VerdictInputIncomplete), StateResultUntrusted, ActionServiceFix, RuleWindowVerdict},
-		"unusable records":          {shortWindows(6, 9, VerdictPointsUnusable, VerdictDataAbsentWhenQueried), StateStrategyInvalid, ActionStrategyEdit, RuleWindowVerdict},
-		"an unknown hole":           {shortWindows(6, 9, VerdictUnknown, VerdictDataAbsentWhenQueried), StateResultUntrusted, ActionServiceFix, ""},
-		"no windows named":          {&HistoryCoverage{Levels: 2, Short: 2, WorstValid: 6, WorstRequired: 9, Guarded: 2}, StateResultUntrusted, ActionServiceFix, ""},
+		"every hole the data's":      {shortWindows(6, 9, VerdictDataAbsentWhenQueried, VerdictDataAbsentWhenQueried), StateDataAbsent, ActionDataCheck, RuleWindowVerdict},
+		"one minute not seen whole":  {shortWindows(6, 9, VerdictDataAbsentWhenQueried, VerdictInputIncomplete), StateResultUntrusted, ActionServiceFix, RuleWindowVerdict},
+		"unusable records":           {shortWindows(6, 9, VerdictPointsUnusable, VerdictDataAbsentWhenQueried), StateStrategyInvalid, ActionStrategyEdit, RuleWindowVerdict},
+		"unusable beside incomplete": {shortWindows(6, 9, VerdictPointsUnusable, VerdictInputIncomplete), StateResultUntrusted, ActionServiceFix, RuleWindowVerdict},
+		"an unknown hole":            {shortWindows(6, 9, VerdictUnknown, VerdictDataAbsentWhenQueried), StateResultUntrusted, ActionServiceFix, ""},
+		"no windows named":           {&HistoryCoverage{Levels: 2, Short: 2, WorstValid: 6, WorstRequired: 9, Guarded: 2}, StateResultUntrusted, ActionServiceFix, ""},
 	} {
 		standing := standingOf(row(testCase.coverage), now)
 		if standing.State != testCase.state || standing.Action != testCase.action || standing.RefinedBy != testCase.rule {
@@ -178,10 +179,19 @@ func TestAWaitIsDecidedByWhatIsMoving(t *testing.T) {
 		t.Fatalf("an object unheard for the window = %+v, want WATCH / UNCONFIRMED", standing)
 	}
 	// The checks whose pair is a wait name the next round when nothing
-	// else on the row says why.
+	// else on the row says why -- and a guard flat for the stalled bound is
+	// not something moving, on these rows as on any.
 	for _, check := range []Check{CheckConfigUnresolved, CheckObservationGap} {
 		if standing := standingOf(Anomaly{Finding: Finding{Check: check}, ReasonLastAt: now}, now); standing.Action != ActionWatch || standing.Watch != WatchNextRound {
 			t.Fatalf("%s = %+v, want WATCH / NEXT_ROUND", check, standing)
+		}
+		flat := Anomaly{Finding: Finding{Check: check}, ReasonLastAt: now, Guards: []GapGuard{{Required: 9, Observed: 4, UnchangedRounds: StalledRounds}}}
+		if standing := standingOf(flat, now); standing.Watch != WatchNextRound {
+			t.Fatalf("%s with a flat guard = %+v, want NEXT_ROUND: a guard that has not moved for the bound is not moving", check, standing)
+		}
+		flat.Guards[0].UnchangedRounds = 0
+		if standing := standingOf(flat, now); standing.Watch != WatchGuardMoving {
+			t.Fatalf("%s with a guard that just moved = %+v, want GUARD_MOVING", check, standing)
 		}
 	}
 	// Under no check: detecting, nothing to do. A retained record older
