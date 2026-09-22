@@ -40,7 +40,7 @@ func TestWorkerDrivesTheOpenAlertCopyAroundTheEvaluation(t *testing.T) {
 			// The fixture's Plan is off the consumer's protocol, so the real
 			// second gate answers protocol_not_gated; the count is what has
 			// to travel, whichever outcome it carries.
-			result.Plans[0].OpenAlertGate.ProtocolNotGated = 1
+			result.Plans[0].OpenAlertGate.ProtocolCarriesNoRecovery = 1
 		}
 		ports.executeOverride = streamExecution(header, batches, completion)
 
@@ -70,7 +70,7 @@ func TestWorkerDrivesTheOpenAlertCopyAroundTheEvaluation(t *testing.T) {
 		if len(completed) != 1 {
 			t.Fatalf("evaluation observations=%d, want one", len(completed))
 		}
-		wantFacts := []observability.OpenAlertGateFact{{Outcome: observability.OpenAlertGateProtocolNotGated, Records: 1}}
+		wantFacts := []observability.OpenAlertGateFact{{Outcome: observability.OpenAlertGateProtocolCarriesNoRecovery, Records: 1}}
 		if !reflect.DeepEqual(completed[0].OpenAlertGates, wantFacts) {
 			t.Fatalf("observed gate facts=%+v, want %+v", completed[0].OpenAlertGates, wantFacts)
 		}

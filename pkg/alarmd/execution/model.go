@@ -1889,14 +1889,16 @@ type RecoveryGateCounts struct {
 // produced their envelope. The two held kinds produced none: the consumer
 // holds no open alert on the series, or the series identity it keys alerts
 // by could not be built. NotConfigured is a caller that passed no set, the
-// behaviour before the gate existed. ProtocolNotGated is a Plan that does
-// not publish the alert consumer's protocol, so the set was not asked.
+// behaviour before the gate existed. ProtocolCarriesNoRecovery is a Plan on a
+// protocol with no representation for a recovery: held, no envelope built,
+// the set not asked. It counted the same records before under the name
+// ProtocolNotGated, when they were built and then dropped at the sink.
 type OpenAlertGateCounts struct {
-	Passed                 uint64
-	HeldNoOpenAlert        uint64
-	HeldFingerprintUnknown uint64
-	NotConfigured          uint64
-	ProtocolNotGated       uint64
+	Passed                    uint64
+	HeldNoOpenAlert           uint64
+	HeldFingerprintUnknown    uint64
+	NotConfigured             uint64
+	ProtocolCarriesNoRecovery uint64
 }
 
 type PlanEvaluationResult struct {

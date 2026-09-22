@@ -236,6 +236,19 @@ const (
 	// member": an unknown read as absent would hold this Plan's recoveries
 	// for good and leave no trace.
 	RecoveryHeldFingerprintUnknown = "fingerprint_unknown"
+	// RecoveryHeldProtocolCarriesNoRecovery: the Plan publishes a protocol
+	// with no representation for a recovery, so there is no envelope to build.
+	// The compatibility protocol carries anomaly points and nothing else and
+	// its sink drops every other kind; the consumer decides recovery from the
+	// absence of anomalies instead.
+	//
+	// Held before the envelope is assembled, which is the whole point of it.
+	// Recovery is a steady-state result, so on that protocol every healthy
+	// series produced one every round and the process built the evidence,
+	// the subject and the legacy anomaly list for each - measured at 3,030 a
+	// second against 20-30 anomalies actually published. Nothing downstream
+	// changes: those envelopes never left.
+	RecoveryHeldProtocolCarriesNoRecovery = "protocol_carries_no_recovery"
 )
 
 // The outcomes of the second recovery gate, the open alert set. The set is
@@ -253,13 +266,19 @@ const (
 	// as it did before the gate existed. A production worker always passes a
 	// set, so this outcome counting there is the wiring having come apart.
 	OpenAlertGateNotConfigured = "not_configured"
-	// OpenAlertGateProtocolNotGated: the Plan does not publish the alert
-	// consumer's protocol, so the consumer's open alert set has nothing to
-	// say about its envelope. The compatibility protocol carries anomalies
-	// only and drops the RECOVERY envelope at the sink; alarmd's own decision
-	// event has no consumer that keeps an open alert set. The set is not
-	// asked.
-	OpenAlertGateProtocolNotGated = "protocol_not_gated"
+	// OpenAlertGateProtocolCarriesNoRecovery: the Plan publishes a protocol
+	// with no representation for a recovery, so the record is held and no
+	// envelope is built. The set is not asked - it has nothing to say about
+	// an envelope that has nowhere to go.
+	//
+	// It was called protocol_not_gated and meant the opposite thing: the set
+	// was not asked and the envelope went anyway, to be dropped at the sink.
+	// The word changed with the behaviour rather than being left to mean its
+	// own negation. A reader comparing the two builds should expect this
+	// counter to hold its rate while output_events_without_message_total
+	// {format="python_compatible",event_kind="RECOVERY"} falls to zero: the
+	// same records, counted where the decision is now made.
+	OpenAlertGateProtocolCarriesNoRecovery = "protocol_carries_no_recovery"
 )
 
 // RecoveryGateV2 is what became of a record whose evaluated Levels agreed on

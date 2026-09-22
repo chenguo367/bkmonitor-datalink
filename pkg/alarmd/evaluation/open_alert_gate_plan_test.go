@@ -40,6 +40,12 @@ func TestEvaluatorGatesARecoveryEnvelopeOnTheOpenAlertSet(t *testing.T) {
 		p.StrategyIR.StrategyRef.SnapshotRevision = 7
 		p.OutputIdentity = &identity
 	}
+	// The shared fixture publishes the standard raw event, so the arm about a
+	// Plan off that protocol has to put it back rather than leave the format
+	// unset.
+	compatible := func(p *contract.EvaluationPlanV2) {
+		p.WireFormat = contract.WireFormatPythonCompatible
+	}
 	// The fixture record carries no dimensions; the fingerprint is the
 	// strategy's and business's alone, which is what the gate asks about.
 	fingerprint, err := contract.MonitorDedupeMD5("7", "2", map[string]json.RawMessage{}, identity)
@@ -60,8 +66,11 @@ func TestEvaluatorGatesARecoveryEnvelopeOnTheOpenAlertSet(t *testing.T) {
 			wantCounts: execution.OpenAlertGateCounts{HeldNoOpenAlert: 1}, wantEnvelopes: 0, wantHeld: true},
 		{name: "no set passed: the envelope goes and the wiring gap is counted", shape: native, set: nil,
 			wantCounts: execution.OpenAlertGateCounts{NotConfigured: 1}, wantEnvelopes: 1},
-		{name: "a Plan off the consumer's protocol: the set is not asked", shape: nil, set: openAlertSetStub{},
-			wantCounts: execution.OpenAlertGateCounts{ProtocolNotGated: 1}, wantEnvelopes: 1},
+		// The compatibility protocol has no representation for a recovery, so
+		// the record is held and no envelope is built. It used to be built
+		// here and dropped at the sink, which is why this arm wanted one.
+		{name: "a Plan off the consumer's protocol: held, no envelope, the set not asked", shape: compatible, set: openAlertSetStub{},
+			wantCounts: execution.OpenAlertGateCounts{ProtocolCarriesNoRecovery: 1}, wantEnvelopes: 0, wantHeld: true},
 	} {
 		t.Run(arm.name, func(t *testing.T) {
 			plan := compiledTwoLevelsShaped(t, "50", "50", arm.shape)

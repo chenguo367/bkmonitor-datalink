@@ -150,7 +150,19 @@ func TestTheStateANoDataSeriesWritesCarriesOnlyItsOwnLevel(t *testing.T) {
 // closes - which on a page full of open alerts is the hardest kind to notice,
 // because it looks like the thing it is reporting never got better.
 func TestANoDataAlertOpensAndRecoversOnTheOrdinaryPath(t *testing.T) {
-	plan := noDataCompiled(t, 1)
+	// On the standard raw event, which is the only protocol that carries a
+	// closing event at all. The compatibility protocol has no representation
+	// for a recovery, so alarmd holds it and its consumer closes the alert
+	// itself from the absence of anomalies - a real arrangement, but one in
+	// which "did a closing event go out" is not a question with an answer, and
+	// this case is about that event.
+	plan := compiledWindowWithNoDataShaped(t, 1, 1, &contract.NoDataConfigV1{Continuous: 1, Level: 2}, false,
+		func(p *contract.EvaluationPlanV2) {
+			p.WireFormat = contract.WireFormatStandardRawEvent
+			p.StrategyRef.SnapshotRevision = 7
+			p.StrategyIR.StrategyRef.SnapshotRevision = 7
+			p.OutputIdentity = &contract.MonitorOutputIdentity{DimensionFields: []string{"host"}}
+		})
 	evaluator := newEvaluator(t)
 	ctx := context.Background()
 

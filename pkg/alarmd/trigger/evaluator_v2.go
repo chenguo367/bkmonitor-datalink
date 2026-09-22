@@ -82,6 +82,23 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 	}
 	if result.RecordResult == contract.LevelResultRecovery {
 		result.RecoveryGate = recoveryGateV2(result.LevelOutcomes)
+		// A protocol with no representation for a recovery is decided here,
+		// ahead of the identity work below, because the point of deciding it
+		// is not to do that work. The open alert set is not asked: it has
+		// nothing to say about an envelope that has nowhere to go, and on the
+		// compatibility protocol it could not be asked anyway - the dedupe
+		// identity it keys on needs a frozen revision those Plans do not have.
+		//
+		// Recovery is a steady-state result, so this is not a rare branch: on
+		// a deployment publishing the compatibility protocol it is every
+		// healthy series every round, measured at 3,030 records a second
+		// against 20-30 anomalies actually published. Each one used to build
+		// its evidence, its subject and its legacy anomaly list and hand the
+		// result to a sink that dropped it.
+		if !result.RecoveryGate.Held && request.Plan.WireFormat() != contract.WireFormatStandardRawEvent {
+			result.RecoveryGate = RecoveryGateV2{Held: true, Cause: RecoveryHeldProtocolCarriesNoRecovery,
+				OpenAlertGate: OpenAlertGateProtocolCarriesNoRecovery}
+		}
 	}
 	if result.RecordResult == contract.LevelResultAbnormal ||
 		(result.RecordResult == contract.LevelResultRecovery && !result.RecoveryGate.Held) {
@@ -648,8 +665,9 @@ func recoveryGateV2(outcomes []LevelOutcomeV2) RecoveryGateV2 {
 // report is about an envelope that was sent, and here none is.
 func openAlertGateV2(gate RecoveryGateV2, request EvaluationRequestV2, strategyID, dedupeMD5 string) RecoveryGateV2 {
 	switch {
-	case request.Plan.WireFormat() != contract.WireFormatStandardRawEvent:
-		gate.OpenAlertGate = OpenAlertGateProtocolNotGated
+	// A Plan on a protocol that carries no recovery never reaches here: it is
+	// held before the caller starts building the identity this gate reads, so
+	// a case for it would be a branch no record arrives at.
 	case request.OpenAlerts == nil:
 		gate.OpenAlertGate = OpenAlertGateNotConfigured
 	case dedupeMD5 == "":

@@ -232,7 +232,12 @@ func TestEvaluatorClearsSeriesWarmingOnlyOnFollowingFullSlot(t *testing.T) {
 		t.Fatalf("next Evaluate()=%v", err)
 	}
 	secondPlan := second.Plans[0]
-	if secondPlan.LevelOutcomes[0].Outcome != execution.LevelOutcomeRecovery || len(secondPlan.StateResults[0].Events) != 1 || secondPlan.StateResults[0].Mutation.Levels[0].HistoryCompleteness != execution.HistoryFull || secondPlan.StateResults[0].Mutation.Levels[0].GapReasonCode != "" {
+	// The convergence is the subject: the Level reaches FULL and drops its
+	// reason. No event goes with it, and that is this fixture's protocol
+	// rather than anything about the convergence - the compatibility protocol
+	// carries anomaly points only, so a recovery on it is held before an
+	// envelope is built. It used to be built here and dropped at the sink.
+	if secondPlan.LevelOutcomes[0].Outcome != execution.LevelOutcomeRecovery || len(secondPlan.StateResults[0].Events) != 0 || secondPlan.StateResults[0].Mutation.Levels[0].HistoryCompleteness != execution.HistoryFull || secondPlan.StateResults[0].Mutation.Levels[0].GapReasonCode != "" {
 		t.Fatalf("following FULL slot did not converge WARMING: %+v", secondPlan)
 	}
 }
@@ -653,6 +658,14 @@ func compiledWindowWithUptime(t testing.TB, windowSize, requiredAnomalies uint32
 // optionally on, so a test can have a Plan that carries a no-data level without
 // changing anything else about it.
 func compiledWindowWithNoData(t testing.TB, windowSize, requiredAnomalies uint32, noData *contract.NoDataConfigV1, uptime bool) *strategy.CompiledPlan {
+	return compiledWindowWithNoDataShaped(t, windowSize, requiredAnomalies, noData, uptime, nil)
+}
+
+// compiledWindowWithNoDataShaped is the same with a last look at the Plan
+// document, for cases that need a shape the default does not have - chiefly
+// the standard raw event, which is the only protocol that carries a recovery
+// envelope and so the only one on which a closing event can be asserted.
+func compiledWindowWithNoDataShaped(t testing.TB, windowSize, requiredAnomalies uint32, noData *contract.NoDataConfigV1, uptime bool, shape func(*contract.EvaluationPlanV2)) *strategy.CompiledPlan {
 	c, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{MaxPlanBytes: 1 << 20, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16, MaxConditionsPerAlgorithm: 64, MaxASTNodesPerLevel: 256, MaxTriggerWindowSize: 16, MaxRecoveryConsecutiveWindows: 16, MaxRequiredHistoryPoints: 32, MaxTriggerComputeCost: 1 << 20, MaxCompiledPlanBytes: 1 << 20, MaxCacheEntries: 16, MaxCacheBytes: 1 << 20, NegativeCacheTTL: time.Minute, BudgetRevision: "test"})
 	if err != nil {
 		t.Fatal(err)
@@ -671,6 +684,9 @@ func compiledWindowWithNoData(t testing.TB, windowSize, requiredAnomalies uint32
 	triggerConfig := json.RawMessage(triggerPayload)
 	level := contract.LevelIRV2{Definition: contract.LevelDefinitionV2{LevelID: 5, Priority: 1}, Connector: contract.LevelConnectorAND, DetectPlan: contract.DetectPlanV2{Algorithms: []contract.AlgorithmIRV2{{Type: "Threshold", Version: 1, Config: json.RawMessage(`{"value_field":"value","data_unit":"percent","threshold_unit_prefix":"","precision":{"decimal_places":6,"rounding":"HALF_EVEN"},"groups":[{"conditions":[{"operator":"GTE","threshold_decimal":"50"}]}]}`)}}}, TriggerPlan: contract.TypedPlanV1{Type: "N_OF_M", Version: 1, Config: triggerConfig}, RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1, Config: json.RawMessage(`{"enabled":true,"consecutive_windows":1}`)}}
 	p := contract.EvaluationPlanV2{PlanID: "7", StrategyRef: ref, InputProjection: projection, NoData: noData, StrategyIR: contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2}, StrategyRef: ref, InputProjection: projection, ExecutionSemantics: contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries, QueryWindow: 300, AggregationInterval: 60, EvaluationInterval: 60, LatenessTolerance: 120}, Levels: []contract.LevelIRV2{level}}}
+	if shape != nil {
+		shape(&p)
+	}
 	r, err := c.Compile(context.Background(), strategy.CompileRequest{Plan: p, DatasetContract: contract.DatasetContractV2{SchemaDigest: strings.Repeat("1", 64), NormalizationDigest: strings.Repeat("2", 64), IdentityFields: []string{"host"}, SourceTimeField: "time", ReceivedTimeField: "received_time"}, StateSemantics: strategy.StateSemantics{StateSchemaVersion: "s", CodecSemanticsVersion: "c", IdentitySchemaDigest: strings.Repeat("3", 64), SourceTimeSemanticsVersion: "t", HistoryCellSemanticsVersion: "h"}})
 	if err != nil {
 		t.Fatal(err)

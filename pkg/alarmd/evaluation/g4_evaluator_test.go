@@ -53,8 +53,13 @@ func TestEvaluateSeriesProducesOneAbnormalAndRecoveryForNamedInputs(t *testing.T
 	if err != nil {
 		t.Fatalf("evaluateSeries(recovery) error = %v", err)
 	}
+	// The outcome is the subject here. The recovery produces no envelope
+	// because this fixture publishes the compatibility protocol, which has no
+	// representation for one: the record is held before the envelope is built,
+	// where before it was built and then dropped at the sink. The state is
+	// still written either way, which is what the Events count sits beside.
 	if len(recovery.LevelOutcomes) != 1 || recovery.LevelOutcomes[0].Outcome != execution.LevelOutcomeRecovery ||
-		len(recovery.StateResults) != 1 || len(recovery.StateResults[0].Events) != 1 {
+		len(recovery.StateResults) != 1 || len(recovery.StateResults[0].Events) != 0 {
 		t.Fatalf("recovery result = %+v", recovery)
 	}
 }

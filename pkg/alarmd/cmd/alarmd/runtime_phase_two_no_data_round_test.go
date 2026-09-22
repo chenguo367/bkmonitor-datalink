@@ -311,7 +311,11 @@ func startNoDataFixtureOn(t *testing.T, protocol string) *noDataFixture {
 	t.Helper()
 	address, redisClient := startPhaseTwoRedis(t)
 	ctx := context.Background()
-	installNoDataStrategy(t, ctx, redisClient)
+	// A frozen revision puts the strategy on the standard raw event, which
+	// is the only protocol carrying a closing event. The compatibility
+	// protocol needs the opposite: its converter refuses an event that
+	// carries a strategy_ref, so that fixture has to stay unrevisioned.
+	installNoDataStrategy(t, ctx, redisClient, protocol != config.OutputProtocolLegacy)
 
 	const interval = int64(60)
 	base := time.Now().Unix()
@@ -397,7 +401,7 @@ func startNoDataFixtureOn(t *testing.T, protocol string) *noDataFixture {
 	return fixture
 }
 
-func installNoDataStrategy(t *testing.T, ctx context.Context, redisClient *redis.Client) {
+func installNoDataStrategy(t *testing.T, ctx context.Context, redisClient *redis.Client, frozen bool) {
 	t.Helper()
 	raw, err := os.ReadFile("testdata/g1_full_threshold_strategy.json")
 	if err != nil {
@@ -430,6 +434,9 @@ func installNoDataStrategy(t *testing.T, ctx context.Context, redisClient *redis
 	}
 	for _, detect := range document["detects"].([]any) {
 		detect.(map[string]any)["trigger_config"].(map[string]any)["check_window"] = 1
+	}
+	if frozen {
+		document["strategy_revision"] = 7
 	}
 	encoded, err := json.Marshal(document)
 	if err != nil {

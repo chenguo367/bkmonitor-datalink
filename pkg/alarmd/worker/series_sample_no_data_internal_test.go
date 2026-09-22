@@ -32,7 +32,18 @@ type noDataSampleRound struct {
 func CheckSeriesSampleNoDataWorkerRegression(t *testing.T, off, on *state.ExecutionStore) {
 	t.Helper()
 	due := noDataWiredPlan(t)
-	due.CompiledPlan = noDataPreflightPlan(t, "7", &contract.NoDataConfigV1{Continuous: 3, Level: 2})
+	// On the standard raw event: rounds 5 and 6 assert the opening and the
+	// closing event, and only that protocol carries a closing one. The
+	// compatibility protocol has no representation for a recovery, so the
+	// record is held before an envelope is built and the consumer closes the
+	// alert itself from the absence of anomalies.
+	due.CompiledPlan = noDataPreflightPlanShaped(t,
+		contract.StrategyRefV2{TenantID: "tenant", StrategyID: "7", Revision: "strategy-v1", SnapshotRevision: 7},
+		&contract.NoDataConfigV1{Continuous: 3, Level: 2},
+		func(p *contract.EvaluationPlanV2) {
+			p.WireFormat = contract.WireFormatStandardRawEvent
+			p.OutputIdentity = &contract.MonitorOutputIdentity{DimensionFields: []string{"host"}}
+		})
 	sampler, err := observability.NewSeriesSampler(observability.SeriesSampleLimits{
 		RecordsPerMinute: 8, BytesPerMinute: 8 * observability.SeriesSampleMaxBytes, QueueCapacity: 1,
 	})

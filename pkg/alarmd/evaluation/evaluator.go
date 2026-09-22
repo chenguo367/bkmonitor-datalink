@@ -158,8 +158,8 @@ func countOpenAlertGate(counts *execution.OpenAlertGateCounts, gate trigger.Reco
 		counts.HeldFingerprintUnknown++
 	case trigger.OpenAlertGateNotConfigured:
 		counts.NotConfigured++
-	case trigger.OpenAlertGateProtocolNotGated:
-		counts.ProtocolNotGated++
+	case trigger.OpenAlertGateProtocolCarriesNoRecovery:
+		counts.ProtocolCarriesNoRecovery++
 	}
 }
 

@@ -821,7 +821,7 @@ func compilePlanV2WithOutput(t testing.TB, levels []contract.LevelIRV2, shape fu
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := contract.StrategyRefV2{TenantID: "default", StrategyID: "1001", Revision: "strategy-r1"}
+	ref := contract.StrategyRefV2{TenantID: "default", StrategyID: "1001", Revision: "strategy-r1", SnapshotRevision: 7}
 	projection := contract.InputProjectionV2{ValueFields: []string{"value"}, DimensionFields: []string{"host"}, BusinessIdentityField: "bk_biz_id", MultiValueAlignment: "SINGLE_VALUE", DataUnit: "percent", MissingValuePolicy: contract.MissingValuePolicyRequired}
 	plan := contract.EvaluationPlanV2{
 		PlanID: "1001", StrategyRef: ref, InputProjection: projection,
@@ -831,6 +831,15 @@ func compilePlanV2WithOutput(t testing.TB, levels []contract.LevelIRV2, shape fu
 			InputProjection:    projection, Levels: levels,
 		},
 	}
+	// The fixture publishes the standard raw event, with the frozen revision
+	// and output identity it needs. That is the only protocol carrying a
+	// recovery envelope, and most cases here are about the envelope or the
+	// gates in front of it; compiled the other way a recovery is held before
+	// one is built and those cases would assert a path that does not run.
+	// The shape callback runs last, so a case wanting the compatibility
+	// protocol sets it back.
+	plan.WireFormat = contract.WireFormatStandardRawEvent
+	plan.OutputIdentity = &contract.MonitorOutputIdentity{DimensionFields: []string{"host"}}
 	if shape != nil {
 		shape(&plan)
 	}

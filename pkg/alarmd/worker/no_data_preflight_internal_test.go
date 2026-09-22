@@ -49,6 +49,15 @@ func noDataPreflightPlan(t *testing.T, strategyID string, noData *contract.NoDat
 // strategy reference, for a case that needs a revisioned strategy.
 func noDataPreflightPlanWithRef(t *testing.T, ref contract.StrategyRefV2, noData *contract.NoDataConfigV1) *strategy.CompiledPlan {
 	t.Helper()
+	return noDataPreflightPlanShaped(t, ref, noData, nil)
+}
+
+// noDataPreflightPlanShaped is the same with a last look at the Plan document.
+// A case that asserts a closing event needs the standard raw event set here:
+// it is the only protocol that carries a recovery envelope, and on the
+// compatibility protocol the record is held before one is built.
+func noDataPreflightPlanShaped(t *testing.T, ref contract.StrategyRefV2, noData *contract.NoDataConfigV1, shape func(*contract.EvaluationPlanV2)) *strategy.CompiledPlan {
+	t.Helper()
 	strategyID := ref.StrategyID
 	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{
 		MaxPlanBytes: 64 << 10, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16,
@@ -83,6 +92,9 @@ func noDataPreflightPlanWithRef(t *testing.T, ref contract.StrategyRefV2, noData
 				RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1, Config: json.RawMessage(`{"enabled":true,"consecutive_windows":1}`)},
 			}},
 		},
+	}
+	if shape != nil {
+		shape(&plan)
 	}
 	result, err := compiler.Compile(context.Background(), strategy.CompileRequest{
 		Plan: plan,

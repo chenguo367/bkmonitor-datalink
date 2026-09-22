@@ -99,11 +99,19 @@ func TestRecoveryEnvelopeGoesOnlyToAnOpenAlert(t *testing.T) {
 			envelope: true, asked: 0,
 		},
 		{
-			name:     "a Plan on the compatibility protocol: the set is not asked",
-			plan:     func(t *testing.T) *strategy.CompiledPlan { return compilePlanV2(t, recovered) },
-			set:      func(t *testing.T) *openAlertSetFixture { return &openAlertSetFixture{} },
-			wantGate: RecoveryGateV2{OpenAlertGate: OpenAlertGateProtocolNotGated},
-			envelope: true, asked: 0,
+			// The protocol carries anomaly points and nothing else, so the
+			// record is held and no envelope is built. It used to be built
+			// here and dropped at the sink, which is why this arm wanted one.
+			name: "a Plan on the compatibility protocol: held, no envelope, the set not asked",
+			plan: func(t *testing.T) *strategy.CompiledPlan {
+				return compilePlanV2WithOutput(t, recovered, func(p *contract.EvaluationPlanV2) {
+					p.WireFormat = contract.WireFormatPythonCompatible
+				})
+			},
+			set: func(t *testing.T) *openAlertSetFixture { return &openAlertSetFixture{} },
+			wantGate: RecoveryGateV2{Held: true, Cause: RecoveryHeldProtocolCarriesNoRecovery,
+				OpenAlertGate: OpenAlertGateProtocolCarriesNoRecovery},
+			envelope: false, asked: 0,
 		},
 		{
 			name: "a historical decision-event Plan now uses the consumer recovery gate",

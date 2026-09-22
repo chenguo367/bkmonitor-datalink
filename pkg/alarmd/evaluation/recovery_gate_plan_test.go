@@ -187,20 +187,31 @@ func compiledTwoLevelsWithThresholds(t *testing.T, threshold5, threshold6 string
 }
 
 // compiledTwoLevelsShaped lets a test reshape the Plan document before it is
-// compiled, for the shapes the default fixture does not have: a frozen
-// revision, a wire format, an output identity.
+// compiled, for the shapes the default fixture does not have.
+//
+// The fixture publishes the standard raw event, with the frozen revision and
+// output identity that format needs, because the recovery envelope is what
+// every case built on it is about. A Plan on the compatibility protocol has no
+// envelope to gate: that protocol carries anomaly points only, so a recovery
+// on it is held before one is built and the open alert set is never asked.
+// Compiled the other way these cases would assert a gate that does not run.
+//
+// The shape callback still runs last, so a case that wants the compatibility
+// protocol can set it back.
 func compiledTwoLevelsShaped(t *testing.T, threshold5, threshold6 string, shape func(*contract.EvaluationPlanV2)) *strategy.CompiledPlan {
 	t.Helper()
 	c, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{MaxPlanBytes: 1 << 20, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16, MaxConditionsPerAlgorithm: 64, MaxASTNodesPerLevel: 256, MaxTriggerWindowSize: 16, MaxRecoveryConsecutiveWindows: 16, MaxRequiredHistoryPoints: 32, MaxTriggerComputeCost: 1 << 20, MaxCompiledPlanBytes: 1 << 20, MaxCacheEntries: 16, MaxCacheBytes: 1 << 20, NegativeCacheTTL: time.Minute, BudgetRevision: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := contract.StrategyRefV2{TenantID: "tenant", StrategyID: "7", Revision: "r1"}
+	ref := contract.StrategyRefV2{TenantID: "tenant", StrategyID: "7", Revision: "r1", SnapshotRevision: 7}
 	projection := contract.InputProjectionV2{ValueFields: []string{"value"}, DimensionFields: []string{"host"}, BusinessIdentityField: "bk_biz_id", MultiValueAlignment: "SINGLE_VALUE", DataUnit: "percent", MissingValuePolicy: contract.MissingValuePolicyRequired}
 	level := func(id, priority uint32, threshold string) contract.LevelIRV2 {
 		return contract.LevelIRV2{Definition: contract.LevelDefinitionV2{LevelID: id, Priority: priority}, Connector: contract.LevelConnectorAND, DetectPlan: contract.DetectPlanV2{Algorithms: []contract.AlgorithmIRV2{{Type: "Threshold", Version: 1, Config: json.RawMessage(`{"value_field":"value","data_unit":"percent","threshold_unit_prefix":"","precision":{"decimal_places":6,"rounding":"HALF_EVEN"},"groups":[{"conditions":[{"operator":"GTE","threshold_decimal":"` + threshold + `"}]}]}`)}}}, TriggerPlan: contract.TypedPlanV1{Type: "N_OF_M", Version: 1, Config: json.RawMessage(`{"window_size":1,"required_anomalies":1,"step_seconds":60}`)}, RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1, Config: json.RawMessage(`{"enabled":true,"consecutive_windows":1}`)}}
 	}
 	p := contract.EvaluationPlanV2{PlanID: "7", StrategyRef: ref, InputProjection: projection, StrategyIR: contract.StrategyIRV2{Schema: contract.Schema{Name: contract.StrategyIRSchemaV2, Major: 2}, StrategyRef: ref, InputProjection: projection, ExecutionSemantics: contract.ExecutionSemanticsV2{EvaluationScope: contract.EvaluationScopeSeries, QueryWindow: 300, AggregationInterval: 60, EvaluationInterval: 60, LatenessTolerance: 120}, Levels: []contract.LevelIRV2{level(5, 1, threshold5), level(6, 2, threshold6)}}}
+	p.WireFormat = contract.WireFormatStandardRawEvent
+	p.OutputIdentity = &contract.MonitorOutputIdentity{DimensionFields: []string{"host"}}
 	if shape != nil {
 		shape(&p)
 	}

@@ -405,8 +405,15 @@ func controlledG4StrategyDocument(
 	if kind == strategy.DetectorKindOsRestart {
 		item["functions"] = []any{map[string]any{"id": "abs", "params": []any{}}}
 	}
+	// A frozen revision, so these Plans publish the standard raw event. The
+	// goldens built on this document assert a closing RECOVERY beside the
+	// opening ABNORMAL, and only that protocol carries a closing one: the
+	// compatibility protocol has no representation for a recovery and holds
+	// it before an envelope is built, leaving its consumer to close the alert
+	// from the absence of anomalies. These cases are about the algorithms,
+	// which the output protocol does not change.
 	document, err := json.Marshal(map[string]any{
-		"id": id, "bk_biz_id": controlledG4SyntheticBusinessID, "bk_tenant_id": "tenant-a",
+		"id": id, "bk_biz_id": controlledG4SyntheticBusinessID, "bk_tenant_id": "tenant-a", "strategy_revision": 7,
 		"space_uid": controlledG4SyntheticSpaceUID, "update_time": 1,
 		"items": []any{item},
 		"detects": []any{map[string]any{

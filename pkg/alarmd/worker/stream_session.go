@@ -1576,7 +1576,7 @@ func openAlertGateFacts(due execution.DuePlan, evaluated execution.EvaluationRes
 		{Outcome: observability.OpenAlertGateHeldNoOpenAlert, Records: gate.HeldNoOpenAlert},
 		{Outcome: observability.OpenAlertGateHeldFingerprintUnknown, Records: gate.HeldFingerprintUnknown},
 		{Outcome: observability.OpenAlertGateNotConfigured, Records: gate.NotConfigured},
-		{Outcome: observability.OpenAlertGateProtocolNotGated, Records: gate.ProtocolNotGated},
+		{Outcome: observability.OpenAlertGateProtocolCarriesNoRecovery, Records: gate.ProtocolCarriesNoRecovery},
 	} {
 		if fact.Records > 0 {
 			facts = append(facts, fact)

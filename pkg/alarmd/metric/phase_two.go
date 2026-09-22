@@ -878,9 +878,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by " +
 			"could not be built; held and named rather than read as absent), not_configured (the evaluation ran " +
 			"without a set; the envelope went as before the gate -- on a production worker this is a wiring " +
-			"fault), protocol_not_gated (the Plan does not publish the alert consumer's protocol -- the compatibility " +
-			"protocol drops RECOVERY at the sink and alarmd's own decision event has no such consumer; the set was " +
-			"not asked). " +
+			"fault), protocol_carries_no_recovery (the Plan publishes a protocol with no representation for a " +
+			"recovery -- the compatibility protocol carries anomaly points only and its consumer decides recovery " +
+			"from their absence; the record is held and no envelope is built, and the set is not asked). " +
+			"protocol_carries_no_recovery was called protocol_not_gated and meant the opposite: the envelope was " +
+			"built and handed to the sink, which dropped it. The same records are counted, at the point the " +
+			"decision is now made, so across that change this series holds its rate while " +
+			"output_events_without_message_total{format=\"python_compatible\",event_kind=\"RECOVERY\"} falls to " +
+			"zero. That fall is the change landing, not the work going away. " +
 			"Counted apart from trigger_recovery_held_total: a record is counted by one gate only. Like that " +
 			"counter this counts records per evaluation, not alerts. Which of passed and held_no_open_alert " +
 			"dominates says nothing on its own; read it against open_alert_set_mode, because in " +

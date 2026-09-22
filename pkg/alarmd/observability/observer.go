@@ -1877,16 +1877,18 @@ const (
 	// envelope went as before the gate existed. On a production worker this
 	// counting is the wiring having come apart.
 	OpenAlertGateNotConfigured OpenAlertGateOutcome = "not_configured"
-	// OpenAlertGateProtocolNotGated: the Plan does not publish the alert
-	// consumer's protocol; the set was not asked.
-	OpenAlertGateProtocolNotGated OpenAlertGateOutcome = "protocol_not_gated"
+	// OpenAlertGateProtocolCarriesNoRecovery: the Plan publishes a protocol
+	// with no representation for a recovery. The record is held and no
+	// envelope is built; the set is not asked, having nothing to say about an
+	// envelope that has nowhere to go.
+	OpenAlertGateProtocolCarriesNoRecovery OpenAlertGateOutcome = "protocol_carries_no_recovery"
 )
 
 // OpenAlertGateOutcomes lists every outcome, for the metric that pre-creates
 // them all.
 var OpenAlertGateOutcomes = []OpenAlertGateOutcome{
 	OpenAlertGatePassed, OpenAlertGateHeldNoOpenAlert, OpenAlertGateHeldFingerprintUnknown,
-	OpenAlertGateNotConfigured, OpenAlertGateProtocolNotGated,
+	OpenAlertGateNotConfigured, OpenAlertGateProtocolCarriesNoRecovery,
 }
 
 // OpenAlertGateFact counts, for one evaluation, the records the second gate
@@ -2403,7 +2405,7 @@ func normalizeOpenAlertGateFacts(observation Observation) []OpenAlertGateFact {
 		}
 		switch fact.Outcome {
 		case OpenAlertGatePassed, OpenAlertGateHeldNoOpenAlert, OpenAlertGateHeldFingerprintUnknown,
-			OpenAlertGateNotConfigured, OpenAlertGateProtocolNotGated:
+			OpenAlertGateNotConfigured, OpenAlertGateProtocolCarriesNoRecovery:
 			facts = append(facts, fact)
 		}
 	}
