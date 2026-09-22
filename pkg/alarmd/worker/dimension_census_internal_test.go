@@ -22,33 +22,62 @@ import (
 )
 
 // The gate's undercounting direction first: a Query Group that has reached
-// its share of the pool is the one the split trigger is about, so the
-// boundary belongs to the candidate side. Judged the other way, the object
-// the trigger names is the one object that never has a census, and the
-// planner reads "no census" as "do not split" - a deployment that would
-// quietly never split anything, with no reading that says so.
-func TestAQueryGroupAtItsShareOfThePoolIsACensusCandidate(t *testing.T) {
-	const pool = 1 << 30
-	share := uint64(pool) / 100 * CensusCandidateSharePercent
+// its share is the one the split trigger is about, so the boundary belongs to
+// the candidate side. Judged the other way, the object the trigger names is
+// the one object that never has a census, and the planner reads "no census"
+// as "do not split" - a deployment that would quietly never split anything,
+// with no reading that says so.
+func TestAQueryGroupAtItsShareIsACensusCandidate(t *testing.T) {
+	const share = 512 << 20
 
-	candidate, got := censusCandidate(share, pool)
+	candidate, got := censusCandidate(share, share)
 	if !candidate {
 		t.Fatalf("a Query Group peaking at exactly its %d-byte share is not a candidate; the split trigger "+
-			"names that object, and without a census nothing will ever split it", share)
+			"names that object, and without a census nothing will ever split it", uint64(share))
 	}
 	if got != share {
-		t.Fatalf("the gate reported a %d-byte share, want %d: the line has to carry the number it decided on", got, share)
+		t.Fatalf("the gate reported a %d-byte share, want %d: the line has to carry the number it decided on",
+			got, uint64(share))
 	}
-	if candidate, _ := censusCandidate(share-1, pool); candidate {
+	if candidate, _ := censusCandidate(share-1, share); candidate {
 		t.Fatalf("a Query Group one byte under its share is a candidate; every Slot on the replica would " +
 			"then count series it has no use for")
 	}
 }
 
-// A worker with no pool figure judges nothing. Zero is not a small pool, it
-// is no reading - and read as a small one, every Query Group clears a share
-// of zero and every Slot on the replica takes a census.
-func TestAWorkerWithNoPoolReadingTakesNoCensus(t *testing.T) {
+// And the share the gate is judged against is the one the worker enforces,
+// not a second number that agrees with it today.
+//
+// The two were derived apart once - the gate recomputed the share as a
+// percentage of the pool while the refusal used qgShareBytes - and they even
+// disagreed at the edges, because the percentage truncates the pool to a
+// multiple of a hundred first. Nothing could have failed in between: one
+// relation with two derivations has no place to be wrong.
+func TestTheCensusGateIsJudgedByTheShareTheWorkerRefusesBy(t *testing.T) {
+	for _, pool := range []uint64{0, 199, 1 << 20, (1 << 30) + 7} {
+		coordinator := &SlotExecutionCoordinator{budget: ProvisionalBudget{MaxRetainedBytes: pool}}
+		enforced := coordinator.qgShareBytes()
+		// Through the gate the Slot actually opens, not through the predicate
+		// alone: the second derivation lived at the call site, so a test that
+		// hands the share in cannot see it.
+		coordinator.censusPeaks.record("qg-share", enforced)
+		stream := &streamedExecution{coordinator: coordinator}
+		stream.openCensusGate("qg-share")
+		if stream.censusShareBytes != enforced {
+			t.Fatalf("pool %d: the gate judged by %d, the worker refuses by %d",
+				pool, stream.censusShareBytes, enforced)
+		}
+		if want := enforced > 0; stream.censusCandidate != want {
+			t.Fatalf("pool %d: a Query Group peaking at exactly the enforced share is a candidate = %v, want %v",
+				pool, stream.censusCandidate, want)
+		}
+	}
+}
+
+// A worker with no share figure judges nothing. Zero is not a small share, it
+// is no reading - and read as a small one, every Query Group clears it and
+// every Slot on the replica takes a census.
+func TestAWorkerWithNoShareReadingTakesNoCensus(t *testing.T) {
 	if candidate, share := censusCandidate(1<<30, 0); candidate || share != 0 {
 		t.Fatalf("censusCandidate(_, 0) = %v, %d, want no candidate and no share", candidate, share)
 	}

@@ -181,14 +181,7 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 		return fmt.Errorf("alarmd worker: prepare EffectiveTime facts: %w", err)
 	}
 	stream.effective = effective
-	// Whether this Query Group's Plans are worth a dimension census, decided
-	// once for the Slot from what its last Slot held: a census has to be
-	// counted while the series go past, and what this Slot will hold is only
-	// known once it has held it.
-	stream.censusPeakBytes = stream.coordinator.censusPeaks.read(header.Contract.Slot.QueryGroup)
-	stream.censusCandidate, stream.censusShareBytes = censusCandidate(
-		stream.censusPeakBytes, stream.coordinator.budget.MaxRetainedBytes,
-	)
+	stream.openCensusGate(header.Contract.Slot.QueryGroup)
 	// The target plans are resolved here, before any series arrives: the
 	// source reads the memberships right after Begin to filter the records,
 	// and the absence judgement at completion reads the same resolutions.
