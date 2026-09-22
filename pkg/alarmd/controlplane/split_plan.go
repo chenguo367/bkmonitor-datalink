@@ -40,11 +40,27 @@ const (
 	// the resplit trigger about as fast as it was made, so planning one is
 	// worse than planning none.
 	MaxShardSkewPercent = 130
-	// MaxCensusAgeSeconds is how old a census may be and still describe the
-	// object. Past it the distribution is not this object's any more - a
-	// strategy whose targets changed an hour ago would be cut along values
-	// it no longer has.
+	// MaxCensusAgeSeconds is the FLOOR on how old a census may be and still
+	// describe the object. Past its own bound the distribution is not this
+	// object's any more - a strategy whose targets changed an hour ago would
+	// be cut along values it no longer has.
+	//
+	// A floor rather than the bound itself, because a census is only ever as
+	// fresh as the object's own cadence: it is written when a Slot runs, so
+	// an object evaluated every ten seconds has one seconds old, and an
+	// object evaluated hourly has one that spends most of the hour older
+	// than any fixed figure. Held to a flat bound, every object slower than
+	// this one is refused on nearly every round - a whole class that can
+	// never be planned, reported under a word that points at the census when
+	// it is the bound that does not fit. Nothing in the schedule contract
+	// caps an evaluation interval; it is only required to be positive.
 	MaxCensusAgeSeconds = 900
+	// CensusAgeCadenceMultiple is how many of the object's own evaluation
+	// intervals its census may span. Two, so one missed round does not make
+	// a census stale: a census is read in a later round than it was written,
+	// so it is already one interval old when it is first looked at, and one
+	// interval would be no allowance at all.
+	CensusAgeCadenceMultiple = 2
 )
 
 // SplitInput is one object's readings, already attributed to one Plan.
@@ -61,6 +77,31 @@ type SplitInput struct {
 	Census     execution.DimensionCensus
 	CensusRead bool
 	At         int64
+	// EvaluationIntervalSeconds is how often this Plan runs, and with it how
+	// often its census is rewritten. Zero is an unknown cadence, which falls
+	// back to the floor - the bound a fixed figure gives - rather than to no
+	// bound at all.
+	EvaluationIntervalSeconds int64
+}
+
+// censusAgeBound is how old this object's census may be - its own cadence,
+// never below the floor - and which of the three it came from.
+//
+// The source travels with the number because two of the three produce the
+// same number. A bound of fifteen minutes on a fast object means the census
+// is stale by many of that object's own rounds; the same fifteen minutes on
+// an object whose cadence was not supplied means the bound is a guess, and
+// refusing under it may be the very misattribution this bound exists to
+// remove. Without the word they are byte-identical on the line.
+func censusAgeBound(intervalSeconds int64) (int64, string) {
+	if intervalSeconds <= 0 {
+		return MaxCensusAgeSeconds, observability.SplitCensusBoundFloorUnknown
+	}
+	bound := intervalSeconds * CensusAgeCadenceMultiple
+	if bound < MaxCensusAgeSeconds {
+		return MaxCensusAgeSeconds, observability.SplitCensusBoundFloorFast
+	}
+	return bound, observability.SplitCensusBoundCadence
 }
 
 // SplitPlan is what a split would be: the dimension, the value lists, and
@@ -129,7 +170,8 @@ func PlanSplit(input SplitInput) (SplitPlan, observability.SplitPlanFacts) {
 	if facts.CensusAgeSeconds < 0 {
 		facts.CensusAgeSeconds = 0
 	}
-	if facts.CensusAgeSeconds > MaxCensusAgeSeconds {
+	facts.CensusAgeBoundSeconds, facts.CensusAgeBoundSource = censusAgeBound(input.EvaluationIntervalSeconds)
+	if facts.CensusAgeSeconds > facts.CensusAgeBoundSeconds {
 		facts.Outcome = observability.SplitOutcomeCensusStale
 		return SplitPlan{}, facts
 	}

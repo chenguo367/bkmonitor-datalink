@@ -140,7 +140,7 @@ func TestAGroupOfSeveralPlansSaysSoAndDividesItsBytes(t *testing.T) {
 		return e
 	}
 	source := &fakeSplitSource{
-		plans: map[execution.QueryGroupIdentity][]execution.PlanCensusIdentity{"qg": {first, second}},
+		plans: map[execution.QueryGroupIdentity][]splitCandidatePlan{"qg": {{Census: first}, {Census: second}}},
 		censuses: map[execution.PlanCensusIdentity]execution.DimensionCensus{
 			first: {Identity: first, Source: execution.DimensionCensusFromRound,
 				ObservedAt: splitDryRunTestClock().Unix(), Series: 6000,
@@ -205,7 +205,7 @@ func TestThePeakIsAttributedToThePlanThatIsAnswerableForIt(t *testing.T) {
 }
 
 type fakeSplitSource struct {
-	plans    map[execution.QueryGroupIdentity][]execution.PlanCensusIdentity
+	plans    map[execution.QueryGroupIdentity][]splitCandidatePlan
 	censuses map[execution.PlanCensusIdentity]execution.DimensionCensus
 	planErr  error
 	reads    int
@@ -213,7 +213,7 @@ type fakeSplitSource struct {
 
 func (source *fakeSplitSource) SplitCandidatePlans(
 	_ context.Context, queryGroup execution.QueryGroupIdentity,
-) ([]execution.PlanCensusIdentity, error) {
+) ([]splitCandidatePlan, error) {
 	if source.planErr != nil {
 		return nil, source.planErr
 	}
@@ -289,7 +289,7 @@ func TestTheDryRunReportsEveryPlanAsADryRun(t *testing.T) {
 			Value: fmt.Sprintf("ip-%04d", index), Series: 10})
 	}
 	source := &fakeSplitSource{
-		plans: map[execution.QueryGroupIdentity][]execution.PlanCensusIdentity{"qg": {plan}},
+		plans: map[execution.QueryGroupIdentity][]splitCandidatePlan{"qg": {{Census: plan}}},
 		censuses: map[execution.PlanCensusIdentity]execution.DimensionCensus{plan: {
 			Identity: plan, Source: execution.DimensionCensusFromRound,
 			ObservedAt: splitDryRunTestClock().Unix(), Series: 6000,
@@ -333,7 +333,7 @@ func TestTheRoundReportsWhatItLookedAtEvenWhenItSkippedNothing(t *testing.T) {
 		Plan:            execution.PlanIdentity{TenantID: "system", BusinessID: "2", StrategyID: "4101"},
 		StateGeneration: "generation",
 	}
-	source := &fakeSplitSource{plans: map[execution.QueryGroupIdentity][]execution.PlanCensusIdentity{"qg": {plan}}}
+	source := &fakeSplitSource{plans: map[execution.QueryGroupIdentity][]splitCandidatePlan{"qg": {{Census: plan}}}}
 
 	_, rounds := splitDryRunFacts(t, source, 3*splitTestPool)
 

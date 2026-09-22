@@ -39,8 +39,9 @@ const splitDryRunMaxObjects = 8
 // and a round that cannot do the first has nothing to ask the second.
 type splitCensusSource interface {
 	// SplitCandidatePlans is the Plans one Query Group carries, each with the
-	// state generation its census is keyed by.
-	SplitCandidatePlans(context.Context, execution.QueryGroupIdentity) ([]execution.PlanCensusIdentity, error)
+	// state generation its census is keyed by and the cadence that census is
+	// rewritten at.
+	SplitCandidatePlans(context.Context, execution.QueryGroupIdentity) ([]splitCandidatePlan, error)
 	// ReadCensus is one Plan's dimension census; false is a Plan nobody has
 	// taken one of, which is a decision the planner makes rather than an
 	// error.
@@ -79,6 +80,19 @@ func (runtime *productionPhaseTwoOwnership) dryRunSplits(
 	runtime.observeSplitRound(ctx, observability.SplitRoundFacts{
 		OverShare: len(candidates) + skipped, Examined: len(candidates), Skipped: skipped,
 	})
+}
+
+// splitCandidatePlan is one Plan of a candidate object: what its census is
+// keyed by, and how often that census is rewritten.
+//
+// The cadence travels with the identity because the planner's staleness
+// bound is not a fixed figure: a census is written when the Plan's Slot
+// runs, so an hourly Plan's census is older than any flat bound for most of
+// the hour. Read against a flat bound, every Plan slower than it would be
+// refused on nearly every round.
+type splitCandidatePlan struct {
+	Census                    execution.PlanCensusIdentity
+	EvaluationIntervalSeconds int64
 }
 
 // splitCandidate is one object the byte readings put over the share a single
@@ -157,7 +171,7 @@ func (runtime *productionPhaseTwoOwnership) dryRunSplit(
 	read := make([]bool, len(plans))
 	var counted uint64
 	for index, plan := range plans {
-		census, found, err := source.ReadCensus(ctx, plan)
+		census, found, err := source.ReadCensus(ctx, plan.Census)
 		if err != nil {
 			continue
 		}
@@ -168,9 +182,10 @@ func (runtime *productionPhaseTwoOwnership) dryRunSplit(
 	}
 	for index, plan := range plans {
 		input := controlplane.SplitInput{
-			Plan: plan.Plan, ShareBytes: candidate.ShareBytes, At: at,
+			Plan: plan.Census.Plan, ShareBytes: candidate.ShareBytes, At: at,
 			Census: censuses[index], CensusRead: read[index],
-			PeakBytes: attributedPeakBytes(candidate.PeakBytes, censuses[index], read[index], counted, len(plans)),
+			EvaluationIntervalSeconds: plan.EvaluationIntervalSeconds,
+			PeakBytes:                 attributedPeakBytes(candidate.PeakBytes, censuses[index], read[index], counted, len(plans)),
 		}
 		_, facts := controlplane.PlanSplit(input)
 		facts.PlansInGroup = len(plans)
