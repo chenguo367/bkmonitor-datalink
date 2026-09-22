@@ -177,10 +177,16 @@ func evaluate(t *testing.T, input AbsenceInput) AbsenceResult {
 	if input.TrackingHorizonSeconds == 0 && result.Facts.Expired != 0 {
 		t.Fatalf("Evaluate() expired %d absences with no horizon configured", result.Facts.Expired)
 	}
+	// The ages are counted where Absent is, so their sum is Absent on every
+	// path; which bucket each absence lands in is asserted by name in the
+	// age tests.
+	if total := result.Facts.AbsentAges.Total(); total != absent {
+		t.Fatalf("Evaluate() filed %d absences by age for %d absent: %+v", total, absent, result.Facts.AbsentAges)
+	}
 	wantFacts := AbsenceFacts{
 		Present: uint64(len(input.Present)), Expected: uint64(len(input.Roster.Groups)), Absent: absent, Unavailable: unavailable,
 		Dropped: input.Dropped, RosterSource: input.Roster.Source, RosterVersion: input.Roster.Version,
-		Expired: result.Facts.Expired, Suppressed: result.Facts.Suppressed,
+		Expired: result.Facts.Expired, Suppressed: result.Facts.Suppressed, AbsentAges: result.Facts.AbsentAges,
 	}
 	if result.Facts != wantFacts {
 		t.Fatalf("Facts = %+v, want %+v", result.Facts, wantFacts)

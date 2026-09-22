@@ -550,6 +550,10 @@ func (stream *streamedExecution) observeNoDataAbsence(
 			RosterSource: string(facts.RosterSource),
 			Expected:     facts.Expected, Present: facts.Present, Absent: facts.Absent, Unavailable: facts.Unavailable,
 			Dropped: facts.Dropped, Expired: facts.Expired, Suppressed: facts.Suppressed,
+			AbsentAges: observability.NoDataAbsentAges{
+				ThisRound: facts.AbsentAges.ThisRound, UnderHour: facts.AbsentAges.UnderHour,
+				UnderDay: facts.AbsentAges.UnderDay, DayOrMore: facts.AbsentAges.DayOrMore,
+			},
 		},
 	})
 }

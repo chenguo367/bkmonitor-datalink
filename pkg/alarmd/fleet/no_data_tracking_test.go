@@ -56,11 +56,13 @@ func TestTheRowCarriesEachPlansLastDecidingWordAndWhereItsHorizonCameFrom(t *tes
 	// Three Plans on one object, one per horizon source; the counts differ
 	// per Plan so a row that mixed them up would show.
 	absenceDecided(ctx, tracker, "s-platform", 600, observability.NoDataAbsenceFacts{
-		HorizonSeconds: 3600, RosterSource: "TARGET_STATIC", Expected: 10, Present: 6, Absent: 2, Expired: 1, Suppressed: 1})
+		HorizonSeconds: 3600, RosterSource: "TARGET_STATIC", Expected: 10, Present: 6, Absent: 2, Expired: 1, Suppressed: 1,
+		AbsentAges: observability.NoDataAbsentAges{UnderHour: 1, DayOrMore: 1}})
 	absenceDecided(ctx, tracker, "s-strategy", 600, observability.NoDataAbsenceFacts{
 		HorizonSeconds: 900, RosterSource: "HISTORY", Expected: 5, Present: 5, Absent: 0, Expired: 0, Suppressed: 0})
 	absenceDecided(ctx, tracker, "s-none", 600, observability.NoDataAbsenceFacts{
-		HorizonSeconds: 0, RosterSource: "HISTORY", Expected: 4, Present: 1, Absent: 3, Expired: 0, Suppressed: 0})
+		HorizonSeconds: 0, RosterSource: "HISTORY", Expected: 4, Present: 1, Absent: 3, Expired: 0, Suppressed: 0,
+		AbsentAges: observability.NoDataAbsentAges{ThisRound: 2, UnderDay: 1}})
 
 	row := objectRow(t, tracker, "qg-track")
 	if len(row.NoDataTracking) != 3 {
@@ -72,8 +74,9 @@ func TestTheRowCarriesEachPlansLastDecidingWordAndWhereItsHorizonCameFrom(t *tes
 	}
 	if got := bySource[NoDataHorizonPlatform]; got.Plan.StrategyID != "s-platform" || got.HorizonSeconds != 3600 ||
 		got.Expected != 10 || got.Present != 6 || got.Absent != 2 || got.ExpiredThisRound != 1 || got.Suppressed != 1 ||
-		got.RosterSource != "TARGET_STATIC" || got.EvaluationTime != 600 || !got.DecidedAt.Equal(now) {
-		t.Fatalf("platform-horizon entry = %+v, want s-platform's counts whole, decided at slot 600 seen now", got)
+		got.RosterSource != "TARGET_STATIC" || got.EvaluationTime != 600 || !got.DecidedAt.Equal(now) ||
+		got.AbsentAges != (NoDataAbsentAges{UnderHour: 1, DayOrMore: 1}) {
+		t.Fatalf("platform-horizon entry = %+v, want s-platform's counts whole, ages included, decided at slot 600 seen now", got)
 	}
 	if got := bySource[NoDataHorizonStrategy]; got.Plan.StrategyID != "s-strategy" || got.HorizonSeconds != 900 {
 		t.Fatalf("strategy-horizon entry = %+v, want s-strategy with its own 900", got)
@@ -91,7 +94,8 @@ func TestTheRowCarriesEachPlansLastDecidingWordAndWhereItsHorizonCameFrom(t *tes
 	// not a running total, so 1 expired then 0 expired reads 0, not 1.
 	at.at = at.at.Add(time.Minute)
 	absenceDecided(ctx, tracker, "s-platform", 660, observability.NoDataAbsenceFacts{
-		HorizonSeconds: 3600, RosterSource: "TARGET_STATIC", Expected: 10, Present: 6, Absent: 1, Expired: 0, Suppressed: 2})
+		HorizonSeconds: 3600, RosterSource: "TARGET_STATIC", Expected: 10, Present: 6, Absent: 1, Expired: 0, Suppressed: 2,
+		AbsentAges: observability.NoDataAbsentAges{UnderHour: 1}})
 	row = objectRow(t, tracker, "qg-track")
 	if len(row.NoDataTracking) != 3 {
 		t.Fatalf("a second round of one Plan made %d entries, want still 3", len(row.NoDataTracking))
@@ -115,6 +119,9 @@ func TestTheRowCarriesEachPlansLastDecidingWordAndWhereItsHorizonCameFrom(t *tes
 	want := NoDataTrackingSummary{
 		Plans: 3, HorizonNone: 1, HorizonPlatform: 1, HorizonStrategy: 1,
 		Expected: 19, Absent: 4, ExpiredThisRound: 0, Suppressed: 2, LastDecidedAt: now.Add(time.Minute),
+		// The latest word of each Plan: s-platform's second round replaced
+		// its first, so the day-or-more absence it had is gone from the sum.
+		AbsentAges: NoDataAbsentAges{ThisRound: 2, UnderHour: 1, UnderDay: 1},
 		// Every line here carried no frozen word, so every source was inferred.
 		HorizonSourceInferred: ptr(3),
 	}

@@ -848,6 +848,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			RosterSource: absence.RosterSource, Expected: absence.Expected, Present: absence.Present,
 			Absent: absence.Absent, ExpiredThisRound: absence.Expired, Suppressed: absence.Suppressed,
 			Dropped: absence.Dropped, EvaluationTime: trace.EvaluationTime, DecidedAt: at,
+			AbsentAges: NoDataAbsentAges{
+				ThisRound: absence.AbsentAges.ThisRound, UnderHour: absence.AbsentAges.UnderHour,
+				UnderDay: absence.AbsentAges.UnderDay, DayOrMore: absence.AbsentAges.DayOrMore,
+			},
 		}
 	}
 	// A renewal that reached the store. Success -- whether or not it set a

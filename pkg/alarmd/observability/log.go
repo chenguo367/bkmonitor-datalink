@@ -411,6 +411,13 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Uint64("no_data_dropped", facts.Dropped),
 			slog.Uint64("no_data_expired", facts.Expired),
 			slog.Uint64("no_data_suppressed", facts.Suppressed),
+			// The ages beside the count, zeros included, for the same reason
+			// as the counts: whether the horizon can reach anything is read
+			// from the last bucket being zero or not.
+			slog.Uint64("no_data_absent_this_round", facts.AbsentAges.ThisRound),
+			slog.Uint64("no_data_absent_under_hour", facts.AbsentAges.UnderHour),
+			slog.Uint64("no_data_absent_under_day", facts.AbsentAges.UnderDay),
+			slog.Uint64("no_data_absent_day_or_more", facts.AbsentAges.DayOrMore),
 		)
 	}
 	if facts := observation.TargetResolution; facts != nil {

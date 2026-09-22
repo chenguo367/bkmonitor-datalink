@@ -528,6 +528,22 @@ type NoDataAbsenceFacts struct {
 	Dropped       uint64
 	Expired       uint64
 	Suppressed    uint64
+	// AbsentAges is Absent by how long each absence has been open at this
+	// round -- this round, under an hour, under a day, a day or more -- as
+	// the evaluation filed them from the same start the horizon reads. They
+	// sum to Absent. This is what says whether a horizon can reach anything:
+	// thousands of absences all under an hour old are groups that report
+	// every few rounds and reset their clock, which no horizon stops, and
+	// the last bucket is what a one-day horizon would.
+	AbsentAges NoDataAbsentAges
+}
+
+// NoDataAbsentAges is the age buckets of the absences one round reported.
+type NoDataAbsentAges struct {
+	ThisRound uint64
+	UnderHour uint64
+	UnderDay  uint64
+	DayOrMore uint64
 }
 
 // NoDataAbsenceOutcomes is every count the absence line carries, in the order
