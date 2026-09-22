@@ -1043,7 +1043,8 @@ func appendEnvelopePassCounts(attributes []slog.Attr, observation Observation) [
 		slog.Int64("envelope_corrupt", observation.Counts.EnvelopeCorrupt),
 		slog.Int64("no_record_yet", observation.Counts.NoRecordYet),
 		slog.Int64("frame_corrupt_rescued", observation.Counts.FrameCorruptRescued),
-		slog.Int64("frame_corrupt_lost", observation.Counts.FrameCorruptLost))
+		slog.Int64("frame_corrupt_lost", observation.Counts.FrameCorruptLost),
+		slog.Int64("unclassified", observation.Counts.Unclassified))
 }
 
 func appendTraceFields(attributes []slog.Attr, trace TraceFields) []slog.Attr {

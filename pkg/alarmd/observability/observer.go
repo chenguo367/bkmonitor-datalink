@@ -429,6 +429,7 @@ type Counts struct {
 	NoRecordYet         int64
 	FrameCorruptRescued int64
 	FrameCorruptLost    int64
+	Unclassified        int64
 }
 
 // TargetResolutionFacts is one Plan's target plan resolved for one Slot:
@@ -2834,10 +2835,13 @@ const (
 	EnvelopePassEnvelopeCorrupt   = "envelope_corrupt"
 	EnvelopePassFrameCorruptSaved = "frame_corrupt_rescued"
 	EnvelopePassFrameCorruptLost  = "frame_corrupt_lost"
+	// EnvelopePassUnclassified is a shape the split does not know: unreachable
+	// today, carried so that a sixth one is counted rather than dropped.
+	EnvelopePassUnclassified = "unclassified"
 )
 
 var EnvelopePassOutcomes = []string{EnvelopePassOldRepresentation, EnvelopePassNoRecordYet,
-	EnvelopePassEnvelopeCorrupt, EnvelopePassFrameCorruptSaved, EnvelopePassFrameCorruptLost}
+	EnvelopePassEnvelopeCorrupt, EnvelopePassFrameCorruptSaved, EnvelopePassFrameCorruptLost, EnvelopePassUnclassified}
 
 func normalizeScheduleCutoverFacts(facts *ScheduleCutoverFacts) *ScheduleCutoverFacts {
 	if facts == nil {

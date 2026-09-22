@@ -765,6 +765,7 @@ type runtimeLoadPass struct {
 	noRecordYet         int
 	frameCorruptRescued int
 	frameCorruptLost    int
+	unclassified        int
 }
 
 func (batch *runtimeLoadBatch) reset() {
@@ -930,10 +931,19 @@ func (store *ExecutionStore) loadRuntimeBatch(
 				pass.envelopeCorrupt++
 			case pass.frames[index] == nil:
 				pass.noRecordYet++
-			case answered:
+			case pass.frames[index] != nil && answered:
 				pass.frameCorruptRescued++
-			default:
+			case pass.frames[index] != nil:
 				pass.frameCorruptLost++
+			default:
+				// Unreachable as the five stand, and deliberately written so
+				// that it can stop being unreachable. A shape none of the five
+				// names lands here and is counted rather than dropped, which
+				// is what makes them a partition by construction instead of by
+				// whatever a fixture happens to contain: a shape a fixture has
+				// no data for is invisible to every case built on one, the sum
+				// over the buckets included.
+				pass.unclassified++
 			}
 			views[index] = view
 			continue

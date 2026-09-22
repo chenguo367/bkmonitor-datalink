@@ -1353,6 +1353,7 @@ func (m phaseTwoMetrics) observeEnvelopePass(counts observability.Counts) {
 		observability.EnvelopePassEnvelopeCorrupt:   counts.EnvelopeCorrupt,
 		observability.EnvelopePassFrameCorruptSaved: counts.FrameCorruptRescued,
 		observability.EnvelopePassFrameCorruptLost:  counts.FrameCorruptLost,
+		observability.EnvelopePassUnclassified:      counts.Unclassified,
 	} {
 		if value > 0 {
 			m.envelopePass.WithLabelValues(outcome).Add(float64(value))

@@ -1541,7 +1541,7 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 			EnvelopeReads: int64(loaded.EnvelopeReads), EnvelopeAnswered: int64(loaded.EnvelopeAnswered),
 			EnvelopeCorrupt: int64(loaded.EnvelopeCorrupt),
 			NoRecordYet:     int64(loaded.NoRecordYet), FrameCorruptRescued: int64(loaded.FrameCorruptRescued),
-			FrameCorruptLost: int64(loaded.FrameCorruptLost)}, nil)
+			FrameCorruptLost: int64(loaded.FrameCorruptLost), Unclassified: int64(loaded.Unclassified)}, nil)
 	for index, entry := range batch {
 		if err := stream.evaluateLoadedSeries(ctx, entry, loaded.Items[index]); err != nil {
 			return err

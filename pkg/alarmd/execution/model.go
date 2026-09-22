@@ -1168,6 +1168,12 @@ type StatePreflightResult struct {
 	NoRecordYet         int
 	FrameCorruptRescued int
 	FrameCorruptLost    int
+	// Unclassified is a shape the split does not know. It is unreachable as
+	// the five stand and is carried anyway, because the alternative is that a
+	// sixth shape added later is silently dropped from all of them -- and a
+	// test cannot catch that, having no data for a shape nobody has written
+	// yet. Non-zero means the five stopped being a partition.
+	Unclassified int
 }
 
 func (result StatePreflightResult) Find(identity StateKeyIdentity) (RuntimeStateView, bool) {
@@ -1227,7 +1233,8 @@ func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflight
 		LoadedBytes: result.LoadedBytes, EnvelopeReads: result.EnvelopeReads,
 		EnvelopeAnswered: result.EnvelopeAnswered, EnvelopeCorrupt: result.EnvelopeCorrupt,
 		NoRecordYet:         result.NoRecordYet,
-		FrameCorruptRescued: result.FrameCorruptRescued, FrameCorruptLost: result.FrameCorruptLost}
+		FrameCorruptRescued: result.FrameCorruptRescued, FrameCorruptLost: result.FrameCorruptLost,
+		Unclassified: result.Unclassified}
 	seen := make(map[StateKeyIdentity]struct{}, len(result.Items))
 	for index, view := range result.Items {
 		candidate, ok := wanted[view.Identity]

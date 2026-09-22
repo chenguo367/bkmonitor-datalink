@@ -11,12 +11,13 @@ package state
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// The second pass reports which of the four it found, and one round holds all
+// The second pass reports which of the five it found, and one round holds all
 // of them at once.
 //
 // The total on its own cannot say when the migration is over: a series with no
@@ -28,7 +29,7 @@ import (
 // rescued read exactly like a new series arriving, and they send a reader to
 // opposite places.
 //
-// One round with all four shapes present, because the failure this pins is
+// One round with all five shapes present, because the failure this pins is
 // miscounting one shape as another: a case with a single shape in it passes
 // against a counter that files everything under one bucket.
 func TestTheSecondPassSaysWhichOfTheFourItFound(t *testing.T) {
@@ -83,9 +84,17 @@ func TestTheSecondPassSaysWhichOfTheFourItFound(t *testing.T) {
 			t.Errorf("%s = %d, want %d (all five shapes are in this round exactly once)", name, got.have, got.want)
 		}
 	}
-	// The four account for the second pass and nothing else: the healthy frame
-	// is answered in the first pass and must not appear in any of them.
-	if sum := loaded.EnvelopeAnswered + loaded.EnvelopeCorrupt + loaded.NoRecordYet + loaded.FrameCorruptRescued + loaded.FrameCorruptLost; sum != loaded.EnvelopeReads {
+	// The five account for the whole of the second pass, which is what makes
+	// this the completeness guard: a sixth shape added without a bucket lands
+	// in none of them and the sum falls short, where every per-bucket case
+	// above would still pass. The healthy frame is answered in the first pass
+	// and must not appear in any of them.
+	if loaded.Unclassified != 0 {
+		t.Fatalf("Unclassified = %d: a shape reached the split that none of the five names, so they are no longer a "+
+			"partition and the total no longer cross-checks them", loaded.Unclassified)
+	}
+	if sum := loaded.EnvelopeAnswered + loaded.EnvelopeCorrupt + loaded.NoRecordYet + loaded.FrameCorruptRescued +
+		loaded.FrameCorruptLost + loaded.Unclassified; sum != loaded.EnvelopeReads {
 		t.Fatalf("the five sum to %d against %d series that needed the second read: a shape is being counted twice "+
 			"or not at all", sum, loaded.EnvelopeReads)
 	}
@@ -121,5 +130,66 @@ func TestANewSeriesDoesNotCountAsTheOlderRepresentation(t *testing.T) {
 	if loaded.NoRecordYet != len(items) || loaded.EnvelopeReads != len(items) {
 		t.Fatalf("NoRecordYet = %d, EnvelopeReads = %d, want %d each: these series went through the second pass and "+
 			"are the reason the total cannot be the indicator", loaded.NoRecordYet, loaded.EnvelopeReads, len(items))
+	}
+}
+
+// failAfterBackend answers the first MGET and refuses the ones after it, so a
+// preflight's first pass succeeds and its second pass does not.
+type failAfterBackend struct {
+	*pipelineMemoryBackend
+	calls int
+}
+
+func (backend *failAfterBackend) MGet(ctx context.Context, keys []string) ([][]byte, error) {
+	backend.calls++
+	if backend.calls > 1 {
+		return nil, errors.New("state: injected second-pass read failure")
+	}
+	return backend.pipelineMemoryBackend.MGet(ctx, keys)
+}
+
+// The five and the total differ by exactly the series whose read failed.
+//
+// This is the identity the total is kept for, and the only statement about
+// these counts that holds on every round: a batch whose read fails classifies
+// every one of its items as a failure and never reaches the split, so those
+// series are in EnvelopeReads and in none of the five. Without a case for it
+// the identity lives only in a comment, and a comment is what the last wrong
+// claim about these counts was.
+//
+// It pins the other term of that identity. The completeness guard is the sum
+// in the case above, where every read comes back and the five must account for
+// all of them; this one covers the round where they must not.
+func TestTheFiveAndTheTotalDifferByTheReadsThatFailed(t *testing.T) {
+	version := applyVersion()
+	backend := &failAfterBackend{pipelineMemoryBackend: newPipelineMemoryBackend()}
+	store := newBatchStore(t, backend, nil)
+	items := make([]execution.StatePreflightItem, 3)
+	for index := range items {
+		identity := seriesIdentity(index)
+		items[index] = execution.StatePreflightItem{Identity: identity, ApplyVersion: version}
+		envelopeKey, _ := RuntimeStateKeyV2("alarmd", identity)
+		backend.values[envelopeKey], _ = encodeRuntime(seriesMutation(t, identity, version, 0, "env"), 7)
+	}
+
+	loaded, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.EnvelopeReads != len(items) {
+		t.Fatalf("EnvelopeReads = %d, want %d: every series had no frame and went to the second pass",
+			loaded.EnvelopeReads, len(items))
+	}
+	sum := loaded.EnvelopeAnswered + loaded.EnvelopeCorrupt + loaded.NoRecordYet +
+		loaded.FrameCorruptRescued + loaded.FrameCorruptLost
+	if sum != 0 {
+		t.Fatalf("the five sum to %d on a round whose second pass never came back: a series that was not read "+
+			"cannot have been classified", sum)
+	}
+	// And the series say so, rather than reading as a finished migration.
+	for index, view := range loaded.Items {
+		if view.Status != execution.StateRetryableIO {
+			t.Fatalf("series %d status = %q, want a retryable read: the envelope was never fetched", index, view.Status)
+		}
 	}
 }
