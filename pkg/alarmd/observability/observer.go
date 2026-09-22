@@ -177,6 +177,10 @@ const (
 	// signal: not the write family, which is correctly silent for such a Plan,
 	// and not the memory itself, which reads fine right up until it is gone.
 	StageNoDataMemoryRenewed = "no_data_memory_renewed"
+	// StageDimensionCensus is a Slot leaving one candidate Plan's dimension
+	// census behind (decision-020 section 4.7.3): what its series look like
+	// along each dimension, which is what a split is planned from.
+	StageDimensionCensus = "dimension_census"
 	// StageFrozenStateRenewed names the renewal of the Runtime State keys of
 	// the series a Slot read and did not write.
 	//
@@ -696,6 +700,34 @@ func (facts *FrozenStateRenewalFacts) Record(renewed, fresh, missing, failed int
 	facts.Fresh += fresh
 	facts.Missing += missing
 	facts.Failed += failed
+}
+
+// DimensionCensusFacts is one census write: where its values came from, what
+// the store did with it, how much of the strategy it could name, and the two
+// numbers the candidate decision was made on.
+//
+// PeakBytes and ShareBytes are on the line because "why is this Plan a
+// candidate" is otherwise unanswerable afterwards: the gate is this
+// replica's own peak against its own pool share (decision-020 section
+// 4.7.3.1), both of which move, and a census that appears or stops
+// appearing is otherwise a change with no reading behind it.
+//
+// OverflowValues and OverflowSeries are the reading that says the bound was
+// reached: a census that names four thousand values and hides a tail of
+// twenty thousand is not a distribution a split can be planned from, and it
+// has to be possible to see that without reading the record.
+type DimensionCensusFacts struct {
+	Source         string `json:"source"`
+	Status         string `json:"status"`
+	Series         uint32 `json:"series"`
+	Dimensions     int    `json:"dimensions"`
+	Values         int    `json:"values"`
+	OverflowValues uint32 `json:"overflow_values"`
+	OverflowSeries uint32 `json:"overflow_series"`
+	Bytes          int    `json:"bytes"`
+	Limit          int    `json:"limit"`
+	PeakBytes      uint64 `json:"peak_bytes"`
+	ShareBytes     uint64 `json:"share_bytes"`
 }
 
 // RecordCensus states where the Slot's series went.
@@ -2254,7 +2286,9 @@ type Observation struct {
 	// reason. The line's own reason is the Plan's fold - one word for the
 	// worst Level - so a Level suppressed by its effective time or held by a
 	// warming window had no name on the line unless it was that word.
-	LevelOutcomes      []LevelOutcomeFact
+	LevelOutcomes []LevelOutcomeFact
+	// DimensionCensus is one candidate Plan's census as this Slot wrote it.
+	DimensionCensus    *DimensionCensusFacts
 	ControlSourceRound *ControlSourceRoundFacts
 	normalized         bool
 	stageReasonBucket  bool
@@ -2341,6 +2375,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.QueryStatus = normalizeQueryStatus(observation.Component, observation.Stage, observation.QueryStatus)
 	observation.QueryUnavailable = normalizeQueryUnavailable(observation.Component, observation.Stage, observation.QueryUnavailable)
 	observation.SlotReadiness = normalizeSlotReadiness(observation.SlotReadiness)
+	observation.DimensionCensus = normalizeDimensionCensusFacts(observation.DimensionCensus)
 	if observation.RuntimeConfig != nil {
 		if observation.Component != ComponentRuntime || observation.Stage != StageConfigLoaded {
 			observation.RuntimeConfig = nil
@@ -3301,6 +3336,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentAccess, StageTargetResolved},
 	{ComponentProgress, StageExecutionEvidenceWritten},
 	{ComponentState, StageNoDataMemoryRead},
+	{ComponentState, StageDimensionCensus},
 	{ComponentState, StageNoDataMemoryRenewed},
 	{ComponentState, StageFrozenStateRenewed},
 	{ComponentState, StageNoDataMemoryRefused},

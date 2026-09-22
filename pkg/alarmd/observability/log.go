@@ -747,6 +747,24 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if len(observation.LevelOutcomes) > 0 {
 		attributes = append(attributes, slog.Any("level_outcomes", observation.LevelOutcomes))
 	}
+	if facts := observation.DimensionCensus; facts != nil {
+		// The gate's two numbers go out with the census itself: a census that
+		// appears, or stops appearing, is a candidate decision, and the
+		// decision cannot be checked afterwards from the census alone.
+		attributes = append(attributes,
+			slog.String("census_source", facts.Source),
+			slog.String("census_status", facts.Status),
+			slog.Uint64("census_series", uint64(facts.Series)),
+			slog.Int("census_dimensions", facts.Dimensions),
+			slog.Int("census_values", facts.Values),
+			slog.Uint64("census_overflow_values", uint64(facts.OverflowValues)),
+			slog.Uint64("census_overflow_series", uint64(facts.OverflowSeries)),
+			slog.Int("census_bytes", facts.Bytes),
+			slog.Int("census_limit", facts.Limit),
+			slog.Uint64("census_peak_bytes", facts.PeakBytes),
+			slog.Uint64("census_share_bytes", facts.ShareBytes),
+		)
+	}
 	if observation.Err != nil {
 		attributes = append(attributes,
 			slog.String("error_type", fmt.Sprintf("%T", observation.Err)),
