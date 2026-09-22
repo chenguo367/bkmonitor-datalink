@@ -116,6 +116,7 @@ type phaseTwoMetrics struct {
 	algorithmEvaluations            *prometheus.CounterVec
 	recoveryHeld                    *prometheus.CounterVec
 	levelAbnormal                   *prometheus.CounterVec
+	historyCoverageRejected         *prometheus.CounterVec
 	recoveryPastLevelWithoutRecov   prometheus.Counter
 	openAlertGate                   *prometheus.CounterVec
 	openAlertSet                    *openAlertSetCollector
@@ -849,6 +850,23 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	// whatever Level the alert stands at, so it goes only once every Level has
 	// agreed. The two causes a Level withholds agreement for are the label; a
 	// zero for either must be readable as "never held", so both are created.
+	// A coverage fact set the observer refused is counted under the rule it
+	// broke. Every rule exists from start so that zero is a reading: before
+	// this counter the refusal was silent, and a deployment could not say
+	// whether the shape had ever occurred, let alone which rule it fell to.
+	metrics.historyCoverageRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "history_coverage_rejected_total",
+		Help: "Coverage fact sets the observer refused as not describing one run, by the rule they " +
+			"broke -- a count that could not have come from counting the same windows, a named window " +
+			"that does not add up to its own shortfall, and so on. The refused set leaves no counts " +
+			"behind; the row and the log carry the rule in their place. Every rule is created at " +
+			"startup, so a zero says the shape has not occurred; a non-zero cell names a producer whose " +
+			"counting has drifted from the observer's contract and is the number to read before " +
+			"trusting any coverage from that build.",
+	}, []string{"rule"})
+	for _, rule := range observability.CoverageRejectionRules {
+		metrics.historyCoverageRejected.WithLabelValues(string(rule))
+	}
 	metrics.levelAbnormal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "level_abnormal_total",
 		Help: "Level verdicts of ABNORMAL, by whether the detection window they were reached on was " +
@@ -1148,7 +1166,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.historyCoverageRejected, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.effectiveClose, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
@@ -1327,6 +1345,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.algorithmEvaluations.WithLabelValues(
 			string(fact.SourceAlgorithmFamily), string(fact.Result),
 		).Inc()
+	}
+	if rejected := observation.HistoryCoverageRejected; rejected != nil {
+		m.historyCoverageRejected.WithLabelValues(string(rejected.Rule)).Inc()
 	}
 	if facts := observation.HistoryCoverage; facts != nil && facts.Abnormal > 0 {
 		m.levelAbnormal.WithLabelValues("full").Add(float64(facts.Abnormal - facts.AbnormalOnIncomplete))

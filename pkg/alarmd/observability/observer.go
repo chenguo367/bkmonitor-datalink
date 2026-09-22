@@ -2050,6 +2050,13 @@ type Observation struct {
 	// ever and by design will never produce a recovery. Both report the same
 	// reason on every round, so without the counts the two are one population.
 	HistoryCoverage *HistoryCoverageFacts
+	// HistoryCoverageRejected is set, and HistoryCoverage nil, when the
+	// coverage facts this observation carried did not pass normalize: the
+	// rule they broke and, for a rule about one window, its series. A
+	// refused reading leaves this in its place rather than nothing, so the
+	// row and the log say the server declined the reading instead of
+	// looking like a run with every window complete.
+	HistoryCoverageRejected *CoverageRejection
 	// PrimaryInput is what the Slot's PRIMARY query answered with, on the
 	// completion line: whether it answered whole, and whether it carried any
 	// records. It is the fact that says whose a hole is. A series missing
@@ -2215,7 +2222,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.CapacityBudget = NormalizeCapacityBudget(observation.CapacityBudget)
 	observation.CapacityRejection = normalizeCapacityRejection(observation)
 	observation.QueryCooldown = normalizeQueryCooldownFacts(observation.QueryCooldown)
-	observation.HistoryCoverage = normalizeHistoryCoverageFacts(observation.HistoryCoverage)
+	observation.HistoryCoverage, observation.HistoryCoverageRejected = normalizeHistoryCoverageFacts(observation.HistoryCoverage)
 	observation.PrimaryInput = normalizePrimaryInputFacts(observation.PrimaryInput)
 	observation.QueryPermit = normalizeQueryPermitFacts(observation.QueryPermit)
 	observation.NoDataSlot = normalizeNoDataSlotFacts(observation.NoDataSlot)

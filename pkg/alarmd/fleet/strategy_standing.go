@@ -239,6 +239,28 @@ func removedFromSource(standing StrategyStanding) (removed, pending bool) {
 	return removed, pending
 }
 
+// aboutOthers renders, for each Plan a row's evidence names other than the
+// strategy asked about, that Plan's own state word -- never an action word,
+// so the thing to do appears on that Plan's own card and this one only
+// points at it.
+func aboutOthers(row Anomaly, except string, words Words) []string {
+	if row.Standing == nil {
+		return nil
+	}
+	others := make([]string, 0, len(row.Standing.About))
+	for _, ref := range row.Standing.About {
+		if ref.StrategyID == except {
+			continue
+		}
+		if own, given := standingForStrategy(row, ref); given {
+			others = append(others, ref.StrategyID+"："+words.State[own.State])
+		} else {
+			others = append(others, ref.StrategyID)
+		}
+	}
+	return others
+}
+
 // strategyStandingLine is the sentence: the standing, the objects and who
 // holds them, and every withheld item with its reason and field.
 func strategyStandingLine(standing StrategyStanding) string {
@@ -276,9 +298,10 @@ func strategyStandingLine(standing StrategyStanding) string {
 			// neighbour is context, not a second place to act.
 			if len(plan.Rows) > 0 && plan.Rows[0].Standing != nil {
 				rowStanding := plan.Rows[0].Standing
-				if rowStanding.About != nil && rowStanding.About.StrategyID != standing.StrategyID {
-					object += "，在检测；同对象上策略 " + rowStanding.About.StrategyID + "：" +
-						words.State[rowStanding.State] + "（见该策略）"
+				if own, given := standingForStrategy(plan.Rows[0], StrategyRef{StrategyID: standing.StrategyID, BusinessID: plan.Business}); given {
+					object += "，" + words.State[own.State] + "·" + words.Action[own.Action]
+				} else if others := aboutOthers(plan.Rows[0], standing.StrategyID, words); len(others) > 0 {
+					object += "，在检测；同对象上策略 " + strings.Join(others, "、") + "（见该策略）"
 				} else {
 					object += "，" + words.State[rowStanding.State] + "·" + words.Action[rowStanding.Action]
 				}

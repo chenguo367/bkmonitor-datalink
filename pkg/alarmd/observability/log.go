@@ -257,6 +257,15 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			attributes = append(attributes, slog.String("history_worst_guard", worst.GuardReason))
 		}
 	}
+	if rejected := observation.HistoryCoverageRejected; rejected != nil {
+		// The reading the server declined, on the line where the reading
+		// would have been: the rule, and the window's series when the rule
+		// is about one. A grep for the rule finds every round it refused.
+		attributes = append(attributes, slog.String("history_coverage_rejected", string(rejected.Rule)))
+		if rejected.Series != "" {
+			attributes = append(attributes, slog.String("history_coverage_rejected_series", rejected.Series))
+		}
+	}
 	if counts := observation.OutputWireFormats; len(counts) > 0 {
 		// One key per format the batch carried, under the format's own
 		// name: a grep for standard_raw_event finds the batches that sent

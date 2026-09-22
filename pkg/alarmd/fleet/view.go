@@ -581,6 +581,14 @@ type LastError struct {
 	Operation string `json:"operation,omitempty"`
 }
 
+// CoverageRejected is the fleet's copy of the observer's coverage rejection:
+// the rule name from observability.CoverageRejectionRules and the series when
+// the rule is about one window.
+type CoverageRejected struct {
+	Rule   string `json:"rule"`
+	Series string `json:"series,omitempty"`
+}
+
 // HistoryCoverage is how far short of the required detection window this
 // object's series were, and for how many consecutive rounds.
 //
@@ -1160,9 +1168,17 @@ type Anomaly struct {
 	// a window a round or two from converging, and a window whose series do
 	// not live long enough to ever fill it. Only the shortfall separates them,
 	// and it used to be discarded in state/window.go.
-	Coverage  *HistoryCoverage `json:"coverage,omitempty"`
-	Since     time.Time        `json:"since"`
-	SinceFrom SinceSource      `json:"since_from"`
+	Coverage *HistoryCoverage `json:"coverage,omitempty"`
+	// CoverageRejected stands where Coverage would when the latest round's
+	// coverage facts did not pass the observer's checks: the rule they broke
+	// and, for a rule about one window, that window's series. Nothing the
+	// rule judged untrustworthy comes with it. Without this the row's
+	// coverage was simply absent, which reads exactly like every window
+	// complete; the server declining a reading has to be said where the
+	// reading would have been.
+	CoverageRejected *CoverageRejected `json:"coverage_rejected,omitempty"`
+	Since            time.Time         `json:"since"`
+	SinceFrom        SinceSource       `json:"since_from"`
 	// Wake is where the object is in its cycle, from the due index, attached
 	// by the publisher. Absent on a replica with no index; Known false when
 	// the index has no entry, which means no round has returned since that

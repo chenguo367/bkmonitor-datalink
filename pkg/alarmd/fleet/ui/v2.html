@@ -249,17 +249,20 @@ function lineFor(strategyID) {
 }
 
 // One object's line on the card: its own words, and for a short window
-// the windows named with their holes -- which minutes, whose. Words the
-// server says are about another Plan on the same object (standing.about)
-// are shown as that Plan's state only -- no action word, so the thing to
-// do is on one card, the neighbour's; the page only places what the
-// server named.
+// the windows named with their holes -- which minutes, whose. A row whose
+// words the server says are about other Plans on the same object
+// (standing.about, this strategy not among them) is shown as a pointer to
+// those strategies with no state or action word of its own -- the thing to
+// do is on their cards; the page only places what the server named.
 function objectLine(row, strategyID) {
   var li = document.createElement('li');
   var standing = row.standing || {};
   var parts = [word('state', standing.state), word('action', standing.action) + (standing.watch ? '：' + word('watch', standing.watch) : '')];
-  if (standing.about && standing.about.strategy_id !== strategyID) {
-    parts = ['本策略在检测；同对象上策略 ' + standing.about.strategy_id + '：' + word('state', standing.state) + '（见该策略）'];
+  var about = standing.about || [];
+  var mine = false, others = [];
+  about.forEach(function (ref) { if (ref.strategy_id === strategyID) mine = true; else others.push(ref.strategy_id); });
+  if (about.length && !mine) {
+    parts = ['本策略在检测；同对象上策略 ' + others.join('、') + ' 有它们自己的问题（见该策略）'];
   }
   if (row.since) parts.push('自 ' + ago(row.since));
   li.appendChild(text('span', parts.join(' · ')));
@@ -273,6 +276,15 @@ function objectLine(row, strategyID) {
   // disagreed in production. The page still does not gate a list on a
   // number, because a block hidden behind the wrong field disappears
   // rather than misreads.
+  // A reading the server refused stands where the windows would: the rule
+  // it broke, in the server's words, and nothing of the refused numbers.
+  // Without this line a refused reading and every-window-complete were the
+  // same absence.
+  if (row.coverage_rejected) {
+    var refused = text('li', '这一轮的窗口读数服务端判定不自洽（' + word('coverage_rejected', row.coverage_rejected.rule) + '），未展示');
+    refused.title = row.coverage_rejected.rule + (row.coverage_rejected.series ? ' · ' + row.coverage_rejected.series : '');
+    li.appendChild(refused);
+  }
   var coverage = row.coverage || {};
   var windows = coverage.windows || [];
   if (windows.length > 0 || coverage.short > 0) {

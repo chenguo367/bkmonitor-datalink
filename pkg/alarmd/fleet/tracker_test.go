@@ -652,6 +652,55 @@ func TestARoundWithoutCoverageEndsTheShortRun(t *testing.T) {
 	}
 }
 
+// A round whose coverage the observer refused leaves the rule on the row
+// where the coverage would be, and a later round that reads clean clears it:
+// the row says one of three things -- the windows, "the server refused the
+// reading", or nothing -- and never lets a refusal look like every window
+// complete.
+func TestARefusedCoverageStandsOnTheRowWhereTheReadingWouldBe(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	// The tracker sits behind the observer's normalize in production
+	// (Multi.Observe normalizes before fanning out), so the fixture hands
+	// it what normalize would: no facts, the rule.
+	refused := coverageCompletion("qg-refused", 3, 1, 6, 9)
+	refused.HistoryCoverage = nil
+	refused.HistoryCoverageRejected = &observability.CoverageRejection{Rule: observability.CoverageRejectWindowHoleArithmetic, Series: "abc"}
+	for round := 0; round < DefaultDegradedRounds+1; round++ {
+		tracker.Observe(context.Background(), refused)
+	}
+	rows := append(tracker.Anomalies(), tracker.Undecidable()...)
+	if len(rows) != 1 || rows[0].Coverage != nil || rows[0].CoverageRejected == nil ||
+		rows[0].CoverageRejected.Rule != string(observability.CoverageRejectWindowHoleArithmetic) || rows[0].CoverageRejected.Series != "abc" {
+		t.Fatalf("rows = %+v, want the object listed with the refusal and no coverage", rows)
+	}
+	tracker.Observe(context.Background(), coverageCompletion("qg-refused", 3, 1, 6, 9))
+	rows = append(tracker.Anomalies(), tracker.Undecidable()...)
+	if len(rows) != 1 || rows[0].Coverage == nil || rows[0].CoverageRejected != nil {
+		t.Fatalf("rows after a clean round = %+v, want the coverage back and the refusal gone", rows)
+	}
+	// A refusal, then a healthy round, then a degraded round that reports
+	// no coverage at all: the refusal ended with the run it belonged to and
+	// does not come back on the new one.
+	for round := 0; round < DefaultDegradedRounds+1; round++ {
+		tracker.Observe(context.Background(), refused)
+	}
+	tracker.Observe(context.Background(), completion("qg-refused", "FULL_COMPLETED", "8930"))
+	if listed := append(tracker.Anomalies(), tracker.Undecidable()...); len(listed) != 0 {
+		t.Fatalf("rows after a healthy round = %+v, want the object gone", listed)
+	}
+	// Blocked rounds never reach the site that reads a round's coverage, so
+	// the refusal from the earlier run can only be gone if the healthy round
+	// that ended that run cleared it.
+	for round := 0; round < DefaultBlockedRounds; round++ {
+		tracker.Observe(context.Background(), runOutcome("qg-refused", "source_blocked"))
+	}
+	rows = tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Kind != KindBlockedRun || rows[0].CoverageRejected != nil {
+		t.Fatalf("rows on a new blocked run = %+v, want the old refusal not carried onto it", rows)
+	}
+}
+
 // Persistent is the rule the verdict and the page both read. Each branch is
 // pinned, including the two that are false for different reasons: a table of
 // only true cases passes against a rule that returns true always.

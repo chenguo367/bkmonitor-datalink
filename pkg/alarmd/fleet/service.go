@@ -169,6 +169,11 @@ func (service *Service) View(ctx context.Context) View {
 			}
 		}
 		view.Gaps = append(kept, Gap{Kind: GapSnapshotsUnreadable, Detail: gapDetail(snapshotsErr)})
+		// Said here and not left to the aggregation: a view that read no
+		// snapshot cannot tell, whatever the aggregation made of an empty
+		// set. Today it produced a gap per expected replica and so was
+		// already UNKNOWN; this does not depend on that staying true.
+		view.Health = HealthUnknown
 	}
 	if expectationErr != nil {
 		for index := range view.Gaps {

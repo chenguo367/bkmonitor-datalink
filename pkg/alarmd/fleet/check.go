@@ -331,10 +331,8 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 		// otherwise the smallest id, so the same row always folds under the
 		// same key. On an object running six Plans the fold had named the
 		// smallest id while every guard on the row belonged to another.
-		if planScopedCheck(check) {
-			if named, one := implicatedStrategy(anomaly); one {
-				return named.StrategyID
-			}
+		if key := strategyGroupKey(anomaly, check); key != "" {
+			return key
 		}
 		key := ""
 		for _, strategy := range anomaly.Strategies {

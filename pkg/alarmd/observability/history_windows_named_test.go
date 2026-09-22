@@ -29,7 +29,7 @@ func namedWindow() HistoryWindowFact {
 func TestNamedWindowsThatCannotDescribeTheRoundAreDropped(t *testing.T) {
 	t.Parallel()
 	sound := &HistoryCoverageFacts{Levels: 3, Short: 1, WorstValid: 6, WorstRequired: 9, Windows: []HistoryWindowFact{namedWindow()}}
-	if got := normalizeHistoryCoverageFacts(sound); got == nil || len(got.Windows) != 1 || got.Windows[0].Missing[0] != 120 {
+	if got, rejected := normalizeHistoryCoverageFacts(sound); got == nil || rejected != nil || len(got.Windows) != 1 || got.Windows[0].Missing[0] != 120 {
 		t.Fatalf("a sound named window was dropped or rewritten: %+v", got)
 	}
 	for name, mutate := range map[string]func(*HistoryWindowFact, *HistoryCoverageFacts){
@@ -55,8 +55,8 @@ func TestNamedWindowsThatCannotDescribeTheRoundAreDropped(t *testing.T) {
 	} {
 		facts := &HistoryCoverageFacts{Levels: 3, Short: 1, WorstValid: 6, WorstRequired: 9, Windows: []HistoryWindowFact{namedWindow()}}
 		mutate(&facts.Windows[0], facts)
-		if got := normalizeHistoryCoverageFacts(facts); got != nil {
-			t.Fatalf("%s: facts survived as %+v, want dropped", name, got)
+		if got, rejected := normalizeHistoryCoverageFacts(facts); got != nil || rejected == nil {
+			t.Fatalf("%s: facts survived as %+v (rejection %+v), want dropped under a named rule", name, got, rejected)
 		}
 	}
 	// More named windows than the bound is the evaluator's bound broken.
@@ -64,7 +64,7 @@ func TestNamedWindowsThatCannotDescribeTheRoundAreDropped(t *testing.T) {
 	for i := 0; i <= MaxHistoryWindows; i++ {
 		crowded.Windows = append(crowded.Windows, namedWindow())
 	}
-	if got := normalizeHistoryCoverageFacts(crowded); got != nil {
+	if got, rejected := normalizeHistoryCoverageFacts(crowded); got != nil || rejected == nil || rejected.Rule != CoverageRejectWindowsOverBound {
 		t.Fatalf("%d named windows survived, want dropped over the bound of %d", len(crowded.Windows), MaxHistoryWindows)
 	}
 }
@@ -104,6 +104,24 @@ func TestTheCompletionLineNamesTheWorstWindowAndThePrimaryAnswer(t *testing.T) {
 		if got != value {
 			t.Fatalf("event[%q] = %#v, want %#v", field, got, value)
 		}
+	}
+	// A refused coverage leaves its rule on the line where the reading
+	// would have been, and none of the worst-window keys.
+	output.Reset()
+	withheldObserver(t, &output).Observe(context.Background(), Observation{
+		Component: ComponentProgress, Stage: StageProgressCommitted, Result: ResultSuccess,
+		Trace:           TraceFields{StrategyID: "4101", BusinessID: "7", QueryGroupKey: "qg-window", EvaluationTime: 600},
+		HistoryCoverage: &HistoryCoverageFacts{Levels: 3, Short: 1, WorstValid: 6, WorstRequired: 9, Windows: []HistoryWindowFact{{Series: "abc", Level: 5, Valid: 6, Required: 9, MissingTotal: 5}}},
+	})
+	event = map[string]any{}
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode refused completion log: %v; log=%s", err, output.String())
+	}
+	if event["history_coverage_rejected"] != string(CoverageRejectWindowHoleArithmetic) || event["history_coverage_rejected_series"] != "abc" {
+		t.Fatalf("refused line = %#v, want the rule and the window's series", event)
+	}
+	if _, present := event["history_worst_series"]; present {
+		t.Fatalf("a refused coverage still rendered its worst window: %#v", event)
 	}
 	// A primary answer outside the contract's words is not carried.
 	if got := normalizePrimaryInputFacts(&PrimaryInputFacts{Completeness: "MOSTLY"}); got != nil {
