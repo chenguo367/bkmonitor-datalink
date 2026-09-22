@@ -1496,6 +1496,8 @@ func walkObjectRows(check Check, group, queryGroup string, view *View, now time.
 			if check == CheckDefect && anomaly.Finding.Check != check && anomaly.Internal != nil {
 				listed[underKey(check, anomaly.QueryGroup)] = struct{}{}
 				if group == "" || anomaly.Internal.Code == group {
+					standing := standingOf(anomaly, now)
+					anomaly.Standing = &standing
 					visit(anomaly)
 				}
 				continue
@@ -1518,6 +1520,8 @@ func walkObjectRows(check Check, group, queryGroup string, view *View, now time.
 					anomaly.Skip, anomaly.Loss = &record, LossWhileDemoted
 				}
 			}
+			standing := standingOf(anomaly, now)
+			anomaly.Standing = &standing
 			visit(anomaly)
 		}
 	}
@@ -1526,6 +1530,8 @@ func walkObjectRows(check Check, group, queryGroup string, view *View, now time.
 		if (check != "" && row.Finding.Check != check) || (group != "" && row.Finding.Group != group) {
 			continue
 		}
+		standing := standingOf(row, now)
+		row.Standing = &standing
 		visit(row)
 	}
 }

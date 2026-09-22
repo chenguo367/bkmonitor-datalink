@@ -268,6 +268,19 @@ type queryGroupState struct {
 	// to each of this object's Plans, by Plan, from the Plan's evaluation
 	// lines.
 	planSeries map[StrategyRef]*PlanSeriesMatched
+	// rounds is the object's recent completions, oldest first, at most
+	// RecentRoundsKept of them: what each hole on a window is read against
+	// to say whose minute it is. slotOffset is the object's distance from a
+	// Slot to the record minute it evaluates, from the latest round that
+	// reported one, so a round that carried no record can still be matched
+	// to the minute a hole names; slotOffsetKnown says one has been seen.
+	rounds          []roundMark
+	slotOffset      int64
+	slotOffsetKnown bool
+	// worstWindow is the key of the window the worst pair belonged to on
+	// the last round, so the round-over-round counters know when the pair
+	// moved to another window.
+	worstWindow string
 	// guards is the held gap scopes reported for this object, by Plan and
 	// scope, with the completion generation each was last reported in. A
 	// completion prunes the scopes the round did not report -- a released
@@ -1149,6 +1162,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.determined = true
 		state.lastCompleted = completion
 		state.lastRoundSlot = trace.EvaluationTime
+		// Every completion, healthy or not, goes on the ring the holes are
+		// read against: a healthy round is exactly the one a later hole at
+		// its minute has to be matched to.
+		rememberRound(state, trace.EvaluationTime, completion, observation.ProgressCompletionReason,
+			observation.HistoryCoverage, observation.PrimaryInput)
 		// A round completed in this process speaks for the object; the
 		// summary it was restored from is history now.
 		state.restoredRound = nil
@@ -1247,21 +1265,31 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// round's valid count on the same object; a round with nothing short
 		// ends the comparison, like every other run counter here.
 		previous := state.previousWorstValid
+		// The comparison is between the worst pairs of two rounds, and the
+		// pair belongs to a window. When the worst window is another one
+		// than last round's, the two pairs are not one window's progress and
+		// the counters start over; the row says so.
+		worstWindow, worstWindowChanged := "", false
+		if facts := observation.HistoryCoverage; facts != nil && facts.Short > 0 && len(facts.Windows) > 0 {
+			worstWindow = windowKey(facts.Windows[0].Series, facts.Windows[0].Level)
+			worstWindowChanged = state.worstWindow != "" && state.worstWindow != worstWindow
+		}
 		if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 {
 			state.noProgressRounds, state.previousWorstValid, state.unchangedRounds = 0, 0, 0
 		} else {
-			if state.coverage != nil && facts.WorstValid <= previous {
+			if state.coverage != nil && !worstWindowChanged && facts.WorstValid <= previous {
 				state.noProgressRounds++
 			} else {
 				state.noProgressRounds = 0
 			}
-			if state.coverage != nil && facts.WorstValid == previous {
+			if state.coverage != nil && !worstWindowChanged && facts.WorstValid == previous {
 				state.unchangedRounds++
 			} else {
 				state.unchangedRounds = 0
 			}
 			state.previousWorstValid = facts.WorstValid
 		}
+		state.worstWindow = worstWindow
 		hadCoverage := state.coverage != nil
 		state.coverage = nil
 		if facts := observation.HistoryCoverage; facts != nil {
@@ -1274,8 +1302,15 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				Unusable: facts.Unusable, UnusableReason: facts.UnusableReason,
 				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
 				NoProgressRounds: state.noProgressRounds, UnchangedRounds: state.unchangedRounds,
+				WorstWindow: worstWindow, WorstWindowChanged: worstWindowChanged,
+				Windows: windowRows(state.rounds, facts),
 			}
-			if hadCoverage && facts.Short != 0 {
+			if len(state.coverage.Windows) > 0 {
+				state.coverage.RoundsRemembered, state.coverage.RoundsKept = len(state.rounds), RecentRoundsKept
+			}
+			// The previous count is the previous window's, and is named as
+			// such only when it is this window's.
+			if hadCoverage && facts.Short != 0 && !worstWindowChanged {
 				state.coverage.PreviousWorstValid, state.coverage.PreviousKnown = previous, true
 			}
 		}
