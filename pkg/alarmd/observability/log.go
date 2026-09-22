@@ -814,6 +814,17 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if len(observation.LevelOutcomes) > 0 {
 		attributes = append(attributes, slog.Any("level_outcomes", observation.LevelOutcomes))
 	}
+	if facts := observation.Shardability; facts != nil {
+		// The denominator first: a count of strategies that cannot be split
+		// says nothing without how many there are.
+		attributes = append(attributes,
+			slog.Int("shardable_plans", facts.Plans),
+			slog.Int("shardable_splittable", facts.Splittable),
+			slog.Int("shardable_disjunctive", facts.Disjunctive),
+			slog.Int("shardable_not_structured", facts.NotStructured),
+			slog.Int("shardable_no_queries", facts.NoQueries),
+		)
+	}
 	if facts := observation.SplitPlan; facts != nil {
 		// The decision and every reading it was judged from. "This object was
 		// not split" is the same line for an object under its share and one
