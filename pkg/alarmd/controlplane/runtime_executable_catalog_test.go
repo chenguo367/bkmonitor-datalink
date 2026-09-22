@@ -941,13 +941,64 @@ func TestAnUnclassifiedTerminalRefusesOneStrategyAndKeepsItsCode(t *testing.T) {
 	}
 }
 
-// Every reason the compiler refuses a Plan's effective time with has an entry
-// in this table. The list is the compiler's, so a reason added there without a
-// classification is red here rather than in a deployment.
-func TestEveryEffectiveTimeTerminalReasonIsClassified(t *testing.T) {
-	for _, reason := range strategy.EffectiveTimeTerminalReasons() {
+// Every reason the compiler can end a compile on has an entry in this table.
+//
+// The list is the compiler's, walked in full. The test that holds this table
+// against the page's reading walks the reason catalogue instead and skips a
+// code it finds unclassified, so it holds the classified codes consistent with
+// each other and cannot go red because one is missing - which is how a
+// deployment met a missing one before any test did. This is the assertion in
+// the other direction.
+func TestEveryCompilerTerminalReasonIsClassified(t *testing.T) {
+	for _, reason := range strategy.CompilerTerminalReasons() {
 		if _, known := CompilerTerminalDisposition(reason); !known {
 			t.Fatalf("%s has no disposition: the compiler produces it and this table does not classify it", reason)
 		}
+	}
+}
+
+// An unclassified terminal leaves the strategy running the last definition
+// that compiled, which is what the disposition it is filed under decides.
+//
+// Asserted on the catalog rather than on the word: retaining the last good
+// Plan is refused for one disposition only, so a test that reads the word back
+// passes with the retention deleted. What a reader of this needs to know is
+// that the strategy is still in the catalog and still detecting.
+func TestAnUnclassifiedTerminalKeepsTheStrategyOnItsLastGoodPlan(t *testing.T) {
+	compiler, semantics := runtimeClosureCompiler(t)
+	good := runtimeClosureNamedFrozenPlan(t, "1001", "1", []contract.LevelIRV2{runtimeClosureLevel(1, strategy.DetectorKindThreshold)})
+	catalog := runtimeClosureCatalog(runtimeClosureQueryGroup(t, "1", good))
+	published, err := retainRuntimeExecutableCatalog(context.Background(), catalog, nil, compiler, semantics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The same strategy, now refused by a reason this build has no entry for.
+	refused := runtimeClosureNamedFrozenPlan(t, "1001", "1", []contract.LevelIRV2{runtimeClosureLevel(1, strategy.DetectorKindThreshold)})
+	refused.Plan.EffectiveTimeSnapshot = json.RawMessage(`"a string where an object belongs"`)
+	refused.PlanRevision = runtimeClosurePlanRevision(t, refused.Plan)
+	next := runtimeClosureCatalog(runtimeClosureQueryGroup(t, "1", refused))
+	lastGood := &PublishedSnapshot{QueryGroups: published.QueryGroups}
+	built, err := retainRuntimeExecutableCatalog(context.Background(), next, lastGood, compiler, semantics)
+	if err != nil {
+		t.Fatalf("retainRuntimeExecutableCatalog() error = %v", err)
+	}
+	running := false
+	for _, group := range built.QueryGroups {
+		for _, plan := range group.Plans {
+			running = running || plan.Identity.StrategyID == "1001"
+		}
+	}
+	if !running {
+		t.Fatal("the strategy is not in the catalog: an unclassified reason stopped it detecting")
+	}
+	stale := false
+	for _, disposition := range built.Dispositions {
+		if disposition.SourceID == "1001" && disposition.Disposition == DispositionStaleConfig {
+			stale = true
+		}
+	}
+	if !stale {
+		t.Fatalf("no STALE_CONFIG disposition: the strategy runs but nothing says it is on an older definition: %+v", built.Dispositions)
 	}
 }

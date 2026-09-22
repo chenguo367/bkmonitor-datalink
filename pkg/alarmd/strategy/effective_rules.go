@@ -77,8 +77,7 @@ const (
 )
 
 // EffectiveTimeTerminalReasons is every reason this compiler refuses a Plan
-// for over its effective time. The catalog walks it so a reason added here
-// without a classification is refused by a test rather than by a deployment.
+// for over its effective time.
 func EffectiveTimeTerminalReasons() []string {
 	return []string{
 		ReasonEffectiveTimeSnapshotInvalid, ReasonEffectiveTimeSchemaUnsupported,
@@ -88,6 +87,24 @@ func EffectiveTimeTerminalReasons() []string {
 		ReasonEffectiveTimeCalendarItemsMissing, ReasonEffectiveTimeInvalid,
 		ReasonEffectiveTimeCalendarMissing,
 	}
+}
+
+// CompilerTerminalReasons is every reason this compiler can end a compile on,
+// in any scope.
+//
+// It exists to be walked. The table that classifies these for the catalog is
+// checked by a test over the reason catalogue, and that test skips a code it
+// finds unclassified - it holds the classified codes consistent with each
+// other and cannot go red because one is missing, which is how a deployment
+// came to meet the missing one first. A list the compiler owns, asserted to be
+// classified in full, is the guard that reaches the case this one did not.
+func CompilerTerminalReasons() []string {
+	return append([]string{
+		contract.ReasonAlgorithmUnsupported, contract.ReasonLevelBudgetExceeded,
+		contract.ReasonLevelInvalid, contract.ReasonNoDataConfigInvalid,
+		contract.ReasonPlanBudgetExceeded, contract.ReasonPlanDuplicateLevelID,
+		contract.ReasonPlanInvalid, contract.ReasonProjectionInvalid,
+	}, EffectiveTimeTerminalReasons()...)
 }
 
 func compileEffectiveRules(raw json.RawMessage, tenant string) (*compiledEffectiveRules, error) {
