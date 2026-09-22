@@ -68,32 +68,38 @@ func TestAFoldWhoseWayOutHasNotMovedReadsAsStalledNotRecovering(t *testing.T) {
 	if group := groupOf([]Anomaly{completing("qg-reached", reached, shortWindow)}); group.Recovery != RecoveryRecovering {
 		t.Fatalf("a guard at its requirement reads %s, want RECOVERING: a release not yet happened is not a stall", group.Recovery)
 	}
-	// A short window whose worst valid count has not moved is the other
-	// way to stall, with no guard on the row at all.
-	flat := &HistoryCoverage{Levels: 5, Short: 1, WorstValid: 6, WorstRequired: 9, UnchangedRounds: StalledRounds}
-	flatRow := Anomaly{QueryGroup: "qg-flat", Kind: KindDegradedRun, Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "HISTORY_GAPPED",
-		ReasonLastAt: fresh, Coverage: flat}
-	rows := []Anomaly{flatRow}
-	Attribute(rows, now)
-	for _, report := range ReportChecks([][]Anomaly{rows}, nil, nil, now) {
-		if len(report.Groups) == 1 && report.Groups[0].CompletingNow == 1 && report.Groups[0].Recovery != RecoveryStalled {
-			t.Fatalf("a flat short window under %s reads %s, want STALLED", report.Code, report.Groups[0].Recovery)
-		}
+	// A short window whose worst valid count has not moved is the other way
+	// to stall, with no guard on the row at all: a series whose window has
+	// been short for longer than it is long (the data-missing line), flat for
+	// StalledRounds, reads stalled; the same window whose count moved last
+	// round reads recovering.
+	windowRow := func(qg string, unchanged uint32) Anomaly {
+		return Anomaly{QueryGroup: qg, Kind: KindDegradedRun, Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "HISTORY_GAPPED",
+			ReasonLastAt: fresh, Coverage: &HistoryCoverage{Levels: 5, Short: 1, WorstValid: 6, WorstRequired: 9, ShortRounds: 12, UnchangedRounds: unchanged}}
 	}
-	// Failing outranks stalled.
-	failing := Anomaly{QueryGroup: "qg-failing", Kind: KindDegradedRun, Cause: "LEVEL_OUTCOME_UNKNOWN", CauseReason: "QUERY_TIMEOUT",
-		ReasonLastAt: fresh, ReasonCode: "error", LastError: &LastError{Text: "timeout", At: fresh}}
-	rows = []Anomaly{completing("qg-stuck", stuck, shortWindow), failing}
-	Attribute(rows, now)
-	for _, report := range ReportChecks([][]Anomaly{rows}, nil, nil, now) {
-		for _, group := range report.Groups {
-			if group.FailingNow > 0 && group.Stalled > 0 && group.Recovery != RecoveryBlocked {
-				t.Fatalf("a fold with a failing object and a stalled one reads %s, want BLOCKED", group.Recovery)
-			}
-			if group.FailingNow > 0 && group.Recovery != RecoveryBlocked {
-				t.Fatalf("a fold with a failing object reads %s, want BLOCKED", group.Recovery)
+	dataMissing := func(rows []Anomaly) CheckGroup {
+		t.Helper()
+		Attribute(rows, now)
+		for _, report := range ReportChecks([][]Anomaly{rows}, nil, nil, now) {
+			if report.Code == CheckSeriesDataMissing && len(report.Groups) == 1 {
+				return report.Groups[0]
 			}
 		}
+		t.Fatalf("no %s fold for %+v", CheckSeriesDataMissing, rows)
+		return CheckGroup{}
+	}
+	if group := dataMissing([]Anomaly{windowRow("qg-flat", StalledRounds)}); group.Recovery != RecoveryStalled || group.Stalled != 1 {
+		t.Fatalf("a flat short window reads %s stalled %d, want STALLED, 1", group.Recovery, group.Stalled)
+	}
+	if group := dataMissing([]Anomaly{windowRow("qg-filling", 0)}); group.Recovery != RecoveryRecovering || group.Stalled != 0 {
+		t.Fatalf("a filling short window reads %s stalled %d, want RECOVERING, 0", group.Recovery, group.Stalled)
+	}
+	// Failing outranks stalled, on the counts the reading is decided from.
+	if got := recoveryOf(&CheckGroup{FailingNow: 1, Stalled: 1, CompletingNow: 2}, false); got != RecoveryBlocked {
+		t.Fatalf("a fold with a failing object and a stalled one reads %s, want BLOCKED", got)
+	}
+	if got := recoveryOf(&CheckGroup{Stalled: 1, CompletingNow: 2}, false); got != RecoveryStalled {
+		t.Fatalf("a fold with a stalled object and no failing one reads %s, want STALLED", got)
 	}
 }
 
