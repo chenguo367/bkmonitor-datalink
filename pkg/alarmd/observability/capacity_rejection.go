@@ -125,7 +125,8 @@ type SlotBudgetUsageFacts struct {
 // is everything else the completion does, and it is only visible because the
 // total is carried beside the parts.
 //
-// Input is this Slot waiting for its records and consuming them, not the
+// Input is this Slot waiting for its records and consuming them, from the
+// moment the replica took the Slot and not from the first record. Not the
 // query's own latency -- that runs on the view stream's side, and a Slot that
 // waited its turn waited here with a backend that was never slow.
 //

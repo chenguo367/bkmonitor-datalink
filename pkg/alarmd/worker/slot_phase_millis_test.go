@@ -98,39 +98,53 @@ func executeSlowSlot(t *testing.T, failStage string, input, preflight, evaluate 
 // what no line could answer is what a Slot spent in each in total, which is
 // the question asked of a Slot that overran its period.
 func TestACompletedSlotSaysWhichPhaseSpentItsTime(t *testing.T) {
-	const slow = 40 * time.Millisecond
-	// Wide of the delay in both directions: the assertion is that the clock
-	// followed the delay into its own phase, not that a test machine is
-	// punctual.
-	const moved, still = 30, 20
+	const slow = 300 * time.Millisecond
+	// Half the delay, as a floor on the delayed phase alone. No baseline run
+	// and no ceiling on the others, deliberately: the phases that were not
+	// delayed do real work, and on a loaded machine -- ten iterations under
+	// -race -- the evaluator alone reached 196 ms, which is the same order as
+	// the delay. A criterion whose noise is the size of its signal is worse
+	// than none, and differencing against a baseline run made it worse still,
+	// because the baseline is one sample and spikes too.
+	//
+	// What survives that is ordinal: whichever phase was delayed must be the
+	// largest of the three. One duration reported under two names breaks it
+	// without any clock being trusted, which is the failure worth catching.
+	const moved = uint64(slow/time.Millisecond) / 2
 
 	for name, testCase := range map[string]struct {
 		input, preflight, evaluate time.Duration
-		phase                      func(execution.SlotTiming) (string, uint64, string, uint64)
+		phase                      func(execution.SlotTiming) (string, uint64)
 	}{
-		"records that take their time": {input: slow, phase: func(timing execution.SlotTiming) (string, uint64, string, uint64) {
-			return "input", timing.Input, "preflight", timing.Preflight
+		"records that take their time": {input: slow, phase: func(timing execution.SlotTiming) (string, uint64) {
+			return "input", timing.Input
 		}},
-		"a slow State read": {preflight: slow, phase: func(timing execution.SlotTiming) (string, uint64, string, uint64) {
-			return "preflight", timing.Preflight, "evaluate", timing.Evaluate
+		"a slow State read": {preflight: slow, phase: func(timing execution.SlotTiming) (string, uint64) {
+			return "preflight", timing.Preflight
 		}},
-		"a slow evaluator": {evaluate: slow, phase: func(timing execution.SlotTiming) (string, uint64, string, uint64) {
-			return "evaluate", timing.Evaluate, "input", timing.Input
+		"a slow evaluator": {evaluate: slow, phase: func(timing execution.SlotTiming) (string, uint64) {
+			return "evaluate", timing.Evaluate
 		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			timing := runSlowSlot(t, testCase.input, testCase.preflight, testCase.evaluate)
-			delayed, delayedMillis, other, otherMillis := testCase.phase(timing)
+			delayed, delayedMillis := testCase.phase(timing)
 			t.Logf("slot=%d input=%d preflight=%d evaluate=%d",
 				timing.Slot, timing.Input, timing.Preflight, timing.Evaluate)
 
 			if delayedMillis < moved {
-				t.Fatalf("%s_millis = %d after %v was spent there, want at least %d: the phase did not charge its own work",
-					delayed, delayedMillis, slow, moved)
+				t.Fatalf("%s_millis = %d after %v was spent there, want at least %d: the phase did not charge its "+
+					"own work", delayed, delayedMillis, slow, moved)
 			}
-			if otherMillis > still {
-				t.Fatalf("%s_millis = %d while the delay was in %s, want at most %d: one duration is being reported "+
-					"under more than one name", other, otherMillis, delayed, still)
+			for other, otherMillis := range map[string]uint64{
+				"input": timing.Input, "preflight": timing.Preflight, "evaluate": timing.Evaluate,
+			} {
+				if other == delayed || otherMillis < delayedMillis {
+					continue
+				}
+				t.Fatalf("%s_millis = %d is not below the delayed %s_millis = %d: the delay was spent in %s, so "+
+					"anything else reporting as much is the same duration under a second name",
+					other, otherMillis, delayed, delayedMillis, delayed)
 			}
 			// The total holds the parts. They do not sum to it -- the
 			// completion does more than these three -- so this is the only

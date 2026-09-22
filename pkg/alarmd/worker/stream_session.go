@@ -92,9 +92,15 @@ type streamedExecution struct {
 type slotPhase int
 
 const (
-	// slotPhaseInput is from the first record to the completion arriving: this
-	// Slot waiting for its records and consuming them. It contains the query's
-	// own latency and is not it, which is why it is not named for the query.
+	// slotPhaseInput runs from Begin to the completion arriving: this Slot
+	// waiting for its records and consuming them, the wait before the first
+	// one included.
+	//
+	// From Begin and not from the first record, deliberately: a Slot that
+	// waited its turn spent that time, and charging from the first record
+	// would hide exactly the stretch this field is read to find. It contains
+	// the query's own latency and is not it, which is why it is not named for
+	// the query -- the query runs on the view stream's side.
 	slotPhaseInput slotPhase = iota
 	slotPhasePreflight
 	slotPhaseEvaluate

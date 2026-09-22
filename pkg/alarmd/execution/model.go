@@ -4352,12 +4352,14 @@ type SlotExecutionResult struct {
 // is everything else the completion does, and carrying the total beside the
 // parts is what makes that remainder visible instead of implied.
 //
-// Input is deliberately not called a query time. It is this Slot waiting for
-// its records and consuming them, which contains the query's own latency but
-// is not it: the query runs on the view stream's side, and a Slot that waited
-// its turn waited here with a backend that was never slow. A number named for
-// the query would be read as the backend's, and a preflight that took eight
-// seconds already spent three days being read as a slow data source.
+// Input runs from the moment this replica takes the Slot up to the completion
+// arriving -- the wait before the first record included, not from it. It is
+// deliberately not called a query time: it contains the query's own latency
+// but is not it, because the query runs on the view stream's side and a Slot
+// that waited its turn waited here with a backend that was never slow. A
+// number named for the query would be read as the backend's, and a preflight
+// that took eight seconds already spent three days being read as a slow data
+// source.
 //
 // Preflight and Evaluate are sums over one Slot's batches and series, not
 // single calls. Each call is already on its own line; what no line could

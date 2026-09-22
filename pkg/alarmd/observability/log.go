@@ -364,10 +364,24 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.SlotBudgetUsage; f != nil {
 		attributes = append(attributes, slog.Any("slot_budget_usage", f))
 	}
-	// Its own key beside the usage, under its own condition: the two answer
-	// different questions and a row can carry either without the other.
+	// Flat keys rather than an object, under its own condition: the two
+	// answer different questions and a row can carry either without the
+	// other.
+	//
+	// Flat because this line has already paid for the other choice once. A
+	// nested held_by shipped here and was invisible to anything filtering the
+	// line, and the rows that most needed it carried no cause at all. This
+	// field exists to be filtered on -- "which Slots spent their period
+	// waiting for records" is the question -- so it is written the way the
+	// rest of the line is. The neighbour above is the known exception: it
+	// predates this and is nested, so its members are readable on a row and
+	// not selectable by one.
 	if f := observation.SlotTiming; f != nil {
-		attributes = append(attributes, slog.Any("slot_timing", f))
+		attributes = append(attributes,
+			slog.Uint64("slot_millis", f.Slot),
+			slog.Uint64("input_millis", f.Input),
+			slog.Uint64("preflight_millis", f.Preflight),
+			slog.Uint64("evaluate_millis", f.Evaluate))
 	}
 	if observation.CapacityBudget != "" {
 		attributes = append(attributes, slog.String("capacity_budget", string(observation.CapacityBudget)))
