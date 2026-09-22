@@ -341,18 +341,46 @@ func TestAnObjectSlowerThanTheFloorIsJudgedByItsOwnCadence(t *testing.T) {
 			"fixed floor, every object slower than the floor is refused on nearly every round and the "+
 			"reading blames the census", facts.Outcome)
 	}
-	if facts.CensusAgeBoundSeconds != hourly*controlplane.CensusAgeCadenceMultiple {
-		t.Fatalf("the bound it was judged against is %ds, want %ds - and it has to be on the line, or a "+
-			"reader shown only the age cannot tell a census that is behind from one as fresh as this "+
-			"object's census ever gets",
-			facts.CensusAgeBoundSeconds, hourly*controlplane.CensusAgeCadenceMultiple)
+	if facts.CensusAgeBoundSource != observability.SplitCensusBoundCadence {
+		t.Fatalf("the bound came from %q, want the object's own cadence", facts.CensusAgeBoundSource)
 	}
 
-	// Past its own cadence it is stale like anything else.
-	input.At = input.Census.ObservedAt + hourly*controlplane.CensusAgeCadenceMultiple + 1
+	// Far past its own cadence it is stale like anything else. Asserted at a
+	// number this test writes out rather than one computed from the same
+	// constant the code uses: an expectation that moves with the constant
+	// tests that the bound equals the bound.
+	input.At = input.Census.ObservedAt + 4*hourly
 	if _, facts := controlplane.PlanSplit(input); facts.Outcome != observability.SplitOutcomeCensusStale {
-		t.Fatalf("outcome = %q past two of its own intervals, want %q",
+		t.Fatalf("outcome = %q four hours after an hourly object's census was written, want %q",
 			facts.Outcome, observability.SplitOutcomeCensusStale)
+	}
+}
+
+// A census one round old plus the jitter of being read in a later round is
+// still planned from. This is the property the cadence multiple exists for,
+// and the only assertion that can fail if it is wrong.
+//
+// A census is written when a Slot runs and read by a round that comes after,
+// so it is ALREADY one interval old the first time anyone looks at it - one
+// interval of allowance is no allowance, and the schedule does not promise
+// the reading round lands the same second. The earlier version of this test
+// asserted against `interval * CensusAgeCadenceMultiple`, so the expectation
+// moved with the constant and the constant could be set to one with every
+// test still green; the fixture also sat exactly on the boundary, which the
+// strict comparison lets through.
+func TestACensusOneRoundOldPlusJitterIsStillPlannedFrom(t *testing.T) {
+	const hourly = int64(3600)
+	const jitter = int64(90)
+	input := splitInput(evenCensus("ip", 600, 10), 3*splitShare)
+	input.EvaluationIntervalSeconds = hourly
+	input.At = input.Census.ObservedAt + hourly + jitter
+
+	_, facts := controlplane.PlanSplit(input)
+
+	if facts.Outcome != observability.SplitOutcomePlanned {
+		t.Fatalf("outcome = %q for a census one interval and %ds old, want a plan: an hourly object's "+
+			"census is one interval old the moment it is first read, so a bound of one interval refuses "+
+			"it for any scheduling jitter at all", facts.Outcome, jitter)
 	}
 }
 
@@ -373,6 +401,9 @@ func TestAFastObjectIsNotJudgedMoreTightlyThanTheFloor(t *testing.T) {
 	if facts.CensusAgeBoundSeconds != controlplane.MaxCensusAgeSeconds {
 		t.Fatalf("bound = %ds, want the floor %ds", facts.CensusAgeBoundSeconds, controlplane.MaxCensusAgeSeconds)
 	}
+	if facts.CensusAgeBoundSource != observability.SplitCensusBoundFloorFast {
+		t.Fatalf("the bound came from %q, want the floor named as the fast object's", facts.CensusAgeBoundSource)
+	}
 }
 
 // An object whose cadence is unknown falls back to the floor rather than to
@@ -382,9 +413,20 @@ func TestAnObjectWithNoKnownCadenceFallsBackToTheFloor(t *testing.T) {
 	input := splitInput(evenCensus("ip", 600, 10), 3*splitShare)
 	input.At = input.Census.ObservedAt + controlplane.MaxCensusAgeSeconds + 1
 
-	if _, facts := controlplane.PlanSplit(input); facts.Outcome != observability.SplitOutcomeCensusStale {
+	_, facts := controlplane.PlanSplit(input)
+	if facts.Outcome != observability.SplitOutcomeCensusStale {
 		t.Fatalf("outcome = %q with no cadence known, want the floor still applied (%q)",
 			facts.Outcome, observability.SplitOutcomeCensusStale)
+	}
+	// And it says the bound was a guess. The floor reached this way and the
+	// floor reached by a fast object are the same number, for opposite
+	// reasons: the first may be refusing a census that is perfectly fresh
+	// for an object nobody told us the cadence of - the misattribution the
+	// cadence bound exists to remove - and the second is a census stale by
+	// many of the object's own rounds. Without the word they are identical
+	// on the line.
+	if facts.CensusAgeBoundSource != observability.SplitCensusBoundFloorUnknown {
+		t.Fatalf("the bound came from %q, want it named as a guess", facts.CensusAgeBoundSource)
 	}
 }
 

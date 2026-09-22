@@ -84,17 +84,24 @@ type SplitInput struct {
 	EvaluationIntervalSeconds int64
 }
 
-// censusAgeBound is how old this object's census may be: its own cadence,
-// never below the floor.
-func censusAgeBound(intervalSeconds int64) int64 {
+// censusAgeBound is how old this object's census may be - its own cadence,
+// never below the floor - and which of the three it came from.
+//
+// The source travels with the number because two of the three produce the
+// same number. A bound of fifteen minutes on a fast object means the census
+// is stale by many of that object's own rounds; the same fifteen minutes on
+// an object whose cadence was not supplied means the bound is a guess, and
+// refusing under it may be the very misattribution this bound exists to
+// remove. Without the word they are byte-identical on the line.
+func censusAgeBound(intervalSeconds int64) (int64, string) {
 	if intervalSeconds <= 0 {
-		return MaxCensusAgeSeconds
+		return MaxCensusAgeSeconds, observability.SplitCensusBoundFloorUnknown
 	}
 	bound := intervalSeconds * CensusAgeCadenceMultiple
 	if bound < MaxCensusAgeSeconds {
-		return MaxCensusAgeSeconds
+		return MaxCensusAgeSeconds, observability.SplitCensusBoundFloorFast
 	}
-	return bound
+	return bound, observability.SplitCensusBoundCadence
 }
 
 // SplitPlan is what a split would be: the dimension, the value lists, and
@@ -163,7 +170,7 @@ func PlanSplit(input SplitInput) (SplitPlan, observability.SplitPlanFacts) {
 	if facts.CensusAgeSeconds < 0 {
 		facts.CensusAgeSeconds = 0
 	}
-	facts.CensusAgeBoundSeconds = censusAgeBound(input.EvaluationIntervalSeconds)
+	facts.CensusAgeBoundSeconds, facts.CensusAgeBoundSource = censusAgeBound(input.EvaluationIntervalSeconds)
 	if facts.CensusAgeSeconds > facts.CensusAgeBoundSeconds {
 		facts.Outcome = observability.SplitOutcomeCensusStale
 		return SplitPlan{}, facts

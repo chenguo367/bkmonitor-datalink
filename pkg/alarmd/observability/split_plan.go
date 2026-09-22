@@ -57,6 +57,25 @@ const (
 	// no peak, or a census of no series. Never read as "no pressure": an
 	// unknown is reported as an unknown.
 	SplitOutcomeNoReading = "NO_READING"
+	// Where a census's staleness bound came from. Three words rather than
+	// the number alone, because two of them produce the SAME number - the
+	// floor - for opposite reasons, and a reader met by a stale census and a
+	// bound of fifteen minutes cannot otherwise tell which he has.
+	//
+	// CADENCE: the object's own evaluation interval. A census past this has
+	// genuinely not been rewritten for two of the object's own rounds, which
+	// is a fact about that object's Slots.
+	// FLOOR_FAST: the object runs faster than the floor, so the floor is the
+	// wider bound and the one used. Past it the census is stale by many of
+	// the object's own rounds.
+	// FLOOR_UNKNOWN: the cadence was not supplied, so the bound is a guess.
+	// A census refused under this word may be perfectly fresh for an object
+	// nobody told us the cadence of - the same misattribution the cadence
+	// bound exists to remove, on a smaller population.
+	SplitCensusBoundCadence      = "CADENCE"
+	SplitCensusBoundFloorFast    = "FLOOR_FAST"
+	SplitCensusBoundFloorUnknown = "FLOOR_UNKNOWN"
+
 	// SplitOutcomeUnrecognised is a decision this build cannot name: the
 	// planner reached an outcome that is not in this vocabulary.
 	//
@@ -173,6 +192,7 @@ type SplitPlanFacts struct {
 	Series                uint32 `json:"series"`
 	CensusAgeSeconds      int64  `json:"census_age_seconds"`
 	CensusAgeBoundSeconds int64  `json:"census_age_bound_seconds"`
+	CensusAgeBoundSource  string `json:"census_age_bound_source,omitempty"`
 	CensusSource          string `json:"census_source,omitempty"`
 	// HeaviestValueSeries is the largest single value's weight and
 	// TargetSeries what one piece should carry. The first above the second is
