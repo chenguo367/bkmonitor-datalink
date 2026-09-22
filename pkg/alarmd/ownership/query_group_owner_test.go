@@ -118,3 +118,31 @@ func TestReadQueryGroupOwnerRejectsInvalidFacts(t *testing.T) {
 		t.Fatal("store error became an absent owner")
 	}
 }
+
+func TestReadActiveControlLeaderUsesLiveSpecialLeaseWithoutExposingToken(t *testing.T) {
+	store := newIntegrationStore(t)
+	ctx := context.Background()
+	if _, found, err := store.ReadActiveControlLeader(ctx); err != nil || found {
+		t.Fatal("missing control leader was not absent")
+	}
+	authority, err := store.AcquireControlLeader(ctx, "control-worker", time.Now(), time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, found, err := store.ReadActiveControlLeader(ctx)
+	if err != nil || !found || owner.OwnerID != "control-worker" || owner.OwnerEpoch != authority.Fence.OwnerEpoch || !owner.Deadline.After(owner.ObservedAt) {
+		t.Fatalf("active control leader=%+v found=%v err=%v", owner, found, err)
+	}
+	raw, _ := json.Marshal(owner)
+	if strings.Contains(string(raw), "lease_token") || strings.Contains(string(raw), authority.Fence.LeaseToken) {
+		t.Fatal("control leader read exposed the lease token")
+	}
+	elapseOnRedis(t, store, ControlLeaderIdentity, time.Minute+time.Second)
+	if _, found, err := store.ReadActiveControlLeader(ctx); err != nil || found {
+		t.Fatal("expired control lease was accepted")
+	}
+	legacy, found, err := store.ReadControlLeader(ctx)
+	if err != nil || !found || legacy.OwnerID != owner.OwnerID || legacy.OwnerEpoch != owner.OwnerEpoch {
+		t.Fatal("the legacy control leader read changed semantics")
+	}
+}

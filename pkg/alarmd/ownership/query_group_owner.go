@@ -22,6 +22,13 @@ type QueryGroupOwner struct {
 	ObservedAt time.Time `json:"observed_at"`
 }
 
+// ReadActiveControlLeader is the control leader's active lease on Redis's clock.
+// Unlike ReadControlLeader, it rejects a retained hash whose lease has expired.
+// It does not expose the lease token or alter the older discovery API's meaning.
+func (store *RedisStore) ReadActiveControlLeader(ctx context.Context) (QueryGroupOwner, bool, error) {
+	return store.ReadQueryGroupOwner(ctx, ControlLeaderIdentity)
+}
+
 // ReadQueryGroupOwner reads one active lease atomically with Redis TIME. Desired
 // placement is not ownership; absent, expired and paused leases return false.
 func (store *RedisStore) ReadQueryGroupOwner(ctx context.Context, identity execution.QueryGroupIdentity) (QueryGroupOwner, bool, error) {

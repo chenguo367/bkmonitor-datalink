@@ -117,6 +117,12 @@ type Server struct {
 	sessions  map[string]*session
 	counters  serverCounters
 	closed    bool
+
+	// Diagnostics have their own admission slots and handler lock. A slow
+	// evidence reader must not hold the control stream's session lock or queue.
+	evidenceMu      sync.RWMutex
+	evidenceHandler func(context.Context, *pb.EvidenceRequest) (*pb.EvidenceResult, error)
+	evidenceSlots   chan struct{}
 }
 
 // ServerOptions are the seams a test needs: a clock, and how often the
@@ -144,7 +150,8 @@ func NewServer(admission Admission, observer observability.Observer, options Ser
 	if tick <= 0 {
 		tick = HeartbeatInterval
 	}
-	return &Server{admission: admission, observer: observer, costs: options.Costs, now: now, tick: tick, sessions: map[string]*session{}}, nil
+	return &Server{admission: admission, observer: observer, costs: options.Costs, now: now, tick: tick,
+		sessions: map[string]*session{}, evidenceSlots: make(chan struct{}, EvidenceConcurrency)}, nil
 }
 
 // Lead starts a term: a new publisher, and every open session is woken so
