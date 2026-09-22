@@ -612,6 +612,37 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Bool("rebalance_moves_truncated", facts.MovesTruncated),
 			slog.Any("rebalance_moves", facts.Moves),
 		)
+		if bytes := facts.Bytes; bytes != nil {
+			// The byte-constraint round's counts, zeros included, for the
+			// same reason: judged and unread together say whether the round
+			// could judge at all, and a round that moved nothing because it
+			// judged nothing reads identically to one that found nothing to
+			// move without them. The per-Worker lists stay on the page; the
+			// overloaded one is here because it is the actionable half and
+			// is bounded by the fleet.
+			attributes = append(attributes,
+				slog.Int("byte_constraint_judged", bytes.Judged),
+				slog.Int("byte_constraint_unread", bytes.Unread),
+				slog.Int("byte_constraint_pool_unknown", len(bytes.PoolUnknown)),
+				slog.Int("byte_constraint_unsettled", len(bytes.Unsettled)),
+				slog.Any("byte_constraint_overloaded", bytes.Overloaded),
+				slog.Int("byte_constraint_planned_moves", bytes.PlannedMoves),
+				slog.Int("byte_constraint_published_moves", bytes.PublishedMoves),
+			)
+		}
+		if gate := facts.ShardAware; gate != nil {
+			// All three whenever the gate ran, zeros included: a round that
+			// admits a split and one from a build that has no gate read the
+			// same otherwise, and "how many ready workers did it ask" is the
+			// denominator of the other two. The list stays beside the count
+			// because a rollout reader wants the replica, not the number.
+			attributes = append(attributes,
+				slog.Int("shard_aware_ready", gate.Ready),
+				slog.Int("shard_unaware_replicas", len(gate.Unaware)),
+				slog.Any("shard_unaware", gate.Unaware),
+				slog.Int("shard_splits_held", gate.SplitsHeld),
+			)
+		}
 	}
 	if facts := observation.AssignmentSweep; facts != nil {
 		// The five numbers of a sweep, zeros included: the line existed for a

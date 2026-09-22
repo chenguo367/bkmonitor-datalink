@@ -1448,6 +1448,25 @@ func normalizeRebalanceFacts(facts *RebalanceFacts) *RebalanceFacts {
 		normalized.Moves = normalized.Moves[:MaxRebalanceMoveSamples]
 		normalized.MovesTruncated = true
 	}
+	if gate := facts.ShardAware; gate != nil {
+		// Copied rather than shared: the round keeps its own list and the
+		// observation is read after the round moves on. Bounded by the ready
+		// set, which is the fleet, and truncated at the same sample bound the
+		// owned counts use so one enormous fleet cannot make one enormous
+		// line.
+		bounded := *gate
+		bounded.Unaware = append([]string(nil), gate.Unaware...)
+		if len(bounded.Unaware) > MaxRebalanceOwnedSamples {
+			bounded.Unaware = bounded.Unaware[:MaxRebalanceOwnedSamples]
+		}
+		if bounded.Ready < 0 {
+			bounded.Ready = 0
+		}
+		if bounded.SplitsHeld < 0 {
+			bounded.SplitsHeld = 0
+		}
+		normalized.ShardAware = &bounded
+	}
 	return &normalized
 }
 
