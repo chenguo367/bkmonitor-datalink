@@ -193,6 +193,23 @@ func TestAWaitIsDecidedByWhatIsMoving(t *testing.T) {
 		if standing := standingOf(flat, now); standing.Watch != WatchGuardMoving {
 			t.Fatalf("%s with a guard that just moved = %+v, want GUARD_MOVING", check, standing)
 		}
+		// The wait for the next round has a bound: the row may say the same
+		// thing for StalledRounds rounds; on the round after, it is this
+		// side's to look at, not a wait.
+		waited := Anomaly{Finding: Finding{Check: check}, ReasonLastAt: now, Consecutive: StalledRounds}
+		if standing := standingOf(waited, now); standing.Action != ActionWatch || standing.Watch != WatchNextRound {
+			t.Fatalf("%s on round %d = %+v, want still NEXT_ROUND", check, StalledRounds, standing)
+		}
+		waited.Consecutive = StalledRounds + 1
+		if standing := standingOf(waited, now); standing.Action != ActionServiceFix || standing.Watch != "" || standing.RefinedBy != RuleStalled {
+			t.Fatalf("%s on round %d = %+v, want SERVICE_FIX by STALLED: a wait past its bound is where things hide", check, StalledRounds+1, standing)
+		}
+	}
+	// The same bound on a changed configuration under any check.
+	changed := Anomaly{Finding: Finding{Check: CheckWindowUndecided}, ReasonLastAt: now, ConfigChanged: true, Consecutive: StalledRounds + 1,
+		Coverage: &HistoryCoverage{Levels: 1, Short: 1, WorstValid: 6, WorstRequired: 9, Guarded: 1}}
+	if standing := standingOf(changed, now); standing.Action == ActionWatch {
+		t.Fatalf("a changed configuration %d rounds on = %+v, want not a wait", StalledRounds+1, standing)
 	}
 	// Under no check: detecting, nothing to do. A retained record older
 	// than the window: recovered, nothing to do.

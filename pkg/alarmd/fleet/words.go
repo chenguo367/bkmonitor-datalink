@@ -69,7 +69,8 @@ var ActionWords = []ActionWord{ActionServiceFix, ActionStrategyEdit, ActionDataC
 // out. GUARD_MOVING: a guard's count moved within the last StalledRounds
 // rounds. UNCONFIRMED: nothing has been heard from the object within the
 // recent window. NEXT_ROUND: the round that will say is the next one -- the
-// configuration just changed, or the cause did not survive a restart.
+// configuration just changed, or the cause did not survive a restart -- for
+// at most StalledRounds rounds, after which the row is this side's.
 type WatchReason string
 
 const (
@@ -229,12 +230,15 @@ func standingOf(row Anomaly, now time.Time) Standing {
 		}
 		return standing
 	}
-	// The checks whose own pair is a wait carry the reason for it.
+	// The checks whose own pair is a wait carry the reason for it -- and a
+	// wait that has outlived its bound is not a wait: a row still saying
+	// the same thing after StalledRounds rounds is this side's to look at,
+	// or the column would be where things go to not be seen.
 	if standing.Action == ActionWatch {
 		if reason, waiting := watchReasonOf(row, now); waiting {
 			standing.Watch = reason
 		} else {
-			standing.Watch = WatchNextRound
+			standing.Action, standing.RefinedBy = ActionServiceFix, RuleStalled
 		}
 	}
 	return standing
@@ -305,7 +309,12 @@ func watchReasonOf(row Anomaly, now time.Time) (WatchReason, bool) {
 	if !row.ReasonLastAt.IsZero() && now.Sub(row.ReasonLastAt) > RecentSkipWindow {
 		return WatchUnconfirmed, true
 	}
-	if row.ConfigChanged || row.Finding.Check == CheckObservationGap || row.Finding.Check == CheckConfigUnresolved {
+	// The next round decides -- for at most StalledRounds rounds. A row that
+	// has said the same thing for longer than that is not waiting on a
+	// round, whatever its check says; Consecutive is the row's own count of
+	// rounds under its current result and reason.
+	if (row.ConfigChanged || row.Finding.Check == CheckObservationGap || row.Finding.Check == CheckConfigUnresolved) &&
+		row.Consecutive <= StalledRounds {
 		return WatchNextRound, true
 	}
 	return "", false
