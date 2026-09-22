@@ -165,11 +165,11 @@ func retainRuntimeExecutableCatalog(
 			// Any refusal that keeps the last good definition, not only a
 			// config one: the Levels this round could not compile are
 			// supplemented from the definition that did.
-			hasConfigRejected := false
+			retainsLastGood := false
 			for _, terminal := range levelTerminals {
 				disposition := terminalDisposition(sourcePlan.Identity.StrategyID, "LEVEL", terminal)
 				terminalDispositions = append(terminalDispositions, disposition)
-				hasConfigRejected = hasConfigRejected || RetainsLastGoodDefinition(disposition.Disposition)
+				retainsLastGood = retainsLastGood || RetainsLastGoodDefinition(disposition.Disposition)
 			}
 			plan, err := retainCompiledLevels(sourcePlan, compiled)
 			if err != nil {
@@ -180,7 +180,7 @@ func retainRuntimeExecutableCatalog(
 				return Catalog{}, err
 			}
 			supplementedLevels := map[uint32]struct{}{}
-			if hasConfigRejected {
+			if retainsLastGood {
 				if entry, ok := lastGoodPlans[sourcePlan.Identity.StrategyID]; ok {
 					_, executable, err := runtimePlanIsTerminalFree(ctx, entry, compiler, stateSemantics)
 					if err != nil {
