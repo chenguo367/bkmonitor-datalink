@@ -46,6 +46,7 @@
     <div id="health" title="部署判定">…</div>
     <div id="lead">读取中</div>
     <div id="meta"></div>
+    <a id="cliAuthorization" href="./cli">CLI 授权</a>
   </header>
   <div id="columns"></div>
   <section id="card" hidden></section>
@@ -59,6 +60,8 @@ var BASE = (function () {
   var p = location.pathname.replace(/\/v2\/?$/, '/');
   return p.charAt(p.length - 1) === '/' ? p : p + '/';
 })();
+
+document.getElementById('cliAuthorization').href = BASE.replace(/v2\.html\/$/, '') + 'cli';
 
 // No vocabulary lives here. Every word the page shows is looked up in the
 // words the server sent with the list; a code the server did not word is

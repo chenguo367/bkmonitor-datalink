@@ -53,6 +53,19 @@ type HTTPConfig struct {
 	DiagnosticsListen string `yaml:"diagnostics_listen"`
 }
 
+// CLIConfig enables the deployment-operator evidence channel. IssuerKey is
+// injected only by a host route which already authenticated and authorized the
+// operator. It is never a CLI token and never part of RuntimeConfigFacts.
+type CLIConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	EnvironmentID   string `yaml:"environment_id"`
+	EnvironmentName string `yaml:"environment_name"`
+	PublicBaseURL   string `yaml:"public_base_url"`
+	IssuerKey       string `yaml:"issuer_key" json:"-"`
+	// AuthorizationURL points at the protected host's authorization page. If
+	// empty, the embedded page uses its own protected grant route.
+}
+
 // DiagnosticsFact renders the diagnostics surface for startup logging. Every
 // runtime reports it through this one helper so the three of them cannot drift
 // into disagreeing about what an unset address means.
@@ -187,6 +200,7 @@ func (c Config) DynamicGroupKeyPrefix() (string, bool) {
 type Config struct {
 	Input           PhaseTwoInputConfig   `yaml:"input"`
 	HTTP            HTTPConfig            `yaml:"http"`
+	CLI             CLIConfig             `yaml:"cli"`
 	Kafka           KafkaConfig           `yaml:"kafka"`
 	Redis           RedisConfig           `yaml:"redis"`
 	PlatformCache   PlatformCacheConfig   `yaml:"platform_cache"`

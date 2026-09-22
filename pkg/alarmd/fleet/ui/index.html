@@ -164,6 +164,7 @@ details.group table{margin:6px 0 0 12px}
     <input id="every" type="number" min="5" step="5" size="3">
     <span>秒</span>
     <button id="refreshNow">立即刷新</button>
+    <a id="cliAuthorization" href="./cli">CLI 授权</a>
     <span class="basis" id="refreshNote"></span>
   </div>
 
@@ -435,6 +436,8 @@ var BASE = (function () {
   var p = location.pathname;
   return p.charAt(p.length - 1) === '/' ? p : p + '/';
 })();
+
+document.getElementById('cliAuthorization').href = BASE.replace(/index\.html\/$/, '') + 'cli';
 
 var LIMIT = 20;
 // Which line of the first screen is open, and which of its groups are
