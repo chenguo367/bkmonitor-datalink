@@ -299,7 +299,11 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			// Shard is execution content: the Slot names the Plan's gap marker
 			// and no-data memory by it. Nil, and so absent from the digest,
 			// for every Plan that is not split.
-			execution: []string{"Identity", "StateGeneration", "ScheduleSpec", "ScheduleRevision", "RequirementTemplates", "QueryPlans", "Shard"},
+			// LevelContractRefs are execution content beside the generation
+			// they were derived with: a Worker holds the Plan's records to
+			// them. Nil, and so absent from the digest, for an object
+			// published before the field.
+			execution: []string{"Identity", "StateGeneration", "ScheduleSpec", "ScheduleRevision", "RequirementTemplates", "QueryPlans", "Shard", "LevelContractRefs", "NoDataLevelContractRefs"},
 			split:     []string{"Plan"},
 			// PlanRevision digests the whole EvaluationPlanV2, update_time and
 			// source document included, and nothing reads it.

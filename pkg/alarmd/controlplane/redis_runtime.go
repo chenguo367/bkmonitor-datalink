@@ -2122,7 +2122,8 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 				errors.New("alarmd controlplane: frozen Plan cannot be compiled for G1 FULL execution"))
 		}
 		compiledGeneration := execution.StateGeneration(compiled.StateCompatibilityHash())
-		if err := runtime.checkFrozenPlanGeneration(ctx, request, plan, record, segment, compiledGeneration); err != nil {
+		formulaSkew, err := runtime.checkFrozenPlanGeneration(ctx, request, plan, record, segment, compiledGeneration)
+		if err != nil {
 			return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailurePlanMaterialize, err)
 		}
 		deadline, err := completionDeadline(request.EvaluationTime, plan.ScheduleSpec)
@@ -2139,7 +2140,10 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 		duePlans = append(duePlans, execution.DuePlan{Identity: plan.Identity, Shard: execution.ShardOf(plan.Shard), CompiledPlan: compiled,
 			StateGeneration: record.Fact.Selected.StateGeneration, StateApplyEpoch: record.Fact.Selected.StateApplyEpoch,
 			ScheduleRevision: plan.ScheduleRevision, ScheduleSpec: plan.ScheduleSpec,
-			CompletionDeadlineUnixMilli: deadline, PartialCapabilities: capabilities})
+			CompletionDeadlineUnixMilli: deadline, PartialCapabilities: capabilities,
+			LevelContractRefs:          append([]execution.RuntimeLevelContractRef(nil), plan.LevelContractRefs...),
+			NoDataLevelContractRefs:    append([]execution.RuntimeLevelContractRef(nil), plan.NoDataLevelContractRefs...),
+			StateGenerationFormulaSkew: formulaSkew})
 	}
 	// Whether this Segment still names what the control plane publishes. Not
 	// part of the no-data hops: it is the same question one level up, asked of
@@ -2184,7 +2188,10 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 }
 
 // checkFrozenPlanGeneration decides whether a due Plan may be frozen under the
-// state generation its activation record names. That generation is the one the
+// state generation its activation record names, and reports whether this
+// process derives that generation by another formula than the Leader that
+// published it - the skew the Slot's contract validation has to know about
+// when the Plan carries no published Level contract refs. That generation is the one the
 // Slot executes under: the Coordinator keys the Plan's state by it and compares
 // it with the live activation to decide when the Plan re-warms. Three
 // generations are in play, and only two of them are persisted facts:
@@ -2231,23 +2238,24 @@ func (runtime *RedisCatalogRuntime) checkFrozenPlanGeneration(
 	record PlanActivationRecord,
 	segment persistedScheduleSegment,
 	compiled execution.StateGeneration,
-) error {
+) (formulaSkew bool, err error) {
 	recorded := record.Fact.Selected.StateGeneration
 	if plan.StateGeneration != "" {
 		if plan.StateGeneration != recorded {
 			runtime.observeStateGenerationSkew(ctx, request, segment, plan, "record")
-			return errors.New("alarmd controlplane: Plan activation state generation differs from the frozen Plan")
+			return false, errors.New("alarmd controlplane: Plan activation state generation differs from the frozen Plan")
 		}
 		if compiled != plan.StateGeneration {
 			runtime.observeStateGenerationSkew(ctx, request, segment, plan, "formula")
+			return true, nil
 		}
-		return nil
+		return false, nil
 	}
 	if compiled == recorded {
-		return nil
+		return false, nil
 	}
 	if segment.Schedule.Segment.End == nil {
-		return errors.New("alarmd controlplane: open Segment stores a Plan without a state generation")
+		return false, errors.New("alarmd controlplane: open Segment stores a Plan without a state generation")
 	}
 	executionSemantics := plan.Plan.StrategyIR.ExecutionSemantics
 	legacy, err := contract.DeriveStateCompatibilityHashV1(contract.StateCompatibilityInputV1{
@@ -2258,12 +2266,14 @@ func (runtime *RedisCatalogRuntime) checkFrozenPlanGeneration(
 		HistoryCellSemanticsVersion: runtime.stateSemantics.HistoryCellSemanticsVersion,
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	if execution.StateGeneration(legacy) != recorded {
-		return errors.New("alarmd controlplane: closed Segment stores a Plan without a state generation and its activation names neither the compiled nor the pre-G4 one")
+		return false, errors.New("alarmd controlplane: closed Segment stores a Plan without a state generation and its activation names neither the compiled nor the pre-G4 one")
 	}
-	return nil
+	// A pre-G4 record under a Plan this process compiles to another
+	// generation: the same skew, by an older formula.
+	return true, nil
 }
 
 // observeStateGenerationSkew names the Slot, the Segment and the Plan the

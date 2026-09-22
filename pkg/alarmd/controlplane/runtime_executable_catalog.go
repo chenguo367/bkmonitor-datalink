@@ -82,6 +82,20 @@ func retainRuntimeExecutableCatalog(
 			return errors.New("alarmd controlplane: runtime executable Plan has no state compatibility")
 		}
 		plan.StateGeneration = execution.StateGeneration(compiled.StateCompatibilityHash())
+		// The refs from the same compilation as the generation, so the key
+		// and the contract a Worker holds a record to were derived by one
+		// build.
+		refs, err := execution.DeriveRuntimeLevelContractRefs(compiled)
+		if err != nil {
+			return err
+		}
+		plan.LevelContractRefs = refs
+		plan.NoDataLevelContractRefs = nil
+		if view := compiled.NoDataView(); view != nil {
+			if plan.NoDataLevelContractRefs, err = execution.DeriveRuntimeLevelContractRefs(view); err != nil {
+				return err
+			}
+		}
 		observeRetention(&result.Retention, compiled)
 		if _, duplicate := seenPlans[plan.Key()]; duplicate {
 			return errors.New("alarmd controlplane: duplicate runtime executable Plan identity")

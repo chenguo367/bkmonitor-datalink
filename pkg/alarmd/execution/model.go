@@ -402,6 +402,34 @@ type DuePlan struct {
 	ScheduleSpec                ScheduleSpec
 	CompletionDeadlineUnixMilli int64
 	PartialCapabilities         []LevelPartialCapability
+	// LevelContractRefs are the Level contract references the Control
+	// Leader published with the Plan, derived from the same compilation
+	// that produced its StateGeneration: what the Plan's records were and
+	// will be written with. Nil for a Plan published by a Leader that
+	// predates the field, in which case this process derives them itself.
+	//
+	// Published rather than derived on every replica because the two
+	// derivations are two builds' formulas. A key and a contract derived by
+	// one build and validated by another disagreed on every rollout that
+	// moved either formula, and the disagreement was a refusal of every
+	// loaded record for as long as the rollout lasted (decision-020 section
+	// 4.7.9).
+	LevelContractRefs []RuntimeLevelContractRef
+	// NoDataLevelContractRefs are the same for the Plan's no-data view: the
+	// no-data Level shares its ID with the source Level it follows and has
+	// its own fingerprints, so its refs are its own set, published beside
+	// the declared Levels' and swapped in by PlanViewFor for the synthetic
+	// series. Nil for a Plan without a no-data Level, and for one published
+	// before the field.
+	NoDataLevelContractRefs []RuntimeLevelContractRef
+	// StateGenerationFormulaSkew is the runtime having found that its own
+	// derivation of the Plan's state generation differs from the published
+	// one: the Leader that published it is another build. With
+	// LevelContractRefs published the refs decide as usual; without them the
+	// refs this process derives are as unreliable as the generation it
+	// derived, so the loaded records' refs are not held to them - the key
+	// is trusted and a mutation carries forward the refs the record has.
+	StateGenerationFormulaSkew bool
 }
 
 type Completeness string
@@ -2487,7 +2515,7 @@ func (result EvaluationResult) Validate(request EvaluationRequest) error {
 		if err := validateLoadedFactDisposition(planResult, request.State, request.Gaps); err != nil {
 			return err
 		}
-		levelContracts := runtimeLevelContracts{plan: plan.CompiledPlan}
+		levelContracts := levelContractsOf(plan)
 		if err := validateLoadedStateContracts(plan, request.State, &levelContracts); err != nil {
 			return err
 		}
@@ -2585,14 +2613,22 @@ func (result EvaluationResult) Validate(request EvaluationRequest) error {
 				view.Status != StateDeterministicInvalid {
 				return errors.New("alarmd execution: unavailable or terminal state cannot be mutated")
 			}
+			// A mutation writes the Plan's refs - or, when they are not ones a
+			// record can be held to, the refs the loaded record already has.
 			for _, level := range mutation.Levels {
 				ref, found := levelContracts.find(level.LevelID)
-				if !found || level.LevelStateCompatibility != ref.LevelStateCompatibility ||
-					level.WarmupRequirementRef != ref.WarmupRequirementRef {
+				if !found {
+					return errors.New("alarmd execution: State mutation Level contract differs from the compiled Plan")
+				}
+				if level.LevelStateCompatibility == ref.LevelStateCompatibility && level.WarmupRequirementRef == ref.WarmupRequirementRef {
+					continue
+				}
+				if stored, kept := findPersistedLevel(view.Levels, level.LevelID); levelContracts.verifiable() || !kept ||
+					stored.LevelStateCompatibility != level.LevelStateCompatibility || stored.WarmupRequirementRef != level.WarmupRequirementRef {
 					return errors.New("alarmd execution: State mutation Level contract differs from the compiled Plan")
 				}
 			}
-			if mutation.SeriesGuard != nil {
+			if mutation.SeriesGuard != nil && levelContracts.verifiable() {
 				seriesWarmup, err := levelContracts.seriesWarmup()
 				if err != nil || mutation.SeriesGuard.WarmupRequirementRef != seriesWarmup {
 					return errors.New("alarmd execution: State mutation series guard differs from the compiled Plan")
@@ -2954,22 +2990,27 @@ func validateLoadedStateContracts(plan DuePlan, states StatePreflightResult, lev
 			(state.Status != StateFoundReady && state.Status != StateFoundWarming && state.Status != StateFoundGapped) {
 			continue
 		}
+		// A record's refs are held to the Plan's only when the Plan's refs
+		// are ones a record can be held to: published, or derived here by
+		// the formula the Leader used. A Level the Plan does not have is
+		// refused either way.
+		verifiable := levelContracts.verifiable()
 		for _, level := range state.Levels {
 			ref, found := levelContracts.find(level.LevelID)
-			if !found || level.LevelStateCompatibility != ref.LevelStateCompatibility ||
-				level.WarmupRequirementRef != ref.WarmupRequirementRef {
+			if !found || (verifiable && (level.LevelStateCompatibility != ref.LevelStateCompatibility ||
+				level.WarmupRequirementRef != ref.WarmupRequirementRef)) {
 				return &StateContractMismatchError{What: "Level contract"}
 			}
 		}
 		for _, point := range state.History {
 			for _, fact := range point.Levels {
 				ref, found := levelContracts.find(fact.LevelID)
-				if !found || fact.DetectFingerprint != ref.DetectFingerprint {
+				if !found || (verifiable && fact.DetectFingerprint != ref.DetectFingerprint) {
 					return &StateContractMismatchError{What: "history"}
 				}
 			}
 		}
-		if state.SeriesGuard != nil {
+		if state.SeriesGuard != nil && verifiable {
 			seriesWarmup, err := levelContracts.seriesWarmup()
 			if err != nil || state.SeriesGuard.WarmupRequirementRef != seriesWarmup {
 				return &StateContractMismatchError{What: "series guard"}

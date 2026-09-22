@@ -153,6 +153,17 @@ type FrozenPlan struct {
 	// marker and no-data memory by it. Omitted when nil for the same reason
 	// NoDataSuspended is - this struct is inside the object digest.
 	Shard *execution.ShardRef `json:",omitempty"`
+	// LevelContractRefs are the Level contract references the Leader derived
+	// from the same compilation that produced StateGeneration, published so
+	// every Worker validates and writes the Plan's records with the Leader's
+	// refs rather than its own build's derivation (decision-020 section
+	// 4.7.9). Execution content, inside the object digest: a Plan whose refs
+	// moved is a Plan whose records mean something else. Omitted when nil so
+	// an object published before the field keeps every digest it had.
+	LevelContractRefs []execution.RuntimeLevelContractRef `json:",omitempty"`
+	// NoDataLevelContractRefs are the same for the Plan's no-data view, whose
+	// Level shares an ID with a declared Level and has refs of its own.
+	NoDataLevelContractRefs []execution.RuntimeLevelContractRef `json:",omitempty"`
 }
 
 // Key is this Plan's index key: the strategy and the piece. Two pieces of one
