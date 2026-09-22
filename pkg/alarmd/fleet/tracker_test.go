@@ -689,14 +689,15 @@ func TestARefusedCoverageStandsOnTheRowWhereTheReadingWouldBe(t *testing.T) {
 	if listed := append(tracker.Anomalies(), tracker.Undecidable()...); len(listed) != 0 {
 		t.Fatalf("rows after a healthy round = %+v, want the object gone", listed)
 	}
-	plain := completion("qg-refused", "COMPLETED_WITH_UNAVAILABLE", "8930")
-	plain.ProgressCompletionCause = "LEVEL_OUTCOME_UNKNOWN"
-	for round := 0; round < DefaultDegradedRounds+1; round++ {
-		tracker.Observe(context.Background(), plain)
+	// Blocked rounds never reach the site that reads a round's coverage, so
+	// the refusal from the earlier run can only be gone if the healthy round
+	// that ended that run cleared it.
+	for round := 0; round < DefaultBlockedRounds; round++ {
+		tracker.Observe(context.Background(), runOutcome("qg-refused", "source_blocked"))
 	}
-	rows = append(tracker.Anomalies(), tracker.Undecidable()...)
-	if len(rows) != 1 || rows[0].CoverageRejected != nil {
-		t.Fatalf("rows on a new run = %+v, want the old refusal not carried onto it", rows)
+	rows = tracker.Anomalies()
+	if len(rows) != 1 || rows[0].Kind != KindBlockedRun || rows[0].CoverageRejected != nil {
+		t.Fatalf("rows on a new blocked run = %+v, want the old refusal not carried onto it", rows)
 	}
 }
 
