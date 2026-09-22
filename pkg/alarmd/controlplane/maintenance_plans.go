@@ -15,6 +15,9 @@ import (
 type MaintenancePlan struct {
 	Identity execution.PlanIdentity
 	Compiled *strategy.CompiledPlan
+	// Partial detector compilation cannot prove every level inactive, but the
+	// executable levels still need membership tracking for ordinary recovery.
+	CloseUnavailable bool
 }
 
 func (runtime *RedisCatalogRuntime) CurrentPlans(ctx context.Context, qg execution.QueryGroupIdentity, at execution.EvaluationTime) ([]MaintenancePlan, error) {
@@ -46,7 +49,7 @@ func (runtime *RedisCatalogRuntime) CurrentPlans(ctx context.Context, qg executi
 			return nil, ctx.Err()
 		}
 		compiled, ok := result.Plan()
-		if err != nil || !ok || result.PlanTerminal() != nil || len(result.LevelTerminals()) != 0 {
+		if err != nil || !ok || result.PlanTerminal() != nil {
 			if err == nil {
 				err = errors.New("activated maintenance plan cannot be compiled")
 			}
@@ -56,7 +59,7 @@ func (runtime *RedisCatalogRuntime) CurrentPlans(ctx context.Context, qg executi
 				Trace: observability.TraceFields{QueryGroupKey: string(qg)}})
 			continue
 		}
-		plans = append(plans, MaintenancePlan{Identity: plan.Identity, Compiled: compiled})
+		plans = append(plans, MaintenancePlan{Identity: plan.Identity, Compiled: compiled, CloseUnavailable: len(result.LevelTerminals()) != 0})
 	}
 	return plans, nil
 }

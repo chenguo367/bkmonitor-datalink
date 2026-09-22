@@ -214,7 +214,7 @@ func (m *effectiveMaintenance) group(ctx context.Context, qg execution.QueryGrou
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if plan.Compiled.WireFormat() != contract.WireFormatStandardRawEvent {
+		if plan.CloseUnavailable || plan.Compiled.WireFormat() != contract.WireFormatStandardRawEvent {
 			continue
 		}
 		fact, err := plan.Compiled.ResolveEffectiveTimeWithProvider(ctx, at.Unix(), plan.Identity.BusinessID, m.legacy)
@@ -318,20 +318,25 @@ func (m *effectiveMaintenance) refreshLegacy(ctx context.Context, qg execution.Q
 			continue
 		}
 		levels := plan.Compiled.Levels()
-		level := plan.Compiled.NoDataLevel()
-		if len(levels) > 0 {
-			level = &levels[0]
+		if level := plan.Compiled.NoDataLevel(); level != nil {
+			levels = append(levels, *level)
 		}
-		if level == nil {
-			continue
+		needed := false
+		var ids []int64
+		for _, level := range levels {
+			r := level.EffectiveTimeRequirement()
+			if r.Kind() != strategy.EffectiveTimeAlways {
+				needed = true
+			}
+			ids = append(ids, r.ActiveCalendarIDs()...)
+			ids = append(ids, r.InactiveCalendarIDs()...)
 		}
-		r := level.EffectiveTimeRequirement()
-		if r.Kind() == strategy.EffectiveTimeAlways {
+		if !needed {
 			continue
 		}
 		m.legacyCursor[qg] = (i + 1) % len(plans)
 		round, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
-		err := m.legacyCache.Refresh(round, plan.Identity.TenantID, plan.Identity.BusinessID, append(r.ActiveCalendarIDs(), r.InactiveCalendarIDs()...))
+		err := m.legacyCache.Refresh(round, plan.Identity.TenantID, plan.Identity.BusinessID, ids)
 		cancel()
 		if err != nil {
 			m.observe(ctx, qg, "legacy_effective_time_unavailable", err, 0)

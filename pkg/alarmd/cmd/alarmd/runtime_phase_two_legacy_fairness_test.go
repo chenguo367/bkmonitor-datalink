@@ -29,3 +29,14 @@ func TestEffectiveMaintenanceSlowLegacyDoesNotStarveSnapshotPlan(t *testing.T) {
 		t.Fatalf("slow calls=%d modern closes=%d", slow.calls, len(modern.writer.batches))
 	}
 }
+
+func TestEffectiveMaintenancePartialPlanRetainsTrackingWithoutClosing(t *testing.T) {
+	f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(18, 0), []openalerts.Alert{maintenanceAlert("native", "critical")})
+	catalog := f.m.catalog.(maintenanceTestCatalog)
+	catalog.plans[0].CloseUnavailable = true
+	f.m.catalog = catalog
+	f.m.step(context.Background())
+	if len(f.writer.batches) != 0 || f.m.cache.Stats().Tracked != 1 {
+		t.Fatalf("partial plan closes=%d tracked=%d", len(f.writer.batches), f.m.cache.Stats().Tracked)
+	}
+}
