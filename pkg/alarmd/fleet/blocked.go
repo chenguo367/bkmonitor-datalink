@@ -328,6 +328,25 @@ var failureFacets = map[string]facets{
 	"PLAN_REACTIVATED":        {StageConfig, ClassConfig, DependencyNone},
 	"EFFECTIVE_TIME_INACTIVE": {StageConfig, ClassConfig, DependencyNone},
 	"EFFECTIVE_TIME_UNKNOWN":  {StageConfig, ClassConfig, DependencyNone},
+	// The compiler's refusals over a Plan's effective time. The definition's
+	// own window is the config's; the snapshot ones are the control source's,
+	// because what is missing or unreadable arrived from it and no change to
+	// this strategy or this deployment produces it.
+	"EFFECTIVE_TIME_INVALID":                   {StageConfig, ClassConfig, DependencyNone},
+	"EFFECTIVE_TIME_SNAPSHOT_INVALID":          {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_SNAPSHOT_STATUS_INVALID":   {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_SNAPSHOT_UNAVAILABLE":      {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_SCHEMA_UNSUPPORTED":        {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_CALENDARS_MISSING":         {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_CALENDAR_MISSING":          {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_CALENDAR_NOT_PRESENT":      {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_CALENDAR_IDENTITY_INVALID": {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_CALENDAR_DUPLICATE":        {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_CALENDAR_ITEMS_MISSING":    {StageConfig, ClassConfig, DependencyControlSource},
+	// A terminal this build cannot classify. Config's stage, because it is a
+	// definition this build refused; the compiler's own code travels with the
+	// disposition for the reader who has to find out which part.
+	"COMPILER_TERMINAL_UNCLASSIFIED": {StageConfig, ClassConfig, DependencyNone},
 
 	// The definition cannot be evaluated as written.
 	"ALGORITHM_UNSUPPORTED":                 {StageConfig, ClassConfig, DependencyNone},
@@ -341,6 +360,7 @@ var failureFacets = map[string]facets{
 	// to be classified, not because either blocks the strategy -- its
 	// thresholds are detected either way.
 	"NO_DATA_CONFIG_INVALID":              {StageConfig, ClassConfig, DependencyNone},
+	"NO_DATA_PLAN_UNCOMPILABLE":           {StageConfig, ClassConfig, DependencyNone},
 	"NO_DATA_ROSTER_UNSUPPORTED":          {StageConfig, ClassConfig, DependencyNone},
 	"PROJECTION_INVALID":                  {StageConfig, ClassConfig, DependencyNone},
 	"PLAN_SET_CONFLICT":                   {StageConfig, ClassConfig, DependencyNone},

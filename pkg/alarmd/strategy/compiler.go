@@ -204,11 +204,14 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 			// that passes validation can still run the trigger window past a
 			// compiler limit.
 			//
-			// The reason is the config layer's, because this is the same setting
-			// failing a later check: enabled, but it produces no decision. The
-			// path keeps the no_data prefix to say which part of it.
+			// The code is this shape's own, not the config layer's. They are
+			// the same setting failing two different checks, but they leave the
+			// strategy in opposite states - one detects its thresholds and the
+			// other detects nothing - and a reader downstream has only the code
+			// to tell them apart. The path keeps the no_data prefix to say
+			// which part of the definition it was.
 			return CompileResult{planTerminal: &Terminal{
-				ReasonCode: contract.ReasonNoDataConfigInvalid,
+				ReasonCode: contract.ReasonNoDataPlanUncompilable,
 				FieldPath:  "no_data." + terminal.FieldPath,
 			}}, nil
 		default:
@@ -239,11 +242,11 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 		}
 		var config triggerPlanConfigV1
 		if json.Unmarshal(raw.TriggerPlan.Config, &config) != nil {
-			return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_INVALID", FieldPath: "strategy_ir.levels.trigger_plan"}}, nil
+			return CompileResult{planTerminal: &Terminal{ReasonCode: ReasonEffectiveTimeInvalid, FieldPath: "strategy_ir.levels.trigger_plan"}}, nil
 		}
 		requirement, err := compileEffectiveTimeRequirement(config.Uptime, config.TimezoneRef)
 		if err != nil {
-			return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_INVALID", FieldPath: "strategy_ir.levels.trigger_plan.uptime"}}, nil
+			return CompileResult{planTerminal: &Terminal{ReasonCode: ReasonEffectiveTimeInvalid, FieldPath: "strategy_ir.levels.trigger_plan.uptime"}}, nil
 		}
 		compiled.noDataLevel.effectiveTime = requirement
 	}
@@ -256,7 +259,7 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 			requirement := level.effectiveTime
 			for _, id := range append(requirement.ActiveCalendarIDs(), requirement.InactiveCalendarIDs()...) {
 				if _, exists := compiled.effectiveRules.calendars[id]; !exists {
-					return CompileResult{planTerminal: &Terminal{ReasonCode: "EFFECTIVE_TIME_CALENDAR_MISSING", FieldPath: "effective_time_snapshot.calendars"}}, nil
+					return CompileResult{planTerminal: &Terminal{ReasonCode: ReasonEffectiveTimeCalendarMissing, FieldPath: "effective_time_snapshot.calendars"}}, nil
 				}
 			}
 		}

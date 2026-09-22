@@ -667,9 +667,41 @@ var codeChecks = map[string]verdict{
 	// first-screen line.
 	"NO_DATA_CONFIG_INVALID":     isNormal,
 	"NO_DATA_ROSTER_UNSUPPORTED": isNormal,
+	// The shape the config layer cannot see: a no-data setting that passes
+	// validation and then runs its trigger window past a compile limit refuses
+	// the whole definition. A reader met by this has a strategy that detects
+	// nothing, which is the line above rather than the one beside it. A reading
+	// keyed by code alone cannot tell two states apart under one code, which is
+	// why this shape has its own.
+	"NO_DATA_PLAN_UNCOMPILABLE": lands(CheckPlanUnevaluable),
 	// The definition's input projection, not this deployment's state
 	// projection: the compiler emits it for a plan whose input_projection is
 	// invalid, and the catalog files it as CONFIG_REJECTED beside PLAN_INVALID.
+	// The Plan's effective time. The definition names a window or a calendar
+	// the compiler cannot turn into a rule, so the strategy detects nothing
+	// until it is fixed - the same line as any other definition that cannot be
+	// evaluated. The two that are not the definition's fault are below.
+	"EFFECTIVE_TIME_INVALID":                   lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_SNAPSHOT_INVALID":          lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_SNAPSHOT_STATUS_INVALID":   lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_CALENDAR_IDENTITY_INVALID": lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_CALENDAR_DUPLICATE":        lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_CALENDAR_ITEMS_MISSING":    lands(CheckPlanUnevaluable),
+	// This build cannot read the snapshot's schema: a newer writer, and
+	// nothing in the definition or the deployment to change.
+	"EFFECTIVE_TIME_SCHEMA_UNSUPPORTED": lands(CheckPlanUnevaluable),
+	// The snapshot did not arrive, or arrived without the calendar the
+	// strategy names. The definition is not wrong and this build is not
+	// lacking anything; a piece of the source is missing, and the strategy
+	// detects nothing until it comes.
+	"EFFECTIVE_TIME_SNAPSHOT_UNAVAILABLE": lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_CALENDARS_MISSING":    lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_CALENDAR_NOT_PRESENT": lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_CALENDAR_MISSING":     lands(CheckPlanUnevaluable),
+	// A terminal this build's table has no entry for. It is one strategy's
+	// refusal like any other, and the compiler's own code travels in the
+	// disposition's detail so the next reader is not guessing.
+	"COMPILER_TERMINAL_UNCLASSIFIED":      lands(CheckPlanUnevaluable),
 	"PROJECTION_INVALID":                  lands(CheckPlanUnevaluable),
 	"PLAN_SET_CONFLICT":                   lands(CheckPlanUnevaluable),
 	"LEVEL_INVALID":                       lands(CheckPlanUnevaluable),

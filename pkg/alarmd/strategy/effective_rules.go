@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	"time"
 
@@ -59,26 +58,81 @@ type compiledEffectiveRules struct {
 	bytes     int
 }
 
+// The reasons compileEffectiveRules refuses a snapshot with. The codes live in
+// the contract's reason catalogue with every other code a reader can meet; a
+// code that exists only here is one the catalog cannot classify and the page
+// cannot name.
+const (
+	ReasonEffectiveTimeSnapshotInvalid       = contract.ReasonEffectiveTimeSnapshotInvalid
+	ReasonEffectiveTimeSchemaUnsupported     = contract.ReasonEffectiveTimeSchemaUnsupported
+	ReasonEffectiveTimeSnapshotUnavailable   = contract.ReasonEffectiveTimeSnapshotUnavailable
+	ReasonEffectiveTimeSnapshotStatusInvalid = contract.ReasonEffectiveTimeSnapshotStatusInvalid
+	ReasonEffectiveTimeCalendarsMissing      = contract.ReasonEffectiveTimeCalendarsMissing
+	ReasonEffectiveTimeCalendarIdentity      = contract.ReasonEffectiveTimeCalendarIdentity
+	ReasonEffectiveTimeCalendarDuplicate     = contract.ReasonEffectiveTimeCalendarDuplicate
+	ReasonEffectiveTimeCalendarNotPresent    = contract.ReasonEffectiveTimeCalendarNotPresent
+	ReasonEffectiveTimeCalendarItemsMissing  = contract.ReasonEffectiveTimeCalendarItemsMissing
+	ReasonEffectiveTimeInvalid               = contract.ReasonEffectiveTimeInvalid
+	ReasonEffectiveTimeCalendarMissing       = contract.ReasonEffectiveTimeCalendarMissing
+)
+
+// EffectiveTimeTerminalReasons is every reason this compiler refuses a Plan
+// for over its effective time.
+func EffectiveTimeTerminalReasons() []string {
+	return []string{
+		ReasonEffectiveTimeSnapshotInvalid, ReasonEffectiveTimeSchemaUnsupported,
+		ReasonEffectiveTimeSnapshotUnavailable, ReasonEffectiveTimeSnapshotStatusInvalid,
+		ReasonEffectiveTimeCalendarsMissing, ReasonEffectiveTimeCalendarIdentity,
+		ReasonEffectiveTimeCalendarDuplicate, ReasonEffectiveTimeCalendarNotPresent,
+		ReasonEffectiveTimeCalendarItemsMissing, ReasonEffectiveTimeInvalid,
+		ReasonEffectiveTimeCalendarMissing,
+	}
+}
+
+// CompilerTerminalReasons is every reason this compiler can end a compile on,
+// in any scope.
+//
+// It exists to be walked. The table that classifies these for the catalog is
+// checked by a test over the reason catalogue, and that test skips a code it
+// finds unclassified - it holds the classified codes consistent with each
+// other and cannot go red because one is missing, which is how a deployment
+// came to meet the missing one first. A list the compiler owns, asserted to be
+// classified in full, is the guard that reaches the case this one did not.
+func CompilerTerminalReasons() []string {
+	return append([]string{
+		contract.ReasonAlgorithmUnsupported, contract.ReasonLevelBudgetExceeded,
+		contract.ReasonLevelInvalid,
+		contract.ReasonPlanBudgetExceeded, contract.ReasonPlanDuplicateLevelID,
+		contract.ReasonPlanInvalid, contract.ReasonProjectionInvalid,
+		contract.ReasonNoDataPlanUncompilable,
+	}, EffectiveTimeTerminalReasons()...)
+}
+
 func compileEffectiveRules(raw json.RawMessage, tenant string) (*compiledEffectiveRules, error) {
 	if len(raw) == 0 {
 		return nil, nil
 	}
 	var snapshot effectiveSnapshot
 	if err := json.Unmarshal(raw, &snapshot); err != nil {
-		return nil, errors.New("EFFECTIVE_TIME_SNAPSHOT_INVALID")
+		return nil, errors.New(ReasonEffectiveTimeSnapshotInvalid)
 	}
 	if snapshot.SchemaVersion != 1 {
-		return nil, errors.New("EFFECTIVE_TIME_SCHEMA_UNSUPPORTED")
+		return nil, errors.New(ReasonEffectiveTimeSchemaUnsupported)
 	}
 	switch snapshot.Status {
 	case "READY":
 	case "INVALID", "UNAVAILABLE":
-		return nil, fmt.Errorf("EFFECTIVE_TIME_SNAPSHOT_%s", snapshot.Status)
+		// Both of the snapshot's own failure states map to one reason: the
+		// difference between a snapshot the source could not build and one it
+		// built wrong is not something this Plan can act on, and a code built
+		// by interpolation is a code nothing downstream can be written
+		// against.
+		return nil, errors.New(ReasonEffectiveTimeSnapshotUnavailable)
 	default:
-		return nil, errors.New("EFFECTIVE_TIME_SNAPSHOT_STATUS_INVALID")
+		return nil, errors.New(ReasonEffectiveTimeSnapshotStatusInvalid)
 	}
 	if snapshot.Calendars == nil {
-		return nil, errors.New("EFFECTIVE_TIME_CALENDARS_MISSING")
+		return nil, errors.New(ReasonEffectiveTimeCalendarsMissing)
 	}
 	location, err := ruleLocation(snapshot.BusinessTimezone)
 	if err != nil {
@@ -91,16 +145,16 @@ func compileEffectiveRules(raw json.RawMessage, tenant string) (*compiledEffecti
 	rules := &compiledEffectiveRules{location: location, calendars: make(map[int64][]compiledCalendarItem), digest: digest, bytes: len(raw) * 2}
 	for _, calendar := range snapshot.Calendars {
 		if calendar.ID <= 0 || calendar.TenantID != tenant {
-			return nil, errors.New("EFFECTIVE_TIME_CALENDAR_IDENTITY_INVALID")
+			return nil, errors.New(ReasonEffectiveTimeCalendarIdentity)
 		}
 		if _, exists := rules.calendars[calendar.ID]; exists {
-			return nil, errors.New("EFFECTIVE_TIME_CALENDAR_DUPLICATE")
+			return nil, errors.New(ReasonEffectiveTimeCalendarDuplicate)
 		}
 		if calendar.Status != "PRESENT" {
-			return nil, errors.New("EFFECTIVE_TIME_CALENDAR_NOT_PRESENT")
+			return nil, errors.New(ReasonEffectiveTimeCalendarNotPresent)
 		}
 		if calendar.Items == nil {
-			return nil, errors.New("EFFECTIVE_TIME_CALENDAR_ITEMS_MISSING")
+			return nil, errors.New(ReasonEffectiveTimeCalendarItemsMissing)
 		}
 		items := make([]compiledCalendarItem, 0, len(calendar.Items))
 		ids := make(map[int64]struct{}, len(calendar.Items))
