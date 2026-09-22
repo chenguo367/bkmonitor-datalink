@@ -1848,6 +1848,16 @@ func compiledPlanForTest(t testing.TB) *strategy.CompiledPlan {
 }
 
 func compiledPlanWithTriggerConfig(t testing.TB, triggerConfig json.RawMessage) *strategy.CompiledPlan {
+	return compiledPlanWith(t, triggerConfig, "50")
+}
+
+// compiledPlanWithDetectThreshold is the test Plan with another threshold:
+// the same state requirement and trigger, another detect fingerprint.
+func compiledPlanWithDetectThreshold(t testing.TB, threshold string) *strategy.CompiledPlan {
+	return compiledPlanWith(t, json.RawMessage(`{"window_size":30,"required_anomalies":5,"step_seconds":60}`), threshold)
+}
+
+func compiledPlanWith(t testing.TB, triggerConfig json.RawMessage, threshold string) *strategy.CompiledPlan {
 	if t != nil {
 		t.Helper()
 	}
@@ -1879,7 +1889,7 @@ func compiledPlanWithTriggerConfig(t testing.TB, triggerConfig json.RawMessage) 
 				Definition: contract.LevelDefinitionV2{LevelID: 5, Priority: 1}, Connector: contract.LevelConnectorAND,
 				DetectPlan: contract.DetectPlanV2{Algorithms: []contract.AlgorithmIRV2{{
 					Type: "Threshold", Version: 1,
-					Config: json.RawMessage(`{"value_field":"value","data_unit":"percent","threshold_unit_prefix":"","precision":{"decimal_places":6,"rounding":"HALF_EVEN"},"groups":[{"conditions":[{"operator":"GTE","threshold_decimal":"50"}]}]}`),
+					Config: json.RawMessage(`{"value_field":"value","data_unit":"percent","threshold_unit_prefix":"","precision":{"decimal_places":6,"rounding":"HALF_EVEN"},"groups":[{"conditions":[{"operator":"GTE","threshold_decimal":"` + threshold + `"}]}]}`),
 				}}},
 				TriggerPlan:  contract.TypedPlanV1{Type: "N_OF_M", Version: 1, Config: triggerConfig},
 				RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1, Config: json.RawMessage(`{"enabled":true,"consecutive_windows":1}`)},

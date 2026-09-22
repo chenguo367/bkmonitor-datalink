@@ -14,6 +14,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 // RetainedPeakCensusMaxGroups bounds the census. It is far above any
@@ -83,7 +85,11 @@ func (c *RetainedPeakCensus) Observe(ctx context.Context, o Observation) {
 	switch o.Stage {
 	case StageSlotCompleted, StageEvaluationCompleted, StageStatePreflight, StageStateApplied:
 	case StageResourceHard:
-		if o.Component != ComponentResource || o.CapacityBudget != CapacityBudgetRetainedBytes {
+		// The two refusals of the retained-byte pool the summary counts
+		// (addRetainedStop): the pool full and this object over its share.
+		// A Slot refused for its own size is not a reading of the pool.
+		if o.Component != ComponentResource || o.CapacityBudget != CapacityBudgetRetainedBytes ||
+			(string(o.ReasonCode) != contract.ReasonResourceHardStop && string(o.ReasonCode) != contract.ReasonQGBudgetShareExceeded) {
 			return
 		}
 	default:
@@ -105,15 +111,7 @@ func (c *RetainedPeakCensus) Observe(ctx context.Context, o Observation) {
 		g = &censusGroup{epoch: epoch}
 		c.groups[key] = g
 	}
-	if g.epoch != epoch {
-		if g.epoch+1 == epoch {
-			g.previous = g.current
-		} else {
-			g.previous = censusWindow{}
-		}
-		g.current = censusWindow{}
-		g.epoch = epoch
-	}
+	g.rotate(epoch)
 	w := &g.current
 	switch o.Stage {
 	case StageSlotCompleted:
@@ -133,17 +131,40 @@ func (c *RetainedPeakCensus) Observe(ctx context.Context, o Observation) {
 	}
 }
 
+// rotate brings the group's windows to epoch: the window just past becomes
+// the previous one, anything older is gone. The summary rotates every group
+// on Publish; the census rotates a group when it is observed and when it is
+// read, which comes to the same thing - a group that stopped completing
+// Slots ages out of its two windows on the read rather than never.
+func (g *censusGroup) rotate(epoch int64) {
+	if g.epoch == epoch {
+		return
+	}
+	if g.epoch+1 == epoch {
+		g.previous = g.current
+	} else {
+		g.previous = censusWindow{}
+	}
+	g.current = censusWindow{}
+	g.epoch = epoch
+}
+
 // RetainedPeaks is every Query Group's reading, in key order: the larger of
 // the two windows' peaks and the sum of their walls, as the summary reads
-// them. A Query Group with neither a peak nor any wall is not a reading.
+// them, over the two windows ending now. A Query Group with neither a peak
+// nor any wall in them is not a reading: one that stopped completing Slots
+// two windows ago reports nothing, as it would from the summary, rather than
+// the last thing it did for as long as it is owned.
 func (c *RetainedPeakCensus) RetainedPeaks() []CostRetainedPeak {
 	if c == nil {
 		return nil
 	}
+	epoch := c.now().UnixNano() / int64(c.window)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	peaks := make([]CostRetainedPeak, 0, len(c.groups))
 	for key, g := range c.groups {
+		g.rotate(epoch)
 		reading := CostRetainedPeak{QueryGroupKey: key,
 			RetainedBytesPeak:  max(g.current.retainedBytesPeak, g.previous.retainedBytesPeak),
 			ComputeWallNS:      g.current.computeWallNS + g.previous.computeWallNS,
