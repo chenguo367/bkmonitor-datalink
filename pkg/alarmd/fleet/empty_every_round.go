@@ -87,15 +87,22 @@ var EmptyEveryRoundCauses = []string{EmptyEveryRoundCauseUnknown}
 // object is forty-five seconds, and three rounds lost to a restart is a blip
 // the run should survive -- the object was completing empty either side of it.
 //
-// A stride is only known once two empty rounds have been watched. Until then
-// the clock is the only measure there is, which is the right answer for the
-// case that has no cadence to compare against: a run restored from a record,
-// its start dated a day ago, resuming here.
-func emptyRunHole(gap, stride int64, window time.Duration) bool {
+// With no cadence yet there is nothing to compare against, and the question
+// becomes which run this is. A run this process watched from its first round
+// has no hole behind it by construction, however long its rounds are apart --
+// that is the slow object, and judging it against the clock is what took it
+// off the line for good. A run restored from a record has everything behind
+// it unwatched, and its inherited start is exactly the one this predicate
+// exists to refuse. So: inherited, a long first gap is a hole; watched, it is
+// the object's pace being learned.
+func emptyRunHole(gap, stride int64, inherited bool, window time.Duration) bool {
 	if gap <= int64(window/time.Second) {
 		return false
 	}
-	return stride <= 0 || gap > stride*emptyRunStrideStall
+	if stride <= 0 {
+		return inherited
+	}
+	return gap > stride*emptyRunStrideStall
 }
 
 // countEmptyEveryRound is the distinct objects of KindEmptyEveryRound in the

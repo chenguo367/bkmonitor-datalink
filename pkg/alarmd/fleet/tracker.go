@@ -248,14 +248,14 @@ type queryGroupState struct {
 	lastEmptySlot  int64
 	emptySinceFrom SinceSource
 	emptySlotFrom  SinceSource
-	// emptyStride is the Slot distance between the two latest empty rounds:
-	// this object's own cadence, learned from its own rounds rather than
-	// declared anywhere. A hole in the evidence is measured against it,
-	// because a stretch that is long by the clock is not long for an object
-	// whose next round was never due until then. Zero until two empty rounds
-	// have been watched, and after a hole it is the hole -- which only makes
-	// the next round less likely to be read as one, and one round later it is
-	// the object's cadence again.
+	// emptyStride is the longest Slot distance between two empty rounds this
+	// run has accepted: the object's own cadence, learned from its own rounds
+	// rather than declared anywhere. A hole in the evidence is measured
+	// against it, because a stretch that is long by the clock is not long for
+	// an object whose next round was never due until then. It rises and does
+	// not fall inside a run, so that a round arriving far sooner than the
+	// pace cannot make the next ordinary one look like a hole; a hole clears
+	// it along with the run's start, because a hole is not a pace.
 	emptyStride int64
 	// lastDataSlot is the Slot records were last seen at, on the source's
 	// clock: the other end of the data side's hour. Zero until a round with
@@ -1228,12 +1228,41 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			// Nothing here says otherwise -- the hour is a threshold, not a
 			// period -- and a predicate that goes silent exactly at its own
 			// constant is measuring the wrong thing.
+			//
+			// The cadence rises with the longest gap the run has accepted and
+			// does not fall inside it. A draft that let every gap set the
+			// cadence let one round arriving early decide it: a catch-up, a
+			// retry, a burst after a restart is a gap nothing like the pace,
+			// and the ordinary round after it then read as a hole. The row
+			// stayed on the page with a Since later than the truth -- not a
+			// missing reading but a smaller one in its place, which looks as
+			// credible as the right one. Letting it fall halfway instead
+			// survives one such round and not two in a row, which is a
+			// restart burst; rising only is the shape with no such edge.
+			// What it costs is the other direction: a run that has already
+			// accepted one near-hour gap holds a higher bar for the rest of
+			// the run, so a later stall shorter than three of that gap is not
+			// called one. The row is then listed from its earlier start --
+			// which is what SinceIsLowerBound on this row already says it is.
+			//
+			// Measured from the latest empty round and from nothing else. A
+			// record that carries the run's start without a round summary
+			// leaves no second point, and the distance from a run's start is
+			// not a gap in its evidence -- an object empty for ninety minutes
+			// at fifteen seconds a round has a start ninety minutes back and
+			// no hole anywhere. Judging that distance took such a record off
+			// its own restored start, which the test for it caught.
 			if state.lastEmptySlot != 0 {
 				gap := trace.EvaluationTime - state.lastEmptySlot
-				if emptyRunHole(gap, state.emptyStride, tracker.emptyEveryRoundAfter) {
-					state.emptySinceSlot = 0
+				switch {
+				case emptyRunHole(gap, state.emptyStride, state.emptySlotFrom == SinceRestoredEmptyRun, tracker.emptyEveryRoundAfter):
+					// The run starts again here, and so does the cadence:
+					// the hole is not a pace, and seeding the cadence with
+					// it would raise the bar for the whole run that follows.
+					state.emptySinceSlot, state.emptyStride = 0, 0
+				case gap > state.emptyStride:
+					state.emptyStride = gap
 				}
-				state.emptyStride = gap
 			}
 			if state.emptySinceSlot == 0 {
 				state.emptySinceSlot = trace.EvaluationTime
