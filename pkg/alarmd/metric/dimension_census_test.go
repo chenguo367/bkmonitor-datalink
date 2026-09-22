@@ -111,3 +111,91 @@ func TestACensusWithNoSourceOrOutcomeIsCountedUnderTheNamedUnknown(t *testing.T)
 			"label, not create one", len(before), len(after))
 	}
 }
+
+// Every split outcome and every round disposition has a series before
+// anything is observed.
+//
+// Pinned rather than left to the pre-creation loops still being there. The
+// whole reading of this family rests on them: UNDER_SHARE carrying a value
+// means the round looked and found nothing to split, while the family being
+// empty means no round looked at all - and with the loops gone the second
+// state renders as the first. Deleting either loop left the whole library
+// green before this existed.
+func TestEverySplitOutcomeAndRoundDispositionIsPreCreated(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	for family, want := range map[string]int{
+		"bkmonitor_alarmd_split_plan_total":          len(observability.SplitOutcomes()),
+		"bkmonitor_alarmd_split_round_objects_total": len(splitRoundDispositions),
+	} {
+		series := gatherFamily(t, r, family)
+		if len(series) != want {
+			t.Fatalf("%s pre-created %d series, want %d: a zero is only a reading when the series exists "+
+				"before anything writes it", family, len(series), want)
+		}
+		for _, metric := range series {
+			if got := metric.GetCounter().GetValue(); got != 0 {
+				t.Fatalf("%s pre-created a series at %v, want zero", family, got)
+			}
+		}
+	}
+}
+
+// A round's counts and an object's decision are two families, and one does
+// not move the other.
+//
+// The round's three used to ride out on the object's structure, in a field
+// meaning "how many Plans share this object's bytes". One field, two
+// subjects: a reader filtering it for soft estimates caught the round's line
+// and read the fleet's skipped count as one Plan's group size, and the round
+// hitting its bound landed in the same bucket as an object missing a number.
+func TestARoundsCountsAndAnObjectsDecisionAreCountedApart(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	ctx := context.Background()
+
+	r.Observe(ctx, observability.Observation{
+		Component: observability.ComponentControlPlane, Stage: observability.StageSplitPlanned,
+		Result:     observability.ResultDegraded,
+		SplitRound: &observability.SplitRoundFacts{OverShare: 13, Examined: 8, Skipped: 5},
+	})
+
+	for disposition, want := range map[string]float64{"over_share": 13, "examined": 8, "skipped": 5} {
+		got := testutil.ToFloat64(r.phaseTwo.splitRoundObjects.WithLabelValues(disposition))
+		if got != want {
+			t.Fatalf("round %s = %v, want %v", disposition, got, want)
+		}
+	}
+	for _, outcome := range observability.SplitOutcomes() {
+		if got := testutil.ToFloat64(r.phaseTwo.splitPlans.WithLabelValues(outcome)); got != 0 {
+			t.Fatalf("a round's counts moved the object outcome %q to %v", outcome, got)
+		}
+	}
+}
+
+// A decision this build cannot name is counted under a word of its own, not
+// folded into the one for a missing number.
+//
+// They have different owners and different answers: a missing number is a
+// state of the deployment - a pool not reported, a census not written - and
+// something an operator can go and look at, while an unrecognised outcome is
+// a defect in this build that only a change of code fixes. Folded together, a
+// counter that should send someone to the source reads like one more
+// environmental condition.
+func TestAnUnrecognisedOutcomeIsCountedApartFromAMissingNumber(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+
+	r.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentControlPlane, Stage: observability.StageSplitPlanned,
+		Result:    observability.ResultSuccess,
+		SplitPlan: &observability.SplitPlanFacts{Outcome: "INVENTED", DryRun: true},
+	})
+
+	if got := testutil.ToFloat64(r.phaseTwo.splitPlans.WithLabelValues(
+		observability.SplitOutcomeUnrecognised)); got != 1 {
+		t.Fatalf("%s = %v, want 1", observability.SplitOutcomeUnrecognised, got)
+	}
+	if got := testutil.ToFloat64(r.phaseTwo.splitPlans.WithLabelValues(
+		observability.SplitOutcomeNoReading)); got != 0 {
+		t.Fatalf("an unrecognised outcome was counted as a missing number (%v): the first is this build's "+
+			"defect and the second is the deployment's state", got)
+	}
+}

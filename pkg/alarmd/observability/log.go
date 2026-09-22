@@ -814,6 +814,43 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if len(observation.LevelOutcomes) > 0 {
 		attributes = append(attributes, slog.Any("level_outcomes", observation.LevelOutcomes))
 	}
+	if facts := observation.SplitPlan; facts != nil {
+		// The decision and every reading it was judged from. "This object was
+		// not split" is the same line for an object under its share and one
+		// whose heaviest value cannot be divided, and those call for opposite
+		// answers, so the numbers travel with the word.
+		attributes = append(attributes,
+			slog.String("split_outcome", facts.Outcome),
+			slog.Uint64("split_peak_bytes", facts.PeakBytes),
+			slog.Uint64("split_share_bytes", facts.ShareBytes),
+			slog.Int("split_shards", facts.Shards),
+			slog.Int("split_carrying_shards", facts.Carrying),
+			slog.Bool("split_shards_capped", facts.ShardsCapped),
+			slog.String("split_dimension", facts.Dimension),
+			slog.Int("split_dimension_candidates", facts.Candidates),
+			slog.Uint64("split_series", uint64(facts.Series)),
+			slog.Int64("split_census_age_seconds", facts.CensusAgeSeconds),
+			slog.String("split_census_source", facts.CensusSource),
+			slog.Uint64("split_heaviest_value_series", uint64(facts.HeaviestValueSeries)),
+			slog.Uint64("split_target_series", uint64(facts.TargetSeries)),
+			slog.Uint64("split_tail_series", uint64(facts.TailSeries)),
+			slog.Int("split_skew_percent", facts.SkewPercent),
+			slog.Uint64("split_largest_shard_series", uint64(facts.LargestShardSeries)),
+			slog.Uint64("split_smallest_shard_series", uint64(facts.SmallestShardSeries)),
+			slog.Int("split_plans_in_group", facts.PlansInGroup),
+			slog.Bool("split_dry_run", facts.DryRun),
+		)
+	}
+	if facts := observation.SplitRound; facts != nil {
+		// The round's own three, with their denominator: skipped alone
+		// cannot say whether a zero means nothing was left out or nothing
+		// was looked at.
+		attributes = append(attributes,
+			slog.Int("split_round_over_share", facts.OverShare),
+			slog.Int("split_round_examined", facts.Examined),
+			slog.Int("split_round_skipped", facts.Skipped),
+		)
+	}
 	if facts := observation.DimensionCensus; facts != nil {
 		// The gate's two numbers go out with the census itself: a census that
 		// appears, or stops appearing, is a candidate decision, and the

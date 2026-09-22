@@ -18,41 +18,51 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
-// CensusCandidateSharePercent is how much of this worker's retained-byte pool
-// one Query Group's per-Slot peak has to reach for its Plans to be worth
-// taking a census of.
-//
-// It is the split trigger of decision-020 section 4.7.4 read on the worker:
-// that trigger is "a Query Group whose peak passes the pool's per-object
-// share", and the per-object share is half the pool (decision-019). Both
-// numbers are the worker's own - its pool, and the peak the retained-peak
-// census already keeps per Query Group - so the gate needs no control-plane
-// field, no publication path, and nobody has to tell a worker that it is a
-// candidate.
-//
-// The cost of being local is that it reads only this replica's two windows.
-// That is the same reading the Leader plans placement from (section 5.7), so
-// the two cannot disagree about which objects are heavy; what it cannot see
-// is an object that is heavy only on another replica, which is an object
-// that replica is taking the census of.
-const CensusCandidateSharePercent = 50
-
 // censusCandidate says whether this Slot's Query Group is heavy enough to be
-// worth a census, and returns the share it was judged against so the line can
-// be read afterwards.
+// worth a census: its last Slot here retained at least the share a single
+// object may hold of this worker's pool.
 //
-// A share of zero is not a share every Query Group clears, it is no reading:
-// a worker with no pool figure has not been told what its pool is, and one
-// whose pool is too small to have a share would otherwise admit every Slot on
-// the replica. Both are the same answer and they are decided in one place, so
-// that place is load-bearing rather than shadowed by a second test of the
-// same thing.
-func censusCandidate(peakBytes, poolBytes uint64) (bool, uint64) {
-	share := poolBytes / 100 * CensusCandidateSharePercent
-	if share == 0 {
+// That share is the worker's own qgShareBytes - the number it already refuses
+// a Slot by, with ReasonQGBudgetShareExceeded - and it is passed in rather
+// than derived here. It is one relation, so it gets one derivation: the split
+// trigger of decision-020 section 4.7.4 is "a Query Group whose peak passes
+// the per-object share", and a second copy of that share here would agree
+// with the enforced one until somebody changed one of them, with nothing to
+// fail in between. An earlier version of this gate recomputed it as a
+// percentage of the pool; the two even disagreed at the edges, because the
+// percentage truncates the pool to a multiple of a hundred first.
+//
+// Both numbers are the worker's own - its pool, and the peak it keeps per
+// Query Group - so the gate needs no control-plane field, no publication
+// path, and nobody has to tell a worker that it is a candidate. The cost of
+// being local is that it reads only this replica: what it cannot see is an
+// object that is heavy only on another replica, which is an object that
+// replica is taking the census of.
+//
+// A share of zero is not a share every Query Group clears, it is no reading -
+// a worker that has not been told what its pool is judges nothing.
+func censusCandidate(peakBytes, shareBytes uint64) (bool, uint64) {
+	if shareBytes == 0 {
 		return false, 0
 	}
-	return peakBytes >= share, share
+	return peakBytes >= shareBytes, shareBytes
+}
+
+// openCensusGate decides once for the Slot whether this Query Group's Plans
+// are worth a dimension census, and keeps the two numbers it decided on.
+//
+// Decided at Begin from what this Query Group's LAST Slot held, because a
+// census has to be counted while the series go past and what this Slot will
+// hold is only known once it has held it.
+//
+// It is a step of its own rather than three lines inside Begin so that the
+// decision has somewhere to be tested. The gate used to be fed a second
+// derivation of the share, and no test could reach the line that fed it.
+func (stream *streamedExecution) openCensusGate(queryGroup execution.QueryGroupIdentity) {
+	stream.censusPeakBytes = stream.coordinator.censusPeaks.read(queryGroup)
+	stream.censusCandidate, stream.censusShareBytes = censusCandidate(
+		stream.censusPeakBytes, stream.coordinator.qgShareBytes(),
+	)
 }
 
 // censusBuilders are this Slot's censuses in progress, one per candidate
