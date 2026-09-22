@@ -35,6 +35,7 @@ type StrategyLine struct {
 	// LastGoodAt the latest healthy completion any of them had.
 	Since      *time.Time  `json:"since,omitempty"`
 	SinceFrom  SinceSource `json:"since_from,omitempty"`
+	SinceBasis SinceBasis  `json:"since_basis,omitempty"`
 	LastGoodAt *time.Time  `json:"last_good_at,omitempty"`
 	// DecidingObject is the object whose standing this is: the coordinate
 	// a reader opens.
@@ -47,8 +48,18 @@ type StrategyLine struct {
 
 // StrategyListResponse is GET /api/strategies.
 type StrategyListResponse struct {
+	// Words travels on every response, beside the lines it renders, and
+	// not from an endpoint of its own: the vocabulary and the data it
+	// words must arrive together. Served separately, a page could hold
+	// last release's table against this release's lines, and a word the
+	// release added would render blank or as its code -- the very thing
+	// keeping the words out of the page exists to prevent. Its size is
+	// not the argument either way.
 	Words      Words          `json:"words"`
 	Strategies []StrategyLine `json:"strategies"`
+	// Summary is over every line before the filter: how many strategies
+	// each word holds, and the one line to act on first.
+	Summary StrategySummary `json:"summary"`
 	// Total is how many strategies have a standing to list after the
 	// filter, Listed how many this page holds, Truncated whether Total
 	// exceeded the limit.
@@ -58,6 +69,40 @@ type StrategyListResponse struct {
 	// State and Action echo the filter the list was asked with.
 	State  StateWord  `json:"state,omitempty"`
 	Action ActionWord `json:"action,omitempty"`
+}
+
+// StrategySummary is the first screen's arithmetic over the lines: how
+// many strategies stand under each word, and which line to act on first --
+// the most severe line whose action asks somebody to act. Decided here so
+// the page's first sentence is the server's.
+type StrategySummary struct {
+	Strategies int                `json:"strategies"`
+	ByAction   map[ActionWord]int `json:"by_action"`
+	ByState    map[StateWord]int  `json:"by_state"`
+	Lead       *StrategyLine      `json:"lead,omitempty"`
+}
+
+// SummarizeStrategyLines counts the lines by word and picks the lead: the
+// first line, in severity order, whose action is a hand -- not a wait, not
+// nothing to do.
+func SummarizeStrategyLines(lines []StrategyLine) StrategySummary {
+	summary := StrategySummary{Strategies: len(lines), ByAction: map[ActionWord]int{}, ByState: map[StateWord]int{}}
+	for _, word := range ActionWords {
+		summary.ByAction[word] = 0
+	}
+	for _, word := range StateWords {
+		summary.ByState[word] = 0
+	}
+	for i := range lines {
+		line := lines[i]
+		summary.ByAction[line.Standing.Action]++
+		summary.ByState[line.Standing.State]++
+		if summary.Lead == nil && line.Standing.Action != ActionWatch && line.Standing.Action != ActionNone {
+			lead := line
+			summary.Lead = &lead
+		}
+	}
+	return summary
 }
 
 // MaxStrategyLines bounds one page of the list.
@@ -88,7 +133,7 @@ func StrategyLines(view *View, now time.Time) []StrategyLine {
 			fold.objects[row.QueryGroup] = struct{}{}
 			if !row.Since.IsZero() && (fold.line.Since == nil || row.Since.Before(*fold.line.Since)) {
 				since := row.Since
-				fold.line.Since, fold.line.SinceFrom = &since, row.SinceFrom
+				fold.line.Since, fold.line.SinceFrom, fold.line.SinceBasis = &since, row.SinceFrom, sinceBasisOf(row.SinceFrom)
 			}
 			if !row.LastHealthyAt.IsZero() && (fold.line.LastGoodAt == nil || row.LastHealthyAt.After(*fold.line.LastGoodAt)) {
 				last := row.LastHealthyAt

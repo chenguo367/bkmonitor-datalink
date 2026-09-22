@@ -51,6 +51,9 @@ func TestAStrategyIsOneLineOverEveryObjectThatRunsIt(t *testing.T) {
 	if first.Standing.Check != CheckDependencyDown || first.Standing.State != StateDependencyUnanswered || first.Standing.Action != ActionServiceFix {
 		t.Fatalf("first standing = %+v, want the dependency's words: the more severe check decides", first.Standing)
 	}
+	if first.SinceBasis != SinceExact {
+		t.Fatalf("since basis = %s, want EXACT for a business-state onset", first.SinceBasis)
+	}
 	if first.Since == nil || !first.Since.Equal(now.Add(-2*time.Hour)) || first.LastGoodAt == nil || !first.LastGoodAt.Equal(now.Add(-90*time.Minute)) {
 		t.Fatalf("first clocks = since %v / last good %v, want the earliest onset and the latest healthy completion", first.Since, first.LastGoodAt)
 	}
@@ -61,6 +64,24 @@ func TestAStrategyIsOneLineOverEveryObjectThatRunsIt(t *testing.T) {
 	if second.StrategyID != "4102" || second.Objects != 1 || second.Standing.Action != ActionDataCheck ||
 		!strings.Contains(second.Line, "数据没到 · 数据负责人查 · 最差窗口 6/9，缺的 3 分钟查询都正常返回、序列不在结果里") {
 		t.Fatalf("second line = %+v", second)
+	}
+	// The summary counts every word, zeros included, and leads with the
+	// first line that asks somebody to act.
+	summary := SummarizeStrategyLines(lines)
+	if summary.Strategies != 2 || summary.ByAction[ActionServiceFix] != 1 || summary.ByAction[ActionDataCheck] != 1 || summary.ByAction[ActionNone] != 0 ||
+		summary.ByState[StateDependencyUnanswered] != 1 || summary.ByState[StateDataAbsent] != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+	if summary.Lead == nil || summary.Lead.StrategyID != "4101" {
+		t.Fatalf("lead = %+v, want the most severe line that asks for a hand", summary.Lead)
+	}
+	waiting := []StrategyLine{{StrategyID: "1", Standing: Standing{Action: ActionWatch}}, {StrategyID: "2", Standing: Standing{Action: ActionNone}},
+		{StrategyID: "3", Standing: Standing{Action: ActionStrategyEdit}}}
+	if lead := SummarizeStrategyLines(waiting).Lead; lead == nil || lead.StrategyID != "3" {
+		t.Fatalf("lead over waits = %+v, want the first line that asks for a hand, past the waits", lead)
+	}
+	if lead := SummarizeStrategyLines(waiting[:2]).Lead; lead != nil {
+		t.Fatalf("lead with nothing to do = %+v, want none", lead)
 	}
 	// The filter keeps only the words asked for.
 	if kept := FilterStrategyLines(lines, "", ActionDataCheck); len(kept) != 1 || kept[0].StrategyID != "4102" {
@@ -124,8 +145,11 @@ func TestTheStrategyListIsServedWithItsWords(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Words.State) != len(StateWords) || len(body.Words.Action) != len(ActionWords) {
+	if len(body.Words.State) != len(StateWords) || len(body.Words.Action) != len(ActionWords) || len(body.Words.Health) != 3 {
 		t.Fatalf("words = %+v, want the whole vocabulary on the response", body.Words)
+	}
+	if body.Summary.Strategies != 2 || body.Summary.Lead == nil {
+		t.Fatalf("summary = %+v, want the arithmetic over every line before the limit", body.Summary)
 	}
 	if body.Listed != 1 || body.Total != 2 || !body.Truncated {
 		t.Fatalf("listed/total/truncated = %d/%d/%v, want 1 of the 2 lines the row's two strategies make, and said so", body.Listed, body.Total, body.Truncated)
