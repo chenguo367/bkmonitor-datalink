@@ -80,7 +80,7 @@ func TestACensusValueIsOnlyWhatASplitCouldMatchOn(t *testing.T) {
 	}
 }
 
-func censusRecordView(t *testing.T, dimensions map[string]json.RawMessage) execution.RecordView {
+func censusDatasetView(t *testing.T, dimensions map[string]json.RawMessage) *execution.DatasetView {
 	t.Helper()
 	dataset := execution.NewDataset([]contract.CanonicalRecordV2{{
 		RecordID: "record", SourceTime: 600, BusinessID: "2", Dimensions: dimensions,
@@ -89,7 +89,12 @@ func censusRecordView(t *testing.T, dimensions map[string]json.RawMessage) execu
 	if err != nil {
 		t.Fatal(err)
 	}
-	record, ok := view.Record(0)
+	return view
+}
+
+func censusRecordView(t *testing.T, dimensions map[string]json.RawMessage) execution.RecordView {
+	t.Helper()
+	record, ok := censusDatasetView(t, dimensions).Record(0)
 	if !ok {
 		t.Fatal("the fixture dataset has no record")
 	}
@@ -269,5 +274,70 @@ func TestARefusedCensusIsReportedUnderItsOwnNameAndDoesNotStopTheSlot(t *testing
 	}
 	if event["census_bytes"] != float64(900000) || event["census_limit"] != float64(524288) {
 		t.Fatalf("the line does not say how far over the cap the census was: %#v", event)
+	}
+}
+
+// Which census a series lands in is decided from the series' kind, on the
+// path the Slot actually calls. Asserted here rather than by handing the
+// source in: a test that names the source itself proves the two builders are
+// kept apart and proves nothing about the one line that chooses between them,
+// and that line is the whole of what keeps a group that did not report out of
+// the distribution a split is cut from.
+func TestTheSeriesKindDecidesWhichCensusTheSeriesLandsIn(t *testing.T) {
+	store := &recordingCensusStore{}
+	var output bytes.Buffer
+	stream := censusStream(t, store, &output)
+	stream.censusCandidate = true
+	due := execution.DuePlan{Identity: censusTestIdentity().Plan, StateGeneration: "generation"}
+
+	count := func(kind execution.SeriesKind, value string) {
+		stream.countSeriesForCensus(due, []execution.SeriesEvaluationInputRequest{{
+			Kind: kind,
+			Inputs: []execution.NamedInputBinding{{
+				Role: execution.InputRolePrimary,
+				View: censusDatasetView(t, map[string]json.RawMessage{"ip": json.RawMessage(`"` + value + `"`)}),
+			}},
+		}})
+	}
+	count(execution.SeriesKindReal, "192.0.2.1")
+	count(execution.SeriesKindNoData, "192.0.2.9")
+
+	round, taken, err := stream.censuses.byPlan[due.Identity].Build(600)
+	if err != nil || !taken {
+		t.Fatalf("the round census = %v, %v, want a census", taken, err)
+	}
+	if round.Series != 1 || round.Dimensions[0].Values[0].Value != "192.0.2.1" {
+		t.Fatalf("the round census holds %+v, want only the series the round evaluated: a synthetic "+
+			"absence series exists because its group did NOT report, and counted here it would put a "+
+			"value carrying no series into the split's domain", round.Dimensions)
+	}
+	roster, taken, err := stream.censuses.rosterByPlan[due.Identity].Build(600)
+	if err != nil || !taken {
+		t.Fatalf("the roster census = %v, %v, want the absence series counted there", taken, err)
+	}
+	if roster.Series != 1 || roster.Dimensions[0].Values[0].Value != "192.0.2.9" {
+		t.Fatalf("the roster census holds %+v, want the absence series", roster.Dimensions)
+	}
+}
+
+// And a Slot whose Query Group is not a candidate counts nothing at all,
+// which is what keeps the census off the ordinary Slot.
+func TestASlotThatIsNotACandidateCountsNothing(t *testing.T) {
+	store := &recordingCensusStore{}
+	var output bytes.Buffer
+	stream := censusStream(t, store, &output)
+	due := execution.DuePlan{Identity: censusTestIdentity().Plan, StateGeneration: "generation"}
+
+	stream.countSeriesForCensus(due, []execution.SeriesEvaluationInputRequest{{
+		Kind: execution.SeriesKindReal,
+		Inputs: []execution.NamedInputBinding{{
+			Role: execution.InputRolePrimary,
+			View: censusDatasetView(t, map[string]json.RawMessage{"ip": json.RawMessage(`"192.0.2.1"`)}),
+		}},
+	}})
+
+	if len(stream.censuses.byPlan) != 0 || len(stream.censuses.rosterByPlan) != 0 {
+		t.Fatalf("a Slot that is not a candidate built %d round censuses and %d roster ones, want none",
+			len(stream.censuses.byPlan), len(stream.censuses.rosterByPlan))
 	}
 }
