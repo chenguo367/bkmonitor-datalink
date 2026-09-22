@@ -449,7 +449,8 @@ var codeChecks = map[string]verdict{
 	// receive, and the fix is the size of the read rather than the health of
 	// the store. Landing it with the dependencies is what made 163 of these in
 	// one day read as a Redis incident.
-	"STATE_READ_TIMEOUT": lands(CheckDefect),
+	"STATE_READ_TIMEOUT":  lands(CheckDefect),
+	"STATE_READ_DEADLINE": lands(CheckDefect),
 	// Not a defect and not a dependency: this strategy asks for more of one
 	// replica than any single object may hold, and the answer is to shard it.
 	"QG_BUDGET_SHARE_EXCEEDED": lands(CheckPlanUnevaluable),

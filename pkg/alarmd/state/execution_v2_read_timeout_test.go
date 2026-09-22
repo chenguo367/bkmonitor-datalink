@@ -33,19 +33,35 @@ var _ net.Error = timeoutError{}
 // every reader who followed the name went to a dependency that was fine, and
 // the row said nothing about the size of the read that actually failed.
 func TestAReadThatRanOutOfTimeIsNotTheDependencyBeingDown(t *testing.T) {
-	for name, err := range map[string]error{
-		"the client's own read timeout": timeoutError{},
-		"a deadline on the call":        context.DeadlineExceeded,
-		"a deadline on the socket":      os.ErrDeadlineExceeded,
-		"wrapped":                       errors.Join(errors.New("state: Redis MGET"), timeoutError{}),
+	// The property is that none of these is the dependency's word. Which of
+	// the two timeouts each one is comes next, and is the thing this case
+	// used to fold together: every shape got STATE_READ_TIMEOUT, so a
+	// deadline spent by the work above this read was indistinguishable from a
+	// reply too large for the connection to receive, and only the second has
+	// anything to do with read size.
+	for name, testCase := range map[string]struct {
+		err  error
+		want string
+	}{
+		"the client's own read timeout": {timeoutError{}, contract.ReasonStateReadTimeout},
+		"a deadline on the socket":      {os.ErrDeadlineExceeded, contract.ReasonStateReadTimeout},
+		"wrapped":                       {errors.Join(errors.New("state: Redis MGET"), timeoutError{}), contract.ReasonStateReadTimeout},
+		"a deadline on the call":        {context.DeadlineExceeded, contract.ReasonStateReadDeadline},
+		"the call was cancelled":        {context.Canceled, contract.ReasonStateReadDeadline},
+		// A context deadline that arrives wrapped in a net error marked
+		// Timeout: both predicates accept it, and the narrower one is asked
+		// first so it keeps its own word.
+		"a call deadline behind a net timeout": {errors.Join(timeoutError{}, context.DeadlineExceeded), contract.ReasonStateReadDeadline},
 	} {
-		view := runtimeLoadFailure(execution.RuntimeStateView{}, err)
+		view := runtimeLoadFailure(execution.RuntimeStateView{}, testCase.err)
 		if view.Status != execution.StateRetryableIO {
 			t.Fatalf("%s: status = %q, want a retryable read", name, view.Status)
 		}
-		if view.ReasonCode != execution.ReasonCode(contract.ReasonStateReadTimeout) {
-			t.Fatalf("%s: reason = %q, want %q; named after the dependency it sends the reader to a store "+
-				"that was answering everyone else", name, view.ReasonCode, contract.ReasonStateReadTimeout)
+		if view.ReasonCode == execution.ReasonCode(contract.ReasonRedisUnavailable) {
+			t.Fatalf("%s: named after the dependency; it sends the reader to a store that was answering everyone else", name)
+		}
+		if view.ReasonCode != execution.ReasonCode(testCase.want) {
+			t.Fatalf("%s: reason = %q, want %q", name, view.ReasonCode, testCase.want)
 		}
 	}
 

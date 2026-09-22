@@ -709,6 +709,12 @@ func runtimeLoadFailure(view execution.RuntimeStateView, err error) execution.Ru
 	switch {
 	case errors.As(err, &identityErr):
 		view.BlobRevision, view.Status, view.ReasonCode = 1, execution.StateDeterministicInvalid, execution.ReasonCode(contract.ReasonStateCorrupt)
+	case isCallDeadline(err):
+		// A deadline on the call, not the connection giving up: the time this
+		// read had was spent before or during it by the work above. Named
+		// apart from the connection's own timeout because the two are fixed
+		// in different places -- see the reason's own comment.
+		view.Status, view.ReasonCode = execution.StateRetryableIO, execution.ReasonCode(contract.ReasonStateReadDeadline)
 	case isReadTimeout(err):
 		view.Status, view.ReasonCode = execution.StateRetryableIO, execution.ReasonCode(contract.ReasonStateReadTimeout)
 	default:
@@ -721,6 +727,25 @@ func runtimeLoadFailure(view execution.RuntimeStateView, err error) execution.Ru
 // worker names a failed preflight with the same test the store classifies one
 // with rather than a second opinion about what a timeout looks like.
 func IsStateReadTimeout(err error) bool { return isReadTimeout(err) }
+
+// isCallDeadline reports whether a read ended because a deadline on the call
+// expired. It is checked before isReadTimeout, which accepts both shapes: a
+// context deadline surfaces as a net error marked Timeout on some paths, so
+// asking the narrower question first is what keeps the two words apart.
+//
+// A dial that timed out is excluded here for the same reason it is excluded
+// there: nothing was read, and the dependency being unreachable is its own
+// word.
+func isCallDeadline(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return false
+	}
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+}
 
 // isReadTimeout reports whether a read failed by running out of time rather
 // than by the dependency refusing or dropping it.
