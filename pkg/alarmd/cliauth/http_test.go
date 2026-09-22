@@ -214,6 +214,77 @@ func TestNewValidatesCoordinatesWithoutExposingSecrets(t *testing.T) {
 	}
 }
 
+func TestDeploymentURLUsesBrowserOrigin(t *testing.T) {
+	client := startRedis(t)
+	for _, tt := range []struct {
+		configured string
+		origin     string
+	}{
+		{"http://EXAMPLE.TEST:80/alarmd", "http://example.test"},
+		{"https://EXAMPLE.TEST:443/alarmd", "https://example.test"},
+		{"https://EXAMPLE.TEST/alarmd", "https://example.test"},
+		{"http://EXAMPLE.TEST:8080/alarmd", "http://example.test:8080"},
+		{"https://EXAMPLE.TEST:8443/alarmd", "https://example.test:8443"},
+		{"http://[2001:DB8::1]:80/alarmd", "http://[2001:db8::1]"},
+		{"https://[2001:DB8::1]:443/alarmd", "https://[2001:db8::1]"},
+		{"https://[2001:DB8::1]:8443/alarmd", "https://[2001:db8::1]:8443"},
+	} {
+		t.Run(tt.configured, func(t *testing.T) {
+			m, err := New(Options{Redis: client, Prefix: "origin-fixture", EnvironmentID: "origin-environment",
+				EnvironmentName: "Origin fixture", PublicBaseURL: tt.configured, IssuerKey: testIssuerKey})
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantURL := tt.origin + "/alarmd/"
+			if m.publicBaseURL != wantURL || m.origin != tt.origin {
+				t.Fatalf("deployment URL=%q origin=%q", m.publicBaseURL, m.origin)
+			}
+			w := authRequest(m, http.MethodGet, grantsPath, "", true)
+			var preview grantPreview
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &preview) != nil || preview.PublicBaseURL != wantURL {
+				t.Fatal("grant preview did not use the normalized URL")
+			}
+			crossScheme := strings.Replace(tt.origin, "http://", "https://", 1)
+			if strings.HasPrefix(tt.origin, "https://") {
+				crossScheme = strings.Replace(tt.origin, "https://", "http://", 1)
+			}
+			for _, origin := range []string{crossScheme, "http://evil.test", "https://evil.test", tt.origin + ".evil.test"} {
+				r := trustedRequest(http.MethodPost, `{"confirm":true}`)
+				r.Header.Set("Origin", origin)
+				w = httptest.NewRecorder()
+				m.Handler().ServeHTTP(w, r)
+				var rejected struct {
+					Error Error `json:"error"`
+				}
+				if w.Code != http.StatusForbidden || json.Unmarshal(w.Body.Bytes(), &rejected) != nil || rejected.Error.Code != "origin_denied" {
+					t.Fatalf("foreign Origin %q was not rejected", origin)
+				}
+			}
+			r := trustedRequest(http.MethodPost, `{"confirm":true}`)
+			r.Header.Set("Origin", tt.origin)
+			w = httptest.NewRecorder()
+			m.Handler().ServeHTTP(w, r)
+			var issued struct {
+				AuthorizationCode string `json:"authorization_code"`
+				PublicBaseURL     string `json:"public_base_url"`
+			}
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &issued) != nil || issued.PublicBaseURL != wantURL {
+				t.Fatal("browser Origin did not authorize a grant with the normalized URL")
+			}
+			raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(issued.AuthorizationCode, "alarmd-login-v1."))
+			var grant authorizationPackage
+			if err != nil || json.Unmarshal(raw, &grant) != nil || grant.PublicBaseURL != wantURL {
+				t.Fatal("authorization package did not retain the normalized URL")
+			}
+			w = exchange(m, grant)
+			var exchanged exchangeResponse
+			if w.Code != http.StatusOK || json.Unmarshal(w.Body.Bytes(), &exchanged) != nil || exchanged.PublicBaseURL != wantURL {
+				t.Fatal("exchange did not retain the normalized URL")
+			}
+		})
+	}
+}
+
 func TestHTTPDeploymentPreservesURLAndRequiresMatchingOrigin(t *testing.T) {
 	client := startRedis(t)
 	server := httptest.NewUnstartedServer(nil)

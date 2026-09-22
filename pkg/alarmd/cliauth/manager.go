@@ -135,6 +135,14 @@ func New(o Options) (*Manager, error) {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
+	// Browsers serialize origins with lowercase hosts and without default ports.
+	u.Host = strings.ToLower(u.Host)
+	if (u.Scheme == "http" && u.Port() == "80") || (u.Scheme == "https" && u.Port() == "443") {
+		u.Host = u.Hostname()
+		if strings.Contains(u.Host, ":") {
+			u.Host = "[" + u.Host + "]"
+		}
+	}
 	u.Path = strings.TrimRight(u.Path, "/") + "/"
 	u.RawPath = ""
 	return &Manager{
