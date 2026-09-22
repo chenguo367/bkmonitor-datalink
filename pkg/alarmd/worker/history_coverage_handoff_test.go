@@ -100,6 +100,29 @@ func TestASlotThatSummarisedNoWindowPublishesNoCounts(t *testing.T) {
 	}
 }
 
+// Unless it says why it summarised none. A Slot whose every series was
+// resumed, or none of whose State could be loaded, has nothing to say about
+// windows and something to say about itself -- and it is the reading that most
+// needs saying, because the alternative is a row that reports no coverage at
+// all while 249 series went unevaluated. The gate reads all three counts, so
+// the one case this exists for is not the one it drops.
+func TestASlotThatSummarisedNoWindowStillPublishesWhyNot(t *testing.T) {
+	for name, coverage := range map[string]execution.HistoryCoverage{
+		"every series resumed":       {Resumed: 227},
+		"no State loadable":          {Constrained: 249},
+		"a few summarised, most not": {Levels: 22, Resumed: 227},
+	} {
+		facts := historyCoverageFacts(coverage)
+		if facts == nil {
+			t.Errorf("%s: no facts published, want the round's own account of itself", name)
+			continue
+		}
+		if facts.Resumed != coverage.Resumed || facts.Constrained != coverage.Constrained {
+			t.Errorf("%s: facts = %+v, want the two counts carried", name, *facts)
+		}
+	}
+}
+
 // The named windows cross whole, field by field, and the primary fact rides
 // the completion beside them. Written against the source struct's fields by
 // name so a field added to the window on one side and forgotten on the other

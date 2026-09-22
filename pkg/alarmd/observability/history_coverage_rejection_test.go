@@ -147,3 +147,41 @@ func TestARefusedCoverageLeavesItsRuleOnTheObservation(t *testing.T) {
 		t.Fatalf("accepted observation carries coverage %+v rejection %+v", accepted.HistoryCoverage, accepted.HistoryCoverageRejected)
 	}
 }
+
+// A run that summarised no window and says why is accepted, not refused. It
+// is the reading the two counts exist for -- every series resumed, or none of
+// their State loadable -- and LEVELS_ZERO, which names a zero-window set that
+// counts something on those windows, would otherwise refuse it.
+//
+// Asserted as accepted and not merely as "not swallowed": the rule that walks
+// every field only says a set is not dropped, and a refusal is not a drop.
+func TestARunThatSummarisedNothingAndSaysWhyIsAccepted(t *testing.T) {
+	for name, facts := range map[string]HistoryCoverageFacts{
+		"every series resumed":         {Resumed: 227},
+		"no State loadable":            {Constrained: 249},
+		"both, and nothing summarised": {Resumed: 12, Constrained: 7},
+		"some summarised, most not":    {Levels: 22, Short: 1, WorstValid: 6, WorstRequired: 9, Resumed: 227},
+	} {
+		in := facts
+		kept, rejected := normalizeHistoryCoverageFacts(&in)
+		if rejected != nil {
+			t.Errorf("%s: refused under %s, want the reading kept", name, rejected.Rule)
+			continue
+		}
+		if kept == nil {
+			t.Errorf("%s: dropped as no coverage, want the reading kept", name)
+			continue
+		}
+		if kept.Resumed != facts.Resumed || kept.Constrained != facts.Constrained {
+			t.Errorf("%s: kept = %+v, want the counts carried through", name, *kept)
+		}
+	}
+	// A zero-window set that counts something on windows it says it did not
+	// summarise is still the contradiction LEVELS_ZERO names, whatever the
+	// two counts say beside it.
+	contradiction := HistoryCoverageFacts{Resumed: 5, Short: 2}
+	if _, rejected := normalizeHistoryCoverageFacts(&contradiction); rejected == nil ||
+		rejected.Rule != CoverageRejectLevelsZero {
+		t.Errorf("a short count with no window summarised was not refused under LEVELS_ZERO: %+v", rejected)
+	}
+}
