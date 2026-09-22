@@ -3228,6 +3228,14 @@ function addressWords(dep) {
 // nothing was, or that the role has no writer to speak of.
 function writerWords(dep) {
   var w = dep.writer;
+  // A role that carries its own account answers from it whether or not there
+  // is a writer summary beside it. The open alert set under the index
+  // protocol has none on purpose -- that protocol has no publisher heartbeat,
+  // so the server clears the summary -- and this early return then rendered
+  // the whole column as a dash: the members, the gate's answers, the
+  // subscription and the calibration were all on the response and none of
+  // them reached the page.
+  if (dep.open_alert_set) return openAlertSetWords(dep);
   if (!w) {
     return dep.role === 'strategy_cache' ? '（这个副本不是 leader，没读过策略缓存）' : '—';
   }
@@ -3265,20 +3273,58 @@ var OPEN_ALERT_UNAVAILABLE = {
   heartbeat_stale: '心跳过期（超过 3 个发布周期没更新）',
   fingerprint_version: '指纹版本与本端不同——每次查询都会落空，读起来像"没有未恢复告警"'
 };
+// Every answer the gate can give. A key missing here is not rendered and
+// does not count towards the total, so the row said "the gate has not been
+// asked yet" on a deployment where it had answered 168 times and held every
+// recovery: the index protocol's two answers were added to the server and
+// not to this table. The table is hand-listed, so it is the thing to check
+// whenever the server gains an answer.
 var OPEN_ALERT_ANSWER = {
   authoritative_member: '发布里有',
   authoritative_absent: '发布里没有',
+  index_member: '索引里有',
+  index_absent: '索引里没有',
   recently_sent: '本副本刚发过',
   not_yet_loaded: '首轮未装载',
   self_maintained: '按本副本记录',
   passed_through: '直接放行'
 };
+// What the numbers above mean for the deployment, said once rather than left
+// for the reader to derive. The gate holds a recovery when the series is not
+// in the consumer's set, so a set that is loaded and holds nothing while
+// every lookup comes back "not in it" means no recovery event leaves this
+// deployment -- which the row could not be read to say: it showed the set as
+// available and not stale, both true, and neither of them the answer.
+//
+// Two things produce it and this cannot tell them apart, so it names both:
+// the consumer genuinely holds no open alert (nothing is alarming), or it is
+// not recording what this deployment sends it. The count of held recoveries
+// is what separates them in practice -- a consumer with nothing open is one
+// this deployment also sent nothing to.
+function openAlertConsequence(a, lookups) {
+  if (!lookups || a.members !== 0 || a.loaded_sets === 0) return '';
+  var absent = (a.lookups && (a.lookups.index_absent || 0) + (a.lookups.authoritative_absent || 0)) || 0;
+  if (absent < lookups) return '';
+  return '这套部署现在发不出恢复：集合装载了但一条未恢复指纹都没有，' + lookups
+    + ' 次全部落空、恢复被扣住——要么消费方此刻确实没有未恢复告警，要么它没有把本部署发过去的告警记进这个集合';
+}
+
 function openAlertSetWords(dep) {
   var a = dep.open_alert_set;
   var w = dep.writer;
   if (!a) return w && w.present ? '有' : '没有';
   var parts = [];
-  if (a.heartbeat_age_seconds !== undefined && a.heartbeat_age_seconds !== null) {
+  // The index protocol is its own publication and has no heartbeat, so the
+  // heartbeat branch below read it as "nothing published" -- on a deployment
+  // whose index was configured, subscribed, read 27 s ago and covering 60
+  // strategies, the row said there was no consumer publication at all.
+  if (a.index_protocol) {
+    parts.push('有：消费方按索引协议发布'
+      + (a.index_read_age_seconds != null ? '，本端 ' + elapsedLabel(a.index_read_age_seconds) + '前读到' : '，本端还没读到过')
+      + (a.subscription_ready ? '' : '，订阅未就绪'));
+    parts.push('跟踪 ' + a.tracked_sets + ' 条策略、索引覆盖 ' + a.loaded_sets + ' 条、未恢复指纹 ' + a.members + ' 个'
+      + (a.calibration_configured ? '' : '（未配校准）'));
+  } else if (a.heartbeat_age_seconds !== undefined && a.heartbeat_age_seconds !== null) {
     parts.push('有：消费方心跳 ' + elapsedLabel(a.heartbeat_age_seconds) + '前（周期 ' + a.cycle_seconds + ' s，指纹版本 ' + a.fingerprint_version
       + (a.fingerprint_version !== a.reader_fingerprint_version ? '≠本端 ' + a.reader_fingerprint_version : '') + '）');
     parts.push('跟踪 ' + a.tracked_sets + ' 条策略、发布覆盖 ' + a.loaded_sets + ' 条、未恢复指纹 ' + a.members + ' 个');
@@ -3296,7 +3342,8 @@ function openAlertSetWords(dep) {
     if (n) { answers.push(OPEN_ALERT_ANSWER[key] + ' ' + n); total += n; }
   });
   parts.push(total ? '恢复门查过 ' + total + ' 次：' + answers.join('、') : '恢复门还没查过');
-  return parts.join('；');
+  parts.push(openAlertConsequence(a, total));
+  return parts.filter(Boolean).join('；');
 }
 
 function renderReplicas(rows) {

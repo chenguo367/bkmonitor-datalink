@@ -14,6 +14,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 	"regexp"
 	"strings"
@@ -873,4 +874,33 @@ func stringsOf[T ~string](values []T) []string {
 		out = append(out, string(value))
 	}
 	return out
+}
+
+// Every answer the recovery gate can give has a word on the page.
+//
+// The page's answer table is hand-listed and the renderer counts only the
+// keys in it, so an answer missing here is not merely unworded: it does not
+// count towards the total, and the row then says the gate has not been asked
+// at all. That shipped -- a deployment whose every lookup came back under the
+// index protocol's answer read as "the recovery gate has not been asked yet"
+// while it was holding a hundred and sixty-eight recoveries, because the two
+// index answers were added to the server and not to the table.
+//
+// Pinned against the closed list rather than against the two that were
+// missing, so the next answer added in Go fails here instead of on a
+// deployment.
+func TestThePageHasWordingForEveryOpenAlertGateAnswer(t *testing.T) {
+	if len(openalerts.Answers) == 0 {
+		t.Fatal("no gate answers declared in Go; the check would pass vacuously")
+	}
+	found := regexp.MustCompile(`var OPEN_ALERT_ANSWER = \{([\s\S]*?)\};`).FindStringSubmatch(string(page))
+	if found == nil {
+		t.Fatal("the page no longer declares OPEN_ALERT_ANSWER")
+	}
+	for _, answer := range openalerts.Answers {
+		if !regexp.MustCompile(`\b` + string(answer) + `:`).MatchString(found[1]) {
+			t.Errorf("the recovery gate can answer %q and the page has no word for it: the row will not count it, "+
+				"and with only such answers it reads as though the gate was never asked", answer)
+		}
+	}
 }
