@@ -403,6 +403,10 @@ func suspendedNoDataSource(reason string) (nodata.RosterSource, bool) {
 var AlwaysReportedWithheld = []WithheldKey{
 	{Disposition: DispositionUnsupported, Reason: contract.ReasonSnapshotRetentionInsufficient},
 	{Disposition: DispositionUnsupported, Reason: contract.ReasonCompletionOffsetBelowReserve},
+	// "No strategy's effective time was widened to the whole day because a
+	// range did not parse" is a claim a reader acts on: the widening is the
+	// direction of more detection, and the only way to see it is this pair.
+	{Disposition: DispositionConfigNormalized, Reason: ReasonEffectiveTimeRangeInvalid},
 }
 
 // NoDataReasons is the set of reasons that withhold a Plan from no-data
@@ -458,4 +462,5 @@ var CatalogDispositions = []Disposition{
 	DispositionRemoved,
 	DispositionUnsupported,
 	DispositionCompatibilityIgnored,
+	DispositionConfigNormalized,
 }

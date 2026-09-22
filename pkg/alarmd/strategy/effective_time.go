@@ -219,15 +219,7 @@ func compileEffectiveTimeRequirement(uptime *uptimeConfigV1, timezoneRef string)
 		ranges := make([]TimeRange, 0, len(*uptime.TimeRanges))
 		seenRanges := make(map[TimeRange]struct{}, len(*uptime.TimeRanges))
 		for _, raw := range *uptime.TimeRanges {
-			start, ok := parseClockMinute(raw.Start)
-			if !ok {
-				return EffectiveTimeRequirement{}, errors.New("effective time: invalid start")
-			}
-			end, ok := parseClockMinute(raw.End)
-			if !ok {
-				return EffectiveTimeRequirement{}, errors.New("effective time: invalid end")
-			}
-			timeRange := TimeRange{startMinute: start, endMinute: end}
+			timeRange := timeRangeOf(raw)
 			if _, duplicate := seenRanges[timeRange]; duplicate {
 				continue
 			}
@@ -272,6 +264,49 @@ func compileEffectiveTimeRequirement(uptime *uptimeConfigV1, timezoneRef string)
 	}
 	requirement.digest = digest
 	return requirement, nil
+}
+
+// timeRangeOf reads one configured range the way Python's in_alarm_time
+// reads it: a start that does not parse is 00:00 and an end that does not
+// parse is 23:59, each on its own, and the range is used as it comes out
+// (alarm_backends/core/control/strategy.py, the two try/except around
+// arrow.get). Refusing the Plan instead, as this did, turned a malformed
+// range into a strategy that never detected, when Python had it detect all
+// day; the Control Leader names each range it read this way
+// (EFFECTIVE_TIME_RANGE_INVALID), so the widening is not silent.
+func timeRangeOf(raw uptimeTimeRangeV1) TimeRange {
+	start, ok := parseClockMinute(raw.Start)
+	if !ok {
+		start = 0
+	}
+	end, ok := parseClockMinute(raw.End)
+	if !ok {
+		end = 24*60 - 1
+	}
+	return TimeRange{startMinute: start, endMinute: end}
+}
+
+// UptimeTimeRangesNormalized reports whether any configured range of the
+// uptime has a start or end that does not parse and so is read as 00:00 or
+// 23:59: what timeRangeOf did to it, for the Leader to name. False for an
+// absent uptime and for one every range of which parses.
+func UptimeTimeRangesNormalized(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var value uptimeConfigV1
+	if json.Unmarshal(raw, &value) != nil || value.TimeRanges == nil {
+		return false
+	}
+	for _, timeRange := range *value.TimeRanges {
+		if _, ok := parseClockMinute(timeRange.Start); !ok {
+			return true
+		}
+		if _, ok := parseClockMinute(timeRange.End); !ok {
+			return true
+		}
+	}
+	return false
 }
 
 func parseClockMinute(value string) (uint16, bool) {
