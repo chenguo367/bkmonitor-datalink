@@ -606,3 +606,24 @@ func TestPhaseTwoScheduleCursorAdvanceCountsByOutcome(t *testing.T) {
 		t.Fatalf("schedule_cursor_advance_total{conflict,CURSOR_MOVED} = %v, want a published zero", got)
 	}
 }
+
+// The Leader's round says how many ready replicas do not declare the split
+// contract, and the gauge follows it: a rolling release reads 0, n, 0 here.
+func TestTheUnawareReplicaGaugeFollowsTheRoundsSplitGate(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{})
+	observe := func(unaware []string) {
+		recorder.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentOwnership, Stage: observability.StageRebalancePlanned, Result: observability.ResultSuccess,
+			Operation: observability.OperationLoad,
+			Rebalance: &observability.RebalanceFacts{ShardAware: &observability.ShardAwareFacts{Ready: 3, Unaware: unaware}},
+		})
+	}
+	observe([]string{"worker-2", "worker-3"})
+	if got := testutil.ToFloat64(recorder.phaseTwo.shardUnawareReadyReplicas); got != 2 {
+		t.Fatalf("shard_unaware_ready_replicas = %v after two unaware replicas, want 2", got)
+	}
+	observe(nil)
+	if got := testutil.ToFloat64(recorder.phaseTwo.shardUnawareReadyReplicas); got != 0 {
+		t.Fatalf("shard_unaware_ready_replicas = %v after the roll, want 0", got)
+	}
+}

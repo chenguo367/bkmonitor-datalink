@@ -11,6 +11,7 @@ package ownership
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -184,6 +185,51 @@ type ControlLeader struct {
 // before this contract moves an owner without clearing a pending scope,
 // and the fleet it could be elected from is the ready set.
 const CapabilityContentScope = "content-scope.v1"
+
+// CapabilityShardAware is the decision-020 split contract (section 4.7.7): a
+// worker that declares it indexes activations by (Plan, shard index) and
+// executes a strategy split into pieces; one that does not refuses an
+// activation naming the same Plan twice, whole, and executes nothing until
+// the split is withdrawn. A Leader publishes a split only while every ready
+// worker declares it, and withdraws every split to one piece when one that
+// does not joins: a rollback is the ordinary case, and a rollback into a
+// split fleet without this would stop every rolled-back replica at once.
+// The gate is a runtime fact, not a release discipline.
+const CapabilityShardAware = "shard-aware.v1"
+
+// ShardSplitHeld is the word for a split the Leader was asked for and did not
+// publish because a ready worker does not declare CapabilityShardAware. It
+// names the replica; the count of them on a fleet that asked for no split
+// is zero, which is the reading a rollout is judged by.
+const ShardSplitHeld = "SHARD_SPLIT_HELD"
+
+// ShardSplitGate is the split contract's answer for one ready set.
+type ShardSplitGate struct {
+	// Admitted says every ready worker declares the contract, so a split
+	// may be published. False for an empty set: a split is admitted for a
+	// fleet, not for nobody.
+	Admitted bool
+	// Ready is how many workers were asked; Unaware the ids of those that
+	// do not declare the contract, in id order. Unaware is what the page
+	// shows while a rollout is in flight and what a rollback puts back.
+	Ready   int
+	Unaware []string
+}
+
+// ShardSplitAdmission decides the gate for a ready set, the same set the
+// round's placements use; a registration that has expired is not in it, so
+// a replica that is gone does not hold a split.
+func ShardSplitAdmission(workers []WorkerRegistration) ShardSplitGate {
+	gate := ShardSplitGate{Ready: len(workers)}
+	for _, worker := range workers {
+		if !worker.Declares(CapabilityShardAware) {
+			gate.Unaware = append(gate.Unaware, worker.WorkerID)
+		}
+	}
+	sort.Strings(gate.Unaware)
+	gate.Admitted = len(workers) > 0 && len(gate.Unaware) == 0
+	return gate
+}
 
 // Declares reports whether the registration names the capability.
 func (worker WorkerRegistration) Declares(capability string) bool {

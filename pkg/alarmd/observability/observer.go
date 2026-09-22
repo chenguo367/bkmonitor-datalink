@@ -1323,6 +1323,21 @@ type RebalanceFacts struct {
 	// Bytes is the same round's byte-constraint planning (decision-020
 	// section 5.7), which runs before the count correction above.
 	Bytes *ByteConstraintFacts `json:"bytes,omitempty"`
+	// ShardAware is the same round's split gate (decision-020 section
+	// 4.7.7): how many ready workers, and which of them do not declare the
+	// split contract. A split is published only while Unaware is empty.
+	ShardAware *ShardAwareFacts `json:"shard_aware,omitempty"`
+}
+
+// ShardAwareFacts is one round's split-contract census over the ready set.
+// Unaware is a list rather than a count because the replica is what a
+// rollout reader looks for, and 0 -> n -> 0 across a roll is the reading.
+type ShardAwareFacts struct {
+	Ready   int      `json:"ready"`
+	Unaware []string `json:"unaware,omitempty"`
+	// SplitsHeld is how many splits the round was asked for and did not
+	// publish because Unaware is not empty; zero on a fleet asked for none.
+	SplitsHeld int `json:"splits_held"`
 }
 
 // ByteConstraintFacts is one round's byte-constraint planning: retained
