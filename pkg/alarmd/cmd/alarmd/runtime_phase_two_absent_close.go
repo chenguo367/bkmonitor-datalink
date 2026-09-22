@@ -172,6 +172,17 @@ func boolSide(value bool) int {
 	return 0
 }
 
+// setTotal takes a running total the loop does not own - the memories keep
+// their own - and publishes it as this counter's value. A total rather than
+// an increment because the two memories count for themselves; adding a
+// delta computed from the last published value would drift the first time a
+// round was missed.
+func (loop *absentStrategyClose) setTotal(outcome string, total uint64) {
+	loop.countsMu.Lock()
+	loop.counts[outcome] = total
+	loop.countsMu.Unlock()
+}
+
 func (loop *absentStrategyClose) count(outcome string, n int) {
 	if n <= 0 {
 		return
@@ -216,7 +227,7 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 	now := loop.bundle.dependencies.Now()
 	observed, haveSnapshot := loop.reconciler.ObservedSnapshot()
 	departed, refusedDepartures := loop.reconciler.DepartedStrategies()
-	loop.count(absentalerts.OutcomeMemoryFull, int(refusedDepartures)-int(loop.counts[absentalerts.OutcomeMemoryFull]))
+	loop.setTotal(absentalerts.OutcomeMemoryFull, refusedDepartures+loop.tracker.Dropped())
 	round := absentalerts.Round{
 		Departed: departedByKey(departed), Published: publishedKeys(loop.reconciler.PublishedStrategies()),
 		SnapshotStrategies: snapshotKeys(observed), SnapshotUsable: haveSnapshot,
