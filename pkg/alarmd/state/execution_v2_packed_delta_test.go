@@ -199,3 +199,42 @@ func TestAnInheritedUndervivedIDIsCarriedWhileThisRoundsIsRefused(t *testing.T) 
 		t.Fatalf("this round's undeliverable id was refused with %q (%v), want %q", rule, err, PackedRuleRecordIDNotDerived)
 	}
 }
+
+// The bound and a merged position in the same record, which is the only shape
+// where the pre-scan and the walk can disagree. The pre-scan decides how many
+// of the oldest points the walk skips, so a count that reads a merged position
+// as two positions drops one point too many - and only from records a restart
+// or a late arrival produced, which is to say from the records that matter.
+func TestABoundedRecordWithAMergedPositionKeepsTheRightPoints(t *testing.T) {
+	identity := packedIdentity()
+	base := []execution.StateHistoryPoint{
+		packedPoint(t, identity, 1758400000, execution.LevelFactNormal),
+		packedPoint(t, identity, 1758400060, execution.LevelFactNormal),
+		packedPoint(t, identity, 1758400120, execution.LevelFactNormal),
+	}
+	// One point lands on a position the record holds, one is new: four
+	// positions, not five.
+	delta := []execution.StateHistoryPoint{
+		packedPoint(t, identity, 1758400120, execution.LevelFactAnomalous),
+		packedPoint(t, identity, 1758400180, execution.LevelFactAnomalous),
+	}
+	raw, err := encodeRuntimePacked(deltaMutation(t, base, delta, 3, 1), 9)
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	view, err := decodeRuntimePacked(raw, identity)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(view.History) != 3 {
+		t.Fatalf("the record holds %d points under a bound of three", len(view.History))
+	}
+	want := []int64{1758400060, 1758400120, 1758400180}
+	for index, sourceTime := range want {
+		if view.History[index].SourceTime != sourceTime {
+			t.Fatalf("the record holds %d at position %d, want %d: four positions merge to four, and a "+
+				"count that reads the merged one as two evicts one point too many",
+				view.History[index].SourceTime, index, sourceTime)
+		}
+	}
+}
