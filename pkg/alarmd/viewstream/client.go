@@ -375,6 +375,9 @@ func (client *Client) serveOnce(ctx context.Context) (connected bool, err error)
 	client.mu.Lock()
 	client.stats.Connected, client.stats.Leader, client.stats.Connections = true, leader, client.stats.Connections+1
 	client.mu.Unlock()
+	if client.costs != nil {
+		client.costs.SessionStarted()
+	}
 	defer func() {
 		client.mu.Lock()
 		client.stats.Connected = false

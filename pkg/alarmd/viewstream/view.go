@@ -101,6 +101,10 @@ type QueryGroupCost struct {
 // nothing.
 type CostSource interface {
 	Costs() []QueryGroupCost
+	// SessionStarted is told once per stream, after the Hello went out and
+	// before the first heartbeat: the Leader listening now may not be the
+	// one anything was reported to, so every reading is unreported again.
+	SessionStarted()
 }
 
 // CostSink is what the Leader hands each heartbeat's costs to, with the
