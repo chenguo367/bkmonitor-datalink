@@ -28,9 +28,10 @@ package fleet
 // look while not naming one costs a sentence. So the row stays every
 // strategy's, as before, unless both agree: the fold does not guess.
 //
-// This is the one place that reads "which Plan is this row about"; the
+// This is the one place that reads "which Plan is this row about"; aboutOf
+// adds the conditions under which a row carries the answer at all, and the
 // strategy fold, the check's strategy group and the card's object sentence
-// all take their answer from here, so the three cannot drift apart.
+// all take it from there.
 func implicatedStrategy(row Anomaly) (StrategyRef, bool) {
 	var held StrategyRef
 	guarded := false
@@ -63,6 +64,19 @@ func implicatedStrategy(row Anomaly) (StrategyRef, bool) {
 		}
 	}
 	return StrategyRef{}, false
+}
+
+// aboutOf is the one Plan a row's words are about, for the rows that carry
+// one: a check whose evidence is per Plan, an object running more than one
+// Plan, and evidence that names exactly one. This is the single derivation
+// the standing (Standing.About) and the check's strategy group both read;
+// neither restates its conditions, so the group on the first page and the
+// name on the card cannot come apart.
+func aboutOf(row Anomaly) (StrategyRef, bool) {
+	if !planScopedCheck(row.Finding.Check) || len(row.Strategies) <= 1 {
+		return StrategyRef{}, false
+	}
+	return implicatedStrategy(row)
 }
 
 // strategiesOf is the strategies a listed row folds onto: the one Plan its
