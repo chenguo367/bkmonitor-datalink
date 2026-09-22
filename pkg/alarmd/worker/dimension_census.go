@@ -38,15 +38,21 @@ import (
 const CensusCandidateSharePercent = 50
 
 // censusCandidate says whether this Slot's Query Group is heavy enough to be
-// worth a census, and returns the two numbers the decision was made on so the
-// line can be read afterwards. A worker with no pool figure judges nothing:
-// zero is not a small pool, it is no reading.
+// worth a census, and returns the share it was judged against so the line can
+// be read afterwards.
+//
+// A share of zero is not a share every Query Group clears, it is no reading:
+// a worker with no pool figure has not been told what its pool is, and one
+// whose pool is too small to have a share would otherwise admit every Slot on
+// the replica. Both are the same answer and they are decided in one place, so
+// that place is load-bearing rather than shadowed by a second test of the
+// same thing.
 func censusCandidate(peakBytes, poolBytes uint64) (bool, uint64) {
-	if poolBytes == 0 {
+	share := poolBytes / 100 * CensusCandidateSharePercent
+	if share == 0 {
 		return false, 0
 	}
-	share := poolBytes / 100 * CensusCandidateSharePercent
-	return peakBytes >= share && share > 0, share
+	return peakBytes >= share, share
 }
 
 // censusBuilders are this Slot's censuses in progress, one per candidate

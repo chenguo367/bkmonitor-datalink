@@ -12,6 +12,7 @@ package execution_test
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -140,6 +141,18 @@ func TestACensusPastTheTrackedBoundStillCountsTheSeriesItCannotName(t *testing.T
 	if entry.OverflowValues < untracked {
 		t.Fatalf("overflow names %d values, want at least the %d first seen past the tracked bound",
 			entry.OverflowValues, untracked)
+	}
+	// Named nowhere, not merely counted somewhere. Each late value carries
+	// two series where every tracked one carries one, so without the bound
+	// they would be the heaviest values in the census and sit at its very
+	// top - an assertion on the overflow total alone cannot tell the two
+	// apart.
+	for _, value := range entry.Values {
+		if strings.HasPrefix(value.Value, "late-") {
+			t.Fatalf("the census names %q, a value first seen after the tracked set was full: "+
+				"the bound is on what the builder holds, and a value it never held cannot be named",
+				value.Value)
+		}
 	}
 	censusAccountsForEverySeries(t, census, "ip", observed)
 }

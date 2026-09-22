@@ -115,10 +115,15 @@ func TestASyntheticAbsenceSeriesIsCountedIntoTheRosterCensusAndNotTheRounds(t *t
 
 	builders.observeSeries(identity, execution.DimensionCensusFromRound, censusRecordView(t,
 		map[string]json.RawMessage{"ip": json.RawMessage(`"192.0.2.1"`)}))
+	// The tag as a string rather than as the boolean this repository's own
+	// synthetic series happen to carry. A boolean is dropped by the value
+	// guard whatever the tag filter does, so a fixture carrying one would
+	// pass with the filter deleted - and the encoding of a dimension written
+	// elsewhere is not this code's to assume.
 	builders.observeSeries(identity, execution.DimensionCensusFromRoster, censusRecordView(t,
 		map[string]json.RawMessage{
 			"ip":                        json.RawMessage(`"192.0.2.9"`),
-			contract.NoDataDimensionTag: json.RawMessage(`true`),
+			contract.NoDataDimensionTag: json.RawMessage(`"missing"`),
 		}))
 
 	round, taken, err := builders.byPlan[identity.Plan].Build(600)
