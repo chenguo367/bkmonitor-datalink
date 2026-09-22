@@ -811,6 +811,39 @@ func TestThePageHasWordingForEveryFold(t *testing.T) {
 	}
 }
 
+// The dependency table names every role the server can send and no other,
+// and the host cache's writer column has words for every kind the writer
+// holds: a kind added on the server without a word here would print its
+// code beside the count, and a word here for a kind the server never sends
+// is a sentence no deployment can produce.
+func TestThePageHasWordingForEveryEndpointRoleAndHostCacheHolding(t *testing.T) {
+	body := string(page)
+	for _, table := range []struct {
+		name string
+		list []string
+	}{
+		{"ENDPOINT", fleet.EndpointRoles},
+		{"CMDB_HOLDING", fleet.CMDBHoldingKinds},
+	} {
+		found := regexp.MustCompile(`var ` + table.name + ` = \{([\s\S]*?)\};`).FindStringSubmatch(body)
+		if found == nil {
+			t.Fatalf("the page has no %s wording table", table.name)
+		}
+		worded := map[string]bool{}
+		for _, entry := range regexp.MustCompile(`(?m)^\s*([a-z_]+):`).FindAllStringSubmatch(found[1], -1) {
+			worded[entry[1]] = true
+			if !containsString(table.list, entry[1]) {
+				t.Errorf("%s has words for %s, which the server never sends", table.name, entry[1])
+			}
+		}
+		for _, key := range table.list {
+			if !worded[key] {
+				t.Errorf("%s has no words for %s", table.name, key)
+			}
+		}
+	}
+}
+
 // The progress word beside a held guard is the emitter's, lower-case, and
 // the page has words for each of its three and for none it never sends: the
 // third word, ready, is the one that names a guard that should have released,

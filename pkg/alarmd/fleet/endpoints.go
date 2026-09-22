@@ -168,6 +168,60 @@ type WriterEvidence struct {
 	// host cache; not_configured, authoritative and the like for the settings
 	// copy. Empty where the reader keeps no such state.
 	State string `json:"state,omitempty"`
+	// Holdings is each thing the writer keeps under this role, for the roles
+	// where that is more than one. The host cache is four keys from one
+	// writer -- the host hash, the service-instance hash, the topology hash
+	// and the refresh marker -- read into one snapshot, and Count above is
+	// the hosts alone: a deployment with two thousand hosts and an empty
+	// topology hash read as healthy while every topology-scoped strategy
+	// resolved to a node that did not exist. One entry per kind, in the
+	// closed order of the role's kind list; absent where the writer keeps one
+	// thing.
+	Holdings []WriterHolding `json:"holdings,omitempty"`
+}
+
+// WriterHolding is one thing a writer keeps under a role: which kind, whether
+// the reader read it, how many there are, and how old it says it is when it
+// carries its own time.
+type WriterHolding struct {
+	// Kind is the closed name of the thing; CMDBHoldingKinds for the host
+	// cache. The page's wording table is held to the list.
+	Kind string `json:"kind"`
+	// Present says the reader read this kind at all. A count of zero on a
+	// table read is a fact about the writer; a table not read says nothing.
+	Present bool `json:"present"`
+	// Count is how many of the kind there are, for the kinds that are a
+	// table; zero for a marker. Never omitted: the zero is the number this
+	// field exists to show, and an omitted zero read on the page as
+	// "undefined 个" the first time it was rendered.
+	Count int `json:"count"`
+	// AgeSeconds is how old the kind's own time is, for the kinds that carry
+	// one: the refresh marker.
+	AgeSeconds *float64 `json:"age_seconds,omitempty"`
+}
+
+// What the host cache's writer keeps, closed, in the order the page shows
+// them. Hosts first because it is the count everything else is read beside;
+// the model-identity subset beside it because it is hosts read another way;
+// the two other tables; and the writer's own word on when it last wrote.
+const (
+	CMDBHoldingHosts = "host"
+	// CMDBHoldingModelledHosts is the hosts carrying the canonical (model,
+	// instance) identity: a model_inst_id target is resolved by it, and a
+	// writer that does not put it on hosts leaves every such target
+	// unresolved with a full host count beside it.
+	CMDBHoldingModelledHosts    = "host_with_model_identity"
+	CMDBHoldingServiceInstances = "service_instance"
+	CMDBHoldingTopologyNodes    = "topology_node"
+	// CMDBHoldingRefreshMarker is when the writer last completed a full
+	// host-topology pass, by its own record. Absent, the hosts' age is
+	// unknown, not zero.
+	CMDBHoldingRefreshMarker = "refresh_marker"
+)
+
+// CMDBHoldingKinds is the closed list of what the host cache role holds.
+var CMDBHoldingKinds = []string{
+	CMDBHoldingHosts, CMDBHoldingModelledHosts, CMDBHoldingServiceInstances, CMDBHoldingTopologyNodes, CMDBHoldingRefreshMarker,
 }
 
 // The endpoint roles, closed. The page's wording table is held to this list.

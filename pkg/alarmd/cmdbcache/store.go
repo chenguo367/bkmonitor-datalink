@@ -129,13 +129,27 @@ type Health struct {
 	// instances is a real state - but it is what a series naming an instance
 	// will be admitted-unavailable against, so it is published beside the
 	// host count for that reading.
-	ServiceInstances  int
-	Age               time.Duration
-	SourceAge         time.Duration
-	Degraded          bool
-	DegradedReason    string
-	ConsecutiveErrors uint64
-	Refreshes         uint64
+	ServiceInstances int
+	// TopologyNodes is how many nodes the topology cache listed: the set a
+	// dynamic topology reference is checked against. Zero with hosts held is
+	// a topology cache the writer left empty, and every topology-scoped
+	// strategy reads as referencing a node that does not exist.
+	TopologyNodes int
+	// ModelledHosts is how many of the hosts carry the canonical (model,
+	// instance) identity a model_inst_id target is resolved by. Zero beside a
+	// full host count is a writer that does not put the identity on hosts,
+	// which is a different situation from a model the cache knows no host of.
+	ModelledHosts int
+	// SourceRefreshMarked says the writer's refresh marker was read: the time
+	// it last completed a full host-topology pass. Without it SourceAge is
+	// zero, which reads like "just refreshed" and is nothing of the kind.
+	SourceRefreshMarked bool
+	Age                 time.Duration
+	SourceAge           time.Duration
+	Degraded            bool
+	DegradedReason      string
+	ConsecutiveErrors   uint64
+	Refreshes           uint64
 }
 
 func (store *Store) Health() Health {
@@ -154,8 +168,11 @@ func (store *Store) Health() Health {
 	health.Loaded = true
 	health.Hosts = store.index.Hosts()
 	health.ServiceInstances = store.index.ServiceInstances()
+	health.TopologyNodes = store.index.TopologyNodes()
+	health.ModelledHosts = store.index.ModelledHosts()
 	health.Age = now.Sub(store.index.BuiltAt())
 	if source := store.index.SourceRefreshedAt(); !source.IsZero() {
+		health.SourceRefreshMarked = true
 		health.SourceAge = now.Sub(source)
 	}
 	switch {

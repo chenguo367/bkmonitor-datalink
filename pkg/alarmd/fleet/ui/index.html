@@ -3218,7 +3218,7 @@ function writerWords(dep) {
       return (w.present ? '有：列出 ' + w.count + ' 条策略' : '没有：strategy_ids 为空或不存在——这个地址上没人在写策略缓存，或前缀不对')
         + (w.state === 'marker_present' ? '；写入方标记 last_updated ' + (age ? '于 ' + age + '更新' : '存在') : '；没有 last_updated 标记');
     case 'cmdb_cache':
-      return (w.present ? '有：' + w.count + ' 台主机' + (age ? '，来源刷新于 ' + age : '') : '没有：主机索引未加载')
+      return (w.present ? cmdbHoldingsWords(w, age) : '没有：主机索引未加载')
         + (w.state && w.state !== 'loaded' ? '（' + w.state + '）' : '');
     case 'dynamic_config':
       return (w.present ? '有：已加载' + (age ? '，' + age : '') : '没有') + (w.state ? '（' + w.state + '）' : '');
@@ -3226,6 +3226,42 @@ function writerWords(dep) {
       return openAlertSetWords(dep);
   }
   return w.present ? '有' : '没有';
+}
+
+// What the host cache's writer keeps, by kind, in the server's closed words.
+// One writer, four keys, read into one snapshot: the count of hosts alone
+// said nothing about the other three, and a full host hash beside an empty
+// topology hash read as a healthy cache while every topology-scoped strategy
+// pointed at a node that did not exist. The unit follows the kind.
+var CMDB_HOLDING = {
+  host: ['主机 ', ' 台'],
+  host_with_model_identity: ['其中带模型实例身份的 ', ' 台'],
+  service_instance: ['服务实例 ', ' 个'],
+  topology_node: ['拓扑节点 ', ' 个'],
+  refresh_marker: ['来源刷新于 ', '']
+};
+
+// The writer column for the host cache: each holding with its count, the
+// refresh marker as an age or as its absence -- a marker not there is a
+// writer that has not completed a full pass or a prefix that is not the
+// writer's, and neither is "just refreshed". A server that sends no holdings
+// is read by the host count alone, as before.
+function cmdbHoldingsWords(w, age) {
+  if (!w.holdings || !w.holdings.length) {
+    return '有：' + w.count + ' 台主机' + (age ? '，来源刷新于 ' + age : '');
+  }
+  var parts = [];
+  w.holdings.forEach(function (holding) {
+    var words = CMDB_HOLDING[holding.kind] || [holding.kind + ' ', ''];
+    if (holding.kind === 'refresh_marker') {
+      parts.push(holding.present && holding.age_seconds !== undefined && holding.age_seconds !== null
+        ? words[0] + elapsedLabel(holding.age_seconds) + '前'
+        : '没有来源刷新标记（写入方没完成过一次全量主机拓扑刷新，或这个前缀不是它写的）');
+      return;
+    }
+    parts.push(holding.present ? words[0] + holding.count + words[1] : words[0].trim() + '未读到');
+  });
+  return '有：' + parts.join('，');
 }
 
 // The reader's account of the alert consumer's publication, as one sentence:

@@ -163,6 +163,46 @@ func TestAFailedRefreshKeepsTheLastGoodIndex(t *testing.T) {
 	}
 }
 
+// Health names each thing the index holds, not the hosts alone: the
+// topology nodes a dynamic reference is checked against, the hosts carrying
+// the model identity a model_inst_id target is resolved by, and whether the
+// writer's refresh marker was read at all -- an unread marker is an unknown
+// age, not a source refreshed zero seconds ago.
+func TestHealthNamesEachThingTheIndexHolds(t *testing.T) {
+	clock := time.Unix(1700000000, 0).UTC()
+	builder := newIndexBuilder(clock)
+	builder.addFields([]string{"10.0.0.1|0", multiModuleHost, "192.0.2.101|0", hostByIdentity101})
+	builder.addTopologyNodes([]string{"set|12", "module|31", "module|32"})
+	builder.index.sourceRefreshedAt = clock.Add(-4 * time.Minute)
+	store, err := NewStore(stubLoader{index: builder.index}, StoreOptions{
+		RefreshInterval: time.Minute, MaxAge: 10 * time.Minute, Now: func() time.Time { return clock },
+	})
+	if err != nil {
+		t.Fatalf("new store: %v", err)
+	}
+	if err := store.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	health := store.Health()
+	if health.Hosts != 2 || health.ModelledHosts != 1 || health.TopologyNodes != 3 || health.ServiceInstances != 0 {
+		t.Fatalf("health = %+v, want 2 hosts of which 1 modelled, 3 topology nodes, no service instances", health)
+	}
+	if !health.SourceRefreshMarked || health.SourceAge != 4*time.Minute {
+		t.Fatalf("health = %+v, want the marker read and 4 minutes old", health)
+	}
+
+	// The same index with no marker: not marked, and no age.
+	unmarked := newIndexBuilder(clock)
+	unmarked.addFields([]string{"10.0.0.1|0", multiModuleHost})
+	store.reader = stubLoader{index: unmarked.index}
+	if err := store.Refresh(context.Background()); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if health := store.Health(); health.SourceRefreshMarked || health.SourceAge != 0 || health.TopologyNodes != 0 {
+		t.Fatalf("health = %+v, want no marker, no source age, no topology nodes", health)
+	}
+}
+
 // An empty host cache would put every host-scoped strategy out of scope at
 // once. That is a degraded read, not a fact about the fleet.
 func TestAnEmptyIndexIsReportedAsDegraded(t *testing.T) {

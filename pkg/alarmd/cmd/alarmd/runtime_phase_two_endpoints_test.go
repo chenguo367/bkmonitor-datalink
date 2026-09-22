@@ -19,6 +19,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -190,6 +191,10 @@ func TestEndpointFactsReadTheSharedConnectionAndTheSourceRound(t *testing.T) {
 	writer := byRole[fleet.EndpointStrategyCache].Writer
 	if writer == nil || !writer.Present || writer.Count != 81 || writer.State != "marker_present" || writer.AgeSeconds == nil || *writer.AgeSeconds != 95 {
 		t.Errorf("strategy cache writer = %+v, want 81 listed with a 95-second-old marker", writer)
+	}
+	// The host cache role reads its store; without one it says nothing.
+	if cmdb := byRole[fleet.EndpointCMDBCache]; cmdb.Writer != nil {
+		t.Errorf("host cache without a store reports writer evidence: %+v", cmdb.Writer)
 	}
 	// A follower has no round and says nothing about the writer.
 	none := endpointFactsSource(cfg, sharing, recorder, nil, nil, func() *fleet.SourceFacts { return nil }, nil, nil,
@@ -624,4 +629,64 @@ func TestOpenAlertIndexReadDoesNotBecomeWriterHeartbeat(t *testing.T) {
 		}
 	}
 	t.Fatal("missing open alert endpoint")
+}
+
+// The host cache's writer column is each thing the writer keeps, not the
+// host count alone: the store's index is one snapshot of four keys, and a
+// deployment with every host held and an empty topology hash read as
+// healthy while every topology-scoped strategy resolved to a node that did
+// not exist. Every kind is on the line in the closed order whenever an index
+// is held; the refresh marker says it is absent rather than zero seconds
+// old; an index never loaded has no holdings to speak of.
+func TestTheHostCacheWriterNamesEachThingItHolds(t *testing.T) {
+	held := cmdbWriterEvidence(cmdbcache.Health{Loaded: true, Hosts: 2002, ModelledHosts: 1980, ServiceInstances: 311,
+		TopologyNodes: 0, SourceRefreshMarked: true, SourceAge: 4 * time.Minute})
+	if !held.Present || held.Count != 2002 || held.State != "loaded" || held.AgeSeconds == nil || *held.AgeSeconds != 240 {
+		t.Fatalf("held index = %+v, want present, 2002 hosts, loaded, 240 s old", held)
+	}
+	kinds := make([]string, 0, len(held.Holdings))
+	for _, holding := range held.Holdings {
+		kinds = append(kinds, holding.Kind)
+		if !holding.Present {
+			t.Errorf("%s not present on a held index: the loader reads every table or fails as a whole", holding.Kind)
+		}
+	}
+	if strings.Join(kinds, ",") != strings.Join(fleet.CMDBHoldingKinds, ",") {
+		t.Fatalf("holdings %v, want every kind in the closed order %v", kinds, fleet.CMDBHoldingKinds)
+	}
+	counts := map[string]int{}
+	for _, holding := range held.Holdings {
+		counts[holding.Kind] = holding.Count
+	}
+	if counts[fleet.CMDBHoldingHosts] != 2002 || counts[fleet.CMDBHoldingModelledHosts] != 1980 ||
+		counts[fleet.CMDBHoldingServiceInstances] != 311 || counts[fleet.CMDBHoldingTopologyNodes] != 0 {
+		t.Errorf("counts = %v, want each table's own", counts)
+	}
+	marker := held.Holdings[len(held.Holdings)-1]
+	if marker.Kind != fleet.CMDBHoldingRefreshMarker || marker.AgeSeconds == nil || *marker.AgeSeconds != 240 || marker.Count != 0 {
+		t.Errorf("marker = %+v, want the refresh marker 240 s old with no count", marker)
+	}
+
+	// No marker: the writer has not completed a full pass, or the prefix is
+	// not the writer's. The holding says absent; no age is invented on it or
+	// on the writer.
+	unmarked := cmdbWriterEvidence(cmdbcache.Health{Loaded: true, Hosts: 2002, SourceRefreshMarked: false})
+	if unmarked.AgeSeconds != nil {
+		t.Errorf("an unmarked index carries an age %v, want none", *unmarked.AgeSeconds)
+	}
+	marker = unmarked.Holdings[len(unmarked.Holdings)-1]
+	if marker.Kind != fleet.CMDBHoldingRefreshMarker || marker.Present || marker.AgeSeconds != nil {
+		t.Errorf("marker on an unmarked index = %+v, want absent with no age", marker)
+	}
+
+	// The store's degradation word rides as the state, over "loaded".
+	if stale := cmdbWriterEvidence(cmdbcache.Health{Loaded: true, Hosts: 2002, Degraded: true, DegradedReason: "index_stale"}); stale.State != "index_stale" || len(stale.Holdings) != len(fleet.CMDBHoldingKinds) {
+		t.Errorf("stale index = %+v, want the degradation word and every holding", stale)
+	}
+
+	// Never loaded: nothing was read, so nothing is held.
+	never := cmdbWriterEvidence(cmdbcache.Health{Degraded: true, DegradedReason: "never_loaded"})
+	if never.Present || never.State != "never_loaded" || never.Holdings != nil || never.AgeSeconds != nil {
+		t.Errorf("never loaded = %+v, want absent, never_loaded, no holdings", never)
+	}
 }

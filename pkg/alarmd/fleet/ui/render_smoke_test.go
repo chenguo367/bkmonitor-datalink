@@ -395,7 +395,18 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 			Writer: &fleet.WriterEvidence{Present: true, Count: 62, AgeSeconds: ptrFloat(95), State: "marker_present"}},
 		{Role: fleet.EndpointCMDBCache, Kind: "redis", Address: "redis.example:6379", Mode: "standalone", DB: &cacheDB,
 			Prefix: "bk_monitorv3.ee.cache", Configured: true, SharedWith: fleet.EndpointStrategyCache, LastSuccessAgeSeconds: &successAge,
-			Writer: &fleet.WriterEvidence{Present: true, Count: 47788, AgeSeconds: &cmdbAge, State: "loaded"}},
+			// The writer's four keys as holdings: a full host hash, the
+			// model-identity subset, the two other tables, and the marker
+			// with its age. The topology hash is empty here on purpose: the
+			// shape the host count alone read as healthy.
+			Writer: &fleet.WriterEvidence{Present: true, Count: 47788, AgeSeconds: &cmdbAge, State: "loaded",
+				Holdings: []fleet.WriterHolding{
+					{Kind: fleet.CMDBHoldingHosts, Present: true, Count: 47788},
+					{Kind: fleet.CMDBHoldingModelledHosts, Present: true, Count: 47788},
+					{Kind: fleet.CMDBHoldingServiceInstances, Present: true, Count: 3120},
+					{Kind: fleet.CMDBHoldingTopologyNodes, Present: true, Count: 0},
+					{Kind: fleet.CMDBHoldingRefreshMarker, Present: true, AgeSeconds: &cmdbAge},
+				}}},
 		{Role: fleet.EndpointDynamicConfig, Kind: "redis"},
 		// The consumer's publication: read once, its heartbeat now stale,
 		// the gate answering on the copy's own record for the last question.
@@ -1068,7 +1079,14 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"EXPECTED HINT nosource ::", "策略缓存的读数没有发布（旧构建，或还没有 leader 跑过一轮），说不出这个 0 是没策略还是全被扣住"},
 		{"EXPECTED HINT empty ::", "策略缓存列出 0 条，接受 0 条；写入方没有留 last_updated 标记"},
 		{"DEPS ::", "策略缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache成功 3 秒前；失败 1 小时 0 分前：dial tcp: i/o timeout有：列出 62 条策略；写入方标记 last_updated 于 1 分 35 秒前更新"},
-		{"DEPS ::", "CMDB 主机缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache · 与 strategy_cache 共用连接成功 3 秒前有：47788 台主机，来源刷新于 4 分 0 秒前"},
+		// Every holding by kind and unit; the empty topology hash is a
+		// zero on the line, not a healthy-looking host count.
+		{"DEPS ::", "CMDB 主机缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache · 与 strategy_cache 共用连接成功 3 秒前有：主机 47788 台，其中带模型实例身份的 47788 台，服务实例 3120 个，拓扑节点 0 个，来源刷新于 4 分 0 秒前"},
+		// No refresh marker: said as its absence and what it means, not as
+		// an age of zero. A server sending no holdings is read by the host
+		// count alone.
+		{"DEPS nomarker ::", "有：主机 47788 台，其中带模型实例身份的 0 台，服务实例 3120 个，拓扑节点 812 个，没有来源刷新标记（写入方没完成过一次全量主机拓扑刷新，或这个前缀不是它写的）"},
+		{"DEPS noholdings ::", "有：47788 台主机，来源刷新于 4 分 0 秒前"},
 		{"DEPS ::", "平台动态配置（平台写、alarmd 读）未配置"},
 		{"DEPS ::", "未恢复时序指纹集合（告警消费方写、alarmd 读；恢复门据此判有没有可恢复的告警）redis sentinel 主节点名 monitor，哨兵 sentinel-0.example:26379,sentinel-1.example:26379 · db 8 · alarmd:open_alerts: · 与 state_redis 共用连接成功 3 秒前有：消费方心跳 3 分 20 秒前（周期 60 s，指纹版本 md5_v1）；跟踪 6 条策略、发布覆盖 6 条、未恢复指纹 517 个；当前 发布不可用，按本副本自己的记录放行/扣留：心跳过期（超过 3 个发布周期没更新）；恢复门查过 16 次：发布里有 3、发布里没有 12、按本副本记录 1"},
 		// The sentinel address in words -- master name, then sentinels -- so
@@ -1653,6 +1671,24 @@ ctx.renderGroups();
 console.log('GROUPS REJECTED :: ' + textOf(store['groups']));
 console.log('EXPECTED HINT :: ' + textOf(store['expectedHint']));
 console.log('DEPS :: ' + textOf(store['depBasis']) + ' ｜ ' + textOf(store['depRows']));
+// The host cache's writer column on two other deployments: one whose writer
+// left no refresh marker, and one whose server sends no holdings at all.
+var cmdbRole = data.health.dependencies.filter(function (dep) { return dep.role === 'cmdb_cache'; })[0];
+var noMarker = JSON.parse(JSON.stringify(cmdbRole));
+delete noMarker.writer.age_seconds;
+noMarker.writer.holdings = noMarker.writer.holdings.map(function (holding) {
+  if (holding.kind === 'refresh_marker') return {kind: holding.kind, present: false};
+  if (holding.kind === 'topology_node') return {kind: holding.kind, present: true, count: 812};
+  if (holding.kind === 'host_with_model_identity') return {kind: holding.kind, present: true, count: 0};
+  return holding;
+});
+ctx.renderDependencies([noMarker], 'abcde', 1);
+console.log('DEPS nomarker :: ' + textOf(store['depRows']));
+var noHoldings = JSON.parse(JSON.stringify(cmdbRole));
+delete noHoldings.writer.holdings;
+ctx.renderDependencies([noHoldings], 'abcde', 1);
+console.log('DEPS noholdings :: ' + textOf(store['depRows']));
+ctx.renderDependencies(data.health.dependencies, data.health.dependencies_replica, data.health.dependencies_replicas);
 // The hint on the other two deployments the same 0 can be: a build that
 // published no source round, and a source with nothing listed.
 ctx.renderSource(null, 0);

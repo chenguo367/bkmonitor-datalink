@@ -227,16 +227,7 @@ func endpointFactsSource(
 				}
 			case fleet.EndpointCMDBCache:
 				if cmdb != nil {
-					health := cmdb.Health()
-					writer := &fleet.WriterEvidence{Present: health.Loaded, Count: health.Hosts, State: health.DegradedReason}
-					if health.Loaded && health.SourceAge > 0 {
-						age := health.SourceAge.Seconds()
-						writer.AgeSeconds = &age
-					}
-					if writer.State == "" && health.Loaded {
-						writer.State = "loaded"
-					}
-					entry.Writer = writer
+					entry.Writer = cmdbWriterEvidence(cmdb.Health())
 				}
 			case fleet.EndpointDynamicConfig:
 				if settings != nil {
@@ -274,6 +265,39 @@ func endpointFactsSource(
 		}
 		return endpoints
 	}
+}
+
+// cmdbWriterEvidence is the host cache role's writer column: whether an index
+// is held, the hosts as the count, the writer's refresh time as the age, the
+// store's degradation word as the state -- and each thing the writer keeps
+// as its own holding, so a full host hash beside an empty topology hash or
+// an absent refresh marker is read as what it is. The holdings are in the
+// closed order and every kind is present whenever an index is held: the
+// loader reads the three hashes into one snapshot or fails as a whole, so a
+// held index has read all three; the marker alone may be missing, and says
+// so with Present false rather than an age of zero.
+func cmdbWriterEvidence(health cmdbcache.Health) *fleet.WriterEvidence {
+	writer := &fleet.WriterEvidence{Present: health.Loaded, Count: health.Hosts, State: health.DegradedReason}
+	if writer.State == "" && health.Loaded {
+		writer.State = "loaded"
+	}
+	if !health.Loaded {
+		return writer
+	}
+	marker := fleet.WriterHolding{Kind: fleet.CMDBHoldingRefreshMarker, Present: health.SourceRefreshMarked}
+	if health.SourceRefreshMarked {
+		age := health.SourceAge.Seconds()
+		writer.AgeSeconds = &age
+		marker.AgeSeconds = &age
+	}
+	writer.Holdings = []fleet.WriterHolding{
+		{Kind: fleet.CMDBHoldingHosts, Present: true, Count: health.Hosts},
+		{Kind: fleet.CMDBHoldingModelledHosts, Present: true, Count: health.ModelledHosts},
+		{Kind: fleet.CMDBHoldingServiceInstances, Present: true, Count: health.ServiceInstances},
+		{Kind: fleet.CMDBHoldingTopologyNodes, Present: true, Count: health.TopologyNodes},
+		marker,
+	}
+	return writer
 }
 
 // readinessFactsSource reads this replica's readiness from the same tracker
