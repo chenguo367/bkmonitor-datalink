@@ -313,10 +313,10 @@ func TestACensusTooOldToDescribeTheObjectIsRefused(t *testing.T) {
 	}
 }
 
-// Two leaders reading one census plan the same split. Nothing may depend on
-// map order: a strategy that is cut one way here and another way there would
-// have two sets of pieces alive at once, each holding series the other also
-// holds.
+// One census plans one split, run after run. This says the planner does not
+// depend on map order; it does NOT say the tie-breaks are the ones intended,
+// because a planner that broke every tie the other way round would agree with
+// itself just as well. The two tests after it pin the rules themselves.
 func TestTwoLeadersReadingOneCensusPlanTheSameSplit(t *testing.T) {
 	census := evenCensus("ip", 600, 10)
 	// A second dimension that divides worse, so the choice between them is a
@@ -372,5 +372,62 @@ func TestEveryPlanSaysItWasNotActedOn(t *testing.T) {
 		if _, facts := controlplane.PlanSplit(splitInput(evenCensus("ip", 600, 10), peak)); !facts.DryRun {
 			t.Fatalf("peak %d: the plan does not say it was a dry run", peak)
 		}
+	}
+}
+
+// Ties between dimensions go to the name that sorts first.
+//
+// Pinned as a rule rather than left to whatever order the census arrived in:
+// the tie is broken the same way by every build, which is what makes a split
+// survive a leader handover mid-rollout. Two leaders of one build agree
+// however the tie is broken - that is what makes the self-consistency test
+// above unable to see this - but two builds do not, and a strategy cut one
+// way by the leader that planned it and another way by the leader that
+// carries it out has two sets of pieces alive at once, each holding series
+// the other also holds.
+func TestATieBetweenDimensionsGoesToTheNameThatSortsFirst(t *testing.T) {
+	census := evenCensus("ip", 600, 10)
+	// The same distribution under a second name, so the two divide equally
+	// well and nothing but the tie rule separates them.
+	twin := census.Dimensions[0]
+	twin.Dimension = "zone"
+	twin.Values = append([]execution.DimensionValueCount(nil), twin.Values...)
+	census.Dimensions = append(census.Dimensions, twin)
+
+	_, facts := controlplane.PlanSplit(splitInput(census, 3*splitShare))
+
+	if facts.Outcome != observability.SplitOutcomePlanned {
+		t.Fatalf("outcome = %q, want a plan", facts.Outcome)
+	}
+	if facts.Dimension != "ip" {
+		t.Fatalf("the tie went to %q, want %q - the name that sorts first. Both dimensions divide this "+
+			"census equally well, so whichever is chosen must be chosen by a rule every build follows",
+			facts.Dimension, "ip")
+	}
+}
+
+// Ties between equally heavy values go to the value that sorts first, and the
+// assignment that follows is the same on every build.
+//
+// The same blind spot as the dimension tie: equal values assigned in reverse
+// order still fill the pieces evenly, so nothing about the shape of the split
+// changes and only the contents of each list do. Those contents are what a
+// piece matches on, so two builds disagreeing about them is two pieces each
+// claiming the same series.
+func TestATieBetweenEquallyHeavyValuesGoesToTheValueThatSortsFirst(t *testing.T) {
+	plan, facts := controlplane.PlanSplit(splitInput(evenCensus("ip", 600, 10), 3*splitShare))
+
+	if facts.Outcome != observability.SplitOutcomePlanned {
+		t.Fatalf("outcome = %q, want a plan", facts.Outcome)
+	}
+	// Every value here carries the same weight, so the order they are handed
+	// out in is the order they sort in, and the first piece takes the first.
+	if plan.Lists[0][0] != "ip-0000" {
+		t.Fatalf("the first piece's first value is %q, want %q: with every value equally heavy the "+
+			"assignment order is the value order, and it has to be the same order on every build",
+			plan.Lists[0][0], "ip-0000")
+	}
+	if plan.Lists[len(plan.Lists)-1][0] != "ip-0005" {
+		t.Fatalf("the last piece's first value is %q, want %q", plan.Lists[len(plan.Lists)-1][0], "ip-0005")
 	}
 }
