@@ -876,7 +876,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// view and the lease the renewal last brought, whether the Query Group
 	// is executed from the view; the receipt counts those that are.
 	viewGate := newViewExecutionGate()
-	workerCosts := newWorkerCostSource(retainedPeaks, external.Now)
+	workerCosts := newWorkerCostSource(retainedPeaks, recorder, external.Now)
 	viewClient, err := viewstream.NewClient(
 		viewstream.ClientIdentity{WorkerID: cfg.PhaseTwo.Worker.ID, Incarnation: incarnation, StreamToken: streamIdentity.Token},
 		viewStreamDiscovery{store: ownershipStore}, repository, observer, viewstream.ClientOptions{Now: external.Now, Switched: viewGate,
@@ -913,6 +913,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// The fleet store's own meters. It shares the runtime client with
+	// everything else on this connection, so its traffic is invisible in the
+	// per-connection counters; these are written by it alone.
+	fleetStore.Meter(recorder)
 	// Freshness has to be shorter than the snapshot TTL, or a replica that
 	// stops publishing goes straight from fresh to absent and the stale branch
 	// never fires. The two say different things: stale means alive but stuck,

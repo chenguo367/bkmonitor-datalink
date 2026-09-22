@@ -342,6 +342,21 @@ func TestASourceAcceptingNothingDegradesOnlyWhenNothingRunsBecauseOfIt(t *testin
 	if s := view.SourceStanding; s == nil || s.Kind != SourceAccepting || s.Run != "70 个对象正在检测" || s.Cache != "策略缓存列出 81 条，可用 70 条，扣住 11 条（原因见检查项）" {
 		t.Errorf("accepting standing = %+v", s)
 	}
+	// A normalized record is listed and is not among the accepted, so a
+	// withheld count taken as listed minus accepted swallows it -- and it is
+	// not withheld: the Plan runs, wider than written. The sentence says so
+	// on its own clause, and the refusal beside it keeps its own count.
+	widened := []Snapshot{{Replica: "pod-a", TakenAt: now.Add(-10 * time.Second), Owned: 70, Determined: 70,
+		Source: NewSourceFacts(now, map[string]int{"ACCEPTED": 70, "SOURCE_INCOMPLETE": 11, "CONFIG_NORMALIZED": 2},
+			[]WithheldObject{
+				{StrategyID: "4108", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"},
+				{StrategyID: "4109", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"},
+				{StrategyID: "4110", Scope: "STRATEGY", Disposition: "SOURCE_INCOMPLETE", Reason: "SOURCE_IDENTITY_UNAVAILABLE"}})}}
+	view = Aggregate(Expectation{QueryGroups: 70, Known: true}, widened, []string{"pod-a"}, now, freshness)
+	if s := view.SourceStanding; s == nil || s.Normalized != 2 ||
+		s.Cache != "策略缓存列出 83 条，可用 70 条，扣住 11 条（原因见检查项），2 条按放宽的读法在检测（不是被扣，原因见检查项）" {
+		t.Errorf("accepting standing with normalized records = %+v", s)
+	}
 	empty := []Snapshot{{Replica: "pod-a", TakenAt: now.Add(-10 * time.Second), Source: NewSourceFacts(now, map[string]int{}, nil)}}
 	view = Aggregate(Expectation{QueryGroups: 0, Known: true}, empty, []string{"pod-a"}, now, freshness)
 	if s := view.SourceStanding; s == nil || s.Kind != SourceNothingListed || s.Cache != "策略缓存里没有列出任何策略" || s.Run != "0 个对象正在检测" {

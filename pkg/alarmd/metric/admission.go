@@ -103,6 +103,35 @@ func (r *Recorder) SetCMDBServiceInstanceIndex(instances int) {
 	r.phaseTwo.cmdbIndexServiceInstances.Set(float64(instances))
 }
 
+// SnapshotPublished records the size of the fleet snapshot this replica just
+// published; SnapshotsLoaded records one fleet view read and the bytes it
+// pulled. Together they make the fleet store's Redis traffic readable on
+// its own, apart from the state store's on the same connection.
+func (r *Recorder) SnapshotPublished(bytes int) {
+	if r == nil {
+		return
+	}
+	r.phaseTwo.fleetSnapshotBytes.Set(float64(bytes))
+}
+
+func (r *Recorder) SnapshotsLoaded(loaded int, bytes int) {
+	if r == nil {
+		return
+	}
+	r.phaseTwo.fleetViewSnapshotLoads.Inc()
+	r.phaseTwo.fleetViewSnapshotBytes.Add(float64(bytes))
+}
+
+// SetRetainedPeakCensus publishes the heartbeat census's size and how many
+// observations it has dropped for being full.
+func (r *Recorder) SetRetainedPeakCensus(groups int, overflow uint64) {
+	if r == nil {
+		return
+	}
+	r.phaseTwo.retainedPeakCensusGroups.Set(float64(groups))
+	r.phaseTwo.retainedPeakCensusOverflow.Set(float64(overflow))
+}
+
 // RecordUnmappedSeverity counts one event whose alert level had no name in
 // this build. The level is a small bounded number stated in strategy
 // configuration, so it is safe as a label; anything outside that is folded.

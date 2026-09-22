@@ -106,7 +106,21 @@ const (
 	// that records REMOVED with no Plan. Neither is a refusal.
 	dispositionPendingRemoval = "PENDING_REMOVAL"
 	dispositionRemoved        = "REMOVED"
+	// The item was accepted with a part of its configuration read as
+	// something other than what was written, the way the platform's own
+	// reader reads it -- a time range that does not parse read as the whole
+	// day. Not a refusal: the Plan runs. Listed beside the refusals because
+	// that is where a reader looks for what the catalog did to a strategy,
+	// and the words for it have to say "wider than written", not "withheld".
+	dispositionConfigNormalized = "CONFIG_NORMALIZED"
 )
+
+// isWithheld says whether a disposition kept the item from running. The
+// accepted item and the normalized one both run; every other disposition is
+// a strategy or item that did not become a Plan this round.
+func isWithheld(disposition string) bool {
+	return disposition != dispositionAccepted && disposition != dispositionConfigNormalized
+}
 
 // WithheldObject is one withheld record as the control plane hands it over.
 type WithheldObject struct {
@@ -273,6 +287,13 @@ type SourceStanding struct {
 	Listed     int `json:"listed"`
 	Accepted   int `json:"accepted"`
 	Incomplete int `json:"incomplete"`
+	// Normalized is how many of the listed records were accepted with part
+	// of their configuration read as something other than what was written.
+	// They are listed and not accepted-as-written, so a count of withheld
+	// taken as Listed minus Accepted swallows them: the sentence said "1
+	// withheld" about a strategy that is detecting, on the same screen as
+	// the line that says it is detecting more than it asked for.
+	Normalized int `json:"normalized,omitempty"`
 	// Executing is how many objects the deployment runs: the catalogue's
 	// count when it is known, or what the replicas own, whichever is more.
 	Executing int `json:"executing"`
@@ -294,7 +315,8 @@ func sourceStandingOf(source *SourceFacts, executing int) *SourceStanding {
 		return nil
 	}
 	standing := &SourceStanding{Listed: source.Listed, Accepted: source.Accepted,
-		Incomplete: source.WithheldCount(dispositionSourceIncomplete), Executing: executing,
+		Incomplete: source.WithheldCount(dispositionSourceIncomplete),
+		Normalized: source.WithheldCount(dispositionConfigNormalized), Executing: executing,
 		WriterAgeSeconds: source.ChangeSignalAgeSeconds}
 	switch {
 	case source.Listed == 0:
@@ -320,8 +342,15 @@ func sourceStandingLines(standing *SourceStanding) (run, cache string) {
 		return fmt.Sprintf("%d 个对象正在检测", standing.Executing), "策略缓存里没有列出任何策略"
 	case SourceAccepting:
 		cache = fmt.Sprintf("策略缓存列出 %d 条，可用 %d 条", standing.Listed, standing.Accepted)
-		if withheld := standing.Listed - standing.Accepted; withheld > 0 {
+		// The normalized records are listed and are not among the accepted,
+		// so they fall into this subtraction -- and they are not withheld:
+		// the Plan runs, wider than it was written. Named on their own
+		// clause rather than counted with the refusals.
+		if withheld := standing.Listed - standing.Accepted - standing.Normalized; withheld > 0 {
 			cache += fmt.Sprintf("，扣住 %d 条（原因见检查项）", withheld)
+		}
+		if standing.Normalized > 0 {
+			cache += fmt.Sprintf("，%d 条按放宽的读法在检测（不是被扣，原因见检查项）", standing.Normalized)
 		}
 		return fmt.Sprintf("%d 个对象正在检测", standing.Executing), cache
 	case SourceUpdateUnusable:
@@ -343,7 +372,8 @@ func sourceUnusableWord(standing *SourceStanding) string {
 	case standing.Incomplete == standing.Listed:
 		return "身份不完整"
 	case standing.Incomplete > 0:
-		return fmt.Sprintf("，其中 %d 条身份不完整、%d 条因别的原因被扣（原因见检查项）", standing.Incomplete, standing.Listed-standing.Incomplete)
+		return fmt.Sprintf("，其中 %d 条身份不完整、%d 条因别的原因被扣（原因见检查项）", standing.Incomplete,
+			standing.Listed-standing.Incomplete-standing.Normalized)
 	default:
 		return "，全部因别的原因被扣（原因见检查项）"
 	}

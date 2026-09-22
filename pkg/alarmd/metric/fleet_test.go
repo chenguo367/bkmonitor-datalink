@@ -6,6 +6,7 @@
 package metric
 
 import (
+	"github.com/prometheus/client_golang/prometheus"
 	"testing"
 )
 
@@ -92,12 +93,23 @@ func TestFleetVerdictOmitsTheDenominatorItCouldNotRead(t *testing.T) {
 
 // A scrape that reached no judgment must publish none. A default would export
 // "healthy" for a deployment nobody managed to ask.
+//
+// The verdict's own collector, not every metric whose name starts with
+// fleet: the fleet store's meters share the prefix and are written by
+// publishing and reading snapshots, which has nothing to do with whether a
+// judgment was reached -- and a counter that publishes no zero is one a
+// reader cannot tell from an absent build.
 func TestFleetVerdictPublishesNothingWithoutAJudgment(t *testing.T) {
-	gathered := gatherFleet(t, FleetVerdict{})
-	for name := range gathered {
-		if len(name) > 22 && name[:22] == "bkmonitor_alarmd_fleet" {
-			t.Fatalf("published %s without a judgment", name)
-		}
+	registry := prometheus.NewRegistry()
+	if err := registry.Register(newFleetCollector(func() FleetVerdict { return FleetVerdict{} })); err != nil {
+		t.Fatal(err)
+	}
+	families, err := registry.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(families) != 0 {
+		t.Fatalf("the verdict collector published %d families without a judgment: %+v", len(families), families)
 	}
 }
 
