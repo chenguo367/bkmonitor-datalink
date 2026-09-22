@@ -1002,3 +1002,64 @@ func TestAnUnclassifiedTerminalKeepsTheStrategyOnItsLastGoodPlan(t *testing.T) {
 		t.Fatalf("no STALE_CONFIG disposition: the strategy runs but nothing says it is on an older definition: %+v", built.Dispositions)
 	}
 }
+
+// A refusal that is not the definition's fault keeps the strategy detecting.
+//
+// The snapshot a Plan's effective time is compiled against comes from the
+// source and can simply be late. Filing that under a disposition of its own
+// was the point - the definition is not wrong and this build is not lacking
+// anything - and it is also where the retention gate could have been left
+// behind: the gate used to name the one disposition that existed, so a third
+// one would have dropped these strategies out of the catalog entirely. A
+// round that publishes nothing for a strategy is a strategy that stops
+// alerting, which is worse than the refresh failure this change removes.
+func TestASourceIncompleteRefusalKeepsTheStrategyDetecting(t *testing.T) {
+	compiler, semantics := runtimeClosureCompiler(t)
+	good := runtimeClosureNamedFrozenPlan(t, "1001", "1", []contract.LevelIRV2{runtimeClosureLevel(1, strategy.DetectorKindThreshold)})
+	published, err := retainRuntimeExecutableCatalog(context.Background(), runtimeClosureCatalog(runtimeClosureQueryGroup(t, "1", good)), nil, compiler, semantics)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	late := runtimeClosureNamedFrozenPlan(t, "1001", "1", []contract.LevelIRV2{runtimeClosureLevel(1, strategy.DetectorKindThreshold)})
+	late.Plan.EffectiveTimeSnapshot = json.RawMessage(`{"schema_version":1,"status":"UNAVAILABLE","calendars":[]}`)
+	late.PlanRevision = runtimeClosurePlanRevision(t, late.Plan)
+	built, err := retainRuntimeExecutableCatalog(context.Background(),
+		runtimeClosureCatalog(runtimeClosureQueryGroup(t, "1", late)),
+		&PublishedSnapshot{QueryGroups: published.QueryGroups}, compiler, semantics)
+	if err != nil {
+		t.Fatalf("retainRuntimeExecutableCatalog() error = %v", err)
+	}
+	running := false
+	for _, group := range built.QueryGroups {
+		for _, plan := range group.Plans {
+			running = running || plan.Identity.StrategyID == "1001"
+		}
+	}
+	if !running {
+		t.Fatal("the strategy left the catalog because a snapshot was late: it stops alerting until the source returns")
+	}
+	stale := false
+	for _, disposition := range built.Dispositions {
+		if disposition.SourceID == "1001" && disposition.Disposition == DispositionStaleConfig {
+			stale = true
+		}
+	}
+	if !stale {
+		t.Fatalf("no STALE_CONFIG disposition: the strategy runs and nothing says it is on an older definition: %+v", built.Dispositions)
+	}
+}
+
+// The two no-data refusals leave the strategy in opposite states, so they do
+// not share a code: one suspends absence detection and leaves the thresholds
+// detecting, the other refuses the whole definition. Everything downstream is
+// keyed by the code alone.
+func TestTheTwoNoDataRefusalsDoNotShareACode(t *testing.T) {
+	if contract.ReasonNoDataConfigInvalid == contract.ReasonNoDataPlanUncompilable {
+		t.Fatal("one code for two states: a reader keyed by code cannot tell a detecting strategy from a refused one")
+	}
+	uncompilable, known := CompilerTerminalDisposition(contract.ReasonNoDataPlanUncompilable)
+	if !known || uncompilable != DispositionConfigRejected {
+		t.Fatalf("NO_DATA_PLAN_UNCOMPILABLE = %s/%v, want a config refusal", uncompilable, known)
+	}
+}

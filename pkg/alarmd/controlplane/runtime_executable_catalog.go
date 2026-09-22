@@ -130,7 +130,7 @@ func retainRuntimeExecutableCatalog(
 			if terminal := compiledResult.PlanTerminal(); terminal != nil {
 				disposition := terminalDisposition(sourcePlan.Identity.StrategyID, "PLAN", *terminal)
 				result.Dispositions = withoutAcceptedPlanDisposition(result.Dispositions, sourcePlan.Identity.StrategyID)
-				if disposition.Disposition == DispositionConfigRejected {
+				if RetainsLastGoodDefinition(disposition.Disposition) {
 					if entry, ok := lastGoodPlans[sourcePlan.Identity.StrategyID]; ok {
 						lastGoodCompiled, executable, err := runtimePlanIsTerminalFree(ctx, entry, compiler, stateSemantics)
 						if err != nil {
@@ -162,11 +162,14 @@ func retainRuntimeExecutableCatalog(
 			}
 			levelTerminals := compiledResult.LevelTerminals()
 			terminalDispositions := make([]ObjectDisposition, 0, len(levelTerminals))
+			// Any refusal that keeps the last good definition, not only a
+			// config one: the Levels this round could not compile are
+			// supplemented from the definition that did.
 			hasConfigRejected := false
 			for _, terminal := range levelTerminals {
 				disposition := terminalDisposition(sourcePlan.Identity.StrategyID, "LEVEL", terminal)
 				terminalDispositions = append(terminalDispositions, disposition)
-				hasConfigRejected = hasConfigRejected || disposition.Disposition == DispositionConfigRejected
+				hasConfigRejected = hasConfigRejected || RetainsLastGoodDefinition(disposition.Disposition)
 			}
 			plan, err := retainCompiledLevels(sourcePlan, compiled)
 			if err != nil {
@@ -583,7 +586,7 @@ func CompilerTerminalDisposition(reasonCode string) (Disposition, bool) {
 		strategy.ReasonEffectiveTimeSchemaUnsupported:
 		return DispositionUnsupported, true
 	case contract.ReasonPlanInvalid, contract.ReasonPlanDuplicateLevelID, contract.ReasonProjectionInvalid, contract.ReasonLevelInvalid,
-		contract.ReasonNoDataConfigInvalid,
+		contract.ReasonNoDataPlanUncompilable,
 		strategy.ReasonEffectiveTimeInvalid, strategy.ReasonEffectiveTimeSnapshotInvalid,
 		strategy.ReasonEffectiveTimeSnapshotStatusInvalid, strategy.ReasonEffectiveTimeCalendarIdentity,
 		strategy.ReasonEffectiveTimeCalendarDuplicate, strategy.ReasonEffectiveTimeCalendarItemsMissing:

@@ -101,9 +101,10 @@ func EffectiveTimeTerminalReasons() []string {
 func CompilerTerminalReasons() []string {
 	return append([]string{
 		contract.ReasonAlgorithmUnsupported, contract.ReasonLevelBudgetExceeded,
-		contract.ReasonLevelInvalid, contract.ReasonNoDataConfigInvalid,
+		contract.ReasonLevelInvalid,
 		contract.ReasonPlanBudgetExceeded, contract.ReasonPlanDuplicateLevelID,
 		contract.ReasonPlanInvalid, contract.ReasonProjectionInvalid,
+		contract.ReasonNoDataPlanUncompilable,
 	}, EffectiveTimeTerminalReasons()...)
 }
 

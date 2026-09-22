@@ -802,9 +802,28 @@ func AbsencesOf(dispositions []ObjectDisposition) map[string]int64 {
 	return absences
 }
 
+// RetainsLastGoodDefinition says whether a refusal leaves the strategy running
+// the last definition that compiled.
+//
+// One predicate, called from both places that decide it. They used to say it
+// in two ways that happened to agree: the source audit retained under anything
+// but UNSUPPORTED, and the executable catalog retained under CONFIG_REJECTED,
+// which were the only two dispositions a compiler terminal could carry. The
+// first terminal filed as something else - a snapshot that had not arrived,
+// which is neither the definition's fault nor this build's - would have been
+// retained by one and dropped by the other, and dropped means the strategy
+// stops detecting for as long as the source is missing a piece.
+//
+// UNSUPPORTED is the one that does not retain, and for a reason that does not
+// generalise: this build cannot evaluate that definition at all, so an older
+// one of it is not a safer answer, it is the same refusal one revision back.
+func RetainsLastGoodDefinition(disposition Disposition) bool {
+	return disposition != DispositionUnsupported
+}
+
 func shouldRetainLastGood(dispositions []ObjectDisposition) bool {
 	for _, disposition := range dispositions {
-		if disposition.Disposition == DispositionUnsupported {
+		if !RetainsLastGoodDefinition(disposition.Disposition) {
 			return false
 		}
 	}

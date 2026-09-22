@@ -360,6 +360,7 @@ var failureFacets = map[string]facets{
 	// to be classified, not because either blocks the strategy -- its
 	// thresholds are detected either way.
 	"NO_DATA_CONFIG_INVALID":              {StageConfig, ClassConfig, DependencyNone},
+	"NO_DATA_PLAN_UNCOMPILABLE":           {StageConfig, ClassConfig, DependencyNone},
 	"NO_DATA_ROSTER_UNSUPPORTED":          {StageConfig, ClassConfig, DependencyNone},
 	"PROJECTION_INVALID":                  {StageConfig, ClassConfig, DependencyNone},
 	"PLAN_SET_CONFLICT":                   {StageConfig, ClassConfig, DependencyNone},

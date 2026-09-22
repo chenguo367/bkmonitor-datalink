@@ -665,18 +665,15 @@ var codeChecks = map[string]verdict{
 	// catalog_no_data_plans under its own suspended source and listed by
 	// strategy, which is the coverage question this belongs to rather than a
 	// first-screen line.
-	//
-	// The ruling above holds for the config layer's own refusal, where the
-	// Plan is compiled and only its absence detection is suspended. The
-	// compiler returns the same code as a Plan terminal for one shape the
-	// config layer cannot see - a no-data setting that passes validation and
-	// then runs its trigger window past a compile limit - and there the whole
-	// definition is refused. A reader met by that has a strategy which detects
-	// nothing, so it belongs on the line that says so; the catalog's
-	// disposition is what tells the two apart, and it is CONFIG_REJECTED only
-	// for the second.
-	"NO_DATA_CONFIG_INVALID":     lands(CheckPlanUnevaluable),
+	"NO_DATA_CONFIG_INVALID":     isNormal,
 	"NO_DATA_ROSTER_UNSUPPORTED": isNormal,
+	// The shape the config layer cannot see: a no-data setting that passes
+	// validation and then runs its trigger window past a compile limit refuses
+	// the whole definition. A reader met by this has a strategy that detects
+	// nothing, which is the line above rather than the one beside it. A reading
+	// keyed by code alone cannot tell two states apart under one code, which is
+	// why this shape has its own.
+	"NO_DATA_PLAN_UNCOMPILABLE": lands(CheckPlanUnevaluable),
 	// The definition's input projection, not this deployment's state
 	// projection: the compiler emits it for a plan whose input_projection is
 	// invalid, and the catalog files it as CONFIG_REJECTED beside PLAN_INVALID.

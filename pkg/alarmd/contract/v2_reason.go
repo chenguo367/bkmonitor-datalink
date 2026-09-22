@@ -59,9 +59,10 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonMultipleEvaluationUnitsUnsupported: {
 		ReasonMultipleEvaluationUnitsUnsupported, ReasonClassDeterministic, reasonOutcomeDomainsV2,
 	},
-	ReasonPlanDuplicateLevelID: {ReasonPlanDuplicateLevelID, ReasonClassDeterministic, reasonOutcomeDomainsV2},
-	ReasonPlanBudgetExceeded:   {ReasonPlanBudgetExceeded, ReasonClassDeterministic, reasonOutcomeDomainsV2},
-	ReasonNoDataConfigInvalid:  {ReasonNoDataConfigInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonPlanDuplicateLevelID:   {ReasonPlanDuplicateLevelID, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonPlanBudgetExceeded:     {ReasonPlanBudgetExceeded, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonNoDataConfigInvalid:    {ReasonNoDataConfigInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonNoDataPlanUncompilable: {ReasonNoDataPlanUncompilable, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	// Deterministic, every one of them: the definition and the snapshot it is
 	// compiled against are both frozen for the round, so the next attempt on
 	// the same pair reaches the same answer. A snapshot that arrives later

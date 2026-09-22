@@ -204,11 +204,14 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 			// that passes validation can still run the trigger window past a
 			// compiler limit.
 			//
-			// The reason is the config layer's, because this is the same setting
-			// failing a later check: enabled, but it produces no decision. The
-			// path keeps the no_data prefix to say which part of it.
+			// The code is this shape's own, not the config layer's. They are
+			// the same setting failing two different checks, but they leave the
+			// strategy in opposite states - one detects its thresholds and the
+			// other detects nothing - and a reader downstream has only the code
+			// to tell them apart. The path keeps the no_data prefix to say
+			// which part of the definition it was.
 			return CompileResult{planTerminal: &Terminal{
-				ReasonCode: contract.ReasonNoDataConfigInvalid,
+				ReasonCode: contract.ReasonNoDataPlanUncompilable,
 				FieldPath:  "no_data." + terminal.FieldPath,
 			}}, nil
 		default:

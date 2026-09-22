@@ -48,6 +48,14 @@ const (
 	ReasonPlanDuplicateLevelID       = "PLAN_DUPLICATE_LEVEL_ID"
 	ReasonPlanBudgetExceeded         = "PLAN_BUDGET_EXCEEDED"
 	ReasonNoDataConfigInvalid        = "NO_DATA_CONFIG_INVALID"
+	// ReasonNoDataPlanUncompilable names the shape the config layer cannot
+	// see: a no-data setting that passes validation and then runs its trigger
+	// window past a compile limit. It refuses the whole definition, where
+	// NO_DATA_CONFIG_INVALID leaves the strategy detecting its thresholds and
+	// suspends only its absence detection - which is why the two cannot share
+	// a code. A reader meeting one has a strategy that detects nothing; a
+	// reader meeting the other has a strategy that detects.
+	ReasonNoDataPlanUncompilable = "NO_DATA_PLAN_UNCOMPILABLE"
 	// The reasons a Plan's effective time refuses to compile. They are
 	// declared here, with every other code a reader can meet, because a code
 	// that exists only as a literal inside the compiler is one nothing
