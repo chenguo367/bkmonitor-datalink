@@ -263,7 +263,20 @@ const (
 	DispositionRemoved              Disposition = "REMOVED"
 	DispositionUnsupported          Disposition = "UNSUPPORTED_PHASE2_CAPABILITY"
 	DispositionCompatibilityIgnored Disposition = "COMPATIBILITY_IGNORED"
+	// DispositionConfigNormalized is an object accepted with a part of its
+	// configuration read as something other than what was written, the way
+	// Python reads it: the Plan runs, and this says what was widened. It
+	// is not withheld from anything; it is listed with the withheld
+	// dispositions because that is the list a reader looks at for "what did
+	// the catalog do to my strategy", and a widening that is not there is a
+	// widening nobody finds.
+	DispositionConfigNormalized Disposition = "CONFIG_NORMALIZED"
 )
+
+// ReasonEffectiveTimeRangeInvalid names a Level whose uptime has a range
+// with a start or end that does not parse, read as 00:00 or 23:59 as Python
+// reads it.
+const ReasonEffectiveTimeRangeInvalid = "EFFECTIVE_TIME_RANGE_INVALID"
 
 type ObjectDisposition struct {
 	SourceID    string
@@ -1652,6 +1665,12 @@ func compilePlan(
 		if len(detect.Trigger.Uptime) > 0 && string(detect.Trigger.Uptime) != "null" {
 			triggerFields["uptime"] = detect.Trigger.Uptime
 			triggerFields["timezone_ref"] = "BUSINESS_LOCAL"
+			// Named here, where the Leader can say which strategy and Level;
+			// the compiler reads the range as Python does and does not know
+			// whose it is.
+			if strategy.UptimeTimeRangesNormalized(detect.Trigger.Uptime) {
+				dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNormalized, Reason: ReasonEffectiveTimeRangeInvalid})
+			}
 		}
 		trigger, _ := json.Marshal(triggerFields)
 		recovery, _ := json.Marshal(map[string]any{"consecutive_windows": recoveryConfig.CheckWindow, "enabled": recoveryEnabled})

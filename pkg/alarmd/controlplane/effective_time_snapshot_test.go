@@ -108,3 +108,57 @@ func TestEffectiveTimeMultipleLevelsKeepTheirOwnUptime(t *testing.T) {
 		t.Fatalf("lost level requirements: %+v", levels)
 	}
 }
+
+// A strategy whose uptime has a range that does not parse is accepted, its
+// Level running on the range read as Python reads it, and the Leader names
+// the widening at the Level scope: CONFIG_NORMALIZED with
+// EFFECTIVE_TIME_RANGE_INVALID, the pair the composition always reports so
+// "no strategy was widened" is a reading too.
+func TestAMalformedTimeRangeIsAcceptedAndNamed(t *testing.T) {
+	build := func(start string) controlplane.Catalog {
+		document := map[string]any{}
+		if err := json.Unmarshal(realThresholdDocuments(t)[0], &document); err != nil {
+			t.Fatal(err)
+		}
+		for _, raw := range document["detects"].([]any) {
+			raw.(map[string]any)["trigger_config"].(map[string]any)["uptime"] = map[string]any{"time_ranges": []any{map[string]any{"start": start, "end": "17:00"}}}
+		}
+		encoded, _ := json.Marshal(document)
+		catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{{SourceID: "1001", Document: encoded, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}}}, Planner: &recordingPlanner{facts: queryFacts(t)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return catalog
+	}
+	named := func(catalog controlplane.Catalog) int {
+		count := 0
+		for _, disposition := range catalog.Dispositions {
+			if disposition.Disposition == controlplane.DispositionConfigNormalized && disposition.Reason == controlplane.ReasonEffectiveTimeRangeInvalid && disposition.Scope == "LEVEL" && disposition.SourceID == "1001" {
+				count++
+			}
+		}
+		return count
+	}
+	malformed := build("25:00")
+	if len(malformed.QueryGroups) != 1 || len(malformed.QueryGroups[0].Plans) != 1 {
+		t.Fatalf("a strategy with a malformed range was not accepted: %+v", malformed.Dispositions)
+	}
+	if named(malformed) == 0 {
+		t.Fatalf("the widening was not named: %+v", malformed.Dispositions)
+	}
+	compiled := compileWithEvaluationCore(t, malformed.QueryGroups[0].Plans[0].Plan, malformed.QueryGroups[0].QueryPlan.Normalization.DatasetContract)
+	ranges := compiled.Levels()[0].EffectiveTimeRequirement().TimeRanges()
+	if len(ranges) != 1 || ranges[0].StartMinute() != 0 || ranges[0].EndMinute() != 17*60 {
+		t.Fatalf("the Level runs on %+v, want 00:00..17:00 as Python reads a start that does not parse", ranges)
+	}
+	if named(build("09:00")) != 0 {
+		t.Fatal("a range that parses was named as widened")
+	}
+	found := false
+	for _, key := range controlplane.AlwaysReportedWithheld {
+		found = found || (key.Disposition == controlplane.DispositionConfigNormalized && key.Reason == controlplane.ReasonEffectiveTimeRangeInvalid)
+	}
+	if !found {
+		t.Fatal("the pair is not always reported, so its zero is not a reading")
+	}
+}
