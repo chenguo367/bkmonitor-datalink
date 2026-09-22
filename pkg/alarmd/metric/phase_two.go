@@ -1917,6 +1917,17 @@ func (gauge *loadedGauge) Set(value float64) {
 	gauge.loaded.Store(true)
 }
 
+// Unload takes the gauge off the scrape until something sets it again. For
+// a reading that belongs to a role this process has stopped playing: the
+// last value it had is not this process's answer any more, and a series
+// that keeps reporting it is worse than one that is absent, because the
+// absent one is read as "not this replica" and the stale one is read as a
+// current answer - and these gauges are aggregated with max across
+// replicas, so one replica's stale number outranks the current Leader's.
+func (gauge *loadedGauge) Unload() {
+	gauge.loaded.Store(false)
+}
+
 func (gauge *loadedGauge) Describe(ch chan<- *prometheus.Desc) {
 	gauge.gauge.Describe(ch)
 }
@@ -1924,6 +1935,29 @@ func (gauge *loadedGauge) Describe(ch chan<- *prometheus.Desc) {
 func (gauge *loadedGauge) Collect(ch chan<- prometheus.Metric) {
 	if gauge.loaded.Load() {
 		gauge.gauge.Collect(ch)
+	}
+}
+
+// ControlLeaderStepDown takes this process's Control Leader readings off the
+// scrape: it is not the Leader any more, and what it last saw as one is not
+// an answer about the fleet now. Every one of these is a leader-round gauge
+// whose HELP says to aggregate replicas with max, which is exactly the
+// aggregation a stale value wins.
+//
+// The per-replica gauges are not here: a replica reports its own view of
+// draining Query Groups, its own index staleness, whether it leads or not,
+// and those readings stay true.
+func (r *Recorder) ControlLeaderStepDown() {
+	if r == nil {
+		return
+	}
+	for _, gauge := range []*loadedGauge{
+		r.phaseTwo.rebalancePlannedMoves, r.phaseTwo.rebalanceGap, r.phaseTwo.shardUnawareReadyReplicas,
+		r.phaseTwo.activationHeldQueryGroups, r.phaseTwo.activationHeldAgeSecondsMax,
+	} {
+		if gauge != nil {
+			gauge.Unload()
+		}
 	}
 }
 

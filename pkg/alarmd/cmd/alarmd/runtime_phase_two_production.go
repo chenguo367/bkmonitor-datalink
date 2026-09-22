@@ -1294,16 +1294,21 @@ type productionPhaseTwoProgressReader interface {
 }
 
 type productionPhaseTwoOwnershipDependencies struct {
-	ExpiredRangeEnabled       bool
-	Store                     productionPhaseTwoOwnershipStore
-	WorkerID                  string
-	Catalog                   productionPhaseTwoSlotCatalog
-	Progress                  productionPhaseTwoProgressReader
-	Executor                  scheduler.Executor
-	Now                       func() time.Time
-	Reconcile                 *scheduler.Reconciler
-	ControlLeaderTTL          time.Duration
-	Observer                  observability.Observer
+	ExpiredRangeEnabled bool
+	Store               productionPhaseTwoOwnershipStore
+	WorkerID            string
+	Catalog             productionPhaseTwoSlotCatalog
+	Progress            productionPhaseTwoProgressReader
+	Executor            scheduler.Executor
+	Now                 func() time.Time
+	Reconcile           *scheduler.Reconciler
+	ControlLeaderTTL    time.Duration
+	Observer            observability.Observer
+	// SteppedDownAsLeader is told when this process stops being the Control
+	// Leader, so the readings that belong to the role can be taken off the
+	// scrape. Optional; a runtime without it keeps its last readings, which
+	// is what every runtime did before.
+	SteppedDownAsLeader       func()
 	Flights                   *scheduler.FlightCoordinator
 	RecoveryLimits            scheduler.RecoveryLimits
 	PostRecoveryTerminalDelay time.Duration
@@ -2353,6 +2358,12 @@ func (runtime *productionPhaseTwoOwnership) clearControlAuthority(authority owne
 	if runtime.authority.Fence == authority.Fence {
 		runtime.authority = ownership.PublicationAuthority{}
 		runtime.viewStepDown()
+		// The leader-round readings go with the role. They are aggregated
+		// across replicas with max, so a replica that stopped leading and
+		// kept its last reading outranks the Leader that has one.
+		if steppedDown := runtime.dependencies.SteppedDownAsLeader; steppedDown != nil {
+			steppedDown()
+		}
 	}
 }
 
