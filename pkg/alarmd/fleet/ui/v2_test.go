@@ -87,8 +87,11 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 					{At: at.Add(-time.Minute), Cause: fleet.HoleNotInMemory}},
 				MissingTotal: 3, Verdict: fleet.VerdictInputIncomplete, HolesBy: fleet.WindowHoleCounts{AnsweredWithoutSeries: 1, InputIncomplete: 1, NotInMemory: 1}}}}}
 	// A second object whose windows are named while its short count is
-	// zero: the two fields travel separately and nothing keeps them in
-	// step, so the page must show what is there, not what is counted.
+	// zero. This shape does not reach the page from production -- the
+	// evaluator names a window under the condition it counts it, and
+	// normalize drops a coverage with more windows than its count -- so
+	// the fixture pins the page's rule, not a drift that happened: the
+	// block is gated on the windows being there, never on the count.
 	named := fleet.Anomaly{QueryGroup: "qg-window-fedcba", Since: since, SinceFrom: fleet.SinceBusinessState, CauseReason: "HISTORY_GAPPED",
 		Standing: &standing, Finding: fleet.Finding{Check: fleet.CheckWindowUndecided},
 		Coverage: &fleet.HistoryCoverage{Levels: 1,

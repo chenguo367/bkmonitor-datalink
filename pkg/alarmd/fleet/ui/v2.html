@@ -256,9 +256,13 @@ function objectLine(row) {
   li.title = (standing.check || '') + (row.cause_reason ? ' · ' + row.cause_reason : '');
   // Whether there is anything to show is decided by what is there -- the
   // named windows -- not by the parallel count of short windows, which
-  // only writes the summary sentence. Nothing keeps the two in step, and a
-  // block hidden behind the wrong one of them disappears rather than
-  // misreads.
+  // only writes the summary sentence. This is a rule, not a repair: the
+  // server's contract already forbids more windows than the count (the
+  // evaluator names a window under the same condition it counts it, and
+  // normalize drops a coverage that says otherwise), so the two never
+  // disagreed in production. The page still does not gate a list on a
+  // number, because a block hidden behind the wrong field disappears
+  // rather than misreads.
   var coverage = row.coverage || {};
   var windows = coverage.windows || [];
   if (windows.length > 0 || coverage.short > 0) {
