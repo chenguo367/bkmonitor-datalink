@@ -211,9 +211,25 @@ func TestARoundThatSummarisedNoWindowStillSaysWhyOnTheLine(t *testing.T) {
 			t.Errorf("the line lacks %q:\n%s", want, described)
 		}
 	}
-	// A round with nothing to explain does not carry the pair at all.
-	quiet := line(&HistoryCoverageFacts{Levels: 9})
+	// The other count is its own statement -- not "they were all carried
+	// forward" but "not one of them could be read" -- and a condition written
+	// on only the first would still pass every case above it.
+	unreadable := line(&HistoryCoverageFacts{Constrained: 249})
+	for _, want := range []string{"history_constrained=249", "history_levels=0"} {
+		if !strings.Contains(unreadable, want) {
+			t.Errorf("the line lacks %q:\n%s", want, unreadable)
+		}
+	}
+	// A round with nothing to explain does not carry the pair at all, and
+	// still carries its named window. The two blocks are independent: this
+	// pins that, so folding them back together goes red rather than taking
+	// the window facts down with it.
+	quiet := line(&HistoryCoverageFacts{Levels: 9, Short: 1,
+		Windows: []HistoryWindowFact{namedWindow()}})
 	if strings.Contains(quiet, "history_resumed") || strings.Contains(quiet, "history_constrained") {
 		t.Errorf("a round that summarised every window carries the pair:\n%s", quiet)
+	}
+	if !strings.Contains(quiet, "history_worst_series") {
+		t.Errorf("the ordinary round lost its named window:\n%s", quiet)
 	}
 }
