@@ -264,7 +264,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 				guardReason = durableGuardReasons[l.Definition().LevelID]
 			}
 			coverage.ObserveWindow(execution.WindowCoverage{
-				LevelID: l.Definition().LevelID, Series: series,
+				Plan: due.Identity, LevelID: l.Definition().LevelID, Series: series,
 				Valid: summary.ValidPositions, Required: summary.RequiredPositions, End: record.SourceTime(),
 				Missing: holes.Missing, MissingTotal: holes.MissingTotal,
 				Unusable: holes.Unusable, UnusableTotal: holes.UnusableTotal,

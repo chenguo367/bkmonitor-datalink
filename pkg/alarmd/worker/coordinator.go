@@ -2380,6 +2380,7 @@ func historyCoverageFacts(coverage execution.HistoryCoverage) *observability.His
 	}
 	for _, window := range coverage.Windows {
 		facts.Windows = append(facts.Windows, observability.HistoryWindowFact{
+			Strategy: window.Plan.StrategyID, Business: window.Plan.BusinessID,
 			Series: string(window.Series), Level: window.LevelID, Valid: window.Valid, Required: window.Required, End: window.End,
 			Missing: append([]int64(nil), window.Missing...), MissingTotal: window.MissingTotal,
 			Unusable: append([]int64(nil), window.Unusable...), UnusableTotal: window.UnusableTotal,

@@ -2233,6 +2233,14 @@ const (
 
 // WindowCoverage is one short window of the round, by identity.
 type WindowCoverage struct {
+	// Plan is which Plan's window this is, and is part of its identity.
+	// LevelID is an ordinal inside a Plan, so Level 1 of two Plans is two
+	// different Levels sharing a number; history is stored per Plan
+	// (StateKeyIdentity), so one series under two Plans is two independent
+	// windows rather than one window seen twice. A Query Group exists so
+	// several strategies can share one query, which makes that the ordinary
+	// case and not a corner.
+	Plan     PlanIdentity
 	LevelID  uint32
 	Series   SeriesIdentityDigest
 	Valid    uint32
@@ -2270,21 +2278,30 @@ func (window WindowCoverage) Shortfall() uint32 {
 // windows however its records were ordered. A window that is not short is
 // not a hole and is not kept.
 //
-// A window is one series at one Level, and that pair is its identity: an
-// object whose Plans cover the same series reaches the same window once per
-// Plan, and without this every one of those was a separate entry. On a
-// deployment with a six-Plan object the list came back seven long with four
-// distinct windows in it -- three entries byte-identical to another three --
-// so three of the worst eight places went to copies and three genuinely
-// different windows were pushed off the end the reader never saw. The worse
-// reading of a repeated window wins, which for an identical repeat is the
+// A window is one Plan's series at one Level, and that triple is its
+// identity. Within a Plan a series is summarised once per record of the
+// round -- each with its own End -- and the worst of those is the one to
+// keep: on a deployment with a six-Plan object the list came back seven long
+// with four distinct windows in it, three entries byte-identical to another
+// three, so three of the worst eight places went to copies and three
+// genuinely different windows were pushed off the end the reader never saw.
+//
+// Across Plans it is not a repeat at all, which is why the Plan is in the
+// identity and not just the pair: Level numbers are Plan-local, so two Plans
+// requiring different window lengths both report "Level 1", and folding them
+// dropped one of the two without a trace -- four points of five under one
+// strategy replaced by ten of thirty under another, with nothing on the
+// entry naming either. Dropping a reading leaves nothing behind to notice,
+// which is why this is the harder direction of the two.
+//
+// The worse reading of a repeat wins, which for an identical repeat is the
 // one already kept.
 func (coverage *HistoryCoverage) ObserveWindow(window WindowCoverage) {
 	if coverage == nil || window.Required == 0 || window.Shortfall() == 0 {
 		return
 	}
 	for index, kept := range coverage.Windows {
-		if kept.Series != window.Series || kept.LevelID != window.LevelID {
+		if kept.Plan != window.Plan || kept.Series != window.Series || kept.LevelID != window.LevelID {
 			continue
 		}
 		if !worseWindow(window, kept) {
@@ -2317,7 +2334,16 @@ func worseWindow(left, right WindowCoverage) bool {
 	if left.Series != right.Series {
 		return left.Series < right.Series
 	}
-	return left.LevelID < right.LevelID
+	if left.LevelID != right.LevelID {
+		return left.LevelID < right.LevelID
+	}
+	// Plans last, so the order two Plans' windows come out in is fixed too:
+	// the list has to be the same however the round's records were ordered,
+	// and two Plans of one object can now both be in it.
+	if left.Plan.StrategyID != right.Plan.StrategyID {
+		return left.Plan.StrategyID < right.Plan.StrategyID
+	}
+	return left.Plan.BusinessID < right.Plan.BusinessID
 }
 
 // ObserveUnusable records one Level whose detection could not use this

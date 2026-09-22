@@ -91,8 +91,12 @@ func queryFreeCompletion(kind string) bool {
 }
 
 // windowKey is the identity a reader follows across rounds.
-func windowKey(series string, level uint32) string {
-	return series + "/" + strconv.FormatUint(uint64(level), 10)
+func windowKey(strategy, series string, level uint32) string {
+	key := series + "/" + strconv.FormatUint(uint64(level), 10)
+	if strategy == "" {
+		return key
+	}
+	return strategy + "/" + key
 }
 
 // windowRows reads every named window of the round against the object's
@@ -106,7 +110,8 @@ func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts) [
 	rows := make([]WindowRow, 0, len(facts.Windows))
 	for _, window := range facts.Windows {
 		row := WindowRow{
-			Key: windowKey(window.Series, window.Level), Series: window.Series, Level: window.Level,
+			Key:      windowKey(window.Strategy, window.Series, window.Level),
+			Strategy: window.Strategy, Business: window.Business, Series: window.Series, Level: window.Level,
 			Valid: window.Valid, Required: window.Required, End: time.Unix(window.End, 0).UTC(),
 			Guarded: window.Guarded, GuardReason: window.GuardReason, Fresh: window.Fresh,
 			MissingTotal: window.MissingTotal, UnusableTotal: window.UnusableTotal,
