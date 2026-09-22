@@ -254,12 +254,20 @@ function objectLine(row) {
   if (row.since) parts.push('自 ' + ago(row.since));
   li.appendChild(text('span', parts.join(' · ')));
   li.title = (standing.check || '') + (row.cause_reason ? ' · ' + row.cause_reason : '');
-  var coverage = row.coverage;
-  if (coverage && coverage.short > 0) {
+  // Whether there is anything to show is decided by what is there -- the
+  // named windows -- not by the parallel count of short windows, which
+  // only writes the summary sentence. Nothing keeps the two in step, and a
+  // block hidden behind the wrong one of them disappears rather than
+  // misreads.
+  var coverage = row.coverage || {};
+  var windows = coverage.windows || [];
+  if (windows.length > 0 || coverage.short > 0) {
     var sub = document.createElement('ul');
-    sub.appendChild(text('li', '最差窗口 ' + coverage.worst_valid + '/' + coverage.worst_required + '，短窗 ' + coverage.short + ' 个'
-      + (coverage.worst_window_changed ? '（最差的换了一条序列）' : '')));
-    (coverage.windows || []).forEach(function (window) {
+    if (coverage.short > 0) {
+      sub.appendChild(text('li', '最差窗口 ' + coverage.worst_valid + '/' + coverage.worst_required + '，短窗 ' + coverage.short + ' 个'
+        + (coverage.worst_window_changed ? '（最差的换了一条序列）' : '')));
+    }
+    windows.forEach(function (window) {
       var holes = (window.holes || []).map(function (hole) { return clockLabel(hole.at) + ' ' + word('hole', hole.cause); });
       var head = '序列 ' + String(window.series).slice(0, 8) + '：' + window.valid + '/' + window.required + '，' + word('verdict', window.verdict);
       var item = text('li', head + (holes.length ? '；缺 ' + holes.join('、') : ''));

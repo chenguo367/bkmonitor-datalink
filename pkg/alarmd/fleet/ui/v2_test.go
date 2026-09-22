@@ -86,9 +86,18 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 					{At: at.Add(-2 * time.Minute), Cause: fleet.HoleInputIncomplete, Round: "COMPLETED_WITH_UNAVAILABLE", Reason: "QUERY_TIMEOUT"},
 					{At: at.Add(-time.Minute), Cause: fleet.HoleNotInMemory}},
 				MissingTotal: 3, Verdict: fleet.VerdictInputIncomplete, HolesBy: fleet.WindowHoleCounts{AnsweredWithoutSeries: 1, InputIncomplete: 1, NotInMemory: 1}}}}}
+	// A second object whose windows are named while its short count is
+	// zero: the two fields travel separately and nothing keeps them in
+	// step, so the page must show what is there, not what is counted.
+	named := fleet.Anomaly{QueryGroup: "qg-window-fedcba", Since: since, SinceFrom: fleet.SinceBusinessState, CauseReason: "HISTORY_GAPPED",
+		Standing: &standing, Finding: fleet.Finding{Check: fleet.CheckWindowUndecided},
+		Coverage: &fleet.HistoryCoverage{Levels: 1,
+			Windows: []fleet.WindowRow{{Key: "series-two/1", Series: "series-two", Level: 1, Valid: 8, Required: 9, End: at,
+				Holes:         []fleet.WindowHole{{At: at.Add(-4 * time.Minute), Cause: fleet.HolePointUnusable, Round: "FULL_COMPLETED"}},
+				UnusableTotal: 1, Verdict: fleet.VerdictPointsUnusable, HolesBy: fleet.WindowHoleCounts{Unusable: 1}}}}}
 	card := fleet.StrategyStanding{StrategyID: "4101", AnsweredBy: "pod-a", Publication: fleet.StrategyPublication{SnapshotRevision: "53b81c9bbb2e", Epoch: 9},
 		Standing: fleet.StandingDetecting, Found: true, Line: "策略 4101：已生效，1 个对象在检测：qg-window-abc（pod-a 持有，数据没到·数据负责人查）",
-		Plans: []fleet.StrategyPlanStanding{{StrategyPlanRef: fleet.StrategyPlanRef{QueryGroup: "qg-window-abcdef", Business: "7"}, Replica: "pod-a", Existence: "active", Rows: []fleet.Anomaly{row},
+		Plans: []fleet.StrategyPlanStanding{{StrategyPlanRef: fleet.StrategyPlanRef{QueryGroup: "qg-window-abcdef", Business: "7"}, Replica: "pod-a", Existence: "active", Rows: []fleet.Anomaly{row, named},
 			Config: &fleet.StrategyPlanConfigs{Redacted: true, Items: []fleet.StrategyPlanConfig{{
 				PlanID:   "4101",
 				Schedule: fleet.StrategyScheduleConfig{IntervalSeconds: 60},
@@ -128,10 +137,17 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 		"查询正常返回，这条序列不在结果里", "本侧那一轮没查全", "超出本进程记忆", "本侧没查全",
 		"每 60 秒检测一次", "查 system.cpu_summary 的 usage，avg_over_time 60s", "目标 36 个", "级别 1：5 个周期内 1 次异常触发，连续 5 个周期正常恢复",
 		"最差的换了一条序列",
+		// The named window of the object whose short count is zero.
+		"序列 series-t：8/9，记录检测用不了；缺 ", "记录到了，检测用不了",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the rendering lacks %q:\n%s", want, rendered)
 		}
+	}
+	// The summary sentence is the count's alone: one object counts a short
+	// window, so it is written once, not once per object with windows.
+	if got := strings.Count(rendered, "短窗 "); got != 1 {
+		t.Errorf("the short-window summary is written %d times, want once:\n%s", got, rendered)
 	}
 	// No code word in what a reader sees: the check, the rule, the reason,
 	// the verdict code all stay in titles and the folded coordinates.

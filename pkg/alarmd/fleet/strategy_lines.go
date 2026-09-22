@@ -48,6 +48,13 @@ type StrategyLine struct {
 
 // StrategyListResponse is GET /api/strategies.
 type StrategyListResponse struct {
+	// Words travels on every response, beside the lines it renders, and
+	// not from an endpoint of its own: the vocabulary and the data it
+	// words must arrive together. Served separately, a page could hold
+	// last release's table against this release's lines, and a word the
+	// release added would render blank or as its code -- the very thing
+	// keeping the words out of the page exists to prevent. Its size is
+	// not the argument either way.
 	Words      Words          `json:"words"`
 	Strategies []StrategyLine `json:"strategies"`
 	// Summary is over every line before the filter: how many strategies
