@@ -7,7 +7,6 @@ package execution
 
 import (
 	"reflect"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -632,64 +631,73 @@ func stateRetentionPoints(plan DuePlan) uint32 {
 	return retention
 }
 
-// validateStateHistoryReplacement proves that Points is the complete bounded
-// replacement snapshot obtained from the loaded history plus this batch's
-// affected anchors. Retention may evict only the oldest points.
+// validateStateHistoryReplacement proves that Points is this round's addition
+// to the loaded record and nothing else: every point anchored in this batch,
+// ordered and unique, and where it lands on a position the loaded history
+// already holds, the same record carrying at least the facts that were stored.
+// BaseHistory must be the history that was loaded, and the retention bound the
+// one the compiled Plan asks for.
+//
+// It used to prove that Points was the whole bounded window. The window is
+// still what gets written; it is now assembled at serialization from these two
+// fields, so what has to be proved here is that the pair describes it.
 func validateStateHistoryReplacement(loaded []StateHistoryPoint, mutation StateMutation, retention uint32) error {
 	if retention == 0 {
 		return resultContractViolation(codeHistoryRetentionBoundMissing, "State history replacement lacks a retention bound")
+	}
+	// Derived by the producer, derived again here from the compiled Plan, and
+	// compared. One derivation would let the bound the write uses drift from
+	// the bound the Plan asks for with nothing to notice.
+	if mutation.RetentionPoints != retention {
+		return resultContractViolation(codeHistoryRetentionBoundMissing, "State mutation carries a retention bound the Plan does not ask for")
+	}
+	if len(mutation.BaseHistory) != len(loaded) {
+		return resultContractViolation(codeHistoryLoadedPointChanged, "State mutation base is not the loaded history")
+	}
+	for index := range loaded {
+		if !reflect.DeepEqual(loaded[index], mutation.BaseHistory[index]) {
+			return resultContractViolation(codeHistoryLoadedPointChanged, "State mutation base is not the loaded history")
+		}
 	}
 	affected := make(map[RecordAnchor]struct{}, len(mutation.AffectedRecords))
 	for _, anchor := range mutation.AffectedRecords {
 		affected[anchor] = struct{}{}
 	}
 	loadedPoints := make(map[RecordAnchor]StateHistoryPoint, len(loaded))
-	allAnchors := make(map[RecordAnchor]struct{}, len(loaded)+len(affected))
 	for _, point := range loaded {
-		anchor := RecordAnchor{RecordID: point.RecordID, SourceTime: point.SourceTime}
-		loadedPoints[anchor] = point
-		allAnchors[anchor] = struct{}{}
-	}
-	if len(mutation.Points) != 0 {
-		for anchor := range affected {
-			allAnchors[anchor] = struct{}{}
-		}
-	}
-	for _, point := range mutation.Points {
-		anchor := RecordAnchor{RecordID: point.RecordID, SourceTime: point.SourceTime}
-		if loadedPoint, ok := loadedPoints[anchor]; ok {
-			if !reflect.DeepEqual(loadedPoint, point) {
-				return resultContractViolation(codeHistoryLoadedPointChanged, "State history replacement changes a loaded point")
-			}
-			continue
-		}
-		if _, current := affected[anchor]; !current {
-			return resultContractViolation(codeHistoryLoadedPointInvented, "State history replacement changes or invents a loaded point")
-		}
-	}
-	expectedAnchors := make([]RecordAnchor, 0, len(allAnchors))
-	for anchor := range allAnchors {
-		expectedAnchors = append(expectedAnchors, anchor)
-	}
-	sort.Slice(expectedAnchors, func(left, right int) bool {
-		if expectedAnchors[left].SourceTime != expectedAnchors[right].SourceTime {
-			return expectedAnchors[left].SourceTime < expectedAnchors[right].SourceTime
-		}
-		return expectedAnchors[left].RecordID < expectedAnchors[right].RecordID
-	})
-	if len(expectedAnchors) > int(retention) {
-		expectedAnchors = expectedAnchors[len(expectedAnchors)-int(retention):]
-	}
-	if len(expectedAnchors) != len(mutation.Points) {
-		return resultContractViolation(codeHistorySnapshotIncomplete, "State history replacement is not the complete bounded snapshot")
+		loadedPoints[RecordAnchor{RecordID: point.RecordID, SourceTime: point.SourceTime}] = point
 	}
 	for index, point := range mutation.Points {
+		if index > 0 && StateHistoryOrder(mutation.Points[index-1], point) >= 0 {
+			return resultContractViolation(codeHistorySnapshotIncomplete, "State history addition is not ordered and unique")
+		}
 		anchor := RecordAnchor{RecordID: point.RecordID, SourceTime: point.SourceTime}
-		if anchor != expectedAnchors[index] {
-			return resultContractViolation(codeHistorySnapshotIncomplete, "State history replacement is not the complete bounded snapshot")
+		if _, current := affected[anchor]; !current {
+			return resultContractViolation(codeHistoryLoadedPointInvented, "State history addition carries a point this batch did not evaluate")
+		}
+		stored, landsOnLoaded := loadedPoints[anchor]
+		if !landsOnLoaded {
+			continue
+		}
+		// The addition replaces the stored point at that position, so it has to
+		// carry what was stored there. A fact that disappears this way is a
+		// silent history rewrite: the point stays, the Level's past does not.
+		for _, fact := range stored.Levels {
+			if !containsStateLevelFact(point.Levels, fact) {
+				return resultContractViolation(codeHistoryLoadedPointChanged, "State history addition drops a stored Level fact")
+			}
 		}
 	}
 	return nil
+}
+
+func containsStateLevelFact(facts []StateLevelFact, fact StateLevelFact) bool {
+	for _, candidate := range facts {
+		if candidate == fact {
+			return true
+		}
+	}
+	return false
 }
 
 func stateUnknownMayAdvance(input InternalExecution, mutation StateMutation, outcome LevelOutcome) bool {

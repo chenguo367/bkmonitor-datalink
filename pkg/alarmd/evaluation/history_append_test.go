@@ -52,17 +52,18 @@ func TestReEvaluatingAStoredRecordDoesNotBreakItsOwnHistory(t *testing.T) {
 	for _, evaluated := range result.Plans {
 		for _, state := range evaluated.StateResults {
 			mutations++
+			record := recordLeftBehind(t, state.Mutation)
 			previous, previousID := int64(-1), ""
-			for index, p := range state.Mutation.Points {
+			for index, p := range record {
 				if index > 0 && (p.SourceTime < previous ||
 					(p.SourceTime == previous && p.RecordID <= previousID)) {
 					t.Fatalf("history is not strictly increasing at index %d: source %d after %d", index, p.SourceTime, previous)
 				}
 				previous, previousID = p.SourceTime, p.RecordID
 			}
-			if len(state.Mutation.Points) != len(stored) {
+			if len(record) != len(stored) {
 				t.Fatalf("re-evaluating a stored record changed the point count: got %d, want %d",
-					len(state.Mutation.Points), len(stored))
+					len(record), len(stored))
 			}
 		}
 	}
@@ -362,4 +363,19 @@ func TestEvaluationSaysWhichLevelsCouldNotUseTheRecordAndWhy(t *testing.T) {
 	if got := result.Plans[0].HistoryCoverage; got.Unusable != 0 || got.UnusableReason != "" {
 		t.Fatalf("a usable record reports unusable = %d (%q)", got.Unusable, got.UnusableReason)
 	}
+}
+
+// recordLeftBehind is the record this mutation writes: the history it was
+// built against with the round's points merged in, bounded by the retention
+// it carries. The mutation names the addition, so a test about what the
+// history looks like afterwards has to ask for the merge rather than read
+// Points - reading Points would be asking what the round evaluated, which is
+// a different question that happens to have had the same answer before.
+func recordLeftBehind(t testing.TB, mutation execution.StateMutation) []execution.StateHistoryPoint {
+	t.Helper()
+	record, err := execution.MergedHistory(mutation.BaseHistory, mutation.Points, mutation.RetentionPoints)
+	if err != nil {
+		t.Fatalf("merge the record the mutation leaves behind: %v", err)
+	}
+	return record
 }

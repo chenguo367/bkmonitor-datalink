@@ -198,8 +198,18 @@ func TestEvaluatorBoundsPersistedHistoryAcrossOneSeriesBatch(t *testing.T) {
 		t.Fatalf("Evaluate()=%v", err)
 	}
 	result := evaluated.Plans[0]
-	if len(result.StateResults) != 1 || len(result.StateResults[0].Mutation.AffectedRecords) != 3 || len(result.StateResults[0].Mutation.Points) != 2 {
-		t.Fatalf("history was not bounded independently from affected records: %+v", result.StateResults)
+	if len(result.StateResults) != 1 || len(result.StateResults[0].Mutation.AffectedRecords) != 3 {
+		t.Fatalf("the batch's affected records were not all carried: %+v", result.StateResults)
+	}
+	// The bound holds over the record the write leaves behind, not over the
+	// points the round evaluated: three records were evaluated and all three
+	// travel as the addition, and the retention of two decides what survives.
+	if record := recordLeftBehind(t, result.StateResults[0].Mutation); len(record) != 2 {
+		t.Fatalf("history was not bounded independently from affected records: %+v", record)
+	}
+	if points := len(result.StateResults[0].Mutation.Points); points != 3 {
+		t.Fatalf("the addition carries %d points, want the batch's three: truncating at the producer is "+
+			"what moves the bound away from the record it bounds", points)
 	}
 }
 
@@ -517,12 +527,21 @@ func TestEvaluatorAdvancesLoadedPlanGapAfterFullStateMutation(t *testing.T) {
 	}
 }
 
+// stateViewFromMutation is the record a following round would load after this
+// mutation landed. The history is the merge the store performs, not the points
+// the mutation names: a fixture that fed the addition back as the whole record
+// would shrink the window by one round each time and quietly stop reproducing
+// whatever it was built to reproduce.
 func stateViewFromMutation(mutation execution.StateMutation, status execution.StateLoadStatus) execution.RuntimeStateView {
 	levels := make([]execution.RuntimeLevelStateView, len(mutation.Levels))
 	for i, level := range mutation.Levels {
 		levels[i] = execution.RuntimeLevelStateView{LevelID: level.LevelID, LevelStateCompatibility: level.LevelStateCompatibility, HistoryCompleteness: level.HistoryCompleteness, GapReasonCode: level.GapReasonCode, WarmupRequirementRef: level.WarmupRequirementRef, LastProcessedEventTime: level.LastProcessedEventTime}
 	}
-	return execution.RuntimeStateView{Identity: mutation.Identity, Status: status, BlobRevision: mutation.ExpectedBlobRevision + 1, VersionComparison: execution.ApplyVersionPersistedOlder, History: append([]execution.StateHistoryPoint(nil), mutation.Points...), Levels: levels, SeriesGuard: mutation.SeriesGuard}
+	history, err := execution.MergedHistory(mutation.BaseHistory, mutation.Points, mutation.RetentionPoints)
+	if err != nil {
+		panic(err)
+	}
+	return execution.RuntimeStateView{Identity: mutation.Identity, Status: status, BlobRevision: mutation.ExpectedBlobRevision + 1, VersionComparison: execution.ApplyVersionPersistedOlder, History: history, Levels: levels, SeriesGuard: mutation.SeriesGuard}
 }
 
 // NORMAL is still forbidden under either guard, and that half is untouched: an

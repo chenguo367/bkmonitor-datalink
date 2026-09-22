@@ -48,6 +48,21 @@ func retainedStateMutationBytes(mutation execution.StateMutation) uint64 {
 	// dropping a field somebody adds later.
 	withoutHistory := mutation
 	withoutHistory.Points = nil
+	// BaseHistory is blanked and never charged, which is the one place this
+	// accounting deliberately counts zero for something that is reachable.
+	//
+	// It is the history the Slot loaded, held by the StatePreflightResult for
+	// as long as the Slot runs - the result contract reads it after every
+	// series is evaluated, and the apply needs it. The mutation points at that
+	// slice; referencing it allocates nothing and frees nothing sooner. Before
+	// this field existed the mutation carried a rebuilt copy of the same window
+	// and that copy was charged, correctly, because it was a second array.
+	//
+	// So the charge dropping is the copy going away, not a window escaping the
+	// budget. What has to stay true for that to hold is that nobody makes
+	// BaseHistory a slice of its own; two tests pin the pair - a long base
+	// costs no more than an empty one, and the round's own points still cost.
+	withoutHistory.BaseHistory = nil
 	total := retainedObjectBytes(withoutHistory)
 	total += uint64(cap(mutation.Points)) * uint64(unsafe.Sizeof(execution.StateHistoryPoint{}))
 	for index := range mutation.Points {

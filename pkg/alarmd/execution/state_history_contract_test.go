@@ -7,90 +7,150 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 )
 
-func TestStateHistoryReplacementPreservesLoadedPrefixAndAppendsAffectedPoint(t *testing.T) {
+// The mutation names what this round adds; the record it leaves behind is that
+// merged into the history it was built against. So the contract proves the
+// pair: the base is the history that was loaded, the addition is this batch's
+// own points in order, and the bound is the Plan's.
+func TestStateHistoryAdditionCarriesThisBatchAgainstTheLoadedRecord(t *testing.T) {
 	loaded := []StateHistoryPoint{stateHistoryPoint("old", 10, LevelFactNormal)}
 	mutation := StateMutation{
 		AffectedRecords: []RecordAnchor{{RecordID: "current", SourceTime: 20}},
-		Points: []StateHistoryPoint{
-			stateHistoryPoint("old", 10, LevelFactNormal),
-			stateHistoryPoint("current", 20, LevelFactAnomalous),
-		},
+		Points:          []StateHistoryPoint{stateHistoryPoint("current", 20, LevelFactAnomalous)},
+		RetentionPoints: 3,
+		BaseHistory:     loaded,
 	}
 	if err := validateStateHistoryReplacement(loaded, mutation, 3); err != nil {
-		t.Fatalf("valid replacement rejected: %v", err)
+		t.Fatalf("valid addition rejected: %v", err)
 	}
 }
 
-func TestStateHistoryReplacementAllowsOnlyBoundedOldestEviction(t *testing.T) {
+// Eviction is no longer the producer's to perform, so the producer no longer
+// proves it: the addition is the same whether the merged record fits the bound
+// or overflows it, and the bound travels for the store to apply.
+func TestStateHistoryAdditionIsTheSameWhetherTheBoundEvictsOrNot(t *testing.T) {
 	loaded := []StateHistoryPoint{
 		stateHistoryPoint("oldest", 10, LevelFactNormal),
 		stateHistoryPoint("old", 20, LevelFactAnomalous),
 	}
 	mutation := StateMutation{
 		AffectedRecords: []RecordAnchor{{RecordID: "current", SourceTime: 30}},
-		Points: []StateHistoryPoint{
-			stateHistoryPoint("old", 20, LevelFactAnomalous),
-			stateHistoryPoint("current", 30, LevelFactNormal),
-		},
+		Points:          []StateHistoryPoint{stateHistoryPoint("current", 30, LevelFactNormal)},
+		RetentionPoints: 2,
+		BaseHistory:     loaded,
 	}
 	if err := validateStateHistoryReplacement(loaded, mutation, 2); err != nil {
-		t.Fatalf("bounded oldest eviction rejected: %v", err)
+		t.Fatalf("addition under an evicting bound rejected: %v", err)
+	}
+	merged, err := MergedHistory(mutation.BaseHistory, mutation.Points, mutation.RetentionPoints)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if len(merged) != 2 || merged[0].RecordID != "old" || merged[1].RecordID != "current" {
+		t.Fatalf("the bound must evict the oldest of the merged record, got %+v", merged)
 	}
 }
 
-func TestStateHistoryReplacementAllowsOlderAffectedPointEvictedInSameBatch(t *testing.T) {
-	mutation := StateMutation{
-		AffectedRecords: []RecordAnchor{
-			{RecordID: "first", SourceTime: 10},
-			{RecordID: "second", SourceTime: 20},
-		},
-		Points: []StateHistoryPoint{stateHistoryPoint("second", 20, LevelFactAnomalous)},
-	}
-	if err := validateStateHistoryReplacement(nil, mutation, 1); err != nil {
-		t.Fatalf("bounded same-batch eviction rejected: %v", err)
-	}
-}
-
-func TestStateHistoryReplacementRejectsLoadedPrefixTamperingOrUnneededLoss(t *testing.T) {
+// The bound is derived twice - by the producer from the compiled Plan, and
+// here from the same Plan - and compared. One derivation would let the bound
+// the write truncates by drift from the one the Plan asks for, and the only
+// visible symptom would be points quietly missing from records.
+func TestStateHistoryAdditionRejectsARetentionBoundThePlanDoesNotAskFor(t *testing.T) {
 	loaded := []StateHistoryPoint{stateHistoryPoint("old", 10, LevelFactNormal)}
-	base := StateMutation{
+	mutation := StateMutation{
+		AffectedRecords: []RecordAnchor{{RecordID: "current", SourceTime: 20}},
+		Points:          []StateHistoryPoint{stateHistoryPoint("current", 20, LevelFactAnomalous)},
+		RetentionPoints: 9,
+		BaseHistory:     loaded,
+	}
+	if err := validateStateHistoryReplacement(loaded, mutation, 3); err == nil {
+		t.Fatal("a mutation whose bound is not the Plan's must be rejected")
+	}
+	mutation.RetentionPoints = 0
+	if err := validateStateHistoryReplacement(loaded, mutation, 3); err == nil {
+		t.Fatal("a mutation carrying no bound must be rejected")
+	}
+}
+
+func TestStateHistoryAdditionRejectsABaseThatIsNotTheLoadedHistory(t *testing.T) {
+	loaded := []StateHistoryPoint{stateHistoryPoint("old", 10, LevelFactNormal)}
+	mutation := StateMutation{
+		AffectedRecords: []RecordAnchor{{RecordID: "current", SourceTime: 20}},
+		Points:          []StateHistoryPoint{stateHistoryPoint("current", 20, LevelFactAnomalous)},
+		RetentionPoints: 3,
+	}
+	if err := validateStateHistoryReplacement(loaded, mutation, 3); err == nil {
+		t.Fatal("an absent base must be rejected while a history was loaded")
+	}
+	mutation.BaseHistory = []StateHistoryPoint{stateHistoryPoint("old", 10, LevelFactAnomalous)}
+	if err := validateStateHistoryReplacement(loaded, mutation, 3); err == nil {
+		t.Fatal("a base that rewrites a loaded point must be rejected")
+	}
+}
+
+func TestStateHistoryAdditionRejectsAPointThisBatchDidNotEvaluate(t *testing.T) {
+	mutation := StateMutation{
 		AffectedRecords: []RecordAnchor{{RecordID: "current", SourceTime: 20}},
 		Points: []StateHistoryPoint{
-			stateHistoryPoint("old", 10, LevelFactNormal),
 			stateHistoryPoint("current", 20, LevelFactAnomalous),
+			stateHistoryPoint("invented", 30, LevelFactNormal),
 		},
+		RetentionPoints: 3,
 	}
-
-	tampered := base
-	tampered.Points = append([]StateHistoryPoint(nil), base.Points...)
-	tampered.Points[0] = stateHistoryPoint("old", 10, LevelFactAnomalous)
-	if err := validateStateHistoryReplacement(loaded, tampered, 3); err == nil {
-		t.Fatal("tampered loaded history must be rejected")
-	}
-
-	dropped := base
-	dropped.Points = []StateHistoryPoint{stateHistoryPoint("current", 20, LevelFactAnomalous)}
-	if err := validateStateHistoryReplacement(loaded, dropped, 3); err == nil {
-		t.Fatal("loaded history must not be dropped before the retention bound")
+	if err := validateStateHistoryReplacement(nil, mutation, 3); err == nil {
+		t.Fatal("a point outside this batch's anchors must be rejected")
 	}
 }
 
-func TestStateHistoryReplacementRejectsLoadedHistoryClearedByEmptySnapshot(t *testing.T) {
-	loaded := []StateHistoryPoint{stateHistoryPoint("old", 10, LevelFactNormal)}
-	mutation := StateMutation{AffectedRecords: []RecordAnchor{{RecordID: "current", SourceTime: 20}}}
-	if err := validateStateHistoryReplacement(loaded, mutation, 3); err == nil {
-		t.Fatal("empty replacement must not clear loaded history")
+func TestStateHistoryAdditionRejectsPointsOutOfOrderOrRepeated(t *testing.T) {
+	anchors := []RecordAnchor{{RecordID: "first", SourceTime: 20}, {RecordID: "second", SourceTime: 10}}
+	descending := StateMutation{
+		AffectedRecords: anchors,
+		Points: []StateHistoryPoint{
+			stateHistoryPoint("first", 20, LevelFactNormal),
+			stateHistoryPoint("second", 10, LevelFactNormal),
+		},
+		RetentionPoints: 3,
+	}
+	if err := validateStateHistoryReplacement(nil, descending, 3); err == nil {
+		t.Fatal("an addition out of order must be rejected")
+	}
+	repeated := StateMutation{
+		AffectedRecords: []RecordAnchor{{RecordID: "first", SourceTime: 10}},
+		Points: []StateHistoryPoint{
+			stateHistoryPoint("first", 10, LevelFactNormal),
+			stateHistoryPoint("first", 10, LevelFactNormal),
+		},
+		RetentionPoints: 3,
+	}
+	if err := validateStateHistoryReplacement(nil, repeated, 3); err == nil {
+		t.Fatal("an addition naming one position twice must be rejected")
 	}
 }
 
-func TestStateHistoryReplacementRejectsOverlappingAnchorFactTampering(t *testing.T) {
-	loaded := []StateHistoryPoint{stateHistoryPoint("same", 10, LevelFactNormal)}
+// A point landing on a position the history already holds replaces it, so it
+// has to carry what was stored there. Dropping a Level fact this way leaves the
+// point in place and deletes the Level's past, which no count notices.
+func TestStateHistoryAdditionMayNotDropAStoredFactAtAPositionItReplaces(t *testing.T) {
+	loaded := []StateHistoryPoint{{RecordID: "same", SourceTime: 10, Levels: []StateLevelFact{
+		{LevelID: 5, DetectFingerprint: "detect-v1", Result: LevelFactNormal},
+		{LevelID: 6, DetectFingerprint: "detect-v1", Result: LevelFactNormal},
+	}}}
 	mutation := StateMutation{
 		AffectedRecords: []RecordAnchor{{RecordID: "same", SourceTime: 10}},
-		Points:          []StateHistoryPoint{stateHistoryPoint("same", 10, LevelFactAnomalous)},
+		Points:          []StateHistoryPoint{stateHistoryPoint("same", 10, LevelFactNormal)},
+		RetentionPoints: 3,
+		BaseHistory:     loaded,
 	}
 	if err := validateStateHistoryReplacement(loaded, mutation, 3); err == nil {
-		t.Fatal("replayed anchor must not rewrite its loaded detect fact")
+		t.Fatal("an addition that drops a stored Level fact must be rejected")
+	}
+	mutation.Points = []StateHistoryPoint{{RecordID: "same", SourceTime: 10, Levels: []StateLevelFact{
+		{LevelID: 5, DetectFingerprint: "detect-v1", Result: LevelFactNormal},
+		{LevelID: 6, DetectFingerprint: "detect-v1", Result: LevelFactNormal},
+		{LevelID: 7, DetectFingerprint: "detect-v1", Result: LevelFactAnomalous},
+	}}}
+	if err := validateStateHistoryReplacement(loaded, mutation, 3); err != nil {
+		t.Fatalf("an addition carrying the stored facts and a new one must be accepted: %v", err)
 	}
 }
 
