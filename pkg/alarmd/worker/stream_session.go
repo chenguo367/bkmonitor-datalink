@@ -1083,6 +1083,15 @@ func (stream *streamedExecution) observeCompletionOnlyProbe(ctx context.Context)
 // completion of every consumer must be FULL for the Plan to complete FULL
 // EMPTY; a PARTIAL or UNAVAILABLE PRIMARY completion opens the Plan gap with
 // the completion reasons of that same set.
+//
+// A FULL EMPTY Plan also recovers its standing marker's Plan scopes. That is
+// the only place it can happen: with no series the evaluator is never called,
+// so the recovery that rides on a state mutation never runs, and a Plan whose
+// source has gone empty keeps a marker for as long as it stays empty --
+// holding every Level at UNKNOWN with the marker's reason on the first round
+// the data comes back, for the whole warmup, after a source that was healthy
+// the entire time. Level scopes are left alone: they ask for that series'
+// history to have moved, and an empty source has no such thing to show.
 func (stream *streamedExecution) noSeriesPlanResult(due execution.DuePlan) (execution.EvaluationResult, error) {
 	bindings := stream.noSeriesBindings(due)
 	primary, found := firstNonFullPrimary(bindings)
@@ -1090,9 +1099,19 @@ func (stream *streamedExecution) noSeriesPlanResult(due execution.DuePlan) (exec
 		if !planCompletedFullEmpty(bindings, due.Identity) {
 			return execution.EvaluationResult{}, completionContractError(codeNoSeriesPlanResultInvalid, "alarmd worker: trustworthy completion produced no series or FULL EMPTY Plan")
 		}
+		plan := execution.PlanEvaluationResult{Plan: due.Identity, Disposition: execution.PlanDecided}
+		if emptySourceSlotIsWholeInput(bindings, due.Identity) {
+			recovery, err := execution.PlanGapRecoveryMutation(stream.header.Contract, due, stream.gaps, execution.GapRecoverPlanScopeOnly)
+			if err != nil {
+				return execution.EvaluationResult{}, err
+			}
+			if recovery != nil {
+				plan.GuardAfterState = []execution.PlanGapMutation{*recovery}
+			}
+		}
 		return execution.EvaluationResult{Contract: stream.header.Contract, Result: observability.ResultSuccess,
 			ReasonCode: observability.ReasonNone,
-			Plans:      []execution.PlanEvaluationResult{{Plan: due.Identity, Disposition: execution.PlanDecided}}}, nil
+			Plans:      []execution.PlanEvaluationResult{plan}}, nil
 	}
 	mutation, err := stream.completionGapMutationFor(due, bindings)
 	if err != nil {
@@ -2031,6 +2050,34 @@ func planCompletedFullEmpty(bindings []execution.NamedInputBinding, plan executi
 		}
 	}
 	return found
+}
+
+// emptySourceSlotIsWholeInput says whether a Plan that produced no series is
+// evidence that its input was whole this round. That is what a Plan scope's
+// warmup counts, and it is a narrower question than the one that decides the
+// Plan completed: a round whose dependency query was UNAVAILABLE still
+// completes FULL EMPTY, because with no PRIMARY record there was nothing for
+// the dependency to feed and this round's conclusions do not rest on it -- but
+// it is not evidence that the dependency is answering again, and the first
+// round that does return series will need it. Counting such a round towards
+// the warmup would lift a guard on the strength of rounds that never asked the
+// question the guard is waiting on.
+//
+// So: FULL EMPTY as the completion judged it, and on top of that every binding
+// of this Plan whole and available, dependencies included.
+func emptySourceSlotIsWholeInput(bindings []execution.NamedInputBinding, plan execution.PlanIdentity) bool {
+	if !planCompletedFullEmpty(bindings, plan) {
+		return false
+	}
+	for _, binding := range bindings {
+		if binding.Consumer.Plan != plan {
+			continue
+		}
+		if binding.Completeness != execution.CompletenessFull || binding.Disposition != execution.AccessAvailable {
+			return false
+		}
+	}
+	return true
 }
 
 // completionGapMutationFor builds the Plan gap mutation for a set of
