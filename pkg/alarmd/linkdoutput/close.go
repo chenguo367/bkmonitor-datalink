@@ -12,13 +12,37 @@ import (
 const ActionClosed = "closed"
 const CloseReasonInactive = "strategy_inactive"
 
+// CloseReasonAbsent is the close for an alert whose strategy no longer
+// exists: disabled or deleted, so nothing is left to evaluate it back to
+// normal. It is its own reason and not a variant of the inactive one,
+// because the two say different things to whoever reads the alert. Inactive
+// means "outside its hours, it will be back"; absent means "there is no
+// strategy behind this alert any more".
+const CloseReasonAbsent = "strategy_absent"
+
 // CloseRequest carries an active alert's identity and its actual severity,
 // obtained from Linkd reconciliation. A SET member alone is insufficient.
 // OccurredAt is a current maintenance decision, never a historical Slot.
+//
+// Reason says which close this is. Empty is CloseReasonInactive, which is
+// what every caller sent before there was a second reason, and what keeps
+// the event id of an inactive close identical across this change.
 type CloseRequest struct {
 	TenantID, Fingerprint, AlertInstanceID, Severity string
 	StrategyID, StrategyRevision, BusinessID         int64
 	OccurredAt                                       time.Time
+	Reason                                           string
+}
+
+// closeText is what each reason puts on the event, and the salt its event id
+// is derived under. The salts differ so that the same alert closed for two
+// different reasons is two events; the inactive salt is the original string
+// so that an inactive close keeps the id it has always had.
+var closeText = map[string]struct{ salt, title, content string }{
+	CloseReasonInactive: {"alarmd-inactive-close-v1", "Strategy is outside its effective time",
+		"Close requested because the strategy is currently inactive; this does not indicate metric recovery."},
+	CloseReasonAbsent: {"alarmd-absent-strategy-close-v1", "Strategy no longer exists",
+		"Close requested because the strategy was disabled or deleted and nothing evaluates this alert any more; this does not indicate metric recovery."},
 }
 
 func ConvertClose(request CloseRequest) (Event, error) {
@@ -33,16 +57,24 @@ func ConvertClose(request CloseRequest) (Event, error) {
 	if request.Severity == "" || len(request.Severity) > MaxSeverityBytes {
 		return Event{}, errors.New("close requires the active alert severity")
 	}
+	reason := request.Reason
+	if reason == "" {
+		reason = CloseReasonInactive
+	}
+	text, known := closeText[reason]
+	if !known {
+		return Event{}, errors.New("close requires a reason this build can name")
+	}
 	// Stable within an attempt; retries use the same event. Later maintenance
 	// rechecks current rules and uses a new current time rather than replaying
 	// an old closure across a new active interval.
-	idInput, _ := json.Marshal([]any{"alarmd-inactive-close-v1", request.TenantID, request.StrategyID,
+	idInput, _ := json.Marshal([]any{text.salt, request.TenantID, request.StrategyID,
 		request.StrategyRevision, request.AlertInstanceID, request.Fingerprint, request.Severity, request.OccurredAt.Unix()})
 	digest := sha256.Sum256(idInput)
 	id := hex.EncodeToString(digest[:])
 	wire := wireEvent{TenantID: request.TenantID, EventID: id, AlertID: request.Fingerprint,
-		Title: "Strategy is outside its effective time", Content: "Close requested because the strategy is currently inactive; this does not indicate metric recovery.",
-		Evaluations: []wireEvaluation{{Severity: request.Severity, Action: ActionClosed, ActionReason: CloseReasonInactive}},
+		Title: text.title, Content: text.content,
+		Evaluations: []wireEvaluation{{Severity: request.Severity, Action: ActionClosed, ActionReason: reason}},
 		Dimensions:  map[string]json.RawMessage{}, OccurredAt: wireTime(request.OccurredAt.Unix()), ProducedAt: wireTime(request.OccurredAt.Unix()),
 		Labels:    wireLabels{StrategyID: request.StrategyID, StrategyVersion: request.StrategyRevision, BusinessID: request.BusinessID},
 		ExtraData: wireExtraData{EvaluationFamily: evaluationFamilyMetricAlgorithm},

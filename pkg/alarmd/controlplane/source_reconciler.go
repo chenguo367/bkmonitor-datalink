@@ -67,6 +67,10 @@ const (
 // does not follow how often the publisher runs and need not move with it.
 const sourceFullReadInterval = 6 * time.Minute
 
+// SourceFullReadInterval is that bound, for the callers whose own freshness
+// bound has to follow it rather than repeat it as a second number.
+const SourceFullReadInterval = sourceFullReadInterval
+
 type SourceRefreshResult struct {
 	Status      SourceRefreshStatus
 	Observation string
@@ -199,6 +203,11 @@ type SourceReconciler struct {
 	// LookupStrategy; replaced whole at the end of each round that published
 	// or confirmed one.
 	strategies strategyLookupState
+	// departed remembers the strategies this catalog let go, with the
+	// identity each had while it still existed. Nothing else in the process
+	// can supply that identity once the strategy is gone; see
+	// DepartedStrategy.
+	departed *departedMemory
 }
 
 // ConfigureClock sets the clock the reconciler paces its periodic full reads
@@ -314,7 +323,7 @@ func NewSourceReconciler(
 	}
 	return &SourceReconciler{repository: repository, publisher: publisher, compiler: compiler,
 		stateSemantics: stateSemantics, validateCatalog: validateCatalog, candidates: NewCandidateCache(),
-		now: time.Now}, nil
+		departed: newDepartedMemory(), now: time.Now}, nil
 }
 
 func (reconciler *SourceReconciler) Refresh(
@@ -673,6 +682,12 @@ func (repository *RedisCatalogRepository) sourceCandidateKey() string {
 // made, so the next round's last-good catalog costs no read at all.
 func (reconciler *SourceReconciler) rememberLastGood(publication SnapshotPublicationRef, catalog Catalog) {
 	groups := append([]QueryGroup(nil), catalog.QueryGroups...)
+	// Before the new publication replaces the old one, record what left. The
+	// two publications are the only moment both the strategy's absence and
+	// its identity are in hand at once.
+	if reconciler.lastGood != nil {
+		reconciler.departed.record(reconciler.lastGood.QueryGroups, groups, reconciler.now())
+	}
 	reconciler.lastGood = &PublishedSnapshot{SchemaVersion: snapshotSchemaVersion, Publication: publication, QueryGroups: groups}
 	reconciler.strategies.replace(buildStrategyIndex(publication, groups, catalog.Dispositions))
 }

@@ -765,10 +765,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 			}()
 		}
 	}
-	openAlertCopy, err := newLinkdIndex(cfg, linkdClient, linkdConnection, external.Now)
+	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, external.Now)
 	if err != nil {
 		return nil, err
 	}
+	openAlertCopy := linkd.Cache
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
 	linkdBudget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
 	legacyTime := strategycache.NewLegacyEffectiveTime(controlClient, cmdbClient, cfg.PlatformKeyPrefix(), external.Now, linkdBudget.Strategies, linkdBudget.Bytes/4)
@@ -1121,6 +1122,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
 		capacity: linkdBudget, sourceID: cfg.PhaseTwo.Linkd.EventSourceID, legacy: legacyTime.Provider(), legacyCache: legacyTime}
 	bundle.dependencies.RunEffectiveTime = maintenance.run
+	// The control leader's difference against the strategies that no longer
+	// exist. It runs on every replica's loop and does nothing on a follower;
+	// the leader check is inside the round, so a failover needs no wiring of
+	// its own.
+	absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Source, linkd.Alerts, events,
+		cfg.PhaseTwo.Linkd.EventSourceID, cfg.PhaseTwo.Linkd.AbsentCloseSend)
+	bundle.dependencies.RunAbsentClose = absentClose.run
+	recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)
 	recorder.SetEffectiveCloseSource(maintenance.Stats)
 	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.
