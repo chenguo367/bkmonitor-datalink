@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -94,6 +95,102 @@ func TestAdmissionOnlyRenewsValidInvocation(t *testing.T) {
 	status, _ = call(t, c, envelope(c, "invoke", "read", Params{"id": "x"}))
 	if status != 401 || runs.Load() != 1 {
 		t.Fatal("revoked session executed")
+	}
+}
+
+// sessionAuth authenticates the bearer token as the session ID, so a test
+// can hold two sessions against one channel.
+type sessionAuth struct{ testAuth }
+
+func (a *sessionAuth) Authenticate(_ context.Context, token string) (cliauth.Session, error) {
+	return cliauth.Session{ID: token, EnvironmentID: "test", Scope: cliauth.ScopeReadonly, ExpiresAt: time.Now().Add(time.Hour)}, a.err
+}
+
+func callAs(t *testing.T, c *Channel, token string, body any) (int, http.Header, Response) {
+	t.Helper()
+	raw, err := json.Marshal(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("POST", "/api/cli/channel", bytes.NewReader(raw))
+	r.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	c.ServeHTTP(w, r)
+	var out Response
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("invalid response: %v", err)
+	}
+	return w.Code, w.Header(), out
+}
+
+// One session spends its own minute's budget of executed invocations and
+// no one else's: the thirty-first in a minute is refused with the seconds
+// to the turn of the minute, without executing, without renewing, and
+// without touching the other session; the next minute starts it over.
+// Refused inputs and non-invocations cost nothing.
+func TestASessionSpendsOnlyItsOwnInvocationBudget(t *testing.T) {
+	a := &sessionAuth{}
+	now := time.Date(2026, 1, 1, 0, 0, 20, 0, time.UTC)
+	var runs atomic.Int32
+	op := Operation{ID: "read", Summary: "Read", Fields: map[string]Field{"id": {Type: "string", MinLength: 1}}, Required: []string{"id"},
+		Run: func(context.Context, Params) Outcome { runs.Add(1); return Outcome{Complete: true} }}
+	c, err := New(Options{Auth: a, EnvironmentID: "test", Replica: "replica-1", Build: "test", Operations: []Operation{op},
+		Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Discovery advertises the budget; it and the refused inputs spend none.
+	if _, _, out := callAs(t, c, "s1", envelope(c, "discover", "", nil)); out.Result.(map[string]any)["budget"].(map[string]any)["invokes_per_session_per_minute"] != float64(InvokesPerSessionPerMinute) {
+		t.Fatalf("discover does not advertise the budget: %+v", out.Result)
+	}
+	for i := 0; i < 5; i++ {
+		if status, _, _ := callAs(t, c, "s1", envelope(c, "invoke", "read", Params{"id": ""})); status != 400 {
+			t.Fatalf("refused input status %d", status)
+		}
+	}
+	for i := 0; i < InvokesPerSessionPerMinute; i++ {
+		if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", "read", Params{"id": "x"})); status != 200 {
+			t.Fatalf("invocation %d of the budget refused: %d %+v", i+1, status, out)
+		}
+	}
+	admitted := a.calls.Load()
+	status, header, out := callAs(t, c, "s1", envelope(c, "invoke", "read", Params{"id": "x"}))
+	if status != 429 || out.Error == nil || out.Error.Code != "rate_limited" || header.Get("Retry-After") != "40" {
+		t.Fatalf("over budget: %d %s %+v", status, header.Get("Retry-After"), out)
+	}
+	if runs.Load() != int32(InvokesPerSessionPerMinute) || a.calls.Load() != admitted || out.Meta.Session == nil || out.Meta.Session.Renewed {
+		t.Fatalf("a refused invocation executed or was admitted: runs %d, admitted %d -> %d", runs.Load(), admitted, a.calls.Load())
+	}
+	// The other session is untouched.
+	if status, _, out := callAs(t, c, "s2", envelope(c, "invoke", "read", Params{"id": "x"})); status != 200 {
+		t.Fatalf("another session refused on the first's budget: %d %+v", status, out)
+	}
+	// The minute turns and the first session starts over.
+	now = now.Add(40 * time.Second)
+	if status, _, out := callAs(t, c, "s1", envelope(c, "invoke", "read", Params{"id": "x"})); status != 200 {
+		t.Fatalf("budget did not start over with the minute: %d %+v", status, out)
+	}
+}
+
+// The gate forgets sessions whose minute has passed once it holds more than
+// it needs to, and never forgets one still in its minute.
+func TestTheInvocationGateForgetsPastMinutes(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	c := &Channel{options: Options{Now: func() time.Time { return now }}, windows: make(map[string]*sessionWindow)}
+	for i := 0; i < sessionWindowSweep; i++ {
+		c.allowInvoke(strconv.Itoa(i))
+	}
+	now = now.Add(time.Minute)
+	c.allowInvoke("fresh")
+	if len(c.windows) != 1 || c.windows["fresh"] == nil {
+		t.Fatalf("%d sessions remembered after their minute passed, want the fresh one alone", len(c.windows))
+	}
+	for i := 0; i < sessionWindowSweep-1; i++ {
+		c.allowInvoke(strconv.Itoa(i))
+	}
+	c.allowInvoke("also-fresh")
+	if len(c.windows) != sessionWindowSweep+1 {
+		t.Fatalf("%d sessions, want %d: a sweep in the same minute must forget none", len(c.windows), sessionWindowSweep+1)
 	}
 }
 
