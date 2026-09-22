@@ -163,11 +163,17 @@ type SplitPlanFacts struct {
 	// of one says there was nothing to choose from.
 	Dimension  string `json:"dimension,omitempty"`
 	Candidates int    `json:"dimension_candidates"`
-	// Series is what the census counted, and CensusAgeSeconds how old that
-	// count is.
-	Series           uint32 `json:"series"`
-	CensusAgeSeconds int64  `json:"census_age_seconds"`
-	CensusSource     string `json:"census_source,omitempty"`
+	// Series is what the census counted, CensusAgeSeconds how old that count
+	// is, and CensusAgeBoundSeconds how old it was allowed to be. The bound
+	// travels with the age because it is not the same for every object: a
+	// census is rewritten when the object's Slot runs, so the bound follows
+	// the object's own cadence, and a reader shown only the age cannot tell
+	// a census that is behind from one that is exactly as fresh as an hourly
+	// strategy's census ever gets.
+	Series                uint32 `json:"series"`
+	CensusAgeSeconds      int64  `json:"census_age_seconds"`
+	CensusAgeBoundSeconds int64  `json:"census_age_bound_seconds"`
+	CensusSource          string `json:"census_source,omitempty"`
 	// HeaviestValueSeries is the largest single value's weight and
 	// TargetSeries what one piece should carry. The first above the second is
 	// the whole of VALUE_TOO_HEAVY, and the two numbers say how far past it

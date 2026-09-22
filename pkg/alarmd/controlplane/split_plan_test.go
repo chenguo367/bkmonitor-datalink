@@ -313,6 +313,81 @@ func TestACensusTooOldToDescribeTheObjectIsRefused(t *testing.T) {
 	}
 }
 
+// An object slower than the fixed floor is judged by its own cadence, not by
+// the floor.
+//
+// This is the third point a threshold test needs, past the two either side of
+// the line: the worst case real load offers. A census is written when the
+// object's Slot runs, so an hourly strategy's census is older than any fixed
+// figure for most of every hour - held to the floor it would be refused on
+// nearly every round, and the whole class of slow objects could never be
+// planned. Nothing caps an evaluation interval; the schedule contract asks
+// only that it be positive.
+func TestAnObjectSlowerThanTheFloorIsJudgedByItsOwnCadence(t *testing.T) {
+	const hourly = int64(3600)
+	input := splitInput(evenCensus("ip", 600, 10), 3*splitShare)
+	input.EvaluationIntervalSeconds = hourly
+
+	// A census written one round ago - as fresh as an hourly object's census
+	// ever is - is far past the floor and must still be planned from.
+	input.At = input.Census.ObservedAt + hourly
+	if input.At-input.Census.ObservedAt <= controlplane.MaxCensusAgeSeconds {
+		t.Fatalf("fixture: an hourly object's freshest census is inside the %ds floor, so this proves nothing",
+			controlplane.MaxCensusAgeSeconds)
+	}
+	_, facts := controlplane.PlanSplit(input)
+	if facts.Outcome != observability.SplitOutcomePlanned {
+		t.Fatalf("outcome = %q for a census one round old on an hourly object, want a plan: judged by a "+
+			"fixed floor, every object slower than the floor is refused on nearly every round and the "+
+			"reading blames the census", facts.Outcome)
+	}
+	if facts.CensusAgeBoundSeconds != hourly*controlplane.CensusAgeCadenceMultiple {
+		t.Fatalf("the bound it was judged against is %ds, want %ds - and it has to be on the line, or a "+
+			"reader shown only the age cannot tell a census that is behind from one as fresh as this "+
+			"object's census ever gets",
+			facts.CensusAgeBoundSeconds, hourly*controlplane.CensusAgeCadenceMultiple)
+	}
+
+	// Past its own cadence it is stale like anything else.
+	input.At = input.Census.ObservedAt + hourly*controlplane.CensusAgeCadenceMultiple + 1
+	if _, facts := controlplane.PlanSplit(input); facts.Outcome != observability.SplitOutcomeCensusStale {
+		t.Fatalf("outcome = %q past two of its own intervals, want %q",
+			facts.Outcome, observability.SplitOutcomeCensusStale)
+	}
+}
+
+// A fast object is not given a bound tighter than the floor. The cadence
+// raises the bound and never lowers it: a ten-second object whose census is a
+// minute old is not describing a different strategy, and refusing it would
+// make the fastest objects the hardest to plan.
+func TestAFastObjectIsNotJudgedMoreTightlyThanTheFloor(t *testing.T) {
+	input := splitInput(evenCensus("ip", 600, 10), 3*splitShare)
+	input.EvaluationIntervalSeconds = 10
+	input.At = input.Census.ObservedAt + controlplane.MaxCensusAgeSeconds
+
+	_, facts := controlplane.PlanSplit(input)
+
+	if facts.Outcome != observability.SplitOutcomePlanned {
+		t.Fatalf("outcome = %q for a ten-second object at the floor, want a plan", facts.Outcome)
+	}
+	if facts.CensusAgeBoundSeconds != controlplane.MaxCensusAgeSeconds {
+		t.Fatalf("bound = %ds, want the floor %ds", facts.CensusAgeBoundSeconds, controlplane.MaxCensusAgeSeconds)
+	}
+}
+
+// An object whose cadence is unknown falls back to the floor rather than to
+// no bound: a missing number is not permission to plan from any census at
+// all.
+func TestAnObjectWithNoKnownCadenceFallsBackToTheFloor(t *testing.T) {
+	input := splitInput(evenCensus("ip", 600, 10), 3*splitShare)
+	input.At = input.Census.ObservedAt + controlplane.MaxCensusAgeSeconds + 1
+
+	if _, facts := controlplane.PlanSplit(input); facts.Outcome != observability.SplitOutcomeCensusStale {
+		t.Fatalf("outcome = %q with no cadence known, want the floor still applied (%q)",
+			facts.Outcome, observability.SplitOutcomeCensusStale)
+	}
+}
+
 // One census plans one split, run after run. This says the planner does not
 // depend on map order; it does NOT say the tie-breaks are the ones intended,
 // because a planner that broke every tie the other way round would agree with

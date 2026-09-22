@@ -43,7 +43,8 @@ func TestTheSplitLineCarriesTheDecisionAndTheReadingsItWasJudgedFrom(t *testing.
 	event := splitPlanEvent(t, &SplitPlanFacts{
 		Outcome: SplitOutcomeValueTooHeavy, StrategyID: "4101", BusinessID: "2",
 		PeakBytes: 3 << 30, ShareBytes: 1 << 30, Shards: 7, Carrying: 6, ShardsCapped: true,
-		Dimension: "ip", Candidates: 2, Series: 6000, CensusAgeSeconds: 42, CensusSource: "round",
+		Dimension: "ip", Candidates: 2, Series: 6000, CensusAgeSeconds: 42, CensusAgeBoundSeconds: 7200,
+		CensusSource:        "round",
 		HeaviestValueSeries: 4000, TargetSeries: 1000, TailSeries: 12, SkewPercent: 180,
 		LargestShardSeries: 1800, SmallestShardSeries: 1000, PlansInGroup: 1, DryRun: true,
 	})
@@ -65,13 +66,16 @@ func TestTheSplitLineCarriesTheDecisionAndTheReadingsItWasJudgedFrom(t *testing.
 		"split_dimension_candidates":  float64(2),
 		"split_series":                float64(6000),
 		"split_census_age_seconds":    float64(42),
-		"split_census_source":         "round",
-		"split_tail_series":           float64(12),
-		"split_skew_percent":          float64(180),
-		"split_largest_shard_series":  float64(1800),
-		"split_smallest_shard_series": float64(1000),
-		"split_plans_in_group":        float64(1),
-		"split_dry_run":               true,
+		// The bound beside the age: it is not the same for every object, so
+		// an age on its own cannot say whether a census is behind.
+		"split_census_age_bound_seconds": float64(7200),
+		"split_census_source":            "round",
+		"split_tail_series":              float64(12),
+		"split_skew_percent":             float64(180),
+		"split_largest_shard_series":     float64(1800),
+		"split_smallest_shard_series":    float64(1000),
+		"split_plans_in_group":           float64(1),
+		"split_dry_run":                  true,
 	}
 	for field, value := range want {
 		got, present := event[field]

@@ -36,7 +36,7 @@ type catalogSplitCensusSource struct {
 	censuses planCensusReader
 	mu       sync.Mutex
 	revision string
-	planMemo map[execution.QueryGroupIdentity][]execution.PlanCensusIdentity
+	planMemo map[execution.QueryGroupIdentity][]splitCandidatePlan
 }
 
 // contentQueryGroupLoader is the catalog's object read, narrowed to what this
@@ -66,7 +66,7 @@ func newCatalogSplitCensusSource(
 // key it would build belongs to nothing.
 func (source *catalogSplitCensusSource) SplitCandidatePlans(
 	ctx context.Context, queryGroup execution.QueryGroupIdentity,
-) ([]execution.PlanCensusIdentity, error) {
+) ([]splitCandidatePlan, error) {
 	if source == nil || source.source == nil || source.objects == nil {
 		return nil, errors.New("alarmd: split census source is not configured")
 	}
@@ -97,13 +97,16 @@ func (source *catalogSplitCensusSource) SplitCandidatePlans(
 		source.remember(revision, queryGroup, nil)
 		return nil, nil
 	}
-	plans := make([]execution.PlanCensusIdentity, 0, len(group.Plans))
+	plans := make([]splitCandidatePlan, 0, len(group.Plans))
 	for _, plan := range group.Plans {
 		if plan.StateGeneration == "" {
 			continue
 		}
-		plans = append(plans, execution.PlanCensusIdentity{
-			Plan: plan.Identity, StateGeneration: plan.StateGeneration})
+		plans = append(plans, splitCandidatePlan{
+			Census: execution.PlanCensusIdentity{
+				Plan: plan.Identity, StateGeneration: plan.StateGeneration},
+			EvaluationIntervalSeconds: plan.ScheduleSpec.EvaluationIntervalSeconds,
+		})
 	}
 	source.remember(revision, queryGroup, plans)
 	return plans, nil
@@ -125,7 +128,7 @@ func (source *catalogSplitCensusSource) ReadCensus(
 // different build.
 func (source *catalogSplitCensusSource) memoized(
 	revision string, queryGroup execution.QueryGroupIdentity,
-) ([]execution.PlanCensusIdentity, bool) {
+) ([]splitCandidatePlan, bool) {
 	source.mu.Lock()
 	defer source.mu.Unlock()
 	if source.revision != revision || source.planMemo == nil {
@@ -136,12 +139,12 @@ func (source *catalogSplitCensusSource) memoized(
 }
 
 func (source *catalogSplitCensusSource) remember(
-	revision string, queryGroup execution.QueryGroupIdentity, plans []execution.PlanCensusIdentity,
+	revision string, queryGroup execution.QueryGroupIdentity, plans []splitCandidatePlan,
 ) {
 	source.mu.Lock()
 	defer source.mu.Unlock()
 	if source.revision != revision || source.planMemo == nil {
-		source.revision, source.planMemo = revision, make(map[execution.QueryGroupIdentity][]execution.PlanCensusIdentity)
+		source.revision, source.planMemo = revision, make(map[execution.QueryGroupIdentity][]splitCandidatePlan)
 	}
 	source.planMemo[queryGroup] = plans
 }

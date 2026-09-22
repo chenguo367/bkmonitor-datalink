@@ -830,6 +830,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Int("split_dimension_candidates", facts.Candidates),
 			slog.Uint64("split_series", uint64(facts.Series)),
 			slog.Int64("split_census_age_seconds", facts.CensusAgeSeconds),
+			slog.Int64("split_census_age_bound_seconds", facts.CensusAgeBoundSeconds),
 			slog.String("split_census_source", facts.CensusSource),
 			slog.Uint64("split_heaviest_value_series", uint64(facts.HeaviestValueSeries)),
 			slog.Uint64("split_target_series", uint64(facts.TargetSeries)),
