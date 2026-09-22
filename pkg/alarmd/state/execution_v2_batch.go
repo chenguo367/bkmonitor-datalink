@@ -757,9 +757,13 @@ type runtimeLoadPass struct {
 	envelopes bool
 	pending   []int
 	frames    map[int][]byte
-	// envelopeAfterUnreadableFrame counts the series whose frame was present
-	// and unreadable and whose envelope answered instead.
-	envelopeAfterUnreadableFrame int
+	// The four the second pass splits into; see the table where they are
+	// counted. Only envelopeAnswered ever reaches zero, which is why one
+	// number over all four could not say when the migration is over.
+	envelopeAnswered    int
+	noRecordYet         int
+	frameCorruptRescued int
+	frameCorruptLost    int
 }
 
 func (batch *runtimeLoadBatch) reset() {
@@ -887,16 +891,39 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			// together, which is the shape this decision has always had when
 			// both records existed.
 			view := store.readStoredRecord(request, item, raw, pass.frames[index])
-			// The frame's bytes were there and did not read, and the older
-			// record answered in its place. That is a corrupt or truncated
-			// frame, not a writer of the older representation: a readable
-			// frame never reaches this pass at all, so this count cannot see
-			// the shape where an envelope outranks a frame that reads. What
-			// that shape needs is a fleet-level fact - every ready replica
-			// declaring it writes frames - and it is recorded as an unmeasured
-			// boundary until there is one.
-			if pass.frames[index] != nil && view.Representation == execution.StateRepresentationEnvelope {
-				pass.envelopeAfterUnreadableFrame++
+			// Which of the four the second pass actually found. One number for
+			// all of them cannot say when the migration is over, because only
+			// one of the four ever ends:
+			//
+			//	frame        envelope answered   what it is
+			//	-----------  -----------------   ----------------------------
+			//	absent       yes                 the older representation, the
+			//	                                 only count that must reach zero
+			//	absent       no                  a series with no record yet --
+			//	                                 new or empty, normal for ever
+			//	present, bad yes                 a corrupt frame the older record
+			//	                                 rescued: a defect, not a writer
+			//	present, bad no                  a corrupt frame nothing rescued
+			//
+			// Counted here, where both records are in hand, rather than where
+			// the decision to read twice was taken: there the frame's absence
+			// is all that is known, and absence is exactly what the first two
+			// rows share.
+			//
+			// noRecordYet also holds an envelope that was present and did not
+			// read. That series has no usable record either way, and telling
+			// the two apart is a question about what is stored rather than
+			// what was read -- the stock side answers it, this side cannot.
+			answered := view.Representation == execution.StateRepresentationEnvelope
+			switch {
+			case pass.frames[index] == nil && answered:
+				pass.envelopeAnswered++
+			case pass.frames[index] == nil:
+				pass.noRecordYet++
+			case answered:
+				pass.frameCorruptRescued++
+			default:
+				pass.frameCorruptLost++
 			}
 			views[index] = view
 			continue

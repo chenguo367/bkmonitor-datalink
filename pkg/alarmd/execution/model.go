@@ -1115,19 +1115,39 @@ type StatePreflightResult struct {
 	LoadedBytes int64
 	// EnvelopeReads is how many series this preflight had to read the older
 	// representation for, because the framed record was missing or could not
-	// be read on its own.
+	// be read on its own. It is a cost: how much the second pass is still
+	// being asked to do.
 	//
-	// It is the number that says how long the compatibility read still has to
-	// exist: the older representation has no writer and is not renewed, so it
-	// leaves on its own TTL, and a Query Group whose count has reached zero
-	// and stayed there is one whose second read is buying nothing.
+	// It is deliberately not the migration indicator, though it was used as
+	// one. A series with no record at all has no frame either, so it lands
+	// here and keeps landing here for ever: a deployment that creates series
+	// can never drive this to zero, migrated or not. On the release that first
+	// carried it a round read 131 of 256 this way, and nothing in the number
+	// said how many of the 131 were the older representation.
 	EnvelopeReads int
-	// EnvelopeAfterUnreadableFrame is how many of those series had a frame
-	// whose bytes were there and did not read, so the older record answered
-	// instead. It is a corruption signal, not a writer: a readable frame is
-	// never compared against the envelope, so nothing here can see an envelope
-	// outranking a frame that reads.
-	EnvelopeAfterUnreadableFrame int
+	// The four the second pass splits into. Only EnvelopeAnswered ever ends,
+	// which is the whole reason the total above cannot answer for them.
+	//
+	// EnvelopeAnswered: no frame, and the older record answered -- the
+	// migration stock, the one count that must reach zero before the
+	// compatibility read can go.
+	//
+	// NoRecordYet: no frame and nothing answered -- a series with no record
+	// yet. Normal for ever on any deployment where series appear. It also
+	// holds an envelope that was present and unreadable; separating that is a
+	// question about what is stored, which only the stock side answers.
+	//
+	// FrameCorruptRescued and FrameCorruptLost: the frame's bytes were there
+	// and did not read. Both are corruption, not a writer of the older
+	// representation, and both should be zero -- they are named for the defect
+	// rather than for the branch that found them, because a reader meeting one
+	// has a damaged record and not a migration to wait out. They were
+	// invisible while one count covered all four: a corrupt frame the older
+	// record rescued read exactly like a new series arriving.
+	EnvelopeAnswered    int
+	NoRecordYet         int
+	FrameCorruptRescued int
+	FrameCorruptLost    int
 }
 
 func (result StatePreflightResult) Find(identity StateKeyIdentity) (RuntimeStateView, bool) {
@@ -1184,7 +1204,9 @@ func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflight
 	// number a deployment reads to learn whether the compatibility pass is
 	// still buying anything.
 	classified := StatePreflightResult{Items: make([]RuntimeStateView, len(result.Items)),
-		LoadedBytes: result.LoadedBytes, EnvelopeReads: result.EnvelopeReads, EnvelopeAfterUnreadableFrame: result.EnvelopeAfterUnreadableFrame}
+		LoadedBytes: result.LoadedBytes, EnvelopeReads: result.EnvelopeReads,
+		EnvelopeAnswered: result.EnvelopeAnswered, NoRecordYet: result.NoRecordYet,
+		FrameCorruptRescued: result.FrameCorruptRescued, FrameCorruptLost: result.FrameCorruptLost}
 	seen := make(map[StateKeyIdentity]struct{}, len(result.Items))
 	for index, view := range result.Items {
 		candidate, ok := wanted[view.Identity]

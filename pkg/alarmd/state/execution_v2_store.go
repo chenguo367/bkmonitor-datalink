@@ -283,7 +283,9 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 		batch.keys = append(batch.keys, envelopeKey)
 	}
 	flush()
-	result.EnvelopeReads, result.EnvelopeAfterUnreadableFrame = len(pass.pending), pass.envelopeAfterUnreadableFrame
+	result.EnvelopeReads = len(pass.pending)
+	result.EnvelopeAnswered, result.NoRecordYet = pass.envelopeAnswered, pass.noRecordYet
+	result.FrameCorruptRescued, result.FrameCorruptLost = pass.frameCorruptRescued, pass.frameCorruptLost
 	// One commit for the whole preflight: the round read every key of the
 	// Query Group, so this is a complete measurement of the population rather
 	// than whatever the last batch happened to hold.

@@ -304,8 +304,8 @@ func TestTheEnvelopeIsReadOnlyForSeriesWhoseFrameCannotAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if test.name == "the frame answers" && loaded.EnvelopeAfterUnreadableFrame != 0 {
-				t.Fatalf("EnvelopeAfterUnreadableFrame = %d with no envelope read at all", loaded.EnvelopeAfterUnreadableFrame)
+			if test.name == "the frame answers" && loaded.FrameCorruptRescued != 0 {
+				t.Fatalf("FrameCorruptRescued = %d with no envelope read at all", loaded.FrameCorruptRescued)
 			}
 			if loaded.EnvelopeReads != test.wantReads {
 				t.Fatalf("EnvelopeReads = %d, want %d", loaded.EnvelopeReads, test.wantReads)
@@ -405,9 +405,16 @@ func TestAnEnvelopeAnsweringForAnUnreadableFrameIsCounted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.EnvelopeReads != 1 || loaded.EnvelopeAfterUnreadableFrame != 1 {
-		t.Fatalf("EnvelopeReads = %d, EnvelopeAfterUnreadableFrame = %d, want 1 and 1: the envelope answered for a series whose frame could not",
-			loaded.EnvelopeReads, loaded.EnvelopeAfterUnreadableFrame)
+	if loaded.EnvelopeReads != 1 || loaded.FrameCorruptRescued != 1 {
+		t.Fatalf("EnvelopeReads = %d, FrameCorruptRescued = %d, want 1 and 1: the envelope answered for a series whose frame could not",
+			loaded.EnvelopeReads, loaded.FrameCorruptRescued)
+	}
+	// And it is not filed as the older representation still being written:
+	// the two read the same on the total above and send a reader to opposite
+	// places -- one to a damaged record, the other to a migration to wait out.
+	if loaded.EnvelopeAnswered != 0 {
+		t.Fatalf("EnvelopeAnswered = %d for a series whose frame was present and corrupt: a damaged record is being "+
+			"counted as the migration stock", loaded.EnvelopeAnswered)
 	}
 	if loaded.Items[0].Representation != execution.StateRepresentationEnvelope {
 		t.Fatalf("view = %s, want the envelope: it is the only record that read", loaded.Items[0].Representation)

@@ -415,13 +415,19 @@ type Counts struct {
 	StateBytes int64
 	// EnvelopeReads is how many of a state preflight's series had to be read
 	// from the older representation as well, because the framed record could
-	// not answer for them. Zero is the finished migration, and a Query Group
-	// that has stayed at zero is one whose compatibility read buys nothing.
+	// not answer for them. It is the second pass's cost, and it is not the
+	// migration indicator: a series with no record at all has no frame, so it
+	// lands here for ever.
 	EnvelopeReads int64
-	// EnvelopeAfterUnreadableFrame is how many of those series had a frame
-	// that was there and did not read. It says a record is corrupt, not that
-	// anything still writes the older representation.
-	EnvelopeAfterUnreadableFrame int64
+	// The four EnvelopeReads splits into; see execution.StatePreflightResult
+	// for the table. EnvelopeAnswered is the only one that ends, and reading
+	// it as zero is the whole point of having it -- so all four go on the line
+	// at every value, zero included. A count that exists to answer "how many"
+	// has its answer erased by omitting its zero.
+	EnvelopeAnswered    int64
+	NoRecordYet         int64
+	FrameCorruptRescued int64
+	FrameCorruptLost    int64
 }
 
 // TargetResolutionFacts is one Plan's target plan resolved for one Slot:
