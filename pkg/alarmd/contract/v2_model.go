@@ -158,6 +158,14 @@ const (
 	// 0.58 MB/s, against a store answering every other caller that second.
 	// Something other than the byte volume ends these reads, and one word
 	// could not say so.
+	//
+	// A cancelled call is not this. Cancellation is the work above being
+	// stopped -- a replica shutting down, a sibling batch's failure bringing
+	// the parent context with it -- and not the time running out, so it keeps
+	// the dependency's word rather than taking a third meaning into this one.
+	// The word lands on a defect row, and a deployment that ships several
+	// times a day would file one per replica per release for doing exactly
+	// what it was told.
 	ReasonStateReadDeadline = "STATE_READ_DEADLINE"
 	// ReasonQGBudgetShareExceeded names one Query Group's Slot asking for more
 	// of the process pool than any single object may hold.

@@ -47,7 +47,6 @@ func TestAReadThatRanOutOfTimeIsNotTheDependencyBeingDown(t *testing.T) {
 		"a deadline on the socket":      {os.ErrDeadlineExceeded, contract.ReasonStateReadTimeout},
 		"wrapped":                       {errors.Join(errors.New("state: Redis MGET"), timeoutError{}), contract.ReasonStateReadTimeout},
 		"a deadline on the call":        {context.DeadlineExceeded, contract.ReasonStateReadDeadline},
-		"the call was cancelled":        {context.Canceled, contract.ReasonStateReadDeadline},
 		// A context deadline that arrives wrapped in a net error marked
 		// Timeout: both predicates accept it, and the narrower one is asked
 		// first so it keeps its own word.
@@ -77,6 +76,25 @@ func TestAReadThatRanOutOfTimeIsNotTheDependencyBeingDown(t *testing.T) {
 		t.Fatalf("a dial timeout = %q, want %q: nothing was read, so no read was too large",
 			dial.ReasonCode, contract.ReasonRedisUnavailable)
 	}
+	// A cancelled call is not a deadline. context.Canceled is the work above
+	// being stopped -- a graceful shutdown, or a sibling batch's failure
+	// bringing the parent context down -- not this read running out of the
+	// time it had, which is the whole of what the deadline word claims.
+	//
+	// Asserted because the word lands on a defect row in the fleet: counting
+	// cancellation under it would file a defect for every replica every time
+	// one is taken down, which on a deployment that ships several times a day
+	// is a standing row nobody can act on. The release transient belongs on
+	// its own line or on none, never on the defect line.
+	cancelled := runtimeLoadFailure(execution.RuntimeStateView{}, context.Canceled)
+	if cancelled.ReasonCode == execution.ReasonCode(contract.ReasonStateReadDeadline) {
+		t.Fatalf("a cancelled call = %q: shutting a replica down is not this read spending its time, and this word "+
+			"files a defect", cancelled.ReasonCode)
+	}
+	if cancelled.Status != execution.StateRetryableIO {
+		t.Fatalf("a cancelled call status = %q, want a retryable read", cancelled.Status)
+	}
+
 	// A read on an established connection still is ours, so the check above is
 	// about dialling rather than about net.OpError.
 	read := runtimeLoadFailure(execution.RuntimeStateView{}, &net.OpError{

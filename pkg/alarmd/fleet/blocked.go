@@ -188,8 +188,8 @@ var failureFacets = map[string]facets{
 	// dependency at all.
 	"STATE_READ_TIMEOUT": {StageEvaluate, ClassCapacity, DependencyNone},
 	// Same stage and no dependency, and deliberately not ClassCapacity: a
-	// deadline spent before this read is not this read asking for too much, so
-	// and filing it under capacity would send the reader to the read size --
+	// deadline spent before this read is not this read asking for too much, and
+	// filing it under capacity would send the reader to the read size --
 	// which is the misattribution splitting the word exists to end.
 	"STATE_READ_DEADLINE": {StageEvaluate, ClassTimeout, DependencyNone},
 	// The object is too big for one replica's share; no dependency is involved

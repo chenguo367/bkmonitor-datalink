@@ -736,6 +736,15 @@ func IsStateReadTimeout(err error) bool { return isReadTimeout(err) }
 // A dial that timed out is excluded here for the same reason it is excluded
 // there: nothing was read, and the dependency being unreachable is its own
 // word.
+//
+// A cancelled call is not one of these. context.Canceled is the work above
+// being stopped -- a graceful shutdown, or a sibling batch's failure bringing
+// the parent context down -- and not this read running out of the time it had,
+// which is what this word says. The distinction is not academic: the word
+// lands on a defect row in the fleet, so counting cancellation here would file
+// a defect for every replica every time one is taken down, which is several
+// times a day on a deployment that ships. A word that has just been split out
+// of two meanings does not get to take on a third.
 func isCallDeadline(err error) bool {
 	if err == nil {
 		return false
@@ -744,7 +753,7 @@ func isCallDeadline(err error) bool {
 	if errors.As(err, &opErr) && opErr.Op == "dial" {
 		return false
 	}
-	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)
+	return errors.Is(err, context.DeadlineExceeded)
 }
 
 // isReadTimeout reports whether a read failed by running out of time rather
