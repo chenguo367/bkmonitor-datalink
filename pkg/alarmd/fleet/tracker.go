@@ -1193,6 +1193,20 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				state.emptySinceFrom = SinceSnapshotContinuity
 			}
 			state.emptyRuns++
+			// A hole in the evidence longer than the window the line waits
+			// for costs the run its head start. The run itself continues --
+			// the object still has not seen data, and a blocked or failing
+			// stretch leaves it on that stretch's own line meanwhile -- but
+			// an hour of empty completions has to be an hour this process
+			// watched, near enough. A day of rounds that produced no
+			// completion at all once sat inside a run dated the day before,
+			// and the release that ended them put three hundred objects on
+			// this line at once, each with fifty-two rounds of evidence
+			// behind an inherited hour. A short blip does not cost the hour:
+			// the object was completing empty either side of it.
+			if state.lastEmptySlot != 0 && trace.EvaluationTime-state.lastEmptySlot > int64(tracker.emptyEveryRoundAfter/time.Second) {
+				state.emptySinceSlot = 0
+			}
 			if state.emptySinceSlot == 0 {
 				state.emptySinceSlot = trace.EvaluationTime
 				state.emptySlotFrom = SinceSnapshotContinuity
