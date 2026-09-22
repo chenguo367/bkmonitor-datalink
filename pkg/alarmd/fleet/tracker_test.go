@@ -679,6 +679,25 @@ func TestARefusedCoverageStandsOnTheRowWhereTheReadingWouldBe(t *testing.T) {
 	if len(rows) != 1 || rows[0].Coverage == nil || rows[0].CoverageRejected != nil {
 		t.Fatalf("rows after a clean round = %+v, want the coverage back and the refusal gone", rows)
 	}
+	// A refusal, then a healthy round, then a degraded round that reports
+	// no coverage at all: the refusal ended with the run it belonged to and
+	// does not come back on the new one.
+	for round := 0; round < DefaultDegradedRounds+1; round++ {
+		tracker.Observe(context.Background(), refused)
+	}
+	tracker.Observe(context.Background(), completion("qg-refused", "FULL_COMPLETED", "8930"))
+	if listed := append(tracker.Anomalies(), tracker.Undecidable()...); len(listed) != 0 {
+		t.Fatalf("rows after a healthy round = %+v, want the object gone", listed)
+	}
+	plain := completion("qg-refused", "COMPLETED_WITH_UNAVAILABLE", "8930")
+	plain.ProgressCompletionCause = "LEVEL_OUTCOME_UNKNOWN"
+	for round := 0; round < DefaultDegradedRounds+1; round++ {
+		tracker.Observe(context.Background(), plain)
+	}
+	rows = append(tracker.Anomalies(), tracker.Undecidable()...)
+	if len(rows) != 1 || rows[0].CoverageRejected != nil {
+		t.Fatalf("rows on a new run = %+v, want the old refusal not carried onto it", rows)
+	}
 }
 
 // Persistent is the rule the verdict and the page both read. Each branch is

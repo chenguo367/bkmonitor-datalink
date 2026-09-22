@@ -223,13 +223,14 @@ type Standing struct {
 	// RefinedBy names the rule that changed the check's own pair, from the
 	// closed list StandingRules; empty when the pair is the check's.
 	RefinedBy StandingRule `json:"refined_by,omitempty"`
-	// About is the one Plan the words are about, set only when the row's
-	// object runs several Plans and the evidence the words were read from
-	// -- the guards, the series counts -- belongs to one of them. The other
-	// strategies on the object are not under these words; a fold or a card
-	// that reads the row for one of them reads this first. Absent when the
-	// object runs one Plan or the evidence names none or several.
-	About *StrategyRef `json:"about,omitempty"`
+	// About is the Plans this row's evidence is about, set on the words a
+	// row gives a strategy when the row's object runs several Plans and the
+	// check reads per-Plan evidence -- the guards, the series counts. The
+	// words themselves are read from that strategy's own Plan; About lists
+	// every Plan the row names so a card for a neighbour can say whose the
+	// object's trouble is. Absent when the object runs one Plan, the check
+	// is about the whole round, or the evidence names no Plan.
+	About []StrategyRef `json:"about,omitempty"`
 }
 
 // StandingRule names each rule that can refine a check's pair.
@@ -249,10 +250,15 @@ const (
 	RuleStalled StandingRule = "STALLED"
 	// RuleWatch: the row is moving or unheard, and the wait has a reason.
 	RuleWatch StandingRule = "WATCH"
+	// RulePlanEvidence: the words were read from the strategy's own Plan on
+	// an object that runs several -- a Plan bound to no series for longer
+	// than the stall bound is the data's, whatever the object's other Plans
+	// are doing.
+	RulePlanEvidence StandingRule = "PLAN_EVIDENCE"
 )
 
 // StandingRules is the closed list.
-var StandingRules = []StandingRule{RuleUnpaired, RuleHistoricalLoss, RuleWindowVerdict, RuleStalled, RuleWatch}
+var StandingRules = []StandingRule{RuleUnpaired, RuleHistoricalLoss, RuleWindowVerdict, RuleStalled, RuleWatch, RulePlanEvidence}
 
 // standingOf decides a row's words: the check's pair, then the rules in
 // order, each one a closed predicate on the row. A row under no check is
@@ -280,11 +286,11 @@ func standingOf(row Anomaly) Standing {
 	// the direct evidence that it will not. Read the other way round, a
 	// stuck object would read as "give it one more round" for ever -- the
 	// exact state STALLED was added to name.
-	if named, one := aboutOf(row); one {
-		about := named
-		standing.About = &about
-	}
 	if planScopedCheck(row.Finding.Check) {
+		// The Plans this row's evidence names, when the object runs several:
+		// carried on the object's own words so a card can say whose the
+		// object's trouble is, and copied onto each strategy's words.
+		standing.About = implicatedStrategies(row, row.Finding.Check)
 		if stalled(&row) {
 			standing.RefinedBy = RuleStalled
 			if verdict, decided := windowVerdictWords(row); decided {

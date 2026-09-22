@@ -27,9 +27,9 @@ func soundCoverage() *HistoryCoverageFacts {
 func TestEveryCoverageRejectionHasItsOwnRule(t *testing.T) {
 	t.Parallel()
 	breakers := map[CoverageRejectionRule]func(*HistoryCoverageFacts){
-		CoverageRejectLevelsZero: func(f *HistoryCoverageFacts) {
-			f.Levels, f.Short, f.Guarded, f.Fresh, f.ShortFresh, f.Windows = 0, 0, 0, 0, 0, nil
-		},
+		// Zero windows with something counted on them; a set that is zero
+		// everywhere is a run that summarised nothing, and is not refused.
+		CoverageRejectLevelsZero:             func(f *HistoryCoverageFacts) { f.Levels = 0 },
 		CoverageRejectShortOverLevels:        func(f *HistoryCoverageFacts) { f.Short = f.Levels + 1 },
 		CoverageRejectEmptyOverShort:         func(f *HistoryCoverageFacts) { f.Empty = f.Short + 1 },
 		CoverageRejectGuardedOverLevels:      func(f *HistoryCoverageFacts) { f.Guarded = f.Levels + 1 },
@@ -82,6 +82,9 @@ func TestEveryCoverageRejectionHasItsOwnRule(t *testing.T) {
 	}
 	if got, rejected := normalizeHistoryCoverageFacts(nil); got != nil || rejected != nil {
 		t.Fatalf("nil facts: %+v / %+v, want neither facts nor a rejection", got, rejected)
+	}
+	if got, rejected := normalizeHistoryCoverageFacts(&HistoryCoverageFacts{}); got != nil || rejected != nil {
+		t.Fatalf("all-zero facts: %+v / %+v, want dropped as no coverage, not refused", got, rejected)
 	}
 }
 

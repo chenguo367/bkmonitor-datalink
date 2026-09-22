@@ -180,10 +180,13 @@ var CoverageRejectionRules = []CoverageRejectionRule{
 }
 
 // CoverageRejection is what is left of a coverage fact set normalize refused:
-// the one rule it broke and, for a rule about one window, that window's
-// series. Nothing the rule judged untrustworthy travels with it -- not the
-// counts, not the pair -- so a reader cannot pick a number out of the shell
-// and judge by it. It exists because a refused fact set used to leave
+// the one rule it broke and its anchor. The anchor is what the rule alone
+// determines and what a reader goes to look at next: a rule that judges one
+// window carries that window's series; a rule that judges a property of the
+// whole set carries nothing, because the set's identity is the row itself.
+// Nothing the rule judged untrustworthy travels with it -- not the counts,
+// not the pair -- so a reader cannot pick a number out of the shell and
+// judge by it. It exists because a refused fact set used to leave
 // nothing at all: the row's coverage was simply absent, which on the page is
 // the same shape as every window complete. A reading the server itself
 // declared incoherent has to say so where the reading would have been.
@@ -224,6 +227,14 @@ func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) (*HistoryCoverag
 	// same reason as the rest: this is the count a reader uses to decide whether
 	// a strategy's dimensions are at fault, and a clamped one would still look
 	// like an answer.
+	// A set that is zero everywhere is a run that summarised no window, which
+	// the field's own comment calls a meaningful statement; it is dropped
+	// as no coverage, not refused. Zero windows with something counted on
+	// them is the contradiction.
+	if copied.Levels == 0 && copied.Short == 0 && copied.Empty == 0 && copied.Guarded == 0 && copied.Fresh == 0 &&
+		copied.ShortFresh == 0 && copied.Unusable == 0 && len(copied.Windows) == 0 {
+		return nil, nil
+	}
 	switch {
 	case copied.Levels == 0:
 		return rejectCoverage(CoverageRejectLevelsZero)

@@ -125,6 +125,10 @@ func StrategyLines(view *View, now time.Time) []StrategyLine {
 		}
 		rank := foldRank(row.Finding.Check, row.Loss)
 		for _, ref := range strategiesOf(row) {
+			standing, given := standingForStrategy(row, ref)
+			if !given {
+				continue
+			}
 			fold := folds[ref]
 			if fold == nil {
 				fold = &strategyFold{line: StrategyLine{StrategyID: ref.StrategyID, BusinessID: ref.BusinessID}, rank: unranked, objects: map[string]struct{}{}}
@@ -144,7 +148,7 @@ func StrategyLines(view *View, now time.Time) []StrategyLine {
 			// order rows were walked in.
 			if rank < fold.rank || (rank == fold.rank && !row.Since.IsZero() && (fold.deciding.Since.IsZero() || row.Since.Before(fold.deciding.Since))) {
 				fold.rank, fold.deciding = rank, row
-				fold.line.Standing, fold.line.DecidingObject = *row.Standing, row.QueryGroup
+				fold.line.Standing, fold.line.DecidingObject = standing, row.QueryGroup
 			}
 		}
 	})
