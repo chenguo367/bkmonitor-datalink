@@ -365,6 +365,17 @@ func AssembleQueryGroup(object QueryGroupObject, contexts map[execution.PlanIden
 	return group, nil
 }
 
+// LoadObservedSegmentQueryGroup reads only the content explicitly named by a
+// retained Segment. It neither falls back to another publication nor updates
+// the Worker's installed local view. Use a diagnostic repository with no observer.
+func (repository *RedisCatalogRepository) LoadObservedSegmentQueryGroup(ctx context.Context, segment execution.ScheduleSegmentFact, at execution.EvaluationTime) (QueryGroup, error) {
+	if repository == nil || segment.ObjectDigest == "" || !segment.Contains(at) {
+		return QueryGroup{}, ErrCatalogObjectUnavailable
+	}
+	group, _, _, err := repository.loadSegmentQueryGroupByContent(ctx, segment.At(at))
+	return group, err
+}
+
 // LoadSegmentQueryGroup reads the Query Group a Slot at the evaluation time
 // executes under its Segment: by content when the Segment names it and the
 // content is stored, and from the Snapshot the Segment's Publication names
