@@ -837,6 +837,13 @@ const (
 	// A record arrived at that minute and the Level could not use it: the
 	// strategy's or the detection's, and the row's unusable reason says why.
 	HolePointUnusable HoleCause = "POINT_UNUSABLE"
+	// The round of that minute is remembered and ran a query, but what its
+	// primary answered is not on record: the completion carried no primary
+	// fact, or carried a word outside the contract's list. Not knowing what
+	// the round said is its own reading, apart from the round saying
+	// PARTIAL -- folding the two would make "the dependency did not answer"
+	// and "this side did not write it down" one name, the strongest one.
+	HolePrimaryUnrecorded HoleCause = "ROUND_PRIMARY_UNRECORDED"
 	// No round this process remembers evaluated that minute: before this
 	// process took the object, older than the rounds kept, or a hole listed
 	// beyond the listing bound. A limit of the reader, not a finding.
@@ -844,7 +851,7 @@ const (
 )
 
 // HoleCauses is the closed list, for the page's completeness check.
-var HoleCauses = []HoleCause{HoleAnsweredWithoutSeries, HoleAnsweredEmpty, HoleInputIncomplete, HolePointUnusable, HoleNotInMemory}
+var HoleCauses = []HoleCause{HoleAnsweredWithoutSeries, HoleAnsweredEmpty, HoleInputIncomplete, HolePointUnusable, HolePrimaryUnrecorded, HoleNotInMemory}
 
 // WindowVerdict is what a window's holes say together about whose the
 // shortfall is. Decided here from the causes, so the page states a verdict
@@ -863,7 +870,8 @@ const (
 	// could not use.
 	VerdictPointsUnusable WindowVerdict = "POINTS_UNUSABLE"
 	// Nothing this side did wrong is on record, and at least one hole is a
-	// minute this process cannot speak for.
+	// minute this process cannot speak for -- not remembered, or remembered
+	// without what the query answered.
 	VerdictUnknown WindowVerdict = "UNKNOWN"
 )
 
@@ -918,19 +926,22 @@ type WindowHoleCounts struct {
 	AnsweredEmpty         uint32 `json:"answered_empty"`
 	InputIncomplete       uint32 `json:"input_incomplete"`
 	Unusable              uint32 `json:"unusable"`
+	PrimaryUnrecorded     uint32 `json:"primary_unrecorded"`
 	NotInMemory           uint32 `json:"not_in_memory"`
 }
 
 // verdictOf reads the counts into the one word: this side's incomplete
 // rounds first, then unusable records, then the data's only when every hole
-// is accounted for as the data's, else unknown.
+// is accounted for as the data's, else unknown. A hole whose round is
+// remembered without its primary's answer is unknown, never this side's:
+// the strongest word is not the fallback for a word that is missing.
 func verdictOf(counts WindowHoleCounts) WindowVerdict {
 	switch {
 	case counts.InputIncomplete > 0:
 		return VerdictInputIncomplete
 	case counts.Unusable > 0:
 		return VerdictPointsUnusable
-	case counts.NotInMemory > 0:
+	case counts.NotInMemory > 0 || counts.PrimaryUnrecorded > 0:
 		return VerdictUnknown
 	default:
 		return VerdictDataAbsentWhenQueried

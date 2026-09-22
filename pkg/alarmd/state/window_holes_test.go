@@ -34,8 +34,10 @@ func TestTheHolesOfAWindowAreThePositionsTheSummaryDidNotCount(t *testing.T) {
 		point(400, "c", fact(one, LevelFactAnomalous), fact(five, LevelFactNormal)),
 	})
 	history, _ := window.History(1)
-	summary := history.Summarize(400, 6)
-	holes := history.Holes(400, 6, 16)
+	summary, holes := history.SummarizeHoles(400, 6, 16)
+	if only := history.Summarize(400, 6); only != summary {
+		t.Fatalf("the walk with holes summarised %+v, the plain one %+v: one walk, two answers", summary, only)
+	}
 	if summary.ValidPositions != 2 {
 		t.Fatalf("summary = %+v, want 2 valid positions", summary)
 	}
@@ -51,23 +53,29 @@ func TestTheHolesOfAWindowAreThePositionsTheSummaryDidNotCount(t *testing.T) {
 	}
 	// The bound cuts the list, never the total: a window short by more than
 	// the bound still says how short.
-	bounded := history.Holes(400, 6, 2)
+	_, bounded := history.SummarizeHoles(400, 6, 2)
 	if !reflect.DeepEqual(bounded.Missing, []int64{160, 280}) || bounded.MissingTotal != 3 {
 		t.Fatalf("bounded = %+v, want the two oldest listed and all three counted", bounded)
 	}
 	// A request the summary would refuse to walk names nothing: more
 	// positions than the Level retains, or a window reaching before the epoch.
+	refused := func(end int64, required uint32) WindowHoles {
+		_, holes := history.SummarizeHoles(end, required, 16)
+		return holes
+	}
 	for name, holes := range map[string]WindowHoles{
-		"beyond retention": history.Holes(400, 9, 16),
-		"before the epoch": history.Holes(100, 6, 16),
+		"beyond retention": refused(400, 9),
+		"before the epoch": refused(100, 6),
 	} {
 		if holes.MissingTotal != 0 || holes.UnusableTotal != 0 || holes.Missing != nil || holes.Unusable != nil {
 			t.Fatalf("%s: holes = %+v, want none named -- the summary would not have walked it", name, holes)
 		}
 	}
+	// The plain summary lists nothing; the counts it would have made are the
+	// walk's and cost nothing to keep, but nothing reads them from it.
 	// A full window has no holes.
 	fiveHistory, _ := window.History(5)
-	if full := fiveHistory.Holes(400, 1, 16); full.MissingTotal != 0 || full.UnusableTotal != 0 {
+	if _, full := fiveHistory.SummarizeHoles(400, 1, 16); full.MissingTotal != 0 || full.UnusableTotal != 0 {
 		t.Fatalf("a full window reported holes: %+v", full)
 	}
 }

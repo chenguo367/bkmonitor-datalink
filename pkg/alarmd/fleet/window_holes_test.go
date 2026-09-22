@@ -145,12 +145,25 @@ func TestTheWindowVerdictIsDecidedFromItsHoles(t *testing.T) {
 	if rows[0].Verdict != VerdictInputIncomplete || rows[0].HolesBy.InputIncomplete != 1 {
 		t.Fatalf("rows = %+v, want INPUT_INCOMPLETE over unusable and unseen", rows)
 	}
-	// A completion with no primary fact at all -- a Slot skipped without a
-	// query -- is a minute not seen whole.
+	// A Slot given up without a query carries no primary, and the kind says
+	// why: the minute was not seen whole by this side.
 	rounds = []roundMark{{slot: 300, end: 240, kind: "GAP_SKIPPED", reason: "GAP_SKIPPED"}}
 	rows = windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{window([]int64{240}, 1, nil, 0)}})
 	if rows[0].Holes[0].Cause != HoleInputIncomplete || rows[0].Holes[0].Reason != "GAP_SKIPPED" {
 		t.Fatalf("a skipped round's hole = %+v, want INPUT_INCOMPLETE carrying the skip reason", rows[0].Holes[0])
+	}
+	// A round that ran and whose primary answer is not on record -- the
+	// completion carried none, or a word outside the contract's list that
+	// the observer dropped -- is a minute nobody can speak for. Not this
+	// side's: "the dependency did not answer" and "we did not write down
+	// what it answered" must not share the strongest word.
+	rounds = []roundMark{{slot: 300, end: 240, kind: "FULL_COMPLETED"}}
+	rows = windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{window([]int64{240}, 1, nil, 0)}})
+	if hole := rows[0].Holes[0]; hole.Cause != HolePrimaryUnrecorded || hole.Round != "FULL_COMPLETED" {
+		t.Fatalf("a round without its primary on record = %+v, want ROUND_PRIMARY_UNRECORDED", hole)
+	}
+	if rows[0].Verdict != VerdictUnknown || rows[0].HolesBy.PrimaryUnrecorded != 1 || rows[0].HolesBy.InputIncomplete != 0 {
+		t.Fatalf("rows = %+v, want UNKNOWN with the unrecorded hole counted on its own", rows)
 	}
 	if windowRows(rounds, nil) != nil || windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1}) != nil {
 		t.Fatal("rows were made for a round that named no window")

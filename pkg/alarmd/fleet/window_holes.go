@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -78,6 +79,17 @@ func roundAt(rounds []roundMark, minute int64) (roundMark, bool) {
 	return inferred, inferredFound
 }
 
+// queryFreeCompletion reports whether the completion kind is one that never
+// reached the query stage, from the module's own list rather than a copy.
+func queryFreeCompletion(kind string) bool {
+	for _, queryFree := range model.QueryFreeCompletionKinds {
+		if kind == string(queryFree) {
+			return true
+		}
+	}
+	return false
+}
+
 // windowKey is the identity a reader follows across rounds.
 func windowKey(series string, level uint32) string {
 	return series + "/" + strconv.FormatUint(uint64(level), 10)
@@ -110,11 +122,18 @@ func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts) [
 				case mark.primary != nil && mark.primary.Completeness == "FULL":
 					hole.Cause = HoleAnsweredEmpty
 					row.HolesBy.AnsweredEmpty++
-				default:
-					// PARTIAL, UNAVAILABLE, or a completion with no primary
-					// at all: the minute was not seen whole.
+				case mark.primary != nil || queryFreeCompletion(mark.kind):
+					// PARTIAL or UNAVAILABLE, or a Slot given up without a
+					// query -- the kind itself says no primary was asked
+					// for: the minute was not seen whole by this side.
 					hole.Cause = HoleInputIncomplete
 					row.HolesBy.InputIncomplete++
+				default:
+					// A round that ran a query and did not record what it
+					// answered: not this side's by default, and not the
+					// data's either.
+					hole.Cause = HolePrimaryUnrecorded
+					row.HolesBy.PrimaryUnrecorded++
 				}
 			} else {
 				hole.Cause = HoleNotInMemory

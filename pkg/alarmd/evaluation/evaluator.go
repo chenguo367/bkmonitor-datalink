@@ -258,8 +258,13 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			completeness = guarded
 			durableGuardReasons[l.Definition().LevelID] = reason
 		}
-		histories[i] = trigger.LevelHistory{LevelID: l.Definition().LevelID, View: historyView{HistoryView: h, completeness: completeness}}
-		summary := histories[i].View.Summarize(record.SourceTime(), l.RequiredDetectHistoryPoints())
+		held := historyView{HistoryView: h, completeness: completeness}
+		histories[i] = trigger.LevelHistory{LevelID: l.Definition().LevelID, View: held}
+		// One walk for the counts and the holes: the summary visits every
+		// position and classifies it, and a second walk over a day-long
+		// window would double the dearest read on this path for exactly the
+		// windows most likely to be short.
+		summary, holes := held.summarizeHoles(ctx, record.SourceTime(), l.RequiredDetectHistoryPoints(), execution.MaxWindowHolesListed)
 		historyCompleteness[l.Definition().LevelID] = execution.HistoryCompleteness(summary.Completeness)
 		// completeness is non-empty exactly when a guard is forcing this Level's
 		// verdict, so the same variable that decides what gets reported also says
@@ -274,10 +279,9 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			coverage.ObserveUnusable(reason)
 		}
 		// The short window by name: which series, and which of its positions
-		// are empty. Walked only for a short window, from the same window the
-		// summary counted, and bounded there.
+		// are empty -- from the walk above, so the named holes and the
+		// shortfall are one count.
 		if summary.ValidPositions < summary.RequiredPositions {
-			holes := h.Holes(record.SourceTime(), summary.RequiredPositions, execution.MaxWindowHolesListed)
 			coverage.ObserveWindow(execution.WindowCoverage{
 				LevelID: l.Definition().LevelID, Series: series,
 				Valid: summary.ValidPositions, Required: summary.RequiredPositions, End: record.SourceTime(),
@@ -844,14 +848,22 @@ type historyView struct {
 }
 
 func (h historyView) Summarize(t int64, n uint32) trigger.HistorySummary {
-	s := h.HistoryView.Summarize(t, n)
+	summary, _ := h.summarizeHoles(context.Background(), t, n, 0)
+	return summary
+}
+
+// summarizeHoles is Summarize with the holes named from the same walk. The
+// forced completeness is applied here and only here, so the counts the
+// trigger reads and the holes the coverage names are one walk's answer.
+func (h historyView) summarizeHoles(ctx context.Context, t int64, n uint32, limit int) (trigger.HistorySummary, state.WindowHoles) {
+	s, holes := h.HistoryView.SummarizeHolesContext(ctx, t, n, limit)
 	c := h.completeness
 	if c == "" {
 		c = string(s.Completeness)
 	}
 	return trigger.HistorySummary{Completeness: c, WindowStart: s.WindowStart, WindowEnd: s.WindowEnd,
 		ValidPositions: s.ValidPositions, RequiredPositions: s.RequiredPositions,
-		AnomalyCount: s.AnomalyCount, AnomalyDigest: s.AnomalyDigest}
+		AnomalyCount: s.AnomalyCount, AnomalyDigest: s.AnomalyDigest}, holes
 }
 func levelState(v execution.RuntimeStateView, id uint32) (execution.RuntimeLevelStateView, bool) {
 	for _, l := range v.Levels {
