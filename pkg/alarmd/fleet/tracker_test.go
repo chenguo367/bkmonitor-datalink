@@ -1362,6 +1362,7 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 	// own: one round cannot supply them. Measure is the row's word for what
 	// WorstValid counts, a constant of the field and not of the round.
 	rowOnly := map[string]bool{"ShortRounds": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true,
+		"ConstrainedRounds": true, "ResumedRounds": true,
 		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "UnchangedRounds": true, "Measure": true,
 		"WorstWindow": true, "WorstWindowChanged": true, "Windows": true, "RoundsRemembered": true, "RoundsKept": true}
 	for i := 0; i < published.NumField(); i++ {
@@ -1781,5 +1782,56 @@ func TestAnInternalFailureIsASecondFactUnderDefect(t *testing.T) {
 	}
 	if listed[0].Internal != nil {
 		t.Fatalf("after a healthy completion the row still carries %+v", listed[0].Internal)
+	}
+}
+
+// partialRound is a round that summarised no window and says why: every
+// series already applied at this Slot's version, or none of their State
+// loadable.
+func partialRound(queryGroup string, resumed, constrained uint32) observability.Observation {
+	observation := completion(queryGroup, "COMPLETED_WITH_UNAVAILABLE", "8930")
+	observation.ProgressCompletionCause = "LEVEL_OUTCOME_UNKNOWN"
+	observation.ProgressCompletionReason = "HISTORY_WARMING"
+	observation.HistoryCoverage = &observability.HistoryCoverageFacts{Resumed: resumed, Constrained: constrained}
+	return observation
+}
+
+// The two partial-round counts are this round's and the next round replaces
+// them, so a round that could load no State left no trace once the next one
+// landed: on a running deployment the only way to see one was to be reading
+// the interface at the moment it happened, and six consecutive samples of an
+// object that fails a State read every ten minutes caught none. The runs are
+// counted here for the same reason the short-window run is -- one round
+// cannot tell a blip from a state -- and each ends on the first round that
+// is not of its kind.
+func TestThePartialRoundRunsAreCountedAndEndOnTheFirstOrdinaryRound(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	for round := 0; round < 3; round++ {
+		tracker.Observe(context.Background(), partialRound("qg-partial", 0, 249))
+	}
+	coverage := func() *HistoryCoverage {
+		listed := tracker.Undecidable()
+		if len(listed) != 1 || listed[0].Coverage == nil {
+			t.Fatalf("undecidable = %+v, want one object carrying coverage", listed)
+		}
+		return listed[0].Coverage
+	}
+	if got := coverage(); got.ConstrainedRounds != 3 || got.ResumedRounds != 0 {
+		t.Fatalf("constrained rounds = %d, resumed = %d, want three constrained and no resumed", got.ConstrainedRounds, got.ResumedRounds)
+	}
+	// The other kind of partial round: the constrained run ends, the resumed
+	// one starts. They are separate runs because they are separate
+	// statements -- everything was already applied, against nothing could be
+	// read -- and a reader acts differently on each.
+	tracker.Observe(context.Background(), partialRound("qg-partial", 227, 0))
+	if got := coverage(); got.ConstrainedRounds != 0 || got.ResumedRounds != 1 {
+		t.Fatalf("constrained rounds = %d, resumed = %d, want the constrained run ended and the resumed one begun", got.ConstrainedRounds, got.ResumedRounds)
+	}
+	// An ordinary round ends both.
+	tracker.Observe(context.Background(), coverageCompletion("qg-partial", 3, 1, 2, 14))
+	if got := coverage(); got.ConstrainedRounds != 0 || got.ResumedRounds != 0 {
+		t.Fatalf("constrained rounds = %d, resumed = %d after a round that summarised its windows, want both runs ended",
+			got.ConstrainedRounds, got.ResumedRounds)
 	}
 }

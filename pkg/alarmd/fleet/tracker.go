@@ -369,6 +369,10 @@ type queryGroupState struct {
 	// only part that separates a window that is filling from one that never
 	// will.
 	shortRounds uint32
+	// constrainedRounds and resumedRounds are the runs of the two partial
+	// rounds; see HistoryCoverage.ConstrainedRounds.
+	constrainedRounds uint32
+	resumedRounds     uint32
 	// heldFullRounds counts consecutive rounds whose windows were all full
 	// while a guard held them; a short round, an unguarded round or a
 	// healthy completion ends it.
@@ -1254,6 +1258,20 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		} else {
 			state.heldFullRounds++
 		}
+		// The two partial-round runs. Their per-round counts are replaced by
+		// the next round, so without these a round that could load no State
+		// is gone the moment the next one lands, and the interface can only
+		// answer for whoever happened to be looking.
+		if facts := observation.HistoryCoverage; facts == nil || facts.Constrained == 0 {
+			state.constrainedRounds = 0
+		} else {
+			state.constrainedRounds++
+		}
+		if facts := observation.HistoryCoverage; facts == nil || facts.Resumed == 0 {
+			state.resumedRounds = 0
+		} else {
+			state.resumedRounds++
+		}
 		// Every short window belonged to a series with no loaded history, or
 		// the run ends. "Every", not "any": one short window that did have
 		// history is a round where churn is not the whole story, and this
@@ -1311,6 +1329,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				Fresh: facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,
 				Unusable: facts.Unusable, UnusableReason: facts.UnusableReason,
 				Resumed: facts.Resumed, Constrained: facts.Constrained,
+				ConstrainedRounds: state.constrainedRounds, ResumedRounds: state.resumedRounds,
 				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
 				NoProgressRounds: state.noProgressRounds, UnchangedRounds: state.unchangedRounds,
 				WorstWindow: worstWindow, WorstWindowChanged: worstWindowChanged,
@@ -1438,6 +1457,8 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.coverageRejected = nil
 	state.shortRounds = 0
 	state.emptyRounds = 0
+	state.constrainedRounds = 0
+	state.resumedRounds = 0
 	state.heldFullRounds = 0
 	state.sawSomethingWrong = false
 	state.degradedRuns = 0

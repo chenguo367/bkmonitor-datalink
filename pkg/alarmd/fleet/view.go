@@ -767,6 +767,18 @@ type HistoryCoverage struct {
 	// reader needs to see before trusting Levels as a size.
 	Resumed     uint32 `json:"resumed"`
 	Constrained uint32 `json:"constrained"`
+	// ConstrainedRounds is how many consecutive rounds could load no State
+	// for any series, and ResumedRounds the same for rounds that summarised
+	// no window because every series was already applied at the Slot's
+	// version. The two counts above are this round's and nothing keeps
+	// them: a round that could load nothing leaves no trace once the next
+	// round replaces it, so a run of them and a single one read the same on
+	// the row -- and on a live deployment the only way to see one was to
+	// sample the interface at the moment it happened. Counted here for the
+	// same reason ShortRounds is: one round cannot tell a blip from a
+	// state.
+	ConstrainedRounds uint32 `json:"constrained_rounds"`
+	ResumedRounds     uint32 `json:"resumed_rounds"`
 	// Abnormal is how many Level verdicts in the last round were ABNORMAL and
 	// AbnormalOnIncomplete how many of those were reached on a window that was
 	// not full. The trigger decides ABNORMAL before it reads completeness, so
