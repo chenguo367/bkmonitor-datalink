@@ -359,9 +359,9 @@ func newCompletionOnlyFixture(
 	}
 	request := slotRequest(execution.OperationNormal)
 	request.Contract = contractRef
-	request.DuePlanTargets = execution.FrozenDuePlanTargets{DuePlanSetDigest: digest, Plans: make([]execution.PlanIdentity, len(plans))}
+	request.DuePlanTargets = execution.FrozenDuePlanTargets{DuePlanSetDigest: digest, Plans: make([]execution.PlanKey, len(plans))}
 	for index := range plans {
-		request.DuePlanTargets.Plans[index] = plans[index].Identity
+		request.DuePlanTargets.Plans[index] = plans[index].Key()
 	}
 	request.ExpectedNextSlot = contractRef.Slot.EvaluationTime
 	return fixture{trace: &trace, observations: &observations, ports: ports, coordinator: coordinator}, request

@@ -51,7 +51,7 @@ func (repository *RedisCatalogRepository) loadPublishedGroups(
 	for identity, entry := range content.Groups {
 		plans := make([]FrozenPlan, 0, len(entry.Plans))
 		for _, plan := range entry.Plans {
-			plans = append(plans, FrozenPlan{Identity: plan})
+			plans = append(plans, FrozenPlan{Identity: plan.PlanIdentity, Shard: shardPointerOf(plan)})
 		}
 		published.groups[identity] = QueryGroup{Identity: identity, Plans: plans}
 	}

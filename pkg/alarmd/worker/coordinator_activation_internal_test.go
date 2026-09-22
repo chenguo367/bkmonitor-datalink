@@ -109,7 +109,8 @@ func (*activationSiblingPorts) Sequence(ctx context.Context, _ execution.Sequenc
 
 func (ports *activationSiblingPorts) LoadActivations(_ context.Context, request execution.PlanActivationRequest) (execution.PlanActivationResult, error) {
 	result := execution.PlanActivationResult{Contract: request.Contract}
-	for _, plan := range request.Plans {
+	for _, key := range request.Plans {
+		plan := key.PlanIdentity
 		selected := execution.ActivatedPlan{Identity: plan, StateApplyEpoch: 1, RequiredFullSlots: 1}
 		switch plan {
 		case ports.changedPlan:
@@ -124,7 +125,7 @@ func (ports *activationSiblingPorts) LoadActivations(_ context.Context, request 
 }
 
 func (ports *activationSiblingPorts) Check(_ context.Context, request execution.SideEffectAdmissionRequest) (execution.SideEffectAdmissionResult, error) {
-	ports.admitted = append(ports.admitted, request.Plan)
+	ports.admitted = append(ports.admitted, request.Plan.PlanIdentity)
 	return execution.SideEffectAdmissionResult{Admitted: true}, nil
 }
 

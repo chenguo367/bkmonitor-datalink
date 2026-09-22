@@ -410,7 +410,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	// the other way round too: a record it holds for a Plan no open Segment
 	// carries is an activation that cannot be recovered from the Segments,
 	// and a cutover must not quietly drop it.
-	coveredPrevious := make(map[execution.PlanIdentity]struct{}, len(carried))
+	coveredPrevious := make(map[execution.PlanKey]struct{}, len(carried))
 	for _, queryGroup := range oldIdentities {
 		// Recorded before anything can fail on it: the cutover returns at its
 		// first failure, so this names the one that stopped it.
@@ -424,7 +424,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 				// Kept without a read: the manifest names the same content and
 				// the same contexts, so the open Segment is left as it is.
 				for _, plan := range newGroup.Plans {
-					record, ok := carried[plan.Identity]
+					record, ok := carried[plan.Key()]
 					if !ok {
 						return fmt.Errorf("%w: a kept Query Group has a Plan without a current activation record", ErrActivationRecordMissing)
 					}
@@ -483,7 +483,7 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 			return err
 		}
 		for _, record := range open.Plans {
-			coveredPrevious[record.Fact.Plan] = struct{}{}
+			coveredPrevious[record.Fact.Key()] = struct{}{}
 		}
 		if remains && open.Schedule.Segment.ObjectDigest != "" && open.Schedule.Segment.ObjectDigest == newContent[queryGroup].digest {
 			// Same execution content: the Segment and its records stay. Only
@@ -882,7 +882,7 @@ func (repository *RedisCatalogRepository) CompareAndSetScheduleCutover(
 	next.SchemaVersion = activationSchemaVersion
 	updates := make([]scheduleTimelineUpdate, 0, len(facts))
 	seen := make(map[execution.QueryGroupIdentity]struct{}, len(facts))
-	affectedPlans := make(map[execution.PlanIdentity]struct{})
+	affectedPlans := make(map[execution.PlanKey]struct{})
 	for _, fact := range facts {
 		if _, duplicate := seen[fact.NewSegment.QueryGroup]; duplicate {
 			return errors.New("alarmd controlplane: duplicate Query Group cutover")
@@ -900,10 +900,10 @@ func (repository *RedisCatalogRepository) CompareAndSetScheduleCutover(
 			return err
 		}
 		for _, plan := range oldSchedule.Plans {
-			affectedPlans[plan.Identity] = struct{}{}
+			affectedPlans[plan.Key()] = struct{}{}
 		}
 		for _, plan := range newSchedule.Plans {
-			affectedPlans[plan.Identity] = struct{}{}
+			affectedPlans[plan.Key()] = struct{}{}
 		}
 		timeline, raw, err := repository.loadScheduleTimelineForUpdate(ctx, fact.OldSegment.QueryGroup)
 		if err != nil {
@@ -941,20 +941,20 @@ func validateInitialActivationCoverage(state ActivationState, timelines []persis
 	if err != nil {
 		return err
 	}
-	covered := make(map[execution.PlanIdentity]PlanActivationRecord, len(wanted))
+	covered := make(map[execution.PlanKey]PlanActivationRecord, len(wanted))
 	for _, timeline := range timelines {
 		for _, record := range timeline.Segments[0].Plans {
-			if _, duplicate := covered[record.Fact.Plan]; duplicate {
+			if _, duplicate := covered[record.Fact.Key()]; duplicate {
 				return errors.New("alarmd controlplane: initial Schedule Segments contain duplicate Plan activation")
 			}
-			covered[record.Fact.Plan] = record
+			covered[record.Fact.Key()] = record
 		}
 	}
 	if len(covered) != len(wanted) {
 		return errors.New("alarmd controlplane: initial Schedule Segments must exactly cover Plan activation")
 	}
 	for identity, record := range wanted {
-		if covered[identity] != record {
+		if !covered[identity].Equal(record) {
 			return errors.New("alarmd controlplane: initial Schedule Segments must exactly cover Plan activation")
 		}
 	}
@@ -977,14 +977,14 @@ func validateOpenSegmentActivation(state ActivationState, segment persistedSched
 		return err
 	}
 	for _, record := range segment.Plans {
-		if current[record.Fact.Plan] != record {
+		if !current[record.Fact.Key()].Equal(record) {
 			return errors.New("alarmd controlplane: open Schedule Segment differs from current Plan activation")
 		}
 	}
 	return nil
 }
 
-func validateUnchangedActivationRecords(previous, next ActivationState, affected map[execution.PlanIdentity]struct{}) error {
+func validateUnchangedActivationRecords(previous, next ActivationState, affected map[execution.PlanKey]struct{}) error {
 	before, err := activationRecordMap(previous.Plans)
 	if err != nil {
 		return err
@@ -997,7 +997,7 @@ func validateUnchangedActivationRecords(previous, next ActivationState, affected
 		if _, changed := affected[identity]; changed {
 			continue
 		}
-		if after[identity] != record {
+		if !after[identity].Equal(record) {
 			return errors.New("alarmd controlplane: activation changed outside affected Query Groups")
 		}
 	}
@@ -1005,20 +1005,20 @@ func validateUnchangedActivationRecords(previous, next ActivationState, affected
 		if _, changed := affected[identity]; changed {
 			continue
 		}
-		if before[identity] != record {
+		if !before[identity].Equal(record) {
 			return errors.New("alarmd controlplane: activation changed outside affected Query Groups")
 		}
 	}
 	return nil
 }
 
-func activationRecordMap(records []PlanActivationRecord) (map[execution.PlanIdentity]PlanActivationRecord, error) {
-	result := make(map[execution.PlanIdentity]PlanActivationRecord, len(records))
+func activationRecordMap(records []PlanActivationRecord) (map[execution.PlanKey]PlanActivationRecord, error) {
+	result := make(map[execution.PlanKey]PlanActivationRecord, len(records))
 	for _, record := range records {
-		if _, duplicate := result[record.Fact.Plan]; duplicate {
+		if _, duplicate := result[record.Fact.Key()]; duplicate {
 			return nil, errors.New("alarmd controlplane: duplicate Plan activation")
 		}
-		result[record.Fact.Plan] = record
+		result[record.Fact.Key()] = record
 	}
 	return result, nil
 }
@@ -1213,13 +1213,13 @@ func (repository *RedisCatalogRepository) materializeSchedule(
 }
 
 func activationRecordsForSchedule(state ActivationState, schedule execution.FrozenQueryGroupSchedule) ([]PlanActivationRecord, error) {
-	byPlan := make(map[execution.PlanIdentity]PlanActivationRecord, len(state.Plans))
+	byPlan := make(map[execution.PlanKey]PlanActivationRecord, len(state.Plans))
 	for _, record := range state.Plans {
-		byPlan[record.Fact.Plan] = record
+		byPlan[record.Fact.Key()] = record
 	}
 	records := make([]PlanActivationRecord, len(schedule.Plans))
 	for index, plan := range schedule.Plans {
-		record, ok := byPlan[plan.Identity]
+		record, ok := byPlan[plan.Key()]
 		if !ok || record.Publication.SnapshotRevision != schedule.Segment.Publication.SnapshotRevision ||
 			execution.PublicationEpoch(record.Publication.PublicationEpoch) != schedule.Segment.Publication.PublicationEpoch ||
 			record.Fact.Selected.ScheduleRevision != plan.ScheduleRevision {
@@ -1323,7 +1323,7 @@ func (repository *RedisCatalogRepository) loadActivatedGroupsFromOpenSchedules(
 	if err != nil {
 		return nil, nil, err
 	}
-	covered := make(map[execution.PlanIdentity]struct{}, len(expected))
+	covered := make(map[execution.PlanKey]struct{}, len(expected))
 	groups := make(map[execution.QueryGroupIdentity]QueryGroup)
 	digests := make(map[execution.QueryGroupIdentity]execution.ObjectDigest)
 	identities := make([]execution.QueryGroupIdentity, 0, len(candidates))
@@ -1351,13 +1351,13 @@ func (repository *RedisCatalogRepository) loadActivatedGroupsFromOpenSchedules(
 			return nil, nil, err
 		}
 		for _, record := range open.Plans {
-			if expected[record.Fact.Plan] != record {
+			if !expected[record.Fact.Key()].Equal(record) {
 				return nil, nil, ErrSnapshotUnavailable
 			}
-			if _, duplicate := covered[record.Fact.Plan]; duplicate {
+			if _, duplicate := covered[record.Fact.Key()]; duplicate {
 				return nil, nil, ErrSnapshotUnavailable
 			}
-			covered[record.Fact.Plan] = struct{}{}
+			covered[record.Fact.Key()] = struct{}{}
 		}
 		groups[identity] = QueryGroup{
 			Identity: identity,
@@ -1407,7 +1407,7 @@ func (repository *RedisCatalogRepository) loadActivatedGroupsFromScheduleScan(ct
 	if err != nil {
 		return nil, err
 	}
-	covered := make(map[execution.PlanIdentity]struct{}, len(expected))
+	covered := make(map[execution.PlanKey]struct{}, len(expected))
 	groups := make(map[execution.QueryGroupIdentity]QueryGroup)
 	var cursor uint64
 	pattern := repository.prefix + ":schedule_timeline:*"
@@ -1437,13 +1437,13 @@ func (repository *RedisCatalogRepository) loadActivatedGroupsFromScheduleScan(ct
 				return nil, err
 			}
 			for _, record := range open.Plans {
-				if expected[record.Fact.Plan] != record {
+				if !expected[record.Fact.Key()].Equal(record) {
 					return nil, ErrSnapshotUnavailable
 				}
-				if _, duplicate := covered[record.Fact.Plan]; duplicate {
+				if _, duplicate := covered[record.Fact.Key()]; duplicate {
 					return nil, ErrSnapshotUnavailable
 				}
-				covered[record.Fact.Plan] = struct{}{}
+				covered[record.Fact.Key()] = struct{}{}
 			}
 			groups[identity] = QueryGroup{Identity: identity, QueryPlan: execution.QueryPlanFacts{QueryRevision: open.Schedule.Segment.QueryRevision}, ScheduleRevision: open.Schedule.Segment.ScheduleRevision}
 		}
@@ -1715,15 +1715,15 @@ func activationRecordsForPersistedSchedule(records []PlanActivationRecord, sched
 	if len(records) != len(schedule.Plans) {
 		return nil, errors.New("alarmd controlplane: persisted Plan activation cardinality differs from schedule")
 	}
-	byPlan := make(map[execution.PlanIdentity]PlanActivationRecord, len(records))
+	byPlan := make(map[execution.PlanKey]PlanActivationRecord, len(records))
 	for _, record := range records {
-		if _, duplicate := byPlan[record.Fact.Plan]; duplicate {
+		if _, duplicate := byPlan[record.Fact.Key()]; duplicate {
 			return nil, errors.New("alarmd controlplane: duplicate persisted Plan activation")
 		}
-		byPlan[record.Fact.Plan] = record
+		byPlan[record.Fact.Key()] = record
 	}
 	for _, plan := range schedule.Plans {
-		record, ok := byPlan[plan.Identity]
+		record, ok := byPlan[plan.Key()]
 		if !ok || record.Fact.Selected.ScheduleRevision != plan.ScheduleRevision ||
 			record.Publication.SnapshotRevision != schedule.Segment.Publication.SnapshotRevision ||
 			execution.PublicationEpoch(record.Publication.PublicationEpoch) != schedule.Segment.Publication.PublicationEpoch {
@@ -2080,6 +2080,9 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 		}
 		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureSnapshotRead, err)
 	}
+	// Both maps are one Segment's, that is one Query Group's, so a strategy
+	// has one piece in them and the identity names it; the due refs carry
+	// the identity alone.
 	activationByPlan := make(map[execution.PlanIdentity]PlanActivationRecord, len(segment.Plans))
 	for _, record := range segment.Plans {
 		activationByPlan[record.Fact.Plan] = record
@@ -2133,7 +2136,7 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 		if compiled.NoData() != nil {
 			frozen++
 		}
-		duePlans = append(duePlans, execution.DuePlan{Identity: plan.Identity, CompiledPlan: compiled,
+		duePlans = append(duePlans, execution.DuePlan{Identity: plan.Identity, Shard: execution.ShardOf(plan.Shard), CompiledPlan: compiled,
 			StateGeneration: record.Fact.Selected.StateGeneration, StateApplyEpoch: record.Fact.Selected.StateApplyEpoch,
 			ScheduleRevision: plan.ScheduleRevision, ScheduleSpec: plan.ScheduleSpec,
 			CompletionDeadlineUnixMilli: deadline, PartialCapabilities: capabilities})

@@ -2028,11 +2028,11 @@ func TestProductionPhaseTwoActivationChecksExactPersistedStateEpoch(t *testing.T
 				ScheduleRevision: "plan-schedule-1", RequiredFullSlots: 2}}},
 	}}
 	activation := productionPhaseTwoActivation{source: source}
-	active, err := activation.IsPlanActive(context.Background(), contractRef, plan, 7)
+	active, err := activation.IsPlanActive(context.Background(), contractRef, execution.PlanKey{PlanIdentity: plan}, 7)
 	if err != nil || !active {
 		t.Fatalf("IsPlanActive(exact epoch) = %v, %v", active, err)
 	}
-	active, err = activation.IsPlanActive(context.Background(), contractRef, plan, 8)
+	active, err = activation.IsPlanActive(context.Background(), contractRef, execution.PlanKey{PlanIdentity: plan}, 8)
 	if err != nil || active {
 		t.Fatalf("IsPlanActive(stale epoch) = %v, %v", active, err)
 	}
@@ -2189,7 +2189,7 @@ func TestProductionSlotObservationsBracketRealExecutionWithFrozenProvenance(t *t
 				Contract: contractRef,
 				DuePlanTargets: execution.FrozenDuePlanTargets{
 					DuePlanSetDigest: contractRef.DuePlanSetDigest,
-					Plans:            []execution.PlanIdentity{{TenantID: "tenant", BusinessID: "2", StrategyID: "7"}},
+					Plans:            []execution.PlanKey{{PlanIdentity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"}}},
 				},
 				EarliestQueryDeadlineUnixMilli: 121_000,
 				RecoveryUntilUnixMilli:         721_000,

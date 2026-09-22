@@ -355,8 +355,8 @@ func (coordinator *SlotExecutionCoordinator) executeQueryFreeFinalization(
 	if err := owner.retainTargets(ctx, len(finalization.Targets.Plans), finalization.Targets.Plans); err != nil {
 		return execution.SlotExecutionResult{}, err
 	}
-	plans := append([]execution.PlanIdentity(nil), finalization.Targets.Plans...)
-	sort.Slice(plans, func(left, right int) bool { return lessPlanIdentity(plans[left], plans[right]) })
+	plans := append([]execution.PlanKey(nil), finalization.Targets.Plans...)
+	sort.Slice(plans, func(left, right int) bool { return execution.LessPlanKey(plans[left], plans[right]) })
 	activationRequest := execution.PlanActivationRequest{Contract: request.Contract, Plans: plans}
 	guardFacts, err := coordinator.loadActivations(ctx, activationRequest)
 	if err != nil {
@@ -412,7 +412,7 @@ func (coordinator *SlotExecutionCoordinator) executeQueryFreeFinalization(
 		// moment the completion is being built. Both query-free modes ask: each
 		// of them can be the second half of an attempt that evaluated, alerted
 		// and then failed to write the Slot down.
-		evidence := coordinator.readExecutionEvidence(sequenceCtx, plans, request.Contract.Slot)
+		evidence := coordinator.readExecutionEvidence(sequenceCtx, execution.PlanIdentitiesOf(plans), request.Contract.Slot)
 		result, err = coordinator.commitProgress(sequenceCtx, request, execution.SlotCompletion{
 			Contract: request.Contract, Kind: completionKind,
 			Result: observability.ResultDegraded, ReasonCode: finalization.ReasonCode,
@@ -455,11 +455,11 @@ func duePlanActivationRequest(
 	contractRef execution.FrozenExecutionContractRef,
 	duePlans []execution.DuePlan,
 ) execution.PlanActivationRequest {
-	plans := make([]execution.PlanIdentity, len(duePlans))
+	plans := make([]execution.PlanKey, len(duePlans))
 	for index, plan := range duePlans {
-		plans[index] = plan.Identity
+		plans[index] = plan.Key()
 	}
-	sort.Slice(plans, func(left, right int) bool { return lessPlanIdentity(plans[left], plans[right]) })
+	sort.Slice(plans, func(left, right int) bool { return execution.LessPlanKey(plans[left], plans[right]) })
 	return execution.PlanActivationRequest{Contract: contractRef, Plans: plans}
 }
 
@@ -496,7 +496,7 @@ func changedSelectedActivations(
 ) execution.PlanActivationResult {
 	changed := execution.PlanActivationResult{Contract: after.Contract}
 	for _, fact := range after.Facts {
-		previous, found := before.Find(fact.Plan)
+		previous, found := before.Find(fact.Key())
 		if found && previous.Equal(fact) {
 			continue
 		}
@@ -549,7 +549,7 @@ func classifyActivationChange(
 ) activationChange {
 	change := activationChangeUnchanged
 	for _, due := range duePlans {
-		fact, found := activations.Find(due.Identity)
+		fact, found := activations.Find(due.Key())
 		var this activationChange
 		samePlan := found && fact.Selection != execution.ActivationNone &&
 			fact.Selected.Identity == due.Identity &&
@@ -590,7 +590,7 @@ func guardReasonFor(
 ) execution.ReasonCode {
 	guarded := make([]execution.DuePlan, 0, len(duePlans))
 	for _, due := range duePlans {
-		if fact, found := activations.Find(due.Identity); found && fact.Selection != execution.ActivationNone {
+		if fact, found := activations.Find(due.Key()); found && fact.Selection != execution.ActivationNone {
 			guarded = append(guarded, due)
 		}
 	}
@@ -631,11 +631,11 @@ func (change activationChange) cause() execution.CompletionCause {
 func changedDuePlanActivations(
 	duePlans []execution.DuePlan,
 	activations execution.PlanActivationResult,
-) (map[execution.PlanIdentity]struct{}, execution.PlanActivationResult) {
-	changedPlans := make(map[execution.PlanIdentity]struct{})
+) (map[execution.PlanKey]struct{}, execution.PlanActivationResult) {
+	changedPlans := make(map[execution.PlanKey]struct{})
 	changedSelected := execution.PlanActivationResult{Contract: activations.Contract}
 	for _, due := range duePlans {
-		fact, found := activations.Find(due.Identity)
+		fact, found := activations.Find(due.Key())
 		if found && fact.Selection != execution.ActivationNone &&
 			fact.Selected.Identity == due.Identity &&
 			fact.Selected.StateGeneration == due.StateGeneration &&
@@ -643,7 +643,7 @@ func changedDuePlanActivations(
 			fact.Selected.ScheduleRevision == due.ScheduleRevision {
 			continue
 		}
-		changedPlans[due.Identity] = struct{}{}
+		changedPlans[due.Key()] = struct{}{}
 		if found && fact.Selection != execution.ActivationNone {
 			changedSelected.Facts = append(changedSelected.Facts, fact)
 		}
@@ -662,7 +662,7 @@ func (coordinator *SlotExecutionCoordinator) admitActivatedPlans(
 		if fact.Selection == execution.ActivationNone {
 			continue
 		}
-		if err := coordinator.admitPlan(ctx, request, fact.Plan, fact.Selected.StateApplyEpoch); err != nil {
+		if err := coordinator.admitPlan(ctx, request, fact.Key(), fact.Selected.StateApplyEpoch); err != nil {
 			return err
 		}
 	}
@@ -798,7 +798,7 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 			return false, fmt.Errorf("alarmd worker: build activated Plan ApplyVersion: %w", err)
 		}
 		items = append(items, execution.PlanGapLoadItem{
-			Identity:     execution.PlanGapIdentity{Plan: fact.Plan, StateGeneration: fact.Selected.StateGeneration},
+			Identity:     fact.GapIdentity(),
 			ApplyVersion: version, ScheduleRevision: fact.Selected.ScheduleRevision,
 		})
 	}
@@ -824,10 +824,10 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 		return false, fmt.Errorf("alarmd worker: activated Plan gap preflight: %w", err)
 	}
 
-	selected := make(map[execution.PlanIdentity]execution.ActivatedPlan, len(activations.Facts))
+	selected := make(map[execution.PlanKey]execution.ActivatedPlan, len(activations.Facts))
 	for _, fact := range activations.Facts {
 		if fact.Selection != execution.ActivationNone {
-			selected[fact.Plan] = fact.Selected
+			selected[fact.Key()] = fact.Selected
 		}
 	}
 	mutations := make([]execution.PlanGapMutation, 0, len(items))
@@ -841,7 +841,7 @@ func (coordinator *SlotExecutionCoordinator) ensureActivatedPlanGaps(
 		if err != nil {
 			return false, err
 		}
-		plan := selected[item.Identity.Plan]
+		plan := selected[execution.PlanKeyOf(item.Identity.Plan, item.Identity.Shard)]
 		// Query-free finalization cannot replace a statement already committed
 		// by this Slot, including a tombstone left by successful gap recovery.
 		if reuseCommittedQueryFreeStatement && sameSlotGapCommitted(marker, item, plan) {
@@ -1002,9 +1002,7 @@ func activatedPlanSequencingScope(slot execution.SlotIdentity, activations execu
 	scope := execution.SequencingScope{Slot: slot}
 	for _, fact := range activations.Facts {
 		if fact.Selection != execution.ActivationNone {
-			scope.GapKeys = append(scope.GapKeys, execution.PlanGapIdentity{
-				Plan: fact.Plan, StateGeneration: fact.Selected.StateGeneration,
-			})
+			scope.GapKeys = append(scope.GapKeys, fact.GapIdentity())
 		}
 	}
 	sort.Slice(scope.GapKeys, func(left, right int) bool {
@@ -1096,12 +1094,12 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	// population anyone reads that against.
 	var frozenRenewals observability.FrozenStateRenewalFacts
 	for _, planResult := range planResults {
-		if _, changed := changedPlans[planResult.Plan]; changed {
-			continue
-		}
 		due, ok := duePlan(header.DuePlans, planResult.Plan)
 		if !ok {
 			return execution.SlotExecutionResult{}, errors.New("alarmd worker: evaluated plan is not due")
+		}
+		if _, changed := changedPlans[due.Key()]; changed {
+			continue
 		}
 		if err := coordinator.admit(ctx, request, due); err != nil {
 			return execution.SlotExecutionResult{}, err
@@ -1416,19 +1414,17 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 func unsatisfiedForcedWarmingActivations(
 	activations execution.PlanActivationResult,
 	loaded execution.GapLoadResult,
-	changedPlans map[execution.PlanIdentity]struct{},
+	changedPlans map[execution.PlanKey]struct{},
 ) execution.PlanActivationResult {
 	result := execution.PlanActivationResult{Contract: activations.Contract}
 	for _, fact := range activations.Facts {
 		if fact.Selection == execution.ActivationNone || !fact.Selected.ForceWarming {
 			continue
 		}
-		if _, changed := changedPlans[fact.Plan]; changed {
+		if _, changed := changedPlans[fact.Key()]; changed {
 			continue
 		}
-		marker, found := loaded.Find(execution.PlanGapIdentity{
-			Plan: fact.Plan, StateGeneration: fact.Selected.StateGeneration,
-		})
+		marker, found := loaded.Find(fact.GapIdentity())
 		if found && (marker.Status == execution.GapFound || marker.Status == execution.GapClearedTombstone) &&
 			marker.PersistedApplyVersion.StateApplyEpoch >= fact.Selected.StateApplyEpoch {
 			continue
@@ -1500,13 +1496,13 @@ func (coordinator *SlotExecutionCoordinator) admit(
 	request execution.SlotExecutionRequest,
 	plan execution.DuePlan,
 ) error {
-	return coordinator.admitPlan(ctx, request, plan.Identity, plan.StateApplyEpoch)
+	return coordinator.admitPlan(ctx, request, plan.Key(), plan.StateApplyEpoch)
 }
 
 func (coordinator *SlotExecutionCoordinator) admitPlan(
 	ctx context.Context,
 	request execution.SlotExecutionRequest,
-	plan execution.PlanIdentity,
+	plan execution.PlanKey,
 	epoch execution.StateApplyEpoch,
 ) error {
 	started := time.Now()

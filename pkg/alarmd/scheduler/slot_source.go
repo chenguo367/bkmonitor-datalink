@@ -771,9 +771,9 @@ func (source *ProductionSlotSource) snapshotUnavailableSlot(
 	if err != nil {
 		return FrozenSlot{}, false, &SourceBlockedError{Err: err}
 	}
-	targets := execution.FrozenDuePlanTargets{DuePlanSetDigest: digest, Plans: make([]execution.PlanIdentity, len(duePlans))}
+	targets := execution.FrozenDuePlanTargets{DuePlanSetDigest: digest, Plans: make([]execution.PlanKey, len(duePlans))}
 	for index, due := range duePlans {
-		targets.Plans[index] = due.Identity
+		targets.Plans[index] = due.Key()
 	}
 	contractRef := execution.FrozenExecutionContractRef{
 		Slot:             execution.SlotIdentity{QueryGroup: source.queryGroup, EvaluationTime: nextSlot},
@@ -1049,10 +1049,10 @@ func frozenSlotExecutionFacts(
 	}
 	targets := execution.FrozenDuePlanTargets{
 		DuePlanSetDigest: fact.Contract.DuePlanSetDigest,
-		Plans:            make([]execution.PlanIdentity, len(fact.DuePlans)),
+		Plans:            make([]execution.PlanKey, len(fact.DuePlans)),
 	}
 	for index := range fact.DuePlans {
-		targets.Plans[index] = fact.DuePlans[index].Identity
+		targets.Plans[index] = fact.DuePlans[index].Key()
 	}
 	if deadline <= int64(fact.Contract.Slot.EvaluationTime)*1000 || targets.Validate(fact.Contract) != nil {
 		return execution.FrozenDuePlanTargets{}, 0, ErrSlotContractDrift
