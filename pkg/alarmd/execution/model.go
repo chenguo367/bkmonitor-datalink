@@ -2269,9 +2269,29 @@ func (window WindowCoverage) Shortfall() uint32 {
 // by shortfall, ties by series and Level so the same round names the same
 // windows however its records were ordered. A window that is not short is
 // not a hole and is not kept.
+//
+// A window is one series at one Level, and that pair is its identity: an
+// object whose Plans cover the same series reaches the same window once per
+// Plan, and without this every one of those was a separate entry. On a
+// deployment with a six-Plan object the list came back seven long with four
+// distinct windows in it -- three entries byte-identical to another three --
+// so three of the worst eight places went to copies and three genuinely
+// different windows were pushed off the end the reader never saw. The worse
+// reading of a repeated window wins, which for an identical repeat is the
+// one already kept.
 func (coverage *HistoryCoverage) ObserveWindow(window WindowCoverage) {
 	if coverage == nil || window.Required == 0 || window.Shortfall() == 0 {
 		return
+	}
+	for index, kept := range coverage.Windows {
+		if kept.Series != window.Series || kept.LevelID != window.LevelID {
+			continue
+		}
+		if !worseWindow(window, kept) {
+			return
+		}
+		coverage.Windows = append(coverage.Windows[:index], coverage.Windows[index+1:]...)
+		break
 	}
 	position := len(coverage.Windows)
 	for position > 0 && worseWindow(window, coverage.Windows[position-1]) {
