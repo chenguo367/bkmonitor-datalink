@@ -1366,7 +1366,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// the counters start over; the row says so.
 		worstWindow, worstWindowChanged := "", false
 		if facts := observation.HistoryCoverage; facts != nil && facts.Short > 0 && len(facts.Windows) > 0 {
-			worstWindow = windowKey(facts.Windows[0].Series, facts.Windows[0].Level)
+			worstWindow = windowKey(facts.Windows[0].Strategy, facts.Windows[0].Series, facts.Windows[0].Level)
 			worstWindowChanged = state.worstWindow != "" && state.worstWindow != worstWindow
 		}
 		if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 {

@@ -128,7 +128,9 @@ func TestASlotThatSummarisedNoWindowStillPublishesWhyNot(t *testing.T) {
 // name so a field added to the window on one side and forgotten on the other
 // fails here rather than rendering as absent on the page.
 func TestEveryNamedWindowFieldAndThePrimaryFactReachTheObservation(t *testing.T) {
-	window := execution.WindowCoverage{LevelID: 5, Series: "abc", Valid: 2, Required: 9, End: 540,
+	window := execution.WindowCoverage{
+		Plan:    execution.PlanIdentity{TenantID: "default", BusinessID: "2", StrategyID: "4101"},
+		LevelID: 5, Series: "abc", Valid: 2, Required: 9, End: 540,
 		Missing: []int64{120, 180}, MissingTotal: 6, Unusable: []int64{240}, UnusableTotal: 1,
 		Guarded: true, GuardReason: "CONFIG_DRIFT", Fresh: true}
 	facts := historyCoverageFacts(execution.HistoryCoverage{Levels: 1, Short: 1, WorstValid: 2, WorstRequired: 9, Windows: []execution.WindowCoverage{window}})
@@ -140,6 +142,18 @@ func TestEveryNamedWindowFieldAndThePrimaryFactReachTheObservation(t *testing.T)
 	for i := 0; i < source.NumField(); i++ {
 		name := source.Type().Field(i).Name
 		want := source.Field(i).Interface()
+		// The Plan crosses as the two of its parts a reader acts on: the
+		// tenant is not on the fact because the page is already scoped to
+		// one, and asserting the pair by name is what keeps a Plan added
+		// here from crossing as nothing.
+		if name == "Plan" {
+			plan := want.(execution.PlanIdentity)
+			if got.FieldByName("Strategy").String() != plan.StrategyID || got.FieldByName("Business").String() != plan.BusinessID {
+				t.Errorf("the window's Plan crossed as strategy %q business %q, want %q/%q",
+					got.FieldByName("Strategy").String(), got.FieldByName("Business").String(), plan.StrategyID, plan.BusinessID)
+			}
+			continue
+		}
 		target := name
 		if name == "LevelID" {
 			target = "Level"

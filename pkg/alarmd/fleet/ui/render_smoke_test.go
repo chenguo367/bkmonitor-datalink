@@ -406,6 +406,18 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 				Available: false, UnavailableReason: "heartbeat_stale", HeartbeatAgeSeconds: ptrFloat(200), CycleSeconds: 60,
 				FingerprintVersion: "md5_v1", ReaderFingerprintVersion: "md5_v1", TrackedSets: 6, LoadedSets: 6, Members: 517,
 				Lookups: map[string]uint64{"authoritative_member": 3, "authoritative_absent": 12, "self_maintained": 1}}},
+		// The same dependency under the index protocol, which has no heartbeat:
+		// configured, subscribed, read seconds ago, covering every strategy --
+		// and holding nothing, with every lookup coming back "not in it". The
+		// row read as "no publication at all, and the gate has not been asked"
+		// on a live deployment of exactly this shape.
+		{Role: fleet.EndpointOpenAlertSet, Kind: "redis", Address: "monitor@sentinel-0.example:26379", Mode: "sentinel", DB: &stateDB,
+			Prefix: "alarmd:open_alerts", Configured: true, SharedWith: fleet.EndpointStateRedis,
+			OpenAlertSet: &fleet.OpenAlertSetFacts{Mode: "self_maintained", IndexProtocol: true, SubscriptionReady: true,
+				CalibrationConfigured: false, IndexReadAgeSeconds: ptrFloat(27), MemberBytes: 15899,
+				Available: true, StaleBeyondBound: false, ReaderFingerprintVersion: "md5_v1",
+				TrackedSets: 60, LoadedSets: 60, Members: 0,
+				Lookups: map[string]uint64{"index_absent": 168}}},
 		{Role: fleet.EndpointQueryBackend, Kind: "http", Address: "http://unify-query.example:10205", Configured: true},
 		// The output sink's own record: open, since sixteen minutes, on the
 		// first attempt.
@@ -1081,6 +1093,15 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The shown list is one of two: the basis says so and where the others are.
 		{"DEPS ::", "副本 abcde 解析到的坐标（2 个副本都发布了，这里显示最新发布的这一份；各副本自己的连接记录在 /api/health 的 per_replica[].dependencies）"},
 		{"DEPS ::", "兼容输出用的服务 Redis（策略快照）redis standalone redis.example:6379 · db 8 · bk_monitorv3.ee.cache本进程还没对它发过命令"},
+		// The index protocol is a publication the heartbeat branch cannot see,
+		// and the answer it gives has to be counted or the row says the gate
+		// was never asked.
+		{"DEPS ::", "有：消费方按索引协议发布，本端 27 秒前读到"},
+		{"DEPS ::", "跟踪 60 条策略、索引覆盖 60 条、未恢复指纹 0 个（未配校准）"},
+		{"DEPS ::", "恢复门查过 168 次：索引里没有 168"},
+		// The consequence, said once rather than left for the reader to derive
+		// from a row that also says "available" and "not stale", both true.
+		{"DEPS ::", "这套部署现在发不出恢复：集合装载了但一条未恢复指纹都没有，168 次全部落空、恢复被扣住"},
 		{"VAR degraded why ::", "策略缓存里有策略，但这一轮一条都没接受，且没有任何对象在检测——整个部署没有在检测任何东西；不是没负载，是全部被扣在配置获取环节（副本 abcde）"},
 		{"NOTHING-RUNNING CHECKS ::", "5 条策略这个部署跑不了（1 种原因）——本构建不支持 5 条；处理办法按原因组看"},
 		{"NOTHING-RUNNING GROUPS ::", "这是什么：该检测算法还没迁到 Go 侧，本构建不评估它。谁处理：本构建能力（等新构建，改参数没有用）。下一步：等带该算法的构建；改部署参数没有用"},

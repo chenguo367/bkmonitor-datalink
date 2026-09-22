@@ -135,6 +135,12 @@ const (
 // on this window is held by a guard and under which reason it was raised;
 // Fresh that no state was loaded for the series this round.
 type HistoryWindowFact struct {
+	// Strategy and Business name the Plan the window belongs to. Level is an
+	// ordinal inside a Plan, so a window named by series and Level alone
+	// cannot be acted on: the thing a reader goes and changes is a strategy,
+	// and two of them sharing a Query Group both report "Level 1".
+	Strategy      string  `json:"strategy_id,omitempty"`
+	Business      string  `json:"business_id,omitempty"`
 	Series        string  `json:"series"`
 	Level         uint32  `json:"level"`
 	Valid         uint32  `json:"valid"`

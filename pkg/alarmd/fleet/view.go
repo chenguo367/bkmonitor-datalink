@@ -914,9 +914,15 @@ var WindowVerdicts = []WindowVerdict{VerdictDataAbsentWhenQueried, VerdictInputI
 // WindowRow is one short window of the last round, by identity, with each
 // listed hole read against the object's remembered rounds.
 type WindowRow struct {
-	// Key is the series digest and Level joined, the identity a reader
-	// follows across rounds; Series and Level are the same two apart.
+	// Key is the Plan, series digest and Level joined, the identity a reader
+	// follows across rounds; Strategy, Business, Series and Level are the
+	// same parts apart. The Plan is in it because Level is an ordinal inside
+	// a Plan -- two strategies sharing a Query Group both call theirs Level
+	// 1 -- and because the reader of this table goes and changes a strategy,
+	// which a series digest and a number do not name.
 	Key      string    `json:"key"`
+	Strategy string    `json:"strategy_id,omitempty"`
+	Business string    `json:"business_id,omitempty"`
 	Series   string    `json:"series"`
 	Level    uint32    `json:"level"`
 	Valid    uint32    `json:"valid"`

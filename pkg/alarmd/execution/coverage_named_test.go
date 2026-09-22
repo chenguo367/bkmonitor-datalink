@@ -74,16 +74,17 @@ func TestTheNamedWindowsAreTheWorstFewWorstFirst(t *testing.T) {
 // distinct windows among them -- three of them byte-identical repeats -- so
 // three of the eight places were copies.
 func TestAWindowReachedBySeveralPlansIsNamedOnce(t *testing.T) {
-	// Two Plans over the same three series, merged the way a round merges
-	// its Plans' coverage.
+	// One Plan summarising the same three series once per record of the
+	// round -- the repeat this exists for.
+	plan := PlanIdentity{TenantID: "default", BusinessID: "2", StrategyID: "4101"}
 	var round HistoryCoverage
-	for plan := 0; plan < 2; plan++ {
-		var perPlan HistoryCoverage
-		perPlan.Levels = 3
+	for record := 0; record < 2; record++ {
+		var perRecord HistoryCoverage
+		perRecord.Levels = 3
 		for _, series := range []SeriesIdentityDigest{"a", "b", "c"} {
-			perPlan.ObserveWindow(WindowCoverage{Series: series, LevelID: 1, Valid: 6, Required: 9, MissingTotal: 3})
+			perRecord.ObserveWindow(WindowCoverage{Plan: plan, Series: series, LevelID: 1, Valid: 6, Required: 9, MissingTotal: 3})
 		}
-		round.Merge(perPlan)
+		round.Merge(perRecord)
 	}
 	if len(round.Windows) != 3 {
 		t.Fatalf("named %d windows, want the three distinct ones: %+v", len(round.Windows), round.Windows)
@@ -99,14 +100,14 @@ func TestAWindowReachedBySeveralPlansIsNamedOnce(t *testing.T) {
 	}
 	// The same series at a different Level is a different window, and the
 	// bound is still spent on distinct ones.
-	round.ObserveWindow(WindowCoverage{Series: "a", LevelID: 2, Valid: 6, Required: 9, MissingTotal: 3})
+	round.ObserveWindow(WindowCoverage{Plan: plan, Series: "a", LevelID: 2, Valid: 6, Required: 9, MissingTotal: 3})
 	if len(round.Windows) != 4 {
 		t.Fatalf("named %d windows, want the same series at another Level to be its own: %+v", len(round.Windows), round.Windows)
 	}
 	// A repeat that is worse replaces the one kept; a repeat that is not is
 	// dropped. The list says the worst reading of each window, once.
-	round.ObserveWindow(WindowCoverage{Series: "a", LevelID: 1, Valid: 1, Required: 9, MissingTotal: 8})
-	round.ObserveWindow(WindowCoverage{Series: "a", LevelID: 1, Valid: 8, Required: 9, MissingTotal: 1})
+	round.ObserveWindow(WindowCoverage{Plan: plan, Series: "a", LevelID: 1, Valid: 1, Required: 9, MissingTotal: 8})
+	round.ObserveWindow(WindowCoverage{Plan: plan, Series: "a", LevelID: 1, Valid: 8, Required: 9, MissingTotal: 1})
 	worst := uint32(0)
 	named := 0
 	for _, window := range round.Windows {
@@ -119,5 +120,79 @@ func TestAWindowReachedBySeveralPlansIsNamedOnce(t *testing.T) {
 	}
 	if len(round.Windows) != 4 {
 		t.Errorf("named %d windows after two repeats, want the four distinct ones", len(round.Windows))
+	}
+}
+
+// Two Plans of one Query Group over the same series are two windows, not one
+// seen twice. Level numbers are Plan-local, so both call theirs Level 1, and
+// a Query Group exists precisely so several strategies can share one query --
+// this is the ordinary shape, not a corner.
+//
+// The two carry different window lengths here because that is what makes the
+// loss visible: folded on (series, Level) alone, one strategy's four points
+// of five was replaced by another's ten of thirty, and the entry named
+// neither strategy, so the reader could not see that a reading had gone. A
+// dropped reading leaves nothing behind to notice, which is the direction
+// that needs the test.
+func TestTwoPlansOverOneSeriesAreTwoWindows(t *testing.T) {
+	short := PlanIdentity{TenantID: "default", BusinessID: "2", StrategyID: "4101"}
+	long := PlanIdentity{TenantID: "default", BusinessID: "2", StrategyID: "4102"}
+	var round HistoryCoverage
+	for _, each := range []WindowCoverage{
+		{Plan: short, Series: "shared", LevelID: 1, Valid: 4, Required: 5, MissingTotal: 1},
+		{Plan: long, Series: "shared", LevelID: 1, Valid: 10, Required: 30, MissingTotal: 20},
+	} {
+		var perPlan HistoryCoverage
+		perPlan.Levels = 1
+		perPlan.ObserveWindow(each)
+		round.Merge(perPlan)
+	}
+	if len(round.Windows) != 2 {
+		t.Fatalf("named %d windows, want both Plans': %+v", len(round.Windows), round.Windows)
+	}
+	byStrategy := map[string]WindowCoverage{}
+	for _, window := range round.Windows {
+		byStrategy[window.Plan.StrategyID] = window
+	}
+	if got := byStrategy["4101"]; got.Required != 5 || got.Valid != 4 {
+		t.Errorf("the five-point Plan's window = %+v, want 4/5 kept", got)
+	}
+	if got := byStrategy["4102"]; got.Required != 30 || got.Valid != 10 {
+		t.Errorf("the thirty-point Plan's window = %+v, want 10/30 kept", got)
+	}
+	// Within one Plan the repeat still folds, so the fix did not simply stop
+	// folding: the same Plan, series and Level twice is one entry.
+	var again HistoryCoverage
+	again.ObserveWindow(WindowCoverage{Plan: short, Series: "shared", LevelID: 1, Valid: 4, Required: 5, MissingTotal: 1})
+	again.ObserveWindow(WindowCoverage{Plan: short, Series: "shared", LevelID: 1, Valid: 4, Required: 5, MissingTotal: 1})
+	if len(again.Windows) != 1 {
+		t.Errorf("one Plan's repeat named %d times, want once", len(again.Windows))
+	}
+	// Two Plans' windows equal on every ordering key but the Plan come out
+	// in the same order whichever arrived first. The list is read across
+	// rounds and by more than one replica, so an order that depends on the
+	// order records happened to be processed in is two readers disagreeing
+	// about a deployment neither is wrong about -- the same reason series
+	// and Level are tie-breaks and not just the shortfall.
+	tied := []WindowCoverage{
+		{Plan: long, Series: "tied", LevelID: 1, Valid: 4, Required: 5, MissingTotal: 1},
+		{Plan: short, Series: "tied", LevelID: 1, Valid: 4, Required: 5, MissingTotal: 1},
+	}
+	var forwards, backwards HistoryCoverage
+	forwards.ObserveWindow(tied[0])
+	forwards.ObserveWindow(tied[1])
+	backwards.ObserveWindow(tied[1])
+	backwards.ObserveWindow(tied[0])
+	if len(forwards.Windows) != 2 || len(backwards.Windows) != 2 {
+		t.Fatalf("tied windows kept %d and %d, want both each way", len(forwards.Windows), len(backwards.Windows))
+	}
+	for index := range forwards.Windows {
+		if forwards.Windows[index].Plan != backwards.Windows[index].Plan {
+			t.Fatalf("position %d is %s one way and %s the other: the order depends on which record came first",
+				index, forwards.Windows[index].Plan.StrategyID, backwards.Windows[index].Plan.StrategyID)
+		}
+	}
+	if forwards.Windows[0].Plan.StrategyID != short.StrategyID {
+		t.Errorf("tied windows lead with strategy %s, want the lower id %s", forwards.Windows[0].Plan.StrategyID, short.StrategyID)
 	}
 }
