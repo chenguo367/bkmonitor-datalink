@@ -28,6 +28,11 @@ type streamedExecution struct {
 	prepared      preparedNamedInputIndex
 	streamed      map[streamedInputKey]execution.NamedInputBinding
 	planSeries    map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{}
+	// planSeriesCounts is len(planSeries[plan]) once per Plan, for the
+	// evaluation lines: the number is constant for a Plan within a Slot and
+	// the lines are one per series, so it is counted on the first line and
+	// the same pointer rides on the rest.
+	planSeriesCounts map[execution.PlanIdentity]*int
 	// completionOnly holds, per Plan without streamed PRIMARY series, the exact
 	// set validated by validateCompletionOnlyExactSet: one completion binding
 	// per frozen (consumer, requirement). It decides the no-series result.
@@ -260,6 +265,7 @@ func (stream *streamedExecution) releaseProvisional() {
 	stream.header = execution.InternalExecutionHeader{}
 	stream.prepared = preparedNamedInputIndex{}
 	stream.streamed, stream.planSeries, stream.completionOnly, stream.effective = nil, nil, nil, nil
+	stream.planSeriesCounts = nil
 	stream.bindings, stream.stateItems, stream.gapItems, stream.delivered = nil, nil, nil, nil
 	stream.state, stream.gaps = execution.StatePreflightResult{}, execution.GapLoadResult{}
 	stream.evaluated = execution.EvaluationResult{}
@@ -1529,9 +1535,26 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 		Trace:                observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID, DimensionIdentityDigest: string(series)},
 		AlgorithmEvaluations: evaluations, AlgorithmInputs: namedInputs,
 		RecoveryGates: recoveryGateFacts(due, evaluated), OpenAlertGates: openAlertGateFacts(due, evaluated),
-		OutputWireFormat: planWireFormat(due),
+		OutputWireFormat: planWireFormat(due), PlanSeriesMatched: stream.planSeriesMatched(due),
 	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
+}
+
+// planSeriesMatched is how many PRIMARY series the Slot bound to the Plan,
+// for the line: the number that separates a guard warming from a guard on a
+// Plan with nothing to warm on. Counted from what the stream bound, which is
+// what the evaluation ran on -- and final by the first line, because
+// evaluation starts at complete, after every delivery has been joined.
+func (stream *streamedExecution) planSeriesMatched(due execution.DuePlan) *int {
+	if cached := stream.planSeriesCounts[due.Identity]; cached != nil {
+		return cached
+	}
+	matched := len(stream.planSeries[due.Identity])
+	if stream.planSeriesCounts == nil {
+		stream.planSeriesCounts = make(map[execution.PlanIdentity]*int)
+	}
+	stream.planSeriesCounts[due.Identity] = &matched
+	return &matched
 }
 
 // planWireFormat is the format the Plan's events go out as, for the
@@ -1617,9 +1640,10 @@ func (stream *streamedExecution) observeCompletionOnlyPlan(
 		Result: evaluated.Result, Operation: observability.Operation(stream.request.Operation),
 		Direction: observability.DirectionInternal, ReasonCode: evaluated.ReasonCode,
 		EvaluationOwner: costEvaluationOwner(due.Identity), EvaluationRecordsKnown: true,
-		Trace:            observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID},
-		AlgorithmInputs:  stream.completionOnlyAlgorithmInputFacts(due),
-		OutputWireFormat: planWireFormat(due),
+		Trace:             observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID},
+		AlgorithmInputs:   stream.completionOnlyAlgorithmInputFacts(due),
+		OutputWireFormat:  planWireFormat(due),
+		PlanSeriesMatched: stream.planSeriesMatched(due),
 	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
 }

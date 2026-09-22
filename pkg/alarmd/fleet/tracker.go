@@ -264,6 +264,10 @@ type queryGroupState struct {
 	// wireFormats is the wire format each of this object's Plans last said
 	// its events go out as, by Plan, from the Plan's evaluation line.
 	wireFormats map[StrategyRef]*PlanWireFormat
+	// planSeries is how many PRIMARY series the latest evaluated round bound
+	// to each of this object's Plans, by Plan, from the Plan's evaluation
+	// lines.
+	planSeries map[StrategyRef]*PlanSeriesMatched
 	// guards is the held gap scopes reported for this object, by Plan and
 	// scope, with the completion generation each was last reported in. A
 	// completion prunes the scopes the round did not report -- a released
@@ -828,6 +832,15 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			state.wireFormats = map[StrategyRef]*PlanWireFormat{}
 		}
 		state.wireFormats[plan] = &PlanWireFormat{Plan: plan, WireFormat: format, LastSeenAt: at}
+	}
+	// How many series the round bound to the Plan, from its evaluation
+	// lines: every line of one Plan in one round says the same number, so
+	// the latest line's is the round's.
+	if matched := observation.PlanSeriesMatched; matched != nil && plan.StrategyID != "" {
+		if state.planSeries == nil {
+			state.planSeries = map[StrategyRef]*PlanSeriesMatched{}
+		}
+		state.planSeries[plan] = &PlanSeriesMatched{Plan: plan, Matched: *matched, EvaluationTime: trace.EvaluationTime, LastSeenAt: at}
 	}
 	// What the Plan's no-data round decided, on the round it decided. Not a
 	// round of the object either: the Slot it belongs to completes on its
@@ -1546,6 +1559,14 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		Restored:      state.restoredRound,
 	}
 	anomaly.Guards, anomaly.GuardsTotal = worstGuards(state.guards)
+	// The guard's Plan's input beside the guard: the number that says
+	// whether 0 of N is warming or has nothing to warm on.
+	for index := range anomaly.Guards {
+		if matched := state.planSeries[anomaly.Guards[index].Plan]; matched != nil {
+			anomaly.Guards[index].SeriesMatched, anomaly.Guards[index].SeriesMatchedKnown = matched.Matched, true
+		}
+	}
+	anomaly.PlanSeries = planSeriesRows(state)
 	anomaly.NoDataMemoryUpkeep = latestUpkeep(state)
 	anomaly.NoDataTracking = noDataTrackingRows(state)
 	anomaly.WireFormats = wireFormatRows(state)
@@ -1934,6 +1955,25 @@ func (tracker *Tracker) NoDataTrackingSummary() *NoDataTrackingSummary {
 		}
 	}
 	return summary
+}
+
+// planSeriesRows is every Plan's latest matched-series count, smallest
+// strategy first, copied so the row does not alias the tracker's state.
+func planSeriesRows(state *queryGroupState) []PlanSeriesMatched {
+	if len(state.planSeries) == 0 {
+		return nil
+	}
+	rows := make([]PlanSeriesMatched, 0, len(state.planSeries))
+	for _, matched := range state.planSeries {
+		rows = append(rows, *matched)
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		if rows[i].Plan.StrategyID != rows[j].Plan.StrategyID {
+			return rows[i].Plan.StrategyID < rows[j].Plan.StrategyID
+		}
+		return rows[i].Plan.BusinessID < rows[j].Plan.BusinessID
+	})
+	return rows
 }
 
 // wireFormatRows is every Plan's wire format, smallest strategy first,

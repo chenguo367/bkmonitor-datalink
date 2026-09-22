@@ -129,3 +129,36 @@ func TestTheEvaluationLineNamesTheResolvedWireFormat(t *testing.T) {
 		})
 	}
 }
+
+// Every evaluation line of a Plan says how many series the Slot bound to it,
+// and the completion-only line of a Plan bound to none says zero: the number
+// that separates a guard warming from a guard with nothing to warm on. Two
+// Plans with different counts, so a constant would show.
+func TestTheEvaluationLineSaysHowManySeriesThePlanWasBoundTo(t *testing.T) {
+	plan := noDataWiredPlan(t)
+	other := plan
+	other.Identity.StrategyID = "4102"
+	other.CompiledPlan = noDataPreflightPlan(t, "4102", nil)
+	recorded := []observability.Observation{}
+	stream := noDataWiredStream(t, plan, &emptyNoDataStore{})
+	stream.coordinator.ports.Observer = observability.ObserverFunc(
+		func(_ context.Context, observation observability.Observation) {
+			recorded = append(recorded, observation)
+		})
+	// The first Plan was bound two series this Slot; the other none.
+	stream.planSeries = map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{}{
+		plan.Identity: {"series-1": {}, "series-2": {}},
+	}
+	stream.observeEvaluationCompleted(context.Background(), time.Now(), plan, "series-1", nil,
+		execution.EvaluationResult{Result: observability.ResultSuccess})
+	stream.observeCompletionOnlyPlan(context.Background(), other, execution.EvaluationResult{Result: observability.ResultSuccess})
+	if len(recorded) != 2 {
+		t.Fatalf("recorded %d observations, want two evaluation lines", len(recorded))
+	}
+	if got := recorded[0].PlanSeriesMatched; got == nil || *got != 2 || recorded[0].Trace.StrategyID != plan.Identity.StrategyID {
+		t.Fatalf("the bound Plan's line says %v series, want 2", got)
+	}
+	if got := recorded[1].PlanSeriesMatched; got == nil || *got != 0 || recorded[1].Trace.StrategyID != "4102" {
+		t.Fatalf("the unbound Plan's completion-only line says %v series, want 0 and not nil: zero is the reading", got)
+	}
+}

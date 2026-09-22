@@ -619,6 +619,11 @@ type CheckGroup struct {
 	CompletingNow int `json:"completing_now,omitempty"`
 	Delayed       int `json:"delayed,omitempty"`
 	Silent        int `json:"silent,omitempty"`
+	// Stalled is the objects among CompletingNow whose way out has not moved
+	// for StalledRounds rounds: a held guard's count or a short window's
+	// valid count. It is what turns the fold's reading from recovering to
+	// stalled, and it is on the wire so the page can say how many.
+	Stalled int `json:"stalled,omitempty"`
 	// Recovered is the objects that completed healthily after being listed
 	// under this fold, within RecoveredRetention: the positive evidence. On a
 	// fold with objects still under it, it is how far the problem has come
@@ -642,6 +647,13 @@ const (
 	// RecoveryRecovering: no failure within the window; rounds are ending
 	// again (with results nobody can use yet) or are only late.
 	RecoveryRecovering Recovery = "RECOVERING"
+	// RecoveryStalled: no failure within the window and rounds are ending,
+	// but what the fold is waiting on -- a held guard's count, a short
+	// window's valid count -- has not moved for StalledRounds rounds on at
+	// least one object. Rounds ending is not progress: a guard at 0 of 9 for
+	// twenty rounds read as "recovering" for twenty rounds, and the reader
+	// who took that at its word waited for something no round was bringing.
+	RecoveryStalled Recovery = "STALLED"
 	// RecoveryUnconfirmed: no failure within the window, and nothing heard
 	// from any object within it either -- a cooldown, a round not yet due.
 	// Not recovered: recovery needs a success, and none was seen.
@@ -657,7 +669,33 @@ const (
 )
 
 // RecoveryStates is the closed list, for the page's completeness test.
-var RecoveryStates = []Recovery{RecoveryBlocked, RecoveryRecovering, RecoveryUnconfirmed, RecoveryRecovered, RecoveryHistorical}
+var RecoveryStates = []Recovery{RecoveryBlocked, RecoveryRecovering, RecoveryStalled, RecoveryUnconfirmed, RecoveryRecovered, RecoveryHistorical}
+
+// StalledRounds is how many consecutive rounds a guard's count or a short
+// window's valid count must have stayed put before a completing object is
+// read as stalled rather than recovering: one is a round, two a coincidence,
+// three a run.
+const StalledRounds = 3
+
+// stalled reports an object whose rounds end but whose way out has not moved:
+// a held guard whose observed count has been the same for StalledRounds
+// rounds, or a short window whose worst valid count has. A guard that has
+// already reached its requirement is not stalled -- it is a release that has
+// not happened yet, which HeldFullRounds reads. Read from the row's own
+// counters, never from how long the object has been listed: an object listed
+// for an hour whose count rose last round is recovering, slowly.
+func stalled(anomaly *Anomaly) bool {
+	for _, guard := range anomaly.Guards {
+		if guard.Required > 0 && guard.Observed < guard.Required && guard.UnchangedRounds >= StalledRounds {
+			return true
+		}
+	}
+	if coverage := anomaly.Coverage; coverage != nil && coverage.Short > 0 &&
+		coverage.WorstValid < coverage.WorstRequired && coverage.UnchangedRounds >= StalledRounds {
+		return true
+	}
+	return false
+}
 
 // RecoveryStatesWithoutAProducer names the states nothing decides yet. Empty
 // since the trackers began recording recoveries: every state has a producer,
@@ -726,6 +764,9 @@ func noteProblem(group *CheckGroup, anomaly *Anomaly, code string, now time.Time
 		group.Delayed++
 	default:
 		group.CompletingNow++
+		if stalled(anomaly) {
+			group.Stalled++
+		}
 	}
 }
 
@@ -738,6 +779,8 @@ func recoveryOf(group *CheckGroup, historical bool) Recovery {
 		return RecoveryHistorical
 	case group.FailingNow > 0:
 		return RecoveryBlocked
+	case group.Stalled > 0:
+		return RecoveryStalled
 	case group.CompletingNow > 0 || group.Delayed > 0:
 		return RecoveryRecovering
 	default:

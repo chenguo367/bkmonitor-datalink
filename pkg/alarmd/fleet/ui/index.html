@@ -729,6 +729,7 @@ var GROUP_BY = {replica: '副本', reason_code: '原因码', detail: '后端症�
 var RECOVERY_STATE = {
   BLOCKED: '仍然受阻（最近窗口内还在失败）',
   RECOVERING: '正在恢复（窗口内没有新失败；轮次在结束或只是迟到，结果还没补齐）',
+  STALLED: '卡住了（窗口内没有新失败、轮次也在结束，但至少一个对象的守卫计数或最差窗口的有效点数连续 3 轮没动——等不来，要看那个对象为什么没进展）',
   UNCONFIRMED: '恢复待确认（窗口内没有新失败，也没观察到任何一轮成功——不算已恢复）',
   RECOVERED: '已恢复（这一组的对象都在之后成功完成过，现在没有对象在这一组；对象数是各副本观察到的合计）',
   HISTORICAL: '留有历史影响（历史检测缺口，那段未检测的时间不补）'
@@ -741,6 +742,7 @@ var RECOVERY_STATE = {
 function problemClause(report, group) {
   if (!group || !group.recovery) return '';
   var parts = [RECOVERY_STATE[group.recovery] || group.recovery];
+  if (group.stalled) parts.push(group.stalled + ' 个对象守卫/窗口连续 3 轮以上没进展');
   if (group.overdue) parts.push('其中 ' + group.overdue + ' 个已超期');
   if (group.retrying) parts.push(group.retrying + ' 个在重试');
   if (group.recovered) parts.push(recoveredWords(group));
@@ -1319,18 +1321,31 @@ function guardScopeWords(guard) {
   return scope + (guard.plan && guard.plan.strategy_id ? '（策略 ' + guard.plan.strategy_id + '）' : '');
 }
 
+// What the guard's Plan had to work with, beside the guard. A guard at 0 of
+// N is warming only if its Plan is being evaluated on something; a Plan the
+// round bound no series to evaluates nothing, writes no state and advances
+// no guard, and the two read the same without the count. Said in the words
+// of the reading, not of the mechanism: "nothing to warm on".
+function guardInputWords(guard) {
+  if (!guard.series_matched_known) return '';
+  if (guard.series_matched === 0) {
+    return '，这条策略最近一轮没有匹配到任何序列——守卫不是在预热，是没有输入可推进（查策略的目标/过滤是否还有数据）';
+  }
+  return '，最近一轮匹配到 ' + guard.series_matched + ' 条序列';
+}
+
 function guardWords(guard) {
   var reason = guard.reason ? '，起因：' + (GUARD_REASON[guard.reason] || guard.reason) : '';
   if (guard.status === 'GAPPED') {
     // No count against a gapped scope. What a reader can know of it is how
     // long it has held without the release condition moving.
     return guardScopeWords(guard) + '：' + GUARD_STATUS.GAPPED + reason + '，解除前不计进度；本进程见它 ' + (guard.rounds || 0) + ' 轮'
-      + (guard.unchanged_rounds ? '，连续 ' + guard.unchanged_rounds + ' 轮没变化' : '');
+      + (guard.unchanged_rounds ? '，连续 ' + guard.unchanged_rounds + ' 轮没变化' : '') + guardInputWords(guard);
   }
   return guardScopeWords(guard) + '：' + (GUARD_STATUS[guard.status] || guard.status)
     + '，完整轮次 ' + (guard.observed || 0) + '/' + (guard.required || 0) + reason
     + '，' + (GUARD_PROGRESS[guard.progress] || guard.progress || '')
-    + (guard.progress !== 'ready' && guard.unchanged_rounds ? '，连续 ' + guard.unchanged_rounds + ' 轮没进展' : '');
+    + (guard.progress !== 'ready' && guard.unchanged_rounds ? '，连续 ' + guard.unchanged_rounds + ' 轮没进展' : '') + guardInputWords(guard);
 }
 
 function guardsWords(anomaly) {
@@ -2419,6 +2434,14 @@ function objectRow(anomaly, check, group) {
     line('无数据记忆维护', memoryUpkeepWords(anomaly.no_data_memory_upkeep),
       '记忆有有效期，靠每次读到时续期保活：每隔有效期的四分之一问一次存储，剩余不到一半才真的续。"最近一次问"在前进就是维护在工作；写入次数不涨是正常的（组不变就不写），别拿它判断记忆是否还活着。'
       + '指标 worker_no_data_memory_renewals_total{result,reason}、worker_no_data_memory_reads_total{representation}');
+  }
+  // How many series each Plan was bound to in its latest evaluated round:
+  // the per-Plan input evidence. Zero is the reading this line exists for.
+  if (anomaly.plan_series && anomaly.plan_series.length) {
+    line('每条策略匹配到的序列', anomaly.plan_series.map(function (entry) {
+      return '策略 ' + entry.plan.strategy_id + '：' + entry.matched + (entry.matched ? ' 条' : ' 条（没有输入：这条策略这一轮什么都没检测，状态不写、守卫不推进）');
+    }).join('；') + '（最近一轮 ' + momentLabel(anomaly.plan_series[0].evaluation_time * 1000) + '）',
+      '同一个对象（查询组）下各条策略各自匹配到的 PRIMARY 序列数，取自该策略最近一次评估行；0 条的策略要查目标/过滤条件是否还有数据。日志 evaluation_completed 行 series_matched');
   }
   // Which way each Plan's events go out, from the Plan's own evaluation
   // line. Readable without the object catalog, which is what makes it the
