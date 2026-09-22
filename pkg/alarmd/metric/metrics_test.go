@@ -195,7 +195,7 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 	}
 
 	for family, want := range map[string]int{
-		"bkmonitor_alarmd_observation_duration_seconds": 2880,
+		"bkmonitor_alarmd_observation_duration_seconds": 2970,
 	} {
 		if got := bounds[family]; got != want {
 			t.Errorf("histogram family %s theoretical maximum = %d, want buckets/+Inf/sum/count total %d", family, got, want)
@@ -414,6 +414,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_unavailable_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_open_alert_set_refresh_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_open_alert_set_lookup_total"] = "variableLabels: {answer}"
+	expected["bkmonitor_alarmd_effective_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_open_alert_set_entries"] = "variableLabels: {kind}"
 	expected["bkmonitor_alarmd_open_alert_set_tracked_strategies"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_open_alert_set_evictions_total"] = "variableLabels: {}"
@@ -914,8 +915,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_mode")] = len(openalerts.Modes)
 	bounds[fqName("open_alert_set_authoritative_age_seconds")] = 1
 	bounds[fqName("open_alert_set_unavailable_total")] = len(openalerts.UnavailableReasons)
-	bounds[fqName("open_alert_set_refresh_total")] = 2
+	bounds[fqName("open_alert_set_refresh_total")] = 3
 	bounds[fqName("open_alert_set_lookup_total")] = len(openalerts.Answers)
+	bounds[fqName("effective_close_total")] = len(observability.EffectiveCloseOutcomes)
 	bounds[fqName("open_alert_set_entries")] = 3
 	bounds[fqName("open_alert_set_tracked_strategies")] = 1
 	bounds[fqName("open_alert_set_evictions_total")] = 1

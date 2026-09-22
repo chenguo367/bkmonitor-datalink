@@ -2399,7 +2399,7 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	}
 	return &productionPhaseTwoQueryGroup{
 		session: session, runner: runner, observer: runtime.dependencies.Observer, now: runtime.dependencies.Now,
-		release: release,
+		release: release, flights: runtime.flights, queryGroup: queryGroup, viewGate: runtime.viewGate,
 	}, nil
 }
 
@@ -2439,10 +2439,13 @@ func (runtime *productionPhaseTwoOwnership) ensureControlAuthority(
 }
 
 type productionPhaseTwoQueryGroup struct {
-	session  *ownership.Session
-	runner   *scheduler.Runner
-	observer observability.Observer
-	now      func() time.Time
+	flights    *scheduler.FlightCoordinator
+	queryGroup execution.QueryGroupIdentity
+	viewGate   *viewExecutionGate
+	session    *ownership.Session
+	runner     *scheduler.Runner
+	observer   observability.Observer
+	now        func() time.Time
 	// release is what letting the Query Group go must also do: the view gate
 	// forgets it, so it counts neither as executed from the view nor as
 	// short of it.

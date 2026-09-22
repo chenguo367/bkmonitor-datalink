@@ -156,7 +156,7 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	stream.streamed = make(map[streamedInputKey]execution.NamedInputBinding)
 	stream.planSeries = make(map[execution.PlanIdentity]map[execution.SeriesIdentityDigest]struct{})
 	stream.completionOnly = make(map[execution.PlanIdentity][]execution.NamedInputBinding)
-	effective, err := prepareAlwaysEffectiveTimeFacts(ctx, header)
+	effective, err := PrepareEffectiveTimeFacts(ctx, header, stream.coordinator.ports.EffectiveTime)
 	if err != nil {
 		return fmt.Errorf("alarmd worker: prepare EffectiveTime facts: %w", err)
 	}
@@ -1455,7 +1455,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	// even if no record of this round asks about it. The constructor requires
 	// the port; the guard is for tests that build the struct.
 	if openAlerts := stream.coordinator.ports.OpenAlerts; openAlerts != nil {
-		openAlerts.TrackPlans([]execution.PlanIdentity{due.Identity})
+		openAlerts.TrackPlans(stream.header.Contract.Slot.QueryGroup, []execution.PlanIdentity{due.Identity})
 		request.OpenAlerts = openAlerts
 	}
 	started := time.Now()

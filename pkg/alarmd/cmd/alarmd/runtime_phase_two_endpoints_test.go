@@ -26,7 +26,6 @@ import (
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
 // The one deployment shape the page went blind on: every platform cache on
@@ -584,8 +583,8 @@ func TestTheOpenAlertPublicationHasADependencyRowWithTheReadersAccount(t *testin
 		t.Fatalf("no row for %s among %d endpoints", fleet.EndpointOpenAlertSet, len(facts))
 	}
 	if row.Kind != "redis" || !row.Configured || row.Address != "redis:6379" || row.DB == nil || *row.DB != 8 ||
-		row.Prefix != openalerts.KeyPrefix || row.SharedWith != fleet.EndpointStateRedis {
-		t.Fatalf("row = %+v, want the state Redis, db 8, the contract's prefix %q, shared with the state role", row, openalerts.KeyPrefix)
+		row.Prefix != cfg.PhaseTwo.Linkd.Prefix() || row.SharedWith != fleet.EndpointStateRedis {
+		t.Fatalf("row = %+v, want the state Redis, db 8, the contract's prefix %q, shared with the state role", row, cfg.PhaseTwo.Linkd.Prefix())
 	}
 	if row.Prefix == cfg.Redis.StatePrefix || strings.HasPrefix(row.Prefix, cfg.Redis.StatePrefix) {
 		t.Fatalf("prefix %q is derived from the state prefix; the contract's prefix is fixed so the writer need not learn this deployment's configuration", row.Prefix)
@@ -609,4 +608,20 @@ func TestTheOpenAlertPublicationHasADependencyRowWithTheReadersAccount(t *testin
 			t.Fatalf("without a source the row = %+v, want the coordinates and no account", entry)
 		}
 	}
+}
+
+func TestOpenAlertIndexReadDoesNotBecomeWriterHeartbeat(t *testing.T) {
+	cfg := config.Default()
+	age := 2.0
+	account := &fleet.OpenAlertSetFacts{IndexProtocol: true, IndexReadAgeSeconds: &age, SubscriptionReady: true, Members: 3}
+	rows := endpointFactsSource(cfg, endpointSharing{}, nil, nil, nil, func() *fleet.SourceFacts { return nil }, nil, func() *fleet.OpenAlertSetFacts { return account }, time.Now)()
+	for _, row := range rows {
+		if row.Role == fleet.EndpointOpenAlertSet {
+			if row.Writer != nil || row.OpenAlertSet != account {
+				t.Fatalf("reader evidence claimed a writer: %+v", row)
+			}
+			return
+		}
+	}
+	t.Fatal("missing open alert endpoint")
 }

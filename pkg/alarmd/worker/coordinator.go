@@ -25,17 +25,20 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
 type Ports struct {
-	Finalization execution.QueryFreeFinalizationSource
-	Activation   execution.PlanActivationSource
-	Query        execution.QueryExecutionSource
-	Sequencer    execution.SideEffectSequencer
-	Evaluator    execution.Evaluator
-	Admission    execution.SideEffectAdmitter
-	GapGuard     execution.GapGuardStore
+	// EffectiveTime supplies bounded legacy facts; nil yields UNKNOWN for legacy schedules.
+	EffectiveTime strategy.EffectiveTimeProvider
+	Finalization  execution.QueryFreeFinalizationSource
+	Activation    execution.PlanActivationSource
+	Query         execution.QueryExecutionSource
+	Sequencer     execution.SideEffectSequencer
+	Evaluator     execution.Evaluator
+	Admission     execution.SideEffectAdmitter
+	GapGuard      execution.GapGuardStore
 	// NoData is required, like every other port here. A worker without it would
 	// evaluate every Plan's thresholds and none of their absence, and the only
 	// sign would be no-data alerts that never fire - which is indistinguishable

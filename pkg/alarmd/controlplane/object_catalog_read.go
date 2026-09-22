@@ -38,6 +38,18 @@ import (
 // digest that names them.
 var ErrCatalogObjectCorrupt = errors.New("alarmd controlplane: catalog object does not match its digest")
 
+// ErrCatalogObjectContractNewer reports stored bytes of a contract version
+// this build does not read but recognizes as a later one of the same
+// contract: an object a newer build published. It is kept apart from
+// ErrCatalogObjectCorrupt because the two mean opposite things to a reader.
+// A corrupt object is a defect in the store; an object of a newer contract
+// is this replica being the old one in a rollout, which every version bump
+// of the object produces for exactly as long as the rollout takes. Read as
+// corruption, a rollout looks like every strategy's object breaking at once,
+// and that is what the v3 bump would have looked like on every replica
+// still on v2.
+var ErrCatalogObjectContractNewer = errors.New("alarmd controlplane: catalog object is of a contract newer than this build")
+
 const (
 	objectReadKindQueryGroup    = "query_group"
 	objectReadKindOutputContext = "output_context"
@@ -48,12 +60,16 @@ const (
 	objectReadShare   = "share"
 	objectReadMissing = "missing"
 	objectReadInvalid = "invalid"
+	// objectReadNewer is an object of a contract this build does not read
+	// yet: the outcome of being the older replica in a rollout.
+	objectReadNewer = "newer"
 
 	segmentReadObject         = "object"
 	segmentReadLegacySegment  = "legacy_segment"
 	segmentReadWithoutRef     = "segment_without_ref"
 	segmentReadObjectMissing  = "object_missing"
 	segmentReadObjectInvalid  = "object_invalid"
+	segmentReadObjectNewer    = "object_newer"
 	segmentReadObjectMismatch = "object_mismatch"
 )
 
@@ -220,6 +236,10 @@ func (repository *RedisCatalogRepository) readObject(
 	// than one version, so an object of a version this build does not know
 	// is refused by name here rather than failing the digest check.
 	name, err := domain(payload)
+	if errors.Is(err, ErrCatalogObjectContractNewer) {
+		repository.observeObjectRead(ctx, kind, objectReadNewer)
+		return nil, 0, err
+	}
 	if err != nil {
 		repository.observeObjectRead(ctx, kind, objectReadInvalid)
 		return nil, 0, fmt.Errorf("%w: %v", ErrCatalogObjectCorrupt, err)
@@ -310,7 +330,7 @@ func (repository *RedisCatalogRepository) LoadOutputContext(ctx context.Context,
 
 // loadOutputContext returns the decoded context and its stored size.
 func (repository *RedisCatalogRepository) loadOutputContext(ctx context.Context, digest execution.OutputContextDigest) (OutputContextObject, int, error) {
-	value, size, err := repository.loadObject(ctx, objectReadKindOutputContext, repository.outputContextKey(digest), constantDomain(outputContextContractVersion), string(digest),
+	value, size, err := repository.loadObject(ctx, objectReadKindOutputContext, repository.outputContextKey(digest), outputContextDomain, string(digest),
 		func(payload []byte) (any, error) {
 			var object OutputContextObject
 			if err := json.Unmarshal(payload, &object); err != nil {
@@ -354,8 +374,9 @@ func AssembleQueryGroup(object QueryGroupObject, contexts map[execution.PlanIden
 				PlanID: plan.PlanID, StrategyRef: context.StrategyRef, InputProjection: plan.InputProjection,
 				SourceCompatibility: context.SourceCompatibility, OutputIdentity: plan.OutputIdentity,
 				SubjectFacts: context.SubjectFacts, LegacyOutput: context.LegacyOutput, TargetScope: plan.TargetScope, TargetPlan: plan.TargetPlan,
-				NoData:     plan.NoData,
-				StrategyIR: strategyIR, WireFormat: context.WireFormat, SignalType: context.SignalType,
+				NoData:                plan.NoData,
+				EffectiveTimeSnapshot: append(json.RawMessage(nil), plan.EffectiveTimeSnapshot...),
+				StrategyIR:            strategyIR, WireFormat: context.WireFormat, SignalType: context.SignalType,
 				TerminalReasonCode: plan.TerminalReasonCode,
 			},
 			StateGeneration: plan.StateGeneration, ScheduleSpec: plan.ScheduleSpec, ScheduleRevision: plan.ScheduleRevision,
@@ -419,6 +440,8 @@ func (repository *RedisCatalogRepository) loadSegmentQueryGroupByContent(
 	switch {
 	case errors.Is(err, ErrCatalogObjectUnavailable):
 		return QueryGroup{}, entry, segmentReadObjectMissing, err
+	case errors.Is(err, ErrCatalogObjectContractNewer):
+		return QueryGroup{}, entry, segmentReadObjectNewer, err
 	case errors.Is(err, ErrCatalogObjectCorrupt):
 		return QueryGroup{}, entry, segmentReadObjectInvalid, err
 	case err != nil:
@@ -439,6 +462,8 @@ func (repository *RedisCatalogRepository) loadSegmentQueryGroupByContent(
 		switch {
 		case errors.Is(err, ErrCatalogObjectUnavailable):
 			return QueryGroup{}, entry, segmentReadObjectMissing, err
+		case errors.Is(err, ErrCatalogObjectContractNewer):
+			return QueryGroup{}, entry, segmentReadObjectNewer, err
 		case errors.Is(err, ErrCatalogObjectCorrupt):
 			return QueryGroup{}, entry, segmentReadObjectInvalid, err
 		case err != nil:

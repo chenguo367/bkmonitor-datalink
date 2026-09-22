@@ -653,7 +653,7 @@ func (store *RedisStore) CheckFenceWithAssignment(
 	if err != nil {
 		return AssignmentRecord{}, err
 	}
-	return assignmentFromReply(fence.QueryGroup, values[1:7], values[7:10])
+	return assignmentFromReply(fence.QueryGroup, values[1:7], values[7:11])
 }
 
 // CheckFenceForContentScope is CheckFence for a writer that declares the
@@ -688,7 +688,7 @@ func (store *RedisStore) checkFence(
 	if err != nil {
 		return nil, err
 	}
-	values, err := scriptValues(result, 10)
+	values, err := scriptValues(result, 11)
 	if err != nil {
 		return nil, err
 	}
@@ -1019,7 +1019,7 @@ return {'RENEWED', deadline_ms, scope, pending, effective, now_ms, timeline}
 // facts then describe one instant, which two round trips cannot promise: the
 // Control Leader can publish a new Assignment between them.
 //
-// Every branch returns a seven element array so one reply shape covers every
+// Every branch returns an eleven element array so one reply shape covers every
 // outcome. Absent hash fields are returned as empty strings rather than left
 // out: a Lua table stops converting at its first nil and a missing HMGET
 // element is nil, so an unguarded record would silently shorten the reply for
@@ -1028,7 +1028,7 @@ return {'RENEWED', deadline_ms, scope, pending, effective, now_ms, timeline}
 // ARGV[5], when present and non-empty, is the content scope the caller is
 // executing; the fence then also refuses a record that names another. The
 // reply's elements 8 to 10 carry the record's content scope, pending scope
-// and effective time, empty for a record that has none.
+// and effective time; element 11 carries the timeline revision.
 var checkFenceScript = redis.NewScript(FenceLua + `
 local require_assignment = ARGV[1]
 local owner_id = ARGV[2]
@@ -1036,19 +1036,19 @@ local epoch = ARGV[3]
 local token = ARGV[4]
 local content_scope = ARGV[5] or ''
 local now_ms = redis_now_ms()
-local empty = {'', '', '', '', '', '', '', '', ''}
+local empty = {'', '', '', '', '', '', '', '', '', ''}
 local refusal = fence_refusal(KEYS[1], KEYS[2], require_assignment, owner_id, epoch, token, content_scope, now_ms)
-if refusal then return {refusal, empty[1], empty[2], empty[3], empty[4], empty[5], empty[6], empty[7], empty[8], empty[9]} end
-local record = {'', '', '', '', '', '', '', '', ''}
+if refusal then return {refusal, empty[1], empty[2], empty[3], empty[4], empty[5], empty[6], empty[7], empty[8], empty[9], empty[10]} end
+local record = {'', '', '', '', '', '', '', '', '', ''}
 if require_assignment == '1' then
   local fields = redis.call('HMGET', KEYS[1], 'desired_worker_id', 'assignment_generation',
     'record_revision', 'control_epoch', 'placement_reason', 'assigned_at_ms',
-    'content_scope', 'pending_content_scope', 'effective_at_ms')
-  for index = 1, 9 do
+    'content_scope', 'pending_content_scope', 'effective_at_ms', 'timeline_record_revision')
+  for index = 1, 10 do
     if fields[index] then record[index] = fields[index] end
   end
 end
-return {'VALID', record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8], record[9]}
+return {'VALID', record[1], record[2], record[3], record[4], record[5], record[6], record[7], record[8], record[9], record[10]}
 `)
 
 var releaseScript = redis.NewScript(`

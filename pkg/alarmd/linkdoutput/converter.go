@@ -36,7 +36,8 @@ import (
 
 // The two actions this process produces, out of the consumer's three.
 //
-// closed is deliberately never written: closing is a lifetime decision made on
+// Detector conversion does not emit closed; ConvertClose handles explicit
+// effective-time maintenance separately. Closing is a lifetime decision made on
 // a timeout this process does not observe. A repeated triggered is how a
 // continuing anomaly is stated.
 const (

@@ -604,6 +604,9 @@ func (d *ObservationDirectory) readGroup(ctx context.Context, r *directoryRead, 
 		return QueryGroupObject{}, err
 	}
 	domain, err := queryGroupObjectDomain(payload)
+	if errors.Is(err, ErrCatalogObjectContractNewer) {
+		return QueryGroupObject{}, err
+	}
 	if err != nil {
 		return QueryGroupObject{}, ErrCatalogObjectCorrupt
 	}

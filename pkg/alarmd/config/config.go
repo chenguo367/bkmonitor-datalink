@@ -629,6 +629,9 @@ func (c Config) validateCommon() error {
 }
 
 func (c Config) validateGoAccessRuntime() error {
+	if err := c.PhaseTwo.Linkd.Validate(); err != nil {
+		return err
+	}
 	if c.Kafka.InputTopic != "" || c.Kafka.GroupID != "" || c.Kafka.InitialOffset != "" {
 		return errors.New("phase-two Go Access must not configure phase-one Kafka input coordinates")
 	}

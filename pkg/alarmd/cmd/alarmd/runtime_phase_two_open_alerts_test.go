@@ -54,7 +54,7 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 	}
 
 	port := openAlertCopyPort{cache: cache}
-	port.TrackPlans([]execution.PlanIdentity{{TenantID: "default", BusinessID: "2", StrategyID: "1001"}})
+	port.TrackPlans("qg-test", []execution.PlanIdentity{{TenantID: "default", BusinessID: "2", StrategyID: "1001"}})
 	source.publication = openalerts.Publication{
 		Heartbeat: &openalerts.Heartbeat{PublishedAt: at, Cycle: time.Minute, FingerprintVersion: openalerts.FingerprintVersion},
 		Sets:      map[openalerts.StrategyKey][]string{{TenantID: "default", StrategyID: "1001"}: {"f1"}},

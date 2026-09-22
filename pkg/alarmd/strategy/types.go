@@ -522,6 +522,7 @@ func (l CompiledLevel) Fingerprints() LevelFingerprints {
 func (l CompiledLevel) ResourceEstimate() ResourceEstimate { return l.resourceEstimate }
 
 type CompiledPlan struct {
+	effectiveRules      *compiledEffectiveRules
 	planRef             contract.RuntimePlanRefV1
 	strategyRef         contract.StrategyRefV2
 	outputIdentity      *contract.MonitorOutputIdentity

@@ -75,8 +75,10 @@ func TestOpenAlertSetFactsEncodeWithoutInventingAnAge(t *testing.T) {
 	}
 	// The mode and the stale flag under their names; the ages absent, not
 	// zero; the counts present at zero, since a count of nothing is an
-	// answer and an absent count is not.
-	if !strings.Contains(string(encoded), `"open_alert_set":{"mode":"never_loaded","stale_beyond_bound":false,"available":false,"reader_fingerprint_version":"","tracked_sets":0,"loaded_sets":0,"members":0}`) ||
+	// answer and an absent count is not; whether calibration is configured
+	// present at false, since "off" is a reading a deployment has to be
+	// able to make.
+	if !strings.Contains(string(encoded), `"open_alert_set":{"calibration_configured":false,"mode":"never_loaded","stale_beyond_bound":false,"available":false,"reader_fingerprint_version":"","tracked_sets":0,"loaded_sets":0,"members":0}`) ||
 		strings.Contains(string(encoded), "authoritative_age_seconds") || strings.Contains(string(encoded), "heartbeat_age_seconds") {
 		t.Fatalf("encoded = %s", encoded)
 	}

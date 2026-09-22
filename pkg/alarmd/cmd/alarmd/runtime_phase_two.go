@@ -466,6 +466,9 @@ type phaseTwoWorkerBundleDependencies struct {
 	// RefreshOpenAlerts reads the consumer's open alert publication into the
 	// process copy; run once at start and then on its own cadence.
 	RefreshOpenAlerts func(context.Context)
+	// RunOpenAlerts owns subscription/reconciliation for the current protocol.
+	RunOpenAlerts    func(context.Context) error
+	RunEffectiveTime func(context.Context)
 	// RefreshPlatformSettings reads the platform's dynamic configuration
 	// into the process copy and brings what evaluates by it up to date; run
 	// once at start and then once a minute.
@@ -2277,6 +2280,17 @@ func phaseTwoWorkerRegistration(
 }
 
 func (bundle *phaseTwoWorkerBundle) startMaintenance() {
+	if bundle.dependencies.RunOpenAlerts != nil {
+		bundle.maintenanceWG.Add(1)
+		go func() {
+			defer bundle.maintenanceWG.Done()
+			_ = bundle.dependencies.RunOpenAlerts(bundle.maintenanceCtx)
+		}()
+	}
+	if bundle.dependencies.RunEffectiveTime != nil {
+		bundle.maintenanceWG.Add(1)
+		go func() { defer bundle.maintenanceWG.Done(); bundle.dependencies.RunEffectiveTime(bundle.maintenanceCtx) }()
+	}
 	bundle.maintenanceWG.Add(1)
 	go bundle.maintainRegistration()
 	if bundle.dependencies.PublishFleet != nil {

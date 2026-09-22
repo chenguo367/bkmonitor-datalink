@@ -228,7 +228,16 @@ func (repository *RedisCatalogRepository) loadOutputContexts(
 			if err != nil {
 				return nil, activationDependencyIO(err)
 			}
-			hashed, err := contract.DeriveCanonicalDigestV2OverCanonical(outputContextContractVersion, payload)
+			domain, err := outputContextDomain(payload)
+			if errors.Is(err, ErrCatalogObjectContractNewer) {
+				repository.observeObjectRead(ctx, objectReadKindOutputContext, objectReadNewer)
+				return nil, err
+			}
+			if err != nil {
+				repository.observeObjectRead(ctx, objectReadKindOutputContext, objectReadInvalid)
+				return nil, fmt.Errorf("%w: %v", ErrCatalogObjectCorrupt, err)
+			}
+			hashed, err := contract.DeriveCanonicalDigestV2OverCanonical(domain, payload)
 			if err != nil || hashed != string(digest) {
 				repository.observeObjectRead(ctx, objectReadKindOutputContext, objectReadInvalid)
 				return nil, ErrCatalogObjectCorrupt

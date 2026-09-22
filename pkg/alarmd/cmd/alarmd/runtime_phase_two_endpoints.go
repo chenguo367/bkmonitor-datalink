@@ -11,6 +11,7 @@ package main
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -21,7 +22,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 )
 
@@ -31,6 +31,7 @@ import (
 // role, because a role with no client of its own has no health of its own.
 type endpointSharing struct {
 	runtimeIsSource       bool
+	linkdDedicated        bool
 	cmdbSharedWith        string
 	dynamicSharedWith     string
 	targetGroupSharedWith string
@@ -64,8 +65,9 @@ func (sharing endpointSharing) redisClientForRole(role string) string {
 		}
 		return "target_group"
 	case fleet.EndpointOpenAlertSet:
-		// Read through the state store's client: the publication lives on
-		// the state Redis under its own fixed prefix.
+		if sharing.linkdDedicated {
+			return "linkd"
+		}
 		return sharing.redisClientForRole(fleet.EndpointStateRedis)
 	case fleet.EndpointCompatOutput:
 		return "legacy_output"
@@ -118,12 +120,14 @@ func resolveEndpoints(cfg config.Config, sharing endpointSharing) []fleet.Endpoi
 	} else {
 		endpoints = append(endpoints, fleet.Endpoint{Role: fleet.EndpointDynamicConfig, Kind: "redis"})
 	}
-	// The consumer's open alert publication: the same instance and database
-	// as this replica's own state, under the contract's fixed prefix rather
-	// than the state prefix, because the writer is another service that
-	// must not have to learn this deployment's configuration.
-	openAlerts := redisEndpoint(fleet.EndpointOpenAlertSet, cfg.RuntimeStoreRedis(), openalerts.KeyPrefix)
-	openAlerts.SharedWith = fleet.EndpointStateRedis
+	linkdConnection := cfg.RuntimeStoreRedis()
+	if cfg.PhaseTwo.Linkd.Connection != nil {
+		linkdConnection = *cfg.PhaseTwo.Linkd.Connection
+	}
+	openAlerts := redisEndpoint(fleet.EndpointOpenAlertSet, linkdConnection, cfg.PhaseTwo.Linkd.Prefix())
+	if reflect.DeepEqual(linkdConnection, cfg.RuntimeStoreRedis()) {
+		openAlerts.SharedWith = fleet.EndpointStateRedis
+	}
 	endpoints = append(endpoints, openAlerts,
 		fleet.Endpoint{Role: fleet.EndpointQueryBackend, Kind: "http", Address: cfg.PhaseTwo.Access.UQEndpoint,
 			Configured: cfg.PhaseTwo.Access.UQEndpoint != ""},
@@ -149,6 +153,7 @@ func endpointFactsSource(
 	source func() *fleet.SourceFacts, outputSink func() outputSinkState, openAlerts func() *fleet.OpenAlertSetFacts,
 	now func() time.Time,
 ) func() []fleet.Endpoint {
+	sharing.linkdDedicated = cfg.PhaseTwo.Linkd.Connection != nil && !reflect.DeepEqual(*cfg.PhaseTwo.Linkd.Connection, cfg.RuntimeStoreRedis())
 	static := resolveEndpoints(cfg, sharing)
 	return func() []fleet.Endpoint {
 		at := now()
@@ -257,6 +262,11 @@ func endpointFactsSource(
 							writer.State = facts.Mode + ":" + facts.UnavailableReason
 						}
 						entry.Writer = writer
+						// A successful read is not evidence of a recent writer.
+						// The index protocol has no publisher heartbeat.
+						if facts.IndexProtocol {
+							entry.Writer = nil
+						}
 						entry.OpenAlertSet = facts
 					}
 				}
