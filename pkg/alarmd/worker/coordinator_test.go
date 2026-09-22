@@ -1839,7 +1839,7 @@ func (ports *recordingPorts) Contains(tenantID, strategyID, fingerprint string) 
 	return ports.openAlerts[tenantID+"/"+strategyID+"/"+fingerprint]
 }
 
-func (ports *recordingPorts) TrackPlans(plans []execution.PlanIdentity) {
+func (ports *recordingPorts) TrackPlans(_ execution.QueryGroupIdentity, plans []execution.PlanIdentity) {
 	ports.trackedPlans = append(ports.trackedPlans, plans...)
 	ports.openAlertCalls = append(ports.openAlertCalls, "track after "+ports.lastTrace())
 }

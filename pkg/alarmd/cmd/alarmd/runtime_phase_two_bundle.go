@@ -39,6 +39,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/worker"
@@ -742,20 +743,31 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	// The copy of the consumer's open alert set reads the publisher's keys
-	// from the same Redis the runtime objects live in; the publisher is
-	// another service, and it getting that connection is a deployment item.
-	// Not a configuration key: the policy for an unavailable publication is
-	// a ruling recorded in the openalerts package, not an operator setting.
-	openAlertSource, err := openalerts.NewRedisSource(runtimeClient)
-	if err != nil {
-		return nil, err
+	// External facts reuse runtime Redis unless the deployment binds Linkd
+	// elsewhere. A failed index is not a startup dependency of detection.
+	linkdConnection := runtimeConnection
+	linkdClient := runtimeClient
+	linkdClientOwned := false
+	if cfg.PhaseTwo.Linkd.Connection != nil {
+		linkdConnection = *cfg.PhaseTwo.Linkd.Connection
+		if !reflect.DeepEqual(linkdConnection, runtimeConnection) {
+			linkdClient = redis.NewUniversalClient(productionRedisOptions(linkdConnection))
+			linkdClient.AddHook(recorder.RedisHook("linkd"))
+			linkdClientOwned = true
+			defer func() {
+				if resultErr != nil {
+					_ = linkdClient.Close()
+				}
+			}()
+		}
 	}
-	openAlertCopy, err := openalerts.New(openalerts.Options{Source: openAlertSource, Now: external.Now})
+	openAlertCopy, err := newLinkdIndex(cfg, linkdClient, linkdConnection, external.Now)
 	if err != nil {
 		return nil, err
 	}
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
+	linkdBudget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
+	legacyTime := strategycache.NewLegacyEffectiveTime(controlClient, cmdbClient, cfg.PlatformKeyPrefix(), external.Now, linkdBudget.Strategies, linkdBudget.Bytes/4)
 	// The mark a failed attempt leaves behind. Wired here and asserted by a
 	// test on this function: the port is allowed to be nil, and a production
 	// runtime that left it nil would lose every query-free completion's
@@ -767,11 +779,12 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	workerPorts := worker.Ports{
-		Finalization: frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
+		EffectiveTime: legacyTime.Provider(),
+		Finalization:  frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
 		NoData: executionStore, Hosts: cmdbcache.NewHostBusinessLookup(cmdbIndex), State: executionStore, Progress: progressStore, Observer: observer,
 		ExecutionEvidence: slotAppliedMarks,
-		OpenAlerts:        openAlertCopyPort{cache: openAlertCopy},
+		OpenAlerts:        &openAlertCopyPort{cache: openAlertCopy},
 		Targets:           targetResolver,
 	}
 	coordinator, err := worker.NewSlotExecutionCoordinator(workerPorts, worker.ProvisionalBudget{
@@ -1042,7 +1055,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 				costRefresh.publish(ctx, external.Now(), costSummary.Snapshot())
 			}
 		},
-		RefreshOpenAlerts:       openAlertCopy.Refresh,
+		RunOpenAlerts:           openAlertCopy.Run,
 		RefreshPlatformSettings: platformSettingsRefresher(platformSettings, hostStatus, recorder),
 		ApplyObservationWindows: observationWindowApplier{
 			store: windowStore, flow: targetFlow, samples: seriesSampler, now: external.Now,
@@ -1057,6 +1070,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 			viewServer.Close()
 			eventsClosed = true
 			closers := []error{events.Shutdown(shutdownCtx)}
+			if linkdClientOwned {
+				closers = append(closers, linkdClient.Close())
+			}
 			if !runtimeClientIsSource {
 				closers = append(closers, runtimeClient.Close())
 			}
@@ -1076,6 +1092,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	bundle.workerPorts = workerPorts
+	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
+		capacity: linkdBudget, sourceID: cfg.PhaseTwo.Linkd.EventSourceID, legacy: legacyTime.Provider(), legacyCache: legacyTime}
+	bundle.dependencies.RunEffectiveTime = maintenance.run
+	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.
 	//
 	// None of them were on /metrics, so the one signal that says this replica
@@ -1388,13 +1408,20 @@ func maxDuration(values ...time.Duration) time.Duration {
 
 // openAlertCopyPort adapts the process copy to the worker's port: the
 // worker speaks in Plan identities, the copy in strategy keys.
-type openAlertCopyPort struct{ cache *openalerts.Cache }
+type openAlertCopyPort struct {
+	cache         *openalerts.Cache
+	registerOwned func(execution.QueryGroupIdentity, []execution.PlanIdentity)
+}
 
 func (port openAlertCopyPort) Contains(tenantID, strategyID, fingerprint string) bool {
 	return port.cache.Contains(tenantID, strategyID, fingerprint)
 }
 
-func (port openAlertCopyPort) TrackPlans(plans []execution.PlanIdentity) {
+func (port openAlertCopyPort) TrackPlans(qg execution.QueryGroupIdentity, plans []execution.PlanIdentity) {
+	if port.registerOwned != nil {
+		port.registerOwned(qg, plans)
+		return
+	}
 	keys := make([]openalerts.StrategyKey, 0, len(plans))
 	for _, plan := range plans {
 		keys = append(keys, openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID})
@@ -1414,9 +1441,15 @@ func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func
 		stats := cache.Stats()
 		at := now()
 		facts := &fleet.OpenAlertSetFacts{Mode: string(stats.Mode), StaleBeyondBound: cache.StaleBeyondBound(),
+			IndexProtocol: stats.IndexProtocol, SubscriptionReady: stats.SubscriptionReady, CalibratedSets: stats.Calibrated,
+			PendingReads: stats.PendingReads, PendingReconciles: stats.PendingReconciles, MemberBytes: stats.MemberBytes,
 			Available: stats.Available, UnavailableReason: string(stats.UnavailableReason),
 			ReaderFingerprintVersion: openalerts.FingerprintVersion,
 			TrackedSets:              stats.Tracked, LoadedSets: stats.Loaded, Members: stats.Members}
+		if !stats.IndexReadAt.IsZero() {
+			age := at.Sub(stats.IndexReadAt).Seconds()
+			facts.IndexReadAgeSeconds = &age
+		}
 		if !stats.LoadedAt.IsZero() {
 			age := at.Sub(stats.LoadedAt).Seconds()
 			facts.AuthoritativeAgeSeconds = &age

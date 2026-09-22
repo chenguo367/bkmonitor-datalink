@@ -131,7 +131,7 @@ func (c *openAlertSetCollector) Collect(ch chan<- prometheus.Metric) {
 	for _, reason := range openalerts.UnavailableReasons {
 		ch <- prometheus.MustNewConstMetric(c.unavailable, prometheus.CounterValue, float64(stats.Unavailable[reason]), string(reason))
 	}
-	for _, result := range []string{"authoritative", "unavailable"} {
+	for _, result := range []string{"authoritative", "unavailable", "index"} {
 		ch <- prometheus.MustNewConstMetric(c.refreshes, prometheus.CounterValue, float64(stats.Refreshes[result]), result)
 	}
 	for _, answer := range openalerts.Answers {

@@ -334,6 +334,7 @@ func (c PhaseTwoCanonicalConfig) Stride() uint64 {
 func (c PhaseTwoCanonicalConfig) SelectedMode() string { return c.mode() }
 
 type PhaseTwoRuntimeConfig struct {
+	Linkd            LinkdConfig                    `yaml:"linkd"`
 	Worker           PhaseTwoWorkerConfig           `yaml:"worker"`
 	Control          PhaseTwoControlConfig          `yaml:"control"`
 	Output           PhaseTwoOutputConfig           `yaml:"output"`

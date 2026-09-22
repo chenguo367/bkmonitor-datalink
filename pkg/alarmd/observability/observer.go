@@ -57,24 +57,25 @@ const (
 	ComponentPythonProducer = "python_producer"
 	ComponentOther          = "_other"
 
-	StageConfigLoaded           = "config_loaded"
-	StageLegacyPodCache         = "legacy_pod_cache"
-	StageSnapshotRefreshed      = "snapshot_refreshed"
-	StageSnapshotUnavailable    = "snapshot_unavailable"
-	StageActivationFailed       = "activation_failed"
-	StageActiveQGSet            = "active_qg_set"
-	StageObjectCatalog          = "object_catalog"
-	StageObjectRead             = "object_read"
-	StageFrozenPlanGeneration   = "frozen_plan_generation"
-	StageActivationHold         = "activation_hold"
-	StageScheduleCutover        = "schedule_cutover"
-	StageLegacyQGMigration      = "legacy_active_qg_migration"
-	StageDrainingQGReconciled   = "draining_query_groups"
-	StageAssignmentAcquired     = "assignment_acquired"
-	StageAssignmentLost         = "assignment_lost"
-	StageRebalancePlanned       = "rebalance_planned"
-	StageControlReadsSpent      = "control_reads_spent"
-	StageAssignmentIndexWritten = "assignment_index_written"
+	StageConfigLoaded             = "config_loaded"
+	StageEffectiveTimeMaintenance = "effective_time_maintenance"
+	StageLegacyPodCache           = "legacy_pod_cache"
+	StageSnapshotRefreshed        = "snapshot_refreshed"
+	StageSnapshotUnavailable      = "snapshot_unavailable"
+	StageActivationFailed         = "activation_failed"
+	StageActiveQGSet              = "active_qg_set"
+	StageObjectCatalog            = "object_catalog"
+	StageObjectRead               = "object_read"
+	StageFrozenPlanGeneration     = "frozen_plan_generation"
+	StageActivationHold           = "activation_hold"
+	StageScheduleCutover          = "schedule_cutover"
+	StageLegacyQGMigration        = "legacy_active_qg_migration"
+	StageDrainingQGReconciled     = "draining_query_groups"
+	StageAssignmentAcquired       = "assignment_acquired"
+	StageAssignmentLost           = "assignment_lost"
+	StageRebalancePlanned         = "rebalance_planned"
+	StageControlReadsSpent        = "control_reads_spent"
+	StageAssignmentIndexWritten   = "assignment_index_written"
 	// StageAssignmentSwept names one sweep of the Assignment records by the
 	// Control Leader: how many named retired Query Groups and how many of
 	// those it reclaimed (AssignmentSweepFacts).
@@ -2989,6 +2990,9 @@ func NormalizeReason(reason ReasonCode, result Result) ReasonCode {
 	if _, ok := schedulerDecisionReasonSet[reason]; ok {
 		return reason
 	}
+	if _, ok := effectiveMaintenanceReasonSet[reason]; ok {
+		return reason
+	}
 	return ReasonOther
 }
 
@@ -3106,6 +3110,7 @@ func normalizeCounts(counts Counts) Counts {
 
 var metricComponentStages = []ComponentStage{
 	{ComponentRuntime, StageStartup}, {ComponentRuntime, StageConfigLoaded},
+	{ComponentRuntime, StageEffectiveTimeMaintenance},
 	{ComponentRuntime, StageShutdown}, {ComponentRuntime, StageFatal},
 	{ComponentRuntime, StageRestartRecovered},
 	// Registered on the generic catalog rather than the phase-two one because
@@ -3224,6 +3229,11 @@ var allDirections = []Direction{DirectionInput, DirectionOutput, DirectionIntern
 // did not say. They are listed once and shared, so adding one cannot silently
 // change what counts as a resource reason.
 var unclassifiedReasons = []ReasonCode{ReasonNone, ReasonInternalUnknown, ReasonNotReported}
+
+// Maintenance details are bounded log reasons, not new metric label dimensions.
+var effectiveMaintenanceReasons = []ReasonCode{
+	"unsupported_runner", "unavailable", "legacy_effective_time_unavailable", "effective_time_unknown",
+	"close_identity_invalid", "close_metadata_missing", "close_acked"}
 var contractClassReasons = []ReasonCode{
 	ReasonContractDeterministic, ReasonContractRetryable, ReasonContractCoverage,
 }
@@ -3301,7 +3311,7 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 var allCommonReasons = joinReasons(unclassifiedReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 var allResourceReasons = joinReasons(
 	unclassifiedReasons, resourceOnlyReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
@@ -3314,6 +3324,7 @@ var resourceReasonSet = makeReasonSet(resourceOnlyReasons)
 var activationFailureReasonSet = makeReasonSet(activationFailureReasons)
 var viewStreamReasonSet = makeReasonSet(ViewStreamReasons)
 var schedulerDecisionReasonSet = makeReasonSet(SchedulerDecisionReasons)
+var effectiveMaintenanceReasonSet = makeReasonSet(effectiveMaintenanceReasons)
 var contractObservationReasons, contractObservationReasonSet, contractObservationMetricReasonByCode = loadContractObservationReasons()
 
 func makeComponentStageSet(values []ComponentStage) map[ComponentStage]struct{} {

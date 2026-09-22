@@ -360,6 +360,12 @@ func (coordinator *FlightCoordinator) QueryPermitOccupancy() QueryPermitOccupanc
 	return occupancy
 }
 
+// TryMaintenance shares the QG's existing flight exclusion with detection.
+// It never queues: maintenance yields to an executing Slot and retries later.
+func (coordinator *FlightCoordinator) TryMaintenance(queryGroup execution.QueryGroupIdentity) (func(), bool) {
+	return coordinator.tryAcquire(queryGroup)
+}
+
 func (coordinator *FlightCoordinator) tryAcquire(queryGroup execution.QueryGroupIdentity) (func(), bool) {
 	if coordinator == nil {
 		return nil, false
