@@ -103,6 +103,14 @@ const (
 	// spoken at least once if it speaks at all, and short enough that the
 	// line is on the page the same day the strategy is created.
 	DefaultEmptyEveryRoundAfter = time.Hour
+	// emptyRunStrideStall is how many of an object's own strides a gap between
+	// two empty rounds has to cover before it is read as a hole in the
+	// evidence rather than the object's ordinary pace. Three: two consecutive
+	// rounds missing is a blip on any period, and an object that has produced
+	// nothing for three of its own cycles has stopped being watched in the
+	// sense this line cares about, whether its cycle is fifteen seconds or two
+	// hours.
+	emptyRunStrideStall = 3
 	// DefaultNoDataAfter is how long, on the source's clock, an object that
 	// did return records must have gone without them -- latest empty Slot
 	// minus the Slot records were last seen at -- before its empty rounds
@@ -240,6 +248,15 @@ type queryGroupState struct {
 	lastEmptySlot  int64
 	emptySinceFrom SinceSource
 	emptySlotFrom  SinceSource
+	// emptyStride is the Slot distance between the two latest empty rounds:
+	// this object's own cadence, learned from its own rounds rather than
+	// declared anywhere. A hole in the evidence is measured against it,
+	// because a stretch that is long by the clock is not long for an object
+	// whose next round was never due until then. Zero until two empty rounds
+	// have been watched, and after a hole it is the hole -- which only makes
+	// the next round less likely to be read as one, and one round later it is
+	// the object's cadence again.
+	emptyStride int64
 	// lastDataSlot is the Slot records were last seen at, on the source's
 	// clock: the other end of the data side's hour. Zero until a round with
 	// records is watched or restored; sawData without it is a round that
@@ -1193,19 +1210,30 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				state.emptySinceFrom = SinceSnapshotContinuity
 			}
 			state.emptyRuns++
-			// A hole in the evidence longer than the window the line waits
-			// for costs the run its head start. The run itself continues --
-			// the object still has not seen data, and a blocked or failing
-			// stretch leaves it on that stretch's own line meanwhile -- but
-			// an hour of empty completions has to be an hour this process
-			// watched, near enough. A day of rounds that produced no
-			// completion at all once sat inside a run dated the day before,
+			// A hole in the evidence costs the run its head start. The run
+			// itself continues -- the object still has not seen data, and a
+			// blocked or failing stretch leaves it on that stretch's own line
+			// meanwhile -- but an hour of empty completions has to be an hour
+			// this process watched, near enough. A day of rounds that produced
+			// no completion at all once sat inside a run dated the day before,
 			// and the release that ended them put three hundred objects on
-			// this line at once, each with fifty-two rounds of evidence
-			// behind an inherited hour. A short blip does not cost the hour:
-			// the object was completing empty either side of it.
-			if state.lastEmptySlot != 0 && trace.EvaluationTime-state.lastEmptySlot > int64(tracker.emptyEveryRoundAfter/time.Second) {
-				state.emptySinceSlot = 0
+			// this line at once, each with fifty-two rounds of evidence behind
+			// an inherited hour.
+			//
+			// A hole is measured against the object's own cadence, not against
+			// the clock. The first draft of this compared the distance to the
+			// hour the line waits for, which reads every round of an object
+			// slower than an hour as a hole: the start is cleared each round,
+			// the distance stays zero, and the line can never list it at all.
+			// Nothing here says otherwise -- the hour is a threshold, not a
+			// period -- and a predicate that goes silent exactly at its own
+			// constant is measuring the wrong thing.
+			if state.lastEmptySlot != 0 {
+				gap := trace.EvaluationTime - state.lastEmptySlot
+				if emptyRunHole(gap, state.emptyStride, tracker.emptyEveryRoundAfter) {
+					state.emptySinceSlot = 0
+				}
+				state.emptyStride = gap
 			}
 			if state.emptySinceSlot == 0 {
 				state.emptySinceSlot = trace.EvaluationTime

@@ -74,6 +74,30 @@ const EmptyEveryRoundCauseUnknown = "CAUSE_UNKNOWN"
 // page's wording table.
 var EmptyEveryRoundCauses = []string{EmptyEveryRoundCauseUnknown}
 
+// emptyRunHole reports whether the distance between two of an object's empty
+// rounds is a hole in the evidence -- a stretch this process did not watch the
+// object complete empty -- rather than the object's ordinary pace.
+//
+// Two conditions, and both are needed. The gap has to be long by the object's
+// own cadence, because an object evaluated every two hours produces one empty
+// round every two hours and none of them is a hole; comparing against the hour
+// the line waits for reads each of its rounds as one, clears the run's start
+// every time, and takes the object off the line permanently. And the gap has
+// to be long by the clock too, because three strides of a fifteen-second
+// object is forty-five seconds, and three rounds lost to a restart is a blip
+// the run should survive -- the object was completing empty either side of it.
+//
+// A stride is only known once two empty rounds have been watched. Until then
+// the clock is the only measure there is, which is the right answer for the
+// case that has no cadence to compare against: a run restored from a record,
+// its start dated a day ago, resuming here.
+func emptyRunHole(gap, stride int64, window time.Duration) bool {
+	if gap <= int64(window/time.Second) {
+		return false
+	}
+	return stride <= 0 || gap > stride*emptyRunStrideStall
+}
+
 // countEmptyEveryRound is the distinct objects of KindEmptyEveryRound in the
 // no-data column: the first screen's one number for this line.
 func countEmptyEveryRound(rows []Anomaly) int {
