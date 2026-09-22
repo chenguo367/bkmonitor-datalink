@@ -271,13 +271,14 @@ func strategyStandingLine(standing StrategyStanding) string {
 			// is the coordinate and rides on the row, the sentence is read
 			// by whoever asked about the strategy. Words the row says are
 			// about another Plan on the same object are reported as that
-			// Plan's, so a strategy is not told its data is absent because
-			// a neighbour's is.
+			// Plan's state and nothing more -- no action word, so the thing
+			// to do appears on one card only, the neighbour's; here the
+			// neighbour is context, not a second place to act.
 			if len(plan.Rows) > 0 && plan.Rows[0].Standing != nil {
 				rowStanding := plan.Rows[0].Standing
 				if rowStanding.About != nil && rowStanding.About.StrategyID != standing.StrategyID {
-					object += "，在检测；同对象上策略 " + rowStanding.About.StrategyID + " 的：" +
-						words.State[rowStanding.State] + "·" + words.Action[rowStanding.Action]
+					object += "，在检测；同对象上策略 " + rowStanding.About.StrategyID + "：" +
+						words.State[rowStanding.State] + "（见该策略）"
 				} else {
 					object += "，" + words.State[rowStanding.State] + "·" + words.Action[rowStanding.Action]
 				}

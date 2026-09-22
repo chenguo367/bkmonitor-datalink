@@ -149,12 +149,19 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 		"最差的换了一条序列",
 		// The named window of the object whose short count is zero.
 		"序列 series-t：8/9，记录检测用不了；缺 ", "记录到了，检测用不了",
-		// The neighbour's words, said to be the neighbour's.
-		"本策略在检测；同对象上策略 4102 的：数据没到 · 数据负责人查",
+		// The neighbour's state, said to be the neighbour's, with no action word.
+		"本策略在检测；同对象上策略 4102：数据没到（见该策略）",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the rendering lacks %q:\n%s", want, rendered)
 		}
+	}
+	// The neighbour's line carries no action word: the thing to do is on the
+	// neighbour's own card. The card's own action word appears in the head,
+	// the lead line, the object's own line and the next step -- never on the
+	// neighbour's line.
+	if neighbour := rendered[strings.Index(rendered, "本策略在检测；"):]; strings.Contains(neighbour[:strings.Index(neighbour, "关键配置")], "数据负责人查") {
+		t.Errorf("the neighbour's line carries an action word:\n%s", neighbour)
 	}
 	// The summary sentence is the count's alone: one object counts a short
 	// window, so it is written once, not once per object with windows.

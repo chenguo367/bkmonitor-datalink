@@ -247,14 +247,16 @@ function lineFor(strategyID) {
 
 // One object's line on the card: its own words, and for a short window
 // the windows named with their holes -- which minutes, whose. Words the
-// server says are about another Plan on the same object are shown as that
-// Plan's -- the server names it in standing.about; the page only places it.
+// server says are about another Plan on the same object (standing.about)
+// are shown as that Plan's state only -- no action word, so the thing to
+// do is on one card, the neighbour's; the page only places what the
+// server named.
 function objectLine(row, strategyID) {
   var li = document.createElement('li');
   var standing = row.standing || {};
   var parts = [word('state', standing.state), word('action', standing.action) + (standing.watch ? '：' + word('watch', standing.watch) : '')];
   if (standing.about && standing.about.strategy_id !== strategyID) {
-    parts = ['本策略在检测；同对象上策略 ' + standing.about.strategy_id + ' 的：' + parts.join(' · ')];
+    parts = ['本策略在检测；同对象上策略 ' + standing.about.strategy_id + '：' + word('state', standing.state) + '（见该策略）'];
   }
   if (row.since) parts.push('自 ' + ago(row.since));
   li.appendChild(text('span', parts.join(' · ')));

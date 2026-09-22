@@ -9,42 +9,52 @@
 
 package fleet
 
-// implicatedStrategy names the one Plan a row's evidence is about, when the
-// evidence names exactly one: every held guard on the row belongs to it, and
-// every Plan the latest round bound no series to is it.
+// implicatedStrategy names the one Plan a row's evidence is about, when both
+// pieces of evidence name it and nothing else: every held guard on the row
+// belongs to it, and it is the one Plan the latest round bound no series to.
 //
 // A row is one object, and an object may run several Plans; the guards and
 // the series counts on the row are per Plan. Folding such a row onto every
 // strategy the object runs reads one Plan's evidence as every strategy's --
 // on a verification cluster five strategies with hundreds of matched series
 // each were told "data absent" because a sixth Plan on the same object had
-// bound none. When the evidence names no Plan, or names more than one, the
-// row stays every strategy's, as before: the fold does not guess.
+// bound none.
+//
+// Both pieces are required because they answer different questions: a held
+// guard says "this Plan's verdict is being held", a zero series count says
+// "this Plan matched nothing". Only on the same Plan do the two make "this
+// strategy is the cause"; either alone, or the two on different Plans, is an
+// incomplete statement, and naming the wrong strategy sends its owner to
+// look while not naming one costs a sentence. So the row stays every
+// strategy's, as before, unless both agree: the fold does not guess.
 //
 // This is the one place that reads "which Plan is this row about"; the
 // strategy fold, the check's strategy group and the card's object sentence
 // all take their answer from here, so the three cannot drift apart.
 func implicatedStrategy(row Anomaly) (StrategyRef, bool) {
-	var named StrategyRef
-	found := false
+	var held StrategyRef
+	guarded := false
 	for _, guard := range row.Guards {
-		if found && guard.Plan != named {
+		if guarded && guard.Plan != held {
 			return StrategyRef{}, false
 		}
-		named, found = guard.Plan, true
+		held, guarded = guard.Plan, true
 	}
+	var unbound StrategyRef
+	bare := false
 	for _, plan := range row.PlanSeries {
 		if plan.Matched != 0 {
 			continue
 		}
-		if found && plan.Plan != named {
+		if bare && plan.Plan != unbound {
 			return StrategyRef{}, false
 		}
-		named, found = plan.Plan, true
+		unbound, bare = plan.Plan, true
 	}
-	if !found {
+	if !guarded || !bare || held != unbound {
 		return StrategyRef{}, false
 	}
+	named := held
 	// The named Plan has to be one the row lists, or the row's strategies
 	// would lose the row to a Plan none of them is.
 	for _, ref := range row.Strategies {

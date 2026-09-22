@@ -37,16 +37,20 @@ func TestTheEvidenceNamesOnePlanOrNone(t *testing.T) {
 		want StrategyRef
 		one  bool
 	}{
-		"guards on one plan":            {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refC, 0), heldGuard(refC, 0)}}, refC, true},
-		"one plan bound no series":      {Anomaly{Strategies: three, PlanSeries: []PlanSeriesMatched{{Plan: refA, Matched: 8}, {Plan: refC, Matched: 0}}}, refC, true},
-		"guards and series agree":       {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refC, 0)}, PlanSeries: []PlanSeriesMatched{{Plan: refA, Matched: 8}, {Plan: refC}}}, refC, true},
-		"guards on two plans":           {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refB, 3), heldGuard(refC, 0)}}, StrategyRef{}, false},
-		"two plans bound no series":     {Anomaly{Strategies: three, PlanSeries: []PlanSeriesMatched{{Plan: refB}, {Plan: refC}}}, StrategyRef{}, false},
-		"guards and series disagree":    {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refB, 3)}, PlanSeries: []PlanSeriesMatched{{Plan: refC}}}, StrategyRef{}, false},
-		"no evidence":                   {Anomaly{Strategies: three, PlanSeries: []PlanSeriesMatched{{Plan: refA, Matched: 8}}}, StrategyRef{}, false},
-		"named plan the row lacks":      {Anomaly{Strategies: []StrategyRef{refA, refB}, Guards: []GapGuard{heldGuard(refC, 0)}}, StrategyRef{}, false},
-		"the only plan, trivially":      {Anomaly{Strategies: []StrategyRef{refA}, Guards: []GapGuard{heldGuard(refA, 0)}}, refA, true},
-		"every series present, no hold": {Anomaly{Strategies: three}, StrategyRef{}, false},
+		"guards and no series on one plan": {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refC, 0), heldGuard(refC, 0)},
+			PlanSeries: []PlanSeriesMatched{{Plan: refA, Matched: 8}, {Plan: refC}}}, refC, true},
+		// Either piece alone is an incomplete statement.
+		"guards on one plan, every series present": {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refC, 3)},
+			PlanSeries: []PlanSeriesMatched{{Plan: refA, Matched: 8}, {Plan: refC, Matched: 3}}}, StrategyRef{}, false},
+		"guards on one plan, series unknown":   {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refC, 0)}}, StrategyRef{}, false},
+		"one plan bound no series, no guard":   {Anomaly{Strategies: three, PlanSeries: []PlanSeriesMatched{{Plan: refA, Matched: 8}, {Plan: refC, Matched: 0}}}, StrategyRef{}, false},
+		"guards on two plans":                  {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refB, 0), heldGuard(refC, 0)}, PlanSeries: []PlanSeriesMatched{{Plan: refC}}}, StrategyRef{}, false},
+		"two plans bound no series":            {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refC, 0)}, PlanSeries: []PlanSeriesMatched{{Plan: refB}, {Plan: refC}}}, StrategyRef{}, false},
+		"guards and series on different plans": {Anomaly{Strategies: three, Guards: []GapGuard{heldGuard(refB, 3)}, PlanSeries: []PlanSeriesMatched{{Plan: refC}}}, StrategyRef{}, false},
+		"no evidence":                          {Anomaly{Strategies: three, PlanSeries: []PlanSeriesMatched{{Plan: refA, Matched: 8}}}, StrategyRef{}, false},
+		"named plan the row lacks":             {Anomaly{Strategies: []StrategyRef{refA, refB}, Guards: []GapGuard{heldGuard(refC, 0)}, PlanSeries: []PlanSeriesMatched{{Plan: refC}}}, StrategyRef{}, false},
+		"the only plan, trivially":             {Anomaly{Strategies: []StrategyRef{refA}, Guards: []GapGuard{heldGuard(refA, 0)}, PlanSeries: []PlanSeriesMatched{{Plan: refA}}}, refA, true},
+		"every series present, no hold":        {Anomaly{Strategies: three}, StrategyRef{}, false},
 	} {
 		got, one := implicatedStrategy(testCase.row)
 		if one != testCase.one || got != testCase.want {
@@ -55,7 +59,8 @@ func TestTheEvidenceNamesOnePlanOrNone(t *testing.T) {
 	}
 	// The standing carries About only where it says something: an object
 	// running one Plan has no neighbour for the words to be told apart from.
-	single := Anomaly{Finding: Finding{Check: CheckSeriesDataMissing}, Strategies: []StrategyRef{refA}, Guards: []GapGuard{heldGuard(refA, 0)}}
+	single := Anomaly{Finding: Finding{Check: CheckSeriesDataMissing}, Strategies: []StrategyRef{refA}, Guards: []GapGuard{heldGuard(refA, 0)},
+		PlanSeries: []PlanSeriesMatched{{Plan: refA}}}
 	if standing := standingOf(single); standing.About != nil {
 		t.Fatalf("standing of a one-Plan object = %+v, want no About", standing)
 	}
@@ -108,7 +113,6 @@ func TestARowAboutOnePlanIsNotEveryStrategysLine(t *testing.T) {
 	// with no About: the fold does not guess.
 	split := about
 	split.Guards = []GapGuard{heldGuard(refB, 3), heldGuard(refC, 0)}
-	split.PlanSeries = nil
 	lines = StrategyLines(&View{Anomalies: []Anomaly{split}}, now)
 	if len(lines) != 3 || lines[0].Standing.About != nil {
 		t.Fatalf("lines with guards on two Plans = %+v, want all three strategies and no About", lines)
@@ -120,13 +124,46 @@ func TestARowAboutOnePlanIsNotEveryStrategysLine(t *testing.T) {
 	card := StrategyStanding{StrategyID: refB.StrategyID, Standing: StandingDetecting, Found: true,
 		Plans: []StrategyPlanStanding{{StrategyPlanRef: StrategyPlanRef{QueryGroup: "qg-shared"}, Replica: "pod-a", Existence: "active",
 			Rows: []Anomaly{withStanding(about)}}}}
-	if line := strategyStandingLine(card); !strings.Contains(line, "在检测；同对象上策略 4103 的：数据没到·数据负责人查") {
+	// The neighbour's card states the neighbour's state and no action word:
+	// the thing to do is on one card, the neighbour's own.
+	line := strategyStandingLine(card)
+	if !strings.Contains(line, "在检测；同对象上策略 4103：数据没到（见该策略）") || strings.Contains(line, "数据负责人查") {
 		t.Fatalf("neighbour's card reads %q", line)
 	}
 	own := card
 	own.StrategyID = refC.StrategyID
 	if line := strategyStandingLine(own); !strings.Contains(line, "持有，数据没到·数据负责人查）") || strings.Contains(line, "同对象") {
 		t.Fatalf("own card reads %q", line)
+	}
+}
+
+// The strategy a row's check groups it under and the strategy its standing
+// says the words are about are one relation read in two places; this pins
+// them together for the checks grouped by strategy, so a change to either
+// alone goes red rather than letting the group on the first page and the
+// name on the card drift apart.
+func TestTheStrategyGroupIsTheStrategyTheWordsAreAbout(t *testing.T) {
+	three := []StrategyRef{refA, refB, refC}
+	for name, row := range map[string]Anomaly{
+		"about one plan": {Finding: Finding{Check: CheckSeriesDataMissing}, Strategies: three,
+			Guards: []GapGuard{heldGuard(refC, 0)}, PlanSeries: []PlanSeriesMatched{{Plan: refA, Matched: 8}, {Plan: refC}}},
+		"about none":    {Finding: Finding{Check: CheckSeriesDataMissing}, Strategies: three, Guards: []GapGuard{heldGuard(refC, 3)}},
+		"about another": {Finding: Finding{Check: CheckSeriesDataMissing}, Strategies: three, Guards: []GapGuard{heldGuard(refB, 0)}, PlanSeries: []PlanSeriesMatched{{Plan: refB}}},
+		"one plan":      {Finding: Finding{Check: CheckSeriesDataMissing}, Strategies: []StrategyRef{refB}, Guards: []GapGuard{heldGuard(refB, 0)}, PlanSeries: []PlanSeriesMatched{{Plan: refB}}},
+	} {
+		standing := standingOf(row)
+		want := ""
+		for _, ref := range row.Strategies {
+			if want == "" || ref.StrategyID < want {
+				want = ref.StrategyID
+			}
+		}
+		if standing.About != nil {
+			want = standing.About.StrategyID
+		}
+		if got := groupKeyOf(row, row.Finding.Check); got != want {
+			t.Errorf("%s: group key = %q, standing about %+v: want %q", name, got, standing.About, want)
+		}
 	}
 }
 
