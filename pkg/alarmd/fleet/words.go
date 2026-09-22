@@ -124,7 +124,7 @@ func ProductWords() Words {
 			VerdictPointsUnusable: "记录检测用不了", VerdictUnknown: "说不出是谁的",
 		},
 		SinceBasis: map[SinceBasis]string{
-			SinceExact: "实测", SinceAtLeast: "只会更久", SinceAtMost: "只会更短", SinceRefused: "时间异常，请上报",
+			SinceExact: "起点确切", SinceAtLeast: "只会更久", SinceAtMost: "只会更短", SinceRefused: "时间异常，请上报",
 		},
 		StateOrder: append([]StateWord(nil), StateWords...), ActionOrder: append([]ActionWord(nil), ActionWords...),
 		State: map[StateWord]string{
