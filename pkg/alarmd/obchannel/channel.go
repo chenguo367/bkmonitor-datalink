@@ -98,15 +98,18 @@ type Operation struct {
 	Summary       string
 	EvidenceScope string
 	Targetable    bool
-	Fields        map[string]Field
-	Required      []string
-	Examples      []Params
-	OutputSchema  any
-	Limits        any
-	Availability  func() Availability
-	InputRules    any
-	Validate      func(Params) error
-	Run           func(context.Context, Params) Outcome
+	// DefaultOwnerParam selects an execution owner when no explicit target is
+	// supplied. The named domain field must be a required string identity.
+	DefaultOwnerParam string
+	Fields            map[string]Field
+	Required          []string
+	Examples          []Params
+	OutputSchema      any
+	Limits            any
+	Availability      func() Availability
+	InputRules        any
+	Validate          func(Params) error
+	Run               func(context.Context, Params) Outcome
 }
 type Options struct {
 	Auth          Authorizer
@@ -206,6 +209,16 @@ func New(options Options) (*Channel, error) {
 				if _, found := op.Fields[name]; found {
 					return nil, fmt.Errorf("operation %q uses reserved targeting field %q", op.ID, name)
 				}
+			}
+		}
+		if op.DefaultOwnerParam != "" {
+			field, exists := op.Fields[op.DefaultOwnerParam]
+			required := false
+			for _, name := range op.Required {
+				required = required || name == op.DefaultOwnerParam
+			}
+			if !op.Targetable || !exists || field.Type != "string" || !required {
+				return nil, fmt.Errorf("invalid default owner field for %q", op.ID)
 			}
 		}
 		for _, name := range op.Required {
@@ -462,7 +475,11 @@ func describe(op Operation) map[string]any {
 		}
 		input["allOf"] = rules
 	}
-	return map[string]any{"operation": op.ID, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "effect": "read", "required_scope": cliauth.ScopeReadonly, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
+	value := map[string]any{"operation": op.ID, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "effect": "read", "required_scope": cliauth.ScopeReadonly, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
+	if op.DefaultOwnerParam != "" {
+		value["default_owner_parameter"] = op.DefaultOwnerParam
+	}
+	return value
 }
 func validate(op Operation, params Params) error {
 	for _, name := range op.Required {

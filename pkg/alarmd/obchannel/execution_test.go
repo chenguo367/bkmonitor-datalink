@@ -249,7 +249,7 @@ func TestInternalExecutionHonorsContextAndSharedExecutionBudget(t *testing.T) {
 		}
 		close(entered)
 		<-ctx.Done()
-		return Outcome{Complete: true}
+		return Outcome{Complete: true, Value: map[string]any{"points_read_before_timeout": 2}}
 	})
 	c := newTargetChannel(t, Options{Auth: auth, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op}})
 	ctx, cancel := context.WithCancel(context.Background())
@@ -267,8 +267,8 @@ func TestInternalExecutionHonorsContextAndSharedExecutionBudget(t *testing.T) {
 	}
 	cancel()
 	response = <-done
-	if response.Error == nil || response.Error.Code != "request_timeout" || response.Evidence.Complete {
-		t.Fatal("cancelled read returned complete evidence")
+	if response.Error == nil || response.Error.Code != "request_timeout" || response.Evidence.Complete || response.Result != nil {
+		t.Fatal("cancelled read returned evidence beyond the channel deadline")
 	}
 	response = c.ExecuteEvidence(ctx, internalInvocation(c))
 	if response.Error == nil || response.Error.Code != "request_timeout" {

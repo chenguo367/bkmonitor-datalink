@@ -40,6 +40,9 @@ func NativeOperations(handler http.Handler) []Operation {
 				if id == "strategy.get" {
 					strategyNext(&out, p, result)
 				}
+				if id == "object.get" {
+					objectSlotNext(&out, p, result)
+				}
 				if id == "strategy.list" {
 					// This endpoint lists fact rows, not every source strategy.
 					out.Limitations = append(out.Limitations, "Population is strategies represented by current Fleet fact rows, not the complete source catalog.")
@@ -142,6 +145,32 @@ func strategyNext(out *Outcome, p Params, result map[string]any) {
 		}
 		if len(out.Next) >= 13 {
 			out.Limitations = append(out.Limitations, "Next-call suggestions are limited; remaining object references stay in result.plans.")
+			break
+		}
+	}
+}
+
+// Only suggest Slots whose identity was actually captured. A wall-clock log
+// timestamp or a range summary is not an execution Slot.
+func objectSlotNext(out *Outcome, p Params, result map[string]any) {
+	rows, _ := result["records"].([]any)
+	seen := map[int64]bool{}
+	for _, row := range rows {
+		record, ok := row.(map[string]any)
+		if !ok || record["slot_identity_known"] != true || record["query_group_key"] != p.String("query_group") {
+			continue
+		}
+		number, ok := record["evaluation_time"].(json.Number)
+		if !ok {
+			continue
+		}
+		slot, err := number.Int64()
+		if err != nil || slot <= 0 || seen[slot] {
+			continue
+		}
+		seen[slot] = true
+		out.Next = append(out.Next, Call{Operation: "slot.get", Params: Params{"query_group": p.String("query_group"), "evaluation_time": slot}, Reason: "查看这轮Slot的历史查询条件、保留输入证据及重查入口。"})
+		if len(seen) == 3 {
 			break
 		}
 	}

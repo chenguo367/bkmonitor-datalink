@@ -162,6 +162,9 @@ func invocationParams(op Operation, input Params) (Params, Target, error) {
 	if err := validate(op, params); err != nil {
 		return nil, Target{}, err
 	}
+	if target.Replica == "" && target.OwnerQueryGroup == "" && op.DefaultOwnerParam != "" {
+		target.OwnerQueryGroup = params.String(op.DefaultOwnerParam)
+	}
 	return params, target, nil
 }
 
