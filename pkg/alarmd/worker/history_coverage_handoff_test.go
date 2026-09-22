@@ -10,6 +10,7 @@
 package worker
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 
@@ -45,12 +46,23 @@ func TestEveryWindowCountReachesTheObservation(t *testing.T) {
 			field.SetUint(uint64(90 + i))
 		case reflect.String:
 			field.SetString("REASON_" + value.Type().Field(i).Name)
+		case reflect.Int64:
+			field.SetInt(int64(1000 + i))
+		case reflect.Slice:
+			// The named windows cross field by field below, since the two
+			// sides are different types; here they only have to be present.
+			if value.Type().Field(i).Name != "Windows" {
+				t.Fatalf("%s is a slice this test has no fixture for; decide how it crosses", value.Type().Field(i).Name)
+			}
 		default:
 			t.Fatalf("%s is neither a uint32 nor a string; a field of another kind needs a decision "+
 				"about how it crosses, not a silent skip", value.Type().Field(i).Name)
 		}
 	}
 	source.Levels = 200
+	source.Windows = []execution.WindowCoverage{{LevelID: 5, Series: "abc", Valid: 2, Required: 9, End: 540,
+		Missing: []int64{120, 180}, MissingTotal: 6, Unusable: []int64{240}, UnusableTotal: 1,
+		Guarded: true, GuardReason: "CONFIG_DRIFT", Fresh: true}}
 
 	facts := historyCoverageFacts(source)
 	if facts == nil {
@@ -64,6 +76,9 @@ func TestEveryWindowCountReachesTheObservation(t *testing.T) {
 		if !got.IsValid() {
 			t.Errorf("HistoryCoverage.%s has no counterpart on HistoryCoverageFacts, so it is "+
 				"computed during evaluation and never leaves the worker", name)
+			continue
+		}
+		if name == "Windows" {
 			continue
 		}
 		if !reflect.DeepEqual(got.Interface(), value.Field(i).Interface()) {
@@ -82,5 +97,50 @@ func TestASlotThatSummarisedNoWindowPublishesNoCounts(t *testing.T) {
 	if facts := historyCoverageFacts(execution.HistoryCoverage{}); facts != nil {
 		t.Fatalf("facts = %+v for a Slot that summarised no window, want none: zeros here read as "+
 			"a measurement that found nothing wrong", facts)
+	}
+}
+
+// The named windows cross whole, field by field, and the primary fact rides
+// the completion beside them. Written against the source struct's fields by
+// name so a field added to the window on one side and forgotten on the other
+// fails here rather than rendering as absent on the page.
+func TestEveryNamedWindowFieldAndThePrimaryFactReachTheObservation(t *testing.T) {
+	window := execution.WindowCoverage{LevelID: 5, Series: "abc", Valid: 2, Required: 9, End: 540,
+		Missing: []int64{120, 180}, MissingTotal: 6, Unusable: []int64{240}, UnusableTotal: 1,
+		Guarded: true, GuardReason: "CONFIG_DRIFT", Fresh: true}
+	facts := historyCoverageFacts(execution.HistoryCoverage{Levels: 1, Short: 1, WorstValid: 2, WorstRequired: 9, Windows: []execution.WindowCoverage{window}})
+	if facts == nil || len(facts.Windows) != 1 {
+		t.Fatalf("facts = %+v, want the one named window crossed", facts)
+	}
+	got := reflect.ValueOf(facts.Windows[0])
+	source := reflect.ValueOf(window)
+	for i := 0; i < source.NumField(); i++ {
+		name := source.Type().Field(i).Name
+		want := source.Field(i).Interface()
+		target := name
+		if name == "LevelID" {
+			target = "Level"
+		}
+		field := got.FieldByName(target)
+		if !field.IsValid() {
+			t.Errorf("WindowCoverage.%s has no counterpart on the fact", name)
+			continue
+		}
+		if fmt.Sprint(field.Interface()) != fmt.Sprint(want) {
+			t.Errorf("%s crossed as %v, want %v", name, field.Interface(), want)
+		}
+	}
+	// The lists are copies: a window the evaluator goes on to append to does
+	// not rewrite the observation already handed out.
+	window.Missing[0] = 999
+	if facts.Windows[0].Missing[0] != 120 {
+		t.Fatal("the observation shares the evaluator's slice")
+	}
+	if primaryInputFacts(nil) != nil {
+		t.Fatal("a completion with no primary produced primary facts")
+	}
+	primary := primaryInputFacts(&execution.PrimaryInputFact{Completeness: execution.CompletenessPartial, DataState: execution.DataStateData})
+	if primary == nil || primary.Completeness != "PARTIAL" || primary.DataState != "DATA" {
+		t.Fatalf("primary facts = %+v, want PARTIAL with DATA", primary)
 	}
 }

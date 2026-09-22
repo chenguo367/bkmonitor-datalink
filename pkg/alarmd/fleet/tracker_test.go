@@ -1281,6 +1281,14 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 			field.SetUint(uint64(90 + i))
 		case reflect.String:
 			field.SetString("REASON_" + source.Type().Field(i).Name)
+		case reflect.Int64:
+			field.SetInt(int64(1000 + i))
+		case reflect.Slice:
+			// The named windows cross into the row's own richer rows, read
+			// against the object's rounds; window_holes_test.go holds that.
+			if source.Type().Field(i).Name != "Windows" {
+				t.Fatalf("%s is a slice this test has no fixture for; decide how it crosses", source.Type().Field(i).Name)
+			}
 		default:
 			t.Fatalf("%s is neither a uint32 nor a string; decide how it crosses", source.Type().Field(i).Name)
 		}
@@ -1305,7 +1313,8 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 	// own: one round cannot supply them. Measure is the row's word for what
 	// WorstValid counts, a constant of the field and not of the round.
 	rowOnly := map[string]bool{"ShortRounds": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true,
-		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "UnchangedRounds": true, "Measure": true}
+		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "UnchangedRounds": true, "Measure": true,
+		"WorstWindow": true, "WorstWindowChanged": true, "Windows": true, "RoundsRemembered": true, "RoundsKept": true}
 	for i := 0; i < published.NumField(); i++ {
 		name := published.Type().Field(i).Name
 		if rowOnly[name] {
@@ -1323,6 +1332,11 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 	}
 	for i := 0; i < source.NumField(); i++ {
 		name := source.Type().Field(i).Name
+		// End is read into the object's round ring, where every hole is
+		// matched against it, and not rendered on its own.
+		if name == "End" {
+			continue
+		}
 		if !published.FieldByName(name).IsValid() {
 			t.Errorf("the observation's %s has no field on the row: published and never rendered", name)
 		}

@@ -89,6 +89,7 @@ func convergeDriftedSlot(t *testing.T, completeness execution.Completeness) (exe
 			Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 				if observation.Stage == observability.StageProgressCommitted {
 					ports.committedCauses = append(ports.committedCauses, observation.ProgressCompletionCause)
+					ports.committedPrimary = append(ports.committedPrimary, observation.PrimaryInput)
 				}
 			}),
 		},
@@ -113,11 +114,20 @@ func convergeDriftedSlot(t *testing.T, completeness execution.Completeness) (exe
 	if err != nil {
 		t.Fatalf("convergeNormalActivation() error: %v", err)
 	}
+	// What the primary answered rides the same line as the cause: it is
+	// the fact a hole on a later window is read against, and a line that
+	// carries the cause and not the answer sends every such hole to
+	// "not in memory".
+	if len(ports.committedPrimary) != 1 || ports.committedPrimary[0] == nil ||
+		ports.committedPrimary[0].Completeness != string(completeness) || ports.committedPrimary[0].DataState != string(primary.DataState) {
+		t.Fatalf("committed primary=%+v, want %s with %q on the completion line", ports.committedPrimary, completeness, primary.DataState)
+	}
 	return result, ports.committedCauses
 }
 
 type convergeObservingPorts struct {
-	committedCauses []string
+	committedCauses  []string
+	committedPrimary []*observability.PrimaryInputFacts
 }
 
 func (*convergeObservingPorts) Sequence(ctx context.Context, _ execution.SequencingScope, run func(context.Context) error) error {

@@ -228,6 +228,35 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		// exists for, and it is the line a search for the strategy finds.
 		attributes = append(attributes, slog.Int("series_matched", *matched))
 	}
+	if p := observation.PrimaryInput; p != nil {
+		// What the query answered, on the completion line: the fact a hole on
+		// a window is read against. EMPTY is rendered, not omitted -- it is
+		// the reading that says every series was absent from this minute.
+		attributes = append(attributes, slog.String("primary_completeness", p.Completeness))
+		if p.DataState != "" {
+			attributes = append(attributes, slog.String("primary_data_state", p.DataState))
+		}
+	}
+	if c := observation.HistoryCoverage; c != nil && len(c.Windows) > 0 {
+		// The worst named window, on the line: which series, and which minutes
+		// it lacks. One window rather than all of them, because the line is
+		// read by a person searching for one strategy and the rest are on the
+		// row; the count says how many more were named.
+		worst := c.Windows[0]
+		attributes = append(attributes,
+			slog.String("history_worst_series", worst.Series),
+			slog.Int64("history_worst_end", worst.End),
+			slog.Int("history_windows_named", len(c.Windows)))
+		if len(worst.Missing) > 0 {
+			attributes = append(attributes, slog.String("history_worst_missing", joinInt64(worst.Missing)))
+		}
+		if len(worst.Unusable) > 0 {
+			attributes = append(attributes, slog.String("history_worst_unusable", joinInt64(worst.Unusable)))
+		}
+		if worst.GuardReason != "" {
+			attributes = append(attributes, slog.String("history_worst_guard", worst.GuardReason))
+		}
+	}
 	if counts := observation.OutputWireFormats; len(counts) > 0 {
 		// One key per format the batch carried, under the format's own
 		// name: a grep for standard_raw_event finds the batches that sent
@@ -1015,4 +1044,15 @@ func sortedWireFormats(counts OutputWireFormatCounts) []string {
 	}
 	sort.Strings(formats)
 	return formats
+}
+
+// joinInt64 renders source times as one comma-separated value, so the
+// minutes a window lacks are one key a search for the strategy finds rather
+// than sixteen numbered ones.
+func joinInt64(values []int64) string {
+	parts := make([]string, len(values))
+	for i, value := range values {
+		parts[i] = strconv.FormatInt(value, 10)
+	}
+	return strings.Join(parts, ",")
 }

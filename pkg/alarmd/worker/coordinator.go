@@ -1491,7 +1491,7 @@ func (coordinator *SlotExecutionCoordinator) commitProgress(
 	})
 	coordinator.observeCommittedProgress(ctx, request.Operation, started, observationResult, observationReason,
 		string(completion.Kind), string(completionCause.Cause), string(completionCause.Reason), completionCause.Coverage,
-		completion.Evidence)
+		completion.Evidence, completion.Primary)
 	return execution.SlotExecutionResult{Completed: true, CompletionKind: completion.Kind, Result: completion.Result, ReasonCode: completion.ReasonCode}, nil
 }
 
@@ -2250,7 +2250,7 @@ func indexStatePreflight(result execution.StatePreflightResult) map[execution.St
 }
 
 // Called only after this invocation received and validated ProgressCommitted.
-func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, coverage execution.HistoryCoverage, evidence *execution.ExecutionEvidence) {
+func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx context.Context, operation execution.Operation, started time.Time, result observability.Result, reason observability.ReasonCode, kind, cause, causeReason string, coverage execution.HistoryCoverage, evidence *execution.ExecutionEvidence, primary *execution.PrimaryInputFact) {
 	if reason == "" {
 		reason = observability.ReasonNone
 	}
@@ -2273,7 +2273,8 @@ func (coordinator *SlotExecutionCoordinator) observeCommittedProgress(ctx contex
 		Result: result, ReasonCode: reason, Duration: time.Since(started), ProgressCompletionKind: kind,
 		ProgressCompletionCause: cause, ProgressCompletionReason: causeReason,
 		HistoryCoverage: coverageFacts, ExecutionEvidence: executionEvidenceFacts(evidence),
-		HeldBy: heldBy,
+		PrimaryInput: primaryInputFacts(primary),
+		HeldBy:       heldBy,
 	})
 }
 
@@ -2308,14 +2309,35 @@ func historyCoverageFacts(coverage execution.HistoryCoverage) *observability.His
 	if coverage.Levels == 0 {
 		return nil
 	}
-	return &observability.HistoryCoverageFacts{
+	facts := &observability.HistoryCoverageFacts{
 		Levels: coverage.Levels, Short: coverage.Short, Empty: coverage.Empty,
 		WorstValid: coverage.WorstValid, WorstRequired: coverage.WorstRequired,
 		Guarded: coverage.Guarded,
 		Fresh:   coverage.Fresh, ShortFresh: coverage.ShortFresh,
 		Abnormal: coverage.Abnormal, AbnormalOnIncomplete: coverage.AbnormalOnIncomplete,
 		Unusable: coverage.Unusable, UnusableReason: coverage.UnusableReason,
+		End: coverage.End,
 	}
+	for _, window := range coverage.Windows {
+		facts.Windows = append(facts.Windows, observability.HistoryWindowFact{
+			Series: string(window.Series), Level: window.LevelID, Valid: window.Valid, Required: window.Required, End: window.End,
+			Missing: append([]int64(nil), window.Missing...), MissingTotal: window.MissingTotal,
+			Unusable: append([]int64(nil), window.Unusable...), UnusableTotal: window.UnusableTotal,
+			Guarded: window.Guarded, GuardReason: string(window.GuardReason), Fresh: window.Fresh,
+		})
+	}
+	return facts
+}
+
+// primaryInputFacts carries what the completion recorded about the PRIMARY
+// query onto its observation, by the same hand-copy and for the same reason
+// as the coverage above. Nil when the completion carries no primary: a Slot
+// skipped or expired without a query has nothing to say about the data.
+func primaryInputFacts(primary *execution.PrimaryInputFact) *observability.PrimaryInputFacts {
+	if primary == nil {
+		return nil
+	}
+	return &observability.PrimaryInputFacts{Completeness: string(primary.Completeness), DataState: string(primary.DataState)}
 }
 
 // configDriftCompletion builds the completion of a Slot whose activations moved
