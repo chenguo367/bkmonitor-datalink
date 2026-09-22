@@ -111,3 +111,31 @@ type SlotBudgetUsageFacts struct {
 	RetainedBytesLimit  uint64 `json:"-"`
 	SeriesLimit         uint64 `json:"-"`
 }
+
+// SlotTimingFacts is where one Slot's wall clock went, in milliseconds, on its
+// completion row.
+//
+// Its own object beside the budget usage because it answers a different
+// question. The usage says what the Slot consumed of what it was allowed; this
+// says where its period went, and the two are read by different people at
+// different moments -- one when a budget is near its limit, the other when a
+// Slot did not finish in time.
+//
+// Slot is the whole of it and the three parts do not sum to it: the remainder
+// is everything else the completion does, and it is only visible because the
+// total is carried beside the parts.
+//
+// Input is this Slot waiting for its records and consuming them, from the
+// moment the replica took the Slot and not from the first record. Not the
+// query's own latency -- that runs on the view stream's side, and a Slot that
+// waited its turn waited here with a backend that was never slow.
+//
+// Reported at every value including zero, for the same reason the retained
+// phases are: a phase that is usually nothing and occasionally the whole Slot
+// is the one worth finding, and its zeros are its denominator.
+type SlotTimingFacts struct {
+	Slot      uint64 `json:"slot_millis"`
+	Input     uint64 `json:"input_millis"`
+	Preflight uint64 `json:"preflight_millis"`
+	Evaluate  uint64 `json:"evaluate_millis"`
+}

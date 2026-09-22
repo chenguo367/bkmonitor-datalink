@@ -171,6 +171,36 @@ const (
 	// dependency that was fine, while the row carried nothing about how much
 	// had been asked for.
 	ReasonStateReadTimeout = "STATE_READ_TIMEOUT"
+	// ReasonStateReadDeadline names a Runtime State read that was still in
+	// flight when a deadline on the call expired, rather than one the
+	// connection gave up on.
+	//
+	// Split from STATE_READ_TIMEOUT because the two have different fixes and
+	// one word could not tell them apart. The connection's own read timeout
+	// fires when a reply is too large to arrive in the time the client allows
+	// a single command; a deadline on the context fires when the work above
+	// this read has already spent the time the Slot had. The first is fixed by
+	// reading less per call, the second by what the Slot spent before it got
+	// here -- and a build that called both STATE_READ_TIMEOUT sent every
+	// reader to the first.
+	//
+	// The reading that forced the split: one Query Group timed out the same
+	// way at 85.9 MB per round and again at 1.75 MB, after the stored
+	// representation changed from 344,206 to 7,049 bytes a record. At the
+	// first size the connection timeout is a sufficient explanation -- it
+	// needs 28.6 MB/s to land inside three seconds. At the second it is not:
+	// 0.58 MB/s, against a store answering every other caller that second.
+	// Something other than the byte volume ends these reads, and one word
+	// could not say so.
+	//
+	// A cancelled call is not this. Cancellation is the work above being
+	// stopped -- a replica shutting down, a sibling batch's failure bringing
+	// the parent context with it -- and not the time running out, so it keeps
+	// the dependency's word rather than taking a third meaning into this one.
+	// The word lands on a defect row, and a deployment that ships several
+	// times a day would file one per replica per release for doing exactly
+	// what it was told.
+	ReasonStateReadDeadline = "STATE_READ_DEADLINE"
 	// ReasonQGBudgetShareExceeded names one Query Group's Slot asking for more
 	// of the process pool than any single object may hold.
 	//
