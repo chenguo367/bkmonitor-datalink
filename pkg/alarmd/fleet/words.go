@@ -197,6 +197,13 @@ type Standing struct {
 	// RefinedBy names the rule that changed the check's own pair, from the
 	// closed list StandingRules; empty when the pair is the check's.
 	RefinedBy StandingRule `json:"refined_by,omitempty"`
+	// About is the one Plan the words are about, set only when the row's
+	// object runs several Plans and the evidence the words were read from
+	// -- the guards, the series counts -- belongs to one of them. The other
+	// strategies on the object are not under these words; a fold or a card
+	// that reads the row for one of them reads this first. Absent when the
+	// object runs one Plan or the evidence names none or several.
+	About *StrategyRef `json:"about,omitempty"`
 }
 
 // StandingRule names each rule that can refine a check's pair.
@@ -247,7 +254,11 @@ func standingOf(row Anomaly) Standing {
 	// the direct evidence that it will not. Read the other way round, a
 	// stuck object would read as "give it one more round" for ever -- the
 	// exact state STALLED was added to name.
-	if row.Finding.Check == CheckWindowUndecided || row.Finding.Check == CheckSeriesDataMissing {
+	if planScopedCheck(row.Finding.Check) {
+		if named, one := implicatedStrategy(row); one && len(row.Strategies) > 1 {
+			about := named
+			standing.About = &about
+		}
 		if stalled(&row) {
 			standing.RefinedBy = RuleStalled
 			if verdict, decided := windowVerdictWords(row); decided {
