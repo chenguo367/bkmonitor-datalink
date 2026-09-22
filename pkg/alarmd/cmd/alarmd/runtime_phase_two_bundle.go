@@ -1036,7 +1036,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 			return nil
 		}
 		return bundle.runtimeConfig
-	})
+	}, cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer})
 	defer func() {
 		if resultErr != nil {
 			_ = closeCLI()

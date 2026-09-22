@@ -65,9 +65,9 @@ func (admission viewStreamAdmission) Admit(ctx context.Context, workerID, token 
 }
 
 // viewStreamIdentity is what this process advertises in its registration
-// for the stream: where it serves it and the token a Worker must present
-// to it. Minted once per process; the token never leaves the registration
-// and the Hello.
+// for the stream: where it serves it and the token a Worker must present.
+// Minted once per process; only registration and authenticated control RPCs
+// (Hello and ReadEvidence) carry it. It never appears in OB evidence.
 type viewStreamIdentity struct {
 	Endpoint string
 	Token    string

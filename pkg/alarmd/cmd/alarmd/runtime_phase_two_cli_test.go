@@ -11,11 +11,15 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream/pb"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestCLIDisabledLeavesNativeAPIUnchanged(t *testing.T) {
 	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(218) })
-	h, closeCLI := buildPhaseTwoCLI(config.Default(), native, nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil })
+	h, closeCLI := buildPhaseTwoCLI(config.Default(), native, nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
 	defer closeCLI()
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/health", nil))
@@ -28,7 +32,7 @@ func TestCLIInvalidConfigurationOnlyDisablesCLIRoutes(t *testing.T) {
 	cfg := config.Default()
 	cfg.CLI.Enabled = true
 	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(218) })
-	h, closeCLI := buildPhaseTwoCLI(cfg, native, nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil })
+	h, closeCLI := buildPhaseTwoCLI(cfg, native, nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
 	defer closeCLI()
 	for _, path := range []string{"/api/health", "/api/cli/channel", "/api/cli/auth/grants"} {
 		w := httptest.NewRecorder()
@@ -46,7 +50,7 @@ func TestCLIInvalidConfigurationOnlyDisablesCLIRoutes(t *testing.T) {
 func TestCLIConstructionNeedsNoRedisAvailabilityAndNoAnonymousGrant(t *testing.T) {
 	cfg := config.Default()
 	cfg.CLI = config.CLIConfig{Enabled: true, EnvironmentID: "test", EnvironmentName: "Test", PublicBaseURL: "https://ob.example/alarmd/", IssuerKey: strings.Repeat("x", 32)}
-	h, closeCLI := buildPhaseTwoCLI(cfg, http.NotFoundHandler(), nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil })
+	h, closeCLI := buildPhaseTwoCLI(cfg, http.NotFoundHandler(), nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
 	defer closeCLI()
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/cli/auth/grants", nil))
@@ -76,5 +80,29 @@ func TestCLIRuntimeFactsUseAppliedProfileAndObservationOnly(t *testing.T) {
 	}
 	if strings.Contains(string(raw), "issuer_key") || strings.Contains(string(raw), "LastUnavailable") {
 		t.Fatal("runtime evidence includes raw config or errors")
+	}
+}
+
+func TestCLIControlRPCIsBoundOnlyWhenCLIConfigured(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		cfg := config.Default()
+		cfg.CLI = config.CLIConfig{Enabled: enabled, EnvironmentID: "test", EnvironmentName: "Test", PublicBaseURL: "http://ob.example/alarmd/", IssuerKey: strings.Repeat("x", 32)}
+		cfg.PhaseTwo.Worker.ID = "test-worker"
+		server, err := viewstream.NewServer(viewStreamAdmission{}, observability.NopObserver{}, viewstream.ServerOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, closeCLI := buildPhaseTwoCLI(cfg, http.NotFoundHandler(), nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Server: server, Incarnation: "test-process", StreamToken: "fixture-worker-token"})
+		// The environment precondition is checked before any Redis access.
+		// Constructing this surface and binding its handler need no live Redis.
+		_, err = server.ReadEvidence(context.Background(), &pb.EvidenceRequest{EnvironmentId: "wrong"})
+		closeCLI()
+		want := codes.Unimplemented
+		if enabled {
+			want = codes.FailedPrecondition
+		}
+		if status.Code(err) != want {
+			t.Fatalf("enabled=%v: %v", enabled, err)
+		}
 	}
 }
