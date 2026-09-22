@@ -41,7 +41,7 @@ func TestTheCostThresholdIsMeasuredAgainstWhatWasSent(t *testing.T) {
 	}
 
 	// And the source measures against the sent value rather than the read one.
-	source := newWorkerCostSource(nil, nil)
+	source := newWorkerCostSource(nil, nil, nil)
 	group := execution.QueryGroupIdentity("qg-1")
 	source.boundByOwned(func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"a", "b", "c", "d"} })
 	if costs := source.report([]observability.CostRetainedPeak{{QueryGroupKey: "qg-1", RetainedBytesPeak: 1000}}); len(costs) != 1 {
@@ -106,7 +106,7 @@ func TestAnUndeivableAskCarriesTheLastDerivedRate(t *testing.T) {
 			reading: observability.CostRetainedPeak{ComputeWallNS: int64(second)}, elapsed: 0},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			source := newWorkerCostSource(nil, nil)
+			source := newWorkerCostSource(nil, nil, nil)
 			group := execution.QueryGroupIdentity("qg-1")
 			source.advanceCost(group, seedFirst, second)
 			seeded := source.advanceCost(group, seedSecond, second)
@@ -124,7 +124,7 @@ func TestAnUndeivableAskCarriesTheLastDerivedRate(t *testing.T) {
 // Before any rate has been derived there is nothing to carry, and the Query
 // Group reports zero - which the Leader reads as unreported.
 func TestTheFirstAskForAQueryGroupReportsNoRate(t *testing.T) {
-	source := newWorkerCostSource(nil, nil)
+	source := newWorkerCostSource(nil, nil, nil)
 	got := source.advanceCost(execution.QueryGroupIdentity("qg-1"),
 		observability.CostRetainedPeak{ComputeWallNS: int64(time.Second)}, time.Second)
 	if got != 0 {
@@ -139,7 +139,7 @@ func TestTheFirstAskForAQueryGroupReportsNoRate(t *testing.T) {
 // reading - and the Leader places objects by that number.
 func TestARateThatMovesIsReportedWhenTheBytesDoNot(t *testing.T) {
 	const second = time.Second
-	source := newWorkerCostSource(nil, nil)
+	source := newWorkerCostSource(nil, nil, nil)
 	source.boundByOwned(func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"a", "b", "c", "d"} })
 	const peak = uint64(4096)
 
@@ -177,7 +177,7 @@ func TestARateThatMovesIsReportedWhenTheBytesDoNot(t *testing.T) {
 // withheld by the threshold forever - silently, because from here it looks
 // exactly like an object already reported.
 func TestAnEntryCutByTheBoundIsSentInFull(t *testing.T) {
-	source := newWorkerCostSource(nil, nil)
+	source := newWorkerCostSource(nil, nil, nil)
 	source.boundByOwned(func() []execution.QueryGroupIdentity { return nil })
 	group := execution.QueryGroupIdentity("qg-1")
 
@@ -206,7 +206,7 @@ func TestAnEntryCutByTheBoundIsSentInFull(t *testing.T) {
 // Leader needs that object in its candidates as much as any other - an
 // object it never heard of cannot be placed.
 func TestAColdQueryGroupsFirstReadingIsSent(t *testing.T) {
-	source := newWorkerCostSource(nil, nil)
+	source := newWorkerCostSource(nil, nil, nil)
 	source.boundByOwned(func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"a", "b", "c", "d"} })
 	first := source.report([]observability.CostRetainedPeak{{QueryGroupKey: "qg-cold"}})
 	if len(first) != 1 || first[0].QueryGroup != "qg-cold" || first[0].RetainedBytesPeak != 0 || first[0].CostPerSecondMilli != 0 {
@@ -229,7 +229,7 @@ func TestAColdQueryGroupsFirstReadingIsSent(t *testing.T) {
 // had a destination - 85 percent unread ten minutes after a roll, on every
 // Worker.
 func TestANewStreamReportsEveryReadingAgain(t *testing.T) {
-	source := newWorkerCostSource(nil, nil)
+	source := newWorkerCostSource(nil, nil, nil)
 	source.boundByOwned(func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"qg-1", "qg-2"} })
 	readings := []observability.CostRetainedPeak{{QueryGroupKey: "qg-1", RetainedBytesPeak: 1000}, {QueryGroupKey: "qg-2", RetainedBytesPeak: 2000}}
 	if costs := source.report(readings); len(costs) != 2 {
@@ -254,10 +254,29 @@ func TestCostsReadTheCensusPrunedToTheRoster(t *testing.T) {
 		census.Observe(context.Background(), observability.Observation{Stage: observability.StageSlotCompleted,
 			Trace: observability.TraceFields{QueryGroupKey: group}, SlotBudgetUsage: &observability.SlotBudgetUsageFacts{RetainedBytes: 4096}})
 	}
-	source := newWorkerCostSource(census, func() time.Time { return now })
+	meter := &recordingCensusMeter{}
+	source := newWorkerCostSource(census, meter, func() time.Time { return now })
 	source.boundByOwned(func() []execution.QueryGroupIdentity { return []execution.QueryGroupIdentity{"qg-1", "qg-2"} })
 	costs := source.Costs()
 	if len(costs) != 2 || costs[0].QueryGroup != "qg-1" || costs[1].QueryGroup != "qg-2" {
 		t.Fatalf("costs = %+v, want the two owned Query Groups and not the one let go", costs)
 	}
+	// The census's own size is published beside the report, after the
+	// pruning -- the two it holds for the roster, not the three it held --
+	// and its overflow with it, so a census nothing prunes is readable
+	// rather than only counted.
+	if meter.calls != 1 || meter.groups != 2 || meter.overflow != 0 {
+		t.Fatalf("census meter = %+v, want one reading of two groups and no overflow", meter)
+	}
+}
+
+// recordingCensusMeter keeps the last census reading published.
+type recordingCensusMeter struct {
+	groups   int
+	overflow uint64
+	calls    int
+}
+
+func (m *recordingCensusMeter) SetRetainedPeakCensus(groups int, overflow uint64) {
+	m.groups, m.overflow, m.calls = groups, overflow, m.calls+1
 }

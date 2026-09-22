@@ -142,6 +142,11 @@ type phaseTwoMetrics struct {
 	seriesAdmission                 *prometheus.CounterVec
 	cmdbIndexHosts                  prometheus.Gauge
 	cmdbIndexServiceInstances       prometheus.Gauge
+	fleetSnapshotBytes              prometheus.Gauge
+	fleetViewSnapshotLoads          prometheus.Counter
+	fleetViewSnapshotBytes          prometheus.Counter
+	retainedPeakCensusGroups        prometheus.Gauge
+	retainedPeakCensusOverflow      prometheus.Gauge
 	hostDisableMonitorStates        prometheus.Gauge
 	unmappedSeverity                *prometheus.CounterVec
 	cmdbIndexAge                    *prometheus.GaugeVec
@@ -1003,6 +1008,45 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Service instances in the in-memory CMDB index the target filter decides on; zero while a series " +
 			"names an instance is an instance cache nobody writes, and such series are admitted with the gap named.",
 	})
+	// The fleet snapshot this replica publishes, and the snapshots every
+	// fleet view read pulls. A view is one MGET over every replica's
+	// snapshot on the replica that answers, and it is read on every page
+	// load and every native OB invocation; the MGET rode the state store's
+	// connection, whose own traffic drowned it -- a load of two hundred
+	// views a minute could not be told from the baseline's drift on the
+	// per-connection counters. These count only what the fleet store does,
+	// so their difference over a window is the views' alone; the gauge is
+	// the true size of one replica's snapshot, which the read cost is a
+	// multiple of.
+	metrics.fleetSnapshotBytes = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_snapshot_bytes",
+		Help: "Bytes of the fleet snapshot this replica last published to the snapshot store. A fleet view on any replica " +
+			"reads every replica's snapshot, so one view costs about the sum of this across the fleet.",
+	})
+	metrics.fleetViewSnapshotLoads = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_view_snapshot_loads_total",
+		Help: "Fleet snapshot store reads this replica made to build a fleet view: one per /api or OB channel request that " +
+			"needed the view. Written only by the fleet store, so a difference over a window is the views' alone.",
+	})
+	metrics.fleetViewSnapshotBytes = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "fleet_view_snapshot_bytes_total",
+		Help: "Bytes of fleet snapshots this replica read from the snapshot store to build fleet views. Divided by " +
+			"fleet_view_snapshot_loads_total it is the true per-view read size.",
+	})
+	// The heartbeat's cost census: how many Query Groups it holds a reading
+	// for, and how many observations it dropped for being full. The census is
+	// bounded far above any owned count and pruned to the roster on every
+	// report, so the overflow is zero on a replica anything reports to; it
+	// is readable here because a number nobody can read is not a bound.
+	metrics.retainedPeakCensusGroups = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "retained_peak_census_groups",
+		Help: "Query Groups the heartbeat's retained-peak census holds a reading for on this replica, after the roster pruned it.",
+	})
+	metrics.retainedPeakCensusOverflow = prometheus.NewGauge(prometheus.GaugeOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "retained_peak_census_overflow",
+		Help: "Observations the retained-peak census dropped since the process started because it was full. Non-zero is a " +
+			"replica whose census no roster has pruned; read as a counter, published from the census's own count.",
+	})
 	// The list is a transcription of a platform setting an operator can change
 	// without alarmd noticing. Publishing how many states it is filtering on
 	// makes that drift a one-query check instead of a shadow reconcile.
@@ -1198,6 +1242,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
+		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
 		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.frozenStateRenewals, m.frozenStateCensus)...)
 }

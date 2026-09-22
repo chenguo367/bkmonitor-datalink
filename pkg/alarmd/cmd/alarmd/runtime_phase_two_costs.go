@@ -42,6 +42,7 @@ const costEWMAWeightPercent = 30
 // round and stopping once the replica is back under its share.
 type workerCostSource struct {
 	census retainedPeakSource
+	meter  censusMeter
 	mu     sync.Mutex
 	// owned is set after the bundle exists, which is after the view client is
 	// built, so it is read under the lock: the heartbeat can ask for costs
@@ -92,13 +93,23 @@ type costRate struct {
 type retainedPeakSource interface {
 	RetainedPeaks() []observability.CostRetainedPeak
 	Retain(owned []string)
+	Overflow() uint64
 }
 
-func newWorkerCostSource(census retainedPeakSource, now func() time.Time) *workerCostSource {
+// censusMeter is where the census's own size and losses are published. The
+// census is bounded at a number far above any owned count and pruned to the
+// roster on every report, so the overflow is zero on a replica anything
+// reports to -- and a bound nobody can read is not a bound, which is why it
+// is published rather than only counted.
+type censusMeter interface {
+	SetRetainedPeakCensus(groups int, overflow uint64)
+}
+
+func newWorkerCostSource(census retainedPeakSource, meter censusMeter, now func() time.Time) *workerCostSource {
 	if now == nil {
 		now = time.Now
 	}
-	return &workerCostSource{census: census, now: now,
+	return &workerCostSource{census: census, meter: meter, now: now,
 		reported: make(map[execution.QueryGroupIdentity]reportedCost),
 		cost:     make(map[execution.QueryGroupIdentity]*costRate)}
 }
@@ -153,7 +164,13 @@ func (source *workerCostSource) Costs() []viewstream.QueryGroupCost {
 		}
 		source.census.Retain(keys)
 	}
-	return source.report(source.census.RetainedPeaks())
+	peaks := source.census.RetainedPeaks()
+	if source.meter != nil {
+		// After the pruning, so the size is what the census holds for the
+		// roster rather than what it held before it was cut to it.
+		source.meter.SetRetainedPeakCensus(len(peaks), source.census.Overflow())
+	}
+	return source.report(peaks)
 }
 
 // report decides what to send from one set of readings. Separate from Costs so
