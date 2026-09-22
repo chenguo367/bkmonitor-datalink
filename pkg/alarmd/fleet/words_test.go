@@ -27,8 +27,8 @@ func TestEveryCheckHasExactlyOnePairOfWords(t *testing.T) {
 	for _, word := range ActionWords {
 		actions[word] = true
 	}
-	if len(StateWords) != 8 || len(ActionWords) != 6 || len(WatchReasons) != 4 {
-		t.Fatalf("vocabulary = %d state / %d action / %d watch words, want 8 / 6 / 4: the count is the ruling", len(StateWords), len(ActionWords), len(WatchReasons))
+	if len(StateWords) != 8 || len(ActionWords) != 6 || len(WatchReasons) != 3 {
+		t.Fatalf("vocabulary = %d state / %d action / %d watch words, want 8 / 6 / 3: the count is the ruling", len(StateWords), len(ActionWords), len(WatchReasons))
 	}
 	for _, check := range Checks() {
 		pair, paired := checkWords[check]
@@ -172,11 +172,19 @@ func TestAWaitIsDecidedByWhatIsMoving(t *testing.T) {
 	if standing := standingOf(stalledWindow, now); standing.Action != ActionDataCheck || standing.RefinedBy != RuleWindowVerdict {
 		t.Fatalf("a stalled window whose holes are the data's = %+v, want DATA_CHECK by WINDOW_VERDICT", standing)
 	}
-	// Unheard within the recent window.
+	// Silence is not a wait: a row unheard for the window, with nothing on
+	// it moving, keeps the check's own pair -- this side looks -- and an
+	// object the fleet has stopped hearing from is filed overdue or stalled
+	// by the table, never as a wait.
 	silent := Anomaly{Finding: Finding{Check: CheckWindowUndecided}, ReasonLastAt: now.Add(-RecentSkipWindow - time.Minute),
 		Coverage: &HistoryCoverage{Levels: 1, Short: 1, WorstValid: 6, WorstRequired: 9, Guarded: 1}}
-	if standing := standingOf(silent, now); standing.Action != ActionWatch || standing.Watch != WatchUnconfirmed {
-		t.Fatalf("an object unheard for the window = %+v, want WATCH / UNCONFIRMED", standing)
+	if standing := standingOf(silent, now); standing.Action == ActionWatch {
+		t.Fatalf("an object unheard for the window = %+v, want not a wait: nothing on it is moving", standing)
+	}
+	for _, check := range []Check{CheckSlotsOverdue, CheckRoundsStalled} {
+		if standing := standingOf(Anomaly{Finding: Finding{Check: check}, ReasonLastAt: now.Add(-time.Hour)}, now); standing.Action != ActionServiceFix {
+			t.Fatalf("%s = %+v, want SERVICE_FIX: an object nobody hears from is looked at, not waited for", check, standing)
+		}
 	}
 	// The checks whose pair is a wait name the next round when nothing
 	// else on the row says why -- and a guard flat for the stalled bound is

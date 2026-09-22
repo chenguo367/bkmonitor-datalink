@@ -67,21 +67,27 @@ var ActionWords = []ActionWord{ActionServiceFix, ActionStrategyEdit, ActionDataC
 // decided by a rule on the row, never by the check alone. WINDOW_FILLING:
 // the worst short window gained points this round or its holes are sliding
 // out. GUARD_MOVING: a guard's count moved within the last StalledRounds
-// rounds. UNCONFIRMED: nothing has been heard from the object within the
-// recent window. NEXT_ROUND: the round that will say is the next one -- the
+// rounds. NEXT_ROUND: the round that will say is the next one -- the
 // configuration just changed, or the cause did not survive a restart -- for
 // at most StalledRounds rounds, after which the row is this side's.
+//
+// A wait is an assertion about the future: one more round and this will
+// clear. So every reason here is evidence that something is moving, and
+// nothing here is the absence of evidence. "Nothing heard from the object
+// within the window" is not a reason to wait -- an object nobody is hearing
+// from is one nobody is evaluating, and the check table already files that
+// as overdue or stalled, this side's to look at. Read as a wait it would be
+// the state that is never looked at.
 type WatchReason string
 
 const (
 	WatchWindowFilling WatchReason = "WINDOW_FILLING"
 	WatchGuardMoving   WatchReason = "GUARD_MOVING"
-	WatchUnconfirmed   WatchReason = "UNCONFIRMED"
 	WatchNextRound     WatchReason = "NEXT_ROUND"
 )
 
 // WatchReasons is the closed list.
-var WatchReasons = []WatchReason{WatchWindowFilling, WatchGuardMoving, WatchUnconfirmed, WatchNextRound}
+var WatchReasons = []WatchReason{WatchWindowFilling, WatchGuardMoving, WatchNextRound}
 
 // Words is the vocabulary as sent: each word with its rendering. The page
 // looks a word up here and nowhere else.
@@ -104,7 +110,7 @@ func ProductWords() Words {
 			ActionCacheWriterFill: "缓存写入方补", ActionWatch: "等着看", ActionNone: "不用处理",
 		},
 		Watch: map[WatchReason]string{
-			WatchWindowFilling: "窗口在补", WatchGuardMoving: "保护在解除", WatchUnconfirmed: "还没听到它", WatchNextRound: "等下一轮",
+			WatchWindowFilling: "窗口在补", WatchGuardMoving: "保护在解除", WatchNextRound: "等下一轮",
 		},
 	}
 }
@@ -208,7 +214,12 @@ func standingOf(row Anomaly, now time.Time) Standing {
 		return standing
 	}
 	// The undecided windows: decided by their holes when every short window
-	// is named, and by whether anything is moving otherwise.
+	// is named, and by whether anything is moving otherwise. Stalled is read
+	// before the wait on purpose: a wait asserts that the next round will
+	// move things, and a guard or window flat for StalledRounds rounds is
+	// the direct evidence that it will not. Read the other way round, a
+	// stuck object would read as "give it one more round" for ever -- the
+	// exact state STALLED was added to name.
 	if row.Finding.Check == CheckWindowUndecided || row.Finding.Check == CheckSeriesDataMissing {
 		if stalled(&row) {
 			standing.RefinedBy = RuleStalled
@@ -221,7 +232,7 @@ func standingOf(row Anomaly, now time.Time) Standing {
 			}
 			return standing
 		}
-		if reason, waiting := watchReasonOf(row, now); waiting {
+		if reason, waiting := watchReasonOf(row); waiting {
 			standing.Action, standing.Watch, standing.RefinedBy = ActionWatch, reason, RuleWatch
 			return standing
 		}
@@ -235,7 +246,7 @@ func standingOf(row Anomaly, now time.Time) Standing {
 	// the same thing after StalledRounds rounds is this side's to look at,
 	// or the column would be where things go to not be seen.
 	if standing.Action == ActionWatch {
-		if reason, waiting := watchReasonOf(row, now); waiting {
+		if reason, waiting := watchReasonOf(row); waiting {
 			standing.Watch = reason
 		} else {
 			standing.Action, standing.RefinedBy = ActionServiceFix, RuleStalled
@@ -292,9 +303,9 @@ func planBoundNoSeries(row Anomaly) bool {
 
 // watchReasonOf reads whether the row is a wait, and why, from the facts
 // the wait is about: a window gaining points or sliding its holes out, a
-// guard whose count moved within StalledRounds, an object unheard within
-// the recent window, or a cause that the next round decides.
-func watchReasonOf(row Anomaly, now time.Time) (WatchReason, bool) {
+// guard whose count moved within StalledRounds, or a cause that the next
+// round decides. Every reason is something moving; silence is not one.
+func watchReasonOf(row Anomaly) (WatchReason, bool) {
 	if coverage := row.Coverage; coverage != nil && coverage.Short > 0 {
 		if (coverage.PreviousKnown && coverage.WorstValid > coverage.PreviousWorstValid) ||
 			(row.WindowFill != nil && row.WindowFill.Sliding) {
@@ -305,9 +316,6 @@ func watchReasonOf(row Anomaly, now time.Time) (WatchReason, bool) {
 		if guard.Required > 0 && guard.Observed > 0 && guard.Observed < guard.Required && guard.UnchangedRounds < StalledRounds {
 			return WatchGuardMoving, true
 		}
-	}
-	if !row.ReasonLastAt.IsZero() && now.Sub(row.ReasonLastAt) > RecentSkipWindow {
-		return WatchUnconfirmed, true
 	}
 	// The next round decides -- for at most StalledRounds rounds. A row that
 	// has said the same thing for longer than that is not waiting on a
