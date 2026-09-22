@@ -34,6 +34,9 @@ var page []byte
 //go:embed v2.html
 var pageV2 []byte
 
+//go:embed cli.html
+var pageCLI []byte
+
 // Modified is the timestamp served for caching. Build time is not available
 // here, so a fixed instant is used: the page changes only when the binary does,
 // and the binary's own version is what an operator checks.
@@ -52,6 +55,9 @@ func Handler() http.Handler {
 		case "", "/index.html":
 		case "/v2", "/v2.html":
 			body, name = pageV2, "v2.html"
+		case "/cli", "/cli.html":
+			body, name = pageCLI, "cli.html"
+			response.Header().Set("Cache-Control", "no-store")
 		default:
 			http.NotFound(response, request)
 			return

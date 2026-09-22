@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>alarmd CLI 授权</title>
+<style>
+body{font:16px/1.65 system-ui,sans-serif;color:#243247;background:#f4f6fa;margin:0;padding:32px}main{max-width:720px;margin:auto;background:#fff;padding:28px;border:1px solid #dce3ed;border-radius:10px}h1{margin-top:0;font-size:24px}p{margin:16px 0}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f6fa;padding:12px}button{font:inherit;padding:8px 16px;cursor:pointer}button:disabled{cursor:default}textarea{box-sizing:border-box;width:100%;height:140px;font:13px monospace}#status{white-space:pre-wrap}.error{color:#a32525}label{display:block}a{color:#1769c2}
+</style>
+</head>
+<body><main>
+<h1>授权 alarmd CLI 读取此环境</h1>
+<p>授权范围为本部署的运维只读取证，包括策略配置、运行证据和受限的 Redis 数据。请核对环境与操作人，再生成一次性授权码。</p>
+<pre id="preview" aria-live="polite">正在读取环境与权限…</pre>
+<button id="issue" disabled>生成授权码</button>
+<section id="grant" hidden>
+<p>在终端运行 <code>alarmd-cli auth login</code>，按提示粘贴下方授权码。授权码 5 分钟内有效且仅能兑换一次；不要放入聊天记录、工单或命令参数。</p>
+<label for="code">一次性授权码</label><textarea id="code" readonly autocomplete="off" spellcheck="false"></textarea>
+<button id="copy">复制授权码</button>
+<p id="expiry"></p>
+<p>会话有效期 1 小时。有效取证请求在剩余 10 分钟以内时续期；停止使用后自然失效。使用 <code>alarmd-cli auth logout --env 环境ID</code> 可提前撤销。</p>
+</section>
+<p id="status" role="status"></p>
+<p><a id="back" href="./v2">返回可观测页面</a></p>
+</main>
+<script>
+'use strict';
+const base = new URL(location.href);
+base.pathname = base.pathname.replace(/\/cli(?:\.html)?\/?$/, '/');
+base.search = ''; base.hash = '';
+const endpoint = new URL('api/cli/auth/grants', base);
+document.getElementById('back').href = new URL('v2', base).href;
+const status = document.getElementById('status');
+const issue = document.getElementById('issue');
+const code = document.getElementById('code');
+let expiryTimer;
+function message(text, error) { status.textContent = text; status.className = error ? 'error' : ''; }
+function clearCode() { code.value = ''; document.getElementById('grant').hidden = true; clearTimeout(expiryTimer); }
+async function request(method) {
+  const response = await fetch(endpoint, {method, credentials:'same-origin', cache:'no-store', redirect:'error', headers:method==='POST'?{'Content-Type':'application/json'}:{}, body:method==='POST'?JSON.stringify({confirm:true}):undefined});
+  const value = await response.json();
+  if (!response.ok) throw new Error(value.error?.message || '授权服务暂不可用，请检查宿主权限与接入配置。');
+  return value;
+}
+request('GET').then(value => {
+  document.getElementById('preview').textContent = `环境：${value.environment_name} (${value.environment_id})\n入口：${value.public_base_url}\n操作人：${value.principal}\n权限：${value.scope}`;
+  issue.disabled = false;
+}).catch(error => { document.getElementById('preview').textContent = '尚未获得授权环境信息。'; message(error.message, true); });
+issue.addEventListener('click', async () => {
+  issue.disabled = true; clearCode(); message('正在生成…', false);
+  try {
+    const value = await request('POST');
+    code.value = value.authorization_code;
+    document.getElementById('grant').hidden = false;
+    document.getElementById('expiry').textContent = `兑换截止时间：${new Date(value.grant_expires_at).toLocaleString()}；环境：${value.environment_id}`;
+    expiryTimer = setTimeout(() => { clearCode(); message('授权码已到期，可以重新生成。', false); }, Math.max(0, new Date(value.grant_expires_at).getTime()-Date.now()));
+    message('授权码已生成。', false);
+  } catch (error) { message(error.message, true); }
+  finally { issue.disabled = false; }
+});
+document.getElementById('copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(code.value); message('已复制，请粘贴到 CLI 登录提示中。', false); }
+  catch (_) { code.focus(); code.select(); message('浏览器无法直接复制，已选中授权码，请手动复制。', false); }
+});
+addEventListener('pagehide', clearCode);
+</script></body></html>

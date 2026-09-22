@@ -1030,7 +1030,19 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	var publisher fleetPublisher
-	bundle, err := newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
+	var bundle *phaseTwoWorkerBundle
+	fleetAPI, closeCLI := buildPhaseTwoCLI(cfg, fleetAPI, repository, progressStore, platformSettings, func() *observability.RuntimeConfigFacts {
+		if bundle == nil {
+			return nil
+		}
+		return bundle.runtimeConfig
+	})
+	defer func() {
+		if resultErr != nil {
+			_ = closeCLI()
+		}
+	}()
+	bundle, err = newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
 		Config: cfg, Health: health, Control: control, Ownership: productionOwnership,
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,
 		FleetAPI:      fleetAPI,
@@ -1056,7 +1068,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 			stopCMDBIndex()
 			viewServer.Close()
 			eventsClosed = true
-			closers := []error{events.Shutdown(shutdownCtx)}
+			closers := []error{events.Shutdown(shutdownCtx), closeCLI()}
 			if !runtimeClientIsSource {
 				closers = append(closers, runtimeClient.Close())
 			}
