@@ -85,3 +85,35 @@ func TestAScheduleRevisionChangeDiscardsEveryScopesWarmupCount(t *testing.T) {
 		}
 	}
 }
+
+// The reasons a count stops applying to its own scope, with the schedule
+// revision held still so they are the only thing that could restart it.
+//
+// These are what is left in the per-mutation branch now that the revision is
+// swept before the mutations are applied. A count is how many FULL Slots have
+// been seen against one requirement under one reason; change either and the
+// slots already counted were counted against a different question.
+func TestAWarmupCountRestartsWhenItsRequirementOrItsReasonChanges(t *testing.T) {
+	scope := execution.GapScope{LevelID: 2, HasLevel: true}
+	warmed := []execution.GapScopeState{{Scope: scope, Status: execution.GapStatusWarming,
+		ReasonCode: "CONFIG_DRIFT", RequiredFullSlots: 5, ObservedFullSlots: 3}}
+	for name, testCase := range map[string]struct {
+		mutation execution.GapScopeMutation
+		want     uint32
+	}{
+		"the same question again": {
+			execution.GapScopeMutation{Scope: scope, Kind: execution.GapWarmup, ReasonCode: "CONFIG_DRIFT", RequiredFullSlots: 5}, 4,
+		},
+		"a different requirement": {
+			execution.GapScopeMutation{Scope: scope, Kind: execution.GapWarmup, ReasonCode: "CONFIG_DRIFT", RequiredFullSlots: 7}, 1,
+		},
+		"a different reason": {
+			execution.GapScopeMutation{Scope: scope, Kind: execution.GapWarmup, ReasonCode: "HISTORY_WARMING", RequiredFullSlots: 5}, 1,
+		},
+	} {
+		applied := applyGapScopes(warmed, []execution.GapScopeMutation{testCase.mutation}, "r1", "r1")
+		if len(applied) != 1 || applied[0].ObservedFullSlots != testCase.want {
+			t.Errorf("%s: scopes = %+v, want the count at %d", name, applied, testCase.want)
+		}
+	}
+}
