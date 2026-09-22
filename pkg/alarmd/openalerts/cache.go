@@ -84,10 +84,12 @@ const (
 	// AnswerPassedThrough: the publication is unavailable and the policy is
 	// to let every recovery go, as before the gate existed.
 	AnswerPassedThrough Answer = "passed_through"
+	AnswerIndexMember   Answer = "index_member"
+	AnswerIndexAbsent   Answer = "index_absent"
 )
 
 // Answers lists every Answer, for the metric that pre-creates them all.
-var Answers = []Answer{AnswerMember, AnswerAbsent, AnswerRecentlySent, AnswerNotYetLoaded, AnswerSelfMaintained, AnswerPassedThrough}
+var Answers = []Answer{AnswerMember, AnswerAbsent, AnswerRecentlySent, AnswerNotYetLoaded, AnswerSelfMaintained, AnswerPassedThrough, AnswerIndexMember, AnswerIndexAbsent}
 
 // UnavailablePolicy is what the copy answers while the publication is
 // unavailable. It is one decision point on purpose, because the two answers
@@ -117,17 +119,24 @@ type Stats struct {
 	UnavailableReason UnavailableReason
 	// LoadedAt is when the last authoritative publication was read; zero if
 	// never. A metric derived from it must not be emitted while zero.
-	LoadedAt    time.Time
-	Heartbeat   Heartbeat
-	Tracked     int
-	Loaded      int
-	Members     int
-	Added       int
-	Removed     int
-	Evictions   uint64
-	Refreshes   map[string]uint64
-	Unavailable map[UnavailableReason]uint64
-	Lookups     map[Answer]uint64
+	LoadedAt                        time.Time
+	Heartbeat                       Heartbeat
+	Tracked                         int
+	Loaded                          int
+	Members                         int
+	Added                           int
+	Removed                         int
+	Evictions                       uint64
+	Refreshes                       map[string]uint64
+	Unavailable                     map[UnavailableReason]uint64
+	Lookups                         map[Answer]uint64
+	IndexReadAt                     time.Time
+	PendingReads, PendingReconciles int
+	OldestPendingAt                 time.Time
+	SubscriptionReady               bool
+	MemberBytes                     int
+	IndexProtocol                   bool
+	Calibrated                      int
 }
 
 type member struct {
@@ -142,6 +151,7 @@ type stamped struct {
 // Cache is this process's copy of the consumer's open alert set. It
 // implements contract.OpenAlertSet.
 type Cache struct {
+	index  *indexState
 	mu     sync.Mutex
 	source Source
 	now    func() time.Time
@@ -221,6 +231,10 @@ func (cache *Cache) Track(keys ...StrategyKey) {
 	if cache == nil {
 		return
 	}
+	if cache.index != nil {
+		_ = cache.TrackOwned(keys...)
+		return
+	}
 	now := cache.now()
 	cache.mu.Lock()
 	for _, key := range keys {
@@ -239,6 +253,9 @@ func (cache *Cache) Contains(tenantID, strategyID, fingerprint string) bool {
 	now := cache.now()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	if cache.index != nil {
+		return cache.indexContains(m, now, true)
+	}
 	cache.tracked[key] = now
 	if cache.available && cache.loaded[key] {
 		if _, ok := cache.sets[key][fingerprint]; ok {
@@ -294,6 +311,9 @@ func (cache *Cache) removedAfter(m member, at time.Time) bool {
 // is only consulted with an authoritative publication in hand, so the cycle
 // is known; the fallback exists for the type's sake, not for a path.
 func (cache *Cache) localRetention() time.Duration {
+	if cache.index != nil {
+		return cache.index.options.LocalRetention
+	}
 	if cache.heartbeat.Cycle > 0 {
 		return LocalRetentionCycles * cache.heartbeat.Cycle
 	}
@@ -318,6 +338,9 @@ func (cache *Cache) Acknowledged(events []contract.TriggerEventV1) {
 			continue
 		}
 		m := member{key: StrategyKey{TenantID: event.TenantID, StrategyID: event.PlanRef.StrategyID}, fingerprint: event.DedupeMD5}
+		if cache.index != nil && cache.index.entries[m.key] == nil {
+			continue
+		}
 		switch event.EventKind {
 		case contract.TriggerEventAbnormal:
 			cache.added[m] = stamped{at: now}
@@ -366,6 +389,10 @@ func (cache *Cache) boundLocal() {
 // place, which is what self-maintained mode answers from.
 func (cache *Cache) Refresh(ctx context.Context) {
 	if cache == nil {
+		return
+	}
+	if cache.index != nil {
+		cache.refreshIndex(ctx)
 		return
 	}
 	keys := cache.readSet()
@@ -461,6 +488,9 @@ func (cache *Cache) Stats() Stats {
 	if cache == nil {
 		return Stats{}
 	}
+	if cache.index != nil {
+		return cache.indexStats()
+	}
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	stats := Stats{
@@ -500,6 +530,16 @@ func (cache *Cache) Stats() Stats {
 // deployed, and the Mode says so on its own.
 func (cache *Cache) StaleBeyondBound() bool {
 	if cache == nil {
+		return false
+	}
+	if cache.index != nil {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		for _, entry := range cache.index.entries {
+			if !entry.calibratedAt.IsZero() && !cache.calibrated(entry, cache.now()) {
+				return true
+			}
+		}
 		return false
 	}
 	now := cache.now()
