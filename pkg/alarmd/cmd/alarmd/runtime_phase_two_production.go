@@ -1337,6 +1337,11 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// stream, which every round tolerates.
 	ViewStream *viewstream.Server
 	ViewSource viewSource
+	// Costs is the Leader's ledger of what each Worker's heartbeat reported
+	// its Query Groups cost, judged for the byte constraint each round
+	// (decision-020 section 5.7). Nil is a runtime that judges nothing and
+	// reports every ready Worker as not judged.
+	Costs *scheduler.CostLedger
 }
 
 type productionPhaseTwoOwnership struct {
@@ -1543,15 +1548,39 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	// comes back after a crash or a rollout owns nothing until this moves
 	// its share to it. The index is written from the owners after the moves,
 	// so a worker reads the round's final answer.
-	plan := runtime.reconciler.PlanRebalance(owners, workers, at)
-	outcome, err := runtime.publishRebalance(ctx, authority, plan, records, workers, at)
+	// Feasibility before balance (decision-020 section 5.7): a Worker whose
+	// Query Groups' retained-byte peaks sum past its pool's share gives its
+	// largest one to the Worker with the most headroom, whatever the
+	// counts say; the count correction then plans over the owners after
+	// those moves and under the same readings, so it neither undoes them
+	// nor fills a destination past its share.
+	stable, remaining := runtime.observeReadySet(authority, workers, at)
+	readings := runtime.dependencies.Costs.Readings(owners, workers)
+	bytePlan := runtime.reconciler.PlanByteMoves(owners, workers, readings, at)
+	byteMoves := make([]scheduler.RebalanceMove, 0, len(bytePlan.Moves))
+	for _, move := range bytePlan.Moves {
+		byteMoves = append(byteMoves, scheduler.RebalanceMove{QueryGroup: move.QueryGroup, From: move.From, To: move.To})
+	}
+	byteOutcome, err := runtime.publishMoves(ctx, authority, byteMoves, records, stable, remaining, at)
+	for _, move := range byteOutcome.applied {
+		owners[move.QueryGroup] = move.To
+	}
+	if err != nil {
+		runtime.observeRebalance(ctx, scheduler.RebalancePlan{Owned: map[string]int{}}, rebalanceOutcome{}, bytePlan, byteOutcome, at)
+		return err
+	}
+	plan := runtime.reconciler.PlanRebalanceWithBytes(owners, workers, readings, at)
+	outcome, err := runtime.publishMoves(ctx, authority, plan.Moves, records, stable, remaining, at)
 	for _, move := range outcome.applied {
 		owners[move.QueryGroup] = move.To
 	}
-	runtime.observeRebalance(ctx, plan, outcome, at)
+	runtime.observeRebalance(ctx, plan, outcome, bytePlan, byteOutcome, at)
 	if err != nil {
 		return err
 	}
+	// The ledger keeps what the round's final owners agree with; a Query
+	// Group that moved has no reading until its new holder reports it.
+	runtime.dependencies.Costs.Retain(owners)
 	runtime.publishAssignmentIndex(ctx, authority, owners, workers, at)
 	runtime.sweepRetiredAssignments(ctx, authority, ordered)
 	runtime.publishView(ctx, authority, records, owners)
@@ -1644,9 +1673,10 @@ type rebalanceOutcome struct {
 	pausedFor time.Duration
 }
 
-// publishRebalance publishes the moves of one plan as Assignment decisions
-// under this round's authority, unless the ready set changed within the
-// stabilisation window, in which case the round only reports the plan.
+// publishMoves publishes one round's moves - the byte-constraint moves and
+// the count rebalance's alike - as Assignment decisions under this round's
+// authority, unless the ready set changed within the stabilisation window,
+// in which case the round only reports them.
 //
 // Each move names the record revision the reconcile just read, so a record
 // another writer moved in between is refused by the store and skipped, not
@@ -1655,24 +1685,27 @@ type rebalanceOutcome struct {
 // asked: its next renewal is refused with NOT_DESIRED and its in-flight
 // commit by the fence, and the new holder resumes the Query Group from its
 // Progress, which is the same handover a rendezvous re-placement makes.
-func (runtime *productionPhaseTwoOwnership) publishRebalance(
+// Every move is written as REBALANCE: the byte-constraint word is accepted
+// by readers first (ownership.PlacementByteConstraint) and written once
+// every reader accepts it.
+func (runtime *productionPhaseTwoOwnership) publishMoves(
 	ctx context.Context,
 	authority ownership.PublicationAuthority,
-	plan scheduler.RebalancePlan,
+	moves []scheduler.RebalanceMove,
 	records map[execution.QueryGroupIdentity]ownership.AssignmentRecord,
-	workers []ownership.WorkerRegistration,
+	stable bool,
+	remaining time.Duration,
 	at time.Time,
 ) (rebalanceOutcome, error) {
 	outcome := rebalanceOutcome{}
-	stable, remaining := runtime.observeReadySet(authority, workers, at)
-	if len(plan.Moves) == 0 {
+	if len(moves) == 0 {
 		return outcome, nil
 	}
 	if !stable {
 		outcome.paused, outcome.pausedFor = true, remaining
 		return outcome, nil
 	}
-	for _, move := range plan.Moves {
+	for _, move := range moves {
 		record, known := records[move.QueryGroup]
 		if !known || record.DesiredWorkerID != move.From {
 			// The plan was computed from these records; a move over a Query
@@ -1774,6 +1807,8 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 	ctx context.Context,
 	plan scheduler.RebalancePlan,
 	outcome rebalanceOutcome,
+	bytePlan scheduler.BytePlan,
+	byteOutcome rebalanceOutcome,
 	at time.Time,
 ) {
 	facts := &observability.RebalanceFacts{
@@ -1781,6 +1816,7 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		MostOwned: plan.MostOwned, LeastOwned: plan.LeastOwned, Batch: plan.Batch, PlannedMoves: len(plan.Moves),
 		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts,
 		Paused: outcome.paused, PausedForSeconds: outcome.pausedFor.Seconds(),
+		Bytes: byteConstraintFacts(bytePlan, byteOutcome),
 	}
 	workerIDs := make([]string, 0, len(plan.Owned))
 	for workerID := range plan.Owned {
@@ -1813,9 +1849,45 @@ func (runtime *productionPhaseTwoOwnership) observeRebalance(
 		// than a second walk over the counts with its own tie rule.
 		published.MostOwnedBy, published.LeastOwnedBy = plan.Moves[0].From, plan.Moves[0].To
 	}
+	published.Bytes = fleetByteConstraintFacts(bytePlan, byteOutcome)
 	runtime.mu.Lock()
 	runtime.lastRebalance = published
 	runtime.mu.Unlock()
+}
+
+// byteConstraintFacts is one round's byte-constraint planning for the log
+// line: what was judged, what was not, who was over, what moved.
+func byteConstraintFacts(plan scheduler.BytePlan, outcome rebalanceOutcome) *observability.ByteConstraintFacts {
+	facts := &observability.ByteConstraintFacts{
+		SharePercent: scheduler.ByteConstraintPercent, Judged: plan.Judged, PoolUnknown: plan.PoolUnknown, Unread: plan.Unread, Unsettled: plan.Unsettled,
+		Overloaded: plan.Overloaded, Unplaceable: plan.Unplaceable, PlannedMoves: len(plan.Moves),
+		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts, Paused: outcome.paused,
+	}
+	for _, move := range plan.Moves {
+		facts.Moves = append(facts.Moves, observability.ByteMoveSample{QueryGroup: string(move.QueryGroup), From: move.From, To: move.To, Bytes: move.Bytes})
+	}
+	return facts
+}
+
+// fleetByteConstraintFacts is the same round for the fleet snapshot.
+func fleetByteConstraintFacts(plan scheduler.BytePlan, outcome rebalanceOutcome) *fleet.ByteConstraintFacts {
+	facts := &fleet.ByteConstraintFacts{
+		SharePercent: scheduler.ByteConstraintPercent, Judged: plan.Judged, PoolUnknown: plan.PoolUnknown, Unread: plan.Unread, Unsettled: plan.Unsettled,
+		Overloaded: plan.Overloaded, Unplaceable: plan.Unplaceable, PlannedMoves: len(plan.Moves),
+		PublishedMoves: len(outcome.applied), Conflicts: outcome.conflicts, Paused: outcome.paused,
+	}
+	workerIDs := make([]string, 0, len(plan.Sum))
+	for workerID := range plan.Sum {
+		workerIDs = append(workerIDs, workerID)
+	}
+	sort.Strings(workerIDs)
+	for _, workerID := range workerIDs {
+		facts.Sums = append(facts.Sums, fleet.ByteSumSample{WorkerID: workerID, PeakSumBytes: plan.Sum[workerID]})
+	}
+	for _, move := range plan.Moves {
+		facts.Moves = append(facts.Moves, fleet.ByteMoveSample{QueryGroup: string(move.QueryGroup), From: move.From, To: move.To, Bytes: move.Bytes})
+	}
+	return facts
 }
 
 // LastRebalance is the plan the latest round on this process computed, for

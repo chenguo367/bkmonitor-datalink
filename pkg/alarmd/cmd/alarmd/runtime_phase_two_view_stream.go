@@ -20,6 +20,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
@@ -184,6 +185,21 @@ type viewSource interface {
 	// carries still executes from its timeline's last Segment; false when
 	// there is nothing left to execute.
 	DrainingContent(context.Context, execution.QueryGroupIdentity) (execution.ObjectDigest, []execution.OutputContextRef, bool, error)
+}
+
+// costLedgerSink hands each heartbeat's costs to the Leader's ledger: the
+// stream's CostSink over the scheduler's ledger, so the scheduler package
+// never imports the stream.
+type costLedgerSink struct{ ledger *scheduler.CostLedger }
+
+func (sink costLedgerSink) RecordCosts(workerID string, costs []viewstream.QueryGroupCost) {
+	reports := make([]scheduler.QueryGroupCostReport, 0, len(costs))
+	for _, cost := range costs {
+		reports = append(reports, scheduler.QueryGroupCostReport{
+			QueryGroup: cost.QueryGroup, RetainedBytesPeak: cost.RetainedBytesPeak, CostPerSecondMilli: cost.CostPerSecondMilli,
+		})
+	}
+	sink.ledger.Record(workerID, reports)
 }
 
 // viewLead and viewStepDown follow the control leader authority: a term

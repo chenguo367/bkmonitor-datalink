@@ -2237,6 +2237,11 @@ func (bundle *phaseTwoWorkerBundle) loadFacts() *ownership.WorkerLoad {
 		PermitsHeld:      capacity.PermitsHeld, PermitBudget: capacity.PermitBudget,
 		PermitSeconds: capacity.PermitSeconds, Waiting: capacity.Waiting,
 		MemoryUsedBytes: capacity.MemoryUsed, MemoryLimitBytes: capacity.MemoryLimit,
+		// The pool the Leader judges this replica's byte constraint against
+		// (decision-020 section 5.7): the same number the coordinator holds
+		// Slots under, so the Leader never re-derives it from the memory
+		// limit with a divisor of its own.
+		RetainedPoolBytes: bundle.dependencies.Config.PhaseTwo.Coordinator.MaxRetainedBytes,
 	}
 }
 
