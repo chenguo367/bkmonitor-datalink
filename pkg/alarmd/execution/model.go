@@ -1124,6 +1124,17 @@ type StatePreflightResult struct {
 	// can never drive this to zero, migrated or not. On the release that first
 	// carried it a round read 131 of 256 this way, and nothing in the number
 	// said how many of the 131 were the older representation.
+	//
+	// What it is good for is an identity over the five below, which are a
+	// partition of the second pass:
+	//
+	//	EnvelopeReads - (the five) = envelopes this round did not get back
+	//
+	// A batch whose read fails classifies every one of its items as a failure
+	// and never reaches the split, so the difference is the only name that
+	// shape has. Zero difference says the five account for the pass; a
+	// standing difference says reads are failing, and neither is visible in
+	// any of the five alone.
 	EnvelopeReads int
 	// The four the second pass splits into. Only EnvelopeAnswered ever ends,
 	// which is the whole reason the total above cannot answer for them.
@@ -1132,19 +1143,28 @@ type StatePreflightResult struct {
 	// migration stock, the one count that must reach zero before the
 	// compatibility read can go.
 	//
-	// NoRecordYet: no frame and nothing answered -- a series with no record
-	// yet. Normal for ever on any deployment where series appear. It also
-	// holds an envelope that was present and unreadable; separating that is a
-	// question about what is stored, which only the stock side answers.
+	// EnvelopeCorrupt: no frame, and the older key held bytes that did not
+	// read. A damaged record of the older representation, and a defect. It has
+	// its own name because the alternative was to fold it in beside the series
+	// that never had a record -- which is the same mistake this split exists
+	// to undo, made on the other side: a damaged envelope would have been
+	// indistinguishable from a new series, exactly as a damaged frame was.
+	//
+	// NoRecordYet: no frame and the older key held nothing at all -- a series
+	// with no record yet. Normal for ever on any deployment where series
+	// appear, and the reason the total above can never reach zero.
 	//
 	// FrameCorruptRescued and FrameCorruptLost: the frame's bytes were there
 	// and did not read. Both are corruption, not a writer of the older
 	// representation, and both should be zero -- they are named for the defect
 	// rather than for the branch that found them, because a reader meeting one
 	// has a damaged record and not a migration to wait out. They were
-	// invisible while one count covered all four: a corrupt frame the older
-	// record rescued read exactly like a new series arriving.
+	// invisible while one count covered the pass: a corrupt frame the older
+	// record rescued read exactly like a new series arriving. FrameCorruptLost
+	// does not separate an absent envelope from an unreadable one, because the
+	// record is lost either way and the frame has already named the defect.
 	EnvelopeAnswered    int
+	EnvelopeCorrupt     int
 	NoRecordYet         int
 	FrameCorruptRescued int
 	FrameCorruptLost    int
@@ -1205,7 +1225,8 @@ func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflight
 	// still buying anything.
 	classified := StatePreflightResult{Items: make([]RuntimeStateView, len(result.Items)),
 		LoadedBytes: result.LoadedBytes, EnvelopeReads: result.EnvelopeReads,
-		EnvelopeAnswered: result.EnvelopeAnswered, NoRecordYet: result.NoRecordYet,
+		EnvelopeAnswered: result.EnvelopeAnswered, EnvelopeCorrupt: result.EnvelopeCorrupt,
+		NoRecordYet:         result.NoRecordYet,
 		FrameCorruptRescued: result.FrameCorruptRescued, FrameCorruptLost: result.FrameCorruptLost}
 	seen := make(map[StateKeyIdentity]struct{}, len(result.Items))
 	for index, view := range result.Items {

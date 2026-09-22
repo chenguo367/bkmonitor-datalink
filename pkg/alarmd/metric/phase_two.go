@@ -85,6 +85,7 @@ type phaseTwoMetrics struct {
 	scheduleCutoverTimelineMax      prometheus.Gauge
 	scheduleTimelineBytes           prometheus.Histogram
 	scheduleSegmentsPruned          prometheus.Counter
+	envelopePass                    *prometheus.CounterVec
 	schedulePruneSkipped            *prometheus.CounterVec
 	scheduleCutoverDuration         *prometheus.HistogramVec
 	scheduleCutovers                *prometheus.CounterVec
@@ -631,6 +632,28 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.scheduleCutoverTimelineMax = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_timeline_bytes_max", Help: "Largest Schedule timeline written by the last publication cutover. Rising across cutovers means some timeline is never pruned."})
 	metrics.scheduleTimelineBytes = prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_timeline_bytes", Help: "Schedule timeline sizes as written by publication cutovers.", Buckets: scheduleTimelineBytesBuckets})
 	metrics.scheduleSegmentsPruned = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_segments_pruned_total", Help: "Closed Schedule Segments dropped by publication cutovers because no Slot in them is read anymore."})
+	// The state preflight's second pass, split by what it found. Pre-created
+	// at zero for every outcome, because this family is read for its zeros:
+	// the compatibility read may go when old_representation has been zero
+	// across the fleet, and the three defect outcomes are read to confirm they
+	// are zero. A label value nobody pre-created is absent, and absent and
+	// zero are the two readings this has to keep apart.
+	//
+	// A counter and not the log line it is also written to: the preflight line
+	// is rate-limited like every other workflow stage, so a busy deployment
+	// merges most of them away. A sampled line can carry a non-zero -- wait
+	// and one appears -- but "zero everywhere, always" cannot be established
+	// from a sample at all, and that is the reading the deletion waits on.
+	metrics.envelopePass = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem,
+		Name: "state_envelope_pass_series_total",
+		Help: "Series a state preflight's second pass classified, by what it found. old_representation is the migration " +
+			"stock and the only outcome that ends; no_record_yet is a series with no record at all and never ends. " +
+			"envelope_corrupt, frame_corrupt_rescued and frame_corrupt_lost are damaged records, not writers, and " +
+			"should be zero. The sum is below state_preflight's envelope_reads by the series whose read failed and " +
+			"never reached the split."}, []string{"outcome"})
+	for _, outcome := range observability.EnvelopePassOutcomes {
+		metrics.envelopePass.WithLabelValues(outcome)
+	}
 	metrics.schedulePruneSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_prune_skipped_total", Help: "Schedule timelines a cutover left unpruned, by reason."}, []string{"reason"})
 	metrics.scheduleCutoverDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_duration_seconds", Help: "Publication cutover compare-and-set duration.", Buckets: activeQGSetDurationBuckets}, []string{"result"})
 	for _, reason := range observability.SchedulePruneSkipReasons {
@@ -1317,6 +1340,26 @@ const (
 	sourceWithheldLineDropped = "dropped"
 )
 
+// observeEnvelopePass records one preflight's second pass, by outcome.
+//
+// Every outcome has its label pre-created at zero, so a fleet that has
+// finished migrating reads as zero rather than as absent -- which is the
+// distinction this family exists to make, and the one a log line cannot make
+// because the preflight line is sampled.
+func (m phaseTwoMetrics) observeEnvelopePass(counts observability.Counts) {
+	for outcome, value := range map[string]int64{
+		observability.EnvelopePassOldRepresentation: counts.EnvelopeAnswered,
+		observability.EnvelopePassNoRecordYet:       counts.NoRecordYet,
+		observability.EnvelopePassEnvelopeCorrupt:   counts.EnvelopeCorrupt,
+		observability.EnvelopePassFrameCorruptSaved: counts.FrameCorruptRescued,
+		observability.EnvelopePassFrameCorruptLost:  counts.FrameCorruptLost,
+	} {
+		if value > 0 {
+			m.envelopePass.WithLabelValues(outcome).Add(float64(value))
+		}
+	}
+}
+
 func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 	return append(append(m.workflow.collectors(), []prometheus.Collector{
 		m.shortPeriod.completed, m.shortPeriod.duration, m.shortPeriod.lag,
@@ -1332,7 +1375,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission,
 		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries, m.rangeGateDecisions, m.statePreflights,
 		m.queryFailures,
@@ -1477,6 +1520,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if observation.Component == observability.ComponentState && observation.Stage == observability.StageStatePreflight {
 		result, reason := observability.NormalizeStatePreflight(observation.Result, observation.ReasonCode)
 		m.statePreflights.WithLabelValues(string(result), string(reason)).Inc()
+		m.observeEnvelopePass(observation.Counts)
 	}
 	m.observeSlotWait(observation)
 	if facts := observation.ScheduleCutover; facts != nil {

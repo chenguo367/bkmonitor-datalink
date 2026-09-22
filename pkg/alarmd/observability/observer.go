@@ -425,6 +425,7 @@ type Counts struct {
 	// at every value, zero included. A count that exists to answer "how many"
 	// has its answer erased by omitting its zero.
 	EnvelopeAnswered    int64
+	EnvelopeCorrupt     int64
 	NoRecordYet         int64
 	FrameCorruptRescued int64
 	FrameCorruptLost    int64
@@ -2820,6 +2821,23 @@ func normalizeDrainingQGFacts(facts *DrainingQGFacts) *DrainingQGFacts {
 
 // SchedulePruneSkipReasons is the closed vocabulary of ScheduleCutoverFacts.PrunesSkipped.
 var SchedulePruneSkipReasons = []string{"progress_unavailable", "progress_missing"}
+
+// The outcomes a state preflight's second pass splits into, as the closed set
+// the counter pre-creates. Only OldRepresentation ends; NoRecordYet never
+// does; the three corrupt ones should be zero and are read to confirm it.
+//
+// Pre-created because this family is read for its zeros, and an outcome nobody
+// pre-created is absent -- which reads the same as zero and means the opposite.
+const (
+	EnvelopePassOldRepresentation = "old_representation"
+	EnvelopePassNoRecordYet       = "no_record_yet"
+	EnvelopePassEnvelopeCorrupt   = "envelope_corrupt"
+	EnvelopePassFrameCorruptSaved = "frame_corrupt_rescued"
+	EnvelopePassFrameCorruptLost  = "frame_corrupt_lost"
+)
+
+var EnvelopePassOutcomes = []string{EnvelopePassOldRepresentation, EnvelopePassNoRecordYet,
+	EnvelopePassEnvelopeCorrupt, EnvelopePassFrameCorruptSaved, EnvelopePassFrameCorruptLost}
 
 func normalizeScheduleCutoverFacts(facts *ScheduleCutoverFacts) *ScheduleCutoverFacts {
 	if facts == nil {

@@ -1040,6 +1040,7 @@ func appendEnvelopePassCounts(attributes []slog.Attr, observation Observation) [
 	}
 	return append(attributes,
 		slog.Int64("envelope_answered", observation.Counts.EnvelopeAnswered),
+		slog.Int64("envelope_corrupt", observation.Counts.EnvelopeCorrupt),
 		slog.Int64("no_record_yet", observation.Counts.NoRecordYet),
 		slog.Int64("frame_corrupt_rescued", observation.Counts.FrameCorruptRescued),
 		slog.Int64("frame_corrupt_lost", observation.Counts.FrameCorruptLost))

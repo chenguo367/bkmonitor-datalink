@@ -285,6 +285,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	flush()
 	result.EnvelopeReads = len(pass.pending)
 	result.EnvelopeAnswered, result.NoRecordYet = pass.envelopeAnswered, pass.noRecordYet
+	result.EnvelopeCorrupt = pass.envelopeCorrupt
 	result.FrameCorruptRescued, result.FrameCorruptLost = pass.frameCorruptRescued, pass.frameCorruptLost
 	// One commit for the whole preflight: the round read every key of the
 	// Query Group, so this is a complete measurement of the population rather

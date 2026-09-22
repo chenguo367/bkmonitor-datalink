@@ -38,7 +38,8 @@ func TestTheSecondPassSaysWhichOfTheFourItFound(t *testing.T) {
 
 	const (
 		stock  = iota // no frame, the envelope answers: the migration stock
-		fresh         // no frame, nothing answers: a series with no record yet
+		fresh         // no frame, no envelope either: a series with no record yet
+		rotten        // no frame, the envelope has bytes that do not read
 		saved         // frame present and corrupt, the envelope answers
 		lost          // frame present and corrupt, nothing answers
 		framed        // a healthy frame, which never reaches the second pass
@@ -55,6 +56,8 @@ func TestTheSecondPassSaysWhichOfTheFourItFound(t *testing.T) {
 			backend.values[envelopeKey], _ = encodeRuntime(seriesMutation(t, identity, version, 0, "env"), 7)
 		case fresh:
 			// Nothing written at all.
+		case rotten:
+			backend.values[envelopeKey] = []byte("not-an-envelope")
 		case saved:
 			backend.values[framedKey] = []byte("not-a-frame")
 			backend.values[envelopeKey], _ = encodeRuntime(seriesMutation(t, identity, version, 0, "env"), 7)
@@ -71,18 +74,19 @@ func TestTheSecondPassSaysWhichOfTheFourItFound(t *testing.T) {
 	}
 	for name, got := range map[string]struct{ have, want int }{
 		"EnvelopeAnswered":    {loaded.EnvelopeAnswered, 1},
+		"EnvelopeCorrupt":     {loaded.EnvelopeCorrupt, 1},
 		"NoRecordYet":         {loaded.NoRecordYet, 1},
 		"FrameCorruptRescued": {loaded.FrameCorruptRescued, 1},
 		"FrameCorruptLost":    {loaded.FrameCorruptLost, 1},
 	} {
 		if got.have != got.want {
-			t.Errorf("%s = %d, want %d (all four shapes are in this round exactly once)", name, got.have, got.want)
+			t.Errorf("%s = %d, want %d (all five shapes are in this round exactly once)", name, got.have, got.want)
 		}
 	}
 	// The four account for the second pass and nothing else: the healthy frame
 	// is answered in the first pass and must not appear in any of them.
-	if sum := loaded.EnvelopeAnswered + loaded.NoRecordYet + loaded.FrameCorruptRescued + loaded.FrameCorruptLost; sum != loaded.EnvelopeReads {
-		t.Fatalf("the four sum to %d against %d series that needed the second read: a shape is being counted twice "+
+	if sum := loaded.EnvelopeAnswered + loaded.EnvelopeCorrupt + loaded.NoRecordYet + loaded.FrameCorruptRescued + loaded.FrameCorruptLost; sum != loaded.EnvelopeReads {
+		t.Fatalf("the five sum to %d against %d series that needed the second read: a shape is being counted twice "+
 			"or not at all", sum, loaded.EnvelopeReads)
 	}
 	if loaded.EnvelopeReads != shapes-1 {

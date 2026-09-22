@@ -761,6 +761,7 @@ type runtimeLoadPass struct {
 	// counted. Only envelopeAnswered ever reaches zero, which is why one
 	// number over all four could not say when the migration is over.
 	envelopeAnswered    int
+	envelopeCorrupt     int
 	noRecordYet         int
 	frameCorruptRescued int
 	frameCorruptLost    int
@@ -910,14 +911,23 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			// is all that is known, and absence is exactly what the first two
 			// rows share.
 			//
-			// noRecordYet also holds an envelope that was present and did not
-			// read. That series has no usable record either way, and telling
-			// the two apart is a question about what is stored rather than
-			// what was read -- the stock side answers it, this side cannot.
+			// The envelope's own bytes decide the middle two: raw is nil when
+			// the key held nothing and non-nil when it held something that did
+			// not read. Both are facts of this read, so a bucket that merged
+			// them would be doing to the older record exactly what one count
+			// over all of these did to the frame -- leaving a damaged record
+			// indistinguishable from a series that never had one.
+			//
+			// frameCorruptLost does not split the same way: its record is lost
+			// whether the envelope was absent or unreadable, and the frame has
+			// already named the defect. The five are a partition, which is what
+			// lets the total below cross-check them.
 			answered := view.Representation == execution.StateRepresentationEnvelope
 			switch {
 			case pass.frames[index] == nil && answered:
 				pass.envelopeAnswered++
+			case pass.frames[index] == nil && raw != nil:
+				pass.envelopeCorrupt++
 			case pass.frames[index] == nil:
 				pass.noRecordYet++
 			case answered:

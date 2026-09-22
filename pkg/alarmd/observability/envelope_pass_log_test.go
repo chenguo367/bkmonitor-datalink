@@ -55,7 +55,7 @@ func preflightLine(t *testing.T, counts Counts, stage string) map[string]any {
 func TestTheSecondPassCountsAreOnTheLineAtZero(t *testing.T) {
 	t.Parallel()
 	fields := preflightLine(t, Counts{Keys: 256, StateBytes: 126762}, StageStatePreflight)
-	for _, name := range []string{"envelope_answered", "no_record_yet", "frame_corrupt_rescued", "frame_corrupt_lost"} {
+	for _, name := range []string{"envelope_answered", "envelope_corrupt", "no_record_yet", "frame_corrupt_rescued", "frame_corrupt_lost"} {
 		value, present := fields[name]
 		if !present {
 			t.Errorf("%s is missing from a preflight line where it is zero: a count that only appears when non-zero "+
@@ -81,7 +81,7 @@ func TestTheSecondPassCountsAreOnTheLineAtZero(t *testing.T) {
 func TestTheSecondPassCountsStayOffOtherLines(t *testing.T) {
 	t.Parallel()
 	fields := preflightLine(t, Counts{Keys: 4}, StageGapLoaded)
-	for _, name := range []string{"envelope_answered", "no_record_yet", "frame_corrupt_rescued", "frame_corrupt_lost"} {
+	for _, name := range []string{"envelope_answered", "envelope_corrupt", "no_record_yet", "frame_corrupt_rescued", "frame_corrupt_lost"} {
 		if _, present := fields[name]; present {
 			t.Errorf("%s is on the %s line, which does not produce it", name, StageGapLoaded)
 		}
