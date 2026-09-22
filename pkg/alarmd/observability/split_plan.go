@@ -70,6 +70,31 @@ func SplitOutcomes() []string {
 	}
 }
 
+// normalizeSplitPlanFacts copies the facts and holds the outcome to its
+// vocabulary. An outcome outside it becomes NO_READING rather than reaching
+// the metric: a label nobody declared is a series nobody pre-created, and one
+// arriving at runtime is how a bounded label set stops being bounded. It
+// becomes the word for "a number is missing" because that is what an
+// unrecognised decision is - the planner reached an answer this build cannot
+// name, and reading it as any of the others would be a claim.
+func normalizeSplitPlanFacts(facts *SplitPlanFacts) *SplitPlanFacts {
+	if facts == nil {
+		return nil
+	}
+	copied := *facts
+	known := false
+	for _, outcome := range SplitOutcomes() {
+		if copied.Outcome == outcome {
+			known = true
+			break
+		}
+	}
+	if !known {
+		copied.Outcome = SplitOutcomeNoReading
+	}
+	return &copied
+}
+
 // SplitPlanFacts is one object's split decision as a dry run reports it: what
 // was decided, from which readings, and - when a split was planned - what the
 // pieces would carry.
@@ -125,6 +150,10 @@ type SplitPlanFacts struct {
 	// a reader can tell a lopsided split from a small one.
 	LargestShardSeries  uint32 `json:"largest_shard_series"`
 	SmallestShardSeries uint32 `json:"smallest_shard_series"`
+	// PlansInGroup is how many Plans the Query Group whose bytes were read
+	// carries. One means the peak is this Plan's; more means it was shared
+	// out among them, and the estimate is that much softer.
+	PlansInGroup int `json:"plans_in_group"`
 	// DryRun is true while the planner only reports. It is on the line rather
 	// than implied by the build, because the line is the only place a reader
 	// can tell a plan that was acted on from one that was not.

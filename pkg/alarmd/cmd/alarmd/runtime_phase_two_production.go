@@ -1346,6 +1346,11 @@ type productionPhaseTwoOwnershipDependencies struct {
 	// (decision-020 section 5.7). Nil is a runtime that judges nothing and
 	// reports every ready Worker as not judged.
 	Costs *scheduler.CostLedger
+	// SplitCensus reads what the split dry run needs about an object over its
+	// share: the Plans it carries and the census each has (decision-020
+	// section 4.7.4). Nil is a runtime that works out no splits, which is
+	// every round of a deployment that has not turned the reading on.
+	SplitCensus splitCensusSource
 }
 
 type productionPhaseTwoOwnership struct {
@@ -1589,6 +1594,10 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	if err != nil {
 		return err
 	}
+	// What a split would be for whatever is still over its share once this
+	// round's moves are in. Reported and not acted on; it reads Plans and
+	// censuses for the few objects the trigger names and writes nothing.
+	runtime.dryRunSplits(ctx, owners, workers, readings, at)
 	// The ledger keeps what the round's final owners agree with; a Query
 	// Group that moved has no reading until its new holder reports it.
 	runtime.dependencies.Costs.Retain(owners)

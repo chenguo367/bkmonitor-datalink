@@ -1,0 +1,229 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2025 Tencent. All rights reserved.
+// Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://opensource.org/licenses/MIT
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+// an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+
+package main
+
+import (
+	"context"
+	"sort"
+	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
+)
+
+// splitDryRunMaxObjects bounds how many objects one round works out a split
+// for.
+//
+// The trigger should name one or two (decision-020 section 4.7.3.1). A round
+// that finds fifty is a round where something else is wrong - a fleet whose
+// pools were all reported as tiny, a ledger carrying stale peaks - and the
+// answer to that is not to read fifty objects' Plans and censuses. What is
+// left out is counted rather than dropped in silence.
+const splitDryRunMaxObjects = 8
+
+// splitCensusSource is what the dry run needs beyond the readings the round
+// already has: which Plans an object carries, and the census each has.
+//
+// Two methods rather than one because they are two different reads with two
+// different failure modes - the catalog's object, and the Plan's own census -
+// and a round that cannot do the first has nothing to ask the second.
+type splitCensusSource interface {
+	// SplitCandidatePlans is the Plans one Query Group carries, each with the
+	// state generation its census is keyed by.
+	SplitCandidatePlans(context.Context, execution.QueryGroupIdentity) ([]execution.PlanCensusIdentity, error)
+	// ReadCensus is one Plan's dimension census; false is a Plan nobody has
+	// taken one of, which is a decision the planner makes rather than an
+	// error.
+	ReadCensus(context.Context, execution.PlanCensusIdentity) (execution.DimensionCensus, bool, error)
+}
+
+// dryRunSplits works out what splitting each over-share object would look
+// like, and reports it. Nothing is published and nothing is written: this is
+// the reading that has to be trusted before a split is acted on, taken on the
+// objects a split would actually be taken on.
+//
+// Run after the byte moves rather than before: an object over its share on a
+// Worker that just gave something away may not be over it any more, and the
+// round's final owners are what the next round will judge. Working from the
+// pre-move owners would plan splits for objects the round had already fixed
+// by moving them.
+func (runtime *productionPhaseTwoOwnership) dryRunSplits(
+	ctx context.Context,
+	owners map[execution.QueryGroupIdentity]string,
+	workers []ownership.WorkerRegistration,
+	readings scheduler.ByteReadings,
+	at time.Time,
+) {
+	source := runtime.dependencies.SplitCensus
+	if source == nil {
+		return
+	}
+	candidates, overflow := splitCandidates(owners, workers, readings)
+	for _, candidate := range candidates {
+		runtime.dryRunSplit(ctx, source, candidate, at.Unix())
+	}
+	if overflow > 0 {
+		runtime.observeSplitOverflow(ctx, overflow)
+	}
+}
+
+// splitCandidate is one object the byte readings put over the share a single
+// object may hold, with the two numbers that put it there.
+type splitCandidate struct {
+	QueryGroup execution.QueryGroupIdentity
+	PeakBytes  uint64
+	ShareBytes uint64
+}
+
+// splitCandidates is every object over its share, heaviest first, bounded.
+//
+// The share is the holder's pool halved - the same number the Worker refuses a
+// Slot by, and the same one it judges a census candidate by. An object whose
+// holder reported no pool is not judged: an unknown pool is not a large one.
+func splitCandidates(
+	owners map[execution.QueryGroupIdentity]string,
+	workers []ownership.WorkerRegistration,
+	readings scheduler.ByteReadings,
+) ([]splitCandidate, int) {
+	pools := make(map[string]uint64, len(workers))
+	for _, worker := range workers {
+		if worker.Load != nil && worker.Load.RetainedPoolBytes > 0 {
+			pools[worker.WorkerID] = worker.Load.RetainedPoolBytes
+		}
+	}
+	candidates := make([]splitCandidate, 0, len(owners))
+	for queryGroup, owner := range owners {
+		peak, known := readings.Peak[queryGroup]
+		if !known || peak == 0 {
+			continue
+		}
+		pool, reported := pools[owner]
+		if !reported {
+			continue
+		}
+		share := pool / 2
+		if share == 0 || peak <= share {
+			continue
+		}
+		candidates = append(candidates, splitCandidate{QueryGroup: queryGroup, PeakBytes: peak, ShareBytes: share})
+	}
+	// Heaviest first, then by name: the bound below cuts the tail, so which
+	// objects survive it must be the worst ones and must not depend on map
+	// order.
+	sort.Slice(candidates, func(left, right int) bool {
+		if candidates[left].PeakBytes != candidates[right].PeakBytes {
+			return candidates[left].PeakBytes > candidates[right].PeakBytes
+		}
+		return candidates[left].QueryGroup < candidates[right].QueryGroup
+	})
+	if len(candidates) > splitDryRunMaxObjects {
+		return candidates[:splitDryRunMaxObjects], len(candidates) - splitDryRunMaxObjects
+	}
+	return candidates, 0
+}
+
+// dryRunSplit reads one object's Plans and censuses and reports what a split
+// would be for each.
+func (runtime *productionPhaseTwoOwnership) dryRunSplit(
+	ctx context.Context, source splitCensusSource, candidate splitCandidate, at int64,
+) {
+	plans, err := source.SplitCandidatePlans(ctx, candidate.QueryGroup)
+	if err != nil || len(plans) == 0 {
+		// An object whose Plans this round could not read is not an object
+		// with no Plans. Reported as a reading that is missing, under the
+		// Query Group, because that is all this round knows about it.
+		runtime.observeSplitPlan(ctx, candidate.QueryGroup, observability.SplitPlanFacts{
+			Outcome: observability.SplitOutcomeNoReading, DryRun: true,
+			PeakBytes: candidate.PeakBytes, ShareBytes: candidate.ShareBytes,
+		}, err)
+		return
+	}
+	censuses := make([]execution.DimensionCensus, len(plans))
+	read := make([]bool, len(plans))
+	var counted uint64
+	for index, plan := range plans {
+		census, found, err := source.ReadCensus(ctx, plan)
+		if err != nil {
+			continue
+		}
+		censuses[index], read[index] = census, found
+		if found {
+			counted += uint64(census.Series)
+		}
+	}
+	for index, plan := range plans {
+		input := controlplane.SplitInput{
+			Plan: plan.Plan, ShareBytes: candidate.ShareBytes, At: at,
+			Census: censuses[index], CensusRead: read[index],
+			PeakBytes: attributedPeakBytes(candidate.PeakBytes, censuses[index], read[index], counted, len(plans)),
+		}
+		_, facts := controlplane.PlanSplit(input)
+		facts.PlansInGroup = len(plans)
+		runtime.observeSplitPlan(ctx, candidate.QueryGroup, facts, nil)
+	}
+}
+
+// attributedPeakBytes is how much of the Query Group's bytes this Plan is
+// answerable for.
+//
+// A Query Group carrying one Plan is the ordinary case and the whole of the
+// peak is that Plan's. A Query Group carrying several has one byte figure for
+// all of them, and the only reading that says how they divide is how many
+// series each was counted with - so the peak is split in that proportion. It
+// is an estimate; PlansInGroup on the line is what says how much of one, and a
+// Plan with no census in a group of several gets nothing rather than a guess,
+// which the planner then answers as NO_CENSUS.
+func attributedPeakBytes(
+	peak uint64, census execution.DimensionCensus, read bool, counted uint64, plans int,
+) uint64 {
+	if plans == 1 {
+		return peak
+	}
+	if !read || counted == 0 || census.Series == 0 {
+		return 0
+	}
+	return peak / counted * uint64(census.Series)
+}
+
+func (runtime *productionPhaseTwoOwnership) observeSplitPlan(
+	ctx context.Context, queryGroup execution.QueryGroupIdentity, facts observability.SplitPlanFacts, err error,
+) {
+	result, reason := observability.ResultSuccess, observability.ReasonNone
+	if err != nil {
+		result, reason = observability.ResultDegraded, observability.ReasonInternalUnknown
+	}
+	observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentControlPlane, Stage: observability.StageSplitPlanned,
+		Result: observability.Result(result), Direction: observability.DirectionInternal,
+		ReasonCode: reason, Err: err,
+		Trace: observability.TraceFields{
+			QueryGroupKey: string(queryGroup), StrategyID: facts.StrategyID, BusinessID: facts.BusinessID,
+		},
+		SplitPlan: &facts,
+	})
+}
+
+// observeSplitOverflow says how many over-share objects this round did not
+// work a split out for. Non-zero is not a split problem: it is a round where
+// far more objects are over their share than a split trigger should ever
+// name, and the readings to look at are the pools and the peaks.
+func (runtime *productionPhaseTwoOwnership) observeSplitOverflow(ctx context.Context, overflow int) {
+	observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
+		Component: observability.ComponentControlPlane, Stage: observability.StageSplitPlanned,
+		Result: observability.ResultDegraded, Direction: observability.DirectionInternal,
+		ReasonCode: observability.ReasonCode(observability.ReasonInternalUnknown),
+		SplitPlan: &observability.SplitPlanFacts{
+			Outcome: observability.SplitOutcomeNoReading, DryRun: true, PlansInGroup: overflow,
+		},
+	})
+}

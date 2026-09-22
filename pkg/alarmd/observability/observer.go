@@ -177,6 +177,11 @@ const (
 	// signal: not the write family, which is correctly silent for such a Plan,
 	// and not the memory itself, which reads fine right up until it is gone.
 	StageNoDataMemoryRenewed = "no_data_memory_renewed"
+	// StageSplitPlanned is the Leader deciding what splitting one object
+	// would look like, or why it cannot be split. A dry run for now: the
+	// stage exists so the decision can be read on the objects it would
+	// actually be taken on, before anything acts on it.
+	StageSplitPlanned = "split_planned"
 	// StageDimensionCensus is a Slot leaving one candidate Plan's dimension
 	// census behind (decision-020 section 4.7.3): what its series look like
 	// along each dimension, which is what a split is planned from.
@@ -2306,6 +2311,9 @@ type Observation struct {
 	// worst Level - so a Level suppressed by its effective time or held by a
 	// warming window had no name on the line unless it was that word.
 	LevelOutcomes []LevelOutcomeFact
+	// SplitPlan is one object's split decision as the Leader's dry run
+	// reached it.
+	SplitPlan *SplitPlanFacts
 	// DimensionCensus is one candidate Plan's census as this Slot wrote it.
 	DimensionCensus    *DimensionCensusFacts
 	ControlSourceRound *ControlSourceRoundFacts
@@ -2395,6 +2403,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.QueryUnavailable = normalizeQueryUnavailable(observation.Component, observation.Stage, observation.QueryUnavailable)
 	observation.SlotReadiness = normalizeSlotReadiness(observation.SlotReadiness)
 	observation.DimensionCensus = normalizeDimensionCensusFacts(observation.DimensionCensus)
+	observation.SplitPlan = normalizeSplitPlanFacts(observation.SplitPlan)
 	if observation.RuntimeConfig != nil {
 		if observation.Component != ComponentRuntime || observation.Stage != StageConfigLoaded {
 			observation.RuntimeConfig = nil
@@ -3356,6 +3365,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentProgress, StageExecutionEvidenceWritten},
 	{ComponentState, StageNoDataMemoryRead},
 	{ComponentState, StageDimensionCensus},
+	{ComponentControlPlane, StageSplitPlanned},
 	{ComponentState, StageNoDataMemoryRenewed},
 	{ComponentState, StageFrozenStateRenewed},
 	{ComponentState, StageNoDataMemoryRefused},

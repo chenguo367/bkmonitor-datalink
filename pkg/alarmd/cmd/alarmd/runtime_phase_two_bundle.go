@@ -857,6 +857,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		ReconcileInterval:         cfg.PhaseTwo.Control.ReconcileInterval.Duration(),
 		ContentScopes:             currentContentScopes(repository),
 		ViewStream:                viewServer, ViewSource: repository, Costs: costs,
+		SplitCensus: newCatalogSplitCensusSource(repository, repository, executionStore),
 	})
 	if err != nil {
 		return nil, err
