@@ -358,6 +358,12 @@ type queryGroupState struct {
 	// because a shortfall left over from an earlier round would be read as
 	// describing the reason currently on display.
 	coverage *HistoryCoverage
+	// coverageRejected is what stands where coverage would when the round's
+	// coverage facts did not pass the observer: the rule they broke. Kept
+	// and cleared exactly as coverage is, so the row always says one of
+	// three things -- the windows, "the server refused the reading", or
+	// nothing because the round reported no coverage.
+	coverageRejected *CoverageRejected
 	// shortRounds counts consecutive rounds whose windows were short. It is
 	// the one part of the coverage a single observation cannot carry, and the
 	// only part that separates a window that is filling from one that never
@@ -1292,6 +1298,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.worstWindow = worstWindow
 		hadCoverage := state.coverage != nil
 		state.coverage = nil
+		state.coverageRejected = nil
+		if rejected := observation.HistoryCoverageRejected; rejected != nil {
+			state.coverageRejected = &CoverageRejected{Rule: string(rejected.Rule), Series: rejected.Series}
+		}
 		if facts := observation.HistoryCoverage; facts != nil {
 			state.coverage = &HistoryCoverage{
 				Levels: facts.Levels, Short: facts.Short, Empty: facts.Empty,
@@ -1424,6 +1434,7 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.cause = ""
 	state.causeReason = ""
 	state.coverage = nil
+	state.coverageRejected = nil
 	state.shortRounds = 0
 	state.emptyRounds = 0
 	state.heldFullRounds = 0
@@ -1581,21 +1592,22 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 		DemotedSince:  state.demotedSince,
 		Kind:          state.currentKind,
 		ReasonCode:    state.reasonCode, Cause: state.cause, CauseReason: state.causeReason,
-		Coverage:      state.coverage,
-		Since:         state.runStartedAt,
-		SinceFrom:     state.sinceFrom,
-		FailingSince:  state.failingSince,
-		ReasonSince:   state.reasonSince,
-		ReasonLastAt:  state.reasonLastAt,
-		RoundSlot:     state.lastRoundSlot,
-		Consecutive:   state.reasonRuns,
-		Replica:       tracker.replica,
-		Failure:       state.lastFailure,
-		Internal:      state.internal,
-		LastError:     state.lastError,
-		LastHealthyAt: state.lastHealthyAt,
-		ConfigChanged: state.configChanged,
-		Restored:      state.restoredRound,
+		Coverage:         state.coverage,
+		CoverageRejected: state.coverageRejected,
+		Since:            state.runStartedAt,
+		SinceFrom:        state.sinceFrom,
+		FailingSince:     state.failingSince,
+		ReasonSince:      state.reasonSince,
+		ReasonLastAt:     state.reasonLastAt,
+		RoundSlot:        state.lastRoundSlot,
+		Consecutive:      state.reasonRuns,
+		Replica:          tracker.replica,
+		Failure:          state.lastFailure,
+		Internal:         state.internal,
+		LastError:        state.lastError,
+		LastHealthyAt:    state.lastHealthyAt,
+		ConfigChanged:    state.configChanged,
+		Restored:         state.restoredRound,
 	}
 	anomaly.Guards, anomaly.GuardsTotal = worstGuards(state.guards)
 	// The guard's Plan's input beside the guard: the number that says

@@ -144,15 +144,75 @@ func (facts HistoryCoverageFacts) Shortfall() uint32 {
 	return facts.WorstRequired - facts.WorstValid
 }
 
-func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) *HistoryCoverageFacts {
+// CoverageRejectionRule names one reason normalize refused a coverage fact
+// set. Each is one inequality or one shape the evaluator's own count cannot
+// produce; the list is closed so that each has a counter and a word.
+type CoverageRejectionRule string
+
+const (
+	CoverageRejectLevelsZero             CoverageRejectionRule = "LEVELS_ZERO"
+	CoverageRejectShortOverLevels        CoverageRejectionRule = "SHORT_OVER_LEVELS"
+	CoverageRejectEmptyOverShort         CoverageRejectionRule = "EMPTY_OVER_SHORT"
+	CoverageRejectGuardedOverLevels      CoverageRejectionRule = "GUARDED_OVER_LEVELS"
+	CoverageRejectFreshOverLevels        CoverageRejectionRule = "FRESH_OVER_LEVELS"
+	CoverageRejectShortFreshOverShort    CoverageRejectionRule = "SHORT_FRESH_OVER_SHORT"
+	CoverageRejectShortFreshOverFresh    CoverageRejectionRule = "SHORT_FRESH_OVER_FRESH"
+	CoverageRejectUnusableOverLevels     CoverageRejectionRule = "UNUSABLE_OVER_LEVELS"
+	CoverageRejectUnusableReasonUnpaired CoverageRejectionRule = "UNUSABLE_REASON_UNPAIRED"
+	CoverageRejectEmptyWithValidPoints   CoverageRejectionRule = "EMPTY_WITH_VALID_POINTS"
+	CoverageRejectWindowsOverShort       CoverageRejectionRule = "WINDOWS_OVER_SHORT"
+	CoverageRejectWindowsOverBound       CoverageRejectionRule = "WINDOWS_OVER_BOUND"
+	CoverageRejectWindowUnnamed          CoverageRejectionRule = "WINDOW_UNNAMED"
+	CoverageRejectWindowRequiredZero     CoverageRejectionRule = "WINDOW_REQUIRED_ZERO"
+	CoverageRejectWindowNotShort         CoverageRejectionRule = "WINDOW_NOT_SHORT"
+	CoverageRejectWindowHoleArithmetic   CoverageRejectionRule = "WINDOW_HOLE_ARITHMETIC"
+	CoverageRejectWindowHoleListOverrun  CoverageRejectionRule = "WINDOW_HOLE_LIST_OVERRUN"
+	CoverageRejectWindowGuardReasonFree  CoverageRejectionRule = "WINDOW_GUARD_REASON_UNGUARDED"
+)
+
+// CoverageRejectionRules is the closed list, in the order normalize checks.
+var CoverageRejectionRules = []CoverageRejectionRule{
+	CoverageRejectLevelsZero, CoverageRejectShortOverLevels, CoverageRejectEmptyOverShort, CoverageRejectGuardedOverLevels,
+	CoverageRejectFreshOverLevels, CoverageRejectShortFreshOverShort, CoverageRejectShortFreshOverFresh, CoverageRejectUnusableOverLevels,
+	CoverageRejectUnusableReasonUnpaired, CoverageRejectEmptyWithValidPoints, CoverageRejectWindowsOverShort, CoverageRejectWindowsOverBound,
+	CoverageRejectWindowUnnamed, CoverageRejectWindowRequiredZero, CoverageRejectWindowNotShort, CoverageRejectWindowHoleArithmetic,
+	CoverageRejectWindowHoleListOverrun, CoverageRejectWindowGuardReasonFree,
+}
+
+// CoverageRejection is what is left of a coverage fact set normalize refused:
+// the one rule it broke and, for a rule about one window, that window's
+// series. Nothing the rule judged untrustworthy travels with it -- not the
+// counts, not the pair -- so a reader cannot pick a number out of the shell
+// and judge by it. It exists because a refused fact set used to leave
+// nothing at all: the row's coverage was simply absent, which on the page is
+// the same shape as every window complete. A reading the server itself
+// declared incoherent has to say so where the reading would have been.
+type CoverageRejection struct {
+	Rule   CoverageRejectionRule `json:"rule"`
+	Series string                `json:"series,omitempty"`
+}
+
+func rejectCoverage(rule CoverageRejectionRule) (*HistoryCoverageFacts, *CoverageRejection) {
+	return nil, &CoverageRejection{Rule: rule}
+}
+
+func rejectWindow(rule CoverageRejectionRule, window HistoryWindowFact) (*HistoryCoverageFacts, *CoverageRejection) {
+	return nil, &CoverageRejection{Rule: rule, Series: window.Series}
+}
+
+// normalizeHistoryCoverageFacts returns the facts it accepts, or nil and the
+// rule under which it refused them. Nil facts in give nil and no rejection:
+// a run that reported no coverage is not a run whose coverage was refused.
+func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) (*HistoryCoverageFacts, *CoverageRejection) {
 	if facts == nil {
-		return nil
+		return nil, nil
 	}
 	copied := *facts
 	// A Short above Levels cannot have come from counting the same windows,
 	// so the pair is not describing one run and nothing derived from it can be
 	// trusted. Clamping would keep a plausible-looking number; dropping the
-	// facts leaves the absence visible.
+	// facts leaves the absence visible -- and, since the rules were named,
+	// leaves the rule in its place.
 	// Guarded is counted over the same windows as Levels, short or not, so it
 	// cannot exceed them either. Checked here with the rest rather than clamped:
 	// a count that could not have come from these windows makes every number
@@ -164,16 +224,28 @@ func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) *HistoryCoverage
 	// same reason as the rest: this is the count a reader uses to decide whether
 	// a strategy's dimensions are at fault, and a clamped one would still look
 	// like an answer.
-	if copied.Levels == 0 || copied.Short > copied.Levels || copied.Empty > copied.Short ||
-		copied.Guarded > copied.Levels || copied.Fresh > copied.Levels ||
-		copied.ShortFresh > copied.Short || copied.ShortFresh > copied.Fresh ||
-		copied.Unusable > copied.Levels {
-		return nil
+	switch {
+	case copied.Levels == 0:
+		return rejectCoverage(CoverageRejectLevelsZero)
+	case copied.Short > copied.Levels:
+		return rejectCoverage(CoverageRejectShortOverLevels)
+	case copied.Empty > copied.Short:
+		return rejectCoverage(CoverageRejectEmptyOverShort)
+	case copied.Guarded > copied.Levels:
+		return rejectCoverage(CoverageRejectGuardedOverLevels)
+	case copied.Fresh > copied.Levels:
+		return rejectCoverage(CoverageRejectFreshOverLevels)
+	case copied.ShortFresh > copied.Short:
+		return rejectCoverage(CoverageRejectShortFreshOverShort)
+	case copied.ShortFresh > copied.Fresh:
+		return rejectCoverage(CoverageRejectShortFreshOverFresh)
+	case copied.Unusable > copied.Levels:
+		return rejectCoverage(CoverageRejectUnusableOverLevels)
 	}
 	// A reason with no unusable Level, or unusable Levels with no reason, did
 	// not come from the evaluator: it records the first reason as it counts.
 	if (copied.Unusable == 0) != (copied.UnusableReason == "") {
-		return nil
+		return rejectCoverage(CoverageRejectUnusableReasonUnpaired)
 	}
 	if copied.Short == 0 {
 		copied.WorstValid, copied.WorstRequired, copied.Empty = 0, 0, 0
@@ -182,7 +254,7 @@ func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) *HistoryCoverage
 	// A pair saying otherwise did not come from counting the same windows, so
 	// the count is not describing this run.
 	if copied.Empty > 0 && copied.WorstValid != 0 {
-		return nil
+		return rejectCoverage(CoverageRejectEmptyWithValidPoints)
 	}
 	if copied.WorstValid >= copied.WorstRequired {
 		// Nothing was actually short in the pair, whatever Short says. Keeping
@@ -195,17 +267,28 @@ func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) *HistoryCoverage
 	// that breaks any of these did not come from walking these windows, and
 	// the same rule as above applies -- the whole facts go, not the list,
 	// because the pair and the names claim to describe the same window.
-	if uint32(len(copied.Windows)) > copied.Short || len(copied.Windows) > MaxHistoryWindows {
-		return nil
+	if uint32(len(copied.Windows)) > copied.Short {
+		return rejectCoverage(CoverageRejectWindowsOverShort)
+	}
+	if len(copied.Windows) > MaxHistoryWindows {
+		return rejectCoverage(CoverageRejectWindowsOverBound)
 	}
 	windows := make([]HistoryWindowFact, 0, len(copied.Windows))
 	for _, window := range copied.Windows {
-		if window.Series == "" || window.Required == 0 || window.Valid >= window.Required ||
-			window.MissingTotal+window.UnusableTotal != window.Required-window.Valid ||
-			uint32(len(window.Missing)) > window.MissingTotal || uint32(len(window.Unusable)) > window.UnusableTotal ||
-			len(window.Missing) > MaxHistoryWindowHoles || len(window.Unusable) > MaxHistoryWindowHoles ||
-			(window.GuardReason != "" && !window.Guarded) {
-			return nil
+		switch {
+		case window.Series == "":
+			return rejectWindow(CoverageRejectWindowUnnamed, window)
+		case window.Required == 0:
+			return rejectWindow(CoverageRejectWindowRequiredZero, window)
+		case window.Valid >= window.Required:
+			return rejectWindow(CoverageRejectWindowNotShort, window)
+		case window.MissingTotal+window.UnusableTotal != window.Required-window.Valid:
+			return rejectWindow(CoverageRejectWindowHoleArithmetic, window)
+		case uint32(len(window.Missing)) > window.MissingTotal || uint32(len(window.Unusable)) > window.UnusableTotal ||
+			len(window.Missing) > MaxHistoryWindowHoles || len(window.Unusable) > MaxHistoryWindowHoles:
+			return rejectWindow(CoverageRejectWindowHoleListOverrun, window)
+		case window.GuardReason != "" && !window.Guarded:
+			return rejectWindow(CoverageRejectWindowGuardReasonFree, window)
 		}
 		window.Missing = append([]int64(nil), window.Missing...)
 		window.Unusable = append([]int64(nil), window.Unusable...)
@@ -215,5 +298,5 @@ func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) *HistoryCoverage
 	if len(copied.Windows) == 0 {
 		copied.Windows = nil
 	}
-	return &copied
+	return &copied, nil
 }
