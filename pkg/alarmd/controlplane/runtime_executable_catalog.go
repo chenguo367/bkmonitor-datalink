@@ -128,10 +128,7 @@ func retainRuntimeExecutableCatalog(
 				return Catalog{}, err
 			}
 			if terminal := compiledResult.PlanTerminal(); terminal != nil {
-				disposition, err := terminalDisposition(sourcePlan.Identity.StrategyID, "PLAN", *terminal)
-				if err != nil {
-					return Catalog{}, err
-				}
+				disposition := terminalDisposition(sourcePlan.Identity.StrategyID, "PLAN", *terminal)
 				result.Dispositions = withoutAcceptedPlanDisposition(result.Dispositions, sourcePlan.Identity.StrategyID)
 				if disposition.Disposition == DispositionConfigRejected {
 					if entry, ok := lastGoodPlans[sourcePlan.Identity.StrategyID]; ok {
@@ -167,10 +164,7 @@ func retainRuntimeExecutableCatalog(
 			terminalDispositions := make([]ObjectDisposition, 0, len(levelTerminals))
 			hasConfigRejected := false
 			for _, terminal := range levelTerminals {
-				disposition, err := terminalDisposition(sourcePlan.Identity.StrategyID, "LEVEL", terminal)
-				if err != nil {
-					return Catalog{}, err
-				}
+				disposition := terminalDisposition(sourcePlan.Identity.StrategyID, "LEVEL", terminal)
 				terminalDispositions = append(terminalDispositions, disposition)
 				hasConfigRejected = hasConfigRejected || disposition.Disposition == DispositionConfigRejected
 			}
@@ -525,11 +519,7 @@ func runtimeRequirementTemplate(requirement strategy.AlgorithmInputRequirement) 
 
 func compileResultDispositions(sourceID string, result strategy.CompileResult) ([]ObjectDisposition, error) {
 	if terminal := result.PlanTerminal(); terminal != nil {
-		disposition, err := terminalDisposition(sourceID, "PLAN", *terminal)
-		if err != nil {
-			return nil, err
-		}
-		return []ObjectDisposition{disposition}, nil
+		return []ObjectDisposition{terminalDisposition(sourceID, "PLAN", *terminal)}, nil
 	}
 	terminals := result.LevelTerminals()
 	if len(terminals) == 0 {
@@ -537,11 +527,7 @@ func compileResultDispositions(sourceID string, result strategy.CompileResult) (
 	}
 	dispositions := make([]ObjectDisposition, 0, len(terminals))
 	for _, terminal := range terminals {
-		disposition, err := terminalDisposition(sourceID, "LEVEL", terminal)
-		if err != nil {
-			return nil, err
-		}
-		dispositions = append(dispositions, disposition)
+		dispositions = append(dispositions, terminalDisposition(sourceID, "LEVEL", terminal))
 	}
 	return dispositions, nil
 }
@@ -593,22 +579,52 @@ func refreshQueryGroupDigests(group *QueryGroup) error {
 // ok is false for a code the compiler does not produce as a terminal.
 func CompilerTerminalDisposition(reasonCode string) (Disposition, bool) {
 	switch reasonCode {
-	case contract.ReasonAlgorithmUnsupported, contract.ReasonPlanBudgetExceeded, contract.ReasonLevelBudgetExceeded:
+	case contract.ReasonAlgorithmUnsupported, contract.ReasonPlanBudgetExceeded, contract.ReasonLevelBudgetExceeded,
+		strategy.ReasonEffectiveTimeSchemaUnsupported:
 		return DispositionUnsupported, true
-	case contract.ReasonPlanInvalid, contract.ReasonPlanDuplicateLevelID, contract.ReasonProjectionInvalid, contract.ReasonLevelInvalid:
+	case contract.ReasonPlanInvalid, contract.ReasonPlanDuplicateLevelID, contract.ReasonProjectionInvalid, contract.ReasonLevelInvalid,
+		contract.ReasonNoDataConfigInvalid,
+		strategy.ReasonEffectiveTimeInvalid, strategy.ReasonEffectiveTimeSnapshotInvalid,
+		strategy.ReasonEffectiveTimeSnapshotStatusInvalid, strategy.ReasonEffectiveTimeCalendarIdentity,
+		strategy.ReasonEffectiveTimeCalendarDuplicate, strategy.ReasonEffectiveTimeCalendarItemsMissing:
 		return DispositionConfigRejected, true
+	case strategy.ReasonEffectiveTimeSnapshotUnavailable, strategy.ReasonEffectiveTimeCalendarsMissing,
+		strategy.ReasonEffectiveTimeCalendarNotPresent, strategy.ReasonEffectiveTimeCalendarMissing:
+		// The strategy names a calendar the snapshot did not carry, or the
+		// snapshot did not arrive. The definition is not wrong and this build
+		// is not lacking anything: what is missing is a piece of the source,
+		// which is the one disposition that says so.
+		return DispositionSourceIncomplete, true
 	default:
 		return "", false
 	}
 }
 
-func terminalDisposition(sourceID, scope string, terminal strategy.Terminal) (ObjectDisposition, error) {
+// ReasonCompilerTerminalUnclassified files a terminal this build's table has no
+// entry for. It carries the compiler's own reason code and field path so the
+// strategy can still be named, which is the half that mattered: the code this
+// replaces failed the whole refresh and dropped all three.
+const ReasonCompilerTerminalUnclassified = contract.ReasonCompilerTerminalUnclassified
+
+func terminalDisposition(sourceID, scope string, terminal strategy.Terminal) ObjectDisposition {
 	disposition, known := CompilerTerminalDisposition(terminal.ReasonCode)
 	if !known {
-		return ObjectDisposition{}, errors.New("alarmd controlplane: runtime compiler returned an unclassified terminal reason")
+		// One strategy's compile refusal is one strategy's refusal. Failing
+		// the round here is what a live deployment met: a reason the compiler
+		// had gained and the table had not took every config refresh with it,
+		// fifty-three rounds with none published, every strategy left on a
+		// catalog from before - and the error carried neither the strategy nor
+		// the reason, so nothing could say which definition to look at.
+		//
+		// The unknown code travels in the detail rather than the disposition,
+		// because a code this build cannot classify is exactly the one a
+		// reader needs to see verbatim.
+		return ObjectDisposition{SourceID: sourceID, Scope: scope, LevelID: terminal.LevelID,
+			Disposition: DispositionConfigRejected, Reason: ReasonCompilerTerminalUnclassified,
+			FieldPath: terminal.FieldPath, Detail: dispositionDetail(terminal.ReasonCode)}
 	}
 	return ObjectDisposition{SourceID: sourceID, Scope: scope, LevelID: terminal.LevelID,
-		Disposition: disposition, Reason: terminal.ReasonCode, FieldPath: terminal.FieldPath}, nil
+		Disposition: disposition, Reason: terminal.ReasonCode, FieldPath: terminal.FieldPath}
 }
 
 func withoutAcceptedPlanDisposition(dispositions []ObjectDisposition, sourceID string) []ObjectDisposition {

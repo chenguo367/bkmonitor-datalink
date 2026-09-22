@@ -48,6 +48,32 @@ const (
 	ReasonPlanDuplicateLevelID       = "PLAN_DUPLICATE_LEVEL_ID"
 	ReasonPlanBudgetExceeded         = "PLAN_BUDGET_EXCEEDED"
 	ReasonNoDataConfigInvalid        = "NO_DATA_CONFIG_INVALID"
+	// The reasons a Plan's effective time refuses to compile. They are
+	// declared here, with every other code a reader can meet, because a code
+	// that exists only as a literal inside the compiler is one nothing
+	// downstream can be written against: the catalog classifies a terminal by
+	// its code, and the first of these to reach a deployment took every config
+	// refresh with it.
+	//
+	// EFFECTIVE_TIME_INVALID is the definition's own window. The SNAPSHOT_ and
+	// CALENDAR_ ones are about the snapshot the source hands over: whether it
+	// arrived, whether this build can read it, and whether it carries the
+	// calendars the definition names.
+	ReasonEffectiveTimeInvalid               = "EFFECTIVE_TIME_INVALID"
+	ReasonEffectiveTimeSnapshotInvalid       = "EFFECTIVE_TIME_SNAPSHOT_INVALID"
+	ReasonEffectiveTimeSnapshotStatusInvalid = "EFFECTIVE_TIME_SNAPSHOT_STATUS_INVALID"
+	ReasonEffectiveTimeSnapshotUnavailable   = "EFFECTIVE_TIME_SNAPSHOT_UNAVAILABLE"
+	ReasonEffectiveTimeSchemaUnsupported     = "EFFECTIVE_TIME_SCHEMA_UNSUPPORTED"
+	ReasonEffectiveTimeCalendarsMissing      = "EFFECTIVE_TIME_CALENDARS_MISSING"
+	ReasonEffectiveTimeCalendarMissing       = "EFFECTIVE_TIME_CALENDAR_MISSING"
+	ReasonEffectiveTimeCalendarNotPresent    = "EFFECTIVE_TIME_CALENDAR_NOT_PRESENT"
+	ReasonEffectiveTimeCalendarIdentity      = "EFFECTIVE_TIME_CALENDAR_IDENTITY_INVALID"
+	ReasonEffectiveTimeCalendarDuplicate     = "EFFECTIVE_TIME_CALENDAR_DUPLICATE"
+	ReasonEffectiveTimeCalendarItemsMissing  = "EFFECTIVE_TIME_CALENDAR_ITEMS_MISSING"
+	// ReasonCompilerTerminalUnclassified files a compiler terminal this build
+	// has no classification for. It is declared here so the tables that walk
+	// the catalogue can see it; the compiler's own code travels beside it.
+	ReasonCompilerTerminalUnclassified = "COMPILER_TERMINAL_UNCLASSIFIED"
 	// ReasonNoDataRosterUnsupported names an item whose target shape this
 	// build cannot turn into an expected set. Like the one above it, it
 	// suspends that Plan's no-data detection and nothing else: the strategy's

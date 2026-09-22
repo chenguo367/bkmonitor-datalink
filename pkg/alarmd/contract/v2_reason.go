@@ -62,6 +62,22 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	ReasonPlanDuplicateLevelID: {ReasonPlanDuplicateLevelID, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonPlanBudgetExceeded:   {ReasonPlanBudgetExceeded, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	ReasonNoDataConfigInvalid:  {ReasonNoDataConfigInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	// Deterministic, every one of them: the definition and the snapshot it is
+	// compiled against are both frozen for the round, so the next attempt on
+	// the same pair reaches the same answer. A snapshot that arrives later
+	// makes a different pair, not a different verdict on this one.
+	ReasonEffectiveTimeInvalid:               {ReasonEffectiveTimeInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeSnapshotInvalid:       {ReasonEffectiveTimeSnapshotInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeSnapshotStatusInvalid: {ReasonEffectiveTimeSnapshotStatusInvalid, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeSnapshotUnavailable:   {ReasonEffectiveTimeSnapshotUnavailable, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeSchemaUnsupported:     {ReasonEffectiveTimeSchemaUnsupported, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeCalendarsMissing:      {ReasonEffectiveTimeCalendarsMissing, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeCalendarMissing:       {ReasonEffectiveTimeCalendarMissing, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeCalendarNotPresent:    {ReasonEffectiveTimeCalendarNotPresent, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeCalendarIdentity:      {ReasonEffectiveTimeCalendarIdentity, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeCalendarDuplicate:     {ReasonEffectiveTimeCalendarDuplicate, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonEffectiveTimeCalendarItemsMissing:  {ReasonEffectiveTimeCalendarItemsMissing, ReasonClassDeterministic, reasonOutcomeDomainsV2},
+	ReasonCompilerTerminalUnclassified:       {ReasonCompilerTerminalUnclassified, ReasonClassDeterministic, reasonOutcomeDomainsV2},
 	// Deterministic for the same reason: the target's shape and the no-data
 	// dimensions are both frozen, so every round would reach this answer again.
 	ReasonNoDataRosterUnsupported:  {ReasonNoDataRosterUnsupported, ReasonClassDeterministic, reasonOutcomeDomainsV2},
