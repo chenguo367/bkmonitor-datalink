@@ -744,6 +744,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if len(observation.AlgorithmInputs) > 0 {
 		attributes = append(attributes, slog.Any("algorithm_inputs", observation.AlgorithmInputs))
 	}
+	if len(observation.LevelOutcomes) > 0 {
+		attributes = append(attributes, slog.Any("level_outcomes", observation.LevelOutcomes))
+	}
 	if observation.Err != nil {
 		attributes = append(attributes,
 			slog.String("error_type", fmt.Sprintf("%T", observation.Err)),

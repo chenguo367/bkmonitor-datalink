@@ -72,10 +72,19 @@ type maintenanceTestRunner struct {
 	scope    string
 	revision uint64
 	entered  int
+	// enter, when set, is what withMaintenance answers before running
+	// anything: the owner or the view gate refusing the round.
+	enter func() error
 }
 
 func (r *maintenanceTestRunner) withMaintenance(ctx context.Context, run func(context.Context, func(context.Context) error) error) error {
 	r.entered++
+	if r.enter != nil {
+		if err := r.enter(); err != nil {
+			r.lastErr = err
+			return err
+		}
+	}
 	r.lastErr = run(ctx, r.check)
 	return r.lastErr
 }

@@ -9,11 +9,13 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -625,5 +627,35 @@ func TestTheUnawareReplicaGaugeFollowsTheRoundsSplitGate(t *testing.T) {
 	observe(nil)
 	if got := testutil.ToFloat64(recorder.phaseTwo.shardUnawareReadyReplicas); got != 0 {
 		t.Fatalf("shard_unaware_ready_replicas = %v after the roll, want 0", got)
+	}
+}
+
+// Level outcomes reach the counter by kind and, for the kinds that carry a
+// reason, by reason - a coverage reason by name, any other as other, so the
+// label set stays the closed list the metric pre-creates.
+func TestLevelOutcomesAreCountedByKindAndCoverageReason(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{})
+	recorder.Observe(context.Background(), observability.Observation{
+		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted, Result: observability.ResultDegraded,
+		Operation: observability.OperationLoad, ReasonCode: observability.ReasonCode(contract.ReasonEffectiveTimeInactive),
+		LevelOutcomes: []observability.LevelOutcomeFact{
+			{Outcome: "UNKNOWN", Reason: contract.ReasonEffectiveTimeInactive, Count: 2},
+			{Outcome: "TERMINAL", Reason: contract.ReasonStateCorrupt, Count: 1},
+			{Outcome: "ABNORMAL", Count: 3},
+		},
+	})
+	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("UNKNOWN", contract.ReasonEffectiveTimeInactive)); got != 2 {
+		t.Fatalf("UNKNOWN/EFFECTIVE_TIME_INACTIVE = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("TERMINAL", observability.LevelOutcomeReasonOther)); got != 1 {
+		t.Fatalf("TERMINAL/other = %v, want the deterministic reason folded to other", got)
+	}
+	if got := testutil.ToFloat64(recorder.phaseTwo.levelOutcomes.WithLabelValues("ABNORMAL", "")); got != 3 {
+		t.Fatalf("ABNORMAL = %v, want 3", got)
+	}
+	for _, line := range strings.Split(scrape(t, recorder), "\n") {
+		if strings.HasPrefix(line, "bkmonitor_alarmd_level_outcome_total{") && strings.Contains(line, contract.ReasonStateCorrupt) {
+			t.Fatalf("a deterministic reason leaked into the level outcome labels: %s", line)
+		}
 	}
 }

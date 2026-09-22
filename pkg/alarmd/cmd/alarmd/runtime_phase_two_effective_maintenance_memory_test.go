@@ -10,6 +10,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 // The maintenance loop reads a Query Group's Plans from the store once, and
@@ -166,4 +167,37 @@ func TestEveryWayACloseDoesNotHappenIsNamedAndCounted(t *testing.T) {
 			t.Fatalf("stats=%v batches=%d, want two alerts counted on each of two ticks", stats, len(f.writer.batches))
 		}
 	})
+}
+
+// A read the executable view does not allow yet is named as such and tried
+// again next tick; a read the store did not answer stays "unavailable". The
+// first is every owned Query Group once or twice in a replica's first seconds
+// after a rollout; under one word it read as a few hundred store failures per
+// replica per roll, and hid any real one.
+func TestAViewGateRefusalOfAMaintenanceReadIsNamedAndRetried(t *testing.T) {
+	f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(10, 0), nil)
+	catalog := f.m.catalog.(*maintenanceTestCatalog)
+	refusals := 2
+	f.runner.enter = func() error {
+		if refusals > 0 {
+			refusals--
+			return &scheduler.ViewNotExecutableError{Reason: "timeline_stale"}
+		}
+		return nil
+	}
+	f.m.step(context.Background())
+	f.m.step(context.Background())
+	if stats := f.m.Stats(); stats["view_not_executable"] != 2 || stats["unavailable"] != 0 || catalog.reads != 0 {
+		t.Fatalf("stats=%v reads=%d, want two view refusals named as such, no unavailable, no read yet", stats, catalog.reads)
+	}
+	f.m.step(context.Background())
+	if stats := f.m.Stats(); catalog.reads != 1 || stats["view_not_executable"] != 2 {
+		t.Fatalf("after the view allows it the Plans were not read: stats=%v reads=%d", stats, catalog.reads)
+	}
+	f.runner.enter = func() error { return errors.New("store unavailable") }
+	f.runner.revision = 2
+	f.m.step(context.Background())
+	if stats := f.m.Stats(); stats["unavailable"] != 1 {
+		t.Fatalf("a store failure was not counted as unavailable: %v", stats)
+	}
 }

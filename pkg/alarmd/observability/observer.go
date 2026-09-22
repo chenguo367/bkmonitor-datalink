@@ -1922,6 +1922,88 @@ type RecoveryGateFact struct {
 	Records uint64            `json:"records"`
 }
 
+// LevelOutcomeFact is one cell of an evaluation's Level outcomes: the
+// outcome kind, the reason for an UNKNOWN or TERMINAL one (empty for the
+// business outcomes, which carry none), and how many Level outcomes fell in
+// it. LevelOutcomeKinds is the closed list of kinds; the reason is bounded
+// by the observation reason catalog, and one outside it is reported as
+// other so the cell count stays bounded.
+type LevelOutcomeFact struct {
+	Outcome string `json:"outcome"`
+	Reason  string `json:"reason,omitempty"`
+	Count   uint64 `json:"count"`
+}
+
+// LevelOutcomeKinds is every Level outcome kind, in the execution's words.
+var LevelOutcomeKinds = []string{"NORMAL", "ABNORMAL", "RECOVERY", "UNKNOWN", "TERMINAL"}
+
+// LevelOutcomeReasonOther is the reason label for an UNKNOWN or TERMINAL
+// outcome whose reason is not a coverage reason.
+const LevelOutcomeReasonOther = "other"
+
+// LevelOutcomeReasons is every reason an UNKNOWN or TERMINAL Level outcome
+// is counted under by name: the coverage class of the observation catalog -
+// the effective time, a warming or gapped window, a gap guard, a query that
+// answered partially or not at all - and other for every reason outside it.
+// The coverage class is the family a Level that was not judged carries; a
+// deterministic or retryable reason on a TERMINAL outcome is a defect with
+// its own line and is counted as other here rather than leaking every
+// exact code into a label. The metric pre-creates the two outcomes over
+// this list, which bounds it.
+func LevelOutcomeReasons() []string {
+	reasons := make([]string, 0, 1)
+	for _, definition := range contract.ReasonCatalogV2() {
+		if definition.Class == contract.ReasonClassCoverage && definition.Domains.Has(contract.ReasonDomainObservation) {
+			reasons = append(reasons, definition.Code)
+		}
+	}
+	sort.Strings(reasons)
+	return append(reasons, LevelOutcomeReasonOther)
+}
+
+// LevelOutcomeReasonLabel is the metric label for a Level outcome's reason:
+// the reason itself when it is a coverage reason, other otherwise. The log
+// line keeps the exact reason; only the metric is bounded this way.
+func LevelOutcomeReasonLabel(reason string) string {
+	for _, known := range LevelOutcomeReasons() {
+		if known == reason {
+			return reason
+		}
+	}
+	return LevelOutcomeReasonOther
+}
+
+func normalizeLevelOutcomeFacts(observation Observation) []LevelOutcomeFact {
+	if observation.Component != ComponentEvaluation || observation.Stage != StageEvaluationCompleted {
+		return nil
+	}
+	facts := make([]LevelOutcomeFact, 0, len(observation.LevelOutcomes))
+	for _, fact := range observation.LevelOutcomes {
+		if fact.Count == 0 {
+			continue
+		}
+		known := false
+		for _, kind := range LevelOutcomeKinds {
+			known = known || kind == fact.Outcome
+		}
+		if !known {
+			continue
+		}
+		if fact.Outcome == "UNKNOWN" || fact.Outcome == "TERMINAL" {
+			if fact.Reason == "" {
+				fact.Reason = LevelOutcomeReasonOther
+			}
+		} else {
+			fact.Reason = ""
+		}
+		facts = append(facts, fact)
+	}
+	if len(facts) == 0 {
+		return nil
+	}
+	return facts
+}
+
 // OpenAlertGateOutcome is what the second recovery gate, the consumer's
 // open alert set, did with a RECOVERY record every Level had agreed on. The
 // set is closed: it is a metric label. A record is counted here or under a
@@ -2166,9 +2248,16 @@ type Observation struct {
 	AlgorithmInputs      []AlgorithmInputFact
 	RecoveryGates        []RecoveryGateFact
 	OpenAlertGates       []OpenAlertGateFact
-	ControlSourceRound   *ControlSourceRoundFacts
-	normalized           bool
-	stageReasonBucket    bool
+	// LevelOutcomes is what the evaluation concluded per Level outcome and
+	// reason, on an evaluation_completed line: how many Level outcomes were
+	// NORMAL, ABNORMAL, RECOVERY, and for UNKNOWN and TERMINAL by which
+	// reason. The line's own reason is the Plan's fold - one word for the
+	// worst Level - so a Level suppressed by its effective time or held by a
+	// warming window had no name on the line unless it was that word.
+	LevelOutcomes      []LevelOutcomeFact
+	ControlSourceRound *ControlSourceRoundFacts
+	normalized         bool
+	stageReasonBucket  bool
 
 	// DurationKnown distinguishes a measured zero from an absent timer. Older
 	// producers with a positive Duration are also understood as measured.
@@ -2286,6 +2375,7 @@ func NormalizeObservation(observation Observation) Observation {
 	)
 	observation.AlgorithmEvaluations, observation.AlgorithmInputs = normalizeAlgorithmFacts(observation)
 	observation.RecoveryGates = normalizeRecoveryGateFacts(observation)
+	observation.LevelOutcomes = normalizeLevelOutcomeFacts(observation)
 	observation.OpenAlertGates = normalizeOpenAlertGateFacts(observation)
 	observation.ControlSourceRound = normalizeControlSourceRoundFacts(observation)
 	observation.Counts = normalizeCounts(observation.Counts)
@@ -3288,6 +3378,13 @@ const (
 	// its owner not accepting.
 	EffectiveCloseUnavailable       ReasonCode = "unavailable"
 	EffectiveCloseUnsupportedRunner ReasonCode = "unsupported_runner"
+	// EffectiveCloseViewNotExecutable is a Query Group whose Plans the loop
+	// could not read because the executable view does not allow it yet:
+	// the view not installed, or the lease behind it. A rollout's shape -
+	// every owned Query Group, once or twice, in the seconds after a
+	// replica starts - and not a store failure, which is what "unavailable"
+	// read as when the two were one word.
+	EffectiveCloseViewNotExecutable ReasonCode = "view_not_executable"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3296,6 +3393,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseAcked, EffectiveCloseMetadataMissing, EffectiveClosePrecheckFailed, EffectiveCloseSendFailed,
 	EffectiveCloseMaintenanceBusy, EffectiveClosePlanUncompilable, EffectiveCloseIdentityInvalid,
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
+	EffectiveCloseViewNotExecutable,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.
