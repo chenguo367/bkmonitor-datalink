@@ -64,3 +64,60 @@ func TestTheNamedWindowsAreTheWorstFewWorstFirst(t *testing.T) {
 		t.Fatalf("ties ordered %d / %d, want Level 1 first on both", a.Windows[0].LevelID, b.Windows[0].LevelID)
 	}
 }
+
+// A window is one series at one Level, and an object whose Plans cover the
+// same series reaches the same window once per Plan. Named once: the list is
+// the worst few windows, and a place spent on a copy is a genuinely
+// different window the reader never sees.
+//
+// A six-Plan object on a live deployment produced seven names with four
+// distinct windows among them -- three of them byte-identical repeats -- so
+// three of the eight places were copies.
+func TestAWindowReachedBySeveralPlansIsNamedOnce(t *testing.T) {
+	// Two Plans over the same three series, merged the way a round merges
+	// its Plans' coverage.
+	var round HistoryCoverage
+	for plan := 0; plan < 2; plan++ {
+		var perPlan HistoryCoverage
+		perPlan.Levels = 3
+		for _, series := range []SeriesIdentityDigest{"a", "b", "c"} {
+			perPlan.ObserveWindow(WindowCoverage{Series: series, LevelID: 1, Valid: 6, Required: 9, MissingTotal: 3})
+		}
+		round.Merge(perPlan)
+	}
+	if len(round.Windows) != 3 {
+		t.Fatalf("named %d windows, want the three distinct ones: %+v", len(round.Windows), round.Windows)
+	}
+	seen := map[string]int{}
+	for _, window := range round.Windows {
+		seen[string(window.Series)+"/"+string(rune('0'+window.LevelID))]++
+	}
+	for key, count := range seen {
+		if count != 1 {
+			t.Errorf("window %s named %d times", key, count)
+		}
+	}
+	// The same series at a different Level is a different window, and the
+	// bound is still spent on distinct ones.
+	round.ObserveWindow(WindowCoverage{Series: "a", LevelID: 2, Valid: 6, Required: 9, MissingTotal: 3})
+	if len(round.Windows) != 4 {
+		t.Fatalf("named %d windows, want the same series at another Level to be its own: %+v", len(round.Windows), round.Windows)
+	}
+	// A repeat that is worse replaces the one kept; a repeat that is not is
+	// dropped. The list says the worst reading of each window, once.
+	round.ObserveWindow(WindowCoverage{Series: "a", LevelID: 1, Valid: 1, Required: 9, MissingTotal: 8})
+	round.ObserveWindow(WindowCoverage{Series: "a", LevelID: 1, Valid: 8, Required: 9, MissingTotal: 1})
+	worst := uint32(0)
+	named := 0
+	for _, window := range round.Windows {
+		if window.Series == "a" && window.LevelID == 1 {
+			named, worst = named+1, window.Shortfall()
+		}
+	}
+	if named != 1 || worst != 8 {
+		t.Errorf("series a Level 1 named %d times with shortfall %d, want once with the worst reading (8)", named, worst)
+	}
+	if len(round.Windows) != 4 {
+		t.Errorf("named %d windows after two repeats, want the four distinct ones", len(round.Windows))
+	}
+}
