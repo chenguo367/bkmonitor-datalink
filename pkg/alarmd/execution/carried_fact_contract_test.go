@@ -52,7 +52,10 @@ func TestStateFactCarriedFromTheLoadedHistoryIsNotJudgedByThisRoundsThinnerOutco
 	// The round's point for the record is the held point unchanged: nothing
 	// fresh was written for the Level, the carried fact is all it has.
 	mutation.Points = []execution.StateHistoryPoint{heldPoint}
-	mutation.BaseHistory = []execution.StateHistoryPoint{heldPoint}
+	// The one slice the loaded view also carries: the base is a reference to
+	// the history that was read, and the contract compares it by identity.
+	heldHistory := []execution.StateHistoryPoint{heldPoint}
+	mutation.BaseHistory = heldHistory
 	mutation.MutationDigest = ""
 	state.Mutation = mustStateMutation(mutation)
 	outcome := normalLevelOutcome()
@@ -70,7 +73,7 @@ func TestStateFactCarriedFromTheLoadedHistoryIsNotJudgedByThisRoundsThinnerOutco
 			GapReasonCode:           execution.ReasonCode(contract.ReasonHistoryWarming),
 			WarmupRequirementRef:    state.Mutation.Levels[0].WarmupRequirementRef,
 		}},
-		History: []execution.StateHistoryPoint{heldPoint},
+		History: heldHistory,
 	}
 	gaps := execution.GapLoadResult{Items: []execution.GapGuardSnapshot{{
 		Identity: input.GapPreflight[0].Identity, Status: execution.GapMissing,

@@ -1677,7 +1677,13 @@ func loadedSeriesWarmingCompletion(
 			LevelID: 5, DetectFingerprint: refs[0].DetectFingerprint, Result: execution.LevelFactNormal,
 		}},
 	}
-	state.Mutation.BaseHistory = []execution.StateHistoryPoint{loadedPoint}
+	// One slice, shared by the loaded view and the mutation's base, because
+	// that is what the producer does: it references the history it read. The
+	// contract compares identity, not content, so a fixture that built two
+	// equal slices would be refused - and rightly, a copy is the thing this
+	// mutation shape exists to remove.
+	loadedHistory := []execution.StateHistoryPoint{loadedPoint}
+	state.Mutation.BaseHistory = loadedHistory
 	state.Mutation = mustStateMutation(state.Mutation)
 	request := evaluationRequest(input, execution.StatePreflightResult{Items: []execution.RuntimeStateView{{
 		Identity: input.StatePreflight[0].Identity, BlobRevision: 1,
@@ -1689,7 +1695,7 @@ func loadedSeriesWarmingCompletion(
 			GapReasonCode:        execution.ReasonCode(contract.ReasonHistoryWarming),
 			WarmupRequirementRef: refs[0].WarmupRequirementRef,
 		}},
-		History: []execution.StateHistoryPoint{loadedPoint},
+		History: loadedHistory,
 	}}}, execution.GapLoadResult{Items: []execution.GapGuardSnapshot{{
 		Identity: input.GapPreflight[0].Identity, Status: execution.GapMissing,
 	}}})

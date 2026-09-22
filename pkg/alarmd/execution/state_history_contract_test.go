@@ -71,7 +71,17 @@ func TestStateHistoryAdditionRejectsARetentionBoundThePlanDoesNotAskFor(t *testi
 	}
 }
 
-func TestStateHistoryAdditionRejectsABaseThatIsNotTheLoadedHistory(t *testing.T) {
+// The base has to be the loaded history itself, not something equal to it.
+// The mutation's claim is that it references the record the Slot read - that
+// is why it carries a base instead of a rebuilt window - so a copy is both a
+// weaker claim and exactly the allocation this shape exists to remove.
+//
+// Checked by identity for a second reason: comparing the content costs what
+// the copy cost. A per-point deep comparison over a 1469 point window measured
+// 310 us, 155 KB and 3085 allocations for one series in one round, which is
+// the window allocation again, moved out of the producer and into the contract
+// where a benchmark on the producer cannot see it.
+func TestStateHistoryAdditionRejectsABaseThatIsNotTheLoadedHistoryItself(t *testing.T) {
 	loaded := []StateHistoryPoint{stateHistoryPoint("old", 10, LevelFactNormal)}
 	mutation := StateMutation{
 		AffectedRecords: []RecordAnchor{{RecordID: "current", SourceTime: 20}},
@@ -84,6 +94,43 @@ func TestStateHistoryAdditionRejectsABaseThatIsNotTheLoadedHistory(t *testing.T)
 	mutation.BaseHistory = []StateHistoryPoint{stateHistoryPoint("old", 10, LevelFactAnomalous)}
 	if err := validateStateHistoryReplacement(loaded, mutation, 3); err == nil {
 		t.Fatal("a base that rewrites a loaded point must be rejected")
+	}
+	// Equal point for point, and still not the loaded history.
+	mutation.BaseHistory = append([]StateHistoryPoint(nil), loaded...)
+	if err := validateStateHistoryReplacement(loaded, mutation, 3); err == nil {
+		t.Fatal("a copy of the loaded history must be rejected: the mutation is supposed to reference " +
+			"the record that was read, and a copy is the allocation this shape removes")
+	}
+	mutation.BaseHistory = loaded
+	if err := validateStateHistoryReplacement(loaded, mutation, 3); err != nil {
+		t.Fatalf("the loaded history itself was rejected: %v", err)
+	}
+}
+
+// The check that replaced the deep comparison must cost nothing per point, or
+// the change it belongs to has been undone inside the check that guards it.
+func TestTheBaseCheckDoesNotWalkTheLoadedHistory(t *testing.T) {
+	measure := func(points int) float64 {
+		loaded := make([]StateHistoryPoint, 0, points)
+		for index := 0; index < points; index++ {
+			loaded = append(loaded, stateHistoryPoint("stored", int64(index)*60, LevelFactNormal))
+		}
+		mutation := StateMutation{
+			AffectedRecords: []RecordAnchor{{RecordID: "current", SourceTime: int64(points) * 60}},
+			Points:          []StateHistoryPoint{stateHistoryPoint("current", int64(points)*60, LevelFactAnomalous)},
+			RetentionPoints: uint32(points) + 1,
+			BaseHistory:     loaded,
+		}
+		return testing.AllocsPerRun(50, func() {
+			if err := validateStateHistoryReplacement(loaded, mutation, uint32(points)+1); err != nil {
+				t.Fatalf("valid addition rejected: %v", err)
+			}
+		})
+	}
+	short, long := measure(8), measure(1469)
+	if long > short {
+		t.Fatalf("validating against a 1469 point record allocated %v and against an 8 point one %v; the "+
+			"base is compared by identity precisely so that this does not grow with the window", long, short)
 	}
 }
 
@@ -226,4 +273,31 @@ func stateHistoryPoint(recordID string, sourceTime int64, result LevelFactResult
 	return StateHistoryPoint{RecordID: recordID, SourceTime: sourceTime, Levels: []StateLevelFact{{
 		LevelID: 5, DetectFingerprint: "detect-v1", Result: result,
 	}}}
+}
+
+// The contract check over a full retained window, which is where the cost of
+// this shape can hide: the producer's benchmark measures the digest and would
+// report the whole saving even if the check it feeds walked the window again.
+//
+// Run as: go test ./execution/ -run '^$' -bench ValidateStateHistoryAddition
+// -benchmem
+func BenchmarkValidateStateHistoryAddition(b *testing.B) {
+	const points = 1469
+	loaded := make([]StateHistoryPoint, 0, points)
+	for index := 0; index < points; index++ {
+		loaded = append(loaded, stateHistoryPoint("stored", int64(index)*60, LevelFactNormal))
+	}
+	mutation := StateMutation{
+		AffectedRecords: []RecordAnchor{{RecordID: "current", SourceTime: int64(points) * 60}},
+		Points:          []StateHistoryPoint{stateHistoryPoint("current", int64(points)*60, LevelFactAnomalous)},
+		RetentionPoints: points + 1,
+		BaseHistory:     loaded,
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		if err := validateStateHistoryReplacement(loaded, mutation, points+1); err != nil {
+			b.Fatalf("valid addition rejected: %v", err)
+		}
+	}
 }
