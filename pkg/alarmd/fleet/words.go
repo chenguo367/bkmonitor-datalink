@@ -9,8 +9,6 @@
 
 package fleet
 
-import "time"
-
 // The product vocabulary: the words a reader of the page sees, decided here
 // and sent with every response, so the page carries no table of its own.
 //
@@ -197,7 +195,7 @@ var StandingRules = []StandingRule{RuleUnpaired, RuleHistoricalLoss, RuleWindowV
 // standingOf decides a row's words: the check's pair, then the rules in
 // order, each one a closed predicate on the row. A row under no check is
 // detecting with nothing to do.
-func standingOf(row Anomaly, now time.Time) Standing {
+func standingOf(row Anomaly) Standing {
 	if row.Finding.Check == "" {
 		return Standing{State: StateDetecting, Action: ActionNone}
 	}
