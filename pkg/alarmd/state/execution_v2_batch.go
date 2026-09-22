@@ -711,21 +711,23 @@ func (store *ExecutionStore) runtimeLoadBatchLimit(group execution.QueryGroupIde
 // while the migration is unfinished.
 //
 // So the envelope pass is bounded by what the store accepts as a value rather
-// than by anything this round saw - sixteen keys per call under the production
+// than by anything any round saw - sixteen keys per call under the production
 // limit, which is what the first read of any cold Query Group has always been
 // bounded by. It is a conservative bound for a pass that should be empty and
-// is meant to disappear; a per-representation memory would earn back the
-// difference for the fleets that are mid-migration, and is worth doing only if
-// one of them is slow enough to notice.
-func (store *ExecutionStore) envelopeLoadBatchLimit(largest int, read bool) int {
+// is meant to disappear; a per-representation committed memory would earn back
+// the difference for the fleets that are mid-migration, and is worth doing only
+// if one of them is slow enough to notice.
+func (store *ExecutionStore) envelopeLoadBatchLimit() int {
+	// Deliberately not learned from this pass's own reads either. A batch that
+	// measures small envelopes would raise the bound for the batches after it,
+	// and the population this pass reads is mixed by construction: a Query
+	// Group changing representation holds both sizes at once, and so does one
+	// whose series differ in age. Sixteen short windows at 4 KB would lift the
+	// bound to the item cap and the next batch of long ones would ask for
+	// 89 MB. The sibling bound survives that only because it takes the max of
+	// a committed measurement of the whole population; this pass has none and
+	// deliberately commits none, since the records it reads are leaving.
 	expected := uint64(store.options.MaxValueBytes)
-	if read {
-		// Measured, including a largest of zero: within one representation a
-		// round of empty values is a measurement, and it is what a Query Group
-		// whose older keys have already expired looks like. That reading is
-		// only trusted here because it came from the envelopes themselves.
-		expected = uint64(largest)
-	}
 	if expected == 0 {
 		return runtimeLoadBatchItems
 	}
@@ -755,10 +757,9 @@ type runtimeLoadPass struct {
 	envelopes bool
 	pending   []int
 	frames    map[int][]byte
-	// envelopePreferred counts the series where both records were there and
-	// the older one was the newer statement - the shape the first pass stops
-	// looking for.
-	envelopePreferred int
+	// envelopeAfterUnreadableFrame counts the series whose frame was present
+	// and unreadable and whose envelope answered instead.
+	envelopeAfterUnreadableFrame int
 }
 
 func (batch *runtimeLoadBatch) reset() {
@@ -877,14 +878,16 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			// together, which is the shape this decision has always had when
 			// both records existed.
 			view := store.readStoredRecord(request, item, raw, pass.frames[index])
-			// An envelope that won against a frame that was there is the shape
-			// the first pass no longer looks for. Counting it here is what says
-			// whether anything still writes the older representation: a series
-			// with no frame at all is the migration, and says nothing about a
-			// writer. Zero across a deployment is the evidence that the first
-			// pass gives up nothing; anything else is a writer still at work.
+			// The frame's bytes were there and did not read, and the older
+			// record answered in its place. That is a corrupt or truncated
+			// frame, not a writer of the older representation: a readable
+			// frame never reaches this pass at all, so this count cannot see
+			// the shape where an envelope outranks a frame that reads. What
+			// that shape needs is a fleet-level fact - every ready replica
+			// declaring it writes frames - and it is recorded as an unmeasured
+			// boundary until there is one.
 			if pass.frames[index] != nil && view.Representation == execution.StateRepresentationEnvelope {
-				pass.envelopePreferred++
+				pass.envelopeAfterUnreadableFrame++
 			}
 			views[index] = view
 			continue

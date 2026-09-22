@@ -404,10 +404,10 @@ type Counts struct {
 	// not answer for them. Zero is the finished migration, and a Query Group
 	// that has stayed at zero is one whose compatibility read buys nothing.
 	EnvelopeReads int64
-	// EnvelopePreferred is how many of those series had both records and the
-	// older one won. Zero says nothing writes the older representation any
-	// more, which is what the frame-first read assumes.
-	EnvelopePreferred int64
+	// EnvelopeAfterUnreadableFrame is how many of those series had a frame
+	// that was there and did not read. It says a record is corrupt, not that
+	// anything still writes the older representation.
+	EnvelopeAfterUnreadableFrame int64
 }
 
 // TargetResolutionFacts is one Plan's target plan resolved for one Slot:

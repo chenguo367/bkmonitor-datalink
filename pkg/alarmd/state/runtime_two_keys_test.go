@@ -304,8 +304,8 @@ func TestTheEnvelopeIsReadOnlyForSeriesWhoseFrameCannotAnswer(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if test.name == "the frame answers" && loaded.EnvelopePreferred != 0 {
-				t.Fatalf("EnvelopePreferred = %d with no envelope read at all", loaded.EnvelopePreferred)
+			if test.name == "the frame answers" && loaded.EnvelopeAfterUnreadableFrame != 0 {
+				t.Fatalf("EnvelopeAfterUnreadableFrame = %d with no envelope read at all", loaded.EnvelopeAfterUnreadableFrame)
 			}
 			if loaded.EnvelopeReads != test.wantReads {
 				t.Fatalf("EnvelopeReads = %d, want %d", loaded.EnvelopeReads, test.wantReads)
@@ -340,11 +340,19 @@ func TestTheEnvelopePassKeepsEveryCallInsideTheBatchBudget(t *testing.T) {
 	backend := newPipelineMemoryBackend()
 	store := newBatchStore(t, backend, nil)
 	const series = 60
-	// Records the size of the ones this was measured on: a long window is a
-	// few hundred KiB as an envelope.
-	padding := strings.Repeat("p", 340<<10)
+	// A mixed population, which is what a Query Group changing representation
+	// holds and what a Query Group whose series differ in age holds. The short
+	// windows come first: a bound learned from them would lift the next batch
+	// to the item cap, and the next batch is the long ones. Equal-sized
+	// records are the one population that cannot show this.
+	short := strings.Repeat("s", 4<<10)
+	long := strings.Repeat("p", 340<<10)
 	mutations := make([]execution.StateMutation, series)
 	for index := range mutations {
+		padding := long
+		if index < 16 {
+			padding = short
+		}
 		mutations[index] = seriesMutation(t, seriesIdentity(index), applyVersion(), 0, padding)
 		key, _ := RuntimeStateKeyV2("alarmd", mutations[index].Identity)
 		backend.values[key], _ = encodeRuntime(mutations[index], 1)
@@ -373,11 +381,12 @@ func TestTheEnvelopePassKeepsEveryCallInsideTheBatchBudget(t *testing.T) {
 	}
 }
 
-// A series whose envelope is the newer statement is counted, so a deployment
-// can read whether anything still writes the older representation rather than
-// assuming nothing does. The frame is still the view - that is the rule this
-// read follows - and the count is the evidence for or against it.
-func TestAnEnvelopeThatWinsAgainstAFrameIsCounted(t *testing.T) {
+// A frame that is there and does not read leaves the envelope to answer, and
+// that is counted - as what it is. The count cannot see an envelope outranking
+// a frame that reads, because such a frame never reaches the second pass; that
+// shape has no reading today and is recorded as a boundary rather than
+// assumed away.
+func TestAnEnvelopeAnsweringForAnUnreadableFrameIsCounted(t *testing.T) {
 	older := execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 30, SlotDigest: "slot-0"}
 	newer := applyVersion()
 	backend := newPipelineMemoryBackend()
@@ -396,9 +405,9 @@ func TestAnEnvelopeThatWinsAgainstAFrameIsCounted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.EnvelopeReads != 1 || loaded.EnvelopePreferred != 1 {
-		t.Fatalf("EnvelopeReads = %d, EnvelopePreferred = %d, want 1 and 1: the envelope answered for a series whose frame could not",
-			loaded.EnvelopeReads, loaded.EnvelopePreferred)
+	if loaded.EnvelopeReads != 1 || loaded.EnvelopeAfterUnreadableFrame != 1 {
+		t.Fatalf("EnvelopeReads = %d, EnvelopeAfterUnreadableFrame = %d, want 1 and 1: the envelope answered for a series whose frame could not",
+			loaded.EnvelopeReads, loaded.EnvelopeAfterUnreadableFrame)
 	}
 	if loaded.Items[0].Representation != execution.StateRepresentationEnvelope {
 		t.Fatalf("view = %s, want the envelope: it is the only record that read", loaded.Items[0].Representation)

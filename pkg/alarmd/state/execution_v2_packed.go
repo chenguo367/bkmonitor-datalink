@@ -506,6 +506,20 @@ const (
 // one - so the envelope can legitimately be the newer of the two, and taking
 // the framed one on sight would throw away every round the old owner ran.
 //
+// Who still asks this. The sequential apply path does: it reads both keys to
+// compare against exact bytes and has no per-Slot multiplier, so the second
+// key costs it a value it already has the round trip for. The preflight does
+// not any more - it asks for the envelope only of a series whose frame is
+// missing or unreadable, so a frame that reads is the view whatever the older
+// key holds. What that gives up is this function's first paragraph: during a
+// rollout from a binary that predates the framed record, the rounds the old
+// owner wrote are missing from the frame's history until the window slides
+// past them. It is given up because the alternative is reading a 344 KB
+// record for every series of every Slot for a representation nothing writes,
+// and there is no reading today that says the shape still happens - the
+// fleet-level fact that would settle it is every ready replica declaring it
+// writes frames.
+//
 // Equal versions go to the framed key, and that choice is not arbitrary. Two
 // records at one version describe the same evaluation and hold the same facts,
 // so either is correct to read; but taking the envelope means deriving the

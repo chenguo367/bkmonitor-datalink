@@ -223,27 +223,18 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	pass := &runtimeLoadPass{frames: make(map[int][]byte)}
 	batch := &runtimeLoadBatch{}
 	roundLargest, anyRead := 0, false
-	envelopeLargest, envelopeRead := 0, false
 	flush := func() {
 		bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items, pass)
 		result.LoadedBytes += bytes
-		if read {
-			// Each pass measures its own representation. The frame pass's
-			// reading is what the Query Group's size is committed from, since
-			// that is the key every write goes to and the one the next round
-			// reads first; the envelope pass's is kept for this round's own
-			// batches and thrown away, because the records it measures are
-			// leaving.
-			if pass.envelopes {
-				envelopeRead = true
-				if largest > envelopeLargest {
-					envelopeLargest = largest
-				}
-			} else {
-				anyRead = true
-				if largest > roundLargest {
-					roundLargest = largest
-				}
+		if read && !pass.envelopes {
+			// Only the frame pass measures. The Query Group's committed size
+			// describes the key every write goes to and the one the next round
+			// reads first; the envelopes are leaving, and a size learned from
+			// them would bound the frame pass by records that will not be
+			// there.
+			anyRead = true
+			if largest > roundLargest {
+				roundLargest = largest
 			}
 		}
 		batch.reset()
@@ -268,16 +259,9 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	}
 	flush()
 	// The second pass, for the series the first one could not answer from the
-	// frame alone. Its bound comes from the envelopes it reads and never from
-	// the frames the first pass measured: on the one shape this pass exists
-	// for - a series with an envelope and no frame - every frame came back
-	// empty, and a bound taken from that asks for every envelope at once,
-	// which is ten times the batch budget and dies on its deadline every
-	// round without recovering. Until this round has measured an envelope the
-	// bound is what the store accepts as a value; after that it is what the
-	// envelopes turned out to weigh, which keeps a Query Group whose older
-	// keys are already gone from paying for a bound sized to records that are
-	// not there.
+	// frame alone. Its bound is what the store accepts as a value and nothing
+	// else - not the frames the first pass measured, and not its own earlier
+	// batches. See envelopeLoadBatchLimit for why both of those are traps.
 	pass.envelopes = true
 	for _, index := range pass.pending {
 		item := request.Items[index]
@@ -291,7 +275,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			result.Items[index] = runtimeLoadFailure(view, err)
 			continue
 		}
-		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.envelopeLoadBatchLimit(envelopeLargest, envelopeRead)) {
+		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.envelopeLoadBatchLimit()) {
 			flush()
 		}
 		batch.target = target
@@ -299,7 +283,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 		batch.keys = append(batch.keys, envelopeKey)
 	}
 	flush()
-	result.EnvelopeReads, result.EnvelopePreferred = len(pass.pending), pass.envelopePreferred
+	result.EnvelopeReads, result.EnvelopeAfterUnreadableFrame = len(pass.pending), pass.envelopeAfterUnreadableFrame
 	// One commit for the whole preflight: the round read every key of the
 	// Query Group, so this is a complete measurement of the population rather
 	// than whatever the last batch happened to hold.
