@@ -364,6 +364,11 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if f := observation.SlotBudgetUsage; f != nil {
 		attributes = append(attributes, slog.Any("slot_budget_usage", f))
 	}
+	// Its own key beside the usage, under its own condition: the two answer
+	// different questions and a row can carry either without the other.
+	if f := observation.SlotTiming; f != nil {
+		attributes = append(attributes, slog.Any("slot_timing", f))
+	}
 	if observation.CapacityBudget != "" {
 		attributes = append(attributes, slog.String("capacity_budget", string(observation.CapacityBudget)))
 	}

@@ -71,9 +71,72 @@ type streamedExecution struct {
 	// be incremented by a site that names no phase while every assertion on
 	// the total still passes.
 	retainedByPhase [retainPhaseCount]uint64
-	effects         effectCounts
-	gapFacts        uint64
-	began           bool
+	// spentByPhase is this execution's wall clock split the same way, in
+	// nanoseconds, summed over every call of each phase.
+	spentByPhase [slotPhaseCount]uint64
+	// beganAt is when this execution started, for the total the phases are
+	// read against. Zero on an execution that never began, which reports no
+	// duration rather than the time since the epoch.
+	beganAt  time.Time
+	effects  effectCounts
+	gapFacts uint64
+	began    bool
+}
+
+// slotPhase says which part of a Slot a stretch of wall clock was spent in.
+//
+// The three are the parts a Slot can be slow in for unrelated causes: waiting
+// for its records, reading State, and deciding. They are not a partition of
+// the Slot -- the completion does more than these three -- and the total is
+// carried beside them so the remainder is visible rather than implied.
+type slotPhase int
+
+const (
+	// slotPhaseInput is from the first record to the completion arriving: this
+	// Slot waiting for its records and consuming them. It contains the query's
+	// own latency and is not it, which is why it is not named for the query.
+	slotPhaseInput slotPhase = iota
+	slotPhasePreflight
+	slotPhaseEvaluate
+	slotPhaseCount
+)
+
+// spend records wall clock against the phase that spent it, from since to now.
+//
+// The only way to add to this execution's clock, for the same reason
+// retainBytes is: a phase's time arriving with no phase attached is the
+// failure the split exists to prevent. A zero since is a call that was never
+// started and adds nothing.
+func (stream *streamedExecution) spend(phase slotPhase, since time.Time) {
+	if since.IsZero() {
+		return
+	}
+	elapsed := time.Since(since)
+	if elapsed < 0 {
+		return
+	}
+	stream.spentByPhase[phase] += uint64(elapsed)
+}
+
+// spentMillis is what one phase took, rounded to milliseconds.
+func (stream *streamedExecution) spentMillis(phase slotPhase) uint64 {
+	if stream == nil {
+		return 0
+	}
+	return uint64(time.Duration(stream.spentByPhase[phase]).Milliseconds())
+}
+
+// slotMillis is how long this execution has been running, zero if it never
+// began.
+func (stream *streamedExecution) slotMillis() uint64 {
+	if stream == nil || stream.beganAt.IsZero() {
+		return 0
+	}
+	elapsed := time.Since(stream.beganAt)
+	if elapsed < 0 {
+		return 0
+	}
+	return uint64(elapsed.Milliseconds())
 }
 
 // retainPhase says which part of a Slot a retained byte was held for. The
@@ -163,6 +226,10 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 	}
 	prepared.inputBuilder = inputBuilder
 	stream.began = true
+	// Started here rather than at the Slot's evaluation time: this is when
+	// this replica began working on it, and the gap between the two is the
+	// scheduler's to answer for, not the Slot's.
+	stream.beganAt = time.Now()
 	stream.header = header
 	stream.prepared = prepared
 	stream.streamed = make(map[streamedInputKey]execution.NamedInputBinding)
@@ -612,6 +679,11 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 	if !stream.began {
 		return completionContractError(codeCompletionBeforeBegin, "alarmd worker: QueryExecutionSource returned completion before Begin")
 	}
+	// The input phase ends the moment the completion arrives, whatever this
+	// call goes on to decide about it: a completion this Slot refuses still
+	// waited for its records, and charging that wait to nothing would make a
+	// refused Slot look instantaneous.
+	stream.spend(slotPhaseInput, stream.beganAt)
 	if err := completion.Validate(stream.header, stream.delivered); err != nil {
 		return wrapCompletionContractError(codeCompletionInvalid, err)
 	}
@@ -1426,6 +1498,10 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 	if err == nil {
 		loaded, err = execution.ClassifyStatePreflight(stateRequest, loaded)
 	}
+	// Both outcomes: a read that did not come back is the one that took the
+	// longest, and leaving it out would make the phase's total fall exactly
+	// when the reads started timing out.
+	stream.spend(slotPhasePreflight, started)
 	if err != nil {
 		// The read's own facts, because they are the ones that decide what to
 		// do. A read that did not come back has no byte count - that is why the
@@ -1491,6 +1567,7 @@ func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry
 	}
 	started := time.Now()
 	evaluated, err := stream.coordinator.ports.Evaluator.Evaluate(ctx, request)
+	stream.spend(slotPhaseEvaluate, started)
 	if err != nil {
 		stream.observeEvaluationFailure(ctx, started, due, err)
 		return wrapEvaluationError(codeEvaluationFailed, fmt.Errorf("alarmd worker: evaluate series: %w", err))

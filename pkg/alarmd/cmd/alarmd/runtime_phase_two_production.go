@@ -2613,6 +2613,7 @@ func (executor observedProductionSlotExecutor) Execute(
 		Result:             observedResult, ReasonCode: reason, Direction: observability.DirectionInternal,
 		Duration: time.Since(started), Trace: trace, Err: observedErr,
 		SlotBudgetUsage: slotBudgetUsageFacts(result.Usage),
+		SlotTiming:      slotTimingFacts(result.Timing),
 	})
 	observability.EmitTargetFlow(ctx, "execution_outcome", trace, observability.TargetFlowFacts{ExecutionOutcomeKnown: true, Attempted: true, Completed: result.Completed, Completion: string(result.CompletionKind)})
 	return result, err
@@ -2875,5 +2876,12 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		RetainedStateBytes:  usage.RetainedStateBytes,
 		StateMutationsLimit: usage.StateMutationsLimit, GapMutationsLimit: usage.GapMutationsLimit,
 		EventsLimit: usage.EventsLimit, RetainedBytesLimit: usage.RetainedBytesLimit, SeriesLimit: usage.SeriesLimit,
+	}
+}
+
+// slotTimingFacts is where the Slot's clock went, for its completion row.
+func slotTimingFacts(timing execution.SlotTiming) *observability.SlotTimingFacts {
+	return &observability.SlotTimingFacts{
+		Slot: timing.Slot, Input: timing.Input, Preflight: timing.Preflight, Evaluate: timing.Evaluate,
 	}
 }

@@ -2097,6 +2097,7 @@ type Observation struct {
 	CapacityBudget        CapacityBudget
 	CapacityRejection     *CapacityRejectionFacts
 	SlotBudgetUsage       *SlotBudgetUsageFacts
+	SlotTiming            *SlotTimingFacts
 	SourceKind            SourceKind
 	QueryPermit           *QueryPermitFacts
 	NoDataSlot            *NoDataSlotFacts

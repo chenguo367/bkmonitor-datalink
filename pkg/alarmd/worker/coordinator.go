@@ -294,7 +294,13 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	queryResult, queryReason := provisionalResult(stream.evaluated)
 	coordinator.observeQueryCompleted(ctx, request.Operation, started, queryResult, queryReason, completion, stream.evaluated)
 	if len(stream.evaluated.Plans) == 0 {
-		return execution.SlotExecutionResult{Result: queryResult, ReasonCode: queryReason, Usage: stream.budgetUsage()}, nil
+		// The timing travels with the usage here for the same reason it does at
+		// the other exit: this Slot ran. A round that produced no Plan result
+		// still waited for its records and still read State, and reporting the
+		// budgets it used beside an empty clock would read as a Slot that was
+		// never measured rather than one that found nothing to decide.
+		return execution.SlotExecutionResult{Result: queryResult, ReasonCode: queryReason,
+			Usage: stream.budgetUsage(), Timing: stream.timing()}, nil
 	}
 
 	var result execution.SlotExecutionResult
@@ -321,7 +327,22 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	// that produced it. A Slot that ends any other way has no usage to report
 	// rather than a usage of zero, and the two must not arrive as one number.
 	result.Usage = stream.budgetUsage()
+	result.Timing = stream.timing()
 	return result, nil
+}
+
+// timing is where this execution's wall clock went, for the completion row.
+// Beside the usage rather than in it: see execution.SlotTiming.
+func (stream *streamedExecution) timing() execution.SlotTiming {
+	if stream == nil {
+		return execution.SlotTiming{}
+	}
+	return execution.SlotTiming{
+		Slot:      stream.slotMillis(),
+		Input:     stream.spentMillis(slotPhaseInput),
+		Preflight: stream.spentMillis(slotPhasePreflight),
+		Evaluate:  stream.spentMillis(slotPhaseEvaluate),
+	}
 }
 
 // budgetUsage is what this execution took of each budget, for the completion

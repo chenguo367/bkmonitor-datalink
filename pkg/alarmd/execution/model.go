@@ -4330,6 +4330,44 @@ type SlotExecutionResult struct {
 	// which is how a count standing in for memory went a year without anyone
 	// being able to see that the memory it stood for was never reached.
 	Usage SlotBudgetUsage
+	// Timing is where this Slot's wall clock went, carried beside the usage
+	// rather than inside it.
+	//
+	// Apart because the two are different kinds of quantity. Everything in
+	// Usage is a count of work: run the same Slot twice against the same
+	// inputs and it comes back the same, which is what lets a test assert that
+	// an observer did not change the execution by comparing the two runs. A
+	// duration never comes back the same. Put in there it would quietly turn
+	// that comparison into one that can only be approximate, and the next
+	// person to add a field would find an invariant that no longer holds
+	// without being told which field broke it.
+	Timing SlotTiming
+}
+
+// SlotTiming is where one Slot's wall clock went, in milliseconds.
+//
+// Slot is the whole of it, from this replica taking the Slot up to the
+// completion row. The three beside it are the parts a Slot can be slow in for
+// unrelated reasons, and they deliberately do not sum to it: what is left over
+// is everything else the completion does, and carrying the total beside the
+// parts is what makes that remainder visible instead of implied.
+//
+// Input is deliberately not called a query time. It is this Slot waiting for
+// its records and consuming them, which contains the query's own latency but
+// is not it: the query runs on the view stream's side, and a Slot that waited
+// its turn waited here with a backend that was never slow. A number named for
+// the query would be read as the backend's, and a preflight that took eight
+// seconds already spent three days being read as a slow data source.
+//
+// Preflight and Evaluate are sums over one Slot's batches and series, not
+// single calls. Each call is already on its own line; what no line could
+// answer is what the Slot spent in each in total, which is the question asked
+// of a Slot that overran its period.
+type SlotTiming struct {
+	Slot      uint64
+	Input     uint64
+	Preflight uint64
+	Evaluate  uint64
 }
 
 // SlotBudgetUsage is one Slot's own consumption of the budgets it was admitted
