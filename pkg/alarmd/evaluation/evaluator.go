@@ -69,6 +69,15 @@ func (e *Evaluator) Evaluate(ctx context.Context, request execution.EvaluationRe
 	return result, nil
 }
 
+// planGapRecoveryMutation is this Slot's recovery of the Plan's marker, for a
+// Slot that evaluated series. The gate is what a series-bearing Slot has to
+// show for itself: a state mutation, meaning at least one series carried its
+// round forward. A Slot with no series at all never reaches here at all -- the
+// worker's Slot wrap-up decides that one, under the Plan-scope reach.
+//
+// The arithmetic is not repeated here. Both callers ask
+// execution.PlanGapRecoveryMutation, and differ only in the reach they pass,
+// so "how far does one healthy Slot move a warmup count" has one definition.
 func planGapRecoveryMutation(
 	request execution.EvaluationRequest,
 	due execution.DuePlan,
@@ -77,49 +86,7 @@ func planGapRecoveryMutation(
 	if !hasStateMutation {
 		return nil, nil
 	}
-	identity := due.GapIdentity()
-	gap, found := request.Gaps.Find(identity)
-	if !found || gap.Status != execution.GapFound {
-		return nil, nil
-	}
-	// A marker written under an older Plan schedule revision still recovers,
-	// it only restarts its warmup: the store discards the warmup count of
-	// every scope whose schedule revision changed (state applyGapScopes), so
-	// this Slot is the first observed FULL Slot under the current revision and
-	// the count starts at zero here too. Before this the marker was neither
-	// warmed nor cleared once the schedule revision moved, and because no
-	// writer refreshes the revision while the data is FULL, every Level under
-	// the marker stayed UNKNOWN with the marker's reason for as long as the
-	// marker lived - whatever that reason was.
-	restarted := gap.LastScheduleRevision != due.ScheduleRevision
-	scopes := make([]execution.GapScopeMutation, len(gap.Scopes))
-	for index, current := range gap.Scopes {
-		observed := current.ObservedFullSlots
-		if restarted {
-			observed = 0
-		}
-		scopes[index] = execution.GapScopeMutation{Scope: current.Scope, Kind: execution.GapClear}
-		if observed+1 < current.RequiredFullSlots {
-			scopes[index].Kind = execution.GapWarmup
-			scopes[index].ReasonCode = current.ReasonCode
-			scopes[index].RequiredFullSlots = current.RequiredFullSlots
-		}
-	}
-	version, err := execution.BuildApplyVersion(request.Header.Contract, due.StateApplyEpoch)
-	if err != nil {
-		return nil, err
-	}
-	mutation, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{
-		Identity:               identity,
-		ExpectedMarkerRevision: gap.MarkerRevision,
-		ApplyVersion:           version,
-		ScheduleRevision:       due.ScheduleRevision,
-		Scopes:                 scopes,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &mutation, nil
+	return execution.PlanGapRecoveryMutation(request.Header.Contract, due, request.Gaps, execution.GapRecoverEveryScope)
 }
 
 type recordResult struct {

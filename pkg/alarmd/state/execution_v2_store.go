@@ -645,6 +645,18 @@ func decodeGap(raw []byte, identity execution.PlanGapIdentity, contractRef execu
 func applyGapScopes(previous []execution.GapScopeState, mutations []execution.GapScopeMutation, previousSchedule, nextSchedule execution.PlanScheduleRevision) []execution.GapScopeState {
 	states := make(map[execution.GapScope]execution.GapScopeState, len(previous))
 	for _, state := range previous {
+		// A warmup count belongs to the schedule revision it was earned under,
+		// and this write moves the marker to a new one. Every scope loses its
+		// count, not only the scopes this mutation names: the envelope carries
+		// one revision for all of them, so a scope left out of the mutation
+		// would keep counting slots observed under a schedule that no longer
+		// exists. It held while every recovery named every scope; the first
+		// mutation that names a subset -- a Slot with no series, which can
+		// speak for the Plan's scopes and not for a Level's -- separated
+		// "the envelope's revision moved" from "the counts were discarded".
+		if previousSchedule != nextSchedule {
+			state.ObservedFullSlots = 0
+		}
 		states[state.Scope] = state
 	}
 	for _, mutation := range mutations {
@@ -656,7 +668,11 @@ func applyGapScopes(previous []execution.GapScopeState, mutations []execution.Ga
 				ReasonCode: mutation.ReasonCode, RequiredFullSlots: mutation.RequiredFullSlots}
 		case execution.GapWarmup:
 			current := states[mutation.Scope]
-			if previousSchedule != nextSchedule || current.RequiredFullSlots != mutation.RequiredFullSlots || current.ReasonCode != mutation.ReasonCode {
+			// The schedule revision is not asked about here: the sweep above
+			// has already discarded every count it invalidates, and asking
+			// again would put one rule in two places. What is left are the
+			// per-scope reasons a count stops applying to its own scope.
+			if current.RequiredFullSlots != mutation.RequiredFullSlots || current.ReasonCode != mutation.ReasonCode {
 				current.ObservedFullSlots = 0
 			}
 			current.Scope, current.Status = mutation.Scope, execution.GapStatusWarming
