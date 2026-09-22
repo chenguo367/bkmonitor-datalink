@@ -2326,6 +2326,9 @@ type Observation struct {
 	// worst Level - so a Level suppressed by its effective time or held by a
 	// warming window had no name on the line unless it was that word.
 	LevelOutcomes []LevelOutcomeFact
+	// Shardability is the catalog counted by whether a value-list split
+	// could be expressed at all, once per publication.
+	Shardability *ShardabilityFacts
 	// SplitPlan is one object's split decision as the Leader's dry run
 	// reached it; SplitRound is what that round looked at. Two structures
 	// because they have two subjects - one object, and one round.
