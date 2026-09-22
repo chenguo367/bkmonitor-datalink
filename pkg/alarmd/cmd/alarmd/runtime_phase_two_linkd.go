@@ -10,7 +10,20 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
-func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection config.RedisConnectionConfig, now func() time.Time) (*openalerts.Cache, error) {
+// linkdIndex is the alert link as this process uses it: the per-strategy
+// copy the workers read, and the two ports the control leader's absent
+// strategy difference needs - one point read per departed strategy, and the
+// reconciliation that says what its alerts are.
+type linkdIndex struct {
+	Cache  *openalerts.Cache
+	Source *openalerts.SetSource
+	// Alerts is nil when the deployment configures no reconciliation
+	// endpoint. Nothing is closed then, and the difference says so on every
+	// round rather than reporting a clean zero.
+	Alerts openalerts.Reconciler
+}
+
+func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection config.RedisConnectionConfig, now func() time.Time) (linkdIndex, error) {
 	capacity := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
 	settings := cfg.PhaseTwo.Linkd
 	// One read cannot monopolize the allowance for the whole worker. These
@@ -18,11 +31,11 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 	source, err := openalerts.NewSetSource(client, settings.Prefix(), openalerts.ReadLimits{
 		MaxMembers: max(1, capacity.Members/4), MaxBytes: max(1, capacity.Bytes/4), MaxPages: 100, PageSize: 256})
 	if err != nil {
-		return nil, err
+		return linkdIndex{}, err
 	}
 	subscriber, err := openalerts.NewRedisSubscriber(client, settings.Prefix(), time.Second)
 	if err != nil {
-		return nil, err
+		return linkdIndex{}, err
 	}
 	var reconciler openalerts.Reconciler
 	if settings.ConsoleURL != "" {
@@ -39,12 +52,16 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 			Binding: openalerts.TargetBinding{EventSourceID: settings.EventSourceID, HookName: settings.HookName, KeyPrefix: settings.Prefix(),
 				Address: address, Database: connection.DB, Sources: sources}})
 		if err != nil {
-			return nil, err
+			return linkdIndex{}, err
 		}
 	}
-	return openalerts.NewIndex(openalerts.IndexOptions{Source: source, Subscriber: subscriber, Reconciler: reconciler, Now: now,
+	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: source, Subscriber: subscriber, Reconciler: reconciler, Now: now,
 		Policy: openalerts.PolicySelfMaintain, MaxStrategies: capacity.Strategies, MaxMembers: capacity.Members, MaxBytes: capacity.Bytes,
 		MaxLocalEntries: capacity.LocalEntries, ReadBatch: capacity.ReadBatch, ReconcileBatch: 1, RefreshInterval: time.Second,
 		IndexInterval: time.Minute, ReconcileInterval: settings.CalibrationInterval(), CalibrationMaxAge: 2 * settings.CalibrationInterval(),
 		LocalRetention: time.Minute, CycleTimeout: 5 * time.Second})
+	if err != nil {
+		return linkdIndex{}, err
+	}
+	return linkdIndex{Cache: cache, Source: source, Alerts: reconciler}, nil
 }

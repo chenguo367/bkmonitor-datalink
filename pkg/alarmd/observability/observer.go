@@ -16,6 +16,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
@@ -59,23 +60,27 @@ const (
 
 	StageConfigLoaded             = "config_loaded"
 	StageEffectiveTimeMaintenance = "effective_time_maintenance"
-	StageLegacyPodCache           = "legacy_pod_cache"
-	StageSnapshotRefreshed        = "snapshot_refreshed"
-	StageSnapshotUnavailable      = "snapshot_unavailable"
-	StageActivationFailed         = "activation_failed"
-	StageActiveQGSet              = "active_qg_set"
-	StageObjectCatalog            = "object_catalog"
-	StageObjectRead               = "object_read"
-	StageFrozenPlanGeneration     = "frozen_plan_generation"
-	StageActivationHold           = "activation_hold"
-	StageScheduleCutover          = "schedule_cutover"
-	StageLegacyQGMigration        = "legacy_active_qg_migration"
-	StageDrainingQGReconciled     = "draining_query_groups"
-	StageAssignmentAcquired       = "assignment_acquired"
-	StageAssignmentLost           = "assignment_lost"
-	StageRebalancePlanned         = "rebalance_planned"
-	StageControlReadsSpent        = "control_reads_spent"
-	StageAssignmentIndexWritten   = "assignment_index_written"
+	// StageAbsentStrategyClose is the control leader's difference between the
+	// alert link's unrecovered alerts and the strategy snapshot, and the
+	// closes it pushes for strategies that no longer exist.
+	StageAbsentStrategyClose    = "absent_strategy_close"
+	StageLegacyPodCache         = "legacy_pod_cache"
+	StageSnapshotRefreshed      = "snapshot_refreshed"
+	StageSnapshotUnavailable    = "snapshot_unavailable"
+	StageActivationFailed       = "activation_failed"
+	StageActiveQGSet            = "active_qg_set"
+	StageObjectCatalog          = "object_catalog"
+	StageObjectRead             = "object_read"
+	StageFrozenPlanGeneration   = "frozen_plan_generation"
+	StageActivationHold         = "activation_hold"
+	StageScheduleCutover        = "schedule_cutover"
+	StageLegacyQGMigration      = "legacy_active_qg_migration"
+	StageDrainingQGReconciled   = "draining_query_groups"
+	StageAssignmentAcquired     = "assignment_acquired"
+	StageAssignmentLost         = "assignment_lost"
+	StageRebalancePlanned       = "rebalance_planned"
+	StageControlReadsSpent      = "control_reads_spent"
+	StageAssignmentIndexWritten = "assignment_index_written"
 	// StageAssignmentSwept names one sweep of the Assignment records by the
 	// Control Leader: how many named retired Query Groups and how many of
 	// those it reclaimed (AssignmentSweepFacts).
@@ -3159,6 +3164,9 @@ func NormalizeReason(reason ReasonCode, result Result) ReasonCode {
 	if _, ok := effectiveMaintenanceReasonSet[reason]; ok {
 		return reason
 	}
+	if _, ok := absentCloseReasonSet[reason]; ok {
+		return reason
+	}
 	return ReasonOther
 }
 
@@ -3309,6 +3317,13 @@ var metricComponentStages = []ComponentStage{
 
 var phaseTwoComponentStages = []ComponentStage{
 	{ComponentRuntime, StageLegacyPodCache},
+	// The absent-strategy difference reports through its own metric family,
+	// which has a cell per outcome and per denominator. Registered here
+	// rather than on the generic catalog so that it does not also buy a
+	// slice of the duration histogram's cross product, which would be
+	// ninety more series for a loop that runs twelve times an hour on one
+	// replica and is fully answered by its own family.
+	{ComponentControlPlane, StageAbsentStrategyClose},
 	{ComponentControlPlane, StageSnapshotRefreshed}, {ComponentControlPlane, StageSnapshotUnavailable},
 	{ComponentControlPlane, StageActivationFailed},
 	// The catalog's three stages were emitted from the day the catalog
@@ -3453,6 +3468,27 @@ var EffectiveCloseOutcomes = []ReasonCode{
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.
 var effectiveMaintenanceReasons = EffectiveCloseOutcomes
+
+// AbsentCloseReasons is the absent-strategy difference's vocabulary as
+// observability reason codes. The words are the difference's own - one
+// vocabulary, declared where the decision is made - so that a log line, the
+// metric cell and the code branch cannot drift into three spellings.
+var AbsentCloseReasons = absentCloseReasons()
+
+func absentCloseReasons() []ReasonCode {
+	reasons := make([]ReasonCode, 0, len(absentalerts.Outcomes)+len(absentalerts.Refusals))
+	for _, outcome := range absentalerts.Outcomes {
+		reasons = append(reasons, ReasonCode(outcome))
+	}
+	for _, refusal := range absentalerts.Refusals {
+		if refusal == absentalerts.RefusalNone {
+			continue
+		}
+		reasons = append(reasons, ReasonCode(refusal))
+	}
+	return reasons
+}
+
 var contractClassReasons = []ReasonCode{
 	ReasonContractDeterministic, ReasonContractRetryable, ReasonContractCoverage,
 }
@@ -3530,7 +3566,7 @@ var SchedulerDecisionReasons = func() []ReasonCode {
 var allCommonReasons = joinReasons(unclassifiedReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 var allResourceReasons = joinReasons(
 	unclassifiedReasons, resourceOnlyReasons, contractClassReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
-var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
+var allLogReasons = joinReasons(unclassifiedReasons, resourceOnlyReasons, activationFailureReasons, ViewStreamReasons, SchedulerDecisionReasons, effectiveMaintenanceReasons, AbsentCloseReasons, []ReasonCode{ReasonOther, ReasonStateAlreadyAppliedBeforeEvaluation})
 
 var componentStageSet = makeComponentStageSet(allComponentStages)
 var metricComponentStageSet = makeComponentStageSet(metricComponentStages)
@@ -3544,6 +3580,7 @@ var activationFailureReasonSet = makeReasonSet(activationFailureReasons)
 var viewStreamReasonSet = makeReasonSet(ViewStreamReasons)
 var schedulerDecisionReasonSet = makeReasonSet(SchedulerDecisionReasons)
 var effectiveMaintenanceReasonSet = makeReasonSet(effectiveMaintenanceReasons)
+var absentCloseReasonSet = makeReasonSet(AbsentCloseReasons)
 var contractObservationReasons, contractObservationReasonSet, contractObservationMetricReasonByCode = loadContractObservationReasons()
 
 func makeComponentStageSet(values []ComponentStage) map[ComponentStage]struct{} {
