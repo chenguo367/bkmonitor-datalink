@@ -55,6 +55,14 @@ type streamedExecution struct {
 	// seriesCensus is where this Slot's series went, counted where each
 	// decision is made rather than inferred afterwards. See seriesCensus.
 	seriesCensus seriesCensus
+	// censuses are the dimension censuses this Slot is taking, one per
+	// candidate Plan, and the two numbers the candidacy was decided on.
+	// Empty on every Slot whose Query Group is not heavy enough to be worth
+	// one, which is nearly all of them.
+	censuses         censusBuilders
+	censusPeakBytes  uint64
+	censusShareBytes uint64
+	censusCandidate  bool
 	// noDataPlansSeen is how many of this Slot's Plans detect no-data,
 	// counted where they are found rather than where they are judged.
 	noDataPlansSeen      int
@@ -173,6 +181,14 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 		return fmt.Errorf("alarmd worker: prepare EffectiveTime facts: %w", err)
 	}
 	stream.effective = effective
+	// Whether this Query Group's Plans are worth a dimension census, decided
+	// once for the Slot from what its last Slot held: a census has to be
+	// counted while the series go past, and what this Slot will hold is only
+	// known once it has held it.
+	stream.censusPeakBytes = stream.coordinator.censusPeaks.read(header.Contract.Slot.QueryGroup)
+	stream.censusCandidate, stream.censusShareBytes = censusCandidate(
+		stream.censusPeakBytes, stream.coordinator.budget.MaxRetainedBytes,
+	)
 	// The target plans are resolved here, before any series arrives: the
 	// source reads the memberships right after Begin to filter the records,
 	// and the absence judgement at completion reads the same resolutions.
@@ -1457,6 +1473,11 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 
 func (stream *streamedExecution) evaluateLoadedSeries(ctx context.Context, entry completedSeries, view execution.RuntimeStateView) error {
 	due, series, inputs := entry.due, entry.series, entry.inputs
+	// Counted before the round decides anything about this series: the census
+	// is of the series the Query Group has, and a series whose State is
+	// already applied or whose evaluation is refused is one of them. Only for
+	// a candidate Query Group; every other Slot does nothing here.
+	stream.countSeriesForCensus(due, inputs)
 	if view.VersionComparison == execution.ApplyVersionEqual {
 		resumed, err := resumedSeriesResult(stream.header, due, view, stream.gaps)
 		if err != nil {

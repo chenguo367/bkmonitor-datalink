@@ -120,6 +120,8 @@ type phaseTwoMetrics struct {
 	historyCoverageRejected         *prometheus.CounterVec
 	historyCoverageUnsummarised     *prometheus.CounterVec
 	levelOutcomes                   *prometheus.CounterVec
+	dimensionCensusWrites           *prometheus.CounterVec
+	dimensionCensusValues           *prometheus.CounterVec
 	recoveryPastLevelWithoutRecov   prometheus.Counter
 	openAlertGate                   *prometheus.CounterVec
 	openAlertSet                    *openAlertSetCollector
@@ -919,6 +921,37 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		}
 		metrics.levelOutcomes.WithLabelValues(outcome, "")
 	}
+	// What the dimension census did, by where its values came from and what
+	// the store said (decision-020 section 4.7.3). Two families rather than
+	// one: how many censuses were taken is a different question from how
+	// much of a strategy they could name, and a reader asking the second
+	// needs the overflow beside the named values or the answer is a number
+	// with no denominator.
+	metrics.dimensionCensusWrites = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "dimension_census_total",
+		Help: "Dimension censuses this replica took, by source and by what the store did with them. " +
+			"source=round is the ordinary one, counted from the series the round evaluated; source=roster is the " +
+			"fallback for a round that saw no series, and its values are an upper bound because the no-data roster " +
+			"remembers groups that are gone. status=WRITTEN is stored, REJECTED is refused whole (too large or " +
+			"unencodable - never truncated, because a cut census reads like a distribution), RETRYABLE is the store " +
+			"not answering. Only candidate Query Groups take one, so a flat zero here is a fleet with no object " +
+			"heavy enough to split.",
+	}, []string{"source", "status"})
+	for _, source := range observability.DimensionCensusSources() {
+		for _, status := range observability.DimensionCensusStatuses() {
+			metrics.dimensionCensusWrites.WithLabelValues(source, status)
+		}
+	}
+	metrics.dimensionCensusValues = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "dimension_census_values_total",
+		Help: "Dimension values the censuses named, and what they could not: kind=named is values carried in the " +
+			"census, kind=overflow_values is values the bound left out, kind=overflow_series is the series on those " +
+			"values. Read named against overflow_series: a census that names four thousand values while a hundred " +
+			"thousand series sit in the overflow is not a distribution a split can be planned from.",
+	}, []string{"kind"})
+	for _, kind := range []string{"named", "overflow_values", "overflow_series"} {
+		metrics.dimensionCensusValues.WithLabelValues(kind)
+	}
 	metrics.levelAbnormal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "level_abnormal_total",
 		Help: "Level verdicts of ABNORMAL, by whether the detection window they were reached on was " +
@@ -1218,7 +1251,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.effectiveClose, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
@@ -1400,6 +1433,12 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.algorithmEvaluations.WithLabelValues(
 			string(fact.SourceAlgorithmFamily), string(fact.Result),
 		).Inc()
+	}
+	if facts := observation.DimensionCensus; facts != nil {
+		m.dimensionCensusWrites.WithLabelValues(facts.Source, facts.Status).Inc()
+		m.dimensionCensusValues.WithLabelValues("named").Add(float64(facts.Values))
+		m.dimensionCensusValues.WithLabelValues("overflow_values").Add(float64(facts.OverflowValues))
+		m.dimensionCensusValues.WithLabelValues("overflow_series").Add(float64(facts.OverflowSeries))
 	}
 	if rejected := observation.HistoryCoverageRejected; rejected != nil {
 		m.historyCoverageRejected.WithLabelValues(string(rejected.Rule)).Inc()

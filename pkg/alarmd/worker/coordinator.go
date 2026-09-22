@@ -64,6 +64,12 @@ type Ports struct {
 	// window reads as never evaluated. A deployment without it loses a reading,
 	// not a detection.
 	ExecutionEvidence execution.SlotExecutionEvidenceStore
+	// Census is where a Slot leaves the dimension census of a candidate Plan
+	// (decision-020 section 4.7.3). Optional, and the optionality is the
+	// point: a worker without it takes no census, which is exactly what
+	// every build before this one did, and nothing else about the Slot
+	// changes.
+	Census execution.PlanCensusStore
 	// Targets resolves a Plan's target plan for one Slot (decision-017). It
 	// is optional the way ExecutionEvidence is, and for a safer reason: a
 	// worker without it does not run target-plan Plans on no target, it
@@ -91,6 +97,48 @@ type SlotExecutionCoordinator struct {
 	// One per process, because a streak is about rounds rather than about one
 	// Slot. See no_data_skip_streak.go.
 	noDataSkips noDataSkipStreaks
+	// censusPeaks is the retained bytes each owned Query Group's last Slot
+	// held, which is what decides whether its Plans are worth a dimension
+	// census. Per process rather than per Slot because a Slot cannot judge
+	// itself: what it will hold is only known once it has held it, and a
+	// census has to be counted while the series go past. A Query Group's
+	// first Slot after a restart takes no census and the next one decides
+	// on its reading, which is the same one-round lag the byte constraint
+	// plans placement on.
+	censusPeaks slotRetainedPeaks
+}
+
+// slotRetainedPeaks remembers one number per Query Group: what its last Slot
+// on this replica retained.
+//
+// A Query Group that moves to another replica leaves its entry behind, the
+// way the no-data skip streaks do and for the same reason: the entry is only
+// ever read as the gate on a Slot of that Query Group running here again, so
+// a stale one costs a map entry and nothing else, and the first Slot after it
+// comes back reads the last thing it did hold here rather than nothing.
+// Entries are replaced rather than accumulated, so the map is bounded by the
+// Query Groups this replica has owned.
+type slotRetainedPeaks struct {
+	mu    sync.Mutex
+	peaks map[execution.QueryGroupIdentity]uint64
+}
+
+func (peaks *slotRetainedPeaks) record(queryGroup execution.QueryGroupIdentity, retained uint64) {
+	if queryGroup == "" {
+		return
+	}
+	peaks.mu.Lock()
+	defer peaks.mu.Unlock()
+	if peaks.peaks == nil {
+		peaks.peaks = make(map[execution.QueryGroupIdentity]uint64)
+	}
+	peaks.peaks[queryGroup] = retained
+}
+
+func (peaks *slotRetainedPeaks) read(queryGroup execution.QueryGroupIdentity) uint64 {
+	peaks.mu.Lock()
+	defer peaks.mu.Unlock()
+	return peaks.peaks[queryGroup]
 }
 
 type processProvisionalReservations struct {
@@ -293,6 +341,13 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 	})
 	queryResult, queryReason := provisionalResult(stream.evaluated)
 	coordinator.observeQueryCompleted(ctx, request.Operation, started, queryResult, queryReason, completion, stream.evaluated)
+	// The census of what this Slot saw, before the round's own writes: it is
+	// a planning input, not part of the round, so it neither holds up the
+	// sequencing nor fails the Slot. The Slot's own retained bytes are
+	// recorded here, whether or not it took one: that reading is what
+	// decides the next Slot of this Query Group.
+	stream.writeCensuses(ctx)
+	coordinator.censusPeaks.record(stream.header.Contract.Slot.QueryGroup, stream.retainedTotal())
 	if len(stream.evaluated.Plans) == 0 {
 		return execution.SlotExecutionResult{Result: queryResult, ReasonCode: queryReason, Usage: stream.budgetUsage()}, nil
 	}
