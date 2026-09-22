@@ -692,6 +692,16 @@ type runtimeLoadBatch struct {
 	keys    []string
 }
 
+// runtimeLoadPass carries what the first pass learned into the second: which
+// series still need the older representation, and the framed bytes they came
+// with, so both records are classified together exactly as they were when one
+// call fetched both keys.
+type runtimeLoadPass struct {
+	envelopes bool
+	pending   []int
+	frames    map[int][]byte
+}
+
 func (batch *runtimeLoadBatch) reset() {
 	batch.indexes, batch.keys = batch.indexes[:0], batch.keys[:0]
 }
@@ -781,7 +791,7 @@ func isReadTimeout(err error) bool {
 // corrupt or oversize blob affects only its own item; a failed read marks the
 // whole batch retryable, exactly as the failed single reads did.
 func (store *ExecutionStore) loadRuntimeBatch(
-	ctx context.Context, request execution.StatePreflightRequest, batch *runtimeLoadBatch, views []execution.RuntimeStateView,
+	ctx context.Context, request execution.StatePreflightRequest, batch *runtimeLoadBatch, views []execution.RuntimeStateView, pass *runtimeLoadPass,
 ) (loaded int64, largest int, read bool) {
 	if len(batch.indexes) == 0 {
 		return 0, 0, false
@@ -797,15 +807,54 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			views[index] = runtimeLoadFailure(view, err)
 			continue
 		}
-		envelopeRaw, framedRaw := values[2*position], values[2*position+1]
-		weight := len(envelopeRaw) + len(framedRaw)
-		loaded += int64(weight)
-		if weight > largest {
-			largest = weight
+		raw := values[position]
+		loaded += int64(len(raw))
+		if len(raw) > largest {
+			largest = len(raw)
 		}
-		views[index] = store.readStoredRecord(request, item, envelopeRaw, framedRaw)
+		if pass.envelopes {
+			// The envelope arrived for a series whose frame could not answer.
+			// The frame's bytes travel with it so the two are classified
+			// together, which is the shape this decision has always had when
+			// both records existed.
+			views[index] = store.readStoredRecord(request, item, raw, pass.frames[index])
+			continue
+		}
+		classified, needsEnvelope := store.readFramedRecord(request, item, raw)
+		if needsEnvelope {
+			pass.pending = append(pass.pending, index)
+			pass.frames[index] = raw
+			continue
+		}
+		views[index] = classified
 	}
 	return loaded, largest, err == nil
+}
+
+// readFramedRecord classifies a series from its framed record alone, and says
+// when it cannot.
+//
+// It cannot in exactly the cases the older representation was kept for: no
+// frame at all, or a frame whose bytes do not read as a record this binary
+// knows how to refuse on its own. A frame written by a newer binary is not one
+// of them - that refusal is the honest answer whatever the older key holds,
+// and it is the answer the pair of keys already produced.
+func (store *ExecutionStore) readFramedRecord(
+	request execution.StatePreflightRequest, item execution.StatePreflightItem, framedRaw []byte,
+) (execution.RuntimeStateView, bool) {
+	if framedRaw == nil {
+		return execution.RuntimeStateView{}, true
+	}
+	if len(framedRaw) > store.options.MaxValueBytes {
+		return execution.RuntimeStateView{Identity: item.Identity, BlobRevision: 1, Status: execution.StateDeterministicInvalid,
+			ReasonCode: execution.ReasonCode(contract.ReasonStateBudgetExceeded)}, false
+	}
+	decoded := decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
+	if decoded.Status == execution.StateDeterministicInvalid &&
+		decoded.ReasonCode != execution.ReasonCode(contract.ReasonStateSchemaUnsupported) {
+		return execution.RuntimeStateView{}, true
+	}
+	return store.readStoredRecord(request, item, nil, framedRaw), false
 }
 
 // readStoredRecord turns the two values one series may hold into the one view

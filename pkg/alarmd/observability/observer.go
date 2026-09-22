@@ -399,6 +399,11 @@ type Counts struct {
 	Bytes      int64
 	Keys       int64
 	StateBytes int64
+	// EnvelopeReads is how many of a state preflight's series had to be read
+	// from the older representation as well, because the framed record could
+	// not answer for them. Zero is the finished migration, and a Query Group
+	// that has stayed at zero is one whose compatibility read buys nothing.
+	EnvelopeReads int64
 }
 
 // TargetResolutionFacts is one Plan's target plan resolved for one Slot:

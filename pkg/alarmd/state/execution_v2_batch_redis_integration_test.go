@@ -176,9 +176,11 @@ func TestRedisFencedBatchApplyStoresSequentialBytesWithinBoundedRoundTrips(t *te
 	fixture.client.reset()
 	loaded := loadInStreamBatches(t, batched, items)
 	// One safe batch of 16 for a Query Group nothing has been read for, then
-	// the item bound once its record size is known.
-	if fixture.client.mgets != 5 {
-		t.Fatalf("preflight MGET round trips = %d, want 1 safe batch of 16 + ceil(984/256) = 5", fixture.client.mgets)
+	// the item bound once its record size is known - and the same again for
+	// the envelope pass, because every series here is missing from both keys
+	// so the frame pass answers none of them.
+	if fixture.client.mgets != 9 {
+		t.Fatalf("preflight MGET round trips = %d, want the frame pass (1 safe batch of 16 + ceil(984/256) = 5) and the envelope pass (4)", fixture.client.mgets)
 	}
 	for index, view := range loaded.Items {
 		if view.Status != execution.StateMissingWarming {
@@ -378,8 +380,10 @@ func TestRedisRuntimeStateHotModelRoundTrips(t *testing.T) {
 	newTrips := fixture.client.mgets + fixture.client.evals + fixture.client.pipelines
 	t.Logf("hot model %d series: old path %d round trips in %v; batched fenced path %d round trips (mget=%d pipelines=%d) in %v",
 		series, oldTrips, oldElapsed, newTrips, fixture.client.mgets, fixture.client.pipelines, newElapsed)
-	if oldTrips != 3*series {
-		t.Fatalf("old path round trips = %d, want %d", oldTrips, 3*series)
+	// Four per series on the sequential path: the load's frame pass and
+	// envelope pass, then the apply's re-read and its EVAL.
+	if oldTrips != 4*series {
+		t.Fatalf("old path round trips = %d, want %d", oldTrips, 4*series)
 	}
 	// One safe batch, then the item bound. A Query Group nothing has been read
 	// for yet is bounded by the batch budget over the largest value the store
@@ -388,8 +392,12 @@ func TestRedisRuntimeStateHotModelRoundTrips(t *testing.T) {
 	// at the item bound. The extra round trip is that one call, per Query
 	// Group, and it is what stops a Query Group whose records grew to 345 KiB
 	// from asking for 86 MB in one MGET.
-	if fixture.client.mgets != 17 || fixture.client.pipelines != 16 || fixture.client.evals != 0 {
-		t.Fatalf("batched round trips: mget=%d pipelines=%d eval=%d, want 17 + 16", fixture.client.mgets, fixture.client.pipelines, fixture.client.evals)
+	// Doubled by the envelope pass while every series is missing from both
+	// keys, which is this fixture and the middle of a migration; a fleet whose
+	// series all have frames pays the first pass only.
+	if fixture.client.mgets != 33 || fixture.client.pipelines != 16 || fixture.client.evals != 0 {
+		t.Fatalf("batched round trips: mget=%d pipelines=%d eval=%d, want the frame pass (17) and the envelope pass (16) plus 16 pipelines",
+			fixture.client.mgets, fixture.client.pipelines, fixture.client.evals)
 	}
 	requireMatchingRedisState(t, fixture, mutations, false)
 }
