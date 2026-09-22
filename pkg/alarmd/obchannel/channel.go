@@ -47,9 +47,12 @@ const (
 	// refused budgets do not spend it: they read no evidence.
 	InvokesPerSessionPerMinute = 30
 	// sessionWindowSweep is how many sessions the gate remembers before it
-	// forgets the ones whose minute has passed. Sessions are minted at most
-	// a few a minute by the authorization gate and live an hour, so the
-	// map is small; this keeps it so if that ever changes.
+	// forgets the ones whose minute has passed. It is not a bound: a sweep
+	// forgets only past minutes, so a thousand sessions all live in the
+	// current minute would all be kept. The bound is the authorization
+	// gate's -- at most six grants a minute, sessions living an hour, so a
+	// few hundred alive at once -- and this sweep only keeps the map from
+	// carrying every session that ever was for the life of the process.
 	sessionWindowSweep = 1024
 )
 
