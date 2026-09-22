@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"testing"
 	"time"
 )
@@ -84,6 +85,16 @@ func TestEveryCheckHasExactlyOnePairOfWords(t *testing.T) {
 		if words.SinceBasis[basis] == "" {
 			t.Errorf("since basis %s has no rendering", basis)
 		}
+	}
+	// Every rule the observer can refuse a window reading under has a word,
+	// and no word is for a rule the observer does not have.
+	for _, rule := range observability.CoverageRejectionRules {
+		if words.CoverageRejected[string(rule)] == "" {
+			t.Errorf("coverage rejection rule %s has no rendering", rule)
+		}
+	}
+	if len(words.CoverageRejected) != len(observability.CoverageRejectionRules) {
+		t.Errorf("%d coverage rejection words for %d rules", len(words.CoverageRejected), len(observability.CoverageRejectionRules))
 	}
 	for source, want := range map[SinceSource]SinceBasis{SinceBusinessState: SinceExact, SinceSnapshotContinuity: SinceExact,
 		SinceRestoredLastFull: SinceAtMost, SinceRestoredAtRestart: SinceAtLeast, SinceRestoredEmptyRun: SinceAtLeast,

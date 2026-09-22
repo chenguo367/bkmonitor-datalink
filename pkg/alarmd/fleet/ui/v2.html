@@ -270,6 +270,15 @@ function objectLine(row, strategyID) {
   // disagreed in production. The page still does not gate a list on a
   // number, because a block hidden behind the wrong field disappears
   // rather than misreads.
+  // A reading the server refused stands where the windows would: the rule
+  // it broke, in the server's words, and nothing of the refused numbers.
+  // Without this line a refused reading and every-window-complete were the
+  // same absence.
+  if (row.coverage_rejected) {
+    var refused = text('li', '这一轮的窗口读数服务端判定不自洽（' + word('coverage_rejected', row.coverage_rejected.rule) + '），未展示');
+    refused.title = row.coverage_rejected.rule + (row.coverage_rejected.series ? ' · ' + row.coverage_rejected.series : '');
+    li.appendChild(refused);
+  }
   var coverage = row.coverage || {};
   var windows = coverage.windows || [];
   if (windows.length > 0 || coverage.short > 0) {

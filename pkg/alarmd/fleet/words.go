@@ -9,6 +9,8 @@
 
 package fleet
 
+import "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+
 // The product vocabulary: the words a reader of the page sees, decided here
 // and sent with every response, so the page carries no table of its own.
 //
@@ -103,6 +105,10 @@ type Words struct {
 	// SinceBasis renders the direction of a duration: measured, a lower
 	// bound, an upper bound, or refused.
 	SinceBasis map[SinceBasis]string `json:"since_basis"`
+	// CoverageRejected renders the rule the server refused a window reading
+	// under (observability.CoverageRejectionRules), for the line that
+	// stands where the windows would have been.
+	CoverageRejected map[string]string `json:"coverage_rejected"`
 	// StateOrder and ActionOrder are the lists' own order, which a JSON
 	// object cannot carry: the page lays its columns out in this order and
 	// decides none of its own.
@@ -125,6 +131,26 @@ func ProductWords() Words {
 		},
 		SinceBasis: map[SinceBasis]string{
 			SinceExact: "起点确切", SinceAtLeast: "只会更久", SinceAtMost: "只会更短", SinceRefused: "时间异常，请上报",
+		},
+		CoverageRejected: map[string]string{
+			string(observability.CoverageRejectLevelsZero):             "一个窗口都没计",
+			string(observability.CoverageRejectShortOverLevels):        "短窗数多于窗口数",
+			string(observability.CoverageRejectEmptyOverShort):         "空窗数多于短窗数",
+			string(observability.CoverageRejectGuardedOverLevels):      "被守卫的窗多于窗口数",
+			string(observability.CoverageRejectFreshOverLevels):        "新序列的窗多于窗口数",
+			string(observability.CoverageRejectShortFreshOverShort):    "新序列的短窗多于短窗数",
+			string(observability.CoverageRejectShortFreshOverFresh):    "新序列的短窗多于新序列的窗",
+			string(observability.CoverageRejectUnusableOverLevels):     "用不了记录的级别多于窗口数",
+			string(observability.CoverageRejectUnusableReasonUnpaired): "用不了记录的计数与原因不配对",
+			string(observability.CoverageRejectEmptyWithValidPoints):   "有空窗却报了有效点",
+			string(observability.CoverageRejectWindowsOverShort):       "点名的窗多于短窗数",
+			string(observability.CoverageRejectWindowsOverBound):       "点名的窗超过上限",
+			string(observability.CoverageRejectWindowUnnamed):          "点名的窗没有序列",
+			string(observability.CoverageRejectWindowRequiredZero):     "点名的窗要求 0 个点",
+			string(observability.CoverageRejectWindowNotShort):         "点名的窗其实是满的",
+			string(observability.CoverageRejectWindowHoleArithmetic):   "缺的分钟数与窗口缺口对不上",
+			string(observability.CoverageRejectWindowHoleListOverrun):  "缺的分钟列表比计数还长",
+			string(observability.CoverageRejectWindowGuardReasonFree):  "写了守卫原因却没被守卫",
 		},
 		StateOrder: append([]StateWord(nil), StateWords...), ActionOrder: append([]ActionWord(nil), ActionWords...),
 		State: map[StateWord]string{
@@ -254,11 +280,11 @@ func standingOf(row Anomaly) Standing {
 	// the direct evidence that it will not. Read the other way round, a
 	// stuck object would read as "give it one more round" for ever -- the
 	// exact state STALLED was added to name.
+	if named, one := aboutOf(row); one {
+		about := named
+		standing.About = &about
+	}
 	if planScopedCheck(row.Finding.Check) {
-		if named, one := implicatedStrategy(row); one && len(row.Strategies) > 1 {
-			about := named
-			standing.About = &about
-		}
 		if stalled(&row) {
 			standing.RefinedBy = RuleStalled
 			if verdict, decided := windowVerdictWords(row); decided {

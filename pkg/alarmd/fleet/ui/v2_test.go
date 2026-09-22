@@ -105,9 +105,14 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 		Standing: &fleet.Standing{State: fleet.StateDataAbsent, Action: fleet.ActionDataCheck, Check: fleet.CheckSeriesDataMissing, RefinedBy: fleet.RuleStalled,
 			About: &fleet.StrategyRef{StrategyID: "4102", BusinessID: "7"}},
 		Finding: fleet.Finding{Check: fleet.CheckSeriesDataMissing}}
+	// A fourth object whose window reading the server refused: the line says
+	// so in the server's words, where the windows would have been.
+	refused := fleet.Anomaly{QueryGroup: "qg-refused-abcdef", Since: since, SinceFrom: fleet.SinceBusinessState, CauseReason: "HISTORY_GAPPED",
+		Standing: &standing, Finding: fleet.Finding{Check: fleet.CheckWindowUndecided},
+		CoverageRejected: &fleet.CoverageRejected{Rule: "WINDOW_HOLE_ARITHMETIC", Series: "series-three"}}
 	card := fleet.StrategyStanding{StrategyID: "4101", AnsweredBy: "pod-a", Publication: fleet.StrategyPublication{SnapshotRevision: "53b81c9bbb2e", Epoch: 9},
 		Standing: fleet.StandingDetecting, Found: true, Line: "策略 4101：已生效，1 个对象在检测：qg-window-abc（pod-a 持有，数据没到·数据负责人查）",
-		Plans: []fleet.StrategyPlanStanding{{StrategyPlanRef: fleet.StrategyPlanRef{QueryGroup: "qg-window-abcdef", Business: "7"}, Replica: "pod-a", Existence: "active", Rows: []fleet.Anomaly{row, named, neighbour},
+		Plans: []fleet.StrategyPlanStanding{{StrategyPlanRef: fleet.StrategyPlanRef{QueryGroup: "qg-window-abcdef", Business: "7"}, Replica: "pod-a", Existence: "active", Rows: []fleet.Anomaly{row, named, refused, neighbour},
 			Config: &fleet.StrategyPlanConfigs{Redacted: true, Items: []fleet.StrategyPlanConfig{{
 				PlanID:   "4101",
 				Schedule: fleet.StrategyScheduleConfig{IntervalSeconds: 60},
@@ -151,6 +156,8 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 		"序列 series-t：8/9，记录检测用不了；缺 ", "记录到了，检测用不了",
 		// The neighbour's state, said to be the neighbour's, with no action word.
 		"本策略在检测；同对象上策略 4102：数据没到（见该策略）",
+		// The refused reading, in the server's words.
+		"这一轮的窗口读数服务端判定不自洽（缺的分钟数与窗口缺口对不上），未展示",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the rendering lacks %q:\n%s", want, rendered)
