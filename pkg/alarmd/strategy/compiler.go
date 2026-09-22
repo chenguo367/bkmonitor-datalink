@@ -332,7 +332,7 @@ func (c *PlanCompiler) deriveStateCompatibilityHash(request CompileRequest, leve
 		}
 		levelClosure[levelIndex].DetectFingerprint = level.fingerprints.Detect
 		levelClosure[levelIndex].TriggerFingerprint = level.fingerprints.Trigger
-		levelClosure[levelIndex].StateRequirement = level.stateRequirement
+		levelClosure[levelIndex].StateRequirement = level.stateRequirement.StateIdentityView()
 	}
 	identityAndAlgorithmDigest, err := contract.DeriveCanonicalDigestV2("strategy-state-input-closure-v2", struct {
 		IdentitySchemaDigest  string   `json:"identity_schema_digest"`

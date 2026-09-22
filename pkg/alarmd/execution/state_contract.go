@@ -190,7 +190,7 @@ func DeriveRuntimeLevelContractRefs(plan *strategy.CompiledPlan) ([]RuntimeLevel
 		warmup, err := contract.DeriveCanonicalDigestV2("alarmd-level-warmup-requirement-v1", struct {
 			LevelID          uint32                    `json:"level_id"`
 			StateRequirement strategy.StateRequirement `json:"state_requirement"`
-		}{definition.LevelID, level.StateRequirement()})
+		}{definition.LevelID, level.StateRequirement().StateIdentityView()})
 		if err != nil {
 			return nil, fmt.Errorf("alarmd execution: derive Level warmup requirement: %w", err)
 		}

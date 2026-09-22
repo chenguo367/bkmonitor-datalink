@@ -485,6 +485,16 @@ var codeChecks = map[string]verdict{
 	"STATE_CORRUPT":            lands(CheckDefect),
 	"STATE_SCHEMA_UNSUPPORTED": lands(CheckDefect),
 	"AUDIT_DROP":               lands(CheckDefect),
+	// The Level contract on the record this deployment stored is not the one
+	// its compiled Plan asks for. Both sides are this system's own -- it wrote
+	// the record and it compiled the Plan -- and retrying compares the same two
+	// again, so the Query Group does not complete until one of them changes.
+	// Nothing about the data or the strategy is wrong.
+	"STATE_LEVEL_CONTRACT_MISMATCH": lands(CheckDefect),
+	// The trigger evaluator refused its own state before deciding. Which
+	// invariant is on the line as a field; that it failed at all is this
+	// deployment's.
+	"TRIGGER_INVARIANT": lands(CheckDefect),
 	// The store this deployment routed to cannot do what the write needs. It is
 	// wiring rather than weather: retrying reaches the same backend and gets the
 	// same answer. It used to arrive as REDIS_UNAVAILABLE, which sent the reader

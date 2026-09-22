@@ -223,9 +223,15 @@ var failureFacets = map[string]facets{
 	"STATE_SCHEMA_UNSUPPORTED":   {StageCommit, ClassContract, DependencyNone},
 	"AUDIT_DROP":                 {StageCommit, ClassContract, DependencyNone},
 	"BACKEND_CAPABILITY_MISSING": {StageCommit, ClassContract, DependencyNone},
-	"GAP_GUARD_CONFLICT":         {StageEvaluate, ClassContract, DependencyNone},
-	"GAP_SCOPE_REASON_CONFLICT":  {StageEvaluate, ClassContract, DependencyNone},
-	"EVALUATION_FAILED":          {StageEvaluate, ClassContract, DependencyNone},
+	// Read at the evaluation, not the commit: the record was loaded and
+	// refused before anything was decided, so nothing of this round reached a
+	// write. Sending a reader to the commit would send them to a step that
+	// never ran.
+	"STATE_LEVEL_CONTRACT_MISMATCH": {StageEvaluate, ClassContract, DependencyNone},
+	"TRIGGER_INVARIANT":             {StageEvaluate, ClassContract, DependencyNone},
+	"GAP_GUARD_CONFLICT":            {StageEvaluate, ClassContract, DependencyNone},
+	"GAP_SCOPE_REASON_CONFLICT":     {StageEvaluate, ClassContract, DependencyNone},
+	"EVALUATION_FAILED":             {StageEvaluate, ClassContract, DependencyNone},
 	// The series state moved under the Slot writing it. The step is the
 	// state write -- the apply and its preflight are the commit of the
 	// round's result -- so a reader is sent to what was committing against
