@@ -10,7 +10,6 @@ package obchannel
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -117,17 +116,22 @@ type Availability struct {
 	Reason    string `json:"reason,omitempty"`
 }
 type Operation struct {
-	ID           string
-	Summary      string
-	Fields       map[string]Field
-	Required     []string
-	Examples     []Params
-	OutputSchema any
-	Limits       any
-	Availability func() Availability
-	InputRules   any
-	Validate     func(Params) error
-	Run          func(context.Context, Params) Outcome
+	ID            string
+	Summary       string
+	EvidenceScope string
+	Targetable    bool
+	// DefaultOwnerParam selects an execution owner when no explicit target is
+	// supplied. The named domain field must be a required string identity.
+	DefaultOwnerParam string
+	Fields            map[string]Field
+	Required          []string
+	Examples          []Params
+	OutputSchema      any
+	Limits            any
+	Availability      func() Availability
+	InputRules        any
+	Validate          func(Params) error
+	Run               func(context.Context, Params) Outcome
 }
 type Options struct {
 	Auth          Authorizer
@@ -137,6 +141,8 @@ type Options struct {
 	Concurrency   int
 	Operations    []Operation
 	Now           func() time.Time
+	Incarnation   string
+	Route         func(context.Context, Invocation) Response
 }
 type Channel struct {
 	options   Options
@@ -214,6 +220,19 @@ type Meta struct {
 	RequestID     string       `json:"request_id"`
 	RespondedAt   time.Time    `json:"responded_at"`
 	Session       *SessionMeta `json:"session,omitempty"`
+	Incarnation   string       `json:"incarnation,omitempty"`
+	Via           []string     `json:"via,omitempty"`
+	Owner         *OwnerMeta   `json:"owner,omitempty"`
+}
+
+// OwnerMeta is a lease observation made by the routing layer. It is distinct
+// from Incarnation, which identifies the answering process, not its lease.
+type OwnerMeta struct {
+	QueryGroup string    `json:"query_group"`
+	OwnerID    string    `json:"owner_id"`
+	OwnerEpoch uint64    `json:"owner_epoch"`
+	Deadline   time.Time `json:"deadline"`
+	ObservedAt time.Time `json:"observed_at"`
 }
 type Response struct {
 	Status   string   `json:"status"`
@@ -247,6 +266,26 @@ func New(options Options) (*Channel, error) {
 		if _, found := c.ops[op.ID]; found {
 			return nil, fmt.Errorf("duplicate OB operation %q", op.ID)
 		}
+		if op.EvidenceScope == "" {
+			op.EvidenceScope = "deployment"
+		}
+		if op.Targetable {
+			for name := range targetFields() {
+				if _, found := op.Fields[name]; found {
+					return nil, fmt.Errorf("operation %q uses reserved targeting field %q", op.ID, name)
+				}
+			}
+		}
+		if op.DefaultOwnerParam != "" {
+			field, exists := op.Fields[op.DefaultOwnerParam]
+			required := false
+			for _, name := range op.Required {
+				required = required || name == op.DefaultOwnerParam
+			}
+			if !op.Targetable || !exists || field.Type != "string" || !required {
+				return nil, fmt.Errorf("invalid default owner field for %q", op.ID)
+			}
+		}
 		for _, name := range op.Required {
 			if _, ok := op.Fields[name]; !ok {
 				return nil, fmt.Errorf("unknown required field %q", name)
@@ -270,11 +309,7 @@ func New(options Options) (*Channel, error) {
 }
 
 func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	meta := Meta{Version: Version, Revision: c.revision, EnvironmentID: c.options.EnvironmentID, AnsweredBy: c.options.Replica, Build: c.options.Build}
-	var id [16]byte
-	if _, err := rand.Read(id[:]); err == nil {
-		meta.RequestID = hex.EncodeToString(id[:])
-	}
+	meta := c.localMeta("")
 	fail := func(status int, code, message string) {
 		c.write(w, status, Response{Status: "error", Summary: message, Error: &Failure{code, message}, Meta: meta})
 	}
@@ -350,7 +385,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		rows := make([]any, 0, len(c.ordered))
 		for _, id := range c.ordered {
 			op := c.ops[id]
-			rows = append(rows, map[string]any{"operation": id, "summary": op.Summary, "effect": "read", "required_scope": cliauth.ScopeReadonly, "authorized": true, "availability": available(op), "next_call": map[string]string{"mode": "describe", "operation": id}})
+			rows = append(rows, map[string]any{"operation": id, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "effect": "read", "required_scope": cliauth.ScopeReadonly, "authorized": true, "availability": available(op), "next_call": map[string]string{"mode": "describe", "operation": id}})
 		}
 		c.write(w, 200, Response{Status: "ok", Summary: "Discover operations, describe one, then invoke it in this environment.",
 			Result:   map[string]any{"operations": rows, "budget": map[string]any{"invokes_per_session_per_minute": InvokesPerSessionPerMinute}},
@@ -376,8 +411,30 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		c.write(w, 409, Response{Status: "error", Summary: "Catalog changed; describe the operation again. This invocation did not execute or renew the session.", Error: &Failure{"catalog_changed", "Expected catalog revision does not match."}, Next: []Call{{Mode: "describe", Operation: op.ID, Params: Params{}, Reason: "Describe this operation before retrying."}}, Meta: meta})
 		return
 	}
-	if err := validate(op, req.Params); err != nil {
+	params, target, err := invocationParams(op, req.Params)
+	if err != nil {
 		fail(400, "invalid_input", err.Error())
+		return
+	}
+	if target.Replica != "" || target.OwnerQueryGroup != "" {
+		if c.options.Route == nil {
+			fail(503, "target_routing_unavailable", "Targeted evidence routing is not configured.")
+			return
+		}
+		// The external entry owns CLI admission and renewal exactly once. The
+		// internal route carries operation context, never the CLI credential.
+		session, err = c.options.Auth.Admit(ctx, session, req.Renew)
+		if err != nil {
+			fail(authStatus(err), cliauth.ErrorCode(err), "Session unavailable at routing admission.")
+			return
+		}
+		out := c.options.Route(ctx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: target})
+		out.Meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, Renewed: session.Renewed}
+		code := 200
+		if out.Status == "error" {
+			code = 502
+		}
+		c.write(w, code, out)
 		return
 	}
 	availability := available(op)
@@ -409,26 +466,30 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, Renewed: session.Renewed}
-	out := op.Run(ctx, req.Params)
-	status := "ok"
+	out := c.run(ctx, op, params, Target{}, meta)
 	code := 200
-	if !out.Complete {
-		status = "partial"
-	}
-	if out.Error != nil {
-		status = "error"
+	if out.Status == "error" {
 		code = 502
 	}
-	if out.Summary == "" {
-		out.Summary = op.Summary
-	}
-	c.write(w, code, Response{Status: status, Summary: out.Summary, Result: out.Value, Evidence: Evidence{Complete: out.Complete, Limitations: out.Limitations}, Next: out.Next, Error: out.Error, Meta: meta})
+	c.write(w, code, out)
 }
 
 func (c *Channel) write(w http.ResponseWriter, status int, response Response) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	response.Meta.RespondedAt = c.options.Now().UTC()
+	response = c.prepareResponse(response)
+	if response.Error != nil && response.Error.Code == "response_budget_exceeded" {
+		status = 502
+	}
+	encoded, _ := json.Marshal(response)
+	w.WriteHeader(status)
+	_, _ = w.Write(encoded)
+}
+
+func (c *Channel) prepareResponse(response Response) Response {
+	if response.Meta.RespondedAt.IsZero() {
+		response.Meta.RespondedAt = c.options.Now().UTC()
+	}
 	if response.Evidence.Limitations == nil {
 		response.Evidence.Limitations = []string{}
 	}
@@ -443,11 +504,8 @@ func (c *Channel) write(w http.ResponseWriter, status int, response Response) {
 		response.Evidence = Evidence{Limitations: []string{"result_not_returned"}}
 		response.Next = []Call{}
 		response.Error = &Failure{"response_budget_exceeded", response.Summary}
-		status = 502
-		encoded, _ = json.Marshal(response)
 	}
-	w.WriteHeader(status)
-	_, _ = w.Write(encoded)
+	return response
 }
 
 func available(op Operation) Availability {
@@ -472,11 +530,32 @@ func describe(op Operation) map[string]any {
 	if examples == nil {
 		examples = []Params{}
 	}
-	input := map[string]any{"type": "object", "properties": op.Fields, "required": required, "additionalProperties": false}
+	fields := op.Fields
+	if op.Targetable {
+		fields = make(map[string]Field, len(op.Fields)+3)
+		for name, field := range op.Fields {
+			fields[name] = field
+		}
+		for name, field := range targetFields() {
+			fields[name] = field
+		}
+	}
+	input := map[string]any{"type": "object", "properties": fields, "required": required, "additionalProperties": false}
 	if op.InputRules != nil {
 		input["allOf"] = op.InputRules
 	}
-	return map[string]any{"operation": op.ID, "summary": op.Summary, "effect": "read", "required_scope": cliauth.ScopeReadonly, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
+	if op.Targetable {
+		rules := targetRules()
+		if op.InputRules != nil {
+			rules = append([]any{map[string]any{"allOf": op.InputRules}}, rules...)
+		}
+		input["allOf"] = rules
+	}
+	value := map[string]any{"operation": op.ID, "summary": op.Summary, "evidence_scope": op.EvidenceScope, "targetable": op.Targetable, "effect": "read", "required_scope": cliauth.ScopeReadonly, "input_schema": input, "output_schema": op.OutputSchema, "examples": examples, "limits": op.Limits, "time_semantics": "meta.responded_at is response time; source observation times and versions remain in result. Multiple reads are not an atomic snapshot."}
+	if op.DefaultOwnerParam != "" {
+		value["default_owner_parameter"] = op.DefaultOwnerParam
+	}
+	return value
 }
 func validate(op Operation, params Params) error {
 	for _, name := range op.Required {

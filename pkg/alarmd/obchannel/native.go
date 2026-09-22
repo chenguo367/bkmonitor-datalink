@@ -30,7 +30,7 @@ func NativeOperations(handler http.Handler) []Operation {
 	}
 	limits := map[string]any{"timeout_ms": RequestTimeout.Milliseconds(), "response_bytes": MaxResponseBytes, "population": "existing Fleet snapshots; list limit bounds returned rows, not snapshot reads"}
 	makeOp := func(id, summary string, fields map[string]Field, required []string, output any, route func(Params) (string, url.Values)) Operation {
-		return Operation{ID: id, Summary: summary, Fields: fields, Required: required, OutputSchema: SchemaOf(output), Limits: limits, Run: func(ctx context.Context, p Params) Outcome {
+		return Operation{ID: id, Summary: summary, EvidenceScope: "deployment", Fields: fields, Required: required, OutputSchema: SchemaOf(output), Limits: limits, Run: func(ctx context.Context, p Params) Outcome {
 			path, query := route(p)
 			out := invokeNative(ctx, handler, path, query)
 			if result, ok := out.Value.(map[string]any); ok {
@@ -39,6 +39,9 @@ func NativeOperations(handler http.Handler) []Operation {
 				}
 				if id == "strategy.get" {
 					strategyNext(&out, p, result)
+				}
+				if id == "object.get" {
+					objectSlotNext(&out, p, result)
 				}
 				if id == "strategy.list" {
 					// This endpoint lists fact rows, not every source strategy.
@@ -83,6 +86,10 @@ func NativeOperations(handler http.Handler) []Operation {
 		}),
 	}
 	for i := range ops {
+		if ops[i].ID == "sample.get" || ops[i].ID == "observation.get" {
+			ops[i].EvidenceScope = "shared_records_with_process_diagnostics"
+			ops[i].Targetable = true
+		}
 		if ops[i].ID == "strategy.get" {
 			ops[i].Examples = []Params{{"strategy_id": "1001"}}
 			f := ops[i].Fields["strategy_id"]
@@ -138,6 +145,32 @@ func strategyNext(out *Outcome, p Params, result map[string]any) {
 		}
 		if len(out.Next) >= 13 {
 			out.Limitations = append(out.Limitations, "Next-call suggestions are limited; remaining object references stay in result.plans.")
+			break
+		}
+	}
+}
+
+// Only suggest Slots whose identity was actually captured. A wall-clock log
+// timestamp or a range summary is not an execution Slot.
+func objectSlotNext(out *Outcome, p Params, result map[string]any) {
+	rows, _ := result["records"].([]any)
+	seen := map[int64]bool{}
+	for _, row := range rows {
+		record, ok := row.(map[string]any)
+		if !ok || record["slot_identity_known"] != true || record["query_group_key"] != p.String("query_group") {
+			continue
+		}
+		number, ok := record["evaluation_time"].(json.Number)
+		if !ok {
+			continue
+		}
+		slot, err := number.Int64()
+		if err != nil || slot <= 0 || seen[slot] {
+			continue
+		}
+		seen[slot] = true
+		out.Next = append(out.Next, Call{Operation: "slot.get", Params: Params{"query_group": p.String("query_group"), "evaluation_time": slot}, Reason: "查看这轮Slot的历史查询条件、保留输入证据及重查入口。"})
+		if len(seen) == 3 {
 			break
 		}
 	}

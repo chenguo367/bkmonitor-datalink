@@ -36,7 +36,7 @@ func StoreOperations(service *obevidence.Service) []Operation {
 	storeVariants := map[string][]string{"source_strategy": {"strategy_id"}, "target_group": {"group_id"}, "dynamic_config": {"fields"}, "query_progress": {"query_group"}}
 	configRequired := map[string][]string{"source": {"strategy_id"}, "published": {"strategy_id", "query_group", "object_digest"}}
 	storeRequired := map[string][]string{"source_strategy": {"strategy_id"}, "target_group": {"group_id"}, "query_progress": {"query_group"}}
-	return []Operation{
+	ops := []Operation{
 		{ID: "strategy.config", Summary: "读取策略具体配置，并区分当前源缓存与指定发布对象；秘密字段有明确省略记录。", Fields: configFields, Required: []string{"view", "strategy_id"}, Limits: limits, OutputSchema: SchemaOf(obevidence.Result{}), InputRules: variantRules("view", configFields, configVariants, configRequired), Examples: []Params{{"view": "source", "strategy_id": "1001"}}, Validate: func(p Params) error { return validateVariant(p, "view", configVariants, configRequired) }, Run: func(ctx context.Context, p Params) Outcome {
 			return storeOutcome(service.StrategyConfig(ctx, obevidence.ConfigRequest{View: p.String("view"), StrategyID: p.String("strategy_id"), Tenant: p.String("tenant"), Business: p.String("business"), QueryGroup: p.String("query_group"), ObjectDigest: p.String("object_digest")}))
 		}},
@@ -56,6 +56,11 @@ func StoreOperations(service *obevidence.Service) []Operation {
 			return storeOutcome(service.Store(ctx, obevidence.StoreRequest{Family: p.String("family"), StrategyID: p.String("strategy_id"), GroupID: p.String("group_id"), QueryGroup: p.String("query_group"), Fields: selectedFields(p)}))
 		}},
 	}
+	for i := range ops {
+		ops[i].EvidenceScope = "replica_configured_store"
+		ops[i].Targetable = true
+	}
+	return ops
 }
 
 func selectedFields(p Params) []platformsettings.Field {

@@ -7,19 +7,24 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 
+	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cliauth"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/evidenceroute"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
 type cliRuntimeFacts struct {
@@ -29,8 +34,14 @@ type cliRuntimeFacts struct {
 	PlatformSettings *platformsettings.Observation     `json:"platform_settings"`
 }
 
+type cliControlBinding struct {
+	Incarnation string
+	StreamToken string
+	Server      *viewstream.Server
+}
+
 func cliRuntimeOperation(facts func() *observability.RuntimeConfigFacts, settings *platformsettings.Cache) obchannel.Operation {
-	return obchannel.Operation{ID: "runtime.get", Summary: "读取回答请求的这一进程实际运行配置、预算、连接位置和已采用的动态配置；不是全副本一致性结论。", Fields: map[string]obchannel.Field{}, OutputSchema: obchannel.SchemaOf(cliRuntimeFacts{}), Limits: map[string]any{"redis_commands": 0, "scope": "answering_replica"}, Run: func(context.Context, obchannel.Params) obchannel.Outcome {
+	return obchannel.Operation{ID: "runtime.get", Summary: "读取实际回答进程的运行配置、预算、连接位置和已采用动态配置；可指定实例或按执行租约定位逻辑 Worker。", EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{}, OutputSchema: obchannel.SchemaOf(cliRuntimeFacts{}), Limits: map[string]any{"redis_commands": 0, "scope": "answering_replica"}, Run: func(context.Context, obchannel.Params) obchannel.Outcome {
 		value := cliRuntimeFacts{Scope: "answering_replica", ReadAt: time.Now().UTC(), Config: facts()}
 		if settings != nil {
 			observed := settings.Observe()
@@ -44,12 +55,16 @@ func cliRuntimeOperation(facts func() *observability.RuntimeConfigFacts, setting
 // buildPhaseTwoCLI allocates only small, lazy diagnostic pools. There is no
 // startup Ping, refresh loop or detector dependency. Configuration or auth-store
 // failures disable the CLI surface, never the existing execution path.
-func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlplane.RedisCatalogRepository, progressStore *progress.Store, settings *platformsettings.Cache, facts func() *observability.RuntimeConfigFacts) (http.Handler, func() error) {
+func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlplane.RedisCatalogRepository, progressStore *progress.Store, settings *platformsettings.Cache, facts func() *observability.RuntimeConfigFacts, control cliControlBinding) (http.Handler, func() error) {
 	if !cfg.CLI.Enabled {
 		return native, func() error { return nil }
 	}
 	var clients []redis.UniversalClient
+	var closeQuery func()
 	closeClients := func() error {
+		if closeQuery != nil {
+			closeQuery()
+		}
 		var errs []error
 		for _, client := range clients {
 			errs = append(errs, client.Close())
@@ -75,8 +90,16 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	options := obevidence.Options{Catalog: catalog, Progress: progressStore}
 	options.SourceStrategy = bind("strategy_cache", cfg.StrategySourceRedis(), cfg.PhaseTwo.Control.StrategyCachePrefix)
 	// Catalog and progress share a diagnostic runtime pool, not detector I/O.
-	options.Published = bind("runtime", cfg.RuntimeStoreRedis(), cfg.Redis.StatePrefix)
+	runtimeConnection := cfg.RuntimeStoreRedis()
+	diagnosticRuntime := newClient(runtimeConnection)
+	options.Published = obevidence.RedisBinding{Client: diagnosticRuntime, Location: obevidence.Location{Role: "runtime", Address: redisAddress(runtimeConnection), Mode: runtimeConnection.Mode, DB: runtimeConnection.DB, Prefix: cfg.Redis.StatePrefix}}
 	options.QueryProgress = options.Published
+	// Route discovery is evidence I/O too. Reuse the diagnostic runtime pool,
+	// never the production ownership connection or its startup readiness path.
+	routingStore, err := ownership.NewRedisStoreWithClient(diagnosticRuntime, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership"))
+	if err != nil {
+		return composeCLI(native, nil, nil), closeClients
+	}
 	if connection, configured := cfg.TargetGroupRedis(); configured {
 		options.TargetGroup = bind("target_group", connection, targetGroupPrefix(cfg))
 	}
@@ -85,9 +108,37 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	ops := append(obchannel.NativeOperations(native), obchannel.StoreOperations(obevidence.New(options))...)
 	ops = append(ops, cliRuntimeOperation(facts, settings))
-	channel, err := obchannel.New(obchannel.Options{Auth: manager, EnvironmentID: cfg.CLI.EnvironmentID, Replica: cfg.PhaseTwo.Worker.ID, Build: version + "/" + commit, Concurrency: 1, Operations: ops})
+	// A diagnostic query has independent sockets, no retries and no production
+	// query permits. It never occupies the execution client's connection pool.
+	queryTransport := &http.Transport{Proxy: http.ProxyFromEnvironment,
+		DialContext:     (&net.Dialer{Timeout: obchannel.RequestTimeout}).DialContext,
+		MaxConnsPerHost: 1, MaxIdleConns: 1, MaxIdleConnsPerHost: 1,
+		IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: obchannel.RequestTimeout,
+		ResponseHeaderTimeout: obchannel.RequestTimeout}
+	closeQuery = queryTransport.CloseIdleConnections
+	queryClient, _ := accessuq.NewDiagnosticClient(cfg.PhaseTwo.Access.UQEndpoint, cfg.PhaseTwo.Access.QuerySource,
+		&http.Client{Transport: queryTransport, Timeout: obchannel.RequestTimeout,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }})
+	ops = append(ops, obchannel.SlotOperations(obchannel.SlotOptions{Resolve: newCLISlotResolver(cfg, diagnosticRuntime),
+		Evidence: newCLISlotEvidenceReader(cfg, diagnosticRuntime), UQ: queryClient})...)
+	var router *evidenceroute.Router
+	channelOptions := obchannel.Options{Auth: manager, EnvironmentID: cfg.CLI.EnvironmentID, Replica: cfg.PhaseTwo.Worker.ID, Incarnation: control.Incarnation, Build: version + "/" + commit, Concurrency: 1, Operations: ops}
+	if control.Server != nil {
+		channelOptions.Route = func(ctx context.Context, call obchannel.Invocation) obchannel.Response {
+			return router.Invoke(ctx, call)
+		}
+	}
+	channel, err := obchannel.New(channelOptions)
 	if err != nil {
 		return composeCLI(native, nil, nil), closeClients
+	}
+	if control.Server != nil {
+		router, err = evidenceroute.New(evidenceroute.Options{Store: routingStore, WorkerID: cfg.PhaseTwo.Worker.ID, StreamToken: control.StreamToken, EnvironmentID: cfg.CLI.EnvironmentID,
+			Build: channelOptions.Build, Incarnation: control.Incarnation, CatalogRevision: channel.CatalogRevision(), Execute: channel.ExecuteEvidence})
+		if err != nil {
+			return composeCLI(native, nil, nil), closeClients
+		}
+		control.Server.SetEvidenceHandler(router.Handle)
 	}
 	return composeCLI(native, channel, manager.Handler()), closeClients
 }

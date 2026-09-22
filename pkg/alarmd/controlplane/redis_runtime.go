@@ -2052,6 +2052,17 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 	ctx context.Context,
 	request execution.FreezeSlotContractRequest,
 ) (execution.FrozenSlotContractFact, error) {
+	return runtime.freezeSlotContract(ctx, request, false)
+}
+
+// FreezeObservedSlotContract preserves the production contract checks while
+// requiring the Segment's retained content. Diagnostics must not build a fleet
+// catalog index as a fallback for one missing historical object.
+func (runtime *RedisCatalogRuntime) FreezeObservedSlotContract(ctx context.Context, request execution.FreezeSlotContractRequest) (execution.FrozenSlotContractFact, error) {
+	return runtime.freezeSlotContract(ctx, request, true)
+}
+
+func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, request execution.FreezeSlotContractRequest, observed bool) (execution.FrozenSlotContractFact, error) {
 	if err := request.Validate(); err != nil {
 		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
 	}
@@ -2071,9 +2082,14 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 	}
 	publication := SnapshotPublicationRef{SnapshotRevision: schedule.Segment.Publication.SnapshotRevision,
 		PublicationEpoch: uint64(schedule.Segment.Publication.PublicationEpoch)}
-	group, err := runtime.repository.LoadSegmentQueryGroup(ctx, schedule.Segment, request.EvaluationTime, func(ctx context.Context) (QueryGroup, error) {
-		return runtime.repository.loadPublishedQueryGroup(ctx, publication, request.QueryGroup)
-	})
+	var group QueryGroup
+	if observed {
+		group, err = runtime.repository.LoadObservedSegmentQueryGroup(ctx, schedule.Segment, request.EvaluationTime)
+	} else {
+		group, err = runtime.repository.LoadSegmentQueryGroup(ctx, schedule.Segment, request.EvaluationTime, func(ctx context.Context) (QueryGroup, error) {
+			return runtime.repository.loadPublishedQueryGroup(ctx, publication, request.QueryGroup)
+		})
+	}
 	if err != nil {
 		if errors.Is(err, ErrCatalogObjectUnavailable) {
 			return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailurePlanMaterialize, err)
@@ -2148,7 +2164,9 @@ func (runtime *RedisCatalogRuntime) FreezeSlotContract(
 	// Whether this Segment still names what the control plane publishes. Not
 	// part of the no-data hops: it is the same question one level up, asked of
 	// the whole execution content rather than one field of it.
-	runtime.repository.observeSegmentContentFreshness(ctx, schedule.Segment)
+	if !observed {
+		runtime.repository.observeSegmentContentFreshness(ctx, schedule.Segment)
+	}
 	// Both hops, reported on every Slot whether either is any or none. The
 	// leader's published count and these two are read in order: the first that
 	// reads zero while the one before it does not is where the section is lost.
