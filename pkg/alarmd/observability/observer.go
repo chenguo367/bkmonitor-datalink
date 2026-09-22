@@ -1963,8 +1963,16 @@ type Observation struct {
 	// as, on the evaluation line of the Plan that decided them (empty when
 	// the line is not a Plan's); OutputWireFormats how many events of an
 	// event_acked batch went out as each.
-	OutputWireFormat       string
-	OutputWireFormats      OutputWireFormatCounts
+	OutputWireFormat  string
+	OutputWireFormats OutputWireFormatCounts
+	// PlanSeriesMatched is how many PRIMARY series this Slot's query bound to
+	// the Plan an evaluation line is about, on every evaluation line of that
+	// Plan and on the completion-only line of a Plan bound to none. A Plan
+	// bound to no series evaluates nothing, writes no state and advances no
+	// guard: a gap guard on such a Plan sits at 0 of N for as long as the
+	// Plan has no input, and read without this number that is a guard
+	// warming. Nil when the line is not a Plan's.
+	PlanSeriesMatched      *int
 	RunOutcome             string
 	Attempted              bool
 	ExecuteOutcome         string

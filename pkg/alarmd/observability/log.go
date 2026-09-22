@@ -223,6 +223,11 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	if observation.OutputWireFormat != "" {
 		attributes = append(attributes, slog.String("wire_format", observation.OutputWireFormat))
 	}
+	if matched := observation.PlanSeriesMatched; matched != nil {
+		// Zero rendered: a Plan bound to no series is the reading this key
+		// exists for, and it is the line a search for the strategy finds.
+		attributes = append(attributes, slog.Int("series_matched", *matched))
+	}
 	if counts := observation.OutputWireFormats; len(counts) > 0 {
 		// One key per format the batch carried, under the format's own
 		// name: a grep for standard_raw_event finds the batches that sent

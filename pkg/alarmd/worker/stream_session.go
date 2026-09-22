@@ -1529,9 +1529,18 @@ func (stream *streamedExecution) observeEvaluationCompleted(
 		Trace:                observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID, DimensionIdentityDigest: string(series)},
 		AlgorithmEvaluations: evaluations, AlgorithmInputs: namedInputs,
 		RecoveryGates: recoveryGateFacts(due, evaluated), OpenAlertGates: openAlertGateFacts(due, evaluated),
-		OutputWireFormat: planWireFormat(due),
+		OutputWireFormat: planWireFormat(due), PlanSeriesMatched: stream.planSeriesMatched(due),
 	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
+}
+
+// planSeriesMatched is how many PRIMARY series the Slot bound to the Plan,
+// for the line: the number that separates a guard warming from a guard on a
+// Plan with nothing to warm on. Counted from what the stream bound, which is
+// what the evaluation ran on.
+func (stream *streamedExecution) planSeriesMatched(due execution.DuePlan) *int {
+	matched := len(stream.planSeries[due.Identity])
+	return &matched
 }
 
 // planWireFormat is the format the Plan's events go out as, for the
@@ -1617,9 +1626,10 @@ func (stream *streamedExecution) observeCompletionOnlyPlan(
 		Result: evaluated.Result, Operation: observability.Operation(stream.request.Operation),
 		Direction: observability.DirectionInternal, ReasonCode: evaluated.ReasonCode,
 		EvaluationOwner: costEvaluationOwner(due.Identity), EvaluationRecordsKnown: true,
-		Trace:            observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID},
-		AlgorithmInputs:  stream.completionOnlyAlgorithmInputFacts(due),
-		OutputWireFormat: planWireFormat(due),
+		Trace:             observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID},
+		AlgorithmInputs:   stream.completionOnlyAlgorithmInputFacts(due),
+		OutputWireFormat:  planWireFormat(due),
+		PlanSeriesMatched: stream.planSeriesMatched(due),
 	}
 	stream.coordinator.ports.Observer.Observe(ctx, observation)
 }

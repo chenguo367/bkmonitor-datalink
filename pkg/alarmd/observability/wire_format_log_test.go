@@ -40,6 +40,24 @@ func TestTheWireFormatIsOnTheEvaluationAndACKLines(t *testing.T) {
 	if event["wire_format"] != contract.WireFormatStandardRawEvent {
 		t.Fatalf("evaluation line wire_format = %#v, want %q; event=%#v", event["wire_format"], contract.WireFormatStandardRawEvent, event)
 	}
+	if _, present := event["series_matched"]; present {
+		t.Fatalf("a line without a series count carries series_matched; event=%#v", event)
+	}
+	// The count, zero included: a Plan bound to no series is the reading.
+	zero := 0
+	output.Reset()
+	withheldObserver(t, &output).Observe(context.Background(), Observation{
+		Component: ComponentEvaluation, Stage: StageEvaluationCompleted, Result: ResultSuccess,
+		Trace:             TraceFields{StrategyID: "4102", QueryGroupKey: "qg-wire", EvaluationTime: 600},
+		PlanSeriesMatched: &zero,
+	})
+	event = map[string]any{}
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode evaluation log: %v; log=%s", err, output.String())
+	}
+	if event["series_matched"] != float64(0) {
+		t.Fatalf("evaluation line series_matched = %#v, want a rendered 0; event=%#v", event["series_matched"], event)
+	}
 
 	output.Reset()
 	withheldObserver(t, &output).Observe(context.Background(), Observation{

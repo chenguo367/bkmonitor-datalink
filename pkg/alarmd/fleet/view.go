@@ -337,6 +337,16 @@ type NoDataMemoryUpkeep struct {
 	Plans int `json:"plans,omitempty"`
 }
 
+// PlanSeriesMatched is how many PRIMARY series the latest evaluated round
+// bound to one Plan, with the Slot it was counted on and when this process
+// saw it. Zero is the reading this exists for.
+type PlanSeriesMatched struct {
+	Plan           StrategyRef `json:"plan"`
+	Matched        int         `json:"matched"`
+	EvaluationTime int64       `json:"evaluation_time"`
+	LastSeenAt     time.Time   `json:"last_seen_at"`
+}
+
 // PlanWireFormat is the wire format one Plan's events are published as, as
 // the Plan's last evaluation line said it, with when this process last saw
 // it. The word is the sink's resolved one -- python_compatible or
@@ -592,6 +602,12 @@ type GapGuard struct {
 	LastAt          time.Time `json:"last_at"`
 	Rounds          int       `json:"rounds"`
 	UnchangedRounds int       `json:"unchanged_rounds"`
+	// SeriesMatched is how many PRIMARY series the latest evaluated round
+	// bound to the guard's Plan, and SeriesMatchedKnown whether a round has
+	// said: a guard at 0 of N whose Plan bound no series is not warming, it
+	// has nothing to warm on, and the two look the same without this.
+	SeriesMatched      int  `json:"series_matched"`
+	SeriesMatchedKnown bool `json:"series_matched_known"`
 	// Measure says what Observed counts: the points that arrived since the
 	// guard's trigger, so it climbs one per round while the window beside it
 	// on the row (HistoryCoverage.WorstValid) holds points from either side
@@ -1105,6 +1121,13 @@ type Anomaly struct {
 	// effective_output needs the catalog in memory, and a deployment that
 	// keeps none had no way to answer which strategies publish which way.
 	WireFormats []PlanWireFormat `json:"wire_formats,omitempty"`
+	// PlanSeries is how many PRIMARY series the latest evaluated round bound
+	// to each of the object's Plans, by Plan, smallest strategy first, from
+	// the Plan's own evaluation lines. Absent until a Plan evaluates. This is
+	// the per-Plan input evidence the row otherwise lacks: a Plan bound to no
+	// series evaluates nothing and advances no guard, and a held guard at 0
+	// of N on such a Plan is not warming -- it has nothing to warm on.
+	PlanSeries []PlanSeriesMatched `json:"plan_series,omitempty"`
 	// NoDataTracking is on every row of an object one of whose Plans this
 	// process has seen a no-data round decide: what the last deciding round
 	// of each such Plan counted, by Plan, smallest strategy first. Absent
