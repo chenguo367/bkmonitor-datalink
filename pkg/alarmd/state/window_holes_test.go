@@ -51,6 +51,11 @@ func TestTheHolesOfAWindowAreThePositionsTheSummaryDidNotCount(t *testing.T) {
 		t.Fatalf("holes %d+%d and shortfall %d describe two different windows",
 			holes.MissingTotal, holes.UnusableTotal, summary.RequiredPositions-summary.ValidPositions)
 	}
+	// A hole at the window's first position is a hole like any other: seven
+	// positions ending at 400 start at 40, where nothing was ever applied.
+	if _, leading := history.SummarizeHoles(400, 7, 16); !reflect.DeepEqual(leading.Missing, []int64{40, 160, 280, 340}) || leading.MissingTotal != 4 {
+		t.Fatalf("with a hole at the first position: %+v, want 40 listed first", leading)
+	}
 	// The bound cuts the list, never the total: a window short by more than
 	// the bound still says how short.
 	_, bounded := history.SummarizeHoles(400, 6, 2)
