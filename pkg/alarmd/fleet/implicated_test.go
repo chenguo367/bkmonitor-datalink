@@ -53,6 +53,17 @@ func TestTheEvidenceNamesOnePlanOrNone(t *testing.T) {
 			t.Errorf("%s: implicated = %+v/%v, want %+v/%v", name, got, one, testCase.want, testCase.one)
 		}
 	}
+	// The standing carries About only where it says something: an object
+	// running one Plan has no neighbour for the words to be told apart from.
+	single := Anomaly{Finding: Finding{Check: CheckSeriesDataMissing}, Strategies: []StrategyRef{refA}, Guards: []GapGuard{heldGuard(refA, 0)}}
+	if standing := standingOf(single); standing.About != nil {
+		t.Fatalf("standing of a one-Plan object = %+v, want no About", standing)
+	}
+	shared := single
+	shared.Strategies = []StrategyRef{refA, refB}
+	if standing := standingOf(shared); standing.About == nil || *standing.About != refA {
+		t.Fatalf("standing of a shared object = %+v, want About the Plan the guard belongs to", standing)
+	}
 }
 
 // One object running three Plans, stalled because one of them bound no
