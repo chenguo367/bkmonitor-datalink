@@ -163,7 +163,7 @@ func (coordinator *SlotExecutionCoordinator) recordExecutionEvidence(
 	// finalization that reads it runs after the replay window closes, and a
 	// mark that ended where its reader begins was never there to be read.
 	err := coordinator.ports.ExecutionEvidence.Record(
-		writeCtx, request.Contract.Slot, request.DuePlanTargets.Plans, applied,
+		writeCtx, request.Contract.Slot, execution.PlanIdentitiesOf(request.DuePlanTargets.Plans), applied,
 		time.UnixMilli(request.KeepUntilUnixMilli), now,
 	)
 	result := observability.Result(observability.ResultSuccess)

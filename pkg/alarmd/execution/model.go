@@ -295,6 +295,73 @@ type ShardRef struct {
 // IsZero reports a Plan that is not a piece of a split strategy.
 func (shard ShardRef) IsZero() bool { return shard == ShardRef{} }
 
+// ShardOf reads a carried shard: nil is the zero ShardRef. Persisted carriers
+// hold a pointer so that a Plan which is not split serializes without the
+// field - encoding/json does not omit a zero struct - and this is the one
+// way to read them back into the value the keys and identities take.
+func ShardOf(shard *ShardRef) ShardRef {
+	if shard == nil {
+		return ShardRef{}
+	}
+	return *shard
+}
+
+// PlanKey is what a Plan is indexed by wherever one strategy may be present
+// as several Plans: the identity and the piece. The identity alone is the
+// event identity and stays one per strategy; the piece is what makes N Plans
+// of a split strategy N entries rather than one overwriting the others. It
+// is the index, not the record key: a piece keeps its index across a
+// re-split that changes its matcher, which is how a re-split reads as the
+// piece's own cutover rather than as one Plan leaving and another arriving.
+// The record keys (gap marker, no-data memory) take the matcher digest
+// instead, so a re-split starts those from zero as decision-020 rules.
+//
+// A Plan that is not split has index zero, the same key it had before pieces
+// existed.
+//
+// The identity is embedded and the index is omitted when zero, so a key
+// serializes exactly as the identity did wherever a list of Plans is
+// persisted (the frozen due-Plan targets of an unfinished Slot, an
+// activation request): every record of a Plan that is not split keeps its
+// bytes, and an old build reads the same shape it wrote.
+type PlanKey struct {
+	PlanIdentity
+	ShardIndex int `json:",omitempty"`
+}
+
+// PlanKeyOf is the key of a Plan carrying the given shard.
+func PlanKeyOf(plan PlanIdentity, shard ShardRef) PlanKey {
+	return PlanKey{PlanIdentity: plan, ShardIndex: shard.Index}
+}
+
+// Key is this due Plan's index key.
+func (due DuePlan) Key() PlanKey { return PlanKeyOf(due.Identity, due.Shard) }
+
+// PlanIdentitiesOf projects keys onto their identities, for the records that
+// are kept per Query Group and so name a Plan by identity alone: within one
+// group a strategy has one piece, and the identity is the piece.
+func PlanIdentitiesOf(keys []PlanKey) []PlanIdentity {
+	identities := make([]PlanIdentity, len(keys))
+	for index, key := range keys {
+		identities[index] = key.PlanIdentity
+	}
+	return identities
+}
+
+// LessPlanKey orders keys by identity and then by piece.
+func LessPlanKey(left, right PlanKey) bool {
+	if left.PlanIdentity != right.PlanIdentity {
+		return lessPlanIdentity(left.PlanIdentity, right.PlanIdentity)
+	}
+	return left.ShardIndex < right.ShardIndex
+}
+
+// ShardsEqual compares two carried shards by content. Two carriers decoded
+// from the same bytes hold different pointers, so a struct holding one must
+// not be compared with ==: that would call every split Plan changed on every
+// read.
+func ShardsEqual(left, right *ShardRef) bool { return ShardOf(left) == ShardOf(right) }
+
 // Validate accepts the zero ShardRef and otherwise requires a whole
 // coordinate: a piece knows its dimension, its place among at least two, and
 // its matcher. A strategy split into one piece is not split, and a piece
@@ -2964,8 +3031,11 @@ func findGapPreflight(items []PlanGapLoadItem, identity PlanGapIdentity) (PlanGa
 }
 
 type SideEffectAdmissionRequest struct {
-	Contract        FrozenExecutionContractRef
-	Plan            PlanIdentity
+	Contract FrozenExecutionContractRef
+	// Plan is keyed by strategy and piece: the activation the admission
+	// reads is indexed by both, and a piece asked about by identity alone
+	// would read as the strategy's zeroth piece.
+	Plan            PlanKey
 	StateApplyEpoch StateApplyEpoch
 	OwnerFence      OwnerFence
 }

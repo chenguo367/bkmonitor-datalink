@@ -216,10 +216,10 @@ func frozenExecutionFacts(
 	}
 	targets := execution.FrozenDuePlanTargets{
 		DuePlanSetDigest: fact.Contract.DuePlanSetDigest,
-		Plans:            make([]execution.PlanIdentity, len(fact.DuePlans)),
+		Plans:            make([]execution.PlanKey, len(fact.DuePlans)),
 	}
 	for index := range fact.DuePlans {
-		targets.Plans[index] = fact.DuePlans[index].Identity
+		targets.Plans[index] = fact.DuePlans[index].Key()
 	}
 	if err := targets.Validate(fact.Contract); err != nil {
 		return execution.FrozenDuePlanTargets{}, 0, err
@@ -1249,13 +1249,13 @@ type productionPhaseTwoActivation struct {
 func (activation productionPhaseTwoActivation) IsPlanActive(
 	ctx context.Context,
 	contractRef execution.FrozenExecutionContractRef,
-	plan execution.PlanIdentity,
+	plan execution.PlanKey,
 	epoch execution.StateApplyEpoch,
 ) (bool, error) {
 	if activation.source == nil || epoch == 0 {
 		return false, errors.New("phase-two production Plan activation is invalid")
 	}
-	request := execution.PlanActivationRequest{Contract: contractRef, Plans: []execution.PlanIdentity{plan}}
+	request := execution.PlanActivationRequest{Contract: contractRef, Plans: []execution.PlanKey{plan}}
 	result, err := activation.source.LoadActivations(ctx, request)
 	if err != nil {
 		return false, err

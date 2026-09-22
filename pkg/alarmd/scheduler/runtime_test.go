@@ -394,7 +394,7 @@ func frozenSlot(queryGroup execution.QueryGroupIdentity) FrozenSlot {
 		AssignmentGeneration: 1,
 	}, DuePlanTargets: execution.FrozenDuePlanTargets{
 		DuePlanSetDigest: contract.DuePlanSetDigest,
-		Plans:            []execution.PlanIdentity{{TenantID: "tenant", BusinessID: "2", StrategyID: "7"}},
+		Plans:            []execution.PlanKey{{PlanIdentity: execution.PlanIdentity{TenantID: "tenant", BusinessID: "2", StrategyID: "7"}}},
 	}, EarliestQueryDeadlineUnixMilli: 101_000, RecoveryUntilUnixMilli: 701_000,
 		KeepUntilUnixMilli: 777_000, ExpectedNextSlot: contract.Slot.EvaluationTime}
 }

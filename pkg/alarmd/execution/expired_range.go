@@ -119,9 +119,13 @@ func (p ExpiredRangeProjectionV1) validateFacts() error {
 		return bad()
 	}
 	for _, projection := range []UnfinishedSlotProjection{p.First, p.Last} {
+		// Compared by identity: the Schedule's Plans are one Query Group's,
+		// and a Query Group holds one piece of a strategy, so within it the
+		// identity names the piece. The Schedule entry does not carry the
+		// piece; the targets do, and only the identity half is read here.
 		targets := make(map[PlanIdentity]struct{}, len(projection.DuePlanTargets.Plans))
 		for _, target := range projection.DuePlanTargets.Plans {
-			targets[target] = struct{}{}
+			targets[target.PlanIdentity] = struct{}{}
 		}
 		ref := projection.Contract
 		segment := p.Schedule.Segment

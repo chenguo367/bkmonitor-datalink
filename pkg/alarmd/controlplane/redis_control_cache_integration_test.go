@@ -244,7 +244,7 @@ func (fixture controlReadCacheFixture) coldRepository(t *testing.T) (*controlpla
 func (fixture controlReadCacheFixture) activationRequest() execution.PlanActivationRequest {
 	return execution.PlanActivationRequest{
 		Contract: fixture.contract.Contract,
-		Plans:    []execution.PlanIdentity{fixture.contract.DuePlans[0].Identity},
+		Plans:    []execution.PlanKey{fixture.contract.DuePlans[0].Key()},
 	}
 }
 

@@ -104,15 +104,15 @@ func activationsFromTimeline(request execution.PlanActivationRequest, timeline p
 			return execution.PlanActivationResult{}, errors.New("alarmd controlplane: activation request does not reference its persisted Schedule Segment")
 		}
 		historical := schedule.Segment.End != nil
-		byPlan := make(map[execution.PlanIdentity]execution.PlanActivationFact, len(segment.Plans))
+		byPlan := make(map[execution.PlanKey]execution.PlanActivationFact, len(segment.Plans))
 		for _, record := range segment.Plans {
-			byPlan[record.Fact.Plan] = record.Fact
+			byPlan[record.Fact.Key()] = record.Fact
 		}
 		result := execution.PlanActivationResult{Contract: contractRef, Facts: make([]execution.PlanActivationFact, 0, len(request.Plans))}
 		for _, plan := range request.Plans {
 			fact, found := byPlan[plan]
 			if historical || !found {
-				fact = execution.PlanActivationFact{Plan: plan, Selection: execution.ActivationNone}
+				fact = execution.PlanActivationFact{Plan: plan.PlanIdentity, Selection: execution.ActivationNone, Shard: shardPointerOf(plan)}
 			}
 			result.Facts = append(result.Facts, fact)
 		}

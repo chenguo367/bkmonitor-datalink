@@ -68,7 +68,7 @@ func retainRuntimeExecutableCatalog(
 	result.QueryGroups = make([]QueryGroup, 0, len(catalog.QueryGroups))
 	result.Dispositions = append([]ObjectDisposition(nil), catalog.Dispositions...)
 	groups := make(map[execution.QueryGroupIdentity]*QueryGroup, len(catalog.QueryGroups))
-	seenPlans := make(map[execution.PlanIdentity]struct{})
+	seenPlans := make(map[execution.PlanKey]struct{})
 	lastGoodPlans := indexLastGoodPlans(lastGood)
 	rejectClosure := func(sourceID string, dispositions ...ObjectDisposition) {
 		result.Dispositions = append(result.Dispositions, dispositions...)
@@ -83,10 +83,10 @@ func retainRuntimeExecutableCatalog(
 		}
 		plan.StateGeneration = execution.StateGeneration(compiled.StateCompatibilityHash())
 		observeRetention(&result.Retention, compiled)
-		if _, duplicate := seenPlans[plan.Identity]; duplicate {
+		if _, duplicate := seenPlans[plan.Key()]; duplicate {
 			return errors.New("alarmd controlplane: duplicate runtime executable Plan identity")
 		}
-		seenPlans[plan.Identity] = struct{}{}
+		seenPlans[plan.Key()] = struct{}{}
 		identity, err := deriveQueryGroupIdentity(facts)
 		if err != nil {
 			return err
