@@ -162,3 +162,54 @@ func TestAMalformedTimeRangeIsAcceptedAndNamed(t *testing.T) {
 		t.Fatal("the pair is not always reported, so its zero is not a reading")
 	}
 }
+
+// A strategy refused for a query config it cannot decode names the config
+// and says what was wrong with it, in the compiler's words: a reader of the
+// audit gets items[0].query_configs[1] and "query interval is invalid", not a
+// word for a document of a few hundred keys. The same shape LEVEL_INVALID
+// has carried since its field path was added.
+func TestAQueryConfigRefusalNamesTheConfigAndWhatWasWrongWithIt(t *testing.T) {
+	document := map[string]any{}
+	if err := json.Unmarshal(realThresholdDocuments(t)[0], &document); err != nil {
+		t.Fatal(err)
+	}
+	item := document["items"].([]any)[0].(map[string]any)
+	configs := item["query_configs"].([]any)
+	var second map[string]any
+	if err := json.Unmarshal(mustMarshal(t, configs[0]), &second); err != nil {
+		t.Fatal(err)
+	}
+	second["agg_interval"] = -60
+	item["query_configs"] = append(configs, second)
+	encoded := mustMarshal(t, document)
+	planner, err := controlplane.NewLegacyPrimaryQueryCompiler("uq-primary-v1", "UTC", testLegacyQueryRuntimeFacts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{{SourceID: "1001", Document: encoded, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}}}, Planner: planner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, disposition := range catalog.Dispositions {
+		if disposition.Reason != "QUERY_CONFIG_INVALID" {
+			continue
+		}
+		if disposition.FieldPath != "items[0].query_configs[1]" {
+			t.Fatalf("the refusal names %q, want items[0].query_configs[1]", disposition.FieldPath)
+		}
+		if !strings.Contains(disposition.Detail, "query interval is invalid") {
+			t.Fatalf("the refusal says %q, want the compiler's words about the interval", disposition.Detail)
+		}
+		return
+	}
+	t.Fatalf("no QUERY_CONFIG_INVALID disposition: %+v", catalog.Dispositions)
+}
+
+func mustMarshal(t *testing.T, value any) []byte {
+	t.Helper()
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
+}
