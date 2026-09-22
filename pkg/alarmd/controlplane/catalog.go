@@ -264,6 +264,43 @@ type Catalog struct {
 	// retain because their persisted facts no longer hold under this binary,
 	// under either refusal. Zero on every build within one release.
 	RetainedStaleRevisions int
+	// Retention is what this build's Levels ask the state store to keep,
+	// measured off the compiled Levels rather than modelled from the shapes in
+	// the strategy documents. It is the only place the whole compiled
+	// population is in hand at once, which is what makes it a measurement.
+	Retention CatalogRetention
+}
+
+// CatalogRetention sums the retained window of every Level the runtime
+// executable Catalog accepted.
+//
+// The two point sums exist to be divided: decision-022 R5 retains a slack
+// past the window a Level requires so a recovery can step over a rollout's
+// hole, and how much that costs the deployment is RetentionPoints over
+// RequiredPoints. It was estimated at between four and twenty-two percent
+// depending on which shapes the population actually holds, and the estimate
+// could not be narrowed from outside - nothing publishes a strategy's window
+// and threshold in bulk. Compiling every Plan is the measurement, and this is
+// where every Plan is compiled.
+//
+// Points, not bytes: bytes are what the retention pool is budgeted in, and
+// points are their proxy here. The bytes are read from the store's own
+// retained-bytes metric across the release rather than derived from these.
+type CatalogRetention struct {
+	// RequiredPoints and RetentionPoints are summed over every accepted
+	// Level, the no-data Level included, because the store retains its points
+	// on the same records.
+	RequiredPoints  uint64
+	RetentionPoints uint64
+	// LevelsWithSlack is the Levels that retain more than they require: the
+	// ones both R5 gates admitted. The rest retain exactly their window.
+	LevelsWithSlack int
+	// The same Levels split by which term of the window dominates, because
+	// the cost follows the trigger window while the size follows the sum of
+	// both. Two Levels with the same required window cost differently, and a
+	// single count of paying Levels hides that.
+	LevelsWithSlackWindowDominant   int
+	LevelsWithSlackRecoveryDominant int
 }
 
 func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
