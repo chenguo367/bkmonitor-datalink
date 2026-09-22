@@ -143,23 +143,7 @@ func Shardability(groups []QueryGroup) observability.ShardabilityFacts {
 	for _, group := range groups {
 		for _, plan := range group.Plans {
 			facts.Plans++
-			// Every word this census accepts, named. The default is its own
-			// cell and not one of the four: an answer added on one side and
-			// not here would otherwise be counted as whatever the default
-			// chose, which is an under-report with no line to look at - and
-			// the natural next change to shardabilityOf is exactly that.
-			switch shardabilityOf(plan.QueryPlans) {
-			case observability.ShardQueriesBuilt:
-				facts.Splittable++
-			case observability.ShardQueriesNotStructured:
-				facts.NotStructured++
-			case observability.ShardQueriesDisjunctive:
-				facts.Disjunctive++
-			case observability.ShardQueriesNoQueries:
-				facts.NoQueries++
-			default:
-				facts.Unrecognised++
-			}
+			facts.Count(shardabilityOf(plan.QueryPlans))
 		}
 	}
 	return facts

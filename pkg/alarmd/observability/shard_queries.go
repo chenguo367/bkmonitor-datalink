@@ -116,6 +116,37 @@ type ShardabilityFacts struct {
 	Unrecognised int `json:"unrecognised"`
 }
 
+// Count files one Plan's answer in the cell it belongs to.
+//
+// A step of its own so the cell for an answer this build does not know can
+// be reached by a test. It cannot be reached through the census itself:
+// every word the classifier can return is named in this switch, so the
+// default is unreachable by construction today - and the sum of the cells
+// is the same whichever cell an answer is folded into, so the identity over
+// them is blind to the fold as well.
+//
+// The cell exists precisely because someone will add a word later, and the
+// day it first matters is the day it first becomes reachable. Marked
+// unreachable instead, nothing would remind that person to look here.
+//
+// The fold that was there before counted an unclassifiable Plan as
+// splittable, which is the optimistic direction: a planner would then go and
+// cut something nothing could classify.
+func (facts *ShardabilityFacts) Count(answer string) {
+	switch answer {
+	case ShardQueriesBuilt:
+		facts.Splittable++
+	case ShardQueriesNotStructured:
+		facts.NotStructured++
+	case ShardQueriesDisjunctive:
+		facts.Disjunctive++
+	case ShardQueriesNoQueries:
+		facts.NoQueries++
+	default:
+		facts.Unrecognised++
+	}
+}
+
 // ShardQueryFacts is one attempt to express a planned split as queries.
 type ShardQueryFacts struct {
 	Outcome    string `json:"outcome"`

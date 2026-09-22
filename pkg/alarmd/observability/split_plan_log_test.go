@@ -174,3 +174,48 @@ func TestTheSplitRoundLineCarriesItsCountsAndTheirDenominator(t *testing.T) {
 		t.Fatalf("the round's line wears an object's outcome word: %#v", event)
 	}
 }
+
+// An answer this build does not know lands in its own cell, and every
+// answer it does know lands in its own.
+//
+// Reached here rather than through the census, which cannot produce an
+// unknown answer: its classifier returns four words and the switch names all
+// four, so the cell is unreachable by construction today. The identity over
+// the cells cannot see it either - the five sum to the same total whichever
+// cell an answer is folded into - so folding the unknown into "splittable"
+// left the whole library green.
+//
+// That fold is also the optimistic direction. A Plan nothing could classify
+// would be counted as one a value list can split, and a planner would go and
+// cut it.
+//
+// The cell exists because someone will add a word, and the day it first
+// matters is the day it first becomes reachable. This test is what will be
+// waiting for them.
+func TestAnAnswerThisBuildDoesNotKnowLandsInItsOwnCell(t *testing.T) {
+	t.Parallel()
+
+	var facts ShardabilityFacts
+	facts.Count("A_WORD_ADDED_AFTER_THIS_BUILD")
+	if facts.Unrecognised != 1 {
+		t.Fatalf("an unknown answer filed as %+v, want it in the cell of its own: counted as splittable, a "+
+			"Plan nothing could classify is one a planner would go and cut", facts)
+	}
+	if facts.Splittable != 0 || facts.NotStructured != 0 || facts.Disjunctive != 0 || facts.NoQueries != 0 {
+		t.Fatalf("an unknown answer reached a named cell: %+v", facts)
+	}
+
+	for answer, cell := range map[string]func(ShardabilityFacts) int{
+		ShardQueriesBuilt:         func(f ShardabilityFacts) int { return f.Splittable },
+		ShardQueriesNotStructured: func(f ShardabilityFacts) int { return f.NotStructured },
+		ShardQueriesDisjunctive:   func(f ShardabilityFacts) int { return f.Disjunctive },
+		ShardQueriesNoQueries:     func(f ShardabilityFacts) int { return f.NoQueries },
+	} {
+		var counted ShardabilityFacts
+		counted.Count(answer)
+		if cell(counted) != 1 || counted.Unrecognised != 0 {
+			t.Fatalf("the declared answer %q filed as %+v, want its own cell and not the unknown one",
+				answer, counted)
+		}
+	}
+}
