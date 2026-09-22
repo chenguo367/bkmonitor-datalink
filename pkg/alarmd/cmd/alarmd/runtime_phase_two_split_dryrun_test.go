@@ -522,17 +522,33 @@ func TestAnObjectWorthSplittingAndImpossibleToCutReportsBoth(t *testing.T) {
 	}
 }
 
-// An object no split was planned for is not asked the question at all.
+// An object no split was planned for is not asked the question at all -
+// including an object that IS over its share and was looked at.
 //
-// Asked anyway it would answer NOT_PLANNED for every object under its share,
-// which is a count of the ordinary case wearing the clothes of a refusal.
+// Asked anyway it would answer NOT_PLANNED, which is a count of "there was
+// nothing to build from" wearing the clothes of a refusal. The object under
+// its share cannot show this on its own: it never becomes a candidate, so
+// the guard is never reached. The one that shows it is over its share and
+// has no census.
 func TestAnObjectWithNoPlannedSplitIsNotAskedAboutItsQueries(t *testing.T) {
 	source := splitDryRunPlannedSource(t, splitDryRunQueries(t, execution.QueryConditions{}))
 
 	_, _, queries := splitDryRunAllFacts(t, source, splitTestPool/4)
-
 	if len(queries) != 0 {
 		t.Fatalf("%d shard-query answers for an object under its share, want none: every object that does "+
 			"not need splitting would otherwise be counted as one that could not be split", len(queries))
+	}
+
+	// Over its share, examined, and no census to plan from. This one reaches
+	// the guard.
+	source.censuses = nil
+	facts, _, queries := splitDryRunAllFacts(t, source, 3*splitTestPool)
+	if len(facts) != 1 || facts[0].Outcome != observability.SplitOutcomeNoCensus {
+		t.Fatalf("split facts = %+v, want one object waiting for a census", facts)
+	}
+	if len(queries) != 0 {
+		t.Fatalf("%d shard-query answers for an object with nothing planned, want none: there is no "+
+			"dimension and no value list to build from, and the answer would be a refusal for a case that "+
+			"is simply not ready", len(queries))
 	}
 }
