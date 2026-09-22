@@ -11,6 +11,7 @@ package controlplane_test
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -328,9 +329,9 @@ func TestTheCatalogCountsHowMuchOfItselfAValueListCouldSplit(t *testing.T) {
 	if facts.Splittable != 2 || facts.Disjunctive != 1 || facts.NotStructured != 1 || facts.NoQueries != 1 {
 		t.Fatalf("census = %+v, want two splittable, one disjunctive, one PromQL and one without queries", facts)
 	}
-	if facts.Splittable+facts.Disjunctive+facts.NotStructured+facts.NoQueries != facts.Plans {
-		t.Fatalf("the four counts sum to %d against %d Plans: every Plan lands in exactly one",
-			facts.Splittable+facts.Disjunctive+facts.NotStructured+facts.NoQueries, facts.Plans)
+	if facts.Splittable+facts.Disjunctive+facts.NotStructured+facts.NoQueries+facts.Unrecognised != facts.Plans {
+		t.Fatalf("the five counts sum to %d against %d Plans: every Plan lands in exactly one",
+			facts.Splittable+facts.Disjunctive+facts.NotStructured+facts.NoQueries+facts.Unrecognised, facts.Plans)
 	}
 }
 
@@ -358,5 +359,104 @@ func TestAPlanIsOnlyAsSplittableAsItsLeastSplittableQuery(t *testing.T) {
 	if facts.Disjunctive != 1 || facts.Splittable != 0 {
 		t.Fatalf("census = %+v, want the Plan counted as unsplittable: one conjunctive query does not make "+
 			"a Plan splittable when another of its queries is not", facts)
+	}
+}
+
+// The one refusal that is this build's defect carries what the contract
+// actually said.
+//
+// The change that added it was made because the first thing INVALID ever did
+// was stop me with nothing to act on - and nothing was guarding it, so
+// replacing the message with an empty string left every test green. A
+// refusal a reader cannot act on is the same as no refusal, and the
+// assertion has to be on the message being the contract's own, not merely
+// on its being non-empty: "error" is non-empty too.
+func TestAContractRefusalCarriesWhatTheContractSaid(t *testing.T) {
+	// Query facts this transform's own checks admit - structured, all "and",
+	// grouping by the split dimension - and the query contract refuses when
+	// they are rebuilt. That is exactly the shape INVALID is for: the
+	// transform produced something the layer below will not take.
+	refused := shardQueryFixture(t, execution.QueryConditions{})
+	refused.MetricMerge = ""
+
+	pieces, facts := controlplane.ShardQueries(shardPlanIdentity(),
+		map[execution.LogicalQueryRef]execution.QueryPlanFacts{"q-a": refused}, threeWaySplit())
+
+	if facts.Outcome != observability.ShardQueriesInvalid {
+		t.Fatalf("outcome = %q, want %q; facts = %+v", facts.Outcome, observability.ShardQueriesInvalid, facts)
+	}
+	if len(pieces) != 0 {
+		t.Fatalf("%d pieces built past a contract refusal, want none", len(pieces))
+	}
+	if !strings.Contains(facts.Detail, "structured query facts") {
+		t.Fatalf("detail = %q, want the contract's own words: a reader met by a bare INVALID has no field, "+
+			"no rule and nothing to do - which is what this refusal did to me the first time it fired",
+			facts.Detail)
+	}
+}
+
+// The three things that are not this build's defect say so under their own
+// words, and carry no message because there is none to carry.
+//
+// They shared INVALID once. A deployment holding one Plan without queries
+// then had a standing count of "the build is broken", and a caller handing
+// over an unplanned split got the same word as a contract violation.
+func TestTheRefusalsThatAreNotDefectsHaveTheirOwnWords(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		queries map[execution.LogicalQueryRef]execution.QueryPlanFacts
+		split   controlplane.SplitPlan
+		want    string
+	}{
+		"a Plan with no queries at all": {
+			queries: map[execution.LogicalQueryRef]execution.QueryPlanFacts{},
+			split:   threeWaySplit(), want: observability.ShardQueriesNoQueries},
+		"a split with no dimension": {
+			queries: nil, split: controlplane.SplitPlan{Plan: shardPlanIdentity(), Lists: [][]string{{"a"}}},
+			want: observability.ShardQueriesNotPlanned},
+		"a split with no value lists": {
+			queries: nil, split: controlplane.SplitPlan{Plan: shardPlanIdentity(), Dimension: "ip"},
+			want: observability.ShardQueriesNotPlanned},
+	} {
+		t.Run(name, func(t *testing.T) {
+			queries := testCase.queries
+			if queries == nil {
+				queries = shardQueries(t, execution.QueryConditions{})
+			}
+			_, facts := controlplane.ShardQueries(shardPlanIdentity(), queries, testCase.split)
+			if facts.Outcome != testCase.want {
+				t.Fatalf("outcome = %q, want %q", facts.Outcome, testCase.want)
+			}
+			if facts.Detail != "" {
+				t.Fatalf("detail = %q on a refusal that is not a contract violation: the message exists "+
+					"for the one word that has one", facts.Detail)
+			}
+		})
+	}
+}
+
+// A Plan this census cannot classify lands in its own cell, and the cells
+// still sum to the denominator.
+//
+// The word shardabilityOf returns for "no queries" and the word the
+// transform returns for a contract violation used to be the same one, joined
+// by a silent rename in this switch. The natural next change - making
+// shardabilityOf say INVALID for a query that really is invalid - would then
+// have been counted as a Plan with no queries: under-reported, with no line
+// to look at.
+func TestAPlanThisCensusCannotClassifyHasItsOwnCell(t *testing.T) {
+	facts := controlplane.Shardability([]controlplane.QueryGroup{{Plans: []controlplane.FrozenPlan{
+		{Identity: shardPlanIdentity(), QueryPlans: shardQueries(t, execution.QueryConditions{})},
+		{Identity: shardPlanIdentity(), QueryPlans: nil},
+	}}})
+
+	if facts.Plans != 2 || facts.Splittable != 1 || facts.NoQueries != 1 {
+		t.Fatalf("census = %+v, want one splittable and one without queries", facts)
+	}
+	if facts.Unrecognised != 0 {
+		t.Fatalf("census = %+v, want nothing unclassified for words this build knows", facts)
+	}
+	if facts.Splittable+facts.Disjunctive+facts.NotStructured+facts.NoQueries+facts.Unrecognised != facts.Plans {
+		t.Fatalf("the five cells sum to %d against %d Plans: every Plan lands in exactly one",
+			facts.Splittable+facts.Disjunctive+facts.NotStructured+facts.NoQueries+facts.Unrecognised, facts.Plans)
 	}
 }

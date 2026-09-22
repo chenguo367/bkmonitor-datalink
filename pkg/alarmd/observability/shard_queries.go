@@ -47,10 +47,25 @@ const (
 	// carry. The piece that matches nothing else has to name every value the
 	// others do, so it is the one that reaches this first.
 	ShardQueriesTooManyValues = "TOO_MANY_VALUES"
+	// ShardQueriesNotPlanned is a split with no dimension or no value lists:
+	// the caller handed over something the planner never produced. Neither
+	// the strategy's shape nor a contract refusal - nothing was asked for.
+	ShardQueriesNotPlanned = "NOT_PLANNED"
+	// ShardQueriesNoQueries is a Plan carrying no query facts at all. That
+	// is the strategy's shape, and it is the one thing a deployment can
+	// legitimately have a standing count of.
+	ShardQueriesNoQueries = "NO_QUERIES"
 	// ShardQueriesInvalid is a transform that produced facts the query
-	// contract refuses. It is this build's defect rather than the strategy's
-	// shape, and it is counted apart for the same reason an unrecognised
-	// outcome is: the two send different people to different places.
+	// contract refuses, and ONLY that. It is this build's defect rather than
+	// the strategy's shape, and it is counted apart for the same reason an
+	// unrecognised outcome is: the two send different people to different
+	// places.
+	//
+	// It carried three meanings once - this, a Plan with no queries, and a
+	// split nobody planned - and only this one ever has a message to carry,
+	// so the other two reached a reader as a bare INVALID saying "the build
+	// is broken, go read code". A deployment holding one Plan without
+	// queries had a standing count of it.
 	ShardQueriesInvalid = "INVALID"
 )
 
@@ -59,7 +74,8 @@ const (
 func ShardQueryOutcomes() []string {
 	return []string{
 		ShardQueriesBuilt, ShardQueriesNotStructured, ShardQueriesDisjunctive,
-		ShardQueriesDimensionNotQueryable, ShardQueriesTooManyValues, ShardQueriesInvalid,
+		ShardQueriesDimensionNotQueryable, ShardQueriesTooManyValues,
+		ShardQueriesNotPlanned, ShardQueriesNoQueries, ShardQueriesInvalid,
 	}
 }
 
@@ -92,6 +108,12 @@ type ShardabilityFacts struct {
 	// NoQueries is a Plan carrying no query facts at all, counted rather
 	// than folded into either answer.
 	NoQueries int `json:"no_queries"`
+	// Unrecognised is a Plan this build could not classify - an answer
+	// outside the four above. Its own cell rather than folded into any of
+	// them: folded, a word added on one side of this census and not the
+	// other would be counted as whatever the fold chose, and under-reported
+	// with no line to look at. The five sum to Plans.
+	Unrecognised int `json:"unrecognised"`
 }
 
 // ShardQueryFacts is one attempt to express a planned split as queries.

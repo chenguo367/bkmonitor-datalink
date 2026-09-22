@@ -72,8 +72,15 @@ func ShardQueries(
 		StrategyID: plan.StrategyID, BusinessID: plan.BusinessID,
 		Dimension: split.Dimension, Shards: shards, Queries: len(queries),
 	}
-	if split.Dimension == "" || len(split.Lists) == 0 || len(queries) == 0 {
-		facts.Outcome = observability.ShardQueriesInvalid
+	if len(queries) == 0 {
+		// The strategy's shape, not this build's defect: a deployment may
+		// legitimately hold such a Plan, and a standing INVALID would send
+		// its reader to the code.
+		facts.Outcome = observability.ShardQueriesNoQueries
+		return nil, facts
+	}
+	if split.Dimension == "" || len(split.Lists) == 0 {
+		facts.Outcome = observability.ShardQueriesNotPlanned
 		return nil, facts
 	}
 	fallback := make([]string, 0, MaxShardConditionValues)
@@ -136,15 +143,22 @@ func Shardability(groups []QueryGroup) observability.ShardabilityFacts {
 	for _, group := range groups {
 		for _, plan := range group.Plans {
 			facts.Plans++
+			// Every word this census accepts, named. The default is its own
+			// cell and not one of the four: an answer added on one side and
+			// not here would otherwise be counted as whatever the default
+			// chose, which is an under-report with no line to look at - and
+			// the natural next change to shardabilityOf is exactly that.
 			switch shardabilityOf(plan.QueryPlans) {
+			case observability.ShardQueriesBuilt:
+				facts.Splittable++
 			case observability.ShardQueriesNotStructured:
 				facts.NotStructured++
 			case observability.ShardQueriesDisjunctive:
 				facts.Disjunctive++
-			case observability.ShardQueriesInvalid:
+			case observability.ShardQueriesNoQueries:
 				facts.NoQueries++
 			default:
-				facts.Splittable++
+				facts.Unrecognised++
 			}
 		}
 	}
@@ -156,7 +170,7 @@ func Shardability(groups []QueryGroup) observability.ShardabilityFacts {
 // only as splittable as its least splittable query.
 func shardabilityOf(queries map[execution.LogicalQueryRef]execution.QueryPlanFacts) string {
 	if len(queries) == 0 {
-		return observability.ShardQueriesInvalid
+		return observability.ShardQueriesNoQueries
 	}
 	answer := observability.ShardQueriesBuilt
 	for _, facts := range queries {
