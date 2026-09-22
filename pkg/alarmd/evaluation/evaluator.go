@@ -984,16 +984,25 @@ func buildMutation(request execution.EvaluationRequest, due execution.DuePlan, r
 		if completeness == "" {
 			completeness = execution.HistoryWarming
 		}
-		var reason execution.ReasonCode
 		for _, outcome := range outcomes {
 			if outcome.LevelID == r.LevelID && outcome.HistoryCompleteness != "" {
 				completeness = execution.HistoryCompleteness(outcome.HistoryCompleteness)
-				if completeness == execution.HistoryWarming {
-					reason = execution.ReasonCode(contract.ReasonHistoryWarming)
-				} else if completeness == execution.HistoryGapped {
-					reason = execution.ReasonCode(contract.ReasonHistoryGapped)
-				}
 			}
+		}
+		// The reason follows the completeness, whichever of the two decided
+		// it: the trigger's outcome when it evaluated the Level, the summary
+		// alone when it did not. A Level suppressed by its effective time
+		// still advances its history, and the trigger returns before it
+		// says anything about the window; deriving the reason only from what
+		// the trigger said left such a Level WARMING with no reason, which
+		// the state contract refuses - every Slot of every strategy outside
+		// its hours, from the first one whose window was not yet full.
+		var reason execution.ReasonCode
+		switch completeness {
+		case execution.HistoryWarming:
+			reason = execution.ReasonCode(contract.ReasonHistoryWarming)
+		case execution.HistoryGapped:
+			reason = execution.ReasonCode(contract.ReasonHistoryGapped)
 		}
 		if guarded, found := durableGuardReasons[r.LevelID]; found &&
 			(completeness == execution.HistoryWarming || completeness == execution.HistoryGapped) {

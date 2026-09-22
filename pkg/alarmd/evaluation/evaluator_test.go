@@ -925,3 +925,46 @@ func proposeRoundGuard(t *testing.T, request execution.EvaluationRequest, result
 	result.Plans[0].GuardBeforeEvents = []execution.PlanGapMutation{mutation}
 	result.Plans[0].GuardAfterState = nil
 }
+
+// A Level outside its effective hours still advances its history, and the
+// history it advances may not be full yet: the trigger returns before it says
+// anything about the window, so the completeness comes from the summary
+// alone, and the reason has to come with it. It did not: the mutation carried
+// WARMING with no reason, the state contract refused it, and every Slot of a
+// strategy outside its hours failed from the first one whose window was not
+// yet full - on a new state generation, every such strategy at once, until a
+// query-free finalization covered it with a gap guard. This is the shape of
+// one strategy on a live deployment on the acceptance release: business
+// hours only, no calendar, evaluated in the evening on a window the new
+// generation had not filled.
+func TestAnInactiveLevelOnAWarmingWindowCarriesTheWarmingReason(t *testing.T) {
+	req := requestFixtureForPlan(t, compiledWindowWithUptime(t, 3, 2, true), []contract.CanonicalRecordV2{{RecordID: strings.Repeat("b", 64), SourceTime: 100, BusinessID: "2", DimensionIdentity: contract.DimensionIdentityV2{Digest: strings.Repeat("c", 64)}, Values: map[string]json.RawMessage{"value": json.RawMessage(`80`)}, Dimensions: map[string]json.RawMessage{}, ReceivedTime: 100}}, nil)
+	if got := req.Header.EffectiveTimeFacts[0].Fact.Status(); got != strategy.EffectiveTimeInactive {
+		t.Fatalf("fixture status=%s, want INACTIVE", got)
+	}
+	// No history under this generation yet: the window of three is warming.
+	req.State.Items[0].Status = execution.StateMissingWarming
+	req.State.Items[0].BlobRevision = 0
+	req.State.Items[0].Levels = nil
+	evaluated, err := newEvaluator(t).Evaluate(context.Background(), req)
+	if err != nil {
+		t.Fatalf("an inactive Level on a warming window failed to evaluate: %v", err)
+	}
+	if err := evaluated.Validate(req); err != nil {
+		t.Fatalf("the contract refused what the evaluator produced: %v", err)
+	}
+	plan := evaluated.Plans[0]
+	if len(plan.LevelOutcomes) != 1 || plan.LevelOutcomes[0].Outcome != execution.LevelOutcomeUnknown || plan.LevelOutcomes[0].ReasonCode != execution.ReasonCode(contract.ReasonEffectiveTimeInactive) {
+		t.Fatalf("outcomes = %+v, want one UNKNOWN with EFFECTIVE_TIME_INACTIVE", plan.LevelOutcomes)
+	}
+	if len(plan.StateResults) != 1 || len(plan.StateResults[0].Mutation.Levels) != 1 {
+		t.Fatalf("state results = %+v, want the one advancing mutation", plan.StateResults)
+	}
+	level := plan.StateResults[0].Mutation.Levels[0]
+	if level.HistoryCompleteness != execution.HistoryWarming || level.GapReasonCode != execution.ReasonCode(contract.ReasonHistoryWarming) {
+		t.Fatalf("mutation Level = %+v, want WARMING with HISTORY_WARMING: a warming window without its reason is what the contract refuses", level)
+	}
+	if len(plan.StateResults[0].Events) != 0 {
+		t.Fatalf("an inactive Level emitted events: %+v", plan.StateResults[0].Events)
+	}
+}
