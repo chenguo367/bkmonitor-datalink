@@ -117,6 +117,7 @@ type phaseTwoMetrics struct {
 	recoveryHeld                    *prometheus.CounterVec
 	levelAbnormal                   *prometheus.CounterVec
 	historyCoverageRejected         *prometheus.CounterVec
+	historyCoverageUnsummarised     *prometheus.CounterVec
 	recoveryPastLevelWithoutRecov   prometheus.Counter
 	openAlertGate                   *prometheus.CounterVec
 	openAlertSet                    *openAlertSetCollector
@@ -867,6 +868,24 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, rule := range observability.CoverageRejectionRules {
 		metrics.historyCoverageRejected.WithLabelValues(string(rule))
 	}
+	// The series a run handled without summarising a window for them, by the
+	// reason it could not. This is the denominator history_coverage's Levels
+	// lacks: a run that resumed or could not load most of its series reports a
+	// small Levels, and without this counter that reading is the same shape as
+	// a small object. Both causes are created at startup, so a zero says the
+	// shape has not occurred; a cell that runs with Levels low is the reading
+	// that says a round described part of an object rather than all of it.
+	metrics.historyCoverageUnsummarised = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "history_coverage_unsummarised_total",
+		Help: "Series a run produced Level outcomes for without summarising a detection window, by cause. " +
+			"resumed: State was already applied at this Slot's version, so the round was bookkeeping and not an " +
+			"evaluation. constrained: State could not be loaded, so there was nothing to evaluate. Read beside " +
+			"history_coverage levels -- levels plus these is what the run actually handled, and levels alone is " +
+			"not how many Levels the object is watched on.",
+	}, []string{"cause"})
+	for _, cause := range []string{"resumed", "constrained"} {
+		metrics.historyCoverageUnsummarised.WithLabelValues(cause)
+	}
 	metrics.levelAbnormal = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "level_abnormal_total",
 		Help: "Level verdicts of ABNORMAL, by whether the detection window they were reached on was " +
@@ -1166,7 +1185,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.historyCoverageRejected, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.effectiveClose, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
@@ -1348,6 +1367,14 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if rejected := observation.HistoryCoverageRejected; rejected != nil {
 		m.historyCoverageRejected.WithLabelValues(string(rejected.Rule)).Inc()
+	}
+	if facts := observation.HistoryCoverage; facts != nil {
+		if facts.Resumed > 0 {
+			m.historyCoverageUnsummarised.WithLabelValues("resumed").Add(float64(facts.Resumed))
+		}
+		if facts.Constrained > 0 {
+			m.historyCoverageUnsummarised.WithLabelValues("constrained").Add(float64(facts.Constrained))
+		}
 	}
 	if facts := observation.HistoryCoverage; facts != nil && facts.Abnormal > 0 {
 		m.levelAbnormal.WithLabelValues("full").Add(float64(facts.Abnormal - facts.AbnormalOnIncomplete))

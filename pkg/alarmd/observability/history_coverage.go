@@ -29,6 +29,21 @@ type HistoryCoverageFacts struct {
 	// first is how a stalled run comes to look healthy.
 	Levels uint32 `json:"levels"`
 	Short  uint32 `json:"short"`
+	// Resumed and Constrained are the series this run handled without
+	// summarising a window for them: Resumed because their State was already
+	// applied at this Slot's version, so the round was bookkeeping and not an
+	// evaluation; Constrained because their State could not be loaded, so
+	// there was nothing to evaluate. They are the denominator Levels lacks.
+	//
+	// Levels alone answers "how many windows did this run summarise", and a
+	// reader who takes it for "how many Levels is this object being watched
+	// on" is wrong by these two counts. A run that resumed 227 of 249 series
+	// reports Levels = 22, which without these is the same shape on the page
+	// as an object that has 22 -- a partial round rendered as a small healthy
+	// one. Kept as two counts and not one because they are different answers,
+	// and because a reading that carries them names its own mechanism.
+	Resumed     uint32 `json:"resumed,omitempty"`
+	Constrained uint32 `json:"constrained,omitempty"`
 	// Empty is how many of those held no valid position at all. Separate from
 	// Short because zero points and few points are different situations that
 	// report the same reason: few points is a series not yet old enough, no
@@ -209,6 +224,22 @@ func (f HistoryCoverageFacts) reportsNothing() bool {
 		f.Guarded == 0 && f.Fresh == 0 && f.ShortFresh == 0 &&
 		f.Abnormal == 0 && f.AbnormalOnIncomplete == 0 &&
 		f.Unusable == 0 && f.UnusableReason == "" &&
+		len(f.Windows) == 0 && f.End == 0 &&
+		f.Resumed == 0 && f.Constrained == 0
+}
+
+// summarisedNothing says whether the set summarised no window. Distinct from
+// reportsNothing: a run that summarised nothing and says why -- every series
+// resumed, or none of their State loadable -- is a reading and not a silence,
+// and it is the reading a reader most needs. Only the window fields are asked
+// about here, so the two counts that explain a zero cannot be what keeps the
+// zero from being recognised.
+func (f HistoryCoverageFacts) summarisedNothing() bool {
+	return f.Levels == 0 && f.Short == 0 && f.Empty == 0 &&
+		f.WorstValid == 0 && f.WorstRequired == 0 &&
+		f.Guarded == 0 && f.Fresh == 0 && f.ShortFresh == 0 &&
+		f.Abnormal == 0 && f.AbnormalOnIncomplete == 0 &&
+		f.Unusable == 0 && f.UnusableReason == "" &&
 		len(f.Windows) == 0 && f.End == 0
 }
 
@@ -250,6 +281,14 @@ func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) (*HistoryCoverag
 	// them is the contradiction.
 	if copied.reportsNothing() {
 		return nil, nil
+	}
+	// A run that summarised no window and says why is a reading, not a
+	// contradiction: every series was resumed, or none of their State could be
+	// loaded, and the counts saying so are the whole of what it has to report.
+	// Checked before the rule below, which would otherwise refuse the one
+	// reading that explains a zero.
+	if copied.summarisedNothing() {
+		return &copied, nil
 	}
 	switch {
 	case copied.Levels == 0:

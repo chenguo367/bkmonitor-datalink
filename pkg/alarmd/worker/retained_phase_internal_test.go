@@ -12,6 +12,8 @@ package worker
 import (
 	"context"
 	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
 // retainedSeed puts a fixture's starting retention on the input phase, which is
@@ -43,10 +45,22 @@ func TestEachPhaseIsChargedForItsOwnBytesAndNobodyElses(t *testing.T) {
 			}
 		},
 	}, {
+		// Two cases over one call, because that call carries two quantities:
+		// what the caller already held when it asked, and what this result
+		// adds. They used to be summed into the output phase, where the
+		// first one dominated and was read as output.
 		name: "the side effects this round produced", phase: retainPhaseOutput,
 		drive: func(t *testing.T, stream *streamedExecution) {
 			t.Helper()
-			if err := stream.mergeProvisional(context.Background(), sideEffectTestResult("state", "qg"), 128); err != nil {
+			if err := stream.mergeProvisional(context.Background(), sideEffectTestResult("state", "qg"), 0); err != nil {
+				t.Fatalf("merge provisional: %v", err)
+			}
+		},
+	}, {
+		name: "the Runtime State this round loaded", phase: retainPhaseState,
+		drive: func(t *testing.T, stream *streamedExecution) {
+			t.Helper()
+			if err := stream.mergeProvisional(context.Background(), execution.EvaluationResult{}, 128); err != nil {
 				t.Fatalf("merge provisional: %v", err)
 			}
 		},
@@ -92,12 +106,15 @@ func TestReleasingAnExecutionGivesBackEveryPhaseItHeld(t *testing.T) {
 		t.Fatalf("merge provisional: %v", err)
 	}
 	held := stream.retainedTotal()
-	if held != stream.retainedByPhase[retainPhaseInput]+stream.retainedByPhase[retainPhaseGap]+
-		stream.retainedByPhase[retainPhaseOutput] {
+	sum := uint64(0)
+	for phase := retainPhaseInput; phase < retainPhaseCount; phase++ {
+		sum += stream.retainedByPhase[phase]
+	}
+	if held != sum {
 		t.Fatalf("the total %d is not the sum of the phases %v", held, stream.retainedByPhase)
 	}
 	if stream.retainedByPhase[retainPhaseInput] == 0 || stream.retainedByPhase[retainPhaseGap] == 0 ||
-		stream.retainedByPhase[retainPhaseOutput] == 0 {
+		stream.retainedByPhase[retainPhaseOutput] == 0 || stream.retainedByPhase[retainPhaseState] == 0 {
 		t.Fatalf("a phase this case drove holds nothing, so a partial release would not show: %v", stream.retainedByPhase)
 	}
 

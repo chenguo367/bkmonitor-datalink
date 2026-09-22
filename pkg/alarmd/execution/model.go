@@ -2071,6 +2071,29 @@ type HistoryCoverage struct {
 	// nobody looked at.
 	Levels uint32
 	Short  uint32
+	// Resumed and Constrained are the series this Slot handled without
+	// summarising a window for them, by the reason it could not.
+	//
+	// They are the denominator Levels lacks. A Slot produces Level outcomes
+	// for every series it handles, but a window summary only for the series it
+	// actually evaluated, and these two are every way the second set can be
+	// smaller than the first: Resumed is a series whose State was already
+	// applied at this Slot's ApplyVersion, so the round was bookkeeping and
+	// not an evaluation (worker resumedSeriesResult, which deliberately
+	// manufactures no coverage -- State does not retain the original window
+	// counts and inventing them from it would be inventing numbers);
+	// Constrained is a series whose State could not be loaded, so nothing was
+	// evaluated to summarise (evaluation constrainedRecord).
+	//
+	// Without them, a Slot that resumed or could not load 227 of 249 series
+	// reports Levels = 22 and is read as a small healthy object, which on the
+	// page is the same shape as an object that has 22. Named separately rather
+	// than folded into one count because they are different answers to "why
+	// is this round not describing the whole object", and because a reading
+	// that carries them says which mechanism produced it without anyone having
+	// to go back to the logs.
+	Resumed     uint32
+	Constrained uint32
 	// WorstValid and WorstRequired are one Level's pair -- the Level with the
 	// largest shortfall -- and not a minimum over one field beside a maximum
 	// over the other. Taken independently they describe a Level that may not
@@ -2332,9 +2355,15 @@ func (coverage *HistoryCoverage) Observe(validPositions, requiredPositions uint3
 
 // Merge folds another coverage in, keeping the worse of the two pairs whole.
 func (coverage *HistoryCoverage) Merge(other HistoryCoverage) {
-	if coverage == nil || other.Levels == 0 {
+	// A record that summarised no window still says something when it says why
+	// it did not, so the short-circuit asks whether anything was reported at
+	// all rather than whether a window was. Reading Levels alone here would
+	// have dropped exactly the counts that exist to explain a low Levels.
+	if coverage == nil || (other.Levels == 0 && other.Resumed == 0 && other.Constrained == 0) {
 		return
 	}
+	coverage.Resumed += other.Resumed
+	coverage.Constrained += other.Constrained
 	coverage.Levels += other.Levels
 	coverage.Short += other.Short
 	coverage.Empty += other.Empty
@@ -4324,6 +4353,11 @@ type SlotBudgetUsage struct {
 	RetainedInputBytes  uint64
 	RetainedGapBytes    uint64
 	RetainedOutputBytes uint64
+	// RetainedStateBytes is the Runtime State this Slot loaded and holds: the
+	// retained window per series, which is proportional to the retention bound
+	// and dwarfs what the Slot writes. It was counted under the output bytes,
+	// where it was read as output.
+	RetainedStateBytes uint64
 
 	// The limits each was measured against, carried with the usage rather than
 	// looked up by the reporter. A usage without its limit is not a reading,

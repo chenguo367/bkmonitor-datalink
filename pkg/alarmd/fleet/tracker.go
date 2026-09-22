@@ -1310,6 +1310,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				Guarded: facts.Guarded, HeldFullRounds: state.heldFullRounds,
 				Fresh: facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,
 				Unusable: facts.Unusable, UnusableReason: facts.UnusableReason,
+				Resumed: facts.Resumed, Constrained: facts.Constrained,
 				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
 				NoProgressRounds: state.noProgressRounds, UnchangedRounds: state.unchangedRounds,
 				WorstWindow: worstWindow, WorstWindowChanged: worstWindowChanged,

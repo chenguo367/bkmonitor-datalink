@@ -2862,6 +2862,7 @@ func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBu
 		RetainedBytes: usage.RetainedBytes, Series: usage.Series,
 		RetainedInputBytes: usage.RetainedInputBytes, RetainedGapBytes: usage.RetainedGapBytes,
 		RetainedOutputBytes: usage.RetainedOutputBytes,
+		RetainedStateBytes:  usage.RetainedStateBytes,
 		StateMutationsLimit: usage.StateMutationsLimit, GapMutationsLimit: usage.GapMutationsLimit,
 		EventsLimit: usage.EventsLimit, RetainedBytesLimit: usage.RetainedBytesLimit, SeriesLimit: usage.SeriesLimit,
 	}
