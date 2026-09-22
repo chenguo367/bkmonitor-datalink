@@ -2,8 +2,11 @@ package linkdoutput
 
 import (
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 )
 
 func TestCloseUsesActiveSeverityAndStableIdentity(t *testing.T) {
@@ -35,5 +38,35 @@ func TestCloseUsesActiveSeverityAndStableIdentity(t *testing.T) {
 	r.Severity = ""
 	if _, err := ConvertClose(r); err == nil {
 		t.Fatal("missing active severity accepted")
+	}
+}
+
+func TestClosePreservesNativeSignedBusinessIdentity(t *testing.T) {
+	for _, businessID := range []int64{2, -42} {
+		t.Run(strconv.FormatInt(businessID, 10), func(t *testing.T) {
+			trigger := decision(func(event *contract.TriggerEventV1) {
+				event.BusinessID = strconv.FormatInt(businessID, 10)
+				event.StrategyRef.BusinessID = businessID
+			})
+			opened := convertRaw(t, trigger)
+			closed, err := ConvertClose(CloseRequest{
+				TenantID: trigger.TenantID, Fingerprint: opened.AlertID, AlertInstanceID: "active-instance",
+				Severity: opened.Severity, StrategyID: trigger.StrategyRef.StrategyID,
+				StrategyRevision: trigger.StrategyRef.Revision, BusinessID: businessID,
+				OccurredAt: time.Unix(trigger.EvaluationTime+60, 0),
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, event := range []Event{opened, closed} {
+				var wire wireEvent
+				if err := json.Unmarshal(event.Payload, &wire); err != nil {
+					t.Fatal(err)
+				}
+				if wire.Labels.BusinessID != businessID || wire.AlertID != opened.AlertID {
+					t.Fatalf("event changed business or alert identity: %s", event.Payload)
+				}
+			}
+		})
 	}
 }

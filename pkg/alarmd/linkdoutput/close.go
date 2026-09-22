@@ -22,7 +22,8 @@ type CloseRequest struct {
 }
 
 func ConvertClose(request CloseRequest) (Event, error) {
-	if request.TenantID == "" || request.AlertInstanceID == "" || request.StrategyID <= 0 || request.StrategyRevision <= 0 || request.BusinessID <= 0 || request.OccurredAt.Unix() <= 0 {
+	// Match StrategySnapshotRef: negative IDs identify non-BKCC spaces; zero is unset.
+	if request.TenantID == "" || request.AlertInstanceID == "" || request.StrategyID <= 0 || request.StrategyRevision <= 0 || request.BusinessID == 0 || request.OccurredAt.Unix() <= 0 {
 		return Event{}, errors.New("close requires tenant, active instance, strategy revision, business and current time")
 	}
 	fingerprint, err := hex.DecodeString(request.Fingerprint)

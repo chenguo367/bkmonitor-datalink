@@ -157,3 +157,38 @@ func TestCloseSinkRefusesBrokerWithoutTenantHeaders(t *testing.T) {
 		t.Fatalf("err=%v sent=%d", err, sent)
 	}
 }
+
+func TestCloseSinkWritesNegativeBusinessIdentity(t *testing.T) {
+	var sent []*sarama.ProducerMessage
+	sink, err := newTriggerEventSink("native-events", &fakeSyncProducer{send: func(m *sarama.ProducerMessage) (int32, int64, error) {
+		sent = append(sent, m)
+		return 0, 0, nil
+	}}, &fakeCloser{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	request := closeSinkRequest()
+	request.BusinessID = -42
+	if err := sink.WriteCloseBatch(context.Background(), []linkdoutput.CloseRequest{request}); err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 {
+		t.Fatalf("sent %d messages", len(sent))
+	}
+	data, err := sent[0].Value.Encode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire struct {
+		Labels struct {
+			BusinessID int64 `json:"bk_biz_id"`
+		} `json:"labels"`
+	}
+	if err := json.Unmarshal(data, &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.Labels.BusinessID != request.BusinessID {
+		t.Fatalf("business identity changed: %s", data)
+	}
+}
