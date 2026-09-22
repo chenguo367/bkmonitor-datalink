@@ -448,15 +448,22 @@ func (c *PlanCompiler) compileLevel(
 	if requiredPoints > c.limits.MaxRequiredHistoryPoints {
 		return terminal(contract.ReasonLevelBudgetExceeded, "level.state_requirement")
 	}
+	retentionPoints := requiredPoints + retentionSlack(requiredPoints, trigger, recovery, execution.EvaluationInterval)
+	if retentionPoints < requiredPoints {
+		return terminal(contract.ReasonLevelBudgetExceeded, "level.state_requirement")
+	}
 	level := CompiledLevel{
 		definition: raw.Definition, connector: raw.Connector, algorithms: algorithms,
 		detectors: detectors, trigger: trigger, recovery: recovery,
 		effectiveTime:    effectiveTime,
-		stateRequirement: StateRequirement{RequiredDetectHistoryPoints: requiredPoints, RetentionPoints: requiredPoints},
+		stateRequirement: StateRequirement{RequiredDetectHistoryPoints: requiredPoints, RetentionPoints: retentionPoints},
 	}
 	level.resourceEstimate.Algorithms = len(algorithms)
 	level.resourceEstimate.ASTNodes = astNodes
-	level.resourceEstimate.StatePointsPerSeries = uint64(requiredPoints)
+	// The pool pays for what is retained, not for what the window requires.
+	// Since the slack those are different numbers, and the smaller one would
+	// under-count every Level the slack applies to.
+	level.resourceEstimate.StatePointsPerSeries = uint64(retentionPoints)
 	level.resourceEstimate.FixedComputeCost = 1
 	for _, algorithm := range raw.DetectPlan.Algorithms {
 		registration, _ := c.registry.lookup(algorithm.Type, algorithm.Version)
@@ -490,6 +497,83 @@ func (c *PlanCompiler) compileLevel(
 		return CompiledLevel{}, nil, nil, fmt.Errorf("strategy: derive Level trigger fingerprint: %w", err)
 	}
 	return level, normalizers, nil, nil
+}
+
+// RecoveryHoleToleranceSeconds is the longest run of missing positions the
+// recovery walk is built to step over: one rollout bounce, which is what
+// punches the holes it exists for.
+//
+// A duration and not a count of points, because a bounce is a length of time
+// and the same bounce is a different number of points at every evaluation
+// interval. It is the one constant in the derivation below, and it is a
+// program constant rather than configuration: an operator knows the release
+// cadence, not how a walk spends its retained window.
+const RecoveryHoleToleranceSeconds = 600
+
+// retentionSlack is how many positions a Level retains beyond the ones its
+// window requires, so the recovery walk can step over a hole and still reach
+// the run of answered windows it needs.
+//
+// Why any is needed: the walk reaches back over WindowSize+ConsecutiveWindows-1
+// offsets, but only the newest ConsecutiveWindows of them lie wholly inside a
+// window retained at exactly the required size - the rest run off the end and
+// read as holes. The usable margin is therefore RequiredAnomalies-1, while a
+// run of H holes puts WindowSize+H-2*RequiredAnomalies+1 windows out of reach.
+// At the common RequiredAnomalies of one the margin is zero: a single hole
+// anywhere leaves the recovery unreachable until it ages out of the window,
+// which for a day-long window is a day. Retaining the difference is what makes
+// the rule reachable at all rather than a rule that reads well and never fires.
+//
+// Why it is gated twice: the slack is paid per series in retained memory, and
+// two different Levels get nothing for the money, at opposite ends.
+//
+// A Level whose whole window is shorter than the tolerance is the first. The
+// hole ages out of such a window within the tolerance on its own, so the wait
+// the slack removes is shorter than the wait it is built to remove - the
+// benefit is below a delay already accepted. Charging every Level cost 22% of
+// the fleet's retained bytes to shorten nine-minute waits.
+//
+// A Level whose slack would come to more than its own window is the second.
+// The wait removed is requiredPoints long and the memory costs slack points,
+// so once slack reaches requiredPoints the cheaper trade is to let the hole
+// age out. This is the case the first gate cannot see: the slack's leading
+// term is the trigger window, and requiredPoints is that window plus the
+// recovery run, so two Levels with the same requiredPoints cost differently
+// depending on which term dominates. A Level at window 1469 and one anomaly
+// retains 2947 points against 1469 - double - while a Level of the same
+// required size built from a short window and a long recovery run retains
+// 1508.
+//
+// Neither gate subsumes the other and neither adds a constant. A Level at
+// window 3, threshold 3, recovery run 8 on a one minute interval spans exactly
+// the tolerance and is refused by the first while the second would admit it;
+// the window 1469 Level is refused by the second while the first admits it.
+func retentionSlack(requiredPoints uint32, trigger TriggerPlan, recovery RecoveryPlan, intervalSeconds uint32) uint32 {
+	if !recovery.Enabled || intervalSeconds == 0 || trigger.RequiredAnomalies == 0 {
+		return 0
+	}
+	// The wait this buys out: how long the hole takes to leave the window on
+	// its own. Compared in seconds so it does not depend on how the interval
+	// divides the tolerance.
+	if uint64(requiredPoints)*uint64(intervalSeconds) <= RecoveryHoleToleranceSeconds {
+		return 0
+	}
+	tolerancePoints := (RecoveryHoleToleranceSeconds + uint64(intervalSeconds) - 1) / uint64(intervalSeconds)
+	// WindowSize + tolerancePoints - 3*RequiredAnomalies + 2, in a width that
+	// cannot wrap while the subtraction is taken.
+	slack := int64(trigger.WindowSize) + int64(tolerancePoints) + 2 - 3*int64(trigger.RequiredAnomalies)
+	if slack < 1 {
+		// A Level whose threshold is high enough to absorb the holes on its
+		// own still retains one spare position: the arithmetic says it needs
+		// none, and one keeps "retains more than it requires" true for every
+		// Level both gates admit, so a count of those Levels is a count of the
+		// Levels the rule reaches rather than an arithmetic artefact.
+		slack = 1
+	}
+	if slack >= int64(requiredPoints) {
+		return 0
+	}
+	return uint32(slack)
 }
 
 func triggerComputeCostForLevel(trigger TriggerPlan, recovery RecoveryPlan) uint64 {

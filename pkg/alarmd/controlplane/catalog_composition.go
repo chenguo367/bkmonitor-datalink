@@ -188,6 +188,11 @@ type CatalogComposition struct {
 	// it is what makes the residual readable from outside instead of only
 	// from the test that pins it.
 	InertPlans int
+	// Retention is the Catalog's own measurement of what its Levels ask the
+	// store to keep, carried through unchanged. It is summed where the
+	// compiled Levels are in hand; recomputing it here from the frozen
+	// strategy documents would be the same relation derived twice.
+	Retention CatalogRetention
 }
 
 // SourceSemanticsLabel is the partition key for one Query Group's query: the
@@ -232,6 +237,7 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		Objects:     make(map[Disposition]int, len(CatalogDispositions)+1),
 		Withheld:    make(map[WithheldKey]int),
 		NoDataPlans: make(map[nodata.RosterSource]int, 3),
+		Retention:   catalog.Retention,
 	}
 	for _, semantics := range SupportedSourceSemantics {
 		composition.QueryGroups[semantics] = 0

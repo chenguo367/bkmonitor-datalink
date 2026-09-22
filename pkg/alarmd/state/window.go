@@ -356,9 +356,10 @@ func (view HistoryView) SummarizeContext(ctx context.Context, endTime int64, req
 	// Align rejects a requirement whose retention is below its requirement, whose
 	// interval is not a positive whole number of seconds, or whose horizon would
 	// overflow -- so a window that exists satisfies all of that already; the
-	// compiler builds RetentionPoints and RequiredDetectHistoryPoints from one
-	// variable, making them equal rather than merely ordered; and both callers
-	// pass that same number as the argument compared here. requiredPositions is
+	// compiler derives RetentionPoints from RequiredDetectHistoryPoints and
+	// never below it, so the two are ordered - equal for a Level the recovery
+	// slack does not reach, larger for one it does; and both callers pass the
+	// required number as the argument compared here. requiredPositions is
 	// normalised above, so the zero case cannot arrive either.
 	//
 	// Kept rather than deleted because a summary is not the right place to

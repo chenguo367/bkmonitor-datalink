@@ -283,8 +283,13 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 		reflect.TypeOf(controlplane.Catalog{}): {
 			split: []string{"QueryGroups"},
 			// RetainedStaleRevisions is a build count reported on the round;
-			// nothing persists or digests it.
-			neither: []string{"ObservationID", "SnapshotRevision", "Dispositions", "RetainedStaleRevisions"},
+			// nothing persists or digests it. Retention is the same kind of
+			// thing: a measurement of what this build's compiled Levels ask
+			// the store to keep, reported and then discarded. Digesting it
+			// would make every object's digest move when a Level's window
+			// changed anywhere in the deployment, which is a republication
+			// and a Segment recut for a number no consumer reads.
+			neither: []string{"ObservationID", "SnapshotRevision", "Dispositions", "RetainedStaleRevisions", "Retention"},
 		},
 		reflect.TypeOf(controlplane.QueryGroup{}): {
 			execution: []string{"Identity", "QueryPlan", "MembershipDigest", "ScheduleRevision"},

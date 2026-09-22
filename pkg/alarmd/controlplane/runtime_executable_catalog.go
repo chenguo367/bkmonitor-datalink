@@ -19,6 +19,41 @@ var errRuntimeCatalogClosureInvalid = errors.New("alarmd controlplane: runtime C
 // retainRuntimeExecutableCatalog applies the Evaluation Core compiler before
 // publication. Deterministic Plan and Level terminals remain source-audit
 // facts; only terminal-free Plans enter the immutable scheduling Catalog.
+// observeRetention sums one accepted Plan's retained window into the
+// Catalog's measurement.
+//
+// Taken here because this is the one place the compiled Level is in hand for
+// every Plan the deployment runs: the composition downstream sees the frozen
+// strategy document, and deriving the window from it a second time would put
+// the same relation in two places with nothing comparing them.
+//
+// The no-data Level counts with the rest. Its facts are written on the same
+// records, so its retention is retention the store pays for.
+func observeRetention(retention *CatalogRetention, compiled *strategy.CompiledPlan) {
+	levels := compiled.Levels()
+	if noData := compiled.NoDataLevel(); noData != nil {
+		levels = append(append([]strategy.CompiledLevel(nil), levels...), *noData)
+	}
+	for _, level := range levels {
+		requirement := level.StateRequirement()
+		retention.RequiredPoints += uint64(requirement.RequiredDetectHistoryPoints)
+		retention.RetentionPoints += uint64(requirement.RetentionPoints)
+		if requirement.RetentionPoints <= requirement.RequiredDetectHistoryPoints {
+			continue
+		}
+		retention.LevelsWithSlack++
+		// Which term of the required window is the larger one. The slack's
+		// leading term is the trigger window, so a Level whose window
+		// dominates pays far more for the same required size than one whose
+		// recovery run does.
+		if level.Trigger().WindowSize > level.Recovery().ConsecutiveWindows {
+			retention.LevelsWithSlackWindowDominant++
+			continue
+		}
+		retention.LevelsWithSlackRecoveryDominant++
+	}
+}
+
 func retainRuntimeExecutableCatalog(
 	ctx context.Context,
 	catalog Catalog,
@@ -47,6 +82,7 @@ func retainRuntimeExecutableCatalog(
 			return errors.New("alarmd controlplane: runtime executable Plan has no state compatibility")
 		}
 		plan.StateGeneration = execution.StateGeneration(compiled.StateCompatibilityHash())
+		observeRetention(&result.Retention, compiled)
 		if _, duplicate := seenPlans[plan.Identity]; duplicate {
 			return errors.New("alarmd controlplane: duplicate runtime executable Plan identity")
 		}

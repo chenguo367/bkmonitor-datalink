@@ -333,19 +333,24 @@ func evaluateLevelV2(
 	oldestWindowStart := triggerStart
 	if recoveryPlan.Enabled && result == "" {
 		// How far back an observed position may still count: the retained
-		// window and no further. It is not a separate bound -- the window
-		// holds exactly RequiredDetectHistoryPoints positions (the compiler
-		// sets RetentionPoints to the same number), so nothing older than that
-		// exists to be read. A second, wider bound would be a bound nothing
-		// can reach, and its branches would be code no round runs.
+		// window and no further, because nothing older than that exists to be
+		// read. A bound wider than the retention would be a bound nothing can
+		// reach, and its branches would be code no round runs.
 		//
-		// Computed from the plan the same way the compiler computes it, not
-		// read off the summary: the summary is supplied by the history, and a
-		// history that leaves the field zero would silently bound the walk to
-		// nothing rather than to the window.
-		retained := triggerPlan.WindowSize
-		if recoveryPlan.ConsecutiveWindows > 0 {
-			retained += recoveryPlan.ConsecutiveWindows - 1
+		// Read off the Level's own retention rather than recomputed from the
+		// window. The two were the same number until the compiler began
+		// retaining a slack beyond the required window, and a walk still
+		// bounded at the required size would stop exactly where the slack
+		// begins - leaving the positions the slack exists to keep unread, and
+		// this whole rule reachable only in the cases that never needed it.
+		//
+		// Not read off the summary either: the summary comes from the history,
+		// and a history that leaves the field zero would silently bound the
+		// walk to nothing rather than to the window.
+		retained := level.StateRequirement().RetentionPoints
+		if retained == 0 {
+			return LevelOutcomeV2{}, contract.LevelResultV1{}, invariantV2(
+				"bound Recovery walk", definition.LevelID, errors.New("Level retains no positions"))
 		}
 		for offset := uint32(0); observedMisses < recoveryPlan.ConsecutiveWindows && offset < retained; offset++ {
 			shift, ok := multiplyUint32ToInt64(offset, triggerPlan.StepSeconds)

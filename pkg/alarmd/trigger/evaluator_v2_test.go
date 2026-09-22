@@ -513,6 +513,58 @@ func TestEvaluatorV2RecoveryWalkPassesSkippedWindowsToReachTheRetainedOnes(t *te
 	}
 }
 
+// The walk reads the positions the record is retained for past the ones its
+// window requires, and a recovery reachable only from those positions is the
+// only thing that says so.
+//
+// Window 5, threshold 1, twenty consecutive windows required, on a one minute
+// step: the window requires 5+19 = 24 positions and the compiler retains 38.
+// Every position on the grid is observed and normal except the eighth back,
+// which is missing:
+//
+//	offsets 0..3    whole windows                       answered, misses 1..4
+//	offsets 4..8    the hole lies inside each of them   stepped over, 5 skipped
+//	offsets 9..24   whole windows again                 answered, misses 5..20
+//
+// The twentieth answered window is reached at offset 24, past the 24 positions
+// the window requires and inside the 38 retained. A walk bounded at the
+// required size stops at offset 23 holding nineteen - one short - and the Level
+// reports its incomplete history instead of the recovery.
+//
+// The hole is what separates the two bounds. Without it the twentieth answered
+// window falls on offset 19 and either bound reaches it, which is why no case
+// written before the retention grew a slack can tell them apart.
+func TestEvaluatorV2RecoveryWalkReadsThePositionsRetainedPastTheWindow(t *testing.T) {
+	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(5, 1, 5, 1, 20, nil)})
+	level := plan.Levels()[0]
+	requirement := level.StateRequirement()
+	if requirement.RequiredDetectHistoryPoints != 24 || requirement.RetentionPoints != 38 {
+		t.Fatalf("StateRequirement() = %+v, want 24 required and 38 retained: the distance between the "+
+			"two is what this case walks into", requirement)
+	}
+	const source, step = int64(3600), int64(60)
+	points := make(map[int64]bool, requirement.RetentionPoints)
+	for offset := uint32(0); offset < requirement.RetentionPoints; offset++ {
+		points[source-int64(offset)*step] = false
+	}
+	delete(points, source-8*step)
+
+	request := requestV2(t, plan, source, []DetectionFact{factV2(level, DetectionNormal)},
+		[]LevelHistory{{LevelID: 5, View: pointHistory{step: step, points: points}}}, activeFactsV2(t, plan, source))
+	result, err := EvaluateV2(request)
+	if err != nil {
+		t.Fatalf("EvaluateV2() error = %v", err)
+	}
+	if result.RecordResult != contract.LevelResultRecovery {
+		t.Fatalf("record result = %q, completion = %v, want RECOVERY: the walk stopped at the required "+
+			"window instead of reading the positions retained past it", result.RecordResult, result.Completion)
+	}
+	recovery := result.LevelOutcomes[0].DecisionWindow.Recovery
+	if recovery.ObservedConsecutiveMisses != 20 || recovery.SkippedWindows != 5 {
+		t.Fatalf("recovery evidence = %+v, want twenty answered windows and five stepped over", recovery)
+	}
+}
+
 func TestEvaluatorV2AllInactiveIsSuppressedNotNormal(t *testing.T) {
 	plan := compilePlanV2(t, []contract.LevelIRV2{levelV2(1, 1, 1, 1, 1, staticUptimeV2())})
 	level := plan.Levels()[0]
