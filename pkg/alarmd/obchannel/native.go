@@ -30,7 +30,7 @@ func NativeOperations(handler http.Handler) []Operation {
 	}
 	limits := map[string]any{"timeout_ms": RequestTimeout.Milliseconds(), "response_bytes": MaxResponseBytes, "population": "existing Fleet snapshots; list limit bounds returned rows, not snapshot reads"}
 	makeOp := func(id, summary string, fields map[string]Field, required []string, output any, route func(Params) (string, url.Values)) Operation {
-		return Operation{ID: id, Summary: summary, Fields: fields, Required: required, OutputSchema: SchemaOf(output), Limits: limits, Run: func(ctx context.Context, p Params) Outcome {
+		return Operation{ID: id, Summary: summary, EvidenceScope: "deployment", Fields: fields, Required: required, OutputSchema: SchemaOf(output), Limits: limits, Run: func(ctx context.Context, p Params) Outcome {
 			path, query := route(p)
 			out := invokeNative(ctx, handler, path, query)
 			if result, ok := out.Value.(map[string]any); ok {
@@ -83,6 +83,10 @@ func NativeOperations(handler http.Handler) []Operation {
 		}),
 	}
 	for i := range ops {
+		if ops[i].ID == "sample.get" || ops[i].ID == "observation.get" {
+			ops[i].EvidenceScope = "shared_records_with_process_diagnostics"
+			ops[i].Targetable = true
+		}
 		if ops[i].ID == "strategy.get" {
 			ops[i].Examples = []Params{{"strategy_id": "1001"}}
 			f := ops[i].Fields["strategy_id"]
