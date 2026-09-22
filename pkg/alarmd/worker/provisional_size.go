@@ -1,6 +1,60 @@
 package worker
 
-import "reflect"
+import (
+	"reflect"
+	"unsafe"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+)
+
+// retainedStateResultBytes is what a Slot's pending state results cost it,
+// counting the memory this round allocated rather than every byte reachable
+// from them.
+//
+// The generic sizer below is wrong for exactly one field, and that field is
+// the largest one in the Slot. A mutation's Points is the whole retained
+// window: appendHistoryPoint rebuilds the window on every record, so the
+// point array and the fact arrays inside it are allocated here. The strings
+// are not. RecordID is copied from the loaded history as a header, and
+// DetectFingerprint and Result are Plan level constants that every point of
+// every series shares one backing array for. Charging their contents once per
+// point charges the Slot for bytes nothing allocated, and the overcharge grows
+// with retention times series while the memory does not.
+//
+// Measured on the shape that drove this: a two-level Plan retaining 1469
+// points was charged 989,739 bytes per mutation, of which 564 KiB was string
+// content shared with the loaded history. Two hundred mutations of that put a
+// Slot near a pool limit it was nowhere close to, and the refusal lands on
+// RESOURCE_HARD_STOP - which is to say the accounting stopped detection on
+// memory that was never held.
+//
+// What remains is deliberately still conservative: every point's fact array is
+// counted, though only the newest point's was allocated this round - the older
+// ones are headers into the loaded history. Distinguishing them here would
+// mean knowing which point is new, which this layer does not, and a budget is
+// the wrong place to guess low.
+func retainedStateResultBytes(results []execution.StateEvaluation) uint64 {
+	total := uint64(cap(results)) * uint64(unsafe.Sizeof(execution.StateEvaluation{}))
+	for index := range results {
+		total += retainedStateMutationBytes(results[index].Mutation)
+		total += retainedObjectBytes(results[index].Events)
+	}
+	return total
+}
+
+func retainedStateMutationBytes(mutation execution.StateMutation) uint64 {
+	// Every field but the history, counted exactly as it always was. Blanking
+	// the one field rather than listing the others keeps this from silently
+	// dropping a field somebody adds later.
+	withoutHistory := mutation
+	withoutHistory.Points = nil
+	total := retainedObjectBytes(withoutHistory)
+	total += uint64(cap(mutation.Points)) * uint64(unsafe.Sizeof(execution.StateHistoryPoint{}))
+	for index := range mutation.Points {
+		total += uint64(cap(mutation.Points[index].Levels)) * uint64(unsafe.Sizeof(execution.StateLevelFact{}))
+	}
+	return total
+}
 
 // retainedObjectBytes accounts for the acyclic State/Gap/Event DTOs, without
 // serializing and copying their payloads. It includes slice capacity and map

@@ -132,14 +132,19 @@ func newEffectBytes(current, next execution.EvaluationResult) uint64 {
 			}
 		}
 		if previous == nil {
-			retained += 2 * retainedObjectBytes(plan)
+			// Split the same way the incremental branch below is, so the first
+			// series of a Slot is charged for its history on the same terms as
+			// every series after it.
+			withoutState := plan
+			withoutState.StateResults = nil
+			retained += 2 * (retainedObjectBytes(withoutState) + retainedStateResultBytes(plan.StateResults))
 			continue
 		}
 		if len(plan.LevelOutcomes) != 0 {
 			retained += 2 * retainedObjectBytes(plan.LevelOutcomes)
 		}
 		if len(plan.StateResults) != 0 {
-			retained += 2 * retainedObjectBytes(plan.StateResults)
+			retained += 2 * retainedStateResultBytes(plan.StateResults)
 		}
 		for _, pair := range []struct{ previous, next []execution.PlanGapMutation }{{previous.GuardBeforeEvents, plan.GuardBeforeEvents}, {previous.GuardAfterState, plan.GuardAfterState}} {
 			for index, candidate := range pair.next {
