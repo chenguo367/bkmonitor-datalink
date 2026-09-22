@@ -391,10 +391,33 @@ type NoDataTracking struct {
 	Suppressed       uint64 `json:"suppressed"`
 	// Dropped is the series the round refused as not matching the item.
 	Dropped uint64 `json:"dropped,omitempty"`
+	// AbsentAges is Absent by how long each absence has been open, as the
+	// round filed them: what the horizon can reach is the last bucket.
+	AbsentAges NoDataAbsentAges `json:"absent_ages"`
 	// EvaluationTime is the Slot that decided; DecidedAt when this process
 	// saw it.
 	EvaluationTime int64     `json:"evaluation_time"`
 	DecidedAt      time.Time `json:"decided_at"`
+}
+
+// NoDataAbsentAges is the age buckets of the absences a round reported: the
+// absence began this round, is under an hour old, under a day, a day or
+// more. They sum to the row's Absent. A deployment reads its horizon against
+// them: a day-long horizon stops what sits in DayOrMore and nothing else,
+// and thousands of absences all in the first two buckets are groups that
+// report every few rounds and reset their clock -- which no horizon reaches.
+type NoDataAbsentAges struct {
+	ThisRound uint64 `json:"this_round"`
+	UnderHour uint64 `json:"under_hour"`
+	UnderDay  uint64 `json:"under_day"`
+	DayOrMore uint64 `json:"day_or_more"`
+}
+
+func (ages *NoDataAbsentAges) add(other NoDataAbsentAges) {
+	ages.ThisRound += other.ThisRound
+	ages.UnderHour += other.UnderHour
+	ages.UnderDay += other.UnderDay
+	ages.DayOrMore += other.DayOrMore
 }
 
 // Where a Plan's effective horizon is read as coming from. Compilation
@@ -463,10 +486,11 @@ type NoDataTrackingSummary struct {
 	HorizonUnknown  int `json:"horizon_unknown,omitempty"`
 	// Expected, Absent, ExpiredThisRound and Suppressed are the sums of the
 	// same fields over each Plan's last deciding round.
-	Expected         uint64 `json:"expected"`
-	Absent           uint64 `json:"absent"`
-	ExpiredThisRound uint64 `json:"expired_this_round"`
-	Suppressed       uint64 `json:"suppressed"`
+	Expected         uint64           `json:"expected"`
+	Absent           uint64           `json:"absent"`
+	ExpiredThisRound uint64           `json:"expired_this_round"`
+	Suppressed       uint64           `json:"suppressed"`
+	AbsentAges       NoDataAbsentAges `json:"absent_ages"`
 	// LastDecidedAt is the latest deciding round seen.
 	LastDecidedAt time.Time `json:"last_decided_at,omitempty"`
 	// HorizonSourceInferred is how many of the Plans' sources were read by
@@ -497,6 +521,7 @@ func (summary *NoDataTrackingSummary) add(other NoDataTrackingSummary) {
 	summary.Absent += other.Absent
 	summary.ExpiredThisRound += other.ExpiredThisRound
 	summary.Suppressed += other.Suppressed
+	summary.AbsentAges.add(other.AbsentAges)
 	if other.LastDecidedAt.After(summary.LastDecidedAt) {
 		summary.LastDecidedAt = other.LastDecidedAt
 	}
@@ -516,6 +541,7 @@ func (tracking NoDataTracking) summaryOf() NoDataTrackingSummary {
 	summary := NoDataTrackingSummary{
 		Plans: 1, Expected: tracking.Expected, Absent: tracking.Absent,
 		ExpiredThisRound: tracking.ExpiredThisRound, Suppressed: tracking.Suppressed, LastDecidedAt: tracking.DecidedAt,
+		AbsentAges: tracking.AbsentAges,
 	}
 	inferred := 0
 	if tracking.HorizonSourceBasis != NoDataHorizonSourceFrozen {

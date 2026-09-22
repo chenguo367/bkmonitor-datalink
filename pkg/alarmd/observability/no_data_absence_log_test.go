@@ -31,6 +31,7 @@ func TestTheAbsenceLineRendersEveryCountUnderItsOwnKey(t *testing.T) {
 		NoDataAbsence: &NoDataAbsenceFacts{
 			Outcome: "EVALUATED", HorizonSeconds: 3600, HorizonSource: "STRATEGY", RosterSource: "TARGET_STATIC",
 			Expected: 10, Present: 6, Absent: 2, Unavailable: 0, Dropped: 0, Expired: 1, Suppressed: 1,
+			AbsentAges: NoDataAbsentAges{ThisRound: 0, UnderHour: 1, UnderDay: 0, DayOrMore: 1},
 		},
 	})
 
@@ -51,6 +52,12 @@ func TestTheAbsenceLineRendersEveryCountUnderItsOwnKey(t *testing.T) {
 		"no_data_dropped":         float64(0),
 		"no_data_expired":         float64(1),
 		"no_data_suppressed":      float64(1),
+		// The ages, zeros included: the last bucket at zero is the reading
+		// that a horizon has nothing to reach.
+		"no_data_absent_this_round":  float64(0),
+		"no_data_absent_under_hour":  float64(1),
+		"no_data_absent_under_day":   float64(0),
+		"no_data_absent_day_or_more": float64(1),
 	}
 	for field, value := range want {
 		got, present := event[field]

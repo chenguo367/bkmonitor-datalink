@@ -112,12 +112,21 @@ func TestARoundThatJudgedSaysWhatItCountedAgainstWhichHorizon(t *testing.T) {
 	if line.RosterSource != string(nodata.RosterHistory) {
 		t.Fatalf("line roster source = %q, want %q", line.RosterSource, nodata.RosterHistory)
 	}
+	// The one absence still tracked is horizon/2 = 300 s old: under an hour.
+	// The two the horizon stopped are in no bucket.
+	if line.AbsentAges != (observability.NoDataAbsentAges{UnderHour: 1}) {
+		t.Fatalf("line ages = %+v, want the one tracked absence under an hour and nothing for the expired", line.AbsentAges)
+	}
 	fromRound := observability.NoDataAbsenceFacts{
 		Outcome: string(round.outcome), HorizonSeconds: round.horizon, HorizonSource: round.horizonSource,
 		RosterSource: string(round.facts.RosterSource),
 		Expected:     round.facts.Expected, Present: round.facts.Present, Absent: round.facts.Absent,
 		Unavailable: round.facts.Unavailable, Dropped: round.facts.Dropped,
 		Expired: round.facts.Expired, Suppressed: round.facts.Suppressed,
+		AbsentAges: observability.NoDataAbsentAges{
+			ThisRound: round.facts.AbsentAges.ThisRound, UnderHour: round.facts.AbsentAges.UnderHour,
+			UnderDay: round.facts.AbsentAges.UnderDay, DayOrMore: round.facts.AbsentAges.DayOrMore,
+		},
 	}
 	if line != fromRound {
 		t.Fatalf("line %+v does not carry the round's own facts %+v", line, round.facts)
@@ -132,6 +141,11 @@ func TestARoundThatJudgedSaysWhatItCountedAgainstWhichHorizon(t *testing.T) {
 	}
 	if control[0].HorizonSeconds != 0 || control[0].HorizonSource != "" || control[0].Expired != 0 || control[0].Absent != 3 {
 		t.Fatalf("control line = %+v, want horizon 0 from nowhere, expired 0, absent 3", control[0])
+	}
+	// Without a horizon all three are tracked, 1800 s, 1200 s and 300 s old:
+	// all under an hour, and the buckets sum to Absent.
+	if control[0].AbsentAges != (observability.NoDataAbsentAges{UnderHour: 3}) {
+		t.Fatalf("control ages = %+v, want all three under an hour", control[0].AbsentAges)
 	}
 }
 

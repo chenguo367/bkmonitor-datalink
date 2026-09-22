@@ -138,6 +138,55 @@ type AbsenceFacts struct {
 	// Suppressed counts the groups this round met already stopped, which is
 	// the standing size of what the horizon is holding down.
 	Suppressed uint64
+	// AbsentAges is the absences still tracked and reported this round, by
+	// how long each has been open: since this round only, under an hour,
+	// under a day, a day or more. Counted where Absent is, from the same
+	// FirstAbsent the horizon reads, so the two agree about every group.
+	//
+	// It exists because the horizon's effect cannot be read from Expired
+	// alone: a deployment that switched a one-day horizon on and saw thirty
+	// absences expire out of four thousand could not tell "the backlog was
+	// thirty" from "the horizon is not reaching them". The ages say which --
+	// four thousand absences all under an hour old are groups that report
+	// every few rounds and reset their clock each time, which no horizon
+	// ever reaches -- and they are the number a deployment chooses its
+	// horizon by: what a day-long horizon would stop is what sits in the
+	// last bucket.
+	AbsentAges AbsentAgeBuckets
+}
+
+// AbsentAgeBuckets is how long the absences reported this round have been
+// open, four buckets by the age of each absence at this evaluation time.
+type AbsentAgeBuckets struct {
+	// ThisRound is an absence that began at this evaluation time: its first
+	// absent round. UnderHour is older than that and under an hour, UnderDay
+	// an hour or more and under a day, DayOrMore a day or more.
+	ThisRound uint64
+	UnderHour uint64
+	UnderDay  uint64
+	DayOrMore uint64
+}
+
+// Total is every absence the buckets counted, which equals Absent.
+func (buckets AbsentAgeBuckets) Total() uint64 {
+	return buckets.ThisRound + buckets.UnderHour + buckets.UnderDay + buckets.DayOrMore
+}
+
+// count files one open absence by its age at evaluationTime. An absence
+// with no start is filed as this round's, which is the only round it can
+// have begun in for the memory to lack the start.
+func (buckets *AbsentAgeBuckets) count(firstAbsent, evaluationTime int64) {
+	age := evaluationTime - firstAbsent
+	switch {
+	case firstAbsent <= 0 || age <= 0:
+		buckets.ThisRound++
+	case age < 3600:
+		buckets.UnderHour++
+	case age < 86400:
+		buckets.UnderDay++
+	default:
+		buckets.DayOrMore++
+	}
 }
 
 // AbsenceResult is the evaluation. Memory is the whole updated map rather than
@@ -310,6 +359,7 @@ func evaluateAbsence(input AbsenceInput) AbsenceResult {
 			}
 			result.Verdicts[whole] = VerdictAnomaly
 			result.Facts.Absent++
+			result.Facts.AbsentAges.count(entry.FirstAbsent, input.EvaluationTime)
 			result.Memory[whole] = entry
 			closeDroppedAbsences(&result, input, true)
 			return result
@@ -383,6 +433,7 @@ func evaluateAbsence(input AbsenceInput) AbsenceResult {
 		}
 		result.Verdicts[key] = VerdictAnomaly
 		result.Facts.Absent++
+		result.Facts.AbsentAges.count(entry.FirstAbsent, input.EvaluationTime)
 		result.Memory[key] = entry
 	}
 

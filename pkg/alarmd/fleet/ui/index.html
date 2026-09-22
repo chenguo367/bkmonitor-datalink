@@ -1251,11 +1251,23 @@ function noDataTrackingWords(tracking) {
         ? '，来源' + (HORIZON_SOURCE_BASIS[tracking.horizon_source_basis] || tracking.horizon_source_basis) : '')
     + '）');
   parts.push('期待 ' + tracking.expected + ' 个组' + (tracking.roster_source ? '（名册来源 ' + tracking.roster_source + '）' : '')
-    + '，那一轮到了 ' + tracking.present + '，在追踪的缺失 ' + tracking.absent
+    + '，那一轮到了 ' + tracking.present + '，在追踪的缺失 ' + tracking.absent + absentAgesWords(tracking.absent_ages)
     + '，那一轮到期停追 ' + tracking.expired_this_round + '，已停追压着 ' + tracking.suppressed
     + (tracking.dropped ? '，维度不匹配丢弃 ' + tracking.dropped : ''));
   parts.push('判定于 ' + momentLabel(tracking.evaluation_time * 1000));
   return parts.join('；');
+}
+
+// The absences by how long each has been open. This is what a horizon is
+// read against: a one-day horizon stops what sits in the last bucket and
+// nothing else, so a first wave of thirty expiries out of four thousand
+// absences is not the horizon failing to reach them when the four thousand
+// are all under an hour old -- groups that report every few rounds and
+// reset their clock each time.
+function absentAgesWords(ages) {
+  if (!ages) return '';
+  return '（本轮起 ' + (ages.this_round || 0) + '、不到 1 h ' + (ages.under_hour || 0)
+    + '、不到 1 天 ' + (ages.under_day || 0) + '、满 1 天 ' + (ages.day_or_more || 0) + '）';
 }
 
 function memoryUpkeepWords(upkeep) {
@@ -2461,7 +2473,7 @@ function objectRow(anomaly, check, group) {
   if (anomaly.no_data_tracking && anomaly.no_data_tracking.length) {
     anomaly.no_data_tracking.forEach(function (tracking) {
       line('无数据追踪', noDataTrackingWords(tracking),
-        '每条无数据策略最近一次判定的原样计数，不做前后轮相减。"在追踪的缺失"是还在产出无数据异常的组；"那一轮到期停追"是那一轮追踪期限到了、停止产出的组；"已停追压着"是之前就停了、那一轮又遇到的组，就是期限正压着的规模。'
+        '每条无数据策略最近一次判定的原样计数，不做前后轮相减。"在追踪的缺失"是还在产出无数据异常的组，括号里按缺席多久分四档（期限只够得到"满 1 天"那一档；前两档多的是隔几轮就报一次、来了就重置计时的稀疏上报）；"那一轮到期停追"是那一轮追踪期限到了、停止产出的组；"已停追压着"是之前就停了、那一轮又遇到的组，就是期限正压着的规模。'
         + '停追不会发恢复：数据再来才会重新开始追踪。期限为"无"时后两个数恒为 0。来源写"按值推断"的是旧编译或旧副本的行，重编译后会变为冻结词。'
         + '指标 worker_no_data_absences_total{outcome}');
     });
@@ -3081,7 +3093,11 @@ function renderNoDataTracking(tracking) {
         ? '（其中 ' + tracking.horizon_source_inferred + ' 条的来源仍是按值推断的——旧编译或旧副本，重编译后会变为冻结词；为 0 才全是合同冻的）'
         : '（来源全部是编译时冻进 Plan 的）')];
   parts.push('各策略最近一轮合计（不同周期的策略"最近一轮"落在不同时刻，这不是某一个时间窗）：期待 ' + tracking.expected
-    + ' 个组，在追踪的缺失 ' + tracking.absent + '，最近一轮到期停追 ' + tracking.expired_this_round + '，已停追压着 ' + tracking.suppressed);
+    + ' 个组，在追踪的缺失 ' + tracking.absent + absentAgesWords(tracking.absent_ages)
+    + '，最近一轮到期停追 ' + tracking.expired_this_round + '，已停追压着 ' + tracking.suppressed);
+  if (tracking.absent_ages && tracking.absent && !tracking.absent_ages.day_or_more && (tracking.horizon_platform || tracking.horizon_strategy)) {
+    parts.push('缺失里没有满一天的：期限够不到任何一个——这些组是隔几轮就报一次、来了就重置计时的稀疏上报，不是长期缺席');
+  }
   if (tracking.horizon_none === tracking.plans) {
     parts.push('全部无期限，后两个数恒为 0——特性没开，不是没起作用');
   } else if (!tracking.expired_this_round && !tracking.suppressed) {
