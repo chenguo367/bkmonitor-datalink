@@ -21,6 +21,19 @@ type LinkdConfig struct {
 	Username          string                 `yaml:"username"`
 	Password          string                 `yaml:"password"`
 	ReconcileInterval Duration               `yaml:"reconcile_interval"`
+	// AbsentCloseSend arms the close for strategies that no longer exist.
+	// False, the default, takes the difference and reports every reading
+	// without sending one close: the strategies it would have closed are
+	// counted, the alerts are not.
+	//
+	// It is a setting rather than a program constant because what it decides
+	// is not a fact about the program. The difference's gates are ours to
+	// get right; whether this deployment's numbers - how many strategies it
+	// let go, how many of those still hold alerts - are the numbers whoever
+	// runs it expects, is theirs, and nothing inside the process can answer
+	// it. A capability that makes alerts disappear is armed once those
+	// numbers have been read, not once the code is believed.
+	AbsentCloseSend bool `yaml:"absent_close_send"`
 }
 
 func (c LinkdConfig) Prefix() string {

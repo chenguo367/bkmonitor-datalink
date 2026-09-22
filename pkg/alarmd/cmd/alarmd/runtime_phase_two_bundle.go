@@ -1121,9 +1121,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// exist. It runs on every replica's loop and does nothing on a follower;
 	// the leader check is inside the round, so a failover needs no wiring of
 	// its own.
-	absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Source, linkd.Alerts, events, cfg.PhaseTwo.Linkd.EventSourceID)
+	absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Source, linkd.Alerts, events,
+		cfg.PhaseTwo.Linkd.EventSourceID, cfg.PhaseTwo.Linkd.AbsentCloseSend)
 	bundle.dependencies.RunAbsentClose = absentClose.run
-	recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Difference)
+	recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)
 	recorder.SetEffectiveCloseSource(maintenance.Stats)
 	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.

@@ -21,65 +21,81 @@ import (
 type absentCloseCollector struct {
 	mu         sync.Mutex
 	outcomes   func() map[string]uint64
+	rounds     func() map[string]uint64
 	difference func() map[string]int
 	outcomeIs  *prometheus.Desc
+	roundIs    *prometheus.Desc
 	sides      *prometheus.Desc
 }
 
 // differenceSides is the closed list of denominators, so every one of them
 // has a cell from the first scrape.
 var differenceSides = []string{"departed", "with_open_alerts", "candidates", "snapshot_strategies",
-	"published_strategies", "returned", "unreadable_index"}
+	"published_strategies", "returned", "unreadable_index", "send_armed"}
 
 func newAbsentCloseCollector() *absentCloseCollector {
 	return &absentCloseCollector{
 		outcomeIs: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "absent_strategy_close_total"),
-			"What the control leader's difference against deleted strategies did, by outcome. Counted per "+
+			"What the control leader's difference against deleted strategies decided, by outcome. Counted per "+
 				"strategy except alert_closed, metadata_missing, producer_foreign and producer_unknown, which count "+
-				"alerts. The refusal words (snapshot_unusable, snapshot_empty, snapshot_stale, snapshot_shrunk, "+
-				"difference_too_large) count whole rounds that decided nothing, and none counts the rounds that "+
-				"decided; they are the denominator every other reading is read against. Every cell exists from the "+
-				"start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
+				"alerts. closed counts decisions and alert_closed counts what went out: while the close is not "+
+				"armed (absent_strategy_difference side=send_armed is 0) closed rises and alert_closed stays at "+
+				"zero, which is what the difference would do. alert_closed rising round after round while closed "+
+				"stays flat is not new work: it is the same alerts being closed again because the alert link has "+
+				"not removed their fingerprints from its index, which is what ends a strategy's candidacy. Why a "+
+				"whole round decided nothing is absent_strategy_round_total, not a cell here. Every cell exists "+
+				"from the start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
+		roundIs: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "absent_strategy_round_total"),
+			"How each round of the difference ended: none is a round that decided, and the rest name the fact "+
+				"that was not good enough to decide on - snapshot_unusable (the source was not observed this "+
+				"round), snapshot_empty, snapshot_stale, snapshot_shrunk (the strategy list itself lost a large "+
+				"share of its entries) and difference_too_large. Rounds, not strategies: this says what this "+
+				"service could do, where absent_strategy_close_total says what the data was. none is the "+
+				"denominator the outcome family is read against.", []string{"disposition"}, nil),
 		sides: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "absent_strategy_difference"),
 			"The sizes the last round decided on: departed is the strategies the catalog let go and still "+
 				"remembers, with_open_alerts how many of those the alert link still holds an alert for, candidates "+
 				"the difference itself, snapshot_strategies and published_strategies what it was judged against, "+
 				"returned the departed strategies the source lists again, and unreadable_index the ones whose alert "+
-				"index could not be read. A candidates of zero beside a departed of zero is a quiet deployment; "+
-				"beside a large departed it is a difference that refused.", []string{"side"}, nil),
+				"index could not be read, and send_armed whether this deployment has armed the close at all "+
+				"(0 means every decision is reported and none is sent). A candidates of zero beside a departed of "+
+				"zero is a quiet deployment; beside a large departed it is a difference that refused.", []string{"side"}, nil),
 	}
 }
 
 // SetAbsentCloseSource binds the collector to the loop's counts. Safe before
 // or after registration; a nil recorder is a no-op.
-func (r *Recorder) SetAbsentCloseSource(outcomes func() map[string]uint64, difference func() map[string]int) {
+func (r *Recorder) SetAbsentCloseSource(outcomes func() map[string]uint64, rounds func() map[string]uint64, difference func() map[string]int) {
 	if r == nil || r.phaseTwo.absentClose == nil {
 		return
 	}
 	r.phaseTwo.absentClose.mu.Lock()
 	r.phaseTwo.absentClose.outcomes = outcomes
+	r.phaseTwo.absentClose.rounds = rounds
 	r.phaseTwo.absentClose.difference = difference
 	r.phaseTwo.absentClose.mu.Unlock()
 }
 
 func (c *absentCloseCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.outcomeIs
+	ch <- c.roundIs
 	ch <- c.sides
 }
 
 func (c *absentCloseCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.Lock()
-	outcomes, difference := c.outcomes, c.difference
+	outcomes, rounds, difference := c.outcomes, c.rounds, c.difference
 	c.mu.Unlock()
-	if outcomes == nil || difference == nil {
+	if outcomes == nil || rounds == nil || difference == nil {
 		return
 	}
 	counts := outcomes()
 	for _, outcome := range absentalerts.Outcomes {
 		ch <- prometheus.MustNewConstMetric(c.outcomeIs, prometheus.CounterValue, float64(counts[outcome]), outcome)
 	}
+	dispositions := rounds()
 	for _, refusal := range absentalerts.Refusals {
-		ch <- prometheus.MustNewConstMetric(c.outcomeIs, prometheus.CounterValue, float64(counts[refusal]), refusal)
+		ch <- prometheus.MustNewConstMetric(c.roundIs, prometheus.CounterValue, float64(dispositions[refusal]), refusal)
 	}
 	sizes := difference()
 	for _, side := range differenceSides {

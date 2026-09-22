@@ -319,11 +319,13 @@ type Bounds struct {
 	// "a tenth of the strategies are gone" is that the list is wrong, not
 	// that the strategies are.
 	//
-	// The other side is deliberately not a ratio. A deployment can honestly
-	// have every one of its few unrecovered alerts on deleted strategies -
-	// that is the backlog this capability exists to clear - and a ratio
-	// against the open alert index would refuse exactly that case. What the
-	// index side is checked for is overlap, below.
+	// The other side is deliberately not a statistic at all. A deployment
+	// can honestly have every one of its few unrecovered alerts on deleted
+	// strategies - that is the backlog this capability exists to clear - so
+	// neither a ratio against the alert index nor a check that the two sides
+	// overlap can be a gate: both refuse precisely that state. "This alert
+	// is not ours" is a fact each alert carries, and it is answered per
+	// alert where it is a fact; see OutcomeProducerForeign.
 	MaxDifferenceRatio float64
 	// MinDifferenceForRatio is the difference below which the ratio says
 	// nothing. On a deployment with four strategies one deletion is
@@ -342,7 +344,10 @@ type Bounds struct {
 	MaxCloseStrategies int
 }
 
-// Result is the round's decision.
+// Result is the round's decision. Close is what the round decided to
+// close, which is not the same as what it sent: arming the send is the
+// caller's, and the two are counted apart so that a deployment can read
+// what the difference would do before it does it.
 type Result struct {
 	Close   []Absent
 	Counts  Counts
@@ -455,8 +460,7 @@ func shrunk(counts Counts, bounds Bounds) bool {
 
 // tooLarge applies the size gate against the snapshot, which is the
 // denominator that says whether the snapshot is missing strategies it should
-// have. See MaxDifferenceRatio for why the index side is an overlap check
-// and not a ratio.
+// have. See MaxDifferenceRatio for why there is no gate on the other side.
 func tooLarge(counts Counts, bounds Bounds) bool {
 	if bounds.MaxDifferenceRatio <= 0 || counts.Candidates < max(bounds.MinDifferenceForRatio, 1) {
 		return false

@@ -15,6 +15,18 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
+// A strategy stops being a candidate when the alert link no longer holds an
+// unrecovered alert for it, which is the link's to decide: it removes the
+// fingerprint from its index when it accepts the close. That is this loop's
+// termination condition and it is not in this repository. If the link does
+// not remove them, the loop sends the same closes again every round until
+// the departure memory expires. Whether that is harmful depends on the
+// link's idempotence, but it has one reading either way: alert_closed rises
+// round after round while closed stays flat, which is the same alerts being
+// closed again rather than new ones being found. No local "recently closed"
+// memory is kept for it - a reading that names the dependency is worth more
+// than state that hides it.
+//
 // absentCloseInterval is how often the leader takes the difference. The
 // bound is not cost - the round is a handful of point reads - but the
 // grace: a candidate has to be seen missing by two rounds under two
@@ -44,8 +56,12 @@ type absentStrategyClose struct {
 	alerts     openalerts.Reconciler
 	writer     closeWriter
 	sourceID   string
-	tracker    *absentalerts.Tracker
-	bounds     absentalerts.Bounds
+	// send arms the close. False takes the whole difference and reports
+	// every reading without sending one close; see LinkdConfig.
+	// AbsentCloseSend for why the decision is a setting.
+	send    bool
+	tracker *absentalerts.Tracker
+	bounds  absentalerts.Bounds
 	// previousSnapshot is how large the last snapshot this loop decided on
 	// was, which is what the next one's size is judged against.
 	previousSnapshot int
@@ -74,9 +90,9 @@ type absentCloseIndex interface {
 }
 
 func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, reconciler absentCloseControl,
-	index absentCloseIndex, alerts openalerts.Reconciler, writer closeWriter, sourceID string) *absentStrategyClose {
+	index absentCloseIndex, alerts openalerts.Reconciler, writer closeWriter, sourceID string, send bool) *absentStrategyClose {
 	return &absentStrategyClose{
-		bundle: bundle, reconciler: reconciler, index: index, alerts: alerts, writer: writer, sourceID: sourceID,
+		bundle: bundle, reconciler: reconciler, index: index, alerts: alerts, writer: writer, sourceID: sourceID, send: send,
 		tracker: absentalerts.NewTracker(controlplane.MaxDepartedStrategies),
 		bounds: absentalerts.Bounds{
 			// The loop's own grace, on top of the removal grace the catalog
@@ -95,18 +111,32 @@ func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, reconciler absentClose
 	}
 }
 
-// Stats is the outcome counts, for the metric that reports every cell.
+// Stats is the per-candidate and per-alert outcome counts.
 func (loop *absentStrategyClose) Stats() map[string]uint64 {
 	loop.countsMu.Lock()
 	defer loop.countsMu.Unlock()
-	counts := make(map[string]uint64, len(absentalerts.Outcomes)+len(absentalerts.Refusals))
+	counts := make(map[string]uint64, len(absentalerts.Outcomes))
 	for _, outcome := range absentalerts.Outcomes {
 		counts[outcome] = loop.counts[outcome]
 	}
-	for _, refusal := range absentalerts.Refusals {
-		counts[refusal] = loop.counts[refusal]
-	}
 	return counts
+}
+
+// Rounds is how each round ended, by its own word.
+//
+// A separate family from Stats on purpose: "this round decided nothing" is
+// a fact about one round of this service, and "this candidate was decided
+// and not closed" is a fact about one strategy's data. Counting them under
+// one label would put a round-level fact in an object-level vocabulary,
+// and a reader summing the family would be adding rounds to strategies.
+func (loop *absentStrategyClose) Rounds() map[string]uint64 {
+	loop.countsMu.Lock()
+	defer loop.countsMu.Unlock()
+	rounds := make(map[string]uint64, len(absentalerts.Refusals))
+	for _, refusal := range absentalerts.Refusals {
+		rounds[refusal] = loop.counts[refusal]
+	}
+	return rounds
 }
 
 // Difference is the round's denominators, for the gauge that reports them.
@@ -119,8 +149,15 @@ func (loop *absentStrategyClose) Difference() map[string]int {
 		"departed": loop.lastCounts.Departed, "with_open_alerts": loop.lastCounts.WithOpenAlerts,
 		"candidates": loop.lastCounts.Candidates, "snapshot_strategies": loop.lastCounts.SnapshotStrategies,
 		"published_strategies": loop.lastCounts.PublishedStrategies, "returned": loop.lastCounts.Returned,
-		"unreadable_index": loop.lastCounts.UnreadableIndex,
+		"unreadable_index": loop.lastCounts.UnreadableIndex, "send_armed": boolSide(loop.send),
 	}
+}
+
+func boolSide(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (loop *absentStrategyClose) count(outcome string, n int) {
@@ -225,6 +262,13 @@ func (loop *absentStrategyClose) readIndex(ctx context.Context, round absentaler
 // closeStrategy reads the strategy's current alerts from the alert link and
 // closes the ones this deployment produced.
 func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absentalerts.Absent, now time.Time) {
+	if !loop.send {
+		// Decided, not sent. The strategy is already counted under closed,
+		// which counts decisions; alert_closed counts what went out, and
+		// stays at zero. The round's line carries send=false, because a
+		// line is the only place the two can be told apart.
+		return
+	}
 	if loop.alerts == nil {
 		// Without the reconciliation endpoint there is no authoritative
 		// alert metadata, so there is nothing to address a close to. Every

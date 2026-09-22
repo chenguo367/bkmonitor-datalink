@@ -113,7 +113,7 @@ func newAbsentFixture(t *testing.T, alerts []openalerts.Alert) *absentTestFixtur
 		Now: func() time.Time { return fixture.now }, Observer: observability.NopObserver{}}}
 	bundle.controlLeader = true
 	index := &absentTestIndex{holding: map[openalerts.StrategyKey]bool{{TenantID: "system", StrategyID: "10"}: true}}
-	fixture.loop = newAbsentStrategyClose(bundle, fixture.control, index, fixture.alerts, fixture.writer, "native")
+	fixture.loop = newAbsentStrategyClose(bundle, fixture.control, index, fixture.alerts, fixture.writer, "native", true)
 	return fixture
 }
 
@@ -246,8 +246,8 @@ func TestASnapshotThatShrankRefusesTheRoundByName(t *testing.T) {
 	if len(fixture.writer.batches) != 0 {
 		t.Fatalf("a round decided on a snapshot that had lost most of its strategies: %+v", fixture.writer.batches)
 	}
-	if fixture.loop.Stats()[absentalerts.RefusalSnapshotShrunk] != 1 {
-		t.Fatalf("the refusal was not named: %+v", fixture.loop.Stats())
+	if fixture.loop.Rounds()[absentalerts.RefusalSnapshotShrunk] != 1 {
+		t.Fatalf("the refusal was not named: %+v", fixture.loop.Rounds())
 	}
 }
 
@@ -282,5 +282,49 @@ func TestAStrategyTheFleetStillRunsIsNeverClosed(t *testing.T) {
 	fixture.loop.step(ctx)
 	if len(fixture.writer.batches) != 0 {
 		t.Fatalf("a strategy with a published Plan had its alerts closed: %+v", fixture.writer.batches)
+	}
+}
+
+// Until the deployment arms it, the difference runs in full and sends
+// nothing: what it would close is counted as a decision, and what went out
+// stays at zero. That is how the numbers can be read before they are acted
+// on, which is the only way to know whether this deployment's numbers are
+// the expected ones.
+func TestAnUnarmedDifferenceDecidesEverythingAndSendsNothing(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+	fixture.loop.send = false
+	ctx := context.Background()
+	fixture.loop.step(ctx)
+	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 100)
+	fixture.loop.step(ctx)
+	if len(fixture.writer.batches) != 0 {
+		t.Fatalf("an unarmed difference sent a close: %+v", fixture.writer.batches)
+	}
+	stats := fixture.loop.Stats()
+	if stats[absentalerts.OutcomeClosed] != 1 {
+		t.Fatalf("an unarmed difference did not report what it would have closed: %+v", stats)
+	}
+	if stats[absentalerts.OutcomeAlertClosed] != 0 {
+		t.Fatalf("an unarmed difference counted alerts as closed: %+v", stats)
+	}
+	if fixture.loop.Difference()["send_armed"] != 0 {
+		t.Fatalf("the reading does not say the close is unarmed: %+v", fixture.loop.Difference())
+	}
+}
+
+// The rounds are their own family: what this service could do is not what
+// the data was, and a reader summing one must not be adding the other.
+func TestARefusedRoundIsCountedAsARoundNotAsACandidate(t *testing.T) {
+	fixture := newAbsentFixture(t, nil)
+	fixture.control.haveSnaphot = false
+	fixture.loop.step(context.Background())
+	if fixture.loop.Rounds()[absentalerts.RefusalSnapshotUnusable] != 1 {
+		t.Fatalf("the refused round was not counted as a round: %+v", fixture.loop.Rounds())
+	}
+	for outcome, count := range fixture.loop.Stats() {
+		if count != 0 {
+			t.Fatalf("a refused round put %s in the candidate family: %+v", outcome, fixture.loop.Stats())
+		}
 	}
 }
