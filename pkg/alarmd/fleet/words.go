@@ -88,16 +88,45 @@ const (
 var WatchReasons = []WatchReason{WatchWindowFilling, WatchGuardMoving, WatchNextRound}
 
 // Words is the vocabulary as sent: each word with its rendering. The page
-// looks a word up here and nowhere else.
+// looks a word up here and nowhere else. Health is the deployment's own
+// three-word answer, rendered here too so the page's first word is not an
+// English constant.
 type Words struct {
 	State  map[StateWord]string   `json:"state"`
 	Action map[ActionWord]string  `json:"action"`
 	Watch  map[WatchReason]string `json:"watch"`
+	Health map[Health]string      `json:"health"`
+	// Hole and Verdict render a named window's holes and its verdict, the
+	// two closed lists the strategy card shows beside the words.
+	Hole    map[HoleCause]string     `json:"hole"`
+	Verdict map[WindowVerdict]string `json:"verdict"`
+	// SinceBasis renders the direction of a duration: measured, a lower
+	// bound, an upper bound, or refused.
+	SinceBasis map[SinceBasis]string `json:"since_basis"`
+	// StateOrder and ActionOrder are the lists' own order, which a JSON
+	// object cannot carry: the page lays its columns out in this order and
+	// decides none of its own.
+	StateOrder  []StateWord  `json:"state_order"`
+	ActionOrder []ActionWord `json:"action_order"`
 }
 
 // ProductWords is the one rendering of the vocabulary.
 func ProductWords() Words {
 	return Words{
+		Health: map[Health]string{HealthHealthy: "正常", HealthDegraded: "降级", HealthUnknown: "证据不全"},
+		Hole: map[HoleCause]string{
+			HoleAnsweredWithoutSeries: "查询正常返回，这条序列不在结果里", HoleAnsweredEmpty: "查询正常返回，整个对象没有数据",
+			HoleInputIncomplete: "本侧那一轮没查全", HolePointUnusable: "记录到了，检测用不了",
+			HolePrimaryUnrecorded: "那一轮查询答了什么没记下来", HoleNotInMemory: "超出本进程记忆",
+		},
+		Verdict: map[WindowVerdict]string{
+			VerdictDataAbsentWhenQueried: "查询时数据不在", VerdictInputIncomplete: "本侧没查全",
+			VerdictPointsUnusable: "记录检测用不了", VerdictUnknown: "说不出是谁的",
+		},
+		SinceBasis: map[SinceBasis]string{
+			SinceExact: "实测", SinceAtLeast: "只会更久", SinceAtMost: "只会更短", SinceRefused: "时间异常，请上报",
+		},
+		StateOrder: append([]StateWord(nil), StateWords...), ActionOrder: append([]ActionWord(nil), ActionWords...),
 		State: map[StateWord]string{
 			StateDetecting: "在检测", StateResultUntrusted: "检测结果不能采信", StateNotDetecting: "没在检测",
 			StateDataAbsent: "数据没到", StateStrategyInvalid: "策略定义有问题", StateDependencyUnanswered: "依赖没应答",
@@ -324,4 +353,42 @@ func watchReasonOf(row Anomaly) (WatchReason, bool) {
 		return WatchNextRound, true
 	}
 	return "", false
+}
+
+// SinceBasis is the direction of a duration: what the since source says
+// about the clock beside it, in one of four words, so a reader who does
+// not know the sources knows which way the number can be wrong.
+type SinceBasis string
+
+const (
+	// SinceExact: this process, or persisted business state, saw it start.
+	SinceExact SinceBasis = "EXACT"
+	// SinceAtLeast: the clock started when this process began watching, or
+	// at the earliest moment a record could still prove; the real start is
+	// no later, and may be far earlier.
+	SinceAtLeast SinceBasis = "AT_LEAST"
+	// SinceAtMost: the clock is the last moment the object is known to have
+	// been fine; it went wrong some time after.
+	SinceAtMost SinceBasis = "AT_MOST"
+	// SinceRefused: the start was later than the read and was refused.
+	SinceRefused SinceBasis = "REFUSED"
+)
+
+// SinceBases is the closed list.
+var SinceBases = []SinceBasis{SinceExact, SinceAtLeast, SinceAtMost, SinceRefused}
+
+// sinceBasisOf reads a since source into its direction. A source the table
+// does not know reads as a lower bound: the one direction that never
+// overstates how long something has been wrong.
+func sinceBasisOf(source SinceSource) SinceBasis {
+	switch source {
+	case SinceBusinessState, SinceSnapshotContinuity:
+		return SinceExact
+	case SinceRestoredLastFull:
+		return SinceAtMost
+	case SinceRefusedFuture:
+		return SinceRefused
+	default:
+		return SinceAtLeast
+	}
 }

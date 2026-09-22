@@ -65,6 +65,36 @@ func TestEveryCheckHasExactlyOnePairOfWords(t *testing.T) {
 			t.Errorf("watch reason %s has no rendering", word)
 		}
 	}
+	for _, word := range []Health{HealthHealthy, HealthDegraded, HealthUnknown} {
+		if words.Health[word] == "" {
+			t.Errorf("health %s has no rendering", word)
+		}
+	}
+	for _, cause := range HoleCauses {
+		if words.Hole[cause] == "" {
+			t.Errorf("hole cause %s has no rendering", cause)
+		}
+	}
+	for _, verdict := range WindowVerdicts {
+		if words.Verdict[verdict] == "" {
+			t.Errorf("verdict %s has no rendering", verdict)
+		}
+	}
+	for _, basis := range SinceBases {
+		if words.SinceBasis[basis] == "" {
+			t.Errorf("since basis %s has no rendering", basis)
+		}
+	}
+	for source, want := range map[SinceSource]SinceBasis{SinceBusinessState: SinceExact, SinceSnapshotContinuity: SinceExact,
+		SinceRestoredLastFull: SinceAtMost, SinceRestoredAtRestart: SinceAtLeast, SinceRestoredEmptyRun: SinceAtLeast,
+		SinceProcessStart: SinceAtLeast, SinceRefusedFuture: SinceRefused, SinceSource("SOMETHING_NEW"): SinceAtLeast} {
+		if got := sinceBasisOf(source); got != want {
+			t.Errorf("since basis of %s = %s, want %s", source, got, want)
+		}
+	}
+	if len(words.StateOrder) != len(StateWords) || len(words.ActionOrder) != len(ActionWords) || words.ActionOrder[0] != ActionServiceFix {
+		t.Errorf("the lists' order does not travel: %v / %v", words.StateOrder, words.ActionOrder)
+	}
 	// The fold for a word the table does not know goes one way only: to
 	// this side, to be looked at. Never towards nothing to do.
 	unpaired := standingOf(Anomaly{Finding: Finding{Check: Check("NOT_A_CHECK")}})

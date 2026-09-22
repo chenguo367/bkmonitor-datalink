@@ -260,13 +260,19 @@ func strategyStandingLine(standing StrategyStanding) string {
 		}
 		withheld = append(withheld, item)
 	}
+	words := ProductWords()
 	objects := make([]string, 0, len(standing.Plans))
 	for _, plan := range standing.Plans {
 		object := shortObjectName(plan.QueryGroup)
 		switch {
 		case plan.Replica != "":
 			object += "（" + shortReplicaName(plan.Replica) + " 持有"
-			if len(plan.Rows) > 0 {
+			// The object's own words, not the check it is under: the check
+			// is the coordinate and rides on the row, the sentence is read
+			// by whoever asked about the strategy.
+			if len(plan.Rows) > 0 && plan.Rows[0].Standing != nil {
+				object += "，" + words.State[plan.Rows[0].Standing.State] + "·" + words.Action[plan.Rows[0].Standing.Action]
+			} else if len(plan.Rows) > 0 {
 				object += "，在 " + string(plan.Rows[0].Finding.Check) + " 行"
 			}
 			object += "）"
@@ -440,8 +446,9 @@ func serveStrategyList(response http.ResponseWriter, request *http.Request, serv
 	}
 	current := service.View(request.Context())
 	Decide(&current, now(), stallAfter)
-	lines := FilterStrategyLines(StrategyLines(&current, now()), state, action)
-	body := StrategyListResponse{Words: ProductWords(), Strategies: lines, Total: len(lines), State: state, Action: action}
+	all := StrategyLines(&current, now())
+	lines := FilterStrategyLines(all, state, action)
+	body := StrategyListResponse{Words: ProductWords(), Strategies: lines, Summary: SummarizeStrategyLines(all), Total: len(lines), State: state, Action: action}
 	if len(lines) > limit {
 		body.Strategies, body.Truncated = lines[:limit], true
 	}
