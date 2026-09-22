@@ -269,9 +269,18 @@ func strategyStandingLine(standing StrategyStanding) string {
 			object += "（" + shortReplicaName(plan.Replica) + " 持有"
 			// The object's own words, not the check it is under: the check
 			// is the coordinate and rides on the row, the sentence is read
-			// by whoever asked about the strategy.
+			// by whoever asked about the strategy. Words the row says are
+			// about another Plan on the same object are reported as that
+			// Plan's, so a strategy is not told its data is absent because
+			// a neighbour's is.
 			if len(plan.Rows) > 0 && plan.Rows[0].Standing != nil {
-				object += "，" + words.State[plan.Rows[0].Standing.State] + "·" + words.Action[plan.Rows[0].Standing.Action]
+				rowStanding := plan.Rows[0].Standing
+				if rowStanding.About != nil && rowStanding.About.StrategyID != standing.StrategyID {
+					object += "，在检测；同对象上策略 " + rowStanding.About.StrategyID + " 的：" +
+						words.State[rowStanding.State] + "·" + words.Action[rowStanding.Action]
+				} else {
+					object += "，" + words.State[rowStanding.State] + "·" + words.Action[rowStanding.Action]
+				}
 			} else if len(plan.Rows) > 0 {
 				object += "，在 " + string(plan.Rows[0].Finding.Check) + " 行"
 			}

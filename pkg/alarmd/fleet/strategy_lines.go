@@ -123,11 +123,11 @@ func StrategyLines(view *View, now time.Time) []StrategyLine {
 		if row.Standing == nil {
 			return
 		}
-		rank := checkRank(row.Finding.Check)
-		for _, ref := range row.Strategies {
+		rank := foldRank(row.Finding.Check, row.Loss)
+		for _, ref := range strategiesOf(row) {
 			fold := folds[ref]
 			if fold == nil {
-				fold = &strategyFold{line: StrategyLine{StrategyID: ref.StrategyID, BusinessID: ref.BusinessID}, rank: len(checkOrder) + 1, objects: map[string]struct{}{}}
+				fold = &strategyFold{line: StrategyLine{StrategyID: ref.StrategyID, BusinessID: ref.BusinessID}, rank: unranked, objects: map[string]struct{}{}}
 				folds[ref] = fold
 			}
 			fold.objects[row.QueryGroup] = struct{}{}
@@ -155,7 +155,7 @@ func StrategyLines(view *View, now time.Time) []StrategyLine {
 		lines = append(lines, fold.line)
 	}
 	sort.Slice(lines, func(i, j int) bool {
-		left, right := checkRank(lines[i].Standing.Check), checkRank(lines[j].Standing.Check)
+		left, right := lineRank(lines[i]), lineRank(lines[j])
 		if left != right {
 			return left < right
 		}
@@ -165,6 +165,34 @@ func StrategyLines(view *View, now time.Time) []StrategyLine {
 		return lines[i].BusinessID < lines[j].BusinessID
 	})
 	return lines
+}
+
+// unranked is a fold no row has decided yet: below every current and every
+// historical rank.
+var unranked = 2*(len(checkOrder)+1) + 1
+
+// foldRank orders the rows competing to decide a strategy's line: by the
+// check's severity, and every current row before every historical one. A
+// historical row is what is left of a loss the object has run past; the
+// object beside it is under a current check now. On a verification cluster
+// a strategy losing history under an undecided window read "recovered,
+// nothing to do" because its recovered restart loss ranked higher -- a past
+// tense outranking the present.
+func foldRank(check Check, loss Loss) int {
+	rank := checkRank(check)
+	if loss == LossHistorical {
+		rank += len(checkOrder) + 1
+	}
+	return rank
+}
+
+// lineRank is foldRank read back from the line, for ordering the list.
+func lineRank(line StrategyLine) int {
+	loss := Loss("")
+	if line.Standing.RefinedBy == RuleHistoricalLoss {
+		loss = LossHistorical
+	}
+	return foldRank(line.Standing.Check, loss)
 }
 
 // strategyLineOf composes the sentence from its slots.

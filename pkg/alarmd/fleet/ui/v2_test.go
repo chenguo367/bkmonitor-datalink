@@ -98,9 +98,16 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 			Windows: []fleet.WindowRow{{Key: "series-two/1", Series: "series-two", Level: 1, Valid: 8, Required: 9, End: at,
 				Holes:         []fleet.WindowHole{{At: at.Add(-4 * time.Minute), Cause: fleet.HolePointUnusable, Round: "FULL_COMPLETED"}},
 				UnusableTotal: 1, Verdict: fleet.VerdictPointsUnusable, HolesBy: fleet.WindowHoleCounts{Unusable: 1}}}}}
+	// A third object shared with another strategy, whose words the server
+	// says are that other Plan's: the page shows whose they are and does
+	// not read them as this strategy's.
+	neighbour := fleet.Anomaly{QueryGroup: "qg-shared-012345", Since: since, SinceFrom: fleet.SinceBusinessState,
+		Standing: &fleet.Standing{State: fleet.StateDataAbsent, Action: fleet.ActionDataCheck, Check: fleet.CheckSeriesDataMissing, RefinedBy: fleet.RuleStalled,
+			About: &fleet.StrategyRef{StrategyID: "4102", BusinessID: "7"}},
+		Finding: fleet.Finding{Check: fleet.CheckSeriesDataMissing}}
 	card := fleet.StrategyStanding{StrategyID: "4101", AnsweredBy: "pod-a", Publication: fleet.StrategyPublication{SnapshotRevision: "53b81c9bbb2e", Epoch: 9},
 		Standing: fleet.StandingDetecting, Found: true, Line: "策略 4101：已生效，1 个对象在检测：qg-window-abc（pod-a 持有，数据没到·数据负责人查）",
-		Plans: []fleet.StrategyPlanStanding{{StrategyPlanRef: fleet.StrategyPlanRef{QueryGroup: "qg-window-abcdef", Business: "7"}, Replica: "pod-a", Existence: "active", Rows: []fleet.Anomaly{row, named},
+		Plans: []fleet.StrategyPlanStanding{{StrategyPlanRef: fleet.StrategyPlanRef{QueryGroup: "qg-window-abcdef", Business: "7"}, Replica: "pod-a", Existence: "active", Rows: []fleet.Anomaly{row, named, neighbour},
 			Config: &fleet.StrategyPlanConfigs{Redacted: true, Items: []fleet.StrategyPlanConfig{{
 				PlanID:   "4101",
 				Schedule: fleet.StrategyScheduleConfig{IntervalSeconds: 60},
@@ -142,6 +149,8 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 		"最差的换了一条序列",
 		// The named window of the object whose short count is zero.
 		"序列 series-t：8/9，记录检测用不了；缺 ", "记录到了，检测用不了",
+		// The neighbour's words, said to be the neighbour's.
+		"本策略在检测；同对象上策略 4102 的：数据没到 · 数据负责人查",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the rendering lacks %q:\n%s", want, rendered)
