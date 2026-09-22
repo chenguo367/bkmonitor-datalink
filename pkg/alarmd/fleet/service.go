@@ -21,6 +21,14 @@ import (
 // unreadable one.
 const GapRegistryUnavailable GapKind = "REGISTRY_UNAVAILABLE"
 
+// GapSnapshotsUnreadable means this process could not read the published
+// snapshots at all this round. It is not the same as every replica missing:
+// the replicas may all have published and be read fine by the next call,
+// and a view that listed each of them as missing would have said so of four
+// running replicas -- which it did, once, on a verification cluster, with no
+// field left to say the read itself had failed.
+const GapSnapshotsUnreadable GapKind = "SNAPSHOTS_UNREADABLE"
+
 // ExpectationSource reads the authoritative object set from the control plane.
 //
 // It is deliberately not derived from the calling replica's own state: on a
@@ -142,15 +150,26 @@ func (service *Service) View(ctx context.Context) View {
 		}
 	}
 
-	snapshots, err := service.snapshots.Load(ctx, replicas)
-	if err != nil {
-		// Reading snapshots failed as a whole, so no replica can be said to
-		// have published. Coverage is therefore zero and every replica is
-		// missing, which is what the aggregation is given.
+	snapshots, snapshotsErr := service.snapshots.Load(ctx, replicas)
+	if snapshotsErr != nil {
+		// Reading snapshots failed as a whole, so nothing can be said of any
+		// replica. Coverage is therefore zero, which is what the aggregation
+		// is given; the per-replica "missing" gaps it derives from that are
+		// replaced below, because they would state something the read did
+		// not establish.
 		snapshots = nil
 	}
 
 	view := Aggregate(expectation, snapshots, replicas, at, service.freshness)
+	if snapshotsErr != nil {
+		kept := make([]Gap, 0, len(view.Gaps)+1)
+		for _, gap := range view.Gaps {
+			if gap.Kind != GapReplicaMissing {
+				kept = append(kept, gap)
+			}
+		}
+		view.Gaps = append(kept, Gap{Kind: GapSnapshotsUnreadable, Detail: gapDetail(snapshotsErr)})
+	}
 	if expectationErr != nil {
 		for index := range view.Gaps {
 			if view.Gaps[index].Kind == GapDenominatorUnavailable {

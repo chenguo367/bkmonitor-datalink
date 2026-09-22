@@ -66,7 +66,7 @@ func convergeDriftedSlot(t *testing.T, completeness execution.Completeness) (exe
 		OwnerFence:       execution.OwnerFence{QueryGroup: "query-group", OwnerID: "worker-1", OwnerEpoch: 1, LeaseToken: "lease-1"},
 		ExpectedNextSlot: contractRef.Slot.EvaluationTime,
 		DuePlanTargets: execution.FrozenDuePlanTargets{
-			DuePlanSetDigest: contractRef.DuePlanSetDigest, Plans: []execution.PlanIdentity{plan},
+			DuePlanSetDigest: contractRef.DuePlanSetDigest, Plans: []execution.PlanKey{{PlanIdentity: plan}},
 		},
 		EarliestQueryDeadlineUnixMilli: 1_788_000_060_000,
 		KeepUntilUnixMilli:             1_788_000_600_000,
@@ -98,7 +98,7 @@ func convergeDriftedSlot(t *testing.T, completeness execution.Completeness) (exe
 	// The Plan is no longer activated, which is what drift means here: nothing
 	// is left to protect, so convergence goes straight to the commit that
 	// carries the completion. That is the branch under test.
-	activationRequest := execution.PlanActivationRequest{Contract: contractRef, Plans: []execution.PlanIdentity{plan}}
+	activationRequest := execution.PlanActivationRequest{Contract: contractRef, Plans: []execution.PlanKey{{PlanIdentity: plan}}}
 	deselected := execution.PlanActivationResult{
 		Contract: contractRef,
 		Facts:    []execution.PlanActivationFact{{Plan: plan, Selection: execution.ActivationNone}},
@@ -137,7 +137,7 @@ func (*convergeObservingPorts) Sequence(ctx context.Context, _ execution.Sequenc
 func (*convergeObservingPorts) LoadActivations(_ context.Context, request execution.PlanActivationRequest) (execution.PlanActivationResult, error) {
 	result := execution.PlanActivationResult{Contract: request.Contract}
 	for _, plan := range request.Plans {
-		result.Facts = append(result.Facts, execution.PlanActivationFact{Plan: plan, Selection: execution.ActivationNone})
+		result.Facts = append(result.Facts, execution.PlanActivationFact{Plan: plan.PlanIdentity, Selection: execution.ActivationNone})
 	}
 	return result, nil
 }

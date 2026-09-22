@@ -136,6 +136,34 @@ type StateRequirement struct {
 	RetentionPoints             uint32
 }
 
+// StateIdentityView is this requirement as the two hashes that decide state
+// identity see it: the retention filled in as the required count.
+//
+// Retention is not part of what makes stored state compatible with a Plan. It
+// decides how many positions are kept beyond the ones detection reads, so a
+// Level that raises it keeps more and one that lowers it trims more, and
+// either way the record it was already keeping is still readable by the Plan
+// that asks. Hashing it made raising the retention indistinguishable from
+// changing what the Level detects: the Plan's state generation moved, so the
+// record moved to a new key and started from zero, and the Level contract
+// stored on the old record no longer matched the compiled one, so what could
+// still be read was refused and dropped.
+//
+// Filling the field rather than removing it from the hashed shape is what
+// keeps this byte-compatible. Until retention could differ from the required
+// count it was always equal to it, so every hash a deployment has stored was
+// derived over a value shaped exactly like this one. A Level that never took
+// any slack hashes to the same string it already had; a Level that took some
+// goes back to the string it had before it did.
+//
+// Both sites derive this from here rather than each filling the field: the
+// two hashes have to agree about what state identity means, and a rule stated
+// twice is a rule that will be changed once.
+func (requirement StateRequirement) StateIdentityView() StateRequirement {
+	requirement.RetentionPoints = requirement.RequiredDetectHistoryPoints
+	return requirement
+}
+
 type ResourceEstimate struct {
 	FixedComputeCost     uint64
 	CostPerRecord        uint64

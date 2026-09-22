@@ -45,8 +45,9 @@ func TestMissingHistoryFromFullPersistsCurrentFactAndConvergesAfterReplay(t *tes
 	if len(result.StateResults[0].Events) != 0 || len(result.GuardAfterState) != 0 || mutation.SeriesGuard != nil || len(mutation.Levels) != 1 || mutation.Levels[0].HistoryCompleteness != execution.HistoryGapped || mutation.Levels[0].GapReasonCode != execution.ReasonCode(contract.ReasonHistoryGapped) {
 		t.Fatalf("gap scope or reason %+v", result)
 	}
-	if len(mutation.Points) != 2 || !reflect.DeepEqual(mutation.Points[0], history[1]) || mutation.Points[1].SourceTime != 720 || len(mutation.Points[1].Levels) != 1 || mutation.Points[1].Levels[0].Result != execution.LevelFactUnavailable {
-		t.Fatalf("retained history/current unavailable %+v", mutation.Points)
+	record := recordLeftBehind(t, mutation)
+	if len(record) != 2 || !reflect.DeepEqual(record[0], history[1]) || record[1].SourceTime != 720 || len(record[1].Levels) != 1 || record[1].Levels[0].Result != execution.LevelFactUnavailable {
+		t.Fatalf("retained history/current unavailable %+v", record)
 	}
 	if err := mutation.ValidateDigest(); err != nil {
 		t.Fatal(err)

@@ -111,6 +111,13 @@ const (
 	// would put a record over a ceiling that had already admitted its Plan,
 	// and the bound would quietly stop being a bound again.
 	PackedRuleLegacyRecordIDTooLong = "legacy_record_id_too_long"
+	// PackedRuleTwoRecordsOneSourceTime is the merge of this round's points
+	// into the loaded record finding two different records at one source time.
+	// The producer names the same thing first and refuses there; it is named
+	// again here because this is where the two are actually brought together,
+	// and a merge that picked one of them would decide a record's past by which
+	// side of the merge it arrived on.
+	PackedRuleTwoRecordsOneSourceTime = "two_records_one_source_time"
 )
 
 // MaxLegacyRecordIDLength is the width the upper bound costs a carried id at,
@@ -132,7 +139,7 @@ var PackedRuleNames = []string{
 	PackedRuleLevelNotInMutation, PackedRuleNoDetectFingerprint, PackedRuleTwoFingerprints,
 	PackedRuleDuplicateLevel, PackedRuleSourceTimeNotRising, PackedRuleRecordIDUnderivable,
 	PackedRuleRecordIDNotDerived, PackedRuleUnencodableFactState, PackedRuleMutationDigestMismatch,
-	PackedRuleIdentityKeyUnderivable, PackedRuleLegacyRecordIDTooLong,
+	PackedRuleIdentityKeyUnderivable, PackedRuleLegacyRecordIDTooLong, PackedRuleTwoRecordsOneSourceTime,
 }
 
 // PackedContractRefusal is a framed write refused by one named rule. The
@@ -163,6 +170,24 @@ func packedRefusal(rule, format string, args ...any) error {
 	return &PackedContractRefusal{Rule: rule, Detail: fmt.Sprintf(format, args...)}
 }
 
+// walkRecordPoints visits the record this mutation leaves behind, oldest
+// first: the history it was built against with this round's points merged in,
+// bounded by the retention the mutation carries.
+//
+// It allocates nothing and holds no slice of its own. That is the point of it:
+// a mutation names one new point, and building the window here rather than at
+// the producer is what removes the per-round rebuild of the whole window. A
+// caller that materializes what this emits has put the allocation back.
+func walkRecordPoints(mutation execution.StateMutation, visit func(execution.StateHistoryPoint) error) error {
+	err := execution.WalkMergedHistory(mutation.BaseHistory, mutation.Points, mutation.RetentionPoints, visit)
+	var conflict *execution.HistoryRecordIdentityConflict
+	if errors.As(err, &conflict) {
+		return packedRefusal(PackedRuleTwoRecordsOneSourceTime,
+			"source time %d is claimed by %s in the record and %s in this round", conflict.SourceTime, conflict.Stored, conflict.Fresh)
+	}
+	return err
+}
+
 // levelFingerprints picks each Level's one detect fingerprint out of the points
 // and refuses a mutation whose points disagree with each other.
 //
@@ -177,15 +202,19 @@ func levelFingerprints(mutation execution.StateMutation, levels []execution.Runt
 	for index, level := range levels {
 		position[level.LevelID] = index
 	}
-	for _, point := range mutation.Points {
+	// Over the record the write stores, not over the points the round added:
+	// the header carries one fingerprint per Level for the whole record, and an
+	// inherited point disagreeing with a fresh one is exactly the disagreement
+	// this refuses.
+	if err := walkRecordPoints(mutation, func(point execution.StateHistoryPoint) error {
 		for _, fact := range point.Levels {
 			index, known := position[fact.LevelID]
 			if !known {
-				return nil, packedRefusal(PackedRuleLevelNotInMutation,
+				return packedRefusal(PackedRuleLevelNotInMutation,
 					"point at %d names Level %d, which the mutation does not carry", point.SourceTime, fact.LevelID)
 			}
 			if fact.DetectFingerprint == "" {
-				return nil, packedRefusal(PackedRuleNoDetectFingerprint,
+				return packedRefusal(PackedRuleNoDetectFingerprint,
 					"point at %d carries no detect fingerprint for Level %d", point.SourceTime, fact.LevelID)
 			}
 			if fingerprints[index] == "" {
@@ -193,10 +222,13 @@ func levelFingerprints(mutation execution.StateMutation, levels []execution.Runt
 				continue
 			}
 			if fingerprints[index] != fact.DetectFingerprint {
-				return nil, packedRefusal(PackedRuleTwoFingerprints,
+				return packedRefusal(PackedRuleTwoFingerprints,
 					"Level %d has two detect fingerprints in one record", fact.LevelID)
 			}
 		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 	return fingerprints, nil
 }
@@ -242,16 +274,20 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 	var legacy []packedLegacyRecordID
 	var points []byte
 	previous := int64(0)
-	for pointIndex, point := range mutation.Points {
+	pointIndex := -1
+	pointCount := 0
+	if err := walkRecordPoints(mutation, func(point execution.StateHistoryPoint) error {
+		pointIndex++
+		pointCount++
 		if point.SourceTime < 0 || (pointIndex > 0 && point.SourceTime <= previous) {
-			return nil, 0, packedRefusal(PackedRuleSourceTimeNotRising, "points must rise strictly by source time")
+			return packedRefusal(PackedRuleSourceTimeNotRising, "points must rise strictly by source time")
 		}
 		// The id is not stored. It is checked here against the derivation every
 		// producer uses, so a producer that stops deriving it is refused where
 		// it writes rather than read back as a different record later.
 		expected, deriveErr := contract.DeriveRecordIDV2(string(mutation.Identity.SeriesIdentityDigest), point.SourceTime)
 		if deriveErr != nil {
-			return nil, 0, packedRefusal(PackedRuleRecordIDUnderivable, "derive record id at %d: %v", point.SourceTime, deriveErr)
+			return packedRefusal(PackedRuleRecordIDUnderivable, "derive record id at %d: %v", point.SourceTime, deriveErr)
 		}
 		if point.RecordID != expected {
 			// A point this round produced must derive: that is the check that
@@ -267,11 +303,11 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 			// point never ages out of the refusal either. Its id is stored
 			// instead, which is what the envelope did for every point.
 			if _, thisRound := affected[execution.RecordAnchor{RecordID: point.RecordID, SourceTime: point.SourceTime}]; thisRound {
-				return nil, 0, packedRefusal(PackedRuleRecordIDNotDerived,
+				return packedRefusal(PackedRuleRecordIDNotDerived,
 					"point at %d carries a record id the series identity and source time do not derive", point.SourceTime)
 			}
 			if len(point.RecordID) > MaxLegacyRecordIDLength {
-				return nil, 0, packedRefusal(PackedRuleLegacyRecordIDTooLong,
+				return packedRefusal(PackedRuleLegacyRecordIDTooLong,
 					"point at %d carries a %d character record id, over the %d the bound is derived from",
 					point.SourceTime, len(point.RecordID), MaxLegacyRecordIDLength)
 			}
@@ -298,13 +334,16 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 			case execution.LevelFactError:
 				setBit(anomalous, position, true)
 			default:
-				return nil, 0, packedRefusal(PackedRuleUnencodableFactState, "Level %d fact result %q", fact.LevelID, fact.Result)
+				return packedRefusal(PackedRuleUnencodableFactState, "Level %d fact result %q", fact.LevelID, fact.Result)
 			}
 		}
 		points = append(points, present...)
 		points = append(points, valid...)
 		points = append(points, anomalous...)
 		previous = point.SourceTime
+		return nil
+	}); err != nil {
+		return nil, 0, err
 	}
 
 	// The header is built after the points, because only encoding them says
@@ -313,7 +352,7 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 		Schema: executionStateSchemaV3, Identity: mutation.Identity, BlobRevision: revision,
 		ApplyVersion: mutation.ApplyVersion, MutationDigest: mutation.MutationDigest, LastEventTime: last,
 		SeriesGuard: mutation.SeriesGuard, Levels: make([]packedLevel, len(levels)),
-		PointCount: len(mutation.Points), LegacyRecordIDs: legacy,
+		PointCount: pointCount, LegacyRecordIDs: legacy,
 	}
 	for index, level := range levels {
 		header.Levels[index] = packedLevel{Mutation: level, DetectFingerprint: fingerprints[index]}

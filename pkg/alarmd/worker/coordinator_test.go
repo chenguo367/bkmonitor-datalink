@@ -1254,7 +1254,8 @@ func (ports *recordingPorts) LoadActivations(
 		return execution.PlanActivationResult{}, errors.New("injected activation read")
 	}
 	facts := make([]execution.PlanActivationFact, len(request.Plans))
-	for index, plan := range request.Plans {
+	for index, key := range request.Plans {
+		plan := key.PlanIdentity
 		facts[index] = execution.PlanActivationFact{
 			Plan: plan, Selection: execution.ActivationCurrent,
 			Selected: execution.ActivatedPlan{
@@ -1994,7 +1995,7 @@ func slotRequest(operation execution.Operation) execution.SlotExecutionRequest {
 		Contract: contract,
 		DuePlanTargets: execution.FrozenDuePlanTargets{
 			DuePlanSetDigest: contract.DuePlanSetDigest,
-			Plans:            []execution.PlanIdentity{planIdentity()},
+			Plans:            []execution.PlanKey{{PlanIdentity: planIdentity()}},
 		},
 		EarliestQueryDeadlineUnixMilli: int64(contract.Slot.EvaluationTime)*1000 + 1_000,
 		RecoveryUntilUnixMilli:         int64(contract.Slot.EvaluationTime)*1000 + 601_000,
@@ -2165,12 +2166,18 @@ func stateMutationForTest(seriesDigest, recordID string, factResult execution.Le
 			RecordID: recordID, SourceTime: 1_788_000_000,
 			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: refs[0].DetectFingerprint, Result: factResult}},
 		}},
+		RetentionPoints: testPlanRetentionPoints,
 	})
 	if err != nil {
 		panic(err)
 	}
 	return mutation
 }
+
+// testPlanRetentionPoints is what compiledPlanForTest asks to retain. The
+// result contract derives the same number from the compiled Plan and compares,
+// so a fixture that guessed it would be refused rather than quietly accepted.
+const testPlanRetentionPoints = 1
 
 func validLevelOutcome(kind execution.LevelOutcomeKind, reason execution.ReasonCode, partial bool) execution.LevelOutcome {
 	outcome := execution.LevelOutcome{

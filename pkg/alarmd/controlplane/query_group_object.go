@@ -177,6 +177,14 @@ type QueryGroupPlanObject struct {
 	NoData             *contract.NoDataConfigV1 `json:"no_data,omitempty"`
 	StrategyIR         contract.StrategyIRV2    `json:"strategy_ir"`
 	TerminalReasonCode string                   `json:"terminal_reason_code,omitempty"`
+	// Shard is the piece of a split strategy this Plan is; omitted for a
+	// Plan that is not split, so no object of an unsplit Plan changes bytes.
+	Shard *execution.ShardRef `json:"shard,omitempty"`
+}
+
+// Key is this object's Plan key: the strategy and the piece.
+func (plan QueryGroupPlanObject) Key() execution.PlanKey {
+	return execution.PlanKeyOf(plan.Identity, execution.ShardOf(plan.Shard))
 }
 
 // OutputContextObject is what event rendering reads for one Plan: the source
@@ -231,6 +239,7 @@ func buildQueryGroupPlanObject(plan FrozenPlan) QueryGroupPlanObject {
 		TargetScope: plan.Plan.TargetScope, TargetPlan: plan.Plan.TargetPlan, NoData: plan.Plan.NoData, StrategyIR: strategyIR,
 		EffectiveTimeSnapshot: append(json.RawMessage(nil), plan.Plan.EffectiveTimeSnapshot...),
 		TerminalReasonCode:    plan.Plan.TerminalReasonCode,
+		Shard:                 plan.Shard,
 	}
 }
 

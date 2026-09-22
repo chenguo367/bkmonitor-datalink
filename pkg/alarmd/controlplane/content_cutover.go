@@ -231,24 +231,24 @@ const (
 // validateContentCoverage checks that the assembled activation names every
 // Plan of the new publication exactly once, and no other.
 func validateContentCoverage(plans []PlanActivationRecord, groups map[execution.QueryGroupIdentity]QueryGroup) error {
-	wanted := make(map[execution.PlanIdentity]struct{})
+	wanted := make(map[execution.PlanKey]struct{})
 	for _, group := range groups {
 		for _, plan := range group.Plans {
-			if _, duplicate := wanted[plan.Identity]; duplicate {
+			if _, duplicate := wanted[plan.Key()]; duplicate {
 				return errors.New("alarmd controlplane: publication names a Plan in two Query Groups")
 			}
-			wanted[plan.Identity] = struct{}{}
+			wanted[plan.Key()] = struct{}{}
 		}
 	}
-	covered := make(map[execution.PlanIdentity]struct{}, len(plans))
+	covered := make(map[execution.PlanKey]struct{}, len(plans))
 	for _, record := range plans {
-		if _, duplicate := covered[record.Fact.Plan]; duplicate {
+		if _, duplicate := covered[record.Fact.Key()]; duplicate {
 			return errors.New("alarmd controlplane: content cutover activated a Plan twice")
 		}
-		if _, ok := wanted[record.Fact.Plan]; !ok {
+		if _, ok := wanted[record.Fact.Key()]; !ok {
 			return errors.New("alarmd controlplane: content cutover activated a Plan outside the publication")
 		}
-		covered[record.Fact.Plan] = struct{}{}
+		covered[record.Fact.Key()] = struct{}{}
 	}
 	if len(covered) != len(wanted) {
 		return errors.New("alarmd controlplane: content cutover must activate every Plan of the publication")

@@ -168,3 +168,47 @@ func TestTheSlotChargesBothItsFirstSeriesAndTheRestForArraysOnly(t *testing.T) {
 		}
 	}
 }
+
+// The base a mutation points at is the record the Slot loaded, and the Slot
+// already holds it: the preflight result is alive until the result contract
+// has read it and the apply has used it. A mutation referencing that slice
+// allocates nothing, so the reservation must not grow with it.
+//
+// This is the one field the accounting deliberately counts zero for, so it is
+// stated as a test rather than left to the comment. Before the mutation
+// carried a base it carried a rebuilt copy of the same window, and that copy
+// was charged - correctly, because it was a second array. What must not happen
+// is somebody making the base a slice of its own and leaving this at zero.
+func TestTheLoadedBaseAMutationPointsAtIsTheSlotsAndIsNotChargedTwice(t *testing.T) {
+	const points, levels = 512, 2
+	loaded := stateResultWithHistory(points, levels, 64)[0].Mutation.Points
+	bare := stateResultWithHistory(1, levels, 64)
+	based := stateResultWithHistory(1, levels, 64)
+	based[0].Mutation.BaseHistory = loaded
+	if got, want := retainedStateResultBytes(based), retainedStateResultBytes(bare); got != want {
+		t.Fatalf("a mutation against a %d point record costs %d and against an empty one %d; the base is "+
+			"the preflight result's and referencing it allocates nothing", points, got, want)
+	}
+}
+
+// And the direction that guards correctness rather than availability: the
+// points this round adds are the mutation's own, and every one of them has to
+// cost. A reservation blind to them admits a Slot and then holds the memory.
+func TestThePointsARoundAddsAreStillChargedToIt(t *testing.T) {
+	const levels = 2
+	one := retainedStateResultBytes(stateResultWithHistory(1, levels, 64))
+	many := retainedStateResultBytes(stateResultWithHistory(64, levels, 64))
+	if many <= one {
+		t.Fatalf("64 added points cost %d and one costs %d; the round's own points are what it allocated", many, one)
+	}
+	perPoint := float64(many-one) / 63
+	if want := float64(pointBytes + levels*factBytes); perPoint < want {
+		t.Fatalf("each added point costs %.1f bytes, under the %.1f its arrays take: a point carries a "+
+			"StateHistoryPoint and its Level facts and both are this round's", perPoint, want)
+	}
+}
+
+const (
+	pointBytes = 48
+	factBytes  = 40
+)

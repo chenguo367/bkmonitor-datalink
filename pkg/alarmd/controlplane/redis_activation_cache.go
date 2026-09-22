@@ -17,7 +17,7 @@ const parsedActivationMaxPayloadBytes = 2 << 20
 type parsedActivation struct {
 	payload string
 	state   ActivationState
-	byPlan  map[execution.PlanIdentity]execution.PlanActivationFact
+	byPlan  map[execution.PlanKey]execution.PlanActivationFact
 }
 
 // The single entry is immutable after publication and never leaves this package.
@@ -81,9 +81,9 @@ func parseActivation(payload string) (*parsedActivation, error) {
 	if err := validateActivationState(state); err != nil {
 		return nil, &PersistedActivationCorruptError{Err: err}
 	}
-	entry := &parsedActivation{state: state, byPlan: make(map[execution.PlanIdentity]execution.PlanActivationFact, len(state.Plans))}
+	entry := &parsedActivation{state: state, byPlan: make(map[execution.PlanKey]execution.PlanActivationFact, len(state.Plans))}
 	for _, record := range state.Plans {
-		entry.byPlan[record.Fact.Plan] = record.Fact
+		entry.byPlan[record.Fact.Key()] = record.Fact
 	}
 	return entry, nil
 }

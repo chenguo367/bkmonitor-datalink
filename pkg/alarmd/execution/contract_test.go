@@ -1058,6 +1058,7 @@ func TestLocalizedTerminalRequiresAndAcceptsExactSeriesGuard(t *testing.T) {
 			LevelID: 5, LevelStateCompatibility: levelRefs[0].LevelStateCompatibility, HistoryCompleteness: execution.HistoryGapped,
 			GapReasonCode: reason, WarmupRequirementRef: levelRefs[0].WarmupRequirementRef,
 		}},
+		RetentionPoints: testPlanRetentionPoints,
 	})
 	if err != nil {
 		t.Fatalf("BuildStateMutation() error=%v", err)
@@ -1125,6 +1126,7 @@ func TestLocalizedBadSeriesOutsideDatasetCanProduceExactGuard(t *testing.T) {
 			HistoryCompleteness: execution.HistoryGapped, GapReasonCode: reason,
 			WarmupRequirementRef: levelRefs[0].WarmupRequirementRef,
 		}},
+		RetentionPoints: testPlanRetentionPoints,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1642,12 +1644,19 @@ func normalStateEvaluation() execution.StateEvaluation {
 				LevelID: 5, DetectFingerprint: refs[0].DetectFingerprint, Result: execution.LevelFactNormal,
 			}},
 		}},
+		RetentionPoints: testPlanRetentionPoints,
 	})
 	if err != nil {
 		panic(err)
 	}
 	return execution.StateEvaluation{Mutation: mutation}
 }
+
+// testPlanRetentionPoints is what compiledPlanForTest asks to retain: one
+// window of one point, with the recovery slack the span gate zeroes at this
+// interval. Named once so a fixture cannot answer the contract's retention
+// comparison with a number nobody derived.
+const testPlanRetentionPoints = 1
 
 func loadedSeriesWarmingCompletion(
 	t testing.TB,
@@ -1658,7 +1667,6 @@ func loadedSeriesWarmingCompletion(
 	state := normalStateEvaluation()
 	state.Mutation.ExpectedBlobRevision = 1
 	state.Mutation.MutationDigest = ""
-	state.Mutation = mustStateMutation(state.Mutation)
 	refs, err := execution.DeriveRuntimeLevelContractRefs(input.DuePlans[0].CompiledPlan)
 	if err != nil {
 		t.Fatal(err)
@@ -1669,6 +1677,14 @@ func loadedSeriesWarmingCompletion(
 			LevelID: 5, DetectFingerprint: refs[0].DetectFingerprint, Result: execution.LevelFactNormal,
 		}},
 	}
+	// One slice, shared by the loaded view and the mutation's base, because
+	// that is what the producer does: it references the history it read. The
+	// contract compares identity, not content, so a fixture that built two
+	// equal slices would be refused - and rightly, a copy is the thing this
+	// mutation shape exists to remove.
+	loadedHistory := []execution.StateHistoryPoint{loadedPoint}
+	state.Mutation.BaseHistory = loadedHistory
+	state.Mutation = mustStateMutation(state.Mutation)
 	request := evaluationRequest(input, execution.StatePreflightResult{Items: []execution.RuntimeStateView{{
 		Identity: input.StatePreflight[0].Identity, BlobRevision: 1,
 		PersistedApplyVersion:   olderApplyVersion(input.StatePreflight[0].ApplyVersion),
@@ -1679,7 +1695,7 @@ func loadedSeriesWarmingCompletion(
 			GapReasonCode:        execution.ReasonCode(contract.ReasonHistoryWarming),
 			WarmupRequirementRef: refs[0].WarmupRequirementRef,
 		}},
-		History: []execution.StateHistoryPoint{loadedPoint},
+		History: loadedHistory,
 	}}}, execution.GapLoadResult{Items: []execution.GapGuardSnapshot{{
 		Identity: input.GapPreflight[0].Identity, Status: execution.GapMissing,
 	}}})

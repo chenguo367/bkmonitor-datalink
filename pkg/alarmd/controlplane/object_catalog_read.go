@@ -381,6 +381,7 @@ func AssembleQueryGroup(object QueryGroupObject, contexts map[execution.PlanIden
 			},
 			StateGeneration: plan.StateGeneration, ScheduleSpec: plan.ScheduleSpec, ScheduleRevision: plan.ScheduleRevision,
 			RequirementTemplates: plan.RequirementTemplates, QueryPlans: plan.QueryPlans,
+			Shard: plan.Shard,
 		})
 	}
 	return group, nil

@@ -148,6 +148,27 @@ type FrozenPlan struct {
 	ScheduleRevision     execution.PlanScheduleRevision
 	RequirementTemplates []execution.DataRequirementTemplate                    `json:"RequirementTemplates,omitempty"`
 	QueryPlans           map[execution.LogicalQueryRef]execution.QueryPlanFacts `json:"QueryPlans,omitempty"`
+	// Shard is the piece of a split strategy this Plan is, nil for a Plan
+	// that is not split. It is execution content: the Slot names its gap
+	// marker and no-data memory by it. Omitted when nil for the same reason
+	// NoDataSuspended is - this struct is inside the object digest.
+	Shard *execution.ShardRef `json:",omitempty"`
+}
+
+// Key is this Plan's index key: the strategy and the piece. Two pieces of one
+// strategy are two Plans in every index the control plane keeps.
+func (plan FrozenPlan) Key() execution.PlanKey {
+	return execution.PlanKeyOf(plan.Identity, execution.ShardOf(plan.Shard))
+}
+
+// shardPointerOf is the carried form of a key's piece for a placeholder Plan
+// built from an index entry: the index keeps only the piece's index, so the
+// placeholder carries only that. Nil for a Plan that is not split.
+func shardPointerOf(key execution.PlanKey) *execution.ShardRef {
+	if key.ShardIndex == 0 {
+		return nil
+	}
+	return &execution.ShardRef{Index: key.ShardIndex}
 }
 
 // TargetSources is what the deployment renders for a target plan's dynamic
@@ -318,13 +339,15 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	}
 	catalog := Catalog{ObservationID: observationID, QueryGroups: []QueryGroup{}, Dispositions: []ObjectDisposition{}}
 	groups := make(map[execution.QueryGroupIdentity]*QueryGroup)
-	seenPlans := make(map[execution.PlanIdentity]struct{}, len(request.Strategies))
+	// Keyed by strategy and piece: a split strategy is one Plan per piece,
+	// and the same piece twice is the duplicate.
+	seenPlans := make(map[execution.PlanKey]struct{}, len(request.Strategies))
 	lastGood := indexLastGoodPlans(request.LastGood)
 	addPlan := func(facts execution.QueryPlanFacts, plan FrozenPlan) error {
-		if _, duplicate := seenPlans[plan.Identity]; duplicate {
+		if _, duplicate := seenPlans[plan.Key()]; duplicate {
 			return errors.New("alarmd controlplane: duplicate Plan identity")
 		}
-		seenPlans[plan.Identity] = struct{}{}
+		seenPlans[plan.Key()] = struct{}{}
 		identity, err := deriveQueryGroupIdentity(facts)
 		if err != nil {
 			return err
@@ -428,8 +451,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			}
 			continue
 		}
-		planIdentity := candidate.plan.Identity
-		if _, duplicate := seenPlans[planIdentity]; duplicate {
+		if _, duplicate := seenPlans[candidate.plan.Key()]; duplicate {
 			catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: "DUPLICATE_STRATEGY_IDENTITY"})
 			continue
 		}

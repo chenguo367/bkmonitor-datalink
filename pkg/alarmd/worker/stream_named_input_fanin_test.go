@@ -342,7 +342,7 @@ func workerSlotRequest(contractRef execution.FrozenExecutionContractRef) executi
 		Contract: contractRef,
 		DuePlanTargets: execution.FrozenDuePlanTargets{
 			DuePlanSetDigest: contractRef.DuePlanSetDigest,
-			Plans:            []execution.PlanIdentity{planIdentity()},
+			Plans:            []execution.PlanKey{{PlanIdentity: planIdentity()}},
 		},
 		EarliestQueryDeadlineUnixMilli: int64(contractRef.Slot.EvaluationTime)*1000 + 1_000,
 		RecoveryUntilUnixMilli:         int64(contractRef.Slot.EvaluationTime)*1000 + 601_000,

@@ -260,7 +260,24 @@ const (
 	ReasonStateCorrupt           = "STATE_CORRUPT"
 	ReasonStateSchemaUnsupported = "STATE_SCHEMA_UNSUPPORTED"
 	ReasonStateBudgetExceeded    = "STATE_BUDGET_EXCEEDED"
-	ReasonAuditDrop              = "AUDIT_DROP"
+	// Two evaluation failures that had no observation word, so the line they
+	// reach classified them as internal_unknown -- the word for a site that
+	// looked at a failure and could not name it. Both already named themselves
+	// one level down and the classification simply did not ask.
+	//
+	// STATE_LEVEL_CONTRACT_MISMATCH is loaded Runtime State whose Level
+	// contract is not the compiled Plan's. It is the word the query failure
+	// facts already carry for it, reused rather than a second one invented:
+	// the same failure counted under two names on two lines is a failure a
+	// reader cannot add up.
+	ReasonStateLevelContractMismatch = "STATE_LEVEL_CONTRACT_MISMATCH"
+	// TRIGGER_INVARIANT is the trigger evaluator refusing its own state: an
+	// invariant it checks before deciding did not hold. Which operation found
+	// it travels as a field rather than in the word, because the word is what
+	// a reader groups by and one invariant per word would make a vocabulary
+	// nobody can hold.
+	ReasonTriggerInvariant = "TRIGGER_INVARIANT"
+	ReasonAuditDrop        = "AUDIT_DROP"
 	// Ownership refusals, observation-only. The ownership store answers a
 	// fence check, a lease acquire or renew, or a fenced write with one of
 	// four typed errors; until these names existed every one of them was

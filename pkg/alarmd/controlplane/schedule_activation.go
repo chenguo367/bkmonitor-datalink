@@ -231,7 +231,7 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 		return ActivationState{}, err
 	}
 	for index := range records {
-		previousRecord, continuouslyActive := previousRecords[records[index].Fact.Plan]
+		previousRecord, continuouslyActive := previousRecords[records[index].Fact.Key()]
 		if !continuouslyActive ||
 			previousRecord.Fact.Selected.StateGeneration != records[index].Fact.Selected.StateGeneration {
 			records[index].Fact.Selected.ForceWarming = true
@@ -244,14 +244,14 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 	// projection, which forgets a drained Query Group before its timeline
 	// expires; the CAS side appends to the same timelines.
 	if len(returning) > 0 {
-		planGroups := make(map[execution.PlanIdentity]execution.QueryGroupIdentity)
+		planGroups := make(map[execution.PlanKey]execution.QueryGroupIdentity)
 		for identity, group := range newGroups {
 			for _, plan := range group.Plans {
-				planGroups[plan.Identity] = identity
+				planGroups[plan.Key()] = identity
 			}
 		}
 		for index := range records {
-			if _, returned := returning[planGroups[records[index].Fact.Plan]]; returned {
+			if _, returned := returning[planGroups[records[index].Fact.Key()]]; returned {
 				records[index].Fact.Selected.ForceWarming = true
 			}
 		}
@@ -311,7 +311,7 @@ func (reconciler *ScheduleActivationReconciler) upgradeLegacyActivation(
 		return ActivationState{}, err
 	}
 	identities := make([]execution.QueryGroupIdentity, 0, len(groups))
-	covered := make(map[execution.PlanIdentity]struct{}, len(previous.Plans))
+	covered := make(map[execution.PlanKey]struct{}, len(previous.Plans))
 	for identity := range groups {
 		timeline, loadErr := reconciler.repository.loadScheduleTimeline(ctx, identity)
 		if loadErr != nil {
@@ -329,11 +329,11 @@ func (reconciler *ScheduleActivationReconciler) upgradeLegacyActivation(
 			return ActivationState{}, err
 		}
 		for _, record := range open.Plans {
-			if _, duplicate := covered[record.Fact.Plan]; duplicate {
+			if _, duplicate := covered[record.Fact.Key()]; duplicate {
 				failureClass = ActivationFailureClassCoverageConflict
 				return ActivationState{}, ErrSnapshotUnavailable
 			}
-			covered[record.Fact.Plan] = struct{}{}
+			covered[record.Fact.Key()] = struct{}{}
 		}
 		identities = append(identities, identity)
 	}
@@ -433,17 +433,17 @@ func (reconciler *ScheduleActivationReconciler) reactivateHeld(
 	if err != nil {
 		return ActivationState{}, err
 	}
-	returningPlans := make(map[execution.PlanIdentity]struct{})
+	returningPlans := make(map[execution.PlanKey]struct{})
 	for identity := range reactivating {
 		for _, plan := range groups[identity].Plans {
-			returningPlans[plan.Identity] = struct{}{}
+			returningPlans[plan.Key()] = struct{}{}
 		}
 	}
 	next := previous
 	next.RecordRevision = previous.RecordRevision + 1
 	next.Plans = append([]PlanActivationRecord(nil), previous.Plans...)
 	for _, record := range compiled {
-		if _, returning := returningPlans[record.Fact.Plan]; !returning {
+		if _, returning := returningPlans[record.Fact.Key()]; !returning {
 			continue
 		}
 		record.Fact.Selected.ForceWarming = true

@@ -142,7 +142,7 @@ func TestAHintedActivationRequestIsAnsweredFromTheTimelineWithoutTheHeader(t *te
 		ScheduleRevision: group.ScheduleRevision, ScheduleSegmentStart: 60, DuePlanSetDigest: "due-plans-v1",
 	}
 	missing := execution.PlanIdentity{TenantID: "tenant-a", BusinessID: "2", StrategyID: "9999"}
-	request := execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanIdentity{plan.Identity, missing}}
+	request := execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanKey{{PlanIdentity: plan.Identity}, {PlanIdentity: missing}}}
 	byHeader, err := repository.LoadActivations(ctx, request)
 	if err != nil {
 		t.Fatal(err)

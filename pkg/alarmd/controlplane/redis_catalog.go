@@ -81,6 +81,12 @@ type PlanActivationRecord struct {
 	Publication SnapshotPublicationRef       `json:"publication"`
 }
 
+// Equal compares by content; the fact carries a pointer, see
+// execution.ActivatedPlan.
+func (record PlanActivationRecord) Equal(other PlanActivationRecord) bool {
+	return record.Fact.Equal(other.Fact) && record.Publication == other.Publication
+}
+
 type DrainingQueryGroup struct {
 	QueryGroup      execution.QueryGroupIdentity `json:"query_group"`
 	RetiredBoundary execution.EvaluationTime     `json:"retired_boundary"`
@@ -805,7 +811,7 @@ func (repository *RedisCatalogRepository) LoadActivations(ctx context.Context, r
 	for _, plan := range request.Plans {
 		fact, found := entry.byPlan[plan]
 		if historical || !found {
-			fact = execution.PlanActivationFact{Plan: plan, Selection: execution.ActivationNone}
+			fact = execution.PlanActivationFact{Plan: plan.PlanIdentity, Selection: execution.ActivationNone, Shard: shardPointerOf(plan)}
 		}
 		result.Facts = append(result.Facts, fact)
 	}
@@ -866,12 +872,12 @@ func validateActivationState(state ActivationState) error {
 	if state.Pending != nil && *state.Pending == state.Current {
 		return errors.New("alarmd controlplane: pending snapshot must differ from current")
 	}
-	seen := make(map[execution.PlanIdentity]struct{}, len(state.Plans))
+	seen := make(map[execution.PlanKey]struct{}, len(state.Plans))
 	for _, record := range state.Plans {
-		if _, duplicate := seen[record.Fact.Plan]; duplicate {
+		if _, duplicate := seen[record.Fact.Key()]; duplicate {
 			return errors.New("alarmd controlplane: duplicate activation Plan")
 		}
-		seen[record.Fact.Plan] = struct{}{}
+		seen[record.Fact.Key()] = struct{}{}
 		if err := record.Fact.Plan.Validate(); err != nil || record.Publication.validate() != nil {
 			return errors.New("alarmd controlplane: invalid activation Plan record")
 		}
@@ -898,6 +904,16 @@ func validateActivationState(state ActivationState) error {
 		selected := record.Fact.Selected
 		if selected.Identity != record.Fact.Plan || selected.StateGeneration == "" || selected.StateApplyEpoch == 0 || selected.ScheduleRevision == "" || selected.RequiredFullSlots == 0 {
 			return errors.New("alarmd controlplane: incomplete activated Plan")
+		}
+		// The piece is repeated on the selection the way the identity is,
+		// and has to agree the same way.
+		if !execution.ShardsEqual(selected.Shard, record.Fact.Shard) {
+			return errors.New("alarmd controlplane: activated Plan names another piece than its record")
+		}
+		if record.Fact.Shard != nil {
+			if err := record.Fact.Shard.Validate(); err != nil || record.Fact.Shard.IsZero() {
+				return errors.New("alarmd controlplane: activation record carries an incomplete piece")
+			}
 		}
 	}
 	seenDraining := make(map[execution.QueryGroupIdentity]struct{}, len(state.Draining))

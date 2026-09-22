@@ -295,6 +295,73 @@ type ShardRef struct {
 // IsZero reports a Plan that is not a piece of a split strategy.
 func (shard ShardRef) IsZero() bool { return shard == ShardRef{} }
 
+// ShardOf reads a carried shard: nil is the zero ShardRef. Persisted carriers
+// hold a pointer so that a Plan which is not split serializes without the
+// field - encoding/json does not omit a zero struct - and this is the one
+// way to read them back into the value the keys and identities take.
+func ShardOf(shard *ShardRef) ShardRef {
+	if shard == nil {
+		return ShardRef{}
+	}
+	return *shard
+}
+
+// PlanKey is what a Plan is indexed by wherever one strategy may be present
+// as several Plans: the identity and the piece. The identity alone is the
+// event identity and stays one per strategy; the piece is what makes N Plans
+// of a split strategy N entries rather than one overwriting the others. It
+// is the index, not the record key: a piece keeps its index across a
+// re-split that changes its matcher, which is how a re-split reads as the
+// piece's own cutover rather than as one Plan leaving and another arriving.
+// The record keys (gap marker, no-data memory) take the matcher digest
+// instead, so a re-split starts those from zero as decision-020 rules.
+//
+// A Plan that is not split has index zero, the same key it had before pieces
+// existed.
+//
+// The identity is embedded and the index is omitted when zero, so a key
+// serializes exactly as the identity did wherever a list of Plans is
+// persisted (the frozen due-Plan targets of an unfinished Slot, an
+// activation request): every record of a Plan that is not split keeps its
+// bytes, and an old build reads the same shape it wrote.
+type PlanKey struct {
+	PlanIdentity
+	ShardIndex int `json:",omitempty"`
+}
+
+// PlanKeyOf is the key of a Plan carrying the given shard.
+func PlanKeyOf(plan PlanIdentity, shard ShardRef) PlanKey {
+	return PlanKey{PlanIdentity: plan, ShardIndex: shard.Index}
+}
+
+// Key is this due Plan's index key.
+func (due DuePlan) Key() PlanKey { return PlanKeyOf(due.Identity, due.Shard) }
+
+// PlanIdentitiesOf projects keys onto their identities, for the records that
+// are kept per Query Group and so name a Plan by identity alone: within one
+// group a strategy has one piece, and the identity is the piece.
+func PlanIdentitiesOf(keys []PlanKey) []PlanIdentity {
+	identities := make([]PlanIdentity, len(keys))
+	for index, key := range keys {
+		identities[index] = key.PlanIdentity
+	}
+	return identities
+}
+
+// LessPlanKey orders keys by identity and then by piece.
+func LessPlanKey(left, right PlanKey) bool {
+	if left.PlanIdentity != right.PlanIdentity {
+		return lessPlanIdentity(left.PlanIdentity, right.PlanIdentity)
+	}
+	return left.ShardIndex < right.ShardIndex
+}
+
+// ShardsEqual compares two carried shards by content. Two carriers decoded
+// from the same bytes hold different pointers, so a struct holding one must
+// not be compared with ==: that would call every split Plan changed on every
+// read.
+func ShardsEqual(left, right *ShardRef) bool { return ShardOf(left) == ShardOf(right) }
+
 // Validate accepts the zero ShardRef and otherwise requires a whole
 // coordinate: a piece knows its dimension, its place among at least two, and
 // its matcher. A strategy split into one piece is not split, and a piece
@@ -1379,7 +1446,42 @@ type StateMutation struct {
 	AffectedRecords      []RecordAnchor
 	SeriesGuard          *StateGuardFact
 	Levels               []RuntimeLevelStateMutation
-	Points               []StateHistoryPoint
+	// Points is what this round adds to the record, not the record it means to
+	// leave behind. Ordinarily one point; a record whose source time the loaded
+	// history already holds still produces one, carrying that point's Level
+	// facts merged with the fresh ones.
+	//
+	// It used to be the whole retained window, rebuilt and digested every round
+	// for every series. The digest is derived over this field, so a window of
+	// 1469 points cost 11 ms and 5.5 MB of canonical encoding per series per
+	// round - measured, and the largest single item in the profile. What the
+	// write stores is unchanged: BaseHistory merged with these points, bounded
+	// by RetentionPoints, at serialization time.
+	Points []StateHistoryPoint
+	// RetentionPoints is the bound in force this round, the largest of the
+	// Plan's Levels. It travels with the mutation rather than being read back
+	// from the record because the bound changes: a Plan that raises it must not
+	// have the round that raises it truncated by the value the previous round
+	// stored. It is part of the digest for the reason every field there is - it
+	// decides the bytes the write leaves behind, and two statements that differ
+	// only in it are not the same statement.
+	RetentionPoints uint32
+	// BaseHistory is the loaded record this Delta applies to: the history read
+	// at preflight, referenced rather than copied.
+	//
+	// Not part of the digest, and deliberately so. ExpectedBlobRevision already
+	// names the record these points were read from, and the compare-and-set
+	// refuses a write whose stored bytes are no longer the ones preflight saw,
+	// so the base is pinned by the revision and not by the statement. Digesting
+	// it would put the whole window back into the hash and undo the change that
+	// introduced this field.
+	//
+	// The consequence is that equal digests no longer fix the bytes written -
+	// the result is f(BaseHistory, Points, RetentionPoints). What makes a skip
+	// safe is that the merge is idempotent by source time, not that the digest
+	// covers the outcome, and that is pinned by its own tests rather than left
+	// to the reader.
+	BaseHistory []StateHistoryPoint
 	// sealedDigest is written by BuildStateMutation and read by ValidateDigest.
 	// It is unexported so that no encoder and no caller outside this package can
 	// reach it, and it never takes part in the digest.
@@ -2839,7 +2941,12 @@ func (err *StateContractMismatchError) QueryFailure() (string, string) {
 
 // QueryFailureCodeStateContractMismatch is the failure code a
 // StateContractMismatchError reports.
-const QueryFailureCodeStateContractMismatch = "STATE_LEVEL_CONTRACT_MISMATCH"
+//
+// The same string as the observation reason, taken from the one declaration
+// rather than written out again: the query failure facts and the completion
+// line both name this failure, and two spellings of one word are two rows a
+// reader cannot add together.
+const QueryFailureCodeStateContractMismatch = contract.ReasonStateLevelContractMismatch
 
 func validateLoadedStateContracts(plan DuePlan, states StatePreflightResult, levelContracts *runtimeLevelContracts) error {
 	for _, state := range states.Items {
@@ -2964,8 +3071,11 @@ func findGapPreflight(items []PlanGapLoadItem, identity PlanGapIdentity) (PlanGa
 }
 
 type SideEffectAdmissionRequest struct {
-	Contract        FrozenExecutionContractRef
-	Plan            PlanIdentity
+	Contract FrozenExecutionContractRef
+	// Plan is keyed by strategy and piece: the activation the admission
+	// reads is indexed by both, and a piece asked about by identity alone
+	// would read as the strategy's zeroth piece.
+	Plan            PlanKey
 	StateApplyEpoch StateApplyEpoch
 	OwnerFence      OwnerFence
 }

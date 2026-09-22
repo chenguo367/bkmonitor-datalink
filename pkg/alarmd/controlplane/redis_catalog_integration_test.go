@@ -1255,8 +1255,8 @@ func TestRedisCatalogRepositoryActivationCASAndProjection(t *testing.T) {
 		ScheduleRevision: catalog.QueryGroups[0].ScheduleRevision, ScheduleSegmentStart: 60, DuePlanSetDigest: "due-plans-v1",
 	}
 	missingPlan := execution.PlanIdentity{TenantID: "tenant-a", BusinessID: "2", StrategyID: "9999"}
-	activations, err := repository.LoadActivations(context.Background(), execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanIdentity{plan.Identity, missingPlan}})
-	if err != nil || len(activations.Facts) != 2 || activations.Facts[0] != fact || activations.Facts[1].Selection != execution.ActivationNone {
+	activations, err := repository.LoadActivations(context.Background(), execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanKey{{PlanIdentity: plan.Identity}, {PlanIdentity: missingPlan}}})
+	if err != nil || len(activations.Facts) != 2 || !activations.Facts[0].Equal(fact) || activations.Facts[1].Selection != execution.ActivationNone {
 		t.Fatalf("activation projection=(%#v, %v)", activations, err)
 	}
 
@@ -1270,7 +1270,7 @@ func TestRedisCatalogRepositoryActivationCASAndProjection(t *testing.T) {
 	if err := client.Set(context.Background(), "alarmd:control:test:activation", payload, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
-	again, err := repository.LoadActivations(context.Background(), execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanIdentity{plan.Identity}})
+	again, err := repository.LoadActivations(context.Background(), execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanKey{{PlanIdentity: plan.Identity}}})
 	if err != nil || len(again.Facts) != 1 || again.Facts[0] != state.Plans[0].Fact {
 		t.Fatal("second authorization missed current facts or caller isolation", err)
 	}
@@ -2687,7 +2687,7 @@ func TestScheduleActivationReconcilerCutsBackToHistoricalSnapshotOnNewOccurrence
 	}
 	activations, err := repository.LoadActivations(ctx, execution.PlanActivationRequest{
 		Contract: fact.Contract,
-		Plans:    []execution.PlanIdentity{fact.DuePlans[0].Identity},
+		Plans:    []execution.PlanKey{fact.DuePlans[0].Key()},
 	})
 	if err != nil || len(activations.Facts) != 1 || activations.Facts[0].Selection != execution.ActivationNone {
 		t.Fatalf("A@e1 historical activation=(%#v, %v), want NONE while A@e3 is current", activations, err)
