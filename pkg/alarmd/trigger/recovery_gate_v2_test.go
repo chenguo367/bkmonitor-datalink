@@ -105,6 +105,47 @@ func TestRecoveryEnvelopeWaitsForEveryLevel(t *testing.T) {
 			primary: 1,
 		},
 	}
+	t.Run("a Level hold keeps its own cause on the compatibility protocol", func(t *testing.T) {
+		// Two reasons to suppress the envelope hold at once here: a Level is
+		// unavailable, and the protocol carries no recovery. The envelope
+		// cannot tell them apart - neither produces one - so the only thing
+		// that can is which gate counted the record.
+		//
+		// It has to be the Level. Its two causes are the only reading of "a
+		// Level held this" on that protocol, and that protocol is the one
+		// every strategy in the deployment publishes, so letting the protocol
+		// answer first would take trigger_recovery_held_total{cause=level_*}
+		// to zero across the fleet while every envelope count stayed the same
+		// - the counters agreeing with each other and with nothing.
+		plan := compilePlanV2WithOutput(t,
+			[]contract.LevelIRV2{levelV2(1, 1, 1, 1, 1, nil), levelV2(2, 2, 1, 1, 1, nil)},
+			func(p *contract.EvaluationPlanV2) { p.WireFormat = contract.WireFormatPythonCompatible })
+		levels := plan.Levels()
+		result, err := EvaluateV2(requestV2(t, plan, source,
+			[]DetectionFact{unavailableFactV2(levels[0], contract.ReasonRequiredValueMissing), factV2(levels[1], DetectionNormal)},
+			[]LevelHistory{
+				{LevelID: 1, View: pointHistory{step: 60, points: map[int64]bool{source - 60: true}}},
+				{LevelID: 2, View: pointHistory{step: 60, points: map[int64]bool{source: false}}},
+			}, activeFactsV2(t, plan, source)))
+		if err != nil {
+			t.Fatalf("EvaluateV2() error = %v", err)
+		}
+		if result.RecordResult != contract.LevelResultRecovery {
+			t.Fatalf("record result = %q, want RECOVERY: the fixture does not reach either gate", result.RecordResult)
+		}
+		if !result.RecoveryGate.Held || result.RecoveryGate.Cause != RecoveryHeldLevelUnavailable || result.RecoveryGate.LevelID != 1 {
+			t.Fatalf("gate = %+v, want held by Level 1 as %s: the protocol overwrote the Level's cause",
+				result.RecoveryGate, RecoveryHeldLevelUnavailable)
+		}
+		if result.RecoveryGate.OpenAlertGate != "" {
+			t.Fatalf("second gate outcome = %q, want none: a record is counted by one gate only, and the "+
+				"first one already held this", result.RecoveryGate.OpenAlertGate)
+		}
+		if result.TriggerEvent != nil {
+			t.Fatalf("a held record still produced an envelope: %+v", result.TriggerEvent)
+		}
+	})
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			plan := compilePlanV2(t, test.levels)
