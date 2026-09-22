@@ -286,6 +286,20 @@ function objectLine(row, strategyID) {
     li.appendChild(refused);
   }
   var coverage = row.coverage || {};
+  // How much of the object this round actually describes. A round that
+  // resumed or could not load most of its series summarises a window for the
+  // few it evaluated, and the count of those few reads as the object's size
+  // unless the rest are said out loud. Rendered on existence of the coverage,
+  // not on either count being above zero: the reading that matters most is
+  // the one where levels is small and these are large, and a block hidden
+  // behind a number disappears rather than misreads.
+  if (row.coverage && (coverage.resumed > 0 || coverage.constrained > 0)) {
+    var parts = [];
+    if (coverage.resumed > 0) parts.push('已应用过、本轮未重算 ' + coverage.resumed + ' 条');
+    if (coverage.constrained > 0) parts.push('状态没加载上、本轮评估不了 ' + coverage.constrained + ' 条');
+    li.appendChild(text('li', '这一轮汇总了 ' + (coverage.levels || 0) + ' 扇窗；另有' + parts.join('、')
+      + '——上面的窗口读数只说这一轮算过的那些，不是这个对象的全部'));
+  }
   var windows = coverage.windows || [];
   if (windows.length > 0 || coverage.short > 0) {
     var sub = document.createElement('ul');

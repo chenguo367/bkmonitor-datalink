@@ -432,6 +432,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_output_events_without_message_total"] = "variableLabels: {format,event_kind}"
 	expected["bkmonitor_alarmd_output_events_by_kind_total"] = "variableLabels: {format,event_kind}"
 	expected["bkmonitor_alarmd_history_coverage_rejected_total"] = "variableLabels: {rule}"
+	expected["bkmonitor_alarmd_history_coverage_unsummarised_total"] = "variableLabels: {cause}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_worker_no_data_absences_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_target_plan_resolution_total"] = "variableLabels: {state}"
@@ -952,6 +953,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// label is filled from the same closed list and every cell is created at
 	// startup, so a zero is "has not occurred", not "never written".
 	bounds[fqName("history_coverage_rejected_total")] = len(observability.CoverageRejectionRules)
+	bounds[fqName("history_coverage_unsummarised_total")] = 2
 	// The four outcomes a no-data Plan can land on, and no more: the label is
 	// filled from the same list the evaluation publishes, and all four are
 	// created at startup so a zero on the one that never resolves on its own

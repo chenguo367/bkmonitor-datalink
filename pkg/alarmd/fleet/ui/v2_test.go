@@ -115,9 +115,16 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 	refusedSet := fleet.Anomaly{QueryGroup: "qg-refused-fedcba", Since: since, SinceFrom: fleet.SinceBusinessState, CauseReason: "HISTORY_GAPPED",
 		Standing: &standing, Finding: fleet.Finding{Check: fleet.CheckWindowUndecided},
 		CoverageRejected: &fleet.CoverageRejected{Rule: "SHORT_OVER_LEVELS"}}
+	// A sixth whose round described a fraction of the object: 22 windows
+	// summarised out of 249 series, the rest already applied by an earlier
+	// attempt of the same Slot. Without the two counts beside it, Levels = 22
+	// on the page is the same shape as an object that has 22 Levels.
+	partial := fleet.Anomaly{QueryGroup: "qg-partial-abcdef", Since: since, SinceFrom: fleet.SinceBusinessState, CauseReason: "HISTORY_GAPPED",
+		Standing: &standing, Finding: fleet.Finding{Check: fleet.CheckWindowUndecided},
+		Coverage: &fleet.HistoryCoverage{Levels: 22, Resumed: 227}}
 	card := fleet.StrategyStanding{StrategyID: "4101", AnsweredBy: "pod-a", Publication: fleet.StrategyPublication{SnapshotRevision: "53b81c9bbb2e", Epoch: 9},
 		Standing: fleet.StandingDetecting, Found: true, Line: "策略 4101：已生效，1 个对象在检测：qg-window-abc（pod-a 持有，数据没到·数据负责人查）",
-		Plans: []fleet.StrategyPlanStanding{{StrategyPlanRef: fleet.StrategyPlanRef{QueryGroup: "qg-window-abcdef", Business: "7"}, Replica: "pod-a", Existence: "active", Rows: []fleet.Anomaly{row, named, refused, refusedSet, neighbour},
+		Plans: []fleet.StrategyPlanStanding{{StrategyPlanRef: fleet.StrategyPlanRef{QueryGroup: "qg-window-abcdef", Business: "7"}, Replica: "pod-a", Existence: "active", Rows: []fleet.Anomaly{row, named, refused, refusedSet, partial, neighbour},
 			Config: &fleet.StrategyPlanConfigs{Redacted: true, Items: []fleet.StrategyPlanConfig{{
 				PlanID:   "4101",
 				Schedule: fleet.StrategyScheduleConfig{IntervalSeconds: 60},
@@ -165,6 +172,9 @@ func TestTheSecondPageRendersWithoutThrowingOrLeakingCodes(t *testing.T) {
 		// one about the whole set.
 		"这一轮的窗口读数服务端判定不自洽（缺的分钟数与窗口缺口对不上），未展示",
 		"这一轮的窗口读数服务端判定不自洽（短窗数多于窗口数），未展示",
+		// The round that described a fraction of its object says so beside
+		// the count, so 22 is not read as the object's size.
+		"这一轮汇总了 22 扇窗；另有已应用过、本轮未重算 227 条——上面的窗口读数只说这一轮算过的那些，不是这个对象的全部",
 	} {
 		if !strings.Contains(rendered, want) {
 			t.Errorf("the rendering lacks %q:\n%s", want, rendered)

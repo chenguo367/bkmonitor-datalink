@@ -754,6 +754,19 @@ type HistoryCoverage struct {
 	// not carry, the value has the wrong shape, or an algorithm declined it.
 	Unusable       uint32 `json:"unusable,omitempty"`
 	UnusableReason string `json:"unusable_reason,omitempty"`
+	// Resumed and Constrained are the series this round handled without
+	// summarising a window for them: Resumed because their State was already
+	// applied at this Slot's version, so the round was bookkeeping and not an
+	// evaluation; Constrained because their State could not be loaded.
+	//
+	// They are the denominator Levels lacks. Levels answers "how many windows
+	// did this round summarise", and a round that resumed 227 of 249 series
+	// reports 22 -- which on the page, without these, is the same shape as an
+	// object that has 22. Not omitempty on purpose: a zero here is the
+	// statement that every series was evaluated, and it is the reading a
+	// reader needs to see before trusting Levels as a size.
+	Resumed     uint32 `json:"resumed"`
+	Constrained uint32 `json:"constrained"`
 	// Abnormal is how many Level verdicts in the last round were ABNORMAL and
 	// AbnormalOnIncomplete how many of those were reached on a window that was
 	// not full. The trigger decides ABNORMAL before it reads completeness, so

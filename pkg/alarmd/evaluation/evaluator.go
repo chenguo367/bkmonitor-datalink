@@ -856,7 +856,11 @@ func (e *Evaluator) constrainedRecord(request execution.EvaluationRequest, due e
 	if view.Status == execution.StateDeterministicInvalid {
 		kind = execution.LevelOutcomeTerminal
 	}
-	out := recordResult{}
+	// Counted where the record is turned away, not where the windows are
+	// summarised: this is the one place that knows a series produced Level
+	// outcomes without an evaluation behind them, and the coverage a reader
+	// sees is otherwise silent about it.
+	out := recordResult{coverage: execution.HistoryCoverage{Constrained: 1}}
 	for _, l := range due.CompiledPlan.Levels() {
 		out.outcomes = append(out.outcomes, execution.LevelOutcome{Plan: due.Identity, LevelID: l.Definition().LevelID, SeriesIdentityDigest: view.Identity.SeriesIdentityDigest, Record: execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()}, Outcome: kind, ReasonCode: view.ReasonCode})
 	}

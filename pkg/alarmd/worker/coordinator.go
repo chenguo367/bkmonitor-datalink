@@ -2305,11 +2305,16 @@ func executionEvidenceFacts(evidence *execution.ExecutionEvidence) *observabilit
 // a Slot whose windows were all complete both report zero short, and they are
 // opposite statements; absence is how the first one stays sayable.
 func historyCoverageFacts(coverage execution.HistoryCoverage) *observability.HistoryCoverageFacts {
-	if coverage.Levels == 0 {
+	// A Slot that summarised no window still has something to report when it
+	// knows why. Gating on Levels alone made the extreme case -- every series
+	// resumed, or none of their State loadable -- report no coverage at all,
+	// which is the one reading that most needed to be visible.
+	if coverage.Levels == 0 && coverage.Resumed == 0 && coverage.Constrained == 0 {
 		return nil
 	}
 	facts := &observability.HistoryCoverageFacts{
 		Levels: coverage.Levels, Short: coverage.Short, Empty: coverage.Empty,
+		Resumed: coverage.Resumed, Constrained: coverage.Constrained,
 		WorstValid: coverage.WorstValid, WorstRequired: coverage.WorstRequired,
 		Guarded: coverage.Guarded,
 		Fresh:   coverage.Fresh, ShortFresh: coverage.ShortFresh,
