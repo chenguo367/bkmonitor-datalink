@@ -185,12 +185,13 @@ function renderColumns(list) {
 // sentence, the words, each object with its own standing and the holes of
 // its windows, the key configuration, and the developer's coordinates
 // folded away.
-function renderCard(standing) {
+function renderCard(standing, refusal) {
   var card = document.getElementById('card');
   card.textContent = '';
   card.hidden = false;
   if (!standing) {
-    card.appendChild(text('p', '读不到这条策略', 'err'));
+    card.appendChild(text('p', (refusal && refusal.detail) || '读不到这条策略', 'err'));
+    if (refusal && refusal.text) card.appendChild(text('p', refusal.text, 'note'));
     return;
   }
   var line = lineFor(standing.strategy_id);
@@ -348,10 +349,18 @@ function configLines(standing) {
   return lines;
 }
 
+// A refused request carries the server's own sentence about why. Throwing
+// it away and showing "could not read this" is how a deployment whose
+// catalog had not published for half an hour told every reader nothing,
+// while the body said which step its rounds were stopping at.
 function getJSON(path) {
   return fetch(BASE + path, {cache: 'no-store'}).then(function (response) {
-    if (!response.ok) throw new Error(path + ' ' + response.status);
-    return response.json();
+    if (response.ok) return response.json();
+    return response.json().catch(function () { return null; }).then(function (body) {
+      var refusal = new Error(path + ' ' + response.status);
+      refusal.body = body;
+      throw refusal;
+    });
   });
 }
 
@@ -379,7 +388,7 @@ function openSelected() {
   if (!id) { card.hidden = true; return; }
   getJSON('api/strategies/' + encodeURIComponent(id) + '?include=config')
     .then(renderCard)
-    .catch(function () { renderCard(null); });
+    .catch(function (refusal) { renderCard(null, refusal && refusal.body); });
 }
 
 window.addEventListener('hashchange', openSelected);

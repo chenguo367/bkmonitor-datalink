@@ -135,7 +135,7 @@ func TestTheStrategyListIsServedWithItsWords(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := WithStrategyStanding(plain, service, func(string) StrategyLookupFacts { return StrategyLookupFacts{} }, nil, nil, "pod-a", func() time.Time { return now }, 0)
+	handler := WithStrategyStanding(plain, service, func(string) StrategyLookupFacts { return StrategyLookupFacts{} }, nil, nil, nil, "pod-a", func() time.Time { return now }, 0)
 	response := httptest.NewRecorder()
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/strategies?limit=1", nil))
 	if response.Code != http.StatusOK {

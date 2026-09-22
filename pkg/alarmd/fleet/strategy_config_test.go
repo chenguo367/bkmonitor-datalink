@@ -236,7 +236,7 @@ func configHandler(t *testing.T, facts map[string]StrategyLookupFacts, loader St
 		t.Fatal(err)
 	}
 	lookup := func(id string) StrategyLookupFacts { return facts[id] }
-	return WithStrategyStanding(handler, service, lookup, nil, loader, "pod-a", func() time.Time { return now }, 0)
+	return WithStrategyStanding(handler, service, lookup, nil, loader, nil, "pod-a", func() time.Time { return now }, 0)
 }
 
 // include=config reads each Plan's object once and attaches the projection;

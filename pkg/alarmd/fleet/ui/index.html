@@ -1039,7 +1039,14 @@ function standingClause(report) {
   var parts = [];
   (report.groups || []).forEach(function (group) {
     if (group.key === 'CONTROL_SOURCE_STALE' && group.text) {
-      parts.push('策略配置刷新失败' + (group.stage ? '于 ' + group.stage : '') + '：' + group.text + '，新配置尚未发布，跑的是上一份好的目录');
+      // The consequence a reader hits next and has no way to connect to
+      // this row: while nothing has published, the point read by strategy
+      // id is refused, and its refusal names this same failure. The row
+      // names no strategy at all -- it counts zero of them -- so without
+      // this sentence the page holds the symptom and the cause with no
+      // edge between them.
+      parts.push('策略配置刷新失败' + (group.stage ? '于 ' + group.stage : '') + '：' + group.text
+        + '，新配置尚未发布，跑的是上一份好的目录；此期间按策略 ID 点查会被拒，拒的就是这条原因');
     }
     // One clause per replica whose output is not open: which one, for how
     // long, how many tries. A node with no route to the output used to be

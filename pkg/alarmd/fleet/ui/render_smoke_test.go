@@ -855,7 +855,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// The two standings, first. The time is the viewer's clock and is not
 		// asserted; everything after it is.
 		"起没有生效：连续 120 轮激活失败（1 种原因），舰队在执行 bdc6ffcb 的内容，源已到 e7a1b2c3",
-		"3 种副本级运行状态超出设计界，判定因此降级——策略配置刷新失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m，新配置尚未发布，跑的是上一份好的目录；" +
+		"3 种副本级运行状态超出设计界，判定因此降级——策略配置刷新失败于 validate_catalog：plan retention 60h13m exceeds catalog retention 24h13m，新配置尚未发布，跑的是上一份好的目录；此期间按策略 ID 点查会被拒，拒的就是这条原因；" +
 			"副本 fghij 告警输出未就绪 5 分 0 秒，已试 12 次（这个副本不接检测任务，其余副本在顶；通了自动就绪）",
 		"下一步：按种类处理：源过期看策略源刷新，leader 缺席看租约，告警集合/平台设置过期看对应发布者；输出未就绪看该副本所在节点到告警输出的网络（它自己在重试，最多 30 秒一次，通了就就绪），不用重启它",
 		// The third standing: the numbers are the leader's round, the lag is
