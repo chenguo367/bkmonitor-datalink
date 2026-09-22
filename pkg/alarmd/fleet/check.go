@@ -107,6 +107,14 @@ const (
 	CheckSourceIncomplete      Check = "SOURCE_INCOMPLETE"
 	CheckCapabilityUnsupported Check = "CAPABILITY_UNSUPPORTED"
 	CheckConfigRejected        Check = "CONFIG_REJECTED"
+	// A strategy the source accepted with part of its configuration read as
+	// something other than what was written -- a time range that does not
+	// parse, read as the whole day the way the platform's own reader reads
+	// it. The Plan runs, wider than written; it is the strategy's to fix and
+	// it is not a refusal. It has its own line because the disposition was
+	// otherwise dropped on the floor (sourceChecks did not know it, so the
+	// walk skipped it) while the page's hint counted it among the withheld.
+	CheckConfigNormalized Check = "CONFIG_NORMALIZED"
 	// The source's active set dropping strategies and listing them again:
 	// the platform's list, read across rounds. One round's dispositions say
 	// REMOVED, which reads as a strategy deleted; the account across rounds
@@ -125,6 +133,7 @@ var sourceChecks = map[string]Check{
 	dispositionCapabilityUnsupported: CheckCapabilityUnsupported,
 	dispositionConfigRejected:        CheckConfigRejected,
 	dispositionStaleConfig:           CheckConfigRejected,
+	dispositionConfigNormalized:      CheckConfigNormalized,
 }
 
 // GroupBy is the key a check's objects are folded on. One backend not
@@ -175,6 +184,7 @@ var checkAnswers = map[Check]struct {
 	CheckSourceSetFlapping:     {OwnerPlatform, GroupByHour},
 	CheckCapabilityUnsupported: {OwnerAlarmd, GroupByReasonCode},
 	CheckConfigRejected:        {OwnerStrategy, GroupByReasonCode},
+	CheckConfigNormalized:      {OwnerStrategy, GroupByReasonCode},
 	CheckCutoverFailing:        {OwnerAlarmd, GroupByReasonCode},
 	CheckReplicaDegraded:       {OwnerAlarmd, GroupByDegradation},
 	CheckOwnershipSkewed:       {OwnerAlarmd, GroupByReplica},
@@ -246,6 +256,9 @@ var checkOrder = []Check{
 	CheckPlanUnevaluable,
 	CheckQueryTargetMissing,
 	CheckConfigRejected,
+	// Last: the strategy runs. A reader who starts at the top meets every
+	// line that stops detection before the one that only widens it.
+	CheckConfigNormalized,
 }
 
 // Standing is whether a check is a fact about the whole deployment rather
@@ -264,7 +277,7 @@ func (check Check) Standing() bool {
 // these ever became one.
 func (check Check) SourceStanding() bool {
 	return check == CheckSourceIncomplete || check == CheckCapabilityUnsupported || check == CheckConfigRejected ||
-		check == CheckSourceSetFlapping
+		check == CheckSourceSetFlapping || check == CheckConfigNormalized
 }
 
 // Checks lists every check the table answers, in the order the page lists
@@ -1120,7 +1133,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				}
 				group := &CheckGroup{Key: key, Strategies: withheld.Count, Replicas: []string{view.SourceReplica},
 					Disposition: withheld.Disposition, Samples: withheld.Samples}
-				if check == CheckCapabilityUnsupported {
+				if check == CheckCapabilityUnsupported || check == CheckConfigNormalized {
 					words := WithheldWordsOf(withheld.Reason)
 					group.Words = &words
 				}

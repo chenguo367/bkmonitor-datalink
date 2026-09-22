@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -58,9 +59,52 @@ import (
 // list dropping strategies and listing them again, which one round's
 // dispositions call REMOVED and only an account across rounds can call
 // what it is -- a standing over the leader's account, folded by the hour.
+// Twenty-eight since the source's normalized items: a strategy accepted with
+// a time range read as the whole day because the range did not parse. It
+// runs, wider than written, and the disposition the leader records for it
+// was one the fold did not know -- so it was skipped in silence while the
+// page's hint counted it among the withheld. Its own line, last, because it
+// is the one standing under which detection is not stopped.
+// A normalized item reaches the page as its own line: filed under
+// CONFIG_NORMALIZED and no other check, the strategy's to act on, with the
+// detecting pair (the Plan runs) and the reason's words on the group. Before
+// this the walk skipped the disposition it did not know, and the strategy
+// appeared nowhere while the hint counted it among the withheld.
+func TestANormalizedItemIsItsOwnLineAndNotAWithheldOne(t *testing.T) {
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	view := View{Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NORMALIZED": 2, "CONFIG_REJECTED": 1},
+		[]WithheldObject{
+			{StrategyID: "4108", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"},
+			{StrategyID: "4109", Scope: "LEVEL", LevelID: 2, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"},
+			{StrategyID: "4110", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_REJECTED", Reason: "LEVEL_INVALID"},
+		}), SourceReplica: "pod-a"}
+	reports := ReportChecks(nil, nil, &view, at)
+	byCode := map[Check]CheckReport{}
+	for _, report := range reports {
+		byCode[report.Code] = report
+	}
+	normalized, filed := byCode[CheckConfigNormalized]
+	if !filed || normalized.Strategies != 2 || len(normalized.Groups) != 1 || normalized.Owner != OwnerStrategy {
+		t.Fatalf("CONFIG_NORMALIZED report = %+v, want two strategies in one reason group, the strategy's", normalized)
+	}
+	if group := normalized.Groups[0]; group.Key != "EFFECTIVE_TIME_RANGE_INVALID" || group.Words == nil || group.Words.Kind != WithheldStrategyDefinition ||
+		!strings.Contains(group.Words.What, "比配置写的宽") {
+		t.Errorf("group = %+v, want the reason's words saying wider than written", group)
+	}
+	if rejected := byCode[CheckConfigRejected]; rejected.Strategies != 1 {
+		t.Errorf("CONFIG_REJECTED counts %d strategies, want the one refused and not the two normalized", rejected.Strategies)
+	}
+	if pair := checkWords[CheckConfigNormalized]; pair.State != StateDetecting || pair.Action != ActionStrategyEdit {
+		t.Errorf("words = %+v, want detecting and the strategy's to edit", pair)
+	}
+	if !CheckConfigNormalized.SourceStanding() || Checks()[len(Checks())-1] != CheckConfigNormalized {
+		t.Errorf("CONFIG_NORMALIZED is a source standing and the last line; got standing %v, last %s", CheckConfigNormalized.SourceStanding(), Checks()[len(Checks())-1])
+	}
+}
+
 func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
-	if got := len(Checks()); got != 27 || len(checkAnswers) != 27 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 27: a new check has to "+
+	if got := len(Checks()); got != 28 || len(checkAnswers) != 28 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 28: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -167,6 +211,10 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckConfigRejected: {Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_REJECTED": 1, "STALE_CONFIG": 1},
 			[]WithheldObject{{StrategyID: "9", Scope: "LEVEL", LevelID: 2, Disposition: "CONFIG_REJECTED", Reason: "LEVEL_INVALID", FieldPath: "items[0].algorithms[0]"},
 				{StrategyID: "10", Scope: "STRATEGY", Disposition: "STALE_CONFIG", Reason: "LEVEL_INVALID"}}), SourceReplica: "pod-a"},
+		// The normalized item: accepted, and read wider than written. Its
+		// group carries the reason's words like the capability line's do.
+		CheckConfigNormalized: {Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NORMALIZED": 1},
+			[]WithheldObject{{StrategyID: "12", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"}}), SourceReplica: "pod-a"},
 		// The set flapping: the leader's account across rounds, with one
 		// hour in which a dropped strategy was listed again.
 		CheckSourceSetFlapping: {Source: sourceFactsWithSet(at, &SourceSetFacts{Since: at.Add(-3 * time.Hour),

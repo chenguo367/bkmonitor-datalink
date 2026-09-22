@@ -200,7 +200,7 @@ func strategyStandingKindOf(standing StrategyStanding) StrategyStandingKind {
 	}
 	withheld, removed := 0, 0
 	for _, disposition := range standing.Dispositions {
-		if disposition.Disposition != dispositionAccepted {
+		if isWithheld(disposition.Disposition) {
 			withheld++
 		}
 		if disposition.Disposition == dispositionRemoved {
@@ -265,6 +265,10 @@ func aboutOthers(row Anomaly, except string, words Words) []string {
 // holds them, and every withheld item with its reason and field.
 func strategyStandingLine(standing StrategyStanding) string {
 	withheld := make([]string, 0, len(standing.Dispositions))
+	// Normalized items are not withheld: the Plan runs, wider than written.
+	// They get their own clause after the standing, in the reason's words,
+	// so a strategy read as whole-day is never reported as one held back.
+	normalized := make([]string, 0, 1)
 	for _, disposition := range standing.Dispositions {
 		if disposition.Disposition == dispositionAccepted {
 			continue
@@ -279,6 +283,10 @@ func strategyStandingLine(standing StrategyStanding) string {
 		}
 		if disposition.FieldPath != "" {
 			item += "（" + disposition.FieldPath + "）"
+		}
+		if disposition.Disposition == dispositionConfigNormalized {
+			normalized = append(normalized, item+"——"+WithheldWordsOf(disposition.Reason).What)
+			continue
 		}
 		withheld = append(withheld, item)
 	}
@@ -317,6 +325,21 @@ func strategyStandingLine(standing StrategyStanding) string {
 		objects = append(objects, object)
 	}
 	removed, pending := removedFromSource(standing)
+	return strategyStandingSentence(standing, objects, withheld, removed, pending) + normalizedClause(normalized)
+}
+
+// normalizedClause is the sentence's tail for the items read wider than
+// written; empty when there are none.
+func normalizedClause(normalized []string) string {
+	if len(normalized) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("；%d 项按放宽的配置在检测：%s", len(normalized), strings.Join(normalized, "；"))
+}
+
+// strategyStandingSentence is the standing, the objects and the withheld
+// items, before any clause about normalized ones.
+func strategyStandingSentence(standing StrategyStanding, objects, withheld []string, removed, pending bool) string {
 	switch standing.Standing {
 	case StandingNotListed:
 		if removed {

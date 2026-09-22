@@ -106,7 +106,21 @@ const (
 	// that records REMOVED with no Plan. Neither is a refusal.
 	dispositionPendingRemoval = "PENDING_REMOVAL"
 	dispositionRemoved        = "REMOVED"
+	// The item was accepted with a part of its configuration read as
+	// something other than what was written, the way the platform's own
+	// reader reads it -- a time range that does not parse read as the whole
+	// day. Not a refusal: the Plan runs. Listed beside the refusals because
+	// that is where a reader looks for what the catalog did to a strategy,
+	// and the words for it have to say "wider than written", not "withheld".
+	dispositionConfigNormalized = "CONFIG_NORMALIZED"
 )
+
+// isWithheld says whether a disposition kept the item from running. The
+// accepted item and the normalized one both run; every other disposition is
+// a strategy or item that did not become a Plan this round.
+func isWithheld(disposition string) bool {
+	return disposition != dispositionAccepted && disposition != dispositionConfigNormalized
+}
 
 // WithheldObject is one withheld record as the control plane hands it over.
 type WithheldObject struct {
