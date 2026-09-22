@@ -239,7 +239,7 @@ func TestAStaleZeroDoesNotNameItsPlan(t *testing.T) {
 	if got := implicatedStrategies(row, CheckSeriesDataMissing); !reflect.DeepEqual(got, []StrategyRef{refC}) {
 		t.Fatalf("a zero four minutes old names %+v, want the Plan", got)
 	}
-	row.PlanSeries[1].LastSeenAt = now.Add(-RecentSkipWindow - time.Minute)
+	row.PlanSeries[1].LastSeenAt = now.Add(-PlanSeriesZeroWindow - time.Minute)
 	if got := implicatedStrategies(row, CheckSeriesDataMissing); got != nil {
 		t.Fatalf("a zero past the recent window names %+v, want none", got)
 	}
@@ -247,6 +247,23 @@ func TestAStaleZeroDoesNotNameItsPlan(t *testing.T) {
 	row.Guards = []GapGuard{heldGuard(refC, 0)}
 	if got := implicatedStrategies(row, CheckSeriesDataMissing); !reflect.DeepEqual(got, []StrategyRef{refC}) {
 		t.Fatalf("a held Plan with a stale zero names %+v, want the Plan by its guard", got)
+	}
+	// Without both times there is no age to measure, and the zero is read as
+	// it stands: a row that has not yet recorded a latest round, or a count
+	// carrying no time, still names its Plan rather than being spared on an
+	// age nobody measured.
+	for _, unaged := range []struct {
+		name string
+		row  Anomaly
+	}{
+		{"no latest round on the row", Anomaly{Finding: Finding{Check: CheckSeriesDataMissing}, Strategies: three,
+			PlanSeries: []PlanSeriesMatched{{Plan: refC, Matched: 0, LastSeenAt: now.Add(-24 * time.Hour)}}}},
+		{"no time on the count", Anomaly{Finding: Finding{Check: CheckSeriesDataMissing}, Strategies: three, ReasonLastAt: now,
+			PlanSeries: []PlanSeriesMatched{{Plan: refC, Matched: 0}}}},
+	} {
+		if got := implicatedStrategies(unaged.row, CheckSeriesDataMissing); !reflect.DeepEqual(got, []StrategyRef{refC}) {
+			t.Fatalf("%s: names %+v, want the Plan read as-is", unaged.name, got)
+		}
 	}
 }
 

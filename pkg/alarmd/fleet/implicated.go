@@ -12,7 +12,22 @@ package fleet
 import (
 	"sort"
 	"strings"
+	"time"
 )
+
+// PlanSeriesZeroWindow is how long a Plan's zero series count is read as
+// current: seen within this of the row's latest round. The count is written
+// from the Plan's evaluation lines, and a Plan bound to nothing does not
+// produce one every round, so on a running cluster the entry trailed the
+// round by three to four minutes -- a lag, not staleness. Ten minutes covers
+// that with room; a zero older than this is a Plan whose lines stopped, and
+// says nothing about what it matches now.
+//
+// The same number as RecentSkipWindow, under its own name because it answers
+// a different question: that one bounds "a loss still in progress", this one
+// bounds "a series count still describing the Plan". Retuning the loss bound
+// must not move attribution with it.
+const PlanSeriesZeroWindow = 10 * time.Minute
 
 // planEvidence is what a row says about one of its Plans, read from the
 // row's per-Plan facts alone: whether the latest round bound the Plan to no
@@ -26,13 +41,10 @@ type planEvidence struct {
 // guards -- into one entry per Plan the row lists that either fact names.
 //
 // A zero series count counts only while it is recent: within
-// RecentSkipWindow of the row's latest round. The count is written from the
-// Plan's evaluation lines, and a Plan bound to nothing may not produce one
-// every round, so the entry can lag the round by a few minutes -- a lag
-// that is not staleness. A zero from a week ago is: a Plan whose lines
-// stopped altogether says nothing about what it matches now, and naming it
-// the data's on that would send a person after a fact this side no longer
-// holds.
+// PlanSeriesZeroWindow of the row's latest round. A zero from a week ago is
+// a Plan whose lines stopped altogether, which says nothing about what it
+// matches now; naming it the data's on that would send a person after a
+// fact this side no longer holds.
 //
 // A row is one object, and an object may run several Plans; the guards and
 // the series counts on the row are per Plan. Folding such a row onto every
@@ -76,13 +88,15 @@ func evidenceByPlan(row Anomaly) map[StrategyRef]*planEvidence {
 }
 
 // recentZero says whether a Plan's zero series count is recent enough to
-// read: seen within RecentSkipWindow of the row's latest round. A row that
-// has no latest-round time yet is read as-is.
+// read: seen within PlanSeriesZeroWindow of the row's latest round. Without
+// both times there is no age to measure, and the count is read as-is: the
+// row is still named, not silently spared, because the only reason to spare
+// it is a measured age this side does not have.
 func recentZero(row Anomaly, plan PlanSeriesMatched) bool {
 	if row.ReasonLastAt.IsZero() || plan.LastSeenAt.IsZero() {
 		return true
 	}
-	return row.ReasonLastAt.Sub(plan.LastSeenAt) <= RecentSkipWindow
+	return row.ReasonLastAt.Sub(plan.LastSeenAt) <= PlanSeriesZeroWindow
 }
 
 // implicatedStrategies is the Plans a row's evidence names, smallest id
