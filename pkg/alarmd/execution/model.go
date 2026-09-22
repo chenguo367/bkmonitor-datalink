@@ -1113,6 +1113,21 @@ type StatePreflightResult struct {
 	// is what lets a state read reach 86 MB per Slot unremarked and then arrive
 	// as a dependency outage.
 	LoadedBytes int64
+	// EnvelopeReads is how many series this preflight had to read the older
+	// representation for, because the framed record was missing or could not
+	// be read on its own.
+	//
+	// It is the number that says how long the compatibility read still has to
+	// exist: the older representation has no writer and is not renewed, so it
+	// leaves on its own TTL, and a Query Group whose count has reached zero
+	// and stayed there is one whose second read is buying nothing.
+	EnvelopeReads int
+	// EnvelopeAfterUnreadableFrame is how many of those series had a frame
+	// whose bytes were there and did not read, so the older record answered
+	// instead. It is a corruption signal, not a writer: a readable frame is
+	// never compared against the envelope, so nothing here can see an envelope
+	// outranking a frame that reads.
+	EnvelopeAfterUnreadableFrame int
 }
 
 func (result StatePreflightResult) Find(identity StateKeyIdentity) (RuntimeStateView, bool) {
@@ -1164,7 +1179,12 @@ func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflight
 	// The byte count travels with the classified result: it is the store's
 	// own reading of what the preflight moved, and dropping it here left the
 	// preflight line reporting zero bytes on every successful round.
-	classified := StatePreflightResult{Items: make([]RuntimeStateView, len(result.Items)), LoadedBytes: result.LoadedBytes}
+	// EnvelopeReads travels for the same reason: it is the store's count of
+	// the series that still needed the older representation, and it is the
+	// number a deployment reads to learn whether the compatibility pass is
+	// still buying anything.
+	classified := StatePreflightResult{Items: make([]RuntimeStateView, len(result.Items)),
+		LoadedBytes: result.LoadedBytes, EnvelopeReads: result.EnvelopeReads, EnvelopeAfterUnreadableFrame: result.EnvelopeAfterUnreadableFrame}
 	seen := make(map[StateKeyIdentity]struct{}, len(result.Items))
 	for index, view := range result.Items {
 		candidate, ok := wanted[view.Identity]

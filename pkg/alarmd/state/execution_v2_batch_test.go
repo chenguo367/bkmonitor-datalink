@@ -31,6 +31,11 @@ type pipelineMemoryBackend struct {
 	failPipeline error
 	failMGet     error
 	guards       []*FenceGuard
+	// recordKeyCounts keeps how many keys each MGET carried, for the tests
+	// that assert on the batch bound rather than on the number of calls.
+	recordKeyCounts bool
+	keyCounts       []int
+	byteCounts      []int
 }
 
 func newPipelineMemoryBackend() *pipelineMemoryBackend {
@@ -39,6 +44,14 @@ func newPipelineMemoryBackend() *pipelineMemoryBackend {
 
 func (backend *pipelineMemoryBackend) MGet(ctx context.Context, keys []string) ([][]byte, error) {
 	backend.mgetCalls++
+	if backend.recordKeyCounts {
+		backend.keyCounts = append(backend.keyCounts, len(keys))
+		bytes := 0
+		for _, key := range keys {
+			bytes += len(backend.values[key])
+		}
+		backend.byteCounts = append(backend.byteCounts, bytes)
+	}
 	if backend.failMGet != nil {
 		return nil, backend.failMGet
 	}
@@ -207,8 +220,20 @@ func TestLoadRuntimeBatchesReadsAndIsolatesInvalidItems(t *testing.T) {
 	// at the item bound. The extra round trip is that one call, per Query
 	// Group, and it is what stops a Query Group whose records grew to 345 KiB
 	// from asking for 86 MB in one MGET.
-	if backend.mgetCalls != 4 {
-		t.Fatalf("MGET round trips = %d, want 1 safe batch of 16 + ceil(584/256) = 4", backend.mgetCalls)
+	//
+	// Twice over here, because every series in this fixture holds an envelope
+	// and no frame: the first pass reads 600 frames and finds none, the second
+	// reads the 600 envelopes that answer. A fleet that has finished the
+	// migration pays the first pass only - which is the point of the split -
+	// and this fixture is what the middle of the migration costs.
+	// The envelope pass runs at the value bound throughout - eight keys per
+	// call in this fixture, sixteen under the production limit - because a
+	// bound learned from its own earlier batches is the trap the sibling
+	// bound is protected from by a committed measurement this pass does not
+	// have. Empty replies are what those calls cost while the migration is
+	// unfinished, and the pass disappears when the older keys do.
+	if backend.mgetCalls != 79 {
+		t.Fatalf("MGET round trips = %d, want the frame pass (1 safe batch of 16 + ceil(584/256) = 4) and the envelope pass (600 / 8 = 75)", backend.mgetCalls)
 	}
 	for index, view := range loaded.Items {
 		want := execution.StateMissingWarming
@@ -281,17 +306,26 @@ func TestApplyRuntimePipelinesWitnessedItemsAndStoresSequentialBytes(t *testing.
 	// at the item bound. The extra round trip is that one call, per Query
 	// Group, and it is what stops a Query Group whose records grew to 345 KiB
 	// from asking for 86 MB in one MGET.
-	if batched.mgetCalls != 5 {
-		t.Fatalf("preflight MGET round trips = %d, want 1 safe batch of 16 + ceil(984/256) = 5", batched.mgetCalls)
+	// Plus the envelope pass: every series here is missing from both keys, so
+	// the frame pass answers none of them and the second asks the older key.
+	// Its first call is bounded by what the store accepts as a value, because
+	// nothing has measured an envelope yet; that call comes back empty, which
+	// is a measurement of this representation, and the rest run at the item
+	// bound. A missing key costs a reply and no bytes, which is what makes
+	// paying it for a cold Query Group acceptable; what it buys is never
+	// reading a 345 KiB envelope for a series whose frame answers.
+	if batched.mgetCalls != 130 {
+		t.Fatalf("preflight MGET round trips = %d, want the frame pass (5) and the envelope pass at the value bound (1000 / 8 = 125)", batched.mgetCalls)
 	}
 	result, err := batchedStore.ApplyRuntimeFenced(context.Background(), request, testApplyFence())
 	if err != nil {
 		t.Fatalf("ApplyRuntimeFenced() error = %v", err)
 	}
 	requireAllStatus(t, result, execution.StateApplied)
-	// The MGETs are the preflight's five above; the apply itself re-reads
-	// nothing, which is what this counts.
-	if batched.pipelines != 4 || batched.pipelineKeys != 1000 || batched.casCalls != 0 || batched.mgetCalls != 5 {
+	// The MGETs are the preflight's 130 above - its frame pass and its
+	// envelope pass; the apply itself re-reads nothing, which is what this
+	// counts.
+	if batched.pipelines != 4 || batched.pipelineKeys != 1000 || batched.casCalls != 0 || batched.mgetCalls != 130 {
 		t.Fatalf("apply round trips: pipelines=%d keys=%d cas=%d mget=%d, want 4 pipelines carrying 1000 keys and no re-read",
 			batched.pipelines, batched.pipelineKeys, batched.casCalls, batched.mgetCalls)
 	}

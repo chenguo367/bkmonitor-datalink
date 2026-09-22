@@ -495,8 +495,19 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	if len(values) == 2 {
 		envelopeRaw, framedRaw = values[0], values[1]
 	}
-	// The same reading LoadRuntime makes, so a series that reaches this path
-	// without a witness is classified exactly as it would have been with one.
+	// Both keys, and the newer of the two records, which is what LoadRuntime
+	// did before its read was split in two. It differs from the load in one
+	// shape only: a series with both records where the envelope is the newer
+	// statement reads as the envelope here and as the frame there.
+	//
+	// It is left differing rather than split to match. This path runs for a
+	// series without a preflight witness - a repeated key, or a caller with no
+	// preflight - and it re-reads in order to compare against exact bytes, so
+	// the second key costs it a value it already has the round trip for. The
+	// load's split exists to stop fetching a 344 KB record for every series of
+	// every Slot; there is no such multiplier here. What both of them give up
+	// is named where the load gives it up, and whether it happens at all is
+	// read from EnvelopePreferred.
 	view := store.readStoredRecord(execution.StatePreflightRequest{Contract: contractRef},
 		execution.StatePreflightItem{Identity: mutation.Identity, ApplyVersion: mutation.ApplyVersion}, envelopeRaw, framedRaw)
 	witness, _ := store.witnesses.take(contractRef.Slot, mutation.Identity)
@@ -685,11 +696,70 @@ func (store *ExecutionStore) runtimeLoadBatchLimit(group execution.QueryGroupIde
 	}
 }
 
+// envelopeLoadBatchLimit bounds the second pass, and deliberately learns
+// nothing from the first.
+//
+// The first pass measures frames. On the one round shape the envelope read
+// exists for - a series that has an envelope and no frame - every frame comes
+// back empty, and a largest of zero reads as "this Query Group's records are
+// empty", which is the item bound: 256 keys in one call. The records about to
+// be asked for are the largest ones the store holds, so that bound asks for
+// 249 envelopes of 344 KB in a single MGET, ten times the batch budget, and
+// the read dies on its deadline. It does not recover either: a failed read
+// commits no size, so the next round sends the same call again. The symptom
+// this split exists to remove would have moved into the pass that only runs
+// while the migration is unfinished.
+//
+// So the envelope pass is bounded by what the store accepts as a value rather
+// than by anything any round saw - sixteen keys per call under the production
+// limit, which is what the first read of any cold Query Group has always been
+// bounded by. It is a conservative bound for a pass that should be empty and
+// is meant to disappear; a per-representation committed memory would earn back
+// the difference for the fleets that are mid-migration, and is worth doing only
+// if one of them is slow enough to notice.
+func (store *ExecutionStore) envelopeLoadBatchLimit() int {
+	// Deliberately not learned from this pass's own reads either. A batch that
+	// measures small envelopes would raise the bound for the batches after it,
+	// and the population this pass reads is mixed by construction: a Query
+	// Group changing representation holds both sizes at once, and so does one
+	// whose series differ in age. Sixteen short windows at 4 KB would lift the
+	// bound to the item cap and the next batch of long ones would ask for
+	// 89 MB. The sibling bound survives that only because it takes the max of
+	// a committed measurement of the whole population; this pass has none and
+	// deliberately commits none, since the records it reads are leaving.
+	expected := uint64(store.options.MaxValueBytes)
+	if expected == 0 {
+		return runtimeLoadBatchItems
+	}
+	limit := int(runtimeLoadBatchBytes / expected)
+	switch {
+	case limit < 1:
+		return 1
+	case limit > runtimeLoadBatchItems:
+		return runtimeLoadBatchItems
+	default:
+		return limit
+	}
+}
+
 // runtimeLoadBatch collects consecutive same-target keys for one MGET.
 type runtimeLoadBatch struct {
 	target  StorageTarget
 	indexes []int
 	keys    []string
+}
+
+// runtimeLoadPass carries what the first pass learned into the second: which
+// series still need the older representation, and the framed bytes they came
+// with, so both records are classified together exactly as they were when one
+// call fetched both keys.
+type runtimeLoadPass struct {
+	envelopes bool
+	pending   []int
+	frames    map[int][]byte
+	// envelopeAfterUnreadableFrame counts the series whose frame was present
+	// and unreadable and whose envelope answered instead.
+	envelopeAfterUnreadableFrame int
 }
 
 func (batch *runtimeLoadBatch) reset() {
@@ -790,7 +860,7 @@ func isReadTimeout(err error) bool {
 // corrupt or oversize blob affects only its own item; a failed read marks the
 // whole batch retryable, exactly as the failed single reads did.
 func (store *ExecutionStore) loadRuntimeBatch(
-	ctx context.Context, request execution.StatePreflightRequest, batch *runtimeLoadBatch, views []execution.RuntimeStateView,
+	ctx context.Context, request execution.StatePreflightRequest, batch *runtimeLoadBatch, views []execution.RuntimeStateView, pass *runtimeLoadPass,
 ) (loaded int64, largest int, read bool) {
 	if len(batch.indexes) == 0 {
 		return 0, 0, false
@@ -806,15 +876,73 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			views[index] = runtimeLoadFailure(view, err)
 			continue
 		}
-		envelopeRaw, framedRaw := values[2*position], values[2*position+1]
-		weight := len(envelopeRaw) + len(framedRaw)
-		loaded += int64(weight)
-		if weight > largest {
-			largest = weight
+		raw := values[position]
+		loaded += int64(len(raw))
+		if len(raw) > largest {
+			largest = len(raw)
 		}
-		views[index] = store.readStoredRecord(request, item, envelopeRaw, framedRaw)
+		if pass.envelopes {
+			// The envelope arrived for a series whose frame could not answer.
+			// The frame's bytes travel with it so the two are classified
+			// together, which is the shape this decision has always had when
+			// both records existed.
+			view := store.readStoredRecord(request, item, raw, pass.frames[index])
+			// The frame's bytes were there and did not read, and the older
+			// record answered in its place. That is a corrupt or truncated
+			// frame, not a writer of the older representation: a readable
+			// frame never reaches this pass at all, so this count cannot see
+			// the shape where an envelope outranks a frame that reads. What
+			// that shape needs is a fleet-level fact - every ready replica
+			// declaring it writes frames - and it is recorded as an unmeasured
+			// boundary until there is one.
+			if pass.frames[index] != nil && view.Representation == execution.StateRepresentationEnvelope {
+				pass.envelopeAfterUnreadableFrame++
+			}
+			views[index] = view
+			continue
+		}
+		classified, needsEnvelope := store.readFramedRecord(request, item, raw)
+		if needsEnvelope {
+			pass.pending = append(pass.pending, index)
+			pass.frames[index] = raw
+			continue
+		}
+		views[index] = classified
 	}
 	return loaded, largest, err == nil
+}
+
+// readFramedRecord classifies a series from its framed record alone, and says
+// when it cannot.
+//
+// It cannot in exactly the cases the older representation was kept for: no
+// frame at all, or a frame whose bytes do not read as a record this binary
+// knows how to refuse on its own. A frame written by a newer binary is not one
+// of them - that refusal is the honest answer whatever the older key holds,
+// and it is the answer the pair of keys already produced.
+//
+// The size check is the frame's alone, where the pair of keys was refused if
+// either exceeded the limit. A series whose envelope is oversize and whose
+// frame is not is now read rather than refused - the readable record answers
+// and the unreadable one is not fetched. That is the more usable side of a
+// refusal that existed to keep a value nobody could write back from being
+// classified as good, and the envelope is not written back by anything.
+func (store *ExecutionStore) readFramedRecord(
+	request execution.StatePreflightRequest, item execution.StatePreflightItem, framedRaw []byte,
+) (execution.RuntimeStateView, bool) {
+	if framedRaw == nil {
+		return execution.RuntimeStateView{}, true
+	}
+	if len(framedRaw) > store.options.MaxValueBytes {
+		return execution.RuntimeStateView{Identity: item.Identity, BlobRevision: 1, Status: execution.StateDeterministicInvalid,
+			ReasonCode: execution.ReasonCode(contract.ReasonStateBudgetExceeded)}, false
+	}
+	decoded := decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
+	if decoded.Status == execution.StateDeterministicInvalid &&
+		decoded.ReasonCode != execution.ReasonCode(contract.ReasonStateSchemaUnsupported) {
+		return execution.RuntimeStateView{}, true
+	}
+	return store.readStoredRecord(request, item, nil, framedRaw), false
 }
 
 // readStoredRecord turns the two values one series may hold into the one view

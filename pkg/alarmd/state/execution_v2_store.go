@@ -194,20 +194,54 @@ func rejectRuntimeBudget(items []execution.StateMutation) []execution.StateApply
 // consecutive items that route to the same storage target. Each value is still
 // classified on its own; a preflight witness is kept per readable key so the
 // following ApplyRuntime can prove what it saw without reading again.
+//
+// The read is in two passes, and the second one is usually empty. Every series
+// may hold two records - the framed one every binary of this era writes, and
+// the JSON envelope its predecessors wrote - and the round used to fetch both
+// keys of every series whether or not the older one held anything. On a
+// strategy retaining a long window that is the whole cost of the read: 1466
+// points are 7 KB framed and 344 KB as an envelope, so a Query Group of 249
+// series read 87.6 MB per round of which 85.7 MB was a representation with no
+// writer, and a read that size stops fitting in its deadline. The first pass
+// asks for the framed key alone; the second asks for the envelope only of the
+// series whose frame is missing or cannot be read by itself, which is what the
+// envelope was being kept for. A series whose frame answers is classified from
+// the frame in the first pass, exactly as it was when both keys arrived
+// together - the choice between the two records only ever mattered when both
+// held one.
+//
+// The older records are not deleted here or anywhere: they are not renewed
+// either (a frozen series is renewed under the representation it was read in),
+// so they leave on their own TTL. EnvelopeReads says how many series still
+// need the second read, which is how a deployment learns when the
+// compatibility pass can go.
 func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.StatePreflightRequest) (execution.StatePreflightResult, error) {
 	if err := request.Contract.Validate(); err != nil || len(request.Items) == 0 || len(request.Items) > store.options.MaxItemsPerCall {
 		return execution.StatePreflightResult{}, fmt.Errorf("state: invalid runtime load request")
 	}
 	result := execution.StatePreflightResult{Items: make([]execution.RuntimeStateView, len(request.Items))}
+	pass := &runtimeLoadPass{frames: make(map[int][]byte)}
 	batch := &runtimeLoadBatch{}
 	roundLargest, anyRead := 0, false
+	flush := func() {
+		bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items, pass)
+		result.LoadedBytes += bytes
+		if read && !pass.envelopes {
+			// Only the frame pass measures. The Query Group's committed size
+			// describes the key every write goes to and the one the next round
+			// reads first; the envelopes are leaving, and a size learned from
+			// them would bound the frame pass by records that will not be
+			// there.
+			anyRead = true
+			if largest > roundLargest {
+				roundLargest = largest
+			}
+		}
+		batch.reset()
+	}
 	for index, item := range request.Items {
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
-		envelopeKey, err := RuntimeStateKeyV2(store.options.Prefix, item.Identity)
-		var framedKey string
-		if err == nil {
-			framedKey, err = RuntimeStateKeyV3(store.options.Prefix, item.Identity)
-		}
+		framedKey, err := RuntimeStateKeyV3(store.options.Prefix, item.Identity)
 		var target StorageTarget
 		if err == nil {
 			target, err = store.options.Router.Route(item.Identity.Plan.TenantID, item.Identity.Plan.StrategyID)
@@ -217,31 +251,39 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			continue
 		}
 		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.runtimeLoadBatchLimit(request.Contract.Slot.QueryGroup, roundLargest, anyRead)) {
-			bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items)
-			result.LoadedBytes += bytes
-			if read {
-				anyRead = true
-				if largest > roundLargest {
-					roundLargest = largest
-				}
-			}
-			batch.reset()
+			flush()
 		}
 		batch.target = target
 		batch.indexes = append(batch.indexes, index)
-		// Both keys of one series travel in the same call, envelope first:
-		// the batch bound counts series, and the bytes it bounds are the sum
-		// of whatever both keys hold.
-		batch.keys = append(batch.keys, envelopeKey, framedKey)
+		batch.keys = append(batch.keys, framedKey)
 	}
-	bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items)
-	result.LoadedBytes += bytes
-	if read {
-		anyRead = true
-		if largest > roundLargest {
-			roundLargest = largest
+	flush()
+	// The second pass, for the series the first one could not answer from the
+	// frame alone. Its bound is what the store accepts as a value and nothing
+	// else - not the frames the first pass measured, and not its own earlier
+	// batches. See envelopeLoadBatchLimit for why both of those are traps.
+	pass.envelopes = true
+	for _, index := range pass.pending {
+		item := request.Items[index]
+		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
+		envelopeKey, err := RuntimeStateKeyV2(store.options.Prefix, item.Identity)
+		var target StorageTarget
+		if err == nil {
+			target, err = store.options.Router.Route(item.Identity.Plan.TenantID, item.Identity.Plan.StrategyID)
 		}
+		if err != nil {
+			result.Items[index] = runtimeLoadFailure(view, err)
+			continue
+		}
+		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.envelopeLoadBatchLimit()) {
+			flush()
+		}
+		batch.target = target
+		batch.indexes = append(batch.indexes, index)
+		batch.keys = append(batch.keys, envelopeKey)
 	}
+	flush()
+	result.EnvelopeReads, result.EnvelopeAfterUnreadableFrame = len(pass.pending), pass.envelopeAfterUnreadableFrame
 	// One commit for the whole preflight: the round read every key of the
 	// Query Group, so this is a complete measurement of the population rather
 	// than whatever the last batch happened to hold.
