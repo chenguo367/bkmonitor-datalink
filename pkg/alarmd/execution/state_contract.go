@@ -169,6 +169,16 @@ type RuntimeLevelContractRef struct {
 
 // DeriveRuntimeLevelContractRefs closes persisted state identities over the
 // Compiler-owned state and Level semantics.
+//
+// Every input here - the Plan's state compatibility hash, the Level ID, the
+// detect and trigger fingerprints, the state requirement's identity view -
+// is also an input of the state generation (strategy.deriveStateCompatibilityHash,
+// the level closure), and has to stay one. A record is keyed by the
+// generation and held to these refs; a change that moved the refs without
+// moving the generation would meet the records under the same key with
+// another contract, on every build alike, with no formula skew to name it -
+// a refusal of every loaded record for good, not for a rollout. The test
+// beside this file changes each input and asserts both move.
 func DeriveRuntimeLevelContractRefs(plan *strategy.CompiledPlan) ([]RuntimeLevelContractRef, error) {
 	if plan == nil || plan.StateCompatibilityHash() == "" {
 		return nil, errors.New("alarmd execution: compiled state contract is required")
