@@ -278,6 +278,18 @@ const (
 // reads it.
 const ReasonEffectiveTimeRangeInvalid = "EFFECTIVE_TIME_RANGE_INVALID"
 
+// dispositionDetailMaxBytes bounds the text a disposition carries: enough
+// for a decoder's sentence, not for a document.
+const dispositionDetailMaxBytes = 256
+
+// dispositionDetail bounds a refusal's text for the audit.
+func dispositionDetail(text string) string {
+	if len(text) <= dispositionDetailMaxBytes {
+		return text
+	}
+	return text[:dispositionDetailMaxBytes]
+}
+
 type ObjectDisposition struct {
 	SourceID    string
 	Scope       string
@@ -291,6 +303,13 @@ type ObjectDisposition struct {
 	// came from the same field, and finding out which took compiling the
 	// documents again offline. Empty when the refusal is not about a field.
 	FieldPath string
+	// Detail is what the refusal said about the field, in the compiler's
+	// words and bounded, when a word and a path are not enough to act on:
+	// "query interval is invalid" beside items[0].query_configs[1] is what a
+	// strategy owner can fix; QUERY_CONFIG_INVALID alone is not. Empty for
+	// every refusal that carries no text. Omitted when empty, so a published
+	// audit written before the field keeps its bytes.
+	Detail string `json:",omitempty"`
 	// AbsentSince is when a strategy under PENDING_REMOVAL was first found
 	// absent from the observed active set, in Unix seconds; the removal
 	// grace is measured from it. Zero on every other disposition, and on a
@@ -921,7 +940,14 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	if err != nil {
 		var compileFailure *QueryPlanCompileError
 		if errors.As(err, &compileFailure) && compileFailure.Disposition != "" && compileFailure.Reason != "" {
-			candidate.dispositions = append(candidate.dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: compileFailure.Disposition, Reason: compileFailure.Reason})
+			disposition := ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: compileFailure.Disposition, Reason: compileFailure.Reason}
+			if compileFailure.FieldPath != "" {
+				disposition.FieldPath = "items[0]." + compileFailure.FieldPath
+			}
+			if compileFailure.Err != nil {
+				disposition.Detail = dispositionDetail(compileFailure.Err.Error())
+			}
+			candidate.dispositions = append(candidate.dispositions, disposition)
 		}
 		return candidate, fmt.Errorf("QUERY_PLAN_INVALID: %w", err)
 	}
