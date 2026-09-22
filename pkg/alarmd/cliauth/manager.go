@@ -118,8 +118,8 @@ func New(o Options) (*Manager, error) {
 		return nil, errors.New("cliauth: environment identity and name are required, at most 256 bytes")
 	}
 	u, err := url.Parse(o.PublicBaseURL)
-	if err != nil || u.Scheme != "https" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
-		return nil, errors.New("cliauth: PublicBaseURL must be an HTTPS URL without userinfo, query or fragment")
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" || u.Opaque != "" {
+		return nil, errors.New("cliauth: PublicBaseURL must be an HTTP(S) URL without userinfo, query or fragment")
 	}
 	if strings.Contains(u.Path, "\\") {
 		return nil, errors.New("cliauth: PublicBaseURL path is invalid")

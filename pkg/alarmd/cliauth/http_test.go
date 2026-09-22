@@ -8,6 +8,7 @@ package cliauth
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -180,7 +181,7 @@ func TestNewValidatesCoordinatesWithoutExposingSecrets(t *testing.T) {
 	if err != nil || m.publicBaseURL != "https://example.test/prefix/" {
 		t.Fatalf("New=%v err=%v", m, err)
 	}
-	for _, invalidURL := range []string{"", "//example.test", "http://example.test/", "https://user:secret@example.test/", "https://example.test/?token=secret", "https://example.test/#fragment", "https://example.test/../bad", "https://example.test/%2e%2e/bad", "https://example.test/a%2f..%2fb"} {
+	for _, invalidURL := range []string{"", "//example.test", "ftp://example.test/", "https://user:secret@example.test/", "https://example.test/?token=secret", "https://example.test/#fragment", "https://example.test/../bad", "https://example.test/%2e%2e/bad", "https://example.test/a%2f..%2fb", "http://user:secret@example.test/", "http://example.test/?token=secret", "http://example.test/#fragment", "http://example.test/../bad"} {
 		t.Run(invalidURL, func(t *testing.T) {
 			opts := base
 			opts.PublicBaseURL = invalidURL
@@ -210,6 +211,87 @@ func TestNewValidatesCoordinatesWithoutExposingSecrets(t *testing.T) {
 	m, err = New(base)
 	if err != nil || strings.Count(m.prefix, "{") != 1 || strings.Contains(m.prefix, base.EnvironmentID) {
 		t.Fatal("environment changed Redis hash tag")
+	}
+}
+
+func TestHTTPDeploymentPreservesURLAndRequiresMatchingOrigin(t *testing.T) {
+	client := startRedis(t)
+	server := httptest.NewUnstartedServer(nil)
+	publicBaseURL := "http://" + server.Listener.Addr().String() + "/alarmd/"
+	m, err := New(Options{Redis: client, Prefix: "http-fixture", EnvironmentID: "http-environment",
+		EnvironmentName: "HTTP fixture", PublicBaseURL: publicBaseURL, IssuerKey: testIssuerKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server.Config.Handler = http.StripPrefix("/alarmd", m.Handler())
+	server.Start()
+	defer server.Close()
+	request := func(method, path, origin, body string, trusted bool) (int, []byte) {
+		t.Helper()
+		r, err := http.NewRequest(method, publicBaseURL+strings.TrimPrefix(path, "/"), strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		r.Header.Set("Content-Type", "application/json")
+		if trusted {
+			r.Header.Set(IssuerKeyHeader, testIssuerKey)
+			r.Header.Set(PrincipalHeader, "tenant-a/operator")
+		}
+		if origin != "" {
+			r.Header.Set("Origin", origin)
+		}
+		response, err := server.Client().Do(r)
+		if err != nil {
+			t.Fatal("HTTP fixture request failed")
+		}
+		defer response.Body.Close()
+		data, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal("cannot read HTTP fixture response")
+		}
+		if response.Header.Get("Cache-Control") != "no-store" {
+			t.Fatal("HTTP authorization response lost no-store")
+		}
+		return response.StatusCode, data
+	}
+	status, body := request(http.MethodGet, grantsPath, "", "", true)
+	var preview grantPreview
+	if status != http.StatusOK || json.Unmarshal(body, &preview) != nil || preview.PublicBaseURL != publicBaseURL || preview.Principal != "tenant-a/operator" {
+		t.Fatal("HTTP grant preview did not preserve deployment URL and principal")
+	}
+	wrongOrigin := strings.Replace(server.URL, "http://", "https://", 1)
+	status, body = request(http.MethodPost, grantsPath, wrongOrigin, `{"confirm":true}`, true)
+	var rejected struct {
+		Error Error `json:"error"`
+	}
+	if status != http.StatusForbidden || json.Unmarshal(body, &rejected) != nil || rejected.Error.Code != "origin_denied" {
+		t.Fatal("HTTPS Origin was accepted for an HTTP deployment")
+	}
+	status, _ = request(http.MethodPost, grantsPath, server.URL, `{"confirm":true}`, false)
+	if status != http.StatusForbidden {
+		t.Fatal("HTTP configuration bypassed issuer authentication")
+	}
+	status, body = request(http.MethodPost, grantsPath, server.URL, `{"confirm":true}`, true)
+	var issued struct {
+		AuthorizationCode string `json:"authorization_code"`
+		PublicBaseURL     string `json:"public_base_url"`
+	}
+	if status != http.StatusOK || json.Unmarshal(body, &issued) != nil || issued.PublicBaseURL != publicBaseURL {
+		t.Fatal("HTTP grant issuance did not preserve deployment URL")
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(strings.TrimPrefix(issued.AuthorizationCode, "alarmd-login-v1."))
+	var grant authorizationPackage
+	if err != nil || json.Unmarshal(raw, &grant) != nil || grant.PublicBaseURL != publicBaseURL || !validSecret(grant.GrantSecret) {
+		t.Fatal("HTTP authorization package did not retain the deployment URL")
+	}
+	input, _ := json.Marshal(map[string]string{"environment_id": grant.EnvironmentID, "grant_secret": grant.GrantSecret})
+	status, body = request(http.MethodPost, exchangePath, "", string(input), false)
+	var exchanged exchangeResponse
+	if status != http.StatusOK || json.Unmarshal(body, &exchanged) != nil || exchanged.PublicBaseURL != publicBaseURL || !validSecret(exchanged.AccessToken) {
+		t.Fatal("HTTP exchange did not preserve the deployment URL or create a token")
+	}
+	if _, err := m.Authenticate(context.Background(), exchanged.AccessToken); err != nil {
+		t.Fatal("HTTP exchange did not create a valid Redis session")
 	}
 }
 
