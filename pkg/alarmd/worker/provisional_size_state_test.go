@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
@@ -87,6 +88,44 @@ func TestAPendingStateHistoryIsChargedForItsArraysNotItsSharedStrings(t *testing
 		t.Fatalf("one mutation of the verified shape costs %d, want the %d bytes of its arrays plus a small "+
 			"fixed part: the deployment expectation in the comment above is derived from this number",
 			got, wantPerMutation)
+	}
+}
+
+// Nothing else on a pending state result became free.
+//
+// The case above fixes the history's terms and is blind to everything beside
+// it: dropping the events, and dropping the whole non-history part of the
+// mutation, both left it green. Both are the undercount direction, which is
+// the one a budget must never err in - a Slot charged less than it holds is
+// admitted, and then holds it.
+//
+// The events matter most of the two. An event is the evidence envelope, the
+// largest thing on a record after the history itself, and unlike the history
+// it is built here rather than borrowed from the loaded state.
+func TestEveryPartOfAPendingStateResultIsStillCharged(t *testing.T) {
+	const points, levels = 8, 1
+	bare := retainedStateResultBytes(stateResultWithHistory(points, levels, 8))
+
+	withEvent := stateResultWithHistory(points, levels, 8)
+	withEvent[0].Events = []contract.TriggerEventV1{{
+		EventKind: "ABNORMAL", TenantID: "default", BusinessID: "2",
+		LegacyOutput: &contract.LegacyEventContext{AnomalyTimestamps: []int64{60, 120, 180}},
+	}}
+	if got := retainedStateResultBytes(withEvent); got <= bare {
+		t.Fatalf("a result carrying an event costs %d and one carrying none costs %d: the events are not "+
+			"charged, and they are the largest thing on the record after the history", got, bare)
+	}
+
+	withRest := stateResultWithHistory(points, levels, 8)
+	withRest[0].Mutation.Levels = []execution.RuntimeLevelStateMutation{
+		{LevelID: 1, LevelStateCompatibility: strings.Repeat("l", 64), WarmupRequirementRef: strings.Repeat("w", 64)},
+	}
+	withRest[0].Mutation.AffectedRecords = []execution.RecordAnchor{
+		{RecordID: strings.Repeat("r", 64), SourceTime: 60},
+	}
+	if got := retainedStateResultBytes(withRest); got <= bare {
+		t.Fatalf("a mutation carrying Levels and AffectedRecords costs %d and an empty one costs %d: the "+
+			"fields beside the history are not charged at all", got, bare)
 	}
 }
 
