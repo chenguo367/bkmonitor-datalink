@@ -28,3 +28,14 @@ func TestProjectionRejectsNonObjectsAndTrailingDocuments(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceTargetValuesPreserveOrdinaryMembersButOmitCredentials(t *testing.T) {
+	value, omitted, err := projectJSON([]byte(`{"items":[{"target":[[{"key":"Authorization","method":"eq","value":["TARGET_SECRET"]},{"key":"bk_host_id","method":"eq","value":[42]}]]}]}`), sourcePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(value)
+	if strings.Contains(string(data), "TARGET_SECRET") || !strings.Contains(string(data), "42") || len(omitted) != 1 || omitted[0].Reason != "credential_parameter" {
+		t.Fatalf("unsafe or lossy target projection: %s %+v", data, omitted)
+	}
+}

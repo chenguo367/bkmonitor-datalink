@@ -217,6 +217,10 @@ func runPhaseTwoApplicationWithDependencies(
 	go func() { httpDone <- server.Run(httpContext, cfg.HTTP.Listen, cfg.ShutdownTimeout.Duration()) }()
 
 	bundle, err := dependencies.openBundle(runtimeContext, cfg, recorder, logger, application.health)
+	if err == nil && bundle != nil {
+		// Publish startup facts before making the evidence handler reachable.
+		bundle.runtimeConfig = &profile
+	}
 	if err == nil && bundle != nil && bundle.dependencies.FleetAPI != nil {
 		// The listener starts before this runtime does, so the API answers
 		// "not ready" until here rather than pretending to have no data.
@@ -234,7 +238,6 @@ func runPhaseTwoApplicationWithDependencies(
 		return errors.Join(err, normalizeRuntimeShutdownError(httpErr, false))
 	}
 	bundleDone := make(chan error, 1)
-	bundle.runtimeConfig = &profile
 	go func() { bundleDone <- bundle.Run(runtimeContext) }()
 
 	var runErr, httpErr error

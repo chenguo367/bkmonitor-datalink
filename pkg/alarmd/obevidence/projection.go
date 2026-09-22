@@ -63,7 +63,7 @@ var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name
 var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid name is_enabled update_time strategy_revision priority priority_group_key labels scenario source type", map[string]*policy{
 	"items": fields("id query_md5 expression time_delay unit", map[string]*policy{
 		"query_configs": sourceQueryPolicy, "algorithms": algorithmPolicy, "functions": functionPolicy,
-		"target":      fields("condition key method value type model_id target_type", map[string]*policy{"conditions": conditionPolicy, "hosts": memberPolicy, "nodes": memberPolicy}),
+		"target":      namedValues(fields("condition key method value type model_id target_type", map[string]*policy{"conditions": conditionPolicy, "hosts": memberPolicy, "nodes": memberPolicy})),
 		"target_plan": targetPolicy, "no_data_config": noDataPolicy,
 	}),
 	"detects":        fields("level priority connector", map[string]*policy{"trigger_config": triggerPolicy, "recovery_config": triggerPolicy, "effective_time": uptimePolicy}),
