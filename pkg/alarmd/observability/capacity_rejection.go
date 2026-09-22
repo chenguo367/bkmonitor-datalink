@@ -95,6 +95,7 @@ type SlotBudgetUsageFacts struct {
 	RetainedInputBytes  uint64 `json:"retained_input_bytes"`
 	RetainedGapBytes    uint64 `json:"retained_gap_bytes"`
 	RetainedOutputBytes uint64 `json:"retained_output_bytes"`
+	RetainedStateBytes  uint64 `json:"retained_state_bytes"`
 
 	// The limits stay off the row and are carried for readers that hold the
 	// facts rather than the log line.

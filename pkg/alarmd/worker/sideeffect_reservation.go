@@ -99,8 +99,8 @@ func (stream *streamedExecution) mergeProvisional(ctx context.Context, next exec
 		}
 		return err
 	}
-	retained += newEffectBytes(stream.evaluated, next)
-	if err := stream.coordinator.acquireEffects(delta, retained, stream, stream.reservationPhase("normal_output")); err != nil {
+	effects := newEffectBytes(stream.evaluated, next)
+	if err := stream.coordinator.acquireEffects(delta, retained+effects, stream, stream.reservationPhase("normal_output")); err != nil {
 		var exceeded *provisionalBudgetExceededError
 		if errors.As(err, &exceeded) {
 			stream.coordinator.observeCapacityRejection(ctx, stream.request.Operation, exceeded.budget, err)
@@ -117,7 +117,11 @@ func (stream *streamedExecution) mergeProvisional(ctx context.Context, next exec
 	stream.effects.states += delta.states
 	stream.effects.events += delta.events
 	stream.effects.gaps += delta.gaps
-	stream.retainBytes(retainPhaseOutput, retained)
+	// Split where it was summed: the loaded State the caller measured under
+	// its own phase, the effects this call adds under the output's. One
+	// reservation, the same total, two answers instead of one.
+	stream.retainBytes(retainPhaseState, retained)
+	stream.retainBytes(retainPhaseOutput, effects)
 	return nil
 }
 

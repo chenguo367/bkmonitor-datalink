@@ -338,6 +338,7 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		RetainedInputBytes:  stream.retainedByPhase[retainPhaseInput],
 		RetainedGapBytes:    stream.retainedByPhase[retainPhaseGap],
 		RetainedOutputBytes: stream.retainedByPhase[retainPhaseOutput],
+		RetainedStateBytes:  stream.retainedByPhase[retainPhaseState],
 		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 	}

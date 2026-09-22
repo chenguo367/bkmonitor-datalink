@@ -4312,6 +4312,11 @@ type SlotBudgetUsage struct {
 	RetainedInputBytes  uint64
 	RetainedGapBytes    uint64
 	RetainedOutputBytes uint64
+	// RetainedStateBytes is the Runtime State this Slot loaded and holds: the
+	// retained window per series, which is proportional to the retention bound
+	// and dwarfs what the Slot writes. It was counted under the output bytes,
+	// where it was read as output.
+	RetainedStateBytes uint64
 
 	// The limits each was measured against, carried with the usage rather than
 	// looked up by the reporter. A usage without its limit is not a reading,

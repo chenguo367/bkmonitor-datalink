@@ -86,6 +86,18 @@ const (
 	retainPhaseInput retainPhase = iota
 	retainPhaseGap
 	retainPhaseOutput
+	// retainPhaseState is the Runtime State this Slot loaded and holds: the
+	// retained window, per series, for as long as the Slot runs.
+	//
+	// Its own phase because it is neither of the two it used to be read as.
+	// It was charged to the output phase, where it dominated -- a 1,466-point
+	// window costs 48 + len(RecordID) + 40 x levels per point, per series, and
+	// every effect this Slot will write is small beside it. So
+	// retained_output_bytes tracked the retention bound rather than the
+	// output, and no number anywhere answered "how much will this Slot
+	// write". The total is unchanged; only which of the three it is counted
+	// under.
+	retainPhaseState
 	retainPhaseCount
 )
 

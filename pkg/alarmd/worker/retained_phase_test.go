@@ -31,10 +31,10 @@ func TestACompletedSlotSaysWhichPhaseHeldItsBytes(t *testing.T) {
 		t.Fatalf("Execute() result=%+v error=%v", result, err)
 	}
 	usage := result.Usage
-	t.Logf("retained: total=%d input=%d gap=%d output=%d", usage.RetainedBytes,
-		usage.RetainedInputBytes, usage.RetainedGapBytes, usage.RetainedOutputBytes)
+	t.Logf("retained: total=%d input=%d gap=%d output=%d state=%d", usage.RetainedBytes,
+		usage.RetainedInputBytes, usage.RetainedGapBytes, usage.RetainedOutputBytes, usage.RetainedStateBytes)
 
-	if sum := usage.RetainedInputBytes + usage.RetainedGapBytes + usage.RetainedOutputBytes; sum != usage.RetainedBytes {
+	if sum := usage.RetainedInputBytes + usage.RetainedGapBytes + usage.RetainedOutputBytes + usage.RetainedStateBytes; sum != usage.RetainedBytes {
 		t.Fatalf("the phases sum to %d against a reported total of %d; a reader cannot tell which of the two "+
 			"is the number the pool was charged", sum, usage.RetainedBytes)
 	}
