@@ -308,8 +308,41 @@ func TestAnUnarmedDifferenceDecidesEverythingAndSendsNothing(t *testing.T) {
 	if stats[absentalerts.OutcomeAlertClosed] != 0 {
 		t.Fatalf("an unarmed difference counted alerts as closed: %+v", stats)
 	}
+	if stats[absentalerts.OutcomeWouldSend] != 1 {
+		t.Fatalf("an unarmed difference did not say how many alerts arming would send: %+v", stats)
+	}
 	if fixture.loop.Difference()["send_armed"] != 0 {
 		t.Fatalf("the reading does not say the close is unarmed: %+v", fixture.loop.Difference())
+	}
+}
+
+// The guard against closing another deployment's alerts has to be read
+// while the close is unarmed, which means the alerts have to be read then
+// too. A producer_foreign of zero that comes from never having looked is
+// indistinguishable from one that comes from looking, and it is exactly the
+// number someone would arm the close on.
+func TestAnUnarmedDifferenceStillFilesEveryAlertByItsProducer(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{
+		nativeAlert("mine", "0123456789abcdef0123456789abcdef"),
+		{AlertID: "theirs", EventSourceID: "another-source", Fingerprint: "1123456789abcdef0123456789abcdef", Severity: "1"},
+		{AlertID: "nameless", Fingerprint: "2123456789abcdef0123456789abcdef", Severity: "1"},
+		{AlertID: "no-severity", EventSourceID: "native", Fingerprint: "3123456789abcdef0123456789abcdef"},
+	})
+	fixture.loop.send = false
+	ctx := context.Background()
+	fixture.loop.step(ctx)
+	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.control.snapshot = liveSnapshot("observation-two", fixture.now, 100)
+	fixture.loop.step(ctx)
+	stats := fixture.loop.Stats()
+	if stats[absentalerts.OutcomeProducerForeign] != 1 || stats[absentalerts.OutcomeProducerUnknown] != 1 || stats[absentalerts.OutcomeMetadataMissing] != 1 {
+		t.Fatalf("an unarmed round left the per-alert guards unread: %+v", stats)
+	}
+	if stats[absentalerts.OutcomeWouldSend] != 1 {
+		t.Fatalf("an unarmed round did not count what arming would send: %+v", stats)
+	}
+	if len(fixture.writer.batches) != 0 {
+		t.Fatalf("an unarmed round sent something: %+v", fixture.writer.batches)
 	}
 }
 

@@ -67,6 +67,10 @@ const (
 // does not follow how often the publisher runs and need not move with it.
 const sourceFullReadInterval = 6 * time.Minute
 
+// SourceFullReadInterval is that bound, for the callers whose own freshness
+// bound has to follow it rather than repeat it as a second number.
+const SourceFullReadInterval = sourceFullReadInterval
+
 type SourceRefreshResult struct {
 	Status      SourceRefreshStatus
 	Observation string

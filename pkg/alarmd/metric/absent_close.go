@@ -31,7 +31,8 @@ type absentCloseCollector struct {
 // differenceSides is the closed list of denominators, so every one of them
 // has a cell from the first scrape.
 var differenceSides = []string{"departed", "with_open_alerts", "candidates", "snapshot_strategies",
-	"published_strategies", "returned", "unreadable_index", "send_armed"}
+	"published_strategies", "returned", "unreadable_index", "send_armed",
+	"snapshot_age_seconds", "max_snapshot_age_seconds"}
 
 func newAbsentCloseCollector() *absentCloseCollector {
 	return &absentCloseCollector{
@@ -41,6 +42,8 @@ func newAbsentCloseCollector() *absentCloseCollector {
 				"alerts. closed counts decisions and alert_closed counts what went out: while the close is not "+
 				"armed (absent_strategy_difference side=send_armed is 0) closed rises and alert_closed stays at "+
 				"zero, which is what the difference would do. alert_closed rising round after round while closed "+
+				"zero, which is what the difference would do, and would_send counts the alerts that arming would "+
+				"have sent. alert_closed rising round after round while closed "+
 				"stays flat is not new work: it is the same alerts being closed again because the alert link has "+
 				"not removed their fingerprints from its index, which is what ends a strategy's candidacy. Why a "+
 				"whole round decided nothing is absent_strategy_round_total, not a cell here. Every cell exists "+
@@ -58,8 +61,11 @@ func newAbsentCloseCollector() *absentCloseCollector {
 				"the difference itself, snapshot_strategies and published_strategies what it was judged against, "+
 				"returned the departed strategies the source lists again, and unreadable_index the ones whose alert "+
 				"index could not be read, and send_armed whether this deployment has armed the close at all "+
-				"(0 means every decision is reported and none is sent). A candidates of zero beside a departed of "+
-				"zero is a quiet deployment; beside a large departed it is a difference that refused.", []string{"side"}, nil),
+				"(0 means every decision is reported and none is sent). snapshot_age_seconds is reported beside "+
+				"max_snapshot_age_seconds so that a snapshot_stale round can be read as the source falling "+
+				"behind rather than as a bound that does not fit this deployment. A candidates of zero beside a "+
+				"departed of zero is a quiet deployment; beside a large departed it is a difference that "+
+				"refused.", []string{"side"}, nil),
 	}
 }
 

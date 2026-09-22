@@ -73,6 +73,11 @@ type absentStrategyClose struct {
 	counts    map[string]uint64
 	// lastCounts is the last round's denominators, which the gauge reports.
 	lastCounts absentalerts.Counts
+	// lastAgeSeconds is how old the observation the last round decided on
+	// was. Reported beside the bound it is judged against, so that a reader
+	// meeting snapshot_stale can tell "the source fell behind" from "the
+	// bound does not fit this deployment's refresh".
+	lastAgeSeconds int
 }
 
 // absentCloseControl is what the loop asks the control plane: what the
@@ -97,8 +102,14 @@ func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, reconciler absentClose
 		bounds: absentalerts.Bounds{
 			// The loop's own grace, on top of the removal grace the catalog
 			// already applied before it let the strategy go.
-			Grace:          controlplane.AbsenceGracePeriod,
-			MaxSnapshotAge: 30 * time.Minute,
+			Grace: controlplane.AbsenceGracePeriod,
+			// Derived from how often the source is actually read rather than
+			// set as a second constant: a bound that does not follow the
+			// reader's own cadence refuses every round on a deployment whose
+			// source is slower than whatever number was written here, and
+			// the refusal word points at the source rather than at the
+			// bound. Five reads' worth of slack.
+			MaxSnapshotAge: 5 * controlplane.SourceFullReadInterval,
 			// A tenth of the deployment's strategies departing and still
 			// holding alerts is not a day's deletions.
 			MaxDifferenceRatio: 0.1, MinDifferenceForRatio: 20,
@@ -150,6 +161,7 @@ func (loop *absentStrategyClose) Difference() map[string]int {
 		"candidates": loop.lastCounts.Candidates, "snapshot_strategies": loop.lastCounts.SnapshotStrategies,
 		"published_strategies": loop.lastCounts.PublishedStrategies, "returned": loop.lastCounts.Returned,
 		"unreadable_index": loop.lastCounts.UnreadableIndex, "send_armed": boolSide(loop.send),
+		"snapshot_age_seconds": loop.lastAgeSeconds, "max_snapshot_age_seconds": int(loop.bounds.MaxSnapshotAge / time.Second),
 	}
 }
 
@@ -214,6 +226,9 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 	if haveSnapshot {
 		round.SnapshotAgeSeconds = int64(now.Sub(observed.ReadAt) / time.Second)
 	}
+	loop.countsMu.Lock()
+	loop.lastAgeSeconds = int(round.SnapshotAgeSeconds)
+	loop.countsMu.Unlock()
 	round.WithOpenAlerts, round.Unreadable = loop.readIndex(ctx, round)
 	result := loop.tracker.Round(round, loop.bounds)
 	if haveSnapshot && result.Refusal == absentalerts.RefusalNone {
@@ -262,13 +277,6 @@ func (loop *absentStrategyClose) readIndex(ctx context.Context, round absentaler
 // closeStrategy reads the strategy's current alerts from the alert link and
 // closes the ones this deployment produced.
 func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absentalerts.Absent, now time.Time) {
-	if !loop.send {
-		// Decided, not sent. The strategy is already counted under closed,
-		// which counts decisions; alert_closed counts what went out, and
-		// stays at zero. The round's line carries send=false, because a
-		// line is the only place the two can be told apart.
-		return
-	}
 	if loop.alerts == nil {
 		// Without the reconciliation endpoint there is no authoritative
 		// alert metadata, so there is nothing to address a close to. Every
@@ -313,6 +321,18 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 	loop.count(absentalerts.OutcomeProducerUnknown, unknown)
 	loop.count(absentalerts.OutcomeMetadataMissing, withoutSeverity)
 	if len(batch) == 0 {
+		return
+	}
+	if !loop.send {
+		// Everything up to here has run: the alerts were read, each one was
+		// filed under whose it is, and the batch was built. Only the send is
+		// held. The gate sits here and not at the top of this function
+		// because the counts above are how a deployment decides whether to
+		// arm it - above all producer_foreign, which is the guard against
+		// closing another deployment's alerts. Skipping the read would leave
+		// that cell at zero, and "looked and found none" would be
+		// indistinguishable from "never looked".
+		loop.count(absentalerts.OutcomeWouldSend, len(batch))
 		return
 	}
 	if err := loop.writer.WriteCloseBatch(ctx, batch); err != nil {

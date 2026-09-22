@@ -232,6 +232,12 @@ const (
 	OutcomeAlertClosed = "alert_closed"
 	// OutcomeSendFailed: the producer did not acknowledge the batch.
 	OutcomeSendFailed = "send_failed"
+	// OutcomeWouldSend: an alert a round decided on and did not send,
+	// because the deployment has not armed the close. Counted per alert, so
+	// that what arming would do is a number and not an estimate from the
+	// strategy counts - eight strategies can be eight alerts or eight
+	// thousand.
+	OutcomeWouldSend = "would_send"
 	// OutcomeIndexUnreadable: this strategy's open alert set could not be
 	// read. Counted per strategy and per round, and never folded into "it
 	// has no alerts": read and empty is a fact, not read is an absence of
@@ -265,7 +271,7 @@ const (
 var Outcomes = []string{OutcomeClosed, OutcomeStillPublished, OutcomeWithinGrace, OutcomeUnconfirmed,
 	OutcomeIdentityUnknown, OutcomeRevisionUnknown, OutcomeDeferred, OutcomeEvidenceUnavailable,
 	OutcomeMetadataMissing, OutcomeAlertClosed, OutcomeSendFailed, OutcomeIndexUnreadable,
-	OutcomeNotLeader, OutcomeMemoryFull, OutcomeProducerForeign, OutcomeProducerUnknown}
+	OutcomeNotLeader, OutcomeMemoryFull, OutcomeProducerForeign, OutcomeProducerUnknown, OutcomeWouldSend}
 
 // Counts is what the round measured. The two denominators are reported with
 // every reading, because a zero means two different things - nothing was
