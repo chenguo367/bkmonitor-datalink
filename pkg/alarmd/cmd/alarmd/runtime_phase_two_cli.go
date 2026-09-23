@@ -92,6 +92,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	options := obevidence.Options{Catalog: catalog, Progress: progressStore}
 	options.SourceStrategy = bind("strategy_cache", cfg.StrategySourceRedis(), cfg.PhaseTwo.Control.StrategyCachePrefix)
+	options.CMDBCache = bind("cmdb_cache", cfg.CMDBCacheRedis(), "")
 	// Catalog and progress share a diagnostic runtime pool, not detector I/O.
 	runtimeConnection := cfg.RuntimeStoreRedis()
 	diagnosticRuntime := newClient(runtimeConnection)
