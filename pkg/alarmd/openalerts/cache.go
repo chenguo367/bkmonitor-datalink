@@ -74,13 +74,21 @@ const SentConfirmAfter = 5 * time.Minute
 
 // DisjointMinimum is how many alerts this process sent, each past
 // SentConfirmAfter at the latest read and none of them found, before the
-// sets are taken to be keyed differently from this process's lookups. One
-// or two could be alerts the consumer closed on its own; with every one
-// missing and at least this many, the likelier reading is that no lookup
-// can ever hit. While disjoint, the gate answers from what this process
-// sent (the self-maintained answer) instead of holding every recovery,
-// and a single alert found in any set ends it.
-const DisjointMinimum = 3
+// sets are taken to be keyed differently from this process's lookups.
+//
+// One is enough. An alert the consumer closed on its own can put a quiet
+// deployment into the state wrongly, and the price of that is the gate as
+// it was before it existed: a RECOVERY for an alert the consumer no longer
+// holds, which it records as orphaned and changes nothing for. A higher
+// bar would leave a deployment with one or two alerts outside the fallback
+// for good, holding exactly the recoveries it exists to release.
+//
+// Leaving the state takes positive evidence only: an alert of ours found
+// in a set, or nothing of ours left open. The count dropping does not end
+// it, because the recoveries the fallback lets through are what make it
+// drop; ending on that would hold the last few again against sets that
+// still carry none of ours.
+const DisjointMinimum = 1
 
 // Answer is how a lookup was answered. Closed: a metric label. The first
 // three are authoritative answers; the rest say the copy answered on its

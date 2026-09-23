@@ -125,16 +125,19 @@ func TestOneOfOurAlertsInTheSetIsNotDisjoint(t *testing.T) {
 
 // The two constants are boundaries; each is tested on both sides.
 func TestDisjointNeedsEnoughAlertsOldEnough(t *testing.T) {
-	t.Run("one alert short of the minimum", func(t *testing.T) {
+	t.Run("nothing of ours to compare", func(t *testing.T) {
 		f := newDisjointFixture(t, PolicySelfMaintain, "theirs-1")
-		ours := sentFingerprints(DisjointMinimum - 1)
-		f.send(ours...)
 		f.reread(SentConfirmAfter + time.Second)
-		if stats := f.cache.Stats(); stats.Disjoint || stats.SentNotInSet != DisjointMinimum-1 {
-			t.Fatalf("disjoint %v not-in %d, want counted but not disjoint", stats.Disjoint, stats.SentNotInSet)
+		if stats := f.cache.Stats(); stats.Disjoint || stats.SentNotInSet != 0 {
+			t.Fatalf("disjoint %v not-in %d, want a set with nothing of ours to compare left alone", stats.Disjoint, stats.SentNotInSet)
 		}
-		if f.cache.Contains(tenant, keyA.StrategyID, ours[0]) {
-			t.Fatal("below the minimum the gate must answer from the set as before")
+	})
+	t.Run("a single alert of ours, old enough and missing", func(t *testing.T) {
+		f := newDisjointFixture(t, PolicySelfMaintain, "theirs-1")
+		f.send("ours-only")
+		f.reread(SentConfirmAfter + time.Second)
+		if !f.cache.Stats().Disjoint || !f.cache.Contains(tenant, keyA.StrategyID, "ours-only") {
+			t.Fatal("a deployment with one alert never reaches the fallback")
 		}
 	})
 	t.Run("alerts a second too young for the consumer to have opened", func(t *testing.T) {
@@ -174,7 +177,7 @@ func TestAResentAbnormalKeepsItsFirstSendTime(t *testing.T) {
 // answers from the sets again.
 func TestDisjointEndsWhenOneOfOurAlertsAppears(t *testing.T) {
 	f := newDisjointFixture(t, PolicySelfMaintain, "theirs-1")
-	ours := sentFingerprints(DisjointMinimum)
+	ours := sentFingerprints(3)
 	f.send(ours...)
 	f.reread(SentConfirmAfter + time.Second)
 	if !f.cache.Stats().Disjoint {
@@ -230,14 +233,14 @@ func TestCalibrationBetweenResendsDoesNotForgetWhatWasOpened(t *testing.T) {
 // starts again.
 func TestARecoveryRestartsTheAge(t *testing.T) {
 	f := newDisjointFixture(t, PolicySelfMaintain, "theirs-1")
-	ours := sentFingerprints(DisjointMinimum)
+	ours := sentFingerprints(3)
 	f.send(ours...)
 	f.c.advance(SentConfirmAfter)
 	f.cache.Acknowledged([]contract.TriggerEventV1{recovery(keyA, ours[0])})
 	f.send(ours[0])
 	f.reread(time.Second)
-	if stats := f.cache.Stats(); stats.Disjoint || stats.SentNotInSet != DisjointMinimum-1 {
-		t.Fatalf("disjoint %v not-in %d, want the reopened alert too young to count", stats.Disjoint, stats.SentNotInSet)
+	if stats := f.cache.Stats(); stats.SentNotInSet != len(ours)-1 {
+		t.Fatalf("not-in %d, want %d: the reopened alert is too young to count", stats.SentNotInSet, len(ours)-1)
 	}
 }
 
@@ -282,5 +285,48 @@ func TestAnAlertTheCalibrationFindsMissingFromTheSetCountsAsFound(t *testing.T) 
 	cache.Refresh(context.Background())
 	if stats := cache.Stats(); stats.Disjoint || stats.SentInSet != 1 {
 		t.Fatalf("disjoint %v in %d, want the calibration's missing member found", stats.Disjoint, stats.SentInSet)
+	}
+}
+
+// The fallback's own recoveries shrink the count it entered on; that must
+// not end it. Three alerts enter, one recovers through the fallback, and
+// the other two still go out against sets that carry none of ours.
+func TestTheRecoveriesTheFallbackReleasesDoNotEndIt(t *testing.T) {
+	f := newDisjointFixture(t, PolicySelfMaintain, "theirs-1", "theirs-2")
+	ours := sentFingerprints(3)
+	f.send(ours...)
+	f.reread(SentConfirmAfter + time.Second)
+	if !f.cache.Stats().Disjoint {
+		t.Fatal("setup: not disjoint")
+	}
+	for i, fp := range ours[:2] {
+		if !f.cache.Contains(tenant, keyA.StrategyID, fp) {
+			t.Fatalf("recovery %d held", i)
+		}
+		f.cache.Acknowledged([]contract.TriggerEventV1{recovery(keyA, fp)})
+		f.reread(time.Minute)
+		if !f.cache.Stats().Disjoint {
+			t.Fatalf("after %d recoveries the state ended with none of ours ever found", i+1)
+		}
+	}
+	if !f.cache.Contains(tenant, keyA.StrategyID, ours[2]) {
+		t.Fatal("the last alert of ours was held again")
+	}
+}
+
+// With nothing of ours left open there is nothing left for the fallback to
+// answer, and the state ends: the next alert has to show the sets disjoint
+// again on its own.
+func TestDisjointEndsWhenNothingOfOursIsLeftOpen(t *testing.T) {
+	f := newDisjointFixture(t, PolicySelfMaintain, "theirs-1")
+	f.send("ours-only")
+	f.reread(SentConfirmAfter + time.Second)
+	if !f.cache.Stats().Disjoint {
+		t.Fatal("setup: not disjoint")
+	}
+	f.cache.Acknowledged([]contract.TriggerEventV1{recovery(keyA, "ours-only")})
+	f.reread(time.Minute)
+	if f.cache.Stats().Disjoint {
+		t.Fatal("the state outlived every alert it was answering for")
 	}
 }

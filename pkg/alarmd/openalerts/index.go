@@ -502,6 +502,10 @@ func (cache *Cache) assessSent() {
 		}
 	}
 	disjoint := inSet == 0 && notInSet >= DisjointMinimum
+	if cache.index.disjoint {
+		// See DisjointMinimum: only positive evidence ends the state.
+		disjoint = inSet == 0 && len(cache.index.opened) > 0
+	}
 	if disjoint && !cache.index.disjoint {
 		cache.unavailable[UnavailableMembersDisjoint]++
 	}

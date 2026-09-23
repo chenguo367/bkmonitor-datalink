@@ -95,8 +95,8 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 				"consumer closed on its own; all no and none yes is the sets keyed differently from this process's "+
 				"lookups, which open_alert_set_disjoint reports.", "in_set"),
 		disjoint: descriptor("open_alert_set_disjoint",
-			"1 while none of at least three alerts this process sent is in the consumer's sets (see "+
-				"open_alert_set_sent_alerts). Every lookup against such sets would miss and hold the recovery, so "+
+			"1 while none of the alerts this process sent is in the consumer's sets (see "+
+				"open_alert_set_sent_alerts); it ends when one of them is found or none is left open. Every lookup against such sets would miss and hold the recovery, so "+
 				"while this is 1 the gate answers from what this process sent instead, and fleet health degrades "+
 				"with OPEN_ALERT_SET_DISJOINT."),
 	}

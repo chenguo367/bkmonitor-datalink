@@ -1924,7 +1924,7 @@ type OpenAlertSetFacts struct {
 	Members     int `json:"members"`
 	// SentInSet and SentNotInSet are the alerts this replica sent ABNORMAL
 	// for, old enough for the consumer to have opened them, by whether the
-	// sets carry them. Disjoint is none carried out of at least three: the
+	// sets carry them. Disjoint is none of them carried: the
 	// sets are keyed differently from this replica's lookups, and it
 	// degrades the verdict with DegradationOpenAlertSetDisjoint.
 	SentInSet    int  `json:"sent_in_set"`
