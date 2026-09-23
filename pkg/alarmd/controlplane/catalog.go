@@ -1776,10 +1776,50 @@ func compilePlan(
 		plan.OutputIdentity = &contract.MonitorOutputIdentity{DynamicDimensions: dataset.DynamicDimensions, DimensionFields: append([]string{}, dataset.IdentityFields...)}
 		plan.SubjectFacts = frozenSubjectFacts(source, item)
 	}
-	scheduleSpec := execution.DeriveScheduleSpec(interval)
+	scheduleSpec, refusal, err := planScheduleSpec(sourceID, plan, interval)
+	if err != nil {
+		if refusal != nil {
+			dispositions = append(dispositions, *refusal)
+		}
+		return contract.EvaluationPlanV2{}, planCompileFacts{}, dispositions, err
+	}
 	schedule, err := execution.DerivePlanScheduleRevision(scheduleSpec)
 	return plan, planCompileFacts{ScheduleSpec: scheduleSpec, ScheduleRevision: schedule, NoDataSuspended: suspended},
 		dispositions, err
+}
+
+// planScheduleSpec derives the Plan's schedule and holds the three copies of
+// its evaluation step to one another: the schedule's cadence, the execution
+// semantics' evaluation interval, and each Level's trigger step. Today all
+// three are the item's aggregation interval, written from one variable, and
+// the state grid, the trigger windows and the Slot cadence only line up
+// because they are. A change that moves one of them -- the day the step is
+// separated from the aggregation interval -- has to answer for the others,
+// and this is where it finds out: the Plan is withheld by name rather than
+// run on a schedule its windows do not count in.
+func planScheduleSpec(sourceID string, plan contract.EvaluationPlanV2, intervalSeconds int64) (execution.ScheduleSpec, *ObjectDisposition, error) {
+	spec := execution.DeriveScheduleSpec(intervalSeconds)
+	step := int64(plan.StrategyIR.ExecutionSemantics.EvaluationInterval)
+	mismatch := func(what string, value int64) (execution.ScheduleSpec, *ObjectDisposition, error) {
+		detail := fmt.Sprintf("%s=%d evaluation_interval=%d", what, value, step)
+		return execution.ScheduleSpec{}, &ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionUnsupported, Reason: "EVALUATION_STEP_INCONSISTENT",
+			Detail: detail}, errors.New("alarmd controlplane: evaluation step copies disagree: " + detail)
+	}
+	if spec.EvaluationIntervalSeconds != step {
+		return mismatch("schedule_interval", spec.EvaluationIntervalSeconds)
+	}
+	for _, level := range plan.StrategyIR.Levels {
+		var trigger struct {
+			StepSeconds int64 `json:"step_seconds"`
+		}
+		if err := json.Unmarshal(level.TriggerPlan.Config, &trigger); err != nil {
+			return execution.ScheduleSpec{}, nil, err
+		}
+		if trigger.StepSeconds != step {
+			return mismatch(fmt.Sprintf("level_%d_step_seconds", level.Definition.LevelID), trigger.StepSeconds)
+		}
+	}
+	return spec, nil, nil
 }
 
 func supportedAlgorithmKind(kind string) bool {
