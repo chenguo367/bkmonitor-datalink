@@ -66,19 +66,42 @@ type countingProbe struct {
 	missing map[string]struct{}
 	err     error
 	asked   [][]execution.ObjectDigest
-	// hold, when set, blocks the next call until released, once; entered
-	// is closed when that call begins.
+	// hold, when set, blocks the next call that asks about holdFor until
+	// released, once; entered is closed when that call begins. Keyed on an
+	// object so the hold catches the call it means: an install probes its
+	// own view in the same stretch as a heartbeat re-probes the old one, and
+	// a hold on "the next call" caught whichever came first. The held call
+	// also gives up with its context, as the catalog's own read does, so a
+	// test that fails while holding it does not leave the client stuck in
+	// its cleanup until the test binary times out.
 	hold, entered chan struct{}
+	holdFor       string
 }
 
-func (probe *countingProbe) MissingObjects(_ context.Context, objects []execution.ObjectDigest, contexts []execution.OutputContextDigest) (int, error) {
+func asksAbout(objects []execution.ObjectDigest, digest string) bool {
+	for _, object := range objects {
+		if string(object) == digest {
+			return true
+		}
+	}
+	return false
+}
+
+func (probe *countingProbe) MissingObjects(ctx context.Context, objects []execution.ObjectDigest, contexts []execution.OutputContextDigest) (int, error) {
 	probe.mu.Lock()
-	hold, entered := probe.hold, probe.entered
-	probe.hold, probe.entered = nil, nil
+	var hold, entered chan struct{}
+	if probe.hold != nil && (probe.holdFor == "" || asksAbout(objects, probe.holdFor)) {
+		hold, entered = probe.hold, probe.entered
+		probe.hold, probe.entered, probe.holdFor = nil, nil, ""
+	}
 	probe.mu.Unlock()
 	if hold != nil {
 		close(entered)
-		<-hold
+		select {
+		case <-hold:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
 	}
 	probe.mu.Lock()
 	defer probe.mu.Unlock()
@@ -642,7 +665,9 @@ func TestTheWorkerReprobesTheInstalledViewOnTheHeartbeat(t *testing.T) {
 	}
 	hold, entered := make(chan struct{}), make(chan struct{})
 	probe.mu.Lock()
-	probe.hold, probe.entered = hold, entered
+	// Only a re-probe of revision 1 asks about obj-2; revision 2's install
+	// asks about obj-2b and must not be the call that is held.
+	probe.hold, probe.entered, probe.holdFor = hold, entered, "obj-2"
 	probe.missing["obj-2"] = struct{}{}
 	probe.mu.Unlock()
 	// The next heartbeat's re-probe blocks; the Leader answers that
@@ -661,7 +686,12 @@ func TestTheWorkerReprobesTheInstalledViewOnTheHeartbeat(t *testing.T) {
 		return out
 	}
 	leader.mu.Unlock()
-	<-entered
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		close(hold)
+		t.Fatal("no heartbeat re-probed revision 1 within five seconds")
+	}
 	eventually(t, "revision 2 is installed while the re-probe of 1 is held", func() bool {
 		view, ok := client.Installed()
 		return ok && view.Version.Revision == 2
