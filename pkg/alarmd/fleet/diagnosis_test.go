@@ -352,6 +352,22 @@ func TestAFailedForwardToALeaderIsARefusalNotALocalPage(t *testing.T) {
 	}
 }
 
+// The first read serves every request waiting on it, so a first request
+// that went away does not fail it: the read runs on its own bound.
+func TestADiagnosisReadIsNotCancelledWithTheRequestThatStartedIt(t *testing.T) {
+	cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}}
+	started, cancelled := context.WithCancel(context.Background())
+	var readErr error
+	entry, _ := cache.get(started, "d-1", now, func(ctx context.Context) *diagnosisEntry {
+		cancelled()
+		readErr = ctx.Err()
+		return &diagnosisEntry{universe: []string{"1"}, digest: "x", readAt: now, expires: now.Add(time.Minute)}
+	})
+	if readErr != nil || entry.readError != "" || len(entry.universe) != 1 {
+		t.Fatalf("read ctx err %v entry %+v, want the read unaffected by the request's cancellation", readErr, entry)
+	}
+}
+
 func hasPart(row DiagnosisRow, what, reason string) bool {
 	for _, part := range row.UnknownParts {
 		if part.What == what && part.Reason == reason {
