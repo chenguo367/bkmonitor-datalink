@@ -142,11 +142,16 @@ const strategyStandingForwardTimeout = 2 * time.Second
 // without an endpoint -- is the view stream's word for which, and the
 // caller carries it in the refusal.
 func leaderForwarder(discovery leaderDiscovery, replica string, client *http.Client) fleet.LeaderForward {
+	return leaderForwarderWithin(discovery, replica, client, strategyStandingForwardTimeout)
+}
+
+// leaderForwarderWithin is leaderForwarder with the hop's own bound.
+func leaderForwarderWithin(discovery leaderDiscovery, replica string, client *http.Client, timeout time.Duration) fleet.LeaderForward {
 	if discovery == nil {
 		return nil
 	}
 	if client == nil {
-		client = &http.Client{Timeout: strategyStandingForwardTimeout}
+		client = &http.Client{Timeout: timeout}
 	}
 	return func(response http.ResponseWriter, request *http.Request) (bool, string) {
 		leader, miss, err := discovery.Leader(request.Context())
@@ -159,16 +164,16 @@ func leaderForwarder(discovery leaderDiscovery, replica string, client *http.Cli
 		if _, _, splitErr := net.SplitHostPort(leader.Endpoint); splitErr != nil {
 			return false, viewstream.MissLeaderNoEndpoint
 		}
-		ctx, cancel := context.WithTimeout(request.Context(), strategyStandingForwardTimeout)
+		ctx, cancel := context.WithTimeout(request.Context(), timeout)
 		defer cancel()
 		forwarded, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+leader.Endpoint+request.URL.RequestURI(), nil)
 		if err != nil {
-			return false, "FORWARD_FAILED"
+			return false, fleet.ForwardFailed
 		}
 		forwarded.Header.Set(fleet.ForwardedHeader(), replica)
 		reply, err := client.Do(forwarded)
 		if err != nil {
-			return false, "FORWARD_FAILED"
+			return false, fleet.ForwardFailed
 		}
 		defer reply.Body.Close()
 		if contentType := reply.Header.Get("Content-Type"); contentType != "" {
