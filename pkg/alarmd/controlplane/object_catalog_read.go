@@ -153,7 +153,9 @@ type objectReadFlights struct {
 // lookup or store it makes. The process configures it once, before anything
 // reads; a caller that configures it again while the loops run -- a test
 // dropping what this process has kept, to read a lost object from Redis --
-// used to race every reader of the field.
+// used to race every reader of the field. A read already in flight when the
+// cache is replaced stores into the new one: the key is the content's digest,
+// so what it stores is right, and the new cache simply does not start empty.
 func (repository *RedisCatalogRepository) ConfigureObjectCache(maxEntries, maxBytes int) error {
 	if repository == nil || maxEntries <= 0 || maxBytes <= 0 {
 		return errors.New("alarmd controlplane: invalid catalog object cache budget")
