@@ -110,8 +110,17 @@ var reasonCatalogV2 = map[string]ReasonDefinitionV2{
 	// Observation only: a deferral never reaches a receipt or a query result,
 	// it just says the Slot will come back when its window is in.
 	ReasonQueryNotReady: {ReasonQueryNotReady, ReasonClassRetryable, ReasonDomainObservation},
+	// A Level may be unavailable for it, so it is a Receipt reason too. The
+	// access layer hands it to every consumer of a query a recovery ran out of
+	// time to send, and a consumer of a dependency query is a Level whose
+	// primary query may well have answered: that Level has a record, makes a
+	// Detect fact, and the fact carries this reason. Without the Receipt
+	// domain the trigger refused that fact and failed the whole Slot with
+	// TRIGGER_INVARIANT, on replays only, because only a recovery has a
+	// deadline to run out of.
 	ReasonExecutionBudgetExhausted: {
-		ReasonExecutionBudgetExhausted, ReasonClassCoverage, ReasonDomainQueryResult | ReasonDomainObservation,
+		ReasonExecutionBudgetExhausted, ReasonClassCoverage,
+		ReasonDomainQueryResult | ReasonDomainReceipt | ReasonDomainObservation,
 	},
 	ReasonSnapshotUnavailable: {ReasonSnapshotUnavailable, ReasonClassCoverage, ReasonDomainObservation},
 	ReasonGapSkipped:          {ReasonGapSkipped, ReasonClassCoverage, ReasonDomainObservation},
@@ -231,4 +240,18 @@ func IsKnownReasonV2(code string) bool {
 func ReasonAllowedForV2(code string, domain ReasonDomainsV2) bool {
 	definition, ok := LookupReasonV2(code)
 	return ok && definition.Domains.Has(domain)
+}
+
+// LevelUnavailableReasonV2 says whether a Level may be UNAVAILABLE for this
+// reason: whether a Detect fact may carry it into the trigger, and so into
+// the Level's outcome and the gap guard it proposes.
+//
+// A Detect fact's reason has two ways in. A detector declares the reasons it
+// may fail with, and the compiler refuses a declaration outside this set; an
+// input binding carries the reason the access layer gave it, and nothing
+// checked those until the trigger did, at run time, by failing the Slot. One
+// predicate for both, so the compiler, the trigger and a test of what the
+// access layer stamps all ask the same question.
+func LevelUnavailableReasonV2(code string) bool {
+	return ReasonAllowedForV2(code, ReasonDomainReceipt|ReasonDomainObservation)
 }

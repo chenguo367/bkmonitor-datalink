@@ -665,8 +665,7 @@ func validateAlgorithmCompileResult(
 	sort.Strings(reasons)
 	canonicalReasons := reasons[:0]
 	for _, reason := range reasons {
-		if !contract.ReasonAllowedForV2(reason, contract.ReasonDomainReceipt) ||
-			!contract.ReasonAllowedForV2(reason, contract.ReasonDomainObservation) {
+		if !contract.LevelUnavailableReasonV2(reason) {
 			return fmt.Errorf("strategy: invalid compiler output for %s@%d", raw.Type, raw.Version)
 		}
 		if len(canonicalReasons) == 0 || canonicalReasons[len(canonicalReasons)-1] != reason {

@@ -1103,8 +1103,9 @@ func TestReasonCatalogV2IsFrozenAndDomainAware(t *testing.T) {
 	}
 	executionBudget, ok := LookupReasonV2(ReasonExecutionBudgetExhausted)
 	if !ok || executionBudget.Class != ReasonClassCoverage ||
-		executionBudget.Domains != ReasonDomainQueryResult|ReasonDomainObservation ||
-		!ReasonAllowedForV2(ReasonExecutionBudgetExhausted, ReasonDomainQueryResult) {
+		executionBudget.Domains != ReasonDomainQueryResult|ReasonDomainReceipt|ReasonDomainObservation ||
+		!ReasonAllowedForV2(ReasonExecutionBudgetExhausted, ReasonDomainQueryResult) ||
+		!LevelUnavailableReasonV2(ReasonExecutionBudgetExhausted) {
 		t.Fatalf("execution budget reason definition = (%#v, %t)", executionBudget, ok)
 	}
 	for _, reason := range []string{
