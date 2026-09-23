@@ -141,7 +141,7 @@ func TestTheCapabilityLineNamesTheKindsUnderItAndNotOneCauseForAll(t *testing.T)
 	if line.Strategies != 7 || len(line.Groups) != 3 {
 		t.Fatalf("line = %+v, want 7 strategies in 3 groups", line)
 	}
-	if want := "7 条策略这个部署跑不了（3 种原因）——部署参数不够 1 条、本构建不支持 5 条、原因待查 1 条；处理办法按原因组看"; line.Line != want {
+	if want := "7 条策略这个部署跑不了（3 种原因）——本构建不支持 5 条、策略定义超出护栏 1 条、原因待查 1 条；处理办法按原因组看"; line.Line != want {
 		t.Errorf("line = %q\nwant %q", line.Line, want)
 	}
 	if strings.Contains(line.Line, "快照保留期") {
@@ -164,8 +164,12 @@ func TestTheCapabilityLineNamesTheKindsUnderItAndNotOneCauseForAll(t *testing.T)
 			t.Errorf("%s words = %+v, want kind %s", reason, words, kind)
 		}
 	}
-	if retention := words["SNAPSHOT_RETENTION_INSUFFICIENT"]; retention == nil || retention.Kind != WithheldDeploymentParameter || !strings.Contains(retention.Next, "快照保留期") {
-		t.Errorf("retention words = %+v, want the deployment parameter", retention)
+	// Past the state store's own ceiling the retention cannot be raised by
+	// anyone but the strategy: the words send the reader to its cadence and
+	// say that a deployment parameter will not help.
+	if retention := words["SNAPSHOT_RETENTION_INSUFFICIENT"]; retention == nil || retention.Kind != WithheldStrategyDefinition ||
+		!strings.Contains(retention.Next, "评估周期") || !strings.Contains(retention.Next, "调部署参数没有用") {
+		t.Errorf("retention words = %+v, want the strategy's cadence and no deployment parameter", retention)
 	}
 	if unknown := words["NEW_WORD_NOBODY_EXPLAINED"]; unknown == nil || unknown.Kind != WithheldUnknownReason || !strings.Contains(unknown.What, "NEW_WORD_NOBODY_EXPLAINED") {
 		t.Errorf("unknown reason words = %+v, want the reason named as unknown", unknown)

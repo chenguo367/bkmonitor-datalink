@@ -333,6 +333,15 @@ type Catalog struct {
 	// the strategy documents. It is the only place the whole compiled
 	// population is in hand at once, which is what makes it a measurement.
 	Retention CatalogRetention
+	// ObjectRetention is how long this build's content objects and output
+	// contexts are kept once no manifest names them any more: the longest a
+	// frozen Slot of any of its Plans may still read them by content, which a
+	// Plan evaluated every sixty hours needs for sixty hours. Decided by the
+	// deployment's admission, which knows the Slot timings; zero keeps the
+	// catalog TTL. It is stored beside the manifest, not in it: the manifest
+	// is decoded strictly, and a field an older reader does not know would
+	// make it refuse the whole publication.
+	ObjectRetention time.Duration
 }
 
 // CatalogRetention sums the retained window of every Level the runtime

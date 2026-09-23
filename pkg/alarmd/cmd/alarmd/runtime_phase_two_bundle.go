@@ -1377,15 +1377,16 @@ func phaseTwoPublicationDelayAllowance(cfg config.Config) time.Duration {
 	return cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration() + 2*cfg.PhaseTwo.Control.RefreshInterval.Duration()
 }
 
-// phaseTwoMaxSupportedEvaluationInterval is the longest evaluation cadence a
-// Plan may have and still be served. It is stated rather than discovered
-// because it decides how long a published Catalog has to be kept: a Plan
-// evaluated once a day is still owed its Snapshot a day later, so a
-// deployment that keeps Catalogs for a day cannot serve one.
-//
-// A day is the cadence the platform's own strategies reach. It is not a
-// limit anybody configures; it is the number the retention is derived from,
-// and a Plan beyond it is refused with this bound named.
+// phaseTwoMaxSupportedEvaluationInterval is the cadence the catalog keys other
+// than content -- manifests, timelines, the active set -- are kept for. It is
+// no longer the longest cadence a Plan may have: a Plan evaluated every sixty
+// hours reads its content by digest when its Slot completes, and the content
+// objects are kept for as long as the publication's longest Plan needs
+// (Catalog.ObjectRetention, bounded by phaseTwoObjectRetentionLimit). It was
+// the only bound once, and it refused a sixty-hour strategy for a retention
+// the deployment could have given it at the cost of a few megabytes, where
+// stretching every catalog key would have cost a quarter of a gigabyte in
+// manifests alone.
 const phaseTwoMaxSupportedEvaluationInterval = 24 * time.Hour
 
 // phaseTwoCatalogRetention is how long published Catalogs are kept: long
@@ -1401,6 +1402,16 @@ const phaseTwoMaxSupportedEvaluationInterval = 24 * time.Hour
 func phaseTwoCatalogRetention(cfg config.Config) time.Duration {
 	supported := phaseTwoMaxSupportedEvaluationInterval - cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
 	return maxDuration(cfg.PhaseTwo.Control.CatalogTTL.Duration(), phaseTwoSnapshotMinimumRetention(cfg, supported))
+}
+
+// phaseTwoObjectRetentionLimit is the longest a Plan's content is kept for
+// it: the state store's own ceiling on how long a series' state may live. A
+// Plan whose frozen Slot would need its content past it could not keep its
+// state across one of its own periods either, so it is refused by name here
+// rather than admitted to run on state that expires between its rounds. Never
+// below the catalog retention, which every Plan up to a day's cadence needs.
+func phaseTwoObjectRetentionLimit(cfg config.Config) time.Duration {
+	return maxDuration(cfg.Redis.MaxTTL.Duration(), phaseTwoCatalogRetention(cfg))
 }
 
 func phaseTwoSnapshotMinimumRetention(cfg config.Config, queryDeadlineOffset time.Duration) time.Duration {
@@ -1425,14 +1436,18 @@ func phaseTwoSnapshotMinimumRetention(cfg config.Config, queryDeadlineOffset tim
 // does not follow a Plan; a Plan that asks for more than there is, is the Plan
 // that cannot run.
 //
-// Withholding names both numbers, because the two readings are different
-// actions: shorten the strategy's evaluation cadence, or raise the deployment's
-// retention. A refusal saying only that the Catalog cannot be retained left the
-// reader to work out which of those it was.
+// A Plan's retention need is met up to phaseTwoObjectRetentionLimit by keeping
+// its content longer, and only a Plan past that limit is withheld, with both
+// numbers named. The limit is the state store's own ceiling, so the action is
+// the strategy's -- a shorter cadence -- and not a deployment parameter.
 func phaseTwoCatalogRetentionAdmission(cfg config.Config) controlplane.CatalogAdmission {
 	return func(catalog controlplane.Catalog) (controlplane.Catalog, error) {
 		reserve := cfg.PhaseTwo.Access.DownstreamExecutionReserve.Duration()
 		retention := phaseTwoCatalogRetention(cfg)
+		limit := phaseTwoObjectRetentionLimit(cfg)
+		// The longest any accepted Plan's frozen Slot may still read its
+		// content, which is what the content objects are then kept for.
+		objectRetention := retention
 		// One record per withheld source, in the order they were met, because
 		// the dispositions are a partition: every object counted once. The
 		// compiler has already recorded an ACCEPTED for each source it
@@ -1467,11 +1482,13 @@ func phaseTwoCatalogRetentionAdmission(cfg config.Config) controlplane.CatalogAd
 						fmt.Sprintf("completion_offset=%s downstream_execution_reserve=%s", completion, reserve))
 					continue
 				}
-				if required := phaseTwoSnapshotMinimumRetention(cfg, offset); retention < required {
+				required := phaseTwoSnapshotMinimumRetention(cfg, offset)
+				if required > limit {
 					withhold(plan, contract.ReasonSnapshotRetentionInsufficient,
-						fmt.Sprintf("required_retention=%s catalog_retention=%s", required, retention))
+						fmt.Sprintf("required_retention=%s retention_limit=%s", required, limit))
 					continue
 				}
+				objectRetention = maxDuration(objectRetention, required)
 				kept = append(kept, plan)
 			}
 			if len(kept) == 0 {
@@ -1484,6 +1501,7 @@ func phaseTwoCatalogRetentionAdmission(cfg config.Config) controlplane.CatalogAd
 			groups = append(groups, group)
 		}
 		catalog.QueryGroups = groups
+		catalog.ObjectRetention = objectRetention
 		if len(withheld) == 0 {
 			return catalog, nil
 		}
