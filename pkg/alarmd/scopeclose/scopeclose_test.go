@@ -340,3 +340,20 @@ func TestFactsAreBoundedPrefixes(t *testing.T) {
 		t.Fatalf("facts after the decision = %+v", facts)
 	}
 }
+
+// Rotation is what keeps one stuck close from starving the rest: a close
+// that failed stays for the next step, and the next step starts after it
+// rather than at the head again.
+func TestTheNextStepStartsAfterTheLastDecided(t *testing.T) {
+	first, second := fp(1), fp(2)
+	f := newFixture(openSet(ownSrc, first, second), true, func(o *Options) { o.Batch = 1 })
+	f.writer.fail = errors.New("broker down")
+	f.slot(1700000000, drop(first, 0), drop(second, 0))
+	f.slot(1700000060, drop(first, 0), drop(second, 0))
+	f.writer.fail = nil
+	f.slot(1700000120)
+	sent := f.writer.sent()
+	if len(sent) != 1 || sent[0].Fingerprint != second {
+		t.Fatalf("sent %v, want the one after the failed head", sent)
+	}
+}
