@@ -58,6 +58,7 @@ func buildSeriesAdmission(
 	recorder *metric.Recorder,
 	logger *observability.Logger,
 	hostStatus *dynamicHostStatusFilter,
+	wait startupWaiter,
 ) (*admission.Chain, *cmdbcache.Store, error) {
 	// The platform states its key prefix once and both of its caches hang off
 	// it, so the CMDB cache key comes from that one spelling.
@@ -77,8 +78,10 @@ func buildSeriesAdmission(
 	// worker that started without one would decide every scoped strategy's
 	// series to be out of scope and silently stop alerting for them. This is
 	// not a new dependency to fail on: the cache is on the database alarmd
-	// already needs to run at all.
-	if err := store.Refresh(ctx); err != nil {
+	// already needs to run at all. A cache that does not answer is waited on
+	// in place: the replica stays not ready, which is the same "no
+	// evaluation without an index" this line exists for.
+	if err := wait.await(ctx, "cmdb_index", store.Refresh); err != nil {
 		return nil, nil, fmt.Errorf("alarmd: build the CMDB host index the target filter decides on: %w", err)
 	}
 	publishCMDBIndexHealth(recorder, store)

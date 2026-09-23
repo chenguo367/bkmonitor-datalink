@@ -536,6 +536,8 @@ type phaseTwoWorkerBundle struct {
 	mu             sync.RWMutex
 	queryGroups    []execution.QueryGroupIdentity
 	assigned       map[execution.QueryGroupIdentity]struct{}
+	// assignmentRead is set by the first Assignment applied; see updateReadiness.
+	assignmentRead bool
 	runners        map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle
 	// scheduledRunners is the owned Runner set in Query Group order, rebuilt
 	// only after that set changes. The dispatcher reads it on every pass of its
@@ -843,7 +845,7 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 		Component: observability.ComponentRuntime, Stage: observability.StageConfigLoaded,
 		Result: observability.ResultSuccess, RuntimeConfig: bundle.runtimeConfig,
 	})
-	if err := bundle.register(ctx, ownership.WorkerStarting); err != nil {
+	if err := bundle.registerAtStartup(ctx, ownership.WorkerStarting); err != nil {
 		return err
 	}
 	leader, err := bundle.tryAcquireControlLeader(ctx)
@@ -888,7 +890,7 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 		return err
 	}
 	bundle.readPersistedSourceSuccess(ctx)
-	if err := bundle.register(ctx, ownership.WorkerReady); err != nil {
+	if err := bundle.registerAtStartup(ctx, ownership.WorkerReady); err != nil {
 		return err
 	}
 	if !controlFactsAvailable {
@@ -906,14 +908,50 @@ func (bundle *phaseTwoWorkerBundle) Start(ctx context.Context) error {
 	bundle.mu.RUnlock()
 	if leader {
 		if err := bundle.dependencies.Ownership.PublishAssignments(ctx, queryGroups, bundle.dependencies.Now()); err != nil {
-			return fmt.Errorf("phase-two publish Assignment: %w", err)
+			if !errors.Is(err, ownership.ErrStaleFence) {
+				return bundle.startWithoutAssignment(ctx, fmt.Errorf("phase-two publish Assignment: %w", err))
+			}
+			bundle.markControlFollower(err)
 		}
 	}
 	assigned, err := bundle.dependencies.Ownership.AssignedQueryGroups(ctx, queryGroups)
 	if err != nil {
-		return fmt.Errorf("phase-two read Assignment: %w", err)
+		return bundle.startWithoutAssignment(ctx, fmt.Errorf("phase-two read Assignment: %w", err))
 	}
 	if err := bundle.applyAssignment(ctx, assigned); err != nil {
+		return err
+	}
+	bundle.startMaintenance()
+	bundle.updateReadiness()
+	return nil
+}
+
+// registerAtStartup is the reconcile tick's handling of a registration write,
+// applied at startup: a write that fails is the renewal loop's to retry, and
+// the replica carries on unregistered, which is how it is given no Query
+// Group meanwhile. Ending startup here turned a Redis failover that crossed a
+// rollout into a crash loop.
+func (bundle *phaseTwoWorkerBundle) registerAtStartup(ctx context.Context, readiness ownership.AssignmentReadiness) error {
+	err := bundle.register(ctx, readiness)
+	switch {
+	case err == nil:
+		return nil
+	case ctx.Err() != nil:
+		return ctx.Err()
+	case isPhaseTwoInvariantError(err):
+		return err
+	}
+	bundle.observeRegistrationRenewal(observability.ResultFailed, err)
+	bundle.markControlDependencyDegraded()
+	return nil
+}
+
+// startWithoutAssignment ends startup without an Assignment when the
+// Assignment could not be published or read, as the reconcile tick does: the
+// replica is not ready while it holds none, and the first tick publishes and
+// reads it again. Invariant violations still end startup.
+func (bundle *phaseTwoWorkerBundle) startWithoutAssignment(ctx context.Context, err error) error {
+	if err := bundle.scopeControlError(ctx, observability.ComponentOwnership, observability.StageAssignmentAcquired, err); err != nil {
 		return err
 	}
 	bundle.startMaintenance()
@@ -2541,6 +2579,7 @@ func (bundle *phaseTwoWorkerBundle) applyAssignment(
 		return errPhaseTwoWorkerDraining
 	}
 	bundle.assigned = desired
+	bundle.assignmentRead = true
 	removed := make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle)
 	for queryGroup, lifecycle := range bundle.runners {
 		if _, keep := desired[queryGroup]; keep {
@@ -2826,7 +2865,10 @@ func (bundle *phaseTwoWorkerBundle) setOwnedQueryGroupsLocked() {
 
 func (bundle *phaseTwoWorkerBundle) updateReadiness() {
 	bundle.mu.RLock()
-	assignmentReady := !bundle.draining && !bundle.closed && len(bundle.runners) == len(bundle.assigned)
+	// A replica that has not yet read its Assignment holds none, which is not
+	// the same as having been assigned none: startup that could not read it
+	// waits for the tick that does, not ready meanwhile.
+	assignmentReady := bundle.assignmentRead && !bundle.draining && !bundle.closed && len(bundle.runners) == len(bundle.assigned)
 	if assignmentReady {
 		for queryGroup := range bundle.assigned {
 			if _, open := bundle.runners[queryGroup]; !open {
