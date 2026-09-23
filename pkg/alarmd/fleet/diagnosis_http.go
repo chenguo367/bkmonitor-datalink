@@ -87,6 +87,10 @@ type diagnosisEntry struct {
 	ready chan struct{}
 }
 
+// DiagnosisReadTimeout bounds one diagnosis's first read of the universe and
+// the fleet's snapshots, inside the channel's own request deadline.
+const DiagnosisReadTimeout = 2500 * time.Millisecond
+
 // DiagnosisCacheEntries bounds the diagnoses kept at once: a few people
 // diagnosing the same deployment each keep their own read, and a fifth
 // evicts the entry closest to expiring.
@@ -125,7 +129,13 @@ func (cache *diagnosisCache) get(ctx context.Context, id string, at time.Time, r
 	cache.entries[id] = placeholder
 	cache.mu.Unlock()
 
-	filled := read(ctx)
+	// The read serves every request waiting on this placeholder, so it is
+	// not bound to the one that started it: a first request that went away
+	// would fail the others. It keeps the first request's values and its
+	// own bound.
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DiagnosisReadTimeout)
+	filled := read(readCtx)
+	cancel()
 	placeholder.universe, placeholder.digest, placeholder.readAt = filled.universe, filled.digest, filled.readAt
 	placeholder.view, placeholder.readError, placeholder.expires = filled.view, filled.readError, filled.expires
 	close(placeholder.ready)
