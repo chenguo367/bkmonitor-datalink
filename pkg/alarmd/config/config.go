@@ -25,6 +25,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 )
 
@@ -384,20 +385,30 @@ func (c Config) OutputProtocol() string {
 	return c.PhaseTwo.Output.protocol()
 }
 
-// NoDataTrackingHorizonSeconds is the deployment's default horizon for how
-// long one absent group stays tracked, and whether it set one at all.
+// NoDataTrackingHorizonSeconds is the horizon the deployment's values state,
+// and whether they state one at all.
 //
-// A deployment states a horizon by writing the leaf, and states that it has
-// none by leaving it out; the value itself never means "no horizon", which is
-// why this reports presence separately instead of returning a zero that would
-// have to carry both. Absent, absence stays tracked indefinitely - the
-// behaviour every Plan had before the horizon existed. A strategy stating its
-// own overrides it.
+// It is the values layer and nothing more. The effective platform horizon is
+// resolved by the platform settings copy: a dynamic value, else this one,
+// else the contract's one day. Absent here therefore no longer means "track
+// indefinitely" - that reading is withdrawn; the approved contract gives every
+// group a finite horizon by default. A strategy stating its own overrides all
+// three.
 func (c Config) NoDataTrackingHorizonSeconds() (int64, bool) {
 	if c.PhaseTwo.NoData.TrackingHorizonSeconds == nil {
 		return 0, false
 	}
 	return *c.PhaseTwo.NoData.TrackingHorizonSeconds, true
+}
+
+// PlatformSettingsLayer is the deployment's layer of the platform settings:
+// the platform_settings group, and the no-data horizon from its own leaf.
+func (c Config) PlatformSettingsLayer() platformsettings.Layer {
+	layer := c.PhaseTwo.PlatformSettings.Layer()
+	if horizon, stated := c.NoDataTrackingHorizonSeconds(); stated {
+		layer.NoDataTrackingHorizonSeconds = &horizon
+	}
+	return layer
 }
 
 // CMDBCacheRedis is where the platform's host cache is read from.

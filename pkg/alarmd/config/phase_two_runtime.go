@@ -96,7 +96,7 @@ type PhaseTwoPlatformSettingsConfig struct {
 
 // Layer is the deployment layer as the platformsettings copy resolves it.
 func (c PhaseTwoPlatformSettingsConfig) Layer() platformsettings.Layer {
-	layer := platformsettings.Layer{IsAccessBKData: c.IsAccessBKData}
+	layer := platformsettings.Layer{IsAccessBKData: c.IsAccessBKData, Origin: platformsettings.HorizonSourceValues}
 	if c.HostDisableMonitorStates != nil {
 		values := append([]string{}, *c.HostDisableMonitorStates...)
 		layer.HostDisableMonitorStates = &values
@@ -370,11 +370,11 @@ type PhaseTwoNoDataConfig struct {
 	// running. Present, it must be at least one second, and both zero and a
 	// negative are refused by name rather than read as an intention.
 	//
-	// Absence leaves absence tracked indefinitely, which is what every Plan
-	// did before the horizon existed, so a deployment that says nothing keeps
-	// the behaviour it has. The asymmetry is deliberate: a horizon stops
-	// no-data alerts once it passes, so one arrived at by default rather than
-	// by decision would silence a genuine outage and look like quiet.
+	// Absent, the platform settings copy resolves the horizon: a dynamic
+	// value published under base_config.domains.strategy, else the approved
+	// contract's one day. An earlier ruling had absence mean "track
+	// indefinitely"; it is withdrawn in favour of the contract, which gives
+	// every group a finite horizon by default.
 	TrackingHorizonSeconds *int64 `yaml:"tracking_horizon_seconds,omitempty"`
 }
 

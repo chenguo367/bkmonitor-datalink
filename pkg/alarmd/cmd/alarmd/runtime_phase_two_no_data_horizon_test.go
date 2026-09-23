@@ -19,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 )
 
 // The horizon an operator wrote in the config reaches a Plan the running
@@ -37,24 +38,36 @@ import (
 // execute.
 func TestTheConfiguredNoDataHorizonReachesACompiledPlan(t *testing.T) {
 	const horizon = 600
-	if got := noDataHorizonOfFirstDuePlan(t, horizon); got != horizon {
+	if got := noDataHorizonOfFirstDuePlan(t, horizon, ""); got != horizon {
 		t.Fatalf("the compiled Plan carries horizon %d, want the configured %d. The value is read from "+
 			"phase_two.no_data.tracking_horizon_seconds and has to survive every step between there and the "+
 			"Slot contract, which is where detection reads it", got, horizon)
 	}
 
-	// The control. A configured zero and an unconfigured deployment must reach
-	// the same place, and without this the case above passes on an assembly
-	// that hands every Plan a horizon from somewhere other than the config.
-	if got := noDataHorizonOfFirstDuePlan(t, 0); got != 0 {
-		t.Fatalf("a deployment configuring no horizon compiled %d; absence stays tracked indefinitely until "+
-			"someone decides otherwise, because a horizon stops no-data alerts once it passes", got)
+	// The control, and the contract's default: a deployment configuring no
+	// horizon compiles one day. Without this the case above passes on an
+	// assembly that hands every Plan the configured number from anywhere.
+	if got := noDataHorizonOfFirstDuePlan(t, 0, ""); got != 86400 {
+		t.Fatalf("a deployment configuring no horizon compiled %d, want the contract's one day (86400): "+
+			"every group gets a finite horizon unless someone states another", got)
+	}
+
+	// The dynamic layer, as the platform's distribution publishes it, over
+	// the deployment's values: 3600 published beats 600 configured, all the
+	// way into the Plan the Slot runs.
+	if got := noDataHorizonOfFirstDuePlan(t, horizon, "3600"); got != 3600 {
+		t.Fatalf("with 3600 published under base_config.domains.strategy the compiled Plan carries %d, "+
+			"want the dynamic value over the configured %d", got, horizon)
 	}
 }
 
 // noDataHorizonOfFirstDuePlan opens the production bundle against a config
 // stating this horizon and returns the horizon frozen into the first due Plan.
-func noDataHorizonOfFirstDuePlan(t *testing.T, horizon int64) int64 {
+//
+// published, when not empty, is the raw JSON the platform's distribution
+// carries for the dynamic horizon; the distribution is then read from the
+// strategy cache's own Redis.
+func noDataHorizonOfFirstDuePlan(t *testing.T, horizon int64, published string) int64 {
 	t.Helper()
 	ctx := context.Background()
 	fixture := startCutoverFixtureWith(t,
@@ -64,9 +77,27 @@ func noDataHorizonOfFirstDuePlan(t *testing.T, horizon int64) int64 {
 			if horizon != 0 {
 				cfg.PhaseTwo.NoData.TrackingHorizonSeconds = &horizon
 			}
+			if published != "" {
+				connection := cfg.StrategySourceRedis()
+				cfg.PlatformCache.DynamicConfig = &connection
+			}
 		},
 		observability.Discard(observability.ComponentRuntime),
-		enableNoDataOnCutoverStrategies,
+		func(ctx context.Context, client *redis.Client, cfg config.Config) {
+			enableNoDataOnCutoverStrategies(ctx, client, cfg)
+			if published == "" {
+				return
+			}
+			prefix := cfg.PhaseTwo.PlatformSettings.RedisKeyPrefix
+			key := platformsettings.ConfigKey(prefix, platformsettings.Tenant,
+				platformsettings.FieldNoDataTrackingHorizonSeconds.DBKey())
+			if err := client.Set(ctx, key, published, 0).Err(); err != nil {
+				panic("no_data horizon fixture: publish " + key + ": " + err.Error())
+			}
+			if err := client.Set(ctx, platformsettings.RevisionKey(prefix), "horizon-test", 0).Err(); err != nil {
+				panic("no_data horizon fixture: publish revision: " + err.Error())
+			}
+		},
 	)
 
 	schedule, err := fixture.production.dependencies.Catalog.ReadInitialFrozenSchedule(ctx, fixture.queryGroup)

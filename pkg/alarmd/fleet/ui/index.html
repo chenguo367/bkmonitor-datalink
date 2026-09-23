@@ -1244,8 +1244,8 @@ var WIRE_FORMAT = {
 // the Go list. PLATFORM is the deployment's leaf; a strategy stating exactly
 // the platform's value reads as PLATFORM until the platform's changes.
 var HORIZON_SOURCE = {
-  NONE: '没有期限（无限期追踪，特性未开）',
-  PLATFORM: '平台默认',
+  NONE: '没有期限（无限期追踪：旧编译的 Plan，重编译后会带上平台期限）',
+  PLATFORM: '平台设定',
   STRATEGY: '策略自己设的',
   UNKNOWN: '本副本没被告知平台默认，说不清来源'
 };
@@ -1254,6 +1254,14 @@ var HORIZON_SOURCE = {
 // a Plan compiled before that word existed or a line from an older Worker:
 // the value compared with the platform's leaf, which reads a strategy set to
 // exactly the platform's value as PLATFORM until the platform's moves.
+// Which layer the platform's horizon came from, for a PLATFORM row. Held to
+// platformsettings.HorizonSources: the contract's one-day default, the
+// deployment's values, or the dynamic configuration published by the base.
+var HORIZON_LAYER = {
+  DEFAULT: '默认 1 天',
+  VALUES: '部署 values',
+  DYNAMIC: '动态配置'
+};
 var HORIZON_SOURCE_BASIS = {
   FROZEN: '编译时冻进 Plan 的',
   INFERRED_BY_VALUE: '按值推断的（旧编译或旧副本：策略的值等于平台叶子就读作平台），重编译后变为冻结'
@@ -1268,6 +1276,8 @@ function noDataTrackingWords(tracking) {
   parts.push('策略 ' + tracking.plan.strategy_id
     + '：期限 ' + (tracking.horizon_seconds ? elapsedLabel(tracking.horizon_seconds) : '无')
     + '（' + (HORIZON_SOURCE[tracking.horizon_source] || tracking.horizon_source)
+    + (tracking.horizon_source === 'PLATFORM' && latestDeployment && latestDeployment.no_data_horizon
+        ? '：' + (HORIZON_LAYER[latestDeployment.no_data_horizon.source] || latestDeployment.no_data_horizon.source) : '')
     + (tracking.horizon_source !== 'NONE' && tracking.horizon_source_basis
         ? '，来源' + (HORIZON_SOURCE_BASIS[tracking.horizon_source_basis] || tracking.horizon_source_basis) : '')
     + '）');

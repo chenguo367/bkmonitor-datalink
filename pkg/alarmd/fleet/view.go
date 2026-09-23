@@ -1844,6 +1844,20 @@ type PlatformSettingsFacts struct {
 	// beside the mode because a decode error names the field and the value
 	// and nothing else does.
 	LastUnavailable string `json:"last_unavailable,omitempty"`
+	// NoDataTrackingHorizonSeconds is the platform no-data horizon this
+	// replica's copy resolves - the one every Plan that states none has
+	// frozen - and NoDataTrackingHorizonSource the layer it came from:
+	// DEFAULT, VALUES or DYNAMIC.
+	NoDataTrackingHorizonSeconds int64  `json:"no_data_tracking_horizon_seconds,omitempty"`
+	NoDataTrackingHorizonSource  string `json:"no_data_tracking_horizon_source,omitempty"`
+}
+
+// NoDataHorizonFacts is the platform no-data horizon as the deployment
+// resolves it, and the replica that said so.
+type NoDataHorizonFacts struct {
+	Seconds int64  `json:"seconds"`
+	Source  string `json:"source"`
+	Replica string `json:"replica"`
 }
 
 // ControlSourceFacts is what a replica says about the control plane's
@@ -2460,6 +2474,10 @@ type View struct {
 	// replica said so. Absent when no counted replica has attempted it.
 	Activation        *ActivationFacts `json:"activation,omitempty"`
 	ActivationReplica string           `json:"activation_replica,omitempty"`
+	// NoDataHorizon is the platform no-data horizon and the layer it came
+	// from, as a counted replica resolves it. Absent when no replica reports
+	// one.
+	NoDataHorizon *NoDataHorizonFacts `json:"no_data_horizon,omitempty"`
 	// Rebalance is the newest rebalance planning round any counted replica
 	// published, and RebalanceReplica which one. Newest rather than "the one
 	// that has it": a replica that stopped being the leader keeps its last
@@ -2635,6 +2653,13 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 		if snapshot.PlatformSettings != nil && snapshot.PlatformSettings.StaleBeyondBound {
 			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationPlatformSettingsStale, Replica: replica})
+		}
+		// The horizon every replica resolves from the same layers; the first
+		// counted replica that reports one speaks for the deployment, and
+		// its name travels with it so a disagreement can be traced.
+		if facts := snapshot.PlatformSettings; facts != nil && facts.NoDataTrackingHorizonSeconds > 0 && view.NoDataHorizon == nil {
+			view.NoDataHorizon = &NoDataHorizonFacts{Seconds: facts.NoDataTrackingHorizonSeconds,
+				Source: facts.NoDataTrackingHorizonSource, Replica: replica}
 		}
 		if snapshot.ControlSource != nil {
 			if snapshot.ControlSource.StaleBeyondBound {

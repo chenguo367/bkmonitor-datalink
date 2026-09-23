@@ -143,7 +143,7 @@ func TestAFrozenSeriesIsRenewedUnderTheKeyItsRecordLivesIn(t *testing.T) {
 	identity := stateIdentityV2()
 	envelopeKey, _ := RuntimeStateKeyV2("alarmd", identity)
 	framedKey, _ := RuntimeStateKeyV3("alarmd", identity)
-	ttl, err := store.runtimeTTL(testRetention())
+	ttl, err := store.runtimeTTL(testRetention(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

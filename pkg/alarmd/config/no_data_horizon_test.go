@@ -12,15 +12,16 @@ package config
 import (
 	"strings"
 	"testing"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 )
 
 // The deployment's no-data horizon is read from the key an operator writes.
 //
 // The key name is the whole interface. A setting that parses into a field
 // nothing reads, or that is read from a name the operator did not write, is
-// indistinguishable from one left at its default - and this default means
-// "track absence indefinitely", so the mistake looks exactly like a deployment
-// that chose not to set it.
+// indistinguishable from one left at its default, so the mistake looks exactly
+// like a deployment that chose not to set it.
 func TestTheNoDataHorizonIsReadFromTheKeyAnOperatorWrites(t *testing.T) {
 	loaded, err := Load(writeConfig(t, platformSettingsConfigContents("",
 		platformSettingsControlBase+"  no_data:\n    tracking_horizon_seconds: 600\n")))
@@ -33,22 +34,27 @@ func TestTheNoDataHorizonIsReadFromTheKeyAnOperatorWrites(t *testing.T) {
 			"phase_two.no_data.tracking_horizon_seconds", got, stated)
 	}
 
-	// The other answer, and it is the one that ships: a deployment saying
-	// nothing keeps tracking absence indefinitely. Without this the case above
-	// passes on a parser that returns 600 for anything, and the default the
-	// feature is off by would go unasserted.
-	//
-	// It reports absence rather than a zero because the two are different
-	// facts and only one of them is writable: this deployment set no horizon,
-	// which is not the same as having written one down as nothing.
+	if layer := loaded.PlatformSettingsLayer(); layer.NoDataTrackingHorizonSeconds == nil ||
+		*layer.NoDataTrackingHorizonSeconds != 600 || layer.Origin != platformsettings.HorizonSourceValues {
+		t.Fatalf("the deployment layer carries %v from %s, want 600 from VALUES", layer.NoDataTrackingHorizonSeconds, layer.Origin)
+	}
+
+	// The other answer: a deployment saying nothing states no horizon, and
+	// the platform settings copy then resolves the contract's one day (or a
+	// dynamic value). It reports absence rather than a zero because the two
+	// are different facts and only one of them is writable. Without this the
+	// case above passes on a parser that returns 600 for anything.
 	silent, err := Load(writeConfig(t, platformSettingsConfigContents("", platformSettingsControlBase)))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if got, stated := silent.NoDataTrackingHorizonSeconds(); stated || got != 0 {
-		t.Fatalf("a config stating no horizon reads as (%d, %t), want (0, false): absence stays tracked "+
-			"until someone decides otherwise, because a horizon stops no-data alerts once it passes",
-			got, stated)
+		t.Fatalf("a config stating no horizon reads as (%d, %t), want (0, false)", got, stated)
+	}
+	resolved := platformsettings.Resolve(platformsettings.CodeDefaults(), silent.PlatformSettingsLayer())
+	if resolved.NoDataTrackingHorizonSeconds != 86400 || resolved.NoDataTrackingHorizonSource != platformsettings.HorizonSourceDefault {
+		t.Fatalf("a silent deployment resolves %d from %s, want the contract's one day from DEFAULT",
+			resolved.NoDataTrackingHorizonSeconds, resolved.NoDataTrackingHorizonSource)
 	}
 }
 

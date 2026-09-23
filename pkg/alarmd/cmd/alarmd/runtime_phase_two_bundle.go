@@ -195,15 +195,6 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// anomaly list costs no reads of its own. It forwards every observation
 	// untouched: diagnostics must not change what the pipeline reports.
 	fleetTracker := fleet.NewTracker(baseObserver, cfg.PhaseTwo.Worker.ID, external.Now)
-	// The same leaf the reconciler freezes into every Plan, read the same way,
-	// so a row can say whether a Plan's horizon is the platform's or the
-	// strategy's own. A Plan compiled under an earlier value of the leaf reads
-	// as strategy until the reconciler's round key recompiles it, which is
-	// the propagation delay and nothing else.
-	fleetTracker.SetPlatformNoDataHorizon(func() int64 {
-		horizon, _ := cfg.NoDataTrackingHorizonSeconds()
-		return horizon
-	})
 	var observer observability.Observer = fleetTracker
 	targetFlow, err := observability.NewTargetFlow(logger)
 	if err != nil {
@@ -383,6 +374,14 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	recorder.SetPlatformSettingsSource(platformSettings.Stats)
 	hostStatus := newDynamicHostStatusFilter(platformSettings.Current().HostDisableMonitorStates)
+	// The same resolved horizon the reconciler freezes into every Plan, read
+	// the same way, so a row can say whether a Plan's horizon is the
+	// platform's or the strategy's own. A Plan compiled under an earlier value
+	// reads as strategy until the reconciler's round key recompiles it, which
+	// is the propagation delay and nothing else.
+	fleetTracker.SetPlatformNoDataHorizon(func() int64 {
+		return platformSettings.Current().NoDataTrackingHorizonSeconds
+	})
 	strategySource, err := newStrategySource(controlClient, cfg.PhaseTwo.Control.StrategyCachePrefix)
 	if err != nil {
 		return nil, err
@@ -510,11 +509,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// setting without every strategy document having to change for the new
 	// value to reach its Plan.
 	if err := reconciler.ConfigureNoDataPolicy(func() controlplane.NoDataPolicy {
-		// An absent leaf is no platform horizon, and the zero that stands for
-		// it here never travels as an operator's value: the config refuses a
-		// written zero, so this one can only have come from absence.
-		horizon, _ := cfg.NoDataTrackingHorizonSeconds()
-		return controlplane.NoDataPolicy{TrackingHorizonSeconds: horizon}
+		// Resolved by the platform settings copy: a dynamic value, else the
+		// deployment's values, else the contract's one day. Always positive,
+		// so every Plan with no-data enabled carries a finite horizon.
+		return controlplane.NoDataPolicy{TrackingHorizonSeconds: platformSettings.Current().NoDataTrackingHorizonSeconds}
 	}); err != nil {
 		return nil, err
 	}
@@ -794,7 +792,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 		NoData: executionStore, Hosts: cmdbcache.NewHostBusinessLookup(cmdbIndex), State: executionStore, Census: executionStore, Progress: progressStore, Observer: observer,
 		ExecutionEvidence: slotAppliedMarks,
 		OpenAlerts:        &openAlertCopyPort{cache: openAlertCopy},
-		Targets:           targetResolver,
+		// The horizon the platform settings copy resolves now, read per Slot:
+		// runtime state lives at most this long past a series' last write.
+		StateHorizon: func() int64 { return platformSettings.Current().NoDataTrackingHorizonSeconds },
+		Targets:      targetResolver,
 	}
 	coordinator, err := worker.NewSlotExecutionCoordinator(workerPorts, worker.ProvisionalBudget{
 		MaxSeries: cfg.PhaseTwo.Coordinator.MaxSeries, MaxRetainedBytes: cfg.PhaseTwo.Coordinator.MaxRetainedBytes,
