@@ -227,6 +227,10 @@ func (source failingViewSource) LoadPublishedContent(context.Context, controlpla
 	return controlplane.PublishedContent{}, source.err
 }
 
+func (source failingViewSource) ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error) {
+	return nil, nil
+}
+
 func (source failingViewSource) DrainingContent(context.Context, execution.QueryGroupIdentity) (execution.ObjectDigest, []execution.OutputContextRef, bool, error) {
 	return "", nil, false, source.err
 }
@@ -239,6 +243,10 @@ func (staticViewSource) LoadActivation(context.Context) (controlplane.Activation
 
 func (staticViewSource) LoadPublishedContent(context.Context, controlplane.SnapshotPublicationRef) (controlplane.PublishedContent, error) {
 	return controlplane.PublishedContent{}, nil
+}
+
+func (staticViewSource) ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error) {
+	return nil, nil
 }
 
 func (staticViewSource) DrainingContent(context.Context, execution.QueryGroupIdentity) (execution.ObjectDigest, []execution.OutputContextRef, bool, error) {

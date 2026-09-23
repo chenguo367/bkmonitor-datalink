@@ -167,14 +167,21 @@ return 1
 // Worker that sees the new header knows which cached timelines to drop and
 // which to keep, from the same write that changed them.
 const compareAndSetCutoverSchedulesScript = `
+-- Checked before anything is read or written: an error raised after the
+-- first write leaves the writes before it in place, since a script is not
+-- rolled back. A caller that passes the layout of an older version of this
+-- script is refused here, whole.
+local timelines = tonumber(ARGV[7])
+if not timelines or ARGV[8] == nil or #KEYS < 5 + timelines or #ARGV < 8 + 2 * timelines + (#KEYS - 5 - timelines) then
+  return redis.error_reply('alarmd cutover script: argument layout does not match')
+end
 local header = redis.call('GET', KEYS[1])
 if not header or header ~= ARGV[1] then return 0 end
 if redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end
-local timelines = tonumber(ARGV[7])
-local last_timeline = 4 + timelines
-for index = 5, last_timeline do
+local last_timeline = 5 + timelines
+for index = 6, last_timeline do
   local current = redis.call('GET', KEYS[index])
-  local expected_index = 2 * index - 2
+  local expected_index = 2 * index - 3
   local expected = ARGV[expected_index]
   if expected == '' then
     if current then return 0 end
@@ -186,8 +193,16 @@ redis.call('PEXPIRE', KEYS[3], ARGV[5])
 redis.call('SET', KEYS[1], ARGV[2])
 redis.call('SET', KEYS[2], ARGV[3])
 redis.call('SET', KEYS[4], ARGV[6], 'PX', ARGV[5])
-for index = 5, last_timeline do
-  local next_index = 2 * index - 1
+-- KEYS[5] is the set of Query Groups this cutover held back, with no
+-- expiry: losing it would let the next cutover take them for unchanged. The
+-- activation body counts it, so a set that is lost anyway is noticed.
+if ARGV[8] == '' then
+  redis.call('DEL', KEYS[5])
+elseif ARGV[8] ~= '=' then
+  redis.call('SET', KEYS[5], ARGV[8])
+end
+for index = 6, last_timeline do
+  local next_index = 2 * index - 2
   redis.call('SET', KEYS[index], ARGV[next_index], 'PX', ARGV[5])
 end
 -- Each rewritten timeline's revision goes onto its Assignment record in
@@ -196,7 +211,7 @@ end
 for offset = 1, #KEYS - last_timeline do
   local record = KEYS[last_timeline + offset]
   if redis.call('EXISTS', record) == 1 then
-    redis.call('HSET', record, 'timeline_record_revision', ARGV[7 + 2 * timelines + offset])
+    redis.call('HSET', record, 'timeline_record_revision', ARGV[8 + 2 * timelines + offset])
   end
 end
 return 1
@@ -277,8 +292,8 @@ func (repository *RedisCatalogRepository) persistActivationRefUpgrade(ctx contex
 	}
 	changed, err := repository.client.Eval(ctx, compareAndSetCutoverSchedulesScript,
 		[]string{repository.activationHeaderKey(), repository.activationKey(), repository.activeQGSetKey(next.ActiveQGSetRef.Digest),
-			repository.activationDeltaKey(next.RecordRevision)},
-		expectedHeader, nextHeader, payload, activePayload, repository.ttl.Milliseconds(), delta, 0).Int()
+			repository.activationDeltaKey(next.RecordRevision), repository.activationBlockedKey()},
+		expectedHeader, nextHeader, payload, activePayload, repository.ttl.Milliseconds(), delta, 0, blockedSetUnchanged).Int()
 	if err != nil {
 		return activationDependencyIO(fmt.Errorf("persist activation ref upgrade: %w", err))
 	}
@@ -331,6 +346,10 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		return err
 	}
 	oldGroups := previousContent.groups
+	previousBlocked := make(map[execution.QueryGroupIdentity]BlockedQueryGroup, len(previousContent.blocked))
+	for _, group := range previousContent.blocked {
+		previousBlocked[group.QueryGroup] = group
+	}
 	reactivating, held, _, err := repository.partitionReactivations(ctx, previous.Draining, newGroups, boundary, progress)
 	if err != nil {
 		return err
@@ -385,7 +404,8 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 			continue
 		}
 		previousRefs, known := previousContent.refsFor(newGroup)
-		if readAll || previousContent.digests[identity] != newContent[identity].digest || !known ||
+		_, wasBlocked := previousBlocked[identity]
+		if readAll || wasBlocked || previousContent.digests[identity] != newContent[identity].digest || !known ||
 			!execution.SameOutputContextRefs(previousRefs, newContent[identity].refs) {
 			needed = append(needed, identity)
 		}
@@ -411,38 +431,153 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	// carries is an activation that cannot be recovered from the Segments,
 	// and a cutover must not quietly drop it.
 	coveredPrevious := make(map[execution.PlanKey]struct{}, len(carried))
+	// A Query Group whose open Segment fails a precondition only a write
+	// outside this path could have broken is held back rather than failing
+	// the whole publication: it keeps the records it carries and its
+	// timeline is not written. Its records are kept apart from the others so
+	// the coverage the publication owes is checked on everyone else.
+	var blockedNow []BlockedQueryGroup
+	var blockedPlans []PlanActivationRecord
+	blockedGroups := make(map[execution.QueryGroupIdentity]struct{})
+	reopened := 0
+	var previousPublished *PublishedContent
+	previousPlansOf := func(group execution.QueryGroupIdentity) ([]execution.PlanKey, execution.ObjectDigest, []execution.OutputContextRef, error) {
+		if earlier, ok := previousBlocked[group]; ok {
+			return earlier.Plans, earlier.ActivatedDigest, earlier.ActivatedRefs, nil
+		}
+		if previousPublished == nil {
+			content, err := repository.LoadPublishedContent(ctx, previous.Current)
+			if err != nil {
+				return nil, "", nil, err
+			}
+			previousPublished = &content
+		}
+		entry := previousPublished.Groups[group]
+		return entry.Plans, entry.Digest, entry.Refs, nil
+	}
+	settle := func(group execution.QueryGroupIdentity, remains bool, reason, detail string,
+		openDigest execution.ObjectDigest, openRefs []execution.OutputContextRef) error {
+		keys, activatedDigest, activatedRefs, err := previousPlansOf(group)
+		if err != nil {
+			return err
+		}
+		for _, key := range keys {
+			coveredPrevious[key] = struct{}{}
+		}
+		if !remains {
+			// Leaving the publication: there is nothing to keep running, and
+			// the draining projection already expects it gone.
+			cutover.decided(cutoverRetiredUnwritten)
+			return nil
+		}
+		for _, key := range keys {
+			if record, ok := carried[key]; ok {
+				blockedPlans = append(blockedPlans, record)
+			}
+		}
+		blockedGroups[group] = struct{}{}
+		blockedNow = append(blockedNow, blockedAt(previousBlocked, group, reason, detail, boundary,
+			keys, activatedDigest, activatedRefs, openDigest, openRefs))
+		cutover.decided(cutoverBlocked)
+		return nil
+	}
 	for _, queryGroup := range oldIdentities {
 		// Recorded before anything can fail on it: the cutover returns at its
 		// first failure, so this names the one that stopped it.
 		cutover.failedAt(queryGroup)
 		oldGroup := oldGroups[queryGroup]
 		newGroup, remains := newGroups[queryGroup]
-		if remains && !readAll {
+		_, wasBlocked := previousBlocked[queryGroup]
+		if remains && !readAll && !wasBlocked {
 			previousRefs, known := previousContent.refsFor(newGroup)
 			if previousContent.digests[queryGroup] == newContent[queryGroup].digest && known &&
 				execution.SameOutputContextRefs(previousRefs, newContent[queryGroup].refs) {
 				// Kept without a read: the manifest names the same content and
 				// the same contexts, so the open Segment is left as it is.
+				kept := make([]PlanActivationRecord, 0, len(newGroup.Plans))
+				missing := false
 				for _, plan := range newGroup.Plans {
 					record, ok := carried[plan.Key()]
 					if !ok {
-						return fmt.Errorf("%w: a kept Query Group has a Plan without a current activation record", ErrActivationRecordMissing)
+						missing = true
+						break
 					}
-					plans = append(plans, record)
+					kept = append(kept, record)
 				}
+				if missing {
+					if err := settle(queryGroup, remains, CutoverReasonActivationRecordMissing,
+						"a kept Query Group has a Plan without a current activation record", "", nil); err != nil {
+						return err
+					}
+					continue
+				}
+				plans = append(plans, kept...)
 				cutover.decided(cutoverKept)
 				continue
 			}
 		}
 		timeline, raw, err := repository.loadScheduleTimelineForUpdate(ctx, queryGroup)
+		if errors.Is(err, ErrScheduleUnavailable) {
+			// The key is gone: evicted, or expired. This used to fail the whole
+			// cutover as a dependency that did not answer, on every publication,
+			// under a word that said to wait. The Query Group ran nothing without
+			// its timeline; it is opened again as a new one, and the script
+			// writes only if the key is still absent then.
+			keys, _, _, keysErr := previousPlansOf(queryGroup)
+			if keysErr != nil {
+				return keysErr
+			}
+			for _, key := range keys {
+				coveredPrevious[key] = struct{}{}
+			}
+			if !remains {
+				cutover.decided(cutoverRetiredUnwritten)
+				continue
+			}
+			// The candidate records say which publication the Segment names: the
+			// new one when the content changed, the one the carried records were
+			// activated under when it did not - its content is the same, and the
+			// records are kept as they were.
+			openPublication, openGroup, openNamed := published.content.Publication, newGroup, published.content.Groups[queryGroup]
+			if carriedPublication, ok := candidatePublication(candidate, newGroup); ok && carriedPublication != openPublication {
+				group, groupErr := repository.loadPublishedQueryGroup(ctx, carriedPublication, queryGroup)
+				if groupErr != nil {
+					return groupErr
+				}
+				content, contentErr := repository.LoadPublishedContent(ctx, carriedPublication)
+				if contentErr != nil {
+					return contentErr
+				}
+				openPublication, openGroup, openNamed = carriedPublication, group, content.Groups[queryGroup]
+			}
+			opened, openErr := repository.openQueryGroupTimeline(ctx, openPublication, openGroup, openNamed, boundary, candidate, now, cutover)
+			if openErr != nil {
+				return openErr
+			}
+			updates = append(updates, opened.update)
+			plans = append(plans, opened.records...)
+			reopened++
+			cutover.redecided(cutoverAdded, cutoverReopened)
+			continue
+		}
+		var unreadable *DeterministicScheduleError
+		if errors.As(err, &unreadable) {
+			if err := settle(queryGroup, remains, CutoverReasonTimelineMissing, "timeline unreadable: "+err.Error(), "", nil); err != nil {
+				return err
+			}
+			continue
+		}
 		if err != nil {
 			return err
 		}
 		cutover.read++
 		last := len(timeline.Segments) - 1
 		if last < 0 || timeline.RetiredAt != nil {
-			return scheduleConflict(CutoverReasonTimelineMissing, queryGroup,
-				fmt.Sprintf("segments=%d retired_at=%v", len(timeline.Segments), timeline.RetiredAt))
+			if err := settle(queryGroup, remains, CutoverReasonTimelineMissing,
+				fmt.Sprintf("segments=%d retired_at=%v", len(timeline.Segments), timeline.RetiredAt), "", nil); err != nil {
+				return err
+			}
+			continue
 		}
 		open := timeline.Segments[last]
 		if open.Schedule.Segment.End != nil || open.Schedule.Segment.Start >= boundary {
@@ -450,9 +585,15 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 			if open.Schedule.Segment.End != nil {
 				end = fmt.Sprintf("%d", *open.Schedule.Segment.End)
 			}
-			return scheduleConflict(CutoverReasonOpenSegmentClosed, queryGroup,
-				fmt.Sprintf("open_start=%d open_end=%s boundary=%d",
-					open.Schedule.Segment.Start, end, boundary))
+			if err := settle(queryGroup, remains, CutoverReasonOpenSegmentClosed,
+				fmt.Sprintf("open_start=%d open_end=%s boundary=%d", open.Schedule.Segment.Start, end, boundary), "", nil); err != nil {
+				return err
+			}
+			continue
+		}
+		openRefs := open.Schedule.Segment.OutputContextRefs
+		if count := len(open.Schedule.Segment.OutputContextRevisions); count > 0 {
+			openRefs = open.Schedule.Segment.OutputContextRevisions[count-1].Refs
 		}
 		// A source that names the content must agree with the Segment; a
 		// Segment that disagrees was changed outside this path. A Segment
@@ -466,21 +607,32 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		// in the code forever for a state that cannot be produced any more.
 		if oldDigest, named := previousContent.digests[queryGroup]; named && open.Schedule.Segment.ObjectDigest != "" &&
 			open.Schedule.Segment.ObjectDigest != oldDigest {
-			return scheduleConflict(CutoverReasonOpenDigestMismatch, queryGroup,
+			if err := settle(queryGroup, remains, CutoverReasonOpenDigestMismatch,
 				fmt.Sprintf("open_digest=%s activation_digest=%s published_digest=%s content_source=%s",
-					open.Schedule.Segment.ObjectDigest, oldDigest, newContent[queryGroup].digest,
-					previousContent.source))
+					open.Schedule.Segment.ObjectDigest, oldDigest, newContent[queryGroup].digest, previousContent.source),
+				open.Schedule.Segment.ObjectDigest, openRefs); err != nil {
+				return err
+			}
+			continue
 		}
 		if open.Schedule.Segment.ObjectDigest == "" && oldGroup.QueryPlan.QueryRevision != "" &&
 			(open.Schedule.Segment.QueryRevision != oldGroup.QueryPlan.QueryRevision ||
 				open.Schedule.Segment.ScheduleRevision != oldGroup.ScheduleRevision) {
-			return scheduleConflict(CutoverReasonLegacyRevisionMismatch, queryGroup,
+			if err := settle(queryGroup, remains, CutoverReasonLegacyRevisionMismatch,
 				fmt.Sprintf("open_query_revision=%s want=%s open_schedule_revision=%s want=%s",
 					open.Schedule.Segment.QueryRevision, oldGroup.QueryPlan.QueryRevision,
-					open.Schedule.Segment.ScheduleRevision, oldGroup.ScheduleRevision))
+					open.Schedule.Segment.ScheduleRevision, oldGroup.ScheduleRevision),
+				open.Schedule.Segment.ObjectDigest, openRefs); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := validateOpenSegmentActivation(previous, open); err != nil {
-			return err
+			if err := settle(queryGroup, remains, CutoverReasonActivationRecordMissing, err.Error(),
+				open.Schedule.Segment.ObjectDigest, openRefs); err != nil {
+				return err
+			}
+			continue
 		}
 		for _, record := range open.Plans {
 			coveredPrevious[record.Fact.Key()] = struct{}{}
@@ -580,11 +732,40 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		updates = append(updates, opened.update)
 		plans = append(plans, opened.records...)
 	}
-	if err := validateContentCoverage(plans, activeGroups); err != nil {
+	// Coverage is owed by everyone the cutover did not hold back. A blocked
+	// Query Group's carried records name what it ran, which may not be the
+	// Plans the publication gives it now; a carried record for a Plan another
+	// Query Group now owns gives way to that one.
+	coverageGroups := activeGroups
+	if len(blockedGroups) > 0 {
+		coverageGroups = make(map[execution.QueryGroupIdentity]QueryGroup, len(activeGroups))
+		for identity, group := range activeGroups {
+			if _, blocked := blockedGroups[identity]; !blocked {
+				coverageGroups[identity] = group
+			}
+		}
+	}
+	if err := validateContentCoverage(plans, coverageGroups); err != nil {
 		return err
+	}
+	owned := make(map[execution.PlanKey]struct{}, len(plans))
+	for _, record := range plans {
+		owned[record.Fact.Key()] = struct{}{}
+	}
+	for _, record := range blockedPlans {
+		if _, taken := owned[record.Fact.Key()]; taken {
+			continue
+		}
+		owned[record.Fact.Key()] = struct{}{}
+		plans = append(plans, record)
 	}
 	sort.Slice(plans, func(i, j int) bool { return lessPlanIdentity(plans[i].Fact.Plan, plans[j].Fact.Plan) })
 	next.Plans = plans
+	next.BlockedCount, next.BlockedDigest = len(blockedNow), blockedDigest(blockedNow)
+	blockedPayload, err := encodeBlockedSet(blockedNow)
+	if err != nil {
+		return err
+	}
 	// The assembled state is validated the way the candidate was at the top:
 	// the active set reference is only assigned by the persistence step.
 	assembled := next
@@ -595,9 +776,10 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	if err := repository.pruneTimelines(ctx, updates, candidates, progress, cutover); err != nil {
 		return err
 	}
-	if err := repository.persistCutoverActivation(ctx, expected, next, updates, cutover); err != nil {
+	if err := repository.persistCutoverActivation(ctx, expected, next, updates, cutover, blockedPayload); err != nil {
 		return err
 	}
+	repository.blocked.record(blockedNow, previousContent.accounting, reopened)
 	if readAll {
 		repository.contentCutoverVerified.Store(true)
 	}
@@ -808,7 +990,10 @@ func (repository *RedisCatalogRepository) CompareAndSetHeldReactivation(
 	if err := repository.pruneTimelines(ctx, updates, candidates, progress, cutover); err != nil {
 		return err
 	}
-	return repository.persistCutoverActivation(ctx, expected, next, updates, cutover)
+	// The publication does not change, and neither does the set of Query
+	// Groups a cutover held back from it.
+	next.BlockedCount, next.BlockedDigest = previous.BlockedCount, previous.BlockedDigest
+	return repository.persistCutoverActivation(ctx, expected, next, updates, cutover, blockedSetUnchanged)
 }
 
 func (repository *RedisCatalogRepository) CompareAndSetInitialScheduleActivation(
@@ -933,7 +1118,8 @@ func (repository *RedisCatalogRepository) CompareAndSetScheduleCutover(
 	if err := validateUnchangedActivationRecords(previous, next, affectedPlans); err != nil {
 		return err
 	}
-	return repository.persistCutoverActivation(ctx, expected, next, updates, nil)
+	next.BlockedCount, next.BlockedDigest = previous.BlockedCount, previous.BlockedDigest
+	return repository.persistCutoverActivation(ctx, expected, next, updates, nil, blockedSetUnchanged)
 }
 
 func validateInitialActivationCoverage(state ActivationState, timelines []persistedScheduleTimeline) error {
@@ -1097,6 +1283,7 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 	next ActivationState,
 	updates []scheduleTimelineUpdate,
 	cutover *cutoverFacts,
+	blocked []byte,
 ) error {
 	active := make(map[execution.QueryGroupIdentity]struct{})
 	previous, loadErr := repository.LoadActivation(ctx)
@@ -1153,9 +1340,9 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 		return err
 	}
 	keys := []string{repository.activationHeaderKey(), repository.activationKey(), repository.activeQGSetKey(ref.Digest),
-		repository.activationDeltaKey(next.RecordRevision)}
-	args := []interface{}{expectedHeader, nextHeader, activationPayload, activePayload, repository.ttl.Milliseconds(), deltaPayload, len(updates)}
-	payloadBytes := len(expectedHeader) + len(nextHeader) + len(activationPayload) + len(activePayload) + len(deltaPayload)
+		repository.activationDeltaKey(next.RecordRevision), repository.activationBlockedKey()}
+	args := []interface{}{expectedHeader, nextHeader, activationPayload, activePayload, repository.ttl.Milliseconds(), deltaPayload, len(updates), blocked}
+	payloadBytes := len(expectedHeader) + len(nextHeader) + len(activationPayload) + len(activePayload) + len(deltaPayload) + len(blocked)
 	timelineBytes := make([]int, 0, len(updates))
 	for _, update := range updates {
 		payload, err := json.Marshal(update.next)
@@ -2617,4 +2804,22 @@ func (repository *RedisCatalogRepository) loadScheduleTimelineHinted(
 		}
 	}
 	return repository.loadScheduleTimeline(ctx, queryGroup)
+}
+
+// candidatePublication is the publication the candidate records of a Query
+// Group name, when they all name one.
+func candidatePublication(candidate ActivationState, group QueryGroup) (SnapshotPublicationRef, bool) {
+	byPlan := make(map[execution.PlanKey]SnapshotPublicationRef, len(candidate.Plans))
+	for _, record := range candidate.Plans {
+		byPlan[record.Fact.Key()] = record.Publication
+	}
+	var named SnapshotPublicationRef
+	for index, plan := range group.Plans {
+		publication, ok := byPlan[plan.Key()]
+		if !ok || (index > 0 && publication != named) {
+			return SnapshotPublicationRef{}, false
+		}
+		named = publication
+	}
+	return named, len(group.Plans) > 0
 }

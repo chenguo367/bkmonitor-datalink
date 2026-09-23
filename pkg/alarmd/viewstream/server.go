@@ -360,6 +360,16 @@ func (server *Server) Stats() Stats {
 	return stats
 }
 
+// Snapshot is the view the current version gives one Worker, as a Worker
+// that connected now would receive it; false while nothing is published.
+func (server *Server) Snapshot(workerID string) (View, bool) {
+	publisher := server.currentPublisher()
+	if publisher == nil {
+		return View{}, false
+	}
+	return publisher.Snapshot(workerID)
+}
+
 func (server *Server) currentPublisher() *Publisher {
 	server.mu.Lock()
 	defer server.mu.Unlock()

@@ -33,6 +33,10 @@ func (source *fakeSplitViewSource) LoadPublishedContent(
 	return controlplane.PublishedContent{Groups: source.groups}, nil
 }
 
+func (source *fakeSplitViewSource) ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error) {
+	return nil, nil
+}
+
 func (source *fakeSplitViewSource) DrainingContent(
 	context.Context, execution.QueryGroupIdentity,
 ) (execution.ObjectDigest, []execution.OutputContextRef, bool, error) {

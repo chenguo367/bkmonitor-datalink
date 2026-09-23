@@ -514,6 +514,9 @@ type phaseTwoWorkerBundleDependencies struct {
 	// the floor directly. It is recorded by the same command hook, so it needs
 	// no metric of its own. A nil probe disables the measurement.
 	ProbeControlRedis func(context.Context) error
+	// ActivationBlocked is the Control Leader's last cutover as far as the
+	// Query Groups it held back go; nil where there is no repository.
+	ActivationBlocked func() controlplane.ActivationBlockedReading
 	CloseResources    func(context.Context) error
 	Now               func() time.Time
 }

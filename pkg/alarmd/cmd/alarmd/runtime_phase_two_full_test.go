@@ -115,6 +115,9 @@ func TestProductionPhaseTwoBundleKeepsThePlatformCacheApartFromItsOwnStore(t *te
 	if len(bundle.queryGroups) != 1 {
 		t.Fatalf("selected strategies compiled to Query Groups = %v, want exactly one", bundle.queryGroups)
 	}
+	if bundle.dependencies.ActivationBlocked == nil {
+		t.Fatal("the production bundle does not read the Query Groups a cutover held back")
+	}
 	sourceKeys, err := sourceClient.Keys(ctx, cfg.Redis.StatePrefix+"*").Result()
 	if err != nil || len(sourceKeys) != 0 {
 		t.Fatalf("top-level StrategySource Redis contains runtime keys %v, error=%v", sourceKeys, err)

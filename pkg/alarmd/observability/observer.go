@@ -942,7 +942,7 @@ type ScheduleCutoverFacts struct {
 
 // ScheduleCutoverDecisions is the closed vocabulary of what a publication
 // cutover does with one Query Group.
-var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", "retired", "added"}
+var ScheduleCutoverDecisions = []string{"kept", "revised", "cut", "legacy_cut", "retired", "added", "blocked", "reopened", "retired_unwritten"}
 
 // ReplayExpiryFacts describe one Slot the scheduler gave up replaying.
 //

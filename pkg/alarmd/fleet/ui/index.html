@@ -819,7 +819,8 @@ var DEGRADATION = {
   PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置',
   OUTPUT_NOT_READY: '副本连不上告警输出：进程活着但不就绪，不接检测任务，由其余副本顶着——少一个副本的容量',
   VIEW_PUBLISH_FAILING: 'leader 超过一分钟发不出视图：已有视图的副本照常检测，这期间重启的副本没有视图、什么都不执行；原因见说明',
-  VIEW_STREAM_NO_SESSIONS: 'leader 超过一分钟有待连的副本却没有一个连上视图流：视图谁都收不到，重启的副本会拿不到视图'
+  VIEW_STREAM_NO_SESSIONS: 'leader 超过一分钟有待连的副本却没有一个连上视图流：视图谁都收不到，重启的副本会拿不到视图',
+  ACTIVATION_BLOCKED: '上一次发布有 QG 被扣住：它们的时间轴被发布流程之外的写入改过，保持原来的内容照常执行（没有可执行段的不执行），其余策略已按新配置生效；用修复子命令或查外部写入后会自动切过去；哪些 QG、什么原因见说明'
 };
 
 // What each line owes past its sentence, per check and held to the Go list:

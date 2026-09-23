@@ -254,3 +254,26 @@ func TestFleetPublisherNamesTheStrategiesOnRetainedRecords(t *testing.T) {
 		t.Fatalf("retained record strategies = %+v, want strategy 1854 of business 7", skip.Strategies)
 	}
 }
+
+// The standing names the Query Groups the last cutover held back - how many,
+// why and which - from the repository's reading, and says nothing when none
+// were.
+func TestActivationStandingNamesQueryGroupsTheCutoverHeldBack(t *testing.T) {
+	bundle := mustPhaseTwoWorkerBundle(t, validGoAccessRuntimeConfig(), newPhaseTwoApplicationHealth(), &fakePhaseTwoControl{}, &fakePhaseTwoOwnership{})
+	reading := controlplane.ActivationBlockedReading{
+		ByReason: map[string]int{controlplane.CutoverReasonOpenSegmentClosed: 1, controlplane.CutoverReasonOpenDigestMismatch: 2},
+		Samples:  []string{"qg-a:open_digest_mismatch", "qg-b:open_digest_mismatch", "qg-c:open_segment_closed_or_ahead"},
+	}
+	bundle.dependencies.ActivationBlocked = func() controlplane.ActivationBlockedReading { return reading }
+	bundle.activation.attempted = true
+	facts := bundle.activationFleetFacts()
+	if facts == nil || facts.BlockedQueryGroups != 3 ||
+		facts.BlockedReasons != "open_digest_mismatch=2,open_segment_closed_or_ahead=1" ||
+		facts.BlockedSamples != "qg-a:open_digest_mismatch,qg-b:open_digest_mismatch,qg-c:open_segment_closed_or_ahead" {
+		t.Fatalf("facts = %+v", facts)
+	}
+	reading = controlplane.ActivationBlockedReading{}
+	if facts := bundle.activationFleetFacts(); facts.BlockedQueryGroups != 0 || facts.BlockedReasons != "" || facts.BlockedSamples != "" {
+		t.Fatalf("nothing held back, facts = %+v", facts)
+	}
+}
