@@ -238,6 +238,20 @@ func TestARecordOfAnotherStrategyIsNotAnIdentity(t *testing.T) {
 	}
 }
 
+// Nor is a record that says another producer wrote the alert, even when the
+// reconciliation said it was ours: the two disagreeing is not a reason to
+// believe either about whose business it is.
+func TestARecordOfAnotherProducerIsNotAnIdentity(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+	record := fixture.link.records["alert-1"]
+	record.EventSourceID = "another-source"
+	fixture.link.records["alert-1"] = record
+	fixture.mature(context.Background())
+	if len(fixture.writer.batches) != 0 || fixture.loop.Stats()[absentalerts.OutcomeIdentityUnknown] != 1 {
+		t.Fatalf("a close was addressed with an identity from another producer's record: %+v %+v", fixture.writer.batches, fixture.loop.Stats())
+	}
+}
+
 // A business without a revision is its own answer.
 func TestARecordWithoutARevisionHasItsOwnAnswer(t *testing.T) {
 	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
