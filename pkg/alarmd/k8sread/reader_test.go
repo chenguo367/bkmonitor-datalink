@@ -31,11 +31,11 @@ type fakeAPI struct {
 }
 
 const (
-	selfPod   = "alarmd-trigger-abc-1"
-	otherPod  = "other-web-xyz-1"
-	crashPod  = "alarmd-trigger-abc-2"
+	selfPod  = "alarmd-trigger-abc-1"
+	otherPod = "other-web-xyz-1"
+	crashPod = "alarmd-trigger-abc-2"
 	// copycat carries alarmd's labels but belongs to another Deployment.
-	copycat = "copycat-xyz-1"
+	copycat   = "copycat-xyz-1"
 	alarmdSel = "app.kubernetes.io/component=trigger,app.kubernetes.io/name=alarmd"
 )
 
