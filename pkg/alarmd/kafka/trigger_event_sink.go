@@ -457,7 +457,7 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			// message here and no snapshot; the native protocol still carries
 			// it, because the choice of protocol is the revision's, not the
 			// event kind's.
-			if events[index].EventKind != contract.TriggerEventAbnormal {
+			if !contract.EventHasMessage(format, events[index].EventKind) {
 				messages[index] = nil
 				continue
 			}

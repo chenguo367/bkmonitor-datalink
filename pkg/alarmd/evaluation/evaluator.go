@@ -422,20 +422,46 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			}
 		}
 	}
-	var events []contract.TriggerEventV1
-	if tr.TriggerEvent != nil {
-		events = []contract.TriggerEventV1{*tr.TriggerEvent}
-	}
+	events, withoutMessage := keptEvents(tr.TriggerEvent)
 	result := recordResult{outcomes: outcomes, gate: tr.RecoveryGate, coverage: coverage}
 	if advance || len(missingInputGuards) > 0 {
 		mutation, err := buildMutation(request, due, record, view, facts, tr.LevelOutcomes, historyCompleteness, durableGuardReasons, missingInputGuards)
 		if err != nil {
 			return recordResult{}, err
 		}
-		result.state = &execution.StateEvaluation{Mutation: mutation, Events: events}
+		result.state = &execution.StateEvaluation{Mutation: mutation, Events: events, WithoutMessage: withoutMessage}
 	}
 	captureSampleDecision(sample, tr)
 	return result, nil
+}
+
+// keptEvents is what the series keeps of the event its record decided: the
+// event, or - when the sink would take it and send nothing - its identity
+// only. The event is built either way, so what it is and whether it builds
+// are unchanged; what changes is that one the sink would drop is garbage from
+// here rather than from the sink, and it was the largest thing the Slot held
+// for such a series.
+func keptEvents(event *contract.TriggerEventV1) ([]contract.TriggerEventV1, []execution.EventWithoutMessage) {
+	switch {
+	case event == nil:
+		return nil, nil
+	case contract.DroppedAtSink(event):
+		return nil, []execution.EventWithoutMessage{{
+			Record:    execution.RecordAnchor{RecordID: event.RecordRef.RecordID, SourceTime: event.RecordRef.SourceTime},
+			EventKind: event.EventKind, Format: contract.OutputWireFormatOf(event),
+		}}
+	default:
+		return []contract.TriggerEventV1{*event}, nil
+	}
+}
+
+// appendKept adds one record's kept outputs to the series': its events and
+// the identities of the events it did not keep. One step for both, because
+// the series' mutation carries the two together and a record whose events
+// were folded in while its identities were not would lose them from every
+// count the write adds back.
+func appendKept(events []contract.TriggerEventV1, withoutMessage []execution.EventWithoutMessage, state *execution.StateEvaluation) ([]contract.TriggerEventV1, []execution.EventWithoutMessage) {
+	return append(events, state.Events...), append(withoutMessage, state.WithoutMessage...)
 }
 
 // evaluateSeries evaluates one due Plan and one series. The slice contains one
@@ -537,6 +563,7 @@ func (e *Evaluator) evaluateSeries(
 	}
 	var final *execution.StateEvaluation
 	var events []contract.TriggerEventV1
+	var withoutMessage []execution.EventWithoutMessage
 	var affected []execution.RecordAnchor
 	// The history as the store holds it, kept apart from the provisional view
 	// the records build on each other. A Slot with several records advances the
@@ -591,7 +618,7 @@ func (e *Evaluator) evaluateSeries(
 				}
 			}
 			final = one.state
-			events = append(events, one.state.Events...)
+			events, withoutMessage = appendKept(events, withoutMessage, one.state)
 			affected = append(affected, execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()})
 		}
 	}
@@ -603,7 +630,7 @@ func (e *Evaluator) evaluateSeries(
 		if err != nil {
 			return execution.PlanEvaluationResult{}, err
 		}
-		final.Mutation, final.Events = mutation, events
+		final.Mutation, final.Events, final.WithoutMessage = mutation, events, withoutMessage
 		result.StateResults = []execution.StateEvaluation{*final}
 	}
 	if gapMutation, gapErr := planGapRecoveryMutation(legacy, due, len(result.StateResults) > 0); gapErr != nil {

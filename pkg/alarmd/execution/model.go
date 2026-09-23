@@ -2057,6 +2057,24 @@ func (mutation PlanNoDataMutation) ReplacesWholeRecord() bool {
 type StateEvaluation struct {
 	Mutation StateMutation
 	Events   []contract.TriggerEventV1
+	// WithoutMessage is the events this series decided and did not keep
+	// because the sink would take them and leave them without a message
+	// (contract.DroppedAtSink): under the Python-compatible protocol, every
+	// RECOVERY. Only their identity is kept. The event, with its evidence, was
+	// the largest thing a Slot held for such a Plan - one per healthy series
+	// per round - and it was held until the sink dropped it. What an output
+	// line counts is unchanged: the write adds these back as events the
+	// protocol had no message for, which is what they were.
+	WithoutMessage []EventWithoutMessage
+}
+
+// EventWithoutMessage is one decided event kept as its identity only: the
+// record it was for, its kind, and the resolved wire format that has no
+// message for that kind.
+type EventWithoutMessage struct {
+	Record    RecordAnchor
+	EventKind string
+	Format    string
 }
 
 type PlanDisposition string
@@ -2651,7 +2669,7 @@ func (result EvaluationResult) Validate(request EvaluationRequest) error {
 		if planResult.Disposition != PlanDecided && planResult.Disposition != PlanDecidedDegraded &&
 			planResult.Disposition != PlanRetryPending {
 			for _, state := range planResult.StateResults {
-				if len(state.Events) != 0 || len(state.Mutation.Points) != 0 ||
+				if len(state.Events) != 0 || len(state.WithoutMessage) != 0 || len(state.Mutation.Points) != 0 ||
 					(state.Mutation.SeriesGuard == nil && !stateMutationHasLevelGuard(state.Mutation)) {
 					return errors.New("alarmd execution: non-decision Plan may persist only a bounded Runtime State guard")
 				}
