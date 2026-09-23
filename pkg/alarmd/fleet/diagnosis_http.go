@@ -72,6 +72,11 @@ type DiagnosisResponse struct {
 	// process changed.
 	SnapshotReread bool   `json:"snapshot_reread,omitempty"`
 	NextCursor     string `json:"next_cursor,omitempty"`
+	// Timing is where this page's time went.
+	Timing DiagnosisTiming `json:"timing_ms"`
+	// Warmed is the warm-up this process ran when it took the catalog over,
+	// absent where none has run.
+	Warmed *DiagnosisWarm `json:"warmed,omitempty"`
 }
 
 type diagnosisEntry struct {
@@ -82,6 +87,10 @@ type diagnosisEntry struct {
 	view      *View
 	readError string
 	expires   time.Time
+	// universeTook and viewTook are how long the read that filled the entry
+	// took for each; viewTook is nil where there is no service to read.
+	universeTook *int64
+	viewTook     *int64
 	// ready is closed when the read that fills the entry has finished; a
 	// request for the same diagnosis waits on it instead of reading again.
 	ready chan struct{}
@@ -138,6 +147,7 @@ func (cache *diagnosisCache) get(ctx context.Context, id string, at time.Time, r
 	cancel()
 	placeholder.universe, placeholder.digest, placeholder.readAt = filled.universe, filled.digest, filled.readAt
 	placeholder.view, placeholder.readError, placeholder.expires = filled.view, filled.readError, filled.expires
+	placeholder.universeTook, placeholder.viewTook = filled.universeTook, filled.viewTook
 	close(placeholder.ready)
 	if placeholder.readError != "" {
 		cache.mu.Lock()
@@ -200,7 +210,8 @@ const ForwardFailed = "FORWARD_FAILED"
 // the Leader once, the way a strategy's standing is forwarded, so every
 // page of one diagnosis is decided against one catalog and one cache.
 func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFunc, forward LeaderForward,
-	universe UniverseReader, progress ProgressReader, replica string, now func() time.Time, stallAfter time.Duration) http.Handler {
+	universe UniverseReader, progress ProgressReader, replica string, now func() time.Time, stallAfter time.Duration,
+	warmer *DiagnosisWarmer) http.Handler {
 	if now == nil {
 		now = time.Now
 	}
@@ -255,7 +266,10 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		})
 		body := DiagnosisResponse{Diagnosis: entry.id, AnsweredBy: replica, Strategies: []DiagnosisRow{},
 			Verdicts: DiagnosisVerdicts(), UnknownReasons: append([]string(nil), DiagnosisUnknownReasons...),
-			SnapshotReread: fresh && cursor.Diagnosis != "", Progress: "not_wired"}
+			SnapshotReread: fresh && cursor.Diagnosis != "", Progress: "not_wired", Warmed: warmer.Last()}
+		if fresh {
+			body.Timing = entry.timing()
+		}
 		body.Universe = DiagnosisUniverse{Status: "ok", Source: "strategy_ids", Count: len(entry.universe), Digest: entry.digest}
 		if !entry.readAt.IsZero() {
 			readAt := entry.readAt
@@ -272,11 +286,15 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			body.UniverseChanged = &UniverseChange{FromDigest: cursor.Digest, ToDigest: entry.digest, Count: len(entry.universe)}
 		}
 		ctx := newDiagnosisContext(entry.view, replica, at)
+		started := time.Now()
 		page := buildDiagnosisPage(entry.universe, cursor.After, limit, func(id string) DiagnosisRow {
 			return diagnoseStrategy(id, lookup(id), ctx)
 		})
+		body.Timing.RowsMillis = time.Since(started).Milliseconds()
 		if progress != nil {
+			started = time.Now()
 			found, failed, err := progress(request.Context(), pageQueryGroups(page.Rows))
+			body.Timing.ProgressMillis = millisOf(time.Since(started))
 			if err != nil {
 				body.Progress = "unavailable"
 				applyProgress(page.Rows, nil, nil, ProgressUnreadable)
@@ -295,18 +313,27 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 
 func readDiagnosisEntry(ctx context.Context, service *Service, universe UniverseReader, at time.Time, stallAfter time.Duration) *diagnosisEntry {
 	entry := &diagnosisEntry{readAt: at, expires: at.Add(DiagnosisCacheTTL)}
+	started := time.Now()
 	ids, err := universe(ctx)
+	entry.universeTook = millisOf(time.Since(started))
 	if err != nil {
 		entry.readError = err.Error()
 		return entry
 	}
 	entry.universe, entry.digest = NormalizeUniverse(ids)
 	if service != nil {
+		started = time.Now()
 		view := service.View(ctx)
 		Decide(&view, at, stallAfter)
 		entry.view = &view
+		entry.viewTook = millisOf(time.Since(started))
 	}
 	return entry
+}
+
+// timing is the entry's read, as a page's timing.
+func (entry *diagnosisEntry) timing() DiagnosisTiming {
+	return DiagnosisTiming{UniverseMillis: entry.universeTook, ViewMillis: entry.viewTook}
 }
 
 func newDiagnosisID() string {

@@ -1065,10 +1065,15 @@ func openProductionPhaseTwoBundleWithDependencies(
 		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
 	// The environment diagnosis: every strategy of the source's active set,
 	// one row each, answered where the catalog is the way a standing is.
+	// The warmer reads one first page through the same readers when this
+	// process takes the catalog over, on the fleet publish cadence below, so
+	// the first page asked after a hand-over is not the process's first read.
+	diagnosisWarmer := fleet.NewDiagnosisWarmer(fleetService, strategyLookupSource(reconciler),
+		diagnosisUniverse(strategySource), diagnosisProgress(progressStore), external.Now, stallAfter)
 	fleetAPI = fleet.WithDiagnosis(fleetAPI, fleetService, strategyLookupSource(reconciler),
 		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, diagnosisForwardTimeout, "diagnosis", recorder.ObserveLeaderForward),
 		diagnosisUniverse(strategySource), diagnosisProgress(progressStore),
-		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
+		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter, diagnosisWarmer)
 	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())
 	var costRefresh *observationCostRefresh
 	if diagnosticsClient != nil && observationCapacity.CostBytes > 0 {
@@ -1125,6 +1130,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 			publisher.publishOnce(ctx)
 			if costRefresh != nil {
 				costRefresh.publish(ctx, external.Now(), costSummary.Snapshot())
+			}
+			// Off the cadence: the warm-up is bounded by a first page's read
+			// timeout, and a publish must not wait on it.
+			if warm := diagnosisWarmer.Tick(); warm != nil {
+				go warm(ctx)
 			}
 		},
 		RunOpenAlerts: func(runCtx context.Context) error {

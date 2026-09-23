@@ -45,6 +45,8 @@ type diagnosisRig struct {
 	universeErr   error
 	universeReads int
 	clock         time.Time
+	// warmer is built from the same readers the handler answers from.
+	warmer *DiagnosisWarmer
 }
 
 func newDiagnosisRig(t *testing.T, facts map[string]StrategyLookupFacts, progress ProgressReader) *diagnosisRig {
@@ -84,8 +86,9 @@ func newDiagnosisRigWith(t *testing.T, facts map[string]StrategyLookupFacts, pro
 		rig.universeReads++
 		return append([]string(nil), rig.universe...), rig.universeErr
 	}
+	rig.warmer = NewDiagnosisWarmer(service, lookup, universe, progress, func() time.Time { return rig.clock }, 0)
 	rig.handler = WithDiagnosis(http.NotFoundHandler(), service, lookup, nil, universe, progress, "pod-a",
-		func() time.Time { return rig.clock }, 0)
+		func() time.Time { return rig.clock }, 0, rig.warmer)
 	return rig
 }
 
@@ -387,7 +390,7 @@ func TestConcurrentDiagnosesKeepTheirOwnReadAndAFailedReadIsNotKept(t *testing.T
 func TestAFailedForwardToALeaderIsARefusalNotALocalPage(t *testing.T) {
 	forward := func(http.ResponseWriter, *http.Request) (bool, string) { return false, ForwardFailed }
 	handler := WithDiagnosis(http.NotFoundHandler(), nil, func(string) StrategyLookupFacts { return StrategyLookupFacts{} }, forward,
-		func(context.Context) ([]string, error) { return []string{"1"}, nil }, nil, "pod-a", func() time.Time { return now }, 0)
+		func(context.Context) ([]string, error) { return []string{"1"}, nil }, nil, "pod-a", func() time.Time { return now }, 0, nil)
 	w := httptest.NewRecorder()
 	handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/diagnose", nil))
 	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "LEADER_UNAVAILABLE") {
