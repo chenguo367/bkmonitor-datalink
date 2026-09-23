@@ -31,8 +31,8 @@ func noStoreManager(t *testing.T) *Manager {
 
 func trustedRequest(method, body string) *http.Request {
 	r := httptest.NewRequest(method, grantsPath, strings.NewReader(body))
-	r.Header.Set(IssuerKeyHeader, testIssuerKey)
-	r.Header.Set(PrincipalHeader, "tenant-a/operator")
+	r.Header.Set("Authorization", "Bearer "+testAdminKey)
+
 	r.Header.Set("Origin", "https://example.test")
 	r.Header.Set("Content-Type", "application/json")
 	return r
@@ -47,14 +47,12 @@ func TestGrantTrustAndRequestValidation(t *testing.T) {
 		status int
 		code   string
 	}{
-		{"no issuer key", func(r *http.Request) { r.Header.Del(IssuerKeyHeader) }, `{"confirm":true}`, 403, "issuer_unauthorized"},
-		{"wrong issuer key", func(r *http.Request) { r.Header.Set(IssuerKeyHeader, "incorrect") }, `{"confirm":true}`, 403, "issuer_unauthorized"},
-		{"two issuer keys", func(r *http.Request) { r.Header.Add(IssuerKeyHeader, testIssuerKey) }, `{"confirm":true}`, 403, "issuer_unauthorized"},
-		{"empty principal", func(r *http.Request) { r.Header.Del(PrincipalHeader) }, `{"confirm":true}`, 403, "issuer_unauthorized"},
-		{"long principal", func(r *http.Request) { r.Header.Set(PrincipalHeader, strings.Repeat("x", 257)) }, `{"confirm":true}`, 403, "issuer_unauthorized"},
-		{"control in principal", func(r *http.Request) { r.Header.Set(PrincipalHeader, "user\nadmin") }, `{"confirm":true}`, 403, "issuer_unauthorized"},
-		{"two principals", func(r *http.Request) { r.Header.Add(PrincipalHeader, "another-user") }, `{"confirm":true}`, 403, "issuer_unauthorized"},
-		{"bearer cannot mint", func(r *http.Request) { r.Header.Set("Authorization", "Bearer credential") }, `{"confirm":true}`, 403, "issuer_unauthorized"},
+		{"no administrator key", func(r *http.Request) { r.Header.Del("Authorization") }, `{"confirm":true}`, 403, "admin_unauthorized"},
+		{"wrong administrator key", func(r *http.Request) { r.Header.Set("Authorization", "Bearer incorrect") }, `{"confirm":true}`, 403, "admin_unauthorized"},
+		{"two administrator keys", func(r *http.Request) { r.Header.Add("Authorization", "Bearer "+testAdminKey) }, `{"confirm":true}`, 403, "admin_unauthorized"},
+		{"joined authorization", func(r *http.Request) { r.Header.Set("Authorization", "Bearer "+testAdminKey+", Bearer "+testAdminKey) }, `{"confirm":true}`, 403, "admin_unauthorized"},
+		{"wrong authorization scheme", func(r *http.Request) { r.Header.Set("Authorization", "Basic "+testAdminKey) }, `{"confirm":true}`, 403, "admin_unauthorized"},
+		{"bearer cannot mint", func(r *http.Request) { r.Header.Set("Authorization", "Bearer credential") }, `{"confirm":true}`, 403, "admin_unauthorized"},
 		{"no origin", func(r *http.Request) { r.Header.Del("Origin") }, `{"confirm":true}`, 403, "origin_denied"},
 		{"null origin", func(r *http.Request) { r.Header.Set("Origin", "null") }, `{"confirm":true}`, 403, "origin_denied"},
 		{"wrong scheme", func(r *http.Request) { r.Header.Set("Origin", "http://example.test") }, `{"confirm":true}`, 403, "origin_denied"},
@@ -92,7 +90,7 @@ func TestGrantTrustAndRequestValidation(t *testing.T) {
 			if payload.Status != "error" || payload.Error.Code != tt.code {
 				t.Fatalf("payload=%+v", payload)
 			}
-			if strings.Contains(w.Body.String(), testIssuerKey) || strings.Contains(w.Body.String(), "credential") {
+			if strings.Contains(w.Body.String(), testAdminKey) || strings.Contains(w.Body.String(), "credential") {
 				t.Fatal("error echoed a request credential")
 			}
 			if w.Header().Get("Cache-Control") != "no-store" || w.Header().Get("Access-Control-Allow-Origin") != "" {
@@ -106,24 +104,24 @@ func TestPreviewDoesNotCreateGrantOrUseRedis(t *testing.T) {
 	m := noStoreManager(t)
 	for i := 0; i < 10; i++ {
 		response := authRequest(m, http.MethodGet, grantsPath, "", true)
-		if response.Code != 200 || strings.Contains(response.Body.String(), "authorization_code") || strings.Contains(response.Body.String(), testIssuerKey) {
+		if response.Code != 200 || strings.Contains(response.Body.String(), "authorization_code") || strings.Contains(response.Body.String(), testAdminKey) {
 			t.Fatal("invalid grant preview")
 		}
 		var preview grantPreview
 		if err := json.Unmarshal(response.Body.Bytes(), &preview); err != nil {
 			t.Fatal(err)
 		}
-		if preview.Principal != "tenant-a/operator" || preview.Scope != ScopeReadonly || preview.SessionTTLSeconds != 3600 || preview.GrantTTLSeconds != 300 {
+		if preview.Principal != "deployment-admin" || preview.Scope != ScopeReadonly || preview.SessionTTLSeconds != 3600 || preview.GrantTTLSeconds != 300 {
 			t.Fatalf("preview=%+v", preview)
 		}
 	}
 	if m.grantWindow.count != 0 {
 		t.Fatal("preview consumed issuance budget")
 	}
-	m.issuerConfigured = false
+	m.adminConfigured = false
 	response := authRequest(m, http.MethodGet, grantsPath, "", true)
-	if response.Code != 503 || !strings.Contains(response.Body.String(), "issuer_not_configured") {
-		t.Fatal("unconfigured issuer accepted")
+	if response.Code != 503 || !strings.Contains(response.Body.String(), "admin_not_configured") {
+		t.Fatal("unconfigured administrator accepted")
 	}
 }
 
@@ -165,7 +163,7 @@ func TestHTTPBudgetsAndMethodBoundaries(t *testing.T) {
 		}
 	}
 	if response := authRequest(m, http.MethodGet, sessionPath, "", true); response.Code != 401 {
-		t.Fatal("issuer key acted as bearer")
+		t.Fatal("administrator key acted as bearer")
 	}
 	if response := authRequest(m, http.MethodGet, "/api/cli/channel", "", true); response.Code != 404 {
 		t.Fatal("auth handler served a channel request")
@@ -176,7 +174,7 @@ func TestNewValidatesCoordinatesWithoutExposingSecrets(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1})
 	defer client.Close()
 	base := Options{Redis: client, Prefix: "state", EnvironmentID: "environment", EnvironmentName: "Environment",
-		PublicBaseURL: "https://example.test/prefix", IssuerKey: testIssuerKey}
+		PublicBaseURL: "https://example.test/prefix", AdminKey: testAdminKey}
 	m, err := New(base)
 	if err != nil || m.publicBaseURL != "https://example.test/prefix/" {
 		t.Fatalf("New=%v err=%v", m, err)
@@ -195,7 +193,7 @@ func TestNewValidatesCoordinatesWithoutExposingSecrets(t *testing.T) {
 		func(o *Options) { o.Prefix = "a{wrong-slot}" },
 		func(o *Options) { o.EnvironmentID = "" },
 		func(o *Options) { o.EnvironmentName = "" },
-		func(o *Options) { o.IssuerKey = "weak" },
+		func(o *Options) { o.AdminKey = "weak" },
 	} {
 		opts := base
 		mutate(&opts)
@@ -203,7 +201,7 @@ func TestNewValidatesCoordinatesWithoutExposingSecrets(t *testing.T) {
 			t.Fatal("invalid options accepted")
 		}
 	}
-	base.IssuerKey = ""
+	base.AdminKey = ""
 	if _, err := New(base); err != nil {
 		t.Fatalf("disabled issuance rejected: %v", err)
 	}
@@ -231,7 +229,7 @@ func TestDeploymentURLUsesBrowserOrigin(t *testing.T) {
 	} {
 		t.Run(tt.configured, func(t *testing.T) {
 			m, err := New(Options{Redis: client, Prefix: "origin-fixture", EnvironmentID: "origin-environment",
-				EnvironmentName: "Origin fixture", PublicBaseURL: tt.configured, IssuerKey: testIssuerKey})
+				EnvironmentName: "Origin fixture", PublicBaseURL: tt.configured, AdminKey: testAdminKey})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -290,7 +288,7 @@ func TestHTTPDeploymentPreservesURLAndRequiresMatchingOrigin(t *testing.T) {
 	server := httptest.NewUnstartedServer(nil)
 	publicBaseURL := "http://" + server.Listener.Addr().String() + "/alarmd/"
 	m, err := New(Options{Redis: client, Prefix: "http-fixture", EnvironmentID: "http-environment",
-		EnvironmentName: "HTTP fixture", PublicBaseURL: publicBaseURL, IssuerKey: testIssuerKey})
+		EnvironmentName: "HTTP fixture", PublicBaseURL: publicBaseURL, AdminKey: testAdminKey})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,8 +303,8 @@ func TestHTTPDeploymentPreservesURLAndRequiresMatchingOrigin(t *testing.T) {
 		}
 		r.Header.Set("Content-Type", "application/json")
 		if trusted {
-			r.Header.Set(IssuerKeyHeader, testIssuerKey)
-			r.Header.Set(PrincipalHeader, "tenant-a/operator")
+			r.Header.Set("Authorization", "Bearer "+testAdminKey)
+
 		}
 		if origin != "" {
 			r.Header.Set("Origin", origin)
@@ -327,7 +325,7 @@ func TestHTTPDeploymentPreservesURLAndRequiresMatchingOrigin(t *testing.T) {
 	}
 	status, body := request(http.MethodGet, grantsPath, "", "", true)
 	var preview grantPreview
-	if status != http.StatusOK || json.Unmarshal(body, &preview) != nil || preview.PublicBaseURL != publicBaseURL || preview.Principal != "tenant-a/operator" {
+	if status != http.StatusOK || json.Unmarshal(body, &preview) != nil || preview.PublicBaseURL != publicBaseURL || preview.Principal != "deployment-admin" {
 		t.Fatal("HTTP grant preview did not preserve deployment URL and principal")
 	}
 	wrongOrigin := strings.Replace(server.URL, "http://", "https://", 1)
@@ -340,7 +338,7 @@ func TestHTTPDeploymentPreservesURLAndRequiresMatchingOrigin(t *testing.T) {
 	}
 	status, _ = request(http.MethodPost, grantsPath, server.URL, `{"confirm":true}`, false)
 	if status != http.StatusForbidden {
-		t.Fatal("HTTP configuration bypassed issuer authentication")
+		t.Fatal("HTTP configuration bypassed administrator authentication")
 	}
 	status, body = request(http.MethodPost, grantsPath, server.URL, `{"confirm":true}`, true)
 	var issued struct {
@@ -398,7 +396,7 @@ func TestSlowBodyReleasesHTTPAdmissionSlot(t *testing.T) {
 	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	_, err = fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: example.test\r\nOrigin: https://example.test\r\n%s: %s\r\n%s: tenant-a/operator\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{", grantsPath, IssuerKeyHeader, testIssuerKey, PrincipalHeader)
+	_, err = fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: example.test\r\nOrigin: https://example.test\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nContent-Length: 16\r\n\r\n{", grantsPath, testAdminKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,5 +440,77 @@ func TestSaturatedHandlerDoesNotWaitForRejectedBody(t *testing.T) {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusTooManyRequests {
 		t.Fatalf("busy status=%d", response.StatusCode)
+	}
+}
+
+func TestLegacyHostHeadersCannotAuthorizeOrChoosePrincipal(t *testing.T) {
+	m := noStoreManager(t)
+	for _, authenticated := range []bool{false, true} {
+		r := httptest.NewRequest(http.MethodGet, grantsPath, nil)
+		r.Header.Set("X-Alarmd-Issuer-Key", testAdminKey)
+		r.Header.Set("X-Alarmd-Principal", "forged-user")
+		if authenticated {
+			r.Header.Set("Authorization", "Bearer "+testAdminKey)
+		}
+		w := httptest.NewRecorder()
+		m.Handler().ServeHTTP(w, r)
+		want := 403
+		if authenticated {
+			want = 200
+		}
+		if w.Code != want {
+			t.Fatalf("authenticated=%v status=%d", authenticated, w.Code)
+		}
+		if strings.Contains(w.Body.String(), "forged-user") || strings.Contains(w.Body.String(), testAdminKey) {
+			t.Fatal("host identity or key leaked into response")
+		}
+		if authenticated && !strings.Contains(w.Body.String(), `"principal":"deployment-admin"`) {
+			t.Fatal("deployment principal missing")
+		}
+	}
+}
+
+func TestAdministratorAndSessionKeysAreNotInterchangeable(t *testing.T) {
+	client := startRedis(t)
+	m := newTestManager(t, client)
+	response := login(t, m)
+	r := trustedRequest(http.MethodGet, "")
+	r.Header.Set("Authorization", "Bearer "+response.AccessToken)
+	w := httptest.NewRecorder()
+	m.Handler().ServeHTTP(w, r)
+	if w.Code != 403 {
+		t.Fatal("session token authorized grant issuance")
+	}
+	if _, err := m.Authenticate(context.Background(), testAdminKey); err == nil {
+		t.Fatal("administrator key authorized a session")
+	}
+}
+
+func TestAdministratorKeyHeaderCompatibleBounds(t *testing.T) {
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1})
+	defer client.Close()
+	for _, tt := range []struct {
+		key string
+		ok  bool
+	}{
+		{strings.Repeat("a", 32), true}, {strings.Repeat("~", 256), true},
+		{strings.Repeat("a", 31), false}, {strings.Repeat("a", 257), false},
+		{strings.Repeat("a", 32) + " b", false}, {strings.Repeat("a", 32) + "中", false},
+		{strings.Repeat("a", 32) + "\x7f", false},
+	} {
+		m, err := New(Options{Redis: client, Prefix: "bounds", EnvironmentID: "test", EnvironmentName: "test", PublicBaseURL: "http://example.test/", AdminKey: tt.key})
+		if (err == nil) != tt.ok {
+			t.Fatalf("key length %d ok=%v error=%v", len(tt.key), tt.ok, err)
+		}
+		if err != nil {
+			continue
+		}
+		r := httptest.NewRequest(http.MethodGet, grantsPath, nil)
+		r.Header.Set("Authorization", "Bearer "+tt.key)
+		w := httptest.NewRecorder()
+		m.Handler().ServeHTTP(w, r)
+		if w.Code != 200 {
+			t.Fatalf("length %d could not authorize: %d", len(tt.key), w.Code)
+		}
 	}
 }

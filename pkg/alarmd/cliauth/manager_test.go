@@ -23,7 +23,7 @@ import (
 	"github.com/go-redis/redis/v8"
 )
 
-const testIssuerKey = "fixture-only-issuer-key-0123456789abcdef"
+const testAdminKey = "fixture-only-administrator-key-0123456789abcdef"
 
 func startRedis(t *testing.T) *redis.Client {
 	t.Helper()
@@ -67,7 +67,7 @@ func newTestManager(t *testing.T, client redis.UniversalClient) *Manager {
 	t.Helper()
 	m, err := New(Options{Redis: client, Prefix: "test-alarmd", EnvironmentID: "test-env",
 		EnvironmentName: "Test environment", PublicBaseURL: "https://example.test/alarmd/",
-		IssuerKey: testIssuerKey, Now: func() time.Time { return time.Unix(1, 0) }})
+		AdminKey: testAdminKey, Now: func() time.Time { return time.Unix(1, 0) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,8 +78,8 @@ func authRequest(m *Manager, method, path, body string, trusted bool) *httptest.
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
 	if trusted {
-		r.Header.Set(IssuerKeyHeader, testIssuerKey)
-		r.Header.Set(PrincipalHeader, "tenant-a/operator")
+		r.Header.Set("Authorization", "Bearer "+testAdminKey)
+
 		r.Header.Set("Origin", "https://example.test")
 	}
 	w := httptest.NewRecorder()
@@ -190,7 +190,7 @@ func TestGrantAndSessionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.ID != response.SessionID || session.Principal != "tenant-a/operator" || session.Renewed || !session.ExpiresAt.Equal(response.ExpiresAt) {
+	if session.ID != response.SessionID || session.Principal != "deployment-admin" || session.Renewed || !session.ExpiresAt.Equal(response.ExpiresAt) {
 		t.Fatalf("session=%+v", session)
 	}
 	if session.ExpiresAt.Before(before.Add(SessionLifetime - time.Second)) {
@@ -207,7 +207,7 @@ func TestGrantAndSessionRoundTrip(t *testing.T) {
 	}
 	for _, key := range keys {
 		raw := client.Get(ctx, key).Val()
-		for _, secret := range []string{grant.GrantSecret, response.AccessToken, testIssuerKey} {
+		for _, secret := range []string{grant.GrantSecret, response.AccessToken, testAdminKey} {
 			if strings.Contains(key, secret) || strings.Contains(raw, secret) {
 				t.Fatal("stored raw credential")
 			}

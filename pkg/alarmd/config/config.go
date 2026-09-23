@@ -53,17 +53,15 @@ type HTTPConfig struct {
 	DiagnosticsListen string `yaml:"diagnostics_listen"`
 }
 
-// CLIConfig enables the deployment-operator evidence channel. IssuerKey is
-// injected only by a host route which already authenticated and authorized the
-// operator. It is never a CLI token and never part of RuntimeConfigFacts.
+// CLIConfig enables the deployment-operator evidence channel. AdminKey authorizes
+// grant issuance directly in alarmd; it is not a CLI session token or user identity.
+// The key must never be included in runtime configuration evidence.
 type CLIConfig struct {
 	Enabled         bool   `yaml:"enabled"`
 	EnvironmentID   string `yaml:"environment_id"`
 	EnvironmentName string `yaml:"environment_name"`
 	PublicBaseURL   string `yaml:"public_base_url"`
-	IssuerKey       string `yaml:"issuer_key" json:"-"`
-	// AuthorizationURL points at the protected host's authorization page. If
-	// empty, the embedded page uses its own protected grant route.
+	AdminKey        string `yaml:"admin_key" json:"-"`
 }
 
 // DiagnosticsFact renders the diagnostics surface for startup logging. Every
