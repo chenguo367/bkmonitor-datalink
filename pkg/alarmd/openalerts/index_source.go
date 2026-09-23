@@ -186,32 +186,3 @@ func waitIndex(ctx context.Context, duration time.Duration) bool {
 		return true
 	}
 }
-
-// HasOpenAlerts reports whether the link holds at least one unrecovered
-// alert for the strategy, as one point read.
-//
-// It exists for the control leader's difference, which asks the question for
-// each strategy the catalog let go. Asked the other way round - walk the
-// index and list every strategy in it - the cost follows the size of the
-// whole database rather than the number of alerts, because a cursor with a
-// pattern still visits every key, and on a deployment that shares this
-// database with the runtime state that is a periodic pass over hundreds of
-// thousands of keys that have nothing to do with alerts. One point read per
-// departed strategy replaces it.
-//
-// A set exists only while it has a member, so existence is the answer. The
-// error is returned rather than folded into false: not read is not the same
-// as read and empty, and only the second may be taken as "nothing to close".
-func (source *SetSource) HasOpenAlerts(ctx context.Context, key StrategyKey) (bool, error) {
-	if source == nil {
-		return false, errors.New("alarmd openalerts: no index source")
-	}
-	if !validStrategyKey(key) {
-		return false, errors.New("alarmd openalerts: invalid strategy identity")
-	}
-	members, err := source.client.SCard(ctx, source.prefix+":"+key.TenantID+":"+key.StrategyID).Result()
-	if err != nil {
-		return false, err
-	}
-	return members > 0, nil
-}

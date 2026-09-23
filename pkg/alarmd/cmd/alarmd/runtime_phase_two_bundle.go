@@ -1125,11 +1125,15 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// The control leader's difference against the strategies that no longer
 	// exist. It runs on every replica's loop and does nothing on a follower;
 	// the leader check is inside the round, so a failover needs no wiring of
-	// its own.
-	absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Source, linkd.Alerts, events,
-		cfg.PhaseTwo.Linkd.EventSourceID, cfg.PhaseTwo.Linkd.AbsentCloseSend)
-	bundle.dependencies.RunAbsentClose = absentClose.run
-	recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)
+	// its own. It exists only with the alert link's Console: the difference
+	// is the link's roster minus the snapshot, and a deployment without the
+	// link has neither the roster nor the alerts it would close.
+	if linkd.Console != nil {
+		absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Console, events,
+			cfg.PhaseTwo.Linkd.EventSourceID, cfg.PhaseTwo.Linkd.AbsentCloseSend)
+		bundle.dependencies.RunAbsentClose = absentClose.run
+		recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)
+	}
 	recorder.SetEffectiveCloseSource(maintenance.Stats)
 	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.

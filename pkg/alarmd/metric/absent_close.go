@@ -30,42 +30,43 @@ type absentCloseCollector struct {
 
 // differenceSides is the closed list of denominators, so every one of them
 // has a cell from the first scrape.
-var differenceSides = []string{"departed", "with_open_alerts", "candidates", "snapshot_strategies",
-	"published_strategies", "returned", "unreadable_index", "send_armed",
-	"snapshot_age_seconds", "max_snapshot_age_seconds"}
+var differenceSides = []string{"roster_strategies", "roster_unreadable", "roster_pages", "roster_complete",
+	"candidates", "snapshot_strategies", "published_strategies", "remembered_identities", "send_armed",
+	"snapshot_age_seconds", "max_snapshot_age_seconds", "link_health_age_seconds", "max_link_health_age_seconds",
+	"link_pending"}
 
 func newAbsentCloseCollector() *absentCloseCollector {
 	return &absentCloseCollector{
 		outcomeIs: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "absent_strategy_close_total"),
-			"What the control leader's difference against deleted strategies decided, by outcome. Counted per "+
-				"strategy except alert_closed, metadata_missing, producer_foreign and producer_unknown, which count "+
-				"alerts. closed counts decisions and alert_closed counts what went out: while the close is not "+
-				"armed (absent_strategy_difference side=send_armed is 0) closed rises and alert_closed stays at "+
-				"zero, which is what the difference would do. alert_closed rising round after round while closed "+
-				"zero, which is what the difference would do, and would_send counts the alerts that arming would "+
-				"have sent. alert_closed rising round after round while closed "+
-				"stays flat is not new work: it is the same alerts being closed again because the alert link has "+
-				"not removed their fingerprints from its index, which is what ends a strategy's candidacy. Why a "+
-				"whole round decided nothing is absent_strategy_round_total, not a cell here. Every cell exists "+
-				"from the start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
+			"What the control leader's difference against disabled or deleted strategies decided, by outcome. "+
+				"Counted per strategy except alert_closed, send_failed, would_send, producer_foreign and "+
+				"producer_unknown, which count alerts. closed counts decisions and alert_closed counts what went "+
+				"out: while the close is not armed (absent_strategy_difference side=send_armed is 0) closed rises, "+
+				"alert_closed stays at zero, and would_send counts the alerts arming would have sent. "+
+				"identity_unknown and revision_unknown are strategies decided and not sent because no business or "+
+				"revision could be found for them. Why a whole round decided nothing is "+
+				"absent_strategy_round_total, not a cell here. Every cell exists from the start so a zero is a "+
+				"reading and not an absence.", []string{"outcome"}, nil),
 		roundIs: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "absent_strategy_round_total"),
 			"How each round of the difference ended: none is a round that decided, and the rest name the fact "+
-				"that was not good enough to decide on - snapshot_unusable (the source was not observed this "+
-				"round), snapshot_empty, snapshot_stale, snapshot_shrunk (the strategy list itself lost a large "+
-				"share of its entries) and difference_too_large. Rounds, not strategies: this says what this "+
-				"service could do, where absent_strategy_close_total says what the data was. none is the "+
-				"denominator the outcome family is read against.", []string{"disposition"}, nil),
+				"that was not good enough to decide on - link_unavailable (the alert link's roster could not be "+
+				"read), link_unhealthy (the link says its own set maintenance is failing or has not succeeded "+
+				"recently), snapshot_unusable (the source was not observed this round), snapshot_empty, "+
+				"snapshot_stale and snapshot_shrunk (the strategy list itself lost a large share of its "+
+				"entries). Rounds, not strategies. none is the denominator the outcome family is read against.",
+			[]string{"disposition"}, nil),
 		sides: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "absent_strategy_difference"),
-			"The sizes the last round decided on: departed is the strategies the catalog let go and still "+
-				"remembers, with_open_alerts how many of those the alert link still holds an alert for, candidates "+
-				"the difference itself, snapshot_strategies and published_strategies what it was judged against, "+
-				"returned the departed strategies the source lists again, and unreadable_index the ones whose alert "+
-				"index could not be read, and send_armed whether this deployment has armed the close at all "+
-				"(0 means every decision is reported and none is sent). snapshot_age_seconds is reported beside "+
-				"max_snapshot_age_seconds so that a snapshot_stale round can be read as the source falling "+
-				"behind rather than as a bound that does not fit this deployment. A candidates of zero beside a "+
-				"departed of zero is a quiet deployment; beside a large departed it is a difference that "+
-				"refused.", []string{"side"}, nil),
+			"The sizes the last round decided on: roster_strategies is the strategies the alert link listed "+
+				"with an unrecovered alert, roster_unreadable the ones it listed and could not read, roster_pages "+
+				"and roster_complete how far the walk of its roster got, candidates the difference itself, "+
+				"snapshot_strategies and published_strategies what it was judged against, remembered_identities "+
+				"the strategies the catalog let go and still knows the business of, and send_armed whether this "+
+				"deployment has armed the close at all (0 means every decision is reported and none is sent). "+
+				"Each age is reported beside its bound - snapshot_age_seconds beside max_snapshot_age_seconds, "+
+				"link_health_age_seconds (since the link's last successful discovery) beside "+
+				"max_link_health_age_seconds - so a refused round can be read as the side falling behind rather "+
+				"than as a bound that does not fit. link_pending is the link's own refresh backlog.",
+			[]string{"side"}, nil),
 	}
 }
 

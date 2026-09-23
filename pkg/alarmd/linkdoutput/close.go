@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -20,8 +21,9 @@ const CloseReasonInactive = "strategy_inactive"
 // strategy behind this alert any more".
 const CloseReasonAbsent = "strategy_absent"
 
-// CloseRequest carries an active alert's identity and its actual severity,
-// obtained from Linkd reconciliation. A SET member alone is insufficient.
+// CloseRequest carries an active alert's identity and its severity. A SET
+// member alone is insufficient. An empty severity is accepted for the absent
+// close only, and closes at every built-in level; see closeAtEveryLevel.
 // OccurredAt is a current maintenance decision, never a historical Slot.
 //
 // Reason says which close this is. Empty is CloseReasonInactive, which is
@@ -54,9 +56,6 @@ func ConvertClose(request CloseRequest) (Event, error) {
 	if err != nil || len(fingerprint) != 16 || hex.EncodeToString(fingerprint) != request.Fingerprint {
 		return Event{}, errors.New("close requires the native source alert fingerprint")
 	}
-	if request.Severity == "" || len(request.Severity) > MaxSeverityBytes {
-		return Event{}, errors.New("close requires the active alert severity")
-	}
 	reason := request.Reason
 	if reason == "" {
 		reason = CloseReasonInactive
@@ -64,6 +63,13 @@ func ConvertClose(request CloseRequest) (Event, error) {
 	text, known := closeText[reason]
 	if !known {
 		return Event{}, errors.New("close requires a reason this build can name")
+	}
+	if len(request.Severity) > MaxSeverityBytes || (request.Severity == "" && reason != CloseReasonAbsent) {
+		return Event{}, errors.New("close requires the active alert severity")
+	}
+	evaluations := []wireEvaluation{{Severity: request.Severity, Action: ActionClosed, ActionReason: reason}}
+	if request.Severity == "" {
+		evaluations = closeAtEveryLevel(reason)
 	}
 	// Stable within an attempt; retries use the same event. Later maintenance
 	// rechecks current rules and uses a new current time rather than replaying
@@ -74,7 +80,7 @@ func ConvertClose(request CloseRequest) (Event, error) {
 	id := hex.EncodeToString(digest[:])
 	wire := wireEvent{TenantID: request.TenantID, EventID: id, AlertID: request.Fingerprint,
 		Title: text.title, Content: text.content,
-		Evaluations: []wireEvaluation{{Severity: request.Severity, Action: ActionClosed, ActionReason: reason}},
+		Evaluations: evaluations,
 		Dimensions:  map[string]json.RawMessage{}, OccurredAt: wireTime(request.OccurredAt.Unix()), ProducedAt: wireTime(request.OccurredAt.Unix()),
 		Labels:    wireLabels{StrategyID: request.StrategyID, StrategyVersion: request.StrategyRevision, BusinessID: request.BusinessID},
 		ExtraData: wireExtraData{EvaluationFamily: evaluationFamilyMetricAlgorithm},
@@ -84,4 +90,28 @@ func ConvertClose(request CloseRequest) (Event, error) {
 		return Event{}, fmt.Errorf("encode close: %w", err)
 	}
 	return Event{EventID: id, AlertID: request.Fingerprint, TenantID: request.TenantID, Payload: payload, Severity: request.Severity, Action: ActionClosed}, nil
+}
+
+// closeAtEveryLevel is a close whose severity is not known: one closed
+// evaluation for each level this build names. The consumer applies the
+// evaluation whose severity is the active alert's own and records the others
+// as finding no alert at that level, which changes nothing; a severity it
+// does not know would reject the whole event, which is why only the built-in
+// names are written - the same names every triggered event of this build
+// uses, so the consumer knows them wherever it created the alert.
+//
+// Only the absent close is allowed to ask for it. That close comes from the
+// link's reconciliation, which carries no severity; the inactive close keeps
+// requiring one, because what it closes has a Plan whose levels are known.
+func closeAtEveryLevel(reason string) []wireEvaluation {
+	levels := make([]uint32, 0, len(builtInSeverities))
+	for level := range builtInSeverities {
+		levels = append(levels, level)
+	}
+	sort.Slice(levels, func(i, j int) bool { return levels[i] < levels[j] })
+	evaluations := make([]wireEvaluation, 0, len(levels))
+	for _, level := range levels {
+		evaluations = append(evaluations, wireEvaluation{Severity: builtInSeverities[level], Action: ActionClosed, ActionReason: reason})
+	}
+	return evaluations
 }
