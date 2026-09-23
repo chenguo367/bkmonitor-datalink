@@ -174,7 +174,7 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	record, _ := json.Marshal(storedRecord{EnvironmentID: m.environmentID, Scope: ScopeReadonly, CodeChallenge: input.CodeChallenge})
-	result, err := m.run(r.Context(), issueScript, []string{m.prefix + "grant:" + digest(secret)}, string(record), GrantLifetime.Milliseconds())
+	result, err := m.run(r.Context(), issueScript, []string{m.prefix + "grant:" + digest(secret), m.epochKey()}, string(record), GrantLifetime.Milliseconds())
 	if err != nil {
 		return err
 	}
@@ -211,6 +211,9 @@ type loginResponse struct {
 	PairingID          string    `json:"pairing_id,omitempty"`
 	PairingIdleSeconds int64     `json:"pairing_idle_seconds,omitempty"`
 	Pairing            string    `json:"pairing"`
+	// BoundToChallenge says the exchanged grant was bound to the verifier
+	// that exchanged it: a loopback login checks it.
+	BoundToChallenge bool `json:"bound_to_challenge"`
 }
 
 func (m *Manager) login(record storedRecord, token, refresh string) loginResponse {
@@ -272,6 +275,10 @@ func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
 		m.count(CountStoreUnavailable)
 		return err
 	}
+	if status, _ := firstStatus(result); status == 3 {
+		m.count(CountExchangeRejected)
+		return failure("grant_not_bound", "A loopback login takes only a code issued for its own challenge; this code was issued for copying. Use auth login with it, or authorize the listening CLI from the page.", 401)
+	}
 	record, _, err := resultRecord(result)
 	if ErrorCode(err) == "auth_expired_or_revoked" {
 		m.count(CountExchangeRejected)
@@ -281,13 +288,22 @@ func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	m.count(CountExchanged)
-	if paired, _ := result[len(result)-1].(int64); paired != 1 || len(result) != 4 {
+	// The one success reply is five long; its length is checked before any
+	// index is read, so a later branch of the script cannot panic this.
+	var paired, bound int64
+	if len(result) == 5 {
+		paired, _ = result[3].(int64)
+		bound, _ = result[4].(int64)
+	}
+	if paired != 1 {
 		m.count(CountPairingsRefused)
 		refresh = ""
 	} else {
 		m.count(CountPairingsIssued)
 	}
-	return writeJSON(w, m.login(record, token, refresh))
+	response := m.login(record, token, refresh)
+	response.BoundToChallenge = bound == 1
+	return writeJSON(w, response)
 }
 
 // handleRefresh spends a renewal credential for a new session and the next

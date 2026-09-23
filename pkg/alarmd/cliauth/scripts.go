@@ -13,6 +13,9 @@ local clock = redis.call('TIME')
 local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 local record = cjson.decode(ARGV[1])
 record.expires_at_ms = now + tonumber(ARGV[2])
+-- The grant belongs to the environment's current revocation epoch: a
+-- revocation before its exchange voids it too.
+record.epoch = tonumber(redis.call('GET', KEYS[2]) or '0')
 local encoded = cjson.encode(record)
 if not redis.call('SET', KEYS[1], encoded, 'PX', ARGV[2], 'NX') then
   return {2}
@@ -32,11 +35,18 @@ if record.environment_id ~= ARGV[1] or record.scope ~= ARGV[3] or record.expires
 end
 -- A grant made for a loopback login answers only the verifier's holder. A
 -- wrong or missing verifier leaves the grant for its holder to exchange.
-if record.code_challenge and record.code_challenge ~= '' and record.code_challenge ~= ARGV[9] then
-  return {0}
+local epoch = tonumber(redis.call('GET', KEYS[5]) or '0')
+if (tonumber(record.epoch) or 0) ~= epoch then return {0} end
+local bound = 0
+if record.code_challenge and record.code_challenge ~= '' then
+  if record.code_challenge ~= ARGV[9] then return {0} end
+  bound = 1
+elseif ARGV[9] ~= '' then
+  -- A verifier offered for a grant bound to none: the loopback login takes
+  -- only a grant its own challenge was bound to. Left for its holder.
+  return {3}
 end
 record.code_challenge = nil
-local epoch = tonumber(redis.call('GET', KEYS[5]) or '0')
 record.session_id = ARGV[2]
 record.expires_at_ms = now + tonumber(ARGV[4])
 record.epoch = epoch
@@ -62,7 +72,7 @@ if paired == 1 then
   redis.call('SET', KEYS[3], pairing, 'PX', ARGV[6])
   redis.call('ZADD', KEYS[4], now, ARGV[5])
 end
-return {1, encoded, 0, paired}
+return {1, encoded, 0, paired, bound}
 `
 
 const sessionScript = `
@@ -97,13 +107,21 @@ return {1, raw, renewed}
 // simply absent.
 //
 // Returns {0} absent or revoked, {4} the administrator key changed since the
-// pairing, {2} a key collision, {1, session, 0, pairing_id} renewed.
+// pairing, {2} a key collision, {6, sealed} spent within the grace with the
+// sealed answer of that renewal, {1, session, 0, pairing_id} renewed.
 const refreshScript = `
 redis.replicate_commands()
 local clock = redis.call('TIME')
 local now = tonumber(clock[1]) * 1000 + math.floor(tonumber(clock[2]) / 1000)
 local raw = redis.call('GET', KEYS[1])
-if not raw then return {0} end
+if not raw then
+  -- Spent moments ago: the answer to that renewal, sealed with the spent
+  -- credential, is returned again so a reply lost on the way is not a lost
+  -- pairing.
+  local sealed = redis.call('GET', KEYS[6])
+  if sealed then return {6, sealed} end
+  return {0}
+end
 local pairing = cjson.decode(raw)
 local epoch = tonumber(redis.call('GET', KEYS[5]) or '0')
 if pairing.environment_id ~= ARGV[1] or pairing.scope ~= ARGV[2] or (tonumber(pairing.epoch) or 0) ~= epoch then
@@ -121,6 +139,7 @@ local session = cjson.encode({session_id = ARGV[4], environment_id = ARGV[1], sc
   pairing_id = pairing.pairing_id, expires_at_ms = now + tonumber(ARGV[5])})
 if redis.call('EXISTS', KEYS[2]) == 1 or redis.call('EXISTS', KEYS[3]) == 1 then return {2} end
 redis.call('DEL', KEYS[1])
+redis.call('SET', KEYS[6], ARGV[7], 'PX', ARGV[8])
 redis.call('SET', KEYS[2], cjson.encode(pairing), 'PX', ARGV[6])
 redis.call('SET', KEYS[3], session, 'PX', ARGV[5])
 redis.call('ZADD', KEYS[4], now, pairing.pairing_id)

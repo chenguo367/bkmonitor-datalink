@@ -120,6 +120,7 @@ function load(pageURL, respond, loop) {
   });
   let requests = 0;
   const calls = [];
+  const ticks = [];
   const context = {
     document: { getElementById: element },
     location: new URL(pageURL),
@@ -128,7 +129,7 @@ function load(pageURL, respond, loop) {
     crypto: require('crypto').webcrypto,
     btoa: s => Buffer.from(s, 'binary').toString('base64'),
     confirm: () => true,
-    setInterval: () => 0,
+    setInterval: fn => { ticks.push(fn); return 0; },
     fetch: async (url, options) => {
       const target = String(url);
       calls.push({ url: target, method: (options && options.method) || 'GET', body: options && options.body });
@@ -142,7 +143,7 @@ function load(pageURL, respond, loop) {
     },
   };
   new Function(...Object.keys(context), script)(...Object.values(context));
-  return { elements, requests: () => requests, calls };
+  return { elements, requests: () => requests, calls, tick: async () => { for (const fn of ticks) await fn(); } };
 }
 
 const answer = (status, body) => ({ ok: status < 400, status, json: async () => body });
@@ -221,6 +222,17 @@ async function inspect(pageURL, respond, then) {
   runs.loopback_grant_refused = await loopbackRun(async (url) => url.pathname === '/ready'
     ? answer(200, { state: commandState(url), code_challenge: challenge }) : answer(200, {}),
     () => answer(403, { status: 'error', error: { code: 'admin_unauthorized', message: 'server sentence' } }));
+  {
+    // Nothing answers on the loopback address: after five probes the page
+    // says the browser may be blocking it and opens the copy fallback.
+    const page = load(entryPage, () => answer(200, preview), null);
+    await settle();
+    // An element the script never touched keeps the page's own state: hidden.
+    const hidden = () => !(page.elements.manual && page.elements.manual.hidden === false);
+    const early = { probe: page.elements.probe.textContent, manual_hidden: hidden() };
+    for (let i = 0; i < 4; i++) await page.tick();
+    runs.blocked = { early, probe: page.elements.probe.textContent, manual_hidden: hidden() };
+  }
   {
     const page = load(entryPage, (url, options) => String(url).endsWith('/revoke-all')
       ? (runs.revoke_body = JSON.parse(options.body), answer(200, { revoked_pairings: 3, sessions_revoked: true }))
@@ -308,6 +320,19 @@ func checkLoopback(t *testing.T, raw map[string]json.RawMessage) {
 		if !got.Error || !strings.Contains(got.Status, says) || strings.Contains(got.Status, "server sentence") {
 			t.Errorf("%s says what to do: %+v", name, got)
 		}
+	}
+	var blocked struct {
+		Early struct {
+			Probe        string `json:"probe"`
+			ManualHidden bool   `json:"manual_hidden"`
+		} `json:"early"`
+		Probe        string `json:"probe"`
+		ManualHidden bool   `json:"manual_hidden"`
+	}
+	_ = json.Unmarshal(raw["blocked"], &blocked)
+	if strings.Contains(blocked.Early.Probe, "拦截") || !blocked.Early.ManualHidden ||
+		!strings.Contains(blocked.Probe, "拦截") || !strings.Contains(blocked.Probe, "复制授权码") || blocked.ManualHidden {
+		t.Errorf("five unanswered probes say the browser may block the local address and open the fallback: %+v", blocked)
 	}
 	var revoke struct {
 		Status string `json:"status"`

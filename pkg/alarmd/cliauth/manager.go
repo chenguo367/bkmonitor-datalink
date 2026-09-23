@@ -60,6 +60,7 @@ type Session struct {
 	ExpiresAt     time.Time `json:"expires_at"`
 	Renewed       bool      `json:"renewed"`
 	TokenHash     string    `json:"-"`
+	pairingID     string
 }
 
 // Error contains a safe public message, never an underlying Redis error or a
@@ -216,7 +217,7 @@ type storedRecord struct {
 
 func (r storedRecord) session(hash string, renewed bool) Session {
 	return Session{ID: r.SessionID, EnvironmentID: r.EnvironmentID,
-		Scope: r.Scope, ExpiresAt: time.UnixMilli(r.ExpiresAtMS).UTC(), Renewed: renewed, TokenHash: hash}
+		Scope: r.Scope, ExpiresAt: time.UnixMilli(r.ExpiresAtMS).UTC(), Renewed: renewed, TokenHash: hash, pairingID: r.PairingID}
 }
 
 func (m *Manager) run(ctx context.Context, script string, keys []string, args ...interface{}) ([]interface{}, error) {
