@@ -137,6 +137,8 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	ops = append(ops, obchannel.SlotOperations(obchannel.SlotOptions{Resolve: newCLISlotResolver(cfg, diagnosticRuntime),
 		Evidence: newCLISlotEvidenceReader(cfg, diagnosticRuntime), UQ: queryClient})...)
 	var router *evidenceroute.Router
+	// The diagnosis composes the reads above, so it is registered last.
+	ops = append(ops, obchannel.DiagnoseOperation(native, ops))
 	channelOptions := obchannel.Options{Auth: manager, EnvironmentID: cfg.CLI.EnvironmentID, Replica: cfg.PhaseTwo.Worker.ID, Incarnation: control.Incarnation, Build: version + "/" + commit, Concurrency: 1, Operations: ops}
 	if control.Server != nil {
 		channelOptions.Route = func(ctx context.Context, call obchannel.Invocation) obchannel.Response {
