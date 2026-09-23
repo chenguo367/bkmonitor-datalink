@@ -1962,6 +1962,35 @@ type OpenAlertSetFacts struct {
 	// Comparison puts what this replica sent beside what the link holds for
 	// the same strategies. Absent on a copy that does not read the index.
 	Comparison *OpenAlertComparison `json:"comparison,omitempty"`
+	// TargetScopeClose is the close of alerts whose target left the
+	// strategy's monitoring scope, read beside the set it acts on. Absent
+	// on a replica that does not run it.
+	TargetScopeClose *TargetScopeCloseFacts `json:"target_scope_close,omitempty"`
+}
+
+// TargetScopeCloseFacts is what the target-scope close decided and holds:
+// the outcome totals (every outcome present, zeros included), how many
+// fingerprints wait for a second Slot and how many are confirmed, and up
+// to eight strategies with at most three fingerprint prefixes per list.
+// Armed false means every decision is counted as would_send and none sent.
+type TargetScopeCloseFacts struct {
+	Armed      bool                       `json:"armed"`
+	Pending    int                        `json:"pending"`
+	Confirmed  int                        `json:"confirmed"`
+	MaxEntries int                        `json:"max_entries"`
+	Outcomes   map[string]uint64          `json:"outcomes"`
+	Strategies []TargetScopeCloseStrategy `json:"strategies,omitempty"`
+}
+
+// TargetScopeCloseStrategy is one strategy's reading.
+type TargetScopeCloseStrategy struct {
+	TenantID      string            `json:"tenant_id"`
+	StrategyID    string            `json:"strategy_id"`
+	Pending       int               `json:"pending"`
+	Confirmed     int               `json:"confirmed"`
+	Outcomes      map[string]uint64 `json:"outcomes,omitempty"`
+	PendingSample []string          `json:"pending_sample,omitempty"`
+	DecidedSample []string          `json:"decided_sample,omitempty"`
 }
 
 // OpenAlertComparison is the recovery gate's side-by-side reading: the keys

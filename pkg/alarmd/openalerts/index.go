@@ -770,6 +770,39 @@ func (cache *Cache) indexMembers(key StrategyKey) []string {
 	return result
 }
 
+// Holds answers, from memory and without counting a lookup, whether the
+// strategy's set carries the fingerprint. judged is false whenever the
+// answer would not be the link's: a copy that does not read the index, a
+// subscription that is not ready, sets disjoint from this process's own
+// sends (see DisjointMinimum), or a strategy whose set has no current
+// calibration. A caller that acts on "not a member" must not act on an
+// unjudged answer.
+func (cache *Cache) Holds(key StrategyKey, fingerprint string) (held, judged bool) {
+	if cache == nil || cache.index == nil {
+		return false, false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	now := cache.now()
+	entry := cache.index.entries[key]
+	if !cache.index.ready || cache.index.disjoint || !cache.calibrated(entry, now) {
+		return false, false
+	}
+	return cache.indexContains(member{key: key, fingerprint: fingerprint}, now, false), true
+}
+
+// OwnEventSourceID is this deployment's source as the last successful
+// calibration named it; empty until one has. An alert of another source is
+// not this deployment's to close.
+func (cache *Cache) OwnEventSourceID() string {
+	if cache == nil || cache.index == nil {
+		return ""
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.index.eventSourceID
+}
+
 func (cache *Cache) ActiveAlerts(key StrategyKey) []Alert {
 	if cache == nil || cache.index == nil {
 		return nil

@@ -477,6 +477,10 @@ type phaseTwoWorkerBundleDependencies struct {
 	// goroutine for the process, which decides per round whether it is the
 	// leader.
 	RunAbsentClose func(context.Context)
+	// RunTargetScopeClose decides the closes of alerts whose target left
+	// the strategy's scope, from what this replica's own admission step
+	// turned away. Every replica runs its own.
+	RunTargetScopeClose func(context.Context)
 	// RefreshPlatformSettings reads the platform's dynamic configuration
 	// into the process copy and brings what evaluates by it up to date; run
 	// once at start and then once a minute.
@@ -2298,6 +2302,13 @@ func (bundle *phaseTwoWorkerBundle) startMaintenance() {
 	if bundle.dependencies.RunAbsentClose != nil {
 		bundle.maintenanceWG.Add(1)
 		go func() { defer bundle.maintenanceWG.Done(); bundle.dependencies.RunAbsentClose(bundle.maintenanceCtx) }()
+	}
+	if bundle.dependencies.RunTargetScopeClose != nil {
+		bundle.maintenanceWG.Add(1)
+		go func() {
+			defer bundle.maintenanceWG.Done()
+			bundle.dependencies.RunTargetScopeClose(bundle.maintenanceCtx)
+		}()
 	}
 	if bundle.dependencies.RunEffectiveTime != nil {
 		bundle.maintenanceWG.Add(1)

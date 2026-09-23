@@ -30,6 +30,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
@@ -434,6 +435,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_lookup_total"] = "variableLabels: {answer}"
 	expected["bkmonitor_alarmd_effective_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_absent_strategy_close_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_target_scope_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_absent_strategy_difference"] = "variableLabels: {side}"
 	expected["bkmonitor_alarmd_absent_strategy_round_total"] = "variableLabels: {disposition}"
 	expected["bkmonitor_alarmd_open_alert_set_entries"] = "variableLabels: {kind}"
@@ -963,6 +965,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_lookup_total")] = len(openalerts.Answers)
 	bounds[fqName("effective_close_total")] = len(observability.EffectiveCloseOutcomes)
 	bounds[fqName("absent_strategy_close_total")] = len(absentalerts.Outcomes)
+	bounds[fqName("target_scope_close_total")] = len(scopeclose.Outcomes)
 	bounds[fqName("absent_strategy_round_total")] = len(absentalerts.Refusals)
 	bounds[fqName("absent_strategy_difference")] = len(differenceSides)
 	bounds[fqName("open_alert_set_entries")] = 3

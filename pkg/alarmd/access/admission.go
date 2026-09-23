@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
@@ -27,6 +28,93 @@ type SeriesAdmission interface {
 // AdmissionObserver counts decisions. It is called once per series per plan, so
 // it must stay allocation-free.
 type AdmissionObserver func(filter, result, reason string)
+
+// ScopeDrop is one series a Plan's monitoring target turned away, as the
+// target-scope close needs it: which Plan, whether the rejection was the
+// target's own verdict on current facts (admission.DefinitelyOutside), and,
+// only then, the fingerprint the evaluator would have given the record.
+//
+// Fingerprint is empty when the rejection was not definitive, and when the
+// Plan does not produce fingerprinted alerts at all (no frozen revision or
+// no output identity - the evaluator computes none there either), or the
+// record's dimensions cannot be fingerprinted.
+type ScopeDrop struct {
+	Plan             execution.PlanIdentity
+	Filter, Reason   string
+	Definitive       bool
+	Fingerprint      string
+	StrategyRevision int64
+	// Round is the Slot's evaluation time: two drops of one fingerprint are
+	// two observations only when they come from two Slots.
+	Round int64
+}
+
+// ScopeDropObserver receives the target filters' rejections. It is called
+// on the query's own goroutine, once per rejected series per Plan, and must
+// not block.
+type ScopeDropObserver func(ScopeDrop)
+
+// planOutput is what the evaluator fingerprints a Plan's records under: the
+// frozen strategy reference and the output identity. Held beside the scopes
+// so a rejected record can be given the fingerprint the evaluator would
+// have given it had the record been admitted.
+type planOutput struct {
+	strategyID string
+	revision   int64
+	identity   *contract.MonitorOutputIdentity
+}
+
+type planOutputs map[execution.PlanIdentity]planOutput
+
+func buildPlanOutputs(duePlans []execution.DuePlan) planOutputs {
+	outputs := make(planOutputs, len(duePlans))
+	for _, due := range duePlans {
+		if due.CompiledPlan == nil {
+			continue
+		}
+		ref := due.CompiledPlan.StrategyRef()
+		outputs[due.Identity] = planOutput{strategyID: ref.StrategyID, revision: int64(ref.SnapshotRevision),
+			identity: due.CompiledPlan.OutputIdentity()}
+	}
+	return outputs
+}
+
+// fingerprint is trigger.EvaluateV2's dedupe identity for a record of this
+// Plan: the same function over the same strategy, business, dimensions and
+// output identity, under the same condition that there is a frozen revision
+// and an identity at all.
+func (output planOutput) fingerprint(businessID string, dimensions map[string]json.RawMessage) string {
+	if output.revision <= 0 || output.identity == nil {
+		return ""
+	}
+	fingerprint, err := contract.MonitorDedupeMD5(output.strategyID, businessID, dimensions, *output.identity)
+	if err != nil {
+		return ""
+	}
+	return fingerprint
+}
+
+// reportScopeDrop hands a target filter's rejection to the target-scope
+// close. The fingerprint is computed only for a definitive rejection: it is
+// the one the close can act on, and the only one worth an MD5 per series.
+// Rejections by any other filter - the host status filter above all - are
+// not reported: the record is still inside its target.
+func (adapter *seriesAdapter) reportScopeDrop(identity execution.PlanIdentity, plan admission.PlanContext, facts *admission.Facts, filter, reason string) {
+	if adapter.scopeDrop == nil {
+		return
+	}
+	if filter != (admission.TargetScopeFilter{}).Name() && filter != (admission.TargetPlanFilter{}).Name() {
+		return
+	}
+	drop := ScopeDrop{Plan: identity, Filter: filter, Reason: reason, Round: adapter.round,
+		Definitive: admission.DefinitelyOutside(plan, facts, filter, reason)}
+	if drop.Definitive {
+		output := adapter.outputs[identity]
+		drop.StrategyRevision = output.revision
+		drop.Fingerprint = output.fingerprint(identity.BusinessID, facts.Dimensions)
+	}
+	adapter.scopeDrop(drop)
+}
 
 // planScopes indexes the frozen monitoring targets of the plans in one
 // execution. It is built once per execution rather than looked up per series.

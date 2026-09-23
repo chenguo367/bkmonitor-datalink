@@ -1,0 +1,79 @@
+package main
+
+import (
+	"context"
+	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
+)
+
+// targetScopeCloseInterval is how often the close decides. The decision
+// needs two Slots of the same strategy, and the shortest evaluation interval
+// is a minute; twice a minute keeps a confirmed observation from waiting a
+// whole Slot for its close without making the step itself a load.
+const targetScopeCloseInterval = 30 * time.Second
+
+// targetScopeCloseLoop runs the close's decisions on this replica. The
+// observations come from this replica's own admission step, so every replica
+// runs its own loop over what it saw; there is no leader and nothing shared.
+type targetScopeCloseLoop struct {
+	bundle *phaseTwoWorkerBundle
+	closer *scopeclose.Closer
+}
+
+func (loop targetScopeCloseLoop) run(ctx context.Context) {
+	ticker := time.NewTicker(targetScopeCloseInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		loop.bundle.mu.RLock()
+		stopping := loop.bundle.draining || loop.bundle.closed
+		loop.bundle.mu.RUnlock()
+		if stopping {
+			continue
+		}
+		step, cancel := context.WithTimeout(ctx, targetScopeCloseInterval/2)
+		loop.closer.Step(step)
+		cancel()
+	}
+}
+
+// scopeDropObserver hands the admission step's target rejections to the
+// close.
+func scopeDropObserver(closer *scopeclose.Closer) access.ScopeDropObserver {
+	return func(drop access.ScopeDrop) {
+		closer.Observe(scopeclose.Drop{TenantID: drop.Plan.TenantID, BusinessID: drop.Plan.BusinessID,
+			StrategyID: drop.Plan.StrategyID, Fingerprint: drop.Fingerprint, StrategyRevision: drop.StrategyRevision,
+			Round: drop.Round, Definitive: drop.Definitive})
+	}
+}
+
+// withTargetScopeClose puts the close's reading beside the open set it acts
+// on, in the replica's facts and so in fleet.get and the health view.
+func withTargetScopeClose(source func() *fleet.OpenAlertSetFacts, closer *scopeclose.Closer) func() *fleet.OpenAlertSetFacts {
+	return func() *fleet.OpenAlertSetFacts {
+		facts := source()
+		if facts != nil && closer != nil {
+			facts.TargetScopeClose = targetScopeCloseFacts(closer.Facts())
+		}
+		return facts
+	}
+}
+
+// targetScopeCloseFacts carries the close's facts field for field.
+func targetScopeCloseFacts(facts scopeclose.Facts) *fleet.TargetScopeCloseFacts {
+	result := &fleet.TargetScopeCloseFacts{Armed: facts.Armed, Pending: facts.Pending, Confirmed: facts.Confirmed,
+		MaxEntries: facts.MaxEntries, Outcomes: facts.Outcomes}
+	for _, row := range facts.Strategies {
+		result.Strategies = append(result.Strategies, fleet.TargetScopeCloseStrategy{TenantID: row.TenantID,
+			StrategyID: row.StrategyID, Pending: row.Pending, Confirmed: row.Confirmed, Outcomes: row.Outcomes,
+			PendingSample: row.PendingSample, DecidedSample: row.DecidedSample})
+	}
+	return result
+}
