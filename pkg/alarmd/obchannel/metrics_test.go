@@ -133,6 +133,11 @@ func TestMetricsGetSaysWhenACollectorFailedAndKeepsNonFiniteValues(t *testing.T)
 	if len(result.Families) != 2 || *result.Families[0].Series[0].Value != 64 || result.Families[1].Series[0].NonFinite != "NaN" {
 		t.Errorf("families = %+v", result.Families)
 	}
+	// Asked only for families that answered, the read is still not
+	// complete: which families the failed collector owns is not known.
+	if _, out, only := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_redis_pool_size"}}); out.Evidence.Complete || len(only.Absent) != 0 || only.GatherError == "" {
+		t.Errorf("read beside a failed collector: complete %v absent %v gather_error %q", out.Evidence.Complete, only.Absent, only.GatherError)
+	}
 	_, _, first := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_wide_total"}})
 	_, _, second := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_wide_total"}})
 	for i := range first.Families[0].Series {
