@@ -183,7 +183,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// Where the link writes its open alert sets is the link's answer; it is
 	// read before anything connects, so the index, the difference and the
 	// endpoint list all read the one location.
-	cfg = adoptLinkdLocation(ctx, cfg, openalerts.DiscoverTarget)
+	cfg, linkdDiscovery := adoptLinkdLocation(ctx, cfg, openalerts.DiscoverTarget)
 	// Phase two limits repeated diagnostics per (reason, Query Group) bucket
 	// and reports suppressed counts; the phase-one per-reason budget hid every
 	// other Query Group's coordinates once one object became noisy.
@@ -1222,7 +1222,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		source:           bundle.sourceFleetFacts,
 		endpoints: withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
 			bundle.sourceFleetFacts, events.State, openAlertSetFactsSource(openAlertCopy, external.Now), external.Now),
-			linkd.Console, external.Now),
+			linkd.Console, linkdDiscovery, external.Now),
 		// The same snapshot the readiness endpoint serves, so the fleet and
 		// the probe cannot disagree about one replica.
 		readiness: readinessFactsSource(health),

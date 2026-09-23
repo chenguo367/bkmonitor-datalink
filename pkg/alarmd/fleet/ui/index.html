@@ -1531,6 +1531,21 @@ var LINK_HEALTH = {
   discovery_never_succeeded: '从未成功完成全量发现',
   discovery_stale: '距上次成功的全量发现已超过界限'
 };
+// The startup question "where does the link write", and what came of it.
+var LINKD_DISCOVERY = {
+  adopted: '已按 Console 给出的位置读取',
+  connection_stated: '部署自己配置了集合所在的 Redis，未向 Console 询问',
+  no_held_connection: 'Console 给出的 Redis 不是本进程已持有连接的任何一个，仍按原位置读取，每轮对账会拒绝并写出两处位置',
+  failed: '启动时向 Console 询问失败，仍按原位置读取'
+};
+function linkdTargetWords(t) {
+  return t.event_source_id + '/' + t.hook_name + ' 写在 ' + t.address + ' db ' + t.database + ' 前缀 ' + t.key_prefix;
+}
+function consoleFailureHint(text) {
+  if (/status 401/.test(text || '')) return '；401 是 Console 拒绝了账号口令（phase_two.linkd 的 username/password 或对应环境变量），不是接口不存在';
+  if (/status 403/.test(text || '')) return '；403 是账号没有该接口的权限';
+  return '';
+}
 function consoleWords(c) {
   var words = CONSOLE_STATE[c.state] || c.state;
   if (c.state === 'unreadable') {
@@ -1542,10 +1557,21 @@ function consoleWords(c) {
     if (c.reason === 'roster' && failing && /status 404/.test(failing.last_failure || '')) {
       words += '；名册接口 404，多半是 linkd 版本早于名册接口';
     }
+    words += consoleFailureHint(failing && failing.last_failure);
   } else if (c.state === 'link_unhealthy') {
     words += '（' + (LINK_HEALTH[c.reason] || c.reason)
       + (c.link_health_age_seconds != null ? '，上次成功在 ' + elapsedLabel(c.link_health_age_seconds) + '前，界限 ' + elapsedLabel(c.max_link_health_age_seconds) : '')
       + (c.link_error ? '：' + c.link_error : '') + '）';
+  }
+  if (c.target) {
+    words += '；目标 ' + linkdTargetWords(c.target)
+      + (c.target_age_seconds != null ? '（' + elapsedLabel(c.target_age_seconds) + '前解析）' : '');
+  }
+  var d = c.discovery;
+  if (d) {
+    words += '；启动时：' + (LINKD_DISCOVERY[d.outcome] || d.outcome)
+      + (d.target && d.outcome !== 'adopted' ? '（Console 说 ' + linkdTargetWords(d.target) + '）' : '')
+      + (d.error ? '（试了 ' + d.attempts + ' 次：' + d.error + consoleFailureHint(d.error) + '）' : '');
   }
   return words;
 }

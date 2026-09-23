@@ -37,7 +37,8 @@ func linkdConsoleEndpoint(cfg config.Config) fleet.Endpoint {
 // withLinkdConsole fills the Console's entry with what this replica has seen
 // of it. A nil console is a deployment that configured none, whose entry
 // already says so.
-func withLinkdConsole(endpoints func() []fleet.Endpoint, console *openalerts.HTTPReconciler, now func() time.Time) func() []fleet.Endpoint {
+func withLinkdConsole(endpoints func() []fleet.Endpoint, console *openalerts.HTTPReconciler,
+	discovery *fleet.LinkdDiscoveryFacts, now func() time.Time) func() []fleet.Endpoint {
 	if console == nil {
 		return endpoints
 	}
@@ -45,7 +46,9 @@ func withLinkdConsole(endpoints func() []fleet.Endpoint, console *openalerts.HTT
 		entries := endpoints()
 		for index := range entries {
 			if entries[index].Role == fleet.EndpointLinkdConsole {
-				entries[index].Console = linkdConsoleFacts(console, now())
+				facts := linkdConsoleFacts(console, now())
+				facts.Discovery = discovery
+				entries[index].Console = facts
 			}
 		}
 		return entries
@@ -80,6 +83,12 @@ func linkdConsoleFacts(console *openalerts.HTTPReconciler, at time.Time) *fleet.
 		called = called || call.Calls > 0
 		if row.Failing && facts.Reason == "" {
 			facts.Reason = op
+		}
+	}
+	if console != nil {
+		if target, resolvedAt := console.Target(); !resolvedAt.IsZero() {
+			age := at.Sub(resolvedAt).Seconds()
+			facts.Target, facts.TargetAgeSeconds = linkdTargetFacts(target), &age
 		}
 	}
 	linkWord := ""

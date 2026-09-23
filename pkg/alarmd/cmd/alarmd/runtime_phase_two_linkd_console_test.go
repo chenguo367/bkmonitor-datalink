@@ -194,3 +194,22 @@ func TestTheSourceFactsCountThePlansThatGoToTheLink(t *testing.T) {
 		t.Fatalf("source facts = %+v, want 3 standard plans", facts)
 	}
 }
+
+// The entry carries where the link writes -- the target this replica
+// resolved and the startup discovery -- so a refusal that names two
+// locations can be read without the logs.
+func TestTheConsoleEntryCarriesTheResolvedTargetAndTheDiscovery(t *testing.T) {
+	console := consoleTestServer(t, browsePage(nil, ""))
+	readRoster(console)
+	discovery := &fleet.LinkdDiscoveryFacts{Outcome: fleet.LinkdDiscoveryFailed, Attempts: 3, Error: "alarmd openalerts: Console HTTP status 401"}
+	endpoints := func() []fleet.Endpoint { return []fleet.Endpoint{{Role: fleet.EndpointLinkdConsole, Configured: true}} }
+	entry := withLinkdConsole(endpoints, console, discovery, func() time.Time { return consoleTestNow })()[0]
+	if entry.Console == nil || entry.Console.Discovery != discovery || entry.Console.Target == nil ||
+		*entry.Console.Target != (fleet.LinkdTargetFacts{EventSourceID: "source", HookName: "active", Address: "192.0.2.10:6379", Database: 3, KeyPrefix: "test:active"}) ||
+		entry.Console.TargetAgeSeconds == nil || *entry.Console.TargetAgeSeconds != 0 {
+		t.Fatalf("console facts = %+v", entry.Console)
+	}
+	if fresh := linkdConsoleFacts(consoleTestServer(t, http.NotFound), consoleTestNow); fresh.Target != nil {
+		t.Fatalf("a Console never resolved carries a target: %+v", fresh.Target)
+	}
+}

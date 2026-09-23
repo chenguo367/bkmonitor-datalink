@@ -155,7 +155,7 @@ func (reader *HTTPReconciler) Binding(ctx context.Context) (TargetBinding, error
 	reader.mu.Lock()
 	binding, at := reader.binding, reader.resolvedAt
 	reader.mu.Unlock()
-	if !at.IsZero() && time.Since(at) < bindingReuse {
+	if !at.IsZero() && reader.now().Sub(at) < bindingReuse {
 		return binding, nil
 	}
 	return reader.resolve(ctx)
@@ -186,7 +186,7 @@ func (reader *HTTPReconciler) resolve(ctx context.Context) (TargetBinding, error
 			binding.Address, binding.Database, binding.KeyPrefix, index.Address, index.Database, index.KeyPrefix, binding.Address)
 	}
 	reader.mu.Lock()
-	reader.binding, reader.resolvedAt = binding, time.Now()
+	reader.binding, reader.resolvedAt = binding, reader.now()
 	reader.mu.Unlock()
 	return binding, nil
 }

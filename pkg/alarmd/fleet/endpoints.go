@@ -235,7 +235,61 @@ type LinkdConsoleFacts struct {
 	// old that reading is. Absent until a roster page has been read.
 	LinkPending        *int     `json:"link_pending,omitempty"`
 	LinkReadAgeSeconds *float64 `json:"link_read_age_seconds,omitempty"`
+	// Target is the link's target this replica resolved last -- where the
+	// link writes the sets this replica reads -- and TargetAgeSeconds how
+	// long ago. Absent until a call has resolved one.
+	Target           *LinkdTargetFacts `json:"target,omitempty"`
+	TargetAgeSeconds *float64          `json:"target_age_seconds,omitempty"`
+	// Discovery is what startup learned from the Console about where the
+	// link writes: whether this process adopted that location and, when it
+	// did not, why. Absent without a Console.
+	Discovery *LinkdDiscoveryFacts `json:"discovery,omitempty"`
 }
+
+// LinkdTargetFacts is one of the link's targets as its Console names it:
+// the event source and hook it serves, and the Redis, database and prefix
+// its sets are written to. Credentials are never part of it.
+type LinkdTargetFacts struct {
+	EventSourceID string `json:"event_source_id"`
+	HookName      string `json:"hook_name"`
+	Address       string `json:"address"`
+	Database      int    `json:"database"`
+	KeyPrefix     string `json:"key_prefix"`
+}
+
+// LinkdDiscoveryFacts is the startup question "where does the link write",
+// asked of the Console before anything connects. Its answer used to change
+// the configuration or, on any failure, nothing -- and a Console refusing the
+// credentials looked afterwards exactly like one never asked.
+type LinkdDiscoveryFacts struct {
+	// Outcome is one of LinkdDiscoveryOutcomes.
+	Outcome  string            `json:"outcome"`
+	Attempts int               `json:"attempts"`
+	Error    string            `json:"error,omitempty"`
+	Target   *LinkdTargetFacts `json:"target,omitempty"`
+}
+
+// The startup discovery outcomes, closed; the page's wording table is held
+// to this list.
+const (
+	// LinkdDiscoveryAdopted: the link writes to a Redis this process already
+	// holds a connection to, and the sets are read there.
+	LinkdDiscoveryAdopted = "adopted"
+	// LinkdDiscoveryConnectionStated: the deployment states the link's Redis
+	// itself; the Console was not asked.
+	LinkdDiscoveryConnectionStated = "connection_stated"
+	// LinkdDiscoveryNoHeldConnection: the Console answered with a Redis this
+	// process holds no connection to. The sets are read where they would
+	// have been, and every reconciliation refuses with both places named.
+	LinkdDiscoveryNoHeldConnection = "no_held_connection"
+	// LinkdDiscoveryFailed: the Console did not answer the question within
+	// the startup attempts; Error says what it answered instead.
+	LinkdDiscoveryFailed = "failed"
+)
+
+// LinkdDiscoveryOutcomes is every word Outcome can carry.
+var LinkdDiscoveryOutcomes = []string{LinkdDiscoveryAdopted, LinkdDiscoveryConnectionStated,
+	LinkdDiscoveryNoHeldConnection, LinkdDiscoveryFailed}
 
 // ConsoleCallFacts is one Console operation as this replica has called it.
 // Calls and Failures answer "how many" and are never omitted; the ages are

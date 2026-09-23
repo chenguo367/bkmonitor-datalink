@@ -105,6 +105,14 @@ func (reader *HTTPReconciler) Record() ConsoleRecord {
 	return record
 }
 
+// Target is the target the last successful resolution chose and when, zero
+// until one has.
+func (reader *HTTPReconciler) Target() (TargetBinding, time.Time) {
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	return reader.binding, reader.resolvedAt
+}
+
 func (reader *HTTPReconciler) now() time.Time {
 	if reader.options.Now != nil {
 		return reader.options.Now()
