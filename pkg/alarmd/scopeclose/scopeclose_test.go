@@ -134,7 +134,7 @@ func (f *fixture) slot(round int64, drops ...Drop) {
 	defer func() {
 		for k, words := range bulk {
 			for word, count := range words {
-				f.closer.Count(k, round, word, count)
+				f.closer.Count(k, "group", round, word, count)
 			}
 		}
 		f.closer.Step(context.Background())
@@ -521,14 +521,31 @@ func TestScreenRefusesDisjointSets(t *testing.T) {
 // total any attempt reported. A new round counts afresh.
 func TestARetriedRoundIsCountedOnce(t *testing.T) {
 	closer := New(Options{})
-	closer.Count(key, 1700000000, OutcomeNotMember, 3) // an attempt that failed halfway
-	closer.Count(key, 1700000000, OutcomeNotMember, 5) // the retry that completed
-	closer.Count(key, 1700000000, OutcomeNotMember, 5) // a retry after that
+	closer.Count(key, "group", 1700000000, OutcomeNotMember, 3) // an attempt that failed halfway
+	closer.Count(key, "group", 1700000000, OutcomeNotMember, 5) // the retry that completed
+	closer.Count(key, "group", 1700000000, OutcomeNotMember, 5) // a retry after that
 	if got := closer.Stats()[OutcomeNotMember]; got != 5 {
 		t.Fatalf("not_member = %d after three attempts of one round, want 5", got)
 	}
-	closer.Count(key, 1700000060, OutcomeNotMember, 2)
+	closer.Count(key, "group", 1700000060, OutcomeNotMember, 2)
 	if got := closer.Stats()[OutcomeNotMember]; got != 7 {
 		t.Fatalf("not_member = %d after the next round, want 7", got)
+	}
+}
+
+// Several Plans of one strategy - another business, another shard, another
+// Query Group - report the same round: those are summed, while each one's
+// own retries are still counted once.
+func TestReportersOfOneStrategyAreSummedAndTheirRetriesAreNot(t *testing.T) {
+	closer := New(Options{})
+	closer.Count(key, "group-a|business-2", 1700000000, OutcomeNotMember, 3)
+	closer.Count(key, "group-b|business-2", 1700000000, OutcomeNotMember, 4)
+	closer.Count(key, "group-a|business-3", 1700000000, OutcomeNotMember, 5)
+	closer.Count(key, "group-b|business-2", 1700000000, OutcomeNotMember, 4) // a retry
+	if got := closer.Stats()[OutcomeNotMember]; got != 12 {
+		t.Fatalf("not_member = %d, want 3+4+5 = 12", got)
+	}
+	if got := closer.Facts().Strategies[0].Outcomes[OutcomeNotMember]; got != 12 {
+		t.Fatalf("the strategy's own count = %d, want 12", got)
 	}
 }

@@ -344,7 +344,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		cancel()
 	}
 	running.Wait()
-	flushScopeDrops(source.config.ScopeDrops, adapters, int64(request.Contract.Slot.EvaluationTime))
+	flushScopeDrops(source.config.ScopeDrops, adapters, request.Contract.Slot, outputs)
 	if firstQueryErr != nil {
 		return execution.QueryExecutionCompletion{}, firstQueryErr
 	}

@@ -94,10 +94,10 @@ func TestTargetScopeCloseThroughTheProductionWiring(t *testing.T) {
 			sink.Observe(access.ScopeDrop{Plan: plan, Filter: "target_plan", Reason: "out_of_target",
 				Fingerprint: fingerprint, StrategyRevision: 4, Round: round})
 		}
-		sink.Count(plan, round, access.ScopeDropIndefinite, 1)
-		sink.Count(plan, round, access.ScopeDropCacheUnavailable, 1)
-		sink.Count(plan, round, access.ScopeDropFingerprintUnsupported, 2)
-		sink.Count(plan, round, access.ScopeDropNoFingerprint, 3)
+		sink.Count(access.ScopeDropReporter{Slot: execution.SlotIdentity{QueryGroup: "group", EvaluationTime: execution.EvaluationTime(round)}, Plan: plan}, access.ScopeDropIndefinite, 1)
+		sink.Count(access.ScopeDropReporter{Slot: execution.SlotIdentity{QueryGroup: "group", EvaluationTime: execution.EvaluationTime(round)}, Plan: plan}, access.ScopeDropCacheUnavailable, 1)
+		sink.Count(access.ScopeDropReporter{Slot: execution.SlotIdentity{QueryGroup: "group", EvaluationTime: execution.EvaluationTime(round)}, Plan: plan}, access.ScopeDropFingerprintUnsupported, 2)
+		sink.Count(access.ScopeDropReporter{Slot: execution.SlotIdentity{QueryGroup: "group", EvaluationTime: execution.EvaluationTime(round)}, Plan: plan}, access.ScopeDropNoFingerprint, 3)
 		closer.Step(context.Background())
 	}
 	slot(1700000000)

@@ -7,6 +7,7 @@ package access
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -82,12 +83,33 @@ type ScopeDropSink interface {
 	Screen(plan execution.PlanIdentity) string
 	// Observe receives one definitive rejection of a Plan Screen cleared.
 	Observe(ScopeDrop)
-	// Count reports the attempt's rejections of the Plan under a word: one
+	// Count reports the attempt's rejections of one Plan under a word: one
 	// of the ScopeDrop words above, or one Screen returned. It is called
-	// once per Plan and word per attempt, after every query of the attempt
-	// has ended, with the Slot's evaluation time: a retried Slot reports the
-	// same round again, and the sink counts a round once.
-	Count(plan execution.PlanIdentity, round int64, word string, n int)
+	// once per reporter and word per attempt, after every query of the
+	// attempt has ended. A retried Slot reports as the same reporter again,
+	// and the sink counts it once; different reporters - Plans of one
+	// strategy under another business or shard, or in another Query Group -
+	// are different rejections, and the sink sums them.
+	Count(reporter ScopeDropReporter, word string, n int)
+}
+
+// ScopeDropReporter is who reports a bulk count: one Plan, as one shard,
+// in one Slot. Two reports with the same reporter are two attempts of the
+// same work.
+type ScopeDropReporter struct {
+	Slot  execution.SlotIdentity
+	Plan  execution.PlanIdentity
+	Shard execution.ShardRef
+}
+
+// Instance names the reporting Plan instance apart from its strategy and
+// round: the Query Group, the business and the shard. Two reports of one
+// strategy and round with the same instance are attempts of one piece of
+// work; with different instances they are different pieces.
+func (reporter ScopeDropReporter) Instance() string {
+	shard := reporter.Shard
+	return fmt.Sprintf("%s\x00%s\x00%s\x00%d\x00%d\x00%s", reporter.Slot.QueryGroup, reporter.Plan.BusinessID,
+		shard.Dimension, shard.Index, shard.Count, shard.MatcherDigest)
 }
 
 // planOutput is what the evaluator fingerprints a Plan's records under: the
@@ -100,6 +122,8 @@ type planOutput struct {
 	identity   *contract.MonitorOutputIdentity
 	// multiInput is a Plan fed by more than one requirement.
 	multiInput bool
+	// shard is the Plan's piece of a split strategy, for the reporter.
+	shard execution.ShardRef
 }
 
 type planOutputs map[execution.PlanIdentity]planOutput
@@ -123,7 +147,7 @@ func buildPlanOutputs(duePlans []execution.DuePlan, queries []PlannedQuery) plan
 			continue
 		}
 		ref := due.CompiledPlan.StrategyRef()
-		outputs[due.Identity] = planOutput{strategyID: ref.StrategyID, revision: int64(ref.SnapshotRevision),
+		outputs[due.Identity] = planOutput{strategyID: ref.StrategyID, revision: int64(ref.SnapshotRevision), shard: due.Shard,
 			identity: due.CompiledPlan.OutputIdentity(), multiInput: len(inputs[due.Identity]) > 1}
 	}
 	return outputs
@@ -206,7 +230,7 @@ func (adapter *seriesAdapter) tallyScopeDrop(plan execution.PlanIdentity, word s
 // flushScopeDrops hands one attempt's bulk counts to the sink: the tallies
 // of every query of the attempt summed, one Count per Plan and word,
 // whatever way the queries ended.
-func flushScopeDrops(sink ScopeDropSink, adapters []*seriesAdapter, round int64) {
+func flushScopeDrops(sink ScopeDropSink, adapters []*seriesAdapter, slot execution.SlotIdentity, outputs planOutputs) {
 	if sink == nil {
 		return
 	}
@@ -221,7 +245,7 @@ func flushScopeDrops(sink ScopeDropSink, adapters []*seriesAdapter, round int64)
 		adapter.scopeTallies = nil
 	}
 	for key, n := range total {
-		sink.Count(key.plan, round, key.word, n)
+		sink.Count(ScopeDropReporter{Slot: slot, Plan: key.plan, Shard: outputs[key.plan].shard}, key.word, n)
 	}
 }
 

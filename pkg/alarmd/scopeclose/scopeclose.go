@@ -171,11 +171,12 @@ type entry struct {
 	lastSeen   time.Time
 }
 
-// bulkKey and bulkRound remember, per strategy and outcome, the last round
+// bulkKey and bulkRound remember, per reporter and outcome, the last round
 // counted in bulk and how much of it, so a retried round is counted once.
 type bulkKey struct {
-	key     openalerts.StrategyKey
-	outcome string
+	key      openalerts.StrategyKey
+	reporter string
+	outcome  string
 }
 
 type bulkRound struct {
@@ -260,17 +261,20 @@ func (closer *Closer) Screen(key openalerts.StrategyKey) string {
 	return ""
 }
 
-// Count adds an attempt's rejections of a strategy under one outcome, in
-// bulk. A retried Slot reports its round again; the round is counted once,
-// at the largest total any of its attempts reported, so an attempt that
-// failed halfway and the retry that completed are not summed.
-func (closer *Closer) Count(key openalerts.StrategyKey, round int64, outcome string, n int) {
+// Count adds one reporter's rejections of a strategy under one outcome, in
+// bulk. The reporter names one Plan instance - business, shard, Query
+// Group - of the strategy; several of them report the same round and are
+// summed. A retried Slot reports as the same reporter and round again; that
+// is counted once, at the largest total any of its attempts reported, so an
+// attempt that failed halfway and the retry that completed are not summed.
+// Only readings depend on this; no close is decided from it.
+func (closer *Closer) Count(key openalerts.StrategyKey, reporter string, round int64, outcome string, n int) {
 	if n <= 0 {
 		return
 	}
 	closer.mu.Lock()
 	defer closer.mu.Unlock()
-	bk := bulkKey{key: key, outcome: outcome}
+	bk := bulkKey{key: key, reporter: reporter, outcome: outcome}
 	last, seen := closer.bulk[bk]
 	if seen && last.round == round {
 		if n <= last.n {
