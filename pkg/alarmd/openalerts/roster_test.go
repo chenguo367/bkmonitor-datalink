@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -33,9 +34,17 @@ func browseJSON() map[string]any {
 
 func rosterServer(t *testing.T, respond func(w http.ResponseWriter, r *http.Request)) *HTTPReconciler {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(respond))
+	// The link lists one target, the one the tests bind to; every other path
+	// is the test's own.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/strategy-index/targets") {
+			_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
+			return
+		}
+		respond(w, r)
+	}))
 	t.Cleanup(server.Close)
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret", Binding: testBinding(), MaxResponseBytes: 1 << 20})
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret", Index: testIndex(), MaxResponseBytes: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}

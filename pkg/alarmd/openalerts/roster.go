@@ -61,7 +61,10 @@ const RosterPageSize = 200
 // Roster reads one page of the link's strategy list. An empty cursor starts
 // a walk.
 func (reader *HTTPReconciler) Roster(ctx context.Context, cursor string) (RosterPage, error) {
-	b := reader.options.Binding
+	b, err := reader.Binding(ctx)
+	if err != nil {
+		return RosterPage{}, err
+	}
 	query := url.Values{"event_source_id": {b.EventSourceID}, "hook_name": {b.HookName}, "count": {strconv.Itoa(RosterPageSize)}}
 	if cursor != "" {
 		query.Set("cursor", cursor)
@@ -91,7 +94,7 @@ func (reader *HTTPReconciler) Roster(ctx context.Context, cursor string) (Roster
 	// The response names the target it walked. A walk of another target -
 	// another prefix, another database - would hand this process another
 	// deployment's strategies.
-	if !reader.matches(response.Target) {
+	if !sameTarget(b, response.Target) {
 		return RosterPage{}, errors.New("alarmd openalerts: roster target differs from the binding")
 	}
 	if response.Health == nil || response.Rows == nil || response.Health.PendingCount == nil ||
@@ -102,7 +105,6 @@ func (reader *HTTPReconciler) Roster(ctx context.Context, cursor string) (Roster
 	if response.NextCursor != nil {
 		page.Next = *response.NextCursor
 	}
-	var err error
 	if page.Health.LastSuccess, err = optionalTime(response.Health.LastSuccess); err != nil {
 		return RosterPage{}, err
 	}

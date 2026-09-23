@@ -14,15 +14,20 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
+	"time"
 )
 
 // Reconciliation is a complete alert-store observation. Missing and Suppressed
 // are the index differences to preserve across ordinary SET reads.
 type Reconciliation struct {
-	Members    []string
-	Missing    []string
-	Suppressed []string
-	Alerts     []Alert
+	// EventSourceID is the source of the target that answered: this
+	// deployment's own, which is how an alert's producer is told apart.
+	EventSourceID string
+	Members       []string
+	Missing       []string
+	Suppressed    []string
+	Alerts        []Alert
 }
 
 // Severity is optional in older Console responses. Its absence never prevents
@@ -38,8 +43,8 @@ type Reconciler interface {
 	Reconcile(context.Context, StrategyKey) (Reconciliation, error)
 }
 
-// TargetBinding must be supplied from deployment configuration. It is checked
-// against /targets and each response; the first target is never auto-selected.
+// TargetBinding is one of the alert link's targets as its Console lists it:
+// which source and hook it belongs to, and where its open alert sets are.
 type TargetBinding struct {
 	EventSourceID string   `json:"eventSourceId"`
 	HookName      string   `json:"hookName"`
@@ -49,38 +54,58 @@ type TargetBinding struct {
 	Sources       []string `json:"sources"`
 }
 
+// TargetSelector picks which of the link's targets is this deployment's. Both
+// fields are optional: with neither, the one target the link lists is used,
+// and a link that lists several is refused with their names, so the choice is
+// never the first one that happened to come back.
+type TargetSelector struct {
+	EventSourceID string
+	HookName      string
+}
+
+// IndexLocation is where this process reads the open alert sets from. The
+// target the link writes them to must be the same place, or every set this
+// process reads is empty whatever the link holds.
+type IndexLocation struct {
+	KeyPrefix string
+	Address   string
+	Database  int
+}
+
 type HTTPReconcilerOptions struct {
 	BaseURL          string
 	Username         string
 	Password         string
 	Client           *http.Client
-	Binding          TargetBinding
+	Select           TargetSelector
+	Index            IndexLocation
 	MaxResponseBytes int64
 }
 
-type HTTPReconciler struct{ options HTTPReconcilerOptions }
+// HTTPReconciler reads the link's Console. Which target is this deployment's
+// is not configured but read from the Console itself - the link publishes
+// the source, hook, prefix and location of every target it maintains - and
+// it is read again on every reconciliation and at most a minute apart on the
+// roster, so a target the link changes is noticed rather than assumed.
+type HTTPReconciler struct {
+	options    HTTPReconcilerOptions
+	mu         sync.Mutex
+	binding    TargetBinding
+	resolvedAt time.Time
+}
+
+// bindingReuse is how long a resolved target is reused by the roster walk,
+// which makes one request per page and would otherwise ask for the targets
+// as often as it pages.
+const bindingReuse = time.Minute
 
 func NewHTTPReconciler(options HTTPReconcilerOptions) (*HTTPReconciler, error) {
 	u, err := url.Parse(options.BaseURL)
-	b := options.Binding
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" ||
 		options.Client == nil || options.MaxResponseBytes <= 0 || options.Username == "" || options.Password == "" ||
-		b.EventSourceID == "" || b.HookName == "" || !validPrefix(b.KeyPrefix) || b.Address == "" || b.Database < 0 || len(b.Sources) == 0 || len(b.Sources) > 64 {
-		return nil, errors.New("alarmd openalerts: invalid reconciliation endpoint or binding")
+		!validPrefix(options.Index.KeyPrefix) || options.Index.Address == "" || options.Index.Database < 0 {
+		return nil, errors.New("alarmd openalerts: invalid reconciliation endpoint")
 	}
-	b.Sources = append([]string(nil), b.Sources...)
-	sort.Strings(b.Sources)
-	found := false
-	for i, source := range b.Sources {
-		if source == "" || (i > 0 && source == b.Sources[i-1]) {
-			return nil, errors.New("alarmd openalerts: invalid source scope")
-		}
-		found = found || source == b.EventSourceID
-	}
-	if !found {
-		return nil, errors.New("alarmd openalerts: binding source is outside allowed scope")
-	}
-	options.Binding = b
 	// Do not forward Basic Auth to another endpoint through a redirect.
 	client := *options.Client
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
@@ -120,34 +145,93 @@ func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query ur
 	return nil
 }
 
-func (reader *HTTPReconciler) matches(target TargetBinding) bool {
+// Binding is this deployment's target, read from the Console. It is reused
+// for up to bindingReuse; Reconcile always reads it afresh.
+func (reader *HTTPReconciler) Binding(ctx context.Context) (TargetBinding, error) {
+	reader.mu.Lock()
+	binding, at := reader.binding, reader.resolvedAt
+	reader.mu.Unlock()
+	if !at.IsZero() && time.Since(at) < bindingReuse {
+		return binding, nil
+	}
+	return reader.resolve(ctx)
+}
+
+func (reader *HTTPReconciler) resolve(ctx context.Context) (TargetBinding, error) {
+	var targets []TargetBinding
+	if err := reader.get(ctx, "targets", nil, &targets); err != nil {
+		return TargetBinding{}, err
+	}
+	if len(targets) > 512 {
+		return TargetBinding{}, ErrIncomplete
+	}
+	selector := reader.options.Select
+	candidates := make([]TargetBinding, 0, 1)
+	names := make([]string, 0, len(targets))
+	for _, target := range targets {
+		names = append(names, target.EventSourceID+"/"+target.HookName)
+		if (selector.EventSourceID == "" || target.EventSourceID == selector.EventSourceID) &&
+			(selector.HookName == "" || target.HookName == selector.HookName) {
+			candidates = append(candidates, target)
+		}
+	}
+	switch {
+	case len(candidates) == 0:
+		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link lists no target matching event_source_id=%q hook_name=%q (targets: %s)",
+			selector.EventSourceID, selector.HookName, strings.Join(names, ", "))
+	case len(candidates) > 1:
+		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link lists %d targets, set linkd event_source_id and hook_name to choose one (targets: %s)",
+			len(candidates), strings.Join(names, ", "))
+	}
+	binding, err := normalizeBinding(candidates[0])
+	if err != nil {
+		return TargetBinding{}, err
+	}
+	index := reader.options.Index
+	if binding.KeyPrefix != index.KeyPrefix || !strings.EqualFold(binding.Address, index.Address) || binding.Database != index.Database {
+		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link writes open alert sets to %s db %d prefix %s, this process reads %s db %d prefix %s; set linkd redis (and key_prefix) to the link hook's",
+			binding.Address, binding.Database, binding.KeyPrefix, index.Address, index.Database, index.KeyPrefix)
+	}
+	reader.mu.Lock()
+	reader.binding, reader.resolvedAt = binding, time.Now()
+	reader.mu.Unlock()
+	return binding, nil
+}
+
+func normalizeBinding(b TargetBinding) (TargetBinding, error) {
+	if b.EventSourceID == "" || b.HookName == "" || !validPrefix(b.KeyPrefix) || b.Address == "" || b.Database < 0 ||
+		len(b.Sources) == 0 || len(b.Sources) > 64 {
+		return TargetBinding{}, errors.New("alarmd openalerts: the link listed an invalid target")
+	}
+	b.Sources = append([]string(nil), b.Sources...)
+	sort.Strings(b.Sources)
+	found := false
+	for i, source := range b.Sources {
+		if source == "" || (i > 0 && source == b.Sources[i-1]) {
+			return TargetBinding{}, errors.New("alarmd openalerts: invalid source scope")
+		}
+		found = found || source == b.EventSourceID
+	}
+	if !found {
+		return TargetBinding{}, errors.New("alarmd openalerts: binding source is outside allowed scope")
+	}
+	return b, nil
+}
+
+// sameTarget says a response was produced for the target this call resolved.
+func sameTarget(binding, target TargetBinding) bool {
 	target.Sources = append([]string(nil), target.Sources...)
 	sort.Strings(target.Sources)
-	return reflect.DeepEqual(reader.options.Binding, target)
+	return reflect.DeepEqual(binding, target)
 }
 
 func (reader *HTTPReconciler) Reconcile(ctx context.Context, key StrategyKey) (Reconciliation, error) {
 	if !validStrategyKey(key) {
 		return Reconciliation{}, errors.New("alarmd openalerts: invalid strategy identity")
 	}
-	var targets []TargetBinding
-	if err := reader.get(ctx, "targets", nil, &targets); err != nil {
+	b, err := reader.resolve(ctx)
+	if err != nil {
 		return Reconciliation{}, err
-	}
-	if len(targets) > 512 {
-		return Reconciliation{}, ErrIncomplete
-	}
-	found := false
-	for _, target := range targets {
-		if target.EventSourceID == reader.options.Binding.EventSourceID && target.HookName == reader.options.Binding.HookName {
-			if found || !reader.matches(target) {
-				return Reconciliation{}, errors.New("alarmd openalerts: reconciliation binding changed")
-			}
-			found = true
-		}
-	}
-	if !found {
-		return Reconciliation{}, errors.New("alarmd openalerts: reconciliation binding missing")
 	}
 	var response struct {
 		Target     TargetBinding `json:"target"`
@@ -167,7 +251,6 @@ func (reader *HTTPReconciler) Reconcile(ctx context.Context, key StrategyKey) (R
 			Alerts      []Alert `json:"alerts"`
 		} `json:"rows"`
 	}
-	b := reader.options.Binding
 	query := url.Values{"event_source_id": {b.EventSourceID}, "hook_name": {b.HookName}, "bk_tenant_id": {key.TenantID}, "strategy_id": {key.StrategyID}}
 	if err := reader.get(ctx, "reconcile", query, &response); err != nil {
 		return Reconciliation{}, err
@@ -175,10 +258,10 @@ func (reader *HTTPReconciler) Reconcile(ctx context.Context, key StrategyKey) (R
 	if !response.Complete || !response.Redis.Complete || !response.Alerts.Complete || response.Rows == nil || len(response.Rows) > 10000 {
 		return Reconciliation{}, ErrIncomplete
 	}
-	if !reader.matches(response.Target) || response.TenantID != key.TenantID || response.StrategyID != key.StrategyID || response.Key != b.KeyPrefix+":"+key.TenantID+":"+key.StrategyID {
+	if !sameTarget(b, response.Target) || response.TenantID != key.TenantID || response.StrategyID != key.StrategyID || response.Key != b.KeyPrefix+":"+key.TenantID+":"+key.StrategyID {
 		return Reconciliation{}, errors.New("alarmd openalerts: reconciliation identity mismatch")
 	}
-	result := Reconciliation{}
+	result := Reconciliation{EventSourceID: b.EventSourceID}
 	seen := make(map[string]struct{}, len(response.Rows))
 	activeCount := 0
 	for _, row := range response.Rows {

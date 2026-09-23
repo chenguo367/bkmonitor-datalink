@@ -121,15 +121,19 @@ type maintenanceGroup struct {
 }
 
 type effectiveMaintenance struct {
-	trackingMu           sync.Mutex
-	bundle               *phaseTwoWorkerBundle
-	catalog              maintenanceCatalog
-	cache                *openalerts.Cache
-	writer               closeWriter
-	legacy               strategy.EffectiveTimeProvider
-	legacyCache          legacyRefresher
-	capacity             config.LinkdCapacity
-	sourceID             string
+	trackingMu  sync.Mutex
+	bundle      *phaseTwoWorkerBundle
+	catalog     maintenanceCatalog
+	cache       *openalerts.Cache
+	writer      closeWriter
+	legacy      strategy.EffectiveTimeProvider
+	legacyCache legacyRefresher
+	capacity    config.LinkdCapacity
+	sourceID    string
+	// sourceOf, when set, is where sourceID comes from: the source of the
+	// target the alert link's Console lists for this deployment, read rather
+	// than configured.
+	sourceOf             func(context.Context) (string, error)
 	byGroup              map[execution.QueryGroupIdentity][]openalerts.StrategyKey
 	refs                 map[openalerts.StrategyKey]int
 	calibrationRequested map[openalerts.StrategyKey]time.Time
@@ -366,6 +370,14 @@ func planHasSchedule(plan *strategy.CompiledPlan) bool {
 func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plans []controlplane.MaintenancePlan) {
 	if len(plans) == 0 {
 		return
+	}
+	if m.sourceOf != nil {
+		source, err := m.sourceOf(ctx)
+		if err != nil {
+			m.observe(ctx, qg, closeOutcomeUnavailable, err, 0)
+			return
+		}
+		m.sourceID = source
 	}
 	at := m.bundle.dependencies.Now()
 	start := m.planCursor[qg]

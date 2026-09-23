@@ -48,14 +48,13 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 		if connection.Mode == config.RedisModeSentinel {
 			address = "sentinel:" + connection.MasterName + " (" + strings.Join(connection.SentinelAddress, ", ") + ")"
 		}
-		sources := settings.SharedSources
-		if len(sources) == 0 {
-			sources = []string{settings.EventSourceID}
-		}
+		// Which of the link's targets is this deployment's, and its source
+		// scope, are read from the Console; the configuration only narrows the
+		// choice when the link maintains more than one target.
 		console, err = openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL,
 			Username: settings.Username, Password: settings.Password, Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: int64(capacity.Bytes / 4),
-			Binding: openalerts.TargetBinding{EventSourceID: settings.EventSourceID, HookName: settings.HookName, KeyPrefix: settings.Prefix(),
-				Address: address, Database: connection.DB, Sources: sources}})
+			Select: openalerts.TargetSelector{EventSourceID: settings.EventSourceID, HookName: settings.HookName},
+			Index:  openalerts.IndexLocation{KeyPrefix: settings.Prefix(), Address: address, Database: connection.DB}})
 		if err != nil {
 			return linkdIndex{}, err
 		}

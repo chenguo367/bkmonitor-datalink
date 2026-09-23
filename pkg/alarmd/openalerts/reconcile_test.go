@@ -18,6 +18,13 @@ func testBinding() TargetBinding {
 	return TargetBinding{EventSourceID: "source", HookName: "active", KeyPrefix: "test:active", Address: "redis:6379", Database: 3, Sources: []string{"source"}}
 }
 
+// testIndex is where the tests' process reads the sets: the same place
+// testBinding says the link writes them.
+func testIndex() IndexLocation {
+	b := testBinding()
+	return IndexLocation{KeyPrefix: b.KeyPrefix, Address: b.Address, Database: b.Database}
+}
+
 func reconciliationJSON() map[string]any {
 	return map[string]any{
 		"target": testBinding(), "tenantId": keyA.TenantID, "strategyId": keyA.StrategyID, "key": "test:active:" + keyA.TenantID + ":" + keyA.StrategyID,
@@ -49,7 +56,7 @@ func TestHTTPReconcilerChecksBindingQueryAuthAndRetainsMetadata(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(reconciliationJSON())
 	}))
 	defer server.Close()
-	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret", Binding: testBinding(), MaxResponseBytes: 1 << 20})
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret", Index: testIndex(), MaxResponseBytes: 1 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +105,7 @@ func TestHTTPReconcilerRejectsPartialAndInvalidScope(t *testing.T) {
 				_ = json.NewEncoder(w).Encode(m)
 			}))
 			defer server.Close()
-			reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "u", Password: "p", Binding: testBinding(), MaxResponseBytes: 1 << 20})
+			reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "u", Password: "p", Index: testIndex(), MaxResponseBytes: 1 << 20})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -109,19 +116,76 @@ func TestHTTPReconcilerRejectsPartialAndInvalidScope(t *testing.T) {
 	}
 }
 
-func TestHTTPReconcilerDoesNotChooseFirstTargetOrLeakCredentials(t *testing.T) {
+// The target is read from the link, not configured: the one target it lists
+// is used; several are refused by name unless the configuration narrows the
+// choice; and errors never carry the credentials.
+func TestTheTargetIsReadFromTheLinkAndNeverGuessed(t *testing.T) {
+	other := testBinding()
+	other.EventSourceID, other.HookName, other.Sources = "other", "other-hook", []string{"other"}
+	for name, tc := range map[string]struct {
+		targets  []TargetBinding
+		selector TargetSelector
+		ok       bool
+	}{
+		"the only target":             {[]TargetBinding{testBinding()}, TargetSelector{}, true},
+		"several without a selector":  {[]TargetBinding{testBinding(), other}, TargetSelector{}, false},
+		"several with a selector":     {[]TargetBinding{other, testBinding()}, TargetSelector{EventSourceID: "source"}, true},
+		"a selector matching nothing": {[]TargetBinding{other}, TargetSelector{HookName: "active"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(tc.targets)
+			}))
+			defer server.Close()
+			reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "private-user",
+				Password: "private-password", Select: tc.selector, Index: testIndex(), MaxResponseBytes: 1 << 20})
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding, err := reader.Binding(context.Background())
+			if tc.ok != (err == nil) {
+				t.Fatalf("binding=%+v err=%v", binding, err)
+			}
+			if err != nil && strings.Contains(err.Error(), "private") {
+				t.Fatalf("an error carried the credentials: %v", err)
+			}
+			if tc.ok && binding.EventSourceID != "source" {
+				t.Fatalf("the wrong target was chosen: %+v", binding)
+			}
+		})
+	}
+}
+
+// A target that writes its sets somewhere this process does not read them is
+// refused, and the refusal names both places so the fix is in the message.
+func TestATargetWritingElsewhereIsRefusedByName(t *testing.T) {
+	for name, tc := range map[string]struct {
+		mutate func(*TargetBinding)
+		want   string
+	}{
+		"another database": {func(b *TargetBinding) { b.Database = 9 }, "db 9"},
+		"another prefix":   {func(b *TargetBinding) { b.KeyPrefix = "other:active" }, "prefix other:active"},
+		"another address":  {func(b *TargetBinding) { b.Address = "other:6379" }, "other:6379"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			elsewhere := testBinding()
+			tc.mutate(&elsewhere)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode([]TargetBinding{elsewhere})
+			}))
+			defer server.Close()
+			reader, _ := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "u", Password: "p", Index: testIndex(), MaxResponseBytes: 1 << 20})
+			_, err := reader.Binding(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "this process reads redis:6379 db 3 prefix test:active") {
+				t.Fatalf("err = %v", err)
+			}
+		})
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b := testBinding()
-		b.EventSourceID = "other"
-		_ = json.NewEncoder(w).Encode([]TargetBinding{b})
+		_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
 	}))
 	defer server.Close()
-	reader, _ := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "private-user", Password: "private-password", Binding: testBinding(), MaxResponseBytes: 1 << 20})
-	_, err := reader.Reconcile(context.Background(), keyA)
-	if err == nil || strings.Contains(err.Error(), "private") {
-		t.Fatalf("binding error = %v", err)
-	}
-	reader.options.MaxResponseBytes = 1
+	reader, _ := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "u", Password: "p", Index: testIndex(), MaxResponseBytes: 1})
 	if _, err := reader.Reconcile(context.Background(), keyA); !errors.Is(err, ErrIncomplete) {
 		t.Fatalf("body bound error = %v", err)
 	}

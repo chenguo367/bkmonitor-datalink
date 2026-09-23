@@ -56,11 +56,10 @@ const absentCloseMaxLinkHealthAge = 15 * time.Minute
 // longer exist. See package absentalerts for what the difference is and
 // what has to hold before anything is closed.
 type absentStrategyClose struct {
-	bundle   *phaseTwoWorkerBundle
-	control  absentCloseControl
-	link     absentCloseLink
-	writer   closeWriter
-	sourceID string
+	bundle  *phaseTwoWorkerBundle
+	control absentCloseControl
+	link    absentCloseLink
+	writer  closeWriter
 	// send arms the close. False takes the whole difference and reports
 	// every reading without sending one close; see LinkdConfig.
 	// AbsentCloseSend for why the decision is a setting.
@@ -113,9 +112,9 @@ type absentCloseLink interface {
 }
 
 func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, control absentCloseControl, link absentCloseLink,
-	writer closeWriter, sourceID string, send bool) *absentStrategyClose {
+	writer closeWriter, send bool) *absentStrategyClose {
 	return &absentStrategyClose{
-		bundle: bundle, control: control, link: link, writer: writer, sourceID: sourceID, send: send,
+		bundle: bundle, control: control, link: link, writer: writer, send: send,
 		tracker: absentalerts.NewTracker(controlplane.MaxDepartedStrategies),
 		bounds: absentalerts.Bounds{
 			Grace: controlplane.AbsenceGracePeriod,
@@ -336,7 +335,7 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 		switch alert.EventSourceID {
 		case "":
 			unknown++
-		case loop.sourceID:
+		case reconciliation.EventSourceID:
 			own = append(own, alert)
 		default:
 			foreign++
@@ -352,7 +351,7 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 		loop.observe(ctx, absentalerts.OutcomeIdentityUnknown, errors.New("strategy id is not a positive integer"), 1)
 		return
 	}
-	identity, outcome := loop.identity(ctx, absent, own)
+	identity, outcome := loop.identity(ctx, absent, own, reconciliation.EventSourceID)
 	if outcome != "" {
 		loop.observe(ctx, outcome, errors.New("no business or revision for a strategy that no longer exists"), 1)
 		return
@@ -388,14 +387,14 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 // answer is on the alerts themselves, in the labels they were created with,
 // read from the link's record of the alert. A record is used only if it is
 // this deployment's alert of this strategy.
-func (loop *absentStrategyClose) identity(ctx context.Context, absent absentalerts.Absent, own []openalerts.Alert) (absentalerts.Identity, string) {
+func (loop *absentStrategyClose) identity(ctx context.Context, absent absentalerts.Absent, own []openalerts.Alert, source string) (absentalerts.Identity, string) {
 	if absent.Identity.BusinessID != 0 && absent.Identity.Revision > 0 {
 		return absent.Identity, ""
 	}
 	found := absent.Identity
 	for i := 0; i < len(own) && i < absentCloseIdentityReads; i++ {
 		record, err := loop.link.AlertRecord(ctx, absent.Key.TenantID, own[i].AlertID)
-		if err != nil || record.EventSourceID != loop.sourceID || record.StrategyID != absent.Key.StrategyID {
+		if err != nil || record.EventSourceID != source || record.StrategyID != absent.Key.StrategyID {
 			continue
 		}
 		if found.BusinessID == 0 {

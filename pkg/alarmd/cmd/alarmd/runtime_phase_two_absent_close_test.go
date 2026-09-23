@@ -59,7 +59,7 @@ func (link *absentTestLink) Reconcile(context.Context, openalerts.StrategyKey) (
 	if link.alertsErr != nil {
 		return openalerts.Reconciliation{}, link.alertsErr
 	}
-	return openalerts.Reconciliation{Alerts: link.alerts}, nil
+	return openalerts.Reconciliation{EventSourceID: "native", Alerts: link.alerts}, nil
 }
 
 func (link *absentTestLink) AlertRecord(_ context.Context, _, alertID string) (openalerts.AlertRecord, error) {
@@ -144,7 +144,7 @@ func newAbsentFixture(t *testing.T, alerts []openalerts.Alert) *absentTestFixtur
 	bundle := &phaseTwoWorkerBundle{dependencies: phaseTwoWorkerBundleDependencies{
 		Now: func() time.Time { return fixture.now }, Observer: observability.NopObserver{}}}
 	bundle.controlLeader = true
-	fixture.loop = newAbsentStrategyClose(bundle, fixture.control, fixture.link, fixture.writer, "native", true)
+	fixture.loop = newAbsentStrategyClose(bundle, fixture.control, fixture.link, fixture.writer, true)
 	return fixture
 }
 
