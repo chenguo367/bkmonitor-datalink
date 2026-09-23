@@ -2143,7 +2143,8 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 		}
 		bundle.setOwnedQueryGroupsLocked()
 		bundle.mu.Unlock()
-		result = append(result, waitPhaseTwoGroup(ctx, &bundle.maintenanceWG))
+		maintenanceErr := waitPhaseTwoGroup(ctx, &bundle.maintenanceWG)
+		result = append(result, maintenanceErr)
 		for index, lifecycle := range runners {
 			releaseErr := lifecycle.runner.Release(ctx)
 			result = append(result, releaseErr)
@@ -2152,6 +2153,14 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 				transitionResult = observability.ResultFailed
 			}
 			bundle.observeOwnership(ctx, observability.StageAssignmentLost, transitionResult, queryGroups[index], releaseErr)
+		}
+		// The Control Leader lease goes last among the leases, and only when
+		// every leader task has stopped: a wait that timed out may leave one
+		// still writing, and releasing then would let the next leader start
+		// while the old one writes - the overlap the lease exists to prevent.
+		// Left to expire, as it always was, in that case.
+		if releaser, ok := bundle.dependencies.Ownership.(phaseTwoControlLeaderReleaser); ok && maintenanceErr == nil {
+			result = append(result, releaser.ReleaseControlLeader(ctx))
 		}
 		if bundle.dependencies.CloseResources != nil {
 			result = append(result, bundle.dependencies.CloseResources(ctx))
@@ -2414,7 +2423,24 @@ func (bundle *phaseTwoWorkerBundle) tryAcquireControlLeader(ctx context.Context)
 		return leader, err
 	}
 	bundle.startControlMaintenance()
+	// A new term: publish the stored view before this round's refresh, so a
+	// Worker without a view does not wait for the whole refresh to get one.
+	if publisher, ok := bundle.dependencies.Ownership.(phaseTwoStoredViewPublisher); ok {
+		publisher.PublishStoredView(ctx)
+	}
 	return true, nil
+}
+
+// phaseTwoStoredViewPublisher publishes a new term's first view from stored
+// facts; optional, see productionPhaseTwoOwnership.PublishStoredView.
+type phaseTwoStoredViewPublisher interface {
+	PublishStoredView(context.Context)
+}
+
+// phaseTwoControlLeaderReleaser gives up the Control Leader lease at
+// shutdown; optional, see productionPhaseTwoOwnership.ReleaseControlLeader.
+type phaseTwoControlLeaderReleaser interface {
+	ReleaseControlLeader(context.Context) error
 }
 
 func (bundle *phaseTwoWorkerBundle) startControlMaintenance() {

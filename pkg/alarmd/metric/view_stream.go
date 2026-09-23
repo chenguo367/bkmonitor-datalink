@@ -26,6 +26,14 @@ type ViewStreamCounts struct {
 	IgnoredUnknownVersion, IgnoredUnexpectedReceiver, IgnoredDigestMismatch, IgnoredStaleIncarnation int
 	// Counters since the process started.
 	Publications, PublicationsSkipped, SnapshotChunksSent, DeltasSent, EmptyDeltasSent, DeltasOversized, Refusals uint64
+	// PublishFailures is every desired set the Leader could not publish, by
+	// why, every reason present; PublishFailingSeconds how long the current
+	// run of failures has lasted (0 while publishing works); and
+	// NoSessionsSeconds how long Workers have been expected with none
+	// holding a stream (0 otherwise).
+	PublishFailures       map[string]uint64
+	PublishFailingSeconds float64
+	NoSessionsSeconds     float64
 }
 
 type viewStreamCollector struct {
@@ -40,6 +48,9 @@ type viewStreamCollector struct {
 	sent         *prometheus.Desc
 	oversized    *prometheus.Desc
 	refusals     *prometheus.Desc
+	failures     *prometheus.Desc
+	failing      *prometheus.Desc
+	noSessions   *prometheus.Desc
 }
 
 func newViewStreamCollector() *viewStreamCollector {
@@ -86,6 +97,19 @@ func newViewStreamCollector() *viewStreamCollector {
 				"snapshot.", nil, nil),
 		refusals: prometheus.NewDesc(name("view_stream_refusals_total"),
 			"Streams this Leader refused at Hello, for any of the protocol's reasons; the reason is on the view_session log line.", nil, nil),
+		failures: prometheus.NewDesc(name("view_publish_failures_total"),
+			"Desired sets the Leader could not publish, by why: activation_unreadable, content_unreadable, "+
+				"draining_unreadable, active_set_unreadable, assignments_unreadable (a read the set is built from failed), "+
+				"publish_rejected (the stream refused it). A Leader that cannot publish leaves view_revision flat exactly "+
+				"like one with nothing new to publish; this tells them apart. Counted since the process started.",
+			[]string{"reason"}, nil),
+		failing: prometheus.NewDesc(name("view_publish_failing_seconds"),
+			"How long this Leader has been failing to publish with no success since; 0 while publishing works. "+
+				"Past a minute fleet health degrades with VIEW_PUBLISH_FAILING: Workers that restart meanwhile have no view "+
+				"and execute nothing.", nil, nil),
+		noSessions: prometheus.NewDesc(name("view_stream_no_sessions_seconds"),
+			"How long this Leader has had Workers expected and none holding a stream; 0 otherwise. Past a minute fleet "+
+				"health degrades with VIEW_STREAM_NO_SESSIONS: the view reaches nobody.", nil, nil),
 	}
 }
 
@@ -110,6 +134,9 @@ func (c *viewStreamCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.sent
 	ch <- c.oversized
 	ch <- c.refusals
+	ch <- c.failures
+	ch <- c.failing
+	ch <- c.noSessions
 }
 
 func (c *viewStreamCollector) Collect(ch chan<- prometheus.Metric) {
@@ -134,9 +161,14 @@ func (c *viewStreamCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.sent, prometheus.CounterValue, float64(counts.EmptyDeltasSent), "empty_delta")
 	ch <- prometheus.MustNewConstMetric(c.oversized, prometheus.CounterValue, float64(counts.DeltasOversized))
 	ch <- prometheus.MustNewConstMetric(c.refusals, prometheus.CounterValue, float64(counts.Refusals))
+	for reason, value := range counts.PublishFailures {
+		ch <- prometheus.MustNewConstMetric(c.failures, prometheus.CounterValue, float64(value), reason)
+	}
 	if !counts.Leading {
 		return
 	}
+	ch <- prometheus.MustNewConstMetric(c.failing, prometheus.GaugeValue, counts.PublishFailingSeconds)
+	ch <- prometheus.MustNewConstMetric(c.noSessions, prometheus.GaugeValue, counts.NoSessionsSeconds)
 	ch <- prometheus.MustNewConstMetric(c.revision, prometheus.GaugeValue, float64(counts.Revision))
 	ch <- prometheus.MustNewConstMetric(c.sessions, prometheus.GaugeValue, float64(counts.Sessions))
 	for stage, value := range map[string]int{

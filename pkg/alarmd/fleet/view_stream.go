@@ -24,6 +24,13 @@ import (
 // version and who is not; before this it lived in the Leader's process and
 // its metrics. This is that ledger's current page, on the first screen.
 
+// ViewStreamStallBound is how long a Leader may fail to publish, or have its
+// view reach no Worker, before the verdict degrades: a dozen reconcile
+// rounds, well past a slow round or a rollout's reconnects. The start of a
+// no-session run is noted when the server's stats are read, so the verdict
+// can lag the true start by at most one stats read interval.
+const ViewStreamStallBound = time.Minute
+
 // ViewStreamFacts is the Leader's account of the stream at one instant. A
 // replica that is not the Leader publishes Leading false and nothing else
 // meaningful; the aggregate prefers the Leader's.
@@ -71,6 +78,18 @@ type ViewStreamFacts struct {
 	// message of them would have exceeded the stream's message bound.
 	DeltasOversized uint64 `json:"deltas_oversized"`
 	Refusals        uint64 `json:"refusals"`
+	// PublishFailures is the current run of desired sets the Leader could
+	// not publish, PublishFailureReason the latest one's reason, and
+	// PublishFailingSeconds how long the run has lasted, absent while
+	// publishing works. NoSessionsSeconds is how long Workers have been
+	// expected with none holding a stream, absent otherwise. Each has a
+	// BeyondBound flag the verdict reads, set past ViewStreamStallBound.
+	PublishFailures           uint64   `json:"publish_failures"`
+	PublishFailureReason      string   `json:"publish_failure_reason,omitempty"`
+	PublishFailingSeconds     *float64 `json:"publish_failing_seconds,omitempty"`
+	PublishFailingBeyondBound bool     `json:"publish_failing_beyond_bound"`
+	NoSessionsSeconds         *float64 `json:"no_sessions_seconds,omitempty"`
+	NoSessionsBeyondBound     bool     `json:"no_sessions_beyond_bound"`
 	// Line is the one sentence for the first screen, composed here so the
 	// page and any other reader say the same thing.
 	Line string `json:"line"`

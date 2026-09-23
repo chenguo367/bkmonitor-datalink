@@ -243,11 +243,13 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 	}
 	state, err := source.LoadActivation(ctx)
 	if err != nil {
+		stream.NotePublishFailure(viewstream.PublishFailureActivationUnreadable)
 		report(fmt.Errorf("read activation: %w", err))
 		return
 	}
 	published, err := source.LoadPublishedContent(ctx, state.Current)
 	if err != nil {
+		stream.NotePublishFailure(viewstream.PublishFailureContentUnreadable)
 		report(fmt.Errorf("read published content %s: %w", state.Current.SnapshotRevision, err))
 		return
 	}
@@ -276,6 +278,7 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 		}
 		digest, refs, draining, err := source.DrainingContent(ctx, identity)
 		if err != nil {
+			stream.NotePublishFailure(viewstream.PublishFailureDrainingUnreadable)
 			report(fmt.Errorf("read draining content %s: %w", identity, err))
 			return
 		}
@@ -367,4 +370,88 @@ func newViewStreamIncarnation() (string, error) {
 func (bundle *phaseTwoWorkerBundle) runViewClient() {
 	defer bundle.maintenanceWG.Done()
 	_ = bundle.dependencies.ViewClient.Run(bundle.maintenanceCtx)
+}
+
+// activeQueryGroupSetSource is the view source's reader of the activation's
+// active set. Optional: a source without it publishes no view before the
+// first assignment round, which is what every source did before.
+type activeQueryGroupSetSource interface {
+	LoadActiveQueryGroupSet(context.Context, controlplane.ActiveQueryGroupSetRef) ([]execution.QueryGroupIdentity, error)
+}
+
+// PublishStoredView is the first view of a new term, published from what
+// is already stored: the activation in force, its active set and Draining
+// Query Groups, and their Assignment records as the last leader left them.
+// Before it the first view of a term waited for a whole control refresh -
+// read the source, compile, publish, activate - and every Worker that
+// restarted in that time executed nothing, having no view to execute from.
+//
+// The records are the ownership facts the view is derived from, so a view
+// published from them is never further from the truth than the last view of
+// the previous term. A Worker still holds its own lease before it executes;
+// nothing here widens what may run. It is published under this term's
+// control epoch, and the first assignment round of the term publishes again
+// under the same epoch, which supersedes it.
+//
+// Nothing is published when the active set cannot be read or is empty: an
+// empty view under a newer epoch would take every Query Group off every
+// Worker that already holds a view.
+func (runtime *productionPhaseTwoOwnership) PublishStoredView(ctx context.Context) {
+	if runtime == nil {
+		return
+	}
+	runtime.mu.Lock()
+	authority := runtime.authority
+	runtime.mu.Unlock()
+	stream, source := runtime.dependencies.ViewStream, runtime.dependencies.ViewSource
+	active, readsActive := source.(activeQueryGroupSetSource)
+	if stream == nil || source == nil || !readsActive || authority.Fence.QueryGroup == "" {
+		return
+	}
+	report := func(err error) {
+		observeRuntime(ctx, runtime.dependencies.Observer, observability.Observation{
+			Component: observability.ComponentOwnership, Stage: observability.StageViewPublished,
+			Result: observability.ResultDegraded, ReasonCode: observability.ReasonInternalUnknown, Err: err,
+			ViewStream: &observability.ViewStreamFacts{Event: "publish_failed", ControlEpoch: authority.Fence.OwnerEpoch, Reason: err.Error()},
+		})
+	}
+	state, err := source.LoadActivation(ctx)
+	if err != nil {
+		stream.NotePublishFailure(viewstream.PublishFailureActivationUnreadable)
+		report(fmt.Errorf("stored view: read activation: %w", err))
+		return
+	}
+	identities, err := active.LoadActiveQueryGroupSet(ctx, state.ActiveQGSetRef)
+	if err != nil {
+		stream.NotePublishFailure(viewstream.PublishFailureActiveSetUnreadable)
+		report(fmt.Errorf("stored view: read active set: %w", err))
+		return
+	}
+	seen := make(map[execution.QueryGroupIdentity]struct{}, len(identities)+len(state.Draining))
+	unique := make([]execution.QueryGroupIdentity, 0, len(identities)+len(state.Draining))
+	for _, identity := range identities {
+		if _, dup := seen[identity]; !dup {
+			seen[identity] = struct{}{}
+			unique = append(unique, identity)
+		}
+	}
+	for _, draining := range state.Draining {
+		if _, dup := seen[draining.QueryGroup]; !dup {
+			seen[draining.QueryGroup] = struct{}{}
+			unique = append(unique, draining.QueryGroup)
+		}
+	}
+	if len(unique) == 0 {
+		return
+	}
+	records, _, err := runtime.dependencies.Store.ReadAssignments(ctx, unique)
+	if err != nil {
+		stream.NotePublishFailure(viewstream.PublishFailureAssignmentsUnreadable)
+		report(fmt.Errorf("stored view: read assignments: %w", err))
+		return
+	}
+	if len(records) == 0 {
+		return
+	}
+	runtime.publishView(ctx, authority, records, nil)
 }

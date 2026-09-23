@@ -32,6 +32,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
 func TestRecorderUsesPrivateRegistries(t *testing.T) {
@@ -350,6 +351,9 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_view_publications_total":                      "variableLabels: {result}",
 		"bkmonitor_alarmd_view_messages_sent_total":                     "variableLabels: {kind}",
 		"bkmonitor_alarmd_view_stream_refusals_total":                   "variableLabels: {}",
+		"bkmonitor_alarmd_view_publish_failures_total":                  "variableLabels: {reason}",
+		"bkmonitor_alarmd_view_publish_failing_seconds":                 "variableLabels: {}",
+		"bkmonitor_alarmd_view_stream_no_sessions_seconds":              "variableLabels: {}",
 		"bkmonitor_alarmd_view_deltas_oversized_total":                  "variableLabels: {}",
 		"bkmonitor_alarmd_view_executed_query_groups":                   "variableLabels: {outcome}",
 		"bkmonitor_alarmd_view_gate_lease_renewal_total":                "variableLabels: {result}",
@@ -849,16 +853,19 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// The Leader's view stream: five stages, four ignore reasons, two
 		// publication results, three message kinds, and four single gauges
 		// or counters; all closed lists.
-		fqName("view_stream_leading"):         1,
-		fqName("view_revision"):               1,
-		fqName("view_stream_sessions"):        1,
-		fqName("view_version_receivers"):      5,
-		fqName("view_receipts_ignored_total"): 4,
-		fqName("view_publications_total"):     2,
-		fqName("view_messages_sent_total"):    3,
-		fqName("view_stream_refusals_total"):  1,
-		fqName("view_deltas_oversized_total"): 1,
-		fqName("view_executed_query_groups"):  len(viewGateOutcomes),
+		fqName("view_stream_leading"):             1,
+		fqName("view_revision"):                   1,
+		fqName("view_stream_sessions"):            1,
+		fqName("view_version_receivers"):          5,
+		fqName("view_receipts_ignored_total"):     4,
+		fqName("view_publications_total"):         2,
+		fqName("view_messages_sent_total"):        3,
+		fqName("view_stream_refusals_total"):      1,
+		fqName("view_publish_failures_total"):     len(viewstream.PublishFailureReasons),
+		fqName("view_publish_failing_seconds"):    1,
+		fqName("view_stream_no_sessions_seconds"): 1,
+		fqName("view_deltas_oversized_total"):     1,
+		fqName("view_executed_query_groups"):      len(viewGateOutcomes),
 		// settled, unsettled and failed, with the gate.
 		fqName("view_gate_lease_renewal_total"): 3,
 		// The Worker's side: closed failure and refusal words plus other.

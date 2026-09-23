@@ -2097,6 +2097,16 @@ const (
 	// output_kafka endpoint entry every snapshot; this is the line that reads
 	// it, since a replica holding nothing has no object row to be seen on.
 	DegradationOutputNotReady DegradationKind = "OUTPUT_NOT_READY"
+	// DegradationViewPublishFailing: the Leader has been failing to publish
+	// its desired set past the bound. Workers that hold a view keep
+	// executing from it; a Worker that restarts meanwhile has none and
+	// executes nothing.
+	DegradationViewPublishFailing DegradationKind = "VIEW_PUBLISH_FAILING"
+	// DegradationViewStreamNoSessions: the Leader has had Workers expected
+	// and none holding a stream past the bound: its view reaches nobody.
+	// Read before deciding whether a Leader should give way; it does not
+	// today (N2 design, section 2c).
+	DegradationViewStreamNoSessions DegradationKind = "VIEW_STREAM_NO_SESSIONS"
 )
 
 // DegradationKinds is the closed set, for the page's wording table and the
@@ -2104,7 +2114,7 @@ const (
 var DegradationKinds = []DegradationKind{
 	DegradationActivationBehind, DegradationControlSourceStale, DegradationControlLeaderAbsent,
 	DegradationOpenAlertSetStale, DegradationPlatformSettingsStale, DegradationSourceBlocked,
-	DegradationOutputNotReady, DegradationOpenAlertSetDisjoint,
+	DegradationOutputNotReady, DegradationOpenAlertSetDisjoint, DegradationViewPublishFailing, DegradationViewStreamNoSessions,
 }
 
 // endpointByRole is the entry under role in a replica's list, or nil.
@@ -2721,6 +2731,15 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if snapshot.AssignmentSweep != nil && (view.AssignmentSweep == nil || snapshot.AssignmentSweep.At.After(view.AssignmentSweep.At)) {
 			facts := *snapshot.AssignmentSweep
 			view.AssignmentSweep, view.AssignmentSweepReplica = &facts, replica
+		}
+		if snapshot.ViewStream != nil && snapshot.ViewStream.Leading {
+			if snapshot.ViewStream.PublishFailingBeyondBound {
+				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationViewPublishFailing, Replica: replica,
+					Text: snapshot.ViewStream.PublishFailureReason})
+			}
+			if snapshot.ViewStream.NoSessionsBeyondBound {
+				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationViewStreamNoSessions, Replica: replica})
+			}
 		}
 		if snapshot.ViewStream != nil && viewStreamPreferred(view.ViewStream, snapshot.ViewStream) {
 			facts := *snapshot.ViewStream

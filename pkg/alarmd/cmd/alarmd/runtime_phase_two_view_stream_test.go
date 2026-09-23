@@ -206,6 +206,9 @@ func TestAViewPublishFailureIsReportedAndTheRoundStands(t *testing.T) {
 		observed[0].ViewStream == nil || observed[0].ViewStream.Event != "publish_failed" || !strings.Contains(observed[0].ViewStream.Reason, "redis gone") {
 		t.Fatalf("observed = %+v, want one degraded view_published naming the failure", observed)
 	}
+	if stats := server.Stats(); stats.PublishFailures != 1 || stats.PublishFailureReason != viewstream.PublishFailureActivationUnreadable {
+		t.Fatalf("server stats = %+v, want the failure recorded by its reason", stats)
+	}
 	// Not leading is a failure of the same kind, not a panic and not a stall.
 	runtime.dependencies.ViewSource = staticViewSource{}
 	runtime.publishView(context.Background(), authority, nil, nil)
