@@ -81,8 +81,12 @@ type SlotBudgetUsageFacts struct {
 	StateMutations uint64 `json:"state_mutations"`
 	GapMutations   uint64 `json:"gap_mutations"`
 	Events         uint64 `json:"events"`
-	RetainedBytes  uint64 `json:"retained_bytes"`
-	Series         uint64 `json:"series"`
+	// EventsWithoutMessage is the events decided and not kept because their
+	// protocol has no message for them; Events plus this is what Events
+	// counted before a Python-compatible RECOVERY stopped being held.
+	EventsWithoutMessage uint64 `json:"events_without_message"`
+	RetainedBytes        uint64 `json:"retained_bytes"`
+	Series               uint64 `json:"series"`
 
 	// RetainedBytes split by what the memory was held for, summing to it.
 	//

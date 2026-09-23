@@ -4535,8 +4535,14 @@ type SlotBudgetUsage struct {
 	StateMutations uint64
 	GapMutations   uint64
 	Events         uint64
-	RetainedBytes  uint64
-	Series         uint64
+	// EventsWithoutMessage is the events this Slot decided and did not keep,
+	// because their protocol has no message for them (a Python-compatible
+	// RECOVERY). They use no events budget, so Events no longer counts them;
+	// the two together are what Events counted before they stopped being
+	// held, which is the number to compare across that change.
+	EventsWithoutMessage uint64
+	RetainedBytes        uint64
+	Series               uint64
 
 	// RetainedBytes split by what the memory was held for. They sum to
 	// RetainedBytes.

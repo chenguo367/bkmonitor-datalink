@@ -415,7 +415,8 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 	budget := stream.coordinator.budget
 	return execution.SlotBudgetUsage{
 		StateMutations: stream.effects.states, GapMutations: stream.effects.gaps,
-		Events: stream.effects.events, RetainedBytes: stream.retainedTotal(), Series: stream.series,
+		Events: stream.effects.events, EventsWithoutMessage: eventsWithoutMessage(stream.evaluated),
+		RetainedBytes: stream.retainedTotal(), Series: stream.series,
 		RetainedInputBytes:  stream.retainedByPhase[retainPhaseInput],
 		RetainedGapBytes:    stream.retainedByPhase[retainPhaseGap],
 		RetainedOutputBytes: stream.retainedByPhase[retainPhaseOutput],
@@ -424,6 +425,18 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
 		RetainedShareBytes: stream.coordinator.qgShareBytes(),
 	}
+}
+
+// eventsWithoutMessage counts the identities the Slot's series kept in place
+// of events their protocol has no message for.
+func eventsWithoutMessage(result execution.EvaluationResult) uint64 {
+	var count uint64
+	for _, plan := range result.Plans {
+		for _, state := range plan.StateResults {
+			count += uint64(len(state.WithoutMessage))
+		}
+	}
+	return count
 }
 
 func isReadinessDeferred(err error) bool {
