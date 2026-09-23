@@ -20,24 +20,19 @@
 // only where the link does: a deployment without it has no roster, and
 // nothing here runs.
 //
-// What makes a strategy in that difference safe to close is not the roster.
-// The roster can only err by missing a strategy or listing one twice - both
-// cost a close, neither invents one - and a close the link receives for an
-// alert that is no longer active is a no-op on its side. The side that can
-// close a live strategy's alerts is the snapshot: a snapshot read that loses
-// entries makes live strategies look deleted, and this deployment has seen
-// that for minutes at a time. So the gates are on the snapshot:
+// The strategy cache is the answer to "does this strategy exist": a strategy
+// the cache no longer lists is one alarmd does not run, and its unrecovered
+// alerts have nothing left to recover them. The cache is not read twice or
+// reinterpreted here; the snapshot is the control plane's own read of it. What
+// is added is only what one read cannot say: that the read was a good one
+// (read at all, not empty, not old, not suddenly much smaller than the last),
+// and that the strategy stayed missing - for the grace, across two reads.
 //
-//   - the snapshot was observed, is not empty, and is not old;
-//   - it did not shrink against the round before or against what the
-//     catalog is running;
-//   - the catalog is not running a Plan of the strategy;
-//   - this loop has seen the strategy missing for the grace, under two
-//     different observations of the source.
-//
-// The link's own health is a gate as well, because a roster from a link
-// whose maintenance has stopped says nothing current, and the round that
-// reads it decides nothing rather than something stale.
+// The roster can only err by missing a strategy or listing one twice, which
+// costs a close and never makes one; and a close the link receives for an
+// alert that is no longer active is a no-op on its side. The link's own
+// health is a gate as well, because a roster from a link whose maintenance
+// has stopped says nothing current.
 package absentalerts
 
 import (
@@ -102,11 +97,6 @@ type Round struct {
 	// loop last decided on one. Zero means there is no round to compare
 	// against, which is the first round of a leader term.
 	PreviousSnapshotStrategies int
-	// Published is every strategy with a Plan in the publication the control
-	// plane currently runs. A strategy here is executing, whatever the
-	// snapshot says, and is never closed. Matched by strategy id, as the
-	// snapshot is.
-	Published map[Key]struct{}
 	// Identities is what the catalog remembers about the strategies it let
 	// go. A candidate not here is still closed; its identity is read from its
 	// alerts.
@@ -157,8 +147,7 @@ const (
 	// decide on. Strategies created since it was read would read as absent.
 	RefusalSnapshotStale = "snapshot_stale"
 	// RefusalSnapshotShrunk: the snapshot itself lost a large share of its
-	// strategies since the round before, or against the objects the catalog
-	// is running. The gate is on the input and not on the difference: the
+	// strategies since the round before. The gate is on the input and not on the difference: the
 	// difference is an output filtered by "still holds an unrecovered
 	// alert", so a badly truncated snapshot whose lost strategies happened
 	// to have no open alerts produces a small difference and reads as a
@@ -175,12 +164,8 @@ var Refusals = []string{RefusalNone, RefusalLinkUnavailable, RefusalLinkUnhealth
 // not close lands on one of these, and every one of them is counted.
 const (
 	// OutcomeClosed: absent from the snapshot for the grace under two
-	// observations, not running a Plan, and within this round's bound.
+	// observations, and within this round's bound.
 	OutcomeClosed = "closed"
-	// OutcomeStillPublished: absent from the snapshot, but the catalog is
-	// still running a Plan of it. The strategy is detecting; the snapshot
-	// read is the side that is wrong.
-	OutcomeStillPublished = "still_published"
 	// OutcomeWithinGrace: absent, but not for long enough by this loop's own
 	// clock. A leader that has just been elected cannot close on its first
 	// round.
@@ -242,7 +227,7 @@ const (
 )
 
 // Outcomes is the closed list, for the metric that reports every cell.
-var Outcomes = []string{OutcomeClosed, OutcomeStillPublished, OutcomeWithinGrace, OutcomeUnconfirmed,
+var Outcomes = []string{OutcomeClosed, OutcomeWithinGrace, OutcomeUnconfirmed,
 	OutcomeDeferred, OutcomeIndexUnreadable, OutcomeIdentityUnknown, OutcomeRevisionUnknown,
 	OutcomeEvidenceUnavailable, OutcomeAlertClosed, OutcomeSendFailed, OutcomeWouldSend,
 	OutcomeNotLeader, OutcomeMemoryFull, OutcomeProducerForeign, OutcomeProducerUnknown}
@@ -255,16 +240,14 @@ type Counts struct {
 	Roster                     int
 	RosterUnreadable           int
 	SnapshotStrategies         int
-	PublishedStrategies        int
 	PreviousSnapshotStrategies int
 	// Candidates is the difference this round acts on: listed by the link,
 	// not listed by the snapshot.
-	Candidates     int
-	Closed         int
-	StillPublished int
-	WithinGrace    int
-	Unconfirmed    int
-	Deferred       int
+	Candidates  int
+	Closed      int
+	WithinGrace int
+	Unconfirmed int
+	Deferred    int
 }
 
 // Bounds are the gates a round is decided under.
@@ -281,8 +264,7 @@ type Bounds struct {
 	// roster is not current.
 	MaxLinkHealthAge time.Duration
 	// MaxSnapshotShrinkRatio is how much smaller this round's snapshot may
-	// be than the round before's, or than the number of strategies the
-	// catalog is running, before the round is refused.
+	// be than the round before's before the round is refused.
 	MaxSnapshotShrinkRatio float64
 	// MinSnapshotForShrink is the size below which the shrink ratio says
 	// nothing: on a deployment with four strategies one deletion is
@@ -310,7 +292,7 @@ type Result struct {
 // decision reads it, without the decision itself mutating memory.
 func Candidates(round Round, bounds Bounds) ([]Key, Counts, string) {
 	counts := Counts{Roster: len(round.Roster), RosterUnreadable: round.RosterUnreadable,
-		SnapshotStrategies: len(round.SnapshotStrategies), PublishedStrategies: len(round.Published),
+		SnapshotStrategies:         len(round.SnapshotStrategies),
 		PreviousSnapshotStrategies: round.PreviousSnapshotStrategies}
 	if !round.LinkRead {
 		return nil, counts, RefusalLinkUnavailable
@@ -366,12 +348,7 @@ func Compute(round Round, bounds Bounds) Result {
 		return Result{Counts: counts, Refusal: refusal}
 	}
 	result := Result{Counts: counts, Refusal: RefusalNone}
-	running := strategyIDs(round.Published)
 	for _, key := range rotate(candidates, round.After) {
-		if _, published := running[key.StrategyID]; published {
-			result.Counts.StillPublished++
-			continue
-		}
 		absence, tracked := round.FirstAbsent[key]
 		if !tracked || round.Now.Sub(absence.Since) < bounds.Grace {
 			result.Counts.WithinGrace++
@@ -421,9 +398,7 @@ func linkUnhealthy(round Round, bounds Bounds) bool {
 }
 
 // shrunk gates on the input: the strategy list itself, against what it was
-// and against what the catalog is running. Either comparison is enough, and
-// both are denominators a reader is given, so "the snapshot did not shrink"
-// and "nothing compared it" are different readings.
+// the round before.
 func shrunk(counts Counts, bounds Bounds) bool {
 	if bounds.MaxSnapshotShrinkRatio <= 0 {
 		return false
@@ -434,7 +409,7 @@ func shrunk(counts Counts, bounds Bounds) bool {
 		}
 		return float64(before-counts.SnapshotStrategies)/float64(before) > bounds.MaxSnapshotShrinkRatio
 	}
-	return against(counts.PreviousSnapshotStrategies) || against(counts.PublishedStrategies)
+	return against(counts.PreviousSnapshotStrategies)
 }
 
 func sortKeys(keys []Key) {

@@ -110,18 +110,6 @@ func TestAStrategyTheSnapshotListsIsNotACandidate(t *testing.T) {
 	}
 }
 
-// The second condition is independent of the first: a strategy whose Plan
-// the fleet is running is detecting, whatever the snapshot says.
-func TestAStrategyStillRunningAPlanIsNotClosed(t *testing.T) {
-	k := key("10")
-	round := roundFor(set(k), ripe(k))
-	round.Published = set(k)
-	result := Compute(round, testBounds())
-	if len(result.Close) != 0 || result.Counts.StillPublished != 1 {
-		t.Fatalf("a strategy with a published Plan was closed: %+v", result)
-	}
-}
-
 // Not read is not empty. The count is reported so that it is a reading.
 func TestAStrategyTheLinkCouldNotReadIsReportedNotClosed(t *testing.T) {
 	round := roundFor(set(), nil)
@@ -248,23 +236,6 @@ func TestTheShrinkGateIsABoundaryOnBothSides(t *testing.T) {
 	}
 }
 
-// The same gate against the running catalog, for a leader whose first round
-// has no previous snapshot.
-func TestASnapshotSmallerThanTheRunningCatalogRefusesTheRound(t *testing.T) {
-	k := key("10")
-	round := roundFor(set(k), ripe(k))
-	round.SnapshotStrategies = filled(60)
-	round.PreviousSnapshotStrategies = 0
-	published := map[Key]struct{}{}
-	for i := 0; i < 100; i++ {
-		published[key("published-"+itoa(i))] = struct{}{}
-	}
-	round.Published = published
-	if result := Compute(round, testBounds()); result.Refusal != RefusalSnapshotShrunk {
-		t.Fatalf("a snapshot far smaller than the running catalog was decided on: %+v", result)
-	}
-}
-
 // A deployment whose unrecovered alerts are mostly, or all, on deleted
 // strategies is the case this capability exists for - and on its first run
 // against a backlog, the difference can be a large share of everything.
@@ -358,16 +329,12 @@ func TestAStrategyTheLinkStopsListingIsForgotten(t *testing.T) {
 func TestEveryCandidateLandsOnExactlyOneOutcome(t *testing.T) {
 	roster := map[Key]struct{}{}
 	absences := map[Key]Absence{}
-	published := map[Key]struct{}{}
-	for _, shape := range []string{"closed", "published", "grace", "unconfirmed"} {
+	for _, shape := range []string{"closed", "grace", "unconfirmed"} {
 		k := key(shape)
 		roster[k] = struct{}{}
 		switch shape {
 		case "closed":
 			absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-before"}
-		case "published":
-			absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-before"}
-			published[k] = struct{}{}
 		case "grace":
 			absences[k] = Absence{Since: testNow, Observation: "observation-now"}
 		case "unconfirmed":
@@ -375,13 +342,12 @@ func TestEveryCandidateLandsOnExactlyOneOutcome(t *testing.T) {
 		}
 	}
 	round := roundFor(roster, absences)
-	round.Published = published
 	counts := Compute(round, testBounds()).Counts
-	filed := counts.Closed + counts.StillPublished + counts.WithinGrace + counts.Unconfirmed + counts.Deferred
-	if filed != counts.Candidates || counts.Candidates != 4 {
+	filed := counts.Closed + counts.WithinGrace + counts.Unconfirmed + counts.Deferred
+	if filed != counts.Candidates || counts.Candidates != 3 {
 		t.Fatalf("a candidate was not filed under any outcome: %+v", counts)
 	}
-	for _, count := range []int{counts.Closed, counts.StillPublished, counts.WithinGrace, counts.Unconfirmed} {
+	for _, count := range []int{counts.Closed, counts.WithinGrace, counts.Unconfirmed} {
 		if count != 1 {
 			t.Fatalf("each shape should file once: %+v", counts)
 		}
@@ -397,17 +363,6 @@ func TestAStrategyTheSnapshotListsWithoutATenantIsNotACandidate(t *testing.T) {
 	round.SnapshotStrategies[Key{StrategyID: "10"}] = struct{}{}
 	if result := Compute(round, testBounds()); result.Counts.Candidates != 0 || len(result.Close) != 0 {
 		t.Fatalf("a strategy the snapshot lists without a tenant was read as absent: %+v", result)
-	}
-}
-
-// Likewise a running Plan protects the strategy whatever tenant either side
-// wrote down.
-func TestARunningPlanProtectsTheStrategyUnderAnyTenant(t *testing.T) {
-	k := key("10")
-	round := roundFor(set(k), ripe(k))
-	round.Published = set(Key{TenantID: "other", StrategyID: "10"})
-	if result := Compute(round, testBounds()); result.Counts.StillPublished != 1 || len(result.Close) != 0 {
-		t.Fatalf("a strategy with a running Plan was closed: %+v", result)
 	}
 }
 
@@ -433,35 +388,5 @@ func TestTheWalkStartsPastTheLastDecidedStrategy(t *testing.T) {
 		if k.Key.StrategyID != want[i] {
 			t.Fatalf("the second round did not start past the first one's last: %+v", second.Close)
 		}
-	}
-}
-
-// The source drops strategies for minutes and brings them back. While the
-// catalog still runs the strategy, this loop's clock does not start; it
-// starts when the catalog lets go, so a strategy absent for just over the
-// catalog's grace is not closed on the next round.
-func TestTheClockStartsWhenTheCatalogLetsGoNotWhenTheSourceMissesIt(t *testing.T) {
-	k := key("10")
-	tracker := NewTracker(100)
-	running := roundFor(set(k), nil)
-	running.Published = set(k)
-	running.SnapshotObservation = "observation-one"
-	tracker.Round(running, testBounds())
-	if tracker.Tracked() != 0 {
-		t.Fatal("a strategy the catalog still runs started its clock")
-	}
-	released := roundFor(set(k), nil)
-	released.Now = testNow.Add(11 * time.Minute)
-	released.LinkLastSuccess = released.Now.Add(-time.Minute)
-	released.SnapshotObservation = "observation-two"
-	if result := tracker.Round(released, testBounds()); result.Counts.WithinGrace != 1 || len(result.Close) != 0 {
-		t.Fatalf("closed on the round the catalog let go, on the source's earlier absence: %+v", result)
-	}
-	later := roundFor(set(k), nil)
-	later.Now = testNow.Add(22 * time.Minute)
-	later.LinkLastSuccess = later.Now.Add(-time.Minute)
-	later.SnapshotObservation = "observation-three"
-	if result := tracker.Round(later, testBounds()); len(result.Close) != 1 {
-		t.Fatalf("not closed once its own grace passed after the catalog let go: %+v", result)
 	}
 }
