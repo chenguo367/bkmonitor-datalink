@@ -13,6 +13,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
@@ -254,6 +255,7 @@ func sourceFactsOf(result phaseTwoControlRefreshResult, at time.Time) *fleet.Sou
 	}
 	facts := fleet.NewSourceFacts(at, objects, withheld)
 	facts.Plans, facts.RevisionedPlans, facts.PlansKnown = composition.PlansTotal, composition.RevisionedPlans, true
+	facts.StandardPlans = composition.PlansByWireFormat[contract.WireFormatStandardRawEvent]
 	facts.ChangeSignalPresent = result.ChangeSignalPresent
 	if result.ChangeSignalPresent {
 		age := result.ChangeSignalAgeSeconds

@@ -80,6 +80,8 @@ type HTTPReconcilerOptions struct {
 	Select           TargetSelector
 	Index            IndexLocation
 	MaxResponseBytes int64
+	// Now is the clock the call record is kept by; nil is the wall clock.
+	Now func() time.Time
 }
 
 // HTTPReconciler reads the link's Console. Which target is this deployment's
@@ -92,6 +94,8 @@ type HTTPReconciler struct {
 	mu         sync.Mutex
 	binding    TargetBinding
 	resolvedAt time.Time
+	// calls is what this process has seen of each Console operation.
+	calls consoleCalls
 }
 
 // bindingReuse is how long a resolved target is reused by the roster walk,
@@ -129,7 +133,7 @@ func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query ur
 	req.SetBasicAuth(reader.options.Username, reader.options.Password)
 	response, err := reader.options.Client.Do(req)
 	if err != nil {
-		return errors.New("alarmd openalerts: reconcile request failed")
+		return errors.New("alarmd openalerts: Console request failed")
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
@@ -151,7 +155,7 @@ func (reader *HTTPReconciler) Binding(ctx context.Context) (TargetBinding, error
 	reader.mu.Lock()
 	binding, at := reader.binding, reader.resolvedAt
 	reader.mu.Unlock()
-	if !at.IsZero() && time.Since(at) < bindingReuse {
+	if !at.IsZero() && reader.now().Sub(at) < bindingReuse {
 		return binding, nil
 	}
 	return reader.resolve(ctx)
@@ -182,7 +186,7 @@ func (reader *HTTPReconciler) resolve(ctx context.Context) (TargetBinding, error
 			binding.Address, binding.Database, binding.KeyPrefix, index.Address, index.Database, index.KeyPrefix, binding.Address)
 	}
 	reader.mu.Lock()
-	reader.binding, reader.resolvedAt = binding, time.Now()
+	reader.binding, reader.resolvedAt = binding, reader.now()
 	reader.mu.Unlock()
 	return binding, nil
 }
@@ -244,7 +248,7 @@ func sameTarget(binding, target TargetBinding) bool {
 	return reflect.DeepEqual(binding, target)
 }
 
-func (reader *HTTPReconciler) Reconcile(ctx context.Context, key StrategyKey) (Reconciliation, error) {
+func (reader *HTTPReconciler) reconcile(ctx context.Context, key StrategyKey) (Reconciliation, error) {
 	if !validStrategyKey(key) {
 		return Reconciliation{}, errors.New("alarmd openalerts: invalid strategy identity")
 	}
@@ -325,7 +329,7 @@ func (reader *HTTPReconciler) Reconcile(ctx context.Context, key StrategyKey) (R
 type statusError int
 
 func (code statusError) Error() string {
-	return fmt.Sprintf("alarmd openalerts: reconcile HTTP status %d", int(code))
+	return fmt.Sprintf("alarmd openalerts: Console HTTP status %d", int(code))
 }
 
 func containsSource(sources []string, value string) bool {

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 )
 
@@ -29,31 +30,44 @@ var linkdDiscoveryPause = 2 * time.Second
 // restates the hook's Redis a second time. A stated linkd connection is left
 // alone, and so is a target at a Redis this process holds no connection to:
 // the reconciler then refuses with both locations named.
-func adoptLinkdLocation(ctx context.Context, cfg config.Config, discover discoverLinkdTarget) config.Config {
+//
+// What happened is returned beside the configuration, because the answer is
+// otherwise lost: a Console refusing the credentials, or a link writing to a
+// Redis this process holds no connection to, leaves the configuration as it
+// was and every later round refusing, with nothing that says why.
+func adoptLinkdLocation(ctx context.Context, cfg config.Config, discover discoverLinkdTarget) (config.Config, *fleet.LinkdDiscoveryFacts) {
 	settings := cfg.PhaseTwo.Linkd
-	if settings.ConsoleURL == "" || settings.Connection != nil {
-		return cfg
+	if settings.ConsoleURL == "" {
+		return cfg, nil
+	}
+	if settings.Connection != nil {
+		return cfg, &fleet.LinkdDiscoveryFacts{Outcome: fleet.LinkdDiscoveryConnectionStated}
 	}
 	options := openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL, Username: settings.Username, Password: settings.Password,
 		Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: 1 << 20,
 		Select: openalerts.TargetSelector{EventSourceID: settings.EventSourceID, HookName: settings.HookName}}
 	var target openalerts.TargetBinding
 	var err error
+	facts := &fleet.LinkdDiscoveryFacts{}
 	for attempt := 0; attempt < linkdDiscoveryAttempts; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return cfg
+				facts.Outcome, facts.Error = fleet.LinkdDiscoveryFailed, boundedText(ctx.Err().Error())
+				return cfg, facts
 			case <-time.After(linkdDiscoveryPause):
 			}
 		}
+		facts.Attempts++
 		if target, err = discover(ctx, options); err == nil {
 			break
 		}
 	}
 	if err != nil {
-		return cfg
+		facts.Outcome, facts.Error = fleet.LinkdDiscoveryFailed, boundedText(err.Error())
+		return cfg, facts
 	}
+	facts.Target = linkdTargetFacts(target)
 	for _, held := range heldRedisConnections(cfg) {
 		if !strings.EqualFold(linkdLocation(held), target.Address) {
 			continue
@@ -63,9 +77,30 @@ func adoptLinkdLocation(ctx context.Context, cfg config.Config, discover discove
 		if settings.KeyPrefix == "" {
 			cfg.PhaseTwo.Linkd.KeyPrefix = target.KeyPrefix
 		}
-		return cfg
+		facts.Outcome = fleet.LinkdDiscoveryAdopted
+		return cfg, facts
 	}
-	return cfg
+	facts.Outcome = fleet.LinkdDiscoveryNoHeldConnection
+	return cfg, facts
+}
+
+// linkdTargetFacts is a target as the page shows it: where the link writes,
+// never its credentials, which the Console does not publish.
+func linkdTargetFacts(target openalerts.TargetBinding) *fleet.LinkdTargetFacts {
+	return &fleet.LinkdTargetFacts{EventSourceID: target.EventSourceID, HookName: target.HookName,
+		Address: target.Address, Database: target.Database, KeyPrefix: target.KeyPrefix}
+}
+
+// linkdFailureTextLimit bounds a failure sentence carried on the snapshot.
+// The Console's own errors list every target it maintains, which on a link
+// with many hooks is long.
+const linkdFailureTextLimit = 512
+
+func boundedText(text string) string {
+	if len(text) > linkdFailureTextLimit {
+		return text[:linkdFailureTextLimit] + "..."
+	}
+	return text
 }
 
 // heldRedisConnections are the Redis connections the deployment already gave

@@ -2423,6 +2423,9 @@ type View struct {
 	Dependencies         []Endpoint `json:"dependencies,omitempty"`
 	DependenciesReplica  string     `json:"dependencies_replica,omitempty"`
 	DependenciesReplicas int        `json:"dependencies_replicas,omitempty"`
+	// LinkdConsole is the alert link's Console read against whether this
+	// deployment needs it. Nil until the leader has published a round.
+	LinkdConsole *LinkdConsoleStanding `json:"linkd_console,omitempty"`
 	// ReplicasNotReady counts the counted replicas whose own readiness says
 	// not ready: up and publishing, and answering the probe with no. Which
 	// bit is on each replica's row. A replica that published no readiness is
@@ -2825,6 +2828,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	// it has is a cache that cannot update the run, which the standing says
 	// and the badge does not.
 	view.SourceStanding = sourceStandingOf(view.Source, executingObjects(&view))
+	view.LinkdConsole = linkdConsoleStandingOf(&view)
 	if view.SourceStanding != nil && view.SourceStanding.Kind == SourceBlocked {
 		view.Degradations = append(view.Degradations, Degradation{Kind: DegradationSourceBlocked,
 			Replica: view.SourceReplica, Stage: "catalog", Text: sourceBlockedText(view.Source)})

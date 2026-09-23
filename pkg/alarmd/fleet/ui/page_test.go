@@ -12,6 +12,7 @@ package ui
 import (
 	"reflect"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/absentalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -902,5 +903,54 @@ func TestThePageHasWordingForEveryOpenAlertGateAnswer(t *testing.T) {
 			t.Errorf("the recovery gate can answer %q and the page has no word for it: the row will not count it, "+
 				"and with only such answers it reads as though the gate was never asked", answer)
 		}
+	}
+}
+
+// The dependency table's role words, the Console's states, its operations
+// and the link's own health words are each hand-listed on the page, and the
+// Go side says each list is closed and the page is held to it. Nothing held
+// it: a role or a state added in Go reaches the page as its raw word, and
+// the first-screen Console sentence drops the part it has no word for.
+func TestThePageHasWordingForEveryDependencyRoleAndConsoleReading(t *testing.T) {
+	var unhealthy []string
+	for _, word := range absentalerts.LinkHealthWords {
+		if word != absentalerts.LinkHealthy {
+			unhealthy = append(unhealthy, word)
+		}
+	}
+	tables := map[string][]string{
+		"ENDPOINT":        fleet.EndpointRoles,
+		"CONSOLE_STATE":   fleet.LinkdConsoleStates,
+		"CONSOLE_OP":      openalerts.ConsoleOps,
+		"LINK_HEALTH":     unhealthy,
+		"LINKD_DISCOVERY": fleet.LinkdDiscoveryOutcomes,
+	}
+	for table, words := range tables {
+		if len(words) == 0 {
+			t.Fatalf("%s: no words declared in Go; the check would pass vacuously", table)
+		}
+		found := regexp.MustCompile(`var ` + table + ` = \{([\s\S]*?)\};`).FindStringSubmatch(string(page))
+		if found == nil {
+			t.Fatalf("the page no longer declares %s", table)
+		}
+		for _, word := range words {
+			if !regexp.MustCompile(`\b` + word + `:`).MatchString(found[1]) {
+				t.Errorf("%s has no word for %q", table, word)
+			}
+		}
+	}
+}
+
+// The first-screen Console line is shown from the server's decision and
+// nothing else: a page that decided from the state alone would put a
+// permanently true sentence on every deployment whose events all go the
+// Python-compatible way.
+func TestTheFirstScreenConsoleLineReadsTheServersAttention(t *testing.T) {
+	body := regexp.MustCompile(`function consoleBrief\(standing, deployment\) \{\n  if \(!standing \|\| !standing\.attention\) return '';`)
+	if !body.MatchString(string(page)) {
+		t.Fatal("consoleBrief no longer returns nothing unless the server set attention")
+	}
+	if !strings.Contains(string(page), "consoleBrief(deployment.linkd_console, deployment)") {
+		t.Fatal("the brief no longer renders the Console line from deployment.linkd_console")
 	}
 }

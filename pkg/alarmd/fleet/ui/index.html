@@ -189,6 +189,7 @@ details.group table{margin:6px 0 0 12px}
       <p id="briefSchedule"></p>
       <p id="briefTodo"></p>
       <p id="briefBlind"></p>
+      <p id="briefConsole" hidden></p>
     </div>
     <!-- The badge answers "is alarmd well". Nobody opens this page to ask that:
          they ask whether alerting is working, what is affected and whether to
@@ -1505,6 +1506,85 @@ function renderBrief(deployment) {
   // said as what it is.
   var covered = deployment.covered || 0;
   text('briefBlind', '状态覆盖：' + (blind.length ? blind.join('；') : (covered ? '全部对象都有结论' : '没有对象在检测（0 个），无所谓结论')) + '。' + detail);
+  var consoleLine = consoleBrief(deployment.linkd_console, deployment);
+  text('briefConsole', consoleLine);
+  show('briefConsole', consoleLine !== '');
+}
+
+// The alert link's Console on the first screen, only where the server says
+// the deployment needs it and it is not working: events go to the link as
+// the standard raw event, so their alerts can be closed only through the
+// Console. A deployment whose events all go the Python-compatible way hands
+// its alerts to the Python backend; its Console is unconfigured by design
+// and the line stays off -- that decision is the server's (attention), not
+// this page's.
+var CONSOLE_STATE = {
+  not_configured: '未配置告警链路 Console（phase_two.linkd.console_url）：集合校准、已停用/删除策略的告警关闭都不运行',
+  not_called: '已配置，本副本还没调用过',
+  unreadable: '已配置但读不到：两项关闭每轮都在尝试、都没成',
+  link_unhealthy: '读得到，但 linkd 自报集合维护不健康：已停用/删除策略的关闭每轮拒绝（link_unhealthy）',
+  reachable: '可达'
+};
+var CONSOLE_OP = { roster: '名册', reconcile: '校准对账', alert_record: '单条告警记录' };
+var LINK_HEALTH = {
+  discovery_failing: '最近一次全量发现失败',
+  discovery_never_succeeded: '从未成功完成全量发现',
+  discovery_stale: '距上次成功的全量发现已超过界限'
+};
+// The startup question "where does the link write", and what came of it.
+var LINKD_DISCOVERY = {
+  adopted: '已按 Console 给出的位置读取',
+  connection_stated: '部署自己配置了集合所在的 Redis，未向 Console 询问',
+  no_held_connection: 'Console 给出的 Redis 不是本进程已持有连接的任何一个，仍按原位置读取，每轮对账会拒绝并写出两处位置',
+  failed: '启动时向 Console 询问失败，仍按原位置读取'
+};
+function linkdTargetWords(t) {
+  return t.event_source_id + '/' + t.hook_name + ' 写在 ' + t.address + ' db ' + t.database + ' 前缀 ' + t.key_prefix;
+}
+function consoleFailureHint(text) {
+  if (/status 401/.test(text || '')) return '；401 是 Console 拒绝了账号口令（phase_two.linkd 的 username/password 或对应环境变量），不是接口不存在';
+  if (/status 403/.test(text || '')) return '；403 是账号没有该接口的权限';
+  return '';
+}
+function consoleWords(c) {
+  var words = CONSOLE_STATE[c.state] || c.state;
+  if (c.state === 'unreadable') {
+    var failing = (c.calls || []).filter(function (call) { return call.op === c.reason; })[0];
+    words += '（' + (CONSOLE_OP[c.reason] || c.reason) + '最近一次失败'
+      + (failing && failing.last_failure ? '：' + failing.last_failure : '') + '）';
+    // A link older than the roster answers every reconciliation and refuses
+    // every browse; the status says which of the two this is.
+    if (c.reason === 'roster' && failing && /status 404/.test(failing.last_failure || '')) {
+      words += '；名册接口 404，多半是 linkd 版本早于名册接口';
+    }
+    words += consoleFailureHint(failing && failing.last_failure);
+  } else if (c.state === 'link_unhealthy') {
+    words += '（' + (LINK_HEALTH[c.reason] || c.reason)
+      + (c.link_health_age_seconds != null ? '，上次成功在 ' + elapsedLabel(c.link_health_age_seconds) + '前，界限 ' + elapsedLabel(c.max_link_health_age_seconds) : '')
+      + (c.link_error ? '：' + c.link_error : '') + '）';
+  }
+  if (c.target) {
+    words += '；目标 ' + linkdTargetWords(c.target)
+      + (c.target_age_seconds != null ? '（' + elapsedLabel(c.target_age_seconds) + '前解析）' : '');
+  }
+  var d = c.discovery;
+  if (d) {
+    words += '；启动时：' + (LINKD_DISCOVERY[d.outcome] || d.outcome)
+      + (d.target && d.outcome !== 'adopted' ? '（Console 说 ' + linkdTargetWords(d.target) + '）' : '')
+      + (d.error ? '（试了 ' + d.attempts + ' 次：' + d.error + consoleFailureHint(d.error) + '）' : '');
+  }
+  return words;
+}
+function consoleBrief(standing, deployment) {
+  if (!standing || !standing.attention) return '';
+  // The entry the server decided from, for the failure text and the link's
+  // ages; the standing's own two words when that replica's list is not here.
+  var own = (deployment.per_replica || []).filter(function (r) { return r.replica === standing.replica; })[0];
+  var deps = (own && own.dependencies) || (standing.replica === deployment.dependencies_replica ? deployment.dependencies || [] : []);
+  var dep = deps.filter(function (d) { return d.role === 'linkd_console'; })[0];
+  var c = dep && dep.console ? dep.console : { state: standing.state, reason: standing.reason };
+  return standing.standard_plans + ' 条计划的事件发往告警链路，但告警链路 Console ' + consoleWords(c)
+    + '——这些告警在策略停用/删除后不会被 alarmd 关闭。';
 }
 
 // Which build the numbers came from. Held to the Go grouping: one group per
@@ -3143,6 +3223,7 @@ var ENDPOINT = {
   dynamic_config: '平台动态配置（平台写、alarmd 读）',
   target_group: '目标分组成员缓存（平台写、alarmd 读）',
   open_alert_set: '未恢复时序指纹集合（告警消费方写、alarmd 读；恢复门据此判有没有可恢复的告警）',
+  linkd_console: '告警链路 Console（HTTP；集合校准、已停用/删除策略的告警关闭都靠它）',
   query_backend: '查询后端（unify-query）',
   output_kafka: '告警输出 Kafka（topic 在前缀列）',
   compat_output_redis: '兼容输出用的服务 Redis（策略快照）'
@@ -3198,6 +3279,22 @@ function renderDependencies(list, replica, replicasWithList) {
       seenParts.push('脚本缓存未命中 ' + dep.script_cache_misses + ' 次（最近 '
         + elapsedLabel(dep.last_script_cache_miss_age_seconds) + '前；不是失败——启动后首次 EVALSHA 的正常装载，若发生在运行很久之后则是 Redis 重启或切主）');
     }
+    // The Console keeps one record per operation, because they fail apart:
+    // a link older than the roster answers every reconciliation and refuses
+    // every browse.
+    if (dep.configured && dep.console && dep.console.calls) {
+      dep.console.calls.forEach(function (call) {
+        var bits = (CONSOLE_OP[call.op] || call.op) + ' ' + call.calls + ' 次';
+        if (!call.calls) {
+          bits += call.op === 'roster' ? '（只有控制 leader 走名册）' : '';
+        } else {
+          if (call.failures) bits += '、失败 ' + call.failures;
+          if (call.last_success_age_seconds != null) bits += '，成功 ' + elapsedLabel(call.last_success_age_seconds) + '前';
+          if (call.last_failure_age_seconds != null) bits += '，失败 ' + elapsedLabel(call.last_failure_age_seconds) + '前：' + (call.last_failure || '（无文本）');
+        }
+        seenParts.push(bits);
+      });
+    }
     if (!seenParts.length) {
       seenParts.push(dep.kind === 'redis' && dep.configured ? '本进程还没对它发过命令' : '这一列只对 Redis 连接与告警输出有记录；查询后端的失败在检查项里按对象归因');
     }
@@ -3236,6 +3333,7 @@ function writerWords(dep) {
   // subscription and the calibration were all on the response and none of
   // them reached the page.
   if (dep.open_alert_set) return openAlertSetWords(dep);
+  if (dep.console) return consoleWords(dep.console);
   if (!w) {
     return dep.role === 'strategy_cache' ? '（这个副本不是 leader，没读过策略缓存）' : '—';
   }
