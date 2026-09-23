@@ -665,15 +665,13 @@ func TestPhaseTwoCatalogRetentionAdmissionUsesTheCandidatesOwnScheduleOffset(t *
 	if err != nil || len(admitted.QueryGroups) != 1 {
 		t.Fatalf("admission(default) = (%+v, %v), want the Plan kept", admitted.QueryGroups, err)
 	}
-	// The retention is derived from the longest cadence the deployment
-	// supports, so shortening the configured floor no longer shortens it;
-	// the way to need more retention than there is, is a Plan evaluated less
-	// often than that bound. The property under test is unchanged: the
-	// candidate's own schedule offset decides whether it fits -- only the
-	// consequence moved, from refusing the Catalog to withholding the Plan.
+	// The candidate's own schedule offset decides whether it fits. The only
+	// Plan that does not is one whose frozen Slot would need its content kept
+	// past the state store's own ceiling; everything short of that is given
+	// the retention it needs.
 	beyond := controlplane.Catalog{QueryGroups: []controlplane.QueryGroup{{Plans: []controlplane.FrozenPlan{{
 		ScheduleSpec: execution.ScheduleSpec{
-			EvaluationIntervalSeconds: int64(phaseTwoMaxSupportedEvaluationInterval/time.Second) + 60, Timezone: "UTC"},
+			EvaluationIntervalSeconds: int64(phaseTwoObjectRetentionLimit(cfg)/time.Second) + 60, Timezone: "UTC"},
 	}}}}}
 	admitted, err = phaseTwoCatalogRetentionAdmission(cfg)(beyond)
 	if err != nil {

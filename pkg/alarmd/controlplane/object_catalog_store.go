@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -121,6 +122,43 @@ func (repository *RedisCatalogRepository) outputContextKey(digest execution.Outp
 
 func (repository *RedisCatalogRepository) catalogManifestKey(revision execution.SnapshotRevision) string {
 	return repository.prefix + ":manifest:" + string(revision)
+}
+
+// objectRetentionKey holds, per publication, how long that publication's
+// objects and output contexts are kept (Catalog.ObjectRetention), in
+// milliseconds. It sits beside the manifest rather than in it because the
+// manifest is decoded strictly. Absent means the catalog TTL.
+func (repository *RedisCatalogRepository) objectRetentionKey(revision execution.SnapshotRevision) string {
+	return repository.prefix + ":object_retention:" + string(revision)
+}
+
+// objectTTL is the TTL content objects are written and renewed with: the
+// publication's own retention where it asks for longer than the catalog TTL,
+// the catalog TTL otherwise. Never shorter: every other key of the catalog is
+// kept for the catalog TTL, and an object outliving them costs nothing but
+// its bytes.
+func (repository *RedisCatalogRepository) objectTTL(retention time.Duration) time.Duration {
+	if retention > repository.ttl {
+		return retention
+	}
+	return repository.ttl
+}
+
+// storedObjectRetention reads a publication's object retention. Absent or
+// unreadable reads as the catalog TTL, which is what every publication
+// before this key had: the renewal it feeds is advisory, and a lost
+// retention costs a long Plan's superseded objects their extra life, never
+// a renewal.
+func (repository *RedisCatalogRepository) storedObjectRetention(ctx context.Context, revision execution.SnapshotRevision) time.Duration {
+	value, err := repository.client.Get(ctx, repository.objectRetentionKey(revision)).Result()
+	if err != nil {
+		return repository.ttl
+	}
+	millis, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || millis <= 0 {
+		return repository.ttl
+	}
+	return repository.objectTTL(time.Duration(millis) * time.Millisecond)
 }
 
 // buildObjectCatalogContent derives every object, every output context and
@@ -246,6 +284,7 @@ func (repository *RedisCatalogRepository) writeObjectCatalog(ctx context.Context
 		},
 	})
 	_, knownObjects, knownContexts := repository.objectCatalog.snapshot()
+	objectTTL := repository.objectTTL(catalog.ObjectRetention)
 
 	// Digests the previous revision already proved present are skipped
 	// outright; the rest are asked about in one EXISTS pipeline before any
@@ -304,7 +343,7 @@ func (repository *RedisCatalogRepository) writeObjectCatalog(ctx context.Context
 				} else {
 					payload = content.contexts[contextKeys[key]]
 				}
-				replies[index] = pipe.SetNX(ctx, key, payload, repository.ttl)
+				replies[index] = pipe.SetNX(ctx, key, payload, objectTTL)
 			}
 			return nil
 		}); err != nil {
@@ -320,6 +359,22 @@ func (repository *RedisCatalogRepository) writeObjectCatalog(ctx context.Context
 				facts.Present++
 			}
 		}
+	}
+	// The retention goes beside the manifest, with the manifest's own life:
+	// the renewal reads it for the publication it renews, so a leader that
+	// has just started keeps a long Plan's objects as long as the one that
+	// published them did, without having admitted a Catalog first. Written
+	// before the manifest, so no renewal can find the manifest without it:
+	// a leader that stopped between the two would otherwise leave a
+	// publication whose long Plans' objects are renewed for the catalog TTL.
+	// It is named by revision, so a manifest collision after it is harmless.
+	if objectTTL > repository.ttl {
+		if err := repository.client.Set(ctx, repository.objectRetentionKey(catalog.SnapshotRevision),
+			strconv.FormatInt(objectTTL.Milliseconds(), 10), repository.ttl).Err(); err != nil {
+			return fmt.Errorf("alarmd controlplane: write catalog object retention: %w", err)
+		}
+	} else if err := repository.client.Del(ctx, repository.objectRetentionKey(catalog.SnapshotRevision)).Err(); err != nil {
+		return fmt.Errorf("alarmd controlplane: clear catalog object retention: %w", err)
 	}
 	result, err := repository.client.Eval(ctx, writeCatalogManifestScript,
 		[]string{repository.catalogManifestKey(catalog.SnapshotRevision)}, content.manifestPayload, repository.ttl.Milliseconds()).Int()
@@ -384,17 +439,33 @@ func (repository *RedisCatalogRepository) renewObjectCatalog(ctx context.Context
 	if err != nil {
 		return
 	}
-	keys = append(keys, repository.catalogManifestKey(revision))
 	// A Query Group a cutover held back runs content the current manifest no
 	// longer names; renewing only the manifest's objects would let what it
 	// runs expire under it a catalog TTL later.
 	keys = append(keys, repository.blockedObjectKeys(ctx)...)
+	// Content is renewed for as long as the publication's longest Plan may
+	// still read it once it is superseded; the manifest, like every other
+	// catalog key, for the catalog TTL. The retention is read from beside
+	// the manifest and not from memory, so the first renewal of a leader
+	// that has just started does not cut a long Plan's objects back.
+	objectTTL := repository.storedObjectRetention(ctx, revision)
+	contentKeys := len(keys)
+	keys = append(keys, repository.catalogManifestKey(revision))
 	for start := 0; start < len(keys); start += objectCatalogBatch {
 		batch := keys[start:minInt(start+objectCatalogBatch, len(keys))]
 		replies := make([]*redis.BoolCmd, len(batch))
 		if _, err := repository.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for index, key := range batch {
-				replies[index] = pipe.PExpire(ctx, key, repository.ttl)
+				ttl := objectTTL
+				if start+index >= contentKeys {
+					ttl = repository.ttl
+				}
+				replies[index] = pipe.PExpire(ctx, key, ttl)
+			}
+			if start+len(batch) == len(keys) && objectTTL > repository.ttl {
+				// Not counted: absent is what a publication with no long Plan
+				// has, and it is not a missing object.
+				pipe.PExpire(ctx, repository.objectRetentionKey(revision), repository.ttl)
 			}
 			return nil
 		}); err != nil {

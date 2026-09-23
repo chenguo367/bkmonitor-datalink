@@ -289,7 +289,10 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			// would make every object's digest move when a Level's window
 			// changed anywhere in the deployment, which is a republication
 			// and a Segment recut for a number no consumer reads.
-			neither: []string{"ObservationID", "SnapshotRevision", "Dispositions", "RetainedStaleRevisions", "Retention"},
+			// ObjectRetention is how long the content is kept, not what it is:
+			// digested, a strategy's cadence change elsewhere would move every
+			// object's digest. It is stored beside the manifest instead.
+			neither: []string{"ObservationID", "SnapshotRevision", "Dispositions", "RetainedStaleRevisions", "Retention", "ObjectRetention"},
 		},
 		reflect.TypeOf(controlplane.QueryGroup{}): {
 			execution: []string{"Identity", "QueryPlan", "MembershipDigest", "ScheduleRevision"},
