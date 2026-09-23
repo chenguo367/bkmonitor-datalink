@@ -126,3 +126,37 @@ func TestSetsCarryingNoneOfOurAlertsDegradeTheVerdictByName(t *testing.T) {
 		})
 	}
 }
+
+// A Leader failing to publish, or whose view reaches nobody, past the bound
+// degrades the verdict by name and replica; a follower's facts and a Leader
+// inside the bound degrade nothing.
+func TestAViewThatCannotBePublishedOrReachesNobodyDegradesTheVerdict(t *testing.T) {
+	for _, arm := range []struct {
+		name  string
+		facts *ViewStreamFacts
+		want  []Degradation
+	}{
+		{name: "healthy leader", facts: &ViewStreamFacts{Leading: true}},
+		{name: "failing inside the bound", facts: &ViewStreamFacts{Leading: true, PublishFailures: 3}},
+		{name: "failing past the bound", facts: &ViewStreamFacts{Leading: true, PublishFailures: 20, PublishFailureReason: "activation_unreadable", PublishFailingBeyondBound: true},
+			want: []Degradation{{Kind: DegradationViewPublishFailing, Replica: "pod-b", Text: "activation_unreadable"}}},
+		{name: "nobody connected past the bound", facts: &ViewStreamFacts{Leading: true, NoSessionsBeyondBound: true},
+			want: []Degradation{{Kind: DegradationViewStreamNoSessions, Replica: "pod-b"}}},
+		{name: "a follower's leftovers", facts: &ViewStreamFacts{PublishFailingBeyondBound: true, NoSessionsBeyondBound: true}},
+	} {
+		t.Run(arm.name, func(t *testing.T) {
+			snapshots := healthySnapshots()
+			snapshots[1].ViewStream = arm.facts
+			view := Aggregate(Expectation{QueryGroups: 949, Known: true}, snapshots, replicas(), now, freshness)
+			var got []Degradation
+			for _, degradation := range view.Degradations {
+				if degradation.Kind == DegradationViewPublishFailing || degradation.Kind == DegradationViewStreamNoSessions {
+					got = append(got, degradation)
+				}
+			}
+			if len(got) != len(arm.want) || (len(got) == 1 && got[0] != arm.want[0]) {
+				t.Fatalf("degradations = %+v, want %+v", got, arm.want)
+			}
+		})
+	}
+}

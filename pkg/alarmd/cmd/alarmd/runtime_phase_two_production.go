@@ -2907,3 +2907,26 @@ func slotTimingFacts(timing execution.SlotTiming) *observability.SlotTimingFacts
 		Slot: timing.Slot, Input: timing.Input, Preflight: timing.Preflight, Evaluate: timing.Evaluate,
 	}
 }
+
+// ReleaseControlLeader gives up the Control Leader lease this process holds,
+// so the next leader is elected now rather than when the lease expires. It is
+// called at shutdown only once every leader task has stopped; see Shutdown.
+// Not holding the lease, or finding it no longer this process's, is not an
+// error: there is nothing to give up.
+func (runtime *productionPhaseTwoOwnership) ReleaseControlLeader(ctx context.Context) error {
+	if runtime == nil || runtime.dependencies.Store == nil {
+		return nil
+	}
+	runtime.mu.Lock()
+	authority := runtime.authority
+	runtime.mu.Unlock()
+	if authority.Fence.QueryGroup == "" {
+		return nil
+	}
+	err := runtime.dependencies.Store.Release(ctx, authority.Fence)
+	runtime.clearControlAuthority(authority)
+	if errors.Is(err, ownership.ErrStaleFence) {
+		return nil
+	}
+	return err
+}

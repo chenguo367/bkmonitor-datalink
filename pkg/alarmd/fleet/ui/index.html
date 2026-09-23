@@ -817,7 +817,9 @@ var DEGRADATION = {
   OPEN_ALERT_SET_STALE: '已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识',
   OPEN_ALERT_SET_DISJOINT: '本副本发出的告警一条都不在 linkd 的已开告警集合里，集合的键和本副本查的不是一种；恢复门改按本副本发过的告警放行，本副本没发过的告警的恢复仍会被扣住，请核对 linkd 告警源的指纹配置',
   PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置',
-  OUTPUT_NOT_READY: '副本连不上告警输出：进程活着但不就绪，不接检测任务，由其余副本顶着——少一个副本的容量'
+  OUTPUT_NOT_READY: '副本连不上告警输出：进程活着但不就绪，不接检测任务，由其余副本顶着——少一个副本的容量',
+  VIEW_PUBLISH_FAILING: 'leader 超过一分钟发不出视图：已有视图的副本照常检测，这期间重启的副本没有视图、什么都不执行；原因见说明',
+  VIEW_STREAM_NO_SESSIONS: 'leader 超过一分钟有待连的副本却没有一个连上视图流：视图谁都收不到，重启的副本会拿不到视图'
 };
 
 // What each line owes past its sentence, per check and held to the Go list:

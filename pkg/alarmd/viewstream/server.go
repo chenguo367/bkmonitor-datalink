@@ -95,6 +95,41 @@ type Stats struct {
 	// by the chunked snapshot of the same revision.
 	DeltasOversized uint64
 	Refusals        uint64
+	// PublishFailingSince is when the Leader's desired set last failed to
+	// be published with no success since; zero while publishing works.
+	// PublishFailures counts the failures since then, PublishFailureReason
+	// names the latest (PublishFailureReasons), and PublishFailuresByReason
+	// counts every failure since the process started.
+	PublishFailingSince     time.Time
+	PublishFailures         uint64
+	PublishFailureReason    string
+	PublishFailuresByReason map[string]uint64
+	// NoSessionsSince is when this Leader was first seen with Workers
+	// expected and none of them holding a stream; zero otherwise. Read by
+	// Stats, so it is as fresh as the last read.
+	NoSessionsSince time.Time
+}
+
+// Why a desired set could not be published, closed: a metric label.
+const (
+	PublishFailureActivationUnreadable  = "activation_unreadable"
+	PublishFailureContentUnreadable     = "content_unreadable"
+	PublishFailureDrainingUnreadable    = "draining_unreadable"
+	PublishFailureActiveSetUnreadable   = "active_set_unreadable"
+	PublishFailureAssignmentsUnreadable = "assignments_unreadable"
+	PublishFailureRejected              = "publish_rejected"
+)
+
+// PublishFailureReasons lists every reason, for the metric that pre-creates
+// them all.
+var PublishFailureReasons = []string{PublishFailureActivationUnreadable, PublishFailureContentUnreadable,
+	PublishFailureDrainingUnreadable, PublishFailureActiveSetUnreadable, PublishFailureAssignmentsUnreadable, PublishFailureRejected}
+
+type publishFailures struct {
+	since    time.Time
+	run      uint64
+	reason   string
+	byReason map[string]uint64
 }
 
 type serverCounters struct {
@@ -117,6 +152,9 @@ type Server struct {
 	sessions  map[string]*session
 	counters  serverCounters
 	closed    bool
+	failures  publishFailures
+	// noSessionsSince backs Stats.NoSessionsSince.
+	noSessionsSince time.Time
 
 	// Diagnostics have their own admission slots and handler lock. A slow
 	// evidence reader must not hold the control stream's session lock or queue.
@@ -209,13 +247,16 @@ func (server *Server) Publish(ctx context.Context, desired Desired) (Published, 
 	publisher := server.publisher
 	server.mu.Unlock()
 	if publisher == nil {
+		server.NotePublishFailure(PublishFailureRejected)
 		return Published{}, errors.New("alarmd viewstream: not leading")
 	}
 	published, err := publisher.Publish(desired)
 	if err != nil {
+		server.NotePublishFailure(PublishFailureRejected)
 		return Published{}, err
 	}
 	server.mu.Lock()
+	server.failures.since, server.failures.run, server.failures.reason = time.Time{}, 0, ""
 	if published.Changed {
 		server.counters.publications++
 	} else {
@@ -249,16 +290,40 @@ func (server *Server) Publish(ctx context.Context, desired Desired) (Published, 
 	return published, nil
 }
 
+// NotePublishFailure records that the Leader could not publish its desired
+// set, by why (one of PublishFailureReasons). It is how a Leader that cannot
+// publish is told from one with nothing new to publish: both leave the
+// revision where it was. The next successful Publish clears the run.
+func (server *Server) NotePublishFailure(reason string) {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	if server.failures.byReason == nil {
+		server.failures.byReason = make(map[string]uint64, len(PublishFailureReasons))
+	}
+	if server.failures.run == 0 {
+		server.failures.since = server.now()
+	}
+	server.failures.run++
+	server.failures.reason = reason
+	server.failures.byReason[reason]++
+}
+
 // Stats for the page and the metrics.
 func (server *Server) Stats() Stats {
 	server.mu.Lock()
 	defer server.mu.Unlock()
 	stats := Stats{Sessions: len(server.sessions),
+		PublishFailingSince: server.failures.since, PublishFailures: server.failures.run,
+		PublishFailureReason: server.failures.reason, PublishFailuresByReason: make(map[string]uint64, len(PublishFailureReasons)),
 		Publications: server.counters.publications, PublicationsSkipped: server.counters.publicationsSkipped,
 		SnapshotChunksSent: server.counters.snapshotChunks, DeltasSent: server.counters.deltas,
 		EmptyDeltasSent: server.counters.emptyDeltas, DeltasOversized: server.counters.deltasOversized,
 		Refusals: server.counters.refusals}
+	for _, reason := range PublishFailureReasons {
+		stats.PublishFailuresByReason[reason] = server.failures.byReason[reason]
+	}
 	if server.publisher == nil {
+		server.noSessionsSince = time.Time{}
 		return stats
 	}
 	stats.Leading, stats.ControlEpoch, stats.Revision = true, server.publisher.epoch, server.publisher.Revision()
@@ -282,6 +347,16 @@ func (server *Server) Stats() Stats {
 		}
 	}
 	stats.Ignored = server.publisher.ledger.Ignored()
+	// Workers are expected and none holds a stream: a Leader whose view
+	// reaches nobody. Dated from the first read that saw it.
+	if stats.Counts.Expected > 0 && stats.Sessions == 0 {
+		if server.noSessionsSince.IsZero() {
+			server.noSessionsSince = server.now()
+		}
+	} else {
+		server.noSessionsSince = time.Time{}
+	}
+	stats.NoSessionsSince = server.noSessionsSince
 	return stats
 }
 
