@@ -49,7 +49,7 @@ func TestTheAuthorizationPageSaysWhatToDoForEveryGrantRefusal(t *testing.T) {
 	w := httptest.NewRecorder()
 	Handler().ServeHTTP(w, httptest.NewRequest("GET", "/cli", nil))
 	body := w.Body.String()
-	for _, code := range []string{"admin_unauthorized", "admin_not_configured", "origin_denied", "auth_rate_limited",
+	for _, code := range []string{"admin_unauthorized", "admin_not_configured", "auth_rate_limited",
 		"auth_busy", "auth_store_unavailable", "not_found", "unreachable"} {
 		if !strings.Contains(body, "  "+code+": ") {
 			t.Errorf("the page has no hint for %q", code)

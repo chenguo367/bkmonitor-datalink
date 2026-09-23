@@ -54,7 +54,6 @@ function wrongEntry(configured) {
 const HINTS = {
   admin_unauthorized: '管理凭据不对：请输入部署时写进 Secret 的那个值（values 里 alarmd.cli.adminKeySecret.existingSecret 指向的 Secret）。',
   admin_not_configured: 'alarmd 没有拿到管理凭据，签发未开启：检查 values 里 alarmd.cli.adminKeySecret.existingSecret，以及该 Secret 是否在 alarmd 所在的命名空间、键名是否对，改完重新部署。',
-  origin_denied: '',
   auth_rate_limited: '生成得太频繁：每个副本每分钟最多 6 次，请下一分钟再试。',
   auth_busy: '授权服务正忙，请几秒后重试。',
   auth_store_unavailable: 'alarmd 读写授权记录的运行 Redis 暂不可用，请稍后重试；持续失败请检查 alarmd 的运行 Redis。',
@@ -63,7 +62,10 @@ const HINTS = {
 };
 function hint(code, fallback) {
   if (code === 'origin_denied') return wrongEntry(configuredEntry || '（未知，请先点"核对环境"）');
-  return HINTS[code] || fallback || '授权服务暂不可用，请检查管理凭据与部署配置。';
+  // Own keys only: a code such as "constructor" must reach the fallback, not
+  // the prototype's function.
+  if (Object.hasOwn(HINTS, code)) return HINTS[code];
+  return fallback || '授权服务暂不可用，请检查管理凭据与部署配置。';
 }
 function clearCode() { code.value = ''; document.getElementById('grant').hidden = true; clearTimeout(expiryTimer); }
 async function request(method, key) {
