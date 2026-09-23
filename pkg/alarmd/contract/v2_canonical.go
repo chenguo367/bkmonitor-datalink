@@ -413,7 +413,9 @@ func DeriveRecordIDV2(dimensionIdentityDigest string, sourceTime int64) (string,
 // holds the two to each other across the range of times.
 //
 // It keeps a hash of its own and is not for concurrent use: one deriver per
-// series being read or written.
+// series being read or written. The saved hash state lives in memory only and
+// is never persisted, so a Go release that changes how that state is encoded
+// changes nothing here.
 type RecordIDDeriverV2 struct {
 	prefix []byte
 	digest hash.Hash
