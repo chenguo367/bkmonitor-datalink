@@ -612,3 +612,146 @@ func TestAHeldReactivationKeepsTheHeldBackSet(t *testing.T) {
 		t.Fatalf("the held reactivation dropped the body's count: %d %q", reactivated.BlockedCount, reactivated.BlockedDigest)
 	}
 }
+
+// The ref upgrade writes through the cutover script too, with no timeline
+// and the held-back set left as it is. It used to pass the layout of the
+// script before the set existed, which wrote the header, the body and the
+// delta and then failed on the missing argument - a write that happened and
+// reported an error.
+func TestTheActivationRefUpgradeWritesWholeAndKeepsTheHeldBackSet(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:cutover-isolation-ref-upgrade")
+	fixture.publish(t, cutoverCatalog(t, 80, nil), 60)
+	previous := fixture.activation(t)
+	if err := fixture.client.Set(fixture.ctx, fixture.prefix+":activation_blocked", "kept as it is", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	active, err := fixture.client.Get(fixture.ctx, fixture.prefix+":active_qg_set:"+previous.ActiveQGSetRef.Digest).Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := previous
+	next.RecordRevision++
+	expected := controlplane.ActivationExpectation{RecordRevision: previous.RecordRevision, Current: previous.Current, Pending: previous.Pending}
+	if err := fixture.repository.PersistActivationRefUpgradeForTest(fixture.ctx, expected, next, active); err != nil {
+		t.Fatalf("the ref upgrade failed: %v", err)
+	}
+	fixture.repository.ForgetActivationCacheForTest()
+	if after := fixture.activation(t); after.RecordRevision != previous.RecordRevision+1 {
+		t.Fatalf("record revision = %d, want %d", after.RecordRevision, previous.RecordRevision+1)
+	}
+	if got, err := fixture.client.Get(fixture.ctx, fixture.prefix+":activation_blocked").Result(); err != nil || got != "kept as it is" {
+		t.Fatalf("the ref upgrade changed the held-back set: %q, %v", got, err)
+	}
+}
+
+// A caller that hands the cutover script the layout of an older version of
+// it is refused before anything is written.
+func TestTheCutoverScriptRefusesAnOldArgumentLayoutWhole(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:cutover-isolation-old-layout")
+	fixture.publish(t, cutoverCatalog(t, 80, nil), 60)
+	header, err := fixture.client.Get(fixture.ctx, fixture.prefix+":activation_header").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := fixture.client.Get(fixture.ctx, fixture.prefix+":activation").Result()
+	state := fixture.activation(t)
+	err = fixture.client.Eval(fixture.ctx, controlplane.CutoverScriptForTest(),
+		[]string{fixture.prefix + ":activation_header", fixture.prefix + ":activation",
+			fixture.prefix + ":active_qg_set:" + state.ActiveQGSetRef.Digest, fixture.prefix + ":activation_delta:999"},
+		header, "rewritten-header", "rewritten-body", "", 1000, "delta", 0).Err()
+	if err == nil || !strings.Contains(err.Error(), "argument layout") {
+		t.Fatalf("err = %v, want the layout refused", err)
+	}
+	if got, _ := fixture.client.Get(fixture.ctx, fixture.prefix+":activation_header").Result(); got != header {
+		t.Fatal("the header was written before the refusal")
+	}
+	if got, _ := fixture.client.Get(fixture.ctx, fixture.prefix+":activation").Result(); got != body {
+		t.Fatal("the body was written before the refusal")
+	}
+}
+
+// movingCatalog is two strategies of one business: in the first
+// publication they share query facts and one Query Group; in the second the
+// second strategy queries another table and moves to a Query Group of its
+// own.
+func movingCatalog(t *testing.T, moved bool) controlplane.Catalog {
+	t.Helper()
+	documents := realThresholdDocuments(t)
+	var second map[string]any
+	if err := json.Unmarshal(documents[0], &second); err != nil {
+		t.Fatal(err)
+	}
+	second["id"] = float64(1003)
+	for _, item := range second["items"].([]any) {
+		item.(map[string]any)["id"] = float64(13)
+	}
+	secondDocument, err := json.Marshal(second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner := queryPlannerFunc(func(_ context.Context, source controlplane.PrimaryQuerySource) (execution.QueryPlanFacts, error) {
+		facts := queryFactsFor(t, "2", "bkcc__2")
+		if moved && source.StrategyID == "1003" {
+			facts.QueryRevision = ""
+			facts.QueryList = append([]execution.QueryClause(nil), facts.QueryList...)
+			facts.QueryList[0].TableID = "system.mem"
+			return execution.BuildQueryPlanFacts(facts)
+		}
+		return facts, nil
+	})
+	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{
+		{SourceID: "1001", Document: documents[0], Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}},
+		{SourceID: "1003", Document: secondDocument, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}},
+	}, Planner: planner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return catalog
+}
+
+// A Plan that moved to another Query Group in the publication that held its
+// old Query Group back is activated once, under the Query Group that has it
+// now: the held-back one's carried record for it gives way. Kept, the Plan
+// would be named twice.
+func TestAPlanThatMovedAwayFromAHeldBackQueryGroupIsActivatedOnce(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:cutover-isolation-moved")
+	first, second := movingCatalog(t, false), movingCatalog(t, true)
+	groupOf := func(catalog controlplane.Catalog, strategy string) controlplane.QueryGroup {
+		for _, group := range catalog.QueryGroups {
+			for _, plan := range group.Plans {
+				if plan.Identity.StrategyID == strategy {
+					return group
+				}
+			}
+		}
+		t.Fatalf("strategy %s is in no Query Group; dispositions %+v", strategy, catalog.Dispositions)
+		return controlplane.QueryGroup{}
+	}
+	from, to := groupOf(first, "1003"), groupOf(second, "1003")
+	if from.Identity == to.Identity || groupOf(first, "1001").Identity != from.Identity || groupOf(second, "1001").Identity != from.Identity {
+		t.Fatalf("setup: 1003 does not move out of 1001's Query Group (%s -> %s)", from.Identity, to.Identity)
+	}
+	fixture.publish(t, first, 60)
+	fixture.rewriteOpenDigest(t, from.Identity, digestOf(t, to))
+	if _, err := fixture.publishNoEnsure(t, second, 120); err != nil {
+		t.Fatalf("a Plan that moved away from a held-back Query Group failed the publication: %v", err)
+	}
+	if blocked := fixture.blocked(t); len(blocked) != 1 || blocked[0].QueryGroup != from.Identity {
+		t.Fatalf("blocked = %+v, want the Query Group 1003 left", blocked)
+	}
+	count := 0
+	var named controlplane.PlanActivationRecord
+	for _, record := range fixture.activation(t).Plans {
+		if record.Fact.Plan.StrategyID == "1003" {
+			count++
+			named = record
+		}
+	}
+	if count != 1 {
+		t.Fatalf("1003 is named %d times in the activation, want once", count)
+	}
+	opened := fixture.openSegment(t, to.Identity, 120)
+	if named.Publication.SnapshotRevision != opened.Publication.SnapshotRevision {
+		t.Fatalf("1003's record names %+v, want the Query Group that has it now (%+v)", named.Publication, opened.Publication)
+	}
+}
