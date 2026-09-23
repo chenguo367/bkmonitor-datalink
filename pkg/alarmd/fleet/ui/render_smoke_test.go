@@ -423,7 +423,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 				// prefixes, which the page must not print.
 				Comparison: &fleet.OpenAlertComparison{OwnEventSourceID: "src-own", Sent: 4,
 					SentShapes: map[string]int{"hex32": 4}, MemberShapes: map[string]int{"hex64": 147},
-					AlertSources:     map[string]int{"src-own": 0, "src-other": 140, "other": 7},
+					AlertSources:     map[string]int{"src-own": 2, "src-other": 140, "other": 7},
 					SentInCalibrated: 4, SentMatchingAlertID: 0, SentMatchingFingerprint: 0,
 					Strategies: []fleet.OpenAlertComparisonStrategy{{TenantID: "system", StrategyID: "8709", Sent: 1, Members: 3,
 						Alerts: 3, Calibrated: true, SentSample: []string{"5f3a9c1e"}, MemberSample: []string{"c0ffee42"},
@@ -1109,7 +1109,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"DEPS ::", "有：消费方按索引协议发布，本端 27 秒前读到"},
 		{"DEPS ::", "跟踪 60 条策略、索引覆盖 60 条、未恢复指纹 0 个（未配校准）"},
 		{"DEPS ::", "恢复门查过 168 次：索引里没有 168"},
-		{"DEPS ::", "恢复闸对照：本端发出未恢复 4 个（32 位十六进制 4），集合成员 64 位十六进制 147；校准列出的活动告警本部署来源 0 条、其他来源 147 条；在已校准策略里的 4 个发出键中，等于某条活动告警 ID 的 0 个、等于其指纹的 0 个"},
+		{"DEPS ::", "恢复闸对照：本端发出未恢复 4 个（32 位十六进制 4），集合成员 64 位十六进制 147；校准列出的活动告警本部署来源 2 条、其他来源 147 条；在已校准策略里的 4 个发出键中，等于某条活动告警 ID 的 0 个、等于其指纹的 0 个"},
 		// The consequence, said once rather than left for the reader to derive
 		// from a row that also says "available" and "not stale", both true.
 		{"DEPS ::", "这套部署现在发不出恢复：集合装载了但一条未恢复指纹都没有，168 次全部落空、恢复被扣住"},

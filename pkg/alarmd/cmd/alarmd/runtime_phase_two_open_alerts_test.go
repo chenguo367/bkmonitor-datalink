@@ -133,3 +133,32 @@ func TestTheOpenAlertComparisonIsCarriedFieldForField(t *testing.T) {
 		t.Error("no comparison is carried as none")
 	}
 }
+
+type nothingIndexed struct{}
+
+func (nothingIndexed) ReadSet(context.Context, openalerts.StrategyKey) ([]string, error) {
+	return nil, nil
+}
+
+func (nothingIndexed) Watch(ctx context.Context, _ func(bool), _ func(openalerts.StrategyKey)) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// A copy that reads the index publishes its comparison in the replica's
+// facts, before any read as well: the counts are then zeros, which is what
+// the copy knows.
+func TestAnIndexCopyPublishesItsComparison(t *testing.T) {
+	now := func() time.Time { return time.Unix(1_700_000_000, 0) }
+	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: nothingIndexed{}, Subscriber: nothingIndexed{}, Now: now,
+		MaxStrategies: 1, MaxMembers: 1, MaxBytes: 1, MaxLocalEntries: 1, ReadBatch: 1, ReconcileBatch: 1,
+		RefreshInterval: time.Minute, IndexInterval: time.Minute, ReconcileInterval: time.Minute, CalibrationMaxAge: time.Minute,
+		LocalRetention: time.Minute, CycleTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := openAlertSetFactsSource(cache, now)()
+	if facts.Comparison == nil || facts.Comparison.SentShapes == nil || facts.Comparison.MemberShapes == nil {
+		t.Fatalf("the index copy's facts carry no comparison: %+v", facts.Comparison)
+	}
+}
