@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1056,7 +1057,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		return candidate, errors.New("OUTPUT_PROTOCOL_REQUIRES_OUTPUT_IDENTITY")
 	}
 	if format == contract.WireFormatPythonCompatible {
-		plan.LegacyOutput = &contract.LegacyOutputContext{DynamicDimensions: facts.Normalization.DatasetContract.DynamicDimensions, Strategy: append(json.RawMessage(nil), source.Document...), DimensionFields: append([]string{}, facts.Normalization.DatasetContract.IdentityFields...), ItemID: strconv.FormatInt(item.ID, 10)}
+		plan.LegacyOutput = &contract.LegacyOutputContext{DynamicDimensions: facts.Normalization.DatasetContract.DynamicDimensions, Strategy: legacyOutputStrategyDocument(source.Document), DimensionFields: append([]string{}, facts.Normalization.DatasetContract.IdentityFields...), ItemID: strconv.FormatInt(item.ID, 10)}
 	}
 	revision, err := contract.DeriveCanonicalDigestV2("alarmd-plan-semantics-v1", plan)
 	if err != nil {
@@ -1075,6 +1076,127 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		candidate.dispositions = append(candidate.dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionConfigNormalized, Reason: ReasonPriorityIgnored})
 	}
 	return candidate, nil
+}
+
+// legacyOutputStrategyDocument is the strategy document a Python-compatible
+// Plan carries for its output, less what the platform's strategy cache writes
+// differently from one refresh to the next without the strategy changing.
+//
+// The document is copied into the Plan, so every byte of it is part of the
+// snapshot revision, and the cache rewrites two things round after round: an
+// invalid strategy's invalid_type, which its two refresh paths write as empty
+// and as the reason in turn, and the order of the hosts a dynamic target
+// resolves to. Measured on the verification deployment, every one of the
+// Plans that differed between two readings minutes apart differed only
+// there, and each such round published a whole new catalog for content that
+// executes exactly as before.
+//
+// is_invalid and invalid_type are dropped: nothing that reads the output
+// snapshot reads either. Each target condition's value list is put in the
+// order of its elements' canonical bytes: a target matches as a set, and the
+// elements take several shapes (a host, a topology node, a dynamic group), so
+// no one field orders them all. No other list is touched: the order of a
+// condition list or a dimension list means something to the platform, which
+// compares an alert's snapshot with the current strategy in order. A document
+// that does not have the expected shape is carried as it was.
+func legacyOutputStrategyDocument(document json.RawMessage) json.RawMessage {
+	verbatim := append(json.RawMessage(nil), document...)
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(document, &fields) != nil || fields == nil {
+		return verbatim
+	}
+	delete(fields, "is_invalid")
+	delete(fields, "invalid_type")
+	if raw, present := fields["items"]; present {
+		if items, ok := orderedTargetValues(raw); ok {
+			fields["items"] = items
+		}
+	}
+	normalized, err := marshalJSONUnescaped(fields)
+	if err != nil {
+		return verbatim
+	}
+	return normalized
+}
+
+// orderedTargetValues is the items list with each target condition's value
+// list in canonical order; false leaves the list as it was.
+func orderedTargetValues(raw json.RawMessage) (json.RawMessage, bool) {
+	var items []map[string]json.RawMessage
+	if json.Unmarshal(raw, &items) != nil {
+		return nil, false
+	}
+	for _, item := range items {
+		targetRaw, present := item["target"]
+		if !present {
+			continue
+		}
+		var target [][]map[string]json.RawMessage
+		if json.Unmarshal(targetRaw, &target) != nil {
+			continue
+		}
+		for _, group := range target {
+			for _, condition := range group {
+				valuesRaw, present := condition["value"]
+				if !present {
+					continue
+				}
+				var values []json.RawMessage
+				if json.Unmarshal(valuesRaw, &values) != nil {
+					continue
+				}
+				keys := make([]string, len(values))
+				canonical := true
+				for index, value := range values {
+					key, err := contract.CanonicalJSONV2(value)
+					if err != nil {
+						canonical = false
+						break
+					}
+					keys[index] = string(key)
+				}
+				if !canonical {
+					continue
+				}
+				order := make([]int, len(values))
+				for index := range order {
+					order[index] = index
+				}
+				sort.SliceStable(order, func(left, right int) bool { return keys[order[left]] < keys[order[right]] })
+				sorted := make([]json.RawMessage, len(values))
+				for index, from := range order {
+					sorted[index] = values[from]
+				}
+				encoded, err := marshalJSONUnescaped(sorted)
+				if err != nil {
+					return nil, false
+				}
+				condition["value"] = encoded
+			}
+		}
+		encoded, err := marshalJSONUnescaped(target)
+		if err != nil {
+			return nil, false
+		}
+		item["target"] = encoded
+	}
+	encoded, err := marshalJSONUnescaped(items)
+	if err != nil {
+		return nil, false
+	}
+	return encoded, true
+}
+
+// marshalJSONUnescaped is json.Marshal without HTML escaping, so a strategy
+// name with an ampersand reads back as the platform wrote it.
+func marshalJSONUnescaped(value any) (json.RawMessage, error) {
+	var buffer bytes.Buffer
+	encoder := json.NewEncoder(&buffer)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	return json.RawMessage(bytes.TrimSuffix(buffer.Bytes(), []byte{'\n'})), nil
 }
 
 // legacyPriorityApplies is the platform's own test for a strategy taking part
