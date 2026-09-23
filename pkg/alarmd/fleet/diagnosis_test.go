@@ -360,3 +360,13 @@ func hasPart(row DiagnosisRow, what, reason string) bool {
 	}
 	return false
 }
+
+// The universe digest is a contract with the CLI, which recomputes it from
+// the ids it received to prove the pages covered the set: pinned here and in
+// alarmd-cli's TestUniverseDigestMatchesTheServersAlgorithm.
+func TestNormalizeUniverseDigestIsPinned(t *testing.T) {
+	ids, digest := NormalizeUniverse([]string{"10", "2", "2", "1", "379"})
+	if strings.Join(ids, ",") != "1,2,10,379" || digest != "5fa412068ab113ae" {
+		t.Fatalf("ids %v digest %s", ids, digest)
+	}
+}
