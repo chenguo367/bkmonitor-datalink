@@ -67,6 +67,7 @@ let configuredEntry = '';
 let previewed = false;
 let ready = null;
 let done = false;
+let misses = 0;
 function message(text, error) { status.textContent = text; status.className = error ? 'error' : ''; }
 // The loopback login: a port and a state made here, once per page. The CLI
 // listens on 127.0.0.1 only; this page asks it for the state back before
@@ -136,7 +137,14 @@ async function probeCLI() {
     const value = await response.json();
     ready = response.ok && value.state === state && /^[A-Za-z0-9_-]{43}$/.test(value.code_challenge || '') ? value.code_challenge : null;
   } catch (_) { ready = null; }
-  probe.textContent = ready ? 'CLI 已就绪。' : 'CLI 未就绪：请先在终端执行上面的命令。';
+  misses = ready ? 0 : misses + 1;
+  // Five probes in a row with no answer: the command may be running and the
+  // browser refusing this page's requests to the local address, which looks
+  // exactly like a CLI that was never started.
+  probe.textContent = ready ? 'CLI 已就绪。' : misses >= 5
+    ? 'CLI 未就绪：已连续 10 秒连不上本机 CLI。如果命令已经在运行，可能是浏览器拦截了网页访问本机（127.0.0.1）的请求；请改用下面的"复制授权码"。'
+    : 'CLI 未就绪：请先在终端执行上面的命令。';
+  if (misses >= 5) $('manual').hidden = false;
   offer();
 }
 adminKey.addEventListener('input', () => { revision++; previewed = false; offer(); preview.textContent = '请重新核对环境。'; clearCode(); });

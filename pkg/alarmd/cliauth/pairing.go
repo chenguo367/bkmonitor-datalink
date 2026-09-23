@@ -7,8 +7,13 @@ package cliauth
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"sync"
 	"time"
 )
@@ -46,12 +51,13 @@ const (
 	CountRenewalKeyRotated = "renewal_admin_key_rotated"
 	CountPairingsForgotten = "pairings_forgotten"
 	CountRevokedAll        = "revoked_all"
+	CountRenewalReplayed   = "renewal_replayed"
 	CountStoreUnavailable  = "store_unavailable"
 )
 
 // Counts is every counter name, in the order a reader lists them.
 var Counts = []string{CountGrantsIssued, CountExchanged, CountExchangeRejected, CountPairingsIssued, CountPairingsRefused,
-	CountRenewed, CountRenewalExpired, CountRenewalKeyRotated, CountPairingsForgotten, CountRevokedAll, CountStoreUnavailable}
+	CountRenewed, CountRenewalReplayed, CountRenewalExpired, CountRenewalKeyRotated, CountPairingsForgotten, CountRevokedAll, CountStoreUnavailable}
 
 type counters struct {
 	mu     sync.Mutex
@@ -140,12 +146,21 @@ func (m *Manager) Refresh(ctx context.Context, refreshToken string) (Renewal, er
 	if err != nil {
 		return Renewal{}, err
 	}
+	sealed, err := sealRenewal(refreshToken, replayedRenewal{AccessToken: token, RefreshToken: next, SessionID: id})
+	if err != nil {
+		return Renewal{}, err
+	}
 	result, err := m.run(ctx, refreshScript,
-		[]string{pairingKey(m.prefix, refreshToken), pairingKey(m.prefix, next), m.prefix + "session:" + digest(token), m.pairingsKey(), m.epochKey()},
-		m.environmentID, ScopeReadonly, m.adminBinding(), id, SessionLifetime.Milliseconds(), PairingIdleLifetime.Milliseconds())
+		[]string{pairingKey(m.prefix, refreshToken), pairingKey(m.prefix, next), m.prefix + "session:" + digest(token), m.pairingsKey(), m.epochKey(),
+			m.prefix + "spent:" + digest(refreshToken)},
+		m.environmentID, ScopeReadonly, m.adminBinding(), id, SessionLifetime.Milliseconds(), PairingIdleLifetime.Milliseconds(),
+		sealed, RenewalReplayGrace.Milliseconds())
 	if err != nil {
 		m.count(CountStoreUnavailable)
 		return Renewal{}, err
+	}
+	if status, ok := firstStatus(result); ok && status == 6 {
+		return m.replay(ctx, refreshToken, result)
 	}
 	if status, ok := firstStatus(result); ok && status == 4 {
 		m.count(CountRenewalKeyRotated)
@@ -240,4 +255,70 @@ func firstStatus(result []interface{}) (int64, bool) {
 	}
 	status, ok := result[0].(int64)
 	return status, ok
+}
+
+// RenewalReplayGrace is how long the answer to a renewal is kept for the
+// credential it spent: a reply lost on the way is asked for again with the
+// same credential and gets the same pair, not a lost pairing.
+const RenewalReplayGrace = 30 * time.Second
+
+type replayedRenewal struct {
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	SessionID    string `json:"session_id"`
+}
+
+// sealRenewal encrypts a renewal's answer under a key only the spent
+// credential's holder can derive: the store holds it for the grace without
+// holding anything a reader of the store could use.
+func sealRenewal(spent string, answer replayedRenewal) (string, error) {
+	plain, _ := json.Marshal(answer)
+	block, _ := aes.NewCipher(replayKey(spent))
+	aead, _ := cipher.NewGCM(block)
+	nonce := make([]byte, aead.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return "", failure("internal_error", "Unable to generate a credential.", 500)
+	}
+	return base64.RawStdEncoding.EncodeToString(aead.Seal(nonce, nonce, plain, nil)), nil
+}
+
+func openRenewal(spent, sealed string) (replayedRenewal, bool) {
+	raw, err := base64.RawStdEncoding.DecodeString(sealed)
+	block, _ := aes.NewCipher(replayKey(spent))
+	aead, _ := cipher.NewGCM(block)
+	if err != nil || len(raw) < aead.NonceSize() {
+		return replayedRenewal{}, false
+	}
+	plain, err := aead.Open(nil, raw[:aead.NonceSize()], raw[aead.NonceSize():], nil)
+	var answer replayedRenewal
+	if err != nil || json.Unmarshal(plain, &answer) != nil {
+		return replayedRenewal{}, false
+	}
+	return answer, true
+}
+
+func replayKey(spent string) []byte {
+	sum := sha256.Sum256([]byte("cli-renewal-replay:" + spent))
+	return sum[:]
+}
+
+// replay answers a renewal repeated within the grace with the pair the first
+// one returned, if its session still stands: a revocation in between ends it.
+func (m *Manager) replay(ctx context.Context, spent string, result []interface{}) (Renewal, error) {
+	sealed, _ := result[1].(string)
+	answer, ok := openRenewal(spent, sealed)
+	if !ok {
+		m.count(CountRenewalExpired)
+		return Renewal{}, renewalFailure()
+	}
+	session, err := m.sessionOperation(ctx, digest(answer.AccessToken), answer.SessionID, "read")
+	if ErrorCode(err) == "auth_expired_or_revoked" {
+		m.count(CountRenewalExpired)
+		return Renewal{}, renewalFailure()
+	}
+	if err != nil {
+		return Renewal{}, err
+	}
+	m.count(CountRenewalReplayed)
+	return Renewal{Session: session, AccessToken: answer.AccessToken, RefreshToken: answer.RefreshToken, PairingID: session.pairingID}, nil
 }
