@@ -393,6 +393,10 @@ func TestObjectGetSummarySaysHowMuchOfTheObjectTheFactCovers(t *testing.T) {
 		{"no coverage", `{"query_group":"q","found":true,"facts_total":1,"anomaly":{"kind":"STALLED","reason_code":"none"}}`,
 			nil, []string{"窗口", "/0"}},
 		{"no fact", `{"query_group":"q","found":true,"facts_total":0,"facts":[]}`, nil, []string{"窗口"}},
+		{"filling window, every hole listed", `{"query_group":"q","found":true,"facts_total":1,"anomaly":{"kind":"DEGRADED_RUN","reason_code":"COMPLETED_WITH_UNAVAILABLE","cause_reason":"PLAN_REACTIVATED","standing":{"state":"RESULT_UNTRUSTED","action":"WATCH","watch":"WINDOW_FILLING"},"wake":{"known":true,"interval_seconds":60},"coverage":{"levels":2,"short":2,"guarded":2,"windows":[{"key":"s/a/1","series":"a","level":1,"valid":3,"required":5,"end":"2026-09-23T11:00:00Z","holes":[{"at":"2026-09-23T10:56:00Z","cause":"NOT_IN_MEMORY"},{"at":"2026-09-23T10:57:00Z","cause":"NOT_IN_MEMORY"}],"missing_total":2,"unusable_total":0}]}}}`,
+			[]string{"2/2 个 Level 窗口未满", "窗口 s/a/1 的 2 个洞在 2026-09-23 11:02Z 全部滑出，这个窗口届时满", "其后一轮（2026-09-23 11:03Z）收敛", "另有 1 个未满窗口没有列出"}, []string{"可信"}},
+		{"detecting, no time", `{"query_group":"q","found":true,"facts_total":1,"anomaly":{"kind":"DEGRADED_RUN","reason_code":"COMPLETED_WITH_UNAVAILABLE","standing":{"state":"DETECTING","action":"NONE"},"wake":{"known":true,"interval_seconds":60},"coverage":{"levels":2,"short":1,"guarded":0,"windows":[{"key":"s/a/1","series":"a","level":1,"valid":4,"required":5,"end":"2026-09-23T11:00:00Z","holes":[{"at":"2026-09-23T10:56:00Z","cause":"NOT_IN_MEMORY"}],"missing_total":1,"unusable_total":0}]}}}`,
+			[]string{"1/2"}, []string{"滑出窗口"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(tc.body)) })
