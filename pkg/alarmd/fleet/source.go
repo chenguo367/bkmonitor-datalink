@@ -32,7 +32,9 @@ type SourceFacts struct {
 	// At is when the round that produced these facts ran.
 	At time.Time `json:"at"`
 	// Listed is how many strategies the source listed: every object the round
-	// recorded a disposition for. Accepted is how many of them became Plans.
+	// recorded a disposition for, save the records that only annotate an
+	// accepted one (CONFIG_NORMALIZED). Accepted is how many of them became
+	// Plans.
 	Listed   int `json:"listed"`
 	Accepted int `json:"accepted"`
 	// Objects is the partition of Listed by disposition, non-zero entries only.
@@ -146,7 +148,11 @@ func NewSourceFacts(at time.Time, objects map[string]int, withheld []WithheldObj
 			continue
 		}
 		facts.Objects[disposition] = count
-		facts.Listed += count
+		// A normalized record annotates an item that is also counted as
+		// accepted; adding it here would count that item twice.
+		if disposition != dispositionConfigNormalized {
+			facts.Listed += count
+		}
 		if disposition == dispositionAccepted {
 			facts.Accepted = count
 		}
@@ -346,15 +352,15 @@ func sourceStandingLines(standing *SourceStanding) (run, cache string) {
 		return fmt.Sprintf("%d 个对象正在检测", standing.Executing), "策略缓存里没有列出任何策略"
 	case SourceAccepting:
 		cache = fmt.Sprintf("策略缓存列出 %d 条，可用 %d 条", standing.Listed, standing.Accepted)
-		// The normalized records are listed and are not among the accepted,
-		// so they fall into this subtraction -- and they are not withheld:
-		// the Plan runs, wider than it was written. Named on their own
-		// clause rather than counted with the refusals.
-		if withheld := standing.Listed - standing.Accepted - standing.Normalized; withheld > 0 {
+		// A normalized record annotates an accepted item and is not in the
+		// listed count, so the refusals are what listed minus accepted
+		// leaves. The normalized ones are among the accepted and say so on
+		// their own clause: the Plan runs, read otherwise than written.
+		if withheld := standing.Listed - standing.Accepted; withheld > 0 {
 			cache += fmt.Sprintf("，扣住 %d 条（原因见检查项）", withheld)
 		}
 		if standing.Normalized > 0 {
-			cache += fmt.Sprintf("，%d 条按放宽的读法在检测（不是被扣，原因见检查项）", standing.Normalized)
+			cache += fmt.Sprintf("，可用的里有 %d 条的读法和配置写的不同（在检测，不是被扣，原因见检查项）", standing.Normalized)
 		}
 		return fmt.Sprintf("%d 个对象正在检测", standing.Executing), cache
 	case SourceUpdateUnusable:
@@ -377,7 +383,7 @@ func sourceUnusableWord(standing *SourceStanding) string {
 		return "身份不完整"
 	case standing.Incomplete > 0:
 		return fmt.Sprintf("，其中 %d 条身份不完整、%d 条因别的原因被扣（原因见检查项）", standing.Incomplete,
-			standing.Listed-standing.Incomplete-standing.Normalized)
+			standing.Listed-standing.Incomplete)
 	default:
 		return "，全部因别的原因被扣（原因见检查项）"
 	}

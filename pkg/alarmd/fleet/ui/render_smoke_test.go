@@ -1094,7 +1094,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"EXPECTED HINT ::", "策略缓存列出 62 条，接受 0 条；扣住 59 条 SOURCE_INCOMPLETE/SOURCE_IDENTITY_UNAVAILABLE、1 条 CONFIG_REJECTED/LEVEL_INVALID、1 条 SOURCE_INCOMPLETE/SOURCE_OBJECT_INCOMPLETE、1 条 STALE_CONFIG/LEVEL_INVALID；不是没负载，是全部被扣在配置获取环节——看首屏第一行；写入方标记 last_updated 于 1 分 35 秒前更新"},
 		{"EXPECTED HINT nosource ::", "策略缓存的读数没有发布（旧构建，或还没有 leader 跑过一轮），说不出这个 0 是没策略还是全被扣住"},
 		{"EXPECTED HINT empty ::", "策略缓存列出 0 条，接受 0 条；写入方没有留 last_updated 标记"},
-		{"EXPECTED HINT normalized ::", "扣住 1 条 CONFIG_REJECTED/LEVEL_INVALID；按放宽的读法在检测 2 条 CONFIG_NORMALIZED/EFFECTIVE_TIME_RANGE_INVALID（不是被扣）"},
+		{"EXPECTED HINT normalized ::", "扣住 1 条 CONFIG_REJECTED/LEVEL_INVALID；读法和写的不同、在检测 2 条 CONFIG_NORMALIZED/EFFECTIVE_TIME_RANGE_INVALID（不是被扣）"},
 		{"DEPS ::", "策略缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache成功 3 秒前；失败 1 小时 0 分前：dial tcp: i/o timeout有：列出 62 条策略；写入方标记 last_updated 于 1 分 35 秒前更新"},
 		{"DEPS ::", "CMDB 主机缓存（平台写、alarmd 读）redis standalone redis.example:6379 · db 0 · bk_monitorv3.ee.cache · 与 strategy_cache 共用连接成功 3 秒前有：47788 台主机，来源刷新于 4 分 0 秒前"},
 		{"DEPS ::", "平台动态配置（平台写、alarmd 读）未配置"},

@@ -278,6 +278,12 @@ const (
 // reads it.
 const ReasonEffectiveTimeRangeInvalid = "EFFECTIVE_TIME_RANGE_INVALID"
 
+// ReasonPriorityIgnored names a Plan compiled from a strategy that takes
+// part in priority arbitration, run as the standalone strategy it is. The
+// arbitration belongs to the platform's alert pipeline, so a lower-priority
+// strategy detects and alerts beside a higher one on the same target.
+const ReasonPriorityIgnored = "PRIORITY_IGNORED"
+
 // dispositionDetailMaxBytes bounds the text a disposition carries: enough
 // for a decoder's sentence, not for a document.
 const dispositionDetailMaxBytes = 256
@@ -903,9 +909,13 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	if source.SourceID == "" || source.SourceID != strconv.FormatInt(legacy.ID, 10) {
 		return sourceCandidate{}, errors.New("SOURCE_IDENTITY_MISMATCH")
 	}
-	if hasJSONValue(legacy.Priority) || legacy.PriorityGroupKey != "" {
-		return sourceCandidate{dispositions: []ObjectDisposition{{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported, Reason: "UNSUPPORTED_PRIORITY_SEMANTICS"}}}, errors.New("alarmd controlplane: priority semantics unsupported")
-	}
+	// Priority is how the platform's alert pipeline arbitrates between the
+	// strategies of one priority group: the highest one watching a dimension
+	// keeps the lower ones from detecting it, and closes their alerts. That
+	// is coordination across strategies, not a fact about this one, so the
+	// strategy is compiled as the standalone strategy it is and the Plan is
+	// named as having had its priority ignored.
+	priorityIgnored := legacyPriorityApplies(legacy)
 	if len(legacy.Items) > 1 {
 		return sourceCandidate{dispositions: []ObjectDisposition{{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported, Reason: "UNSUPPORTED_MULTI_ITEM_STRATEGY"}}}, errors.New("alarmd controlplane: multiple Item strategies unsupported in phase two")
 	}
@@ -1061,7 +1071,19 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		RequirementTemplates: compiledInputs.requirements, QueryPlans: compiledInputs.queryPlans,
 	}
 	candidate.dispositions = append(candidate.dispositions, dispositions...)
+	if priorityIgnored {
+		candidate.dispositions = append(candidate.dispositions, ObjectDisposition{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionConfigNormalized, Reason: ReasonPriorityIgnored})
+	}
 	return candidate, nil
+}
+
+// legacyPriorityApplies is the platform's own test for a strategy taking part
+// in priority arbitration: a priority is set, zero included, and the strategy
+// belongs to a priority group. Either one alone arbitrates nothing there, so
+// it is not named here either.
+func legacyPriorityApplies(legacy legacyStrategy) bool {
+	value := strings.TrimSpace(string(legacy.Priority))
+	return value != "" && value != "null" && legacy.PriorityGroupKey != ""
 }
 
 // itemUnit is the item's data unit, derived the way Python derives it: the
@@ -1595,9 +1617,6 @@ func compilePlan(
 	targetPlan *contract.TargetPlanV1,
 	policy NoDataPolicy,
 ) (contract.EvaluationPlanV2, planCompileFacts, []ObjectDisposition, error) {
-	if hasJSONValue(source.Priority) || source.PriorityGroupKey != "" {
-		return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, errors.New("alarmd controlplane: G1 does not support priority semantics")
-	}
 	interval, err := itemInterval(item)
 	if err != nil {
 		return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, err

@@ -33,10 +33,10 @@ func TestEveryCapabilityReasonHasWordsAndEveryWordIsAReason(t *testing.T) {
 	// to the compilers' unsupported constructors and the target plan's
 	// decoder, whose names are the only place they are spelled.
 	sources := map[string]*regexp.Regexp{
-		// The normalized disposition's one reason is a named constant beside
-		// the disposition; the words table carries it because the group
+		// The normalized disposition's reasons are named constants beside
+		// the disposition; the words table carries them because the group
 		// under CONFIG_NORMALIZED shows the reason's words the same way.
-		"../controlplane": regexp.MustCompile(`DispositionUnsupported,?[^\n]*\n?[^\n]*Reason: "([A-Z_]+)"|queryUnsupported\("([A-Z_]+)"|return "(UNSUPPORTED_[A-Z_]+)"|ReasonEffectiveTimeRangeInvalid = "([A-Z_]+)"`),
+		"../controlplane": regexp.MustCompile(`DispositionUnsupported,?[^\n]*\n?[^\n]*Reason: "([A-Z_]+)"|queryUnsupported\("([A-Z_]+)"|return "(UNSUPPORTED_[A-Z_]+)"|Reason(?:EffectiveTimeRangeInvalid|PriorityIgnored) = "([A-Z_]+)"`),
 		"../targetplan":   regexp.MustCompile(`Reason[A-Za-z]* += "([A-Z_]+)"`),
 		"../contract":     regexp.MustCompile(`Reason(?:SnapshotRetentionInsufficient|CompletionOffsetBelowReserve) += "([A-Z_]+)"`),
 	}

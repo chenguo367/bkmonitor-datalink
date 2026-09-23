@@ -1,6 +1,7 @@
 package controlplane_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -147,25 +148,95 @@ func TestCatalogRevisionIsIndependentFromSourceTraversalOrder(t *testing.T) {
 	}
 }
 
-func TestG1DoesNotSilentlyDropUnsupportedLegacySemantics(t *testing.T) {
-	base := `{"id":1,"bk_biz_id":2,"update_time":1,%s"items":[{"id":1,"query_md5":"q","expression":"a","query_configs":[{"agg_interval":60}],"algorithms":[{"level":1,"type":"Threshold","config":[[{"method":"gt","threshold":1}]]}]}],"detects":[{"level":1,"trigger_config":{"count":1,"check_window":1%s}}]}`
+// A strategy in a priority group is compiled as the standalone strategy it
+// is. The arbitration between the group's strategies is the platform alert
+// pipeline's, so nothing of it reaches the Plan: the Plan is the one the same
+// strategy compiles to without the two fields, save for the verbatim strategy
+// document the output carries, and the only trace is a record naming it.
+func TestPriorityGroupStrategyRunsStandaloneAndIsNamed(t *testing.T) {
+	base := `{"id":1,"bk_biz_id":2,"update_time":1,%s"items":[{"id":1,"query_md5":"q","expression":"a","query_configs":[{"agg_interval":60}],"algorithms":[{"level":1,"type":"Threshold","config":[[{"method":"gt","threshold":1}]]}]}],"detects":[{"level":1,"trigger_config":{"count":1,"check_window":1}}]}`
 	identity := controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}
-	for _, test := range []struct{ name, prefix, trigger string }{
-		{name: "priority semantics", prefix: `"priority":1,"priority_group_key":"group",`, trigger: ""},
+	build := func(t *testing.T, prefix string) controlplane.Catalog {
+		t.Helper()
+		document := json.RawMessage(fmt.Sprintf(base, prefix))
+		catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{{SourceID: "1", Document: document, Identity: identity}}, Planner: &recordingPlanner{facts: queryFacts(t)}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(catalog.QueryGroups) != 1 || len(catalog.QueryGroups[0].Plans) != 1 {
+			t.Fatalf("strategy did not become a Plan: %#v", catalog.Dispositions)
+		}
+		return catalog
+	}
+	ignoredRecords := func(catalog controlplane.Catalog) []controlplane.ObjectDisposition {
+		var records []controlplane.ObjectDisposition
+		for _, disposition := range catalog.Dispositions {
+			if disposition.Reason == controlplane.ReasonPriorityIgnored {
+				records = append(records, disposition)
+			}
+		}
+		return records
+	}
+	standalone := build(t, "")
+	for _, test := range []struct {
+		name, prefix string
+		named        bool
+	}{
+		{name: "priority in a group", prefix: `"priority":100,"priority_group_key":"PGK:group",`, named: true},
+		// Zero is a priority there: it never claims a dimension, and a higher
+		// strategy of its group still keeps it from detecting one.
+		{name: "zero priority in a group", prefix: `"priority":0,"priority_group_key":"0123456789abcdef",`, named: true},
+		{name: "group without a priority", prefix: `"priority":null,"priority_group_key":"0123456789abcdef",`},
+		{name: "priority without a group", prefix: `"priority":1,"priority_group_key":"",`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			document := json.RawMessage(fmt.Sprintf(base, test.prefix, test.trigger))
-			catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{{SourceID: "1", Document: document, Identity: identity}}, Planner: &recordingPlanner{facts: queryFacts(t)}})
-			if err != nil {
-				t.Fatal(err)
+			catalog := build(t, test.prefix)
+			records := ignoredRecords(catalog)
+			if !test.named {
+				if len(records) != 0 {
+					t.Fatalf("a strategy the platform does not arbitrate was named: %#v", records)
+				}
+				return
 			}
-			if len(catalog.QueryGroups) != 0 || len(catalog.Dispositions) != 1 {
-				t.Fatalf("unsupported semantics were silently accepted: %#v", catalog)
+			want := controlplane.ObjectDisposition{SourceID: "1", Scope: "PLAN", Disposition: controlplane.DispositionConfigNormalized, Reason: controlplane.ReasonPriorityIgnored}
+			if len(records) != 1 || records[0] != want {
+				t.Fatalf("records=%#v, want one %#v", records, want)
 			}
-			if test.name == "non-default uptime" && catalog.Dispositions[0].Scope != "PLAN" {
-				t.Fatalf("uptime scope=%s", catalog.Dispositions[0].Scope)
+			accepted := 0
+			for _, disposition := range catalog.Dispositions {
+				if disposition.Disposition == controlplane.DispositionAccepted {
+					accepted++
+				}
+			}
+			if accepted != 1 {
+				t.Fatalf("dispositions=%#v, want the Plan accepted", catalog.Dispositions)
+			}
+			got, alone := catalog.QueryGroups[0], standalone.QueryGroups[0]
+			if got.Identity != alone.Identity {
+				t.Fatalf("Query Group identity moved with the priority fields: %s != %s", got.Identity, alone.Identity)
+			}
+			gotPlan, alonePlan := got.Plans[0].Plan, alone.Plans[0].Plan
+			if gotPlan.LegacyOutput == nil || !bytes.Contains(gotPlan.LegacyOutput.Strategy, []byte(`"priority_group_key"`)) {
+				t.Fatalf("the output lost the strategy document as written: %#v", gotPlan.LegacyOutput)
+			}
+			gotPlan.LegacyOutput, alonePlan.LegacyOutput = nil, nil
+			gotBytes, _ := json.Marshal(gotPlan)
+			aloneBytes, _ := json.Marshal(alonePlan)
+			if !bytes.Equal(gotBytes, aloneBytes) {
+				t.Fatalf("priority reached the Plan:\n%s\n%s", gotBytes, aloneBytes)
 			}
 		})
+	}
+	if records := ignoredRecords(standalone); len(records) != 0 {
+		t.Fatalf("a strategy without priority was named: %#v", records)
+	}
+	// The zero is a reading: no strategy here is arbitrated by priority.
+	key := controlplane.WithheldKey{Disposition: controlplane.DispositionConfigNormalized, Reason: controlplane.ReasonPriorityIgnored}
+	if count, reported := controlplane.ComposeCatalog(standalone).Withheld[key]; !reported || count != 0 {
+		t.Fatalf("PRIORITY_IGNORED reported=%v count=%d, want a zero that is published", reported, count)
+	}
+	if count := controlplane.ComposeCatalog(build(t, `"priority":1,"priority_group_key":"PGK:group",`)).Withheld[key]; count != 1 {
+		t.Fatalf("PRIORITY_IGNORED count=%d, want the one named Plan", count)
 	}
 }
 

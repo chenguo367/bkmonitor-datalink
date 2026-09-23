@@ -127,7 +127,7 @@ func TestAStrategysStandingIsAnsweredFromTheLookupAndTheFleetsView(t *testing.T)
 		t.Fatalf("4108: status %d standing %v, want DETECTING: a normalized item does not withhold", status, body["standing"])
 	}
 	if line, _ := body["line"].(string); !strings.Contains(line, "已生效，1 个对象在检测") ||
-		!strings.Contains(line, "；1 项按放宽的配置在检测：LEVEL 级别 1：CONFIG_NORMALIZED/EFFECTIVE_TIME_RANGE_INVALID——生效时间段的开始或结束时间格式不合法") ||
+		!strings.Contains(line, "；1 项的读法和配置写的不同、在检测：LEVEL 级别 1：CONFIG_NORMALIZED/EFFECTIVE_TIME_RANGE_INVALID——生效时间段的开始或结束时间格式不合法") ||
 		strings.Contains(line, "项被扣住") || strings.Contains(line, "全部被扣住") || strings.Contains(line, "部分生效") {
 		t.Errorf("4108 line = %q", line)
 	}

@@ -478,7 +478,7 @@ func normalizedClause(normalized []string) string {
 	if len(normalized) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("；%d 项按放宽的配置在检测：%s", len(normalized), strings.Join(normalized, "；"))
+	return fmt.Sprintf("；%d 项的读法和配置写的不同、在检测：%s", len(normalized), strings.Join(normalized, "；"))
 }
 
 // strategyStandingSentence is the standing, the objects and the withheld

@@ -182,8 +182,9 @@ var checkWords = map[Check]wordPair{
 	CheckSourceSetFlapping:     {StateNotDetecting, ActionCacheWriterFill},
 	CheckCapabilityUnsupported: {StateNotDetecting, ActionServiceFix},
 	CheckConfigRejected:        {StateNotDetecting, ActionStrategyEdit},
-	// Detecting, because the Plan runs; the strategy's to edit, because the
-	// range it wrote is what was read as the whole day.
+	// Detecting, because the Plan runs. The action here is the line's when a
+	// reason asks for an edit; a line whose reasons ask nothing is nobody's
+	// (normalizedOwner), and each reason carries its own action.
 	CheckConfigNormalized:     {StateDetecting, ActionStrategyEdit},
 	CheckCutoverFailing:       {StateResultUntrusted, ActionServiceFix},
 	CheckReplicaDegraded:      {StateResultUntrusted, ActionServiceFix},
