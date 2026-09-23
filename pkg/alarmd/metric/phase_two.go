@@ -146,6 +146,7 @@ type phaseTwoMetrics struct {
 	targetScopeClose                *targetScopeCloseCollector
 	linkdConsole                    *linkdConsoleCollector
 	controlSourceRounds             *prometheus.CounterVec
+	strategiesReturnedAfterRemoval  prometheus.Counter
 	controlSourceRetainedStale      prometheus.Counter
 	controlSource                   *controlSourceCollector
 	platformSettings                *platformSettingsCollector
@@ -1187,6 +1188,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.absentClose = newAbsentCloseCollector()
 	metrics.targetScopeClose = newTargetScopeCloseCollector()
 	metrics.linkdConsole = newLinkdConsoleCollector()
+	metrics.strategiesReturnedAfterRemoval = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "catalog_strategy_returned_after_removal_total",
+		Help: "Strategies the source listed again after their Plan had already left the Catalog: absent past the " +
+			"removal grace, withdrawn, then back. A return inside the grace is not one. Counted by the Control " +
+			"Leader's source-set ledger; read it summed over replicas, since only the Leader counts.",
+	})
 	metrics.controlSourceRounds = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_source_refresh_total",
 		Help: "Refresh rounds of the control plane's strategy source on this process, every round, by outcome " +
@@ -1485,7 +1492,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.controlSource,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
@@ -2281,4 +2288,13 @@ func readingOf(facts *observability.ExecutionEvidenceFacts) string {
 		Kind:         execution.ExecutionEvidenceKind(facts.Kind),
 		PlansApplied: facts.PlansApplied, PlansTotal: facts.PlansTotal,
 	})
+}
+
+// AddStrategiesReturnedAfterRemoval counts strategies the source-set ledger
+// saw listed again after their Plan had left the Catalog.
+func (r *Recorder) AddStrategiesReturnedAfterRemoval(n int) {
+	if r == nil || r.phaseTwo.strategiesReturnedAfterRemoval == nil || n <= 0 {
+		return
+	}
+	r.phaseTwo.strategiesReturnedAfterRemoval.Add(float64(n))
 }

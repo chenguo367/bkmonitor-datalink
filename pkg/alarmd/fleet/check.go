@@ -1635,8 +1635,10 @@ func sourceSetHourText(hour SourceSetHour) string {
 	if hour.LongestAbsentSeconds > 0 {
 		text += fmt.Sprintf("，最长缺席 %.0f 分钟", hour.LongestAbsentSeconds/60)
 	}
-	if hour.Removed > 0 {
-		text += fmt.Sprintf("，其中 %d 条已被移除后重新放置", hour.Removed)
+	// Removed counts the Plans that left the Catalog in the hour; the ones
+	// that came back after it are their own count.
+	if hour.ReturnedAfterRemoval > 0 {
+		text += fmt.Sprintf("，其中 %d 条是已被移除后重新放置", hour.ReturnedAfterRemoval)
 	}
 	return text
 }
