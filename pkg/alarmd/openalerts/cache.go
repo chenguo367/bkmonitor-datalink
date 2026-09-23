@@ -49,14 +49,38 @@ const (
 	UnavailableHeartbeatUnreadable UnavailableReason = "heartbeat_unreadable"
 	UnavailableHeartbeatStale      UnavailableReason = "heartbeat_stale"
 	UnavailableFingerprintVersion  UnavailableReason = "fingerprint_version"
+	// UnavailableMembersDisjoint: the consumer's sets hold members, or were
+	// read, but none of the alerts this process sent ABNORMAL for is in
+	// them once the consumer has had time to open it. The sets are then not
+	// keyed the way this process asks, and every lookup would miss; see
+	// DisjointMinimum.
+	UnavailableMembersDisjoint UnavailableReason = "members_disjoint"
 )
 
 // UnavailableReasons lists every reason, for the metric that pre-creates
 // them all: a reason at zero has to be readable as "never happened".
 var UnavailableReasons = []UnavailableReason{
 	UnavailableReadError, UnavailableHeartbeatMissing, UnavailableHeartbeatUnreadable,
-	UnavailableHeartbeatStale, UnavailableFingerprintVersion,
+	UnavailableHeartbeatStale, UnavailableFingerprintVersion, UnavailableMembersDisjoint,
 }
+
+// SentConfirmAfter is how long after this process first sent an alert's
+// ABNORMAL a read of the consumer's set is expected to carry it. The
+// consumer opens the alert on the message and rebuilds the set on a hint
+// it batches for about a second; five minutes covers that and a slow
+// rebuild several times over. An alert younger than this at the read is
+// not counted either way.
+const SentConfirmAfter = 5 * time.Minute
+
+// DisjointMinimum is how many alerts this process sent, each past
+// SentConfirmAfter at the latest read and none of them found, before the
+// sets are taken to be keyed differently from this process's lookups. One
+// or two could be alerts the consumer closed on its own; with every one
+// missing and at least this many, the likelier reading is that no lookup
+// can ever hit. While disjoint, the gate answers from what this process
+// sent (the self-maintained answer) instead of holding every recovery,
+// and a single alert found in any set ends it.
+const DisjointMinimum = 3
 
 // Answer is how a lookup was answered. Closed: a metric label. The first
 // three are authoritative answers; the rest say the copy answered on its
@@ -142,6 +166,13 @@ type Stats struct {
 	// than wonder why nothing closes.
 	CalibrationConfigured bool
 	Calibrated            int
+	// SentInSet and SentNotInSet split the alerts this process sent
+	// ABNORMAL for, and has not sent RECOVERY for, by whether the latest
+	// read of their strategy's set carries them. Only alerts first sent at
+	// least SentConfirmAfter before that read count. Disjoint is the state
+	// DisjointMinimum describes.
+	SentInSet, SentNotInSet int
+	Disjoint                bool
 }
 
 type member struct {
@@ -259,7 +290,7 @@ func (cache *Cache) Contains(tenantID, strategyID, fingerprint string) bool {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
 	if cache.index != nil {
-		return cache.indexContains(m, now, true)
+		return cache.indexGate(m, now)
 	}
 	cache.tracked[key] = now
 	if cache.available && cache.loaded[key] {
@@ -350,9 +381,13 @@ func (cache *Cache) Acknowledged(events []contract.TriggerEventV1) {
 		case contract.TriggerEventAbnormal:
 			cache.added[m] = stamped{at: now}
 			delete(cache.removed, m)
+			cache.noteOpened(m, now)
 		case contract.TriggerEventRecovery:
 			cache.removed[m] = stamped{at: now}
 			delete(cache.added, m)
+			if cache.index != nil {
+				delete(cache.index.opened, m)
+			}
 		}
 	}
 	cache.boundLocal()
