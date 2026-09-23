@@ -129,7 +129,10 @@ type RedisCatalogRepository struct {
 	objectCatalog objectCatalogState
 	catalogIndex  catalogIndex
 	contentMemo   publishedContentMemo
-	objectCache   *objectReadCache
+	// objectCache is read through objects(): an atomic pointer, so the
+	// cache can be configured, or configured again, while readers are
+	// running. See ConfigureObjectCache.
+	objectCache   atomic.Pointer[objectReadCache]
 	objectFlights objectReadFlights
 	// localView is what this Worker holds by content for the Query Groups it
 	// owns, sized from the bytes it read. See local_view.go.

@@ -147,12 +147,27 @@ type objectReadFlights struct {
 }
 
 // ConfigureObjectCache bounds the decoded catalog objects this process keeps.
+//
+// Safe to call while objects are being read: the new cache replaces the old
+// one in one atomic store, and a reader holds whichever it loaded for the one
+// lookup or store it makes. The process configures it once, before anything
+// reads; a caller that configures it again while the loops run -- a test
+// dropping what this process has kept, to read a lost object from Redis --
+// used to race every reader of the field. A read already in flight when the
+// cache is replaced stores into the new one: the key is the content's digest,
+// so what it stores is right, and the new cache simply does not start empty.
 func (repository *RedisCatalogRepository) ConfigureObjectCache(maxEntries, maxBytes int) error {
 	if repository == nil || maxEntries <= 0 || maxBytes <= 0 {
 		return errors.New("alarmd controlplane: invalid catalog object cache budget")
 	}
-	repository.objectCache = newObjectReadCache(maxEntries, maxBytes)
+	repository.objectCache.Store(newObjectReadCache(maxEntries, maxBytes))
 	return nil
+}
+
+// objects is the object cache in force, nil before one is configured; every
+// method of the cache treats nil as empty.
+func (repository *RedisCatalogRepository) objects() *objectReadCache {
+	return repository.objectCache.Load()
 }
 
 func (repository *RedisCatalogRepository) observeObjectRead(ctx context.Context, kind, result string) {
@@ -175,7 +190,7 @@ func (repository *RedisCatalogRepository) loadObject(
 	if repository == nil || repository.client == nil || digest == "" {
 		return nil, 0, errors.New("alarmd controlplane: catalog object digest is required")
 	}
-	if value, size, ok := repository.objectCache.lookup(key); ok {
+	if value, size, ok := repository.objects().lookup(key); ok {
 		repository.observeObjectRead(ctx, kind, objectReadHit)
 		return value, size, nil
 	}
@@ -214,7 +229,7 @@ func (repository *RedisCatalogRepository) loadObject(
 	flights.mu.Unlock()
 	close(flight.done)
 	if flight.err == nil {
-		repository.objectCache.store(key, flight.value, flight.bytes)
+		repository.objects().store(key, flight.value, flight.bytes)
 	}
 	return flight.value, flight.bytes, flight.err
 }
