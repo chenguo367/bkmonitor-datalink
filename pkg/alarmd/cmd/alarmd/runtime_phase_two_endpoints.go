@@ -128,7 +128,7 @@ func resolveEndpoints(cfg config.Config, sharing endpointSharing) []fleet.Endpoi
 	if reflect.DeepEqual(linkdConnection, cfg.RuntimeStoreRedis()) {
 		openAlerts.SharedWith = fleet.EndpointStateRedis
 	}
-	endpoints = append(endpoints, openAlerts,
+	endpoints = append(endpoints, openAlerts, linkdConsoleEndpoint(cfg),
 		fleet.Endpoint{Role: fleet.EndpointQueryBackend, Kind: "http", Address: cfg.PhaseTwo.Access.UQEndpoint,
 			Configured: cfg.PhaseTwo.Access.UQEndpoint != ""},
 		outputKafkaEndpoint(cfg),

@@ -58,9 +58,8 @@ type LinkHealth struct {
 // that a walk takes as few requests as the link allows.
 const RosterPageSize = 200
 
-// Roster reads one page of the link's strategy list. An empty cursor starts
-// a walk.
-func (reader *HTTPReconciler) Roster(ctx context.Context, cursor string) (RosterPage, error) {
+// roster is Roster without the call record.
+func (reader *HTTPReconciler) roster(ctx context.Context, cursor string) (RosterPage, error) {
 	b, err := reader.Binding(ctx)
 	if err != nil {
 		return RosterPage{}, err
@@ -163,8 +162,8 @@ type AlertRecord struct {
 // ErrAlertNotFound is the link answering that it has no such alert.
 var ErrAlertNotFound = errors.New("alarmd openalerts: alert not found")
 
-// AlertRecord reads one alert's record from the link's Console.
-func (reader *HTTPReconciler) AlertRecord(ctx context.Context, tenantID, alertID string) (AlertRecord, error) {
+// alertRecord is AlertRecord without the call record.
+func (reader *HTTPReconciler) alertRecord(ctx context.Context, tenantID, alertID string) (AlertRecord, error) {
 	if tenantID == "" || alertID == "" || len(alertID) > 1024 || len(tenantID) > 256 {
 		return AlertRecord{}, errors.New("alarmd openalerts: invalid alert identity")
 	}

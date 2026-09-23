@@ -1144,6 +1144,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 		recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)
 	}
 	recorder.SetEffectiveCloseSource(maintenance.Stats)
+	// Bound whether or not a Console is configured: not_configured is a
+	// reading, and the absent_strategy families are missing there by
+	// construction.
+	recorder.SetLinkdConsoleSource(fleet.LinkdConsoleStates, openalerts.ConsoleOps,
+		linkdConsoleReading(linkd.Console, external.Now))
 	workerPorts.OpenAlerts.(*openAlertCopyPort).registerOwned = maintenance.registerExecutedPlans
 	// The walk's counts, from the same published facts the verdict page reads.
 	//
@@ -1215,8 +1220,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 		assignmentSweep:  bundle.assignmentSweepFleetFacts,
 		viewStream:       viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
 		source:           bundle.sourceFleetFacts,
-		endpoints: endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
+		endpoints: withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
 			bundle.sourceFleetFacts, events.State, openAlertSetFactsSource(openAlertCopy, external.Now), external.Now),
+			linkd.Console, external.Now),
 		// The same snapshot the readiness endpoint serves, so the fleet and
 		// the probe cannot disagree about one replica.
 		readiness: readinessFactsSource(health),

@@ -436,6 +436,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_control_source_refresh_total"] = "variableLabels: {outcome,exit}"
 	expected["bkmonitor_alarmd_control_source_mode"] = "variableLabels: {role,mode}"
 	expected["bkmonitor_alarmd_control_source_last_success_age_seconds"] = "variableLabels: {}"
+	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
+	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_catalog_query_groups"] = "variableLabels: {source_semantics}"
 	expected["bkmonitor_alarmd_catalog_plans"] = "variableLabels: {source_semantics}"
@@ -955,6 +957,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("control_source_refresh_total")] = len(controlplane.SourceRefreshExits)
 	bounds[fqName("control_source_mode")] = len(observability.ControlSourceRoles) * len(observability.ControlSourceModes)
 	bounds[fqName("control_source_last_success_age_seconds")] = 1
+	// Five states; three operations by two results.
+	bounds[fqName("linkd_console_state")] = 5
+	bounds[fqName("linkd_console_calls_total")] = 6
 	bounds[fqName("control_source_retained_stale_revisions_total")] = 1
 	// The supported data sources, plus other for one the compiler started
 	// accepting without being named, plus mixed for a Query Group that reads

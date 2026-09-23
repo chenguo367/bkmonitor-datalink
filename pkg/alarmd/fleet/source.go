@@ -58,6 +58,10 @@ type SourceFacts struct {
 	Plans           int  `json:"plans,omitempty"`
 	RevisionedPlans int  `json:"revisioned_plans,omitempty"`
 	PlansKnown      bool `json:"plans_known,omitempty"`
+	// StandardPlans is how many of the Plans publish the standard raw event
+	// -- the events the alert link turns into alerts, and so the alerts only
+	// the link's Console can close. Read with PlansKnown.
+	StandardPlans int `json:"standard_plans,omitempty"`
 	// Set is the account of the source's active set across rounds -- what
 	// one round's dispositions cannot say: which strategies are under grace
 	// and since when, and how often the set drops strategies and lists them

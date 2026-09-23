@@ -391,10 +391,36 @@ func lessKey(a, b Key) bool {
 // discovery that failed, one that never succeeded, and one that last
 // succeeded longer ago than the bound all say the roster is not current.
 func linkUnhealthy(round Round, bounds Bounds) bool {
-	if round.LinkError != "" || round.LinkLastSuccess.IsZero() {
-		return true
+	return LinkHealthWord(round.LinkLastSuccess, round.LinkError, round.Now, bounds.MaxLinkHealthAge) != LinkHealthy
+}
+
+// The words for the link's account of its own set maintenance, closed. A
+// round refuses as link_unhealthy on every word but LinkHealthy; the health
+// page names which one, from this same function, so the two cannot differ
+// about one reading.
+const (
+	LinkHealthy                 = "healthy"
+	LinkDiscoveryFailing        = "discovery_failing"
+	LinkDiscoveryNeverSucceeded = "discovery_never_succeeded"
+	LinkDiscoveryStale          = "discovery_stale"
+)
+
+// LinkHealthWords is every word LinkHealthWord returns.
+var LinkHealthWords = []string{LinkHealthy, LinkDiscoveryFailing, LinkDiscoveryNeverSucceeded, LinkDiscoveryStale}
+
+// LinkHealthWord names the link's account of itself: its latest discovery
+// failed, none ever succeeded, or the last success is older than maxAge. A
+// zero maxAge does not judge age.
+func LinkHealthWord(lastSuccess time.Time, linkError string, now time.Time, maxAge time.Duration) string {
+	switch {
+	case linkError != "":
+		return LinkDiscoveryFailing
+	case lastSuccess.IsZero():
+		return LinkDiscoveryNeverSucceeded
+	case maxAge > 0 && now.Sub(lastSuccess) > maxAge:
+		return LinkDiscoveryStale
 	}
-	return bounds.MaxLinkHealthAge > 0 && round.Now.Sub(round.LinkLastSuccess) > bounds.MaxLinkHealthAge
+	return LinkHealthy
 }
 
 // shrunk gates on the input: the strategy list itself, against what it was

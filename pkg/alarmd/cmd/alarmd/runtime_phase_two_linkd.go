@@ -48,8 +48,8 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 		// choice when the link maintains more than one target.
 		console, err = openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL,
 			Username: settings.Username, Password: settings.Password, Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: int64(capacity.Bytes / 4),
-			Select: openalerts.TargetSelector{EventSourceID: settings.EventSourceID, HookName: settings.HookName},
-			Index:  openalerts.IndexLocation{KeyPrefix: settings.Prefix(), Address: linkdLocation(connection), Database: connection.DB}})
+			Now: now, Select: openalerts.TargetSelector{EventSourceID: settings.EventSourceID, HookName: settings.HookName},
+			Index: openalerts.IndexLocation{KeyPrefix: settings.Prefix(), Address: linkdLocation(connection), Database: connection.DB}})
 		if err != nil {
 			return linkdIndex{}, err
 		}
