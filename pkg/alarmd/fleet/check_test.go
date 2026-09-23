@@ -124,6 +124,39 @@ func TestANormalizedRecordDoesNotListItsStrategyTwice(t *testing.T) {
 	}
 }
 
+// The CONFIG_NORMALIZED line takes its owner from its reasons. Every
+// strategy under it is detecting; a line of ignored priorities alone asks
+// nobody to act, and one that also holds a time range read as the whole day
+// still asks the strategy to fix what it wrote.
+func TestTheNormalizedLineAsksOnlyWhatItsReasonsAsk(t *testing.T) {
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	ownerOf := func(withheld []WithheldObject) Owner {
+		view := View{Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NORMALIZED": len(withheld)}, withheld), SourceReplica: "pod-a"}
+		for _, report := range ReportChecks(nil, nil, &view, at) {
+			if report.Code == CheckConfigNormalized {
+				return report.Owner
+			}
+		}
+		t.Fatal("no CONFIG_NORMALIZED line")
+		return ""
+	}
+	priority := []WithheldObject{
+		{StrategyID: "11", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "PRIORITY_IGNORED"},
+		{StrategyID: "12", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "PRIORITY_IGNORED"},
+	}
+	if owner := ownerOf(priority); owner != OwnerNobody {
+		t.Errorf("a line of ignored priorities is %s's, want nobody's", owner)
+	}
+	mixed := append(append([]WithheldObject{}, priority...),
+		WithheldObject{StrategyID: "13", Scope: "LEVEL", LevelID: 1, Disposition: "CONFIG_NORMALIZED", Reason: "EFFECTIVE_TIME_RANGE_INVALID"})
+	if owner := ownerOf(mixed); owner != OwnerStrategy {
+		t.Errorf("a line that also holds a range to fix is %s's, want the strategy's", owner)
+	}
+	if owner := ownerOf([]WithheldObject{{StrategyID: "14", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "SOMETHING_NEW"}}); owner != OwnerStrategy {
+		t.Errorf("a reason with no action of its own made the line %s's, want the strategy's as before", owner)
+	}
+}
+
 func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// Twenty-nine: RETAINED_SHARE_APPROACHING is a rule over a dimension the
 	// rows did not carry before - the latest completed Slot's retained bytes

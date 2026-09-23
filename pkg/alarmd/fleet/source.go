@@ -32,7 +32,9 @@ type SourceFacts struct {
 	// At is when the round that produced these facts ran.
 	At time.Time `json:"at"`
 	// Listed is how many strategies the source listed: every object the round
-	// recorded a disposition for. Accepted is how many of them became Plans.
+	// recorded a disposition for, save the records that only annotate an
+	// accepted one (CONFIG_NORMALIZED). Accepted is how many of them became
+	// Plans.
 	Listed   int `json:"listed"`
 	Accepted int `json:"accepted"`
 	// Objects is the partition of Listed by disposition, non-zero entries only.
@@ -381,7 +383,7 @@ func sourceUnusableWord(standing *SourceStanding) string {
 		return "身份不完整"
 	case standing.Incomplete > 0:
 		return fmt.Sprintf("，其中 %d 条身份不完整、%d 条因别的原因被扣（原因见检查项）", standing.Incomplete,
-			standing.Listed-standing.Incomplete-standing.Normalized)
+			standing.Listed-standing.Incomplete)
 	default:
 		return "，全部因别的原因被扣（原因见检查项）"
 	}

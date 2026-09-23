@@ -1232,6 +1232,9 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		if check == CheckCapabilityUnsupported {
 			report.Line = capabilityLine(report.Strategies, report.Groups)
 		}
+		if check == CheckConfigNormalized {
+			report.Owner = normalizedOwner(report.Groups)
+		}
 		if check == CheckSourceSetFlapping && view != nil && view.Source != nil && view.Source.Set != nil {
 			// Newest hour first: the question is "is it still happening".
 			sort.Slice(report.Groups, func(i, j int) bool { return report.Groups[i].Key > report.Groups[j].Key })
@@ -1655,4 +1658,20 @@ func sourceSetLine(strategies, hours int, set *SourceSetFacts) string {
 		line += fmt.Sprintf("；本小时已回来 %d 条", set.ReactivatedThisHour)
 	}
 	return line + fmt.Sprintf("（账自 %s 起）", set.Since.UTC().Format("01-02 15:04Z"))
+}
+
+// normalizedOwner is whose the CONFIG_NORMALIZED line is: the strategy's when
+// any of its reasons asks the strategy to change what it wrote, nobody's when
+// none does. The strategies under it are all detecting, and a line that asks
+// for an edit nobody should make teaches its reader to skip the line, the
+// reasons that do need one included. A reason with no action of its own is
+// taken as asking for the edit, which is what the line asked before reasons
+// carried one.
+func normalizedOwner(groups []CheckGroup) Owner {
+	for _, group := range groups {
+		if group.Words == nil || group.Words.Action != ActionNone {
+			return OwnerStrategy
+		}
+	}
+	return OwnerNobody
 }
