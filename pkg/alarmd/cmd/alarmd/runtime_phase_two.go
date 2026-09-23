@@ -2785,10 +2785,15 @@ func (bundle *phaseTwoWorkerBundle) stopQueryGroup(
 	lifecycle *phaseTwoQueryGroupLifecycle,
 ) error {
 	lifecycle.cancel()
+	// Bounded as a lost Query Group's stop is: the control loop runs this, and
+	// the run context has no deadline, so a lease goroutine that did not end
+	// would have held the loop for good. Past the bound the lease is released
+	// anyway; a renewal still in flight then finds its fence stale and stops.
 	select {
 	case <-lifecycle.done:
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-time.After(bundle.dependencies.Config.ShutdownTimeout.Duration()):
 	}
 	if err := lifecycle.runner.Release(ctx); err != nil {
 		return fmt.Errorf("phase-two release Query Group %s: %w", queryGroup, err)

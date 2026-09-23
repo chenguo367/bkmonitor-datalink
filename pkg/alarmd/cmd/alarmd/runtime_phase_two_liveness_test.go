@@ -387,3 +387,61 @@ func TestASlotHeldPastItsDeadlineThroughTheDispatcherFailsLiveness(t *testing.T)
 		return len(stalledLoops(bundle.liveness)) == 0
 	})
 }
+
+// A replica shut down stops being judged: its loops stop on purpose, and
+// the probe must not fail a replica that is draining.
+func TestAShutDownReplicaIsNotJudged(t *testing.T) {
+	cfg := validGoAccessRuntimeConfig()
+	cfg.PhaseTwo.Scheduler.TickInterval = config.Duration(time.Millisecond)
+	cfg.PhaseTwo.Control.RefreshInterval = config.Duration(time.Hour)
+	cfg.PhaseTwo.Control.ReconcileInterval = config.Duration(2 * time.Millisecond)
+	queryGroup := execution.QueryGroupIdentity("query-group-1")
+	runner := newFakePhaseTwoQueryGroup()
+	clock := newLivenessClock()
+	bundle, err := newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
+		Config: cfg, Health: newPhaseTwoApplicationHealth(),
+		Control:   &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{queryGroup}},
+		Ownership: &fakePhaseTwoOwnership{assigned: []execution.QueryGroupIdentity{queryGroup}, runner: runner},
+		Observer:  observability.NopObserver{}, Now: clock.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- bundle.Run(ctx) }()
+	waitSignal(t, runner.leaseStarted, "owned query-group lease")
+	cancel()
+	<-done
+	clock.advance(time.Hour)
+	if got := stalledLoops(bundle.liveness); len(got) != 0 {
+		t.Fatalf("a shut-down replica was judged: stalled %v", got)
+	}
+}
+
+// The control loop's stop of a Query Group is bounded: a lease goroutine
+// that never ends does not hold the loop, and the lease is released anyway.
+func TestStoppingAQueryGroupWhoseLeaseNeverEndsIsBounded(t *testing.T) {
+	cfg := validGoAccessRuntimeConfig()
+	cfg.ShutdownTimeout = config.Duration(50 * time.Millisecond)
+	runner := newFakePhaseTwoQueryGroup()
+	bundle := mustPhaseTwoWorkerBundle(t, cfg, newPhaseTwoApplicationHealth(),
+		&fakePhaseTwoControl{}, &fakePhaseTwoOwnership{runner: runner})
+	lifecycle := &phaseTwoQueryGroupLifecycle{runner: runner, cancel: func() {}, done: make(chan struct{})}
+	stopped := make(chan error, 1)
+	go func() { stopped <- bundle.stopQueryGroup(context.Background(), "query-group-1", lifecycle) }()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the control loop waited on a lease goroutine that never ended")
+	}
+	runner.mu.Lock()
+	released := runner.releaseCalls
+	runner.mu.Unlock()
+	if released != 1 {
+		t.Fatalf("lease released %d times, want 1", released)
+	}
+}
