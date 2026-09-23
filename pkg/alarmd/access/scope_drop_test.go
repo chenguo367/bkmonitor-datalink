@@ -124,8 +124,12 @@ func TestRejectionsTheCloseCannotUseAreCountedInBulk(t *testing.T) {
 		word    string
 		screens int
 	}{
-		{"not resolved in full", hostPlanContext(false), scopeOutput, "", ScopeDropCacheUnavailable, 0},
-		{"multi-input", hostPlanContext(true), func() planOutput { o := scopeOutput; o.multiInput = true; return o }(), "", ScopeDropFingerprintUnsupported, 0},
+		{"not resolved in full", hostPlanContext(false), scopeOutput, "", ScopeDropCacheUnavailable, 1},
+		{"multi-input", hostPlanContext(true), func() planOutput { o := scopeOutput; o.multiInput = true; return o }(), "", ScopeDropFingerprintUnsupported, 1},
+		// A set that cannot be judged answers first, before the
+		// rejection's standing or the Plan's inputs are looked at.
+		{"set unavailable before multi-input", hostPlanContext(true), func() planOutput { o := scopeOutput; o.multiInput = true; return o }(), "set_unavailable", "set_unavailable", 1},
+		{"set unavailable before standing", hostPlanContext(false), scopeOutput, "set_unavailable", "set_unavailable", 1},
 		{"no frozen revision", hostPlanContext(true), planOutput{strategyID: "42", identity: scopeOutput.identity}, "", ScopeDropNoFingerprint, 1},
 		{"screened out", hostPlanContext(true), scopeOutput, "not_member", "not_member", 1},
 	}
@@ -256,7 +260,7 @@ func TestTheQuerysBulkCountsReachTheSinkWhenItEnds(t *testing.T) {
 	contractRef, frozen := frozenExecution(t)
 	frozen.DuePlans[0].CompiledPlan = compilePlanForStrategy(t, "1001", hostScopeContract("192.0.2.10|0"))
 	contractRef = bindFrozenDueDigest(t, contractRef, frozen)
-	sink := &recordingSink{screen: "not_member"}
+	sink := &recordingSink{}
 	source, err := NewSource(staticFrozenPlan{plan: frozen}, &hostStreamingProvider{hosts: []string{"192.0.2.10", "192.0.2.98", "192.0.2.99"}},
 		&recordingQueryPermits{}, Config{MinReadyDelay: time.Second, Admission: scopedChain(), ScopeDrops: sink})
 	if err != nil {
@@ -283,7 +287,7 @@ type closerSink struct {
 	calls  int
 }
 
-func (sink *closerSink) Screen(execution.PlanIdentity) string { return scopeclose.OutcomeNotMember }
+func (sink *closerSink) Screen(execution.PlanIdentity) string { return "" }
 func (sink *closerSink) Observe(ScopeDrop)                    {}
 func (sink *closerSink) Count(reporter ScopeDropReporter, word string, n int) {
 	sink.calls++
@@ -398,5 +402,18 @@ func TestTheReporterInstanceNamesQueryGroupBusinessAndShard(t *testing.T) {
 		if other.Instance() == base.Instance() {
 			t.Errorf("another %s reads as the same reporter", name)
 		}
+	}
+}
+
+// With no sink the admission step reports nothing and keeps nothing: no
+// screen, no tally, whatever the target turned away.
+func TestWithoutASinkTheAdmissionStepKeepsNothing(t *testing.T) {
+	adapter, _ := scopeDropAdapter(t, targetChain(), hostPlanContext(true), &recordingSink{}, scopeOutput)
+	adapter.scopeSink = nil
+	for _, id := range []string{"102", "103"} {
+		deliverSeries(t, adapter, hostDims(id))
+	}
+	if adapter.scopeScreens != nil || adapter.scopeTallies != nil {
+		t.Fatalf("screens %v tallies %v, want none without a sink", adapter.scopeScreens, adapter.scopeTallies)
 	}
 }

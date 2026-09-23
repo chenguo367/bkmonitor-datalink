@@ -5,8 +5,10 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 )
@@ -44,6 +46,36 @@ func (loop targetScopeCloseLoop) run(ctx context.Context) {
 		loop.closer.Step(step)
 		cancel()
 	}
+}
+
+// targetScopeCloseFor builds the close and the sink the admission step
+// reports to, only for a deployment with the alert link's Console. Without
+// it there is no calibrated set, no alert ids and no own source to judge
+// against, so the close could never act; wiring it anyway would have every
+// rejection of every Plan screened and counted as set_unavailable for
+// nothing. The sink is then a nil interface, which the access path reads as
+// "nobody listens", and the outcome counters stay at zero.
+func targetScopeCloseFor(cfg config.Config, now func() time.Time) (*scopeclose.Closer, access.ScopeDropSink) {
+	if cfg.PhaseTwo.Linkd.ConsoleURL == "" {
+		return nil, nil
+	}
+	budget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
+	closer := scopeclose.New(scopeclose.Options{Send: cfg.PhaseTwo.Linkd.AbsentCloseSend, Now: now,
+		MaxEntries: budget.LocalEntries, Batch: budget.CloseBatch})
+	return closer, scopeDropSink{closer: closer}
+}
+
+// bindTargetScopeClose binds the close to the open alert copy and the
+// producer, its counts to the metric and its loop to the bundle. Nothing is
+// wired for a nil close.
+func bindTargetScopeClose(bundle *phaseTwoWorkerBundle, closer *scopeclose.Closer, cache *openalerts.Cache,
+	writer scopeclose.Writer, recorder *metric.Recorder) {
+	if closer == nil {
+		return
+	}
+	closer.Bind(scopeclose.CacheSet(cache), writer)
+	recorder.SetTargetScopeCloseSource(closer.Stats)
+	bundle.dependencies.RunTargetScopeClose = targetScopeCloseLoop{bundle: bundle, closer: closer}.run
 }
 
 // scopeDropSink hands the admission step's target rejections to the close:

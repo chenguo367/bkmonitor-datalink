@@ -37,7 +37,6 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategycache"
@@ -656,18 +655,16 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// The close of alerts whose target left the strategy's scope hears the
 	// target filters' rejections from the query path below; the open set it
 	// judges them against and the producer it closes through are bound once
-	// they exist. Armed by the same setting as the absent-strategy close:
-	// both are this process closing alerts on its own inference.
-	scopeBudget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
-	scopeClose := scopeclose.New(scopeclose.Options{Send: cfg.PhaseTwo.Linkd.AbsentCloseSend, Now: external.Now,
-		MaxEntries: scopeBudget.LocalEntries, Batch: scopeBudget.CloseBatch})
+	// they exist. It exists only with the alert link's Console, as the
+	// absent-strategy close does; see targetScopeCloseFor.
+	scopeClose, scopeDrops := targetScopeCloseFor(cfg, external.Now)
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
 		MinReadyDelay:       cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
 		Now:                 external.Now,
 		Observer:            observer,
 		Admission:           seriesAdmission,
 		ObserveAdmission:    recorder.RecordSeriesAdmission,
-		ScopeDrops:          scopeDropSink{closer: scopeClose},
+		ScopeDrops:          scopeDrops,
 		ObserveSeriesPulled: seriesPullTally.Add,
 	})
 	if err != nil {
@@ -1182,9 +1179,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		}
 	}
 	bundle.dependencies.RunEffectiveTime = maintenance.run
-	scopeClose.Bind(scopeclose.CacheSet(openAlertCopy), events)
-	recorder.SetTargetScopeCloseSource(scopeClose.Stats)
-	bundle.dependencies.RunTargetScopeClose = targetScopeCloseLoop{bundle: bundle, closer: scopeClose}.run
+	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, events, recorder)
 	openAlertFacts := withTargetScopeClose(openAlertSetFactsSource(openAlertCopy, external.Now), scopeClose)
 	// The control leader's difference against the strategies that no longer
 	// exist. It runs on every replica's loop and does nothing on a follower;

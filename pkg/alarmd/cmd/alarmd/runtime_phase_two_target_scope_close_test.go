@@ -8,9 +8,11 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 )
@@ -159,5 +161,55 @@ func TestTheTargetScopeCloseFactsAreCarriedFieldForField(t *testing.T) {
 	carried := source()
 	if carried.TargetScopeClose == nil || len(carried.TargetScopeClose.Outcomes) != len(scopeclose.Outcomes) {
 		t.Fatalf("open set facts = %+v, want the close beside them with every outcome", carried)
+	}
+}
+
+// A deployment without the alert link's Console has nothing the close could
+// act on, so nothing of it is wired: no sink on the admission step (and so
+// no Screen or Count), no loop, and the outcome counters stay at zero on
+// /metrics. With the Console, all three are there.
+func TestTheTargetScopeCloseIsNotWiredWithoutTheLinkConsole(t *testing.T) {
+	cfg := config.Default()
+	cfg.PhaseTwo.Linkd.ConsoleURL = ""
+	closer, sink := targetScopeCloseFor(cfg, time.Now)
+	// The sink must be a nil interface, not a typed nil: the access path
+	// tests the interface, and a typed nil would be screened and counted.
+	if closer != nil || sink != nil {
+		t.Fatalf("without a Console: closer %v sink %v, want neither", closer, sink)
+	}
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	bundle := &phaseTwoWorkerBundle{}
+	bindTargetScopeClose(bundle, closer, nil, &maintenanceTestWriter{}, recorder)
+	if bundle.dependencies.RunTargetScopeClose != nil {
+		t.Fatal("a loop was wired without a Console")
+	}
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := 0
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_target_scope_close_total" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			found++
+			if m.GetCounter().GetValue() != 0 {
+				t.Errorf("%v = %v without a Console, want 0", m.GetLabel(), m.GetCounter().GetValue())
+			}
+		}
+	}
+	if found != len(scopeclose.Outcomes) {
+		t.Fatalf("%d outcome cells on /metrics, want every one of %d pre-registered", found, len(scopeclose.Outcomes))
+	}
+
+	cfg.PhaseTwo.Linkd.ConsoleURL = "https://console.example.test"
+	closer, sink = targetScopeCloseFor(cfg, time.Now)
+	if closer == nil || sink == nil {
+		t.Fatal("with a Console the close was not built")
+	}
+	bindTargetScopeClose(bundle, closer, nil, &maintenanceTestWriter{}, recorder)
+	if bundle.dependencies.RunTargetScopeClose == nil {
+		t.Fatal("with a Console no loop was wired")
 	}
 }
