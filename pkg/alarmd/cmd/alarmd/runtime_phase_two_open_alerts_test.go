@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -52,6 +53,9 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 			t.Fatalf("lookups before any lookup = %v, want every answer word at zero", facts.Lookups)
 		}
 	}
+	if facts.Comparison != nil {
+		t.Fatalf("a copy that does not read the index has nothing to compare: %+v", facts.Comparison)
+	}
 
 	port := openAlertCopyPort{cache: cache}
 	port.TrackPlans("qg-test", []execution.PlanIdentity{{TenantID: "default", BusinessID: "2", StrategyID: "1001"}})
@@ -88,5 +92,89 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 	if facts.Available || facts.Mode != string(openalerts.ModeSelfMaintained) || facts.UnavailableReason != string(openalerts.UnavailableHeartbeatMissing) ||
 		facts.HeartbeatAgeSeconds == nil || *facts.HeartbeatAgeSeconds != 645 {
 		t.Fatalf("account after the publisher stopped = %+v, want self_maintained for heartbeat_missing with the last heartbeat 645 s old", facts)
+	}
+}
+
+// Every field of the copy's comparison reaches the replica's facts: a field
+// added to one side and not carried would read as zero, and a zero here is a
+// reading ("none of the alerts is ours").
+func TestTheOpenAlertComparisonIsCarriedFieldForField(t *testing.T) {
+	comparison := &openalerts.Comparison{OwnEventSourceID: "own", Sent: 3,
+		SentShapes: map[string]int{openalerts.ShapeHex32: 3}, MemberShapes: map[string]int{openalerts.ShapeHex64: 5},
+		AlertSources: map[string]int{"own": 0, "elsewhere": 5}, SentInCalibrated: 3, SentMatchingAlertID: 2, SentMatchingFingerprint: 1,
+		Strategies: []openalerts.ComparisonStrategy{{TenantID: "t", StrategyID: "s", Sent: 1, Members: 2, Alerts: 3, Calibrated: true,
+			SentSample: []string{"a"}, MemberSample: []string{"b"},
+			AlertSample: []openalerts.ComparisonAlert{{AlertID: "c", Fingerprint: "d", EventSourceID: "e"}}}}}
+	facts := openAlertComparisonFacts(comparison)
+	var zero func(path string, value reflect.Value)
+	zero = func(path string, value reflect.Value) {
+		switch value.Kind() {
+		case reflect.Ptr:
+			zero(path, value.Elem())
+		case reflect.Struct:
+			for i := 0; i < value.NumField(); i++ {
+				zero(path+"."+value.Type().Field(i).Name, value.Field(i))
+			}
+		case reflect.Slice:
+			if value.Len() == 0 {
+				t.Errorf("%s was not carried", path)
+			}
+			for i := 0; i < value.Len(); i++ {
+				zero(path, value.Index(i))
+			}
+		default:
+			if value.IsZero() {
+				t.Errorf("%s was not carried", path)
+			}
+		}
+	}
+	zero("comparison", reflect.ValueOf(facts))
+	if openAlertComparisonFacts(nil) != nil {
+		t.Error("no comparison is carried as none")
+	}
+}
+
+type nothingIndexed struct{}
+
+func (nothingIndexed) ReadSet(context.Context, openalerts.StrategyKey) ([]string, error) {
+	return nil, nil
+}
+
+func (nothingIndexed) Watch(ctx context.Context, _ func(bool), _ func(openalerts.StrategyKey)) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+// A copy that reads the index publishes its comparison in the replica's
+// facts, before any read as well: the counts are then zeros, which is what
+// the copy knows.
+func TestAnIndexCopyPublishesItsComparison(t *testing.T) {
+	now := func() time.Time { return time.Unix(1_700_000_000, 0) }
+	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: nothingIndexed{}, Subscriber: nothingIndexed{}, Now: now,
+		MaxStrategies: 1, MaxMembers: 1, MaxBytes: 1, MaxLocalEntries: 1, ReadBatch: 1, ReconcileBatch: 1,
+		RefreshInterval: time.Minute, IndexInterval: time.Minute, ReconcileInterval: time.Minute, CalibrationMaxAge: time.Minute,
+		LocalRetention: time.Minute, CycleTimeout: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	facts := openAlertSetFactsSource(cache, now)()
+	if facts.Comparison == nil || facts.Comparison.SentShapes == nil || facts.Comparison.MemberShapes == nil {
+		t.Fatalf("the index copy's facts carry no comparison: %+v", facts.Comparison)
+	}
+}
+
+// Sets that carry none of this replica's alerts reach the published facts
+// under their own names, and so the fleet verdict: the copy saying so is
+// not enough if the replica does not pass it on.
+func TestTheDisjointStateIsPublishedWithTheSentCounts(t *testing.T) {
+	stats := openalerts.Stats{Mode: openalerts.ModeSelfMaintained, IndexProtocol: true,
+		SentInSet: 0, SentNotInSet: 103, Disjoint: true, UnavailableReason: openalerts.UnavailableMembersDisjoint}
+	facts := openAlertSetFacts(stats, false, time.Unix(1_700_000_000, 0))
+	if !facts.Disjoint || facts.SentInSet != 0 || facts.SentNotInSet != 103 || facts.UnavailableReason != "members_disjoint" {
+		t.Fatalf("facts = %+v, want disjoint with 0 of 103 found and the reason named", facts)
+	}
+	stats.SentInSet, stats.Disjoint, stats.UnavailableReason = 4, false, ""
+	if facts := openAlertSetFacts(stats, false, time.Unix(1_700_000_000, 0)); facts.Disjoint || facts.SentInSet != 4 {
+		t.Fatalf("facts = %+v, want the found count and no disjoint", facts)
 	}
 }
