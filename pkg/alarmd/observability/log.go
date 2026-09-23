@@ -1036,6 +1036,7 @@ func appendObservationCounts(attributes []slog.Attr, counts Counts) []slog.Attr 
 		{"messages", counts.Messages}, {"records", counts.Records}, {"plans", counts.Plans},
 		{"levels", counts.Levels}, {"events", counts.Events}, {"bytes", counts.Bytes},
 		{"keys", counts.Keys}, {"state_bytes", counts.StateBytes}, {"envelope_reads", counts.EnvelopeReads},
+		{"envelope_reads_apply", counts.EnvelopeReadsApply},
 	}
 	for _, value := range values {
 		if value.value > 0 {

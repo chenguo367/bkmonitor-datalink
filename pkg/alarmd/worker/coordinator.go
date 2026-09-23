@@ -2019,7 +2019,8 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 			conflictFacts = &conflicts
 		}
 		coordinator.observeChunk(ctx, observability.StageStateApplied, operation, chunkStarted, started, observationResult, reason,
-			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, conflictFacts,
+			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes,
+				EnvelopeReadsApply: int64(result.EnvelopeReads)}, err, conflictFacts,
 			applyRefusalRules, chunkLegacyIDs)
 		return err
 	})

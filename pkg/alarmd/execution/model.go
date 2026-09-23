@@ -3440,6 +3440,18 @@ func (item *StateApplyItemResult) MarkVersionConflict(kind StateVersionConflictK
 
 type StateApplyResult struct {
 	Items []StateApplyItemResult
+	// EnvelopeReads is how many of this apply's items had their outcome
+	// decided by the older representation: the record the write was compared
+	// against came from the envelope key, or an envelope that did not read
+	// refused the write with no frame beside it.
+	//
+	// Only the per-key path can count any. It reads both keys of every series
+	// it writes, so reading the envelope is not the event - the envelope
+	// deciding something is. Kept apart from the preflight's count because
+	// the two are two consumers of one key: the envelope can be deleted only
+	// when neither of them still depends on it, and one number summed from
+	// both could not say which one had not reached zero.
+	EnvelopeReads int
 }
 
 func (result StateApplyResult) Validate() error {
