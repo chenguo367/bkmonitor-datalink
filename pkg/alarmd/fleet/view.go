@@ -1457,10 +1457,19 @@ type Snapshot struct {
 	// question about any number that looks wrong after a release is which
 	// build produced it. Absent on a build before this field existed, which the
 	// aggregate keeps apart from any version.
-	Build          *BuildFacts `json:"build,omitempty"`
-	Determined     int         `json:"determined"`
-	Anomalies      []Anomaly   `json:"anomalies"`
-	TotalAnomalies int         `json:"total_anomalies"`
+	Build      *BuildFacts `json:"build,omitempty"`
+	Determined int         `json:"determined"`
+	// AwaitingFirstRound are the owned objects Determined does not count
+	// because their first round has not come yet: their period is longer
+	// than the restart grace and their next due time is ahead within one
+	// period (see AwaitingFirstRound).
+	// A day-long or sixty-hour strategy has nothing to say for up to that
+	// long after every restart or handover; counted as unknown it held the
+	// whole deployment at UNKNOWN for as long. Bounded; the total counts all.
+	AwaitingFirstRound      []FirstRoundWait `json:"awaiting_first_round,omitempty"`
+	AwaitingFirstRoundTotal int              `json:"awaiting_first_round_total,omitempty"`
+	Anomalies               []Anomaly        `json:"anomalies"`
+	TotalAnomalies          int              `json:"total_anomalies"`
 	// Demoted are the objects held back because their backend kept answering
 	// unavailable. They are published apart from Anomalies, not folded into
 	// them, because they answer a different question: Anomalies is what this
@@ -2376,6 +2385,11 @@ type View struct {
 	Determined int   `json:"determined"`
 	Unknown    int   `json:"unknown"`
 	Gaps       []Gap `json:"gaps,omitempty"`
+	// AwaitingFirstRound is the undetermined objects that are only waiting for
+	// their first round (see Snapshot.AwaitingFirstRound), by period. They are
+	// not in Unknown and do not make the verdict UNKNOWN; they are said here
+	// instead, so a reader sees how many and until when.
+	AwaitingFirstRound *FirstRoundWaits `json:"awaiting_first_round,omitempty"`
 	// Degradations are replica-level conditions that make the verdict
 	// DEGRADED on their own, beside the anomalies: what is wrong is a replica's
 	// standing, not any object it evaluates.
@@ -2642,6 +2656,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			}
 		}
 		view.Determined += snapshot.Determined
+		view.AwaitingFirstRound = view.AwaitingFirstRound.add(snapshot)
 		view.AnomaliesTotal += snapshot.TotalAnomalies
 		view.Anomalies = append(view.Anomalies, snapshot.Anomalies...)
 		view.DemotedTotal += snapshot.TotalDemoted
@@ -2910,8 +2925,8 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	case view.Determined > view.Covered:
 		view.Gaps = append(view.Gaps, Gap{Kind: GapCoverageInconsistent,
 			Detail: "more objects reported as determined than owned"})
-	case view.Covered > view.Determined:
-		view.Unknown += view.Covered - view.Determined
+	case view.Covered > view.Determined+view.AwaitingFirstRound.count():
+		view.Unknown += view.Covered - view.Determined - view.AwaitingFirstRound.count()
 		view.Gaps = append(view.Gaps, Gap{Kind: GapUndetermined})
 	}
 

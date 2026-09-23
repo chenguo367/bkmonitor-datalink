@@ -407,6 +407,7 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// which is why that number does not depend on this list at all.
 	parked, overdue := publisherOverdue(publisher.overdue, at, publisher.replica, publisher.strategies)
 	anomalies = append(anomalies, onlyUnlisted(parked, anomalies, demoted)...)
+	awaiting, awaitingTotal := publisher.awaitingFirstRound(owned, at)
 	snapshot := fleet.Snapshot{
 		Replica:   publisher.replica,
 		TakenAt:   at,
@@ -417,6 +418,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 		// The difference between the two is what the replica owns but cannot
 		// speak for, which the aggregate counts as unknown rather than healthy.
 		Determined: publisher.tracker.Determined(),
+		// The undetermined objects that are only waiting for their first
+		// round, which the aggregate says as such rather than as unknown.
+		AwaitingFirstRound: awaiting, AwaitingFirstRoundTotal: awaitingTotal,
 		// Which objects, not only how many. A sum cannot tell two replicas
 		// holding distinct shares from two replicas holding the same object,
 		// and that ambiguity sat unresolved on a running deployment for over a
@@ -574,6 +578,38 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 // The cost is bounded and small -- a replica of this deployment holds a few
 // hundred objects, so the list is tens of kilobytes against the snapshot's
 // megabyte budget.
+// awaitingFirstRound names the owned objects without a conclusion that are
+// only waiting for their first round (fleet.AwaitingFirstRound), soonest due
+// first and bounded, with the total. Nothing is exempted without a schedule
+// to ask.
+func (publisher *fleetPublisher) awaitingFirstRound(owned []execution.QueryGroupIdentity, at time.Time) ([]fleet.FirstRoundWait, int) {
+	if publisher.schedule == nil {
+		return nil, 0
+	}
+	var waits []fleet.FirstRoundWait
+	for _, queryGroup := range owned {
+		id := string(queryGroup)
+		if publisher.tracker.HasConclusion(id) {
+			continue
+		}
+		wake := publisher.schedule.WakeOf(id)
+		if fleet.AwaitingFirstRound(wake, at) {
+			waits = append(waits, fleet.FirstRoundWait{QueryGroup: id, IntervalSeconds: wake.IntervalSeconds, DueAt: wake.DueAt})
+		}
+	}
+	total := len(waits)
+	sort.Slice(waits, func(i, j int) bool {
+		if !waits[i].DueAt.Equal(waits[j].DueAt) {
+			return waits[i].DueAt.Before(waits[j].DueAt)
+		}
+		return waits[i].QueryGroup < waits[j].QueryGroup
+	})
+	if len(waits) > fleet.MaxFirstRoundWaits {
+		waits = waits[:fleet.MaxFirstRoundWaits]
+	}
+	return waits, total
+}
+
 func ownedObjectIDs(owned []execution.QueryGroupIdentity) []string {
 	if len(owned) == 0 {
 		return nil
