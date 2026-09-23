@@ -186,6 +186,22 @@ func (adapter *seriesAdapter) reportScopeDrop(identity execution.PlanIdentity, p
 	if filter != (admission.TargetScopeFilter{}).Name() && filter != (admission.TargetPlanFilter{}).Name() {
 		return
 	}
+	// The screen comes first: a strategy the close cannot act on - its set
+	// empty or not judgeable - is answered once per query, and every one of
+	// its rejections is counted under that one word, before anything is
+	// asked about the rejection itself.
+	screen, screened := adapter.scopeScreens[identity]
+	if !screened {
+		if adapter.scopeScreens == nil {
+			adapter.scopeScreens = make(map[execution.PlanIdentity]string, 1)
+		}
+		screen = adapter.scopeSink.Screen(identity)
+		adapter.scopeScreens[identity] = screen
+	}
+	if screen != "" {
+		adapter.tallyScopeDrop(identity, screen)
+		return
+	}
 	switch admission.RejectionStandingOf(plan, facts, filter, reason) {
 	case admission.StandingCacheUnavailable:
 		adapter.tallyScopeDrop(identity, ScopeDropCacheUnavailable)
@@ -197,18 +213,6 @@ func (adapter *seriesAdapter) reportScopeDrop(identity execution.PlanIdentity, p
 	output := adapter.outputs[identity]
 	if output.multiInput {
 		adapter.tallyScopeDrop(identity, ScopeDropFingerprintUnsupported)
-		return
-	}
-	screen, screened := adapter.scopeScreens[identity]
-	if !screened {
-		if adapter.scopeScreens == nil {
-			adapter.scopeScreens = make(map[execution.PlanIdentity]string, 1)
-		}
-		screen = adapter.scopeSink.Screen(identity)
-		adapter.scopeScreens[identity] = screen
-	}
-	if screen != "" {
-		adapter.tallyScopeDrop(identity, screen)
 		return
 	}
 	fingerprint := output.fingerprint(identity.BusinessID, facts.Dimensions)
