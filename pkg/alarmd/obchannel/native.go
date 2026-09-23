@@ -42,6 +42,9 @@ func NativeOperations(handler http.Handler) []Operation {
 				}
 				if id == "object.get" {
 					objectSlotNext(&out, p, result)
+					if line := objectExtentLine(result); line != "" && out.Summary == "" {
+						out.Summary = line
+					}
 				}
 				if id == "strategy.list" {
 					// This endpoint lists fact rows, not every source strategy.
@@ -148,6 +151,48 @@ func strategyNext(out *Outcome, p Params, result map[string]any) {
 			break
 		}
 	}
+}
+
+// objectExtentLine says how much of the object the first fact covers, from
+// the fact's own coverage: a DEGRADED_RUN held by ten series of twenty
+// thousand and one held by all of them read the same at the top of the
+// result, and only the counts under coverage tell them apart. Levels counts
+// Level windows - one per series and Level - so the line names windows, not
+// series. Nothing is said when the fact carries no coverage: a count that is
+// absent is not a count of zero.
+func objectExtentLine(result map[string]any) string {
+	fact, _ := result["anomaly"].(map[string]any)
+	if fact == nil {
+		return ""
+	}
+	coverage, _ := fact["coverage"].(map[string]any)
+	levels, ok := numberField(coverage, "levels")
+	if !ok || levels <= 0 {
+		return ""
+	}
+	short, _ := numberField(coverage, "short")
+	guarded, _ := numberField(coverage, "guarded")
+	kind, _ := fact["kind"].(string)
+	reason, _ := fact["cause_reason"].(string)
+	if reason == "" {
+		reason, _ = fact["reason_code"].(string)
+	}
+	line := fmt.Sprintf("%s（%s）：%d/%d 个 Level 窗口未满，其中 %d 个处于守卫中", kind, reason, short, levels, guarded)
+	if total, ok := numberField(result, "facts_total"); ok && total > 1 {
+		line += fmt.Sprintf("；此为 %d 条事实中的第 1 条", total)
+	}
+	return line
+}
+
+func numberField(m map[string]any, key string) (int64, bool) {
+	switch v := m[key].(type) {
+	case json.Number:
+		n, err := v.Int64()
+		return n, err == nil
+	case float64:
+		return int64(v), true
+	}
+	return 0, false
 }
 
 // Only suggest Slots whose identity was actually captured. A wall-clock log
