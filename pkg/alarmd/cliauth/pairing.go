@@ -259,7 +259,9 @@ func firstStatus(result []interface{}) (int64, bool) {
 
 // RenewalReplayGrace is how long the answer to a renewal is kept for the
 // credential it spent: a reply lost on the way is asked for again with the
-// same credential and gets the same pair, not a lost pairing.
+// same credential and gets the same pair, not a lost pairing. A reuse inside
+// the grace is this replay and not a theft signal; a reuse detector added
+// later has to start counting after it.
 const RenewalReplayGrace = 30 * time.Second
 
 type replayedRenewal struct {

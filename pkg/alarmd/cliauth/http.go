@@ -288,8 +288,14 @@ func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	m.count(CountExchanged)
-	bound, _ := result[len(result)-1].(int64)
-	if paired, _ := result[3].(int64); paired != 1 || len(result) != 5 {
+	// The one success reply is five long; its length is checked before any
+	// index is read, so a later branch of the script cannot panic this.
+	var paired, bound int64
+	if len(result) == 5 {
+		paired, _ = result[3].(int64)
+		bound, _ = result[4].(int64)
+	}
+	if paired != 1 {
 		m.count(CountPairingsRefused)
 		refresh = ""
 	} else {

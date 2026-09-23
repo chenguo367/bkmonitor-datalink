@@ -142,7 +142,7 @@ async function probeCLI() {
   // browser refusing this page's requests to the local address, which looks
   // exactly like a CLI that was never started.
   probe.textContent = ready ? 'CLI 已就绪。' : misses >= 5
-    ? 'CLI 未就绪：已连续 10 秒连不上本机 CLI。如果命令已经在运行，可能是浏览器拦截了网页访问本机（127.0.0.1）的请求；请改用下面的"复制授权码"。'
+    ? 'CLI 未就绪：已连续 5 次（约 10 秒）连不上本机 CLI。如果命令已经在运行，可能是浏览器拦截了网页访问本机（127.0.0.1）的请求；请改用下面的"复制授权码"。'
     : 'CLI 未就绪：请先在终端执行上面的命令。';
   if (misses >= 5) $('manual').hidden = false;
   offer();
