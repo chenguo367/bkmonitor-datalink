@@ -54,6 +54,9 @@ type indexState struct {
 	everReady      bool
 	members, bytes int
 	running        bool
+	// eventSourceID is this deployment's own source as the last successful
+	// calibration named it, kept for the recovery comparison.
+	eventSourceID string
 }
 
 func NewIndex(options IndexOptions) (*Cache, error) {
@@ -528,6 +531,7 @@ func (cache *Cache) applyCalibration(job indexJob, started time.Time, result Rec
 	next.reconcileRequested = next.dirty != job.generation
 	next.reason = ""
 	*entry = next
+	cache.index.eventSourceID = result.EventSourceID
 	cache.refreshes["authoritative"]++
 	// Once a newer complete calibration exists, aged local recoveries must
 	// not permanently suppress an alert the consumer still holds active.

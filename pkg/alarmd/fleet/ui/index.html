@@ -3407,6 +3407,33 @@ function openAlertConsequence(a, lookups) {
     + ' 次全部落空、恢复被扣住——要么消费方此刻确实没有未恢复告警，要么它没有把本部署发过去的告警记进这个集合';
 }
 
+var KEY_SHAPE = { hex32: '32 位十六进制', hex64: '64 位十六进制', hex_other: '其他长度十六进制', non_hex: '非十六进制' };
+
+function shapeWords(shapes) {
+  var out = [];
+  Object.keys(shapes || {}).sort().forEach(function (key) {
+    if (shapes[key]) out.push((KEY_SHAPE[key] || key) + ' ' + shapes[key]);
+  });
+  return out.length ? out.join('、') : '无';
+}
+
+// The recovery gate's side-by-side reading, in counts and shapes only: the
+// keys themselves stay in the API sample. Which of the three misses it is
+// reads off the three clauses -- member shape, whose alerts, and whether our
+// keys are there as an alert id or as a fingerprint.
+function openAlertComparisonWords(c) {
+  if (!c) return '';
+  var own = c.own_event_source_id ? (c.alert_sources || {})[c.own_event_source_id] || 0 : null;
+  var others = 0;
+  Object.keys(c.alert_sources || {}).forEach(function (key) {
+    if (key !== c.own_event_source_id) others += c.alert_sources[key];
+  });
+  return '恢复闸对照：本端发出未恢复 ' + c.sent + ' 个（' + shapeWords(c.sent_shapes) + '），集合成员 ' + shapeWords(c.member_shapes)
+    + '；校准列出的活动告警' + (own === null ? '来源 ' + others + ' 条（本部署来源尚未读到）' : '本部署来源 ' + own + ' 条、其他来源 ' + others + ' 条')
+    + '；在已校准策略里的 ' + c.sent_in_calibrated + ' 个发出键中，等于某条活动告警 ID 的 ' + c.sent_matching_alert_id
+    + ' 个、等于其指纹的 ' + c.sent_matching_fingerprint + ' 个';
+}
+
 function openAlertSetWords(dep) {
   var a = dep.open_alert_set;
   var w = dep.writer;
@@ -3441,6 +3468,7 @@ function openAlertSetWords(dep) {
   });
   parts.push(total ? '恢复门查过 ' + total + ' 次：' + answers.join('、') : '恢复门还没查过');
   parts.push(openAlertConsequence(a, total));
+  parts.push(openAlertComparisonWords(a.comparison));
   return parts.filter(Boolean).join('；');
 }
 
