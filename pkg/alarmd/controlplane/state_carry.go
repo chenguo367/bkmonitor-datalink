@@ -129,29 +129,14 @@ func (reconciler *ScheduleActivationReconciler) previousPlan(
 	currentGroup execution.QueryGroupIdentity,
 ) (contract.EvaluationPlanV2, contract.DatasetContractV2, error) {
 	key := previous.Fact.Key()
-	candidates := make([]execution.QueryGroupIdentity, 0, 1)
-	if _, present := previousContent.digests[currentGroup]; present {
-		candidates = append(candidates, currentGroup)
-	}
-	for identity, group := range previousContent.groups {
-		if identity == currentGroup {
-			continue
-		}
-		for _, plan := range group.Plans {
-			if plan.Key() == key {
-				candidates = append(candidates, identity)
-				break
-			}
-		}
-	}
-	for _, identity := range candidates {
+	find := func(identity execution.QueryGroupIdentity) (contract.EvaluationPlanV2, contract.DatasetContractV2, bool, error) {
 		digest := previousContent.digests[identity]
 		if digest == "" {
-			continue
+			return contract.EvaluationPlanV2{}, contract.DatasetContractV2{}, false, nil
 		}
 		object, err := reconciler.repository.LoadQueryGroupObject(ctx, digest)
 		if err != nil {
-			return contract.EvaluationPlanV2{}, contract.DatasetContractV2{}, err
+			return contract.EvaluationPlanV2{}, contract.DatasetContractV2{}, false, err
 		}
 		for _, plan := range object.Plans {
 			if plan.Key() != key {
@@ -164,7 +149,30 @@ func (reconciler *ScheduleActivationReconciler) previousPlan(
 				OutputIdentity: plan.OutputIdentity, TargetScope: plan.TargetScope, TargetPlan: plan.TargetPlan,
 				NoData: plan.NoData, EffectiveTimeSnapshot: plan.EffectiveTimeSnapshot,
 				StrategyIR: strategyIR, TerminalReasonCode: plan.TerminalReasonCode,
-			}, object.QueryPlan.Normalization.DatasetContract, nil
+			}, object.QueryPlan.Normalization.DatasetContract, true, nil
+		}
+		return contract.EvaluationPlanV2{}, contract.DatasetContractV2{}, false, nil
+	}
+	// The group the Plan is in now, which is where nearly every Plan was
+	// before: one object read, no scan.
+	if plan, dataset, found, err := find(currentGroup); err != nil || found {
+		return plan, dataset, err
+	}
+	// Otherwise the groups that list their Plans. A manifest's do not, so
+	// this is the open-Segment source only, and a Plan whose group was
+	// renamed under a manifest carries nothing.
+	for identity, group := range previousContent.groups {
+		if identity == currentGroup {
+			continue
+		}
+		for _, plan := range group.Plans {
+			if plan.Key() != key {
+				continue
+			}
+			if plan, dataset, found, err := find(identity); err != nil || found {
+				return plan, dataset, err
+			}
+			break
 		}
 	}
 	return contract.EvaluationPlanV2{}, contract.DatasetContractV2{}, errors.New("alarmd controlplane: previous activation does not hold the Plan")
