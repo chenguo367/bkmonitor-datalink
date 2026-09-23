@@ -255,3 +255,32 @@ func TestTheOpenedRecordIsBounded(t *testing.T) {
 		t.Fatal("alerts past the bound were dropped without being counted")
 	}
 }
+
+// An alert the calibration finds active in the consumer's store but missing
+// from the Redis set is still an alert the consumer holds, keyed our way:
+// it counts as found, and the sets are not disjoint.
+func TestAnAlertTheCalibrationFindsMissingFromTheSetCountsAsFound(t *testing.T) {
+	c := &clock{at: time.Unix(1700000000, 0)}
+	ours := sentFingerprints(DisjointMinimum)
+	options := indexOptions(c)
+	options.Source = setReaderFunc(func(context.Context, StrategyKey) ([]string, error) { return []string{"theirs-1"}, nil })
+	options.Reconciler = reconcilerFunc(func(context.Context, StrategyKey) (Reconciliation, error) {
+		return Reconciliation{Members: []string{"theirs-1", ours[0]}, Missing: []string{ours[0]}}, nil
+	})
+	cache := mustIndex(t, options)
+	if err := cache.SetTracked([]StrategyKey{keyA}); err != nil {
+		t.Fatal(err)
+	}
+	cache.Refresh(context.Background())
+	events := make([]contract.TriggerEventV1, 0, len(ours))
+	for _, fp := range ours {
+		events = append(events, abnormal(keyA, fp))
+	}
+	cache.Acknowledged(events)
+	c.advance(SentConfirmAfter + time.Second)
+	cache.RequestReconcile(keyA)
+	cache.Refresh(context.Background())
+	if stats := cache.Stats(); stats.Disjoint || stats.SentInSet != 1 {
+		t.Fatalf("disjoint %v in %d, want the calibration's missing member found", stats.Disjoint, stats.SentInSet)
+	}
+}
