@@ -46,8 +46,10 @@ type RedisBinding struct {
 }
 type Options struct {
 	SourceStrategy, TargetGroup, DynamicConfig, QueryProgress, Published RedisBinding
-	Catalog                                                              *controlplane.RedisCatalogRepository
-	Progress                                                             *progress.Store
+	// CMDBCache is the platform's host cache, read here only for INFO.
+	CMDBCache RedisBinding
+	Catalog   *controlplane.RedisCatalogRepository
+	Progress  *progress.Store
 }
 type Service struct{ options Options }
 
