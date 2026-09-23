@@ -390,6 +390,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		attributes = append(attributes, slog.String("source_kind", string(observation.SourceKind)))
 	}
 	attributes = appendObservationCounts(attributes, observation.Counts)
+	attributes = appendEnvelopePassCounts(attributes, observation)
 	attributes = appendTraceFields(attributes, observation.Trace)
 	if f := observation.QueryFailure; f != nil {
 		attributes = append(attributes, slog.String("failure_stage", f.Stage), slog.String("failure_category", f.Category), slog.String("failure_code", f.Code))
@@ -1021,7 +1022,7 @@ func appendObservationCounts(attributes []slog.Attr, counts Counts) []slog.Attr 
 	}{
 		{"messages", counts.Messages}, {"records", counts.Records}, {"plans", counts.Plans},
 		{"levels", counts.Levels}, {"events", counts.Events}, {"bytes", counts.Bytes},
-		{"keys", counts.Keys}, {"state_bytes", counts.StateBytes}, {"envelope_reads", counts.EnvelopeReads}, {"envelope_after_unreadable_frame", counts.EnvelopeAfterUnreadableFrame},
+		{"keys", counts.Keys}, {"state_bytes", counts.StateBytes}, {"envelope_reads", counts.EnvelopeReads},
 	}
 	for _, value := range values {
 		if value.value > 0 {
@@ -1029,6 +1030,34 @@ func appendObservationCounts(attributes []slog.Attr, counts Counts) []slog.Attr 
 		}
 	}
 	return attributes
+}
+
+// appendEnvelopePassCounts writes the four the state preflight's second pass
+// splits into, at every value including zero.
+//
+// Zero included, unlike every other count on the line, because these are the
+// only ones whose zero is the answer: the migration is over when
+// envelope_answered is zero and stays there, and the two corruption counts
+// are read to confirm they are zero. A count that appears only when non-zero
+// cannot say "none of these happened" -- it reads identically to "nobody
+// counted", which is how envelope_reads spent a release being invisible on
+// every line where it was zero.
+//
+// Gated on the stage rather than on the values, because gating on the values
+// is the same omission in another shape. Only the preflight line produces
+// them, so only it carries them: four keys on every observation in the
+// process would be most of a log line spent restating zeros nobody asked.
+func appendEnvelopePassCounts(attributes []slog.Attr, observation Observation) []slog.Attr {
+	if observation.Stage != StageStatePreflight {
+		return attributes
+	}
+	return append(attributes,
+		slog.Int64("envelope_answered", observation.Counts.EnvelopeAnswered),
+		slog.Int64("envelope_corrupt", observation.Counts.EnvelopeCorrupt),
+		slog.Int64("no_record_yet", observation.Counts.NoRecordYet),
+		slog.Int64("frame_corrupt_rescued", observation.Counts.FrameCorruptRescued),
+		slog.Int64("frame_corrupt_lost", observation.Counts.FrameCorruptLost),
+		slog.Int64("unclassified", observation.Counts.Unclassified))
 }
 
 func appendTraceFields(attributes []slog.Attr, trace TraceFields) []slog.Attr {

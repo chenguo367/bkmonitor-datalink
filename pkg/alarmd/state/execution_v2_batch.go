@@ -757,9 +757,15 @@ type runtimeLoadPass struct {
 	envelopes bool
 	pending   []int
 	frames    map[int][]byte
-	// envelopeAfterUnreadableFrame counts the series whose frame was present
-	// and unreadable and whose envelope answered instead.
-	envelopeAfterUnreadableFrame int
+	// The four the second pass splits into; see the table where they are
+	// counted. Only envelopeAnswered ever reaches zero, which is why one
+	// number over all four could not say when the migration is over.
+	envelopeAnswered    int
+	envelopeCorrupt     int
+	noRecordYet         int
+	frameCorruptRescued int
+	frameCorruptLost    int
+	unclassified        int
 }
 
 func (batch *runtimeLoadBatch) reset() {
@@ -887,16 +893,57 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			// together, which is the shape this decision has always had when
 			// both records existed.
 			view := store.readStoredRecord(request, item, raw, pass.frames[index])
-			// The frame's bytes were there and did not read, and the older
-			// record answered in its place. That is a corrupt or truncated
-			// frame, not a writer of the older representation: a readable
-			// frame never reaches this pass at all, so this count cannot see
-			// the shape where an envelope outranks a frame that reads. What
-			// that shape needs is a fleet-level fact - every ready replica
-			// declaring it writes frames - and it is recorded as an unmeasured
-			// boundary until there is one.
-			if pass.frames[index] != nil && view.Representation == execution.StateRepresentationEnvelope {
-				pass.envelopeAfterUnreadableFrame++
+			// Which of the four the second pass actually found. One number for
+			// all of them cannot say when the migration is over, because only
+			// one of the four ever ends:
+			//
+			//	frame        envelope answered   what it is
+			//	-----------  -----------------   ----------------------------
+			//	absent       yes                 the older representation, the
+			//	                                 only count that must reach zero
+			//	absent       no                  a series with no record yet --
+			//	                                 new or empty, normal for ever
+			//	present, bad yes                 a corrupt frame the older record
+			//	                                 rescued: a defect, not a writer
+			//	present, bad no                  a corrupt frame nothing rescued
+			//
+			// Counted here, where both records are in hand, rather than where
+			// the decision to read twice was taken: there the frame's absence
+			// is all that is known, and absence is exactly what the first two
+			// rows share.
+			//
+			// The envelope's own bytes decide the middle two: raw is nil when
+			// the key held nothing and non-nil when it held something that did
+			// not read. Both are facts of this read, so a bucket that merged
+			// them would be doing to the older record exactly what one count
+			// over all of these did to the frame -- leaving a damaged record
+			// indistinguishable from a series that never had one.
+			//
+			// frameCorruptLost does not split the same way: its record is lost
+			// whether the envelope was absent or unreadable, and the frame has
+			// already named the defect. The five are a partition, which is what
+			// lets the total below cross-check them.
+			answered := view.Representation == execution.StateRepresentationEnvelope
+			switch {
+			case pass.frames[index] == nil && answered:
+				pass.envelopeAnswered++
+			case pass.frames[index] == nil && raw != nil:
+				pass.envelopeCorrupt++
+			case pass.frames[index] == nil:
+				pass.noRecordYet++
+			case pass.frames[index] != nil && answered:
+				pass.frameCorruptRescued++
+			case pass.frames[index] != nil:
+				pass.frameCorruptLost++
+			default:
+				// Unreachable as the five stand, and deliberately written so
+				// that it can stop being unreachable. A shape none of the five
+				// names lands here and is counted rather than dropped, which
+				// is what makes them a partition by construction instead of by
+				// whatever a fixture happens to contain: a shape a fixture has
+				// no data for is invisible to every case built on one, the sum
+				// over the buckets included.
+				pass.unclassified++
 			}
 			views[index] = view
 			continue
