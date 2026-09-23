@@ -330,3 +330,26 @@ func TestDisjointEndsWhenNothingOfOursIsLeftOpen(t *testing.T) {
 		t.Fatal("the state outlived every alert it was answering for")
 	}
 }
+
+// The count reaches zero without the sets changing when every alert of
+// ours still open is too young to count: the old ones recovered through
+// the fallback, a new one opened a minute ago. Ending the state then would
+// hold the new alert's recovery against sets that have never carried one
+// of ours.
+func TestAYoungAlertKeepsTheStateAfterTheOldOnesRecover(t *testing.T) {
+	f := newDisjointFixture(t, PolicySelfMaintain, "theirs-1")
+	f.send("ours-old")
+	f.reread(SentConfirmAfter + time.Second)
+	if !f.cache.Stats().Disjoint {
+		t.Fatal("setup: not disjoint")
+	}
+	f.send("ours-young")
+	f.cache.Acknowledged([]contract.TriggerEventV1{recovery(keyA, "ours-old")})
+	f.reread(time.Minute)
+	if stats := f.cache.Stats(); !stats.Disjoint || stats.SentNotInSet != 0 {
+		t.Fatalf("disjoint %v not-in %d, want the state kept with nothing old enough to count", stats.Disjoint, stats.SentNotInSet)
+	}
+	if !f.cache.Contains(tenant, keyA.StrategyID, "ours-young") {
+		t.Fatal("the young alert's recovery was held")
+	}
+}
