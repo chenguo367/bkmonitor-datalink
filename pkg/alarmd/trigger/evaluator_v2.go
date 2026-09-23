@@ -206,8 +206,7 @@ func EvaluateStateEligibilityV2(
 
 	switch fact.Result {
 	case DetectionUnavailable, DetectionError:
-		if fact.ReasonCode == "" ||
-			!contract.ReasonAllowedForV2(fact.ReasonCode, contract.ReasonDomainReceipt|contract.ReasonDomainObservation) {
+		if !contract.LevelUnavailableReasonV2(fact.ReasonCode) {
 			return StateEligibilityV2{}, invariantV2(
 				"validate unavailable Detect fact", definition.LevelID, errors.New("invalid fact result or reason"),
 			)
