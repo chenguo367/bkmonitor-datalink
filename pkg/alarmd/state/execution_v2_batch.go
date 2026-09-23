@@ -1060,7 +1060,12 @@ func (store *ExecutionStore) readFramedRecord(
 		decoded.ReasonCode != execution.ReasonCode(contract.ReasonStateSchemaUnsupported) {
 		return execution.RuntimeStateView{}, true
 	}
-	return store.readStoredRecord(request, item, nil, framedRaw), false
+	// The frame is handed on decoded. Decoding it a second time there cost
+	// as much as the first -- a record of fourteen hundred points is read
+	// point by point, each with its derived id -- and was half of what
+	// reading a long-history Query Group's state cost.
+	view, _ := store.readStoredRecordDecoded(request, item, nil, framedRaw, &decoded)
+	return view, false
 }
 
 // readStoredRecord turns the two values one series may hold into the one view
@@ -1088,6 +1093,17 @@ func (store *ExecutionStore) readStoredRecord(
 func (store *ExecutionStore) readStoredRecordSourced(
 	request execution.StatePreflightRequest, item execution.StatePreflightItem, envelopeRaw, framedRaw []byte,
 ) (execution.RuntimeStateView, runtimeViewSource) {
+	return store.readStoredRecordDecoded(request, item, envelopeRaw, framedRaw, nil)
+}
+
+// readStoredRecordDecoded is readStoredRecordSourced for a caller that has
+// already decoded framedRaw, with the same request and item, and passes the
+// result as framedDecoded; nil decodes it here. Decoding is a function of
+// those inputs alone, so the view is the one a second decode would give.
+func (store *ExecutionStore) readStoredRecordDecoded(
+	request execution.StatePreflightRequest, item execution.StatePreflightItem, envelopeRaw, framedRaw []byte,
+	framedDecoded *execution.RuntimeStateView,
+) (execution.RuntimeStateView, runtimeViewSource) {
 	oversize := func() execution.RuntimeStateView {
 		return execution.RuntimeStateView{Identity: item.Identity, BlobRevision: 1, Status: execution.StateDeterministicInvalid,
 			ReasonCode: execution.ReasonCode(contract.ReasonStateBudgetExceeded)}
@@ -1112,7 +1128,12 @@ func (store *ExecutionStore) readStoredRecordSourced(
 	}
 	if framedRaw != nil {
 		witness.framedDigest = ExpectedValueDigest(framedRaw)
-		decoded := decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
+		var decoded execution.RuntimeStateView
+		if framedDecoded != nil {
+			decoded = *framedDecoded
+		} else {
+			decoded = decodeRuntime(framedRaw, item.Identity, request.Contract, item.ApplyVersion)
+		}
 		if decoded.Status == execution.StateDeterministicInvalid {
 			if decoded.ReasonCode == execution.ReasonCode(contract.ReasonStateSchemaUnsupported) {
 				// A frame this binary does not know is a newer binary's
