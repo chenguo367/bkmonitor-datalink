@@ -16,8 +16,9 @@ type discoverLinkdTarget func(context.Context, openalerts.HTTPReconcilerOptions)
 
 // linkdDiscoveryAttempts bounds how long startup waits on a Console that does
 // not answer. Detection does not depend on the link; a process that could
-// not ask keeps reading where it would have, and the difference refuses by
-// name until a restart finds the Console.
+// not ask reads from the fallback location meanwhile, and keeps asking in the
+// background (linkdLocationSwitch.retry) until the Console answers, then moves
+// its reads to where the link writes without a restart.
 const linkdDiscoveryAttempts = 3
 
 var linkdDiscoveryPause = 2 * time.Second
@@ -68,20 +69,34 @@ func adoptLinkdLocation(ctx context.Context, cfg config.Config, discover discove
 		return cfg, facts
 	}
 	facts.Target = linkdTargetFacts(target)
+	connection, prefix, found := heldLinkdLocation(cfg, target)
+	if !found {
+		facts.Outcome = fleet.LinkdDiscoveryNoHeldConnection
+		return cfg, facts
+	}
+	cfg.PhaseTwo.Linkd.Connection = &connection
+	cfg.PhaseTwo.Linkd.KeyPrefix = prefix
+	facts.Outcome = fleet.LinkdDiscoveryAdopted
+	return cfg, facts
+}
+
+// heldLinkdLocation is where this process reads the sets a target writes:
+// one of the Redis connections it already holds, pointed at the target's
+// database, under the stated prefix or else the target's. Not found when no
+// held connection is at the target's Redis.
+func heldLinkdLocation(cfg config.Config, target openalerts.TargetBinding) (config.RedisConnectionConfig, string, bool) {
 	for _, held := range heldRedisConnections(cfg) {
 		if !strings.EqualFold(linkdLocation(held), target.Address) {
 			continue
 		}
 		held.DB = target.Database
-		cfg.PhaseTwo.Linkd.Connection = &held
-		if settings.KeyPrefix == "" {
-			cfg.PhaseTwo.Linkd.KeyPrefix = target.KeyPrefix
+		prefix := cfg.PhaseTwo.Linkd.KeyPrefix
+		if prefix == "" {
+			prefix = target.KeyPrefix
 		}
-		facts.Outcome = fleet.LinkdDiscoveryAdopted
-		return cfg, facts
+		return held, prefix, true
 	}
-	facts.Outcome = fleet.LinkdDiscoveryNoHeldConnection
-	return cfg, facts
+	return config.RedisConnectionConfig{}, "", false
 }
 
 // linkdTargetFacts is a target as the page shows it: where the link writes,

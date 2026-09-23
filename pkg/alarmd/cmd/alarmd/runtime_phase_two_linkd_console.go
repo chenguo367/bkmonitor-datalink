@@ -34,21 +34,38 @@ func linkdConsoleEndpoint(cfg config.Config) fleet.Endpoint {
 	return entry
 }
 
+// linkdLocationReport is where the open alert sets are read and how that was
+// found: the startup discovery, or a later one that moved the reads.
+type linkdLocationReport interface {
+	Discovery() *fleet.LinkdDiscoveryFacts
+	Location() (config.RedisConnectionConfig, string, bool)
+}
+
 // withLinkdConsole fills the Console's entry with what this replica has seen
 // of it. A nil console is a deployment that configured none, whose entry
-// already says so.
+// already says so. When a later discovery moved the reads, the open alert
+// set's entry is rewritten to where they are read now: the list is otherwise
+// resolved once, at startup, from the fallback location.
 func withLinkdConsole(endpoints func() []fleet.Endpoint, console *openalerts.HTTPReconciler,
-	discovery *fleet.LinkdDiscoveryFacts, now func() time.Time) func() []fleet.Endpoint {
+	location linkdLocationReport, now func() time.Time) func() []fleet.Endpoint {
 	if console == nil {
 		return endpoints
 	}
 	return func() []fleet.Endpoint {
 		entries := endpoints()
+		connection, prefix, moved := location.Location()
 		for index := range entries {
-			if entries[index].Role == fleet.EndpointLinkdConsole {
+			switch entries[index].Role {
+			case fleet.EndpointLinkdConsole:
 				facts := linkdConsoleFacts(console, now())
-				facts.Discovery = discovery
+				facts.Discovery = location.Discovery()
 				entries[index].Console = facts
+			case fleet.EndpointOpenAlertSet:
+				if moved {
+					entry := redisEndpoint(fleet.EndpointOpenAlertSet, connection, prefix)
+					entries[index].Address, entries[index].Mode, entries[index].DB, entries[index].Prefix, entries[index].SharedWith =
+						entry.Address, entry.Mode, entry.DB, entry.Prefix, ""
+				}
 			}
 		}
 		return entries

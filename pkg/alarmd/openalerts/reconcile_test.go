@@ -207,3 +207,30 @@ func TestDiscoveryReadsTheTargetWithoutAskingWhereThisProcessReads(t *testing.T)
 		t.Fatalf("target %+v err %v", target, err)
 	}
 }
+
+// A reader bound to the fallback location refuses by name until it is moved
+// to where the link writes; after the move it resolves, and a location that
+// cannot be a location is refused without moving anything.
+func TestAReaderMovedToWhereTheLinkWritesResolves(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
+	}))
+	defer server.Close()
+	fallback := IndexLocation{KeyPrefix: "alarmd:open_alerts", Address: "runtime:6379", Database: 8}
+	reader, err := NewHTTPReconciler(HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "u", Password: "p", Index: fallback, MaxResponseBytes: 1 << 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reader.Binding(context.Background()); err == nil || !strings.Contains(err.Error(), "this process reads runtime:6379 db 8") {
+		t.Fatalf("before the move: %v", err)
+	}
+	if err := reader.SetIndexLocation(IndexLocation{KeyPrefix: "test:active", Address: "", Database: 0}); err == nil {
+		t.Fatal("an invalid location was accepted")
+	}
+	if err := reader.SetIndexLocation(testIndex()); err != nil {
+		t.Fatal(err)
+	}
+	if binding, err := reader.Binding(context.Background()); err != nil || binding.Address != testBinding().Address {
+		t.Fatalf("after the move: %+v %v", binding, err)
+	}
+}

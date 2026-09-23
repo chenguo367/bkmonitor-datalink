@@ -767,7 +767,17 @@ func openProductionPhaseTwoBundleWithDependencies(
 			}()
 		}
 	}
-	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, external.Now)
+	// A later discovery that finds the link at another held connection opens
+	// a client for it once; the runtime connection keeps the runtime client.
+	openLinkdClient := func(connection config.RedisConnectionConfig) (redis.UniversalClient, bool) {
+		if sameRedisConnection(connection, runtimeConnection) {
+			return runtimeClient, false
+		}
+		client := redis.NewUniversalClient(productionRedisOptions(connection))
+		client.AddHook(recorder.RedisHook("linkd"))
+		return client, true
+	}
+	linkd, err := newLinkdIndex(cfg, linkdClient, linkdConnection, linkdDiscovery, openLinkdClient, external.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -1087,7 +1097,12 @@ func openProductionPhaseTwoBundleWithDependencies(
 				costRefresh.publish(ctx, external.Now(), costSummary.Snapshot())
 			}
 		},
-		RunOpenAlerts:           openAlertCopy.Run,
+		RunOpenAlerts: func(runCtx context.Context) error {
+			// A process whose startup discovery failed keeps asking in the
+			// background, on the same lifetime as the copy it may rebind.
+			go linkd.Location.retry(runCtx, cfg, openalerts.DiscoverTarget, linkdRetryFirst, linkdRetryCeiling)
+			return openAlertCopy.Run(runCtx)
+		},
 		RefreshPlatformSettings: platformSettingsRefresher(platformSettings, hostStatus, recorder),
 		ApplyObservationWindows: observationWindowApplier{
 			store: windowStore, flow: targetFlow, samples: seriesSampler, now: external.Now,
@@ -1102,6 +1117,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 			viewServer.Close()
 			eventsClosed = true
 			closers := []error{events.Shutdown(shutdownCtx), closeCLI()}
+			if moved := linkd.Location.OwnedClient(); moved != nil {
+				closers = append(closers, moved.Close())
+			}
 			if linkdClientOwned {
 				closers = append(closers, linkdClient.Close())
 			}
@@ -1223,7 +1241,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		source:           bundle.sourceFleetFacts,
 		endpoints: withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
 			bundle.sourceFleetFacts, events.State, openAlertSetFactsSource(openAlertCopy, external.Now), external.Now),
-			linkd.Console, linkdDiscovery, external.Now),
+			linkd.Console, linkd.Location, external.Now),
 		// The same snapshot the readiness endpoint serves, so the fleet and
 		// the probe cannot disagree about one replica.
 		readiness: readinessFactsSource(health),

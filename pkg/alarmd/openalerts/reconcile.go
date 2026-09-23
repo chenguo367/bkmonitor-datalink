@@ -180,7 +180,9 @@ func (reader *HTTPReconciler) resolve(ctx context.Context) (TargetBinding, error
 	if err != nil {
 		return TargetBinding{}, err
 	}
+	reader.mu.Lock()
 	index := reader.options.Index
+	reader.mu.Unlock()
 	if binding.KeyPrefix != index.KeyPrefix || !strings.EqualFold(binding.Address, index.Address) || binding.Database != index.Database {
 		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link writes open alert sets to %s db %d prefix %s, this process reads %s db %d prefix %s, and none of the Redis connections this process holds is at %s",
 			binding.Address, binding.Database, binding.KeyPrefix, index.Address, index.Database, index.KeyPrefix, binding.Address)
@@ -189,6 +191,23 @@ func (reader *HTTPReconciler) resolve(ctx context.Context) (TargetBinding, error
 	reader.binding, reader.resolvedAt = binding, reader.now()
 	reader.mu.Unlock()
 	return binding, nil
+}
+
+// SetIndexLocation moves where this process says it reads the open alert
+// sets from. A process that could not ask the Console at startup reads from
+// a fallback location, and every reconciliation refuses with both locations
+// named; once a later discovery finds where the link writes, the reader is
+// rebound there and this is the reconciler's half of that move. The resolved
+// target is forgotten so the next reconciliation checks the new location.
+func (reader *HTTPReconciler) SetIndexLocation(index IndexLocation) error {
+	if !validPrefix(index.KeyPrefix) || index.Address == "" || index.Database < 0 {
+		return errors.New("alarmd openalerts: invalid index location")
+	}
+	reader.mu.Lock()
+	defer reader.mu.Unlock()
+	reader.options.Index = index
+	reader.binding, reader.resolvedAt = TargetBinding{}, time.Time{}
+	return nil
 }
 
 // choose is the target the selector picks among those the Console lists.
