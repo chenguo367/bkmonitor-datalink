@@ -132,7 +132,7 @@ func TestTheStartupWaitRetriesCountsAndStopsOnAnAnswerOrARefusal(t *testing.T) {
 
 // The delay doubles to its ceiling and no further.
 func TestTheStartupWaitBacksOffToItsCeiling(t *testing.T) {
-	waiter := startupWaiter{initial: 10 * time.Millisecond, ceiling: 40 * time.Millisecond}
+	waiter := startupWaiter{initial: 50 * time.Millisecond, ceiling: 100 * time.Millisecond}
 	var at []time.Time
 	_ = waiter.await(context.Background(), "redis_source", func(context.Context) error {
 		at = append(at, time.Now())
@@ -141,10 +141,12 @@ func TestTheStartupWaitBacksOffToItsCeiling(t *testing.T) {
 		}
 		return nil
 	})
-	want := []time.Duration{10, 20, 40, 40, 40}
+	// Without the ceiling the fourth and fifth gaps would be 200ms and 400ms,
+	// past the half-again tolerance.
+	want := []time.Duration{50, 100, 100, 100, 100}
 	for i, floor := range want {
 		gap := at[i+1].Sub(at[i])
-		if gap < floor*time.Millisecond || gap > floor*time.Millisecond+200*time.Millisecond {
+		if gap < floor*time.Millisecond || gap > floor*time.Millisecond*3/2 {
 			t.Fatalf("gap %d = %s, want about %dms (gaps from %v)", i, gap, floor, at)
 		}
 	}
