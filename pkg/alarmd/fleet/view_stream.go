@@ -24,14 +24,16 @@ import (
 // version and who is not; before this it lived in the Leader's process and
 // its metrics. This is that ledger's current page, on the first screen.
 
+// ViewStreamStallBound is how long a Leader may fail to publish, or have its
+// view reach no Worker, before the verdict degrades: a dozen reconcile
+// rounds, well past a slow round or a rollout's reconnects. The start of a
+// no-session run is noted when the server's stats are read, so the verdict
+// can lag the true start by at most one stats read interval.
+const ViewStreamStallBound = time.Minute
+
 // ViewStreamFacts is the Leader's account of the stream at one instant. A
 // replica that is not the Leader publishes Leading false and nothing else
 // meaningful; the aggregate prefers the Leader's.
-// ViewStreamStallBound is how long a Leader may fail to publish, or have its
-// view reach no Worker, before the verdict degrades: a dozen reconcile
-// rounds, well past a slow round or a rollout's reconnects.
-const ViewStreamStallBound = time.Minute
-
 type ViewStreamFacts struct {
 	At      time.Time `json:"at"`
 	Leading bool      `json:"leading"`
