@@ -25,10 +25,15 @@ func TestLinkdConfigurationBinding(t *testing.T) {
 	if err := c.Validate(); err == nil {
 		t.Fatal("URL credentials accepted")
 	}
-	c.ConsoleURL = "https://console.example.test"
-	c.HookName = ""
+	// The target is read from the Console; source and hook only narrow the
+	// choice, so a Console with credentials alone is a whole configuration.
+	c = LinkdConfig{ConsoleURL: "https://console.example.test", Username: "reader", Password: "test-password"}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("a Console with credentials alone was refused: %v", err)
+	}
+	c.Password = ""
 	if err := c.Validate(); err == nil {
-		t.Fatal("missing source binding accepted")
+		t.Fatal("a Console without credentials was accepted")
 	}
 }
 

@@ -8,17 +8,20 @@ import (
 	"time"
 )
 
-// LinkdConfig binds the external index to the source that consumes this
-// worker's native events. An omitted connection reuses runtime Redis.
-// Capacity follows the container; operators specify locations and acceptable
-// reconciliation delay, not mutually dependent entry/byte/queue limits.
+// LinkdConfig is the alert link as this deployment reaches it. The Console
+// address and its credentials are the whole of it in the usual case: which of
+// the link's targets is this deployment's - its source, hook, prefix, where
+// its sets are and which sources share them - is read from the Console.
+// EventSourceID and HookName only narrow that choice when the link maintains
+// more than one target. An omitted connection and prefix are where this
+// process reads the sets from, its runtime Redis and alarmd:open_alerts, and
+// the Console is asked whether that is where the link writes them.
 type LinkdConfig struct {
 	Connection        *RedisConnectionConfig `yaml:"connection"`
 	KeyPrefix         string                 `yaml:"key_prefix"`
 	ConsoleURL        string                 `yaml:"console_url"`
 	EventSourceID     string                 `yaml:"event_source_id"`
 	HookName          string                 `yaml:"hook_name"`
-	SharedSources     []string               `yaml:"shared_sources"`
 	Username          string                 `yaml:"username"`
 	Password          string                 `yaml:"password"`
 	ReconcileInterval Duration               `yaml:"reconcile_interval"`
@@ -101,9 +104,6 @@ func (c LinkdConfig) Validate() error {
 	u, err := url.Parse(c.ConsoleURL)
 	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("linkd console_url must be an HTTP service URL without credentials or query")
-	}
-	if c.EventSourceID == "" || c.HookName == "" {
-		return errors.New("linkd reconciliation requires event_source_id and hook_name")
 	}
 	if c.Username == "" || c.Password == "" {
 		return errors.New("linkd console service requires username and password")

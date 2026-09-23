@@ -1121,6 +1121,12 @@ func openProductionPhaseTwoBundleWithDependencies(
 	bundle.workerPorts = workerPorts
 	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
 		capacity: linkdBudget, sourceID: cfg.PhaseTwo.Linkd.EventSourceID, legacy: legacyTime.Provider(), legacyCache: legacyTime}
+	if linkd.Console != nil {
+		maintenance.sourceOf = func(ctx context.Context) (string, error) {
+			binding, err := linkd.Console.Binding(ctx)
+			return binding.EventSourceID, err
+		}
+	}
 	bundle.dependencies.RunEffectiveTime = maintenance.run
 	// The control leader's difference against the strategies that no longer
 	// exist. It runs on every replica's loop and does nothing on a follower;
@@ -1129,8 +1135,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// is the link's roster minus the snapshot, and a deployment without the
 	// link has neither the roster nor the alerts it would close.
 	if linkd.Console != nil {
-		absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Console, events,
-			cfg.PhaseTwo.Linkd.EventSourceID, cfg.PhaseTwo.Linkd.AbsentCloseSend)
+		absentClose := newAbsentStrategyClose(bundle, reconciler, linkd.Console, events, cfg.PhaseTwo.Linkd.AbsentCloseSend)
 		bundle.dependencies.RunAbsentClose = absentClose.run
 		recorder.SetAbsentCloseSource(absentClose.Stats, absentClose.Rounds, absentClose.Difference)
 	}

@@ -353,3 +353,23 @@ func TestEffectiveMaintenanceSharesExecutionTrackingWithoutLosingACK(t *testing.
 		t.Fatal("released group retained execution-registered cache entries")
 	}
 }
+
+// Which alerts are this deployment's comes from the target the link's
+// Console lists when the source is not configured; a Console that cannot say
+// closes nothing and says so.
+func TestEffectiveMaintenanceTakesItsSourceFromTheLinksTarget(t *testing.T) {
+	f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(8, 0), []openalerts.Alert{maintenanceAlert("native", "")})
+	f.m.sourceID = ""
+	f.m.sourceOf = func(context.Context) (string, error) { return "native", nil }
+	f.m.step(context.Background())
+	if len(f.writer.batches) != 1 {
+		t.Fatalf("the source read from the link's target was not used: %v", f.writer.batches)
+	}
+	g := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(8, 0), []openalerts.Alert{maintenanceAlert("native", "")})
+	g.m.sourceID = ""
+	g.m.sourceOf = func(context.Context) (string, error) { return "", errors.New("console unreachable") }
+	g.m.step(context.Background())
+	if len(g.writer.batches) != 0 || g.m.Stats()["unavailable"] == 0 {
+		t.Fatalf("a Console that could not name the source still closed, or said nothing: %v %v", g.writer.batches, g.m.Stats())
+	}
+}
