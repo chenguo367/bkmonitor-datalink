@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -253,7 +254,16 @@ func TestAControlLoopStuckInACallFailsLivenessAndRecovers(t *testing.T) {
 
 	owner.armed.Store(true)
 	waitSignal(t, owner.entered, "the control loop enters the held call")
-	clock.advance(controlLoopStallBound + time.Second)
+	// Past the dispatch bound but inside the control loop's: the held control
+	// loop is not yet late, which is what tells the two bounds apart.
+	clock.advance(dispatchLoopStallBound + time.Second)
+	waitUntil(t, 5*time.Second, "the dispatch loop turns under the moved clock", func() bool {
+		return livenessTurnAge(bundle.liveness, livenessLoopDispatch) < time.Second
+	})
+	if got := stalledLoops(bundle.liveness); len(got) != 0 {
+		t.Fatalf("inside the control loop's bound: stalled %v", got)
+	}
+	clock.advance(controlLoopStallBound - dispatchLoopStallBound)
 	waitUntil(t, 5*time.Second, "only the control loop is named", func() bool {
 		return sameLoops(stalledLoops(bundle.liveness), livenessLoopControl)
 	})
@@ -261,6 +271,119 @@ func TestAControlLoopStuckInACallFailsLivenessAndRecovers(t *testing.T) {
 	owner.armed.Store(false)
 	close(owner.release)
 	waitUntil(t, 5*time.Second, "the probe recovers once the call returns", func() bool {
+		return len(stalledLoops(bundle.liveness)) == 0
+	})
+}
+
+func livenessTurnAge(liveness *phaseTwoLiveness, loop string) time.Duration {
+	age, started := liveness.reading().TurnAge[loop]
+	if !started {
+		return time.Hour
+	}
+	return age
+}
+
+// A control loop whose every turn fails on a dependency is still turning:
+// the probe stays 200, and readiness is what reports the outage. Failing the
+// probe here would restart every replica at once on one Redis outage.
+func TestAControlLoopFailingOnADependencyStaysAlive(t *testing.T) {
+	cfg := validGoAccessRuntimeConfig()
+	cfg.PhaseTwo.Scheduler.TickInterval = config.Duration(time.Millisecond)
+	cfg.PhaseTwo.Control.RefreshInterval = config.Duration(time.Hour)
+	cfg.PhaseTwo.Control.ReconcileInterval = config.Duration(2 * time.Millisecond)
+	queryGroup := execution.QueryGroupIdentity("query-group-1")
+	runner := newFakePhaseTwoQueryGroup()
+	owner := &fakePhaseTwoOwnership{assigned: []execution.QueryGroupIdentity{queryGroup}, runner: runner}
+	clock := newLivenessClock()
+	health := newPhaseTwoApplicationHealth()
+	bundle, err := newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
+		Config: cfg, Health: health,
+		Control: &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{queryGroup}}, Ownership: owner,
+		Observer: observability.NopObserver{}, Now: clock.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- bundle.Run(ctx) }()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	waitSignal(t, runner.leaseStarted, "owned query-group lease")
+	owner.injectFailure("assigned", errors.New("dial tcp: connection refused"), -1)
+	waitForHealth(t, health, "the outage on the page", func(snapshot observability.HealthSnapshot) bool {
+		return hasReason(snapshot.Reasons, phaseTwoControlDependencyReason)
+	})
+	clock.advance(controlLoopStallBound + time.Minute)
+	waitUntil(t, 5*time.Second, "the failing control loop keeps turning", func() bool {
+		return livenessTurnAge(bundle.liveness, livenessLoopControl) < time.Second
+	})
+	if got := stalledLoops(bundle.liveness); len(got) != 0 {
+		t.Fatalf("a dependency outage failed liveness: stalled %v", got)
+	}
+}
+
+// The execution side through the dispatcher that feeds it: a Query Group
+// whose run ignores its context holds the only slot past the deadline it was
+// queued by. The probe names the executions once the bound passes and
+// recovers when the run returns.
+func TestASlotHeldPastItsDeadlineThroughTheDispatcherFailsLiveness(t *testing.T) {
+	cfg := validGoAccessRuntimeConfig()
+	cfg.PhaseTwo.Scheduler.TickInterval = config.Duration(time.Millisecond)
+	cfg.PhaseTwo.Scheduler.ActiveExecutionLimit = 1
+	cfg.PhaseTwo.Control.RefreshInterval = config.Duration(time.Hour)
+	cfg.PhaseTwo.Control.ReconcileInterval = config.Duration(2 * time.Millisecond)
+	queryGroup := execution.QueryGroupIdentity("query-group-1")
+	clock := newLivenessClock()
+	deadline := clock.Now().Add(time.Minute)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	owner := &fakePhaseTwoOwnership{assigned: []execution.QueryGroupIdentity{queryGroup}}
+	owner.runner = &callbackPhaseTwoQueryGroup{
+		run: func(context.Context) (execution.SlotExecutionResult, bool, error) {
+			once.Do(func() { close(entered) })
+			<-release
+			return execution.SlotExecutionResult{}, true, nil
+		},
+		nextDeadline: func() time.Time { return deadline },
+	}
+	bundle, err := newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
+		Config: cfg, Health: newPhaseTwoApplicationHealth(),
+		Control: &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{queryGroup}}, Ownership: owner,
+		Observer: observability.NopObserver{}, Now: clock.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- bundle.Run(ctx) }()
+	released := false
+	defer func() {
+		if !released {
+			close(release)
+		}
+		cancel()
+		<-done
+	}()
+	waitSignal(t, entered, "the run holds the only slot")
+	clock.advance(deadline.Add(executionPastDeadlineGrace).Sub(clock.Now()) + executionsStuckBound - time.Second)
+	waitUntil(t, 5*time.Second, "both loops turn under the moved clock", func() bool {
+		return livenessTurnAge(bundle.liveness, livenessLoopControl) < time.Second &&
+			livenessTurnAge(bundle.liveness, livenessLoopDispatch) < time.Second
+	})
+	if got := stalledLoops(bundle.liveness); len(got) != 0 {
+		t.Fatalf("a second inside the bound: stalled %v", got)
+	}
+	clock.advance(2 * time.Second)
+	waitUntil(t, 5*time.Second, "the held slot is named", func() bool {
+		return sameLoops(stalledLoops(bundle.liveness), livenessExecutions)
+	})
+	close(release)
+	released = true
+	waitUntil(t, 5*time.Second, "the probe recovers once the run returns", func() bool {
 		return len(stalledLoops(bundle.liveness)) == 0
 	})
 }
