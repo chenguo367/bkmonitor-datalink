@@ -3451,6 +3451,11 @@ type StateApplyResult struct {
 	// the two are two consumers of one key: the envelope can be deleted only
 	// when neither of them still depends on it, and one number summed from
 	// both could not say which one had not reached zero.
+	//
+	// A request that fails part-way - a pipeline that could not be added to
+	// or flushed - returns no result at all, so the items the envelope
+	// decided before the failure, including ones already written, are not
+	// counted. The count is a lower bound for such a round, never more.
 	EnvelopeReads int
 }
 

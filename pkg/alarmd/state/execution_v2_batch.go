@@ -521,8 +521,9 @@ func (store *ExecutionStore) applyRuntimeSequential(
 	// What the difference costs is that the load's envelope count cannot see
 	// this path. Whether this path still depends on the envelope is its own
 	// count - the second result, reported on the apply as
-	// envelope_reads_apply - and the envelope can go only when that count and
-	// the load's are both zero.
+	// envelope_reads_apply and counted in state_envelope_apply_items_total -
+	// and the envelope can go only when that count and the load's
+	// old_representation outcome have both stayed at zero.
 	view, source := store.readStoredRecordSourced(execution.StatePreflightRequest{Contract: contractRef},
 		execution.StatePreflightItem{Identity: mutation.Identity, ApplyVersion: mutation.ApplyVersion}, envelopeRaw, framedRaw)
 	fromEnvelope := source == runtimeViewEnvelope
