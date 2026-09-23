@@ -97,6 +97,31 @@ func TestTheShareRefusalTakesTheObjectOffThisLine(t *testing.T) {
 	}
 }
 
+// A refusal at the share takes the object off this line for that round and
+// keeps its Since: refusals come and go, and restarting Since at each one
+// would hide an object growing into its share behind a clock that never
+// runs long.
+func TestARefusalBetweenCompletionsKeepsSince(t *testing.T) {
+	at := &clock{at: time.Date(2026, 9, 23, 8, 0, 0, 0, time.UTC)}
+	tracker := newTracker(t, at)
+	first := at.at
+	tracker.Observe(context.Background(), slotCompleted("qg", shareShare*97/100, shareShare, at.at))
+	at.at = at.at.Add(time.Minute)
+	refused := slotCompleted("qg", 0, shareShare, at.at)
+	refused.Err, refused.Result = errors.New("share exceeded"), observability.ResultTerminal
+	refused.ReasonCode = observability.ReasonCode(contract.ReasonQGBudgetShareExceeded)
+	tracker.Observe(context.Background(), refused)
+	if _, listed := shareRows(tracker)["qg"]; listed {
+		t.Fatal("the refused round is listed here as well as on the refusal's line")
+	}
+	at.at = at.at.Add(time.Minute)
+	tracker.Observe(context.Background(), slotCompleted("qg", shareShare*98/100, shareShare, at.at))
+	row, listed := shareRows(tracker)["qg"]
+	if !listed || !row.Since.Equal(first) {
+		t.Fatalf("listed %v since %v after a refusal between completions, want listed since %v", listed, row.Since, first)
+	}
+}
+
 // Since is when the object reached the threshold, kept across the rounds it
 // stays there and started again after a round below it: how long it has been
 // near the wall is what says whether it is growing into it.
@@ -120,6 +145,36 @@ func TestSinceIsWhenTheObjectReachedTheThreshold(t *testing.T) {
 	tracker.Observe(context.Background(), slotCompleted("qg", shareShare*96/100, shareShare, at.at))
 	if row := shareRows(tracker)["qg"]; !row.Since.Equal(again) {
 		t.Fatalf("since = %v after a round below, want the round it came back %v", row.Since, again)
+	}
+}
+
+// The row says which phase filled the share, because that says who acts: the
+// state phase is the strategy's retention, the output phase is what this build
+// holds per round. Four distinct numbers, so a field carried under another's
+// name cannot pass.
+func TestTheRowSaysWhichPhaseFilledTheShare(t *testing.T) {
+	at := &clock{at: now.Add(-time.Minute)}
+	tracker := NewTracker(nil, "pod-a", at.Now)
+	observed := slotCompleted("qg", shareShare*97/100, shareShare, at.at)
+	observed.SlotBudgetUsage.RetainedInputBytes = 11
+	observed.SlotBudgetUsage.RetainedStateBytes = 22
+	observed.SlotBudgetUsage.RetainedOutputBytes = shareShare*97/100 - 11 - 22 - 44
+	observed.SlotBudgetUsage.RetainedGapBytes = 44
+	tracker.Observe(context.Background(), observed)
+	facts := shareRows(tracker)["qg"].RetainedShare
+	if facts == nil || facts.RetainedInputBytes != 11 || facts.RetainedStateBytes != 22 || facts.RetainedGapBytes != 44 ||
+		facts.RetainedOutputBytes != shareShare*97/100-77 || facts.ThresholdPercent != RetainedShareApproachPercent {
+		t.Fatalf("row facts = %+v, want the four phases and the threshold as the completion carried them", facts)
+	}
+	snapshots := healthySnapshots()
+	snapshots[0].RetainedShare = tracker.RetainedShare()
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, []string{"pod-a", "pod-b"})
+	entry := requestJSON(t, handler, "/api/health")["retained_share"].([]any)[0].(map[string]any)
+	for field, want := range map[string]float64{"retained_input_bytes": 11, "retained_state_bytes": 22, "retained_gap_bytes": 44,
+		"threshold_percent": RetainedShareApproachPercent} {
+		if entry[field] != want {
+			t.Errorf("health entry %s = %v, want %v", field, entry[field], want)
+		}
 	}
 }
 

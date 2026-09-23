@@ -41,6 +41,23 @@ type RetainedShareFacts struct {
 	// threshold without a completed Slot below it since: how long it has
 	// been near the wall, which is what says whether it is growing into it.
 	Since time.Time `json:"since"`
+	// The completed Slot's retained bytes by phase, summing to RetainedBytes.
+	// They say who acts: a share filled by the state phase is the strategy's
+	// retention and series, one filled by the output phase is mostly what
+	// this build holds per round, which the strategy's owner cannot change.
+	RetainedInputBytes  uint64 `json:"retained_input_bytes"`
+	RetainedStateBytes  uint64 `json:"retained_state_bytes"`
+	RetainedOutputBytes uint64 `json:"retained_output_bytes"`
+	RetainedGapBytes    uint64 `json:"retained_gap_bytes"`
+	// ThresholdPercent is the threshold the row was listed at, carried so the
+	// page does not state a number of its own.
+	ThresholdPercent uint64 `json:"threshold_percent"`
+	// refused marks an object whose latest round was refused at its share. It
+	// is on the refusal's line then, not on this one; the reading is kept so
+	// the next completion still knows since when the object has been near the
+	// wall - refusals come and go, and clearing the reading on each one would
+	// restart Since every time and hide an object growing into its share.
+	refused bool
 }
 
 // noteShareUsage keeps the latest completed Slot's reading. Only a Slot that
@@ -55,6 +72,9 @@ func (state *queryGroupState) noteShareUsage(usage *observability.SlotBudgetUsag
 	next := &RetainedShareFacts{
 		RetainedBytes: usage.RetainedBytes, ShareBytes: usage.RetainedShareBytes,
 		PercentOfShare: percent, Slot: slot, At: at, Since: at,
+		RetainedInputBytes: usage.RetainedInputBytes, RetainedStateBytes: usage.RetainedStateBytes,
+		RetainedOutputBytes: usage.RetainedOutputBytes, RetainedGapBytes: usage.RetainedGapBytes,
+		ThresholdPercent: RetainedShareApproachPercent,
 	}
 	if previous := state.shareUsage; previous != nil &&
 		observability.RetainedShareApproaching(previous.RetainedBytes, previous.ShareBytes) &&
@@ -75,7 +95,7 @@ func (tracker *Tracker) RetainedShare() []Anomaly {
 	anomalies := make([]Anomaly, 0)
 	for queryGroup, state := range tracker.groups {
 		usage := state.shareUsage
-		if usage == nil || !observability.RetainedShareApproaching(usage.RetainedBytes, usage.ShareBytes) {
+		if usage == nil || usage.refused || !observability.RetainedShareApproaching(usage.RetainedBytes, usage.ShareBytes) {
 			continue
 		}
 		facts := *usage

@@ -1483,6 +1483,14 @@ type RetainedShareRef struct {
 	ShareBytes     uint64        `json:"share_bytes"`
 	PercentOfShare uint64        `json:"percent_of_share"`
 	Since          time.Time     `json:"since"`
+	// By phase, so a reader of this response can tell a share filled by the
+	// strategy's retention (state) from one filled by what this build holds
+	// per round (output), which call for different people.
+	RetainedInputBytes  uint64 `json:"retained_input_bytes"`
+	RetainedStateBytes  uint64 `json:"retained_state_bytes"`
+	RetainedOutputBytes uint64 `json:"retained_output_bytes"`
+	RetainedGapBytes    uint64 `json:"retained_gap_bytes"`
+	ThresholdPercent    uint64 `json:"threshold_percent"`
 }
 
 // retainedShareList keeps the view's order, which is fullest first.
@@ -1500,6 +1508,9 @@ func retainedShareList(rows []Anomaly) []RetainedShareRef {
 			QueryGroup: row.QueryGroup, Strategies: row.Strategies, Replica: row.Replica,
 			RetainedBytes: facts.RetainedBytes, ShareBytes: facts.ShareBytes,
 			PercentOfShare: facts.PercentOfShare, Since: facts.Since,
+			RetainedInputBytes: facts.RetainedInputBytes, RetainedStateBytes: facts.RetainedStateBytes,
+			RetainedOutputBytes: facts.RetainedOutputBytes, RetainedGapBytes: facts.RetainedGapBytes,
+			ThresholdPercent: facts.ThresholdPercent,
 		})
 	}
 	sort.SliceStable(list, func(left, right int) bool {

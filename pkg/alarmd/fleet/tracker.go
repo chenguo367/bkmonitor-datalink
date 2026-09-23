@@ -831,8 +831,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	case string(observation.ReasonCode) == contract.ReasonQGBudgetShareExceeded:
 		// Past the share: the object is on the refusal's line now, and a
 		// warning that it is near the share would say less than that line
-		// and say it twice.
-		state.shareUsage = nil
+		// and say it twice. The reading stays, marked, so the next completion
+		// keeps the Since this one had.
+		if state.shareUsage != nil {
+			state.shareUsage.refused = true
+		}
 	case observation.Stage == observability.StageSlotCompleted && observation.Err == nil:
 		state.noteShareUsage(observation.SlotBudgetUsage, trace.EvaluationTime, at)
 	}
