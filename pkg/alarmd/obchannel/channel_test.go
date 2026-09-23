@@ -368,3 +368,49 @@ func TestRouteSlotsIncludeBodyCleanupAndMethodRejection(t *testing.T) {
 		t.Fatalf("cleanup leaked a slot: %d", status)
 	}
 }
+
+// A degraded object says, at the top of object.get, how much of it is
+// degraded: the counts come from the fact's own coverage, through the same
+// invoke path the CLI uses. A fact without coverage gets no count, because
+// an absent count is not a zero.
+func TestObjectGetSummarySaysHowMuchOfTheObjectTheFactCovers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want []string
+		deny []string
+	}{
+		{"few of many", `{"query_group":"q","found":true,"facts_total":1,"anomaly":{"kind":"DEGRADED_RUN","reason_code":"COMPLETED_WITH_UNAVAILABLE","cause_reason":"HISTORY_GAPPED","coverage":{"levels":19643,"short":10,"guarded":6}}}`,
+			[]string{"DEGRADED_RUN（HISTORY_GAPPED）", "10/19643", "其中 6 个"}, []string{"事实中的第 1 条"}},
+		{"all of them, several facts", `{"query_group":"q","found":true,"facts_total":3,"anomaly":{"kind":"DEGRADED_RUN","reason_code":"COMPLETED_WITH_UNAVAILABLE","coverage":{"levels":250,"short":250,"guarded":250}}}`,
+			[]string{"DEGRADED_RUN（COMPLETED_WITH_UNAVAILABLE）", "250/250", "3 条事实中的第 1 条"}, nil},
+		{"mostly resumed", `{"query_group":"q","found":true,"facts_total":1,"anomaly":{"kind":"DEGRADED_RUN","reason_code":"COMPLETED_WITH_UNAVAILABLE","coverage":{"levels":22,"short":3,"guarded":0,"resumed":227}}}`,
+			[]string{"3/22", "另有 227 个序列续跑、0 个未能加载"}, nil},
+		{"nothing summarised", `{"query_group":"q","found":true,"facts_total":1,"anomaly":{"kind":"DEGRADED_RUN","reason_code":"STATE_READ_TIMEOUT","coverage":{"levels":0,"constrained":249}}}`,
+			[]string{"本轮未汇总任何 Level 窗口", "0 个序列续跑、249 个未能加载"}, []string{"/0"}},
+		{"windows full", `{"query_group":"q","found":true,"facts_total":1,"anomaly":{"kind":"DEGRADED_RUN","reason_code":"QUERY_TIMEOUT","coverage":{"levels":19643,"short":0,"guarded":0}}}`,
+			[]string{"19643 个 Level 窗口全满，降级不来自历史窗口"}, []string{"0/19643"}},
+		{"no coverage", `{"query_group":"q","found":true,"facts_total":1,"anomaly":{"kind":"STALLED","reason_code":"none"}}`,
+			nil, []string{"窗口", "/0"}},
+		{"no fact", `{"query_group":"q","found":true,"facts_total":0,"facts":[]}`, nil, []string{"窗口"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte(tc.body)) })
+			c := testChannel(t, &testAuth{}, NativeOperations(native)...)
+			status, out := call(t, c, envelope(c, "invoke", "object.get", Params{"query_group": "q"}))
+			if status != 200 {
+				t.Fatalf("status %d: %+v", status, out)
+			}
+			for _, w := range tc.want {
+				if !strings.Contains(out.Summary, w) {
+					t.Errorf("summary %q lacks %q", out.Summary, w)
+				}
+			}
+			for _, d := range tc.deny {
+				if strings.Contains(out.Summary, d) {
+					t.Errorf("summary %q has %q", out.Summary, d)
+				}
+			}
+		})
+	}
+}
