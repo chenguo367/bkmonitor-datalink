@@ -41,7 +41,8 @@ const (
 	// Segments without a last-good copy. The Plans are exact; Draining holds
 	// only the Query Groups the publication keeps held, so Query Groups a
 	// cutover removed and that had not drained yet stop executing now rather
-	// than at their boundary.
+	// than at their boundary: their Plans have no owner until then, and that
+	// stretch shows up as a gap. A reader of this count checks the gaps.
 	ActivationRebuiltDrainingUnknown ActivationRebuildOutcome = "rebuilt_draining_unknown"
 	// ActivationRebuildNotNeeded: the body was back, or the header gone, by
 	// the time the rebuild looked.
@@ -179,6 +180,10 @@ func parsePublicationRef(text string) (SnapshotPublicationRef, error) {
 // the one read, no body has appeared, and every timeline the candidate was
 // checked against is unchanged. The header, the timelines and the revision
 // are not touched: the body is the one the header already describes.
+//
+// Like the cutover script it touches keys with no common hash tag, which a
+// standalone or Sentinel deployment allows and Redis Cluster refuses with
+// CROSSSLOT; the configuration refuses Cluster for the same reason.
 const rebuildActivationBodyScript = `
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
