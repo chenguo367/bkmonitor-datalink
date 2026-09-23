@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -245,3 +246,30 @@ type discardSink struct{ screen string }
 func (sink *discardSink) Screen(execution.PlanIdentity) string      { return sink.screen }
 func (sink *discardSink) Observe(ScopeDrop)                         {}
 func (sink *discardSink) Count(execution.PlanIdentity, string, int) {}
+
+// Through Source.Execute: the query's bulk counts reach the sink when the
+// query ends. A rejection counted here and never handed over would read as
+// "the target turned nothing away".
+func TestTheQuerysBulkCountsReachTheSinkWhenItEnds(t *testing.T) {
+	contractRef, frozen := frozenExecution(t)
+	frozen.DuePlans[0].CompiledPlan = compilePlanForStrategy(t, "1001", hostScopeContract("192.0.2.10|0"))
+	contractRef = bindFrozenDueDigest(t, contractRef, frozen)
+	sink := &recordingSink{screen: "not_member"}
+	source, err := NewSource(staticFrozenPlan{plan: frozen}, &hostStreamingProvider{hosts: []string{"192.0.2.10", "192.0.2.98", "192.0.2.99"}},
+		&recordingQueryPermits{}, Config{MinReadyDelay: time.Second, Admission: scopedChain(), ScopeDrops: sink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.now = func() time.Time { return time.UnixMilli(2_000_000_000_000) }
+	source.wait = func(context.Context, time.Duration) error { return nil }
+	if _, err := source.Execute(context.Background(), execution.QueryExecutionRequest{
+		Contract: contractRef, Operation: execution.OperationNormal, AttemptNo: 1,
+	}, &recordingConsumer{}); err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	// The two hosts outside the target name themselves by address and no
+	// host cache resolved them, so the rejection is not definitive.
+	if sink.counts[ScopeDropIndefinite] != 2 || len(sink.observed) != 0 {
+		t.Fatalf("counts %v observed %d, want both rejections counted as indefinite", sink.counts, len(sink.observed))
+	}
+}

@@ -487,3 +487,21 @@ func TestScreenJudgesPerStrategy(t *testing.T) {
 		t.Fatalf("Screen(empty set) = %q, want not_member", screen)
 	}
 }
+
+// countingDisjointSet is a copy whose sets are disjoint and whose per
+// strategy answers do not know it: the whole-copy gate is what refuses.
+type countingDisjointSet struct{ fakeSet }
+
+func (set *countingDisjointSet) MemberCount(openalerts.StrategyKey) (int, bool) { return 1, true }
+
+// Disjoint sets refuse the screen on their own, whatever a strategy's
+// count says.
+func TestScreenRefusesDisjointSets(t *testing.T) {
+	set := &countingDisjointSet{fakeSet: *openSet(ownSrc, fp(1))}
+	set.disjoint = true
+	closer := New(Options{})
+	closer.Bind(set, nil)
+	if screen := closer.Screen(key); screen != OutcomeSetUnavailable {
+		t.Fatalf("Screen = %q, want set_unavailable on disjoint sets", screen)
+	}
+}
