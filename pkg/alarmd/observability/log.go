@@ -855,6 +855,19 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.Bool("split_dry_run", facts.DryRun),
 		)
 	}
+	if facts := observation.ShardQuery; facts != nil {
+		attributes = append(attributes,
+			slog.String("shard_query_outcome", facts.Outcome),
+			slog.Int("shard_query_shards", facts.Shards),
+			slog.Int("shard_query_built", facts.Built),
+			slog.Int("shard_query_values", facts.Values),
+			slog.Int("shard_query_fallback_values", facts.FallbackValues),
+			slog.Int("shard_query_queries", facts.Queries),
+		)
+		if facts.Detail != "" {
+			attributes = append(attributes, slog.String("shard_query_detail", facts.Detail))
+		}
+	}
 	if facts := observation.SplitRound; facts != nil {
 		// The round's own three, with their denominator: skipped alone
 		// cannot say whether a zero means nothing was left out or nothing

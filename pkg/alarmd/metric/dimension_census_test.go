@@ -126,6 +126,11 @@ func TestEverySplitOutcomeAndRoundDispositionIsPreCreated(t *testing.T) {
 	for family, want := range map[string]int{
 		"bkmonitor_alarmd_split_plan_total":          len(observability.SplitOutcomes()),
 		"bkmonitor_alarmd_split_round_objects_total": len(splitRoundDispositions),
+		"bkmonitor_alarmd_split_rounds_total":        1,
+		// Five, written out: the pre-creation and the collector both read
+		// the cells from one method, so a count taken from that method here
+		// would agree with it whatever it returned.
+		"bkmonitor_alarmd_catalog_shardability_plans_total": 5,
 	} {
 		series := gatherFamily(t, r, family)
 		if len(series) != want {
@@ -197,5 +202,58 @@ func TestAnUnrecognisedOutcomeIsCountedApartFromAMissingNumber(t *testing.T) {
 		observability.SplitOutcomeNoReading)); got != 0 {
 		t.Fatalf("an unrecognised outcome was counted as a missing number (%v): the first is this build's "+
 			"defect and the second is the deployment's state", got)
+	}
+}
+
+// A round that found nothing over its share still counts as a round.
+//
+// The round family adds each round's counts, so such a round adds zero to
+// every cell of it, and a Leader whose dry run ran every round and a Leader
+// whose dry run never ran read the same there. The rounds counter is what
+// tells them apart; a deployment reading all zeros concluded the second when
+// nothing in the family could say which it was.
+func TestARoundWithNothingOverItsShareIsStillCountedAsARound(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	for range 3 {
+		r.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentControlPlane, Stage: observability.StageSplitPlanned,
+			Result: observability.ResultSuccess, SplitRound: &observability.SplitRoundFacts{},
+		})
+	}
+	if got := testutil.ToFloat64(r.phaseTwo.splitRounds); got != 3 {
+		t.Fatalf("split rounds = %v, want 3", got)
+	}
+	if got := testutil.ToFloat64(r.phaseTwo.splitRoundObjects.WithLabelValues("over_share")); got != 0 {
+		t.Fatalf("an empty round moved over_share to %v", got)
+	}
+}
+
+// The catalog's shardability census is a metric, counted once for each
+// publication this replica wrote, and not for a write that failed.
+//
+// It was a log attribute only, and the reading it exists for - how much of
+// the fleet a value list cannot cut, against how much of what needs cutting
+// it cannot - had no series to read on a deployment. A failed write is
+// retried under the same revision and counted when it lands, so counting
+// the failure too would count that catalog twice.
+func TestTheCatalogShardabilityCensusIsCountedPerSuccessfulPublication(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	census := observability.ShardabilityFacts{Plans: 15, Splittable: 7, Disjunctive: 4, NotStructured: 2, NoQueries: 1, Unrecognised: 1}
+	publish := func(result string) {
+		r.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentControlPlane, Stage: observability.StageObjectCatalog,
+			Result:        observability.Result(result),
+			ObjectCatalog: &observability.ObjectCatalogFacts{Operation: "write", Result: result},
+			Shardability:  &census,
+		})
+	}
+	publish("failure")
+	publish("success")
+	for answer, want := range map[string]float64{
+		"splittable": 7, "disjunctive": 4, "not_structured": 2, "no_queries": 1, "unrecognised": 1,
+	} {
+		if got := testutil.ToFloat64(r.phaseTwo.shardabilityPlans.WithLabelValues(answer)); got != want {
+			t.Fatalf("shardability %s = %v, want %v", answer, got, want)
+		}
 	}
 }

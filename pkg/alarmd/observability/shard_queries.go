@@ -116,6 +116,27 @@ type ShardabilityFacts struct {
 	Unrecognised int `json:"unrecognised"`
 }
 
+// ShardabilityCell is one cell of the catalog's shardability census: which
+// answer, and how many Plans gave it.
+type ShardabilityCell struct {
+	Answer string
+	Plans  int
+}
+
+// Cells is the census as its five cells, in a fixed order. The metric is
+// pre-created from the answers of an empty census and written from the
+// answers of a real one, so a cell cannot be added to one and missing from
+// the other.
+func (facts ShardabilityFacts) Cells() []ShardabilityCell {
+	return []ShardabilityCell{
+		{Answer: "splittable", Plans: facts.Splittable},
+		{Answer: "disjunctive", Plans: facts.Disjunctive},
+		{Answer: "not_structured", Plans: facts.NotStructured},
+		{Answer: "no_queries", Plans: facts.NoQueries},
+		{Answer: "unrecognised", Plans: facts.Unrecognised},
+	}
+}
+
 // Count files one Plan's answer in the cell it belongs to.
 //
 // A step of its own so the cell for an answer this build does not know can

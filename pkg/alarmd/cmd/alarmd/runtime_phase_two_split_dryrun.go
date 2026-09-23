@@ -93,6 +93,12 @@ func (runtime *productionPhaseTwoOwnership) dryRunSplits(
 type splitCandidatePlan struct {
 	Census                    execution.PlanCensusIdentity
 	EvaluationIntervalSeconds int64
+	// Queries is what this Plan runs, for asking whether the split the
+	// planner decided on can be expressed at all. Carried only for the
+	// objects a split is being worked out for - at most a handful a round,
+	// read once per publication - because these are the largest fields a
+	// Plan has and no other object needs them here.
+	Queries map[execution.LogicalQueryRef]execution.QueryPlanFacts
 }
 
 // splitCandidate is one object the byte readings put over the share a single
@@ -164,7 +170,7 @@ func (runtime *productionPhaseTwoOwnership) dryRunSplit(
 		runtime.observeSplitPlan(ctx, candidate.QueryGroup, observability.SplitPlanFacts{
 			Outcome: observability.SplitOutcomeNoReading, DryRun: true,
 			PeakBytes: candidate.PeakBytes, ShareBytes: candidate.ShareBytes,
-		}, err)
+		}, nil, err)
 		return
 	}
 	censuses := make([]execution.DimensionCensus, len(plans))
@@ -187,9 +193,19 @@ func (runtime *productionPhaseTwoOwnership) dryRunSplit(
 			EvaluationIntervalSeconds: plan.EvaluationIntervalSeconds,
 			PeakBytes:                 attributedPeakBytes(candidate.PeakBytes, censuses[index], read[index], counted, len(plans)),
 		}
-		_, facts := controlplane.PlanSplit(input)
+		split, facts := controlplane.PlanSplit(input)
 		facts.PlansInGroup = len(plans)
-		runtime.observeSplitPlan(ctx, candidate.QueryGroup, facts, nil)
+		// Whether the strategy's own query can express what was planned.
+		// Asked only of a split that was planned: the other outcomes have no
+		// dimension and no value lists to build from, and asking anyway
+		// would report NOT_PLANNED for every object under its share - a
+		// count of the ordinary case dressed as a refusal.
+		var queries *observability.ShardQueryFacts
+		if facts.Outcome == observability.SplitOutcomePlanned {
+			_, built := controlplane.ShardQueries(plan.Census.Plan, plans[index].Queries, split)
+			queries = &built
+		}
+		runtime.observeSplitPlan(ctx, candidate.QueryGroup, facts, queries, nil)
 	}
 }
 
@@ -221,7 +237,8 @@ func attributedPeakBytes(
 }
 
 func (runtime *productionPhaseTwoOwnership) observeSplitPlan(
-	ctx context.Context, queryGroup execution.QueryGroupIdentity, facts observability.SplitPlanFacts, err error,
+	ctx context.Context, queryGroup execution.QueryGroupIdentity,
+	facts observability.SplitPlanFacts, queries *observability.ShardQueryFacts, err error,
 ) {
 	result, reason := observability.ResultSuccess, observability.ReasonNone
 	if err != nil {
@@ -234,7 +251,7 @@ func (runtime *productionPhaseTwoOwnership) observeSplitPlan(
 		Trace: observability.TraceFields{
 			QueryGroupKey: string(queryGroup), StrategyID: facts.StrategyID, BusinessID: facts.BusinessID,
 		},
-		SplitPlan: &facts,
+		SplitPlan: &facts, ShardQuery: queries,
 	})
 }
 

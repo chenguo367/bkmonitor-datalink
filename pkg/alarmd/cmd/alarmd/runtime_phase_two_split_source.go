@@ -106,6 +106,7 @@ func (source *catalogSplitCensusSource) SplitCandidatePlans(
 			Census: execution.PlanCensusIdentity{
 				Plan: plan.Identity, StateGeneration: plan.StateGeneration},
 			EvaluationIntervalSeconds: plan.ScheduleSpec.EvaluationIntervalSeconds,
+			Queries:                   plan.QueryPlans,
 		})
 	}
 	source.remember(revision, queryGroup, plans)
