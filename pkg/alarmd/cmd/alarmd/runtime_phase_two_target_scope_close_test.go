@@ -94,9 +94,10 @@ func TestTargetScopeCloseThroughTheProductionWiring(t *testing.T) {
 			sink.Observe(access.ScopeDrop{Plan: plan, Filter: "target_plan", Reason: "out_of_target",
 				Fingerprint: fingerprint, StrategyRevision: 4, Round: round})
 		}
-		sink.Count(plan, access.ScopeDropIndefinite, 1)
-		sink.Count(plan, access.ScopeDropFingerprintUnsupported, 2)
-		sink.Count(plan, access.ScopeDropNoFingerprint, 3)
+		sink.Count(plan, round, access.ScopeDropIndefinite, 1)
+		sink.Count(plan, round, access.ScopeDropCacheUnavailable, 1)
+		sink.Count(plan, round, access.ScopeDropFingerprintUnsupported, 2)
+		sink.Count(plan, round, access.ScopeDropNoFingerprint, 3)
 		closer.Step(context.Background())
 	}
 	slot(1700000000)
@@ -113,7 +114,7 @@ func TestTargetScopeCloseThroughTheProductionWiring(t *testing.T) {
 		t.Fatalf("request = %+v", request)
 	}
 	stats := closer.Stats()
-	if stats[scopeclose.OutcomeClosed] != 1 || stats[scopeclose.OutcomeProducerForeign] != 1 || stats[scopeclose.OutcomeCacheUnavailable] != 2 ||
+	if stats[scopeclose.OutcomeClosed] != 1 || stats[scopeclose.OutcomeProducerForeign] != 1 || stats[scopeclose.OutcomeCacheUnavailable] != 2 || stats[scopeclose.OutcomeIndefinite] != 2 ||
 		stats[scopeclose.OutcomeFingerprintUnsupported] != 4 || stats[scopeclose.OutcomeNotMember] != 6 {
 		t.Fatalf("stats = %v", stats)
 	}

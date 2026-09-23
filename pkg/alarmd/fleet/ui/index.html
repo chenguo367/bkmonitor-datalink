@@ -3460,7 +3460,7 @@ function targetScopeCloseWords(c) {
     + ' 个、已确认待关 ' + (c.confirmed || 0) + ' 个；累计已关 ' + n('closed') + '、本应发送 ' + n('would_send')
     + '、首次观测 ' + n('unconfirmed') + '、目标缓存不确定未判 ' + n('cache_unavailable') + '、不在集合 ' + n('not_member')
     + '、集合不可判 ' + n('set_unavailable') + '、他源告警 ' + n('producer_foreign') + '、发送失败 ' + n('send_failed')
-    + '、观测表满 ' + n('memory_full') + '、多输入无法算指纹 ' + n('fingerprint_unsupported') + '、观测过旧暂缓 ' + n('stale_deferred');
+    + '、观测表满 ' + n('memory_full') + '、多输入无法算指纹 ' + n('fingerprint_unsupported') + '、观测过旧暂缓 ' + n('stale_deferred') + '、拒绝本身不确定 ' + n('indefinite');
 }
 
 function openAlertSetWords(dep) {

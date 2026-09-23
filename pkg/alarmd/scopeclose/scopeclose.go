@@ -89,12 +89,17 @@ const (
 	// have come back into scope since, and a rejection is the only thing
 	// that renews an observation. The close waits for a fresh one.
 	OutcomeStaleDeferred = "stale_deferred"
+	// OutcomeIndefinite counts rejections that are themselves not a verdict
+	// on the record's place - a key or object identity that could not be
+	// built - as opposed to a verdict reached without its facts
+	// (cache_unavailable). Never closed.
+	OutcomeIndefinite = "indefinite"
 )
 
 // Outcomes lists every outcome, for the metric that pre-creates them.
 var Outcomes = []string{OutcomeClosed, OutcomeWouldSend, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
 	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull, OutcomeFingerprintUnsupported,
-	OutcomeStaleDeferred}
+	OutcomeStaleDeferred, OutcomeIndefinite}
 
 // The bounds of what the facts carry.
 const (
@@ -166,6 +171,18 @@ type entry struct {
 	lastSeen   time.Time
 }
 
+// bulkKey and bulkRound remember, per strategy and outcome, the last round
+// counted in bulk and how much of it, so a retried round is counted once.
+type bulkKey struct {
+	key     openalerts.StrategyKey
+	outcome string
+}
+
+type bulkRound struct {
+	round int64
+	n     int
+}
+
 type tally struct {
 	counts  map[string]uint64
 	decided []string
@@ -185,6 +202,7 @@ type Closer struct {
 	after   entryKey
 	counts  map[string]uint64
 	tallies map[openalerts.StrategyKey]*tally
+	bulk    map[bulkKey]bulkRound
 }
 
 // New builds a closer with nothing bound; Bind attaches the open set and
@@ -207,7 +225,7 @@ func New(options Options) *Closer {
 		options.Freshness = time.Minute
 	}
 	return &Closer{options: options, entries: map[entryKey]*entry{}, decided: map[entryKey]time.Time{},
-		counts: map[string]uint64{}, tallies: map[openalerts.StrategyKey]*tally{}}
+		counts: map[string]uint64{}, tallies: map[openalerts.StrategyKey]*tally{}, bulk: map[bulkKey]bulkRound{}}
 }
 
 // Bind attaches the open set and the writer.
@@ -242,12 +260,30 @@ func (closer *Closer) Screen(key openalerts.StrategyKey) string {
 	return ""
 }
 
-// Count adds n rejections of a strategy under one outcome, in bulk.
-func (closer *Closer) Count(key openalerts.StrategyKey, outcome string, n int) {
+// Count adds an attempt's rejections of a strategy under one outcome, in
+// bulk. A retried Slot reports its round again; the round is counted once,
+// at the largest total any of its attempts reported, so an attempt that
+// failed halfway and the retry that completed are not summed.
+func (closer *Closer) Count(key openalerts.StrategyKey, round int64, outcome string, n int) {
 	if n <= 0 {
 		return
 	}
-	closer.count(key, outcome, n)
+	closer.mu.Lock()
+	defer closer.mu.Unlock()
+	bk := bulkKey{key: key, outcome: outcome}
+	last, seen := closer.bulk[bk]
+	if seen && last.round == round {
+		if n <= last.n {
+			return
+		}
+		closer.countLocked(key, outcome, n-last.n)
+		closer.bulk[bk] = bulkRound{round: round, n: n}
+		return
+	}
+	if seen || len(closer.bulk) < closer.options.MaxEntries {
+		closer.bulk[bk] = bulkRound{round: round, n: n}
+	}
+	closer.countLocked(key, outcome, n)
 }
 
 // Observe records one rejection of a strategy Screen cleared. It is called

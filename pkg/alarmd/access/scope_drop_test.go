@@ -14,6 +14,8 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 )
 
 type definitiveSet struct {
@@ -34,7 +36,7 @@ type recordingSink struct {
 
 func (sink *recordingSink) Screen(execution.PlanIdentity) string { sink.screens++; return sink.screen }
 func (sink *recordingSink) Observe(drop ScopeDrop)               { sink.observed = append(sink.observed, drop) }
-func (sink *recordingSink) Count(_ execution.PlanIdentity, word string, n int) {
+func (sink *recordingSink) Count(_ execution.PlanIdentity, _ int64, word string, n int) {
 	if sink.counts == nil {
 		sink.counts = map[string]int{}
 	}
@@ -93,7 +95,7 @@ func TestADefinitiveRejectionCarriesTheEvaluatorsFingerprint(t *testing.T) {
 	adapter, plan := scopeDropAdapter(t, targetChain(), hostPlanContext(true), sink, scopeOutput)
 	deliverSeries(t, adapter, hostDims("101"))
 	deliverSeries(t, adapter, hostDims("102"))
-	adapter.flushScopeDrops()
+	flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, adapter.round)
 
 	want, err := contract.MonitorDedupeMD5("42", plan.BusinessID, hostDims("102"),
 		contract.MonitorOutputIdentity{DimensionFields: []string{"bk_host_id", "device"}})
@@ -122,7 +124,7 @@ func TestRejectionsTheCloseCannotUseAreCountedInBulk(t *testing.T) {
 		word    string
 		screens int
 	}{
-		{"indefinite", hostPlanContext(false), scopeOutput, "", ScopeDropIndefinite, 0},
+		{"not resolved in full", hostPlanContext(false), scopeOutput, "", ScopeDropCacheUnavailable, 0},
 		{"multi-input", hostPlanContext(true), func() planOutput { o := scopeOutput; o.multiInput = true; return o }(), "", ScopeDropFingerprintUnsupported, 0},
 		{"no frozen revision", hostPlanContext(true), planOutput{strategyID: "42", identity: scopeOutput.identity}, "", ScopeDropNoFingerprint, 1},
 		{"screened out", hostPlanContext(true), scopeOutput, "not_member", "not_member", 1},
@@ -136,7 +138,7 @@ func TestRejectionsTheCloseCannotUseAreCountedInBulk(t *testing.T) {
 		if len(sink.counts) != 0 {
 			t.Fatalf("%s: counted before the query ended: %v", c.name, sink.counts)
 		}
-		adapter.flushScopeDrops()
+		flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, adapter.round)
 		if len(sink.observed) != 0 || sink.counts[c.word] != 3 || len(sink.counts) != 1 || sink.screens != c.screens {
 			t.Errorf("%s: observed %d counts %v screens %d, want 3 under %q and %d screens", c.name, len(sink.observed), sink.counts, sink.screens, c.word, c.screens)
 		}
@@ -155,7 +157,7 @@ func TestAHostStatusRejectionIsNotReported(t *testing.T) {
 	sink := &recordingSink{}
 	adapter, _ := scopeDropAdapter(t, chain, admission.PlanContext{TargetScope: hostScope("7")}, sink, scopeOutput)
 	deliverSeries(t, adapter, map[string]json.RawMessage{"bk_host_id": json.RawMessage(`"7"`)})
-	adapter.flushScopeDrops()
+	flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, adapter.round)
 	if len(sink.observed) != 0 || len(sink.counts) != 0 || sink.screens != 0 {
 		t.Fatalf("sink = %+v, want the host status rejection unreported", sink)
 	}
@@ -214,7 +216,7 @@ func TestTheZeroMemberPathDoesNoPerRecordWork(t *testing.T) {
 	if sink.screens != 1 || len(sink.observed) != 0 {
 		t.Fatalf("screens %d observed %d, want one screen and no observation", sink.screens, len(sink.observed))
 	}
-	adapter.flushScopeDrops()
+	flushScopeDrops(adapter.scopeSink, []*seriesAdapter{adapter}, adapter.round)
 	if sink.counts["not_member"] != 1002 {
 		t.Fatalf("counts = %v, want all 1002 rejections in one bulk count", sink.counts)
 	}
@@ -243,9 +245,9 @@ func BenchmarkReportScopeDrop(b *testing.B) {
 
 type discardSink struct{ screen string }
 
-func (sink *discardSink) Screen(execution.PlanIdentity) string      { return sink.screen }
-func (sink *discardSink) Observe(ScopeDrop)                         {}
-func (sink *discardSink) Count(execution.PlanIdentity, string, int) {}
+func (sink *discardSink) Screen(execution.PlanIdentity) string             { return sink.screen }
+func (sink *discardSink) Observe(ScopeDrop)                                {}
+func (sink *discardSink) Count(execution.PlanIdentity, int64, string, int) {}
 
 // Through Source.Execute: the query's bulk counts reach the sink when the
 // query ends. A rejection counted here and never handed over would read as
@@ -269,7 +271,71 @@ func TestTheQuerysBulkCountsReachTheSinkWhenItEnds(t *testing.T) {
 	}
 	// The two hosts outside the target name themselves by address and no
 	// host cache resolved them, so the rejection is not definitive.
-	if sink.counts[ScopeDropIndefinite] != 2 || len(sink.observed) != 0 {
-		t.Fatalf("counts %v observed %d, want both rejections counted as indefinite", sink.counts, len(sink.observed))
+	if sink.counts[ScopeDropCacheUnavailable] != 2 || len(sink.observed) != 0 {
+		t.Fatalf("counts %v observed %d, want both rejections counted as cache_unavailable", sink.counts, len(sink.observed))
+	}
+}
+
+// closerSink hands the access path's counts to a real close, as the
+// production sink does, with the words taken as they are.
+type closerSink struct {
+	closer *scopeclose.Closer
+	calls  int
+}
+
+func (sink *closerSink) Screen(execution.PlanIdentity) string { return scopeclose.OutcomeNotMember }
+func (sink *closerSink) Observe(ScopeDrop)                    {}
+func (sink *closerSink) Count(plan execution.PlanIdentity, round int64, word string, n int) {
+	sink.calls++
+	sink.closer.Count(openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID}, round, word, n)
+}
+
+// A retried Slot runs Execute again for the same round. Each attempt hands
+// over its counts once, after all its queries ended, and the close counts
+// the round once: the two rejected hosts are two, not four.
+func TestARetriedQueryCountsItsRejectionsOnce(t *testing.T) {
+	contractRef, frozen := frozenExecution(t)
+	frozen.DuePlans[0].CompiledPlan = compilePlanForStrategy(t, "1001", hostScopeContract("192.0.2.10|0"))
+	contractRef = bindFrozenDueDigest(t, contractRef, frozen)
+	sink := &closerSink{closer: scopeclose.New(scopeclose.Options{})}
+	source, err := NewSource(staticFrozenPlan{plan: frozen}, &hostStreamingProvider{hosts: []string{"192.0.2.10", "192.0.2.98", "192.0.2.99"}},
+		&recordingQueryPermits{}, Config{MinReadyDelay: time.Second, Admission: scopedChain(), ScopeDrops: sink})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.now = func() time.Time { return time.UnixMilli(2_000_000_000_000) }
+	source.wait = func(context.Context, time.Duration) error { return nil }
+	for attempt := uint32(1); attempt <= 2; attempt++ {
+		if _, err := source.Execute(context.Background(), execution.QueryExecutionRequest{
+			Contract: contractRef, Operation: execution.OperationNormal, AttemptNo: attempt,
+		}, &recordingConsumer{}); err != nil {
+			t.Fatalf("attempt %d: %v", attempt, err)
+		}
+	}
+	if sink.calls != 2 {
+		t.Fatalf("Count called %d times over two attempts, want once per attempt", sink.calls)
+	}
+	if got := sink.closer.Stats()[ScopeDropCacheUnavailable]; got != 2 {
+		t.Fatalf("cache_unavailable = %d after a retried round, want 2", got)
+	}
+}
+
+// An attempt with several queries feeding one Plan hands over one sum per
+// Plan and word: the close keeps the largest total per round, so two
+// per-query reports of one round would count only the larger of them.
+func TestAnAttemptHandsOverOneSumPerPlanAndWord(t *testing.T) {
+	plan := execution.PlanIdentity{TenantID: "t", BusinessID: "2", StrategyID: "42"}
+	first, second := &seriesAdapter{}, &seriesAdapter{}
+	first.tallyScopeDrop(plan, ScopeDropCacheUnavailable)
+	first.tallyScopeDrop(plan, ScopeDropCacheUnavailable)
+	second.tallyScopeDrop(plan, ScopeDropCacheUnavailable)
+	sink := &recordingSink{}
+	flushScopeDrops(sink, []*seriesAdapter{first, nil, second}, 1700000000)
+	if sink.counts[ScopeDropCacheUnavailable] != 3 || len(sink.counts) != 1 {
+		t.Fatalf("counts = %v, want one sum of 3", sink.counts)
+	}
+	flushScopeDrops(sink, []*seriesAdapter{first, second}, 1700000000)
+	if sink.counts[ScopeDropCacheUnavailable] != 3 {
+		t.Fatalf("a second flush handed the same tallies over again: %v", sink.counts)
 	}
 }
