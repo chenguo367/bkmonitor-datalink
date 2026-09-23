@@ -116,11 +116,15 @@ type RedisCatalogRepository struct {
 	prefix          string
 	ttl             time.Duration
 	activationCache parsedActivationCache
-	objectCatalog   objectCatalogState
-	catalogIndex    catalogIndex
-	contentMemo     publishedContentMemo
-	objectCache     *objectReadCache
-	objectFlights   objectReadFlights
+	// lastGood is the activation last served under a known header, kept for
+	// RebuildActivationBody; see lastGoodActivation.
+	lastGood      lastGoodActivation
+	rebuilds      activationRebuildCounts
+	objectCatalog objectCatalogState
+	catalogIndex  catalogIndex
+	contentMemo   publishedContentMemo
+	objectCache   *objectReadCache
+	objectFlights objectReadFlights
 	// localView is what this Worker holds by content for the Query Groups it
 	// owns, sized from the bytes it read. See local_view.go.
 	localView localView

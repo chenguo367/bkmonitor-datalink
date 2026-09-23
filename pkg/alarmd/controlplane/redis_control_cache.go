@@ -694,17 +694,25 @@ func (repository *RedisCatalogRepository) loadParsedActivationAt(ctx context.Con
 		// it is answered before any cached copy is consulted, so a cache cannot
 		// outlive the object it caches.
 		if version.activationLen == 0 {
+			// The header is here and the body is not. Readers see the
+			// activation as unavailable; the Control Leader rebuilds the body
+			// (RebuildActivationBody) from the copy remembered below, kept
+			// apart from the caches this drops.
 			repository.clearActivationCaches()
-			return nil, ErrActivationUnavailable
+			return nil, ErrActivationBodyMissing
 		}
 		if entry, ok := repository.controlCache.lookupActivation(version.header, version.activationLen); ok {
 			counters.hits.Add(1)
+			repository.lastGood.remember(version.header, entry)
 			return entry, nil
 		}
 	}
 	payload, err := repository.client.Get(ctx, repository.activationKey()).Result()
 	if errors.Is(err, redis.Nil) {
 		repository.clearActivationCaches()
+		if version.known {
+			return nil, ErrActivationBodyMissing
+		}
 		return nil, ErrActivationUnavailable
 	}
 	if err != nil {
@@ -722,6 +730,7 @@ func (repository *RedisCatalogRepository) loadParsedActivationAt(ctx context.Con
 			counters.misses.Add(1)
 		}
 		repository.controlCache.storeActivation(version.header, entry, int64(len(payload)))
+		repository.lastGood.remember(version.header, entry)
 	} else {
 		counters.misses.Add(1)
 	}
