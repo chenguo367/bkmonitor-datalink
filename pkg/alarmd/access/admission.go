@@ -29,19 +29,14 @@ type SeriesAdmission interface {
 // it must stay allocation-free.
 type AdmissionObserver func(filter, result, reason string)
 
-// ScopeDrop is one series a Plan's monitoring target turned away, as the
-// target-scope close needs it: which Plan, whether the rejection was the
-// target's own verdict on current facts (admission.DefinitelyOutside), and,
-// only then, the fingerprint the evaluator would have given the record.
-//
-// Fingerprint is empty when the rejection was not definitive, and when the
-// Plan does not produce fingerprinted alerts at all (no frozen revision or
-// no output identity - the evaluator computes none there either), or the
-// record's dimensions cannot be fingerprinted.
+// ScopeDrop is one definitive target rejection the close has asked to see
+// one by one: which Plan, the fingerprint the evaluator would have given the
+// record, and the Slot. Only a Plan whose strategy has open alerts to judge
+// against reaches this; every other rejection is counted in bulk (see
+// ScopeDropSink).
 type ScopeDrop struct {
 	Plan             execution.PlanIdentity
 	Filter, Reason   string
-	Definitive       bool
 	Fingerprint      string
 	StrategyRevision int64
 	// Round is the Slot's evaluation time: two drops of one fingerprint are
@@ -49,10 +44,43 @@ type ScopeDrop struct {
 	Round int64
 }
 
-// ScopeDropObserver receives the target filters' rejections. It is called
-// on the query's own goroutine, once per rejected series per Plan, and must
-// not block.
-type ScopeDropObserver func(ScopeDrop)
+// The words the access path counts rejections under by itself, before the
+// sink is asked anything. The sink maps them to its own outcomes.
+const (
+	// ScopeDropIndefinite is a rejection the target could not stand behind
+	// (admission.DefinitelyOutside said no).
+	ScopeDropIndefinite = "indefinite"
+	// ScopeDropFingerprintUnsupported is a definitive rejection of a Plan
+	// fed by more than one input: the record the evaluator fingerprints is
+	// built from several series, so no one series here has its fingerprint.
+	ScopeDropFingerprintUnsupported = "fingerprint_unsupported"
+	// ScopeDropNoFingerprint is a definitive rejection of a Plan that
+	// produces no fingerprinted alert (no frozen revision or no output
+	// identity), or of a record whose dimensions cannot be fingerprinted.
+	ScopeDropNoFingerprint = "no_fingerprint"
+)
+
+// ScopeDropSink receives the target filters' rejections for the
+// target-scope close.
+//
+// Its cost shape is the point. A wide table filtered by a target turns most
+// of its series away every round, and almost always for a strategy with no
+// open alert at all; an MD5 and two shared locks per such series is CPU and
+// garbage spent to learn nothing. So the adapter asks Screen once per Plan
+// per physical query, and only a Plan Screen clears is fingerprinted series
+// by series; every other rejection is tallied in the adapter's own memory
+// and handed over with Count once, when the query ends.
+type ScopeDropSink interface {
+	// Screen answers, once per Plan per physical query, "" to have the
+	// Plan's definitive rejections fingerprinted and observed one by one,
+	// or the word to count all of them under without that.
+	Screen(plan execution.PlanIdentity) string
+	// Observe receives one definitive rejection of a Plan Screen cleared.
+	Observe(ScopeDrop)
+	// Count adds n rejections of the Plan under a word: one of the
+	// ScopeDrop words above, or one Screen returned.
+	Count(plan execution.PlanIdentity, word string, n int)
+}
 
 // planOutput is what the evaluator fingerprints a Plan's records under: the
 // frozen strategy reference and the output identity. Held beside the scopes
@@ -62,11 +90,25 @@ type planOutput struct {
 	strategyID string
 	revision   int64
 	identity   *contract.MonitorOutputIdentity
+	// multiInput is a Plan fed by more than one requirement.
+	multiInput bool
 }
 
 type planOutputs map[execution.PlanIdentity]planOutput
 
-func buildPlanOutputs(duePlans []execution.DuePlan) planOutputs {
+func buildPlanOutputs(duePlans []execution.DuePlan, queries []PlannedQuery) planOutputs {
+	inputs := make(map[execution.PlanIdentity]map[execution.RequirementID]struct{}, len(duePlans))
+	for _, query := range queries {
+		for _, requirement := range query.Requirements {
+			for _, consumer := range requirement.Consumers {
+				plan := consumer.Consumer.Plan
+				if inputs[plan] == nil {
+					inputs[plan] = map[execution.RequirementID]struct{}{}
+				}
+				inputs[plan][requirement.RequirementID] = struct{}{}
+			}
+		}
+	}
 	outputs := make(planOutputs, len(duePlans))
 	for _, due := range duePlans {
 		if due.CompiledPlan == nil {
@@ -74,7 +116,7 @@ func buildPlanOutputs(duePlans []execution.DuePlan) planOutputs {
 		}
 		ref := due.CompiledPlan.StrategyRef()
 		outputs[due.Identity] = planOutput{strategyID: ref.StrategyID, revision: int64(ref.SnapshotRevision),
-			identity: due.CompiledPlan.OutputIdentity()}
+			identity: due.CompiledPlan.OutputIdentity(), multiInput: len(inputs[due.Identity]) > 1}
 	}
 	return outputs
 }
@@ -94,26 +136,71 @@ func (output planOutput) fingerprint(businessID string, dimensions map[string]js
 	return fingerprint
 }
 
+// scopeTallyKey is one bulk count the adapter keeps until its query ends.
+type scopeTallyKey struct {
+	plan execution.PlanIdentity
+	word string
+}
+
 // reportScopeDrop hands a target filter's rejection to the target-scope
-// close. The fingerprint is computed only for a definitive rejection: it is
-// the one the close can act on, and the only one worth an MD5 per series.
-// Rejections by any other filter - the host status filter above all - are
-// not reported: the record is still inside its target.
+// close. Rejections by any other filter - the host status filter above all
+// - are not reported: the record is still inside its target. Everything but
+// a definitive rejection of a Plan the sink cleared is tallied here, with no
+// lock and no hash; see ScopeDropSink.
 func (adapter *seriesAdapter) reportScopeDrop(identity execution.PlanIdentity, plan admission.PlanContext, facts *admission.Facts, filter, reason string) {
-	if adapter.scopeDrop == nil {
+	if adapter.scopeSink == nil {
 		return
 	}
 	if filter != (admission.TargetScopeFilter{}).Name() && filter != (admission.TargetPlanFilter{}).Name() {
 		return
 	}
-	drop := ScopeDrop{Plan: identity, Filter: filter, Reason: reason, Round: adapter.round,
-		Definitive: admission.DefinitelyOutside(plan, facts, filter, reason)}
-	if drop.Definitive {
-		output := adapter.outputs[identity]
-		drop.StrategyRevision = output.revision
-		drop.Fingerprint = output.fingerprint(identity.BusinessID, facts.Dimensions)
+	if !admission.DefinitelyOutside(plan, facts, filter, reason) {
+		adapter.tallyScopeDrop(identity, ScopeDropIndefinite)
+		return
 	}
-	adapter.scopeDrop(drop)
+	output := adapter.outputs[identity]
+	if output.multiInput {
+		adapter.tallyScopeDrop(identity, ScopeDropFingerprintUnsupported)
+		return
+	}
+	screen, screened := adapter.scopeScreens[identity]
+	if !screened {
+		if adapter.scopeScreens == nil {
+			adapter.scopeScreens = make(map[execution.PlanIdentity]string, 1)
+		}
+		screen = adapter.scopeSink.Screen(identity)
+		adapter.scopeScreens[identity] = screen
+	}
+	if screen != "" {
+		adapter.tallyScopeDrop(identity, screen)
+		return
+	}
+	fingerprint := output.fingerprint(identity.BusinessID, facts.Dimensions)
+	if fingerprint == "" {
+		adapter.tallyScopeDrop(identity, ScopeDropNoFingerprint)
+		return
+	}
+	adapter.scopeSink.Observe(ScopeDrop{Plan: identity, Filter: filter, Reason: reason, Fingerprint: fingerprint,
+		StrategyRevision: output.revision, Round: adapter.round})
+}
+
+func (adapter *seriesAdapter) tallyScopeDrop(plan execution.PlanIdentity, word string) {
+	if adapter.scopeTallies == nil {
+		adapter.scopeTallies = make(map[scopeTallyKey]int, 1)
+	}
+	adapter.scopeTallies[scopeTallyKey{plan: plan, word: word}]++
+}
+
+// flushScopeDrops hands the query's bulk counts to the sink, once, whatever
+// way the query ended.
+func (adapter *seriesAdapter) flushScopeDrops() {
+	if adapter.scopeSink == nil {
+		return
+	}
+	for key, n := range adapter.scopeTallies {
+		adapter.scopeSink.Count(key.plan, key.word, n)
+	}
+	adapter.scopeTallies = nil
 }
 
 // planScopes indexes the frozen monitoring targets of the plans in one

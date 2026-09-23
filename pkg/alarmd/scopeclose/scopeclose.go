@@ -24,7 +24,14 @@
 //   - the fingerprint is in the set (not_member otherwise) and the alert is
 //     this deployment's (producer_foreign otherwise);
 //   - two different Slots turned the same fingerprint away. One Slot is a
-//     first observation, unconfirmed; the second makes it a close.
+//     first observation, unconfirmed; the second makes it a close;
+//   - the last of them is fresh when the close is sent (Freshness): a target
+//     that came back into scope stops being rejected, and nothing else
+//     would tell this memory so.
+//
+// Cost is shaped around the common case, a strategy with no open alert:
+// the access path asks Screen once per strategy per query and counts such
+// rejections in bulk, with no fingerprint and no lock per record.
 //
 // Closes are sent at most Batch per step, starting after the last one the
 // previous step decided, so a large backlog is walked rather than retried
@@ -69,14 +76,25 @@ const (
 	// OutcomeSendFailed counts alerts whose close the producer refused.
 	OutcomeSendFailed = "send_failed"
 	// OutcomeMemoryFull counts first observations not recorded because the
-	// observation table was at its bound; the close for them is delayed to
-	// a later Slot, never made.
+	// observation table was at its bound; the close for them may be delayed
+	// beyond the observation TTL, and is never made on less than two fresh
+	// observations.
 	OutcomeMemoryFull = "memory_full"
+	// OutcomeFingerprintUnsupported counts definitive rejections of a Plan
+	// fed by more than one input, whose alert fingerprint no single series
+	// carries; never closed.
+	OutcomeFingerprintUnsupported = "fingerprint_unsupported"
+	// OutcomeStaleDeferred counts closes held back at the step because the
+	// last observation is older than the freshness bound: the target may
+	// have come back into scope since, and a rejection is the only thing
+	// that renews an observation. The close waits for a fresh one.
+	OutcomeStaleDeferred = "stale_deferred"
 )
 
 // Outcomes lists every outcome, for the metric that pre-creates them.
 var Outcomes = []string{OutcomeClosed, OutcomeWouldSend, OutcomeUnconfirmed, OutcomeCacheUnavailable, OutcomeNotMember,
-	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull}
+	OutcomeSetUnavailable, OutcomeProducerForeign, OutcomeSendFailed, OutcomeMemoryFull, OutcomeFingerprintUnsupported,
+	OutcomeStaleDeferred}
 
 // The bounds of what the facts carry.
 const (
@@ -87,7 +105,8 @@ const (
 	maxTalliedStrategies = 256
 )
 
-// Drop is one definitive or indefinite target rejection of one series.
+// Drop is one definitive target rejection of one series of a strategy that
+// Screen cleared.
 type Drop struct {
 	TenantID, BusinessID, StrategyID string
 	// Fingerprint is the evaluator's dedupe identity of the record; empty
@@ -95,14 +114,16 @@ type Drop struct {
 	Fingerprint      string
 	StrategyRevision int64
 	// Round is the Slot's evaluation time.
-	Round      int64
-	Definitive bool
+	Round int64
 }
 
 // OpenSet is what the close asks the open alert copy.
 type OpenSet interface {
-	// Usable is whether the copy as a whole can be judged against now.
-	Usable() bool
+	// Disjoint is the one whole-copy state that makes every set's answer
+	// meaningless; everything else is judged per strategy.
+	Disjoint() bool
+	// MemberCount is asked once per strategy per query before any record.
+	MemberCount(key openalerts.StrategyKey) (count int, judged bool)
 	Holds(key openalerts.StrategyKey, fingerprint string) (held, judged bool)
 	ActiveAlerts(key openalerts.StrategyKey) []openalerts.Alert
 	OwnEventSourceID() string
@@ -126,6 +147,10 @@ type Options struct {
 	// before it is forgotten, and how long a decided fingerprint is not
 	// decided again.
 	ObservationTTL time.Duration
+	// Freshness is how recent the last observation must be when a close is
+	// sent: two of the close's steps, so a Slot's rejection is acted on by
+	// the step after it, and a backlog is never sent on an old one.
+	Freshness time.Duration
 }
 
 type entryKey struct {
@@ -178,6 +203,9 @@ func New(options Options) *Closer {
 	if options.ObservationTTL <= 0 {
 		options.ObservationTTL = 30 * time.Minute
 	}
+	if options.Freshness <= 0 {
+		options.Freshness = time.Minute
+	}
 	return &Closer{options: options, entries: map[entryKey]*entry{}, decided: map[entryKey]time.Time{},
 		counts: map[string]uint64{}, tallies: map[openalerts.StrategyKey]*tally{}}
 }
@@ -192,14 +220,41 @@ func (closer *Closer) Bind(set OpenSet, writer Writer) {
 // Armed says whether closes are sent.
 func (closer *Closer) Armed() bool { return closer.options.Send }
 
-// Observe records one rejection. It is called on the query's goroutine and
-// does no I/O: one membership lookup in memory, and a map update.
-func (closer *Closer) Observe(drop Drop) {
-	key := openalerts.StrategyKey{TenantID: drop.TenantID, StrategyID: drop.StrategyID}
-	if !drop.Definitive {
-		closer.count(key, OutcomeCacheUnavailable, 1)
+// Screen answers once per strategy per query whether its rejections are
+// worth a fingerprint each: "" when the strategy has open alerts to judge
+// against, and otherwise the outcome all of them are counted under in bulk
+// - set_unavailable when the copy cannot say, not_member when the set is
+// empty, which on a filtered wide table is nearly every strategy.
+func (closer *Closer) Screen(key openalerts.StrategyKey) string {
+	closer.mu.Lock()
+	set := closer.set
+	closer.mu.Unlock()
+	if set == nil || set.Disjoint() || set.OwnEventSourceID() == "" {
+		return OutcomeSetUnavailable
+	}
+	count, judged := set.MemberCount(key)
+	switch {
+	case !judged:
+		return OutcomeSetUnavailable
+	case count == 0:
+		return OutcomeNotMember
+	}
+	return ""
+}
+
+// Count adds n rejections of a strategy under one outcome, in bulk.
+func (closer *Closer) Count(key openalerts.StrategyKey, outcome string, n int) {
+	if n <= 0 {
 		return
 	}
+	closer.count(key, outcome, n)
+}
+
+// Observe records one rejection of a strategy Screen cleared. It is called
+// on the query's goroutine and does no I/O: one membership lookup in
+// memory, and a map update.
+func (closer *Closer) Observe(drop Drop) {
+	key := openalerts.StrategyKey{TenantID: drop.TenantID, StrategyID: drop.StrategyID}
 	if drop.Fingerprint == "" {
 		closer.count(key, OutcomeNotMember, 1)
 		return
@@ -277,7 +332,7 @@ func (closer *Closer) Step(ctx context.Context) {
 	}
 	sort.Slice(confirmed, func(i, j int) bool { return lessEntry(confirmed[i], confirmed[j]) })
 	own := ""
-	if set != nil && set.Usable() {
+	if set != nil && !set.Disjoint() {
 		own = set.OwnEventSourceID()
 	}
 	if own == "" {
@@ -293,6 +348,10 @@ func (closer *Closer) Step(ctx context.Context) {
 	for n := 0; n < len(confirmed) && len(batch) < closer.options.Batch; n++ {
 		ek := confirmed[(start+n)%len(confirmed)]
 		after = ek
+		if !closer.fresh(ek, now) {
+			closer.count(ek.key, OutcomeStaleDeferred, 1)
+			continue
+		}
 		byFingerprint, read := alerts[ek.key]
 		if !read {
 			byFingerprint = map[string]openalerts.Alert{}
@@ -345,6 +404,14 @@ func (closer *Closer) Step(ctx context.Context) {
 		return
 	}
 	closer.decide(decided, OutcomeClosed, now)
+}
+
+// fresh is whether the entry's last observation is recent enough to act on.
+func (closer *Closer) fresh(ek entryKey, now time.Time) bool {
+	closer.mu.Lock()
+	defer closer.mu.Unlock()
+	e := closer.entries[ek]
+	return e != nil && now.Sub(e.lastSeen) <= closer.options.Freshness
 }
 
 func (closer *Closer) request(ek entryKey, alert openalerts.Alert, now time.Time) (linkdoutput.CloseRequest, bool) {
@@ -546,19 +613,17 @@ func prefix(value string) string {
 	return value[:samplePrefix]
 }
 
-// CacheSet is the open alert copy as the close reads it. Usable requires
-// the index protocol with calibration, an available copy and sets that are
-// not disjoint from this process's own sends.
+// CacheSet is the open alert copy as the close reads it. The whole copy is
+// refused only when disjoint; calibration, freshness and availability are
+// judged per strategy by MemberCount and Holds.
 func CacheSet(cache *openalerts.Cache) OpenSet { return cacheSet{cache: cache} }
 
 type cacheSet struct{ cache *openalerts.Cache }
 
-func (set cacheSet) Usable() bool {
-	if set.cache == nil {
-		return false
-	}
-	stats := set.cache.Stats()
-	return stats.IndexProtocol && stats.CalibrationConfigured && stats.Available && !stats.Disjoint
+func (set cacheSet) Disjoint() bool { return set.cache.Disjoint() }
+
+func (set cacheSet) MemberCount(key openalerts.StrategyKey) (int, bool) {
+	return set.cache.MemberCount(key)
 }
 
 func (set cacheSet) Holds(key openalerts.StrategyKey, fingerprint string) (bool, bool) {

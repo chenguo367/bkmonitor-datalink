@@ -16,6 +16,12 @@ func TestHoldsJudgesOnlyACalibratedSetThatIsNotDisjoint(t *testing.T) {
 	if member, judged := f.cache.Holds(keyA, "theirs-1"); !member || !judged {
 		t.Fatalf("Holds(member) = %v, %v; want a judged member", member, judged)
 	}
+	if count, judged := f.cache.MemberCount(keyA); count != 2 || !judged {
+		t.Fatalf("MemberCount = %d, %v; want 2 judged", count, judged)
+	}
+	if f.cache.Disjoint() {
+		t.Fatal("a set carrying members was read as disjoint")
+	}
 	if member, judged := f.cache.Holds(keyA, "elsewhere"); member || !judged {
 		t.Fatalf("Holds(non-member) = %v, %v; want a judged non-member", member, judged)
 	}
@@ -36,6 +42,9 @@ func TestHoldsJudgesOnlyACalibratedSetThatIsNotDisjoint(t *testing.T) {
 	if _, judged := f.cache.Holds(keyA, "theirs-1"); judged {
 		t.Fatal("a set whose calibration aged out was judged")
 	}
+	if _, judged := f.cache.MemberCount(keyA); judged {
+		t.Fatal("a set whose calibration aged out was counted")
+	}
 
 	// Disjoint: the sets carry none of this process's alerts.
 	g := newDisjointFixture(t, PolicySelfMaintain, "theirs-1")
@@ -48,11 +57,14 @@ func TestHoldsJudgesOnlyACalibratedSetThatIsNotDisjoint(t *testing.T) {
 	if _, judged := g.cache.Holds(keyA, "theirs-1"); judged {
 		t.Fatal("a disjoint set was judged")
 	}
+	if _, judged := g.cache.MemberCount(keyA); judged || !g.cache.Disjoint() {
+		t.Fatal("a disjoint set was counted")
+	}
 	if g.cache.OwnEventSourceID() != "" {
 		t.Fatal("a calibration that named no source produced one")
 	}
 	var nilCache *Cache
-	if _, judged := nilCache.Holds(keyA, "x"); judged || nilCache.OwnEventSourceID() != "" {
+	if _, judged := nilCache.Holds(keyA, "x"); judged || nilCache.OwnEventSourceID() != "" || nilCache.Disjoint() {
 		t.Fatal("a nil copy answered")
 	}
 }

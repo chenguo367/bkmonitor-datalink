@@ -111,9 +111,9 @@ type Config struct {
 	Admission SeriesAdmission
 	// ObserveAdmission counts decisions. Optional.
 	ObserveAdmission AdmissionObserver
-	// ObserveScopeDrop receives every series a target filter turned away,
-	// with the fingerprint when the rejection was definitive. Optional.
-	ObserveScopeDrop ScopeDropObserver
+	// ScopeDrops receives the series the target filters turned away, for
+	// the target-scope close; see ScopeDropSink. Optional.
+	ScopeDrops ScopeDropSink
 	// ObserveSeriesPulled counts what this process actually read: one call per
 	// series handed into the pipeline, carrying the datapoints it held. It is
 	// the load figure the per-Slot ceilings have to be read against -- a limit
@@ -245,8 +245,8 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	// one of them would otherwise repeat the same lookup.
 	scopes := buildPlanScopes(prepared.Header.DuePlans, consumer.ResolvedTargets())
 	var outputs planOutputs
-	if source.config.ObserveScopeDrop != nil {
-		outputs = buildPlanOutputs(prepared.Header.DuePlans)
+	if source.config.ScopeDrops != nil {
+		outputs = buildPlanOutputs(prepared.Header.DuePlans, prepared.Queries)
 	}
 	// Only one permit acquisition per Source is pending at a time. Queries
 	// already admitted run independently; all attempts join before returning.
@@ -318,8 +318,9 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			adapter := &seriesAdapter{consumer: consumer, query: query, attemptNo: attempt.AttemptNo,
 				admission: source.config.Admission, observe: source.config.ObserveAdmission,
 				pulled: source.config.ObserveSeriesPulled, scopes: scopes,
-				scopeDrop: source.config.ObserveScopeDrop, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime)}
+				scopeSink: source.config.ScopeDrops, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime)}
 			completion, err := source.executeWithPermit(queryCtx, attempt, adapter, permit)
+			adapter.flushScopeDrops()
 			if err != nil {
 				err = fmt.Errorf("alarmd access: execute physical query: %w", err)
 			} else if !trustedProviderCompletion(query.Spec.Digest, completion) {
@@ -819,11 +820,15 @@ type seriesAdapter struct {
 	// pulled counts the series this query actually handed on. Optional.
 	pulled func(records uint64)
 	scopes planScopes
-	// scopeDrop, outputs and round serve the target-scope close; see
-	// ScopeDrop. All three are empty when nothing listens.
-	scopeDrop ScopeDropObserver
-	outputs   planOutputs
-	round     int64
+	// scopeSink, outputs and round serve the target-scope close; see
+	// ScopeDropSink. scopeScreens and scopeTallies are this query's own
+	// memory of it: one Screen per Plan, and the bulk counts handed over
+	// when the query ends. Empty when nothing listens.
+	scopeSink    ScopeDropSink
+	outputs      planOutputs
+	round        int64
+	scopeScreens map[execution.PlanIdentity]string
+	scopeTallies map[scopeTallyKey]int
 
 	// forwarded accumulates the delivery proofs of the batches that actually
 	// reached the consumer, and withheld counts the ones the monitoring target

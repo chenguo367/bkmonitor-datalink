@@ -30,7 +30,9 @@ func newTargetScopeCloseCollector() *targetScopeCloseCollector {
 				"fingerprint is not an open alert; set_unavailable decisions refused because the open set could "+
 				"not be judged (not calibrated, disjoint, unavailable); producer_foreign open alerts of another "+
 				"source; send_failed closes the producer refused; memory_full first observations past the "+
-				"table's bound. Every cell exists from the start so a zero is a reading and not an absence.",
+				"table's bound; fingerprint_unsupported definitive rejections of Plans fed by several inputs, "+
+				"whose alert fingerprint no single series carries; stale_deferred closes held back because the "+
+				"last observation was older than the freshness bound. Every cell exists from the start so a zero is a reading and not an absence.",
 			[]string{"outcome"}, nil),
 	}
 }

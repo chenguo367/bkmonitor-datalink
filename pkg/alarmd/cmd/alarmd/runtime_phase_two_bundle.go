@@ -653,7 +653,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		Observer:            observer,
 		Admission:           seriesAdmission,
 		ObserveAdmission:    recorder.RecordSeriesAdmission,
-		ObserveScopeDrop:    scopeDropObserver(scopeClose),
+		ScopeDrops:          scopeDropSink{closer: scopeClose},
 		ObserveSeriesPulled: seriesPullTally.Add,
 	})
 	if err != nil {

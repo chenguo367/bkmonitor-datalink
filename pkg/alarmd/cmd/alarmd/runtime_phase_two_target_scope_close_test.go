@@ -59,7 +59,7 @@ func calibratedCopy(t *testing.T, key openalerts.StrategyKey, index scopeCloseIn
 	go func() { defer close(done); _ = cache.Run(ctx) }()
 	t.Cleanup(func() { cancel(); <-done })
 	deadline := time.Now().Add(3 * time.Second)
-	for !cache.Snapshot(key).Calibrated || !cache.Stats().Available {
+	for !cache.Snapshot(key).Calibrated {
 		if time.Now().After(deadline) {
 			t.Fatal("copy did not calibrate")
 		}
@@ -83,14 +83,20 @@ func TestTargetScopeCloseThroughTheProductionWiring(t *testing.T) {
 	closer := scopeclose.New(scopeclose.Options{Send: true})
 	writer := &maintenanceTestWriter{}
 	closer.Bind(scopeclose.CacheSet(cache), writer)
-	observe := scopeDropObserver(closer)
+	sink := scopeDropSink{closer: closer}
+	// One Slot as the access path hands it over: a screen per Plan, the
+	// cleared Plan's definitive rejections one by one, and the bulk counts.
 	slot := func(round int64) {
+		if screen := sink.Screen(plan); screen != "" {
+			t.Fatalf("Screen = %q for a strategy with open alerts", screen)
+		}
 		for _, fingerprint := range []string{ours, theirs} {
-			observe(access.ScopeDrop{Plan: plan, Filter: "target_plan", Reason: "out_of_target", Definitive: true,
+			sink.Observe(access.ScopeDrop{Plan: plan, Filter: "target_plan", Reason: "out_of_target",
 				Fingerprint: fingerprint, StrategyRevision: 4, Round: round})
 		}
-		// A rejection the target could not stand behind, for the same alert.
-		observe(access.ScopeDrop{Plan: plan, Filter: "target_scope", Reason: "out_of_scope", Round: round})
+		sink.Count(plan, access.ScopeDropIndefinite, 1)
+		sink.Count(plan, access.ScopeDropFingerprintUnsupported, 2)
+		sink.Count(plan, access.ScopeDropNoFingerprint, 3)
 		closer.Step(context.Background())
 	}
 	slot(1700000000)
@@ -107,7 +113,8 @@ func TestTargetScopeCloseThroughTheProductionWiring(t *testing.T) {
 		t.Fatalf("request = %+v", request)
 	}
 	stats := closer.Stats()
-	if stats[scopeclose.OutcomeClosed] != 1 || stats[scopeclose.OutcomeProducerForeign] != 1 || stats[scopeclose.OutcomeCacheUnavailable] != 2 {
+	if stats[scopeclose.OutcomeClosed] != 1 || stats[scopeclose.OutcomeProducerForeign] != 1 || stats[scopeclose.OutcomeCacheUnavailable] != 2 ||
+		stats[scopeclose.OutcomeFingerprintUnsupported] != 4 || stats[scopeclose.OutcomeNotMember] != 6 {
 		t.Fatalf("stats = %v", stats)
 	}
 }

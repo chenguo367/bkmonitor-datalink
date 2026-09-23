@@ -5,7 +5,9 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 )
 
@@ -44,14 +46,32 @@ func (loop targetScopeCloseLoop) run(ctx context.Context) {
 	}
 }
 
-// scopeDropObserver hands the admission step's target rejections to the
-// close.
-func scopeDropObserver(closer *scopeclose.Closer) access.ScopeDropObserver {
-	return func(drop access.ScopeDrop) {
-		closer.Observe(scopeclose.Drop{TenantID: drop.Plan.TenantID, BusinessID: drop.Plan.BusinessID,
-			StrategyID: drop.Plan.StrategyID, Fingerprint: drop.Fingerprint, StrategyRevision: drop.StrategyRevision,
-			Round: drop.Round, Definitive: drop.Definitive})
+// scopeDropSink hands the admission step's target rejections to the close:
+// the per-query screen, the one-by-one observations of the strategies it
+// cleared, and the bulk counts, each word mapped to the close's outcome.
+type scopeDropSink struct{ closer *scopeclose.Closer }
+
+func (sink scopeDropSink) Screen(plan execution.PlanIdentity) string {
+	return sink.closer.Screen(openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID})
+}
+
+func (sink scopeDropSink) Observe(drop access.ScopeDrop) {
+	sink.closer.Observe(scopeclose.Drop{TenantID: drop.Plan.TenantID, BusinessID: drop.Plan.BusinessID,
+		StrategyID: drop.Plan.StrategyID, Fingerprint: drop.Fingerprint, StrategyRevision: drop.StrategyRevision,
+		Round: drop.Round})
+}
+
+func (sink scopeDropSink) Count(plan execution.PlanIdentity, word string, n int) {
+	outcome := word
+	switch word {
+	case access.ScopeDropIndefinite:
+		outcome = scopeclose.OutcomeCacheUnavailable
+	case access.ScopeDropFingerprintUnsupported:
+		outcome = scopeclose.OutcomeFingerprintUnsupported
+	case access.ScopeDropNoFingerprint:
+		outcome = scopeclose.OutcomeNotMember
 	}
+	sink.closer.Count(openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID}, outcome, n)
 }
 
 // withTargetScopeClose puts the close's reading beside the open set it acts
