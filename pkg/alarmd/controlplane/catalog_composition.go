@@ -410,6 +410,8 @@ var AlwaysReportedWithheld = []WithheldKey{
 	// "No strategy here takes part in priority arbitration" is the zero that
 	// says every strategy detects exactly as it would alone on the platform.
 	{Disposition: DispositionConfigNormalized, Reason: ReasonPriorityIgnored},
+	// "No strategy here runs a level on another level's trigger."
+	{Disposition: DispositionConfigNormalized, Reason: ReasonLevelTriggerBorrowed},
 }
 
 // NoDataReasons is the set of reasons that withhold a Plan from no-data
