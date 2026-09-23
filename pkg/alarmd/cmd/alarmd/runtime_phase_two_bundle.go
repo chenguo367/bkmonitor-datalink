@@ -793,6 +793,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	openAlertCopy := linkd.Cache
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
+	recorder.SetActivationRebuildSource(repository.ActivationRebuildCounts)
 	linkdBudget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
 	legacyTime := strategycache.NewLegacyEffectiveTime(controlClient, cmdbClient, cfg.PlatformKeyPrefix(), external.Now, linkdBudget.Strategies, linkdBudget.Bytes/4)
 	// The mark a failed attempt leaves behind. Wired here and asserted by a

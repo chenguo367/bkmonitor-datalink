@@ -122,6 +122,20 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 	}
 	failureClass = ActivationFailureClassDependencyIO
 	previous, err := reconciler.repository.LoadActivation(ctx)
+	if errors.Is(err, ErrActivationBodyMissing) {
+		// The header is here without its body. The first activation refuses
+		// any header, so taking that path left every round refused for as
+		// long as the header stayed - it has no TTL. The body is recovered
+		// instead, then this round goes on as it would have.
+		outcome, rebuildErr := reconciler.repository.RebuildActivationBody(ctx)
+		if outcome != "" {
+			reconciler.repository.rebuilds.add(outcome)
+		}
+		if rebuildErr != nil {
+			return ActivationState{}, rebuildErr
+		}
+		previous, err = reconciler.repository.LoadActivation(ctx)
+	}
 	if errors.Is(err, ErrActivationUnavailable) {
 		failureStage, failureClass = ActivationFailureStageCompile, ActivationFailureClassOther
 		initial, buildErr := NewInitialScheduleActivator(

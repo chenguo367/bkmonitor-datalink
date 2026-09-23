@@ -441,6 +441,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_entries"] = "variableLabels: {kind}"
 	expected["bkmonitor_alarmd_open_alert_set_tracked_strategies"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_open_alert_set_evictions_total"] = "variableLabels: {}"
+	expected["bkmonitor_alarmd_activation_rebuild_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_open_alert_set_sent_alerts"] = "variableLabels: {in_set}"
 	expected["bkmonitor_alarmd_open_alert_set_disjoint"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_control_source_refresh_total"] = "variableLabels: {outcome,exit}"
@@ -971,6 +972,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_entries")] = 3
 	bounds[fqName("open_alert_set_tracked_strategies")] = 1
 	bounds[fqName("open_alert_set_evictions_total")] = 1
+	bounds[fqName("activation_rebuild_total")] = len(controlplane.ActivationRebuildOutcomes)
 	bounds[fqName("open_alert_set_sent_alerts")] = 2
 	bounds[fqName("open_alert_set_disjoint")] = 1
 	bounds[fqName("control_source_refresh_total")] = len(controlplane.SourceRefreshExits)
