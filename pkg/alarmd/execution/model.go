@@ -1555,8 +1555,7 @@ type EvaluationRequest struct {
 	Inputs []SeriesEvaluationInputRequest
 	State  StatePreflightResult
 	Gaps   GapLoadResult
-	// OpenAlerts is the consumer's open alert set the second recovery gate
-	// asks. The worker passes it on every request; nil is a caller with no
+	// OpenAlerts is the consumer's open alert set the recovery gate asks. The worker passes it on every request; nil is a caller with no
 	// gate and is counted as such, see OpenAlertGateCounts.NotConfigured.
 	OpenAlerts contract.OpenAlertSet
 }
@@ -2113,22 +2112,22 @@ const (
 	PlanRetryPending    PlanDisposition = "RETRY_PENDING"
 )
 
-// RecoveryGateCounts says what became of this Plan's records whose evaluated
-// Levels agreed on RECOVERY. A held record wrote its Level results to the
-// state but produced no envelope this round, because a sibling Level had not
-// agreed: its state was unknown, or its recovery span still held a
-// triggering window. A record sent past a Level without recovery produced its
-// envelope; that Level can never say RECOVERY and is not consulted.
+// RecoveryGateCounts counts this Plan's RECOVERY records by the state of the
+// first other Level each was decided beside: unavailable, NORMAL with
+// recovery enabled, NORMAL with recovery disabled. None of them holds the
+// envelope; each RECOVERY speaks for its own Level only. The first two are
+// the records that used to wait for that Level and now go on to the open
+// alert set.
 type RecoveryGateCounts struct {
-	HeldLevelUnavailable         uint64
-	HeldLevelRecovering          uint64
-	SentPastLevelWithoutRecovery uint64
+	BesideLevelUnavailable     uint64
+	BesideLevelRecovering      uint64
+	BesideLevelWithoutRecovery uint64
 }
 
-// OpenAlertGateCounts are, per Plan evaluation, what the second recovery
-// gate did with the RECOVERY records every Level had agreed on. A record is
-// counted here or in RecoveryGateCounts, never both: a Level that holds the
-// envelope is asked first, and the set is then not asked. Passed records
+// OpenAlertGateCounts are, per Plan evaluation, what the open alert gate did
+// with the Plan's RECOVERY records; every one of them is counted here once,
+// and may also be counted in RecoveryGateCounts, which describes the record
+// rather than the envelope. Passed records
 // produced their envelope. The two held kinds produced none: the consumer
 // holds no open alert on the series, or the series identity it keys alerts
 // by could not be built. NotConfigured is a caller that passed no set, the

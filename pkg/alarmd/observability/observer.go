@@ -2030,21 +2030,21 @@ type AlgorithmEvaluationFact struct {
 	Provenance            AlgorithmProvenance       `json:"provenance,omitempty"`
 }
 
-// RecoveryGateCause is why a record whose Levels agreed on RECOVERY did not
-// send its envelope, or the one shape it was sent past. The set is closed: it
-// is a metric label.
+// RecoveryGateCause is the state of the first other Level a RECOVERY record
+// was decided beside. None of them holds the envelope: a RECOVERY speaks for
+// its own Level only (trigger recoveryGateV2). The set is closed: it is a
+// metric label.
 type RecoveryGateCause string
 
 const (
-	// RecoveryGateLevelUnavailable held the envelope: a Level's state could
-	// not be established this round.
+	// RecoveryGateLevelUnavailable: another Level's state could not be
+	// established this round.
 	RecoveryGateLevelUnavailable RecoveryGateCause = "level_unavailable"
-	// RecoveryGateLevelRecovering held the envelope: a Level read NORMAL with
-	// recovery enabled, so a window inside its recovery span still triggers.
+	// RecoveryGateLevelRecovering: another Level read NORMAL with recovery
+	// enabled, so a window inside its recovery span still triggers.
 	RecoveryGateLevelRecovering RecoveryGateCause = "level_recovering"
-	// RecoveryGateLevelWithoutRecovery did not hold: the envelope was sent
-	// past a NORMAL Level whose recovery is disabled and which therefore can
-	// never say RECOVERY. Counted so the shape's existence can be read.
+	// RecoveryGateLevelWithoutRecovery: another Level read NORMAL with its
+	// recovery disabled.
 	RecoveryGateLevelWithoutRecovery RecoveryGateCause = "level_without_recovery"
 )
 
@@ -2137,10 +2137,10 @@ func normalizeLevelOutcomeFacts(observation Observation) []LevelOutcomeFact {
 	return facts
 }
 
-// OpenAlertGateOutcome is what the second recovery gate, the consumer's
-// open alert set, did with a RECOVERY record every Level had agreed on. The
-// set is closed: it is a metric label. A record is counted here or under a
-// RecoveryGateCause, never both.
+// OpenAlertGateOutcome is what the recovery gate, the consumer's open alert
+// set, did with a RECOVERY record. The set is closed: it is a metric label.
+// Every RECOVERY record is counted here; a RecoveryGateCause describes the
+// record beside it and may count the same record.
 type OpenAlertGateOutcome string
 
 const (
@@ -2169,8 +2169,8 @@ var OpenAlertGateOutcomes = []OpenAlertGateOutcome{
 	OpenAlertGateNotConfigured, OpenAlertGateProtocolNotGated,
 }
 
-// OpenAlertGateFact counts, for one evaluation, the records the second gate
-// decided under one outcome.
+// OpenAlertGateFact counts, for one evaluation, the records the open alert
+// gate decided under one outcome.
 type OpenAlertGateFact struct {
 	Outcome OpenAlertGateOutcome `json:"outcome"`
 	Records uint64               `json:"records"`

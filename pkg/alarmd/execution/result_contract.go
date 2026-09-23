@@ -49,12 +49,11 @@ type LevelOutcome struct {
 	ReasonCode           ReasonCode
 	PartialProofs        []PartialDecisionProof
 	// EnvelopeHeld marks a RECOVERY outcome whose record's RECOVERY envelope
-	// the trigger held back, because a sibling Level had not agreed: its
-	// state was unknown, or its recovery span still held a triggering
-	// window. The outcome is a fact about this Level and still reaches the
-	// state; the envelope is a statement about the whole series' alert and
-	// waits for a later round. The result contract expects no TriggerEvent
-	// for such a record, and only for such a record.
+	// the open alert gate held back: the consumer holds no open alert on the
+	// series, or the identity it keys alerts by could not be built. The
+	// outcome is a fact about this Level and still reaches the state. The
+	// result contract expects no TriggerEvent for such a record, and only for
+	// such a record.
 	EnvelopeHeld bool
 }
 

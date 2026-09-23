@@ -98,23 +98,23 @@ type recordResult struct {
 	coverage execution.HistoryCoverage
 }
 
-// countRecoveryGate adds one record's gate to the Plan's counts. A held
-// record counts under its cause; a record sent past a Level without recovery
-// counts on its own; every other record adds nothing.
+// countRecoveryGate adds one RECOVERY record to the Plan's counts under the
+// state of the other Level it was decided beside; a record decided beside
+// none, and every other record, adds nothing.
 func countRecoveryGate(counts *execution.RecoveryGateCounts, gate trigger.RecoveryGateV2) {
-	switch {
-	case gate.Held && gate.Cause == trigger.RecoveryHeldLevelUnavailable:
-		counts.HeldLevelUnavailable++
-	case gate.Held && gate.Cause == trigger.RecoveryHeldLevelRecovering:
-		counts.HeldLevelRecovering++
-	case !gate.Held && gate.PassedLevelWithoutRecovery:
-		counts.SentPastLevelWithoutRecovery++
+	switch gate.Beside {
+	case trigger.RecoveryBesideLevelUnavailable:
+		counts.BesideLevelUnavailable++
+	case trigger.RecoveryBesideLevelRecovering:
+		counts.BesideLevelRecovering++
+	case trigger.RecoveryBesideLevelWithoutRecovery:
+		counts.BesideLevelWithoutRecovery++
 	}
 }
 
 // countOpenAlertGate adds one record's second-gate outcome to the Plan's
-// counts. The outcome is empty for every record the second gate was not
-// asked about: an ABNORMAL record, and a RECOVERY record a Level held.
+// counts. The outcome is empty for every record the gate was not asked
+// about, which is every record that is not RECOVERY.
 func countOpenAlertGate(counts *execution.OpenAlertGateCounts, gate trigger.RecoveryGateV2) {
 	switch gate.OpenAlertGate {
 	case trigger.OpenAlertGatePassed:

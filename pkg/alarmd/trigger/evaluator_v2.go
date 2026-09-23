@@ -83,8 +83,7 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 	if result.RecordResult == contract.LevelResultRecovery {
 		result.RecoveryGate = recoveryGateV2(result.LevelOutcomes)
 	}
-	if result.RecordResult == contract.LevelResultAbnormal ||
-		(result.RecordResult == contract.LevelResultRecovery && !result.RecoveryGate.Held) {
+	if result.RecordResult == contract.LevelResultAbnormal || result.RecordResult == contract.LevelResultRecovery {
 		if uint32(len(levelResults)) > request.Limits.MaxLevelResultsPerEvent {
 			return EvaluationResultV2{}, invariantV2("admit event Level results", 0, errors.New("compiled result exceeds admitted limit"))
 		}
@@ -562,73 +561,69 @@ func multiplyUint32ToInt64(left, right uint32) (int64, bool) {
 	return int64(value), true
 }
 
-// recoveryGateV2 decides whether a record whose evaluated Levels agreed on
-// RECOVERY may send its envelope. The consumer keeps one alert per series and
-// resolves it on any RECOVERY envelope without looking at the Level, so the
-// envelope may only go once no Level could still be holding that alert open.
-// The reference implementation asks the same of the alert's own Level: its
-// recovery span must hold no triggering window, and a Level without a check
-// result does not recover. This process does not know which Level the alert
-// stands at, so it asks it of every Level, which is stricter than the
-// reference and never resolves earlier than it.
+// recoveryGateV2 describes a record whose evaluated Levels came to RECOVERY
+// and none to ABNORMAL. It no longer holds the envelope on another Level.
 //
-// A Level whose state is unknown (its detect fact unavailable, its history
-// warming or gapped, its effective time unknown) holds the envelope. A Level
-// that read NORMAL with recovery enabled holds it too: with recovery enabled,
-// NORMAL is exactly "a window inside the recovery span still meets the
-// trigger", which the reference reads as "still triggering, no recovery".
+// Each Level's RECOVERY is a fact about that Level alone: its own recovery
+// span holds no triggering window. The envelope says only that. The standard
+// conversion writes one evaluation per decided Level under that Level's own
+// severity, RECOVERY as resolved, and leaves out every Level that is NORMAL,
+// unavailable or suppressed (linkdoutput evaluations). The alert consumer
+// ends an active alert only on an evaluation whose severity is the alert's
+// own and whose action is not triggered; an evaluation for any other
+// severity is recorded as orphaned and changes nothing. So a RECOVERY for
+// one Level can close that Level's alert and no other, which is what the
+// reference implementation does: it recovers an alert by the alert's own
+// Level. The compatibility protocol carries no RECOVERY at all.
 //
-// Two shapes must not hold it, because they can last indefinitely and a hold
-// on them is an alert that never resolves on its own. A Level suppressed by
-// its effective time can stay suppressed for as long as its schedule says;
-// holding on it would keep every strategy with a part-time Level in alarm
-// until that Level comes back on. The reference resolves such an alert after
-// a fixed no-data tolerance instead. A NORMAL Level whose recovery is
-// disabled can never say RECOVERY at all, so a hold on it would be
-// permanent; it is passed and counted, not consulted. Neither exception is
-// an approximation to tighten later: each closes a permanent hold.
+// The gate used to hold the envelope until every Level had agreed, on the
+// premise that the consumer resolved an alert on any RECOVERY whatever its
+// Level. That premise stopped holding when the conversion went per Level,
+// and the hold stayed: an alert whose own Level had recovered waited for as
+// long as a sibling Level was undecidable, which for a Level whose query
+// comes back empty or whose history stays gapped is indefinitely.
 //
-// Whether a Level's recovery is enabled is read off the outcome itself,
-// which evaluateLevelV2 sets before any of its returns. Reading it off the
-// compiled Levels by position would hold only as long as the outcome loop
-// appends exactly once per Level; a skipped Level would silently line the
-// next one up against the wrong recovery plan, and nothing would fail.
+// What the gate still reports is the shape it used to hold: the first other
+// Level, in Level order, that is unavailable or reads NORMAL with recovery
+// enabled, and failing that one that reads NORMAL with recovery disabled.
+// That count is what the change is read by: records that now go on where
+// they used to wait.
 func recoveryGateV2(outcomes []LevelOutcomeV2) RecoveryGateV2 {
 	gate := RecoveryGateV2{}
-	passedWithoutRecovery := false
+	withoutRecovery := uint32(0)
 	for _, outcome := range outcomes {
 		switch {
 		case outcome.UnavailableReason != "":
-			if !gate.Held {
-				gate = RecoveryGateV2{Held: true, Cause: RecoveryHeldLevelUnavailable, LevelID: outcome.LevelID}
+			if gate.Beside == "" {
+				gate.Beside, gate.BesideLevelID = RecoveryBesideLevelUnavailable, outcome.LevelID
 			}
 		case outcome.SuppressedReason != "":
-			// Suppressed by effective time: not consulted, see above.
+			// Suppressed by effective time: says nothing about this record.
 		case outcome.Result == contract.LevelResultNormal:
 			if outcome.RecoveryEnabled {
-				if !gate.Held {
-					gate = RecoveryGateV2{Held: true, Cause: RecoveryHeldLevelRecovering, LevelID: outcome.LevelID}
+				if gate.Beside == "" {
+					gate.Beside, gate.BesideLevelID = RecoveryBesideLevelRecovering, outcome.LevelID
 				}
-			} else {
-				passedWithoutRecovery = true
+			} else if withoutRecovery == 0 {
+				withoutRecovery = outcome.LevelID
 			}
 		}
 	}
-	if !gate.Held {
-		gate.PassedLevelWithoutRecovery = passedWithoutRecovery
+	if gate.Beside == "" && withoutRecovery != 0 {
+		gate.Beside, gate.BesideLevelID = RecoveryBesideLevelWithoutRecovery, withoutRecovery
 	}
 	return gate
 }
 
-// openAlertGateV2 is the second gate on a RECOVERY envelope, asked only once
-// the first has let the record through: does the consumer hold an open alert
-// on this series at all? The consumer resolves whatever alert it holds on a
-// RECOVERY envelope and closes the envelope as an orphan when it holds none,
-// and a healthy series says RECOVERY every cycle, so without this gate the
-// orphans outnumber the real resolutions by the ratio of healthy series to
-// open alerts. The set answers membership only; it does not say whether the
-// series recovered, which the Level results and the first gate have already
-// decided.
+// openAlertGateV2 is the gate on a RECOVERY envelope: does the consumer hold
+// an open alert on this series at all? The consumer ends the alert of the
+// envelope's severity and records the envelope as an orphan when it holds
+// none, and a healthy series says RECOVERY every cycle, so without this gate
+// the orphans outnumber the real resolutions by the ratio of healthy series
+// to open alerts. The set answers membership only, not severity: an envelope
+// for one Level on a series whose open alert stands at another still passes
+// and is an orphan there, bounded by the open alerts. It does not say whether
+// the series recovered, which the Level results have already decided.
 //
 // Two shapes do not ask the set. A Plan that does not publish the alert
 // consumer's protocol is not gated: the set is that consumer's, and the
@@ -648,8 +643,8 @@ func recoveryGateV2(outcomes []LevelOutcomeV2) RecoveryGateV2 {
 // Plan; it is counted, and it is not read as "not a member", which would
 // look exactly like a consumer that holds no alerts on it.
 //
-// The gate does not pass the record past a Level without recovery: that
-// report is about an envelope that was sent, and here none is.
+// The Level the record was decided beside is kept whatever this gate says:
+// it describes the record, not the envelope.
 func openAlertGateV2(gate RecoveryGateV2, request EvaluationRequestV2, strategyID, dedupeMD5 string) RecoveryGateV2 {
 	switch {
 	case request.Plan.WireFormat() != contract.WireFormatStandardRawEvent:
@@ -657,9 +652,9 @@ func openAlertGateV2(gate RecoveryGateV2, request EvaluationRequestV2, strategyI
 	case request.OpenAlerts == nil:
 		gate.OpenAlertGate = OpenAlertGateNotConfigured
 	case dedupeMD5 == "":
-		gate = RecoveryGateV2{Held: true, Cause: RecoveryHeldFingerprintUnknown, OpenAlertGate: OpenAlertGateHeldFingerprintUnknown}
+		gate.Held, gate.Cause, gate.OpenAlertGate = true, RecoveryHeldFingerprintUnknown, OpenAlertGateHeldFingerprintUnknown
 	case !request.OpenAlerts.Contains(request.TenantID, strategyID, dedupeMD5):
-		gate = RecoveryGateV2{Held: true, Cause: RecoveryHeldNoOpenAlert, OpenAlertGate: OpenAlertGateHeldNoOpenAlert}
+		gate.Held, gate.Cause, gate.OpenAlertGate = true, RecoveryHeldNoOpenAlert, OpenAlertGateHeldNoOpenAlert
 	default:
 		gate.OpenAlertGate = OpenAlertGatePassed
 	}
