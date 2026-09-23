@@ -93,3 +93,16 @@ func TestNoConsoleStandingWithoutBothHalves(t *testing.T) {
 		}
 	}
 }
+
+// The standing reaches /api/health: the response is built field by field,
+// and a field the view decides and the response does not copy renders as
+// nothing on the page.
+func TestTheConsoleStandingReachesTheHealthResponse(t *testing.T) {
+	snapshots := []Snapshot{{Replica: "pod-a", TakenAt: now.Add(-10 * time.Second), Owned: 5, Determined: 5,
+		Source: sourceWithStandardPlans(now.Add(-time.Minute), 46), Dependencies: consoleEntry(LinkdConsoleNotConfigured, "")}}
+	body := requestJSON(t, handlerWith(t, snapshots, Expectation{QueryGroups: 5, Known: true}, []string{"pod-a"}), "/api/health")
+	standing, ok := body["linkd_console"].(map[string]any)
+	if !ok || standing["attention"] != true || standing["state"] != LinkdConsoleNotConfigured || standing["standard_plans"] != float64(46) {
+		t.Fatalf("/api/health linkd_console = %#v", body["linkd_console"])
+	}
+}
