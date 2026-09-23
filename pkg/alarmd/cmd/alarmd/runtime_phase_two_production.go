@@ -2890,7 +2890,8 @@ func publishedComposition(
 func slotBudgetUsageFacts(usage execution.SlotBudgetUsage) *observability.SlotBudgetUsageFacts {
 	return &observability.SlotBudgetUsageFacts{
 		StateMutations: usage.StateMutations, GapMutations: usage.GapMutations, Events: usage.Events,
-		RetainedBytes: usage.RetainedBytes, Series: usage.Series,
+		EventsWithoutMessage: usage.EventsWithoutMessage,
+		RetainedBytes:        usage.RetainedBytes, Series: usage.Series,
 		RetainedInputBytes: usage.RetainedInputBytes, RetainedGapBytes: usage.RetainedGapBytes,
 		RetainedOutputBytes: usage.RetainedOutputBytes,
 		RetainedStateBytes:  usage.RetainedStateBytes,
