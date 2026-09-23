@@ -158,16 +158,25 @@ func strategyNext(out *Outcome, p Params, result map[string]any) {
 // thousand and one held by all of them read the same at the top of the
 // result, and only the counts under coverage tell them apart. Levels counts
 // Level windows - one per series and Level - so the line names windows, not
-// series. Nothing is said when the fact carries no coverage: a count that is
-// absent is not a count of zero.
+// series. It counts only the series this round summarised a window for:
+// resumed and constrained series are the rest of the object (see
+// observability.HistoryCoverage), so they are named beside it, and a round
+// that summarised nothing - every series resumed, or none loadable - is the
+// one the line most has to describe. Nothing is said when the fact carries no
+// coverage: a count that is absent is not a count of zero.
 func objectExtentLine(result map[string]any) string {
 	fact, _ := result["anomaly"].(map[string]any)
 	if fact == nil {
 		return ""
 	}
 	coverage, _ := fact["coverage"].(map[string]any)
-	levels, ok := numberField(coverage, "levels")
-	if !ok || levels <= 0 {
+	if coverage == nil {
+		return ""
+	}
+	levels, _ := numberField(coverage, "levels")
+	resumed, _ := numberField(coverage, "resumed")
+	constrained, _ := numberField(coverage, "constrained")
+	if levels+resumed+constrained <= 0 {
 		return ""
 	}
 	short, _ := numberField(coverage, "short")
@@ -177,7 +186,20 @@ func objectExtentLine(result map[string]any) string {
 	if reason == "" {
 		reason, _ = fact["reason_code"].(string)
 	}
-	line := fmt.Sprintf("%s（%s）：%d/%d 个 Level 窗口未满，其中 %d 个处于守卫中", kind, reason, short, levels, guarded)
+	line := fmt.Sprintf("%s（%s）：", kind, reason)
+	switch {
+	case levels == 0:
+		line += "本轮未汇总任何 Level 窗口"
+	case short == 0 && guarded == 0:
+		// Every window full: the degradation is not the history's, and a
+		// "0/N" would read as nothing affected when the whole round was.
+		line += fmt.Sprintf("%d 个 Level 窗口全满，降级不来自历史窗口", levels)
+	default:
+		line += fmt.Sprintf("%d/%d 个 Level 窗口未满，其中 %d 个处于守卫中", short, levels, guarded)
+	}
+	if resumed > 0 || constrained > 0 {
+		line += fmt.Sprintf("；另有 %d 个序列续跑、%d 个未能加载状态，不在上述窗口内", resumed, constrained)
+	}
 	if total, ok := numberField(result, "facts_total"); ok && total > 1 {
 		line += fmt.Sprintf("；此为 %d 条事实中的第 1 条", total)
 	}
