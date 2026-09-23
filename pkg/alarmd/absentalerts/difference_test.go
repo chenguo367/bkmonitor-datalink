@@ -387,3 +387,51 @@ func TestEveryCandidateLandsOnExactlyOneOutcome(t *testing.T) {
 		}
 	}
 }
+
+// The reviewer's case: a strategy whose source document lost its tenant is
+// listed by the snapshot under an empty tenant, while the link lists it under
+// the tenant its alerts carry. It exists; it must not read as absent.
+func TestAStrategyTheSnapshotListsWithoutATenantIsNotACandidate(t *testing.T) {
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
+	round.SnapshotStrategies[Key{StrategyID: "10"}] = struct{}{}
+	if result := Compute(round, testBounds()); result.Counts.Candidates != 0 || len(result.Close) != 0 {
+		t.Fatalf("a strategy the snapshot lists without a tenant was read as absent: %+v", result)
+	}
+}
+
+// Likewise a running Plan protects the strategy whatever tenant either side
+// wrote down.
+func TestARunningPlanProtectsTheStrategyUnderAnyTenant(t *testing.T) {
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
+	round.Published = set(Key{TenantID: "other", StrategyID: "10"})
+	if result := Compute(round, testBounds()); result.Counts.StillPublished != 1 || len(result.Close) != 0 {
+		t.Fatalf("a strategy with a running Plan was closed: %+v", result)
+	}
+}
+
+// A round starts past the last strategy the previous one decided, so the
+// front of the order cannot hold the bound on every round.
+func TestTheWalkStartsPastTheLastDecidedStrategy(t *testing.T) {
+	roster := map[Key]struct{}{}
+	gone := []Key{}
+	for i := 1; i <= 6; i++ {
+		k := key("gone-" + itoa(i))
+		roster[k] = struct{}{}
+		gone = append(gone, k)
+	}
+	round := roundFor(roster, ripe(gone...))
+	first := Compute(round, testBounds())
+	if len(first.Close) != 4 || first.Close[0].Key != key("gone-1") {
+		t.Fatalf("first round %+v", first.Close)
+	}
+	round.After = first.Close[3].Key
+	second := Compute(round, testBounds())
+	want := []string{"gone-5", "gone-6", "gone-1", "gone-2"}
+	for i, k := range second.Close {
+		if k.Key.StrategyID != want[i] {
+			t.Fatalf("the second round did not start past the first one's last: %+v", second.Close)
+		}
+	}
+}

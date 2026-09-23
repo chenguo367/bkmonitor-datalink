@@ -428,3 +428,26 @@ func TestARefusedRoundIsCountedAsARoundNotAsACandidate(t *testing.T) {
 		}
 	}
 }
+
+// The reviewer's case end to end: the source document of strategy 10 lost its
+// tenant, so the snapshot lists it under an empty one, and nothing runs a
+// Plan of it. It still exists, and its alert stays open.
+func TestAStrategyWhoseDocumentLostItsTenantKeepsItsAlerts(t *testing.T) {
+	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
+	withoutTenant := func(snapshot controlplane.ObservedSnapshot) controlplane.ObservedSnapshot {
+		snapshot.Strategies = append(snapshot.Strategies, controlplane.DepartedStrategy{StrategyID: "10"})
+		return snapshot
+	}
+	ctx := context.Background()
+	fixture.control.snapshot = withoutTenant(fixture.control.snapshot)
+	fixture.loop.step(ctx)
+	fixture.now = fixture.now.Add(controlplane.AbsenceGracePeriod + time.Minute)
+	fixture.control.snapshot = withoutTenant(liveSnapshot("observation-two", fixture.now, 100))
+	for i := range fixture.link.pages {
+		fixture.link.pages[i].Health.LastSuccess = fixture.now.Add(-time.Minute)
+	}
+	fixture.loop.step(ctx)
+	if len(fixture.writer.batches) != 0 || fixture.loop.Difference()["candidates"] != 0 {
+		t.Fatalf("an existing strategy without a tenant in the snapshot had its alert closed: %+v", fixture.writer.batches)
+	}
+}

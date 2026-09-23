@@ -70,6 +70,9 @@ type absentStrategyClose struct {
 	// previousSnapshot is how large the last snapshot this loop decided on
 	// was, which is what the next one's size is judged against.
 	previousSnapshot int
+	// lastDecided is the last strategy a round decided to close, where the
+	// next round's walk over the candidates starts.
+	lastDecided absentalerts.Key
 	// wasLeader is whether the previous round ran as leader. Losing the
 	// term clears the candidate clocks: a replica that comes back after an
 	// hour must not close on memory it made in another term.
@@ -242,7 +245,7 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 		Published: publishedKeys(loop.control.PublishedStrategies()), Identities: identitiesByKey(departed),
 		SnapshotStrategies: snapshotKeys(observed), SnapshotUsable: haveSnapshot,
 		SnapshotObservation: observed.Observation, PreviousSnapshotStrategies: loop.previousSnapshot,
-		Now: now,
+		After: loop.lastDecided, Now: now,
 	}
 	sizes := absentRoundSizes{identities: len(round.Identities)}
 	if haveSnapshot {
@@ -258,6 +261,9 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 	result := loop.tracker.Round(round, loop.bounds)
 	if haveSnapshot && result.Refusal == absentalerts.RefusalNone {
 		loop.previousSnapshot = result.Counts.SnapshotStrategies
+	}
+	if len(result.Close) > 0 {
+		loop.lastDecided = result.Close[len(result.Close)-1].Key
 	}
 	sizes.counts = result.Counts
 	loop.record(ctx, result, sizes)

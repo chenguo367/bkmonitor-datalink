@@ -104,7 +104,8 @@ type Round struct {
 	PreviousSnapshotStrategies int
 	// Published is every strategy with a Plan in the publication the control
 	// plane currently runs. A strategy here is executing, whatever the
-	// snapshot says, and is never closed.
+	// snapshot says, and is never closed. Matched by strategy id, as the
+	// snapshot is.
 	Published map[Key]struct{}
 	// Identities is what the catalog remembers about the strategies it let
 	// go. A candidate not here is still closed; its identity is read from its
@@ -113,7 +114,10 @@ type Round struct {
 	// FirstAbsent is this loop's memory of when each candidate was first
 	// found missing by this loop itself.
 	FirstAbsent map[Key]Absence
-	Now         time.Time
+	// After is the last strategy the previous round decided to close; this
+	// round's walk over the candidates starts just past it.
+	After Key
+	Now   time.Time
 }
 
 // Absent is one strategy the round decided to close.
@@ -326,9 +330,16 @@ func Candidates(round Round, bounds Bounds) ([]Key, Counts, string) {
 	if shrunk(counts, bounds) {
 		return nil, counts, RefusalSnapshotShrunk
 	}
+	// Presence is decided by the strategy id alone. The snapshot lists a
+	// strategy whose source document lost its tenant with an empty one, while
+	// the link keys the same strategy under the tenant its alerts carry; by
+	// the full key that strategy would read as absent although it exists.
+	// Strategy ids are unique across tenants, and matching on less can only
+	// make a strategy look present, which costs a close and never makes one.
+	existing := strategyIDs(round.SnapshotStrategies)
 	candidates := make([]Key, 0)
 	for key := range round.Roster {
-		if _, present := round.SnapshotStrategies[key]; present {
+		if _, present := existing[key.StrategyID]; present {
 			continue
 		}
 		candidates = append(candidates, key)
@@ -336,6 +347,14 @@ func Candidates(round Round, bounds Bounds) ([]Key, Counts, string) {
 	counts.Candidates = len(candidates)
 	sortKeys(candidates)
 	return candidates, counts, RefusalNone
+}
+
+func strategyIDs(keys map[Key]struct{}) map[string]struct{} {
+	ids := make(map[string]struct{}, len(keys))
+	for key := range keys {
+		ids[key.StrategyID] = struct{}{}
+	}
+	return ids
 }
 
 // Compute takes the whole difference. It reads nothing and writes nothing:
@@ -347,8 +366,9 @@ func Compute(round Round, bounds Bounds) Result {
 		return Result{Counts: counts, Refusal: refusal}
 	}
 	result := Result{Counts: counts, Refusal: RefusalNone}
-	for _, key := range candidates {
-		if _, published := round.Published[key]; published {
+	running := strategyIDs(round.Published)
+	for _, key := range rotate(candidates, round.After) {
+		if _, published := running[key.StrategyID]; published {
 			result.Counts.StillPublished++
 			continue
 		}
@@ -369,6 +389,25 @@ func Compute(round Round, bounds Bounds) Result {
 		result.Counts.Closed++
 	}
 	return result
+}
+
+// rotate starts the walk over the candidates just after the last strategy a
+// previous round closed, so that a strategy which never yields a close -
+// every alert another producer's, no identity to be found - cannot hold the
+// front of the order and spend the bound on every round.
+func rotate(candidates []Key, after Key) []Key {
+	if after == (Key{}) {
+		return candidates
+	}
+	start := sort.Search(len(candidates), func(i int) bool { return lessKey(after, candidates[i]) })
+	return append(append(make([]Key, 0, len(candidates)), candidates[start:]...), candidates[:start]...)
+}
+
+func lessKey(a, b Key) bool {
+	if a.TenantID != b.TenantID {
+		return a.TenantID < b.TenantID
+	}
+	return a.StrategyID < b.StrategyID
 }
 
 // linkUnhealthy reads the link's own account of its maintenance. A latest
@@ -399,10 +438,5 @@ func shrunk(counts Counts, bounds Bounds) bool {
 }
 
 func sortKeys(keys []Key) {
-	sort.Slice(keys, func(i, j int) bool {
-		if keys[i].TenantID != keys[j].TenantID {
-			return keys[i].TenantID < keys[j].TenantID
-		}
-		return keys[i].StrategyID < keys[j].StrategyID
-	})
+	sort.Slice(keys, func(i, j int) bool { return lessKey(keys[i], keys[j]) })
 }
