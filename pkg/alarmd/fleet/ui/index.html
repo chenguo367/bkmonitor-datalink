@@ -690,7 +690,7 @@ var CHECK = {
   // did not send one, and names no cause -- the reasons under the line do.
   CAPABILITY_UNSUPPORTED: '{s} 条策略这个部署跑不了（{g} 种原因）——处理办法按原因组看',
   CONFIG_REJECTED:       '{s} 条策略的定义编译不过（{g} 种原因）——按原因组看是哪个字段；带 STALE_CONFIG 的那组仍按上一版配置在跑',
-  CONFIG_NORMALIZED:     '{s} 条策略在检测，但有一部分配置被按放宽的读法读了（{g} 种原因）——不是被扣，是检测的范围比写的宽',
+  CONFIG_NORMALIZED:     '{s} 条策略在检测，但有一部分配置的读法和写的不同（{g} 种原因，各原因的说明见下）——不是被扣',
   // The three standings. {since}, {c}, {applied} and {published} come from
   // the leader's activation facts on the report, not from counts; the split
   // line's numbers come from the leader's rebalance round on the report.
@@ -868,7 +868,7 @@ var NEXT = {
   SOURCE_INCOMPLETE:     '找策略缓存的写入方（bk-monitor 后台的 cache 进程，或替代它的模块）：缺身份字段的要写方按合同补 bk_tenant_id / space_uid（bk-monitor 主线 2026-08-31 起的缓存刷新才写）；ID 列表残留的要写方清掉已删除策略的 ID（2026-09-11 起的刷新会清）。Pod 外一句判据：在缓存 Redis 上 GET <前缀>.strategy_<任一 id>，顶层有 "space_uid" 才算过。alarmd 这边不用改，写方修好后下一轮刷新（最多 6 分钟）自动接受',
   CAPABILITY_UNSUPPORTED: '按原因组各自的"下一步"：部署参数不够的调参数、下一轮刷新自动接受；本构建不支持的等带该能力的构建，改参数没有用；写入方超前的等解释该字段的构建或写入方改文档；策略定义超出护栏的先收策略，护栏不是工作上限',
   CONFIG_REJECTED:       '交策略侧：按原因组与字段路径改策略定义；alarmd 这边不用改，改好后下一轮刷新自动接受。STALE_CONFIG 组的策略仍在按上一版跑，不算漏检',
-  CONFIG_NORMALIZED:     '交策略侧：按原因组的"下一步"改配置的写法；改之前策略照常检测，只是范围比写的宽，不算漏检',
+  CONFIG_NORMALIZED:     '按原因组的"下一步"处理；有的要策略侧改写法，有的不需要处理。策略一直在检测，不算漏检',
   CUTOVER_FAILING:       '先修激活：看展开里最近一次失败文本与 activation_failed 日志；修好前所有策略变更都不生效',
   OWNERSHIP_SKEWED:      '不要手动重启持有多的副本来均衡——重启只会把它的对象整批搬到剩下的副本，不会均分。{rebalance}；在均分回来之前，持有多的那个副本上的漏检与超时不按容量处理、不据此扩副本或加资源',
   REPLICA_DEGRADED:      '按种类处理：源过期看策略源刷新，leader 缺席看租约，告警集合/平台设置过期看对应发布者；输出未就绪看该副本所在节点到告警输出的网络（它自己在重试，最多 30 秒一次，通了就就绪），不用重启它',
@@ -3168,16 +3168,16 @@ function renderSource(source, expected, standing) {
   } else {
     parts.push('策略缓存列出 ' + source.listed + ' 条，接受 ' + source.accepted + ' 条');
   }
-  // A normalized item is not withheld: the strategy runs, wider than it
-  // wrote. It gets its own verb, or the hint counts a running strategy
-  // among the held ones.
+  // A normalized item is not withheld: the strategy runs, read otherwise
+  // than written. It gets its own verb, or the hint counts a running
+  // strategy among the held ones.
   var held = withheld.filter(function (g) { return g.disposition !== 'CONFIG_NORMALIZED'; });
   var widened = withheld.filter(function (g) { return g.disposition === 'CONFIG_NORMALIZED'; });
   if (held.length) {
     parts.push('扣住 ' + held.map(function (g) { return g.count + ' 条 ' + g.disposition + '/' + g.reason; }).join('、'));
   }
   if (widened.length) {
-    parts.push('按放宽的读法在检测 ' + widened.map(function (g) { return g.count + ' 条 ' + g.disposition + '/' + g.reason; }).join('、') + '（不是被扣）');
+    parts.push('读法和写的不同、在检测 ' + widened.map(function (g) { return g.count + ' 条 ' + g.disposition + '/' + g.reason; }).join('、') + '（不是被扣）');
   }
   if (!standing && source.listed && !source.accepted) {
     parts.push('不是没负载，是全部被扣在配置获取环节——看首屏第一行');

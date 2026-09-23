@@ -102,6 +102,28 @@ func TestANormalizedItemIsItsOwnLineAndNotAWithheldOne(t *testing.T) {
 	}
 }
 
+// A normalized record annotates a strategy that is also accepted, so the
+// source's listed count takes the strategy once. Counting the record as well
+// had the priority groups -- one record per accepted Plan -- report more
+// strategies listed than the source holds.
+func TestANormalizedRecordDoesNotListItsStrategyTwice(t *testing.T) {
+	at := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	source := NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_NORMALIZED": 2, "CONFIG_REJECTED": 1},
+		[]WithheldObject{
+			{StrategyID: "11", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "PRIORITY_IGNORED"},
+			{StrategyID: "12", Scope: "PLAN", Disposition: "CONFIG_NORMALIZED", Reason: "PRIORITY_IGNORED"},
+			{StrategyID: "13", Scope: "PLAN", Disposition: "CONFIG_REJECTED", Reason: "TRIGGER_CONFIG_MISSING"},
+		})
+	if source.Listed != 4 || source.Accepted != 3 || source.Objects["CONFIG_NORMALIZED"] != 2 {
+		t.Fatalf("listed=%d accepted=%d normalized=%d, want 4 listed: three accepted, two of them normalized, one refused",
+			source.Listed, source.Accepted, source.Objects["CONFIG_NORMALIZED"])
+	}
+	words := WithheldWordsOf("PRIORITY_IGNORED")
+	if words.Kind != WithheldStrategyDefinition || !strings.Contains(words.What, "不是被扣住") || !strings.Contains(words.Next, "不是这里的错关") {
+		t.Fatalf("words=%+v, want the strategy detecting and the platform's close named as its own", words)
+	}
+}
+
 func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// Twenty-nine: RETAINED_SHARE_APPROACHING is a rule over a dimension the
 	// rows did not carry before - the latest completed Slot's retained bytes

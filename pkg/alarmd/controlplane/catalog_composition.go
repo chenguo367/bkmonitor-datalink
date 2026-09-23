@@ -407,6 +407,9 @@ var AlwaysReportedWithheld = []WithheldKey{
 	// range did not parse" is a claim a reader acts on: the widening is the
 	// direction of more detection, and the only way to see it is this pair.
 	{Disposition: DispositionConfigNormalized, Reason: ReasonEffectiveTimeRangeInvalid},
+	// "No strategy here takes part in priority arbitration" is the zero that
+	// says every strategy detects exactly as it would alone on the platform.
+	{Disposition: DispositionConfigNormalized, Reason: ReasonPriorityIgnored},
 }
 
 // NoDataReasons is the set of reasons that withhold a Plan from no-data

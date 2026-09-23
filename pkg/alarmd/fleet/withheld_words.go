@@ -79,6 +79,12 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 	"EFFECTIVE_TIME_RANGE_INVALID": {Kind: WithheldStrategyDefinition,
 		What: "生效时间段的开始或结束时间格式不合法，已按平台自己的读法读：开始坏读作 00:00、结束坏读作 23:59——策略在检测，但检测的时段比配置写的宽，不是被扣住",
 		Next: "策略负责人把该时间段改成 HH:MM；改好后下一轮刷新按写的时段检测，这一行消失"},
+	// The second reason under CONFIG_NORMALIZED, also not withheld: the
+	// strategy runs, without the arbitration the platform applies between
+	// the strategies of one priority group.
+	"PRIORITY_IGNORED": {Kind: WithheldStrategyDefinition,
+		What: "策略配了优先级分组。优先级是平台告警链路在同组策略之间做的抑制：同一目标上只留优先级最高的那条。这里按独立策略检测，不做这层抑制，所以同组的低优先级策略也会在同一目标上告警——策略在检测，不是被扣住",
+		Next: "不需要处理。平台那边可能仍会按优先级关掉低优先级的告警，那是平台的规则，不是这里的错关"},
 	"SNAPSHOT_RETENTION_INSUFFICIENT": {Kind: WithheldDeploymentParameter,
 		What: "策略要的历史窗口超出本部署的快照保留期",
 		Next: "把快照保留期调到策略要求的值（样本里有要求值），下一轮刷新自动接受"},
@@ -94,9 +100,6 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 	"QUERY_BK_DATA_LOCAL_TIME_NOT_MIGRATED": {Kind: WithheldBuildCapability,
 		What: "该查询的本地时间字段还没迁到 Go 侧",
 		Next: "等带该字段的构建；改部署参数没有用"},
-	"UNSUPPORTED_PRIORITY_SEMANTICS": {Kind: WithheldBuildCapability,
-		What: "策略的优先级语义本构建不支持",
-		Next: "等支持该语义的构建；改部署参数没有用"},
 	"UNSUPPORTED_TARGET_SCOPE": {Kind: WithheldBuildCapability,
 		What: "策略的目标范围写法本构建不支持",
 		Next: "等支持该目标范围的构建；改部署参数没有用"},
