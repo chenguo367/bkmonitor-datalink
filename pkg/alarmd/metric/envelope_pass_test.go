@@ -13,6 +13,8 @@ import (
 	"context"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -94,5 +96,32 @@ func TestAPreflightsCountsReachTheirOwnOutcome(t *testing.T) {
 		if got := envelopePassSeries(t, recorder)[outcome]; got != want {
 			t.Errorf("outcome %q = %v, want %v", outcome, got, want)
 		}
+	}
+}
+
+// The write path's envelope count is a series at zero from the first scrape,
+// and it is moved by the state_applied rows and by nothing else.
+//
+// The row it is read from is sampled and omits a zero, so the deletion's
+// "zero for a whole window" can only be read here. The preflight row is
+// observed too, carrying the same field, so a collector that read the count
+// off every state row - or off the wrong one - fails.
+func TestTheWritePathEnvelopeCountIsACounterReadFromTheAppliedRowOnly(t *testing.T) {
+	recorder := NewRecorder(BuildInfo{})
+	if got := testutil.ToFloat64(recorder.phaseTwo.envelopeApply); got != 0 {
+		t.Fatalf("before anything happened = %v, want a series at zero", got)
+	}
+	observe := func(stage observability.Stage, count int64) {
+		recorder.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentState, Stage: stage, Result: observability.ResultSuccess,
+			Counts: observability.Counts{Keys: 4, EnvelopeReadsApply: count},
+		})
+	}
+	observe(observability.StageStateApplied, 2)
+	observe(observability.StageStateApplied, 0)
+	observe(observability.StageStateApplied, 3)
+	observe(observability.StageStatePreflight, 7)
+	if got := testutil.ToFloat64(recorder.phaseTwo.envelopeApply); got != 5 {
+		t.Fatalf("state_envelope_apply_items_total = %v, want 5 from the applied rows alone", got)
 	}
 }

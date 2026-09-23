@@ -86,6 +86,7 @@ type phaseTwoMetrics struct {
 	scheduleTimelineBytes           prometheus.Histogram
 	scheduleSegmentsPruned          prometheus.Counter
 	envelopePass                    *prometheus.CounterVec
+	envelopeApply                   prometheus.Counter
 	schedulePruneSkipped            *prometheus.CounterVec
 	scheduleCutoverDuration         *prometheus.HistogramVec
 	scheduleCutovers                *prometheus.CounterVec
@@ -658,6 +659,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range observability.EnvelopePassOutcomes {
 		metrics.envelopePass.WithLabelValues(outcome)
 	}
+	// The envelope's other consumer: the per-key write path, which reads both
+	// keys of every series it writes and which no preflight count can see. A
+	// counter for the reason the pass's family is one - its log key is on the
+	// state_applied line, which is sampled like every workflow stage and
+	// omitted at zero, and "zero for a whole window" is the one reading the
+	// deletion waits on. No label, so the series exists at zero from the first
+	// scrape.
+	metrics.envelopeApply = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem,
+		Name: "state_envelope_apply_items_total",
+		Help: "State writes on the per-key path whose outcome the older envelope representation decided: the record " +
+			"the write was classified against came from the envelope, or an unreadable envelope with no frame refused " +
+			"it. The envelope can be deleted only when this and state_envelope_pass_series_total{outcome=\"old_representation\"} " +
+			"have both stayed at zero for a whole retention window. A write request that fails part-way reports no " +
+			"items, so its round is under-counted, never over-counted."})
 	metrics.schedulePruneSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_prune_skipped_total", Help: "Schedule timelines a cutover left unpruned, by reason."}, []string{"reason"})
 	metrics.scheduleCutoverDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_duration_seconds", Help: "Publication cutover compare-and-set duration.", Buckets: activeQGSetDurationBuckets}, []string{"result"})
 	for _, reason := range observability.SchedulePruneSkipReasons {
@@ -1438,7 +1453,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission,
 		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries, m.rangeGateDecisions, m.statePreflights,
 		m.queryFailures,
@@ -1584,6 +1599,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		result, reason := observability.NormalizeStatePreflight(observation.Result, observation.ReasonCode)
 		m.statePreflights.WithLabelValues(string(result), string(reason)).Inc()
 		m.observeEnvelopePass(observation.Counts)
+	}
+	if observation.Component == observability.ComponentState && observation.Stage == observability.StageStateApplied &&
+		observation.Counts.EnvelopeReadsApply > 0 {
+		m.envelopeApply.Add(float64(observation.Counts.EnvelopeReadsApply))
 	}
 	m.observeSlotWait(observation)
 	if facts := observation.ScheduleCutover; facts != nil {

@@ -430,6 +430,13 @@ type Counts struct {
 	FrameCorruptRescued int64
 	FrameCorruptLost    int64
 	Unclassified        int64
+	// EnvelopeReadsApply is how many items of a state apply had their outcome
+	// decided by the older representation on the per-key write path, which
+	// reads both keys and which none of the preflight's counts can see. The
+	// other consumer of the envelope beside EnvelopeAnswered: the envelope
+	// can be deleted only when both have stayed at zero for a whole retention
+	// window, and a sum could not say which one had not.
+	EnvelopeReadsApply int64
 }
 
 // TargetResolutionFacts is one Plan's target plan resolved for one Slot:
