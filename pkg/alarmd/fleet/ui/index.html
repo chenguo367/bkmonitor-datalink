@@ -814,6 +814,7 @@ var DEGRADATION = {
   CONTROL_SOURCE_STALE: '策略源超过设计允许的时间没有刷新成功，跑的是上一份好的目录',
   CONTROL_LEADER_ABSENT: '副本拿不到控制面 leader 租约、也不知道谁持有，超过设计允许的时间——可能没人在刷新',
   OPEN_ALERT_SET_STALE: '已开告警集合的副本超过设计允许的时间没拿到消费者的发布，恢复门在用旧知识',
+  OPEN_ALERT_SET_DISJOINT: '本副本发出的告警一条都不在 linkd 的已开告警集合里，集合的键和本副本查的不是一种；恢复门改按本副本发过的告警放行，本副本没发过的告警的恢复仍会被扣住，请核对 linkd 告警源的指纹配置',
   PLATFORM_SETTINGS_STALE: '平台设置的副本超过设计允许的时间没拿到平台的发布，检测在用可能已变的设置',
   OUTPUT_NOT_READY: '副本连不上告警输出：进程活着但不就绪，不接检测任务，由其余副本顶着——少一个副本的容量'
 };

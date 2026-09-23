@@ -1922,6 +1922,14 @@ type OpenAlertSetFacts struct {
 	TrackedSets int `json:"tracked_sets"`
 	LoadedSets  int `json:"loaded_sets"`
 	Members     int `json:"members"`
+	// SentInSet and SentNotInSet are the alerts this replica sent ABNORMAL
+	// for, old enough for the consumer to have opened them, by whether the
+	// sets carry them. Disjoint is none of them carried: the
+	// sets are keyed differently from this replica's lookups, and it
+	// degrades the verdict with DegradationOpenAlertSetDisjoint.
+	SentInSet    int  `json:"sent_in_set"`
+	SentNotInSet int  `json:"sent_not_in_set"`
+	Disjoint     bool `json:"disjoint"`
 	// Lookups counts how the gate's questions were answered since the process
 	// started, by the reader's closed answer words: the authoritative ones
 	// against the copy's own. A gate that has answered every question on its
@@ -1987,6 +1995,13 @@ const (
 	// knowledge is an alert that stays open past its due, and nothing on the
 	// object list shows that.
 	DegradationOpenAlertSetStale DegradationKind = "OPEN_ALERT_SET_STALE"
+	// DegradationOpenAlertSetDisjoint: the consumer's open alert sets carry
+	// none of the alerts this replica sent, out of enough of them that the
+	// sets cannot be keyed the way the replica asks. Every recovery would be
+	// held as "no open alert"; the replica answers from what it sent
+	// instead, and this names that, because a series it did not send the
+	// ABNORMAL for itself still waits.
+	DegradationOpenAlertSetDisjoint DegradationKind = "OPEN_ALERT_SET_DISJOINT"
 	// DegradationControlSourceStale: no refresh round of the control plane's
 	// strategy source has succeeded for longer than the staleness bound. The
 	// deployment executes the last good catalog and every strategy saved
@@ -2036,7 +2051,7 @@ const (
 var DegradationKinds = []DegradationKind{
 	DegradationActivationBehind, DegradationControlSourceStale, DegradationControlLeaderAbsent,
 	DegradationOpenAlertSetStale, DegradationPlatformSettingsStale, DegradationSourceBlocked,
-	DegradationOutputNotReady,
+	DegradationOutputNotReady, DegradationOpenAlertSetDisjoint,
 }
 
 // endpointByRole is the entry under role in a replica's list, or nil.
@@ -2599,6 +2614,9 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 		if snapshot.OpenAlertSet != nil && snapshot.OpenAlertSet.StaleBeyondBound {
 			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationOpenAlertSetStale, Replica: replica})
+		}
+		if snapshot.OpenAlertSet != nil && snapshot.OpenAlertSet.Disjoint {
+			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationOpenAlertSetDisjoint, Replica: replica})
 		}
 		if snapshot.PlatformSettings != nil && snapshot.PlatformSettings.StaleBeyondBound {
 			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationPlatformSettingsStale, Replica: replica})

@@ -1493,40 +1493,45 @@ func (port openAlertCopyPort) Acknowledged(events []contract.TriggerEventV1) {
 // read as "just now" on a copy that never loaded.
 func openAlertSetFactsSource(cache *openalerts.Cache, now func() time.Time) func() *fleet.OpenAlertSetFacts {
 	return func() *fleet.OpenAlertSetFacts {
-		stats := cache.Stats()
-		at := now()
-		facts := &fleet.OpenAlertSetFacts{Mode: string(stats.Mode), StaleBeyondBound: cache.StaleBeyondBound(),
-			IndexProtocol: stats.IndexProtocol, CalibrationConfigured: stats.CalibrationConfigured, SubscriptionReady: stats.SubscriptionReady, CalibratedSets: stats.Calibrated,
-			PendingReads: stats.PendingReads, PendingReconciles: stats.PendingReconciles, MemberBytes: stats.MemberBytes,
-			Available: stats.Available, UnavailableReason: string(stats.UnavailableReason),
-			ReaderFingerprintVersion: openalerts.FingerprintVersion,
-			TrackedSets:              stats.Tracked, LoadedSets: stats.Loaded, Members: stats.Members}
-		if !stats.IndexReadAt.IsZero() {
-			age := at.Sub(stats.IndexReadAt).Seconds()
-			facts.IndexReadAgeSeconds = &age
-		}
-		if !stats.LoadedAt.IsZero() {
-			age := at.Sub(stats.LoadedAt).Seconds()
-			facts.AuthoritativeAgeSeconds = &age
-		}
-		// The publisher's heartbeat as last read, by its own clock. A copy
-		// that never read one carries none: a zero would read as a cycle
-		// completed at the epoch.
-		if !stats.Heartbeat.PublishedAt.IsZero() {
-			age := at.Sub(stats.Heartbeat.PublishedAt).Seconds()
-			facts.HeartbeatAgeSeconds = &age
-			facts.CycleSeconds = int64(stats.Heartbeat.Cycle / time.Second)
-			facts.FingerprintVersion = stats.Heartbeat.FingerprintVersion
-		}
-		// Every answer word, zero included: a word missing from the map
-		// cannot be told from one never given.
-		facts.Lookups = make(map[string]uint64, len(openalerts.Answers))
-		for _, answer := range openalerts.Answers {
-			facts.Lookups[string(answer)] = stats.Lookups[answer]
-		}
+		facts := openAlertSetFacts(cache.Stats(), cache.StaleBeyondBound(), now())
 		facts.Comparison = openAlertComparisonFacts(cache.Comparison())
 		return facts
 	}
+}
+
+// openAlertSetFacts is the copy's stats as the replica publishes them.
+func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Time) *fleet.OpenAlertSetFacts {
+	facts := &fleet.OpenAlertSetFacts{Mode: string(stats.Mode), StaleBeyondBound: staleBeyondBound,
+		IndexProtocol: stats.IndexProtocol, CalibrationConfigured: stats.CalibrationConfigured, SubscriptionReady: stats.SubscriptionReady, CalibratedSets: stats.Calibrated,
+		PendingReads: stats.PendingReads, PendingReconciles: stats.PendingReconciles, MemberBytes: stats.MemberBytes,
+		Available: stats.Available, UnavailableReason: string(stats.UnavailableReason),
+		ReaderFingerprintVersion: openalerts.FingerprintVersion,
+		TrackedSets:              stats.Tracked, LoadedSets: stats.Loaded, Members: stats.Members,
+		SentInSet: stats.SentInSet, SentNotInSet: stats.SentNotInSet, Disjoint: stats.Disjoint}
+	if !stats.IndexReadAt.IsZero() {
+		age := at.Sub(stats.IndexReadAt).Seconds()
+		facts.IndexReadAgeSeconds = &age
+	}
+	if !stats.LoadedAt.IsZero() {
+		age := at.Sub(stats.LoadedAt).Seconds()
+		facts.AuthoritativeAgeSeconds = &age
+	}
+	// The publisher's heartbeat as last read, by its own clock. A copy
+	// that never read one carries none: a zero would read as a cycle
+	// completed at the epoch.
+	if !stats.Heartbeat.PublishedAt.IsZero() {
+		age := at.Sub(stats.Heartbeat.PublishedAt).Seconds()
+		facts.HeartbeatAgeSeconds = &age
+		facts.CycleSeconds = int64(stats.Heartbeat.Cycle / time.Second)
+		facts.FingerprintVersion = stats.Heartbeat.FingerprintVersion
+	}
+	// Every answer word, zero included: a word missing from the map
+	// cannot be told from one never given.
+	facts.Lookups = make(map[string]uint64, len(openalerts.Answers))
+	for _, answer := range openalerts.Answers {
+		facts.Lookups[string(answer)] = stats.Lookups[answer]
+	}
+	return facts
 }
 
 func productionPhaseTwoPrefix(prefix, component string) string {

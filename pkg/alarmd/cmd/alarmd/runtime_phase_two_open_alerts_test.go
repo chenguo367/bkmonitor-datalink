@@ -162,3 +162,19 @@ func TestAnIndexCopyPublishesItsComparison(t *testing.T) {
 		t.Fatalf("the index copy's facts carry no comparison: %+v", facts.Comparison)
 	}
 }
+
+// Sets that carry none of this replica's alerts reach the published facts
+// under their own names, and so the fleet verdict: the copy saying so is
+// not enough if the replica does not pass it on.
+func TestTheDisjointStateIsPublishedWithTheSentCounts(t *testing.T) {
+	stats := openalerts.Stats{Mode: openalerts.ModeSelfMaintained, IndexProtocol: true,
+		SentInSet: 0, SentNotInSet: 103, Disjoint: true, UnavailableReason: openalerts.UnavailableMembersDisjoint}
+	facts := openAlertSetFacts(stats, false, time.Unix(1_700_000_000, 0))
+	if !facts.Disjoint || facts.SentInSet != 0 || facts.SentNotInSet != 103 || facts.UnavailableReason != "members_disjoint" {
+		t.Fatalf("facts = %+v, want disjoint with 0 of 103 found and the reason named", facts)
+	}
+	stats.SentInSet, stats.Disjoint, stats.UnavailableReason = 4, false, ""
+	if facts := openAlertSetFacts(stats, false, time.Unix(1_700_000_000, 0)); facts.Disjoint || facts.SentInSet != 4 {
+		t.Fatalf("facts = %+v, want the found count and no disjoint", facts)
+	}
+}

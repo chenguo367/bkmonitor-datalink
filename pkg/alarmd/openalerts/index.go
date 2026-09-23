@@ -57,6 +57,34 @@ type indexState struct {
 	// eventSourceID is this deployment's own source as the last successful
 	// calibration named it, kept for the recovery comparison.
 	eventSourceID string
+	// opened is when this process first sent the ABNORMAL for each alert it
+	// has not sent the RECOVERY for since. Kept apart from Cache.added,
+	// which a calibration prunes after the local retention: an alert resent
+	// every round would otherwise be forever younger than
+	// SentConfirmAfter, and the fallback would forget the alerts it exists
+	// to let recover. Bounded by MaxLocalEntries; past it a new alert is
+	// not recorded and counted as an eviction.
+	opened map[member]time.Time
+	// The latest assessment of this process's own sends against the sets;
+	// see assessSent.
+	sentInSet, sentNotInSet int
+	disjoint                bool
+}
+
+// noteOpened records the first ABNORMAL of an alert. Called with the lock
+// held; a no-op outside the index protocol.
+func (cache *Cache) noteOpened(m member, now time.Time) {
+	if cache.index == nil {
+		return
+	}
+	if _, ok := cache.index.opened[m]; ok {
+		return
+	}
+	if len(cache.index.opened) >= cache.index.options.MaxLocalEntries {
+		cache.evictions++
+		return
+	}
+	cache.index.opened[m] = now
 }
 
 func NewIndex(options IndexOptions) (*Cache, error) {
@@ -78,7 +106,7 @@ func NewIndex(options IndexOptions) (*Cache, error) {
 	cache := &Cache{now: options.Now, policy: options.Policy, maxLocal: options.MaxLocalEntries,
 		added: map[member]stamped{}, removed: map[member]stamped{},
 		refreshes: map[string]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{},
-		index: &indexState{options: options, entries: map[StrategyKey]*indexEntry{}, wake: make(chan struct{}, 1)},
+		index: &indexState{options: options, entries: map[StrategyKey]*indexEntry{}, wake: make(chan struct{}, 1), opened: map[member]time.Time{}},
 	}
 	return cache, nil
 }
@@ -150,6 +178,11 @@ func (cache *Cache) SetTracked(keys []StrategyKey) error {
 	for m := range cache.removed {
 		if _, exists := unique[m.key]; !exists {
 			delete(cache.removed, m)
+		}
+	}
+	for m := range cache.index.opened {
+		if _, exists := unique[m.key]; !exists {
+			delete(cache.index.opened, m)
 		}
 	}
 	cache.index.order = cache.index.order[:0]
@@ -241,6 +274,13 @@ func (cache *Cache) Untrack(keys ...StrategyKey) {
 		for m := range cache.removed {
 			if m.key == key {
 				delete(cache.removed, m)
+			}
+		}
+		if cache.index != nil {
+			for m := range cache.index.opened {
+				if m.key == key {
+					delete(cache.index.opened, m)
+				}
 			}
 		}
 	}
@@ -428,6 +468,70 @@ func (cache *Cache) refreshIndex(ctx context.Context) {
 		}
 		cancel()
 	}
+	cache.mu.Lock()
+	cache.assessSent()
+	cache.mu.Unlock()
+}
+
+// assessSent checks the alerts this process sent ABNORMAL for against the
+// latest read of their strategy's set. It is the one reading that tells a
+// consumer holding no alert on a series from sets keyed another way: both
+// answer every lookup "absent", and only the second also leaves out the
+// alerts this process opened itself. Called with the lock held, once per
+// refresh round; the work is one pass over the local entries.
+func (cache *Cache) assessSent() {
+	inSet, notInSet := 0, 0
+	for m, first := range cache.index.opened {
+		entry := cache.index.entries[m.key]
+		if entry == nil {
+			continue
+		}
+		read := entry.indexReadAt
+		if entry.calibratedStarted.After(read) {
+			read = entry.calibratedStarted
+		}
+		if read.IsZero() || first.After(read.Add(-SentConfirmAfter)) {
+			continue
+		}
+		_, inIndex := entry.index[m.fingerprint]
+		_, inMissing := entry.missing[m.fingerprint]
+		if inIndex || inMissing {
+			inSet++
+		} else {
+			notInSet++
+		}
+	}
+	disjoint := inSet == 0 && notInSet >= DisjointMinimum
+	if cache.index.disjoint {
+		// See DisjointMinimum: only positive evidence ends the state.
+		disjoint = inSet == 0 && len(cache.index.opened) > 0
+	}
+	if disjoint && !cache.index.disjoint {
+		cache.unavailable[UnavailableMembersDisjoint]++
+	}
+	cache.index.sentInSet, cache.index.sentNotInSet, cache.index.disjoint = inSet, notInSet, disjoint
+}
+
+// indexGate answers the recovery gate. While the sets are disjoint from
+// this process's sends (see DisjointMinimum) an "absent" from them says
+// nothing about the series, so the gate is answered as when the
+// publication is unavailable: by the policy in force, which by default is
+// what this process sent. A fingerprint the sets do carry is still open.
+// Called with the lock held.
+func (cache *Cache) indexGate(m member, now time.Time) bool {
+	if !cache.index.disjoint {
+		return cache.indexContains(m, now, true)
+	}
+	if cache.policy == PolicyPassThrough {
+		cache.lookups[AnswerPassedThrough]++
+		return true
+	}
+	cache.lookups[AnswerSelfMaintained]++
+	if cache.indexContains(m, now, false) {
+		return true
+	}
+	_, opened := cache.index.opened[m]
+	return opened
 }
 
 func stringSet(values []string) map[string]struct{} {
@@ -734,6 +838,13 @@ func (cache *Cache) indexStats() Stats {
 		}
 	}
 	stats.Available = all && cache.index.ready
+	stats.SentInSet, stats.SentNotInSet, stats.Disjoint = cache.index.sentInSet, cache.index.sentNotInSet, cache.index.disjoint
+	if cache.index.disjoint {
+		stats.Available = false
+		if stats.UnavailableReason == "" {
+			stats.UnavailableReason = UnavailableMembersDisjoint
+		}
+	}
 	stats.MemberBytes = cache.index.bytes
 	stats.SubscriptionReady = cache.index.ready
 	for k, v := range cache.refreshes {
