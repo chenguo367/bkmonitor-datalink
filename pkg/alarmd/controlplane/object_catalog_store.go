@@ -360,18 +360,14 @@ func (repository *RedisCatalogRepository) writeObjectCatalog(ctx context.Context
 			}
 		}
 	}
-	result, err := repository.client.Eval(ctx, writeCatalogManifestScript,
-		[]string{repository.catalogManifestKey(catalog.SnapshotRevision)}, content.manifestPayload, repository.ttl.Milliseconds()).Int()
-	if err != nil {
-		return fmt.Errorf("alarmd controlplane: write catalog manifest: %w", err)
-	}
-	if result == -1 {
-		return ErrCatalogManifestCollision
-	}
 	// The retention goes beside the manifest, with the manifest's own life:
 	// the renewal reads it for the publication it renews, so a leader that
 	// has just started keeps a long Plan's objects as long as the one that
-	// published them did, without having admitted a Catalog first.
+	// published them did, without having admitted a Catalog first. Written
+	// before the manifest, so no renewal can find the manifest without it:
+	// a leader that stopped between the two would otherwise leave a
+	// publication whose long Plans' objects are renewed for the catalog TTL.
+	// It is named by revision, so a manifest collision after it is harmless.
 	if objectTTL > repository.ttl {
 		if err := repository.client.Set(ctx, repository.objectRetentionKey(catalog.SnapshotRevision),
 			strconv.FormatInt(objectTTL.Milliseconds(), 10), repository.ttl).Err(); err != nil {
@@ -379,6 +375,14 @@ func (repository *RedisCatalogRepository) writeObjectCatalog(ctx context.Context
 		}
 	} else if err := repository.client.Del(ctx, repository.objectRetentionKey(catalog.SnapshotRevision)).Err(); err != nil {
 		return fmt.Errorf("alarmd controlplane: clear catalog object retention: %w", err)
+	}
+	result, err := repository.client.Eval(ctx, writeCatalogManifestScript,
+		[]string{repository.catalogManifestKey(catalog.SnapshotRevision)}, content.manifestPayload, repository.ttl.Milliseconds()).Int()
+	if err != nil {
+		return fmt.Errorf("alarmd controlplane: write catalog manifest: %w", err)
+	}
+	if result == -1 {
+		return ErrCatalogManifestCollision
 	}
 	objects := make(map[execution.ObjectDigest]struct{}, len(content.objects))
 	for digest := range content.objects {
