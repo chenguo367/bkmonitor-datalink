@@ -231,6 +231,10 @@ func runPhaseTwoApplicationWithDependencies(
 		// this point is told the stream is not ready and tries again.
 		server.SetGRPC(bundle.dependencies.ControlStream)
 	}
+	if err == nil && bundle != nil {
+		bundle.liveness.logger = logger
+		server.SetLiveness(bundle.liveness)
+	}
 	if err != nil {
 		cancelRuntime()
 		cancelHTTP()
@@ -517,6 +521,8 @@ type phaseTwoWorkerBundleDependencies struct {
 type phaseTwoWorkerBundle struct {
 	runtimeConfig *observability.RuntimeConfigFacts
 	dependencies  phaseTwoWorkerBundleDependencies
+	// liveness is what the liveness probe judges; see phaseTwoLiveness.
+	liveness *phaseTwoLiveness
 	// workerPorts is what this runtime actually handed the coordinator.
 	//
 	// Kept so a test can read it. A port that may be nil is a port a production
@@ -819,7 +825,8 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 	}
 	bundle := &phaseTwoWorkerBundle{dependencies: dependencies, outputSinkReady: true,
 		assigned: make(map[execution.QueryGroupIdentity]struct{}),
-		runners:  make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle)}
+		runners:  make(map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle),
+		liveness: newPhaseTwoLiveness(dependencies.Now, dependencies.Recorder)}
 	if dependencies.Recorder != nil {
 		dependencies.Recorder.SetOwnedQueryGroups(0)
 		dependencies.Recorder.SetControlSourceSource(bundle.controlSourceStats)
@@ -1032,13 +1039,17 @@ func (bundle *phaseTwoWorkerBundle) Run(ctx context.Context) error {
 
 	var runErr error
 	schedulerRunning := true
+	bundle.liveness.start(livenessLoopControl, controlLoopStallBound)
 	for runErr == nil {
 		select {
 		case <-ctx.Done():
 			runErr = ctx.Err()
 		case <-refreshTicker.C:
+			began := bundle.liveness.clock()
 			runErr = bundle.refreshAndReconcile(ctx, true)
+			bundle.liveness.turned(livenessLoopControl, began)
 		case <-reconcileTicker.C:
+			began := bundle.liveness.clock()
 			bundle.probeControlRedis(ctx)
 			// Applied before the reconcile rather than after it: a failure here
 			// must not decide whether the pipeline reconciles, and the applier
@@ -1047,6 +1058,7 @@ func (bundle *phaseTwoWorkerBundle) Run(ctx context.Context) error {
 				bundle.dependencies.ApplyObservationWindows(ctx)
 			}
 			runErr = bundle.refreshAndReconcile(ctx, false)
+			bundle.liveness.turned(livenessLoopControl, began)
 		case schedulerErr := <-schedulerDone:
 			schedulerRunning = false
 			if schedulerErr == nil {
@@ -1226,6 +1238,8 @@ func (dispatcher *phaseTwoRunnerDispatcher) executeScheduled(ctx context.Context
 	}
 	func() {
 		defer dispatcher.changeExecuting(-1)
+		token := dispatcher.bundle.liveness.executionStarted(scheduled.place.deadline)
+		defer dispatcher.bundle.liveness.executionReturned(token)
 		if ctx.Err() == nil && dispatcher.bundle.isCurrentScheduledRunner(scheduled) {
 			result.ran = true
 			func() {
@@ -1255,7 +1269,13 @@ func (dispatcher *phaseTwoRunnerDispatcher) stop() {
 func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan struct{}) error {
 	var canceled error
 	ctxDone := ctx.Done()
+	liveness := dispatcher.bundle.liveness
+	if !dispatcher.oneShot {
+		liveness.setSlots(dispatcher.fanout)
+		liveness.start(livenessLoopDispatch, dispatchLoopStallBound)
+	}
 	for {
+		began := liveness.clock()
 		dispatcher.observeOccupancy(ctx)
 		if canceled != nil && len(dispatcher.active) == 0 {
 			return canceled
@@ -1331,6 +1351,10 @@ func (dispatcher *phaseTwoRunnerDispatcher) run(ctx context.Context, wake <-chan
 			retryReady = retryTimer.C
 		}
 
+		// The turn is the work up to the wait; the wait itself is idle.
+		if !dispatcher.oneShot {
+			liveness.turned(livenessLoopDispatch, began)
+		}
 		select {
 		case dispatch <- scheduled:
 			dispatcher.markDispatched(scheduled, selectDelayed, delayedIndex, delayedDue)
@@ -2159,6 +2183,7 @@ func (bundle *phaseTwoWorkerBundle) Shutdown(ctx context.Context) error {
 		return errors.New("phase-two worker shutdown context is required")
 	}
 	bundle.shutdownOnce.Do(func() {
+		bundle.liveness.stopJudging()
 		bundle.mu.Lock()
 		bundle.draining = true
 		cancelMaintain := bundle.cancelMaintain
@@ -2760,10 +2785,15 @@ func (bundle *phaseTwoWorkerBundle) stopQueryGroup(
 	lifecycle *phaseTwoQueryGroupLifecycle,
 ) error {
 	lifecycle.cancel()
+	// Bounded as a lost Query Group's stop is: the control loop runs this, and
+	// the run context has no deadline, so a lease goroutine that did not end
+	// would have held the loop for good. Past the bound the lease is released
+	// anyway; a renewal still in flight then finds its fence stale and stops.
 	select {
 	case <-lifecycle.done:
 	case <-ctx.Done():
 		return ctx.Err()
+	case <-time.After(bundle.dependencies.Config.ShutdownTimeout.Duration()):
 	}
 	if err := lifecycle.runner.Release(ctx); err != nil {
 		return fmt.Errorf("phase-two release Query Group %s: %w", queryGroup, err)
@@ -3405,6 +3435,9 @@ type httpRuntime interface {
 	SetAPI(http.Handler)
 	// SetGRPC installs the control stream the same way.
 	SetGRPC(http.Handler)
+	// SetLiveness installs what /healthz judges, once the loops it judges
+	// exist.
+	SetLiveness(httpservice.LivenessSource)
 }
 
 // waitRuntimeComponent waits for one component's shutdown to report, up to the
