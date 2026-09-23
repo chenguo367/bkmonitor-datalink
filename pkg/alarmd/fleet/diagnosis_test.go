@@ -229,9 +229,9 @@ func TestALaterPageThatRereadsSaysSoAndNamesAChangedUniverse(t *testing.T) {
 // and neither changes a verdict.
 func TestDiagnosisProgressFillsSlotsAndNamesWhatItCouldNotRead(t *testing.T) {
 	var asked [][]string
-	rig := newDiagnosisRig(t, diagnosisFacts(), func(groups []string) (map[string]ProgressFacts, error) {
+	rig := newDiagnosisRig(t, diagnosisFacts(), func(_ context.Context, groups []string) (map[string]ProgressFacts, map[string]bool, error) {
 		asked = append(asked, groups)
-		return map[string]ProgressFacts{"qg-4101-a": {LastFullSlot: 1790150400, NextSlot: 1790150460}}, nil
+		return map[string]ProgressFacts{"qg-4101-a": {LastFullSlot: 1790150400, NextSlot: 1790150460}}, nil, nil
 	})
 	rig.universe = []string{"4101", "4103"}
 	body := rig.page(t, "", 0)
@@ -242,14 +242,24 @@ func TestDiagnosisProgressFillsSlotsAndNamesWhatItCouldNotRead(t *testing.T) {
 	if row.Plans[0].LastFullSlot == nil || *row.Plans[0].NextSlot != 1790150460 || row.Plans[1].LastFullSlot != nil {
 		t.Errorf("plans = %+v, want a's slots and b's absent", row.Plans)
 	}
-	if !hasPart(row, "qg-4101-b progress", UnknownObjectNotObserved) || row.Verdict != StateDefect {
+	if !hasPart(row, "qg-4101-b progress", ProgressNotFound) || row.Verdict != StateDefect {
 		t.Errorf("row = %+v, want b's progress unknown and the verdict unchanged", row)
 	}
 
-	failing := newDiagnosisRig(t, diagnosisFacts(), func([]string) (map[string]ProgressFacts, error) { return nil, errors.New("down") })
+	oneFailed := newDiagnosisRig(t, diagnosisFacts(), func(context.Context, []string) (map[string]ProgressFacts, map[string]bool, error) {
+		return map[string]ProgressFacts{}, map[string]bool{"qg-4101-a": true}, nil
+	})
+	oneFailed.universe = []string{"4103"}
+	if body = oneFailed.page(t, "", 0); !hasPart(body.Strategies[0], "qg-4101-a progress", ProgressReadFailed) {
+		t.Errorf("a failed object read = %+v, want PROGRESS_READ_FAILED apart from not found", body.Strategies[0].UnknownParts)
+	}
+
+	failing := newDiagnosisRig(t, diagnosisFacts(), func(context.Context, []string) (map[string]ProgressFacts, map[string]bool, error) {
+		return nil, nil, errors.New("down")
+	})
 	failing.universe = []string{"4103"}
 	body = failing.page(t, "", 0)
-	if body.Progress != "unavailable" || !hasPart(body.Strategies[0], "qg-4101-a progress", "PROGRESS_UNREADABLE") ||
+	if body.Progress != "unavailable" || !hasPart(body.Strategies[0], "qg-4101-a progress", ProgressUnreadable) ||
 		body.Strategies[0].Verdict != StateDetecting {
 		t.Errorf("failed read = %q %+v", body.Progress, body.Strategies[0])
 	}
@@ -299,6 +309,46 @@ func TestADiagnosisPageIsCutOnBytesWithoutLosingARow(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "1,2,3,4,5" {
 		t.Fatalf("rows = %v", got)
+	}
+}
+
+// Two diagnoses paging at once each keep their own read: interleaved pages
+// neither evict the other nor reread, and a universe read that failed is not
+// kept, so the next page of that diagnosis reads again.
+func TestConcurrentDiagnosesKeepTheirOwnReadAndAFailedReadIsNotKept(t *testing.T) {
+	rig := newDiagnosisRig(t, diagnosisFacts(), nil)
+	for i := 1; i <= 6; i++ {
+		rig.universe = append(rig.universe, strconv.Itoa(6000+i))
+	}
+	a1, b1 := rig.page(t, "", 2), rig.page(t, "", 2)
+	a2, b2 := rig.page(t, a1.NextCursor, 2), rig.page(t, b1.NextCursor, 2)
+	if a1.Diagnosis == b1.Diagnosis || a2.SnapshotReread || b2.SnapshotReread || rig.universeReads != 2 {
+		t.Fatalf("ids %s/%s reread %v/%v reads %d, want two diagnoses read once each", a1.Diagnosis, b1.Diagnosis, a2.SnapshotReread, b2.SnapshotReread, rig.universeReads)
+	}
+
+	flaky := newDiagnosisRig(t, diagnosisFacts(), nil)
+	flaky.universe = []string{"4101", "4102", "4103"}
+	first := flaky.page(t, "", 1)
+	flaky.universeErr = errors.New("SOURCE_READ_TIMEOUT")
+	flaky.clock = flaky.clock.Add(DiagnosisCacheTTL + time.Second)
+	failed := flaky.page(t, first.NextCursor, 1)
+	flaky.universeErr = nil
+	recovered := flaky.page(t, first.NextCursor, 1)
+	if failed.Universe.Status != "unreadable" || recovered.Universe.Status != "ok" || len(recovered.Strategies) != 1 {
+		t.Fatalf("failed %+v recovered %+v, want the failure not kept", failed.Universe, recovered.Universe)
+	}
+}
+
+// A follower whose hop to an existing Leader failed refuses the page: a page
+// of LOOKUP_UNAVAILABLE rows whose coverage holds would read as a diagnosis.
+func TestAFailedForwardToALeaderIsARefusalNotALocalPage(t *testing.T) {
+	forward := func(http.ResponseWriter, *http.Request) (bool, string) { return false, ForwardFailed }
+	handler := WithDiagnosis(http.NotFoundHandler(), nil, func(string) StrategyLookupFacts { return StrategyLookupFacts{} }, forward,
+		func(context.Context) ([]string, error) { return []string{"1"}, nil }, nil, "pod-a", func() time.Time { return now }, 0)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, httptest.NewRequest("GET", "/api/diagnose", nil))
+	if w.Code != http.StatusServiceUnavailable || !strings.Contains(w.Body.String(), "LEADER_UNAVAILABLE") {
+		t.Fatalf("status %d body %s", w.Code, w.Body.String())
 	}
 }
 

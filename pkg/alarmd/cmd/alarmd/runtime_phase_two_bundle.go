@@ -1068,7 +1068,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// The environment diagnosis: every strategy of the source's active set,
 	// one row each, answered where the catalog is the way a standing is.
 	fleetAPI = fleet.WithDiagnosis(fleetAPI, fleetService, strategyLookupSource(reconciler),
-		leaderForwarder(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil),
+		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, diagnosisForwardTimeout),
 		diagnosisUniverse(strategySource), diagnosisProgress(progressStore),
 		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
 	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())

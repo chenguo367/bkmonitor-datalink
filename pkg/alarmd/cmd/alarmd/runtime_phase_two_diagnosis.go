@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -51,39 +52,49 @@ type progressBatchLoader interface {
 }
 
 // diagnosisProgress reads the page's objects' persisted progress in bounded
-// batches. An object whose own read failed or found nothing is left out, and
-// the page says so per Plan; a batch that failed as a whole fails the page's
-// progress, which the page then reports as unavailable.
+// batches, under the request's context so a client that went away stops the
+// reads. An object whose own read failed is returned apart from one with no
+// record; a batch that failed as a whole fails the page's progress.
 func diagnosisProgress(store progressBatchLoader) fleet.ProgressReader {
 	if store == nil {
 		return nil
 	}
-	return func(queryGroups []string) (map[string]fleet.ProgressFacts, error) {
-		out := make(map[string]fleet.ProgressFacts, len(queryGroups))
-		ctx := context.Background()
+	return func(ctx context.Context, queryGroups []string) (map[string]fleet.ProgressFacts, map[string]bool, error) {
+		found := make(map[string]fleet.ProgressFacts, len(queryGroups))
+		failed := map[string]bool{}
 		for start := 0; start < len(queryGroups); start += diagnosisProgressBatch {
+			if err := ctx.Err(); err != nil {
+				return nil, nil, err
+			}
 			end := min(start+diagnosisProgressBatch, len(queryGroups))
 			identities := make([]execution.ProgressIdentity, 0, end-start)
 			for _, group := range queryGroups[start:end] {
 				identities = append(identities, execution.ProgressIdentity{QueryGroup: execution.QueryGroupIdentity(group)})
 			}
 			results, errs := store.LoadProgressBatch(ctx, identities)
-			failed := 0
+			batchFailed := 0
 			for index, result := range results {
+				group := string(identities[index].QueryGroup)
 				if errs[index] != nil {
-					failed++
+					failed[group] = true
+					batchFailed++
 					continue
 				}
 				if result.Status != execution.ProgressFound || result.Progress == nil {
 					continue
 				}
-				out[string(identities[index].QueryGroup)] = fleet.ProgressFacts{
-					LastFullSlot: int64(result.Progress.LastFullSlot), NextSlot: int64(result.Progress.NextSlot)}
+				found[group] = fleet.ProgressFacts{LastFullSlot: int64(result.Progress.LastFullSlot), NextSlot: int64(result.Progress.NextSlot)}
 			}
-			if failed == len(identities) && failed > 0 {
-				return nil, errors.New("PROGRESS_UNREADABLE")
+			if batchFailed == len(identities) && batchFailed > 0 {
+				return nil, nil, errors.New(fleet.ProgressUnreadable)
 			}
 		}
-		return out, nil
+		return found, failed, nil
 	}
 }
+
+// diagnosisForwardTimeout bounds a diagnosis page's hop to the Leader. The
+// Leader reads the source's set and the fleet's snapshots on a diagnosis's
+// first page, which is more than a standing's memory read; the channel's own
+// request deadline (3 s) still bounds the whole page, so this stays inside it.
+const diagnosisForwardTimeout = 2500 * time.Millisecond

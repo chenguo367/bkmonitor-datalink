@@ -82,7 +82,108 @@ type diagnosisEntry struct {
 	view      *View
 	readError string
 	expires   time.Time
+	// ready is closed when the read that fills the entry has finished; a
+	// request for the same diagnosis waits on it instead of reading again.
+	ready chan struct{}
 }
+
+// DiagnosisCacheEntries bounds the diagnoses kept at once: a few people
+// diagnosing the same deployment each keep their own read, and a fifth
+// evicts the entry closest to expiring.
+const DiagnosisCacheEntries = 4
+
+// diagnosisCache keeps each diagnosis's universe and view by its id. The
+// reads happen outside the lock; a failed universe read is not kept, so a
+// cancelled request does not answer "unreadable" to the pages after it.
+type diagnosisCache struct {
+	mu      sync.Mutex
+	entries map[string]*diagnosisEntry
+}
+
+func (cache *diagnosisCache) get(ctx context.Context, id string, at time.Time, read func(context.Context) *diagnosisEntry) (*diagnosisEntry, bool) {
+	cache.mu.Lock()
+	if entry, ok := cache.entries[id]; ok && id != "" {
+		cache.mu.Unlock()
+		select {
+		case <-entry.ready:
+		case <-ctx.Done():
+			return &diagnosisEntry{id: id, readError: "DIAGNOSIS_READ_CANCELLED", ready: closedReady()}, false
+		}
+		if entry.readError == "" && !at.After(entry.expires) {
+			return entry, false
+		}
+		cache.mu.Lock()
+		if cache.entries[id] == entry {
+			delete(cache.entries, id)
+		}
+	}
+	if id == "" {
+		id = newDiagnosisID()
+	}
+	placeholder := &diagnosisEntry{id: id, ready: make(chan struct{})}
+	cache.evictFor(at)
+	cache.entries[id] = placeholder
+	cache.mu.Unlock()
+
+	filled := read(ctx)
+	placeholder.universe, placeholder.digest, placeholder.readAt = filled.universe, filled.digest, filled.readAt
+	placeholder.view, placeholder.readError, placeholder.expires = filled.view, filled.readError, filled.expires
+	close(placeholder.ready)
+	if placeholder.readError != "" {
+		cache.mu.Lock()
+		if cache.entries[id] == placeholder {
+			delete(cache.entries, id)
+		}
+		cache.mu.Unlock()
+	}
+	return placeholder, true
+}
+
+// evictFor makes room for one entry: expired ones first, then the one
+// closest to expiring. Called with the lock held.
+func (cache *diagnosisCache) evictFor(at time.Time) {
+	for id, entry := range cache.entries {
+		if isReady(entry) && at.After(entry.expires) {
+			delete(cache.entries, id)
+		}
+	}
+	for len(cache.entries) >= DiagnosisCacheEntries {
+		oldest := ""
+		for id, entry := range cache.entries {
+			if !isReady(entry) {
+				continue
+			}
+			if oldest == "" || entry.expires.Before(cache.entries[oldest].expires) {
+				oldest = id
+			}
+		}
+		if oldest == "" {
+			return
+		}
+		delete(cache.entries, oldest)
+	}
+}
+
+func isReady(entry *diagnosisEntry) bool {
+	select {
+	case <-entry.ready:
+		return true
+	default:
+		return false
+	}
+}
+
+func closedReady() chan struct{} {
+	ready := make(chan struct{})
+	close(ready)
+	return ready
+}
+
+// ForwardFailed is the refusal a forwarder gives when a Leader exists and
+// the hop to it failed. A diagnosis page is then refused rather than
+// answered here: a page of LOOKUP_UNAVAILABLE rows whose coverage holds
+// reads as a diagnosis, and it is not one.
+const ForwardFailed = "FORWARD_FAILED"
 
 // WithDiagnosis serves GET /api/diagnose[?cursor=&limit=]. The page is
 // answered where the catalog is: a process without one forwards the page to
@@ -93,8 +194,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 	if now == nil {
 		now = time.Now
 	}
-	var mu sync.Mutex
-	var cached *diagnosisEntry
+	cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/diagnose" {
 			next.ServeHTTP(response, request)
@@ -128,31 +228,24 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			return
 		}
 		if !lookup("0").Available && forward != nil && request.Header.Get(forwardedHeader) == "" {
-			if forwarded, _ := forward(response, request); forwarded {
+			forwarded, refusal := forward(response, request)
+			if forwarded {
 				return
 			}
-			// The Leader could not be reached: answer here, where every row
-			// will say LOOKUP_UNAVAILABLE and the universe is still counted.
+			if refusal == ForwardFailed {
+				writeJSON(response, http.StatusServiceUnavailable, map[string]string{"error": "LEADER_UNAVAILABLE", "reason": refusal})
+				return
+			}
+			// No Leader at all: answer here, where every row says
+			// LOOKUP_UNAVAILABLE and the universe is still counted.
 		}
 		at := now()
-		mu.Lock()
-		entry := cached
-		reread := false
-		if entry == nil || cursor.Diagnosis == "" || entry.id != cursor.Diagnosis || at.After(entry.expires) {
-			reread = cursor.Diagnosis != ""
-			entry = readDiagnosisEntry(request.Context(), service, universe, at, stallAfter)
-			if cursor.Diagnosis != "" {
-				// A later page's reread keeps the diagnosis id, so the CLI's
-				// cursor stays valid; the digest comparison below says whether
-				// the population moved under it.
-				entry.id = cursor.Diagnosis
-			}
-			cached = entry
-		}
-		mu.Unlock()
+		entry, fresh := cache.get(request.Context(), cursor.Diagnosis, at, func(ctx context.Context) *diagnosisEntry {
+			return readDiagnosisEntry(ctx, service, universe, at, stallAfter)
+		})
 		body := DiagnosisResponse{Diagnosis: entry.id, AnsweredBy: replica, Strategies: []DiagnosisRow{},
 			Verdicts: DiagnosisVerdicts(), UnknownReasons: append([]string(nil), DiagnosisUnknownReasons...),
-			SnapshotReread: reread, Progress: "not_wired"}
+			SnapshotReread: fresh && cursor.Diagnosis != "", Progress: "not_wired"}
 		body.Universe = DiagnosisUniverse{Status: "ok", Source: "strategy_ids", Count: len(entry.universe), Digest: entry.digest}
 		if !entry.readAt.IsZero() {
 			readAt := entry.readAt
@@ -173,13 +266,13 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			return diagnoseStrategy(id, lookup(id), ctx)
 		})
 		if progress != nil {
-			facts, err := progress(pageQueryGroups(page.Rows))
+			found, failed, err := progress(request.Context(), pageQueryGroups(page.Rows))
 			if err != nil {
 				body.Progress = "unavailable"
-				applyProgress(page.Rows, nil, "PROGRESS_UNREADABLE")
+				applyProgress(page.Rows, nil, nil, ProgressUnreadable)
 			} else {
 				body.Progress = "read"
-				applyProgress(page.Rows, facts, "")
+				applyProgress(page.Rows, found, failed, "")
 			}
 		}
 		body.Strategies, body.Page = page.Rows, page
@@ -191,7 +284,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 }
 
 func readDiagnosisEntry(ctx context.Context, service *Service, universe UniverseReader, at time.Time, stallAfter time.Duration) *diagnosisEntry {
-	entry := &diagnosisEntry{id: newDiagnosisID(), readAt: at, expires: at.Add(DiagnosisCacheTTL)}
+	entry := &diagnosisEntry{readAt: at, expires: at.Add(DiagnosisCacheTTL)}
 	ids, err := universe(ctx)
 	if err != nil {
 		entry.readError = err.Error()

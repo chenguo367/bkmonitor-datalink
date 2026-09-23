@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -118,10 +119,18 @@ type ProgressFacts struct {
 	NextSlot     int64
 }
 
-// ProgressReader reads the persisted progress of the given objects in one
-// bounded read. A missing object is absent from the map; a failed read is
-// the error, and every object's progress is then unknown.
-type ProgressReader func(queryGroups []string) (map[string]ProgressFacts, error)
+// ProgressReader reads the persisted progress of the given objects in
+// bounded reads. An object with no record is absent from both maps; an object
+// whose own read failed is in failed; a read that failed as a whole is the
+// error, and every object's progress is then unknown.
+type ProgressReader func(ctx context.Context, queryGroups []string) (found map[string]ProgressFacts, failed map[string]bool, err error)
+
+// The reasons a Plan's progress is unknown, closed.
+const (
+	ProgressUnreadable = "PROGRESS_UNREADABLE"
+	ProgressReadFailed = "PROGRESS_READ_FAILED"
+	ProgressNotFound   = "PROGRESS_NOT_FOUND"
+)
 
 // diagnosisContext is what every row of one page is decided against.
 type diagnosisContext struct {
@@ -260,7 +269,7 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 // leaves every Plan's progress unknown with the read's reason; an object
 // the read did not find is unknown on its own. Progress never changes a
 // verdict: it says when, not whether.
-func applyProgress(rows []DiagnosisRow, progress map[string]ProgressFacts, unknown string) {
+func applyProgress(rows []DiagnosisRow, progress map[string]ProgressFacts, failed map[string]bool, unknown string) {
 	for i := range rows {
 		for j := range rows[i].Plans {
 			plan := &rows[i].Plans[j]
@@ -268,9 +277,13 @@ func applyProgress(rows []DiagnosisRow, progress map[string]ProgressFacts, unkno
 				rows[i].UnknownParts = append(rows[i].UnknownParts, DiagnosisPart{What: plan.QueryGroup + " progress", Reason: unknown})
 				continue
 			}
+			if failed[plan.QueryGroup] {
+				rows[i].UnknownParts = append(rows[i].UnknownParts, DiagnosisPart{What: plan.QueryGroup + " progress", Reason: ProgressReadFailed})
+				continue
+			}
 			facts, found := progress[plan.QueryGroup]
 			if !found {
-				rows[i].UnknownParts = append(rows[i].UnknownParts, DiagnosisPart{What: plan.QueryGroup + " progress", Reason: UnknownObjectNotObserved, Detail: "no persisted progress"})
+				rows[i].UnknownParts = append(rows[i].UnknownParts, DiagnosisPart{What: plan.QueryGroup + " progress", Reason: ProgressNotFound})
 				continue
 			}
 			last, next := facts.LastFullSlot, facts.NextSlot
@@ -355,8 +368,10 @@ const DiagnosisPageRows = 2000
 type DiagnosisPage struct {
 	Rows []DiagnosisRow `json:"-"`
 	// IDsExpected is how many ids of the universe fall in this page's range
-	// (after, last row], counted from the universe and not from the rows:
-	// the equation the page proves is these two being equal.
+	// (after, last row], counted by searching the universe for the range's
+	// ends and not from the loop that wrote the rows. The page's rows equal
+	// to it is the page's own check; the proof that the pages cover the
+	// universe is the CLI's, from the ids against the universe's digest.
 	IDsExpected      int               `json:"ids_expected"`
 	RowsWritten      int               `json:"rows"`
 	Holds            bool              `json:"holds"`
@@ -394,8 +409,12 @@ func buildDiagnosisPage(universe []string, after string, limit int, row func(str
 		page.ByVerdict[next.Verdict]++
 		end++
 	}
-	page.IDsExpected = end - start
 	page.RowsWritten = len(page.Rows)
+	if len(page.Rows) > 0 {
+		last := page.Rows[len(page.Rows)-1].StrategyID
+		upper := sort.Search(len(universe), func(i int) bool { return idLess(last, universe[i]) })
+		page.IDsExpected = upper - start
+	}
 	page.Holds = page.IDsExpected == page.RowsWritten
 	if end < len(universe) {
 		page.Last = universe[end-1]
