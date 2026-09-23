@@ -4,6 +4,7 @@
 package k8sread
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net/url"
@@ -342,20 +343,16 @@ func (r *Reader) Events(ctx context.Context, pod string) (EventsResult, error) {
 	}
 	base, apps := r.paths(scope)
 	var objects []ObjectRef
-	pods, _, err := r.listPods(ctx, scope)
-	if err != nil {
-		return EventsResult{}, err
-	}
 	if pod != "" {
-		found := false
-		for _, p := range pods {
-			found = found || p.Metadata.Name == pod
-		}
-		if !found {
-			return EventsResult{}, &Error{Code: CodeOutOfScope, Resource: "pods/" + pod, Message: "not a Pod of " + scope.Deployment}
+		if _, err := r.podInScope(ctx, scope, pod); err != nil {
+			return EventsResult{}, err
 		}
 		objects = append(objects, ObjectRef{Kind: "Pod", Name: pod})
 	} else {
+		pods, _, err := r.listPods(ctx, scope)
+		if err != nil {
+			return EventsResult{}, err
+		}
 		objects = append(objects, ObjectRef{Kind: "Deployment", Name: scope.Deployment})
 		var sets struct {
 			Items []struct {
@@ -437,7 +434,8 @@ type LogRequest struct {
 }
 
 // LogResult is the tail, bounded by lines and by MaxLogBytes. Truncated
-// says the byte bound cut it: fewer lines than asked, the oldest dropped.
+// says the byte bound cut it: fewer lines than asked, the oldest dropped and
+// the newest kept.
 type LogResult struct {
 	Scope     Scope  `json:"scope"`
 	Pod       string `json:"pod"`
@@ -449,6 +447,32 @@ type LogResult struct {
 	Truncated bool   `json:"truncated"`
 }
 
+// podInScope reads one Pod and checks it is the Deployment's: its labels
+// match the selector and its controlling ReplicaSet is controlled by the
+// Deployment. Labels alone are what any workload can copy.
+func (r *Reader) podInScope(ctx context.Context, scope Scope, name string) (podObject, error) {
+	base, apps := r.paths(scope)
+	var pod podObject
+	if err := r.getJSON(ctx, "pods/"+name, base+"/pods/"+url.PathEscape(name), nil, &pod); err != nil {
+		return podObject{}, err
+	}
+	outside := &Error{Code: CodeOutOfScope, Resource: "pods/" + name, Message: "not a Pod of " + scope.Deployment}
+	replicaSet := pod.Metadata.controller("ReplicaSet")
+	if !scope.matches(pod.Metadata.Labels) || replicaSet == "" {
+		return podObject{}, outside
+	}
+	var rs struct {
+		Metadata objectMeta `json:"metadata"`
+	}
+	if err := r.getJSON(ctx, "replicasets/"+replicaSet, apps+"/replicasets/"+url.PathEscape(replicaSet), nil, &rs); err != nil {
+		return podObject{}, err
+	}
+	if rs.Metadata.controller("Deployment") != scope.Deployment {
+		return podObject{}, outside
+	}
+	return pod, nil
+}
+
 // Logs reads the tail of a container's log. The Pod must be one of
 // alarmd's; the container defaults to the Pod's only one, or to "alarmd".
 func (r *Reader) Logs(ctx context.Context, request LogRequest) (LogResult, error) {
@@ -457,12 +481,9 @@ func (r *Reader) Logs(ctx context.Context, request LogRequest) (LogResult, error
 		return LogResult{}, err
 	}
 	base, _ := r.paths(scope)
-	var pod podObject
-	if err := r.getJSON(ctx, "pods/"+request.Pod, base+"/pods/"+url.PathEscape(request.Pod), nil, &pod); err != nil {
+	pod, err := r.podInScope(ctx, scope, request.Pod)
+	if err != nil {
 		return LogResult{}, err
-	}
-	if !scope.matches(pod.Metadata.Labels) {
-		return LogResult{}, &Error{Code: CodeOutOfScope, Resource: "pods/" + request.Pod, Message: "not a Pod of " + scope.Deployment}
 	}
 	container := request.Container
 	if container == "" {
@@ -487,12 +508,15 @@ func (r *Reader) Logs(ctx context.Context, request LogRequest) (LogResult, error
 	if lines > MaxLogLines {
 		lines = MaxLogLines
 	}
-	query := url.Values{"container": {container}, "tailLines": {strconv.Itoa(lines)}, "limitBytes": {strconv.Itoa(MaxLogBytes)},
-		"timestamps": {"true"}}
+	// No limitBytes: the server counts it forward from the start of the last
+	// N lines, so a cut would drop the newest lines - the ones before a
+	// crash. The whole tail is read, bounded by maxLogReadBytes, and only its
+	// last MaxLogBytes are kept.
+	query := url.Values{"container": {container}, "tailLines": {strconv.Itoa(lines)}, "timestamps": {"true"}}
 	if request.Previous {
 		query.Set("previous", "true")
 	}
-	body, err := r.get(ctx, "pods/"+request.Pod+"/log", base+"/pods/"+url.PathEscape(request.Pod)+"/log", query, MaxLogBytes)
+	body, err := r.get(ctx, "pods/"+request.Pod+"/log", base+"/pods/"+url.PathEscape(request.Pod)+"/log", query, maxLogReadBytes)
 	if err != nil {
 		// The server answers a previous log that was never written with 400
 		// and says so; it is a missing object, not a server fault.
@@ -502,9 +526,18 @@ func (r *Reader) Logs(ctx context.Context, request LogRequest) (LogResult, error
 		}
 		return LogResult{}, err
 	}
-	truncated := len(body) >= MaxLogBytes
+	if len(body) > maxLogReadBytes {
+		// The newest bytes are past the read bound: a tail that would lose
+		// them is not returned as one.
+		return LogResult{}, &Error{Code: CodeAPIError, Resource: "pods/" + request.Pod + "/log", Message: "the requested lines exceed the read bound; ask for fewer"}
+	}
+	truncated := false
 	if len(body) > MaxLogBytes {
-		body = body[:MaxLogBytes]
+		// Keep the newest bytes, from the first whole line in them.
+		body, truncated = body[len(body)-MaxLogBytes:], true
+		if cut := bytes.IndexByte(body, '\n'); cut >= 0 && cut+1 < len(body) {
+			body = body[cut+1:]
+		}
 	}
 	return LogResult{Scope: scope, Pod: request.Pod, Container: container, Previous: request.Previous, Lines: lines,
 		Text: string(body), Bytes: len(body), Truncated: truncated}, nil

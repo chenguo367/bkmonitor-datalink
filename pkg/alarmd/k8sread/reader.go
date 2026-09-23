@@ -51,6 +51,9 @@ const (
 	MaxLogBytes     = 256 << 10
 	// maxAPIBytes bounds one API response body before it is decoded.
 	maxAPIBytes = 8 << 20
+	// maxLogReadBytes bounds the whole tail read before its newest
+	// MaxLogBytes are kept.
+	maxLogReadBytes = 8 << 20
 	// scopeTTL is how long the resolved Deployment is reused. A rollout
 	// keeps the Deployment, so this only saves three GETs per read.
 	scopeTTL = 5 * time.Minute

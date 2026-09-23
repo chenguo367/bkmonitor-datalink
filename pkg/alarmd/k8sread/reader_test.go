@@ -34,6 +34,8 @@ const (
 	selfPod   = "alarmd-trigger-abc-1"
 	otherPod  = "other-web-xyz-1"
 	crashPod  = "alarmd-trigger-abc-2"
+	// copycat carries alarmd's labels but belongs to another Deployment.
+	copycat = "copycat-xyz-1"
 	alarmdSel = "app.kubernetes.io/component=trigger,app.kubernetes.io/name=alarmd"
 )
 
@@ -83,6 +85,12 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		write(podJSON(selfPod, alarmdLabels, 0, nil))
 	case path == "/api/v1/namespaces/ns/pods/"+crashPod:
 		write(podJSON(crashPod, alarmdLabels, 3, crashed))
+	case path == "/api/v1/namespaces/ns/pods/"+copycat:
+		pod := podJSON(copycat, alarmdLabels, 0, nil)
+		pod["metadata"].(map[string]any)["ownerReferences"] = owner("ReplicaSet", "copycat-xyz")
+		write(pod)
+	case path == "/apis/apps/v1/namespaces/ns/replicasets/copycat-xyz":
+		write(map[string]any{"metadata": map[string]any{"name": "copycat-xyz", "ownerReferences": owner("Deployment", "copycat")}})
 	case path == "/api/v1/namespaces/ns/pods/"+otherPod:
 		write(podJSON(otherPod, map[string]string{"app.kubernetes.io/name": "web"}, 0, nil))
 	case path == "/apis/apps/v1/namespaces/ns/replicasets/alarmd-trigger-abc":
@@ -227,6 +235,9 @@ func TestEventsFailuresAreNamedNotEmpty(t *testing.T) {
 	if code := codeOfErr(t, err); code != CodeForbidden || !strings.Contains(err.Error(), "cannot list resource") {
 		t.Errorf("every event read refused: %v", err)
 	}
+	if _, err := reader.Events(context.Background(), copycat); codeOfErr(t, err) != CodeOutOfScope {
+		t.Errorf("a Pod with alarmd's labels under another Deployment: %v", err)
+	}
 	_, err = reader.Events(context.Background(), otherPod)
 	delete(api.deny, "/api/v1/namespaces/ns/events")
 	if code := codeOfErr(t, err); code != CodeOutOfScope {
@@ -250,7 +261,9 @@ func TestLogsAreScopedBoundedAndSayPreviousIsMissing(t *testing.T) {
 			logQuery, _ = url.ParseQuery(path[strings.Index(path, "?")+1:])
 		}
 	}
-	if logQuery.Get("previous") != "true" || logQuery.Get("tailLines") != "1000" || logQuery.Get("limitBytes") != "262144" || logQuery.Get("container") != "alarmd" {
+	// No limitBytes: the server would count it forward from the start of the
+	// tail and drop the newest lines.
+	if logQuery.Get("previous") != "true" || logQuery.Get("tailLines") != "1000" || logQuery.Has("limitBytes") || logQuery.Get("container") != "alarmd" {
 		t.Errorf("the log was asked for as %v", logQuery)
 	}
 
@@ -258,7 +271,7 @@ func TestLogsAreScopedBoundedAndSayPreviousIsMissing(t *testing.T) {
 	if code := codeOfErr(t, err); code != CodeNotFound || !strings.Contains(err.Error(), "previous terminated container") {
 		t.Errorf("a previous log never written: %v", err)
 	}
-	for _, request := range []LogRequest{{Pod: otherPod}, {Pod: selfPod, Container: "sidecar"}} {
+	for _, request := range []LogRequest{{Pod: otherPod}, {Pod: copycat}, {Pod: selfPod, Container: "sidecar"}} {
 		if _, err := reader.Logs(context.Background(), request); codeOfErr(t, err) != CodeOutOfScope {
 			t.Errorf("%+v: %v", request, err)
 		}
@@ -269,10 +282,23 @@ func TestLogsAreScopedBoundedAndSayPreviousIsMissing(t *testing.T) {
 		}
 	}
 
-	api.logBody = strings.Repeat("x", MaxLogBytes+100)
+	// Past the byte bound the newest lines are kept - the last one is the
+	// crash - and the cut lands on a line boundary.
+	var long strings.Builder
+	for i := 0; long.Len() <= MaxLogBytes+4096; i++ {
+		long.WriteString("2026-09-23T07:58:00Z line " + strings.Repeat("x", 100) + "\n")
+	}
+	long.WriteString("2026-09-23T07:59:00Z panic: the last line\n")
+	api.logBody = long.String()
 	got, err = reader.Logs(context.Background(), LogRequest{Pod: selfPod})
-	if err != nil || got.Bytes != MaxLogBytes || !got.Truncated || got.Lines != DefaultLogLines {
-		t.Errorf("a log past the byte bound: %d bytes, truncated %v, lines %d, %v", got.Bytes, got.Truncated, got.Lines, err)
+	if err != nil || !got.Truncated || got.Bytes > MaxLogBytes || got.Lines != DefaultLogLines ||
+		!strings.HasSuffix(got.Text, "panic: the last line\n") || !strings.HasPrefix(got.Text, "2026-09-23T07:58:00Z line ") {
+		t.Errorf("a log past the byte bound: %d bytes, truncated %v, lines %d, ends %q, starts %q, %v", got.Bytes, got.Truncated, got.Lines,
+			got.Text[max(0, len(got.Text)-40):], got.Text[:min(40, len(got.Text))], err)
+	}
+	api.logBody = strings.Repeat("y", maxLogReadBytes+1)
+	if _, err := reader.Logs(context.Background(), LogRequest{Pod: selfPod}); codeOfErr(t, err) != CodeAPIError {
+		t.Errorf("a tail past the read bound is refused, not cut: %v", err)
 	}
 }
 
