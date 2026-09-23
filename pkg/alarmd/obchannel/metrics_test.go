@@ -11,7 +11,10 @@ package obchannel
 
 import (
 	"encoding/json"
+	"errors"
+	"math"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -99,5 +102,42 @@ func TestMetricsGetRefusesOtherNamesAndSaysWhenNotWired(t *testing.T) {
 	unwired := testChannel(t, &testAuth{}, MetricsOperations(nil)...)
 	if status, out, _ := invokeMetrics(t, unwired, Params{"names": []any{"bkmonitor_alarmd_redis_pool_size"}}); status == 200 && out.Status == "ok" {
 		t.Errorf("unwired answered ok: %+v", out)
+	}
+}
+
+type failingCollector struct{ desc *prometheus.Desc }
+
+func (c failingCollector) Describe(ch chan<- *prometheus.Desc) { ch <- c.desc }
+func (c failingCollector) Collect(ch chan<- prometheus.Metric) {
+	ch <- prometheus.NewInvalidMetric(c.desc, errFailingCollector)
+}
+
+var errFailingCollector = errors.New("collector read failed")
+
+// A collector that fails does not make the read complete: its family is
+// absent because it could not be read, not because it is not registered,
+// and the answer says so with the registry's error. The other families are
+// read as usual; a series of the registry sorted before the cut keeps two
+// reads on the same series; a NaN gauge says NaN rather than nothing.
+func TestMetricsGetSaysWhenACollectorFailedAndKeepsNonFiniteValues(t *testing.T) {
+	registry := metricsRegistry(t)
+	registry.MustRegister(failingCollector{desc: prometheus.NewDesc("bkmonitor_alarmd_broken_total", "broken", nil, nil)})
+	nan := prometheus.NewGauge(prometheus.GaugeOpts{Name: "bkmonitor_alarmd_ratio", Help: "ratio"})
+	nan.Set(math.NaN())
+	registry.MustRegister(nan)
+	c := testChannel(t, &testAuth{}, MetricsOperations(registry)...)
+	status, out, result := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_broken_total", "bkmonitor_alarmd_redis_pool_size", "bkmonitor_alarmd_ratio"}})
+	if status != 200 || out.Evidence.Complete || !strings.Contains(result.GatherError, "collector read failed") {
+		t.Fatalf("status %d complete %v gather_error %q", status, out.Evidence.Complete, result.GatherError)
+	}
+	if len(result.Families) != 2 || *result.Families[0].Series[0].Value != 64 || result.Families[1].Series[0].NonFinite != "NaN" {
+		t.Errorf("families = %+v", result.Families)
+	}
+	_, _, first := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_wide_total"}})
+	_, _, second := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_wide_total"}})
+	for i := range first.Families[0].Series {
+		if first.Families[0].Series[i].Labels["k"] != second.Families[0].Series[i].Labels["k"] {
+			t.Fatalf("two reads cut different series at %d", i)
+		}
 	}
 }

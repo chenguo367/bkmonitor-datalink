@@ -49,6 +49,9 @@ type MetricSeries struct {
 	Count   *uint64           `json:"count,omitempty"`
 	Sum     *float64          `json:"sum,omitempty"`
 	Buckets map[string]uint64 `json:"buckets,omitempty"`
+	// NonFinite is the value when it is NaN or an infinity, which JSON
+	// cannot carry as a number: a gauge at NaN is a fact, not no value.
+	NonFinite string `json:"non_finite,omitempty"`
 }
 
 // MetricFamily is one family as the process holds it now.
@@ -66,6 +69,11 @@ type MetricFamily struct {
 type MetricsResult struct {
 	Families []MetricFamily `json:"families"`
 	Absent   []string       `json:"absent,omitempty"`
+	// GatherError is the registry's error when some collector failed and
+	// the rest answered. A family that collector owns is then missing from
+	// Families and listed under Absent, and Absent no longer proves the
+	// family is not registered.
+	GatherError string `json:"gather_error,omitempty"`
 }
 
 // MetricsOperations reads the answering process's registry.
@@ -116,8 +124,11 @@ func MetricsOperations(gatherer prometheus.Gatherer) []Operation {
 			if err != nil {
 				return Outcome{Error: &Failure{Code: "metrics_unreadable", Message: "The metrics registry could not be gathered."}}
 			}
-			out := Outcome{Value: result, Complete: len(result.Absent) == 0,
+			out := Outcome{Value: result, Complete: len(result.Absent) == 0 && result.GatherError == "",
 				Limitations: []string{"Values are this process's counters now; use meta.answered_by and read again to take a rate."}}
+			if result.GatherError != "" {
+				out.Limitations = append(out.Limitations, "Some collectors failed; absent families may be registered but unread: "+result.GatherError)
+			}
 			for _, family := range result.Families {
 				if family.Truncated {
 					out.Complete = false
@@ -159,11 +170,18 @@ func readMetrics(gatherer prometheus.Gatherer, names []string, labels map[string
 	if err != nil && len(families) == 0 {
 		return MetricsResult{}, err
 	}
+	gatherError := ""
+	if err != nil {
+		gatherError = err.Error()
+		if len(gatherError) > 512 {
+			gatherError = gatherError[:512] + "..."
+		}
+	}
 	byName := make(map[string]*dto.MetricFamily, len(families))
 	for _, family := range families {
 		byName[family.GetName()] = family
 	}
-	result := MetricsResult{Families: []MetricFamily{}}
+	result := MetricsResult{Families: []MetricFamily{}, GatherError: gatherError}
 	for _, name := range names {
 		family, ok := byName[name]
 		if !ok {
@@ -171,26 +189,37 @@ func readMetrics(gatherer prometheus.Gatherer, names []string, labels map[string
 			continue
 		}
 		out := MetricFamily{Name: name, Type: family.GetType().String(), Help: family.GetHelp(), Series: []MetricSeries{}}
+		matched := []*dto.Metric{}
 		for _, metric := range family.GetMetric() {
-			series := MetricSeries{Labels: map[string]string{}}
-			for _, pair := range metric.GetLabel() {
-				series.Labels[pair.GetName()] = pair.GetValue()
+			if labelsMatch(metricLabelMap(metric), labels) {
+				matched = append(matched, metric)
 			}
-			if !labelsMatch(series.Labels, labels) {
-				continue
-			}
-			out.Matched++
-			if len(out.Series) >= MaxMetricSeries {
-				out.Truncated = true
-				continue
-			}
+		}
+		// Sorted before the cut, so two reads keep the same series and a
+		// rate taken from them subtracts like from like.
+		sort.Slice(matched, func(i, j int) bool {
+			return labelKey(metricLabelMap(matched[i])) < labelKey(metricLabelMap(matched[j]))
+		})
+		out.Matched = len(matched)
+		if len(matched) > MaxMetricSeries {
+			matched, out.Truncated = matched[:MaxMetricSeries], true
+		}
+		for _, metric := range matched {
+			series := MetricSeries{Labels: metricLabelMap(metric)}
 			fillValue(&series, family.GetType(), metric)
 			out.Series = append(out.Series, series)
 		}
-		sort.Slice(out.Series, func(i, j int) bool { return labelKey(out.Series[i].Labels) < labelKey(out.Series[j].Labels) })
 		result.Families = append(result.Families, out)
 	}
 	return result, nil
+}
+
+func metricLabelMap(metric *dto.Metric) map[string]string {
+	labels := make(map[string]string, len(metric.GetLabel()))
+	for _, pair := range metric.GetLabel() {
+		labels[pair.GetName()] = pair.GetValue()
+	}
+	return labels
 }
 
 func labelsMatch(have, want map[string]string) bool {
@@ -205,6 +234,7 @@ func labelsMatch(have, want map[string]string) bool {
 func fillValue(series *MetricSeries, kind dto.MetricType, metric *dto.Metric) {
 	set := func(v float64) {
 		if math.IsNaN(v) || math.IsInf(v, 0) {
+			series.NonFinite = strconv.FormatFloat(v, 'g', -1, 64)
 			return
 		}
 		series.Value = &v
