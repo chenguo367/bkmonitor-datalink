@@ -53,7 +53,7 @@ func TestTheACKLineCountsTheBatchByWireFormat(t *testing.T) {
 				{WireFormat: contract.WireFormatStandardRawEvent, EventKind: contract.TriggerEventRecovery, PlanRef: contract.RuntimePlanRefV1{StrategyID: "4102"}},
 				{EventKind: contract.TriggerEventAbnormal, PlanRef: contract.RuntimePlanRefV1{StrategyID: "4103"}},
 			}
-			err := coordinator.writeEvents(context.Background(), execution.OperationNormal, events)
+			err := coordinator.writeEvents(context.Background(), execution.OperationNormal, execution.PlanIdentity{}, events, nil)
 			if (err != nil) != (testCase.err != nil) {
 				t.Fatalf("writeEvents() error = %v, want an error iff the sink refused", err)
 			}

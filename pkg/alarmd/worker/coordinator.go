@@ -1206,6 +1206,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 
 		mutations := make([]execution.StateMutation, 0, len(planResult.StateResults))
 		eventsByState := make(map[execution.StateKeyIdentity][]contract.TriggerEventV1, len(planResult.StateResults))
+		withoutMessageByState := make(map[execution.StateKeyIdentity][]execution.EventWithoutMessage)
 		stateResults := append([]execution.StateEvaluation(nil), planResult.StateResults...)
 		sort.Slice(stateResults, func(left, right int) bool {
 			return lessStateIdentity(stateResults[left].Mutation.Identity, stateResults[right].Mutation.Identity)
@@ -1236,6 +1237,9 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				coordinator.observe(ctx, observability.ComponentState, observability.StageMutationCompared, request.Operation, started, observability.ResultSuccess, observability.ReasonNone, nil)
 				mutations = append(mutations, stateResult.Mutation)
 				eventsByState[stateResult.Mutation.Identity] = append([]contract.TriggerEventV1(nil), stateResult.Events...)
+				if len(stateResult.WithoutMessage) != 0 {
+					withoutMessageByState[stateResult.Mutation.Identity] = stateResult.WithoutMessage
+				}
 			case execution.StateAlreadyApplied:
 				alreadyApplied.Record(observability.StateAlreadyAppliedAtPreflight, observability.StateAlreadyAppliedKind(classified.AlreadyApplied),
 					string(stateResult.Mutation.Identity.SeriesIdentityDigest), stateResult.Mutation.ExpectedBlobRevision, view.BlobRevision)
@@ -1320,7 +1324,6 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			}
 			accepted := make([]execution.StateMutation, 0, len(mutations)-len(rejected))
 			acceptedBytes := make([]int64, 0, len(mutations)-len(rejected))
-			events := make([]contract.TriggerEventV1, 0)
 			for index, mutation := range mutations {
 				if reason, terminal := rejected[mutation.Identity]; terminal {
 					if deterministicTerminalReason == "" {
@@ -1330,10 +1333,10 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				}
 				accepted = append(accepted, mutation)
 				acceptedBytes = append(acceptedBytes, encodedBytes[index])
-				events = append(events, eventsByState[mutation.Identity]...)
 			}
+			events, withoutMessage := outputsOf(accepted, eventsByState, withoutMessageByState)
 			sortTriggerEvents(events)
-			if err := coordinator.writeEvents(ctx, request.Operation, events); err != nil {
+			if err := coordinator.writeEvents(ctx, request.Operation, planResult.Plan, events, withoutMessage); err != nil {
 				if reason, deferred := outputDeferralReason(err); deferred {
 					// The sink did not start the batch: the lease has less
 					// life left than one batch needs to land. Nothing is
@@ -1658,15 +1661,22 @@ func (coordinator *SlotExecutionCoordinator) applyGap(
 	return nil
 }
 
+// withoutMessage is the events the evaluation decided and did not keep,
+// because the sink would have taken them and sent nothing. The sink is still
+// asked - with what is left, even nothing - so its admission against the lease
+// is where it was; and the line counts them as the sink used to: in the
+// batch's events, formats and kinds, and among the events without a message.
 func (coordinator *SlotExecutionCoordinator) writeEvents(
 	ctx context.Context,
 	operation execution.Operation,
+	plan execution.PlanIdentity,
 	events []contract.TriggerEventV1,
+	withoutMessage []execution.EventWithoutMessage,
 ) error {
-	if len(events) == 0 {
+	if len(events) == 0 && len(withoutMessage) == 0 {
 		return nil
 	}
-	ctx = observability.ContextWithTraceFields(ctx, observability.TraceFields{StrategyID: events[0].PlanRef.StrategyID, BusinessID: events[0].BusinessID})
+	ctx = observability.ContextWithTraceFields(ctx, observability.TraceFields{StrategyID: plan.StrategyID, BusinessID: plan.BusinessID})
 	// The sink's own count of what it handed the broker, for the line: a
 	// batch the protocol has no message for is a success that wrote nothing.
 	ctx, outputWrite := observability.ContextWithOutputWriteReport(ctx)
@@ -1714,12 +1724,22 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		formats[format]++
 		kinds[observability.OutputEventKindKey{Format: format, EventKind: event.EventKind}]++
 	}
+	for _, dropped := range withoutMessage {
+		formats[dropped.Format]++
+		kinds[observability.OutputEventKindKey{Format: dropped.Format, EventKind: dropped.EventKind}]++
+	}
+	written := outputWrite()
+	if written != nil && len(withoutMessage) != 0 {
+		// Only onto a report the sink made: a batch refused before the sink
+		// counted anything said nothing about these either.
+		written = withoutMessageReported(written, withoutMessage)
+	}
 	coordinator.emitObservation(ctx, observability.Observation{
 		Component: observability.ComponentOutput, Stage: observability.StageEventACKed,
 		Operation: observability.Operation(operation), Direction: observability.DirectionInternal,
 		ReasonCode: observability.ReasonCode(reason), Duration: time.Since(started),
-		Counts: observability.Counts{Events: int64(len(events))}, Err: err, OutputRejection: rejection,
-		OutputWrite: outputWrite(), OutputWireFormats: formats, OutputEventKinds: kinds,
+		Counts: observability.Counts{Events: int64(len(events) + len(withoutMessage))}, Err: err, OutputRejection: rejection,
+		OutputWrite: written, OutputWireFormats: formats, OutputEventKinds: kinds,
 	})
 	if err != nil {
 		return fmt.Errorf("alarmd worker: acknowledge events: %w", err)
@@ -1731,6 +1751,51 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		coordinator.ports.OpenAlerts.Acknowledged(events)
 	}
 	return nil
+}
+
+// outputsOf is what the accepted mutations' series decided to send: their
+// events, and the identities of the events they did not keep. Only accepted
+// ones - a series whose mutation the store refused sends nothing, and counts
+// nothing either.
+func outputsOf(
+	accepted []execution.StateMutation,
+	events map[execution.StateKeyIdentity][]contract.TriggerEventV1,
+	withoutMessage map[execution.StateKeyIdentity][]execution.EventWithoutMessage,
+) ([]contract.TriggerEventV1, []execution.EventWithoutMessage) {
+	sent := make([]contract.TriggerEventV1, 0)
+	var dropped []execution.EventWithoutMessage
+	for _, mutation := range accepted {
+		sent = append(sent, events[mutation.Identity]...)
+		dropped = append(dropped, withoutMessage[mutation.Identity]...)
+	}
+	return sent, dropped
+}
+
+// withoutMessageReported adds the events the evaluation did not keep to the
+// sink's report of the batch, as the sink counted them when it received them:
+// no message, by format and kind.
+func withoutMessageReported(facts *observability.OutputWriteFacts, withoutMessage []execution.EventWithoutMessage) *observability.OutputWriteFacts {
+	type key struct{ format, kind string }
+	counts := make(map[key]int64, 1)
+	for _, bucket := range facts.WithoutMessageBy {
+		counts[key{bucket.Format, bucket.EventKind}] += bucket.Events
+	}
+	for _, dropped := range withoutMessage {
+		counts[key{dropped.Format, dropped.EventKind}]++
+	}
+	merged := *facts
+	merged.WithoutMessage += int64(len(withoutMessage))
+	merged.WithoutMessageBy = make([]observability.OutputWithoutMessage, 0, len(counts))
+	for k, n := range counts {
+		merged.WithoutMessageBy = append(merged.WithoutMessageBy, observability.OutputWithoutMessage{Format: k.format, EventKind: k.kind, Events: n})
+	}
+	sort.Slice(merged.WithoutMessageBy, func(i, j int) bool {
+		if merged.WithoutMessageBy[i].Format != merged.WithoutMessageBy[j].Format {
+			return merged.WithoutMessageBy[i].Format < merged.WithoutMessageBy[j].Format
+		}
+		return merged.WithoutMessageBy[i].EventKind < merged.WithoutMessageBy[j].EventKind
+	})
+	return &merged
 }
 
 // outputRejectionDetail is the sentence the sink's refusal carries beside its

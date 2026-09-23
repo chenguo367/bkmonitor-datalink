@@ -38,6 +38,7 @@ func retainedStateResultBytes(results []execution.StateEvaluation) uint64 {
 	for index := range results {
 		total += retainedStateMutationBytes(results[index].Mutation)
 		total += retainedObjectBytes(results[index].Events)
+		total += retainedObjectBytes(results[index].WithoutMessage)
 	}
 	return total
 }

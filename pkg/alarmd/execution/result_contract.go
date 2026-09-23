@@ -1327,6 +1327,27 @@ func validateEventOutcomes(input InternalExecution, result PlanEvaluationResult,
 			}
 		}
 	}
+	// An event decided and not kept, because its protocol has no message for
+	// its kind, stands for the record's envelope as an event would: the same
+	// record identity, the same kind, never both. It carries no content to
+	// check - that is what not keeping it means - so what is checked is that
+	// the protocol really has no message for it: a kept identity in place of
+	// an event the consumer would have received is a lost event.
+	for _, state := range result.StateResults {
+		for _, dropped := range state.WithoutMessage {
+			if contract.EventHasMessage(dropped.Format, dropped.EventKind) {
+				return resultContractViolation(codeEventKindMismatch, "an event its protocol has a message for was not kept")
+			}
+			record := recordIdentity{Series: state.Mutation.Identity.SeriesIdentityDigest, Record: dropped.Record}
+			if _, duplicate := actualEvents[record]; duplicate {
+				return resultContractViolation(codeEventDuplicate, "duplicate TriggerEvent for one Plan series record")
+			}
+			if expectedEvents[record] == "" || dropped.EventKind != expectedEvents[record] {
+				return resultContractViolation(codeEventKindMismatch, "TriggerEvent kind does not match Level outcomes")
+			}
+			actualEvents[record] = struct{}{}
+		}
+	}
 	if len(actualEvents) != len(expectedEvents) {
 		return resultContractViolation(codeEventEnvelopeCountInvalid, "ABNORMAL or RECOVERY Level outcomes require exactly one TriggerEvent envelope")
 	}

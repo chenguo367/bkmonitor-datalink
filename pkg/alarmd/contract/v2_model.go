@@ -549,6 +549,45 @@ const (
 // ResolveOutputWireFormat interprets historical frozen Plans without changing
 // their serialized identity. Evaluation (including recovery gating) and the
 // output sink use the same rule. Unknown formats remain unknown for rejection.
+// EventHasMessage reports whether an event of this kind becomes a message
+// under this resolved wire format. The Python-compatible protocol carries
+// anomalies and nothing else: its consumer decides recovery from the absence
+// of anomalies, so an event of any other kind has no message there. Every
+// other format carries every kind.
+//
+// One rule with two readers: the sink, which leaves such an event without a
+// message, and the evaluation, which does not keep one it knows the sink
+// would drop. Two copies of it could disagree, and the way they would
+// disagree is silent - an event kept that goes nowhere, or dropped that
+// should have gone.
+func EventHasMessage(format, eventKind string) bool {
+	return format != WireFormatPythonCompatible || eventKind == TriggerEventAbnormal
+}
+
+// DroppedAtSink reports whether the sink would take this event and leave it
+// without a message, raising nothing: a kind its resolved protocol has no
+// message for, and nothing about the event the sink would refuse first. An
+// event the sink would refuse is not dropped silently, and is not reported
+// here, so that whoever acts on this answer leaves the refusal where it was.
+func DroppedAtSink(event *TriggerEventV1) bool {
+	if event == nil {
+		return false
+	}
+	if EventHasMessage(OutputWireFormatOf(event), event.EventKind) {
+		return false
+	}
+	return event.LegacyOutput != nil && event.LegacyOutput.Configuration != nil
+}
+
+// OutputWireFormatOf is the wire format the sink resolves this event to.
+func OutputWireFormatOf(event *TriggerEventV1) string {
+	var revision int64
+	if event.StrategyRef != nil {
+		revision = event.StrategyRef.Revision
+	}
+	return ResolveOutputWireFormat(event.WireFormat, revision)
+}
+
 func ResolveOutputWireFormat(format string, snapshotRevision int64) string {
 	switch format {
 	case WireFormatTriggerEvent:

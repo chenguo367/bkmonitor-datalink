@@ -67,7 +67,9 @@ func newCapacityLoadCollector(source CapacityLoadSource) *capacityLoadCollector 
 				"utilization ratio. retained_bytes and series are a shared pool across the Slots running "+
 				"on this replica: a Slot is refused when the replica's outstanding total would cross the "+
 				"ceiling, so a utilization ratio is the right reading for those two, and a Slot can be "+
-				"refused while its own usage is a small fraction of the limit.",
+				"refused while its own usage is a small fraction of the limit. A RECOVERY under the "+
+				"Python-compatible protocol, which that protocol has no message for, is not held and does "+
+				"not use the events budget; the output lines still count it among the events without a message.",
 			[]string{"budget"}),
 		memoryLimit: descriptor("container_memory_limit_bytes",
 			"The memory limit every budget above was derived from, labelled with where it was read. A "+

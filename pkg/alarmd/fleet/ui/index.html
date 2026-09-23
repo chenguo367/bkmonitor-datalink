@@ -889,7 +889,7 @@ var NEXT = {
   SERIES_CHURNING:       '交策略侧：序列活不过检测窗口，通常是聚合维度太细',
   PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略',
   QUERY_TARGET_MISSING:  '按策略核引用的表与字段是否真不存在（对元数据）：是就改策略或接入数据，不是就是查询构造或元数据问题回 alarmd；已降级的对象修好后会自动重试',
-  RETAINED_SHARE_APPROACHING: '先看对象行上哪个相位占大头，再决定找谁：state 占大头是策略的留存窗口与序列数，交策略侧（收聚合维度、缩短窗口，或分片 decision-020）；output 占大头是本服务每轮在内存里留着的产出（例如兼容协议下每轮为健康序列造、在出口被丢掉的 RECOVERY 事件），不是策略写错了，交 alarmd 处理。份额本身不随争用调，调参解决不了'
+  RETAINED_SHARE_APPROACHING: '先看对象行上哪个相位占大头，再决定找谁：state 占大头是策略的留存窗口与序列数，交策略侧（收聚合维度、缩短窗口，或分片 decision-020）；output 占大头是本服务每轮在内存里留着的产出（这一轮要发出去的事件与写回的状态；兼容协议下没有消息的 RECOVERY 已不再占用），不是策略写错了，交 alarmd 处理。份额本身不随争用调，调参解决不了'
 };
 
 // What state counts as recovered, per check: the thing to look at after
