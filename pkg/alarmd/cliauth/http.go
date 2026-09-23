@@ -19,17 +19,15 @@ import (
 )
 
 const (
-	IssuerKeyHeader = "X-Alarmd-Issuer-Key"
-	PrincipalHeader = "X-Alarmd-Principal"
-	grantsPath      = "/api/cli/auth/grants"
-	exchangePath    = "/api/cli/auth/exchange"
-	sessionPath     = "/api/cli/session"
-	maxBodyBytes    = 64 << 10
+	grantsPath   = "/api/cli/auth/grants"
+	exchangePath = "/api/cli/auth/exchange"
+	sessionPath  = "/api/cli/session"
+	maxBodyBytes = 64 << 10
 )
 
 // Handler serves only the four auth operations. The surrounding server remains
-// responsible for bounded request read time and trusted proxy routing. It must
-// not expose issuer credentials through access logs or configuration evidence.
+// responsible for bounded request read time and request routing. It must
+// not expose administrator credentials through access logs or configuration evidence.
 func (m *Manager) Handler() http.Handler { return http.HandlerFunc(m.serveHTTP) }
 
 func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request) {
@@ -78,18 +76,20 @@ func boundBodyRead(w http.ResponseWriter, r *http.Request, timeout time.Duration
 	}
 }
 
-func (m *Manager) issuerPrincipal(r *http.Request) (string, error) {
-	if !m.issuerConfigured {
-		return "", failure("issuer_not_configured", "Trusted host authorization is not configured.", 503)
+// authorizeAdmin checks the deployment administrator key, the one credential
+// that can issue a grant.
+func (m *Manager) authorizeAdmin(r *http.Request) error {
+	if !m.adminConfigured {
+		return failure("admin_not_configured", "Deployment authorization is not configured.", 503)
 	}
-	key, singleKey := singleHeader(r, IssuerKeyHeader)
-	principal, singlePrincipal := singleHeader(r, PrincipalHeader)
+	authorization, single := singleHeader(r, "Authorization")
+	scheme, key, separated := strings.Cut(authorization, " ")
 	hash := sha256.Sum256([]byte(key))
-	keyMatches := subtle.ConstantTimeCompare(hash[:], m.issuerHash[:]) == 1
-	if !singleKey || !singlePrincipal || !keyMatches || !validText(principal, 256) || len(r.Header.Values("Authorization")) != 0 {
-		return "", failure("issuer_unauthorized", "A trusted host must authorize this request and provide its principal.", 403)
+	keyMatches := subtle.ConstantTimeCompare(hash[:], m.adminHash[:]) == 1
+	if !single || !separated || !strings.EqualFold(scheme, "Bearer") || !keyMatches {
+		return failure("admin_unauthorized", "Deployment administrator authorization is required.", 403)
 	}
-	return principal, nil
+	return nil
 }
 
 func singleHeader(r *http.Request, name string) (string, bool) {
@@ -104,7 +104,6 @@ type grantPreview struct {
 	EnvironmentID     string `json:"environment_id"`
 	EnvironmentName   string `json:"environment_name"`
 	PublicBaseURL     string `json:"public_base_url"`
-	Principal         string `json:"principal"`
 	Scope             string `json:"scope"`
 	GrantTTLSeconds   int    `json:"grant_ttl_seconds"`
 	SessionTTLSeconds int    `json:"session_ttl_seconds"`
@@ -123,19 +122,18 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		return methodNotAllowed(w, "GET, POST")
 	}
-	principal, err := m.issuerPrincipal(r)
-	if err != nil {
+	if err := m.authorizeAdmin(r); err != nil {
 		return err
 	}
 	preview := grantPreview{EnvironmentID: m.environmentID, EnvironmentName: m.environmentName,
-		PublicBaseURL: m.publicBaseURL, Principal: principal, Scope: ScopeReadonly,
+		PublicBaseURL: m.publicBaseURL, Scope: ScopeReadonly,
 		GrantTTLSeconds: int(GrantLifetime.Seconds()), SessionTTLSeconds: int(SessionLifetime.Seconds())}
 	if r.Method == http.MethodGet {
 		return writeJSON(w, preview)
 	}
 	origin, single := singleHeader(r, "Origin")
 	if !single || origin != m.origin {
-		return failure("origin_denied", "A grant must be requested from the configured host origin.", 403)
+		return failure("origin_denied", "A grant must be requested from the configured deployment origin.", 403)
 	}
 	var input struct {
 		Confirm bool `json:"confirm"`
@@ -153,7 +151,7 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	record, _ := json.Marshal(storedRecord{Principal: principal, EnvironmentID: m.environmentID, Scope: ScopeReadonly})
+	record, _ := json.Marshal(storedRecord{EnvironmentID: m.environmentID, Scope: ScopeReadonly})
 	result, err := m.run(r.Context(), issueScript, []string{m.prefix + "grant:" + digest(secret)}, string(record), GrantLifetime.Milliseconds())
 	if err != nil {
 		return err

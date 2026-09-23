@@ -53,17 +53,35 @@ type HTTPConfig struct {
 	DiagnosticsListen string `yaml:"diagnostics_listen"`
 }
 
-// CLIConfig enables the deployment-operator evidence channel. IssuerKey is
-// injected only by a host route which already authenticated and authorized the
-// operator. It is never a CLI token and never part of RuntimeConfigFacts.
+// CLIConfig enables the deployment-operator evidence channel. AdminKey authorizes
+// grant issuance directly in alarmd; it is not a CLI session token or user identity.
+// The key must never be included in runtime configuration evidence.
 type CLIConfig struct {
 	Enabled         bool   `yaml:"enabled"`
 	EnvironmentID   string `yaml:"environment_id"`
 	EnvironmentName string `yaml:"environment_name"`
 	PublicBaseURL   string `yaml:"public_base_url"`
-	IssuerKey       string `yaml:"issuer_key" json:"-"`
-	// AuthorizationURL points at the protected host's authorization page. If
-	// empty, the embedded page uses its own protected grant route.
+	AdminKey        string `yaml:"admin_key" json:"-"`
+}
+
+// CLIAdminKeyEnvironment carries the administrator key when the deployment
+// keeps it in a Secret of its own rather than in the rendered configuration:
+// a chart then references the Secret and the key never appears in values.
+const CLIAdminKeyEnvironment = "ALARMD_CLI_ADMIN_KEY"
+
+// resolveAdminKeyFromEnvironment fills the administrator key from the
+// environment. A key stated in both places is refused: two sources for one
+// secret is a deployment that can rotate one and keep using the other.
+func (c *CLIConfig) resolveAdminKeyFromEnvironment() error {
+	env, ok := os.LookupEnv(CLIAdminKeyEnvironment)
+	if !ok || env == "" {
+		return nil
+	}
+	if c.AdminKey != "" {
+		return errors.New("cli admin_key is set both in the file and in " + CLIAdminKeyEnvironment)
+	}
+	c.AdminKey = env
+	return nil
 }
 
 // DiagnosticsFact renders the diagnostics surface for startup logging. Every
@@ -551,6 +569,9 @@ func Load(path string) (Config, error) {
 	cfg.resolveCompatibilityPodCache()
 	cfg.resolvePhaseTwoWorkerIDFromEnvironment()
 	if err := cfg.PhaseTwo.Linkd.resolveCredentialsFromEnvironment(); err != nil {
+		return Config{}, err
+	}
+	if err := cfg.CLI.resolveAdminKeyFromEnvironment(); err != nil {
 		return Config{}, err
 	}
 	if err := cfg.PhaseTwo.migratePlatformSettings(); err != nil {

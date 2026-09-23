@@ -3,8 +3,7 @@
 // Copyright (C) 2017-2026 Tencent. All rights reserved.
 // Licensed under the MIT License.
 
-// Package cliauth provides short-lived CLI grants and sessions. The host must
-// authenticate and authorize the browser before injecting the issuer headers.
+// Package cliauth provides deployment-key authorization and short-lived CLI grants and sessions.
 package cliauth
 
 import (
@@ -42,13 +41,12 @@ type Options struct {
 	EnvironmentID   string
 	EnvironmentName string
 	PublicBaseURL   string
-	IssuerKey       string
+	AdminKey        string
 	Now             func() time.Time
 }
 
 type Session struct {
 	ID            string    `json:"session_id"`
-	Principal     string    `json:"principal"`
 	EnvironmentID string    `json:"environment_id"`
 	Scope         string    `json:"scope"`
 	ExpiresAt     time.Time `json:"expires_at"`
@@ -82,7 +80,7 @@ func failure(code, message string, status int) *Error {
 }
 
 func expired() *Error {
-	return failure("auth_expired_or_revoked", "The CLI session has expired or was revoked; authorize again from the host page.", 401)
+	return failure("auth_expired_or_revoked", "The CLI session has expired or was revoked; authorize again from the authorization page.", 401)
 }
 
 func storeUnavailable() *Error {
@@ -90,23 +88,23 @@ func storeUnavailable() *Error {
 }
 
 type Manager struct {
-	client           redis.UniversalClient
-	prefix           string
-	environmentID    string
-	environmentName  string
-	publicBaseURL    string
-	origin           string
-	issuerHash       [sha256.Size]byte
-	issuerConfigured bool
-	now              func() time.Time
-	httpSlots        chan struct{}
-	limitMu          sync.Mutex
-	grantWindow      rateWindow
-	exchangeWindow   rateWindow
+	client          redis.UniversalClient
+	prefix          string
+	environmentID   string
+	environmentName string
+	publicBaseURL   string
+	origin          string
+	adminHash       [sha256.Size]byte
+	adminConfigured bool
+	now             func() time.Time
+	httpSlots       chan struct{}
+	limitMu         sync.Mutex
+	grantWindow     rateWindow
+	exchangeWindow  rateWindow
 }
 
 // New validates deployment coordinates without contacting Redis. An empty
-// issuer key disables issuance; it never enables anonymous authorization.
+// administrator key disables issuance; it never enables anonymous authorization.
 func New(o Options) (*Manager, error) {
 	if o.Redis == nil {
 		return nil, errors.New("cliauth: Redis is required")
@@ -129,8 +127,8 @@ func New(o Options) (*Manager, error) {
 			return nil, errors.New("cliauth: PublicBaseURL path is invalid")
 		}
 	}
-	if o.IssuerKey != "" && (len(o.IssuerKey) < 32 || len(o.IssuerKey) > 256 || !validText(o.IssuerKey, 256)) {
-		return nil, errors.New("cliauth: IssuerKey must contain 32 to 256 bytes when configured")
+	if o.AdminKey != "" && (len(o.AdminKey) < 32 || len(o.AdminKey) > 256 || !validAdminKey(o.AdminKey)) {
+		return nil, errors.New("cliauth: AdminKey must contain 32 to 256 printable ASCII bytes without spaces when configured")
 	}
 	if o.Now == nil {
 		o.Now = time.Now
@@ -150,9 +148,18 @@ func New(o Options) (*Manager, error) {
 		prefix:        o.Prefix + ".cli:{" + digest(o.EnvironmentID) + "}:",
 		environmentID: o.EnvironmentID, environmentName: o.EnvironmentName,
 		publicBaseURL: u.String(), origin: u.Scheme + "://" + u.Host,
-		issuerHash: sha256.Sum256([]byte(o.IssuerKey)), issuerConfigured: o.IssuerKey != "",
+		adminHash: sha256.Sum256([]byte(o.AdminKey)), adminConfigured: o.AdminKey != "",
 		now: o.Now, httpSlots: make(chan struct{}, 4),
 	}, nil
+}
+
+func validAdminKey(key string) bool {
+	for i := 0; i < len(key); i++ {
+		if key[i] < 0x21 || key[i] > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 func validText(value string, maxBytes int) bool {
@@ -185,14 +192,13 @@ func validSecret(secret string) bool {
 
 type storedRecord struct {
 	SessionID     string `json:"session_id,omitempty"`
-	Principal     string `json:"principal"`
 	EnvironmentID string `json:"environment_id"`
 	Scope         string `json:"scope"`
 	ExpiresAtMS   int64  `json:"expires_at_ms"`
 }
 
 func (r storedRecord) session(hash string, renewed bool) Session {
-	return Session{ID: r.SessionID, Principal: r.Principal, EnvironmentID: r.EnvironmentID,
+	return Session{ID: r.SessionID, EnvironmentID: r.EnvironmentID,
 		Scope: r.Scope, ExpiresAt: time.UnixMilli(r.ExpiresAtMS).UTC(), Renewed: renewed, TokenHash: hash}
 }
 

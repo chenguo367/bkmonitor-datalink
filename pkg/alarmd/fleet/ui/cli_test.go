@@ -19,8 +19,24 @@ func TestCLIAuthorizationPageIsEmbeddedAndNotCached(t *testing.T) {
 				t.Fatalf("missing page contract %s", term)
 			}
 		}
-		if strings.Contains(body, "X-Alarmd-Issuer-Key") || strings.Contains(body, "localStorage") {
-			t.Fatal("issuer secret or persistent grant handling in page")
+		if strings.Contains(body, "localStorage") {
+			t.Fatal("persistent grant handling in page")
+		}
+	}
+}
+
+func TestCLIAuthorizationPageUsesEphemeralDeploymentKey(t *testing.T) {
+	w := httptest.NewRecorder()
+	Handler().ServeHTTP(w, httptest.NewRequest("GET", "/cli", nil))
+	body := w.Body.String()
+	for _, term := range []string{`type="password"`, `autocomplete="off"`, `credentials:'omit'`, `'Authorization':'Bearer '+key`, `currentRevision !== revision`, `adminKey.value = ''`, `issue.disabled = true`} {
+		if !strings.Contains(body, term) {
+			t.Fatalf("missing direct authorization contract: %s", term)
+		}
+	}
+	for _, term := range []string{"localStorage", "sessionStorage", "credentials:'same-origin'"} {
+		if strings.Contains(body, term) {
+			t.Fatalf("unwanted persistent or cookie credential use: %s", term)
 		}
 	}
 }

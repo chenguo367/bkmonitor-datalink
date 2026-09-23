@@ -49,13 +49,13 @@ func TestCLIInvalidConfigurationOnlyDisablesCLIRoutes(t *testing.T) {
 
 func TestCLIConstructionNeedsNoRedisAvailabilityAndNoAnonymousGrant(t *testing.T) {
 	cfg := config.Default()
-	cfg.CLI = config.CLIConfig{Enabled: true, EnvironmentID: "test", EnvironmentName: "Test", PublicBaseURL: "https://ob.example/alarmd/", IssuerKey: strings.Repeat("x", 32)}
+	cfg.CLI = config.CLIConfig{Enabled: true, EnvironmentID: "test", EnvironmentName: "Test", PublicBaseURL: "https://ob.example/alarmd/", AdminKey: strings.Repeat("x", 32)}
 	h, closeCLI := buildPhaseTwoCLI(cfg, http.NotFoundHandler(), nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
 	defer closeCLI()
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/cli/auth/grants", nil))
-	if w.Code != 403 || !strings.Contains(w.Body.String(), "issuer_unauthorized") {
-		t.Fatalf("CLI construction or issuer isolation failed: %d %s", w.Code, w.Body.String())
+	if w.Code != 403 || !strings.Contains(w.Body.String(), "admin_unauthorized") {
+		t.Fatalf("CLI construction or administrator isolation failed: %d %s", w.Code, w.Body.String())
 	}
 }
 
@@ -78,7 +78,7 @@ func TestCLIRuntimeFactsUseAppliedProfileAndObservationOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(raw), "issuer_key") || strings.Contains(string(raw), "LastUnavailable") {
+	if strings.Contains(string(raw), "admin_key") || strings.Contains(string(raw), "LastUnavailable") {
 		t.Fatal("runtime evidence includes raw config or errors")
 	}
 }
@@ -86,7 +86,7 @@ func TestCLIRuntimeFactsUseAppliedProfileAndObservationOnly(t *testing.T) {
 func TestCLIControlRPCIsBoundOnlyWhenCLIConfigured(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		cfg := config.Default()
-		cfg.CLI = config.CLIConfig{Enabled: enabled, EnvironmentID: "test", EnvironmentName: "Test", PublicBaseURL: "http://ob.example/alarmd/", IssuerKey: strings.Repeat("x", 32)}
+		cfg.CLI = config.CLIConfig{Enabled: enabled, EnvironmentID: "test", EnvironmentName: "Test", PublicBaseURL: "http://ob.example/alarmd/", AdminKey: strings.Repeat("x", 32)}
 		cfg.PhaseTwo.Worker.ID = "test-worker"
 		server, err := viewstream.NewServer(viewStreamAdmission{}, observability.NopObserver{}, viewstream.ServerOptions{})
 		if err != nil {
