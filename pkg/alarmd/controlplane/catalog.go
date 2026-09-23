@@ -285,6 +285,39 @@ const ReasonEffectiveTimeRangeInvalid = "EFFECTIVE_TIME_RANGE_INVALID"
 // strategy detects and alerts beside a higher one on the same target.
 const ReasonPriorityIgnored = "PRIORITY_IGNORED"
 
+// ReasonLevelTriggerBorrowed names a Level whose algorithms sit at a level
+// the strategy wrote no trigger for, run on the strategy's first trigger as
+// the platform runs it.
+const ReasonLevelTriggerBorrowed = "LEVEL_TRIGGER_BORROWED"
+
+// legacyDefaultRecoveryWindows is the recovery window the platform uses when
+// an alert's level has no recovery configured (its recovery checker's
+// DEFAULT_CHECK_WINDOW_SIZE).
+const legacyDefaultRecoveryWindows = 5
+
+// borrowedLegacyDetect is the detect a level without one runs on, read the
+// way the platform reads it. Its trigger checker, finding no trigger for the
+// level, falls back to the strategy's first: the count, the window and the
+// effective time that travels with them. Its recovery checker finds no
+// recovery for the level and takes its default window, so the recovery here
+// is that default rather than the first detect's. The priority and the
+// connector are the level's own defaults, not the first detect's: they
+// belong to that detect's level.
+//
+// The platform goes further than this. Its recovery check also looks up the
+// trigger for the level, fails, and falls back to a required count of zero,
+// so an alert raised at the borrowed level is always still triggering and
+// never recovers the ordinary way. That is a side effect of two fallbacks
+// meeting, not a reading of the strategy, and it is not reproduced: the
+// level here recovers after the default window like any other.
+func borrowedLegacyDetect(first legacyDetect) legacyDetect {
+	return legacyDetect{
+		Level:    first.Level,
+		Trigger:  first.Trigger,
+		Recovery: json.RawMessage(fmt.Sprintf(`{"check_window":%d}`, legacyDefaultRecoveryWindows)),
+	}
+}
+
 // dispositionDetailMaxBytes bounds the text a disposition carries: enough
 // for a decoder's sentence, not for a document.
 const dispositionDetailMaxBytes = 256
@@ -1802,6 +1835,19 @@ func compilePlan(
 		levelID := uint32(rawLevel)
 		detect, ok := detectByLevel[levelID]
 		_, duplicate := duplicateDetect[levelID]
+		borrowed := false
+		if !ok && !duplicate && len(source.Detects) > 0 {
+			// The platform's trigger reads a level with no trigger of its own
+			// with the strategy's first one; its recovery finds none for the
+			// level and takes its default. See borrowedLegacyDetect. The first
+			// one is taken whatever it holds, and one that cannot trigger is
+			// refused below as the missing trigger it is, not lent. Nor is one
+			// whose own level is written twice: the platform would lend the
+			// last of the two, and two triggers at one level are refused here.
+			if _, twice := duplicateDetect[source.Detects[0].Level]; !twice {
+				detect, ok, borrowed = borrowedLegacyDetect(source.Detects[0]), true, true
+			}
+		}
 		if !ok || detect.Level == 0 || detect.Trigger.Count == 0 || detect.Trigger.CheckWindow == 0 || duplicate {
 			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "TRIGGER_CONFIG_MISSING"})
 			continue
@@ -1872,6 +1918,10 @@ func compilePlan(
 		connector := contract.LevelConnectorAND
 		if strings.EqualFold(detect.Connector, "or") {
 			connector = contract.LevelConnectorOR
+		}
+		if borrowed {
+			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigNormalized, Reason: ReasonLevelTriggerBorrowed,
+				Detail: fmt.Sprintf("trigger_from_level=%d", detect.Level)})
 		}
 		levels = append(levels, contract.LevelIRV2{Definition: contract.LevelDefinitionV2{LevelID: levelID, Priority: priority}, Connector: connector, DetectPlan: contract.DetectPlanV2{Algorithms: compiledAlgorithms}, TriggerPlan: contract.TypedPlanV1{Type: "N_OF_M", Version: 1, Config: trigger}, RecoveryPlan: contract.TypedPlanV1{Type: "CONTINUOUS_TRIGGER_MISS", Version: 1, Config: recovery}})
 		inputs.merge(levelInputs)

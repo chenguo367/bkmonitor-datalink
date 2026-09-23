@@ -93,6 +93,12 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 		What:   "策略配了优先级分组。优先级是平台告警链路在同组策略之间做的抑制：同一目标上只留优先级最高的那条。这里按独立策略检测，不做这层抑制，所以同组的低优先级策略也会在同一目标上告警——策略在检测，不是被扣住",
 		Next:   "不需要处理。平台那边可能仍会按优先级关掉低优先级的告警，那是平台的规则，不是这里的错关",
 		Action: ActionNone},
+	// Under CONFIG_NORMALIZED as well: the level runs, on another level's
+	// trigger, the way the platform runs it.
+	"LEVEL_TRIGGER_BORROWED": {Kind: WithheldStrategyDefinition,
+		What:   "这一级别的算法没有配同级别的触发条件，已按平台的读法借用策略里第一条触发条件（次数、窗口、生效时间）来检测，恢复按平台默认的 5 个周期——策略在检测，不是被扣住",
+		Next:   "策略负责人把触发条件配到算法所在的级别上；改好后下一轮刷新按写的条件检测，这一行消失",
+		Action: ActionStrategyEdit},
 	"SNAPSHOT_RETENTION_INSUFFICIENT": {Kind: WithheldStrategyDefinition,
 		What: "策略的评估周期太长：冻结的 Slot 要读的内容和按序列状态，需要保留得比状态存储的上限还久（样本里有要求值和上限）",
 		Next: "缩短该策略的评估周期，下一轮刷新自动接受；调部署参数没有用"},
