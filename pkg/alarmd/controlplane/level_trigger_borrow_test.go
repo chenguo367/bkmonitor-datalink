@@ -107,6 +107,10 @@ func TestALevelWithoutItsOwnTriggerRunsOnTheFirstOne(t *testing.T) {
 		missing(t, build(t, `{"level":1,"trigger_config":{"count":0,"check_window":5}},{"level":3,"trigger_config":{"count":1,"check_window":5}}`))
 	})
 
+	t.Run("a first trigger whose level is written twice is not lent", func(t *testing.T) {
+		missing(t, build(t, `{"level":1,"trigger_config":{"count":1,"check_window":5}},{"level":1,"trigger_config":{"count":3,"check_window":5}}`))
+	})
+
 	t.Run("no trigger at all", func(t *testing.T) {
 		missing(t, build(t, ``))
 	})

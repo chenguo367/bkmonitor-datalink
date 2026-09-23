@@ -1841,8 +1841,12 @@ func compilePlan(
 			// with the strategy's first one; its recovery finds none for the
 			// level and takes its default. See borrowedLegacyDetect. The first
 			// one is taken whatever it holds, and one that cannot trigger is
-			// refused below as the missing trigger it is, not lent.
-			detect, ok, borrowed = borrowedLegacyDetect(source.Detects[0]), true, true
+			// refused below as the missing trigger it is, not lent. Nor is one
+			// whose own level is written twice: the platform would lend the
+			// last of the two, and two triggers at one level are refused here.
+			if _, twice := duplicateDetect[source.Detects[0].Level]; !twice {
+				detect, ok, borrowed = borrowedLegacyDetect(source.Detects[0]), true, true
+			}
 		}
 		if !ok || detect.Level == 0 || detect.Trigger.Count == 0 || detect.Trigger.CheckWindow == 0 || duplicate {
 			dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "LEVEL", LevelID: levelID, Disposition: DispositionConfigRejected, Reason: "TRIGGER_CONFIG_MISSING"})
