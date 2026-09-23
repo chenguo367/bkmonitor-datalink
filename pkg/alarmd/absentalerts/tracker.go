@@ -119,7 +119,20 @@ func (tracker *Tracker) Round(round Round, bounds Bounds) Result {
 		// cannot mature a candidate into a close.
 		return Compute(round, bounds)
 	}
-	tracker.Note(candidates, round.SnapshotObservation, round.Now)
+	// A strategy the catalog still runs does not start its clock. The source
+	// drops strategies for minutes at a time and brings them back - hourly,
+	// on this platform - and the catalog's own removal grace is what absorbs
+	// that; this loop's grace is counted from the moment the catalog let the
+	// strategy go, not from the moment the source first missed it, so a
+	// close needs both graces end to end rather than overlapping.
+	running := strategyIDs(round.Published)
+	released := make([]Key, 0, len(candidates))
+	for _, key := range candidates {
+		if _, published := running[key.StrategyID]; !published {
+			released = append(released, key)
+		}
+	}
+	tracker.Note(released, round.SnapshotObservation, round.Now)
 	round.FirstAbsent = tracker.Absences()
 	return Compute(round, bounds)
 }
