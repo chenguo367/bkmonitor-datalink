@@ -101,6 +101,7 @@ type phaseTwoMetrics struct {
 	objectCatalogObjects            *prometheus.CounterVec
 	objectCatalogRedis              *prometheus.HistogramVec
 	objectCatalogManifestBytes      prometheus.Gauge
+	objectCatalogWrittenBytes       *prometheus.CounterVec
 	objectReads                     *prometheus.CounterVec
 	stateGenerationSkew             *prometheus.CounterVec
 	legacyMigration                 *prometheus.CounterVec
@@ -883,6 +884,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.objectCatalogObjects = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "object_catalog_objects_total", Help: "Content-addressed catalog objects by what a write or renewal did with them: written, present (already stored under their digest) or missing (referenced but not found on renewal)."}, []string{"operation", "outcome"})
 	metrics.objectCatalogRedis = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "object_catalog_redis_duration_seconds", Help: "Object catalog write or renewal duration.", Buckets: activeQGSetDurationBuckets}, []string{"operation", "result"})
 	metrics.objectCatalogManifestBytes = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "object_catalog_manifest_bytes", Help: "Encoded bytes of the manifest written for the latest publication."})
+	// The bytes behind object_catalog_objects_total{outcome="written"}: what a
+	// publication added to the control plane's store. It is the churn rate;
+	// the current catalog's objects are renewed and resident on top of it. The count alone could not answer what a longer
+	// retention costs or how large a one-off rewrite was; both are bytes.
+	metrics.objectCatalogWrittenBytes = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "object_catalog_written_bytes_total",
+		Help: "Bytes the Control Leader wrote to the object catalog, by kind: object (Query Group execution objects and output contexts stored for the first time under their digest) and manifest (the manifest of a publication's revision, counted on every successful write, which a revision written again by a new Leader counts twice though the store renewed it). This counts churn: objects the current catalog still references are renewed every round and stay resident, apart from this rate; objects a publication replaced stay for the catalog retention, about this rate times the retention. What the store holds is the current catalog's bytes plus that. Objects stored by a batch whose pipeline then failed as a whole are not counted, so a failed round can undercount."},
+		[]string{"kind"})
+	for _, kind := range []string{"object", "manifest"} {
+		metrics.objectCatalogWrittenBytes.WithLabelValues(kind)
+	}
 	metrics.objectReads = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "object_read_total", Help: "Catalog object reads by a Worker, by object kind and outcome; for a Segment, whether its Query Group was read by content and if not, why."}, []string{"kind", "result"})
 	// Pre-created so that "no skew" reads as zeros, not as an absent family.
 	metrics.stateGenerationSkew = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_generation_skew_total", Help: "Due Plans whose activation record names a state generation that disagrees with one derived elsewhere: formula (this process compiles the same Plan to another generation than the Control Leader that published it; tolerated, the record's generation governs the Slot; expected while a release rolls, a version mismatch if it persists), record (the record names a generation the Query Group object published with it does not carry; the Slot is refused)."}, []string{"kind"})
@@ -1520,7 +1531,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries, m.rangeGateDecisions, m.statePreflights,
 		m.queryFailures,
-		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
+		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
@@ -1698,7 +1709,14 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.objectCatalogObjects.WithLabelValues(facts.Operation, "written").Add(float64(facts.Written))
 		m.objectCatalogObjects.WithLabelValues(facts.Operation, "present").Add(float64(facts.Present))
 		m.objectCatalogObjects.WithLabelValues(facts.Operation, "missing").Add(float64(facts.Missing))
+		if facts.Operation == "write" {
+			// Objects are counted whenever they were written, success or not:
+			// a write that stored them and then failed on the manifest still
+			// left them in the store for the retention.
+			m.objectCatalogWrittenBytes.WithLabelValues("object").Add(float64(facts.ObjectBytes))
+		}
 		if facts.Operation == "write" && facts.Result == "success" {
+			m.objectCatalogWrittenBytes.WithLabelValues("manifest").Add(float64(facts.ManifestBytes))
 			m.objectCatalogManifestBytes.Set(float64(facts.ManifestBytes))
 			// Counted on the write that succeeded and on no other: a failed
 			// write is retried under the same revision and counted then, so

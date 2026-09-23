@@ -374,6 +374,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_query_failure_total":                          "variableLabels: {stage,category}",
 		"bkmonitor_alarmd_schedule_cutover_duration_seconds":            "variableLabels: {result}",
 		"bkmonitor_alarmd_object_catalog_objects_total":                 "variableLabels: {operation,outcome}",
+		"bkmonitor_alarmd_object_catalog_written_bytes_total":           "variableLabels: {kind}",
 		"bkmonitor_alarmd_canonical_encoding_mode":                      "variableLabels: {mode}",
 		"bkmonitor_alarmd_canonical_encoding_shadow_sample_stride":      "variableLabels: {}",
 		"bkmonitor_alarmd_canonical_encoding_calls_total":               "variableLabels: {outcome}",
@@ -899,6 +900,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		// Two operations (write, renew) by three outcomes (written, present,
 		// missing); two operations by two results for the duration.
 		fqName("object_catalog_objects_total"): 2 * 3,
+		// object, manifest.
+		fqName("object_catalog_written_bytes_total"): 2,
 		// One series per rollout position, all four always emitted so the
 		// graph survives a cutover instead of a series vanishing at it.
 		fqName("canonical_encoding_mode"):                 4,

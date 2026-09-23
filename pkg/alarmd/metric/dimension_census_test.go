@@ -257,3 +257,45 @@ func TestTheCatalogShardabilityCensusIsCountedPerSuccessfulPublication(t *testin
 		}
 	}
 }
+
+// The bytes a publication wrote: the objects it stored for the first time,
+// whether or not the manifest then landed, since they stay in the store for
+// the retention either way; and the manifest of every successful write. A
+// renewal writes neither. Both kinds exist at zero before any write.
+func TestTheCatalogCountsTheBytesAPublicationWrote(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	bytes := func(kind string) float64 {
+		return testutil.ToFloat64(r.phaseTwo.objectCatalogWrittenBytes.WithLabelValues(kind))
+	}
+	// Read from what a scrape would see, not through WithLabelValues, which
+	// would create the series it is asked about.
+	families, err := r.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := 0
+	for _, family := range families {
+		if family.GetName() == "bkmonitor_alarmd_object_catalog_written_bytes_total" {
+			present = len(family.GetMetric())
+		}
+	}
+	if present != 2 {
+		t.Fatalf("%d series before any write, want object and manifest at zero", present)
+	}
+	observe := func(operation, result string, objectBytes, manifestBytes int) {
+		r.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentControlPlane, Stage: observability.StageObjectCatalog,
+			Result:        observability.Result(result),
+			ObjectCatalog: &observability.ObjectCatalogFacts{Operation: operation, Result: result, ObjectBytes: objectBytes, ManifestBytes: manifestBytes},
+		})
+	}
+	observe("write", "success", 5700, 926248)
+	observe("write", "failure", 300, 926248)
+	observe("renew", "success", 0, 926248)
+	if got := bytes("object"); got != 6000 {
+		t.Errorf("object bytes = %v, want 6000: both writes stored their objects", got)
+	}
+	if got := bytes("manifest"); got != 926248 {
+		t.Errorf("manifest bytes = %v, want the one successful write's manifest", got)
+	}
+}
