@@ -114,3 +114,43 @@ func TestAHostStatusRejectionIsNeverDefinitive(t *testing.T) {
 		}
 	}
 }
+
+// A rejection that is not definitive is told apart by why: decided without
+// its facts (cache_unavailable) or not a verdict on the record's place at
+// all (indefinite).
+func TestAnIndefiniteRejectionIsToldApartFromAMissingCache(t *testing.T) {
+	topoScope := PlanContext{TargetScope: scope(TargetScopeGroup{Conditions: []TargetScopeCondition{topo(TargetScopeInclude, "module|1")}})}
+	objectScope := PlanContext{TargetScope: scope(TargetScopeGroup{Conditions: []TargetScopeCondition{{
+		Field: TargetScopeObjectModelInst, Method: TargetScopeInclude, Keys: keys("m|1"), IdentityFields: [][2]string{{"model", "inst"}}}}})}
+	hostPlan := func(members TargetMembership) PlanContext {
+		return PlanContext{TargetPlan: &TargetPlanContext{
+			Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true}, Members: members}}
+	}
+	unresolvedHost := factsFor(map[string]json.RawMessage{"bk_host_id": raw(`"7"`)}, func(f *Facts) { f.AddHostKey("7") })
+	noKey := factsFor(map[string]json.RawMessage{"device": raw(`"sda"`)}, nil)
+	cases := []struct {
+		name  string
+		plan  PlanContext
+		facts *Facts
+		want  RejectionStanding
+	}{
+		{"a named host the cache did not find", topoScope, unresolvedHost, StandingCacheUnavailable},
+		{"an object identity that could not be built", objectScope, noKey, StandingIndefinite},
+		{"a target plan key that could not be built", hostPlan(definitiveMembers{members: keys("8"), definitive: true}), noKey, StandingIndefinite},
+		{"a target plan not resolved in full", hostPlan(definitiveMembers{members: keys("8")}), unresolvedHost, StandingCacheUnavailable},
+		{"a target plan nobody resolved", hostPlan(nil), unresolvedHost, StandingCacheUnavailable},
+	}
+	chain := NewChain(nil, []Filter{TargetScopeFilter{}, TargetPlanFilter{}})
+	for _, c := range cases {
+		admitted, filter, reason := chain.Admit(c.plan, c.facts)
+		if admitted {
+			t.Fatalf("%s: the fixture was admitted", c.name)
+		}
+		if got := RejectionStandingOf(c.plan, c.facts, filter, reason); got != c.want {
+			t.Errorf("%s: standing(%s, %s) = %d, want %d", c.name, filter, reason, got, c.want)
+		}
+	}
+	if got := RejectionStandingOf(PlanContext{}, unresolvedHost, "host_status", "monitoring_disabled"); got != StandingNotTarget {
+		t.Errorf("a host status rejection has standing %d, want not-target", got)
+	}
+}

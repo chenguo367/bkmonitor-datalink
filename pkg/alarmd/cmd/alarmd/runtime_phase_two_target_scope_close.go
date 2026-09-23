@@ -61,17 +61,19 @@ func (sink scopeDropSink) Observe(drop access.ScopeDrop) {
 		Round: drop.Round})
 }
 
-func (sink scopeDropSink) Count(plan execution.PlanIdentity, word string, n int) {
+func (sink scopeDropSink) Count(plan execution.PlanIdentity, round int64, word string, n int) {
 	outcome := word
 	switch word {
 	case access.ScopeDropIndefinite:
+		outcome = scopeclose.OutcomeIndefinite
+	case access.ScopeDropCacheUnavailable:
 		outcome = scopeclose.OutcomeCacheUnavailable
 	case access.ScopeDropFingerprintUnsupported:
 		outcome = scopeclose.OutcomeFingerprintUnsupported
 	case access.ScopeDropNoFingerprint:
 		outcome = scopeclose.OutcomeNotMember
 	}
-	sink.closer.Count(openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID}, outcome, n)
+	sink.closer.Count(openalerts.StrategyKey{TenantID: plan.TenantID, StrategyID: plan.StrategyID}, round, outcome, n)
 }
 
 // withTargetScopeClose puts the close's reading beside the open set it acts

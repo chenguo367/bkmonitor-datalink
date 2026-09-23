@@ -130,6 +130,16 @@ func newFixture(set *fakeSet, send bool, mutate func(*Options)) *fixture {
 // close's step after it.
 func (f *fixture) slot(round int64, drops ...Drop) {
 	screens := map[openalerts.StrategyKey]string{}
+	bulk := map[openalerts.StrategyKey]map[string]int{}
+	defer func() {
+		for k, words := range bulk {
+			for word, count := range words {
+				f.closer.Count(k, round, word, count)
+			}
+		}
+		f.closer.Step(context.Background())
+		f.clock.at = f.clock.at.Add(time.Minute)
+	}()
 	for _, d := range drops {
 		d.Round = round
 		k := openalerts.StrategyKey{TenantID: d.TenantID, StrategyID: d.StrategyID}
@@ -139,13 +149,14 @@ func (f *fixture) slot(round int64, drops ...Drop) {
 			screens[k] = screen
 		}
 		if screen != "" {
-			f.closer.Count(k, screen, 1)
+			if bulk[k] == nil {
+				bulk[k] = map[string]int{}
+			}
+			bulk[k][screen]++
 			continue
 		}
 		f.closer.Observe(d)
 	}
-	f.closer.Step(context.Background())
-	f.clock.at = f.clock.at.Add(time.Minute)
 }
 
 func (f *fixture) want(t *testing.T, name string, want map[string]uint64) {
@@ -503,5 +514,21 @@ func TestScreenRefusesDisjointSets(t *testing.T) {
 	closer.Bind(set, nil)
 	if screen := closer.Screen(key); screen != OutcomeSetUnavailable {
 		t.Fatalf("Screen = %q, want set_unavailable on disjoint sets", screen)
+	}
+}
+
+// A retried Slot reports its round again: counted once, at the largest
+// total any attempt reported. A new round counts afresh.
+func TestARetriedRoundIsCountedOnce(t *testing.T) {
+	closer := New(Options{})
+	closer.Count(key, 1700000000, OutcomeNotMember, 3) // an attempt that failed halfway
+	closer.Count(key, 1700000000, OutcomeNotMember, 5) // the retry that completed
+	closer.Count(key, 1700000000, OutcomeNotMember, 5) // a retry after that
+	if got := closer.Stats()[OutcomeNotMember]; got != 5 {
+		t.Fatalf("not_member = %d after three attempts of one round, want 5", got)
+	}
+	closer.Count(key, 1700000060, OutcomeNotMember, 2)
+	if got := closer.Stats()[OutcomeNotMember]; got != 7 {
+		t.Fatalf("not_member = %d after the next round, want 7", got)
 	}
 }

@@ -32,7 +32,9 @@ func newTargetScopeCloseCollector() *targetScopeCloseCollector {
 				"source; send_failed closes the producer refused; memory_full first observations past the "+
 				"table's bound; fingerprint_unsupported definitive rejections of Plans fed by several inputs, "+
 				"whose alert fingerprint no single series carries; stale_deferred closes held back because the "+
-				"last observation was older than the freshness bound. Every cell exists from the start so a zero is a reading and not an absence.",
+				"last observation was older than the freshness bound; indefinite rejections that are not a verdict on "+
+				"the record's place at all (a key or object identity that could not be built), apart from "+
+				"cache_unavailable, which is a verdict reached without its facts. Every cell exists from the start so a zero is a reading and not an absence.",
 			[]string{"outcome"}, nil),
 	}
 }

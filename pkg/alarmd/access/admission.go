@@ -47,9 +47,14 @@ type ScopeDrop struct {
 // The words the access path counts rejections under by itself, before the
 // sink is asked anything. The sink maps them to its own outcomes.
 const (
-	// ScopeDropIndefinite is a rejection the target could not stand behind
-	// (admission.DefinitelyOutside said no).
+	// ScopeDropIndefinite is a rejection that is itself not a verdict on
+	// the record's place: a key or object identity that could not be built,
+	// a target nobody resolved (admission.StandingIndefinite).
 	ScopeDropIndefinite = "indefinite"
+	// ScopeDropCacheUnavailable is a rejection decided without the facts it
+	// needed: an index not read, a host the cache did not find, a target
+	// plan that did not resolve in full (admission.StandingCacheUnavailable).
+	ScopeDropCacheUnavailable = "cache_unavailable"
 	// ScopeDropFingerprintUnsupported is a definitive rejection of a Plan
 	// fed by more than one input: the record the evaluator fingerprints is
 	// built from several series, so no one series here has its fingerprint.
@@ -77,9 +82,12 @@ type ScopeDropSink interface {
 	Screen(plan execution.PlanIdentity) string
 	// Observe receives one definitive rejection of a Plan Screen cleared.
 	Observe(ScopeDrop)
-	// Count adds n rejections of the Plan under a word: one of the
-	// ScopeDrop words above, or one Screen returned.
-	Count(plan execution.PlanIdentity, word string, n int)
+	// Count reports the attempt's rejections of the Plan under a word: one
+	// of the ScopeDrop words above, or one Screen returned. It is called
+	// once per Plan and word per attempt, after every query of the attempt
+	// has ended, with the Slot's evaluation time: a retried Slot reports the
+	// same round again, and the sink counts a round once.
+	Count(plan execution.PlanIdentity, round int64, word string, n int)
 }
 
 // planOutput is what the evaluator fingerprints a Plan's records under: the
@@ -154,7 +162,11 @@ func (adapter *seriesAdapter) reportScopeDrop(identity execution.PlanIdentity, p
 	if filter != (admission.TargetScopeFilter{}).Name() && filter != (admission.TargetPlanFilter{}).Name() {
 		return
 	}
-	if !admission.DefinitelyOutside(plan, facts, filter, reason) {
+	switch admission.RejectionStandingOf(plan, facts, filter, reason) {
+	case admission.StandingCacheUnavailable:
+		adapter.tallyScopeDrop(identity, ScopeDropCacheUnavailable)
+		return
+	case admission.StandingIndefinite:
 		adapter.tallyScopeDrop(identity, ScopeDropIndefinite)
 		return
 	}
@@ -191,16 +203,26 @@ func (adapter *seriesAdapter) tallyScopeDrop(plan execution.PlanIdentity, word s
 	adapter.scopeTallies[scopeTallyKey{plan: plan, word: word}]++
 }
 
-// flushScopeDrops hands the query's bulk counts to the sink, once, whatever
-// way the query ended.
-func (adapter *seriesAdapter) flushScopeDrops() {
-	if adapter.scopeSink == nil {
+// flushScopeDrops hands one attempt's bulk counts to the sink: the tallies
+// of every query of the attempt summed, one Count per Plan and word,
+// whatever way the queries ended.
+func flushScopeDrops(sink ScopeDropSink, adapters []*seriesAdapter, round int64) {
+	if sink == nil {
 		return
 	}
-	for key, n := range adapter.scopeTallies {
-		adapter.scopeSink.Count(key.plan, key.word, n)
+	total := map[scopeTallyKey]int{}
+	for _, adapter := range adapters {
+		if adapter == nil {
+			continue
+		}
+		for key, n := range adapter.scopeTallies {
+			total[key] += n
+		}
+		adapter.scopeTallies = nil
 	}
-	adapter.scopeTallies = nil
+	for key, n := range total {
+		sink.Count(key.plan, round, key.word, n)
+	}
 }
 
 // planScopes indexes the frozen monitoring targets of the plans in one

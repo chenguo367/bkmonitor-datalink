@@ -253,6 +253,9 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 	queryCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	var running sync.WaitGroup
+	// The adapters are kept so that the target rejections of the whole
+	// attempt are handed over once, after every query has ended.
+	adapters := make([]*seriesAdapter, len(prepared.Queries))
 	var queryFailure sync.Once
 	var firstQueryErr error
 	consumer = &serializedQueryConsumer{QueryExecutionConsumer: consumer}
@@ -319,8 +322,8 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 				admission: source.config.Admission, observe: source.config.ObserveAdmission,
 				pulled: source.config.ObserveSeriesPulled, scopes: scopes,
 				scopeSink: source.config.ScopeDrops, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime)}
+			adapters[index] = adapter
 			completion, err := source.executeWithPermit(queryCtx, attempt, adapter, permit)
-			adapter.flushScopeDrops()
 			if err != nil {
 				err = fmt.Errorf("alarmd access: execute physical query: %w", err)
 			} else if !trustedProviderCompletion(query.Spec.Digest, completion) {
@@ -341,6 +344,7 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 		cancel()
 	}
 	running.Wait()
+	flushScopeDrops(source.config.ScopeDrops, adapters, int64(request.Contract.Slot.EvaluationTime))
 	if firstQueryErr != nil {
 		return execution.QueryExecutionCompletion{}, firstQueryErr
 	}

@@ -18,6 +18,56 @@ type DefinitiveMembership interface {
 	Definitive() bool
 }
 
+// RejectionStanding is what a target rejection can be acted on as.
+type RejectionStanding int
+
+const (
+	// StandingNotTarget is a rejection by a filter other than the two
+	// target filters: the record is still inside its target.
+	StandingNotTarget RejectionStanding = iota
+	// StandingDefinitive is the target's own verdict on current facts.
+	StandingDefinitive
+	// StandingCacheUnavailable is a rejection decided without the facts it
+	// needed: an index that could not be read, a host the record names and
+	// the cache did not find, a target plan whose selectors did not all
+	// answer in full from fresh facts, or that nothing resolved.
+	StandingCacheUnavailable
+	// StandingIndefinite is a rejection that is itself not a verdict on
+	// the record's place: a key or object identity that could not be built.
+	StandingIndefinite
+)
+
+// RejectionStandingOf classifies a rejection for the target-scope close.
+// See DefinitelyOutside for why each case is what it is.
+func RejectionStandingOf(plan PlanContext, facts *Facts, filter, reason string) RejectionStanding {
+	switch filter {
+	case TargetScopeFilter{}.Name():
+		if facts == nil || facts.HostFactsUnavailable {
+			return StandingCacheUnavailable
+		}
+		if reason != contract.TargetScopeReasonOutOfScope {
+			return StandingIndefinite
+		}
+		if _, named := facts.HostNaming.LookupKey(); named && !facts.HostResolved {
+			return StandingCacheUnavailable
+		}
+		return StandingDefinitive
+	case TargetPlanFilter{}.Name():
+		if facts == nil || facts.HostFactsUnavailable || plan.TargetPlan == nil || plan.TargetPlan.Members == nil {
+			return StandingCacheUnavailable
+		}
+		if reason != TargetPlanReasonOutOfTarget {
+			return StandingIndefinite
+		}
+		membership, knows := plan.TargetPlan.Members.(DefinitiveMembership)
+		if !knows || !membership.Definitive() {
+			return StandingCacheUnavailable
+		}
+		return StandingDefinitive
+	}
+	return StandingNotTarget
+}
+
 // DefinitelyOutside reports whether a rejection is the monitoring target
 // itself saying the record is outside it, decided on facts that were all
 // there and current. It is the one question the target-scope close asks of
@@ -37,22 +87,5 @@ type DefinitiveMembership interface {
 // Every "no" here costs a close that could have been sent; every wrong
 // "yes" closes an alert that is still in scope. The rule leans to the first.
 func DefinitelyOutside(plan PlanContext, facts *Facts, filter, reason string) bool {
-	switch filter {
-	case TargetScopeFilter{}.Name():
-		if reason != contract.TargetScopeReasonOutOfScope || facts == nil || facts.HostFactsUnavailable {
-			return false
-		}
-		if _, named := facts.HostNaming.LookupKey(); named && !facts.HostResolved {
-			return false
-		}
-		return true
-	case TargetPlanFilter{}.Name():
-		if reason != TargetPlanReasonOutOfTarget || plan.TargetPlan == nil || plan.TargetPlan.Members == nil ||
-			facts == nil || facts.HostFactsUnavailable {
-			return false
-		}
-		membership, knows := plan.TargetPlan.Members.(DefinitiveMembership)
-		return knows && membership.Definitive()
-	}
-	return false
+	return RejectionStandingOf(plan, facts, filter, reason) == StandingDefinitive
 }
