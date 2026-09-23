@@ -180,6 +180,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if !phaseTwoProductionBudgetsFitPlatform(cfg) {
 		return nil, errors.New("phase-two production budgets overflow provider limits")
 	}
+	// Where the link writes its open alert sets is the link's answer; it is
+	// read before anything connects, so the index, the difference and the
+	// endpoint list all read the one location.
+	cfg = adoptLinkdLocation(ctx, cfg, openalerts.DiscoverTarget)
 	// Phase two limits repeated diagnostics per (reason, Query Group) bucket
 	// and reports suppressed counts; the phase-one per-reason budget hid every
 	// other Query Group's coordinates once one object became noisy.

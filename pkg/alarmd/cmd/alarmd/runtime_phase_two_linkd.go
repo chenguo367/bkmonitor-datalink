@@ -2,7 +2,6 @@ package main
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
@@ -44,17 +43,13 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 	var reconciler openalerts.Reconciler
 	var console *openalerts.HTTPReconciler
 	if settings.ConsoleURL != "" {
-		address := connection.Address
-		if connection.Mode == config.RedisModeSentinel {
-			address = "sentinel:" + connection.MasterName + " (" + strings.Join(connection.SentinelAddress, ", ") + ")"
-		}
 		// Which of the link's targets is this deployment's, and its source
 		// scope, are read from the Console; the configuration only narrows the
 		// choice when the link maintains more than one target.
 		console, err = openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL,
 			Username: settings.Username, Password: settings.Password, Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: int64(capacity.Bytes / 4),
 			Select: openalerts.TargetSelector{EventSourceID: settings.EventSourceID, HookName: settings.HookName},
-			Index:  openalerts.IndexLocation{KeyPrefix: settings.Prefix(), Address: address, Database: connection.DB}})
+			Index:  openalerts.IndexLocation{KeyPrefix: settings.Prefix(), Address: linkdLocation(connection), Database: connection.DB}})
 		if err != nil {
 			return linkdIndex{}, err
 		}

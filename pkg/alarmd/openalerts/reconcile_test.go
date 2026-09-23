@@ -190,3 +190,20 @@ func TestATargetWritingElsewhereIsRefusedByName(t *testing.T) {
 		t.Fatalf("body bound error = %v", err)
 	}
 }
+
+// Discovery reads the target the link lists whatever this process reads
+// today: it is how the process learns where to read.
+func TestDiscoveryReadsTheTargetWithoutAskingWhereThisProcessReads(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/local-api/strategy-index/targets" {
+			t.Errorf("path %s", r.URL.Path)
+		}
+		_ = json.NewEncoder(w).Encode([]TargetBinding{testBinding()})
+	}))
+	defer server.Close()
+	target, err := DiscoverTarget(context.Background(), HTTPReconcilerOptions{BaseURL: server.URL, Client: server.Client(), Username: "user", Password: "secret", MaxResponseBytes: 1 << 20,
+		Index: IndexLocation{KeyPrefix: "elsewhere", Address: "other:6379", Database: 9}})
+	if err != nil || target.Address != "redis:6379" || target.Database != 3 || target.KeyPrefix != "test:active" {
+		t.Fatalf("target %+v err %v", target, err)
+	}
+}

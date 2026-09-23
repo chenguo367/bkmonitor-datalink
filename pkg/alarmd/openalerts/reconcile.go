@@ -157,7 +157,38 @@ func (reader *HTTPReconciler) Binding(ctx context.Context) (TargetBinding, error
 	return reader.resolve(ctx)
 }
 
+// DiscoverTarget reads which of the link's targets is this deployment's,
+// without asking whether this process reads its sets from where the target
+// writes them. It is how a deployment that states only the Console learns
+// where to read: the answer is the link's, not a second copy of it kept in
+// this process's configuration.
+func DiscoverTarget(ctx context.Context, options HTTPReconcilerOptions) (TargetBinding, error) {
+	options.Index = IndexLocation{KeyPrefix: "alarmd:open_alerts", Address: "discovery"}
+	reader, err := NewHTTPReconciler(options)
+	if err != nil {
+		return TargetBinding{}, err
+	}
+	return reader.choose(ctx)
+}
+
 func (reader *HTTPReconciler) resolve(ctx context.Context) (TargetBinding, error) {
+	binding, err := reader.choose(ctx)
+	if err != nil {
+		return TargetBinding{}, err
+	}
+	index := reader.options.Index
+	if binding.KeyPrefix != index.KeyPrefix || !strings.EqualFold(binding.Address, index.Address) || binding.Database != index.Database {
+		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link writes open alert sets to %s db %d prefix %s, this process reads %s db %d prefix %s, and none of the Redis connections this process holds is at %s",
+			binding.Address, binding.Database, binding.KeyPrefix, index.Address, index.Database, index.KeyPrefix, binding.Address)
+	}
+	reader.mu.Lock()
+	reader.binding, reader.resolvedAt = binding, time.Now()
+	reader.mu.Unlock()
+	return binding, nil
+}
+
+// choose is the target the selector picks among those the Console lists.
+func (reader *HTTPReconciler) choose(ctx context.Context) (TargetBinding, error) {
 	var targets []TargetBinding
 	if err := reader.get(ctx, "targets", nil, &targets); err != nil {
 		return TargetBinding{}, err
@@ -183,19 +214,7 @@ func (reader *HTTPReconciler) resolve(ctx context.Context) (TargetBinding, error
 		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link lists %d targets, set linkd event_source_id and hook_name to choose one (targets: %s)",
 			len(candidates), strings.Join(names, ", "))
 	}
-	binding, err := normalizeBinding(candidates[0])
-	if err != nil {
-		return TargetBinding{}, err
-	}
-	index := reader.options.Index
-	if binding.KeyPrefix != index.KeyPrefix || !strings.EqualFold(binding.Address, index.Address) || binding.Database != index.Database {
-		return TargetBinding{}, fmt.Errorf("alarmd openalerts: the link writes open alert sets to %s db %d prefix %s, this process reads %s db %d prefix %s; set linkd redis (and key_prefix) to the link hook's",
-			binding.Address, binding.Database, binding.KeyPrefix, index.Address, index.Database, index.KeyPrefix)
-	}
-	reader.mu.Lock()
-	reader.binding, reader.resolvedAt = binding, time.Now()
-	reader.mu.Unlock()
-	return binding, nil
+	return normalizeBinding(candidates[0])
 }
 
 func normalizeBinding(b TargetBinding) (TargetBinding, error) {
