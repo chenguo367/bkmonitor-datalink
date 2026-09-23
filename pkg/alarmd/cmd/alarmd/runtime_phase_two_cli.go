@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"slices"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -154,10 +155,10 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 func composeCLI(native, channel, auth http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var handler http.Handler
-		switch r.URL.Path {
-		case "/api/cli/channel":
+		switch {
+		case r.URL.Path == "/api/cli/channel":
 			handler = channel
-		case "/api/cli/auth/grants", "/api/cli/auth/exchange", "/api/cli/session":
+		case slices.Contains(cliauth.Paths, r.URL.Path):
 			handler = auth
 		default:
 			native.ServeHTTP(w, r)

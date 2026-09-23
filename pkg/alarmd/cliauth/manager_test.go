@@ -278,14 +278,17 @@ func TestFailedSessionCreationDoesNotConsumeGrant(t *testing.T) {
 	if err := client.Set(ctx, sessionKey, "existing", time.Minute).Err(); err != nil {
 		t.Fatal(err)
 	}
-	result, err := m.run(ctx, exchangeScript, []string{grantKey, sessionKey}, m.environmentID, "candidate-id", ScopeReadonly, SessionLifetime.Milliseconds())
+	result, err := m.run(ctx, exchangeScript, []string{grantKey, sessionKey, m.prefix + "pairing:candidate", m.pairingsKey(), m.epochKey()},
+		m.environmentID, "candidate-id", ScopeReadonly, SessionLifetime.Milliseconds(),
+		"candidate-pairing", PairingIdleLifetime.Milliseconds(), MaxPairings, m.adminBinding(), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result) != 1 || result[0] != int64(2) {
 		t.Fatalf("collision result=%v", result)
 	}
-	if client.Exists(ctx, grantKey).Val() != 1 || client.Get(ctx, sessionKey).Val() != "existing" {
+	if client.Exists(ctx, grantKey).Val() != 1 || client.Get(ctx, sessionKey).Val() != "existing" ||
+		client.Exists(ctx, m.prefix+"pairing:candidate").Val() != 0 || client.ZCard(ctx, m.pairingsKey()).Val() != 0 {
 		t.Fatal("failed create consumed grant or overwrote session")
 	}
 	if response := exchange(m, grant); response.Code != 200 {

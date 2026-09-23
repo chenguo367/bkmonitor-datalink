@@ -30,6 +30,14 @@ const (
 	SessionLifetime  = time.Hour
 	RenewalThreshold = 10 * time.Minute
 	redisTimeout     = time.Second
+	// PairingIdleLifetime is how long a renewal credential lives unused. A
+	// credential is spent and replaced at every renewal, so this bounds only a
+	// device that stopped asking: a month covers a holiday and not a
+	// forgotten laptop.
+	PairingIdleLifetime = 30 * 24 * time.Hour
+	// MaxPairings bounds the renewal credentials one environment holds. Past
+	// it an exchange still logs in, without renewal, and says so.
+	MaxPairings = 64
 )
 
 // Options uses an independently budgeted Redis client supplied by the caller.
@@ -101,6 +109,8 @@ type Manager struct {
 	limitMu         sync.Mutex
 	grantWindow     rateWindow
 	exchangeWindow  rateWindow
+	refreshWindow   rateWindow
+	counts          counters
 }
 
 // New validates deployment coordinates without contacting Redis. An empty
@@ -195,6 +205,13 @@ type storedRecord struct {
 	EnvironmentID string `json:"environment_id"`
 	Scope         string `json:"scope"`
 	ExpiresAtMS   int64  `json:"expires_at_ms"`
+	// Epoch is the environment's revocation epoch the credential was made
+	// in; PairingID the renewal credential a session was issued with.
+	Epoch     int64  `json:"epoch,omitempty"`
+	PairingID string `json:"pairing_id,omitempty"`
+	// CodeChallenge is a grant's PKCE challenge when the CLI asked for one:
+	// the exchange must then carry the verifier. Never on a session.
+	CodeChallenge string `json:"code_challenge,omitempty"`
 }
 
 func (r storedRecord) session(hash string, renewed bool) Session {
@@ -225,7 +242,7 @@ func resultRecord(result []interface{}) (storedRecord, bool, error) {
 	if status == 0 {
 		return storedRecord{}, false, expired()
 	}
-	if len(result) != 3 || status != 1 {
+	if len(result) < 3 || status != 1 {
 		return storedRecord{}, false, storeUnavailable()
 	}
 	raw, ok := result[1].(string)
@@ -263,7 +280,7 @@ func (m *Manager) Admit(ctx context.Context, session Session, renew bool) (Sessi
 }
 
 func (m *Manager) sessionOperation(ctx context.Context, hash, expectedID, action string) (Session, error) {
-	result, err := m.run(ctx, sessionScript, []string{m.prefix + "session:" + hash},
+	result, err := m.run(ctx, sessionScript, []string{m.prefix + "session:" + hash, m.epochKey()},
 		m.environmentID, expectedID, action, ScopeReadonly, SessionLifetime.Milliseconds(), RenewalThreshold.Milliseconds())
 	if err != nil {
 		return Session{}, err

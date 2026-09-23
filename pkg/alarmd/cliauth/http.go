@@ -19,11 +19,18 @@ import (
 )
 
 const (
-	grantsPath   = "/api/cli/auth/grants"
-	exchangePath = "/api/cli/auth/exchange"
-	sessionPath  = "/api/cli/session"
-	maxBodyBytes = 64 << 10
+	grantsPath    = "/api/cli/auth/grants"
+	exchangePath  = "/api/cli/auth/exchange"
+	refreshPath   = "/api/cli/auth/refresh"
+	pairPath      = "/api/cli/auth/pair"
+	forgetPath    = "/api/cli/auth/forget"
+	revokeAllPath = "/api/cli/auth/revoke-all"
+	sessionPath   = "/api/cli/session"
+	maxBodyBytes  = 64 << 10
 )
+
+// Paths is every route this handler serves, for the router in front of it.
+var Paths = []string{grantsPath, exchangePath, refreshPath, pairPath, forgetPath, revokeAllPath, sessionPath}
 
 // Handler serves only the four auth operations. The surrounding server remains
 // responsible for bounded request read time and request routing. It must
@@ -53,6 +60,14 @@ func (m *Manager) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		err = m.handleGrants(w, r)
 	case exchangePath:
 		err = m.handleExchange(w, r)
+	case refreshPath:
+		err = m.handleRefresh(w, r)
+	case pairPath:
+		err = m.handlePair(w, r)
+	case forgetPath:
+		err = m.handleForget(w, r)
+	case revokeAllPath:
+		err = m.handleRevokeAll(w, r)
 	case sessionPath:
 		err = m.handleSession(w, r)
 	default:
@@ -137,12 +152,19 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	}
 	var input struct {
 		Confirm bool `json:"confirm"`
+		// A loopback login: the CLI listening on the operator's machine holds
+		// the verifier of CodeChallenge, and the grant answers only it.
+		CodeChallenge       string `json:"code_challenge,omitempty"`
+		CodeChallengeMethod string `json:"code_challenge_method,omitempty"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		return err
 	}
 	if !input.Confirm {
 		return failure("invalid_request", "Explicit authorization confirmation is required.", 400)
+	}
+	if (input.CodeChallenge != "" || input.CodeChallengeMethod != "") && (input.CodeChallengeMethod != "S256" || !validSecret(input.CodeChallenge)) {
+		return failure("invalid_code_challenge", "A code challenge must be an S256 challenge of 43 URL-safe characters.", 400)
 	}
 	if !m.allow(&m.grantWindow, 6) {
 		return failure("auth_rate_limited", "The grant issuance limit was reached; try again in the next minute.", 429)
@@ -151,7 +173,7 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	record, _ := json.Marshal(storedRecord{EnvironmentID: m.environmentID, Scope: ScopeReadonly})
+	record, _ := json.Marshal(storedRecord{EnvironmentID: m.environmentID, Scope: ScopeReadonly, CodeChallenge: input.CodeChallenge})
 	result, err := m.run(r.Context(), issueScript, []string{m.prefix + "grant:" + digest(secret)}, string(record), GrantLifetime.Milliseconds())
 	if err != nil {
 		return err
@@ -160,6 +182,7 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	m.count(CountGrantsIssued)
 	expiresAt := time.UnixMilli(issued.ExpiresAtMS).UTC()
 	code, _ := json.Marshal(authorizationPackage{Version: "alarmd-login/v1", EnvironmentID: m.environmentID,
 		EnvironmentName: m.environmentName, PublicBaseURL: m.publicBaseURL,
@@ -168,7 +191,39 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 		grantPreview
 		AuthorizationCode string    `json:"authorization_code"`
 		GrantExpiresAt    time.Time `json:"grant_expires_at"`
-	}{preview, "alarmd-login-v1." + base64.RawURLEncoding.EncodeToString(code), expiresAt})
+		// Bound says the grant answers only the verifier's holder.
+		Bound bool `json:"bound_to_challenge"`
+	}{preview, "alarmd-login-v1." + base64.RawURLEncoding.EncodeToString(code), expiresAt, input.CodeChallenge != ""})
+}
+
+// loginResponse is what an exchange and a renewal both return: the session
+// and, when the environment holds a pairing for it, the next renewal
+// credential. Pairing names why there is none.
+type loginResponse struct {
+	EnvironmentID      string    `json:"environment_id"`
+	EnvironmentName    string    `json:"environment_name"`
+	PublicBaseURL      string    `json:"public_base_url"`
+	AccessToken        string    `json:"access_token"`
+	SessionID          string    `json:"session_id"`
+	ExpiresAt          time.Time `json:"expires_at"`
+	Scope              string    `json:"scope"`
+	RefreshToken       string    `json:"refresh_token,omitempty"`
+	PairingID          string    `json:"pairing_id,omitempty"`
+	PairingIdleSeconds int64     `json:"pairing_idle_seconds,omitempty"`
+	Pairing            string    `json:"pairing"`
+}
+
+func (m *Manager) login(record storedRecord, token, refresh string) loginResponse {
+	response := loginResponse{EnvironmentID: m.environmentID, EnvironmentName: m.environmentName, PublicBaseURL: m.publicBaseURL,
+		AccessToken: token, SessionID: record.SessionID, ExpiresAt: time.UnixMilli(record.ExpiresAtMS).UTC(), Scope: ScopeReadonly,
+		Pairing: "paired"}
+	if refresh == "" {
+		response.Pairing = "pairing_limit_reached"
+		return response
+	}
+	response.RefreshToken, response.PairingID = refresh, record.PairingID
+	response.PairingIdleSeconds = int64(PairingIdleLifetime.Seconds())
+	return response
 }
 
 func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
@@ -181,43 +236,162 @@ func (m *Manager) handleExchange(w http.ResponseWriter, r *http.Request) error {
 	var input struct {
 		EnvironmentID string `json:"environment_id"`
 		GrantSecret   string `json:"grant_secret"`
+		CodeVerifier  string `json:"code_verifier,omitempty"`
 	}
 	if err := decodeJSON(w, r, &input); err != nil {
 		return err
 	}
+	challenge := ""
+	if input.CodeVerifier != "" {
+		if !validSecret(input.CodeVerifier) {
+			m.count(CountExchangeRejected)
+			return failure("grant_invalid_or_expired", "The grant is invalid, expired, or already used; obtain a new code.", 401)
+		}
+		sum := sha256.Sum256([]byte(input.CodeVerifier))
+		challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	}
 	if input.EnvironmentID != m.environmentID || !validSecret(input.GrantSecret) {
+		m.count(CountExchangeRejected)
 		return failure("grant_invalid_or_expired", "The grant is invalid, expired, or already used; obtain a new code.", 401)
 	}
-	token, err := randomSecret()
-	if err != nil {
-		return err
+	var secrets [4]string
+	for i := range secrets {
+		value, err := randomSecret()
+		if err != nil {
+			return err
+		}
+		secrets[i] = value
 	}
-	id, err := randomSecret()
-	if err != nil {
-		return err
-	}
+	token, id, refresh, pairingID := secrets[0], secrets[1], secrets[2], secrets[3]
 	result, err := m.run(r.Context(), exchangeScript,
-		[]string{m.prefix + "grant:" + digest(input.GrantSecret), m.prefix + "session:" + digest(token)},
-		m.environmentID, id, ScopeReadonly, SessionLifetime.Milliseconds())
+		[]string{m.prefix + "grant:" + digest(input.GrantSecret), m.prefix + "session:" + digest(token),
+			pairingKey(m.prefix, refresh), m.pairingsKey(), m.epochKey()},
+		m.environmentID, id, ScopeReadonly, SessionLifetime.Milliseconds(),
+		pairingID, PairingIdleLifetime.Milliseconds(), MaxPairings, m.adminBinding(), challenge)
 	if err != nil {
+		m.count(CountStoreUnavailable)
 		return err
 	}
 	record, _, err := resultRecord(result)
 	if ErrorCode(err) == "auth_expired_or_revoked" {
+		m.count(CountExchangeRejected)
 		return failure("grant_invalid_or_expired", "The grant is invalid, expired, or already used; obtain a new code.", 401)
 	}
 	if err != nil {
 		return err
 	}
+	m.count(CountExchanged)
+	if paired, _ := result[len(result)-1].(int64); paired != 1 || len(result) != 4 {
+		m.count(CountPairingsRefused)
+		refresh = ""
+	} else {
+		m.count(CountPairingsIssued)
+	}
+	return writeJSON(w, m.login(record, token, refresh))
+}
+
+// handleRefresh spends a renewal credential for a new session and the next
+// credential. The body carries the credential, never a header, so it is not
+// confused with a session bearer.
+func (m *Manager) handleRefresh(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w, "POST")
+	}
+	if !m.allow(&m.refreshWindow, 60) {
+		return failure("auth_rate_limited", "The renewal limit was reached; try again in the next minute.", 429)
+	}
+	var input struct {
+		EnvironmentID string `json:"environment_id"`
+		RefreshToken  string `json:"refresh_token"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		return err
+	}
+	if input.EnvironmentID != m.environmentID {
+		m.count(CountRenewalExpired)
+		return renewalFailure()
+	}
+	renewal, err := m.Refresh(r.Context(), input.RefreshToken)
+	if err != nil {
+		return err
+	}
+	record := storedRecord{SessionID: renewal.Session.ID, ExpiresAtMS: renewal.Session.ExpiresAt.UnixMilli(), PairingID: renewal.PairingID}
+	return writeJSON(w, m.login(record, renewal.AccessToken, renewal.RefreshToken))
+}
+
+// handlePair gives a live session without a pairing its renewal credential.
+func (m *Manager) handlePair(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w, "POST")
+	}
+	bearer, err := requestBearer(r)
+	if err != nil {
+		return err
+	}
+	refresh, id, err := m.Upgrade(r.Context(), bearer)
+	if err != nil {
+		return err
+	}
 	return writeJSON(w, struct {
-		EnvironmentID   string    `json:"environment_id"`
-		EnvironmentName string    `json:"environment_name"`
-		PublicBaseURL   string    `json:"public_base_url"`
-		AccessToken     string    `json:"access_token"`
-		SessionID       string    `json:"session_id"`
-		ExpiresAt       time.Time `json:"expires_at"`
-		Scope           string    `json:"scope"`
-	}{m.environmentID, m.environmentName, m.publicBaseURL, token, id, time.UnixMilli(record.ExpiresAtMS).UTC(), ScopeReadonly})
+		RefreshToken       string `json:"refresh_token"`
+		PairingID          string `json:"pairing_id"`
+		PairingIdleSeconds int64  `json:"pairing_idle_seconds"`
+	}{refresh, id, int64(PairingIdleLifetime.Seconds())})
+}
+
+// handleForget revokes the caller's own renewal credential.
+func (m *Manager) handleForget(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w, "POST")
+	}
+	var input struct {
+		EnvironmentID string `json:"environment_id"`
+		RefreshToken  string `json:"refresh_token"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		return err
+	}
+	if input.EnvironmentID != m.environmentID {
+		return renewalFailure()
+	}
+	if err := m.Forget(r.Context(), input.RefreshToken); err != nil {
+		return err
+	}
+	return writeJSON(w, struct {
+		Forgotten bool `json:"forgotten"`
+	}{true})
+}
+
+// handleRevokeAll ends every CLI session and pairing of the environment. It
+// takes the administrator key and the configured origin, as issuing does.
+func (m *Manager) handleRevokeAll(w http.ResponseWriter, r *http.Request) error {
+	if r.Method != http.MethodPost {
+		return methodNotAllowed(w, "POST")
+	}
+	if err := m.authorizeAdmin(r); err != nil {
+		return err
+	}
+	origin, single := singleHeader(r, "Origin")
+	if !single || origin != m.origin {
+		return failure("origin_denied", "A revocation must be requested from the configured deployment origin.", 403)
+	}
+	var input struct {
+		Confirm bool `json:"confirm"`
+	}
+	if err := decodeJSON(w, r, &input); err != nil {
+		return err
+	}
+	if !input.Confirm {
+		return failure("invalid_request", "Explicit revocation confirmation is required.", 400)
+	}
+	pairings, err := m.RevokeAll(r.Context())
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, struct {
+		RevokedPairings int64 `json:"revoked_pairings"`
+		SessionsRevoked bool  `json:"sessions_revoked"`
+	}{pairings, true})
 }
 
 func (m *Manager) handleSession(w http.ResponseWriter, r *http.Request) error {
