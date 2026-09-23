@@ -550,6 +550,9 @@ func Load(path string) (Config, error) {
 	cfg.resolveCompatibilityServiceTimeouts()
 	cfg.resolveCompatibilityPodCache()
 	cfg.resolvePhaseTwoWorkerIDFromEnvironment()
+	if err := cfg.PhaseTwo.Linkd.resolveCredentialsFromEnvironment(); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.PhaseTwo.migratePlatformSettings(); err != nil {
 		return Config{}, err
 	}

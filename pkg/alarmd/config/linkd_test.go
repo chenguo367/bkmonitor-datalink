@@ -31,3 +31,47 @@ func TestLinkdConfigurationBinding(t *testing.T) {
 		t.Fatal("missing source binding accepted")
 	}
 }
+
+// The Console credentials may come from the environment, which is how a
+// deployment hands alarmd the alert link's own Console Secret. Stated in both
+// places, they are refused rather than one silently winning.
+func TestLinkdConsoleCredentialsComeFromTheEnvironment(t *testing.T) {
+	t.Setenv(LinkdConsoleUsernameEnvironment, "reader")
+	t.Setenv(LinkdConsolePasswordEnvironment, "test-password")
+	c := LinkdConfig{ConsoleURL: "https://console.example.test", EventSourceID: "native-events", HookName: "active-index"}
+	if err := c.resolveCredentialsFromEnvironment(); err != nil {
+		t.Fatal(err)
+	}
+	if c.Username != "reader" || c.Password != "test-password" {
+		t.Fatalf("credentials not taken from the environment: %+v", c)
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	both := LinkdConfig{Password: "file-password"}
+	if err := both.resolveCredentialsFromEnvironment(); err == nil {
+		t.Fatal("a password stated in the file and the environment was accepted")
+	}
+	t.Setenv(LinkdConsoleUsernameEnvironment, "")
+	t.Setenv(LinkdConsolePasswordEnvironment, "")
+	fileOnly := LinkdConfig{Username: "file-reader", Password: "file-password"}
+	if err := fileOnly.resolveCredentialsFromEnvironment(); err != nil || fileOnly.Username != "file-reader" {
+		t.Fatalf("an empty environment overrode the file: %+v %v", fileOnly, err)
+	}
+}
+
+// Loading applies it: a file that names the Console but not its credentials
+// loads with the credentials the environment carries.
+func TestLoadingTakesTheConsoleCredentialsFromTheEnvironment(t *testing.T) {
+	t.Setenv(LinkdConsoleUsernameEnvironment, "reader")
+	t.Setenv(LinkdConsolePasswordEnvironment, "test-password")
+	text := validGoAccessRuntimeConfigYAML("linkd-worker") +
+		"  linkd:\n    console_url: https://console.example.test\n    event_source_id: native-events\n    hook_name: active-index\n"
+	cfg, err := Load(writeConfig(t, text))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PhaseTwo.Linkd.Username != "reader" || cfg.PhaseTwo.Linkd.Password != "test-password" {
+		t.Fatalf("loading did not take the credentials from the environment: %+v", cfg.PhaseTwo.Linkd)
+	}
+}

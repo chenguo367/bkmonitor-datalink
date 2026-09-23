@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 )
@@ -34,6 +35,35 @@ type LinkdConfig struct {
 	// it. A capability that makes alerts disappear is armed once those
 	// numbers have been read, not once the code is believed.
 	AbsentCloseSend bool `yaml:"absent_close_send"`
+}
+
+// The Console's Basic Auth may come from the environment instead of the file,
+// so that a deployment can hand alarmd the same Secret the alert link's own
+// Console is given - its chart keeps the credentials in an existing Secret -
+// rather than restating them in alarmd's configuration.
+const (
+	LinkdConsoleUsernameEnvironment = "ALARMD_LINKD_CONSOLE_USERNAME"
+	LinkdConsolePasswordEnvironment = "ALARMD_LINKD_CONSOLE_PASSWORD"
+)
+
+// resolveCredentialsFromEnvironment fills the Console credentials from the
+// environment. A credential stated in both places is refused: two sources for
+// one secret is a deployment that can rotate one and keep using the other.
+func (c *LinkdConfig) resolveCredentialsFromEnvironment() error {
+	for _, field := range []struct {
+		name  string
+		value *string
+	}{{LinkdConsoleUsernameEnvironment, &c.Username}, {LinkdConsolePasswordEnvironment, &c.Password}} {
+		env, ok := os.LookupEnv(field.name)
+		if !ok || env == "" {
+			continue
+		}
+		if *field.value != "" {
+			return errors.New("linkd console credentials are set both in the file and in " + field.name)
+		}
+		*field.value = env
+	}
+	return nil
 }
 
 func (c LinkdConfig) Prefix() string {
