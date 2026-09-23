@@ -87,3 +87,22 @@ func TestTheSecondPassCountsStayOffOtherLines(t *testing.T) {
 		}
 	}
 }
+
+// Where the preflight's time went is on its line at every value, zero
+// included, and only on its line.
+func TestThePreflightLineCarriesFetchAndDecodeTime(t *testing.T) {
+	t.Parallel()
+	fields := preflightLine(t, Counts{Keys: 250, StateFetchMillis: 30}, StageStatePreflight)
+	if fields["fetch_ms"] != float64(30) {
+		t.Errorf("fetch_ms = %v, want 30", fields["fetch_ms"])
+	}
+	if value, present := fields["decode_ms"]; !present || value != float64(0) {
+		t.Errorf("decode_ms = %v present %v, want a zero that is on the line", value, present)
+	}
+	other := preflightLine(t, Counts{Keys: 4, StateFetchMillis: 30}, StageGapLoaded)
+	for _, name := range []string{"fetch_ms", "decode_ms"} {
+		if _, present := other[name]; present {
+			t.Errorf("%s is on the %s line, which does not produce it", name, StageGapLoaded)
+		}
+	}
+}
