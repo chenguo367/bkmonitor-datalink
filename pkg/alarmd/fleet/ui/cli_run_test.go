@@ -38,6 +38,9 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 	if err := json.Unmarshal(output, &runs); err != nil {
 		t.Fatalf("harness output: %v\n%s", err, output)
 	}
+	var loops map[string]json.RawMessage
+	_ = json.Unmarshal(output, &loops)
+	checkLoopback(t, loops)
 	run := func(name string) cliPageRun {
 		t.Helper()
 		result, ok := runs[name]
@@ -109,22 +112,37 @@ const fs = require('fs');
 const html = fs.readFileSync(process.argv[2], 'utf8');
 const script = html.slice(html.indexOf('<script>') + 8, html.lastIndexOf('</script>'));
 
-function load(pageURL, respond) {
+function load(pageURL, respond, loop) {
   const elements = {};
   const element = id => elements[id] || (elements[id] = {
     id, textContent: '', value: '', disabled: false, hidden: false, className: '', href: '', listeners: {},
     addEventListener(type, listener) { this.listeners[type] = listener; }, focus() {}, select() {},
   });
   let requests = 0;
+  const calls = [];
   const context = {
     document: { getElementById: element },
     location: new URL(pageURL),
     addEventListener() {},
     navigator: { clipboard: { writeText: async () => {} } },
-    fetch: async (url, options) => { requests++; return respond(url, options); },
+    crypto: require('crypto').webcrypto,
+    btoa: s => Buffer.from(s, 'binary').toString('base64'),
+    confirm: () => true,
+    setInterval: () => 0,
+    fetch: async (url, options) => {
+      const target = String(url);
+      calls.push({ url: target, method: (options && options.method) || 'GET', body: options && options.body });
+      // The CLI on the loopback address: nothing listens unless the run says so.
+      if (target.startsWith('http://127.0.0.1:')) {
+        if (!loop) throw new TypeError('Failed to fetch');
+        return loop(new URL(target), options);
+      }
+      requests++;
+      return respond(url, options);
+    },
   };
   new Function(...Object.keys(context), script)(...Object.values(context));
-  return { elements, requests: () => requests };
+  return { elements, requests: () => requests, calls };
 }
 
 const answer = (status, body) => ({ ok: status < 400, status, json: async () => body });
@@ -160,6 +178,147 @@ async function inspect(pageURL, respond, then) {
   runs.not_json = await inspect(entryPage,
     () => ({ ok: false, status: 404, json: async () => { throw new SyntaxError('Unexpected token <'); } }));
   runs.network_failure = await inspect(entryPage, () => { throw new TypeError('Failed to fetch'); });
+  // The loopback login. The page's own state and port are read back from the
+  // command it shows, as an operator would copy them.
+  const settle = () => new Promise(resolve => setImmediate(resolve));
+  async function loopbackRun(cli, grantAnswer) {
+    let seen;
+    const page = load(entryPage, (url, options) => {
+      if (String(url).endsWith('/grants') && options.method === 'POST') { seen = JSON.parse(options.body); return grantAnswer(); }
+      if (String(url).endsWith('/revoke-all')) return answer(200, { revoked_pairings: 3, sessions_revoked: true });
+      return answer(200, preview);
+    }, cli);
+    const e = page.elements;
+    await settle();
+    const command = e['listen-command'].textContent;
+    const beforePreview = e.authorize.disabled;
+    e['admin-key'].value = 'k'.repeat(40);
+    await e.inspect.listeners.click();
+    await settle();
+    const offered = !e.authorize.disabled;
+    if (offered) { await e.authorize.listeners.click(); await settle(); }
+    return { command, before_preview_disabled: beforePreview, offered, grant: seen || null, status: e.status.textContent,
+      error: e.status.className === 'error', probe: e.probe.textContent, key_kept: e['admin-key'].value !== '',
+      after_disabled: e.authorize.disabled, calls: page.calls.filter(c => c.url.startsWith('http://127.0.0.1:')) };
+  }
+  const challenge = 'C'.repeat(43);
+  const commandState = url => url.searchParams.get('state');
+  const grantOK = () => answer(200, { authorization_code: 'alarmd-login-v1.abc', environment_id: 'ns/release', grant_expires_at: '2026-09-23T09:00:00Z' });
+  let callbackBody;
+  runs.loopback_ok = await loopbackRun(async (url, options) => {
+    if (url.pathname === '/ready') return answer(200, { state: commandState(url), code_challenge: challenge });
+    callbackBody = JSON.parse(options.body);
+    return answer(200, { status: 'ok', environment_id: 'ns/release' });
+  }, grantOK);
+  runs.loopback_ok.callback = callbackBody;
+  runs.loopback_wrong_state = await loopbackRun(async url => answer(200, { state: 'someone-else', code_challenge: challenge }), grantOK);
+  runs.loopback_bad_challenge = await loopbackRun(async url => answer(200, { state: commandState(url), code_challenge: 'short' }), grantOK);
+  runs.loopback_none = await loopbackRun(null, grantOK);
+  runs.loopback_refused = await loopbackRun(async (url) => url.pathname === '/ready'
+    ? answer(200, { state: commandState(url), code_challenge: challenge })
+    : answer(409, { status: 'error', error: { code: 'already_completed', message: 'server sentence' } }), grantOK);
+  runs.loopback_gone = await loopbackRun(async (url) => { if (url.pathname === '/ready') return answer(200, { state: commandState(url), code_challenge: challenge }); throw new TypeError('Failed to fetch'); }, grantOK);
+  runs.loopback_grant_refused = await loopbackRun(async (url) => url.pathname === '/ready'
+    ? answer(200, { state: commandState(url), code_challenge: challenge }) : answer(200, {}),
+    () => answer(403, { status: 'error', error: { code: 'admin_unauthorized', message: 'server sentence' } }));
+  {
+    const page = load(entryPage, (url, options) => String(url).endsWith('/revoke-all')
+      ? (runs.revoke_body = JSON.parse(options.body), answer(200, { revoked_pairings: 3, sessions_revoked: true }))
+      : answer(200, preview));
+    const e = page.elements;
+    e['admin-key'].value = 'k'.repeat(40);
+    await e.inspect.listeners.click();
+    await e.revoke.listeners.click();
+    runs.revoke = { status: e.status.textContent, error: e.status.className === 'error' };
+  }
   process.stdout.write(JSON.stringify(runs));
 })().catch(error => { console.error(error); process.exit(1); });
 `
+
+type loopbackRun struct {
+	Command               string `json:"command"`
+	BeforePreviewDisabled bool   `json:"before_preview_disabled"`
+	Offered               bool   `json:"offered"`
+	Grant                 *struct {
+		Confirm             bool   `json:"confirm"`
+		CodeChallenge       string `json:"code_challenge"`
+		CodeChallengeMethod string `json:"code_challenge_method"`
+	} `json:"grant"`
+	Status   string `json:"status"`
+	Error    bool   `json:"error"`
+	Probe    string `json:"probe"`
+	KeyKept  bool   `json:"key_kept"`
+	After    bool   `json:"after_disabled"`
+	Callback *struct {
+		State string `json:"state"`
+		Code  string `json:"code"`
+	} `json:"callback"`
+	Calls []struct {
+		URL    string `json:"url"`
+		Method string `json:"method"`
+	} `json:"calls"`
+}
+
+// The loopback login as the page runs it: the command carries a port and a
+// state of this page's; the button is offered only when the CLI on that port
+// answers with that state and a well-formed challenge, and after the
+// environment is checked; the grant is asked for bound to the CLI's challenge
+// and handed to the CLI with the state; every way the CLI or the server
+// refuses reaches the operator as what to do.
+func checkLoopback(t *testing.T, raw map[string]json.RawMessage) {
+	t.Helper()
+	run := func(name string) loopbackRun {
+		t.Helper()
+		var got loopbackRun
+		if err := json.Unmarshal(raw[name], &got); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return got
+	}
+	ok := run("loopback_ok")
+	fields := strings.Fields(ok.Command)
+	if len(fields) != 9 || strings.Join(fields[:3], " ") != "alarmd-cli auth listen" || fields[3] != "--url" ||
+		fields[4] != "http://apps.example.test/alarmd/" || fields[5] != "--port" || fields[7] != "--state" || len(fields[8]) != 43 {
+		t.Fatalf("the command: %q", ok.Command)
+	}
+	port, state := fields[6], fields[8]
+	if !ok.BeforePreviewDisabled || !ok.Offered || ok.Grant == nil || !ok.Grant.Confirm ||
+		ok.Grant.CodeChallenge != strings.Repeat("C", 43) || ok.Grant.CodeChallengeMethod != "S256" {
+		t.Errorf("the grant is asked for bound to the CLI's challenge, after the check: %+v", ok)
+	}
+	if ok.Callback == nil || ok.Callback.State != state || ok.Callback.Code != "alarmd-login-v1.abc" {
+		t.Errorf("the code reaches the CLI with the page's state: %+v", ok.Callback)
+	}
+	for _, call := range ok.Calls {
+		if !strings.HasPrefix(call.URL, "http://127.0.0.1:"+port+"/") {
+			t.Errorf("a loopback call to another port: %s", call.URL)
+		}
+	}
+	if ok.Error || !strings.Contains(ok.Status, "ns/release") || ok.KeyKept || !ok.After || !strings.Contains(ok.Probe, "已登录") {
+		t.Errorf("after the CLI logged in: %+v", ok)
+	}
+	for _, name := range []string{"loopback_wrong_state", "loopback_bad_challenge", "loopback_none"} {
+		if got := run(name); got.Offered || got.Grant != nil || strings.Contains(got.Probe, "已就绪") {
+			t.Errorf("%s: a CLI that did not answer with this page's state and a challenge is not offered: %+v", name, got)
+		}
+	}
+	for name, says := range map[string]string{"loopback_refused": "重新执行上面的命令", "loopback_gone": "同一台机器",
+		"loopback_grant_refused": "管理凭据不对"} {
+		got := run(name)
+		if !got.Error || !strings.Contains(got.Status, says) || strings.Contains(got.Status, "server sentence") {
+			t.Errorf("%s says what to do: %+v", name, got)
+		}
+	}
+	var revoke struct {
+		Status string `json:"status"`
+		Error  bool   `json:"error"`
+	}
+	var body struct {
+		Confirm bool `json:"confirm"`
+	}
+	_ = json.Unmarshal(raw["revoke"], &revoke)
+	_ = json.Unmarshal(raw["revoke_body"], &body)
+	if revoke.Error || !strings.Contains(revoke.Status, "配对 3 个") || !body.Confirm {
+		t.Errorf("revoking every pairing: %+v %+v", revoke, body)
+	}
+}

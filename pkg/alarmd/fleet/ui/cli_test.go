@@ -14,7 +14,7 @@ func TestCLIAuthorizationPageIsEmbeddedAndNotCached(t *testing.T) {
 			t.Fatalf("%s: %d", path, w.Code)
 		}
 		body := w.Body.String()
-		for _, term := range []string{"api/cli/auth/grants", "confirm:true", "textContent", "pagehide", "alarmd-cli auth login"} {
+		for _, term := range []string{"api/cli/auth/", "confirm:true", "textContent", "pagehide", "alarmd-cli auth login"} {
 			if !strings.Contains(body, term) {
 				t.Fatalf("missing page contract %s", term)
 			}
