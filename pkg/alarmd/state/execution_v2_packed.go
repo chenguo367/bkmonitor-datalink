@@ -188,6 +188,27 @@ func walkRecordPoints(mutation execution.StateMutation, visit func(execution.Sta
 	return err
 }
 
+// seriesRecordIDs derives the record ids of one series' points, point by
+// point, on one deriver built at the first point. Every point of a record is
+// derived on both its read and its write, and deriving each from scratch was
+// what reading a series with fourteen hundred retained points mostly cost.
+// Built lazily so a record with no points refuses nothing it did not before,
+// and a series the derivation refuses is refused at the point that asked,
+// with the same error DeriveRecordIDV2 gives.
+func seriesRecordIDs(series string) func(int64) (string, error) {
+	var deriver *contract.RecordIDDeriverV2
+	return func(sourceTime int64) (string, error) {
+		if deriver == nil {
+			built, err := contract.NewRecordIDDeriverV2(series)
+			if err != nil {
+				return "", err
+			}
+			deriver = built
+		}
+		return deriver.Derive(sourceTime)
+	}
+}
+
 // levelFingerprints picks each Level's one detect fingerprint out of the points
 // and refuses a mutation whose points disagree with each other.
 //
@@ -276,6 +297,7 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 	previous := int64(0)
 	pointIndex := -1
 	pointCount := 0
+	derive := seriesRecordIDs(string(mutation.Identity.SeriesIdentityDigest))
 	if err := walkRecordPoints(mutation, func(point execution.StateHistoryPoint) error {
 		pointIndex++
 		pointCount++
@@ -285,7 +307,7 @@ func encodeRuntimePackedCounted(mutation execution.StateMutation, revision uint6
 		// The id is not stored. It is checked here against the derivation every
 		// producer uses, so a producer that stops deriving it is refused where
 		// it writes rather than read back as a different record later.
-		expected, deriveErr := contract.DeriveRecordIDV2(string(mutation.Identity.SeriesIdentityDigest), point.SourceTime)
+		expected, deriveErr := derive(point.SourceTime)
 		if deriveErr != nil {
 			return packedRefusal(PackedRuleRecordIDUnderivable, "derive record id at %d: %v", point.SourceTime, deriveErr)
 		}
@@ -433,6 +455,7 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 	}
 	history := make([]execution.StateHistoryPoint, 0, header.PointCount)
 	previous := int64(0)
+	derive := seriesRecordIDs(string(identity.SeriesIdentityDigest))
 	for point := 0; point < header.PointCount; point++ {
 		delta, next, decodeErr := consumeUvarint(rest)
 		if decodeErr != nil {
@@ -453,7 +476,7 @@ func decodeRuntimePacked(raw []byte, identity execution.StateKeyIdentity) (execu
 		// one instead would return a different record than was written.
 		recordID, stored := legacyByIndex[point]
 		if !stored {
-			derived, deriveErr := contract.DeriveRecordIDV2(string(identity.SeriesIdentityDigest), sourceTime)
+			derived, deriveErr := derive(sourceTime)
 			if deriveErr != nil {
 				return execution.RuntimeStateView{}, fmt.Errorf("%w: derive record id: %v", ErrCorruptState, deriveErr)
 			}
