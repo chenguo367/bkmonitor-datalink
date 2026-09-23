@@ -16,6 +16,11 @@ body{font:16px/1.65 system-ui,sans-serif;color:#243247;background:#f4f6fa;margin
 <input id="admin-key" type="password" autocomplete="off" spellcheck="false" maxlength="256">
 <button id="inspect">核对环境</button>
 <pre id="preview" aria-live="polite">输入管理凭据后核对环境。</pre>
+<details id="admin-key-help"><summary>管理凭据从哪里拿？</summary>
+<p>就是部署时存进 Secret 的那个值。Secret 与 alarmd 在同一个命名空间，名字是 values 里 <code>cli.adminKeySecret.existingSecret</code> 的值，键名是同一处的 <code>key</code>（不写时为 <code>admin-key</code>）。有该命名空间 Secret 读权限的人可以这样取出：</p>
+<pre>kubectl -n 命名空间 get secret Secret名 -o jsonpath='{.data.键名}' | base64 -d</pre>
+<p>取出后只粘贴到本页，不要发进聊天或工单。</p>
+</details>
 <section id="listen">
 <h2>本机 CLI 登录</h2>
 <p>在浏览器所在的这台机器上执行下面的命令，CLI 会在本机等待这个页面把授权交给它：</p>
@@ -81,11 +86,11 @@ $('listen-command').textContent = `alarmd-cli auth listen --url ${base.href} --p
 // where to look, so every code the routes and the CLI can return has a line.
 function wrongEntry(configured) {
   return `当前页面地址 ${location.origin} 与 alarmd 配置的入口 ${configured} 不一致，授权码生成会被拒绝。`
-    + `请从 ${configured}cli 打开本页；如果入口地址已经变了，把 values 里的 alarmd.cli.publicBaseUrl（即配置里的 cli.public_base_url）改成新的入口地址（末尾带 /）后重新部署。`;
+    + `请从 ${configured}cli 打开本页；如果入口地址已经变了，把 values 里的 cli.publicBaseUrl（即配置里的 cli.public_base_url）改成新的入口地址（末尾带 /）后重新部署。`;
 }
 const HINTS = {
-  admin_unauthorized: '管理凭据不对：请输入部署时写进 Secret 的那个值（values 里 alarmd.cli.adminKeySecret.existingSecret 指向的 Secret）。',
-  admin_not_configured: 'alarmd 没有拿到管理凭据，签发未开启：检查 values 里 alarmd.cli.adminKeySecret.existingSecret，以及该 Secret 是否在 alarmd 所在的命名空间、键名是否对，改完重新部署。',
+  admin_unauthorized: '管理凭据不对：请输入部署时写进 Secret 的那个值（values 里 cli.adminKeySecret.existingSecret 指向的 Secret，见上方「管理凭据从哪里拿？」）。',
+  admin_not_configured: 'alarmd 没有拿到管理凭据，签发未开启：检查 values 里 cli.adminKeySecret.existingSecret，以及该 Secret 是否在 alarmd 所在的命名空间、键名是否对，改完重新部署。',
   auth_rate_limited: '生成得太频繁：每个副本每分钟最多 6 次，请下一分钟再试。',
   auth_busy: '授权服务正忙，请几秒后重试。',
   auth_store_unavailable: 'alarmd 读写授权记录的运行 Redis 暂不可用，请稍后重试；持续失败请检查 alarmd 的运行 Redis。',

@@ -62,3 +62,22 @@ func TestTheAuthorizationPageSaysWhatToDoForEveryGrantRefusal(t *testing.T) {
 		}
 	}
 }
+
+// The credential is typed once and then forgotten for weeks, so the page
+// says where it lives before any refusal: the Secret, its key, and how to
+// read it. The values path is written without a chart's own prefix,
+// because the same page serves charts that nest the cli block differently.
+func TestTheAuthorizationPageSaysWhereTheAdminKeyLives(t *testing.T) {
+	w := httptest.NewRecorder()
+	Handler().ServeHTTP(w, httptest.NewRequest("GET", "/cli", nil))
+	body := w.Body.String()
+	for _, term := range []string{`<details id="admin-key-help">`, "cli.adminKeySecret.existingSecret", "<code>admin-key</code>",
+		"get secret", "{.data.键名}", "base64 -d"} {
+		if !strings.Contains(body, term) {
+			t.Errorf("the page does not say where the admin key lives: missing %q", term)
+		}
+	}
+	if strings.Contains(body, "alarmd.cli.") {
+		t.Error("the page names one chart's values path")
+	}
+}
