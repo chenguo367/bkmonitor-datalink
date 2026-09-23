@@ -190,7 +190,7 @@ func TestGrantAndSessionRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if session.ID != response.SessionID || session.Principal != "deployment-admin" || session.Renewed || !session.ExpiresAt.Equal(response.ExpiresAt) {
+	if session.ID != response.SessionID || session.Renewed || !session.ExpiresAt.Equal(response.ExpiresAt) {
 		t.Fatalf("session=%+v", session)
 	}
 	if session.ExpiresAt.Before(before.Add(SessionLifetime - time.Second)) {

@@ -47,7 +47,6 @@ type Options struct {
 
 type Session struct {
 	ID            string    `json:"session_id"`
-	Principal     string    `json:"principal"`
 	EnvironmentID string    `json:"environment_id"`
 	Scope         string    `json:"scope"`
 	ExpiresAt     time.Time `json:"expires_at"`
@@ -193,14 +192,13 @@ func validSecret(secret string) bool {
 
 type storedRecord struct {
 	SessionID     string `json:"session_id,omitempty"`
-	Principal     string `json:"principal"`
 	EnvironmentID string `json:"environment_id"`
 	Scope         string `json:"scope"`
 	ExpiresAtMS   int64  `json:"expires_at_ms"`
 }
 
 func (r storedRecord) session(hash string, renewed bool) Session {
-	return Session{ID: r.SessionID, Principal: r.Principal, EnvironmentID: r.EnvironmentID,
+	return Session{ID: r.SessionID, EnvironmentID: r.EnvironmentID,
 		Scope: r.Scope, ExpiresAt: time.UnixMilli(r.ExpiresAtMS).UTC(), Renewed: renewed, TokenHash: hash}
 }
 

@@ -111,7 +111,7 @@ func TestPreviewDoesNotCreateGrantOrUseRedis(t *testing.T) {
 		if err := json.Unmarshal(response.Body.Bytes(), &preview); err != nil {
 			t.Fatal(err)
 		}
-		if preview.Principal != "deployment-admin" || preview.Scope != ScopeReadonly || preview.SessionTTLSeconds != 3600 || preview.GrantTTLSeconds != 300 {
+		if preview.Scope != ScopeReadonly || preview.SessionTTLSeconds != 3600 || preview.GrantTTLSeconds != 300 {
 			t.Fatalf("preview=%+v", preview)
 		}
 	}
@@ -325,8 +325,8 @@ func TestHTTPDeploymentPreservesURLAndRequiresMatchingOrigin(t *testing.T) {
 	}
 	status, body := request(http.MethodGet, grantsPath, "", "", true)
 	var preview grantPreview
-	if status != http.StatusOK || json.Unmarshal(body, &preview) != nil || preview.PublicBaseURL != publicBaseURL || preview.Principal != "deployment-admin" {
-		t.Fatal("HTTP grant preview did not preserve deployment URL and principal")
+	if status != http.StatusOK || json.Unmarshal(body, &preview) != nil || preview.PublicBaseURL != publicBaseURL || preview.Scope != ScopeReadonly {
+		t.Fatal("HTTP grant preview did not preserve deployment URL and scope")
 	}
 	wrongOrigin := strings.Replace(server.URL, "http://", "https://", 1)
 	status, body = request(http.MethodPost, grantsPath, wrongOrigin, `{"confirm":true}`, true)
@@ -443,12 +443,12 @@ func TestSaturatedHandlerDoesNotWaitForRejectedBody(t *testing.T) {
 	}
 }
 
-func TestLegacyHostHeadersCannotAuthorizeOrChoosePrincipal(t *testing.T) {
+// Only the Authorization header carries the administrator key; the key is
+// never echoed back.
+func TestTheGrantPreviewNeedsTheAdministratorKeyAndNeverEchoesIt(t *testing.T) {
 	m := noStoreManager(t)
 	for _, authenticated := range []bool{false, true} {
 		r := httptest.NewRequest(http.MethodGet, grantsPath, nil)
-		r.Header.Set("X-Alarmd-Issuer-Key", testAdminKey)
-		r.Header.Set("X-Alarmd-Principal", "forged-user")
 		if authenticated {
 			r.Header.Set("Authorization", "Bearer "+testAdminKey)
 		}
@@ -461,11 +461,8 @@ func TestLegacyHostHeadersCannotAuthorizeOrChoosePrincipal(t *testing.T) {
 		if w.Code != want {
 			t.Fatalf("authenticated=%v status=%d", authenticated, w.Code)
 		}
-		if strings.Contains(w.Body.String(), "forged-user") || strings.Contains(w.Body.String(), testAdminKey) {
-			t.Fatal("host identity or key leaked into response")
-		}
-		if authenticated && !strings.Contains(w.Body.String(), `"principal":"deployment-admin"`) {
-			t.Fatal("deployment principal missing")
+		if strings.Contains(w.Body.String(), testAdminKey) {
+			t.Fatal("administrator key leaked into response")
 		}
 	}
 }

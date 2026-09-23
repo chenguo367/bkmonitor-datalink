@@ -76,19 +76,20 @@ func boundBodyRead(w http.ResponseWriter, r *http.Request, timeout time.Duration
 	}
 }
 
-// deploymentPrincipal authenticates only the deployment key, never host identity headers.
-func (m *Manager) deploymentPrincipal(r *http.Request) (string, error) {
+// authorizeAdmin checks the deployment administrator key, the one credential
+// that can issue a grant.
+func (m *Manager) authorizeAdmin(r *http.Request) error {
 	if !m.adminConfigured {
-		return "", failure("admin_not_configured", "Deployment authorization is not configured.", 503)
+		return failure("admin_not_configured", "Deployment authorization is not configured.", 503)
 	}
 	authorization, single := singleHeader(r, "Authorization")
 	scheme, key, separated := strings.Cut(authorization, " ")
 	hash := sha256.Sum256([]byte(key))
 	keyMatches := subtle.ConstantTimeCompare(hash[:], m.adminHash[:]) == 1
 	if !single || !separated || !strings.EqualFold(scheme, "Bearer") || !keyMatches {
-		return "", failure("admin_unauthorized", "Deployment administrator authorization is required.", 403)
+		return failure("admin_unauthorized", "Deployment administrator authorization is required.", 403)
 	}
-	return "deployment-admin", nil
+	return nil
 }
 
 func singleHeader(r *http.Request, name string) (string, bool) {
@@ -103,7 +104,6 @@ type grantPreview struct {
 	EnvironmentID     string `json:"environment_id"`
 	EnvironmentName   string `json:"environment_name"`
 	PublicBaseURL     string `json:"public_base_url"`
-	Principal         string `json:"principal"`
 	Scope             string `json:"scope"`
 	GrantTTLSeconds   int    `json:"grant_ttl_seconds"`
 	SessionTTLSeconds int    `json:"session_ttl_seconds"`
@@ -122,12 +122,11 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	if r.Method != http.MethodGet && r.Method != http.MethodPost {
 		return methodNotAllowed(w, "GET, POST")
 	}
-	principal, err := m.deploymentPrincipal(r)
-	if err != nil {
+	if err := m.authorizeAdmin(r); err != nil {
 		return err
 	}
 	preview := grantPreview{EnvironmentID: m.environmentID, EnvironmentName: m.environmentName,
-		PublicBaseURL: m.publicBaseURL, Principal: principal, Scope: ScopeReadonly,
+		PublicBaseURL: m.publicBaseURL, Scope: ScopeReadonly,
 		GrantTTLSeconds: int(GrantLifetime.Seconds()), SessionTTLSeconds: int(SessionLifetime.Seconds())}
 	if r.Method == http.MethodGet {
 		return writeJSON(w, preview)
@@ -152,7 +151,7 @@ func (m *Manager) handleGrants(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	record, _ := json.Marshal(storedRecord{Principal: principal, EnvironmentID: m.environmentID, Scope: ScopeReadonly})
+	record, _ := json.Marshal(storedRecord{EnvironmentID: m.environmentID, Scope: ScopeReadonly})
 	result, err := m.run(r.Context(), issueScript, []string{m.prefix + "grant:" + digest(secret)}, string(record), GrantLifetime.Milliseconds())
 	if err != nil {
 		return err

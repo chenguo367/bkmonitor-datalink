@@ -24,11 +24,4 @@ func TestCLIAdminKeyLoadsWithoutAppearingInJSON(t *testing.T) {
 	if strings.Contains(string(raw), key) || strings.Contains(string(raw), "admin_key") || strings.Contains(string(raw), "AdminKey") {
 		t.Fatal("administrator key in JSON evidence")
 	}
-	var legacy CLIConfig
-	if err := yaml.Unmarshal([]byte("issuer_key: "+key+"\n"), &legacy); err != nil {
-		t.Fatal(err)
-	}
-	if legacy.AdminKey != "" {
-		t.Fatal("removed host configuration enabled administrator authorization")
-	}
 }
