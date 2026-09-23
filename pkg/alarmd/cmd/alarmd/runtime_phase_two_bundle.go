@@ -83,6 +83,19 @@ type phaseTwoProductionExternalDependencies struct {
 	PrepareEvents      func(enginekafka.DecisionSinkConfig) (outputSinkOpener, error)
 	OpenEvents         func(enginekafka.DecisionSinkConfig) (productionPhaseTwoEventSink, error)
 	AdditionalObserver observability.Observer
+	// StartupWaitInitial overrides the first retry delay of a startup
+	// dependency that does not answer; zero is the production delay.
+	StartupWaitInitial time.Duration
+}
+
+func (external phaseTwoProductionExternalDependencies) startupWaiter(
+	recorder *metric.Recorder, logger *observability.Logger, health *phaseTwoApplicationHealth,
+) startupWaiter {
+	waiter := newStartupWaiter(recorder, logger, health)
+	if external.StartupWaitInitial > 0 {
+		waiter.initial, waiter.ceiling = external.StartupWaitInitial, 4*external.StartupWaitInitial
+	}
+	return waiter
 }
 
 func defaultPhaseTwoProductionExternalDependencies() phaseTwoProductionExternalDependencies {
@@ -175,6 +188,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		external.Now == nil || external.HTTPClient == nil || (external.OpenEvents == nil && external.PrepareEvents == nil) {
 		return nil, errors.New("phase-two production Bundle dependencies are incomplete")
 	}
+	wait := external.startupWaiter(recorder, logger, health)
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
@@ -236,7 +250,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	sourceConnection := cfg.StrategySourceRedis()
 	runtimeConnection := cfg.RuntimeStoreRedis()
 	cmdbConnection := cfg.CMDBCacheRedis()
-	controlClient, err := openProductionRedisWithHook(ctx, sourceConnection, recorder.RedisHook("source"))
+	controlClient, err := wait.openRedis(ctx, "redis_source", sourceConnection, recorder.RedisHook("source"))
 	if err != nil {
 		return nil, err
 	}
@@ -250,7 +264,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	runtimeClientIsSource := reflect.DeepEqual(runtimeConnection, sourceConnection)
 	sharing := endpointSharing{runtimeIsSource: runtimeClientIsSource, compatOutputPresent: true}
 	if !runtimeClientIsSource {
-		runtimeClient, err = openProductionRedisWithHook(ctx, runtimeConnection, recorder.RedisHook("runtime"))
+		runtimeClient, err = wait.openRedis(ctx, "redis_runtime", runtimeConnection, recorder.RedisHook("runtime"))
 		if err != nil {
 			return nil, err
 		}
@@ -273,7 +287,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		cmdbClient = runtimeClient
 		sharing.cmdbSharedWith = fleet.EndpointStateRedis
 	default:
-		cmdbClient, err = openProductionRedisWithHook(ctx, cmdbConnection, recorder.RedisHook("cmdb"))
+		cmdbClient, err = wait.openRedis(ctx, "redis_cmdb", cmdbConnection, recorder.RedisHook("cmdb"))
 		if err != nil {
 			return nil, err
 		}
@@ -304,7 +318,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 			dynamicConfigClient = cmdbClient
 			sharing.dynamicSharedWith = fleet.EndpointCMDBCache
 		default:
-			opened, err := openProductionRedisWithHook(ctx, dynamicConfigConnection, recorder.RedisHook("dynamic_config"))
+			opened, err := wait.openRedis(ctx, "redis_dynamic_config", dynamicConfigConnection, recorder.RedisHook("dynamic_config"))
 			if err != nil {
 				return nil, err
 			}
@@ -335,7 +349,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 			targetGroupClient = dynamicConfigClient
 			sharing.targetGroupSharedWith = fleet.EndpointDynamicConfig
 		default:
-			targetGroupClient, err = openProductionRedisWithHook(ctx, targetGroupConnection, recorder.RedisHook("target_group"))
+			targetGroupClient, err = wait.openRedis(ctx, "redis_target_group", targetGroupConnection, recorder.RedisHook("target_group"))
 			if err != nil {
 				return nil, err
 			}
@@ -532,7 +546,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	if err := ownershipStore.Ping(ctx); err != nil {
+	if err := wait.await(ctx, "ownership_store", ownershipStore.Ping); err != nil {
 		return nil, err
 	}
 	// A cutover stamps each rewritten timeline's revision on the Query
@@ -545,7 +559,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	if err := stateBackend.Ping(ctx); err != nil {
+	if err := wait.await(ctx, "state_store", stateBackend.Ping); err != nil {
 		return nil, err
 	}
 	storageRouter, err := state.NewFixedRouter("phase-two-primary", stateBackend)
@@ -616,7 +630,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// A series is evaluated for a strategy only inside that strategy's
 	// monitoring target. The facts it is decided on come from the platform's
 	// CMDB host cache, on the database this client already uses.
-	seriesAdmission, cmdbIndex, err := buildSeriesAdmission(ctx, cfg, cmdbClient, recorder, logger, hostStatus)
+	seriesAdmission, cmdbIndex, err := buildSeriesAdmission(ctx, cfg, cmdbClient, recorder, logger, hostStatus, wait)
 	if err != nil {
 		return nil, err
 	}
@@ -719,7 +733,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		// into twenty-five minutes of failed emissions while Slots kept
 		// completing, and control-plane state written in those minutes then made
 		// the rollback worse than the defect.
-		serviceRedis, err := openProductionRedisWithHook(ctx, cfg.Kafka.LegacyAdapter.ServiceRedis, recorder.RedisHook("legacy_output"))
+		serviceRedis, err := wait.openRedis(ctx, "redis_legacy_output", cfg.Kafka.LegacyAdapter.ServiceRedis, recorder.RedisHook("legacy_output"))
 		if err != nil {
 			return nil, fmt.Errorf("open kafka.legacy_adapter.service_redis: %w", err)
 		}
