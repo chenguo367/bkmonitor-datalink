@@ -18,9 +18,13 @@ type linkdIndex struct {
 	Cache  *openalerts.Cache
 	Source *openalerts.SetSource
 	// Alerts is nil when the deployment configures no reconciliation
-	// endpoint. Nothing is closed then, and the difference says so on every
-	// round rather than reporting a clean zero.
+	// endpoint. Nothing is closed then.
 	Alerts openalerts.Reconciler
+	// Console is the same endpoint with the rest of what it answers - the
+	// roster and the alert records - or nil without one. The difference
+	// against strategies that no longer exist runs only when it is set:
+	// without the link's roster there is no difference to take.
+	Console *openalerts.HTTPReconciler
 }
 
 func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection config.RedisConnectionConfig, now func() time.Time) (linkdIndex, error) {
@@ -38,6 +42,7 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 		return linkdIndex{}, err
 	}
 	var reconciler openalerts.Reconciler
+	var console *openalerts.HTTPReconciler
 	if settings.ConsoleURL != "" {
 		address := connection.Address
 		if connection.Mode == config.RedisModeSentinel {
@@ -47,13 +52,14 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 		if len(sources) == 0 {
 			sources = []string{settings.EventSourceID}
 		}
-		reconciler, err = openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL,
+		console, err = openalerts.NewHTTPReconciler(openalerts.HTTPReconcilerOptions{BaseURL: settings.ConsoleURL,
 			Username: settings.Username, Password: settings.Password, Client: &http.Client{Timeout: 5 * time.Second}, MaxResponseBytes: int64(capacity.Bytes / 4),
 			Binding: openalerts.TargetBinding{EventSourceID: settings.EventSourceID, HookName: settings.HookName, KeyPrefix: settings.Prefix(),
 				Address: address, Database: connection.DB, Sources: sources}})
 		if err != nil {
 			return linkdIndex{}, err
 		}
+		reconciler = console
 	}
 	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: source, Subscriber: subscriber, Reconciler: reconciler, Now: now,
 		Policy: openalerts.PolicySelfMaintain, MaxStrategies: capacity.Strategies, MaxMembers: capacity.Members, MaxBytes: capacity.Bytes,
@@ -63,5 +69,5 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 	if err != nil {
 		return linkdIndex{}, err
 	}
-	return linkdIndex{Cache: cache, Source: source, Alerts: reconciler}, nil
+	return linkdIndex{Cache: cache, Source: source, Alerts: reconciler, Console: console}, nil
 }

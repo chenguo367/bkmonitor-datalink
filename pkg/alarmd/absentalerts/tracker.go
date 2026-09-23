@@ -11,14 +11,10 @@ import (
 
 // Tracker is the loop's memory between rounds: when each candidate was first
 // found missing from the snapshot, and under which observation. It holds
-// nothing else. The identity of a departed strategy is the catalog's memory,
-// not this one, because only the catalog ever had it.
+// nothing else.
 //
-// The memory is bounded. A deployment where the difference is suddenly
-// enormous is a deployment whose snapshot or index is wrong, and the round
-// that would produce such a difference is refused before this is reached;
-// the bound is the second wall, so that a refused round cannot grow the
-// process either.
+// The memory is bounded, and what the bound refuses is counted: a candidate
+// not remembered restarts its grace every round and is never closed.
 type Tracker struct {
 	mu          sync.Mutex
 	firstAbsent map[Key]Absence
@@ -38,9 +34,11 @@ func NewTracker(maxTracked int) *Tracker {
 }
 
 // Note records this round's candidates and forgets every key that is no
-// longer one: a strategy the snapshot lists again, and one whose alerts are
-// gone from the index, both stop being candidates, and neither should keep
-// an absence that a later round would read as long-standing.
+// longer one: a strategy the snapshot lists again, and one the link no
+// longer lists, both stop being candidates, and neither should keep an
+// absence that a later round would read as long-standing. A strategy an
+// incomplete walk did not reach is forgotten the same way, which only
+// delays it.
 func (tracker *Tracker) Note(candidates []Key, observation string, now time.Time) {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()

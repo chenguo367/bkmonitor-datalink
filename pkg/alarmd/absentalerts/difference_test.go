@@ -11,9 +11,8 @@ import (
 var testNow = time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC)
 
 func testBounds() Bounds {
-	return Bounds{Grace: 10 * time.Minute, MaxSnapshotAge: 30 * time.Minute,
-		MaxDifferenceRatio: 0.2, MinDifferenceForRatio: 5, MaxCloseStrategies: 4,
-		MaxSnapshotShrinkRatio: 0.25, MinSnapshotForShrink: 10}
+	return Bounds{Grace: 10 * time.Minute, MaxSnapshotAge: 30 * time.Minute, MaxLinkHealthAge: 15 * time.Minute,
+		MaxCloseStrategies: 4, MaxSnapshotShrinkRatio: 0.25, MinSnapshotForShrink: 10}
 }
 
 func key(id string) Key { return Key{TenantID: "system", StrategyID: id} }
@@ -30,8 +29,8 @@ func itoa(value int) string {
 	return digits
 }
 
-// filled is a snapshot of the given size that lists none of the departed
-// strategies the tests use.
+// filled is a snapshot of the given size that lists none of the strategies
+// the tests close.
 func filled(count int) map[Key]struct{} {
 	snapshot := make(map[Key]struct{}, count)
 	for i := 0; i < count; i++ {
@@ -48,54 +47,74 @@ func set(keys ...Key) map[Key]struct{} {
 	return result
 }
 
-// closable is a strategy the catalog let go two hours ago, which this loop
-// first found missing an hour ago under a different observation: everything
-// a close needs except the round's own gates.
-func closable(id string) (Key, map[Key]Departure, map[Key]Absence) {
-	k := key(id)
-	return k, map[Key]Departure{k: {Identity: Identity{BusinessID: 2, Revision: 7}, At: testNow.Add(-2 * time.Hour)}},
-		map[Key]Absence{k: {Since: testNow.Add(-time.Hour), Observation: "observation-before"}}
+// ripe is the memory of a candidate this loop first found missing an hour
+// ago under a different observation: everything a close needs except the
+// round's own gates.
+func ripe(keys ...Key) map[Key]Absence {
+	absences := make(map[Key]Absence, len(keys))
+	for _, k := range keys {
+		absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-before"}
+	}
+	return absences
 }
 
-func roundFor(k Key, departed map[Key]Departure, absences map[Key]Absence) Round {
-	return Round{Departed: departed, WithOpenAlerts: set(k),
+// roundFor is a healthy round: the link read and maintained a minute ago,
+// a snapshot of 200 live strategies, and the roster listing the given
+// strategies beside a few live ones.
+func roundFor(roster map[Key]struct{}, absences map[Key]Absence) Round {
+	for i := 0; i < 5; i++ {
+		roster[key("live-"+itoa(i))] = struct{}{}
+	}
+	return Round{LinkRead: true, Roster: roster, RosterComplete: true, LinkLastSuccess: testNow.Add(-time.Minute),
 		SnapshotStrategies: filled(200), SnapshotUsable: true, SnapshotObservation: "observation-now",
 		PreviousSnapshotStrategies: 200, FirstAbsent: absences, Now: testNow}
 }
 
-// The whole point, stated once: a strategy the catalog let go that still
-// holds unrecovered alerts gets them closed.
-func TestAStrategyTheCatalogLetGoHasItsAlertsClosed(t *testing.T) {
-	k, departed, absences := closable("10")
-	result := Compute(roundFor(k, departed, absences), testBounds())
+// The whole point, stated once: a strategy the link holds an unrecovered
+// alert for, and the snapshot no longer lists, gets its alerts closed - and
+// it does not have to be one this process watched go.
+func TestAStrategyTheLinkListsAndTheSnapshotDoesNotIsClosed(t *testing.T) {
+	k := key("10")
+	result := Compute(roundFor(set(k), ripe(k)), testBounds())
 	if len(result.Close) != 1 || result.Close[0].Key != k || result.Counts.Closed != 1 {
 		t.Fatalf("the strategy this capability exists for was not closed: %+v", result)
 	}
-	if result.Close[0].Identity.BusinessID != 2 || result.Close[0].Identity.Revision != 7 {
-		t.Fatalf("the close lost the identity only the catalog remembered: %+v", result.Close[0])
+	if result.Counts.Candidates != 1 || result.Counts.Roster != 6 {
+		t.Fatalf("the live strategies on the roster are not candidates: %+v", result.Counts)
+	}
+	if result.Close[0].Identity != (Identity{}) {
+		t.Fatalf("an identity nobody remembered was invented: %+v", result.Close[0])
 	}
 }
 
-// A departed strategy the source lists again is not deleted; it is a
-// disagreement between the catalog and the source, and it is reported as
-// one rather than skipped in silence.
-func TestADepartedStrategyTheSnapshotListsAgainIsNotClosed(t *testing.T) {
-	k, departed, absences := closable("10")
-	round := roundFor(k, departed, absences)
+// When the catalog does remember the strategy, the close carries what it
+// remembered.
+func TestARememberedIdentityTravelsWithTheClose(t *testing.T) {
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
+	round.Identities = map[Key]Identity{k: {BusinessID: 2, Revision: 7}}
+	result := Compute(round, testBounds())
+	if len(result.Close) != 1 || result.Close[0].Identity != (Identity{BusinessID: 2, Revision: 7}) {
+		t.Fatalf("the remembered identity was lost: %+v", result.Close)
+	}
+}
+
+// A strategy the snapshot lists is live, whatever the roster says.
+func TestAStrategyTheSnapshotListsIsNotACandidate(t *testing.T) {
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
 	round.SnapshotStrategies[k] = struct{}{}
 	result := Compute(round, testBounds())
-	if len(result.Close) != 0 || result.Counts.Returned != 1 || result.Counts.Candidates != 0 {
-		t.Fatalf("a strategy the source lists again was closed or hidden: %+v", result)
+	if len(result.Close) != 0 || result.Counts.Candidates != 0 {
+		t.Fatalf("a strategy the source lists was closed: %+v", result)
 	}
 }
 
 // The second condition is independent of the first: a strategy whose Plan
-// the fleet is running is detecting, whatever any memory says. This is the
-// shape that would otherwise take a strategy kept on its last good
-// definition off the air.
+// the fleet is running is detecting, whatever the snapshot says.
 func TestAStrategyStillRunningAPlanIsNotClosed(t *testing.T) {
-	k, departed, absences := closable("10")
-	round := roundFor(k, departed, absences)
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
 	round.Published = set(k)
 	result := Compute(round, testBounds())
 	if len(result.Close) != 0 || result.Counts.StillPublished != 1 {
@@ -103,83 +122,137 @@ func TestAStrategyStillRunningAPlanIsNotClosed(t *testing.T) {
 	}
 }
 
-// Read and empty is a fact; not read is the absence of one. A strategy
-// whose index could not be read must not become "it has no alerts", and
-// must not become a close either.
-func TestAStrategyWhoseIndexCouldNotBeReadIsNeitherClosedNorCleared(t *testing.T) {
-	k, departed, absences := closable("10")
-	round := Round{Departed: departed, WithOpenAlerts: map[Key]struct{}{}, Unreadable: set(k),
-		SnapshotStrategies: filled(200), SnapshotUsable: true, SnapshotObservation: "observation-now",
-		PreviousSnapshotStrategies: 200, FirstAbsent: absences, Now: testNow}
+// Not read is not empty. The count is reported so that it is a reading.
+func TestAStrategyTheLinkCouldNotReadIsReportedNotClosed(t *testing.T) {
+	round := roundFor(set(), nil)
+	round.RosterUnreadable = 3
 	result := Compute(round, testBounds())
-	if len(result.Close) != 0 || result.Counts.Candidates != 0 {
-		t.Fatalf("an unread index produced a decision: %+v", result)
+	if len(result.Close) != 0 || result.Counts.RosterUnreadable != 3 {
+		t.Fatalf("an unread set was hidden or closed: %+v", result)
 	}
-	if result.Counts.UnreadableIndex != 1 {
-		t.Fatalf("an unread index has to be a reading, not a silence: %+v", result.Counts)
+}
+
+// No roster, no difference.
+func TestAnUnreadRosterClosesNothing(t *testing.T) {
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
+	round.LinkRead = false
+	if result := Compute(round, testBounds()); result.Refusal != RefusalLinkUnavailable || len(result.Close) != 0 {
+		t.Fatalf("a round without the roster decided something: %+v", result)
+	}
+}
+
+// The link's own account of its maintenance gates the round: a latest
+// discovery that failed, and one that never succeeded, both refuse it.
+func TestALinkThatSaysItsMaintenanceFailedRefusesTheRound(t *testing.T) {
+	k := key("10")
+	for name, mutate := range map[string]func(*Round){
+		"latest discovery failed": func(r *Round) { r.LinkError = "discovery_failed" },
+		"never succeeded":         func(r *Round) { r.LinkLastSuccess = time.Time{} },
+	} {
+		round := roundFor(set(k), ripe(k))
+		mutate(&round)
+		if result := Compute(round, testBounds()); result.Refusal != RefusalLinkUnhealthy || len(result.Close) != 0 {
+			t.Fatalf("%s: an unhealthy link was decided on: %+v", name, result)
+		}
+	}
+}
+
+// The health age bound, both sides of it: a discovery a minute inside the
+// bound decides, one a minute past it does not.
+func TestTheLinkHealthBoundIsABoundaryOnBothSides(t *testing.T) {
+	k := key("10")
+	bounds := testBounds()
+	inside := roundFor(set(k), ripe(k))
+	inside.LinkLastSuccess = testNow.Add(-bounds.MaxLinkHealthAge + time.Minute)
+	if result := Compute(inside, bounds); result.Refusal != RefusalNone || result.Counts.Closed != 1 {
+		t.Fatalf("a link inside its bound was refused: %+v", result)
+	}
+	past := roundFor(set(k), ripe(k))
+	past.LinkLastSuccess = testNow.Add(-bounds.MaxLinkHealthAge - time.Minute)
+	if result := Compute(past, bounds); result.Refusal != RefusalLinkUnhealthy {
+		t.Fatalf("a link past its bound was decided on: %+v", result)
+	}
+}
+
+// An incomplete walk is a smaller roster: it still decides on what it saw.
+func TestAnIncompleteWalkStillClosesWhatItSaw(t *testing.T) {
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
+	round.RosterComplete = false
+	if result := Compute(round, testBounds()); result.Refusal != RefusalNone || result.Counts.Closed != 1 {
+		t.Fatalf("an incomplete walk refused what it saw: %+v", result)
 	}
 }
 
 // An unread snapshot is not an empty one. Deciding on it would close every
-// departed strategy's alerts on a round that learned nothing.
+// strategy's alerts on a round that learned nothing.
 func TestAnUnreadSnapshotClosesNothingAndKeepsItsDenominators(t *testing.T) {
-	k, departed, absences := closable("10")
-	round := roundFor(k, departed, absences)
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
 	round.SnapshotUsable, round.SnapshotStrategies, round.SnapshotObservation = false, nil, ""
 	result := Compute(round, testBounds())
 	if result.Refusal != RefusalSnapshotUnusable || len(result.Close) != 0 {
 		t.Fatalf("an unread snapshot decided something: %+v", result)
 	}
-	if result.Counts.Departed != 1 || result.Counts.WithOpenAlerts != 1 {
-		t.Fatalf("the refusal dropped its denominators, so zero closes cannot be told from a round that never ran: %+v", result.Counts)
+	if result.Counts.Roster != 6 {
+		t.Fatalf("the refusal dropped its denominators: %+v", result.Counts)
 	}
 }
 
-// An observed but empty snapshot is a source that lost its content. On a
-// live deployment there are always strategies.
 func TestAnEmptySnapshotClosesNothing(t *testing.T) {
-	k, departed, absences := closable("10")
-	round := roundFor(k, departed, absences)
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
 	round.SnapshotStrategies = map[Key]struct{}{}
 	if result := Compute(round, testBounds()); result.Refusal != RefusalSnapshotEmpty || len(result.Close) != 0 {
 		t.Fatalf("an empty snapshot decided something: %+v", result)
 	}
 }
 
-// A snapshot older than the bound has not seen what changed since.
-func TestAStaleSnapshotClosesNothing(t *testing.T) {
-	k, departed, absences := closable("10")
-	round := roundFor(k, departed, absences)
-	round.SnapshotAgeSeconds = int64((45 * time.Minute) / time.Second)
-	if result := Compute(round, testBounds()); result.Refusal != RefusalSnapshotStale || len(result.Close) != 0 {
+// The snapshot age bound, both sides of it.
+func TestTheSnapshotAgeBoundIsABoundaryOnBothSides(t *testing.T) {
+	k := key("10")
+	bounds := testBounds()
+	inside := roundFor(set(k), ripe(k))
+	inside.SnapshotAgeSeconds = int64((bounds.MaxSnapshotAge - time.Minute) / time.Second)
+	if result := Compute(inside, bounds); result.Refusal != RefusalNone {
+		t.Fatalf("a snapshot inside its bound was refused: %+v", result)
+	}
+	past := roundFor(set(k), ripe(k))
+	past.SnapshotAgeSeconds = int64((bounds.MaxSnapshotAge + time.Minute) / time.Second)
+	if result := Compute(past, bounds); result.Refusal != RefusalSnapshotStale || len(result.Close) != 0 {
 		t.Fatalf("a stale snapshot decided something: %+v", result)
 	}
 }
 
-// The gate that works is on the input. A snapshot that lost a large share
-// of its strategies is refused whatever the difference looks like - and the
-// difference can look small, because it is the snapshot seen through "was
-// let go by the catalog" and "still holds an alert".
-func TestASnapshotThatLostAQuarterOfItsStrategiesRefusesTheRound(t *testing.T) {
-	k, departed, absences := closable("10")
-	round := roundFor(k, departed, absences)
-	round.SnapshotStrategies = filled(60)
-	round.PreviousSnapshotStrategies = 100
-	result := Compute(round, testBounds())
+// The gate that works is on the input. A snapshot that lost a large share of
+// its strategies is refused, and a snapshot that lost a share just inside
+// the ratio is not.
+func TestTheShrinkGateIsABoundaryOnBothSides(t *testing.T) {
+	k := key("10")
+	past := roundFor(set(k), ripe(k))
+	past.SnapshotStrategies = filled(74)
+	past.PreviousSnapshotStrategies = 100
+	result := Compute(past, testBounds())
 	if result.Refusal != RefusalSnapshotShrunk || len(result.Close) != 0 {
-		t.Fatalf("a snapshot that lost 40 percent of its strategies was decided on: %+v", result)
+		t.Fatalf("a snapshot that lost 26 percent of its strategies was decided on: %+v", result)
 	}
-	if result.Counts.PreviousSnapshotStrategies != 100 || result.Counts.SnapshotStrategies != 60 {
+	if result.Counts.PreviousSnapshotStrategies != 100 || result.Counts.SnapshotStrategies != 74 {
 		t.Fatalf("the refusal has to carry both sizes: %+v", result.Counts)
+	}
+	inside := roundFor(set(k), ripe(k))
+	inside.SnapshotStrategies = filled(76)
+	inside.PreviousSnapshotStrategies = 100
+	if result := Compute(inside, testBounds()); result.Refusal != RefusalNone {
+		t.Fatalf("a snapshot that lost 24 percent was refused: %+v", result)
 	}
 }
 
 // The same gate against the running catalog, for a leader whose first round
-// has no previous snapshot but whose fleet is running Plans of strategies
-// the snapshot no longer lists.
+// has no previous snapshot.
 func TestASnapshotSmallerThanTheRunningCatalogRefusesTheRound(t *testing.T) {
-	k, departed, absences := closable("10")
-	round := roundFor(k, departed, absences)
+	k := key("10")
+	round := roundFor(set(k), ripe(k))
 	round.SnapshotStrategies = filled(60)
 	round.PreviousSnapshotStrategies = 0
 	published := map[Key]struct{}{}
@@ -192,140 +265,123 @@ func TestASnapshotSmallerThanTheRunningCatalogRefusesTheRound(t *testing.T) {
 	}
 }
 
-// A deployment whose only unrecovered alerts are all on deleted strategies
-// is the case this capability exists for, and nothing about its shape may
-// be read as implausible.
-func TestABacklogWhoseStrategiesAreAllGoneIsStillClosed(t *testing.T) {
-	departed := map[Key]Departure{}
-	absences := map[Key]Absence{}
-	holding := map[Key]struct{}{}
-	for i := 0; i < 3; i++ {
+// A deployment whose unrecovered alerts are mostly, or all, on deleted
+// strategies is the case this capability exists for - and on its first run
+// against a backlog, the difference can be a large share of everything.
+// Nothing about that shape may be read as implausible: a hundred gone
+// strategies beside a snapshot of two hundred is decided on, and the close
+// bound works it off over rounds.
+func TestABacklogLargerThanAnyRatioIsStillWorkedOff(t *testing.T) {
+	roster := map[Key]struct{}{}
+	gone := []Key{}
+	for i := 0; i < 100; i++ {
 		k := key("gone-" + itoa(i))
-		departed[k] = Departure{Identity: Identity{BusinessID: 2, Revision: 7}, At: testNow.Add(-2 * time.Hour)}
-		absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-before"}
-		holding[k] = struct{}{}
+		roster[k] = struct{}{}
+		gone = append(gone, k)
 	}
-	round := Round{Departed: departed, WithOpenAlerts: holding,
-		SnapshotStrategies: filled(200), SnapshotUsable: true, SnapshotObservation: "observation-now",
-		PreviousSnapshotStrategies: 200, FirstAbsent: absences, Now: testNow}
+	round := roundFor(roster, ripe(gone...))
 	result := Compute(round, testBounds())
-	if result.Refusal != RefusalNone || result.Counts.Closed != 3 {
-		t.Fatalf("the backlog this exists to clear was refused: %+v", result)
+	if result.Refusal != RefusalNone || result.Counts.Closed != 4 || result.Counts.Deferred != 96 {
+		t.Fatalf("the backlog this exists to clear was refused or not bounded: %+v", result)
 	}
 }
 
-// The grace is this loop's own, on top of the catalog's: a leader that has
-// just been elected cannot close anything on its first round, whatever it
-// inherited in the departure memory.
+// The grace is this loop's own: a leader that has just been elected cannot
+// close anything on its first round.
 func TestACandidateIsNotClosedOnTheRoundItIsFirstSeen(t *testing.T) {
-	k, departed, _ := closable("10")
-	round := roundFor(k, departed, map[Key]Absence{k: {Since: testNow, Observation: "observation-now"}})
+	k := key("10")
+	round := roundFor(set(k), map[Key]Absence{k: {Since: testNow, Observation: "observation-now"}})
 	result := Compute(round, testBounds())
 	if len(result.Close) != 0 || result.Counts.WithinGrace != 1 {
 		t.Fatalf("a candidate first seen this round was closed: %+v", result)
 	}
 }
 
-// Confirmation is two observations of the source. The reconciler reuses one
-// observation across rounds, so waiting out the grace against a single
-// observation confirms nothing.
+// Confirmation is two observations of the source.
 func TestACandidateSeenOnlyUnderOneObservationIsNotClosed(t *testing.T) {
-	k, departed, _ := closable("10")
-	round := roundFor(k, departed, map[Key]Absence{k: {Since: testNow.Add(-time.Hour), Observation: "observation-now"}})
+	k := key("10")
+	round := roundFor(set(k), map[Key]Absence{k: {Since: testNow.Add(-time.Hour), Observation: "observation-now"}})
 	result := Compute(round, testBounds())
 	if len(result.Close) != 0 || result.Counts.Unconfirmed != 1 {
 		t.Fatalf("one observation confirmed an absence: %+v", result)
 	}
 }
 
-// A close has to be addressed to a business. Nothing remembers this one, so
-// the gap is named instead of guessed.
-func TestACandidateWithNoRememberedBusinessIsNamedNotGuessed(t *testing.T) {
-	k, _, absences := closable("10")
-	round := roundFor(k, map[Key]Departure{k: {At: testNow.Add(-2 * time.Hour)}}, absences)
-	result := Compute(round, testBounds())
-	if len(result.Close) != 0 || result.Counts.IdentityUnknown != 1 {
-		t.Fatalf("a candidate with no remembered identity was closed anyway: %+v", result)
+// The tracker, end to end over rounds: first seen, within grace, then closed
+// once the grace has passed under a second observation.
+func TestTheTrackerClosesOnlyAfterTheGraceAndASecondObservation(t *testing.T) {
+	k := key("10")
+	tracker := NewTracker(100)
+	first := roundFor(set(k), nil)
+	first.SnapshotObservation = "observation-one"
+	if result := tracker.Round(first, testBounds()); result.Counts.WithinGrace != 1 || len(result.Close) != 0 {
+		t.Fatalf("closed on first sight: %+v", result)
+	}
+	later := roundFor(set(k), nil)
+	later.Now = testNow.Add(11 * time.Minute)
+	later.SnapshotObservation = "observation-one"
+	if result := tracker.Round(later, testBounds()); result.Counts.Unconfirmed != 1 {
+		t.Fatalf("confirmed against the same observation: %+v", result)
+	}
+	later.SnapshotObservation = "observation-two"
+	if result := tracker.Round(later, testBounds()); len(result.Close) != 1 {
+		t.Fatalf("not closed after the grace and a second observation: %+v", result)
 	}
 }
 
-// A legacy source publishes no snapshot revision and the close contract
-// requires one. That is its own answer, not the same as an unknown business.
-func TestACandidateWithoutASnapshotRevisionHasItsOwnAnswer(t *testing.T) {
-	k, _, absences := closable("10")
-	round := roundFor(k, map[Key]Departure{k: {Identity: Identity{BusinessID: 2}, At: testNow.Add(-2 * time.Hour)}}, absences)
-	result := Compute(round, testBounds())
-	if len(result.Close) != 0 || result.Counts.RevisionUnknown != 1 || result.Counts.IdentityUnknown != 0 {
-		t.Fatalf("a missing revision was filed as a missing business: %+v", result)
+// A refused round ages nothing: a run of refused rounds cannot mature a
+// candidate into a close.
+func TestARefusedRoundDoesNotStartOrAgeAClock(t *testing.T) {
+	k := key("10")
+	tracker := NewTracker(100)
+	refused := roundFor(set(k), nil)
+	refused.LinkError = "discovery_failed"
+	tracker.Round(refused, testBounds())
+	if tracker.Tracked() != 0 {
+		t.Fatal("a refused round started a candidate's clock")
 	}
 }
 
-// A backlog is worked off over rounds, and what the bound left is reported
-// as deferred rather than as an outcome: those strategies are still
-// candidates.
-func TestTheCloseBoundLeavesTheRestForALaterRound(t *testing.T) {
-	departed := map[Key]Departure{}
-	absences := map[Key]Absence{}
-	holding := map[Key]struct{}{}
-	for i := 0; i < 6; i++ {
-		k := key("gone-" + itoa(i))
-		departed[k] = Departure{Identity: Identity{BusinessID: 2, Revision: 7}, At: testNow.Add(-2 * time.Hour)}
-		absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-before"}
-		holding[k] = struct{}{}
-	}
-	round := Round{Departed: departed, WithOpenAlerts: holding,
-		SnapshotStrategies: filled(200), SnapshotUsable: true, SnapshotObservation: "observation-now",
-		PreviousSnapshotStrategies: 200, FirstAbsent: absences, Now: testNow}
-	result := Compute(round, testBounds())
-	if len(result.Close) != 4 || result.Counts.Deferred != 2 {
-		t.Fatalf("the close bound was not applied or not reported: %+v", result)
+// A strategy the link stops listing is forgotten, so it cannot come back
+// later with an old clock.
+func TestAStrategyTheLinkStopsListingIsForgotten(t *testing.T) {
+	k := key("10")
+	tracker := NewTracker(100)
+	tracker.Round(roundFor(set(k), nil), testBounds())
+	tracker.Round(roundFor(set(), nil), testBounds())
+	if tracker.Tracked() != 0 {
+		t.Fatal("a strategy the link no longer lists kept its clock")
 	}
 }
 
-// Every candidate lands on exactly one outcome. Without this a candidate
-// could fall through every branch and be reported nowhere, which reads as a
-// healthy round.
+// Every candidate lands on exactly one outcome.
 func TestEveryCandidateLandsOnExactlyOneOutcome(t *testing.T) {
-	departed := map[Key]Departure{}
+	roster := map[Key]struct{}{}
 	absences := map[Key]Absence{}
-	holding := map[Key]struct{}{}
 	published := map[Key]struct{}{}
-	for _, shape := range []string{"closed", "published", "grace", "unconfirmed", "identity", "revision"} {
+	for _, shape := range []string{"closed", "published", "grace", "unconfirmed"} {
 		k := key(shape)
-		holding[k] = struct{}{}
+		roster[k] = struct{}{}
 		switch shape {
 		case "closed":
-			departed[k] = Departure{Identity: Identity{BusinessID: 2, Revision: 7}, At: testNow.Add(-2 * time.Hour)}
 			absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-before"}
 		case "published":
-			departed[k] = Departure{Identity: Identity{BusinessID: 2, Revision: 7}, At: testNow.Add(-2 * time.Hour)}
 			absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-before"}
 			published[k] = struct{}{}
 		case "grace":
-			departed[k] = Departure{Identity: Identity{BusinessID: 2, Revision: 7}, At: testNow.Add(-2 * time.Hour)}
 			absences[k] = Absence{Since: testNow, Observation: "observation-now"}
 		case "unconfirmed":
-			departed[k] = Departure{Identity: Identity{BusinessID: 2, Revision: 7}, At: testNow.Add(-2 * time.Hour)}
 			absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-now"}
-		case "identity":
-			departed[k] = Departure{At: testNow.Add(-2 * time.Hour)}
-			absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-before"}
-		case "revision":
-			departed[k] = Departure{Identity: Identity{BusinessID: 2}, At: testNow.Add(-2 * time.Hour)}
-			absences[k] = Absence{Since: testNow.Add(-time.Hour), Observation: "observation-before"}
 		}
 	}
-	round := Round{Departed: departed, WithOpenAlerts: holding, Published: published,
-		SnapshotStrategies: filled(200), SnapshotUsable: true, SnapshotObservation: "observation-now",
-		PreviousSnapshotStrategies: 200, FirstAbsent: absences, Now: testNow}
+	round := roundFor(roster, absences)
+	round.Published = published
 	counts := Compute(round, testBounds()).Counts
-	filed := counts.Closed + counts.StillPublished + counts.WithinGrace + counts.Unconfirmed +
-		counts.IdentityUnknown + counts.RevisionUnknown + counts.Deferred
-	if filed != counts.Candidates || counts.Candidates != 6 {
+	filed := counts.Closed + counts.StillPublished + counts.WithinGrace + counts.Unconfirmed + counts.Deferred
+	if filed != counts.Candidates || counts.Candidates != 4 {
 		t.Fatalf("a candidate was not filed under any outcome: %+v", counts)
 	}
-	for _, count := range []int{counts.Closed, counts.StillPublished, counts.WithinGrace,
-		counts.Unconfirmed, counts.IdentityUnknown, counts.RevisionUnknown} {
+	for _, count := range []int{counts.Closed, counts.StillPublished, counts.WithinGrace, counts.Unconfirmed} {
 		if count != 1 {
 			t.Fatalf("each shape should file once: %+v", counts)
 		}

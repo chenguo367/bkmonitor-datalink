@@ -89,7 +89,11 @@ func NewHTTPReconciler(options HTTPReconcilerOptions) (*HTTPReconciler, error) {
 }
 
 func (reader *HTTPReconciler) get(ctx context.Context, path string, query url.Values, out any) error {
-	u := strings.TrimRight(reader.options.BaseURL, "/") + "/local-api/strategy-index/" + path
+	return reader.getPath(ctx, "/local-api/strategy-index/"+path, query, out)
+}
+
+func (reader *HTTPReconciler) getPath(ctx context.Context, path string, query url.Values, out any) error {
+	u := strings.TrimRight(reader.options.BaseURL, "/") + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
 	}
@@ -104,7 +108,7 @@ func (reader *HTTPReconciler) get(ctx context.Context, path string, query url.Va
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("alarmd openalerts: reconcile HTTP status %d", response.StatusCode)
+		return statusError(response.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(response.Body, reader.options.MaxResponseBytes+1))
 	if err != nil || int64(len(data)) > reader.options.MaxResponseBytes {
@@ -211,6 +215,15 @@ func (reader *HTTPReconciler) Reconcile(ctx context.Context, key StrategyKey) (R
 		}
 	}
 	return result, nil
+}
+
+// statusError is a Console answer other than 200. It keeps the code so a
+// caller for which one code is an answer rather than a failure - the alert
+// record's 404 - can tell it apart.
+type statusError int
+
+func (code statusError) Error() string {
+	return fmt.Sprintf("alarmd openalerts: reconcile HTTP status %d", int(code))
 }
 
 func containsSource(sources []string, value string) bool {

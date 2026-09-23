@@ -70,3 +70,61 @@ func TestClosePreservesNativeSignedBusinessIdentity(t *testing.T) {
 		})
 	}
 }
+
+// The link's reconciliation carries no severity. An absent close without one
+// closes at every built-in level, each exactly once - the consumer refuses a
+// message that names a level twice - and the message is one the consumer's
+// acceptance, as transcribed here, takes whole.
+func TestAnAbsentCloseWithoutASeverityClosesAtEveryBuiltInLevel(t *testing.T) {
+	r := CloseRequest{TenantID: "tenant-test", Fingerprint: "0123456789abcdef0123456789abcdef", AlertInstanceID: "active-instance",
+		StrategyID: 123, StrategyRevision: 4, BusinessID: 2, OccurredAt: time.Unix(1800000000, 0), Reason: CloseReasonAbsent}
+	event, err := ConvertClose(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := checkStandardPayload(event.Payload); err != nil {
+		t.Fatalf("the consumer would refuse the every-level close: %v", err)
+	}
+	var payload wireEvent
+	if err := json.Unmarshal(event.Payload, &payload); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, evaluation := range payload.Evaluations {
+		if evaluation.Action != ActionClosed || evaluation.ActionReason != CloseReasonAbsent || seen[evaluation.Severity] {
+			t.Fatalf("an evaluation is not a single close at its level: %+v", payload.Evaluations)
+		}
+		seen[evaluation.Severity] = true
+	}
+	for _, name := range builtInSeverities {
+		if !seen[name] {
+			t.Fatalf("the level %q is not closed: %+v", name, payload.Evaluations)
+		}
+	}
+	if len(payload.Evaluations) != len(builtInSeverities) {
+		t.Fatalf("a level outside the built-in set was written: %+v", payload.Evaluations)
+	}
+	// With a known severity the absent close stays a single evaluation.
+	r.Severity = "warning"
+	known, err := ConvertClose(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(known.Payload, &payload); err != nil || len(payload.Evaluations) != 1 {
+		t.Fatalf("a known severity was widened: %s", known.Payload)
+	}
+}
+
+// Only the absent close may omit the severity. The inactive close closes the
+// alerts of a strategy whose Plan is running, and its levels are known.
+func TestAnInactiveCloseStillRequiresASeverity(t *testing.T) {
+	r := CloseRequest{TenantID: "tenant-test", Fingerprint: "0123456789abcdef0123456789abcdef", AlertInstanceID: "active-instance",
+		StrategyID: 123, StrategyRevision: 4, BusinessID: 2, OccurredAt: time.Unix(1800000000, 0)}
+	if _, err := ConvertClose(r); err == nil {
+		t.Fatal("an inactive close without a severity was accepted")
+	}
+	r.Reason = CloseReasonInactive
+	if _, err := ConvertClose(r); err == nil {
+		t.Fatal("an inactive close without a severity was accepted")
+	}
+}
