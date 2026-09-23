@@ -1338,6 +1338,10 @@ type Anomaly struct {
 	// NoDataMemory is on rows of KindNoDataMemoryRefused: the refusal the
 	// row lists, whole.
 	NoDataMemory *NoDataMemoryRefusal `json:"no_data_memory,omitempty"`
+	// RetainedShare is on rows of KindRetainedShareApproaching: the latest
+	// completed Slot's retained bytes against the one-object share it was
+	// admitted under.
+	RetainedShare *RetainedShareFacts `json:"retained_share,omitempty"`
 	// NoDataMemoryUpkeep is on every row of an object whose Plans this
 	// process has seen the store keep a memory alive for: the last read's
 	// stored shape and the last renewal. Absent until a renewal reached the
@@ -1511,6 +1515,12 @@ type Snapshot struct {
 	// absence memory for. In no column -- the rounds complete -- and listed
 	// so the line that says detection stopped silently can name them.
 	NoDataMemory []Anomaly `json:"no_data_memory,omitempty"`
+	// RetainedShare is the objects whose latest completed Slot held at least
+	// RetainedShareApproachPercent of the one-object share of the retained
+	// pool. In no column -- the rounds complete -- and listed because the
+	// refusal at the share stops the strategy whole, and this is the only
+	// place it can be seen coming.
+	RetainedShare []Anomaly `json:"retained_share,omitempty"`
 	// Capacity is how close this replica is to its own limits. Absent on a
 	// replica that does not report it, which is why the aggregate counts the
 	// replicas it actually heard from rather than assuming every one answered.
@@ -2368,6 +2378,10 @@ type View struct {
 	// NoDataMemory is the objects whose absence memory the store refuses,
 	// from every counted replica. In no column and in no total, like NoData.
 	NoDataMemory []Anomaly `json:"no_data_memory,omitempty"`
+	// RetainedShare is the objects nearing the one-object share of the
+	// retained pool, from every counted replica. In no column and in no
+	// total, like NoData.
+	RetainedShare []Anomaly `json:"retained_share,omitempty"`
 	// Recovered is the problems whose objects completed healthily within the
 	// retention, merged over the counted replicas by line and fold. In no
 	// column and in no total, like the skips: the objects are running now.
@@ -2589,6 +2603,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 		view.NoData = append(view.NoData, snapshot.NoData...)
 		view.NoDataMemory = append(view.NoDataMemory, snapshot.NoDataMemory...)
+		view.RetainedShare = append(view.RetainedShare, snapshot.RetainedShare...)
 		mergeRecovered(&view, snapshot.Recovered)
 		if facts := snapshot.BookkeepingAbandoned; facts != nil && facts.Slots > 0 {
 			if view.BookkeepingAbandoned == nil {
@@ -2883,6 +2898,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	Attribute(view.ByDesign, now)
 	Attribute(view.NoData, now)
 	Attribute(view.NoDataMemory, now)
+	Attribute(view.RetainedShare, now)
 	view.EmptyEveryRoundTotal = countEmptyEveryRound(view.NoData)
 	// Decided on the newest source round rather than inside the replica loop:
 	// a source is one thing, and after a leader change two replicas carry a

@@ -713,6 +713,7 @@ var CHECK = {
   BACKEND_NOT_ANSWERING: '查询没有得到应答，{n} 个对象受影响（{g} 种症状，{s} 条策略）——客户端超时或 5xx，查询预算、网络、后端耗时哪一环还分不出',
   QUERY_REFUSED:         '后端拒绝了 {n} 个对象的查询（{g} 种原因，{b} 个业务）——后端读了查询并回了状态码，是查询构造、策略引用还是后端规则还分不出',
   QUERY_TARGET_MISSING:  '{n} 个对象的查询被后端回"表或字段不存在"（{g} 种回答，{s} 条策略，{b} 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错',
+  RETAINED_SHARE_APPROACHING: '{n} 个对象最近一轮的留存字节已到单对象份额的 95% 以上（{s} 条策略）：检测照常，但再涨一点，这些策略的每一轮都会被按名拒掉、整条停检',
   NO_DATA_PERSISTENT:    '{n} 个对象持续没有数据（{s} 条策略）',
   EMPTY_EVERY_ROUND:     '{n} 个对象每一轮都查不到数据、没有任何一轮已知有过数据（{s} 条策略）：检测在跑，但没有任何东西可判',
   SERIES_CHURNING:       '{n} 个对象的序列活不过检测窗口（{s} 条策略），恢复判不了',
@@ -855,7 +856,8 @@ var EVIDENCE = {
   SERIES_DATA_MISSING:   '对象行窗口计数：老序列缺点的比例；同一行若带超时或保护，缺点可能是 alarmd 没取到而不是数据没到',
   SERIES_CHURNING:       '对象行窗口计数：新序列占比与活不过窗口的轮数',
   PLAN_UNEVALUABLE:      '分组的策略与原因码',
-  QUERY_TARGET_MISSING:  '分组的后端回答（表/字段不存在的状态词）；策略引用的表与字段看行上策略链接，与元数据逐个核'
+  QUERY_TARGET_MISSING:  '分组的后端回答（表/字段不存在的状态词）；策略引用的表与字段看行上策略链接，与元数据逐个核',
+  RETAINED_SHARE_APPROACHING: '对象行"逼近份额"：最近一个完成 Slot 的留存字节 retained_bytes、它被判的单对象份额 share_bytes、两者之比 percent_of_share、那个 Slot 与看到的时刻；按策略分组，最满的在前。指标 state_retained_share_approaching_slots_total 数的是这样的完成 Slot'
 };
 
 var NEXT = {
@@ -886,7 +888,8 @@ var NEXT = {
   SERIES_DATA_MISSING:   '先看同一行有没有超时或保护：有的先按那个查（缺点可能是 alarmd 没取到）；没有的再按策略给数据负责人',
   SERIES_CHURNING:       '交策略侧：序列活不过检测窗口，通常是聚合维度太细',
   PLAN_UNEVALUABLE:      '交策略侧：按现在的定义算不了，改策略',
-  QUERY_TARGET_MISSING:  '按策略核引用的表与字段是否真不存在（对元数据）：是就改策略或接入数据，不是就是查询构造或元数据问题回 alarmd；已降级的对象修好后会自动重试'
+  QUERY_TARGET_MISSING:  '按策略核引用的表与字段是否真不存在（对元数据）：是就改策略或接入数据，不是就是查询构造或元数据问题回 alarmd；已降级的对象修好后会自动重试',
+  RETAINED_SHARE_APPROACHING: '交策略侧：一个 Slot 的留存超过份额就会被 QG_BUDGET_SHARE_EXCEEDED 整轮拒掉。先看这条策略的序列数是否还在涨；办法是收聚合维度、缩短窗口，或者分片（decision-020）。份额本身不随争用调，不是调参能解决的'
 };
 
 // What state counts as recovered, per check: the thing to look at after
@@ -921,7 +924,8 @@ var RECOVERY = {
   SERIES_DATA_MISSING:   '分出是没到还是没取到后转到对应行；老序列补上点后窗口填满',
   SERIES_CHURNING:       '序列稳定活过窗口后窗口填满',
   PLAN_UNEVALUABLE:      '策略改定义后下一轮可算',
-  QUERY_TARGET_MISSING:  '策略改好或表接入后，冷却到期自动重试成功，对象离开降级池'
+  QUERY_TARGET_MISSING:  '策略改好或表接入后，冷却到期自动重试成功，对象离开降级池',
+  RETAINED_SHARE_APPROACHING: '最近一个完成 Slot 的留存降到份额的 95% 以下即消失；越过份额以后它会转到"策略本身不可用"那一行（QG_BUDGET_SHARE_EXCEEDED），不会停在这一行'
 };
 
 // The next step for the two record lines in the history fold, where the
@@ -3622,7 +3626,8 @@ var KIND_TEXT = {
   OVERDUE_WAKE: '没被调度',
   SKIPPED_SPAN: '留存的漏检记录',
   NO_DATA: '持续无数据',
-  EMPTY_EVERY_ROUND: '每轮都无数据'
+  EMPTY_EVERY_ROUND: '每轮都无数据',
+  RETAINED_SHARE_APPROACHING: '逼近单对象份额'
 };
 function kindText(kind) { return KIND_TEXT[kind] || kind || '—'; }
 

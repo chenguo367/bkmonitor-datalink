@@ -417,6 +417,7 @@ func (stream *streamedExecution) budgetUsage() execution.SlotBudgetUsage {
 		RetainedStateBytes:  stream.retainedByPhase[retainPhaseState],
 		StateMutationsLimit: budget.MaxStateMutations, GapMutationsLimit: budget.MaxGapMutations,
 		EventsLimit: budget.MaxEvents, RetainedBytesLimit: budget.MaxRetainedBytes, SeriesLimit: budget.MaxSeries,
+		RetainedShareBytes: stream.coordinator.qgShareBytes(),
 	}
 }
 
@@ -2172,10 +2173,14 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 //
 // Half rather than a smaller fraction because the share has to leave the
 // largest object that legitimately exists able to run: on a 4 GiB replica half
-// the pool is 512 MiB, and the strategies this was measured on need 65 to 134
-// MiB. A strategy that does not fit in half a replica's pool is one that has to
-// be sharded, and refusing it by name is better than letting it fill the pool
-// and take its neighbours down with it.
+// the pool is 512 MiB. The estimate this was first set against - 65 to 134 MiB
+// for the largest strategy - was wrong by a factor of three to seven; that
+// strategy's Slots measure 464 MB at the median and 489 MB at p99, 86 to 91
+// percent of the share. A strategy that does not fit in half a replica's pool
+// is one that has to be sharded, and refusing it by name is better than letting
+// it fill the pool and take its neighbours down with it - but a refusal nobody
+// saw coming stops a strategy whole, which is why an object nearing its share
+// is reported before it arrives (fleet's RETAINED_SHARE_APPROACHING).
 func (coordinator *SlotExecutionCoordinator) qgShareBytes() uint64 {
 	return coordinator.budget.MaxRetainedBytes / 2
 }

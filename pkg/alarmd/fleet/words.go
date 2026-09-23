@@ -208,6 +208,9 @@ var checkWords = map[Check]wordPair{
 	CheckSeriesChurning:       {StateResultUntrusted, ActionStrategyEdit},
 	CheckPlanUnevaluable:      {StateStrategyInvalid, ActionStrategyEdit},
 	CheckQueryTargetMissing:   {StateStrategyInvalid, ActionStrategyEdit},
+	// Detecting: every round completes. The strategy's to act on before the
+	// share refuses it whole.
+	CheckRetainedShareApproaching: {StateDetecting, ActionStrategyEdit},
 }
 
 // unpairedWords is where a code word the table does not know folds: this

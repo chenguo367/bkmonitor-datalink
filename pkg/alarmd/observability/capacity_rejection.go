@@ -110,6 +110,9 @@ type SlotBudgetUsageFacts struct {
 	EventsLimit         uint64 `json:"-"`
 	RetainedBytesLimit  uint64 `json:"-"`
 	SeriesLimit         uint64 `json:"-"`
+	// RetainedShareBytes is the one Query Group's share of the retained pool
+	// this Slot was admitted against, from the producer that refuses by it.
+	RetainedShareBytes uint64 `json:"-"`
 }
 
 // SlotTimingFacts is where one Slot's wall clock went, in milliseconds, on its

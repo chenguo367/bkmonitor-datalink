@@ -86,6 +86,7 @@ type phaseTwoMetrics struct {
 	scheduleTimelineBytes           prometheus.Histogram
 	scheduleSegmentsPruned          prometheus.Counter
 	envelopePass                    *prometheus.CounterVec
+	retainedShareApproaching        prometheus.Counter
 	envelopeApply                   prometheus.Counter
 	schedulePruneSkipped            *prometheus.CounterVec
 	scheduleCutoverDuration         *prometheus.HistogramVec
@@ -659,6 +660,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, outcome := range observability.EnvelopePassOutcomes {
 		metrics.envelopePass.WithLabelValues(outcome)
 	}
+	// Completed Slots at or past the threshold of their one-object share of
+	// the retained pool. A counter, not a gauge per object: the objects are
+	// named on the page and in fleet.get, and a label per Query Group would
+	// grow with the fleet. What this answers is whether any Slot on this
+	// replica is near the wall at all - a rate above zero - which is the
+	// alerting question; the share refusal after it stops a strategy whole.
+	metrics.retainedShareApproaching = prometheus.NewCounter(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem,
+		Name: "state_retained_share_approaching_slots_total",
+		Help: "Completed Slots whose retained bytes reached at least 95 percent of the one-object share of the " +
+			"retained pool they were admitted under. A Slot past the share is refused as QG_BUDGET_SHARE_EXCEEDED " +
+			"every round and its strategy stops; these are the Slots before that. The objects are listed by name " +
+			"under RETAINED_SHARE_APPROACHING on the page and in fleet.get."})
 	// The envelope's other consumer: the per-key write path, which reads both
 	// keys of every series it writes and which no preflight count can see. A
 	// counter for the reason the pass's family is one - its log key is on the
@@ -1453,7 +1466,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.queryAdmission,
 		m.noDataSlotPlans, m.noDataAbsences, m.targetPlanResolutions, m.targetSelectorResolutions, m.noDataStalls, m.noDataMemoryRefusals, m.noDataMemoryWrites, m.gapGuardScopeRounds, m.noDataPlansSeen, m.noDataPlansByHop, m.segmentContent, m.sourceWithheldLines,
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
-		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.schedulePruneSkipped, m.scheduleCutoverDuration,
+		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries, m.rangeGateDecisions, m.statePreflights,
 		m.queryFailures,
@@ -1603,6 +1616,12 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	if observation.Component == observability.ComponentState && observation.Stage == observability.StageStateApplied &&
 		observation.Counts.EnvelopeReadsApply > 0 {
 		m.envelopeApply.Add(float64(observation.Counts.EnvelopeReadsApply))
+	}
+	if observation.Stage == observability.StageSlotCompleted && observation.Err == nil {
+		if usage := observation.SlotBudgetUsage; usage != nil &&
+			observability.RetainedShareApproaching(usage.RetainedBytes, usage.RetainedShareBytes) {
+			m.retainedShareApproaching.Inc()
+		}
 	}
 	m.observeSlotWait(observation)
 	if facts := observation.ScheduleCutover; facts != nil {

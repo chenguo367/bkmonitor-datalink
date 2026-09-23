@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	model "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -56,6 +57,11 @@ const (
 	// that was written, a group that goes absent after that is never recorded
 	// as first absent, and its no-data alert never fires.
 	KindNoDataMemoryRefused = "NO_DATA_MEMORY_REFUSED"
+	// KindRetainedShareApproaching is an object whose latest completed Slot
+	// held at least RetainedShareApproachPercent of the retained pool's
+	// one-object share. Its rounds complete and its results stand; the row is
+	// the warning before the refusal, which stops the strategy whole.
+	KindRetainedShareApproaching = "RETAINED_SHARE_APPROACHING"
 	// KindEmptyEveryRound is an object whose every round in this process has
 	// completed with no records, for at least EmptyEveryRoundAfter, and that
 	// this process has never seen return any. It is the other half of
@@ -269,6 +275,10 @@ type queryGroupState struct {
 	// the object is listed while any entry remains, and recovers when the
 	// last one goes -- one Plan's write storing says nothing about another's.
 	noDataMemory map[StrategyRef]*NoDataMemoryRefusal
+	// shareUsage is the latest completed Slot's retained bytes against the
+	// one-object share of the pool it was admitted under, nil until a Slot
+	// has completed with both.
+	shareUsage *RetainedShareFacts
 	// upkeep is the last this process saw of the store keeping this object's
 	// memories alive, by Plan: the last read's stored shape and the last
 	// renewal that reached the store. Positive evidence, kept apart from the
@@ -817,6 +827,15 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	// A held gap scope, as the round that read it reports it, every round it
 	// is held. Not a round either: the round it belongs to completes on its
 	// own and prunes the scopes it did not report.
+	switch {
+	case string(observation.ReasonCode) == contract.ReasonQGBudgetShareExceeded:
+		// Past the share: the object is on the refusal's line now, and a
+		// warning that it is near the share would say less than that line
+		// and say it twice.
+		state.shareUsage = nil
+	case observation.Stage == observability.StageSlotCompleted && observation.Err == nil:
+		state.noteShareUsage(observation.SlotBudgetUsage, trace.EvaluationTime, at)
+	}
 	if progress := observation.GapProgress; progress != nil {
 		if state.guards == nil {
 			state.guards = map[string]*gapGuardState{}
