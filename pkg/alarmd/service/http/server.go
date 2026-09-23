@@ -53,7 +53,27 @@ type Server struct {
 	ready              atomic.Bool
 	source             lifecycle.Source
 	healthSource       observability.HealthSource
+	liveness           atomic.Pointer[livenessHolder]
 }
+
+// Stall is one reason the process is not making progress: a named loop that
+// has not finished a turn within its bound, or every execution slot held by
+// an execution far past its deadline. Age is how long the condition has held
+// against Bound.
+type Stall struct {
+	Loop  string        `json:"loop"`
+	Age   time.Duration `json:"-"`
+	Bound time.Duration `json:"-"`
+}
+
+// LivenessSource says what, if anything, has stopped making progress. It is
+// read on every liveness probe, which the kubelet times out after a second,
+// so it must answer from memory.
+type LivenessSource interface {
+	Stalls() []Stall
+}
+
+type livenessHolder struct{ source LivenessSource }
 
 // Option configures a Server. Options are variadic so callers that do not care
 // about the diagnostics surface keep compiling unchanged.
@@ -94,6 +114,13 @@ func (s *Server) SetAPI(handler http.Handler) {
 // listener sets the policy to match.
 func (s *Server) SetGRPC(handler http.Handler) {
 	s.grpcHandler.Store(&handler)
+}
+
+// SetLiveness installs what /healthz judges. Until it is called, and for a
+// runtime that never calls it, /healthz answers 200 as it always has: the
+// process is up, and nothing has yet started that could stop.
+func (s *Server) SetLiveness(source LivenessSource) {
+	s.liveness.Store(&livenessHolder{source: source})
 }
 
 // isGRPC tells a gRPC request from the rest by what gRPC guarantees: HTTP/2
@@ -334,7 +361,31 @@ func (s *Server) serveDiagnostics() (func(context.Context), error) {
 }
 
 func (s *Server) health(response http.ResponseWriter, _ *http.Request) {
-	response.WriteHeader(http.StatusOK)
+	holder := s.liveness.Load()
+	if holder == nil || holder.source == nil {
+		response.WriteHeader(http.StatusOK)
+		return
+	}
+	stalls := holder.source.Stalls()
+	if len(stalls) == 0 {
+		response.WriteHeader(http.StatusOK)
+		return
+	}
+	type stalled struct {
+		Loop         string  `json:"loop"`
+		AgeSeconds   float64 `json:"age_seconds"`
+		BoundSeconds float64 `json:"bound_seconds"`
+	}
+	body := struct {
+		Alive   bool      `json:"alive"`
+		Stalled []stalled `json:"stalled"`
+	}{}
+	for _, stall := range stalls {
+		body.Stalled = append(body.Stalled, stalled{Loop: stall.Loop, AgeSeconds: stall.Age.Seconds(), BoundSeconds: stall.Bound.Seconds()})
+	}
+	response.Header().Set("Content-Type", "application/json")
+	response.WriteHeader(http.StatusServiceUnavailable)
+	_ = json.NewEncoder(response).Encode(body)
 }
 
 func (s *Server) readiness(response http.ResponseWriter, _ *http.Request) {
