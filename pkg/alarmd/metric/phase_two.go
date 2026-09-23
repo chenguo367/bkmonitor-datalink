@@ -130,6 +130,8 @@ type phaseTwoMetrics struct {
 	splitPlans                      *prometheus.CounterVec
 	splitRoundObjects               *prometheus.CounterVec
 	shardQueries                    *prometheus.CounterVec
+	splitRounds                     prometheus.Counter
+	shardabilityPlans               *prometheus.CounterVec
 	dimensionCensusValues           *prometheus.CounterVec
 	recoveryPastLevelWithoutRecov   prometheus.Counter
 	openAlertGate                   *prometheus.CounterVec
@@ -982,14 +984,46 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Planned splits this Leader tried to express as queries, by what the strategy's own query " +
 			"allowed. BUILT is a split the queries express. DISJUNCTIVE is the structural one: a condition " +
 			"list is flat, so a matcher appended after an 'or' changes what the existing conditions mean, " +
-			"and such a strategy cannot be cut by a value list at all - read it against the catalog's " +
-			"shardable_disjunctive to see whether the objects that need splitting are the ones value lists " +
+			"and such a strategy cannot be cut by a value list at all - read it against " +
+			"catalog_shardability_plans_total{answer=\"disjunctive\"} to see whether the objects that need splitting are the ones value lists " +
 			"cannot serve. NOT_STRUCTURED is PromQL, DIMENSION_NOT_QUERYABLE a dimension the query does not " +
 			"group by, TOO_MANY_VALUES a matcher past the value bound, NOT_PLANNED and NO_QUERIES nothing " +
 			"to build from, and INVALID this build producing facts the query contract refuses.",
 	}, []string{"outcome"})
 	for _, outcome := range observability.ShardQueryOutcomes() {
 		metrics.shardQueries.WithLabelValues(outcome)
+	}
+	// How many rounds the dry run ran, apart from what they found. The round
+	// family adds each round's counts, so a round with nothing over its
+	// share adds zero to every cell - and a family that stays at zero then
+	// reads the same whether the dry run ran every round and found nothing,
+	// or never ran. This is the denominator that tells them apart.
+	metrics.splitRounds = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "split_rounds_total",
+		Help: "Split dry run rounds this Leader ran, one per placement round that reached the dry run. " +
+			"Read split_round_objects_total against it: rounds rising with over_share flat is a fleet with " +
+			"nothing over its share; rounds flat is a Leader whose placement round never gets that far, or " +
+			"a replica that is not the Leader.",
+	})
+	// The whole catalog counted by whether a value-list split could be
+	// expressed for each Plan, once per publication this replica wrote
+	// (decision-020 section 4.7.2). A counter rather than a gauge: only the
+	// replica that publishes counts, and a gauge pre-created at zero would
+	// say "a catalog of no Plans" on every other replica, where a counter at
+	// zero says what is true there - this replica counted no publication.
+	// Read as a ratio over a window, which is per-publication shares
+	// weighted by how often the catalog was published.
+	metrics.shardabilityPlans = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "catalog_shardability_plans_total",
+		Help: "Plans in each catalog publication this replica wrote, by whether a value-list split could be " +
+			"expressed for them. splittable can take a matcher; disjunctive has an 'or' in its own conditions, " +
+			"which a flat condition list cannot be cut under; not_structured is PromQL; no_queries carries no " +
+			"query facts; unrecognised is an answer this build does not know. The five sum to the Plans " +
+			"published. Read disjunctive over the sum, against shard_query_total{outcome=\"DISJUNCTIVE\"} " +
+			"over the planned splits: the first is the fleet, the second the objects that need splitting.",
+	}, []string{"answer"})
+	for _, cell := range (observability.ShardabilityFacts{}).Cells() {
+		metrics.shardabilityPlans.WithLabelValues(cell.Answer)
 	}
 	// What the dimension census did, by where its values came from and what
 	// the store said (decision-020 section 4.7.3). Two families rather than
@@ -1361,7 +1395,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectReads, m.stateGenerationSkew,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.effectiveClose, m.absentClose, m.controlSourceRounds, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
@@ -1527,6 +1561,14 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.objectCatalogObjects.WithLabelValues(facts.Operation, "missing").Add(float64(facts.Missing))
 		if facts.Operation == "write" && facts.Result == "success" {
 			m.objectCatalogManifestBytes.Set(float64(facts.ManifestBytes))
+			// Counted on the write that succeeded and on no other: a failed
+			// write is retried under the same revision and counted then, so
+			// counting the failure too would count that catalog twice.
+			if shardability := observation.Shardability; shardability != nil {
+				for _, cell := range shardability.Cells() {
+					m.shardabilityPlans.WithLabelValues(cell.Answer).Add(float64(cell.Plans))
+				}
+			}
 		}
 	}
 	if facts := observation.ObjectRead; facts != nil {
@@ -1549,6 +1591,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.shardQueries.WithLabelValues(facts.Outcome).Inc()
 	}
 	if facts := observation.SplitRound; facts != nil {
+		m.splitRounds.Inc()
 		m.splitRoundObjects.WithLabelValues("over_share").Add(float64(facts.OverShare))
 		m.splitRoundObjects.WithLabelValues("examined").Add(float64(facts.Examined))
 		m.splitRoundObjects.WithLabelValues("skipped").Add(float64(facts.Skipped))
