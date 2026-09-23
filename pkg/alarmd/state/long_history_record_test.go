@@ -84,3 +84,24 @@ func BenchmarkReadALongHistoryRecord(b *testing.B) {
 		}
 	}
 }
+
+// Reading a framed record through the store costs one decode of it, not two.
+// The preflight used to decode the frame to classify it and then decode it
+// again to build the view, which doubled the cost of every long-history Query
+// Group's state read; the allocations of the store's read are held here to
+// within a small margin of one decode's.
+func TestTheStoreDecodesAFramedRecordOnce(t *testing.T) {
+	raw, identity, next := longHistoryRecord(t)
+	store := newBatchStore(t, newPipelineMemoryBackend(), nil)
+	item := execution.StatePreflightItem{Identity: identity, ApplyVersion: next}
+	request := execution.StatePreflightRequest{Contract: frozenRef(), Items: []execution.StatePreflightItem{item}}
+	decode := testing.AllocsPerRun(5, func() { _ = decodeRuntime(raw, identity, frozenRef(), next) })
+	read := testing.AllocsPerRun(5, func() {
+		if view, fallback := store.readFramedRecord(request, item, raw); fallback || len(view.History) != longHistoryPoints {
+			t.Fatalf("read back %d points (fallback %v)", len(view.History), fallback)
+		}
+	})
+	if read > decode*1.25 {
+		t.Fatalf("reading the record allocated %.0f times against %.0f for one decode: the frame is decoded more than once", read, decode)
+	}
+}

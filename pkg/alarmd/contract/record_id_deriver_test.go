@@ -11,6 +11,7 @@ package contract
 
 import (
 	"math"
+	"strings"
 	"testing"
 )
 
@@ -85,5 +86,24 @@ func BenchmarkRecordIDDeriver(b *testing.B) {
 	b.ReportAllocs()
 	for index := 0; index < b.N; index++ {
 		_, _ = deriver.Derive(int64(1790000000 + 60*index))
+	}
+}
+
+// A point's id costs the id and nothing else: the hash's buffers belong to
+// the deriver, not to each call. Declared per call they escaped through the
+// hash interface and were allocated for every point of every record read.
+func TestDerivingAPointsIDAllocatesOnlyTheID(t *testing.T) {
+	deriver, err := NewRecordIDDeriverV2(strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := int64(1756684800)
+	if allocs := testing.AllocsPerRun(100, func() {
+		at += 60
+		if _, err := deriver.Derive(at); err != nil {
+			t.Fatal(err)
+		}
+	}); allocs > 1 {
+		t.Fatalf("Derive allocated %.0f times a point, want only the id", allocs)
 	}
 }

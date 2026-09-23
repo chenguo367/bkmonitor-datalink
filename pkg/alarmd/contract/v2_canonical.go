@@ -419,6 +419,11 @@ func DeriveRecordIDV2(dimensionIdentityDigest string, sourceTime int64) (string,
 type RecordIDDeriverV2 struct {
 	prefix []byte
 	digest hash.Hash
+	// The buffers each point is hashed through. The hash is reached through
+	// an interface, so a buffer declared per call escapes and is allocated
+	// per point; kept here, it is allocated once per series.
+	length [4 + 20]byte
+	sum    [sha256.Size]byte
 }
 
 // NewRecordIDDeriverV2 fixes the series, refused as DeriveRecordIDV2 refuses
@@ -449,13 +454,11 @@ func (deriver *RecordIDDeriverV2) Derive(sourceTime int64) (string, error) {
 	if err := deriver.digest.(encoding.BinaryUnmarshaler).UnmarshalBinary(deriver.prefix); err != nil {
 		return "", fmt.Errorf("record id deriver: %w", err)
 	}
-	var buffer [4 + 20]byte
-	text := strconv.AppendInt(buffer[4:4], sourceTime, 10)
-	binary.BigEndian.PutUint32(buffer[:4], uint32(len(text)))
-	_, _ = deriver.digest.Write(buffer[:4+len(text)])
-	var sum [sha256.Size]byte
+	text := strconv.AppendInt(deriver.length[4:4], sourceTime, 10)
+	binary.BigEndian.PutUint32(deriver.length[:4], uint32(len(text)))
+	_, _ = deriver.digest.Write(deriver.length[:4+len(text)])
 	var encoded [2 * sha256.Size]byte
-	hex.Encode(encoded[:], deriver.digest.Sum(sum[:0]))
+	hex.Encode(encoded[:], deriver.digest.Sum(deriver.sum[:0]))
 	return string(encoded[:]), nil
 }
 
