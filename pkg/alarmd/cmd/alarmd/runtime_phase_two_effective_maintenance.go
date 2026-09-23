@@ -92,7 +92,6 @@ type legacyRefresher interface {
 // are the ones this file reads by.
 const (
 	closeOutcomeAcked                = string(observability.EffectiveCloseAcked)
-	closeOutcomeMetadataMissing      = string(observability.EffectiveCloseMetadataMissing)
 	closeOutcomePrecheckFailed       = string(observability.EffectiveClosePrecheckFailed)
 	closeOutcomeSendFailed           = string(observability.EffectiveCloseSendFailed)
 	closeOutcomeMaintenanceBusy      = string(observability.EffectiveCloseMaintenanceBusy)
@@ -136,14 +135,13 @@ type effectiveMaintenance struct {
 	calibrationRequested map[openalerts.StrategyKey]time.Time
 	// ACK suppresses only immediate repeat sends. It never deletes the
 	// external member or declares Linkd closed; reconciliation confirms that.
-	sent             map[string]time.Time
-	groups           map[execution.QueryGroupIdentity]*maintenanceGroup
-	readCursor       execution.QueryGroupIdentity
-	planCursor       map[execution.QueryGroupIdentity]int
-	legacyCursor     map[execution.QueryGroupIdentity]int
-	metadataReported map[openalerts.StrategyKey]time.Time
-	countsMu         sync.Mutex
-	counts           map[string]uint64
+	sent         map[string]time.Time
+	groups       map[execution.QueryGroupIdentity]*maintenanceGroup
+	readCursor   execution.QueryGroupIdentity
+	planCursor   map[execution.QueryGroupIdentity]int
+	legacyCursor map[execution.QueryGroupIdentity]int
+	countsMu     sync.Mutex
+	counts       map[string]uint64
 }
 
 // Stats is the outcome counts, for the metric that reports every cell.
@@ -214,7 +212,6 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 	if m.planCursor == nil {
 		m.planCursor = make(map[execution.QueryGroupIdentity]int)
 		m.legacyCursor = make(map[execution.QueryGroupIdentity]int)
-		m.metadataReported = make(map[openalerts.StrategyKey]time.Time)
 		m.groups = make(map[execution.QueryGroupIdentity]*maintenanceGroup)
 	}
 	if m.sent == nil {
@@ -233,7 +230,6 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 	for key := range m.calibrationRequested {
 		if m.refs[key] == 0 {
 			delete(m.calibrationRequested, key)
-			delete(m.metadataReported, key)
 		}
 	}
 	m.trackingMu.Unlock()
@@ -416,32 +412,18 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			continue
 		}
 		batch := make([]linkdoutput.CloseRequest, 0, m.capacity.CloseBatch)
-		withoutSeverity := 0
 		for _, alert := range alerts {
 			if alert.EventSourceID != m.sourceID {
-				continue
-			}
-			if alert.Severity == "" {
-				withoutSeverity++
 				continue
 			}
 			sentKey := key.TenantID + "\x00" + alert.EventSourceID + "\x00" + alert.AlertID
 			if _, sent := m.sent[sentKey]; sent {
 				continue
 			}
-			batch = append(batch, linkdoutput.CloseRequest{TenantID: key.TenantID, Fingerprint: alert.Fingerprint, AlertInstanceID: alert.AlertID, Severity: alert.Severity,
+			batch = append(batch, linkdoutput.CloseRequest{TenantID: key.TenantID, Fingerprint: alert.Fingerprint, AlertInstanceID: alert.AlertID,
 				StrategyID: strategyID, StrategyRevision: ref.SnapshotRevision, BusinessID: business, OccurredAt: at})
 			if len(batch) == remaining {
 				break
-			}
-		}
-		if withoutSeverity > 0 {
-			// Counted per alert on every tick they stay open and unclosable;
-			// the log line stays at one per strategy per minute.
-			m.count(closeOutcomeMetadataMissing, withoutSeverity)
-			if at.Sub(m.metadataReported[key]) >= time.Minute {
-				m.metadataReported[key] = at
-				m.observe(ctx, qg, closeOutcomeMetadataMissing, errors.New("Linkd reconciliation does not expose active severity"), withoutSeverity)
 			}
 		}
 		if len(batch) == 0 {
@@ -649,16 +631,14 @@ func (m *effectiveMaintenance) requestCalibration(key openalerts.StrategyKey, at
 }
 
 // observe writes the line and counts the outcome. count is what the outcome
-// is measured in - alerts for close_acked and close_metadata_missing - and
+// is measured in - alerts for close_acked - and
 // one for the outcomes that are events in their own right.
 func (m *effectiveMaintenance) observe(ctx context.Context, qg execution.QueryGroupIdentity, outcome string, err error, count int) {
 	result := observability.ResultSuccess
 	if err != nil {
 		result = observability.ResultDegraded
 	}
-	if outcome != closeOutcomeMetadataMissing {
-		m.count(outcome, max(count, 1))
-	}
+	m.count(outcome, max(count, 1))
 	m.bundle.dependencies.Observer.Observe(ctx, observability.Observation{Component: observability.ComponentRuntime, Stage: observability.StageEffectiveTimeMaintenance, Result: observability.Result(result),
 		ReasonCode: observability.ReasonCode(outcome), Trace: observability.TraceFields{QueryGroupKey: string(qg)}, Counts: observability.Counts{Events: int64(count)}, Err: err})
 }

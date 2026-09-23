@@ -15,7 +15,7 @@ import (
 
 func closeSinkRequest() linkdoutput.CloseRequest {
 	return linkdoutput.CloseRequest{TenantID: "tenant", Fingerprint: strings.Repeat("a", 32), AlertInstanceID: "active-instance",
-		Severity: "critical", StrategyID: 123, StrategyRevision: 4, BusinessID: 2, OccurredAt: time.Unix(1700000000, 0)}
+		StrategyID: 123, StrategyRevision: 4, BusinessID: 2, OccurredAt: time.Unix(1700000000, 0)}
 }
 
 func TestCloseSinkUsesNativeProducerKeyAndTenantHeader(t *testing.T) {
@@ -61,7 +61,7 @@ func TestCloseSinkUsesNativeProducerKeyAndTenantHeader(t *testing.T) {
 	if err := json.Unmarshal(data, &wire); err != nil {
 		t.Fatal(err)
 	}
-	if wire.AlertID != r.Fingerprint || len(wire.Evaluations) != 1 || wire.Evaluations[0].Severity != r.Severity || wire.Evaluations[0].Action != "closed" || wire.Evaluations[0].Reason != "strategy_inactive" {
+	if wire.AlertID != r.Fingerprint || len(wire.Evaluations) != 1 || wire.Evaluations[0].Severity != linkdoutput.SeverityAllLevels || wire.Evaluations[0].Action != "closed" || wire.Evaluations[0].Reason != "strategy_inactive" {
 		t.Fatalf("payload=%s", data)
 	}
 }
@@ -71,7 +71,6 @@ func TestCloseSinkRejectsWholeInvalidBatchBeforeProducer(t *testing.T) {
 		"tenant":      func(r *linkdoutput.CloseRequest) { r.TenantID = "" },
 		"instance":    func(r *linkdoutput.CloseRequest) { r.AlertInstanceID = "" },
 		"fingerprint": func(r *linkdoutput.CloseRequest) { r.Fingerprint = "bad" },
-		"severity":    func(r *linkdoutput.CloseRequest) { r.Severity = "" },
 		"strategy":    func(r *linkdoutput.CloseRequest) { r.StrategyID = 0 },
 		"revision":    func(r *linkdoutput.CloseRequest) { r.StrategyRevision = 0 },
 		"business":    func(r *linkdoutput.CloseRequest) { r.BusinessID = 0 },

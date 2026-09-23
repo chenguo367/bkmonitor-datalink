@@ -360,14 +360,8 @@ func (loop *absentStrategyClose) closeStrategy(ctx context.Context, absent absen
 	}
 	batch := make([]linkdoutput.CloseRequest, 0, min(len(own), absentCloseAlertBatch))
 	for _, alert := range own {
-		// The link's reconciliation does not carry the alert's severity. An
-		// empty one asks the converter for a close at every level this
-		// build names; the link applies the one matching the alert's own
-		// level and leaves the others without effect, so the close lands
-		// on whatever level the alert is at without this process having
-		// to know it.
 		batch = append(batch, linkdoutput.CloseRequest{TenantID: key.TenantID, Fingerprint: alert.Fingerprint,
-			AlertInstanceID: alert.AlertID, Severity: alert.Severity, StrategyID: strategyID,
+			AlertInstanceID: alert.AlertID, StrategyID: strategyID,
 			StrategyRevision: identity.Revision, BusinessID: identity.BusinessID,
 			OccurredAt: now, Reason: linkdoutput.CloseReasonAbsent})
 		if len(batch) == absentCloseAlertBatch {
