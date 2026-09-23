@@ -72,12 +72,12 @@ func TestTheAuthorizationPageSaysWhereTheAdminKeyLives(t *testing.T) {
 	Handler().ServeHTTP(w, httptest.NewRequest("GET", "/cli", nil))
 	body := w.Body.String()
 	for _, term := range []string{`<details id="admin-key-help">`, "cli.adminKeySecret.existingSecret", "<code>admin-key</code>",
-		"get secret", "base64 -d"} {
+		"get secret", "{.data.键名}", "base64 -d"} {
 		if !strings.Contains(body, term) {
 			t.Errorf("the page does not say where the admin key lives: missing %q", term)
 		}
 	}
-	if strings.Contains(body, "alarmd.cli.adminKeySecret") {
+	if strings.Contains(body, "alarmd.cli.") {
 		t.Error("the page names one chart's values path")
 	}
 }
