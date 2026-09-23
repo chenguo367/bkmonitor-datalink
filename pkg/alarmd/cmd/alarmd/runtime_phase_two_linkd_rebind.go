@@ -150,6 +150,11 @@ func (s *linkdLocationSwitch) rebind(connection config.RedisConnectionConfig, pr
 	if s.console != nil {
 		if err := s.console.SetIndexLocation(openalerts.IndexLocation{KeyPrefix: prefix, Address: linkdLocation(connection),
 			Database: connection.DB}); err != nil {
+			// Refused before the move: the client opened for it is closed, or
+			// every retry would leave one behind.
+			if owned {
+				_ = client.Close()
+			}
 			return err
 		}
 	}
