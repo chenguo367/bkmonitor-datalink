@@ -157,14 +157,13 @@ func TestEveryWayACloseDoesNotHappenIsNamedAndCounted(t *testing.T) {
 			t.Fatalf("stats=%v", stats)
 		}
 	})
-	t.Run("metadata missing counts alerts", func(t *testing.T) {
+	t.Run("an alert whose level the link does not report is still closed", func(t *testing.T) {
 		alerts := []openalerts.Alert{maintenanceAlert("native", ""), maintenanceAlert("native", "")}
 		alerts[1].AlertID, alerts[1].Fingerprint = "second", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 		f := newMaintenanceTestFixture(t, maintenanceReadySnapshot, maintenanceTime(8, 0), alerts)
 		f.m.step(context.Background())
-		f.m.step(context.Background())
-		if stats := f.m.Stats(); stats["close_metadata_missing"] != 4 || len(f.writer.batches) != 0 {
-			t.Fatalf("stats=%v batches=%d, want two alerts counted on each of two ticks", stats, len(f.writer.batches))
+		if stats := f.m.Stats(); stats["close_acked"] != 2 || len(f.writer.batches) != 1 || len(f.writer.batches[0]) != 2 {
+			t.Fatalf("stats=%v batches=%v, want both alerts closed at every level", stats, f.writer.batches)
 		}
 	})
 }

@@ -181,7 +181,7 @@ func TestEffectiveMaintenanceOnlyClosesCurrentInactiveNativeAlerts(t *testing.T)
 		{"active", maintenanceReadySnapshot, "native", "critical", maintenanceTime(10, 0), 0},
 		{"unknown", "", "native", "critical", maintenanceTime(8, 0), 0},
 		{"foreign-source", maintenanceReadySnapshot, "other", "critical", maintenanceTime(8, 0), 0},
-		{"missing-severity", maintenanceReadySnapshot, "native", "", maintenanceTime(8, 0), 0},
+		{"level-not-reported", maintenanceReadySnapshot, "native", "", maintenanceTime(8, 0), 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newMaintenanceTestFixture(t, tc.snapshot, tc.at, []openalerts.Alert{maintenanceAlert(tc.source, tc.severity)})
@@ -191,7 +191,7 @@ func TestEffectiveMaintenanceOnlyClosesCurrentInactiveNativeAlerts(t *testing.T)
 			}
 			if tc.want == 1 {
 				r := f.writer.batches[0][0]
-				if r.StrategyID != 123 || r.StrategyRevision != 4 || r.BusinessID != 2 || r.TenantID != "tenant-a" || r.AlertInstanceID != "instance" || r.Severity != "critical" || !r.OccurredAt.Equal(tc.at) {
+				if r.StrategyID != 123 || r.StrategyRevision != 4 || r.BusinessID != 2 || r.TenantID != "tenant-a" || r.AlertInstanceID != "instance" || !r.OccurredAt.Equal(tc.at) {
 					t.Fatalf("request=%+v", r)
 				}
 			}

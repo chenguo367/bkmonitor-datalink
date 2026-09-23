@@ -3447,10 +3447,6 @@ const (
 	// EffectiveCloseAcked counts alerts closed, one per alert the broker
 	// acknowledged.
 	EffectiveCloseAcked ReasonCode = "close_acked"
-	// EffectiveCloseMetadataMissing counts alerts that could not be closed
-	// because the reconciliation exposes no severity for them, once per
-	// evaluation they stay open and unclosable.
-	EffectiveCloseMetadataMissing ReasonCode = "close_metadata_missing"
 	// EffectiveClosePrecheckFailed is the owner and content check before a
 	// send refusing: the fence, the content scope or the timeline moved.
 	EffectiveClosePrecheckFailed ReasonCode = "close_precheck_failed"
@@ -3485,7 +3481,7 @@ const (
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
 // cell and for a reader to bound the family by.
 var EffectiveCloseOutcomes = []ReasonCode{
-	EffectiveCloseAcked, EffectiveCloseMetadataMissing, EffectiveClosePrecheckFailed, EffectiveCloseSendFailed,
+	EffectiveCloseAcked, EffectiveClosePrecheckFailed, EffectiveCloseSendFailed,
 	EffectiveCloseMaintenanceBusy, EffectiveClosePlanUncompilable, EffectiveCloseIdentityInvalid,
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
 	EffectiveCloseViewNotExecutable,

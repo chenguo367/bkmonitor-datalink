@@ -206,8 +206,8 @@ func TestTheAlertsOfAStrategyDeletedBeforeThisProcessSawItAreClosed(t *testing.T
 	var wire struct {
 		Evaluations []struct{ Severity, Action string } `json:"evaluations"`
 	}
-	if err := json.Unmarshal(event.Payload, &wire); err != nil || len(wire.Evaluations) != 3 {
-		t.Fatalf("a close without a known severity has to close at every level: %s", event.Payload)
+	if err := json.Unmarshal(event.Payload, &wire); err != nil || len(wire.Evaluations) != 1 || wire.Evaluations[0].Severity != linkdoutput.SeverityAllLevels {
+		t.Fatalf("a strategy close has to go out at every level: %s", event.Payload)
 	}
 	if difference := fixture.loop.Difference(); difference["roster_strategies"] != 2 ||
 		difference["roster_pages"] != 2 || difference["roster_complete"] != 1 || difference["candidates"] != 1 {
