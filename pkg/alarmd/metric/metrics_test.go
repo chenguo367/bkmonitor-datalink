@@ -457,6 +457,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_disjoint"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_control_source_refresh_total"] = "variableLabels: {outcome,exit}"
 	expected["bkmonitor_alarmd_catalog_strategy_returned_after_removal_total"] = "variableLabels: {}"
+	expected["bkmonitor_alarmd_leader_forward_duration_seconds"] = "variableLabels: {route,result}"
 	expected["bkmonitor_alarmd_control_source_mode"] = "variableLabels: {role,mode}"
 	expected["bkmonitor_alarmd_control_source_last_success_age_seconds"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
@@ -999,6 +1000,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_disjoint")] = 1
 	bounds[fqName("control_source_refresh_total")] = len(controlplane.SourceRefreshExits)
 	bounds[fqName("catalog_strategy_returned_after_removal_total")] = 1
+	bounds[fqName("leader_forward_duration_seconds")] = histogramSeries(len(LeaderForwardRoutes)*len(LeaderForwardResults), len(leaderForwardBuckets))
 	bounds[fqName("control_source_mode")] = len(observability.ControlSourceRoles) * len(observability.ControlSourceModes)
 	bounds[fqName("control_source_last_success_age_seconds")] = 1
 	// Five states; three operations by two results.
@@ -1191,3 +1193,48 @@ func countCustomSeriesByFamily(t *testing.T, recorder *Recorder) map[string]int 
 // source to, repeated here rather than exported because exporting a test's
 // constant would make it look like a value the package promises.
 const catalogReasonHeadroom = 120
+
+// Every route and result pair exists at zero from construction, so "no
+// timeout since the release" reads as zero and not as a missing series; a
+// hop is recorded under the closed words only, anything else dropped.
+func TestLeaderForwardSeriesExistFromTheStartAndTakeOnlyTheClosedWords(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	counts := func() map[string]uint64 {
+		families, err := r.Gatherer().Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]uint64{}
+		for _, family := range families {
+			if family.GetName() != "bkmonitor_alarmd_leader_forward_duration_seconds" {
+				continue
+			}
+			for _, m := range family.GetMetric() {
+				key := ""
+				for _, label := range m.GetLabel() {
+					key += label.GetName() + "=" + label.GetValue() + ","
+				}
+				out[key] = m.GetHistogram().GetSampleCount()
+			}
+		}
+		return out
+	}
+	start := counts()
+	if len(start) != len(LeaderForwardRoutes)*len(LeaderForwardResults) {
+		t.Fatalf("series at construction %v, want every route and result pair", start)
+	}
+	if n, ok := start["result=timeout,route=diagnosis,"]; !ok || n != 0 {
+		t.Fatalf("diagnosis/timeout at construction = %d present %v, want a zero that exists", n, ok)
+	}
+	r.ObserveLeaderForward("diagnosis", "timeout", 2500*time.Millisecond)
+	r.ObserveLeaderForward("diagnosis", "FORWARD_FAILED", time.Second)
+	r.ObserveLeaderForward("objects", "answered", time.Second)
+	after := counts()
+	total := uint64(0)
+	for _, n := range after {
+		total += n
+	}
+	if len(after) != len(start) || total != 1 || after["result=timeout,route=diagnosis,"] != 1 {
+		t.Fatalf("after = %v, want only the closed-word hop recorded and no new series", after)
+	}
+}

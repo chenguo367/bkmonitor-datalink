@@ -11,10 +11,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
@@ -141,41 +143,65 @@ const strategyStandingForwardTimeout = 2 * time.Second
 // -- no lease, a lease holder without a registration, a registration
 // without an endpoint -- is the view stream's word for which, and the
 // caller carries it in the refusal.
-func leaderForwarder(discovery leaderDiscovery, replica string, client *http.Client) fleet.LeaderForward {
-	return leaderForwarderWithin(discovery, replica, client, strategyStandingForwardTimeout)
+func leaderForwarder(discovery leaderDiscovery, replica string, client *http.Client, observe forwardObserver) fleet.LeaderForward {
+	return leaderForwarderWithin(discovery, replica, client, strategyStandingForwardTimeout, "strategy", observe)
 }
 
-// leaderForwarderWithin is leaderForwarder with the hop's own bound.
-func leaderForwarderWithin(discovery leaderDiscovery, replica string, client *http.Client, timeout time.Duration) fleet.LeaderForward {
+// forwardObserver records one hop by route and result
+// (metric.LeaderForwardResults) and how long the replica waited on it.
+type forwardObserver func(route, result string, waited time.Duration)
+
+// leaderForwarderWithin is leaderForwarder with the hop's own bound, and the
+// route its hops are recorded under. Every hop is recorded, answered or not:
+// the reply only ever said FORWARD_FAILED, and a Leader that timed out, one
+// not listening and one that reset the connection are three different
+// things to go and look at.
+func leaderForwarderWithin(discovery leaderDiscovery, replica string, client *http.Client, timeout time.Duration, route string, observe forwardObserver) fleet.LeaderForward {
 	if discovery == nil {
 		return nil
 	}
 	if client == nil {
 		client = &http.Client{Timeout: timeout}
 	}
+	if observe == nil {
+		observe = func(string, string, time.Duration) {}
+	}
 	return func(response http.ResponseWriter, request *http.Request) (bool, string) {
+		started := time.Now()
 		leader, miss, err := discovery.Leader(request.Context())
 		if err != nil {
+			observe(route, "no_leader", time.Since(started))
 			return false, viewstream.MissDiscoveryFailed
 		}
 		if miss != "" {
+			observe(route, "no_leader", time.Since(started))
 			return false, miss
 		}
 		if _, _, splitErr := net.SplitHostPort(leader.Endpoint); splitErr != nil {
+			observe(route, "no_leader", time.Since(started))
 			return false, viewstream.MissLeaderNoEndpoint
 		}
 		ctx, cancel := context.WithTimeout(request.Context(), timeout)
 		defer cancel()
 		forwarded, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+leader.Endpoint+request.URL.RequestURI(), nil)
 		if err != nil {
+			observe(route, "error", time.Since(started))
 			return false, fleet.ForwardFailed
 		}
 		forwarded.Header.Set(fleet.ForwardedHeader(), replica)
 		reply, err := client.Do(forwarded)
 		if err != nil {
+			// The reader leaving first is not the Leader failing: a CLI
+			// giving up, or its own deadline, cancels this hop too.
+			result := forwardFailureOf(err)
+			if request.Context().Err() != nil {
+				result = "canceled"
+			}
+			observe(route, result, time.Since(started))
 			return false, fleet.ForwardFailed
 		}
 		defer reply.Body.Close()
+		observe(route, "answered", time.Since(started))
 		if contentType := reply.Header.Get("Content-Type"); contentType != "" {
 			response.Header().Set("Content-Type", contentType)
 		}
@@ -183,6 +209,20 @@ func leaderForwarderWithin(discovery leaderDiscovery, replica string, client *ht
 		response.WriteHeader(reply.StatusCode)
 		_, _ = io.Copy(response, reply.Body)
 		return true, ""
+	}
+}
+
+// forwardFailureOf names a failed hop: its bound ran out, nothing was
+// listening, or anything else.
+func forwardFailureOf(err error) string {
+	var netErr net.Error
+	switch {
+	case errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()):
+		return "timeout"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "refused"
+	default:
+		return "error"
 	}
 }
 

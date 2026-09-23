@@ -7,6 +7,7 @@ package metric
 
 import (
 	"math"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -147,6 +148,7 @@ type phaseTwoMetrics struct {
 	linkdConsole                    *linkdConsoleCollector
 	controlSourceRounds             *prometheus.CounterVec
 	strategiesReturnedAfterRemoval  prometheus.Counter
+	leaderForward                   *prometheus.HistogramVec
 	controlSourceRetainedStale      prometheus.Counter
 	controlSource                   *controlSourceCollector
 	platformSettings                *platformSettingsCollector
@@ -184,6 +186,18 @@ type phaseTwoMetrics struct {
 }
 
 var activeQGSetDurationBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30}
+
+// leaderForwardBuckets resolve the forward's own bounds: two seconds for a
+// strategy's standing, two and a half for a diagnosis page.
+var leaderForwardBuckets = []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2, 2.5, 5}
+
+// LeaderForwardRoutes and LeaderForwardResults are the closed label values
+// of leader_forward_duration_seconds; anything else is recorded as the
+// route or result "other" would be, which is not at all.
+var (
+	LeaderForwardRoutes  = []string{"strategy", "diagnosis"}
+	LeaderForwardResults = []string{"answered", "timeout", "refused", "error", "no_leader", "canceled"}
+)
 
 // controlReadDurationBuckets spans a single pipelined batch on a healthy
 // link through a reconcile round that is in trouble. The lower buckets are
@@ -1194,6 +1208,25 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"removal grace, withdrawn, then back. A return inside the grace is not one. Counted by the Control " +
 			"Leader's source-set ledger; read it summed over replicas, since only the Leader counts.",
 	})
+	metrics.leaderForward = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "leader_forward_duration_seconds",
+		Help: "Requests a replica handed to the Control Leader's listener because it could not answer them itself, " +
+			"by route (strategy: one strategy's standing; diagnosis: an environment diagnosis page) and result: " +
+			"answered (the Leader replied, whatever its status), timeout (the hop's own bound ran out, which " +
+			"includes a Leader still reading what the reply needs), refused (nothing listening at the Leader's " +
+			"endpoint), error (any other failure of the hop), no_leader (discovery named none, or none with an " +
+			"endpoint), canceled (the reader went away first, so nothing is known of the Leader). The duration is the replica's wait, the Leader's work included. Before this the hop's " +
+			"failure was one word on the reply, FORWARD_FAILED, and which of these it was was not kept anywhere.",
+		Buckets: leaderForwardBuckets,
+	}, []string{"route", "result"})
+	// Every pair exists from the start: the question this answers after a
+	// release is whether diagnosis/timeout is zero, and a series that does
+	// not exist reads as nothing, not as zero.
+	for _, route := range LeaderForwardRoutes {
+		for _, result := range LeaderForwardResults {
+			metrics.leaderForward.WithLabelValues(route, result)
+		}
+	}
 	metrics.controlSourceRounds = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_source_refresh_total",
 		Help: "Refresh rounds of the control plane's strategy source on this process, every round, by outcome " +
@@ -1492,7 +1525,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.controlSource,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.leaderForward, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
@@ -2297,4 +2330,14 @@ func (r *Recorder) AddStrategiesReturnedAfterRemoval(n int) {
 		return
 	}
 	r.phaseTwo.strategiesReturnedAfterRemoval.Add(float64(n))
+}
+
+// ObserveLeaderForward records one hop a replica handed to the Control
+// Leader, by route and result from the closed lists; a value outside them
+// is dropped rather than creating a series.
+func (r *Recorder) ObserveLeaderForward(route, result string, duration time.Duration) {
+	if r == nil || r.phaseTwo.leaderForward == nil || !slices.Contains(LeaderForwardRoutes, route) || !slices.Contains(LeaderForwardResults, result) {
+		return
+	}
+	r.phaseTwo.leaderForward.WithLabelValues(route, result).Observe(duration.Seconds())
 }
