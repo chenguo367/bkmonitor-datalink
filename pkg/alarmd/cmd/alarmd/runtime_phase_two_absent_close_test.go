@@ -18,7 +18,6 @@ type absentTestControl struct {
 	snapshot    controlplane.ObservedSnapshot
 	haveSnaphot bool
 	departed    []controlplane.DepartedStrategy
-	published   []controlplane.DepartedStrategy
 	refused     uint64
 }
 
@@ -27,9 +26,6 @@ func (control *absentTestControl) ObservedSnapshot() (controlplane.ObservedSnaps
 }
 func (control *absentTestControl) DepartedStrategies() ([]controlplane.DepartedStrategy, uint64) {
 	return control.departed, control.refused
-}
-func (control *absentTestControl) PublishedStrategies() []controlplane.DepartedStrategy {
-	return control.published
 }
 
 // absentTestLink is the alert link: a roster in pages, one strategy's
@@ -358,15 +354,6 @@ func TestAListedStrategyWhoseSetCouldNotBeReadIsReported(t *testing.T) {
 	fixture.mature(context.Background())
 	if len(fixture.writer.batches) != 0 || fixture.loop.Stats()[absentalerts.OutcomeIndexUnreadable] != 2 {
 		t.Fatalf("an unread set was closed or hidden: %+v", fixture.loop.Stats())
-	}
-}
-
-func TestAStrategyTheFleetStillRunsIsNeverClosed(t *testing.T) {
-	fixture := newAbsentFixture(t, []openalerts.Alert{nativeAlert("alert-1", "0123456789abcdef0123456789abcdef")})
-	fixture.control.published = []controlplane.DepartedStrategy{{TenantID: "system", StrategyID: "10", BusinessID: 2, Revision: 7}}
-	fixture.mature(context.Background())
-	if len(fixture.writer.batches) != 0 {
-		t.Fatalf("a strategy with a published Plan had its alerts closed: %+v", fixture.writer.batches)
 	}
 }
 

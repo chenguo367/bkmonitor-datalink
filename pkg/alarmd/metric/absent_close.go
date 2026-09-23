@@ -31,7 +31,7 @@ type absentCloseCollector struct {
 // differenceSides is the closed list of denominators, so every one of them
 // has a cell from the first scrape.
 var differenceSides = []string{"roster_strategies", "roster_unreadable", "roster_pages", "roster_complete",
-	"candidates", "snapshot_strategies", "published_strategies", "remembered_identities", "send_armed",
+	"candidates", "snapshot_strategies", "remembered_identities", "send_armed",
 	"snapshot_age_seconds", "max_snapshot_age_seconds", "link_health_age_seconds", "max_link_health_age_seconds",
 	"link_pending"}
 
@@ -59,7 +59,7 @@ func newAbsentCloseCollector() *absentCloseCollector {
 			"The sizes the last round decided on: roster_strategies is the strategies the alert link listed "+
 				"with an unrecovered alert, roster_unreadable the ones it listed and could not read, roster_pages "+
 				"and roster_complete how far the walk of its roster got, candidates the difference itself, "+
-				"snapshot_strategies and published_strategies what it was judged against, remembered_identities "+
+				"snapshot_strategies the strategy cache it was judged against, remembered_identities "+
 				"the strategies the catalog let go and still knows the business of, and send_armed whether this "+
 				"deployment has armed the close at all (0 means every decision is reported and none is sent). "+
 				"Each age is reported beside its bound - snapshot_age_seconds beside max_snapshot_age_seconds, "+

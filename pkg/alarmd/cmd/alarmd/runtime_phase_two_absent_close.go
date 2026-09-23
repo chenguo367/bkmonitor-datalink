@@ -97,12 +97,11 @@ type absentRoundSizes struct {
 }
 
 // absentCloseControl is what the loop asks the control plane: what the
-// source says exists, what the catalog is running, and what it remembers
-// about the strategies it let go.
+// strategy cache says exists, and what it remembers about the strategies it
+// let go.
 type absentCloseControl interface {
 	ObservedSnapshot() (controlplane.ObservedSnapshot, bool)
 	DepartedStrategies() ([]controlplane.DepartedStrategy, uint64)
-	PublishedStrategies() []controlplane.DepartedStrategy
 }
 
 // absentCloseLink is what the loop asks the alert link: its roster, one
@@ -173,9 +172,9 @@ func (loop *absentStrategyClose) Difference() map[string]int {
 		"roster_strategies": last.counts.Roster, "roster_unreadable": last.counts.RosterUnreadable,
 		"roster_pages": last.rosterPages, "roster_complete": boolSide(last.rosterComplete),
 		"candidates": last.counts.Candidates, "snapshot_strategies": last.counts.SnapshotStrategies,
-		"published_strategies": last.counts.PublishedStrategies, "remembered_identities": last.identities,
-		"send_armed":           boolSide(loop.send),
-		"snapshot_age_seconds": last.snapshotAge, "max_snapshot_age_seconds": int(loop.bounds.MaxSnapshotAge / time.Second),
+		"remembered_identities": last.identities,
+		"send_armed":            boolSide(loop.send),
+		"snapshot_age_seconds":  last.snapshotAge, "max_snapshot_age_seconds": int(loop.bounds.MaxSnapshotAge / time.Second),
 		"link_health_age_seconds": last.linkAge, "max_link_health_age_seconds": int(loop.bounds.MaxLinkHealthAge / time.Second),
 		"link_pending": last.linkPending,
 	}
@@ -242,7 +241,7 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 	departed, refusedDepartures := loop.control.DepartedStrategies()
 	loop.setTotal(absentalerts.OutcomeMemoryFull, refusedDepartures+loop.tracker.Dropped())
 	round := absentalerts.Round{
-		Published: publishedKeys(loop.control.PublishedStrategies()), Identities: identitiesByKey(departed),
+		Identities:         identitiesByKey(departed),
 		SnapshotStrategies: snapshotKeys(observed), SnapshotUsable: haveSnapshot,
 		SnapshotObservation: observed.Observation, PreviousSnapshotStrategies: loop.previousSnapshot,
 		After: loop.lastDecided, Now: now,
@@ -424,7 +423,6 @@ func (loop *absentStrategyClose) record(ctx context.Context, result absentalerts
 	loop.counts[result.Refusal]++
 	loop.countsMu.Unlock()
 	loop.count(absentalerts.OutcomeClosed, counts.Closed)
-	loop.count(absentalerts.OutcomeStillPublished, counts.StillPublished)
 	loop.count(absentalerts.OutcomeWithinGrace, counts.WithinGrace)
 	loop.count(absentalerts.OutcomeUnconfirmed, counts.Unconfirmed)
 	loop.count(absentalerts.OutcomeDeferred, counts.Deferred)
@@ -457,14 +455,6 @@ func identitiesByKey(entries []controlplane.DepartedStrategy) map[absentalerts.K
 			absentalerts.Identity{BusinessID: entry.BusinessID, Revision: entry.Revision}
 	}
 	return identities
-}
-
-func publishedKeys(entries []controlplane.DepartedStrategy) map[absentalerts.Key]struct{} {
-	keys := make(map[absentalerts.Key]struct{}, len(entries))
-	for _, entry := range entries {
-		keys[absentalerts.Key{TenantID: entry.TenantID, StrategyID: entry.StrategyID}] = struct{}{}
-	}
-	return keys
 }
 
 func snapshotKeys(observed controlplane.ObservedSnapshot) map[absentalerts.Key]struct{} {
