@@ -260,6 +260,11 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	flush := func() {
 		bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items, pass)
 		result.LoadedBytes += bytes
+		// The frame pass measures, and so does the carry pass: a record it
+		// reads is written this round under the new generation at the size it
+		// was read, and the next round's frame pass reads it there. Leaving it
+		// out committed the empty frame pass's zero as the Query Group's size,
+		// and the next round asked for every carried record in one batch.
 		if read && !pass.envelopes {
 			// Only the frame pass measures. The Query Group's committed size
 			// describes the key every write goes to and the one the next round
@@ -317,6 +322,41 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 		batch.keys = append(batch.keys, envelopeKey)
 	}
 	flush()
+	// The third pass, for the series still without a record whose Plan
+	// carries history from the generation it moved from: that generation's
+	// frame, under the same batching and the same byte count as the other
+	// two. Only the frame is read -- a record the previous generation still
+	// held only as an envelope is old enough to warm up again.
+	pass.envelopes, pass.carry = false, true
+	for index, item := range request.Items {
+		if item.CarryFrom == "" || item.CarryFrom == item.Identity.StateGeneration || result.Items[index].Status != execution.StateMissingWarming {
+			continue
+		}
+		previous := item.Identity
+		previous.StateGeneration = item.CarryFrom
+		carriedKey, err := RuntimeStateKeyV3(store.options.Prefix, previous)
+		var target StorageTarget
+		if err == nil {
+			target, err = store.options.Router.Route(item.Identity.Plan.TenantID, item.Identity.Plan.StrategyID)
+		}
+		if err != nil {
+			pass.carryUnreadable++
+			continue
+		}
+		// Bounded as the envelope pass is, by the largest value the store
+		// accepts and not by anything learned: the frame pass has just found
+		// no record for every one of these series, so what it learned about
+		// this Query Group says nothing about the size of what the previous
+		// generation holds.
+		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.envelopeLoadBatchLimit()) {
+			flush()
+		}
+		batch.target = target
+		batch.indexes = append(batch.indexes, index)
+		batch.keys = append(batch.keys, carriedKey)
+	}
+	flush()
+	result.CarryFound, result.CarryMissing, result.CarryUnreadable = pass.carryFound, pass.carryMissing, pass.carryUnreadable
 	result.EnvelopeReads = len(pass.pending)
 	result.EnvelopeAnswered, result.NoRecordYet = pass.envelopeAnswered, pass.noRecordYet
 	result.EnvelopeCorrupt = pass.envelopeCorrupt

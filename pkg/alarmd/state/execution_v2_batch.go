@@ -772,8 +772,12 @@ type runtimeLoadBatch struct {
 // call fetched both keys.
 type runtimeLoadPass struct {
 	envelopes bool
-	pending   []int
-	frames    map[int][]byte
+	// carry is the third pass: the previous generation's frame of each
+	// series that has no record of its own and whose Plan carries.
+	carry                                     bool
+	carryFound, carryMissing, carryUnreadable int
+	pending                                   []int
+	frames                                    map[int][]byte
 	// The four the second pass splits into; see the table where they are
 	// counted. Only envelopeAnswered ever reaches zero, which is why one
 	// number over all four could not say when the migration is over.
@@ -900,6 +904,23 @@ func (store *ExecutionStore) loadRuntimeBatch(
 	}
 	for position, index := range batch.indexes {
 		item := request.Items[index]
+		if pass.carry {
+			// The series stays the missing record it is; what the previous
+			// generation held rides beside it. A read that failed carries
+			// nothing rather than failing a Slot the series could run
+			// without it.
+			if err != nil {
+				pass.carryUnreadable++
+				continue
+			}
+			raw := values[position]
+			loaded += int64(len(raw))
+			if len(raw) > largest {
+				largest = len(raw)
+			}
+			views[index].Carried = store.readCarriedRecord(request, item, raw, pass)
+			continue
+		}
 		view := execution.RuntimeStateView{Identity: item.Identity, Status: execution.StateMissingWarming}
 		if err != nil {
 			views[index] = runtimeLoadFailure(view, err)
@@ -980,6 +1001,33 @@ func (store *ExecutionStore) loadRuntimeBatch(
 		views[index] = classified
 	}
 	return loaded, largest, err == nil
+}
+
+// readCarriedRecord decodes a series' frame under the generation its Plan
+// carries from. Only a record that reads as a found one is carried; one that
+// is absent, oversize or does not read carries nothing, and each is counted.
+func (store *ExecutionStore) readCarriedRecord(
+	request execution.StatePreflightRequest, item execution.StatePreflightItem, raw []byte, pass *runtimeLoadPass,
+) *execution.RuntimeStateView {
+	if raw == nil {
+		pass.carryMissing++
+		return nil
+	}
+	if len(raw) > store.options.MaxValueBytes {
+		pass.carryUnreadable++
+		return nil
+	}
+	previous := item.Identity
+	previous.StateGeneration = item.CarryFrom
+	view := decodeRuntime(raw, previous, request.Contract, item.ApplyVersion)
+	switch view.Status {
+	case execution.StateFoundReady, execution.StateFoundWarming, execution.StateFoundGapped:
+		pass.carryFound++
+		return &view
+	default:
+		pass.carryUnreadable++
+		return nil
+	}
 }
 
 // readFramedRecord classifies a series from its framed record alone, and says

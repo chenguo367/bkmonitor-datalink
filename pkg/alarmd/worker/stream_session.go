@@ -870,7 +870,7 @@ func (stream *streamedExecution) evaluateSeries(
 		pending = append(pending, completedSeries{due: prepared.due, series: prepared.identity, inputs: prepared.inputs,
 			item: execution.StatePreflightItem{Identity: execution.StateKeyIdentity{
 				Plan: prepared.due.Identity, StateGeneration: prepared.due.StateGeneration, SeriesIdentityDigest: prepared.identity,
-			}, ApplyVersion: version}})
+			}, ApplyVersion: version, CarryFrom: carryFrom(prepared.due)}})
 		if len(pending) >= batchLimit {
 			if err := flush(); err != nil {
 				return err
@@ -1544,8 +1544,14 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 			NoRecordYet:     int64(loaded.NoRecordYet), FrameCorruptRescued: int64(loaded.FrameCorruptRescued),
 			FrameCorruptLost: int64(loaded.FrameCorruptLost), Unclassified: int64(loaded.Unclassified),
 			StateFetchMillis: timing.Fetch.Milliseconds(), StateDecodeMillis: timing.Decode.Milliseconds()}, nil)
+	outcomes := make(map[string]int)
+	defer stream.observeCarries(ctx, outcomes)
 	for index, entry := range batch {
-		if err := stream.evaluateLoadedSeries(ctx, entry, loaded.Items[index]); err != nil {
+		view, outcome := carryHistory(entry.due, loaded.Items[index])
+		if outcome != "" {
+			outcomes[outcome]++
+		}
+		if err := stream.evaluateLoadedSeries(ctx, entry, view); err != nil {
 			return err
 		}
 	}

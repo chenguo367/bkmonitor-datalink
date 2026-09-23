@@ -185,15 +185,79 @@ type ActivatedPlan struct {
 	// unsplit Plan serializes exactly as before. Compare it with ShardsEqual,
 	// never with ==.
 	Shard *ShardRef `json:",omitempty"`
+	// Carry names, on an activation whose state generation moved while the
+	// Plan stayed active, the generation it moved from and the Levels whose
+	// detection did not change with it: their stored results are the same
+	// facts under the new generation, and are carried over rather than
+	// warmed up again. Nil everywhere else, and omitted, so a record without
+	// it serializes exactly as before. It only narrows what warms up; the
+	// Worker still keeps a carried point only when its detect fingerprint is
+	// the new one.
+	Carry *StateCarry `json:",omitempty"`
 }
 
-// Equal compares by content. The shard is a pointer for the wire's sake and
-// two records decoded from the same bytes hold different ones.
+// StateCarry is where an activation's Runtime State may be carried from.
+type StateCarry struct {
+	From   StateGeneration
+	Levels []uint32
+}
+
+// Validate holds a carry to the activation it is on: it comes from another
+// generation, only on an activation that warms up, and names each Level once,
+// in order.
+func (carry *StateCarry) Validate(plan ActivatedPlan) error {
+	if carry == nil {
+		return nil
+	}
+	if carry.From == "" || carry.From == plan.StateGeneration || !plan.ForceWarming {
+		return errors.New("alarmd execution: a state carry needs a previous generation on a warming activation")
+	}
+	for index, level := range carry.Levels {
+		if level == 0 || (index > 0 && carry.Levels[index-1] >= level) {
+			return errors.New("alarmd execution: a state carry names its Levels once each, in order")
+		}
+	}
+	return nil
+}
+
+// CarriesLevel reports whether the activation carries the Level's history
+// over from the previous generation.
+func (plan ActivatedPlan) CarriesLevel(level uint32) bool {
+	if plan.Carry == nil {
+		return false
+	}
+	for _, carried := range plan.Carry.Levels {
+		if carried == level {
+			return true
+		}
+	}
+	return false
+}
+
+func carriesEqual(left, right *StateCarry) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	if left.From != right.From || len(left.Levels) != len(right.Levels) {
+		return false
+	}
+	for index := range left.Levels {
+		if left.Levels[index] != right.Levels[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// Equal compares by content. The shard and the carry are pointers for the
+// wire's sake and two records decoded from the same bytes hold different
+// ones; an activation that differs only in what it carries is a different
+// activation.
 func (plan ActivatedPlan) Equal(other ActivatedPlan) bool {
 	return plan.Identity == other.Identity && plan.StateGeneration == other.StateGeneration &&
 		plan.StateApplyEpoch == other.StateApplyEpoch && plan.ScheduleRevision == other.ScheduleRevision &&
 		plan.RequiredFullSlots == other.RequiredFullSlots && plan.ForceWarming == other.ForceWarming &&
-		ShardsEqual(plan.Shard, other.Shard)
+		ShardsEqual(plan.Shard, other.Shard) && carriesEqual(plan.Carry, other.Carry)
 }
 
 // IsZero reports an activation that selected nothing.
@@ -294,6 +358,9 @@ func (result PlanActivationResult) Validate(request PlanActivationRequest) error
 			if fact.Selected.Identity != fact.Plan || fact.Selected.StateGeneration == "" ||
 				fact.Selected.StateApplyEpoch == 0 || fact.Selected.ScheduleRevision == "" || fact.Selected.RequiredFullSlots == 0 {
 				return errors.New("alarmd execution: incomplete selected activation Plan")
+			}
+			if err := fact.Selected.Carry.Validate(fact.Selected); err != nil {
+				return err
 			}
 		default:
 			return errors.New("alarmd execution: invalid activation selection")

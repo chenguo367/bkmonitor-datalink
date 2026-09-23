@@ -611,6 +611,13 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 			slog.String("state_generation_skew_strategy_id", facts.StrategyID),
 		)
 	}
+	if facts := observation.StateCarry; facts != nil {
+		attributes = append(attributes,
+			slog.String("state_carry_scope", facts.Scope),
+			slog.String("state_carry_result", facts.Result),
+			slog.Int("state_carry_count", facts.Count),
+		)
+	}
 	if facts := observation.ActivationHold; facts != nil {
 		attributes = append(attributes,
 			slog.Int("activation_reappeared", facts.Reappeared),

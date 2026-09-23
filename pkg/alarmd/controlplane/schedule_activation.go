@@ -244,11 +244,33 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 	if err != nil {
 		return ActivationState{}, err
 	}
+	changedPlans := make(map[execution.PlanKey]changedPlan)
+	for _, group := range changed {
+		for _, plan := range group.Plans {
+			changedPlans[plan.Key()] = changedPlan{plan: plan, group: group.Identity, dataset: group.QueryPlan.Normalization.DatasetContract}
+		}
+	}
+	carries := make(map[int]*execution.StateCarry)
 	for index := range records {
 		previousRecord, continuouslyActive := previousRecords[records[index].Fact.Key()]
 		if !continuouslyActive ||
 			previousRecord.Fact.Selected.StateGeneration != records[index].Fact.Selected.StateGeneration {
 			records[index].Fact.Selected.ForceWarming = true
+		}
+		// A generation that moved under a Plan that stayed active: what of
+		// its state is still the same facts. See stateCarry.
+		if continuouslyActive && previousRecord.Fact.Selected.StateGeneration != records[index].Fact.Selected.StateGeneration {
+			current, compiledHere := changedPlans[records[index].Fact.Key()]
+			if !compiledHere {
+				reconciler.observeStateCarry(ctx, StateCarryPreviousUnreadable)
+				continue
+			}
+			carry, outcome := reconciler.stateCarry(ctx, previousRecord, previousContent, current)
+			if carry != nil {
+				carries[index] = carry
+				continue
+			}
+			reconciler.observeStateCarry(ctx, outcome)
 		}
 	}
 	// A Query Group that reopens a retired timeline restarts every Plan it
@@ -257,6 +279,7 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 	// read from the persisted timelines rather than from the Draining
 	// projection, which forgets a drained Query Group before its timeline
 	// expires; the CAS side appends to the same timelines.
+	returned := make(map[int]struct{})
 	if len(returning) > 0 {
 		planGroups := make(map[execution.PlanKey]execution.QueryGroupIdentity)
 		for identity, group := range newGroups {
@@ -265,10 +288,18 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 			}
 		}
 		for index := range records {
-			if _, returned := returning[planGroups[records[index].Fact.Key()]]; returned {
+			if _, back := returning[planGroups[records[index].Fact.Key()]]; back {
 				records[index].Fact.Selected.ForceWarming = true
+				returned[index] = struct{}{}
 			}
 		}
+	}
+	carried, discontinuous := applyStateCarries(records, carries, returned)
+	for ; carried > 0; carried-- {
+		reconciler.observeStateCarry(ctx, StateCarryCarried)
+	}
+	for ; discontinuous > 0; discontinuous-- {
+		reconciler.observeStateCarry(ctx, StateCarryDiscontinuous)
 	}
 	sort.Slice(records, func(i, j int) bool { return lessPlanIdentity(records[i].Fact.Plan, records[j].Fact.Plan) })
 	next := ActivationState{RecordRevision: previous.RecordRevision + 1, Current: publication,
@@ -461,6 +492,8 @@ func (reconciler *ScheduleActivationReconciler) reactivateHeld(
 			continue
 		}
 		record.Fact.Selected.ForceWarming = true
+		// Held and back: the hold is a hole, so nothing is carried across it.
+		record.Fact.Selected.Carry = nil
 		next.Plans = append(next.Plans, record)
 	}
 	sort.Slice(next.Plans, func(i, j int) bool { return lessPlanIdentity(next.Plans[i].Fact.Plan, next.Plans[j].Fact.Plan) })
