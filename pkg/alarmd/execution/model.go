@@ -394,12 +394,15 @@ type DuePlan struct {
 	// not split. It travels with the Plan so that every per-Plan record the
 	// execution names is named through GapIdentity and NoDataIdentity below,
 	// and no site composes a per-Plan identity without it.
-	Shard                       ShardRef
-	CompiledPlan                *strategy.CompiledPlan
-	StateGeneration             StateGeneration
-	StateApplyEpoch             StateApplyEpoch
-	ScheduleRevision            PlanScheduleRevision
-	ScheduleSpec                ScheduleSpec
+	Shard            ShardRef
+	CompiledPlan     *strategy.CompiledPlan
+	StateGeneration  StateGeneration
+	StateApplyEpoch  StateApplyEpoch
+	ScheduleRevision PlanScheduleRevision
+	ScheduleSpec     ScheduleSpec
+	// StateCarry is what the Plan's activation carries over from the state
+	// generation it moved from (ActivatedPlan.Carry), nil when nothing.
+	StateCarry                  *StateCarry
 	CompletionDeadlineUnixMilli int64
 	PartialCapabilities         []LevelPartialCapability
 	// LevelContractRefs are the Level contract references the Control
@@ -577,6 +580,12 @@ func (version ApplyVersion) Validate() error {
 type StatePreflightItem struct {
 	Identity     StateKeyIdentity
 	ApplyVersion ApplyVersion
+	// CarryFrom is the state generation the Plan's activation carries
+	// history from (DuePlan.StateCarry), empty when it carries none. A series
+	// with no record under Identity is then also read under this generation,
+	// and what is found there is handed back beside the view (Carried),
+	// never as the view itself.
+	CarryFrom StateGeneration
 }
 
 type PlanGapLoadItem struct {
@@ -1095,6 +1104,13 @@ type RuntimeStateView struct {
 	Status                  StateLoadStatus
 	ReasonCode              ReasonCode
 	VersionComparison       ApplyVersionComparison
+	// Carried is, on a view with no record of its own (MISSING_WARMING),
+	// the record the same series has under the generation its Plan's
+	// activation carries from, as it was stored there. It is beside the view
+	// and not in it: the view is still the missing record the write creates.
+	// The Worker decides what of it the new generation may keep. Nil when
+	// nothing is carried or nothing was found.
+	Carried *RuntimeStateView
 }
 
 type StatePreflightRequest struct {
@@ -1174,6 +1190,11 @@ type StatePreflightResult struct {
 	// test cannot catch that, having no data for a shape nobody has written
 	// yet. Non-zero means the five stopped being a partition.
 	Unclassified int
+	// The carry pass: series with no record of their own whose Plan carries
+	// history from another generation, by what that generation held for
+	// them. Found is handed to the Worker on the view (Carried); the other
+	// two start from nothing, as a series with no history does.
+	CarryFound, CarryMissing, CarryUnreadable int
 }
 
 func (result StatePreflightResult) Find(identity StateKeyIdentity) (RuntimeStateView, bool) {
@@ -1234,7 +1255,11 @@ func ClassifyStatePreflight(request StatePreflightRequest, result StatePreflight
 		EnvelopeAnswered: result.EnvelopeAnswered, EnvelopeCorrupt: result.EnvelopeCorrupt,
 		NoRecordYet:         result.NoRecordYet,
 		FrameCorruptRescued: result.FrameCorruptRescued, FrameCorruptLost: result.FrameCorruptLost,
-		Unclassified: result.Unclassified}
+		Unclassified: result.Unclassified,
+		// The carry pass's split travels too: dropped here, the round's
+		// reading of how much history crossed a moved generation would be
+		// zero on every round that carried any.
+		CarryFound: result.CarryFound, CarryMissing: result.CarryMissing, CarryUnreadable: result.CarryUnreadable}
 	seen := make(map[StateKeyIdentity]struct{}, len(result.Items))
 	for index, view := range result.Items {
 		candidate, ok := wanted[view.Identity]

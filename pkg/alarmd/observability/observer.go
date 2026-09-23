@@ -63,16 +63,21 @@ const (
 	// StageAbsentStrategyClose is the control leader's difference between the
 	// alert link's unrecovered alerts and the strategy snapshot, and the
 	// closes it pushes for strategies that no longer exist.
-	StageAbsentStrategyClose    = "absent_strategy_close"
-	StageLegacyPodCache         = "legacy_pod_cache"
-	StageSnapshotRefreshed      = "snapshot_refreshed"
-	StageSnapshotUnavailable    = "snapshot_unavailable"
-	StageActivationFailed       = "activation_failed"
-	StageActiveQGSet            = "active_qg_set"
-	StageObjectCatalog          = "object_catalog"
-	StageObjectRead             = "object_read"
-	StageFrozenPlanGeneration   = "frozen_plan_generation"
-	StageActivationHold         = "activation_hold"
+	StageAbsentStrategyClose  = "absent_strategy_close"
+	StageLegacyPodCache       = "legacy_pod_cache"
+	StageSnapshotRefreshed    = "snapshot_refreshed"
+	StageSnapshotUnavailable  = "snapshot_unavailable"
+	StageActivationFailed     = "activation_failed"
+	StageActiveQGSet          = "active_qg_set"
+	StageObjectCatalog        = "object_catalog"
+	StageObjectRead           = "object_read"
+	StageFrozenPlanGeneration = "frozen_plan_generation"
+	StageActivationHold       = "activation_hold"
+	// StageStateCarryDecided is the Control Leader deciding what an
+	// activation whose state generation moved may carry; StageStateCarried
+	// is a Worker carrying it for each series. See StateCarryFacts.
+	StageStateCarryDecided      = "state_carry_decided"
+	StageStateCarried           = "state_carried"
 	StageScheduleCutover        = "schedule_cutover"
 	StageLegacyQGMigration      = "legacy_active_qg_migration"
 	StageDrainingQGReconciled   = "draining_query_groups"
@@ -1296,6 +1301,44 @@ type StateGenerationSkewFacts struct {
 	StrategyID string
 }
 
+// StateCarryFacts count history carried across a moved state generation.
+// Scope is "plan" for the Control Leader's decision per activation and
+// "series" for a Worker's per series; Count is how many met Result.
+type StateCarryFacts struct {
+	Scope  string
+	Result string
+	Count  int
+}
+
+// StateCarryScopes and StateCarryResults are the closed vocabularies of
+// StateCarryFacts; a value outside them is reported as "other".
+var (
+	StateCarryScopes  = []string{"plan", "series"}
+	StateCarryResults = map[string][]string{
+		"plan":   {"carried", "partial", "none_detect_changed", "none_previous_unreadable", "none_discontinuous"},
+		"series": {"carried", "nothing_kept", "skipped_active_guard", "old_missing"},
+	}
+)
+
+func normalizeStateCarryFacts(facts *StateCarryFacts) *StateCarryFacts {
+	if facts == nil {
+		return nil
+	}
+	normalized := StateCarryFacts{Scope: "other", Result: "other", Count: facts.Count}
+	for _, scope := range StateCarryScopes {
+		if facts.Scope != scope {
+			continue
+		}
+		normalized.Scope = scope
+		for _, result := range StateCarryResults[scope] {
+			if facts.Result == result {
+				normalized.Result = result
+			}
+		}
+	}
+	return &normalized
+}
+
 // StateGenerationSkewKinds is the closed vocabulary of
 // StateGenerationSkewFacts; a value outside it is reported as "other".
 var StateGenerationSkewKinds = []string{"formula", "record"}
@@ -2324,6 +2367,7 @@ type Observation struct {
 	ObjectCatalog        *ObjectCatalogFacts
 	ObjectRead           *ObjectReadFacts
 	StateGenerationSkew  *StateGenerationSkewFacts
+	StateCarry           *StateCarryFacts
 	ActivationHold       *ActivationHoldFacts
 	LegacyMigration      *LegacyQGMigrationFacts
 	DrainingQG           *DrainingQGFacts
@@ -2463,6 +2507,7 @@ func NormalizeObservation(observation Observation) Observation {
 	observation.ObjectCatalog = normalizeObjectCatalogFacts(observation.ObjectCatalog)
 	observation.ObjectRead = normalizeObjectReadFacts(observation.ObjectRead)
 	observation.StateGenerationSkew = normalizeStateGenerationSkewFacts(observation.StateGenerationSkew)
+	observation.StateCarry = normalizeStateCarryFacts(observation.StateCarry)
 	observation.ActivationHold = normalizeActivationHoldFacts(observation.ActivationHold)
 	observation.LegacyMigration = normalizeLegacyQGMigrationFacts(observation.LegacyMigration)
 	observation.DrainingQG = normalizeDrainingQGFacts(observation.DrainingQG)
@@ -3412,6 +3457,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentControlPlane, StageActiveQGSet}, {ComponentControlPlane, StageLegacyQGMigration},
 	{ComponentControlPlane, StageDrainingQGReconciled},
 	{ComponentControlPlane, StageFrozenPlanGeneration}, {ComponentControlPlane, StageActivationHold},
+	{ComponentControlPlane, StageStateCarryDecided}, {ComponentState, StageStateCarried},
 	{ComponentOwnership, StageAssignmentAcquired}, {ComponentOwnership, StageAssignmentLost},
 	{ComponentOwnership, StageRebalancePlanned},
 	{ComponentOwnership, StageControlReadsSpent},

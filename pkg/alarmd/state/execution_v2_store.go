@@ -260,7 +260,7 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	flush := func() {
 		bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items, pass)
 		result.LoadedBytes += bytes
-		if read && !pass.envelopes {
+		if read && !pass.envelopes && !pass.carry {
 			// Only the frame pass measures. The Query Group's committed size
 			// describes the key every write goes to and the one the next round
 			// reads first; the envelopes are leaving, and a size learned from
@@ -317,6 +317,36 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 		batch.keys = append(batch.keys, envelopeKey)
 	}
 	flush()
+	// The third pass, for the series still without a record whose Plan
+	// carries history from the generation it moved from: that generation's
+	// frame, under the same batching and the same byte count as the other
+	// two. Only the frame is read -- a record the previous generation still
+	// held only as an envelope is old enough to warm up again.
+	pass.envelopes, pass.carry = false, true
+	for index, item := range request.Items {
+		if item.CarryFrom == "" || item.CarryFrom == item.Identity.StateGeneration || result.Items[index].Status != execution.StateMissingWarming {
+			continue
+		}
+		previous := item.Identity
+		previous.StateGeneration = item.CarryFrom
+		carriedKey, err := RuntimeStateKeyV3(store.options.Prefix, previous)
+		var target StorageTarget
+		if err == nil {
+			target, err = store.options.Router.Route(item.Identity.Plan.TenantID, item.Identity.Plan.StrategyID)
+		}
+		if err != nil {
+			pass.carryUnreadable++
+			continue
+		}
+		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.runtimeLoadBatchLimit(request.Contract.Slot.QueryGroup, roundLargest, anyRead)) {
+			flush()
+		}
+		batch.target = target
+		batch.indexes = append(batch.indexes, index)
+		batch.keys = append(batch.keys, carriedKey)
+	}
+	flush()
+	result.CarryFound, result.CarryMissing, result.CarryUnreadable = pass.carryFound, pass.carryMissing, pass.carryUnreadable
 	result.EnvelopeReads = len(pass.pending)
 	result.EnvelopeAnswered, result.NoRecordYet = pass.envelopeAnswered, pass.noRecordYet
 	result.EnvelopeCorrupt = pass.envelopeCorrupt

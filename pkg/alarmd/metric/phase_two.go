@@ -104,6 +104,7 @@ type phaseTwoMetrics struct {
 	objectCatalogWrittenBytes       *prometheus.CounterVec
 	objectReads                     *prometheus.CounterVec
 	stateGenerationSkew             *prometheus.CounterVec
+	stateCarry                      *prometheus.CounterVec
 	legacyMigration                 *prometheus.CounterVec
 	legacyMigrationScan             prometheus.Histogram
 	legacyMigrationTime             *prometheus.HistogramVec
@@ -897,6 +898,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.objectReads = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "object_read_total", Help: "Catalog object reads by a Worker, by object kind and outcome; for a Segment, whether its Query Group was read by content and if not, why."}, []string{"kind", "result"})
 	// Pre-created so that "no skew" reads as zeros, not as an absent family.
 	metrics.stateGenerationSkew = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_generation_skew_total", Help: "Due Plans whose activation record names a state generation that disagrees with one derived elsewhere: formula (this process compiles the same Plan to another generation than the Control Leader that published it; tolerated, the record's generation governs the Slot; expected while a release rolls, a version mismatch if it persists), record (the record names a generation the Query Group object published with it does not carry; the Slot is refused)."}, []string{"kind"})
+	metrics.stateCarry = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_generation_carry_total", Help: "History carried across a state generation that moved while its Plan stayed active. scope=plan: the Control Leader's decision per activation (carried: every Level's detection is unchanged, the Plan warms up for one full Slot and its series keep their results; partial and none_*: the Plan warms up whole, as before). scope=series: what a Worker did for each series with no record under the new generation (carried: results with the new detect fingerprint kept; nothing_kept: none were; skipped_active_guard: the old record still guarded holes and the series starts over; old_missing: the old generation held nothing)."}, []string{"scope", "result"})
+	for _, scope := range observability.StateCarryScopes {
+		for _, result := range observability.StateCarryResults[scope] {
+			metrics.stateCarry.WithLabelValues(scope, result)
+		}
+	}
 	for _, kind := range observability.StateGenerationSkewKinds {
 		metrics.stateGenerationSkew.WithLabelValues(kind)
 	}
@@ -1531,7 +1538,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries, m.rangeGateDecisions, m.statePreflights,
 		m.queryFailures,
-		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew,
+		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
@@ -1733,6 +1740,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.StateGenerationSkew; facts != nil {
 		m.stateGenerationSkew.WithLabelValues(facts.Kind).Inc()
+	}
+	if facts := observation.StateCarry; facts != nil && facts.Count > 0 {
+		m.stateCarry.WithLabelValues(facts.Scope, facts.Result).Add(float64(facts.Count))
 	}
 	if facts := observation.LegacyMigration; facts != nil {
 		m.legacyMigration.WithLabelValues(facts.Result, facts.ReasonClass).Inc()

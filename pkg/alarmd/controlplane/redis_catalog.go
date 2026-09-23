@@ -918,6 +918,9 @@ func validateActivationState(state ActivationState) error {
 		if selected.Identity != record.Fact.Plan || selected.StateGeneration == "" || selected.StateApplyEpoch == 0 || selected.ScheduleRevision == "" || selected.RequiredFullSlots == 0 {
 			return errors.New("alarmd controlplane: incomplete activated Plan")
 		}
+		if err := selected.Carry.Validate(selected); err != nil {
+			return err
+		}
 		// The piece is repeated on the selection the way the identity is,
 		// and has to agree the same way.
 		if !execution.ShardsEqual(selected.Shard, record.Fact.Shard) {

@@ -32,10 +32,16 @@ import (
 // on every attempt, until the Slot aged out ten minutes later.
 func TestProductionPhaseTwoStateGenerationEditRewarmsAndResumes(t *testing.T) {
 	edits := []struct {
-		name    string
-		install func(t *testing.T, ctx context.Context, fixture *cutoverStallFixture)
+		name string
+		// carries is whether the edit leaves every Level's detection as it
+		// was, so the activation carries the history across; requiredPoints
+		// is then how many positions the edited window needs, which is what
+		// a series short of history still warms up on.
+		carries        bool
+		requiredPoints uint32
+		install        func(t *testing.T, ctx context.Context, fixture *cutoverStallFixture)
 	}{
-		{name: "recovery window", install: func(t *testing.T, ctx context.Context, fixture *cutoverStallFixture) {
+		{name: "recovery window", carries: true, requiredPoints: 3, install: func(t *testing.T, ctx context.Context, fixture *cutoverStallFixture) {
 			installEditedStrategies(t, ctx, fixture.redisClient, 1725000600, func(first map[string]any) {
 				for _, detect := range first["detects"].([]any) {
 					detect.(map[string]any)["recovery_config"].(map[string]any)["check_window"] = 3
@@ -83,10 +89,23 @@ func TestProductionPhaseTwoStateGenerationEditRewarmsAndResumes(t *testing.T) {
 				t.Fatalf("a %s edit must move the state generation: %s", edit.name, generationBefore)
 			}
 			var requiredFullSlots uint32
+			var carry *execution.StateCarry
 			for _, record := range activationAfter.Plans {
 				if record.Fact.Plan.StrategyID == "1001" {
 					requiredFullSlots = record.Fact.Selected.RequiredFullSlots
+					carry = record.Fact.Selected.Carry
 				}
+			}
+			if (carry != nil) != edit.carries {
+				t.Fatalf("a %s edit carried %+v, want carried=%t", edit.name, carry, edit.carries)
+			}
+			// A carried activation warms up behind its guard for one full Slot;
+			// a series whose carried history is shorter than the edited window
+			// still warms up on its window, one position per Slot. This fixture
+			// runs one Slot before the edit, so that is what bounds it.
+			warmSlots := requiredFullSlots
+			if carry != nil {
+				warmSlots = edit.requiredPoints
 			}
 
 			var full, drifted bool
@@ -122,8 +141,8 @@ func TestProductionPhaseTwoStateGenerationEditRewarmsAndResumes(t *testing.T) {
 			}
 			// The drift Slot, then one warming Slot per required full Slot, then
 			// the first FULL one; anything slower is a Slot aging out, not warming.
-			if resumed := fixture.now().Unix() - base; resumed > int64(requiredFullSlots+2)*60+1 {
-				t.Fatalf("resuming took %ds with %d required full Slots, which is the shape of a Slot aging out rather than warming", resumed, requiredFullSlots)
+			if resumed := fixture.now().Unix() - base; resumed > int64(warmSlots+2)*60+1 {
+				t.Fatalf("resuming took %ds with %d warming Slots, which is the shape of a Slot aging out rather than warming", resumed, warmSlots)
 			}
 			for _, observation := range fixture.observed() {
 				if failure := observation.QueryFailure; failure != nil && failure.Code == execution.QueryFailureCodeStateContractMismatch {
