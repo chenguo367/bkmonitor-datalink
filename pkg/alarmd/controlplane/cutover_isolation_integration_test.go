@@ -668,6 +668,19 @@ func TestTheCutoverScriptRefusesAnOldArgumentLayoutWhole(t *testing.T) {
 	if got, _ := fixture.client.Get(fixture.ctx, fixture.prefix+":activation").Result(); got != body {
 		t.Fatal("the body was written before the refusal")
 	}
+	// An Assignment record key without its revision: refused whole too, not
+	// after the header and body are written.
+	err = fixture.client.Eval(fixture.ctx, controlplane.CutoverScriptForTest(),
+		[]string{fixture.prefix + ":activation_header", fixture.prefix + ":activation",
+			fixture.prefix + ":active_qg_set:" + state.ActiveQGSetRef.Digest, fixture.prefix + ":activation_delta:999",
+			fixture.prefix + ":activation_blocked", fixture.prefix + ":assignment:some-query-group"},
+		header, "rewritten-header", "rewritten-body", "", 1000, "delta", 0, "=").Err()
+	if err == nil || !strings.Contains(err.Error(), "argument layout") {
+		t.Fatalf("err = %v, want a record key without its revision refused", err)
+	}
+	if got, _ := fixture.client.Get(fixture.ctx, fixture.prefix+":activation_header").Result(); got != header {
+		t.Fatal("the header was written before the refusal of a record without its revision")
+	}
 }
 
 // movingCatalog is two strategies of one business: in the first

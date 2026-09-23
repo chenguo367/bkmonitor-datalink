@@ -172,7 +172,7 @@ const compareAndSetCutoverSchedulesScript = `
 -- rolled back. A caller that passes the layout of an older version of this
 -- script is refused here, whole.
 local timelines = tonumber(ARGV[7])
-if not timelines or ARGV[8] == nil or #KEYS < 5 + timelines or #ARGV < 8 + 2 * timelines then
+if not timelines or ARGV[8] == nil or #KEYS < 5 + timelines or #ARGV < 8 + 2 * timelines + (#KEYS - 5 - timelines) then
   return redis.error_reply('alarmd cutover script: argument layout does not match')
 end
 local header = redis.call('GET', KEYS[1])
