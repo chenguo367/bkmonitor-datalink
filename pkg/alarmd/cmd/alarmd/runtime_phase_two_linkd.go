@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/go-redis/redis/v8"
 )
@@ -24,21 +25,25 @@ type linkdIndex struct {
 	// against strategies that no longer exist runs only when it is set:
 	// without the link's roster there is no difference to take.
 	Console *openalerts.HTTPReconciler
+	// Location is the source and subscriber the Cache reads through, and
+	// the background discovery that can move them; see linkdLocationSwitch.
+	Location *linkdLocationSwitch
 }
 
-func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection config.RedisConnectionConfig, now func() time.Time) (linkdIndex, error) {
+func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection config.RedisConnectionConfig,
+	discovery *fleet.LinkdDiscoveryFacts, open func(config.RedisConnectionConfig) (redis.UniversalClient, bool), now func() time.Time) (linkdIndex, error) {
 	capacity := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
 	settings := cfg.PhaseTwo.Linkd
 	// One read cannot monopolize the allowance for the whole worker. These
 	// are scan bounds, not an assertion that an oversized SET was empty.
-	source, err := openalerts.NewSetSource(client, settings.Prefix(), openalerts.ReadLimits{
-		MaxMembers: max(1, capacity.Members/4), MaxBytes: max(1, capacity.Bytes/4), MaxPages: 100, PageSize: 256})
+	limits := openalerts.ReadLimits{MaxMembers: max(1, capacity.Members/4), MaxBytes: max(1, capacity.Bytes/4), MaxPages: 100, PageSize: 256}
+	binding, err := newLinkdBinding(client, connection, settings.Prefix(), limits)
 	if err != nil {
 		return linkdIndex{}, err
 	}
-	subscriber, err := openalerts.NewRedisSubscriber(client, settings.Prefix(), time.Second)
-	if err != nil {
-		return linkdIndex{}, err
+	location := &linkdLocationSwitch{current: binding, replaced: make(chan struct{}), limits: limits, open: open}
+	if discovery != nil {
+		location.discovery = *discovery
 	}
 	var reconciler openalerts.Reconciler
 	var console *openalerts.HTTPReconciler
@@ -54,8 +59,9 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 			return linkdIndex{}, err
 		}
 		reconciler = console
+		location.console = console
 	}
-	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: source, Subscriber: subscriber, Reconciler: reconciler, Now: now,
+	cache, err := openalerts.NewIndex(openalerts.IndexOptions{Source: location, Subscriber: location, Reconciler: reconciler, Now: now,
 		Policy: openalerts.PolicySelfMaintain, MaxStrategies: capacity.Strategies, MaxMembers: capacity.Members, MaxBytes: capacity.Bytes,
 		MaxLocalEntries: capacity.LocalEntries, ReadBatch: capacity.ReadBatch, ReconcileBatch: 1, RefreshInterval: time.Second,
 		IndexInterval: time.Minute, ReconcileInterval: settings.CalibrationInterval(), CalibrationMaxAge: 2 * settings.CalibrationInterval(),
@@ -63,5 +69,5 @@ func newLinkdIndex(cfg config.Config, client redis.UniversalClient, connection c
 	if err != nil {
 		return linkdIndex{}, err
 	}
-	return linkdIndex{Cache: cache, Source: source, Alerts: reconciler, Console: console}, nil
+	return linkdIndex{Cache: cache, Source: binding.source, Alerts: reconciler, Console: console, Location: location}, nil
 }

@@ -203,8 +203,9 @@ func TestTheConsoleEntryCarriesTheResolvedTargetAndTheDiscovery(t *testing.T) {
 	readRoster(console)
 	discovery := &fleet.LinkdDiscoveryFacts{Outcome: fleet.LinkdDiscoveryFailed, Attempts: 3, Error: "alarmd openalerts: Console HTTP status 401"}
 	endpoints := func() []fleet.Endpoint { return []fleet.Endpoint{{Role: fleet.EndpointLinkdConsole, Configured: true}} }
-	entry := withLinkdConsole(endpoints, console, discovery, func() time.Time { return consoleTestNow })()[0]
-	if entry.Console == nil || entry.Console.Discovery != discovery || entry.Console.Target == nil ||
+	location := &linkdLocationSwitch{discovery: *discovery, replaced: make(chan struct{})}
+	entry := withLinkdConsole(endpoints, console, location, func() time.Time { return consoleTestNow })()[0]
+	if entry.Console == nil || entry.Console.Discovery == nil || *entry.Console.Discovery != *discovery || entry.Console.Target == nil ||
 		*entry.Console.Target != (fleet.LinkdTargetFacts{EventSourceID: "source", HookName: "active", Address: "192.0.2.10:6379", Database: 3, KeyPrefix: "test:active"}) ||
 		entry.Console.TargetAgeSeconds == nil || *entry.Console.TargetAgeSeconds != 0 {
 		t.Fatalf("console facts = %+v", entry.Console)
