@@ -103,8 +103,12 @@ func TestANormalizedItemIsItsOwnLineAndNotAWithheldOne(t *testing.T) {
 }
 
 func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
-	if got := len(Checks()); got != 28 || len(checkAnswers) != 28 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 28: a new check has to "+
+	// Twenty-nine: RETAINED_SHARE_APPROACHING is a rule over a dimension the
+	// rows did not carry before - the latest completed Slot's retained bytes
+	// against its share - because the refusal it warns of stops a strategy
+	// whole with nothing on the page beforehand.
+	if got := len(Checks()); got != 29 || len(checkAnswers) != 29 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 29: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -173,6 +177,8 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckNoDataPersistent:    {Kind: KindNoData},
 		CheckEmptyEveryRound:     {Kind: KindEmptyEveryRound, EmptyEveryRound: &EmptyEveryRoundFacts{Rounds: 240, NeverSawData: true, Cause: EmptyEveryRoundCauseUnknown}},
 		CheckNoDataMemoryRefused: {Kind: KindNoDataMemoryRefused, ReasonCode: "STATE_BUDGET_EXCEEDED"},
+		CheckRetainedShareApproaching: {Kind: KindRetainedShareApproaching,
+			RetainedShare: &RetainedShareFacts{RetainedBytes: 96, ShareBytes: 100, PercentOfShare: 96}},
 		CheckSeriesChurning: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Fresh: 4, ShortFresh: 4, FreshRounds: 40}},
 		CheckSeriesDataMissing: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{

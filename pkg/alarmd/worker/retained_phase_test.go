@@ -56,3 +56,27 @@ func TestACompletedSlotSaysWhichPhaseHeldItsBytes(t *testing.T) {
 			usage.RetainedInputBytes, usage.RetainedGapBytes, usage.RetainedOutputBytes)
 	}
 }
+
+// A completed Slot carries the share it was admitted under, from the
+// coordinator that refuses by it.
+//
+// The fleet line that warns of the share refusal reads the share off this row
+// and nothing else, so a completion that left it at zero would list nothing
+// on every replica while every object grew into its wall. Read through the
+// whole coordinator, because the line that fills it in is the one this pins.
+func TestACompletedSlotCarriesTheShareItWasAdmittedUnder(t *testing.T) {
+	fixture := newFixture(t, true, "")
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if err != nil || !result.Completed {
+		t.Fatalf("Execute() result=%+v error=%v", result, err)
+	}
+	usage := result.Usage
+	if usage.RetainedShareBytes == 0 || usage.RetainedShareBytes >= usage.RetainedBytesLimit {
+		t.Fatalf("share = %d against a pool of %d: a completion has to carry a share, and a share is part of the "+
+			"pool, not all of it", usage.RetainedShareBytes, usage.RetainedBytesLimit)
+	}
+	if usage.RetainedShareBytes != usage.RetainedBytesLimit/2 {
+		t.Fatalf("share = %d, want half the pool (%d), the share the coordinator refuses by",
+			usage.RetainedShareBytes, usage.RetainedBytesLimit/2)
+	}
+}

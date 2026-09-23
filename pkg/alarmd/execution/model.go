@@ -4542,4 +4542,11 @@ type SlotBudgetUsage struct {
 	EventsLimit         uint64
 	RetainedBytesLimit  uint64
 	SeriesLimit         uint64
+	// RetainedShareBytes is the most of the retained pool this one Query
+	// Group's Slot may hold, which is the wall a large object meets first:
+	// alone on a replica it is refused at its share, long before the pool.
+	// Carried rather than derived from RetainedBytesLimit by the reader,
+	// because the share's rule belongs to the producer that refuses by it,
+	// and a second copy of that rule elsewhere is one that can drift.
+	RetainedShareBytes uint64
 }

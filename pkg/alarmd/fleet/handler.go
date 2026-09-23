@@ -217,6 +217,12 @@ type HealthResponse struct {
 	// spans differ by orders of magnitude between a cursor that fell a minute
 	// behind and one that fell a day behind.
 	PrunedSkips []PrunedSkipRef `json:"pruned_skips,omitempty"`
+	// RetainedShare is the objects whose latest completed Slot held at least
+	// RetainedShareApproachPercent of the one-object share of the retained
+	// pool, fullest first. In no column and no total: they are detecting. A
+	// list, because what a reader acts on is which strategy and how close,
+	// and the refusal it warns of stops that strategy whole.
+	RetainedShare []RetainedShareRef `json:"retained_share,omitempty"`
 	// PublishedVersion and Workers are the acknowledgement view: which
 	// Activation the control plane published and how many counted replicas
 	// have applied it. Per-replica versions are on PerReplica.
@@ -887,6 +893,7 @@ func NewHandler(
 			DemotionExtensions: view.DemotionExtensions, DemotionExits: view.DemotionExits,
 			LastDemotionExit: momentOrNil(view.LastDemotionExit),
 			PrunedSkips:      prunedSkipList(view.PrunedSkips),
+			RetainedShare:    retainedShareList(view.RetainedShare),
 			Coverage:         view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			OutputProtocols: outputProtocolList(view.OutputProtocols),
@@ -1128,6 +1135,7 @@ func listObjects(response http.ResponseWriter, request *http.Request, service *S
 	// view and stay; a reader who wants the rows of another column asks
 	// for that column, and gets them paged.
 	view.Demoted, view.Undecidable, view.ByDesign, view.NoData, view.NoDataMemory = []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}, []Anomaly{}
+	view.RetainedShare = []Anomaly{}
 	view.GapSkips, view.PrunedSkips = map[string]SkippedSpan{}, map[string]PrunedSkip{}
 	// Each replica's dependency record is the verdict route's; here it would
 	// ride on every thirty-second poll for rows this request is not about.
@@ -1463,6 +1471,52 @@ func objectRecords(request *http.Request, queryGroup string, store *DiagnosticSt
 		return nil, &health, "diagnostic records are unavailable"
 	}
 	return records, &health, ""
+}
+
+// RetainedShareRef is one object near its share of the retained pool, as the
+// health response carries it: which object, whose strategies, and how close.
+type RetainedShareRef struct {
+	QueryGroup     string        `json:"query_group"`
+	Strategies     []StrategyRef `json:"strategies,omitempty"`
+	Replica        string        `json:"replica,omitempty"`
+	RetainedBytes  uint64        `json:"retained_bytes"`
+	ShareBytes     uint64        `json:"share_bytes"`
+	PercentOfShare uint64        `json:"percent_of_share"`
+	Since          time.Time     `json:"since"`
+	// By phase, so a reader of this response can tell a share filled by the
+	// strategy's retention (state) from one filled by what this build holds
+	// per round (output), which call for different people.
+	RetainedInputBytes  uint64 `json:"retained_input_bytes"`
+	RetainedStateBytes  uint64 `json:"retained_state_bytes"`
+	RetainedOutputBytes uint64 `json:"retained_output_bytes"`
+	RetainedGapBytes    uint64 `json:"retained_gap_bytes"`
+	ThresholdPercent    uint64 `json:"threshold_percent"`
+}
+
+// retainedShareList keeps the view's order, which is fullest first.
+func retainedShareList(rows []Anomaly) []RetainedShareRef {
+	if len(rows) == 0 {
+		return nil
+	}
+	list := make([]RetainedShareRef, 0, len(rows))
+	for _, row := range rows {
+		facts := row.RetainedShare
+		if facts == nil {
+			continue
+		}
+		list = append(list, RetainedShareRef{
+			QueryGroup: row.QueryGroup, Strategies: row.Strategies, Replica: row.Replica,
+			RetainedBytes: facts.RetainedBytes, ShareBytes: facts.ShareBytes,
+			PercentOfShare: facts.PercentOfShare, Since: facts.Since,
+			RetainedInputBytes: facts.RetainedInputBytes, RetainedStateBytes: facts.RetainedStateBytes,
+			RetainedOutputBytes: facts.RetainedOutputBytes, RetainedGapBytes: facts.RetainedGapBytes,
+			ThresholdPercent: facts.ThresholdPercent,
+		})
+	}
+	sort.SliceStable(list, func(left, right int) bool {
+		return list[left].PercentOfShare > list[right].PercentOfShare
+	})
+	return list
 }
 
 // PrunedSkipRef is one object's lost span, as the page receives it.
