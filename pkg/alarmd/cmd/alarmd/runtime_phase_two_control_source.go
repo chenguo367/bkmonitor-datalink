@@ -130,7 +130,9 @@ func (bundle *phaseTwoWorkerBundle) noteControlRoundLocked(result phaseTwoContro
 		if state.set == nil {
 			state.set = fleet.NewSourceSetLedger(bundle.dependencies.Now)
 		}
-		state.set.NoteRound(sourceSetRoundOf(result.Composition, at))
+		if returned := state.set.NoteRound(sourceSetRoundOf(result.Composition, at)); returned > 0 {
+			bundle.dependencies.Recorder.AddStrategiesReturnedAfterRemoval(returned)
+		}
 		state.source = sourceFactsOf(result, at)
 		state.source.Set = state.set.Facts(at)
 	}

@@ -42,6 +42,9 @@ type SourceSetLedger struct {
 	absent  map[string]time.Time
 	removed map[string]bool
 	hours   map[time.Time]*SourceSetHour
+	// returnedAfterRemoval counts, since started, the strategies listed
+	// again after their Plan had left the Catalog.
+	returnedAfterRemoval int
 }
 
 // SourceSetRound is one round's word on the set, as the composition has it:
@@ -82,6 +85,12 @@ type SourceSetHour struct {
 	// Samples names up to SourceSetSampleLimit of the reactivated
 	// strategies, smallest identifier first.
 	Samples []string `json:"samples,omitempty"`
+	// ReturnedAfterRemoval is the reactivations of this hour whose Plan had
+	// already left the Catalog -- absent past the grace, removed, then listed
+	// again -- and ReturnedAfterRemovalSamples names up to
+	// SourceSetSampleLimit of them. A return inside the grace is not one.
+	ReturnedAfterRemoval        int      `json:"returned_after_removal"`
+	ReturnedAfterRemovalSamples []string `json:"returned_after_removal_samples,omitempty"`
 }
 
 // SourceSetFacts is the ledger as the fleet publishes it.
@@ -99,6 +108,10 @@ type SourceSetFacts struct {
 	// the account by hour, newest first, at most SourceSetHours of them.
 	ReactivatedThisHour int             `json:"reactivated_this_hour"`
 	Hours               []SourceSetHour `json:"hours"`
+	// ReturnedAfterRemovalTotal is every return after removal since Since,
+	// whatever the hours kept: the count a Catalog that withdraws a Plan
+	// only to receive it back is read by.
+	ReturnedAfterRemovalTotal int `json:"returned_after_removal_total"`
 }
 
 // AbsentSample is one strategy the set dropped and when.
@@ -136,7 +149,8 @@ func (ledger *SourceSetLedger) hour(at time.Time) *SourceSetHour {
 	return entry
 }
 
-// NoteRound folds one round in. A strategy under grace or removed that the
+// NoteRound folds one round in, and says how many strategies it saw come
+// back after removal. A strategy under grace or removed that the
 // ledger did not know goes absent at this round; one the source listed again
 // that the ledger knew as absent is a reactivation, whether or not it
 // compiled a Plan this round -- a strategy back in the list under
@@ -144,9 +158,9 @@ func (ledger *SourceSetLedger) hour(at time.Time) *SourceSetHour {
 // strategy on the first screen as one waiting to be removed; one absent
 // longer than the return window is forgotten, as a strategy that was
 // deleted.
-func (ledger *SourceSetLedger) NoteRound(round SourceSetRound) {
+func (ledger *SourceSetLedger) NoteRound(round SourceSetRound) int {
 	if ledger == nil || round.At.IsZero() {
-		return
+		return 0
 	}
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
@@ -160,7 +174,7 @@ func (ledger *SourceSetLedger) NoteRound(round SourceSetRound) {
 			ledger.hour(round.At).Removed++
 		}
 	}
-	returned := []string{}
+	returned, afterRemoval := []string{}, []string{}
 	for _, strategyID := range round.Listed {
 		since, known := ledger.absent[strategyID]
 		if !known {
@@ -172,12 +186,21 @@ func (ledger *SourceSetLedger) NoteRound(round SourceSetRound) {
 			entry.LongestAbsentSeconds = gap
 		}
 		returned = append(returned, strategyID)
+		if ledger.removed[strategyID] {
+			entry.ReturnedAfterRemoval++
+			afterRemoval = append(afterRemoval, strategyID)
+		}
 		delete(ledger.absent, strategyID)
 		delete(ledger.removed, strategyID)
 	}
 	if len(returned) > 0 {
 		entry := ledger.hour(round.At)
 		entry.Samples = boundedSortedSample(append(entry.Samples, returned...), SourceSetSampleLimit)
+	}
+	if len(afterRemoval) > 0 {
+		entry := ledger.hour(round.At)
+		entry.ReturnedAfterRemovalSamples = boundedSortedSample(append(entry.ReturnedAfterRemovalSamples, afterRemoval...), SourceSetSampleLimit)
+		ledger.returnedAfterRemoval += len(afterRemoval)
 	}
 	for strategyID, since := range ledger.absent {
 		if round.At.Sub(since) > SourceSetReturnWindow {
@@ -190,6 +213,7 @@ func (ledger *SourceSetLedger) NoteRound(round SourceSetRound) {
 			delete(ledger.hours, key)
 		}
 	}
+	return len(afterRemoval)
 }
 
 // noteAbsent records a strategy the round did not list. The start of the
@@ -245,7 +269,7 @@ func (ledger *SourceSetLedger) Facts(now time.Time) *SourceSetFacts {
 	}
 	ledger.mu.Lock()
 	defer ledger.mu.Unlock()
-	facts := &SourceSetFacts{Since: ledger.started, Hours: []SourceSetHour{}}
+	facts := &SourceSetFacts{Since: ledger.started, Hours: []SourceSetHour{}, ReturnedAfterRemovalTotal: ledger.returnedAfterRemoval}
 	pending := make([]AbsentSample, 0, len(ledger.absent))
 	for strategyID, since := range ledger.absent {
 		if ledger.removed[strategyID] {
@@ -268,6 +292,7 @@ func (ledger *SourceSetLedger) Facts(now time.Time) *SourceSetFacts {
 	for _, entry := range ledger.hours {
 		copied := *entry
 		copied.Samples = append([]string(nil), entry.Samples...)
+		copied.ReturnedAfterRemovalSamples = append([]string(nil), entry.ReturnedAfterRemovalSamples...)
 		facts.Hours = append(facts.Hours, copied)
 		if entry.Hour.Equal(now.UTC().Truncate(time.Hour)) {
 			facts.ReactivatedThisHour = entry.Reactivated

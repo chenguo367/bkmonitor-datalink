@@ -72,8 +72,13 @@ func TestTheSourceSetAccountTellsAFlapFromARemoval(t *testing.T) {
 	}
 	// 19:07:45: the 22 are listed again; the deleted one is not.
 	at = start.Add(8*time.Minute + 45*time.Second)
-	ledger.NoteRound(SourceSetRound{At: at, Listed: all})
+	if returned := ledger.NoteRound(SourceSetRound{At: at, Listed: all}); returned != 22 {
+		t.Fatalf("returned after removal this round = %d, want the 22 whose Plans had left", returned)
+	}
 	facts = ledger.Facts(at)
+	if facts.Hours[0].ReturnedAfterRemoval != 22 || len(facts.Hours[0].ReturnedAfterRemovalSamples) != SourceSetSampleLimit || facts.ReturnedAfterRemovalTotal != 22 {
+		t.Fatalf("returned after removal: %+v total %d", facts.Hours[0], facts.ReturnedAfterRemovalTotal)
+	}
 	if facts.PendingRemoval != 0 || facts.Removed != 1 || facts.ReactivatedThisHour != 22 {
 		t.Fatalf("after the return: %+v", facts)
 	}
@@ -91,8 +96,13 @@ func TestTheSourceSetAccountTellsAFlapFromARemoval(t *testing.T) {
 	at = start.Add(time.Hour + 2*time.Minute)
 	ledger.NoteRound(SourceSetRound{At: at, Listed: stayed, PendingRemoval: absent(flapping...)})
 	at = start.Add(time.Hour + 8*time.Minute)
-	ledger.NoteRound(SourceSetRound{At: at, Listed: all})
+	if returned := ledger.NoteRound(SourceSetRound{At: at, Listed: all}); returned != 0 {
+		t.Fatalf("a return inside the grace counted as after removal: %d", returned)
+	}
 	facts = ledger.Facts(at)
+	if facts.Hours[0].ReturnedAfterRemoval != 0 || facts.ReturnedAfterRemovalTotal != 22 {
+		t.Fatalf("the hour of a grace return: %+v total %d", facts.Hours[0], facts.ReturnedAfterRemovalTotal)
+	}
 	if len(facts.Hours) != 2 || facts.Hours[0].Hour.Hour() != 20 || facts.Hours[0].Reactivated != 22 || facts.Hours[1].Hour.Hour() != 19 {
 		t.Fatalf("two hours, newest first: %+v", facts.Hours)
 	}
@@ -252,5 +262,19 @@ func TestTheAbsenceStartsWhenTheCatalogSaysNotWhenTheLedgerFirstSaw(t *testing.T
 	ledger.NoteRound(SourceSetRound{At: at, Listed: []string{"keep", "graced", "unsaid"}})
 	if facts = ledger.Facts(at); facts.Hours[0].LongestAbsentSeconds != (11 * time.Minute).Seconds() {
 		t.Fatalf("longest absence = %v s, want 11 minutes from the catalog's start", facts.Hours[0].LongestAbsentSeconds)
+	}
+}
+
+// The hour's sentence says "moved back after removal" for the returns after
+// removal, not for the removals: an hour that removed 23 and brought none
+// back does not read as 23 put back.
+func TestTheSourceSetHourSaysReturnsAfterRemovalNotRemovals(t *testing.T) {
+	removedOnly := sourceSetHourText(SourceSetHour{Removed: 23, Reactivated: 0})
+	if strings.Contains(removedOnly, "重新放置") {
+		t.Errorf("removals read as returns: %q", removedOnly)
+	}
+	back := sourceSetHourText(SourceSetHour{Removed: 23, Reactivated: 22, ReturnedAfterRemoval: 22})
+	if !strings.Contains(back, "22 条是已被移除后重新放置") {
+		t.Errorf("returns after removal not said: %q", back)
 	}
 }
