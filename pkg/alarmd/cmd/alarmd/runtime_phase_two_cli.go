@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/go-redis/redis/v8"
@@ -18,6 +19,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/evidenceroute"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/k8sread"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -108,6 +110,12 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	ops := append(obchannel.NativeOperations(native), obchannel.StoreOperations(obevidence.New(options))...)
 	ops = append(ops, cliRuntimeOperation(facts, settings))
+	// alarmd's own workload, read through this Pod's ServiceAccount. Any
+	// replica answers, so a crashing one is read from one that is up.
+	// The owner chain starts at this Pod: its hostname is its name, whatever
+	// the worker id is configured to.
+	podName, _ := os.Hostname()
+	ops = append(ops, obchannel.K8sOperations(k8sread.New(k8sread.Options{PodName: podName}))...)
 	// A diagnostic query has independent sockets, no retries and no production
 	// query permits. It never occupies the execution client's connection pool.
 	queryTransport := &http.Transport{Proxy: http.ProxyFromEnvironment,

@@ -40,8 +40,6 @@ type openAlertSetCollector struct {
 	entries     *prometheus.Desc
 	tracked     *prometheus.Desc
 	evictions   *prometheus.Desc
-	sent        *prometheus.Desc
-	disjoint    *prometheus.Desc
 }
 
 func newOpenAlertSetCollector() *openAlertSetCollector {
@@ -67,8 +65,7 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 			"Refreshes that did not yield an authoritative publication, by why: read_error (the read failed), "+
 				"heartbeat_missing (no heartbeat key), heartbeat_unreadable (a heartbeat field missing or malformed), "+
 				"heartbeat_stale (older than the staleness bound), fingerprint_version (the publisher computes "+
-				"fingerprints under another algorithm; every lookup would miss, so it is not read as empty), "+
-				"members_disjoint (counted once on entering the state open_alert_set_disjoint reports).", "reason"),
+				"fingerprints under another algorithm; every lookup would miss, so it is not read as empty).", "reason"),
 		refreshes: descriptor("open_alert_set_refresh_total",
 			"Refreshes by result: authoritative or unavailable. One per publisher cycle; a flat line is the "+
 				"refresh loop not running.", "result"),
@@ -88,17 +85,6 @@ func newOpenAlertSetCollector() *openAlertSetCollector {
 		evictions: descriptor("open_alert_set_evictions_total",
 			"Fingerprints this process sent that were dropped from the copy to stay inside its bound, oldest "+
 				"first. In self_maintained mode each one is an alert whose recovery now waits for the publication."),
-		sent: descriptor("open_alert_set_sent_alerts",
-			"Alerts this process sent ABNORMAL for and has not sent RECOVERY for, by whether the latest read of "+
-				"their strategy's set carries them (in_set=yes|no). Only alerts first sent at least five minutes "+
-				"before that read are counted, so the consumer has had time to open them. Some no is an alert the "+
-				"consumer closed on its own; all no and none yes is the sets keyed differently from this process's "+
-				"lookups, which open_alert_set_disjoint reports.", "in_set"),
-		disjoint: descriptor("open_alert_set_disjoint",
-			"1 while none of the alerts this process sent is in the consumer's sets (see "+
-				"open_alert_set_sent_alerts); it ends when one of them is found or none is left open. Every lookup against such sets would miss and hold the recovery, so "+
-				"while this is 1 the gate answers from what this process sent instead, and fleet health degrades "+
-				"with OPEN_ALERT_SET_DISJOINT."),
 	}
 }
 
@@ -122,8 +108,6 @@ func (c *openAlertSetCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.entries
 	ch <- c.tracked
 	ch <- c.evictions
-	ch <- c.sent
-	ch <- c.disjoint
 }
 
 func (c *openAlertSetCollector) Collect(ch chan<- prometheus.Metric) {
@@ -158,11 +142,4 @@ func (c *openAlertSetCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.entries, prometheus.GaugeValue, float64(stats.Removed), "sent_closed")
 	ch <- prometheus.MustNewConstMetric(c.tracked, prometheus.GaugeValue, float64(stats.Tracked))
 	ch <- prometheus.MustNewConstMetric(c.evictions, prometheus.CounterValue, float64(stats.Evictions))
-	ch <- prometheus.MustNewConstMetric(c.sent, prometheus.GaugeValue, float64(stats.SentInSet), "yes")
-	ch <- prometheus.MustNewConstMetric(c.sent, prometheus.GaugeValue, float64(stats.SentNotInSet), "no")
-	disjoint := 0.0
-	if stats.Disjoint {
-		disjoint = 1
-	}
-	ch <- prometheus.MustNewConstMetric(c.disjoint, prometheus.GaugeValue, disjoint)
 }
