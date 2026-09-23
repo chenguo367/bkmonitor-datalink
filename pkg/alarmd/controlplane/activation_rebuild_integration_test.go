@@ -14,6 +14,7 @@ import (
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
 // rebuildFixture is a deployment with one activation in force: a published
@@ -354,5 +355,93 @@ func TestDrainingSurvivesWithTheLastReadCopyAndIsNamedWithoutIt(t *testing.T) {
 	}
 	if counts := restarted.ActivationRebuildCounts(); counts[controlplane.ActivationRebuiltDrainingUnknown] != 1 {
 		t.Fatalf("counts = %v, want the missing Draining named", counts)
+	}
+}
+
+// A Query Group the publication brings back before its retirement drained is
+// held: in the publication, retired on its timeline, in Draining. A leader
+// without the last-read copy recovers it from that timeline, so the body it
+// rebuilds is the one that was lost.
+func TestAHeldQueryGroupIsRecoveredIntoDrainingFromItsTimeline(t *testing.T) {
+	client := newControlplaneRedis(t)
+	ctx := context.Background()
+	prefix := "alarmd:control:rebuild-held"
+	repository, err := controlplane.NewRedisCatalogRepository(client, prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, semantics := runtimePlanCompiler(t)
+	both := twoQueryGroupCatalog(t)
+	returning, staying := both.QueryGroups[0], both.QueryGroups[1]
+	progress := &activationProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{
+		returning.Identity: {Status: execution.ProgressMissing}, staying.Identity: {Status: execution.ProgressMissing},
+	}}
+	reconciler, err := controlplane.NewScheduleActivationReconcilerWithProgress(repository, compiler, semantics, progress,
+		func() time.Time { return time.Unix(90, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := repository.PublishCatalog(ctx, both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := controlplane.NewInitialScheduleActivator(repository, compiler, semantics, func() time.Time { return time.Unix(60, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initial.Ensure(ctx, first.Publication); err != nil {
+		t.Fatal(err)
+	}
+	onlyStaying := controlplane.Catalog{QueryGroups: []controlplane.QueryGroup{staying}}
+	onlyStaying.SnapshotRevision = execution.SnapshotRevision(mustDigest(t, "alarmd-strategy-snapshot-v1", onlyStaying.QueryGroups))
+	second, _, err := repository.PublishCatalog(ctx, onlyStaying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Ensure(ctx, second.Publication); err != nil {
+		t.Fatal(err)
+	}
+	// Not drained: the cursor is short of the retired boundary.
+	progress.byGroup[returning.Identity] = execution.ProgressLoadResult{Status: execution.ProgressFound, Progress: &execution.ScheduleProgress{
+		Identity: execution.ProgressIdentity{QueryGroup: returning.Identity}, NextSlot: 70, LastFullSlot: 60,
+		LastCompletionKind: execution.CompletionFull,
+	}}
+	third, _, err := repository.PublishCatalog(ctx, both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := reconciler.Ensure(ctx, third.Publication)
+	if err != nil || len(held.Draining) != 1 || held.Draining[0].QueryGroup != returning.Identity {
+		t.Fatalf("setup: held = %+v, %v", held.Draining, err)
+	}
+	body, err := client.Get(ctx, prefix+":activation").Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := &rebuildFixture{client: client, prefix: prefix, publication: third.Publication, body: body}
+	f.loseBody(t)
+	// A restarted leader: no copy read, and the Progress reader a production
+	// leader always has.
+	restarted, err := controlplane.NewRedisCatalogRepository(client, prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	restartedReconciler, err := controlplane.NewScheduleActivationReconcilerWithProgress(restarted, compiler, semantics, progress,
+		func() time.Time { return time.Unix(95, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := restartedReconciler.Ensure(ctx, third.Publication); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := client.Get(ctx, prefix+":activation").Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := decodedActivation(t, restored), decodedActivation(t, body); !reflect.DeepEqual(got, want) {
+		t.Fatalf("recovered activation differs:\n got %+v\nwant %+v", got, want)
+	}
+	if counts := restarted.ActivationRebuildCounts(); counts[controlplane.ActivationRebuiltDrainingUnknown] != 1 {
+		t.Fatalf("counts = %v", counts)
 	}
 }
