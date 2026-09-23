@@ -40,3 +40,25 @@ func TestCLIAuthorizationPageUsesEphemeralDeploymentKey(t *testing.T) {
 		}
 	}
 }
+
+// Every refusal the grant route can give reaches the operator as what to do,
+// not only as the server's English sentence: the page names where to look
+// for each code. The origin check is also made before the button, from the
+// preview's own entry, because a mismatch there is certain to be refused.
+func TestTheAuthorizationPageSaysWhatToDoForEveryGrantRefusal(t *testing.T) {
+	w := httptest.NewRecorder()
+	Handler().ServeHTTP(w, httptest.NewRequest("GET", "/cli", nil))
+	body := w.Body.String()
+	for _, code := range []string{"admin_unauthorized", "admin_not_configured", "origin_denied", "auth_rate_limited",
+		"auth_busy", "auth_store_unavailable", "not_found", "unreachable"} {
+		if !strings.Contains(body, "  "+code+": ") {
+			t.Errorf("the page has no hint for %q", code)
+		}
+	}
+	for _, term := range []string{"new URL(value.public_base_url).origin !== location.origin", "message(wrongEntry(configuredEntry), true)",
+		"hint(value.error?.code, value.error?.message)", "throw new Error(hint('unreachable'))", "cli.public_base_url"} {
+		if !strings.Contains(body, term) {
+			t.Errorf("missing hint contract: %s", term)
+		}
+	}
+}

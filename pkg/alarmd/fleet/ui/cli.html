@@ -42,12 +42,41 @@ const inspect = document.getElementById('inspect');
 const preview = document.getElementById('preview');
 let revision = 0;
 let expiryTimer;
+let configuredEntry = '';
 function message(text, error) { status.textContent = text; status.className = error ? 'error' : ''; }
+// What to do, for each way the grant route can refuse. The server's own
+// sentence is English and says what went wrong; the operator reading this
+// page needs where to look, so every code the route can return has a line.
+function wrongEntry(configured) {
+  return `当前页面地址 ${location.origin} 与 alarmd 配置的入口 ${configured} 不一致，授权码生成会被拒绝。`
+    + `请从 ${configured}cli 打开本页；如果入口地址已经变了，把 values 里的 alarmd.cli.publicBaseUrl（即配置里的 cli.public_base_url）改成新的入口地址（末尾带 /）后重新部署。`;
+}
+const HINTS = {
+  admin_unauthorized: '管理凭据不对：请输入部署时写进 Secret 的那个值（values 里 alarmd.cli.adminKeySecret.existingSecret 指向的 Secret）。',
+  admin_not_configured: 'alarmd 没有拿到管理凭据，签发未开启：检查 values 里 alarmd.cli.adminKeySecret.existingSecret，以及该 Secret 是否在 alarmd 所在的命名空间、键名是否对，改完重新部署。',
+  origin_denied: '',
+  auth_rate_limited: '生成得太频繁：每个副本每分钟最多 6 次，请下一分钟再试。',
+  auth_busy: '授权服务正忙，请几秒后重试。',
+  auth_store_unavailable: 'alarmd 读写授权记录的运行 Redis 暂不可用，请稍后重试；持续失败请检查 alarmd 的运行 Redis。',
+  not_found: 'alarmd 没有开启 CLI，或入口没有把 /api/cli/ 转发到 alarmd：确认镜像版本、values 的 alarmd.cli 段，以及 Ingress 按前缀整体转发。',
+  unreachable: '授权接口没有返回 alarmd 的应答：入口没有把 /api/cli/ 转发到 alarmd，或 alarmd 没有开启 CLI。确认 Ingress 按前缀整体转发、不加登录认证，以及 values 的 alarmd.cli 段。'
+};
+function hint(code, fallback) {
+  if (code === 'origin_denied') return wrongEntry(configuredEntry || '（未知，请先点"核对环境"）');
+  return HINTS[code] || fallback || '授权服务暂不可用，请检查管理凭据与部署配置。';
+}
 function clearCode() { code.value = ''; document.getElementById('grant').hidden = true; clearTimeout(expiryTimer); }
 async function request(method, key) {
-  const response = await fetch(endpoint, {method, credentials:'omit', cache:'no-store', redirect:'error', headers:{'Authorization':'Bearer '+key, ...(method==='POST'?{'Content-Type':'application/json'}:{})}, body:method==='POST'?JSON.stringify({confirm:true}):undefined});
-  const value = await response.json();
-  if (!response.ok) throw new Error(value.error?.message || '授权服务暂不可用，请检查管理凭据与部署配置。');
+  let response, value;
+  try {
+    response = await fetch(endpoint, {method, credentials:'omit', cache:'no-store', redirect:'error', headers:{'Authorization':'Bearer '+key, ...(method==='POST'?{'Content-Type':'application/json'}:{})}, body:method==='POST'?JSON.stringify({confirm:true}):undefined});
+    value = await response.json();
+  } catch (_) {
+    // A redirect, a network failure or a body that is not JSON: whatever
+    // answered was not alarmd's grant route.
+    throw new Error(hint('unreachable'));
+  }
+  if (!response.ok) throw new Error(hint(value.error?.code, value.error?.message));
   return value;
 }
 adminKey.addEventListener('input', () => { revision++; issue.disabled = true; preview.textContent = '请重新核对环境。'; clearCode(); });
@@ -59,6 +88,12 @@ inspect.addEventListener('click', async () => {
     const value = await request('GET', adminKey.value);
     if (currentRevision !== revision) return;
     preview.textContent = `环境：${value.environment_name} (${value.environment_id})\n入口：${value.public_base_url}\n权限：部署级运维只读取证`;
+    configuredEntry = new URL(value.public_base_url).origin + new URL(value.public_base_url).pathname;
+    // Generation checks that this page's origin is the configured entry's.
+    // Said here, before the button, rather than as a refusal after it.
+    if (new URL(value.public_base_url).origin !== location.origin) {
+      issue.disabled = true; message(wrongEntry(configuredEntry), true); return;
+    }
     issue.disabled = false; message('请确认上述环境，再生成授权码。', false);
   } catch (error) {
     if (currentRevision !== revision) return;
