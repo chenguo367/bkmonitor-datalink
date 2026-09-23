@@ -127,7 +127,7 @@ type phaseTwoMetrics struct {
 	activationHeldQueryGroups       *loadedGauge
 	activationHeldAgeSecondsMax     *loadedGauge
 	algorithmEvaluations            *prometheus.CounterVec
-	recoveryHeld                    *prometheus.CounterVec
+	recoveryBeside                  *prometheus.CounterVec
 	levelAbnormal                   *prometheus.CounterVec
 	historyCoverageRejected         *prometheus.CounterVec
 	historyCoverageUnsummarised     *prometheus.CounterVec
@@ -139,7 +139,6 @@ type phaseTwoMetrics struct {
 	splitRounds                     prometheus.Counter
 	shardabilityPlans               *prometheus.CounterVec
 	dimensionCensusValues           *prometheus.CounterVec
-	recoveryPastLevelWithoutRecov   prometheus.Counter
 	openAlertGate                   *prometheus.CounterVec
 	openAlertSet                    *openAlertSetCollector
 	activationRebuild               *activationRebuildCollector
@@ -1168,36 +1167,33 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, window := range []string{"full", "incomplete"} {
 		metrics.levelAbnormal.WithLabelValues(window)
 	}
-	metrics.recoveryHeld = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "trigger_recovery_held_total",
-		Help: "Records whose evaluated Levels agreed on RECOVERY but whose envelope was held because " +
-			"another Level had not agreed: level_unavailable is a Level whose state could not be " +
-			"established this round, level_recovering a Level reading NORMAL with a triggering window " +
-			"still inside its recovery span. The Level results still reach the state; only the envelope " +
-			"waits for a later round. Read against algorithm_evaluation_total{result=\"recovery\"}: the " +
-			"ratio is the price of asking every Level. This counts hold events, not alerts: a record held " +
-			"once and then released and a record held every minute for a week read alike here, and the " +
-			"ratio does not separate them either. It says whether the gate is reached and how often, " +
-			"never whether some alert is stuck open; a Level whose history stays gapped is the shape that " +
-			"holds forever, and only the object page or the state itself can show one.",
-	}, []string{"cause"})
-	for _, cause := range []observability.RecoveryGateCause{observability.RecoveryGateLevelUnavailable, observability.RecoveryGateLevelRecovering} {
-		metrics.recoveryHeld.WithLabelValues(string(cause))
+	// Was trigger_recovery_held_total and
+	// trigger_recovery_past_level_without_recovery_total. The gate no longer
+	// holds on another Level, so a held count would read zero for ever; what
+	// is left to read is how often a RECOVERY goes on beside a Level that
+	// used to hold it.
+	metrics.recoveryBeside = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "trigger_recovery_beside_level_total",
+		Help: "RECOVERY records decided while another Level of the same record was in the named state: " +
+			"level_unavailable (its state could not be established this round), level_recovering (it read " +
+			"NORMAL with a triggering window still inside its recovery span), level_without_recovery (it read " +
+			"NORMAL with recovery disabled). Counted by the first such Level in Level order, unavailable and " +
+			"recovering before without-recovery. None of these holds the envelope: a RECOVERY is written as its " +
+			"own Level's evaluation, and the alert consumer ends only an alert of that severity, recording any " +
+			"other as orphaned. The first two are the records that used to wait for that Level; read them " +
+			"against the consumer's orphaned count, which they bound together with the open alert set.",
+	}, []string{"beside"})
+	for _, cause := range []observability.RecoveryGateCause{observability.RecoveryGateLevelUnavailable, observability.RecoveryGateLevelRecovering, observability.RecoveryGateLevelWithoutRecovery} {
+		metrics.recoveryBeside.WithLabelValues(string(cause))
 	}
-	metrics.recoveryPastLevelWithoutRecov = prometheus.NewCounter(prometheus.CounterOpts{
-		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "trigger_recovery_past_level_without_recovery_total",
-		Help: "RECOVERY envelopes sent past a NORMAL Level whose recovery is disabled. Such a Level can " +
-			"never say RECOVERY, so it is not consulted rather than holding the envelope forever. Long at " +
-			"zero means no strategy in this deployment pairs a Level with recovery and one without.",
-	})
-	// The second recovery gate: once every Level has agreed, does the consumer
-	// hold an open alert on the series at all. Every outcome is pre-created so
+	// The recovery gate: does the consumer hold an open alert on the series
+	// at all. Every outcome is pre-created so
 	// a zero reads as "never happened", and not_configured in particular has
 	// to be readable at zero: on a production worker it is the wiring having
 	// come apart, and an absent series would hide exactly that.
 	metrics.openAlertGate = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "trigger_open_alert_gate_total",
-		Help: "RECOVERY records every Level had agreed on, by what the consumer's open alert set decided: " +
+		Help: "RECOVERY records, by what the consumer's open alert set decided: " +
 			"passed (an open alert on the series; the envelope went), held_no_open_alert (none; nothing to " +
 			"resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by " +
 			"could not be built; held and named rather than read as absent), not_configured (the evaluation ran " +
@@ -1541,7 +1537,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
-		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryHeld, m.recoveryPastLevelWithoutRecov, m.openAlertGate,
+		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.leaderForward, m.controlSource,
 		m.controlSourceRetainedStale, m.platformSettings,
@@ -1799,12 +1795,7 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.levelOutcomes.WithLabelValues(fact.Outcome, reason).Add(float64(fact.Count))
 	}
 	for _, fact := range observation.RecoveryGates {
-		switch fact.Cause {
-		case observability.RecoveryGateLevelUnavailable, observability.RecoveryGateLevelRecovering:
-			m.recoveryHeld.WithLabelValues(string(fact.Cause)).Add(float64(fact.Records))
-		case observability.RecoveryGateLevelWithoutRecovery:
-			m.recoveryPastLevelWithoutRecov.Add(float64(fact.Records))
-		}
+		m.recoveryBeside.WithLabelValues(string(fact.Cause)).Add(float64(fact.Records))
 	}
 	for _, fact := range observation.OpenAlertGates {
 		m.openAlertGate.WithLabelValues(string(fact.Outcome)).Add(float64(fact.Records))

@@ -217,19 +217,25 @@ type EvaluationCountsV2 struct {
 	Events      uint64
 }
 
-// The causes a RECOVERY envelope is held for. The set is closed: a metric
-// label is made of it.
+// The states of another Level a RECOVERY record can be decided beside. The
+// set is closed: a metric label is made of it. None of them holds the
+// envelope; see recoveryGateV2.
 const (
-	// RecoveryHeldLevelUnavailable: a Level could not be evaluated at all, so
-	// whether it is still in alarm is unknown.
-	RecoveryHeldLevelUnavailable = "level_unavailable"
-	// RecoveryHeldLevelRecovering: a Level read NORMAL with recovery enabled,
-	// which means a window inside its recovery span still meets its trigger.
-	RecoveryHeldLevelRecovering = "level_recovering"
-	// RecoveryHeldNoOpenAlert: every Level agreed, and the consumer holds no
-	// open alert on the series, so there is nothing for the envelope to
-	// resolve. This is the second gate's cause; it is counted apart from the
-	// two above, which are about Levels.
+	// RecoveryBesideLevelUnavailable: another Level could not be evaluated.
+	RecoveryBesideLevelUnavailable = "level_unavailable"
+	// RecoveryBesideLevelRecovering: another Level read NORMAL with recovery
+	// enabled, so a window inside its recovery span still meets its trigger.
+	RecoveryBesideLevelRecovering = "level_recovering"
+	// RecoveryBesideLevelWithoutRecovery: another Level read NORMAL with its
+	// recovery disabled.
+	RecoveryBesideLevelWithoutRecovery = "level_without_recovery"
+)
+
+// The causes a RECOVERY envelope is held for, all from the open alert set.
+// The set is closed: a metric label is made of it.
+const (
+	// RecoveryHeldNoOpenAlert: the consumer holds no open alert on the
+	// series, so there is nothing for the envelope to resolve.
 	RecoveryHeldNoOpenAlert = "no_open_alert"
 	// RecoveryHeldFingerprintUnknown: the series identity the consumer keys
 	// alerts by could not be built, so membership cannot be asked. Not "not a
@@ -238,7 +244,7 @@ const (
 	RecoveryHeldFingerprintUnknown = "fingerprint_unknown"
 )
 
-// The outcomes of the second recovery gate, the open alert set. The set is
+// The outcomes of the recovery gate, the open alert set. The set is
 // closed: a metric label is made of it. Each is reachable in production:
 // the first four from a Plan on the alert consumer's protocol against a
 // set, the last from a Plan on any other protocol.
@@ -262,24 +268,21 @@ const (
 	OpenAlertGateProtocolNotGated = "protocol_not_gated"
 )
 
-// RecoveryGateV2 is what became of a record whose evaluated Levels agreed on
-// RECOVERY. The envelope that record would produce resolves the alert on its
-// series at the consumer, whatever Level that alert stands at, so every Level
-// has to have had its say: a Level whose state is unknown, or whose recovery
-// span still holds a triggering window, has not agreed and holds the envelope.
-// The Level results themselves are unaffected and still reach the state.
+// RecoveryGateV2 is what became of a record whose evaluated Levels came to
+// RECOVERY and none to ABNORMAL. Only the open alert set holds its envelope;
+// another Level's state does not (recoveryGateV2).
 type RecoveryGateV2 struct {
-	Held bool
-	// Cause and LevelID name the first Level that held the envelope.
-	Cause   string
-	LevelID uint32
-	// PassedLevelWithoutRecovery reports an envelope sent past a NORMAL Level
-	// whose recovery is disabled. Such a Level can never say RECOVERY, so it is
-	// not asked; the count says whether that shape exists in a deployment.
-	PassedLevelWithoutRecovery bool
-	// OpenAlertGate is the second gate's outcome, one of the OpenAlertGate*
-	// values. It is empty when the first gate held, because the second was
-	// then not asked: a record is counted by at most one of the two.
+	// Held and Cause are the open alert set's: one of the RecoveryHeld*
+	// values when it held the envelope.
+	Held  bool
+	Cause string
+	// Beside and BesideLevelID name the first other Level the record was
+	// decided beside, one of the RecoveryBeside* values, or empty when every
+	// other Level agreed or was suppressed.
+	Beside        string
+	BesideLevelID uint32
+	// OpenAlertGate is the open alert set's outcome, one of the
+	// OpenAlertGate* values, for every RECOVERY record.
 	OpenAlertGate string
 }
 

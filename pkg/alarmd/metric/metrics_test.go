@@ -438,8 +438,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	}
 	expected["bkmonitor_alarmd_algorithm_evaluation_total"] = "variableLabels: {algorithm_family,result}"
 	expected["bkmonitor_alarmd_algorithm_input_total"] = "variableLabels: {algorithm_family,input_name,dependency_point,result}"
-	expected["bkmonitor_alarmd_trigger_recovery_held_total"] = "variableLabels: {cause}"
-	expected["bkmonitor_alarmd_trigger_recovery_past_level_without_recovery_total"] = "variableLabels: {}"
+	expected["bkmonitor_alarmd_trigger_recovery_beside_level_total"] = "variableLabels: {beside}"
 	expected["bkmonitor_alarmd_trigger_open_alert_gate_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_open_alert_set_mode"] = "variableLabels: {mode}"
 	expected["bkmonitor_alarmd_open_alert_set_authoritative_age_seconds"] = "variableLabels: {}"
@@ -986,8 +985,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	}
 	bounds[fqName("algorithm_evaluation_total")] = 25
 	bounds[fqName("algorithm_input_total")] = 160
-	bounds[fqName("trigger_recovery_held_total")] = 2
-	bounds[fqName("trigger_recovery_past_level_without_recovery_total")] = 1
+	bounds[fqName("trigger_recovery_beside_level_total")] = 3
 	bounds[fqName("trigger_open_alert_gate_total")] = len(observability.OpenAlertGateOutcomes)
 	bounds[fqName("open_alert_set_mode")] = len(openalerts.Modes)
 	bounds[fqName("open_alert_set_authoritative_age_seconds")] = 1

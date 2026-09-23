@@ -1727,7 +1727,7 @@ func (stream *streamedExecution) observeEvaluationFailure(ctx context.Context, s
 	})
 }
 
-// openAlertGateFacts carries what the second recovery gate did with the
+// openAlertGateFacts carries what the open alert gate did with the
 // Plan's RECOVERY records, one fact per outcome that counted something.
 // levelOutcomeFacts is what the evaluation concluded per Level outcome and,
 // for the outcomes that carry one, per reason: the line's own reason is the
@@ -1780,9 +1780,9 @@ func openAlertGateFacts(due execution.DuePlan, evaluated execution.EvaluationRes
 	return facts
 }
 
-// recoveryGateFacts carries what became of the Plan's RECOVERY envelopes:
-// how many records were held, by cause, and how many were sent past a Level
-// without recovery. Zero counts are left out; the observer drops them anyway.
+// recoveryGateFacts carries the Plan's RECOVERY records by the state of the
+// other Level each was decided beside. Zero counts are left out; the observer
+// drops them anyway.
 func recoveryGateFacts(due execution.DuePlan, evaluated execution.EvaluationResult) []observability.RecoveryGateFact {
 	if len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
 		return nil
@@ -1790,9 +1790,9 @@ func recoveryGateFacts(due execution.DuePlan, evaluated execution.EvaluationResu
 	gate := evaluated.Plans[0].RecoveryGate
 	var facts []observability.RecoveryGateFact
 	for _, fact := range []observability.RecoveryGateFact{
-		{Cause: observability.RecoveryGateLevelUnavailable, Records: gate.HeldLevelUnavailable},
-		{Cause: observability.RecoveryGateLevelRecovering, Records: gate.HeldLevelRecovering},
-		{Cause: observability.RecoveryGateLevelWithoutRecovery, Records: gate.SentPastLevelWithoutRecovery},
+		{Cause: observability.RecoveryGateLevelUnavailable, Records: gate.BesideLevelUnavailable},
+		{Cause: observability.RecoveryGateLevelRecovering, Records: gate.BesideLevelRecovering},
+		{Cause: observability.RecoveryGateLevelWithoutRecovery, Records: gate.BesideLevelWithoutRecovery},
 	} {
 		if fact.Records > 0 {
 			facts = append(facts, fact)
