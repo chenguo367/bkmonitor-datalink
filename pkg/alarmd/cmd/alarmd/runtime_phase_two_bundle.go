@@ -1104,7 +1104,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 			return nil
 		}
 		return bundle.runtimeConfig
-	}, cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer})
+	}, cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer()})
 	defer func() {
 		if resultErr != nil {
 			_ = closeCLI()

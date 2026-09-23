@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/prometheus/client_golang/prometheus"
 	"net"
 	"net/http"
 	"os"
@@ -41,6 +42,9 @@ type cliControlBinding struct {
 	Incarnation string
 	StreamToken string
 	Server      *viewstream.Server
+	// Metrics is this process's registry, read by metrics.get. Nil leaves
+	// the operation listed and unavailable with its reason.
+	Metrics prometheus.Gatherer
 }
 
 func cliRuntimeOperation(facts func() *observability.RuntimeConfigFacts, settings *platformsettings.Cache) obchannel.Operation {
@@ -118,6 +122,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	// the worker id is configured to.
 	podName, _ := os.Hostname()
 	ops = append(ops, obchannel.K8sOperations(k8sread.New(k8sread.Options{PodName: podName}))...)
+	ops = append(ops, obchannel.MetricsOperations(control.Metrics)...)
 	// A diagnostic query has independent sockets, no retries and no production
 	// query permits. It never occupies the execution client's connection pool.
 	queryTransport := &http.Transport{Proxy: http.ProxyFromEnvironment,
