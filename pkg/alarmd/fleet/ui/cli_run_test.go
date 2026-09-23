@@ -47,7 +47,7 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 		return result
 	}
 
-	const entry = "http://apps.example.test/kingeye-alarmd/"
+	const entry = "http://apps.example.test/alarmd/"
 	if got := run("same_origin"); got.IssueDisabled || got.Error {
 		t.Errorf("opened from the configured entry, generation is offered: %+v", got)
 	}
@@ -57,7 +57,7 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 		t.Errorf("the same origin spelled with :80 and upper case is still the entry: %+v", got)
 	}
 	got := run("other_origin")
-	if !got.IssueDisabled || !got.Error || !strings.Contains(got.Status, "http://10.0.0.1:8080") ||
+	if !got.IssueDisabled || !got.Error || !strings.Contains(got.Status, "http://192.0.2.10:8080") ||
 		!strings.Contains(got.Status, entry+"cli") || got.Requests != 1 {
 		t.Errorf("opened from another origin, the page says where to open it and offers nothing to press: %+v", got)
 	}
@@ -129,8 +129,8 @@ function load(pageURL, respond) {
 
 const answer = (status, body) => ({ ok: status < 400, status, json: async () => body });
 const preview = { environment_id: 'ns/release', environment_name: 'ns/release',
-  public_base_url: 'http://apps.example.test/kingeye-alarmd/' };
-const entryPage = 'http://apps.example.test/kingeye-alarmd/cli';
+  public_base_url: 'http://apps.example.test/alarmd/' };
+const entryPage = 'http://apps.example.test/alarmd/cli';
 
 async function inspect(pageURL, respond, then) {
   const page = load(pageURL, respond);
@@ -145,8 +145,8 @@ async function inspect(pageURL, respond, then) {
 (async () => {
   const runs = {};
   runs.same_origin = await inspect(entryPage, () => answer(200, preview));
-  runs.same_origin_other_spelling = await inspect('http://APPS.example.test:80/kingeye-alarmd/cli', () => answer(200, preview));
-  runs.other_origin = await inspect('http://10.0.0.1:8080/kingeye-alarmd/cli', () => answer(200, preview));
+  runs.same_origin_other_spelling = await inspect('http://APPS.example.test:80/alarmd/cli', () => answer(200, preview));
+  runs.other_origin = await inspect('http://192.0.2.10:8080/alarmd/cli', () => answer(200, preview));
   runs.refused_after_preview = await inspect(entryPage,
     (url, options) => options.method === 'GET' ? answer(200, preview)
       : answer(403, { status: 'error', error: { code: 'origin_denied', message: 'server sentence for origin_denied' } }),
