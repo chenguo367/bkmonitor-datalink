@@ -888,7 +888,13 @@ func (store *ExecutionStore) loadRuntimeBatch(
 	if len(batch.indexes) == 0 {
 		return 0, 0, false
 	}
+	fetchStarted := time.Now()
 	values, err := batch.target.Backend.MGet(ctx, batch.keys)
+	if timing := execution.PreflightTimingFrom(ctx); timing != nil {
+		decodeStarted := time.Now()
+		timing.Fetch += decodeStarted.Sub(fetchStarted)
+		defer func() { timing.Decode += time.Since(decodeStarted) }()
+	}
 	if err == nil && len(values) != len(batch.keys) {
 		err = fmt.Errorf("state: invalid backend read cardinality")
 	}

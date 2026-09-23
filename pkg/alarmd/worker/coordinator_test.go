@@ -888,6 +888,27 @@ func TestThePreflightLineCarriesTheBytesItReadBack(t *testing.T) {
 	}
 }
 
+// The preflight line says where its time went: the store's reads, or reading
+// what they returned. The phase total could not tell a slow store from records
+// that decode to fifty times their stored size.
+func TestThePreflightLineSplitsItsTimeIntoFetchAndDecode(t *testing.T) {
+	fixture := newFixture(t, true, "")
+	fixture.ports.stateFetch, fixture.ports.stateDecode = 40*time.Millisecond, 1900*time.Millisecond
+	result, err := fixture.coordinator.Execute(context.Background(), slotRequest(execution.OperationNormal))
+	if err != nil || !result.Completed {
+		t.Fatalf("Execute() result=%+v error=%v", result, err)
+	}
+	for _, observed := range slotObservations(fixture.observations) {
+		if observed.Stage == observability.StageStatePreflight {
+			if observed.Counts.StateFetchMillis != 40 || observed.Counts.StateDecodeMillis != 1900 {
+				t.Fatalf("preflight counts=%+v, want fetch 40 ms and decode 1900 ms", observed.Counts)
+			}
+			return
+		}
+	}
+	t.Fatal("no preflight observation")
+}
+
 func TestSlotExecutionCoordinatorIsolatesDeterministicStateAdmission(t *testing.T) {
 	for _, rejectedLast := range []bool{false, true} {
 		t.Run(fmt.Sprintf("rejected_last_%t", rejectedLast), func(t *testing.T) {
@@ -1376,7 +1397,10 @@ type recordingPorts struct {
 	frozenRenewalErr          error
 	stateLoadStatus           execution.StateLoadStatus
 	// stateLoadedBytes is what the fake store says a preflight read back.
-	stateLoadedBytes        int64
+	stateLoadedBytes int64
+	// stateFetch and stateDecode are what the fake store adds to the
+	// preflight timing its caller asked for.
+	stateFetch, stateDecode time.Duration
 	stateRetryableFirstOnly bool
 	stateLoadCalls          int
 	gapLoadStatus           execution.GapLoadStatus
@@ -1683,7 +1707,7 @@ func (ports *recordingPorts) Evaluate(_ context.Context, request execution.Evalu
 	}, ports.fail("evaluate")
 }
 
-func (ports *recordingPorts) LoadRuntime(_ context.Context, request execution.StatePreflightRequest) (execution.StatePreflightResult, error) {
+func (ports *recordingPorts) LoadRuntime(ctx context.Context, request execution.StatePreflightRequest) (execution.StatePreflightResult, error) {
 	ports.record("state_load")
 	ports.stateLoadCalls++
 	items := make([]execution.RuntimeStateView, len(request.Items))
@@ -1713,6 +1737,10 @@ func (ports *recordingPorts) LoadRuntime(_ context.Context, request execution.St
 				WarmupRequirementRef: refs[0].WarmupRequirementRef,
 			}}
 		}
+	}
+	if timing := execution.PreflightTimingFrom(ctx); timing != nil {
+		timing.Fetch += ports.stateFetch
+		timing.Decode += ports.stateDecode
 	}
 	return execution.StatePreflightResult{Items: items, LoadedBytes: ports.stateLoadedBytes}, ports.fail("state_load")
 }

@@ -1509,7 +1509,8 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 	}
 	stateRequest := execution.StatePreflightRequest{Contract: stream.request.Contract, Items: stateItems}
 	started := time.Now()
-	loaded, err := stream.coordinator.ports.State.LoadRuntime(ctx, stateRequest)
+	timedCtx, timing := execution.WithPreflightTiming(ctx)
+	loaded, err := stream.coordinator.ports.State.LoadRuntime(timedCtx, stateRequest)
 	if err == nil {
 		loaded, err = execution.ClassifyStatePreflight(stateRequest, loaded)
 	}
@@ -1541,7 +1542,8 @@ func (stream *streamedExecution) evaluateCompletedSeriesBatch(ctx context.Contex
 			EnvelopeReads: int64(loaded.EnvelopeReads), EnvelopeAnswered: int64(loaded.EnvelopeAnswered),
 			EnvelopeCorrupt: int64(loaded.EnvelopeCorrupt),
 			NoRecordYet:     int64(loaded.NoRecordYet), FrameCorruptRescued: int64(loaded.FrameCorruptRescued),
-			FrameCorruptLost: int64(loaded.FrameCorruptLost), Unclassified: int64(loaded.Unclassified)}, nil)
+			FrameCorruptLost: int64(loaded.FrameCorruptLost), Unclassified: int64(loaded.Unclassified),
+			StateFetchMillis: timing.Fetch.Milliseconds(), StateDecodeMillis: timing.Decode.Milliseconds()}, nil)
 	for index, entry := range batch {
 		if err := stream.evaluateLoadedSeries(ctx, entry, loaded.Items[index]); err != nil {
 			return err

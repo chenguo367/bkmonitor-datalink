@@ -430,6 +430,11 @@ type Counts struct {
 	FrameCorruptRescued int64
 	FrameCorruptLost    int64
 	Unclassified        int64
+	// StateFetchMillis and StateDecodeMillis split a state preflight's time
+	// into the store's reads and this process's decoding of what they
+	// returned; see execution.PreflightTiming.
+	StateFetchMillis  int64
+	StateDecodeMillis int64
 	// EnvelopeReadsApply is how many items of a state apply had their outcome
 	// decided by the older representation on the per-key write path, which
 	// reads both keys and which none of the preflight's counts can see. The
