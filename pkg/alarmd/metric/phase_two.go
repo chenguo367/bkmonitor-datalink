@@ -1012,7 +1012,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"catalog_shardability_plans_total{answer=\"disjunctive\"} to see whether the objects that need splitting are the ones value lists " +
 			"cannot serve. NOT_STRUCTURED is PromQL, DIMENSION_NOT_QUERYABLE a dimension the query does not " +
 			"group by, TOO_MANY_VALUES a matcher past the value bound, NOT_PLANNED and NO_QUERIES nothing " +
-			"to build from, and INVALID this build producing facts the query contract refuses.",
+			"to build from, and INVALID this build producing facts the query contract refuses. The unit is one " +
+			"object per dry-run round: an object that stays over its share is counted again every round, so a " +
+			"share of this family is weighted by how long each object stayed, while the catalog family is one " +
+			"Plan per publication. Compare the two as shares of their own totals over the same window, and read a " +
+			"standing object as many counts, not many objects.",
 	}, []string{"outcome"})
 	for _, outcome := range observability.ShardQueryOutcomes() {
 		metrics.shardQueries.WithLabelValues(outcome)
@@ -1043,7 +1047,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"expressed for them. splittable can take a matcher; disjunctive has an 'or' in its own conditions, " +
 			"which a flat condition list cannot be cut under; not_structured is PromQL; no_queries carries no " +
 			"query facts; unrecognised is an answer this build does not know. The five sum to the Plans " +
-			"published. Read disjunctive over the sum, against shard_query_total{outcome=\"DISJUNCTIVE\"} " +
+			"published, one Plan per publication. Read disjunctive over the sum, against shard_query_total{outcome=\"DISJUNCTIVE\"} " +
 			"over the planned splits: the first is the fleet, the second the objects that need splitting.",
 	}, []string{"answer"})
 	for _, cell := range (observability.ShardabilityFacts{}).Cells() {
