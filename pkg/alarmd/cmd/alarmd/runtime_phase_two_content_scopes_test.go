@@ -94,12 +94,17 @@ func TestTheContentContractIsGatedOnTheWholeReadySet(t *testing.T) {
 type fakeContentScopeSource struct {
 	state    controlplane.ActivationState
 	manifest controlplane.CatalogManifest
+	blocked  []controlplane.BlockedQueryGroup
 	err      error
 	asked    []execution.SnapshotRevision
 }
 
 func (source *fakeContentScopeSource) LoadActivation(context.Context) (controlplane.ActivationState, error) {
 	return source.state, source.err
+}
+
+func (source *fakeContentScopeSource) ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error) {
+	return source.blocked, nil
 }
 
 func (source *fakeContentScopeSource) LoadCatalogManifest(_ context.Context, revision execution.SnapshotRevision) (controlplane.CatalogManifest, error) {
@@ -400,5 +405,29 @@ func TestASweepThatLeftRecordsHeldOrFailedIsOwedAndAnArrivalThatLeavesIsSwept(t 
 	runtime.sweepRetiredAssignments(context.Background(), authority, set("a"))
 	if len(store.sweeps) != 6 {
 		t.Fatalf("a round after a sweep that found nothing held swept; %d sweeps in total, want still 6", len(store.sweeps))
+	}
+}
+
+// A Query Group a cutover held back is scoped to what its open Segment
+// names, not the manifest's new content: scoped to the manifest, a Worker
+// running it would be refused on a scope mismatch. One with no Segment that
+// can run has no scope at all.
+func TestContentScopesFollowAHeldBackQueryGroupsOpenSegment(t *testing.T) {
+	source := &fakeContentScopeSource{
+		state: controlplane.ActivationState{Current: controlplane.SnapshotPublicationRef{SnapshotRevision: "snap-9", PublicationEpoch: 2}},
+		manifest: controlplane.CatalogManifest{QueryGroups: []controlplane.ManifestQueryGroup{
+			{QueryGroup: "qg-a", ObjectDigest: "da"}, {QueryGroup: "qg-b", ObjectDigest: "db-new"}, {QueryGroup: "qg-c", ObjectDigest: "dc-new"},
+		}},
+		blocked: []controlplane.BlockedQueryGroup{
+			{QueryGroup: "qg-b", Reason: controlplane.CutoverReasonOpenDigestMismatch, OpenDigest: "db-open"},
+			{QueryGroup: "qg-c", Reason: controlplane.CutoverReasonOpenSegmentClosed},
+		},
+	}
+	digests, err := currentContentScopes(source)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(digests) != 2 || digests["qg-a"] != "da" || digests["qg-b"] != "db-open" {
+		t.Fatalf("digests = %v, want qg-a from the manifest, qg-b from its open Segment and no qg-c", digests)
 	}
 }

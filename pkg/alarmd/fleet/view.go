@@ -1814,6 +1814,14 @@ type ActivationFacts struct {
 	FailureStage string `json:"failure_stage,omitempty"`
 	FailureClass string `json:"failure_class,omitempty"`
 	LastFailure  string `json:"last_failure,omitempty"`
+	// BlockedQueryGroups is how many Query Groups the last cutover held back:
+	// each keeps what it ran and the rest of the publication went ahead.
+	// BlockedReasons says why as reason=count pairs, sorted; BlockedSamples
+	// which, as query_group:reason, at most eight. Strings so the facts stay
+	// comparable.
+	BlockedQueryGroups int    `json:"blocked_query_groups,omitempty"`
+	BlockedReasons     string `json:"blocked_reasons,omitempty"`
+	BlockedSamples     string `json:"blocked_samples,omitempty"`
 }
 
 // Reason is the classification as one word, for grouping: the same word the
@@ -2102,6 +2110,12 @@ const (
 	// executing from it; a Worker that restarts meanwhile has none and
 	// executes nothing.
 	DegradationViewPublishFailing DegradationKind = "VIEW_PUBLISH_FAILING"
+	// DegradationActivationBlocked: the last cutover held one or more Query
+	// Groups back - a precondition only a write outside the cutover could
+	// break failed on each - and they run what they ran before it. The rest
+	// of the publication is active. The repair subcommand, or finding what
+	// wrote the timeline, is what clears it.
+	DegradationActivationBlocked DegradationKind = "ACTIVATION_BLOCKED"
 	// DegradationViewStreamNoSessions: the Leader has had Workers expected
 	// and none holding a stream past the bound: its view reaches nobody.
 	// Read before deciding whether a Leader should give way; it does not
@@ -2114,7 +2128,7 @@ const (
 var DegradationKinds = []DegradationKind{
 	DegradationActivationBehind, DegradationControlSourceStale, DegradationControlLeaderAbsent,
 	DegradationOpenAlertSetStale, DegradationPlatformSettingsStale, DegradationSourceBlocked,
-	DegradationOutputNotReady, DegradationOpenAlertSetDisjoint, DegradationViewPublishFailing, DegradationViewStreamNoSessions,
+	DegradationOutputNotReady, DegradationOpenAlertSetDisjoint, DegradationViewPublishFailing, DegradationViewStreamNoSessions, DegradationActivationBlocked,
 }
 
 // endpointByRole is the entry under role in a replica's list, or nil.
@@ -2718,6 +2732,11 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			view.ActivationReplica = replica
 			if snapshot.Activation.BehindBeyondBound {
 				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationActivationBehind, Replica: replica})
+			}
+			if snapshot.Activation.BlockedQueryGroups > 0 {
+				view.Degradations = append(view.Degradations, Degradation{Kind: DegradationActivationBlocked, Replica: replica,
+					Text: fmt.Sprintf("%d held back (%s): %s", snapshot.Activation.BlockedQueryGroups,
+						snapshot.Activation.BlockedReasons, snapshot.Activation.BlockedSamples)})
 			}
 		}
 		if snapshot.Rebalance != nil && (view.Rebalance == nil || snapshot.Rebalance.PlannedAt.After(view.Rebalance.PlannedAt)) {

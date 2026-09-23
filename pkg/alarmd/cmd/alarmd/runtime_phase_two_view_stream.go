@@ -185,6 +185,9 @@ type viewSource interface {
 	// carries still executes from its timeline's last Segment; false when
 	// there is nothing left to execute.
 	DrainingContent(context.Context, execution.QueryGroupIdentity) (execution.ObjectDigest, []execution.OutputContextRef, bool, error)
+	// ActivationBlocked is the Query Groups a cutover held back: the view
+	// gives each the content its open Segment names, not the manifest's.
+	ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error)
 }
 
 // costLedgerSink hands each heartbeat's costs to the Leader's ledger: the
@@ -253,14 +256,21 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 		report(fmt.Errorf("read published content %s: %w", state.Current.SnapshotRevision, err))
 		return
 	}
+	blocked, err := source.ActivationBlocked(ctx)
+	if err != nil {
+		stream.NotePublishFailure(viewstream.PublishFailureContentUnreadable)
+		report(fmt.Errorf("read held-back Query Groups: %w", err))
+		return
+	}
+	running := controlplane.ApplyBlockedToContent(published.Groups, blocked)
 	desired := viewstream.Desired{
 		ControlEpoch: authority.Fence.OwnerEpoch,
 		Publication: viewstream.Publication{SnapshotRevision: state.Current.SnapshotRevision, PublicationEpoch: state.Current.PublicationEpoch,
 			ActivationRecordRevision: state.RecordRevision},
-		Content:     make(map[execution.QueryGroupIdentity]viewstream.Content, len(published.Groups)),
+		Content:     make(map[execution.QueryGroupIdentity]viewstream.Content, len(running)),
 		Assignments: make(map[execution.QueryGroupIdentity]viewstream.Assignment, len(records)),
 	}
-	for identity, entry := range published.Groups {
+	for identity, entry := range running {
 		content := viewstream.Content{ObjectDigest: entry.Digest, OutputContexts: make([]viewstream.OutputContextRef, 0, len(entry.Refs))}
 		for _, ref := range entry.Refs {
 			content.OutputContexts = append(content.OutputContexts, viewstream.OutputContextRef{Plan: ref.Plan, Digest: ref.Digest})

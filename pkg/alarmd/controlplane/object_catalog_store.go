@@ -385,6 +385,10 @@ func (repository *RedisCatalogRepository) renewObjectCatalog(ctx context.Context
 		return
 	}
 	keys = append(keys, repository.catalogManifestKey(revision))
+	// A Query Group a cutover held back runs content the current manifest no
+	// longer names; renewing only the manifest's objects would let what it
+	// runs expire under it a catalog TTL later.
+	keys = append(keys, repository.blockedObjectKeys(ctx)...)
 	for start := 0; start < len(keys); start += objectCatalogBatch {
 		batch := keys[start:minInt(start+objectCatalogBatch, len(keys))]
 		replies := make([]*redis.BoolCmd, len(batch))

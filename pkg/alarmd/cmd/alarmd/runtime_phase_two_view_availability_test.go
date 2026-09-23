@@ -344,3 +344,46 @@ func TestTheViewStallBoundIsReadOnBothSides(t *testing.T) {
 		t.Fatalf("a healthy Leader carries ages: %+v", healthy)
 	}
 }
+
+// blockedViewSource publishes two Query Groups, one of which a cutover held
+// back with its open Segment naming older content.
+type blockedViewSource struct {
+	staticViewSource
+}
+
+func (blockedViewSource) LoadPublishedContent(context.Context, controlplane.SnapshotPublicationRef) (controlplane.PublishedContent, error) {
+	return controlplane.PublishedContent{Groups: map[execution.QueryGroupIdentity]controlplane.ContentEntry{
+		"qg-a": {Digest: "da"}, "qg-b": {Digest: "db-new"},
+	}}, nil
+}
+
+func (blockedViewSource) ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error) {
+	return []controlplane.BlockedQueryGroup{{QueryGroup: "qg-b", Reason: controlplane.CutoverReasonOpenDigestMismatch, OpenDigest: "db-open"}}, nil
+}
+
+// The view gives a held-back Query Group the content its open Segment names,
+// which is what the Worker runs and what its scope says; the manifest's new
+// content would stop it on a scope mismatch.
+func TestTheViewGivesAHeldBackQueryGroupItsOpenSegment(t *testing.T) {
+	var observed []observability.Observation
+	records := map[execution.QueryGroupIdentity]ownership.AssignmentRecord{
+		"qg-a": {DesiredWorkerID: "worker-a", RecordRevision: 3},
+		"qg-b": {DesiredWorkerID: "worker-a", RecordRevision: 2},
+	}
+	runtime, server, authority := storedViewRuntime(t, storedViewSource{}, &storedViewStore{records: records}, &observed)
+	runtime.dependencies.ViewSource = blockedViewSource{}
+	runtime.publishView(context.Background(), authority, records, nil)
+	view, ok := server.Snapshot("worker-a")
+	if !ok || len(observed) != 0 {
+		t.Fatalf("nothing published: ok=%v observed=%+v", ok, observed)
+	}
+	content := map[execution.QueryGroupIdentity]string{}
+	for _, entry := range view.Entries {
+		if entry.Content != nil {
+			content[entry.QueryGroup] = string(entry.Content.ObjectDigest)
+		}
+	}
+	if content["qg-a"] != "da" || content["qg-b"] != "db-open" {
+		t.Fatalf("view content = %v, want qg-a from the manifest and qg-b from its open Segment", content)
+	}
+}

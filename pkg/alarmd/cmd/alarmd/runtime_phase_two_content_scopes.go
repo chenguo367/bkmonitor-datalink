@@ -23,6 +23,9 @@ import (
 type contentScopeSource interface {
 	LoadActivation(context.Context) (controlplane.ActivationState, error)
 	LoadCatalogManifest(context.Context, execution.SnapshotRevision) (controlplane.CatalogManifest, error)
+	// ActivationBlocked is the Query Groups a cutover held back; their scope
+	// is what their open Segment names, not what the manifest names.
+	ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error)
 }
 
 // currentContentScopes reads the content each Query Group is published with
@@ -49,6 +52,20 @@ func currentContentScopes(source contentScopeSource) func(context.Context) (map[
 				continue
 			}
 			digests[entry.QueryGroup] = string(entry.ObjectDigest)
+		}
+		blocked, err := source.ActivationBlocked(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("phase-two content scopes: read held-back Query Groups: %w", err)
+		}
+		for _, group := range blocked {
+			if _, present := digests[group.QueryGroup]; !present {
+				continue
+			}
+			if group.OpenDigest == "" {
+				delete(digests, group.QueryGroup)
+				continue
+			}
+			digests[group.QueryGroup] = string(group.OpenDigest)
 		}
 		return digests, nil
 	}

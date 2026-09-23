@@ -103,6 +103,11 @@ type ActivationState struct {
 	Plans          []PlanActivationRecord  `json:"plans"`
 	Draining       []DrainingQueryGroup    `json:"draining,omitempty"`
 	ActiveQGSetRef ActiveQueryGroupSetRef  `json:"active_qg_set_ref"`
+	// BlockedCount and BlockedDigest account for the persisted set of Query
+	// Groups a cutover held back (see BlockedQueryGroup); the set itself is a
+	// key of its own. A reader that does not know them ignores them.
+	BlockedCount  int    `json:"blocked_count,omitempty"`
+	BlockedDigest string `json:"blocked_digest,omitempty"`
 }
 
 type ActivationExpectation struct {
@@ -120,6 +125,7 @@ type RedisCatalogRepository struct {
 	// RebuildActivationBody; see lastGoodActivation.
 	lastGood      lastGoodActivation
 	rebuilds      activationRebuildCounts
+	blocked       blockedCounts
 	objectCatalog objectCatalogState
 	catalogIndex  catalogIndex
 	contentMemo   publishedContentMemo
