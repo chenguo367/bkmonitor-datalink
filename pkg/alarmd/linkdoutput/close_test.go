@@ -45,7 +45,7 @@ func TestCloseIsAtEveryLevelAndHasAStableIdentity(t *testing.T) {
 // Neither depends on the reconciliation telling it the alert's level, which
 // the link has never done.
 func TestBothStrategyClosesGoOutAtEveryLevel(t *testing.T) {
-	for _, reason := range []string{"", CloseReasonInactive, CloseReasonAbsent} {
+	for _, reason := range []string{"", CloseReasonInactive, CloseReasonAbsent, CloseReasonTargetOutOfScope} {
 		r := CloseRequest{TenantID: "tenant-test", Fingerprint: "0123456789abcdef0123456789abcdef", AlertInstanceID: "active-instance",
 			StrategyID: 123, StrategyRevision: 4, BusinessID: 2, OccurredAt: time.Unix(1800000000, 0), Reason: reason}
 		event, err := ConvertClose(r)

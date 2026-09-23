@@ -30,6 +30,13 @@ const SeverityAllLevels = "__ALL__"
 // strategy behind this alert any more".
 const CloseReasonAbsent = "strategy_absent"
 
+// CloseReasonTargetOutOfScope is the close for an alert whose target left
+// the strategy's monitoring scope: the series is still reported, but the
+// target filter now turns it away, so nothing evaluates it back to normal.
+// The strategy exists and is in effect; what ended is this target's place
+// in it.
+const CloseReasonTargetOutOfScope = "target_out_of_scope"
+
 // CloseRequest carries an active alert's identity. A SET member alone is
 // insufficient. It carries no severity: a close decided for a strategy closes
 // the alert at whatever level it is, which the message says with
@@ -55,6 +62,8 @@ var closeText = map[string]struct{ salt, title, content string }{
 		"Close requested because the strategy is currently inactive; this does not indicate metric recovery."},
 	CloseReasonAbsent: {"alarmd-absent-strategy-close-v1", "Strategy no longer exists",
 		"Close requested because the strategy was disabled or deleted and nothing evaluates this alert any more; this does not indicate metric recovery."},
+	CloseReasonTargetOutOfScope: {"alarmd-target-out-of-scope-close-v1", "Target is no longer in the strategy's scope",
+		"Close requested because the target this alert is about left the strategy's monitoring scope and nothing evaluates this alert any more; this does not indicate metric recovery."},
 }
 
 func ConvertClose(request CloseRequest) (Event, error) {

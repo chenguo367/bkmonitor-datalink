@@ -770,6 +770,69 @@ func (cache *Cache) indexMembers(key StrategyKey) []string {
 	return result
 }
 
+// Holds answers, from memory and without counting a lookup, whether the
+// strategy's set carries the fingerprint. judged is false whenever the
+// answer would not be the link's: a copy that does not read the index, a
+// subscription that is not ready, sets disjoint from this process's own
+// sends (see DisjointMinimum), or a strategy whose set has no current
+// calibration. A caller that acts on "not a member" must not act on an
+// unjudged answer.
+func (cache *Cache) Holds(key StrategyKey, fingerprint string) (held, judged bool) {
+	if cache == nil || cache.index == nil {
+		return false, false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	now := cache.now()
+	entry := cache.index.entries[key]
+	if !cache.index.ready || cache.index.disjoint || !cache.calibrated(entry, now) {
+		return false, false
+	}
+	return cache.indexContains(member{key: key, fingerprint: fingerprint}, now, false), true
+}
+
+// MemberCount is how many fingerprints the strategy's set carries, judged
+// as Holds is: judged is false wherever Holds would not answer. It is the
+// question a caller asks once before asking Holds per fingerprint, so that
+// a strategy with nothing open costs one lookup rather than one per record.
+// A fingerprint this process sent and the set has not read yet is not
+// counted; the next read of the set carries it.
+func (cache *Cache) MemberCount(key StrategyKey) (count int, judged bool) {
+	if cache == nil || cache.index == nil {
+		return 0, false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	entry := cache.index.entries[key]
+	if !cache.index.ready || cache.index.disjoint || !cache.calibrated(entry, cache.now()) {
+		return 0, false
+	}
+	return len(entry.index) + len(entry.missing), true
+}
+
+// Disjoint is whether the sets were last found to carry none of this
+// process's own alerts (see DisjointMinimum), read without the full stats.
+func (cache *Cache) Disjoint() bool {
+	if cache == nil || cache.index == nil {
+		return false
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.index.disjoint
+}
+
+// OwnEventSourceID is this deployment's source as the last successful
+// calibration named it; empty until one has. An alert of another source is
+// not this deployment's to close.
+func (cache *Cache) OwnEventSourceID() string {
+	if cache == nil || cache.index == nil {
+		return ""
+	}
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return cache.index.eventSourceID
+}
+
 func (cache *Cache) ActiveAlerts(key StrategyKey) []Alert {
 	if cache == nil || cache.index == nil {
 		return nil

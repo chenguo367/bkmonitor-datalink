@@ -28,6 +28,9 @@ type resolvedTarget struct {
 	// could not answer. Only the first admits nothing; the second admits the
 	// members that did resolve.
 	unresolved bool
+	// definitive is the resolution's own account of whether its members are
+	// the whole target; see Definitive.
+	definitive bool
 }
 
 // summary is what the round's completion carries for this Plan.
@@ -44,6 +47,19 @@ func (target *resolvedTarget) Contains(key string) bool {
 	}
 	_, found := target.members[key]
 	return found
+}
+
+// Definitive says whether "not a member" is the target's own answer: the
+// plan was resolved, every selector answered in full from current facts,
+// and no reference pointed at a node the topology cache does not list or
+// lists under another business. Anything less is a lower bound on the
+// target, which may filter a record for this Slot but must not close the
+// record's alert. See admission.DefinitelyOutside.
+func (target *resolvedTarget) Definitive() bool {
+	if target == nil || target.unresolved {
+		return false
+	}
+	return target.definitive
 }
 
 // absenceView is what the no-data round reads; nil when nothing resolved.
@@ -131,6 +147,8 @@ func newResolvedTarget(resolution *targetplan.Resolution) *resolvedTarget {
 		target.absence.State = nodata.TargetResolutionUnavailable
 	}
 	target.absence.Members = resolution.Members()
+	target.definitive = resolution.State == targetplan.ResolutionComplete && resolution.StaleAge == 0 &&
+		len(resolution.Failures) == 0 && len(resolution.NodesMissing) == 0 && len(resolution.NodesForeign) == 0
 	// One union, read twice: the absence view lists it and the filter
 	// indexes it, so the two cannot disagree about who the members are.
 	members := resolution.Members()
