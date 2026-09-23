@@ -49,6 +49,13 @@ type diagnosisRig struct {
 
 func newDiagnosisRig(t *testing.T, facts map[string]StrategyLookupFacts, progress ProgressReader) *diagnosisRig {
 	t.Helper()
+	return newDiagnosisRigWith(t, facts, progress, nil)
+}
+
+// newDiagnosisRigWith lets a test shape the one anomaly row the fleet holds
+// (4101's object on pod-b) before the service is built.
+func newDiagnosisRigWith(t *testing.T, facts map[string]StrategyLookupFacts, progress ProgressReader, shape func(*Anomaly)) *diagnosisRig {
+	t.Helper()
 	rig := &diagnosisRig{clock: now}
 	snapshots := healthySnapshots()
 	snapshots[0].Owned, snapshots[0].Determined = 2, 2
@@ -57,6 +64,9 @@ func newDiagnosisRig(t *testing.T, facts map[string]StrategyLookupFacts, progres
 	snapshots[1].OwnedObjects = []string{"qg-4101-b"}
 	row := anomaly("qg-4101-b")
 	row.Replica = "pod-b"
+	if shape != nil {
+		shape(&row)
+	}
 	snapshots[1].Anomalies = []Anomaly{row}
 	snapshots[1].TotalAnomalies = 1
 	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 3, Known: true, IDs: []string{"qg-4101-a", "qg-4101-b", "qg-other"}}},
@@ -152,6 +162,39 @@ func TestTheDiagnosisGivesEveryListedStrategyOneRowFromTheExistingWords(t *testi
 	}
 	if strings.Join(order, ",") != "4101,4102,4103,4105,4109" || sum != 5 {
 		t.Errorf("order %v sum %d, want numeric order and the verdicts summing to the universe", order, sum)
+	}
+}
+
+// A row whose result waits on filling windows carries when they clear, from
+// the deciding row's windows and its object's interval; the same row read as
+// a defect does not.
+func TestADiagnosisRowWaitingOnItsWindowsSaysWhenTheyClear(t *testing.T) {
+	end := now.Truncate(time.Minute)
+	filling := func(row *Anomaly) {
+		row.Wake = &WakeFacts{Known: true, IntervalSeconds: 60, DueAt: now.Add(time.Minute)}
+		row.Since, row.RoundSlot, row.Consecutive = now.Add(-10*time.Minute), now.Add(-time.Minute).Unix(), 3
+		row.Coverage = &HistoryCoverage{Levels: 1, Short: 1, Guarded: 1, Windows: []WindowRow{{Key: "4101/a/1", Series: "a", Level: 1,
+			Valid: 3, Required: 5, End: end, MissingTotal: 2,
+			Holes: []WindowHole{{At: end.Add(-4 * time.Minute)}, {At: end.Add(-3 * time.Minute)}}}}}
+		// The shape the words read as a window gaining points: a degraded
+		// run held by a reactivation guard whose worst window grew.
+		row.Kind, row.ReasonCode, row.Cause, row.CauseReason = "DEGRADED_RUN", "COMPLETED_WITH_UNAVAILABLE", "LEVEL_OUTCOME_UNKNOWN", "PLAN_REACTIVATED"
+		row.Coverage.WorstValid, row.Coverage.WorstRequired, row.Coverage.PreviousWorstValid, row.Coverage.PreviousKnown = 3, 5, 2, true
+	}
+	rig := newDiagnosisRigWith(t, diagnosisFacts(), nil, filling)
+	rig.universe = []string{"4101"}
+	body := rig.page(t, "", 0)
+	if len(body.Strategies) != 1 {
+		t.Fatalf("rows %+v", body.Strategies)
+	}
+	row := body.Strategies[0]
+	if row.Verdict != StateResultUntrusted || row.WindowClears == nil || !row.WindowClears.At.Equal(end.Add(2*time.Minute)) || !row.WindowClears.Exact {
+		t.Fatalf("row %+v clears %+v, want %s", row, row.WindowClears, end.Add(2*time.Minute))
+	}
+	rig = newDiagnosisRig(t, diagnosisFacts(), nil)
+	rig.universe = []string{"4101"}
+	if got := rig.page(t, "", 0).Strategies[0]; got.WindowClears != nil {
+		t.Errorf("a %s row got %+v", got.Verdict, got.WindowClears)
 	}
 }
 

@@ -45,6 +45,13 @@ func NativeOperations(handler http.Handler) []Operation {
 					if line := objectExtentLine(result); line != "" && out.Summary == "" {
 						out.Summary = line
 					}
+					if clearing := objectWindowClears(result); clearing != nil {
+						result["window_clears"] = clearing
+						if out.Summary != "" {
+							out.Summary += "；"
+						}
+						out.Summary += clearing.Line
+					}
 				}
 				if id == "strategy.list" {
 					// This endpoint lists fact rows, not every source strategy.
@@ -204,6 +211,27 @@ func objectExtentLine(result map[string]any) string {
 		line += fmt.Sprintf("；此为 %d 条事实中的第 1 条", total)
 	}
 	return line
+}
+
+// objectWindowClears is, for an object whose result is not yet trusted
+// because its windows are filling, when the last listed hole slides out of
+// its window: the same computation the diagnosis rows carry, over the
+// first fact as the fleet API returned it. Nil when the fact does not say
+// so or lacks the windows or the interval to compute it from.
+func objectWindowClears(result map[string]any) *fleet.WindowClearing {
+	raw, ok := result["anomaly"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var anomaly fleet.Anomaly
+	if json.Unmarshal(encoded, &anomaly) != nil || anomaly.Standing == nil {
+		return nil
+	}
+	return fleet.WindowClearsOf(anomaly, *anomaly.Standing)
 }
 
 func numberField(m map[string]any, key string) (int64, bool) {

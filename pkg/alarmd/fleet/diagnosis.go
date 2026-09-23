@@ -104,13 +104,19 @@ type DiagnosisRow struct {
 	Reason string `json:"reason,omitempty"`
 	Check  Check  `json:"check,omitempty"`
 	// Catalog is the strategy's standing in the publication answered from.
-	Catalog        StrategyStandingKind   `json:"catalog,omitempty"`
-	DecidingObject string                 `json:"deciding_object,omitempty"`
-	LastGoodAt     *time.Time             `json:"last_good_at,omitempty"`
-	Extent         *DiagnosisExtent       `json:"extent,omitempty"`
-	Dispositions   []DiagnosisDisposition `json:"dispositions,omitempty"`
-	Plans          []DiagnosisPlan        `json:"plans"`
-	UnknownParts   []DiagnosisPart        `json:"unknown_parts,omitempty"`
+	Catalog        StrategyStandingKind `json:"catalog,omitempty"`
+	DecidingObject string               `json:"deciding_object,omitempty"`
+	LastGoodAt     *time.Time           `json:"last_good_at,omitempty"`
+	Extent         *DiagnosisExtent     `json:"extent,omitempty"`
+	// WindowClears is, for a result not yet trusted because its windows are
+	// filling, when the last listed hole slides out of its window and that
+	// window is full -- from the deciding row's named windows and the
+	// object's evaluation interval -- or why that cannot be computed. It is
+	// not when the result can be taken; see WindowClearing.
+	WindowClears *WindowClearing        `json:"window_clears,omitempty"`
+	Dispositions []DiagnosisDisposition `json:"dispositions,omitempty"`
+	Plans        []DiagnosisPlan        `json:"plans"`
+	UnknownParts []DiagnosisPart        `json:"unknown_parts,omitempty"`
 }
 
 // ProgressFacts is one object's persisted progress, as the runtime reads it.
@@ -250,6 +256,7 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 			row.Extent = &DiagnosisExtent{Levels: coverage.Levels, Short: coverage.Short, Guarded: coverage.Guarded,
 				Resumed: coverage.Resumed, Constrained: coverage.Constrained}
 		}
+		row.WindowClears = WindowClearsOf(best, bestWords)
 		return row
 	}
 	if observed == 0 {
@@ -262,6 +269,28 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 	}
 	row.Verdict, row.Action = StateDetecting, ActionNone
 	return row
+}
+
+// WindowClearsOf is the deciding row's clearing when its words say the
+// result is waiting on windows to fill, and nil otherwise. A refusal is
+// returned too, so the row says why there is no time; the Plan-level gap
+// guards the object carries are counted beside it, since they release on
+// their own count.
+func WindowClearsOf(anomaly Anomaly, words Standing) *WindowClearing {
+	if words.State != StateResultUntrusted && words.Watch != WatchWindowFilling {
+		return nil
+	}
+	var interval time.Duration
+	if anomaly.Wake != nil && anomaly.Wake.IntervalSeconds > 0 {
+		interval = time.Duration(anomaly.Wake.IntervalSeconds) * time.Second
+	}
+	clearing, ok := LastClearing(anomaly.Coverage, interval)
+	if !ok {
+		return nil
+	}
+	clearing.PlanGuards = len(anomaly.Guards)
+	clearing.Line = clearing.text()
+	return &clearing
 }
 
 // applyProgress fills each Plan's persisted progress after the page's
