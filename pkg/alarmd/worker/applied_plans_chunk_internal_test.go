@@ -103,7 +103,7 @@ func TestAPlanIsThisAttemptsOnlyWhenEveryChunkOfItsKeysLanded(t *testing.T) {
 			}
 			ctx, recorder := withAppliedPlans(context.Background())
 			_, err := coordinator.applyState(ctx, execution.OperationNormal, contractRef, execution.OwnerFence{}, "",
-				nil, chunkedStateMutations(t, contractRef, plan, 2), nil)
+				nil, 0, chunkedStateMutations(t, contractRef, plan, 2), nil)
 			if (err != nil) != tc.fails {
 				t.Fatalf("applyState() error = %v, want failure %v", err, tc.fails)
 			}

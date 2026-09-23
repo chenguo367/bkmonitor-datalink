@@ -256,6 +256,10 @@ type HealthResponse struct {
 	// standing degrades this deployment" from "this build has no such field".
 	Degradations []Degradation    `json:"degradations"`
 	Activation   *ActivationFacts `json:"activation"`
+	// NoDataHorizon is the platform no-data tracking horizon every Plan that
+	// states none has frozen, and which layer set it (DEFAULT, VALUES or
+	// DYNAMIC). A Plan with its own says STRATEGY on its tracking row.
+	NoDataHorizon *NoDataHorizonFacts `json:"no_data_horizon,omitempty"`
 	// Load is the operating judgment the capacity panel opens with: on
 	// time, backlog, loss, bottleneck, with the numbers each was read from
 	// and the limits it holds under. Decided here, once, from the same view
@@ -900,7 +904,8 @@ func NewHandler(
 			OutputPath:      OutputPathOf(&view),
 			Degradations:    degradationList(view.Degradations),
 			Activation:      view.Activation, ActivationReplica: view.ActivationReplica,
-			Rebalance: view.Rebalance, RebalanceReplica: view.RebalanceReplica,
+			NoDataHorizon: view.NoDataHorizon,
+			Rebalance:     view.Rebalance, RebalanceReplica: view.RebalanceReplica,
 			AssignmentScope: view.AssignmentScope, AssignmentScopeReplica: view.AssignmentScopeReplica,
 			AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
 			ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,

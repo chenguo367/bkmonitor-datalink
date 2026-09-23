@@ -57,7 +57,7 @@ func (store *ExecutionStore) RenewFrozenRuntime(
 	if len(request.Items) > store.options.MaxItemsPerCall {
 		return execution.FrozenStateRenewalResult{}, errors.New("state: too many frozen series in one renewal request")
 	}
-	ttl, err := store.runtimeTTL(request.Retention)
+	ttl, err := store.runtimeTTL(request.Retention, request.HorizonSeconds)
 	if err != nil {
 		// A retention no configured TTL can serve is the apply path's refusal
 		// to make, and it makes it per Plan with a named reason. Repeating it

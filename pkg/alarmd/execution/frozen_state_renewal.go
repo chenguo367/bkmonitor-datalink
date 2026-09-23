@@ -67,6 +67,9 @@ type FrozenStateRenewalRequest struct {
 	Contract  FrozenExecutionContractRef
 	Retention []StateRetentionRequirement
 	Items     []FrozenSeriesState
+	// HorizonSeconds caps the renewed lifetime the same way it caps a
+	// write's; see StateApplyRequest.HorizonSeconds.
+	HorizonSeconds int64
 	// Now is when the ages in Items are measured against. Passed rather than
 	// read from the clock inside the store so a test can put a key past half
 	// its life without waiting out half its life.

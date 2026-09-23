@@ -58,6 +58,11 @@ type Ports struct {
 	// RECOVERY envelope, and the trigger counts that as not_configured, which
 	// on a production worker is the wiring having come apart.
 	OpenAlerts execution.OpenAlertCopy
+	// StateHorizon is the platform no-data tracking horizon H in force now,
+	// in seconds. A series' runtime state lives at most H past its last
+	// write, so one that stops appearing leaves nothing behind for longer
+	// than H. Optional: nil leaves the retention's own lifetime uncapped.
+	StateHorizon func() int64
 	// ExecutionEvidence records and reads how far an earlier attempt at a Slot
 	// got. It is the one optional port: nil keeps exactly the behaviour of
 	// builds before it existed, which is that a Slot finalized after its replay
@@ -1307,18 +1312,19 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				return execution.SlotExecutionResult{}, fmt.Errorf("alarmd worker: %w", err)
 			}
 		}
+		horizon := coordinator.stateHorizon(due)
 		// Before the writes, not after. A renewal is about the keys this Plan
 		// is not writing, so nothing below can change what it decides -- but
 		// an apply that fails returns from this function, and the keys that
 		// were about to expire would then go one more Slot without anyone
 		// asking about them, on the Slot that already went wrong.
-		coordinator.renewFrozenState(ctx, request, retention, frozen, &frozenRenewals)
+		coordinator.renewFrozenState(ctx, request, retention, horizon, frozen, &frozenRenewals)
 
 		if len(mutations) > 0 {
 			if err := coordinator.admit(ctx, request, due); err != nil {
 				return execution.SlotExecutionResult{}, err
 			}
-			rejected, encodedBytes, err := coordinator.admitState(ctx, request.Operation, request.Contract, retention, mutations)
+			rejected, encodedBytes, err := coordinator.admitState(ctx, request.Operation, request.Contract, retention, horizon, mutations)
 			if err != nil {
 				return execution.SlotExecutionResult{}, err
 			}
@@ -1373,7 +1379,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				continue
 			}
 			if len(accepted) > 0 {
-				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, accepted, acceptedBytes)
+				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, horizon, accepted, acceptedBytes)
 				if err != nil {
 					return execution.SlotExecutionResult{}, err
 				}
@@ -1855,6 +1861,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 	operation execution.Operation,
 	contractRef execution.FrozenExecutionContractRef,
 	retention []execution.StateRetentionRequirement,
+	horizon int64,
 	mutations []execution.StateMutation,
 ) (map[execution.StateKeyIdentity]execution.ReasonCode, []int64, error) {
 	started := time.Now()
@@ -1865,7 +1872,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 		chunkItems := mutations[chunk.start:chunk.end]
 		chunkStarted := time.Now()
 		result, err := coordinator.ports.State.AdmitRuntime(ctx, execution.StateApplyRequest{
-			Contract: contractRef, Retention: retention, Items: chunkItems,
+			Contract: contractRef, Retention: retention, Items: chunkItems, HorizonSeconds: horizon,
 		})
 		var reason execution.ReasonCode
 		var chunkBytes int64
@@ -1936,6 +1943,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 	fence execution.OwnerFence,
 	contentScope string,
 	retention []execution.StateRetentionRequirement,
+	horizon int64,
 	mutations []execution.StateMutation,
 	encodedBytes []int64,
 ) (map[execution.StateKeyIdentity]execution.ReasonCode, error) {
@@ -1975,7 +1983,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		for _, mutation := range chunkItems {
 			expectedRevisions[mutation.Identity] = mutation.ExpectedBlobRevision
 		}
-		applyRequest := execution.StateApplyRequest{Contract: contractRef, Retention: retention, Items: chunkItems}
+		applyRequest := execution.StateApplyRequest{Contract: contractRef, Retention: retention, Items: chunkItems, HorizonSeconds: horizon}
 		chunkStarted := time.Now()
 		var result execution.StateApplyResult
 		var err error
@@ -2246,6 +2254,22 @@ func (coordinator *SlotExecutionCoordinator) observeCapacityRejection(
 // it fill the pool and take its neighbours down with it - but a refusal nobody
 // saw coming stops a strategy whole, which is why an object nearing its share
 // is reported before it arrives (fleet's RETAINED_SHARE_APPROACHING).
+// stateHorizon is how long this Plan's series keep their runtime state past
+// their last write: the Plan's own no-data horizon when it has one frozen -
+// the strategy's, or the platform's at compile time - else the platform's
+// horizon in force now. Zero when the worker was given no horizon at all.
+func (coordinator *SlotExecutionCoordinator) stateHorizon(due execution.DuePlan) int64 {
+	if due.CompiledPlan != nil {
+		if noData := due.CompiledPlan.NoData(); noData != nil && noData.TrackingHorizonSeconds > 0 {
+			return noData.TrackingHorizonSeconds
+		}
+	}
+	if coordinator.ports.StateHorizon == nil {
+		return 0
+	}
+	return max(coordinator.ports.StateHorizon(), 0)
+}
+
 func (coordinator *SlotExecutionCoordinator) qgShareBytes() uint64 {
 	return coordinator.budget.MaxRetainedBytes / 2
 }

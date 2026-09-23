@@ -3352,6 +3352,11 @@ type StateApplyRequest struct {
 	Contract  FrozenExecutionContractRef
 	Retention []StateRetentionRequirement
 	Items     []StateMutation
+	// HorizonSeconds is the longest a series' runtime state may outlive its
+	// last write: the no-data tracking horizon H, reused so that a series
+	// that stops appearing leaves no state behind for longer than H. Zero
+	// leaves the retention's own lifetime uncapped.
+	HorizonSeconds int64
 }
 
 type StateAdmissionStatus string

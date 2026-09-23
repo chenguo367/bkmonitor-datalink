@@ -166,14 +166,48 @@ func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 // runtimeTTL derives how long the keys of one apply request have to survive
 // from that request's Plan retention. StateTTL owns the formula so the two
 // stores cannot drift; the execution store only supplies the deployment bounds.
-func (store *ExecutionStore) runtimeTTL(retention []execution.StateRetentionRequirement) (time.Duration, error) {
+//
+// horizonSeconds, when positive, caps it: a series' runtime state lives at
+// most H past its last write, so one that stops appearing is gone H later
+// rather than a retention span or the deployment's maximum later. The cap
+// never goes below what a series that keeps reporting needs to survive until
+// its next Slot - one evaluation interval, its lateness and the restart
+// margin - because a lifetime shorter than that would lose the state of a
+// series that never went away. Lowering H therefore shortens lifetimes from
+// the next write on, and raising it lengthens them from the next write on:
+// a key that already expired is gone, so nothing reclaimed comes back.
+func (store *ExecutionStore) runtimeTTL(retention []execution.StateRetentionRequirement, horizonSeconds int64) (time.Duration, error) {
 	requirements := make([]LevelRequirement, len(retention))
 	for index, level := range retention {
 		// The window facts are left empty: StateTTL reads only the retention,
 		// and it must read exactly the retention the window was built from.
 		requirements[index] = NewLevelRequirement(level, "", 0)
 	}
-	return StateTTL(requirements, store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL)
+	ttl, err := StateTTL(requirements, store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL)
+	if err != nil || horizonSeconds <= 0 {
+		return ttl, err
+	}
+	return capByHorizon(ttl, requirements, store.options.RestartMargin, store.options.MinTTL,
+		time.Duration(horizonSeconds)*time.Second), nil
+}
+
+// capByHorizon is the retention's lifetime capped at the horizon, and the
+// horizon floored at what a reporting series needs between two writes.
+func capByHorizon(ttl time.Duration, requirements []LevelRequirement, restartMargin, minimum, horizon time.Duration) time.Duration {
+	limit := max(horizon, StateLifetimeFloor(requirements, restartMargin), minimum)
+	return min(ttl, limit)
+}
+
+// StateLifetimeFloor is the shortest lifetime a series' runtime state can
+// have and still survive from one write to the next while the series keeps
+// reporting: the longest evaluation interval plus its lateness, and the
+// restart margin.
+func StateLifetimeFloor(requirements []LevelRequirement, restartMargin time.Duration) time.Duration {
+	var floor time.Duration
+	for _, requirement := range requirements {
+		floor = max(floor, requirement.EvaluationInterval+requirement.LatenessTolerance)
+	}
+	return floor + restartMargin
 }
 
 // rejectRuntimeBudget reports a retention need no configured TTL can satisfy.
@@ -299,7 +333,7 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 	if err := request.Contract.Validate(); err != nil || len(request.Items) == 0 || len(request.Items) > store.options.MaxItemsPerCall {
 		return execution.StateAdmissionResult{}, fmt.Errorf("state: invalid runtime admission request")
 	}
-	if _, err := store.runtimeTTL(request.Retention); err != nil {
+	if _, err := store.runtimeTTL(request.Retention, request.HorizonSeconds); err != nil {
 		if !errors.Is(err, ErrStateBudget) {
 			return execution.StateAdmissionResult{}, fmt.Errorf("state: invalid runtime admission request: %w", err)
 		}

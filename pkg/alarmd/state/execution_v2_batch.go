@@ -365,7 +365,7 @@ func (store *ExecutionStore) applyRuntime(
 	// One TTL for the request: every key it writes belongs to the same Plan and
 	// so has the same retention need. Admission derives it the same way, so a
 	// request that was admitted cannot be refused here.
-	ttl, err := store.runtimeTTL(request.Retention)
+	ttl, err := store.runtimeTTL(request.Retention, request.HorizonSeconds)
 	if err != nil {
 		if !errors.Is(err, ErrStateBudget) {
 			return execution.StateApplyResult{}, fmt.Errorf("state: invalid runtime apply request: %w", err)
