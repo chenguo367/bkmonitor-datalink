@@ -435,3 +435,33 @@ func TestTheWalkStartsPastTheLastDecidedStrategy(t *testing.T) {
 		}
 	}
 }
+
+// The source drops strategies for minutes and brings them back. While the
+// catalog still runs the strategy, this loop's clock does not start; it
+// starts when the catalog lets go, so a strategy absent for just over the
+// catalog's grace is not closed on the next round.
+func TestTheClockStartsWhenTheCatalogLetsGoNotWhenTheSourceMissesIt(t *testing.T) {
+	k := key("10")
+	tracker := NewTracker(100)
+	running := roundFor(set(k), nil)
+	running.Published = set(k)
+	running.SnapshotObservation = "observation-one"
+	tracker.Round(running, testBounds())
+	if tracker.Tracked() != 0 {
+		t.Fatal("a strategy the catalog still runs started its clock")
+	}
+	released := roundFor(set(k), nil)
+	released.Now = testNow.Add(11 * time.Minute)
+	released.LinkLastSuccess = released.Now.Add(-time.Minute)
+	released.SnapshotObservation = "observation-two"
+	if result := tracker.Round(released, testBounds()); result.Counts.WithinGrace != 1 || len(result.Close) != 0 {
+		t.Fatalf("closed on the round the catalog let go, on the source's earlier absence: %+v", result)
+	}
+	later := roundFor(set(k), nil)
+	later.Now = testNow.Add(22 * time.Minute)
+	later.LinkLastSuccess = later.Now.Add(-time.Minute)
+	later.SnapshotObservation = "observation-three"
+	if result := tracker.Round(later, testBounds()); len(result.Close) != 1 {
+		t.Fatalf("not closed once its own grace passed after the catalog let go: %+v", result)
+	}
+}
