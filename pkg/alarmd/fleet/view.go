@@ -1922,66 +1922,11 @@ type OpenAlertSetFacts struct {
 	TrackedSets int `json:"tracked_sets"`
 	LoadedSets  int `json:"loaded_sets"`
 	Members     int `json:"members"`
-	// SentInSet and SentNotInSet are the alerts this replica sent ABNORMAL
-	// for, old enough for the consumer to have opened them, by whether the
-	// sets carry them. Disjoint is none of them carried: the
-	// sets are keyed differently from this replica's lookups, and it
-	// degrades the verdict with DegradationOpenAlertSetDisjoint.
-	SentInSet    int  `json:"sent_in_set"`
-	SentNotInSet int  `json:"sent_not_in_set"`
-	Disjoint     bool `json:"disjoint"`
 	// Lookups counts how the gate's questions were answered since the process
 	// started, by the reader's closed answer words: the authoritative ones
 	// against the copy's own. A gate that has answered every question on its
 	// own knowledge reads here, and nowhere on the object list.
 	Lookups map[string]uint64 `json:"lookups,omitempty"`
-	// Comparison puts what this replica sent beside what the link holds for
-	// the same strategies. Absent on a copy that does not read the index.
-	Comparison *OpenAlertComparison `json:"comparison,omitempty"`
-}
-
-// OpenAlertComparison is the recovery gate's side-by-side reading: the keys
-// this replica sent and still holds as open, the link's members for the
-// strategies it tracks, and the active alerts the link's calibration listed.
-// Every list is a bounded sample of fingerprint prefixes; nothing of an
-// alert's content is carried.
-//
-// How it is read: members of a shape other than the sent keys' is a link
-// fingerprinting on another rule; active alerts mostly from a source other
-// than own_event_source_id is a set holding someone else's alerts; sent keys
-// matching active alert ids but not their fingerprints is our alerts held
-// under another fingerprint.
-type OpenAlertComparison struct {
-	OwnEventSourceID        string                        `json:"own_event_source_id,omitempty"`
-	Sent                    int                           `json:"sent"`
-	SentShapes              map[string]int                `json:"sent_shapes"`
-	MemberShapes            map[string]int                `json:"member_shapes"`
-	AlertSources            map[string]int                `json:"alert_sources"`
-	SentInCalibrated        int                           `json:"sent_in_calibrated"`
-	SentMatchingAlertID     int                           `json:"sent_matching_alert_id"`
-	SentMatchingFingerprint int                           `json:"sent_matching_fingerprint"`
-	Strategies              []OpenAlertComparisonStrategy `json:"strategies,omitempty"`
-}
-
-// OpenAlertComparisonStrategy is one strategy's sample.
-type OpenAlertComparisonStrategy struct {
-	TenantID     string                     `json:"tenant_id"`
-	StrategyID   string                     `json:"strategy_id"`
-	Sent         int                        `json:"sent"`
-	Members      int                        `json:"members"`
-	Alerts       int                        `json:"alerts"`
-	Calibrated   bool                       `json:"calibrated"`
-	SentSample   []string                   `json:"sent_sample,omitempty"`
-	MemberSample []string                   `json:"member_sample,omitempty"`
-	AlertSample  []OpenAlertComparisonAlert `json:"alert_sample,omitempty"`
-}
-
-// OpenAlertComparisonAlert is one active alert reduced to its keys, each a
-// prefix.
-type OpenAlertComparisonAlert struct {
-	AlertID       string `json:"alert_id"`
-	Fingerprint   string `json:"fingerprint"`
-	EventSourceID string `json:"event_source_id"`
 }
 
 // DegradationKind names a replica-level condition that degrades the verdict
@@ -1995,13 +1940,6 @@ const (
 	// knowledge is an alert that stays open past its due, and nothing on the
 	// object list shows that.
 	DegradationOpenAlertSetStale DegradationKind = "OPEN_ALERT_SET_STALE"
-	// DegradationOpenAlertSetDisjoint: the consumer's open alert sets carry
-	// none of the alerts this replica sent, out of enough of them that the
-	// sets cannot be keyed the way the replica asks. Every recovery would be
-	// held as "no open alert"; the replica answers from what it sent
-	// instead, and this names that, because a series it did not send the
-	// ABNORMAL for itself still waits.
-	DegradationOpenAlertSetDisjoint DegradationKind = "OPEN_ALERT_SET_DISJOINT"
 	// DegradationControlSourceStale: no refresh round of the control plane's
 	// strategy source has succeeded for longer than the staleness bound. The
 	// deployment executes the last good catalog and every strategy saved
@@ -2051,7 +1989,7 @@ const (
 var DegradationKinds = []DegradationKind{
 	DegradationActivationBehind, DegradationControlSourceStale, DegradationControlLeaderAbsent,
 	DegradationOpenAlertSetStale, DegradationPlatformSettingsStale, DegradationSourceBlocked,
-	DegradationOutputNotReady, DegradationOpenAlertSetDisjoint,
+	DegradationOutputNotReady,
 }
 
 // endpointByRole is the entry under role in a replica's list, or nil.
@@ -2614,9 +2552,6 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 		if snapshot.OpenAlertSet != nil && snapshot.OpenAlertSet.StaleBeyondBound {
 			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationOpenAlertSetStale, Replica: replica})
-		}
-		if snapshot.OpenAlertSet != nil && snapshot.OpenAlertSet.Disjoint {
-			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationOpenAlertSetDisjoint, Replica: replica})
 		}
 		if snapshot.PlatformSettings != nil && snapshot.PlatformSettings.StaleBeyondBound {
 			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationPlatformSettingsStale, Replica: replica})
