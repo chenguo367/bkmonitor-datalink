@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"reflect"
 	"testing"
 	"time"
 
@@ -52,6 +53,9 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 			t.Fatalf("lookups before any lookup = %v, want every answer word at zero", facts.Lookups)
 		}
 	}
+	if facts.Comparison != nil {
+		t.Fatalf("a copy that does not read the index has nothing to compare: %+v", facts.Comparison)
+	}
 
 	port := openAlertCopyPort{cache: cache}
 	port.TrackPlans("qg-test", []execution.PlanIdentity{{TenantID: "default", BusinessID: "2", StrategyID: "1001"}})
@@ -88,5 +92,44 @@ func TestOpenAlertSetFactsAndPortAdapter(t *testing.T) {
 	if facts.Available || facts.Mode != string(openalerts.ModeSelfMaintained) || facts.UnavailableReason != string(openalerts.UnavailableHeartbeatMissing) ||
 		facts.HeartbeatAgeSeconds == nil || *facts.HeartbeatAgeSeconds != 645 {
 		t.Fatalf("account after the publisher stopped = %+v, want self_maintained for heartbeat_missing with the last heartbeat 645 s old", facts)
+	}
+}
+
+// Every field of the copy's comparison reaches the replica's facts: a field
+// added to one side and not carried would read as zero, and a zero here is a
+// reading ("none of the alerts is ours").
+func TestTheOpenAlertComparisonIsCarriedFieldForField(t *testing.T) {
+	comparison := &openalerts.Comparison{OwnEventSourceID: "own", Sent: 3,
+		SentShapes: map[string]int{openalerts.ShapeHex32: 3}, MemberShapes: map[string]int{openalerts.ShapeHex64: 5},
+		AlertSources: map[string]int{"own": 0, "elsewhere": 5}, SentInCalibrated: 3, SentMatchingAlertID: 2, SentMatchingFingerprint: 1,
+		Strategies: []openalerts.ComparisonStrategy{{TenantID: "t", StrategyID: "s", Sent: 1, Members: 2, Alerts: 3, Calibrated: true,
+			SentSample: []string{"a"}, MemberSample: []string{"b"},
+			AlertSample: []openalerts.ComparisonAlert{{AlertID: "c", Fingerprint: "d", EventSourceID: "e"}}}}}
+	facts := openAlertComparisonFacts(comparison)
+	var zero func(path string, value reflect.Value)
+	zero = func(path string, value reflect.Value) {
+		switch value.Kind() {
+		case reflect.Ptr:
+			zero(path, value.Elem())
+		case reflect.Struct:
+			for i := 0; i < value.NumField(); i++ {
+				zero(path+"."+value.Type().Field(i).Name, value.Field(i))
+			}
+		case reflect.Slice:
+			if value.Len() == 0 {
+				t.Errorf("%s was not carried", path)
+			}
+			for i := 0; i < value.Len(); i++ {
+				zero(path, value.Index(i))
+			}
+		default:
+			if value.IsZero() {
+				t.Errorf("%s was not carried", path)
+			}
+		}
+	}
+	zero("comparison", reflect.ValueOf(facts))
+	if openAlertComparisonFacts(nil) != nil {
+		t.Error("no comparison is carried as none")
 	}
 }

@@ -1927,6 +1927,53 @@ type OpenAlertSetFacts struct {
 	// against the copy's own. A gate that has answered every question on its
 	// own knowledge reads here, and nowhere on the object list.
 	Lookups map[string]uint64 `json:"lookups,omitempty"`
+	// Comparison puts what this replica sent beside what the link holds for
+	// the same strategies. Absent on a copy that does not read the index.
+	Comparison *OpenAlertComparison `json:"comparison,omitempty"`
+}
+
+// OpenAlertComparison is the recovery gate's side-by-side reading: the keys
+// this replica sent and still holds as open, the link's members for the
+// strategies it tracks, and the active alerts the link's calibration listed.
+// Every list is a bounded sample of fingerprint prefixes; nothing of an
+// alert's content is carried.
+//
+// How it is read: members of a shape other than the sent keys' is a link
+// fingerprinting on another rule; active alerts mostly from a source other
+// than own_event_source_id is a set holding someone else's alerts; sent keys
+// matching active alert ids but not their fingerprints is our alerts held
+// under another fingerprint.
+type OpenAlertComparison struct {
+	OwnEventSourceID        string                        `json:"own_event_source_id,omitempty"`
+	Sent                    int                           `json:"sent"`
+	SentShapes              map[string]int                `json:"sent_shapes"`
+	MemberShapes            map[string]int                `json:"member_shapes"`
+	AlertSources            map[string]int                `json:"alert_sources"`
+	SentInCalibrated        int                           `json:"sent_in_calibrated"`
+	SentMatchingAlertID     int                           `json:"sent_matching_alert_id"`
+	SentMatchingFingerprint int                           `json:"sent_matching_fingerprint"`
+	Strategies              []OpenAlertComparisonStrategy `json:"strategies,omitempty"`
+}
+
+// OpenAlertComparisonStrategy is one strategy's sample.
+type OpenAlertComparisonStrategy struct {
+	TenantID     string                     `json:"tenant_id"`
+	StrategyID   string                     `json:"strategy_id"`
+	Sent         int                        `json:"sent"`
+	Members      int                        `json:"members"`
+	Alerts       int                        `json:"alerts"`
+	Calibrated   bool                       `json:"calibrated"`
+	SentSample   []string                   `json:"sent_sample,omitempty"`
+	MemberSample []string                   `json:"member_sample,omitempty"`
+	AlertSample  []OpenAlertComparisonAlert `json:"alert_sample,omitempty"`
+}
+
+// OpenAlertComparisonAlert is one active alert reduced to its keys, each a
+// prefix.
+type OpenAlertComparisonAlert struct {
+	AlertID       string `json:"alert_id"`
+	Fingerprint   string `json:"fingerprint"`
+	EventSourceID string `json:"event_source_id"`
 }
 
 // DegradationKind names a replica-level condition that degrades the verdict

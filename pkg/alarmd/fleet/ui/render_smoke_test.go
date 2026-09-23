@@ -417,7 +417,17 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 				CalibrationConfigured: false, IndexReadAgeSeconds: ptrFloat(27), MemberBytes: 15899,
 				Available: true, StaleBeyondBound: false, ReaderFingerprintVersion: "md5_v1",
 				TrackedSets: 60, LoadedSets: 60, Members: 0,
-				Lookups: map[string]uint64{"index_absent": 168}}},
+				Lookups: map[string]uint64{"index_absent": 168},
+				// The gate's side-by-side reading on a set that holds someone
+				// else's alerts under a 64-character rule: the samples carry
+				// prefixes, which the page must not print.
+				Comparison: &fleet.OpenAlertComparison{OwnEventSourceID: "src-own", Sent: 4,
+					SentShapes: map[string]int{"hex32": 4}, MemberShapes: map[string]int{"hex64": 147},
+					AlertSources:     map[string]int{"src-own": 0, "src-other": 140, "other": 7},
+					SentInCalibrated: 4, SentMatchingAlertID: 0, SentMatchingFingerprint: 0,
+					Strategies: []fleet.OpenAlertComparisonStrategy{{TenantID: "system", StrategyID: "8709", Sent: 1, Members: 3,
+						Alerts: 3, Calibrated: true, SentSample: []string{"5f3a9c1e"}, MemberSample: []string{"c0ffee42"},
+						AlertSample: []fleet.OpenAlertComparisonAlert{{AlertID: "d00dfeed", Fingerprint: "c0ffee42", EventSourceID: "src-other"}}}}}}},
 		{Role: fleet.EndpointQueryBackend, Kind: "http", Address: "http://unify-query.example:10205", Configured: true},
 		// The output sink's own record: open, since sixteen minutes, on the
 		// first attempt.
@@ -1099,6 +1109,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"DEPS ::", "有：消费方按索引协议发布，本端 27 秒前读到"},
 		{"DEPS ::", "跟踪 60 条策略、索引覆盖 60 条、未恢复指纹 0 个（未配校准）"},
 		{"DEPS ::", "恢复门查过 168 次：索引里没有 168"},
+		{"DEPS ::", "恢复闸对照：本端发出未恢复 4 个（32 位十六进制 4），集合成员 64 位十六进制 147；校准列出的活动告警本部署来源 0 条、其他来源 147 条；在已校准策略里的 4 个发出键中，等于某条活动告警 ID 的 0 个、等于其指纹的 0 个"},
 		// The consequence, said once rather than left for the reader to derive
 		// from a row that also says "available" and "not stale", both true.
 		{"DEPS ::", "这套部署现在发不出恢复：集合装载了但一条未恢复指纹都没有，168 次全部落空、恢复被扣住"},
@@ -1116,6 +1127,13 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// And nothing on the page carries a credential-shaped address: the
 	// dependency table is the one place addresses appear, and the fixture's
 	// are bare host:port.
+	// The comparison's samples stay in the API: the page prints counts and
+	// shapes, never a key or a source id.
+	for _, sample := range []string{"5f3a9c1e", "c0ffee42", "d00dfeed", "src-other", "src-own"} {
+		if strings.Contains(text, sample) {
+			t.Errorf("the page printed the comparison sample %q", sample)
+		}
+	}
 	if deps := lineStarting(text, "DEPS ::"); strings.Contains(deps, "@") || strings.Contains(deps, "password") {
 		t.Errorf("the dependency table renders something credential-shaped:\n%s", deps)
 	}
