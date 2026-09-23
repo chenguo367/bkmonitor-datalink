@@ -1060,13 +1060,13 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// request to the Leader's listener, found the way the view stream's
 	// clients find it.
 	fleetAPI = fleet.WithStrategyStanding(fleetAPI, fleetService, strategyLookupSource(reconciler),
-		leaderForwarder(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil),
+		leaderForwarder(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, recorder.ObserveLeaderForward),
 		strategyObjectLoader(repository), catalogAbsenceSource(func() *phaseTwoWorkerBundle { return bundle }, directory != nil),
 		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
 	// The environment diagnosis: every strategy of the source's active set,
 	// one row each, answered where the catalog is the way a standing is.
 	fleetAPI = fleet.WithDiagnosis(fleetAPI, fleetService, strategyLookupSource(reconciler),
-		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, diagnosisForwardTimeout),
+		leaderForwarderWithin(viewStreamDiscovery{store: ownershipStore}, cfg.PhaseTwo.Worker.ID, nil, diagnosisForwardTimeout, "diagnosis", recorder.ObserveLeaderForward),
 		diagnosisUniverse(strategySource), diagnosisProgress(progressStore),
 		strategyStandingReplica(cfg.PhaseTwo.Worker.ID), external.Now, stallAfter)
 	costCandidatesCache := fleet.NewCostCandidatesCache(external.Now, 3*cfg.PhaseTwo.Control.RefreshInterval.Duration())
