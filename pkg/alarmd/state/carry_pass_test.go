@@ -7,6 +7,7 @@ package state
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -88,4 +89,60 @@ func TestTheCarryPassReadsThePreviousGenerationBesideTheMissingRecord(t *testing
 	if got := loaded.LoadedBytes - baseline.LoadedBytes; got != int64(carriedBytes+len("not-a-frame")) {
 		t.Fatalf("the carry pass added %d bytes to the round, want the %d it read", got, carriedBytes+len("not-a-frame"))
 	}
+}
+
+// The carry pass reads records the frame pass could say nothing about, since
+// it found none, and those records are written this round under the new
+// generation at the size they were read. So neither the carry pass nor the
+// next round's frame pass may batch them by what the empty frame pass
+// learned: on a cold store after a release that moved every generation, that
+// asked for every carried record in one read, over the byte budget, and the
+// next round asked for all of them again under the new keys - a read that
+// fails every time learns nothing, so it never recovered.
+func TestCarriedRecordsStayWithinTheReadBudgetForTwoRounds(t *testing.T) {
+	version := applyVersion()
+	backend := newPipelineMemoryBackend()
+	backend.recordKeyCounts = true
+	store := newBatchStore(t, backend, nil)
+	const previous = execution.StateGeneration("previous-generation")
+	const series = 64
+	padding := strings.Repeat("x", 200<<10)
+	items := make([]execution.StatePreflightItem, series)
+	for index := range items {
+		identity := seriesIdentity(index)
+		items[index] = execution.StatePreflightItem{Identity: identity, ApplyVersion: version, CarryFrom: previous}
+		old := identity
+		old.StateGeneration = previous
+		key, _ := RuntimeStateKeyV3("alarmd", old)
+		backend.values[key], _ = encodeRuntimePacked(seriesMutation(t, old, version, 0, padding), 4)
+	}
+	within := func(t *testing.T, round string) {
+		t.Helper()
+		for call, bytes := range backend.byteCounts {
+			if bytes > runtimeLoadBatchBytes {
+				t.Fatalf("%s: read %d asked for %d keys, %d bytes, over the %d byte budget (all reads: keys %v)",
+					round, call, backend.keyCounts[call], bytes, runtimeLoadBatchBytes, backend.keyCounts)
+			}
+		}
+		backend.keyCounts, backend.byteCounts = nil, nil
+	}
+
+	loaded, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: items})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.CarryFound != series {
+		t.Fatalf("carried %d of %d", loaded.CarryFound, series)
+	}
+	within(t, "the round that carries")
+
+	// The round wrote each carried record under the new generation.
+	for index := range items {
+		key, _ := RuntimeStateKeyV3("alarmd", items[index].Identity)
+		backend.values[key], _ = encodeRuntimePacked(seriesMutation(t, items[index].Identity, version, 0, padding), 1)
+	}
+	if _, err := store.LoadRuntime(context.Background(), execution.StatePreflightRequest{Contract: frozenRef(), Items: items}); err != nil {
+		t.Fatal(err)
+	}
+	within(t, "the round after it")
 }

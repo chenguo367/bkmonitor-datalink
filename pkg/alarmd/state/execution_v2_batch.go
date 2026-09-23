@@ -915,6 +915,9 @@ func (store *ExecutionStore) loadRuntimeBatch(
 			}
 			raw := values[position]
 			loaded += int64(len(raw))
+			if len(raw) > largest {
+				largest = len(raw)
+			}
 			views[index].Carried = store.readCarriedRecord(request, item, raw, pass)
 			continue
 		}

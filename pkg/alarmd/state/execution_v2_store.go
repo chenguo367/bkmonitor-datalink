@@ -260,7 +260,12 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 	flush := func() {
 		bytes, largest, read := store.loadRuntimeBatch(ctx, request, batch, result.Items, pass)
 		result.LoadedBytes += bytes
-		if read && !pass.envelopes && !pass.carry {
+		// The frame pass measures, and so does the carry pass: a record it
+		// reads is written this round under the new generation at the size it
+		// was read, and the next round's frame pass reads it there. Leaving it
+		// out committed the empty frame pass's zero as the Query Group's size,
+		// and the next round asked for every carried record in one batch.
+		if read && !pass.envelopes {
 			// Only the frame pass measures. The Query Group's committed size
 			// describes the key every write goes to and the one the next round
 			// reads first; the envelopes are leaving, and a size learned from
@@ -338,7 +343,12 @@ func (store *ExecutionStore) LoadRuntime(ctx context.Context, request execution.
 			pass.carryUnreadable++
 			continue
 		}
-		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.runtimeLoadBatchLimit(request.Contract.Slot.QueryGroup, roundLargest, anyRead)) {
+		// Bounded as the envelope pass is, by the largest value the store
+		// accepts and not by anything learned: the frame pass has just found
+		// no record for every one of these series, so what it learned about
+		// this Query Group says nothing about the size of what the previous
+		// generation holds.
+		if len(batch.indexes) > 0 && (batch.target.Name != target.Name || len(batch.indexes) >= store.envelopeLoadBatchLimit()) {
 			flush()
 		}
 		batch.target = target
