@@ -208,6 +208,17 @@ func compileEffectiveTimeRequirement(uptime *uptimeConfigV1, timezoneRef string)
 	if uptime != nil && uptime.TimeRanges != nil && len(*uptime.TimeRanges) == 0 {
 		uptime, timezoneRef = nil, ""
 	}
+	// An uptime with nothing in it is no uptime: Python's in_alarm_time
+	// returns "always in effect" on `not uptime` before it reads a field
+	// (alarm_backends/core/control/strategy.py), and so it does for an
+	// explicit null time_ranges. A writer that defaults every detect's uptime
+	// to {} states no schedule; refusing it withheld every such strategy.
+	// An uptime that names calendars but no time_ranges is still refused:
+	// Python fails on it (KeyError on time_ranges), so there is no semantics
+	// to follow.
+	if uptime != nil && uptime.TimeRanges == nil && uptime.ActiveCalendars == nil && uptime.Calendars == nil {
+		uptime, timezoneRef = nil, ""
+	}
 	requirement := EffectiveTimeRequirement{kind: EffectiveTimeAlways, version: 1}
 	if uptime == nil && timezoneRef != "" {
 		return EffectiveTimeRequirement{}, errors.New("effective time: timezone_ref requires uptime")

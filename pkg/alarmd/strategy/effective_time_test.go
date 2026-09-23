@@ -261,3 +261,16 @@ func equalInt64s(left, right []int64) bool {
 	}
 	return true
 }
+
+// A writer that defaults every detect's uptime to an empty object states no
+// schedule: the level compiles to the same ALWAYS requirement as no uptime.
+func TestAnEmptyUptimeIsAlwaysInEffect(t *testing.T) {
+	compiler := newTestCompiler(t)
+	want := mustCompilePlan(t, compiler, validPlan()).Levels()[0].EffectiveTimeRequirement()
+	plan := validPlan()
+	plan.StrategyIR.Levels[0].TriggerPlan.Config = triggerConfigWithUptime("BUSINESS_LOCAL", map[string]any{})
+	requirement := mustCompilePlan(t, compiler, plan).Levels()[0].EffectiveTimeRequirement()
+	if requirement.Kind() != EffectiveTimeAlways || requirement.Digest() != want.Digest() {
+		t.Fatalf("empty uptime compiled to %q %q, want ALWAYS %q", requirement.Kind(), requirement.Digest(), want.Digest())
+	}
+}

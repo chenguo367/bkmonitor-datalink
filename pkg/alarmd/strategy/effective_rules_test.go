@@ -178,10 +178,17 @@ func TestSnapshotFrozenAcrossVersionsAndUptimeStateStable(t *testing.T) {
 }
 
 func TestUptimeSecondsAndEmptyPythonSemantics(t *testing.T) {
-	for _, raw := range []string{`{"time_ranges":[],"active_calendars":[7]}`, `null`} {
+	for _, raw := range []string{`{"time_ranges":[],"active_calendars":[7]}`, `null`, `{}`, `{"time_ranges":null}`} {
 		requirement, err := CompileUptime(json.RawMessage(raw))
 		if err != nil || requirement.Kind() != EffectiveTimeAlways {
 			t.Fatalf("%s: %+v %v", raw, requirement, err)
+		}
+	}
+	// Python has no reading of calendars without time_ranges (it raises), so
+	// neither does this.
+	for _, raw := range []string{`{"calendars":[3]}`, `{"active_calendars":[]}`} {
+		if _, err := CompileUptime(json.RawMessage(raw)); err == nil {
+			t.Fatalf("%s: accepted an uptime Python cannot read", raw)
 		}
 	}
 	req, err := CompileUptime(json.RawMessage(`{"time_ranges":[{"start":"23:15:59","end":"01:05:20"}]}`))
