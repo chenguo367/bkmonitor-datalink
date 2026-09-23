@@ -455,3 +455,160 @@ func catalogWithout(t *testing.T, catalog controlplane.Catalog, group execution.
 	t.Fatalf("no single-strategy catalog leaves %s out", group)
 	return controlplane.Catalog{}
 }
+
+// A Query Group held back while its own content changed is judged against
+// the content its records were activated with, not the manifest's: once its
+// timeline is repaired, the next publication cuts it to the new content.
+// Judged against the manifest, the repaired Segment would read as rewritten
+// and the Query Group would stay held back for good.
+func TestAHeldBackQueryGroupWhoseContentChangedIsCutOnceRepaired(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:cutover-isolation-changed")
+	first := cutoverCatalog(t, 80, nil)
+	second := cutoverCatalog(t, 90, nil)
+	edited, untouched := splitEdited(t, first, second)
+	fixture.publish(t, first, 60)
+	original := fixture.rewriteOpenDigest(t, edited.Identity, digestOf(t, untouched))
+	if _, err := fixture.publishNoEnsure(t, second, 120); err != nil {
+		t.Fatal(err)
+	}
+	if blocked := fixture.blocked(t); len(blocked) != 1 || blocked[0].QueryGroup != edited.Identity || blocked[0].ActivatedDigest != digestOf(t, edited) {
+		t.Fatalf("setup: blocked = %+v", blocked)
+	}
+	if err := fixture.client.Set(fixture.ctx, fixture.prefix+":schedule_timeline:"+string(edited.Identity), original, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	third := cutoverCatalog(t, 95, nil)
+	thirdSnapshot, err := fixture.publishNoEnsure(t, third, 180)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked := fixture.blocked(t); len(blocked) != 0 {
+		t.Fatalf("the repaired Query Group is still held back: %+v", blocked)
+	}
+	if cut := fixture.openSegment(t, edited.Identity, 180); cut.Start != 180 || cut.Publication.SnapshotRevision != thirdSnapshot.Publication.SnapshotRevision {
+		t.Fatalf("the repaired Query Group was not cut to the new content: %+v", cut)
+	}
+}
+
+// A timeline that does not decode is held back like a rewritten one: the
+// rest of the publication goes ahead.
+func TestAnUnreadableTimelineIsHeldBack(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:cutover-isolation-unreadable")
+	first := cutoverCatalog(t, 80, nil)
+	second := cutoverCatalog(t, 90, nil)
+	_, untouched := splitEdited(t, first, second)
+	fixture.publish(t, first, 60)
+	if err := fixture.client.Set(fixture.ctx, fixture.prefix+":schedule_timeline:"+string(untouched.Identity), "{not a timeline", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.publishNoEnsure(t, second, 120); err != nil {
+		t.Fatalf("an unreadable timeline failed the whole publication: %v", err)
+	}
+	blocked := fixture.blocked(t)
+	if len(blocked) != 1 || blocked[0].QueryGroup != untouched.Identity || blocked[0].Reason != controlplane.CutoverReasonTimelineMissing ||
+		!strings.Contains(blocked[0].Detail, "unreadable") || blocked[0].OpenDigest != "" {
+		t.Fatalf("blocked = %+v, want the unreadable timeline held back with nothing to run", blocked)
+	}
+}
+
+// A held reactivation keeps its publication, and with it the set of Query
+// Groups a cutover held back from that publication and the body's count of
+// them: deleting or rewriting either there would pass a held-back Query Group
+// off as unchanged at the next cutover.
+func TestAHeldReactivationKeepsTheHeldBackSet(t *testing.T) {
+	client := newControlplaneRedis(t)
+	ctx := context.Background()
+	prefix := "alarmd:control:cutover-isolation-reactivation"
+	repository, err := controlplane.NewRedisCatalogRepository(client, prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiler, semantics := runtimePlanCompiler(t)
+	both := twoQueryGroupCatalog(t)
+	returning, staying := both.QueryGroups[0], both.QueryGroups[1]
+	progress := &activationProgressReader{byGroup: map[execution.QueryGroupIdentity]execution.ProgressLoadResult{
+		returning.Identity: {Status: execution.ProgressMissing}, staying.Identity: {Status: execution.ProgressMissing},
+	}}
+	reconciler, err := controlplane.NewScheduleActivationReconcilerWithProgress(repository, compiler, semantics, progress,
+		func() time.Time { return time.Unix(90, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := repository.PublishCatalog(ctx, both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initial, err := controlplane.NewInitialScheduleActivator(repository, compiler, semantics, func() time.Time { return time.Unix(60, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := initial.Ensure(ctx, first.Publication); err != nil {
+		t.Fatal(err)
+	}
+	onlyStaying := controlplane.Catalog{QueryGroups: []controlplane.QueryGroup{staying}}
+	onlyStaying.SnapshotRevision = execution.SnapshotRevision(mustDigest(t, "alarmd-strategy-snapshot-v1", onlyStaying.QueryGroups))
+	second, _, err := repository.PublishCatalog(ctx, onlyStaying)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reconciler.Ensure(ctx, second.Publication); err != nil {
+		t.Fatal(err)
+	}
+	progress.byGroup[returning.Identity] = execution.ProgressLoadResult{Status: execution.ProgressFound, Progress: &execution.ScheduleProgress{
+		Identity: execution.ProgressIdentity{QueryGroup: returning.Identity}, NextSlot: 70, LastFullSlot: 60,
+		LastCompletionKind: execution.CompletionFull,
+	}}
+	third, _, err := repository.PublishCatalog(ctx, both)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := reconciler.Ensure(ctx, third.Publication)
+	if err != nil || len(held.Draining) != 1 {
+		t.Fatalf("setup: held = %+v, %v", held.Draining, err)
+	}
+
+	// A held-back set the body accounts for, as a cutover would have left it.
+	set := []controlplane.BlockedQueryGroup{{QueryGroup: staying.Identity, Reason: controlplane.CutoverReasonOpenDigestMismatch, Since: 90}}
+	payload, err := controlplane.EncodeBlockedSetForTest(set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Set(ctx, prefix+":activation_blocked", payload, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := client.Get(ctx, prefix+":activation").Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatal(err)
+	}
+	body["blocked_count"], body["blocked_digest"] = 1, controlplane.BlockedDigestForTest(set)
+	rewritten, _ := json.Marshal(body)
+	if err := client.Set(ctx, prefix+":activation", rewritten, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	repository.ForgetActivationCacheForTest()
+
+	// Drained: the held Query Group comes back through the held reactivation.
+	progress.byGroup[returning.Identity] = execution.ProgressLoadResult{Status: execution.ProgressFound, Progress: &execution.ScheduleProgress{
+		Identity: execution.ProgressIdentity{QueryGroup: returning.Identity}, NextSlot: held.Draining[0].RetiredBoundary + 60,
+		LastFullSlot: held.Draining[0].RetiredBoundary, LastCompletionKind: execution.CompletionFull,
+	}}
+	later, err := controlplane.NewScheduleActivationReconcilerWithProgress(repository, compiler, semantics, progress,
+		func() time.Time { return time.Unix(int64(held.Draining[0].RetiredBoundary)+300, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	reactivated, err := later.Ensure(ctx, third.Publication)
+	if err != nil || len(reactivated.Draining) != 0 {
+		t.Fatalf("the held Query Group was not reactivated: %+v, %v", reactivated.Draining, err)
+	}
+	if got, err := client.Get(ctx, prefix+":activation_blocked").Bytes(); err != nil || string(got) != string(payload) {
+		t.Fatalf("the held reactivation changed the held-back set: %q, %v", got, err)
+	}
+	if reactivated.BlockedCount != 1 || reactivated.BlockedDigest != controlplane.BlockedDigestForTest(set) {
+		t.Fatalf("the held reactivation dropped the body's count: %d %q", reactivated.BlockedCount, reactivated.BlockedDigest)
+	}
+}

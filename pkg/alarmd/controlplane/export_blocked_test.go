@@ -12,3 +12,10 @@ func (repository *RedisCatalogRepository) ForgetActivationCacheForTest() {
 	repository.activationCache.entry = nil
 	repository.activationCache.mu.Unlock()
 }
+
+// EncodeBlockedSetForTest and BlockedDigestForTest are the persisted form of
+// a held-back set and the digest the activation body counts it by.
+func EncodeBlockedSetForTest(groups []BlockedQueryGroup) ([]byte, error) {
+	return encodeBlockedSet(groups)
+}
+func BlockedDigestForTest(groups []BlockedQueryGroup) string { return blockedDigest(groups) }
