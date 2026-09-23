@@ -273,6 +273,9 @@ func TestNoStoredViewIsPublishedFromAnUnreadableOrEmptySet(t *testing.T) {
 	for name, source := range map[string]storedViewSource{
 		"unreadable": {activeErr: errors.New("redis gone")},
 		"empty":      {},
+		// Active Query Groups none of which has a record yet: a fresh
+		// deployment before its first assignment round.
+		"no records": {active: []execution.QueryGroupIdentity{"qg-new"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			var observed []observability.Observation
