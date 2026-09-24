@@ -197,6 +197,11 @@ type HealthResponse struct {
 	DemotionEntries         int `json:"demotion_entries"`
 	DemotionExtensions      int `json:"demotion_extensions"`
 	DemotionExits           int `json:"demotion_exits"`
+	// DemotionRestored, DemotionHandovers and DemotionReentries: see View.
+	// Entries plus restored equal exits plus handovers plus the pool now.
+	DemotionRestored  int `json:"demotion_restored"`
+	DemotionHandovers int `json:"demotion_handovers"`
+	DemotionReentries int `json:"demotion_reentries"`
 	// A pointer because omitempty does nothing for a struct: a zero time.Time
 	// still serialises, as "0001-01-01T00:00:00Z", and that string is truthy in
 	// the page. The page guards this field by truthiness, so a zero would render
@@ -282,6 +287,10 @@ type HealthResponse struct {
 	// for retired Query Groups, beside the census that cannot see them.
 	AssignmentSweep        *AssignmentSweepFacts `json:"assignment_sweep,omitempty"`
 	AssignmentSweepReplica string                `json:"assignment_sweep_replica,omitempty"`
+	// LeaderRound is the leader's last reconcile round, stage by stage, and
+	// LeaderRoundReplica which leader.
+	LeaderRound        *LeaderRoundFacts `json:"leader_round,omitempty"`
+	LeaderRoundReplica string            `json:"leader_round_replica,omitempty"`
 	// ViewStream is the Leader's account of the view stream, with its one
 	// sentence for the first screen, and ViewStreamReplica which replica.
 	ViewStream        *ViewStreamFacts `json:"view_stream,omitempty"`
@@ -905,10 +914,12 @@ func NewHandler(
 			DemotedDue:           view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
 			DemotionEntries:    view.DemotionEntries,
 			DemotionExtensions: view.DemotionExtensions, DemotionExits: view.DemotionExits,
-			LastDemotionExit: momentOrNil(view.LastDemotionExit),
-			PrunedSkips:      prunedSkipList(view.PrunedSkips),
-			RetainedShare:    retainedShareList(view.RetainedShare),
-			Coverage:         view.Coverage, PerReplica: view.PerReplica,
+			DemotionRestored: view.DemotionRestored, DemotionHandovers: view.DemotionHandovers,
+			DemotionReentries: view.DemotionReentries,
+			LastDemotionExit:  momentOrNil(view.LastDemotionExit),
+			PrunedSkips:       prunedSkipList(view.PrunedSkips),
+			RetainedShare:     retainedShareList(view.RetainedShare),
+			Coverage:          view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			OutputProtocols: outputProtocolList(view.OutputProtocols),
 			OutputPath:      OutputPathOf(&view),
@@ -918,6 +929,7 @@ func NewHandler(
 			Rebalance:     view.Rebalance, RebalanceReplica: view.RebalanceReplica,
 			AssignmentScope: view.AssignmentScope, AssignmentScopeReplica: view.AssignmentScopeReplica,
 			AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
+			LeaderRound: view.LeaderRound, LeaderRoundReplica: view.LeaderRoundReplica,
 			ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,
 			Source: view.Source, SourceReplica: view.SourceReplica, SourceStanding: view.SourceStanding,
 			NoDataTracking: view.NoDataTracking,

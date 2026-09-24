@@ -239,6 +239,9 @@ type fleetPublisher struct {
 	// assignmentSweep reports the control leader's last sweep of retired
 	// Assignment records. Nil on a follower.
 	assignmentSweep func() *fleet.AssignmentSweepFacts
+	// leaderRound reports the control leader's last reconcile round, stage
+	// by stage; nil on a follower.
+	leaderRound func() *fleet.LeaderRoundFacts
 	// viewStream reports this replica's account of the view stream: the
 	// Leader's ledger, or Leading false. Nil on a runtime without the stream.
 	viewStream func() *fleet.ViewStreamFacts
@@ -463,6 +466,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.assignmentSweep != nil {
 		snapshot.AssignmentSweep = publisher.assignmentSweep()
 	}
+	if publisher.leaderRound != nil {
+		snapshot.LeaderRound = publisher.leaderRound()
+	}
 	if publisher.viewStream != nil {
 		snapshot.ViewStream = publisher.viewStream()
 	}
@@ -491,8 +497,11 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	byDesign := publisher.tracker.ByDesign()
 	snapshot.ByDesign = byDesign
 	snapshot.TotalByDesign = len(byDesign)
-	snapshot.DemotionEntries, snapshot.DemotionExtensions, snapshot.DemotionExits,
-		snapshot.LastDemotionExit = publisher.tracker.DemotionFlow()
+	flow := publisher.tracker.DemotionFlow()
+	snapshot.DemotionEntries, snapshot.DemotionExtensions, snapshot.DemotionExits, snapshot.LastDemotionExit =
+		flow.Entries, flow.Extensions, flow.Exits, flow.LastExit
+	snapshot.DemotionRestored, snapshot.DemotionHandovers, snapshot.DemotionReentries =
+		flow.Restored, flow.Handovers, flow.Reentries
 	// The spans nothing ever evaluated. Not folded into any column: those
 	// objects are running normally now, and the loss is in their past.
 	snapshot.PrunedSkips = publisher.tracker.PrunedSkips()

@@ -1511,6 +1511,14 @@ type Snapshot struct {
 	DemotionEntries    int `json:"demotion_entries"`
 	DemotionExtensions int `json:"demotion_extensions"`
 	DemotionExits      int `json:"demotion_exits"`
+	// DemotionRestored, DemotionHandovers and DemotionReentries close the
+	// pool's arithmetic across restarts and owners: objects restored into the
+	// pool from their record are not entries, objects handed to another
+	// replica while in it are not exits, and a re-entry is an entry within
+	// the re-entry window of an exit. Absent (zero) on a build before them.
+	DemotionRestored  int `json:"demotion_restored,omitempty"`
+	DemotionHandovers int `json:"demotion_handovers,omitempty"`
+	DemotionReentries int `json:"demotion_reentries,omitempty"`
 	// LastDemotionExit is when this replica last saw an object leave the pool.
 	// Zero means it has not seen one, which is not the same as "none left
 	// recently" and must not be rendered as a duration.
@@ -1601,6 +1609,9 @@ type Snapshot struct {
 	// records for retired Query Groups. Absent on every follower and on a
 	// leader that has not swept.
 	AssignmentSweep *AssignmentSweepFacts `json:"assignment_sweep,omitempty"`
+	// LeaderRound is the control leader's last reconcile round, stage by
+	// stage. Absent on every follower and on a build before it.
+	LeaderRound *LeaderRoundFacts `json:"leader_round,omitempty"`
 	// ViewStream is this replica's account of the view stream: the Leader's
 	// ledger when it leads, Leading false otherwise. Absent on a build before
 	// the stream existed.
@@ -1922,6 +1933,14 @@ type ControlSourceFacts struct {
 	// once per limiter window; this is the copy that does not scroll away.
 	LastFailureExit string `json:"last_failure_exit,omitempty"`
 	LastFailure     string `json:"last_failure,omitempty"`
+	// PendingConfirmationAgeSeconds is how long the leader's refresh has
+	// been answering PENDING_CONFIRMATION with no PUBLISHED or UNCHANGED
+	// since, 0 when nothing is pending, and PendingConfirmationRounds how
+	// many rounds. Those rounds count as successes, so LastSuccessAgeSeconds
+	// stays young while a change waits; this is what rises. Absent on a
+	// process that is not leading.
+	PendingConfirmationAgeSeconds *float64 `json:"pending_confirmation_age_seconds,omitempty"`
+	PendingConfirmationRounds     int      `json:"pending_confirmation_rounds,omitempty"`
 }
 
 // OpenAlertSetFacts is what a replica says about its copy of the consumer's
@@ -2538,6 +2557,9 @@ type View struct {
 	DemotionEntries    int                    `json:"demotion_entries"`
 	DemotionExtensions int                    `json:"demotion_extensions"`
 	DemotionExits      int                    `json:"demotion_exits"`
+	DemotionRestored   int                    `json:"demotion_restored"`
+	DemotionHandovers  int                    `json:"demotion_handovers"`
+	DemotionReentries  int                    `json:"demotion_reentries"`
 	LastDemotionExit   time.Time              `json:"last_demotion_exit,omitempty"`
 	// DemotedDue counts pooled objects whose own cooldown window has already
 	// elapsed at the moment of this read: they are due to be tried again and are
@@ -2619,6 +2641,10 @@ type View struct {
 	// AssignmentSweepReplica which one.
 	AssignmentSweep        *AssignmentSweepFacts `json:"assignment_sweep,omitempty"`
 	AssignmentSweepReplica string                `json:"assignment_sweep_replica,omitempty"`
+	// LeaderRound is the newest leader round any counted replica published,
+	// and LeaderRoundReplica which one.
+	LeaderRound        *LeaderRoundFacts `json:"leader_round,omitempty"`
+	LeaderRoundReplica string            `json:"leader_round_replica,omitempty"`
 	// ViewStream is the Leader's account of the view stream -- the newest
 	// snapshot that says it leads; failing any, the newest that says it does
 	// not, so the page can say "no Leader is serving the stream" -- and
@@ -2727,6 +2753,9 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		view.DemotionEntries += snapshot.DemotionEntries
 		view.DemotionExtensions += snapshot.DemotionExtensions
 		view.DemotionExits += snapshot.DemotionExits
+		view.DemotionRestored += snapshot.DemotionRestored
+		view.DemotionHandovers += snapshot.DemotionHandovers
+		view.DemotionReentries += snapshot.DemotionReentries
 		for queryGroup, skip := range snapshot.PrunedSkips {
 			if view.PrunedSkips == nil {
 				view.PrunedSkips = make(map[string]PrunedSkip, len(snapshot.PrunedSkips))
@@ -2830,6 +2859,10 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if snapshot.AssignmentSweep != nil && (view.AssignmentSweep == nil || snapshot.AssignmentSweep.At.After(view.AssignmentSweep.At)) {
 			facts := *snapshot.AssignmentSweep
 			view.AssignmentSweep, view.AssignmentSweepReplica = &facts, replica
+		}
+		if snapshot.LeaderRound != nil && (view.LeaderRound == nil || snapshot.LeaderRound.At.After(view.LeaderRound.At)) {
+			facts := *snapshot.LeaderRound
+			view.LeaderRound, view.LeaderRoundReplica = &facts, replica
 		}
 		if snapshot.ViewStream != nil && snapshot.ViewStream.Leading {
 			if snapshot.ViewStream.PublishFailingBeyondBound {

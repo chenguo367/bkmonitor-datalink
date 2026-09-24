@@ -351,6 +351,12 @@ type phaseTwoControlRefreshResult struct {
 	// fleet can say how old the writer's content is beside what it withheld.
 	ChangeSignalPresent    bool
 	ChangeSignalAgeSeconds int64
+	// SourceRefreshStatus is the source refresh's own answer on a round
+	// that got one: PENDING_CONFIRMATION, PUBLISHED, UNCHANGED or
+	// PUBLICATION_CONFLICT. Empty on a round that got none -- a failure, a
+	// follower's activation load -- which says nothing about a pending
+	// candidate either way.
+	SourceRefreshStatus controlplane.SourceRefreshStatus
 	// Activation is what this round did about bringing the activation to the
 	// publication the source produced, when it tried. Absent on a round that
 	// did not try: a follower's load, a source failure before any publication
@@ -460,6 +466,43 @@ func (bundle *phaseTwoWorkerBundle) assignmentSweepFleetFacts() *fleet.Assignmen
 		return nil
 	}
 	return source.LastAssignmentSweep()
+}
+
+// phaseTwoLeaderRoundSource is what an ownership runtime that runs the
+// control leader's reconcile rounds reports about them. Its own interface,
+// so a runtime that runs none -- every test fake among them -- needs no
+// stub.
+type phaseTwoLeaderRoundSource interface {
+	LastLeaderRound() *fleet.LeaderRoundFacts
+	LeaderRoundStats() metric.LeaderRoundStats
+}
+
+var _ phaseTwoLeaderRoundSource = (*productionPhaseTwoOwnership)(nil)
+
+// leaderRoundFleetFacts is the latest leader round on this process, for the
+// fleet snapshot; nil on a follower.
+func (bundle *phaseTwoWorkerBundle) leaderRoundFleetFacts() *fleet.LeaderRoundFacts {
+	if bundle == nil {
+		return nil
+	}
+	source, ok := bundle.dependencies.Ownership.(phaseTwoLeaderRoundSource)
+	if !ok {
+		return nil
+	}
+	return source.LastLeaderRound()
+}
+
+// leaderRoundStats is what the leader round collector scrapes; empty on a
+// runtime that runs no rounds.
+func (bundle *phaseTwoWorkerBundle) leaderRoundStats() metric.LeaderRoundStats {
+	if bundle == nil {
+		return metric.LeaderRoundStats{}
+	}
+	source, ok := bundle.dependencies.Ownership.(phaseTwoLeaderRoundSource)
+	if !ok {
+		return metric.LeaderRoundStats{}
+	}
+	return source.LeaderRoundStats()
 }
 
 type phaseTwoQueryGroupLifecycle struct {
@@ -863,6 +906,7 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 	if dependencies.Recorder != nil {
 		dependencies.Recorder.SetOwnedQueryGroups(0)
 		dependencies.Recorder.SetControlSourceSource(bundle.controlSourceStats)
+		dependencies.Recorder.SetLeaderRoundSource(bundle.leaderRoundStats)
 		dependencies.Recorder.SetCatalogCompositionSource(bundle.catalogComposition)
 	}
 	return bundle, nil

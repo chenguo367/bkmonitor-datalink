@@ -2054,8 +2054,10 @@ func TestProductionPhaseTwoOwnershipUsesAssignmentAndLeaseBeforeRunner(t *testin
 		t.Fatal(err)
 	}
 	var observations []observability.Observation
+	cooldowns := &countingCooldownStore{}
 	production, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
-		Store: store, WorkerID: "worker-1", Catalog: unavailableSlotCatalog{},
+		QueryCooldowns: cooldowns,
+		Store:          store, WorkerID: "worker-1", Catalog: unavailableSlotCatalog{},
 		Progress: unavailableScheduleProgress{}, Executor: rejectingSlotExecutor{}, Now: func() time.Time { return now },
 		ControlLeaderTTL: time.Minute, Observer: observability.ObserverFunc(func(_ context.Context, observation observability.Observation) {
 			observations = append(observations, observation)
@@ -2104,6 +2106,13 @@ func TestProductionPhaseTwoOwnershipUsesAssignmentAndLeaseBeforeRunner(t *testin
 	}
 	if !hasObservedStage(observations, observability.StageLeaseRenewed) {
 		t.Fatalf("ownership observations = %+v, want lease_renewed", observations)
+	}
+	// The Query Group's pool record is read on its first round, so a Query
+	// Group that was in the pool before a restart or a change of owner is
+	// still in it.
+	_, _, _ = runner.RunOne(context.Background())
+	if cooldowns.loads != 1 {
+		t.Fatalf("pool record read %d times on the first round, want once", cooldowns.loads)
 	}
 	store.checkErr = ownership.ErrStaleFence
 	if _, attempted, err := runner.RunOne(context.Background()); !errors.Is(err, ownership.ErrStaleFence) || attempted {
@@ -3016,4 +3025,16 @@ func TestProductionPhaseTwoControlReportsEveryRoundAndPersistsSuccess(t *testing
 	if !reported {
 		t.Fatal("the failed mark write was not reported")
 	}
+}
+
+// countingCooldownStore holds no records and counts the reads.
+type countingCooldownStore struct{ loads int }
+
+func (store *countingCooldownStore) LoadQueryCooldown(context.Context, execution.QueryGroupIdentity) (scheduler.QueryCooldownRecord, bool, error) {
+	store.loads++
+	return scheduler.QueryCooldownRecord{}, false, nil
+}
+
+func (*countingCooldownStore) SaveQueryCooldown(context.Context, execution.OwnerFence, scheduler.QueryCooldownRecord) error {
+	return nil
 }

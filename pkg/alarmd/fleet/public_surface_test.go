@@ -35,6 +35,7 @@ var publicHealthFields = map[string]bool{
 	"DemotedDue": true, "DemotedDueOldestSeconds": true, "DemotionEntries": true, "DemotionExtensions": true,
 	"DemotionExits": true, "LastDemotionExit": true, "PublishedVersion": true, "ReplicasNotReady": true,
 	"DependenciesReplicas": true, "Cohorts": true,
+	"DemotionRestored": true, "DemotionHandovers": true, "DemotionReentries": true,
 }
 
 var redactedHealthFields = map[string]bool{
@@ -47,6 +48,7 @@ var redactedHealthFields = map[string]bool{
 	"DependenciesReplica": true, "LinkdConsole": true, "Coverage": true, "PerReplica": true, "Overdue": true,
 	"Dispatch": true, "Schedule": true, "Gaps": true, "Capacity": true,
 	"VerdictHistory": true, "VerdictHistorySince": true, "VerdictHistoryReplica": true,
+	"LeaderRound": true, "LeaderRoundReplica": true,
 }
 
 // fill sets every settable leaf under value to something non-zero: free-form

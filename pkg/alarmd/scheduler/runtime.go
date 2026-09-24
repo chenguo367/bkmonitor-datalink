@@ -397,6 +397,14 @@ type Runner struct {
 	sourceNextAt   time.Time
 	dueBound       RunnerDueBound
 	queryCooldown  queryCooldownState
+	// cooldownMemory, cooldownStore, cooldownLoaded and cooldownFence carry
+	// the pool membership across Runners: what it remembers of the pool, the
+	// store it is kept in, whether it has been read back, and the fence the
+	// writes go under.
+	cooldownMemory queryCooldownMemory
+	cooldownStore  QueryCooldownStore
+	cooldownLoaded bool
+	cooldownFence  execution.OwnerFence
 	// heldBy is what the previous round did, carried forward so the next
 	// round's Slot can report what kept it from running. It is the Runner's
 	// own word -- the same one run_one_return_total counts -- and is read on
@@ -715,6 +723,7 @@ func (runner *Runner) runOneTracked(
 		return execution.SlotExecutionResult{}, false, err
 	}
 	ctx = withVerifiedOwnership(ctx, runner.queryGroup, confirmedAssignment, confirmedFence)
+	runner.restoreQueryCooldown(ctx, confirmedFence)
 	decision = "source_next"
 	slot, due, facts, err := runner.source.Next(ctx, runner.queryGroup)
 	sourceFacts = facts
