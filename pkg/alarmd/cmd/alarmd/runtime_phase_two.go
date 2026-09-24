@@ -83,6 +83,8 @@ type phaseTwoApplicationDependencies struct {
 		*phaseTwoApplicationHealth,
 	) (*phaseTwoWorkerBundle, error)
 	newHTTP func(*metric.Recorder, observability.HealthSource, httpSurface) (httpRuntime, error)
+	// lifecycle opens the process's start/stop record; nil records nothing.
+	lifecycle func(config.Config) *lifecycleRecord
 }
 
 // httpSurface is what the listener needs from the configuration: where the
@@ -104,8 +106,8 @@ type runtimeModeDependencies struct {
 
 func defaultPhaseTwoApplicationDependencies() phaseTwoApplicationDependencies {
 	return phaseTwoApplicationDependencies{
-		configureCPU: configurePhaseTwoCPU,
-		run:          runPhaseTwoApplication, openBundle: openProductionPhaseTwoBundle,
+		configureCPU: configurePhaseTwoCPU, lifecycle: newLifecycleRecord,
+		run: runPhaseTwoApplication, openBundle: openProductionPhaseTwoBundle,
 		newHTTP: func(recorder *metric.Recorder, source observability.HealthSource, surface httpSurface) (httpRuntime, error) {
 			options := []httpservice.Option{httpservice.WithDiagnosticsAddress(surface.Diagnostics), httpservice.WithInternalAddress(surface.Internal)}
 			if surface.Restricted {
@@ -232,6 +234,12 @@ func runPhaseTwoApplicationWithDependencies(
 	httpDone := make(chan error, 1)
 	go func() { httpDone <- server.Run(httpContext, cfg.HTTP.Listen, cfg.ShutdownTimeout.Duration()) }()
 
+	var lifecycle *lifecycleRecord
+	if dependencies.lifecycle != nil {
+		lifecycle = dependencies.lifecycle(cfg)
+	}
+	defer lifecycle.close()
+	lifecycle.start()
 	bundle, err := dependencies.openBundle(runtimeContext, cfg, recorder, logger, application.health)
 	if err == nil && bundle != nil {
 		// Publish startup facts before making the evidence handler reachable.
@@ -253,6 +261,7 @@ func runPhaseTwoApplicationWithDependencies(
 		server.SetLiveness(bundle.liveness)
 	}
 	if err != nil {
+		lifecycle.stop(lifecycleStopStartFailed, err)
 		cancelRuntime()
 		cancelHTTP()
 		httpErr := waitRuntimeComponent(httpDone, time.Now().Add(cfg.ShutdownTimeout.Duration()))
@@ -287,6 +296,7 @@ func runPhaseTwoApplicationWithDependencies(
 			markPhaseTwoFatal(runtimeContext, bundle, application.health, httpErr)
 		}
 	}
+	lifecycle.stop(lifecycleStopReason(ctx.Err() != nil, bundleStoppedEarly, httpStoppedEarly), errors.Join(runErr, httpErr))
 	cancelRuntime()
 	cancelHTTP()
 	deadline := time.Now().Add(cfg.ShutdownTimeout.Duration())
