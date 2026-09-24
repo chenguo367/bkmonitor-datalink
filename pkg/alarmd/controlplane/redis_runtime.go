@@ -330,8 +330,12 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 	if !activationMatchesExpectation(previous, expected) {
 		return ErrActivationConflict
 	}
-	if next.Pending != nil || next.Current.PublicationEpoch <= previous.Current.PublicationEpoch ||
-		next.Current.SnapshotRevision == previous.Current.SnapshotRevision {
+	// Finishing a cutover left in progress is the one write that may name the
+	// publication it already names: it clears the progress, so it cannot be
+	// repeated. Any other write must move to a new publication.
+	finishing := previous.CutoverProgress != nil && next.CutoverProgress == nil && next.Current == previous.Current
+	if next.Pending != nil || (!finishing && (next.Current.PublicationEpoch <= previous.Current.PublicationEpoch ||
+		next.Current.SnapshotRevision == previous.Current.SnapshotRevision)) {
 		return fmt.Errorf("%w: publication activation must advance to one new current publication", ErrCutoverRequest)
 	}
 	published, err := repository.loadPublishedGroups(ctx, next.Current)

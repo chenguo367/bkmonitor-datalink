@@ -186,7 +186,7 @@ func TestProductionPhaseTwoBundleStartsIdleWithEmptyCatalogThenActivatesQueryGro
 		t.Fatalf("empty Catalog runtime Query Groups/runners = %v/%d, want healthy idle", bundle.queryGroups, len(bundle.runners))
 	}
 	productionControl := bundle.dependencies.Control.(*productionPhaseTwoControl)
-	activation, err := productionControl.dependencies.Repository.LoadActivation(ctx)
+	activation, err := productionControl.dependencies.Repository.(*controlplane.RedisCatalogRepository).LoadActivation(ctx)
 	if err != nil || activation.RecordRevision != 1 || len(activation.Plans) != 0 {
 		t.Fatalf("empty Catalog activation = %+v, %v", activation, err)
 	}
@@ -206,7 +206,7 @@ func TestProductionPhaseTwoBundleStartsIdleWithEmptyCatalogThenActivatesQueryGro
 	if len(bundle.queryGroups) != 1 || len(bundle.runners) != 1 {
 		t.Fatalf("activated Query Groups/runners = %v/%d, want one", bundle.queryGroups, len(bundle.runners))
 	}
-	activation, err = productionControl.dependencies.Repository.LoadActivation(ctx)
+	activation, err = productionControl.dependencies.Repository.(*controlplane.RedisCatalogRepository).LoadActivation(ctx)
 	if err != nil || activation.RecordRevision != 2 || len(activation.Plans) != 1 {
 		t.Fatalf("non-empty Catalog activation = %+v, %v", activation, err)
 	}
@@ -274,7 +274,7 @@ func TestProductionPhaseTwoBundleRebuildsExpiredSnapshotReferencedByPersistentAc
 		t.Fatalf("first Start() error = %v", err)
 	}
 	firstControl := first.dependencies.Control.(*productionPhaseTwoControl)
-	oldActivation, err := firstControl.dependencies.Repository.LoadActivation(ctx)
+	oldActivation, err := firstControl.dependencies.Repository.LoadActivationHead(ctx)
 	if err != nil || oldActivation.Current.SnapshotRevision == "" {
 		t.Fatalf("first activation = %+v, %v", oldActivation, err)
 	}
@@ -365,7 +365,7 @@ func TestProductionPhaseTwoBundleRebuildsExpiredSnapshotReferencedByPersistentAc
 		t.Fatalf("refreshAndReconcile(rebuild expired Snapshot) error = %v", err)
 	}
 	recoveredControl := recovered.dependencies.Control.(*productionPhaseTwoControl)
-	newActivation, err := recoveredControl.dependencies.Repository.LoadActivation(ctx)
+	newActivation, err := recoveredControl.dependencies.Repository.LoadActivationHead(ctx)
 	if err != nil {
 		t.Fatalf("recovered activation error = %v", err)
 	}
@@ -546,7 +546,7 @@ func testProductionPhaseTwoStrandedLatest(
 		t.Fatalf("first Start() error = %v", err)
 	}
 	firstControl := first.dependencies.Control.(*productionPhaseTwoControl)
-	oldActivation, err := firstControl.dependencies.Repository.LoadActivation(ctx)
+	oldActivation, err := firstControl.dependencies.Repository.(*controlplane.RedisCatalogRepository).LoadActivation(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -611,7 +611,7 @@ func testProductionPhaseTwoStrandedLatest(
 	var scheduleBefore string
 	scheduleKey := catalogPrefix + ":schedule_timeline:" + string(oldSnapshot.QueryGroups[0].Identity)
 	if !wantRecovery {
-		activationBefore, err = firstControl.dependencies.Repository.LoadActivation(ctx)
+		activationBefore, err = firstControl.dependencies.Repository.LoadActivationHead(ctx)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -662,7 +662,7 @@ func testProductionPhaseTwoStrandedLatest(
 		!errors.Is(result.Cause, controlplane.ErrSnapshotUnavailable) {
 		t.Fatalf("rejected Refresh()=(%+v,%v), want Snapshot unavailable without activation", result, refreshErr)
 	}
-	activation, err := firstControl.dependencies.Repository.LoadActivation(ctx)
+	activation, err := firstControl.dependencies.Repository.LoadActivationHead(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1327,7 +1327,7 @@ func TestProductionPhaseTwoBundleDrainsExpiredRetiredBacklogWithoutProjection(t 
 		t.Fatalf("refreshAndReconcile(confirm strategy 1001 retirement) error = %v", err)
 	}
 	productionControl := bundle.dependencies.Control.(*productionPhaseTwoControl)
-	activation, err := productionControl.dependencies.Repository.LoadActivation(ctx)
+	activation, err := productionControl.dependencies.Repository.LoadActivationHead(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

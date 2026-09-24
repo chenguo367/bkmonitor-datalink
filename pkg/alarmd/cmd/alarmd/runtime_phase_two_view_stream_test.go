@@ -219,7 +219,7 @@ func TestAViewPublishFailureIsReportedAndTheRoundStands(t *testing.T) {
 
 type failingViewSource struct{ err error }
 
-func (source failingViewSource) LoadActivation(context.Context) (controlplane.ActivationState, error) {
+func (source failingViewSource) LoadActivationHead(context.Context) (controlplane.ActivationState, error) {
 	return controlplane.ActivationState{}, source.err
 }
 
@@ -237,7 +237,7 @@ func (source failingViewSource) DrainingContent(context.Context, execution.Query
 
 type staticViewSource struct{}
 
-func (staticViewSource) LoadActivation(context.Context) (controlplane.ActivationState, error) {
+func (staticViewSource) LoadActivationHead(context.Context) (controlplane.ActivationState, error) {
 	return controlplane.ActivationState{RecordRevision: 1, Current: controlplane.SnapshotPublicationRef{SnapshotRevision: "snap", PublicationEpoch: 1}}, nil
 }
 
@@ -251,4 +251,62 @@ func (staticViewSource) ActivationBlocked(context.Context) ([]controlplane.Block
 
 func (staticViewSource) DrainingContent(context.Context, execution.QueryGroupIdentity) (execution.ObjectDigest, []execution.OutputContextRef, bool, error) {
 	return "", nil, false, nil
+}
+
+// ApplyCutoverProgress passes the content through: this fixture has no
+// cutover in progress.
+func (_ failingViewSource) ApplyCutoverProgress(
+	_ context.Context, _ controlplane.ActivationState, content map[execution.QueryGroupIdentity]controlplane.ContentEntry,
+) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error) {
+	return content, nil
+}
+
+// ApplyCutoverProgress passes the content through: this fixture has no
+// cutover in progress.
+func (_ staticViewSource) ApplyCutoverProgress(
+	_ context.Context, _ controlplane.ActivationState, content map[execution.QueryGroupIdentity]controlplane.ContentEntry,
+) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error) {
+	return content, nil
+}
+
+// progressViewSource publishes new content for qg while its open Segment
+// still runs old, as during a cutover in progress.
+type progressViewSource struct{ staticViewSource }
+
+func (progressViewSource) LoadActivationHead(context.Context) (controlplane.ActivationState, error) {
+	return controlplane.ActivationState{RecordRevision: 2, Current: controlplane.SnapshotPublicationRef{SnapshotRevision: "snap", PublicationEpoch: 2},
+		CutoverProgress: &controlplane.CutoverProgress{}}, nil
+}
+
+func (progressViewSource) LoadPublishedContent(context.Context, controlplane.SnapshotPublicationRef) (controlplane.PublishedContent, error) {
+	return controlplane.PublishedContent{Groups: map[execution.QueryGroupIdentity]controlplane.ContentEntry{"qg": {Digest: "new"}, "added": {Digest: "fresh"}}}, nil
+}
+
+func (progressViewSource) ApplyCutoverProgress(
+	_ context.Context, state controlplane.ActivationState, content map[execution.QueryGroupIdentity]controlplane.ContentEntry,
+) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error) {
+	if state.CutoverProgress == nil {
+		return content, nil
+	}
+	return map[execution.QueryGroupIdentity]controlplane.ContentEntry{"qg": {Digest: "old"}}, nil
+}
+
+// While a cutover is in progress the view gives each Query Group what its
+// open Segment runs: a Query Group past the cursor keeps its old content,
+// and one not added yet is not in the view. Given the manifest's, the first
+// would stop on a scope mismatch and the second would be told to run what
+// it has no timeline for.
+func TestTheViewFollowsTheOpenSegmentsWhileACutoverIsInProgress(t *testing.T) {
+	source := progressViewSource{}
+	state, err := source.LoadActivationHead(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	running, err := runningViewContent(context.Background(), source, state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(running) != 1 || running["qg"].Digest != "old" {
+		t.Fatalf("view content = %+v, want only qg on the content its open Segment runs", running)
+	}
 }

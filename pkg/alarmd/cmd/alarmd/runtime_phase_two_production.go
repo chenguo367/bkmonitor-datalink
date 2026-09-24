@@ -307,7 +307,7 @@ type productionInitialScheduleActivator interface {
 }
 
 type productionCatalogRepository interface {
-	LoadActivation(context.Context) (controlplane.ActivationState, error)
+	LoadActivationHead(context.Context) (controlplane.ActivationState, error)
 	ControlVersionTag(context.Context) (string, bool, error)
 	LoadActiveQueryGroupSet(context.Context, controlplane.ActiveQueryGroupSetRef) ([]execution.QueryGroupIdentity, error)
 	RenewCurrentActivationObjects(context.Context) error
@@ -445,7 +445,7 @@ func (runtime *productionPhaseTwoControl) LoadActive(
 	// This tick runs as a follower: whatever this process published in an
 	// earlier term is not its to answer from any more.
 	runtime.dependencies.Reconciler.StepDown()
-	state, err := runtime.dependencies.Repository.LoadActivation(ctx)
+	state, err := runtime.dependencies.Repository.LoadActivationHead(ctx)
 	if err != nil {
 		reason := "read_failed"
 		if errors.Is(err, controlplane.ErrActivationUnavailable) {
@@ -583,7 +583,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 		})
 	}()
 	if result.Status == controlplane.SourceRefreshPendingConfirmation {
-		state, err := runtime.dependencies.Repository.LoadActivation(ctx)
+		state, err := runtime.dependencies.Repository.LoadActivationHead(ctx)
 		activationMissing := false
 		if errors.Is(err, controlplane.ErrActivationUnavailable) {
 			// The activation record is gone. The store answered; there is
@@ -704,7 +704,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 	previous := controlplane.ActivationState{}
 	previousErr := controlplane.ErrActivationUnavailable
 	if result.Status != controlplane.SourceRefreshUnchanged {
-		previous, previousErr = runtime.dependencies.Repository.LoadActivation(ctx)
+		previous, previousErr = runtime.dependencies.Repository.LoadActivationHead(ctx)
 	}
 	state, activationResult, ok := runtime.activate(ctx, result.Publication)
 	if !ok {
@@ -947,7 +947,7 @@ func (runtime *productionPhaseTwoControl) keepLastGood(
 	if errors.Is(cause, controlplane.ErrPublicationOccurrenceCollision) {
 		reason = observability.ReasonContractDeterministic
 	}
-	state, err := runtime.dependencies.Repository.LoadActivation(ctx)
+	state, err := runtime.dependencies.Repository.LoadActivationHead(ctx)
 	if errors.Is(err, controlplane.ErrActivationUnavailable) {
 		return phaseTwoControlRefreshResult{}, controlplane.ActivationState{}, cause
 	}

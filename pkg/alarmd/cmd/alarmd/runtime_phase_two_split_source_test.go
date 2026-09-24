@@ -21,10 +21,17 @@ type fakeSplitViewSource struct {
 	revision execution.SnapshotRevision
 	groups   map[execution.QueryGroupIdentity]controlplane.ContentEntry
 	loads    int
+	// running is what the open Segments run while inProgress is set.
+	inProgress bool
+	running    map[execution.QueryGroupIdentity]controlplane.ContentEntry
 }
 
-func (source *fakeSplitViewSource) LoadActivation(context.Context) (controlplane.ActivationState, error) {
-	return controlplane.ActivationState{Current: controlplane.SnapshotPublicationRef{SnapshotRevision: source.revision}}, nil
+func (source *fakeSplitViewSource) LoadActivationHead(context.Context) (controlplane.ActivationState, error) {
+	state := controlplane.ActivationState{Current: controlplane.SnapshotPublicationRef{SnapshotRevision: source.revision}}
+	if source.inProgress {
+		state.CutoverProgress = &controlplane.CutoverProgress{}
+	}
+	return state, nil
 }
 
 func (source *fakeSplitViewSource) LoadPublishedContent(
@@ -44,14 +51,18 @@ func (source *fakeSplitViewSource) DrainingContent(
 }
 
 type fakeContentLoader struct {
-	groups map[execution.QueryGroupIdentity]controlplane.QueryGroup
-	loads  int
+	groups  map[execution.QueryGroupIdentity]controlplane.QueryGroup
+	loads   int
+	digests []execution.ObjectDigest
 }
 
 func (loader *fakeContentLoader) LoadContentQueryGroups(
-	_ context.Context, _ controlplane.PublishedContent, identities []execution.QueryGroupIdentity,
+	_ context.Context, content controlplane.PublishedContent, identities []execution.QueryGroupIdentity,
 ) (map[execution.QueryGroupIdentity]controlplane.QueryGroup, error) {
 	loader.loads++
+	for _, identity := range identities {
+		loader.digests = append(loader.digests, content.Groups[identity].Digest)
+	}
 	result := make(map[execution.QueryGroupIdentity]controlplane.QueryGroup, len(identities))
 	for _, identity := range identities {
 		if group, ok := loader.groups[identity]; ok {
@@ -149,5 +160,45 @@ func TestACandidatesObjectIsReadOncePerPublication(t *testing.T) {
 		t.Fatalf("the object was read %d times across two publications, want once each: a generation "+
 			"carried over from another publication builds a census key that belongs to nothing",
 			loader.loads)
+	}
+}
+
+// ApplyCutoverProgress gives what the open Segments run while a cutover is
+// in progress, and the content as given otherwise.
+func (source *fakeSplitViewSource) ApplyCutoverProgress(
+	_ context.Context, state controlplane.ActivationState, content map[execution.QueryGroupIdentity]controlplane.ContentEntry,
+) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error) {
+	if state.CutoverProgress == nil {
+		return content, nil
+	}
+	return source.running, nil
+}
+
+// While a cutover is in progress a candidate's Plans are read from the
+// object its open Segment runs, not the manifest's, and not remembered past
+// the cutover: once it finishes, the same revision names the manifest's
+// object and that is read.
+func TestACandidatesPlansFollowItsOpenSegmentWhileACutoverIsInProgress(t *testing.T) {
+	group := controlplane.QueryGroup{Plans: []controlplane.FrozenPlan{{
+		Identity:        execution.PlanIdentity{TenantID: "system", BusinessID: "2", StrategyID: "4101"},
+		StateGeneration: "generation",
+		ScheduleSpec:    execution.ScheduleSpec{EvaluationIntervalSeconds: 60},
+		QueryPlans:      splitDryRunQueries(t, execution.QueryConditions{}),
+	}}}
+	view := &fakeSplitViewSource{revision: "snapshot-2", inProgress: true,
+		groups:  map[execution.QueryGroupIdentity]controlplane.ContentEntry{"qg": {Digest: "new"}},
+		running: map[execution.QueryGroupIdentity]controlplane.ContentEntry{"qg": {Digest: "old"}}}
+	loader := &fakeContentLoader{groups: map[execution.QueryGroupIdentity]controlplane.QueryGroup{"qg": group}}
+	source := newCatalogSplitCensusSource(view, loader, fakeCensusReader{})
+
+	if _, err := source.SplitCandidatePlans(context.Background(), "qg"); err != nil {
+		t.Fatal(err)
+	}
+	view.inProgress = false
+	if _, err := source.SplitCandidatePlans(context.Background(), "qg"); err != nil {
+		t.Fatal(err)
+	}
+	if len(loader.digests) != 2 || loader.digests[0] != "old" || loader.digests[1] != "new" {
+		t.Fatalf("objects read = %v, want the open Segment's while in progress, then the manifest's", loader.digests)
 	}
 }

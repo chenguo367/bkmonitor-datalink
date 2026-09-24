@@ -38,7 +38,7 @@ func (source controlPlaneExpectation) Expectation(ctx context.Context) (fleet.Ex
 	if source.repository == nil {
 		return fleet.Expectation{}, errors.New("alarmd fleet: control plane repository is required")
 	}
-	activation, err := source.repository.LoadActivation(ctx)
+	activation, err := source.repository.LoadActivationHead(ctx)
 	if err != nil {
 		return fleet.Expectation{}, err
 	}

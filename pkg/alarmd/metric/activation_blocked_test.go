@@ -55,3 +55,29 @@ func TestActivationBlockedReadsTheLeadersLastCutover(t *testing.T) {
 		t.Fatalf("values = %v series = %v", values, series)
 	}
 }
+
+// The activation body's length is one gauge: zero before a source is bound,
+// the source's reading after.
+func TestActivationBodyBytesIsTheLastReadLength(t *testing.T) {
+	read := func(recorder *Recorder) (float64, int) {
+		t.Helper()
+		families, err := recorder.Gatherer().Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, family := range families {
+			if family.GetName() == "bkmonitor_alarmd_activation_body_bytes" {
+				return family.GetMetric()[0].GetGauge().GetValue(), len(family.GetMetric())
+			}
+		}
+		return -1, 0
+	}
+	recorder := NewRecorder(BuildInfo{})
+	if value, series := read(recorder); value != 0 || series != 1 {
+		t.Fatalf("unbound gauge = %v over %d series, want 0 over 1", value, series)
+	}
+	recorder.SetActivationBodyBytesSource(func() int64 { return 1_541_020 })
+	if value, _ := read(recorder); value != 1_541_020 {
+		t.Fatalf("gauge = %v, want the source's 1541020", value)
+	}
+}

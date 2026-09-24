@@ -205,8 +205,8 @@ type storedViewSource struct {
 	draining  []controlplane.DrainingQueryGroup
 }
 
-func (source storedViewSource) LoadActivation(ctx context.Context) (controlplane.ActivationState, error) {
-	state, err := source.staticViewSource.LoadActivation(ctx)
+func (source storedViewSource) LoadActivationHead(ctx context.Context) (controlplane.ActivationState, error) {
+	state, err := source.staticViewSource.LoadActivationHead(ctx)
 	state.Draining = source.draining
 	return state, err
 }

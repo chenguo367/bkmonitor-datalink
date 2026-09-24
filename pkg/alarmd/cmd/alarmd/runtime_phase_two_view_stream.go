@@ -179,7 +179,7 @@ func interfaceAddress() string {
 // viewSource is what the round needs of the catalog to build the desired
 // set: the activation and the published content it names.
 type viewSource interface {
-	LoadActivation(context.Context) (controlplane.ActivationState, error)
+	LoadActivationHead(context.Context) (controlplane.ActivationState, error)
 	LoadPublishedContent(context.Context, controlplane.SnapshotPublicationRef) (controlplane.PublishedContent, error)
 	// DrainingContent is what a Query Group the publication no longer
 	// carries still executes from its timeline's last Segment; false when
@@ -188,6 +188,32 @@ type viewSource interface {
 	// ActivationBlocked is the Query Groups a cutover held back: the view
 	// gives each the content its open Segment names, not the manifest's.
 	ActivationBlocked(context.Context) ([]controlplane.BlockedQueryGroup, error)
+	// ApplyCutoverProgress is the content the Query Groups run while a
+	// cutover is in progress: what each open Segment names. Without
+	// progress it returns the content as given.
+	ApplyCutoverProgress(context.Context, controlplane.ActivationState, map[execution.QueryGroupIdentity]controlplane.ContentEntry) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error)
+}
+
+// runningViewContent is what each Query Group of the activation runs, which
+// is what the view gives it: the published content, a held-back Query Group
+// on its open Segment instead, and every Query Group on its open Segment
+// while a cutover is in progress.
+func runningViewContent(
+	ctx context.Context, source viewSource, state controlplane.ActivationState,
+) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error) {
+	published, err := source.LoadPublishedContent(ctx, state.Current)
+	if err != nil {
+		return nil, fmt.Errorf("read published content %s: %w", state.Current.SnapshotRevision, err)
+	}
+	blocked, err := source.ActivationBlocked(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("read held-back Query Groups: %w", err)
+	}
+	running := controlplane.ApplyBlockedToContent(published.Groups, blocked)
+	if running, err = source.ApplyCutoverProgress(ctx, state, running); err != nil {
+		return nil, fmt.Errorf("read the content a cutover in progress runs: %w", err)
+	}
+	return running, nil
 }
 
 // costLedgerSink hands each heartbeat's costs to the Leader's ledger: the
@@ -244,25 +270,18 @@ func (runtime *productionPhaseTwoOwnership) publishView(
 			ViewStream: &observability.ViewStreamFacts{Event: "publish_failed", ControlEpoch: authority.Fence.OwnerEpoch, Reason: err.Error()},
 		})
 	}
-	state, err := source.LoadActivation(ctx)
+	state, err := source.LoadActivationHead(ctx)
 	if err != nil {
 		stream.NotePublishFailure(viewstream.PublishFailureActivationUnreadable)
 		report(fmt.Errorf("read activation: %w", err))
 		return
 	}
-	published, err := source.LoadPublishedContent(ctx, state.Current)
+	running, err := runningViewContent(ctx, source, state)
 	if err != nil {
 		stream.NotePublishFailure(viewstream.PublishFailureContentUnreadable)
-		report(fmt.Errorf("read published content %s: %w", state.Current.SnapshotRevision, err))
+		report(err)
 		return
 	}
-	blocked, err := source.ActivationBlocked(ctx)
-	if err != nil {
-		stream.NotePublishFailure(viewstream.PublishFailureContentUnreadable)
-		report(fmt.Errorf("read held-back Query Groups: %w", err))
-		return
-	}
-	running := controlplane.ApplyBlockedToContent(published.Groups, blocked)
 	desired := viewstream.Desired{
 		ControlEpoch: authority.Fence.OwnerEpoch,
 		Publication: viewstream.Publication{SnapshotRevision: state.Current.SnapshotRevision, PublicationEpoch: state.Current.PublicationEpoch,
@@ -425,7 +444,7 @@ func (runtime *productionPhaseTwoOwnership) PublishStoredView(ctx context.Contex
 			ViewStream: &observability.ViewStreamFacts{Event: "publish_failed", ControlEpoch: authority.Fence.OwnerEpoch, Reason: err.Error()},
 		})
 	}
-	state, err := source.LoadActivation(ctx)
+	state, err := source.LoadActivationHead(ctx)
 	if err != nil {
 		stream.NotePublishFailure(viewstream.PublishFailureActivationUnreadable)
 		report(fmt.Errorf("stored view: read activation: %w", err))

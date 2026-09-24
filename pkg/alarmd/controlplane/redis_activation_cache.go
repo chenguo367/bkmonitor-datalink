@@ -1,6 +1,7 @@
 package controlplane
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -18,6 +19,25 @@ type parsedActivation struct {
 	payload string
 	state   ActivationState
 	byPlan  map[execution.PlanKey]execution.PlanActivationFact
+	// withPlans is a head body's state with its records read back from the
+	// open Segments, computed once for the entry; see LoadActivation.
+	withPlansMu sync.Mutex
+	withPlans   *ActivationState
+}
+
+// materialized is the entry's state with its Plan records, for a head body.
+// A failed read is not remembered: the next call reads again.
+func (entry *parsedActivation) materialized(ctx context.Context, repository *RedisCatalogRepository) (ActivationState, error) {
+	entry.withPlansMu.Lock()
+	defer entry.withPlansMu.Unlock()
+	if entry.withPlans == nil {
+		state, err := repository.materializeActivationPlans(ctx, entry.cloneState())
+		if err != nil {
+			return ActivationState{}, err
+		}
+		entry.withPlans = &state
+	}
+	return (&parsedActivation{state: *entry.withPlans}).cloneState(), nil
 }
 
 // The single entry is immutable after publication and never leaves this package.
@@ -93,6 +113,10 @@ func (entry *parsedActivation) cloneState() ActivationState {
 	if state.Pending != nil {
 		pending := *state.Pending
 		state.Pending = &pending
+	}
+	if state.CutoverProgress != nil {
+		progress := *state.CutoverProgress
+		state.CutoverProgress = &progress
 	}
 	state.Plans = slices.Clone(state.Plans)
 	state.Draining = slices.Clone(state.Draining)

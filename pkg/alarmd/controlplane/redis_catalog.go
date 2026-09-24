@@ -108,6 +108,13 @@ type ActivationState struct {
 	// key of its own. A reader that does not know them ignores them.
 	BlockedCount  int    `json:"blocked_count,omitempty"`
 	BlockedDigest string `json:"blocked_digest,omitempty"`
+	// CutoverProgress is a publication cutover committed in pieces that has
+	// not finished (N15): the Query Groups after its cursor still run the
+	// content they ran before it. Nil everywhere else, and omitted, so a body
+	// without it serializes exactly as before. This build does not write one;
+	// it reads it, and finishes the cutover in one piece. See
+	// activation_head.go.
+	CutoverProgress *CutoverProgress `json:"cutover_progress,omitempty"`
 }
 
 type ActivationExpectation struct {
@@ -145,6 +152,7 @@ type RedisCatalogRepository struct {
 	freshnessClock             func() time.Time
 	controlCache               *controlReadCache
 	controlReads               controlReadCounters
+	activationBodyBytes        atomic.Int64
 	adoptMu                    sync.Mutex
 	legacyMigrationMaxScanKeys int
 	legacyMigrationTimeout     time.Duration
@@ -248,7 +256,7 @@ func (repository *RedisCatalogRepository) RenewCurrentActivationObjects(ctx cont
 			Result: observability.Result(metricResult), ActiveQGSet: &observability.ActiveQGSetFacts{Operation: "renew", Result: metricResult,
 				QueryGroups: queryGroups, ObjectBytes: objectBytes, Duration: time.Since(started)}})
 	}()
-	state, err := repository.LoadActivation(ctx)
+	state, err := repository.LoadActivationHead(ctx)
 	if err != nil {
 		return err
 	}
@@ -758,10 +766,17 @@ func (repository *RedisCatalogRepository) LoadLatestAudit(ctx context.Context) (
 	return audit, nil
 }
 
+// LoadActivation is the activation with its Plan records, which only the
+// Control Leader's activation and cutover need; every other reader wants
+// LoadActivationHead. A head body gets its records back from the open
+// Segments (materializeActivationPlans), once per header.
 func (repository *RedisCatalogRepository) LoadActivation(ctx context.Context) (ActivationState, error) {
 	entry, err := repository.loadParsedActivation(ctx)
 	if err != nil {
 		return ActivationState{}, err
+	}
+	if entry.state.SchemaVersion == activationHeadSchemaVersion {
+		return entry.materialized(ctx, repository)
 	}
 	return entry.cloneState(), nil
 }
@@ -812,72 +827,42 @@ func (repository *RedisCatalogRepository) LoadActivations(ctx context.Context, r
 		repository.clearActivationCaches()
 		return execution.PlanActivationResult{}, err
 	}
-	entry, err := repository.loadParsedActivationAt(ctx, version)
+	// The activation must be there - a header without its body is the state
+	// the Control Leader rebuilds, and executing past it would hide it - but
+	// the answer comes from the Query Group's timeline, as on the hinted
+	// path: the open Segment carries the same records the body does for this
+	// Query Group, and a head body carries none (activation_head.go).
+	if _, err := repository.loadParsedActivationAt(ctx, version); err != nil {
+		return execution.PlanActivationResult{}, err
+	}
+	timeline, err := repository.loadScheduleTimelineAt(ctx, request.Contract.Slot.QueryGroup, version)
 	if err != nil {
 		return execution.PlanActivationResult{}, err
 	}
-	historical, err := repository.validateClosedHistoricalContract(ctx, request.Contract, entry.state.Current, version)
-	if err != nil {
-		return execution.PlanActivationResult{}, err
-	}
-	result := execution.PlanActivationResult{Contract: request.Contract, Facts: make([]execution.PlanActivationFact, 0, len(request.Plans))}
-	for _, plan := range request.Plans {
-		fact, found := entry.byPlan[plan]
-		if historical || !found {
-			fact = execution.PlanActivationFact{Plan: plan.PlanIdentity, Selection: execution.ActivationNone, Shard: shardPointerOf(plan)}
-		}
-		result.Facts = append(result.Facts, fact)
-	}
-	if err := result.Validate(request); err != nil {
-		return execution.PlanActivationResult{}, err
-	}
-	return result, nil
-}
-
-func (repository *RedisCatalogRepository) validateClosedHistoricalContract(
-	ctx context.Context,
-	contractRef execution.FrozenExecutionContractRef,
-	current SnapshotPublicationRef,
-	version controlVersion,
-) (bool, error) {
-	timeline, err := repository.loadScheduleTimelineAt(ctx, contractRef.Slot.QueryGroup, version)
-	if err != nil {
-		return false, err
-	}
-	for _, segment := range timeline.Segments {
-		schedule := segment.Schedule
-		if !schedule.Segment.Contains(contractRef.Slot.EvaluationTime) {
-			continue
-		}
-		if schedule.Segment.Start != contractRef.ScheduleSegmentStart ||
-			schedule.Segment.ScheduleRevision != contractRef.ScheduleRevision ||
-			schedule.Segment.Publication.SnapshotRevision != contractRef.SnapshotRevision ||
-			schedule.Segment.QueryRevision != contractRef.QueryRevision {
-			return false, errors.New("alarmd controlplane: activation request does not reference its persisted Schedule Segment")
-		}
-		// The current occurrence of a Query Group is its open Segment. It
-		// need not name the current publication: a Query Group whose content
-		// did not change keeps its Segment across publications, so naming
-		// an older publication is the normal case, not a historical one.
-		if schedule.Segment.End == nil {
-			return false, nil
-		}
-		return true, nil
-	}
-	return false, errors.New("alarmd controlplane: activation request has no persisted Schedule Segment")
+	return activationsFromTimeline(request, timeline)
 }
 
 func validateActivationState(state ActivationState) error {
-	if state.SchemaVersion != "" && state.SchemaVersion != activationSchemaVersion && state.SchemaVersion != legacyActivationSchemaVersion {
+	switch state.SchemaVersion {
+	case "", activationSchemaVersion, legacyActivationSchemaVersion, activationHeadSchemaVersion:
+	default:
 		return errors.New("alarmd controlplane: unsupported activation schema")
 	}
-	if state.SchemaVersion == activationSchemaVersion {
+	if state.SchemaVersion == activationSchemaVersion || state.SchemaVersion == activationHeadSchemaVersion {
 		if err := state.ActiveQGSetRef.validate(); err != nil {
 			return err
 		}
 	}
+	// A head carries no records: they are on the open Segments (see
+	// activation_head.go). One that carries some is not a head.
+	if state.SchemaVersion == activationHeadSchemaVersion && len(state.Plans) > 0 {
+		return errors.New("alarmd controlplane: an activation head carries Plan records")
+	}
 	if state.RecordRevision == 0 || state.Current.validate() != nil {
 		return errors.New("alarmd controlplane: incomplete activation state")
+	}
+	if err := state.CutoverProgress.validate(state.Current); err != nil {
+		return err
 	}
 	if state.Pending != nil && state.Pending.validate() != nil {
 		return errors.New("alarmd controlplane: invalid pending snapshot reference")
