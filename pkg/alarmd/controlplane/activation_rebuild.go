@@ -11,7 +11,6 @@ package controlplane
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -272,7 +271,13 @@ func (repository *RedisCatalogRepository) RebuildActivationBody(ctx context.Cont
 			return ActivationRebuildCoverageInvalid, fmt.Errorf("%w: the last activation read names another active set",
 				ErrActivationRebuildRefused)
 		}
-		if err := checkRebuiltCoverage(last.state, open); err != nil {
+		// A head carries no records to hold against the Segments; the ones
+		// this process wrote with it do, when it wrote that head.
+		covered := last.state
+		if full, ok := repository.written.lookup(last.payload); ok {
+			covered = full
+		}
+		if err := checkRebuiltCoverage(covered, open); err != nil {
 			return ActivationRebuildCoverageInvalid, fmt.Errorf("%w: %v", ErrActivationRebuildRefused, err)
 		}
 		payload = []byte(last.payload)
@@ -284,7 +289,7 @@ func (repository *RedisCatalogRepository) RebuildActivationBody(ctx context.Cont
 		if err := checkRebuiltCoverage(state, open); err != nil {
 			return ActivationRebuildCoverageInvalid, fmt.Errorf("%w: %v", ErrActivationRebuildRefused, err)
 		}
-		payload, err = json.Marshal(state)
+		payload, err = encodeActivationHead(state)
 		if err != nil {
 			return "", err
 		}
@@ -304,15 +309,21 @@ func (repository *RedisCatalogRepository) RebuildActivationBody(ctx context.Cont
 
 // checkRebuiltCoverage is the invariant every writer of the body keeps: its
 // Plans are exactly the Plans of the open Segments, each equal, none twice.
+//
+// A head carries no records, so all that is left of it is that no Plan is
+// open in two Query Groups.
 func checkRebuiltCoverage(state ActivationState, open map[execution.QueryGroupIdentity]persistedScheduleSegment) error {
+	head := state.SchemaVersion == activationHeadSchemaVersion
 	expected, err := activationRecordMap(state.Plans)
 	if err != nil {
 		return err
 	}
 	covered := make(map[execution.PlanKey]struct{}, len(expected))
 	for _, segment := range open {
-		if err := validateOpenSegmentActivation(state, segment); err != nil {
-			return err
+		if !head {
+			if err := validateOpenSegmentActivation(state, segment); err != nil {
+				return err
+			}
 		}
 		for _, record := range segment.Plans {
 			if _, duplicate := covered[record.Fact.Key()]; duplicate {
@@ -321,7 +332,7 @@ func checkRebuiltCoverage(state ActivationState, open map[execution.QueryGroupId
 			covered[record.Fact.Key()] = struct{}{}
 		}
 	}
-	if len(covered) != len(expected) {
+	if !head && len(covered) != len(expected) {
 		return errors.New("the body holds a Plan no open Segment carries")
 	}
 	return nil

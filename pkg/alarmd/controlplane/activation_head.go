@@ -11,10 +11,12 @@ package controlplane
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"sort"
+	"sync"
 
 	"github.com/go-redis/redis/v8"
 
@@ -29,8 +31,8 @@ import (
 //
 // A later build stops writing that copy: its body is a head (schema v3, no
 // Plans), and a publication cut over in pieces leaves a CutoverProgress on it.
-// This build still writes the body with its Plans, and is the one a rollback
-// from that later build lands on, so it reads both:
+// This build writes the head. It also reads a body with its Plans, which the
+// build before it wrote and a rollback to it writes again:
 //
 //   - every reader that wants the head reads it through LoadActivationHead
 //     and never touches the records;
@@ -43,7 +45,6 @@ import (
 const activationHeadSchemaVersion = "alarmd-control-activation-v3"
 
 // CutoverProgress is how far a publication cutover committed in pieces got.
-// This build does not write one.
 type CutoverProgress struct {
 	From            SnapshotPublicationRef `json:"from"`
 	Cursor          CutoverCursor          `json:"cursor"`
@@ -129,11 +130,35 @@ const openSegmentReadBatch = 256
 // next. It is refused by name instead: a Worker cannot run it either, and
 // deleting the key lets the next cutover open it again.
 func (repository *RedisCatalogRepository) readOpenSegments(
-	ctx context.Context, identities []execution.QueryGroupIdentity,
+	ctx context.Context, identities []execution.QueryGroupIdentity, version controlVersion,
 ) (map[execution.QueryGroupIdentity]persistedScheduleSegment, error) {
+	// Timelines already cached under the header are taken from the cache,
+	// and the ones read are stored there: on a warm replica this costs
+	// nothing, and a read that follows finds them.
+	repository.adoptControlVersion(ctx, version)
+	counters := &repository.controlReads.timeline
 	result := make(map[execution.QueryGroupIdentity]persistedScheduleSegment, len(identities))
-	for start := 0; start < len(identities); start += openSegmentReadBatch {
-		batch := identities[start:min(start+openSegmentReadBatch, len(identities))]
+	accept := func(identity execution.QueryGroupIdentity, timeline persistedScheduleTimeline) {
+		if timeline.RetiredAt != nil || len(timeline.Segments) == 0 {
+			return
+		}
+		if open := timeline.Segments[len(timeline.Segments)-1]; open.Schedule.Segment.End == nil {
+			result[identity] = open
+		}
+	}
+	missing := make([]execution.QueryGroupIdentity, 0, len(identities))
+	for _, identity := range identities {
+		if version.known {
+			if timeline, ok := repository.controlCache.lookupTimeline(version.header, identity); ok {
+				counters.hits.Add(1)
+				accept(identity, timeline)
+				continue
+			}
+		}
+		missing = append(missing, identity)
+	}
+	for start := 0; start < len(missing); start += openSegmentReadBatch {
+		batch := missing[start:min(start+openSegmentReadBatch, len(missing))]
 		replies := make([]*redis.StringCmd, len(batch))
 		if _, err := repository.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
 			for index, identity := range batch {
@@ -157,14 +182,11 @@ func (repository *RedisCatalogRepository) readOpenSegments(
 					"the timeline of Query Group %s does not decode (%w); a cutover in progress cannot tell what it runs "+
 						"until the key is repaired or deleted, after which it is opened again", identity, err)}
 			}
-			if timeline.RetiredAt != nil || len(timeline.Segments) == 0 {
-				continue
+			counters.misses.Add(1)
+			if version.known {
+				repository.controlCache.storeTimeline(version.header, identity, timeline, len(payload))
 			}
-			open := timeline.Segments[len(timeline.Segments)-1]
-			if open.Schedule.Segment.End != nil {
-				continue
-			}
-			result[identity] = open
+			accept(identity, timeline)
 		}
 	}
 	return result, nil
@@ -192,6 +214,18 @@ func openSegmentRefs(segment persistedScheduleSegment) []execution.OutputContext
 func (repository *RedisCatalogRepository) activeOpenSegments(
 	ctx context.Context, state ActivationState,
 ) (map[execution.QueryGroupIdentity]persistedScheduleSegment, error) {
+	version, err := repository.readControlVersion(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return repository.activeOpenSegmentsAt(ctx, state, version)
+}
+
+// activeOpenSegmentsAt is activeOpenSegments under a header the caller
+// already read.
+func (repository *RedisCatalogRepository) activeOpenSegmentsAt(
+	ctx context.Context, state ActivationState, version controlVersion,
+) (map[execution.QueryGroupIdentity]persistedScheduleSegment, error) {
 	identities, err := repository.LoadActiveQueryGroupSet(ctx, state.ActiveQGSetRef)
 	if err != nil {
 		return nil, err
@@ -212,7 +246,7 @@ func (repository *RedisCatalogRepository) activeOpenSegments(
 			}
 		}
 	}
-	return repository.readOpenSegments(ctx, identities)
+	return repository.readOpenSegments(ctx, identities, version)
 }
 
 // materializeActivationPlans gives a head body back its Plan records, from
@@ -223,8 +257,10 @@ func (repository *RedisCatalogRepository) activeOpenSegments(
 // A Query Group whose open Segment cannot be read contributes no records.
 // Held back and without an open Segment, it ran nothing before either; held
 // back with one, its records are on that Segment.
-func (repository *RedisCatalogRepository) materializeActivationPlans(ctx context.Context, state ActivationState) (ActivationState, error) {
-	segments, err := repository.activeOpenSegments(ctx, state)
+func (repository *RedisCatalogRepository) materializeActivationPlans(
+	ctx context.Context, state ActivationState, version controlVersion,
+) (ActivationState, error) {
+	segments, err := repository.activeOpenSegmentsAt(ctx, state, version)
 	if err != nil {
 		return ActivationState{}, err
 	}
@@ -304,6 +340,43 @@ func (repository *RedisCatalogRepository) ApplyCutoverProgress(
 			Refs: append([]execution.OutputContextRef(nil), openSegmentRefs(segment)...)}
 	}
 	return running, nil
+}
+
+// encodeActivationHead is the body this build writes: the activation
+// without its Plan records, which are on the open Segments.
+func encodeActivationHead(state ActivationState) ([]byte, error) {
+	head := state
+	head.SchemaVersion = activationHeadSchemaVersion
+	head.Plans = nil
+	return json.Marshal(head)
+}
+
+// writtenActivation is the last activation this process wrote, records and
+// all, keyed by the exact head it wrote. The Control Leader reads its own
+// write back on the next round; with it the records come from here, and
+// only a head another process wrote - a new leader, a rollback, a rebuild -
+// is read back from the open Segments.
+type writtenActivation struct {
+	mu      sync.Mutex
+	payload string
+	state   *ActivationState
+}
+
+func (written *writtenActivation) remember(payload []byte, state ActivationState) {
+	full := (&parsedActivation{state: state}).cloneState()
+	full.SchemaVersion = activationSchemaVersion
+	written.mu.Lock()
+	written.payload, written.state = string(payload), &full
+	written.mu.Unlock()
+}
+
+func (written *writtenActivation) lookup(payload string) (ActivationState, bool) {
+	written.mu.Lock()
+	defer written.mu.Unlock()
+	if written.state == nil || payload == "" || written.payload != payload {
+		return ActivationState{}, false
+	}
+	return (&parsedActivation{state: *written.state}).cloneState(), true
 }
 
 // ErrCutoverInProgress refuses an operation that would act on the current

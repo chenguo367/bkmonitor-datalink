@@ -129,7 +129,9 @@ if ARGV[1] == '' then
 elseif not header or header ~= ARGV[1] then
   return 0
 end
-if redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end
+-- The active set is named by its digest and checked when written, so
+-- being there is being it (N15); ARGV[4] is no longer the set itself.
+if redis.call('EXISTS', KEYS[3]) ~= 1 then return 0 end
 local timelines = tonumber(ARGV[6])
 local last_timeline = 3 + timelines
 for index = 4, last_timeline do
@@ -177,7 +179,9 @@ if not timelines or ARGV[8] == nil or #KEYS < 5 + timelines or #ARGV < 8 + 2 * t
 end
 local header = redis.call('GET', KEYS[1])
 if not header or header ~= ARGV[1] then return 0 end
-if redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end
+-- The active set is named by its digest and checked when written, so
+-- being there is being it (N15); ARGV[4] is no longer the set itself.
+if redis.call('EXISTS', KEYS[3]) ~= 1 then return 0 end
 local last_timeline = 5 + timelines
 for index = 6, last_timeline do
   local current = redis.call('GET', KEYS[index])
@@ -280,7 +284,7 @@ func (repository *RedisCatalogRepository) persistActivationRefUpgrade(ctx contex
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(next)
+	payload, err := encodeActivationHead(next)
 	if err != nil {
 		return err
 	}
@@ -300,6 +304,7 @@ func (repository *RedisCatalogRepository) persistActivationRefUpgrade(ctx contex
 	if changed != 1 {
 		return ErrActivationConflict
 	}
+	repository.written.remember(payload, next)
 	return nil
 }
 
@@ -1247,7 +1252,7 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 	if err != nil {
 		return err
 	}
-	activationPayload, err := json.Marshal(next)
+	activationPayload, err := encodeActivationHead(next)
 	if err != nil {
 		return err
 	}
@@ -1278,6 +1283,7 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 	if changed != 1 {
 		return ErrActivationConflict
 	}
+	repository.written.remember(activationPayload, next)
 	return nil
 }
 
@@ -1330,7 +1336,7 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 	if err != nil {
 		return err
 	}
-	activationPayload, err := json.Marshal(next)
+	activationPayload, err := encodeActivationHead(next)
 	if err != nil {
 		return err
 	}
@@ -1373,6 +1379,7 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 	if changed != 1 {
 		return ErrActivationConflict
 	}
+	repository.written.remember(activationPayload, next)
 	return nil
 }
 

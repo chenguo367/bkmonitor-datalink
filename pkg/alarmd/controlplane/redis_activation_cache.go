@@ -27,11 +27,11 @@ type parsedActivation struct {
 
 // materialized is the entry's state with its Plan records, for a head body.
 // A failed read is not remembered: the next call reads again.
-func (entry *parsedActivation) materialized(ctx context.Context, repository *RedisCatalogRepository) (ActivationState, error) {
+func (entry *parsedActivation) materialized(ctx context.Context, repository *RedisCatalogRepository, version controlVersion) (ActivationState, error) {
 	entry.withPlansMu.Lock()
 	defer entry.withPlansMu.Unlock()
 	if entry.withPlans == nil {
-		state, err := repository.materializeActivationPlans(ctx, entry.cloneState())
+		state, err := repository.materializeActivationPlans(ctx, entry.cloneState(), version)
 		if err != nil {
 			return ActivationState{}, err
 		}
