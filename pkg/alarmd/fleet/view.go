@@ -1601,6 +1601,9 @@ type Snapshot struct {
 	// records for retired Query Groups. Absent on every follower and on a
 	// leader that has not swept.
 	AssignmentSweep *AssignmentSweepFacts `json:"assignment_sweep,omitempty"`
+	// LeaderRound is the control leader's last reconcile round, stage by
+	// stage. Absent on every follower and on a build before it.
+	LeaderRound *LeaderRoundFacts `json:"leader_round,omitempty"`
 	// ViewStream is this replica's account of the view stream: the Leader's
 	// ledger when it leads, Leading false otherwise. Absent on a build before
 	// the stream existed.
@@ -2627,6 +2630,10 @@ type View struct {
 	// AssignmentSweepReplica which one.
 	AssignmentSweep        *AssignmentSweepFacts `json:"assignment_sweep,omitempty"`
 	AssignmentSweepReplica string                `json:"assignment_sweep_replica,omitempty"`
+	// LeaderRound is the newest leader round any counted replica published,
+	// and LeaderRoundReplica which one.
+	LeaderRound        *LeaderRoundFacts `json:"leader_round,omitempty"`
+	LeaderRoundReplica string            `json:"leader_round_replica,omitempty"`
 	// ViewStream is the Leader's account of the view stream -- the newest
 	// snapshot that says it leads; failing any, the newest that says it does
 	// not, so the page can say "no Leader is serving the stream" -- and
@@ -2838,6 +2845,10 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		if snapshot.AssignmentSweep != nil && (view.AssignmentSweep == nil || snapshot.AssignmentSweep.At.After(view.AssignmentSweep.At)) {
 			facts := *snapshot.AssignmentSweep
 			view.AssignmentSweep, view.AssignmentSweepReplica = &facts, replica
+		}
+		if snapshot.LeaderRound != nil && (view.LeaderRound == nil || snapshot.LeaderRound.At.After(view.LeaderRound.At)) {
+			facts := *snapshot.LeaderRound
+			view.LeaderRound, view.LeaderRoundReplica = &facts, replica
 		}
 		if snapshot.ViewStream != nil && snapshot.ViewStream.Leading {
 			if snapshot.ViewStream.PublishFailingBeyondBound {

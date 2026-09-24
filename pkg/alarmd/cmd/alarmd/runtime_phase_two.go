@@ -468,6 +468,43 @@ func (bundle *phaseTwoWorkerBundle) assignmentSweepFleetFacts() *fleet.Assignmen
 	return source.LastAssignmentSweep()
 }
 
+// phaseTwoLeaderRoundSource is what an ownership runtime that runs the
+// control leader's reconcile rounds reports about them. Its own interface,
+// so a runtime that runs none -- every test fake among them -- needs no
+// stub.
+type phaseTwoLeaderRoundSource interface {
+	LastLeaderRound() *fleet.LeaderRoundFacts
+	LeaderRoundStats() metric.LeaderRoundStats
+}
+
+var _ phaseTwoLeaderRoundSource = (*productionPhaseTwoOwnership)(nil)
+
+// leaderRoundFleetFacts is the latest leader round on this process, for the
+// fleet snapshot; nil on a follower.
+func (bundle *phaseTwoWorkerBundle) leaderRoundFleetFacts() *fleet.LeaderRoundFacts {
+	if bundle == nil {
+		return nil
+	}
+	source, ok := bundle.dependencies.Ownership.(phaseTwoLeaderRoundSource)
+	if !ok {
+		return nil
+	}
+	return source.LastLeaderRound()
+}
+
+// leaderRoundStats is what the leader round collector scrapes; empty on a
+// runtime that runs no rounds.
+func (bundle *phaseTwoWorkerBundle) leaderRoundStats() metric.LeaderRoundStats {
+	if bundle == nil {
+		return metric.LeaderRoundStats{}
+	}
+	source, ok := bundle.dependencies.Ownership.(phaseTwoLeaderRoundSource)
+	if !ok {
+		return metric.LeaderRoundStats{}
+	}
+	return source.LeaderRoundStats()
+}
+
 type phaseTwoQueryGroupLifecycle struct {
 	runner phaseTwoQueryGroupRuntime
 	cancel context.CancelFunc
@@ -869,6 +906,7 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 	if dependencies.Recorder != nil {
 		dependencies.Recorder.SetOwnedQueryGroups(0)
 		dependencies.Recorder.SetControlSourceSource(bundle.controlSourceStats)
+		dependencies.Recorder.SetLeaderRoundSource(bundle.leaderRoundStats)
 		dependencies.Recorder.SetCatalogCompositionSource(bundle.catalogComposition)
 	}
 	return bundle, nil

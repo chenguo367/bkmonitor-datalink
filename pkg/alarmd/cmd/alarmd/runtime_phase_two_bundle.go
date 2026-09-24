@@ -1285,6 +1285,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		rebalance:        bundle.rebalanceFleetFacts,
 		assignmentScope:  bundle.assignmentScopeFleetFacts,
 		assignmentSweep:  bundle.assignmentSweepFleetFacts,
+		leaderRound:      bundle.leaderRoundFleetFacts,
 		viewStream:       viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
 		source:           bundle.sourceFleetFacts,
 		endpoints: withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,

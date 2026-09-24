@@ -1383,6 +1383,14 @@ type productionPhaseTwoOwnership struct {
 	// lastAssignmentSweep is the latest sweep of retired records, success or
 	// failure, for the fleet snapshot. Nil until a sweep has run.
 	lastAssignmentSweep *fleet.AssignmentSweepFacts
+	// lastLeaderRound is the latest reconcile round stage by stage, and
+	// leaderRounds and leaderRoundSeconds the rounds this process has led,
+	// by result, and their seconds by stage, the whole round under "total".
+	// Only a round that held the authority is counted: one that could not
+	// get it was not a leader's round.
+	lastLeaderRound    *fleet.LeaderRoundFacts
+	leaderRounds       map[string]uint64
+	leaderRoundSeconds map[string]float64
 
 	// readySet is the ready set the last round reconciled against and when
 	// it last changed, remembered under the fence epoch it was observed in;
@@ -1499,14 +1507,17 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	ctx context.Context,
 	queryGroups []execution.QueryGroupIdentity,
 	at time.Time,
-) error {
+) (err error) {
 	if runtime == nil || at.IsZero() {
 		return newPhaseTwoInvariantError("phase-two production Assignment reconcile is invalid")
 	}
+	round := newLeaderRoundTimer(at)
 	authority, err := runtime.ensureControlAuthority(ctx, at)
 	if err != nil {
 		return err
 	}
+	round.done(fleet.LeaderRoundStageAuthority)
+	defer func() { runtime.recordLeaderRound(round.finish(err)) }()
 	ordered := append([]execution.QueryGroupIdentity(nil), queryGroups...)
 	sort.Slice(ordered, func(left, right int) bool { return ordered[left] < ordered[right] })
 	for index, queryGroup := range ordered {
@@ -1521,6 +1532,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	if err != nil {
 		return err
 	}
+	round.done(fleet.LeaderRoundStageReadyWorkers)
 	// The content contract's gate, decided once per round on the same ready
 	// set the placements use: every ready worker declares it, and the round
 	// brings each record to the content its Query Group is published with;
@@ -1532,6 +1544,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	if err != nil {
 		return err
 	}
+	round.done(fleet.LeaderRoundStageContentScopes)
 	// Every Query Group's record in one bounded batch, then the placement
 	// decisions over it. Reading them one at a time cost the round a Redis
 	// round trip per Query Group, all of it waiting, all of it before any
@@ -1544,6 +1557,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		}
 		return err
 	}
+	round.done(fleet.LeaderRoundStageReconcileRecords)
 	// The round's census of the content scope on the records it settled,
 	// for the page: the same read, counted once, so how far the contract
 	// has reached the records is not a question for a script in a Pod.
@@ -1586,6 +1600,7 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 		runtime.observeRebalance(ctx, scheduler.RebalancePlan{Owned: map[string]int{}}, rebalanceOutcome{}, bytePlan, byteOutcome, shardGate, at)
 		return err
 	}
+	round.done(fleet.LeaderRoundStageByteMoves)
 	plan := runtime.reconciler.PlanRebalanceWithBytes(owners, workers, readings, at)
 	outcome, err := runtime.publishMoves(ctx, authority, plan.Moves, records, stable, remaining, at)
 	for _, move := range outcome.applied {
@@ -1595,17 +1610,110 @@ func (runtime *productionPhaseTwoOwnership) PublishAssignments(
 	if err != nil {
 		return err
 	}
+	round.done(fleet.LeaderRoundStageRebalanceMoves)
 	// What a split would be for whatever is still over its share once this
 	// round's moves are in. Reported and not acted on; it reads Plans and
 	// censuses for the few objects the trigger names and writes nothing.
 	runtime.dryRunSplits(ctx, owners, workers, readings, at)
+	round.done(fleet.LeaderRoundStageSplitDryRun)
 	// The ledger keeps what the round's final owners agree with; a Query
 	// Group that moved has no reading until its new holder reports it.
 	runtime.dependencies.Costs.Retain(owners)
 	runtime.publishAssignmentIndex(ctx, authority, owners, workers, at)
+	round.done(fleet.LeaderRoundStageAssignmentIndex)
 	runtime.sweepRetiredAssignments(ctx, authority, ordered)
+	round.done(fleet.LeaderRoundStageAssignmentSweep)
 	runtime.publishView(ctx, authority, records, owners)
+	round.done(fleet.LeaderRoundStageViewPublish)
 	return nil
+}
+
+// leaderRoundTimer times one leader round stage by stage, on the monotonic
+// clock: at is the round's own time, for the facts, and never a duration.
+type leaderRoundTimer struct {
+	at      time.Time
+	started time.Time
+	last    time.Time
+	stages  []fleet.LeaderRoundStage
+}
+
+func newLeaderRoundTimer(at time.Time) *leaderRoundTimer {
+	now := time.Now()
+	return &leaderRoundTimer{at: at, started: now, last: now, stages: make([]fleet.LeaderRoundStage, 0, len(fleet.LeaderRoundStages))}
+}
+
+// done closes the stage that has just finished.
+func (timer *leaderRoundTimer) done(stage string) {
+	now := time.Now()
+	timer.stages = append(timer.stages, fleet.LeaderRoundStage{Stage: stage, Seconds: now.Sub(timer.last).Seconds()})
+	timer.last = now
+}
+
+// finish is the round as it ended: a failed round names the stage after
+// the last one it finished, the one it failed in.
+func (timer *leaderRoundTimer) finish(err error) fleet.LeaderRoundFacts {
+	facts := fleet.LeaderRoundFacts{At: timer.at, Result: fleet.LeaderRoundCompleted,
+		TotalSeconds: time.Since(timer.started).Seconds(), Stages: timer.stages}
+	if err != nil {
+		facts.Result = fleet.LeaderRoundFailed
+		if len(timer.stages) < len(fleet.LeaderRoundStages) {
+			facts.FailedStage = fleet.LeaderRoundStages[len(timer.stages)]
+		}
+	}
+	return facts
+}
+
+// recordLeaderRound keeps the round for the fleet snapshot and adds it to
+// the process's totals.
+func (runtime *productionPhaseTwoOwnership) recordLeaderRound(facts fleet.LeaderRoundFacts) {
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.leaderRounds == nil {
+		runtime.leaderRounds = map[string]uint64{}
+		runtime.leaderRoundSeconds = map[string]float64{}
+	}
+	runtime.lastLeaderRound = &facts
+	runtime.leaderRounds[facts.Result]++
+	for _, stage := range facts.Stages {
+		runtime.leaderRoundSeconds[stage.Stage] += stage.Seconds
+	}
+	runtime.leaderRoundSeconds[metric.LeaderRoundStageTotal] += facts.TotalSeconds
+}
+
+// LastLeaderRound is the latest reconcile round this process led, stage by
+// stage, for the fleet snapshot; nil until one.
+func (runtime *productionPhaseTwoOwnership) LastLeaderRound() *fleet.LeaderRoundFacts {
+	if runtime == nil {
+		return nil
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.lastLeaderRound == nil {
+		return nil
+	}
+	facts := *runtime.lastLeaderRound
+	facts.Stages = append([]fleet.LeaderRoundStage(nil), facts.Stages...)
+	return &facts
+}
+
+// LeaderRoundStats is the rounds this process has led, for the collector.
+func (runtime *productionPhaseTwoOwnership) LeaderRoundStats() metric.LeaderRoundStats {
+	if runtime == nil {
+		return metric.LeaderRoundStats{}
+	}
+	runtime.mu.Lock()
+	defer runtime.mu.Unlock()
+	if runtime.leaderRounds == nil {
+		return metric.LeaderRoundStats{}
+	}
+	stats := metric.LeaderRoundStats{Leading: true, Rounds: map[string]uint64{}, Seconds: map[string]float64{}}
+	for result, count := range runtime.leaderRounds {
+		stats.Rounds[result] = count
+	}
+	for stage, seconds := range runtime.leaderRoundSeconds {
+		stats.Seconds[stage] = seconds
+	}
+	return stats
 }
 
 // sweepRetiredAssignments reclaims the Assignment records of Query Groups

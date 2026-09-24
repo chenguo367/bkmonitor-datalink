@@ -282,6 +282,10 @@ type HealthResponse struct {
 	// for retired Query Groups, beside the census that cannot see them.
 	AssignmentSweep        *AssignmentSweepFacts `json:"assignment_sweep,omitempty"`
 	AssignmentSweepReplica string                `json:"assignment_sweep_replica,omitempty"`
+	// LeaderRound is the leader's last reconcile round, stage by stage, and
+	// LeaderRoundReplica which leader.
+	LeaderRound        *LeaderRoundFacts `json:"leader_round,omitempty"`
+	LeaderRoundReplica string            `json:"leader_round_replica,omitempty"`
 	// ViewStream is the Leader's account of the view stream, with its one
 	// sentence for the first screen, and ViewStreamReplica which replica.
 	ViewStream        *ViewStreamFacts `json:"view_stream,omitempty"`
@@ -918,6 +922,7 @@ func NewHandler(
 			Rebalance:     view.Rebalance, RebalanceReplica: view.RebalanceReplica,
 			AssignmentScope: view.AssignmentScope, AssignmentScopeReplica: view.AssignmentScopeReplica,
 			AssignmentSweep: view.AssignmentSweep, AssignmentSweepReplica: view.AssignmentSweepReplica,
+			LeaderRound: view.LeaderRound, LeaderRoundReplica: view.LeaderRoundReplica,
 			ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,
 			Source: view.Source, SourceReplica: view.SourceReplica, SourceStanding: view.SourceStanding,
 			NoDataTracking: view.NoDataTracking,

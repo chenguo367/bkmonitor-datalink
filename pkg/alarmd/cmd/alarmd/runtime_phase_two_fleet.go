@@ -239,6 +239,9 @@ type fleetPublisher struct {
 	// assignmentSweep reports the control leader's last sweep of retired
 	// Assignment records. Nil on a follower.
 	assignmentSweep func() *fleet.AssignmentSweepFacts
+	// leaderRound reports the control leader's last reconcile round, stage
+	// by stage; nil on a follower.
+	leaderRound func() *fleet.LeaderRoundFacts
 	// viewStream reports this replica's account of the view stream: the
 	// Leader's ledger, or Leading false. Nil on a runtime without the stream.
 	viewStream func() *fleet.ViewStreamFacts
@@ -462,6 +465,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	}
 	if publisher.assignmentSweep != nil {
 		snapshot.AssignmentSweep = publisher.assignmentSweep()
+	}
+	if publisher.leaderRound != nil {
+		snapshot.LeaderRound = publisher.leaderRound()
 	}
 	if publisher.viewStream != nil {
 		snapshot.ViewStream = publisher.viewStream()
