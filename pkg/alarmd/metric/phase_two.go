@@ -1472,7 +1472,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, state := range targetplan.ResolutionStates {
 		metrics.targetPlanResolutions.WithLabelValues(string(state))
 	}
-	// The selector cells are created on first observation - three kinds by
+	// The selector cells are created on first observation - four kinds by
 	// four states by the reasons is mostly triples that cannot happen - but
 	// the ones an operator acts on are created at zero, so a zero there is
 	// "has not happened" rather than "nothing ever counted here".
@@ -1485,6 +1485,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorOKEmpty), targetplan.ReasonNodeMissing},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorOKEmpty), targetplan.ReasonNodeForeign},
 		{targetplan.SelectorKindStatic, string(targetplan.SelectorUnavailable), targetplan.ReasonModelUnresolved},
+		{targetplan.SelectorKindExclude, string(targetplan.SelectorUnavailable), targetplan.ReasonModelUnresolved},
+		{targetplan.SelectorKindExclude, string(targetplan.SelectorUnavailable), targetplan.ReasonIndexUnavailable},
 	} {
 		metrics.targetSelectorResolutions.WithLabelValues(cell[0], cell[1], cell[2])
 	}
@@ -2092,7 +2094,7 @@ func (m phaseTwoMetrics) observeTargetResolution(facts *observability.TargetReso
 	for _, selector := range facts.Selectors {
 		kind, selectorState, reason := "other", "other", "other"
 		switch selector.Kind {
-		case targetplan.SelectorKindStatic, targetplan.SelectorKindGroup, targetplan.SelectorKindTopology:
+		case targetplan.SelectorKindStatic, targetplan.SelectorKindGroup, targetplan.SelectorKindTopology, targetplan.SelectorKindExclude:
 			kind = selector.Kind
 		}
 		for _, known := range targetplan.SelectorStates {

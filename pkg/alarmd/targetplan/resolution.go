@@ -32,6 +32,7 @@ const (
 	SelectorKindStatic   = "static"
 	SelectorKindGroup    = "dynamic_group"
 	SelectorKindTopology = "dynamic_topology"
+	SelectorKindExclude  = "exclude"
 )
 
 // The reasons a selector is unavailable or incomplete, closed. They are
@@ -122,10 +123,15 @@ type Failure struct {
 // admission filter asks Contains; the no-data round reads State and
 // Members; both read the same value, which is the point.
 type Resolution struct {
-	Static    map[string]struct{}
-	Selectors []SelectorResult
-	State     ResolutionState
-	Failures  []Failure
+	Static map[string]struct{}
+	// Excluded uses the same keys as Static and selector members. When its
+	// identity cannot be resolved, neither admission nor absence may use
+	// the included set, because doing so would widen the configured target.
+	Excluded             map[string]struct{}
+	ExclusionUnavailable bool
+	Selectors            []SelectorResult
+	State                ResolutionState
+	Failures             []Failure
 	// NodesMissing lists topology references whose node the cache does not
 	// list; NodesForeign those whose node holds hosts under another
 	// business only. Both reach the object row's target_resolutions; how
@@ -136,11 +142,14 @@ type Resolution struct {
 	StaleAge time.Duration
 }
 
-// Contains answers the admission filter: the key is in the static set or in
-// any selector's members. An unavailable selector has no members and so
-// admits nothing through it, which is what "no match" means for records.
+// Contains answers the admission filter from the included sources minus
+// exclusions. Failed inclusion selectors add no members; an unresolved
+// exclusion makes the whole target unavailable and admits nothing.
 func (resolution *Resolution) Contains(key string) bool {
-	if resolution == nil {
+	if resolution == nil || resolution.ExclusionUnavailable {
+		return false
+	}
+	if _, excluded := resolution.Excluded[key]; excluded {
 		return false
 	}
 	if _, found := resolution.Static[key]; found {
@@ -154,11 +163,11 @@ func (resolution *Resolution) Contains(key string) bool {
 	return false
 }
 
-// Members is the union of every member key, sorted, for the no-data
-// roster. Read only under a Complete state; the roster never sees a lower
-// bound.
+// Members is the sorted union minus exclusions, shared by admission and
+// the no-data roster. Only a Complete resolution can judge absence; an
+// unresolved exclusion returns no members to either consumer.
 func (resolution *Resolution) Members() []string {
-	if resolution == nil {
+	if resolution == nil || resolution.ExclusionUnavailable {
 		return nil
 	}
 	union := make(map[string]struct{}, len(resolution.Static))
@@ -172,7 +181,9 @@ func (resolution *Resolution) Members() []string {
 	}
 	members := make([]string, 0, len(union))
 	for key := range union {
-		members = append(members, key)
+		if _, excluded := resolution.Excluded[key]; !excluded {
+			members = append(members, key)
+		}
 	}
 	sort.Strings(members)
 	return members
@@ -190,7 +201,7 @@ func (resolution *Resolution) Compose() {
 		switch selector.State {
 		case SelectorUnavailable:
 			resolution.State = ResolutionUnavailable
-			resolution.Failures = append(resolution.Failures, Failure{Kind: selector.Kind, ID: selector.ID, Reason: selector.Reason})
+			resolution.Failures = append(resolution.Failures, Failure{Kind: selector.Kind, ID: selector.ID, Reason: selector.Reason, Dropped: selector.Dropped, Kept: selector.Kept})
 		case SelectorIncomplete:
 			if resolution.State != ResolutionUnavailable {
 				resolution.State = ResolutionIncomplete

@@ -85,7 +85,7 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 		return nil, unsupported("", "%s", err)
 	}
 	if err := onlyKeys(fields, "", "schema_version", "model_id", "target_rule", "failure_policy",
-		"static_targets", "dynamic_groups", "dynamic_topologies", "model_match"); err != nil {
+		"static_targets", "dynamic_groups", "dynamic_topologies", "model_match", "exclude"); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(string(fields["schema_version"])) != "1" {
@@ -139,6 +139,34 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 	}
 	plan.StaticKeys = contract.CanonicalTargetScopeKeys(keys)
 	contract.SortTargetPlanMembers(plan.StaticMembers)
+	// An absent field is the original v1 protocol. A present field must be
+	// an array, including when empty; null must not erase an exclusion.
+	if raw, present := fields["exclude"]; present {
+		exclusions, err := arrayElements(raw)
+		if err != nil {
+			return nil, unsupported("exclude", "%s", err)
+		}
+		if len(exclusions) > 0 && !contract.TargetPlanRuleAllowsDynamic(rule) {
+			return nil, unsupported("exclude", "rule %s requires an empty exclusion list", rule)
+		}
+		seen := make(map[contract.TargetPlanMemberV1]struct{}, len(exclusions))
+		for index, element := range exclusions {
+			key, member, err := decodeStaticTarget(rule, ruleDimensions, plan, element, fmt.Sprintf("exclude[%d]", index))
+			if err != nil {
+				return nil, err
+			}
+			if member == nil {
+				plan.ExcludeKeys = append(plan.ExcludeKeys, key)
+			} else if _, duplicate := seen[*member]; !duplicate {
+				seen[*member] = struct{}{}
+				plan.ExcludeMembers = append(plan.ExcludeMembers, *member)
+			}
+		}
+		if len(plan.ExcludeKeys) > 0 {
+			plan.ExcludeKeys = contract.CanonicalTargetScopeKeys(plan.ExcludeKeys)
+		}
+		contract.SortTargetPlanMembers(plan.ExcludeMembers)
+	}
 
 	groups, err := arrayElements(fields["dynamic_groups"])
 	if err != nil {
@@ -377,9 +405,8 @@ func arrayElements(raw json.RawMessage) ([]json.RawMessage, error) {
 }
 
 // onlyKeys refuses a field the table does not name and a named field that
-// is absent, each by path. Optional fields are not a concept here: every
-// field the protocol lists is required, and model_match is the one
-// exception, checked by its reader.
+// is absent, each by path. The top-level model_match and exclude fields
+// are optional for existing v1 writers and checked by their own readers.
 func onlyKeys(fields map[string]json.RawMessage, path string, allowed ...string) *Error {
 	names := make([]string, 0, len(fields))
 	for name := range fields {
@@ -399,7 +426,7 @@ func onlyKeys(fields map[string]json.RawMessage, path string, allowed ...string)
 		}
 	}
 	for _, name := range allowed {
-		if name == "model_match" {
+		if path == "" && (name == "model_match" || name == "exclude") {
 			continue
 		}
 		if _, present := fields[name]; !present {

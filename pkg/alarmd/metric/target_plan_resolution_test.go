@@ -40,6 +40,8 @@ func TestTheSelectorCellsAnOperatorActsOnArePublishedAtZeroAsOneSet(t *testing.T
 		"dynamic_topology|OKEmpty|node_missing",
 		"dynamic_topology|OKEmpty|node_in_other_business",
 		"static|Unavailable|model_representation_unresolved",
+		"exclude|Unavailable|model_representation_unresolved",
+		"exclude|Unavailable|index_unavailable",
 	}
 	sort.Strings(want)
 	got := selectorCells(t, r)
@@ -75,6 +77,7 @@ func TestAResolutionCountsThePlanOnceAndEachSelectorOnce(t *testing.T) {
 			StrategyID: "7", State: "Unavailable",
 			Selectors: []observability.TargetSelectorFacts{
 				{Kind: "static", State: "OK", Reason: "none", Kept: 2},
+				{Kind: "exclude", State: "Unavailable", Reason: "model_representation_unresolved", Dropped: 1},
 				{Kind: "dynamic_topology", State: "OKEmpty", Reason: "node_in_other_business", NodeForeign: true},
 				{Kind: "dynamic_group", State: "Unavailable", Reason: "key_missing"},
 				{Kind: "dynamic_group", State: "Unavailable", Reason: "key_missing"},
@@ -86,10 +89,11 @@ func TestAResolutionCountsThePlanOnceAndEachSelectorOnce(t *testing.T) {
 	got := selectorCells(t, r)
 	for cell, want := range map[string]float64{
 		"static|OK|none": 1,
-		"dynamic_topology|OKEmpty|node_in_other_business": 1,
-		"dynamic_group|Unavailable|key_missing":           2,
-		"dynamic_group|Unavailable|other":                 1,
-		"dynamic_topology|OKEmpty|node_missing":           0,
+		"exclude|Unavailable|model_representation_unresolved": 1,
+		"dynamic_topology|OKEmpty|node_in_other_business":     1,
+		"dynamic_group|Unavailable|key_missing":               2,
+		"dynamic_group|Unavailable|other":                     1,
+		"dynamic_topology|OKEmpty|node_missing":               0,
 	} {
 		if got[cell] != want {
 			t.Fatalf("%s after one resolution = %v, want %v (all: %v)", cell, got[cell], want, got)

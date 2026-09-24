@@ -42,6 +42,8 @@ const (
 	// every digest they had.
 	queryGroupObjectContractVersionV2 = "alarmd-query-group-object-v2"
 	queryGroupObjectContractVersionV3 = "alarmd-query-group-object-v3"
+	// v4 prevents older workers from silently dropping target exclusions.
+	queryGroupObjectContractVersionV4 = "alarmd-query-group-object-v4"
 	outputContextContractVersion      = "alarmd-output-context-v1"
 
 	// The two contracts' version strings are a prefix and a number, and the
@@ -50,7 +52,7 @@ const (
 	// corruption. The latest numbers are the ones the known-version checks
 	// above accept; a version bump moves both.
 	queryGroupObjectContractPrefix = "alarmd-query-group-object-v"
-	queryGroupObjectContractLatest = 3
+	queryGroupObjectContractLatest = 4
 	outputContextContractPrefix    = "alarmd-output-context-v"
 	outputContextContractLatest    = 1
 )
@@ -67,10 +69,15 @@ func newerContractVersion(version, prefix string, latest int) bool {
 	return err == nil && parsed > latest
 }
 
-// queryGroupObjectVersion is the contract version an object is written
-// under: v2 as soon as one of its Plans carries the target's second frozen
-// form, v1 otherwise.
+// queryGroupObjectVersion selects the oldest contract that preserves every
+// Plan: v4 for exclusions, v3 for effective-time snapshots, v2 for target
+// plans, and v1 otherwise.
 func queryGroupObjectVersion(plans []QueryGroupPlanObject) string {
+	for _, plan := range plans {
+		if plan.TargetPlan.HasExclusions() {
+			return queryGroupObjectContractVersionV4
+		}
+	}
 	for _, plan := range plans {
 		if len(plan.EffectiveTimeSnapshot) > 0 {
 			return queryGroupObjectContractVersionV3
@@ -87,7 +94,7 @@ func queryGroupObjectVersion(plans []QueryGroupPlanObject) string {
 // knownQueryGroupObjectVersion reports whether this build reads objects of
 // that contract version.
 func knownQueryGroupObjectVersion(version string) bool {
-	return version == queryGroupObjectContractVersion || version == queryGroupObjectContractVersionV2 || version == queryGroupObjectContractVersionV3
+	return version == queryGroupObjectContractVersion || version == queryGroupObjectContractVersionV2 || version == queryGroupObjectContractVersionV3 || version == queryGroupObjectContractVersionV4
 }
 
 // queryGroupObjectDomain reads the contract version a stored object declares

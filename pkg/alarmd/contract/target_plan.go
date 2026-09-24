@@ -44,6 +44,10 @@ type TargetPlanV1 struct {
 	// only the cache knows it - so they live apart from StaticKeys, which is
 	// empty on such a plan.
 	StaticMembers []TargetPlanMemberV1 `json:"static_members,omitempty"`
+	// ExcludeKeys and ExcludeMembers use the same identity as the included
+	// static targets. Exclusions apply after all sources are resolved.
+	ExcludeKeys    []string             `json:"exclude_keys,omitempty"`
+	ExcludeMembers []TargetPlanMemberV1 `json:"exclude_members,omitempty"`
 	// DynamicGroups are the dynamic group ids referenced, sorted and unique.
 	DynamicGroups []string `json:"dynamic_groups,omitempty"`
 	// DynamicTopologies are the topology node references, sorted and unique.
@@ -289,6 +293,15 @@ func (plan *TargetPlanV1) Validate() error {
 	if err := canonicalTargetPlanList("static keys", plan.StaticKeys); err != nil {
 		return err
 	}
+	if err := canonicalTargetPlanList("exclude keys", plan.ExcludeKeys); err != nil {
+		return err
+	}
+	if plan.HasExclusions() && !facts.Dynamic {
+		return fmt.Errorf("alarmd contract: rule %s carries no exclusions", plan.Rule)
+	}
+	if plan.Rule == TargetPlanRuleModelInstID && plan.Identity.HostIdentity && len(plan.ExcludeKeys) > 0 {
+		return errors.New("alarmd contract: model_inst_id exclusions read by host identity must name model members")
+	}
 	if plan.Identity.HostIdentity {
 		if plan.Rule != TargetPlanRuleHostID && plan.Rule != TargetPlanRuleModelInstID {
 			return fmt.Errorf("alarmd contract: rule %s does not read a host identity", plan.Rule)
@@ -319,6 +332,19 @@ func (plan *TargetPlanV1) Validate() error {
 			}
 		}
 	}
+	if len(plan.ExcludeMembers) > 0 {
+		if plan.Rule != TargetPlanRuleModelInstID || !plan.Identity.HostIdentity || len(plan.ExcludeKeys) > 0 {
+			return errors.New("alarmd contract: excluded members belong to a model_inst_id plan read by host identity")
+		}
+		for index, member := range plan.ExcludeMembers {
+			if member.ModelID != plan.ModelID || strings.TrimSpace(member.ModelInstID) == "" {
+				return errors.New("alarmd contract: an excluded member names the plan's model and a non-empty instance")
+			}
+			if index > 0 && !plan.ExcludeMembers[index-1].less(member) {
+				return errors.New("alarmd contract: excluded members must be canonically ordered and unique")
+			}
+		}
+	}
 	if err := canonicalTargetPlanList("dynamic groups", plan.DynamicGroups); err != nil {
 		return err
 	}
@@ -337,6 +363,11 @@ func (plan *TargetPlanV1) Validate() error {
 		return errors.New("alarmd contract: a target plan that names nothing matches nothing and is refused at compile time")
 	}
 	return nil
+}
+
+// HasExclusions reports whether an older object reader would widen this plan.
+func (plan *TargetPlanV1) HasExclusions() bool {
+	return plan != nil && (len(plan.ExcludeKeys) > 0 || len(plan.ExcludeMembers) > 0)
 }
 
 func (member TargetPlanMemberV1) less(other TargetPlanMemberV1) bool {

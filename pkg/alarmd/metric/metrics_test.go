@@ -1074,9 +1074,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("worker_no_data_slot_plans_total")] = len(nodata.SlotOutcomes)
 	bounds[fqName("worker_no_data_absences_total")] = len(observability.NoDataAbsenceOutcomes)
 	bounds[fqName("target_plan_resolution_total")] = len(targetplan.ResolutionStates)
-	// Three kinds by four states by the closed reasons; cells are created on
+	// Four kinds by four states by the closed reasons; cells are created on
 	// observation because most triples cannot happen.
-	bounds[fqName("target_selector_resolutions_total")] = 3 * len(targetplan.SelectorStates) * len(targetplan.SelectorReasons)
+	bounds[fqName("target_selector_resolutions_total")] = 4 * len(targetplan.SelectorStates) * len(targetplan.SelectorReasons)
 	// Every outcome but EVALUATED: a Plan that evaluated has not stalled, so
 	// that pair cannot happen and a label for it would be a zero that means
 	// nothing rather than one that means "nothing has stopped".
