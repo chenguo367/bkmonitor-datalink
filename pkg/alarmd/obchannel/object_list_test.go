@@ -140,7 +140,7 @@ func TestObjectListCarriesFiltersIntoTheRouteAndTheNextPage(t *testing.T) {
 	if next["order"] != "newest" || next["replica"] != "worker-a" || next["strategy"] != "8999" || next["business"] != "2" || next["offset"] != 10 {
 		t.Fatalf("next page dropped a filter: %v", next)
 	}
-	if len(out.Limitations) == 0 || !strings.Contains(out.Limitations[0], "filtered") {
+	if !strings.Contains(strings.Join(out.Limitations, "\n"), "Rows are filtered") {
 		t.Fatalf("a filtered page does not say so: %v", out.Limitations)
 	}
 	// An unfiltered read sends no empty filters: an empty replica would be refused.
@@ -214,3 +214,33 @@ func TestObjectListReadsTheKeysTheRouteTypeEncodes(t *testing.T) {
 
 // omitEmptyInListResponse are kept keys fleet omits when they are empty.
 var omitEmptyInListResponse = map[string]bool{"replica": true, "strategy": true, "business": true, "last_demotion_exit": true, "demoted_due_oldest_seconds": true, "gaps": true}
+
+func TestObjectListSaysPagesAreSeparateReads(t *testing.T) {
+	out := objectList(t, &objectRoute{rows: poolRows(3)}).Run(context.Background(), Params{"column": "demoted"})
+	if !strings.Contains(strings.Join(out.Limitations, "\n"), "Each page is a separate read") {
+		t.Fatalf("a page does not say it is its own read: %v", out.Limitations)
+	}
+}
+
+// oversizedRoute answers more than the response budget, as a deployment
+// view with a full page of rows can.
+type oversizedRoute struct{}
+
+func (oversizedRoute) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
+	_, _ = w.Write([]byte(`{"anomalies":["` + strings.Repeat("x", MaxResponseBytes) + `"]}`))
+}
+
+func TestObjectListOverBudgetOffersHalfThePage(t *testing.T) {
+	op := objectList(t, oversizedRoute{})
+	out := op.Run(context.Background(), Params{"column": "demoted", "offset": json.Number("50"), "limit": json.Number("200"), "replica": "worker-a"})
+	if out.Error == nil || out.Error.Code != "response_budget_exceeded" {
+		t.Fatalf("oversized page not refused by name: %+v", out)
+	}
+	if len(out.Next) != 1 || out.Next[0].Params["limit"] != 100 || out.Next[0].Params["offset"] != 50 || out.Next[0].Params["replica"] != "worker-a" {
+		t.Fatalf("no half-size retry of the same page: %+v", out.Next)
+	}
+	out = op.Run(context.Background(), Params{"column": "demoted", "limit": json.Number("1")})
+	if len(out.Next) != 0 {
+		t.Fatalf("a one-row page cannot be halved: %+v", out.Next)
+	}
+}
