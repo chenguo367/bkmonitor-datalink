@@ -394,7 +394,15 @@ func (hook failingGetHook) BeforeProcess(ctx context.Context, cmd redis.Cmder) (
 	return ctx, nil
 }
 func (failingGetHook) AfterProcess(context.Context, redis.Cmder) error { return nil }
-func (failingGetHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmder) (context.Context, error) {
+
+// A cutover reads its timelines in pipelined batches; the read fails there
+// the same way, taking the batch with it as a connection failure would.
+func (hook failingGetHook) BeforeProcessPipeline(ctx context.Context, cmds []redis.Cmder) (context.Context, error) {
+	for _, cmd := range cmds {
+		if _, err := hook.BeforeProcess(ctx, cmd); err != nil {
+			return ctx, err
+		}
+	}
 	return ctx, nil
 }
 func (failingGetHook) AfterProcessPipeline(context.Context, []redis.Cmder) error { return nil }
