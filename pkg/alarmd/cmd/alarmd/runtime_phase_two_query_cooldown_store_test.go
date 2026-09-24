@@ -17,7 +17,9 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
@@ -117,5 +119,41 @@ func TestEveryPoolRecordWriteIsCountedByItsResult(t *testing.T) {
 	}
 	if len(lines) != 1 || lines[0].Result != observability.ResultFailed || lines[0].Trace.QueryGroupKey != "qg" || lines[0].Err == nil {
 		t.Fatalf("lines = %+v, want one failed line naming the Query Group", lines)
+	}
+}
+
+// The production store counts on the process's Recorder: a write made
+// through it is read back from query_cooldown_saves_total, so a wiring that
+// counted nowhere would read as zero failures and fail here instead.
+func TestTheProductionPoolStoreCountsOnTheRecorder(t *testing.T) {
+	address, client := startPhaseTwoRedis(t)
+	cfg := config.Default()
+	cfg.Redis.Address = address
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	store := newProductionQueryCooldownStore(cfg, client, recorder, observability.NopObserver{})
+	fence := execution.OwnerFence{QueryGroup: "qg", OwnerID: "worker", OwnerEpoch: 1, LeaseToken: "token"}
+	if err := store.SaveQueryCooldown(context.Background(), fence, scheduler.QueryCooldownRecord{QueryGroup: "qg", OwnerEpoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(context.Background(), queryCooldownPrefix(cfg)+":qg").Err(); err != nil {
+		t.Fatalf("record not under the prefix store.inspect reads: %v", err)
+	}
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := -1.0
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_query_cooldown_saves_total" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			if m.GetLabel()[0].GetValue() == "written" {
+				written = m.GetCounter().GetValue()
+			}
+		}
+	}
+	if written != 1 {
+		t.Fatalf("written = %v on the process Recorder, want 1", written)
 	}
 }

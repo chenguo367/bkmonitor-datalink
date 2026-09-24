@@ -1268,3 +1268,18 @@ func TestLeaderForwardSeriesExistFromTheStartAndTakeOnlyTheClosedWords(t *testin
 		t.Fatalf("after = %v, want only the closed-word hop recorded and no new series", after)
 	}
 }
+
+// The pool record writes are pre-created: every result reads 0 before any
+// write, so a zero is a count and not a series nobody registered.
+func TestQueryCooldownSaveResultsArePreCreated(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	seen := map[string]bool{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_query_cooldown_saves_total") {
+		seen[m.GetLabel()[0].GetValue()] = true
+	}
+	for _, result := range QueryCooldownSaveResults {
+		if !seen[result] {
+			t.Fatalf("result %q not pre-created: %v", result, seen)
+		}
+	}
+}

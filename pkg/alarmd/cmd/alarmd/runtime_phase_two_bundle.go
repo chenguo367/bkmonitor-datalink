@@ -885,9 +885,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		SteppedDownAsLeader: recorder.ControlLeaderStepDown,
 		ExpiredRangeEnabled: cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled,
-		QueryCooldowns: newRedisQueryCooldownStore(runtimeClient, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "cooldown"),
-			recorder.ObserveQueryCooldownSave, observer),
-		Store: ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
+		QueryCooldowns:      newProductionQueryCooldownStore(cfg, runtimeClient, recorder, observer),
+		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
 		Executor: executor, Now: external.Now, ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(),
 		Observer: observer, Reconcile: assignmentReconciler, Flights: flights, RecoveryLimits: recoveryLimits,
 		PostRecoveryTerminalDelay: retention.TerminalDelay,

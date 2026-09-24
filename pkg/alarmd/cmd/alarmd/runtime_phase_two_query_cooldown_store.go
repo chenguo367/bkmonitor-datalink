@@ -19,7 +19,9 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
@@ -47,6 +49,13 @@ redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[3])
 return 1
 `
 
+// queryCooldownPrefix is where the pool records are kept. The Runners write
+// under it and store.inspect reads under it; one function, so the evidence
+// read cannot look somewhere the owners do not write.
+func queryCooldownPrefix(cfg config.Config) string {
+	return productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "cooldown")
+}
+
 // errQueryCooldownSuperseded is a save a later owner's record refused.
 var errQueryCooldownSuperseded = errors.New("alarmd: query cooldown record belongs to a later owner")
 
@@ -61,6 +70,15 @@ type redisQueryCooldownStore struct {
 	// state that is gone by the next restart with nothing to say so.
 	saves    func(result string)
 	observer observability.Observer
+}
+
+// newProductionQueryCooldownStore is the pool record store the Runners of a
+// production process write, counted on its Recorder and reported to its
+// observer. A named step, so the wiring a deployment depends on -- a write
+// counted nowhere reads as a write that never failed -- is one a test runs.
+func newProductionQueryCooldownStore(cfg config.Config, client redis.UniversalClient, recorder *metric.Recorder,
+	observer observability.Observer) scheduler.QueryCooldownStore {
+	return newRedisQueryCooldownStore(client, queryCooldownPrefix(cfg), recorder.ObserveQueryCooldownSave, observer)
 }
 
 // newRedisQueryCooldownStore is the store, or none -- a nil interface, not a
