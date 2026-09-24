@@ -28,6 +28,17 @@ type Target struct {
 	Replica             string `json:"replica,omitempty"`
 	OwnerQueryGroup     string `json:"owner_query_group,omitempty"`
 	ExpectedIncarnation string `json:"expected_incarnation,omitempty"`
+	// ControlLeader asks for whichever Worker holds the Control Leader lease
+	// when the ingress routes the read. The ingress resolves it to Replica
+	// from the same lease read it routes by, so the answer comes from the
+	// Leader of that term or fails as control_changed -- never from another
+	// instance.
+	ControlLeader bool `json:"control_leader,omitempty"`
+}
+
+// Explicit is whether the read names a target at all.
+func (t Target) Explicit() bool {
+	return t.Replica != "" || t.OwnerQueryGroup != "" || t.ControlLeader
 }
 
 func (c *Channel) CatalogRevision() string { return c.revision }
@@ -127,13 +138,16 @@ func targetFields() map[string]Field {
 		"replica":              {Type: "string", MinLength: 1, MaxLength: 256, Pattern: "^[^\\x00-\\x1f\\x7f]+$", Description: "Worker identity for registry lookup only; never interpreted as an endpoint.", Source: "OB worker identity"},
 		"owner_query_group":    {Type: "string", MinLength: 1, MaxLength: 256, Pattern: "^[^\\x00-\\x1f\\x7f]+$", Description: "Query Group whose current execution lease selects the worker.", Source: "strategy.get plans[].query_group"},
 		"expected_incarnation": {Type: "string", MinLength: 1, MaxLength: 256, Pattern: "^[^\\x00-\\x1f\\x7f]+$", Description: "Expected process incarnation; requires an explicit target.", Source: "meta.incarnation from prior targeted evidence"},
+		"control_leader":       {Type: "boolean", Description: "true reads the current Control Leader, resolved from the lease the read is routed by; meta.control_leader names it and its term, on a failed read too. Refused as target_routing_unavailable where targeted routing is not configured, like any targeted read.", Source: "Control Leader lease"},
 	}
 }
 
 func targetRules() []any {
 	return []any{
 		map[string]any{"not": map[string]any{"required": []string{"replica", "owner_query_group"}}},
-		map[string]any{"if": map[string]any{"required": []string{"expected_incarnation"}}, "then": map[string]any{"anyOf": []any{map[string]any{"required": []string{"replica"}}, map[string]any{"required": []string{"owner_query_group"}}}}},
+		map[string]any{"not": map[string]any{"required": []string{"replica", "control_leader"}}},
+		map[string]any{"not": map[string]any{"required": []string{"owner_query_group", "control_leader"}}},
+		map[string]any{"if": map[string]any{"required": []string{"expected_incarnation"}}, "then": map[string]any{"anyOf": []any{map[string]any{"required": []string{"replica"}}, map[string]any{"required": []string{"owner_query_group"}}, map[string]any{"required": []string{"control_leader"}}}}},
 	}
 }
 
@@ -152,17 +166,26 @@ func invocationParams(op Operation, input Params) (Params, Target, error) {
 			params[name] = value
 		}
 	}
-	target := Target{Replica: input.String("replica"), OwnerQueryGroup: input.String("owner_query_group"), ExpectedIncarnation: input.String("expected_incarnation")}
-	if target.Replica != "" && target.OwnerQueryGroup != "" {
-		return nil, Target{}, errors.New("replica and owner_query_group are mutually exclusive")
+	target := Target{Replica: input.String("replica"), OwnerQueryGroup: input.String("owner_query_group"), ExpectedIncarnation: input.String("expected_incarnation"), ControlLeader: input.Bool("control_leader")}
+	if value, given := input["control_leader"]; given && value != true {
+		return nil, Target{}, errors.New("control_leader, when given, must be true")
 	}
-	if target.ExpectedIncarnation != "" && target.Replica == "" && target.OwnerQueryGroup == "" {
-		return nil, Target{}, errors.New("expected_incarnation requires replica or owner_query_group")
+	named := 0
+	for _, set := range []bool{target.Replica != "", target.OwnerQueryGroup != "", target.ControlLeader} {
+		if set {
+			named++
+		}
+	}
+	if named > 1 {
+		return nil, Target{}, errors.New("replica, owner_query_group and control_leader are mutually exclusive")
+	}
+	if target.ExpectedIncarnation != "" && !target.Explicit() {
+		return nil, Target{}, errors.New("expected_incarnation requires replica, owner_query_group or control_leader")
 	}
 	if err := validate(op, params); err != nil {
 		return nil, Target{}, err
 	}
-	if target.Replica == "" && target.OwnerQueryGroup == "" && op.DefaultOwnerParam != "" {
+	if !target.Explicit() && op.DefaultOwnerParam != "" {
 		target.OwnerQueryGroup = params.String(op.DefaultOwnerParam)
 	}
 	return params, target, nil
@@ -194,7 +217,14 @@ func (c *Channel) pinNext(calls []Call, target Target) []Call {
 		for name, value := range call.Params {
 			params[name] = value
 		}
+		// A next call that asks for the Leader is left to be resolved when it
+		// is made: the Leader may have changed by then. The Worker executing
+		// this read sees only the Replica the ingress resolved, so a pinned
+		// call goes to that same process.
 		replica, group := params.String("replica"), params.String("owner_query_group")
+		if params.Bool("control_leader") {
+			continue
+		}
 		if replica != "" || group != "" {
 			same := (group != "" && group == target.OwnerQueryGroup && replica == "") || (replica != "" && replica == target.Replica && group == "")
 			if !same {

@@ -223,6 +223,15 @@ type Meta struct {
 	Incarnation   string       `json:"incarnation,omitempty"`
 	Via           []string     `json:"via,omitempty"`
 	Owner         *OwnerMeta   `json:"owner,omitempty"`
+	// ControlLeader is the lease a control_leader read was resolved from:
+	// the answer is that Worker in that term, or the read failed.
+	ControlLeader *LeaderMeta `json:"control_leader,omitempty"`
+}
+
+// LeaderMeta is the Control Leader lease the routing layer resolved.
+type LeaderMeta struct {
+	OwnerID    string `json:"owner_id"`
+	OwnerEpoch uint64 `json:"owner_epoch"`
 }
 
 // OwnerMeta is a lease observation made by the routing layer. It is distinct
@@ -416,7 +425,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		fail(400, "invalid_input", err.Error())
 		return
 	}
-	if target.Replica != "" || target.OwnerQueryGroup != "" {
+	if target.Explicit() {
 		if c.options.Route == nil {
 			fail(503, "target_routing_unavailable", "Targeted evidence routing is not configured.")
 			return
