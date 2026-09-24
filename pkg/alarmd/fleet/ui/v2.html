@@ -357,11 +357,33 @@ function getJSON(path) {
   return fetch(BASE + path, {cache: 'no-store'}).then(function (response) {
     if (response.ok) return response.json();
     return response.json().catch(function () { return null; }).then(function (body) {
-      var refusal = new Error(path + ' ' + response.status);
+      // A structured error says itself in its message; the restricted public
+      // surface's is one, and it is told apart so the page can say where the
+      // data went rather than that it could not be read.
+      var error = body && body.error;
+      var words = error && typeof error === 'object' ? (error.message || error.code) : error;
+      var refusal = new Error(path + ' ' + response.status + (words ? '：' + words : ''));
       refusal.body = body;
+      refusal.restricted = !!(error && typeof error === 'object' && error.code === RESTRICTED_CODE);
       throw refusal;
     });
   });
+}
+
+// The restricted public surface: the refusal's code and the one notice shown
+// where the data behind the CLI would be, with the login page -- the one the
+// header's authorization link points at, built from this page's base.
+var RESTRICTED_CODE = 'public_surface_restricted';
+var RESTRICTED_NOTICE = '公开面已收紧，完整数据请用 CLI 读';
+function loginHref() { return BASE.replace(/v2\.html\/$/, '') + 'cli'; }
+function restrictedNotice(el) {
+  el.textContent = '';
+  el.appendChild(document.createTextNode(RESTRICTED_NOTICE + '：'));
+  var link = document.createElement('a');
+  link.href = loginHref();
+  link.textContent = '登录页';
+  el.appendChild(link);
+  el.hidden = false;
 }
 
 function refresh() {
@@ -372,8 +394,14 @@ function refresh() {
     renderColumns(LATEST);
     openSelected();
   }).catch(function (error) {
-    document.getElementById('lead').textContent = '读不到：' + error.message;
-    document.getElementById('lead').className = 'err';
+    var lead = document.getElementById('lead');
+    if (error.restricted) {
+      lead.className = '';
+      restrictedNotice(lead);
+      return;
+    }
+    lead.textContent = '读不到：' + error.message;
+    lead.className = 'err';
   });
 }
 
@@ -388,7 +416,14 @@ function openSelected() {
   if (!id) { card.hidden = true; return; }
   getJSON('api/strategies/' + encodeURIComponent(id) + '?include=config')
     .then(renderCard)
-    .catch(function (refusal) { renderCard(null, refusal && refusal.body); });
+    .catch(function (refusal) {
+      if (refusal && refusal.restricted) {
+        card.hidden = false;
+        restrictedNotice(card);
+        return;
+      }
+      renderCard(null, refusal && refusal.body);
+    });
 }
 
 window.addEventListener('hashchange', openSelected);

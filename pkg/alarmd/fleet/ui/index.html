@@ -465,8 +465,17 @@ function api(path, init) {
         // response, not an explanation. Pasting the whole JSON into a sentence
         // is not a message -- it is the raw response with a prefix on it, which
         // is what a reader saw whenever a route answered in its own shape.
-        var reason = (body && body.error) || (body ? 'HTTP ' + r.status : (text || ('HTTP ' + r.status)));
+        //
+        // An error may itself be structured -- the restricted public surface
+        // answers {code, message, login_href} -- and an object pasted into a
+        // sentence reads "[object Object]". Its words are its message, else
+        // its code.
+        var error = body && body.error;
+        var reason = error
+          ? (typeof error === 'object' ? (error.message || error.code || 'HTTP ' + r.status) : error)
+          : (body ? 'HTTP ' + r.status : (text || ('HTTP ' + r.status)));
         var failure = new Error(reason);
+        failure.restricted = !!(error && typeof error === 'object' && error.code === RESTRICTED_CODE);
         // Carried rather than matched out of the text later: a provider message
         // that happens to contain "404" is not a missing route, and deciding
         // that from the sentence gets it wrong in whichever direction is worse.
@@ -483,8 +492,37 @@ function text(id, v) { document.getElementById(id).textContent = v; }
 
 function fail(errId, err) {
   var el = document.getElementById(errId);
+  // A route the public surface no longer serves is not a failure to read: the
+  // data is behind the CLI, and the block says so and where to log in.
+  if (err && err.restricted) {
+    restrictedNotice(el);
+    return;
+  }
   // Never a blank panel and never a zero: say which channel could not answer.
   el.textContent = '这一块读不到：' + err.message;
+  el.hidden = false;
+}
+
+// The restricted public surface: the refusal's code, and the one notice every
+// block whose data moved behind the CLI shows in its place.
+var RESTRICTED_CODE = 'public_surface_restricted';
+var RESTRICTED_NOTICE = '公开面已收紧，完整数据请用 CLI 读';
+
+// The login page, built from the page's own base. A refusal's login_href is
+// relative to the refused API path, not to this page; the page knows its base
+// already, and its login page is the one the header's authorization link
+// points at, whatever prefix the host adds.
+function loginHref() { return BASE.replace(/index\.html\/$/, '') + 'cli'; }
+
+// Replaces el's content with the notice, an optional lead sentence before it,
+// and a link to the login page. Never inferred from the absent data.
+function restrictedNotice(el, lead) {
+  el.textContent = '';
+  el.appendChild(document.createTextNode((lead || '') + RESTRICTED_NOTICE + '：'));
+  var link = document.createElement('a');
+  link.href = loginHref();
+  link.textContent = '登录页';
+  el.appendChild(link);
   el.hidden = false;
 }
 
@@ -2680,6 +2718,12 @@ function loadHealth() {
 function renderDeployment(deployment) {
     show('healthErr', false);
     latestDeployment = deployment;
+    // The restricted public surface sends the verdict and the counts and
+    // nothing that names a replica, a place or an object. Every block below
+    // that reads one of the withheld fields shows the notice instead: an empty
+    // list here is "not sent", and reading it as "none" is how the page said
+    // "没有副本被计入" beside a verdict one replica had decided.
+    var restricted = deployment.restricted === true;
     var h = deployment.health || 'UNKNOWN';
     var badge = document.getElementById('health');
     badge.textContent = h;
@@ -2719,7 +2763,11 @@ function renderDeployment(deployment) {
       var decidesVerdict = h === 'UNKNOWN' && !(deployment.gaps || []).length;
       text('unattributedHint', '重启后从记录里恢复的：记录留了"这一轮没跑成"，没留为什么，'
         + '所以还说不清是不是 alarmd 自己的问题。'
-        + (decidesVerdict
+        // Whether it decides the verdict turns on the gaps, which a restricted
+        // surface does not send.
+        + (restricted
+            ? ''
+            : decidesVerdict
             ? '本次判定就是停在这里。'
             : '本次判定不是停在这里——原因见上面的"证据不全"那一句。')
         + '已经计入左边的"没跑成待查"，不另占一栏。'
@@ -2729,7 +2777,11 @@ function renderDeployment(deployment) {
     // on the verdict response, which is fetched first and refreshed on the same
     // timer, so a console configured after a restart appears without a reload.
     consoleBase = deployment.strategy_link_base || '';
-    renderImpact(deployment.impact);
+    if (restricted) {
+      restrictedNotice(document.getElementById('impact'));
+    } else {
+      renderImpact(deployment.impact);
+    }
     // The equation is printed with its own arithmetic rather than asserted in
     // prose. A reader who can only be told the columns partition the objects has
     // no way to notice the day they stop doing so.
@@ -2805,11 +2857,15 @@ function renderDeployment(deployment) {
     }
     flow.push('计数从本次进程启动起算，重启归零');
     text('poolFlowHint', flow.join('；'));
-    renderCoverage(deployment.coverage);
-    renderReplicas(deployment.per_replica);
-    renderSource(deployment.source, deployment.expected, deployment.source_standing);
-    renderNoDataTracking(deployment.no_data_tracking);
-    renderDependencies(deployment.dependencies || [], deployment.dependencies_replica, deployment.dependencies_replicas);
+    if (restricted) {
+      renderRestrictedBlocks();
+    } else {
+      renderCoverage(deployment.coverage);
+      renderReplicas(deployment.per_replica);
+      renderSource(deployment.source, deployment.expected, deployment.source_standing);
+      renderNoDataTracking(deployment.no_data_tracking);
+      renderDependencies(deployment.dependencies || [], deployment.dependencies_replica, deployment.dependencies_replicas);
+    }
     text('demotedHint', deployment.demoted_total
       ? '后端持续查不到，已降级不再反复查；不计入部署健康判定'
       : '当前没有对象被降级');
@@ -2834,8 +2890,11 @@ function renderDeployment(deployment) {
     // deployment that holds none would report "nothing is being missed" for one
     // where nothing is watching, which is the failure this whole cell is for.
     var overdue = deployment.overdue;
-    show('overdueCell', !!overdue);
-    if (overdue) {
+    show('overdueCell', !!overdue || restricted);
+    if (restricted) {
+      text('overdue', '—');
+      restrictedNotice(document.getElementById('overdueHint'));
+    } else if (overdue) {
       // Three states, not two. While the due index runs in shadow it decides
       // nothing, so no object is ever held back, so this count cannot be
       // anything but zero -- and printing "0，每个对象都在按自己的周期被处理"
@@ -2873,7 +2932,11 @@ function renderDeployment(deployment) {
         }
       }
     }
-    renderPrunedSkips(deployment.pruned_skips || []);
+    if (restricted) {
+      restrictedNotice(document.getElementById('prunedSkips'));
+    } else {
+      renderPrunedSkips(deployment.pruned_skips || []);
+    }
     var gaps = deployment.gaps || [];
     // UNKNOWN has two ways in and the wording used to describe only one.
     //
@@ -2885,7 +2948,11 @@ function renderDeployment(deployment) {
     // the reader "证据齐全" underneath it: the page asserting the opposite of
     // its own badge, with nothing on it that could settle the argument.
     var degradations = deployment.degradations || [];
-    text('why', gaps.length
+    // Restricted: the verdict is the server's, and why it holds is in the
+    // gaps, the degradations and the object lists -- none of them sent.
+    if (restricted) {
+      restrictedNotice(document.getElementById('why'), '判定 ' + h + ' 来自服务端；原因与明细不在公开面上（CLI 读 fleet.get）。');
+    } else text('why', gaps.length
       ? '证据不全：' + (GAP_MEANING[gaps[0].kind] || gaps[0].kind) +
         (gaps.length > 1 ? '，另有 ' + (gaps.length - 1) + ' 项' : '')
       : (h === 'UNKNOWN' && unattributed
@@ -2927,9 +2994,60 @@ function renderDeployment(deployment) {
     // from the same read rather than fetched separately: two reads would let
     // the page show a verdict from one moment beside occupancy from another.
     show('capErr', false);
-    renderLoad(deployment.load);
-    renderCapacity(deployment.capacity, gaps, deployment.schedule);
-    renderBrief(deployment);
+    if (restricted) {
+      document.getElementById('loadLines').textContent = '';
+      text('loadLimits', '');
+      restrictedNotice(document.getElementById('loadLines'));
+      document.getElementById('capCards').textContent = '';
+      show('capEmpty', false);
+      restrictedNotice(document.getElementById('capNote'));
+      renderRestrictedBrief(deployment);
+    } else {
+      renderLoad(deployment.load);
+      renderCapacity(deployment.capacity, gaps, deployment.schedule);
+      renderBrief(deployment);
+    }
+}
+
+// The blocks of the health panel that read only withheld fields: the
+// replicas, their dependencies, the coverage comparison, the source and the
+// no-data tracking. Each shows the notice where its content would be.
+function renderRestrictedBlocks() {
+  show('coverWrap', true);
+  restrictedNotice(document.getElementById('coverBasis'));
+  show('replicaPanel', true);
+  var rows = document.getElementById('repRows');
+  rows.textContent = '';
+  var row = document.createElement('tr');
+  var cell = document.createElement('td');
+  cell.colSpan = 99;
+  restrictedNotice(cell);
+  row.appendChild(cell);
+  rows.appendChild(row);
+  document.getElementById('depRows').textContent = '';
+  restrictedNotice(document.getElementById('depBasis'));
+  restrictedNotice(document.getElementById('expectedHint'));
+  show('noDataTrackingCell', true);
+  restrictedNotice(document.getElementById('noDataTrackingHint'));
+}
+
+// The first screen's brief on a restricted surface: the state coverage from
+// the counts that are sent, and the notice where the version, the schedule,
+// the blocked lines and the detail's completeness would be -- each read from
+// a withheld field or from the object list, which is not public.
+function renderRestrictedBrief(deployment) {
+  var buildLine = document.getElementById('buildLine');
+  buildLine.className = 'basis';
+  restrictedNotice(buildLine, '版本：');
+  restrictedNotice(document.getElementById('briefSchedule'), '执行情况：');
+  restrictedNotice(document.getElementById('briefBlocked'));
+  var unknown = deployment.unknown || 0, unattributed = deployment.unattributed || 0;
+  var blind = [];
+  if (unknown) blind.push(unknown + ' 个对象现在说不出结论');
+  if (unattributed) blind.push(unattributed + ' 个对象没留下成因，还说不清归谁');
+  restrictedNotice(document.getElementById('briefBlind'), '状态覆盖：' + (blind.length ? blind.join('；') : '各栏计数见下')
+    + '。明细是否完整：');
+  show('briefConsole', false);
 }
 
 // What the verdict costs, in the unit the work is done in.

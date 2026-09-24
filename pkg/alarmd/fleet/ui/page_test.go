@@ -450,8 +450,12 @@ func TestTheAnomalyColumnIsCalledOneThingEverywhere(t *testing.T) {
 // live deployment for as long as it took someone to read the JSON by hand.
 //
 // It answers with a type now, so this is the same check as the other two.
+//
+// The route answers HealthResponse, or on a restricted public surface the
+// summary PublicHealthResponse -- the same fields plus restricted, which is
+// the one the page reads to know the rest were withheld.
 func TestEveryVerdictFieldThePageReadsExistsInTheAPI(t *testing.T) {
-	assertFieldsExist(t, "deployment", reflect.TypeOf(fleet.HealthResponse{}))
+	assertFieldsExist(t, "deployment", reflect.TypeOf(fleet.PublicHealthResponse{}))
 }
 
 // The impact line is the only thing on the page that answers "what is affected"
