@@ -15,6 +15,30 @@ import (
 var InfoFields = []string{
 	"redis_version", "role", "maxmemory", "maxmemory_policy", "used_memory", "used_memory_peak",
 	"used_memory_rss", "evicted_keys", "expired_keys", "keyspace_hits", "keyspace_misses",
+	"master_repl_offset", "connected_slaves",
+}
+
+// ReplicaInfoFields are reported only by a server that is a replica: how far
+// it has applied its master's stream and whether its link is up. On a
+// replica each one missing is named; on a master none is expected.
+var ReplicaInfoFields = []string{
+	"master_link_status", "master_last_io_seconds_ago", "master_sync_in_progress", "slave_repl_offset",
+}
+
+// InfoScriptCommands are the commands whose INFO commandstats line is kept:
+// the script calls every alarmd write and every fenced read goes through.
+// A server lists a command only once it has been called since the stats
+// were last reset, so an absent one is no calls, not an unknown.
+var InfoScriptCommands = []string{"eval", "evalsha", "eval_ro", "evalsha_ro"}
+
+// ReplicaLink is one replica as its master reports it, without its address:
+// its state, the offset it has acknowledged, how many bytes that is behind
+// the master's own offset, and the seconds since its last acknowledgement.
+type ReplicaLink struct {
+	State       string `json:"state"`
+	Offset      int64  `json:"offset"`
+	BytesBehind int64  `json:"bytes_behind"`
+	LagSeconds  int64  `json:"lag_seconds"`
 }
 
 // ServerInfo is one Redis server as alarmd reaches it: which of alarmd's
@@ -31,6 +55,12 @@ type ServerInfo struct {
 	Fields   map[string]string `json:"fields,omitempty"`
 	Missing  []string          `json:"missing,omitempty"`
 	Keyspace map[string]string `json:"keyspace,omitempty"`
+	// Commands is the commandstats line of each of InfoScriptCommands the
+	// server has called since its stats were reset: calls, usec,
+	// usec_per_call and, on newer servers, rejected and failed calls.
+	Commands map[string]string `json:"commands,omitempty"`
+	// Replicas is what a master reports of each of its replicas.
+	Replicas []ReplicaLink `json:"replicas,omitempty"`
 }
 
 // InfoResult is every Redis server alarmd is configured with, one entry per
@@ -85,7 +115,9 @@ func (service *Service) Info(ctx context.Context) InfoResult {
 			result.Complete = false
 		} else {
 			s.info.Status = "ok"
-			s.info.Fields, s.info.Keyspace, s.info.Missing = parseInfo(raw, s.info.DBs)
+			parsed := parseInfo(raw, s.info.DBs)
+			s.info.Fields, s.info.Keyspace, s.info.Missing = parsed.fields, parsed.keyspace, parsed.missing
+			s.info.Commands, s.info.Replicas = parsed.commands, parsed.replicas
 		}
 		sort.Strings(s.info.Roles)
 		result.Servers = append(result.Servers, s.info)
@@ -104,19 +136,35 @@ func appendUnique(values []int, value int) []int {
 	return values
 }
 
-// parseInfo keeps the allowed fields, and the keyspace line of each db a
-// role reads. A field the server did not report is named as missing, not
-// written as zero.
-func parseInfo(raw string, dbs []int) (map[string]string, map[string]string, []string) {
-	allowed := make(map[string]bool, len(InfoFields))
+// parsedInfo is what parseInfo keeps of one INFO answer.
+type parsedInfo struct {
+	fields, keyspace, commands map[string]string
+	missing                    []string
+	replicas                   []ReplicaLink
+}
+
+// parseInfo keeps the allowed fields, the keyspace line of each db a role
+// reads, the commandstats of the script commands, and each replica line
+// without its address. A field the server should have reported and did not
+// is named as missing, not written as zero.
+func parseInfo(raw string, dbs []int) parsedInfo {
+	allowed := make(map[string]bool, len(InfoFields)+len(ReplicaInfoFields))
 	for _, name := range InfoFields {
+		allowed[name] = true
+	}
+	for _, name := range ReplicaInfoFields {
 		allowed[name] = true
 	}
 	wantDB := map[string]bool{}
 	for _, db := range dbs {
 		wantDB["db"+strconv.Itoa(db)] = true
 	}
-	fields, keyspace := map[string]string{}, map[string]string{}
+	wantCommand := map[string]bool{}
+	for _, command := range InfoScriptCommands {
+		wantCommand["cmdstat_"+command] = true
+	}
+	parsed := parsedInfo{fields: map[string]string{}, keyspace: map[string]string{}, commands: map[string]string{}}
+	var links []map[string]string
 	for _, line := range strings.Split(raw, "\n") {
 		name, value, ok := strings.Cut(strings.TrimSpace(line), ":")
 		if !ok || strings.HasPrefix(name, "#") {
@@ -124,16 +172,54 @@ func parseInfo(raw string, dbs []int) (map[string]string, map[string]string, []s
 		}
 		switch {
 		case allowed[name]:
-			fields[name] = value
+			parsed.fields[name] = value
 		case wantDB[name]:
-			keyspace[name] = value
+			parsed.keyspace[name] = value
+		case wantCommand[name]:
+			parsed.commands[strings.TrimPrefix(name, "cmdstat_")] = value
+		case replicaLine(name):
+			links = append(links, pairs(value))
 		}
 	}
-	var missing []string
-	for _, name := range InfoFields {
-		if _, ok := fields[name]; !ok {
-			missing = append(missing, name)
+	expected := InfoFields
+	if parsed.fields["role"] == "slave" {
+		expected = append(append([]string(nil), InfoFields...), ReplicaInfoFields...)
+	}
+	for _, name := range expected {
+		if _, ok := parsed.fields[name]; !ok {
+			parsed.missing = append(parsed.missing, name)
 		}
 	}
-	return fields, keyspace, missing
+	masterOffset, _ := strconv.ParseInt(parsed.fields["master_repl_offset"], 10, 64)
+	for _, link := range links {
+		// Only these keys are read from the line; ip and port never are.
+		offset, _ := strconv.ParseInt(link["offset"], 10, 64)
+		lag, _ := strconv.ParseInt(link["lag"], 10, 64)
+		parsed.replicas = append(parsed.replicas, ReplicaLink{State: link["state"], Offset: offset, BytesBehind: masterOffset - offset, LagSeconds: lag})
+	}
+	if len(parsed.commands) == 0 {
+		parsed.commands = nil
+	}
+	return parsed
+}
+
+// replicaLine is whether an INFO name is a master's slaveN line.
+func replicaLine(name string) bool {
+	number, ok := strings.CutPrefix(name, "slave")
+	if !ok {
+		return false
+	}
+	_, err := strconv.Atoi(number)
+	return err == nil
+}
+
+// pairs splits a k=v,k=v INFO value.
+func pairs(value string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(value, ",") {
+		if key, v, ok := strings.Cut(pair, "="); ok {
+			out[key] = v
+		}
+	}
+	return out
 }

@@ -55,12 +55,13 @@ func StoreOperations(service *obevidence.Service) []Operation {
 		}, Run: func(ctx context.Context, p Params) Outcome {
 			return storeOutcome(service.Store(ctx, obevidence.StoreRequest{Family: p.String("family"), StrategyID: p.String("strategy_id"), GroupID: p.String("group_id"), QueryGroup: p.String("query_group"), Fields: selectedFields(p)}))
 		}},
-		{ID: "store.info", Summary: "读取 alarmd 用到的每个 Redis 的内存上限、淘汰策略、已用内存、淘汰与过期计数和各角色所在库的键数（INFO 白名单字段）；读不到的服务器具名标出。", Fields: map[string]Field{}, Limits: limits, OutputSchema: SchemaOf(obevidence.InfoResult{}), Run: func(ctx context.Context, _ Params) Outcome {
+		{ID: "store.info", Summary: "读取 alarmd 用到的每个 Redis 的内存上限、淘汰策略、已用内存、淘汰与过期计数、各角色所在库的键数、脚本命令（eval/evalsha）累计调用与耗时、复制 offset 与各副本落后字节数（不含副本地址）（INFO 白名单字段）；读不到的服务器具名标出。", Fields: map[string]Field{}, Limits: limits, OutputSchema: SchemaOf(obevidence.InfoResult{}), Run: func(ctx context.Context, _ Params) Outcome {
 			info := service.Info(ctx)
 			out := Outcome{Value: info, Complete: info.Complete, Summary: strconv.Itoa(len(info.Servers)) + " Redis servers"}
 			if !info.Complete {
 				out.Limitations = append(out.Limitations, "Servers with status dependency_unavailable did not answer INFO; their fields are unknown, not zero.")
 			}
+			out.Limitations = append(out.Limitations, "commands counts since the server's stats were last reset or it started; a script command absent from it had no calls in that time. A rate needs two reads.")
 			return out
 		}},
 	}
