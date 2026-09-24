@@ -17,6 +17,7 @@ import (
 	"github.com/Shopify/sarama"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/legacyoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
@@ -185,12 +186,16 @@ func TestAnEventOfNoKnownFormatIsRefusedAlone(t *testing.T) {
 	}
 }
 
-// Every rule the standard converter names is one the metric is created for,
-// so a refusal never folds to _other for want of a cell.
+// Every rule the standard converter and this sink name is one the metric is
+// created for, so a refusal never folds to _other for want of a cell.
 func TestEveryConverterRuleHasAMetricCell(t *testing.T) {
 	for _, rule := range []string{
 		linkdoutput.RuleIdentityMissing, linkdoutput.RuleActionUnknown, linkdoutput.RuleLevelsInvalid,
 		linkdoutput.RuleTooManyLevels, linkdoutput.RuleBusinessIdentity, linkdoutput.RuleEncode,
+		observability.OutputRejectEventInvalid, observability.OutputRejectFormatUnsupported,
+		observability.OutputRejectLegacyContextMissing, observability.OutputRejectLegacyConversion,
+		observability.OutputRejectLegacyStrategyInvalid, observability.OutputRejectLegacyOutputInvalid,
+		observability.OutputRejectLegacyPayloadTooLarge,
 	} {
 		if observability.NormalizeOutputRejectRule(rule) != rule {
 			t.Errorf("converter rule %q has no metric cell", rule)
@@ -224,17 +229,21 @@ func legacySeriesEvent(t *testing.T, series, event string) contract.TriggerEvent
 
 // The compatible path isolates in one pass: the converter is asked once for
 // the group, an event it refuses and an event whose message is too large are
-// refused alone, and the rest is written.
+// refused alone, and the rest is written. A refusal the strategy's own
+// configuration causes is named apart from one alarmd causes.
 func TestTheCompatiblePathRefusesEachEventAlone(t *testing.T) {
 	t.Parallel()
 	producer := &countingProducer{}
 	sink := producer.sink(t)
 	good, refused, large := legacySeriesEvent(t, "series-a", "a"), legacySeriesEvent(t, "series-b", "b"), legacySeriesEvent(t, "series-c", "c")
+	misconfigured := legacySeriesEvent(t, "series-d", "d")
 	converter := &eachConverter{convert: func(event contract.TriggerEventV1) (LegacyConvertedEvent, error) {
 		payload := json.RawMessage(`{}`)
 		switch event.EventID {
 		case refused.EventID:
-			return LegacyConvertedEvent{}, errors.New("invalid legacy item/severity")
+			return LegacyConvertedEvent{}, errors.New("legacy protocol carries anomaly points only")
+		case misconfigured.EventID:
+			return LegacyConvertedEvent{}, &legacyoutput.StrategyConfigError{Err: errors.New("invalid legacy item/severity")}
 		case large.EventID:
 			payload = json.RawMessage(`{"padding":"` + strings.Repeat("x", 2048) + `"}`)
 		}
@@ -244,7 +253,7 @@ func TestTheCompatiblePathRefusesEachEventAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	partial := partialOf(t, sink.WriteBatch(context.Background(), []contract.TriggerEventV1{good, refused, large}))
+	partial := partialOf(t, sink.WriteBatch(context.Background(), []contract.TriggerEventV1{good, refused, large, misconfigured}))
 	if converter.calls != 1 {
 		t.Fatalf("converter asked %d times, want once for the group: isolating must not convert again", converter.calls)
 	}
@@ -255,7 +264,8 @@ func TestTheCompatiblePathRefusesEachEventAlone(t *testing.T) {
 	for _, rejected := range partial.Rejected {
 		rules[rejected.EventID] = rejected.Rule
 	}
-	if len(rules) != 2 || rules[refused.EventID] != observability.OutputRejectLegacyConversion || rules[large.EventID] != observability.OutputRejectLegacyPayloadTooLarge {
-		t.Fatalf("rejected = %+v, want the refused event by legacy_conversion_rejected and the large one by legacy_payload_too_large", partial.Rejected)
+	if len(rules) != 3 || rules[refused.EventID] != observability.OutputRejectLegacyConversion || rules[large.EventID] != observability.OutputRejectLegacyPayloadTooLarge ||
+		rules[misconfigured.EventID] != observability.OutputRejectLegacyStrategyInvalid {
+		t.Fatalf("rejected = %+v, want the refused event by legacy_conversion_rejected, the large one by legacy_payload_too_large and the misconfigured one by legacy_strategy_invalid", partial.Rejected)
 	}
 }

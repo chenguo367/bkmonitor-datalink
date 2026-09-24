@@ -509,7 +509,12 @@ func (sink *TriggerEventSink) WriteBatch(ctx context.Context, events []contract.
 			index := indices[i]
 			switch {
 			case failures[i] != nil:
-				refused[index] = refusal{rule: observability.OutputRejectLegacyConversion, detail: "legacy conversion failed: " + failures[i].Error()}
+				rule := observability.OutputRejectLegacyConversion
+				var config *legacyoutput.StrategyConfigError
+				if errors.As(failures[i], &config) {
+					rule = observability.OutputRejectLegacyStrategyInvalid
+				}
+				refused[index] = refusal{rule: rule, detail: "legacy conversion failed: " + failures[i].Error()}
 			case len(item.Payload) > sink.maxLegacyBytes:
 				refused[index] = refusal{rule: observability.OutputRejectLegacyPayloadTooLarge,
 					detail: fmt.Sprintf("legacy payload of %d bytes exceeds %d", len(item.Payload), sink.maxLegacyBytes)}

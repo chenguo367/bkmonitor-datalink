@@ -160,6 +160,9 @@ func (c *Converter) convertAll(ctx context.Context, events []contract.TriggerEve
 		if !exists {
 			entry.snapshot = -1
 			entry.strategy, entry.err = prepareStrategy(metadata, c.SnapshotPrefix)
+			if entry.err != nil {
+				entry.err = &StrategyConfigError{Err: entry.err}
+			}
 			if entry.err == nil {
 				entry.snapshot = len(judged.snapshots)
 				judged.snapshots = append(judged.snapshots, Snapshot{
@@ -225,6 +228,17 @@ func prepareStrategy(metadata *contract.FrozenLegacyOutput, snapshotPrefix strin
 	return frozen, nil
 }
 
+// StrategyConfigError is a refusal whose cause is the frozen strategy
+// configuration itself: it cannot be read, is incomplete, or names no item
+// or level the event was decided for. The strategy's owner fixes it; every
+// other refusal is alarmd's own.
+type StrategyConfigError struct {
+	Err error
+}
+
+func (err *StrategyConfigError) Error() string { return err.Err.Error() }
+func (err *StrategyConfigError) Unwrap() error { return err.Err }
+
 // SnapshotStoreError is the snapshot store not taking the batch. It is the
 // one failure ConvertBatch returns that says nothing about the events: every
 // other error is the converter's own answer about their content, which it
@@ -262,15 +276,25 @@ func convertEvent(ctx context.Context, event contract.TriggerEventV1, frozen pre
 	if strconv.FormatInt(s.ID, 10) != event.PlanRef.StrategyID || strconv.FormatInt(s.BusinessID, 10) != event.BusinessID || (s.TenantID != "" && s.TenantID != event.TenantID) {
 		return Event{}, fmt.Errorf("frozen legacy strategy identity mismatch")
 	}
-	itemName := ""
+	itemName, itemFound := "", false
 	for _, item := range s.Items {
 		if strconv.FormatInt(item.ID, 10) == metadata.ItemID() {
-			itemName = item.Name
+			itemName, itemFound = item.Name, true
 			break
 		}
 	}
-	if itemName == "" || event.PrimaryLevelID < 1 || event.PrimaryLevelID > 3 {
-		return Event{}, fmt.Errorf("invalid legacy item/severity")
+	// The item id and the strategy are frozen together, so an item the
+	// strategy does not hold is the freeze disagreeing with itself: alarmd's.
+	// An item with no name, or a level the Python protocol has no severity
+	// for, is the strategy as configured.
+	if !itemFound {
+		return Event{}, fmt.Errorf("frozen legacy item %s is not in its frozen strategy", metadata.ItemID())
+	}
+	if itemName == "" {
+		return Event{}, &StrategyConfigError{Err: fmt.Errorf("legacy item %s has no name", metadata.ItemID())}
+	}
+	if event.PrimaryLevelID < 1 || event.PrimaryLevelID > 3 {
+		return Event{}, &StrategyConfigError{Err: fmt.Errorf("legacy protocol has no severity for level %d", event.PrimaryLevelID)}
 	}
 	// The Python protocol represents anomaly points only. Anything else
 	// reaching the converter is a routing mistake, and a loud one is better
