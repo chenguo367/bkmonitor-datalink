@@ -47,7 +47,17 @@ func TestTheQueryCooldownRecordIsFencedByOwnerOnRedis(t *testing.T) {
 	if err != nil || !found || got.OwnerEpoch != 2 || !got.Until.Equal(successor.Until) || !got.EnteredAt.Equal(entered) {
 		t.Fatalf("record = (%+v, %t, %v), want the successor's", got, found, err)
 	}
-	// The same owner, and a later one, write.
+	// The same owner writes its own record again: the exit after the entry
+	// is what is read back, not the entry.
+	exited := successor
+	exited.Until, exited.ExitedAt, exited.ExitReason = time.Time{}, entered.Add(2*time.Minute), "recovered"
+	if err := store.SaveQueryCooldown(ctx, fence(2), exited); err != nil {
+		t.Fatalf("the same owner's second save = %v, want written", err)
+	}
+	if got, _, _ := store.LoadQueryCooldown(ctx, "qg"); !got.Until.IsZero() || got.ExitReason != "recovered" {
+		t.Fatalf("record after the same owner's exit = %+v, want the exit", got)
+	}
+	// A later owner writes.
 	later := successor
 	later.OwnerEpoch, later.Failures = 3, 5
 	if err := store.SaveQueryCooldown(ctx, fence(3), later); err != nil {

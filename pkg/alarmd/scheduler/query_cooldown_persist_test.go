@@ -196,6 +196,11 @@ func TestAChangeThatIsNotTheQueryBringsAProbeForwardAndDoesNotExit(t *testing.T)
 	if runner.queryCooldown.until.IsZero() || store.records["qg"].Until.IsZero() {
 		t.Fatalf("pool state = %+v, record %+v: the change took the Query Group out of the pool", runner.queryCooldown, store.records["qg"])
 	}
+	// The probe brought forward is in the record too, so a restart before
+	// it runs does not wait out the old cooldown.
+	if record := store.records["qg"]; !record.Until.Equal(now) || record.ScheduleRevision != "schedule-2" {
+		t.Fatalf("record = %+v, want until brought forward to now under the new schedule", record)
+	}
 	// The probe fails: extended, still in the pool, and the next Slot waits.
 	slot.Contract.Slot.EvaluationTime++
 	runner.recordQueryAvailability(context.Background(), slot, unavailableResult(), 60)
