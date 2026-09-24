@@ -95,6 +95,7 @@ func NativeOperations(handler http.Handler) []Operation {
 			return "/api/objects/" + url.PathEscape(p.String("query_group")), url.Values{"samples": {strconv.Itoa(p.Int("limit", 10))}}
 		}),
 	}
+	ops = append(ops, objectListOperation(handler, limits))
 	for i := range ops {
 		if ops[i].ID == "sample.get" || ops[i].ID == "observation.get" {
 			ops[i].EvidenceScope = "shared_records_with_process_diagnostics"
