@@ -15,7 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-redis/redis/v8"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -26,7 +31,7 @@ import (
 func TestTheQueryCooldownRecordIsFencedByOwnerOnRedis(t *testing.T) {
 	_, client := startPhaseTwoRedis(t)
 	ctx := context.Background()
-	store := newRedisQueryCooldownStore(client, "test.cooldown")
+	store := newRedisQueryCooldownStore(client, "test.cooldown", nil, nil)
 	if _, found, err := store.LoadQueryCooldown(ctx, "qg"); found || err != nil {
 		t.Fatalf("empty store = (found %t, %v), want no record and no error", found, err)
 	}
@@ -76,7 +81,79 @@ func TestTheQueryCooldownRecordIsFencedByOwnerOnRedis(t *testing.T) {
 	if err := store.SaveQueryCooldown(ctx, fence(1), stale); err != nil {
 		t.Fatalf("a save over an undecodable record = %v, want it written", err)
 	}
-	if newRedisQueryCooldownStore(nil, "p") != nil {
+	if newRedisQueryCooldownStore(nil, "p", nil, nil) != nil {
 		t.Fatal("a store without a client is not nil")
+	}
+}
+
+// Every write is counted by what became of it -- written, superseded by a
+// later owner, failed in the store -- and a failed one is also a line naming
+// its Query Group, so a pool state lost before the next restart is seen when
+// it is lost, not guessed at afterwards.
+func TestEveryPoolRecordWriteIsCountedByItsResult(t *testing.T) {
+	_, client := startPhaseTwoRedis(t)
+	ctx := context.Background()
+	results := map[string]int{}
+	var lines []observability.Observation
+	observer := observability.ObserverFunc(func(_ context.Context, o observability.Observation) { lines = append(lines, o) })
+	store := newRedisQueryCooldownStore(client, "test.cooldown", func(result string) { results[result]++ }, observer)
+	fence := func(epoch uint64) execution.OwnerFence {
+		return execution.OwnerFence{QueryGroup: "qg", OwnerID: "worker", OwnerEpoch: epoch, LeaseToken: "token"}
+	}
+	record := scheduler.QueryCooldownRecord{QueryGroup: "qg", OwnerEpoch: 2, Until: time.Unix(2_000, 0)}
+	if err := store.SaveQueryCooldown(ctx, fence(2), record); err != nil {
+		t.Fatal(err)
+	}
+	record.OwnerEpoch = 1
+	if err := store.SaveQueryCooldown(ctx, fence(1), record); !errors.Is(err, errQueryCooldownSuperseded) {
+		t.Fatalf("stale save = %v", err)
+	}
+	down := redis.NewClient(&redis.Options{Addr: "192.0.2.1:6379", DialTimeout: 50 * time.Millisecond, MaxRetries: -1})
+	t.Cleanup(func() { _ = down.Close() })
+	failing := newRedisQueryCooldownStore(down, "test.cooldown", func(result string) { results[result]++ }, observer)
+	if err := failing.SaveQueryCooldown(ctx, fence(3), record); err == nil || errors.Is(err, errQueryCooldownSuperseded) {
+		t.Fatalf("save to an unreachable store = %v, want the store's error", err)
+	}
+	if results["written"] != 1 || results["superseded"] != 1 || results["failed"] != 1 {
+		t.Fatalf("results = %v, want one of each", results)
+	}
+	if len(lines) != 1 || lines[0].Result != observability.ResultFailed || lines[0].Trace.QueryGroupKey != "qg" || lines[0].Err == nil {
+		t.Fatalf("lines = %+v, want one failed line naming the Query Group", lines)
+	}
+}
+
+// The production store counts on the process's Recorder: a write made
+// through it is read back from query_cooldown_saves_total, so a wiring that
+// counted nowhere would read as zero failures and fail here instead.
+func TestTheProductionPoolStoreCountsOnTheRecorder(t *testing.T) {
+	address, client := startPhaseTwoRedis(t)
+	cfg := config.Default()
+	cfg.Redis.Address = address
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	store := newProductionQueryCooldownStore(cfg, client, recorder, observability.NopObserver{})
+	fence := execution.OwnerFence{QueryGroup: "qg", OwnerID: "worker", OwnerEpoch: 1, LeaseToken: "token"}
+	if err := store.SaveQueryCooldown(context.Background(), fence, scheduler.QueryCooldownRecord{QueryGroup: "qg", OwnerEpoch: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Get(context.Background(), queryCooldownPrefix(cfg)+":qg").Err(); err != nil {
+		t.Fatalf("record not under the prefix store.inspect reads: %v", err)
+	}
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	written := -1.0
+	for _, family := range families {
+		if family.GetName() != "bkmonitor_alarmd_query_cooldown_saves_total" {
+			continue
+		}
+		for _, m := range family.GetMetric() {
+			if m.GetLabel()[0].GetValue() == "written" {
+				written = m.GetCounter().GetValue()
+			}
+		}
+	}
+	if written != 1 {
+		t.Fatalf("written = %v on the process Recorder, want 1", written)
 	}
 }

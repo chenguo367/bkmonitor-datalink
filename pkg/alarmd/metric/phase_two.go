@@ -164,6 +164,7 @@ type phaseTwoMetrics struct {
 	linkdConsole                    *linkdConsoleCollector
 	controlSourceRounds             *prometheus.CounterVec
 	strategiesReturnedAfterRemoval  prometheus.Counter
+	queryCooldownSaves              *prometheus.CounterVec
 	leaderForward                   *prometheus.HistogramVec
 	controlSourceRetainedStale      prometheus.Counter
 	controlSource                   *controlSourceCollector
@@ -1276,6 +1277,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"removal grace, withdrawn, then back. A return inside the grace is not one. Counted by the Control " +
 			"Leader's source-set ledger; read it summed over replicas, since only the Leader counts.",
 	})
+	metrics.queryCooldownSaves = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "query_cooldown_saves_total",
+		Help: "Writes of a Query Group's query cooldown pool record, by result: written; superseded (a later " +
+			"owner's record is there, so this owner's write was refused -- the successor's pool state stands); " +
+			"failed (the runtime store did not take the write, and the pool state it carried is lost to the " +
+			"next restart or owner). Written on a change of the pool state only, never per round.",
+	}, []string{"result"})
+	for _, result := range QueryCooldownSaveResults {
+		metrics.queryCooldownSaves.WithLabelValues(result)
+	}
 	metrics.leaderForward = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "leader_forward_duration_seconds",
 		Help: "Requests a replica handed to the Control Leader's listener because it could not answer them itself, " +
@@ -1595,7 +1606,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.leaderForward, m.controlSource, m.leaderRound,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.leaderForward, m.controlSource, m.leaderRound,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
@@ -2413,6 +2424,24 @@ func readingOf(facts *observability.ExecutionEvidenceFacts) string {
 
 // AddStrategiesReturnedAfterRemoval counts strategies the source-set ledger
 // saw listed again after their Plan had left the Catalog.
+// QueryCooldownSaveResults is every result of a pool record write, closed.
+var QueryCooldownSaveResults = []string{"written", "superseded", "failed"}
+
+// ObserveQueryCooldownSave counts one pool record write by its result; a
+// result outside QueryCooldownSaveResults is dropped rather than creating a
+// series.
+func (r *Recorder) ObserveQueryCooldownSave(result string) {
+	if r == nil || r.phaseTwo.queryCooldownSaves == nil {
+		return
+	}
+	for _, known := range QueryCooldownSaveResults {
+		if result == known {
+			r.phaseTwo.queryCooldownSaves.WithLabelValues(result).Inc()
+			return
+		}
+	}
+}
+
 func (r *Recorder) AddStrategiesReturnedAfterRemoval(n int) {
 	if r == nil || r.phaseTwo.strategiesReturnedAfterRemoval == nil || n <= 0 {
 		return

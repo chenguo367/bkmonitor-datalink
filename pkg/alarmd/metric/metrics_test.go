@@ -469,6 +469,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_control_source_last_success_age_seconds"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_source_pending_confirmation_age_seconds"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_leader_rounds_total"] = "variableLabels: {result}"
+	expected["bkmonitor_alarmd_query_cooldown_saves_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_leader_round_stage_seconds_total"] = "variableLabels: {stage}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
@@ -1026,6 +1027,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("control_source_last_success_age_seconds")] = 1
 	bounds[fqName("source_pending_confirmation_age_seconds")] = 1
 	bounds[fqName("leader_rounds_total")] = 2
+	bounds[fqName("query_cooldown_saves_total")] = len(QueryCooldownSaveResults)
 	bounds[fqName("leader_round_stage_seconds_total")] = len(fleet.LeaderRoundStages) + 1
 	// Five states; three operations by two results.
 	bounds[fqName("linkd_console_state")] = 5
@@ -1264,5 +1266,20 @@ func TestLeaderForwardSeriesExistFromTheStartAndTakeOnlyTheClosedWords(t *testin
 	}
 	if len(after) != len(start) || total != 1 || after["result=timeout,route=diagnosis,"] != 1 {
 		t.Fatalf("after = %v, want only the closed-word hop recorded and no new series", after)
+	}
+}
+
+// The pool record writes are pre-created: every result reads 0 before any
+// write, so a zero is a count and not a series nobody registered.
+func TestQueryCooldownSaveResultsArePreCreated(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	seen := map[string]bool{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_query_cooldown_saves_total") {
+		seen[m.GetLabel()[0].GetValue()] = true
+	}
+	for _, result := range QueryCooldownSaveResults {
+		if !seen[result] {
+			t.Fatalf("result %q not pre-created: %v", result, seen)
+		}
 	}
 }
