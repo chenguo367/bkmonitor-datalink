@@ -13,12 +13,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strconv"
 	"time"
 
 	"github.com/go-redis/redis/v8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
@@ -53,15 +55,21 @@ var errQueryCooldownSuperseded = errors.New("alarmd: query cooldown record belon
 type redisQueryCooldownStore struct {
 	client redis.UniversalClient
 	prefix string
+	// saves counts every write by its result, and observer is told of a
+	// write that failed, as a line limited by reason and Query Group: the
+	// Runner cannot act on either, and a failure nothing records is a pool
+	// state that is gone by the next restart with nothing to say so.
+	saves    func(result string)
+	observer observability.Observer
 }
 
 // newRedisQueryCooldownStore is the store, or none -- a nil interface, not a
 // nil pointer inside one -- when there is no runtime store to keep it in.
-func newRedisQueryCooldownStore(client redis.UniversalClient, prefix string) scheduler.QueryCooldownStore {
+func newRedisQueryCooldownStore(client redis.UniversalClient, prefix string, saves func(string), observer observability.Observer) scheduler.QueryCooldownStore {
 	if client == nil || prefix == "" {
 		return nil
 	}
-	return &redisQueryCooldownStore{client: client, prefix: prefix}
+	return &redisQueryCooldownStore{client: client, prefix: prefix, saves: saves, observer: observer}
 }
 
 func (store *redisQueryCooldownStore) key(queryGroup execution.QueryGroupIdentity) string {
@@ -85,8 +93,30 @@ func (store *redisQueryCooldownStore) LoadQueryCooldown(ctx context.Context, que
 	return record, true, nil
 }
 
-// SaveQueryCooldown writes the record under the owner's epoch.
+// SaveQueryCooldown writes the record under the owner's epoch, and counts
+// the write by its result.
 func (store *redisQueryCooldownStore) SaveQueryCooldown(ctx context.Context, fence execution.OwnerFence, record scheduler.QueryCooldownRecord) error {
+	err := store.save(ctx, fence, record)
+	result := "written"
+	switch {
+	case errors.Is(err, errQueryCooldownSuperseded):
+		result = "superseded"
+	case err != nil:
+		result = "failed"
+		observeRuntime(ctx, store.observer, observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageQueryCooldown,
+			Result: observability.ResultFailed, Direction: observability.DirectionInternal,
+			ReasonCode: observability.ReasonContractRetryable, Err: fmt.Errorf("save query cooldown record: %w", err),
+			Trace: observability.TraceFields{QueryGroupKey: string(record.QueryGroup)},
+		})
+	}
+	if store.saves != nil {
+		store.saves(result)
+	}
+	return err
+}
+
+func (store *redisQueryCooldownStore) save(ctx context.Context, fence execution.OwnerFence, record scheduler.QueryCooldownRecord) error {
 	payload, err := json.Marshal(record)
 	if err != nil {
 		return err
