@@ -24,7 +24,8 @@ func K8sOperations(reader *k8sread.Reader) []Operation {
 	maxScan, maxSince := int64(k8sread.MaxScanLines), int64(k8sread.MaxLogSinceSeconds)
 	substring := Field{Type: "string", MinLength: 1, MaxLength: k8sread.MaxLogFilterBytes}
 	limits := map[string]any{"max_pods": k8sread.MaxPods, "max_events": k8sread.MaxEvents, "max_replica_sets": k8sread.MaxReplicaSets,
-		"max_log_lines": k8sread.MaxLogLines, "max_log_bytes": k8sread.MaxLogBytes, "verbs": "GET only", "scope": "the Deployment this replica belongs to"}
+		"max_log_lines": k8sread.MaxLogLines, "max_log_bytes": k8sread.MaxLogBytes,
+		"max_scan_bytes": k8sread.MaxScanBytes, "max_log_line_bytes": k8sread.MaxLogLineBytes, "verbs": "GET only", "scope": "the Deployment this replica belongs to"}
 	ops := []Operation{
 		{ID: "k8s.pods", Summary: "读取 alarmd 自己的 Deployment 状态与各 Pod 的阶段、就绪、重启次数和上次退出原因。", Fields: map[string]Field{}, OutputSchema: SchemaOf(k8sread.PodsResult{}),
 			Run: func(ctx context.Context, _ Params) Outcome {
@@ -53,31 +54,18 @@ func K8sOperations(reader *k8sread.Reader) []Operation {
 				}
 				return out
 			}},
-		{ID: "k8s.logs", Summary: "读取 alarmd 某个 Pod 容器日志的末尾若干行；previous=true 读上一次运行（崩溃前）的日志；contains 按子串过滤（在更长的末尾里找，只返回命中的行），since_seconds 只看最近若干秒。", Fields: map[string]Field{
+		{ID: "k8s.logs", Summary: "读取 alarmd 某个 Pod 容器日志的末尾若干行；previous=true 读上一次运行（崩溃前）的日志；contains 按子串过滤：日志边读边扫、只返回命中的行，扫描量不受返回上限约束；配 since_seconds 时从那一刻起扫到最新，扫不完会写明停在哪一行。", Fields: map[string]Field{
 			"pod": pod, "container": container,
 			"previous": {Type: "boolean", Description: "读上一次运行的日志，即崩溃或被杀之前的那一次。"},
 			"lines":    {Type: "integer", Description: "返回的行数上限，默认 200；过滤时是命中行里最新的这么多行。", Minimum: &minLines, Maximum: &maxLines},
 			"contains": {Type: "array", Items: &substring, MaxItems: k8sread.MaxLogFilters, UniqueItems: true,
 				Description: "只保留含任一子串的行，比如 stage 名、原因码、QG 标识。"},
-			"scan_lines":    {Type: "integer", Description: "过滤时扫描的末尾行数，默认 20000；读取总量仍受 8 MiB 上限。", Minimum: &minLines, Maximum: &maxScan},
-			"since_seconds": {Type: "integer", Description: "只读最近这么多秒的日志。", Minimum: &minLines, Maximum: &maxSince},
+			"scan_lines":    {Type: "integer", Description: "过滤且不给 since_seconds 时扫描的末尾行数，默认 20000；给了 since_seconds 时默认扫整个窗口。", Minimum: &minLines, Maximum: &maxScan},
+			"since_seconds": {Type: "integer", Description: "只读最近这么多秒的日志；过滤时从这一刻扫到最新。", Minimum: &minLines, Maximum: &maxSince},
 		}, Required: []string{"pod"}, OutputSchema: SchemaOf(k8sread.LogResult{}), Examples: []Params{{"pod": "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", "previous": true},
 			{"pod": "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", "contains": []any{"schedule_cutover"}, "since_seconds": int64(3600)}},
 			Run: func(ctx context.Context, p Params) Outcome {
-				result, err := reader.Logs(ctx, logRequestOf(p))
-				out := k8sOutcome(result, err)
-				if err == nil && result.Truncated {
-					out.Complete = false
-					if len(result.Contains) > 0 {
-						out.Limitations = append(out.Limitations, "More lines matched than returned; the newest are kept. Narrow the substrings or the window for older ones.")
-					} else {
-						out.Limitations = append(out.Limitations, "The log reached the byte bound; fewer lines than asked, the oldest dropped.")
-					}
-				}
-				if err == nil && len(result.Contains) > 0 && result.MatchedLines == 0 {
-					out.Limitations = append(out.Limitations, "No matching line in the scanned tail; that is not proof there was none before it.")
-				}
-				return out
+				return logOutcome(reader.Logs(ctx, logRequestOf(p)))
 			}},
 	}
 	for i := range ops {
@@ -112,4 +100,27 @@ func logRequestOf(p Params) k8sread.LogRequest {
 	}
 	return k8sread.LogRequest{Pod: p.String("pod"), Container: p.String("container"), Previous: p.Bool("previous"),
 		Lines: p.Int("lines", k8sread.DefaultLogLines), Contains: contains, ScanLines: p.Int("scan_lines", 0), SinceSeconds: p.Int("since_seconds", 0)}
+}
+
+// logOutcome is a log read as the channel answers it: partial, and saying
+// why, when lines were left out or the scan stopped short of the end.
+func logOutcome(result k8sread.LogResult, err error) Outcome {
+	out := k8sOutcome(result, err)
+	if err == nil && result.Truncated {
+		out.Complete = false
+		if len(result.Contains) > 0 {
+			out.Limitations = append(out.Limitations, "More lines matched than returned; the newest are kept. Narrow the substrings or the window for older ones.")
+		} else {
+			out.Limitations = append(out.Limitations, "The log reached the byte bound; fewer lines than asked, the oldest dropped.")
+		}
+	}
+	if err == nil && result.ScanComplete != nil && !*result.ScanComplete {
+		out.Complete = false
+		out.Limitations = append(out.Limitations, "The scan stopped at the "+result.ScanStopped+" after the line stamped "+result.ScanTo+
+			"; nothing after it was read. Ask again with since_seconds reaching back only to that time to scan the rest.")
+	}
+	if err == nil && len(result.Contains) > 0 && result.MatchedLines == 0 {
+		out.Limitations = append(out.Limitations, "No matching line in the scanned part (scan_from to scan_to); that is not proof there was none outside it.")
+	}
+	return out
 }

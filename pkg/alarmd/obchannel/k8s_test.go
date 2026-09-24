@@ -61,3 +61,18 @@ func TestTheLogParametersReachTheRead(t *testing.T) {
 		t.Fatalf("plain request %+v", plain)
 	}
 }
+
+// A scan that stopped short of the end of the log is a partial answer that
+// says where it stopped; one that reached the end is complete.
+func TestAScanStoppedShortIsPartialAndSaysWhere(t *testing.T) {
+	stopped, complete := false, true
+	got := logOutcome(k8sread.LogResult{Contains: []string{"schedule_cutover"}, MatchedLines: 3, ScanTo: "2026-09-24T05:00:07Z",
+		ScanComplete: &stopped, ScanStopped: k8sread.ScanStoppedDeadline}, nil)
+	if got.Complete || len(got.Limitations) != 2 || !strings.Contains(got.Limitations[1], "2026-09-24T05:00:07Z") ||
+		!strings.Contains(got.Limitations[1], "deadline") {
+		t.Fatalf("stopped scan %+v", got)
+	}
+	if got := logOutcome(k8sread.LogResult{Contains: []string{"schedule_cutover"}, MatchedLines: 3, ScanComplete: &complete}, nil); !got.Complete {
+		t.Fatalf("whole scan %+v", got)
+	}
+}

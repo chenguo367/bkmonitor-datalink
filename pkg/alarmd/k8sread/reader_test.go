@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -29,6 +30,8 @@ type fakeAPI struct {
 	// deny answers these paths with a status, to stand in for RBAC.
 	deny    map[string]int
 	logBody string
+	// logStream, when set, answers log reads in place of logBody.
+	logStream func(http.ResponseWriter, *http.Request)
 }
 
 const (
@@ -122,6 +125,10 @@ func (f *fakeAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Query().Get("previous") == "true" && path == "/api/v1/namespaces/ns/pods/"+selfPod+"/log" {
 			w.WriteHeader(http.StatusBadRequest)
 			write(map[string]any{"kind": "Status", "message": `previous terminated container "alarmd" in pod "` + selfPod + `" not found`})
+			return
+		}
+		if f.logStream != nil {
+			f.logStream(w, r)
 			return
 		}
 		_, _ = w.Write([]byte(f.logBody))
@@ -396,22 +403,114 @@ func TestAFilteredReadFindsTheLinesAPlainTailWouldNotReach(t *testing.T) {
 		strings.Contains(got.Text, "\"n\":1") || strings.Contains(got.Text, "lease_renewed") || got.ScannedLines < 1000 {
 		t.Fatalf("filtered read %+v", got)
 	}
-	var logQuery url.Values
-	for _, path := range api.paths() {
-		if strings.Contains(path, "/log?") {
-			logQuery, _ = url.ParseQuery(path[strings.Index(path, "?")+1:])
+	lastLogQuery := func() url.Values {
+		var query url.Values
+		for _, path := range api.paths() {
+			if strings.Contains(path, "/log?") {
+				query, _ = url.ParseQuery(path[strings.Index(path, "?")+1:])
+			}
 		}
+		return query
 	}
-	if logQuery.Get("tailLines") != strconv.Itoa(DefaultScanLines) || logQuery.Get("sinceSeconds") != "3600" {
-		t.Fatalf("asked as %v, want the default scan and the window", logQuery)
+	// A window is scanned whole from its start: no tail is asked for.
+	if query := lastLogQuery(); query.Has("tailLines") || query.Get("sinceSeconds") != "3600" {
+		t.Fatalf("asked as %v, want the window and no tail", query)
 	}
-	// The oldest match is reachable with room for it.
+	if got.ScanComplete == nil || !*got.ScanComplete || got.ScanStopped != "" ||
+		got.ScanFrom != "2026-09-24T05:00:00Z" || got.ScanTo != "2026-09-24T05:03:00Z" || got.ScannedBytes != int64(log.Len()) {
+		t.Fatalf("scan %+v, want the whole log scanned first line to last", got)
+	}
+	// The oldest match is reachable with room for it; without a window the
+	// default tail is scanned.
 	if got, _ := reader.Logs(context.Background(), LogRequest{Pod: selfPod, Contains: []string{"\"n\":1"}}); got.MatchedLines != 1 || got.Truncated {
 		t.Fatalf("the old line: %+v", got)
+	}
+	if query := lastLogQuery(); query.Get("tailLines") != strconv.Itoa(DefaultScanLines) || query.Has("sinceSeconds") {
+		t.Fatalf("asked as %v, want the default tail", query)
 	}
 	for _, contains := range [][]string{{""}, {strings.Repeat("s", MaxLogFilterBytes+1)}, {"a", "b", "c", "d", "e"}} {
 		if _, err := reader.Logs(context.Background(), LogRequest{Pod: selfPod, Contains: contains}); codeOfErr(t, err) != CodeAPIError {
 			t.Errorf("filters %q: %v", contains, err)
 		}
+	}
+}
+
+// A filtered read is streamed: a window far past the bound a plain read
+// holds is scanned whole, its first and last lines found, and memory holds
+// only the lines kept.
+func TestAFilteredReadScansPastThePlainReadBound(t *testing.T) {
+	var log strings.Builder
+	log.WriteString("2026-09-24T04:00:00Z {\"stage\":\"schedule_cutover\",\"n\":\"first\"}\n")
+	filler := "2026-09-24T04:30:00Z {\"stage\":\"lease_renewed\"} " + strings.Repeat("x", 400) + "\n"
+	for log.Len() < maxLogReadBytes+maxLogReadBytes/2 {
+		log.WriteString(filler)
+	}
+	log.WriteString("2026-09-24T05:00:00Z {\"stage\":\"schedule_cutover\",\"n\":\"last\"}\n")
+	reader := newReader(t, &fakeAPI{t: t, logBody: log.String()})
+	got, err := reader.Logs(context.Background(), LogRequest{Pod: selfPod, Contains: []string{"schedule_cutover"}, SinceSeconds: 3600})
+	if err != nil {
+		t.Fatalf("a window past the plain read bound: %v", err)
+	}
+	if got.MatchedLines != 2 || !strings.Contains(got.Text, `"first"`) || !strings.Contains(got.Text, `"last"`) ||
+		got.ScannedBytes <= maxLogReadBytes || got.ScanComplete == nil || !*got.ScanComplete {
+		t.Fatalf("filtered read %+v", got)
+	}
+}
+
+// A log that keeps coming past the read's deadline is cut before it: the
+// lines scanned by then are answered, not failed, and the answer says the
+// scan stopped at the deadline and at which line.
+func TestAScanCutByTheDeadlineAnswersWhatItScanned(t *testing.T) {
+	api := &fakeAPI{t: t}
+	api.logStream = func(w http.ResponseWriter, r *http.Request) {
+		flusher := w.(http.Flusher)
+		for n := 0; r.Context().Err() == nil; n++ {
+			stage := "lease_renewed"
+			if n%10 == 0 {
+				stage = "schedule_cutover"
+			}
+			_, _ = fmt.Fprintf(w, "2026-09-24T05:00:%02dZ {\"stage\":%q,\"n\":%d}\n", n%60, stage, n)
+			flusher.Flush()
+			time.Sleep(time.Millisecond)
+		}
+	}
+	reader := newReader(t, api)
+	ctx, cancel := context.WithTimeout(context.Background(), scanMargin+700*time.Millisecond)
+	defer cancel()
+	got, err := reader.Logs(ctx, LogRequest{Pod: selfPod, Contains: []string{"schedule_cutover"}, SinceSeconds: 60})
+	if err != nil {
+		t.Fatalf("a scan cut by the deadline failed instead of answering: %v", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the answer came after the read's deadline")
+	}
+	if got.ScanComplete == nil || *got.ScanComplete || got.ScanStopped != ScanStoppedDeadline ||
+		got.MatchedLines == 0 || got.ScannedLines < got.MatchedLines || got.ScanTo == "" {
+		t.Fatalf("cut scan %+v, want the matches so far and where it stopped", got)
+	}
+}
+
+// The scan keeps the newest matches in order, cuts an overlong line, and
+// stops at its byte bound saying so.
+func TestTheScanKeepsTheNewestAndStopsAtItsBound(t *testing.T) {
+	body := "t1 hit a\nt2 miss\nt3 hit b\nt4 hit c\nt5 hit " + strings.Repeat("z", 2*MaxLogLineBytes) + "\nt6 hit d\n"
+	scan, err := scanLog(strings.NewReader(body), []string{"hit"}, 2, MaxScanBytes)
+	if err != nil || scan.matched != 5 || scan.lines != 6 || scan.from != "t1" || scan.to != "t6" || scan.stopped != "" {
+		t.Fatalf("scan %+v, %v", scan, err)
+	}
+	kept := strings.Split(strings.TrimSuffix(string(scan.kept()), "\n"), "\n")
+	if len(kept) != 2 || len(kept[0]) != MaxLogLineBytes || !strings.HasPrefix(kept[0], "t5 hit ") || kept[1] != "t6 hit d" {
+		t.Fatalf("kept %q, want the newest two in order and the long one cut", kept)
+	}
+	// A substring past the kept length, and one across two reads of the
+	// buffer, are still found: the line is matched whole, only the copy kept
+	// is cut.
+	deep := "t7 " + strings.Repeat("y", 64<<10-5) + "needle" + strings.Repeat("y", 3*MaxLogLineBytes) + "\n"
+	if scan, err := scanLog(strings.NewReader(deep), []string{"needle"}, 1, MaxScanBytes); err != nil || scan.matched != 1 || len(scan.kept()) != MaxLogLineBytes+1 {
+		t.Fatalf("a match deep in a long line: %+v, %v", scan.matched, err)
+	}
+	scan, err = scanLog(strings.NewReader(body), []string{"hit"}, 2, 20)
+	if err != nil || scan.stopped != ScanStoppedByteBound || scan.to == "t6" {
+		t.Fatalf("bounded scan %+v, %v", scan, err)
 	}
 }

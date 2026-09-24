@@ -49,10 +49,18 @@ const (
 	DefaultLogLines = 200
 	MaxLogLines     = 1000
 	MaxLogBytes     = 256 << 10
-	// A filtered read scans a longer tail than it returns: DefaultScanLines
-	// unless asked, at most MaxScanLines, still bounded by maxLogReadBytes.
+	// A filtered read streams the log and keeps only the matching lines, so
+	// what it scans is not bounded by what it returns. Without a window it
+	// scans the last DefaultScanLines lines; ScanLines asks for another
+	// tail, at most MaxScanLines. Either way the scan stops at
+	// MaxScanBytes or scanMargin before the read's deadline, and says so.
 	DefaultScanLines = 20000
 	MaxScanLines     = 50000
+	MaxScanBytes     = 512 << 20
+	// MaxLogLineBytes bounds one matched line kept; a longer one is cut.
+	MaxLogLineBytes = 8 << 10
+	// scanMargin is left of the read's deadline to answer in.
+	scanMargin = 500 * time.Millisecond
 	// MaxLogFilters bounds the substrings one read filters on, and
 	// MaxLogFilterBytes each of them.
 	MaxLogFilters     = 4
@@ -199,6 +207,22 @@ func (r *Reader) httpClient() (*http.Client, error) {
 // get sends one GET and returns the body, bounded by limit. A status of 400
 // or above is a named Error carrying the server's own message.
 func (r *Reader) get(ctx context.Context, resource, path string, query url.Values, limit int64) ([]byte, error) {
+	body, err := r.open(ctx, resource, path, query)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+	read, err := io.ReadAll(io.LimitReader(body, limit+1))
+	if err != nil {
+		return nil, &Error{Code: CodeUnreachable, Resource: resource, Message: "the response was cut off"}
+	}
+	return read, nil
+}
+
+// open sends one GET and hands back the body unread, for a caller that
+// reads it as it arrives. A status of 400 or above is a named Error
+// carrying the server's own message, and the body is then closed.
+func (r *Reader) open(ctx context.Context, resource, path string, query url.Values) (io.ReadCloser, error) {
 	if r.options.Host == "" || r.options.Port == "" {
 		return nil, &Error{Code: CodeNoAPIServer, Resource: resource, Message: "KUBERNETES_SERVICE_HOST/PORT are not set"}
 	}
@@ -225,15 +249,12 @@ func (r *Reader) get(ctx context.Context, resource, path string, query url.Value
 	if err != nil {
 		return nil, &Error{Code: CodeUnreachable, Resource: resource, Message: unreachableText(err)}
 	}
-	defer response.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(response.Body, limit+1))
-	if err != nil {
-		return nil, &Error{Code: CodeUnreachable, Resource: resource, Message: "the response was cut off"}
-	}
 	if response.StatusCode >= 400 {
+		defer response.Body.Close()
+		body, _ := io.ReadAll(io.LimitReader(response.Body, maxAPIBytes))
 		return nil, &Error{Code: codeOf(response.StatusCode), Resource: resource, Status: response.StatusCode, Message: statusMessage(body)}
 	}
-	return body, nil
+	return response.Body, nil
 }
 
 func unreachableText(err error) string {

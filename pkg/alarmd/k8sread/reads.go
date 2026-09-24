@@ -4,13 +4,16 @@
 package k8sread
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"net/url"
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -432,8 +435,9 @@ type LogRequest struct {
 	Previous bool
 	Lines    int
 	// Contains keeps only the lines holding any of these substrings. The
-	// tail scanned for them is ScanLines long, so a line far older than the
-	// bytes a plain read would return can still be found.
+	// log is streamed and scanned for them, so a line far older than the
+	// bytes a plain read would return can still be found: from SinceSeconds
+	// back when a window is given, else over the last ScanLines lines.
 	Contains  []string
 	ScanLines int
 	// SinceSeconds starts the log that many seconds back.
@@ -452,14 +456,22 @@ type LogResult struct {
 	Text      string `json:"text"`
 	Bytes     int    `json:"bytes"`
 	Truncated bool   `json:"truncated"`
-	// Contains, SinceSeconds and the counts describe a filtered read:
-	// how many lines of the tail were scanned and how many matched, of
-	// which the newest Lines are in Text. More matched than returned sets
-	// Truncated.
+	// Contains, SinceSeconds and the scan describe a filtered read: how
+	// much of the log was scanned and how many lines matched, of which the
+	// newest Lines are in Text; more matched than returned sets Truncated.
+	// ScanFrom and ScanTo are the timestamps of the first and last lines
+	// scanned. ScanComplete says the scan reached the end of the log; when
+	// it did not, ScanStopped says why (deadline or byte_bound) and nothing
+	// after ScanTo was read.
 	Contains     []string `json:"contains,omitempty"`
 	SinceSeconds int      `json:"since_seconds,omitempty"`
 	ScannedLines int      `json:"scanned_lines,omitempty"`
+	ScannedBytes int64    `json:"scanned_bytes,omitempty"`
 	MatchedLines int      `json:"matched_lines,omitempty"`
+	ScanFrom     string   `json:"scan_from,omitempty"`
+	ScanTo       string   `json:"scan_to,omitempty"`
+	ScanComplete *bool    `json:"scan_complete,omitempty"`
+	ScanStopped  string   `json:"scan_stopped,omitempty"`
 }
 
 // podInScope reads one Pod and checks it is the Deployment's: its labels
@@ -527,64 +539,220 @@ func (r *Reader) Logs(ctx context.Context, request LogRequest) (LogResult, error
 	if err != nil {
 		return LogResult{}, err
 	}
-	// Filtered, the tail read is the scan, and only matching lines are kept
-	// from it; unfiltered, the tail is the lines asked for.
-	tail := lines
-	if len(filters) > 0 {
-		tail = request.ScanLines
-		if tail <= 0 {
-			tail = DefaultScanLines
-		}
-		if tail > MaxScanLines {
-			tail = MaxScanLines
-		}
-	}
-	// No limitBytes: the server counts it forward from the start of the last
-	// N lines, so a cut would drop the newest lines - the ones before a
-	// crash. The whole tail is read, bounded by maxLogReadBytes, and only its
-	// last MaxLogBytes are kept.
-	query := url.Values{"container": {container}, "tailLines": {strconv.Itoa(tail)}, "timestamps": {"true"}}
-	if request.Previous {
-		query.Set("previous", "true")
-	}
 	since := request.SinceSeconds
 	if since > MaxLogSinceSeconds {
 		since = MaxLogSinceSeconds
 	}
+	query := url.Values{"container": {container}, "timestamps": {"true"}}
+	if request.Previous {
+		query.Set("previous", "true")
+	}
 	if since > 0 {
 		query.Set("sinceSeconds", strconv.Itoa(since))
 	}
-	body, err := r.get(ctx, "pods/"+request.Pod+"/log", base+"/pods/"+url.PathEscape(request.Pod)+"/log", query, maxLogReadBytes)
-	if err != nil {
+	result := LogResult{Scope: scope, Pod: request.Pod, Container: container, Previous: request.Previous, Lines: lines,
+		Contains: filters, SinceSeconds: since}
+	resource, path := "pods/"+request.Pod+"/log", base+"/pods/"+url.PathEscape(request.Pod)+"/log"
+	named := func(err error) error {
 		// The server answers a previous log that was never written with 400
 		// and says so; it is a missing object, not a server fault.
 		var named *Error
 		if request.Previous && errors.As(err, &named) && named.Status == 400 {
 			named.Code = CodeNotFound
 		}
-		return LogResult{}, err
+		return err
+	}
+	if len(filters) > 0 {
+		// Filtered, the log is streamed and scanned as it arrives, so the
+		// scan is not bounded by what is returned. A window scans all of
+		// it from its start; without one, or when asked, a tail is scanned.
+		scan := request.ScanLines
+		if scan <= 0 && since == 0 {
+			scan = DefaultScanLines
+		}
+		if scan > MaxScanLines {
+			scan = MaxScanLines
+		}
+		if scan > 0 {
+			query.Set("tailLines", strconv.Itoa(scan))
+		}
+		body, err := r.open(ctx, resource, path, query)
+		if err != nil {
+			return LogResult{}, named(err)
+		}
+		defer body.Close()
+		// The read's deadline would fail the whole answer; the scan is cut
+		// scanMargin before it by closing the stream, and what was scanned by
+		// then is answered, saying where it stopped.
+		var expired atomic.Bool
+		if deadline, ok := ctx.Deadline(); ok {
+			cut := time.AfterFunc(time.Until(deadline.Add(-scanMargin)), func() {
+				expired.Store(true)
+				_ = body.Close()
+			})
+			defer cut.Stop()
+		}
+		scanned, err := scanLog(body, filters, lines, MaxScanBytes)
+		if err != nil && expired.Load() {
+			scanned.stopped, err = ScanStoppedDeadline, nil
+		}
+		if err != nil {
+			return LogResult{}, &Error{Code: CodeUnreachable, Resource: resource, Message: "the log stream was cut off"}
+		}
+		result.ScannedLines, result.ScannedBytes, result.MatchedLines = scanned.lines, scanned.bytes, scanned.matched
+		result.ScanFrom, result.ScanTo, result.ScanStopped = scanned.from, scanned.to, scanned.stopped
+		complete := scanned.stopped == ""
+		result.ScanComplete = &complete
+		return result.withText(scanned.kept(), scanned.matched > lines), nil
+	}
+	// No limitBytes: the server counts it forward from the start of the last
+	// N lines, so a cut would drop the newest lines - the ones before a
+	// crash. The whole tail is read, bounded by maxLogReadBytes, and only its
+	// last MaxLogBytes are kept.
+	query.Set("tailLines", strconv.Itoa(lines))
+	body, err := r.get(ctx, resource, path, query, maxLogReadBytes)
+	if err != nil {
+		return LogResult{}, named(err)
 	}
 	if len(body) > maxLogReadBytes {
 		// The newest bytes are past the read bound: a tail that would lose
 		// them is not returned as one.
-		return LogResult{}, &Error{Code: CodeAPIError, Resource: "pods/" + request.Pod + "/log", Message: "the requested lines exceed the read bound; ask for fewer"}
+		return LogResult{}, &Error{Code: CodeAPIError, Resource: resource, Message: "the requested lines exceed the read bound; ask for fewer"}
 	}
-	result := LogResult{Scope: scope, Pod: request.Pod, Container: container, Previous: request.Previous, Lines: lines,
-		Contains: filters, SinceSeconds: since}
-	if len(filters) > 0 {
-		body, result.ScannedLines, result.MatchedLines = filterLog(body, filters, lines)
-		result.Truncated = result.MatchedLines > lines
-	}
-	truncated := result.Truncated
+	return result.withText(body, false), nil
+}
+
+// withText sets the text returned, its newest MaxLogBytes from the first
+// whole line in them. Truncated says lines were left out: by the byte bound,
+// or, filtered, because more matched than returned.
+func (result LogResult) withText(body []byte, truncated bool) LogResult {
 	if len(body) > MaxLogBytes {
-		// Keep the newest bytes, from the first whole line in them.
 		body, truncated = body[len(body)-MaxLogBytes:], true
 		if cut := bytes.IndexByte(body, '\n'); cut >= 0 && cut+1 < len(body) {
 			body = body[cut+1:]
 		}
 	}
 	result.Text, result.Bytes, result.Truncated = string(body), len(body), truncated
-	return result, nil
+	return result
+}
+
+// Why a scan stopped before the end of the log.
+const (
+	ScanStoppedDeadline  = "deadline"
+	ScanStoppedByteBound = "byte_bound"
+)
+
+// logScan is what one streamed scan saw: the newest matching lines in a
+// ring, how many lines matched in all, how much was scanned, the
+// timestamps of the first and last lines scanned, and why it stopped short
+// of the end of the log, if it did.
+type logScan struct {
+	ring     [][]byte
+	next     int
+	matched  int
+	lines    int
+	bytes    int64
+	from, to string
+	stopped  string
+}
+
+// scanLog reads body line by line and keeps the newest keep lines holding
+// any of filters. Memory is keep lines of at most MaxLogLineBytes each,
+// whatever the log's size. It stops once limit bytes are scanned and says
+// so; a read error comes back with what was scanned before it.
+func scanLog(body io.Reader, filters []string, keep int, limit int64) (logScan, error) {
+	scan := logScan{ring: make([][]byte, 0, keep)}
+	needles := make([][]byte, len(filters))
+	for index, filter := range filters {
+		needles[index] = []byte(filter)
+	}
+	reader := bufio.NewReaderSize(body, 64<<10)
+	// A line is matched whole as it arrives, chunk by chunk, carrying the
+	// tail of the previous chunk so a substring across two is found; only
+	// the copy kept is cut to MaxLogLineBytes.
+	overlap := 0
+	for _, needle := range needles {
+		overlap = max(overlap, len(needle)-1)
+	}
+	var line, window []byte
+	for {
+		if scan.bytes >= limit {
+			scan.stopped = ScanStoppedByteBound
+			return scan, nil
+		}
+		line, window = line[:0], window[:0]
+		hit := false
+		for {
+			chunk, err := reader.ReadSlice('\n')
+			scan.bytes += int64(len(chunk))
+			if room := MaxLogLineBytes - len(line); room > 0 {
+				line = append(line, chunk[:min(room, len(chunk))]...)
+			}
+			if !hit {
+				window = append(window, chunk...)
+				hit = containsAny(window, needles)
+				window = append(window[:0], window[max(0, len(window)-overlap):]...)
+			}
+			if err == bufio.ErrBufferFull {
+				continue
+			}
+			if err == io.EOF {
+				if len(line) > 0 {
+					scan.see(line, hit)
+				}
+				return scan, nil
+			}
+			if err != nil {
+				return scan, err
+			}
+			break
+		}
+		scan.see(line, hit)
+	}
+}
+
+// containsAny is whether text holds any of needles.
+func containsAny(text []byte, needles [][]byte) bool {
+	for _, needle := range needles {
+		if bytes.Contains(text, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// see counts one line, notes its timestamp and keeps it if it matched.
+func (scan *logScan) see(line []byte, hit bool) {
+	scan.lines++
+	if space := bytes.IndexByte(line, ' '); space > 0 {
+		if scan.from == "" {
+			scan.from = string(line[:space])
+		}
+		scan.to = string(line[:space])
+	}
+	if !hit {
+		return
+	}
+	kept := append(make([]byte, 0, len(line)+1), line...)
+	if kept[len(kept)-1] != '\n' {
+		kept = append(kept, '\n')
+	}
+	scan.matched++
+	if len(scan.ring) < cap(scan.ring) {
+		scan.ring = append(scan.ring, kept)
+	} else {
+		scan.ring[scan.next] = kept
+		scan.next = (scan.next + 1) % len(scan.ring)
+	}
+}
+
+// kept is the matching lines kept, oldest first.
+func (scan *logScan) kept() []byte {
+	var out []byte
+	for index := range scan.ring {
+		out = append(out, scan.ring[(scan.next+index)%len(scan.ring)]...)
+	}
+	return out
 }
 
 // logFilters checks the substrings a read filters on.
@@ -600,28 +768,4 @@ func logFilters(contains []string) ([]string, error) {
 		filters = append(filters, filter)
 	}
 	return filters, nil
-}
-
-// filterLog keeps the lines of body holding any of filters, the newest
-// keep of them, and says how many lines it scanned and how many matched.
-func filterLog(body []byte, filters []string, keep int) ([]byte, int, int) {
-	var matched [][]byte
-	scanned := 0
-	for _, line := range bytes.SplitAfter(body, []byte("\n")) {
-		if len(line) == 0 {
-			continue
-		}
-		scanned++
-		for _, filter := range filters {
-			if bytes.Contains(line, []byte(filter)) {
-				matched = append(matched, line)
-				break
-			}
-		}
-	}
-	total := len(matched)
-	if len(matched) > keep {
-		matched = matched[len(matched)-keep:]
-	}
-	return bytes.Join(matched, nil), scanned, total
 }
