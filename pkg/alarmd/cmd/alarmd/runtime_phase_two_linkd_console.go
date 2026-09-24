@@ -108,6 +108,7 @@ func linkdConsoleFacts(console *openalerts.HTTPReconciler, at time.Time) *fleet.
 			facts.Target, facts.TargetAgeSeconds = linkdTargetFacts(target), &age
 		}
 	}
+	facts.EventSource = linkdEventSourceFacts(record, at)
 	linkWord := ""
 	if !record.LinkReadAt.IsZero() {
 		age := at.Sub(record.LinkReadAt).Seconds()
@@ -145,4 +146,18 @@ func linkdConsoleReading(console *openalerts.HTTPReconciler, now func() time.Tim
 		}
 		return reading
 	}
+}
+
+// linkdEventSourceFacts is the link's keying of this deployment's alerts as
+// the record last read it; nil until read.
+func linkdEventSourceFacts(record openalerts.ConsoleRecord, at time.Time) *fleet.LinkdEventSourceFacts {
+	if record.EventSourceReadAt.IsZero() {
+		return nil
+	}
+	keying := record.EventSource
+	return &fleet.LinkdEventSourceFacts{EventSourceID: keying.EventSourceID, FingerprintMode: keying.FingerprintMode,
+		FingerprintField: keying.FingerprintField, FingerprintFields: append([]string(nil), keying.FingerprintFields...),
+		Revision: keying.Revision, Published: keying.Published, Pending: keying.Pending, Deleted: keying.Deleted,
+		InEffect: keying.InEffect, KeyedByAlertID: keying.KeyedByAlertID,
+		ReadAgeSeconds: at.Sub(record.EventSourceReadAt).Seconds()}
 }
