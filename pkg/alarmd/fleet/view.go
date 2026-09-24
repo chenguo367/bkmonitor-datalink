@@ -1567,6 +1567,12 @@ type Snapshot struct {
 	// PlatformSettings is the state of this replica's copy of the platform's
 	// settings it evaluates by. Absent on a build before it existed.
 	PlatformSettings *PlatformSettingsFacts `json:"platform_settings,omitempty"`
+	// MetricsUnexported says this replica serves /metrics nowhere: its
+	// public surface is restricted and it has no internal listener.
+	MetricsUnexported bool `json:"metrics_unexported,omitempty"`
+	// CLIUnavailable says this replica is configured for a restricted public
+	// surface and its CLI did not come up, so the surface stayed open.
+	CLIUnavailable bool `json:"cli_unavailable,omitempty"`
 	// Activation is the standing of bringing the fleet's activation to the
 	// current publication, as the control leader reports it. Absent on every
 	// replica that has not attempted it, which is every follower, and on a
@@ -2130,6 +2136,16 @@ const (
 	// Read before deciding whether a Leader should give way; it does not
 	// today (N2 design, section 2c).
 	DegradationViewStreamNoSessions DegradationKind = "VIEW_STREAM_NO_SESSIONS"
+	// DegradationMetricsUnexported: the replica holds a CLI admin key, so its
+	// public listener no longer serves /metrics, and it has no internal
+	// listener to serve them on. Detection is unaffected; every alert rule
+	// the host writes against the process's own metrics reads nothing.
+	DegradationMetricsUnexported DegradationKind = "METRICS_INTERNAL_LISTEN_MISSING"
+	// DegradationCLIAuthUnavailable: the replica holds a CLI admin key and its
+	// CLI did not come up, so no session can be had through it. Its public
+	// surface stays unrestricted rather than leave no way in, and the
+	// coordinates that surface carries are public until the CLI is repaired.
+	DegradationCLIAuthUnavailable DegradationKind = "CLI_AUTH_UNAVAILABLE"
 )
 
 // DegradationKinds is the closed set, for the page's wording table and the
@@ -2138,6 +2154,7 @@ var DegradationKinds = []DegradationKind{
 	DegradationActivationBehind, DegradationControlSourceStale, DegradationControlLeaderAbsent,
 	DegradationOpenAlertSetStale, DegradationPlatformSettingsStale, DegradationSourceBlocked,
 	DegradationOutputNotReady, DegradationOpenAlertSetDisjoint, DegradationViewPublishFailing, DegradationViewStreamNoSessions, DegradationActivationBlocked,
+	DegradationMetricsUnexported, DegradationCLIAuthUnavailable,
 }
 
 // endpointByRole is the entry under role in a replica's list, or nil.
@@ -2721,6 +2738,12 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		}
 		if snapshot.PlatformSettings != nil && snapshot.PlatformSettings.StaleBeyondBound {
 			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationPlatformSettingsStale, Replica: replica})
+		}
+		if snapshot.MetricsUnexported {
+			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationMetricsUnexported, Replica: replica})
+		}
+		if snapshot.CLIUnavailable {
+			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationCLIAuthUnavailable, Replica: replica})
 		}
 		// The horizon every replica resolves from the same layers; the first
 		// counted replica that reports one speaks for the deployment, and

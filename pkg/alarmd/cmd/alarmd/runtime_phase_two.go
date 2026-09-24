@@ -82,7 +82,19 @@ type phaseTwoApplicationDependencies struct {
 		*observability.Logger,
 		*phaseTwoApplicationHealth,
 	) (*phaseTwoWorkerBundle, error)
-	newHTTP func(*metric.Recorder, observability.HealthSource, string) (httpRuntime, error)
+	newHTTP func(*metric.Recorder, observability.HealthSource, httpSurface) (httpRuntime, error)
+}
+
+// httpSurface is what the listener needs from the configuration: where the
+// side listeners bind and whether the public surface is restricted.
+type httpSurface struct {
+	Diagnostics string
+	Internal    string
+	Restricted  bool
+}
+
+func httpSurfaceOf(cfg config.Config) httpSurface {
+	return httpSurface{Diagnostics: cfg.HTTP.DiagnosticsListen, Internal: cfg.HTTP.InternalListen, Restricted: cfg.PublicSurfaceRestrictionRequested()}
 }
 
 type runtimeModeDependencies struct {
@@ -94,8 +106,12 @@ func defaultPhaseTwoApplicationDependencies() phaseTwoApplicationDependencies {
 	return phaseTwoApplicationDependencies{
 		configureCPU: configurePhaseTwoCPU,
 		run:          runPhaseTwoApplication, openBundle: openProductionPhaseTwoBundle,
-		newHTTP: func(recorder *metric.Recorder, source observability.HealthSource, diagnosticsAddress string) (httpRuntime, error) {
-			return httpservice.NewWithHealth(recorder, source, httpservice.WithDiagnosticsAddress(diagnosticsAddress))
+		newHTTP: func(recorder *metric.Recorder, source observability.HealthSource, surface httpSurface) (httpRuntime, error) {
+			options := []httpservice.Option{httpservice.WithDiagnosticsAddress(surface.Diagnostics), httpservice.WithInternalAddress(surface.Internal)}
+			if surface.Restricted {
+				options = append(options, httpservice.WithRestrictedPublicSurface())
+			}
+			return httpservice.NewWithHealth(recorder, source, options...)
 		},
 	}
 }
@@ -206,7 +222,7 @@ func runPhaseTwoApplicationWithDependencies(
 	logger.Info("canonical_encoder", contract.CanonicalMode(), 0, 0,
 		slog.Uint64("shadow_sample_stride", cfg.PhaseTwo.Canonical.Stride()))
 
-	server, err := dependencies.newHTTP(recorder, application, cfg.HTTP.DiagnosticsListen)
+	server, err := dependencies.newHTTP(recorder, application, httpSurfaceOf(cfg))
 	if err != nil {
 		return err
 	}
@@ -224,6 +240,7 @@ func runPhaseTwoApplicationWithDependencies(
 	if err == nil && bundle != nil && bundle.dependencies.FleetAPI != nil {
 		// The listener starts before this runtime does, so the API answers
 		// "not ready" until here rather than pretending to have no data.
+		server.SetPublicSurfaceRestricted(bundle.dependencies.PublicSurfaceRestricted)
 		server.SetAPI(bundle.dependencies.FleetAPI)
 	}
 	if err == nil && bundle != nil && bundle.dependencies.ControlStream != nil {
@@ -491,6 +508,9 @@ type phaseTwoWorkerBundleDependencies struct {
 	RefreshPlatformSettings func(context.Context)
 	// PublishFleet writes this replica's contribution to them.
 	FleetAPI http.Handler
+	// PublicSurfaceRestricted is whether the listener's public surface is
+	// restricted: asked for by the configuration and the CLI came up.
+	PublicSurfaceRestricted bool
 	// ControlStream serves decision-016's view stream over the HTTP
 	// listener (gRPC over h2c), and StreamIdentity is what this process
 	// writes into its registration for it. ViewStreamStats is the Leader's
@@ -3441,6 +3461,9 @@ type httpRuntime interface {
 	// SetLiveness installs what /healthz judges, once the loops it judges
 	// exist.
 	SetLiveness(httpservice.LivenessSource)
+	// SetPublicSurfaceRestricted settles the public surface once the CLI is
+	// built: restricted only when a session can be had.
+	SetPublicSurfaceRestricted(bool)
 }
 
 // waitRuntimeComponent waits for one component's shutdown to report, up to the

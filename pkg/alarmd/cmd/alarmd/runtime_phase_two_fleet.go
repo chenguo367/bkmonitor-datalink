@@ -245,6 +245,9 @@ type fleetPublisher struct {
 	// platformSettings reports the state of this replica's copy of the
 	// platform's settings. Nil on a bundle that has none.
 	platformSettings func() *fleet.PlatformSettingsFacts
+	// publicSurface is how the public surface came out at assembly; it does
+	// not change under a running process.
+	publicSurface publicSurfaceStanding
 	// outputProtocol is the wire format choice this process runs with, read
 	// once from its configuration at assembly: the configuration does not
 	// change under a running process, and what it decides is frozen into
@@ -446,6 +449,8 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.platformSettings != nil {
 		snapshot.PlatformSettings = publisher.platformSettings()
 	}
+	snapshot.MetricsUnexported = publisher.publicSurface.MetricsUnexported
+	snapshot.CLIUnavailable = publisher.publicSurface.CLIUnavailable
 	if publisher.activation != nil {
 		snapshot.Activation = publisher.activation()
 	}

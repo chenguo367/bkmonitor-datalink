@@ -1108,22 +1108,25 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	var publisher fleetPublisher
-	fleetAPI, closeCLI := buildPhaseTwoCLI(cfg, fleetAPI, repository, progressStore, platformSettings, func() *observability.RuntimeConfigFacts {
+	fleetAPI, closeCLI, publicRestricted := buildPhaseTwoCLI(cfg, fleetAPI, repository, progressStore, platformSettings, func() *observability.RuntimeConfigFacts {
 		if bundle == nil {
 			return nil
 		}
 		return bundle.runtimeConfig
-	}, cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer()})
+	}, cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer(),
+		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now)})
 	defer func() {
 		if resultErr != nil {
 			_ = closeCLI()
 		}
 	}()
+	surface := publicSurfaceStandingOf(cfg, publicRestricted)
+	surface.warn(logger)
 	bundle, err = newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
 		ActivationBlocked: repository.ActivationBlockedReading,
 		Config:            cfg, Health: health, Control: control, Ownership: productionOwnership,
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,
-		FleetAPI:      fleetAPI,
+		FleetAPI: fleetAPI, PublicSurfaceRestricted: publicRestricted,
 		ControlStream: controlStream, StreamIdentity: streamIdentity, ViewStreamStats: viewServer.Stats, ViewClient: viewClient,
 		PublishFleet: func(ctx context.Context) {
 			observationRefresh.publish(ctx)
@@ -1275,6 +1278,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		openAlerts:       openAlertFacts,
 		controlSource:    bundle.controlSourceFleetFacts,
 		platformSettings: platformSettingsFactsSource(platformSettings, external.Now),
+		publicSurface:    surface,
 		activation:       bundle.activationFleetFacts,
 		rebalance:        bundle.rebalanceFleetFacts,
 		assignmentScope:  bundle.assignmentScopeFleetFacts,
