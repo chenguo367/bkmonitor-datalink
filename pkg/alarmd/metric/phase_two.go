@@ -74,6 +74,9 @@ type phaseTwoMetrics struct {
 	outputEventsByWireFormat        *prometheus.CounterVec
 	outputEventsWithoutMessage      *prometheus.CounterVec
 	outputEventsByKind              *prometheus.CounterVec
+	outputEventsRejected            *prometheus.CounterVec
+	outputRejectedStrategyOverflow  prometheus.Counter
+	outputRejectedStrategies        *boundedLabels
 	frozenStateRenewals             *prometheus.CounterVec
 	frozenStateCensus               *prometheus.CounterVec
 	segmentContent                  *prometheus.CounterVec
@@ -792,6 +795,27 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.outputEventsWithoutMessage.WithLabelValues(format, kind)
 		}
 	}
+	metrics.outputEventsRejected = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "output_events_rejected_total",
+		Help: "Events the output sink would not write because of their own content, one each, by the " +
+			"rule the event broke and the strategy it was decided for. The rest of the batch is written: " +
+			"a refused event takes its own series with it (the series' State stays where it was and the " +
+			"next round decides it again, so a refusal that keeps holding counts once a round) and no " +
+			"other series. Rules are closed; one this build does not name folds to _other. The strategy " +
+			"label holds the first OutputRejectedStrategyLabels strategies refused in this process and " +
+			"folds the rest to _other, counted apart in output_events_rejected_strategies_overflow_total. " +
+			"Every rule is created at startup with strategy=_other, so zero reads as zero.",
+	}, []string{"rule", "strategy"})
+	for _, rule := range observability.OutputRejectRules {
+		metrics.outputEventsRejected.WithLabelValues(rule, observability.OutputRejectOther)
+	}
+	metrics.outputRejectedStrategyOverflow = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "output_events_rejected_strategies_overflow_total",
+		Help: "Rejected events whose strategy did not get a label of its own on output_events_rejected_total " +
+			"because OutputRejectedStrategyLabels strategies already had one. Non-zero means the per-strategy " +
+			"split is partial: read which strategies through the event_acked lines.",
+	})
+	metrics.outputRejectedStrategies = &boundedLabels{limit: OutputRejectedStrategyLabels}
 	metrics.outputEventsByKind = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "output_events_by_kind_total",
 		Help: "Events handed to the output sink, by the wire format they were published as and their " +
@@ -1545,7 +1569,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
-		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.frozenStateRenewals, m.frozenStateCensus)...)
+		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus)...)
 }
 
 func (m phaseTwoMetrics) observe(observation observability.Observation) {
@@ -1841,6 +1865,13 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			).Add(float64(count))
 		}
 		if write := observation.OutputWrite; write != nil {
+			for _, rejected := range write.Rejected {
+				strategy, labelled := m.outputRejectedStrategies.label(rejected.StrategyID)
+				if !labelled {
+					m.outputRejectedStrategyOverflow.Inc()
+				}
+				m.outputEventsRejected.WithLabelValues(observability.NormalizeOutputRejectRule(rejected.Rule), strategy).Inc()
+			}
 			for _, bucket := range write.WithoutMessageBy {
 				m.outputEventsWithoutMessage.WithLabelValues(
 					observability.NormalizeWireFormat(bucket.Format), observability.NormalizeOutputEventKind(bucket.EventKind),

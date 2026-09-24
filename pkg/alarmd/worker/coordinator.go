@@ -1356,7 +1356,24 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			events, withoutMessage := outputsOf(accepted, eventsByState, withoutMessageByState)
 			sortTriggerEvents(events)
 			if err := coordinator.writeEvents(ctx, request.Operation, planResult.Plan, events, withoutMessage); err != nil {
-				if reason, deferred := outputDeferralReason(err); deferred {
+				if notWritten, partial := outputNotWritten(err); partial {
+					// The sink wrote the batch but for some events it would
+					// not represent, and withheld the other events of their
+					// series. Those series did not send what they decided,
+					// so their State stays where it was: the next round
+					// decides them again from it, and nothing records an
+					// alert the consumer never received or a recovery
+					// behind one. Every other series moves as it would
+					// have, and the Slot completes by the rejection's name.
+					kept, keptBytes, keepErr := withoutSeriesNotWritten(accepted, acceptedBytes, eventsByState, notWritten)
+					if keepErr != nil {
+						return execution.SlotExecutionResult{}, keepErr
+					}
+					if reason, rejected := outputRejectionReason(err); rejected && deterministicTerminalReason == "" {
+						deterministicTerminalReason = reason
+					}
+					accepted, acceptedBytes = kept, keptBytes
+				} else if reason, deferred := outputDeferralReason(err); deferred {
 					// The sink did not start the batch: the lease has less
 					// life left than one batch needs to land. Nothing is
 					// unknown and nothing is wrong with the content; the
@@ -1365,8 +1382,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 						retryPendingReason = reason
 					}
 					continue
-				}
-				if reason, rejected := outputRejectionReason(err); rejected {
+				} else if reason, rejected := outputRejectionReason(err); rejected {
 					// Decided in this process, from this Plan's own decisions
 					// or this deployment's own client: the same events meet
 					// the same refusal on every retry. This Plan's State is
@@ -1379,17 +1395,18 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 						deterministicTerminalReason = reason
 					}
 					continue
+				} else {
+					if !isRetryableOutputDependency(err) {
+						return execution.SlotExecutionResult{}, err
+					}
+					if retryPendingReason == "" {
+						retryPendingReason = execution.ReasonCode(contract.ReasonOutputACKUnknown)
+					}
+					// Event acknowledgement is Plan-local. Keep the Slot retryable and
+					// continue healthy sibling Plans, but do not apply this Plan's State
+					// or advance Progress until the stable event identity is replayed.
+					continue
 				}
-				if !isRetryableOutputDependency(err) {
-					return execution.SlotExecutionResult{}, err
-				}
-				if retryPendingReason == "" {
-					retryPendingReason = execution.ReasonCode(contract.ReasonOutputACKUnknown)
-				}
-				// Event acknowledgement is Plan-local. Keep the Slot retryable and
-				// continue healthy sibling Plans, but do not apply this Plan's State
-				// or advance Progress until the stable event identity is replayed.
-				continue
 			}
 			if len(accepted) > 0 {
 				rejectedApply, err := coordinator.applyState(ctx, request.Operation, request.Contract, request.OwnerFence, request.ContentScope, retention, horizon, accepted, acceptedBytes)
@@ -1760,16 +1777,83 @@ func (coordinator *SlotExecutionCoordinator) writeEvents(
 		Counts: observability.Counts{Events: int64(len(events) + len(withoutMessage))}, Err: err, OutputRejection: rejection,
 		OutputWrite: written, OutputWireFormats: formats, OutputEventKinds: kinds,
 	})
-	if err != nil {
+	acked := events
+	if notWritten, partial := outputNotWritten(err); partial {
+		// The rest of the batch was written and acknowledged: the copy
+		// hears of those, and of none of the events that were not written.
+		acked = make([]contract.TriggerEventV1, 0, len(events))
+		for _, event := range events {
+			if _, skipped := notWritten[event.EventID]; !skipped {
+				acked = append(acked, event)
+			}
+		}
+	} else if err != nil {
 		return fmt.Errorf("alarmd worker: acknowledge events: %w", err)
 	}
 	// Only after the ACK: a batch the sink did not take opened nothing at
 	// the consumer, and the copy must not say it did. The constructor
 	// requires the port; the guard is for tests that build the struct.
-	if coordinator.ports.OpenAlerts != nil {
-		coordinator.ports.OpenAlerts.Acknowledged(events)
+	if coordinator.ports.OpenAlerts != nil && len(acked) > 0 {
+		coordinator.ports.OpenAlerts.Acknowledged(acked)
+	}
+	if err != nil {
+		return fmt.Errorf("alarmd worker: acknowledge events: %w", err)
 	}
 	return nil
+}
+
+// outputNotWritten reports whether the sink wrote the batch except for some
+// of its events (kafka.OutputPartiallyRejectedError), and which: the events
+// it refused and the ones it withheld beside them. It is checked before the
+// whole-batch rejection, which the partial one also names.
+func outputNotWritten(err error) (map[string]struct{}, bool) {
+	if err == nil {
+		return nil, false
+	}
+	var partial interface{ OutputNotWrittenEventIDs() []string }
+	if !errors.As(err, &partial) || partial == nil {
+		return nil, false
+	}
+	ids := partial.OutputNotWrittenEventIDs()
+	notWritten := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		notWritten[id] = struct{}{}
+	}
+	return notWritten, true
+}
+
+// withoutSeriesNotWritten is the accepted mutations, and their sizes, less
+// the series any of whose events was not written. The sink withholds every
+// event of such a series, so a series left with one of its events written
+// is a sink that broke that promise: its State would miss an alert the
+// consumer holds, and that is refused here rather than applied.
+func withoutSeriesNotWritten(
+	accepted []execution.StateMutation,
+	acceptedBytes []int64,
+	events map[execution.StateKeyIdentity][]contract.TriggerEventV1,
+	notWritten map[string]struct{},
+) ([]execution.StateMutation, []int64, error) {
+	kept := make([]execution.StateMutation, 0, len(accepted))
+	keptBytes := make([]int64, 0, len(acceptedBytes))
+	for index, mutation := range accepted {
+		held, sent := 0, 0
+		for _, event := range events[mutation.Identity] {
+			if _, skipped := notWritten[event.EventID]; skipped {
+				held++
+			} else {
+				sent++
+			}
+		}
+		if held == 0 {
+			kept = append(kept, mutation)
+			keptBytes = append(keptBytes, acceptedBytes[index])
+			continue
+		}
+		if sent != 0 {
+			return nil, nil, fmt.Errorf("alarmd worker: output wrote %d events of a series whose other %d it did not write", sent, held)
+		}
+	}
+	return kept, keptBytes, nil
 }
 
 // outputsOf is what the accepted mutations' series decided to send: their
