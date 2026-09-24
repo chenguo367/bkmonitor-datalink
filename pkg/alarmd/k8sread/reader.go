@@ -49,6 +49,16 @@ const (
 	DefaultLogLines = 200
 	MaxLogLines     = 1000
 	MaxLogBytes     = 256 << 10
+	// A filtered read scans a longer tail than it returns: DefaultScanLines
+	// unless asked, at most MaxScanLines, still bounded by maxLogReadBytes.
+	DefaultScanLines = 20000
+	MaxScanLines     = 50000
+	// MaxLogFilters bounds the substrings one read filters on, and
+	// MaxLogFilterBytes each of them.
+	MaxLogFilters     = 4
+	MaxLogFilterBytes = 128
+	// MaxLogSinceSeconds bounds how far back a read may start.
+	MaxLogSinceSeconds = 24 * 60 * 60
 	// maxAPIBytes bounds one API response body before it is decoded.
 	maxAPIBytes = 8 << 20
 	// maxLogReadBytes bounds the whole tail read before its newest

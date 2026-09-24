@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -367,5 +368,50 @@ func TestAPodNotOwnedByADeploymentHasNoScope(t *testing.T) {
 	reader.options.PodName = ""
 	if _, err := reader.Pods(context.Background()); codeOfErr(t, err) != CodeScopeUnresolved {
 		t.Errorf("no Pod name: %v", err)
+	}
+}
+
+// A filtered read scans a longer tail and keeps only the matching lines,
+// the newest of them: a line far older than a plain read's bytes is still
+// found. The scan and window reach the server as tailLines and sinceSeconds;
+// the counts say how much was scanned and matched; more matches than
+// returned is truncation; bad substrings are refused before any read.
+func TestAFilteredReadFindsTheLinesAPlainTailWouldNotReach(t *testing.T) {
+	var log strings.Builder
+	log.WriteString("2026-09-24T05:00:00Z {\"stage\":\"schedule_cutover\",\"n\":1}\n")
+	for long := 0; long < 3*MaxLogBytes; {
+		line := "2026-09-24T05:01:00Z {\"stage\":\"lease_renewed\"} " + strings.Repeat("x", 200) + "\n"
+		log.WriteString(line)
+		long += len(line)
+	}
+	log.WriteString("2026-09-24T05:02:00Z {\"stage\":\"schedule_cutover\",\"n\":2}\n")
+	log.WriteString("2026-09-24T05:03:00Z {\"stage\":\"schedule_cutover\",\"n\":3}\n")
+	api := &fakeAPI{t: t, logBody: log.String()}
+	reader := newReader(t, api)
+	got, err := reader.Logs(context.Background(), LogRequest{Pod: selfPod, Contains: []string{"schedule_cutover"}, Lines: 2, SinceSeconds: 3600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.MatchedLines != 3 || !got.Truncated || !strings.Contains(got.Text, "\"n\":2") || !strings.Contains(got.Text, "\"n\":3") ||
+		strings.Contains(got.Text, "\"n\":1") || strings.Contains(got.Text, "lease_renewed") || got.ScannedLines < 1000 {
+		t.Fatalf("filtered read %+v", got)
+	}
+	var logQuery url.Values
+	for _, path := range api.paths() {
+		if strings.Contains(path, "/log?") {
+			logQuery, _ = url.ParseQuery(path[strings.Index(path, "?")+1:])
+		}
+	}
+	if logQuery.Get("tailLines") != strconv.Itoa(DefaultScanLines) || logQuery.Get("sinceSeconds") != "3600" {
+		t.Fatalf("asked as %v, want the default scan and the window", logQuery)
+	}
+	// The oldest match is reachable with room for it.
+	if got, _ := reader.Logs(context.Background(), LogRequest{Pod: selfPod, Contains: []string{"\"n\":1"}}); got.MatchedLines != 1 || got.Truncated {
+		t.Fatalf("the old line: %+v", got)
+	}
+	for _, contains := range [][]string{{""}, {strings.Repeat("s", MaxLogFilterBytes+1)}, {"a", "b", "c", "d", "e"}} {
+		if _, err := reader.Logs(context.Background(), LogRequest{Pod: selfPod, Contains: contains}); codeOfErr(t, err) != CodeAPIError {
+			t.Errorf("filters %q: %v", contains, err)
+		}
 	}
 }

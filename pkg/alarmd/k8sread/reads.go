@@ -431,6 +431,13 @@ type LogRequest struct {
 	// Previous reads the container's previous run: the one that crashed.
 	Previous bool
 	Lines    int
+	// Contains keeps only the lines holding any of these substrings. The
+	// tail scanned for them is ScanLines long, so a line far older than the
+	// bytes a plain read would return can still be found.
+	Contains  []string
+	ScanLines int
+	// SinceSeconds starts the log that many seconds back.
+	SinceSeconds int
 }
 
 // LogResult is the tail, bounded by lines and by MaxLogBytes. Truncated
@@ -445,6 +452,14 @@ type LogResult struct {
 	Text      string `json:"text"`
 	Bytes     int    `json:"bytes"`
 	Truncated bool   `json:"truncated"`
+	// Contains, SinceSeconds and the counts describe a filtered read:
+	// how many lines of the tail were scanned and how many matched, of
+	// which the newest Lines are in Text. More matched than returned sets
+	// Truncated.
+	Contains     []string `json:"contains,omitempty"`
+	SinceSeconds int      `json:"since_seconds,omitempty"`
+	ScannedLines int      `json:"scanned_lines,omitempty"`
+	MatchedLines int      `json:"matched_lines,omitempty"`
 }
 
 // podInScope reads one Pod and checks it is the Deployment's: its labels
@@ -508,13 +523,36 @@ func (r *Reader) Logs(ctx context.Context, request LogRequest) (LogResult, error
 	if lines > MaxLogLines {
 		lines = MaxLogLines
 	}
+	filters, err := logFilters(request.Contains)
+	if err != nil {
+		return LogResult{}, err
+	}
+	// Filtered, the tail read is the scan, and only matching lines are kept
+	// from it; unfiltered, the tail is the lines asked for.
+	tail := lines
+	if len(filters) > 0 {
+		tail = request.ScanLines
+		if tail <= 0 {
+			tail = DefaultScanLines
+		}
+		if tail > MaxScanLines {
+			tail = MaxScanLines
+		}
+	}
 	// No limitBytes: the server counts it forward from the start of the last
 	// N lines, so a cut would drop the newest lines - the ones before a
 	// crash. The whole tail is read, bounded by maxLogReadBytes, and only its
 	// last MaxLogBytes are kept.
-	query := url.Values{"container": {container}, "tailLines": {strconv.Itoa(lines)}, "timestamps": {"true"}}
+	query := url.Values{"container": {container}, "tailLines": {strconv.Itoa(tail)}, "timestamps": {"true"}}
 	if request.Previous {
 		query.Set("previous", "true")
+	}
+	since := request.SinceSeconds
+	if since > MaxLogSinceSeconds {
+		since = MaxLogSinceSeconds
+	}
+	if since > 0 {
+		query.Set("sinceSeconds", strconv.Itoa(since))
 	}
 	body, err := r.get(ctx, "pods/"+request.Pod+"/log", base+"/pods/"+url.PathEscape(request.Pod)+"/log", query, maxLogReadBytes)
 	if err != nil {
@@ -531,7 +569,13 @@ func (r *Reader) Logs(ctx context.Context, request LogRequest) (LogResult, error
 		// them is not returned as one.
 		return LogResult{}, &Error{Code: CodeAPIError, Resource: "pods/" + request.Pod + "/log", Message: "the requested lines exceed the read bound; ask for fewer"}
 	}
-	truncated := false
+	result := LogResult{Scope: scope, Pod: request.Pod, Container: container, Previous: request.Previous, Lines: lines,
+		Contains: filters, SinceSeconds: since}
+	if len(filters) > 0 {
+		body, result.ScannedLines, result.MatchedLines = filterLog(body, filters, lines)
+		result.Truncated = result.MatchedLines > lines
+	}
+	truncated := result.Truncated
 	if len(body) > MaxLogBytes {
 		// Keep the newest bytes, from the first whole line in them.
 		body, truncated = body[len(body)-MaxLogBytes:], true
@@ -539,6 +583,45 @@ func (r *Reader) Logs(ctx context.Context, request LogRequest) (LogResult, error
 			body = body[cut+1:]
 		}
 	}
-	return LogResult{Scope: scope, Pod: request.Pod, Container: container, Previous: request.Previous, Lines: lines,
-		Text: string(body), Bytes: len(body), Truncated: truncated}, nil
+	result.Text, result.Bytes, result.Truncated = string(body), len(body), truncated
+	return result, nil
+}
+
+// logFilters checks the substrings a read filters on.
+func logFilters(contains []string) ([]string, error) {
+	if len(contains) > MaxLogFilters {
+		return nil, &Error{Code: CodeAPIError, Message: "at most " + strconv.Itoa(MaxLogFilters) + " substrings"}
+	}
+	var filters []string
+	for _, filter := range contains {
+		if filter == "" || len(filter) > MaxLogFilterBytes {
+			return nil, &Error{Code: CodeAPIError, Message: "each substring is 1 to " + strconv.Itoa(MaxLogFilterBytes) + " bytes"}
+		}
+		filters = append(filters, filter)
+	}
+	return filters, nil
+}
+
+// filterLog keeps the lines of body holding any of filters, the newest
+// keep of them, and says how many lines it scanned and how many matched.
+func filterLog(body []byte, filters []string, keep int) ([]byte, int, int) {
+	var matched [][]byte
+	scanned := 0
+	for _, line := range bytes.SplitAfter(body, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		scanned++
+		for _, filter := range filters {
+			if bytes.Contains(line, []byte(filter)) {
+				matched = append(matched, line)
+				break
+			}
+		}
+	}
+	total := len(matched)
+	if len(matched) > keep {
+		matched = matched[len(matched)-keep:]
+	}
+	return bytes.Join(matched, nil), scanned, total
 }

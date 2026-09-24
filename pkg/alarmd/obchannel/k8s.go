@@ -21,6 +21,8 @@ func K8sOperations(reader *k8sread.Reader) []Operation {
 	pod := Field{Type: "string", Description: "alarmd 的 Pod 名。", Source: "k8s.pods pods[].name", Pattern: "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", MinLength: 1, MaxLength: 253}
 	container := Field{Type: "string", Description: "容器名；省略时取 Pod 唯一的容器，多个容器时取 alarmd。", Source: "k8s.pods pods[].containers[].name", Pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", MinLength: 1, MaxLength: 63}
 	minLines, maxLines := int64(1), int64(k8sread.MaxLogLines)
+	maxScan, maxSince := int64(k8sread.MaxScanLines), int64(k8sread.MaxLogSinceSeconds)
+	substring := Field{Type: "string", MinLength: 1, MaxLength: k8sread.MaxLogFilterBytes}
 	limits := map[string]any{"max_pods": k8sread.MaxPods, "max_events": k8sread.MaxEvents, "max_replica_sets": k8sread.MaxReplicaSets,
 		"max_log_lines": k8sread.MaxLogLines, "max_log_bytes": k8sread.MaxLogBytes, "verbs": "GET only", "scope": "the Deployment this replica belongs to"}
 	ops := []Operation{
@@ -51,17 +53,29 @@ func K8sOperations(reader *k8sread.Reader) []Operation {
 				}
 				return out
 			}},
-		{ID: "k8s.logs", Summary: "读取 alarmd 某个 Pod 容器日志的末尾若干行；previous=true 读上一次运行（崩溃前）的日志。", Fields: map[string]Field{
+		{ID: "k8s.logs", Summary: "读取 alarmd 某个 Pod 容器日志的末尾若干行；previous=true 读上一次运行（崩溃前）的日志；contains 按子串过滤（在更长的末尾里找，只返回命中的行），since_seconds 只看最近若干秒。", Fields: map[string]Field{
 			"pod": pod, "container": container,
 			"previous": {Type: "boolean", Description: "读上一次运行的日志，即崩溃或被杀之前的那一次。"},
-			"lines":    {Type: "integer", Description: "末尾行数，默认 200。", Minimum: &minLines, Maximum: &maxLines},
-		}, Required: []string{"pod"}, OutputSchema: SchemaOf(k8sread.LogResult{}), Examples: []Params{{"pod": "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", "previous": true}},
+			"lines":    {Type: "integer", Description: "返回的行数上限，默认 200；过滤时是命中行里最新的这么多行。", Minimum: &minLines, Maximum: &maxLines},
+			"contains": {Type: "array", Items: &substring, MaxItems: k8sread.MaxLogFilters, UniqueItems: true,
+				Description: "只保留含任一子串的行，比如 stage 名、原因码、QG 标识。"},
+			"scan_lines":    {Type: "integer", Description: "过滤时扫描的末尾行数，默认 20000；读取总量仍受 8 MiB 上限。", Minimum: &minLines, Maximum: &maxScan},
+			"since_seconds": {Type: "integer", Description: "只读最近这么多秒的日志。", Minimum: &minLines, Maximum: &maxSince},
+		}, Required: []string{"pod"}, OutputSchema: SchemaOf(k8sread.LogResult{}), Examples: []Params{{"pod": "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", "previous": true},
+			{"pod": "bk-monitor-alarmd-trigger-5bdb679ddf-abcde", "contains": []any{"schedule_cutover"}, "since_seconds": int64(3600)}},
 			Run: func(ctx context.Context, p Params) Outcome {
-				result, err := reader.Logs(ctx, k8sread.LogRequest{Pod: p.String("pod"), Container: p.String("container"), Previous: p.Bool("previous"), Lines: p.Int("lines", k8sread.DefaultLogLines)})
+				result, err := reader.Logs(ctx, logRequestOf(p))
 				out := k8sOutcome(result, err)
 				if err == nil && result.Truncated {
 					out.Complete = false
-					out.Limitations = append(out.Limitations, "The log reached the byte bound; fewer lines than asked, the oldest dropped.")
+					if len(result.Contains) > 0 {
+						out.Limitations = append(out.Limitations, "More lines matched than returned; the newest are kept. Narrow the substrings or the window for older ones.")
+					} else {
+						out.Limitations = append(out.Limitations, "The log reached the byte bound; fewer lines than asked, the oldest dropped.")
+					}
+				}
+				if err == nil && len(result.Contains) > 0 && result.MatchedLines == 0 {
+					out.Limitations = append(out.Limitations, "No matching line in the scanned tail; that is not proof there was none before it.")
 				}
 				return out
 			}},
@@ -84,4 +98,18 @@ func k8sOutcome(value any, err error) Outcome {
 		return Outcome{Error: &Failure{Code: "k8s_" + k8sread.CodeAPIError, Message: err.Error()}, Limitations: []string{k8sBoundary}}
 	}
 	return Outcome{Value: value, Complete: true, Limitations: []string{k8sBoundary}}
+}
+
+// logRequestOf is the log read the parameters ask for.
+func logRequestOf(p Params) k8sread.LogRequest {
+	var contains []string
+	if values, ok := p["contains"].([]any); ok {
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				contains = append(contains, text)
+			}
+		}
+	}
+	return k8sread.LogRequest{Pod: p.String("pod"), Container: p.String("container"), Previous: p.Bool("previous"),
+		Lines: p.Int("lines", k8sread.DefaultLogLines), Contains: contains, ScanLines: p.Int("scan_lines", 0), SinceSeconds: p.Int("since_seconds", 0)}
 }
