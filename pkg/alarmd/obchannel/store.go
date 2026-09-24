@@ -141,9 +141,9 @@ func storeOutcome(r obevidence.Result) Outcome {
 	}
 	switch r.Status {
 	case "dependency_unavailable":
-		out.Error = &Failure{"evidence_unavailable", "The configured evidence store could not be read."}
+		out.Error = &Failure{Code: "evidence_unavailable", Message: "The configured evidence store could not be read.", Reason: r.Reason}
 	case "invalid_input":
-		out.Error = &Failure{"invalid_input", "The domain reader rejected the input."}
+		out.Error = &Failure{Code: "invalid_input", Message: "The domain reader rejected the input."}
 	}
 	return out
 }

@@ -45,7 +45,18 @@ type Location struct {
 type RedisBinding struct {
 	Client   redis.Cmdable
 	Location Location
+	// OnFailure, when set, hears the reason of each read of this binding that
+	// the server did not answer: once per read, however many keys it asked.
+	OnFailure func(reason string)
 }
+
+// failed reports one unanswered read of the binding by its reason.
+func (binding RedisBinding) failed(reason string) {
+	if binding.OnFailure != nil && reason != "" {
+		binding.OnFailure(reason)
+	}
+}
+
 type Options struct {
 	SourceStrategy, TargetGroup, DynamicConfig, QueryProgress, Published RedisBinding
 	// QueryCooldown is the runtime store under the pool records' prefix: the

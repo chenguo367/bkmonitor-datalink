@@ -31,6 +31,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scopeclose"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
@@ -470,6 +471,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_source_pending_confirmation_age_seconds"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_leader_rounds_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_query_cooldown_saves_total"] = "variableLabels: {result}"
+	expected["bkmonitor_alarmd_diagnostic_redis_failures_total"] = "variableLabels: {client,reason}"
 	expected["bkmonitor_alarmd_leader_round_stage_seconds_total"] = "variableLabels: {stage}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
@@ -1028,6 +1030,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("source_pending_confirmation_age_seconds")] = 1
 	bounds[fqName("leader_rounds_total")] = 2
 	bounds[fqName("query_cooldown_saves_total")] = len(QueryCooldownSaveResults)
+	bounds[fqName("diagnostic_redis_failures_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
 	bounds[fqName("leader_round_stage_seconds_total")] = len(fleet.LeaderRoundStages) + 1
 	// Five states; three operations by two results.
 	bounds[fqName("linkd_console_state")] = 5
@@ -1281,5 +1284,29 @@ func TestQueryCooldownSaveResultsArePreCreated(t *testing.T) {
 		if !seen[result] {
 			t.Fatalf("result %q not pre-created: %v", result, seen)
 		}
+	}
+}
+
+// Diagnostic Redis failures are counted by client and reason, every cell
+// from startup; a reason outside the set folds to other and a client outside
+// it is not counted.
+func TestDiagnosticRedisFailuresAreCountedByReason(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	if cells := gatherFamily(t, r, "bkmonitor_alarmd_diagnostic_redis_failures_total"); len(cells) != len(DiagnosticRedisClients)*len(redisfailure.Reasons) {
+		t.Fatalf("%d cells before any failure, want every client and reason", len(cells))
+	}
+	r.ObserveDiagnosticRedisFailure("auth", redisfailure.ConnectionClosed)
+	r.ObserveDiagnosticRedisFailure("auth", "not_a_reason")
+	r.ObserveDiagnosticRedisFailure("nobody", redisfailure.Timeout)
+	counts := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_diagnostic_redis_failures_total") {
+		labels := map[string]string{}
+		for _, label := range m.GetLabel() {
+			labels[label.GetName()] = label.GetValue()
+		}
+		counts[labels["client"]+"/"+labels["reason"]] = m.GetCounter().GetValue()
+	}
+	if counts["auth/connection_closed"] != 1 || counts["auth/other"] != 1 || len(counts) != len(DiagnosticRedisClients)*len(redisfailure.Reasons) {
+		t.Fatalf("counts %v", counts)
 	}
 }

@@ -500,3 +500,29 @@ func TestRedisErrorsAreSafeAndFailClosed(t *testing.T) {
 		t.Fatal("safe error unavailable to caller")
 	}
 }
+
+// A store call nobody answered fails as auth_store_unavailable naming why,
+// and the reason is reported to the manager's counter.
+func TestAnUnansweredStoreSaysWhy(t *testing.T) {
+	dead := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1, DialTimeout: 200 * time.Millisecond})
+	t.Cleanup(func() { _ = dead.Close() })
+	var heard []string
+	m, err := New(Options{Redis: dead, Prefix: "test-alarmd", EnvironmentID: "test-env", EnvironmentName: "Test environment",
+		PublicBaseURL: "https://example.test/alarmd/", AdminKey: testAdminKey, Now: func() time.Time { return time.Unix(1, 0) },
+		OnStoreFailure: func(reason string) { heard = append(heard, reason) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.ActivePairings(context.Background())
+	var failure *Error
+	if !errors.As(err, &failure) || failure.Code != "auth_store_unavailable" || failure.Reason != "connection_refused" {
+		t.Fatalf("error %#v", err)
+	}
+	if len(heard) != 1 || heard[0] != "connection_refused" {
+		t.Fatalf("heard %v", heard)
+	}
+	encoded, _ := json.Marshal(failure)
+	if !strings.Contains(string(encoded), `"reason":"connection_refused"`) {
+		t.Fatalf("the reason does not reach the answer: %s", encoded)
+	}
+}

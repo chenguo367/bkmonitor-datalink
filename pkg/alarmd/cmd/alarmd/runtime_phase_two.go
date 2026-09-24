@@ -238,6 +238,9 @@ func runPhaseTwoApplicationWithDependencies(
 	if dependencies.lifecycle != nil {
 		lifecycle = dependencies.lifecycle(cfg)
 	}
+	if lifecycle != nil {
+		lifecycle.failed = func(reason string) { recorder.ObserveDiagnosticRedisFailure("lifecycle", reason) }
+	}
 	defer lifecycle.close()
 	lifecycle.start()
 	bundle, err := dependencies.openBundle(runtimeContext, cfg, recorder, logger, application.health)

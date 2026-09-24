@@ -20,6 +20,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/nodata"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/targetplan"
 )
 
@@ -165,6 +166,7 @@ type phaseTwoMetrics struct {
 	controlSourceRounds             *prometheus.CounterVec
 	strategiesReturnedAfterRemoval  prometheus.Counter
 	queryCooldownSaves              *prometheus.CounterVec
+	diagnosticRedisFailures         *prometheus.CounterVec
 	leaderForward                   *prometheus.HistogramVec
 	controlSourceRetainedStale      prometheus.Counter
 	controlSource                   *controlSourceCollector
@@ -1287,6 +1289,19 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, result := range QueryCooldownSaveResults {
 		metrics.queryCooldownSaves.WithLabelValues(result)
 	}
+	metrics.diagnosticRedisFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "diagnostic_redis_failures_total",
+		Help: "Calls to Redis by the diagnostic clients that were not answered, by client -- evidence (the CLI's " +
+			"store reads), auth (the CLI's authorization store), lifecycle (the start and stop record) -- and by " +
+			"reason: connection_closed (the connection was closed under the call; a pooled connection the network " +
+			"cut while idle fails so), connection_refused, timeout, pool_timeout, canceled, server_error, " +
+			"malformed_reply, other. Every cell exists from startup, so a zero is a count.",
+	}, []string{"client", "reason"})
+	for _, client := range DiagnosticRedisClients {
+		for _, reason := range redisfailure.Reasons {
+			metrics.diagnosticRedisFailures.WithLabelValues(client, reason)
+		}
+	}
 	metrics.leaderForward = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "leader_forward_duration_seconds",
 		Help: "Requests a replica handed to the Control Leader's listener because it could not answer them itself, " +
@@ -1606,7 +1621,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.leaderForward, m.controlSource, m.leaderRound,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.diagnosticRedisFailures, m.leaderForward, m.controlSource, m.leaderRound,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
@@ -2426,6 +2441,34 @@ func readingOf(facts *observability.ExecutionEvidenceFacts) string {
 // saw listed again after their Plan had left the Catalog.
 // QueryCooldownSaveResults is every result of a pool record write, closed.
 var QueryCooldownSaveResults = []string{"written", "superseded", "failed"}
+
+// DiagnosticRedisClients are the diagnostic Redis clients whose failures are
+// counted by reason.
+var DiagnosticRedisClients = []string{"evidence", "auth", "lifecycle"}
+
+// ObserveDiagnosticRedisFailure counts one unanswered call of a diagnostic
+// client by its reason; a client or reason outside the closed sets is
+// counted under other rather than creating a series.
+func (r *Recorder) ObserveDiagnosticRedisFailure(client, reason string) {
+	if r == nil || r.phaseTwo.diagnosticRedisFailures == nil {
+		return
+	}
+	known := func(value string, values []string) bool {
+		for _, candidate := range values {
+			if value == candidate {
+				return true
+			}
+		}
+		return false
+	}
+	if !known(client, DiagnosticRedisClients) {
+		return
+	}
+	if !known(reason, redisfailure.Reasons) {
+		reason = redisfailure.Other
+	}
+	r.phaseTwo.diagnosticRedisFailures.WithLabelValues(client, reason).Inc()
+}
 
 // ObserveQueryCooldownSave counts one pool record write by its result; a
 // result outside QueryCooldownSaveResults is dropped rather than creating a

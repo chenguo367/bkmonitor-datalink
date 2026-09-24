@@ -52,6 +52,9 @@ type cliControlBinding struct {
 	// PublicWindows serves /api/windows on a restricted public surface
 	// (fleet.NewPublicWindowsHandler). Nil leaves the route unserved there.
 	PublicWindows http.Handler
+	// RedisFailures, when set, counts an unanswered call of the CLI's own
+	// Redis clients -- evidence, auth -- by its reason.
+	RedisFailures func(client, reason string)
 }
 
 // cliLifecycleOperation reads every replica's start and stop record, which
@@ -94,6 +97,13 @@ func cliRuntimeOperation(facts func() *observability.RuntimeConfigFacts, setting
 // public surface is publicAPI's. A CLI that fails to come up leaves the
 // surface open, since restricting it would leave no way in.
 func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlplane.RedisCatalogRepository, progressStore *progress.Store, settings *platformsettings.Cache, facts func() *observability.RuntimeConfigFacts, control cliControlBinding) (handler http.Handler, closeCLI func() error, restricted bool) {
+	failed := func(client string) func(string) {
+		return func(reason string) {
+			if control.RedisFailures != nil {
+				control.RedisFailures(client, reason)
+			}
+		}
+	}
 	var clients []redis.UniversalClient
 	var closeQuery func()
 	closeClients := func() error {
@@ -120,15 +130,16 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 		// a process with the CLI off builds the evidence clients too; they
 		// connect on first use, a first-page diagnosis, and hold nothing
 		// before it.
-		store, workload, _ := deploymentReads(cfg, catalog, progressStore, newClient)
+		store, workload, _ := deploymentReads(cfg, catalog, progressStore, newClient, failed("evidence"))
 		return obchannel.WithDeploymentSection(native, append(store, workload...)), closeClients, false
 	}
 	// Authentication has its own pool, so an evidence read cannot occupy it.
-	manager, err := cliauth.New(cliauth.Options{Redis: newClient(cfg.RuntimeStoreRedis()), Prefix: cfg.Redis.StatePrefix, EnvironmentID: cfg.CLI.EnvironmentID, EnvironmentName: cfg.CLI.EnvironmentName, PublicBaseURL: cfg.CLI.PublicBaseURL, AdminKey: cfg.CLI.AdminKey})
+	manager, err := cliauth.New(cliauth.Options{Redis: newClient(cfg.RuntimeStoreRedis()), Prefix: cfg.Redis.StatePrefix, EnvironmentID: cfg.CLI.EnvironmentID, EnvironmentName: cfg.CLI.EnvironmentName, PublicBaseURL: cfg.CLI.PublicBaseURL, AdminKey: cfg.CLI.AdminKey,
+		OnStoreFailure: failed("auth")})
 	if err != nil {
 		return composeCLI(native, nil, nil), closeClients, false
 	}
-	store, workload, diagnosticRuntime := deploymentReads(cfg, catalog, progressStore, newClient)
+	store, workload, diagnosticRuntime := deploymentReads(cfg, catalog, progressStore, newClient, failed("evidence"))
 	// Route discovery is evidence I/O too. Reuse the diagnostic runtime pool,
 	// never the production ownership connection or its startup readiness path.
 	routingStore, err := ownership.NewRedisStoreWithClient(diagnosticRuntime, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership"))
@@ -187,7 +198,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 // same ones. It also returns the diagnostic runtime pool, which the CLI's
 // route discovery reuses.
 func deploymentReads(cfg config.Config, catalog *controlplane.RedisCatalogRepository, progressStore *progress.Store,
-	newClient func(config.RedisConnectionConfig) redis.UniversalClient) (store, workload []obchannel.Operation, diagnosticRuntime redis.UniversalClient) {
+	newClient func(config.RedisConnectionConfig) redis.UniversalClient, failed func(reason string)) (store, workload []obchannel.Operation, diagnosticRuntime redis.UniversalClient) {
 	bind := func(role string, connection config.RedisConnectionConfig, prefix string) obevidence.RedisBinding {
 		return obevidence.RedisBinding{Client: newClient(connection), Location: obevidence.Location{Role: role, Address: redisAddress(connection), Mode: connection.Mode, DB: connection.DB, Prefix: prefix}}
 	}
@@ -212,6 +223,11 @@ func deploymentReads(cfg config.Config, catalog *controlplane.RedisCatalogReposi
 	// The owner chain starts at this Pod: its hostname is its name, whatever
 	// the worker id is configured to.
 	podName, _ := os.Hostname()
+	// Every binding reports an unanswered read by its reason.
+	for _, binding := range []*obevidence.RedisBinding{&options.SourceStrategy, &options.CMDBCache, &options.Published,
+		&options.QueryProgress, &options.QueryCooldown, &options.TargetGroup, &options.DynamicConfig} {
+		binding.OnFailure = failed
+	}
 	return obchannel.StoreOperations(obevidence.New(options)), obchannel.K8sOperations(k8sread.New(k8sread.Options{PodName: podName})), diagnosticRuntime
 }
 
