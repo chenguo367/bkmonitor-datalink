@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -393,7 +394,15 @@ func (hook failingGetHook) BeforeProcess(ctx context.Context, cmd redis.Cmder) (
 	return ctx, nil
 }
 func (failingGetHook) AfterProcess(context.Context, redis.Cmder) error { return nil }
-func (failingGetHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmder) (context.Context, error) {
+
+// A cutover reads its timelines in pipelined batches; the read fails there
+// the same way, taking the batch with it as a connection failure would.
+func (hook failingGetHook) BeforeProcessPipeline(ctx context.Context, cmds []redis.Cmder) (context.Context, error) {
+	for _, cmd := range cmds {
+		if _, err := hook.BeforeProcess(ctx, cmd); err != nil {
+			return ctx, err
+		}
+	}
 	return ctx, nil
 }
 func (failingGetHook) AfterProcessPipeline(context.Context, []redis.Cmder) error { return nil }
@@ -632,7 +641,8 @@ func TestTheActivationRefUpgradeWritesWholeAndKeepsTheHeldBackSet(t *testing.T) 
 	next := previous
 	next.RecordRevision++
 	expected := controlplane.ActivationExpectation{RecordRevision: previous.RecordRevision, Current: previous.Current, Pending: previous.Pending}
-	if err := fixture.repository.PersistActivationRefUpgradeForTest(fixture.ctx, expected, next, active); err != nil {
+	// The script is handed the set's length, not the set (N15).
+	if err := fixture.repository.PersistActivationRefUpgradeForTest(fixture.ctx, expected, next, []byte(strconv.Itoa(len(active)))); err != nil {
 		t.Fatalf("the ref upgrade failed: %v", err)
 	}
 	fixture.repository.ForgetActivationCacheForTest()

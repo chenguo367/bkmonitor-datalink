@@ -147,13 +147,14 @@ func TestAHeadBodyIsReadBackFromTheOpenSegments(t *testing.T) {
 		t.Fatalf("worker answer = (%+v, %v), want %+v", answer.Facts, err, want[0].Fact)
 	}
 
-	// The next publication cuts over from the head and writes this build's
-	// body, records and all.
+	// The next publication cuts over from the head and writes a head
+	// again; the records it wrote are the ones the leader reads back.
 	second := headCatalog(t, 90, "AB")
 	fixture.publish(t, second, 120)
 	after := fixture.activation(t)
 	raw, err := controlplane.ActivationBytesForTest(fixture.ctx, fixture.repository)
-	if err != nil || !strings.Contains(string(raw), `"alarmd-control-activation-v2"`) || len(after.Plans) != len(before.Plans) {
+	if err != nil || !strings.Contains(string(raw), `"alarmd-control-activation-v3"`) || strings.Contains(string(raw), `"fact"`) ||
+		len(after.Plans) != len(before.Plans) {
 		t.Fatalf("after the next publication body=%s plans=%d (%v)", raw, len(after.Plans), err)
 	}
 	if cut := fixture.openSegment(t, groupA.Identity, 120); cut.Start != 120 {
@@ -259,8 +260,8 @@ func TestAnUnfinishedCutoverIsFinishedOnTheFirstTick(t *testing.T) {
 		t.Fatalf("records after finishing = %+v", after.Plans)
 	}
 	raw, err := controlplane.ActivationBytesForTest(fixture.ctx, fixture.repository)
-	if err != nil || strings.Contains(string(raw), "cutover_progress") || !strings.Contains(string(raw), `"alarmd-control-activation-v2"`) {
-		t.Fatalf("finished body = %s (%v), want this build's body without progress", raw, err)
+	if err != nil || strings.Contains(string(raw), "cutover_progress") || !strings.Contains(string(raw), `"alarmd-control-activation-v3"`) {
+		t.Fatalf("finished body = %s (%v), want a head without progress", raw, err)
 	}
 	// Finished is finished: the next tick has nothing to do.
 	again, err := fixture.reconciler.Ensure(fixture.ctx, second.Publication)

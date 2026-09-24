@@ -111,9 +111,7 @@ type ActivationState struct {
 	// CutoverProgress is a publication cutover committed in pieces that has
 	// not finished (N15): the Query Groups after its cursor still run the
 	// content they ran before it. Nil everywhere else, and omitted, so a body
-	// without it serializes exactly as before. This build does not write one;
-	// it reads it, and finishes the cutover in one piece. See
-	// activation_head.go.
+	// without it serializes exactly as before. See activation_head.go.
 	CutoverProgress *CutoverProgress `json:"cutover_progress,omitempty"`
 }
 
@@ -153,6 +151,8 @@ type RedisCatalogRepository struct {
 	controlCache               *controlReadCache
 	controlReads               controlReadCounters
 	activationBodyBytes        atomic.Int64
+	written                    writtenActivation
+	activeSets                 activeSetCache
 	adoptMu                    sync.Mutex
 	legacyMigrationMaxScanKeys int
 	legacyMigrationTimeout     time.Duration
@@ -771,12 +771,23 @@ func (repository *RedisCatalogRepository) LoadLatestAudit(ctx context.Context) (
 // LoadActivationHead. A head body gets its records back from the open
 // Segments (materializeActivationPlans), once per header.
 func (repository *RedisCatalogRepository) LoadActivation(ctx context.Context) (ActivationState, error) {
-	entry, err := repository.loadParsedActivation(ctx)
+	if repository == nil || repository.client == nil {
+		return ActivationState{}, errors.New("alarmd controlplane: Redis catalog repository is required")
+	}
+	version, err := repository.readControlVersion(ctx)
+	if err != nil {
+		repository.clearActivationCaches()
+		return ActivationState{}, err
+	}
+	entry, err := repository.loadParsedActivationAt(ctx, version)
 	if err != nil {
 		return ActivationState{}, err
 	}
 	if entry.state.SchemaVersion == activationHeadSchemaVersion {
-		return entry.materialized(ctx, repository)
+		if state, ok := repository.written.lookup(entry.payload); ok {
+			return state, nil
+		}
+		return entry.materialized(ctx, repository, version)
 	}
 	return entry.cloneState(), nil
 }

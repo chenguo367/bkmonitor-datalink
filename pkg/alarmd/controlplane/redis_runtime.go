@@ -129,7 +129,10 @@ if ARGV[1] == '' then
 elseif not header or header ~= ARGV[1] then
   return 0
 end
-if redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end
+-- The active set is named by its digest and checked when written, so a
+-- key of that name and length is the set (N15). ARGV[4] is its length, not
+-- the set itself; checked here, in the write, rather than before it.
+if redis.call('STRLEN', KEYS[3]) ~= tonumber(ARGV[4]) then return 0 end
 local timelines = tonumber(ARGV[6])
 local last_timeline = 3 + timelines
 for index = 4, last_timeline do
@@ -177,7 +180,10 @@ if not timelines or ARGV[8] == nil or #KEYS < 5 + timelines or #ARGV < 8 + 2 * t
 end
 local header = redis.call('GET', KEYS[1])
 if not header or header ~= ARGV[1] then return 0 end
-if redis.call('GET', KEYS[3]) ~= ARGV[4] then return 0 end
+-- The active set is named by its digest and checked when written, so a
+-- key of that name and length is the set (N15). ARGV[4] is its length, not
+-- the set itself; checked here, in the write, rather than before it.
+if redis.call('STRLEN', KEYS[3]) ~= tonumber(ARGV[4]) then return 0 end
 local last_timeline = 5 + timelines
 for index = 6, last_timeline do
   local current = redis.call('GET', KEYS[index])
@@ -280,7 +286,7 @@ func (repository *RedisCatalogRepository) persistActivationRefUpgrade(ctx contex
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(next)
+	payload, err := encodeActivationHead(next)
 	if err != nil {
 		return err
 	}
@@ -300,6 +306,7 @@ func (repository *RedisCatalogRepository) persistActivationRefUpgrade(ctx contex
 	if changed != 1 {
 		return ErrActivationConflict
 	}
+	repository.written.remember(payload, next)
 	return nil
 }
 
@@ -485,42 +492,61 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		cutover.decided(cutoverBlocked)
 		return nil
 	}
+	// keptWithoutRead is the Query Groups the manifest shows unchanged, whose
+	// open Segment is left as it is without a read. Every other one is read,
+	// and all of those are fetched before the walk, in pipelined batches: a
+	// process's first cutover reads every open Segment, and one round trip
+	// each is what made it tens of seconds on a few thousand Query Groups.
+	keptWithoutRead := func(queryGroup execution.QueryGroupIdentity) bool {
+		newGroup, remains := newGroups[queryGroup]
+		if _, wasBlocked := previousBlocked[queryGroup]; !remains || readAll || wasBlocked {
+			return false
+		}
+		previousRefs, known := previousContent.refsFor(newGroup)
+		return previousContent.digests[queryGroup] == newContent[queryGroup].digest && known &&
+			execution.SameOutputContextRefs(previousRefs, newContent[queryGroup].refs)
+	}
+	toRead := make([]execution.QueryGroupIdentity, 0, len(oldIdentities))
+	for _, queryGroup := range oldIdentities {
+		if !keptWithoutRead(queryGroup) {
+			toRead = append(toRead, queryGroup)
+		}
+	}
+	prefetched, err := repository.prefetchTimelinesForUpdate(ctx, toRead)
+	if err != nil {
+		return err
+	}
 	for _, queryGroup := range oldIdentities {
 		// Recorded before anything can fail on it: the cutover returns at its
 		// first failure, so this names the one that stopped it.
 		cutover.failedAt(queryGroup)
 		oldGroup := oldGroups[queryGroup]
 		newGroup, remains := newGroups[queryGroup]
-		_, wasBlocked := previousBlocked[queryGroup]
-		if remains && !readAll && !wasBlocked {
-			previousRefs, known := previousContent.refsFor(newGroup)
-			if previousContent.digests[queryGroup] == newContent[queryGroup].digest && known &&
-				execution.SameOutputContextRefs(previousRefs, newContent[queryGroup].refs) {
-				// Kept without a read: the manifest names the same content and
-				// the same contexts, so the open Segment is left as it is.
-				kept := make([]PlanActivationRecord, 0, len(newGroup.Plans))
-				missing := false
-				for _, plan := range newGroup.Plans {
-					record, ok := carried[plan.Key()]
-					if !ok {
-						missing = true
-						break
-					}
-					kept = append(kept, record)
+		if keptWithoutRead(queryGroup) {
+			// Kept without a read: the manifest names the same content and
+			// the same contexts, so the open Segment is left as it is.
+			kept := make([]PlanActivationRecord, 0, len(newGroup.Plans))
+			missing := false
+			for _, plan := range newGroup.Plans {
+				record, ok := carried[plan.Key()]
+				if !ok {
+					missing = true
+					break
 				}
-				if missing {
-					if err := settle(queryGroup, remains, CutoverReasonActivationRecordMissing,
-						"a kept Query Group has a Plan without a current activation record", "", nil); err != nil {
-						return err
-					}
-					continue
+				kept = append(kept, record)
+			}
+			if missing {
+				if err := settle(queryGroup, remains, CutoverReasonActivationRecordMissing,
+					"a kept Query Group has a Plan without a current activation record", "", nil); err != nil {
+					return err
 				}
-				plans = append(plans, kept...)
-				cutover.decided(cutoverKept)
 				continue
 			}
+			plans = append(plans, kept...)
+			cutover.decided(cutoverKept)
+			continue
 		}
-		timeline, raw, err := repository.loadScheduleTimelineForUpdate(ctx, queryGroup)
+		timeline, raw, err := prefetched.timeline(queryGroup)
 		if errors.Is(err, ErrScheduleUnavailable) {
 			// The key is gone: evicted, or expired. This used to fail the whole
 			// cutover as a dependency that did not answer, on every publication,
@@ -788,6 +814,59 @@ func (repository *RedisCatalogRepository) CompareAndSetPublicationScheduleActiva
 		repository.contentCutoverVerified.Store(true)
 	}
 	return nil
+}
+
+// prefetchedTimelines is the stored bytes of the timelines a cutover reads,
+// fetched together before it walks them. The walk decodes each as the one
+// read it used to make would have: absent is ErrScheduleUnavailable, bytes
+// that do not decode are a DeterministicScheduleError, and the bytes are
+// the expectation the write is fenced on.
+type prefetchedTimelines struct {
+	payloads map[execution.QueryGroupIdentity][]byte
+}
+
+func (prefetched prefetchedTimelines) timeline(queryGroup execution.QueryGroupIdentity) (persistedScheduleTimeline, []byte, error) {
+	payload, ok := prefetched.payloads[queryGroup]
+	if !ok {
+		return persistedScheduleTimeline{}, nil, ErrScheduleUnavailable
+	}
+	timeline, err := decodeScheduleTimeline(queryGroup, payload)
+	if err != nil {
+		return persistedScheduleTimeline{}, nil, err
+	}
+	return timeline, payload, nil
+}
+
+// prefetchTimelinesForUpdate reads the timelines of the given Query Groups
+// live, in pipelined batches. A read that fails fails the cutover, as the
+// single read it replaces did; a key that is not there is left out.
+func (repository *RedisCatalogRepository) prefetchTimelinesForUpdate(
+	ctx context.Context, identities []execution.QueryGroupIdentity,
+) (prefetchedTimelines, error) {
+	result := prefetchedTimelines{payloads: make(map[execution.QueryGroupIdentity][]byte, len(identities))}
+	for start := 0; start < len(identities); start += openSegmentReadBatch {
+		batch := identities[start:min(start+openSegmentReadBatch, len(identities))]
+		replies := make([]*redis.StringCmd, len(batch))
+		if _, err := repository.client.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+			for index, identity := range batch {
+				replies[index] = pipe.Get(ctx, repository.scheduleTimelineKey(identity))
+			}
+			return nil
+		}); err != nil && !errors.Is(err, redis.Nil) {
+			return prefetchedTimelines{}, activationDependencyIO(err)
+		}
+		for index, identity := range batch {
+			payload, err := replies[index].Bytes()
+			if errors.Is(err, redis.Nil) {
+				continue
+			}
+			if err != nil {
+				return prefetchedTimelines{}, activationDependencyIO(err)
+			}
+			result.payloads[identity] = payload
+		}
+	}
+	return result, nil
 }
 
 // CompareAndSetInitialScheduleActivation establishes zero or more first
@@ -1247,7 +1326,7 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 	if err != nil {
 		return err
 	}
-	activationPayload, err := json.Marshal(next)
+	activationPayload, err := encodeActivationHead(next)
 	if err != nil {
 		return err
 	}
@@ -1278,6 +1357,7 @@ func (repository *RedisCatalogRepository) persistInitialActivation(
 	if changed != 1 {
 		return ErrActivationConflict
 	}
+	repository.written.remember(activationPayload, next)
 	return nil
 }
 
@@ -1330,7 +1410,7 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 	if err != nil {
 		return err
 	}
-	activationPayload, err := json.Marshal(next)
+	activationPayload, err := encodeActivationHead(next)
 	if err != nil {
 		return err
 	}
@@ -1373,6 +1453,7 @@ func (repository *RedisCatalogRepository) persistCutoverActivation(
 	if changed != 1 {
 		return ErrActivationConflict
 	}
+	repository.written.remember(activationPayload, next)
 	return nil
 }
 
