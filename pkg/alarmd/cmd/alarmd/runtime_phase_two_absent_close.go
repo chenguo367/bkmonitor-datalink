@@ -111,6 +111,15 @@ type absentCloseLink interface {
 	AlertRecord(context.Context, string, string) (openalerts.AlertRecord, error)
 }
 
+// eventSourceReader is a link that can also say how it keys this
+// deployment's alerts. The roster walk reads it once per walk, so the
+// reading is at most one walk old on the control leader; it is kept on the
+// Console's record for the endpoint entry, and a failure there is the
+// Console record's to show, never the walk's.
+type eventSourceReader interface {
+	EventSource(context.Context) (openalerts.EventSourceKeying, error)
+}
+
 func newAbsentStrategyClose(bundle *phaseTwoWorkerBundle, control absentCloseControl, link absentCloseLink,
 	writer closeWriter, send bool) *absentStrategyClose {
 	return &absentStrategyClose{
@@ -281,6 +290,9 @@ func (loop *absentStrategyClose) step(ctx context.Context) {
 func (loop *absentStrategyClose) readRoster(ctx context.Context, round *absentalerts.Round) (openalerts.LinkHealth, int) {
 	round.Roster = make(map[absentalerts.Key]struct{})
 	unreadable := make(map[absentalerts.Key]struct{})
+	if reader, ok := loop.link.(eventSourceReader); ok {
+		_, _ = reader.EventSource(ctx)
+	}
 	var health openalerts.LinkHealth
 	cursor, pages := "", 0
 	for pages < absentCloseRosterPages {

@@ -244,6 +244,30 @@ type LinkdConsoleFacts struct {
 	// link writes: whether this process adopted that location and, when it
 	// did not, why. Absent without a Console.
 	Discovery *LinkdDiscoveryFacts `json:"discovery,omitempty"`
+	// EventSource is how the link keys this deployment's alerts, as its
+	// Console last answered: the fingerprint mode and field(s) a recovery
+	// lookup's key has to agree with. Absent until read; the control leader
+	// reads it at the start of each roster walk.
+	EventSource *LinkdEventSourceFacts `json:"event_source,omitempty"`
+}
+
+// LinkdEventSourceFacts is the link's definition of this deployment's
+// event source as far as keying goes, and how long ago it was read.
+type LinkdEventSourceFacts struct {
+	EventSourceID     string   `json:"event_source_id"`
+	FingerprintMode   string   `json:"fingerprint_mode"`
+	FingerprintField  string   `json:"fingerprint_field,omitempty"`
+	FingerprintFields []string `json:"fingerprint_fields,omitempty"`
+	Revision          int64    `json:"revision"`
+	Published         int64    `json:"published"`
+	Pending           bool     `json:"pending,omitempty"`
+	Deleted           bool     `json:"deleted,omitempty"`
+	// InEffect is false for a source never released: no keying runs yet.
+	InEffect bool `json:"in_effect"`
+	// KeyedByAlertID says the link keys these alerts by the alert id this
+	// deployment sends (field mode on source_alert_id); fields mode hashes.
+	KeyedByAlertID bool    `json:"keyed_by_alert_id"`
+	ReadAgeSeconds float64 `json:"read_age_seconds"`
 }
 
 // LinkdTargetFacts is one of the link's targets as its Console names it:

@@ -25,11 +25,14 @@ const (
 	// ConsoleOpAlertRecord is one alert's record. The link answering that it
 	// has no such alert is an answer, not a failure.
 	ConsoleOpAlertRecord = "alert_record"
+	// ConsoleOpEventSource is this deployment's event source definition on
+	// the link, read for how the link keys its alerts.
+	ConsoleOpEventSource = "event_source"
 )
 
 // ConsoleOps is every operation a ConsoleRecord carries, in the order a
 // reader shows them.
-var ConsoleOps = []string{ConsoleOpRoster, ConsoleOpReconcile, ConsoleOpAlertRecord}
+var ConsoleOps = []string{ConsoleOpRoster, ConsoleOpReconcile, ConsoleOpAlertRecord, ConsoleOpEventSource}
 
 // ConsoleCall is what this process has seen of one operation: how many
 // calls and failures, when it last completed, when it last failed and what
@@ -58,13 +61,19 @@ type ConsoleRecord struct {
 	// which on a replica that is not the control leader is never.
 	Link       LinkHealth
 	LinkReadAt time.Time
+	// EventSource is this deployment's event source on the link as last
+	// read, and EventSourceReadAt when; zero until read.
+	EventSource       EventSourceKeying
+	EventSourceReadAt time.Time
 }
 
 type consoleCalls struct {
-	mu         sync.Mutex
-	calls      map[string]ConsoleCall
-	link       LinkHealth
-	linkReadAt time.Time
+	mu                sync.Mutex
+	calls             map[string]ConsoleCall
+	link              LinkHealth
+	linkReadAt        time.Time
+	eventSource       EventSourceKeying
+	eventSourceReadAt time.Time
 }
 
 func (calls *consoleCalls) record(op string, at time.Time, err error) {
@@ -98,7 +107,8 @@ func (reader *HTTPReconciler) Record() ConsoleRecord {
 	reader.calls.mu.Lock()
 	defer reader.calls.mu.Unlock()
 	record := ConsoleRecord{Calls: make(map[string]ConsoleCall, len(ConsoleOps)),
-		Link: reader.calls.link, LinkReadAt: reader.calls.linkReadAt}
+		Link: reader.calls.link, LinkReadAt: reader.calls.linkReadAt,
+		EventSource: reader.calls.eventSource.clone(), EventSourceReadAt: reader.calls.eventSourceReadAt}
 	for _, op := range ConsoleOps {
 		record.Calls[op] = reader.calls.calls[op]
 	}

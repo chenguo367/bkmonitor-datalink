@@ -12,8 +12,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,6 +44,11 @@ func consoleTestServer(t *testing.T, browse http.HandlerFunc) *openalerts.HTTPRe
 			_ = json.NewEncoder(w).Encode([]openalerts.TargetBinding{consoleTestBinding()})
 			return
 		case "/local-api/strategy-index/browse":
+			browse(w, r)
+			return
+		}
+		// The event source definition is the test's to answer, like browse.
+		if strings.HasPrefix(r.URL.Path, "/local-api/event-sources/") {
 			browse(w, r)
 			return
 		}
@@ -212,5 +219,70 @@ func TestTheConsoleEntryCarriesTheResolvedTargetAndTheDiscovery(t *testing.T) {
 	}
 	if fresh := linkdConsoleFacts(consoleTestServer(t, http.NotFound), consoleTestNow); fresh.Target != nil {
 		t.Fatalf("a Console never resolved carries a target: %+v", fresh.Target)
+	}
+}
+
+// keyingLink is an alert link that also says how it keys this deployment's
+// alerts, and counts the asking.
+type keyingLink struct {
+	absentTestLink
+	asked int
+	err   error
+}
+
+func (link *keyingLink) EventSource(context.Context) (openalerts.EventSourceKeying, error) {
+	link.asked++
+	return openalerts.EventSourceKeying{}, link.err
+}
+
+// Each roster walk asks the link how it keys this deployment's alerts,
+// once, and a failure to answer is the Console record's to show: the walk
+// reads the roster as before.
+func TestEachRosterWalkAsksTheLinkHowItKeysOurAlerts(t *testing.T) {
+	link := &keyingLink{absentTestLink: absentTestLink{pages: []openalerts.RosterPage{{}}}, err: errors.New("unreachable")}
+	loop := &absentStrategyClose{link: link}
+	round := &absentalerts.Round{}
+	loop.readRoster(context.Background(), round)
+	if link.asked != 1 || !round.LinkRead {
+		t.Fatalf("asked %d times, roster read %v; want one ask per walk and the walk unaffected by its failure", link.asked, round.LinkRead)
+	}
+}
+
+// The keying reaches the endpoint entry once read, with its age; before it
+// is read there is none, not an empty one.
+func TestTheLinksKeyingReachesTheConsoleFacts(t *testing.T) {
+	at := time.Date(2026, 9, 24, 5, 0, 0, 0, time.UTC)
+	if linkdEventSourceFacts(openalerts.ConsoleRecord{}, at) != nil {
+		t.Fatal("an unread keying was published")
+	}
+	facts := linkdEventSourceFacts(openalerts.ConsoleRecord{EventSourceReadAt: at.Add(-30 * time.Second),
+		EventSource: openalerts.EventSourceKeying{EventSourceID: "alarmd", FingerprintMode: "field", FingerprintField: "source_alert_id", Revision: 3, Published: 3,
+			InEffect: true, KeyedByAlertID: true}}, at)
+	if facts == nil || facts.EventSourceID != "alarmd" || facts.FingerprintMode != "field" || facts.FingerprintField != "source_alert_id" ||
+		facts.Published != 3 || facts.ReadAgeSeconds != 30 || !facts.InEffect || !facts.KeyedByAlertID {
+		t.Fatalf("facts = %+v", facts)
+	}
+}
+
+// Read through the Console, the keying is on the facts the endpoint entry
+// publishes.
+func TestTheConsoleFactsCarryTheKeyingOnceRead(t *testing.T) {
+	console := consoleTestServer(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/local-api/event-sources/"+consoleTestBinding().EventSourceID {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": consoleTestBinding().EventSourceID, "revision": 2, "published": 2,
+			"spec": map[string]any{"fingerprint_mode": "field", "fingerprint_field": "source_alert_id"}})
+	})
+	if facts := linkdConsoleFacts(console, consoleTestNow); facts.EventSource != nil {
+		t.Fatalf("keying published before it was read: %+v", facts.EventSource)
+	}
+	if _, err := console.EventSource(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	facts := linkdConsoleFacts(console, consoleTestNow)
+	if facts.EventSource == nil || facts.EventSource.FingerprintMode != "field" || facts.EventSource.FingerprintField != "source_alert_id" {
+		t.Fatalf("keying on the facts = %+v", facts.EventSource)
 	}
 }
