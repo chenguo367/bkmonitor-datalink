@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -632,7 +633,8 @@ func TestTheActivationRefUpgradeWritesWholeAndKeepsTheHeldBackSet(t *testing.T) 
 	next := previous
 	next.RecordRevision++
 	expected := controlplane.ActivationExpectation{RecordRevision: previous.RecordRevision, Current: previous.Current, Pending: previous.Pending}
-	if err := fixture.repository.PersistActivationRefUpgradeForTest(fixture.ctx, expected, next, active); err != nil {
+	// The script is handed the set's length, not the set (N15).
+	if err := fixture.repository.PersistActivationRefUpgradeForTest(fixture.ctx, expected, next, []byte(strconv.Itoa(len(active)))); err != nil {
 		t.Fatalf("the ref upgrade failed: %v", err)
 	}
 	fixture.repository.ForgetActivationCacheForTest()

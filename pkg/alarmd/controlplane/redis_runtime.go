@@ -129,9 +129,10 @@ if ARGV[1] == '' then
 elseif not header or header ~= ARGV[1] then
   return 0
 end
--- The active set is named by its digest and checked when written, so
--- being there is being it (N15); ARGV[4] is no longer the set itself.
-if redis.call('EXISTS', KEYS[3]) ~= 1 then return 0 end
+-- The active set is named by its digest and checked when written, so a
+-- key of that name and length is the set (N15). ARGV[4] is its length, not
+-- the set itself; checked here, in the write, rather than before it.
+if redis.call('STRLEN', KEYS[3]) ~= tonumber(ARGV[4]) then return 0 end
 local timelines = tonumber(ARGV[6])
 local last_timeline = 3 + timelines
 for index = 4, last_timeline do
@@ -179,9 +180,10 @@ if not timelines or ARGV[8] == nil or #KEYS < 5 + timelines or #ARGV < 8 + 2 * t
 end
 local header = redis.call('GET', KEYS[1])
 if not header or header ~= ARGV[1] then return 0 end
--- The active set is named by its digest and checked when written, so
--- being there is being it (N15); ARGV[4] is no longer the set itself.
-if redis.call('EXISTS', KEYS[3]) ~= 1 then return 0 end
+-- The active set is named by its digest and checked when written, so a
+-- key of that name and length is the set (N15). ARGV[4] is its length, not
+-- the set itself; checked here, in the write, rather than before it.
+if redis.call('STRLEN', KEYS[3]) ~= tonumber(ARGV[4]) then return 0 end
 local last_timeline = 5 + timelines
 for index = 6, last_timeline do
   local current = redis.call('GET', KEYS[index])

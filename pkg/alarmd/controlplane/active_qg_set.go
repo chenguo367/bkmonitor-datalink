@@ -8,6 +8,7 @@ import (
 	"errors"
 	"slices"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 
@@ -70,9 +71,9 @@ func canonicalActiveQueryGroupSet(identities []execution.QueryGroupIdentity) (Ac
 // and returns its reference. The key is named by the digest of its content,
 // so a key of that name and length already there is the set: it is not sent
 // again, which for a set that did not change is every publication (N15).
-// The cutover scripts check the key exists; they are no longer handed the
-// set to compare, and the second return value - what they were handed - is
-// empty.
+// The cutover scripts check the key and its length; they are no longer
+// handed the set to compare, and the second return value - what they are
+// handed - is the length.
 func (repository *RedisCatalogRepository) persistAndVerifyActiveQGSet(ctx context.Context, identities []execution.QueryGroupIdentity) (ActiveQueryGroupSetRef, []byte, error) {
 	encodeStarted := time.Now()
 	ref, payload, err := canonicalActiveQueryGroupSet(identities)
@@ -99,7 +100,7 @@ func (repository *RedisCatalogRepository) persistAndVerifyActiveQGSet(ctx contex
 		}
 		if created {
 			writeResult = "success"
-			return ref, []byte{}, nil
+			return ref, []byte(strconv.Itoa(len(payload))), nil
 		}
 		// Written by another process between the two reads: it is the same
 		// digest, so it is the same set, if it is the same length.
@@ -111,7 +112,7 @@ func (repository *RedisCatalogRepository) persistAndVerifyActiveQGSet(ctx contex
 		return ref, nil, &ActiveQueryGroupSetConflictError{Err: errors.New("active Query Group set collision")}
 	}
 	writeResult = "success"
-	return ref, []byte{}, nil
+	return ref, []byte(strconv.Itoa(len(payload))), nil
 }
 
 // activeSetCache is the last set read, by digest: a set's content never

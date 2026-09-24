@@ -322,8 +322,16 @@ func TestControlReadCacheReadsActivationAndTimelineOncePerHeader(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := hook.bodyReads("activation") + hook.bodyReads("timeline"); got != 0 {
-		t.Fatalf("warm Leader and Schedule reads transferred %d bodies, want 0", got)
+	// The body is a head this repository did not write (N15): its records
+	// are read back from the open Segment once for the header, live - a
+	// timeline can be rewritten under an unchanged header, and those records
+	// decide the next activation - and kept for the rest of the header.
+	// Nothing else is read again.
+	if got := hook.bodyReads("activation"); got != 0 {
+		t.Fatalf("warm Leader and Schedule reads transferred %d activation bodies, want 0", got)
+	}
+	if got := hook.bodyReads("timeline"); got != 1 {
+		t.Fatalf("warm Leader and Schedule reads transferred %d timelines, want the 1 the head's records are read from", got)
 	}
 	if got := hook.count("get", "header"); got != 12 {
 		t.Fatalf("header probes=%d, want one per read (12)", got)

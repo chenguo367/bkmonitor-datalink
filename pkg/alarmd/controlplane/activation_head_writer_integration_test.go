@@ -155,3 +155,36 @@ func TestTheActiveSetIsCheckedByReferenceAndReadOncePerDigest(t *testing.T) {
 		t.Fatalf("a set that is gone read as %v, want ErrSnapshotUnavailable", err)
 	}
 }
+
+// A timeline rewritten under an unchanged header - the repair subcommand
+// does that - is what a head's records are read back from, not a copy the
+// timeline cache took before the rewrite: those records decide the next
+// activation.
+func TestAHeadIsReadBackFromTheTimelineAsItIsNotAsCached(t *testing.T) {
+	fixture := newControlReadCacheFixture(t, "head-live-read")
+	ctx := context.Background()
+	cold, runtime := fixture.coldRepository(t)
+	// Warm the cold repository's timeline cache under the current header.
+	if _, err := runtime.ReadFrozenSchedule(ctx, fixture.queryGroup, 120); err != nil {
+		t.Fatal(err)
+	}
+	key := fixture.prefix + ":schedule_timeline:" + string(fixture.queryGroup)
+	raw, err := fixture.client.Get(ctx, key).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rewritten := strings.Replace(raw, `"RequiredFullSlots":`, `"RequiredFullSlots":7`, 1)
+	if rewritten == raw {
+		t.Fatal("setup: no record to rewrite")
+	}
+	if err := fixture.client.Set(ctx, key, rewritten, time.Hour).Err(); err != nil {
+		t.Fatal(err)
+	}
+	state, err := cold.LoadActivation(ctx)
+	if err != nil || len(state.Plans) == 0 {
+		t.Fatalf("activation = (%+v, %v)", state, err)
+	}
+	if got := state.Plans[0].Fact.Selected.RequiredFullSlots; got < 70 {
+		t.Fatalf("records read back with RequiredFullSlots=%d, want the rewritten timeline's", got)
+	}
+}

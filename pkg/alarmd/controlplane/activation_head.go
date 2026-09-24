@@ -132,9 +132,12 @@ const openSegmentReadBatch = 256
 func (repository *RedisCatalogRepository) readOpenSegments(
 	ctx context.Context, identities []execution.QueryGroupIdentity, version controlVersion,
 ) (map[execution.QueryGroupIdentity]persistedScheduleSegment, error) {
-	// Timelines already cached under the header are taken from the cache,
-	// and the ones read are stored there: on a warm replica this costs
-	// nothing, and a read that follows finds them.
+	// Read live, not from the timeline cache: the cache is keyed by the
+	// activation header, and a timeline can be rewritten under an unchanged
+	// header (the repair subcommand does). What this answers decides what
+	// the next activation writes, so it is not answered from a copy that may
+	// predate such a write. It is rare - a head this process did not write,
+	// or a cutover in progress - and what it reads refreshes the cache.
 	repository.adoptControlVersion(ctx, version)
 	counters := &repository.controlReads.timeline
 	result := make(map[execution.QueryGroupIdentity]persistedScheduleSegment, len(identities))
@@ -146,17 +149,7 @@ func (repository *RedisCatalogRepository) readOpenSegments(
 			result[identity] = open
 		}
 	}
-	missing := make([]execution.QueryGroupIdentity, 0, len(identities))
-	for _, identity := range identities {
-		if version.known {
-			if timeline, ok := repository.controlCache.lookupTimeline(version.header, identity); ok {
-				counters.hits.Add(1)
-				accept(identity, timeline)
-				continue
-			}
-		}
-		missing = append(missing, identity)
-	}
+	missing := identities
 	for start := 0; start < len(missing); start += openSegmentReadBatch {
 		batch := missing[start:min(start+openSegmentReadBatch, len(missing))]
 		replies := make([]*redis.StringCmd, len(batch))
