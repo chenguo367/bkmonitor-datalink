@@ -42,6 +42,57 @@ type OutputWriteFacts struct {
 	// protocol too. Summed over the buckets it equals WithoutMessage; absent
 	// on a report from a sink that gave no breakdown.
 	WithoutMessageBy []OutputWithoutMessage `json:"events_without_message_by,omitempty"`
+	// Rejected is the events of the batch the sink would not write, one
+	// entry each, by the rule it broke: the others went out. Withheld is the
+	// events not written because another event of the same series was
+	// rejected -- a series goes out whole or not at all, since its State
+	// moves as one -- and they are not counted as rejections.
+	Rejected []OutputRejectedEvent `json:"rejected,omitempty"`
+	Withheld int64                 `json:"withheld,omitempty"`
+}
+
+// OutputRejectedEvent is one event the sink would not write: the rule it
+// broke, the strategy it was decided for, and the wire format it was for.
+type OutputRejectedEvent struct {
+	Rule       string `json:"rule"`
+	StrategyID string `json:"strategy_id"`
+	Format     string `json:"format"`
+}
+
+// The rules an event can break on its way to the wire, closed. The standard
+// ones are the converter's own (linkdoutput); the rest are the sink's.
+const (
+	OutputRejectStandardIdentityMissing  = "standard_identity_missing"
+	OutputRejectStandardActionUnknown    = "standard_action_unknown"
+	OutputRejectStandardLevelsInvalid    = "standard_levels_invalid"
+	OutputRejectStandardTooManyLevels    = "standard_too_many_levels"
+	OutputRejectStandardBusinessIdentity = "standard_business_identity"
+	OutputRejectStandardEncode           = "standard_encode"
+	OutputRejectEventInvalid             = "event_invalid"
+	OutputRejectFormatUnsupported        = "format_unsupported"
+	OutputRejectLegacyContextMissing     = "legacy_context_missing"
+	OutputRejectLegacyConversion         = "legacy_conversion_rejected"
+	OutputRejectLegacyOutputInvalid      = "legacy_output_invalid"
+	OutputRejectLegacyPayloadTooLarge    = "legacy_payload_too_large"
+	OutputRejectOther                    = "_other"
+)
+
+// OutputRejectRules is every rule a metric cell is created for.
+var OutputRejectRules = []string{
+	OutputRejectStandardIdentityMissing, OutputRejectStandardActionUnknown, OutputRejectStandardLevelsInvalid,
+	OutputRejectStandardTooManyLevels, OutputRejectStandardBusinessIdentity, OutputRejectStandardEncode,
+	OutputRejectEventInvalid, OutputRejectFormatUnsupported, OutputRejectLegacyContextMissing,
+	OutputRejectLegacyConversion, OutputRejectLegacyOutputInvalid, OutputRejectLegacyPayloadTooLarge, OutputRejectOther,
+}
+
+// NormalizeOutputRejectRule folds a rule this build does not name onto _other.
+func NormalizeOutputRejectRule(rule string) string {
+	for _, known := range OutputRejectRules {
+		if rule == known {
+			return rule
+		}
+	}
+	return OutputRejectOther
 }
 
 // OutputWithoutMessage is one bucket of events the protocol had no message
@@ -113,6 +164,26 @@ func ReportOutputWrite(ctx context.Context, published, withoutMessage int, witho
 		}
 		return buckets[i].EventKind < buckets[j].EventKind
 	})
-	report.facts = OutputWriteFacts{Published: int64(published), WithoutMessage: int64(withoutMessage), WithoutMessageBy: buckets}
+	rejected, withheld := report.facts.Rejected, report.facts.Withheld
+	report.facts = OutputWriteFacts{Published: int64(published), WithoutMessage: int64(withoutMessage), WithoutMessageBy: buckets,
+		Rejected: rejected, Withheld: withheld}
+	report.reported = true
+}
+
+// ReportOutputRejected is the sink's account of the events of one batch it
+// would not write and of the ones it withheld beside them. It is reported
+// before the write is attempted, so a batch the broker then fails still says
+// which of its events the converter had refused. A no-op when the caller gave
+// no place for it.
+func ReportOutputRejected(ctx context.Context, rejected []OutputRejectedEvent, withheld int) {
+	if ctx == nil || (len(rejected) == 0 && withheld == 0) {
+		return
+	}
+	report, _ := ctx.Value(outputWriteReportKey{}).(*outputWriteReport)
+	if report == nil {
+		return
+	}
+	report.facts.Rejected = append([]OutputRejectedEvent(nil), rejected...)
+	report.facts.Withheld = int64(withheld)
 	report.reported = true
 }

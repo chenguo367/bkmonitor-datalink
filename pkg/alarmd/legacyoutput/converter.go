@@ -67,74 +67,162 @@ func (c *Converter) ConvertBatch(ctx context.Context, events []contract.TriggerE
 	if c.Store == nil {
 		return nil, fmt.Errorf("legacy snapshot store required")
 	}
+	judged := c.convertAll(ctx, events)
+	output := make([]Event, 0, len(events))
+	for index, err := range judged.failures {
+		if err != nil {
+			return nil, err
+		}
+		output = append(output, judged.events[index])
+	}
+	// Validate every event before one bounded, de-duplicated snapshot write.
+	if err := c.Store.SaveBatch(ctx, judged.snapshots); err != nil {
+		return nil, &SnapshotStoreError{Err: fmt.Errorf("save legacy snapshots: %w", err)}
+	}
+	return output, nil
+}
+
+// ConvertEach converts every event on its own account: the events and the
+// failures it returns are aligned with the events it was given, and an event
+// the converter will not write fails alone instead of taking the batch with
+// it. A strategy whose frozen configuration cannot be prepared fails each of
+// its own events and no other strategy's. The snapshots of the strategies
+// that converted at least one event are written once, after every event has
+// been judged, so isolating a bad event costs no extra write. That write is
+// the one failure that says nothing about the events; it comes back as the
+// third result, a SnapshotStoreError, and so does a cancelled context.
+func (c *Converter) ConvertEach(ctx context.Context, events []contract.TriggerEventV1) ([]Event, []error, error) {
+	if len(events) == 0 {
+		return []Event{}, []error{}, nil
+	}
+	if c.Store == nil {
+		return nil, nil, fmt.Errorf("legacy snapshot store required")
+	}
+	judged := c.convertAll(ctx, events)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, err
+	}
+	used := make([]bool, len(judged.snapshots))
+	for index, err := range judged.failures {
+		if err == nil && judged.snapshotOf[index] >= 0 {
+			used[judged.snapshotOf[index]] = true
+		}
+	}
+	kept := make([]Snapshot, 0, len(judged.snapshots))
+	for index, snapshot := range judged.snapshots {
+		if used[index] {
+			kept = append(kept, snapshot)
+		}
+	}
+	if len(kept) > 0 {
+		if err := c.Store.SaveBatch(ctx, kept); err != nil {
+			return nil, nil, &SnapshotStoreError{Err: fmt.Errorf("save legacy snapshots: %w", err)}
+		}
+	}
+	return judged.events, judged.failures, nil
+}
+
+// judgedBatch is every event of a batch judged and nothing written: events
+// and failures are aligned with the batch, snapshots holds one record per
+// strategy that could be prepared, and snapshotOf says which of them each
+// event converted against (-1 when its strategy could not be prepared).
+type judgedBatch struct {
+	events     []Event
+	failures   []error
+	snapshots  []Snapshot
+	snapshotOf []int
+}
+
+func (c *Converter) convertAll(ctx context.Context, events []contract.TriggerEventV1) judgedBatch {
 	now := time.Now()
 	if c.Now != nil {
 		now = c.Now()
 	}
-	configs := map[string]preparedStrategy{}
-	snapshots := make([]Snapshot, 0)
-	output := make([]Event, 0, len(events))
+	type prepared struct {
+		strategy preparedStrategy
+		snapshot int
+		err      error
+	}
+	configs := map[string]prepared{}
+	judged := judgedBatch{
+		events: make([]Event, len(events)), failures: make([]error, len(events)),
+		snapshots: make([]Snapshot, 0), snapshotOf: make([]int, len(events)),
+	}
 	pods := NewBatchPodResolver(c.Pods)
-	for _, event := range events {
+	for index, event := range events {
+		judged.snapshotOf[index] = -1
 		if event.StrategyRef != nil || event.LegacyOutput == nil || event.LegacyOutput.Configuration == nil {
-			return nil, fmt.Errorf("legacy event requires frozen context and no strategy_ref")
+			judged.failures[index] = fmt.Errorf("legacy event requires frozen context and no strategy_ref")
+			continue
 		}
 		metadata := event.LegacyOutput.Configuration
-		frozen, exists := configs[metadata.StrategyKey()]
+		entry, exists := configs[metadata.StrategyKey()]
 		if !exists {
-			frozen.raw = metadata.StrategyJSON()
-			if err := json.Unmarshal(frozen.raw, &frozen.config); err != nil {
-				return nil, err
+			entry.snapshot = -1
+			entry.strategy, entry.err = prepareStrategy(metadata, c.SnapshotPrefix)
+			if entry.err == nil {
+				entry.snapshot = len(judged.snapshots)
+				judged.snapshots = append(judged.snapshots, Snapshot{
+					StrategyID: entry.strategy.config.ID, Key: entry.strategy.snapshot, Value: entry.strategy.raw,
+				})
 			}
-			var err error
-			frozen.target, err = PrepareTarget(frozen.raw)
-			if err != nil {
-				return nil, err
-			}
-			s := frozen.config
-			if s.ID <= 0 || s.BusinessID == 0 || s.UpdateTime <= 0 || s.Name == "" || len(s.Items) == 0 || len(s.Items[0].Queries) == 0 {
-				return nil, fmt.Errorf("incomplete frozen legacy strategy")
-			}
-			frozen.snapshot = strings.TrimSuffix(c.SnapshotPrefix, ".") + ".cache.strategy.snapshot." + strconv.FormatInt(s.ID, 10) + "." + strconv.FormatInt(s.UpdateTime, 10)
-			if c.SnapshotPrefix == "" {
-				frozen.snapshot = strings.TrimPrefix(frozen.snapshot, ".")
-			}
-			seen := map[string]bool{}
-			addMetric := func(value string) {
-				if !seen[value] {
-					seen[value] = true
-					frozen.metrics = append(frozen.metrics, value)
-				}
-			}
-			for _, item := range s.Items {
-				for _, query := range item.Queries {
-					addMetric(query.MetricID)
-				}
-			}
-			for _, item := range s.Items {
-				addMetric(item.Name)
-			}
-			for _, item := range s.Items {
-				for _, query := range item.Queries {
-					if query.PromQL != "" {
-						addMetric(query.PromQL)
-					}
-				}
-			}
-			configs[metadata.StrategyKey()] = frozen
-			snapshots = append(snapshots, Snapshot{StrategyID: s.ID, Key: frozen.snapshot, Value: frozen.raw})
+			configs[metadata.StrategyKey()] = entry
 		}
-		converted, err := convertEvent(ctx, event, frozen, now.Unix(), pods, c.PluginID)
-		if err != nil {
-			return nil, err
+		if entry.err != nil {
+			judged.failures[index] = entry.err
+			continue
 		}
-		output = append(output, converted)
+		judged.snapshotOf[index] = entry.snapshot
+		judged.events[index], judged.failures[index] = convertEvent(ctx, event, entry.strategy, now.Unix(), pods, c.PluginID)
 	}
-	// Validate every event before one bounded, de-duplicated snapshot write.
-	if err := c.Store.SaveBatch(ctx, snapshots); err != nil {
-		return nil, &SnapshotStoreError{Err: fmt.Errorf("save legacy snapshots: %w", err)}
+	return judged
+}
+
+// prepareStrategy reads one frozen strategy configuration into what every
+// event of it converts against. A failure here is the strategy's, and every
+// event of that strategy shares it.
+func prepareStrategy(metadata *contract.FrozenLegacyOutput, snapshotPrefix string) (preparedStrategy, error) {
+	var frozen preparedStrategy
+	frozen.raw = metadata.StrategyJSON()
+	if err := json.Unmarshal(frozen.raw, &frozen.config); err != nil {
+		return preparedStrategy{}, err
 	}
-	return output, nil
+	var err error
+	frozen.target, err = PrepareTarget(frozen.raw)
+	if err != nil {
+		return preparedStrategy{}, err
+	}
+	s := frozen.config
+	if s.ID <= 0 || s.BusinessID == 0 || s.UpdateTime <= 0 || s.Name == "" || len(s.Items) == 0 || len(s.Items[0].Queries) == 0 {
+		return preparedStrategy{}, fmt.Errorf("incomplete frozen legacy strategy")
+	}
+	frozen.snapshot = strings.TrimSuffix(snapshotPrefix, ".") + ".cache.strategy.snapshot." + strconv.FormatInt(s.ID, 10) + "." + strconv.FormatInt(s.UpdateTime, 10)
+	if snapshotPrefix == "" {
+		frozen.snapshot = strings.TrimPrefix(frozen.snapshot, ".")
+	}
+	seen := map[string]bool{}
+	addMetric := func(value string) {
+		if !seen[value] {
+			seen[value] = true
+			frozen.metrics = append(frozen.metrics, value)
+		}
+	}
+	for _, item := range s.Items {
+		for _, query := range item.Queries {
+			addMetric(query.MetricID)
+		}
+	}
+	for _, item := range s.Items {
+		addMetric(item.Name)
+	}
+	for _, item := range s.Items {
+		for _, query := range item.Queries {
+			if query.PromQL != "" {
+				addMetric(query.PromQL)
+			}
+		}
+	}
+	return frozen, nil
 }
 
 // SnapshotStoreError is the snapshot store not taking the batch. It is the

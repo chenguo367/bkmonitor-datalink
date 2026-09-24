@@ -474,6 +474,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_output_events_by_wire_format_total"] = "variableLabels: {format}"
 	expected["bkmonitor_alarmd_output_events_without_message_total"] = "variableLabels: {format,event_kind}"
 	expected["bkmonitor_alarmd_output_events_by_kind_total"] = "variableLabels: {format,event_kind}"
+	expected["bkmonitor_alarmd_output_events_rejected_total"] = "variableLabels: {rule,strategy}"
+	expected["bkmonitor_alarmd_output_events_rejected_strategies_overflow_total"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_history_coverage_rejected_total"] = "variableLabels: {rule}"
 	expected["bkmonitor_alarmd_history_coverage_unsummarised_total"] = "variableLabels: {cause}"
 	expected["bkmonitor_alarmd_worker_no_data_slot_plans_total"] = "variableLabels: {outcome}"
@@ -1036,6 +1038,10 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("output_events_by_wire_format_total")] = len(observability.WireFormats)
 	bounds[fqName("output_events_without_message_total")] = len(observability.WireFormats) * len(observability.OutputEventKinds)
 	bounds[fqName("output_events_by_kind_total")] = len(observability.WireFormats) * len(observability.OutputEventKinds)
+	// One strategy label per rule for each of the first OutputRejectedStrategyLabels
+	// strategies, plus _other.
+	bounds[fqName("output_events_rejected_total")] = len(observability.OutputRejectRules) * (OutputRejectedStrategyLabels + 1)
+	bounds[fqName("output_events_rejected_strategies_overflow_total")] = 1
 	// One cell per rule normalize can refuse a coverage fact set under; the
 	// label is filled from the same closed list and every cell is created at
 	// startup, so a zero is "has not occurred", not "never written".
