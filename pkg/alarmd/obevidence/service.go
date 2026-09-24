@@ -16,6 +16,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 const (
@@ -27,6 +28,7 @@ const (
 	FamilyTargetGroup    = "target_group"
 	FamilyDynamicConfig  = "dynamic_config"
 	FamilyQueryProgress  = "query_progress"
+	FamilyQueryCooldown  = "query_cooldown"
 )
 
 type Location struct {
@@ -46,6 +48,9 @@ type RedisBinding struct {
 }
 type Options struct {
 	SourceStrategy, TargetGroup, DynamicConfig, QueryProgress, Published RedisBinding
+	// QueryCooldown is the runtime store under the pool records' prefix: the
+	// record a Query Group's owner keeps of its place in the demoted pool.
+	QueryCooldown RedisBinding
 	// CMDBCache is the platform's host cache, read here only for INFO.
 	CMDBCache RedisBinding
 	Catalog   *controlplane.RedisCatalogRepository
@@ -210,9 +215,43 @@ func (service *Service) Store(ctx context.Context, request StoreRequest) Result 
 			r.Value = value
 		}
 		return r
+	case FamilyQueryCooldown:
+		return service.queryCooldown(ctx, request)
 	default:
 		return invalid(request.Family, RedisBinding{})
 	}
+}
+
+// queryCooldown reads a Query Group's pool record as its owner wrote it. The
+// pool rows object.list serves are the owner's memory; this is what a
+// restart or a new owner would read back, and absent here means the next
+// owner starts the Query Group outside the pool.
+func (service *Service) queryCooldown(ctx context.Context, request StoreRequest) Result {
+	binding := service.options.QueryCooldown
+	if !identifier(request.QueryGroup) || request.StrategyID != "" || request.GroupID != "" || len(request.Fields) > 0 {
+		return invalid(request.Family, binding)
+	}
+	if binding.Client == nil || binding.Location.Prefix == "" {
+		return result(request.Family, binding, "not_configured")
+	}
+	queryGroup := execution.QueryGroupIdentity(request.QueryGroup)
+	r, raw := readOne(ctx, request.Family, binding, scheduler.QueryCooldownKey(binding.Location.Prefix, queryGroup))
+	if r.Status != "ok" {
+		return r
+	}
+	var record scheduler.QueryCooldownRecord
+	if json.Unmarshal(raw, &record) != nil {
+		r.Status = "invalid_document"
+		r.Complete = false
+		return r
+	}
+	if record.QueryGroup != queryGroup {
+		r.Status = "identity_mismatch"
+		r.Complete = false
+		return r
+	}
+	r.Value = record
+	return r
 }
 
 func (service *Service) StrategyConfig(ctx context.Context, request ConfigRequest) Result {

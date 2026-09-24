@@ -81,6 +81,13 @@ type QueryCooldownRecord struct {
 	Reentries        uint32                       `json:"reentries,omitempty"`
 }
 
+// QueryCooldownKey is where a Query Group's record is kept under prefix. The
+// store that writes it and the evidence read that shows it both build the key
+// here, so the two cannot name different keys.
+func QueryCooldownKey(prefix string, queryGroup execution.QueryGroupIdentity) string {
+	return prefix + ":" + string(queryGroup)
+}
+
 // QueryCooldownStore keeps QueryCooldownRecords. A record that cannot be read
 // is no record: the Query Group starts outside the pool and is probed as
 // before, never refused. A save the store refuses because a later owner

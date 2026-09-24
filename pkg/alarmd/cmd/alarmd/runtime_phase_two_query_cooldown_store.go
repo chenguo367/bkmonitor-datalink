@@ -91,7 +91,7 @@ func newRedisQueryCooldownStore(client redis.UniversalClient, prefix string, sav
 }
 
 func (store *redisQueryCooldownStore) key(queryGroup execution.QueryGroupIdentity) string {
-	return store.prefix + ":" + string(queryGroup)
+	return scheduler.QueryCooldownKey(store.prefix, queryGroup)
 }
 
 // LoadQueryCooldown reads the record. Absent is no record; so is one that
