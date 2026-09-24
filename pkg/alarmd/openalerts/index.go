@@ -105,8 +105,9 @@ func NewIndex(options IndexOptions) (*Cache, error) {
 	}
 	cache := &Cache{now: options.Now, policy: options.Policy, maxLocal: options.MaxLocalEntries,
 		added: map[member]stamped{}, removed: map[member]stamped{},
-		refreshes: map[string]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{},
-		index: &indexState{options: options, entries: map[StrategyKey]*indexEntry{}, wake: make(chan struct{}, 1), opened: map[member]time.Time{}},
+		refreshes: map[string]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{}, ownLookups: map[Answer]uint64{},
+		gateSince: options.Now(),
+		index:     &indexState{options: options, entries: map[StrategyKey]*indexEntry{}, wake: make(chan struct{}, 1), opened: map[member]time.Time{}},
 	}
 	return cache, nil
 }
@@ -523,10 +524,10 @@ func (cache *Cache) indexGate(m member, now time.Time) bool {
 		return cache.indexContains(m, now, true)
 	}
 	if cache.policy == PolicyPassThrough {
-		cache.lookups[AnswerPassedThrough]++
+		cache.countLookup(AnswerPassedThrough)
 		return true
 	}
-	cache.lookups[AnswerSelfMaintained]++
+	cache.countLookup(AnswerSelfMaintained)
 	if cache.indexContains(m, now, false) {
 		return true
 	}
@@ -699,7 +700,7 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 		answer = AnswerPassedThrough
 	}
 	if count {
-		cache.lookups[answer]++
+		cache.countLookup(answer)
 	}
 	return present
 }
@@ -919,5 +920,6 @@ func (cache *Cache) indexStats() Stats {
 	for k, v := range cache.lookups {
 		stats.Lookups[k] = v
 	}
+	cache.gateStats(&stats)
 	return stats
 }

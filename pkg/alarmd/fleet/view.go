@@ -1941,6 +1941,21 @@ type ControlSourceFacts struct {
 // touched had no row for this one, so whether the consumer's publication was
 // there at all -- and whether the gate was passing recoveries on the
 // consumer's word or on its own -- could not be read anywhere.
+// GateLookupFact is one recovery-gate lookup as the replica kept it: the
+// key it was asked, its answer and decision, whether it was the replica's
+// own open alert, and, for a "not open", other strategies whose sets carry
+// the same fingerprint.
+type GateLookupFact struct {
+	At          time.Time `json:"at"`
+	TenantID    string    `json:"tenant_id"`
+	StrategyID  string    `json:"strategy_id"`
+	Fingerprint string    `json:"fingerprint"`
+	Answer      string    `json:"answer"`
+	Open        bool      `json:"open"`
+	Own         bool      `json:"own"`
+	InOtherSets []string  `json:"in_other_sets,omitempty"`
+}
+
 type OpenAlertSetFacts struct {
 	IndexProtocol bool `json:"index_protocol,omitempty"`
 	// CalibrationConfigured is whether a reconciler is bound; false is a
@@ -1988,6 +2003,22 @@ type OpenAlertSetFacts struct {
 	SentInSet    int  `json:"sent_in_set"`
 	SentNotInSet int  `json:"sent_not_in_set"`
 	Disjoint     bool `json:"disjoint"`
+	// GateOwnLookups is Lookups for the gate's lookups of this replica's
+	// own open alerts, every answer word present; GateOwnHeld how many of
+	// those the gate answered "not open". A healthy series asks the gate
+	// every round and has no alert, so the plain counts are mostly "not
+	// open" by design; a "not open" for an alert this replica opened is a
+	// RECOVERY held while its alert stays open. GateRecent and
+	// GateRecentOwnHeld are the last lookups of each, whole.
+	GateOwnLookups map[string]uint64 `json:"gate_own_lookups,omitempty"`
+	GateOwnHeld    uint64            `json:"gate_own_held,omitempty"`
+	// GateSince is when the own split started. What the replica sent is
+	// held in memory and starts empty at every start, so an alert opened
+	// before GateSince is not "own" here: no own lookup says only that no
+	// alert sent since then reached the gate.
+	GateSince         *time.Time       `json:"gate_since,omitempty"`
+	GateRecent        []GateLookupFact `json:"gate_recent,omitempty"`
+	GateRecentOwnHeld []GateLookupFact `json:"gate_recent_own_held,omitempty"`
 	// Lookups counts how the gate's questions were answered since the process
 	// started, by the reader's closed answer words: the authoritative ones
 	// against the copy's own. A gate that has answered every question on its

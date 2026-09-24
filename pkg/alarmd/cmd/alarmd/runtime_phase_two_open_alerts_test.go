@@ -178,3 +178,21 @@ func TestTheDisjointStateIsPublishedWithTheSentCounts(t *testing.T) {
 		t.Fatalf("facts = %+v, want the found count and no disjoint", facts)
 	}
 }
+
+// The gate's own-alert split and its kept lookups reach the replica's
+// facts: every answer word in the own split, zero included, and the held
+// lookups whole.
+func TestTheGatesOwnHeldLookupsReachTheFacts(t *testing.T) {
+	at := time.Date(2026, 9, 24, 4, 0, 0, 0, time.UTC)
+	held := openalerts.GateLookup{At: at, TenantID: "system", StrategyID: "363", Fingerprint: "1f018838",
+		Answer: openalerts.AnswerIndexAbsent, Own: true, InOtherSets: []string{"370"}}
+	facts := openAlertSetFacts(openalerts.Stats{OwnLookups: map[openalerts.Answer]uint64{openalerts.AnswerIndexAbsent: 2},
+		OwnHeld: 2, RecentLookups: []openalerts.GateLookup{held}, RecentOwnHeld: []openalerts.GateLookup{held}}, false, at)
+	if facts.GateOwnHeld != 2 || facts.GateOwnLookups["index_absent"] != 2 || len(facts.GateOwnLookups) != len(openalerts.Answers) {
+		t.Fatalf("own held %d own lookups %v", facts.GateOwnHeld, facts.GateOwnLookups)
+	}
+	if len(facts.GateRecentOwnHeld) != 1 || facts.GateRecentOwnHeld[0].Fingerprint != "1f018838" || facts.GateRecentOwnHeld[0].InOtherSets[0] != "370" ||
+		!facts.GateRecentOwnHeld[0].Own || facts.GateRecentOwnHeld[0].Answer != "index_absent" || len(facts.GateRecent) != 1 {
+		t.Fatalf("kept lookups %+v %+v", facts.GateRecentOwnHeld, facts.GateRecent)
+	}
+}

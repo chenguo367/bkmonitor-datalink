@@ -1612,9 +1612,17 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 	// Every answer word, zero included: a word missing from the map
 	// cannot be told from one never given.
 	facts.Lookups = make(map[string]uint64, len(openalerts.Answers))
+	facts.GateOwnLookups = make(map[string]uint64, len(openalerts.Answers))
 	for _, answer := range openalerts.Answers {
 		facts.Lookups[string(answer)] = stats.Lookups[answer]
+		facts.GateOwnLookups[string(answer)] = stats.OwnLookups[answer]
 	}
+	facts.GateOwnHeld = stats.OwnHeld
+	if !stats.GateSince.IsZero() {
+		since := stats.GateSince
+		facts.GateSince = &since
+	}
+	facts.GateRecent, facts.GateRecentOwnHeld = gateLookupFacts(stats.RecentLookups), gateLookupFacts(stats.RecentOwnHeld)
 	return facts
 }
 
@@ -1681,4 +1689,18 @@ func openAlertComparisonFacts(comparison *openalerts.Comparison) *fleet.OpenAler
 		facts.Strategies = append(facts.Strategies, strategy)
 	}
 	return facts
+}
+
+// gateLookupFacts is the kept gate lookups as the replica publishes them.
+func gateLookupFacts(lookups []openalerts.GateLookup) []fleet.GateLookupFact {
+	if len(lookups) == 0 {
+		return nil
+	}
+	out := make([]fleet.GateLookupFact, 0, len(lookups))
+	for _, lookup := range lookups {
+		out = append(out, fleet.GateLookupFact{At: lookup.At, TenantID: lookup.TenantID, StrategyID: lookup.StrategyID,
+			Fingerprint: lookup.Fingerprint, Answer: string(lookup.Answer), Open: lookup.Open, Own: lookup.Own,
+			InOtherSets: append([]string(nil), lookup.InOtherSets...)})
+	}
+	return out
 }
