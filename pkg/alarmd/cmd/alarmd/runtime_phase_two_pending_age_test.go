@@ -116,3 +116,24 @@ func TestAFollowerReportsNoPendingAge(t *testing.T) {
 		t.Fatalf("follower stats = %+v, want not leading", stats)
 	}
 }
+
+// A leader that loses the lease and wins it back starts the pending age from
+// its new term: the stretch it spent as a follower refreshed nothing and is
+// not part of any wait it can speak for.
+func TestThePendingAgeStartsAgainInANewTerm(t *testing.T) {
+	pending := sourceRound(controlplane.SourceRefreshPendingConfirmation)
+	control := &fakePhaseTwoControl{queryGroups: []execution.QueryGroupIdentity{"query-group-1"},
+		initialResult: pending, refreshResults: []phaseTwoControlRefreshResult{pending}}
+	owner := &fakePhaseTwoOwnership{assigned: []execution.QueryGroupIdentity{"query-group-1"}, runner: newFakePhaseTwoQueryGroup()}
+	fixture := newControlSourceFixture(t, control, owner)
+	fixture.start()
+	fixture.clock = fixture.clock.Add(10 * time.Minute)
+	fixture.bundle.noteControlRole(false, nil)
+	fixture.clock = fixture.clock.Add(10 * time.Minute)
+	fixture.bundle.noteControlRole(true, nil)
+	fixture.tick()
+	facts := fixture.bundle.controlSourceFleetFacts()
+	if facts == nil || facts.PendingConfirmationAgeSeconds == nil || *facts.PendingConfirmationAgeSeconds != 0 || facts.PendingConfirmationRounds != 1 {
+		t.Fatalf("facts after a new term = %+v, want the age counted from the new term's first pending round", facts)
+	}
+}

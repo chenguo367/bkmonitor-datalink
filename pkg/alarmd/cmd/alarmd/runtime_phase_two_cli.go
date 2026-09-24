@@ -116,7 +116,10 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	if !cfg.CLI.Enabled {
 		// No channel, but the public diagnosis still carries the deployment
-		// section, read through the same operations the CLI's would use.
+		// section, read through the same operations the CLI's would use. So
+		// a process with the CLI off builds the evidence clients too; they
+		// connect on first use, a first-page diagnosis, and hold nothing
+		// before it.
 		store, workload, _ := deploymentReads(cfg, catalog, progressStore, newClient)
 		return obchannel.WithDeploymentSection(native, append(store, workload...)), closeClients, false
 	}
