@@ -197,6 +197,11 @@ type HealthResponse struct {
 	DemotionEntries         int `json:"demotion_entries"`
 	DemotionExtensions      int `json:"demotion_extensions"`
 	DemotionExits           int `json:"demotion_exits"`
+	// DemotionRestored, DemotionHandovers and DemotionReentries: see View.
+	// Entries plus restored equal exits plus handovers plus the pool now.
+	DemotionRestored  int `json:"demotion_restored"`
+	DemotionHandovers int `json:"demotion_handovers"`
+	DemotionReentries int `json:"demotion_reentries"`
 	// A pointer because omitempty does nothing for a struct: a zero time.Time
 	// still serialises, as "0001-01-01T00:00:00Z", and that string is truthy in
 	// the page. The page guards this field by truthiness, so a zero would render
@@ -909,10 +914,12 @@ func NewHandler(
 			DemotedDue:           view.DemotedDue, DemotedDueOldestSeconds: view.DemotedDueOldestSeconds,
 			DemotionEntries:    view.DemotionEntries,
 			DemotionExtensions: view.DemotionExtensions, DemotionExits: view.DemotionExits,
-			LastDemotionExit: momentOrNil(view.LastDemotionExit),
-			PrunedSkips:      prunedSkipList(view.PrunedSkips),
-			RetainedShare:    retainedShareList(view.RetainedShare),
-			Coverage:         view.Coverage, PerReplica: view.PerReplica,
+			DemotionRestored: view.DemotionRestored, DemotionHandovers: view.DemotionHandovers,
+			DemotionReentries: view.DemotionReentries,
+			LastDemotionExit:  momentOrNil(view.LastDemotionExit),
+			PrunedSkips:       prunedSkipList(view.PrunedSkips),
+			RetainedShare:     retainedShareList(view.RetainedShare),
+			Coverage:          view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			OutputProtocols: outputProtocolList(view.OutputProtocols),
 			OutputPath:      OutputPathOf(&view),

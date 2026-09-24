@@ -1296,15 +1296,19 @@ type productionPhaseTwoProgressReader interface {
 
 type productionPhaseTwoOwnershipDependencies struct {
 	ExpiredRangeEnabled bool
-	Store               productionPhaseTwoOwnershipStore
-	WorkerID            string
-	Catalog             productionPhaseTwoSlotCatalog
-	Progress            productionPhaseTwoProgressReader
-	Executor            scheduler.Executor
-	Now                 func() time.Time
-	Reconcile           *scheduler.Reconciler
-	ControlLeaderTTL    time.Duration
-	Observer            observability.Observer
+	// QueryCooldowns keeps each owned Query Group's place in the query
+	// cooldown pool across restarts and owners. Nil keeps it in the Runner
+	// alone, which is what every runtime did before.
+	QueryCooldowns   scheduler.QueryCooldownStore
+	Store            productionPhaseTwoOwnershipStore
+	WorkerID         string
+	Catalog          productionPhaseTwoSlotCatalog
+	Progress         productionPhaseTwoProgressReader
+	Executor         scheduler.Executor
+	Now              func() time.Time
+	Reconcile        *scheduler.Reconciler
+	ControlLeaderTTL time.Duration
+	Observer         observability.Observer
 	// SteppedDownAsLeader is told when this process stops being the Control
 	// Leader, so the readings that belong to the role can be taken off the
 	// scrape. Optional; a runtime without it keeps its last readings, which
@@ -2535,6 +2539,9 @@ func (runtime *productionPhaseTwoOwnership) OpenQueryGroup(
 	if err != nil {
 		_ = session.Release(ctx)
 		return nil, err
+	}
+	if runtime.dependencies.QueryCooldowns != nil {
+		runner.WithQueryCooldownStore(runtime.dependencies.QueryCooldowns)
 	}
 	return &productionPhaseTwoQueryGroup{
 		session: session, runner: runner, observer: runtime.dependencies.Observer, now: runtime.dependencies.Now,

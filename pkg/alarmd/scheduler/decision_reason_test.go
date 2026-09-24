@@ -96,7 +96,8 @@ func TestACooldownTransitionCarriesAResultAndAReason(t *testing.T) {
 		{"entered", observability.ResultDegraded, observability.ReasonCode(contract.ReasonQueryUnavailable)},
 		{"extended", observability.ResultDegraded, observability.ReasonCode(contract.ReasonQueryUnavailable)},
 		{"recovered", observability.ResultResumed, observability.ReasonCode(contract.ReasonQueryUnavailable)},
-		{"entered", observability.ResultDegraded, observability.ReasonCode(contract.ReasonQueryUnavailable)},
+		// Back within the re-entry window of the exit above.
+		{"reentered", observability.ResultDegraded, observability.ReasonCode(contract.ReasonQueryUnavailable)},
 		{"disabled", observability.ResultSuccess, observability.ReasonNone},
 	}
 	var lines []observability.Observation

@@ -676,6 +676,16 @@ type Tracker struct {
 	demotionExtensions int
 	demotionExits      int
 	lastDemotionExit   time.Time
+	// demotionRestored is the objects that came back into the pool from their
+	// persisted record -- after a restart or a change of owner -- and are not
+	// entries; demotionHandovers the objects that left this replica while in
+	// the pool, which are not exits: the pool moves with the object. With
+	// them the pool's own arithmetic closes: entries plus restored equal
+	// exits plus handovers plus the objects in it now. demotionReentries is
+	// the entries that came back within the re-entry window of an exit.
+	demotionRestored  int
+	demotionHandovers int
+	demotionReentries int
 	// recovered is the problems whose listed objects completed healthily,
 	// by line and fold, kept for RecoveredRetention after the last one did.
 	recovered map[string]*recoveredFold
@@ -1048,12 +1058,23 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 	seenBefore := state.determined
 	if facts := observation.QueryCooldown; facts != nil {
 		switch facts.Event {
-		case "entered", "extended":
+		case "entered", "reentered", "extended", "restored":
 			copy := *facts
-			if state.queryCooldown == nil {
+			if state.queryCooldown == nil && facts.Event == "restored" {
+				// Back from its record: in the pool since it first entered,
+				// on whichever replica that was.
+				tracker.demotionRestored++
+				state.demotedSince = facts.EnteredAt
+				if state.demotedSince.IsZero() {
+					state.demotedSince = at
+				}
+			} else if state.queryCooldown == nil {
 				tracker.demotionEntries++
 				state.demotedSince = at
-			} else {
+				if facts.Event == "reentered" {
+					tracker.demotionReentries++
+				}
+			} else if facts.Event != "restored" {
 				// Counted apart from entries because it is the only thing that
 				// separates a pool that is still working from one that is stuck.
 				// During a real outage nothing exits -- there is nothing to
@@ -1065,7 +1086,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			}
 			state.queryCooldown = &copy
 			state.cooldownExposed = true
-		case "recovered", "config_changed", "disabled":
+		case "recovered", "query_revision_changed", "disabled":
 			// Counted only on the way out of the pool, not on every event that
 			// could clear one. Demotion takes objects out of the health
 			// denominator, so the number that matters is not how big the pool is
@@ -1686,10 +1707,23 @@ func (tracker *Tracker) Demoted() []Anomaly {
 // exits alone would report every sustained outage as a broken mechanism. A pool
 // being extended is being retried and failing; a pool whose deadlines have
 // passed with no entries, extensions or exits is not being touched at all.
-func (tracker *Tracker) DemotionFlow() (entries, extensions, exits int, lastExit time.Time) {
+func (tracker *Tracker) DemotionFlow() DemotionFlowFacts {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
-	return tracker.demotionEntries, tracker.demotionExtensions, tracker.demotionExits, tracker.lastDemotionExit
+	return DemotionFlowFacts{Entries: tracker.demotionEntries, Extensions: tracker.demotionExtensions,
+		Exits: tracker.demotionExits, LastExit: tracker.lastDemotionExit, Restored: tracker.demotionRestored,
+		Handovers: tracker.demotionHandovers, Reentries: tracker.demotionReentries}
+}
+
+// DemotionFlowFacts is the pool's flow on one replica since it started.
+// Entries plus Restored equal Exits plus Handovers plus the objects in the
+// pool now; Reentries is the part of Entries that came back within the
+// re-entry window of an exit.
+type DemotionFlowFacts struct {
+	Entries, Extensions, Exits int
+	LastExit                   time.Time
+	Restored, Handovers        int
+	Reentries                  int
 }
 
 // columnOf decides which of the three lists an object belongs to. Exactly one,
@@ -1903,11 +1937,18 @@ func (tracker *Tracker) Determined() int {
 
 // Forget drops query groups this replica no longer owns, so a handover does not
 // leave their last known state behind to be republished forever.
+//
+// An object in the pool that is dropped here has not left the pool: its
+// record goes with it to its next owner, which restores it. It is counted as
+// a handover, so this replica's entries, exits and occupancy still add up.
 func (tracker *Tracker) Forget(owned map[string]struct{}) {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
-	for queryGroup := range tracker.groups {
+	for queryGroup, state := range tracker.groups {
 		if _, kept := owned[queryGroup]; !kept {
+			if state.queryCooldown != nil {
+				tracker.demotionHandovers++
+			}
 			delete(tracker.groups, queryGroup)
 		}
 	}

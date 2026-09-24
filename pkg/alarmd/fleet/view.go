@@ -1511,6 +1511,14 @@ type Snapshot struct {
 	DemotionEntries    int `json:"demotion_entries"`
 	DemotionExtensions int `json:"demotion_extensions"`
 	DemotionExits      int `json:"demotion_exits"`
+	// DemotionRestored, DemotionHandovers and DemotionReentries close the
+	// pool's arithmetic across restarts and owners: objects restored into the
+	// pool from their record are not entries, objects handed to another
+	// replica while in it are not exits, and a re-entry is an entry within
+	// the re-entry window of an exit. Absent (zero) on a build before them.
+	DemotionRestored  int `json:"demotion_restored,omitempty"`
+	DemotionHandovers int `json:"demotion_handovers,omitempty"`
+	DemotionReentries int `json:"demotion_reentries,omitempty"`
 	// LastDemotionExit is when this replica last saw an object leave the pool.
 	// Zero means it has not seen one, which is not the same as "none left
 	// recently" and must not be rendered as a duration.
@@ -2549,6 +2557,9 @@ type View struct {
 	DemotionEntries    int                    `json:"demotion_entries"`
 	DemotionExtensions int                    `json:"demotion_extensions"`
 	DemotionExits      int                    `json:"demotion_exits"`
+	DemotionRestored   int                    `json:"demotion_restored"`
+	DemotionHandovers  int                    `json:"demotion_handovers"`
+	DemotionReentries  int                    `json:"demotion_reentries"`
 	LastDemotionExit   time.Time              `json:"last_demotion_exit,omitempty"`
 	// DemotedDue counts pooled objects whose own cooldown window has already
 	// elapsed at the moment of this read: they are due to be tried again and are
@@ -2742,6 +2753,9 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 		view.DemotionEntries += snapshot.DemotionEntries
 		view.DemotionExtensions += snapshot.DemotionExtensions
 		view.DemotionExits += snapshot.DemotionExits
+		view.DemotionRestored += snapshot.DemotionRestored
+		view.DemotionHandovers += snapshot.DemotionHandovers
+		view.DemotionReentries += snapshot.DemotionReentries
 		for queryGroup, skip := range snapshot.PrunedSkips {
 			if view.PrunedSkips == nil {
 				view.PrunedSkips = make(map[string]PrunedSkip, len(snapshot.PrunedSkips))

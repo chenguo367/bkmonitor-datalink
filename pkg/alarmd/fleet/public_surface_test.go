@@ -35,6 +35,7 @@ var publicHealthFields = map[string]bool{
 	"DemotedDue": true, "DemotedDueOldestSeconds": true, "DemotionEntries": true, "DemotionExtensions": true,
 	"DemotionExits": true, "LastDemotionExit": true, "PublishedVersion": true, "ReplicasNotReady": true,
 	"DependenciesReplicas": true, "Cohorts": true,
+	"DemotionRestored": true, "DemotionHandovers": true, "DemotionReentries": true,
 }
 
 var redactedHealthFields = map[string]bool{
