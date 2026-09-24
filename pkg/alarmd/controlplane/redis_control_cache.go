@@ -617,7 +617,18 @@ func (repository *RedisCatalogRepository) fetchControlVersion(ctx context.Contex
 	if err != nil && !errors.Is(err, redis.Nil) {
 		return controlVersion{}, activationDependencyIO(err)
 	}
+	repository.activationBodyBytes.Store(size)
 	return controlVersion{header: text, known: text != "", activationLen: size}, nil
+}
+
+// ActivationBodyBytes is the stored length of the activation body at this
+// process's last control read, zero before the first. It is what every
+// publication writes whole and every replica reads whole after it (N15).
+func (repository *RedisCatalogRepository) ActivationBodyBytes() int64 {
+	if repository == nil {
+		return 0
+	}
+	return repository.activationBodyBytes.Load()
 }
 
 func (repository *RedisCatalogRepository) clearActivationCaches() {

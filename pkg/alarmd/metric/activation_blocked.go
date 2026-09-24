@@ -34,6 +34,10 @@ type activationBlockedCollector struct {
 	blocked    *prometheus.Desc
 	accounting *prometheus.Desc
 	reopened   *prometheus.Desc
+	// bodyBytes is the activation body's stored length, read by every
+	// replica with the header; see SetActivationBodyBytesSource.
+	bodySource func() int64
+	bodyBytes  *prometheus.Desc
 }
 
 func newActivationBlockedCollector() *activationBlockedCollector {
@@ -52,7 +56,21 @@ func newActivationBlockedCollector() *activationBlockedCollector {
 		reopened: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "activation_timeline_reopened_total"),
 			"Timelines a cutover opened again because their key was gone. This used to fail every publication under "+
 				"a word that said a dependency did not answer.", nil, nil),
+		bodyBytes: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "activation_body_bytes"),
+			"Stored length of the activation body at this process's last control read, zero before the first. Every "+
+				"publication rewrites the body whole and every replica reads it whole after the header moves, so this "+
+				"is what a publication costs each of them regardless of how little changed.", nil, nil),
 	}
+}
+
+// SetActivationBodyBytesSource binds the body length gauge to the repository.
+func (r *Recorder) SetActivationBodyBytesSource(source func() int64) {
+	if r == nil || r.phaseTwo.activationBlocked == nil {
+		return
+	}
+	r.phaseTwo.activationBlocked.mu.Lock()
+	r.phaseTwo.activationBlocked.bodySource = source
+	r.phaseTwo.activationBlocked.mu.Unlock()
 }
 
 // SetActivationBlockedSource binds the collector to the repository.
@@ -69,11 +87,12 @@ func (c *activationBlockedCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.blocked
 	ch <- c.accounting
 	ch <- c.reopened
+	ch <- c.bodyBytes
 }
 
 func (c *activationBlockedCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.Lock()
-	source := c.source
+	source, bodySource := c.source, c.bodySource
 	c.mu.Unlock()
 	var reading controlplane.ActivationBlockedReading
 	if source != nil {
@@ -86,4 +105,9 @@ func (c *activationBlockedCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(c.accounting, prometheus.CounterValue, float64(reading.Accounting[accounting]), string(accounting))
 	}
 	ch <- prometheus.MustNewConstMetric(c.reopened, prometheus.CounterValue, float64(reading.Reopened))
+	var bodyBytes int64
+	if bodySource != nil {
+		bodyBytes = bodySource()
+	}
+	ch <- prometheus.MustNewConstMetric(c.bodyBytes, prometheus.GaugeValue, float64(bodyBytes))
 }

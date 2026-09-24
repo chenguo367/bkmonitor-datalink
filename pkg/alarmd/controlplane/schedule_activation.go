@@ -160,7 +160,14 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 		}
 		return reconciler.Ensure(ctx, publication)
 	}
-	if previous.Current == publication {
+	// A cutover a later build committed in pieces and did not finish leaves
+	// the current publication named while the Query Groups past its cursor
+	// still run the one before. That is not "already active": it is finished
+	// here, as one cutover to the same publication, on the first tick rather
+	// than whenever the source next changes - a Query Group not yet added
+	// would detect nothing until then.
+	finishing := previous.CutoverProgress != nil && previous.Current == publication
+	if previous.Current == publication && !finishing {
 		failureStage, failureClass = ActivationFailureStageCurrentRecovery, ActivationFailureClassProjectionConflict
 		if _, loadErr := reconciler.repository.LoadActiveQueryGroupSet(ctx, previous.ActiveQGSetRef); loadErr != nil {
 			return ActivationState{}, loadErr
@@ -174,7 +181,7 @@ func (reconciler *ScheduleActivationReconciler) Ensure(
 	if publication.PublicationEpoch < previous.Current.PublicationEpoch {
 		return previous, nil
 	}
-	if publication.PublicationEpoch == previous.Current.PublicationEpoch {
+	if publication.PublicationEpoch == previous.Current.PublicationEpoch && !finishing {
 		return ActivationState{}, ErrActivationEpochCollision
 	}
 	failureStage, failureClass = ActivationFailureStageCandidateLoad, ActivationFailureClassDependencyIO

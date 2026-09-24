@@ -154,7 +154,15 @@ func (content activatedContent) refsFor(group QueryGroup) ([]execution.OutputCon
 // activated, so it is not an old Query Group for the next cutover to keep or
 // cut, and it is not part of the coverage the activation owes.
 func (repository *RedisCatalogRepository) loadActivatedContent(ctx context.Context, activation ActivationState) (activatedContent, error) {
-	content, err := repository.loadPublicationContent(ctx, activation)
+	load := repository.loadPublicationContent
+	if activation.CutoverProgress != nil {
+		// The manifest of the current publication names content the Query
+		// Groups past the cutover's cursor are not running yet; taken for
+		// theirs, it would pass them off as unchanged and they would never be
+		// cut. What each runs is on its open Segment.
+		load = repository.activatedContentFromOpenSegments
+	}
+	content, err := load(ctx, activation)
 	if err != nil {
 		return activatedContent{}, err
 	}

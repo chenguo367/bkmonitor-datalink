@@ -92,6 +92,7 @@ func TestTheContentContractIsGatedOnTheWholeReadySet(t *testing.T) {
 }
 
 type fakeContentScopeSource struct {
+	running  map[execution.QueryGroupIdentity]controlplane.ContentEntry
 	state    controlplane.ActivationState
 	manifest controlplane.CatalogManifest
 	blocked  []controlplane.BlockedQueryGroup
@@ -99,7 +100,7 @@ type fakeContentScopeSource struct {
 	asked    []execution.SnapshotRevision
 }
 
-func (source *fakeContentScopeSource) LoadActivation(context.Context) (controlplane.ActivationState, error) {
+func (source *fakeContentScopeSource) LoadActivationHead(context.Context) (controlplane.ActivationState, error) {
 	return source.state, source.err
 }
 
@@ -429,5 +430,37 @@ func TestContentScopesFollowAHeldBackQueryGroupsOpenSegment(t *testing.T) {
 	}
 	if len(digests) != 2 || digests["qg-a"] != "da" || digests["qg-b"] != "db-open" {
 		t.Fatalf("digests = %v, want qg-a from the manifest, qg-b from its open Segment and no qg-c", digests)
+	}
+}
+
+// ApplyCutoverProgress gives what the open Segments run while a cutover is
+// in progress, and the content as given otherwise.
+func (source *fakeContentScopeSource) ApplyCutoverProgress(
+	_ context.Context, state controlplane.ActivationState, content map[execution.QueryGroupIdentity]controlplane.ContentEntry,
+) (map[execution.QueryGroupIdentity]controlplane.ContentEntry, error) {
+	if state.CutoverProgress == nil {
+		return content, nil
+	}
+	return source.running, nil
+}
+
+// While a cutover is in progress the scopes are what each open Segment runs,
+// not what the manifest names: a Query Group past the cursor still runs the
+// publication before, and a scope naming the manifest's content would stop
+// it on a scope mismatch. The manifest is not read at all then.
+func TestContentScopesFollowTheOpenSegmentsWhileACutoverIsInProgress(t *testing.T) {
+	source := &fakeContentScopeSource{
+		state: controlplane.ActivationState{Current: controlplane.SnapshotPublicationRef{SnapshotRevision: "snap-9", PublicationEpoch: 2},
+			CutoverProgress: &controlplane.CutoverProgress{}},
+		manifest: controlplane.CatalogManifest{QueryGroups: []controlplane.ManifestQueryGroup{
+			{QueryGroup: "qg-a", ObjectDigest: "new-a"}, {QueryGroup: "qg-c", ObjectDigest: "new-c"}}},
+		running: map[execution.QueryGroupIdentity]controlplane.ContentEntry{"qg-a": {Digest: "old-a"}},
+	}
+	digests, err := currentContentScopes(source)(context.Background())
+	if err != nil {
+		t.Fatalf("currentContentScopes() error = %v", err)
+	}
+	if len(digests) != 1 || digests["qg-a"] != "old-a" || len(source.asked) != 0 {
+		t.Fatalf("digests = %v, manifest reads %v; want qg-a on what its open Segment runs and no manifest read", digests, source.asked)
 	}
 }

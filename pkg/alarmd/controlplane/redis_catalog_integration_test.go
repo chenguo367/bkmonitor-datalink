@@ -1260,8 +1260,17 @@ func TestRedisCatalogRepositoryActivationCASAndProjection(t *testing.T) {
 		t.Fatalf("activation projection=(%#v, %v)", activations, err)
 	}
 
-	// Each authorization must reread live bytes, even if record_revision is unchanged.
+	// A caller changing the facts it was given changes nothing the next
+	// authorization reads.
 	activations.Facts[0].Selected.StateGeneration = "caller-mutation"
+	again, err := repository.LoadActivations(context.Background(), execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanKey{{PlanIdentity: plan.Identity}}})
+	if err != nil || len(again.Facts) != 1 || !again.Facts[0].Equal(fact) {
+		t.Fatal("second authorization saw the caller's mutation", err)
+	}
+	// The answer is the Query Group's open Segment, which is what executes
+	// (N15): a body rewritten beside it, header unchanged, with records the
+	// Segment does not carry, does not become the answer. The body must still
+	// be there - one that is gone is the state the leader rebuilds.
 	state.Plans[0].Fact.Selected.StateApplyEpoch++
 	payload, err := json.Marshal(state)
 	if err != nil {
@@ -1270,9 +1279,15 @@ func TestRedisCatalogRepositoryActivationCASAndProjection(t *testing.T) {
 	if err := client.Set(context.Background(), "alarmd:control:test:activation", payload, 0).Err(); err != nil {
 		t.Fatal(err)
 	}
-	again, err := repository.LoadActivations(context.Background(), execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanKey{{PlanIdentity: plan.Identity}}})
-	if err != nil || len(again.Facts) != 1 || again.Facts[0] != state.Plans[0].Fact {
-		t.Fatal("second authorization missed current facts or caller isolation", err)
+	again, err = repository.LoadActivations(context.Background(), execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanKey{{PlanIdentity: plan.Identity}}})
+	if err != nil || len(again.Facts) != 1 || !again.Facts[0].Equal(fact) {
+		t.Fatalf("authorization answered %+v (%v), want the open Segment's record %+v", again.Facts, err, fact)
+	}
+	if err := client.Del(context.Background(), "alarmd:control:test:activation").Err(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repository.LoadActivations(context.Background(), execution.PlanActivationRequest{Contract: contract, Plans: []execution.PlanKey{{PlanIdentity: plan.Identity}}}); !errors.Is(err, controlplane.ErrActivationBodyMissing) {
+		t.Fatalf("authorization without the body = %v, want ErrActivationBodyMissing", err)
 	}
 }
 

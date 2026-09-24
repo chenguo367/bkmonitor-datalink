@@ -1817,7 +1817,7 @@ func sourceRefreshObservations(
 	return matches
 }
 
-func (repository *fakeProductionCatalogRepository) LoadActivation(
+func (repository *fakeProductionCatalogRepository) LoadActivationHead(
 	context.Context,
 ) (controlplane.ActivationState, error) {
 	return repository.activation, repository.activationErr

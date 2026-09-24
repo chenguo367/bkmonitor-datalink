@@ -438,7 +438,7 @@ func (reconciler *SourceReconciler) Refresh(
 	// at a stranded candidate. Restore its occurrence directly; requiring two
 	// identical source observations here can leave the active Snapshot expired
 	// forever when non-semantic observation details change between refreshes.
-	activation, activationErr := reconciler.repository.LoadActivation(ctx)
+	activation, activationErr := reconciler.repository.LoadActivationHead(ctx)
 	if activationErr == nil && activation.Current.SnapshotRevision == catalog.SnapshotRevision {
 		return reconciler.publish(ctx, current, catalog, SourceRefreshUnchanged)
 	}
@@ -562,7 +562,7 @@ func (reconciler *SourceReconciler) publish(
 	catalog Catalog,
 	status SourceRefreshStatus,
 ) (SourceRefreshResult, error) {
-	activation, activationErr := reconciler.repository.LoadActivation(ctx)
+	activation, activationErr := reconciler.repository.LoadActivationHead(ctx)
 	if activationErr == nil && activation.Current.SnapshotRevision == catalog.SnapshotRevision {
 		snapshot, _, loadErr := reconciler.publisher.restoreIfActivationCurrent(ctx, activation, catalog)
 		if loadErr != nil {
