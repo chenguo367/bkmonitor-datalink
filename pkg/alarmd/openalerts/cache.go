@@ -181,6 +181,19 @@ type Stats struct {
 	// DisjointMinimum describes.
 	SentInSet, SentNotInSet int
 	Disjoint                bool
+	// OwnLookups is Lookups for the lookups of this process's own open
+	// alerts; OwnHeld how many of those the gate answered "not open", which
+	// holds a RECOVERY whose alert stays open. RecentLookups and
+	// RecentOwnHeld are the last RecentGateLookups of each, whole.
+	OwnLookups    map[Answer]uint64
+	OwnHeld       uint64
+	RecentLookups []GateLookup
+	RecentOwnHeld []GateLookup
+	// GateSince is when the own split started: what this process sent is
+	// held in memory and starts empty at every start, so an alert opened
+	// before it is not "own" here, and "no own lookup" says only that none
+	// of the alerts sent since reached the gate.
+	GateSince time.Time
 }
 
 type member struct {
@@ -226,6 +239,17 @@ type Cache struct {
 	refreshes   map[string]uint64
 	unavailable map[UnavailableReason]uint64
 	lookups     map[Answer]uint64
+	// lastAnswer, ownLookups, ownHeld and the two samples are the gate's
+	// lookups as recordGate keeps them.
+	lastAnswer    Answer
+	ownLookups    map[Answer]uint64
+	ownHeld       uint64
+	recentLookups gateRing
+	recentOwnHeld gateRing
+	// gateSince is when this copy was made: the own split rests on what
+	// this process sent (index.opened, added), which lives in memory and
+	// starts empty with the process.
+	gateSince time.Time
 }
 
 // Options configure a Cache. Zero values take the defaults below.
@@ -264,7 +288,8 @@ func New(options Options) (*Cache, error) {
 		maxLocal: options.MaxLocalEntries, trackingWindow: options.TrackingWindow,
 		tracked: map[StrategyKey]time.Time{}, loaded: map[StrategyKey]bool{}, sets: map[StrategyKey]map[string]struct{}{},
 		added: map[member]stamped{}, removed: map[member]stamped{},
-		refreshes: map[string]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{},
+		refreshes: map[string]uint64{}, unavailable: map[UnavailableReason]uint64{}, lookups: map[Answer]uint64{}, ownLookups: map[Answer]uint64{},
+		gateSince: options.Now(),
 	}, nil
 }
 
@@ -288,6 +313,7 @@ func (cache *Cache) Track(keys ...StrategyKey) {
 }
 
 // Contains implements contract.OpenAlertSet. See Answer for how it answers.
+// Every answer is also recorded for reading (see recordGate).
 func (cache *Cache) Contains(tenantID, strategyID, fingerprint string) bool {
 	if cache == nil {
 		return false
@@ -297,24 +323,32 @@ func (cache *Cache) Contains(tenantID, strategyID, fingerprint string) bool {
 	now := cache.now()
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
+	open := cache.contains(m, now)
+	cache.recordGate(m, now, open)
+	return open
+}
+
+// contains is Contains with the lock held.
+func (cache *Cache) contains(m member, now time.Time) bool {
+	key, fingerprint := m.key, m.fingerprint
 	if cache.index != nil {
 		return cache.indexGate(m, now)
 	}
 	cache.tracked[key] = now
 	if cache.available && cache.loaded[key] {
 		if _, ok := cache.sets[key][fingerprint]; ok {
-			cache.lookups[AnswerMember]++
+			cache.countLookup(AnswerMember)
 			return true
 		}
 		if sent, ok := cache.added[m]; ok && now.Sub(sent.at) <= cache.localRetention() && !cache.removedAfter(m, sent.at) {
-			cache.lookups[AnswerRecentlySent]++
+			cache.countLookup(AnswerRecentlySent)
 			return true
 		}
-		cache.lookups[AnswerAbsent]++
+		cache.countLookup(AnswerAbsent)
 		return false
 	}
 	if cache.available {
-		cache.lookups[AnswerNotYetLoaded]++
+		cache.countLookup(AnswerNotYetLoaded)
 	}
 	return cache.answerUnavailable(m)
 }
@@ -324,10 +358,10 @@ func (cache *Cache) Contains(tenantID, strategyID, fingerprint string) bool {
 func (cache *Cache) answerUnavailable(m member) bool {
 	switch cache.policy {
 	case PolicyPassThrough:
-		cache.lookups[AnswerPassedThrough]++
+		cache.countLookup(AnswerPassedThrough)
 		return true
 	default:
-		cache.lookups[AnswerSelfMaintained]++
+		cache.countLookup(AnswerSelfMaintained)
 		return cache.selfMaintainedOpen(m)
 	}
 }
@@ -567,6 +601,7 @@ func (cache *Cache) Stats() Stats {
 	for k, v := range cache.lookups {
 		stats.Lookups[k] = v
 	}
+	cache.gateStats(&stats)
 	return stats
 }
 
