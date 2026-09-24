@@ -29,8 +29,10 @@ import (
 // keeps the rows, the page and the counts that say what the rows are part of,
 // so a page is paid for in rows rather than in the view around them.
 
-// MaxObjectListLimit bounds one page. A pool row runs to a few kilobytes, so
-// a full page stays well inside the response budget.
+// MaxObjectListLimit bounds one page. The response budget is spent on the
+// route's whole answer, the deployment view around the rows included, before
+// the view is dropped; a page that does not fit is refused by name and the
+// answer offers the same page at half the rows.
 const MaxObjectListLimit = 200
 
 // objectListKept are the route's keys a page keeps besides its rows: the
@@ -73,6 +75,10 @@ func objectListOperation(handler http.Handler, limits map[string]any) Operation 
 				}
 			}
 			out := invokeNative(ctx, handler, "/api/objects", query)
+			if out.Error != nil && out.Error.Code == "response_budget_exceeded" && limit > 1 {
+				params := objectListParams(p, offset, limit/2)
+				out.Next = append(out.Next, Call{Operation: "object.list", Params: params, Reason: "这一页连同部署视图超出应答上限；同一页减半行数再读。"})
+			}
 			result, ok := out.Value.(map[string]any)
 			if !ok || out.Error != nil {
 				return out
@@ -88,20 +94,30 @@ func objectListOperation(handler http.Handler, limits map[string]any) Operation 
 			rows, _ := result["anomalies"].([]any)
 			out.Summary = objectListLine(p.String("column"), result, offset, len(rows), total)
 			if next := offset + len(rows); len(rows) > 0 && next < total {
-				params := Params{"column": p.String("column"), "offset": next, "limit": limit}
-				for _, name := range []string{"order", "replica", "strategy", "business"} {
-					if value := p.String(name); value != "" {
-						params[name] = value
-					}
-				}
-				out.Next = append(out.Next, Call{Operation: "object.list", Params: params, Reason: fmt.Sprintf("下一页：共 %d 行，已读到第 %d 行。", total, next)})
+				out.Next = append(out.Next, Call{Operation: "object.list", Params: objectListParams(p, next, limit), Reason: fmt.Sprintf("下一页：共 %d 行，已读到第 %d 行。", total, next)})
 			}
+			// Every page is its own read of the view as it is then: an object
+			// that leaves the pool between two pages moves the rest up by one,
+			// and one that enters may or may not be read.
+			out.Limitations = append(out.Limitations, "Each page is a separate read of the current view; if demotion_entries or demotion_exits differ between pages, the pages are not one moment of the population and rows may be skipped or repeated.")
 			if result["filtered"] == true {
 				out.Limitations = append(out.Limitations, "Rows are filtered; totals other than page.total are deployment-wide.")
 			}
 			return out
 		},
 	}
+}
+
+// objectListParams is a call for the page at offset, carrying the column,
+// the order and the filters of the page it follows.
+func objectListParams(p Params, offset, limit int) Params {
+	params := Params{"column": p.String("column"), "offset": offset, "limit": limit}
+	for _, name := range []string{"order", "replica", "strategy", "business"} {
+		if value := p.String(name); value != "" {
+			params[name] = value
+		}
+	}
+	return params
 }
 
 // objectListLine is the page in one line: which column, how many in it, which
