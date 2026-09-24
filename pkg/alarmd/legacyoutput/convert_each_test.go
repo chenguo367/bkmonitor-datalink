@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -154,12 +155,19 @@ func TestConvertEachReturnsTheSnapshotStoreFailureAlone(t *testing.T) {
 // does not carry -- is not named as the strategy's.
 func TestConvertEachLeavesAlarmdsOwnRefusalsUnnamedAsConfiguration(t *testing.T) {
 	events, now := legacyFixtureAnomalies(t)
-	noContext, mismatch, recovery := events[0], events[0], events[0]
+	noContext, mismatch, recovery, missingItem := events[0], events[0], events[0], events[0]
 	noContext.EventID, noContext.LegacyOutput = "no-context", nil
 	mismatch.EventID, mismatch.PlanRef.StrategyID = "mismatch", "424242"
 	recovery.EventID, recovery.EventKind = "recovery", contract.TriggerEventRecovery
+	// The frozen item id names an item its own frozen strategy does not hold.
+	missingItem.EventID = "missing-item"
+	frozen := *events[0].LegacyOutput
+	frozen.Configuration = contract.FreezeLegacyOutput(&contract.LegacyOutputContext{
+		Strategy: events[0].LegacyOutput.Configuration.StrategyJSON(), DimensionFields: events[0].LegacyOutput.Configuration.DimensionFields(), ItemID: "987654321",
+	})
+	missingItem.LegacyOutput = &frozen
 	converter := Converter{Store: &snapshotRecorder{}, Now: func() time.Time { return now }}
-	_, failures, err := converter.ConvertEach(context.Background(), []contract.TriggerEventV1{noContext, mismatch, recovery})
+	_, failures, err := converter.ConvertEach(context.Background(), []contract.TriggerEventV1{noContext, mismatch, recovery, missingItem})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,5 +176,33 @@ func TestConvertEachLeavesAlarmdsOwnRefusalsUnnamedAsConfiguration(t *testing.T)
 		if failure == nil || errors.As(failure, &config) {
 			t.Fatalf("event %d: %v, want refused and not as the strategy's", index, failure)
 		}
+	}
+	if !strings.Contains(failures[3].Error(), "not in its frozen strategy") {
+		t.Fatalf("the missing item was refused for another reason: %v", failures[3])
+	}
+}
+
+// An item the strategy holds with no name is the strategy as configured.
+func TestConvertEachNamesAnUnnamedItemAsTheStrategys(t *testing.T) {
+	events, now := legacyFixtureAnomalies(t)
+	var strategy map[string]any
+	if err := json.Unmarshal(events[0].LegacyOutput.Configuration.StrategyJSON(), &strategy); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range strategy["items"].([]any) {
+		raw.(map[string]any)["name"] = ""
+	}
+	unnamed, _ := json.Marshal(strategy)
+	event := events[0]
+	frozen := *event.LegacyOutput
+	frozen.Configuration = contract.FreezeLegacyOutput(&contract.LegacyOutputContext{
+		Strategy: unnamed, DimensionFields: event.LegacyOutput.Configuration.DimensionFields(), ItemID: event.LegacyOutput.Configuration.ItemID(),
+	})
+	event.LegacyOutput = &frozen
+	converter := Converter{Store: &snapshotRecorder{}, Now: func() time.Time { return now }}
+	_, failures, err := converter.ConvertEach(context.Background(), []contract.TriggerEventV1{event})
+	var config *StrategyConfigError
+	if err != nil || !errors.As(failures[0], &config) || !strings.Contains(failures[0].Error(), "has no name") {
+		t.Fatalf("an unnamed item: %v, %v", failures, err)
 	}
 }

@@ -276,15 +276,25 @@ func convertEvent(ctx context.Context, event contract.TriggerEventV1, frozen pre
 	if strconv.FormatInt(s.ID, 10) != event.PlanRef.StrategyID || strconv.FormatInt(s.BusinessID, 10) != event.BusinessID || (s.TenantID != "" && s.TenantID != event.TenantID) {
 		return Event{}, fmt.Errorf("frozen legacy strategy identity mismatch")
 	}
-	itemName := ""
+	itemName, itemFound := "", false
 	for _, item := range s.Items {
 		if strconv.FormatInt(item.ID, 10) == metadata.ItemID() {
-			itemName = item.Name
+			itemName, itemFound = item.Name, true
 			break
 		}
 	}
-	if itemName == "" || event.PrimaryLevelID < 1 || event.PrimaryLevelID > 3 {
-		return Event{}, &StrategyConfigError{Err: fmt.Errorf("invalid legacy item/severity")}
+	// The item id and the strategy are frozen together, so an item the
+	// strategy does not hold is the freeze disagreeing with itself: alarmd's.
+	// An item with no name, or a level the Python protocol has no severity
+	// for, is the strategy as configured.
+	if !itemFound {
+		return Event{}, fmt.Errorf("frozen legacy item %s is not in its frozen strategy", metadata.ItemID())
+	}
+	if itemName == "" {
+		return Event{}, &StrategyConfigError{Err: fmt.Errorf("legacy item %s has no name", metadata.ItemID())}
+	}
+	if event.PrimaryLevelID < 1 || event.PrimaryLevelID > 3 {
+		return Event{}, &StrategyConfigError{Err: fmt.Errorf("legacy protocol has no severity for level %d", event.PrimaryLevelID)}
 	}
 	// The Python protocol represents anomaly points only. Anything else
 	// reaching the converter is a routing mistake, and a loud one is better
