@@ -5,6 +5,7 @@ package obchannel
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -45,5 +46,33 @@ func TestK8sFailuresReachTheCLIByName(t *testing.T) {
 	}
 	if got := k8sOutcome(k8sread.EventsResult{}, nil); !got.Complete || got.Error != nil {
 		t.Errorf("a read that happened is complete: %+v", got)
+	}
+}
+
+// The log parameters reach the read as asked.
+func TestTheLogParametersReachTheRead(t *testing.T) {
+	request := logRequestOf(Params{"pod": "p", "contains": []any{"schedule_cutover", "held_no_open_alert"},
+		"scan_lines": json.Number("30000"), "since_seconds": json.Number("600"), "lines": json.Number("50"), "previous": true})
+	if request.Pod != "p" || len(request.Contains) != 2 || request.Contains[1] != "held_no_open_alert" ||
+		request.ScanLines != 30000 || request.SinceSeconds != 600 || request.Lines != 50 || !request.Previous {
+		t.Fatalf("request %+v", request)
+	}
+	if plain := logRequestOf(Params{"pod": "p"}); plain.Contains != nil || plain.ScanLines != 0 || plain.SinceSeconds != 0 || plain.Lines != k8sread.DefaultLogLines {
+		t.Fatalf("plain request %+v", plain)
+	}
+}
+
+// A scan that stopped short of the end of the log is a partial answer that
+// says where it stopped; one that reached the end is complete.
+func TestAScanStoppedShortIsPartialAndSaysWhere(t *testing.T) {
+	stopped, complete := false, true
+	got := logOutcome(k8sread.LogResult{Contains: []string{"schedule_cutover"}, MatchedLines: 3, ScanTo: "2026-09-24T05:00:07Z",
+		ScanComplete: &stopped, ScanStopped: k8sread.ScanStoppedDeadline}, nil)
+	if got.Complete || len(got.Limitations) != 2 || !strings.Contains(got.Limitations[1], "2026-09-24T05:00:07Z") ||
+		!strings.Contains(got.Limitations[1], "deadline") {
+		t.Fatalf("stopped scan %+v", got)
+	}
+	if got := logOutcome(k8sread.LogResult{Contains: []string{"schedule_cutover"}, MatchedLines: 3, ScanComplete: &complete}, nil); !got.Complete {
+		t.Fatalf("whole scan %+v", got)
 	}
 }
