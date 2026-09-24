@@ -138,7 +138,7 @@ func targetFields() map[string]Field {
 		"replica":              {Type: "string", MinLength: 1, MaxLength: 256, Pattern: "^[^\\x00-\\x1f\\x7f]+$", Description: "Worker identity for registry lookup only; never interpreted as an endpoint.", Source: "OB worker identity"},
 		"owner_query_group":    {Type: "string", MinLength: 1, MaxLength: 256, Pattern: "^[^\\x00-\\x1f\\x7f]+$", Description: "Query Group whose current execution lease selects the worker.", Source: "strategy.get plans[].query_group"},
 		"expected_incarnation": {Type: "string", MinLength: 1, MaxLength: 256, Pattern: "^[^\\x00-\\x1f\\x7f]+$", Description: "Expected process incarnation; requires an explicit target.", Source: "meta.incarnation from prior targeted evidence"},
-		"control_leader":       {Type: "boolean", Description: "true reads the current Control Leader, resolved from the lease the read is routed by; meta.control_leader names it and its term.", Source: "Control Leader lease"},
+		"control_leader":       {Type: "boolean", Description: "true reads the current Control Leader, resolved from the lease the read is routed by; meta.control_leader names it and its term, on a failed read too. Refused as target_routing_unavailable where targeted routing is not configured, like any targeted read.", Source: "Control Leader lease"},
 	}
 }
 

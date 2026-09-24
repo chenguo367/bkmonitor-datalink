@@ -79,9 +79,10 @@ func (r *Router) Invoke(ctx context.Context, call obchannel.Invocation) obchanne
 		TargetWorkerId: target, ExpectedIncarnation: call.Target.ExpectedIncarnation, OwnerQueryGroup: call.Target.OwnerQueryGroup, ControlEpoch: leader.OwnerEpoch}
 	response, err := r.send(ctx, leader.OwnerID, req)
 	if err != nil {
-		return r.transportFailure(call.RequestID, err)
+		response = r.transportFailure(call.RequestID, err)
+	} else {
+		response.Meta.Via = append([]string{r.options.WorkerID}, response.Meta.Via...)
 	}
-	response.Meta.Via = append([]string{r.options.WorkerID}, response.Meta.Via...)
 	if call.Target.ControlLeader {
 		response.Meta.ControlLeader = &obchannel.LeaderMeta{OwnerID: leader.OwnerID, OwnerEpoch: leader.OwnerEpoch}
 	}

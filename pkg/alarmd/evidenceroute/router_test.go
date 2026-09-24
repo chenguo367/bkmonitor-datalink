@@ -303,6 +303,20 @@ func TestLegacyControlServiceAndUnreachableTarget(t *testing.T) {
 	}
 }
 
+func TestControlLeaderKeepsItsLeaseWhenTheLeaderCannotBeReached(t *testing.T) {
+	nodes, _ := fixture(t)
+	nodes["leader"].server.Stop()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	result := nodes["entry"].router.Invoke(ctx, obchannel.Invocation{EnvironmentID: "fixture", Version: obchannel.Version, Revision: nodes["entry"].channel.CatalogRevision(), Operation: "runtime.get", RequestID: "leader-down-fixture", Params: obchannel.Params{}, Target: obchannel.Target{ControlLeader: true}})
+	if result.Error == nil || result.Meta.ControlLeader == nil || result.Meta.ControlLeader.OwnerID != "leader" || result.Meta.ControlLeader.OwnerEpoch != 7 {
+		t.Fatalf("a transport failure lost the lease it was resolved from: %+v", result)
+	}
+	if nodes["entry"].runs.Load() != 0 {
+		t.Fatal("an unreachable Leader fell back to the ingress")
+	}
+}
+
 func TestControlLeaderTargetAnswersFromTheLeaseItWasRoutedBy(t *testing.T) {
 	nodes, store := fixture(t)
 	result := invoke(t, nodes["entry"], "runtime.get", obchannel.Params{"control_leader": true})
