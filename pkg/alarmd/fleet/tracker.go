@@ -396,6 +396,16 @@ type queryGroupState struct {
 	// only part that separates a window that is filling from one that never
 	// will.
 	shortRounds uint32
+	// refusedRounds counts the rounds of the current short run whose window
+	// reading the observer refused. Such a round says nothing about the
+	// windows, so it neither extends the run nor ends it; this says how many
+	// the run was held over. Ends with the run.
+	refusedRounds uint32
+	// lastRead says the latest round that was read -- not refused -- carried
+	// a reading, which is what the round after compares against. It is not
+	// "coverage is on the row": a refused round clears the row and leaves
+	// the comparison where the last read round put it.
+	lastRead bool
 	// constrainedRounds and resumedRounds are the runs of the two partial
 	// rounds; see HistoryCoverage.ConstrainedRounds.
 	constrainedRounds uint32
@@ -1330,84 +1340,97 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.reasonCode = completion
 		state.cause = observation.ProgressCompletionCause
 		state.causeReason = observation.ProgressCompletionReason
-		// Counted before the coverage is replaced, because the run length is
-		// the only thing here that one round cannot supply. A round that
-		// reports a complete window ends the run: a window that filled once
-		// was filling, whatever it does next.
-		if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 {
-			state.shortRounds = 0
+		// A round whose reading the observer refused carries no windows, and
+		// that is not the same as a round with no windows short. It holds
+		// every run counter below as it stands -- neither extending a run
+		// nor ending one -- and is counted beside them. Ending the runs
+		// there let a reading refused every few rounds keep a window that
+		// never fills from ever reaching its own length: the object read as
+		// still filling, on no line, for as long as the refusals lasted.
+		refusedRound := observation.HistoryCoverage == nil && observation.HistoryCoverageRejected != nil
+		worstWindow, worstWindowChanged := state.worstWindow, false
+		previous, hadReading := state.previousWorstValid, state.lastRead
+		if refusedRound {
+			state.refusedRounds++
 		} else {
-			state.shortRounds++
-		}
-		if facts := observation.HistoryCoverage; facts == nil || facts.Empty == 0 {
-			state.emptyRounds = 0
-		} else {
-			state.emptyRounds++
-		}
-		// Full under a guard: the round the guard converges on, and every
-		// round after it that it has not.
-		if facts := observation.HistoryCoverage; facts == nil || facts.Guarded == 0 || facts.Short != 0 {
-			state.heldFullRounds = 0
-		} else {
-			state.heldFullRounds++
-		}
-		// The two partial-round runs. Their per-round counts are replaced by
-		// the next round, so without these a round that could load no State
-		// is gone the moment the next one lands, and the interface can only
-		// answer for whoever happened to be looking.
-		if facts := observation.HistoryCoverage; facts == nil || facts.Constrained == 0 {
-			state.constrainedRounds = 0
-		} else {
-			state.constrainedRounds++
-		}
-		if facts := observation.HistoryCoverage; facts == nil || facts.Resumed == 0 {
-			state.resumedRounds = 0
-		} else {
-			state.resumedRounds++
-		}
-		// Every short window belonged to a series with no loaded history, or
-		// the run ends. "Every", not "any": one short window that did have
-		// history is a round where churn is not the whole story, and this
-		// counter is the one that sends a reader to edit a strategy.
-		//
-		// A round with nothing short also ends it, for the same reason it ends
-		// shortRounds -- a window that filled once was filling.
-		if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 ||
-			facts.ShortFresh != facts.Short {
-			state.freshRounds = 0
-		} else {
-			state.freshRounds++
-		}
-		// Whether the worst window is filling: compared with the previous
-		// round's valid count on the same object; a round with nothing short
-		// ends the comparison, like every other run counter here.
-		previous := state.previousWorstValid
-		// The comparison is between the worst pairs of two rounds, and the
-		// pair belongs to a window. When the worst window is another one
-		// than last round's, the two pairs are not one window's progress and
-		// the counters start over; the row says so.
-		worstWindow, worstWindowChanged := "", false
-		if facts := observation.HistoryCoverage; facts != nil && facts.Short > 0 && len(facts.Windows) > 0 {
-			worstWindow = windowKey(facts.Windows[0].Strategy, facts.Windows[0].Series, facts.Windows[0].Level)
-			worstWindowChanged = state.worstWindow != "" && state.worstWindow != worstWindow
-		}
-		if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 {
-			state.noProgressRounds, state.previousWorstValid, state.unchangedRounds = 0, 0, 0
-		} else {
-			if state.coverage != nil && !worstWindowChanged && facts.WorstValid <= previous {
-				state.noProgressRounds++
+			// Counted before the coverage is replaced, because the run length is
+			// the only thing here that one round cannot supply. A round that
+			// reports a complete window ends the run: a window that filled once
+			// was filling, whatever it does next.
+			if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 {
+				state.shortRounds, state.refusedRounds = 0, 0
 			} else {
-				state.noProgressRounds = 0
+				state.shortRounds++
 			}
-			if state.coverage != nil && !worstWindowChanged && facts.WorstValid == previous {
-				state.unchangedRounds++
+			if facts := observation.HistoryCoverage; facts == nil || facts.Empty == 0 {
+				state.emptyRounds = 0
 			} else {
-				state.unchangedRounds = 0
+				state.emptyRounds++
 			}
-			state.previousWorstValid = facts.WorstValid
+			// Full under a guard: the round the guard converges on, and every
+			// round after it that it has not.
+			if facts := observation.HistoryCoverage; facts == nil || facts.Guarded == 0 || facts.Short != 0 {
+				state.heldFullRounds = 0
+			} else {
+				state.heldFullRounds++
+			}
+			// The two partial-round runs. Their per-round counts are replaced by
+			// the next round, so without these a round that could load no State
+			// is gone the moment the next one lands, and the interface can only
+			// answer for whoever happened to be looking.
+			if facts := observation.HistoryCoverage; facts == nil || facts.Constrained == 0 {
+				state.constrainedRounds = 0
+			} else {
+				state.constrainedRounds++
+			}
+			if facts := observation.HistoryCoverage; facts == nil || facts.Resumed == 0 {
+				state.resumedRounds = 0
+			} else {
+				state.resumedRounds++
+			}
+			// Every short window belonged to a series with no loaded history, or
+			// the run ends. "Every", not "any": one short window that did have
+			// history is a round where churn is not the whole story, and this
+			// counter is the one that sends a reader to edit a strategy.
+			//
+			// A round with nothing short also ends it, for the same reason it ends
+			// shortRounds -- a window that filled once was filling.
+			if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 ||
+				facts.ShortFresh != facts.Short {
+				state.freshRounds = 0
+			} else {
+				state.freshRounds++
+			}
+			// Whether the worst window is filling: compared with the previous
+			// round's valid count on the same object; a round with nothing short
+			// ends the comparison, like every other run counter here.
+			// The comparison is between the worst pairs of two rounds, and the
+			// pair belongs to a window. When the worst window is another one
+			// than last round's, the two pairs are not one window's progress and
+			// the counters start over; the row says so.
+			worstWindow = ""
+			if facts := observation.HistoryCoverage; facts != nil && facts.Short > 0 && len(facts.Windows) > 0 {
+				worstWindow = windowKey(facts.Windows[0].Strategy, facts.Windows[0].Series, facts.Windows[0].Level)
+				worstWindowChanged = state.worstWindow != "" && state.worstWindow != worstWindow
+			}
+			if facts := observation.HistoryCoverage; facts == nil || facts.Short == 0 {
+				state.noProgressRounds, state.previousWorstValid, state.unchangedRounds = 0, 0, 0
+			} else {
+				if hadReading && !worstWindowChanged && facts.WorstValid <= previous {
+					state.noProgressRounds++
+				} else {
+					state.noProgressRounds = 0
+				}
+				if hadReading && !worstWindowChanged && facts.WorstValid == previous {
+					state.unchangedRounds++
+				} else {
+					state.unchangedRounds = 0
+				}
+				state.previousWorstValid = facts.WorstValid
+			}
+			state.worstWindow = worstWindow
+			state.lastRead = observation.HistoryCoverage != nil
 		}
-		state.worstWindow = worstWindow
-		hadCoverage := state.coverage != nil
 		state.coverage = nil
 		state.coverageRejected = nil
 		if rejected := observation.HistoryCoverageRejected; rejected != nil {
@@ -1417,7 +1440,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			state.coverage = &HistoryCoverage{
 				Levels: facts.Levels, Short: facts.Short, Empty: facts.Empty,
 				WorstValid: facts.WorstValid, WorstRequired: facts.WorstRequired, Measure: CoverageValidMeasure,
-				ShortRounds: state.shortRounds, EmptyRounds: state.emptyRounds,
+				ShortRounds: state.shortRounds, EmptyRounds: state.emptyRounds, RefusedRounds: state.refusedRounds,
 				Guarded: facts.Guarded, HeldFullRounds: state.heldFullRounds,
 				Fresh: facts.Fresh, ShortFresh: facts.ShortFresh, FreshRounds: state.freshRounds,
 				Unusable: facts.Unusable, UnusableReason: facts.UnusableReason,
@@ -1433,7 +1456,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			}
 			// The previous count is the previous window's, and is named as
 			// such only when it is this window's.
-			if hadCoverage && facts.Short != 0 && !worstWindowChanged {
+			if hadReading && facts.Short != 0 && !worstWindowChanged {
 				state.coverage.PreviousWorstValid, state.coverage.PreviousKnown = previous, true
 			}
 		}
@@ -1549,6 +1572,8 @@ func (tracker *Tracker) resetRun(state *queryGroupState) {
 	state.coverage = nil
 	state.coverageRejected = nil
 	state.shortRounds = 0
+	state.refusedRounds = 0
+	state.lastRead = false
 	state.emptyRounds = 0
 	state.constrainedRounds = 0
 	state.resumedRounds = 0

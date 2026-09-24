@@ -106,8 +106,9 @@ func WithInternalAddress(address string) Option {
 // mount are unchanged here; what the API serves in public is the API
 // handler's to decide. The runtime passes it when the configuration asks for
 // a restricted surface and settles it with SetPublicSurfaceRestricted once
-// it knows whether the CLI came up: until then the surface is closed rather
-// than open.
+// it knows whether the CLI came up. Until then -- the startup window -- the
+// surface is restricted exactly when the configuration asks for it, so no
+// coordinate is public before the CLI is known to be there or not.
 func WithRestrictedPublicSurface() Option {
 	return func(server *Server) { server.restricted.Store(true) }
 }
