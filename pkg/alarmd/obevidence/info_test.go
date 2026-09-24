@@ -2,6 +2,7 @@ package obevidence
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -22,6 +23,12 @@ func TestInfoReadsEachServerOnceAndOnlyTheAllowedFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.Set(ctx, "k", "v", 0)
+	if err := client.ConfigResetStat(ctx).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Eval(ctx, "return 1", nil).Err(); err != nil {
+		t.Fatal(err)
+	}
 	// A database no role reads: its keyspace line stays behind.
 	other := redis.NewClient(&redis.Options{Addr: client.Options().Addr, DB: 2, MaxRetries: -1})
 	defer other.Close()
@@ -56,6 +63,14 @@ func TestInfoReadsEachServerOnceAndOnlyTheAllowedFields(t *testing.T) {
 			t.Errorf("a field outside the list left: %s", name)
 		}
 	}
+	// The script calls since the stats were reset, and the master's own
+	// replication offset; a command never called is absent, not zero.
+	if !strings.HasPrefix(shared.Commands["eval"], "calls=1,") || shared.Commands["evalsha"] != "" || len(shared.Commands) != 1 {
+		t.Errorf("script commands %v", shared.Commands)
+	}
+	if shared.Fields["master_repl_offset"] == "" || shared.Fields["connected_slaves"] != "0" || len(shared.Replicas) != 0 || len(shared.Missing) != 0 {
+		t.Errorf("replication of a lone master: fields %v replicas %v missing %v", shared.Fields, shared.Replicas, shared.Missing)
+	}
 	if !strings.HasPrefix(shared.Keyspace["db5"], "keys=1") || len(shared.Keyspace) != 1 {
 		t.Errorf("keyspace of the roles' dbs only: %v", shared.Keyspace)
 	}
@@ -65,8 +80,54 @@ func TestInfoReadsEachServerOnceAndOnlyTheAllowedFields(t *testing.T) {
 }
 
 func TestParseInfoNamesMissingFields(t *testing.T) {
-	fields, keyspace, missing := parseInfo("# Memory\r\nused_memory:10\r\nclient_list:secret\r\ndb3:keys=2\r\n", []int{3})
-	if fields["used_memory"] != "10" || fields["client_list"] != "" || keyspace["db3"] != "keys=2" || len(missing) != len(InfoFields)-1 {
-		t.Fatalf("%v %v %v", fields, keyspace, missing)
+	parsed := parseInfo("# Memory\r\nused_memory:10\r\nclient_list:secret\r\ndb3:keys=2\r\ncmdstat_get:calls=9\r\n", []int{3})
+	if parsed.fields["used_memory"] != "10" || parsed.fields["client_list"] != "" || parsed.keyspace["db3"] != "keys=2" ||
+		len(parsed.missing) != len(InfoFields)-1 || parsed.commands != nil {
+		t.Fatalf("%+v", parsed)
+	}
+}
+
+// A master names each replica by its state and how far behind it is, never
+// by its address; a replica names its own link and offset, and each of them
+// it did not report.
+func TestParseInfoReadsReplicationWithoutAddresses(t *testing.T) {
+	master := parseInfo("# Replication\r\nrole:master\r\nconnected_slaves:2\r\n"+
+		"slave0:ip=10.0.0.7,port=6379,state=online,offset=1000,lag=0\r\n"+
+		"slave1:ip=10.0.0.8,port=6379,state=wait_bgsave,offset=400,lag=3\r\n"+
+		"master_replid:abc\r\nmaster_repl_offset:1200\r\n"+
+		"# Commandstats\r\ncmdstat_evalsha:calls=5,usec=50,usec_per_call=10.00\r\n", nil)
+	value := func(n *int64) string {
+		if n == nil {
+			return "absent"
+		}
+		return strconv.FormatInt(*n, 10)
+	}
+	read := func(link ReplicaLink) string {
+		return link.State + " " + value(link.Offset) + " " + value(link.BytesBehind) + " " + value(link.LagSeconds)
+	}
+	if len(master.replicas) != 2 || read(master.replicas[0]) != "online 1000 200 0" || read(master.replicas[1]) != "wait_bgsave 400 800 3" {
+		t.Fatalf("replicas %+v", master.replicas)
+	}
+	// An offset either side did not report leaves bytes behind absent, not
+	// the whole other offset.
+	noOffset := parseInfo("role:master\r\nmaster_repl_offset:1200\r\nslave0:ip=10.0.0.7,port=6379,state=online,lag=1\r\n", nil)
+	noMaster := parseInfo("role:master\r\nslave0:ip=10.0.0.7,port=6379,state=online,offset=1000,lag=1\r\n", nil)
+	if read(noOffset.replicas[0]) != "online absent absent 1" || read(noMaster.replicas[0]) != "online 1000 absent 1" {
+		t.Fatalf("missing offsets read as %q and %q", read(noOffset.replicas[0]), read(noMaster.replicas[0]))
+	}
+	if master.commands["evalsha"] != "calls=5,usec=50,usec_per_call=10.00" || master.fields["master_replid"] != "" {
+		t.Fatalf("commands %v fields %v", master.commands, master.fields)
+	}
+	for _, missing := range master.missing {
+		for _, replicaOnly := range ReplicaInfoFields {
+			if missing == replicaOnly {
+				t.Fatalf("a master was held to a replica's fields: %v", master.missing)
+			}
+		}
+	}
+	replica := parseInfo("role:slave\r\nmaster_link_status:down\r\nslave_repl_offset:900\r\nmaster_repl_offset:900\r\n", nil)
+	if replica.fields["master_link_status"] != "down" || replica.fields["slave_repl_offset"] != "900" ||
+		!strings.Contains(strings.Join(replica.missing, ","), "master_last_io_seconds_ago") {
+		t.Fatalf("replica %+v", replica)
 	}
 }
