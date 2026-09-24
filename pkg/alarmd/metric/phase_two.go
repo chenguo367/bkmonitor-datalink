@@ -30,76 +30,88 @@ import (
 var splitRoundDispositions = []string{"over_share", "examined", "skipped"}
 
 type phaseTwoMetrics struct {
-	workflow                        workflowMetrics
-	shortPeriod                     shortPeriodMetrics
-	queryStatus                     queryStatusMetrics
-	queryUnavailable                queryUnavailableMetrics
-	queryCooldown                   *prometheus.CounterVec
-	slotReadiness                   slotReadinessMetrics
-	slotWait                        *prometheus.HistogramVec
-	slotTiming                      *prometheus.HistogramVec
-	work                            *prometheus.CounterVec
-	busy                            *prometheus.CounterVec
-	lastProgress                    *prometheus.GaugeVec
-	capacity                        *prometheus.CounterVec
-	stateWriteReuse                 *prometheus.CounterVec
-	stateWriteChange                *prometheus.CounterVec
-	stateAlreadyApplied             *prometheus.CounterVec
-	stateVersionConflict            *prometheus.CounterVec
-	ownershipRefusals               *prometheus.CounterVec
-	sourceObservations              *prometheus.CounterVec
-	sourceRefreshes                 *prometheus.CounterVec
-	sourceCompiles                  *prometheus.CounterVec
-	sourceReads                     *prometheus.CounterVec
-	sourceStrategiesRead            prometheus.Counter
-	sourceChangeSignalAge           prometheus.Gauge
-	activationFailures              *prometheus.CounterVec
-	ownedQueryGroups                *prometheus.GaugeVec
-	ownershipTransitions            *prometheus.CounterVec
-	queryAdmission                  *prometheus.CounterVec
-	noDataSlotPlans                 *prometheus.CounterVec
-	noDataAbsences                  *prometheus.CounterVec
-	targetPlanResolutions           *prometheus.CounterVec
-	targetSelectorResolutions       *prometheus.CounterVec
-	noDataStalls                    *prometheus.CounterVec
-	noDataMemoryRefusals            *prometheus.CounterVec
-	noDataMemoryWrites              *prometheus.CounterVec
-	gapGuardScopeRounds             *prometheus.CounterVec
-	noDataPlansSeen                 prometheus.Counter
-	noDataPlansByHop                *prometheus.CounterVec
-	noDataMemoryReads               *prometheus.CounterVec
-	noDataMemoryRenewals            *prometheus.CounterVec
-	queryFreeCompletions            *prometheus.CounterVec
-	executionEvidenceWrites         *prometheus.CounterVec
-	outputEventsByWireFormat        *prometheus.CounterVec
-	outputEventsWithoutMessage      *prometheus.CounterVec
-	outputEventsByKind              *prometheus.CounterVec
-	outputEventsRejected            *prometheus.CounterVec
-	outputRejectedStrategyOverflow  prometheus.Counter
-	outputRejectedStrategies        *boundedLabels
-	frozenStateRenewals             *prometheus.CounterVec
-	frozenStateCensus               *prometheus.CounterVec
-	segmentContent                  *prometheus.CounterVec
-	sourceWithheldLines             *prometheus.CounterVec
-	activeQGSetCount                prometheus.Gauge
-	activeQGSetBytes                prometheus.Gauge
-	activeQGSetEncode               *prometheus.HistogramVec
-	activeQGSetRedis                *prometheus.HistogramVec
-	scheduleCutoverPayload          prometheus.Gauge
-	scheduleCutoverTimelineMax      prometheus.Gauge
-	scheduleTimelineBytes           prometheus.Histogram
-	scheduleSegmentsPruned          prometheus.Counter
-	envelopePass                    *prometheus.CounterVec
-	retainedShareApproaching        prometheus.Counter
-	envelopeApply                   prometheus.Counter
-	schedulePruneSkipped            *prometheus.CounterVec
-	scheduleCutoverDuration         *prometheus.HistogramVec
-	scheduleCutovers                *prometheus.CounterVec
-	replayExpiries                  *prometheus.CounterVec
-	rangeGateDecisions              *prometheus.CounterVec
-	statePreflights                 *prometheus.CounterVec
-	scheduleCutoverQueryGroups      *prometheus.CounterVec
-	scheduleCutoverTimelinesRead    prometheus.Gauge
+	workflow                       workflowMetrics
+	shortPeriod                    shortPeriodMetrics
+	queryStatus                    queryStatusMetrics
+	queryUnavailable               queryUnavailableMetrics
+	queryCooldown                  *prometheus.CounterVec
+	slotReadiness                  slotReadinessMetrics
+	slotWait                       *prometheus.HistogramVec
+	slotTiming                     *prometheus.HistogramVec
+	work                           *prometheus.CounterVec
+	busy                           *prometheus.CounterVec
+	lastProgress                   *prometheus.GaugeVec
+	capacity                       *prometheus.CounterVec
+	stateWriteReuse                *prometheus.CounterVec
+	stateWriteChange               *prometheus.CounterVec
+	stateAlreadyApplied            *prometheus.CounterVec
+	stateVersionConflict           *prometheus.CounterVec
+	ownershipRefusals              *prometheus.CounterVec
+	sourceObservations             *prometheus.CounterVec
+	sourceRefreshes                *prometheus.CounterVec
+	sourceCompiles                 *prometheus.CounterVec
+	sourceReads                    *prometheus.CounterVec
+	sourceStrategiesRead           prometheus.Counter
+	sourceChangeSignalAge          prometheus.Gauge
+	activationFailures             *prometheus.CounterVec
+	ownedQueryGroups               *prometheus.GaugeVec
+	ownershipTransitions           *prometheus.CounterVec
+	queryAdmission                 *prometheus.CounterVec
+	noDataSlotPlans                *prometheus.CounterVec
+	noDataAbsences                 *prometheus.CounterVec
+	targetPlanResolutions          *prometheus.CounterVec
+	targetSelectorResolutions      *prometheus.CounterVec
+	noDataStalls                   *prometheus.CounterVec
+	noDataMemoryRefusals           *prometheus.CounterVec
+	noDataMemoryWrites             *prometheus.CounterVec
+	gapGuardScopeRounds            *prometheus.CounterVec
+	noDataPlansSeen                prometheus.Counter
+	noDataPlansByHop               *prometheus.CounterVec
+	noDataMemoryReads              *prometheus.CounterVec
+	noDataMemoryRenewals           *prometheus.CounterVec
+	queryFreeCompletions           *prometheus.CounterVec
+	executionEvidenceWrites        *prometheus.CounterVec
+	outputEventsByWireFormat       *prometheus.CounterVec
+	outputEventsWithoutMessage     *prometheus.CounterVec
+	outputEventsByKind             *prometheus.CounterVec
+	outputEventsRejected           *prometheus.CounterVec
+	outputRejectedStrategyOverflow prometheus.Counter
+	outputRejectedStrategies       *boundedLabels
+	frozenStateRenewals            *prometheus.CounterVec
+	frozenStateCensus              *prometheus.CounterVec
+	segmentContent                 *prometheus.CounterVec
+	sourceWithheldLines            *prometheus.CounterVec
+	activeQGSetCount               prometheus.Gauge
+	activeQGSetBytes               prometheus.Gauge
+	activeQGSetEncode              *prometheus.HistogramVec
+	activeQGSetRedis               *prometheus.HistogramVec
+	scheduleCutoverPayload         prometheus.Gauge
+	scheduleCutoverTimelineMax     prometheus.Gauge
+	scheduleTimelineBytes          prometheus.Histogram
+	scheduleSegmentsPruned         prometheus.Counter
+	envelopePass                   *prometheus.CounterVec
+	retainedShareApproaching       prometheus.Counter
+	envelopeApply                  prometheus.Counter
+	schedulePruneSkipped           *prometheus.CounterVec
+	scheduleCutoverDuration        *prometheus.HistogramVec
+	scheduleCutovers               *prometheus.CounterVec
+	replayExpiries                 *prometheus.CounterVec
+	rangeGateDecisions             *prometheus.CounterVec
+	statePreflights                *prometheus.CounterVec
+	scheduleCutoverQueryGroups     *prometheus.CounterVec
+	scheduleCutoverTimelinesRead   prometheus.Gauge
+	// The last successful cutover's exact duration, set with its payload and
+	// timelines read so the three describe one cutover; the first
+	// successful cutover of this process, which reads every timeline, kept
+	// apart and never overwritten; every successful cutover's payload as a
+	// distribution. See observeScheduleCutover.
+	scheduleCutoverLastDuration   prometheus.Gauge
+	scheduleCutoverFirstDuration  prometheus.Gauge
+	scheduleCutoverFirstTimelines prometheus.Gauge
+	scheduleCutoverPayloadSize    prometheus.Histogram
+	// scheduleCutoverFirstSeen is a pointer: the metrics are passed by value,
+	// and a flag copied with them would never stay set.
+	scheduleCutoverFirstSeen        *atomic.Bool
 	queryFailures                   *prometheus.CounterVec
 	objectCatalogObjects            *prometheus.CounterVec
 	objectCatalogRedis              *prometheus.HistogramVec
@@ -190,6 +202,15 @@ type phaseTwoMetrics struct {
 }
 
 var activeQGSetDurationBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30}
+
+// scheduleCutoverDurationBuckets are the Active Set buckets with 10 and 20
+// seconds between 5 and 30: a leader's first cutover reads every timeline
+// and lands there, and "under 30 seconds" could not tell a change of it.
+var scheduleCutoverDurationBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 10, 20, 30}
+
+// scheduleCutoverPayloadBuckets run from 1 KiB to 16 MiB by fours: a cutover
+// writing only heads is kilobytes, one writing every timeline megabytes.
+var scheduleCutoverPayloadBuckets = prometheus.ExponentialBuckets(1024, 4, 8)
 
 // leaderForwardBuckets resolve the forward's own bounds: two seconds for a
 // strategy's standing, two and a half for a diagnosis page.
@@ -713,7 +734,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"have both stayed at zero for a whole retention window. A write request that fails part-way reports no " +
 			"items, so its round is under-counted, never over-counted."})
 	metrics.schedulePruneSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_prune_skipped_total", Help: "Schedule timelines a cutover left unpruned, by reason."}, []string{"reason"})
-	metrics.scheduleCutoverDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_duration_seconds", Help: "Publication cutover compare-and-set duration.", Buckets: activeQGSetDurationBuckets}, []string{"result"})
+	metrics.scheduleCutoverDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_duration_seconds", Help: "Publication cutover compare-and-set duration.", Buckets: scheduleCutoverDurationBuckets}, []string{"result"})
+	metrics.scheduleCutoverFirstSeen = new(atomic.Bool)
+	metrics.scheduleCutoverLastDuration = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_last_duration_seconds",
+		Help: "Exact duration of the last successful publication cutover, set together with schedule_cutover_payload_bytes and schedule_cutover_timelines_read so the three describe the same cutover."})
+	metrics.scheduleCutoverFirstDuration = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_first_duration_seconds",
+		Help: "Exact duration of this process's first successful publication cutover, which reads every timeline: the full read is decided once per process and not again when leadership is lost and regained, so a later term's first cutover does not read everything and is not this one. Set once and never overwritten; see schedule_cutover_first_timelines_read for whether it has run."})
+	metrics.scheduleCutoverFirstTimelines = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_first_timelines_read",
+		Help: "Timelines this process's first successful publication cutover read; set once with schedule_cutover_first_duration_seconds. Zero means this process has not completed a cutover yet: a successful one reads at least one timeline."})
+	metrics.scheduleCutoverPayloadSize = prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_payload_size_bytes",
+		Help: "Bytes each successful publication cutover sent, as a distribution since the process started; schedule_cutover_payload_bytes is the last one only.", Buckets: scheduleCutoverPayloadBuckets})
 	for _, reason := range observability.SchedulePruneSkipReasons {
 		metrics.schedulePruneSkipped.WithLabelValues(reason)
 	}
@@ -1556,7 +1586,8 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.activeQGSetCount, m.activeQGSetBytes, m.activeQGSetEncode, m.activeQGSetRedis,
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
-		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.replayExpiries, m.rangeGateDecisions, m.statePreflights,
+		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.scheduleCutoverLastDuration, m.scheduleCutoverFirstDuration,
+		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.rangeGateDecisions, m.statePreflights,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
@@ -1726,6 +1757,12 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 			m.scheduleCutoverPayload.Set(float64(facts.PayloadBytes))
 			m.scheduleCutoverTimelineMax.Set(float64(facts.MaxTimelineBytes))
 			m.scheduleCutoverTimelinesRead.Set(float64(facts.TimelinesRead))
+			m.scheduleCutoverLastDuration.Set(facts.Duration.Seconds())
+			m.scheduleCutoverPayloadSize.Observe(float64(facts.PayloadBytes))
+			if m.scheduleCutoverFirstSeen.CompareAndSwap(false, true) {
+				m.scheduleCutoverFirstDuration.Set(facts.Duration.Seconds())
+				m.scheduleCutoverFirstTimelines.Set(float64(facts.TimelinesRead))
+			}
 			for decision, count := range facts.QueryGroups {
 				m.scheduleCutoverQueryGroups.WithLabelValues(decision).Add(float64(count))
 			}
