@@ -341,6 +341,14 @@ type HealthResponse struct {
 	// the two are answers from one read, and splitting them would let a page
 	// show a verdict from one moment beside occupancy from another.
 	Capacity *CapacityView `json:"capacity"`
+	// VerdictHistory is the last changes of the verdict this replica
+	// decided, oldest first, each with the degradations, gaps and counts
+	// that decided it; VerdictHistorySince is when the record starts, which
+	// is this process's first verdict. See RecordVerdict.
+	VerdictHistory      []VerdictChange `json:"verdict_history,omitempty"`
+	VerdictHistorySince *time.Time      `json:"verdict_history_since,omitempty"`
+	// VerdictHistoryReplica is the replica whose record VerdictHistory is.
+	VerdictHistoryReplica string `json:"verdict_history_replica,omitempty"`
 }
 
 // Count is one value and how many anomalies carry it.
@@ -880,6 +888,8 @@ func NewHandler(
 		// findings, as the lines the list route draws.
 		at := now()
 		Decide(&view, at, stallAfter)
+		service.RecordVerdict(&view, at)
+		history, since := service.VerdictHistory()
 		columns := Report(&view, at).Columns
 		writeJSON(response, http.StatusOK, HealthResponse{
 			Cohorts: cohortList(Cohorts(&view, columns)), Cooling: Cooling(&view, columns, at),
@@ -915,7 +925,8 @@ func NewHandler(
 			DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,
 			Overdue: view.Overdue, Dispatch: view.Dispatch, Schedule: view.Schedule,
 			Gaps: view.Gaps, Capacity: view.Capacity,
-			Load: LoadOf(&view, now()),
+			Load:           LoadOf(&view, now()),
+			VerdictHistory: history, VerdictHistorySince: momentOrNil(since), VerdictHistoryReplica: service.VerdictReplica(),
 		})
 	})
 	return mux, nil

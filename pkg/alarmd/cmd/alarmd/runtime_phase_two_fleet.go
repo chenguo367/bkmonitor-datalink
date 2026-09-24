@@ -682,6 +682,9 @@ func fleetVerdictSource(
 		// differently: it used to mark stalling on the anomaly list alone
 		// while the page marked every column.
 		fleet.Decide(&view, at, stallAfter)
+		// A scrape decides the verdict too, and it is the one that runs
+		// whether or not anybody is looking: it keeps the record current.
+		service.RecordVerdict(&view, at)
 		return fleetVerdictOf(view, at)
 	}
 }
