@@ -86,6 +86,11 @@ func TestDiagnoseEnvironmentAddsTheDeploymentToTheFirstPage(t *testing.T) {
 	if replicas := deployment["replicas"].(map[string]any); replicas["reason"] != "service_account_not_mounted" {
 		t.Errorf("replicas = %v", replicas)
 	}
+	// Every server that answered has a memory standing; the one that did not
+	// is its finding only.
+	if memory, _ := deployment["redis_memory"].([]any); len(memory) != 3 {
+		t.Errorf("redis_memory = %v, want the three answering servers", deployment["redis_memory"])
+	}
 	findings := findingsOf(t, out)
 	for _, want := range []struct{ code, detail string }{
 		{FindingRedisEvictionPolicy, "allkeys-lru"}, {FindingRedisEvictedKeys, "evicted_keys=3"},
@@ -122,5 +127,55 @@ func TestDiagnoseEnvironmentIsIncompleteWhenAPageDoesNotProveItself(t *testing.T
 	findings := findingsOf(t, out)
 	if !hasFinding(findings, FindingPartUnreadable, "operation not registered") {
 		t.Errorf("unregistered parts not named: %+v", findings)
+	}
+}
+
+// Memory past 80% of maxmemory is a finding, at 80% it is not: one point on
+// each side of the line, with no rounding between them. No limit is no
+// finding and reads as "不限" on the standing; a count not reported is an
+// unknown, never a pass.
+func TestRedisMemoryNearTheLimitIsReportedPastItsLine(t *testing.T) {
+	server := func(role, used, limit string) map[string]any {
+		fields := map[string]any{"maxmemory_policy": "noeviction", "evicted_keys": "0"}
+		if used != "" {
+			fields["used_memory"] = used
+		}
+		if limit != "" {
+			fields["maxmemory"] = limit
+		}
+		return map[string]any{"roles": []any{role}, "address": role + ":1", "status": "ok", "fields": fields}
+	}
+	findings, memory := redisFindings(map[string]any{"servers": []any{
+		server("at", "8000", "10000"), server("past", "8001", "10000"), server("over", "12000", "10000"),
+		server("unlimited", "999999", "0"), server("nomax", "1", ""), server("noused", "", "10000"),
+	}})
+	near := map[string]string{}
+	unknown := map[string]string{}
+	for _, finding := range findings {
+		switch finding.Code {
+		case FindingRedisMemoryNearLimit:
+			near[finding.Scope] = finding.Detail
+		case FindingRedisInfoUnknown:
+			unknown[finding.Scope] = finding.Detail
+		}
+	}
+	if _, found := near["[at]@at:1"]; found {
+		t.Errorf("exactly 80%% was reported: %v", near)
+	}
+	if near["[past]@past:1"] != "used_memory=8001 maxmemory=10000 share=80.01%" || near["[over]@over:1"] == "" {
+		t.Errorf("past the line not reported with its counts: %v", near)
+	}
+	if _, found := near["[unlimited]@unlimited:1"]; found {
+		t.Errorf("a server without a limit was reported: %v", near)
+	}
+	if unknown["[nomax]@nomax:1"] != "maxmemory not reported" || unknown["[noused]@noused:1"] != "used_memory not reported" {
+		t.Errorf("unreported counts not named unknown: %v", unknown)
+	}
+	shares := map[string]string{}
+	for _, standing := range memory {
+		shares[standing.Scope] = standing.Share
+	}
+	if shares["[unlimited]@unlimited:1"] != "不限" || shares["[at]@at:1"] != "80.00%" || shares["[nomax]@nomax:1"] != "未知" || len(memory) != 6 {
+		t.Errorf("standings %+v", memory)
 	}
 }
