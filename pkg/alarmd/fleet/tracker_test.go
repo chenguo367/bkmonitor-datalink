@@ -1361,7 +1361,7 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 	// The run counters and the round-over-round progress are the tracker's
 	// own: one round cannot supply them. Measure is the row's word for what
 	// WorstValid counts, a constant of the field and not of the round.
-	rowOnly := map[string]bool{"ShortRounds": true, "RefusedRounds": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true,
+	rowOnly := map[string]bool{"ShortRounds": true, "RefusedRounds": true, "Held": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true,
 		"ConstrainedRounds": true, "ResumedRounds": true,
 		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "UnchangedRounds": true, "Measure": true,
 		"WorstWindow": true, "WorstWindowChanged": true, "Windows": true, "RoundsRemembered": true, "RoundsKept": true}
@@ -1885,16 +1885,22 @@ func TestARefusedReadingHoldsTheShortRunRatherThanEndingIt(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %+v, want the object listed", rows)
 	}
-	// The last round was refused: the row shows the refusal, not a stale
-	// reading. The next read round shows the held run.
-	if rows[0].Coverage != nil || rows[0].CoverageRejected == nil {
-		t.Fatalf("row after a refused round = %+v, want the refusal where the reading would be", rows[0])
+	// The last round was refused: the row carries the refusal beside the
+	// run's last reading, marked held, and the judgement the held counts
+	// reach stays on the row -- it does not flip to the refusal's line on
+	// every refused round.
+	if held := rows[0].Coverage; held == nil || !held.Held || rows[0].CoverageRejected == nil ||
+		held.ShortRounds != uint32(read) || held.RefusedRounds != uint32(read) {
+		t.Fatalf("row after a refused round = %+v coverage %+v, want the held reading beside the refusal", rows[0], rows[0].Coverage)
+	}
+	if check, _, _ := checkOf(rows[0], Schedule("")); check != CheckSeriesDataMissing {
+		t.Fatalf("check on a refused round = %q, want the held judgement", check)
 	}
 	tracker.Observe(context.Background(), coverageCompletion("qg-refused", 3, 1, 2, required))
 	read++
 	rows = append(tracker.Anomalies(), tracker.Undecidable()...)
 	coverage := rows[0].Coverage
-	if coverage == nil || coverage.ShortRounds != uint32(read) || coverage.RefusedRounds != uint32(read-1) {
+	if coverage == nil || coverage.Held || rows[0].CoverageRejected != nil || coverage.ShortRounds != uint32(read) || coverage.RefusedRounds != uint32(read-1) {
 		t.Fatalf("coverage = %+v, want %d short rounds held over %d refused ones", coverage, read, read-1)
 	}
 	// The round-over-round comparison is held too: it compares with the last
@@ -1916,6 +1922,15 @@ func TestARefusedReadingHoldsTheShortRunRatherThanEndingIt(t *testing.T) {
 	if coverage := rows[0].Coverage; coverage == nil || coverage.PreviousKnown || coverage.ShortRounds != 1 || coverage.RefusedRounds != 0 {
 		t.Fatalf("coverage after a round with no reading = %+v, want the run and the comparison started over", coverage)
 	}
+	// A refused round right after a round with no reading has no reading of
+	// the run to hold: the refusal stands alone.
+	tracker.Observe(context.Background(), plain)
+	tracker.Observe(context.Background(), refused)
+	rows = append(tracker.Anomalies(), tracker.Undecidable()...)
+	if rows[0].Coverage != nil || rows[0].CoverageRejected == nil {
+		t.Fatalf("row = coverage %+v rejected %+v, want the refusal alone", rows[0].Coverage, rows[0].CoverageRejected)
+	}
+	tracker.Observe(context.Background(), coverageCompletion("qg-refused", 3, 1, 2, required))
 	// A read round with every window full still ends the run, refusals and
 	// all.
 	tracker.Observe(context.Background(), coverageCompletion("qg-refused", 3, 0, 0, 0))
