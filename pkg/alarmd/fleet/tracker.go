@@ -1431,7 +1431,21 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			state.worstWindow = worstWindow
 			state.lastRead = observation.HistoryCoverage != nil
 		}
+		// A refused round inside a run that has been read keeps the last
+		// reading on the row, marked held and carrying the run's refusals,
+		// beside the refusal: the run counters were held over the round, so
+		// the verdict they support still stands. Dropping the reading put
+		// such an object on the refusal's line every refused round and back
+		// on its window's line every read one, so the judgement the held
+		// counts reached was out of sight half the time. Only a run with no
+		// reading at all leaves the refusal alone on the row.
+		held := state.coverage
 		state.coverage = nil
+		if refusedRound && held != nil {
+			kept := *held
+			kept.Held, kept.RefusedRounds = true, state.refusedRounds
+			state.coverage = &kept
+		}
 		state.coverageRejected = nil
 		if rejected := observation.HistoryCoverageRejected; rejected != nil {
 			state.coverageRejected = &CoverageRejected{Rule: string(rejected.Rule), Series: rejected.Series}

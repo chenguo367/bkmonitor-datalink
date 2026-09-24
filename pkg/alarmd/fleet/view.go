@@ -712,6 +712,10 @@ type HistoryCoverage struct {
 	// neither extended nor ended, so a run with refusals in it is longer in
 	// time than ShortRounds rounds, and this says by how many.
 	RefusedRounds uint32 `json:"refused_rounds,omitempty"`
+	// Held says this is the last reading of the run, kept on a row whose
+	// latest round was refused (CoverageRejected is beside it). The counts
+	// are the run's as they stood; the per-round facts are that reading's.
+	Held bool `json:"held,omitempty"`
 	// EmptyRounds is the same count for windows holding nothing at all. It is
 	// tracked separately rather than inferred from ShortRounds: a window can
 	// be short for an hour and empty only for the last two rounds, and those
@@ -1205,8 +1209,10 @@ type Anomaly struct {
 	// not live long enough to ever fill it. Only the shortfall separates them,
 	// and it used to be discarded in state/window.go.
 	Coverage *HistoryCoverage `json:"coverage,omitempty"`
-	// CoverageRejected stands where Coverage would when the latest round's
-	// coverage facts did not pass the observer's checks: the rule they broke
+	// CoverageRejected is on the row when the latest round's coverage facts
+	// did not pass the observer's checks. It stands where Coverage would
+	// when the run has no reading; beside a held one (Coverage.Held) when it
+	// has. It carries the rule they broke
 	// and, for a rule about one window, that window's series. Nothing the
 	// rule judged untrustworthy comes with it. Without this the row's
 	// coverage was simply absent, which reads exactly like every window
