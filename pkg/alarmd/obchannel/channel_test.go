@@ -255,6 +255,9 @@ func TestStableCatalogAndConditionalSchema(t *testing.T) {
 		{"store.inspect", Params{"family": "dynamic_config", "fields": []any{"is_access_bk_data", "is_access_bk_data"}}, false},
 		{"store.inspect", Params{"family": "source_strategy", "strategy_id": "18446744073709551616"}, false},
 		{"store.inspect", Params{"family": "query_progress", "query_group": "q"}, true},
+		{"store.inspect", Params{"family": "query_cooldown", "query_group": "q"}, true},
+		{"store.inspect", Params{"family": "query_cooldown"}, false},
+		{"store.inspect", Params{"family": "query_cooldown", "query_group": "q", "strategy_id": "1"}, false},
 		{"store.inspect", Params{"family": "target_group", "group_id": "a b"}, false},
 		{"store.inspect", Params{"family": "target_group", "group_id": "a", "strategy_id": "1"}, false},
 	} {
@@ -264,7 +267,7 @@ func TestStableCatalogAndConditionalSchema(t *testing.T) {
 	}
 	_, desc := call(t, c, envelope(c, "describe", "store.inspect", nil))
 	encoded, _ := json.Marshal(desc.Result)
-	for _, word := range []string{"allOf", "additionalProperties", "query_progress", "uniqueItems", "max_commands"} {
+	for _, word := range []string{"allOf", "additionalProperties", "query_progress", "query_cooldown", "uniqueItems", "max_commands"} {
 		if !bytes.Contains(encoded, []byte(word)) {
 			t.Fatalf("schema missing %s", word)
 		}
