@@ -17,6 +17,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/go-redis/redis/v8"
 )
 
@@ -356,6 +357,48 @@ func TestInvalidSelectorsNeverReadRedis(t *testing.T) {
 	for _, request := range []StoreRequest{{Family: "arbitrary"}, {Family: FamilySourceStrategy, StrategyID: "../7"}, {Family: FamilySourceStrategy, StrategyID: "007"}, {Family: FamilyDynamicConfig, Fields: []platformsettings.Field{"password"}}, {Family: FamilyTargetGroup, GroupID: "12", StrategyID: "7"}} {
 		if r := service.Store(context.Background(), request); r.Status != "invalid_input" {
 			t.Fatalf("invalid selector: %+v", r)
+		}
+	}
+}
+
+// The pool record reads back as the owner wrote it; a record under another
+// Query Group's key, one that does not decode, and a store with no prefix
+// are each named rather than read as a record or as absent.
+func TestQueryCooldownRecordIsReadAndCheckedAgainstItsKey(t *testing.T) {
+	client := redisForTest(t)
+	ctx := context.Background()
+	service := New(Options{QueryCooldown: binding(client, "runtime", "rt:phase-two:cooldown")})
+	key := scheduler.QueryCooldownKey("rt:phase-two:cooldown", "group")
+	read := func() Result {
+		return service.Store(ctx, StoreRequest{Family: FamilyQueryCooldown, QueryGroup: "group"})
+	}
+	if r := read(); r.Status != "missing" || r.Location.Key != key {
+		t.Fatalf("no record: %+v", r)
+	}
+	entered := time.Unix(1_790_000_000, 0).UTC()
+	_ = client.Set(ctx, key, encoded(t, scheduler.QueryCooldownRecord{QueryGroup: "group", OwnerEpoch: 3, EnteredAt: entered, Failures: 32}), time.Hour).Err()
+	r := read()
+	record, ok := r.Value.(scheduler.QueryCooldownRecord)
+	if r.Status != "ok" || !r.Complete || !ok || record.OwnerEpoch != 3 || record.Failures != 32 || !record.EnteredAt.Equal(entered) || r.TTLMS == nil || *r.TTLMS <= 0 {
+		t.Fatalf("record: %+v", r)
+	}
+	_ = client.Set(ctx, key, encoded(t, scheduler.QueryCooldownRecord{QueryGroup: "other", OwnerEpoch: 3}), 0).Err()
+	if r := read(); r.Status != "identity_mismatch" || r.Complete || r.Value != nil {
+		t.Fatalf("another Query Group's record: %+v", r)
+	}
+	_ = client.Set(ctx, key, `{"query_group":`, 0).Err()
+	if r := read(); r.Status != "invalid_document" || r.Complete || r.Value != nil {
+		t.Fatalf("undecodable record: %+v", r)
+	}
+	for _, request := range []StoreRequest{{Family: FamilyQueryCooldown}, {Family: FamilyQueryCooldown, QueryGroup: "group", StrategyID: "7"},
+		{Family: FamilyQueryCooldown, QueryGroup: "group", GroupID: "1"}, {Family: FamilyQueryCooldown, QueryGroup: "bad group"}} {
+		if r := service.Store(ctx, request); r.Status != "invalid_input" {
+			t.Fatalf("invalid selector %+v: %+v", request, r)
+		}
+	}
+	for _, missing := range []Options{{}, {QueryCooldown: binding(client, "runtime", "")}} {
+		if r := New(missing).Store(ctx, StoreRequest{Family: FamilyQueryCooldown, QueryGroup: "group"}); r.Status != "not_configured" {
+			t.Fatalf("unconfigured: %+v", r)
 		}
 	}
 }

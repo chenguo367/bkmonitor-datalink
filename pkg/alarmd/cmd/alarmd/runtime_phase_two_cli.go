@@ -199,6 +199,8 @@ func deploymentReads(cfg config.Config, catalog *controlplane.RedisCatalogReposi
 	diagnosticRuntime = newClient(runtimeConnection)
 	options.Published = obevidence.RedisBinding{Client: diagnosticRuntime, Location: obevidence.Location{Role: "runtime", Address: redisAddress(runtimeConnection), Mode: runtimeConnection.Mode, DB: runtimeConnection.DB, Prefix: cfg.Redis.StatePrefix}}
 	options.QueryProgress = options.Published
+	// The pool records sit in the same runtime store, under their own prefix.
+	options.QueryCooldown = obevidence.RedisBinding{Client: diagnosticRuntime, Location: obevidence.Location{Role: "runtime", Address: redisAddress(runtimeConnection), Mode: runtimeConnection.Mode, DB: runtimeConnection.DB, Prefix: queryCooldownPrefix(cfg)}}
 	if connection, configured := cfg.TargetGroupRedis(); configured {
 		options.TargetGroup = bind("target_group", connection, targetGroupPrefix(cfg))
 	}
