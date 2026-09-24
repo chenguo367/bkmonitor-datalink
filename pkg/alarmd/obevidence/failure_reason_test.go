@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,8 +63,8 @@ func TestAReadOnAConnectionCutWhileIdleSaysWhy(t *testing.T) {
 	}
 	time.Sleep(2500 * time.Millisecond)
 	got, _ := readOne(ctx, "fixture", read, "absent")
-	if got.Status != "dependency_unavailable" || got.Reason != redisfailure.ConnectionClosed {
-		t.Fatalf("read after the idle cut: status %s reason %q", got.Status, got.Reason)
+	if got.Status != "dependency_unavailable" || got.Reason != redisfailure.ConnectionClosed || got.ReasonText == "" {
+		t.Fatalf("read after the idle cut: status %s reason %q text %q", got.Status, got.Reason, got.ReasonText)
 	}
 	if len(heard) != 1 || heard[0] != redisfailure.ConnectionClosed {
 		t.Fatalf("the binding heard %v, want one connection_closed", heard)
@@ -78,6 +79,7 @@ func TestAnUnansweredInfoSaysWhy(t *testing.T) {
 	gone := RedisBinding{Client: dead, Location: Location{Role: "runtime", Address: "gone", Mode: "standalone"}, OnFailure: func(reason string) { heard = append(heard, reason) }}
 	got := New(Options{Published: gone}).Info(context.Background())
 	if len(got.Servers) != 1 || got.Servers[0].Status != "dependency_unavailable" || got.Servers[0].Reason != redisfailure.ConnectionRefused ||
+		!strings.Contains(got.Servers[0].ReasonText, "127.0.0.1:1") ||
 		len(heard) != 1 || heard[0] != redisfailure.ConnectionRefused {
 		t.Fatalf("servers %+v heard %v", got.Servers, heard)
 	}

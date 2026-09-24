@@ -108,11 +108,11 @@ func (m *Manager) ActivePairings(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	if len(result) != 2 {
-		return 0, m.storeFailed(redisfailure.MalformedReply)
+		return 0, m.storeFailed(redisfailure.MalformedReply, "the store answered in a shape no script returns")
 	}
 	count, ok := result[1].(int64)
 	if !ok {
-		return 0, m.storeFailed(redisfailure.MalformedReply)
+		return 0, m.storeFailed(redisfailure.MalformedReply, "the store answered in a shape no script returns")
 	}
 	return count, nil
 }
@@ -244,7 +244,7 @@ func (m *Manager) RevokeAll(ctx context.Context) (int64, error) {
 		return 0, err
 	}
 	if len(result) != 3 {
-		return 0, m.storeFailed(redisfailure.MalformedReply)
+		return 0, m.storeFailed(redisfailure.MalformedReply, "the store answered in a shape no script returns")
 	}
 	pairings, _ := result[2].(int64)
 	m.count(CountRevokedAll)

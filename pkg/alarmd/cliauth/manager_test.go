@@ -509,7 +509,7 @@ func TestAnUnansweredStoreSaysWhy(t *testing.T) {
 	var heard []string
 	m, err := New(Options{Redis: dead, Prefix: "test-alarmd", EnvironmentID: "test-env", EnvironmentName: "Test environment",
 		PublicBaseURL: "https://example.test/alarmd/", AdminKey: testAdminKey, Now: func() time.Time { return time.Unix(1, 0) },
-		OnStoreFailure: func(reason string) { heard = append(heard, reason) }})
+		OnStoreFailure: func(reason, detail string) { heard = append(heard, reason, detail) }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,11 +518,11 @@ func TestAnUnansweredStoreSaysWhy(t *testing.T) {
 	if !errors.As(err, &failure) || failure.Code != "auth_store_unavailable" || failure.Reason != "connection_refused" {
 		t.Fatalf("error %#v", err)
 	}
-	if len(heard) != 1 || heard[0] != "connection_refused" {
+	if len(heard) != 2 || heard[0] != "connection_refused" || !strings.Contains(heard[1], "127.0.0.1:1") {
 		t.Fatalf("heard %v", heard)
 	}
 	encoded, _ := json.Marshal(failure)
-	if !strings.Contains(string(encoded), `"reason":"connection_refused"`) {
-		t.Fatalf("the reason does not reach the answer: %s", encoded)
+	if !strings.Contains(string(encoded), `"reason":"connection_refused"`) || strings.Contains(string(encoded), "127.0.0.1") {
+		t.Fatalf("the answer should carry the reason and not the text: %s", encoded)
 	}
 }

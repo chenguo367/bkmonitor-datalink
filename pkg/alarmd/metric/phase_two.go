@@ -1294,7 +1294,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Calls to Redis by the diagnostic clients that were not answered, by client -- evidence (the CLI's " +
 			"store reads), auth (the CLI's authorization store), lifecycle (the start and stop record) -- and by " +
 			"reason: connection_closed (the connection was closed under the call; a pooled connection the network " +
-			"cut while idle fails so), connection_refused, timeout, pool_timeout, canceled, server_error, " +
+			"cut while idle fails so), connection_refused, sentinel_unreachable (no Sentinel answered for the master), " +
+			"timeout, pool_timeout, canceled, server_error, " +
 			"malformed_reply, other. Every cell exists from startup, so a zero is a count.",
 	}, []string{"client", "reason"})
 	for _, client := range DiagnosticRedisClients {

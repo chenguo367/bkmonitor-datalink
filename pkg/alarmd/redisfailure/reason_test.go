@@ -12,8 +12,10 @@ import (
 	"io"
 	"net"
 	"os"
+	"strings"
 	"syscall"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/go-redis/redis/v8"
 )
@@ -45,10 +47,13 @@ func TestEachFailureIsNamedApart(t *testing.T) {
 		context.DeadlineExceeded:                                  Timeout,
 		&net.OpError{Op: "read", Net: "tcp", Err: timeoutError{}}: Timeout,
 		errors.New("redis: connection pool timeout"):              PoolTimeout,
-		context.Canceled:                                          Canceled,
-		serverReply("ERR unknown command"):                        ServerError,
-		redis.Nil:                                                 Other,
-		errors.New("something else"):                              Other,
+		// go-redis v8.11.5 sentinel.go, verbatim, and as a caller wraps it.
+		errors.New("redis: all sentinels specified in configuration are unreachable"):                               SentinelUnreachable,
+		fmt.Errorf("get master: %w", errors.New("redis: all sentinels specified in configuration are unreachable")): SentinelUnreachable,
+		context.Canceled:                   Canceled,
+		serverReply("ERR unknown command"): ServerError,
+		redis.Nil:                          Other,
+		errors.New("something else"):       Other,
 	} {
 		if got := Reason(err); got != want {
 			t.Errorf("Reason(%v) = %q, want %q", err, got, want)
@@ -58,5 +63,17 @@ func TestEachFailureIsNamedApart(t *testing.T) {
 		if reason == "" {
 			t.Fatal("an empty reason in the closed set")
 		}
+	}
+}
+
+// The text a reason of other is read by is the error's own, cut on a
+// character boundary.
+func TestDetailKeepsTheErrorsOwnTextBounded(t *testing.T) {
+	if Detail(nil) != "" || Detail(errors.New("short")) != "short" {
+		t.Fatal("detail of a short error")
+	}
+	long := Detail(errors.New(strings.Repeat("失", 200)))
+	if len(long) > MaxDetailBytes || !utf8.ValidString(long) || len(long) < MaxDetailBytes-3 {
+		t.Fatalf("detail of a long error: %d bytes, valid %v", len(long), utf8.ValidString(long))
 	}
 }

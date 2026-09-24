@@ -67,7 +67,7 @@ func readMany(ctx context.Context, source string, binding RedisBinding, keys []s
 		// was unavailable: an idle connection the network cut and a command
 		// the server refused are fixed in different places.
 		if types[i] == nil || types[i].Err() != nil || ttls[i].Err() != nil {
-			r.Reason = failureReason(txErr, types[i], ttls[i])
+			r.Reason, r.ReasonText = failureReason(txErr, types[i], ttls[i])
 			unanswered = r.Reason
 			continue
 		}
@@ -91,7 +91,7 @@ func readMany(ctx context.Context, source string, binding RedisBinding, keys []s
 			continue
 		}
 		if values[i].Err() != nil {
-			r.Reason = failureReason(txErr, values[i])
+			r.Reason, r.ReasonText = failureReason(txErr, values[i])
 			unanswered = r.Reason
 			continue
 		}
@@ -119,16 +119,17 @@ func readMany(ctx context.Context, source string, binding RedisBinding, keys []s
 	return results, raw
 }
 
-// failureReason is why a read went unanswered: the first failed command's
-// error, else the transaction's, else a reply that was never filled in.
-func failureReason(txErr error, commands ...redis.Cmder) string {
+// failureReason is why a read went unanswered, and the error's own text:
+// the first failed command's error, else the transaction's, else a reply
+// that was never filled in.
+func failureReason(txErr error, commands ...redis.Cmder) (string, string) {
 	for _, command := range commands {
 		if command != nil && command.Err() != nil {
-			return redisfailure.Reason(command.Err())
+			return redisfailure.Reason(command.Err()), redisfailure.Detail(command.Err())
 		}
 	}
 	if txErr != nil {
-		return redisfailure.Reason(txErr)
+		return redisfailure.Reason(txErr), redisfailure.Detail(txErr)
 	}
-	return redisfailure.MalformedReply
+	return redisfailure.MalformedReply, "a reply the transaction did not fill in"
 }

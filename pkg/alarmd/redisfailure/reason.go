@@ -16,6 +16,7 @@ import (
 	"net"
 	"strings"
 	"syscall"
+	"unicode/utf8"
 
 	"github.com/go-redis/redis/v8"
 )
@@ -27,6 +28,9 @@ const (
 	ConnectionClosed = "connection_closed"
 	// ConnectionRefused is no connection made: refused, or no route.
 	ConnectionRefused = "connection_refused"
+	// SentinelUnreachable is no Sentinel answering for the master: the
+	// failure is in the Sentinel layer, not on a master connection.
+	SentinelUnreachable = "sentinel_unreachable"
 	// Timeout is a deadline reached: the call's or the socket's.
 	Timeout = "timeout"
 	// PoolTimeout is no connection free in the client's pool in time.
@@ -42,7 +46,32 @@ const (
 )
 
 // Reasons is every reason, for counters created at startup.
-var Reasons = []string{ConnectionClosed, ConnectionRefused, Timeout, PoolTimeout, Canceled, ServerError, MalformedReply, Other}
+var Reasons = []string{ConnectionClosed, ConnectionRefused, SentinelUnreachable, Timeout, PoolTimeout, Canceled, ServerError, MalformedReply, Other}
+
+// sentinelUnreachable is go-redis v8's own sentence when no Sentinel answers
+// for the master. It wraps nothing, so the sentence is all there is to match.
+const sentinelUnreachable = "all sentinels specified in configuration are unreachable"
+
+// MaxDetailBytes bounds the error text Detail keeps.
+const MaxDetailBytes = 256
+
+// Detail is err's own text, cut to MaxDetailBytes on a character boundary,
+// for a reason of Other to be read by: a count of other says only that it
+// was none of the named ones.
+func Detail(err error) string {
+	if err == nil {
+		return ""
+	}
+	text := err.Error()
+	if len(text) <= MaxDetailBytes {
+		return text
+	}
+	cut := MaxDetailBytes
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
+}
 
 // Reason names why err failed; empty for no error.
 func Reason(err error) string {
@@ -60,6 +89,8 @@ func Reason(err error) string {
 		return ConnectionRefused
 	case err.Error() == "redis: connection pool timeout":
 		return PoolTimeout
+	case strings.Contains(err.Error(), sentinelUnreachable):
+		return SentinelUnreachable
 	}
 	var timeout interface{ Timeout() bool }
 	if errors.As(err, &timeout) && timeout.Timeout() {

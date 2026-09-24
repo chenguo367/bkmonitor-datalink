@@ -68,7 +68,8 @@ type ServerInfo struct {
 	Replicas []ReplicaLink `json:"replicas,omitempty"`
 	// Reason is why a server with status dependency_unavailable did not
 	// answer.
-	Reason string `json:"reason,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	ReasonText string `json:"reason_text,omitempty"`
 }
 
 // InfoResult is every Redis server alarmd is configured with, one entry per
@@ -120,7 +121,7 @@ func (service *Service) Info(ctx context.Context) InfoResult {
 		s.info.ReadAt = &at
 		if err != nil {
 			s.info.Status = "dependency_unavailable"
-			s.info.Reason = redisfailure.Reason(err)
+			s.info.Reason, s.info.ReasonText = redisfailure.Reason(err), redisfailure.Detail(err)
 			s.binding.failed(s.info.Reason)
 			result.Complete = false
 		} else {

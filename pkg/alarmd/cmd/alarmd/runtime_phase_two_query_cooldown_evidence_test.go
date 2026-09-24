@@ -12,6 +12,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,5 +124,32 @@ func TestTheCLIStoreReadsReportAnUnansweredReadByReason(t *testing.T) {
 	out := inspect.Run(context.Background(), obchannel.Params{"family": obevidence.FamilyQueryCooldown, "query_group": "qg"})
 	if out.Error == nil || out.Error.Reason != "connection_refused" || len(heard) != 1 || heard[0] != "connection_refused" {
 		t.Fatalf("error %+v heard %v", out.Error, heard)
+	}
+}
+
+type capturedObservations []observability.Observation
+
+func (captured *capturedObservations) Observe(_ context.Context, observation observability.Observation) {
+	*captured = append(*captured, observation)
+}
+
+// Every CLI client's unanswered call is counted by its reason; the
+// authorization store's is also a limited auth_store line carrying the
+// error's text, which its public answer leaves out. An evidence read's text
+// is in its own result, so it logs nothing.
+func TestCLIRedisFailuresAreCountedAndTheAuthStoresTextLogged(t *testing.T) {
+	recorder := metric.NewRecorder(metric.BuildInfo{})
+	var observed capturedObservations
+	report := cliRedisFailures(recorder, &observed)
+	report("auth", "sentinel_unreachable", "redis: all sentinels specified in configuration are unreachable")
+	report("evidence", "timeout", "")
+	for client, reason := range map[string]string{"auth": "sentinel_unreachable", "evidence": "timeout"} {
+		if got := counterValue(t, recorder, "bkmonitor_alarmd_diagnostic_redis_failures_total", map[string]string{"client": client, "reason": reason}); got != 1 {
+			t.Fatalf("%s/%s counted %v", client, reason, got)
+		}
+	}
+	if len(observed) != 1 || observed[0].Stage != observability.StageAuthStore ||
+		!strings.Contains(observed[0].Err.Error(), "all sentinels specified in configuration are unreachable") {
+		t.Fatalf("observed %+v", observed)
 	}
 }

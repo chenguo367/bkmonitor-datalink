@@ -54,8 +54,10 @@ type Options struct {
 	AdminKey        string
 	Now             func() time.Time
 	// OnStoreFailure, when set, hears the reason of each store call that
-	// was not answered, or answered in a shape no script returns.
-	OnStoreFailure func(reason string)
+	// was not answered, or answered in a shape no script returns, and the
+	// error's own bounded text. The text never reaches an answer: this
+	// route is public, and the text can name an address.
+	OnStoreFailure func(reason, detail string)
 }
 
 type Session struct {
@@ -107,10 +109,10 @@ func storeUnavailable(reason string) *Error {
 	return unavailable
 }
 
-// storeFailed is the store not answering, reported by its reason.
-func (m *Manager) storeFailed(reason string) *Error {
+// storeFailed is the store not answering, reported by its reason and text.
+func (m *Manager) storeFailed(reason, detail string) *Error {
 	if m.onStoreFailure != nil {
-		m.onStoreFailure(reason)
+		m.onStoreFailure(reason, detail)
 	}
 	return storeUnavailable(reason)
 }
@@ -131,7 +133,7 @@ type Manager struct {
 	exchangeWindow  rateWindow
 	refreshWindow   rateWindow
 	counts          counters
-	onStoreFailure  func(reason string)
+	onStoreFailure  func(reason, detail string)
 }
 
 // New validates deployment coordinates without contacting Redis. An empty
@@ -248,30 +250,30 @@ func (m *Manager) run(ctx context.Context, script string, keys []string, args ..
 	// trip. The injected client must disable automatic retries for auth writes.
 	result, err := m.client.Eval(ctx, script, keys, args...).Slice()
 	if err != nil {
-		return nil, m.storeFailed(redisfailure.Reason(err))
+		return nil, m.storeFailed(redisfailure.Reason(err), redisfailure.Detail(err))
 	}
 	return result, nil
 }
 
 func (m *Manager) resultRecord(result []interface{}) (storedRecord, bool, error) {
 	if len(result) < 1 {
-		return storedRecord{}, false, m.storeFailed(redisfailure.MalformedReply)
+		return storedRecord{}, false, m.storeFailed(redisfailure.MalformedReply, "the store answered in a shape no script returns")
 	}
 	status, ok := result[0].(int64)
 	if !ok {
-		return storedRecord{}, false, m.storeFailed(redisfailure.MalformedReply)
+		return storedRecord{}, false, m.storeFailed(redisfailure.MalformedReply, "the store answered in a shape no script returns")
 	}
 	if status == 0 {
 		return storedRecord{}, false, expired()
 	}
 	if len(result) < 3 || status != 1 {
-		return storedRecord{}, false, m.storeFailed(redisfailure.MalformedReply)
+		return storedRecord{}, false, m.storeFailed(redisfailure.MalformedReply, "the store answered in a shape no script returns")
 	}
 	raw, ok := result[1].(string)
 	renewed, renewOK := result[2].(int64)
 	var record storedRecord
 	if !ok || !renewOK || json.Unmarshal([]byte(raw), &record) != nil {
-		return storedRecord{}, false, m.storeFailed(redisfailure.MalformedReply)
+		return storedRecord{}, false, m.storeFailed(redisfailure.MalformedReply, "the store answered in a shape no script returns")
 	}
 	return record, renewed == 1, nil
 }

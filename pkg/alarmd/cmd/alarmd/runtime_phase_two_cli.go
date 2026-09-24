@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/evidenceroute"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/k8sread"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -52,9 +54,27 @@ type cliControlBinding struct {
 	// PublicWindows serves /api/windows on a restricted public surface
 	// (fleet.NewPublicWindowsHandler). Nil leaves the route unserved there.
 	PublicWindows http.Handler
-	// RedisFailures, when set, counts an unanswered call of the CLI's own
-	// Redis clients -- evidence, auth -- by its reason.
-	RedisFailures func(client, reason string)
+	// RedisFailures, when set, hears an unanswered call of the CLI's own
+	// Redis clients -- evidence, auth -- by its reason, with the error's
+	// bounded text where the answer cannot carry it (auth).
+	RedisFailures func(client, reason, detail string)
+}
+
+// cliRedisFailures counts an unanswered call of a CLI client by its reason,
+// and for the authorization store, whose public answer carries the reason
+// only, also logs the error's bounded text as a limited auth_store line.
+func cliRedisFailures(recorder *metric.Recorder, observer observability.Observer) func(client, reason, detail string) {
+	return func(client, reason, detail string) {
+		recorder.ObserveDiagnosticRedisFailure(client, reason)
+		if client != "auth" {
+			return
+		}
+		observeRuntime(context.Background(), observer, observability.Observation{
+			Component: observability.ComponentRuntime, Stage: observability.StageAuthStore,
+			Result: observability.ResultFailed, Direction: observability.DirectionInternal,
+			ReasonCode: observability.ReasonContractRetryable, Err: fmt.Errorf("authorization store %s: %s", reason, detail),
+		})
+	}
 }
 
 // cliLifecycleOperation reads every replica's start and stop record, which
@@ -100,7 +120,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	failed := func(client string) func(string) {
 		return func(reason string) {
 			if control.RedisFailures != nil {
-				control.RedisFailures(client, reason)
+				control.RedisFailures(client, reason, "")
 			}
 		}
 	}
@@ -135,7 +155,11 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	// Authentication has its own pool, so an evidence read cannot occupy it.
 	manager, err := cliauth.New(cliauth.Options{Redis: newClient(cfg.RuntimeStoreRedis()), Prefix: cfg.Redis.StatePrefix, EnvironmentID: cfg.CLI.EnvironmentID, EnvironmentName: cfg.CLI.EnvironmentName, PublicBaseURL: cfg.CLI.PublicBaseURL, AdminKey: cfg.CLI.AdminKey,
-		OnStoreFailure: failed("auth")})
+		OnStoreFailure: func(reason, detail string) {
+			if control.RedisFailures != nil {
+				control.RedisFailures("auth", reason, detail)
+			}
+		}})
 	if err != nil {
 		return composeCLI(native, nil, nil), closeClients, false
 	}

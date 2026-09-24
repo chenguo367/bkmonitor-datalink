@@ -116,6 +116,11 @@ type Result struct {
 	Limits   Limits     `json:"limits"`
 	Value    any        `json:"value"`
 	Reason   string     `json:"reason,omitempty"`
+	// ReasonText is the error's own text, bounded, beside a reason for a
+	// read the server did not answer: other names nothing on its own. The
+	// result goes only to an authorized session, which reads addresses
+	// already.
+	ReasonText string `json:"reason_text,omitempty"`
 }
 
 func result(source string, binding RedisBinding, status string) Result {
