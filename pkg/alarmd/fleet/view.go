@@ -707,6 +707,11 @@ type HistoryCoverage struct {
 	// tell a filling window from a permanently short one; both are short. Only
 	// the sequence separates them, and a filling window converges.
 	ShortRounds uint32 `json:"short_rounds"`
+	// RefusedRounds is how many rounds of that run had their window reading
+	// refused by the observer. The run counts are held over such a round,
+	// neither extended nor ended, so a run with refusals in it is longer in
+	// time than ShortRounds rounds, and this says by how many.
+	RefusedRounds uint32 `json:"refused_rounds,omitempty"`
 	// EmptyRounds is the same count for windows holding nothing at all. It is
 	// tracked separately rather than inferred from ShortRounds: a window can
 	// be short for an hour and empty only for the last two rounds, and those
