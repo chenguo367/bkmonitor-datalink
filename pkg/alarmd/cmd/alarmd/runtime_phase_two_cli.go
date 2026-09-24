@@ -54,6 +54,24 @@ type cliControlBinding struct {
 	PublicWindows http.Handler
 }
 
+// cliLifecycleOperation reads every replica's start and stop record, which
+// outlives the Pods it describes.
+func cliLifecycleOperation(client redis.UniversalClient, key string) obchannel.Operation {
+	return obchannel.Operation{ID: "lifecycle.get", Summary: "读取各副本最近的启动与停止记录（含停止原因、错误），以及同名副本两次启动之间没写停止的次数（OOM、SIGKILL 这类不干净退出）；Pod 被删后仍可读。",
+		EvidenceScope: "deployment", Fields: map[string]obchannel.Field{}, OutputSchema: obchannel.SchemaOf(lifecycleReading{}),
+		Limits: map[string]any{"entries": lifecycleRecordEntries, "redis_commands": 1},
+		Run: func(ctx context.Context, _ obchannel.Params) obchannel.Outcome {
+			reading, err := readLifecycle(ctx, client, key)
+			if err != nil {
+				return obchannel.Outcome{Error: &obchannel.Failure{Code: "store_unavailable", Message: "the runtime store did not answer the lifecycle read"}}
+			}
+			return obchannel.Outcome{Value: reading, Complete: reading.Unreadable == 0,
+				Limitations: []string{"Only the last 64 starts and stops are kept.",
+					"unclean_restarts counts starts not followed by a stop record: an OOM kill or SIGKILL, but also a stop the store could not take. Not every one is a crash.",
+					"The replica name is the worker id, which is the Pod name: a container restarted in place counts under the same name, while a Pod that died and was replaced leaves its old name's last entry a start - read the old name's last entry for that case."}}
+		}}
+}
+
 func cliRuntimeOperation(facts func() *observability.RuntimeConfigFacts, settings *platformsettings.Cache) obchannel.Operation {
 	return obchannel.Operation{ID: "runtime.get", Summary: "读取实际回答进程的运行配置、预算、连接位置和已采用动态配置；可指定实例或按执行租约定位逻辑 Worker。", EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{}, OutputSchema: obchannel.SchemaOf(cliRuntimeFacts{}), Limits: map[string]any{"redis_commands": 0, "scope": "answering_replica"}, Run: func(context.Context, obchannel.Params) obchannel.Outcome {
 		value := cliRuntimeFacts{Scope: "answering_replica", ReadAt: time.Now().UTC(), Config: facts()}
@@ -129,6 +147,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	ops := append(obchannel.NativeOperations(native), obchannel.StoreOperations(obevidence.New(options))...)
 	ops = append(ops, cliRuntimeOperation(facts, settings))
+	ops = append(ops, cliLifecycleOperation(diagnosticRuntime, lifecycleRecordKey(cfg)))
 	// alarmd's own workload, read through this Pod's ServiceAccount. Any
 	// replica answers, so a crashing one is read from one that is up.
 	// The owner chain starts at this Pod: its hostname is its name, whatever
