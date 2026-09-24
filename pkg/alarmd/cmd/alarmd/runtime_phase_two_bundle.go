@@ -973,6 +973,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	fleetService.SetReplica(cfg.PhaseTwo.Worker.ID)
 	// Windows live under the same phase-two prefix as the rest of the runtime
 	// objects, and every replica reads them on the reconcile tick it already
 	// runs, so opening one needs neither a restart nor a release.

@@ -63,6 +63,10 @@ type Service struct {
 	// its cost would otherwise scale with how many people are looking at it.
 	// The mutex is held across the refresh on purpose: concurrent viewers then
 	// collapse into one read instead of racing to issue their own.
+	// verdicts is the record of the deployment verdict's changes; see
+	// RecordVerdict.
+	verdicts verdictHistory
+
 	sourceMu    sync.Mutex
 	sourcesAt   time.Time
 	sourcesFor  time.Duration
