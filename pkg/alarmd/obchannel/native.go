@@ -298,26 +298,26 @@ func (w *capture) Write(b []byte) (int, error) {
 
 func invokeNative(ctx context.Context, handler http.Handler, path string, query url.Values) Outcome {
 	if handler == nil {
-		return Outcome{Error: &Failure{"not_configured", "Fleet evidence API is not configured."}}
+		return Outcome{Error: &Failure{Code: "not_configured", Message: "Fleet evidence API is not configured."}}
 	}
 	req := &http.Request{Method: http.MethodGet, URL: &url.URL{Path: path, RawQuery: query.Encode()}, Header: make(http.Header)}
 	// PathEscape is deliberately undone into URL.Path, the decoded path
 	// contract of net/http. An identifier containing '/' is not a valid object.
 	decoded, err := url.PathUnescape(path)
 	if err != nil {
-		return Outcome{Error: &Failure{"invalid_input", "Invalid object path."}}
+		return Outcome{Error: &Failure{Code: "invalid_input", Message: "Invalid object path."}}
 	}
 	req.URL.Path = decoded
 	w := &capture{header: make(http.Header)}
 	handler.ServeHTTP(w, req.WithContext(ctx))
 	if w.overflow {
-		return Outcome{Error: &Failure{"response_budget_exceeded", "Native evidence exceeded the byte limit."}}
+		return Outcome{Error: &Failure{Code: "response_budget_exceeded", Message: "Native evidence exceeded the byte limit."}}
 	}
 	var result map[string]any
 	dec := json.NewDecoder(bytes.NewReader(w.body.Bytes()))
 	dec.UseNumber()
 	if err := dec.Decode(&result); err != nil || result == nil {
-		return Outcome{Error: &Failure{"invalid_upstream_response", "The evidence handler did not return a JSON object."}}
+		return Outcome{Error: &Failure{Code: "invalid_upstream_response", Message: "The evidence handler did not return a JSON object."}}
 	}
 	out := Outcome{Value: result, Complete: true}
 	if complete, ok := result["complete"].(bool); ok && !complete {
@@ -357,7 +357,7 @@ func invokeNative(ctx context.Context, handler http.Handler, path string, query 
 		// Missing retained data and partial domain responses are evidence,
 		// whereas a bare handler error is a failed call. Neither means healthy.
 		if _, domain := result["query_group"]; !domain {
-			out.Error = &Failure{"evidence_unavailable", fmt.Sprintf("Evidence handler returned HTTP %d; inspect result for the precise reason.", w.status)}
+			out.Error = &Failure{Code: "evidence_unavailable", Message: fmt.Sprintf("Evidence handler returned HTTP %d; inspect result for the precise reason.", w.status)}
 		} else {
 			out.Limitations = append(out.Limitations, fmt.Sprintf("Native HTTP status %d; object or evidence may be absent or unavailable.", w.status))
 		}

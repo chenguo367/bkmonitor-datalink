@@ -110,6 +110,9 @@ type Outcome struct {
 type Failure struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	// Reason is why a store the read depends on did not answer, when that is
+	// what failed: one of redisfailure's reasons.
+	Reason string `json:"reason,omitempty"`
 }
 type Availability struct {
 	Available bool   `json:"available"`
@@ -320,7 +323,12 @@ func New(options Options) (*Channel, error) {
 func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	meta := c.localMeta("")
 	fail := func(status int, code, message string) {
-		c.write(w, status, Response{Status: "error", Summary: message, Error: &Failure{code, message}, Meta: meta})
+		c.write(w, status, Response{Status: "error", Summary: message, Error: &Failure{Code: code, Message: message}, Meta: meta})
+	}
+	// An authorization that failed says why the store did not answer.
+	failAuth := func(err error, message string) {
+		c.write(w, authStatus(err), Response{Status: "error", Summary: message,
+			Error: &Failure{Code: cliauth.ErrorCode(err), Message: message, Reason: authReason(err)}, Meta: meta})
 	}
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(RequestTimeout))
@@ -365,7 +373,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	session, err := c.options.Auth.Authenticate(ctx, token)
 	if err != nil {
-		fail(authStatus(err), cliauth.ErrorCode(err), "Session unavailable; run auth login if expired or revoked.")
+		failAuth(err, "Session unavailable; run auth login if expired or revoked.")
 		return
 	}
 	if session.EnvironmentID != c.options.EnvironmentID || session.Scope != cliauth.ScopeReadonly {
@@ -417,7 +425,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Revision != c.revision {
-		c.write(w, 409, Response{Status: "error", Summary: "Catalog changed; describe the operation again. This invocation did not execute or renew the session.", Error: &Failure{"catalog_changed", "Expected catalog revision does not match."}, Next: []Call{{Mode: "describe", Operation: op.ID, Params: Params{}, Reason: "Describe this operation before retrying."}}, Meta: meta})
+		c.write(w, 409, Response{Status: "error", Summary: "Catalog changed; describe the operation again. This invocation did not execute or renew the session.", Error: &Failure{Code: "catalog_changed", Message: "Expected catalog revision does not match."}, Next: []Call{{Mode: "describe", Operation: op.ID, Params: Params{}, Reason: "Describe this operation before retrying."}}, Meta: meta})
 		return
 	}
 	params, target, err := invocationParams(op, req.Params)
@@ -434,7 +442,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// internal route carries operation context, never the CLI credential.
 		session, err = c.options.Auth.Admit(ctx, session, req.Renew)
 		if err != nil {
-			fail(authStatus(err), cliauth.ErrorCode(err), "Session unavailable at routing admission.")
+			failAuth(err, "Session unavailable at routing admission.")
 			return
 		}
 		out := c.options.Route(ctx, Invocation{EnvironmentID: c.options.EnvironmentID, Version: req.Version, Revision: req.Revision, Operation: req.Operation, RequestID: meta.RequestID, Params: params, Target: target})
@@ -471,7 +479,7 @@ func (c *Channel) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// rejected budgets do not count as activity and cannot prolong a session.
 	session, err = c.options.Auth.Admit(ctx, session, req.Renew)
 	if err != nil {
-		fail(authStatus(err), cliauth.ErrorCode(err), "Session unavailable at execution admission.")
+		failAuth(err, "Session unavailable at execution admission.")
 		return
 	}
 	meta.Session = &SessionMeta{ID: session.ID, ExpiresAt: session.ExpiresAt, Renewed: session.Renewed}
@@ -512,7 +520,7 @@ func (c *Channel) prepareResponse(response Response) Response {
 		response.Result = nil
 		response.Evidence = Evidence{Limitations: []string{"result_not_returned"}}
 		response.Next = []Call{}
-		response.Error = &Failure{"response_budget_exceeded", response.Summary}
+		response.Error = &Failure{Code: "response_budget_exceeded", Message: response.Summary}
 	}
 	return response
 }
@@ -522,6 +530,13 @@ func available(op Operation) Availability {
 		return op.Availability()
 	}
 	return Availability{Available: true}
+}
+func authReason(err error) string {
+	var detail *cliauth.Error
+	if errors.As(err, &detail) {
+		return detail.Reason
+	}
+	return ""
 }
 func authStatus(err error) int {
 	var detail *cliauth.Error

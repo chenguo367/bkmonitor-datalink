@@ -105,7 +105,7 @@ func SlotOperations(options SlotOptions) []Operation {
 		for _, query := range plan.Prepared.Queries {
 			preview, err := options.UQ.Preview(query.Spec)
 			if err != nil {
-				return Outcome{Error: &Failure{"query_plan_unavailable", "Historical query cannot be rendered by this build."}}
+				return Outcome{Error: &Failure{Code: "query_plan_unavailable", Message: "Historical query cannot be rendered by this build."}}
 			}
 			item := SlotQueryPlan{PhysicalQueryDigest: query.Spec.Digest, Request: preview, Inputs: []SlotQueryInput{}}
 			for _, requirement := range append(append([]execution.DataRequirement{}, query.Requirements...), query.ReadinessInvalidRequirements...) {
@@ -155,7 +155,7 @@ func SlotOperations(options SlotOptions) []Operation {
 		}
 		slot := slotContext(plan)
 		changed := func(code, message string) Outcome {
-			return Outcome{Error: &Failure{code, message}, Next: []Call{{Operation: "slot.get", Params: slotParams(slot), Reason: "在实际执行实例重新读取保留合同与请求预览；未执行UQ查询。"}}}
+			return Outcome{Error: &Failure{Code: code, Message: message}, Next: []Call{{Operation: "slot.get", Params: slotParams(slot), Reason: "在实际执行实例重新读取保留合同与请求预览；未执行UQ查询。"}}}
 		}
 		if slot.ContractDigest != p.String("contract_digest") {
 			return changed("slot_contract_changed", "Retained Slot contract differs from the preview; no UQ query executed.")
@@ -186,7 +186,7 @@ func SlotOperations(options SlotOptions) []Operation {
 			if errors.As(err, &diagnostic) {
 				code = diagnostic.Code
 			}
-			out.Error = &Failure{code, "Diagnostic UQ query did not complete; inspect retained partial query evidence."}
+			out.Error = &Failure{Code: code, Message: "Diagnostic UQ query did not complete; inspect retained partial query evidence."}
 		}
 		return out
 	}
@@ -195,7 +195,7 @@ func SlotOperations(options SlotOptions) []Operation {
 
 func resolveSlot(ctx context.Context, options SlotOptions, p Params) (SlotPlan, *Failure) {
 	if options.Resolve == nil || options.UQ == nil {
-		return SlotPlan{}, &Failure{"operation_unavailable", "Slot diagnostics are not configured."}
+		return SlotPlan{}, &Failure{Code: "operation_unavailable", Message: "Slot diagnostics are not configured."}
 	}
 	slot := execution.SlotIdentity{QueryGroup: execution.QueryGroupIdentity(p.String("query_group")), EvaluationTime: execution.EvaluationTime(p.Int("evaluation_time", 0))}
 	plan, err := options.Resolve(ctx, slot)
@@ -214,13 +214,13 @@ func resolveSlot(ctx context.Context, options SlotOptions, p Params) (SlotPlan, 
 func slotFailure(err error) *Failure {
 	switch {
 	case errors.Is(err, ErrHistoricalContractUnavailable):
-		return &Failure{"historical_contract_unavailable", "Retained historical Segment, object or exact due plans are unavailable; current strategy is not substituted."}
+		return &Failure{Code: "historical_contract_unavailable", Message: "Retained historical Segment, object or exact due plans are unavailable; current strategy is not substituted."}
 	case errors.Is(err, ErrSlotBudgetExceeded):
-		return &Failure{"budget_exceeded", "Historical evidence exceeds the diagnostic read budget."}
+		return &Failure{Code: "budget_exceeded", Message: "Historical evidence exceeds the diagnostic read budget."}
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
-		return &Failure{"request_timeout", "Slot evidence read context ended."}
+		return &Failure{Code: "request_timeout", Message: "Slot evidence read context ended."}
 	default:
-		return &Failure{"dependency_unavailable", "Historical evidence dependency could not be read."}
+		return &Failure{Code: "dependency_unavailable", Message: "Historical evidence dependency could not be read."}
 	}
 }
 

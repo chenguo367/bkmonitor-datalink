@@ -1117,7 +1117,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		}
 		return bundle.runtimeConfig
 	}, cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer(),
-		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now)})
+		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now), RedisFailures: cliRedisFailures(recorder, observer)})
 	defer func() {
 		if resultErr != nil {
 			_ = closeCLI()

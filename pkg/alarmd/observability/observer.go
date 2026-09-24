@@ -3468,6 +3468,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentOwnership, StageLeaseRenewed}, {ComponentOwnership, StageFenceChecked},
 	{ComponentScheduler, StageScheduleDue}, {ComponentScheduler, StageSlotStarted},
 	{ComponentScheduler, StageSlotCompleted}, {ComponentScheduler, StageQueryAdmission},
+	{ComponentRuntime, StageAuthStore},
 	{ComponentScheduler, StageQueryCooldown}, {ComponentScheduler, StageRunnerReturned}, {ComponentScheduler, StageDispatcherSnapshot}, {ComponentScheduler, StageQueryPermitWait},
 	{ComponentScheduler, StageExpiredRangeReturned},
 	{ComponentScheduler, StageDispatchTurnaway},
