@@ -2,6 +2,7 @@ package obevidence
 
 import (
 	"context"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -95,9 +96,24 @@ func TestParseInfoReadsReplicationWithoutAddresses(t *testing.T) {
 		"slave1:ip=10.0.0.8,port=6379,state=wait_bgsave,offset=400,lag=3\r\n"+
 		"master_replid:abc\r\nmaster_repl_offset:1200\r\n"+
 		"# Commandstats\r\ncmdstat_evalsha:calls=5,usec=50,usec_per_call=10.00\r\n", nil)
-	want := []ReplicaLink{{State: "online", Offset: 1000, BytesBehind: 200}, {State: "wait_bgsave", Offset: 400, BytesBehind: 800, LagSeconds: 3}}
-	if len(master.replicas) != 2 || master.replicas[0] != want[0] || master.replicas[1] != want[1] {
+	value := func(n *int64) string {
+		if n == nil {
+			return "absent"
+		}
+		return strconv.FormatInt(*n, 10)
+	}
+	read := func(link ReplicaLink) string {
+		return link.State + " " + value(link.Offset) + " " + value(link.BytesBehind) + " " + value(link.LagSeconds)
+	}
+	if len(master.replicas) != 2 || read(master.replicas[0]) != "online 1000 200 0" || read(master.replicas[1]) != "wait_bgsave 400 800 3" {
 		t.Fatalf("replicas %+v", master.replicas)
+	}
+	// An offset either side did not report leaves bytes behind absent, not
+	// the whole other offset.
+	noOffset := parseInfo("role:master\r\nmaster_repl_offset:1200\r\nslave0:ip=10.0.0.7,port=6379,state=online,lag=1\r\n", nil)
+	noMaster := parseInfo("role:master\r\nslave0:ip=10.0.0.7,port=6379,state=online,offset=1000,lag=1\r\n", nil)
+	if read(noOffset.replicas[0]) != "online absent absent 1" || read(noMaster.replicas[0]) != "online 1000 absent 1" {
+		t.Fatalf("missing offsets read as %q and %q", read(noOffset.replicas[0]), read(noMaster.replicas[0]))
 	}
 	if master.commands["evalsha"] != "calls=5,usec=50,usec_per_call=10.00" || master.fields["master_replid"] != "" {
 		t.Fatalf("commands %v fields %v", master.commands, master.fields)
