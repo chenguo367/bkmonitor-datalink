@@ -128,6 +128,10 @@ func (l *Logger) Info(stage, result string, records int, duration time.Duration,
 	l.log(slog.LevelInfo, stage, result, records, duration, attrs...)
 }
 
+func (l *Logger) Warn(stage, result string, records int, duration time.Duration, attrs ...slog.Attr) {
+	l.log(slog.LevelWarn, stage, result, records, duration, attrs...)
+}
+
 func (l *Logger) Error(stage, result string, records int, duration time.Duration, attrs ...slog.Attr) {
 	l.log(slog.LevelError, stage, result, records, duration, attrs...)
 }

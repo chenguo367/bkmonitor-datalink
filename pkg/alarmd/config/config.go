@@ -52,6 +52,13 @@ type HTTPConfig struct {
 	// loopback so routing the query surface cannot expose it. An empty value
 	// serves no diagnostics at all; pprof is never folded back into Listen.
 	DiagnosticsListen string `yaml:"diagnostics_listen"`
+	// InternalListen carries /metrics, /healthz and /readyz for the cluster
+	// alone. A restricted public surface (PublicSurfaceRestrictionRequested,
+	// once the CLI is up) stops serving /metrics on Listen, so the scrape
+	// needs this port; without it the process still runs and reports that
+	// its metrics have no way out. Empty otherwise serves nothing extra: an
+	// unrestricted Listen still carries all three.
+	InternalListen string `yaml:"internal_listen"`
 }
 
 // CLIConfig enables the deployment-operator evidence channel. AdminKey authorizes
@@ -594,6 +601,19 @@ func Load(path string) (Config, error) {
 	return cfg, nil
 }
 
+// PublicSurfaceRestrictionRequested is the configuration's half of the one
+// switch for the public surface: the process serves the CLI with a
+// deployment administrator key. The key is what makes a CLI session
+// available, and only then do the routes that carry deployment coordinates
+// have somewhere else to be read from; a key on a process with the CLI
+// switched off opens no session. The other half is the runtime's: the
+// surface is restricted only once the CLI has actually come up, since
+// restricting without it would leave no way in. No separate setting exists,
+// so the two cannot disagree.
+func (c Config) PublicSurfaceRestrictionRequested() bool {
+	return c.CLI.Enabled && c.CLI.AdminKey != ""
+}
+
 func (c Config) Validate() error {
 	if err := c.validateCommon(); err != nil {
 		return err
@@ -668,6 +688,17 @@ func (c Config) validateCommon() error {
 				"http diagnostics_listen %q must differ from http listen %q",
 				c.HTTP.DiagnosticsListen, c.HTTP.Listen,
 			)
+		}
+	}
+
+	if c.HTTP.InternalListen != "" {
+		if err := validateListenAddress("http internal_listen", c.HTTP.InternalListen); err != nil {
+			return err
+		}
+		for _, other := range []struct{ field, address string }{{"http listen", c.HTTP.Listen}, {"http diagnostics_listen", c.HTTP.DiagnosticsListen}} {
+			if other.address != "" && listenAddressesCollide(c.HTTP.InternalListen, other.address) {
+				return fmt.Errorf("http internal_listen %q must differ from %s %q", c.HTTP.InternalListen, other.field, other.address)
+			}
 		}
 	}
 

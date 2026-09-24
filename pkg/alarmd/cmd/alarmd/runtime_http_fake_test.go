@@ -26,6 +26,8 @@ type fakeHTTPRuntime struct {
 	api      http.Handler
 	grpc     http.Handler
 	liveness httpservice.LivenessSource
+	// restricted is the last settlement of the public surface, nil if none.
+	restricted *bool
 }
 
 func (runtime *fakeHTTPRuntime) Run(ctx context.Context, address string, timeout time.Duration) error {
@@ -38,4 +40,8 @@ func (runtime *fakeHTTPRuntime) SetGRPC(handler http.Handler) { runtime.grpc = h
 
 func (runtime *fakeHTTPRuntime) SetLiveness(source httpservice.LivenessSource) {
 	runtime.liveness = source
+}
+
+func (runtime *fakeHTTPRuntime) SetPublicSurfaceRestricted(restricted bool) {
+	runtime.restricted = &restricted
 }

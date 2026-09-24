@@ -19,7 +19,7 @@ import (
 
 func TestCLIDisabledLeavesNativeAPIUnchanged(t *testing.T) {
 	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(218) })
-	h, closeCLI := buildPhaseTwoCLI(config.Default(), native, nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
+	h, closeCLI, _ := buildPhaseTwoCLI(config.Default(), native, nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
 	defer closeCLI()
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/health", nil))
@@ -32,7 +32,7 @@ func TestCLIInvalidConfigurationOnlyDisablesCLIRoutes(t *testing.T) {
 	cfg := config.Default()
 	cfg.CLI.Enabled = true
 	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(218) })
-	h, closeCLI := buildPhaseTwoCLI(cfg, native, nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
+	h, closeCLI, _ := buildPhaseTwoCLI(cfg, native, nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
 	defer closeCLI()
 	for _, path := range []string{"/api/health", "/api/cli/channel", "/api/cli/auth/grants"} {
 		w := httptest.NewRecorder()
@@ -50,7 +50,7 @@ func TestCLIInvalidConfigurationOnlyDisablesCLIRoutes(t *testing.T) {
 func TestCLIConstructionNeedsNoRedisAvailabilityAndNoAnonymousGrant(t *testing.T) {
 	cfg := config.Default()
 	cfg.CLI = config.CLIConfig{Enabled: true, EnvironmentID: "test", EnvironmentName: "Test", PublicBaseURL: "https://ob.example/alarmd/", AdminKey: strings.Repeat("x", 32)}
-	h, closeCLI := buildPhaseTwoCLI(cfg, http.NotFoundHandler(), nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
+	h, closeCLI, _ := buildPhaseTwoCLI(cfg, http.NotFoundHandler(), nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Incarnation: "test-process"})
 	defer closeCLI()
 	w := httptest.NewRecorder()
 	h.ServeHTTP(w, httptest.NewRequest("GET", "/api/cli/auth/grants", nil))
@@ -92,7 +92,7 @@ func TestCLIControlRPCIsBoundOnlyWhenCLIConfigured(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, closeCLI := buildPhaseTwoCLI(cfg, http.NotFoundHandler(), nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Server: server, Incarnation: "test-process", StreamToken: "fixture-worker-token"})
+		_, closeCLI, _ := buildPhaseTwoCLI(cfg, http.NotFoundHandler(), nil, nil, nil, func() *observability.RuntimeConfigFacts { return nil }, cliControlBinding{Server: server, Incarnation: "test-process", StreamToken: "fixture-worker-token"})
 		// The environment precondition is checked before any Redis access.
 		// Constructing this surface and binding its handler need no live Redis.
 		_, err = server.ReadEvidence(context.Background(), &pb.EvidenceRequest{EnvironmentId: "wrong"})

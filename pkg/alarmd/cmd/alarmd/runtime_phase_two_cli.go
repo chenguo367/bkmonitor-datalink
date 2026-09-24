@@ -4,9 +4,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -21,6 +23,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/evidenceroute"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/k8sread"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
@@ -28,6 +31,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/publicsurface"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/viewstream"
 )
 
@@ -45,6 +49,9 @@ type cliControlBinding struct {
 	// Metrics is this process's registry, read by metrics.get. Nil leaves
 	// the operation listed and unavailable with its reason.
 	Metrics prometheus.Gatherer
+	// PublicWindows serves /api/windows on a restricted public surface
+	// (fleet.NewPublicWindowsHandler). Nil leaves the route unserved there.
+	PublicWindows http.Handler
 }
 
 func cliRuntimeOperation(facts func() *observability.RuntimeConfigFacts, settings *platformsettings.Cache) obchannel.Operation {
@@ -62,9 +69,15 @@ func cliRuntimeOperation(facts func() *observability.RuntimeConfigFacts, setting
 // buildPhaseTwoCLI allocates only small, lazy diagnostic pools. There is no
 // startup Ping, refresh loop or detector dependency. Configuration or auth-store
 // failures disable the CLI surface, never the existing execution path.
-func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlplane.RedisCatalogRepository, progressStore *progress.Store, settings *platformsettings.Cache, facts func() *observability.RuntimeConfigFacts, control cliControlBinding) (http.Handler, func() error) {
+//
+// native is the whole API. The CLI operations read it as it is. The public
+// surface serves it whole unless the configuration asks for a restricted
+// surface and the CLI came up in full; restricted says which, and then the
+// public surface is publicAPI's. A CLI that fails to come up leaves the
+// surface open, since restricting it would leave no way in.
+func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlplane.RedisCatalogRepository, progressStore *progress.Store, settings *platformsettings.Cache, facts func() *observability.RuntimeConfigFacts, control cliControlBinding) (handler http.Handler, closeCLI func() error, restricted bool) {
 	if !cfg.CLI.Enabled {
-		return native, func() error { return nil }
+		return native, func() error { return nil }, false
 	}
 	var clients []redis.UniversalClient
 	var closeQuery func()
@@ -89,7 +102,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	// Authentication has its own pool, so an evidence read cannot occupy it.
 	manager, err := cliauth.New(cliauth.Options{Redis: newClient(cfg.RuntimeStoreRedis()), Prefix: cfg.Redis.StatePrefix, EnvironmentID: cfg.CLI.EnvironmentID, EnvironmentName: cfg.CLI.EnvironmentName, PublicBaseURL: cfg.CLI.PublicBaseURL, AdminKey: cfg.CLI.AdminKey})
 	if err != nil {
-		return composeCLI(native, nil, nil), closeClients
+		return composeCLI(native, nil, nil), closeClients, false
 	}
 	bind := func(role string, connection config.RedisConnectionConfig, prefix string) obevidence.RedisBinding {
 		return obevidence.RedisBinding{Client: newClient(connection), Location: obevidence.Location{Role: role, Address: redisAddress(connection), Mode: connection.Mode, DB: connection.DB, Prefix: prefix}}
@@ -106,7 +119,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	// never the production ownership connection or its startup readiness path.
 	routingStore, err := ownership.NewRedisStoreWithClient(diagnosticRuntime, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership"))
 	if err != nil {
-		return composeCLI(native, nil, nil), closeClients
+		return composeCLI(native, nil, nil), closeClients, false
 	}
 	if connection, configured := cfg.TargetGroupRedis(); configured {
 		options.TargetGroup = bind("target_group", connection, targetGroupPrefix(cfg))
@@ -147,17 +160,109 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	channel, err := obchannel.New(channelOptions)
 	if err != nil {
-		return composeCLI(native, nil, nil), closeClients
+		return composeCLI(native, nil, nil), closeClients, false
 	}
 	if control.Server != nil {
 		router, err = evidenceroute.New(evidenceroute.Options{Store: routingStore, WorkerID: cfg.PhaseTwo.Worker.ID, StreamToken: control.StreamToken, EnvironmentID: cfg.CLI.EnvironmentID,
 			Build: channelOptions.Build, Incarnation: control.Incarnation, CatalogRevision: channel.CatalogRevision(), Execute: channel.ExecuteEvidence})
 		if err != nil {
-			return composeCLI(native, nil, nil), closeClients
+			return composeCLI(native, nil, nil), closeClients, false
 		}
 		control.Server.SetEvidenceHandler(router.Handle)
 	}
-	return composeCLI(native, channel, manager.Handler()), closeClients
+	if !cfg.PublicSurfaceRestrictionRequested() {
+		return composeCLI(native, channel, manager.Handler()), closeClients, false
+	}
+	return composeCLI(publicAPI(native, control.PublicWindows), channel, manager.Handler()), closeClients, true
+}
+
+// publicSurfaceStanding is what the replica says about its public surface
+// once the CLI is built. Both are named degradations and a startup warning;
+// neither stops the process, since detection matters more than either.
+type publicSurfaceStanding struct {
+	// MetricsUnexported: the surface is restricted and there is no internal
+	// listener, so /metrics is served nowhere.
+	MetricsUnexported bool
+	// CLIUnavailable: the configuration asks for a restricted surface and the
+	// CLI did not come up, so the surface stays open -- restricting it would
+	// leave no way in -- and the coordinates it carries are public.
+	CLIUnavailable bool
+}
+
+func publicSurfaceStandingOf(cfg config.Config, restricted bool) publicSurfaceStanding {
+	return publicSurfaceStanding{
+		MetricsUnexported: restricted && cfg.HTTP.InternalListen == "",
+		CLIUnavailable:    cfg.PublicSurfaceRestrictionRequested() && !restricted,
+	}
+}
+
+func (standing publicSurfaceStanding) warn(logger *observability.Logger) {
+	if standing.MetricsUnexported {
+		logger.Warn(observability.StageStartup, observability.ResultDegraded, 0, 0,
+			slog.String("reason_code", string(fleet.DegradationMetricsUnexported)),
+			slog.String("detail", "the public listener is restricted and http.internal_listen is not set: /metrics is served nowhere"))
+	}
+	if standing.CLIUnavailable {
+		logger.Warn(observability.StageStartup, observability.ResultDegraded, 0, 0,
+			slog.String("reason_code", string(fleet.DegradationCLIAuthUnavailable)),
+			slog.String("detail", "a CLI admin key is configured and the CLI did not come up: the public surface stays unrestricted"))
+	}
+}
+
+// publicAPI is what a restricted public surface serves of the API: the
+// summary without deployment coordinates and the observation windows; every
+// other route is refused as moved behind the CLI session, with the way in
+// named. The CLI routes -- the page's, issuing, exchange, pairing, renewal --
+// are composed in front of it and stay public, so a caller whose every
+// credential has expired can still get a new one.
+func publicAPI(native, windows http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/health":
+			publicHealth(w, r, native)
+		case "/api/windows":
+			if windows == nil {
+				http.NotFound(w, r)
+				return
+			}
+			windows.ServeHTTP(w, r)
+		default:
+			publicsurface.Refuse(w, r)
+		}
+	})
+}
+
+// publicHealth answers the health route with fleet.PublicHealth of what the
+// API answers. Anything but a readable answer is reported in fixed words:
+// the API's own error text is not public.
+func publicHealth(w http.ResponseWriter, r *http.Request, native http.Handler) {
+	captured := &capturedResponse{header: http.Header{}}
+	native.ServeHTTP(captured, r)
+	var full fleet.HealthResponse
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	if captured.code != 0 && captured.code != http.StatusOK || json.Unmarshal(captured.body.Bytes(), &full) != nil {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "health summary unavailable"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(fleet.PublicHealth(full))
+}
+
+// capturedResponse holds a handler's answer so it can be reduced before it
+// is sent.
+type capturedResponse struct {
+	header http.Header
+	code   int
+	body   bytes.Buffer
+}
+
+func (c *capturedResponse) Header() http.Header         { return c.header }
+func (c *capturedResponse) Write(b []byte) (int, error) { return c.body.Write(b) }
+func (c *capturedResponse) WriteHeader(code int) {
+	if c.code == 0 {
+		c.code = code
+	}
 }
 
 func composeCLI(native, channel, auth http.Handler) http.Handler {

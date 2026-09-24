@@ -96,7 +96,7 @@ func TestPhaseTwoCPUInitializationFailsBeforeOpeningServices(t *testing.T) {
 			t.Fatal("opened bundle after CPU failure")
 			return nil, nil
 		},
-		newHTTP: func(*metric.Recorder, observability.HealthSource, string) (httpRuntime, error) {
+		newHTTP: func(*metric.Recorder, observability.HealthSource, httpSurface) (httpRuntime, error) {
 			t.Fatal("opened HTTP after CPU failure")
 			return nil, nil
 		},
