@@ -57,6 +57,29 @@ type cliControlBinding struct {
 	RedisFailures func(client, reason string)
 }
 
+// cliIdleTimeout is how long a CLI client keeps a connection it is not
+// using. The CLI's calls come a request at a time, at a person's pace, and
+// between two of them a network or a proxy may close an idle connection
+// -- go-redis v8 does not check one before reusing it, so a call on a
+// connection cut while idle failed, and nothing retries it. A connection
+// idle longer than this is dropped when the next call takes it from the
+// pool, and that call dials a fresh one. The bound is at the scale of one
+// request's burst of commands, far below any idle cut a network makes, so
+// it holds whatever that cut is; what it costs is a dial per request after
+// a pause, which at the CLI's rate is nothing.
+var cliIdleTimeout = 10 * time.Second
+
+// cliRedisOptions is a CLI client's connection: the diagnostic client's one
+// attempt and bounded deadlines, a pool of two holding nothing idle past
+// cliIdleTimeout.
+func cliRedisOptions(connection config.RedisConnectionConfig) *redis.UniversalOptions {
+	options := observationRedisOptions(connection)
+	options.PoolSize = 2
+	options.MinIdleConns = 0
+	options.IdleTimeout = cliIdleTimeout
+	return options
+}
+
 // cliLifecycleOperation reads every replica's start and stop record, which
 // outlives the Pods it describes.
 func cliLifecycleOperation(client redis.UniversalClient, key string) obchannel.Operation {
@@ -117,10 +140,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 		return errors.Join(errs...)
 	}
 	newClient := func(connection config.RedisConnectionConfig) redis.UniversalClient {
-		options := observationRedisOptions(connection)
-		options.PoolSize = 2
-		options.MinIdleConns = 0
-		client := redis.NewUniversalClient(options)
+		client := redis.NewUniversalClient(cliRedisOptions(connection))
 		clients = append(clients, client)
 		return client
 	}
