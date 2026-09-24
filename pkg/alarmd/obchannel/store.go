@@ -61,7 +61,7 @@ func StoreOperations(service *obevidence.Service) []Operation {
 			if !info.Complete {
 				out.Limitations = append(out.Limitations, "Servers with status dependency_unavailable did not answer INFO; their fields are unknown, not zero.")
 			}
-			out.Limitations = append(out.Limitations, "commands counts since the server's stats were last reset or it started; a script command absent from it had no calls in that time. A rate needs two reads.")
+			out.Limitations = append(out.Limitations, "commands counts every client of the server together, not alarmd alone, since its stats were last reset or it started; a script command absent from it had no calls in that time. A rate needs two reads.")
 			return out
 		}},
 	}

@@ -34,11 +34,14 @@ var InfoScriptCommands = []string{"eval", "evalsha", "eval_ro", "evalsha_ro"}
 // ReplicaLink is one replica as its master reports it, without its address:
 // its state, the offset it has acknowledged, how many bytes that is behind
 // the master's own offset, and the seconds since its last acknowledgement.
+// A value the line or the master did not report is absent, not zero, and
+// BytesBehind needs both offsets; it may be negative when the replica's
+// acknowledgement is newer than the master's INFO.
 type ReplicaLink struct {
 	State       string `json:"state"`
-	Offset      int64  `json:"offset"`
-	BytesBehind int64  `json:"bytes_behind"`
-	LagSeconds  int64  `json:"lag_seconds"`
+	Offset      *int64 `json:"offset,omitempty"`
+	BytesBehind *int64 `json:"bytes_behind,omitempty"`
+	LagSeconds  *int64 `json:"lag_seconds,omitempty"`
 }
 
 // ServerInfo is one Redis server as alarmd reaches it: which of alarmd's
@@ -190,17 +193,29 @@ func parseInfo(raw string, dbs []int) parsedInfo {
 			parsed.missing = append(parsed.missing, name)
 		}
 	}
-	masterOffset, _ := strconv.ParseInt(parsed.fields["master_repl_offset"], 10, 64)
+	masterOffset := reported(parsed.fields["master_repl_offset"])
 	for _, link := range links {
 		// Only these keys are read from the line; ip and port never are.
-		offset, _ := strconv.ParseInt(link["offset"], 10, 64)
-		lag, _ := strconv.ParseInt(link["lag"], 10, 64)
-		parsed.replicas = append(parsed.replicas, ReplicaLink{State: link["state"], Offset: offset, BytesBehind: masterOffset - offset, LagSeconds: lag})
+		replica := ReplicaLink{State: link["state"], Offset: reported(link["offset"]), LagSeconds: reported(link["lag"])}
+		if masterOffset != nil && replica.Offset != nil {
+			behind := *masterOffset - *replica.Offset
+			replica.BytesBehind = &behind
+		}
+		parsed.replicas = append(parsed.replicas, replica)
 	}
 	if len(parsed.commands) == 0 {
 		parsed.commands = nil
 	}
 	return parsed
+}
+
+// reported is an INFO integer, or nil when it is absent or not a number.
+func reported(value string) *int64 {
+	number, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &number
 }
 
 // replicaLine is whether an INFO name is a master's slaveN line.
