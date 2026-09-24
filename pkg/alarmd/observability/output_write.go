@@ -72,9 +72,15 @@ const (
 	OutputRejectFormatUnsupported        = "format_unsupported"
 	OutputRejectLegacyContextMissing     = "legacy_context_missing"
 	OutputRejectLegacyConversion         = "legacy_conversion_rejected"
-	OutputRejectLegacyOutputInvalid      = "legacy_output_invalid"
-	OutputRejectLegacyPayloadTooLarge    = "legacy_payload_too_large"
-	OutputRejectOther                    = "_other"
+	// OutputRejectLegacyStrategyInvalid is the frozen strategy configuration
+	// the compatible protocol cannot be written from -- incomplete, or naming
+	// no item or level the event has. It is the strategy's to fix, not
+	// alarmd's, and is counted apart from legacy_conversion_rejected, which
+	// is left to what only alarmd can get wrong.
+	OutputRejectLegacyStrategyInvalid = "legacy_strategy_invalid"
+	OutputRejectLegacyOutputInvalid   = "legacy_output_invalid"
+	OutputRejectLegacyPayloadTooLarge = "legacy_payload_too_large"
+	OutputRejectOther                 = "_other"
 )
 
 // OutputRejectRules is every rule a metric cell is created for.
@@ -82,7 +88,8 @@ var OutputRejectRules = []string{
 	OutputRejectStandardIdentityMissing, OutputRejectStandardActionUnknown, OutputRejectStandardLevelsInvalid,
 	OutputRejectStandardTooManyLevels, OutputRejectStandardBusinessIdentity, OutputRejectStandardEncode,
 	OutputRejectEventInvalid, OutputRejectFormatUnsupported, OutputRejectLegacyContextMissing,
-	OutputRejectLegacyConversion, OutputRejectLegacyOutputInvalid, OutputRejectLegacyPayloadTooLarge, OutputRejectOther,
+	OutputRejectLegacyConversion, OutputRejectLegacyStrategyInvalid, OutputRejectLegacyOutputInvalid, OutputRejectLegacyPayloadTooLarge,
+	OutputRejectOther,
 }
 
 // NormalizeOutputRejectRule folds a rule this build does not name onto _other.

@@ -117,6 +117,12 @@ func TestConvertEachRefusesAloneAndWritesSnapshotsOnce(t *testing.T) {
 	if failures[1] == nil || failures[2] == nil {
 		t.Fatalf("failures = %v, want the refused event and the broken strategy's event to fail", failures)
 	}
+	// A level the strategy has no severity for, and a strategy too incomplete
+	// to convert against, are the strategy's to fix.
+	var config *StrategyConfigError
+	if !errors.As(failures[1], &config) || !errors.As(failures[2], &config) {
+		t.Fatalf("failures = %v, want both named as the strategy configuration's", failures)
+	}
 	if store.batches != 1 || len(store.snapshots) != 1 || strconv.FormatInt(store.snapshots[0].StrategyID, 10) != events[0].PlanRef.StrategyID {
 		t.Fatalf("snapshot writes = %d with %+v, want one write holding only the strategy that converted an event", store.batches, store.snapshots)
 	}
@@ -140,5 +146,27 @@ func TestConvertEachReturnsTheSnapshotStoreFailureAlone(t *testing.T) {
 	var storeErr *SnapshotStoreError
 	if !errors.As(err, &storeErr) || converted != nil || failures != nil {
 		t.Fatalf("ConvertEach() = %v, %v, %v; want only a SnapshotStoreError", converted, failures, err)
+	}
+}
+
+// What only alarmd gets wrong -- an event routed here without its frozen
+// context, a strategy identity that is not the event's, a kind the protocol
+// does not carry -- is not named as the strategy's.
+func TestConvertEachLeavesAlarmdsOwnRefusalsUnnamedAsConfiguration(t *testing.T) {
+	events, now := legacyFixtureAnomalies(t)
+	noContext, mismatch, recovery := events[0], events[0], events[0]
+	noContext.EventID, noContext.LegacyOutput = "no-context", nil
+	mismatch.EventID, mismatch.PlanRef.StrategyID = "mismatch", "424242"
+	recovery.EventID, recovery.EventKind = "recovery", contract.TriggerEventRecovery
+	converter := Converter{Store: &snapshotRecorder{}, Now: func() time.Time { return now }}
+	_, failures, err := converter.ConvertEach(context.Background(), []contract.TriggerEventV1{noContext, mismatch, recovery})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index, failure := range failures {
+		var config *StrategyConfigError
+		if failure == nil || errors.As(failure, &config) {
+			t.Fatalf("event %d: %v, want refused and not as the strategy's", index, failure)
+		}
 	}
 }
