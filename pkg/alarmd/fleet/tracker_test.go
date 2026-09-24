@@ -1924,3 +1924,23 @@ func TestARefusedReadingHoldsTheShortRunRatherThanEndingIt(t *testing.T) {
 		t.Fatalf("coverage after a full round = %+v, want the run ended", coverage)
 	}
 }
+
+// An object whose every reading is refused stands on the refusal's own line,
+// naming the rule -- not on the line for a window whose counts are known.
+func TestAnObjectRefusedEveryRoundStandsOnTheRefusalsLine(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	refused := coverageCompletion("qg-refused", 3, 1, 2, 14)
+	refused.HistoryCoverage = nil
+	refused.HistoryCoverageRejected = &observability.CoverageRejection{Rule: observability.CoverageRejectWindowHoleArithmetic, Series: "abc"}
+	for round := 0; round < 40; round++ {
+		tracker.Observe(context.Background(), refused)
+	}
+	rows := append(tracker.Anomalies(), tracker.Undecidable()...)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if check, under, _ := checkOf(rows[0], Schedule("")); check != CheckCoverageReadingRefused || !under {
+		t.Fatalf("check = %q under %v, want the refusal's line", check, under)
+	}
+}

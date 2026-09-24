@@ -147,6 +147,12 @@ func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, uncla
 			if check, under, decided := windowCheck(anomaly.CauseReason, anomaly.Coverage); decided {
 				return check, under, false
 			}
+			// No counts because the observer refused them, not because the
+			// round had none: the refusal is the finding, not the coarse
+			// reading of a reason whose counts are missing.
+			if anomaly.Coverage == nil && anomaly.CoverageRejected != nil {
+				return CheckCoverageReadingRefused, true, false
+			}
 		}
 		// A reason carried by a durable history guard is not this round's
 		// finding. A Level judged WARMING or GAPPED under some trigger -- a

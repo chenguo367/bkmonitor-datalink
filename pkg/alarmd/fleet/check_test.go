@@ -162,8 +162,13 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// rows did not carry before - the latest completed Slot's retained bytes
 	// against its share - because the refusal it warns of stops a strategy
 	// whole with nothing on the page beforehand.
-	if got := len(Checks()); got != 29 || len(checkAnswers) != 29 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 29: a new check has to "+
+	// Thirty: COVERAGE_READING_REFUSED is a rule over a dimension the rows
+	// already carried - coverage_rejected, the rule a round's window counts
+	// broke - because such a row read as WINDOW_UNDECIDED, the line for
+	// counts that are known and say nothing yet, and sent the reader to wait
+	// for counts that would never arrive.
+	if got := len(Checks()); got != 30 || len(checkAnswers) != 30 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 30: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -240,6 +245,8 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40}},
 		CheckWindowUndecided: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, ShortRounds: 40, EmptyRounds: 40}},
+		CheckCoverageReadingRefused: {Kind: KindDegradedRun, CauseReason: "HISTORY_GAPPED",
+			CoverageRejected: &CoverageRejected{Rule: "WINDOW_HOLE_ARITHMETIC", Series: "abc"}},
 		CheckPlanUnevaluable:  {Kind: KindDegradedRun, CauseReason: "ALGORITHM_UNSUPPORTED"},
 		CheckConfigUnresolved: {Kind: KindDegradedRun, CauseReason: "CONFIG_DRIFT"},
 	}
@@ -1075,4 +1082,30 @@ func sourceFactsWithSet(at time.Time, set *SourceSetFacts) *SourceFacts {
 	facts := NewSourceFacts(at, map[string]int{"ACCEPTED": 3}, nil)
 	facts.Set = set
 	return facts
+}
+
+// A refused reading folds on the rule the counts broke: two rules are two
+// groups, named by the rule.
+func TestRefusedReadingsFoldOnTheRule(t *testing.T) {
+	at := time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+	rows := []Anomaly{
+		{QueryGroup: "qg-a", Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", CoverageRejected: &CoverageRejected{Rule: "RULE_ONE"}},
+		{QueryGroup: "qg-b", Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", CoverageRejected: &CoverageRejected{Rule: "RULE_ONE"}},
+		{QueryGroup: "qg-c", Kind: KindDegradedRun, CauseReason: "HISTORY_GAPPED", CoverageRejected: &CoverageRejected{Rule: "RULE_TWO"}},
+	}
+	Attribute(rows, at)
+	for _, report := range ReportChecks([][]Anomaly{rows}, nil, &View{}, at) {
+		if report.Code != CheckCoverageReadingRefused {
+			continue
+		}
+		keys := map[string]int{}
+		for _, group := range report.Groups {
+			keys[group.Key] = group.Objects
+		}
+		if len(keys) != 2 || keys["RULE_ONE"] != 2 || keys["RULE_TWO"] != 1 {
+			t.Fatalf("groups %v, want one per rule", keys)
+		}
+		return
+	}
+	t.Fatal("no COVERAGE_READING_REFUSED line")
 }

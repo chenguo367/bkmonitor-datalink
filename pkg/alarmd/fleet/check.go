@@ -100,8 +100,16 @@ const (
 	CheckSeriesChurning    Check = "SERIES_CHURNING"
 	CheckSeriesDataMissing Check = "SERIES_DATA_MISSING"
 	CheckWindowUndecided   Check = "WINDOW_UNDECIDED"
-	CheckPlanUnevaluable   Check = "PLAN_UNEVALUABLE"
-	CheckConfigUnresolved  Check = "CONFIG_UNRESOLVED"
+	// CoverageReadingRefused is a window reason whose counts the observer
+	// refused: the round's own window facts broke one of the observer's
+	// rules, so nothing can say whether the window is filling. It is this
+	// deployment's -- the counts are its own -- and it names the rule. Such
+	// a row used to read as "the window cannot be decided", the line for a
+	// window whose counts are known and say nothing yet, which sent a reader
+	// to wait for a window whose counts would never arrive.
+	CheckCoverageReadingRefused Check = "COVERAGE_READING_REFUSED"
+	CheckPlanUnevaluable        Check = "PLAN_UNEVALUABLE"
+	CheckConfigUnresolved       Check = "CONFIG_UNRESOLVED"
 	// The three source standings: strategies the control leader's round
 	// listed and did not accept, before any of them could be an object. They
 	// fold the source's withheld groups rather than object rows, one line per
@@ -204,6 +212,8 @@ var checkAnswers = map[Check]struct {
 	CheckDependencyDown:        {OwnerAlarmd, GroupByBlocked},
 	CheckDefect:                {OwnerAlarmd, GroupByBlocked},
 	CheckObservationGap:        {OwnerAlarmd, GroupByGapKind},
+	// Folded on the rule the counts broke (the detail fold reads it).
+	CheckCoverageReadingRefused: {OwnerAlarmd, GroupByDetail},
 
 	CheckNoDataPersistent: {OwnerData, GroupByStrategy},
 
@@ -254,6 +264,7 @@ var checkOrder = []Check{
 	CheckDependencyDown,
 	CheckDefect,
 	CheckObservationGap,
+	CheckCoverageReadingRefused,
 	CheckQueryRefused,
 	CheckWindowUndecided,
 	CheckConfigUnresolved,
@@ -346,6 +357,9 @@ func groupKeyOf(anomaly Anomaly, check Check) string {
 	case GroupByDetail:
 		if anomaly.Failure != nil && anomaly.Failure.Detail != "" {
 			return anomaly.Failure.Detail
+		}
+		if anomaly.Coverage == nil && anomaly.CoverageRejected != nil {
+			return anomaly.CoverageRejected.Rule
 		}
 		if code := decidingCode(anomaly); code != "" {
 			return code
