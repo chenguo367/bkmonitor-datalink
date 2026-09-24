@@ -94,9 +94,6 @@ func cliRuntimeOperation(facts func() *observability.RuntimeConfigFacts, setting
 // public surface is publicAPI's. A CLI that fails to come up leaves the
 // surface open, since restricting it would leave no way in.
 func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlplane.RedisCatalogRepository, progressStore *progress.Store, settings *platformsettings.Cache, facts func() *observability.RuntimeConfigFacts, control cliControlBinding) (handler http.Handler, closeCLI func() error, restricted bool) {
-	if !cfg.CLI.Enabled {
-		return native, func() error { return nil }, false
-	}
 	var clients []redis.UniversalClient
 	var closeQuery func()
 	closeClients := func() error {
@@ -117,43 +114,28 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 		clients = append(clients, client)
 		return client
 	}
+	if !cfg.CLI.Enabled {
+		// No channel, but the public diagnosis still carries the deployment
+		// section, read through the same operations the CLI's would use.
+		store, workload, _ := deploymentReads(cfg, catalog, progressStore, newClient)
+		return obchannel.WithDeploymentSection(native, append(store, workload...)), closeClients, false
+	}
 	// Authentication has its own pool, so an evidence read cannot occupy it.
 	manager, err := cliauth.New(cliauth.Options{Redis: newClient(cfg.RuntimeStoreRedis()), Prefix: cfg.Redis.StatePrefix, EnvironmentID: cfg.CLI.EnvironmentID, EnvironmentName: cfg.CLI.EnvironmentName, PublicBaseURL: cfg.CLI.PublicBaseURL, AdminKey: cfg.CLI.AdminKey})
 	if err != nil {
 		return composeCLI(native, nil, nil), closeClients, false
 	}
-	bind := func(role string, connection config.RedisConnectionConfig, prefix string) obevidence.RedisBinding {
-		return obevidence.RedisBinding{Client: newClient(connection), Location: obevidence.Location{Role: role, Address: redisAddress(connection), Mode: connection.Mode, DB: connection.DB, Prefix: prefix}}
-	}
-	options := obevidence.Options{Catalog: catalog, Progress: progressStore}
-	options.SourceStrategy = bind("strategy_cache", cfg.StrategySourceRedis(), cfg.PhaseTwo.Control.StrategyCachePrefix)
-	options.CMDBCache = bind("cmdb_cache", cfg.CMDBCacheRedis(), "")
-	// Catalog and progress share a diagnostic runtime pool, not detector I/O.
-	runtimeConnection := cfg.RuntimeStoreRedis()
-	diagnosticRuntime := newClient(runtimeConnection)
-	options.Published = obevidence.RedisBinding{Client: diagnosticRuntime, Location: obevidence.Location{Role: "runtime", Address: redisAddress(runtimeConnection), Mode: runtimeConnection.Mode, DB: runtimeConnection.DB, Prefix: cfg.Redis.StatePrefix}}
-	options.QueryProgress = options.Published
+	store, workload, diagnosticRuntime := deploymentReads(cfg, catalog, progressStore, newClient)
 	// Route discovery is evidence I/O too. Reuse the diagnostic runtime pool,
 	// never the production ownership connection or its startup readiness path.
 	routingStore, err := ownership.NewRedisStoreWithClient(diagnosticRuntime, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership"))
 	if err != nil {
 		return composeCLI(native, nil, nil), closeClients, false
 	}
-	if connection, configured := cfg.TargetGroupRedis(); configured {
-		options.TargetGroup = bind("target_group", connection, targetGroupPrefix(cfg))
-	}
-	if connection, configured := cfg.DynamicConfigRedis(); configured {
-		options.DynamicConfig = bind("dynamic_config", connection, cfg.PhaseTwo.PlatformSettings.RedisKeyPrefix)
-	}
-	ops := append(obchannel.NativeOperations(native), obchannel.StoreOperations(obevidence.New(options))...)
+	ops := append(obchannel.NativeOperations(native), store...)
 	ops = append(ops, cliRuntimeOperation(facts, settings))
 	ops = append(ops, cliLifecycleOperation(diagnosticRuntime, lifecycleRecordKey(cfg)))
-	// alarmd's own workload, read through this Pod's ServiceAccount. Any
-	// replica answers, so a crashing one is read from one that is up.
-	// The owner chain starts at this Pod: its hostname is its name, whatever
-	// the worker id is configured to.
-	podName, _ := os.Hostname()
-	ops = append(ops, obchannel.K8sOperations(k8sread.New(k8sread.Options{PodName: podName}))...)
+	ops = append(ops, workload...)
 	ops = append(ops, obchannel.MetricsOperations(control.Metrics)...)
 	// A diagnostic query has independent sockets, no retries and no production
 	// query permits. It never occupies the execution client's connection pool.
@@ -190,9 +172,42 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 		control.Server.SetEvidenceHandler(router.Handle)
 	}
 	if !cfg.PublicSurfaceRestrictionRequested() {
-		return composeCLI(native, channel, manager.Handler()), closeClients, false
+		return composeCLI(obchannel.WithDeploymentSection(native, append(store, workload...)), channel, manager.Handler()), closeClients, false
 	}
 	return composeCLI(publicAPI(native, control.PublicWindows), channel, manager.Handler()), closeClients, true
+}
+
+// deploymentReads builds the reads the deployment section is made of: the
+// Redis evidence operations (store.info among them) and alarmd's own
+// workload (k8s.pods among them). The CLI registers them as operations; a
+// public diagnosis without the CLI composes its deployment section from the
+// same ones. It also returns the diagnostic runtime pool, which the CLI's
+// route discovery reuses.
+func deploymentReads(cfg config.Config, catalog *controlplane.RedisCatalogRepository, progressStore *progress.Store,
+	newClient func(config.RedisConnectionConfig) redis.UniversalClient) (store, workload []obchannel.Operation, diagnosticRuntime redis.UniversalClient) {
+	bind := func(role string, connection config.RedisConnectionConfig, prefix string) obevidence.RedisBinding {
+		return obevidence.RedisBinding{Client: newClient(connection), Location: obevidence.Location{Role: role, Address: redisAddress(connection), Mode: connection.Mode, DB: connection.DB, Prefix: prefix}}
+	}
+	options := obevidence.Options{Catalog: catalog, Progress: progressStore}
+	options.SourceStrategy = bind("strategy_cache", cfg.StrategySourceRedis(), cfg.PhaseTwo.Control.StrategyCachePrefix)
+	options.CMDBCache = bind("cmdb_cache", cfg.CMDBCacheRedis(), "")
+	// Catalog and progress share a diagnostic runtime pool, not detector I/O.
+	runtimeConnection := cfg.RuntimeStoreRedis()
+	diagnosticRuntime = newClient(runtimeConnection)
+	options.Published = obevidence.RedisBinding{Client: diagnosticRuntime, Location: obevidence.Location{Role: "runtime", Address: redisAddress(runtimeConnection), Mode: runtimeConnection.Mode, DB: runtimeConnection.DB, Prefix: cfg.Redis.StatePrefix}}
+	options.QueryProgress = options.Published
+	if connection, configured := cfg.TargetGroupRedis(); configured {
+		options.TargetGroup = bind("target_group", connection, targetGroupPrefix(cfg))
+	}
+	if connection, configured := cfg.DynamicConfigRedis(); configured {
+		options.DynamicConfig = bind("dynamic_config", connection, cfg.PhaseTwo.PlatformSettings.RedisKeyPrefix)
+	}
+	// alarmd's own workload, read through this Pod's ServiceAccount. Any
+	// replica answers, so a crashing one is read from one that is up.
+	// The owner chain starts at this Pod: its hostname is its name, whatever
+	// the worker id is configured to.
+	podName, _ := os.Hostname()
+	return obchannel.StoreOperations(obevidence.New(options)), obchannel.K8sOperations(k8sread.New(k8sread.Options{PodName: podName})), diagnosticRuntime
 }
 
 // publicSurfaceStanding is what the replica says about its public surface

@@ -307,7 +307,10 @@ func cliInvoke(t *testing.T, h http.Handler, token, revision, op string) obchann
 
 // Without a key, or with the CLI off -- the configuration a deployment with
 // no cli block renders -- the public surface is the API itself, byte for
-// byte, on every route; the public windows handler is not used.
+// byte, on every route but one; the public windows handler is not used. The
+// one is the diagnosis's first page, which keeps every byte and gains the
+// deployment section, so a deployment read without the CLI still sees its
+// Redis and Pod findings.
 func TestNoKeyLeavesThePublicSurfaceByteForByte(t *testing.T) {
 	enabled := config.Default()
 	// A CLI that comes up in full without a key: the case that must not
@@ -329,12 +332,30 @@ func TestNoKeyLeavesThePublicSurfaceByteForByte(t *testing.T) {
 		for _, path := range append(append([]string{}, restrictedRoutes...), "/api/health", "/api/windows") {
 			for _, method := range []string{http.MethodGet, http.MethodPost} {
 				got, want := publicCall(h, method, path), publicCall(standInAPI(), method, path)
+				if path == "/api/diagnose" && method == http.MethodGet {
+					assertOnlyTheDeploymentSectionAdded(t, name, got, want)
+					continue
+				}
 				if got.Code != want.Code || !bytes.Equal(got.Body.Bytes(), want.Body.Bytes()) {
 					t.Errorf("%s: %s %s = %d %.80s, want the API's own %d %.80s", name, method, path, got.Code, got.Body.String(), want.Code, want.Body.String())
 				}
 			}
 		}
 		closeCLI()
+	}
+}
+
+// assertOnlyTheDeploymentSectionAdded holds an unrestricted diagnosis to
+// what it may change: the API's page, every byte of it, with one key added.
+func assertOnlyTheDeploymentSectionAdded(t *testing.T, name string, got, want *httptest.ResponseRecorder) {
+	t.Helper()
+	own := bytes.TrimRight(want.Body.Bytes(), " \t\r\n")
+	var page, base map[string]json.RawMessage
+	if got.Code != want.Code || !bytes.HasPrefix(got.Body.Bytes(), own[:len(own)-1]) ||
+		json.Unmarshal(got.Body.Bytes(), &page) != nil || json.Unmarshal(own, &base) != nil ||
+		len(page) != len(base)+1 || page["deployment"] == nil {
+		t.Errorf("%s: GET /api/diagnose = %d %s, want the API's own %d %s with the deployment section added",
+			name, got.Code, got.Body.String(), want.Code, want.Body.String())
 	}
 }
 
