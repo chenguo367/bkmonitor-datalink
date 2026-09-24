@@ -1922,6 +1922,14 @@ type ControlSourceFacts struct {
 	// once per limiter window; this is the copy that does not scroll away.
 	LastFailureExit string `json:"last_failure_exit,omitempty"`
 	LastFailure     string `json:"last_failure,omitempty"`
+	// PendingConfirmationAgeSeconds is how long the leader's refresh has
+	// been answering PENDING_CONFIRMATION with no PUBLISHED or UNCHANGED
+	// since, 0 when nothing is pending, and PendingConfirmationRounds how
+	// many rounds. Those rounds count as successes, so LastSuccessAgeSeconds
+	// stays young while a change waits; this is what rises. Absent on a
+	// process that is not leading.
+	PendingConfirmationAgeSeconds *float64 `json:"pending_confirmation_age_seconds,omitempty"`
+	PendingConfirmationRounds     int      `json:"pending_confirmation_rounds,omitempty"`
 }
 
 // OpenAlertSetFacts is what a replica says about its copy of the consumer's

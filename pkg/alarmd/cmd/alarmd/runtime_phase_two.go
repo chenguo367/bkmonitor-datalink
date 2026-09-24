@@ -351,6 +351,12 @@ type phaseTwoControlRefreshResult struct {
 	// fleet can say how old the writer's content is beside what it withheld.
 	ChangeSignalPresent    bool
 	ChangeSignalAgeSeconds int64
+	// SourceRefreshStatus is the source refresh's own answer on a round
+	// that got one: PENDING_CONFIRMATION, PUBLISHED, UNCHANGED or
+	// PUBLICATION_CONFLICT. Empty on a round that got none -- a failure, a
+	// follower's activation load -- which says nothing about a pending
+	// candidate either way.
+	SourceRefreshStatus controlplane.SourceRefreshStatus
 	// Activation is what this round did about bringing the activation to the
 	// publication the source produced, when it tried. Absent on a round that
 	// did not try: a follower's load, a source failure before any publication

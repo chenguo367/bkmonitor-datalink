@@ -564,6 +564,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 		// that far leaves them nil rather than empty, and nothing is delivered.
 		refreshResult.Composition = publishedComposition(refreshErr, composition, refreshResult.Status)
 		refreshResult.ChangeSignalPresent, refreshResult.ChangeSignalAgeSeconds = changeSignalPresent, changeSignalAge
+		refreshResult.SourceRefreshStatus = result.Status
 	}()
 	// Which strategies are behind the counts, once per change. Written here
 	// rather than at each return for the same reason the composition is: the
