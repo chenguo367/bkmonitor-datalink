@@ -1255,8 +1255,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"fault), protocol_not_gated (the Plan does not publish the alert consumer's protocol -- the compatibility " +
 			"protocol drops RECOVERY at the sink and alarmd's own decision event has no such consumer; the set was " +
 			"not asked). " +
-			"Counted apart from trigger_recovery_held_total: a record is counted by one gate only. Like that " +
-			"counter this counts records per evaluation, not alerts. Which of passed and held_no_open_alert " +
+			"It counts records per evaluation, not alerts. Which of passed and held_no_open_alert " +
 			"dominates says nothing on its own; read it against open_alert_set_mode, because in " +
 			"self_maintained mode the set is this process's own knowledge.",
 	}, []string{"outcome"})
