@@ -35,6 +35,10 @@ type fixtureStore struct {
 	owner      ownership.QueryGroupOwner
 	ownerReads int
 	moveOnRead int
+	// leaderReads counts lease reads; the read numbered moveLeaderOnRead
+	// sees the next term, as if the lease was handed over just before it.
+	leaderReads      int
+	moveLeaderOnRead int
 }
 
 func (s *fixtureStore) ReadWorker(_ context.Context, id string) (ownership.WorkerRegistration, bool, error) {
@@ -46,6 +50,10 @@ func (s *fixtureStore) ReadWorker(_ context.Context, id string) (ownership.Worke
 func (s *fixtureStore) ReadActiveControlLeader(context.Context) (ownership.QueryGroupOwner, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.leaderReads++
+	if s.moveLeaderOnRead == s.leaderReads {
+		s.leader.OwnerEpoch++
+	}
 	return s.leader, s.leader.OwnerID != "", nil
 }
 func (s *fixtureStore) ReadQueryGroupOwner(context.Context, execution.QueryGroupIdentity) (ownership.QueryGroupOwner, bool, error) {
@@ -292,5 +300,59 @@ func TestLegacyControlServiceAndUnreachableTarget(t *testing.T) {
 	result = nodes["entry"].router.Invoke(ctx, obchannel.Invocation{EnvironmentID: "fixture", Version: obchannel.Version, Revision: nodes["entry"].channel.CatalogRevision(), Operation: "runtime.get", RequestID: "unreachable-fixture", Params: obchannel.Params{}, Target: obchannel.Target{Replica: "worker"}})
 	if result.Error == nil || result.Error.Code != "target_timeout" || nodes["worker"].runs.Load() != 0 {
 		t.Fatalf("unreachable target became evidence: %+v", result)
+	}
+}
+
+func TestControlLeaderTargetAnswersFromTheLeaseItWasRoutedBy(t *testing.T) {
+	nodes, store := fixture(t)
+	result := invoke(t, nodes["entry"], "runtime.get", obchannel.Params{"control_leader": true})
+	if result.Status != "ok" || result.Meta.AnsweredBy != "leader" || result.Meta.Incarnation != "leader-boot" {
+		t.Fatalf("control_leader was not answered by the Leader: %+v", result)
+	}
+	if result.Meta.ControlLeader == nil || result.Meta.ControlLeader.OwnerID != "leader" || result.Meta.ControlLeader.OwnerEpoch != 7 {
+		t.Fatalf("the resolved lease is not reported: %+v", result.Meta.ControlLeader)
+	}
+	if strings.Join(result.Meta.Via, ",") != "entry,leader" || nodes["leader"].runs.Load() != 1 || nodes["entry"].runs.Load() != 0 || nodes["worker"].runs.Load() != 0 {
+		t.Fatalf("control_leader ran somewhere other than the Leader: via=%v", result.Meta.Via)
+	}
+	if result.Next[0].Params.String("replica") != "leader" || result.Next[0].Params.String("expected_incarnation") != "leader-boot" {
+		t.Fatalf("next call is not pinned to the process that answered: %+v", result.Next)
+	}
+
+	// Asked of the Leader itself, it still answers there and says so.
+	result = invoke(t, nodes["leader"], "runtime.get", obchannel.Params{"control_leader": true})
+	if result.Status != "ok" || result.Meta.AnsweredBy != "leader" || result.Meta.ControlLeader == nil || nodes["leader"].runs.Load() != 2 {
+		t.Fatalf("control_leader at the Leader failed: %+v", result)
+	}
+
+	// A plain replica read carries no lease claim.
+	result = invoke(t, nodes["entry"], "runtime.get", obchannel.Params{"replica": "leader"})
+	if result.Status != "ok" || result.Meta.ControlLeader != nil {
+		t.Fatalf("a replica read claimed a Leader lease: %+v", result.Meta)
+	}
+
+	// The lease handed over between the ingress read and the Leader's own
+	// check: the read fails, and nobody answers in the old term's place.
+	store.mu.Lock()
+	store.leaderReads, store.moveLeaderOnRead = 0, 2
+	store.mu.Unlock()
+	runs := nodes["leader"].runs.Load()
+	result = invoke(t, nodes["entry"], "runtime.get", obchannel.Params{"control_leader": true})
+	if result.Error == nil || result.Error.Code != "control_changed" || result.Meta.ControlLeader == nil || nodes["leader"].runs.Load() != runs || nodes["worker"].runs.Load() != 0 {
+		t.Fatalf("handover mid-read answered or lost its lease facts: %+v", result)
+	}
+
+	// A restarted Leader is caught like any other target.
+	result = invoke(t, nodes["entry"], "runtime.get", obchannel.Params{"control_leader": true, "expected_incarnation": "old-boot"})
+	if result.Error == nil || result.Error.Code != "target_changed" || nodes["leader"].runs.Load() != runs {
+		t.Fatalf("restarted Leader answered: %+v", result)
+	}
+
+	store.mu.Lock()
+	store.leader.OwnerID = ""
+	store.mu.Unlock()
+	result = invoke(t, nodes["entry"], "runtime.get", obchannel.Params{"control_leader": true})
+	if result.Error == nil || result.Error.Code != "control_unavailable" || nodes["entry"].runs.Load() != 0 {
+		t.Fatalf("no Leader fell back to the ingress: %+v", result)
 	}
 }

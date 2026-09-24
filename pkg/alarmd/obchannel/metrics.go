@@ -28,7 +28,8 @@ import (
 // numbers the page and the rules are written against without a scrape, a
 // query service or a port-forward. It is the process's own counters and no
 // more: a rate needs two reads, and another replica's counters need another
-// read targeted at it.
+// read targeted at it. Counters only the Leader moves (source refresh,
+// cutover) are read with control_leader, without first finding its name.
 
 // MetricNamePattern is the names metrics.get accepts: alarmd's own families.
 var MetricNamePattern = regexp.MustCompile(`^bkmonitor_alarmd_[a-z0-9_]+$`)
@@ -94,14 +95,14 @@ func MetricsOperations(gatherer prometheus.Gatherer) []Operation {
 	}
 	return []Operation{{
 		ID:            "metrics.get",
-		Summary:       "按名字读取应答进程自己的 alarmd 指标当前值（计数器、仪表、直方图）；速率要读两次相减，其他副本要指定实例再读。",
+		Summary:       "按名字读取应答进程自己的 alarmd 指标当前值（计数器、仪表、直方图）；速率要读两次相减，其他副本要指定实例再读，control_leader=true 直接读当前 Control Leader。",
 		EvidenceScope: "process",
 		Targetable:    true,
 		Fields:        fields,
 		Required:      []string{"names"},
 		Limits:        map[string]any{"names": MaxMetricNames, "series_per_family": MaxMetricSeries, "label_filters": MaxMetricLabelFilters, "scope": "answering_replica"},
 		OutputSchema:  SchemaOf(MetricsResult{}),
-		Examples:      []Params{{"names": []any{"bkmonitor_alarmd_source_refresh_total"}}},
+		Examples:      []Params{{"names": []any{"bkmonitor_alarmd_source_refresh_total"}}, {"names": []any{"bkmonitor_alarmd_source_refresh_total"}, "control_leader": true}},
 		Availability:  available,
 		Validate: func(p Params) error {
 			names, _ := p["names"].([]any)

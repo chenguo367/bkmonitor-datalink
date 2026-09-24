@@ -67,14 +67,24 @@ func (r *Router) Invoke(ctx context.Context, call obchannel.Invocation) obchanne
 	if err != nil || !found {
 		return r.failure(call.RequestID, "control_unavailable", "No readable active Control Leader; this targeted read did not fall back to another instance.")
 	}
+	target := call.Target.Replica
+	if call.Target.ControlLeader {
+		// Resolved from the lease this read is routed by, and the Leader
+		// re-checks that term before it executes, so a handover in between
+		// fails the read instead of answering from the old Leader.
+		target = leader.OwnerID
+	}
 	req := &pb.EvidenceRequest{WorkerId: r.options.WorkerID, StreamToken: r.options.StreamToken, Phase: "route", EnvironmentId: call.EnvironmentID,
 		RequestId: call.RequestID, ChannelVersion: call.Version, CatalogRevision: call.Revision, Operation: call.Operation, ParamsJson: params,
-		TargetWorkerId: call.Target.Replica, ExpectedIncarnation: call.Target.ExpectedIncarnation, OwnerQueryGroup: call.Target.OwnerQueryGroup, ControlEpoch: leader.OwnerEpoch}
+		TargetWorkerId: target, ExpectedIncarnation: call.Target.ExpectedIncarnation, OwnerQueryGroup: call.Target.OwnerQueryGroup, ControlEpoch: leader.OwnerEpoch}
 	response, err := r.send(ctx, leader.OwnerID, req)
 	if err != nil {
 		return r.transportFailure(call.RequestID, err)
 	}
 	response.Meta.Via = append([]string{r.options.WorkerID}, response.Meta.Via...)
+	if call.Target.ControlLeader {
+		response.Meta.ControlLeader = &obchannel.LeaderMeta{OwnerID: leader.OwnerID, OwnerEpoch: leader.OwnerEpoch}
+	}
 	return response
 }
 

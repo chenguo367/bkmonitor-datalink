@@ -59,7 +59,9 @@ func TestTargetSchemaAndDomainValidationStayConsistent(t *testing.T) {
 			}
 		}
 		raw, _ := json.Marshal(input)
-		if !strings.Contains(string(raw), `"not":{"required":["replica","owner_query_group"]}`) || !strings.Contains(string(raw), `"if":{"required":["expected_incarnation"]}`) {
+		if !strings.Contains(string(raw), `"not":{"required":["replica","owner_query_group"]}`) || !strings.Contains(string(raw), `"if":{"required":["expected_incarnation"]}`) ||
+			!strings.Contains(string(raw), `"not":{"required":["replica","control_leader"]}`) || !strings.Contains(string(raw), `"not":{"required":["owner_query_group","control_leader"]}`) ||
+			!strings.Contains(string(raw), `{"required":["control_leader"]}`) || fields["control_leader"].Type != "boolean" {
 			t.Fatal("describe omitted target exclusion/dependency rules")
 		}
 	}
@@ -89,12 +91,18 @@ func TestTargetSchemaAndDomainValidationStayConsistent(t *testing.T) {
 		{Params{"family": "source_strategy", "strategy_id": "7", "replica": "worker\x7f-b"}, false},
 		{Params{"family": "source_strategy", "strategy_id": "7", "replica": strings.Repeat("a", 257)}, false},
 		{Params{"family": "source_strategy", "strategy_id": "7", "replica": "worker-b", "group_id": "invalid-for-family"}, false},
+		{Params{"family": "source_strategy", "strategy_id": "7", "control_leader": true}, true},
+		{Params{"family": "source_strategy", "strategy_id": "7", "control_leader": true, "expected_incarnation": "process-b"}, true},
+		{Params{"family": "source_strategy", "strategy_id": "7", "control_leader": true, "replica": "worker-b"}, false},
+		{Params{"family": "source_strategy", "strategy_id": "7", "control_leader": true, "owner_query_group": "qg"}, false},
+		{Params{"family": "source_strategy", "strategy_id": "7", "control_leader": false}, false},
+		{Params{"family": "source_strategy", "strategy_id": "7", "control_leader": "true"}, false},
 	} {
 		params, target, err := invocationParams(store, tc.params)
 		if (err == nil) != tc.valid {
 			t.Fatalf("params=%v err=%v", tc.params, err)
 		}
-		if tc.valid && (len(params) != 2 || (target.Replica == "" && target.OwnerQueryGroup == "")) {
+		if tc.valid && (len(params) != 2 || !target.Explicit()) {
 			t.Fatal("target was not separated from domain params")
 		}
 	}
@@ -277,7 +285,7 @@ func TestInternalExecutionHonorsContextAndSharedExecutionBudget(t *testing.T) {
 }
 
 func TestTargetedNextCallsPinActualProcessWithoutTargetingCommonReads(t *testing.T) {
-	original := []Call{{Operation: "process.read", Params: Params{"id": "next"}}, {Operation: "fleet.get", Params: Params{}}, {Operation: "process.read", Params: Params{"id": "same", "replica": "worker-b"}}, {Operation: "process.read", Params: Params{"id": "other", "replica": "worker-c"}}}
+	original := []Call{{Operation: "process.read", Params: Params{"id": "next"}}, {Operation: "fleet.get", Params: Params{}}, {Operation: "process.read", Params: Params{"id": "same", "replica": "worker-b"}}, {Operation: "process.read", Params: Params{"id": "other", "replica": "worker-c"}}, {Operation: "process.read", Params: Params{"id": "leader", "control_leader": true}}}
 	op := targetOperation(func(context.Context, Params) Outcome { return Outcome{Complete: true, Next: original} })
 	c := newTargetChannel(t, Options{Auth: &internalAuthProbe{}, EnvironmentID: "test", Replica: "worker-b", Incarnation: "process-b", Operations: []Operation{op, {ID: "fleet.get", Summary: "Common", Run: func(context.Context, Params) Outcome { return Outcome{Complete: true} }}}})
 	inv := internalInvocation(c)
@@ -288,6 +296,9 @@ func TestTargetedNextCallsPinActualProcessWithoutTargetingCommonReads(t *testing
 	}
 	if len(out.Next[1].Params) != 0 || out.Next[2].Params.String("expected_incarnation") != "process-b" || out.Next[3].Params.String("expected_incarnation") != "" {
 		t.Fatal("next call targeted a common or different process")
+	}
+	if len(out.Next[4].Params) != 2 || out.Next[4].Params.String("expected_incarnation") != "" || out.Next[4].Params.String("owner_query_group") != "" {
+		t.Fatal("a next call for the Leader was pinned to this process instead of resolved when made")
 	}
 	if len(original[0].Params) != 1 || len(original[2].Params) != 2 {
 		t.Fatal("next-call pin mutated producer-owned data")
