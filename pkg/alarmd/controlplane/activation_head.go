@@ -119,8 +119,15 @@ func (repository *RedisCatalogRepository) LoadActivationHead(ctx context.Context
 const openSegmentReadBatch = 256
 
 // readOpenSegments reads the open Segment of each Query Group. A Query Group
-// with no timeline, an unreadable one, or none open (retired, closed) is
-// left out: it runs nothing, which is exactly what the answer is about.
+// with no timeline, or none open (retired, closed), is left out: it runs
+// nothing, which is exactly what the answer is about.
+//
+// A timeline that does not decode is not left out. Taken for absent, a Query
+// Group of the current publication would pass for one to add, and the
+// cutover script, which adds only where no timeline is, would refuse the
+// write on every tick; and its records would vanish from the body written
+// next. It is refused by name instead: a Worker cannot run it either, and
+// deleting the key lets the next cutover open it again.
 func (repository *RedisCatalogRepository) readOpenSegments(
 	ctx context.Context, identities []execution.QueryGroupIdentity,
 ) (map[execution.QueryGroupIdentity]persistedScheduleSegment, error) {
@@ -145,7 +152,12 @@ func (repository *RedisCatalogRepository) readOpenSegments(
 				return nil, activationDependencyIO(err)
 			}
 			timeline, err := decodeScheduleTimeline(identity, payload)
-			if err != nil || timeline.RetiredAt != nil || len(timeline.Segments) == 0 {
+			if err != nil {
+				return nil, &DeterministicScheduleError{Err: fmt.Errorf(
+					"the timeline of Query Group %s does not decode (%w); a cutover in progress cannot tell what it runs "+
+						"until the key is repaired or deleted, after which it is opened again", identity, err)}
+			}
+			if timeline.RetiredAt != nil || len(timeline.Segments) == 0 {
 				continue
 			}
 			open := timeline.Segments[len(timeline.Segments)-1]
@@ -168,15 +180,37 @@ func openSegmentRefs(segment persistedScheduleSegment) []execution.OutputContext
 	return refs
 }
 
-// activeOpenSegments reads the open Segments of the Query Groups in the
-// activation's active set. A draining Query Group has retired its timeline
-// and has no open Segment, so it is not asked about.
+// activeOpenSegments reads the open Segments of the Query Groups the
+// activation may be running. That is its active set; and while a cutover is
+// in progress, every Query Group of the current publication as well. A later
+// build writes the active set once, after the last piece of a class, so a
+// Query Group added by an earlier piece of that class has its timeline and
+// is not in the set yet: taken from the set alone it would pass for one to
+// add, and the cutover script refuses to add over a timeline that is there.
+// A draining Query Group has retired its timeline and has no open Segment,
+// so it is not asked about.
 func (repository *RedisCatalogRepository) activeOpenSegments(
 	ctx context.Context, state ActivationState,
 ) (map[execution.QueryGroupIdentity]persistedScheduleSegment, error) {
 	identities, err := repository.LoadActiveQueryGroupSet(ctx, state.ActiveQGSetRef)
 	if err != nil {
 		return nil, err
+	}
+	if state.CutoverProgress != nil {
+		manifest, err := repository.LoadCatalogManifest(ctx, state.Current.SnapshotRevision)
+		if err != nil {
+			return nil, err
+		}
+		seen := make(map[execution.QueryGroupIdentity]struct{}, len(identities)+len(manifest.QueryGroups))
+		for _, identity := range identities {
+			seen[identity] = struct{}{}
+		}
+		for _, entry := range manifest.QueryGroups {
+			if _, listed := seen[entry.QueryGroup]; !listed && entry.QueryGroup != "" {
+				seen[entry.QueryGroup] = struct{}{}
+				identities = append(identities, entry.QueryGroup)
+			}
+		}
 	}
 	return repository.readOpenSegments(ctx, identities)
 }

@@ -306,3 +306,100 @@ func TestOnlyFinishingAnUnfinishedCutoverMayKeepItsPublication(t *testing.T) {
 		})
 	}
 }
+
+// afterAddedPiece stands in what a later build leaves when a cutover from
+// first to second committed its retired piece and its added piece but not
+// its changed one: B retired, C's timeline written - and, since the active
+// set is written only after a class's last piece, C not in the set yet - A
+// still on first's content. Built by running the real cutover and putting
+// A's timeline and the set back.
+func afterAddedPiece(t *testing.T, fixture *cutoverFixture) (second controlplane.PublishedSnapshot, state controlplane.ActivationState) {
+	t.Helper()
+	first := fixture.publish(t, headCatalog(t, 80, "AB"), 60)
+	before := fixture.activation(t)
+	groupA := groupOf(t, headCatalog(t, 80, "AB"), "2")
+	groupB := groupOf(t, headCatalog(t, 80, "AB"), "3")
+	groupC := groupOf(t, headCatalog(t, 90, "AC"), "4")
+	timelineA := fixture.timelineBytes(t, groupA.Identity)
+	second = fixture.publish(t, headCatalog(t, 90, "AC"), 120)
+	if err := fixture.client.Set(fixture.ctx, fixture.prefix+":schedule_timeline:"+string(groupA.Identity), timelineA, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := controlplane.PersistActiveQueryGroupSetForTest(fixture.ctx, fixture.repository, []execution.QueryGroupIdentity{groupA.Identity})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state = asHead(before)
+	state.RecordRevision = fixture.activation(t).RecordRevision + 1
+	state.Current = second.Publication
+	state.ActiveQGSetRef = ref
+	state.Draining = append(append([]controlplane.DrainingQueryGroup(nil), before.Draining...),
+		controlplane.DrainingQueryGroup{QueryGroup: groupB.Identity, RetiredBoundary: 120})
+	state.CutoverProgress = &controlplane.CutoverProgress{From: first.Publication,
+		Cursor:          controlplane.CutoverCursor{Class: controlplane.CutoverClassAdded, QueryGroup: groupC.Identity},
+		ChangesetDigest: "changeset", ChangesetCount: 3, Remaining: 1}
+	if err := controlplane.WriteActivationForTest(fixture.ctx, fixture.repository, state); err != nil {
+		t.Fatal(err)
+	}
+	return second, state
+}
+
+// A Query Group an earlier piece added has its timeline and is not in the
+// active set yet. Finishing reads it as running, not as one to add - adding
+// it would meet its own timeline and be refused on every tick - so the
+// cutover finishes, C's timeline untouched and its records in the body.
+func TestAnAddedPieceIsReadAsRunningWhenTheCutoverIsFinished(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:activation-added-piece")
+	second, state := afterAddedPiece(t, fixture)
+	groupA := groupOf(t, headCatalog(t, 80, "AB"), "2")
+	groupC := groupOf(t, headCatalog(t, 90, "AC"), "4")
+	timelineC := fixture.timelineBytes(t, groupC.Identity)
+
+	*fixture.now = time.Unix(180, 0)
+	finished, err := fixture.reconciler.Ensure(fixture.ctx, second.Publication)
+	if err != nil {
+		t.Fatalf("finishing after an added piece: %v", err)
+	}
+	if finished.CutoverProgress != nil || finished.RecordRevision != state.RecordRevision+1 {
+		t.Fatalf("finished activation = %+v", finished)
+	}
+	if cut := fixture.openSegment(t, groupA.Identity, 180); cut.Start != 180 {
+		t.Fatalf("A was not cut: %+v", cut)
+	}
+	if got := fixture.timelineBytes(t, groupC.Identity); !reflect.DeepEqual(got, timelineC) {
+		t.Fatal("C, added by an earlier piece, was written again")
+	}
+	if records := recordsOf(fixture.activation(t), groupC); len(records) != len(groupC.Plans) {
+		t.Fatalf("C's records after finishing = %+v", records)
+	}
+}
+
+// A timeline that does not decode is refused by name while a cutover is in
+// progress, not taken for a Query Group that runs nothing: that would pass
+// it for one to add, which its own key refuses on every tick, and drop its
+// records from the body. Deleting the key is the way out: the next tick
+// opens it again.
+func TestAnUndecodableTimelineIsRefusedByNameWhileACutoverIsInProgress(t *testing.T) {
+	fixture := newCutoverFixture(t, "alarmd:control:activation-undecodable")
+	second, _ := afterAddedPiece(t, fixture)
+	groupA := groupOf(t, headCatalog(t, 80, "AB"), "2")
+	key := fixture.prefix + ":schedule_timeline:" + string(groupA.Identity)
+	if err := fixture.client.Set(fixture.ctx, key, "not-a-timeline", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	*fixture.now = time.Unix(180, 0)
+	var corrupt *controlplane.DeterministicScheduleError
+	if _, err := fixture.reconciler.Ensure(fixture.ctx, second.Publication); !errors.As(err, &corrupt) || !strings.Contains(err.Error(), string(groupA.Identity)) {
+		t.Fatalf("finishing over an undecodable timeline = %v, want a corrupt error naming %s", err, groupA.Identity)
+	}
+	if err := fixture.client.Del(fixture.ctx, key).Err(); err != nil {
+		t.Fatal(err)
+	}
+	finished, err := fixture.reconciler.Ensure(fixture.ctx, second.Publication)
+	if err != nil || finished.CutoverProgress != nil {
+		t.Fatalf("after deleting the key = (%+v, %v), want the cutover finished", finished, err)
+	}
+	if opened := fixture.openSegment(t, groupA.Identity, 180); opened.Start != 180 {
+		t.Fatalf("A was not opened again: %+v", opened)
+	}
+}
