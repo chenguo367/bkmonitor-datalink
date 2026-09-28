@@ -82,6 +82,7 @@ func (cache *Cache) noteOpened(m member, now time.Time) {
 	}
 	if len(cache.index.opened) >= cache.index.options.MaxLocalEntries {
 		cache.evictions++
+		cache.openRefused++
 		return
 	}
 	cache.index.opened[m] = now
@@ -173,7 +174,7 @@ func (cache *Cache) SetTracked(keys []StrategyKey) error {
 	}
 	for m := range cache.added {
 		if _, exists := unique[m.key]; !exists {
-			delete(cache.added, m)
+			cache.leaveSent(m, DepartureUntracked)
 		}
 	}
 	for m := range cache.removed {
@@ -183,7 +184,7 @@ func (cache *Cache) SetTracked(keys []StrategyKey) error {
 	}
 	for m := range cache.index.opened {
 		if _, exists := unique[m.key]; !exists {
-			delete(cache.index.opened, m)
+			cache.leaveOpen(m, DepartureUntracked)
 		}
 	}
 	cache.index.order = cache.index.order[:0]
@@ -269,7 +270,7 @@ func (cache *Cache) Untrack(keys ...StrategyKey) {
 		}
 		for m := range cache.added {
 			if m.key == key {
-				delete(cache.added, m)
+				cache.leaveSent(m, DepartureUntracked)
 			}
 		}
 		for m := range cache.removed {
@@ -280,7 +281,7 @@ func (cache *Cache) Untrack(keys ...StrategyKey) {
 		if cache.index != nil {
 			for m := range cache.index.opened {
 				if m.key == key {
-					delete(cache.index.opened, m)
+					cache.leaveOpen(m, DepartureUntracked)
 				}
 			}
 		}
@@ -642,7 +643,7 @@ func (cache *Cache) applyCalibration(job indexJob, started time.Time, result Rec
 	// not permanently suppress an alert the consumer still holds active.
 	for m, s := range cache.added {
 		if m.key == job.key && s.at.Before(started) && cache.now().Sub(s.at) > cache.index.options.LocalRetention {
-			delete(cache.added, m)
+			cache.leaveSent(m, DepartureNotResent)
 		}
 	}
 	for m, s := range cache.removed {

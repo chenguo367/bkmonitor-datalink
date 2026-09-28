@@ -2030,7 +2030,20 @@ type OpenAlertSetFacts struct {
 	// RECOVERY held while its alert stays open. GateRecent and
 	// GateRecentOwnHeld are the last lookups of each, whole.
 	GateOwnLookups map[string]uint64 `json:"gate_own_lookups,omitempty"`
-	GateOwnHeld    uint64            `json:"gate_own_held,omitempty"`
+	// OwnOpen is how many alerts the replica opened and has not sent the
+	// RECOVERY for: the alerts the gate asks about as its own. It keeps an
+	// alert that is no longer re-sent, which comparison.sent does not.
+	// OwnOpenDepartures counts why alerts left it (recovery_acked,
+	// untracked) and OwnOpenRefused the alerts it had no room for.
+	// SentDepartures counts why alerts left comparison.sent (recovery_acked,
+	// not_resent, untracked, evicted). All since the process started, every
+	// word present; the own-open fields are absent on a copy that does not
+	// read the index.
+	OwnOpen           *int              `json:"own_open,omitempty"`
+	OwnOpenDepartures map[string]uint64 `json:"own_open_departures,omitempty"`
+	OwnOpenRefused    uint64            `json:"own_open_refused,omitempty"`
+	SentDepartures    map[string]uint64 `json:"sent_departures,omitempty"`
+	GateOwnHeld       uint64            `json:"gate_own_held,omitempty"`
 	// GateSince is when the own split started. What the replica sent is
 	// held in memory and starts empty at every start, so an alert opened
 	// before GateSince is not "own" here: no own lookup says only that no
@@ -2089,7 +2102,12 @@ type TargetScopeCloseStrategy struct {
 // matching active alert ids but not their fingerprints is our alerts held
 // under another fingerprint.
 type OpenAlertComparison struct {
-	OwnEventSourceID        string                        `json:"own_event_source_id,omitempty"`
+	OwnEventSourceID string `json:"own_event_source_id,omitempty"`
+	// Sent is the alerts whose ABNORMAL the replica sent within the local
+	// retention, not the alerts it holds open: one no longer re-sent leaves
+	// it without a RECOVERY. The alerts it holds open are
+	// OpenAlertSetFacts.OwnOpen, and why either count fell is
+	// SentDepartures and OwnOpenDepartures.
 	Sent                    int                           `json:"sent"`
 	SentShapes              map[string]int                `json:"sent_shapes"`
 	MemberShapes            map[string]int                `json:"member_shapes"`
