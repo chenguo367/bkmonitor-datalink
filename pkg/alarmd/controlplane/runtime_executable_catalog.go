@@ -446,7 +446,7 @@ func validateRuntimePlanDependencyClosure(plan FrozenPlan, compiled *strategy.Co
 	}
 	expected := make(map[runtimeRequirementKey]execution.DataRequirementTemplate)
 	for _, level := range compiled.Levels().All() {
-		for _, algorithm := range level.Algorithms() {
+		for _, algorithm := range level.Algorithms().All() {
 			for _, requirement := range algorithm.InputRequirements() {
 				template, err := runtimeRequirementTemplate(requirement)
 				if err != nil {

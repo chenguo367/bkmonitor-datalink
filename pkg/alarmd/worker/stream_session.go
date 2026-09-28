@@ -409,7 +409,7 @@ func prepareNamedInputIndex(header execution.InternalExecutionHeader) (preparedN
 		for _, level := range due.CompiledPlan.Levels().All() {
 			consumer := execution.ConsumerRef{Plan: due.Identity, LevelID: level.Definition().LevelID, HasLevel: true}
 			prepared.consumersByPlan[due.Identity] = append(prepared.consumersByPlan[due.Identity], consumer)
-			for _, algorithm := range level.Algorithms() {
+			for _, algorithm := range level.Algorithms().All() {
 				policy, declared := algorithm.SeriesFoldPolicy()
 				if !declared {
 					continue
@@ -1841,7 +1841,7 @@ func (stream *streamedExecution) algorithmObservationFacts(
 	}
 	levels := make(map[uint32][]observedAlgorithm, due.CompiledPlan.Levels().Len())
 	for _, level := range due.CompiledPlan.Levels().All() {
-		for _, algorithm := range level.Algorithms() {
+		for _, algorithm := range level.Algorithms().All() {
 			observed, ok := observeAlgorithm(algorithm)
 			if ok {
 				levels[level.Definition().LevelID] = append(levels[level.Definition().LevelID], observed)
@@ -1942,7 +1942,7 @@ func (stream *streamedExecution) completionOnlyAlgorithmInputFacts(
 	facts := make([]observability.AlgorithmInputFact, 0)
 	for _, level := range due.CompiledPlan.Levels().All() {
 		levelID := level.Definition().LevelID
-		for _, compiled := range level.Algorithms() {
+		for _, compiled := range level.Algorithms().All() {
 			algorithm, observed := observeAlgorithm(compiled)
 			if !observed {
 				continue

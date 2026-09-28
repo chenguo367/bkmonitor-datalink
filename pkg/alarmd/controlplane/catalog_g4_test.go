@@ -94,7 +94,7 @@ func TestG4CatalogFreezesFourAlgorithmQueryAndRequirementContracts(t *testing.T)
 				t.Fatalf("frozen plan = %+v", plan)
 			}
 			compiled := compileWithEvaluationCore(t, plan.Plan, catalog.QueryGroups[0].QueryPlan.Normalization.DatasetContract)
-			compiledAlgorithm := compiled.Levels().At(0).Algorithms()[0]
+			compiledAlgorithm := compiled.Levels().At(0).Algorithms().At(0)
 			if compiledAlgorithm.Kind() != test.detectorKind {
 				t.Fatalf("compiled detector kind = %q, want %q", compiledAlgorithm.Kind(), test.detectorKind)
 			}

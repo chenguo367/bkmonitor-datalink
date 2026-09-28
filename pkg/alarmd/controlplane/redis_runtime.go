@@ -2355,13 +2355,18 @@ func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, requ
 	publication := SnapshotPublicationRef{SnapshotRevision: schedule.Segment.Publication.SnapshotRevision,
 		PublicationEpoch: uint64(schedule.Segment.Publication.PublicationEpoch)}
 	var group QueryGroup
+	// Whether the group came from the content the Segment names, which is
+	// what lets a Plan's compile be keyed by that content.
+	var byContent bool
 	if observed {
 		group, err = runtime.repository.LoadObservedSegmentQueryGroup(ctx, schedule.Segment, request.EvaluationTime)
+		byContent = err == nil
 	} else {
-		group, err = runtime.repository.LoadSegmentQueryGroup(ctx, schedule.Segment, request.EvaluationTime, func(ctx context.Context) (QueryGroup, error) {
+		group, byContent, err = runtime.repository.LoadSegmentQueryGroupContent(ctx, schedule.Segment, request.EvaluationTime, func(ctx context.Context) (QueryGroup, error) {
 			return runtime.repository.loadPublishedQueryGroup(ctx, publication, request.QueryGroup)
 		})
 	}
+	contentSegment := schedule.Segment.At(request.EvaluationTime)
 	if err != nil {
 		if errors.Is(err, ErrCatalogObjectUnavailable) {
 			return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailurePlanMaterialize, err)
@@ -2400,7 +2405,8 @@ func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, requ
 				errors.New("alarmd controlplane: due Plan is absent from frozen Catalog or activation"))
 		}
 		compiledResult, err := runtime.compiler.Compile(ctx, strategy.CompileRequest{Plan: plan.Plan,
-			DatasetContract: group.QueryPlan.Normalization.DatasetContract, StateSemantics: runtime.stateSemantics})
+			DatasetContract: group.QueryPlan.Normalization.DatasetContract, StateSemantics: runtime.stateSemantics,
+			ContentKey: compileContentKey(byContent, contentSegment, plan)})
 		if err != nil {
 			return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailurePlanMaterialize, err)
 		}
@@ -2462,17 +2468,12 @@ func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, requ
 	if err != nil {
 		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureInputClosure, err)
 	}
-	digest, err := execution.DeriveDuePlanSetDigest(duePlans, requirements)
-	if err != nil {
-		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
-	}
-	fact := execution.FrozenSlotContractFact{Contract: execution.FrozenExecutionContractRef{
+	fact, err := execution.SealFrozenSlotContractFact(execution.FrozenSlotContractFact{Contract: execution.FrozenExecutionContractRef{
 		Slot:             execution.SlotIdentity{QueryGroup: request.QueryGroup, EvaluationTime: request.EvaluationTime},
 		SnapshotRevision: schedule.Segment.Publication.SnapshotRevision, QueryRevision: schedule.Segment.QueryRevision,
 		ScheduleRevision: request.ScheduleRevision, ScheduleSegmentStart: request.ScheduleSegmentStart,
-		DuePlanSetDigest: digest,
-	}, DuePlans: duePlans, Requirements: requirements}
-	if err := fact.Validate(request); err != nil {
+	}, DuePlans: duePlans, Requirements: requirements}, request)
+	if err != nil {
 		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
 	}
 	return fact, nil
@@ -2614,7 +2615,7 @@ func (runtime *RedisCatalogRuntime) slotRequirements(
 		explicitPrimary := make(map[uint32]map[execution.RequirementID]struct{})
 		for _, level := range due.CompiledPlan.Levels().All() {
 			levelID := level.Definition().LevelID
-			for _, algorithm := range level.Algorithms() {
+			for _, algorithm := range level.Algorithms().All() {
 				algorithmRequirements := algorithm.InputRequirements()
 				if len(algorithmRequirements) == 0 {
 					continue
