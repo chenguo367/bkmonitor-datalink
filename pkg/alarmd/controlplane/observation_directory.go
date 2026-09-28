@@ -110,7 +110,8 @@ type StrategyDirectoryRow struct {
 // DirectoryPublication is one publication a directory refresh read: how many
 // active Plans the activation carries on it, and where its manifest came
 // from -- index or store; expired when a carried publication's manifest key
-// is gone, failed when the read did not return it for any other reason.
+// is gone, unread when the refresh's allowance ran out before it, failed
+// when the read did not return it for any other reason.
 type DirectoryPublication struct {
 	Publication SnapshotPublicationRef `json:"publication"`
 	Plans       int                    `json:"plans"`
@@ -390,7 +391,14 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 				}
 				continue
 			}
+			// A refresh that spent its allowance on the groups before this
+			// manifest did not read it; the next refresh goes on from its
+			// cursor. Named failed, a follower's first minutes after a restart
+			// read as the store failing on an old publication.
 			read.Manifest = "failed"
+			if errors.Is(err, ErrObservationBudget) {
+				read.Manifest = "unread"
+			}
 			s.Publications = append(s.Publications, read)
 			failed := pub
 			failAt("manifest", d.repository.catalogManifestKey(pub.SnapshotRevision), &failed, err)
