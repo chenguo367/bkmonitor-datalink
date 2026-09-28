@@ -232,6 +232,24 @@ func publishCMDBBusinessMappings(recorder *metric.Recorder, health cmdbcache.Hea
 	}
 }
 
+// groupEmptiedLogger writes the line the group store asks for when the
+// groups it holds back from an emptying judged the source's change in
+// number: a hold starting or growing is a warning with the groups held and
+// the groups that had members; the hold ending is said once too.
+func groupEmptiedLogger(logger *observability.Logger) func(held, candidates int) {
+	if logger == nil {
+		return nil
+	}
+	return func(held, candidates int) {
+		attributes := []slog.Attr{slog.Int("held", held), slog.Int("had_members", candidates)}
+		if held == 0 {
+			logger.Info("target_group", "emptied_released", 0, 0, attributes...)
+			return
+		}
+		logger.Warn("target_group", "emptied_held", held, 0, attributes...)
+	}
+}
+
 // seriesAdmissionFilters is the access-path filter chain, in Python's order:
 // the monitoring target decides whether the series belongs to the strategy
 // at all, then the host's operational state decides whether it may alert.
@@ -274,7 +292,7 @@ func hostDisableMonitorStateCount(filters []admission.Filter) int {
 //
 // The group store reads its configured target group connection and refreshes the
 // referenced groups on the host index's cadence with its staleness bound.
-func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
+func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcache.Store, logger *observability.Logger) (*cmdbcache.TargetResolver, *cmdbcache.GroupStore, error) {
 	prefix, rendered := cfg.DynamicGroupKeyPrefix()
 	if !rendered {
 		return cmdbcache.NewTargetResolver(nil, hosts, time.Now), nil, nil
@@ -285,6 +303,7 @@ func buildTargetResolver(cfg config.Config, client redis.Cmdable, hosts *cmdbcac
 	}
 	groups, err := cmdbcache.NewGroupStore(reader, cmdbcache.GroupStoreOptions{
 		RefreshInterval: cmdbIndexRefreshInterval, MaxAge: cmdbIndexStalenessBound,
+		EmptiedChanged: groupEmptiedLogger(logger),
 	})
 	if err != nil {
 		return nil, nil, err

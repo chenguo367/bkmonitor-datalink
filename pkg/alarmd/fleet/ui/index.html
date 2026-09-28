@@ -2229,7 +2229,8 @@ var SELECTOR_REASON = {
   node_in_other_business: '拓扑节点下的主机只属于别的业务',
   members_dropped: '成员逐条校验有丢弃（模型、实例、汇总列出、host_id 规则）',
   source_unwired: '本部署没有接这种 selector 的来源',
-  model_representation_unresolved: '按模型实例（model_inst_id）给出的静态成员，主机缓存里查不到对应主机身份——不是主机模型，或缓存没带规范身份字段'
+  model_representation_unresolved: '按模型实例（model_inst_id）给出的静态成员，主机缓存里查不到对应主机身份——不是主机模型，或缓存没带规范身份字段',
+  emptied_held: '分组读成空但暂不采信：要么在等写入方一个周期（10 分钟）确认，要么本副本引用的分组全部（至少 2 个）或大批同时由有成员变空、按写入方的问题留用上一版；不关告警'
 };
 function targetResolutionWords(resolution) {
   var parts = [RESOLUTION_STATE[resolution.state] || resolution.state];
