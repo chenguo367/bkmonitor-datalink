@@ -673,6 +673,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 				slog.Int("byte_constraint_unread", bytes.Unread),
 				slog.Int("byte_constraint_pool_unknown", len(bytes.PoolUnknown)),
 				slog.Int("byte_constraint_unsettled", len(bytes.Unsettled)),
+				slog.Uint64("byte_constraint_unread_estimate_bytes", bytes.UnreadEstimate),
 				slog.Any("byte_constraint_overloaded", bytes.Overloaded),
 				slog.Int("byte_constraint_planned_moves", bytes.PlannedMoves),
 				slog.Int("byte_constraint_published_moves", bytes.PublishedMoves),
