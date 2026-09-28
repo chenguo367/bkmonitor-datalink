@@ -259,6 +259,25 @@ func failureReason(err error) string {
 	return redisfailure.Reason(err)
 }
 
+// callFailureReason is failureReason for an operation made under ctx. A call
+// issued with its caller's deadline already past, or failing with no
+// Sentinel answering once that deadline passed, failed on the caller's clock:
+// go-redis asks each Sentinel with the spent context, each refuses at once,
+// and the sentence it gives up with is the one a Sentinel outage gives - an
+// operation that never reached the network read as Sentinels down. It is
+// named by the context, timeout or canceled. A Sentinel that does not answer
+// while the caller still has time stays sentinel_unreachable.
+func callFailureReason(ctx context.Context, err error) string {
+	reason := failureReason(err)
+	if reason == "" || ctx.Err() == nil {
+		return reason
+	}
+	if start, ok := ctx.Value(redisCallStartKey{}).(redisCallStart); (ok && start.spent) || reason == redisfailure.SentinelUnreachable {
+		return redisfailure.Reason(ctx.Err())
+	}
+	return reason
+}
+
 func boundedRedisCommand(name string) string {
 	name = strings.ToLower(name)
 	if _, ok := redisCommandNames[name]; ok {
@@ -306,13 +325,20 @@ func (r *Recorder) RedisClientHealth(client string) (RedisClientHealth, bool) {
 
 type redisCallStartKey struct{}
 
+// redisCallStart is when an operation was issued, and whether its caller's
+// context was already done then.
+type redisCallStart struct {
+	at    time.Time
+	spent bool
+}
+
 func (h *RedisCallHook) BeforeProcess(ctx context.Context, _ redis.Cmder) (context.Context, error) {
 	if h == nil {
 		return ctx, nil
 	}
 	h.metrics.operations.WithLabelValues(h.client).Inc()
 	h.callerOperation(ctx)
-	return context.WithValue(ctx, redisCallStartKey{}, h.now()), nil
+	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: ctx.Err() != nil}), nil
 }
 
 func (h *RedisCallHook) AfterProcess(ctx context.Context, cmd redis.Cmder) error {
@@ -329,7 +355,7 @@ func (h *RedisCallHook) BeforeProcessPipeline(ctx context.Context, _ []redis.Cmd
 	}
 	h.metrics.operations.WithLabelValues(h.client).Inc()
 	h.callerOperation(ctx)
-	return context.WithValue(ctx, redisCallStartKey{}, h.now()), nil
+	return context.WithValue(ctx, redisCallStartKey{}, redisCallStart{at: h.now(), spent: ctx.Err() != nil}), nil
 }
 
 // AfterProcessPipeline counts every member of the batch, because the Redis
@@ -352,7 +378,7 @@ func (h *RedisCallHook) AfterProcessPipeline(ctx context.Context, cmds []redis.C
 			}
 		}
 		if reason == "" {
-			reason = failureReason(cmd.Err())
+			reason = callFailureReason(ctx, cmd.Err())
 		}
 		if index == 0 {
 			h.observeDuration(ctx, name, "true")
@@ -385,7 +411,7 @@ func (h *RedisCallHook) record(ctx context.Context, name, pipelined string, err 
 	if err != nil && err != redis.Nil {
 		h.metrics.failures.WithLabelValues(h.client, name, pipelined).Inc()
 	}
-	if reason := failureReason(err); reason != "" {
+	if reason := callFailureReason(ctx, err); reason != "" {
 		h.metrics.reasons.WithLabelValues(h.client, reason).Inc()
 		h.callerFailure(ctx, reason)
 	}
@@ -394,9 +420,9 @@ func (h *RedisCallHook) record(ctx context.Context, name, pipelined string, err 
 }
 
 func (h *RedisCallHook) observeDuration(ctx context.Context, name, pipelined string) {
-	started, ok := ctx.Value(redisCallStartKey{}).(time.Time)
+	started, ok := ctx.Value(redisCallStartKey{}).(redisCallStart)
 	if !ok {
 		return
 	}
-	h.metrics.duration.WithLabelValues(h.client, name, pipelined).Observe(h.now().Sub(started).Seconds())
+	h.metrics.duration.WithLabelValues(h.client, name, pipelined).Observe(h.now().Sub(started.at).Seconds())
 }

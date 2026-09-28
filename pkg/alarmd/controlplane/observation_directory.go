@@ -166,7 +166,12 @@ type StrategyDirectorySnapshot struct {
 	// checks to know the directory is riding the runtime's cache and not
 	// re-reading the manifest on every refresh.
 	ManifestsFromIndex int `json:"manifests_from_index"`
-	byStrategy         map[string][]int
+	// GroupsUnread is how many groups this refresh stopped before reading:
+	// a read that failed for the store or its own time and budget stops the
+	// refresh's reads, the groups after it are not tried, and the next
+	// refresh starts after it.
+	GroupsUnread int `json:"groups_unread"`
+	byStrategy   map[string][]int
 }
 
 // ObservationDirectory is a disposable read projection over the existing
@@ -276,7 +281,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	fail := func(step string, err error) {
 		s.Complete = false
 		s.Reason = "DEPENDENCY_UNAVAILABLE"
-		if errors.Is(err, ErrObservationBudget) {
+		if errors.Is(err, ErrObservationBudget) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			s.Reason = "RESOURCE_BUDGET"
 		}
 		// The first failure is the one that explains the rest: the walk goes
@@ -294,6 +299,18 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 		if first {
 			s.FailedKey, s.FailedPublication = key, publication
 		}
+	}
+	// stops says a failed read ends this refresh's reads. A key missing or an
+	// object that does not decode is that one object's, and the walk goes on
+	// past it; anything else is the store failing or the refresh out of time
+	// or budget, and every later read would fail the same way - past the
+	// deadline, at once and without reaching the network, one failure counted
+	// per remaining object. Once stopped, the groups the directory already
+	// knows still make their rows; the ones it would have to read are unread.
+	stopped := false
+	stops := func(err error) bool {
+		return errors.Is(err, ErrObservationBudget) || ctx.Err() != nil ||
+			!(errors.Is(err, ErrSnapshotUnavailable) || errors.Is(err, ErrCatalogObjectContractNewer) || errors.Is(err, ErrCatalogObjectCorrupt))
 	}
 	payload, err := r.read(ctx, d.repository.latestPublicationKey())
 	if err != nil {
@@ -375,6 +392,10 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			manifest = manifestFromIndex(pub.SnapshotRevision, cached)
 			s.ManifestsFromIndex++
 			read.Manifest = "index"
+		} else if stopped {
+			read.Manifest = "unread"
+			s.Publications = append(s.Publications, read)
+			continue
 		} else if err = r.decode(ctx, d.repository.catalogManifestKey(pub.SnapshotRevision), &manifest); err != nil {
 			// A publication an active Plan is still carried on keeps its
 			// objects renewed and not its manifest, so past the catalog's
@@ -406,6 +427,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			s.Publications = append(s.Publications, read)
 			failed := pub
 			failAt("manifest", d.repository.catalogManifestKey(pub.SnapshotRevision), &failed, err)
+			stopped = stopped || stops(err)
 			break
 		}
 		s.Publications = append(s.Publications, read)
@@ -429,7 +451,6 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			contexts = d.repository.rememberedContextRefs(pub)
 		}
 		start := d.cursor[pub.SnapshotRevision]
-		budgetFailed := false
 		for step := range manifest.QueryGroups {
 			index := (start + step) % len(manifest.QueryGroups)
 			ref := manifest.QueryGroups[index]
@@ -445,16 +466,21 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 				if cachedObject, _, hit := d.repository.objects().lookup(d.repository.queryGroupObjectKey(ref.ObjectDigest)); hit {
 					obj = cachedObject.(storedQueryGroupObject).object
 					err = nil
+				} else if stopped {
+					s.GroupsUnread++
+					continue
 				} else {
 					obj, err = d.readGroup(ctx, &r, ref.ObjectDigest)
 				}
 				if err != nil {
-					if errors.Is(err, ErrObservationBudget) && !budgetFailed {
-						nextCursor[pub.SnapshotRevision] = (index + 1) % len(manifest.QueryGroups)
-						budgetFailed = true
-					}
 					failed := pub
 					failAt("group_object", d.repository.queryGroupObjectKey(ref.ObjectDigest), &failed, err)
+					if stops(err) {
+						// The next refresh starts after this group, so one
+						// that fails every time is tried last, not first.
+						nextCursor[pub.SnapshotRevision] = (index + 1) % len(manifest.QueryGroups)
+						stopped = true
+					}
 					continue
 				}
 				if obj.Identity != ref.QueryGroup {
@@ -522,7 +548,18 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	// A large audit must never starve the current strategy directory. It has
 	// no tenant identity, so its source dispositions remain unattributed.
 	s.SourceReason = "SOURCE_AUDIT_UNAVAILABLE"
-	id, auditErr := r.read(ctx, d.repository.latestAuditKey())
+	var id []byte
+	var auditErr error
+	switch {
+	case !stopped:
+		id, auditErr = r.read(ctx, d.repository.latestAuditKey())
+	case s.Reason == "RESOURCE_BUDGET":
+		// Stopped for its own time or budget: the audit is unread for it.
+		auditErr = ErrObservationBudget
+	default:
+		// Stopped for the store failing: the audit is not read into it.
+		auditErr = ErrSnapshotUnavailable
+	}
 	if auditErr == nil {
 		var audit SourceAuditState
 		auditErr = r.decode(ctx, d.repository.auditKey(string(id)), &audit)

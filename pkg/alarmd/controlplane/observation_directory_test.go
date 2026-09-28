@@ -687,16 +687,17 @@ func TestADirectoryRefreshThatFailsSaysWhichReadAndWhy(t *testing.T) {
 		t.Fatalf("manifest failure = complete %v reason %q read %q error %q", s.Complete, s.Reason, s.FailedRead, s.Error)
 	}
 
-	// Every group object fails, each in its own words: the first is the one
-	// kept, since the walk went on past it.
+	// Every group object would fail: the first failure stops the refresh's
+	// reads, so it is the only one - kept, in its own words - and the group
+	// after it is unread.
 	groups := &failingReadSpy{Cmdable: h.client, fail: ":qgobj:"}
 	walked, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, groups)
 	if err != nil {
 		t.Fatal(err)
 	}
 	walked.Refresh(h.ctx, at)
-	if s := walked.Page(at, "", "", "", 0, 20); groups.failed < 2 || s.FailedRead != "group_object" || !strings.Contains(s.Error, "failure number 1") {
-		t.Fatalf("group failures = %d, read %q error %q, want the first of them", groups.failed, s.FailedRead, s.Error)
+	if s := walked.Page(at, "", "", "", 0, 20); groups.failed != 1 || s.FailedRead != "group_object" || !strings.Contains(s.Error, "failure number 1") || s.GroupsUnread != 1 {
+		t.Fatalf("group failures = %d, read %q error %q unread %d, want the one failure and the other group unread", groups.failed, s.FailedRead, s.Error, s.GroupsUnread)
 	}
 
 	ctx, cancel := context.WithCancel(h.ctx)
@@ -858,4 +859,216 @@ func TestADirectoryNamesACarriedPublicationWhoseManifestIsGoneAndGoesOn(t *testi
 			}
 		})
 	}
+}
+
+// stoppingSpy records every key a directory refresh reads, in order, and
+// answers a read of a key containing part (a group object when empty) with
+// fail's answer for it - nil passes the read through to the store.
+type stoppingSpy struct {
+	redis.Cmdable
+	part string
+	fail func(ctx context.Context, n int) *redis.StringCmd
+	keys []string
+	n    int
+}
+
+func (s *stoppingSpy) GetRange(ctx context.Context, key string, start, end int64) *redis.StringCmd {
+	s.keys = append(s.keys, key)
+	part := s.part
+	if part == "" {
+		part = ":qgobj:"
+	}
+	if strings.Contains(key, part) && s.fail != nil {
+		s.n++
+		if cmd := s.fail(ctx, s.n); cmd != nil {
+			return cmd
+		}
+	}
+	return s.Cmdable.GetRange(ctx, key, start, end)
+}
+
+func (s *stoppingSpy) read(part string) []string {
+	var keys []string
+	for _, key := range s.keys {
+		if strings.Contains(key, part) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// A read that fails for the store stops the refresh's reads: one failure
+// counted, the group after it unread and not tried, the audit not read. The
+// next refresh starts after the group that failed and reads both. A refresh
+// that runs out of its own time stops the same way, named by its budget - a
+// read on a spent deadline fails at once and says no Sentinel answered, and
+// every later one would too. A group whose key is missing is that group's
+// and the walk goes on past it.
+func TestADirectoryRefreshStopsReadingAtAFailureAndResumesAfterIt(t *testing.T) {
+	h, _, at := directoryFixture(t, 32)
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	refused := errors.New("dial tcp 127.0.0.1:6379: connect: connection refused")
+	spy := &stoppingSpy{Cmdable: h.client, fail: func(_ context.Context, n int) *redis.StringCmd {
+		if n == 1 {
+			return redis.NewStringResult("", refused)
+		}
+		return nil
+	}}
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	first := d.Page(at, "", "", "", 0, 20)
+	failedGroup := spy.read(":qgobj:")
+	if len(failedGroup) != 1 || len(spy.read(":latest_audit")) != 0 || first.Complete || first.Reason != "DEPENDENCY_UNAVAILABLE" ||
+		first.FailedRead != "group_object" || first.GroupsUnread != 1 || first.SourceReason != "SOURCE_AUDIT_UNAVAILABLE" {
+		t.Fatalf("a refresh whose group read was refused = reads %v, %+v; want one group read, no audit read, the other unread", spy.keys, first)
+	}
+
+	spy.keys = nil
+	d.Refresh(h.ctx, at.Add(time.Second))
+	second := d.Page(at.Add(time.Second), "", "", "", 0, 20)
+	groupsRead := spy.read(":qgobj:")
+	if !second.Complete || len(second.Rows) != 2 || second.GroupsUnread != 0 || len(groupsRead) != 2 || groupsRead[0] == failedGroup[0] ||
+		groupsRead[1] != failedGroup[0] {
+		t.Fatalf("the next refresh = reads %v, %+v; want both groups, the one that failed last", groupsRead, second)
+	}
+
+	late, err := controlplane.NewObservationDirectory(h.newRepository(t), controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100,
+		Timeout: 50 * time.Millisecond, FreshFor: time.Minute}, &stoppingSpy{Cmdable: h.client, fail: func(ctx context.Context, _ int) *redis.StringCmd {
+		<-ctx.Done()
+		return redis.NewStringResult("", errors.New("redis: all sentinels specified in configuration are unreachable"))
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	late.Refresh(h.ctx, at)
+	if s := late.Page(at, "", "", "", 0, 20); s.Reason != "RESOURCE_BUDGET" || s.FailedRead != "group_object" || s.GroupsUnread != 1 || s.SourceReason != "RESOURCE_BUDGET" {
+		t.Fatalf("a refresh out of time = %+v, want it named by its budget with the other group unread", s)
+	}
+
+	missing := &stoppingSpy{Cmdable: h.client, fail: func(_ context.Context, n int) *redis.StringCmd {
+		if n == 1 {
+			return redis.NewStringResult("", nil)
+		}
+		return nil
+	}}
+	gone, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone.Refresh(h.ctx, at)
+	if s := gone.Page(at, "", "", "", 0, 20); len(missing.read(":qgobj:")) != 2 || s.GroupsUnread != 0 || len(missing.read(":latest_audit")) != 1 || len(s.Rows) != 1 {
+		t.Fatalf("a group whose key is missing = reads %v, %+v; want the walk to go on to the other group and the audit", missing.keys, s)
+	}
+}
+
+// Once a refresh has stopped, nothing after it is read: a manifest read the
+// store refused stops the audit read too, and a group read refused on the
+// latest publication leaves a carried publication's manifest unread and
+// listed so. What needs no read still counts: a group whose object is
+// unchanged in a new publication makes its rows though the changed group
+// before it could not be read.
+func TestADirectoryRefreshThatStoppedReadsNothingAfterItAndKeepsWhatItKnows(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	refused := func(_ context.Context, _ int) *redis.StringCmd {
+		return redis.NewStringResult("", errors.New("dial tcp 127.0.0.1:6379: connect: connection refused"))
+	}
+
+	h, _, at := directoryFixture(t, 32)
+	manifestSpy := &stoppingSpy{Cmdable: h.client, part: ":manifest:", fail: refused}
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, manifestSpy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	if s := d.Page(at, "", "", "", 0, 20); len(manifestSpy.read(":latest_audit")) != 0 || s.FailedRead != "manifest" || s.Reason != "DEPENDENCY_UNAVAILABLE" {
+		t.Fatalf("a refused manifest read = reads %v, %+v; want the refresh stopped there, the audit not read", manifestSpy.keys, s)
+	}
+
+	h, baseline, at := directoryFixture(t, 32)
+	baseline.Refresh(h.ctx, at)
+	carried := baseline.Page(at, "", "", "", 0, 20).Published
+	manifest, err := h.repository.LoadCatalogManifest(h.ctx, carried.SnapshotRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SnapshotRevision = execution.SnapshotRevision(strings.Repeat("e", 64))
+	payload, _ := json.Marshal(manifest)
+	carriedKey := h.prefix + ":manifest:" + string(carried.SnapshotRevision)
+	if err = h.client.Set(h.ctx, h.prefix+":manifest:"+string(manifest.SnapshotRevision), payload, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.client.Set(h.ctx, h.prefix+":latest_publication", "2\n"+string(manifest.SnapshotRevision), 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	groupSpy := &stoppingSpy{Cmdable: h.client, fail: refused}
+	two, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, groupSpy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two.Refresh(h.ctx, at)
+	s := two.Page(at, "", "", "", 0, 20)
+	listed := false
+	for _, publication := range s.Publications {
+		listed = listed || (publication.Publication == carried && publication.Manifest == "unread")
+	}
+	if slices.Contains(groupSpy.keys, carriedKey) || !listed || len(groupSpy.read(":qgobj:")) != 1 {
+		t.Fatalf("a refused group read on the latest publication = reads %v, publications %+v; want the carried manifest unread and listed", groupSpy.keys, s.Publications)
+	}
+
+	// Each group changed in turn, so that in one of the two the changed group
+	// is walked before the unchanged one, whichever sorts first.
+	for name, next := range map[string]func() controlplane.Catalog{
+		"first document changed":  func() controlplane.Catalog { return objectCatalogTwoGroups(t, 90) },
+		"second document changed": func() controlplane.Catalog { return objectCatalogTwoGroupsChangingSecond(t, 95) },
+	} {
+		h, _, at := directoryFixture(t, 32)
+		known := &stoppingSpy{Cmdable: h.client}
+		kept, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, known)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kept.Refresh(h.ctx, at)
+		if first := kept.Page(at, "", "", "", 0, 20); !first.Complete || len(first.Rows) != 2 {
+			t.Fatalf("%s setup: %+v, want both groups known", name, first)
+		}
+		h.publish(t, catalogWithSchedule(t, next(), 60, 0))
+		known.fail = refused
+		known.keys = nil
+		kept.Refresh(h.ctx, at.Add(time.Second))
+		if s := kept.Page(at.Add(time.Second), "", "", "", 0, 20); len(known.read(":qgobj:")) != 1 || len(s.Rows) != 1 || s.GroupsUnread != 0 {
+			t.Fatalf("%s, its group unread = reads %v, %d rows, %d unread; want the unchanged group's row", name, known.keys, len(s.Rows), s.GroupsUnread)
+		}
+	}
+}
+
+// objectCatalogTwoGroupsChangingSecond is objectCatalogTwoGroups with the
+// second strategy's threshold changed instead of the first's.
+func objectCatalogTwoGroupsChangingSecond(t *testing.T, thresholdB int) controlplane.Catalog {
+	t.Helper()
+	documents := realThresholdDocuments(t)
+	second := string(withWireIdentity(t, documents[1], "tenant-a", "bkcc__3"))
+	if strings.Count(second, `"threshold":90`) != 1 {
+		t.Fatalf("setup: the second document's threshold is not 90 once: %s", second)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(strings.Replace(second, `"threshold":90`, fmt.Sprintf(`"threshold":%d`, thresholdB), 1)), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	decoded["bk_biz_id"] = float64(3)
+	documentB, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner := &businessPlanner{facts: map[string]execution.QueryPlanFacts{"2": queryFactsFor(t, "2", "bkcc__2"), "3": queryFactsFor(t, "3", "bkcc__3")}}
+	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{
+		{SourceID: "1001", Document: documents[0], Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}},
+		{SourceID: "1002", Document: documentB, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "3", SpaceScope: "bkcc__3"}},
+	}, Planner: planner})
+	if err != nil || len(catalog.QueryGroups) != 2 {
+		t.Fatalf("setup: catalog %d groups, %v", len(catalog.QueryGroups), err)
+	}
+	return catalog
 }

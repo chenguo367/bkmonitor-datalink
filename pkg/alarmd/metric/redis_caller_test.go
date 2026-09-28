@@ -7,7 +7,11 @@ package metric
 
 import (
 	"context"
+	"errors"
+	"net"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/go-redis/redis/v8"
 
@@ -97,5 +101,70 @@ func TestARedisFailureCountsAgainstTheJobThatMadeTheCall(t *testing.T) {
 		if boundedRedisCommand(name) != name {
 			t.Errorf("%s reads as %q, want its own name", name, boundedRedisCommand(name))
 		}
+	}
+}
+
+// A call made on its caller's spent deadline fails at once, and go-redis,
+// asking each Sentinel with that context, gives up in the words of a Sentinel
+// outage; such a call is named by the deadline - timeout, or canceled for a
+// cancelled caller - whatever the error said. So is one that fails with no
+// Sentinel answering after the deadline passed during it. A Sentinel that does
+// not answer while the caller still has time is sentinel_unreachable, and a
+// call that failed in its own words during its time keeps them.
+func TestAFailureOnTheCallersSpentDeadlineIsNamedByTheDeadline(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	hook := r.RedisHook("diagnostics")
+	refresh := redisfailure.WithCaller(context.Background(), redisfailure.CallerDirectoryRefresh)
+	sentinels := errors.New("redis: all sentinels specified in configuration are unreachable")
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}
+	call := func(ctx context.Context, during func(), err error) {
+		ctx, _ = hook.BeforeProcess(ctx, nil)
+		during()
+		_ = hook.AfterProcess(ctx, failedCommand("getrange", err))
+	}
+	nothing := func() {}
+
+	spent, cancelSpent := context.WithDeadline(refresh, time.Now().Add(-time.Second))
+	defer cancelSpent()
+	call(spent, nothing, sentinels)
+	call(spent, nothing, errors.New("redis: connection pool timeout"))
+	cancelled, cancel := context.WithCancel(refresh)
+	cancel()
+	call(cancelled, nothing, sentinels)
+	call(refresh, nothing, sentinels)
+	expiring, cancelExpiring := context.WithTimeout(refresh, 20*time.Millisecond)
+	defer cancelExpiring()
+	call(expiring, func() { <-expiring.Done() }, sentinels)
+	during, cancelDuring := context.WithCancel(refresh)
+	call(during, cancelDuring, refused)
+	pipeline, _ := hook.BeforeProcessPipeline(spent, nil)
+	_ = hook.AfterProcessPipeline(pipeline, []redis.Cmder{failedCommand("getrange", sentinels)})
+
+	reasons := callerCounts(t, r, callerReasonFamily)
+	for cell, want := range map[string]float64{
+		"diagnostics/directory_refresh/timeout": 4, "diagnostics/directory_refresh/canceled": 1,
+		"diagnostics/directory_refresh/sentinel_unreachable": 1, "diagnostics/directory_refresh/connection_refused": 1,
+		"diagnostics/directory_refresh/pool_timeout": 0,
+	} {
+		if reasons[cell] != want {
+			t.Errorf("reasons %s = %v, want %v", cell, reasons[cell], want)
+		}
+	}
+	if got := failureReasonCounts(t, r); got["diagnostics/timeout"] != 4 || got["diagnostics/sentinel_unreachable"] != 1 {
+		t.Errorf("the client's own reasons = %v, want the same naming", got)
+	}
+	// Each call's round trip is still timed from when it was issued.
+	var timed uint64
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_redis_command_duration_seconds") {
+		labels := map[string]string{}
+		for _, label := range m.GetLabel() {
+			labels[label.GetName()] = label.GetValue()
+		}
+		if labels["client"] == "diagnostics" && labels["command"] == "getrange" {
+			timed += m.GetHistogram().GetSampleCount()
+		}
+	}
+	if timed != 7 {
+		t.Errorf("timed round trips = %d, want the 7 calls", timed)
 	}
 }
