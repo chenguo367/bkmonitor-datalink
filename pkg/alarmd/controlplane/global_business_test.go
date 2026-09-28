@@ -227,7 +227,9 @@ func TestAGlobalBusinessStrategyIsWithheldWhereItCannotRunAsOne(t *testing.T) {
 			}
 			found := false
 			for _, disposition := range global.Dispositions {
-				if disposition.Reason == controlplane.ReasonGlobalBusinessUnsupported {
+				// The word as operators read it, not the constant: it is
+				// what the page and the acceptance reading name.
+				if disposition.Reason == "GLOBAL_STRATEGY_UNSUPPORTED" {
 					found = true
 					if disposition.Disposition != controlplane.DispositionUnsupported || disposition.Detail != "reason="+test.reason {
 						t.Fatalf("disposition = %+v, want UNSUPPORTED with reason=%s", disposition, test.reason)
@@ -235,7 +237,7 @@ func TestAGlobalBusinessStrategyIsWithheldWhereItCannotRunAsOne(t *testing.T) {
 				}
 			}
 			if !found {
-				t.Fatalf("dispositions %+v name no %s", global.Dispositions, controlplane.ReasonGlobalBusinessUnsupported)
+				t.Fatalf("dispositions %+v name no GLOBAL_STRATEGY_UNSUPPORTED", global.Dispositions)
 			}
 		})
 	}

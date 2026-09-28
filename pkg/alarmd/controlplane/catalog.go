@@ -1039,7 +1039,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	}
 	if refusal := globalBusinessRefusal(source.SourceID, source.Identity, targetScope, facts); refusal != nil {
 		candidate.dispositions = append(candidate.dispositions, *refusal)
-		return candidate, errors.New(ReasonGlobalBusinessUnsupported + ": " + refusal.Detail)
+		return candidate, errors.New(ReasonGlobalStrategyUnsupported + ": " + refusal.Detail)
 	}
 	compiledInputs := compiledPlanInputs{primary: facts}
 	for _, label := range itemDataTypes(item) {
@@ -1094,7 +1094,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		// prevent.
 		refusal := globalBusinessUnsupported(source.SourceID, GlobalBusinessOutputProtocol, "")
 		candidate.dispositions = append(candidate.dispositions, refusal)
-		return candidate, errors.New(ReasonGlobalBusinessUnsupported + ": " + refusal.Detail)
+		return candidate, errors.New(ReasonGlobalStrategyUnsupported + ": " + refusal.Detail)
 	}
 	plan.WireFormat = format
 	// Beside the wire format and for the same reason: the sink writes one

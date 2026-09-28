@@ -12,10 +12,10 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// ReasonGlobalBusinessUnsupported withholds a global business strategy this
-// build cannot run as one. The detail names which condition it failed
+// ReasonGlobalStrategyUnsupported withholds a global strategy this build
+// cannot run as one. The detail names which condition it failed
 // (reason=<word>); the words are below.
-const ReasonGlobalBusinessUnsupported = "GLOBAL_BUSINESS_UNSUPPORTED"
+const ReasonGlobalStrategyUnsupported = "GLOBAL_STRATEGY_UNSUPPORTED"
 
 // Why a global business strategy is withheld.
 const (
@@ -96,6 +96,6 @@ func namesTableOrDataLabel(tableID string) bool {
 func globalBusinessUnsupported(sourceID, reason, fieldPath string) ObjectDisposition {
 	return ObjectDisposition{
 		SourceID: sourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
-		Reason: ReasonGlobalBusinessUnsupported, FieldPath: fieldPath, Detail: "reason=" + reason,
+		Reason: ReasonGlobalStrategyUnsupported, FieldPath: fieldPath, Detail: "reason=" + reason,
 	}
 }
