@@ -290,13 +290,6 @@ func decodeLayer(values map[Field]json.RawMessage) (Layer, error) {
 	return layer, nil
 }
 
-var jsonNull = []byte("null")
-
-// decodeHorizon reads the horizon by presence: a JSON null states nothing
-// (no override), and anything else must be a positive whole number of
-// seconds. Zero, a negative, a fraction and a string are refused, and a
-// refused publication keeps the last good settings: there is no value meaning
-// "track forever" for any of them to stand in for.
 // CheckFieldValue checks one field's distributed JSON by the rules a layer is
 // decoded with (decodeLayer), for a reader that shows the fields one at a
 // time: what it refuses is what the runtime refuses, and nothing else. A
@@ -318,6 +311,13 @@ func CheckFieldValue(field Field, raw json.RawMessage) error {
 	return err
 }
 
+var jsonNull = []byte("null")
+
+// decodeHorizon reads the horizon by presence: a JSON null states nothing
+// (no override), and anything else must be a positive whole number of
+// seconds. Zero, a negative, a fraction and a string are refused, and a
+// refused publication keeps the last good settings: there is no value meaning
+// "track forever" for any of them to stand in for.
 func decodeHorizon(raw json.RawMessage) (int64, bool, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if bytes.Equal(trimmed, jsonNull) {
