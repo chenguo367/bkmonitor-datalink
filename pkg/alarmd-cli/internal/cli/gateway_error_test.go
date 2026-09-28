@@ -18,7 +18,8 @@ import (
 
 // A failure written by a proxy or gateway in front of alarmd is named as
 // one, by its HTTP status and without its body - on the describe step and on
-// the call alike - while a failure alarmd answered keeps its own code. The
+// the call alike - while a failure alarmd answered keeps its own code, and
+// one it answered on another channel version is that skew, not a gateway. The
 // gateway's page was printed as the result: its fields, no error code, and
 // nothing saying it was not alarmd's answer.
 func TestAGatewaysFailureIsNamedAndItsPageIsNotTheResult(t *testing.T) {
@@ -51,6 +52,27 @@ func TestAGatewaysFailureIsNamedAndItsPageIsNotTheResult(t *testing.T) {
 				t.Fatalf("the gateway's page reached the output: %s", stdout)
 			}
 		})
+	}
+
+	// alarmd's failure on another channel version is alarmd's, answered across
+	// a version this CLI does not speak - not a gateway's - with its code kept.
+	var skewed Profile
+	skew := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m := envelope(skewed, "error", nil)
+		objectField(m, "meta")["channel_version"] = "alarmd-ob/v2"
+		m["error"] = map[string]any{"code": "target_unreachable", "message": "the owner did not answer"}
+		w.WriteHeader(http.StatusBadGateway)
+		writeJSON(t, w, m)
+	}))
+	defer skew.Close()
+	skewed = fixtureProfile(skew.URL)
+	skewStore := Store{t.TempDir()}
+	_ = skewStore.save(skewed, false)
+	code, result, _, _ := run(t, skewStore, skew.Client(), "", "discover", "--env", skewed.EnvironmentID)
+	failure := objectField(result, "error")
+	if code != 1 || stringField(failure, "code") != "protocol_error" || stringField(failure, "server_error_code") != "target_unreachable" ||
+		stringField(objectField(result, "meta"), "server_channel_version") != "alarmd-ob/v2" {
+		t.Fatalf("alarmd's 502 on another channel version = exit %d %v, want a channel version failure keeping its code", code, result)
 	}
 
 	// alarmd's own failure, with its channel meta, is reported as it was.

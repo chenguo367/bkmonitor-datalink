@@ -155,17 +155,39 @@ func (a *App) saveEvidence(result map[string]any) (string, error) {
 	return path, nil
 }
 
-// channelAnswer says a channel response is to be read as alarmd's. A
-// success has passed validateChannel already; a failure is alarmd's only
-// when it carries the channel's own meta, which the server writes on every
-// answer. Anything else was written by a proxy or gateway in front of it -
-// except a refused session, which goes to the session's own handling
-// whoever wrote it: logging in again is the answer either way.
-func channelAnswer(m map[string]any, status int) bool {
+// channelFailure checks a channel response for a failure alarmd did not
+// answer on this CLI's terms, and reports it; false when the response is
+// alarmd's to report as it is. A success has passed validateChannel
+// already, and a refused session goes to the session's own handling
+// whoever wrote it: logging in again is the answer either way. Otherwise
+// the channel's meta decides, which the server writes on every answer:
+// absent, a proxy or gateway in front of alarmd wrote the failure; present
+// with another version, alarmd answered across a version this CLI does not
+// speak, the same skew a success is refused for.
+func (a *App) channelFailure(m map[string]any, status int) (int, bool) {
 	if status >= 200 && status < 300 || status == http.StatusUnauthorized {
-		return true
+		return 0, false
 	}
-	return stringField(objectField(m, "meta"), "channel_version") == channelVersion
+	switch version := stringField(objectField(m, "meta"), "channel_version"); version {
+	case channelVersion:
+		return 0, false
+	case "":
+		return a.gatewayFailure(status), true
+	default:
+		return a.channelVersionFailure(status, version, stringField(objectField(m, "error"), "code")), true
+	}
+}
+
+// channelVersionFailure reports an alarmd failure answered on another
+// channel version, with the code alarmd gave it.
+func (a *App) channelVersionFailure(status int, version, code string) int {
+	message := fmt.Sprintf("unsupported channel version; upgrade compatibility must be checked: "+
+		"alarmd answered HTTP %d on %s, and this CLI speaks %s.", status, version, channelVersion)
+	a.print(map[string]any{"status": "error", "summary": message,
+		"error":    map[string]any{"code": "protocol_error", "message": message, "http_status": status, "server_error_code": code},
+		"evidence": map[string]any{"complete": false, "limitations": []string{message}},
+		"meta":     map[string]any{"http_status": status, "server_channel_version": version}, "next_call": []any{}})
+	return 1
 }
 
 // gatewayFailure reports a failure a proxy or gateway in front of alarmd

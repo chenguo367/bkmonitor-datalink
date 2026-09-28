@@ -434,8 +434,8 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile) 
 			return a.fail("protocol_error", err.Error(), 1)
 		}
 		if status < 200 || status >= 300 || stringField(m, "status") != "ok" {
-			if !channelAnswer(m, status) {
-				return a.gatewayFailure(status)
+			if code, reported := a.channelFailure(m, status); reported {
+				return code
 			}
 			return a.emitOrLapsed(p, m, []string{p.AccessToken}, status)
 		}
@@ -457,8 +457,8 @@ func (a *App) channel(mode, operation string, params map[string]any, p Profile) 
 			}
 		}
 	}
-	if !channelAnswer(m, status) {
-		return a.gatewayFailure(status)
+	if code, reported := a.channelFailure(m, status); reported {
+		return code
 	}
 	return a.emitOrLapsed(p, m, []string{p.AccessToken, p.RefreshToken}, status)
 }
