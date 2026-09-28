@@ -96,6 +96,21 @@ type Finding struct {
 // whatever its last round said; the window counts say more about a window
 // reason than the word does; and only then are the codes read.
 func checkOf(anomaly Anomaly, schedule Schedule) (check Check, under bool, unclassified bool) {
+	check, under, unclassified = checkOnCounts(anomaly, schedule)
+	// A window line whose every short window is short only by minutes the
+	// query answered whole without the series is the data's, however the row
+	// got to the window line -- its own reason, a guard it is held under, or
+	// a code. The shape of it is a host that misses whole minutes, and it sat
+	// on this deployment's undetermined list.
+	if (check == CheckWindowUndecided || check == CheckSeriesDataMissing) && sparseEvidence(anomaly.Coverage) {
+		return CheckSeriesSparse, true, false
+	}
+	return check, under, unclassified
+}
+
+// checkOnCounts is the line the row's codes and counts put it under, before
+// the window evidence is read.
+func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool, unclassified bool) {
 	// A code the table files as this deployment's own defect is the line,
 	// whatever else the row says: a gap guard in conflict with itself stops
 	// the Slot, so the object also stalls, and filing it as stalled first
@@ -371,6 +386,24 @@ func queryRejected(failure *FailureRef) bool {
 	detail := failure.Detail
 	return strings.HasPrefix(detail, routedetail.RouteDetailKindResponse+"="+routedetail.ResponseFailureStatusPrefix) ||
 		strings.HasPrefix(detail, routedetail.RouteDetailKindHTTPStatus+"=4")
+}
+
+// sparseEvidence says every short window of the object is short only by
+// minutes the query answered whole without the series, as far as the record
+// goes all the way: every short window listed, and every missing minute of
+// each one read against a remembered round. A list cut short, a minute read
+// as not remembered, one incomplete round or one empty answer, and it is not
+// proven, and the row stays where the counts put it.
+func sparseEvidence(coverage *HistoryCoverage) bool {
+	if coverage == nil || coverage.Short == 0 || uint32(len(coverage.Windows)) != coverage.Short {
+		return false
+	}
+	for _, window := range coverage.Windows {
+		if window.Verdict != VerdictDataAbsentWhenQueried || window.HolesBy.AnsweredWithoutSeries != window.MissingTotal {
+			return false
+		}
+	}
+	return true
 }
 
 // windowCheck reads a window reason on its counts. decided is false when the

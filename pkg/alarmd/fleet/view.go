@@ -913,12 +913,18 @@ const (
 	VerdictPointsUnusable WindowVerdict = "POINTS_UNUSABLE"
 	// Nothing this side did wrong is on record, and at least one hole is a
 	// minute this process cannot speak for -- not remembered, or remembered
-	// without what the query answered.
+	// without what the query answered. Also a window with no hole on record:
+	// a shortfall nothing explains is not the data's by default.
 	VerdictUnknown WindowVerdict = "UNKNOWN"
+	// No incomplete round, and at least one hole is a minute the query
+	// answered whole with no rows at all. That is a fact about the query --
+	// it matched nothing -- and not a series missing its points, so it is
+	// never read as sparse data.
+	VerdictQueryAnsweredEmpty WindowVerdict = "QUERY_ANSWERED_EMPTY"
 )
 
 // WindowVerdicts is the closed list, for the page's completeness check.
-var WindowVerdicts = []WindowVerdict{VerdictDataAbsentWhenQueried, VerdictInputIncomplete, VerdictPointsUnusable, VerdictUnknown}
+var WindowVerdicts = []WindowVerdict{VerdictDataAbsentWhenQueried, VerdictInputIncomplete, VerdictPointsUnusable, VerdictUnknown, VerdictQueryAnsweredEmpty}
 
 // WindowRow is one short window of the last round, by identity, with each
 // listed hole read against the object's remembered rounds.
@@ -991,8 +997,12 @@ func verdictOf(counts WindowHoleCounts) WindowVerdict {
 		return VerdictPointsUnusable
 	case counts.NotInMemory > 0 || counts.PrimaryUnrecorded > 0:
 		return VerdictUnknown
-	default:
+	case counts.AnsweredEmpty > 0:
+		return VerdictQueryAnsweredEmpty
+	case counts.AnsweredWithoutSeries > 0:
 		return VerdictDataAbsentWhenQueried
+	default:
+		return VerdictUnknown
 	}
 }
 

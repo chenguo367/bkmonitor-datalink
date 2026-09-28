@@ -173,8 +173,12 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// owner's and waits for a build; any other reason under that
 	// disposition stays this deployment's, which one line with one owner
 	// could not say.
-	if got := len(Checks()); got != 31 || len(checkAnswers) != 31 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 31: a new check has to "+
+	// Thirty-two: SERIES_SPARSE is a rule over a dimension the rows already
+	// carry - each short window's verdict from its holes - because a window
+	// short only by minutes the query answered without the series is the
+	// data's, and it sat on the undetermined list as this deployment's.
+	if got := len(Checks()); got != 32 || len(checkAnswers) != 32 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 32: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -249,6 +253,11 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Fresh: 4, ShortFresh: 4, FreshRounds: 40}},
 		CheckSeriesDataMissing: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 9, Short: 4, WorstValid: 2, WorstRequired: 9, ShortRounds: 40}},
+		// The same row whose one short window is short only by minutes the
+		// query answered without the series.
+		CheckSeriesSparse: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
+			Levels: 9, Short: 1, WorstValid: 2, WorstRequired: 9, ShortRounds: 40, Windows: []WindowRow{{
+				Verdict: VerdictDataAbsentWhenQueried, MissingTotal: 2, HolesBy: WindowHoleCounts{AnsweredWithoutSeries: 2}}}}},
 		CheckWindowUndecided: {Kind: KindDegradedRun, CauseReason: "HISTORY_WARMING", Coverage: &HistoryCoverage{
 			Levels: 3, Short: 2, Empty: 2, WorstRequired: 14, ShortRounds: 40, EmptyRounds: 40}},
 		CheckCoverageReadingRefused: {Kind: KindDegradedRun, CauseReason: "HISTORY_GAPPED",

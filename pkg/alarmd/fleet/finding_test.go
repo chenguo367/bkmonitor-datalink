@@ -605,3 +605,65 @@ func TestATerminalSlotIsFiledUnderItsOwnReason(t *testing.T) {
 		}
 	}
 }
+
+// A window's verdict says whose the shortfall is only as far as its holes do:
+// an empty answer is the query's, and a window with no hole on record is
+// nobody's yet, not the data's by default.
+func TestAWindowVerdictIsTheDatasOnlyOnMinutesAnsweredWithoutTheSeries(t *testing.T) {
+	for name, tc := range map[string]struct {
+		counts WindowHoleCounts
+		want   WindowVerdict
+	}{
+		"answered without the series": {WindowHoleCounts{AnsweredWithoutSeries: 3}, VerdictDataAbsentWhenQueried},
+		"an empty answer among them":  {WindowHoleCounts{AnsweredWithoutSeries: 3, AnsweredEmpty: 1}, VerdictQueryAnsweredEmpty},
+		"no hole on record":           {WindowHoleCounts{}, VerdictUnknown},
+		"one round this side missed":  {WindowHoleCounts{AnsweredWithoutSeries: 3, InputIncomplete: 1}, VerdictInputIncomplete},
+		"a minute not remembered":     {WindowHoleCounts{AnsweredWithoutSeries: 3, NotInMemory: 1}, VerdictUnknown},
+	} {
+		if got := verdictOf(tc.counts); got != tc.want {
+			t.Errorf("%s: verdict = %s, want %s", name, got, tc.want)
+		}
+	}
+}
+
+// A window line is the data's when every short window is short only by
+// minutes the query answered whole without the series, however the row came
+// to the window line: by its own reason's counts, or held under a guard. One
+// window that says anything else, a list cut short, or minutes not all read,
+// and the row stays where it was.
+func TestAWindowLineIsTheDatasOnlyWhenEveryWindowIsSparse(t *testing.T) {
+	sparse := func(missing uint32) WindowRow {
+		return WindowRow{Verdict: VerdictDataAbsentWhenQueried, MissingTotal: missing, HolesBy: WindowHoleCounts{AnsweredWithoutSeries: missing}}
+	}
+	gapped := func(windows ...WindowRow) Anomaly {
+		return Anomaly{Kind: KindDegradedRun, CauseReason: "HISTORY_GAPPED", Coverage: &HistoryCoverage{
+			Levels: 4, Short: 2, WorstValid: 3, WorstRequired: 5, ShortRounds: 9, Windows: windows}}
+	}
+	guarded := func(windows ...WindowRow) Anomaly {
+		return Anomaly{Kind: KindDegradedRun, ReasonCode: "COMPLETED_WITH_UNAVAILABLE", Cause: "GAP_GUARD_WARMING", CauseReason: "GAP_GUARD_WARMING",
+			Coverage: &HistoryCoverage{Levels: 4, Short: 2, WorstValid: 3, WorstRequired: 5, ShortRounds: 9, Guarded: 2, Windows: windows}}
+	}
+	incomplete := WindowRow{Verdict: VerdictInputIncomplete, MissingTotal: 2, HolesBy: WindowHoleCounts{AnsweredWithoutSeries: 1, InputIncomplete: 1}}
+	empty := WindowRow{Verdict: VerdictQueryAnsweredEmpty, MissingTotal: 2, HolesBy: WindowHoleCounts{AnsweredEmpty: 2}}
+	partlyRead := WindowRow{Verdict: VerdictDataAbsentWhenQueried, MissingTotal: 5, HolesBy: WindowHoleCounts{AnsweredWithoutSeries: 2}}
+	for name, tc := range map[string]struct {
+		row  Anomaly
+		want Check
+	}{
+		"gapped, every window sparse":       {gapped(sparse(2), sparse(1)), CheckSeriesSparse},
+		"gapped, one window incomplete":     {gapped(sparse(2), incomplete), CheckSeriesDataMissing},
+		"gapped, one window answered empty": {gapped(sparse(2), empty), CheckSeriesDataMissing},
+		"gapped, the list cut short":        {gapped(sparse(2)), CheckSeriesDataMissing},
+		"gapped, minutes not all read":      {gapped(sparse(2), partlyRead), CheckSeriesDataMissing},
+		"guarded, every window sparse":      {guarded(sparse(2), sparse(1)), CheckSeriesSparse},
+		"guarded, one window incomplete":    {guarded(sparse(2), incomplete), CheckWindowUndecided},
+	} {
+		check, under, _ := checkOf(tc.row, ScheduleOnTime)
+		if check != tc.want || !under {
+			t.Errorf("%s: check = %s (under %v), want %s", name, check, under, tc.want)
+		}
+	}
+	if answers := checkAnswers[CheckSeriesSparse]; answers.Owner != OwnerData || answers.Owner.actionRequired() {
+		t.Errorf("SERIES_SPARSE is owned by %s, want the data owner and no action item for this deployment", answers.Owner)
+	}
+}
