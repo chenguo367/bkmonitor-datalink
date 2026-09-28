@@ -1621,6 +1621,19 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 		facts.GateOwnLookups[string(answer)] = stats.OwnLookups[answer]
 	}
 	facts.GateOwnHeld = stats.OwnHeld
+	facts.SentDepartures = make(map[string]uint64, len(openalerts.SentDepartures))
+	for _, path := range openalerts.SentDepartures {
+		facts.SentDepartures[path] = stats.SentDepartures[path]
+	}
+	if stats.OwnOpenKnown {
+		open := stats.OwnOpen
+		facts.OwnOpen = &open
+		facts.OwnOpenRefusals = stats.OwnOpenRefusals
+		facts.OwnOpenDepartures = make(map[string]uint64, len(openalerts.OwnOpenDepartures))
+		for _, path := range openalerts.OwnOpenDepartures {
+			facts.OwnOpenDepartures[path] = stats.OwnOpenDepartures[path]
+		}
+	}
 	if !stats.GateSince.IsZero() {
 		since := stats.GateSince
 		facts.GateSince = &since
