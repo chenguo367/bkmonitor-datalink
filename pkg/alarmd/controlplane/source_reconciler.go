@@ -180,8 +180,8 @@ type reusableRound struct {
 //     emptied by;
 //   - the clock: not yet at the first absence grace the Catalog serves;
 //   - LastGood and the previous dispositions: this process is the one writer,
-//     a new leader term starts with no memory, and the caller requires the
-//     activation still at this Catalog's revision.
+//     a term that ended forgot the round (StepDown), and the caller requires
+//     the activation still at this Catalog's revision.
 //
 // The periodic full read (sourceFullReadInterval) is not a skipped round, so
 // it always rebuilds: an input missing from this list stays frozen for at
@@ -240,7 +240,7 @@ type SourceReconciler struct {
 	now    func() time.Time
 	memory *sourceRoundMemory
 	// reusable is the last round that ended UNCHANGED, whole; see
-	// reusableFor. Nil after any round that did not.
+	// reusableFor. Nil after any round that did not, and after StepDown.
 	reusable *reusableRound
 	// lastGood is the content of the latest publication this process knows,
 	// kept in memory from the catalog it published or assembled once from

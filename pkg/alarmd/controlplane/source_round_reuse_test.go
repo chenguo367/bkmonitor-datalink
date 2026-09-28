@@ -162,8 +162,9 @@ func TestARoundBuildsWhenWhatItStoodOnMoved(t *testing.T) {
 }
 
 // Two rounds always build whatever the round before them was: the periodic
-// full read, and the first round of a new leader term, which remembers
-// nothing.
+// full read, and the first round of a new leader term -- a new process, which
+// remembers nothing, or one that stepped down and was elected again, which
+// forgot the round when it stepped down.
 func TestThePeriodicReadAndANewLeaderAlwaysBuild(t *testing.T) {
 	harness := newChangeGateHarness(t)
 	settled := harness.settleActive()
@@ -184,4 +185,18 @@ func TestThePeriodicReadAndANewLeaderAlwaysBuild(t *testing.T) {
 	if first.Publication != settled.Publication {
 		t.Fatalf("the new term's first round published %+v, want it where the fleet already is: %+v", first.Publication, settled.Publication)
 	}
+	// That round compiled every strategy, with an empty cache, and ended
+	// UNCHANGED; the next one stands on it and compiled nothing itself.
+	if first.CompiledStrategies == 0 {
+		t.Fatalf("setup: the new term's first round compiled nothing: %+v", first)
+	}
+	reused := harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadSkipped, controlplane.SourceReadUnchanged, 0)
+	harness.wantBuild(reused, controlplane.SourceRefreshReused)
+	if reused.CompiledStrategies != 0 || reused.ReusedStrategies != first.CompiledStrategies+first.ReusedStrategies {
+		t.Fatalf("reused round reported %d compiled and %d reused, want 0 and %d",
+			reused.CompiledStrategies, reused.ReusedStrategies, first.CompiledStrategies+first.ReusedStrategies)
+	}
+
+	successor.StepDown()
+	harness.wantBuild(harness.refresh(controlplane.SourceRefreshUnchanged, controlplane.SourceReadSkipped, controlplane.SourceReadUnchanged, 0), controlplane.SourceRefreshRebuilt)
 }

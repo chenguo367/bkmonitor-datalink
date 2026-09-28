@@ -178,9 +178,15 @@ func (reconciler *SourceReconciler) LookupStrategy(strategyID string) StrategyLo
 // hand-over read as "the source never listed it", from a replica no longer
 // in a position to say. The next round this process completes as Leader
 // builds the index again.
+//
+// It forgets the reusable round too. The round a new term starts with has to
+// build, not stand on a Catalog from before another Leader may have
+// published: the activation check would refuse most of those, and a term
+// boundary is not where that should rest on one check.
 func (reconciler *SourceReconciler) StepDown() {
 	if reconciler == nil {
 		return
 	}
 	reconciler.strategies.replace(nil)
+	reconciler.reusable = nil
 }
