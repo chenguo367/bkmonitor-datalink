@@ -21,6 +21,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
 
 // DirectoryLimits is an observation allowance, never an execution limit.
@@ -267,7 +268,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 		return
 	}
 	defer d.refresh.Unlock()
-	ctx, cancel := context.WithTimeout(ctx, d.limits.Timeout)
+	ctx, cancel := context.WithTimeout(redisfailure.WithCaller(ctx, redisfailure.CallerDirectoryRefresh), d.limits.Timeout)
 	defer cancel()
 	r := directoryRead{repository: d.repository, client: d.readClient, limits: d.limits}
 	s := &StrategyDirectorySnapshot{ObservedAt: at, Limits: d.limits, Rows: []StrategyDirectoryRow{}, byStrategy: map[string][]int{}}
@@ -670,6 +671,7 @@ type OutputFormatFacts struct {
 // manifest read: that is the read the directory exists to not make per
 // request.
 func (d *ObservationDirectory) EffectiveOutput(ctx context.Context, row StrategyDirectoryRow) OutputFormatFacts {
+	ctx = redisfailure.WithCaller(ctx, redisfailure.CallerDirectoryRead)
 	if row.OutputContext == "" {
 		return OutputFormatFacts{Reason: OutputContextRefNotRetained}
 	}
@@ -791,7 +793,7 @@ func (d *ObservationDirectory) Page(at time.Time, tenant, business, strategy str
 // projection. It reads one immutable group; no sibling output contexts, source
 // refresh or snapshot-body fallback can be triggered by an HTTP request.
 func (d *ObservationDirectory) EffectivePlan(ctx context.Context, row StrategyDirectoryRow) (QueryGroupPlanObject, error) {
-	ctx, cancel := context.WithTimeout(ctx, d.limits.Timeout)
+	ctx, cancel := context.WithTimeout(redisfailure.WithCaller(ctx, redisfailure.CallerDirectoryRead), d.limits.Timeout)
 	defer cancel()
 	r := directoryRead{repository: d.repository, client: d.readClient, limits: d.limits}
 	obj, err := d.readGroup(ctx, &r, row.ObjectDigest)

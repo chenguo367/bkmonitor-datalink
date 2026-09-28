@@ -321,6 +321,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_redis_command_total":                          "variableLabels: {client,command,pipelined}",
 		"bkmonitor_alarmd_redis_command_failure_total":                  "variableLabels: {client,command,pipelined}",
 		"bkmonitor_alarmd_redis_failure_reason_total":                   "variableLabels: {client,reason}",
+		"bkmonitor_alarmd_redis_caller_operation_total":                 "variableLabels: {client,caller}",
+		"bkmonitor_alarmd_redis_caller_failure_reason_total":            "variableLabels: {client,caller,reason}",
 		"bkmonitor_alarmd_redis_command_duration_seconds":               "variableLabels: {client,command,pipelined}",
 		"bkmonitor_alarmd_short_period_slot_completions_total":          "variableLabels: {cohort,operation,completion_kind}",
 		"bkmonitor_alarmd_query_cooldown_events_total":                  "variableLabels: {event}",
@@ -862,6 +864,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("redis_command_total"):                 redisCommandSeries,
 		fqName("redis_command_failure_total"):         redisCommandSeries,
 		fqName("redis_failure_reason_total"):          (len(redisClientNames) + 1) * len(redisfailure.Reasons),
+		fqName("redis_caller_operation_total"):        (len(redisClientNames) + 1) * (len(redisfailure.Callers) + 1),
+		fqName("redis_caller_failure_reason_total"):   (len(redisClientNames) + 1) * (len(redisfailure.Callers) + 1) * len(redisfailure.Reasons),
 		fqName("redis_command_duration_seconds"):      histogramSeries(redisCommandSeries, 12),
 		fqName("short_period_slot_completions_total"): 56,
 		// 11 codes UQ declares plus OTHER, times allowed/unavailable/other.
