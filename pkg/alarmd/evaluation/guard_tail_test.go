@@ -11,6 +11,7 @@ package evaluation
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -19,43 +20,61 @@ import (
 )
 
 // An UNKNOWN under a standing guard is marked as the guard's alone only when
-// this round proposes no guard of its own for the Level.
+// the trigger left it UNKNOWN for its history and the round proposes no guard
+// of its own for the Level. Every case answers every input FULL and
+// available, so the inputs alone cannot tell them apart.
 //
-// The side that needs the mark is a dependency that answered FULL with no
-// rows. PlanInputsWhole counts it whole - it answered, and on a round with no
-// series that is all a warmup asks - but for a series that needed it the round
-// proposes its own QUERY_EMPTY guard, and the outcome carries that reason.
-// Such an UNKNOWN is this round's, not the tail of an earlier gap, so its
-// Slot must not read GAP_GUARD_WARMING; only the evaluator's mark says so,
-// since the inputs alone look whole.
-func TestAnUnknownIsMarkedAsTheGuardsAloneOnlyWhenTheRoundProposesNoGuardOfItsOwn(t *testing.T) {
-	plan := compiledG4Plan(t, strategy.DetectorKindSimpleRingRatio, map[string]any{"floor": 20, "ceil": nil},
-		strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, IdentityFields: []string{"host"}})
+//   - A short history is the tail: the record advances State and the guard's
+//     warmup counts it.
+//   - A dependency point missing for this series is this record's own UNKNOWN:
+//     State does not advance, the guard never warms, and calling it warming
+//     would say "nothing to do" for as long as the point stays missing.
+//   - A dependency that answered with no rows is whole to PlanInputsWhole - on
+//     a round with no series that is all a warmup needs - but for a series
+//     that needed it the round proposes its own QUERY_EMPTY guard.
+func TestAnUnknownIsMarkedAsTheGuardsAloneOnlyWhenItIsItsHistoryAndTheRoundProposesNothing(t *testing.T) {
+	projection := strategy.AlgorithmInputProjection{ValueFields: []string{"value"}, IdentityFields: []string{"host"}}
+	config := func() map[string]any { return map[string]any{"floor": 20, "ceil": nil} }
+	single := compiledG4Plan(t, strategy.DetectorKindSimpleRingRatio, config(), projection)
+	double := compiledG4PlanWithTrigger(t, strategy.DetectorKindSimpleRingRatio, config(), projection, 2, 2)
+	normal := func(id string, sourceTime int64) execution.StateHistoryPoint {
+		return execution.StateHistoryPoint{RecordID: strings.Repeat(id, 64), SourceTime: sourceTime,
+			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: double.Levels()[0].Fingerprints().Detect, Result: execution.LevelFactNormal}}}
+	}
 	guard := execution.ReasonCode(contract.ReasonQueryUnavailable)
 	for _, testCase := range []struct {
 		name     string
+		plan     *strategy.CompiledPlan
+		history  []execution.StateHistoryPoint
+		primary  contract.CanonicalRecordV2
 		previous []contract.CanonicalRecordV2
 		reason   execution.ReasonCode
 		tail     bool
 	}{
-		// The dependency answered with rows, none at the offset this record
-		// needs: nothing incomplete, so the round proposes no guard, and the
-		// UNKNOWN the missing point makes carries the standing guard's reason.
-		{name: "dependency answered without the point", previous: []contract.CanonicalRecordV2{g4OffsetMissRecord(39, `100`)},
+		// A hole before the new record leaves the window GAPPED.
+		{name: "history short", plan: double, history: []execution.StateHistoryPoint{normal("d", 180), normal("e", 240)},
+			primary: g4Record(360, `80`, nil), previous: []contract.CanonicalRecordV2{g4Record(300, `100`, nil)},
 			reason: guard, tail: true},
-		{name: "dependency answered empty", previous: []contract.CanonicalRecordV2{},
+		// Rows, none at the offset this record needs.
+		{name: "dependency point missing", plan: single,
+			primary: g4Record(99, `80`, nil), previous: []contract.CanonicalRecordV2{g4OffsetMissRecord(39, `100`)},
+			reason: guard, tail: false},
+		{name: "dependency answered empty", plan: single,
+			primary: g4Record(99, `80`, nil), previous: []contract.CanonicalRecordV2{},
 			reason: execution.ReasonCode(contract.ReasonQueryEmpty), tail: false},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			record := g4Record(99, `80`, nil)
-			request := requestFixtureForPlan(t, plan, []contract.CanonicalRecordV2{record}, nil)
+			request := requestFixtureForPlan(t, testCase.plan, []contract.CanonicalRecordV2{testCase.primary}, testCase.history)
 			request.State.Items[0].Status = execution.StateFoundWarming
 			request.State.Items[0].Levels[0].HistoryCompleteness = execution.HistoryWarming
 			request.State.Items[0].Levels[0].GapReasonCode = guard
-			input := g4Input(t, request, map[string][]contract.CanonicalRecordV2{"primary": {record}, "previous": testCase.previous})
+			if len(testCase.history) != 0 {
+				request.State.Items[0].Levels[0].LastProcessedEventTime = testCase.history[len(testCase.history)-1].SourceTime
+			}
+			input := g4Input(t, request, map[string][]contract.CanonicalRecordV2{"primary": {testCase.primary}, "previous": testCase.previous})
 			request.Inputs = []execution.SeriesEvaluationInputRequest{input}
 			if !execution.PlanInputsWhole(input.Inputs, request.Header.DuePlans[0].Identity) {
-				t.Fatal("fixture: every input must answer FULL and available, so only the mark can tell the sides apart")
+				t.Fatal("fixture: every input must answer FULL and available, so only the mark can tell the cases apart")
 			}
 
 			result, err := newEvaluator(t).Evaluate(context.Background(), request)

@@ -368,7 +368,8 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		kind := execution.LevelOutcomeKind(o.Result)
 		reason := execution.ReasonCode(observability.ReasonNone)
 		// guardTail: the UNKNOWN below carries a standing guard's reason
-		// because of that guard alone, this round adding nothing of its own.
+		// because of that guard alone, this round adding nothing of its own
+		// (unknownOnlyForItsHistory).
 		guardTail := false
 		// A recovery reached on a round whose own inputs were incomplete is
 		// held, and carries the reason of the guard this round proposes.
@@ -404,7 +405,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// dependency point or the EffectiveTime made it UNKNOWN. Only a
 			// record that converges the guard keeps its own local reason.
 			if guarded, found := durableGuardReasons[o.LevelID]; found && guardStaysActive(o, historyCompleteness[o.LevelID]) {
-				reason, guardTail = guarded, true
+				reason, guardTail = guarded, unknownOnlyForItsHistory(o)
 				// Unless this round has incomplete inputs of its own for the
 				// Level. Then the guard that ends up covering this outcome is
 				// the one this round proposes, carrying the fold of those
@@ -1008,6 +1009,23 @@ func stateFact(v string) state.LevelFactResult {
 	default:
 		return state.LevelFactUnavailable
 	}
+}
+
+// unknownOnlyForItsHistory says whether the trigger left a Level UNKNOWN only
+// because its window's history is short - WARMING or GAPPED - and not because
+// this record could not be judged. Only then is an UNKNOWN under a standing
+// guard the guard's tail: the record advances State, the guard's warmup
+// counts it, and the Level is decided once enough such rounds pass.
+//
+// The trigger's other UNKNOWNs are this record's own: a detection fact it
+// could not use (a dependency point missing for this series although the
+// query answered) or an EffectiveTime it could not resolve. Neither advances
+// State, so a guard over them never warms, and calling them warming would say
+// "nothing to do" for as long as the point stays missing. The trigger sets
+// HistoryCompleteness on an UNKNOWN only on the history path; the others
+// return before it.
+func unknownOnlyForItsHistory(outcome trigger.LevelOutcomeV2) bool {
+	return outcome.HistoryCompleteness != ""
 }
 
 // guardStaysActive reports whether the durable Level guard survives this
