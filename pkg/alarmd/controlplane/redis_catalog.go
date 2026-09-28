@@ -130,6 +130,7 @@ type RedisCatalogRepository struct {
 	// RebuildActivationBody; see lastGoodActivation.
 	lastGood      lastGoodActivation
 	rebuilds      activationRebuildCounts
+	header        activationHeaderStanding
 	blocked       blockedCounts
 	objectCatalog objectCatalogState
 	catalogIndex  catalogIndex
@@ -226,11 +227,15 @@ func (repository *RedisCatalogRepository) Ping(ctx context.Context) error {
 // Activation header names, and of nothing else. The Snapshot and the Active
 // Set are content-addressed, so their presence is all the script needs to
 // know about them; the two small mappings are compared by value, and a header
-// that moved means another Activation owns the objects now. The reply carries
-// the Active Set's size for the renewal facts, so the caller never reads it
-// to learn that.
+// that moved means another Activation owns the objects now. A header that is
+// not there at all is told apart from one that moved (-2): nothing moves on
+// from it by itself, and the Control Leader writes it back from the body
+// (RebuildActivationHeader). The reply carries the Active Set's size for the
+// renewal facts, so the caller never reads it to learn that.
 const renewCurrentActivationObjectsScript = `
-if redis.call('GET', KEYS[1]) ~= ARGV[1] then return {0, 0} end
+local header = redis.call('GET', KEYS[1])
+if not header then return {-2, 0} end
+if header ~= ARGV[1] then return {0, 0} end
 if redis.call('EXISTS', KEYS[2]) == 0 or redis.call('GET', KEYS[3]) ~= ARGV[3] or
    redis.call('GET', KEYS[4]) ~= ARGV[4] or redis.call('EXISTS', KEYS[5]) == 0 then return {-1, 0} end
 redis.call('PEXPIRE', KEYS[2], ARGV[2])
@@ -306,7 +311,11 @@ func (repository *RedisCatalogRepository) RenewCurrentActivationObjects(ctx cont
 		queryGroups, objectBytes = len(groups), int(activeBytes)
 		return nil
 	case 0:
+		repository.header.conflict(ActivationRenewalHeaderMoved)
 		return ErrActivationConflict
+	case -2:
+		repository.header.conflict(ActivationRenewalHeaderMissing)
+		return ErrActivationHeaderMissing
 	default:
 		return ErrSnapshotUnavailable
 	}

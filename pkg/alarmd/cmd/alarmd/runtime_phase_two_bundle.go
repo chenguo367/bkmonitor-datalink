@@ -818,6 +818,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	openAlertCopy := linkd.Cache
 	recorder.SetOpenAlertSetSource(openAlertCopy.Stats)
 	recorder.SetActivationRebuildSource(repository.ActivationRebuildCounts)
+	recorder.SetActivationHeaderSource(repository.ActivationHeaderReading)
 	recorder.SetActivationBlockedSource(repository.ActivationBlockedReading)
 	recorder.SetActivationBodyBytesSource(repository.ActivationBodyBytes)
 	linkdBudget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
@@ -1142,6 +1143,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	bundle, err = newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
 		Lookback:          lookbackEngine,
 		ActivationBlocked: repository.ActivationBlockedReading,
+		ActivationHeader:  repository.ActivationHeaderReading,
 		Config:            cfg, Health: health, Control: control, Ownership: productionOwnership,
 		Recorder: recorder, Observer: observer, TargetFlow: targetFlow, Now: external.Now,
 		FleetAPI: fleetAPI, PublicSurfaceRestricted: publicRestricted,
@@ -1299,6 +1301,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		platformSettings: platformSettingsFactsSource(platformSettings, external.Now),
 		publicSurface:    surface,
 		activation:       bundle.activationFleetFacts,
+		activationHeader: bundle.activationHeaderFleetFacts,
 		rebalance:        bundle.rebalanceFleetFacts,
 		assignmentScope:  bundle.assignmentScopeFleetFacts,
 		assignmentSweep:  bundle.assignmentSweepFleetFacts,

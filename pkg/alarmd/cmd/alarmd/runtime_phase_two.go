@@ -600,6 +600,10 @@ type phaseTwoWorkerBundleDependencies struct {
 	ActivationBlocked func() controlplane.ActivationBlockedReading
 	CloseResources    func(context.Context) error
 	Now               func() time.Time
+
+	// ActivationHeader is the Control Leader's standing on a missing
+	// activation header; nil where there is no repository.
+	ActivationHeader func() controlplane.ActivationHeaderReading
 }
 
 type phaseTwoWorkerBundle struct {
