@@ -252,7 +252,7 @@ func deploymentReads(cfg config.Config, catalog *controlplane.RedisCatalogReposi
 	}
 	options := obevidence.Options{Catalog: catalog, Progress: progressStore}
 	options.SourceStrategy = bind("strategy_cache", cfg.StrategySourceRedis(), cfg.PhaseTwo.Control.StrategyCachePrefix)
-	options.CMDBCache = bind("cmdb_cache", cfg.CMDBCacheRedis(), "")
+	options.CMDBCache = bind("cmdb_cache", cfg.CMDBCacheRedis(), cfg.PlatformKeyPrefix())
 	// Catalog and progress share a diagnostic runtime pool, not detector I/O.
 	runtimeConnection := cfg.RuntimeStoreRedis()
 	diagnosticRuntime = newClient(runtimeConnection)

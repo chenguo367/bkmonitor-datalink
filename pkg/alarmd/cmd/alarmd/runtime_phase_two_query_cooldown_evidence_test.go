@@ -18,6 +18,7 @@ import (
 
 	"github.com/go-redis/redis/v8"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
@@ -87,6 +88,43 @@ func TestStoreInspectReadsThePoolRecordTheOwnerWrote(t *testing.T) {
 	}
 	if missing := read("qg-never-pooled"); missing.Status != "missing" {
 		t.Fatalf("a Query Group with no record = %s, want missing", missing.Status)
+	}
+}
+
+// The host record store.inspect reads is the one the host index loads: the
+// CLI's reads are built from the same platform key prefix the admission
+// chain's CMDB reader is. Built without it, every host would read as not
+// configured.
+func TestStoreInspectReadsTheHostRecordTheIndexLoads(t *testing.T) {
+	address, client := startPhaseTwoRedis(t)
+	ctx := context.Background()
+	cfg := config.Default()
+	cfg.Redis.Address = address
+	cfg.Kafka.LegacyAdapter.SnapshotPrefix = "bk_test.ee"
+	indexReader, err := cmdbcache.NewReader(client, cfg.PlatformKeyPrefix())
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := `{"bk_host_id":101,"bk_host_innerip":"192.0.2.10","bk_cloud_id":0,"bk_biz_id":2}`
+	if err := client.HSet(ctx, indexReader.HostCacheKey(), "101", record).Err(); err != nil {
+		t.Fatal(err)
+	}
+	var clients []redis.UniversalClient
+	t.Cleanup(func() {
+		for _, c := range clients {
+			_ = c.Close()
+		}
+	})
+	newClient := func(connection config.RedisConnectionConfig) redis.UniversalClient {
+		c := redis.NewClient(&redis.Options{Addr: connection.Address, DB: connection.DB})
+		clients = append(clients, c)
+		return c
+	}
+	store, _, _ := deploymentReads(cfg, nil, nil, newClient, nil)
+	out := operationNamed(t, store, "store.inspect").Run(ctx, obchannel.Params{"family": obevidence.FamilyCMDBHost, "host": "101"})
+	got, ok := out.Value.(obevidence.Result)
+	if !ok || got.Status != "ok" || got.Location.Role != "cmdb_cache" || got.Location.Key != indexReader.HostCacheKey() {
+		t.Fatalf("host 101 = %+v, want ok at the key the index loads (%s)", got, indexReader.HostCacheKey())
 	}
 }
 

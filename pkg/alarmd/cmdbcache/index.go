@@ -413,6 +413,12 @@ func (reader *Reader) serviceInstanceKey() string {
 	return reader.prefix + "." + serviceInstanceCacheSuffix
 }
 
+// HostCacheKey and ServiceInstanceCacheKey are the two hashes this reader
+// loads, for a reader that looks up one record in them instead.
+func (reader *Reader) HostCacheKey() string { return reader.hostKey() }
+
+func (reader *Reader) ServiceInstanceCacheKey() string { return reader.serviceInstanceKey() }
+
 func (reader *Reader) refreshedKey() string {
 	return reader.prefix + "." + hostTopoRefreshedField
 }
@@ -642,6 +648,24 @@ func decodeWireHost(payload string) (wireHost, error) {
 		return wireHost{}, err
 	}
 	return wire, nil
+}
+
+// DecodeHostRecord reads one host record as a load reads it: the facts the
+// index would hold for it, or the error that has a load skip it. A load
+// drops a record it cannot decode without a word, so this is how one such
+// record is told apart from a host the cache does not have.
+func DecodeHostRecord(payload string) (*HostFacts, error) {
+	wire, err := decodeWireHost(payload)
+	if err != nil {
+		return nil, err
+	}
+	return hostFactsOf(wire, payload), nil
+}
+
+// DecodeServiceInstanceRecord is DecodeHostRecord for the service-instance
+// hash.
+func DecodeServiceInstanceRecord(payload string) (*ServiceInstanceFacts, error) {
+	return decodeServiceInstance(payload)
 }
 
 // hostFactsOf is a host record's facts from its decoded fields and its
