@@ -39,6 +39,13 @@ type RuntimeConfigFacts struct {
 
 // RuntimeRetentionFacts are the retention lengths, in seconds, and their
 // inputs.
+//
+// One Plan's need, which admission holds against ObjectLimitSeconds and
+// withholds the Plan by name when it is past it, is the same sum as
+// SnapshotMinimumSeconds with the Plan's own completion offset in place of the
+// cadence: PublicationDelayAllowanceSeconds + (the Plan's completion offset -
+// DownstreamExecutionReserveSeconds) + MaxReplayAgeSeconds +
+// PostRecoveryTerminalDelaySeconds.
 type RuntimeRetentionFacts struct {
 	// CatalogSeconds is how long published Catalogs are kept: the manifests,
 	// the schedule timelines, the active set. The larger of the configured
@@ -59,7 +66,10 @@ type RuntimeRetentionFacts struct {
 	// a Plan may have: a longer Plan reads its content by digest, kept to
 	// ObjectLimitSeconds.
 	CatalogKeyCadenceSeconds int64 `json:"catalog_key_cadence_seconds"`
-	// The inputs, as configured or derived at startup.
+	// The inputs, as configured or derived at startup. RedisRestartMargin
+	// feeds none of the lengths above: it is added to the lifetime of a
+	// series' runtime state and of a Plan's generation-scoped keys, whose
+	// ceiling is RedisMaxTTL.
 	CatalogTTLSeconds                 int64 `json:"catalog_ttl_seconds"`
 	RedisMaxTTLSeconds                int64 `json:"redis_max_ttl_seconds"`
 	RedisRestartMarginSeconds         int64 `json:"redis_restart_margin_seconds"`
