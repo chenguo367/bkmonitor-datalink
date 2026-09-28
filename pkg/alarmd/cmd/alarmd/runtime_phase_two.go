@@ -26,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
@@ -558,6 +559,10 @@ type phaseTwoWorkerBundleDependencies struct {
 	// the strategy's scope, from what this replica's own admission step
 	// turned away. Every replica runs its own.
 	RunTargetScopeClose func(context.Context)
+	// Lookback is the late-data lookback on the query path, nil when this
+	// process does not run it. The bundle runs its rechecks and drops the
+	// samples of a Query Group the moment it stops owning it.
+	Lookback *lookback.Engine
 	// RefreshPlatformSettings reads the platform's dynamic configuration
 	// into the process copy and brings what evaluates by it up to date; run
 	// once at start and then once a minute.
@@ -911,6 +916,9 @@ func newPhaseTwoWorkerBundle(dependencies phaseTwoWorkerBundleDependencies) (*ph
 		dependencies.Recorder.SetControlSourceSource(bundle.controlSourceStats)
 		dependencies.Recorder.SetLeaderRoundSource(bundle.leaderRoundStats)
 		dependencies.Recorder.SetCatalogCompositionSource(bundle.catalogComposition)
+		if dependencies.Lookback != nil {
+			dependencies.Recorder.SetLookbackSource(dependencies.Lookback.Stats)
+		}
 	}
 	return bundle, nil
 }
@@ -2466,6 +2474,13 @@ func (bundle *phaseTwoWorkerBundle) startMaintenance() {
 		bundle.maintenanceWG.Add(1)
 		go func() { defer bundle.maintenanceWG.Done(); bundle.dependencies.RunEffectiveTime(bundle.maintenanceCtx) }()
 	}
+	if bundle.dependencies.Lookback != nil {
+		bundle.maintenanceWG.Add(1)
+		go func() {
+			defer bundle.maintenanceWG.Done()
+			runLookback(bundle.maintenanceCtx, bundle.dependencies.Lookback)
+		}()
+	}
 	bundle.maintenanceWG.Add(1)
 	go bundle.maintainRegistration()
 	if bundle.dependencies.PublishFleet != nil {
@@ -2961,6 +2976,9 @@ func (bundle *phaseTwoWorkerBundle) setRunnerLocked(
 func (bundle *phaseTwoWorkerBundle) removeRunnerLocked(queryGroup execution.QueryGroupIdentity) {
 	delete(bundle.runners, queryGroup)
 	bundle.setOwnedQueryGroupsLocked()
+	// A Query Group no longer owned is no longer rechecked. The lookback
+	// never takes the bundle's lock under its own, so this order is safe.
+	bundle.dependencies.Lookback.Forget(queryGroup)
 }
 
 // setOwnedQueryGroupsLocked follows every change to the owned Runner set, so

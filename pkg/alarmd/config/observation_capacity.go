@@ -14,6 +14,9 @@ type ObservationCapacity struct {
 	SampleBufferBytes      int
 	SampleBytesPerMinute   int
 	SampleRecordsPerMinute int
+	// LookbackBytes is the kept first reads' share, zero unless the lookback
+	// is enabled.
+	LookbackBytes int
 }
 
 func DeriveObservationCapacity(in CapacityInputs, allocation PhaseTwoObservationConfig) ObservationCapacity {
@@ -39,7 +42,12 @@ func DeriveObservationCapacity(in CapacityInputs, allocation PhaseTwoObservation
 	if ops < 8 || mem < 64<<10 {
 		return ObservationCapacity{}
 	}
-	return ObservationCapacity{DirectoryBytes: mem / 2, DirectoryReadBytes: mem / 16,
+	capacity := ObservationCapacity{DirectoryBytes: mem / 2, DirectoryReadBytes: mem / 16,
 		DirectoryCommands: ops, CostBytes: mem / 4, SampleBufferBytes: mem / 4,
 		SampleRecordsPerMinute: ops, SampleBytesPerMinute: min(mem/16, ops*4096)}
+	if allocation.LookbackEnabled {
+		// Out of the directory's half, so the parts still sum to the share.
+		capacity.DirectoryBytes, capacity.LookbackBytes = mem*3/8, mem/8
+	}
+	return capacity
 }
