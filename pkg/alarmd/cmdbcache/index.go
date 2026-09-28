@@ -553,12 +553,9 @@ func (builder *indexBuilder) addToNodes(facts *HostFacts) {
 func (builder *indexBuilder) addServiceInstanceFields(fields []string) {
 	for position := 0; position+1 < len(fields); position += 2 {
 		identity, payload := fields[position], fields[position+1]
-		facts, err := decodeServiceInstance(payload)
+		facts, err := DecodeServiceInstanceRecord(identity, payload)
 		if err != nil {
 			continue
-		}
-		if facts.ID == "" {
-			facts.ID = identity
 		}
 		builder.index.serviceInstances[identity] = facts
 	}
@@ -655,17 +652,21 @@ func decodeWireHost(payload string) (wireHost, error) {
 // drops a record it cannot decode without a word, so this is how one such
 // record is told apart from a host the cache does not have.
 func DecodeHostRecord(payload string) (*HostFacts, error) {
-	wire, err := decodeWireHost(payload)
-	if err != nil {
-		return nil, err
-	}
-	return hostFactsOf(wire, payload), nil
+	return decodeHost(payload)
 }
 
 // DecodeServiceInstanceRecord is DecodeHostRecord for the service-instance
-// hash.
-func DecodeServiceInstanceRecord(payload string) (*ServiceInstanceFacts, error) {
-	return decodeServiceInstance(payload)
+// hash, whose load it is: the record under field, its id the field's when
+// the record names none.
+func DecodeServiceInstanceRecord(field, payload string) (*ServiceInstanceFacts, error) {
+	facts, err := decodeServiceInstance(payload)
+	if err != nil {
+		return nil, err
+	}
+	if facts.ID == "" {
+		facts.ID = field
+	}
+	return facts, nil
 }
 
 // hostFactsOf is a host record's facts from its decoded fields and its

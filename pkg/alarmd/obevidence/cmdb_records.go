@@ -93,7 +93,7 @@ func (service *Service) cmdbRecord(ctx context.Context, request StoreRequest) Re
 				"business_id": facts.BusinessID, "topo_nodes": facts.TopoNodes}
 		}
 	} else {
-		facts, err := cmdbcache.DecodeServiceInstanceRecord(string(raw))
+		facts, err := cmdbcache.DecodeServiceInstanceRecord(field, string(raw))
 		if err != nil {
 			record.DecodeError = err.Error()
 		} else {
@@ -193,6 +193,12 @@ func readHashField(ctx context.Context, source string, binding RedisBinding, key
 		return r, nil
 	}
 	r.Limits.Bytes = len(value)
+	// Grown past the limit between the length and the read: refused as it
+	// would have been, rather than handed on whole.
+	if len(value) > MaxDocumentBytes {
+		r.Status, r.Reason = "budget_exceeded", "document_bytes"
+		return r, nil
+	}
 	r.Status, r.Complete = "ok", true
 	return r, []byte(value)
 }
