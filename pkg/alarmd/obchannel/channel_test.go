@@ -260,6 +260,15 @@ func TestStableCatalogAndConditionalSchema(t *testing.T) {
 		{"store.inspect", Params{"family": "query_cooldown", "query_group": "q", "strategy_id": "1"}, false},
 		{"store.inspect", Params{"family": "target_group", "group_id": "a b"}, false},
 		{"store.inspect", Params{"family": "target_group", "group_id": "a", "strategy_id": "1"}, false},
+		// A Plan's records are named as strategy.get names the Plan: its
+		// object, its object digest and its strategy, with tenant and
+		// business to narrow; a group id is no part of it.
+		{"store.inspect", Params{"family": "gap_marker", "query_group": "q", "object_digest": strings.Repeat("a", 64), "strategy_id": "1"}, true},
+		{"store.inspect", Params{"family": "no_data_memory", "query_group": "q", "object_digest": strings.Repeat("a", 64), "strategy_id": "1", "tenant": "t", "business": "2"}, true},
+		{"store.inspect", Params{"family": "gap_marker", "query_group": "q", "strategy_id": "1"}, false},
+		{"store.inspect", Params{"family": "no_data_memory", "query_group": "q", "object_digest": strings.Repeat("a", 64)}, false},
+		{"store.inspect", Params{"family": "gap_marker", "query_group": "q", "object_digest": strings.Repeat("a", 64), "strategy_id": "1", "group_id": "g"}, false},
+		{"store.inspect", Params{"family": "query_cooldown", "query_group": "q", "object_digest": strings.Repeat("a", 64)}, false},
 	} {
 		if err := validate(c.ops[tc.operation], tc.params); (err == nil) != tc.valid {
 			t.Fatalf("%s %+v: %v", tc.operation, tc.params, err)
@@ -267,7 +276,7 @@ func TestStableCatalogAndConditionalSchema(t *testing.T) {
 	}
 	_, desc := call(t, c, envelope(c, "describe", "store.inspect", nil))
 	encoded, _ := json.Marshal(desc.Result)
-	for _, word := range []string{"allOf", "additionalProperties", "query_progress", "query_cooldown", "uniqueItems", "max_commands"} {
+	for _, word := range []string{"allOf", "additionalProperties", "query_progress", "query_cooldown", "gap_marker", "no_data_memory", "uniqueItems", "max_commands"} {
 		if !bytes.Contains(encoded, []byte(word)) {
 			t.Fatalf("schema missing %s", word)
 		}

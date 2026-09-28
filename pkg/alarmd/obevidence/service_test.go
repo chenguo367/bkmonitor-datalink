@@ -56,7 +56,7 @@ func (log *commandLog) assertBounded(t *testing.T) {
 	}
 	for _, cmd := range log.commands {
 		switch cmd {
-		case "multi", "exec", "type", "pttl", "getrange":
+		case "multi", "exec", "type", "pttl", "getrange", "strlen", "hlen", "hget":
 		default:
 			t.Fatalf("unbounded/unexpected command %s", cmd)
 		}
