@@ -153,6 +153,7 @@ func (r *observationCostRefresh) publish(ctx context.Context, at time.Time, cost
 	if r == nil {
 		return
 	}
+	ctx = redisfailure.WithCaller(ctx, redisfailure.CallerCostProjection)
 	published, publishErr := r.store.Publish(ctx, r.replica, at, cost)
 	if r.last.IsZero() || at.Sub(r.last) >= r.interval {
 		r.last = at

@@ -361,6 +361,51 @@ type CostCoverage struct {
 	DuePlans            int `json:"due_plans"`
 	UnobservedDuePlans  int `json:"unobserved_due_plans"`
 	HeldDuePlans        int `json:"held_due_plans"`
+
+	// UnobservedDueSample names up to costDueMissSampleLimit of the groups
+	// and Plans counted in UnobservedDueGroups and UnobservedDuePlans, in key
+	// order, each with what the window holds of its group. The counts said
+	// how many and never which: a replica read incomplete for a few Plans
+	// and nothing on it said whose they were or what their group had done.
+	UnobservedDueSample []CostDueMiss `json:"unobserved_due_sample,omitempty"`
+}
+
+// costDueMissSampleLimit bounds the sample: enough to name a handful, never
+// the roster.
+const costDueMissSampleLimit = 8
+
+// CostDueMiss is one tracked group - or one Plan of it, when Scope is
+// strategy_owned - that had a Slot due in the window and left no
+// observation in it, with its group's counts over the window. Counts only:
+// what the group did, not why.
+type CostDueMiss struct {
+	Scope            string           `json:"scope"`
+	QueryGroupKey    string           `json:"query_group_key"`
+	Plan             CostPlanIdentity `json:"plan"`
+	Observations     uint64           `json:"observations"`
+	Attempts         uint64           `json:"attempts"`
+	RunReturns       uint64           `json:"run_returns"`
+	FailedRunReturns uint64           `json:"failed_run_returns"`
+	Evaluations      uint64           `json:"evaluations"`
+	HeldRounds       uint64           `json:"held_rounds"`
+}
+
+// costDueMissOf is a miss of the group, or of plan when it is not nil, with
+// the group's counts over its two windows.
+func costDueMissOf(group *costGroupState, plan *costPlanState, windows costWindows) CostDueMiss {
+	miss := CostDueMiss{Scope: "query_group", QueryGroupKey: group.group.QueryGroupKey}
+	if plan != nil {
+		miss.Scope, miss.Plan = "strategy_owned", plan.identity
+	}
+	for _, s := range [2]CostScalars{windows.current, windows.previous} {
+		miss.Observations += s.Observations
+		miss.Attempts += s.Attempts
+		miss.RunReturns += s.RunReturns
+		miss.FailedRunReturns += s.FailedRunReturns
+		miss.Evaluations += s.Evaluations
+		miss.HeldRounds += s.HeldRounds
+	}
+	return miss
 }
 
 type CostContributor struct {
@@ -902,12 +947,18 @@ func (c *CostSummary) Publish(now time.Time) {
 	// A group the window has no work of and whose rounds the scheduler held
 	// is held, not unseen; its Plans with it.
 	held := make(map[*costGroupState]bool)
+	groupWindows := make(map[*costGroupState]costWindows)
 	for i := range copies {
-		if w := copies[i].windows; copies[i].plan == nil && w.current.Observations+w.previous.Observations == 0 &&
+		if copies[i].plan != nil {
+			continue
+		}
+		groupWindows[copies[i].group] = copies[i].windows
+		if w := copies[i].windows; w.current.Observations+w.previous.Observations == 0 &&
 			w.current.HeldRounds+w.previous.HeldRounds > 0 {
 			held[copies[i].group] = true
 		}
 	}
+	var misses []CostDueMiss
 	for i := range copies {
 		entry := &copies[i]
 		w := entry.windows
@@ -924,6 +975,7 @@ func (c *CostSummary) Publish(now time.Time) {
 					snapshot.Coverage.HeldDueGroups++
 				default:
 					snapshot.Coverage.UnobservedDueGroups++
+					misses = append(misses, costDueMissOf(entry.group, nil, w))
 				}
 			}
 			if entry.group.since.After(snapshot.WindowStart) {
@@ -949,6 +1001,7 @@ func (c *CostSummary) Publish(now time.Time) {
 					snapshot.Coverage.HeldDuePlans++
 				default:
 					snapshot.Coverage.UnobservedDuePlans++
+					misses = append(misses, costDueMissOf(entry.group, entry.plan, groupWindows[entry.group]))
 				}
 			}
 			if entry.plan.since.After(snapshot.WindowStart) {
@@ -964,6 +1017,20 @@ func (c *CostSummary) Publish(now time.Time) {
 		snapshot.Retained.PeakShare = float64(snapshot.Retained.PeakSumBytes) / float64(limit)
 	}
 	snapshot.Coverage.Incomplete = snapshot.Coverage.Incomplete || snapshot.Coverage.ContentionDropped > 0 || snapshot.Coverage.UntrackedObservations > 0 || snapshot.Coverage.UnattributedEvaluations > 0 || snapshot.Coverage.UnknownWallObservations > 0 || snapshot.Coverage.PartialWindowGroups > 0 || snapshot.Coverage.UnobservedDueGroups > 0 || snapshot.Coverage.UnobservedDuePlans > 0
+	sort.Slice(misses, func(i, j int) bool {
+		a, b := misses[i], misses[j]
+		if a.QueryGroupKey != b.QueryGroupKey {
+			return a.QueryGroupKey < b.QueryGroupKey
+		}
+		if a.Scope != b.Scope {
+			return a.Scope < b.Scope
+		}
+		return a.Plan.TenantID+"\x00"+a.Plan.BusinessID+"\x00"+a.Plan.StrategyID < b.Plan.TenantID+"\x00"+b.Plan.BusinessID+"\x00"+b.Plan.StrategyID
+	})
+	if len(misses) > costDueMissSampleLimit {
+		misses = misses[:costDueMissSampleLimit]
+	}
+	snapshot.Coverage.UnobservedDueSample = misses
 	indexes := make(map[*costCopy]int)
 	for dim, rows := range rankings {
 		ranking := CostRanking{Dimension: costDimensions[dim%len(costDimensions)], Scope: "query_group"}
@@ -1032,6 +1099,7 @@ func (c *CostSummary) Snapshot() CostSnapshot {
 	for i := range out.Rankings {
 		out.Rankings[i].Indexes = append([]int(nil), out.Rankings[i].Indexes...)
 	}
+	out.Coverage.UnobservedDueSample = append([]CostDueMiss(nil), out.Coverage.UnobservedDueSample...)
 	return out
 }
 

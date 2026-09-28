@@ -239,3 +239,58 @@ func TestAGroupHeldInTheEarlierBucketIsHeld(t *testing.T) {
 		t.Fatalf("a group held in the earlier bucket only = %+v, want it held and the window complete", coverage)
 	}
 }
+
+// What was due and went unseen is named, not only counted: a group that did
+// nothing is named with its Plan, in key order, each with the group's counts
+// over the window; a group that ran and was held, its due Plan unevaluated,
+// carries the counts that say so. The sample stops at its bound, a caller's
+// copy of it cannot change the cached one, and a window with nothing unseen
+// names nothing.
+func TestWhatWasDueAndWentUnseenIsNamedWithItsGroupsCounts(t *testing.T) {
+	c, now := costDueFixture(t, costMinute, costHourly)
+	c.Publish(*now)
+	sample := c.Snapshot().Coverage.UnobservedDueSample
+	if len(sample) != 2 || sample[0] != (CostDueMiss{Scope: "query_group", QueryGroupKey: "minute"}) ||
+		sample[1] != (CostDueMiss{Scope: "strategy_owned", QueryGroupKey: "minute", Plan: costA}) {
+		t.Fatalf("a due group that did nothing = %+v, want the group then its Plan, all counts zero", sample)
+	}
+
+	c, now = costDueFixture(t, costMinute, costHourly)
+	c.Observe(context.Background(), Observation{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal,
+		RunOutcome: "query_cooldown", Trace: TraceFields{QueryGroupKey: "minute"}})
+	ran(c, "minute", CostPlanIdentity{})
+	c.Publish(*now)
+	sample = c.Snapshot().Coverage.UnobservedDueSample
+	want := CostDueMiss{Scope: "strategy_owned", QueryGroupKey: "minute", Plan: costA, Observations: 1, RunReturns: 1, HeldRounds: 1}
+	if len(sample) != 1 || sample[0] != want {
+		t.Fatalf("a group that ran and was held, its Plan unevaluated = %+v, want %+v", sample, want)
+	}
+
+	// Five groups unseen, each with its Plan: ten misses, the first eight named.
+	groups := []CostGroup{}
+	for i := 0; i < 5; i++ {
+		g := costMinute
+		g.QueryGroupKey = string(rune('a' + i))
+		groups = append(groups, g)
+	}
+	c, now = costDueFixture(t, groups...)
+	c.Publish(*now)
+	snapshot := c.Snapshot()
+	sample = snapshot.Coverage.UnobservedDueSample
+	if snapshot.Coverage.UnobservedDueGroups+snapshot.Coverage.UnobservedDuePlans != 10 || len(sample) != costDueMissSampleLimit ||
+		sample[0].QueryGroupKey != "a" || sample[costDueMissSampleLimit-1] != (CostDueMiss{Scope: "strategy_owned", QueryGroupKey: "d", Plan: costA}) {
+		t.Fatalf("ten misses = groups %d plans %d sample %+v, want the first %d by key", snapshot.Coverage.UnobservedDueGroups,
+			snapshot.Coverage.UnobservedDuePlans, sample, costDueMissSampleLimit)
+	}
+	sample[0].QueryGroupKey = "tampered"
+	if c.Snapshot().Coverage.UnobservedDueSample[0].QueryGroupKey != "a" {
+		t.Fatal("a caller's copy of the sample changed the cached one")
+	}
+
+	c, now = costDueFixture(t, costMinute, costHourly)
+	ran(c, "minute", costA)
+	c.Publish(*now)
+	if sample := c.Snapshot().Coverage.UnobservedDueSample; sample != nil {
+		t.Fatalf("a window with nothing unseen names %+v", sample)
+	}
+}
