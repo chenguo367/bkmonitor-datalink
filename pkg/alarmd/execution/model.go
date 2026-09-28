@@ -2081,14 +2081,14 @@ func (mutation PlanNoDataMutation) ReplacesWholeRecord() bool {
 type StateEvaluation struct {
 	Mutation StateMutation
 	Events   []contract.TriggerEventV1
-	// WithoutMessage is the events this series decided and did not keep
-	// because the sink would take them and leave them without a message
-	// (contract.DroppedAtSink): under the Python-compatible protocol, every
-	// RECOVERY. Only their identity is kept. The event, with its evidence, was
-	// the largest thing a Slot held for such a Plan - one per healthy series
-	// per round - and it was held until the sink dropped it. What an output
-	// line counts is unchanged: the write adds these back as events the
-	// protocol had no message for, which is what they were.
+	// WithoutMessage is the events this series decided that its protocol has
+	// no message for (contract.NoMessageFor): under the Python-compatible
+	// protocol, every RECOVERY. They are not built; only their identity is
+	// kept. The envelope, with its evidence, was once held until the sink
+	// dropped it and later built and dropped at once - one per healthy
+	// series per round either way. What an output line counts is unchanged:
+	// the write adds these back as events the protocol had no message for,
+	// which is what they are.
 	WithoutMessage []EventWithoutMessage
 }
 
