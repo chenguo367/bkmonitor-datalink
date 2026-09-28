@@ -562,7 +562,7 @@ func (builder *indexBuilder) addServiceInstanceFields(fields []string) {
 func (builder *indexBuilder) addFields(fields []string) {
 	for position := 0; position+1 < len(fields); position += 2 {
 		identity, payload := fields[position], fields[position+1]
-		facts, err := decodeHost(payload)
+		wire, err := decodeWireHost(payload)
 		if err != nil {
 			// One malformed record must not blind the whole filter.
 			continue
@@ -570,13 +570,20 @@ func (builder *indexBuilder) addFields(fields []string) {
 		// bmw writes every host twice, under its "ip|cloud" key and under its
 		// host id. Both identities must resolve, but the host counts once and
 		// shares one record - counting fields instead of hosts reports twice
-		// the fleet.
-		if facts.HostID != "" {
-			if existing, found := builder.seen[facts.HostID]; found {
+		// the fleet. The second is known by its host id before the rest of it
+		// is read: its topology and its attributes were built only to be
+		// dropped, and the attributes alone were most of a refresh's
+		// allocation.
+		hostID := numberText(wire.HostID)
+		if hostID != "" {
+			if existing, found := builder.seen[hostID]; found {
 				builder.index.byIdentity[identity] = existing
 				continue
 			}
-			builder.seen[facts.HostID] = facts
+		}
+		facts := hostFactsOf(wire, payload)
+		if hostID != "" {
+			builder.seen[hostID] = facts
 		}
 		builder.index.hosts++
 		builder.index.byIdentity[identity] = facts
@@ -617,12 +624,29 @@ type wireTopoNode struct {
 }
 
 func decodeHost(payload string) (*HostFacts, error) {
+	wire, err := decodeWireHost(payload)
+	if err != nil {
+		return nil, err
+	}
+	return hostFactsOf(wire, payload), nil
+}
+
+// decodeWireHost is the one step of reading a host record that can refuse
+// it. What follows it -- the topology nodes, the scalar attributes -- reads
+// the same payload again and cannot fail, and is the bulk of the cost.
+func decodeWireHost(payload string) (wireHost, error) {
 	decoder := json.NewDecoder(strings.NewReader(payload))
 	decoder.UseNumber()
 	var wire wireHost
 	if err := decoder.Decode(&wire); err != nil {
-		return nil, err
+		return wireHost{}, err
 	}
+	return wire, nil
+}
+
+// hostFactsOf is a host record's facts from its decoded fields and its
+// payload.
+func hostFactsOf(wire wireHost, payload string) *HostFacts {
 	facts := &HostFacts{
 		HostID:      numberText(wire.HostID),
 		IP:          wire.InnerIP,
@@ -638,7 +662,7 @@ func decodeHost(payload string) (*HostFacts, error) {
 	if facts.CloudID == "" {
 		facts.CloudID = "0"
 	}
-	return facts, nil
+	return facts
 }
 
 func decodeServiceInstance(payload string) (*ServiceInstanceFacts, error) {
