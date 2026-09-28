@@ -208,6 +208,10 @@ type Stats struct {
 	OwnOpen           int
 	OwnOpenDepartures map[string]uint64
 	OwnOpenRefusals   uint64
+	// RecoveriesResent counts RECOVERY events the broker took for an alert
+	// whose earlier RECOVERY the ledger still held: sent again because the
+	// consumer's set still carried the alert once the ledger let it through.
+	RecoveriesResent uint64
 }
 
 type member struct {
@@ -217,6 +221,11 @@ type member struct {
 
 type stamped struct {
 	at time.Time
+	// resent is a RECOVERY whose alert the ledger already held closed when
+	// the broker took it: the recovery went out again. Such an entry waits
+	// longer before it lets the alert through again (removalHides), so a
+	// consumer that is behind gets each recovery at most once more.
+	resent bool
 }
 
 // Cache is this process's copy of the consumer's open alert set. It
@@ -250,6 +259,8 @@ type Cache struct {
 	removed   map[member]stamped
 
 	evictions uint64
+	// recoveriesResent: see Stats.RecoveriesResent.
+	recoveriesResent uint64
 	// sentDepartures and openDepartures count why alerts left added and
 	// index.opened; openRefusals the times index.opened was full when an
 	// alert not in it was sent -- refusals, not alerts.
@@ -445,7 +456,15 @@ func (cache *Cache) Acknowledged(events []contract.TriggerEventV1) {
 			delete(cache.removed, m)
 			cache.noteOpened(m, now)
 		case contract.TriggerEventRecovery:
-			cache.removed[m] = stamped{at: now}
+			// A RECOVERY for an alert the ledger still holds closed is the
+			// same recovery sent again; the entry remembers it. Departures
+			// do not count it: the alert left added and opened with the
+			// first one, and both leave* are no-ops for it now.
+			_, resending := cache.removed[m]
+			if resending {
+				cache.recoveriesResent++
+			}
+			cache.removed[m] = stamped{at: now, resent: resending}
 			cache.leaveSent(m, DepartureRecoveryAcked)
 			cache.leaveOpen(m, DepartureRecoveryAcked)
 		}
@@ -597,7 +616,7 @@ func (cache *Cache) Stats() Stats {
 		Mode: ModeNeverLoaded, Available: cache.available, UnavailableReason: cache.reason,
 		LoadedAt: cache.loadedAt, Heartbeat: cache.heartbeat,
 		Tracked: len(cache.tracked), Loaded: len(cache.loaded), Added: len(cache.added), Removed: len(cache.removed),
-		Evictions: cache.evictions,
+		Evictions: cache.evictions, RecoveriesResent: cache.recoveriesResent,
 		Refreshes: make(map[string]uint64, len(cache.refreshes)), Unavailable: make(map[UnavailableReason]uint64, len(cache.unavailable)),
 		Lookups: make(map[Answer]uint64, len(cache.lookups)),
 	}

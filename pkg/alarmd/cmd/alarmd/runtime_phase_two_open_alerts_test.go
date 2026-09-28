@@ -225,3 +225,19 @@ func TestTheDeparturesAndOwnOpenReachTheFacts(t *testing.T) {
 		t.Fatalf("a copy without the index claims own_open: %+v", unknown)
 	}
 }
+
+// The resend count reaches the facts, and a zero is written: a copy that
+// sent nothing again says so.
+func TestTheRecoveriesResentReachTheFacts(t *testing.T) {
+	at := time.Date(2026, 9, 28, 4, 0, 0, 0, time.UTC)
+	if facts := openAlertSetFacts(openalerts.Stats{RecoveriesResent: 3}, false, at); facts.RecoveriesResent != 3 {
+		t.Fatalf("recoveries resent = %d, want 3", facts.RecoveriesResent)
+	}
+	encoded, err := json.Marshal(openAlertSetFacts(openalerts.Stats{}, false, at))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"recoveries_resent":0`) {
+		t.Fatalf("a zero resend count was dropped: %s", encoded)
+	}
+}
