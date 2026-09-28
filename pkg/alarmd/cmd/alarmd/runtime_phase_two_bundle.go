@@ -681,6 +681,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// One host lookup for both readers of a host's business: the no-data
+	// roster and a global business Plan's event attribution.
+	hostBusiness := cmdbcache.NewHostBusinessLookup(cmdbIndex)
+	evaluator.WithBusinessAttribution(hostBusiness, recorder.ObserveEventBusinessAttribution)
 	sequencer, err := worker.NewKeyedSideEffectSequencer(cfg.PhaseTwo.Coordinator.MaxSequencerReservations)
 	if err != nil {
 		return nil, err
@@ -823,7 +827,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		EffectiveTime: legacyTime.Provider(),
 		Finalization:  frozen, Activation: repository, Query: querySource, Sequencer: sequencer,
 		Evaluator: evaluator, Admission: admitter, GapGuard: executionStore, Events: events,
-		NoData: executionStore, Hosts: cmdbcache.NewHostBusinessLookup(cmdbIndex), State: executionStore, Census: executionStore, Progress: progressStore, Observer: observer,
+		NoData: executionStore, Hosts: hostBusiness, State: executionStore, Census: executionStore, Progress: progressStore, Observer: observer,
 		ExecutionEvidence: slotAppliedMarks,
 		OpenAlerts:        &openAlertCopyPort{cache: openAlertCopy},
 		// The horizon the platform settings copy resolves now, read per Slot:

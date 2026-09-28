@@ -166,6 +166,7 @@ type phaseTwoMetrics struct {
 	controlSourceRounds             *prometheus.CounterVec
 	strategiesReturnedAfterRemoval  prometheus.Counter
 	queryCooldownSaves              *prometheus.CounterVec
+	eventBusinessAttribution        *prometheus.CounterVec
 	diagnosticRedisFailures         *prometheus.CounterVec
 	leaderForward                   *prometheus.HistogramVec
 	controlSourceRetainedStale      prometheus.Counter
@@ -1289,6 +1290,18 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, result := range QueryCooldownSaveResults {
 		metrics.queryCooldownSaves.WithLabelValues(result)
 	}
+	metrics.eventBusinessAttribution = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "event_business_attribution_total",
+		Help: "Events of global business strategies by where the business they are filed under came from: " +
+			"target (the host's business, or the business configured on the matched Kubernetes static target), " +
+			"dimension (the record's bk_biz_id aggregation dimension), global (neither answered, so the global " +
+			"business itself). A strategy that configures a target or a business dimension and still lands on " +
+			"global relied on a business the host cache or the data did not have. Counted once per event built, " +
+			"where it is built; a retried Slot counts again. Every other strategy's events are not counted.",
+	}, []string{"source"})
+	for _, source := range contract.BusinessAttributionSources {
+		metrics.eventBusinessAttribution.WithLabelValues(source)
+	}
 	metrics.diagnosticRedisFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "diagnostic_redis_failures_total",
 		Help: "Calls to Redis by the diagnostic clients that were not answered, by client -- evidence (the CLI's " +
@@ -1622,7 +1635,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.diagnosticRedisFailures, m.leaderForward, m.controlSource, m.leaderRound,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.leaderForward, m.controlSource, m.leaderRound,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
@@ -2481,6 +2494,22 @@ func (r *Recorder) ObserveQueryCooldownSave(result string) {
 	for _, known := range QueryCooldownSaveResults {
 		if result == known {
 			r.phaseTwo.queryCooldownSaves.WithLabelValues(result).Inc()
+			return
+		}
+	}
+}
+
+// ObserveEventBusinessAttribution counts one global business event by the
+// source its business came from; a source outside
+// contract.BusinessAttributionSources is dropped rather than creating a
+// series.
+func (r *Recorder) ObserveEventBusinessAttribution(source string) {
+	if r == nil || r.phaseTwo.eventBusinessAttribution == nil {
+		return
+	}
+	for _, known := range contract.BusinessAttributionSources {
+		if source == known {
+			r.phaseTwo.eventBusinessAttribution.WithLabelValues(source).Inc()
 			return
 		}
 	}

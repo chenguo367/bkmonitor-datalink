@@ -216,6 +216,11 @@ type OutputContextObject struct {
 	// when an event is rendered, and it is frozen with the Plan so a Slot
 	// retried across a strategy edit publishes the same bytes both times.
 	SignalType string `json:"signal_type,omitempty"`
+	// GlobalBusiness is read only when an event is built, to file it under
+	// the business it is about, so it sits with the other facts of the
+	// event. What it changes about the query is in the Query Group's facts.
+	// Omitted when false, so no other Plan's context moves.
+	GlobalBusiness bool `json:"global_business,omitempty"`
 }
 
 // BuildQueryGroupObject projects the execution content out of a published
@@ -308,7 +313,7 @@ func BuildOutputContext(plan FrozenPlan) OutputContextObject {
 		ContractVersion: outputContextContractVersion, Identity: plan.Identity,
 		StrategyRef: plan.Plan.StrategyRef, SourceCompatibility: plan.Plan.SourceCompatibility,
 		SubjectFacts: plan.Plan.SubjectFacts, LegacyOutput: plan.Plan.LegacyOutput,
-		WireFormat: plan.Plan.WireFormat, SignalType: plan.Plan.SignalType,
+		WireFormat: plan.Plan.WireFormat, SignalType: plan.Plan.SignalType, GlobalBusiness: plan.Plan.GlobalBusiness,
 	}
 }
 

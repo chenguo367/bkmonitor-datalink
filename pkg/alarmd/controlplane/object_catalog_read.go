@@ -392,7 +392,7 @@ func AssembleQueryGroup(object QueryGroupObject, contexts map[execution.PlanIden
 				NoData:                plan.NoData,
 				EffectiveTimeSnapshot: append(json.RawMessage(nil), plan.EffectiveTimeSnapshot...),
 				StrategyIR:            strategyIR, WireFormat: context.WireFormat, SignalType: context.SignalType,
-				TerminalReasonCode: plan.TerminalReasonCode,
+				TerminalReasonCode: plan.TerminalReasonCode, GlobalBusiness: context.GlobalBusiness,
 			},
 			StateGeneration: plan.StateGeneration, ScheduleSpec: plan.ScheduleSpec, ScheduleRevision: plan.ScheduleRevision,
 			RequirementTemplates: plan.RequirementTemplates, QueryPlans: plan.QueryPlans,

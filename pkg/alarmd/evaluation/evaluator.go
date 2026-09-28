@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"sort"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/detect"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -25,6 +26,39 @@ type Evaluator struct {
 	detect  *detect.Evaluator
 	limits  Limits
 	samples *observability.SeriesSampler
+	// hosts and observeAttribution serve global business Plans: the host
+	// cache their host targets attribute an event through, and the counter
+	// of where each attribution came from. Both may be nil; a nil host cache
+	// attributes a host target's event as a host the cache does not hold.
+	hosts              admission.HostBusinessReader
+	observeAttribution func(source string)
+}
+
+// WithBusinessAttribution gives the evaluator what a global business Plan's
+// events are attributed through: the host cache, read when the event is
+// built, and a callback counting each attribution by its source.
+func (e *Evaluator) WithBusinessAttribution(hosts admission.HostBusinessReader, observe func(source string)) *Evaluator {
+	if e != nil {
+		e.hosts, e.observeAttribution = hosts, observe
+	}
+	return e
+}
+
+// attributeBusiness files a global business Plan's event under the business
+// it is about. It runs where the event is built, once per event, so a
+// threshold event and a no-data event take the same reading of the same
+// configuration.
+func (e *Evaluator) attributeBusiness(event *contract.TriggerEventV1, plan *strategy.CompiledPlan) {
+	if event == nil || !plan.GlobalBusiness() {
+		return
+	}
+	attribution := admission.AttributeBusiness(
+		plan.TargetPlan(), plan.Projection().DimensionFields, event.BusinessID, event.RecordRef.Dimensions, e.hosts,
+	)
+	event.AttributedBusinessID = attribution.BusinessID
+	if e.observeAttribution != nil {
+		e.observeAttribution(attribution.Source)
+	}
 }
 
 func New(detector *detect.Evaluator, limits Limits) (*Evaluator, error) {
@@ -422,6 +456,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			}
 		}
 	}
+	e.attributeBusiness(tr.TriggerEvent, due.CompiledPlan)
 	events, withoutMessage := keptEvents(tr.TriggerEvent)
 	result := recordResult{outcomes: outcomes, gate: tr.RecoveryGate, coverage: coverage}
 	if advance || len(missingInputGuards) > 0 {

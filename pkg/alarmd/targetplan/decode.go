@@ -123,8 +123,9 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 	}
 	keys := make([]string, 0, len(statics))
 	seenMembers := make(map[contract.TargetPlanMemberV1]struct{}, len(statics))
+	businesses := staticBusinesses{}
 	for index, element := range statics {
-		key, member, err := decodeStaticTarget(rule, ruleDimensions, plan, element, fmt.Sprintf("static_targets[%d]", index))
+		key, member, business, err := decodeStaticTarget(rule, ruleDimensions, plan, element, fmt.Sprintf("static_targets[%d]", index))
 		if err != nil {
 			return nil, err
 		}
@@ -136,8 +137,10 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 			continue
 		}
 		keys = append(keys, key)
+		businesses.add(key, business)
 	}
 	plan.StaticKeys = contract.CanonicalTargetScopeKeys(keys)
+	plan.StaticBusinesses = businesses.frozen()
 	contract.SortTargetPlanMembers(plan.StaticMembers)
 
 	groups, err := arrayElements(fields["dynamic_groups"])
@@ -281,60 +284,107 @@ func decodeIdentity(
 
 // decodeStaticTarget reads one static target into its member key, or, on a
 // model_inst_id plan read by host identity, into the (model, instance)
-// member the worker maps to a host id once per Slot.
+// member the worker maps to a host id once per Slot. A Kubernetes target
+// may also carry the business of its cluster, returned as text and empty
+// when the target carries none.
 func decodeStaticTarget(
 	rule contract.TargetPlanRule, ruleDimensions []string, plan *contract.TargetPlanV1, element json.RawMessage, path string,
-) (string, *contract.TargetPlanMemberV1, *Error) {
+) (string, *contract.TargetPlanMemberV1, string, *Error) {
 	fields, err := objectFields(element)
 	if err != nil {
-		return "", nil, unsupported(path, "%s", err)
+		return "", nil, "", unsupported(path, "%s", err)
 	}
 	switch rule {
 	case contract.TargetPlanRuleHostID:
 		if err := onlyKeys(fields, path, "bk_host_id"); err != nil {
-			return "", nil, err
+			return "", nil, "", err
 		}
 		host, err := integerText(fields["bk_host_id"])
 		if err != nil {
-			return "", nil, unsupported(path+".bk_host_id", "%s", err)
+			return "", nil, "", unsupported(path+".bk_host_id", "%s", err)
 		}
-		return contract.TargetPlanMemberKey(host), nil, nil
+		return contract.TargetPlanMemberKey(host), nil, "", nil
 	case contract.TargetPlanRuleModelInstID:
 		if err := onlyKeys(fields, path, "model_id", "model_inst_id"); err != nil {
-			return "", nil, err
+			return "", nil, "", err
 		}
 		model, instance, err := memberModelInstance(fields, path, plan.ModelID)
 		if err != nil {
-			return "", nil, err
+			return "", nil, "", err
 		}
 		if plan.Identity.HostIdentity {
-			return "", &contract.TargetPlanMemberV1{ModelID: model, ModelInstID: instance}, nil
+			return "", &contract.TargetPlanMemberV1{ModelID: model, ModelInstID: instance}, "", nil
 		}
-		return plan.Identity.MemberKey(model, instance), nil, nil
+		return plan.Identity.MemberKey(model, instance), nil, "", nil
 	default:
+		// The cluster's business is optional and is the one optional field of
+		// a static target: read and taken out before the closed key check,
+		// so every other field stays exactly as required as it was.
+		business := ""
+		if raw, present := fields["bk_biz_id"]; present {
+			text, err := integerText(raw)
+			if err != nil {
+				return "", nil, "", unsupported(path+".bk_biz_id", "%s", err)
+			}
+			business = text
+			delete(fields, "bk_biz_id")
+		}
 		if err := onlyKeys(fields, path, "model_id", "model_inst_id", "match"); err != nil {
-			return "", nil, err
+			return "", nil, "", err
 		}
 		if _, _, err := memberModelInstance(fields, path, plan.ModelID); err != nil {
-			return "", nil, err
+			return "", nil, "", err
 		}
 		match, err2 := objectFields(fields["match"])
 		if err2 != nil {
-			return "", nil, unsupported(path+".match", "%s", err2)
+			return "", nil, "", unsupported(path+".match", "%s", err2)
 		}
 		if err := onlyKeys(match, path+".match", ruleDimensions...); err != nil {
-			return "", nil, err
+			return "", nil, "", err
 		}
 		parts := make([]string, 0, len(ruleDimensions))
 		for _, dimension := range ruleDimensions {
 			value, err := nonEmptyText(match[dimension])
 			if err != nil {
-				return "", nil, unsupported(path+".match."+dimension, "%s", err)
+				return "", nil, "", unsupported(path+".match."+dimension, "%s", err)
 			}
 			parts = append(parts, value)
 		}
-		return contract.TargetPlanMemberKey(parts...), nil, nil
+		return contract.TargetPlanMemberKey(parts...), nil, business, nil
 	}
+}
+
+// staticBusinesses collects the business each static target key was given.
+// A key given two different businesses keeps neither: the plan cannot say
+// which is the target's, and picking by document order would move an
+// alert's business when the writer reorders the list.
+type staticBusinesses map[string]string
+
+const conflictingBusiness = "\x00"
+
+func (businesses staticBusinesses) add(key, business string) {
+	if business == "" {
+		return
+	}
+	if existing, found := businesses[key]; found && existing != business {
+		businesses[key] = conflictingBusiness
+		return
+	}
+	businesses[key] = business
+}
+
+func (businesses staticBusinesses) frozen() map[string]string {
+	var frozen map[string]string
+	for key, business := range businesses {
+		if business == conflictingBusiness {
+			continue
+		}
+		if frozen == nil {
+			frozen = make(map[string]string, len(businesses))
+		}
+		frozen[key] = business
+	}
+	return frozen
 }
 
 func memberModelInstance(fields map[string]json.RawMessage, path, planModel string) (string, string, *Error) {

@@ -26,6 +26,15 @@ type SourceIdentity struct {
 	TenantID   string
 	BusinessID string
 	SpaceScope string
+	// GlobalBusiness is the strategy document's is_global_biz: the writer's
+	// word that the strategy's business is a global business, whose
+	// strategies query every business of the tenant and file each alert
+	// under the business it is about. Absent in the document is false.
+	//
+	// Omitted when false: the source facts digest hashes this struct, and a
+	// field every strategy serialized would move the digest - and with it
+	// the observation id - of every strategy on the upgrade.
+	GlobalBusiness bool `json:"GlobalBusiness,omitempty"`
 }
 
 type SourceStrategy struct {
@@ -1026,6 +1035,10 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	if err := validateQueryIdentity(source.Identity, facts); err != nil {
 		return candidate, err
 	}
+	if refusal := globalBusinessRefusal(source.SourceID, source.Identity, targetScope, facts); refusal != nil {
+		candidate.dispositions = append(candidate.dispositions, *refusal)
+		return candidate, errors.New(ReasonGlobalBusinessUnsupported + ": " + refusal.Detail)
+	}
 	compiledInputs := compiledPlanInputs{primary: facts}
 	for _, label := range itemDataTypes(item) {
 		if label == "log" || label == "event" {
@@ -1070,6 +1083,16 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 			Reason: "OUTPUT_PROTOCOL_REQUIRES_STRATEGY_REVISION",
 		})
 		return candidate, errors.New("OUTPUT_PROTOCOL_REQUIRES_STRATEGY_REVISION")
+	}
+	if source.Identity.GlobalBusiness && format == contract.WireFormatPythonCompatible {
+		// The compatible event is filed under the strategy's business by the
+		// platform's own pipeline, which has no field for the business an
+		// alert is about: every alert of a global strategy would land on
+		// the global business, the one outcome the attribution exists to
+		// prevent.
+		refusal := globalBusinessUnsupported(source.SourceID, GlobalBusinessOutputProtocol, "")
+		candidate.dispositions = append(candidate.dispositions, refusal)
+		return candidate, errors.New(ReasonGlobalBusinessUnsupported + ": " + refusal.Detail)
 	}
 	plan.WireFormat = format
 	// Beside the wire format and for the same reason: the sink writes one
@@ -1315,7 +1338,8 @@ func validateQueryIdentity(identity SourceIdentity, facts execution.QueryPlanFac
 	if err := facts.Validate(); err != nil {
 		return err
 	}
-	if facts.TenantID != identity.TenantID || facts.BusinessID != identity.BusinessID || facts.SpaceScope != identity.SpaceScope {
+	if facts.TenantID != identity.TenantID || facts.BusinessID != identity.BusinessID || facts.SpaceScope != identity.SpaceScope ||
+		facts.GlobalBusiness != identity.GlobalBusiness {
 		return errors.New("alarmd controlplane: query plan identity differs from control facts")
 	}
 	return nil
@@ -1935,6 +1959,7 @@ func compilePlan(
 	plan.TargetScope = targetScope
 	plan.EffectiveTimeSnapshot = append(json.RawMessage(nil), source.EffectiveTimeSnapshot...)
 	plan.TargetPlan = targetPlan
+	plan.GlobalBusiness = identity.GlobalBusiness
 	// A no-data configuration this build cannot compile suspends no-data
 	// detection for this Plan and nothing else.
 	//

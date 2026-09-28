@@ -541,6 +541,7 @@ type CompiledPlan struct {
 	targetPlan          *contract.TargetPlanV1
 	noData              *contract.NoDataConfigV1
 	noDataLevel         *CompiledLevel
+	globalBusiness      bool
 }
 
 // NoData is the strategy's no-data configuration, frozen with the Plan. Nil
@@ -619,6 +620,12 @@ func (p *CompiledPlan) TargetPlan() *contract.TargetPlanV1 {
 		return nil
 	}
 	return p.targetPlan
+}
+
+// GlobalBusiness reports whether the Plan belongs to a global business,
+// whose events name the business each one is about beside the Plan's own.
+func (p *CompiledPlan) GlobalBusiness() bool {
+	return p != nil && p.globalBusiness
 }
 
 func (p *CompiledPlan) StrategyRef() contract.StrategyRefV2 {

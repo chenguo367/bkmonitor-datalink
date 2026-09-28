@@ -471,6 +471,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_source_pending_confirmation_age_seconds"] = "variableLabels: {}"
 	expected["bkmonitor_alarmd_leader_rounds_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_query_cooldown_saves_total"] = "variableLabels: {result}"
+	expected["bkmonitor_alarmd_event_business_attribution_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_diagnostic_redis_failures_total"] = "variableLabels: {client,reason}"
 	expected["bkmonitor_alarmd_leader_round_stage_seconds_total"] = "variableLabels: {stage}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
@@ -1030,6 +1031,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("source_pending_confirmation_age_seconds")] = 1
 	bounds[fqName("leader_rounds_total")] = 2
 	bounds[fqName("query_cooldown_saves_total")] = len(QueryCooldownSaveResults)
+	bounds[fqName("event_business_attribution_total")] = len(contract.BusinessAttributionSources)
 	bounds[fqName("diagnostic_redis_failures_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
 	bounds[fqName("leader_round_stage_seconds_total")] = len(fleet.LeaderRoundStages) + 1
 	// Five states; three operations by two results.
@@ -1284,6 +1286,21 @@ func TestQueryCooldownSaveResultsArePreCreated(t *testing.T) {
 		if !seen[result] {
 			t.Fatalf("result %q not pre-created: %v", result, seen)
 		}
+	}
+}
+
+// The attribution sources are pre-created, so a zero under global is a
+// count; a source outside the list creates no series.
+func TestEventBusinessAttributionSourcesArePreCreated(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	r.ObserveEventBusinessAttribution(contract.BusinessAttributionTarget)
+	r.ObserveEventBusinessAttribution("guessed")
+	counts := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_event_business_attribution_total") {
+		counts[m.GetLabel()[0].GetValue()] = m.GetCounter().GetValue()
+	}
+	if len(counts) != len(contract.BusinessAttributionSources) || counts["target"] != 1 || counts["dimension"] != 0 || counts["global"] != 0 {
+		t.Fatalf("attribution counts = %v, want the three sources with target counted once", counts)
 	}
 }
 

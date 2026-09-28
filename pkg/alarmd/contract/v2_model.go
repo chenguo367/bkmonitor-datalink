@@ -515,6 +515,12 @@ type EvaluationPlanV2 struct {
 	// rather than carrying a guess.
 	SignalType         string `json:"signal_type,omitempty"`
 	TerminalReasonCode string `json:"terminal_reason_code,omitempty"`
+	// GlobalBusiness says the strategy belongs to a global business: it
+	// queries every business of its tenant, and each event it raises names
+	// the business it is about beside the Plan's own (see
+	// TriggerEventV1.AttributedBusinessID). Omitted when false, so every
+	// other Plan keeps its bytes and its revision.
+	GlobalBusiness bool `json:"global_business,omitempty"`
 }
 
 // PublishesCompatibleProtocol reports whether this Plan's events go out as the
@@ -890,6 +896,13 @@ type TriggerEventV1 struct {
 	DetectPlanFingerprint   string               `json:"detect_plan_fingerprint"`
 	TriggerStateFingerprint string               `json:"trigger_state_fingerprint"`
 	Trace                   TriggerEventTraceV1  `json:"trace"`
+	// AttributedBusinessID is the business a global business Plan's event is
+	// about: the one its target, or else its bk_biz_id dimension, names, and
+	// the Plan's own business when neither does. BusinessID stays the Plan's
+	// business, because it is part of the Plan's identity, the event id and
+	// the state key; this is only where the output files the alert. Empty
+	// on every other Plan's events, so their bytes are what they were.
+	AttributedBusinessID string `json:"attributed_business_id,omitempty"`
 }
 
 type TriggerEventBuildInputV1 struct {

@@ -42,6 +42,7 @@ var targetPolicy = fields("schema_version model_id target_rule failure_policy st
 	"static_members": memberPolicy, "static_targets": memberPolicy, "dynamic_topologies": memberPolicy,
 	"groups": fields("", map[string]*policy{"conditions": conditionPolicy}), "conditions": conditionPolicy,
 	"conditions_list": conditionPolicy, "nodes": memberPolicy, "hosts": memberPolicy,
+	"static_businesses": dictionary(leaf),
 })
 var uptimePolicy = fields("is_enabled type timezone start end begin end_time begin_time week weekdays days months exclude_days include_days", map[string]*policy{
 	"time_ranges": fields("start end begin end_time begin_time", nil),
@@ -60,7 +61,7 @@ var algorithmPolicy = fields("type version level unit_prefix", map[string]*polic
 var triggerPolicy = fields("type version count check_window window_size required_anomalies required_normals", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
 var functionPolicy = fields("id method window dimensions without position field", map[string]*policy{"params": namedValues(fields("id value", nil))})
 var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name data_source_label data_type_label metric_id metric_field alias values agg_dimension agg_method agg_interval result_table_id time_field query_string data_label unit time_delay offset", map[string]*policy{"agg_condition": conditionPolicy, "functions": functionPolicy})
-var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid name is_enabled update_time strategy_revision priority priority_group_key labels scenario source type", map[string]*policy{
+var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid is_global_biz name is_enabled update_time strategy_revision priority priority_group_key labels scenario source type", map[string]*policy{
 	"items": fields("id query_md5 expression time_delay unit", map[string]*policy{
 		"query_configs": sourceQueryPolicy, "algorithms": algorithmPolicy, "functions": functionPolicy,
 		"target":      namedValues(fields("condition key method value type model_id target_type", map[string]*policy{"conditions": conditionPolicy, "hosts": memberPolicy, "nodes": memberPolicy})),
@@ -77,7 +78,7 @@ var frozenConditionsPolicy = fields("Connectors", map[string]*policy{"Fields": n
 var frozenClausePolicy = fields("FieldSemantics DataSource Driver TableID FieldName TimeField IsRegexp ReferenceName Dimensions Offset OffsetForward KeepColumns QueryString", map[string]*policy{
 	"SourceConditions": frozenConditionsPolicy, "Conditions": frozenConditionsPolicy, "Functions": frozenFunctionPolicy, "TimeAggregation": frozenFunctionPolicy,
 })
-var frozenQueryPolicy = fields("QueryDelaySeconds SourceSemantics QueryRevision Provider ProviderRouteRef TenantID BusinessID SpaceScope MetricMerge StepMillis AlignmentMillis DownSampleRange Timezone NotTimeAlign", map[string]*policy{
+var frozenQueryPolicy = fields("QueryDelaySeconds SourceSemantics QueryRevision Provider ProviderRouteRef TenantID BusinessID SpaceScope GlobalBusiness MetricMerge StepMillis AlignmentMillis DownSampleRange Timezone NotTimeAlign", map[string]*policy{
 	"QueryList": frozenClausePolicy, "PromQL": fields("Expression Match", nil),
 	"TSDBMap": dictionary(fields("table_id storage_id storage_type db measurement need_add_time source_type", map[string]*policy{"time_field": fields("name type unit", nil)})),
 })

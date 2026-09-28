@@ -37,6 +37,15 @@ type TargetPlanV1 struct {
 	// StaticKeys are the member keys of the static targets, already in the
 	// key form the rule defines, sorted and unique.
 	StaticKeys []string `json:"static_keys"`
+	// StaticBusinesses is the business the writer configured on a
+	// Kubernetes static target, by that target's key. It is what a global
+	// business Plan attributes an event on that target to. Only the static
+	// targets that carry a business are here, and a key two targets give
+	// different businesses is left out: neither is the target's business,
+	// and the event falls through to the next source instead of taking one
+	// of them by document order. Absent on every other plan, so their bytes
+	// are what they were.
+	StaticBusinesses map[string]string `json:"static_businesses,omitempty"`
 	// StaticMembers are the static targets of a model_inst_id plan read by
 	// host identity: the (model, instance) pairs as the writer spelled them,
 	// sorted and unique, which the worker maps to host ids through the host
@@ -319,6 +328,19 @@ func (plan *TargetPlanV1) Validate() error {
 			}
 		}
 	}
+	if len(plan.StaticBusinesses) > 0 {
+		if facts.Dynamic {
+			return fmt.Errorf("alarmd contract: rule %s takes a target's business from the host, not the plan", plan.Rule)
+		}
+		for key, business := range plan.StaticBusinesses {
+			if !containsSortedKey(plan.StaticKeys, key) {
+				return errors.New("alarmd contract: a static business names a static key of the plan")
+			}
+			if !canonicalDecimalPattern.MatchString(business) || business == "0" {
+				return errors.New("alarmd contract: a static business is a positive decimal")
+			}
+		}
+	}
 	if err := canonicalTargetPlanList("dynamic groups", plan.DynamicGroups); err != nil {
 		return err
 	}
@@ -375,6 +397,21 @@ func (node TargetPlanTopologyV1) Key() string {
 // SortTargetPlanTopologies orders references canonically, in place.
 func SortTargetPlanTopologies(nodes []TargetPlanTopologyV1) {
 	sort.Slice(nodes, func(left, right int) bool { return nodes[left].less(nodes[right]) })
+}
+
+func containsSortedKey(keys []string, key string) bool {
+	index := sort.SearchStrings(keys, key)
+	return index < len(keys) && keys[index] == key
+}
+
+// StaticBusiness is the business configured on the static target a record
+// key names, and false when that target carries none.
+func (plan *TargetPlanV1) StaticBusiness(key string) (string, bool) {
+	if plan == nil {
+		return "", false
+	}
+	business, found := plan.StaticBusinesses[key]
+	return business, found
 }
 
 func canonicalTargetPlanList(what string, values []string) error {

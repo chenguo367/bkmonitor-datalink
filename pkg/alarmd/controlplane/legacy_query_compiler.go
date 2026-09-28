@@ -342,6 +342,7 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 		TenantID:         source.Identity.TenantID,
 		BusinessID:       source.Identity.BusinessID,
 		SpaceScope:       source.Identity.SpaceScope,
+		GlobalBusiness:   source.Identity.GlobalBusiness,
 		QueryList:        queryList,
 		MetricMerge:      metricMerge,
 		StepMillis:       stepSeconds * 1000,

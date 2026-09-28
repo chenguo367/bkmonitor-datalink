@@ -30,6 +30,10 @@ const (
 	// names cannot be routed. It is a statement about the data, not about
 	// whether the query ran.
 	spaceTableIDFieldIsNotExists = "SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS"
+	// headerSkipSpace asks the provider to route without a space. The
+	// provider reads only whether it is non-empty.
+	headerSkipSpace = "X-Bk-Scope-Skip-Space"
+	skipSpaceValue  = "alarmd"
 )
 
 // dataExistenceStatusCodes are the status codes that describe the data rather
@@ -148,6 +152,32 @@ type queryIdentity struct {
 	AttemptNo uint32
 }
 
+// scopeHeaders are the headers that say whose data a query reads: the
+// tenant always, and then either the strategy's space or, for a global
+// business Plan, the request to skip the space.
+//
+// Never both. The provider still applies the filters a space registers for
+// a table whenever a space is named, skipped or not - a shared table's
+// bk_biz_id filter among them - so a global query that also named its
+// space would read the global business's own data and nothing else.
+func scopeHeaders(facts execution.QueryPlanFacts) map[string]string {
+	if facts.GlobalBusiness {
+		return map[string]string{headerTenant: facts.TenantID, headerSkipSpace: skipSpaceValue}
+	}
+	return map[string]string{headerTenant: facts.TenantID, headerSpace: facts.SpaceScope}
+}
+
+// bodySpace is the space_uid the structured request body carries. The
+// provider takes the body's space whenever the header names none, so a
+// global business Plan leaves it empty as well as the header; the body's
+// space alone would scope the query exactly as the header would.
+func bodySpace(facts execution.QueryPlanFacts) string {
+	if facts.GlobalBusiness {
+		return ""
+	}
+	return facts.SpaceScope
+}
+
 func buildWireRequest(spec execution.PhysicalQuerySpec) (string, []byte, error) {
 	body, err := buildRequest(spec)
 	if err != nil {
@@ -186,8 +216,9 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 	}
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set(headerQuerySource, client.querySource)
-	request.Header.Set(headerTenant, attempt.Spec.PlanFacts.TenantID)
-	request.Header.Set(headerSpace, attempt.Spec.PlanFacts.SpaceScope)
+	for name, value := range scopeHeaders(attempt.Spec.PlanFacts) {
+		request.Header.Set(name, value)
+	}
 	started := client.now()
 	response, err := client.httpClient.Do(request)
 	if err != nil {
@@ -374,7 +405,7 @@ func buildRequest(spec execution.PhysicalQuerySpec) (request, error) {
 	}
 	return request{TSDBMap: spec.PlanFacts.TSDBMap, QueryList: queries, MetricMerge: spec.PlanFacts.MetricMerge,
 		StartTime: strconv.FormatInt(spec.ProviderRange.Start, 10), EndTime: strconv.FormatInt(spec.ProviderRange.End, 10),
-		Step: durationString(spec.PlanFacts.StepMillis), SpaceUID: spec.PlanFacts.SpaceScope,
+		Step: durationString(spec.PlanFacts.StepMillis), SpaceUID: bodySpace(spec.PlanFacts),
 		DownSampleRange: string(spec.PlanFacts.DownSampleRange), Timezone: spec.PlanFacts.Timezone,
 		NotTimeAlign: spec.PlanFacts.NotTimeAlign}, nil
 }

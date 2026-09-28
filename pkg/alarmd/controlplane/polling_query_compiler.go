@@ -96,7 +96,7 @@ func (compiler *LegacyPrimaryQueryCompiler) compilePromQL(source PrimaryQuerySou
 		TenantID: source.Identity.TenantID, BusinessID: source.Identity.BusinessID, SpaceScope: source.Identity.SpaceScope,
 		PromQL: &execution.PromQLQuery{Expression: c.PromQL, Match: match}, SourceSemantics: sources,
 		StepMillis: interval * 1000, AlignmentMillis: interval * 1000, DownSampleRange: execution.DownSampleNone,
-		Timezone: compiler.timezone, Normalization: n,
+		Timezone: compiler.timezone, Normalization: n, GlobalBusiness: source.Identity.GlobalBusiness,
 	})
 }
 

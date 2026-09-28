@@ -116,10 +116,11 @@ func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []s
 		}
 		strategy := SourceStrategy{SourceID: ids[index], Document: append(json.RawMessage(nil), payload...)}
 		var identityDTO struct {
-			ID         int64           `json:"id"`
-			BusinessID int64           `json:"bk_biz_id"`
-			TenantID   json.RawMessage `json:"bk_tenant_id"`
-			SpaceUID   json.RawMessage `json:"space_uid"`
+			ID             int64           `json:"id"`
+			BusinessID     int64           `json:"bk_biz_id"`
+			TenantID       json.RawMessage `json:"bk_tenant_id"`
+			SpaceUID       json.RawMessage `json:"space_uid"`
+			GlobalBusiness json.RawMessage `json:"is_global_biz"`
 		}
 		if err := json.Unmarshal(payload, &identityDTO); err != nil {
 			strategy.SourceDisposition = &ObjectDisposition{
@@ -159,7 +160,20 @@ func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []s
 			strategies = append(strategies, strategy)
 			continue
 		}
-		strategy.Identity = SourceIdentity{TenantID: tenantID, BusinessID: strconv.FormatInt(identityDTO.BusinessID, 10), SpaceScope: spaceUID}
+		global, globalOK := decodeGlobalBusiness(identityDTO.GlobalBusiness)
+		if !globalOK {
+			// Not read as false. A writer that meant true and spelled it
+			// otherwise would have the strategy run as an ordinary one,
+			// scoped to the global business's own space: every other
+			// business's data gone with nothing on the page to say so.
+			strategy.SourceDisposition = &ObjectDisposition{
+				SourceID: ids[index], Scope: "STRATEGY", Disposition: DispositionConfigRejected,
+				Reason: ReasonGlobalBusinessInvalid, FieldPath: "is_global_biz",
+			}
+			strategies = append(strategies, strategy)
+			continue
+		}
+		strategy.Identity = SourceIdentity{TenantID: tenantID, BusinessID: strconv.FormatInt(identityDTO.BusinessID, 10), SpaceScope: spaceUID, GlobalBusiness: global}
 		strategies = append(strategies, strategy)
 	}
 	return strategies, nil
@@ -202,6 +216,26 @@ func missingIdentityFieldPath(tenantOK, spaceOK bool) string {
 		return "bk_tenant_id"
 	default:
 		return "space_uid"
+	}
+}
+
+// ReasonGlobalBusinessInvalid refuses a strategy document whose
+// is_global_biz is present and is not a JSON boolean.
+const ReasonGlobalBusinessInvalid = "STRATEGY_GLOBAL_BUSINESS_INVALID"
+
+// decodeGlobalBusiness reads the optional is_global_biz. Absent is false;
+// present, it must be true or false, and anything else - null, a string,
+// a number - is refused rather than guessed.
+func decodeGlobalBusiness(payload json.RawMessage) (bool, bool) {
+	switch strings.TrimSpace(string(payload)) {
+	case "":
+		return false, true
+	case "true":
+		return true, true
+	case "false":
+		return false, true
+	default:
+		return false, false
 	}
 }
 
