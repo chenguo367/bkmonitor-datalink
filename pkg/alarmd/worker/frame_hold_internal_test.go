@@ -127,7 +127,7 @@ func TestKeptFramesAreReleasedOnEveryWayAPlanLeaves(t *testing.T) {
 				t.Fatalf("writes = %d, want %d", len(state.framesAtWrite), test.writes)
 			}
 			for index := range state.framesAtWrite {
-				if state.framesAtWrite[index] != 1 || state.reservedAtWrite[index] != heldFrameBytes {
+				if state.framesAtWrite[index] != 1 || state.reservedAtWrite[index] != oneFrame() {
 					t.Fatalf("write %d carried %d frames with %d bytes reserved, want its one frame and its own bytes alone",
 						index, state.framesAtWrite[index], state.reservedAtWrite[index])
 				}
@@ -146,13 +146,14 @@ func TestKeptFramesAreReleasedOnEveryWayAPlanLeaves(t *testing.T) {
 func TestKeptFramesAreReleasedWhenAPartialOutputLeavesAnyNumberOfSeries(t *testing.T) {
 	for name, test := range map[string]struct {
 		notWritten []string
-		// reserved is what each write sees reserved: the refused Plan holds
-		// both its series' frames until its write is over, and the sibling
-		// only its own once the refused Plan let go of its frames.
+		// reserved is what each write sees reserved: the refused Plan gives
+		// back the frame of the series it dropped before its write, and the
+		// sibling sees only its own once the refused Plan let go of its
+		// frames.
 		reserved []uint64
 	}{
-		"one series left": {notWritten: []string{"failed-event"}, reserved: []uint64{2 * heldFrameBytes, heldFrameBytes}},
-		"no series left":  {notWritten: []string{"failed-event", "kept-event"}, reserved: []uint64{heldFrameBytes}},
+		"one series left": {notWritten: []string{"failed-event"}, reserved: []uint64{oneFrame(), oneFrame()}},
+		"no series left":  {notWritten: []string{"failed-event", "kept-event"}, reserved: []uint64{oneFrame()}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			fixture := newOutputIsolationFixture(t, test.notWritten...)
