@@ -230,14 +230,16 @@ func TestCostProjectionCarriesAFilledCoverage(t *testing.T) {
 			Members: []observability.CostPlanIdentity{plan(id)}, Schedules: []observability.CostSchedule{{Plan: plan(id), IntervalSeconds: 60, CompletionOffsetSeconds: 60}}}
 	}
 	summary.Reconcile([]observability.CostGroup{group("refused", "1"), group("silent", "2")}, true)
+	now = time.Unix(1400, 0)
+	summary.Reconcile([]observability.CostGroup{group("refused", "1"), group("silent", "2"), group("late", "3")}, true)
 	now = time.Unix(1440, 0)
 	summary.Observe(context.Background(), observability.Observation{Stage: observability.StageProgressCommitted, Result: observability.ResultSuccess,
 		ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE",
 		Trace:                  observability.TraceFields{QueryGroupKey: "refused", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", EvaluationTime: 1320}})
 	summary.Publish(now)
 	snapshot := summary.Snapshot()
-	if len(snapshot.Coverage.UnevaluatedDuePlans) == 0 || len(snapshot.Coverage.UnobservedDueSample) == 0 {
-		t.Fatalf("setup: coverage = %+v, want per-result counts and a named miss", snapshot.Coverage)
+	if len(snapshot.Coverage.UnevaluatedDuePlans) == 0 || len(snapshot.Coverage.UnobservedDueSample) == 0 || len(snapshot.Coverage.PartialWindowSample) == 0 {
+		t.Fatalf("setup: coverage = %+v, want per-result counts, a named miss and a group tracked mid-window", snapshot.Coverage)
 	}
 
 	s, _, _ := projectionFixture(t, 4)
@@ -252,6 +254,10 @@ func TestCostProjectionCarriesAFilledCoverage(t *testing.T) {
 	var read observability.CostSnapshot
 	if err := json.Unmarshal(view.Snapshots[0].Cost, &read); err != nil {
 		t.Fatal(err)
+	}
+	partial, readPartial := snapshot.Coverage.PartialWindowSample, read.Coverage.PartialWindowSample
+	if len(readPartial) != len(partial) || readPartial[0].QueryGroupKey != partial[0].QueryGroupKey || !readPartial[0].TrackedSince.Equal(partial[0].TrackedSince) {
+		t.Fatalf("partial-window sample read back %+v, want %+v", readPartial, partial)
 	}
 	if !reflect.DeepEqual(read.Coverage.UnevaluatedDuePlans, snapshot.Coverage.UnevaluatedDuePlans) ||
 		!reflect.DeepEqual(read.Coverage.UnobservedDueSample, snapshot.Coverage.UnobservedDueSample) {

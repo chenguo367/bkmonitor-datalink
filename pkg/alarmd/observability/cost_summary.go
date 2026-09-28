@@ -189,6 +189,14 @@ type CostScalars struct {
 	// a group held for the whole window has no cost missing from it, and is
 	// counted as held rather than unseen.
 	HeldRounds uint64 `json:"held_rounds,omitempty"`
+
+	// OtherRevisionObservations are observations of this group's key that
+	// carried another revision than the roster's - the group changed
+	// revision and the roster had not caught up. They are untracked and
+	// cost nothing here; counted against the key, they name a group that
+	// looks as if it left no record because its rounds ran under the next
+	// revision.
+	OtherRevisionObservations uint64 `json:"other_revision_observations,omitempty"`
 }
 
 // costHeldOutcomes are the scheduler's words for a round it returned without
@@ -219,12 +227,15 @@ var costUnevaluatedOutcomes = []string{"failed", "gap_skipped", "unavailable", "
 // Why a due Plan its group did not evaluate is unobserved - what the window
 // should have seen and did not: another Plan of its group was evaluated and
 // it was not; its group completed a round normally and evaluated nothing;
-// its group left no record in the window at all; or its group's records
-// hold none of costUnevaluatedOutcomes.
+// its group left no record in the window at all, or none but observations
+// of its key under the revision after the roster's (revision_changed: its
+// rounds ran, the roster had not caught up); or its group's records hold
+// none of costUnevaluatedOutcomes.
 const (
 	costMissSiblingEvaluated     = "sibling_evaluated"
 	costMissCompletedUnevaluated = "completed_unevaluated"
 	costMissNoRecord             = "no_record"
+	costMissRevisionChanged      = "revision_changed"
 	costMissUnexplained          = "unexplained"
 )
 
@@ -254,6 +265,8 @@ func costUnevaluated(w costWindows) (string, bool) {
 		return "in_flight", true
 	case c.HeldRounds+p.HeldRounds > 0:
 		return "held", true
+	case c.OtherRevisionObservations+p.OtherRevisionObservations > 0:
+		return costMissRevisionChanged, false
 	case c.Observations+p.Observations == 0:
 		return costMissNoRecord, false
 	}
@@ -311,6 +324,9 @@ type costGroupState struct {
 	plans   map[CostPlanIdentity]*costPlanState
 	account *costAccount
 	since   time.Time
+	// replaced says the roster tracked this key under other revisions before
+	// this one: the group changed revision, and its window starts over.
+	replaced bool
 	// due is every distinct schedule of the group's Plans, tracked or not:
 	// the group runs for all of them. Empty when the roster carried none.
 	due []costDue
@@ -435,6 +451,21 @@ type CostCoverage struct {
 	// how many and never which: a replica read incomplete for a few Plans
 	// and nothing on it said whose they were or what their group had done.
 	UnobservedDueSample []CostDueMiss `json:"unobserved_due_sample,omitempty"`
+
+	// PartialWindowSample names up to costDueMissSampleLimit of the groups
+	// counted in PartialWindowGroups, in key order: tracked since the window
+	// began, a group new to the roster or one that changed revision
+	// (Replaced) and started its window over. The count alone made a
+	// replica read incomplete for a quarter of an hour with nothing to say
+	// which group, or that it had only changed revision.
+	PartialWindowSample []CostPartialGroup `json:"partial_window_sample,omitempty"`
+}
+
+// CostPartialGroup is one group tracked since after the window began.
+type CostPartialGroup struct {
+	QueryGroupKey string    `json:"query_group_key"`
+	TrackedSince  time.Time `json:"tracked_since"`
+	Replaced      bool      `json:"replaced"`
 }
 
 // CostUnevaluated is how many due Plans one round result accounted for.
@@ -474,6 +505,10 @@ type CostDueMiss struct {
 	RetryingRunReturns uint64 `json:"retrying_run_returns"`
 	UnavailableCommits uint64 `json:"unavailable_commits"`
 	GapSkippedCommits  uint64 `json:"gap_skipped_commits"`
+
+	// OtherRevisionObservations are the group's key observed under another
+	// revision than the roster's (revision_changed).
+	OtherRevisionObservations uint64 `json:"other_revision_observations"`
 }
 
 // compareDueMiss orders misses by group key, then the group before its
@@ -498,6 +533,19 @@ func keepDueMiss(kept []CostDueMiss, miss CostDueMiss) []CostDueMiss {
 	return slices.Insert(kept, at, miss)
 }
 
+// keepPartialGroup adds group to kept, the first costDueMissSampleLimit
+// groups in key order, and keeps no more.
+func keepPartialGroup(kept []CostPartialGroup, group CostPartialGroup) []CostPartialGroup {
+	at, _ := slices.BinarySearchFunc(kept, group, func(a, b CostPartialGroup) int { return cmp.Compare(a.QueryGroupKey, b.QueryGroupKey) })
+	if at >= costDueMissSampleLimit {
+		return kept
+	}
+	if len(kept) == costDueMissSampleLimit {
+		kept = kept[:costDueMissSampleLimit-1]
+	}
+	return slices.Insert(kept, at, group)
+}
+
 // costDueMissOf is a miss of the group, or of plan when it is not nil, for
 // reason, with the group's counts over its two windows.
 func costDueMissOf(group *costGroupState, plan *costPlanState, windows costWindows, reason string) CostDueMiss {
@@ -516,6 +564,7 @@ func costDueMissOf(group *costGroupState, plan *costPlanState, windows costWindo
 		miss.RetryingRunReturns += s.RetryingRunReturns
 		miss.UnavailableCommits += s.UnavailableCommits
 		miss.GapSkippedCommits += s.GapSkippedCommits
+		miss.OtherRevisionObservations += s.OtherRevisionObservations
 	}
 	return miss
 }
@@ -708,8 +757,9 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 		old := previous[input.QueryGroupKey]
 		state := &costGroupState{since: now, plans: make(map[CostPlanIdentity]*costPlanState)}
 		if old != nil && old.group.QueryRevision == input.QueryRevision && old.group.SnapshotRevision == input.SnapshotRevision && old.group.ScheduleRevision == input.ScheduleRevision {
-			state.account, state.since = old.account, old.since
+			state.account, state.since, state.replaced = old.account, old.since, old.replaced
 		} else {
+			state.replaced = old != nil
 			old = nil
 			state.account = &costAccount{}
 		}
@@ -810,8 +860,13 @@ func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 	if scope := c.scope.Load(); scope != nil {
 		g = scope.groups[trace.QueryGroupKey]
 	}
-	if g == nil || (trace.SnapshotRevision != "" && trace.SnapshotRevision != g.group.SnapshotRevision) || (trace.QueryRevision != "" && trace.QueryRevision != g.group.QueryRevision) || (trace.ScheduleRevision != "" && trace.ScheduleRevision != g.group.ScheduleRevision) {
+	if g == nil {
 		c.untracked.add(epoch)
+		return
+	}
+	if (trace.SnapshotRevision != "" && trace.SnapshotRevision != g.group.SnapshotRevision) || (trace.QueryRevision != "" && trace.QueryRevision != g.group.QueryRevision) || (trace.ScheduleRevision != "" && trace.ScheduleRevision != g.group.ScheduleRevision) {
+		c.untracked.add(epoch)
+		c.observeOtherRevision(g, epoch)
 		return
 	}
 	account := g.account
@@ -831,6 +886,20 @@ func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 			account.windows.current.UnattributedEvaluations++
 		}
 	}
+}
+
+// observeOtherRevision counts an observation of g's key under another
+// revision against g, so the group's window can say its rounds ran under the
+// next one. Contention loses this count as it loses any other.
+func (c *CostSummary) observeOtherRevision(g *costGroupState, epoch int64) {
+	if !c.lockAccount(g.account) {
+		c.contentionDropped.Add(1)
+		c.contention.add(epoch)
+		return
+	}
+	defer g.account.mu.Unlock()
+	g.account.windows.rotate(epoch)
+	g.account.windows.current.OtherRevisionObservations++
 }
 
 // observeHeld counts a round the scheduler held, against its group. Only a
@@ -1118,6 +1187,7 @@ func (c *CostSummary) Publish(now time.Time) {
 		snapshot.Coverage.UnevaluatedDuePlans[i].Outcome = outcome
 	}
 	var misses []CostDueMiss
+	var partial []CostPartialGroup
 	for i := range copies {
 		entry := &copies[i]
 		w := entry.windows
@@ -1134,11 +1204,17 @@ func (c *CostSummary) Publish(now time.Time) {
 					snapshot.Coverage.HeldDueGroups++
 				default:
 					snapshot.Coverage.UnobservedDueGroups++
-					misses = keepDueMiss(misses, costDueMissOf(entry.group, nil, w, costMissNoRecord))
+					reason := costMissNoRecord
+					if w.current.OtherRevisionObservations+w.previous.OtherRevisionObservations > 0 {
+						reason = costMissRevisionChanged
+					}
+					misses = keepDueMiss(misses, costDueMissOf(entry.group, nil, w, reason))
 				}
 			}
 			if entry.group.since.After(snapshot.WindowStart) {
 				snapshot.Coverage.PartialWindowGroups++
+				partial = keepPartialGroup(partial, CostPartialGroup{QueryGroupKey: entry.group.group.QueryGroupKey,
+					TrackedSince: entry.group.since, Replaced: entry.group.replaced})
 			}
 			for _, s := range [2]CostScalars{w.current, w.previous} {
 				snapshot.Coverage.UnknownWallObservations += s.EvaluationWall.Unknown + s.StateWall.Unknown + s.QueryWall.Unknown + s.RunWall.Unknown
@@ -1182,6 +1258,7 @@ func (c *CostSummary) Publish(now time.Time) {
 	}
 	snapshot.Coverage.Incomplete = snapshot.Coverage.Incomplete || snapshot.Coverage.ContentionDropped > 0 || snapshot.Coverage.UntrackedObservations > 0 || snapshot.Coverage.UnattributedEvaluations > 0 || snapshot.Coverage.UnknownWallObservations > 0 || snapshot.Coverage.PartialWindowGroups > 0 || snapshot.Coverage.UnobservedDueGroups > 0 || snapshot.Coverage.UnobservedDuePlans > 0
 	snapshot.Coverage.UnobservedDueSample = misses
+	snapshot.Coverage.PartialWindowSample = partial
 	indexes := make(map[*costCopy]int)
 	for dim, rows := range rankings {
 		ranking := CostRanking{Dimension: costDimensions[dim%len(costDimensions)], Scope: "query_group"}
@@ -1252,6 +1329,7 @@ func (c *CostSummary) Snapshot() CostSnapshot {
 	}
 	out.Coverage.UnobservedDueSample = append([]CostDueMiss(nil), out.Coverage.UnobservedDueSample...)
 	out.Coverage.UnevaluatedDuePlans = append([]CostUnevaluated(nil), out.Coverage.UnevaluatedDuePlans...)
+	out.Coverage.PartialWindowSample = append([]CostPartialGroup(nil), out.Coverage.PartialWindowSample...)
 	return out
 }
 
