@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 )
@@ -622,5 +623,32 @@ func TestAHeldGroupWithObservationsUnderItsNextRevisionIsHeld(t *testing.T) {
 	coverage := c.Snapshot().Coverage
 	if unevaluatedOf(t, coverage)["held"] != 1 || coverage.UnobservedDuePlans != 0 || coverage.UntrackedObservations != 1 || !coverage.Incomplete {
 		t.Fatalf("a held group with observations under its next revision = %+v, want its Plan held and the window incomplete for the untracked one", coverage)
+	}
+}
+
+// The partial-window sample keeps the first costDueMissSampleLimit groups by
+// key whatever order they arrive in. Ascending, the ninth arrives with the
+// sample full and belongs past its end; it is dropped, never inserted there.
+// Read directly, so the order is the test's and not a map's.
+func TestThePartialWindowSampleKeepsTheFirstGroupsByKeyInAnyArrivalOrder(t *testing.T) {
+	keys := make([]string, 12)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("g%02d", i)
+	}
+	descending := slices.Clone(keys)
+	slices.Reverse(descending)
+	interleaved := []string{"g11", "g00", "g10", "g01", "g09", "g02", "g08", "g03", "g07", "g04", "g06", "g05"}
+	for name, order := range map[string][]string{"ascending": keys, "descending": descending, "interleaved": interleaved} {
+		var kept []CostPartialGroup
+		for _, key := range order {
+			kept = keepPartialGroup(kept, CostPartialGroup{QueryGroupKey: key})
+		}
+		var got []string
+		for _, group := range kept {
+			got = append(got, group.QueryGroupKey)
+		}
+		if fmt.Sprint(got) != "[g00 g01 g02 g03 g04 g05 g06 g07]" {
+			t.Fatalf("%s arrivals kept %v, want the first eight by key", name, got)
+		}
 	}
 }
