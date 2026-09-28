@@ -30,9 +30,9 @@ var errRuntimeCatalogClosureInvalid = errors.New("alarmd controlplane: runtime C
 // The no-data Level counts with the rest. Its facts are written on the same
 // records, so its retention is retention the store pays for.
 func observeRetention(retention *CatalogRetention, compiled *strategy.CompiledPlan) {
-	levels := compiled.Levels()
+	levels := compiled.Levels().Copy()
 	if noData := compiled.NoDataLevel(); noData != nil {
-		levels = append(append([]strategy.CompiledLevel(nil), levels...), *noData)
+		levels = append(levels, *noData)
 	}
 	for _, level := range levels {
 		requirement := level.StateRequirement()
@@ -212,7 +212,7 @@ func retainRuntimeExecutableCatalog(
 					return Catalog{}, err
 				}
 				verifiedPlan, ok := verification.Plan()
-				if verification.PlanTerminal() == nil && len(verification.LevelTerminals()) == 0 && ok && len(verifiedPlan.Levels()) > 0 {
+				if verification.PlanTerminal() == nil && len(verification.LevelTerminals()) == 0 && ok && verifiedPlan.Levels().Len() > 0 {
 					if err := validateRuntimePlanDependencyClosure(plan, verifiedPlan); err != nil {
 						if errors.Is(err, errRuntimeCatalogClosureInvalid) {
 							rejectClosure(sourcePlan.Identity.StrategyID, terminalDispositions...)
@@ -284,13 +284,13 @@ func runtimeFrozenPlanIsTerminalFree(
 		return nil, false, err
 	}
 	compiled, ok := result.Plan()
-	executable := ok && result.PlanTerminal() == nil && len(result.LevelTerminals()) == 0 && len(compiled.Levels()) > 0
+	executable := ok && result.PlanTerminal() == nil && len(result.LevelTerminals()) == 0 && compiled.Levels().Len() > 0
 	return compiled, executable, nil
 }
 
 func retainCompiledLevels(plan FrozenPlan, compiled *strategy.CompiledPlan) (FrozenPlan, error) {
-	retained := make(map[uint32]struct{}, len(compiled.Levels()))
-	for _, level := range compiled.Levels() {
+	retained := make(map[uint32]struct{}, compiled.Levels().Len())
+	for _, level := range compiled.Levels().All() {
 		retained[level.Definition().LevelID] = struct{}{}
 	}
 	levels := make([]contract.LevelIRV2, 0, len(retained))
@@ -445,7 +445,7 @@ func validateRuntimePlanDependencyClosure(plan FrozenPlan, compiled *strategy.Co
 		return errRuntimeCatalogClosureInvalid
 	}
 	expected := make(map[runtimeRequirementKey]execution.DataRequirementTemplate)
-	for _, level := range compiled.Levels() {
+	for _, level := range compiled.Levels().All() {
 		for _, algorithm := range level.Algorithms() {
 			for _, requirement := range algorithm.InputRequirements() {
 				template, err := runtimeRequirementTemplate(requirement)

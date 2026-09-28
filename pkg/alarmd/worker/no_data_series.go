@@ -204,7 +204,7 @@ func (stream *streamedExecution) noDataCompletedSeries(
 	if err != nil {
 		return completedSeries{}, fmt.Errorf("alarmd worker: derive no-data record id: %w", err)
 	}
-	level := view.CompiledPlan.Levels()[0]
+	level := view.CompiledPlan.Levels().At(0)
 	consumer := execution.ConsumerRef{
 		Plan: view.Identity, LevelID: level.Definition().LevelID, HasLevel: true,
 	}

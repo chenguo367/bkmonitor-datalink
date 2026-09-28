@@ -38,7 +38,7 @@ func compatiblePlanV2(t *testing.T, levels []contract.LevelIRV2) *strategy.Compi
 func recoveryRequestV2(t *testing.T, plan *strategy.CompiledPlan) EvaluationRequestV2 {
 	t.Helper()
 	const source = int64(300)
-	levels := plan.Levels()
+	levels := plan.Levels().Copy()
 	facts := make([]DetectionFact, len(levels))
 	histories := make([]LevelHistory, len(levels))
 	for index, level := range levels {
@@ -121,7 +121,7 @@ func TestARecoveryItsProtocolHasNoMessageForIsNotBuilt(t *testing.T) {
 func TestTheCompatibilityProtocolStillBuildsItsAnomaly(t *testing.T) {
 	plan := compatiblePlanV2(t, []contract.LevelIRV2{levelV2(5, 9, 3, 2, 2, nil)})
 	const source = int64(300)
-	request := requestV2(t, plan, source, []DetectionFact{factV2(plan.Levels()[0], DetectionAnomalous)}, []LevelHistory{{
+	request := requestV2(t, plan, source, []DetectionFact{factV2(plan.Levels().At(0), DetectionAnomalous)}, []LevelHistory{{
 		LevelID: 5, View: pointHistory{step: 60, points: map[int64]bool{180: true, 240: true, 300: true}},
 	}}, activeFactsV2(t, plan, source))
 	result, err := EvaluateV2(request)

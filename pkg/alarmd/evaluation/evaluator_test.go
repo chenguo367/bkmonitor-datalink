@@ -39,7 +39,7 @@ func TestEvaluatorProducesValidatedProvisionalAbnormalWithoutMutatingViews(t *te
 func TestEvaluatorUsesHistoryForNormalThenRecovery(t *testing.T) {
 	history := []execution.StateHistoryPoint{{RecordID: strings.Repeat("a", 64), SourceTime: 40, Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: "", Result: execution.LevelFactAnomalous}}}}
 	req := requestFixture(t, json.RawMessage(`10`), history)
-	history[0].Levels[0].DetectFingerprint = req.Header.DuePlans[0].CompiledPlan.Levels()[0].Fingerprints().Detect
+	history[0].Levels[0].DetectFingerprint = req.Header.DuePlans[0].CompiledPlan.Levels().At(0).Fingerprints().Detect
 	req.State.Items[0].History = history
 	result, err := newEvaluator(t).Evaluate(context.Background(), req)
 	if err != nil {
@@ -259,7 +259,7 @@ func TestEvaluatorConvergesGappedLevelWhenLiveWindowIsFull(t *testing.T) {
 	series := strings.Repeat("c", 64)
 	point := func(plan *strategy.CompiledPlan, id string, sourceTime int64) execution.StateHistoryPoint {
 		return execution.StateHistoryPoint{RecordID: strings.Repeat(id, 64), SourceTime: sourceTime,
-			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: plan.Levels()[0].Fingerprints().Detect, Result: execution.LevelFactNormal}}}
+			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: plan.Levels().At(0).Fingerprints().Detect, Result: execution.LevelFactNormal}}}
 	}
 	tests := []struct {
 		name       string
@@ -293,8 +293,8 @@ func TestEvaluatorConvergesGappedLevelWhenLiveWindowIsFull(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			plan := compiledWindow(t, test.window, test.window)
-			if plan.Levels()[0].RequiredDetectHistoryPoints() != test.window {
-				t.Fatalf("required detect history points = %d, want %d", plan.Levels()[0].RequiredDetectHistoryPoints(), test.window)
+			if plan.Levels().At(0).RequiredDetectHistoryPoints() != test.window {
+				t.Fatalf("required detect history points = %d, want %d", plan.Levels().At(0).RequiredDetectHistoryPoints(), test.window)
 			}
 			history := test.history(plan)
 			request := requestFixtureForPlan(t, plan, []contract.CanonicalRecordV2{{RecordID: strings.Repeat("f", 64), SourceTime: 300, BusinessID: "2",
@@ -644,7 +644,7 @@ func requestFixtureForPlan(t testing.TB, plan *strategy.CompiledPlan, records []
 	provider := strategy.NewStaticScheduleProvider(strategy.TimezoneResolverFunc(func(context.Context, string, string, string) (*time.Location, error) {
 		return time.UTC, nil
 	}))
-	facts, err := provider.Resolve(context.Background(), []strategy.EffectiveTimeRequest{{TenantID: "tenant", BusinessID: "2", EvaluationTime: 100, Requirement: plan.Levels()[0].EffectiveTimeRequirement()}})
+	facts, err := provider.Resolve(context.Background(), []strategy.EffectiveTimeRequest{{TenantID: "tenant", BusinessID: "2", EvaluationTime: 100, Requirement: plan.Levels().At(0).EffectiveTimeRequirement()}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -904,7 +904,7 @@ func proposeRoundGuard(t *testing.T, request execution.EvaluationRequest, result
 		t.Fatal(err)
 	}
 	var required uint32
-	for _, level := range due.CompiledPlan.Levels() {
+	for _, level := range due.CompiledPlan.Levels().All() {
 		if points := level.RequiredDetectHistoryPoints(); points > required {
 			required = points
 		}
@@ -996,7 +996,7 @@ func TestAConvergingGuardLeavesNoReasonOnAnUnguardedWindow(t *testing.T) {
 	series := strings.Repeat("c", 64)
 	point := func(id string, sourceTime int64) execution.StateHistoryPoint {
 		return execution.StateHistoryPoint{RecordID: strings.Repeat(id, 64), SourceTime: sourceTime,
-			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: plan.Levels()[0].Fingerprints().Detect, Result: execution.LevelFactNormal}}}
+			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: plan.Levels().At(0).Fingerprints().Detect, Result: execution.LevelFactNormal}}}
 	}
 	history := []execution.StateHistoryPoint{point("a", 120), point("b", 180), point("d", 240)}
 	request := requestFixtureForPlan(t, plan, []contract.CanonicalRecordV2{{RecordID: strings.Repeat("f", 64), SourceTime: 360, BusinessID: "2",

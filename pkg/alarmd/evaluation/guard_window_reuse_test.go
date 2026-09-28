@@ -25,7 +25,7 @@ import (
 
 func reuseHistoryPoint(plan *strategy.CompiledPlan, id string, sourceTime int64, result execution.LevelFactResult) execution.StateHistoryPoint {
 	return execution.StateHistoryPoint{RecordID: strings.Repeat(id, 64), SourceTime: sourceTime,
-		Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: plan.Levels()[0].Fingerprints().Detect, Result: result}}}
+		Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: plan.Levels().At(0).Fingerprints().Detect, Result: result}}}
 }
 
 func reuseRecord(id string, sourceTime int64, value string) contract.CanonicalRecordV2 {

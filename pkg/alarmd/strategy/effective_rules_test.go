@@ -30,7 +30,7 @@ func TestMaintenanceEffectiveTimeRequiresEveryLevelInactive(t *testing.T) {
 	plan.NoData = &contract.NoDataConfigV1{Continuous: 1, Level: 2}
 	plan.EffectiveTimeSnapshot = json.RawMessage(`{"schema_version":1,"status":"READY","business_timezone":"UTC","calendars":[]}`)
 	compiled := mustCompilePlan(t, newTestCompiler(t), plan)
-	if compiled.NoDataLevel().EffectiveTimeRequirementDigest() != compiled.Levels()[1].EffectiveTimeRequirementDigest() {
+	if compiled.NoDataLevel().EffectiveTimeRequirementDigest() != compiled.Levels().At(1).EffectiveTimeRequirementDigest() {
 		t.Fatal("no-data did not inherit its matching level")
 	}
 	for _, tt := range []struct {

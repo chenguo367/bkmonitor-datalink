@@ -351,7 +351,7 @@ func (m *effectiveMaintenance) readGroup(ctx context.Context, qg execution.Query
 // nothing from this loop: no entry to keep warm, no inactive state to close
 // on.
 func planHasSchedule(plan *strategy.CompiledPlan) bool {
-	levels := plan.Levels()
+	levels := plan.Levels().Copy()
 	if level := plan.NoDataLevel(); level != nil {
 		levels = append(levels, *level)
 	}
@@ -535,7 +535,7 @@ func (m *effectiveMaintenance) refreshLegacy(ctx context.Context, qg execution.Q
 			m.legacyCursor[qg] = i
 			return
 		}
-		levels := plan.Compiled.Levels()
+		levels := plan.Compiled.Levels().Copy()
 		if level := plan.Compiled.NoDataLevel(); level != nil {
 			levels = append(levels, *level)
 		}

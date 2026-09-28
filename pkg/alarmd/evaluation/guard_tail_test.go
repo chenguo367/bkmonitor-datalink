@@ -40,7 +40,7 @@ func TestAnUnknownIsMarkedAsTheGuardsAloneOnlyWhenItIsItsHistoryAndTheRoundPropo
 	double := compiledG4PlanWithTrigger(t, strategy.DetectorKindSimpleRingRatio, config(), projection, 2, 2)
 	normal := func(id string, sourceTime int64) execution.StateHistoryPoint {
 		return execution.StateHistoryPoint{RecordID: strings.Repeat(id, 64), SourceTime: sourceTime,
-			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: double.Levels()[0].Fingerprints().Detect, Result: execution.LevelFactNormal}}}
+			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: double.Levels().At(0).Fingerprints().Detect, Result: execution.LevelFactNormal}}}
 	}
 	guard := execution.ReasonCode(contract.ReasonQueryUnavailable)
 	for _, testCase := range []struct {

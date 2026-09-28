@@ -34,7 +34,7 @@ func TestAnAnomalyWithEnoughEvidenceFiresUnderAGuard(t *testing.T) {
 	guard := execution.ReasonCode(contract.ReasonSnapshotUnavailable)
 	point := func(result execution.LevelFactResult) execution.StateHistoryPoint {
 		return execution.StateHistoryPoint{RecordID: strings.Repeat("d", 64), SourceTime: 300,
-			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: plan.Levels()[0].Fingerprints().Detect, Result: result}}}
+			Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: plan.Levels().At(0).Fingerprints().Detect, Result: result}}}
 	}
 	for _, guardKind := range []string{"plan gap marker", "gapped series state"} {
 		for _, testCase := range []struct {

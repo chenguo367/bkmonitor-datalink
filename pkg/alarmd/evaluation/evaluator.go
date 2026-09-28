@@ -214,8 +214,8 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 	if _, err = window.Apply([]state.StatePoint{point}); err != nil {
 		return recordResult{}, err
 	}
-	histories := make([]trigger.LevelHistory, len(levels))
-	historyCompleteness := make(map[uint32]execution.HistoryCompleteness, len(levels))
+	histories := make([]trigger.LevelHistory, levels.Len())
+	historyCompleteness := make(map[uint32]execution.HistoryCompleteness, levels.Len())
 	// durableGuardReasons holds, per Level, the reason of the guard that is
 	// active in durable state before this record: the loaded Level's WARMING or
 	// GAPPED reason, superseded by a loaded Plan or Level gap marker. It is the
@@ -223,8 +223,8 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 	// a WARMING Level whose loaded history already allows convergence: a record
 	// that does not converge it leaves that guard in place, and every UNKNOWN
 	// outcome under it must preserve its reason.
-	durableGuardReasons := make(map[uint32]execution.ReasonCode, len(levels))
-	effective := make([]trigger.LevelEffectiveTimeFact, len(levels))
+	durableGuardReasons := make(map[uint32]execution.ReasonCode, levels.Len())
+	effective := make([]trigger.LevelEffectiveTimeFact, levels.Len())
 	// Observation only. Summarize is the one place that knows both how much of
 	// the window arrived and how much was asked for, and until now it kept both
 	// and published neither -- which is why a permanently short window and a
@@ -250,7 +250,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			unusable[f.Definition.LevelID] = f.ReasonCode
 		}
 	}
-	for i, l := range levels {
+	for i, l := range levels.All() {
 		h, _ := window.History(l.Definition().LevelID)
 		completeness := ""
 		if current, found := levelState(view, l.Definition().LevelID); found {
@@ -552,7 +552,7 @@ func (e *Evaluator) evaluateSeries(
 	if err != nil {
 		return execution.PlanEvaluationResult{}, err
 	}
-	if uint64(len(due.CompiledPlan.Levels())) > e.limits.MaxLevels {
+	if uint64(due.CompiledPlan.Levels().Len()) > e.limits.MaxLevels {
 		return execution.PlanEvaluationResult{}, errors.New("alarmd evaluation: named input Plan is over budget")
 	}
 	byLevel := make(map[uint32]execution.SeriesEvaluationInputRequest, len(inputs))
@@ -567,11 +567,11 @@ func (e *Evaluator) evaluateSeries(
 		byLevel[input.Consumer.LevelID] = input
 	}
 	levels := due.CompiledPlan.Levels()
-	if len(byLevel) != len(levels) {
+	if len(byLevel) != levels.Len() {
 		return execution.PlanEvaluationResult{}, errors.New("alarmd evaluation: named inputs do not exactly cover compiled Levels")
 	}
-	ordered := make([]execution.SeriesEvaluationInputRequest, len(levels))
-	for index, level := range levels {
+	ordered := make([]execution.SeriesEvaluationInputRequest, levels.Len())
+	for index, level := range levels.All() {
 		if inputs[index].Consumer.LevelID != level.Definition().LevelID {
 			return execution.PlanEvaluationResult{}, errors.New("alarmd evaluation: named inputs are not in compiled Level order")
 		}
@@ -781,8 +781,8 @@ func constrainedOutcomes(
 	due execution.DuePlan, record execution.RecordView, series execution.SeriesIdentityDigest,
 	kind execution.LevelOutcomeKind, reason execution.ReasonCode,
 ) []execution.LevelOutcome {
-	outcomes := make([]execution.LevelOutcome, 0, len(due.CompiledPlan.Levels()))
-	for _, level := range due.CompiledPlan.Levels() {
+	outcomes := make([]execution.LevelOutcome, 0, due.CompiledPlan.Levels().Len())
+	for _, level := range due.CompiledPlan.Levels().All() {
 		outcomes = append(outcomes, execution.LevelOutcome{
 			Plan: due.Identity, LevelID: level.Definition().LevelID, SeriesIdentityDigest: series,
 			Record:  execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()},
@@ -867,11 +867,11 @@ func planLevelRequirements(plan *strategy.CompiledPlan) ([]state.LevelRequiremen
 		return nil, err
 	}
 	levels := plan.Levels()
-	if len(retention) != len(levels) {
+	if len(retention) != levels.Len() {
 		return nil, errors.New("alarmd evaluation: Plan retention is not aligned with its Levels")
 	}
-	requirements := make([]state.LevelRequirement, len(levels))
-	for index, level := range levels {
+	requirements := make([]state.LevelRequirement, levels.Len())
+	for index, level := range levels.All() {
 		if retention[index].LevelID != level.Definition().LevelID {
 			return nil, errors.New("alarmd evaluation: Plan retention is not aligned with its Levels")
 		}
@@ -896,7 +896,7 @@ func planLevelRequirements(plan *strategy.CompiledPlan) ([]state.LevelRequiremen
 // is raised where it was, on every path, the constrained ones included.
 func guardConvergenceAllowed(view execution.RuntimeStateView, plan *strategy.CompiledPlan) (map[uint32]bool, *state.Window, error) {
 	levels := plan.Levels()
-	allowed := make(map[uint32]bool, len(levels))
+	allowed := make(map[uint32]bool, levels.Len())
 	requirements, err := planLevelRequirements(plan)
 	if err != nil {
 		return nil, nil, err
@@ -910,7 +910,7 @@ func guardConvergenceAllowed(view execution.RuntimeStateView, plan *strategy.Com
 			return nil, nil, err
 		}
 	}
-	for _, level := range levels {
+	for _, level := range levels.All() {
 		current, found := levelState(view, level.Definition().LevelID)
 		if !found || current.LastProcessedEventTime <= 0 ||
 			(current.HistoryCompleteness != execution.HistoryWarming && current.HistoryCompleteness != execution.HistoryGapped) {
@@ -936,7 +936,7 @@ func (e *Evaluator) constrainedRecord(request execution.EvaluationRequest, due e
 	// outcomes without an evaluation behind them, and the coverage a reader
 	// sees is otherwise silent about it.
 	out := recordResult{coverage: execution.HistoryCoverage{Constrained: 1}}
-	for _, l := range due.CompiledPlan.Levels() {
+	for _, l := range due.CompiledPlan.Levels().All() {
 		out.outcomes = append(out.outcomes, execution.LevelOutcome{Plan: due.Identity, LevelID: l.Definition().LevelID, SeriesIdentityDigest: view.Identity.SeriesIdentityDigest, Record: execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()}, Outcome: kind, ReasonCode: view.ReasonCode})
 	}
 	return out, nil
@@ -1179,7 +1179,7 @@ func planRetentionPoints(due execution.DuePlan) uint32 {
 	if due.CompiledPlan == nil {
 		return 0
 	}
-	for _, l := range due.CompiledPlan.Levels() {
+	for _, l := range due.CompiledPlan.Levels().All() {
 		if l.StateRequirement().RetentionPoints > retain {
 			retain = l.StateRequirement().RetentionPoints
 		}

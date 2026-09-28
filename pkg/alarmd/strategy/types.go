@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
 	"math/big"
 	"sort"
 	"strings"
@@ -720,15 +721,54 @@ func (p *CompiledPlan) EvaluationSemantics() contract.ExecutionSemanticsV2 {
 	return p.evaluationSemantics
 }
 
-func (p *CompiledPlan) Levels() []CompiledLevel {
-	if p == nil {
+// LevelList is a Plan's compiled Levels, read-only. Its slice is unexported,
+// so code outside this package can read each Level but cannot replace,
+// reorder or append to the Plan's own: code that tries does not compile, and
+// code that needs a slice of its own asks for one with Copy.
+//
+// It is what Levels returns because Levels was called from every stage of
+// every Slot, a few dozen times per series per round, and copied the whole
+// slice each time -- 336 bytes a Level -- for callers that, all but four,
+// only read it.
+type LevelList struct {
+	levels []CompiledLevel
+}
+
+// Len is the number of Levels.
+func (l LevelList) Len() int { return len(l.levels) }
+
+// At is the Level at index, as a value: changing it does not change the Plan.
+func (l LevelList) At(index int) CompiledLevel { return l.levels[index] }
+
+// All yields each Level with its index, in order, as range does over a slice.
+func (l LevelList) All() iter.Seq2[int, CompiledLevel] {
+	return func(yield func(int, CompiledLevel) bool) {
+		for index := range l.levels {
+			if !yield(index, l.levels[index]) {
+				return
+			}
+		}
+	}
+}
+
+// Copy is a slice of the Levels the caller owns: for a caller that appends to
+// it, reorders it or keeps it.
+func (l LevelList) Copy() []CompiledLevel {
+	if l.levels == nil {
 		return nil
 	}
-	return append([]CompiledLevel(nil), p.levels...)
+	return append([]CompiledLevel(nil), l.levels...)
+}
+
+func (p *CompiledPlan) Levels() LevelList {
+	if p == nil {
+		return LevelList{}
+	}
+	return LevelList{levels: p.levels}
 }
 
 func (p *CompiledPlan) LevelsByPriority() []CompiledLevel {
-	levels := p.Levels()
+	levels := p.Levels().Copy()
 	sort.Slice(levels, func(left, right int) bool {
 		if levels[left].definition.Priority == levels[right].definition.Priority {
 			return levels[left].definition.LevelID < levels[right].definition.LevelID

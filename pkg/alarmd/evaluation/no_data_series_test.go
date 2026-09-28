@@ -288,7 +288,7 @@ func noDataRequestFixtureOnGroup(
 	}
 	provider := strategy.NewStaticScheduleProvider(strategy.TimezoneResolverFunc(
 		func(context.Context, string, string, string) (*time.Location, error) { return time.UTC, nil }))
-	requirementLevel := plan.Levels()[0]
+	requirementLevel := plan.Levels().At(0)
 	if level := plan.NoDataLevel(); level != nil {
 		requirementLevel = *level
 	}

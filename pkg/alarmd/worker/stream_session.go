@@ -406,7 +406,7 @@ func prepareNamedInputIndex(header execution.InternalExecutionHeader) (preparedN
 		}]strategy.SeriesFoldPolicy),
 	}
 	for _, due := range header.DuePlans {
-		for _, level := range due.CompiledPlan.Levels() {
+		for _, level := range due.CompiledPlan.Levels().All() {
 			consumer := execution.ConsumerRef{Plan: due.Identity, LevelID: level.Definition().LevelID, HasLevel: true}
 			prepared.consumersByPlan[due.Identity] = append(prepared.consumersByPlan[due.Identity], consumer)
 			for _, algorithm := range level.Algorithms() {
@@ -1833,8 +1833,8 @@ func (stream *streamedExecution) algorithmObservationFacts(
 	if due.CompiledPlan == nil || len(evaluated.Plans) != 1 || evaluated.Plans[0].Plan != due.Identity {
 		return nil, nil
 	}
-	levels := make(map[uint32][]observedAlgorithm, len(due.CompiledPlan.Levels()))
-	for _, level := range due.CompiledPlan.Levels() {
+	levels := make(map[uint32][]observedAlgorithm, due.CompiledPlan.Levels().Len())
+	for _, level := range due.CompiledPlan.Levels().All() {
 		for _, algorithm := range level.Algorithms() {
 			observed, ok := observeAlgorithm(algorithm)
 			if ok {
@@ -1934,7 +1934,7 @@ func (stream *streamedExecution) completionOnlyAlgorithmInputFacts(
 	}
 	bindings := planBindings(stream.bindings, due.Identity)
 	facts := make([]observability.AlgorithmInputFact, 0)
-	for _, level := range due.CompiledPlan.Levels() {
+	for _, level := range due.CompiledPlan.Levels().All() {
 		levelID := level.Definition().LevelID
 		for _, compiled := range level.Algorithms() {
 			algorithm, observed := observeAlgorithm(compiled)
@@ -2310,7 +2310,7 @@ func requiredFullSlots(plan *strategy.CompiledPlan) uint32 {
 		return 0
 	}
 	var required uint32
-	for _, level := range plan.Levels() {
+	for _, level := range plan.Levels().All() {
 		if points := level.RequiredDetectHistoryPoints(); points > required {
 			required = points
 		}

@@ -967,7 +967,7 @@ func validateOptionalLevel(levelID uint32, hasLevel bool) error {
 }
 
 func compiledPlanHasLevel(plan *strategy.CompiledPlan, levelID uint32) bool {
-	for _, level := range plan.Levels() {
+	for _, level := range plan.Levels().All() {
 		if level.Definition().LevelID == levelID {
 			return true
 		}
@@ -2585,12 +2585,12 @@ func buildEvaluationInternalExecution(request EvaluationRequest) (InternalExecut
 	if err != nil {
 		return InternalExecution{}, err
 	}
-	if len(request.Inputs) != len(due.CompiledPlan.Levels()) {
+	if len(request.Inputs) != due.CompiledPlan.Levels().Len() {
 		return InternalExecution{}, errors.New("alarmd execution: evaluation inputs do not exactly cover one due Plan")
 	}
 	input := InternalExecution{Contract: request.Header.Contract, DuePlans: []DuePlan{due},
 		FullPlans: map[PlanIdentity]*strategy.CompiledPlan{due.Identity: full}}
-	for index, level := range due.CompiledPlan.Levels() {
+	for index, level := range due.CompiledPlan.Levels().All() {
 		current := request.Inputs[index]
 		if current.Contract != request.Header.Contract || current.Consumer.Plan != due.Identity || !current.Consumer.HasLevel ||
 			current.Consumer.LevelID != level.Definition().LevelID || current.SeriesIdentity != first.SeriesIdentity ||

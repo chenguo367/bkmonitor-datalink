@@ -2418,8 +2418,8 @@ func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, requ
 		if err != nil {
 			return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
 		}
-		capabilities := make([]execution.LevelPartialCapability, 0, len(compiled.Levels()))
-		for _, level := range compiled.Levels() {
+		capabilities := make([]execution.LevelPartialCapability, 0, compiled.Levels().Len())
+		for _, level := range compiled.Levels().All() {
 			capabilities = append(capabilities, execution.LevelPartialCapability{LevelID: level.Definition().LevelID, Policy: execution.PartialRequiresFull})
 		}
 		if compiled.NoData() != nil {
@@ -2612,7 +2612,7 @@ func (runtime *RedisCatalogRuntime) slotRequirements(
 
 		expected := make(map[execution.RequirementID]uint32)
 		explicitPrimary := make(map[uint32]map[execution.RequirementID]struct{})
-		for _, level := range due.CompiledPlan.Levels() {
+		for _, level := range due.CompiledPlan.Levels().All() {
 			levelID := level.Definition().LevelID
 			for _, algorithm := range level.Algorithms() {
 				algorithmRequirements := algorithm.InputRequirements()
@@ -2640,7 +2640,7 @@ func (runtime *RedisCatalogRuntime) slotRequirements(
 				}
 			}
 		}
-		for _, level := range due.CompiledPlan.Levels() {
+		for _, level := range due.CompiledPlan.Levels().All() {
 			levelID := level.Definition().LevelID
 			switch len(explicitPrimary[levelID]) {
 			case 0:
@@ -2754,7 +2754,7 @@ func validateExactlyOnePrimaryPerLevel(duePlans []execution.DuePlan, requirement
 		}
 	}
 	for _, due := range duePlans {
-		for _, level := range due.CompiledPlan.Levels() {
+		for _, level := range due.CompiledPlan.Levels().All() {
 			consumer := execution.ConsumerRef{Plan: due.Identity, LevelID: level.Definition().LevelID, HasLevel: true}
 			if primary[consumer] != 1 {
 				return errors.New("alarmd controlplane: compiled Level must have exactly one PRIMARY input requirement")
