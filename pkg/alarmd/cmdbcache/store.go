@@ -114,6 +114,7 @@ func (store *Store) Refresh(ctx context.Context) error {
 		store.failures++
 		return err
 	}
+	index.carryOptional(store.index)
 	store.index = index
 	store.lastError = nil
 	store.refreshes++
@@ -146,6 +147,10 @@ type Health struct {
 	ClusterBusinesses          int
 	ClusterBusinessesRefused   int
 	ClusterBusinessesTruncated int
+	// ClusterBusinessesReadFailed says the latest load could not read the
+	// mapping; the counts above are then the last load that could. It is
+	// not a store failure: the hosts refreshed.
+	ClusterBusinessesReadFailed bool
 }
 
 func (store *Store) Health() Health {
@@ -165,6 +170,7 @@ func (store *Store) Health() Health {
 	health.Hosts = store.index.Hosts()
 	health.ServiceInstances = store.index.ServiceInstances()
 	health.ClusterBusinesses, health.ClusterBusinessesRefused, health.ClusterBusinessesTruncated = store.index.ClusterBusinesses()
+	health.ClusterBusinessesReadFailed = store.index.ClusterBusinessReadFailed()
 	health.Age = now.Sub(store.index.BuiltAt())
 	if source := store.index.SourceRefreshedAt(); !source.IsZero() {
 		health.SourceAge = now.Sub(source)

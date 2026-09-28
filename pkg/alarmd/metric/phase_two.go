@@ -1393,8 +1393,10 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "The BCS cluster -> business mapping in the in-memory CMDB index, read in the same load as the " +
 			"hosts, by state: held (clusters a global business strategy's Kubernetes events can be attributed " +
 			"through), refused (fields whose business was not a positive integer), truncated (clusters past the " +
-			"load bound). Zero held is a writer that does not publish the mapping yet; every event that would " +
-			"have used it is then counted as unmapped in event_business_attribution_total.",
+			"load bound), read_failed (1 when the latest load could not read the mapping at all; the hosts still " +
+			"refreshed, and the held counts are the last read that succeeded). Zero held is a writer that does not " +
+			"publish the mapping yet; every event that would have used it is then counted as unmapped in " +
+			"event_business_attribution_total.",
 	}, []string{"state"})
 	for _, state := range CMDBClusterBusinessStates {
 		metrics.cmdbIndexClusterBusinesses.WithLabelValues(state)

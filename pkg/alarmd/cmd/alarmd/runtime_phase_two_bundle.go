@@ -686,7 +686,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// the no-data roster and a global business Plan's event attribution -
 	// and for the cluster mapping read in the same snapshot.
 	hostBusiness := cmdbcache.NewHostBusinessLookup(cmdbIndex)
-	evaluator.WithBusinessAttribution(admission.BusinessLookups{Hosts: hostBusiness, Clusters: hostBusiness}, recorder.ObserveEventBusinessAttribution)
+	evaluator.WithBusinessAttribution(businessAttributionLookups(hostBusiness), recorder.ObserveEventBusinessAttribution)
 	sequencer, err := worker.NewKeyedSideEffectSequencer(cfg.PhaseTwo.Coordinator.MaxSequencerReservations)
 	if err != nil {
 		return nil, err
@@ -1712,4 +1712,12 @@ func gateLookupFacts(lookups []openalerts.GateLookup) []fleet.GateLookupFact {
 			InOtherSets: append([]string(nil), lookup.InOtherSets...)})
 	}
 	return out
+}
+
+// businessAttributionLookups is what a global business Plan's events are
+// attributed through: the host business and the published cluster mapping,
+// both answered from the one CMDB index lookup, so a host and a cluster are
+// never attributed from two snapshots.
+func businessAttributionLookups(index *cmdbcache.HostBusinessLookup) admission.BusinessLookups {
+	return admission.BusinessLookups{Hosts: index, Clusters: index}
 }

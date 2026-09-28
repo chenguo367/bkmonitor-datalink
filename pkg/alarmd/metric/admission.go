@@ -104,17 +104,23 @@ func (r *Recorder) SetCMDBServiceInstanceIndex(instances int) {
 }
 
 // CMDBClusterBusinessStates are the states of the cluster mapping's gauge.
-var CMDBClusterBusinessStates = []string{"held", "refused", "truncated"}
+var CMDBClusterBusinessStates = []string{"held", "refused", "truncated", "read_failed"}
 
 // SetCMDBClusterBusinessIndex publishes the BCS cluster -> business mapping
-// the index holds, and what its load left out.
-func (r *Recorder) SetCMDBClusterBusinessIndex(held, refused, truncated int) {
+// the index holds, what its load left out, and whether the latest load could
+// not read it at all (1) - the held counts are then the last good read's.
+func (r *Recorder) SetCMDBClusterBusinessIndex(held, refused, truncated int, readFailed bool) {
 	if r == nil || r.phaseTwo.cmdbIndexClusterBusinesses == nil {
 		return
 	}
 	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("held").Set(float64(held))
 	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("refused").Set(float64(refused))
 	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("truncated").Set(float64(truncated))
+	failed := 0.0
+	if readFailed {
+		failed = 1
+	}
+	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("read_failed").Set(failed)
 }
 
 // SnapshotPublished records the size of the fleet snapshot this replica just

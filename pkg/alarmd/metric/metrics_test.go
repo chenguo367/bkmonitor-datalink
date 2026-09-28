@@ -1334,12 +1334,13 @@ func TestDiagnosticRedisFailuresAreCountedByReason(t *testing.T) {
 // a count of clusters and not a series nobody registered.
 func TestTheClusterBusinessGaugeHasEveryStateFromStartup(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
-	r.SetCMDBClusterBusinessIndex(3, 1, 0)
+	r.SetCMDBClusterBusinessIndex(3, 1, 0, true)
 	values := map[string]float64{}
 	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_cmdb_index_bcs_cluster_businesses") {
 		values[m.GetLabel()[0].GetValue()] = m.GetGauge().GetValue()
 	}
-	if len(values) != len(CMDBClusterBusinessStates) || values["held"] != 3 || values["refused"] != 1 || values["truncated"] != 0 {
-		t.Fatalf("gauge = %v, want held 3, refused 1, truncated 0", values)
+	if len(values) != len(CMDBClusterBusinessStates) || values["held"] != 3 || values["refused"] != 1 ||
+		values["truncated"] != 0 || values["read_failed"] != 1 {
+		t.Fatalf("gauge = %v, want held 3, refused 1, truncated 0, read_failed 1", values)
 	}
 }

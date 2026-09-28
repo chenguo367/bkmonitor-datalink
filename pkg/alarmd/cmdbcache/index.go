@@ -116,12 +116,65 @@ type Index struct {
 	// clusterBusiness is the business of each BCS cluster the writer
 	// published, by cluster id: how a global business Plan's event on
 	// Kubernetes data that names no business finds the one it belongs to.
-	// Read in the same load as the hosts. clusterBusinessRefused counts
-	// fields whose business was not a positive integer, and
-	// clusterBusinessTruncated the clusters past MaxClusterBusinesses.
-	clusterBusiness          map[string]string
-	clusterBusinessRefused   int
-	clusterBusinessTruncated int
+	// Read in the same load as the hosts, and optional to it: a mapping
+	// that cannot be read does not stop the hosts from refreshing.
+	clusterBusiness businessMapping
+}
+
+// businessMapping is one published "key -> business" hash read into the
+// index: the entries held, and the fields the load left out - refused for a
+// business that is not a positive integer or an empty key, truncated past
+// the bound.
+//
+// readFailed says this load could not read the hash at all. The mapping is
+// optional beside the hosts it is published with, so a read that fails -
+// a hash the writer wrote as another type, one scan that timed out - must
+// not hold back the host index every strategy filters on. The load goes on
+// without it and says so; the store then carries the entries of the index
+// it replaces, so one failed read does not turn every mapped event into an
+// unmapped one, and the flag stays up until a read succeeds.
+type businessMapping struct {
+	entries    map[string]string
+	refused    int
+	truncated  int
+	readFailed bool
+}
+
+// add records one page of field, value pairs, up to bound entries.
+func (mapping *businessMapping) add(fields []string, bound int) {
+	if mapping.entries == nil {
+		mapping.entries = make(map[string]string)
+	}
+	for index := 0; index+1 < len(fields); index += 2 {
+		key := strings.TrimSpace(fields[index])
+		if key == "" {
+			mapping.refused++
+			continue
+		}
+		if _, seen := mapping.entries[key]; seen {
+			continue
+		}
+		business, err := strconv.ParseInt(strings.TrimSpace(fields[index+1]), 10, 64)
+		if err != nil || business <= 0 {
+			mapping.refused++
+			continue
+		}
+		if len(mapping.entries) >= bound {
+			mapping.truncated++
+			continue
+		}
+		mapping.entries[key] = strconv.FormatInt(business, 10)
+	}
+}
+
+// carriedFrom is this mapping, or, when this load could not read it, the
+// entries of the previous one with the failure still flagged.
+func (mapping businessMapping) carriedFrom(previous businessMapping) businessMapping {
+	if !mapping.readFailed {
+		return mapping
+	}
+	previous.readFailed = true
+	return previous
 }
 
 // LookupModelInstance finds the host carrying the canonical (model,
@@ -235,7 +288,7 @@ func (index *Index) LookupClusterBusiness(clusterID string) (string, bool) {
 	if index == nil || clusterID == "" {
 		return "", false
 	}
-	business, found := index.clusterBusiness[clusterID]
+	business, found := index.clusterBusiness.entries[clusterID]
 	return business, found
 }
 
@@ -245,7 +298,22 @@ func (index *Index) ClusterBusinesses() (held, refused, truncated int) {
 	if index == nil {
 		return 0, 0, 0
 	}
-	return len(index.clusterBusiness), index.clusterBusinessRefused, index.clusterBusinessTruncated
+	return len(index.clusterBusiness.entries), index.clusterBusiness.refused, index.clusterBusiness.truncated
+}
+
+// ClusterBusinessReadFailed says the latest load could not read the cluster
+// mapping, and the entries held are the ones an earlier load read.
+func (index *Index) ClusterBusinessReadFailed() bool {
+	return index != nil && index.clusterBusiness.readFailed
+}
+
+// carryOptional takes over, from the index this one replaces, the optional
+// mappings this load could not read.
+func (index *Index) carryOptional(previous *Index) {
+	if index == nil || previous == nil {
+		return
+	}
+	index.clusterBusiness = index.clusterBusiness.carriedFrom(previous.clusterBusiness)
 }
 
 // LookupServiceInstance resolves one service-instance id.
@@ -326,16 +394,27 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	// same round as the hosts, read into the same snapshot so a host and a
 	// cluster are never attributed from two refreshes. An absent hash is a
 	// writer that does not publish it yet: no cluster is mapped, and every
-	// event that would have used one is counted as unmapped.
-	if err := reader.scan(ctx, reader.clusterBusinessKey(), builder.addClusterBusinessFields); err != nil {
-		return nil, fmt.Errorf("alarmd cmdbcache: scan BCS cluster business cache: %w", err)
-	}
+	// event that would have used one is counted as unmapped. A hash that
+	// cannot be read is not a failed load (see businessMapping).
+	builder.index.clusterBusiness = reader.readMapping(ctx, reader.clusterBusinessKey(), MaxClusterBusinesses)
 	index := builder.index
 
 	if refreshed, err := reader.client.Get(ctx, reader.refreshedKey()).Result(); err == nil {
 		index.sourceRefreshedAt = parseRefreshedAt(refreshed)
 	}
 	return index, nil
+}
+
+// readMapping reads one optional "key -> business" hash. A read that fails
+// part way is dropped whole: half a mapping would map some clusters from
+// this round and leave the rest unmapped, which reads like a writer that
+// left them out.
+func (reader *Reader) readMapping(ctx context.Context, key string, bound int) businessMapping {
+	var mapping businessMapping
+	if err := reader.scan(ctx, key, func(fields []string) { mapping.add(fields, bound) }); err != nil {
+		return businessMapping{readFailed: true}
+	}
+	return mapping
 }
 
 // scan streams one hash through consume, a page at a time.
@@ -369,36 +448,6 @@ func newIndexBuilder(now time.Time) *indexBuilder {
 			byModelInstance: make(map[string]*HostFacts),
 		},
 		seen: make(map[string]*HostFacts),
-	}
-}
-
-// addClusterBusinessFields records one page of the cluster mapping: field,
-// value pairs. A business that is not a positive integer is refused - the
-// writer leaves such clusters out, so one here is a writer defect - and a
-// cluster past the bound is truncated; both are counted, neither is kept.
-func (builder *indexBuilder) addClusterBusinessFields(fields []string) {
-	if builder.index.clusterBusiness == nil {
-		builder.index.clusterBusiness = make(map[string]string)
-	}
-	for index := 0; index+1 < len(fields); index += 2 {
-		cluster := strings.TrimSpace(fields[index])
-		if cluster == "" {
-			builder.index.clusterBusinessRefused++
-			continue
-		}
-		if _, seen := builder.index.clusterBusiness[cluster]; seen {
-			continue
-		}
-		business, err := strconv.ParseInt(strings.TrimSpace(fields[index+1]), 10, 64)
-		if err != nil || business <= 0 {
-			builder.index.clusterBusinessRefused++
-			continue
-		}
-		if len(builder.index.clusterBusiness) >= MaxClusterBusinesses {
-			builder.index.clusterBusinessTruncated++
-			continue
-		}
-		builder.index.clusterBusiness[cluster] = strconv.FormatInt(business, 10)
 	}
 }
 
