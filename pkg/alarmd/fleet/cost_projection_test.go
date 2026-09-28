@@ -212,3 +212,50 @@ func TestCostProjectionConcurrentPublicationAndRead(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+// A snapshot the cost summary built, its coverage filled in - the per-result
+// counts of due Plans not evaluated and a named miss - is admitted, written
+// and read back whole. The tests above publish bare snapshots, which the
+// size admission walked by type and let through; this one walks a filled
+// coverage, which is what a replica publishes every refresh.
+func TestCostProjectionCarriesAFilledCoverage(t *testing.T) {
+	now := time.Unix(800, 0)
+	summary := observability.NewCostSummary(observability.CostSummaryOptions{ProcessID: "process", Window: 5 * time.Minute, GroupCapacity: 8,
+		PlanCapacity: 8, MetadataBytes: 4096, TopN: 2, Now: func() time.Time { return now }})
+	plan := func(id string) observability.CostPlanIdentity {
+		return observability.CostPlanIdentity{TenantID: "t", BusinessID: "b", StrategyID: id}
+	}
+	group := func(key, id string) observability.CostGroup {
+		return observability.CostGroup{QueryGroupKey: key, QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r",
+			Members: []observability.CostPlanIdentity{plan(id)}, Schedules: []observability.CostSchedule{{Plan: plan(id), IntervalSeconds: 60, CompletionOffsetSeconds: 60}}}
+	}
+	summary.Reconcile([]observability.CostGroup{group("refused", "1"), group("silent", "2")}, true)
+	now = time.Unix(1440, 0)
+	summary.Observe(context.Background(), observability.Observation{Stage: observability.StageProgressCommitted, Result: observability.ResultSuccess,
+		ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE",
+		Trace:                  observability.TraceFields{QueryGroupKey: "refused", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", EvaluationTime: 1320}})
+	summary.Publish(now)
+	snapshot := summary.Snapshot()
+	if len(snapshot.Coverage.UnevaluatedDuePlans) == 0 || len(snapshot.Coverage.UnobservedDueSample) == 0 {
+		t.Fatalf("setup: coverage = %+v, want per-result counts and a named miss", snapshot.Coverage)
+	}
+
+	s, _, _ := projectionFixture(t, 4)
+	at := snapshot.GeneratedAt
+	if result, err := s.Publish(context.Background(), "a", at, snapshot); err != nil || result.MarkerWritten || result.WrittenBytes == 0 {
+		t.Fatalf("publish of a filled coverage = %+v %v, want it written", result, err)
+	}
+	view := s.Load(context.Background(), []string{"a"}, true, at)
+	if !view.Complete || len(view.Snapshots) != 1 {
+		t.Fatalf("view = %+v, want the one replica read", view)
+	}
+	var read observability.CostSnapshot
+	if err := json.Unmarshal(view.Snapshots[0].Cost, &read); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(read.Coverage.UnevaluatedDuePlans, snapshot.Coverage.UnevaluatedDuePlans) ||
+		!reflect.DeepEqual(read.Coverage.UnobservedDueSample, snapshot.Coverage.UnobservedDueSample) {
+		t.Fatalf("read back %+v / %+v, want %+v / %+v", read.Coverage.UnevaluatedDuePlans, read.Coverage.UnobservedDueSample,
+			snapshot.Coverage.UnevaluatedDuePlans, snapshot.Coverage.UnobservedDueSample)
+	}
+}

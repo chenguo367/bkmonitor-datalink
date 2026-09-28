@@ -138,7 +138,10 @@ type CostScalars struct {
 	Attempts                 uint64   `json:"attempts"`
 	RunReturns               uint64   `json:"run_returns"`
 	FailedRunReturns         uint64   `json:"failed_run_returns"`
+	RetryingRunReturns       uint64   `json:"retrying_run_returns,omitempty"`
 	ProgressCommits          uint64   `json:"progress_commits"`
+	UnavailableCommits       uint64   `json:"unavailable_commits,omitempty"`
+	GapSkippedCommits        uint64   `json:"gap_skipped_commits,omitempty"`
 	Evaluations              uint64   `json:"evaluations"`
 	FailedEvaluations        uint64   `json:"failed_evaluations"`
 	EvaluationRecords        uint64   `json:"evaluation_records"`
@@ -197,6 +200,64 @@ var costHeldOutcomes = map[string]bool{
 	"query_cooldown": true, "single_flight_busy": true, "ownership_rejected": true, "source_backoff": true,
 	"source_retry": true, "source_blocked": true, "source_error": true, "operation_not_ready": true,
 	"admission_denied": true, "view_not_executable": true, "cancelled": true,
+}
+
+// costUnevaluatedOutcomes are the round results that account for a due Plan
+// its group did not evaluate: results that by definition evaluate nothing,
+// each read from what the window observed of the group. failed is a Slot
+// returned failed; gap_skipped a round committed giving a span up;
+// unavailable a round committed with its inputs unavailable
+// (COMPLETED_WITH_UNAVAILABLE, SNAPSHOT_UNAVAILABLE); retrying a Slot
+// returned to be run again (QUERY_NOT_READY, VIEW_NOT_EXECUTABLE); in_flight
+// a Slot started and not returned when the window was read; held a round the
+// scheduler returned without running (costHeldOutcomes). When a window holds
+// several, the first in this order names the Plan: the rounds that ran
+// before the ones that did not. A round that completed normally is none of
+// them: it evaluates what is due.
+var costUnevaluatedOutcomes = []string{"failed", "gap_skipped", "unavailable", "retrying", "in_flight", "held"}
+
+// Why a due Plan its group did not evaluate is unobserved - what the window
+// should have seen and did not: another Plan of its group was evaluated and
+// it was not; its group completed a round normally and evaluated nothing;
+// its group left no record in the window at all; or its group's records
+// hold none of costUnevaluatedOutcomes.
+const (
+	costMissSiblingEvaluated     = "sibling_evaluated"
+	costMissCompletedUnevaluated = "completed_unevaluated"
+	costMissNoRecord             = "no_record"
+	costMissUnexplained          = "unexplained"
+)
+
+// costUnevaluated says what accounts for a due Plan its group did not
+// evaluate over w, both buckets: one of costUnevaluatedOutcomes and true, or
+// the costMiss reason it is unobserved and false. An evaluation of another
+// Plan, and a round completed normally, are read first: either leaves this
+// Plan's evaluation missing whatever else the window holds.
+func costUnevaluated(w costWindows) (string, bool) {
+	c, p := w.current, w.previous
+	commits := c.ProgressCommits + p.ProgressCommits
+	unavailable, skipped := c.UnavailableCommits+p.UnavailableCommits, c.GapSkippedCommits+p.GapSkippedCommits
+	switch {
+	case c.Evaluations+p.Evaluations > 0:
+		return costMissSiblingEvaluated, false
+	case commits > unavailable+skipped:
+		return costMissCompletedUnevaluated, false
+	case c.FailedRunReturns+p.FailedRunReturns > 0:
+		return "failed", true
+	case skipped > 0:
+		return "gap_skipped", true
+	case unavailable > 0:
+		return "unavailable", true
+	case c.RetryingRunReturns+p.RetryingRunReturns > 0:
+		return "retrying", true
+	case c.Attempts+p.Attempts > c.RunReturns+p.RunReturns:
+		return "in_flight", true
+	case c.HeldRounds+p.HeldRounds > 0:
+		return "held", true
+	case c.Observations+p.Observations == 0:
+		return costMissNoRecord, false
+	}
+	return costMissUnexplained, false
 }
 
 type costWindows struct {
@@ -346,22 +407,27 @@ type CostCoverage struct {
 
 	// DueGroups and DuePlans are the tracked ones that had a Slot due in the
 	// window - its evaluation time at or after the window's start, its
-	// completion deadline by the window's end. Of those, HeldDueGroups and
-	// HeldDuePlans have no work in the window because the scheduler held the
-	// group's rounds (HeldRounds): nothing ran, so no cost is missing.
-	// UnobservedDueGroups and UnobservedDuePlans are the rest the window has
-	// no observation of, and they are what makes it incomplete: a group due
-	// that left nothing at all, and a due Plan its group's rounds ran
-	// without evaluating - a round that failed before it, whose Plan's cost
-	// the window does not have. A group on a long interval has no Slot due
-	// in most windows and is not missing from them, which is why observed
-	// is not held to tracked.
+	// completion deadline by the window's end. Of those, HeldDueGroups have
+	// no work in the window because the scheduler held the group's rounds
+	// (HeldRounds): nothing ran, so no cost is missing. UnevaluatedDuePlans
+	// counts the due Plans their group did not evaluate by the round result
+	// that accounts for it (costUnevaluatedOutcomes, every one present): the
+	// window saw what happened, and whether a Plan was evaluated is the
+	// object's health to report, not this ledger's. UnobservedDueGroups and
+	// UnobservedDuePlans are what makes the window incomplete, what it
+	// should have seen and did not: a group due that left nothing at all,
+	// and a due Plan nothing accounts for (costUnevaluated). A group on a
+	// long interval has no Slot due in most windows and is not missing from
+	// them, which is why observed is not held to tracked.
 	DueGroups           int `json:"due_groups"`
 	UnobservedDueGroups int `json:"unobserved_due_groups"`
 	HeldDueGroups       int `json:"held_due_groups"`
 	DuePlans            int `json:"due_plans"`
 	UnobservedDuePlans  int `json:"unobserved_due_plans"`
-	HeldDuePlans        int `json:"held_due_plans"`
+
+	// UnevaluatedDuePlans has one entry per costUnevaluatedOutcomes word, in
+	// that order, zeros included.
+	UnevaluatedDuePlans []CostUnevaluated `json:"unevaluated_due_plans"`
 
 	// UnobservedDueSample names up to costDueMissSampleLimit of the groups
 	// and Plans counted in UnobservedDueGroups and UnobservedDuePlans, in key
@@ -369,6 +435,12 @@ type CostCoverage struct {
 	// how many and never which: a replica read incomplete for a few Plans
 	// and nothing on it said whose they were or what their group had done.
 	UnobservedDueSample []CostDueMiss `json:"unobserved_due_sample,omitempty"`
+}
+
+// CostUnevaluated is how many due Plans one round result accounted for.
+type CostUnevaluated struct {
+	Outcome string `json:"outcome"`
+	Plans   int    `json:"plans"`
 }
 
 // costDueMissSampleLimit bounds the sample: enough to name a handful, never
@@ -392,6 +464,16 @@ type CostDueMiss struct {
 	Evaluations      uint64           `json:"evaluations"`
 	HeldRounds       uint64           `json:"held_rounds"`
 	ProgressCommits  uint64           `json:"progress_commits"`
+
+	// Reason is why the miss is unobserved (costUnevaluated's costMiss
+	// words); a group's own miss left no record (no_record). The counts
+	// after it are the rest of what that reading used: returns to be run
+	// again, and the commits that completed with inputs unavailable or gave
+	// a span up - the rest of ProgressCommits completed normally.
+	Reason             string `json:"reason"`
+	RetryingRunReturns uint64 `json:"retrying_run_returns"`
+	UnavailableCommits uint64 `json:"unavailable_commits"`
+	GapSkippedCommits  uint64 `json:"gap_skipped_commits"`
 }
 
 // compareDueMiss orders misses by group key, then the group before its
@@ -416,10 +498,10 @@ func keepDueMiss(kept []CostDueMiss, miss CostDueMiss) []CostDueMiss {
 	return slices.Insert(kept, at, miss)
 }
 
-// costDueMissOf is a miss of the group, or of plan when it is not nil, with
-// the group's counts over its two windows.
-func costDueMissOf(group *costGroupState, plan *costPlanState, windows costWindows) CostDueMiss {
-	miss := CostDueMiss{Scope: "query_group", QueryGroupKey: group.group.QueryGroupKey}
+// costDueMissOf is a miss of the group, or of plan when it is not nil, for
+// reason, with the group's counts over its two windows.
+func costDueMissOf(group *costGroupState, plan *costPlanState, windows costWindows, reason string) CostDueMiss {
+	miss := CostDueMiss{Scope: "query_group", QueryGroupKey: group.group.QueryGroupKey, Reason: reason}
 	if plan != nil {
 		miss.Scope, miss.Plan = "strategy_owned", plan.identity
 	}
@@ -431,6 +513,9 @@ func costDueMissOf(group *costGroupState, plan *costPlanState, windows costWindo
 		miss.Evaluations += s.Evaluations
 		miss.HeldRounds += s.HeldRounds
 		miss.ProgressCommits += s.ProgressCommits
+		miss.RetryingRunReturns += s.RetryingRunReturns
+		miss.UnavailableCommits += s.UnavailableCommits
+		miss.GapSkippedCommits += s.GapSkippedCommits
 	}
 	return miss
 }
@@ -768,7 +853,12 @@ func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
 		s.Attempts++
 	case StageSlotCompleted:
 		s.RunReturns++
-		if o.Err != nil || o.Result == ResultFailed {
+		// A Slot returned to be run again carries its reason as an error
+		// when the view refused it; it is a retry either way, not a failure.
+		switch {
+		case o.Result == ResultRetrying:
+			s.RetryingRunReturns++
+		case o.Err != nil || o.Result == ResultFailed:
 			s.FailedRunReturns++
 		}
 		if usage := o.SlotBudgetUsage; usage != nil {
@@ -785,6 +875,12 @@ func addCost(s *CostScalars, o Observation, trace TraceFields, now time.Time) {
 		if o.Err == nil && ValidProgressCompletionKind(o.ProgressCompletionKind) {
 			s.ProgressCommits++
 			s.LastProgressUnix = now.Unix()
+			switch o.ProgressCompletionKind {
+			case "COMPLETED_WITH_UNAVAILABLE", "SNAPSHOT_UNAVAILABLE":
+				s.UnavailableCommits++
+			case "GAP_SKIPPED":
+				s.GapSkippedCommits++
+			}
 		}
 	case StageEvaluationCompleted:
 		s.Evaluations++
@@ -972,19 +1068,16 @@ func (c *CostSummary) Publish(now time.Time) {
 	}
 	dueStart, dueEnd := snapshot.WindowStart.Unix(), snapshot.WindowEnd.Unix()
 	// A group the window has no work of and whose rounds the scheduler held
-	// is held, not unseen; its Plans with it.
+	// is held, not unseen.
 	//
-	// Its Plans are held too when the group's only work was attempts that
-	// evaluated nothing, failed nothing and completed no round - the probe a
-	// query cooldown lets through, returned not ready. A group held by its
-	// cooldown for all but that one probe read incomplete with its due Plans
-	// unevaluated, though nothing ran that the window missed. An evaluation
-	// of any Plan of the group, a failed return or a committed round, and
-	// its unevaluated due Plans are unseen as before: the group did run, and
-	// a Plan's cost is missing - a round that completed without evaluating
-	// a due Plan above all.
+	// A due Plan its group did not evaluate is counted by the round result
+	// that accounts for it (costUnevaluated), and is unseen only when none
+	// does: the window answers whether it missed what it should have seen,
+	// not whether every due Plan was evaluated - that is the object's own
+	// named result. What it should have seen and did not is a Plan left out
+	// of a round that evaluated its siblings, a round that completed
+	// normally and evaluated nothing, and a group with no record at all.
 	held := make(map[*costGroupState]bool)
-	plansHeld := make(map[*costGroupState]bool)
 	groupWindows := make(map[*costGroupState]costWindows)
 	for i := range copies {
 		if copies[i].plan != nil {
@@ -992,16 +1085,13 @@ func (c *CostSummary) Publish(now time.Time) {
 		}
 		groupWindows[copies[i].group] = copies[i].windows
 		w := copies[i].windows
-		if w.current.HeldRounds+w.previous.HeldRounds == 0 {
-			continue
-		}
-		if w.current.Observations+w.previous.Observations == 0 {
+		if w.current.HeldRounds+w.previous.HeldRounds > 0 && w.current.Observations+w.previous.Observations == 0 {
 			held[copies[i].group] = true
 		}
-		if w.current.Evaluations+w.previous.Evaluations == 0 && w.current.FailedRunReturns+w.previous.FailedRunReturns == 0 &&
-			w.current.ProgressCommits+w.previous.ProgressCommits == 0 {
-			plansHeld[copies[i].group] = true
-		}
+	}
+	snapshot.Coverage.UnevaluatedDuePlans = make([]CostUnevaluated, len(costUnevaluatedOutcomes))
+	for i, outcome := range costUnevaluatedOutcomes {
+		snapshot.Coverage.UnevaluatedDuePlans[i].Outcome = outcome
 	}
 	var misses []CostDueMiss
 	for i := range copies {
@@ -1020,7 +1110,7 @@ func (c *CostSummary) Publish(now time.Time) {
 					snapshot.Coverage.HeldDueGroups++
 				default:
 					snapshot.Coverage.UnobservedDueGroups++
-					misses = keepDueMiss(misses, costDueMissOf(entry.group, nil, w))
+					misses = keepDueMiss(misses, costDueMissOf(entry.group, nil, w, costMissNoRecord))
 				}
 			}
 			if entry.group.since.After(snapshot.WindowStart) {
@@ -1040,13 +1130,18 @@ func (c *CostSummary) Publish(now time.Time) {
 			}
 			if entry.plan.due.dueIn(dueStart, dueEnd) {
 				snapshot.Coverage.DuePlans++
-				switch {
-				case observed:
-				case plansHeld[entry.group]:
-					snapshot.Coverage.HeldDuePlans++
-				default:
-					snapshot.Coverage.UnobservedDuePlans++
-					misses = keepDueMiss(misses, costDueMissOf(entry.group, entry.plan, groupWindows[entry.group]))
+				if !observed {
+					groupWindow := groupWindows[entry.group]
+					if outcome, accounted := costUnevaluated(groupWindow); accounted {
+						for i := range snapshot.Coverage.UnevaluatedDuePlans {
+							if snapshot.Coverage.UnevaluatedDuePlans[i].Outcome == outcome {
+								snapshot.Coverage.UnevaluatedDuePlans[i].Plans++
+							}
+						}
+					} else {
+						snapshot.Coverage.UnobservedDuePlans++
+						misses = keepDueMiss(misses, costDueMissOf(entry.group, entry.plan, groupWindow, outcome))
+					}
 				}
 			}
 			if entry.plan.since.After(snapshot.WindowStart) {
@@ -1132,6 +1227,7 @@ func (c *CostSummary) Snapshot() CostSnapshot {
 		out.Rankings[i].Indexes = append([]int(nil), out.Rankings[i].Indexes...)
 	}
 	out.Coverage.UnobservedDueSample = append([]CostDueMiss(nil), out.Coverage.UnobservedDueSample...)
+	out.Coverage.UnevaluatedDuePlans = append([]CostUnevaluated(nil), out.Coverage.UnevaluatedDuePlans...)
 	return out
 }
 
