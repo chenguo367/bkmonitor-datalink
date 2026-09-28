@@ -136,8 +136,13 @@ type costWindows struct {
 	previous CostScalars
 }
 
+// rotate brings the windows to epoch. An epoch older than the one they hold
+// leaves them as they are: a Publish reads its clock at the start of its
+// tick, and an observation that has since moved the group into the next
+// window must not have both windows cleared by it. The copy is then a
+// window ahead of the snapshot's; nothing is lost.
 func (w *costWindows) rotate(epoch int64) {
-	if w.epoch == epoch {
+	if epoch <= w.epoch {
 		return
 	}
 	if w.epoch+1 == epoch {
