@@ -1122,9 +1122,12 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	default:
 		scope, err := compileTargetScope(item.Target.groups, item.QueryConfigs)
 		if err != nil {
+			// The reason word says the target was refused; only the error says
+			// which of its fields, methods or values, and it is the one thing
+			// the writer's side needs to find the target to fix.
 			return sourceCandidate{dispositions: []ObjectDisposition{{
 				SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported,
-				Reason: targetScopeDispositionReason(err),
+				Reason: targetScopeDispositionReason(err), FieldPath: "items[0].target", Detail: dispositionDetail(err.Error()),
 			}}}, err
 		}
 		targetScope = scope
