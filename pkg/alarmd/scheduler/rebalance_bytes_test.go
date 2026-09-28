@@ -359,3 +359,59 @@ func TestUnreadEstimateIsTheNearestRankNinetiethPercentile(t *testing.T) {
 		t.Fatal("the estimate sorted the caller's slice")
 	}
 }
+
+// The round names what keeps each judged Worker unsettled: how many of its
+// Query Groups have no peak read, the first few of them by id, and the read
+// peaks the estimate came from. The total alone said every Worker was
+// unsettled and not which Query Groups kept it so. A Worker that is not
+// judged has no unread count: its Query Groups are in no sum.
+func TestRouterPlanByteMovesNamesEachWorkersUnreadQueryGroups(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	live := now.Add(time.Minute)
+	workers := []ownership.WorkerRegistration{byteWorker("a", 1<<20, live), byteWorker("b", 1<<20, live), byteWorker("c", 0, live)}
+	owners := map[execution.QueryGroupIdentity]string{"b-unread": "b", "c-unread": "c"}
+	peaks := map[execution.QueryGroupIdentity]uint64{}
+	for index := 6; index >= 0; index-- {
+		owners[execution.QueryGroupIdentity(fmt.Sprintf("a-unread-%d", index))] = "a"
+	}
+	// 200 read peaks, 1 to 200 bytes, half on each judged Worker.
+	for value := uint64(1); value <= 200; value++ {
+		queryGroup, owner := execution.QueryGroupIdentity(fmt.Sprintf("read-%03d", value)), "a"
+		if value > 100 {
+			owner = "b"
+		}
+		owners[queryGroup], peaks[queryGroup] = owner, value
+	}
+	plan := NewRouter(nil).PlanByteMoves(owners, workers, ByteReadings{Pool: map[string]uint64{"a": 1 << 20, "b": 1 << 20}, Peak: peaks}, now)
+	if plan.Unread != 8 || !reflect.DeepEqual(plan.UnreadBy, map[string]int{"a": 7, "b": 1}) {
+		t.Fatalf("unread = %d by %v, want 7 on a and 1 on b, none for the unjudged c", plan.Unread, plan.UnreadBy)
+	}
+	wantSample := map[string][]execution.QueryGroupIdentity{
+		"a": {"a-unread-0", "a-unread-1", "a-unread-2", "a-unread-3", "a-unread-4"},
+		"b": {"b-unread"},
+	}
+	if !reflect.DeepEqual(plan.UnreadSample, wantSample) {
+		t.Fatalf("unread sample = %v, want each Worker's lowest five by id", plan.UnreadSample)
+	}
+	// Nearest rank over 1..200: the hundredth, the hundred-and-eightieth,
+	// the hundred-and-ninety-eighth, and the largest.
+	if want := (PeakDistribution{Count: 200, P50: 100, P90: 180, P99: 198, Max: 200}); plan.ReadPeaks != want {
+		t.Fatalf("read peaks = %+v, want %+v", plan.ReadPeaks, want)
+	}
+	if plan.ReadPeaks.P90 != plan.UnreadEstimate {
+		t.Fatalf("read peaks p90 = %d, estimate = %d: the distribution is not the one the estimate came from", plan.ReadPeaks.P90, plan.UnreadEstimate)
+	}
+}
+
+func TestPeakDistributionIsNearestRankAndLeavesTheCallersSlice(t *testing.T) {
+	if got := peakDistribution(nil); got != (PeakDistribution{}) {
+		t.Fatalf("no peak read: distribution = %+v, want zero", got)
+	}
+	peaks := []uint64{4, 1, 3, 2}
+	if got, want := peakDistribution(peaks), (PeakDistribution{Count: 4, P50: 2, P90: 4, P99: 4, Max: 4}); got != want {
+		t.Fatalf("distribution = %+v, want %+v", got, want)
+	}
+	if peaks[0] != 4 {
+		t.Fatal("the distribution sorted the caller's slice")
+	}
+}
