@@ -11,7 +11,10 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
 // GenerationScopedFloor is the shortest life a generation-scoped key may have.
@@ -68,6 +71,30 @@ func GenerationScopedTTL(
 		return GenerationScopedFloor, nil
 	}
 	return runtime, nil
+}
+
+// generationWriteTTL is the lifetime a write gives one Plan's generation-scoped
+// key: the same GenerationScopedTTL the load renews it to, so a write never
+// takes back what the load gave, and the key outlives the interval to the
+// Plan's next round whatever that interval is. The floor only for a writer
+// that says it has no compiled Plan; a writer that has one and did not pass
+// it is refused.
+func generationWriteTTL(
+	retention execution.GenerationRetention, plan execution.PlanIdentity, restartMargin, minimum, maximum time.Duration,
+) (time.Duration, error) {
+	if retention.Unknown {
+		return GenerationScopedFloor, nil
+	}
+	levels := retention.ByPlan[plan]
+	if len(levels) == 0 {
+		return 0, fmt.Errorf("state: generation-scoped write for Plan %s/%s/%s carries no retention",
+			plan.TenantID, plan.BusinessID, plan.StrategyID)
+	}
+	requirements := make([]LevelRequirement, len(levels))
+	for index, level := range levels {
+		requirements[index] = NewLevelRequirement(level, "", 0)
+	}
+	return GenerationScopedTTL(requirements, restartMargin, minimum, maximum)
 }
 
 // GenerationScopedRenewalThreshold is the remaining life below which a loaded

@@ -644,6 +644,17 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 	if err := request.Contract.Validate(); err != nil || len(request.Items) == 0 || len(request.Items) > store.options.MaxItemsPerCall {
 		return execution.GapGuardApplyResult{}, fmt.Errorf("state: invalid gap apply request")
 	}
+	// Every marker's lifetime before any is written: a request that does not
+	// say what one of its Plans needs is refused whole, not written in part.
+	lifetimes := make([]time.Duration, len(request.Items))
+	for index, mutation := range request.Items {
+		ttl, err := generationWriteTTL(request.Retention, mutation.Identity.Plan,
+			store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL)
+		if err != nil {
+			return execution.GapGuardApplyResult{}, fmt.Errorf("state: invalid gap apply request: %w", err)
+		}
+		lifetimes[index] = ttl
+	}
 	result := execution.GapGuardApplyResult{Items: make([]execution.GapGuardApplyItemResult, len(request.Items))}
 	for index, mutation := range request.Items {
 		item := execution.GapGuardApplyItemResult{Identity: mutation.Identity}
@@ -744,14 +755,12 @@ func (store *ExecutionStore) ApplyGap(ctx context.Context, request execution.Gap
 			result.Items[index] = item
 			continue
 		}
-		// Written at the floor, not at the Plan's own derived lifetime and not
-		// without one. The load that runs at the start of every Slot renews it
-		// to whatever this Plan actually needs, so the write only has to make
-		// sure the key is never born immortal - which is what a Plan whose last
-		// act was creating this key used to leave behind. Carrying the Plan's
-		// retention here as well would be a third copy of one fact for a value
-		// the next Slot overwrites anyway.
-		applied, applyErr := backend.CompareAndSet(ctx, key, raw, raw == nil, encoded, GenerationScopedFloor)
+		// Written for the Plan's own lifetime, the one the load renews it to.
+		// It used to be written at the floor on the reasoning that the next
+		// load renews it anyway, and that load comes a whole interval later:
+		// for a Plan whose interval is past a day, the marker this round wrote
+		// was gone before the round that had to read it, every round.
+		applied, applyErr := backend.CompareAndSet(ctx, key, raw, raw == nil, encoded, lifetimes[index])
 		if applyErr != nil {
 			item.Status, item.ReasonCode = execution.GapGuardRetryable, execution.ReasonCode(contract.ReasonStateWriteRetryable)
 		} else if !applied {

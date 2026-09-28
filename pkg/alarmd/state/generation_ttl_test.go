@@ -353,7 +353,7 @@ func TestAGenerationKeyIsNeverWrittenWithoutALifetime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := store.ApplyGap(context.Background(), execution.GapGuardApplyRequest{
+	result, err := store.ApplyGap(context.Background(), execution.GapGuardApplyRequest{Retention: execution.GenerationRetention{Unknown: true},
 		Contract: frozenRef(), Items: []execution.PlanGapMutation{mutation},
 	})
 	if err != nil {

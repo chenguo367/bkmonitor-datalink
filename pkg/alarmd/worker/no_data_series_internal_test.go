@@ -149,7 +149,7 @@ func TestANoDataRoundStoresWhatItRemembered(t *testing.T) {
 		t.Fatal("a round that judged the item absent stored nothing")
 	}
 	if err := stream.coordinator.applyNoDataMemory(context.Background(),
-		execution.SlotExecutionRequest{Contract: stream.header.Contract},
+		execution.SlotExecutionRequest{Contract: stream.header.Contract}, stream.header.DuePlans,
 		[]execution.PlanNoDataMutation{*round.mutation}); err != nil {
 		t.Fatal(err)
 	}

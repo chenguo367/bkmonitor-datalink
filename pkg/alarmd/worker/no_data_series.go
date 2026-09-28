@@ -360,13 +360,28 @@ func (stream *streamedExecution) noDataCompleteness(due execution.DuePlan) execu
 // round's, and the round after that stores again. Failing the Slot over it
 // would throw away evaluations that were already correct and already sent.
 func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
-	ctx context.Context, request execution.SlotExecutionRequest, mutations []execution.PlanNoDataMutation,
+	ctx context.Context, request execution.SlotExecutionRequest, duePlans []execution.DuePlan,
+	mutations []execution.PlanNoDataMutation,
 ) error {
 	if len(mutations) == 0 {
 		return nil
 	}
+	// What each memory lives for: its own Plan's retention, the one the load
+	// renews it to.
+	written := make([]execution.DuePlan, 0, len(mutations))
+	for _, mutation := range mutations {
+		due, ok := duePlan(duePlans, mutation.Identity.Plan)
+		if !ok {
+			return fmt.Errorf("alarmd worker: no-data memory for a Plan that is not due")
+		}
+		written = append(written, due)
+	}
+	retention, err := generationRetentionOf(written...)
+	if err != nil {
+		return err
+	}
 	result, err := coordinator.ports.NoData.ApplyNoData(ctx, execution.NoDataApplyRequest{
-		Contract: request.Contract, Items: mutations,
+		Contract: request.Contract, Items: mutations, Retention: retention,
 	})
 	if err != nil {
 		return fmt.Errorf("alarmd worker: store no-data memory: %w", err)

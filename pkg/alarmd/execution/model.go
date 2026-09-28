@@ -3323,6 +3323,31 @@ func (result SideEffectAdmissionResult) Validate() error {
 type GapGuardApplyRequest struct {
 	Contract FrozenExecutionContractRef
 	Items    []PlanGapMutation
+	// Retention is what the written markers live for; see GenerationRetention.
+	Retention GenerationRetention
+}
+
+// GenerationRetention is what a write of generation-scoped keys -- a Plan's
+// gap marker, its no-data memory -- lives for: each Plan's own state
+// retention, from which the store derives the key's lifetime by the formula
+// the load renews it by (state.GenerationScopedTTL).
+//
+// The write needs it as much as the load does. A key written at a fixed day
+// outlived the round that wrote it only when the Plan ran at least daily: a
+// Plan on a sixty-hour interval lost its marker and its memory before its
+// next round could load them, every round, and one on a daily interval lost
+// them whenever the next round ran late.
+type GenerationRetention struct {
+	// ByPlan is each item's Plan's own retention. Every item's Plan must be in
+	// it unless Unknown is set; a write that has neither is refused rather
+	// than written at a guess.
+	ByPlan map[PlanIdentity][]StateRetentionRequirement
+	// Unknown says the writer has no compiled Plan to read the retention from
+	// -- a round that ran no query writes an activated Plan's marker from its
+	// activation record alone -- and the key is written at the floor, as it
+	// was before this was carried. Said, rather than being what an empty map
+	// means, so a writer that forgot the retention is refused instead.
+	Unknown bool
 }
 
 type GapGuardApplyStatus string
