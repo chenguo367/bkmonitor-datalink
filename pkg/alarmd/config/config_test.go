@@ -644,3 +644,23 @@ func TestTheOutputProtocolIsOneOfThreeWords(t *testing.T) {
 		t.Fatalf("default protocol = %q, want auto", got)
 	}
 }
+
+// The compatibility topic carries the prefix the output requires when it
+// opens. Without it the configuration used to pass --check-config and the
+// replica never became ready; now it is refused at load, by name. A topic
+// with the prefix passes the same check.
+func TestTheCompatibilityTopicMustCarryThePrefixTheOutputRequires(t *testing.T) {
+	cfg := validGoAccessConfigObject()
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("fixture: %v", err)
+	}
+	if !strings.HasPrefix(cfg.Kafka.LegacyAdapter.Topic, LegacyTopicPrefix) {
+		t.Fatalf("fixture: topic %q, want one with the prefix", cfg.Kafka.LegacyAdapter.Topic)
+	}
+	cfg.Kafka.LegacyAdapter.Topic = "bkmonitor_backend_event"
+	cfg.Kafka.AllowedOutputTopics = append(cfg.Kafka.AllowedOutputTopics, cfg.Kafka.LegacyAdapter.Topic)
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "legacy_adapter.topic must start with") {
+		t.Fatalf("Validate() = %v, want the topic refused for its prefix", err)
+	}
+}

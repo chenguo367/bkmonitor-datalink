@@ -589,7 +589,8 @@ func CompilerTerminalDisposition(reasonCode string) (Disposition, bool) {
 		contract.ReasonNoDataPlanUncompilable,
 		strategy.ReasonEffectiveTimeInvalid, strategy.ReasonEffectiveTimeSnapshotInvalid,
 		strategy.ReasonEffectiveTimeSnapshotStatusInvalid, strategy.ReasonEffectiveTimeCalendarIdentity,
-		strategy.ReasonEffectiveTimeCalendarDuplicate, strategy.ReasonEffectiveTimeCalendarItemsMissing:
+		strategy.ReasonEffectiveTimeCalendarDuplicate, strategy.ReasonEffectiveTimeCalendarItemsMissing,
+		strategy.ReasonEffectiveTimeItemDuplicate, strategy.ReasonEffectiveTimeItemInvalid, strategy.ReasonEffectiveTimeItemTimeInvalid, strategy.ReasonEffectiveTimeTimeKindInvalid, strategy.ReasonEffectiveTimeTimezoneInvalid, strategy.ReasonEffectiveTimeRepeatInvalid, strategy.ReasonEffectiveTimeRepeatListInvalid, strategy.ReasonEffectiveTimeRepeatEveryInvalid, strategy.ReasonEffectiveTimeRepeatUntilInvalid:
 		return DispositionConfigRejected, true
 	case strategy.ReasonEffectiveTimeSnapshotUnavailable, strategy.ReasonEffectiveTimeCalendarsMissing,
 		strategy.ReasonEffectiveTimeCalendarNotPresent, strategy.ReasonEffectiveTimeCalendarMissing:

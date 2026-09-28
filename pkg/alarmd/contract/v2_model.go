@@ -78,6 +78,18 @@ const (
 	ReasonEffectiveTimeCalendarIdentity      = "EFFECTIVE_TIME_CALENDAR_IDENTITY_INVALID"
 	ReasonEffectiveTimeCalendarDuplicate     = "EFFECTIVE_TIME_CALENDAR_DUPLICATE"
 	ReasonEffectiveTimeCalendarItemsMissing  = "EFFECTIVE_TIME_CALENDAR_ITEMS_MISSING"
+	// The ITEM_, TIME_KIND_, TIMEZONE_ and REPEAT_ ones are a calendar item
+	// or the business timezone in the snapshot that does not parse: the
+	// snapshot arrived and is readable, and what it carries is wrong.
+	ReasonEffectiveTimeItemDuplicate      = "EFFECTIVE_TIME_ITEM_DUPLICATE"
+	ReasonEffectiveTimeItemInvalid        = "EFFECTIVE_TIME_ITEM_INVALID"
+	ReasonEffectiveTimeItemTimeInvalid    = "EFFECTIVE_TIME_ITEM_TIME_INVALID"
+	ReasonEffectiveTimeTimeKindInvalid    = "EFFECTIVE_TIME_TIME_KIND_INVALID"
+	ReasonEffectiveTimeTimezoneInvalid    = "EFFECTIVE_TIME_TIMEZONE_INVALID"
+	ReasonEffectiveTimeRepeatInvalid      = "EFFECTIVE_TIME_REPEAT_INVALID"
+	ReasonEffectiveTimeRepeatListInvalid  = "EFFECTIVE_TIME_REPEAT_LIST_INVALID"
+	ReasonEffectiveTimeRepeatEveryInvalid = "EFFECTIVE_TIME_REPEAT_EVERY_INVALID"
+	ReasonEffectiveTimeRepeatUntilInvalid = "EFFECTIVE_TIME_REPEAT_UNTIL_INVALID"
 	// ReasonCompilerTerminalUnclassified files a compiler terminal this build
 	// has no classification for. It is declared here so the tables that walk
 	// the catalogue can see it; the compiler's own code travels beside it.
