@@ -38,6 +38,9 @@ func TestResolvedEndpointsNameSharingAndCarryNoCredential(t *testing.T) {
 		Username: "alarmd", Password: "top-secret", SentinelPassword: "sentinel-secret", DB: 8}
 	cfg.Redis.StatePrefix = "alarmd:phase2:g2:runtime:v1"
 	cfg.Kafka.LegacyAdapter.SnapshotPrefix = "bk_monitorv3.ee.cache"
+	// Apart from the platform prefix, so the strategy row is seen to name
+	// the one its reader uses.
+	cfg.PhaseTwo.Control.StrategyCachePrefix = "bk_monitorv3.ee.strategy"
 	cfg.Kafka.Brokers = []string{"kafka-0:9092", "kafka-1:9092"}
 	cfg.Kafka.TriggerEvent.Topic = "0bkmonitor_backend_event"
 	cfg.PhaseTwo.Access.UQEndpoint = "http://unify-query:10205"
@@ -65,10 +68,10 @@ func TestResolvedEndpointsNameSharingAndCarryNoCredential(t *testing.T) {
 		t.Errorf("state redis = %+v", state)
 	}
 	strategy := byRole[fleet.EndpointStrategyCache]
-	if strategy.DB == nil || *strategy.DB != 0 || strategy.Prefix != "bk_monitorv3.ee.cache" || strategy.SharedWith != "" {
+	if strategy.DB == nil || *strategy.DB != 0 || strategy.Prefix != "bk_monitorv3.ee.strategy" || strategy.SharedWith != "" {
 		t.Errorf("strategy cache = %+v", strategy)
 	}
-	if cmdb := byRole[fleet.EndpointCMDBCache]; cmdb.SharedWith != fleet.EndpointStrategyCache {
+	if cmdb := byRole[fleet.EndpointCMDBCache]; cmdb.SharedWith != fleet.EndpointStrategyCache || cmdb.Prefix != "bk_monitorv3.ee.cache" {
 		t.Errorf("cmdb cache does not say it shares the strategy cache's connection: %+v", cmdb)
 	}
 	if dynamic := byRole[fleet.EndpointDynamicConfig]; dynamic.Configured || dynamic.Address != "" {

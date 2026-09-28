@@ -98,7 +98,10 @@ func redisEndpoint(role string, connection config.RedisConnectionConfig, prefix 
 func resolveEndpoints(cfg config.Config, sharing endpointSharing) []fleet.Endpoint {
 	endpoints := []fleet.Endpoint{
 		redisEndpoint(fleet.EndpointStateRedis, cfg.RuntimeStoreRedis(), cfg.Redis.StatePrefix),
-		redisEndpoint(fleet.EndpointStrategyCache, cfg.StrategySourceRedis(), cfg.PlatformKeyPrefix()),
+		// The prefix the strategy source reads under, which the chart renders
+		// on its own and which need not be the platform's key prefix: showing
+		// the platform's here named a key space the reader never looks at.
+		redisEndpoint(fleet.EndpointStrategyCache, cfg.StrategySourceRedis(), cfg.PhaseTwo.Control.StrategyCachePrefix),
 		redisEndpoint(fleet.EndpointCMDBCache, cfg.CMDBCacheRedis(), cfg.PlatformKeyPrefix()),
 	}
 	if sharing.runtimeIsSource {
