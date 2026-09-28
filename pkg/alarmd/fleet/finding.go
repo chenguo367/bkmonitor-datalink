@@ -708,11 +708,13 @@ var codeChecks = map[string]verdict{
 	// The snapshot did not arrive, or arrived without the calendar the
 	// strategy names. The definition is not wrong and this build is not
 	// lacking anything; a piece of the source is missing, and the strategy
-	// detects nothing until it comes.
-	"EFFECTIVE_TIME_SNAPSHOT_UNAVAILABLE": lands(CheckPlanUnevaluable),
-	"EFFECTIVE_TIME_CALENDARS_MISSING":    lands(CheckPlanUnevaluable),
-	"EFFECTIVE_TIME_CALENDAR_NOT_PRESENT": lands(CheckPlanUnevaluable),
-	"EFFECTIVE_TIME_CALENDAR_MISSING":     lands(CheckPlanUnevaluable),
+	// detects nothing until it comes -- the line the catalog files these
+	// four under (SOURCE_INCOMPLETE), so a strategy withheld for one and a
+	// Plan that met one at run time read the same and go to the same owner.
+	"EFFECTIVE_TIME_SNAPSHOT_UNAVAILABLE": lands(CheckSourceIncomplete),
+	"EFFECTIVE_TIME_CALENDARS_MISSING":    lands(CheckSourceIncomplete),
+	"EFFECTIVE_TIME_CALENDAR_NOT_PRESENT": lands(CheckSourceIncomplete),
+	"EFFECTIVE_TIME_CALENDAR_MISSING":     lands(CheckSourceIncomplete),
 	// A terminal this build's table has no entry for. It is one strategy's
 	// refusal like any other, and the compiler's own code travels in the
 	// disposition's detail so the next reader is not guessing.

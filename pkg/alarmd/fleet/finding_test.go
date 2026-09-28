@@ -532,3 +532,25 @@ func TestAGuardHeldRoundReadsAsTheWindowsNotAsItsTriggerWord(t *testing.T) {
 		t.Fatalf("defect under a guard: check %q reading %+v, want DEFECT with the defect's own reading", list[0].Finding.Check, list[0].Blocked)
 	}
 }
+
+// A code the catalog files as a missing piece of the source reads as one at
+// run time too: a strategy withheld for it and a Plan that met it after
+// admission land on the same line and go to the same owner. Every code of
+// the table is put to the catalog's own classification, so a code moved on
+// one side and not the other fails here.
+func TestACodeTheCatalogFilesAsSourceIncompleteLandsThereAtRunTime(t *testing.T) {
+	matched := 0
+	for code, verdict := range codeChecks {
+		disposition, known := controlplane.CompilerTerminalDisposition(code)
+		if !known || string(disposition) != dispositionSourceIncomplete {
+			continue
+		}
+		matched++
+		if verdict.check != sourceChecks[dispositionSourceIncomplete] {
+			t.Errorf("%s: the catalog files it %s, the fleet lands it on %s", code, disposition, verdict.check)
+		}
+	}
+	if matched == 0 {
+		t.Fatal("no code of the table is one the catalog files as SOURCE_INCOMPLETE")
+	}
+}
