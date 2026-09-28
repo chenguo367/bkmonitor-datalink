@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"path/filepath"
 	"strings"
 	"time"
@@ -152,6 +153,33 @@ func (a *App) saveEvidence(result map[string]any) (string, error) {
 		return "", errors.New("cannot save the complete redacted response")
 	}
 	return path, nil
+}
+
+// channelAnswer says a channel response is to be read as alarmd's. A
+// success has passed validateChannel already; a failure is alarmd's only
+// when it carries the channel's own meta, which the server writes on every
+// answer. Anything else was written by a proxy or gateway in front of it -
+// except a refused session, which goes to the session's own handling
+// whoever wrote it: logging in again is the answer either way.
+func channelAnswer(m map[string]any, status int) bool {
+	if status >= 200 && status < 300 || status == http.StatusUnauthorized {
+		return true
+	}
+	return stringField(objectField(m, "meta"), "channel_version") == channelVersion
+}
+
+// gatewayFailure reports a failure a proxy or gateway in front of alarmd
+// answered, by its HTTP status, and without its body: that body is someone
+// else's page - help links, request ids, markup - and printed as the result
+// it read as alarmd's answer, with no error code a script could branch on.
+func (a *App) gatewayFailure(status int) int {
+	message := fmt.Sprintf("HTTP %d came from a proxy or gateway in front of alarmd, not from alarmd; the call may not have reached it. "+
+		"Retry; if it persists, check the environment's entry and the gateway in front of it.", status)
+	a.print(map[string]any{"status": "error", "summary": message,
+		"error":    map[string]any{"code": "gateway_error", "message": message, "http_status": status},
+		"evidence": map[string]any{"complete": false, "limitations": []string{message}},
+		"meta":     map[string]any{"http_status": status}, "next_call": []any{}})
+	return 1
 }
 
 func protocolError(err error) error {
