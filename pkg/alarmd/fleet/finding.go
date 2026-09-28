@@ -60,10 +60,16 @@ const (
 	// fields the contract requires is the writer's to fix, and the strategy
 	// it describes is not being detected until it is.
 	OwnerPlatform Owner = "PLATFORM"
+	// OwnerCapability: this build does not run it, by a capability it
+	// declares it does not have -- a query source, an algorithm, a target
+	// form, FTA. Nothing in the deployment or the strategy changes that; a
+	// build that has the capability does. Not an action item: waiting for
+	// the build is the whole of what anyone can do.
+	OwnerCapability Owner = "CAPABILITY"
 )
 
 // Owners lists every owner, for the page's completeness check.
-var Owners = []Owner{OwnerAlarmd, OwnerData, OwnerStrategy, OwnerNobody, OwnerUndetermined, OwnerPlatform}
+var Owners = []Owner{OwnerAlarmd, OwnerData, OwnerStrategy, OwnerNobody, OwnerUndetermined, OwnerPlatform, OwnerCapability}
 
 // Finding is what the page renders for one object.
 type Finding struct {

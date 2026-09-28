@@ -178,9 +178,12 @@ type wordPair struct {
 // to one pair. Held to checkOrder by a test, so a check added without a pair
 // is red before it ships rather than folded at runtime.
 var checkWords = map[Check]wordPair{
-	CheckSourceIncomplete:      {StateNotDetecting, ActionCacheWriterFill},
-	CheckSourceSetFlapping:     {StateNotDetecting, ActionCacheWriterFill},
-	CheckCapabilityUnsupported: {StateNotDetecting, ActionServiceFix},
+	CheckSourceIncomplete:  {StateNotDetecting, ActionCacheWriterFill},
+	CheckSourceSetFlapping: {StateNotDetecting, ActionCacheWriterFill},
+	// Not detecting, and nobody's to act on: the build that has the
+	// capability is the whole of the remedy.
+	CheckCapabilityUnsupported: {StateNotDetecting, ActionNone},
+	CheckCapabilityUnlisted:    {StateNotDetecting, ActionServiceFix},
 	CheckConfigRejected:        {StateNotDetecting, ActionStrategyEdit},
 	// Detecting, because the Plan runs. The action here is the line's when a
 	// reason asks for an edit; a line whose reasons ask nothing is nobody's

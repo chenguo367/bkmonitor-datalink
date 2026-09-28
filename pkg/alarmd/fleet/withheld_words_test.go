@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -139,28 +140,40 @@ func TestTheCapabilityLineNamesTheKindsUnderItAndNotOneCauseForAll(t *testing.T)
 		{StrategyID: "601", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "NEW_WORD_NOBODY_EXPLAINED"},
 	})
 	view := View{Source: facts, SourceReplica: "pod-a"}
-	var line *CheckReport
+	lines := map[Check]*CheckReport{}
 	for _, report := range ReportChecks(nil, nil, &view, now) {
-		if report.Code == CheckCapabilityUnsupported {
-			copied := report
-			line = &copied
+		copied := report
+		lines[report.Code] = &copied
+	}
+	// The declared capability is the capability owner's line; the two
+	// reasons the build does not declare -- a guardrail on the strategy's
+	// cadence and a word nobody explained -- stay this deployment's.
+	declared, unlisted := lines[CheckCapabilityUnsupported], lines[CheckCapabilityUnlisted]
+	if declared == nil || unlisted == nil {
+		t.Fatalf("lines = %v, want the declared capability line and the unlisted one", lines)
+	}
+	if declared.Owner != OwnerCapability || declared.Strategies != 5 || len(declared.Groups) != 1 {
+		t.Fatalf("declared line = %+v, want the capability owner's 5 strategies in 1 group", declared)
+	}
+	if unlisted.Owner != OwnerAlarmd || unlisted.Strategies != 2 || len(unlisted.Groups) != 2 {
+		t.Fatalf("unlisted line = %+v, want this deployment's 2 strategies in 2 groups", unlisted)
+	}
+	if want := "5 条策略这个部署跑不了（1 种原因）——本构建不支持 5 条；处理办法按原因组看"; declared.Line != want {
+		t.Errorf("declared line = %q\nwant %q", declared.Line, want)
+	}
+	if want := "2 条策略这个部署跑不了（2 种原因）——策略定义超出护栏 1 条、原因待查 1 条；处理办法按原因组看"; unlisted.Line != want {
+		t.Errorf("unlisted line = %q\nwant %q", unlisted.Line, want)
+	}
+	for _, line := range []*CheckReport{declared, unlisted} {
+		if strings.Contains(line.Line, "快照保留期") {
+			t.Errorf("the line still states a cause for every reason: %q", line.Line)
 		}
 	}
-	if line == nil {
-		t.Fatal("no capability line")
-	}
-	if line.Strategies != 7 || len(line.Groups) != 3 {
-		t.Fatalf("line = %+v, want 7 strategies in 3 groups", line)
-	}
-	if want := "7 条策略这个部署跑不了（3 种原因）——本构建不支持 5 条、策略定义超出护栏 1 条、原因待查 1 条；处理办法按原因组看"; line.Line != want {
-		t.Errorf("line = %q\nwant %q", line.Line, want)
-	}
-	if strings.Contains(line.Line, "快照保留期") {
-		t.Errorf("the line still states a cause for every reason: %q", line.Line)
-	}
 	words := map[string]*WithheldReasonWords{}
-	for _, group := range line.Groups {
-		words[group.Key] = group.Words
+	for _, line := range []*CheckReport{declared, unlisted} {
+		for _, group := range line.Groups {
+			words[group.Key] = group.Words
+		}
 	}
 	if algorithm := words["ALGORITHM_NOT_MIGRATED"]; algorithm == nil || algorithm.Kind != WithheldBuildCapability ||
 		!strings.Contains(algorithm.Next, "改部署参数没有用") {
@@ -288,4 +301,55 @@ func capabilityDispositionReasons(t *testing.T) []string {
 		})
 	}
 	return reasons
+}
+
+// The declared capabilities are a closed list of reasons the page can explain:
+// a typo on it would leave the real word on this deployment's line without a
+// sign, and a word it cannot explain would send the reader nowhere. The one
+// defect filed under the capability disposition is not on it, and the words
+// the diagnosis attaches follow the list: the capability owner's for a
+// declared reason, this deployment's for any other.
+func TestTheDeclaredCapabilitiesAreNamedReasonsAndOnlyThose(t *testing.T) {
+	for _, reason := range DeclaredCapabilities {
+		words, known := withheldReasonWords[reason]
+		if !known || words.Kind == WithheldUnknownReason {
+			t.Errorf("declared capability %q has no words of its own", reason)
+		}
+	}
+	if slices.Contains(DeclaredCapabilities, "EVALUATION_STEP_INCONSISTENT") {
+		t.Error("a build defect is declared as a capability")
+	}
+	// FTA is not a capability still to come: the ruling is that it is not
+	// supported, and the strategy owner moves the strategy to another data
+	// source. Neither the build nor this deployment is who acts on it.
+	owners := map[string]Owner{"capability": OwnerCapability, "alarmd": OwnerAlarmd, "strategy": OwnerStrategy}
+	for reason, want := range map[string]string{
+		"ALGORITHM_NOT_MIGRATED": "capability", "QUERY_SOURCE_NOT_MIGRATED": "capability",
+		"QUERY_FTA_UNSUPPORTED":        "strategy",
+		"EVALUATION_STEP_INCONSISTENT": "alarmd", "SNAPSHOT_RETENTION_INSUFFICIENT": "alarmd", "SOMETHING_NEW": "alarmd",
+	} {
+		if got := withheldAttribution("UNSUPPORTED_PHASE2_CAPABILITY", reason); got != want {
+			t.Errorf("%s is attributed to %q, want %q", reason, got, want)
+		}
+		check, _ := sourceCheckOf("UNSUPPORTED_PHASE2_CAPABILITY", reason)
+		if owner := checkAnswers[check].Owner; owner != owners[want] {
+			t.Errorf("%s is filed under %s owned by %s, want %s", reason, check, owner, owners[want])
+		}
+	}
+	if slices.Contains(DeclaredCapabilities, "QUERY_FTA_UNSUPPORTED") {
+		t.Error("FTA is declared as a capability a build will bring")
+	}
+	// On the strategy's line it keeps its own words, which send the strategy
+	// owner to another data source.
+	fta := View{Source: NewSourceFacts(now, map[string]int{"UNSUPPORTED_PHASE2_CAPABILITY": 22, "ACCEPTED": 40}, []WithheldObject{
+		{StrategyID: "900", Scope: "PLAN", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "QUERY_FTA_UNSUPPORTED"}}), SourceReplica: "pod-a"}
+	for _, report := range ReportChecks(nil, nil, &fta, now) {
+		if report.Code != CheckConfigRejected || report.Owner != OwnerStrategy || len(report.Groups) != 1 ||
+			report.Groups[0].Words == nil || !strings.Contains(report.Groups[0].Words.Next, "其它数据源") {
+			t.Errorf("FTA line = %+v, want the strategy's line carrying FTA's own words", report)
+		}
+	}
+	if check, _ := sourceCheckOf("CONFIG_REJECTED", "QUERY_SOURCE_NOT_MIGRATED"); check != CheckConfigRejected {
+		t.Errorf("a declared word under another disposition moved it to %s", check)
+	}
 }

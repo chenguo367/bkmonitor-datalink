@@ -11,6 +11,7 @@ package fleet
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"time"
 )
@@ -120,7 +121,13 @@ const (
 	// no line for it anywhere and read HEALTHY with nothing to do.
 	CheckSourceIncomplete      Check = "SOURCE_INCOMPLETE"
 	CheckCapabilityUnsupported Check = "CAPABILITY_UNSUPPORTED"
-	CheckConfigRejected        Check = "CONFIG_REJECTED"
+	// A strategy withheld as beyond this build's capability for a reason the
+	// build has not declared as a capability (DeclaredCapabilities): a word
+	// nobody listed, or a defect filed under the capability disposition. It
+	// stays this deployment's until someone names it, rather than going to
+	// the owner nobody acts for on the strength of the disposition alone.
+	CheckCapabilityUnlisted Check = "CAPABILITY_UNLISTED"
+	CheckConfigRejected     Check = "CONFIG_REJECTED"
 	// A strategy the source accepted with part of its configuration read as
 	// something other than what was written -- a time range that does not
 	// parse, read as the whole day the way the platform's own reader reads
@@ -148,6 +155,57 @@ var sourceChecks = map[string]Check{
 	dispositionConfigRejected:        CheckConfigRejected,
 	dispositionStaleConfig:           CheckConfigRejected,
 	dispositionConfigNormalized:      CheckConfigNormalized,
+}
+
+// DeclaredCapabilities is the closed list of reasons this build declares as
+// capabilities it does not have: a strategy withheld for one of them is the
+// capability owner's, and waits for a build. Only these. The capability
+// disposition carries other reasons too -- a deployment parameter, a writer
+// ahead of the reader, a definition past a guardrail, and one defect
+// (EVALUATION_STEP_INCONSISTENT) -- and any reason not named here, a word
+// added tomorrow included, stays this deployment's (CheckCapabilityUnlisted)
+// until it is named, because a line nobody acts on is the wrong default for
+// a reason nobody has read.
+var DeclaredCapabilities = []string{
+	// Query sources and query features not yet carried over.
+	"QUERY_SOURCE_NOT_MIGRATED", "QUERY_MIXED_PROMQL_NOT_MIGRATED", "QUERY_CMDB_LEVEL_BYPASSES_UQ",
+	"QUERY_BK_DATA_LOCAL_TIME_NOT_MIGRATED", "QUERY_FUNCTION_NOT_MIGRATED", "EXPRESSION_FUNCTION_NOT_MIGRATED",
+	// Detection algorithms (the AIOps ones among them) not carried over.
+	"ALGORITHM_NOT_MIGRATED", "ALGORITHM_UNSUPPORTED",
+	// The legacy target forms, and more than one item.
+	"UNSUPPORTED_TARGET_SCOPE", "UNSUPPORTED_TARGET_SCOPE_UNRESOLVABLE", "UNSUPPORTED_TARGET_VALUE_SHAPE",
+	"UNSUPPORTED_MULTI_ITEM_STRATEGY",
+	// A global business strategy in a form this build cannot run as one.
+	"GLOBAL_STRATEGY_UNSUPPORTED",
+	// An effective-time snapshot schema newer than this build reads.
+	"EFFECTIVE_TIME_SCHEMA_UNSUPPORTED",
+}
+
+// strategyOwnedCapabilityReasons are reasons filed under the capability
+// disposition that no build will ever lift, where the strategy is the one
+// thing that can change: FTA event sources are not supported, by ruling, and
+// the strategy owner moves the strategy to another data source. Filed as a
+// capability they would promise a build that is not coming; filed as this
+// deployment's, a fix it will not make.
+var strategyOwnedCapabilityReasons = []string{"QUERY_FTA_UNSUPPORTED"}
+
+// sourceCheckOf is the line a withheld disposition and its reason are filed
+// under: the disposition's own, except that the capability disposition goes
+// to the capability owner only for a reason it declares, to the strategy's
+// line for a reason only the strategy can answer, and otherwise stays this
+// deployment's.
+func sourceCheckOf(disposition, reason string) (Check, bool) {
+	check, known := sourceChecks[disposition]
+	if !known || check != CheckCapabilityUnsupported {
+		return check, known
+	}
+	switch {
+	case slices.Contains(DeclaredCapabilities, reason):
+		return CheckCapabilityUnsupported, true
+	case slices.Contains(strategyOwnedCapabilityReasons, reason):
+		return CheckConfigRejected, true
+	}
+	return CheckCapabilityUnlisted, true
 }
 
 // GroupBy is the key a check's objects are folded on. One backend not
@@ -196,7 +254,8 @@ var checkAnswers = map[Check]struct {
 }{
 	CheckSourceIncomplete:      {OwnerPlatform, GroupByReasonCode},
 	CheckSourceSetFlapping:     {OwnerPlatform, GroupByHour},
-	CheckCapabilityUnsupported: {OwnerAlarmd, GroupByReasonCode},
+	CheckCapabilityUnsupported: {OwnerCapability, GroupByReasonCode},
+	CheckCapabilityUnlisted:    {OwnerAlarmd, GroupByReasonCode},
 	CheckConfigRejected:        {OwnerStrategy, GroupByReasonCode},
 	CheckConfigNormalized:      {OwnerStrategy, GroupByReasonCode},
 	CheckCutoverFailing:        {OwnerAlarmd, GroupByReasonCode},
@@ -251,6 +310,7 @@ var checkOrder = []Check{
 	CheckSourceIncomplete,
 	CheckSourceSetFlapping,
 	CheckCapabilityUnsupported,
+	CheckCapabilityUnlisted,
 	CheckCutoverFailing,
 	CheckReplicaDegraded,
 	CheckOwnershipSkewed,
@@ -299,7 +359,8 @@ func (check Check) Standing() bool {
 // samples; nothing under it can be listed as an object, because none of
 // these ever became one.
 func (check Check) SourceStanding() bool {
-	return check == CheckSourceIncomplete || check == CheckCapabilityUnsupported || check == CheckConfigRejected ||
+	return check == CheckSourceIncomplete || check == CheckCapabilityUnsupported || check == CheckCapabilityUnlisted ||
+		check == CheckConfigRejected ||
 		check == CheckSourceSetFlapping || check == CheckConfigNormalized
 }
 
@@ -1144,7 +1205,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 		// twice here, as it does in the control plane's own gauge.
 		if view.Source != nil {
 			for _, withheld := range view.Source.Withheld {
-				check, known := sourceChecks[withheld.Disposition]
+				check, known := sourceCheckOf(withheld.Disposition, withheld.Reason)
 				if !known || withheld.Count == 0 {
 					continue
 				}
@@ -1160,8 +1221,12 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 				}
 				group := &CheckGroup{Key: key, Strategies: withheld.Count, Replicas: []string{view.SourceReplica},
 					Disposition: withheld.Disposition, Samples: withheld.Samples}
-				if check == CheckCapabilityUnsupported || check == CheckConfigNormalized {
+				if check == CheckCapabilityUnsupported || check == CheckCapabilityUnlisted || check == CheckConfigNormalized {
 					words := WithheldWordsOf(withheld.Reason)
+					group.Words = &words
+				} else if words, known := withheldReasonWords[withheld.Reason]; known {
+					// A reason moved onto another line keeps the words the
+					// table has for it.
 					group.Words = &words
 				}
 				entry.groups[key] = group
@@ -1243,7 +1308,7 @@ func ReportChecks(columns [][]Anomaly, truncated map[string]bool, view *View, no
 			}
 			return report.Groups[i].Key < report.Groups[j].Key
 		})
-		if check == CheckCapabilityUnsupported {
+		if check == CheckCapabilityUnsupported || check == CheckCapabilityUnlisted {
 			report.Line = capabilityLine(report.Strategies, report.Groups)
 		}
 		if check == CheckConfigNormalized {
