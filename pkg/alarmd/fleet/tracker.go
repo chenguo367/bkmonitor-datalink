@@ -1555,6 +1555,21 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.blockedRuns++
 		state.currentKind = KindBlockedRun
 		state.reasonCode = runOutcome
+		// The words the Slot source or the view refused the round with. A
+		// round that never ran has no slot_completed to carry them, so the
+		// row said source_error for a Query Group failing the same retention
+		// check about once a second, the sentence only on a pod log that a
+		// busy replica rotates in minutes. Stamped with the reason's own
+		// time, so the reading takes them as this round's. The Slot is not
+		// known here; Attempts counts the same words in a row instead.
+		if observation.Err != nil {
+			text := boundedErrorText(observability.SanitizeErrorText(observation.Err.Error()))
+			attempts := 1
+			if state.lastError != nil && state.lastError.EvaluationTime == 0 && state.lastError.Text == text {
+				attempts = state.lastError.Attempts + 1
+			}
+			state.lastError = &LastError{Text: text, Type: fmt.Sprintf("%T", observation.Err), At: at, Attempts: attempts}
+		}
 		// A round that never reached the window is not a window declining to
 		// decide. It is a round that did not happen.
 		state.sawSomethingWrong = true

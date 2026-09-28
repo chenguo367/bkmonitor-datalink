@@ -571,3 +571,49 @@ func TestAFailureOnThePreviousSlotIsNotLentToTheNextRound(t *testing.T) {
 		t.Fatalf("blocked = %+v, want the previous Slot's Redis failure not lent to this round", rows[0].Blocked)
 	}
 }
+
+// A round the Slot source or the view refused never completes, so its words
+// arrive only on the run's own outcome. They reach the row and its reading as
+// this round's, counted while they repeat; a later refusal that brings no
+// words does not borrow the earlier ones as its own.
+func TestARefusedRoundKeepsTheWordsItWasRefusedWith(t *testing.T) {
+	now := time.Date(2026, 9, 28, 5, 20, 0, 0, time.UTC)
+	tracker := NewTracker(nil, "pod-a", func() time.Time { return now })
+	refused := errors.New("alarmd scheduler: Snapshot retention cannot cover recovery contract")
+	refuse := func(err error) {
+		now = now.Add(time.Second)
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageRunnerReturned,
+			Result: observability.ResultTerminal, RunOutcome: "source_error", Err: err,
+			Trace: observability.TraceFields{QueryGroupKey: "qg"},
+		})
+	}
+	for round := 0; round < DefaultBlockedRounds+1; round++ {
+		refuse(refused)
+	}
+	rows := tracker.Anomalies()
+	if len(rows) != 1 || rows[0].LastError == nil || rows[0].LastError.Text != refused.Error() ||
+		rows[0].LastError.Attempts != DefaultBlockedRounds+1 {
+		t.Fatalf("rows = %+v, want the refusal's words, %d in a row", rows, DefaultBlockedRounds+1)
+	}
+	if blocked := blockedOf(rows[0], ScheduleOnTime); blocked == nil || blocked.Text != refused.Error() {
+		t.Fatalf("blocked = %+v, want the refusal read as this round's", blocked)
+	}
+
+	// Other words start their own count.
+	other := errors.New("alarmd scheduler: frozen schedule segment is unreadable")
+	refuse(other)
+	rows = tracker.Anomalies()
+	if len(rows) != 1 || rows[0].LastError == nil || rows[0].LastError.Text != other.Error() || rows[0].LastError.Attempts != 1 {
+		t.Fatalf("rows = %+v, want the new words counted from one", rows)
+	}
+
+	refuse(nil)
+	rows = tracker.Anomalies()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if blocked := blockedOf(rows[0], ScheduleOnTime); blocked == nil || blocked.Text != "" {
+		t.Fatalf("blocked = %+v, want a round without words read without the earlier ones", blocked)
+	}
+}

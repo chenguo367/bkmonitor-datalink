@@ -634,6 +634,11 @@ func (runner *Runner) RunOneAdmitted(
 
 func (runner *Runner) runOne(ctx context.Context, admission ExecutionAdmission) (result execution.SlotExecutionResult, attempted bool, err error) {
 	outcome := "other_error"
+	// refusal is what the Slot source or the view said when it refused the
+	// round. The outcome names only which of them; the sentence travels
+	// beside it, because no later observation of a round that never ran
+	// carries it.
+	var refusal error
 	returned := false
 	defer func() {
 		if !returned {
@@ -646,7 +651,7 @@ func (runner *Runner) runOne(ctx context.Context, admission ExecutionAdmission) 
 			defer func() { _ = recover() }()
 			runner.flights.observer.Observe(ctx, observability.Observation{
 				Component: observability.ComponentScheduler, Stage: observability.StageRunnerReturned,
-				Result: observability.ResultTerminal, RunOutcome: outcome, Attempted: attempted,
+				Result: observability.ResultTerminal, RunOutcome: outcome, Attempted: attempted, Err: refusal,
 				// Carry the object this round belongs to. Observers that only
 				// merge context fields would otherwise see an anonymous round:
 				// the scheduler path only injects the key into the context for
@@ -655,7 +660,7 @@ func (runner *Runner) runOne(ctx context.Context, admission ExecutionAdmission) 
 			})
 		}()
 	}()
-	result, attempted, err = runner.runOneTracked(ctx, admission, &outcome)
+	result, attempted, err = runner.runOneTracked(ctx, admission, &outcome, &refusal)
 	returned = true
 	return
 }
@@ -664,6 +669,7 @@ func (runner *Runner) runOneTracked(
 	ctx context.Context,
 	admission ExecutionAdmission,
 	outcome *string,
+	refusal *error,
 ) (flowResult execution.SlotExecutionResult, flowAttempted bool, flowErr error) {
 	decision := "preflight"
 	defer func() {
@@ -746,9 +752,10 @@ func (runner *Runner) runOneTracked(
 	sourceFacts = facts
 	if err != nil {
 		if isViewNotExecutable(err) {
-			decision = "view_not_executable"
+			decision, *refusal = "view_not_executable", err
 			return runner.refuseViewNotExecutable(), true, nil
 		}
+		*refusal = err
 		var retry *SourceRetryError
 		var blocked *SourceBlockedError
 		if errors.As(err, &retry) || errors.As(err, &blocked) {
@@ -840,7 +847,7 @@ func (runner *Runner) runOneTracked(
 		// The Slot stays due, with its deadline held, for when the view and
 		// the records agree again.
 		if isViewNotExecutable(err) {
-			decision = "view_not_executable"
+			decision, *refusal = "view_not_executable", err
 			return runner.refuseViewNotExecutable(), true, nil
 		}
 		var deferred interface{ ReadinessReadyAt() time.Time }
