@@ -34,6 +34,23 @@ const (
 	topoCacheSuffix            = "cache.cmdb.topo"
 	hostTopoRefreshedField     = "cache.cmdb_last_refresh_all_time.host_topo"
 	scanBatch                  = int64(1000)
+	// clusterBusinessCacheSuffix is the BCS cluster -> business hash the
+	// platform's CMDB cache writer publishes beside the host hash, in the
+	// same round: field the cluster id, value the business id in decimal.
+	clusterBusinessCacheSuffix = "cache.cmdb.bcs_cluster_business"
+	// MaxClusterBusinesses bounds the clusters one load keeps. A tenant has
+	// clusters by the hundreds, a large one by the thousands; a hash past
+	// this is not a cluster list, and loading it whole would put an
+	// unbounded writer mistake into every replica's memory. Clusters past
+	// the bound are counted as truncated and attribute as unmapped.
+	MaxClusterBusinesses = 1 << 16
+	// namespaceBusinessCacheSuffix is the BCS cluster + namespace ->
+	// business hash published beside it: field "cluster|namespace", value
+	// the business id in decimal.
+	namespaceBusinessCacheSuffix = "cache.cmdb.bcs_namespace_business"
+	// MaxNamespaceBusinesses bounds the namespaces one load keeps, on the
+	// same reasoning as MaxClusterBusinesses at a namespace's scale.
+	MaxNamespaceBusinesses = 1 << 18
 )
 
 // HostFacts is what enrichment knows about one host.
@@ -103,6 +120,88 @@ type Index struct {
 	modelledHosts     int
 	builtAt           time.Time
 	sourceRefreshedAt time.Time
+	// clusterBusiness is the business of each BCS cluster the writer
+	// published, by cluster id: how a global business Plan's event on
+	// Kubernetes data that names no business finds the one it belongs to.
+	// Read in the same load as the hosts, and optional to it: a mapping
+	// that cannot be read does not stop the hosts from refreshing.
+	clusterBusiness businessMapping
+	// namespaceBusiness is the business of each namespace of a cluster, by
+	// "cluster|namespace", consulted before the cluster's own business: a
+	// namespace of a cluster shared across businesses belongs to the
+	// business using it. Optional in the same way.
+	namespaceBusiness businessMapping
+}
+
+// MappingStats describes one published business mapping the index read:
+// the entries held, the fields left out as not a positive business or past
+// the bound, and whether the latest load could not read it (the entries are
+// then an earlier load's).
+type MappingStats struct {
+	Held       int
+	Refused    int
+	Truncated  int
+	ReadFailed bool
+}
+
+func (mapping businessMapping) stats() MappingStats {
+	return MappingStats{Held: len(mapping.entries), Refused: mapping.refused, Truncated: mapping.truncated, ReadFailed: mapping.readFailed}
+}
+
+// businessMapping is one published "key -> business" hash read into the
+// index: the entries held, and the fields the load left out - refused for a
+// business that is not a positive integer or an empty key, truncated past
+// the bound.
+//
+// readFailed says this load could not read the hash at all. The mapping is
+// optional beside the hosts it is published with, so a read that fails -
+// a hash the writer wrote as another type, one scan that timed out - must
+// not hold back the host index every strategy filters on. The load goes on
+// without it and says so; the store then carries the entries of the index
+// it replaces, so one failed read does not turn every mapped event into an
+// unmapped one, and the flag stays up until a read succeeds.
+type businessMapping struct {
+	entries    map[string]string
+	refused    int
+	truncated  int
+	readFailed bool
+}
+
+// add records one page of field, value pairs, up to bound entries.
+func (mapping *businessMapping) add(fields []string, bound int) {
+	if mapping.entries == nil {
+		mapping.entries = make(map[string]string)
+	}
+	for index := 0; index+1 < len(fields); index += 2 {
+		key := strings.TrimSpace(fields[index])
+		if key == "" {
+			mapping.refused++
+			continue
+		}
+		if _, seen := mapping.entries[key]; seen {
+			continue
+		}
+		business, err := strconv.ParseInt(strings.TrimSpace(fields[index+1]), 10, 64)
+		if err != nil || business <= 0 {
+			mapping.refused++
+			continue
+		}
+		if len(mapping.entries) >= bound {
+			mapping.truncated++
+			continue
+		}
+		mapping.entries[key] = strconv.FormatInt(business, 10)
+	}
+}
+
+// carriedFrom is this mapping, or, when this load could not read it, the
+// entries of the previous one with the failure still flagged.
+func (mapping businessMapping) carriedFrom(previous businessMapping) businessMapping {
+	if !mapping.readFailed {
+		return mapping
+	}
+	previous.readFailed = true
+	return previous
 }
 
 // LookupModelInstance finds the host carrying the canonical (model,
@@ -210,6 +309,52 @@ func (index *Index) Lookup(key string) (*HostFacts, bool) {
 	return facts, found
 }
 
+// LookupClusterBusiness is the business the writer published for one BCS
+// cluster, and false for a cluster it did not publish.
+func (index *Index) LookupClusterBusiness(clusterID string) (string, bool) {
+	if index == nil || clusterID == "" {
+		return "", false
+	}
+	business, found := index.clusterBusiness.entries[clusterID]
+	return business, found
+}
+
+// LookupNamespaceBusiness is the business the writer published for one
+// namespace of one BCS cluster, and false for a pair it did not publish.
+func (index *Index) LookupNamespaceBusiness(clusterID, namespace string) (string, bool) {
+	if index == nil || clusterID == "" || namespace == "" {
+		return "", false
+	}
+	business, found := index.namespaceBusiness.entries[clusterID+"|"+namespace]
+	return business, found
+}
+
+// ClusterBusinessStats describes the cluster mapping the index holds.
+func (index *Index) ClusterBusinessStats() MappingStats {
+	if index == nil {
+		return MappingStats{}
+	}
+	return index.clusterBusiness.stats()
+}
+
+// NamespaceBusinessStats describes the namespace mapping the index holds.
+func (index *Index) NamespaceBusinessStats() MappingStats {
+	if index == nil {
+		return MappingStats{}
+	}
+	return index.namespaceBusiness.stats()
+}
+
+// carryOptional takes over, from the index this one replaces, the optional
+// mappings this load could not read.
+func (index *Index) carryOptional(previous *Index) {
+	if index == nil || previous == nil {
+		return
+	}
+	index.clusterBusiness = index.clusterBusiness.carriedFrom(previous.clusterBusiness)
+	index.namespaceBusiness = index.namespaceBusiness.carriedFrom(previous.namespaceBusiness)
+}
+
 // LookupServiceInstance resolves one service-instance id.
 func (index *Index) LookupServiceInstance(id string) (*ServiceInstanceFacts, bool) {
 	if index == nil || id == "" {
@@ -255,6 +400,14 @@ func (reader *Reader) topoKey() string {
 	return reader.prefix + "." + topoCacheSuffix
 }
 
+func (reader *Reader) clusterBusinessKey() string {
+	return reader.prefix + "." + clusterBusinessCacheSuffix
+}
+
+func (reader *Reader) namespaceBusinessKey() string {
+	return reader.prefix + "." + namespaceBusinessCacheSuffix
+}
+
 // Load builds a fresh index. It streams the hash rather than reading it whole:
 // the host cache is a single large hash shared with the platform, and a
 // blocking full read of it would stall every other reader.
@@ -280,12 +433,32 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 		return nil, fmt.Errorf("alarmd cmdbcache: read topology cache: %w", err)
 	}
 	builder.addTopologyNodes(nodes)
+	// The cluster mapping is a small hash the same writer publishes in the
+	// same round as the hosts, read into the same snapshot so a host and a
+	// cluster are never attributed from two refreshes. An absent hash is a
+	// writer that does not publish it yet: no cluster is mapped, and every
+	// event that would have used one is counted as unmapped. A hash that
+	// cannot be read is not a failed load (see businessMapping).
+	builder.index.clusterBusiness = reader.readMapping(ctx, reader.clusterBusinessKey(), MaxClusterBusinesses)
+	builder.index.namespaceBusiness = reader.readMapping(ctx, reader.namespaceBusinessKey(), MaxNamespaceBusinesses)
 	index := builder.index
 
 	if refreshed, err := reader.client.Get(ctx, reader.refreshedKey()).Result(); err == nil {
 		index.sourceRefreshedAt = parseRefreshedAt(refreshed)
 	}
 	return index, nil
+}
+
+// readMapping reads one optional "key -> business" hash. A read that fails
+// part way is dropped whole: half a mapping would map some clusters from
+// this round and leave the rest unmapped, which reads like a writer that
+// left them out.
+func (reader *Reader) readMapping(ctx context.Context, key string, bound int) businessMapping {
+	var mapping businessMapping
+	if err := reader.scan(ctx, key, func(fields []string) { mapping.add(fields, bound) }); err != nil {
+		return businessMapping{readFailed: true}
+	}
+	return mapping
 }
 
 // scan streams one hash through consume, a page at a time.

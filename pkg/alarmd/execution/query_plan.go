@@ -171,6 +171,13 @@ type QueryPlanFacts struct {
 	// matcher is a cutover of that group and nothing else. A pointer so that
 	// the facts of an unsplit Plan serialize exactly as they did.
 	Shard *ShardRef `json:"Shard,omitempty"`
+	// GlobalBusiness says the query reads every business of its tenant: the
+	// provider is asked to skip the space rather than scope the query to
+	// SpaceScope, which stays the strategy's own space and is not sent. It
+	// changes what the query returns, so it is part of the revision and of
+	// the Query Group's identity. Omitted when false, so every other Plan's
+	// facts serialize exactly as they did.
+	GlobalBusiness bool `json:"GlobalBusiness,omitempty"`
 }
 
 func BuildQueryPlanFacts(facts QueryPlanFacts) (QueryPlanFacts, error) {

@@ -124,6 +124,9 @@ type StrategyQueryConfig struct {
 	// PromQL says an expression is frozen, and how long it is; never the
 	// expression.
 	PromQL *StrategyPromQLConfig `json:"promql,omitempty"`
+	// GlobalBusiness says the query skips the space and reads every business
+	// of the tenant; SpaceScope is then the strategy's own space, not sent.
+	GlobalBusiness bool `json:"global_business,omitempty"`
 }
 
 // StrategyQueryClause is one query of the Plan: table, metric, dimensions,
@@ -218,6 +221,9 @@ type StrategyTargetPlanConfig struct {
 	StaticMembers      int      `json:"static_members"`
 	DynamicGroups      int      `json:"dynamic_groups"`
 	DynamicTopologies  int      `json:"dynamic_topologies"`
+	// StaticBusinesses is how many static targets carry a business a global
+	// business Plan's events on them are attributed to.
+	StaticBusinesses int `json:"static_businesses,omitempty"`
 }
 
 // StrategyNoDataConfig is whether and how absence is judged.
@@ -399,7 +405,7 @@ func strategyQueryConfigOf(shared model.QueryPlanFacts, own map[model.LogicalQue
 	config := StrategyQueryConfig{
 		Provider: string(shared.Provider), Tenant: shared.TenantID, Business: shared.BusinessID, SpaceScope: shared.SpaceScope,
 		SourceSemantics: append([]string(nil), shared.SourceSemantics...), QueryDelaySeconds: shared.QueryDelaySeconds,
-		StepMillis: shared.StepMillis, Timezone: shared.Timezone, Clauses: []StrategyQueryClause{},
+		StepMillis: shared.StepMillis, Timezone: shared.Timezone, Clauses: []StrategyQueryClause{}, GlobalBusiness: shared.GlobalBusiness,
 	}
 	if shared.MetricMerge != "" {
 		config.MetricMerge = &StrategyRedactedTextInfo{Present: true, Bytes: len(shared.MetricMerge)}
@@ -465,7 +471,7 @@ func strategyTargetConfigOf(scope *contract.TargetScopeV2, plan *contract.Target
 		return StrategyTargetConfig{Kind: TargetKindPlan, Plan: &StrategyTargetPlanConfig{
 			SchemaVersion: plan.SchemaVersion, ModelID: plan.ModelID, Rule: string(plan.Rule),
 			IdentityDimensions: append([]string(nil), plan.Identity.Dimensions...), ModelDimension: plan.Identity.ModelDimension,
-			StaticKeys: len(plan.StaticKeys), StaticMembers: len(plan.StaticMembers),
+			StaticKeys: len(plan.StaticKeys), StaticBusinesses: len(plan.StaticBusinesses), StaticMembers: len(plan.StaticMembers),
 			DynamicGroups: len(plan.DynamicGroups), DynamicTopologies: len(plan.DynamicTopologies),
 		}}
 	case scope != nil:

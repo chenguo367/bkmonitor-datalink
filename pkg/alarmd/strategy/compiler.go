@@ -138,6 +138,7 @@ func (c *PlanCompiler) compileUncached(ctx context.Context, request CompileReque
 		targetScope:         request.Plan.TargetScope,
 		targetPlan:          request.Plan.TargetPlan,
 		noData:              request.Plan.NoData,
+		globalBusiness:      request.Plan.GlobalBusiness,
 	}
 	compiled.effectiveRules, err = compileEffectiveRules(request.Plan.EffectiveTimeSnapshot, request.Plan.StrategyRef.TenantID)
 	if err != nil {

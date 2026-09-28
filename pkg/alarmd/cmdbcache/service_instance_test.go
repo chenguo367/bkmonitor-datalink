@@ -120,7 +120,9 @@ func TestLoadReadsHostsAndServiceInstancesIntoOneSnapshot(t *testing.T) {
 	if index.Hosts() != 1 || index.ServiceInstances() != 1 {
 		t.Fatalf("index holds %d hosts and %d instances", index.Hosts(), index.ServiceInstances())
 	}
-	if !reflect.DeepEqual(client.scans, []string{"bk_monitorv3.ce.cache.cmdb.host", "bk_monitorv3.ce.cache.cmdb.service_instance", "bk_monitorv3.ce.cache.cmdb.topo"}) {
+	if !reflect.DeepEqual(client.scans, []string{"bk_monitorv3.ce.cache.cmdb.host", "bk_monitorv3.ce.cache.cmdb.service_instance",
+		"bk_monitorv3.ce.cache.cmdb.topo", "bk_monitorv3.ce.cache.cmdb.bcs_cluster_business",
+		"bk_monitorv3.ce.cache.cmdb.bcs_namespace_business"}) {
 		t.Fatalf("scanned %v", client.scans)
 	}
 	if index.TopologyNodes() != 1 {

@@ -331,7 +331,11 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			// signal_type sits with wire_format: both describe the event this
 			// Plan publishes rather than what the Slot executes, and both are
 			// decided once when the Plan is built.
-			context: []string{"source_compatibility", "subject_facts", "legacy_output", "wire_format", "signal_type"},
+			// global_business joins them: it decides which business an
+			// event is filed under, read when the event is built. What it
+			// does to the query is QueryPlanFacts' GlobalBusiness, execution
+			// content in the Query Group's facts.
+			context: []string{"source_compatibility", "subject_facts", "legacy_output", "wire_format", "signal_type", "global_business"},
 			split:   []string{"strategy_ref", "strategy_ir"},
 		},
 		reflect.TypeOf(contract.StrategyIRV2{}): {

@@ -114,6 +114,7 @@ func (store *Store) Refresh(ctx context.Context) error {
 		store.failures++
 		return err
 	}
+	index.carryOptional(store.index)
 	store.index = index
 	store.lastError = nil
 	store.refreshes++
@@ -136,6 +137,15 @@ type Health struct {
 	DegradedReason    string
 	ConsecutiveErrors uint64
 	Refreshes         uint64
+	// ClusterBusinessMapping and NamespaceBusinessMapping describe the BCS
+	// cluster and cluster + namespace -> business mappings the held index
+	// read. Zero held is not a degradation of the store - a writer that does
+	// not publish a mapping yet is a real state - but every global business
+	// event that would have used one is then counted as unmapped. A read
+	// failure is not a store failure either: the hosts refreshed, and the
+	// held entries are the last read that succeeded.
+	ClusterBusinessMapping   MappingStats
+	NamespaceBusinessMapping MappingStats
 }
 
 func (store *Store) Health() Health {
@@ -154,6 +164,8 @@ func (store *Store) Health() Health {
 	health.Loaded = true
 	health.Hosts = store.index.Hosts()
 	health.ServiceInstances = store.index.ServiceInstances()
+	health.ClusterBusinessMapping = store.index.ClusterBusinessStats()
+	health.NamespaceBusinessMapping = store.index.NamespaceBusinessStats()
 	health.Age = now.Sub(store.index.BuiltAt())
 	if source := store.index.SourceRefreshedAt(); !source.IsZero() {
 		health.SourceAge = now.Sub(source)

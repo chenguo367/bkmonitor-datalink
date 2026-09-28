@@ -166,6 +166,7 @@ type phaseTwoMetrics struct {
 	controlSourceRounds             *prometheus.CounterVec
 	strategiesReturnedAfterRemoval  prometheus.Counter
 	queryCooldownSaves              *prometheus.CounterVec
+	eventBusinessAttribution        *prometheus.CounterVec
 	diagnosticRedisFailures         *prometheus.CounterVec
 	leaderForward                   *prometheus.HistogramVec
 	controlSourceRetainedStale      prometheus.Counter
@@ -187,6 +188,7 @@ type phaseTwoMetrics struct {
 	seriesAdmission                 *prometheus.CounterVec
 	cmdbIndexHosts                  prometheus.Gauge
 	cmdbIndexServiceInstances       prometheus.Gauge
+	cmdbIndexBusinessMappings       *prometheus.GaugeVec
 	fleetSnapshotBytes              prometheus.Gauge
 	fleetViewSnapshotLoads          prometheus.Counter
 	fleetViewSnapshotBytes          prometheus.Counter
@@ -1289,6 +1291,23 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, result := range QueryCooldownSaveResults {
 		metrics.queryCooldownSaves.WithLabelValues(result)
 	}
+	metrics.eventBusinessAttribution = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "event_business_attribution_total",
+		Help: "Events of global business strategies by where the business they are filed under came from: " +
+			"target (the host's business, or the business configured on the matched Kubernetes static target), " +
+			"dimension (the record's bk_biz_id aggregation dimension), namespace (the business the platform " +
+			"published for the record's namespace of its cluster), cluster (the business published for the " +
+			"record's bcs_cluster_id), unmapped (the record named a cluster neither published mapping holds, so " +
+			"the global business), global (nothing answered, so the global business " +
+			"itself). A strategy that configures a target or a business dimension and still lands on global or " +
+			"unmapped relied on a business the caches or the data did not have. Counted once per event built, " +
+			"where it is built and before the output decides whether to send it: an event the sink then drops " +
+			"is counted, so this is events built, not events sent; a retried Slot counts again. Every other " +
+			"strategy's events are not counted.",
+	}, []string{"source"})
+	for _, source := range contract.BusinessAttributionSources {
+		metrics.eventBusinessAttribution.WithLabelValues(source)
+	}
 	metrics.diagnosticRedisFailures = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "diagnostic_redis_failures_total",
 		Help: "Calls to Redis by the diagnostic clients that were not answered, by client -- evidence (the CLI's " +
@@ -1370,6 +1389,22 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Service instances in the in-memory CMDB index the target filter decides on; zero while a series " +
 			"names an instance is an instance cache nobody writes, and such series are admitted with the gap named.",
 	})
+	metrics.cmdbIndexBusinessMappings = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_index_business_mappings",
+		Help: "The published business mappings in the in-memory CMDB index, read in the same load as the hosts: " +
+			"bcs_cluster (cluster -> business) and bcs_namespace (cluster + namespace -> business), through which " +
+			"a global business strategy's Kubernetes events are attributed. By state: held (entries in use), " +
+			"refused (fields whose business was not a positive integer), truncated (entries past the load bound), " +
+			"read_failed (1 when the latest load could not read the mapping at all; the hosts still refreshed, and " +
+			"the held counts are the last read that succeeded). Zero held is a writer that does not publish the " +
+			"mapping yet; every event that would have used it is then counted as unmapped in " +
+			"event_business_attribution_total.",
+	}, []string{"mapping", "state"})
+	for _, mapping := range CMDBBusinessMappings {
+		for _, state := range CMDBBusinessMappingStates {
+			metrics.cmdbIndexBusinessMappings.WithLabelValues(mapping, state)
+		}
+	}
 	// The fleet snapshot this replica publishes, and the snapshots every
 	// fleet view read pulls. A view is one MGET over every replica's
 	// snapshot on the replica that answers, and it is read on every page
@@ -1622,10 +1657,10 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.diagnosticRedisFailures, m.leaderForward, m.controlSource, m.leaderRound,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.leaderForward, m.controlSource, m.leaderRound,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
-		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
+		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
 		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus)...)
@@ -2481,6 +2516,22 @@ func (r *Recorder) ObserveQueryCooldownSave(result string) {
 	for _, known := range QueryCooldownSaveResults {
 		if result == known {
 			r.phaseTwo.queryCooldownSaves.WithLabelValues(result).Inc()
+			return
+		}
+	}
+}
+
+// ObserveEventBusinessAttribution counts one global business event by the
+// source its business came from; a source outside
+// contract.BusinessAttributionSources is dropped rather than creating a
+// series.
+func (r *Recorder) ObserveEventBusinessAttribution(source string) {
+	if r == nil || r.phaseTwo.eventBusinessAttribution == nil {
+		return
+	}
+	for _, known := range contract.BusinessAttributionSources {
+		if source == known {
+			r.phaseTwo.eventBusinessAttribution.WithLabelValues(source).Inc()
 			return
 		}
 	}

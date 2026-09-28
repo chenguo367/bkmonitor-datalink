@@ -126,8 +126,8 @@ func (client *DiagnosticClient) Preview(spec execution.PhysicalQuerySpec) (Diagn
 	if err != nil {
 		return DiagnosticPreview{}, &DiagnosticError{Code: "query_spec_invalid"}
 	}
-	headers := map[string]string{"Content-Type": "application/json", headerQuerySource: client.client.querySource,
-		headerTenant: spec.PlanFacts.TenantID, headerSpace: spec.PlanFacts.SpaceScope}
+	headers := scopeHeaders(spec.PlanFacts)
+	headers["Content-Type"], headers[headerQuerySource] = "application/json", client.client.querySource
 	// The digest covers the exact provider path/body and semantic headers, not
 	// the current endpoint, secrets or output selection. The preview preserves
 	// business conditions and expressions so operators can inspect the query.

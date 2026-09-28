@@ -170,6 +170,19 @@ func publishCMDBIndexHealth(recorder *metric.Recorder, store *cmdbcache.Store) {
 		health.Hosts, health.Age.Seconds(), health.SourceAge.Seconds(), health.Degraded, health.DegradedReason,
 	)
 	recorder.SetCMDBServiceInstanceIndex(health.ServiceInstances)
+	publishCMDBBusinessMappings(recorder, health)
+}
+
+// publishCMDBBusinessMappings names each business mapping the index holds by
+// the label its gauge carries. The two mappings are read alike and neither
+// the recorder nor the store would notice them published under each other's
+// name.
+func publishCMDBBusinessMappings(recorder *metric.Recorder, health cmdbcache.Health) {
+	for mapping, stats := range map[string]cmdbcache.MappingStats{
+		"bcs_cluster": health.ClusterBusinessMapping, "bcs_namespace": health.NamespaceBusinessMapping,
+	} {
+		recorder.SetCMDBBusinessMapping(mapping, stats.Held, stats.Refused, stats.Truncated, stats.ReadFailed)
+	}
 }
 
 // seriesAdmissionFilters is the access-path filter chain, in Python's order:
