@@ -3,6 +3,7 @@ package observability
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -514,5 +515,112 @@ func TestAnUnavailableRoundIsReadOverTheWholeWindow(t *testing.T) {
 	if coverage := c.Snapshot().Coverage; unevaluatedOf(t, coverage)["unavailable"] != 2 || coverage.UnobservedDuePlans != 0 || coverage.Incomplete {
 		t.Fatalf("a probe refused in the earlier bucket, held in the later = unevaluated %v unseen %d incomplete %v, want both Plans unavailable",
 			coverage.UnevaluatedDuePlans, coverage.UnobservedDuePlans, coverage.Incomplete)
+	}
+}
+
+// A group that changes revision runs under the next one before the roster
+// catches up: its observations are untracked, and the group the roster still
+// holds looks as if it left no record. Counted against its key, the miss is
+// named revision_changed with how many observations went to the next
+// revision - on the group and on its Plan. Once the roster moves, the group
+// is tracked since then and named in the partial-window sample as replaced;
+// a group new to the roster is named there too, not replaced. A tally the
+// group's account could not take for contention is counted as dropped.
+func TestAGroupThatChangedRevisionIsNamedNotLeftAsNoRecord(t *testing.T) {
+	c, now := costDueFixture(t, costMinute)
+	next := TraceFields{QueryGroupKey: "minute", QueryRevision: "q", SnapshotRevision: "s2", ScheduleRevision: "r", EvaluationTime: 1320}
+	c.Observe(context.Background(), Observation{Stage: StageSlotStarted, Result: ResultStarted, Trace: next})
+	c.Observe(context.Background(), Observation{Stage: StageSlotCompleted, Result: ResultSuccess, Duration: time.Millisecond, DurationKnown: true, Trace: next})
+	c.Publish(*now)
+	coverage := c.Snapshot().Coverage
+	sample := coverage.UnobservedDueSample
+	if coverage.UntrackedObservations != 2 || coverage.UnobservedDueGroups != 1 || coverage.UnobservedDuePlans != 1 || !coverage.Incomplete ||
+		len(sample) != 2 || sample[0].Reason != costMissRevisionChanged || sample[0].OtherRevisionObservations != 2 ||
+		sample[1].Reason != costMissRevisionChanged || sample[1].OtherRevisionObservations != 2 {
+		t.Fatalf("a group that ran under its next revision = %+v, want it and its Plan named revision_changed with 2 observations", coverage)
+	}
+
+	moved := costMinute
+	moved.SnapshotRevision = "s2"
+	fresh := CostGroup{QueryGroupKey: "fresh", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", Members: []CostPlanIdentity{costB},
+		Schedules: []CostSchedule{{Plan: costB, IntervalSeconds: 60, CompletionOffsetSeconds: 60}}}
+	*now = time.Unix(1450, 0)
+	c.Reconcile([]CostGroup{moved, fresh}, true)
+	*now = time.Unix(1460, 0)
+	c.Publish(*now)
+	snapshot := c.Snapshot()
+	want := []CostPartialGroup{{QueryGroupKey: "fresh", TrackedSince: time.Unix(1450, 0), Replaced: false},
+		{QueryGroupKey: "minute", TrackedSince: time.Unix(1450, 0), Replaced: true}}
+	if snapshot.Coverage.PartialWindowGroups != 2 || !reflect.DeepEqual(snapshot.Coverage.PartialWindowSample, want) {
+		t.Fatalf("groups tracked since mid-window = %d %+v, want %+v", snapshot.Coverage.PartialWindowGroups, snapshot.Coverage.PartialWindowSample, want)
+	}
+	snapshot.Coverage.PartialWindowSample[0].QueryGroupKey = "tampered"
+	if c.Snapshot().Coverage.PartialWindowSample[0].QueryGroupKey != "fresh" {
+		t.Fatal("a caller's copy of the partial-window sample changed the cached one")
+	}
+	// The roster reconciles again with nothing changed, as it does every
+	// refresh: the group is carried over, still replaced.
+	*now = time.Unix(1470, 0)
+	c.Reconcile([]CostGroup{moved, fresh}, true)
+	c.Publish(*now)
+	if got := c.Snapshot().Coverage.PartialWindowSample; !reflect.DeepEqual(got, want) {
+		t.Fatalf("after a reconcile that changed nothing = %+v, want %+v", got, want)
+	}
+
+	c, now = costDueFixture(t, costMinute)
+	account := c.scope.Load().groups["minute"].account
+	account.mu.Lock()
+	c.Observe(context.Background(), Observation{Stage: StageSlotCompleted, Result: ResultSuccess, Duration: time.Millisecond, DurationKnown: true, Trace: next})
+	account.mu.Unlock()
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.ContentionDroppedTotal != 1 || coverage.UntrackedObservations != 1 ||
+		coverage.UnobservedDueSample[0].Reason != costMissNoRecord {
+		t.Fatalf("a tally the account could not take = %+v, want it dropped and counted, the group left unnamed", coverage)
+	}
+}
+
+// More groups tracked since mid-window than the sample holds: the sample is
+// the first costDueMissSampleLimit by key, whatever order they arrived in,
+// and the count has them all. A bound read one past the limit would cut the
+// sample and insert beyond it, which panics.
+func TestThePartialWindowSampleStopsAtItsBound(t *testing.T) {
+	now := time.Unix(800, 0)
+	c := NewCostSummary(CostSummaryOptions{ProcessID: "process-a", Window: 5 * time.Minute, GroupCapacity: 16, PlanCapacity: 16,
+		MetadataBytes: 4096, TopN: 2, Now: func() time.Time { return now }})
+	c.Reconcile(nil, true)
+	var groups []CostGroup
+	for i := 11; i >= 0; i-- {
+		key := fmt.Sprintf("g%02d", i)
+		plan := CostPlanIdentity{TenantID: "t", BusinessID: "b", StrategyID: key}
+		groups = append(groups, CostGroup{QueryGroupKey: key, QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", Members: []CostPlanIdentity{plan},
+			Schedules: []CostSchedule{{Plan: plan, IntervalSeconds: 60, CompletionOffsetSeconds: 60}}})
+	}
+	now = time.Unix(1450, 0)
+	c.Reconcile(groups, true)
+	now = time.Unix(1460, 0)
+	c.Publish(now)
+	coverage := c.Snapshot().Coverage
+	var keys []string
+	for _, group := range coverage.PartialWindowSample {
+		keys = append(keys, group.QueryGroupKey)
+	}
+	if coverage.PartialWindowGroups != 12 || fmt.Sprint(keys) != "[g00 g01 g02 g03 g04 g05 g06 g07]" {
+		t.Fatalf("twelve groups tracked mid-window = %d %v, want 12 counted and the first eight by key named", coverage.PartialWindowGroups, keys)
+	}
+}
+
+// A group the scheduler held that also has observations of its key under
+// the next revision: the hold accounts for its due Plan, which is held, not
+// revision_changed; the untracked observations keep the window incomplete.
+func TestAHeldGroupWithObservationsUnderItsNextRevisionIsHeld(t *testing.T) {
+	c, now := costDueFixture(t, costMinute)
+	c.Observe(context.Background(), Observation{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal,
+		RunOutcome: "query_cooldown", Trace: TraceFields{QueryGroupKey: "minute"}})
+	c.Observe(context.Background(), Observation{Stage: StageSlotCompleted, Result: ResultSuccess, Duration: time.Millisecond, DurationKnown: true,
+		Trace: TraceFields{QueryGroupKey: "minute", QueryRevision: "q", SnapshotRevision: "s2", ScheduleRevision: "r", EvaluationTime: 1320}})
+	c.Publish(*now)
+	coverage := c.Snapshot().Coverage
+	if unevaluatedOf(t, coverage)["held"] != 1 || coverage.UnobservedDuePlans != 0 || coverage.UntrackedObservations != 1 || !coverage.Incomplete {
+		t.Fatalf("a held group with observations under its next revision = %+v, want its Plan held and the window incomplete for the untracked one", coverage)
 	}
 }
