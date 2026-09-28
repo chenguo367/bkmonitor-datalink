@@ -62,30 +62,30 @@ func sortHostNodes(index *Index) {
 // every shape the reading decides differently on.
 var dedupCorpus = []string{
 	// One host under both of its keys, the same record twice.
-	"10.0.0.1|0", `{"bk_host_id":7,"bk_host_innerip":"10.0.0.1","bk_cloud_id":0,"bk_biz_id":2,"os":"linux","topo_link":{"module|5":[{"bk_obj_id":"module","bk_inst_id":5},{"bk_obj_id":"set","bk_inst_id":3}]}}`,
-	"7", `{"bk_host_id":7,"bk_host_innerip":"10.0.0.1","bk_cloud_id":0,"bk_biz_id":2,"os":"linux","topo_link":{"module|5":[{"bk_obj_id":"module","bk_inst_id":5},{"bk_obj_id":"set","bk_inst_id":3}]}}`,
+	"192.0.2.1|0", `{"bk_host_id":7,"bk_host_innerip":"192.0.2.1","bk_cloud_id":0,"bk_biz_id":2,"os":"linux","topo_link":{"module|5":[{"bk_obj_id":"module","bk_inst_id":5},{"bk_obj_id":"set","bk_inst_id":3}]}}`,
+	"7", `{"bk_host_id":7,"bk_host_innerip":"192.0.2.1","bk_cloud_id":0,"bk_biz_id":2,"os":"linux","topo_link":{"module|5":[{"bk_obj_id":"module","bk_inst_id":5},{"bk_obj_id":"set","bk_inst_id":3}]}}`,
 	// One host under both keys with records that differ: the first read wins.
-	"10.0.0.2|0", `{"bk_host_id":8,"bk_host_innerip":"10.0.0.2","bk_biz_id":2,"rack":"a1"}`,
-	"8", `{"bk_host_id":8,"bk_host_innerip":"10.0.0.2","bk_biz_id":3,"rack":"b9","model_id":"host","model_inst_id":8}`,
+	"192.0.2.2|0", `{"bk_host_id":8,"bk_host_innerip":"192.0.2.2","bk_biz_id":2,"rack":"a1"}`,
+	"8", `{"bk_host_id":8,"bk_host_innerip":"192.0.2.2","bk_biz_id":3,"rack":"b9","model_id":"host","model_inst_id":8}`,
 	// Hosts without a host id are never merged: each counts.
-	"10.0.0.3|0", `{"bk_host_innerip":"10.0.0.3","bk_biz_id":2}`,
-	"10.0.0.3|1", `{"bk_host_innerip":"10.0.0.3","bk_cloud_id":1,"bk_biz_id":2}`,
+	"192.0.2.3|0", `{"bk_host_innerip":"192.0.2.3","bk_biz_id":2}`,
+	"192.0.2.3|1", `{"bk_host_innerip":"192.0.2.3","bk_cloud_id":1,"bk_biz_id":2}`,
 	// Not JSON: skipped, under either key.
-	"10.0.0.4|0", `{"bk_host_id":9,`,
+	"192.0.2.4|0", `{"bk_host_id":9,`,
 	// JSON the host fields refuse, sharing a host id already filed: skipped
 	// as it was, not filed under the first copy.
-	"10.0.0.5|0", `{"bk_host_id":10,"bk_host_innerip":"10.0.0.5","bk_biz_id":2}`,
-	"10", `{"bk_host_id":10,"bk_host_innerip":"10.0.0.5","bk_biz_id":{"not":"a number"}}`,
+	"192.0.2.5|0", `{"bk_host_id":10,"bk_host_innerip":"192.0.2.5","bk_biz_id":2}`,
+	"10", `{"bk_host_id":10,"bk_host_innerip":"192.0.2.5","bk_biz_id":{"not":"a number"}}`,
 	// A field name in another case and a repeated key: the decoder's rules
 	// decide the host id, the same way for both readings.
-	"10.0.0.6|0", `{"BK_HOST_ID":11,"bk_host_innerip":"10.0.0.6","bk_biz_id":2}`,
-	"11", `{"bk_host_id":11,"bk_host_innerip":"10.0.0.6","bk_biz_id":4}`,
-	"10.0.0.7|0", `{"bk_host_id":12,"bk_host_id":13,"bk_host_innerip":"10.0.0.7","bk_biz_id":2}`,
-	"13", `{"bk_host_id":13,"bk_host_innerip":"10.0.0.7","bk_biz_id":5}`,
-	"12", `{"bk_host_id":12,"bk_host_innerip":"10.0.0.8","bk_biz_id":2}`,
+	"192.0.2.6|0", `{"BK_HOST_ID":11,"bk_host_innerip":"192.0.2.6","bk_biz_id":2}`,
+	"11", `{"bk_host_id":11,"bk_host_innerip":"192.0.2.6","bk_biz_id":4}`,
+	"192.0.2.7|0", `{"bk_host_id":12,"bk_host_id":13,"bk_host_innerip":"192.0.2.7","bk_biz_id":2}`,
+	"13", `{"bk_host_id":13,"bk_host_innerip":"192.0.2.7","bk_biz_id":5}`,
+	"12", `{"bk_host_id":12,"bk_host_innerip":"192.0.2.8","bk_biz_id":2}`,
 	// A host id written as a number with a fraction, and its model identity.
-	"10.0.0.9|0", `{"bk_host_id":14.0,"bk_host_innerip":"10.0.0.9","bk_biz_id":2,"model_id":"host","model_inst_id":"14"}`,
-	"14", `{"bk_host_id":14,"bk_host_innerip":"10.0.0.9","bk_biz_id":6,"model_id":"host","model_inst_id":"14"}`,
+	"192.0.2.9|0", `{"bk_host_id":14.0,"bk_host_innerip":"192.0.2.9","bk_biz_id":2,"model_id":"host","model_inst_id":"14"}`,
+	"14", `{"bk_host_id":14,"bk_host_innerip":"192.0.2.9","bk_biz_id":6,"model_id":"host","model_inst_id":"14"}`,
 }
 
 // Recognising a host's second copy by its host id before reading the rest
@@ -128,7 +128,7 @@ func TestAHostsSecondCopyIsRecognisedBeforeItIsReadAndTheIndexIsTheSame(t *testi
 	if index.hosts != 9 {
 		t.Fatalf("setup: the corpus files %d hosts, want 9", index.hosts)
 	}
-	for _, skipped := range []string{"10.0.0.4|0", "10"} {
+	for _, skipped := range []string{"192.0.2.4|0", "10"} {
 		if _, filed := index.byIdentity[skipped]; filed {
 			t.Fatalf("setup: %s was filed; its record is refused", skipped)
 		}
@@ -136,10 +136,10 @@ func TestAHostsSecondCopyIsRecognisedBeforeItIsReadAndTheIndexIsTheSame(t *testi
 	if host := index.byIdentity["8"]; host == nil || host.Attributes["rack"] != "a1" {
 		t.Fatalf("setup: host 8 = %+v, want its first copy's rack", host)
 	}
-	if host := index.byIdentity["11"]; host == nil || host != index.byIdentity["10.0.0.6|0"] {
+	if host := index.byIdentity["11"]; host == nil || host != index.byIdentity["192.0.2.6|0"] {
 		t.Fatal("setup: the host whose id was read in another case is not one record under both keys")
 	}
-	if host := index.byIdentity["13"]; host == nil || host != index.byIdentity["10.0.0.7|0"] || index.byIdentity["12"] == host {
+	if host := index.byIdentity["13"]; host == nil || host != index.byIdentity["192.0.2.7|0"] || index.byIdentity["12"] == host {
 		t.Fatal("setup: the host id of repeated keys is not the last one")
 	}
 }
@@ -152,10 +152,10 @@ func TestAHostsSecondCopyIsNotReadPastItsHostID(t *testing.T) {
 	for index := 0; index < 60; index++ {
 		fmt.Fprintf(&attributes, `,"attribute_%d":"value %d"`, index, index)
 	}
-	record := `{"bk_host_id":7,"bk_host_innerip":"10.0.0.1","bk_biz_id":2` + attributes.String() + `}`
+	record := `{"bk_host_id":7,"bk_host_innerip":"192.0.2.1","bk_biz_id":2` + attributes.String() + `}`
 	at := time.Unix(1_788_000_000, 0)
 	first := testing.AllocsPerRun(20, func() {
-		newIndexBuilder(at).addFields([]string{"10.0.0.1|0", record})
+		newIndexBuilder(at).addFields([]string{"192.0.2.1|0", record})
 	})
 	second := testing.AllocsPerRun(20, func() {
 		builder := newIndexBuilder(at)

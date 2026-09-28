@@ -837,10 +837,14 @@ func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderRes
 			}
 		}
 	}
-	dimensionDigest, err := contract.DeriveDimensionIdentityDigestV2(spec.PlanFacts.TenantID, spec.PlanFacts.BusinessID, identityFields)
+	// The identity keeps the canonical encoding of its fields: every record
+	// carries the same fields, and the series' delivery digest takes their
+	// encoding from here rather than making it again.
+	identity, err := contract.EncodeDimensionIdentityV2(spec.PlanFacts.TenantID, spec.PlanFacts.BusinessID, identityFields)
 	if err != nil {
 		return execution.ProviderSeriesBatch{}, 0, err
 	}
+	dimensionDigest := identity.Digest
 	records := make([]contract.CanonicalRecordV2, 0, len(source.Values))
 	lastTime := int64(-1)
 	for _, row := range source.Values {
@@ -873,7 +877,7 @@ func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderRes
 			Dimensions:        dimensions, ReceivedTime: receivedAt})
 	}
 	dataset := execution.NewDataset(records)
-	digest, err := contract.DeriveRecordsDigestV2("alarmd-provider-series-delivery-v1", records)
+	digest, err := contract.DeriveSeriesRecordsDigestV2("alarmd-provider-series-delivery-v1", records, identity)
 	if err != nil {
 		return execution.ProviderSeriesBatch{}, 0, err
 	}
