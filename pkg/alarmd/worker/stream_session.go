@@ -912,11 +912,12 @@ func (stream *streamedExecution) evaluateSeries(
 		if len(stream.planSeries[due.Identity]) != 0 {
 			continue
 		}
+		started := time.Now()
 		result, err := stream.noSeriesPlanResult(due)
 		if err != nil {
 			return err
 		}
-		stream.observeCompletionOnlyPlan(ctx, due, result)
+		stream.observeCompletionOnlyPlan(ctx, started, due, result)
 		if err := stream.mergeProvisional(ctx, result, 0); err != nil {
 			return err
 		}
@@ -1169,11 +1170,12 @@ func (stream *streamedExecution) completeWithoutSeries(
 	stream.evaluated = execution.EvaluationResult{Contract: stream.header.Contract, Result: observability.ResultSuccess,
 		ReasonCode: observability.ReasonNone}
 	for _, due := range stream.header.DuePlans {
+		started := time.Now()
 		planResult, err := stream.noSeriesPlanResult(due)
 		if err != nil {
 			return err
 		}
-		stream.observeCompletionOnlyPlan(ctx, due, planResult)
+		stream.observeCompletionOnlyPlan(ctx, started, due, planResult)
 		if err := stream.mergeProvisional(ctx, planResult, 0); err != nil {
 			return err
 		}
@@ -1183,6 +1185,7 @@ func (stream *streamedExecution) completeWithoutSeries(
 
 func (stream *streamedExecution) observeCompletionOnlyProbe(ctx context.Context) {
 	for _, due := range stream.header.DuePlans {
+		started := time.Now()
 		result := execution.EvaluationResult{Contract: stream.header.Contract,
 			Result: observability.ResultSuccess, ReasonCode: observability.ReasonNone}
 		for _, binding := range planBindings(stream.bindings, due.Identity) {
@@ -1191,7 +1194,7 @@ func (stream *streamedExecution) observeCompletionOnlyProbe(ctx context.Context)
 				break
 			}
 		}
-		stream.observeCompletionOnlyPlan(ctx, due, result)
+		stream.observeCompletionOnlyPlan(ctx, started, due, result)
 	}
 }
 
@@ -1818,8 +1821,14 @@ func recoveryGateFacts(due execution.DuePlan, evaluated execution.EvaluationResu
 	return facts
 }
 
+// observeCompletionOnlyPlan reports a Plan decided without a series, from
+// its completions alone. The decision is the Plan's evaluation this round,
+// short as it is, and is timed like any other: a completion that carried no
+// duration read as an evaluation whose cost nobody measured, and every Plan
+// without a series left one such line a round.
 func (stream *streamedExecution) observeCompletionOnlyPlan(
 	ctx context.Context,
+	started time.Time,
 	due execution.DuePlan,
 	evaluated execution.EvaluationResult,
 ) {
@@ -1828,6 +1837,7 @@ func (stream *streamedExecution) observeCompletionOnlyPlan(
 		Component: observability.ComponentEvaluation, Stage: observability.StageEvaluationCompleted,
 		Result: evaluated.Result, Operation: observability.Operation(stream.request.Operation),
 		Direction: observability.DirectionInternal, ReasonCode: evaluated.ReasonCode,
+		Duration: time.Since(started), DurationKnown: true,
 		EvaluationOwner: costEvaluationOwner(due.Identity), EvaluationRecordsKnown: true,
 		Trace:             observability.TraceFields{StrategyID: due.Identity.StrategyID, BusinessID: due.Identity.BusinessID},
 		AlgorithmInputs:   stream.completionOnlyAlgorithmInputFacts(due),

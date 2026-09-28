@@ -21,8 +21,11 @@ import (
 // owner is not accepting, or whose identity is not in memory, is left out and
 // the roster says it is incomplete.
 func TestTheCostRosterIsWhatEachOwnedGroupExecutes(t *testing.T) {
+	plan := execution.PlanIdentity{TenantID: "t", BusinessID: "b", StrategyID: "11440"}
 	running := controlplane.ExecutionIdentity{SnapshotRevision: "snapshot-running", QueryRevision: "query-running",
-		ScheduleRevision: "schedule-running", Plans: []execution.PlanIdentity{{TenantID: "t", BusinessID: "b", StrategyID: "11440"}}}
+		ScheduleRevision: "schedule-running", Plans: []execution.PlanIdentity{plan},
+		Schedules: []execution.FrozenPlanSchedule{{Identity: plan,
+			Spec: execution.ScheduleSpec{EvaluationIntervalSeconds: 10, Alignment: 5, Timezone: "UTC", CompletionDeadlineOffsetSeconds: 30}}}}
 	identity := func(qg execution.QueryGroupIdentity, revision uint64, at execution.EvaluationTime) (controlplane.ExecutionIdentity, bool) {
 		// The idle group has an identity in memory too: only its lease not
 		// accepting keeps it out.
@@ -41,6 +44,11 @@ func TestTheCostRosterIsWhatEachOwnedGroupExecutes(t *testing.T) {
 	if g.QueryGroupKey != "ours" || g.SnapshotRevision != "snapshot-running" || g.QueryRevision != "query-running" ||
 		g.ScheduleRevision != "schedule-running" || len(g.Members) != 1 || g.Members[0].StrategyID != "11440" {
 		t.Fatalf("roster group = %+v, want the running Segment's revisions and its Plan", g)
+	}
+	// When the Plan is due, as the Segment froze it: its interval, alignment
+	// and completion offset, which the coverage reads a window against.
+	if len(g.Schedules) != 1 || g.Schedules[0] != (observability.CostSchedule{Plan: g.Members[0], IntervalSeconds: 10, AlignmentSeconds: 5, CompletionOffsetSeconds: 30}) {
+		t.Fatalf("roster schedules = %+v, want the Plan's frozen schedule", g.Schedules)
 	}
 	if groups, complete = executionCostGroups([]ownedLease{owned[0], owned[2]}, identity, 600); complete || len(groups) != 1 {
 		t.Fatalf("an accepting group with no identity in memory: roster %+v complete=%v, want it left out and incomplete", groups, complete)

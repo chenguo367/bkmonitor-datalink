@@ -8,6 +8,7 @@ package observability
 import (
 	"context"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -39,6 +40,54 @@ type CostGroup struct {
 	ScheduleRevision string             `json:"schedule_revision"`
 	Members          []CostPlanIdentity `json:"members"`
 	TotalMembers     int                `json:"total_members"`
+
+	// Schedules are the group's Plans' schedules: they say which of the
+	// group and its Plans a window should have seen (see costDue). Not
+	// published. A group without them is due in every window, and so is a
+	// Plan without one.
+	Schedules []CostSchedule `json:"-"`
+}
+
+// CostSchedule is when one Plan of a group is due: at its alignment plus
+// every multiple of its interval, each Slot completing its completion offset
+// later, all in Unix seconds.
+type CostSchedule struct {
+	Plan                    CostPlanIdentity
+	IntervalSeconds         int64
+	AlignmentSeconds        int64
+	CompletionOffsetSeconds int64
+}
+
+// costDue is one Plan's schedule as the coverage reads it; the zero value is
+// a schedule not known.
+type costDue struct{ interval, alignment, offset int64 }
+
+// costDueBytes is what one kept schedule adds to the roster's metadata.
+const costDueBytes = int(unsafe.Sizeof(costDue{}))
+
+// dueIn says a Slot of the schedule had its whole time inside [start, end]:
+// the first evaluation time at or after start completes by end. A Slot that
+// had it and left no observation in the window is one the window missed; a
+// schedule whose Slots fall due only after the window - an hour's, read in a
+// window of minutes - is not missing from it. A schedule that is not known is
+// due in every window: a missing schedule must not read as nothing expected.
+func (due costDue) dueIn(start, end int64) bool {
+	if due.interval <= 0 {
+		return true
+	}
+	offset := due.offset
+	if offset <= 0 {
+		offset = due.interval
+	}
+	first := due.alignment
+	if start > first {
+		first += (start - first + due.interval - 1) / due.interval * due.interval
+	}
+	return first+offset <= end
+}
+
+func costDueOf(schedule CostSchedule) costDue {
+	return costDue{interval: schedule.IntervalSeconds, alignment: schedule.AlignmentSeconds, offset: schedule.CompletionOffsetSeconds}
 }
 
 type CostSummaryOptions struct {
@@ -128,6 +177,25 @@ type CostScalars struct {
 	LagMeasured        uint64   `json:"lag_measured"`
 	LagUnknown         uint64   `json:"lag_unknown"`
 	LastProgressUnix   int64    `json:"last_progress_unix"`
+
+	// HeldRounds are the rounds the scheduler returned without running the
+	// Slot on purpose or because it could not - a query cooldown, a source
+	// that asked to retry or refused, an operation not ready, a busy or lost
+	// owner (see costHeldOutcomes). They are not work and not observations:
+	// a group held for the whole window has no cost missing from it, and is
+	// counted as held rather than unseen.
+	HeldRounds uint64 `json:"held_rounds,omitempty"`
+}
+
+// costHeldOutcomes are the scheduler's words for a round it returned without
+// running a Slot that was due: every run outcome but the round that ran
+// (execute_returned), the round with nothing due (source_not_due), and the
+// ones that did not return as designed (panic, other_error), which stay
+// unaccounted rather than excused.
+var costHeldOutcomes = map[string]bool{
+	"query_cooldown": true, "single_flight_busy": true, "ownership_rejected": true, "source_backoff": true,
+	"source_retry": true, "source_blocked": true, "source_error": true, "operation_not_ready": true,
+	"admission_denied": true, "view_not_executable": true, "cancelled": true,
 }
 
 type costWindows struct {
@@ -160,6 +228,8 @@ type costPlanState struct {
 	// across a reconciliation that keeps both the group and the Plan.
 	windows *costWindows
 	since   time.Time
+	// due is the Plan's schedule, zero when the roster did not carry one.
+	due costDue
 }
 
 // costAccount is one Query Group's windows and the lock that guards them
@@ -179,6 +249,22 @@ type costGroupState struct {
 	plans   map[CostPlanIdentity]*costPlanState
 	account *costAccount
 	since   time.Time
+	// due is every distinct schedule of the group's Plans, tracked or not:
+	// the group runs for all of them. Empty when the roster carried none.
+	due []costDue
+}
+
+// dueIn says the group had a Slot due in the window; see costDue.dueIn.
+func (g *costGroupState) dueIn(start, end int64) bool {
+	if len(g.due) == 0 {
+		return true
+	}
+	for _, due := range g.due {
+		if due.dueIn(start, end) {
+			return true
+		}
+	}
+	return false
 }
 
 // costScope is one reconciliation's roster. It is stored whole and never
@@ -256,6 +342,25 @@ type CostCoverage struct {
 	UntrackedObservations   uint64 `json:"untracked_observations"`
 	UnattributedEvaluations uint64 `json:"unattributed_evaluations"`
 	Incomplete              bool   `json:"incomplete"`
+
+	// DueGroups and DuePlans are the tracked ones that had a Slot due in the
+	// window - its evaluation time at or after the window's start, its
+	// completion deadline by the window's end. Of those, HeldDueGroups and
+	// HeldDuePlans have no work in the window because the scheduler held the
+	// group's rounds (HeldRounds): nothing ran, so no cost is missing.
+	// UnobservedDueGroups and UnobservedDuePlans are the rest the window has
+	// no observation of, and they are what makes it incomplete: a group due
+	// that left nothing at all, and a due Plan its group's rounds ran
+	// without evaluating - a round that failed before it, whose Plan's cost
+	// the window does not have. A group on a long interval has no Slot due
+	// in most windows and is not missing from them, which is why observed
+	// is not held to tracked.
+	DueGroups           int `json:"due_groups"`
+	UnobservedDueGroups int `json:"unobserved_due_groups"`
+	HeldDueGroups       int `json:"held_due_groups"`
+	DuePlans            int `json:"due_plans"`
+	UnobservedDuePlans  int `json:"unobserved_due_plans"`
+	HeldDuePlans        int `json:"held_due_plans"`
 }
 
 type CostContributor struct {
@@ -429,6 +534,28 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 		}
 		state.group = CostGroup{QueryGroupKey: strings.Clone(input.QueryGroupKey), QueryRevision: strings.Clone(input.QueryRevision), SnapshotRevision: strings.Clone(input.SnapshotRevision), ScheduleRevision: strings.Clone(input.ScheduleRevision), TotalMembers: len(input.Members)}
 		coverage.MetadataBytes += bytes
+		planDue := make(map[CostPlanIdentity]costDue, len(input.Schedules))
+		for _, schedule := range input.Schedules {
+			due := costDueOf(schedule)
+			if due.interval <= 0 {
+				continue
+			}
+			// A split Plan has one schedule per piece; the most frequent is
+			// the one a window sees first.
+			if kept, found := planDue[schedule.Plan]; !found || due.interval < kept.interval {
+				planDue[schedule.Plan] = due
+			}
+			if !slices.Contains(state.due, due) {
+				state.due = append(state.due, due)
+			}
+		}
+		// All of the group's schedules or none: a group read on some of them
+		// could miss the one due in a window and read as not due when it was.
+		// With none it is due in every window, which can only over-report.
+		if coverage.MetadataBytes+len(state.due)*costDueBytes > c.options.MetadataBytes {
+			state.due = nil
+		}
+		coverage.MetadataBytes += len(state.due) * costDueBytes
 		for _, member := range input.Members {
 			bytes := len(member.TenantID) + len(member.BusinessID) + len(member.StrategyID)
 			if !member.valid() || coverage.TrackedPlans >= c.options.PlanCapacity || coverage.MetadataBytes+bytes > c.options.MetadataBytes {
@@ -438,7 +565,7 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 				continue
 			}
 			identity := CostPlanIdentity{strings.Clone(member.TenantID), strings.Clone(member.BusinessID), strings.Clone(member.StrategyID)}
-			plan := &costPlanState{identity: identity, since: now}
+			plan := &costPlanState{identity: identity, since: now, due: planDue[member]}
 			if old != nil && old.plans[member] != nil {
 				plan.windows, plan.since = old.plans[member].windows, old.plans[member].since
 			} else {
@@ -462,6 +589,10 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 // calls hold for a copy of that group's windows and no longer.
 func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 	if c == nil || !c.enabled {
+		return
+	}
+	if o.Stage == StageRunnerReturned {
+		c.observeHeld(ctx, o)
 		return
 	}
 	switch o.Stage {
@@ -519,6 +650,34 @@ func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 			account.windows.current.UnattributedEvaluations++
 		}
 	}
+}
+
+// observeHeld counts a round the scheduler held, against its group. Only a
+// held round takes the group's account - the rounds that ran and the ones
+// with nothing due, dozens a second, take nothing - and a held round of a
+// group the roster does not track is not an untracked observation: it is
+// not cost.
+func (c *CostSummary) observeHeld(ctx context.Context, o Observation) {
+	if !costHeldOutcomes[o.RunOutcome] {
+		return
+	}
+	trace := mergeTraceFields(o.Trace, TraceFieldsFromContext(ctx))
+	var g *costGroupState
+	if scope := c.scope.Load(); scope != nil {
+		g = scope.groups[trace.QueryGroupKey]
+	}
+	if g == nil {
+		return
+	}
+	epoch := c.options.Now().UnixNano() / int64(c.options.Window)
+	if !c.lockAccount(g.account) {
+		c.contentionDropped.Add(1)
+		c.contention.add(epoch)
+		return
+	}
+	defer g.account.mu.Unlock()
+	g.account.windows.rotate(epoch)
+	g.account.windows.current.HeldRounds++
 }
 
 func addWall(w *CostWall, o Observation) {
@@ -739,12 +898,33 @@ func (c *CostSummary) Publish(now time.Time) {
 			rankings[dim] = rows
 		}
 	}
+	dueStart, dueEnd := snapshot.WindowStart.Unix(), snapshot.WindowEnd.Unix()
+	// A group the window has no work of and whose rounds the scheduler held
+	// is held, not unseen; its Plans with it.
+	held := make(map[*costGroupState]bool)
+	for i := range copies {
+		if w := copies[i].windows; copies[i].plan == nil && w.current.Observations+w.previous.Observations == 0 &&
+			w.current.HeldRounds+w.previous.HeldRounds > 0 {
+			held[copies[i].group] = true
+		}
+	}
 	for i := range copies {
 		entry := &copies[i]
 		w := entry.windows
+		observed := w.current.Observations+w.previous.Observations > 0
 		if entry.plan == nil {
-			if w.current.Observations+w.previous.Observations > 0 {
+			if observed {
 				snapshot.Coverage.ObservedGroups++
+			}
+			if entry.group.dueIn(dueStart, dueEnd) {
+				snapshot.Coverage.DueGroups++
+				switch {
+				case observed:
+				case held[entry.group]:
+					snapshot.Coverage.HeldDueGroups++
+				default:
+					snapshot.Coverage.UnobservedDueGroups++
+				}
 			}
 			if entry.group.since.After(snapshot.WindowStart) {
 				snapshot.Coverage.PartialWindowGroups++
@@ -758,8 +938,18 @@ func (c *CostSummary) Publish(now time.Time) {
 				snapshot.Retained.GroupsWithPeak++
 			}
 		} else {
-			if w.current.Observations+w.previous.Observations > 0 {
+			if observed {
 				snapshot.Coverage.ObservedPlans++
+			}
+			if entry.plan.due.dueIn(dueStart, dueEnd) {
+				snapshot.Coverage.DuePlans++
+				switch {
+				case observed:
+				case held[entry.group]:
+					snapshot.Coverage.HeldDuePlans++
+				default:
+					snapshot.Coverage.UnobservedDuePlans++
+				}
 			}
 			if entry.plan.since.After(snapshot.WindowStart) {
 				snapshot.Coverage.PartialWindowPlans++
@@ -773,7 +963,7 @@ func (c *CostSummary) Publish(now time.Time) {
 		snapshot.Retained.LimitBytes, snapshot.Retained.LimitKnown = limit, true
 		snapshot.Retained.PeakShare = float64(snapshot.Retained.PeakSumBytes) / float64(limit)
 	}
-	snapshot.Coverage.Incomplete = snapshot.Coverage.Incomplete || snapshot.Coverage.ContentionDropped > 0 || snapshot.Coverage.UntrackedObservations > 0 || snapshot.Coverage.UnattributedEvaluations > 0 || snapshot.Coverage.UnknownWallObservations > 0 || snapshot.Coverage.PartialWindowGroups > 0 || snapshot.Coverage.ObservedGroups != snapshot.Coverage.TrackedGroups || snapshot.Coverage.ObservedPlans != snapshot.Coverage.TrackedPlans
+	snapshot.Coverage.Incomplete = snapshot.Coverage.Incomplete || snapshot.Coverage.ContentionDropped > 0 || snapshot.Coverage.UntrackedObservations > 0 || snapshot.Coverage.UnattributedEvaluations > 0 || snapshot.Coverage.UnknownWallObservations > 0 || snapshot.Coverage.PartialWindowGroups > 0 || snapshot.Coverage.UnobservedDueGroups > 0 || snapshot.Coverage.UnobservedDuePlans > 0
 	indexes := make(map[*costCopy]int)
 	for dim, rows := range rankings {
 		ranking := CostRanking{Dimension: costDimensions[dim%len(costDimensions)], Scope: "query_group"}

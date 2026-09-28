@@ -258,6 +258,14 @@ func executionCostGroups(owned []ownedLease,
 		for _, plan := range facts.Plans {
 			group.Members = append(group.Members, observability.CostPlanIdentity{TenantID: plan.TenantID, BusinessID: plan.BusinessID, StrategyID: plan.StrategyID})
 		}
+		for _, schedule := range facts.Schedules {
+			plan := schedule.Identity
+			group.Schedules = append(group.Schedules, observability.CostSchedule{
+				Plan:            observability.CostPlanIdentity{TenantID: plan.TenantID, BusinessID: plan.BusinessID, StrategyID: plan.StrategyID},
+				IntervalSeconds: schedule.Spec.EvaluationIntervalSeconds, AlignmentSeconds: int64(schedule.Spec.Alignment),
+				CompletionOffsetSeconds: schedule.Spec.CompletionOffsetSeconds(),
+			})
+		}
 		groups = append(groups, group)
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i].QueryGroupKey < groups[j].QueryGroupKey })
