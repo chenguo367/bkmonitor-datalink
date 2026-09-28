@@ -13,7 +13,13 @@ package execution
 // available this round - the PRIMARY input and every dependency. It is the
 // one judgement of "the Plan's input was whole": a round that meets it is one
 // a gap guard's warmup counts, and one on which a Level still held by a guard
-// is held only by the past.
+// is held only by the past - unless the round proposes a guard of its own.
+//
+// It can: a dependency that answered FULL with no rows is whole here, and on
+// a round with no series that is all a warmup needs, but a series that needed
+// it gets a QUERY_EMPTY guard from this round (InputIncompleteForGuard). The
+// evaluator knows which, and says so on the outcome (LevelOutcome.GuardTail);
+// the inputs alone look whole.
 func PlanInputsWhole(inputs []NamedInputBinding, plan PlanIdentity) bool {
 	for _, binding := range inputs {
 		if binding.Consumer.Plan != plan {
