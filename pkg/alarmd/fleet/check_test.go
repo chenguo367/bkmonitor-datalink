@@ -167,8 +167,14 @@ func TestTheCheckTableIsClosedAtTwenty(t *testing.T) {
 	// broke - because such a row read as WINDOW_UNDECIDED, the line for
 	// counts that are known and say nothing yet, and sent the reader to wait
 	// for counts that would never arrive.
-	if got := len(Checks()); got != 30 || len(checkAnswers) != 30 {
-		t.Errorf("the check table has %d rows in order and %d answered, want 30: a new check has to "+
+	// Thirty-one: CAPABILITY_UNLISTED is a named standing - the capability
+	// disposition split on the closed list of capabilities the build
+	// declares (DeclaredCapabilities). A declared one is the capability
+	// owner's and waits for a build; any other reason under that
+	// disposition stays this deployment's, which one line with one owner
+	// could not say.
+	if got := len(Checks()); got != 31 || len(checkAnswers) != 31 {
+		t.Errorf("the check table has %d rows in order and %d answered, want 31: a new check has to "+
 			"be a rule over the existing dimensions or a named standing, and the design says which", got, len(checkAnswers))
 	}
 	seen := map[Check]bool{}
@@ -275,7 +281,10 @@ func TestEveryCheckHasAProducerExceptTheNamedOne(t *testing.T) {
 		CheckSourceIncomplete: {Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "SOURCE_INCOMPLETE": 1},
 			[]WithheldObject{{StrategyID: "7", Scope: "STRATEGY", Disposition: "SOURCE_INCOMPLETE", Reason: "SOURCE_IDENTITY_UNAVAILABLE"}}), SourceReplica: "pod-a"},
 		CheckCapabilityUnsupported: {Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "UNSUPPORTED_PHASE2_CAPABILITY": 1},
-			[]WithheldObject{{StrategyID: "8", Scope: "STRATEGY", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "SNAPSHOT_RETENTION_INSUFFICIENT"}}), SourceReplica: "pod-a"},
+			[]WithheldObject{{StrategyID: "8", Scope: "STRATEGY", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "ALGORITHM_NOT_MIGRATED"}}), SourceReplica: "pod-a"},
+		// The same disposition for a reason the build does not declare.
+		CheckCapabilityUnlisted: {Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "UNSUPPORTED_PHASE2_CAPABILITY": 1},
+			[]WithheldObject{{StrategyID: "8", Scope: "STRATEGY", Disposition: "UNSUPPORTED_PHASE2_CAPABILITY", Reason: "EVALUATION_STEP_INCONSISTENT"}}), SourceReplica: "pod-a"},
 		CheckConfigRejected: {Source: NewSourceFacts(at, map[string]int{"ACCEPTED": 3, "CONFIG_REJECTED": 1, "STALE_CONFIG": 1},
 			[]WithheldObject{{StrategyID: "9", Scope: "LEVEL", LevelID: 2, Disposition: "CONFIG_REJECTED", Reason: "LEVEL_INVALID", FieldPath: "items[0].algorithms[0]"},
 				{StrategyID: "10", Scope: "STRATEGY", Disposition: "STALE_CONFIG", Reason: "LEVEL_INVALID"}}), SourceReplica: "pod-a"},

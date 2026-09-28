@@ -183,7 +183,7 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 			continue
 		}
 		row.Dispositions = append(row.Dispositions, DiagnosisDisposition{StrategyDisposition: disposition,
-			Attribution: dispositionAttribution(withheldWords(disposition.Disposition).Action)})
+			Attribution: withheldAttribution(disposition.Disposition, disposition.Reason)})
 	}
 	observed := 0
 	for _, plan := range standing.Plans {
@@ -214,9 +214,10 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 	case standing.Standing == StandingWithheld:
 		// No Plan: the words are the first withheld item's check's pair.
 		if len(row.Dispositions) > 0 {
-			words := withheldWords(row.Dispositions[0].Disposition)
+			words := withheldWords(row.Dispositions[0].Disposition, row.Dispositions[0].Reason)
 			row.Verdict, row.Action = words.State, words.Action
-			row.Check, row.Reason = sourceChecks[row.Dispositions[0].Disposition], row.Dispositions[0].Reason
+			row.Check, _ = sourceCheckOf(row.Dispositions[0].Disposition, row.Dispositions[0].Reason)
+			row.Reason = row.Dispositions[0].Reason
 			return row
 		}
 		row.Verdict, row.Reason = DiagnosisUnknown, UnknownLookupUnavailable
@@ -339,8 +340,8 @@ func pageQueryGroups(rows []DiagnosisRow) []string {
 
 // withheldWords is the pair the disposition's check already carries; a
 // disposition with no check folds the way an unpaired check does.
-func withheldWords(disposition string) wordPair {
-	if check, ok := sourceChecks[disposition]; ok {
+func withheldWords(disposition, reason string) wordPair {
+	if check, ok := sourceCheckOf(disposition, reason); ok {
 		if words, ok := checkWords[check]; ok {
 			return words
 		}
@@ -349,6 +350,16 @@ func withheldWords(disposition string) wordPair {
 }
 
 // dispositionAttribution says whose a withheld item is to fix, from the action word.
+// withheldAttribution is who a withheld item is for: the capability owner for
+// a reason the build declares as a capability it lacks, otherwise whoever the
+// line's action sends the reader to.
+func withheldAttribution(disposition, reason string) string {
+	if check, ok := sourceCheckOf(disposition, reason); ok && checkAnswers[check].Owner == OwnerCapability {
+		return "capability"
+	}
+	return dispositionAttribution(withheldWords(disposition, reason).Action)
+}
+
 func dispositionAttribution(action ActionWord) string {
 	switch action {
 	case ActionCacheWriterFill:

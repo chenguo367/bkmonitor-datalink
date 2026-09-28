@@ -140,7 +140,7 @@ func TestTheDiagnosisGivesEveryListedStrategyOneRowFromTheExistingWords(t *testi
 		attribution string
 	}{
 		"4101": {StateDefect, ActionServiceFix, "", ""},
-		"4102": {StateNotDetecting, ActionServiceFix, "ALGORITHM_NOT_MIGRATED", "alarmd"},
+		"4102": {StateNotDetecting, ActionNone, "ALGORITHM_NOT_MIGRATED", "capability"},
 		"4103": {StateDetecting, ActionNone, "", "strategy"},
 		"4105": {DiagnosisUnknown, "", UnknownNotYetPublished, ""},
 		"4109": {StateNotDetecting, ActionCacheWriterFill, "EFFECTIVE_TIME_SNAPSHOT_UNAVAILABLE", "writer"},
