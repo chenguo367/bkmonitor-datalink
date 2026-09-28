@@ -2971,6 +2971,23 @@ func (bundle *phaseTwoWorkerBundle) ownedQueryGroups() []execution.QueryGroupIde
 	return owned
 }
 
+// ownedLeases is the owned Query Groups with the timeline revision each
+// lease names, read from memory, for the cost roster. A Runner without a
+// lease to read is owned and not accepting.
+func (bundle *phaseTwoWorkerBundle) ownedLeases() []ownedLease {
+	bundle.mu.RLock()
+	defer bundle.mu.RUnlock()
+	owned := make([]ownedLease, 0, len(bundle.runners))
+	for queryGroup, lifecycle := range bundle.runners {
+		lease := ownedLease{queryGroup: queryGroup}
+		if runner, ok := lifecycle.runner.(maintenanceRunner); ok {
+			_, lease.revision, lease.accepting = runner.maintenanceLease()
+		}
+		owned = append(owned, lease)
+	}
+	return owned
+}
+
 // setRunnerLocked and removeRunnerLocked are the only ways the owned Runner
 // set changes. Both keep what is derived from that set - the owned count and
 // the dispatcher's ordered view - in step with it, which is why no caller

@@ -176,53 +176,75 @@ type observationRefresh struct {
 	now       func() time.Time
 	interval  time.Duration
 	last      time.Time
-	entries   int
-	owned     func() []execution.QueryGroupIdentity
+	// owned is this replica's Query Groups with the timeline revision each
+	// lease names, and identity what each executes under at a time, from
+	// memory (controlplane.RedisCatalogRepository.CachedExecutionIdentity).
+	owned    func() []ownedLease
+	identity func(execution.QueryGroupIdentity, uint64, execution.EvaluationTime) (controlplane.ExecutionIdentity, bool)
+}
+
+// ownedLease is one Query Group this replica owns: the timeline revision its
+// lease names, and whether its owner is accepting on that lease.
+type ownedLease struct {
+	queryGroup execution.QueryGroupIdentity
+	revision   uint64
+	accepting  bool
 }
 
 func (r *observationRefresh) publish(ctx context.Context) {
 	at := r.now()
-	if r.directory != nil && (r.last.IsZero() || at.Sub(r.last) >= r.interval) {
+	if r.last.IsZero() || at.Sub(r.last) >= r.interval {
 		r.last = at
-		r.directory.Refresh(ctx, at)
-		snapshot := r.directory.Page(at, "", "", "", 0, r.entries)
-		var owned []execution.QueryGroupIdentity
+		// The roster is read from memory, not from the directory, so it no
+		// longer waits on a directory this replica may not keep.
+		if r.directory != nil {
+			r.directory.Refresh(ctx, at)
+		}
+		var owned []ownedLease
 		if r.owned != nil {
 			owned = r.owned()
 		}
-		groups, complete := observationCostGroups(snapshot, owned)
+		groups, complete := executionCostGroups(owned, r.identity, execution.EvaluationTime(at.Unix()))
 		r.cost.Reconcile(groups, complete)
 	}
 	r.cost.Publish(at)
 }
 
-func observationCostGroups(snapshot controlplane.StrategyDirectorySnapshot, ownedGroups []execution.QueryGroupIdentity) ([]observability.CostGroup, bool) {
-	byGroup := map[string]*observability.CostGroup{}
-	owned := map[execution.QueryGroupIdentity]bool{}
-	for _, qg := range ownedGroups {
-		owned[qg] = true
-	}
-	for _, row := range snapshot.Rows {
-		if row.Role != string(execution.ActivationCurrent) || !owned[row.QueryGroup] {
+// executionCostGroups is the cost roster: every owned Query Group under the
+// Segment it executes at at, with the Plans that Segment activates. The
+// events the summary counts carry their Slot's publication, query and
+// schedule revisions, which are that Segment's; a roster read from the
+// strategy directory named, for Plans still on a publication whose manifest
+// has expired, no Query Group at all, and for the latest publication's rows
+// revisions no Slot runs with, so on a long-lived deployment almost every
+// event was untracked.
+//
+// Complete only when every owned Query Group answered. One that did not - a
+// lease the owner is not accepting on, a timeline not in the control cache
+// at the lease's revision - is left out rather than guessed at, and its
+// Slots count as untracked.
+func executionCostGroups(owned []ownedLease,
+	identity func(execution.QueryGroupIdentity, uint64, execution.EvaluationTime) (controlplane.ExecutionIdentity, bool),
+	at execution.EvaluationTime) ([]observability.CostGroup, bool) {
+	groups := make([]observability.CostGroup, 0, len(owned))
+	complete := identity != nil
+	for _, lease := range owned {
+		if !lease.accepting || identity == nil {
+			complete = false
 			continue
 		}
-		key := string(row.QueryGroup)
-		g := byGroup[key]
-		if g == nil {
-			g = &observability.CostGroup{QueryGroupKey: key, SnapshotRevision: string(row.Publication.SnapshotRevision), QueryRevision: string(row.QueryRevision), ScheduleRevision: string(row.ScheduleRevision)}
-			byGroup[key] = g
+		facts, ok := identity(lease.queryGroup, lease.revision, at)
+		if !ok {
+			complete = false
+			continue
 		}
-		g.Members = append(g.Members, observability.CostPlanIdentity{TenantID: row.Identity.TenantID, BusinessID: row.Identity.BusinessID, StrategyID: row.Identity.StrategyID})
-		g.TotalMembers++
+		group := observability.CostGroup{QueryGroupKey: string(lease.queryGroup), SnapshotRevision: string(facts.SnapshotRevision),
+			QueryRevision: string(facts.QueryRevision), ScheduleRevision: string(facts.ScheduleRevision), TotalMembers: len(facts.Plans)}
+		for _, plan := range facts.Plans {
+			group.Members = append(group.Members, observability.CostPlanIdentity{TenantID: plan.TenantID, BusinessID: plan.BusinessID, StrategyID: plan.StrategyID})
+		}
+		groups = append(groups, group)
 	}
-	keys := make([]string, 0, len(byGroup))
-	for key := range byGroup {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	groups := make([]observability.CostGroup, 0, len(keys))
-	for _, key := range keys {
-		groups = append(groups, *byGroup[key])
-	}
-	return groups, snapshot.Complete && len(byGroup) == len(owned)
+	sort.Slice(groups, func(i, j int) bool { return groups[i].QueryGroupKey < groups[j].QueryGroupKey })
+	return groups, complete
 }

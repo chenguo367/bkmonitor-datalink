@@ -1110,7 +1110,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	fleetAPI = fleet.WithCostCandidates(fleetAPI, costCandidatesCache)
 	fleetAPI = fleet.WithSeriesSamples(fleetAPI, directory, windowStore, diagnostics, seriesSampler, external.Now)
 	observationRefresh := &observationRefresh{directory: directory, cost: costSummary, now: external.Now,
-		interval: cfg.PhaseTwo.Control.RefreshInterval.Duration(), entries: observationCapacity.DirectoryBytes / controlplane.DirectoryEntryReservationBytes()}
+		interval: cfg.PhaseTwo.Control.RefreshInterval.Duration(), identity: repository.CachedExecutionIdentity}
 	// The same judgment the page shows, exported so the host writes alert rules
 	// against it instead of reimplementing the arithmetic. The deadline is a
 	// ceiling on hanging, not a tuning knob: the read is one control plane fetch
@@ -1327,7 +1327,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.
-	observationRefresh.owned = bundle.ownedQueryGroups
+	observationRefresh.owned = bundle.ownedLeases
 	workerCosts.boundByOwned(bundle.ownedQueryGroups)
 	bundle.applied = publisher.applied
 	bundle.capacity = publisher.capacity
