@@ -56,7 +56,7 @@ func seriesRecords(random *rand.Rand, points int) []CanonicalRecordV2 {
 			dimensions[fmt.Sprintf("dim_%d_%s", index, text())] = raw(text())
 		}
 	}
-	business := []string{"2", "10", "业务", ""}[random.Intn(4)]
+	business := []string{"2", "10", "业务", "", "line\u2028sep", "para\u2029sep", `quo"te`, "<tag>&", "tab\there"}[random.Intn(9)]
 	received := []int64{0, 1_788_000_123, -5, 9_007_199_254_740_993}[random.Intn(4)]
 	identity := DimensionIdentityV2{Fields: fields, Digest: strings.Repeat("d", 64)}
 	records := make([]CanonicalRecordV2, points)
@@ -66,11 +66,21 @@ func seriesRecords(random *rand.Rand, points int) []CanonicalRecordV2 {
 			values = map[string]json.RawMessage{"value": json.RawMessage(recordsNumbers[random.Intn(len(recordsNumbers))])}
 		}
 		records[index] = CanonicalRecordV2{
-			RecordID: fmt.Sprintf("%064x", random.Uint64()), SourceTime: 1_788_000_000 + int64(index)*60,
+			RecordID: recordID(random, index), SourceTime: 1_788_000_000 + int64(index)*60,
 			BusinessID: business, DimensionIdentity: identity, Values: values, Dimensions: dimensions, ReceivedTime: received,
 		}
 	}
 	return records
+}
+
+// recordID is a record id as a provider derives it, and now and then one
+// carrying the characters canonical encoding treats specially, so the
+// record id's own encoding is held to the canonical one too.
+func recordID(random *rand.Rand, index int) string {
+	if random.Intn(4) == 0 {
+		return fmt.Sprintf("%d %s", index, recordsTexts[random.Intn(len(recordsTexts))])
+	}
+	return fmt.Sprintf("%064x", random.Uint64())
 }
 
 // withCanonicalMode runs body under a canonical encoding mode.
