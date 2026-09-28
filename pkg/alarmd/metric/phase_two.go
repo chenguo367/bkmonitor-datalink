@@ -446,12 +446,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			Help: "Selectors of target plans resolved, once per selector per Plan per Slot, by kind, state and the " +
 				"closed reason behind an Unavailable or Incomplete state: key_missing, json_invalid, " +
 				"structure_invalid, model_mismatch, read_failed, stale, index_unavailable, node_missing, " +
-				"node_in_other_business, members_dropped, source_unwired, model_representation_unresolved. OKEmpty " +
+				"node_in_other_business, members_dropped, source_unwired, model_representation_unresolved, " +
+				"emptied_held. OKEmpty " +
 				"with node_missing is a topology reference to a node the topology cache does not list; OKEmpty with " +
 				"node_in_other_business is one whose node is listed but hosts machines under another business only; " +
 				"static Unavailable with model_representation_unresolved is a model_inst_id plan whose members the " +
 				"host cache knows no host for - a non-host model without a model_match, or a host cache without the " +
-				"canonical identity on its records.",
+				"canonical identity on its records. group Unavailable with emptied_held is a group read empty that is " +
+				"not yet believed: waiting a writer cycle for the emptying to hold, or held because every group the " +
+				"replica references (at least two), or many at once, emptied; the snapshot before was served until " +
+				"the staleness bound, and the group is not read as empty.",
 		}, []string{"kind", "state", "reason"}),
 		noDataSlotPlans: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "worker_no_data_slot_plans_total",
@@ -1579,6 +1583,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonKeyMissing},
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonReadFailed},
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonStale},
+		{targetplan.SelectorKindGroup, string(targetplan.SelectorUnavailable), targetplan.ReasonEmptiedHeld},
 		{targetplan.SelectorKindGroup, string(targetplan.SelectorIncomplete), targetplan.ReasonMembersDropped},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorUnavailable), targetplan.ReasonIndexUnavailable},
 		{targetplan.SelectorKindTopology, string(targetplan.SelectorOKEmpty), targetplan.ReasonNodeMissing},

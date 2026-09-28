@@ -81,6 +81,9 @@ func (resolver *TargetResolver) resolveGroup(ctx context.Context, plan *contract
 		return result
 	case lookup.Age > resolver.groups.MaxAge():
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonStale
+		if lookup.EmptiedHeld {
+			result.Reason = targetplan.ReasonEmptiedHeld
+		}
 		return result
 	case snapshot.ModelID != plan.ModelID:
 		result.State, result.Reason = targetplan.SelectorUnavailable, targetplan.ReasonModelMismatch

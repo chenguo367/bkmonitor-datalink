@@ -58,13 +58,19 @@ const (
 	// such a plan as read by host identity and refuses nothing, so a
 	// catalog disposition never carries the model question.
 	ReasonModelUnresolved = "model_representation_unresolved"
+	// ReasonEmptiedHeld is a dynamic group read empty that the store does not
+	// yet believe - waiting a writer cycle, or held as the writer's emptying -
+	// past the staleness bound, or first read empty during such a wait: the
+	// snapshot before is no longer served, and the group is not read as empty
+	// either.
+	ReasonEmptiedHeld = "emptied_held"
 )
 
 // SelectorReasons is the closed list, for the metric.
 var SelectorReasons = []string{
 	ReasonNone, ReasonKeyMissing, ReasonJSONInvalid, ReasonStructureInvalid, ReasonModelMismatch, ReasonReadFailed,
 	ReasonStale, ReasonIndexUnavailable, ReasonNodeMissing, ReasonNodeForeign, ReasonMembersDropped, ReasonSourceUnwired,
-	ReasonModelUnresolved,
+	ReasonModelUnresolved, ReasonEmptiedHeld,
 }
 
 // SelectorResult is one selector's answer: its members in the plan's key

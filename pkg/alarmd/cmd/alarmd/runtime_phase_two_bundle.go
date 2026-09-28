@@ -646,7 +646,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// What a target plan's dynamic references resolve against, once per
 	// Plan per Slot (decision-017). The group store, when there is one,
 	// refreshes on the same cadence as the host index and stops with it.
-	targetResolver, groupStore, err := buildTargetResolver(cfg, targetGroupClient, cmdbIndex)
+	targetResolver, groupStore, err := buildTargetResolver(cfg, targetGroupClient, cmdbIndex, logger)
 	if err != nil {
 		return nil, err
 	}
