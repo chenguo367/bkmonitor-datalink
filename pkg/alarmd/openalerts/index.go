@@ -684,17 +684,8 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 		present = true
 		answer = AnswerRecentlySent
 	}
-	if removed, ok := cache.removed[m]; ok {
-		observed := time.Time{}
-		if entry != nil {
-			observed = entry.calibratedStarted
-			if !cache.calibrated(entry, now) {
-				observed = entry.indexReadAt
-			}
-		}
-		if now.Sub(removed.at) <= cache.index.options.LocalRetention || !removed.at.Before(observed) {
-			present = false
-		}
+	if removed, ok := cache.removed[m]; ok && cache.removalHides(entry, removed, now) {
+		present = false
 	}
 	if count && (entry == nil || !cache.calibrated(entry, now)) && cache.policy == PolicyPassThrough {
 		present = true
@@ -704,6 +695,52 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 		cache.countLookup(answer)
 	}
 	return present
+}
+
+// removalHides says whether a RECOVERY this process sent still hides its
+// alert: until the retention has passed and something has read the
+// consumer's state since, the set cannot yet reflect the recovery, and an
+// alert still in it is the recovery not yet processed rather than one the
+// consumer kept open. Once it has, the set answers again, and an alert still
+// in it gets the recovery once more. Called with the lock held.
+//
+// Which read counts is the choice here:
+//
+//   - A first recovery, while the sets are authoritative: the first read of
+//     either kind that began after it - the per-minute read of the set, or a
+//     calibration. A consumer that took the RECOVERY and failed to process it
+//     keeps the alert open; waiting for the next calibration left it open for
+//     up to a calibration interval before it was asked again.
+//   - A recovery already sent again (resent): a calibration that began after
+//     it, and with no current calibration, as long as one would take. A
+//     consumer that is behind by more than the retention has both copies
+//     queued; sending on every read would add one more per read for as long
+//     as it stays behind. This is the calibration path that backs the resend.
+//   - While the sets are disjoint from what this process sent, the rule this
+//     ledger had before resends: a calibration that began after it, or with
+//     none current, the next read. What the sets say about this process's
+//     alerts is not trusted then, and the gate answers from its own record.
+func (cache *Cache) removalHides(entry *indexEntry, removed stamped, now time.Time) bool {
+	if entry == nil || now.Sub(removed.at) <= cache.index.options.LocalRetention {
+		return true
+	}
+	calibrated := cache.calibrated(entry, now)
+	observed := entry.indexReadAt
+	switch {
+	case cache.index.disjoint:
+		if calibrated {
+			observed = entry.calibratedStarted
+		}
+	case !removed.resent:
+		if entry.calibratedStarted.After(observed) {
+			observed = entry.calibratedStarted
+		}
+	case calibrated:
+		observed = entry.calibratedStarted
+	case now.Sub(removed.at) <= cache.index.options.ReconcileInterval:
+		return true
+	}
+	return !removed.at.Before(observed)
 }
 
 func (cache *Cache) Snapshot(key StrategyKey) StrategySnapshot {
@@ -857,7 +894,7 @@ func (cache *Cache) ActiveAlerts(key StrategyKey) []Alert {
 func (cache *Cache) indexStats() Stats {
 	cache.mu.Lock()
 	defer cache.mu.Unlock()
-	stats := Stats{Mode: ModeSelfMaintained, IndexProtocol: true, CalibrationConfigured: cache.index.options.Reconciler != nil, Tracked: len(cache.index.entries), Added: len(cache.added), Removed: len(cache.removed), Evictions: cache.evictions,
+	stats := Stats{Mode: ModeSelfMaintained, IndexProtocol: true, CalibrationConfigured: cache.index.options.Reconciler != nil, Tracked: len(cache.index.entries), Added: len(cache.added), Removed: len(cache.removed), Evictions: cache.evictions, RecoveriesResent: cache.recoveriesResent,
 		Refreshes: map[string]uint64{}, Unavailable: map[UnavailableReason]uint64{}, Lookups: map[Answer]uint64{}}
 	all := len(cache.index.entries) > 0
 	for _, entry := range cache.index.entries {

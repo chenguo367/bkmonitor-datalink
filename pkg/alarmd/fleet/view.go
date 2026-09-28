@@ -2059,6 +2059,11 @@ type OpenAlertSetFacts struct {
 	OwnOpenRefusals   uint64            `json:"own_open_refusals,omitempty"`
 	SentDepartures    map[string]uint64 `json:"sent_departures,omitempty"`
 	GateOwnHeld       uint64            `json:"gate_own_held,omitempty"`
+	// RecoveriesResent is how many RECOVERY events went out again for an
+	// alert whose earlier RECOVERY the replica still held closed, because
+	// the consumer's set still carried it (open_alert_set_recovery_resent_total).
+	// Present at zero: a word missing cannot be told from none sent.
+	RecoveriesResent uint64 `json:"recoveries_resent"`
 	// GateSince is when the own split started. What the replica sent is
 	// held in memory and starts empty at every start, so an alert opened
 	// before GateSince is not "own" here: no own lookup says only that no
