@@ -2643,11 +2643,17 @@ func waitForRunnerCalls(t *testing.T, runner *fakePhaseTwoQueryGroup, count int)
 	t.Fatalf("timed out waiting for %d runner calls; got %d", count, runner.runCount())
 }
 
+// waitSignal waits for a signal the case knows is coming. The bound only
+// decides how long a broken case takes to fail, so it is the ten seconds
+// waitFor uses rather than one: under the race detector with the whole
+// module testing beside it, a goroutine can take more than a second to
+// reach the point it signals from, and the case failed there on a run
+// that was otherwise correct.
 func waitSignal(t *testing.T, signal <-chan struct{}, name string) {
 	t.Helper()
 	select {
 	case <-signal:
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatalf("timed out waiting for %s", name)
 	}
 }
