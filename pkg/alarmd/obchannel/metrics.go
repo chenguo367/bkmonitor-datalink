@@ -37,6 +37,13 @@ import (
 // metrics.get takes full names only, and an agent guessed one that does not
 // exist. metrics.list names every family the process registers, with its
 // type and help, so the name is copied rather than guessed.
+//
+// Registered is not the same as gathered. A gather drops a family with no
+// series, and a failure counter has none until its first failure -- which
+// is exactly when "has it ever happened" is the question. Both reads take
+// the registered names from the registry's descriptions, so such a family
+// is listed with no series and read as registered but never recorded,
+// rather than as a name the process does not have.
 
 // MetricNamePattern is the names metrics.get accepts: alarmd's own families.
 var MetricNamePattern = regexp.MustCompile(`^bkmonitor_alarmd_[a-z0-9_]+$`)
@@ -77,11 +84,15 @@ type MetricFamily struct {
 	Truncated bool           `json:"truncated,omitempty"`
 }
 
-// MetricsResult is one read. Absent names the families this process has
-// not registered -- a name that is not there is said, not answered empty.
+// MetricsResult is one read. Absent names the families this process does
+// not register; Unrecorded the ones it registers that have no series yet --
+// a counter that has not moved since the process started, which is a zero,
+// not a missing name. When the registry cannot describe itself the two
+// cannot be told apart and every missing family is Absent.
 type MetricsResult struct {
-	Families []MetricFamily `json:"families"`
-	Absent   []string       `json:"absent,omitempty"`
+	Families   []MetricFamily `json:"families"`
+	Absent     []string       `json:"absent,omitempty"`
+	Unrecorded []string       `json:"unrecorded,omitempty"`
 	// GatherError is the registry's error when some collector failed and
 	// the rest answered. A family that collector owns is then missing from
 	// Families and listed under Absent, and Absent no longer proves the
@@ -91,9 +102,11 @@ type MetricsResult struct {
 
 // MetricFamilyEntry is one family metrics.list names: what metrics.get takes
 // as its name, the family's type and help, and how many series it has now.
+// A family with no series has no type to report: a description does not
+// carry one, and the name is not a reliable guess.
 type MetricFamilyEntry struct {
 	Name   string `json:"name"`
-	Type   string `json:"type"`
+	Type   string `json:"type,omitempty"`
 	Help   string `json:"help,omitempty"`
 	Series int    `json:"series"`
 }
@@ -101,6 +114,9 @@ type MetricFamilyEntry struct {
 // MetricsListResult is the families the answering process registers, in
 // name order. Truncated says more matched than MaxListedFamilies.
 type MetricsListResult struct {
+	// Described is false when the registry could not describe itself and
+	// only families that have series are listed.
+	Described   bool                `json:"described"`
 	Families    []MetricFamilyEntry `json:"families"`
 	Matched     int                 `json:"matched"`
 	Truncated   bool                `json:"truncated,omitempty"`
@@ -150,6 +166,10 @@ func MetricsOperations(gatherer prometheus.Gatherer) []Operation {
 			if result.Truncated {
 				out.Limitations = append(out.Limitations, "More families match than are listed; narrow with contains.")
 			}
+			if !result.Described {
+				out.Complete = false
+				out.Limitations = append(out.Limitations, "The registry could not describe itself: only families that have series are listed, and a registered family with none is missing here.")
+			}
 			return out
 		},
 	}
@@ -193,6 +213,9 @@ func MetricsOperations(gatherer prometheus.Gatherer) []Operation {
 			if len(result.Absent) > 0 {
 				out.Next = append(out.Next, Call{Operation: "metrics.list", Params: Params{}, Reason: "有名字不在应答进程的注册表里；从这里查到确切的族名再读。"})
 			}
+			if len(result.Unrecorded) > 0 {
+				out.Limitations = append(out.Limitations, "Unrecorded families are registered and have no series since this process started: a counter there has not moved.")
+			}
 			for _, family := range result.Families {
 				if family.Truncated {
 					out.Complete = false
@@ -218,32 +241,81 @@ func listMetrics(gatherer prometheus.Gatherer, contains string) (MetricsListResu
 		}
 	}
 	needle := strings.ToLower(contains)
-	// Gather returns the families in name order, which is the order listed.
-	entries := []MetricFamilyEntry{}
+	all := map[string]MetricFamilyEntry{}
+	described, ok := describedFamilies(gatherer)
+	result.Described = ok
+	for name, help := range described {
+		all[name] = MetricFamilyEntry{Name: name, Help: help}
+	}
 	for _, family := range families {
-		name := family.GetName()
+		all[family.GetName()] = MetricFamilyEntry{Name: family.GetName(), Type: family.GetType().String(), Help: family.GetHelp(), Series: len(family.GetMetric())}
+	}
+	entries := []MetricFamilyEntry{}
+	for name, entry := range all {
 		if !MetricNamePattern.MatchString(name) {
 			continue
 		}
-		help := family.GetHelp()
-		if needle != "" && !strings.Contains(strings.ToLower(name), needle) && !strings.Contains(strings.ToLower(help), needle) {
+		if needle != "" && !strings.Contains(strings.ToLower(name), needle) && !strings.Contains(strings.ToLower(entry.Help), needle) {
 			continue
 		}
-		if len(help) > MaxListedHelpBytes {
+		if len(entry.Help) > MaxListedHelpBytes {
 			cut := MaxListedHelpBytes
-			for cut > 0 && !utf8.RuneStart(help[cut]) {
+			for cut > 0 && !utf8.RuneStart(entry.Help[cut]) {
 				cut--
 			}
-			help = help[:cut] + "..."
+			entry.Help = entry.Help[:cut] + "..."
 		}
-		entries = append(entries, MetricFamilyEntry{Name: name, Type: family.GetType().String(), Help: help, Series: len(family.GetMetric())})
+		entries = append(entries, entry)
 	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	result.Matched = len(entries)
 	if len(entries) > MaxListedFamilies {
 		entries, result.Truncated = entries[:MaxListedFamilies], true
 	}
 	result.Families = entries
 	return result, nil
+}
+
+// describer is a gatherer that can also say what it registers, as a
+// prometheus.Registry can.
+type describer interface {
+	Describe(chan<- *prometheus.Desc)
+}
+
+// descPattern reads the name and help out of a description. client_golang
+// exposes neither field; its String form quotes both, and a description in
+// another form is left out rather than guessed at.
+var descPattern = regexp.MustCompile(`^Desc\{fqName: ("(?:[^"\\]|\\.)*"), help: ("(?:[^"\\]|\\.)*"),`)
+
+// describedFamilies is every family the gatherer describes, name to help;
+// false when it cannot describe itself.
+func describedFamilies(gatherer prometheus.Gatherer) (map[string]string, bool) {
+	registry, ok := gatherer.(describer)
+	if !ok {
+		return nil, false
+	}
+	descs := make(chan *prometheus.Desc, 64)
+	go func() {
+		registry.Describe(descs)
+		close(descs)
+	}()
+	families := map[string]string{}
+	for desc := range descs {
+		match := descPattern.FindStringSubmatch(desc.String())
+		if match == nil {
+			continue
+		}
+		name, err := strconv.Unquote(match[1])
+		if err != nil {
+			continue
+		}
+		help, err := strconv.Unquote(match[2])
+		if err != nil {
+			continue
+		}
+		families[name] = help
+	}
+	return families, true
 }
 
 func metricNames(p Params) []string {
@@ -288,10 +360,15 @@ func readMetrics(gatherer prometheus.Gatherer, names []string, labels map[string
 		byName[family.GetName()] = family
 	}
 	result := MetricsResult{Families: []MetricFamily{}, GatherError: gatherError}
+	described, _ := describedFamilies(gatherer)
 	for _, name := range names {
 		family, ok := byName[name]
 		if !ok {
-			result.Absent = append(result.Absent, name)
+			if _, registered := described[name]; registered {
+				result.Unrecorded = append(result.Unrecorded, name)
+			} else {
+				result.Absent = append(result.Absent, name)
+			}
 			continue
 		}
 		out := MetricFamily{Name: name, Type: family.GetType().String(), Help: family.GetHelp(), Series: []MetricSeries{}}

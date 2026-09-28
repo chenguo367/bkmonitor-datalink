@@ -19,6 +19,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 )
 
 func metricsRegistry(t *testing.T) *prometheus.Registry {
@@ -213,5 +215,103 @@ func TestMetricsListNamesTheFamiliesSoNamesAreNotGuessed(t *testing.T) {
 		if err := validate(c.ops["metrics.list"], bad); err == nil {
 			t.Fatalf("contains %v accepted", bad)
 		}
+	}
+}
+
+// A registered family with no series yet -- a failure counter before its
+// first failure -- is listed with no series and read as registered but not
+// recorded: a zero, not a name the process does not have. Only a name the
+// registry does not describe is absent and points at metrics.list.
+func TestARegisteredFamilyWithoutSeriesIsUnrecordedNotAbsent(t *testing.T) {
+	registry := metricsRegistry(t)
+	failures := prometheus.NewCounterVec(prometheus.CounterOpts{Name: "bkmonitor_alarmd_redis_command_failure_total", Help: "failed commands"}, []string{"reason"})
+	registry.MustRegister(failures)
+	c := testChannel(t, &testAuth{}, MetricsOperations(registry)...)
+	_, out := call(t, c, envelope(c, "invoke", "metrics.list", Params{"contains": "failure"}))
+	encoded, _ := json.Marshal(out.Result)
+	var listed MetricsListResult
+	_ = json.Unmarshal(encoded, &listed)
+	if !listed.Described || len(listed.Families) != 1 || listed.Families[0].Name != "bkmonitor_alarmd_redis_command_failure_total" ||
+		listed.Families[0].Series != 0 || listed.Families[0].Type != "" || listed.Families[0].Help != "failed commands" {
+		t.Fatalf("an empty registered family is not listed as such: %+v", listed)
+	}
+	_, got, result := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_redis_command_failure_total", "bkmonitor_alarmd_not_registered_total"}})
+	if len(result.Unrecorded) != 1 || result.Unrecorded[0] != "bkmonitor_alarmd_redis_command_failure_total" ||
+		len(result.Absent) != 1 || result.Absent[0] != "bkmonitor_alarmd_not_registered_total" {
+		t.Fatalf("unrecorded %v absent %v, want the empty family unrecorded and only the unknown name absent", result.Unrecorded, result.Absent)
+	}
+	_, onlyEmpty, _ := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_redis_command_failure_total"}})
+	for _, next := range onlyEmpty.Next {
+		if next.Operation == "metrics.list" {
+			t.Fatal("a registered name without series was sent to look for its name")
+		}
+	}
+	if len(got.Next) != 1 || got.Next[0].Operation != "metrics.list" {
+		t.Fatalf("an unregistered name gave no way to find the right one: %+v", got.Next)
+	}
+
+	// A gatherer that cannot describe itself lists only what has series,
+	// and says so.
+	plain := prometheus.GathererFunc(registry.Gather)
+	c = testChannel(t, &testAuth{}, MetricsOperations(plain)...)
+	_, out = call(t, c, envelope(c, "invoke", "metrics.list", Params{}))
+	encoded, _ = json.Marshal(out.Result)
+	var partial MetricsListResult
+	_ = json.Unmarshal(encoded, &partial)
+	if partial.Described || out.Status != "partial" || !strings.Contains(strings.Join(out.Evidence.Limitations, "\n"), "only families that have series") {
+		t.Fatalf("a listing without descriptions did not say what it leaves out: %+v %v", partial.Described, out.Evidence.Limitations)
+	}
+	for _, family := range partial.Families {
+		if family.Name == "bkmonitor_alarmd_redis_command_failure_total" {
+			t.Fatal("an undescribed listing claimed a family it cannot see")
+		}
+	}
+}
+
+// On the registry production builds, every family it describes is listed:
+// read here without the listing's own parser, so a change in how
+// client_golang prints a description fails this rather than quietly
+// dropping the families that have no series yet.
+func TestTheProductionRegistryIsListedWhole(t *testing.T) {
+	gatherer := metric.NewRecorder(metric.BuildInfo{}).Gatherer()
+	registry, ok := gatherer.(describer)
+	if !ok {
+		t.Fatal("the production gatherer cannot describe itself")
+	}
+	descs := make(chan *prometheus.Desc, 64)
+	go func() { registry.Describe(descs); close(descs) }()
+	want := map[string]bool{}
+	for desc := range descs {
+		text := desc.String()
+		const marker = `fqName: "`
+		start := strings.Index(text, marker)
+		if start < 0 {
+			t.Fatalf("a description without a name: %s", text)
+		}
+		name := text[start+len(marker):]
+		name = name[:strings.IndexByte(name, '"')]
+		if strings.HasPrefix(name, "bkmonitor_alarmd_") {
+			want[name] = true
+		}
+	}
+	listed, err := listMetrics(gatherer, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]bool{}
+	for _, family := range listed.Families {
+		got[family.Name] = true
+	}
+	missing := []string{}
+	for name := range want {
+		if !got[name] {
+			missing = append(missing, name)
+		}
+	}
+	if len(want) == 0 || len(missing) > 0 || !listed.Described {
+		t.Fatalf("described %d alarmd families, listing misses %d: %v", len(want), len(missing), missing)
+	}
+	if listed.Truncated {
+		t.Fatalf("the production registry (%d families) no longer fits MaxListedFamilies (%d)", listed.Matched, MaxListedFamilies)
 	}
 }
