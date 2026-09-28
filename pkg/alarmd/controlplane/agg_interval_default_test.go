@@ -71,10 +71,14 @@ func TestAStrategysPeriodIsTheOnePythonComputes(t *testing.T) {
 			}
 		})
 	}
+	// Refused as a rejected configuration, which keeps the last good Plan.
+	// Left to the schedule, a negative period reads as an unsupported
+	// evaluation step instead, which does not.
 	for _, value := range []string{`-60`, `60.5`, `"60"`} {
 		catalog := buildIntervalCatalog(t, []string{`{"agg_interval":` + value + `}`})
-		if len(catalog.QueryGroups) != 0 {
-			t.Fatalf("agg_interval %s: accepted as a period", value)
+		if len(catalog.QueryGroups) != 0 || len(catalog.Dispositions) != 1 ||
+			catalog.Dispositions[0].Disposition != controlplane.DispositionConfigRejected || catalog.Dispositions[0].Reason != "PLAN_INVALID" {
+			t.Fatalf("agg_interval %s: groups %d, dispositions %+v, want refused as PLAN_INVALID", value, len(catalog.QueryGroups), catalog.Dispositions)
 		}
 	}
 }
