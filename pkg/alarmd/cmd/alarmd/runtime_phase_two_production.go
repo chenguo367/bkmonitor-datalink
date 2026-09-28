@@ -928,10 +928,19 @@ func (runtime *productionPhaseTwoControl) renewCurrentObjects(ctx context.Contex
 	if rebuildErr != nil {
 		return fmt.Errorf("%w; writing it back: %v", err, rebuildErr)
 	}
-	if outcome != controlplane.ActivationHeaderRebuilt && outcome != controlplane.ActivationHeaderRebuildNotNeeded {
+	switch outcome {
+	case controlplane.ActivationHeaderRebuilt, controlplane.ActivationHeaderRebuildNotNeeded,
+		controlplane.ActivationHeaderRebuildConflict:
+		// A conflict is another writer's header, or a new body, landing
+		// between the read and the write: there is something to renew
+		// against now, and the renewal answers for whatever it is - a header
+		// that moved is a conflict it does not report, one still missing is
+		// reported as missing. Returning the missing header here reported
+		// the round degraded for a header that was already back.
+		return runtime.dependencies.Repository.RenewCurrentActivationObjects(ctx)
+	default:
 		return fmt.Errorf("%w; writing it back: %s", err, outcome)
 	}
-	return runtime.dependencies.Repository.RenewCurrentActivationObjects(ctx)
 }
 
 // renewalReason names a failed renewal: a missing activation header by
