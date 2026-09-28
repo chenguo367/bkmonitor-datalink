@@ -1183,14 +1183,13 @@ func (stream *streamedExecution) observeCompletionOnlyProbe(ctx context.Context)
 // EMPTY; a PARTIAL or UNAVAILABLE PRIMARY completion opens the Plan gap with
 // the completion reasons of that same set.
 //
-// A FULL EMPTY Plan also recovers its standing marker's Plan scopes. That is
-// the only place it can happen: with no series the evaluator is never called,
-// so the recovery that rides on a state mutation never runs, and a Plan whose
-// source has gone empty keeps a marker for as long as it stays empty --
-// holding every Level at UNKNOWN with the marker's reason on the first round
-// the data comes back, for the whole warmup, after a source that was healthy
-// the entire time. Level scopes are left alone: they ask for that series'
-// history to have moved, and an empty source has no such thing to show.
+// A FULL EMPTY Plan whose every input was whole also recovers its standing
+// marker, every scope of it. That is the only place it can happen: with no
+// series the evaluator is never called, so the recovery that rides on a state
+// mutation never runs, and a Plan whose source has gone empty - or that
+// matches no series at all - kept a marker for as long as that lasted. Why a
+// whole round with nothing in it counts for Level scopes too is on
+// execution.PlanGapRecoveryMutation.
 func (stream *streamedExecution) noSeriesPlanResult(due execution.DuePlan) (execution.EvaluationResult, error) {
 	bindings := stream.noSeriesBindings(due)
 	primary, found := firstNonFullPrimary(bindings)
@@ -1200,7 +1199,7 @@ func (stream *streamedExecution) noSeriesPlanResult(due execution.DuePlan) (exec
 		}
 		plan := execution.PlanEvaluationResult{Plan: due.Identity, Disposition: execution.PlanDecided}
 		if emptySourceSlotIsWholeInput(bindings, due.Identity) {
-			recovery, err := execution.PlanGapRecoveryMutation(stream.header.Contract, due, stream.gaps, execution.GapRecoverPlanScopeOnly)
+			recovery, err := execution.PlanGapRecoveryMutation(stream.header.Contract, due, stream.gaps)
 			if err != nil {
 				return execution.EvaluationResult{}, err
 			}
@@ -2206,7 +2205,7 @@ func planCompletedFullEmpty(bindings []execution.NamedInputBinding, plan executi
 }
 
 // emptySourceSlotIsWholeInput says whether a Plan that produced no series is
-// evidence that its input was whole this round. That is what a Plan scope's
+// evidence that its input was whole this round. That is what a marker's
 // warmup counts, and it is a narrower question than the one that decides the
 // Plan completed: a round whose dependency query was UNAVAILABLE still
 // completes FULL EMPTY, because with no PRIMARY record there was nothing for

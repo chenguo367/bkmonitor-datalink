@@ -108,11 +108,11 @@ func (e *Evaluator) Evaluate(ctx context.Context, request execution.EvaluationRe
 // Slot that evaluated series. The gate is what a series-bearing Slot has to
 // show for itself: a state mutation, meaning at least one series carried its
 // round forward. A Slot with no series at all never reaches here at all -- the
-// worker's Slot wrap-up decides that one, under the Plan-scope reach.
+// worker's Slot wrap-up decides that one, on the Plan's inputs being whole.
 //
 // The arithmetic is not repeated here. Both callers ask
-// execution.PlanGapRecoveryMutation, and differ only in the reach they pass,
-// so "how far does one healthy Slot move a warmup count" has one definition.
+// execution.PlanGapRecoveryMutation, so "how far does one healthy Slot move a
+// warmup count" has one definition.
 func planGapRecoveryMutation(
 	request execution.EvaluationRequest,
 	due execution.DuePlan,
@@ -121,7 +121,7 @@ func planGapRecoveryMutation(
 	if !hasStateMutation {
 		return nil, nil
 	}
-	return execution.PlanGapRecoveryMutation(request.Header.Contract, due, request.Gaps, execution.GapRecoverEveryScope)
+	return execution.PlanGapRecoveryMutation(request.Header.Contract, due, request.Gaps)
 }
 
 type recordResult struct {
