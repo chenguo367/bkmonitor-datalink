@@ -589,6 +589,98 @@ func TestBuildCatalogAbsentSourceKeepsExecutingThroughTheGracePeriod(t *testing.
 	}
 }
 
+// An active set read whole and empty while strategies are running is a source
+// that lost its content, not every strategy deleted at once: nothing is
+// removed on it, however long it lasts, and every strategy keeps executing
+// under a PENDING_REMOVAL that names why. A set that only shrank is still
+// graced and removed as before (the case above), and a deployment that never
+// had a strategy stays empty.
+func TestBuildCatalogEmptyActiveSetRemovesNothing(t *testing.T) {
+	payload, err := os.ReadFile("testdata/two_threshold_strategies.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var documents []json.RawMessage
+	if err := json.Unmarshal(payload, &documents); err != nil {
+		t.Fatal(err)
+	}
+	identity := controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}
+	both := []controlplane.SourceStrategy{
+		{SourceID: "1001", Document: documents[0], Identity: identity},
+		{SourceID: "1002", Document: documents[1], Identity: identity},
+	}
+	previous, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+		Strategies: both, Planner: &recordingPlanner{facts: queryFacts(t)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lastGood := &controlplane.PublishedSnapshot{
+		Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: previous.SnapshotRevision, PublicationEpoch: 1},
+		QueryGroups: previous.QueryGroups,
+	}
+	t0 := time.Unix(1_700_000_000, 0)
+	emptiedAt := func(sourceID string, since time.Time) controlplane.ObjectDisposition {
+		return controlplane.ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
+			Disposition: controlplane.DispositionPendingRemoval, Reason: "ACTIVE_SET_EMPTY", AbsentSince: since.Unix()}
+	}
+	withPrevious := func(extra ...controlplane.ObjectDisposition) []controlplane.ObjectDisposition {
+		return append(append([]controlplane.ObjectDisposition(nil), previous.Dispositions...), extra...)
+	}
+	for _, test := range []struct {
+		name         string
+		strategies   []controlplane.SourceStrategy
+		lastGood     *controlplane.PublishedSnapshot
+		previous     []controlplane.ObjectDisposition
+		now          time.Time
+		wantPlans    []string
+		wantStrategy []controlplane.ObjectDisposition
+	}{
+		{
+			name: "first found empty keeps every strategy, stamped now", strategies: []controlplane.SourceStrategy{},
+			lastGood: lastGood, previous: previous.Dispositions, now: t0,
+			wantPlans: []string{"1001", "1002"}, wantStrategy: []controlplane.ObjectDisposition{emptiedAt("1001", t0), emptiedAt("1002", t0)},
+		},
+		{
+			name: "empty past the whole grace still removes nothing", strategies: []controlplane.SourceStrategy{},
+			lastGood: lastGood, previous: withPrevious(emptiedAt("1001", t0), emptiedAt("1002", t0)),
+			now:       t0.Add(10 * controlplane.AbsenceGracePeriod),
+			wantPlans: []string{"1001", "1002"}, wantStrategy: []controlplane.ObjectDisposition{emptiedAt("1001", t0), emptiedAt("1002", t0)},
+		},
+		{
+			name: "listed again, nothing is pending", strategies: both,
+			lastGood: lastGood, previous: withPrevious(emptiedAt("1001", t0), emptiedAt("1002", t0)),
+			now: t0.Add(10 * controlplane.AbsenceGracePeriod), wantPlans: []string{"1001", "1002"},
+		},
+		{
+			name: "a deployment that never ran a strategy stays empty", strategies: []controlplane.SourceStrategy{},
+			now: t0, wantPlans: []string{},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+				Strategies: test.strategies, Planner: &recordingPlanner{facts: queryFacts(t)},
+				LastGood: test.lastGood, PreviousDispositions: test.previous, Now: test.now,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := catalogStrategyIDs(catalog); !reflect.DeepEqual(got, test.wantPlans) {
+				t.Fatalf("catalog plans=%v, want %v", got, test.wantPlans)
+			}
+			var strategyDispositions []controlplane.ObjectDisposition
+			for _, disposition := range catalog.Dispositions {
+				if disposition.Scope == "STRATEGY" {
+					strategyDispositions = append(strategyDispositions, disposition)
+				}
+			}
+			if !reflect.DeepEqual(strategyDispositions, test.wantStrategy) {
+				t.Fatalf("strategy dispositions=%#v, want %#v", strategyDispositions, test.wantStrategy)
+			}
+		})
+	}
+}
+
 func ptr[T any](value T) *T { return &value }
 
 func catalogStrategyIDs(catalog controlplane.Catalog) []string {

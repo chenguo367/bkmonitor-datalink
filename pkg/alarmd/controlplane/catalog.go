@@ -626,6 +626,18 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 		now = time.Now()
 	}
 	absentSince := indexAbsentSince(request.PreviousDispositions, request.PendingAbsences)
+	// An active set read whole and empty, with strategies running, is a
+	// source that lost its content - a writer that published an empty list
+	// or a store that answered with none - not a deployment whose every
+	// strategy was deleted at once. Removing them after the grace would stop
+	// every detection the deployment runs on one bad read, so nothing is
+	// removed on it: every strategy keeps executing under PENDING_REMOVAL,
+	// named ACTIVE_SET_EMPTY, until the set lists strategies again. The
+	// absent-alert close refuses the same round for the same reason
+	// (absentalerts.RefusalSnapshotEmpty). A set that shrank is not held:
+	// a bulk deletion is a real one, and a writer's single refusals are
+	// deletions to alarmd.
+	activeSetEmpty := len(observed) == 0 && len(lastGood) > 0
 	for sourceID := range lastGood {
 		if _, found := observed[sourceID]; found {
 			continue
@@ -633,6 +645,17 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 		since, graced := absentSince[sourceID]
 		if !graced {
 			since = now.Unix()
+		}
+		if activeSetEmpty {
+			retained, err := retainLastGood(sourceID)
+			if err != nil {
+				return Catalog{}, err
+			}
+			if retained {
+				catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
+					Disposition: DispositionPendingRemoval, Reason: "ACTIVE_SET_EMPTY", AbsentSince: since})
+			}
+			continue
 		}
 		if now.Unix()-since >= int64(AbsenceGracePeriod/time.Second) {
 			catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: sourceID, Scope: "STRATEGY",
