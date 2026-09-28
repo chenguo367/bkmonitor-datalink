@@ -882,6 +882,7 @@ func sourceRefreshIdentity(
 		ReadMode:            observability.SourceReadMode(result.ReadMode),
 		ReadReason:          observability.SourceReadReason(result.ReadReason),
 		StrategiesRead:      result.StrategiesRead,
+		Build:               observability.SourceRefreshBuild(result.Build),
 		ChangeSignalPresent: result.ChangeSignalPresent, ChangeSignalAgeSeconds: result.ChangeSignalAgeSeconds,
 		RetainedStaleRevisions: result.RetainedStaleRevisions,
 	}

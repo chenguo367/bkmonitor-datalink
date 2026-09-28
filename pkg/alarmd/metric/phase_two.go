@@ -52,6 +52,7 @@ type phaseTwoMetrics struct {
 	sourceRefreshes                *prometheus.CounterVec
 	sourceCompiles                 *prometheus.CounterVec
 	sourceReads                    *prometheus.CounterVec
+	sourceRefreshBuilds            *prometheus.CounterVec
 	sourceStrategiesRead           prometheus.Counter
 	sourceChangeSignalAge          prometheus.Gauge
 	activationFailures             *prometheus.CounterVec
@@ -390,6 +391,13 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 				"round did not end unchanged (pending), the periodic bound on unsignalled changes passed (periodic), " +
 				"the source offered no change signal (missing), or the process remembered no earlier read (elected).",
 		}, []string{"mode", "reason"}),
+		sourceRefreshBuilds: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "source_refresh_build_total",
+			Help: "Source refresh rounds by whether they built their Catalog (rebuilt) or published the previous " +
+				"round's again because nothing it was built from had moved (reused): a skipped read, the same round " +
+				"key, no absence grace ending, and the activation still at that Catalog. On a steady leader almost every " +
+				"round is reused; the periodic full read always rebuilds.",
+		}, []string{"build"}),
 		sourceCompiles: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "source_compile_total",
 			Help: "Strategies a source refresh round asked the compiler about, by whether they were compiled " +
@@ -973,6 +981,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}
 	for _, outcome := range observability.AllSourceReadOutcomes() {
 		metrics.sourceReads.WithLabelValues(string(outcome.Mode), string(outcome.Reason))
+	}
+	for _, build := range observability.SourceRefreshBuilds {
+		metrics.sourceRefreshBuilds.WithLabelValues(string(build))
 	}
 	metrics.legacyMigration = prometheus.NewCounterVec(prometheus.CounterOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "legacy_active_qg_migration_total", Help: "One-time legacy Active QG migration outcomes."}, []string{"result", "reason_class"})
 	metrics.legacyMigrationScan = prometheus.NewHistogram(prometheus.HistogramOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "legacy_active_qg_migration_scan_keys", Help: "Redis keys scanned by one-time legacy Active QG migration.", Buckets: legacyMigrationScanBuckets})
@@ -1660,7 +1671,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.slotReadiness.slack, m.slotReadiness.boundary,
 		m.slotTiming, m.slotWait,
 		m.work, m.busy, m.lastProgress, m.capacity, m.stateWriteReuse, m.stateWriteChange, m.stateAlreadyApplied, m.stateVersionConflict, m.sourceObservations, m.sourceRefreshes, m.sourceCompiles,
-		m.sourceReads, m.sourceStrategiesRead, m.sourceChangeSignalAge,
+		m.sourceReads, m.sourceRefreshBuilds, m.sourceStrategiesRead, m.sourceChangeSignalAge,
 		m.activationFailures, m.unmappedSeverity,
 		m.ownedQueryGroups, m.ownershipTransitions, m.ownershipRefusals,
 		m.queryAdmission,
@@ -1705,6 +1716,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		}
 		if facts.ReusedStrategies > 0 {
 			m.sourceCompiles.WithLabelValues("reused").Add(float64(facts.ReusedStrategies))
+		}
+		if slices.Contains(observability.SourceRefreshBuilds, facts.Build) {
+			m.sourceRefreshBuilds.WithLabelValues(string(facts.Build)).Inc()
 		}
 		if observability.ValidSourceReadOutcome(facts.ReadMode, facts.ReadReason) {
 			m.sourceReads.WithLabelValues(string(facts.ReadMode), string(facts.ReadReason)).Inc()

@@ -432,6 +432,21 @@ type CatalogRetention struct {
 	LevelsWithSlackRecoveryDominant int
 }
 
+// BuildCatalog builds the Catalog a round publishes. It is a pure function of
+// these inputs and nothing else; SourceReconciler.reusableFor lets a round
+// stand on the previous one's Catalog when each is held still, and names what
+// holds each. An input added here has to be added there:
+//
+//   - Strategies: the observation (held by a skipped read);
+//   - the round key - OutputProtocol, the planner's round identity,
+//     TargetSources, NoDataPolicy (catalogRoundKey, the candidate cache's own);
+//   - LastGood and PreviousDispositions (held by the activation head and
+//     this process being the one writer);
+//   - PendingAbsences (none after an UNCHANGED round);
+//   - Now: read only for the absence grace (absenceGraceEnd).
+//
+// The deployment's admission and the runtime retention that follow it read
+// the Catalog, LastGood and static configuration only.
 func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	if request.Planner == nil || request.Strategies == nil {
 		return Catalog{}, errors.New("alarmd controlplane: incomplete catalog build request")
@@ -637,6 +652,35 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 // compilerForRound resolves the compiler the round compiles with. A
 // round-scoped compiler hands out one frozen over its facts as they are now;
 // any other compiler is its own round compiler with an empty identity.
+// catalogRoundKey is everything a round's Catalog depends on besides its
+// observation, its last good publication and the clock: the key the candidate
+// cache empties itself by (beginRound), in one string.
+func catalogRoundKey(planner PrimaryQueryCompiler, protocol string, sources TargetSources, policy NoDataPolicy) (string, error) {
+	_, compilerIdentity, err := compilerForRound(planner)
+	if err != nil {
+		return "", err
+	}
+	return strings.Join([]string{protocol, compilerIdentity, sources.key(), policy.key()}, "\x00"), nil
+}
+
+// absenceGraceEnd is the first moment a Catalog built from these dispositions
+// changes with every input the same: the earliest end of the grace a strategy
+// absent from the source serves under PENDING_REMOVAL before it leaves. Zero
+// when none is serving one.
+func absenceGraceEnd(dispositions []ObjectDisposition) time.Time {
+	var end time.Time
+	for _, disposition := range dispositions {
+		if disposition.Scope != "STRATEGY" || disposition.Disposition != DispositionPendingRemoval || disposition.AbsentSince <= 0 {
+			continue
+		}
+		at := time.Unix(disposition.AbsentSince, 0).Add(AbsenceGracePeriod)
+		if end.IsZero() || at.Before(end) {
+			end = at
+		}
+	}
+	return end
+}
+
 func compilerForRound(planner PrimaryQueryCompiler) (PrimaryQueryCompiler, string, error) {
 	scoped, ok := planner.(RoundScopedCompiler)
 	if !ok {
