@@ -15,6 +15,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
 	"github.com/go-redis/redis/v8"
@@ -297,5 +298,45 @@ func TestCLISlotEvidenceMatchesSlotAndReadsSamplesWithNoSampler(t *testing.T) {
 	client.LPush(ctx, prefix+":diag:v1:"+qg, strings.Repeat("x", 4097))
 	if _, err = read(ctx, execution.SlotIdentity{QueryGroup: execution.QueryGroupIdentity(qg), EvaluationTime: 60}); !errors.Is(err, obchannel.ErrSlotBudgetExceeded) {
 		t.Fatalf("oversize list member: %v", err)
+	}
+}
+
+// Through the CLI as built for a deployment: slot.get on a historical Slot
+// sets the catalog's latest publication beside the Slot's own and explains
+// the difference, so the reader does not stop on it. The latest is the one
+// the catalog names now, not the Slot's.
+func TestSlotGetThroughTheBuiltCLICarriesTheLatestPublication(t *testing.T) {
+	cfg, client, slot, repo := cliSlotFixture(t)
+	ctx := context.Background()
+	latest, err := repo.LoadLatestPublication(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg.Redis.Address = client.Options().Addr
+	cfg.PhaseTwo.Worker.ID = "test-worker"
+	cfg.PhaseTwo.Access.UQEndpoint = "http://127.0.0.1:1"
+	cfg.CLI = config.CLIConfig{Enabled: true, EnvironmentID: "test", EnvironmentName: "Test",
+		PublicBaseURL: "https://ob.example/alarmd/", AdminKey: strings.Repeat("k", 40)}
+	h, closeCLI, _ := buildPhaseTwoCLI(cfg, standInAPI(), repo, nil, nil, func() *observability.RuntimeConfigFacts { return nil },
+		cliControlBinding{Incarnation: "test-process", PublicWindows: windowsStandIn})
+	t.Cleanup(func() { _ = closeCLI() })
+	session := openCLISession(t, h, cfg)
+	revision := cliDiscover(t, h, session.AccessToken)
+	out := cliCall(t, h, session.AccessToken, map[string]any{"channel_version": obchannel.Version, "mode": "invoke", "operation": "slot.get",
+		"params": map[string]any{"query_group": string(slot.QueryGroup), "evaluation_time": slot.EvaluationTime}, "expected_catalog_revision": revision})
+	if out.Error != nil {
+		t.Fatalf("slot.get through the CLI failed: %+v", out.Error)
+	}
+	raw, _ := json.Marshal(out.Result)
+	var view obchannel.SlotGetResult
+	if err := json.Unmarshal(raw, &view); err != nil {
+		t.Fatal(err)
+	}
+	if view.LatestPublication == nil || view.LatestPublication.SnapshotRevision != latest.SnapshotRevision ||
+		view.LatestPublication.PublicationEpoch != latest.PublicationEpoch || view.LatestPublication.SameAsSlot {
+		t.Fatalf("latest publication = %+v, want the catalog's %+v beside an older Slot %s", view.LatestPublication, latest, view.Slot.SnapshotRevision)
+	}
+	if view.Slot.SnapshotRevision == latest.SnapshotRevision || view.SnapshotNote == "" {
+		t.Fatalf("the historical Slot is not told apart from the latest: slot %s note %q", view.Slot.SnapshotRevision, view.SnapshotNote)
 	}
 }

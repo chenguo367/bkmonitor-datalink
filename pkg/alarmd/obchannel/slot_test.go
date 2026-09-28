@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -165,5 +166,49 @@ func TestObjectNextUsesOnlyKnownSlotIdentity(t *testing.T) {
 	}})
 	if len(out.Next) != 1 || out.Next[0].Operation != "slot.get" || out.Next[0].Params["evaluation_time"] != int64(14) {
 		t.Fatal(out.Next)
+	}
+}
+
+// The Slot names the publication its Segment began under. Beside the latest
+// one it says whether they are the same, and explains the difference only
+// when there is one; a latest publication that cannot be read is said, and
+// no latest is claimed.
+func TestSlotGetSetsTheLatestPublicationBesideTheSlotsOwn(t *testing.T) {
+	plan := slotFixture(t)
+	client, err := uq.NewDiagnosticClient("http://127.0.0.1:1", "fixture", http.DefaultClient)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := SlotPublication{SnapshotRevision: "newer", PublicationEpoch: 20}
+	var latestErr error
+	get := SlotOperations(SlotOptions{Resolve: func(context.Context, execution.SlotIdentity) (SlotPlan, error) { return plan, nil }, UQ: client,
+		LatestPublication: func(context.Context) (SlotPublication, error) { return latest, latestErr }})[0]
+	p := jsonParams(t, slotParams(slotContext(plan)))
+
+	view := get.Run(context.Background(), p).Value.(SlotGetResult)
+	if view.LatestPublication == nil || view.LatestPublication.SnapshotRevision != "newer" || view.LatestPublication.PublicationEpoch != 20 ||
+		view.LatestPublication.SameAsSlot || view.Slot.SnapshotRevision != "snapshot" {
+		t.Fatalf("latest beside the Slot = %+v (slot %s)", view.LatestPublication, view.Slot.SnapshotRevision)
+	}
+	if !strings.Contains(view.SnapshotNote, "schedule Segment began under") || !strings.Contains(view.SnapshotNote, "object_digest") {
+		t.Fatalf("an older Slot publication is not explained: %q", view.SnapshotNote)
+	}
+
+	latest = SlotPublication{SnapshotRevision: "snapshot", PublicationEpoch: 19}
+	view = get.Run(context.Background(), p).Value.(SlotGetResult)
+	if view.LatestPublication == nil || !view.LatestPublication.SameAsSlot || view.SnapshotNote != "" {
+		t.Fatalf("the same publication was explained as different: %+v %q", view.LatestPublication, view.SnapshotNote)
+	}
+
+	latestErr = errors.New("catalog unavailable")
+	out := get.Run(context.Background(), p)
+	view = out.Value.(SlotGetResult)
+	if view.LatestPublication != nil || view.SnapshotNote != "" || !strings.Contains(strings.Join(out.Limitations, "\n"), "latest publication could not be read") {
+		t.Fatalf("an unreadable latest publication was not said: %+v %v", view.LatestPublication, out.Limitations)
+	}
+
+	without := SlotOperations(SlotOptions{Resolve: func(context.Context, execution.SlotIdentity) (SlotPlan, error) { return plan, nil }, UQ: client})[0]
+	if view := without.Run(context.Background(), p).Value.(SlotGetResult); view.LatestPublication != nil || view.SnapshotNote != "" {
+		t.Fatalf("a latest publication was claimed with no reader: %+v", view)
 	}
 }

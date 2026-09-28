@@ -22,7 +22,29 @@ type SlotOptions struct {
 	Resolve  func(context.Context, execution.SlotIdentity) (SlotPlan, error)
 	Evidence func(context.Context, execution.SlotIdentity) (SlotEvidence, error)
 	UQ       *uq.DiagnosticClient
+	// LatestPublication, when set, reads the newest publication, the one
+	// strategy.get reports, so a Slot's older snapshot_revision is read
+	// beside it rather than taken for a fault.
+	LatestPublication func(context.Context) (SlotPublication, error)
 }
+
+// SlotPublication is a publication by its content revision and epoch.
+type SlotPublication struct {
+	SnapshotRevision execution.SnapshotRevision `json:"snapshot_revision"`
+	PublicationEpoch uint64                     `json:"publication_epoch"`
+	// SameAsSlot is whether it is the publication the Slot's Segment began
+	// under.
+	SameAsSlot bool `json:"same_as_slot"`
+}
+
+// slotSnapshotNote says why a Slot names an older publication than the
+// latest: its snapshot_revision is the publication its schedule Segment
+// began under, and a later publication that leaves the Query Group's query
+// and schedule as they were keeps the Segment. Two readers of the first
+// acceptance stopped on the difference and asked.
+const slotSnapshotNote = "slot.snapshot_revision is the publication this Slot's schedule Segment began under (at schedule_segment_start). " +
+	"A later publication that leaves this Query Group's query and schedule unchanged keeps the Segment, so the Slot can name an older " +
+	"publication than latest_publication while its object_digest is the one running now; a change of query or schedule starts a new Segment."
 
 type SlotContext struct {
 	QueryGroup       execution.QueryGroupIdentity `json:"query_group"`
@@ -50,11 +72,15 @@ type SlotQueryPlan struct {
 }
 
 type SlotGetResult struct {
-	Kind                    string          `json:"kind"`
-	Slot                    SlotContext     `json:"slot"`
-	Queries                 []SlotQueryPlan `json:"queries"`
-	Retained                SlotEvidence    `json:"retained"`
-	HistoricalInputComplete bool            `json:"historical_input_complete"`
+	Kind string      `json:"kind"`
+	Slot SlotContext `json:"slot"`
+	// LatestPublication is the newest publication beside the Slot's own,
+	// and SnapshotNote why the two differ, present only when they do.
+	LatestPublication       *SlotPublication `json:"latest_publication,omitempty"`
+	SnapshotNote            string           `json:"snapshot_note,omitempty"`
+	Queries                 []SlotQueryPlan  `json:"queries"`
+	Retained                SlotEvidence     `json:"retained"`
+	HistoricalInputComplete bool             `json:"historical_input_complete"`
 }
 
 type SlotQueryResult struct {
@@ -119,6 +145,17 @@ func SlotOperations(options SlotOptions) []Operation {
 			next := slotParams(result.Slot)
 			next["contract_digest"], next["physical_query_digest"], next["request_digest"] = result.Slot.ContractDigest, string(query.Spec.Digest), preview.RequestDigest
 			out.Next = append(out.Next, Call{Operation: "slot.query", Params: next, Reason: "选取此物理查询按原条件重查UQ；默认通过控制面定位当前owner，结果属于本次查询。"})
+		}
+		if options.LatestPublication != nil {
+			if latest, err := options.LatestPublication(ctx); err == nil {
+				latest.SameAsSlot = latest.SnapshotRevision == result.Slot.SnapshotRevision
+				result.LatestPublication = &latest
+				if !latest.SameAsSlot {
+					result.SnapshotNote = slotSnapshotNote
+				}
+			} else {
+				out.Limitations = append(out.Limitations, "The latest publication could not be read; slot.snapshot_revision is the publication the Slot's Segment began under, not necessarily the latest.")
+			}
 		}
 		if options.Evidence != nil {
 			evidence, err := options.Evidence(ctx, plan.Contract.Slot)
