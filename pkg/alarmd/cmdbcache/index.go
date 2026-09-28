@@ -134,9 +134,10 @@ type Index struct {
 }
 
 // MappingStats describes one published business mapping the index read:
-// the entries held, the fields left out as not a positive business or past
-// the bound, and whether the latest load could not read it or read it empty
-// after one that held entries (the entries are then an earlier load's).
+// the entries held, the fields the latest load that read the hash left out
+// as not a positive business or past the bound, and whether the latest load
+// could not read it or read it empty after one that held entries (the
+// entries are then an earlier load's).
 type MappingStats struct {
 	Held       int
 	Refused    int
@@ -214,6 +215,9 @@ func (mapping businessMapping) carriedFrom(previous businessMapping) businessMap
 		previous.readFailed = true
 		return previous
 	case len(mapping.entries) == 0 && len(previous.entries) > 0:
+		// This load read the hash: what it left out is its own count, and a
+		// hash whose every field was refused reads as refused, not as gone.
+		previous.refused, previous.truncated = mapping.refused, mapping.truncated
 		previous.readFailed, previous.emptied = false, true
 		return previous
 	}
@@ -362,7 +366,8 @@ func (index *Index) NamespaceBusinessStats() MappingStats {
 }
 
 // carryOptional takes over, from the index this one replaces, the optional
-// mappings this load could not read.
+// mappings this load could not read or read empty while that index held
+// entries (see carriedFrom).
 func (index *Index) carryOptional(previous *Index) {
 	if index == nil || previous == nil {
 		return

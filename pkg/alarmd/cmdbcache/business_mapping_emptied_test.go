@@ -72,6 +72,22 @@ func TestAMappingReadEmptyAfterOneThatHeldEntriesKeepsThem(t *testing.T) {
 	}
 }
 
+// A hash whose every field is refused holds no entry either, and the
+// entries before are carried the same way; what this load refused is its
+// own count, so a writer publishing only values that are not a business
+// reads apart from one that published nothing.
+func TestAMappingWhoseEveryFieldIsRefusedKeepsTheEntriesAndCountsTheRefusal(t *testing.T) {
+	client := &hashClient{hashes: map[string][]string{emptiedClusterKey: {"BCS-K8S-00001", "11"}}}
+	store := refreshingMappingStore(t, client)
+	mustRefresh(t, store)
+
+	client.hashes[emptiedClusterKey] = []string{"BCS-K8S-00002", "0", "BCS-K8S-00003", "not-a-business"}
+	mustRefresh(t, store)
+	if stats := store.Health().ClusterBusinessMapping; stats != (MappingStats{Held: 1, Refused: 2, Emptied: true}) {
+		t.Fatalf("mapping with every field refused: %+v, want the one entry carried and this load's two refusals", stats)
+	}
+}
+
 // A mapping never held stays empty: that is a writer not publishing it yet,
 // not one that lost it.
 func TestAMappingEmptyOnEveryLoadStaysEmpty(t *testing.T) {
