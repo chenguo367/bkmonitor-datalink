@@ -495,7 +495,45 @@ func (l CompiledLevel) Detectors() []DetectorSpec {
 	return append([]DetectorSpec(nil), l.detectors...)
 }
 
-func (l CompiledLevel) Algorithms() []CompiledAlgorithmPlan {
+func (l CompiledLevel) Algorithms() AlgorithmList {
+	return AlgorithmList{algorithms: l.algorithms}
+}
+
+// AlgorithmList is a Level's compiled algorithms, read-only, as LevelList is
+// a Plan's Levels: each can be read, none replaced, reordered or appended to,
+// and a caller that needs a slice of its own asks for one with Copy.
+//
+// Algorithms copied the whole slice on every call, from every stage that
+// walks a Level's algorithms for every series of every Slot -- 1.1% of a
+// replica's allocation -- for seven callers that all only read it.
+type AlgorithmList struct {
+	algorithms []CompiledAlgorithmPlan
+}
+
+// Len is the number of algorithms.
+func (l AlgorithmList) Len() int { return len(l.algorithms) }
+
+// At is the algorithm at index, as a value: changing it does not change the
+// Level.
+func (l AlgorithmList) At(index int) CompiledAlgorithmPlan { return l.algorithms[index] }
+
+// All yields each algorithm with its index, in order, as range does over a
+// slice.
+func (l AlgorithmList) All() iter.Seq2[int, CompiledAlgorithmPlan] {
+	return func(yield func(int, CompiledAlgorithmPlan) bool) {
+		for index := range l.algorithms {
+			if !yield(index, l.algorithms[index]) {
+				return
+			}
+		}
+	}
+}
+
+// Copy is a slice of the algorithms the caller owns.
+func (l AlgorithmList) Copy() []CompiledAlgorithmPlan {
+	if l.algorithms == nil {
+		return nil
+	}
 	return append([]CompiledAlgorithmPlan(nil), l.algorithms...)
 }
 

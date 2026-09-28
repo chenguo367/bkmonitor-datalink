@@ -2615,7 +2615,7 @@ func (runtime *RedisCatalogRuntime) slotRequirements(
 		explicitPrimary := make(map[uint32]map[execution.RequirementID]struct{})
 		for _, level := range due.CompiledPlan.Levels().All() {
 			levelID := level.Definition().LevelID
-			for _, algorithm := range level.Algorithms() {
+			for _, algorithm := range level.Algorithms().All() {
 				algorithmRequirements := algorithm.InputRequirements()
 				if len(algorithmRequirements) == 0 {
 					continue

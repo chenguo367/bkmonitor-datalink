@@ -258,7 +258,7 @@ func primaryOnlyInput(request execution.EvaluationRequest, record contract.Canon
 func g4Input(t *testing.T, request execution.EvaluationRequest, records map[string][]contract.CanonicalRecordV2) execution.SeriesEvaluationInputRequest {
 	t.Helper()
 	consumer := execution.ConsumerRef{Plan: request.Header.DuePlans[0].Identity, LevelID: 5, HasLevel: true}
-	algorithm := request.Header.DuePlans[0].CompiledPlan.Levels().At(0).Algorithms()[0]
+	algorithm := request.Header.DuePlans[0].CompiledPlan.Levels().At(0).Algorithms().At(0)
 	input := execution.SeriesEvaluationInputRequest{Contract: request.Header.Contract, Consumer: consumer,
 		SeriesIdentity: execution.SeriesIdentityDigest(request.State.Items[0].Identity.SeriesIdentityDigest)}
 	for _, requirement := range algorithm.InputRequirements() {
