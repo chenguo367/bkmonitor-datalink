@@ -180,14 +180,14 @@ func TestAGroupTheSchedulerHeldIsHeldNotMissing(t *testing.T) {
 		t.Fatalf("a group held by its cooldown all window = %+v, want it and its Plan held, nothing unseen or untracked, the window complete", coverage)
 	}
 
-	// A group that ran as well as being held is not held: a round of it ran
-	// without evaluating its due Plan, and that Plan's cost is missing.
+	// A group that ran as well as being held is not itself held; whether its
+	// unevaluated due Plan is, the Plan-level rule decides (below).
 	c, now = costDueFixture(t, costMinute, costHourly)
 	held(c, "minute", "query_cooldown")
 	ran(c, "minute", CostPlanIdentity{})
 	c.Publish(*now)
-	if coverage := c.Snapshot().Coverage; coverage.HeldDuePlans != 0 || coverage.UnobservedDuePlans != 1 || !coverage.Incomplete {
-		t.Fatalf("a group that ran and was held, its due Plan unevaluated = %+v, want the Plan unseen and the window incomplete", coverage)
+	if coverage := c.Snapshot().Coverage; coverage.HeldDueGroups != 0 || coverage.ObservedGroups != 1 {
+		t.Fatalf("a group that ran and was held = %+v, want it observed, not held", coverage)
 	}
 
 	c, now = costDueFixture(t, costMinute, costHourly)
@@ -259,11 +259,12 @@ func TestWhatWasDueAndWentUnseenIsNamedWithItsGroupsCounts(t *testing.T) {
 	c.Observe(context.Background(), Observation{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal,
 		RunOutcome: "query_cooldown", Trace: TraceFields{QueryGroupKey: "minute"}})
 	ran(c, "minute", CostPlanIdentity{})
+	committed(c, "minute")
 	c.Publish(*now)
 	sample = c.Snapshot().Coverage.UnobservedDueSample
-	want := CostDueMiss{Scope: "strategy_owned", QueryGroupKey: "minute", Plan: costA, Observations: 1, RunReturns: 1, HeldRounds: 1}
+	want := CostDueMiss{Scope: "strategy_owned", QueryGroupKey: "minute", Plan: costA, Observations: 2, RunReturns: 1, HeldRounds: 1, ProgressCommits: 1}
 	if len(sample) != 1 || sample[0] != want {
-		t.Fatalf("a group that ran and was held, its Plan unevaluated = %+v, want %+v", sample, want)
+		t.Fatalf("a group that was held and completed a round without its Plan = %+v, want %+v", sample, want)
 	}
 
 	// Five groups unseen, each with its Plan: ten misses, the first eight named.
@@ -331,5 +332,94 @@ func TestTwoPlansOfAGroupAreKeptInStrategyOrderWhicheverArrivesFirst(t *testing.
 		if len(kept) != 2 || kept[0] != first || kept[1] != second {
 			t.Fatalf("arriving %s then %s = %+v, want 1001 before 1002", arrival[0].Plan.StrategyID, arrival[1].Plan.StrategyID, kept)
 		}
+	}
+}
+
+// committed reports one round of the group completed and its progress
+// committed.
+func committed(c *CostSummary, group string) {
+	c.Observe(context.Background(), Observation{Stage: StageProgressCommitted, Result: ResultSuccess, ProgressCompletionKind: "FULL_COMPLETED",
+		Trace: TraceFields{QueryGroupKey: group, QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", EvaluationTime: 1320}})
+}
+
+// A due Plan its group did not evaluate is held when the group's only work
+// in the window was attempts that evaluated nothing, failed nothing and
+// completed no round, around rounds the scheduler held - the probe a query
+// cooldown lets through, returned not ready, which is what a replica read
+// incomplete for with nothing missing. Any evaluation in the group, a
+// failed return, a completed round, or no held round at all, and the Plan
+// is unseen: the group ran, and the Plan's cost is missing.
+func TestADuePlanIsHeldOnlyWhenItsGroupDidNothingButProbes(t *testing.T) {
+	pair := CostGroup{QueryGroupKey: "pair", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", Members: []CostPlanIdentity{costA, costB},
+		Schedules: []CostSchedule{{Plan: costA, IntervalSeconds: 60, CompletionOffsetSeconds: 60}, {Plan: costB, IntervalSeconds: 60, CompletionOffsetSeconds: 60}}}
+	trace := TraceFields{QueryGroupKey: "pair", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", EvaluationTime: 1320}
+	heldRound := func(c *CostSummary) {
+		c.Observe(context.Background(), Observation{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal,
+			RunOutcome: "query_cooldown", Trace: TraceFields{QueryGroupKey: "pair"}})
+	}
+	started := func(c *CostSummary) {
+		c.Observe(context.Background(), Observation{Stage: StageSlotStarted, Result: ResultStarted, Trace: trace})
+	}
+	returned := func(c *CostSummary, failed bool) {
+		o := Observation{Stage: StageSlotCompleted, Result: ResultSuccess, Duration: time.Millisecond, DurationKnown: true, Trace: trace}
+		if failed {
+			o.Result = ResultFailed
+		}
+		c.Observe(context.Background(), o)
+	}
+	evaluated := func(c *CostSummary, plan CostPlanIdentity) {
+		c.Observe(context.Background(), Observation{Stage: StageEvaluationCompleted, Result: ResultSuccess, Duration: time.Millisecond, DurationKnown: true,
+			EvaluationOwner: plan, EvaluationRecordsKnown: true, Trace: trace})
+	}
+	for _, testCase := range []struct {
+		name       string
+		window     func(c *CostSummary)
+		held, seen int
+	}{
+		{"held, one probe returned not ready", func(c *CostSummary) { heldRound(c); started(c); returned(c, false) }, 2, 0},
+		{"held, a probe still in flight", func(c *CostSummary) { heldRound(c); started(c) }, 2, 0},
+		{"held, and the other Plan evaluated", func(c *CostSummary) { heldRound(c); started(c); returned(c, false); evaluated(c, costB) }, 0, 1},
+		{"held, and a round that failed", func(c *CostSummary) { heldRound(c); started(c); returned(c, true) }, 0, 2},
+		{"held, and a round completed", func(c *CostSummary) { heldRound(c); started(c); returned(c, false); committed(c, "pair") }, 0, 2},
+		{"never held, a round that evaluated nothing", func(c *CostSummary) { started(c); returned(c, false) }, 0, 2},
+	} {
+		c, now := costDueFixture(t, pair)
+		testCase.window(c)
+		c.Publish(*now)
+		coverage := c.Snapshot().Coverage
+		if coverage.HeldDuePlans != testCase.held || coverage.UnobservedDuePlans != testCase.seen || coverage.Incomplete != (testCase.seen > 0) {
+			t.Errorf("%s = held %d unseen %d incomplete %v, want held %d unseen %d", testCase.name, coverage.HeldDuePlans, coverage.UnobservedDuePlans,
+				coverage.Incomplete, testCase.held, testCase.seen)
+		}
+	}
+}
+
+// The four conditions are read over the whole window, both buckets: a round
+// committed in the earlier bucket, before a cooldown held the later one,
+// leaves the due Plans unseen. And a miss in a group never held carries that
+// group's counts, as a miss in a held one does.
+func TestAHeldProbeIsReadOverTheWholeWindowAndAMissCarriesItsGroupsCounts(t *testing.T) {
+	pair := CostGroup{QueryGroupKey: "pair", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", Members: []CostPlanIdentity{costA, costB},
+		Schedules: []CostSchedule{{Plan: costA, IntervalSeconds: 60, CompletionOffsetSeconds: 60}, {Plan: costB, IntervalSeconds: 60, CompletionOffsetSeconds: 60}}}
+	trace := TraceFields{QueryGroupKey: "pair", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", EvaluationTime: 1320}
+	c, now := costDueFixture(t, pair)
+	*now = time.Unix(1000, 0)
+	committed(c, "pair")
+	*now = time.Unix(1440, 0)
+	c.Observe(context.Background(), Observation{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal,
+		RunOutcome: "query_cooldown", Trace: TraceFields{QueryGroupKey: "pair"}})
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.HeldDuePlans != 0 || coverage.UnobservedDuePlans != 2 || !coverage.Incomplete {
+		t.Fatalf("a round committed in the earlier bucket, held in the later = held %d unseen %d, want both Plans unseen", coverage.HeldDuePlans, coverage.UnobservedDuePlans)
+	}
+
+	c, now = costDueFixture(t, pair)
+	c.Observe(context.Background(), Observation{Stage: StageSlotStarted, Result: ResultStarted, Trace: trace})
+	c.Observe(context.Background(), Observation{Stage: StageSlotCompleted, Result: ResultSuccess, Duration: time.Millisecond, DurationKnown: true, Trace: trace})
+	c.Publish(*now)
+	sample := c.Snapshot().Coverage.UnobservedDueSample
+	want := CostDueMiss{Scope: "strategy_owned", QueryGroupKey: "pair", Plan: costA, Observations: 2, Attempts: 1, RunReturns: 1}
+	if len(sample) != 2 || sample[0] != want {
+		t.Fatalf("a never-held group's round that evaluated nothing = %+v, want its Plans named with the group's counts %+v", sample, want)
 	}
 }

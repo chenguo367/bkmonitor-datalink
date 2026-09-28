@@ -391,6 +391,7 @@ type CostDueMiss struct {
 	FailedRunReturns uint64           `json:"failed_run_returns"`
 	Evaluations      uint64           `json:"evaluations"`
 	HeldRounds       uint64           `json:"held_rounds"`
+	ProgressCommits  uint64           `json:"progress_commits"`
 }
 
 // compareDueMiss orders misses by group key, then the group before its
@@ -429,6 +430,7 @@ func costDueMissOf(group *costGroupState, plan *costPlanState, windows costWindo
 		miss.FailedRunReturns += s.FailedRunReturns
 		miss.Evaluations += s.Evaluations
 		miss.HeldRounds += s.HeldRounds
+		miss.ProgressCommits += s.ProgressCommits
 	}
 	return miss
 }
@@ -971,16 +973,34 @@ func (c *CostSummary) Publish(now time.Time) {
 	dueStart, dueEnd := snapshot.WindowStart.Unix(), snapshot.WindowEnd.Unix()
 	// A group the window has no work of and whose rounds the scheduler held
 	// is held, not unseen; its Plans with it.
+	//
+	// Its Plans are held too when the group's only work was attempts that
+	// evaluated nothing, failed nothing and completed no round - the probe a
+	// query cooldown lets through, returned not ready. A group held by its
+	// cooldown for all but that one probe read incomplete with its due Plans
+	// unevaluated, though nothing ran that the window missed. An evaluation
+	// of any Plan of the group, a failed return or a committed round, and
+	// its unevaluated due Plans are unseen as before: the group did run, and
+	// a Plan's cost is missing - a round that completed without evaluating
+	// a due Plan above all.
 	held := make(map[*costGroupState]bool)
+	plansHeld := make(map[*costGroupState]bool)
 	groupWindows := make(map[*costGroupState]costWindows)
 	for i := range copies {
 		if copies[i].plan != nil {
 			continue
 		}
 		groupWindows[copies[i].group] = copies[i].windows
-		if w := copies[i].windows; w.current.Observations+w.previous.Observations == 0 &&
-			w.current.HeldRounds+w.previous.HeldRounds > 0 {
+		w := copies[i].windows
+		if w.current.HeldRounds+w.previous.HeldRounds == 0 {
+			continue
+		}
+		if w.current.Observations+w.previous.Observations == 0 {
 			held[copies[i].group] = true
+		}
+		if w.current.Evaluations+w.previous.Evaluations == 0 && w.current.FailedRunReturns+w.previous.FailedRunReturns == 0 &&
+			w.current.ProgressCommits+w.previous.ProgressCommits == 0 {
+			plansHeld[copies[i].group] = true
 		}
 	}
 	var misses []CostDueMiss
@@ -1022,7 +1042,7 @@ func (c *CostSummary) Publish(now time.Time) {
 				snapshot.Coverage.DuePlans++
 				switch {
 				case observed:
-				case held[entry.group]:
+				case plansHeld[entry.group]:
 					snapshot.Coverage.HeldDuePlans++
 				default:
 					snapshot.Coverage.UnobservedDuePlans++
