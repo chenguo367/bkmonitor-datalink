@@ -233,6 +233,28 @@ func TestMalformedAndOversizedEnvelopeNeverAdmitted(t *testing.T) {
 	}
 }
 
+// The CMDB families' identities reach the evidence service from the
+// operation's parameters. With no CMDB cache wired a host the service was
+// handed reads as not configured, and one it was not handed as invalid
+// input, so the two tell the parameter apart from its absence.
+func TestTheStoreOperationHandsTheCMDBIdentitiesOn(t *testing.T) {
+	var inspect Operation
+	for _, op := range StoreOperations(obevidence.New(obevidence.Options{})) {
+		if op.ID == "store.inspect" {
+			inspect = op
+		}
+	}
+	for params, want := range map[string]Params{
+		"host":             {"family": "cmdb_host", "host": "101"},
+		"service_instance": {"family": "cmdb_service_instance", "service_instance": "501"},
+	} {
+		result, _ := inspect.Run(context.Background(), want).Value.(obevidence.Result)
+		if result.Status != "not_configured" {
+			t.Errorf("%s = %+v, want not_configured: the service was not handed the identity", params, result)
+		}
+	}
+}
+
 func TestStableCatalogAndConditionalSchema(t *testing.T) {
 	ops := StoreOperations(obevidence.New(obevidence.Options{}))
 	c := testChannel(t, &testAuth{}, ops...)
@@ -268,6 +290,12 @@ func TestStableCatalogAndConditionalSchema(t *testing.T) {
 		{"store.inspect", Params{"family": "gap_marker", "query_group": "q", "strategy_id": "1"}, false},
 		{"store.inspect", Params{"family": "no_data_memory", "query_group": "q", "object_digest": strings.Repeat("a", 64)}, false},
 		{"store.inspect", Params{"family": "gap_marker", "query_group": "q", "object_digest": strings.Repeat("a", 64), "strategy_id": "1", "group_id": "g"}, false},
+		{"store.inspect", Params{"family": "cmdb_host", "host": "101"}, true},
+		{"store.inspect", Params{"family": "cmdb_host", "host": "192.0.2.10|0"}, true},
+		{"store.inspect", Params{"family": "cmdb_host"}, false},
+		{"store.inspect", Params{"family": "cmdb_host", "host": "101", "strategy_id": "1"}, false},
+		{"store.inspect", Params{"family": "cmdb_service_instance", "service_instance": "501"}, true},
+		{"store.inspect", Params{"family": "cmdb_service_instance", "host": "101"}, false},
 		{"store.inspect", Params{"family": "query_cooldown", "query_group": "q", "object_digest": strings.Repeat("a", 64)}, false},
 	} {
 		if err := validate(c.ops[tc.operation], tc.params); (err == nil) != tc.valid {
@@ -276,7 +304,7 @@ func TestStableCatalogAndConditionalSchema(t *testing.T) {
 	}
 	_, desc := call(t, c, envelope(c, "describe", "store.inspect", nil))
 	encoded, _ := json.Marshal(desc.Result)
-	for _, word := range []string{"allOf", "additionalProperties", "query_progress", "query_cooldown", "gap_marker", "no_data_memory", "uniqueItems", "max_commands"} {
+	for _, word := range []string{"allOf", "additionalProperties", "query_progress", "query_cooldown", "gap_marker", "no_data_memory", "cmdb_host", "cmdb_service_instance", "uniqueItems", "max_commands"} {
 		if !bytes.Contains(encoded, []byte(word)) {
 			t.Fatalf("schema missing %s", word)
 		}

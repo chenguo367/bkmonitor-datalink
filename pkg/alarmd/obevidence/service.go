@@ -63,7 +63,8 @@ type Options struct {
 	// QueryCooldown is the runtime store under the pool records' prefix: the
 	// record a Query Group's owner keeps of its place in the demoted pool.
 	QueryCooldown RedisBinding
-	// CMDBCache is the platform's host cache, read here only for INFO.
+	// CMDBCache is the platform's host cache: INFO, and one host or service
+	// instance record at a time.
 	CMDBCache RedisBinding
 	Catalog   *controlplane.RedisCatalogRepository
 	Progress  *progress.Store
@@ -84,6 +85,12 @@ type StoreRequest struct {
 	ObjectDigest string `json:"object_digest,omitempty"`
 	Tenant       string `json:"tenant,omitempty"`
 	Business     string `json:"business,omitempty"`
+
+	// Host names one record of the platform's CMDB host hash - its host id
+	// or its "ip|cloud" field - and ServiceInstance one of the service
+	// instance hash, by instance id.
+	Host            string `json:"host,omitempty"`
+	ServiceInstance string `json:"service_instance,omitempty"`
 }
 type ConfigRequest struct {
 	View         string `json:"view"`
@@ -224,6 +231,8 @@ func (service *Service) Store(ctx context.Context, request StoreRequest) Result 
 		return r
 	case FamilyDynamicConfig:
 		return service.dynamicConfig(ctx, request)
+	case FamilyCMDBHost, FamilyCMDBServiceInstance:
+		return service.cmdbRecord(ctx, request)
 	case FamilyQueryProgress:
 		binding := service.options.QueryProgress
 		if !identifier(request.QueryGroup) || request.StrategyID != "" || request.GroupID != "" || len(request.Fields) > 0 {
