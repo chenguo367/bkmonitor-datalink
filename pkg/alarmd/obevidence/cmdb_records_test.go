@@ -63,9 +63,11 @@ func TestACMDBRecordIsReadAsWrittenAndAsAlarmdDecodesIt(t *testing.T) {
 	if err := client.HSet(ctx, hosts, "103", strings.Repeat("x", MaxDocumentBytes+1), "105", strings.Repeat("y", MaxDocumentBytes)).Err(); err != nil {
 		t.Fatal(err)
 	}
-	// 502 names no id of its own: a load files it under its field.
+	// 502 names no id of its own: a load files it under its field. 503 names
+	// one that is not its field, and keeps it.
 	if err := client.HSet(ctx, instances, "501", `{"service_instance_id":501,"bk_host_id":101,"ip":"192.0.2.10","bk_cloud_id":0}`,
-		"502", `{"bk_host_id":101,"ip":"192.0.2.10","bk_cloud_id":0}`).Err(); err != nil {
+		"502", `{"bk_host_id":101,"ip":"192.0.2.10","bk_cloud_id":0}`,
+		"503", `{"service_instance_id":9,"bk_host_id":101,"ip":"192.0.2.10","bk_cloud_id":0}`).Err(); err != nil {
 		t.Fatal(err)
 	}
 	if err := client.Expire(ctx, instances, time.Minute).Err(); err != nil {
@@ -152,6 +154,11 @@ func TestACMDBRecordIsReadAsWrittenAndAsAlarmdDecodesIt(t *testing.T) {
 	loadedInstance, found := index.LookupServiceInstance("502")
 	if got, _ := unnamed.Value.(CMDBRecord); unnamed.Status != "ok" || !found || got.Decoded.(map[string]any)["id"] != "502" || loadedInstance.ID != "502" {
 		t.Fatalf("an instance naming no id = %+v value %+v, want its field's id, as the loaded index files it", unnamed, unnamed.Value)
+	}
+	named := service.Store(ctx, StoreRequest{Family: FamilyCMDBServiceInstance, ServiceInstance: "503"})
+	loadedNamed, found := index.LookupServiceInstance("503")
+	if got, _ := named.Value.(CMDBRecord); named.Status != "ok" || !found || got.Decoded.(map[string]any)["id"] != "9" || loadedNamed.ID != "9" {
+		t.Fatalf("an instance naming its own id = %+v value %+v, want that id over its field's, as the loaded index keeps it", named, named.Value)
 	}
 
 	// The whole cache gone reads apart from one record gone.
