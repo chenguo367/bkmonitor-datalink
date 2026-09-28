@@ -26,10 +26,12 @@ type SourceIdentity struct {
 	TenantID   string
 	BusinessID string
 	SpaceScope string
-	// GlobalBusiness is the strategy document's is_global_biz: the writer's
-	// word that the strategy's business is a global business, whose
-	// strategies query every business of the tenant and file each alert
-	// under the business it is about. Absent in the document is false.
+	// GlobalBusiness is the strategy document's is_global_strategy: the
+	// strategy's own switch saying it queries every business of the tenant
+	// and files each alert under the business it is about. It is the
+	// strategy's, and says nothing about which business the strategy lives
+	// in: the writer resolves it, and a strategy it does not claim reads as
+	// ordinary. Absent in the document is false.
 	//
 	// Omitted when false: the source facts digest hashes this struct, and a
 	// field every strategy serialized would move the digest - and with it

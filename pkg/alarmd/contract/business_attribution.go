@@ -12,11 +12,11 @@ package contract
 // published for the record's namespace of its cluster, then the one it
 // published for the cluster itself, then the Plan's own business -
 // a strategy that neither targets nor groups by business or cluster
-// aggregates across businesses, and its alert belongs to the global
-// business itself.
+// aggregates across businesses, and its alert belongs to the business the
+// strategy lives in, whether that is a global business or an ordinary one.
 //
 // They are the source label of the attribution counter. Unmapped is the
-// global business too, taken because the record named a cluster the
+// strategy's own business too, taken because the record named a cluster the
 // published mapping does not hold: a writer that does not publish the
 // mapping yet, a cluster it left out, or one registered since. A strategy
 // that configures a target or a business dimension and still lands on

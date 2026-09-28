@@ -61,7 +61,7 @@ var algorithmPolicy = fields("type version level unit_prefix", map[string]*polic
 var triggerPolicy = fields("type version count check_window window_size required_anomalies required_normals", map[string]*policy{"uptime": uptimePolicy, "config": algorithmConfigPolicy})
 var functionPolicy = fields("id method window dimensions without position field", map[string]*policy{"params": namedValues(fields("id value", nil))})
 var sourceQueryPolicy = fields("alert_name index_set_id promql custom_event_name data_source_label data_type_label metric_id metric_field alias values agg_dimension agg_method agg_interval result_table_id time_field query_string data_label unit time_delay offset", map[string]*policy{"agg_condition": conditionPolicy, "functions": functionPolicy})
-var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid is_global_biz name is_enabled update_time strategy_revision priority priority_group_key labels scenario source type", map[string]*policy{
+var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid is_global_strategy name is_enabled update_time strategy_revision priority priority_group_key labels scenario source type", map[string]*policy{
 	"items": fields("id query_md5 expression time_delay unit", map[string]*policy{
 		"query_configs": sourceQueryPolicy, "algorithms": algorithmPolicy, "functions": functionPolicy,
 		"target":      namedValues(fields("condition key method value type model_id target_type", map[string]*policy{"conditions": conditionPolicy, "hosts": memberPolicy, "nodes": memberPolicy})),

@@ -1298,8 +1298,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"dimension (the record's bk_biz_id aggregation dimension), namespace (the business the platform " +
 			"published for the record's namespace of its cluster), cluster (the business published for the " +
 			"record's bcs_cluster_id), unmapped (the record named a cluster neither published mapping holds, so " +
-			"the global business), global (nothing answered, so the global business " +
-			"itself). A strategy that configures a target or a business dimension and still lands on global or " +
+			"the strategy's own business), global (nothing answered, so the strategy's own business, " +
+			"global or ordinary). A strategy that configures a target or a business dimension and still lands on global or " +
 			"unmapped relied on a business the caches or the data did not have. Counted once per event built, " +
 			"where it is built and before the output decides whether to send it: an event the sink then drops " +
 			"is counted, so this is events built, not events sent; a retried Slot counts again. Every other " +
