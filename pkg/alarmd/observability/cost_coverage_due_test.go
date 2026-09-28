@@ -117,3 +117,83 @@ func TestAWindowIsIncompleteForWhatWasDueInItAndWentUnseen(t *testing.T) {
 		t.Fatalf("a group with no schedule, unseen = %+v, want it due and the window incomplete", coverage)
 	}
 }
+
+// Due is read across the whole window, both buckets: a five-minute group due
+// only in the earlier one and unseen makes it incomplete. A group with two
+// schedules is due when either is, whichever the roster listed first.
+func TestAGroupIsDueAcrossTheWholeWindowAndOnAnyOfItsSchedules(t *testing.T) {
+	fiveMinutes := CostGroup{QueryGroupKey: "five", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", Members: []CostPlanIdentity{costB},
+		Schedules: []CostSchedule{{Plan: costB, IntervalSeconds: 300, CompletionOffsetSeconds: 300}}}
+	c, now := costDueFixture(t, costMinute, fiveMinutes)
+	ran(c, "minute", costA)
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.DueGroups != 2 || coverage.UnobservedDueGroups != 1 || !coverage.Incomplete {
+		t.Fatalf("a group due in the earlier bucket only, unseen = %+v, want it due and the window incomplete", coverage)
+	}
+
+	both := costHourly
+	both.Schedules = []CostSchedule{costHourly.Schedules[0], {Plan: costB, IntervalSeconds: 60, CompletionOffsetSeconds: 60}}
+	c, now = costDueFixture(t, costMinute, both)
+	ran(c, "minute", costA)
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.DueGroups != 2 || coverage.UnobservedDueGroups != 1 {
+		t.Fatalf("a group with an hourly schedule listed before a minute one = %+v, want it due", coverage)
+	}
+}
+
+// A group's schedules are kept all or none. Kept in part under the metadata
+// bound, a group could be read on the one not due and missed on the one
+// that was; with none it is due in every window, which only over-reports.
+func TestAGroupsSchedulesAreKeptAllOrNone(t *testing.T) {
+	split := CostGroup{QueryGroupKey: "split", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", Members: []CostPlanIdentity{costB},
+		Schedules: []CostSchedule{{Plan: costB, IntervalSeconds: 3600, CompletionOffsetSeconds: 3600}, {Plan: costB, IntervalSeconds: 60, CompletionOffsetSeconds: 60}}}
+	now := time.Unix(800, 0)
+	// Room for the group, its one Plan and one schedule of its two.
+	bytes := len("split") + len("qsr") + len(costB.TenantID) + len(costB.BusinessID) + len(costB.StrategyID) + costDueBytes
+	c := NewCostSummary(CostSummaryOptions{ProcessID: "process-a", Window: 5 * time.Minute, GroupCapacity: 8, PlanCapacity: 8,
+		MetadataBytes: bytes, TopN: 2, Now: func() time.Time { return now }})
+	c.Reconcile([]CostGroup{split}, true)
+	now = time.Unix(1440, 0)
+	c.Publish(now)
+	if coverage := c.Snapshot().Coverage; coverage.TrackedGroups != 1 || coverage.TrackedPlans != 1 || coverage.DueGroups != 1 || coverage.UnobservedDueGroups != 1 {
+		t.Fatalf("a group whose schedules did not all fit = %+v, want it tracked, due in the window and unseen", coverage)
+	}
+}
+
+// A group whose rounds the scheduler held - a query cooldown - has no work
+// in the window, and no cost is missing from it: it and its Plans are held,
+// not unseen, and the window is complete. A round with nothing due is not a
+// hold, and a group whose only rounds were those is unseen. A held round of
+// a group the roster does not track is not cost at all.
+func TestAGroupTheSchedulerHeldIsHeldNotMissing(t *testing.T) {
+	held := func(c *CostSummary, group, outcome string) {
+		c.Observe(context.Background(), Observation{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal,
+			RunOutcome: outcome, Trace: TraceFields{QueryGroupKey: group}})
+	}
+	c, now := costDueFixture(t, costMinute, costHourly)
+	held(c, "minute", "query_cooldown")
+	held(c, "elsewhere", "query_cooldown")
+	c.Publish(*now)
+	coverage := c.Snapshot().Coverage
+	if coverage.DueGroups != 1 || coverage.HeldDueGroups != 1 || coverage.UnobservedDueGroups != 0 || coverage.HeldDuePlans != 1 ||
+		coverage.UnobservedDuePlans != 0 || coverage.ObservedGroups != 0 || coverage.UntrackedObservations != 0 || coverage.Incomplete {
+		t.Fatalf("a group held by its cooldown all window = %+v, want it and its Plan held, nothing unseen or untracked, the window complete", coverage)
+	}
+
+	// A group that ran as well as being held is not held: a round of it ran
+	// without evaluating its due Plan, and that Plan's cost is missing.
+	c, now = costDueFixture(t, costMinute, costHourly)
+	held(c, "minute", "query_cooldown")
+	ran(c, "minute", CostPlanIdentity{})
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.HeldDuePlans != 0 || coverage.UnobservedDuePlans != 1 || !coverage.Incomplete {
+		t.Fatalf("a group that ran and was held, its due Plan unevaluated = %+v, want the Plan unseen and the window incomplete", coverage)
+	}
+
+	c, now = costDueFixture(t, costMinute, costHourly)
+	held(c, "minute", "source_not_due")
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.HeldDueGroups != 0 || coverage.UnobservedDueGroups != 1 || !coverage.Incomplete {
+		t.Fatalf("a group whose rounds only had nothing due = %+v, want it unseen and the window incomplete", coverage)
+	}
+}
