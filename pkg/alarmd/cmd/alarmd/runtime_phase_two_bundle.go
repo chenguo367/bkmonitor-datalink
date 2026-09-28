@@ -853,6 +853,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	// The retained-byte pool's usage, read from the coordinator that owns it
+	// at scrape time, beside the ceiling capacity_budget carries.
+	if err := recorder.BindRetainedReservation(func() uint64 { return worker.RetainedReserved(coordinator) }); err != nil {
+		return nil, err
+	}
 	// Only the static compatibility is read from this one; the heartbeat that
 	// carries acknowledgement and load is written by the bundle once it exists.
 	// The view stream this process serves as Leader and joins as Worker

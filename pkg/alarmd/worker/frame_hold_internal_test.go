@@ -53,17 +53,11 @@ func (state *frameRecordingState) ApplyRuntime(ctx context.Context, request exec
 		}
 	}
 	state.framesAtWrite = append(state.framesAtWrite, frames)
-	state.reservedAtWrite = append(state.reservedAtWrite, state.coordinator.reservedRetainedBytes())
+	state.reservedAtWrite = append(state.reservedAtWrite, RetainedReserved(state.coordinator))
 	if state.writeErr != nil {
 		return execution.StateApplyResult{}, state.writeErr
 	}
 	return state.StateStore.ApplyRuntime(ctx, request)
-}
-
-func (coordinator *SlotExecutionCoordinator) reservedRetainedBytes() uint64 {
-	coordinator.reservations.mu.Lock()
-	defer coordinator.reservations.mu.Unlock()
-	return coordinator.reservations.retainedBytes
 }
 
 // retryableOutputError is an output whose acknowledgement is unknown.
@@ -132,7 +126,7 @@ func TestKeptFramesAreReleasedOnEveryWayAPlanLeaves(t *testing.T) {
 						index, state.framesAtWrite[index], state.reservedAtWrite[index])
 				}
 			}
-			if reserved := fixture.coordinator.reservedRetainedBytes(); reserved != 0 {
+			if reserved := RetainedReserved(fixture.coordinator); reserved != 0 {
 				t.Fatalf("%d bytes still reserved after the Slot", reserved)
 			}
 		})
@@ -170,7 +164,7 @@ func TestKeptFramesAreReleasedWhenAPartialOutputLeavesAnyNumberOfSeries(t *testi
 						index, frames, state.reservedAtWrite[index], test.reserved[index])
 				}
 			}
-			if reserved := fixture.coordinator.reservedRetainedBytes(); reserved != 0 {
+			if reserved := RetainedReserved(fixture.coordinator); reserved != 0 {
 				t.Fatalf("%d bytes still reserved after the Slot", reserved)
 			}
 		})

@@ -239,6 +239,20 @@ func (coordinator *SlotExecutionCoordinator) tryAcquireRetained(retainedBytes ui
 	return true
 }
 
+// RetainedReserved is what the Slots running on coordinator hold reserved
+// against MaxRetainedBytes at the moment of the call: the pool's usage, where
+// the completion rows carry each Slot's share only after the fact. The
+// reservation is checked and moved under one lock, so it is read under that
+// lock as well rather than from a second copy every site that moves it would
+// have to keep in step; the lock is only ever held for a comparison and an
+// addition. A function rather than a method: Execute is the coordinator's
+// one way in, and a reading of its pool is not a way in.
+func RetainedReserved(coordinator *SlotExecutionCoordinator) uint64 {
+	coordinator.reservations.mu.Lock()
+	defer coordinator.reservations.mu.Unlock()
+	return coordinator.reservations.retainedBytes
+}
+
 // admittedState is what admission measured for one mutation: its stored size,
 // and the frame the store encoded to measure it, while the Slot holds that
 // frame for the write.

@@ -88,28 +88,43 @@ func observationSampleLimits(capacity config.ObservationCapacity) (observability
 	return limits, queue > 0 && limits.BytesPerMinute >= observability.SeriesSampleMaxBytes
 }
 
+// observationCostOptions is the cost summary sized to the most groups whose
+// reservation fits the collector's half of the budget. The reservation grows
+// with the groups, so the most that fit is found by bisection. It was the
+// budget halved until it fit, which could leave up to half the budget
+// unused, and made the count a cliff: a reservation a few hundred bytes a
+// group larger halved the groups a replica could track.
 func observationCostOptions(capacity config.ObservationCapacity, process string, now func() time.Time) observability.CostSummaryOptions {
 	// The other half pays for bounded cross-replica projection I/O and decode.
 	collectorBytes := capacity.CostBytes / 2
-	groups := collectorBytes / 2048
-	o := observability.CostSummaryOptions{ProcessID: process, Window: 5 * time.Minute, Now: now}
-	for groups > 0 {
-		o.GroupCapacity = groups
-		o.PlanCapacity = groups * 2
-		o.MetadataBytes = collectorBytes / 8
-		// TopN rows of every ranking -- two scopes times the dimensions -- at
-		// about a contributor row each, inside the projection's publish share.
-		// The dimension count is the summary's own, not a literal: it was a
-		// literal 12 from the six dimensions the summary began with, and
-		// stayed 12 when two more were added.
-		rankings := 2 * len(observability.CostDimensions())
-		o.TopN = min(20, groups, max(1, (capacity.CostBytes/16)/(rankings*4096)))
-		if observability.CostSummaryCapacityBytes(o) <= int64(collectorBytes) {
-			return o
+	best := 0
+	for low, high := 1, collectorBytes/2048; low <= high; {
+		groups := low + (high-low)/2
+		if observability.CostSummaryCapacityBytes(observationCostOptionsFor(capacity, groups, process, now)) <= int64(collectorBytes) {
+			best, low = groups, groups+1
+		} else {
+			high = groups - 1
 		}
-		groups /= 2
 	}
-	return observability.CostSummaryOptions{ProcessID: process, Now: now}
+	if best == 0 {
+		return observability.CostSummaryOptions{ProcessID: process, Now: now}
+	}
+	return observationCostOptionsFor(capacity, best, process, now)
+}
+
+// observationCostOptionsFor is the cost summary at a given number of groups,
+// the rest derived from the budget as observationCostOptions derives it.
+func observationCostOptionsFor(capacity config.ObservationCapacity, groups int, process string, now func() time.Time) observability.CostSummaryOptions {
+	o := observability.CostSummaryOptions{ProcessID: process, Window: 5 * time.Minute, Now: now,
+		GroupCapacity: groups, PlanCapacity: groups * 2, MetadataBytes: capacity.CostBytes / 2 / 8}
+	// TopN rows of every ranking -- two scopes times the dimensions -- at
+	// about a contributor row each, inside the projection's publish share.
+	// The dimension count is the summary's own, not a literal: it was a
+	// literal 12 from the six dimensions the summary began with, and
+	// stayed 12 when two more were added.
+	rankings := 2 * len(observability.CostDimensions())
+	o.TopN = min(20, groups, max(1, (capacity.CostBytes/16)/(rankings*4096)))
+	return o
 }
 
 func observationProjectionLimits(capacity config.ObservationCapacity, interval time.Duration) fleet.CostProjectionLimits {
