@@ -260,6 +260,10 @@ type fleetPublisher struct {
 	// each Plan by the control leader anyway. Nil on a publisher built by
 	// hand, and the snapshot then carries no choice.
 	outputProtocol *fleet.OutputProtocolFacts
+	// retention is the retention lengths this process runs with and their
+	// inputs, read once at assembly for the same reason. Nil on a publisher
+	// built by hand, and the snapshot then carries none.
+	retention *observability.RuntimeRetentionFacts
 }
 
 // fleetOverdueWakeCeiling bounds how many parked objects one publish carries.
@@ -344,6 +348,13 @@ func (publisher *fleetPublisher) publishOnce(ctx context.Context) {
 // so the two types can differ in package without differing in content.
 func fleetBuildFacts(build metric.BuildInfo) fleet.BuildFacts {
 	return fleet.BuildFacts{Version: build.Version, Commit: build.Commit, SchemaVersion: build.SchemaVersion}
+}
+
+// fleetRetentionFacts is the runtime profile's retention section, for the
+// fleet snapshot.
+func fleetRetentionFacts(cfg config.Config) *observability.RuntimeRetentionFacts {
+	facts := phaseTwoRuntimeRetention(cfg)
+	return &facts
 }
 
 // fleetOutputProtocolFacts is the choice this process runs with: the word the
@@ -490,6 +501,10 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.outputProtocol != nil {
 		facts := *publisher.outputProtocol
 		snapshot.OutputProtocol = &facts
+	}
+	if publisher.retention != nil {
+		facts := *publisher.retention
+		snapshot.Retention = &facts
 	}
 	// And the objects whose rounds end without a basis to decide recovery.
 	// Beside the anomalies for a different reason than the pool: not "this is

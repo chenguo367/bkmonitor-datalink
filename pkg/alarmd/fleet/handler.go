@@ -242,6 +242,10 @@ type HealthResponse struct {
 	// values file on a machine the reader could not reach. Per strategy, the
 	// frozen format is on the directory route's effective_output.
 	OutputProtocols []OutputProtocolGroup `json:"output_protocols"`
+	// Retentions is which retention lengths each counted replica runs with,
+	// and their inputs, grouped the same way: what runtime.get answers on
+	// the CLI channel, for a deployment read only through its pages.
+	Retentions []RetentionGroup `json:"retentions"`
 	// OutputPath is whether any event can leave as the standard raw event
 	// under those choices, from the leader's Plan counts: the first-screen
 	// sentence a two-line, one-Kafka-read investigation reduced to.
@@ -926,6 +930,7 @@ func NewHandler(
 			Coverage:          view.Coverage, PerReplica: view.PerReplica,
 			PublishedVersion: view.PublishedVersion, Workers: view.Workers, Builds: view.Builds,
 			OutputProtocols: outputProtocolList(view.OutputProtocols),
+			Retentions:      retentionList(view.Retentions),
 			OutputPath:      OutputPathOf(&view),
 			Degradations:    degradationList(view.Degradations),
 			Activation:      view.Activation, ActivationReplica: view.ActivationReplica,
@@ -963,6 +968,15 @@ func cohortList(cohorts []CohortView) []CohortView {
 func outputProtocolList(groups []OutputProtocolGroup) []OutputProtocolGroup {
 	if groups == nil {
 		return []OutputProtocolGroup{}
+	}
+	return groups
+}
+
+// retentionList is the view's retention groups as an empty list rather than
+// null, as outputProtocolList is.
+func retentionList(groups []RetentionGroup) []RetentionGroup {
+	if groups == nil {
+		return []RetentionGroup{}
 	}
 	return groups
 }

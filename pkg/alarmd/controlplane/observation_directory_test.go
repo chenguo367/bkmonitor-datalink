@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -655,6 +656,17 @@ func (s *failingReadSpy) GetRange(ctx context.Context, key string, start, end in
 	return s.Cmdable.GetRange(ctx, key, start, end)
 }
 
+// readOrderSpy records the keys a directory refresh reads, in order.
+type readOrderSpy struct {
+	redis.Cmdable
+	keys []string
+}
+
+func (s *readOrderSpy) GetRange(ctx context.Context, key string, start, end int64) *redis.StringCmd {
+	s.keys = append(s.keys, key)
+	return s.Cmdable.GetRange(ctx, key, start, end)
+}
+
 // A refresh that fails says which step failed and in its own words, not only
 // that a dependency did: a cold replica whose manifest read failed on every
 // refresh reported DEPENDENCY_UNAVAILABLE, and the cost ranking fed from the
@@ -725,7 +737,7 @@ func TestADirectoryRefreshThatFailsSaysWhichReadAndWhy(t *testing.T) {
 // its key.
 func TestADirectoryNamesACarriedPublicationWhoseManifestIsGoneAndGoesOn(t *testing.T) {
 	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
-	for _, side := range []string{"carried", "latest", "carried read failed"} {
+	for _, side := range []string{"carried", "latest", "carried read failed", "carried out of allowance"} {
 		t.Run(side, func(t *testing.T) {
 			h, baseline, at := directoryFixture(t, 32)
 			baseline.Refresh(h.ctx, at)
@@ -751,10 +763,36 @@ func TestADirectoryNamesACarriedPublicationWhoseManifestIsGoneAndGoesOn(t *testi
 				// The carried manifest is there and its read fails: that is
 				// not a manifest past its retention, and it fails the refresh.
 				reads = append(reads, &failingReadSpy{Cmdable: h.client, fail: carriedKey, err: errors.New("read tcp 127.0.0.1:6379: i/o timeout")})
-			} else if err = h.client.Del(h.ctx, map[string]string{"carried": carriedKey, "latest": latestKey}[side]).Err(); err != nil {
-				t.Fatal(err)
+			} else if side != "carried out of allowance" {
+				if err = h.client.Del(h.ctx, map[string]string{"carried": carriedKey, "latest": latestKey}[side]).Err(); err != nil {
+					t.Fatal(err)
+				}
 			}
-			d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, reads...)
+			refreshLimits := limits
+			if side == "carried out of allowance" {
+				// The carried manifest is there and the refresh spends its
+				// allowance before reaching it, as a restarted follower does on
+				// the groups it has not read yet. The allowance is the reads a
+				// refresh with room makes before the carried manifest, counted
+				// with the group objects already cached, as they are for the
+				// refresh under test.
+				roomy := limits
+				roomy.Commands = 1000
+				var order *readOrderSpy
+				for range 2 {
+					order = &readOrderSpy{Cmdable: h.client}
+					counted, err := controlplane.NewObservationDirectory(h.newRepository(t), roomy, order)
+					if err != nil {
+						t.Fatal(err)
+					}
+					counted.Refresh(h.ctx, at)
+				}
+				refreshLimits.Commands = slices.Index(order.keys, carriedKey)
+				if refreshLimits.Commands <= 0 {
+					t.Fatalf("setup: reads %v, want the carried manifest read after at least one other", order.keys)
+				}
+			}
+			d, err := controlplane.NewObservationDirectory(h.newRepository(t), refreshLimits, reads...)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -773,6 +811,14 @@ func TestADirectoryNamesACarriedPublicationWhoseManifestIsGoneAndGoesOn(t *testi
 				last := s.Publications[len(s.Publications)-1]
 				if last.Publication != carried || last.Manifest != "failed" {
 					t.Fatalf("publications = %+v, want the carried one marked failed, not expired", s.Publications)
+				}
+				return
+			}
+			if side == "carried out of allowance" {
+				last := s.Publications[len(s.Publications)-1]
+				if s.Complete || s.FailedRead != "manifest" || s.FailedKey != carriedKey || last.Publication != carried || last.Manifest != "unread" {
+					t.Fatalf("carried out of allowance (%d of %d reads) = complete %v read %q key %q publications %+v, want the carried manifest named unread, not failed",
+						s.ReadCommands, refreshLimits.Commands, s.Complete, s.FailedRead, s.FailedKey, s.Publications)
 				}
 				return
 			}

@@ -1321,6 +1321,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 		readiness: readinessFactsSource(health),
 		// The same word the reconciler above was configured with.
 		outputProtocol: fleetOutputProtocolFacts(cfg),
+		// The same facts the runtime profile reports, from the same
+		// functions the Slot source and admission are assembled with.
+		retention: fleetRetentionFacts(cfg),
 	}
 	// The heartbeat reports the same acknowledgement and occupancy the fleet
 	// snapshot publishes, from the same sources.
