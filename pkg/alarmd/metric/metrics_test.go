@@ -529,6 +529,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_replay_expired_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_range_gate_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_state_preflight_total"] = "variableLabels: {result,reason}"
+	expected["bkmonitor_alarmd_state_admission_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_slot_wait_duration_seconds"] = "variableLabels: {wait}"
 	expected["bkmonitor_alarmd_control_source_withheld_lines_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_state_renewal_gate_resets_total"] = "variableLabels: {}"
@@ -1165,6 +1166,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// folds any other word to unexplained.
 	bounds[fqName("range_gate_total")] = len(observability.RangeGateOutcomes)
 	bounds[fqName("state_preflight_total")] = len(observability.StatePreflightResults) * len(observability.StatePreflightReasons)
+	bounds[fqName("state_admission_total")] = len(observability.StateAdmissionResults) * len(observability.StateAdmissionReasons)
 	// One series per blocking wait a Slot attempt can be in, and no more: the
 	// label is written only from the list observability publishes, and the
 	// three call sites pass those constants.

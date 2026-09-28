@@ -3422,6 +3422,13 @@ type StateAdmissionItemResult struct {
 	// rules share STATE_CORRUPT, and a line that carries only the reason sends
 	// a reader to read every producer.
 	RefusalRule string
+	// RefusalText is the store's own sentence for that refusal, with the
+	// numbers the rule does not carry: the lifetime required against the
+	// ceiling, the bytes encoded against the limit. Empty for every other
+	// status. A Plan refused as STATE_BUDGET_EXCEEDED every round carried
+	// only the reason, and which of two limits it was past, and by how much,
+	// was in no line.
+	RefusalText string
 	// LegacyRecordIDs is how many of the mutation's points carried an id the
 	// derivation could not rebuild, so the id had to be stored.
 	LegacyRecordIDs int

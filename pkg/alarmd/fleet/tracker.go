@@ -296,6 +296,9 @@ type queryGroupState struct {
 	// renewal that reached the store. Positive evidence, kept apart from the
 	// refusals above; the row carries the Plan attempted most recently.
 	upkeep map[StrategyRef]*NoDataMemoryUpkeep
+	// stateRefusals is the latest refused state admission of each of this
+	// object's Plans not admitted since, by Plan.
+	stateRefusals map[StrategyRef]*StateAdmissionRefusal
 	// noDataTracking is what the last deciding no-data round of each of this
 	// object's Plans counted, by Plan. Replaced whole on every deciding
 	// round; a Plan that stops deciding keeps its last word, dated.
@@ -946,6 +949,14 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			refusal.Reason, refusal.Record, refusal.Groups, refusal.Limit
 		memory.LastAt = at
 		memory.Refusals++
+	}
+	// A Plan's state refused at admission, with the store's sentence; not a
+	// round either -- the round ends terminal and reports that on its own.
+	// A later round admitting the Plan ends it. A clean chunk of the same
+	// round does not: a record over the limit refuses its own chunk and
+	// leaves the others admitted.
+	if observation.Stage == observability.StageStateAdmission && observation.StateApplyChunk != nil && plan.StrategyID != "" {
+		tracker.noteStateAdmission(state, plan, observation, trace.EvaluationTime, at)
 	}
 	// What the last read said the memory was stored as. On every read of a
 	// Plan with a memory, so the row can say what it has -- and, once the
@@ -1908,6 +1919,7 @@ func (tracker *Tracker) rowOf(queryGroup string, state *queryGroupState) Anomaly
 	}
 	anomaly.PlanSeries = planSeriesRows(state)
 	anomaly.NoDataMemoryUpkeep = latestUpkeep(state)
+	anomaly.StateAdmissionRefusal = latestStateRefusal(state)
 	anomaly.NoDataTracking = noDataTrackingRows(state)
 	anomaly.WireFormats = wireFormatRows(state)
 	// The holder of the latest round's Slot, when that round gave it up. The
@@ -2266,6 +2278,53 @@ func latestUpkeep(state *queryGroupState) *NoDataMemoryUpkeep {
 	return &copied
 }
 
+// noteStateAdmission records a refused admission of the Plan, or ends its
+// record when a later round's admission went through.
+func (tracker *Tracker) noteStateAdmission(state *queryGroupState, plan StrategyRef, observation observability.Observation, slot int64, at time.Time) {
+	switch observation.Result {
+	case observability.ResultTerminal:
+		if state.stateRefusals == nil {
+			state.stateRefusals = map[StrategyRef]*StateAdmissionRefusal{}
+		}
+		refusal := state.stateRefusals[plan]
+		if refusal == nil {
+			refusal = &StateAdmissionRefusal{Plan: plan, FirstAt: at}
+			state.stateRefusals[plan] = refusal
+		}
+		refusal.Reason = string(observation.ReasonCode)
+		refusal.Rules = append([]string(nil), observation.StateApplyChunk.RefusalRules...)
+		refusal.Text = boundedErrorText(observation.StateApplyChunk.RefusalText)
+		refusal.EvaluationTime, refusal.LastAt = slot, at
+		refusal.Refusals++
+	case observability.Result(observability.ResultSuccess):
+		if refusal := state.stateRefusals[plan]; refusal != nil && refusal.EvaluationTime != slot {
+			delete(state.stateRefusals, plan)
+		}
+	}
+}
+
+// latestStateRefusal is the object's refused admission as the row carries
+// it: the Plan refused most recently, with how many Plans are refused.
+func latestStateRefusal(state *queryGroupState) *StateAdmissionRefusal {
+	var latest *StateAdmissionRefusal
+	for _, candidate := range state.stateRefusals {
+		// Ties to the smaller strategy, so the row does not depend on the
+		// map's order.
+		if latest == nil || candidate.LastAt.After(latest.LastAt) ||
+			(candidate.LastAt.Equal(latest.LastAt) && (candidate.Plan.StrategyID < latest.Plan.StrategyID ||
+				(candidate.Plan.StrategyID == latest.Plan.StrategyID && candidate.Plan.BusinessID < latest.Plan.BusinessID))) {
+			latest = candidate
+		}
+	}
+	if latest == nil {
+		return nil
+	}
+	copied := *latest
+	copied.Rules = append([]string(nil), latest.Rules...)
+	copied.Plans = len(state.stateRefusals)
+	return &copied
+}
+
 // noDataTrackingRows is every Plan's last deciding word, smallest strategy
 // first, copied so the row does not alias the tracker's state.
 func noDataTrackingRows(state *queryGroupState) []NoDataTracking {
@@ -2401,7 +2460,8 @@ func (tracker *Tracker) memoryRowOf(queryGroup string, state *queryGroupState) A
 		QueryGroup: queryGroup, Kind: KindNoDataMemoryRefused, ReasonCode: memory.Reason,
 		Since: first, SinceFrom: SinceSnapshotContinuity, Replica: tracker.replica,
 		ReasonSince: first, ReasonLastAt: memory.LastAt, Consecutive: refusals,
-		NoDataMemory: &memory, NoDataMemoryUpkeep: latestUpkeep(state), Strategies: strategies,
+		NoDataMemory: &memory, NoDataMemoryUpkeep: latestUpkeep(state), StateAdmissionRefusal: latestStateRefusal(state),
+		Strategies: strategies,
 		// The object's rounds complete; the row says when the last did, so
 		// the loss reads as the memory's and not as the round's.
 		LastHealthyAt: state.lastHealthyAt,
