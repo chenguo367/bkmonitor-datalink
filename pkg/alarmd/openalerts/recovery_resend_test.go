@@ -189,3 +189,24 @@ func TestADisjointCopyDoesNotSendARecoveryAgainOnARead(t *testing.T) {
 		t.Fatal("a disjoint copy sent a recovery again on a read")
 	}
 }
+
+// The first read past the retention may be a calibration rather than the
+// per-minute read of the set. A calibration that began after the recovery,
+// with no read since, still carrying the alert, lets the recovery through
+// again just the same.
+func TestACalibrationAloneCanBeTheReadThatSendsARecoveryAgain(t *testing.T) {
+	f := newResendFixture(t, "fp")
+	f.cache.index.options.IndexInterval = time.Hour
+	readBefore := f.cache.Snapshot(keyA).IndexReadAt
+	f.c.advance(time.Second)
+	f.acknowledge(recovery(keyA, "fp"))
+	f.c.advance(time.Minute + time.Second)
+	f.cache.RequestReconcile(keyA)
+	f.cache.Refresh(context.Background())
+	if snapshot := f.cache.Snapshot(keyA); !snapshot.IndexReadAt.Equal(readBefore) || !snapshot.Calibrated {
+		t.Fatalf("fixture: want a calibration and no read of the set since the recovery, got %+v", snapshot)
+	}
+	if !f.open("fp") {
+		t.Fatal("a calibration past the retention still carrying the alert did not let the recovery through")
+	}
+}
