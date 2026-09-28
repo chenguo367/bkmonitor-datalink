@@ -218,6 +218,9 @@ type fleetPublisher struct {
 	// has not attempted it, which is every follower; the aggregate then
 	// takes the one replica that has.
 	activation func() *fleet.ActivationFacts
+	// activationHeader is a missing activation header the control leader has
+	// not written back; nil on every follower and while the header is there.
+	activationHeader func() *fleet.ActivationHeaderFacts
 	// source and endpoints are the leader's last source round and every
 	// replica's resolved external systems; both nil-safe, both optional so
 	// the tests that build a publisher by hand keep working.
@@ -456,6 +459,9 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	snapshot.CLIUnavailable = publisher.publicSurface.CLIUnavailable
 	if publisher.activation != nil {
 		snapshot.Activation = publisher.activation()
+	}
+	if publisher.activationHeader != nil {
+		snapshot.ActivationHeader = publisher.activationHeader()
 	}
 	if publisher.rebalance != nil {
 		snapshot.Rebalance = publisher.rebalance()

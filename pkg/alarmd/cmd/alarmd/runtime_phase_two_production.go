@@ -311,6 +311,9 @@ type productionCatalogRepository interface {
 	ControlVersionTag(context.Context) (string, bool, error)
 	LoadActiveQueryGroupSet(context.Context, controlplane.ActiveQueryGroupSetRef) ([]execution.QueryGroupIdentity, error)
 	RenewCurrentActivationObjects(context.Context) error
+	// RebuildActivationHeader writes back an activation header found missing
+	// with its body present; see renewCurrentObjects.
+	RebuildActivationHeader(context.Context) (controlplane.ActivationHeaderRebuildOutcome, error)
 	LoadPublishedContent(context.Context, controlplane.SnapshotPublicationRef) (controlplane.PublishedContent, error)
 	// MarkSourceRefreshSuccess and LoadSourceRefreshSuccess keep the time of
 	// the last refresh round that succeeded as a persisted fact, so that its
@@ -496,7 +499,7 @@ func (runtime *productionPhaseTwoControl) refresh(
 		}
 		// Renewal is guarded by the Activation CAS and must not replace the
 		// Source/activation result or stop pending confirmation from converging.
-		runtime.observeCurrentObjectRenewal(ctx, runtime.dependencies.Repository.RenewCurrentActivationObjects(ctx))
+		runtime.observeCurrentObjectRenewal(ctx, runtime.renewCurrentObjects(ctx))
 	}()
 	result, err := runtime.dependencies.Reconciler.Refresh(
 		ctx, runtime.dependencies.Source, runtime.dependencies.Planner,
@@ -679,14 +682,14 @@ func (runtime *productionPhaseTwoControl) refresh(
 			sourceRefresh.ActiveQueryGroups = *currentCount
 			sourceRefresh.ActiveQueryGroupsKnown = true
 		}
-		renewErr := runtime.dependencies.Repository.RenewCurrentActivationObjects(ctx)
+		renewErr := runtime.renewCurrentObjects(ctx)
 		renewed = true
 		runtime.observeCurrentObjectRenewal(ctx, renewErr)
 		if renewErr != nil {
 			return phaseTwoControlRefreshResult{
 				QueryGroups: queryGroups, Status: phaseTwoControlDegradedLastGood,
 				SourceKind: observability.SourceKindCompiledSnapshot,
-				ReasonCode: observability.ReasonCode(contract.ReasonRedisUnavailable), Cause: renewErr,
+				ReasonCode: renewalReason(renewErr), Cause: renewErr,
 			}, false, nil
 		}
 		return phaseTwoControlRefreshResult{
@@ -909,10 +912,48 @@ func sourceRefreshCurrentCount(
 	return nil
 }
 
+// renewCurrentObjects renews what the current activation names. A renewal
+// that finds the activation header missing - the body there, the header not -
+// has the header written back from the body and is tried once more: every
+// guarded write compares against the header, so until it is back nothing the
+// activation names is renewed, on any round, and the fleet stops executing
+// when those objects expire. A header another cutover moved is a conflict
+// and is left to the next round, as before.
+func (runtime *productionPhaseTwoControl) renewCurrentObjects(ctx context.Context) error {
+	err := runtime.dependencies.Repository.RenewCurrentActivationObjects(ctx)
+	if !errors.Is(err, controlplane.ErrActivationHeaderMissing) {
+		return err
+	}
+	outcome, rebuildErr := runtime.dependencies.Repository.RebuildActivationHeader(ctx)
+	if rebuildErr != nil {
+		return fmt.Errorf("%w; writing it back: %v", err, rebuildErr)
+	}
+	if outcome != controlplane.ActivationHeaderRebuilt && outcome != controlplane.ActivationHeaderRebuildNotNeeded {
+		return fmt.Errorf("%w; writing it back: %s", err, outcome)
+	}
+	return runtime.dependencies.Repository.RenewCurrentActivationObjects(ctx)
+}
+
+// renewalReason names a failed renewal: a missing activation header by
+// itself, anything else as the Redis failure it was.
+func renewalReason(err error) observability.ReasonCode {
+	if errors.Is(err, controlplane.ErrActivationHeaderMissing) {
+		return observability.ReasonCode(contract.ReasonActivationMissing)
+	}
+	return observability.ReasonCode(contract.ReasonRedisUnavailable)
+}
+
+// observeCurrentObjectRenewal reports a renewal that failed. A conflict -
+// another cutover's header - and an activation that is not there yet are the
+// next round's to settle and are not reported. A missing header is: it is
+// not another writer's and settles on no round by itself, and returning
+// quietly on it is how the fleet ran a day without renewing anything.
 func (runtime *productionPhaseTwoControl) observeCurrentObjectRenewal(ctx context.Context, err error) {
-	if errors.Is(err, controlplane.ErrActivationConflict) || errors.Is(err, controlplane.ErrActivationUnavailable) {
+	if !errors.Is(err, controlplane.ErrActivationHeaderMissing) &&
+		(errors.Is(err, controlplane.ErrActivationConflict) || errors.Is(err, controlplane.ErrActivationUnavailable)) {
 		return
 	}
+	reason := renewalReason(err)
 	runtime.renewMu.Lock()
 	degraded := runtime.renewDegraded
 	if err != nil {
@@ -924,7 +965,7 @@ func (runtime *productionPhaseTwoControl) observeCurrentObjectRenewal(ctx contex
 	if err != nil && !degraded {
 		runtime.dependencies.Observer.Observe(ctx, observability.Observation{
 			Component: observability.ComponentControlPlane, Stage: observability.StageActiveQGSet,
-			Result: observability.ResultDegraded, ReasonCode: observability.ReasonCode(contract.ReasonRedisUnavailable),
+			Result: observability.ResultDegraded, ReasonCode: reason,
 			SourceKind: observability.SourceKindCompiledSnapshot, Err: err,
 		})
 	} else if err == nil && degraded {

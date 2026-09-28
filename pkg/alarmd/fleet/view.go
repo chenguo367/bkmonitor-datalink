@@ -1597,6 +1597,11 @@ type Snapshot struct {
 	// replica that has not attempted it, which is every follower, and on a
 	// build before this fact existed.
 	Activation *ActivationFacts `json:"activation,omitempty"`
+	// ActivationHeader is the control leader's account of an activation
+	// header found missing with its body present and not written back yet.
+	// Absent while the header is there, on every follower, and on a build
+	// before this fact existed.
+	ActivationHeader *ActivationHeaderFacts `json:"activation_header,omitempty"`
 	// Rebalance is the control leader's last rebalance planning round: how
 	// the ready replicas hold the assigned objects and what the round would
 	// move. Absent on every follower and on a build before this fact existed.
@@ -1859,6 +1864,14 @@ type ActivationFacts struct {
 	BlockedQueryGroups int    `json:"blocked_query_groups,omitempty"`
 	BlockedReasons     string `json:"blocked_reasons,omitempty"`
 	BlockedSamples     string `json:"blocked_samples,omitempty"`
+}
+
+// ActivationHeaderFacts is a missing activation header as the control leader
+// saw it: for how long, and how its last attempt to write the header back
+// ended ("" before any attempt).
+type ActivationHeaderFacts struct {
+	MissingSeconds float64 `json:"missing_seconds"`
+	LastRebuild    string  `json:"last_rebuild,omitempty"`
 }
 
 // Reason is the classification as one word, for grouping: the same word the
@@ -2227,6 +2240,14 @@ const (
 	// surface stays unrestricted rather than leave no way in, and the
 	// coordinates that surface carries are public until the CLI is repaired.
 	DegradationCLIAuthUnavailable DegradationKind = "CLI_AUTH_UNAVAILABLE"
+	// DegradationActivationHeaderMissing: the activation body is there and its
+	// header is not, and the control leader has not written it back. Every
+	// reader still executes what the body names, so nothing else fails; but
+	// every guarded write compares against the header, so no strategy change
+	// is activated and nothing the activation names is renewed, and when
+	// those objects expire the fleet executes nothing. The text is the last
+	// rebuild's outcome.
+	DegradationActivationHeaderMissing DegradationKind = "ACTIVATION_HEADER_MISSING"
 )
 
 // DegradationKinds is the closed set, for the page's wording table and the
@@ -2235,7 +2256,7 @@ var DegradationKinds = []DegradationKind{
 	DegradationActivationBehind, DegradationControlSourceStale, DegradationControlLeaderAbsent,
 	DegradationOpenAlertSetStale, DegradationPlatformSettingsStale, DegradationSourceBlocked,
 	DegradationOutputNotReady, DegradationOpenAlertSetDisjoint, DegradationViewPublishFailing, DegradationViewStreamNoSessions, DegradationActivationBlocked,
-	DegradationMetricsUnexported, DegradationCLIAuthUnavailable,
+	DegradationMetricsUnexported, DegradationCLIAuthUnavailable, DegradationActivationHeaderMissing,
 }
 
 // endpointByRole is the entry under role in a replica's list, or nil.
@@ -2867,6 +2888,11 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 					Text: fmt.Sprintf("%d held back (%s): %s", snapshot.Activation.BlockedQueryGroups,
 						snapshot.Activation.BlockedReasons, snapshot.Activation.BlockedSamples)})
 			}
+		}
+		if header := snapshot.ActivationHeader; header != nil {
+			age := header.MissingSeconds
+			view.Degradations = append(view.Degradations, Degradation{Kind: DegradationActivationHeaderMissing, Replica: replica,
+				Text: "last rebuild: " + header.LastRebuild, AgeSeconds: &age})
 		}
 		if snapshot.Rebalance != nil && (view.Rebalance == nil || snapshot.Rebalance.PlannedAt.After(view.Rebalance.PlannedAt)) {
 			facts := *snapshot.Rebalance
