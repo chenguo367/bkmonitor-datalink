@@ -411,6 +411,8 @@ var AlwaysReportedWithheld = []WithheldKey{
 	{Disposition: DispositionConfigNormalized, Reason: ReasonPriorityIgnored},
 	// "No strategy here runs a level on another level's trigger."
 	{Disposition: DispositionConfigNormalized, Reason: ReasonLevelTriggerBorrowed},
+	// "No strategy here runs on a period it did not write."
+	{Disposition: DispositionConfigNormalized, Reason: ReasonAggIntervalDefaulted},
 }
 
 // NoDataReasons is the set of reasons that withhold a Plan from no-data

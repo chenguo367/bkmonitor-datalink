@@ -290,6 +290,11 @@ const (
 // reads it.
 const ReasonEffectiveTimeRangeInvalid = "EFFECTIVE_TIME_RANGE_INVALID"
 
+// ReasonAggIntervalDefaulted names a Plan whose query configs carry no
+// aggregation interval, or a 0 among them, read as the 60 seconds Python
+// reads it as (itemInterval).
+const ReasonAggIntervalDefaulted = "AGG_INTERVAL_DEFAULTED"
+
 // ReasonPriorityIgnored names a Plan compiled from a strategy that takes
 // part in priority arbitration, run as the standalone strategy it is. The
 // arbitration belongs to the platform's alert pipeline, so a lower-priority
@@ -1798,7 +1803,7 @@ func compilePlan(
 	targetPlan *contract.TargetPlanV1,
 	policy NoDataPolicy,
 ) (contract.EvaluationPlanV2, planCompileFacts, []ObjectDisposition, error) {
-	interval, err := itemInterval(item)
+	interval, intervalDefaulted, err := itemInterval(item)
 	if err != nil {
 		return contract.EvaluationPlanV2{}, planCompileFacts{}, nil, err
 	}
@@ -1857,6 +1862,11 @@ func compilePlan(
 	}
 	levels := make([]contract.LevelIRV2, 0, len(levelIDs))
 	dispositions := make([]ObjectDisposition, 0)
+	if intervalDefaulted {
+		dispositions = append(dispositions, ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigNormalized,
+			Reason: ReasonAggIntervalDefaulted, FieldPath: "items[0].query_configs[*].agg_interval",
+			Detail: fmt.Sprintf("agg_interval=%d", pythonDefaultAggInterval)})
+	}
 	for _, rawLevel := range levelIDs {
 		levelID := uint32(rawLevel)
 		detect, ok := detectByLevel[levelID]
@@ -2363,29 +2373,51 @@ func isAlwaysActiveUptime(raw json.RawMessage) bool {
 		(uptime.TimeRanges[0].Start == "00:00:00" && uptime.TimeRanges[0].End == "23:59:59"))
 }
 
-func itemInterval(item legacyItem) (int64, error) {
+// pythonDefaultAggInterval is the 60 seconds Python reads a missing or zero
+// aggregation interval as (CONST_MINUTES).
+const pythonDefaultAggInterval = 60
+
+// itemInterval is the strategy's period, computed as Python's
+// Strategy.get_interval computes it (alarm_backends/core/control/strategy.py):
+//
+//	for query_config in items[0]["query_configs"]:
+//	    if "agg_interval" not in query_config: continue
+//	    ... min_interval = the least of those that carry one ...
+//	return min_interval or CONST_MINUTES
+//
+// A config without the key sits out; one that carries 0 takes part, makes the
+// least 0, and 0 or 60 is 60. So none carried, or a 0 among them, is 60, and
+// defaulted says so. A null sits out too - Python's first-value branch keeps
+// it None - which the writers never publish; a negative or non-integer value
+// is refused by name, where Python would run on it.
+func itemInterval(item legacyItem) (interval int64, defaulted bool, err error) {
 	if len(item.QueryConfigs) == 0 {
-		return 0, errors.New("alarmd controlplane: invalid query config")
+		return 0, false, errors.New("alarmd controlplane: invalid query config")
 	}
 	var minimum int64
+	carried := false
 	for _, raw := range item.QueryConfigs {
 		var query struct {
-			AggInterval json.Number `json:"agg_interval"`
+			AggInterval json.RawMessage `json:"agg_interval"`
 		}
-		decoder := json.NewDecoder(strings.NewReader(string(raw)))
-		decoder.UseNumber()
-		if decoder.Decode(&query) != nil {
-			return 0, errors.New("alarmd controlplane: invalid query config")
+		if json.Unmarshal(raw, &query) != nil {
+			return 0, false, errors.New("alarmd controlplane: invalid query config")
 		}
-		interval, err := strconv.ParseInt(query.AggInterval.String(), 10, 64)
-		if err != nil || interval <= 0 {
-			return 0, errors.New("alarmd controlplane: positive aggregation interval is required")
+		if len(query.AggInterval) == 0 || string(query.AggInterval) == "null" {
+			continue
 		}
-		if minimum == 0 || interval < minimum {
-			minimum = interval
+		value, parseErr := strconv.ParseInt(string(query.AggInterval), 10, 64)
+		if parseErr != nil || value < 0 {
+			return 0, false, errors.New("alarmd controlplane: aggregation interval must be a non-negative integer")
+		}
+		if !carried || value < minimum {
+			minimum, carried = value, true
 		}
 	}
-	return minimum, nil
+	if minimum == 0 {
+		return pythonDefaultAggInterval, true, nil
+	}
+	return minimum, false, nil
 }
 
 func thresholdConfig(raw legacyAlgorithm, unit string) (json.RawMessage, error) {
