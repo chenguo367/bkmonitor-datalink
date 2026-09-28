@@ -713,3 +713,103 @@ func TestADirectoryRefreshThatFailsSaysWhichReadAndWhy(t *testing.T) {
 		t.Fatalf("a complete refresh carries a failure: read %q error %q", s.FailedRead, s.Error)
 	}
 }
+
+// A publication an active Plan is still carried on keeps its objects renewed
+// and not its manifest, so past the catalog's retention its manifest is gone
+// while its Plans run. The directory stopped at the first missing manifest,
+// and on a deployment whose activation carried such a publication it was
+// empty on every replica every refresh. Both sides: a carried publication's
+// manifest missing is named, its Plans are rows marked as such with nothing
+// the manifest would have said, and the latest publication's rows are built;
+// the latest publication's own manifest missing still fails the refresh, by
+// its key.
+func TestADirectoryNamesACarriedPublicationWhoseManifestIsGoneAndGoesOn(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	for _, side := range []string{"carried", "latest", "carried read failed"} {
+		t.Run(side, func(t *testing.T) {
+			h, baseline, at := directoryFixture(t, 32)
+			baseline.Refresh(h.ctx, at)
+			carried := baseline.Page(at, "", "", "", 0, 20).Published
+			manifest, err := h.repository.LoadCatalogManifest(h.ctx, carried.SnapshotRevision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// A later publication of the same groups; the activation stays on
+			// the first, as it does for Plans that have not cut over.
+			manifest.SnapshotRevision = execution.SnapshotRevision(strings.Repeat("e", 64))
+			payload, _ := json.Marshal(manifest)
+			latestKey := h.prefix + ":manifest:" + string(manifest.SnapshotRevision)
+			carriedKey := h.prefix + ":manifest:" + string(carried.SnapshotRevision)
+			if err = h.client.Set(h.ctx, latestKey, payload, 0).Err(); err != nil {
+				t.Fatal(err)
+			}
+			if err = h.client.Set(h.ctx, h.prefix+":latest_publication", "2\n"+string(manifest.SnapshotRevision), 0).Err(); err != nil {
+				t.Fatal(err)
+			}
+			var reads []redis.Cmdable
+			if side == "carried read failed" {
+				// The carried manifest is there and its read fails: that is
+				// not a manifest past its retention, and it fails the refresh.
+				reads = append(reads, &failingReadSpy{Cmdable: h.client, fail: carriedKey, err: errors.New("read tcp 127.0.0.1:6379: i/o timeout")})
+			} else if err = h.client.Del(h.ctx, map[string]string{"carried": carriedKey, "latest": latestKey}[side]).Err(); err != nil {
+				t.Fatal(err)
+			}
+			d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, reads...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.Refresh(h.ctx, at)
+			s := d.Page(at, "", "", "", 0, 100)
+			if side == "carried read failed" {
+				if s.Complete || s.FailedRead != "manifest" || s.FailedKey != carriedKey || s.FailedPublication == nil || *s.FailedPublication != carried {
+					t.Fatalf("carried read failed = complete %v read %q key %q publication %+v, want the refresh failed on the carried manifest by name",
+						s.Complete, s.FailedRead, s.FailedKey, s.FailedPublication)
+				}
+				for _, row := range s.Rows {
+					if row.ManifestExpired {
+						t.Fatalf("row %+v marked expired for a manifest whose read failed", row)
+					}
+				}
+				last := s.Publications[len(s.Publications)-1]
+				if last.Publication != carried || last.Manifest != "failed" {
+					t.Fatalf("publications = %+v, want the carried one marked failed, not expired", s.Publications)
+				}
+				return
+			}
+			if side == "latest" {
+				latest := controlplane.SnapshotPublicationRef{SnapshotRevision: manifest.SnapshotRevision, PublicationEpoch: 2}
+				if s.Complete || s.FailedRead != "manifest" || s.FailedKey != latestKey || s.FailedPublication == nil || *s.FailedPublication != latest {
+					t.Fatalf("latest manifest gone = complete %v read %q key %q publication %+v, want the refresh failed on it by name",
+						s.Complete, s.FailedRead, s.FailedKey, s.FailedPublication)
+				}
+				return
+			}
+			if !s.Complete || s.FailedRead != "" {
+				t.Fatalf("carried manifest gone = complete %v read %q error %q, want the refresh to go on", s.Complete, s.FailedRead, s.Error)
+			}
+			var published, expired int
+			for _, row := range s.Rows {
+				switch {
+				case row.ManifestExpired:
+					expired++
+					if row.Publication != carried || row.QueryGroup != "" || row.ObjectDigest != "" || row.Activation == nil ||
+						row.Role != string(execution.ActivationCurrent) {
+						t.Fatalf("expired row = %+v, want the carried Plan named by its activation and nothing guessed", row)
+					}
+				case row.Publication.SnapshotRevision == manifest.SnapshotRevision && row.QueryGroup != "":
+					published++
+				}
+			}
+			if published == 0 || expired == 0 {
+				t.Fatalf("rows = %+v, want the latest publication's rows and the carried Plans named", s.Rows)
+			}
+			var names []string
+			for _, read := range s.Publications {
+				names = append(names, fmt.Sprintf("%s:%s:%d", read.Publication.SnapshotRevision[:1], read.Manifest, read.Plans))
+			}
+			if want := []string{"e:store:0", string(carried.SnapshotRevision[:1]) + fmt.Sprintf(":expired:%d", expired)}; strings.Join(names, ",") != strings.Join(want, ",") {
+				t.Fatalf("publications = %v, want %v", names, want)
+			}
+		})
+	}
+}

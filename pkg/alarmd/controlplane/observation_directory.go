@@ -100,6 +100,21 @@ type StrategyDirectoryRow struct {
 	// either, which the output read reports as unknown rather than fetching a
 	// manifest to find out.
 	OutputContext execution.OutputContextDigest `json:"output_context_digest,omitempty"`
+	// ManifestExpired is a Plan the activation still carries on a publication
+	// whose manifest is gone: the row names the Plan, its publication and its
+	// activation, and nothing the manifest would have said -- the Query Group,
+	// the object, the revisions -- which is left empty rather than guessed.
+	ManifestExpired bool `json:"manifest_expired,omitempty"`
+}
+
+// DirectoryPublication is one publication a directory refresh read: how many
+// active Plans the activation carries on it, and where its manifest came
+// from -- index or store; expired when a carried publication's manifest key
+// is gone, failed when the read did not return it for any other reason.
+type DirectoryPublication struct {
+	Publication SnapshotPublicationRef `json:"publication"`
+	Plans       int                    `json:"plans"`
+	Manifest    string                 `json:"manifest,omitempty"`
 }
 
 type StrategyDirectorySnapshot struct {
@@ -125,6 +140,17 @@ type StrategyDirectorySnapshot struct {
 	SourceReason       string                 `json:"source_reason,omitempty"`
 	SourceMatchedTotal int                    `json:"source_matched_total"`
 	SourceTruncated    bool                   `json:"source_truncated"`
+	// FailedKey and FailedPublication are what that step was reading: the
+	// store key, and the publication whose manifest or object it was. The
+	// step and its words said a manifest was missing on every replica every
+	// refresh, and not whose -- the latest publication's or one an active
+	// Plan was still carried on -- which is the whole question.
+	FailedKey         string                  `json:"failed_key,omitempty"`
+	FailedPublication *SnapshotPublicationRef `json:"failed_publication,omitempty"`
+	// Publications is every publication the refresh read a manifest for:
+	// the latest, then each one an active Plan's activation still names,
+	// with how many active Plans name it and where its manifest came from.
+	Publications []DirectoryPublication `json:"publications,omitempty"`
 	// Source dispositions have no tenant identity in the persisted contract.
 	// They remain unattributed, never joined to a similarly named tenant Plan.
 	Unattributed []ObjectDisposition    `json:"source_unattributed,omitempty"`
@@ -199,6 +225,34 @@ func (r *directoryRead) read(ctx context.Context, key string) ([]byte, error) {
 	return payload, nil
 }
 
+// nameExpiredManifest adds a row for every active Plan carried on pub, whose
+// manifest is gone, in Plan order; false when the directory's allowance
+// cannot hold them.
+func (d *ObservationDirectory) nameExpiredManifest(s *StrategyDirectorySnapshot, pub SnapshotPublicationRef, plans []PlanActivationRecord) bool {
+	var carried []PlanActivationRecord
+	for _, record := range plans {
+		if record.Publication == pub {
+			carried = append(carried, record)
+		}
+	}
+	sort.Slice(carried, func(i, j int) bool {
+		left, right := carried[i].Fact.Key(), carried[j].Fact.Key()
+		if left.PlanIdentity != right.PlanIdentity {
+			return left.TenantID+"\x00"+left.BusinessID+"\x00"+left.StrategyID < right.TenantID+"\x00"+right.BusinessID+"\x00"+right.StrategyID
+		}
+		return left.ShardIndex < right.ShardIndex
+	})
+	for _, record := range carried {
+		if len(s.Rows) >= d.limits.Entries {
+			return false
+		}
+		fact := record.Fact
+		s.Rows = append(s.Rows, StrategyDirectoryRow{Identity: fact.Plan, Publication: pub, Role: string(fact.Selection),
+			Activation: &fact, ManifestExpired: true})
+	}
+	return true
+}
+
 func (r *directoryRead) decode(ctx context.Context, key string, out any) error {
 	b, err := r.read(ctx, key)
 	if err != nil {
@@ -230,9 +284,18 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			s.FailedRead, s.Error = step, observability.SanitizeErrorText(err.Error())
 		}
 	}
+	// failAt is fail for a read of one key, which the snapshot names with
+	// the publication it belongs to when the failure is the first.
+	failAt := func(step, key string, publication *SnapshotPublicationRef, err error) {
+		first := s.FailedRead == "" && err != nil
+		fail(step, err)
+		if first {
+			s.FailedKey, s.FailedPublication = key, publication
+		}
+	}
 	payload, err := r.read(ctx, d.repository.latestPublicationKey())
 	if err != nil {
-		fail("latest_publication", err)
+		failAt("latest_publication", d.repository.latestPublicationKey(), nil, err)
 		return
 	}
 	parts := strings.Split(string(payload), "\n")
@@ -271,8 +334,10 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	active := make(map[execution.PlanKey]PlanActivationRecord, len(activation.Plans))
 	publications := []SnapshotPublicationRef{s.Published}
 	seen := map[SnapshotPublicationRef]bool{s.Published: true}
+	carried := map[SnapshotPublicationRef]int{}
 	for _, a := range activation.Plans {
 		active[a.Fact.Key()] = a
+		carried[a.Publication]++
 		if !seen[a.Publication] && a.Publication.validate() == nil {
 			publications = append(publications, a.Publication)
 			seen[a.Publication] = true
@@ -303,13 +368,35 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 		// same bytes over the wire every refresh. Only a publication this
 		// process has not loaded -- a carried one, or a cold start -- is read.
 		var manifest CatalogManifest
+		read := DirectoryPublication{Publication: pub, Plans: carried[pub], Manifest: "store"}
 		if cachedRevision == pub.SnapshotRevision && len(cached) > 0 {
 			manifest = manifestFromIndex(pub.SnapshotRevision, cached)
 			s.ManifestsFromIndex++
+			read.Manifest = "index"
 		} else if err = r.decode(ctx, d.repository.catalogManifestKey(pub.SnapshotRevision), &manifest); err != nil {
-			fail("manifest", err)
+			// A publication an active Plan is still carried on keeps its
+			// objects renewed and not its manifest, so past the catalog's
+			// retention the manifest is gone while its Plans run. Stopping
+			// there left the directory empty on every replica every refresh;
+			// its Plans are named and the walk goes on. The latest
+			// publication's manifest is renewed every round, and missing it
+			// still fails the refresh.
+			if pub != s.Published && errors.Is(err, ErrSnapshotUnavailable) {
+				read.Manifest = "expired"
+				s.Publications = append(s.Publications, read)
+				if !d.nameExpiredManifest(s, pub, activation.Plans) {
+					fail("retained_entries", ErrObservationBudget)
+					break
+				}
+				continue
+			}
+			read.Manifest = "failed"
+			s.Publications = append(s.Publications, read)
+			failed := pub
+			failAt("manifest", d.repository.catalogManifestKey(pub.SnapshotRevision), &failed, err)
 			break
 		}
+		s.Publications = append(s.Publications, read)
 		if manifest.SchemaVersion != catalogManifestSchemaVersion || manifest.SnapshotRevision != pub.SnapshotRevision {
 			s.Complete = false
 			s.Reason = "INVALID_MANIFEST"
@@ -354,7 +441,8 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 						nextCursor[pub.SnapshotRevision] = (index + 1) % len(manifest.QueryGroups)
 						budgetFailed = true
 					}
-					fail("group_object", err)
+					failed := pub
+					failAt("group_object", d.repository.queryGroupObjectKey(ref.ObjectDigest), &failed, err)
 					continue
 				}
 				if obj.Identity != ref.QueryGroup {
