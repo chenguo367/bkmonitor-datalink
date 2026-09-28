@@ -19,6 +19,7 @@ package fleet
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -3328,21 +3329,26 @@ func addToRetentionGroup(groups []RetentionGroup, retention *observability.Runti
 }
 
 // sortRetentionGroups puts the facts most replicas run with first, then the
-// longer catalog retention, so two reads of an evenly split deployment list
-// the same way.
+// longer catalog retention and object limit, and last the group whose first
+// replica name sorts first, so two reads of an evenly split deployment list
+// the same way whatever order the snapshots arrived in: two groups can
+// derive the same lengths from different inputs.
 func sortRetentionGroups(groups []RetentionGroup) {
 	sort.SliceStable(groups, func(i, j int) bool {
 		if len(groups[i].Replicas) != len(groups[j].Replicas) {
 			return len(groups[i].Replicas) > len(groups[j].Replicas)
 		}
 		left, right := groups[i].Retention, groups[j].Retention
-		if left == nil || right == nil {
-			return right == nil && left != nil
+		if (left == nil) != (right == nil) {
+			return left != nil
 		}
-		if left.CatalogSeconds != right.CatalogSeconds {
+		if left != nil && left.CatalogSeconds != right.CatalogSeconds {
 			return left.CatalogSeconds > right.CatalogSeconds
 		}
-		return left.ObjectLimitSeconds > right.ObjectLimitSeconds
+		if left != nil && left.ObjectLimitSeconds != right.ObjectLimitSeconds {
+			return left.ObjectLimitSeconds > right.ObjectLimitSeconds
+		}
+		return slices.Min(groups[i].Replicas) < slices.Min(groups[j].Replicas)
 	})
 }
 

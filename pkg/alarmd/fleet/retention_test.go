@@ -64,6 +64,26 @@ func TestTheViewGroupsTheReplicasByTheRetentionTheyRunWith(t *testing.T) {
 	}
 }
 
+// Two groups of one replica each that derive the same lengths from different
+// inputs list in one order whichever replica the aggregate reads first: the
+// replica whose name sorts first leads.
+func TestRetentionGroupsListInOneOrderWhateverTheSnapshotOrder(t *testing.T) {
+	longerReplay := retentionFacts(604800)
+	longerReplay.MaxReplayAgeSeconds = 300
+	for _, reversed := range []bool{false, true} {
+		snapshots := idleSnapshots()
+		snapshots[0].Retention, snapshots[1].Retention = retentionFacts(604800), longerReplay
+		expected := replicas()
+		if reversed {
+			expected[0], expected[1] = expected[1], expected[0]
+		}
+		view := Aggregate(Expectation{QueryGroups: 0, Known: true}, snapshots, expected, now, freshness)
+		if len(view.Retentions) != 2 || view.Retentions[0].Replicas[0] != "pod-a" || view.Retentions[1].Replicas[0] != "pod-b" {
+			t.Fatalf("reversed=%v: retention groups = %+v, want pod-a's group before pod-b's", reversed, view.Retentions)
+		}
+	}
+}
+
 // The health route carries the groups with every length and input by its
 // runtime.get name, and an empty list rather than null with no replica.
 func TestTheHealthRouteCarriesTheRetentionGroups(t *testing.T) {
