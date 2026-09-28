@@ -564,9 +564,15 @@ func gapPreflightForHeader(header execution.InternalExecutionHeader) ([]executio
 		if err != nil {
 			return nil, err
 		}
+		// The Plan's own retention, so the load renews the marker to the
+		// lifetime its write gives it rather than to the floor.
+		retention, err := execution.DeriveStateRetentionRequirement(due.CompiledPlan)
+		if err != nil {
+			return nil, err
+		}
 		items = append(items, execution.PlanGapLoadItem{
 			Identity:     due.GapIdentity(),
-			ApplyVersion: version, ScheduleRevision: due.ScheduleRevision,
+			ApplyVersion: version, ScheduleRevision: due.ScheduleRevision, Retention: retention,
 		})
 	}
 	return items, nil

@@ -11,7 +11,10 @@ package state
 
 import (
 	"errors"
+	"fmt"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
 // GenerationScopedFloor is the shortest life a generation-scoped key may have.
@@ -68,6 +71,40 @@ func GenerationScopedTTL(
 		return GenerationScopedFloor, nil
 	}
 	return runtime, nil
+}
+
+// generationWriteTTL is the lifetime a write gives one Plan's generation-scoped
+// key: the same GenerationScopedTTL the load renews it to, so a write never
+// takes back what the load gave, and the key outlives the interval to the
+// Plan's next round whatever that interval is. A writer that has a compiled
+// Plan and did not pass its retention is refused.
+//
+// A writer that says it has no compiled Plan gets the ceiling, the longest
+// life GenerationScopedTTL gives any Plan. The floor it used to get was
+// shorter than the interval of a Plan that runs less than daily, and the
+// marker such a writer puts down is the one a Plan made to warm up again
+// (ForceWarming) must find at its next round: missing, the round wrote it
+// again and finished without evaluating, and a sixty-hour Plan did that every
+// round, never evaluating again. Longer is the safe direction here as it is
+// in GenerationScopedTTL: the next round that evaluates the Plan writes the
+// marker for the Plan's own lifetime, so only a marker nothing evaluates
+// after -- a Plan deleted or retired next -- keeps the longer life.
+func generationWriteTTL(
+	retention execution.GenerationRetention, plan execution.PlanIdentity, restartMargin, minimum, maximum time.Duration,
+) (time.Duration, error) {
+	if retention.Unknown {
+		return max(maximum, GenerationScopedFloor), nil
+	}
+	levels := retention.ByPlan[plan]
+	if len(levels) == 0 {
+		return 0, fmt.Errorf("state: generation-scoped write for Plan %s/%s/%s carries no retention",
+			plan.TenantID, plan.BusinessID, plan.StrategyID)
+	}
+	requirements := make([]LevelRequirement, len(levels))
+	for index, level := range levels {
+		requirements[index] = NewLevelRequirement(level, "", 0)
+	}
+	return GenerationScopedTTL(requirements, restartMargin, minimum, maximum)
 }
 
 // GenerationScopedRenewalThreshold is the remaining life below which a loaded

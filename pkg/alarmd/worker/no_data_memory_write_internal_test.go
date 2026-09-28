@@ -76,7 +76,7 @@ func TestEveryNoDataMemoryWriteOutcomeIsReportedOnExactlyOneStage(t *testing.T) 
 			}}
 			if err := coordinator.applyNoDataMemory(context.Background(), execution.SlotExecutionRequest{
 				Operation: execution.OperationNormal,
-			}, []execution.PlanNoDataMutation{refusedMemoryMutation(t)}); err != nil {
+			}, refusedMemoryDue(t), []execution.PlanNoDataMutation{refusedMemoryMutation(t)}); err != nil {
 				t.Fatalf("applyNoDataMemory() error: %v", err)
 			}
 
@@ -152,7 +152,7 @@ func TestARefusedWriteIsNotAlsoReportedAsAWrite(t *testing.T) {
 	coordinator, observed := noDataRefusalFixture(store)
 	if err := coordinator.applyNoDataMemory(context.Background(), execution.SlotExecutionRequest{
 		Operation: execution.OperationNormal,
-	}, []execution.PlanNoDataMutation{refusedMemoryMutation(t)}); err != nil {
+	}, refusedMemoryDue(t), []execution.PlanNoDataMutation{refusedMemoryMutation(t)}); err != nil {
 		t.Fatalf("applyNoDataMemory() error: %v", err)
 	}
 	for _, observation := range *observed {
@@ -188,7 +188,7 @@ func TestARefusedNoDataMemoryWriteReportsTheComparisonTheStoreMade(t *testing.T)
 	}}
 	if err := coordinator.applyNoDataMemory(context.Background(), execution.SlotExecutionRequest{
 		Operation: execution.OperationNormal,
-	}, []execution.PlanNoDataMutation{refusedMemoryMutation(t)}); err != nil {
+	}, refusedMemoryDue(t), []execution.PlanNoDataMutation{refusedMemoryMutation(t)}); err != nil {
 		t.Fatalf("applyNoDataMemory() error: %v", err)
 	}
 	var facts *observability.NoDataMemoryWriteFacts

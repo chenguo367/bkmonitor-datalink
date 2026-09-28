@@ -1078,7 +1078,10 @@ func (coordinator *SlotExecutionCoordinator) applyActivatedPlanGaps(
 	extensions ...map[execution.PlanGapIdentity]*observability.GapExtensionFacts,
 ) (bool, error) {
 	allAlready := len(items) > 0
-	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, "activated Plan gap guard",
+	// These markers are written from the activation record alone, which
+	// carries no retention: the request says so, and the store writes them
+	// for its ceiling, which outlives any Plan's next round.
+	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, execution.GenerationRetention{Unknown: true}, "activated Plan gap guard",
 		func(item execution.GapGuardApplyItemResult) error {
 			if item.Status != execution.GapGuardAlreadyApplied {
 				allAlready = false
@@ -1107,6 +1110,7 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 	operation execution.Operation,
 	contractRef execution.FrozenExecutionContractRef,
 	items []execution.PlanGapMutation,
+	retention execution.GenerationRetention,
 	subject string,
 	accept func(execution.GapGuardApplyItemResult) error,
 	extensionMaps ...map[execution.PlanGapIdentity]*observability.GapExtensionFacts,
@@ -1124,7 +1128,7 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 			}
 		}
 		chunkStarted := time.Now()
-		result, err := coordinator.ports.GapGuard.ApplyGap(ctx, execution.GapGuardApplyRequest{Contract: contractRef, Items: chunkItems})
+		result, err := coordinator.ports.GapGuard.ApplyGap(ctx, execution.GapGuardApplyRequest{Contract: contractRef, Items: chunkItems, Retention: retention})
 		var reason execution.ReasonCode
 		if err == nil {
 			if err = result.Validate(); err == nil {
@@ -1264,6 +1268,14 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		if err := coordinator.admit(ctx, request, due); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
+		// What this Plan's gap markers live for, read only when it has any.
+		var gapRetention execution.GenerationRetention
+		if len(planResult.GuardBeforeEvents) > 0 || len(planResult.GuardAfterState) > 0 {
+			var retentionErr error
+			if gapRetention, retentionErr = generationRetentionOf(due); retentionErr != nil {
+				return execution.SlotExecutionResult{}, retentionErr
+			}
+		}
 		// Gap statements commit independently from series State. This also
 		// covers retries whose query became partial or exceeded its budget,
 		// which never enter the evaluator.
@@ -1279,7 +1291,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 		// the retry recovers into one that does not run.
 		coordinator.observeDuplicatedGapStatements(ctx, request, planResult)
 
-		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardBeforeEvents, GapSiteBeforeEvents); err != nil {
+		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardBeforeEvents, gapRetention, GapSiteBeforeEvents); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
 
@@ -1508,7 +1520,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			held.release()
 		}
 		coordinator.observeGapScheduleRestart(ctx, request.Operation, loadedGaps, planResult.GuardAfterState)
-		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardAfterState, GapSiteAfterState); err != nil {
+		if err := coordinator.applyGap(ctx, request.Operation, request.Contract, planResult.GuardAfterState, gapRetention, GapSiteAfterState); err != nil {
 			return execution.SlotExecutionResult{}, err
 		}
 		if planResult.Disposition == execution.PlanRetryPending && retryPendingReason == "" {
@@ -1521,7 +1533,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	// memory only changes what the next round reports as a duration and which
 	// groups it expects, never whether this round fired - so it follows the
 	// writes that do decide that, rather than racing them.
-	if err := coordinator.applyNoDataMemory(ctx, request, noDataMemory); err != nil {
+	if err := coordinator.applyNoDataMemory(ctx, request, header.DuePlans, noDataMemory); err != nil {
 		return execution.SlotExecutionResult{}, err
 	}
 	if retryPendingReason != "" {
@@ -1759,9 +1771,10 @@ func (coordinator *SlotExecutionCoordinator) applyGap(
 	operation execution.Operation,
 	contractRef execution.FrozenExecutionContractRef,
 	items []execution.PlanGapMutation,
+	retention execution.GenerationRetention,
 	site string,
 ) error {
-	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, "gap guard",
+	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, retention, "gap guard",
 		func(item execution.GapGuardApplyItemResult) error {
 			if item.Status != execution.GapGuardApplied && item.Status != execution.GapGuardAlreadyApplied {
 				return &GapApplyRefusal{Stage: "gap guard did not complete", Status: item.Status, Site: site,
@@ -2522,6 +2535,21 @@ func sequencingScope(
 		return gaps[left].StateGeneration < gaps[right].StateGeneration
 	})
 	return execution.SequencingScope{Slot: header.Contract.Slot, StateKeys: states, GapKeys: gaps}
+}
+
+// generationRetentionOf is what the gap markers and no-data memory of these
+// due Plans live for when this Slot writes them: each Plan's own state
+// retention, the one their loads renew them to.
+func generationRetentionOf(dues ...execution.DuePlan) (execution.GenerationRetention, error) {
+	byPlan := make(map[execution.PlanIdentity][]execution.StateRetentionRequirement, len(dues))
+	for _, due := range dues {
+		retention, err := execution.DeriveStateRetentionRequirement(due.CompiledPlan)
+		if err != nil {
+			return execution.GenerationRetention{}, fmt.Errorf("alarmd worker: %w", err)
+		}
+		byPlan[due.Identity] = retention
+	}
+	return execution.GenerationRetention{ByPlan: byPlan}, nil
 }
 
 func duePlan(plans []execution.DuePlan, identity execution.PlanIdentity) (execution.DuePlan, bool) {
