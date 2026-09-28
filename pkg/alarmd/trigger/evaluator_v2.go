@@ -112,6 +112,20 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 				return result, nil
 			}
 		}
+		// An event the Plan's protocol has no message for is decided and not
+		// built: under the compatibility protocol that is every RECOVERY, one
+		// per healthy series per round, and building it was most of this
+		// function's cost for an envelope thrown away as soon as it existed.
+		// The rule and the context are the ones the envelope would have
+		// carried, so it is not built exactly where the sink would have left
+		// it without a message. What building it also did no longer happens
+		// for these records: its invariants are not checked, so one that
+		// would have failed no longer fails the Slot.
+		if format := request.Plan.WireFormat(); contract.NoMessageFor(format, result.RecordResult,
+			request.Plan.LegacyOutput() != nil && request.Plan.PublishesCompatibleProtocol()) {
+			result.WithoutMessageFormat = format
+			return result, nil
+		}
 		event, err := contract.BuildTriggerEventV1(contract.TriggerEventBuildInputV1{
 			StrategyRef: snapshotRef,
 			DedupeMD5:   dedupeMD5,
@@ -627,8 +641,8 @@ func recoveryGateV2(outcomes []LevelOutcomeV2) RecoveryGateV2 {
 //
 // Two shapes do not ask the set. A Plan that does not publish the alert
 // consumer's protocol is not gated: the set is that consumer's, and the
-// The Python compatibility protocol carries no RECOVERY message (the sink
-// drops it). A caller that passed no
+// Python compatibility protocol carries no RECOVERY message, so its envelope
+// is not built at all. A caller that passed no
 // set has no gate; that is the state before the gate existed and is named
 // as such, so a worker that stops passing the set shows up as a count
 // rather than as recoveries quietly going out again.

@@ -562,12 +562,25 @@ const (
 // other format carries every kind.
 //
 // One rule with two readers: the sink, which leaves such an event without a
-// message, and the evaluation, which does not keep one it knows the sink
-// would drop. Two copies of it could disagree, and the way they would
-// disagree is silent - an event kept that goes nowhere, or dropped that
-// should have gone.
+// message, and the trigger, which does not build one the sink would leave
+// without a message (NoMessageFor). Two copies of it could disagree, and the
+// way they would disagree is silent - an event built that goes nowhere, or
+// not built that should have gone.
 func EventHasMessage(format, eventKind string) bool {
 	return format != WireFormatPythonCompatible || eventKind == TriggerEventAbnormal
+}
+
+// NoMessageFor reports whether an event of this kind, under this resolved
+// wire format, would be taken by the sink and left without a message: a kind
+// the protocol has no message for, on an event carrying the compatibility
+// context the sink converts it by. Without that context the sink refuses the
+// event rather than leaving it, so it is not reported here.
+//
+// The trigger asks it before building an envelope and the sink's answer for
+// a built one (DroppedAtSink) is the same function, so the envelope is not
+// built exactly where it would have been dropped.
+func NoMessageFor(format, eventKind string, compatibilityContext bool) bool {
+	return !EventHasMessage(format, eventKind) && compatibilityContext
 }
 
 // DroppedAtSink reports whether the sink would take this event and leave it
@@ -579,10 +592,8 @@ func DroppedAtSink(event *TriggerEventV1) bool {
 	if event == nil {
 		return false
 	}
-	if EventHasMessage(OutputWireFormatOf(event), event.EventKind) {
-		return false
-	}
-	return event.LegacyOutput != nil && event.LegacyOutput.Configuration != nil
+	return NoMessageFor(OutputWireFormatOf(event), event.EventKind,
+		event.LegacyOutput != nil && event.LegacyOutput.Configuration != nil)
 }
 
 // OutputWireFormatOf is the wire format the sink resolves this event to.

@@ -816,13 +816,12 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	}
 	metrics.outputEventsWithoutMessage = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "output_events_without_message_total",
-		Help: "Events handed to the output sink that the protocol had no message for, by the event's " +
-			"resolved wire format and kind, as the sink decided each. Under python_compatible that is " +
-			"every RECOVERY: the Python protocol carries anomaly points and nothing else, so alarmd " +
-			"assembles the recovery envelope from the records and the sink drops it. This is the " +
-			"number that says how much of that a deployment does, which is what decides whether the " +
-			"open-alert gate -- which today runs only for standard_raw_event -- should run for the " +
-			"compatible protocol too and stop the envelope before it is built. A counter rather than " +
+		Help: "Events decided that the protocol has no message for, by the event's resolved wire format " +
+			"and kind, counted at the output write that would have carried them. Under python_compatible " +
+			"that is every RECOVERY: the Python protocol carries anomaly points and nothing else, so the " +
+			"recovery envelope is not built -- the record keeps its identity and is counted here. It says " +
+			"how many recoveries a deployment decides that no message carries, one per healthy series per " +
+			"round, and stays the same number it was when the envelope was built and dropped. A counter rather than " +
 			"the event_acked line's events_without_message summed: log lines are bounded by the " +
 			"emitter's limiter, so a sum over them is a lower bound, and a lower bound cannot say " +
 			"'not much'. Every format and kind is created at startup; a kind or format this build does " +
@@ -1261,9 +1260,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"resolve, no envelope), held_fingerprint_unknown (the series identity the consumer keys alerts by " +
 			"could not be built; held and named rather than read as absent), not_configured (the evaluation ran " +
 			"without a set; the envelope went as before the gate -- on a production worker this is a wiring " +
-			"fault), protocol_not_gated (the Plan does not publish the alert consumer's protocol -- the compatibility " +
-			"protocol drops RECOVERY at the sink and alarmd's own decision event has no such consumer; the set was " +
-			"not asked). " +
+			"fault), protocol_not_gated (the Plan publishes the compatibility protocol, which has no RECOVERY " +
+			"message: the set was not asked and the envelope is not built; output_events_without_message_total " +
+			"counts it). " +
 			"It counts records per evaluation, not alerts. Which of passed and held_no_open_alert " +
 			"dominates says nothing on its own; read it against open_alert_set_mode, because in " +
 			"self_maintained mode the set is this process's own knowledge.",
@@ -1305,9 +1304,9 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"the strategy's own business), global (nothing answered, so the strategy's own business, " +
 			"global or ordinary). A strategy that configures a target or a business dimension and still lands on global or " +
 			"unmapped relied on a business the caches or the data did not have. Counted once per event built, " +
-			"where it is built and before the output decides whether to send it: an event the sink then drops " +
-			"is counted, so this is events built, not events sent; a retried Slot counts again. Every other " +
-			"strategy's events are not counted.",
+			"where it is built and before the output sends it, so this is events built, not events sent; a " +
+			"retried Slot counts again. A RECOVERY under the compatibility protocol is not built and is not " +
+			"counted. Every other strategy's events are not counted.",
 	}, []string{"source"})
 	for _, source := range contract.BusinessAttributionSources {
 		metrics.eventBusinessAttribution.WithLabelValues(source)

@@ -458,7 +458,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		}
 	}
 	e.attributeBusiness(tr.TriggerEvent, due.CompiledPlan)
-	events, withoutMessage := keptEvents(tr.TriggerEvent)
+	events, withoutMessage := keptEvents(tr, execution.RecordAnchor{RecordID: record.RecordID(), SourceTime: record.SourceTime()})
 	result := recordResult{outcomes: outcomes, gate: tr.RecoveryGate, coverage: coverage}
 	if advance || len(missingInputGuards) > 0 {
 		mutation, err := buildMutation(request, due, record, view, facts, tr.LevelOutcomes, historyCompleteness, durableGuardReasons, missingInputGuards)
@@ -472,22 +472,18 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 }
 
 // keptEvents is what the series keeps of the event its record decided: the
-// event, or - when the sink would take it and send nothing - its identity
-// only. The event is built either way, so what it is and whether it builds
-// are unchanged; what changes is that one the sink would drop is garbage from
-// here rather than from the sink, and it was the largest thing the Slot held
-// for such a series.
-func keptEvents(event *contract.TriggerEventV1) ([]contract.TriggerEventV1, []execution.EventWithoutMessage) {
+// event, or - when its protocol has no message for it, so the trigger did not
+// build it - its identity only: the record, the kind and the format. The
+// identity is what the result contract and the output line count it by, as
+// they did when the envelope was built and dropped here.
+func keptEvents(tr trigger.EvaluationResultV2, record execution.RecordAnchor) ([]contract.TriggerEventV1, []execution.EventWithoutMessage) {
 	switch {
-	case event == nil:
+	case tr.WithoutMessageFormat != "":
+		return nil, []execution.EventWithoutMessage{{Record: record, EventKind: tr.RecordResult, Format: tr.WithoutMessageFormat}}
+	case tr.TriggerEvent == nil:
 		return nil, nil
-	case contract.DroppedAtSink(event):
-		return nil, []execution.EventWithoutMessage{{
-			Record:    execution.RecordAnchor{RecordID: event.RecordRef.RecordID, SourceTime: event.RecordRef.SourceTime},
-			EventKind: event.EventKind, Format: contract.OutputWireFormatOf(event),
-		}}
 	default:
-		return []contract.TriggerEventV1{*event}, nil
+		return []contract.TriggerEventV1{*tr.TriggerEvent}, nil
 	}
 }
 
