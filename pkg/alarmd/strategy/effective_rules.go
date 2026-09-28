@@ -54,8 +54,12 @@ type compiledCalendarItem struct {
 type compiledEffectiveRules struct {
 	location  *time.Location
 	calendars map[int64][]compiledCalendarItem
-	digest    string
-	bytes     int
+	// deleted are the calendars the writer marked deleted, compiled above as
+	// empty ones. Kept apart only for EffectiveTimeCalendars; resolution
+	// reads them as the empty calendars they are.
+	deleted map[int64]struct{}
+	digest  string
+	bytes   int
 }
 
 // The reasons compileEffectiveRules refuses a snapshot with. The codes live in
@@ -175,6 +179,10 @@ func compileEffectiveRules(raw json.RawMessage, tenant string) (*compiledEffecti
 			// Refusing it refused the whole strategy for as long as the
 			// calendar stayed deleted, which is for ever.
 			rules.calendars[calendar.ID] = []compiledCalendarItem{}
+			if rules.deleted == nil {
+				rules.deleted = make(map[int64]struct{}, 1)
+			}
+			rules.deleted[calendar.ID] = struct{}{}
 			continue
 		default:
 			return nil, errors.New(ReasonEffectiveTimeCalendarNotPresent)
@@ -291,6 +299,22 @@ func compileCalendarItem(item effectiveItem) (compiledCalendarItem, error) {
 		}
 	}
 	return result, nil
+}
+
+// EffectiveTimeCalendars visits every calendar the Plan's effective-time
+// snapshot names, with whether the writer marked it deleted. One deleted
+// calendar reads as an empty one, as Python reads it; every calendar a
+// deployment names reading deleted at once is the writer's calendar source
+// gone, not a deletion, and only a reader of many Plans can tell the two
+// apart. A Plan without a snapshot visits nothing.
+func (p *CompiledPlan) EffectiveTimeCalendars(visit func(id int64, deleted bool)) {
+	if p == nil || p.effectiveRules == nil {
+		return
+	}
+	for id := range p.effectiveRules.calendars {
+		_, deleted := p.effectiveRules.deleted[id]
+		visit(id, deleted)
+	}
 }
 
 // ResolveEffectiveTime evaluates the frozen Plan at an explicit second, also

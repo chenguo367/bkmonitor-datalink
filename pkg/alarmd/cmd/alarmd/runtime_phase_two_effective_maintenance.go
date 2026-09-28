@@ -102,6 +102,7 @@ const (
 	closeOutcomeUnavailable          = string(observability.EffectiveCloseUnavailable)
 	closeOutcomeUnsupportedRunner    = string(observability.EffectiveCloseUnsupportedRunner)
 	closeOutcomeViewNotExecutable    = string(observability.EffectiveCloseViewNotExecutable)
+	closeOutcomeCalendarsAllDeleted  = string(observability.EffectiveCloseCalendarsAllDeleted)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -118,6 +119,10 @@ type maintenanceGroup struct {
 	// Level is inactive: on the standard wire, with a schedule, and compiled
 	// in full.
 	closable []controlplane.MaintenancePlan
+	// calendars are the calendars the read Plans' effective-time snapshots
+	// name, each true when at least one snapshot holds it present. See
+	// calendarsAllDeleted.
+	calendars map[int64]bool
 }
 
 type effectiveMaintenance struct {
@@ -295,6 +300,7 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 		}
 	}
 
+	allDeleted := calendarsAllDeleted(readUnderCurrentLease(m.groups, runners))
 	for _, qg := range groups {
 		if ctx.Err() != nil {
 			return
@@ -305,8 +311,68 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 			continue
 		}
 		m.refreshLegacy(ctx, qg, known.legacy)
-		m.closeInactive(ctx, qg, runner, known.closable)
+		m.closeInactive(ctx, qg, runner, known.closable, allDeleted)
 	}
+}
+
+// readUnderCurrentLease is the groups whose Plans were read under the lease
+// their owner holds now. A group whose lease moved holds Plans from before
+// the change: in the minute a source-wide loss arrives, the groups not read
+// again yet would still name the calendars present and let the groups
+// already read close.
+func readUnderCurrentLease(groups map[execution.QueryGroupIdentity]*maintenanceGroup,
+	runners map[execution.QueryGroupIdentity]maintenanceRunner) map[execution.QueryGroupIdentity]*maintenanceGroup {
+	current := make(map[execution.QueryGroupIdentity]*maintenanceGroup, len(groups))
+	for qg, known := range groups {
+		if runner := runners[qg]; runner != nil {
+			if scope, revision, accepting := runner.maintenanceLease(); accepting &&
+				known.contentScope == scope && known.timelineRevision == revision {
+				current[qg] = known
+			}
+		}
+	}
+	return current
+}
+
+// calendarsAllDeleted reports whether the Plans this replica holds name at
+// least one calendar and every one of them reads deleted.
+//
+// One calendar deleted is a deletion, and the Plans that named it as their
+// only alert days are inactive and closed, as Python closes them. Every
+// calendar deleted at once is the writer's calendar source gone: the writer
+// marks each calendar it cannot find as deleted and keeps the snapshot
+// READY, so a calendar table that answered nothing arrives as every
+// calendar deleted, and read as a deletion it would close the alerts of
+// every strategy that alerts on calendar days. That state is held back from
+// closing, the same way an empty strategy list is held back from removing
+// strategies. Detection still reads the calendars as empty, as Python does:
+// reading them as unknown would freeze the strategies whose calendars are
+// rest days, which is missed alerts.
+//
+// The view is this replica's owned Plans, read from memory: the whole
+// catalog is not read here, and in a source-wide loss every replica's share
+// reads the same way. A replica whose share names only calendars that were
+// really deleted holds their closes too, which leaves alerts open rather
+// than closing them wrongly.
+func calendarsAllDeleted(groups map[execution.QueryGroupIdentity]*maintenanceGroup) bool {
+	named := false
+	for _, group := range groups {
+		for _, present := range group.calendars {
+			if present {
+				return false
+			}
+			named = true
+		}
+	}
+	return named
+}
+
+// namesCalendar reports whether the Plan's effective-time snapshot names a
+// calendar at all.
+func namesCalendar(plan *strategy.CompiledPlan) bool {
+	named := false
+	plan.EffectiveTimeCalendars(func(int64, bool) { named = true })
+	return named
 }
 
 // readGroup reads the Query Group's activated Plans under the lease the
@@ -332,6 +398,12 @@ func (m *effectiveMaintenance) readGroup(ctx context.Context, qg execution.Query
 	}
 	known := &maintenanceGroup{contentScope: scope, timelineRevision: revision}
 	for _, plan := range read.Plans {
+		plan.Compiled.EffectiveTimeCalendars(func(id int64, deleted bool) {
+			if known.calendars == nil {
+				known.calendars = make(map[int64]bool)
+			}
+			known.calendars[id] = known.calendars[id] || !deleted
+		})
 		if !planHasSchedule(plan.Compiled) {
 			continue
 		}
@@ -366,8 +438,9 @@ func planHasSchedule(plan *strategy.CompiledPlan) bool {
 // closeInactive closes the current alerts of every Plan whose Levels are all
 // inactive now. The judgement is from memory; the store is touched only
 // when a batch is ready to send, for the owner check before the send and
-// the send itself.
-func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plans []controlplane.MaintenancePlan) {
+// the send itself. While every calendar reads deleted (calendarsAllDeleted)
+// a Plan that names a calendar is not closed.
+func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plans []controlplane.MaintenancePlan, calendarsGone bool) {
 	if len(plans) == 0 {
 		return
 	}
@@ -410,6 +483,10 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			}
 		}
 		if len(alerts) == 0 {
+			continue
+		}
+		if calendarsGone && namesCalendar(plan.Compiled) {
+			m.observe(ctx, qg, closeOutcomeCalendarsAllDeleted, nil, 0)
 			continue
 		}
 		business, err := strconv.ParseInt(plan.Identity.BusinessID, 10, 64)

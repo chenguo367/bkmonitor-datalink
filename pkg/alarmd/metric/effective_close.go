@@ -39,7 +39,9 @@ func newEffectiveCloseCollector() *effectiveCloseCollector {
 				"the producer not acknowledging; maintenance_plan_uncompilable is an activated Plan the maintenance "+
 				"could not compile and so cannot judge; unavailable is a Query Group whose Plans could not be read "+
 				"or whose owner is not accepting; effective_time_unknown, legacy_effective_time_unavailable and "+
-				"close_identity_invalid name the judgement that could not be made. Every cell exists from the "+
+				"close_identity_invalid name the judgement that could not be made; calendars_all_deleted is a close "+
+				"held back because every calendar this replica's strategies name read deleted at once, a calendar "+
+				"source gone rather than a deletion. Every cell exists from the "+
 				"start so a zero is a reading and not an absence.", []string{"outcome"}, nil),
 	}
 }
