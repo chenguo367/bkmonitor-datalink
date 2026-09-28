@@ -169,6 +169,7 @@ type phaseTwoMetrics struct {
 	queryCooldownSaves              *prometheus.CounterVec
 	eventBusinessAttribution        *prometheus.CounterVec
 	diagnosticRedisFailures         *prometheus.CounterVec
+	diagnosticRedisDialRetries      *prometheus.CounterVec
 	leaderForward                   *prometheus.HistogramVec
 	controlSourceRetainedStale      prometheus.Counter
 	controlSource                   *controlSourceCollector
@@ -1325,6 +1326,21 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.diagnosticRedisFailures.WithLabelValues(client, reason)
 		}
 	}
+	metrics.diagnosticRedisDialRetries = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "diagnostic_redis_dial_retries_total",
+		Help: "Connections a diagnostic client dialled a second time because the first dial failed, by client and " +
+			"by why the first failed, in the words of diagnostic_redis_failures_total. A dial sends no command, so " +
+			"the second one repeats nothing; one that fails as well is counted there too, under its own reason. " +
+			"The pool's own background dials, which go-redis starts after a run of failed dials, are dialled " +
+			"the same way, so while Redis stays unreachable this grows about once a second per client, and the " +
+			"client dials twice as often as it would without the second dial. " +
+			"Every cell exists from startup, so a zero is a count.",
+	}, []string{"client", "reason"})
+	for _, client := range DiagnosticRedisClients {
+		for _, reason := range redisfailure.Reasons {
+			metrics.diagnosticRedisDialRetries.WithLabelValues(client, reason)
+		}
+	}
 	metrics.leaderForward = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "leader_forward_duration_seconds",
 		Help: "Requests a replica handed to the Control Leader's listener because it could not answer them itself, " +
@@ -1661,7 +1677,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.hostDisableMonitorStates, m.cmdbIndexAge,
@@ -2508,6 +2524,19 @@ func (r *Recorder) ObserveDiagnosticRedisFailure(client, reason string) {
 		reason = redisfailure.Other
 	}
 	r.phaseTwo.diagnosticRedisFailures.WithLabelValues(client, reason).Inc()
+}
+
+// ObserveDiagnosticRedisDialRetry counts one second dial of a diagnostic
+// client by why the first failed; a client or reason outside the closed sets
+// is counted as ObserveDiagnosticRedisFailure counts it.
+func (r *Recorder) ObserveDiagnosticRedisDialRetry(client, reason string) {
+	if r == nil || r.phaseTwo.diagnosticRedisDialRetries == nil || !slices.Contains(DiagnosticRedisClients, client) {
+		return
+	}
+	if !slices.Contains(redisfailure.Reasons, reason) {
+		reason = redisfailure.Other
+	}
+	r.phaseTwo.diagnosticRedisDialRetries.WithLabelValues(client, reason).Inc()
 }
 
 // ObserveQueryCooldownSave counts one pool record write by its result; a

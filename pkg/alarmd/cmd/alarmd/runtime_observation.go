@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"net"
 	"slices"
 	"sort"
 	"time"
@@ -14,6 +16,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
 
 func observationRedisOptions(connection config.RedisConnectionConfig) *redis.UniversalOptions {
@@ -25,6 +28,58 @@ func observationRedisOptions(connection config.RedisConnectionConfig) *redis.Uni
 	o.WriteTimeout = min(o.WriteTimeout, time.Second)
 	o.PoolTimeout = time.Second
 	return o
+}
+
+// diagnosticDialRetryDelay is the pause before a diagnostic client dials a
+// connection a second time. Short: a CLI call is waiting on it.
+const diagnosticDialRetryDelay = 100 * time.Millisecond
+
+// redisDial is a Redis client's dialer.
+type redisDial func(ctx context.Context, network, addr string) (net.Conn, error)
+
+// goRedisDial is the dial go-redis makes when a client names no dialer of its
+// own, with its default timeout when none is set.
+func goRedisDial(options *redis.UniversalOptions) redisDial {
+	timeout := options.DialTimeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 5 * time.Minute}
+	if options.TLSConfig == nil {
+		return dialer.DialContext
+	}
+	return func(_ context.Context, network, addr string) (net.Conn, error) {
+		return tls.DialWithDialer(dialer, network, addr, options.TLSConfig)
+	}
+}
+
+// withDialRetry dials a connection a second time when the first dial fails.
+// A diagnostic client connects on first use and again once its connections
+// went idle, so a CLI call often lands on a fresh dial, and one name lookup
+// that timed out failed the whole call while the runtime's long-lived
+// connections never noticed. A dial sends no command, so dialing again
+// repeats nothing -- which a retry of the authorization store's writes could
+// not promise. The Sentinel connections are dialed by the same dialer, so an
+// unreachable Sentinel gets its second dial too. onRetry hears why the first
+// dial failed; a second failure is the caller's error, classified as before.
+func withDialRetry(options *redis.UniversalOptions, dial redisDial, onRetry func(reason string)) {
+	options.Dialer = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := dial(ctx, network, addr)
+		if err == nil || ctx.Err() != nil {
+			return conn, err
+		}
+		if onRetry != nil {
+			onRetry(redisfailure.Reason(err))
+		}
+		pause := time.NewTimer(diagnosticDialRetryDelay)
+		defer pause.Stop()
+		select {
+		case <-ctx.Done():
+			return nil, err
+		case <-pause.C:
+		}
+		return dial(ctx, network, addr)
+	}
 }
 
 func observationSampleLimits(capacity config.ObservationCapacity) (observability.SeriesSampleLimits, bool) {

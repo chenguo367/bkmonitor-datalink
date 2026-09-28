@@ -480,6 +480,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_query_cooldown_saves_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_event_business_attribution_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_diagnostic_redis_failures_total"] = "variableLabels: {client,reason}"
+	expected["bkmonitor_alarmd_diagnostic_redis_dial_retries_total"] = "variableLabels: {client,reason}"
 	expected["bkmonitor_alarmd_leader_round_stage_seconds_total"] = "variableLabels: {stage}"
 	expected["bkmonitor_alarmd_lookback_samples_total"] = "variableLabels: {source,outcome}"
 	expected["bkmonitor_alarmd_lookback_rechecks_total"] = "variableLabels: {source,tier,outcome}"
@@ -1053,6 +1054,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("query_cooldown_saves_total")] = len(QueryCooldownSaveResults)
 	bounds[fqName("event_business_attribution_total")] = len(contract.BusinessAttributionSources)
 	bounds[fqName("diagnostic_redis_failures_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
+	bounds[fqName("diagnostic_redis_dial_retries_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
 	bounds[fqName("leader_round_stage_seconds_total")] = len(fleet.LeaderRoundStages) + 1
 	for name, n := range lookbackSeriesUpperBounds() {
 		bounds[fqName(name)] = n
@@ -1347,6 +1349,34 @@ func TestDiagnosticRedisFailuresAreCountedByReason(t *testing.T) {
 		counts[labels["client"]+"/"+labels["reason"]] = m.GetCounter().GetValue()
 	}
 	if counts["auth/connection_closed"] != 1 || counts["auth/other"] != 1 || len(counts) != len(DiagnosticRedisClients)*len(redisfailure.Reasons) {
+		t.Fatalf("counts %v", counts)
+	}
+}
+
+// A second dial is counted by client and by why the first failed, from
+// startup; a client outside the closed set is not counted at all.
+func TestDiagnosticRedisDialRetriesAreCountedByReason(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	name := "bkmonitor_alarmd_diagnostic_redis_dial_retries_total"
+	if cells := gatherFamily(t, r, name); len(cells) != len(DiagnosticRedisClients)*len(redisfailure.Reasons) {
+		t.Fatalf("%d cells before any retry, want every client and reason", len(cells))
+	}
+	r.ObserveDiagnosticRedisDialRetry("auth", redisfailure.Timeout)
+	r.ObserveDiagnosticRedisDialRetry("evidence", "not_a_reason")
+	r.ObserveDiagnosticRedisDialRetry("nobody", redisfailure.Timeout)
+	counts := map[string]float64{}
+	for _, m := range gatherFamily(t, r, name) {
+		labels := map[string]string{}
+		for _, label := range m.GetLabel() {
+			labels[label.GetName()] = label.GetValue()
+		}
+		counts[labels["client"]+"/"+labels["reason"]] = m.GetCounter().GetValue()
+	}
+	total := 0.0
+	for _, count := range counts {
+		total += count
+	}
+	if counts["auth/timeout"] != 1 || counts["evidence/other"] != 1 || total != 2 {
 		t.Fatalf("counts %v", counts)
 	}
 }

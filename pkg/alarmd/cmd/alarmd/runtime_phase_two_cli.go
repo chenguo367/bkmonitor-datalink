@@ -59,6 +59,9 @@ type cliControlBinding struct {
 	// Redis clients -- evidence, auth -- by its reason, with the error's
 	// bounded text where the answer cannot carry it (auth).
 	RedisFailures func(client, reason, detail string)
+	// RedisDialRetries, when set, hears each second dial of the CLI's own
+	// Redis clients -- evidence, auth -- by why the first dial failed.
+	RedisDialRetries func(client, reason string)
 	// Lookback is this process's late-data lookback, nil when it does not
 	// run one, and LookbackStanding why; read by lookback.get.
 	Lookback         *lookback.Engine
@@ -80,6 +83,21 @@ func cliRedisFailures(recorder *metric.Recorder, observer observability.Observer
 			ReasonCode: observability.ReasonContractRetryable, Err: fmt.Errorf("authorization store %s: %s", reason, detail),
 		})
 	}
+}
+
+// cliRedisOptions are one CLI Redis client's options: a small pool that
+// connects on first use, whose dials are tried a second time when the first
+// fails (withDialRetry), counted under the client's name.
+func cliRedisOptions(connection config.RedisConnectionConfig, name string, retries func(client, reason string)) *redis.UniversalOptions {
+	options := observationRedisOptions(connection)
+	options.PoolSize = 2
+	options.MinIdleConns = 0
+	withDialRetry(options, goRedisDial(options), func(reason string) {
+		if retries != nil {
+			retries(name, reason)
+		}
+	})
+	return options
 }
 
 // cliLifecycleOperation reads every replica's start and stop record, which
@@ -141,14 +159,14 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 		}
 		return errors.Join(errs...)
 	}
-	newClient := func(connection config.RedisConnectionConfig) redis.UniversalClient {
-		options := observationRedisOptions(connection)
-		options.PoolSize = 2
-		options.MinIdleConns = 0
-		client := redis.NewUniversalClient(options)
-		clients = append(clients, client)
-		return client
+	clientFor := func(name string) func(config.RedisConnectionConfig) redis.UniversalClient {
+		return func(connection config.RedisConnectionConfig) redis.UniversalClient {
+			client := redis.NewUniversalClient(cliRedisOptions(connection, name, control.RedisDialRetries))
+			clients = append(clients, client)
+			return client
+		}
 	}
+	newClient := clientFor("evidence")
 	if !cfg.CLI.Enabled {
 		// No channel, but the public diagnosis still carries the deployment
 		// section, read through the same operations the CLI's would use. So
@@ -159,7 +177,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 		return obchannel.WithDeploymentSection(native, append(store, workload...)), closeClients, false
 	}
 	// Authentication has its own pool, so an evidence read cannot occupy it.
-	manager, err := cliauth.New(cliauth.Options{Redis: newClient(cfg.RuntimeStoreRedis()), Prefix: cfg.Redis.StatePrefix, EnvironmentID: cfg.CLI.EnvironmentID, EnvironmentName: cfg.CLI.EnvironmentName, PublicBaseURL: cfg.CLI.PublicBaseURL, AdminKey: cfg.CLI.AdminKey,
+	manager, err := cliauth.New(cliauth.Options{Redis: clientFor("auth")(cfg.RuntimeStoreRedis()), Prefix: cfg.Redis.StatePrefix, EnvironmentID: cfg.CLI.EnvironmentID, EnvironmentName: cfg.CLI.EnvironmentName, PublicBaseURL: cfg.CLI.PublicBaseURL, AdminKey: cfg.CLI.AdminKey,
 		OnStoreFailure: func(reason, detail string) {
 			if control.RedisFailures != nil {
 				control.RedisFailures("auth", reason, detail)
