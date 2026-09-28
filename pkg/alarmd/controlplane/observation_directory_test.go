@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -631,5 +632,84 @@ func TestTheCompositionCountsPlansByTheWireFormatTheSinkResolves(t *testing.T) {
 	}
 	if got := controlplane.ComposeCatalog(unworded).PlansByWireFormat; got[contract.WireFormatPythonCompatible] != 2 || got[observability.WireFormatOther] != 0 {
 		t.Fatalf("no word, no revision by wire format = %v, want 2 python_compatible and nothing under _other", got)
+	}
+}
+
+// failingReadSpy fails every bounded read of a key containing fail with err,
+// or, when err is nil, with a word numbered by the order of the failures.
+type failingReadSpy struct {
+	redis.Cmdable
+	fail   string
+	err    error
+	failed int
+}
+
+func (s *failingReadSpy) GetRange(ctx context.Context, key string, start, end int64) *redis.StringCmd {
+	if strings.Contains(key, s.fail) {
+		s.failed++
+		if s.err == nil {
+			return redis.NewStringResult("", fmt.Errorf("failure number %d", s.failed))
+		}
+		return redis.NewStringResult("", s.err)
+	}
+	return s.Cmdable.GetRange(ctx, key, start, end)
+}
+
+// A refresh that fails says which step failed and in its own words, not only
+// that a dependency did: a cold replica whose manifest read failed on every
+// refresh reported DEPENDENCY_UNAVAILABLE, and the cost ranking fed from the
+// directory tracked nothing, with a timeout, a missing key and a body that
+// did not decode all reading the same. The first failure is kept: the walk
+// goes on past a group it could not read, and a later word would hide why.
+func TestADirectoryRefreshThatFailsSaysWhichReadAndWhy(t *testing.T) {
+	h, _, at := directoryFixture(t, 32)
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	spy := &failingReadSpy{Cmdable: h.client, fail: ":manifest:", err: errors.New("read tcp 127.0.0.1:6379: i/o timeout")}
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	s := d.Page(at, "", "", "", 0, 20)
+	if s.Complete || s.Reason != "DEPENDENCY_UNAVAILABLE" || s.FailedRead != "manifest" || !strings.Contains(s.Error, "i/o timeout") {
+		t.Fatalf("manifest failure = complete %v reason %q read %q error %q", s.Complete, s.Reason, s.FailedRead, s.Error)
+	}
+
+	// Every group object fails, each in its own words: the first is the one
+	// kept, since the walk went on past it.
+	groups := &failingReadSpy{Cmdable: h.client, fail: ":qgobj:"}
+	walked, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, groups)
+	if err != nil {
+		t.Fatal(err)
+	}
+	walked.Refresh(h.ctx, at)
+	if s := walked.Page(at, "", "", "", 0, 20); groups.failed < 2 || s.FailedRead != "group_object" || !strings.Contains(s.Error, "failure number 1") {
+		t.Fatalf("group failures = %d, read %q error %q, want the first of them", groups.failed, s.FailedRead, s.Error)
+	}
+
+	ctx, cancel := context.WithCancel(h.ctx)
+	cancel()
+	cold, err := controlplane.NewObservationDirectory(h.newRepository(t), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cold.Refresh(ctx, at)
+	if s := cold.Page(at, "", "", "", 0, 20); s.FailedRead != "latest_publication" || !strings.Contains(s.Error, "context canceled") {
+		t.Fatalf("cancelled refresh = read %q error %q, want the first read and its words", s.FailedRead, s.Error)
+	}
+
+	tight, err := controlplane.NewObservationDirectory(h.newRepository(t), controlplane.DirectoryLimits{WireBytes: 8, Commands: 2, Entries: 2, Timeout: time.Second, FreshFor: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tight.Refresh(h.ctx, at)
+	if s := tight.Page(at, "", "", "", 0, 20); s.Reason != "RESOURCE_BUDGET" || s.FailedRead == "" || s.Error == "" {
+		t.Fatalf("budget = reason %q read %q error %q, want the step it ran out on", s.Reason, s.FailedRead, s.Error)
+	}
+
+	healthy, _ := controlplane.NewObservationDirectory(h.newRepository(t), limits)
+	healthy.Refresh(h.ctx, at)
+	if s := healthy.Page(at, "", "", "", 0, 20); !s.Complete || s.FailedRead != "" || s.Error != "" {
+		t.Fatalf("a complete refresh carries a failure: read %q error %q", s.FailedRead, s.Error)
 	}
 }
