@@ -140,6 +140,9 @@ func TestEveryIdentifiedButtonIsWired(t *testing.T) {
 // which looks exactly like a deployment that has no such data.
 func TestEveryCapacityFieldThePageReadsExistsInTheAPI(t *testing.T) {
 	assertFieldsExist(t, "cap", reflect.TypeOf(fleet.CapacityView{}))
+	// Each replica's row reads that replica's own capacity, whose names are
+	// per replica and differ from the deployment's summed ones.
+	assertFieldsExist(t, "rcap", reflect.TypeOf(fleet.Capacity{}))
 }
 
 // The same failure on the other response, and it shipped too: the records panel

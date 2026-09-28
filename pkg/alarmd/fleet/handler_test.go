@@ -508,13 +508,13 @@ func TestHealthResponseCarriesCapacityWhenReplicasReportIt(t *testing.T) {
 	}
 	// The numbers the panel actually shows. A capacity block present but empty
 	// would still leave a heading over nothing.
-	for _, field := range []string{"replicas", "permits_held", "permit_budget", "memory_limit_bytes"} {
+	for _, field := range []string{"replicas", "permits_held_total", "permit_budget_per_replica", "memory_limit_bytes_per_replica"} {
 		if capacity[field] == nil {
 			t.Fatalf("capacity is missing %q, which the panel renders: %v", field, capacity)
 		}
 	}
-	if capacity["permit_budget"].(float64) != 32 {
-		t.Fatalf("a per-replica ceiling was summed: %v", capacity["permit_budget"])
+	if capacity["permit_budget_per_replica"].(float64) != 32 {
+		t.Fatalf("a per-replica ceiling was summed: %v", capacity["permit_budget_per_replica"])
 	}
 }
 
