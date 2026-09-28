@@ -132,7 +132,7 @@ func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) ob
 			return obchannel.Outcome{Value: reading, Complete: true, Limitations: []string{
 				"Counts are this process's since it started; use meta.answered_by, and target each replica for the deployment.",
 				"Only rechecks with outcome compared enter compared_buckets, compared_windows, differences, judgments and by_age; every other outcome is a window not observed, not a window that did not change.",
-				"A recheck reads through the same query service as the first read. A cache in front of the storage that answered the first read again would hide late data; whether the deployed query service has one is not established here.",
+				"A recheck reads through the same query service as the first read. The query service keeps no result cache by its source (its caches hold routing metadata and reload coordination); the deployed version is read from its workload image, not from here. A storage-layer cache that answers until its next refresh, such as a search engine's request cache, is a known boundary: it can return the first read again.",
 				"Judgments cover static-threshold Levels of Plans that admitted the series at the first read; other algorithms are compared as data only.",
 			}}
 		}}
