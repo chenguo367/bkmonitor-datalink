@@ -3,6 +3,8 @@ package obevidence
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net"
 	"os/exec"
@@ -345,6 +347,17 @@ func TestProgressUsesProductionKeyAndDecoder(t *testing.T) {
 	}
 	if !strings.Contains(encoded(t, r), `"NextSlot":120`) {
 		t.Fatal(encoded(t, r))
+	}
+	// The key names its Query Group only by a digest: the result says which
+	// one, the digest is the one between the key's braces, and it is the
+	// SHA-256 of the identity asked for -- computed here, not by the code
+	// under test.
+	digest := sha256.Sum256([]byte("group"))
+	want := hex.EncodeToString(digest[:])
+	open, closing := strings.Index(r.Location.Key, "{"), strings.Index(r.Location.Key, "}")
+	if r.KeyIdentity == nil || r.KeyIdentity.QueryGroup != "group" || r.KeyIdentity.HashTag != want ||
+		open < 0 || closing < open || r.Location.Key[open+1:closing] != want || !strings.Contains(r.KeyIdentity.Rule, "SHA-256") {
+		t.Fatalf("key %s identity %+v, want the braces to hold sha256(group) = %s and the result to say so", r.Location.Key, r.KeyIdentity, want)
 	}
 	_ = client.Set(ctx, key, `{"schema":"unknown","progress":{}}`, 0).Err()
 	if r := service.Store(ctx, StoreRequest{Family: FamilyQueryProgress, QueryGroup: "group"}); r.Status != "invalid_document" {

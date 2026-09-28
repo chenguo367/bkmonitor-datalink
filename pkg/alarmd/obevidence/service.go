@@ -14,6 +14,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
@@ -116,12 +117,28 @@ type Result struct {
 	Limits   Limits     `json:"limits"`
 	Value    any        `json:"value"`
 	Reason   string     `json:"reason,omitempty"`
+	// KeyIdentity says how the key names the object it was read for, on a
+	// family whose key carries a digest of the ID rather than the ID.
+	KeyIdentity *KeyIdentity `json:"key_identity,omitempty"`
 	// ReasonText is the error's own text, bounded, beside a reason for a
 	// read the server did not answer: other names nothing on its own. The
 	// result goes only to an authorized session, which reads addresses
 	// already.
 	ReasonText string `json:"reason_text,omitempty"`
 }
+
+// KeyIdentity ties a key to the object it names when the key holds only a
+// digest of the object's ID: the ID asked for, the digest as it appears in
+// the key, and the rule that derives one from the other.
+type KeyIdentity struct {
+	QueryGroup string `json:"query_group"`
+	HashTag    string `json:"hash_tag"`
+	Rule       string `json:"rule"`
+}
+
+// controlKeyRule is how a control key's braces name its Query Group.
+const controlKeyRule = "hash_tag is the hex SHA-256 of query_group, the part of the key between the braces; " +
+	"it keeps one Query Group's control keys in one Redis Cluster slot"
 
 func result(source string, binding RedisBinding, status string) Result {
 	return Result{Status: status, Source: source, Location: binding.Location,
@@ -214,6 +231,7 @@ func (service *Service) Store(ctx context.Context, request StoreRequest) Result 
 			return result(request.Family, binding, "not_configured")
 		}
 		r, raw := readOne(ctx, request.Family, binding, key)
+		r.KeyIdentity = &KeyIdentity{QueryGroup: request.QueryGroup, HashTag: ownership.ControlHashTag(execution.QueryGroupIdentity(request.QueryGroup)), Rule: controlKeyRule}
 		if r.Status == "ok" {
 			value, err := progress.DecodeObserved(raw)
 			if err != nil {
