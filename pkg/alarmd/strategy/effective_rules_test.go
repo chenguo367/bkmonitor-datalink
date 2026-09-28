@@ -309,3 +309,40 @@ func TestADeletedCalendarIsReadAsAnEmptyCalendar(t *testing.T) {
 		t.Fatalf("unknown calendar status: err = %v, want %s", err, ReasonEffectiveTimeCalendarNotPresent)
 	}
 }
+
+// Every refusal the snapshot's items and timezone can raise is a code the
+// compiler lists as its own, and so one the catalog classifies. They were
+// literals the list did not carry, and every strategy refused for one was
+// filed as COMPILER_TERMINAL_UNCLASSIFIED with the real code only in the
+// detail. One input per code, so a code that leaves the list goes red here.
+func TestEveryEffectiveTimeItemRefusalIsAListedReason(t *testing.T) {
+	listed := map[string]bool{}
+	for _, reason := range EffectiveTimeTerminalReasons() {
+		listed[reason] = true
+	}
+	item := func(mutate func(*effectiveItem)) effectiveItem {
+		value := ruleItem(0, 86400, "UNIX_SECONDS", "UTC", `{}`)
+		mutate(&value)
+		return value
+	}
+	for want, input := range map[string]effectiveItem{
+		ReasonEffectiveTimeItemInvalid:        item(func(i *effectiveItem) { i.Start = nil }),
+		ReasonEffectiveTimeTimeKindInvalid:    item(func(i *effectiveItem) { i.TimeKind = "HOURLY" }),
+		ReasonEffectiveTimeItemTimeInvalid:    item(func(i *effectiveItem) { end := int64(-1); i.End = &end }),
+		ReasonEffectiveTimeTimezoneInvalid:    item(func(i *effectiveItem) { i.Timezone = "Local" }),
+		ReasonEffectiveTimeRepeatInvalid:      item(func(i *effectiveItem) { i.Repeat = json.RawMessage(`{"freq":"hour","interval":1}`) }),
+		ReasonEffectiveTimeRepeatListInvalid:  item(func(i *effectiveItem) { i.Repeat = json.RawMessage(`{"freq":"week","interval":1,"every":[null]}`) }),
+		ReasonEffectiveTimeRepeatEveryInvalid: item(func(i *effectiveItem) { i.Repeat = json.RawMessage(`{"freq":"month","interval":1,"every":[32]}`) }),
+		ReasonEffectiveTimeRepeatUntilInvalid: item(func(i *effectiveItem) { i.Repeat = json.RawMessage(`{"freq":"day","interval":1,"until":-1}`) }),
+	} {
+		_, err := compileCalendarItem(input)
+		if err == nil || err.Error() != want || !listed[err.Error()] {
+			t.Errorf("%s: err = %v, want it and listed", want, err)
+		}
+	}
+	duplicate := []effectiveItem{ruleItem(0, 86400, "UNIX_SECONDS", "UTC", `{}`), ruleItem(0, 86400, "UNIX_SECONDS", "UTC", `{}`)}
+	if _, err := compileEffectiveRules(snapshotForItems(duplicate), "tenant-a"); err == nil ||
+		err.Error() != ReasonEffectiveTimeItemDuplicate || !listed[err.Error()] {
+		t.Errorf("duplicate item: err = %v, want %s and listed", err, ReasonEffectiveTimeItemDuplicate)
+	}
+}

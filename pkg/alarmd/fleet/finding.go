@@ -702,6 +702,15 @@ var codeChecks = map[string]verdict{
 	"EFFECTIVE_TIME_CALENDAR_IDENTITY_INVALID": lands(CheckPlanUnevaluable),
 	"EFFECTIVE_TIME_CALENDAR_DUPLICATE":        lands(CheckPlanUnevaluable),
 	"EFFECTIVE_TIME_CALENDAR_ITEMS_MISSING":    lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_ITEM_DUPLICATE":            lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_ITEM_INVALID":              lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_ITEM_TIME_INVALID":         lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_TIME_KIND_INVALID":         lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_TIMEZONE_INVALID":          lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_REPEAT_INVALID":            lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_REPEAT_LIST_INVALID":       lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_REPEAT_EVERY_INVALID":      lands(CheckPlanUnevaluable),
+	"EFFECTIVE_TIME_REPEAT_UNTIL_INVALID":      lands(CheckPlanUnevaluable),
 	// This build cannot read the snapshot's schema: a newer writer, and
 	// nothing in the definition or the deployment to change.
 	"EFFECTIVE_TIME_SCHEMA_UNSUPPORTED": lands(CheckPlanUnevaluable),

@@ -352,6 +352,17 @@ var failureFacets = map[string]facets{
 	"EFFECTIVE_TIME_CALENDAR_IDENTITY_INVALID": {StageConfig, ClassConfig, DependencyControlSource},
 	"EFFECTIVE_TIME_CALENDAR_DUPLICATE":        {StageConfig, ClassConfig, DependencyControlSource},
 	"EFFECTIVE_TIME_CALENDAR_ITEMS_MISSING":    {StageConfig, ClassConfig, DependencyControlSource},
+	// A calendar item or the business timezone in the snapshot that does not
+	// parse: arrived from the control source, and readable, and wrong.
+	"EFFECTIVE_TIME_ITEM_DUPLICATE":       {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_ITEM_INVALID":         {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_ITEM_TIME_INVALID":    {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_TIME_KIND_INVALID":    {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_TIMEZONE_INVALID":     {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_REPEAT_INVALID":       {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_REPEAT_LIST_INVALID":  {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_REPEAT_EVERY_INVALID": {StageConfig, ClassConfig, DependencyControlSource},
+	"EFFECTIVE_TIME_REPEAT_UNTIL_INVALID": {StageConfig, ClassConfig, DependencyControlSource},
 	// A terminal this build cannot classify. Config's stage, because it is a
 	// definition this build refused; the compiler's own code travels with the
 	// disposition for the reader who has to find out which part.

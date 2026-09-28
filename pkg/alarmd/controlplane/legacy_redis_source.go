@@ -185,9 +185,12 @@ func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []s
 // before touching it when a run finds none; its full refresh never writes it.
 // So an unchanged value means no strategy was saved since the previous read,
 // and says nothing about content the manager derives from other tables and
-// rewrites in place. A marker that is absent or cannot be read is reported as
-// absent: the round then reads everything, as it did before the marker was
-// consulted.
+// rewrites in place. A marker that is absent, or whose value is not a
+// positive integer, is reported as absent: the round then reads everything, as
+// it did before the marker was consulted. A read that fails is not: the error
+// is returned, and the refresh ends at its change-signal exit
+// (SourceReconciler.observe) rather than reading every document without
+// knowing whether the store answers.
 func (source *LegacyRedisStrategySource) ChangeSignal(ctx context.Context) (SourceChangeSignal, error) {
 	if source == nil || source.client == nil {
 		return SourceChangeSignal{}, errors.New("alarmd controlplane: legacy Redis strategy source is required")
