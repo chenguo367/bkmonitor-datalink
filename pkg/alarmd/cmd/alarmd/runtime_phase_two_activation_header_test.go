@@ -143,3 +143,23 @@ func TestTheActivationHeaderStandingIsTheLeadersAndOnlyWhileMissing(t *testing.T
 		t.Fatalf("header present, facts = %+v", facts)
 	}
 }
+
+// A rebuild that conflicted found a header another writer had just put back:
+// the renewal is asked again, answers, and the round is healthy - not
+// reported degraded for a header that was already there.
+func TestARenewalRetriesOnceAfterTheHeaderRebuildConflicts(t *testing.T) {
+	repository := &fakeProductionCatalogRepository{
+		renewErrs:     []error{controlplane.ErrActivationHeaderMissing, nil},
+		headerRebuild: controlplane.ActivationHeaderRebuildConflict,
+	}
+	result, renewals := headerRound(t, controlplane.SourceRefreshPendingConfirmation, repository)
+	if repository.headerRebuilds != 1 || repository.renewCalls != 2 || result.Status != phaseTwoControlHealthy {
+		t.Fatalf("rebuilds %d, renewals %d, result %#v: want one rebuild, a second renewal and a healthy round",
+			repository.headerRebuilds, repository.renewCalls, result)
+	}
+	for _, renewal := range renewals {
+		if renewal.Result == observability.ResultDegraded {
+			t.Fatalf("a round whose header was back was reported degraded: %#v", renewal)
+		}
+	}
+}

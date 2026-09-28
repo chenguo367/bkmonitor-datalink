@@ -307,3 +307,28 @@ func TestAHeaderThatAppearedDuringTheRebuildIsLeftAlone(t *testing.T) {
 		t.Fatal("the header is back and the standing still says missing")
 	}
 }
+
+// A renewal that finds the header ends whatever this process last saw of it
+// missing: after a rebuild conflicted with another writer putting the header
+// back, the standing clears on the next renewal rather than on the next
+// activation, which on an unchanged source may be a long way off.
+func TestARenewalThatFindsTheHeaderClearsTheMissingStanding(t *testing.T) {
+	f := newRebuildFixture(t, "header-back-renewal")
+	ctx := context.Background()
+	f.loseHeader(t)
+	other := redis.NewClient(&redis.Options{Addr: f.client.Options().Addr})
+	defer other.Close()
+	f.client.AddHook(changeBeforeHeaderRebuild{client: other, key: f.prefix + ":activation_header", value: f.header})
+	if outcome, err := f.repository.RebuildActivationHeader(ctx); err != nil || outcome != controlplane.ActivationHeaderRebuildConflict {
+		t.Fatalf("rebuild = %s %v, want the other writer's header first", outcome, err)
+	}
+	if !f.repository.ActivationHeaderReading().Missing {
+		t.Fatal("after the conflict the standing should still say missing")
+	}
+	if err := f.repository.RenewCurrentActivationObjects(ctx); err != nil {
+		t.Fatalf("renewal with the header back: %v", err)
+	}
+	if f.repository.ActivationHeaderReading().Missing {
+		t.Fatal("a renewal found the header and the standing still says missing")
+	}
+}

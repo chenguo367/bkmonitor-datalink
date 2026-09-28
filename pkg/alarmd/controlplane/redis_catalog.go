@@ -307,6 +307,11 @@ func (repository *RedisCatalogRepository) RenewCurrentActivationObjects(ctx cont
 			return err
 		}
 		repository.renewObjectCatalog(ctx, state.Current.SnapshotRevision)
+		// The renewal compared the header and found it: whatever this
+		// process last saw of a missing header is over. Without this a
+		// header another writer put back while a rebuild conflicted stayed
+		// "missing" on the fleet until the next activation asked.
+		repository.header.present()
 		metricResult = "success"
 		queryGroups, objectBytes = len(groups), int(activeBytes)
 		return nil
