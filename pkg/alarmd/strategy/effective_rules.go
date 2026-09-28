@@ -54,12 +54,13 @@ type compiledCalendarItem struct {
 type compiledEffectiveRules struct {
 	location  *time.Location
 	calendars map[int64][]compiledCalendarItem
+	digest    string
+	bytes     int
+
 	// deleted are the calendars the writer marked deleted, compiled above as
 	// empty ones. Kept apart only for EffectiveTimeCalendars; resolution
 	// reads them as the empty calendars they are.
 	deleted map[int64]struct{}
-	digest  string
-	bytes   int
 }
 
 // The reasons compileEffectiveRules refuses a snapshot with. The codes live in

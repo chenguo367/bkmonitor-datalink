@@ -3586,11 +3586,13 @@ const (
 	// replica starts - and not a store failure, which is what "unavailable"
 	// read as when the two were one word.
 	EffectiveCloseViewNotExecutable ReasonCode = "view_not_executable"
-	// EffectiveCloseCalendarsAllDeleted is a close held back for a Plan
-	// that names a calendar, because every calendar this replica's Plans
-	// name reads deleted at once: the writer's calendar source gone, not a
+	// EffectiveCloseCalendarDeletionUnsettled is a close held back for a
+	// Plan that reads a calendar deleted before the deletion settled: the
+	// calendar has not read deleted in every snapshot that names it for
+	// long enough, or every calendar this replica's Plans name read deleted
+	// at once, recently - the writer's calendar source gone, not a
 	// deletion. One per Plan with alerts to close, per step.
-	EffectiveCloseCalendarsAllDeleted ReasonCode = "calendars_all_deleted"
+	EffectiveCloseCalendarDeletionUnsettled ReasonCode = "calendar_deletion_unsettled"
 )
 
 // EffectiveCloseOutcomes is every outcome, for the metric to pre-create each
@@ -3599,7 +3601,7 @@ var EffectiveCloseOutcomes = []ReasonCode{
 	EffectiveCloseAcked, EffectiveClosePrecheckFailed, EffectiveCloseSendFailed,
 	EffectiveCloseMaintenanceBusy, EffectiveClosePlanUncompilable, EffectiveCloseIdentityInvalid,
 	EffectiveCloseEffectiveTimeUnknown, EffectiveCloseLegacyUnavailable, EffectiveCloseUnavailable, EffectiveCloseUnsupportedRunner,
-	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarsAllDeleted,
+	EffectiveCloseViewNotExecutable, EffectiveCloseCalendarDeletionUnsettled,
 }
 
 // Maintenance details are bounded log reasons, not new metric label dimensions.
