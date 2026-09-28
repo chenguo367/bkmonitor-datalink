@@ -6,6 +6,7 @@
 package observability
 
 import (
+	"cmp"
 	"context"
 	"runtime"
 	"slices"
@@ -377,7 +378,9 @@ const costDueMissSampleLimit = 8
 // CostDueMiss is one tracked group - or one Plan of it, when Scope is
 // strategy_owned - that had a Slot due in the window and left no
 // observation in it, with its group's counts over the window. Counts only:
-// what the group did, not why.
+// what the group did, not why. Every count is the group's, a strategy_owned
+// miss's too: a Plan has no observations of its own in the window, which is
+// what made it a miss, and what its group did is the question.
 type CostDueMiss struct {
 	Scope            string           `json:"scope"`
 	QueryGroupKey    string           `json:"query_group_key"`
@@ -388,6 +391,28 @@ type CostDueMiss struct {
 	FailedRunReturns uint64           `json:"failed_run_returns"`
 	Evaluations      uint64           `json:"evaluations"`
 	HeldRounds       uint64           `json:"held_rounds"`
+}
+
+// compareDueMiss orders misses by group key, then the group before its
+// Plans, then the Plan, field by field.
+func compareDueMiss(a, b CostDueMiss) int {
+	return cmp.Or(cmp.Compare(a.QueryGroupKey, b.QueryGroupKey), cmp.Compare(a.Scope, b.Scope),
+		cmp.Compare(a.Plan.TenantID, b.Plan.TenantID), cmp.Compare(a.Plan.BusinessID, b.Plan.BusinessID),
+		cmp.Compare(a.Plan.StrategyID, b.Plan.StrategyID))
+}
+
+// keepDueMiss adds miss to kept, the first costDueMissSampleLimit misses in
+// order, and keeps no more: an outage that misses every group holds eight
+// records while the window is read, not one per group.
+func keepDueMiss(kept []CostDueMiss, miss CostDueMiss) []CostDueMiss {
+	at, _ := slices.BinarySearchFunc(kept, miss, compareDueMiss)
+	if at >= costDueMissSampleLimit {
+		return kept
+	}
+	if len(kept) == costDueMissSampleLimit {
+		kept = kept[:costDueMissSampleLimit-1]
+	}
+	return slices.Insert(kept, at, miss)
 }
 
 // costDueMissOf is a miss of the group, or of plan when it is not nil, with
@@ -975,7 +1000,7 @@ func (c *CostSummary) Publish(now time.Time) {
 					snapshot.Coverage.HeldDueGroups++
 				default:
 					snapshot.Coverage.UnobservedDueGroups++
-					misses = append(misses, costDueMissOf(entry.group, nil, w))
+					misses = keepDueMiss(misses, costDueMissOf(entry.group, nil, w))
 				}
 			}
 			if entry.group.since.After(snapshot.WindowStart) {
@@ -1001,7 +1026,7 @@ func (c *CostSummary) Publish(now time.Time) {
 					snapshot.Coverage.HeldDuePlans++
 				default:
 					snapshot.Coverage.UnobservedDuePlans++
-					misses = append(misses, costDueMissOf(entry.group, entry.plan, groupWindows[entry.group]))
+					misses = keepDueMiss(misses, costDueMissOf(entry.group, entry.plan, groupWindows[entry.group]))
 				}
 			}
 			if entry.plan.since.After(snapshot.WindowStart) {
@@ -1017,19 +1042,6 @@ func (c *CostSummary) Publish(now time.Time) {
 		snapshot.Retained.PeakShare = float64(snapshot.Retained.PeakSumBytes) / float64(limit)
 	}
 	snapshot.Coverage.Incomplete = snapshot.Coverage.Incomplete || snapshot.Coverage.ContentionDropped > 0 || snapshot.Coverage.UntrackedObservations > 0 || snapshot.Coverage.UnattributedEvaluations > 0 || snapshot.Coverage.UnknownWallObservations > 0 || snapshot.Coverage.PartialWindowGroups > 0 || snapshot.Coverage.UnobservedDueGroups > 0 || snapshot.Coverage.UnobservedDuePlans > 0
-	sort.Slice(misses, func(i, j int) bool {
-		a, b := misses[i], misses[j]
-		if a.QueryGroupKey != b.QueryGroupKey {
-			return a.QueryGroupKey < b.QueryGroupKey
-		}
-		if a.Scope != b.Scope {
-			return a.Scope < b.Scope
-		}
-		return a.Plan.TenantID+"\x00"+a.Plan.BusinessID+"\x00"+a.Plan.StrategyID < b.Plan.TenantID+"\x00"+b.Plan.BusinessID+"\x00"+b.Plan.StrategyID
-	})
-	if len(misses) > costDueMissSampleLimit {
-		misses = misses[:costDueMissSampleLimit]
-	}
 	snapshot.Coverage.UnobservedDueSample = misses
 	indexes := make(map[*costCopy]int)
 	for dim, rows := range rankings {
