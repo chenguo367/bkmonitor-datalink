@@ -218,6 +218,7 @@ func listMetrics(gatherer prometheus.Gatherer, contains string) (MetricsListResu
 		}
 	}
 	needle := strings.ToLower(contains)
+	// Gather returns the families in name order, which is the order listed.
 	entries := []MetricFamilyEntry{}
 	for _, family := range families {
 		name := family.GetName()
@@ -237,7 +238,6 @@ func listMetrics(gatherer prometheus.Gatherer, contains string) (MetricsListResu
 		}
 		entries = append(entries, MetricFamilyEntry{Name: name, Type: family.GetType().String(), Help: help, Series: len(family.GetMetric())})
 	}
-	sort.Slice(entries, func(i, j int) bool { return entries[i].Name < entries[j].Name })
 	result.Matched = len(entries)
 	if len(entries) > MaxListedFamilies {
 		entries, result.Truncated = entries[:MaxListedFamilies], true
