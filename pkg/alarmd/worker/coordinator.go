@@ -20,6 +20,7 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -246,33 +247,77 @@ type admittedState struct {
 	frame *execution.EncodedStateFrame
 }
 
+// frameHeaderBytes is what a kept frame holds beside its bytes: the frame
+// itself, which admission hands back with them.
+var frameHeaderBytes = uint64(unsafe.Sizeof(execution.EncodedStateFrame{}))
+
+// frameRetainedBytes is what one kept frame holds of the retained budget:
+// the encoded record as allocated, and the frame around it.
+func frameRetainedBytes(frame *execution.EncodedStateFrame) uint64 {
+	return uint64(cap(frame.Bytes)) + frameHeaderBytes
+}
+
 // heldFrames is one Plan's admitted frames kept for its write, reserved
-// against the retained budget from admission until the write is over.
+// against the retained budget from the moment admission hands each chunk
+// back until the write is over.
+//
+// They used to be reserved once, after the last chunk: until then a Plan's
+// frames -- whole encoded records, the history the loaded state's own charge
+// already covers encoded again beside it -- were held on no reservation at
+// all, and with every running Slot admitting at once that was up to a quarter
+// of the retained budget on a busy replica. The frame around each record was
+// not counted either.
 type heldFrames struct {
 	coordinator *SlotExecutionCoordinator
 	bytes       uint64
-	released    bool
+	// refused is set once the budget did not take a chunk: the Plan keeps
+	// the frames reserved before it and lets every later one go.
+	refused  bool
+	released bool
 }
 
-// holdFrames keeps the admitted frames for the write when the retained budget
-// can take them all, and otherwise lets them go: the write then encodes each
-// mutation itself, as it did before frames were kept, and the Slot is
-// neither refused nor delayed for it. Admission is unchanged either way; it
-// encoded and measured every mutation already.
-func (coordinator *SlotExecutionCoordinator) holdFrames(admitted []admittedState) *heldFrames {
+// keep reserves one admission chunk's frames as the chunk comes back, or
+// lets them go when the retained budget cannot take them -- and every frame
+// of the Plan after them. A frame let go is only encoded again by the write,
+// as it was before frames were kept; the Slot is neither refused nor
+// delayed for it, and admission is the same either way.
+func (held *heldFrames) keep(chunk []admittedState) {
 	var total uint64
-	for _, state := range admitted {
+	for _, state := range chunk {
 		if state.frame != nil {
-			total += uint64(len(state.frame.Bytes))
+			total += frameRetainedBytes(state.frame)
 		}
 	}
-	if total == 0 || !coordinator.tryAcquireRetained(total) {
-		for index := range admitted {
-			admitted[index].frame = nil
-		}
-		return &heldFrames{released: true}
+	if total == 0 {
+		return
 	}
-	return &heldFrames{coordinator: coordinator, bytes: total}
+	if !held.refused && held.coordinator.tryAcquireRetained(total) {
+		held.bytes += total
+		return
+	}
+	held.refused = true
+	for index := range chunk {
+		chunk[index].frame = nil
+	}
+}
+
+// settle keeps the reservation to the frames the write still has: a
+// mutation admission refused, or a series the output dropped, gives its
+// frame's bytes back now rather than when the Plan's write is over.
+func (held *heldFrames) settle(kept []admittedState) {
+	if held == nil || held.released {
+		return
+	}
+	var total uint64
+	for _, state := range kept {
+		if state.frame != nil {
+			total += frameRetainedBytes(state.frame)
+		}
+	}
+	if total < held.bytes {
+		held.coordinator.releaseProvisional(0, held.bytes-total)
+		held.bytes = total
+	}
 }
 
 // release returns the frames' reservation. Called once the write is over or
@@ -1414,10 +1459,15 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			// Plan it refused rather than the Query Group alone.
 			planCtx := observability.ContextWithTraceFields(ctx, observability.TraceFields{
 				StrategyID: planResult.Plan.StrategyID, BusinessID: planResult.Plan.BusinessID})
-			rejected, encodedBytes, err := coordinator.admitState(planCtx, request.Operation, request.Contract, retention, horizon, mutations)
+			rejected, encodedBytes, held, err := coordinator.admitState(planCtx, request.Operation, request.Contract, retention, horizon, mutations)
 			if err != nil {
 				return execution.SlotExecutionResult{}, err
 			}
+			// The frames admission kept wait for the write under the
+			// reservation admission took for them, released when this Plan's
+			// write is over or it stops short of one; deferred as well, for
+			// the exits that return from the Slot.
+			defer held.release()
 			accepted := make([]execution.StateMutation, 0, len(mutations)-len(rejected))
 			acceptedBytes := make([]admittedState, 0, len(mutations)-len(rejected))
 			for index, mutation := range mutations {
@@ -1430,12 +1480,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 				accepted = append(accepted, mutation)
 				acceptedBytes = append(acceptedBytes, encodedBytes[index])
 			}
-			// The frames admission encoded wait for the write under a
-			// reservation of their own, released when this Plan's write is
-			// over or it stops short of one; deferred as well, for the exits
-			// that return from the Slot.
-			held := coordinator.holdFrames(acceptedBytes)
-			defer held.release()
+			held.settle(acceptedBytes)
 			events, withoutMessage := outputsOf(accepted, eventsByState, withoutMessageByState)
 			sortTriggerEvents(events)
 			if err := coordinator.writeEvents(ctx, request.Operation, planResult.Plan, events, withoutMessage); err != nil {
@@ -1456,6 +1501,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 						deterministicTerminalReason = reason
 					}
 					accepted, acceptedBytes = kept, keptBytes
+					held.settle(acceptedBytes)
 				} else if reason, deferred := outputDeferralReason(err); deferred {
 					// The sink did not start the batch: the lease has less
 					// life left than one batch needs to land. Nothing is
@@ -2044,7 +2090,10 @@ func outputRejectionReason(err error) (execution.ReasonCode, bool) {
 // admitState admits one Plan's mutations in Store-sized chunks. It returns the
 // deterministic rejections by identity and, aligned with mutations, the
 // encoded size the store measured for each admitted mutation and the frame it
-// measured, when the store kept one.
+// measured, when the store kept one and the retained budget took it; and the
+// reservation those frames are held under, which the caller releases. An
+// admission that does not complete -- a chunk that fails, a context that ends
+// between chunks -- releases every frame it had reserved before it returns.
 func (coordinator *SlotExecutionCoordinator) admitState(
 	ctx context.Context,
 	operation execution.Operation,
@@ -2052,10 +2101,11 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 	retention []execution.StateRetentionRequirement,
 	horizon int64,
 	mutations []execution.StateMutation,
-) (map[execution.StateKeyIdentity]execution.ReasonCode, []admittedState, error) {
+) (map[execution.StateKeyIdentity]execution.ReasonCode, []admittedState, *heldFrames, error) {
 	started := time.Now()
 	deterministic := make(map[execution.StateKeyIdentity]execution.ReasonCode)
 	encodedBytes := make([]admittedState, len(mutations))
+	held := &heldFrames{coordinator: coordinator}
 	var totals applyTotals
 	err := forEachChunk(ctx, len(mutations), coordinator.applyChunkItems(coordinator.budget.MaxStateMutations), func(chunk applyChunk) error {
 		chunkItems := mutations[chunk.start:chunk.end]
@@ -2102,6 +2152,11 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 						err = fmt.Errorf("state admission did not complete: %s", item.Status)
 					}
 				}
+				if err == nil {
+					// Reserved as the chunk comes back, not after the last
+					// one: the frames are held from here on.
+					held.keep(encodedBytes[chunk.start:chunk.end])
+				}
 			}
 		}
 		observationResult := observability.Result(observability.ResultSuccess)
@@ -2116,9 +2171,10 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 		return err
 	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("alarmd worker: state admission: %w", err)
+		held.release()
+		return nil, nil, nil, fmt.Errorf("alarmd worker: state admission: %w", err)
 	}
-	return deterministic, encodedBytes, nil
+	return deterministic, encodedBytes, held, nil
 }
 
 // applyState writes the accepted mutations of one Plan in Store-sized chunks

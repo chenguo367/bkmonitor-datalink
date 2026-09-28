@@ -311,7 +311,8 @@ func TestAdmitStateChunksAndMeasuresEncodedBytes(t *testing.T) {
 	store := &chunkStore{encodedBytes: 10}
 	fixture := newChunkFixture(store, 8192)
 	mutations := chunkMutations(8193)
-	rejected, encodedBytes, err := fixture.coordinator.admitState(context.Background(), execution.OperationNormal, fixture.contract, chunkRetention, 0, mutations)
+	rejected, encodedBytes, held, err := fixture.coordinator.admitState(context.Background(), execution.OperationNormal, fixture.contract, chunkRetention, 0, mutations)
+	defer held.release()
 	if err != nil || len(rejected) != 0 || store.admitCalls != 2 || len(encodedBytes) != len(mutations) {
 		t.Fatalf("admitState() rejected=%v bytes=%d calls=%d error=%v", rejected, len(encodedBytes), store.admitCalls, err)
 	}
