@@ -231,14 +231,8 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 			// with a document of a few hundred keys and a word.
 			return execution.QueryPlanFacts{}, atQueryConfig(queryConfigRejected("QUERY_CONFIG_INVALID", err), index)
 		}
-		if config.DataSourceLabel == "bk_fta" {
-			// FTA event sources are not supported, and nothing turns them back
-			// on: the query they need names fields the query service does not
-			// hold, and without them it reads every alert of the table.
-			return execution.QueryPlanFacts{}, atQueryConfig(queryUnsupported("QUERY_FTA_UNSUPPORTED", nil), index)
-		}
-		if !pollingSourceSupported(config) {
-			return execution.QueryPlanFacts{}, atQueryConfig(queryUnsupported("QUERY_SOURCE_NOT_MIGRATED", nil), index)
+		if err := configSourceUnsupported(config); err != nil {
+			return execution.QueryPlanFacts{}, atQueryConfig(err, index)
 		}
 		config.AggDimensions = canonicalDimensionStrings(config.AggDimensions)
 		// Python alarm Access does not pass cached query_config.filter_dict to
@@ -966,6 +960,37 @@ func queryConfigRejected(reason string, err error) error {
 // atQueryConfig names the query config a refusal is about. The refusal is
 // built by the two constructors above so the fleet's vocabulary guard, which
 // reads their calls, keeps seeing every word; this only adds where.
+// configSourceUnsupported names a query config whose source this build does
+// not compile. FTA event sources are not supported, and nothing turns them
+// back on: the query they need names fields the query service does not hold,
+// and without them it reads every alert of the table.
+func configSourceUnsupported(config legacyQueryConfig) error {
+	if config.DataSourceLabel == "bk_fta" {
+		return queryUnsupported("QUERY_FTA_UNSUPPORTED", nil)
+	}
+	if !pollingSourceSupported(config) {
+		return queryUnsupported("QUERY_SOURCE_NOT_MIGRATED", nil)
+	}
+	return nil
+}
+
+// querySourceUnsupported is configSourceUnsupported for a raw query config,
+// for the catalog's item check. A config that does not decode, or does not
+// name both its labels, is not judged here: the writer publishes neither
+// (runtime_cache_contract.py requires both labels), and the query compiler
+// refuses them by name.
+func querySourceUnsupported(raw json.RawMessage) (string, bool) {
+	config, err := decodeLegacyQueryConfig(raw)
+	if err != nil || config.DataSourceLabel == "" || config.DataTypeLabel == "" {
+		return "", false
+	}
+	var failure *QueryPlanCompileError
+	if errors.As(configSourceUnsupported(config), &failure) {
+		return failure.Reason, true
+	}
+	return "", false
+}
+
 func atQueryConfig(err error, index int) error {
 	var failure *QueryPlanCompileError
 	if errors.As(err, &failure) {

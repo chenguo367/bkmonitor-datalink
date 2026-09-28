@@ -295,6 +295,51 @@ const ReasonEffectiveTimeRangeInvalid = "EFFECTIVE_TIME_RANGE_INVALID"
 // reads it as (itemInterval).
 const ReasonAggIntervalDefaulted = "AGG_INTERVAL_DEFAULTED"
 
+// The item fields a strategy cannot be compiled without, each refused under
+// its own name with the field it names, as a rejected configuration (the
+// last good Plan stays). They used to be one word, filed as PLAN_INVALID, and
+// judged before the query's source: a data type this build cannot compile,
+// which the writer publishes with no query_md5, read as a configuration
+// error. See itemRefusal.
+const (
+	ReasonItemQueryConfigsMissing = "ITEM_QUERY_CONFIGS_MISSING"
+	ReasonItemQueryMD5Missing     = "ITEM_QUERY_MD5_MISSING"
+	ReasonItemExpressionMissing   = "ITEM_EXPRESSION_MISSING"
+	ReasonItemAlgorithmsMissing   = "ITEM_ALGORITHMS_MISSING"
+)
+
+// itemRefusal is what refuses an item before its target and Plan are
+// compiled, in the order that names it rightly. No query config leaves
+// nothing to judge. Then the query's source: a data source this build cannot
+// compile is a capability fact whatever else the item carries, and the
+// writer leaves query_md5 empty for exactly those types
+// (runtime_cache_projector.py writes it for time_series, log, custom and FTA
+// events only). Only a supported item that still lacks a field is a
+// configuration left incomplete.
+func itemRefusal(sourceID string, item legacyItem) (ObjectDisposition, bool) {
+	rejected := func(reason, field string) (ObjectDisposition, bool) {
+		return ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionConfigRejected, Reason: reason, FieldPath: field}, true
+	}
+	if len(item.QueryConfigs) == 0 {
+		return rejected(ReasonItemQueryConfigsMissing, "items[0].query_configs")
+	}
+	for index, raw := range item.QueryConfigs {
+		if reason, unsupported := querySourceUnsupported(raw); unsupported {
+			return ObjectDisposition{SourceID: sourceID, Scope: "PLAN", Disposition: DispositionUnsupported, Reason: reason,
+				FieldPath: fmt.Sprintf("items[0].query_configs[%d]", index)}, true
+		}
+	}
+	switch {
+	case item.QueryMD5 == "":
+		return rejected(ReasonItemQueryMD5Missing, "items[0].query_md5")
+	case item.Expression == "":
+		return rejected(ReasonItemExpressionMissing, "items[0].expression")
+	case len(item.Algorithms) == 0:
+		return rejected(ReasonItemAlgorithmsMissing, "items[0].algorithms")
+	}
+	return ObjectDisposition{}, false
+}
+
 // ReasonPriorityIgnored names a Plan compiled from a strategy that takes
 // part in priority arbitration, run as the standalone strategy it is. The
 // arbitration belongs to the platform's alert pipeline, so a lower-priority
@@ -970,8 +1015,11 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		return sourceCandidate{dispositions: []ObjectDisposition{{SourceID: source.SourceID, Scope: "PLAN", Disposition: DispositionUnsupported, Reason: "UNSUPPORTED_MULTI_ITEM_STRATEGY"}}}, errors.New("alarmd controlplane: multiple Item strategies unsupported in phase two")
 	}
 	item := legacy.Items[0]
-	if item.ID <= 0 || item.QueryMD5 == "" || item.Expression == "" || len(item.QueryConfigs) == 0 || len(item.Algorithms) == 0 {
-		return candidate, errors.New("INCOMPLETE_SERIES_THRESHOLD_ITEM")
+	if refusal, refused := itemRefusal(source.SourceID, item); refused {
+		return sourceCandidate{dispositions: []ObjectDisposition{refusal}}, fmt.Errorf("alarmd controlplane: %s at %s", refusal.Reason, refusal.FieldPath)
+	}
+	if item.ID <= 0 {
+		return candidate, errors.New("alarmd controlplane: item id must be positive")
 	}
 	// The monitoring target is resolved before anything else is compiled, and
 	// a target this compiler cannot honour is reported as an unsupported
