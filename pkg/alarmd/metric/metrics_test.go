@@ -609,6 +609,9 @@ func bindBudgetHealthAndResources(t *testing.T, recorder *Recorder) {
 	if err := recorder.BindCapacityLoad(func() CapacityLoad { return fullCapacityLoad() }); err != nil {
 		t.Fatalf("BindCapacityLoad() error = %v", err)
 	}
+	if err := recorder.BindRetainedReservation(func() uint64 { return 1 }); err != nil {
+		t.Fatalf("BindRetainedReservation() error = %v", err)
+	}
 	if err := recorder.BindQueryPermits(func() QueryPermitOccupancy {
 		return QueryPermitOccupancy{
 			Inflight: map[string]int{"normal": 1}, Waiting: map[string]int{"normal": 1},
@@ -794,6 +797,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("ownership_transition_total"):                   len(phaseTwoOwnershipTransitions) * metricReasonSets(observability.ComponentOwnership),
 		fqName("ownership_refusals_total"):                     len(ownershipRefusalSites) * len(ownership.RefusalReasons),
 		fqName("capacity_budget"):                              len(phaseTwoBudgets) - 1,
+		fqName("capacity_reserved"):                            1,
 		fqName("container_memory_limit_bytes"):                 len(capacitySources) + 1,
 		fqName("container_cpu_cores"):                          len(capacitySources) + 1,
 		fqName("container_memory_used_bytes"):                  1,

@@ -30,7 +30,7 @@ type admitFramesStore struct {
 }
 
 func (store *admitFramesStore) AdmitRuntime(ctx context.Context, request execution.StateApplyRequest) (execution.StateAdmissionResult, error) {
-	store.reservedAtAdmit = append(store.reservedAtAdmit, store.coordinator.reservedRetainedBytes())
+	store.reservedAtAdmit = append(store.reservedAtAdmit, RetainedReserved(store.coordinator))
 	result, err := store.chunkStore.AdmitRuntime(ctx, request)
 	if store.chunkStore.admitCalls == store.failCall {
 		return execution.StateAdmissionResult{}, errors.New("injected admission failure")
@@ -71,7 +71,9 @@ func keptFrames(admitted []admittedState) []bool {
 // A Plan's frames are reserved as each chunk comes back: the second chunk is
 // admitted with the first one's frames already on the budget, the third with
 // both, and every frame is counted with the frame around its bytes. They
-// used to be reserved after the last chunk, held on nothing until then.
+// used to be reserved after the last chunk, held on nothing until then. Read
+// through RetainedReserved, the reading capacity_reserved publishes: it grows
+// with each chunk while the Plan admits and is back to zero after the release.
 func TestAPlansFramesAreReservedAsEachChunkIsAdmitted(t *testing.T) {
 	fixture, store := framesFixture(1 << 20)
 	_, admitted, held, err := fixture.coordinator.admitState(context.Background(), execution.OperationNormal, fixture.contract, chunkRetention, 0, chunkMutations(6))
@@ -82,7 +84,7 @@ func TestAPlansFramesAreReservedAsEachChunkIsAdmitted(t *testing.T) {
 	if len(store.reservedAtAdmit) != 3 || store.reservedAtAdmit[0] != want[0] || store.reservedAtAdmit[1] != want[1] || store.reservedAtAdmit[2] != want[2] {
 		t.Fatalf("reserved as each chunk was admitted = %v, want %v", store.reservedAtAdmit, want)
 	}
-	if reserved := fixture.coordinator.reservedRetainedBytes(); reserved != 6*oneFrame() || held.bytes != reserved {
+	if reserved := RetainedReserved(fixture.coordinator); reserved != 6*oneFrame() || held.bytes != reserved {
 		t.Fatalf("after admission %d reserved, held %d, want every frame's %d", reserved, held.bytes, 6*oneFrame())
 	}
 	for index, kept := range keptFrames(admitted) {
@@ -91,7 +93,7 @@ func TestAPlansFramesAreReservedAsEachChunkIsAdmitted(t *testing.T) {
 		}
 	}
 	held.release()
-	if reserved := fixture.coordinator.reservedRetainedBytes(); reserved != 0 {
+	if reserved := RetainedReserved(fixture.coordinator); reserved != 0 {
 		t.Fatalf("%d bytes still reserved after the release", reserved)
 	}
 }
@@ -112,7 +114,7 @@ func TestFramesTheBudgetStopsTakingMidPlanAreLetGo(t *testing.T) {
 			t.Fatalf("frames kept = %v, want %v: the first chunk's, and nothing after the chunk the budget refused", keptFrames(admitted), want)
 		}
 	}
-	if reserved := fixture.coordinator.reservedRetainedBytes(); reserved != 2*oneFrame() || held.bytes != reserved {
+	if reserved := RetainedReserved(fixture.coordinator); reserved != 2*oneFrame() || held.bytes != reserved {
 		t.Fatalf("%d reserved, held %d, want the first chunk's %d", reserved, held.bytes, 2*oneFrame())
 	}
 }
@@ -139,7 +141,7 @@ func TestAnAdmissionThatStopsMidPlanReleasesWhatItReserved(t *testing.T) {
 			if len(store.reservedAtAdmit) < 2 || store.reservedAtAdmit[1] == 0 {
 				t.Fatalf("setup: reserved as each chunk was admitted = %v, want frames reserved before it stopped", store.reservedAtAdmit)
 			}
-			if reserved := fixture.coordinator.reservedRetainedBytes(); reserved != 0 {
+			if reserved := RetainedReserved(fixture.coordinator); reserved != 0 {
 				t.Fatalf("%d bytes still reserved after an admission that stopped", reserved)
 			}
 		})
