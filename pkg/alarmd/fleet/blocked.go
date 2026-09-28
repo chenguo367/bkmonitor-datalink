@@ -12,6 +12,8 @@ package fleet
 import (
 	"strings"
 	"time"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // Blocked is the one shape every failure on a row is read in: which step of
@@ -51,6 +53,14 @@ type Blocked struct {
 	// Effect is what the failure did to the detection.
 	Retrying bool   `json:"retrying"`
 	Effect   Effect `json:"effect"`
+	// Timing is this round's failed query read against its budget, when it
+	// measured it: the settling wait by design, how late after it the query
+	// began, what was left to its deadline then, and what it used. It is
+	// what the Dependency above cannot say for a timeout: a backend slow to
+	// answer uses its whole budget having begun on time, a query begun late
+	// had little left, and a budget short to begin with is small in all
+	// three added together. See observability.QueryTiming.
+	Timing *observability.QueryTiming `json:"timing,omitempty"`
 }
 
 // Stage is the step of the work a failure stopped at.
@@ -622,6 +632,12 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 		blocked.Text = anomaly.Failure.Detail
 	case failureCurrent && anomaly.Failure.Text != "":
 		blocked.Text = anomaly.Failure.Text
+	}
+	// Only this round's failure: a kept failure's timing is an earlier
+	// round's, and read as this one's it would time the wrong query.
+	if failureCurrent && anomaly.Failure.Timing != nil {
+		timing := *anomaly.Failure.Timing
+		blocked.Timing = &timing
 	}
 	if !latest.IsZero() {
 		at := latest

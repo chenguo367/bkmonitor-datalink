@@ -291,8 +291,12 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			}
 		}
 		queryDeadline := time.UnixMilli(query.DeadlineUnixMilli)
+		// Where the budget ending at that deadline began: a recovery's is
+		// counted from its arrival, a normal query's from its Slot.
+		budgetStart := int64(request.Contract.Slot.EvaluationTime) * 1000
 		if !recoveryDeadline.IsZero() {
 			queryDeadline = recoveryDeadline
+			budgetStart = recoveryStartedAt.UnixMilli()
 		}
 		permit, err := permits.AcquireQueryPermit(queryCtx, request.Contract.Slot, request.Operation, queryDeadline)
 		if err != nil {
@@ -315,7 +319,8 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			break
 		}
 		attempt := execution.QueryAttempt{Spec: query.Spec, Slot: request.Contract.Slot, Operation: request.Operation,
-			AttemptNo: request.AttemptNo, DeadlineUnixMilli: queryDeadline.UnixMilli(), RecoveryPermit: permit.RecoveryPermit()}
+			AttemptNo: request.AttemptNo, DeadlineUnixMilli: queryDeadline.UnixMilli(), RecoveryPermit: permit.RecoveryPermit(),
+			BudgetStartUnixMilli: budgetStart, ReadyAtUnixMilli: query.ReadyAtUnixMilli}
 		if err := attempt.Validate(); err != nil {
 			permit.Release()
 			dispatchErr = err

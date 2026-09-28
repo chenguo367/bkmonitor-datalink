@@ -404,6 +404,10 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		if f.Detail != "" {
 			attributes = append(attributes, slog.String("failure_detail", f.Detail))
 		}
+		if timing := f.Timing; timing != nil {
+			attributes = append(attributes, slog.Int64("failure_settle_ms", timing.SettleMillis), slog.Int64("failure_start_late_ms", timing.StartLateMillis),
+				slog.Int64("failure_budget_ms", timing.BudgetMillis), slog.Int64("failure_elapsed_ms", timing.ElapsedMillis))
+		}
 	}
 	if observation.RuntimeConfig != nil {
 		attributes = append(attributes, slog.Any("runtime_config", observation.RuntimeConfig))

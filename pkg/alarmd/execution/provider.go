@@ -128,6 +128,15 @@ type QueryAttempt struct {
 	AttemptNo         uint32
 	DeadlineUnixMilli int64
 	RecoveryPermit    *RecoveryPermit
+
+	// BudgetStartUnixMilli is where the budget that ends at the deadline
+	// began: the Slot's evaluation time for a normal query, and the
+	// operation's arrival for a retry, replay or probe, whose deadline is
+	// counted from there. ReadyAtUnixMilli is when the query's window could
+	// first be read; up to it the budget is a settling wait by design. They
+	// only time a failure (see AttemptTiming); zero leaves it untimed.
+	BudgetStartUnixMilli int64
+	ReadyAtUnixMilli     int64
 }
 
 func (attempt QueryAttempt) Validate() error {
@@ -172,6 +181,39 @@ type RouteAttemptFact struct {
 	Result     RouteAttemptResult
 	ReasonCode ReasonCode
 	Detail     string
+	// Timing is when a failed attempt ran against the time it was given;
+	// nil where the attempt did not measure it.
+	Timing *AttemptTiming
+}
+
+// AttemptTiming reads a query that did not come back against its budget,
+// all from timestamps the attempt already holds. The budget runs from the
+// attempt's budget start to its deadline (see QueryAttempt), and the numbers
+// split it at the moment the window could be read and the moment the
+// request went out:
+//
+//   - SettleMillis, from the budget start to when the window could be read:
+//     the settling wait the Plan puts in the budget by design, zero for a
+//     recovery that arrives after it;
+//   - StartLateMillis, from then to the request: the part of the budget
+//     lost before the query began - a queue, a permit, a Slot run late;
+//   - BudgetMillis, from the request to the deadline: what the query was
+//     given, zero or less when it began at or past its deadline;
+//   - ElapsedMillis, from the request to its failure: what it used.
+//
+// The first three add up to the whole budget exactly. Elapsed close to the
+// budget with little lost before it is a backend that did not answer in
+// time; a large StartLate leaving a small budget is a query begun late; and
+// a small whole is a budget short to begin with.
+//
+// The deadline is the attempt's, not the caller's: a caller whose own
+// deadline runs out first ends the query as an error, not as a failed
+// attempt, so its deadline never times one.
+type AttemptTiming struct {
+	SettleMillis    int64
+	StartLateMillis int64
+	BudgetMillis    int64
+	ElapsedMillis   int64
 }
 
 const (

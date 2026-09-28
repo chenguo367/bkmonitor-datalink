@@ -259,6 +259,9 @@ type FailureRef struct {
 	// round's Slot is that round's, whatever the clocks say. Zero when the
 	// observation carried no Slot.
 	Slot int64 `json:"slot,omitempty"`
+	// Timing is the failed query read against its budget, when the attempt
+	// measured it. See observability.QueryTiming.
+	Timing *observability.QueryTiming `json:"timing,omitempty"`
 }
 
 // NoDataMemoryRefusal is what the store said when it would not take a Plan's

@@ -142,7 +142,9 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 		ctx, cancel = context.WithDeadline(ctx, deadline)
 		defer cancel()
 	}
-	return client.execute(callerCtx, ctx, queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo}, sink, nil)
+	return client.execute(callerCtx, ctx, queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo,
+		Budget: queryBudget{StartUnixMilli: attempt.BudgetStartUnixMilli, ReadyAtUnixMilli: attempt.ReadyAtUnixMilli,
+			DeadlineUnixMilli: attempt.DeadlineUnixMilli}}, sink, nil)
 }
 
 // queryIdentity carries provider-local accounting only. Diagnostic reads do
@@ -150,7 +152,14 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 type queryIdentity struct {
 	Spec      execution.PhysicalQuerySpec
 	AttemptNo uint32
+	// Budget is the Slot query's, which a failure is timed against; zero
+	// for a read that is not a Slot's, which then reports no timing.
+	Budget queryBudget
 }
+
+// queryBudget is a Slot query's budget as its attempt carries it: where it
+// began, when the window could first be read, and the deadline it ends at.
+type queryBudget struct{ StartUnixMilli, ReadyAtUnixMilli, DeadlineUnixMilli int64 }
 
 // scopeHeaders are the headers that say whose data a query reads: the
 // tenant always, and then either the strategy's space or, for a global
@@ -231,6 +240,7 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		}
 		completion := client.unavailableCompletion(attempt, reason, execution.TransportRouteDetail(classifyTransportFailure(err)))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
+		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now())
 		return completion, nil
 	}
 	defer response.Body.Close()
@@ -245,6 +255,7 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		}
 		completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable), execution.HTTPStatusRouteDetail(response.StatusCode))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
+		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now())
 		return completion, nil
 	}
 	counted := &countingReader{reader: response.Body}
@@ -259,6 +270,25 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 	completion.Stats.Bytes = counted.bytes
 	completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 	return completion, nil
+}
+
+// attemptTiming splits a failed Slot query's budget where its window could
+// be read and where its request went out (see execution.AttemptTiming). The
+// request's start is taken to the millisecond before splitting, so the
+// three parts add up to the budget exactly; elapsed is on the monotonic
+// clock. Nil for a read that is not a Slot's.
+func attemptTiming(budget queryBudget, started, failed time.Time) *execution.AttemptTiming {
+	if budget.StartUnixMilli <= 0 || budget.DeadlineUnixMilli <= 0 {
+		return nil
+	}
+	readable := max(budget.StartUnixMilli, budget.ReadyAtUnixMilli)
+	sent := started.UnixMilli()
+	return &execution.AttemptTiming{
+		SettleMillis:    readable - budget.StartUnixMilli,
+		StartLateMillis: sent - readable,
+		BudgetMillis:    budget.DeadlineUnixMilli - sent,
+		ElapsedMillis:   failed.Sub(started).Milliseconds(),
+	}
 }
 
 func (client *Client) unavailableCompletion(attempt queryIdentity, reason execution.ReasonCode, detail string) execution.ProviderCompletion {

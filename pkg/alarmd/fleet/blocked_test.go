@@ -410,6 +410,52 @@ func TestARoundThatEndedAfterItsErrorIsNotBeingRetried(t *testing.T) {
 	}
 }
 
+// A timeout's row carries this round's query read against its budget, from
+// the observation that reported the failure to the blocked reading: begun
+// 11 s after its 30 s settling wait with 9 s left, and all of it used,
+// reads as a query begun late - which UNLOCATED alone could not say. A
+// failure kept from an earlier Slot times nothing on this round's row.
+func TestATimeoutsRowCarriesThisRoundsQueryAgainstItsBudget(t *testing.T) {
+	at := &clock{at: now}
+	tracker := newTracker(t, at)
+	timing := observability.QueryTiming{SettleMillis: 30_000, StartLateMillis: 11_000, BudgetMillis: 9_000, ElapsedMillis: 9_004}
+	for round := 0; round < DefaultDegradedRounds; round++ {
+		slot := int64(100 + 60*round)
+		reported := timing
+		tracker.Observe(context.Background(), observability.Observation{
+			QueryFailure: &observability.QueryFailureFacts{Stage: "provider", Category: "provider_transport", Code: "QUERY_TIMEOUT",
+				Detail: "transport=timeout", Timing: &reported},
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
+		})
+		at.at = at.at.Add(time.Millisecond)
+		tracker.Observe(context.Background(), observability.Observation{
+			ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE", ProgressCompletionReason: "QUERY_TIMEOUT",
+			Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot},
+		})
+		at.at = at.at.Add(time.Minute)
+	}
+	rows := tracker.Anomalies()
+	Attribute(rows, at.at)
+	if len(rows) != 1 || rows[0].Failure == nil || rows[0].Failure.Timing == nil || *rows[0].Failure.Timing != timing {
+		t.Fatalf("rows = %+v, want the failure carrying its timing", rows)
+	}
+	blocked := rows[0].Blocked
+	if blocked == nil || blocked.Timing == nil || *blocked.Timing != timing || blocked.Text != "transport=timeout" {
+		t.Fatalf("blocked = %+v, want this round's timing beside its detail", blocked)
+	}
+	if blocked.Timing == rows[0].Failure.Timing {
+		t.Fatal("the blocked reading aliases the failure's timing")
+	}
+
+	earlier := rows[0]
+	failure := *earlier.Failure
+	failure.Slot = earlier.RoundSlot - 60
+	earlier.Failure = &failure
+	if blocked := blockedOf(earlier, ""); blocked.Timing != nil {
+		t.Fatalf("blocked = %+v, want no timing from an earlier Slot's failure", blocked)
+	}
+}
+
 // Two Slots that are known and differ are two rounds, whatever the clocks
 // say: a failure stamped after the latest round ended, on the next Slot, is
 // the next round's -- in flight -- and not this one's. The clock decides

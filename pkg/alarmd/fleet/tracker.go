@@ -1170,6 +1170,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		seen := at
 		state.lastFailure = &FailureRef{Stage: failure.Stage, Category: failure.Category,
 			Code: failure.Code, Detail: failure.Detail, At: &seen, Slot: trace.EvaluationTime}
+		if timing := failure.Timing; timing != nil {
+			copied := *timing
+			state.lastFailure.Timing = &copied
+		}
 		state.lastFailureSlot = trace.EvaluationTime
 		if internalFailure(failure.Category) {
 			copy := *state.lastFailure
