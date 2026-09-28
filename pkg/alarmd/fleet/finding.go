@@ -226,6 +226,12 @@ func codeVerdict(anomaly Anomaly) (check Check, decided bool) {
 		if verdict.check == CheckBackendNotAnswering && queryRejected(anomaly.Failure) {
 			return refusalCheck(anomaly.Failure), true
 		}
+		// A timeout that ran out while this deployment was still delivering
+		// the answer is not the backend not answering: it was not the one
+		// being waited on, and the time is this deployment's to find.
+		if verdict.check == CheckBackendNotAnswering && failureThisRound(anomaly) && deliveryTimedOut(anomaly.Failure) {
+			return CheckDefect, true
+		}
 		if verdict.check == CheckDetectionAbandoned && fullyExecuted(anomaly) {
 			// The Slot was given up for bookkeeping, not for detection: an
 			// earlier attempt had executed every Plan.
@@ -377,6 +383,13 @@ func refusalNamesMissingTarget(failure *FailureRef) bool {
 	}
 	status := strings.TrimPrefix(failure.Detail, prefix)
 	return strings.Contains(status, "not_exist") || strings.Contains(status, "not_found")
+}
+
+// deliveryTimedOut says the failure is a query whose deadline passed while
+// this deployment was decoding and delivering what had arrived of the
+// answer, rather than while it waited on the backend.
+func deliveryTimedOut(failure *FailureRef) bool {
+	return failure != nil && failure.Detail == routedetail.DeliveryTimeoutRouteDetail
 }
 
 func queryRejected(failure *FailureRef) bool {

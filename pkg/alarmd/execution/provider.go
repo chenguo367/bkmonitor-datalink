@@ -228,6 +228,12 @@ const (
 	// RouteDetailKindBody is a transport failure after the answer began: the
 	// response's status was read and its body did not arrive in full.
 	RouteDetailKindBody = "body"
+	// RouteDetailKindDelivery is a query whose deadline passed while alarmd
+	// was decoding and delivering what had arrived of the answer: the time
+	// ran out on this side, with the backend not the one being waited on.
+	RouteDetailKindDelivery = "delivery"
+	// DeliveryTimeoutRouteDetail is the one detail of that kind.
+	DeliveryTimeoutRouteDetail = RouteDetailKindDelivery + "=" + TransportFailureTimeout
 
 	ResponseFailureIsPartialMissing = "is_partial_missing"
 	// ResponseFailureStatusPrefix precedes the lower-cased UQ status code of a

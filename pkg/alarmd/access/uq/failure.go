@@ -26,18 +26,20 @@ func (e *responseLimitError) QueryFailure() (string, string) {
 // bodyFailureError is a query whose answer began and whose body did not
 // arrive in full (see Client.bodyFailure). It keeps the error's own text and
 // says what the failure was in the bounded grammar a failed attempt uses: a
-// transport failure, its "body=<class>" detail, and for a Slot's query its
-// timing, whose local part says how much of the time went to alarmd's own
-// delivery.
+// provider transport failure with its "body=<class>" detail, or a deadline
+// that passed on alarmd's side, "delivery=timeout"; and for a Slot's query
+// its timing, whose local part says how much of the time went to alarmd's
+// own delivery.
 type bodyFailureError struct {
-	err    error
-	code   string
-	detail string
-	timing *execution.AttemptTiming
+	err      error
+	category string
+	code     string
+	detail   string
+	timing   *execution.AttemptTiming
 }
 
 func (e *bodyFailureError) Error() string                                { return e.err.Error() }
 func (e *bodyFailureError) Unwrap() error                                { return e.err }
-func (e *bodyFailureError) QueryFailure() (string, string)               { return "provider_transport", e.code }
+func (e *bodyFailureError) QueryFailure() (string, string)               { return e.category, e.code }
 func (e *bodyFailureError) QueryFailureDetail() string                   { return e.detail }
 func (e *bodyFailureError) QueryFailureTiming() *execution.AttemptTiming { return e.timing }

@@ -247,6 +247,52 @@ func TestARejectedQueryIsNotFiledAsTheBackendsAvailability(t *testing.T) {
 	}
 }
 
+// A query timeout is read by whose time ran out. One whose deadline passed
+// while this deployment was still delivering what had arrived is its own:
+// the backend was not the one being waited on, and filing it as the backend
+// not answering sends the reader to a dependency that answered. One that ran
+// out inside a read of the body is the backend's, as before the answer
+// began. A delivery timeout kept from an earlier Slot decides nothing for
+// this round.
+func TestADeliveryTimeoutIsThisDeploymentsNotTheBackends(t *testing.T) {
+	failedAt := now.Add(-time.Second)
+	failed := func(detail string, slot int64) Anomaly {
+		return Anomaly{Kind: KindBlockedRun, ReasonCode: "source_error", ReasonLastAt: now, RoundSlot: 1060,
+			Failure: &FailureRef{Stage: "execute", Category: "other", Code: "QUERY_TIMEOUT", Detail: detail, At: &failedAt, Slot: slot}}
+	}
+	for _, testCase := range []struct {
+		name       string
+		anomaly    Anomaly
+		check      Check
+		owner      Owner
+		dependency Dependency
+	}{
+		{"delivery ran out", failed("delivery=timeout", 1060), CheckDefect, OwnerAlarmd, DependencyNone},
+		{"a body read ran out", failed("body=timeout", 1060), CheckBackendNotAnswering, OwnerUndetermined, DependencyUnlocated},
+	} {
+		list := []Anomaly{testCase.anomaly}
+		Attribute(list, now)
+		got := list[0]
+		if got.Finding.Check != testCase.check || got.Finding.Owner != testCase.owner || got.Blocked == nil || got.Blocked.Dependency != testCase.dependency {
+			t.Errorf("%s: finding %s/%s blocked %+v, want %s/%s dependency %q", testCase.name, got.Finding.Check, got.Finding.Owner, got.Blocked,
+				testCase.check, testCase.owner, testCase.dependency)
+		}
+	}
+	stale := []Anomaly{failed("delivery=timeout", 1000)}
+	Attribute(stale, now)
+	if stale[0].Blocked != nil && stale[0].Blocked.Dependency == DependencyNone && stale[0].Blocked.DependencyEvidence == dependencyByCode {
+		t.Errorf("an earlier Slot's delivery timeout named this round's dependency: %+v", stale[0].Blocked)
+	}
+	// This round completed on the backend's timeout, with an earlier Slot's
+	// delivery timeout still on the row: this round's timeout is the one read.
+	completed := []Anomaly{{Kind: KindDegradedRun, ReasonCode: "COMPLETED_WITH_UNAVAILABLE", CauseReason: "QUERY_TIMEOUT", ReasonLastAt: now, RoundSlot: 1060,
+		Failure: &FailureRef{Stage: "execute", Category: "other", Code: "QUERY_TIMEOUT", Detail: "delivery=timeout", At: &failedAt, Slot: 1000}}}
+	Attribute(completed, now)
+	if got := completed[0].Finding; got.Check != CheckBackendNotAnswering {
+		t.Errorf("a round that timed out on the backend beside an earlier delivery timeout = %s/%s, want %s", got.Check, got.Owner, CheckBackendNotAnswering)
+	}
+}
+
 // Stalled and a missed turn are decided before any code is read.
 //
 // A stalled object's last code is usually the external thing that happened
