@@ -622,29 +622,53 @@ type CostSummary struct {
 	// rankingStarted, when set, is called by Publish between the copy and
 	// the ranking; a test holds the ranking there.
 	rankingStarted func()
-	// yield is what an observation does between its two tries at a held
+	// yield is what an observation does between its tries at a held
 	// account: runtime.Gosched, which a test replaces to act at that moment.
 	yield func()
+	// retryClock times those tries: time.Now, which a test replaces. The
+	// summary's own clock places observations in windows and is not a
+	// stopwatch.
+	retryClock func() time.Time
 }
 
-// lockAccount takes an account for an observation, yielding once to a holder
-// before giving up. Every holder holds it for one group's copy or one
-// observation's addition, so a holder found at the first try has almost
-// always let go by the second; what is lost is lost to a holder that is
-// itself held up. It never waits for more than the one yield.
+// costAccountRetry is how long an observation keeps trying a held account
+// before it is lost. Every holder holds an account for one group's copy or
+// one observation's addition: a Publish copies a group's windows and its
+// Plans', about 200 ns for a group of one Plan and a few microseconds for the
+// largest group a replica holds - a group of a few tens of Plans at some 600
+// bytes of windows each. 20 us waits out that copy, or another observer of
+// the same group, several times over, and is nothing beside a Slot's own
+// work. A holder the scheduler has taken off the CPU mid-hold is gone for
+// milliseconds; waiting that out would put execution behind maintenance, so
+// that loss stays lost, and counted.
+const costAccountRetry = 20 * time.Microsecond
+
+// lockAccount takes an account for an observation, yielding to a holder and
+// trying again until costAccountRetry has passed, then giving up. The time
+// is checked after each yield, so it bounds the tries, not how long one
+// yield takes on a saturated processor.
 func (c *CostSummary) lockAccount(account *costAccount) bool {
 	if account.mu.TryLock() {
 		return true
 	}
-	c.yield()
-	return account.mu.TryLock()
+	started := c.retryClock()
+	for {
+		c.yield()
+		if account.mu.TryLock() {
+			return true
+		}
+		if c.retryClock().Sub(started) >= costAccountRetry {
+			return false
+		}
+	}
 }
 
 func NewCostSummary(o CostSummaryOptions) *CostSummary {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	c := &CostSummary{options: o, enabled: o.ProcessID != "" && o.Window > 0 && CostSummaryCapacityBytes(o) > 0, yield: runtime.Gosched}
+	c := &CostSummary{options: o, enabled: o.ProcessID != "" && o.Window > 0 && CostSummaryCapacityBytes(o) > 0, yield: runtime.Gosched,
+		retryClock: time.Now}
 	snapshot := &CostSnapshot{Enabled: c.enabled, ProcessID: o.ProcessID, Scope: "process_observed_candidates", CapacityBytesEstimated: CostSummaryCapacityBytes(o)}
 	snapshot.Coverage.Incomplete = true
 	if !c.enabled {

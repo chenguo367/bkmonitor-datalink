@@ -193,35 +193,60 @@ func TestAnObservationIsLostOnlyToItsOwnGroupsAccount(t *testing.T) {
 	t.Fatalf("the other group's observation was lost to an account it does not use: %+v", s.Contributors)
 }
 
-// A holder found at the first try is given one yield to let go: an account a
-// Publish is copying, or another observer is adding to, is free again by
-// the second try, and the observation is counted rather than lost. One that
-// is still held at the second try is lost, and counted as lost.
-func TestAnObservationYieldsOnceToAHolderBeforeItIsLost(t *testing.T) {
+// A holder found at the first try is waited for, a yield at a time, until
+// costAccountRetry has passed. One that lets go within it - a large group's
+// copy, another observer of the same group - loses nothing, however many
+// yields that takes, and so does one that lets go at the bound itself. One
+// still holding when the time is up loses the observation, counted as lost,
+// and Observe returns rather than waiting on. The clock here moves one
+// microsecond a yield, so the yields are the time.
+func TestAnObservationWaitsForAHolderUpToItsBound(t *testing.T) {
 	c, now, _ := costFixture()
 	account := c.scope.Load().groups["shared"].account
-	yields := 0
-	c.yield = func() {
-		yields++
-		account.mu.Unlock()
+	const step = time.Microsecond
+	bound := int(costAccountRetry / step)
+	clock, reads := time.Unix(0, 0), 0
+	c.retryClock = func() time.Time {
+		// A loop that tries without yielding never moves this clock; the
+		// reads still stop it.
+		if reads++; reads > 10*bound {
+			t.Fatalf("the clock was read %d times: the tries are not bounded", reads)
+		}
+		return clock
 	}
-	// Held here, and let go by the yield.
-	account.mu.Lock()
-	c.Observe(context.Background(), costObservation(StageSlotCompleted))
-	if yields != 1 || c.contentionDropped.Load() != 0 {
-		t.Fatalf("a holder that let go during the yield: %d yields, %d lost; want 1 and 0", yields, c.contentionDropped.Load())
+	yields := 0
+	holdUntil := func(release int) {
+		yields, reads = 0, 0
+		c.yield = func() {
+			yields++
+			clock = clock.Add(step)
+			if yields > 10*bound {
+				t.Fatalf("still trying after %d yields: the bound is not holding", yields)
+			}
+			if yields == release {
+				account.mu.Unlock()
+			}
+		}
+		account.mu.Lock()
+		c.Observe(context.Background(), costObservation(StageSlotCompleted))
 	}
 
-	c.yield = func() { yields++ }
-	account.mu.Lock()
-	c.Observe(context.Background(), costObservation(StageSlotCompleted))
+	holdUntil(5)
+	if yields != 5 || c.contentionDropped.Load() != 0 {
+		t.Fatalf("a holder that let go after 5 us: %d yields, %d lost; want 5 and none", yields, c.contentionDropped.Load())
+	}
+	holdUntil(bound)
+	if yields != bound || c.contentionDropped.Load() != 0 {
+		t.Fatalf("a holder that let go at the bound: %d yields, %d lost; want %d and none", yields, c.contentionDropped.Load(), bound)
+	}
+	holdUntil(-1)
 	account.mu.Unlock()
-	if yields != 2 || c.contentionDropped.Load() != 1 {
-		t.Fatalf("a holder still holding after the yield: %d yields in all, %d lost; want 2 and 1", yields, c.contentionDropped.Load())
+	if yields != bound || c.contentionDropped.Load() != 1 {
+		t.Fatalf("a holder that never let go: %d yields, %d lost; want %d, then one lost", yields, c.contentionDropped.Load(), bound)
 	}
 	c.Publish(*now)
-	if row := costRow(t, c.Snapshot(), "query_group", CostPlanIdentity{}); row.Current.RunReturns != 1 {
-		t.Fatalf("run returns = %d, want the one observation made after the holder let go", row.Current.RunReturns)
+	if row := costRow(t, c.Snapshot(), "query_group", CostPlanIdentity{}); row.Current.RunReturns != 2 {
+		t.Fatalf("run returns = %d, want the two observations whose holders let go within the bound", row.Current.RunReturns)
 	}
 }
 
