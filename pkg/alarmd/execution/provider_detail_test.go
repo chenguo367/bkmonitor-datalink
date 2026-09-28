@@ -21,7 +21,9 @@ func TestRouteAttemptDetailHelpersStayBounded(t *testing.T) {
 			t.Fatalf("TransportRouteDetail(%q) = %q, want %q", class, got, want)
 		}
 	}
-	if ResponseRouteDetail(ResponseFailureIsPartialMissing) != "response=is_partial_missing" || ResponseRouteDetail("x") != "response=other" {
+	if ResponseRouteDetail(ResponseFailureIsPartialMissing) != "response=is_partial_missing" ||
+		ResponseRouteDetail(ResponseFailureFieldSemanticsUnacknowledged) != "response=field_semantics_unacknowledged" ||
+		ResponseRouteDetail("x") != "response=other" {
 		t.Fatal("ResponseRouteDetail is not bounded")
 	}
 	for detail, want := range map[string]string{

@@ -142,11 +142,18 @@ func TestProductionPollingSources(t *testing.T) {
 					for index, host := range []string{"synthetic-a", "synthetic-b"} {
 						series = append(series, map[string]any{"name": fmt.Sprintf("series%d", index), "columns": []string{"_time", "_value"}, "types": []string{"float", "float"}, "group_keys": []string{dimension}, "group_values": []string{host}, "values": []any{[]any{(end - 1) * 1000, value}}})
 					}
+					partial := second == "partial" && clock.Load() > base+1
 					var buf bytes.Buffer
-					if err := json.NewEncoder(&buf).Encode(map[string]any{"series": series, "status": nil, "trace_id": "polling-test", "is_partial": second == "partial" && clock.Load() > base+1}); err != nil {
+					if err := json.NewEncoder(&buf).Encode(map[string]any{"series": series, "status": nil, "trace_id": "polling-test", "is_partial": partial}); err != nil {
 						return nil, err
 					}
-					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(&buf), Request: request}, nil
+					header := make(http.Header)
+					if source.label == "bk_fta" && !partial {
+						// As unify-query acknowledges field semantics: only for a
+						// read every route completed, never a partial one.
+						header.Set("X-Bk-Query-Field-Semantics", "fta_event_tags/v1")
+					}
+					return &http.Response{StatusCode: 200, Header: header, Body: io.NopCloser(&buf), Request: request}, nil
 				})}
 				cfg := controlledG4RuntimeConfig(address, "http://controlled-uq", "alarmd-polling-controlled")
 				if source.label == "bk_fta" {

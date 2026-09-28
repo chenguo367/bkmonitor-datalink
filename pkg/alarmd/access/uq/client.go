@@ -25,7 +25,14 @@ const (
 	headerQuerySource = "Bk-Query-Source"
 	headerTenant      = "X-Bk-Tenant-Id"
 	headerSpace       = "X-Bk-Scope-Space-Uid"
-	queryTSPartial    = "QUERY_TS_PARTIAL"
+	// headerFieldSemantics is the provider acknowledging field_semantics: it
+	// names the version the provider executed, sent only once every route of
+	// the query completed under it (unify-query service/http/field_semantics.go).
+	// A provider that does not know field_semantics decodes the request without
+	// it and without its source conditions -- no error, a wider query -- and
+	// sends no acknowledgement, which is the one way to tell the two apart.
+	headerFieldSemantics = "X-Bk-Query-Field-Semantics"
+	queryTSPartial       = "QUERY_TS_PARTIAL"
 	// spaceTableIDFieldIsNotExists is UQ saying the table or field the query
 	// names cannot be routed. It is a statement about the data, not about
 	// whether the query ran.
@@ -167,6 +174,24 @@ func scopeHeaders(facts execution.QueryPlanFacts) map[string]string {
 	return map[string]string{headerTenant: facts.TenantID, headerSpace: facts.SpaceScope}
 }
 
+// requestedFieldSemantics is the field_semantics version a response has to
+// acknowledge, or "" when the query asked for none -- then the header is not
+// read at all. One header names one version, so clauses asking for different
+// versions can never be acknowledged and read as unacknowledged.
+func requestedFieldSemantics(spec execution.PhysicalQuerySpec) string {
+	requested := ""
+	for _, clause := range spec.PlanFacts.QueryList {
+		switch {
+		case clause.FieldSemantics == "":
+		case requested == "":
+			requested = clause.FieldSemantics
+		case requested != clause.FieldSemantics:
+			return "\x00mixed"
+		}
+	}
+	return requested
+}
+
 // bodySpace is the space_uid the structured request body carries. The
 // provider takes the body's space whenever the header names none, so a
 // global business Plan leaves it empty as well as the header; the body's
@@ -244,6 +269,19 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 			scanned.Bytes = uint64(discarded)
 		}
 		completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable), execution.HTTPStatusRouteDetail(response.StatusCode))
+		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
+		return completion, nil
+	}
+	if want := requestedFieldSemantics(attempt.Spec); want != "" && response.Header.Get(headerFieldSemantics) != want {
+		// Decided on the headers, before the body: no series has reached the
+		// sink, so the completion is a plain gap. The body is not read -- it is
+		// the answer to a different, wider query.
+		discarded, _ := io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
+		if scanned != nil {
+			scanned.Bytes = uint64(discarded)
+		}
+		completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable),
+			execution.ResponseRouteDetail(execution.ResponseFailureFieldSemanticsUnacknowledged))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 		return completion, nil
 	}
