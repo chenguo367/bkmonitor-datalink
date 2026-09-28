@@ -1873,6 +1873,9 @@ type SourceRefreshFacts struct {
 	ReadMode       SourceReadMode
 	ReadReason     SourceReadReason
 	StrategiesRead int
+	// Build says whether the round built its Catalog or reused the previous
+	// round's (SourceRefreshBuilds); empty for a producer that does not say.
+	Build SourceRefreshBuild
 	// ChangeSignalPresent says the source offered a change signal this round;
 	// ChangeSignalAgeSeconds is how long ago its publisher moved it, by the
 	// reporting process's clock, and means nothing when not present.
@@ -1930,6 +1933,19 @@ func ValidSourceReadOutcome(mode SourceReadMode, reason SourceReadReason) bool {
 	}
 	return false
 }
+
+// SourceRefreshBuild mirrors the control plane's word for whether a refresh
+// round built its Catalog or stood on the previous round's. Closed: the
+// metric is labelled by it.
+type SourceRefreshBuild string
+
+const (
+	SourceRefreshRebuilt SourceRefreshBuild = "rebuilt"
+	SourceRefreshReused  SourceRefreshBuild = "reused"
+)
+
+// SourceRefreshBuilds is every build word, one pre-created series each.
+var SourceRefreshBuilds = []SourceRefreshBuild{SourceRefreshRebuilt, SourceRefreshReused}
 
 // ControlSourceRole is what this process is to the control plane's source
 // refresh. Only the leader refreshes; a follower reads what the leader
