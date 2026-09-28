@@ -139,5 +139,9 @@ func TestEveryHostRecordTheWriterPublishesIsRead(t *testing.T) {
 	if strings.Join(unindexed, ",") != "custom_level|rack-a" {
 		t.Errorf("topology nodes with a text instance id: %v, want the one known case", unindexed)
 	}
+	// The load counts that node as refused, and no record.
+	if got := index.Refused(); got.Hosts != 0 || got.ServiceInstances != 0 || got.TopoNodes != len(unindexed) {
+		t.Errorf("refused = %+v, want no record and the %d known node", got, len(unindexed))
+	}
 	t.Logf("writer %s: %d fields, %d hosts, %d refused", records.SourceCommit[:10], len(records.Samples), len(hosts), refused)
 }

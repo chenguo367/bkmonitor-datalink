@@ -298,6 +298,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_cmdb_host_index_hosts":                        "variableLabels: {}",
 		"bkmonitor_alarmd_cmdb_service_instance_index_instances":        "variableLabels: {}",
 		"bkmonitor_alarmd_cmdb_index_business_mappings":                 "variableLabels: {mapping,state}",
+		"bkmonitor_alarmd_cmdb_index_records_refused":                   "variableLabels: {record}",
 		"bkmonitor_alarmd_fleet_snapshot_bytes":                         "variableLabels: {}",
 		"bkmonitor_alarmd_fleet_view_snapshot_loads_total":              "variableLabels: {}",
 		"bkmonitor_alarmd_fleet_view_snapshot_bytes_total":              "variableLabels: {}",
@@ -827,6 +828,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("cmdb_host_index_hosts"):                 1,
 		fqName("cmdb_service_instance_index_instances"): 1,
 		fqName("cmdb_index_business_mappings"):          len(CMDBBusinessMappings) * len(CMDBBusinessMappingStates),
+		fqName("cmdb_index_records_refused"):            len(CMDBRefusedRecords),
 		fqName("fleet_snapshot_bytes"):                  1,
 		fqName("fleet_view_snapshot_loads_total"):       1,
 		fqName("fleet_view_snapshot_bytes_total"):       1,
@@ -1386,6 +1388,31 @@ func TestDiagnosticRedisDialRetriesAreCountedByReason(t *testing.T) {
 	}
 	if counts["auth/timeout"] != 1 || counts["evidence/other"] != 1 || total != 2 {
 		t.Fatalf("counts %v", counts)
+	}
+}
+
+// The three refused-record cells exist from startup, so a zero is a load
+// that refused nothing and not a series nobody registered; each kind sets
+// its own cell, and a kind outside the list creates none.
+func TestTheRefusedRecordsGaugeHasEveryKindFromStartup(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	r.SetCMDBRecordsRefused("host", 2)
+	r.SetCMDBRecordsRefused("topo_node", 3)
+	r.SetCMDBRecordsRefused("guessed", 9)
+	values := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_cmdb_index_records_refused") {
+		for _, label := range m.GetLabel() {
+			values[label.GetValue()] = m.GetGauge().GetValue()
+		}
+	}
+	want := map[string]float64{"host": 2, "service_instance": 0, "topo_node": 3}
+	if len(values) != len(want) {
+		t.Fatalf("gauge = %v, want exactly %v", values, want)
+	}
+	for record, value := range want {
+		if values[record] != value {
+			t.Fatalf("gauge = %v, want %v", values, want)
+		}
 	}
 }
 

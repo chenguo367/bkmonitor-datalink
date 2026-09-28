@@ -239,6 +239,14 @@ func endpointFactsSource(
 					if writer.State == "" && health.Loaded {
 						writer.State = "loaded"
 					}
+					if health.Loaded {
+						refused := health.Refused
+						writer.Refused = &fleet.RefusedRecords{
+							Host: refused.Hosts, ServiceInstance: refused.ServiceInstances, TopoNode: refused.TopoNodes,
+							FirstHost: refused.FirstHost, FirstServiceInstance: refused.FirstServiceInstance,
+							FirstTopoNode: refused.FirstTopoNode,
+						}
+					}
 					entry.Writer = writer
 				}
 			case fleet.EndpointDynamicConfig:

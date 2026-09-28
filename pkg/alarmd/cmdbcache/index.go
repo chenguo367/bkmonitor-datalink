@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/go-redis/redis/v8"
 )
@@ -131,6 +132,82 @@ type Index struct {
 	// namespace of a cluster shared across businesses belongs to the
 	// business using it. Optional in the same way.
 	namespaceBusiness businessMapping
+	// refused is what this load read of the host and service instance
+	// hashes and could not use.
+	refused RefusedRecords
+}
+
+// RefusedRecords is what one load read of the host and service instance
+// hashes and could not use: fields whose record does not decode, and the
+// topology nodes of decoded records that do not decode to an object and a
+// numeric instance. Each is taken as absent, as it always was - a record
+// the writer got wrong is the same as one it deleted - and a node lost
+// this way is one a topology target silently does not match. These say how
+// many, and name the first of each by the hash field it was read under, so
+// the record can be read back from the cache.
+//
+// Hosts counts fields, not hosts: the writer publishes every host under
+// its "ip|cloud" field and its host id field, so one bad host record is
+// usually two, and a record that does not decode cannot say which host it
+// is. A topology node is counted once per record, and a host's once, from
+// the first of its two fields that is read.
+type RefusedRecords struct {
+	Hosts                int
+	ServiceInstances     int
+	TopoNodes            int
+	FirstHost            string
+	FirstServiceInstance string
+	// FirstTopoNode names the record the first refused node was in, by its
+	// hash and field: "host:<field>" or "service_instance:<field>".
+	FirstTopoNode string
+}
+
+// maxRefusedFieldBytes bounds a field name kept as the first refused of
+// its kind. The name comes from the writer and goes on to a log line and to
+// every replica's fleet snapshot; the writer's own names are tens of bytes.
+const maxRefusedFieldBytes = 256
+
+// refusedField is a field name as kept for naming a refused record: cut to
+// maxRefusedFieldBytes on a character boundary.
+func refusedField(field string) string {
+	if len(field) <= maxRefusedFieldBytes {
+		return field
+	}
+	cut := maxRefusedFieldBytes
+	for cut > 0 && !utf8.RuneStart(field[cut]) {
+		cut--
+	}
+	return field[:cut]
+}
+
+// SameCounts says whether two loads refused as many of each.
+func (refused RefusedRecords) SameCounts(other RefusedRecords) bool {
+	return refused.Hosts == other.Hosts && refused.ServiceInstances == other.ServiceInstances &&
+		refused.TopoNodes == other.TopoNodes
+}
+
+func (refused *RefusedRecords) host(field string) {
+	if refused.Hosts == 0 {
+		refused.FirstHost = refusedField(field)
+	}
+	refused.Hosts++
+}
+
+func (refused *RefusedRecords) serviceInstance(field string) {
+	if refused.ServiceInstances == 0 {
+		refused.FirstServiceInstance = refusedField(field)
+	}
+	refused.ServiceInstances++
+}
+
+func (refused *RefusedRecords) topoNodes(record, field string, nodes int) {
+	if nodes == 0 {
+		return
+	}
+	if refused.TopoNodes == 0 {
+		refused.FirstTopoNode = record + ":" + refusedField(field)
+	}
+	refused.TopoNodes += nodes
 }
 
 // MappingStats describes one published business mapping the index read:
@@ -365,6 +442,14 @@ func (index *Index) NamespaceBusinessStats() MappingStats {
 	return index.namespaceBusiness.stats()
 }
 
+// Refused is what the load that built this index read and could not use.
+func (index *Index) Refused() RefusedRecords {
+	if index == nil {
+		return RefusedRecords{}
+	}
+	return index.refused
+}
+
 // carryOptional takes over, from the index this one replaces, the optional
 // mappings this load could not read or read empty while that index held
 // entries (see carriedFrom).
@@ -553,10 +638,12 @@ func (builder *indexBuilder) addToNodes(facts *HostFacts) {
 func (builder *indexBuilder) addServiceInstanceFields(fields []string) {
 	for position := 0; position+1 < len(fields); position += 2 {
 		identity, payload := fields[position], fields[position+1]
-		facts, err := DecodeServiceInstanceRecord(identity, payload)
+		facts, refusedNodes, err := DecodeServiceInstanceRecord(identity, payload)
 		if err != nil {
+			builder.index.refused.serviceInstance(identity)
 			continue
 		}
+		builder.index.refused.topoNodes("service_instance", identity, refusedNodes)
 		builder.index.serviceInstances[identity] = facts
 	}
 }
@@ -568,6 +655,7 @@ func (builder *indexBuilder) addFields(fields []string) {
 		wire, err := decodeWireHost(payload)
 		if err != nil {
 			// One malformed record must not blind the whole filter.
+			builder.index.refused.host(identity)
 			continue
 		}
 		// bmw writes every host twice, under its "ip|cloud" key and under its
@@ -584,7 +672,8 @@ func (builder *indexBuilder) addFields(fields []string) {
 				continue
 			}
 		}
-		facts := hostFactsOf(wire, payload)
+		facts, refusedNodes := hostFactsOf(wire, payload)
+		builder.index.refused.topoNodes("host", identity, refusedNodes)
 		if hostID != "" {
 			builder.seen[hostID] = facts
 		}
@@ -631,7 +720,8 @@ func decodeHost(payload string) (*HostFacts, error) {
 	if err != nil {
 		return nil, err
 	}
-	return hostFactsOf(wire, payload), nil
+	facts, _ := hostFactsOf(wire, payload)
+	return facts, nil
 }
 
 // decodeWireHost is the one step of reading a host record that can refuse
@@ -649,29 +739,31 @@ func decodeWireHost(payload string) (wireHost, error) {
 
 // DecodeHostRecord reads one host record as a load reads it: the facts the
 // index would hold for it, or the error that has a load skip it. A load
-// drops a record it cannot decode without a word, so this is how one such
-// record is told apart from a host the cache does not have.
+// takes a record it cannot decode as absent and only counts it, naming the
+// first by its field (Index.Refused), so this is how one such record is read
+// back and told apart from a host the cache does not have.
 func DecodeHostRecord(payload string) (*HostFacts, error) {
 	return decodeHost(payload)
 }
 
 // DecodeServiceInstanceRecord is DecodeHostRecord for the service-instance
 // hash, whose load it is: the record under field, its id the field's when
-// the record names none.
-func DecodeServiceInstanceRecord(field, payload string) (*ServiceInstanceFacts, error) {
-	facts, err := decodeServiceInstance(payload)
+// the record names none, and how many of its topology nodes were refused.
+func DecodeServiceInstanceRecord(field, payload string) (*ServiceInstanceFacts, int, error) {
+	facts, refusedNodes, err := decodeServiceInstance(payload)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if facts.ID == "" {
 		facts.ID = field
 	}
-	return facts, nil
+	return facts, refusedNodes, nil
 }
 
 // hostFactsOf is a host record's facts from its decoded fields and its
-// payload.
-func hostFactsOf(wire wireHost, payload string) *HostFacts {
+// payload, and how many of its topology nodes were refused.
+func hostFactsOf(wire wireHost, payload string) (*HostFacts, int) {
+	nodes, refusedNodes := topoNodes(wire.TopoLinks)
 	facts := &HostFacts{
 		HostID:      numberText(wire.HostID),
 		IP:          wire.InnerIP,
@@ -679,7 +771,7 @@ func hostFactsOf(wire wireHost, payload string) *HostFacts {
 		BusinessID:  numberText(wire.BusinessID),
 		State:       wire.State,
 		DisplayName: wire.DisplayName,
-		TopoNodes:   topoNodes(wire.TopoLinks),
+		TopoNodes:   nodes,
 		Attributes:  scalarAttributes(payload),
 		ModelID:     wire.ModelID,
 		ModelInstID: rawScalarText(wire.ModelInstID),
@@ -687,22 +779,25 @@ func hostFactsOf(wire wireHost, payload string) *HostFacts {
 	if facts.CloudID == "" {
 		facts.CloudID = "0"
 	}
-	return facts
+	return facts, refusedNodes
 }
 
-func decodeServiceInstance(payload string) (*ServiceInstanceFacts, error) {
+// decodeServiceInstance reads one service instance record, and how many of
+// its topology nodes were refused.
+func decodeServiceInstance(payload string) (*ServiceInstanceFacts, int, error) {
 	decoder := json.NewDecoder(strings.NewReader(payload))
 	decoder.UseNumber()
 	var wire wireServiceInstance
 	if err := decoder.Decode(&wire); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
+	nodes, refusedNodes := topoNodes(wire.TopoLinks)
 	facts := &ServiceInstanceFacts{
 		ID:        numberText(wire.ID),
 		HostID:    numberText(wire.HostID),
 		IP:        wire.IP,
 		CloudID:   numberText(wire.CloudID),
-		TopoNodes: topoNodes(wire.TopoLinks),
+		TopoNodes: nodes,
 	}
 	if facts.CloudID == "" {
 		// Python's fuller writes the instance's cloud as it is; the cache
@@ -710,22 +805,35 @@ func decodeServiceInstance(payload string) (*ServiceInstanceFacts, error) {
 		// area, the same default the host decoder applies.
 		facts.CloudID = "0"
 	}
-	return facts, nil
+	return facts, refusedNodes, nil
 }
 
 // topoNodes flattens the links of a record into its node set. Every link
 // contributes its whole chain: a host in several modules sits under several
-// sets, and a target naming any of those nodes includes it.
-func topoNodes(links map[string][]json.RawMessage) []string {
+// sets, and a target naming any of those nodes includes it. A node that
+// does not decode to an object and a numeric instance is left out and
+// counted as refused; the chains of one record share their upper nodes, so
+// a refused node is counted once per record by its text, as the nodes kept
+// are by their key.
+func topoNodes(links map[string][]json.RawMessage) ([]string, int) {
 	nodes := make(map[string]struct{})
+	var refused map[string]struct{}
+	refuse := func(raw json.RawMessage) {
+		if refused == nil {
+			refused = make(map[string]struct{})
+		}
+		refused[string(raw)] = struct{}{}
+	}
 	for _, link := range links {
 		for _, raw := range link {
 			var node wireTopoNode
 			if err := json.Unmarshal(raw, &node); err != nil {
+				refuse(raw)
 				continue
 			}
 			instance := numberText(node.InstanceID)
 			if node.ObjectID == "" || instance == "" {
+				refuse(raw)
 				continue
 			}
 			nodes[node.ObjectID+"|"+instance] = struct{}{}
@@ -735,7 +843,7 @@ func topoNodes(links map[string][]json.RawMessage) []string {
 	for node := range nodes {
 		flat = append(flat, node)
 	}
-	return flat
+	return flat, len(refused)
 }
 
 // scalarAttributes reads the top-level string, number and boolean fields of
