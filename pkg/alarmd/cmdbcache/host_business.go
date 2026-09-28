@@ -54,6 +54,16 @@ func (lookup *HostBusinessLookup) LookupClusterBusiness(clusterID string) (strin
 	return lookup.store.Current().LookupClusterBusiness(clusterID)
 }
 
+// LookupNamespaceBusiness returns the business the platform published for
+// one namespace of one BCS cluster, from the current snapshot, and false
+// when it published none.
+func (lookup *HostBusinessLookup) LookupNamespaceBusiness(clusterID, namespace string) (string, bool) {
+	if lookup == nil || lookup.store == nil {
+		return "", false
+	}
+	return lookup.store.Current().LookupNamespaceBusiness(clusterID, namespace)
+}
+
 // HostIndexResolved reports whether there is an index behind those answers.
 //
 // It exists because the safe direction above is only safe for one host. Asked

@@ -44,6 +44,13 @@ const (
 	// unbounded writer mistake into every replica's memory. Clusters past
 	// the bound are counted as truncated and attribute as unmapped.
 	MaxClusterBusinesses = 1 << 16
+	// namespaceBusinessCacheSuffix is the BCS cluster + namespace ->
+	// business hash published beside it: field "cluster|namespace", value
+	// the business id in decimal.
+	namespaceBusinessCacheSuffix = "cache.cmdb.bcs_namespace_business"
+	// MaxNamespaceBusinesses bounds the namespaces one load keeps, on the
+	// same reasoning as MaxClusterBusinesses at a namespace's scale.
+	MaxNamespaceBusinesses = 1 << 18
 )
 
 // HostFacts is what enrichment knows about one host.
@@ -119,6 +126,26 @@ type Index struct {
 	// Read in the same load as the hosts, and optional to it: a mapping
 	// that cannot be read does not stop the hosts from refreshing.
 	clusterBusiness businessMapping
+	// namespaceBusiness is the business of each namespace of a cluster, by
+	// "cluster|namespace", consulted before the cluster's own business: a
+	// namespace of a cluster shared across businesses belongs to the
+	// business using it. Optional in the same way.
+	namespaceBusiness businessMapping
+}
+
+// MappingStats describes one published business mapping the index read:
+// the entries held, the fields left out as not a positive business or past
+// the bound, and whether the latest load could not read it (the entries are
+// then an earlier load's).
+type MappingStats struct {
+	Held       int
+	Refused    int
+	Truncated  int
+	ReadFailed bool
+}
+
+func (mapping businessMapping) stats() MappingStats {
+	return MappingStats{Held: len(mapping.entries), Refused: mapping.refused, Truncated: mapping.truncated, ReadFailed: mapping.readFailed}
 }
 
 // businessMapping is one published "key -> business" hash read into the
@@ -292,19 +319,30 @@ func (index *Index) LookupClusterBusiness(clusterID string) (string, bool) {
 	return business, found
 }
 
-// ClusterBusinesses is how many clusters the held mapping holds; refused
-// and truncated are the fields the load left out, by why.
-func (index *Index) ClusterBusinesses() (held, refused, truncated int) {
-	if index == nil {
-		return 0, 0, 0
+// LookupNamespaceBusiness is the business the writer published for one
+// namespace of one BCS cluster, and false for a pair it did not publish.
+func (index *Index) LookupNamespaceBusiness(clusterID, namespace string) (string, bool) {
+	if index == nil || clusterID == "" || namespace == "" {
+		return "", false
 	}
-	return len(index.clusterBusiness.entries), index.clusterBusiness.refused, index.clusterBusiness.truncated
+	business, found := index.namespaceBusiness.entries[clusterID+"|"+namespace]
+	return business, found
 }
 
-// ClusterBusinessReadFailed says the latest load could not read the cluster
-// mapping, and the entries held are the ones an earlier load read.
-func (index *Index) ClusterBusinessReadFailed() bool {
-	return index != nil && index.clusterBusiness.readFailed
+// ClusterBusinessStats describes the cluster mapping the index holds.
+func (index *Index) ClusterBusinessStats() MappingStats {
+	if index == nil {
+		return MappingStats{}
+	}
+	return index.clusterBusiness.stats()
+}
+
+// NamespaceBusinessStats describes the namespace mapping the index holds.
+func (index *Index) NamespaceBusinessStats() MappingStats {
+	if index == nil {
+		return MappingStats{}
+	}
+	return index.namespaceBusiness.stats()
 }
 
 // carryOptional takes over, from the index this one replaces, the optional
@@ -314,6 +352,7 @@ func (index *Index) carryOptional(previous *Index) {
 		return
 	}
 	index.clusterBusiness = index.clusterBusiness.carriedFrom(previous.clusterBusiness)
+	index.namespaceBusiness = index.namespaceBusiness.carriedFrom(previous.namespaceBusiness)
 }
 
 // LookupServiceInstance resolves one service-instance id.
@@ -365,6 +404,10 @@ func (reader *Reader) clusterBusinessKey() string {
 	return reader.prefix + "." + clusterBusinessCacheSuffix
 }
 
+func (reader *Reader) namespaceBusinessKey() string {
+	return reader.prefix + "." + namespaceBusinessCacheSuffix
+}
+
 // Load builds a fresh index. It streams the hash rather than reading it whole:
 // the host cache is a single large hash shared with the platform, and a
 // blocking full read of it would stall every other reader.
@@ -397,6 +440,7 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	// event that would have used one is counted as unmapped. A hash that
 	// cannot be read is not a failed load (see businessMapping).
 	builder.index.clusterBusiness = reader.readMapping(ctx, reader.clusterBusinessKey(), MaxClusterBusinesses)
+	builder.index.namespaceBusiness = reader.readMapping(ctx, reader.namespaceBusinessKey(), MaxNamespaceBusinesses)
 	index := builder.index
 
 	if refreshed, err := reader.client.Get(ctx, reader.refreshedKey()).Result(); err == nil {

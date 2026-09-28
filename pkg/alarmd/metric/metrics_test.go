@@ -293,7 +293,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_unmapped_severity_total":                      "variableLabels: {level}",
 		"bkmonitor_alarmd_cmdb_host_index_hosts":                        "variableLabels: {}",
 		"bkmonitor_alarmd_cmdb_service_instance_index_instances":        "variableLabels: {}",
-		"bkmonitor_alarmd_cmdb_index_bcs_cluster_businesses":            "variableLabels: {state}",
+		"bkmonitor_alarmd_cmdb_index_business_mappings":                 "variableLabels: {mapping,state}",
 		"bkmonitor_alarmd_fleet_snapshot_bytes":                         "variableLabels: {}",
 		"bkmonitor_alarmd_fleet_view_snapshot_loads_total":              "variableLabels: {}",
 		"bkmonitor_alarmd_fleet_view_snapshot_bytes_total":              "variableLabels: {}",
@@ -805,7 +805,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("unmapped_severity_total"):               65,
 		fqName("cmdb_host_index_hosts"):                 1,
 		fqName("cmdb_service_instance_index_instances"): 1,
-		fqName("cmdb_index_bcs_cluster_businesses"):     len(CMDBClusterBusinessStates),
+		fqName("cmdb_index_business_mappings"):          len(CMDBBusinessMappings) * len(CMDBBusinessMappingStates),
 		fqName("fleet_snapshot_bytes"):                  1,
 		fqName("fleet_view_snapshot_loads_total"):       1,
 		fqName("fleet_view_snapshot_bytes_total"):       1,
@@ -1332,15 +1332,29 @@ func TestDiagnosticRedisFailuresAreCountedByReason(t *testing.T) {
 
 // The cluster mapping's three states exist from startup, so a zero held is
 // a count of clusters and not a series nobody registered.
-func TestTheClusterBusinessGaugeHasEveryStateFromStartup(t *testing.T) {
+func TestTheBusinessMappingGaugeHasEveryCellFromStartup(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
-	r.SetCMDBClusterBusinessIndex(3, 1, 0, true)
+	r.SetCMDBBusinessMapping("bcs_cluster", 3, 1, 0, true)
+	r.SetCMDBBusinessMapping("bcs_namespace", 5, 0, 2, false)
+	r.SetCMDBBusinessMapping("guessed", 9, 9, 9, true)
 	values := map[string]float64{}
-	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_cmdb_index_bcs_cluster_businesses") {
-		values[m.GetLabel()[0].GetValue()] = m.GetGauge().GetValue()
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_cmdb_index_business_mappings") {
+		labels := map[string]string{}
+		for _, label := range m.GetLabel() {
+			labels[label.GetName()] = label.GetValue()
+		}
+		values[labels["mapping"]+"/"+labels["state"]] = m.GetGauge().GetValue()
 	}
-	if len(values) != len(CMDBClusterBusinessStates) || values["held"] != 3 || values["refused"] != 1 ||
-		values["truncated"] != 0 || values["read_failed"] != 1 {
-		t.Fatalf("gauge = %v, want held 3, refused 1, truncated 0, read_failed 1", values)
+	want := map[string]float64{
+		"bcs_cluster/held": 3, "bcs_cluster/refused": 1, "bcs_cluster/truncated": 0, "bcs_cluster/read_failed": 1,
+		"bcs_namespace/held": 5, "bcs_namespace/refused": 0, "bcs_namespace/truncated": 2, "bcs_namespace/read_failed": 0,
+	}
+	if len(values) != len(want) {
+		t.Fatalf("gauge = %v, want exactly %v", values, want)
+	}
+	for cell, value := range want {
+		if values[cell] != value {
+			t.Fatalf("gauge = %v, want %v", values, want)
+		}
 	}
 }

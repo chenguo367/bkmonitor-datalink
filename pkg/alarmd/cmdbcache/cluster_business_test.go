@@ -36,9 +36,8 @@ func TestLoadReadsTheClusterBusinessMappingIntoTheSameSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	held, refused, truncated := index.ClusterBusinesses()
-	if held != 2 || refused != 4 || truncated != 0 {
-		t.Fatalf("held %d, refused %d, truncated %d; want 2 held and 4 refused", held, refused, truncated)
+	if stats := index.ClusterBusinessStats(); stats != (MappingStats{Held: 2, Refused: 4}) {
+		t.Fatalf("cluster mapping %+v, want 2 held and 4 refused", stats)
 	}
 	store := &Store{index: index, now: time.Now, maxAge: time.Hour, interval: time.Minute}
 	lookup := NewHostBusinessLookup(store)
@@ -52,7 +51,7 @@ func TestLoadReadsTheClusterBusinessMappingIntoTheSameSnapshot(t *testing.T) {
 			t.Fatalf("cluster %q resolved to %q", cluster, business)
 		}
 	}
-	if health := store.Health(); health.ClusterBusinesses != 2 || health.ClusterBusinessesRefused != 4 {
+	if health := store.Health(); health.ClusterBusinessMapping != (MappingStats{Held: 2, Refused: 4}) {
 		t.Fatalf("health = %+v", health)
 	}
 }
@@ -70,8 +69,8 @@ func TestAnAbsentClusterMappingMapsNoCluster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if held, refused, truncated := index.ClusterBusinesses(); held != 0 || refused != 0 || truncated != 0 {
-		t.Fatalf("held %d, refused %d, truncated %d", held, refused, truncated)
+	if stats := index.ClusterBusinessStats(); stats != (MappingStats{}) {
+		t.Fatalf("cluster mapping %+v, want nothing", stats)
 	}
 	store := &Store{index: index, now: func() time.Time { return at }, maxAge: time.Hour, interval: time.Minute}
 	if health := store.Health(); health.Degraded || health.Hosts != 1 {
@@ -91,12 +90,12 @@ func TestTheClusterMappingIsBounded(t *testing.T) {
 		fields = append(fields, "BCS-K8S-"+strconv.Itoa(cluster), "7")
 	}
 	index.clusterBusiness.add(fields, MaxClusterBusinesses)
-	if held, _, truncated := index.ClusterBusinesses(); held != MaxClusterBusinesses || truncated != 0 {
-		t.Fatalf("at the bound: held %d, truncated %d", held, truncated)
+	if stats := index.ClusterBusinessStats(); stats.Held != MaxClusterBusinesses || stats.Truncated != 0 {
+		t.Fatalf("at the bound: %+v", stats)
 	}
 	index.clusterBusiness.add([]string{"BCS-K8S-past", "7"}, MaxClusterBusinesses)
-	if held, _, truncated := index.ClusterBusinesses(); held != MaxClusterBusinesses || truncated != 1 {
-		t.Fatalf("one past the bound: held %d, truncated %d", held, truncated)
+	if stats := index.ClusterBusinessStats(); stats.Held != MaxClusterBusinesses || stats.Truncated != 1 {
+		t.Fatalf("one past the bound: %+v", stats)
 	}
 	if _, found := index.LookupClusterBusiness("BCS-K8S-past"); found {
 		t.Fatal("a cluster past the bound was held")
@@ -157,7 +156,7 @@ func TestAMappingThatCannotBeReadDoesNotHoldBackTheHosts(t *testing.T) {
 	if _, found := store.Current().Lookup("10.0.0.8|0"); !found {
 		t.Fatal("the host index of the refresh whose mapping could not be read was not taken")
 	}
-	if !health.ClusterBusinessesReadFailed || health.ClusterBusinesses != 1 {
+	if !health.ClusterBusinessMapping.ReadFailed || health.ClusterBusinessMapping.Held != 1 {
 		t.Fatalf("health = %+v, want the read failure visible and the held mapping carried", health)
 	}
 	lookup := NewHostBusinessLookup(store)
@@ -172,7 +171,7 @@ func TestAMappingThatCannotBeReadDoesNotHoldBackTheHosts(t *testing.T) {
 	if err := store.Refresh(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if health := store.Health(); health.ClusterBusinessesReadFailed {
+	if health := store.Health(); health.ClusterBusinessMapping.ReadFailed {
 		t.Fatalf("health = %+v, want the flag down once a read succeeds", health)
 	}
 }
@@ -190,7 +189,53 @@ func TestAFirstLoadWithAnUnreadableMappingMapsNoCluster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if held, _, _ := index.ClusterBusinesses(); held != 0 || !index.ClusterBusinessReadFailed() || index.Hosts() != 1 {
-		t.Fatalf("held %d, read failed %v, hosts %d", held, index.ClusterBusinessReadFailed(), index.Hosts())
+	if stats := index.ClusterBusinessStats(); stats.Held != 0 || !stats.ReadFailed || index.Hosts() != 1 {
+		t.Fatalf("cluster mapping %+v, hosts %d", stats, index.Hosts())
+	}
+}
+
+// The namespace mapping hangs off the platform prefix beside the cluster
+// mapping, keyed "cluster|namespace", read into the same snapshot with the
+// same rules, and bounded and isolated the same way: a namespace mapping
+// that cannot be read leaves the cluster mapping and the hosts as they are.
+func TestTheNamespaceMappingIsReadBesideTheClusterMapping(t *testing.T) {
+	const namespaceKey = "bk_monitorv3.ce.cache.cmdb.bcs_namespace_business"
+	at := time.Unix(1700000000, 0).UTC()
+	good := &hashClient{hashes: map[string][]string{
+		"bk_monitorv3.ce.cache.cmdb.host":                 {"10.0.0.7|0", disabledByAddressHost},
+		"bk_monitorv3.ce.cache.cmdb.bcs_cluster_business": {"BCS-K8S-00001", "11"},
+		namespaceKey: {"BCS-K8S-00001|prod", "21", "BCS-K8S-00001|dev", "0"},
+	}}
+	reader, _ := NewReader(good, "bk_monitorv3.ce")
+	store, err := NewStore(reader, StoreOptions{RefreshInterval: time.Minute, MaxAge: time.Hour, Now: func() time.Time { return at }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lookup := NewHostBusinessLookup(store)
+	if business, found := lookup.LookupNamespaceBusiness("BCS-K8S-00001", "prod"); !found || business != "21" {
+		t.Fatalf("namespace prod = %q, %v; want 21", business, found)
+	}
+	for _, pair := range [][2]string{{"BCS-K8S-00001", "dev"}, {"BCS-K8S-00001", "ops"}, {"BCS-K8S-00001", ""}, {"", "prod"}} {
+		if business, found := lookup.LookupNamespaceBusiness(pair[0], pair[1]); found {
+			t.Fatalf("namespace %v resolved to %q", pair, business)
+		}
+	}
+	if health := store.Health(); health.NamespaceBusinessMapping != (MappingStats{Held: 1, Refused: 1}) {
+		t.Fatalf("namespace mapping %+v, want 1 held and 1 refused", health.NamespaceBusinessMapping)
+	}
+
+	reader.client = &failingHashClient{hashClient: good, fail: map[string]error{namespaceKey: errors.New("i/o timeout")}}
+	if err := store.Refresh(context.Background()); err != nil {
+		t.Fatalf("a namespace mapping that cannot be read failed the refresh: %v", err)
+	}
+	health := store.Health()
+	if !health.NamespaceBusinessMapping.ReadFailed || health.NamespaceBusinessMapping.Held != 1 || health.ClusterBusinessMapping.ReadFailed {
+		t.Fatalf("health = %+v, want the namespace read failure visible and carried, the cluster mapping read", health)
+	}
+	if business, found := lookup.LookupNamespaceBusiness("BCS-K8S-00001", "prod"); !found || business != "21" {
+		t.Fatalf("carried namespace prod = %q, %v", business, found)
 	}
 }

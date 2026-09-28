@@ -137,20 +137,15 @@ type Health struct {
 	DegradedReason    string
 	ConsecutiveErrors uint64
 	Refreshes         uint64
-	// ClusterBusinesses, ClusterBusinessesRefused and
-	// ClusterBusinessesTruncated describe the BCS cluster -> business
-	// mapping the held index read: clusters held, and fields left out as not
-	// a positive business or past the bound. Zero held is not a degradation
-	// of the store - a writer that does not publish the mapping yet is a real
-	// state - but every global business event that would have used one is
-	// then counted as unmapped.
-	ClusterBusinesses          int
-	ClusterBusinessesRefused   int
-	ClusterBusinessesTruncated int
-	// ClusterBusinessesReadFailed says the latest load could not read the
-	// mapping; the counts above are then the last load that could. It is
-	// not a store failure: the hosts refreshed.
-	ClusterBusinessesReadFailed bool
+	// ClusterBusinessMapping and NamespaceBusinessMapping describe the BCS
+	// cluster and cluster + namespace -> business mappings the held index
+	// read. Zero held is not a degradation of the store - a writer that does
+	// not publish a mapping yet is a real state - but every global business
+	// event that would have used one is then counted as unmapped. A read
+	// failure is not a store failure either: the hosts refreshed, and the
+	// held entries are the last read that succeeded.
+	ClusterBusinessMapping   MappingStats
+	NamespaceBusinessMapping MappingStats
 }
 
 func (store *Store) Health() Health {
@@ -169,8 +164,8 @@ func (store *Store) Health() Health {
 	health.Loaded = true
 	health.Hosts = store.index.Hosts()
 	health.ServiceInstances = store.index.ServiceInstances()
-	health.ClusterBusinesses, health.ClusterBusinessesRefused, health.ClusterBusinessesTruncated = store.index.ClusterBusinesses()
-	health.ClusterBusinessesReadFailed = store.index.ClusterBusinessReadFailed()
+	health.ClusterBusinessMapping = store.index.ClusterBusinessStats()
+	health.NamespaceBusinessMapping = store.index.NamespaceBusinessStats()
 	health.Age = now.Sub(store.index.BuiltAt())
 	if source := store.index.SourceRefreshedAt(); !source.IsZero() {
 		health.SourceAge = now.Sub(source)

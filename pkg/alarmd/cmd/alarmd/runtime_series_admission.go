@@ -170,8 +170,11 @@ func publishCMDBIndexHealth(recorder *metric.Recorder, store *cmdbcache.Store) {
 		health.Hosts, health.Age.Seconds(), health.SourceAge.Seconds(), health.Degraded, health.DegradedReason,
 	)
 	recorder.SetCMDBServiceInstanceIndex(health.ServiceInstances)
-	recorder.SetCMDBClusterBusinessIndex(health.ClusterBusinesses, health.ClusterBusinessesRefused,
-		health.ClusterBusinessesTruncated, health.ClusterBusinessesReadFailed)
+	for mapping, stats := range map[string]cmdbcache.MappingStats{
+		"bcs_cluster": health.ClusterBusinessMapping, "bcs_namespace": health.NamespaceBusinessMapping,
+	} {
+		recorder.SetCMDBBusinessMapping(mapping, stats.Held, stats.Refused, stats.Truncated, stats.ReadFailed)
+	}
 }
 
 // seriesAdmissionFilters is the access-path filter chain, in Python's order:

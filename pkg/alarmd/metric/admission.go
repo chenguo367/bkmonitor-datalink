@@ -103,24 +103,30 @@ func (r *Recorder) SetCMDBServiceInstanceIndex(instances int) {
 	r.phaseTwo.cmdbIndexServiceInstances.Set(float64(instances))
 }
 
-// CMDBClusterBusinessStates are the states of the cluster mapping's gauge.
-var CMDBClusterBusinessStates = []string{"held", "refused", "truncated", "read_failed"}
+// CMDBBusinessMappings are the published business mappings the CMDB index
+// reads, and CMDBBusinessMappingStates the states of their gauge.
+var (
+	CMDBBusinessMappings      = []string{"bcs_cluster", "bcs_namespace"}
+	CMDBBusinessMappingStates = []string{"held", "refused", "truncated", "read_failed"}
+)
 
-// SetCMDBClusterBusinessIndex publishes the BCS cluster -> business mapping
-// the index holds, what its load left out, and whether the latest load could
-// not read it at all (1) - the held counts are then the last good read's.
-func (r *Recorder) SetCMDBClusterBusinessIndex(held, refused, truncated int, readFailed bool) {
-	if r == nil || r.phaseTwo.cmdbIndexClusterBusinesses == nil {
+// SetCMDBBusinessMapping publishes one business mapping the index holds,
+// what its load left out, and whether the latest load could not read it at
+// all (1) - the held counts are then the last good read's. A mapping outside
+// CMDBBusinessMappings is dropped rather than creating a series.
+func (r *Recorder) SetCMDBBusinessMapping(mapping string, held, refused, truncated int, readFailed bool) {
+	if r == nil || r.phaseTwo.cmdbIndexBusinessMappings == nil || !knownLabel(CMDBBusinessMappings, mapping) {
 		return
 	}
-	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("held").Set(float64(held))
-	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("refused").Set(float64(refused))
-	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("truncated").Set(float64(truncated))
+	gauge := r.phaseTwo.cmdbIndexBusinessMappings
+	gauge.WithLabelValues(mapping, "held").Set(float64(held))
+	gauge.WithLabelValues(mapping, "refused").Set(float64(refused))
+	gauge.WithLabelValues(mapping, "truncated").Set(float64(truncated))
 	failed := 0.0
 	if readFailed {
 		failed = 1
 	}
-	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("read_failed").Set(failed)
+	gauge.WithLabelValues(mapping, "read_failed").Set(failed)
 }
 
 // SnapshotPublished records the size of the fleet snapshot this replica just

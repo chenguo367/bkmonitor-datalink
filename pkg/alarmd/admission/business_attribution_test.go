@@ -309,3 +309,66 @@ func TestAKubernetesTargetIsTakenBeforeTheClusterMapping(t *testing.T) {
 		t.Fatalf("AttributeBusiness() = %+v, want the mapped cluster's 12", got)
 	}
 }
+
+// namespaceMapping is the published BCS cluster + namespace -> business
+// mapping, keyed "cluster|namespace".
+type namespaceMapping map[string]string
+
+func (mapping namespaceMapping) LookupNamespaceBusiness(cluster, namespace string) (string, bool) {
+	business, found := mapping[cluster+"|"+namespace]
+	return business, found
+}
+
+// A namespace's business comes before its cluster's, as the alert pipeline
+// orders them, when the strategy groups by both; a namespace the mapping
+// does not hold falls back to its cluster, and a cluster neither mapping
+// holds is unmapped.
+func TestANamespaceIsAttributedBeforeItsCluster(t *testing.T) {
+	lookups := BusinessLookups{
+		Clusters:   clusterMapping{"BCS-K8S-00001": "11"},
+		Namespaces: namespaceMapping{"BCS-K8S-00001|prod": "21", "BCS-K8S-00001|zero": "0"},
+	}
+	byNamespace := []string{"bcs_cluster_id", "namespace"}
+	for name, test := range map[string]struct {
+		dimensions []string
+		record     map[string]any
+		want       BusinessAttribution
+	}{
+		"a mapped namespace": {
+			dimensions: byNamespace, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00001", "namespace": "prod"},
+			want: BusinessAttribution{BusinessID: "21", Source: contract.BusinessAttributionNamespace},
+		},
+		"a namespace the mapping does not hold falls back to its cluster": {
+			dimensions: byNamespace, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00001", "namespace": "dev"},
+			want: BusinessAttribution{BusinessID: "11", Source: contract.BusinessAttributionCluster},
+		},
+		"a namespace published under no positive business falls back to its cluster": {
+			dimensions: byNamespace, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00001", "namespace": "zero"},
+			want: BusinessAttribution{BusinessID: "11", Source: contract.BusinessAttributionCluster},
+		},
+		"neither mapping holds it": {
+			dimensions: byNamespace, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00009", "namespace": "prod"},
+			want: BusinessAttribution{BusinessID: planBusiness, Source: contract.BusinessAttributionUnmapped},
+		},
+		"not grouped by namespace: the cluster alone": {
+			dimensions: []string{"bcs_cluster_id"}, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00001", "namespace": "prod"},
+			want: BusinessAttribution{BusinessID: "11", Source: contract.BusinessAttributionCluster},
+		},
+		"grouped by namespace, the record names none: the cluster": {
+			dimensions: byNamespace, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00001"},
+			want: BusinessAttribution{BusinessID: "11", Source: contract.BusinessAttributionCluster},
+		},
+		"the business dimension first": {
+			dimensions: []string{"bcs_cluster_id", "namespace", "bk_biz_id"},
+			record:     map[string]any{"bcs_cluster_id": "BCS-K8S-00001", "namespace": "prod", "bk_biz_id": "31"},
+			want:       BusinessAttribution{BusinessID: "31", Source: contract.BusinessAttributionDimension},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := AttributeBusiness(nil, test.dimensions, planBusiness, attributionDimensions(test.record), lookups)
+			if got != test.want {
+				t.Fatalf("AttributeBusiness() = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+}

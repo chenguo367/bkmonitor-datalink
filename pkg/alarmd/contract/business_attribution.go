@@ -9,7 +9,8 @@ package contract
 // they are consulted: the target the record is in (the host's business, or
 // the business configured on the matched Kubernetes static target), then the
 // record's bk_biz_id aggregation dimension, then the business the platform
-// published for the record's bcs_cluster_id, then the Plan's own business -
+// published for the record's namespace of its cluster, then the one it
+// published for the cluster itself, then the Plan's own business -
 // a strategy that neither targets nor groups by business or cluster
 // aggregates across businesses, and its alert belongs to the global
 // business itself.
@@ -23,6 +24,7 @@ package contract
 const (
 	BusinessAttributionTarget    = "target"
 	BusinessAttributionDimension = "dimension"
+	BusinessAttributionNamespace = "namespace"
 	BusinessAttributionCluster   = "cluster"
 	BusinessAttributionUnmapped  = "unmapped"
 	BusinessAttributionGlobal    = "global"
@@ -30,8 +32,8 @@ const (
 
 // BusinessAttributionSources lists the sources in consultation order.
 var BusinessAttributionSources = []string{
-	BusinessAttributionTarget, BusinessAttributionDimension, BusinessAttributionCluster,
-	BusinessAttributionUnmapped, BusinessAttributionGlobal,
+	BusinessAttributionTarget, BusinessAttributionDimension, BusinessAttributionNamespace,
+	BusinessAttributionCluster, BusinessAttributionUnmapped, BusinessAttributionGlobal,
 }
 
 // BusinessDimension is the aggregation dimension a record names its
@@ -42,3 +44,8 @@ const BusinessDimension = "bk_biz_id"
 // ClusterDimension is the aggregation dimension Kubernetes data names its
 // BCS cluster under, the key of the published cluster -> business mapping.
 const ClusterDimension = "bcs_cluster_id"
+
+// NamespaceDimension is the aggregation dimension Kubernetes data names its
+// namespace under; with ClusterDimension it keys the published namespace
+// mapping.
+const NamespaceDimension = "namespace"

@@ -24,12 +24,19 @@ type ClusterBusinessReader interface {
 	LookupClusterBusiness(clusterID string) (string, bool)
 }
 
+// NamespaceBusinessReader is the platform's published BCS cluster +
+// namespace -> business mapping, asked by the pair.
+type NamespaceBusinessReader interface {
+	LookupNamespaceBusiness(clusterID, namespace string) (string, bool)
+}
+
 // BusinessLookups are the caches attribution reads, each at the moment it
-// is asked. Either may be nil: a nil host cache holds no host, and a nil
-// cluster mapping maps no cluster.
+// is asked. Any may be nil: a nil host cache holds no host, and a nil
+// mapping maps nothing.
 type BusinessLookups struct {
-	Hosts    HostBusinessReader
-	Clusters ClusterBusinessReader
+	Hosts      HostBusinessReader
+	Clusters   ClusterBusinessReader
+	Namespaces NamespaceBusinessReader
 }
 
 // BusinessAttribution is what a global business Plan's event is filed
@@ -53,9 +60,13 @@ type BusinessAttribution struct {
 //  2. The bk_biz_id aggregation dimension, when the strategy groups by it
 //     and the record carries a business there.
 //  3. The record's bcs_cluster_id, when the strategy groups by it: the
-//     business the platform published for that cluster. A cluster the
-//     mapping does not hold is filed under the global business and counted
-//     as unmapped, apart from a record that named no cluster at all.
+//     business the platform published for the record's namespace of that
+//     cluster when the strategy groups by namespace too, and otherwise, or
+//     when the namespace mapping does not hold the pair, the business it
+//     published for the cluster. This is the alert pipeline's own order: a
+//     namespace's business first, then its cluster's. A cluster neither
+//     mapping holds is filed under the global business and counted as
+//     unmapped, apart from a record that named no cluster at all.
 //  4. The Plan's own business: a strategy that neither targets nor groups by
 //     business or cluster aggregates across businesses, and its alert is the
 //     global business's own.
@@ -76,6 +87,13 @@ func AttributeBusiness(
 	}
 	if groupsBy(dimensionFields, contract.ClusterDimension) {
 		if cluster := dimensionText(dimensions, contract.ClusterDimension); cluster != "" {
+			if groupsBy(dimensionFields, contract.NamespaceDimension) {
+				if namespace := dimensionText(dimensions, contract.NamespaceDimension); namespace != "" {
+					if business, found := namespaceBusiness(lookups.Namespaces, cluster, namespace); found {
+						return BusinessAttribution{BusinessID: business, Source: contract.BusinessAttributionNamespace}
+					}
+				}
+			}
 			if business, found := clusterBusiness(lookups.Clusters, cluster); found {
 				return BusinessAttribution{BusinessID: business, Source: contract.BusinessAttributionCluster}
 			}
@@ -121,6 +139,17 @@ func targetBusiness(target *contract.TargetPlanV1, dimensions map[string]json.Ra
 		return "", false
 	}
 	return target.StaticBusiness(key)
+}
+
+func namespaceBusiness(namespaces NamespaceBusinessReader, cluster, namespace string) (string, bool) {
+	if namespaces == nil {
+		return "", false
+	}
+	business, found := namespaces.LookupNamespaceBusiness(cluster, namespace)
+	if !found {
+		return "", false
+	}
+	return canonicalBusiness(business)
 }
 
 func groupsBy(dimensionFields []string, dimension string) bool {

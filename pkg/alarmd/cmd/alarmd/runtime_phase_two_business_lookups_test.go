@@ -18,7 +18,7 @@ import (
 func TestBusinessAttributionReadsHostsAndClustersFromTheOneIndexLookup(t *testing.T) {
 	index := cmdbcache.NewHostBusinessLookup(nil)
 	lookups := businessAttributionLookups(index)
-	if lookups.Hosts != index || lookups.Clusters != index {
-		t.Fatalf("lookups = %+v, want the index lookup for both hosts and clusters", lookups)
+	if lookups.Hosts != index || lookups.Clusters != index || lookups.Namespaces != index {
+		t.Fatalf("lookups = %+v, want the index lookup for hosts, clusters and namespaces", lookups)
 	}
 }

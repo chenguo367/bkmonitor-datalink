@@ -1715,9 +1715,9 @@ func gateLookupFacts(lookups []openalerts.GateLookup) []fleet.GateLookupFact {
 }
 
 // businessAttributionLookups is what a global business Plan's events are
-// attributed through: the host business and the published cluster mapping,
-// both answered from the one CMDB index lookup, so a host and a cluster are
-// never attributed from two snapshots.
+// attributed through: the host business and the published cluster and
+// namespace mappings, all answered from the one CMDB index lookup, so a host,
+// a cluster and a namespace are never attributed from two snapshots.
 func businessAttributionLookups(index *cmdbcache.HostBusinessLookup) admission.BusinessLookups {
-	return admission.BusinessLookups{Hosts: index, Clusters: index}
+	return admission.BusinessLookups{Hosts: index, Clusters: index, Namespaces: index}
 }
