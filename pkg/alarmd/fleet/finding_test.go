@@ -10,12 +10,14 @@
 package fleet
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // One reason code, several lines, several owners -- decided on the counts.
@@ -552,5 +554,54 @@ func TestACodeTheCatalogFilesAsSourceIncompleteLandsThereAtRunTime(t *testing.T)
 	}
 	if matched == 0 {
 		t.Fatal("no code of the table is one the catalog files as SOURCE_INCOMPLETE")
+	}
+}
+
+// A terminal Slot is filed under the deterministic reason its progress record
+// keeps, since it names no cause of its own; a Slot finalized
+// SNAPSHOT_UNAVAILABLE reads as the snapshot that was not there, a Plan past
+// its budget as the Plan, and a terminal with no reason at all stays the
+// unclassified defect it is. Any other completion keeps its cause's reason
+// and never borrows the observation's.
+func TestATerminalSlotIsFiledUnderItsOwnReason(t *testing.T) {
+	at := time.Date(2026, 9, 28, 6, 7, 35, 0, time.UTC)
+	complete := func(tracker *Tracker, queryGroup, kind, cause, causeReason, reason string) Anomaly {
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentProgress, Stage: observability.StageProgressCommitted,
+			Result: observability.ResultTerminal, ReasonCode: observability.ReasonCode(reason),
+			ProgressCompletionKind: kind, ProgressCompletionCause: cause, ProgressCompletionReason: causeReason,
+			Trace: observability.TraceFields{QueryGroupKey: queryGroup, StrategyID: "2513", BusinessID: "10", EvaluationTime: 1790424000},
+		})
+		for _, row := range tracker.Anomalies() {
+			if row.QueryGroup == queryGroup {
+				return row
+			}
+		}
+		return Anomaly{}
+	}
+	tracker := NewTracker(nil, "pod-a", func() time.Time { return at })
+	for queryGroup, want := range map[string]Check{"qg-snapshot": CheckDependencyDown, "qg-budget": CheckPlanUnevaluable} {
+		reason := map[string]string{"qg-snapshot": "SNAPSHOT_UNAVAILABLE", "qg-budget": "PLAN_BUDGET_EXCEEDED"}[queryGroup]
+		row := complete(tracker, queryGroup, "COMPLETED_WITH_TERMINAL", "", "", reason)
+		if row.CauseReason != reason {
+			t.Fatalf("%s: cause reason = %q, want the terminal's own %q", queryGroup, row.CauseReason, reason)
+		}
+		if check, decided := codeVerdict(row); !decided || check != want {
+			t.Fatalf("%s: check = %q (decided %v), want %q", queryGroup, check, decided, want)
+		}
+	}
+	row := complete(tracker, "qg-bare", "COMPLETED_WITH_TERMINAL", "", "", string(observability.ReasonNone))
+	if _, decided := codeVerdict(row); decided || row.CauseReason != "" {
+		t.Fatalf("a terminal with no reason = %+v, want it left unclassified", row)
+	}
+	for _, degraded := range []struct{ causeReason, want string }{{"QUERY_TIMEOUT", "QUERY_TIMEOUT"}, {"", ""}} {
+		tracker := NewTracker(nil, "pod-a", func() time.Time { return at })
+		var row Anomaly
+		for round := 0; round < DefaultDegradedRounds; round++ {
+			row = complete(tracker, "qg-degraded", "COMPLETED_WITH_UNAVAILABLE", "PRIMARY_INPUT_UNAVAILABLE", degraded.causeReason, "SNAPSHOT_UNAVAILABLE")
+		}
+		if row.QueryGroup == "" || row.CauseReason != degraded.want {
+			t.Fatalf("a degraded Slot = %+v, want its cause's reason %q and never the observation's", row, degraded.want)
+		}
 	}
 }

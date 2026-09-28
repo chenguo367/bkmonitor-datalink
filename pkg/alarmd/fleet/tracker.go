@@ -1295,6 +1295,17 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// read against: a healthy round is exactly the one a later hole at
 		// its minute has to be matched to.
 		roundReason := roundFiledUnder(observation.ProgressCompletionCause, observation.ProgressCompletionReason)
+		// A terminal Slot names no cause -- the derivation reports none for
+		// TERMINAL -- and its own reason, the deterministic one the progress
+		// record keeps, travels as this observation's reason code. Filed
+		// under nothing, every terminal Slot read as an unclassified defect
+		// of this deployment: a Slot finalized SNAPSHOT_UNAVAILABLE after a
+		// backlog said "program defect" for the whole of its object's period.
+		if roundReason == "" && terminalCompletion(completion) {
+			if reason := string(observation.ReasonCode); reason != "" && reason != string(observability.ReasonNone) {
+				roundReason = reason
+			}
+		}
 		rememberRound(state, trace.EvaluationTime, completion, roundReason,
 			observation.HistoryCoverage, observation.PrimaryInput)
 		// A round completed in this process speaks for the object; the
