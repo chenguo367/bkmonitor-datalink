@@ -393,3 +393,33 @@ func TestADuePlanIsHeldOnlyWhenItsGroupDidNothingButProbes(t *testing.T) {
 		}
 	}
 }
+
+// The four conditions are read over the whole window, both buckets: a round
+// committed in the earlier bucket, before a cooldown held the later one,
+// leaves the due Plans unseen. And a miss in a group never held carries that
+// group's counts, as a miss in a held one does.
+func TestAHeldProbeIsReadOverTheWholeWindowAndAMissCarriesItsGroupsCounts(t *testing.T) {
+	pair := CostGroup{QueryGroupKey: "pair", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", Members: []CostPlanIdentity{costA, costB},
+		Schedules: []CostSchedule{{Plan: costA, IntervalSeconds: 60, CompletionOffsetSeconds: 60}, {Plan: costB, IntervalSeconds: 60, CompletionOffsetSeconds: 60}}}
+	trace := TraceFields{QueryGroupKey: "pair", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", EvaluationTime: 1320}
+	c, now := costDueFixture(t, pair)
+	*now = time.Unix(1000, 0)
+	committed(c, "pair")
+	*now = time.Unix(1440, 0)
+	c.Observe(context.Background(), Observation{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal,
+		RunOutcome: "query_cooldown", Trace: TraceFields{QueryGroupKey: "pair"}})
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.HeldDuePlans != 0 || coverage.UnobservedDuePlans != 2 || !coverage.Incomplete {
+		t.Fatalf("a round committed in the earlier bucket, held in the later = held %d unseen %d, want both Plans unseen", coverage.HeldDuePlans, coverage.UnobservedDuePlans)
+	}
+
+	c, now = costDueFixture(t, pair)
+	c.Observe(context.Background(), Observation{Stage: StageSlotStarted, Result: ResultStarted, Trace: trace})
+	c.Observe(context.Background(), Observation{Stage: StageSlotCompleted, Result: ResultSuccess, Duration: time.Millisecond, DurationKnown: true, Trace: trace})
+	c.Publish(*now)
+	sample := c.Snapshot().Coverage.UnobservedDueSample
+	want := CostDueMiss{Scope: "strategy_owned", QueryGroupKey: "pair", Plan: costA, Observations: 2, Attempts: 1, RunReturns: 1}
+	if len(sample) != 2 || sample[0] != want {
+		t.Fatalf("a never-held group's round that evaluated nothing = %+v, want its Plans named with the group's counts %+v", sample, want)
+	}
+}
