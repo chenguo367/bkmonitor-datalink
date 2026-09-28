@@ -26,14 +26,14 @@ func (evaluator *Evaluator) PreparePlan(plan *strategy.CompiledPlan) (PreparedPl
 		return PreparedPlan{}, errors.New("alarmd detect: prepared plan is not SERIES")
 	}
 	levels := plan.Levels()
-	for i := range levels {
-		if i > 0 && levels[i-1].Definition().LevelID >= levels[i].Definition().LevelID {
+	for i := range levels.All() {
+		if i > 0 && levels.At(i-1).Definition().LevelID >= levels.At(i).Definition().LevelID {
 			return PreparedPlan{}, fmt.Errorf("alarmd detect: compiled levels are not ordered and unique")
 		}
 	}
-	bound := boundPlan{execution: PlanExecution{Plan: plan}, levels: make([]boundLevel, len(levels))}
+	bound := boundPlan{execution: PlanExecution{Plan: plan}, levels: make([]boundLevel, levels.Len())}
 	projectionKeys := make(map[projectionKey]struct{})
-	for levelIndex, level := range levels {
+	for levelIndex, level := range levels.All() {
 		bound.levels[levelIndex] = boundLevel{
 			compiled: level, detectors: make([]boundDetector, len(level.Detectors())),
 			algorithms: make([]boundAlgorithm, len(level.Algorithms())),

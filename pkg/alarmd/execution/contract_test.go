@@ -636,7 +636,7 @@ func TestEvaluationAllowsFullInactiveStateAdvance(t *testing.T) {
 	))
 	facts, err := provider.Resolve(context.Background(), []strategy.EffectiveTimeRequest{{
 		TenantID: "tenant", BusinessID: "2", EvaluationTime: int64(input.Contract.Slot.EvaluationTime),
-		Requirement: compiled.Levels()[0].EffectiveTimeRequirement(),
+		Requirement: compiled.Levels().At(0).EffectiveTimeRequirement(),
 	}})
 	if err != nil || len(facts) != 1 || facts[0].Status() != strategy.EffectiveTimeInactive {
 		t.Fatalf("inactive EffectiveTime fact = %+v, %v", facts, err)
@@ -947,7 +947,7 @@ func loadedSeriesWarmingInactiveCompletion(
 	))
 	facts, err := provider.Resolve(context.Background(), []strategy.EffectiveTimeRequest{{
 		TenantID: "tenant", BusinessID: "2", EvaluationTime: int64(input.Contract.Slot.EvaluationTime),
-		Requirement: compiled.Levels()[0].EffectiveTimeRequirement(),
+		Requirement: compiled.Levels().At(0).EffectiveTimeRequirement(),
 	}})
 	if err != nil || len(facts) != 1 || facts[0].Status() != strategy.EffectiveTimeInactive {
 		t.Fatalf("inactive EffectiveTime fact = %+v, %v", facts, err)
@@ -1544,7 +1544,7 @@ func evaluationRequest(
 	binding := input.Inputs[0]
 	consumer := binding.Consumer
 	if !consumer.HasLevel {
-		consumer = execution.ConsumerRef{Plan: consumer.Plan, LevelID: input.DuePlans[0].CompiledPlan.Levels()[0].Definition().LevelID, HasLevel: true}
+		consumer = execution.ConsumerRef{Plan: consumer.Plan, LevelID: input.DuePlans[0].CompiledPlan.Levels().At(0).Definition().LevelID, HasLevel: true}
 		binding.Consumer = consumer
 	}
 	series := execution.SeriesIdentityDigest(strings.Repeat("c", 64))
@@ -1831,7 +1831,7 @@ func baseDuePlanAndRequirements() ([]execution.DuePlan, []execution.DataRequirem
 }
 
 func effectiveTimeFactForTest(plan *strategy.CompiledPlan) strategy.EffectiveTimeFact {
-	level := plan.Levels()[0]
+	level := plan.Levels().At(0)
 	provider := strategy.NewStaticScheduleProvider(nil)
 	facts, err := provider.Resolve(context.Background(), []strategy.EffectiveTimeRequest{{
 		TenantID: "tenant", BusinessID: "2", EvaluationTime: int64(frozenContract().Slot.EvaluationTime),
@@ -1915,7 +1915,7 @@ func compiledPlanWith(t testing.TB, triggerConfig json.RawMessage, threshold str
 	if !ok {
 		panic("test plan did not compile")
 	}
-	if len(compiled.Levels()) == 0 {
+	if compiled.Levels().Len() == 0 {
 		panic(fmt.Sprintf("test plan has no compiled Levels: %+v", result.LevelTerminals()))
 	}
 	return compiled

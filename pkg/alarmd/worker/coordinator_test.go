@@ -2184,7 +2184,7 @@ func baseDuePlanAndRequirements() ([]execution.DuePlan, []execution.DataRequirem
 }
 
 func effectiveTimeFactForTest(plan *strategy.CompiledPlan) strategy.EffectiveTimeFact {
-	level := plan.Levels()[0]
+	level := plan.Levels().At(0)
 	provider := strategy.NewStaticScheduleProvider(nil)
 	facts, err := provider.Resolve(context.Background(), []strategy.EffectiveTimeRequest{{
 		TenantID: "tenant", BusinessID: "2", EvaluationTime: int64(frozenContract().Slot.EvaluationTime),

@@ -77,7 +77,7 @@ func expectedLevelOutcomeIdentities(input InternalExecution, plan DuePlan) (map[
 			continue
 		}
 		add := func(series SeriesIdentityDigest, anchor RecordAnchor) {
-			for _, level := range plan.CompiledPlan.Levels() {
+			for _, level := range plan.CompiledPlan.Levels().All() {
 				if binding.Consumer.HasLevel && binding.Consumer.LevelID != level.Definition().LevelID {
 					continue
 				}
@@ -628,7 +628,7 @@ func stateRetentionPoints(plan DuePlan) uint32 {
 	if plan.CompiledPlan == nil {
 		return 0
 	}
-	for _, level := range plan.CompiledPlan.Levels() {
+	for _, level := range plan.CompiledPlan.Levels().All() {
 		if points := level.StateRequirement().RetentionPoints; points > retention {
 			retention = points
 		}

@@ -81,7 +81,7 @@ func planCheckOf(identity execution.PlanIdentity, plan *strategy.CompiledPlan, v
 	if plan == nil {
 		return check
 	}
-	for _, level := range plan.Levels() {
+	for _, level := range plan.Levels().All() {
 		compiled := levelCheck{levelID: level.Definition().LevelID, and: level.Connector() == contract.LevelConnectorAND}
 		for _, detector := range level.Detectors() {
 			normalizer, found := plan.Normalizer(detector.NormalizerRef())

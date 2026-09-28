@@ -86,7 +86,7 @@ func TestANoDataRoundProducesASeriesTheEvaluationCanRead(t *testing.T) {
 	// would give every no-data alert a deduplication key that no group on the
 	// other side shares.
 	const noDataConfiguredLevel = uint32(2)
-	if levels := entry.due.CompiledPlan.Levels(); len(levels) != 1 ||
+	if levels := entry.due.CompiledPlan.Levels().Copy(); len(levels) != 1 ||
 		levels[0].Definition().LevelID != noDataConfiguredLevel {
 		t.Fatalf("the series carries levels %+v, want only the configured no-data level %d", levels, noDataConfiguredLevel)
 	}

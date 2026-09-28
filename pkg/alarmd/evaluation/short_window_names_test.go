@@ -28,7 +28,7 @@ import (
 // named holes and the shortfall agree.
 func TestEvaluationNamesTheShortWindowAndItsEmptyPositions(t *testing.T) {
 	plan := compiledWindow(t, 3, 3)
-	fingerprint := plan.Levels()[0].Fingerprints().Detect
+	fingerprint := plan.Levels().At(0).Fingerprints().Detect
 	stored := []execution.StateHistoryPoint{{RecordID: strings.Repeat("d", 64), SourceTime: 180,
 		Levels: []execution.StateLevelFact{{LevelID: 5, DetectFingerprint: fingerprint, Result: execution.LevelFactNormal}}}}
 	record := []contract.CanonicalRecordV2{{RecordID: strings.Repeat("f", 64), SourceTime: 300, BusinessID: "2",

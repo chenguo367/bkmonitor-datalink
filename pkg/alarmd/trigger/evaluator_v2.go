@@ -26,11 +26,11 @@ func EvaluateV2(request EvaluationRequestV2) (EvaluationResultV2, error) {
 		return EvaluationResultV2{}, err
 	}
 	result := EvaluationResultV2{
-		LevelOutcomes: make([]LevelOutcomeV2, 0, len(levels)),
-		Counts:        EvaluationCountsV2{Levels: uint64(len(levels))},
+		LevelOutcomes: make([]LevelOutcomeV2, 0, levels.Len()),
+		Counts:        EvaluationCountsV2{Levels: uint64(levels.Len())},
 	}
-	levelResults := make([]contract.LevelResultV1, 0, len(levels))
-	for index, level := range levels {
+	levelResults := make([]contract.LevelResultV1, 0, levels.Len())
+	for index, level := range levels.All() {
 		eligibility, err := EvaluateStateEligibilityV2(
 			request.EvaluationTime, level, request.Record.LevelFacts[index], request.EffectiveTimeFacts[index].Fact,
 		)
@@ -234,44 +234,44 @@ func EvaluateStateEligibilityV2(
 	return StateEligibilityV2{stateDisposition: effectiveDisposition}, nil
 }
 
-func validateRequestV2(request EvaluationRequestV2) ([]strategy.CompiledLevel, error) {
+func validateRequestV2(request EvaluationRequestV2) (strategy.LevelList, error) {
 	if request.Plan == nil || !request.Limits.valid() || request.TenantID == "" || request.BusinessID == "" ||
 		request.Record.RecordID == "" || request.Record.SourceTime < 0 || request.EvaluationTime < 0 || request.ExecutionID == "" ||
 		request.RecordRef.RecordID != request.Record.RecordID || request.RecordRef.SourceTime != request.Record.SourceTime ||
 		request.RecordRef.Dimensions == nil || request.Observed.Values == nil {
-		return nil, invariantV2("validate request", 0, errors.New("missing identity, value, time, or budget"))
+		return strategy.LevelList{}, invariantV2("validate request", 0, errors.New("missing identity, value, time, or budget"))
 	}
 	levels := request.Plan.Levels()
-	if len(levels) == 0 || uint32(len(levels)) > request.Limits.MaxLevels || uint32(len(levels)) > request.Limits.MaxLevelResultsPerEvent ||
-		len(request.Record.LevelFacts) != len(levels) || len(request.Histories) != len(levels) || len(request.EffectiveTimeFacts) != len(levels) {
-		return nil, invariantV2("align Level inputs", 0, errors.New("Level input cardinality mismatch"))
+	if levels.Len() == 0 || uint32(levels.Len()) > request.Limits.MaxLevels || uint32(levels.Len()) > request.Limits.MaxLevelResultsPerEvent ||
+		len(request.Record.LevelFacts) != levels.Len() || len(request.Histories) != levels.Len() || len(request.EffectiveTimeFacts) != levels.Len() {
+		return strategy.LevelList{}, invariantV2("align Level inputs", 0, errors.New("Level input cardinality mismatch"))
 	}
 	var computeCost uint64
-	for index, level := range levels {
+	for index, level := range levels.All() {
 		definition := level.Definition()
-		if definition.LevelID == 0 || (index > 0 && definition.LevelID <= levels[index-1].Definition().LevelID) ||
+		if definition.LevelID == 0 || (index > 0 && definition.LevelID <= levels.At(index-1).Definition().LevelID) ||
 			request.Record.LevelFacts[index].Definition.LevelID != definition.LevelID || request.Histories[index].LevelID != definition.LevelID ||
 			request.EffectiveTimeFacts[index].LevelID != definition.LevelID || request.Histories[index].View == nil {
-			return nil, invariantV2("align Level inputs", definition.LevelID, errors.New("Level inputs must be sorted, unique, and aligned"))
+			return strategy.LevelList{}, invariantV2("align Level inputs", definition.LevelID, errors.New("Level inputs must be sorted, unique, and aligned"))
 		}
 		triggerPlan, recoveryPlan := level.Trigger(), level.Recovery()
 		required, ok := requiredHistoryPointsV2(triggerPlan, recoveryPlan)
 		if !ok || triggerPlan.WindowSize > request.Limits.MaxTriggerWindowSize ||
 			recoveryPlan.ConsecutiveWindows > request.Limits.MaxRecoveryConsecutiveWindows ||
 			required > request.Limits.MaxRequiredHistoryPoints || required != level.RequiredDetectHistoryPoints() {
-			return nil, invariantV2("admit Level plan", definition.LevelID, errors.New("compiled window exceeds admitted shape"))
+			return strategy.LevelList{}, invariantV2("admit Level plan", definition.LevelID, errors.New("compiled window exceeds admitted shape"))
 		}
 		levelCost := uint64(1)
 		if recoveryPlan.Enabled {
 			levelCost += uint64(recoveryPlan.ConsecutiveWindows)
 		}
 		if math.MaxUint64-computeCost < levelCost {
-			return nil, invariantV2("admit compute", definition.LevelID, errors.New("compute cost overflow"))
+			return strategy.LevelList{}, invariantV2("admit compute", definition.LevelID, errors.New("compute cost overflow"))
 		}
 		computeCost += levelCost
 	}
 	if computeCost > request.Limits.MaxComputeCost {
-		return nil, invariantV2("admit compute", 0, errors.New("compute cost exceeds admitted limit"))
+		return strategy.LevelList{}, invariantV2("admit compute", 0, errors.New("compute cost exceeds admitted limit"))
 	}
 	return levels, nil
 }
