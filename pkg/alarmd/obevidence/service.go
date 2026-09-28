@@ -78,6 +78,12 @@ type StoreRequest struct {
 	GroupID    string                   `json:"group_id,omitempty"`
 	QueryGroup string                   `json:"query_group,omitempty"`
 	Fields     []platformsettings.Field `json:"fields,omitempty"`
+	// ObjectDigest, Tenant and Business name a Plan's records by the
+	// published object that carries its state generation, as strategy.get
+	// shows them.
+	ObjectDigest string `json:"object_digest,omitempty"`
+	Tenant       string `json:"tenant,omitempty"`
+	Business     string `json:"business,omitempty"`
 }
 type ConfigRequest struct {
 	View         string `json:"view"`
@@ -251,6 +257,8 @@ func (service *Service) Store(ctx context.Context, request StoreRequest) Result 
 		return r
 	case FamilyQueryCooldown:
 		return service.queryCooldown(ctx, request)
+	case FamilyGapMarker, FamilyNoDataMemory:
+		return service.planRecords(ctx, request)
 	default:
 		return invalid(request.Family, RedisBinding{})
 	}
