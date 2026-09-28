@@ -91,7 +91,11 @@ const (
 	// Every short window of the object is short only by minutes the query
 	// answered whole without the series: the data was not there when it was
 	// asked for, and nothing on this side is on record as missing it. The
-	// data owner's, and not an item for this deployment to act on.
+	// data owner's, and not an item for this deployment to act on. A minute
+	// the series was outside the strategy's target reads the same way - the
+	// round answered whole and filtered the series out - so a series that
+	// left the target and came back reads sparse for those minutes although
+	// its data was there: the row is not proof that the host missed data.
 	CheckSeriesSparse Check = "SERIES_SPARSE"
 	// EmptyEveryRound is the strategy's half of no-data: an object this
 	// process has never seen return records and whose every round for an
