@@ -150,7 +150,23 @@ func compileEffectiveRules(raw json.RawMessage, tenant string) (*compiledEffecti
 		if _, exists := rules.calendars[calendar.ID]; exists {
 			return nil, errors.New(ReasonEffectiveTimeCalendarDuplicate)
 		}
-		if calendar.Status != "PRESENT" {
+		switch calendar.Status {
+		case "PRESENT":
+		case "DELETED":
+			// A calendar deleted after the strategy named it. The writer keeps
+			// the snapshot READY and marks the calendar deleted; Python reads a
+			// deleted calendar as its cache key lapsing, which it decodes as an
+			// empty list. So it is a calendar with nothing in it, never hit:
+			// named among the rest days it pauses nothing, and named as the
+			// only alert days the strategy is not effective - "configured and
+			// not hit", as Python has it. Its items are not read whatever they
+			// hold, since Python stops refreshing a deleted calendar.
+			//
+			// Refusing it refused the whole strategy for as long as the
+			// calendar stayed deleted, which is for ever.
+			rules.calendars[calendar.ID] = []compiledCalendarItem{}
+			continue
+		default:
 			return nil, errors.New(ReasonEffectiveTimeCalendarNotPresent)
 		}
 		if calendar.Items == nil {
