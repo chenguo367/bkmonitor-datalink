@@ -20,6 +20,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
 // DirectoryLimits is an observation allowance, never an execution limit.
@@ -102,11 +103,20 @@ type StrategyDirectoryRow struct {
 }
 
 type StrategyDirectorySnapshot struct {
-	Limits             DirectoryLimits        `json:"resource_limits"`
-	ObservedAt         time.Time              `json:"observed_at"`
-	Revision           string                 `json:"revision"`
-	Complete           bool                   `json:"complete"`
-	Reason             string                 `json:"reason,omitempty"`
+	Limits     DirectoryLimits `json:"resource_limits"`
+	ObservedAt time.Time       `json:"observed_at"`
+	Revision   string          `json:"revision"`
+	Complete   bool            `json:"complete"`
+	Reason     string          `json:"reason,omitempty"`
+	// FailedRead and Error are the first step that failed the refresh and
+	// its own words, bounded and with URLs redacted: latest_publication,
+	// activation, manifest, group_object, or retained_entries for the
+	// directory's own allowance. The reason alone said DEPENDENCY_UNAVAILABLE
+	// for a manifest read that failed on one replica every refresh, and the
+	// cost ranking fed from this directory tracked nothing, with no way to
+	// tell a read timeout from a missing key or a body that did not decode.
+	FailedRead         string                 `json:"failed_read,omitempty"`
+	Error              string                 `json:"error,omitempty"`
 	Published          SnapshotPublicationRef `json:"published"`
 	Current            SnapshotPublicationRef `json:"current"`
 	ActivationRevision uint64                 `json:"activation_revision"`
@@ -207,16 +217,22 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	r := directoryRead{repository: d.repository, client: d.readClient, limits: d.limits}
 	s := &StrategyDirectorySnapshot{ObservedAt: at, Limits: d.limits, Rows: []StrategyDirectoryRow{}, byStrategy: map[string][]int{}}
 	defer func() { s.ReadBytes, s.ReadCommands = r.bytes, r.commands; d.state.Store(s) }()
-	fail := func(err error) {
+	fail := func(step string, err error) {
 		s.Complete = false
 		s.Reason = "DEPENDENCY_UNAVAILABLE"
 		if errors.Is(err, ErrObservationBudget) {
 			s.Reason = "RESOURCE_BUDGET"
 		}
+		// The first failure is the one that explains the rest: the walk goes
+		// on past a group it could not read, and a later failure's words
+		// would hide why the first one happened.
+		if s.FailedRead == "" && err != nil {
+			s.FailedRead, s.Error = step, observability.SanitizeErrorText(err.Error())
+		}
 	}
 	payload, err := r.read(ctx, d.repository.latestPublicationKey())
 	if err != nil {
-		fail(err)
+		fail("latest_publication", err)
 		return
 	}
 	parts := strings.Split(string(payload), "\n")
@@ -243,7 +259,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	// replica, for a diagnostics projection.
 	activation, err := d.repository.LoadActivation(ctx)
 	if err != nil {
-		fail(err)
+		fail("activation", err)
 		return
 	}
 	if validateActivationState(activation) != nil {
@@ -291,7 +307,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			manifest = manifestFromIndex(pub.SnapshotRevision, cached)
 			s.ManifestsFromIndex++
 		} else if err = r.decode(ctx, d.repository.catalogManifestKey(pub.SnapshotRevision), &manifest); err != nil {
-			fail(err)
+			fail("manifest", err)
 			break
 		}
 		if manifest.SchemaVersion != catalogManifestSchemaVersion || manifest.SnapshotRevision != pub.SnapshotRevision {
@@ -338,7 +354,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 						nextCursor[pub.SnapshotRevision] = (index + 1) % len(manifest.QueryGroups)
 						budgetFailed = true
 					}
-					fail(err)
+					fail("group_object", err)
 					continue
 				}
 				if obj.Identity != ref.QueryGroup {
@@ -347,7 +363,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 					continue
 				}
 				if len(obj.Plans) > d.limits.Entries-retained {
-					fail(ErrObservationBudget)
+					fail("retained_entries", ErrObservationBudget)
 					continue
 				}
 				entry = catalogIndexEntry{Group: obj.Identity, Digest: ref.ObjectDigest, QueryRevision: obj.QueryPlan.QueryRevision, ScheduleRevision: obj.ScheduleRevision}
@@ -365,7 +381,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			// old/new projections; unusually long identities spend more of it.
 			_, alreadyRetained := nextKnown[ref.ObjectDigest]
 			if !alreadyRetained && len(entry.Plans) > d.limits.Entries-retained {
-				fail(ErrObservationBudget)
+				fail("retained_entries", ErrObservationBudget)
 				continue
 			}
 			if !alreadyRetained {
@@ -375,7 +391,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 					entryBytes += DirectoryEntryReservationBytes() + len(id.TenantID) + len(id.BusinessID) + len(id.StrategyID) + len(string(contexts[id]))
 				}
 				if retainedBytes+entryBytes > d.limits.Entries*DirectoryEntryReservationBytes() {
-					fail(ErrObservationBudget)
+					fail("retained_entries", ErrObservationBudget)
 					continue
 				}
 				retained += len(entry.Plans)
@@ -395,7 +411,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 					continue
 				}
 				if len(s.Rows) >= d.limits.Entries {
-					fail(ErrObservationBudget)
+					fail("retained_entries", ErrObservationBudget)
 					break
 				}
 				s.Rows = append(s.Rows, row)
