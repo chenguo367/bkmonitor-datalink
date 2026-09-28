@@ -29,8 +29,8 @@ import (
 
 // The control plane's answer maps onto the fleet's facts field for field:
 // the publication, the Plans with their revisions and digests, every
-// disposition with its scope, level, reason and field -- and the three
-// booleans that tell the standings apart.
+// disposition with its scope, level, reason, field and the compiler's words
+// -- and the three booleans that tell the standings apart.
 func TestTheStrategyLookupReachesTheFleetFieldForField(t *testing.T) {
 	lookup := controlplane.StrategyLookup{
 		Available: true, Found: true, Retained: true,
@@ -39,7 +39,10 @@ func TestTheStrategyLookupReachesTheFleetFieldForField(t *testing.T) {
 			Plan:       execution.PlanIdentity{TenantID: "default", BusinessID: "2", StrategyID: "4101"},
 			QueryGroup: "qg-a", ObjectDigest: "d-a", SnapshotRevision: "s1", QueryRevision: "q1", ScheduleRevision: "r1"}},
 		Dispositions: []controlplane.ObjectDisposition{
-			{SourceID: "4101", Scope: "PLAN", Disposition: controlplane.DispositionStaleConfig, Reason: "QUERY_CONFIG_INVALID", FieldPath: "items[0].query_configs[0]"},
+			{SourceID: "4101", Scope: "PLAN", Disposition: controlplane.DispositionStaleConfig, Reason: "QUERY_CONFIG_INVALID", FieldPath: "items[0].query_configs[0]",
+				Detail: "query interval is invalid"},
+			{SourceID: "4101", Scope: "PLAN", Disposition: controlplane.DispositionUnsupported, Reason: "UNSUPPORTED_TARGET_SCOPE", FieldPath: "items[0].target",
+				Detail: `TARGET_SCOPE_UNSUPPORTED: target field "host_set_template"`},
 			{SourceID: "4101", Scope: "LEVEL", LevelID: 2, Disposition: controlplane.DispositionAccepted}},
 	}
 	want := fleet.StrategyLookupFacts{
@@ -47,7 +50,9 @@ func TestTheStrategyLookupReachesTheFleetFieldForField(t *testing.T) {
 		Plans: []fleet.StrategyPlanRef{{Tenant: "default", Business: "2", QueryGroup: "qg-a", ObjectDigest: "d-a",
 			SnapshotRevision: "s1", QueryRevision: "q1", ScheduleRevision: "r1"}},
 		Dispositions: []fleet.StrategyDisposition{
-			{Scope: "PLAN", Disposition: "STALE_CONFIG", Reason: "QUERY_CONFIG_INVALID", FieldPath: "items[0].query_configs[0]"},
+			{Scope: "PLAN", Disposition: "STALE_CONFIG", Reason: "QUERY_CONFIG_INVALID", FieldPath: "items[0].query_configs[0]", Detail: "query interval is invalid"},
+			{Scope: "PLAN", Disposition: string(controlplane.DispositionUnsupported), Reason: "UNSUPPORTED_TARGET_SCOPE", FieldPath: "items[0].target",
+				Detail: `TARGET_SCOPE_UNSUPPORTED: target field "host_set_template"`},
 			{Scope: "LEVEL", LevelID: 2, Disposition: "ACCEPTED"}},
 	}
 	if got := strategyLookupFactsOf(lookup); !reflect.DeepEqual(got, want) {

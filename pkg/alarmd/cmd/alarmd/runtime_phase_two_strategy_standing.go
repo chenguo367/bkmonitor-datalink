@@ -53,7 +53,7 @@ func strategyLookupFactsOf(lookup controlplane.StrategyLookup) fleet.StrategyLoo
 	for _, disposition := range lookup.Dispositions {
 		facts.Dispositions = append(facts.Dispositions, fleet.StrategyDisposition{
 			Scope: disposition.Scope, LevelID: disposition.LevelID, Disposition: string(disposition.Disposition),
-			Reason: disposition.Reason, FieldPath: disposition.FieldPath,
+			Reason: disposition.Reason, FieldPath: disposition.FieldPath, Detail: disposition.Detail,
 		})
 	}
 	return facts

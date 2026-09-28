@@ -77,12 +77,16 @@ type StrategyPlanRef struct {
 // StrategyDisposition is what the round decided about one item of the
 // strategy: ACCEPTED, or a disposition with the reason and the field it
 // refused on. The same words the first screen's source facts count by.
+// Detail is the refusal in the compiler's words, bounded, when a word and a
+// path are not enough to act on - which target field, which condition
+// method - and empty for every refusal that carries none.
 type StrategyDisposition struct {
 	Scope       string `json:"scope,omitempty"`
 	LevelID     uint32 `json:"level_id,omitempty"`
 	Disposition string `json:"disposition"`
 	Reason      string `json:"reason,omitempty"`
 	FieldPath   string `json:"field_path,omitempty"`
+	Detail      string `json:"detail,omitempty"`
 }
 
 // StrategyLookupFunc answers the standing of one strategy from the
