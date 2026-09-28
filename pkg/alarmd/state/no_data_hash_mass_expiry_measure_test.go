@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strconv"
 	"testing"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 )
 
 // massExpiryGroupField is a no-data group field as the store writes it: the
@@ -51,10 +51,7 @@ func TestMeasureNoDataHashMassExpiry(t *testing.T) {
 	if os.Getenv("ALARMD_MEASURE_MASS_EXPIRY") == "" {
 		t.Skip("a measurement; set ALARMD_MEASURE_MASS_EXPIRY=1 to run it")
 	}
-	executable, err := exec.LookPath("redis-server")
-	if err != nil {
-		t.Skip("redis-server is not installed")
-	}
+	executable := redistest.Server(t)
 	address := reserveTCPAddress(t)
 	startRedisServer(t, executable, address)
 	backend, err := NewRedisBackend(RedisBackendOptions{Address: address, DialTimeout: time.Second,

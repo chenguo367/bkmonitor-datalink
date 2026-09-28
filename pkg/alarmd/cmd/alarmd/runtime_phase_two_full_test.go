@@ -32,6 +32,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 	enginekafka "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/kafka"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -2181,10 +2182,7 @@ func assertObservedOrder(t *testing.T, got, want []observability.Stage) {
 // if it keeps happening, instead of into a result somewhere else in the test.
 func startPhaseTwoRedis(t *testing.T) (string, *redis.Client) {
 	t.Helper()
-	executable, err := exec.LookPath("redis-server")
-	if err != nil {
-		t.Skip("redis-server is not installed")
-	}
+	executable := redistest.Server(t)
 	var refusals []string
 	for attempt := 0; attempt < 5; attempt++ {
 		address, client, refused := startOwnPhaseTwoRedis(t, executable, "")
@@ -2537,10 +2535,7 @@ func TestProductionRunOneReadsControlBodiesOncePerRevisionAndVersion(t *testing.
 // hold it - which is the state in which the fixture used to hand the foreign
 // server to the test.
 func TestPhaseTwoRedisFixtureRefusesAServerItDidNotStart(t *testing.T) {
-	executable, err := exec.LookPath("redis-server")
-	if err != nil {
-		t.Skip("redis-server is not installed")
-	}
+	executable := redistest.Server(t)
 	occupiedAddress, occupied := startPhaseTwoRedis(t)
 	_, port, err := net.SplitHostPort(occupiedAddress)
 	if err != nil {

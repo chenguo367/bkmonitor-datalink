@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 )
 
 func TestRedisStorePublishesAssignmentOnlyWithLiveControlLeader(t *testing.T) {
@@ -354,10 +355,7 @@ func TestRedisStoreCheckFenceCarriesTheAssignmentItAlreadyRead(t *testing.T) {
 
 func newIntegrationStore(t *testing.T) *RedisStore {
 	t.Helper()
-	executable, err := exec.LookPath("redis-server")
-	if err != nil {
-		t.Skip("redis-server is not installed")
-	}
+	executable := redistest.Server(t)
 	address := reserveAddress(t)
 	server := startRedis(t, executable, address)
 	store, err := NewRedisStore(RedisStoreOptions{
