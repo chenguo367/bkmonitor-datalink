@@ -27,8 +27,46 @@ type RuntimeConfigFacts struct {
 	// Linkd is the alert link's settings that decide what this process does,
 	// credential-free: whether a close it can send is armed is otherwise
 	// readable only from the configuration file it was started with.
-	Linkd  RuntimeLinkdFacts `json:"linkd"`
-	Digest string            `json:"runtime_config_digest"`
+	Linkd RuntimeLinkdFacts `json:"linkd"`
+	// Retention is how long this deployment keeps what a Slot reads again,
+	// beside every input each length is derived from. Whether a sixty-hour
+	// strategy's content outlives its period was a question for the
+	// configuration file and four functions; the Slot source's retention and
+	// admission's once came from two different formulas, and nothing said so.
+	Retention RuntimeRetentionFacts `json:"retention"`
+	Digest    string                `json:"runtime_config_digest"`
+}
+
+// RuntimeRetentionFacts are the retention lengths, in seconds, and their
+// inputs.
+type RuntimeRetentionFacts struct {
+	// CatalogSeconds is how long published Catalogs are kept: the manifests,
+	// the schedule timelines, the active set. The larger of the configured
+	// catalog TTL and SnapshotMinimumSeconds.
+	CatalogSeconds int64 `json:"catalog_seconds"`
+	// ObjectLimitSeconds is the longest a Plan's content objects are kept for
+	// it, and the retention the Slot source holds a frozen Slot's Snapshot
+	// to: the larger of the state store's maximum TTL and CatalogSeconds. A
+	// Plan whose recovery contract needs its content longer is withheld by
+	// name at admission.
+	ObjectLimitSeconds int64 `json:"object_limit_seconds"`
+	// SnapshotMinimumSeconds is what the recovery contract needs for the
+	// cadence the catalog keys are kept for: the publication delay
+	// allowance, that cadence less the downstream execution reserve, the
+	// maximum replay age and the post-recovery terminal delay.
+	SnapshotMinimumSeconds int64 `json:"snapshot_minimum_seconds"`
+	// CatalogKeyCadenceSeconds is that cadence. It is not the longest period
+	// a Plan may have: a longer Plan reads its content by digest, kept to
+	// ObjectLimitSeconds.
+	CatalogKeyCadenceSeconds int64 `json:"catalog_key_cadence_seconds"`
+	// The inputs, as configured or derived at startup.
+	CatalogTTLSeconds                 int64 `json:"catalog_ttl_seconds"`
+	RedisMaxTTLSeconds                int64 `json:"redis_max_ttl_seconds"`
+	RedisRestartMarginSeconds         int64 `json:"redis_restart_margin_seconds"`
+	DownstreamExecutionReserveSeconds int64 `json:"downstream_execution_reserve_seconds"`
+	PublicationDelayAllowanceSeconds  int64 `json:"publication_delay_allowance_seconds"`
+	MaxReplayAgeSeconds               int64 `json:"max_replay_age_seconds"`
+	PostRecoveryTerminalDelaySeconds  int64 `json:"post_recovery_terminal_delay_seconds"`
 }
 
 // RuntimeLinkdFacts is what the alert link's configuration switches on: the
