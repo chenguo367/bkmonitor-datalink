@@ -395,12 +395,21 @@ func calendarReads(groups map[execution.QueryGroupIdentity]*maintenanceGroup) ma
 // Python does: reading them as unknown would freeze the strategies whose
 // calendars are rest days, which is missed alerts.
 //
-// The reads are this replica's owned Plans, from memory: the whole catalog
-// is not read here, and in a source-wide loss every replica's share reads
-// the same way. A replica whose share names only calendars that were really
-// deleted holds their closes too, until it is assigned a Plan that names a
-// present calendar, which leaves alerts open rather than closing them
-// wrongly.
+// The reads are this replica's owned Plans, from memory, and not the whole
+// deployment's: each strategy carries its own effective-time snapshot,
+// naming only the calendars that strategy names, so there is no calendar
+// table for the deployment on the read path, and this loop reads only the
+// Segments and objects of the Query Groups it owns. In a source-wide loss
+// every replica's share reads the same way.
+//
+// Known boundary: a replica whose owned Plans name only calendars that were
+// really deleted reads every calendar deleted and holds their closes for as
+// long as that lasts. It does not heal by itself; the alerts stay open
+// until it is assigned a Plan that names a present calendar or the
+// strategies change, and each held strategy is named, with its calendar, on
+// the degraded line for an operator to close by hand. A strategy that names
+// a deleted calendar is misconfigured, and leaving its alerts open is the
+// side this loop takes when it cannot tell a deletion from a loss.
 func (m *effectiveMaintenance) settleCalendarDeletions(reads map[int64]bool, now time.Time) calendarDeletions {
 	if m.deletedSince == nil {
 		m.deletedSince = make(map[int64]time.Time)
