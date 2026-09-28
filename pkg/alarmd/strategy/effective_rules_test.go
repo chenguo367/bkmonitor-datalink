@@ -249,7 +249,7 @@ func TestInvalidCalendarInputsAreRejected(t *testing.T) {
 			t.Fatalf("accepted %s", repeat)
 		}
 	}
-	for _, mutate := range []func(*effectiveSnapshot){func(s *effectiveSnapshot) { s.Calendars[0].TenantID = "other" }, func(s *effectiveSnapshot) { s.Calendars[0].Status = "DELETED" }, func(s *effectiveSnapshot) { s.Calendars[0].Items = nil }, func(s *effectiveSnapshot) { s.BusinessTimezone = "" }} {
+	for _, mutate := range []func(*effectiveSnapshot){func(s *effectiveSnapshot) { s.Calendars[0].TenantID = "other" }, func(s *effectiveSnapshot) { s.Calendars[0].Status = "ARCHIVED" }, func(s *effectiveSnapshot) { s.Calendars[0].Items = nil }, func(s *effectiveSnapshot) { s.BusinessTimezone = "" }} {
 		var snapshot effectiveSnapshot
 		if err := json.Unmarshal(snapshotForItems([]effectiveItem{}), &snapshot); err != nil {
 			t.Fatal(err)
@@ -259,5 +259,53 @@ func TestInvalidCalendarInputsAreRejected(t *testing.T) {
 		if _, err := compileEffectiveRules(raw, "tenant-a"); err == nil {
 			t.Fatal("invalid snapshot accepted")
 		}
+	}
+}
+
+// A calendar the writer marks deleted is read as Python reads one: an empty
+// calendar, never hit, whatever items it still carries. Named among the rest
+// days it pauses nothing; named as the only alert days the strategy is not
+// effective. A calendar present with an item at the moment is the other side
+// of each. A status that is neither is still refused, by name.
+func TestADeletedCalendarIsReadAsAnEmptyCalendar(t *testing.T) {
+	hit := []effectiveItem{ruleItem(100, 200, "UNIX_SECONDS", "UTC", `{}`)}
+	for _, testCase := range []struct {
+		name, role, status string
+		want               string
+	}{
+		{name: "alert days, present and hit", role: "active_calendars", status: "PRESENT", want: EffectiveTimeActive},
+		{name: "alert days, deleted", role: "active_calendars", status: "DELETED", want: EffectiveTimeInactive},
+		{name: "rest days, present and hit", role: "calendars", status: "PRESENT", want: EffectiveTimeInactive},
+		{name: "rest days, deleted", role: "calendars", status: "DELETED", want: EffectiveTimeActive},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			plan := validPlan()
+			plan.StrategyRef.TenantID = "tenant-a"
+			plan.StrategyIR.StrategyRef.TenantID = "tenant-a"
+			plan.StrategyIR.Levels[0].TriggerPlan.Config = triggerConfigWithUptime("BUSINESS_LOCAL", map[string]any{
+				"time_ranges": []any{map[string]any{"start": "00:00", "end": "23:59"}}, testCase.role: []int{7}})
+			raw, err := json.Marshal(effectiveSnapshot{SchemaVersion: 1, Status: "READY", BusinessTimezone: "UTC",
+				Calendars: []effectiveCalendar{{ID: 7, TenantID: "tenant-a", Status: testCase.status, Items: hit}}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			plan.EffectiveTimeSnapshot = raw
+			fact, err := mustCompilePlan(t, newTestCompiler(t), plan).ResolveEffectiveTime(context.Background(), 150)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if fact.Status() != testCase.want {
+				t.Fatalf("status = %s, want %s", fact.Status(), testCase.want)
+			}
+		})
+	}
+	var snapshot effectiveSnapshot
+	if err := json.Unmarshal(snapshotForItems(hit), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Calendars[0].Status = "ARCHIVED"
+	raw, _ := json.Marshal(snapshot)
+	if _, err := compileEffectiveRules(raw, "tenant-a"); err == nil || err.Error() != ReasonEffectiveTimeCalendarNotPresent {
+		t.Fatalf("unknown calendar status: err = %v, want %s", err, ReasonEffectiveTimeCalendarNotPresent)
 	}
 }
