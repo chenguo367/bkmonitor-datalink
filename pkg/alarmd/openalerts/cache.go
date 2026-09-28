@@ -198,14 +198,16 @@ type Stats struct {
 	// started, every path in SentDepartures present. OwnOpen is how many
 	// alerts this process opened and has not sent the RECOVERY for --
 	// the alerts the gate treats as its own -- and OwnOpenDepartures why
-	// alerts left that record; OwnOpenRefused the alerts it had no room
-	// for. The own-open fields are known only under the index protocol,
-	// which OwnOpenKnown says.
+	// alerts left that record; OwnOpenRefusals how many times a first
+	// ABNORMAL found the record full -- a count of refusals, not of alerts:
+	// an alert still firing is refused again every round it is sent.
+	// The own-open fields are known only under the index protocol, which
+	// OwnOpenKnown says.
 	SentDepartures    map[string]uint64
 	OwnOpenKnown      bool
 	OwnOpen           int
 	OwnOpenDepartures map[string]uint64
-	OwnOpenRefused    uint64
+	OwnOpenRefusals   uint64
 }
 
 type member struct {
@@ -249,10 +251,11 @@ type Cache struct {
 
 	evictions uint64
 	// sentDepartures and openDepartures count why alerts left added and
-	// index.opened; openRefused the alerts index.opened had no room for.
+	// index.opened; openRefusals the times index.opened was full when an
+	// alert not in it was sent -- refusals, not alerts.
 	// See departures.go.
 	sentDepartures, openDepartures map[string]uint64
-	openRefused                    uint64
+	openRefusals                   uint64
 	refreshes                      map[string]uint64
 	unavailable                    map[UnavailableReason]uint64
 	lookups                        map[Answer]uint64

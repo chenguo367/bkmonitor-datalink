@@ -1628,7 +1628,7 @@ func openAlertSetFacts(stats openalerts.Stats, staleBeyondBound bool, at time.Ti
 	if stats.OwnOpenKnown {
 		open := stats.OwnOpen
 		facts.OwnOpen = &open
-		facts.OwnOpenRefused = stats.OwnOpenRefused
+		facts.OwnOpenRefusals = stats.OwnOpenRefusals
 		facts.OwnOpenDepartures = make(map[string]uint64, len(openalerts.OwnOpenDepartures))
 		for _, path := range openalerts.OwnOpenDepartures {
 			facts.OwnOpenDepartures[path] = stats.OwnOpenDepartures[path]

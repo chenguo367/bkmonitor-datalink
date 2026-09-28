@@ -114,8 +114,8 @@ func TestTheLocalBoundIsCountedOnBothRecords(t *testing.T) {
 	if stats.SentDepartures[DepartureEvicted] != 2 || stats.Added != 3 {
 		t.Fatalf("sent departures %v added %d, want 2 evicted and 3 kept", stats.SentDepartures, stats.Added)
 	}
-	if stats.OwnOpen != 3 || stats.OwnOpenRefused != 2 {
-		t.Fatalf("own_open %d refused %d, want 3 kept and 2 refused", stats.OwnOpen, stats.OwnOpenRefused)
+	if stats.OwnOpen != 3 || stats.OwnOpenRefusals != 2 {
+		t.Fatalf("own_open %d refused %d, want 3 kept and 2 refused", stats.OwnOpen, stats.OwnOpenRefusals)
 	}
 }
 

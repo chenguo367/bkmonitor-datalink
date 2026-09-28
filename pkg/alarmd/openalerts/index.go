@@ -82,7 +82,7 @@ func (cache *Cache) noteOpened(m member, now time.Time) {
 	}
 	if len(cache.index.opened) >= cache.index.options.MaxLocalEntries {
 		cache.evictions++
-		cache.openRefused++
+		cache.openRefusals++
 		return
 	}
 	cache.index.opened[m] = now

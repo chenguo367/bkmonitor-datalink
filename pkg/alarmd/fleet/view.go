@@ -2034,14 +2034,16 @@ type OpenAlertSetFacts struct {
 	// RECOVERY for: the alerts the gate asks about as its own. It keeps an
 	// alert that is no longer re-sent, which comparison.sent does not.
 	// OwnOpenDepartures counts why alerts left it (recovery_acked,
-	// untracked) and OwnOpenRefused the alerts it had no room for.
+	// untracked) and OwnOpenRefusals how many times an alert not in it was
+	// sent while it was full: refusals, not alerts, since an alert still
+	// firing is refused again every round.
 	// SentDepartures counts why alerts left comparison.sent (recovery_acked,
 	// not_resent, untracked, evicted). All since the process started, every
 	// word present; the own-open fields are absent on a copy that does not
 	// read the index.
 	OwnOpen           *int              `json:"own_open,omitempty"`
 	OwnOpenDepartures map[string]uint64 `json:"own_open_departures,omitempty"`
-	OwnOpenRefused    uint64            `json:"own_open_refused,omitempty"`
+	OwnOpenRefusals   uint64            `json:"own_open_refusals,omitempty"`
 	SentDepartures    map[string]uint64 `json:"sent_departures,omitempty"`
 	GateOwnHeld       uint64            `json:"gate_own_held,omitempty"`
 	// GateSince is when the own split started. What the replica sent is

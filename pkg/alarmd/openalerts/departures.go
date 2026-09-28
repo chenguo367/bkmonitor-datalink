@@ -81,7 +81,7 @@ func (cache *Cache) departureStats(stats *Stats) {
 	}
 	stats.OwnOpenKnown = true
 	stats.OwnOpen = len(cache.index.opened)
-	stats.OwnOpenRefused = cache.openRefused
+	stats.OwnOpenRefusals = cache.openRefusals
 	stats.OwnOpenDepartures = make(map[string]uint64, len(OwnOpenDepartures))
 	for _, path := range OwnOpenDepartures {
 		stats.OwnOpenDepartures[path] = cache.openDepartures[path]
