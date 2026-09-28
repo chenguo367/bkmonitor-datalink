@@ -388,6 +388,21 @@ func decodeLegacyQueryConfig(raw json.RawMessage) (legacyQueryConfig, error) {
 	if config.AggInterval < 0 {
 		return config, errors.New("query interval is invalid")
 	}
+	// A config that carries no agg_interval queries at 60 seconds: every
+	// Python data source this compiler stands in for reads it as
+	// query_config.get("agg_interval", 60) (bkmonitor/data_source/data_source).
+	// Decoded straight into the field it was 0, which the aggregation reads
+	// as Python's "1h" for an interval that is present and 0 - an hour's
+	// window where Python has a minute's.
+	var carried struct {
+		AggInterval json.RawMessage `json:"agg_interval"`
+	}
+	if err := json.Unmarshal(raw, &carried); err != nil {
+		return config, err
+	}
+	if len(carried.AggInterval) == 0 {
+		config.AggInterval = pythonDefaultAggInterval
+	}
 	return config, nil
 }
 
