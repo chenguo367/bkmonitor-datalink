@@ -53,7 +53,7 @@ func PublicHealth(full HealthResponse) PublicHealthResponse {
 		PublishedVersion:  full.PublishedVersion, ReplicasNotReady: full.ReplicasNotReady,
 		DependenciesReplicas: full.DependenciesReplicas,
 		Cohorts:              cohortList(full.Cohorts),
-		Builds:               []BuildGroup{}, OutputProtocols: []OutputProtocolGroup{},
+		Builds:               []BuildGroup{}, OutputProtocols: []OutputProtocolGroup{}, Retentions: []RetentionGroup{},
 		Degradations: []Degradation{}, Dependencies: []Endpoint{},
 		Gaps: []Gap{}, PerReplica: []ReplicaView{},
 	}}

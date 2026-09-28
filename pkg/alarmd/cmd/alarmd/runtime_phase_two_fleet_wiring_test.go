@@ -122,6 +122,15 @@ func TestProductionBundleReportsFleetSnapshotPublishOutcome(t *testing.T) {
 	if len(published) != 1 || published[0].Build == nil || *published[0].Build != want {
 		t.Fatalf("published snapshot build = %+v, want %+v: the page must name the same build as build_info", published, want)
 	}
+	// The retention lengths the page reads are the runtime profile's, from
+	// the same configuration.
+	retention := phaseTwoRuntimeRetention(cfg)
+	if retention.CatalogSeconds <= 0 || retention.ObjectLimitSeconds <= 0 {
+		t.Fatalf("setup: the configuration derives no retention (%+v)", retention)
+	}
+	if published[0].Retention == nil || *published[0].Retention != retention {
+		t.Fatalf("published snapshot retention = %+v, want the runtime profile's %+v", published[0].Retention, retention)
+	}
 
 	// A steady state reports nothing: an outage lasting an hour is one fact,
 	// not one per reconcile tick.

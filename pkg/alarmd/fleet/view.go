@@ -1691,6 +1691,13 @@ type Snapshot struct {
 	// read it from its configuration. Absent on a build before this fact
 	// existed, which the aggregate keeps apart from any choice.
 	OutputProtocol *OutputProtocolFacts `json:"output_protocol,omitempty"`
+	// Retention is the retention lengths this process runs with and their
+	// inputs, the same facts as the runtime profile's retention section. On
+	// the snapshot because a deployment read only through its pages had no
+	// other way to them: the profile is on the CLI channel, and the startup
+	// line carrying it is gone from the log within minutes. Absent on a
+	// build before this fact existed.
+	Retention *observability.RuntimeRetentionFacts `json:"retention,omitempty"`
 }
 
 // OutputProtocolFacts is one process's output protocol choice: the word in
@@ -1722,6 +1729,14 @@ type OutputProtocolFacts struct {
 type OutputProtocolGroup struct {
 	Protocol OutputProtocolFacts `json:"protocol"`
 	Replicas []string            `json:"replicas"`
+}
+
+// RetentionGroup is one distinct set of retention facts and the counted
+// replicas running with it. Retention is nil for the replicas that published
+// none, never filled in with another group's lengths.
+type RetentionGroup struct {
+	Retention *observability.RuntimeRetentionFacts `json:"retention"`
+	Replicas  []string                             `json:"replicas"`
 }
 
 // ReadinessFacts is one replica's readiness as its process reports it: the
@@ -2723,6 +2738,11 @@ type View struct {
 	// group with an empty word. What a given strategy publishes as is not
 	// here -- it is frozen per Plan and read from the directory.
 	OutputProtocols []OutputProtocolGroup `json:"output_protocols"`
+	// Retentions is the distinct retention facts the counted replicas run
+	// with, grouped like Builds: one entry is a deployment that agrees with
+	// itself, more is a rollout or a values file that changed under some of
+	// them. A replica that published none is its own group without facts.
+	Retentions []RetentionGroup `json:"retentions"`
 	// Activation is the control leader's standing on bringing the fleet's
 	// activation to the current publication, and ActivationReplica which
 	// replica said so. Absent when no counted replica has attempted it.
@@ -3052,6 +3072,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 			perReplica.OutputProtocol = &facts
 		}
 		view.OutputProtocols = addToOutputProtocolGroup(view.OutputProtocols, snapshot.OutputProtocol, replica)
+		view.Retentions = addToRetentionGroup(view.Retentions, snapshot.Retention, replica)
 		view.Builds = addToBuildGroup(view.Builds, snapshot.Build, replica)
 		view.Workers.Ready++
 		switch {
@@ -3233,6 +3254,7 @@ func Aggregate(expectation Expectation, snapshots []Snapshot, expectedReplicas [
 	Settle(&view)
 	sortBuildGroups(view.Builds)
 	sortOutputProtocolGroups(view.OutputProtocols)
+	sortRetentionGroups(view.Retentions)
 	return view
 }
 
@@ -3282,6 +3304,46 @@ func addToBuildGroup(groups []BuildGroup, build *BuildFacts, replica string) []B
 		}
 	}
 	return append(groups, BuildGroup{Build: facts, Replicas: []string{replica}})
+}
+
+// addToRetentionGroup files a replica under the retention facts it
+// published, or under the group without facts when it published none.
+func addToRetentionGroup(groups []RetentionGroup, retention *observability.RuntimeRetentionFacts, replica string) []RetentionGroup {
+	for index := range groups {
+		same := groups[index].Retention == nil && retention == nil
+		if groups[index].Retention != nil && retention != nil {
+			same = *groups[index].Retention == *retention
+		}
+		if same {
+			groups[index].Replicas = append(groups[index].Replicas, replica)
+			return groups
+		}
+	}
+	var facts *observability.RuntimeRetentionFacts
+	if retention != nil {
+		copied := *retention
+		facts = &copied
+	}
+	return append(groups, RetentionGroup{Retention: facts, Replicas: []string{replica}})
+}
+
+// sortRetentionGroups puts the facts most replicas run with first, then the
+// longer catalog retention, so two reads of an evenly split deployment list
+// the same way.
+func sortRetentionGroups(groups []RetentionGroup) {
+	sort.SliceStable(groups, func(i, j int) bool {
+		if len(groups[i].Replicas) != len(groups[j].Replicas) {
+			return len(groups[i].Replicas) > len(groups[j].Replicas)
+		}
+		left, right := groups[i].Retention, groups[j].Retention
+		if left == nil || right == nil {
+			return right == nil && left != nil
+		}
+		if left.CatalogSeconds != right.CatalogSeconds {
+			return left.CatalogSeconds > right.CatalogSeconds
+		}
+		return left.ObjectLimitSeconds > right.ObjectLimitSeconds
+	})
 }
 
 // addToOutputProtocolGroup files a replica under the choice it published, or
