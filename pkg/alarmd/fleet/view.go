@@ -1812,12 +1812,30 @@ type ByteConstraintFacts struct {
 	Conflicts      int              `json:"conflicts"`
 	Paused         bool             `json:"paused"`
 	Moves          []ByteMoveSample `json:"moves,omitempty"`
+	// ReadPeaks is the distribution of the peaks read this round, which the
+	// estimate for an unread Query Group is its ninetieth percentile of.
+	ReadPeaks *BytePeakDistribution `json:"read_peaks,omitempty"`
 }
 
 // ByteSumSample is one judged Worker's sum of peaks before the round's moves.
 type ByteSumSample struct {
 	WorkerID     string `json:"worker_id"`
 	PeakSumBytes uint64 `json:"retained_bytes_peak_sum"`
+	// Unread is how many of the Worker's Query Groups have no peak read, and
+	// UnreadSample a few of them by id, lowest first: which ones keep the
+	// Worker from being a destination.
+	Unread       int      `json:"unread,omitempty"`
+	UnreadSample []string `json:"unread_sample,omitempty"`
+}
+
+// BytePeakDistribution is the peaks read in the round the estimate for an
+// unread Query Group was taken from.
+type BytePeakDistribution struct {
+	Count uint64 `json:"count"`
+	P50   uint64 `json:"p50_bytes"`
+	P90   uint64 `json:"p90_bytes"`
+	P99   uint64 `json:"p99_bytes"`
+	Max   uint64 `json:"max_bytes"`
 }
 
 // ByteMoveSample is one byte-constraint move with the peak it was judged by.

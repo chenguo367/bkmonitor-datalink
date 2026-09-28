@@ -2068,7 +2068,14 @@ func fleetByteConstraintFacts(plan scheduler.BytePlan, outcome rebalanceOutcome)
 	}
 	sort.Strings(workerIDs)
 	for _, workerID := range workerIDs {
-		facts.Sums = append(facts.Sums, fleet.ByteSumSample{WorkerID: workerID, PeakSumBytes: plan.Sum[workerID]})
+		sample := fleet.ByteSumSample{WorkerID: workerID, PeakSumBytes: plan.Sum[workerID], Unread: plan.UnreadBy[workerID]}
+		for _, queryGroup := range plan.UnreadSample[workerID] {
+			sample.UnreadSample = append(sample.UnreadSample, string(queryGroup))
+		}
+		facts.Sums = append(facts.Sums, sample)
+	}
+	if peaks := plan.ReadPeaks; peaks.Count > 0 {
+		facts.ReadPeaks = &fleet.BytePeakDistribution{Count: peaks.Count, P50: peaks.P50, P90: peaks.P90, P99: peaks.P99, Max: peaks.Max}
 	}
 	for _, move := range plan.Moves {
 		facts.Moves = append(facts.Moves, fleet.ByteMoveSample{QueryGroup: string(move.QueryGroup), From: move.From, To: move.To, Bytes: move.Bytes})

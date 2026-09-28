@@ -62,6 +62,27 @@ const byteConstraintPercent = 80
 // unread Query Group is counted at on a destination; see above.
 const unreadEstimatePercentile = 90
 
+// unreadSampleLimit bounds the unread Query Groups named per Worker.
+const unreadSampleLimit = 5
+
+// PeakDistribution is the read peaks of one round: how many, and the median,
+// the ninetieth and ninety-ninth percentiles and the largest, by the same
+// nearest-rank rule as the estimate.
+type PeakDistribution struct {
+	Count, P50, P90, P99, Max uint64
+}
+
+// peakDistribution is the distribution of peaks; zero when there are none.
+func peakDistribution(peaks []uint64) PeakDistribution {
+	if len(peaks) == 0 {
+		return PeakDistribution{}
+	}
+	sorted := append([]uint64(nil), peaks...)
+	sort.Slice(sorted, func(left, right int) bool { return sorted[left] < sorted[right] })
+	rank := func(percentile int) uint64 { return sorted[(len(sorted)*percentile+99)/100-1] }
+	return PeakDistribution{Count: uint64(len(sorted)), P50: rank(50), P90: rank(90), P99: rank(99), Max: sorted[len(sorted)-1]}
+}
+
 // ByteConstraintPercent is the share above, for a reader that reports a
 // plan.
 const ByteConstraintPercent = byteConstraintPercent
@@ -137,7 +158,16 @@ type BytePlan struct {
 	// Zero when no peak was read, and then a Worker holding an unread Query
 	// Group is not a destination.
 	UnreadEstimate uint64
-	Sum            map[string]uint64
+	// UnreadBy is Unread per judged Worker, and UnreadSample up to
+	// unreadSampleLimit of each Worker's unread Query Groups, lowest first.
+	// The total alone said every Worker was unsettled and not which Query
+	// Groups kept it so -- whether they were ones that had not run since a
+	// restart or ones that never report -- and that was what decided the fix.
+	UnreadBy     map[string]int
+	UnreadSample map[string][]execution.QueryGroupIdentity
+	// ReadPeaks is the distribution the estimate was taken from.
+	ReadPeaks PeakDistribution
+	Sum       map[string]uint64
 	// Overloaded names the judged Workers over the constraint before the
 	// moves; Unplaceable the ones among them the round found no move for -
 	// no Query Group of theirs with a reading fits any other judged Worker.
@@ -187,6 +217,7 @@ func (router *Router) PlanByteMoves(
 	plan.Judged = len(judged)
 	owned := make(map[string][]execution.QueryGroupIdentity, len(judged))
 	unreadBy := make(map[string]int, len(judged))
+	unreadGroups := make(map[string][]execution.QueryGroupIdentity, len(judged))
 	readPeaks := make([]uint64, 0, len(owners))
 	for queryGroup, owner := range owners {
 		if _, isJudged := plan.Sum[owner]; !isJudged {
@@ -196,6 +227,7 @@ func (router *Router) PlanByteMoves(
 		if !read {
 			plan.Unread++
 			unreadBy[owner]++
+			unreadGroups[owner] = append(unreadGroups[owner], queryGroup)
 			continue
 		}
 		plan.Sum[owner] += peak
@@ -203,6 +235,13 @@ func (router *Router) PlanByteMoves(
 		readPeaks = append(readPeaks, peak)
 	}
 	plan.UnreadEstimate = unreadEstimate(readPeaks)
+	plan.ReadPeaks = peakDistribution(readPeaks)
+	plan.UnreadBy = unreadBy
+	plan.UnreadSample = make(map[string][]execution.QueryGroupIdentity, len(unreadGroups))
+	for workerID, groups := range unreadGroups {
+		sort.Slice(groups, func(left, right int) bool { return groups[left] < groups[right] })
+		plan.UnreadSample[workerID] = groups[:min(len(groups), unreadSampleLimit)]
+	}
 	for _, workerID := range judged {
 		if unreadBy[workerID] > 0 {
 			plan.Unsettled = append(plan.Unsettled, workerID)
