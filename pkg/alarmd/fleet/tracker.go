@@ -205,6 +205,17 @@ func blockedOutcome(outcome string) bool {
 	return inVocabulary(outcome, BlockedOutcomes)
 }
 
+// sourceRefusal is a blocked outcome the Slot source or the view raised: the
+// round was refused before it ran, and the source answering again ends it.
+// A panic or an unclassified error is the round's own and is not.
+func sourceRefusal(outcome string) bool {
+	switch outcome {
+	case "source_blocked", "source_error", "source_retry", "view_not_executable":
+		return true
+	}
+	return false
+}
+
 // failedExecution reports whether a round reached execution and did not finish.
 // Without this, a query group whose every execution fails is invisible: it
 // reports execute_returned, which is not blocked, and commits no progress, so
@@ -1534,6 +1545,31 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				state.coverage.PreviousWorstValid, state.coverage.PreviousKnown = previous, true
 			}
 		}
+	case runOutcome == "source_not_due":
+		// The source answered that the Slot under the cursor is not due: the
+		// view let the round through and nothing is owed. A blocked run the
+		// source or the view started is over -- a Slot still stuck behind a
+		// refusal would be due -- and read on, a view that refused for
+		// seconds at startup counted as this deployment's own until the
+		// object's next round, hours for a long period. Only the standing
+		// ends: the run counters keep what happened, and a restored
+		// conclusion stays, since nothing completed.
+		if state.currentKind == KindBlockedRun && sourceRefusal(state.reasonCode) {
+			state.currentKind, state.reasonCode, state.blockedRuns = "", "", 0
+			state.sawSomethingWrong = false
+			// The run is over, so its start is too: a refusal after this
+			// starts its own run and its own streak, not the old one's.
+			state.inAnomalyRun, state.runStartedAt, state.sinceFrom = false, time.Time{}, ""
+			state.failingSince = time.Time{}
+			state.reasonKey = ""
+			// The refusal's words, which described the run that ended.
+			if state.lastError != nil && state.lastError.EvaluationTime == 0 {
+				state.lastError = nil
+			}
+		}
+		// Otherwise as any round that neither completed nor was blocked (the
+		// default below): it neither starts nor clears a run.
+		return
 	case runOutcome == "ownership_rejected":
 		// The fence refused this replica's round: the object is another
 		// replica's now, or the store could not confirm whose it is. Either
