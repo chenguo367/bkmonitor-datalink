@@ -67,8 +67,10 @@ func TestProviderFailureFactsProjectLastFailedAttempt(t *testing.T) {
 	unavailable := execution.PhysicalQueryCompletion{
 		Completeness: execution.CompletenessUnavailable,
 		RouteFacts: execution.ProviderRouteFacts{Attempts: []execution.RouteAttemptFact{
-			{AttemptNo: 1, Result: execution.RouteAttemptFailed, ReasonCode: execution.ReasonCode(contract.ReasonQueryUnavailable), Detail: execution.HTTPStatusRouteDetail(502)},
-			{AttemptNo: 2, Result: execution.RouteAttemptFailed, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout), Detail: execution.TransportRouteDetail(execution.TransportFailureTimeout)},
+			{AttemptNo: 1, Result: execution.RouteAttemptFailed, ReasonCode: execution.ReasonCode(contract.ReasonQueryUnavailable), Detail: execution.HTTPStatusRouteDetail(502),
+				Timing: &execution.AttemptTiming{StartLateMillis: 1, BudgetMillis: 2, ElapsedMillis: 3}},
+			{AttemptNo: 2, Result: execution.RouteAttemptFailed, ReasonCode: execution.ReasonCode(contract.ReasonQueryTimeout), Detail: execution.TransportRouteDetail(execution.TransportFailureTimeout),
+				Timing: &execution.AttemptTiming{StartLateMillis: 41_000, BudgetMillis: 9_000, ElapsedMillis: 9_004}},
 		}},
 	}
 	if facts := providerFailureFacts(execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{full}}); facts != nil {
@@ -76,7 +78,14 @@ func TestProviderFailureFactsProjectLastFailedAttempt(t *testing.T) {
 	}
 	facts := providerFailureFacts(execution.QueryExecutionCompletion{PhysicalQueries: []execution.PhysicalQueryCompletion{full, unavailable}})
 	want := observability.QueryFailureFacts{Stage: "provider", Category: "provider_transport", Code: contract.ReasonQueryTimeout, Detail: "transport=timeout"}
-	if facts == nil || *facts != want {
+	// The last failed attempt's timing, beside its detail: the attempt the
+	// row reads is the one that was timed.
+	wantTiming := observability.QueryTiming{StartLateMillis: 41_000, BudgetMillis: 9_000, ElapsedMillis: 9_004}
+	if facts == nil || facts.Timing == nil || *facts.Timing != wantTiming {
+		t.Fatalf("facts=%+v, want the last attempt's timing %+v", facts, wantTiming)
+	}
+	facts.Timing = nil
+	if *facts != want {
 		t.Fatalf("facts=%+v, want %+v", facts, want)
 	}
 	bare := execution.PhysicalQueryCompletion{Completeness: execution.CompletenessUnavailable}

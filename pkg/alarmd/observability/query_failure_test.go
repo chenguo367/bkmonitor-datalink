@@ -115,6 +115,37 @@ func TestQueryFailureFactsSurviveWithoutErrorForDegradedProviderResults(t *testi
 	}
 }
 
+// A timed-out query's line carries the three numbers its row reads the
+// timeout by: how late it began, what it was given, what it used. A line
+// without a timing carries none of them rather than zeros.
+func TestATimedOutQueryLogsItsBudgetBesideItsDetail(t *testing.T) {
+	var output bytes.Buffer
+	facts := QueryFailureFacts{Stage: "provider", Category: "provider_transport", Code: "QUERY_TIMEOUT", Detail: "transport=timeout",
+		Timing: &QueryTiming{StartLateMillis: 41_000, BudgetMillis: 9_000, ElapsedMillis: 9_004}}
+	observer := newQueryFailureTestObserver(&output)
+	observer.Observe(context.Background(), Observation{Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultDegraded,
+		ReasonCode: "QUERY_TIMEOUT", QueryFailure: &facts, Trace: TraceFields{QueryGroupKey: "query-group-1"}})
+	var event map[string]any
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode: %v; log=%s", err, output.String())
+	}
+	for field, want := range map[string]any{"failure_start_late_ms": 41_000.0, "failure_budget_ms": 9_000.0, "failure_elapsed_ms": 9_004.0} {
+		if event[field] != want {
+			t.Fatalf("event[%q]=%#v, want %#v; event=%#v", field, event[field], want, event)
+		}
+	}
+	output.Reset()
+	facts.Timing = nil
+	observer.Observe(context.Background(), Observation{Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultDegraded,
+		ReasonCode: "QUERY_TIMEOUT", QueryFailure: &facts, Trace: TraceFields{QueryGroupKey: "query-group-2"}})
+	if !strings.Contains(output.String(), "query-group-2") {
+		t.Fatalf("setup: the untimed failure's line was not written: %q", output.String())
+	}
+	if strings.Contains(output.String(), "failure_budget_ms") {
+		t.Fatalf("an untimed failure logged a budget: %s", output.String())
+	}
+}
+
 func TestValidQueryFailureCodeGrammar(t *testing.T) {
 	for code, want := range map[string]bool{
 		"A": true, "OTHER": true, "A_1": true, "QUERY_TS_PARTIAL": true, strings.Repeat("A", 64): true,

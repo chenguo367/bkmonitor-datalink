@@ -172,6 +172,31 @@ type RouteAttemptFact struct {
 	Result     RouteAttemptResult
 	ReasonCode ReasonCode
 	Detail     string
+	// Timing is when a failed attempt ran against the time it was given;
+	// nil where the attempt did not measure it.
+	Timing *AttemptTiming
+}
+
+// AttemptTiming reads a query that did not come back against its budget,
+// all from timestamps the attempt already holds. A Slot's query budget
+// starts at its evaluation time and ends at the query deadline; the three
+// numbers split it at the moment the request went out:
+//
+//   - StartLateMillis, from the evaluation time to the request: the part of
+//     the budget spent before the query began - a settling wait, a queue,
+//     a Slot run late;
+//   - BudgetMillis, from the request to the deadline: what the query was
+//     given, zero or less when it began at or past its deadline;
+//   - ElapsedMillis, from the request to its failure: what it used.
+//
+// Elapsed close to the budget with little spent before it is a backend that
+// did not answer in time; a large StartLate leaving a small budget is a
+// query begun late; and the two added together are the whole budget the
+// Plan grants, small when the budget was short to begin with.
+type AttemptTiming struct {
+	StartLateMillis int64
+	BudgetMillis    int64
+	ElapsedMillis   int64
 }
 
 const (
