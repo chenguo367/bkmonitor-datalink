@@ -33,8 +33,10 @@ type Evaluator struct {
 	lookups            admission.BusinessLookups
 	observeAttribution func(source string)
 	// rebuildGuardWindow makes the first record build its own window instead
-	// of taking the guard's. Nothing sets it outside the tests that hold the
-	// two to the same result.
+	// of taking the guard's. It exists for the tests that hold the two to the
+	// same result, and only they set it: no constructor, option or
+	// configuration may, because production setting it would put the second
+	// window build back and gain nothing.
 	rebuildGuardWindow bool
 }
 
