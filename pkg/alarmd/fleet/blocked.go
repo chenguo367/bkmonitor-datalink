@@ -539,10 +539,13 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 			blocked.Code = anomaly.Failure.Code
 		}
 	}
-	// A query whose deadline passed while this deployment was still
-	// delivering what had arrived ran out of time on this side: the timeout
-	// is the query stage's, and no dependency is named for it.
-	if failureThisRound(anomaly) && deliveryTimedOut(anomaly.Failure) {
+	// A round that failed on a query whose deadline passed while this
+	// deployment was still delivering what had arrived ran out of time on
+	// this side: a timeout at the query step, with no dependency named - not
+	// the unlocated step its OTHER code gives, nor the configuration a
+	// source error reads as.
+	if deliveryTimedOutThisRound(anomaly) {
+		blocked.Stage, blocked.Class = StageQuery, ClassTimeout
 		blocked.Dependency, blocked.DependencyEvidence = DependencyNone, dependencyByCode
 	}
 	// A failure writing the round's events is read by its words, not by its

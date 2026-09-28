@@ -11,6 +11,7 @@ package fleet
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -247,49 +248,84 @@ func TestARejectedQueryIsNotFiledAsTheBackendsAvailability(t *testing.T) {
 	}
 }
 
-// A query timeout is read by whose time ran out. One whose deadline passed
-// while this deployment was still delivering what had arrived is its own:
-// the backend was not the one being waited on, and filing it as the backend
-// not answering sends the reader to a dependency that answered. One that ran
-// out inside a read of the body is the backend's, as before the answer
-// began. A delivery timeout kept from an earlier Slot decides nothing for
-// this round.
+// A query timeout is read by whose time ran out. A round that failed on a
+// query whose deadline passed while this deployment was still delivering
+// what had arrived is its own - DEFECT, a timeout at the query step with no
+// dependency - whichever word the round ended with: the failure reaches the
+// row as the grammar publishes it, category other and code OTHER, and only
+// its detail says where the time went. Read by the round's word it was an
+// unnamed failure at no step, or from a source error a dependency down at
+// the configuration step. A timeout that ran out inside a read of the body
+// is the backend's, as before the answer began. A round that went on to
+// complete is read by its completion, and a delivery timeout from an earlier
+// Slot decides nothing for this round.
 func TestADeliveryTimeoutIsThisDeploymentsNotTheBackends(t *testing.T) {
-	failedAt := now.Add(-time.Second)
-	failed := func(detail string, slot int64) Anomaly {
-		return Anomaly{Kind: KindBlockedRun, ReasonCode: "source_error", ReasonLastAt: now, RoundSlot: 1060,
-			Failure: &FailureRef{Stage: "execute", Category: "other", Code: "QUERY_TIMEOUT", Detail: detail, At: &failedAt, Slot: slot}}
-	}
-	for _, testCase := range []struct {
-		name       string
-		anomaly    Anomaly
-		check      Check
-		owner      Owner
-		dependency Dependency
-	}{
-		{"delivery ran out", failed("delivery=timeout", 1060), CheckDefect, OwnerAlarmd, DependencyNone},
-		{"a body read ran out", failed("body=timeout", 1060), CheckBackendNotAnswering, OwnerUndetermined, DependencyUnlocated},
-	} {
-		list := []Anomaly{testCase.anomaly}
-		Attribute(list, now)
-		got := list[0]
-		if got.Finding.Check != testCase.check || got.Finding.Owner != testCase.owner || got.Blocked == nil || got.Blocked.Dependency != testCase.dependency {
-			t.Errorf("%s: finding %s/%s blocked %+v, want %s/%s dependency %q", testCase.name, got.Finding.Check, got.Finding.Owner, got.Blocked,
-				testCase.check, testCase.owner, testCase.dependency)
+	observe := func(tracker *Tracker, at *clock, facts observability.QueryFailureFacts, runOutcome string, rounds int) {
+		for round := 0; round < rounds; round++ {
+			slot := int64(1000 + 60*round)
+			reported := facts
+			tracker.Observe(context.Background(), observability.NormalizeObservation(observability.Observation{
+				Component: observability.ComponentAccess, Stage: observability.StageQueryCompleted, Result: observability.ResultFailed,
+				ReasonCode: observability.ReasonInternalUnknown, Err: errors.New("context deadline exceeded"), QueryFailure: &reported,
+				Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot}}))
+			at.at = at.at.Add(time.Millisecond)
+			if runOutcome == "" {
+				tracker.Observe(context.Background(), observability.Observation{ExecuteOutcome: "error", ReasonCode: "internal_unknown",
+					Err: errors.New("alarmd worker: query: context deadline exceeded"), Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot}})
+			} else {
+				tracker.Observe(context.Background(), observability.Observation{Component: observability.ComponentScheduler, Stage: observability.StageRunnerReturned,
+					Result: observability.ResultTerminal, RunOutcome: runOutcome, Err: errors.New("alarmd worker: query: context deadline exceeded"),
+					Trace: observability.TraceFields{QueryGroupKey: "qg-1", EvaluationTime: slot}})
+			}
+			at.at = at.at.Add(time.Minute)
 		}
 	}
-	stale := []Anomaly{failed("delivery=timeout", 1000)}
-	Attribute(stale, now)
-	if stale[0].Blocked != nil && stale[0].Blocked.Dependency == DependencyNone && stale[0].Blocked.DependencyEvidence == dependencyByCode {
-		t.Errorf("an earlier Slot's delivery timeout named this round's dependency: %+v", stale[0].Blocked)
+	// What the client reports for its own delivery; the grammar publishes the
+	// code as OTHER whatever it is given, which is why the client gives OTHER.
+	delivery := observability.QueryFailureFacts{Stage: "execute", Category: "other", Code: "QUERY_TIMEOUT", Detail: "delivery=timeout"}
+	backend := observability.QueryFailureFacts{Stage: "execute", Category: "provider_transport", Code: "QUERY_TIMEOUT", Detail: "body=timeout"}
+	for _, testCase := range []struct {
+		name       string
+		facts      observability.QueryFailureFacts
+		runOutcome string
+		check      Check
+		dependency Dependency
+	}{
+		{"delivery ran out, execution error", delivery, "", CheckDefect, DependencyNone},
+		{"delivery ran out, source error", delivery, "source_error", CheckDefect, DependencyNone},
+		{"a body read ran out", backend, "", CheckBackendNotAnswering, DependencyUnlocated},
+	} {
+		at := &clock{at: now}
+		tracker := newTracker(t, at)
+		observe(tracker, at, testCase.facts, testCase.runOutcome, DefaultBlockedRounds+1)
+		rows := tracker.Anomalies()
+		Attribute(rows, at.at)
+		if len(rows) != 1 {
+			t.Fatalf("%s: rows = %+v, want the one object", testCase.name, rows)
+		}
+		got := rows[0]
+		if got.Failure == nil || got.Failure.Detail != testCase.facts.Detail || (testCase.facts.Category == "other" && got.Failure.Code != "OTHER") {
+			t.Fatalf("%s: failure = %+v, want the reported detail, and OTHER for category other", testCase.name, got.Failure)
+		}
+		if got.Finding.Check != testCase.check || got.Blocked == nil || got.Blocked.Stage != StageQuery || got.Blocked.Dependency != testCase.dependency ||
+			got.Blocked.Class != ClassTimeout {
+			t.Errorf("%s: finding %s/%s blocked %+v, want %s, a timeout at the query step, dependency %s", testCase.name, got.Finding.Check, got.Finding.Owner, got.Blocked,
+				testCase.check, testCase.dependency)
+		}
 	}
-	// This round completed on the backend's timeout, with an earlier Slot's
-	// delivery timeout still on the row: this round's timeout is the one read.
-	completed := []Anomaly{{Kind: KindDegradedRun, ReasonCode: "COMPLETED_WITH_UNAVAILABLE", CauseReason: "QUERY_TIMEOUT", ReasonLastAt: now, RoundSlot: 1060,
-		Failure: &FailureRef{Stage: "execute", Category: "other", Code: "QUERY_TIMEOUT", Detail: "delivery=timeout", At: &failedAt, Slot: 1000}}}
+
+	failedAt := now.Add(-time.Second)
+	completed := []Anomaly{{Kind: KindDegradedRun, ReasonCode: "COMPLETED_WITH_UNAVAILABLE", CauseReason: "HISTORY_GAPPED", ReasonLastAt: now, RoundSlot: 1060,
+		Failure: &FailureRef{Stage: "execute", Category: "other", Code: "OTHER", Detail: "delivery=timeout", At: &failedAt, Slot: 1060}}}
 	Attribute(completed, now)
-	if got := completed[0].Finding; got.Check != CheckBackendNotAnswering {
-		t.Errorf("a round that timed out on the backend beside an earlier delivery timeout = %s/%s, want %s", got.Check, got.Owner, CheckBackendNotAnswering)
+	if got := completed[0]; got.Finding.Check == CheckDefect || got.Blocked == nil || got.Blocked.Code != "HISTORY_GAPPED" || got.Blocked.Class == ClassTimeout {
+		t.Errorf("a round that completed after a delivery timeout = %s / %+v, want its completion's cause to decide", got.Finding.Check, got.Blocked)
+	}
+	stale := []Anomaly{{Kind: KindBlockedRun, ReasonCode: "source_error", ReasonLastAt: now, RoundSlot: 1060,
+		Failure: &FailureRef{Stage: "execute", Category: "other", Code: "OTHER", Detail: "delivery=timeout", At: &failedAt, Slot: 1000}}}
+	Attribute(stale, now)
+	if got := stale[0]; got.Finding.Check == CheckDefect || (got.Blocked != nil && got.Blocked.Class == ClassTimeout) {
+		t.Errorf("an earlier Slot's delivery timeout = %s / %+v, want it to decide nothing for this round", got.Finding.Check, got.Blocked)
 	}
 }
 

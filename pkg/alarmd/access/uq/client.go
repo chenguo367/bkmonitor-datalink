@@ -283,7 +283,9 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 // read begun before it, alarmd was waiting on the backend: the backend's
 // timeout, body=timeout. Between reads, or in a read begun after it - which
 // only finds out - alarmd was still decoding or delivering what had arrived:
-// delivery=timeout, alarmd's own, never the backend's.
+// delivery=timeout, alarmd's own, never the backend's. That one is category
+// other, whose code the failure grammar publishes as OTHER whatever it is
+// given, so it is given OTHER here: the detail is what names it.
 //
 // It stays an error. Series already handed on were delivered, and a
 // completion cannot describe a body that stopped partway. A failure that
@@ -303,7 +305,7 @@ func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryI
 	case broken && passed(body.failedAt):
 		detail = execution.BodyRouteDetail(execution.TransportFailureTimeout)
 		if passed(body.failedBegan) {
-			category, detail = "other", execution.DeliveryTimeoutRouteDetail
+			category, code, detail = "other", "OTHER", execution.DeliveryTimeoutRouteDetail
 		}
 	case broken:
 		class := classifyTransportFailure(body.failed)
@@ -312,7 +314,7 @@ func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryI
 		}
 		detail = execution.BodyRouteDetail(class)
 	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
-		category, detail = "other", execution.DeliveryTimeoutRouteDetail
+		category, code, detail = "other", "OTHER", execution.DeliveryTimeoutRouteDetail
 	default:
 		return err
 	}

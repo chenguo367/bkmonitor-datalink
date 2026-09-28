@@ -151,7 +151,7 @@ func TestAQueryWhoseBodyStopsPartwayNamesItself(t *testing.T) {
 	_, err = slow.Execute(context.Background(), attempt, &slowSink{delay: 500 * time.Millisecond})
 	failure = bodyFailureOf(t, err)
 	timing = failure.QueryFailureTiming()
-	if category, code := failure.QueryFailure(); category != "other" || code != "QUERY_TIMEOUT" || failure.QueryFailureDetail() != "delivery=timeout" ||
+	if category, code := failure.QueryFailure(); category != "other" || code != "OTHER" || failure.QueryFailureDetail() != "delivery=timeout" ||
 		timing == nil || !whole(timing, attempt) || timing.LocalMillis < 400 || timing.LocalMillis > timing.ElapsedMillis {
 		t.Fatalf("a sink that did not keep up = %s/%s %q timing %+v, want alarmd's own delivery timeout, spent mostly local",
 			category, code, failure.QueryFailureDetail(), timing)
@@ -239,7 +239,7 @@ func TestABodyDeadlineIsNamedForWhoHeldTheTime(t *testing.T) {
 		category, code, detail string
 	}{
 		"a read the deadline ended":       {-time.Second, 10 * time.Millisecond, "provider_transport", "QUERY_TIMEOUT", "body=timeout"},
-		"a read begun after the deadline": {10 * time.Millisecond, 20 * time.Millisecond, "other", "QUERY_TIMEOUT", "delivery=timeout"},
+		"a read begun after the deadline": {10 * time.Millisecond, 20 * time.Millisecond, "other", "OTHER", "delivery=timeout"},
 		"a connection broken before it":   {-2 * time.Second, -time.Second, "provider_transport", "QUERY_UNAVAILABLE", "body=connection_reset"},
 	} {
 		body := &countingReader{failed: syscall.ECONNRESET, failedBegan: deadline.Add(testCase.began), failedAt: deadline.Add(testCase.returned)}
@@ -249,6 +249,13 @@ func TestABodyDeadlineIsNamedForWhoHeldTheTime(t *testing.T) {
 		if category, code := failure.QueryFailure(); category != testCase.category || code != testCase.code || failure.QueryFailureDetail() != testCase.detail {
 			t.Errorf("%s = %s/%s %q, want %s/%s %q", name, category, code, failure.QueryFailureDetail(), testCase.category, testCase.code, testCase.detail)
 		}
+	}
+	// With no deadline at all, nothing expired: a broken connection is the
+	// backend's unavailability whenever its read returned.
+	body := &countingReader{failed: syscall.ECONNRESET, failedBegan: time.Now(), failedAt: time.Now()}
+	err := client.bodyFailure(context.Background(), context.Background(), attempt, fmt.Errorf("decode: %w", syscall.ECONNRESET), body, started, started)
+	if failure := bodyFailureOf(t, err); failure.QueryFailureDetail() != "body=connection_reset" {
+		t.Errorf("a reset under no deadline = %q, want body=connection_reset", failure.QueryFailureDetail())
 	}
 }
 
