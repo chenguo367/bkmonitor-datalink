@@ -482,3 +482,50 @@ func TestAKeptSeriesIsInBucketOrderWithTheLaterRecordOfABucket(t *testing.T) {
 		t.Fatalf("kept %v", got)
 	}
 }
+
+// A Query Group that leaves between Step's ownership check and the moment
+// Step marks the sample running -- Forget from the bundle's removal, here
+// from inside Permit, which sits exactly in that window -- settles the
+// sample once, as owner_lost: its recheck never starts, the permit is given
+// back, and the memory charged returns to zero, not below.
+func TestASampleForgottenWhileStepTakesItIsSettledOnce(t *testing.T) {
+	at := time.Unix(1_700_000_100, 0)
+	var engine *Engine
+	var mu sync.Mutex
+	owned, released := true, 0
+	var err error
+	engine, err = New(Options{Now: func() time.Time { return at }, MemoryBytes: 1 << 20,
+		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			t.Error("the recheck of a forgotten sample started")
+			return execution.ProviderCompletion{}, nil
+		},
+		Owns: func(execution.QueryGroupIdentity) bool { mu.Lock(); defer mu.Unlock(); return owned },
+		Permit: func() (func(), string) {
+			mu.Lock()
+			owned = false
+			mu.Unlock()
+			engine.Forget("qg")
+			return func() { mu.Lock(); released++; mu.Unlock() }, ""
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := engine.Begin(sampledQuery(t, logSpec("q-race"), nil))
+	read.Series(dataset("h1", map[int64]string{60: "1"}), nil)
+	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	at = at.Add(Tiers[0])
+	engine.Step(context.Background())
+	time.Sleep(20 * time.Millisecond)
+	stats := engine.Stats()
+	settled := stats.Samples[SourceLogSearch][OutcomeOwnerLost] + stats.Samples[SourceLogSearch][OutcomeCompleted]
+	if stats.PendingBytes != 0 || stats.Pending != 0 || settled != 1 || stats.Samples[SourceLogSearch][OutcomeOwnerLost] != 1 {
+		t.Fatalf("pending %d bytes %d samples %v, want one owner_lost and nothing charged", stats.Pending, stats.PendingBytes, stats.Samples[SourceLogSearch])
+	}
+	if released != 1 {
+		t.Fatalf("permit released %d times, want once", released)
+	}
+	engine.Step(context.Background())
+	if again := engine.Stats(); again.PendingBytes != 0 || again.Samples[SourceLogSearch][OutcomeOwnerLost] != 1 {
+		t.Fatalf("a later Step settled it again: %+v", again.Samples[SourceLogSearch])
+	}
+}

@@ -158,6 +158,10 @@ type sample struct {
 	bytes      int
 	tier       int
 	running    bool
+	// dropped is set when the sample leaves pending, so a Step that took it
+	// as due before a Forget removed it does not start its recheck, and no
+	// sample is settled twice.
+	dropped bool
 }
 
 // Recent is one recheck that found a difference, kept whole for a reader.
@@ -349,6 +353,10 @@ func (engine *Engine) Forget(queryGroup execution.QueryGroupIdentity) {
 }
 
 func (engine *Engine) dropLocked(candidate *sample, outcome string) {
+	if candidate.dropped {
+		return
+	}
+	candidate.dropped = true
 	engine.bytes -= candidate.bytes
 	engine.counts.samples[key2(candidate.source, outcome)]++
 }
@@ -408,6 +416,13 @@ func (engine *Engine) Step(ctx context.Context) {
 			break
 		}
 		engine.mu.Lock()
+		if candidate.dropped {
+			// Forgotten between the ownership check and here: the Query
+			// Group left, and its sample was settled as owner_lost.
+			engine.mu.Unlock()
+			release()
+			continue
+		}
 		candidate.running = true
 		engine.mu.Unlock()
 		go engine.recheck(ctx, candidate, release)
@@ -452,6 +467,10 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	age := started.Sub(candidate.windowEnd)
 	engine.mu.Lock()
 	defer engine.mu.Unlock()
+	candidate.running = false
+	if candidate.dropped {
+		return
+	}
 	engine.counts.rechecks[key3(candidate.source, tier, outcome)]++
 	if outcome == RecheckCompared {
 		engine.counts.record(candidate.source, tier, ageBucket(age), result)
@@ -461,7 +480,6 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 				Judgments: result.judgments, Examples: result.examples, At: started})
 		}
 	}
-	candidate.running = false
 	if !engine.advanceLocked(candidate) {
 		kept := engine.pending[:0]
 		for _, other := range engine.pending {

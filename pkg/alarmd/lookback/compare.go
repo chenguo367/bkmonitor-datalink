@@ -218,7 +218,9 @@ func compare(first, recheck readSet, plans []planCheck) comparison {
 
 // judge counts, for every Plan that admitted the series and can be decided
 // from a value, how each Level's verdict moved. v0 nil is a bucket the first
-// read did not have.
+// read did not have. The admission mask has 64 bits: a query feeding more
+// than 64 Plans judges its first 64 and compares the rest as data only,
+// which a log query's Plans do not come near.
 func (result *comparison) judge(plans []planCheck, admitted uint64, v0, v1 []byte) {
 	for index, plan := range plans {
 		if index >= 64 || admitted&(1<<uint(index)) == 0 || !plan.comparable {
