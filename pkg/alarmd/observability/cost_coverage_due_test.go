@@ -294,3 +294,27 @@ func TestWhatWasDueAndWentUnseenIsNamedWithItsGroupsCounts(t *testing.T) {
 		t.Fatalf("a window with nothing unseen names %+v", sample)
 	}
 }
+
+// The sample is kept as the misses are found, never more than its bound:
+// twenty misses arriving last first leave exactly the first eight in order,
+// and one that sorts after all eight is not kept.
+func TestTheSampleKeepsTheFirstMissesAsTheyArrive(t *testing.T) {
+	var kept []CostDueMiss
+	for i := 19; i >= 0; i-- {
+		kept = keepDueMiss(kept, CostDueMiss{Scope: "query_group", QueryGroupKey: string(rune('a' + i))})
+		if len(kept) > costDueMissSampleLimit {
+			t.Fatalf("kept %d, want at most %d", len(kept), costDueMissSampleLimit)
+		}
+	}
+	if len(kept) != costDueMissSampleLimit {
+		t.Fatalf("kept %d, want %d", len(kept), costDueMissSampleLimit)
+	}
+	for i, miss := range kept {
+		if miss.QueryGroupKey != string(rune('a'+i)) {
+			t.Fatalf("kept %+v, want a..h in order", kept)
+		}
+	}
+	if after := keepDueMiss(kept, CostDueMiss{Scope: "query_group", QueryGroupKey: "z"}); len(after) != costDueMissSampleLimit || after[costDueMissSampleLimit-1].QueryGroupKey != "h" {
+		t.Fatalf("a miss after all eight changed the sample: %+v", after)
+	}
+}
