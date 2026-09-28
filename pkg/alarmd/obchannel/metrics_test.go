@@ -136,6 +136,13 @@ func TestMetricsGetSaysWhenACollectorFailedAndKeepsNonFiniteValues(t *testing.T)
 	if len(result.Families) != 2 || *result.Families[0].Series[0].Value != 64 || result.Families[1].Series[0].NonFinite != "NaN" {
 		t.Errorf("families = %+v", result.Families)
 	}
+	// The failed collector's family is registered and was not read: it is
+	// unrecorded, and the read does not call it a counter that never moved.
+	limits := strings.Join(out.Evidence.Limitations, "\n")
+	if len(result.Unrecorded) != 1 || result.Unrecorded[0] != "bkmonitor_alarmd_broken_total" || len(result.Absent) != 0 ||
+		!strings.Contains(limits, "were not read") || strings.Contains(limits, "has not moved") {
+		t.Errorf("unrecorded %v absent %v limitations %q, want the unread family said to be unread", result.Unrecorded, result.Absent, limits)
+	}
 	// Asked only for families that answered, the read is still not
 	// complete: which families the failed collector owns is not known.
 	if _, out, only := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_redis_pool_size"}}); out.Evidence.Complete || len(only.Absent) != 0 || only.GatherError == "" {

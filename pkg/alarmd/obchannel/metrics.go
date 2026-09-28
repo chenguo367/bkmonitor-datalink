@@ -95,8 +95,9 @@ type MetricsResult struct {
 	Unrecorded []string       `json:"unrecorded,omitempty"`
 	// GatherError is the registry's error when some collector failed and
 	// the rest answered. A family that collector owns is then missing from
-	// Families and listed under Absent, and Absent no longer proves the
-	// family is not registered.
+	// Families: under Unrecorded when the registry describes it, under
+	// Absent when it cannot describe itself. Either way it was not read,
+	// and Unrecorded no longer proves the counter has not moved.
 	GatherError string `json:"gather_error,omitempty"`
 }
 
@@ -162,7 +163,7 @@ func MetricsOperations(gatherer prometheus.Gatherer) []Operation {
 			}
 			out := Outcome{Value: result, Complete: !result.Truncated && result.GatherError == "",
 				Summary:     fmt.Sprintf("应答进程注册了 %d 个匹配的 alarmd 指标族", result.Matched),
-				Limitations: []string{"Families are this process's registry; another replica is read by targeting it. A family a failed collector owns is missing; see gather_error."}}
+				Limitations: []string{"Families are this process's registry; another replica is read by targeting it. A family a failed collector owns is listed with no series; see gather_error."}}
 			if result.Truncated {
 				out.Limitations = append(out.Limitations, "More families match than are listed; narrow with contains.")
 			}
@@ -213,7 +214,10 @@ func MetricsOperations(gatherer prometheus.Gatherer) []Operation {
 			if len(result.Absent) > 0 {
 				out.Next = append(out.Next, Call{Operation: "metrics.list", Params: Params{}, Reason: "有名字不在应答进程的注册表里；从这里查到确切的族名再读。"})
 			}
-			if len(result.Unrecorded) > 0 {
+			switch {
+			case len(result.Unrecorded) > 0 && result.GatherError != "":
+				out.Limitations = append(out.Limitations, "Unrecorded families are registered and were not read: a collector failed, so one may simply have gone unread rather than never moved; see gather_error.")
+			case len(result.Unrecorded) > 0:
 				out.Limitations = append(out.Limitations, "Unrecorded families are registered and have no series since this process started: a counter there has not moved.")
 			}
 			for _, family := range result.Families {
