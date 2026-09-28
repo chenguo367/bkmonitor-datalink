@@ -23,6 +23,48 @@ func TestQueryFailureWrappedBudgetWinsOverProviderDiagnostic(t *testing.T) {
 	}
 }
 
+// A provider whose answer stopped partway reaches the failure facts as the
+// timeout it was, beside its body detail and its timing, and the line's
+// reason is that timeout rather than internal_unknown - through the Source's
+// wrapping, which is how the error arrives. Another category keeps the
+// reason it had.
+func TestABodyThatStoppedPartwayReportsItsTimeoutAndTiming(t *testing.T) {
+	var got observability.Observation
+	c := &SlotExecutionCoordinator{ports: Ports{Observer: observability.ObserverFunc(func(_ context.Context, o observability.Observation) { got = observability.NormalizeObservation(o) })}}
+	timing := execution.AttemptTiming{SettleMillis: 30_000, StartLateMillis: 1_000, BudgetMillis: 9_000, ElapsedMillis: 9_004, LocalMillis: 7_500}
+	named := fmt.Errorf("alarmd access: execute physical query: %w", providerBodyError{error: errors.New("context deadline exceeded"), timing: timing})
+	c.observeQueryFailure(context.Background(), execution.OperationNormal, time.Now(), "execute", named)
+	want := observability.QueryTiming{SettleMillis: 30_000, StartLateMillis: 1_000, BudgetMillis: 9_000, ElapsedMillis: 9_004, LocalMillis: 7_500}
+	if got.QueryFailure == nil || got.QueryFailure.Category != observability.QueryFailureCategoryProviderTransport ||
+		got.QueryFailure.Code != contract.ReasonQueryTimeout || got.QueryFailure.Detail != "body=timeout" ||
+		got.QueryFailure.Timing == nil || *got.QueryFailure.Timing != want {
+		t.Fatalf("failure facts = %+v, want the body timeout with its detail and timing %+v", got.QueryFailure, want)
+	}
+	if got.ReasonCode != observability.ReasonCode(contract.ReasonQueryTimeout) {
+		t.Fatalf("reason = %q, want the provider's timeout", got.ReasonCode)
+	}
+
+	c.observeQueryFailure(context.Background(), execution.OperationNormal, time.Now(), "execute", providerLikeBudgetError{errors.New("status")})
+	if got.ReasonCode != observability.ReasonInternalUnknown || got.QueryFailure.Timing != nil {
+		t.Fatalf("a source_backend failure = reason %q timing %+v, want its reason unchanged and no timing", got.ReasonCode, got.QueryFailure.Timing)
+	}
+}
+
+type providerBodyError struct {
+	error
+	timing execution.AttemptTiming
+}
+
+func (e providerBodyError) Unwrap() error { return e.error }
+func (providerBodyError) QueryFailure() (string, string) {
+	return observability.QueryFailureCategoryProviderTransport, contract.ReasonQueryTimeout
+}
+func (providerBodyError) QueryFailureDetail() string { return "body=timeout" }
+func (e providerBodyError) QueryFailureTiming() *execution.AttemptTiming {
+	timing := e.timing
+	return &timing
+}
+
 type providerLikeBudgetError struct{ error }
 
 func (e providerLikeBudgetError) Unwrap() error { return e.error }

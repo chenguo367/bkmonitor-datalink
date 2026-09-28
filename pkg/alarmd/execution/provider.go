@@ -199,12 +199,16 @@ type RouteAttemptFact struct {
 //     lost before the query began - a queue, a permit, a Slot run late;
 //   - BudgetMillis, from the request to the deadline: what the query was
 //     given, zero or less when it began at or past its deadline;
-//   - ElapsedMillis, from the request to its failure: what it used.
+//   - ElapsedMillis, from the request to its failure: what it used;
+//   - LocalMillis, the part of that alarmd spent decoding and delivering
+//     what had arrived of the answer, zero for a failure before any answer.
+//     The rest of Elapsed was waiting on the backend.
 //
 // The first three add up to the whole budget exactly. Elapsed close to the
-// budget with little lost before it is a backend that did not answer in
-// time; a large StartLate leaving a small budget is a query begun late; and
-// a small whole is a budget short to begin with.
+// budget, with little lost before it and little of it local, is a backend
+// that did not answer in time; most of it local is alarmd's own delivery
+// that did not keep up; a large StartLate leaving a small budget is a query
+// begun late; and a small whole is a budget short to begin with.
 //
 // The deadline is the attempt's, not the caller's: a caller whose own
 // deadline runs out first ends the query as an error, not as a failed
@@ -214,12 +218,16 @@ type AttemptTiming struct {
 	StartLateMillis int64
 	BudgetMillis    int64
 	ElapsedMillis   int64
+	LocalMillis     int64
 }
 
 const (
 	RouteDetailKindHTTPStatus = "http_status"
 	RouteDetailKindTransport  = "transport"
 	RouteDetailKindResponse   = "response"
+	// RouteDetailKindBody is a transport failure after the answer began: the
+	// response's status was read and its body did not arrive in full.
+	RouteDetailKindBody = "body"
 
 	ResponseFailureIsPartialMissing = "is_partial_missing"
 	// ResponseFailureStatusPrefix precedes the lower-cased UQ status code of a
@@ -255,6 +263,12 @@ func TransportRouteDetail(class string) string {
 	default:
 		return RouteDetailKindTransport + "=" + TransportFailureOther
 	}
+}
+
+// BodyRouteDetail encodes a transport failure while a response's body was
+// being read, in the same bounded classes as TransportRouteDetail.
+func BodyRouteDetail(class string) string {
+	return RouteDetailKindBody + strings.TrimPrefix(TransportRouteDetail(class), RouteDetailKindTransport)
 }
 
 // ResponseRouteDetail encodes a 200 response that violated the wire contract
