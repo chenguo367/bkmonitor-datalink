@@ -24,7 +24,23 @@ type RuntimeConfigFacts struct {
 	// file no longer answers it. Addresses and databases only: this surface is
 	// credential-free by contract.
 	Storage RuntimeStorageFacts `json:"storage"`
-	Digest  string              `json:"runtime_config_digest"`
+	// Linkd is the alert link's settings that decide what this process does,
+	// credential-free: whether a close it can send is armed is otherwise
+	// readable only from the configuration file it was started with.
+	Linkd  RuntimeLinkdFacts `json:"linkd"`
+	Digest string            `json:"runtime_config_digest"`
+}
+
+// RuntimeLinkdFacts is what the alert link's configuration switches on: the
+// Console configured or not, the event source and hook the link's target is
+// narrowed to, and whether the close for strategies that no longer exist
+// sends (absent_close_send; false takes the difference and sends nothing).
+// No address, username or password.
+type RuntimeLinkdFacts struct {
+	ConsoleConfigured bool   `json:"console_configured"`
+	EventSourceID     string `json:"event_source_id,omitempty"`
+	HookName          string `json:"hook_name,omitempty"`
+	AbsentCloseSend   bool   `json:"absent_close_send"`
 }
 
 type RuntimeStorageFacts struct {
