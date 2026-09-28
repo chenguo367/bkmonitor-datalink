@@ -20,6 +20,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access"
 	accessuq "github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/access/uq"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/cmdbcache"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -681,10 +682,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
-	// One host lookup for both readers of a host's business: the no-data
-	// roster and a global business Plan's event attribution.
+	// One lookup over the CMDB index for both readers of a host's business -
+	// the no-data roster and a global business Plan's event attribution -
+	// and for the cluster mapping read in the same snapshot.
 	hostBusiness := cmdbcache.NewHostBusinessLookup(cmdbIndex)
-	evaluator.WithBusinessAttribution(hostBusiness, recorder.ObserveEventBusinessAttribution)
+	evaluator.WithBusinessAttribution(admission.BusinessLookups{Hosts: hostBusiness, Clusters: hostBusiness}, recorder.ObserveEventBusinessAttribution)
 	sequencer, err := worker.NewKeyedSideEffectSequencer(cfg.PhaseTwo.Coordinator.MaxSequencerReservations)
 	if err != nil {
 		return nil, err

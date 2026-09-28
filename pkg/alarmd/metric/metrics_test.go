@@ -293,6 +293,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_unmapped_severity_total":                      "variableLabels: {level}",
 		"bkmonitor_alarmd_cmdb_host_index_hosts":                        "variableLabels: {}",
 		"bkmonitor_alarmd_cmdb_service_instance_index_instances":        "variableLabels: {}",
+		"bkmonitor_alarmd_cmdb_index_bcs_cluster_businesses":            "variableLabels: {state}",
 		"bkmonitor_alarmd_fleet_snapshot_bytes":                         "variableLabels: {}",
 		"bkmonitor_alarmd_fleet_view_snapshot_loads_total":              "variableLabels: {}",
 		"bkmonitor_alarmd_fleet_view_snapshot_bytes_total":              "variableLabels: {}",
@@ -804,6 +805,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("unmapped_severity_total"):               65,
 		fqName("cmdb_host_index_hosts"):                 1,
 		fqName("cmdb_service_instance_index_instances"): 1,
+		fqName("cmdb_index_bcs_cluster_businesses"):     len(CMDBClusterBusinessStates),
 		fqName("fleet_snapshot_bytes"):                  1,
 		fqName("fleet_view_snapshot_loads_total"):       1,
 		fqName("fleet_view_snapshot_bytes_total"):       1,
@@ -1325,5 +1327,19 @@ func TestDiagnosticRedisFailuresAreCountedByReason(t *testing.T) {
 	}
 	if counts["auth/connection_closed"] != 1 || counts["auth/other"] != 1 || len(counts) != len(DiagnosticRedisClients)*len(redisfailure.Reasons) {
 		t.Fatalf("counts %v", counts)
+	}
+}
+
+// The cluster mapping's three states exist from startup, so a zero held is
+// a count of clusters and not a series nobody registered.
+func TestTheClusterBusinessGaugeHasEveryStateFromStartup(t *testing.T) {
+	r := NewRecorder(BuildInfo{})
+	r.SetCMDBClusterBusinessIndex(3, 1, 0)
+	values := map[string]float64{}
+	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_cmdb_index_bcs_cluster_businesses") {
+		values[m.GetLabel()[0].GetValue()] = m.GetGauge().GetValue()
+	}
+	if len(values) != len(CMDBClusterBusinessStates) || values["held"] != 3 || values["refused"] != 1 || values["truncated"] != 0 {
+		t.Fatalf("gauge = %v, want held 3, refused 1, truncated 0", values)
 	}
 }

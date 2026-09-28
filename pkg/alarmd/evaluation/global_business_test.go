@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/admission"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -57,7 +58,7 @@ func clusterRecord(value string) []contract.CanonicalRecordV2 {
 // its identity - stays the Plan's.
 func TestAGlobalBusinessThresholdEventIsAttributedWhereItIsBuilt(t *testing.T) {
 	observe, sources := recordingAttribution()
-	evaluator := newEvaluator(t).WithBusinessAttribution(nil, observe)
+	evaluator := newEvaluator(t).WithBusinessAttribution(admission.BusinessLookups{}, observe)
 	plan := compiledWindowEdited(t, 1, 1, nil, false, withTarget(true))
 	result, err := evaluator.Evaluate(context.Background(), requestFixtureForPlan(t, plan, clusterRecord(`60`), nil))
 	if err != nil {
@@ -79,7 +80,7 @@ func TestAGlobalBusinessThresholdEventIsAttributedWhereItIsBuilt(t *testing.T) {
 // an event with no attribution, and nothing is counted.
 func TestAnOrdinaryPlansEventIsNotAttributed(t *testing.T) {
 	observe, sources := recordingAttribution()
-	evaluator := newEvaluator(t).WithBusinessAttribution(nil, observe)
+	evaluator := newEvaluator(t).WithBusinessAttribution(admission.BusinessLookups{}, observe)
 	plan := compiledWindowEdited(t, 1, 1, nil, false, withTarget(false))
 	result, err := evaluator.Evaluate(context.Background(), requestFixtureForPlan(t, plan, clusterRecord(`60`), nil))
 	if err != nil {
@@ -95,7 +96,7 @@ func TestAnOrdinaryPlansEventIsNotAttributed(t *testing.T) {
 // the same attribution: the group's static target names its business.
 func TestAGlobalBusinessNoDataEventIsAttributedToItsGroupsTarget(t *testing.T) {
 	observe, sources := recordingAttribution()
-	evaluator := newEvaluator(t).WithBusinessAttribution(nil, observe)
+	evaluator := newEvaluator(t).WithBusinessAttribution(admission.BusinessLookups{}, observe)
 	plan := compiledWindowEdited(t, 1, 1, &contract.NoDataConfigV1{Continuous: 1, Level: 2}, false, withTarget(true))
 	result, err := evaluator.Evaluate(context.Background(),
 		noDataRequestFixtureOnGroup(t, plan, 1, 100, map[string]string{"bcs_cluster_id": "cluster-a"}))

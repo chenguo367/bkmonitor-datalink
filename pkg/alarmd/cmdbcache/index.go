@@ -34,6 +34,16 @@ const (
 	topoCacheSuffix            = "cache.cmdb.topo"
 	hostTopoRefreshedField     = "cache.cmdb_last_refresh_all_time.host_topo"
 	scanBatch                  = int64(1000)
+	// clusterBusinessCacheSuffix is the BCS cluster -> business hash the
+	// platform's CMDB cache writer publishes beside the host hash, in the
+	// same round: field the cluster id, value the business id in decimal.
+	clusterBusinessCacheSuffix = "cache.cmdb.bcs_cluster_business"
+	// MaxClusterBusinesses bounds the clusters one load keeps. A tenant has
+	// clusters by the hundreds, a large one by the thousands; a hash past
+	// this is not a cluster list, and loading it whole would put an
+	// unbounded writer mistake into every replica's memory. Clusters past
+	// the bound are counted as truncated and attribute as unmapped.
+	MaxClusterBusinesses = 1 << 16
 )
 
 // HostFacts is what enrichment knows about one host.
@@ -103,6 +113,15 @@ type Index struct {
 	modelledHosts     int
 	builtAt           time.Time
 	sourceRefreshedAt time.Time
+	// clusterBusiness is the business of each BCS cluster the writer
+	// published, by cluster id: how a global business Plan's event on
+	// Kubernetes data that names no business finds the one it belongs to.
+	// Read in the same load as the hosts. clusterBusinessRefused counts
+	// fields whose business was not a positive integer, and
+	// clusterBusinessTruncated the clusters past MaxClusterBusinesses.
+	clusterBusiness          map[string]string
+	clusterBusinessRefused   int
+	clusterBusinessTruncated int
 }
 
 // LookupModelInstance finds the host carrying the canonical (model,
@@ -210,6 +229,25 @@ func (index *Index) Lookup(key string) (*HostFacts, bool) {
 	return facts, found
 }
 
+// LookupClusterBusiness is the business the writer published for one BCS
+// cluster, and false for a cluster it did not publish.
+func (index *Index) LookupClusterBusiness(clusterID string) (string, bool) {
+	if index == nil || clusterID == "" {
+		return "", false
+	}
+	business, found := index.clusterBusiness[clusterID]
+	return business, found
+}
+
+// ClusterBusinesses is how many clusters the held mapping holds; refused
+// and truncated are the fields the load left out, by why.
+func (index *Index) ClusterBusinesses() (held, refused, truncated int) {
+	if index == nil {
+		return 0, 0, 0
+	}
+	return len(index.clusterBusiness), index.clusterBusinessRefused, index.clusterBusinessTruncated
+}
+
 // LookupServiceInstance resolves one service-instance id.
 func (index *Index) LookupServiceInstance(id string) (*ServiceInstanceFacts, bool) {
 	if index == nil || id == "" {
@@ -255,6 +293,10 @@ func (reader *Reader) topoKey() string {
 	return reader.prefix + "." + topoCacheSuffix
 }
 
+func (reader *Reader) clusterBusinessKey() string {
+	return reader.prefix + "." + clusterBusinessCacheSuffix
+}
+
 // Load builds a fresh index. It streams the hash rather than reading it whole:
 // the host cache is a single large hash shared with the platform, and a
 // blocking full read of it would stall every other reader.
@@ -280,6 +322,14 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 		return nil, fmt.Errorf("alarmd cmdbcache: read topology cache: %w", err)
 	}
 	builder.addTopologyNodes(nodes)
+	// The cluster mapping is a small hash the same writer publishes in the
+	// same round as the hosts, read into the same snapshot so a host and a
+	// cluster are never attributed from two refreshes. An absent hash is a
+	// writer that does not publish it yet: no cluster is mapped, and every
+	// event that would have used one is counted as unmapped.
+	if err := reader.scan(ctx, reader.clusterBusinessKey(), builder.addClusterBusinessFields); err != nil {
+		return nil, fmt.Errorf("alarmd cmdbcache: scan BCS cluster business cache: %w", err)
+	}
 	index := builder.index
 
 	if refreshed, err := reader.client.Get(ctx, reader.refreshedKey()).Result(); err == nil {
@@ -319,6 +369,36 @@ func newIndexBuilder(now time.Time) *indexBuilder {
 			byModelInstance: make(map[string]*HostFacts),
 		},
 		seen: make(map[string]*HostFacts),
+	}
+}
+
+// addClusterBusinessFields records one page of the cluster mapping: field,
+// value pairs. A business that is not a positive integer is refused - the
+// writer leaves such clusters out, so one here is a writer defect - and a
+// cluster past the bound is truncated; both are counted, neither is kept.
+func (builder *indexBuilder) addClusterBusinessFields(fields []string) {
+	if builder.index.clusterBusiness == nil {
+		builder.index.clusterBusiness = make(map[string]string)
+	}
+	for index := 0; index+1 < len(fields); index += 2 {
+		cluster := strings.TrimSpace(fields[index])
+		if cluster == "" {
+			builder.index.clusterBusinessRefused++
+			continue
+		}
+		if _, seen := builder.index.clusterBusiness[cluster]; seen {
+			continue
+		}
+		business, err := strconv.ParseInt(strings.TrimSpace(fields[index+1]), 10, 64)
+		if err != nil || business <= 0 {
+			builder.index.clusterBusinessRefused++
+			continue
+		}
+		if len(builder.index.clusterBusiness) >= MaxClusterBusinesses {
+			builder.index.clusterBusinessTruncated++
+			continue
+		}
+		builder.index.clusterBusiness[cluster] = strconv.FormatInt(business, 10)
 	}
 }
 

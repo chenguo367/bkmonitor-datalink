@@ -26,20 +26,21 @@ type Evaluator struct {
 	detect  *detect.Evaluator
 	limits  Limits
 	samples *observability.SeriesSampler
-	// hosts and observeAttribution serve global business Plans: the host
-	// cache their host targets attribute an event through, and the counter
-	// of where each attribution came from. Both may be nil; a nil host cache
-	// attributes a host target's event as a host the cache does not hold.
-	hosts              admission.HostBusinessReader
+	// lookups and observeAttribution serve global business Plans: the host
+	// cache and the cluster mapping an event is attributed through, and the
+	// counter of where each attribution came from. Any may be nil; a nil
+	// cache answers for nothing it would have held.
+	lookups            admission.BusinessLookups
 	observeAttribution func(source string)
 }
 
 // WithBusinessAttribution gives the evaluator what a global business Plan's
-// events are attributed through: the host cache, read when the event is
-// built, and a callback counting each attribution by its source.
-func (e *Evaluator) WithBusinessAttribution(hosts admission.HostBusinessReader, observe func(source string)) *Evaluator {
+// events are attributed through: the host cache and the cluster mapping,
+// read when the event is built, and a callback counting each attribution by
+// its source.
+func (e *Evaluator) WithBusinessAttribution(lookups admission.BusinessLookups, observe func(source string)) *Evaluator {
 	if e != nil {
-		e.hosts, e.observeAttribution = hosts, observe
+		e.lookups, e.observeAttribution = lookups, observe
 	}
 	return e
 }
@@ -53,7 +54,7 @@ func (e *Evaluator) attributeBusiness(event *contract.TriggerEventV1, plan *stra
 		return
 	}
 	attribution := admission.AttributeBusiness(
-		plan.TargetPlan(), plan.Projection().DimensionFields, event.BusinessID, event.RecordRef.Dimensions, e.hosts,
+		plan.TargetPlan(), plan.Projection().DimensionFields, event.BusinessID, event.RecordRef.Dimensions, e.lookups,
 	)
 	event.AttributedBusinessID = attribution.BusinessID
 	if e.observeAttribution != nil {

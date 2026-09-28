@@ -43,6 +43,17 @@ func (lookup *HostBusinessLookup) LookupHostBusiness(identity string) (string, b
 	return facts.BusinessID, true
 }
 
+// LookupClusterBusiness returns the business the platform published for one
+// BCS cluster, from the current snapshot, and false when it published none.
+// It is asked when a global business Plan's event on Kubernetes data names
+// no business of its own.
+func (lookup *HostBusinessLookup) LookupClusterBusiness(clusterID string) (string, bool) {
+	if lookup == nil || lookup.store == nil {
+		return "", false
+	}
+	return lookup.store.Current().LookupClusterBusiness(clusterID)
+}
+
 // HostIndexResolved reports whether there is an index behind those answers.
 //
 // It exists because the safe direction above is only safe for one host. Asked

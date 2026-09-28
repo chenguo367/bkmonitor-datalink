@@ -103,6 +103,20 @@ func (r *Recorder) SetCMDBServiceInstanceIndex(instances int) {
 	r.phaseTwo.cmdbIndexServiceInstances.Set(float64(instances))
 }
 
+// CMDBClusterBusinessStates are the states of the cluster mapping's gauge.
+var CMDBClusterBusinessStates = []string{"held", "refused", "truncated"}
+
+// SetCMDBClusterBusinessIndex publishes the BCS cluster -> business mapping
+// the index holds, and what its load left out.
+func (r *Recorder) SetCMDBClusterBusinessIndex(held, refused, truncated int) {
+	if r == nil || r.phaseTwo.cmdbIndexClusterBusinesses == nil {
+		return
+	}
+	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("held").Set(float64(held))
+	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("refused").Set(float64(refused))
+	r.phaseTwo.cmdbIndexClusterBusinesses.WithLabelValues("truncated").Set(float64(truncated))
+}
+
 // SnapshotPublished records the size of the fleet snapshot this replica just
 // published; SnapshotsLoaded records one fleet view read and the bytes it
 // pulled. Together they make the fleet store's Redis traffic readable on

@@ -18,6 +18,20 @@ type HostBusinessReader interface {
 	LookupHostBusiness(identity string) (string, bool)
 }
 
+// ClusterBusinessReader is the platform's published BCS cluster -> business
+// mapping, asked by cluster id.
+type ClusterBusinessReader interface {
+	LookupClusterBusiness(clusterID string) (string, bool)
+}
+
+// BusinessLookups are the caches attribution reads, each at the moment it
+// is asked. Either may be nil: a nil host cache holds no host, and a nil
+// cluster mapping maps no cluster.
+type BusinessLookups struct {
+	Hosts    HostBusinessReader
+	Clusters ClusterBusinessReader
+}
+
 // BusinessAttribution is what a global business Plan's event is filed
 // under, and where that came from (one of contract.BusinessAttributionSources).
 type BusinessAttribution struct {
@@ -38,25 +52,48 @@ type BusinessAttribution struct {
 //     target the record's key matches.
 //  2. The bk_biz_id aggregation dimension, when the strategy groups by it
 //     and the record carries a business there.
-//  3. The Plan's own business: a strategy that neither targets nor groups by
-//     business aggregates across businesses, and its alert is the global
-//     business's own.
+//  3. The record's bcs_cluster_id, when the strategy groups by it: the
+//     business the platform published for that cluster. A cluster the
+//     mapping does not hold is filed under the global business and counted
+//     as unmapped, apart from a record that named no cluster at all.
+//  4. The Plan's own business: a strategy that neither targets nor groups by
+//     business or cluster aggregates across businesses, and its alert is the
+//     global business's own.
 //
-// The host is looked up now, not when the record was admitted: a host cache
-// refreshed in between answers with the host's current business.
+// The caches are read now, not when the record was admitted: a host cache
+// or a mapping refreshed in between answers with the current business.
 func AttributeBusiness(
 	target *contract.TargetPlanV1, dimensionFields []string, planBusiness string,
-	dimensions map[string]json.RawMessage, hosts HostBusinessReader,
+	dimensions map[string]json.RawMessage, lookups BusinessLookups,
 ) BusinessAttribution {
-	if business, found := targetBusiness(target, dimensions, hosts); found {
+	if business, found := targetBusiness(target, dimensions, lookups.Hosts); found {
 		return BusinessAttribution{BusinessID: business, Source: contract.BusinessAttributionTarget}
 	}
-	if groupsByBusiness(dimensionFields) {
+	if groupsBy(dimensionFields, contract.BusinessDimension) {
 		if business, found := canonicalBusiness(dimensionText(dimensions, contract.BusinessDimension)); found {
 			return BusinessAttribution{BusinessID: business, Source: contract.BusinessAttributionDimension}
 		}
 	}
+	if groupsBy(dimensionFields, contract.ClusterDimension) {
+		if cluster := dimensionText(dimensions, contract.ClusterDimension); cluster != "" {
+			if business, found := clusterBusiness(lookups.Clusters, cluster); found {
+				return BusinessAttribution{BusinessID: business, Source: contract.BusinessAttributionCluster}
+			}
+			return BusinessAttribution{BusinessID: planBusiness, Source: contract.BusinessAttributionUnmapped}
+		}
+	}
 	return BusinessAttribution{BusinessID: planBusiness, Source: contract.BusinessAttributionGlobal}
+}
+
+func clusterBusiness(clusters ClusterBusinessReader, cluster string) (string, bool) {
+	if clusters == nil {
+		return "", false
+	}
+	business, found := clusters.LookupClusterBusiness(cluster)
+	if !found {
+		return "", false
+	}
+	return canonicalBusiness(business)
 }
 
 func targetBusiness(target *contract.TargetPlanV1, dimensions map[string]json.RawMessage, hosts HostBusinessReader) (string, bool) {
@@ -86,9 +123,9 @@ func targetBusiness(target *contract.TargetPlanV1, dimensions map[string]json.Ra
 	return target.StaticBusiness(key)
 }
 
-func groupsByBusiness(dimensionFields []string) bool {
+func groupsBy(dimensionFields []string, dimension string) bool {
 	for _, field := range dimensionFields {
-		if field == contract.BusinessDimension {
+		if field == dimension {
 			return true
 		}
 	}

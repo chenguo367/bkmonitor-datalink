@@ -188,6 +188,7 @@ type phaseTwoMetrics struct {
 	seriesAdmission                 *prometheus.CounterVec
 	cmdbIndexHosts                  prometheus.Gauge
 	cmdbIndexServiceInstances       prometheus.Gauge
+	cmdbIndexClusterBusinesses      *prometheus.GaugeVec
 	fleetSnapshotBytes              prometheus.Gauge
 	fleetViewSnapshotLoads          prometheus.Counter
 	fleetViewSnapshotBytes          prometheus.Counter
@@ -1294,10 +1295,14 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "event_business_attribution_total",
 		Help: "Events of global business strategies by where the business they are filed under came from: " +
 			"target (the host's business, or the business configured on the matched Kubernetes static target), " +
-			"dimension (the record's bk_biz_id aggregation dimension), global (neither answered, so the global " +
-			"business itself). A strategy that configures a target or a business dimension and still lands on " +
-			"global relied on a business the host cache or the data did not have. Counted once per event built, " +
-			"where it is built; a retried Slot counts again. Every other strategy's events are not counted.",
+			"dimension (the record's bk_biz_id aggregation dimension), cluster (the business the platform " +
+			"published for the record's bcs_cluster_id), unmapped (the record named a cluster the published " +
+			"mapping does not hold, so the global business), global (nothing answered, so the global business " +
+			"itself). A strategy that configures a target or a business dimension and still lands on global or " +
+			"unmapped relied on a business the caches or the data did not have. Counted once per event built, " +
+			"where it is built and before the output decides whether to send it: an event the sink then drops " +
+			"is counted, so this is events built, not events sent; a retried Slot counts again. Every other " +
+			"strategy's events are not counted.",
 	}, []string{"source"})
 	for _, source := range contract.BusinessAttributionSources {
 		metrics.eventBusinessAttribution.WithLabelValues(source)
@@ -1383,6 +1388,17 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 		Help: "Service instances in the in-memory CMDB index the target filter decides on; zero while a series " +
 			"names an instance is an instance cache nobody writes, and such series are admitted with the gap named.",
 	})
+	metrics.cmdbIndexClusterBusinesses = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_index_bcs_cluster_businesses",
+		Help: "The BCS cluster -> business mapping in the in-memory CMDB index, read in the same load as the " +
+			"hosts, by state: held (clusters a global business strategy's Kubernetes events can be attributed " +
+			"through), refused (fields whose business was not a positive integer), truncated (clusters past the " +
+			"load bound). Zero held is a writer that does not publish the mapping yet; every event that would " +
+			"have used it is then counted as unmapped in event_business_attribution_total.",
+	}, []string{"state"})
+	for _, state := range CMDBClusterBusinessStates {
+		metrics.cmdbIndexClusterBusinesses.WithLabelValues(state)
+	}
 	// The fleet snapshot this replica publishes, and the snapshots every
 	// fleet view read pulls. A view is one MGET over every replica's
 	// snapshot on the replica that answers, and it is read on every page
@@ -1638,7 +1654,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.leaderForward, m.controlSource, m.leaderRound,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
-		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.hostDisableMonitorStates, m.cmdbIndexAge,
+		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexClusterBusinesses, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
 		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus)...)

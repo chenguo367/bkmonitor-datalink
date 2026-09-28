@@ -31,8 +31,10 @@ const (
 	// the space skipped has not been established.
 	GlobalBusinessQueryKind = "query_kind"
 	// GlobalBusinessQueryTable: a query names no table or data label. With
-	// the space skipped the provider has no space to find tables in, so
-	// such a query would answer empty on every round.
+	// the space skipped the provider has no space to find tables in, answers
+	// no series with SPACE_TABLE_ID_FIELD_IS_NOT_EXISTS, and the query is
+	// unavailable on every round - the strategy would never be evaluated,
+	// and would say so only as a query failure.
 	GlobalBusinessQueryTable = "query_table"
 	// GlobalBusinessOutputProtocol: the Plan would publish the compatible
 	// event, which has no place for the business an alert is about.

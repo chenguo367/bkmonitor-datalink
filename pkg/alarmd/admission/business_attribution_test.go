@@ -76,7 +76,7 @@ func TestAttributionFallsThroughTargetThenDimensionThenGlobal(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := AttributeBusiness(test.target, test.dimensions, planBusiness, attributionDimensions(test.record), hosts)
+			got := AttributeBusiness(test.target, test.dimensions, planBusiness, attributionDimensions(test.record), BusinessLookups{Hosts: hosts})
 			if got != test.want {
 				t.Fatalf("AttributeBusiness() = %+v, want %+v", got, test.want)
 			}
@@ -88,7 +88,7 @@ func TestAttributionFallsThroughTargetThenDimensionThenGlobal(t *testing.T) {
 // the event under the target's business, whatever the dimension says.
 func TestTheTargetIsTakenBeforeTheBusinessDimension(t *testing.T) {
 	got := AttributeBusiness(hostTarget(), []string{"bk_biz_id", "bk_host_id"}, planBusiness,
-		attributionDimensions(map[string]any{"bk_host_id": 101, "bk_biz_id": 22}), hostCache{"101": "11"})
+		attributionDimensions(map[string]any{"bk_host_id": 101, "bk_biz_id": 22}), BusinessLookups{Hosts: hostCache{"101": "11"}})
 	if got.BusinessID != "11" || got.Source != contract.BusinessAttributionTarget {
 		t.Fatalf("AttributeBusiness() = %+v, want the host's business 11 from the target", got)
 	}
@@ -99,14 +99,14 @@ func TestTheTargetIsTakenBeforeTheBusinessDimension(t *testing.T) {
 // the target's answer.
 func TestAHostNamedOnlyByAddressIsAttributedByItsHost(t *testing.T) {
 	record := attributionDimensions(map[string]any{"bk_target_ip": "192.0.2.10", "bk_target_cloud_id": "0"})
-	got := AttributeBusiness(hostTarget(), nil, planBusiness, record, hostCache{"192.0.2.10|0": "11"})
+	got := AttributeBusiness(hostTarget(), nil, planBusiness, record, BusinessLookups{Hosts: hostCache{"192.0.2.10|0": "11"}})
 	if got.BusinessID != "11" || got.Source != contract.BusinessAttributionTarget {
 		t.Fatalf("AttributeBusiness() = %+v, want the host's business 11 found by its address", got)
 	}
 	// Without its cloud the address is not looked up, as admission does not
 	// look it up: the record names no host the cache is asked about.
 	record = attributionDimensions(map[string]any{"bk_target_ip": "192.0.2.10"})
-	got = AttributeBusiness(hostTarget(), nil, planBusiness, record, hostCache{"192.0.2.10|0": "11"})
+	got = AttributeBusiness(hostTarget(), nil, planBusiness, record, BusinessLookups{Hosts: hostCache{"192.0.2.10|0": "11"}})
 	if got.Source != contract.BusinessAttributionGlobal {
 		t.Fatalf("AttributeBusiness() = %+v, want no host lookup without the cloud", got)
 	}
@@ -119,7 +119,7 @@ func TestAHostMemberPlanIsAttributedByTheHost(t *testing.T) {
 		Identity:      contract.TargetPlanIdentityV1{Dimensions: []string{"bk_host_id"}, HostIdentity: true},
 		StaticKeys:    []string{},
 		StaticMembers: []contract.TargetPlanMemberV1{{ModelID: "cw-Host", ModelInstID: "101"}}}
-	got := AttributeBusiness(target, nil, planBusiness, attributionDimensions(map[string]any{"bk_host_id": "101"}), hostCache{"101": "11"})
+	got := AttributeBusiness(target, nil, planBusiness, attributionDimensions(map[string]any{"bk_host_id": "101"}), BusinessLookups{Hosts: hostCache{"101": "11"}})
 	if got.BusinessID != "11" || got.Source != contract.BusinessAttributionTarget {
 		t.Fatalf("AttributeBusiness() = %+v, want the host's business 11", got)
 	}
@@ -156,7 +156,7 @@ func TestEachKubernetesRuleTakesTheMatchedStaticTargetsBusiness(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			got := AttributeBusiness(test.target, []string{"bk_biz_id"}, planBusiness, attributionDimensions(test.record), nil)
+			got := AttributeBusiness(test.target, []string{"bk_biz_id"}, planBusiness, attributionDimensions(test.record), BusinessLookups{})
 			if got.BusinessID != "41" || got.Source != contract.BusinessAttributionTarget {
 				t.Fatalf("AttributeBusiness() = %+v, want the matched static target's business 41", got)
 			}
@@ -165,7 +165,7 @@ func TestEachKubernetesRuleTakesTheMatchedStaticTargetsBusiness(t *testing.T) {
 				other[dimension] = value
 			}
 			other["bcs_cluster_id"] = "cluster-b"
-			got = AttributeBusiness(test.target, []string{"bk_biz_id"}, planBusiness, attributionDimensions(other), nil)
+			got = AttributeBusiness(test.target, []string{"bk_biz_id"}, planBusiness, attributionDimensions(other), BusinessLookups{})
 			if got.BusinessID != "22" || got.Source != contract.BusinessAttributionDimension {
 				t.Fatalf("a target with no business configured: AttributeBusiness() = %+v, want the dimension's 22", got)
 			}
@@ -190,7 +190,7 @@ func TestAKubernetesNoDataGroupTakesItsStaticTargetsBusiness(t *testing.T) {
 	for dimension, value := range group {
 		record[dimension] = value
 	}
-	got := AttributeBusiness(target, target.Identity.RosterDimensions(), planBusiness, attributionDimensions(record), nil)
+	got := AttributeBusiness(target, target.Identity.RosterDimensions(), planBusiness, attributionDimensions(record), BusinessLookups{})
 	if got.BusinessID != "41" || got.Source != contract.BusinessAttributionTarget {
 		t.Fatalf("AttributeBusiness() = %+v, want the static target's business 41", got)
 	}
@@ -201,12 +201,12 @@ func TestAKubernetesNoDataGroupTakesItsStaticTargetsBusiness(t *testing.T) {
 // data or from the host cache.
 func TestABusinessThatIsNotPositiveFallsThrough(t *testing.T) {
 	for _, value := range []any{0, "0", -3, "biz", ""} {
-		got := AttributeBusiness(nil, []string{"bk_biz_id"}, planBusiness, attributionDimensions(map[string]any{"bk_biz_id": value}), nil)
+		got := AttributeBusiness(nil, []string{"bk_biz_id"}, planBusiness, attributionDimensions(map[string]any{"bk_biz_id": value}), BusinessLookups{})
 		if got.Source != contract.BusinessAttributionGlobal || got.BusinessID != planBusiness {
 			t.Fatalf("bk_biz_id=%v: AttributeBusiness() = %+v, want the global business", value, got)
 		}
 	}
-	got := AttributeBusiness(hostTarget(), nil, planBusiness, attributionDimensions(map[string]any{"bk_host_id": "101"}), hostCache{"101": "0"})
+	got := AttributeBusiness(hostTarget(), nil, planBusiness, attributionDimensions(map[string]any{"bk_host_id": "101"}), BusinessLookups{Hosts: hostCache{"101": "0"}})
 	if got.Source != contract.BusinessAttributionGlobal {
 		t.Fatalf("a host held under business 0: AttributeBusiness() = %+v, want the global business", got)
 	}
@@ -218,12 +218,94 @@ func TestATargetThatNamesNoBusinessFallsThrough(t *testing.T) {
 	object := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-MySQL", Rule: contract.TargetPlanRuleModelInstID,
 		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"cw_object_model_code", "cw_object_model_inst_id"}}, StaticKeys: []string{"cw-MySQL|mysql-01"}}
 	got := AttributeBusiness(object, []string{"bk_biz_id"}, planBusiness,
-		attributionDimensions(map[string]any{"cw_object_model_code": "cw-MySQL", "cw_object_model_inst_id": "mysql-01", "bk_biz_id": "22"}), hostCache{})
+		attributionDimensions(map[string]any{"cw_object_model_code": "cw-MySQL", "cw_object_model_inst_id": "mysql-01", "bk_biz_id": "22"}), BusinessLookups{Hosts: hostCache{}})
 	if got.BusinessID != "22" || got.Source != contract.BusinessAttributionDimension {
 		t.Fatalf("object target: AttributeBusiness() = %+v, want the dimension's 22", got)
 	}
-	got = AttributeBusiness(hostTarget(), nil, planBusiness, attributionDimensions(map[string]any{"bk_host_id": "101"}), nil)
+	got = AttributeBusiness(hostTarget(), nil, planBusiness, attributionDimensions(map[string]any{"bk_host_id": "101"}), BusinessLookups{})
 	if got.Source != contract.BusinessAttributionGlobal {
 		t.Fatalf("no host cache: AttributeBusiness() = %+v, want the global business", got)
+	}
+}
+
+// clusterMapping is the published BCS cluster -> business mapping.
+type clusterMapping map[string]string
+
+func (mapping clusterMapping) LookupClusterBusiness(cluster string) (string, bool) {
+	business, found := mapping[cluster]
+	return business, found
+}
+
+// Kubernetes data that names no business is attributed through the business
+// the platform published for its cluster, after the target and the business
+// dimension and before the global business. A cluster the mapping does not
+// hold is the global business, counted apart as unmapped.
+func TestKubernetesDataIsAttributedThroughItsCluster(t *testing.T) {
+	clusters := clusterMapping{"BCS-K8S-00001": "11", "BCS-K8S-00003": "0"}
+	byCluster := []string{"bcs_cluster_id", "namespace"}
+	for name, test := range map[string]struct {
+		dimensions []string
+		record     map[string]any
+		lookups    BusinessLookups
+		want       BusinessAttribution
+	}{
+		"a mapped cluster": {
+			dimensions: byCluster, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00001", "namespace": "prod"},
+			lookups: BusinessLookups{Clusters: clusters},
+			want:    BusinessAttribution{BusinessID: "11", Source: contract.BusinessAttributionCluster},
+		},
+		"a cluster the mapping does not hold": {
+			dimensions: byCluster, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00002", "namespace": "prod"},
+			lookups: BusinessLookups{Clusters: clusters},
+			want:    BusinessAttribution{BusinessID: planBusiness, Source: contract.BusinessAttributionUnmapped},
+		},
+		"a cluster published under no positive business": {
+			dimensions: byCluster, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00003"},
+			lookups: BusinessLookups{Clusters: clusters},
+			want:    BusinessAttribution{BusinessID: planBusiness, Source: contract.BusinessAttributionUnmapped},
+		},
+		"no mapping at all": {
+			dimensions: byCluster, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00001"},
+			want: BusinessAttribution{BusinessID: planBusiness, Source: contract.BusinessAttributionUnmapped},
+		},
+		"the business dimension first": {
+			dimensions: []string{"bcs_cluster_id", "bk_biz_id"}, record: map[string]any{"bcs_cluster_id": "BCS-K8S-00001", "bk_biz_id": "22"},
+			lookups: BusinessLookups{Clusters: clusters},
+			want:    BusinessAttribution{BusinessID: "22", Source: contract.BusinessAttributionDimension},
+		},
+		"not grouped by cluster": {
+			dimensions: []string{"namespace"}, record: map[string]any{"namespace": "prod", "bcs_cluster_id": "BCS-K8S-00001"},
+			lookups: BusinessLookups{Clusters: clusters},
+			want:    BusinessAttribution{BusinessID: planBusiness, Source: contract.BusinessAttributionGlobal},
+		},
+		"grouped by cluster, the record names none": {
+			dimensions: byCluster, record: map[string]any{"namespace": "prod"},
+			lookups: BusinessLookups{Clusters: clusters},
+			want:    BusinessAttribution{BusinessID: planBusiness, Source: contract.BusinessAttributionGlobal},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := AttributeBusiness(nil, test.dimensions, planBusiness, attributionDimensions(test.record), test.lookups)
+			if got != test.want {
+				t.Fatalf("AttributeBusiness() = %+v, want %+v", got, test.want)
+			}
+		})
+	}
+}
+
+// A Kubernetes static target that carries a business is taken before the
+// cluster mapping; one that carries none falls through to it.
+func TestAKubernetesTargetIsTakenBeforeTheClusterMapping(t *testing.T) {
+	target := &contract.TargetPlanV1{SchemaVersion: 1, ModelID: "cw-K8s_Cluster", Rule: contract.TargetPlanRuleK8sCluster,
+		Identity: contract.TargetPlanIdentityV1{Dimensions: []string{"bcs_cluster_id"}}, StaticKeys: []string{"BCS-K8S-00001", "BCS-K8S-00002"},
+		StaticBusinesses: map[string]string{"BCS-K8S-00001": "41"}}
+	lookups := BusinessLookups{Clusters: clusterMapping{"BCS-K8S-00001": "11", "BCS-K8S-00002": "12"}}
+	got := AttributeBusiness(target, []string{"bcs_cluster_id"}, planBusiness, attributionDimensions(map[string]any{"bcs_cluster_id": "BCS-K8S-00001"}), lookups)
+	if got.BusinessID != "41" || got.Source != contract.BusinessAttributionTarget {
+		t.Fatalf("AttributeBusiness() = %+v, want the static target's 41", got)
+	}
+	got = AttributeBusiness(target, []string{"bcs_cluster_id"}, planBusiness, attributionDimensions(map[string]any{"bcs_cluster_id": "BCS-K8S-00002"}), lookups)
+	if got.BusinessID != "12" || got.Source != contract.BusinessAttributionCluster {
+		t.Fatalf("AttributeBusiness() = %+v, want the mapped cluster's 12", got)
 	}
 }
