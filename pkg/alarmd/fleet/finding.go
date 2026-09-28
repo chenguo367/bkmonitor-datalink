@@ -212,6 +212,15 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 // failure's code, the round's outcome. Decided with an empty check is a
 // code the table calls normal. Not decided is a row no code reaches.
 func codeVerdict(anomaly Anomaly) (check Check, decided bool) {
+	// A round that failed on a query whose deadline ran out while this
+	// deployment was still delivering the answer is this deployment's,
+	// whichever word the round ended with. The failure's code is OTHER,
+	// which decides nothing, and the round's own word would file it as an
+	// unnamed failure at no step or, from a source error, as a dependency
+	// down - when the detail says where the time went.
+	if deliveryTimedOutThisRound(anomaly) {
+		return CheckDefect, true
+	}
 	for _, code := range decisionCodes(anomaly) {
 		if code == "" {
 			continue
@@ -377,6 +386,16 @@ func refusalNamesMissingTarget(failure *FailureRef) bool {
 	}
 	status := strings.TrimPrefix(failure.Detail, prefix)
 	return strings.Contains(status, "not_exist") || strings.Contains(status, "not_found")
+}
+
+// deliveryTimedOutThisRound says the row's latest round failed, and on a
+// query whose deadline passed while this deployment was decoding and
+// delivering what had arrived of the answer, rather than while it waited
+// on the backend. A round that went on to complete is read by its
+// completion, and a failure from an earlier Slot is not this round's.
+func deliveryTimedOutThisRound(anomaly Anomaly) bool {
+	return (failedExecution(anomaly.ReasonCode) || blockedOutcome(anomaly.ReasonCode)) && failureThisRound(anomaly) &&
+		anomaly.Failure.Detail == routedetail.DeliveryTimeoutRouteDetail
 }
 
 func queryRejected(failure *FailureRef) bool {

@@ -539,6 +539,15 @@ func blockedOf(anomaly Anomaly, schedule Schedule) *Blocked {
 			blocked.Code = anomaly.Failure.Code
 		}
 	}
+	// A round that failed on a query whose deadline passed while this
+	// deployment was still delivering what had arrived ran out of time on
+	// this side: a timeout at the query step, with no dependency named - not
+	// the unlocated step its OTHER code gives, nor the configuration a
+	// source error reads as.
+	if deliveryTimedOutThisRound(anomaly) {
+		blocked.Stage, blocked.Class = StageQuery, ClassTimeout
+		blocked.Dependency, blocked.DependencyEvidence = DependencyNone, dependencyByCode
+	}
 	// A failure writing the round's events is read by its words, not by its
 	// code: the code says the ACK did not come and nothing about why. The
 	// broker not answering is the dependency's, unavailable; the client

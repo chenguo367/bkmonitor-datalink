@@ -240,9 +240,10 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		}
 		completion := client.unavailableCompletion(attempt, reason, execution.TransportRouteDetail(classifyTransportFailure(err)))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
-		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now())
+		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil
 	}
+	answered := client.now()
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		// The body is drained and discarded on purpose: UQ error bodies can echo
@@ -255,29 +256,83 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		}
 		completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable), execution.HTTPStatusRouteDetail(response.StatusCode))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
-		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now())
+		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now(), 0)
 		return completion, nil
 	}
-	counted := &countingReader{reader: response.Body}
+	counted := &countingReader{reader: response.Body, now: client.now}
 	completion, err := client.decodeQuery(ctx, &boundedReader{reader: counted, maximum: client.limits.MaxBodyBytes}, attempt, sink, scanned)
 	if scanned != nil {
 		scanned.Bytes = counted.bytes
 		scanned.Complete = err == nil
 	}
 	if err != nil {
-		return execution.ProviderCompletion{}, err
+		return execution.ProviderCompletion{}, client.bodyFailure(callerCtx, ctx, attempt, err, counted, started, answered)
 	}
 	completion.Stats.Bytes = counted.bytes
 	completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
 	return completion, nil
 }
 
+// bodyFailure names a query whose answer began and whose body did not
+// arrive in full: the deadline passed while it was being read or delivered,
+// or the connection under it broke. Unnamed, it read as an unclassified
+// internal error with no detail, the same as a defect of alarmd's own,
+// while the same timeout before the answer began was named and timed.
+//
+// A deadline is named for whoever held the time when it passed. Inside a
+// read begun before it, alarmd was waiting on the backend: the backend's
+// timeout, body=timeout. Between reads, or in a read begun after it - which
+// only finds out - alarmd was still decoding or delivering what had arrived:
+// delivery=timeout, alarmd's own, never the backend's. That one is category
+// other, whose code the failure grammar publishes as OTHER whatever it is
+// given, so it is given OTHER here: the detail is what names it.
+//
+// It stays an error. Series already handed on were delivered, and a
+// completion cannot describe a body that stopped partway. A failure that
+// names itself - a response budget, a sink's own - keeps its name, and a
+// caller that gave up keeps its error, as it does before the answer.
+func (client *Client) bodyFailure(callerCtx, ctx context.Context, attempt queryIdentity, err error, body *countingReader, started, answered time.Time) error {
+	var declared interface{ QueryFailure() (string, string) }
+	if callerCtx.Err() != nil || errors.As(err, &declared) {
+		return err
+	}
+	deadline, bounded := ctx.Deadline()
+	passed := func(at time.Time) bool { return bounded && !at.Before(deadline) }
+	broken := body.failed != nil && errors.Is(err, body.failed)
+	category, code := "provider_transport", contract.ReasonQueryTimeout
+	var detail string
+	switch {
+	case broken && passed(body.failedAt):
+		detail = execution.BodyRouteDetail(execution.TransportFailureTimeout)
+		if passed(body.failedBegan) {
+			category, code, detail = "other", "OTHER", execution.DeliveryTimeoutRouteDetail
+		}
+	case broken:
+		class := classifyTransportFailure(body.failed)
+		if class != execution.TransportFailureTimeout {
+			code = contract.ReasonQueryUnavailable
+		}
+		detail = execution.BodyRouteDetail(class)
+	case errors.Is(err, context.DeadlineExceeded) && errors.Is(ctx.Err(), context.DeadlineExceeded):
+		category, code, detail = "other", "OTHER", execution.DeliveryTimeoutRouteDetail
+	default:
+		return err
+	}
+	failed := client.now()
+	// What was not spent waiting - for the answer to begin, or inside a read
+	// of its body - was alarmd's own decoding and delivery.
+	local := failed.Sub(answered) - body.waited
+	return &bodyFailureError{err: err, category: category, code: code, detail: detail,
+		timing: attemptTiming(attempt.Budget, started, failed, local)}
+}
+
 // attemptTiming splits a failed Slot query's budget where its window could
 // be read and where its request went out (see execution.AttemptTiming). The
 // request's start is taken to the millisecond before splitting, so the
 // three parts add up to the budget exactly; elapsed is on the monotonic
-// clock. Nil for a read that is not a Slot's.
-func attemptTiming(budget queryBudget, started, failed time.Time) *execution.AttemptTiming {
+// clock, and local is the part of it alarmd spent on the answer itself.
+// Nil for a read that is not a Slot's.
+func attemptTiming(budget queryBudget, started, failed time.Time, local time.Duration) *execution.AttemptTiming {
 	if budget.StartUnixMilli <= 0 || budget.DeadlineUnixMilli <= 0 {
 		return nil
 	}
@@ -288,6 +343,7 @@ func attemptTiming(budget queryBudget, started, failed time.Time) *execution.Att
 		StartLateMillis: sent - readable,
 		BudgetMillis:    budget.DeadlineUnixMilli - sent,
 		ElapsedMillis:   failed.Sub(started).Milliseconds(),
+		LocalMillis:     local.Milliseconds(),
 	}
 }
 
@@ -362,6 +418,16 @@ func providerResultRef(attempt queryIdentity) execution.ProviderResultRef {
 type countingReader struct {
 	reader io.Reader
 	bytes  uint64
+
+	// The reads are timed: the time spent inside them is the time spent
+	// waiting on the backend for the body. failed is the first error a read
+	// returned other than the body's end, and failedBegan and failedAt are
+	// when that read began and returned.
+	now         func() time.Time
+	waited      time.Duration
+	failed      error
+	failedBegan time.Time
+	failedAt    time.Time
 }
 
 type boundedReader struct {
@@ -388,8 +454,14 @@ func (reader *boundedReader) Read(buffer []byte) (int, error) {
 }
 
 func (reader *countingReader) Read(buffer []byte) (int, error) {
+	began := reader.now()
 	count, err := reader.reader.Read(buffer)
+	returned := reader.now()
+	reader.waited += returned.Sub(began)
 	reader.bytes += uint64(count)
+	if err != nil && err != io.EOF && reader.failed == nil {
+		reader.failed, reader.failedBegan, reader.failedAt = err, began, returned
+	}
 	return count, err
 }
 
