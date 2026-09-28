@@ -906,7 +906,11 @@ func openProductionPhaseTwoBundleWithDependencies(
 		PostRecoveryTerminalDelay: retention.TerminalDelay,
 		QueryDeadlineReserve:      retention.QueryReserve,
 		SettlingWait:              cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
-		SnapshotRetention:         phaseTwoCatalogRetention(cfg),
+		// The bound the admission served the Plan under, not the catalog
+		// retention: a Plan past a day's cadence is admitted up to this limit
+		// and its content kept that long, and a Slot source checking the
+		// shorter figure refused every Slot of it for ever.
+		SnapshotRetention:         phaseTwoObjectRetentionLimit(cfg),
 		PublicationDelayAllowance: phaseTwoPublicationDelayAllowance(cfg),
 		LeaseTTL:                  cfg.PhaseTwo.Ownership.LeaseTTL.Duration(),
 		ReconcileInterval:         cfg.PhaseTwo.Control.ReconcileInterval.Duration(),
