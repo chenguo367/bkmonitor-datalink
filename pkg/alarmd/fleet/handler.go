@@ -595,7 +595,7 @@ func summarize(anomalies []Anomaly, at time.Time) Summary {
 			// HISTORY_GAPPED: data that arrived and then had holes, told back
 			// to the reader as "this series does not live long enough to fill
 			// its window", which is a different thing and sends them nowhere.
-			if undecidableReason(anomaly.CauseReason) && anomaly.Coverage.Persistent() {
+			if windowNeverFillsReason(anomaly.CauseReason) && anomaly.Coverage.Persistent() {
 				neverFills++
 				// A subset of a subset, and the only one of these with a named
 				// owner. Persistent() says the shortfall will not resolve; it is

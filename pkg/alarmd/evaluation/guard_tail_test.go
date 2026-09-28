@@ -24,8 +24,9 @@ import (
 // of its own for the Level. Every case answers every input FULL and
 // available, so the inputs alone cannot tell them apart.
 //
-//   - A short history is the tail: the record advances State and the guard's
-//     warmup counts it.
+//   - A short history is the tail, WARMING or GAPPED: the record advances
+//     State and the guard's warmup counts it. GAPPED is the shape a series
+//     that comes back after the gap has - a hole in its window.
 //   - A dependency point missing for this series is this record's own UNKNOWN:
 //     State does not advance, the guard never warms, and calling it warming
 //     would say "nothing to do" for as long as the point stays missing.
@@ -45,14 +46,20 @@ func TestAnUnknownIsMarkedAsTheGuardsAloneOnlyWhenItIsItsHistoryAndTheRoundPropo
 	for _, testCase := range []struct {
 		name     string
 		plan     *strategy.CompiledPlan
+		gapped   bool
 		history  []execution.StateHistoryPoint
 		primary  contract.CanonicalRecordV2
 		previous []contract.CanonicalRecordV2
 		reason   execution.ReasonCode
 		tail     bool
 	}{
-		// A hole before the new record leaves the window GAPPED.
-		{name: "history short", plan: double, history: []execution.StateHistoryPoint{normal("d", 180), normal("e", 240)},
+		// A hole before the new record, in a history still warming.
+		{name: "history warming", plan: double, history: []execution.StateHistoryPoint{normal("d", 180), normal("e", 240)},
+			primary: g4Record(360, `80`, nil), previous: []contract.CanonicalRecordV2{g4Record(300, `100`, nil)},
+			reason: guard, tail: true},
+		// A history already gapped, one point short of a full window at the
+		// last processed record, so the guard's GAPPED still decides.
+		{name: "history gapped", plan: double, gapped: true, history: []execution.StateHistoryPoint{normal("e", 240)},
 			primary: g4Record(360, `80`, nil), previous: []contract.CanonicalRecordV2{g4Record(300, `100`, nil)},
 			reason: guard, tail: true},
 		// Rows, none at the offset this record needs.
@@ -67,6 +74,10 @@ func TestAnUnknownIsMarkedAsTheGuardsAloneOnlyWhenItIsItsHistoryAndTheRoundPropo
 			request := requestFixtureForPlan(t, testCase.plan, []contract.CanonicalRecordV2{testCase.primary}, testCase.history)
 			request.State.Items[0].Status = execution.StateFoundWarming
 			request.State.Items[0].Levels[0].HistoryCompleteness = execution.HistoryWarming
+			if testCase.gapped {
+				request.State.Items[0].Status = execution.StateFoundGapped
+				request.State.Items[0].Levels[0].HistoryCompleteness = execution.HistoryGapped
+			}
 			request.State.Items[0].Levels[0].GapReasonCode = guard
 			if len(testCase.history) != 0 {
 				request.State.Items[0].Levels[0].LastProcessedEventTime = testCase.history[len(testCase.history)-1].SourceTime

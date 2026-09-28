@@ -444,6 +444,9 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		}
 		if !execution.InputAllowsStateAdvance(evaluationBindings(request), outcomes[i]) {
 			tr.LevelOutcomes[i].StateDisposition = trigger.StateFreeze
+			// A frozen Level does not warm its guard, so it is not the
+			// guard's tail whatever made it UNKNOWN (unknownOnlyForItsHistory).
+			outcomes[i].GuardTail = false
 		}
 	}
 	advance := false
