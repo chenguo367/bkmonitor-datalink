@@ -176,6 +176,15 @@ func NewExecutionStore(options ExecutionStoreOptions) (*ExecutionStore, error) {
 // series that never went away. Lowering H therefore shortens lifetimes from
 // the next write on, and raising it lengthens them from the next write on:
 // a key that already expired is gone, so nothing reclaimed comes back.
+//
+// The ceiling bounds the lifetime a key is given, so under a horizon it is
+// held against the capped lifetime, not the retention span. A retention whose
+// span is past the ceiling - fourteen points of a sixty-hour interval are 840
+// hours against a 720-hour ceiling - is written for its horizon cap all the
+// same, which is sixty hours and change. Holding the span against the ceiling
+// first refused every round of such a Plan as STATE_BUDGET_EXCEEDED, for a
+// lifetime it was never going to be given: the strategy stopped detecting and
+// nothing about it changed from one round to the next.
 func (store *ExecutionStore) runtimeTTL(retention []execution.StateRetentionRequirement, horizonSeconds int64) (time.Duration, error) {
 	requirements := make([]LevelRequirement, len(retention))
 	for index, level := range retention {
@@ -184,18 +193,28 @@ func (store *ExecutionStore) runtimeTTL(retention []execution.StateRetentionRequ
 		requirements[index] = NewLevelRequirement(level, "", 0)
 	}
 	ttl, err := StateTTL(requirements, store.options.RestartMargin, store.options.MinTTL, store.options.MaxTTL)
-	if err != nil || horizonSeconds <= 0 {
+	if horizonSeconds <= 0 {
 		return ttl, err
 	}
-	return capByHorizon(ttl, requirements, store.options.RestartMargin, store.options.MinTTL,
-		time.Duration(horizonSeconds)*time.Second), nil
+	limit := horizonLimit(requirements, store.options.RestartMargin, store.options.MinTTL, time.Duration(horizonSeconds)*time.Second)
+	if err != nil {
+		if !errors.Is(err, ErrStateBudget) {
+			return 0, err
+		}
+		// The span is past the ceiling, so it is past the cap too: the
+		// lifetime written is the cap, and the cap is what has to fit.
+		if limit > store.options.MaxTTL {
+			return 0, fmt.Errorf("%w: lifetime capped at the horizon %s exceeds maximum %s", ErrStateBudget, limit, store.options.MaxTTL)
+		}
+		return limit, nil
+	}
+	return min(ttl, limit), nil
 }
 
-// capByHorizon is the retention's lifetime capped at the horizon, and the
-// horizon floored at what a reporting series needs between two writes.
-func capByHorizon(ttl time.Duration, requirements []LevelRequirement, restartMargin, minimum, horizon time.Duration) time.Duration {
-	limit := max(horizon, StateLifetimeFloor(requirements, restartMargin), minimum)
-	return min(ttl, limit)
+// horizonLimit is the longest a series' runtime state lives under a horizon:
+// the horizon, floored at what a reporting series needs between two writes.
+func horizonLimit(requirements []LevelRequirement, restartMargin, minimum, horizon time.Duration) time.Duration {
+	return max(horizon, StateLifetimeFloor(requirements, restartMargin), minimum)
 }
 
 // StateLifetimeFloor is the shortest lifetime a series' runtime state can

@@ -9,7 +9,10 @@
 
 package state
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // GenerationScopedFloor is the shortest life a generation-scoped key may have.
 //
@@ -49,6 +52,15 @@ func GenerationScopedTTL(
 		return GenerationScopedFloor, nil
 	}
 	runtime, err := StateTTL(requirements, restartMargin, minimum, maximum)
+	if errors.Is(err, ErrStateBudget) {
+		// A retention whose span is past the ceiling. The runtime state it
+		// describes is written for its horizon cap, and only when that cap
+		// fits under the ceiling (ExecutionStore.runtimeTTL), so the ceiling
+		// outlives it; the horizon is not known here to say by how much, and
+		// longer is the safe direction. Refusing instead failed the load of a
+		// Plan whose runtime state was being written.
+		return max(maximum, GenerationScopedFloor), nil
+	}
 	if err != nil {
 		return 0, err
 	}
