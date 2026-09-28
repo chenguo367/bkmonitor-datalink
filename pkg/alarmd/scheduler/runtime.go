@@ -258,6 +258,12 @@ type FlightCoordinator struct {
 	// yet; without it a permit that never comes back contributes nothing, which
 	// is the opposite of what should happen.
 	heldPermits map[uint64]heldPermit
+	// lookbackInflight, lookbackHeld and lookbackSeconds are the lookback's
+	// share of the query budget: counted into queryInflight, the process
+	// total, and nowhere else. See lookback_permit.go.
+	lookbackInflight int
+	lookbackHeld     map[uint64]heldPermit
+	lookbackSeconds  float64
 }
 
 type heldPermit struct {
@@ -318,6 +324,11 @@ type QueryPermitOccupancy struct {
 	// a share and not a ratio between two different things.
 	Acquires uint64
 	Queued   uint64
+	// LookbackInflight and LookbackHeldSeconds are the lookback's permits,
+	// apart from every Operation: part of the process's occupancy, never of
+	// normal's or recovery's.
+	LookbackInflight    int
+	LookbackHeldSeconds float64
 }
 
 // QueryPermitOccupancySource reports live occupancy.
@@ -351,6 +362,12 @@ func (coordinator *FlightCoordinator) QueryPermitOccupancy() QueryPermitOccupanc
 	for _, held := range coordinator.heldPermits {
 		if elapsed := at.Sub(held.since); elapsed > 0 {
 			occupancy.HeldSeconds[held.operation] += elapsed.Seconds()
+		}
+	}
+	occupancy.LookbackInflight, occupancy.LookbackHeldSeconds = coordinator.lookbackInflight, coordinator.lookbackSeconds
+	for _, held := range coordinator.lookbackHeld {
+		if elapsed := at.Sub(held.since); elapsed > 0 {
+			occupancy.LookbackHeldSeconds += elapsed.Seconds()
 		}
 	}
 	occupancy.Waiting["normal"] = len(coordinator.normalWaiters)

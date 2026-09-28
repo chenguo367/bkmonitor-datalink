@@ -393,6 +393,10 @@ type PhaseTwoNoDataConfig struct {
 // them on says how much, and nothing here says "unlimited".
 type PhaseTwoObservationConfig struct {
 	MemoryPercent int `yaml:"memory_percent"`
+	// LookbackEnabled runs the late-data lookback (package lookback) inside
+	// the share above: an eighth of it, taken from the directory's half. Off
+	// by default, and refused without a share, which it cannot run without.
+	LookbackEnabled bool `yaml:"lookback_enabled"`
 }
 
 // ObservationMemoryPercentMax bounds the allocation: a quarter of the
@@ -403,6 +407,10 @@ const ObservationMemoryPercentMax = 25
 func (c PhaseTwoObservationConfig) validate() error {
 	if c.MemoryPercent < 0 || c.MemoryPercent > ObservationMemoryPercentMax {
 		return fmt.Errorf("phase_two.observation.memory_percent %d must be between 0 (off) and %d", c.MemoryPercent, ObservationMemoryPercentMax)
+	}
+	if c.LookbackEnabled && c.MemoryPercent == 0 {
+		return fmt.Errorf("phase_two.observation.lookback_enabled needs a memory share: its samples are kept inside " +
+			"phase_two.observation.memory_percent, which is 0")
 	}
 	return nil
 }

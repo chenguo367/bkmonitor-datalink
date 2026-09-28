@@ -479,6 +479,15 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_event_business_attribution_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_diagnostic_redis_failures_total"] = "variableLabels: {client,reason}"
 	expected["bkmonitor_alarmd_leader_round_stage_seconds_total"] = "variableLabels: {stage}"
+	expected["bkmonitor_alarmd_lookback_samples_total"] = "variableLabels: {source,outcome}"
+	expected["bkmonitor_alarmd_lookback_rechecks_total"] = "variableLabels: {source,tier,outcome}"
+	expected["bkmonitor_alarmd_lookback_compared_buckets_total"] = "variableLabels: {source,tier}"
+	expected["bkmonitor_alarmd_lookback_compared_windows_total"] = "variableLabels: {source,tier,differed}"
+	expected["bkmonitor_alarmd_lookback_differences_total"] = "variableLabels: {source,tier,class}"
+	expected["bkmonitor_alarmd_lookback_judgments_total"] = "variableLabels: {source,tier,class}"
+	expected["bkmonitor_alarmd_lookback_series_total"] = "variableLabels: {source,tier,kind}"
+	expected["bkmonitor_alarmd_lookback_windows_by_age_total"] = "variableLabels: {source,age,differed}"
+	expected["bkmonitor_alarmd_lookback_pending"] = "variableLabels: {what}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
@@ -1041,6 +1050,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("event_business_attribution_total")] = len(contract.BusinessAttributionSources)
 	bounds[fqName("diagnostic_redis_failures_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
 	bounds[fqName("leader_round_stage_seconds_total")] = len(fleet.LeaderRoundStages) + 1
+	for name, n := range lookbackSeriesUpperBounds() {
+		bounds[fqName(name)] = n
+	}
 	// Five states; three operations by two results.
 	bounds[fqName("linkd_console_state")] = 5
 	bounds[fqName("linkd_console_calls_total")] = 6
