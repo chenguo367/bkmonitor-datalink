@@ -50,8 +50,15 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 		return result
 	}
 
+	// Each message sits beside the control it is about, and a new one
+	// replaces the last wherever that was: never two at once.
+	for name, got := range runs {
+		if got.Shown > 1 {
+			t.Errorf("%s: %d messages on show at once", name, got.Shown)
+		}
+	}
 	const entry = "http://apps.example.test/alarmd/"
-	if got := run("same_origin"); got.IssueDisabled || got.Error {
+	if got := run("same_origin"); got.IssueDisabled || got.Error || got.At != "inspect-status" {
 		t.Errorf("opened from the configured entry, generation is offered: %+v", got)
 	}
 	// The browser's own origin form: a default port and an upper-case host in
@@ -61,17 +68,17 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 	}
 	got := run("other_origin")
 	if !got.IssueDisabled || !got.Error || !strings.Contains(got.Status, "http://192.0.2.10:8080") ||
-		!strings.Contains(got.Status, entry+"cli") || got.Requests != 1 {
+		!strings.Contains(got.Status, entry+"cli") || got.Requests != 1 || got.At != "inspect-status" {
 		t.Errorf("opened from another origin, the page says where to open it and offers nothing to press: %+v", got)
 	}
-	if got := run("refused_after_preview"); !strings.Contains(got.Status, entry+"cli") || !got.Error {
+	if got := run("refused_after_preview"); !strings.Contains(got.Status, entry+"cli") || !got.Error || got.At != "issue-status" {
 		t.Errorf("a generation refused for its origin says the entry the preview named: %+v", got)
 	}
 
 	for _, code := range []string{"admin_unauthorized", "admin_not_configured", "auth_rate_limited",
 		"auth_busy", "auth_store_unavailable", "not_found"} {
 		got := run("code:" + code)
-		if !got.Error || got.Status == "" || got.Status == "server sentence for "+code {
+		if !got.Error || got.Status == "" || got.Status == "server sentence for "+code || got.At != "inspect-status" {
 			t.Errorf("%s reaches the operator as what to do, not the server's sentence: %+v", code, got)
 		}
 		if got.KeyKept {
@@ -93,7 +100,7 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 	// same fact for the operator: alarmd's route did not answer.
 	notJSON, network := run("not_json"), run("network_failure")
 	if notJSON.Status == "" || notJSON.Status != network.Status || !notJSON.Error ||
-		!strings.Contains(notJSON.Status, "/api/cli/") {
+		!strings.Contains(notJSON.Status, "/api/cli/") || notJSON.At != "inspect-status" {
 		t.Errorf("an answer that is not alarmd's names the route to check: %+v / %+v", notJSON, network)
 	}
 }
@@ -101,6 +108,8 @@ func TestTheAuthorizationPageRunsItsRefusalHandling(t *testing.T) {
 type cliPageRun struct {
 	Status        string `json:"status"`
 	Error         bool   `json:"error"`
+	At            string `json:"at"`
+	Shown         int    `json:"shown"`
 	IssueDisabled bool   `json:"issue_disabled"`
 	KeyKept       bool   `json:"key_kept"`
 	Requests      int    `json:"requests"`
@@ -147,6 +156,15 @@ function load(pageURL, respond, loop) {
 }
 
 const answer = (status, body) => ({ ok: status < 400, status, json: async () => body });
+// The message on show and where: every control has its own line, and at
+// most one of them says anything at a time.
+const NOTES = ['command-status', 'admin-key-status', 'inspect-status', 'authorize-status', 'issue-status', 'revoke-status'];
+function shown(e) {
+  const on = NOTES.filter(id => e[id] && e[id].textContent);
+  const at = on[0] || '';
+  return { status: at ? e[at].textContent : '', error: !!at && e[at].className === 'error', at, shown: on.length };
+}
+const stepsOf = e => ['step-command', 'step-inspect', 'step-authorize'].map(id => (e[id] && e[id].className) || '').join(' ');
 const preview = { environment_id: 'ns/release', environment_name: 'ns/release',
   public_base_url: 'http://apps.example.test/alarmd/' };
 const entryPage = 'http://apps.example.test/alarmd/cli';
@@ -157,8 +175,7 @@ async function inspect(pageURL, respond, then) {
   e['admin-key'].value = 'k'.repeat(40);
   await e.inspect.listeners.click();
   if (then) await then(e);
-  return { status: e.status.textContent, error: e.status.className === 'error', issue_disabled: e.issue.disabled,
-    key_kept: e['admin-key'].value !== '', requests: page.requests() };
+  return { ...shown(e), issue_disabled: e.issue.disabled, key_kept: e['admin-key'].value !== '', requests: page.requests() };
 }
 
 (async () => {
@@ -193,14 +210,17 @@ async function inspect(pageURL, respond, then) {
     await settle();
     const command = e['listen-command'].textContent;
     const beforePreview = e.authorize.disabled;
+    const stepsBefore = stepsOf(e);
     e['admin-key'].value = 'k'.repeat(40);
     await e.inspect.listeners.click();
     await settle();
+    const stepsChecked = stepsOf(e), waitsFor = e['authorize-hint'].textContent;
     const offered = !e.authorize.disabled;
     if (offered) { await e.authorize.listeners.click(); await settle(); }
-    return { command, before_preview_disabled: beforePreview, offered, grant: seen || null, status: e.status.textContent,
-      error: e.status.className === 'error', probe: e.probe.textContent, key_kept: e['admin-key'].value !== '',
-      after_disabled: e.authorize.disabled, calls: page.calls.filter(c => c.url.startsWith('http://127.0.0.1:')) };
+    return { command, before_preview_disabled: beforePreview, offered, grant: seen || null, ...shown(e),
+      probe: e.probe.textContent, key_kept: e['admin-key'].value !== '',
+      after_disabled: e.authorize.disabled, calls: page.calls.filter(c => c.url.startsWith('http://127.0.0.1:')),
+      steps_before: stepsBefore, steps_checked: stepsChecked, waits_for: waitsFor, steps_after: stepsOf(e) };
   }
   const challenge = 'C'.repeat(43);
   const commandState = url => url.searchParams.get('state');
@@ -227,8 +247,8 @@ async function inspect(pageURL, respond, then) {
     // says the browser may be blocking it and opens the copy fallback.
     const page = load(entryPage, () => answer(200, preview), null);
     await settle();
-    // An element the script never touched keeps the page's own state: hidden.
-    const hidden = () => !(page.elements.manual && page.elements.manual.hidden === false);
+    // An element the script never touched keeps the page's own state: closed.
+    const hidden = () => !(page.elements.manual && page.elements.manual.open === true);
     const early = { probe: page.elements.probe.textContent, manual_hidden: hidden() };
     for (let i = 0; i < 4; i++) await page.tick();
     runs.blocked = { early, probe: page.elements.probe.textContent, manual_hidden: hidden() };
@@ -241,7 +261,7 @@ async function inspect(pageURL, respond, then) {
     e['admin-key'].value = 'k'.repeat(40);
     await e.inspect.listeners.click();
     await e.revoke.listeners.click();
-    runs.revoke = { status: e.status.textContent, error: e.status.className === 'error' };
+    runs.revoke = shown(e);
   }
   process.stdout.write(JSON.stringify(runs));
 })().catch(error => { console.error(error); process.exit(1); });
@@ -258,6 +278,8 @@ type loopbackRun struct {
 	} `json:"grant"`
 	Status   string `json:"status"`
 	Error    bool   `json:"error"`
+	At       string `json:"at"`
+	Shown    int    `json:"shown"`
 	Probe    string `json:"probe"`
 	KeyKept  bool   `json:"key_kept"`
 	After    bool   `json:"after_disabled"`
@@ -269,6 +291,12 @@ type loopbackRun struct {
 		URL    string `json:"url"`
 		Method string `json:"method"`
 	} `json:"calls"`
+	// The steps' classes, first to third, on load, after the check and at
+	// the end; and what the authorize step said it waits for after the check.
+	StepsBefore  string `json:"steps_before"`
+	StepsChecked string `json:"steps_checked"`
+	WaitsFor     string `json:"waits_for"`
+	StepsAfter   string `json:"steps_after"`
 }
 
 // The loopback login as the page runs it: the command carries a port and a
@@ -306,8 +334,18 @@ func checkLoopback(t *testing.T, raw map[string]json.RawMessage) {
 			t.Errorf("a loopback call to another port: %s", call.URL)
 		}
 	}
-	if ok.Error || !strings.Contains(ok.Status, "ns/release") || ok.KeyKept || !ok.After || !strings.Contains(ok.Probe, "已登录") {
+	if ok.Error || !strings.Contains(ok.Status, "ns/release") || ok.KeyKept || !ok.After || !strings.Contains(ok.Probe, "已登录") ||
+		ok.At != "authorize-status" {
 		t.Errorf("after the CLI logged in: %+v", ok)
+	}
+	// One step is current at a time, the first one not done: the command
+	// until the CLI answers, then the check, then the button.
+	if ok.StepsBefore != "done current later" || ok.StepsChecked != "done done current" || ok.StepsAfter != "done done done" {
+		t.Errorf("the current step follows the login: %q -> %q -> %q", ok.StepsBefore, ok.StepsChecked, ok.StepsAfter)
+	}
+	if none := run("loopback_none"); none.StepsChecked != "current done later" || !strings.Contains(none.WaitsFor, "第 1 步") {
+		t.Errorf("checked but no CLI: the command is the step to do, and the button says it waits for it: %q %q",
+			none.StepsChecked, none.WaitsFor)
 	}
 	for _, name := range []string{"loopback_wrong_state", "loopback_bad_challenge", "loopback_none"} {
 		if got := run(name); got.Offered || got.Grant != nil || strings.Contains(got.Probe, "已就绪") {
@@ -317,8 +355,9 @@ func checkLoopback(t *testing.T, raw map[string]json.RawMessage) {
 	for name, says := range map[string]string{"loopback_refused": "重新执行上面的命令", "loopback_gone": "同一台机器",
 		"loopback_grant_refused": "管理凭据不对"} {
 		got := run(name)
-		if !got.Error || !strings.Contains(got.Status, says) || strings.Contains(got.Status, "server sentence") {
-			t.Errorf("%s says what to do: %+v", name, got)
+		if !got.Error || !strings.Contains(got.Status, says) || strings.Contains(got.Status, "server sentence") ||
+			got.At != "authorize-status" || got.Shown != 1 {
+			t.Errorf("%s says what to do, beside the button: %+v", name, got)
 		}
 	}
 	var blocked struct {
@@ -337,13 +376,14 @@ func checkLoopback(t *testing.T, raw map[string]json.RawMessage) {
 	var revoke struct {
 		Status string `json:"status"`
 		Error  bool   `json:"error"`
+		At     string `json:"at"`
 	}
 	var body struct {
 		Confirm bool `json:"confirm"`
 	}
 	_ = json.Unmarshal(raw["revoke"], &revoke)
 	_ = json.Unmarshal(raw["revoke_body"], &body)
-	if revoke.Error || !strings.Contains(revoke.Status, "配对 3 个") || !body.Confirm {
+	if revoke.Error || !strings.Contains(revoke.Status, "配对 3 个") || !body.Confirm || revoke.At != "revoke-status" {
 		t.Errorf("revoking every pairing: %+v %+v", revoke, body)
 	}
 }

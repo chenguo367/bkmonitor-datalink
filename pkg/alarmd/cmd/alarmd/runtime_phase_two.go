@@ -26,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet/ui"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -89,15 +90,19 @@ type phaseTwoApplicationDependencies struct {
 }
 
 // httpSurface is what the listener needs from the configuration: where the
-// side listeners bind and whether the public surface is restricted.
+// side listeners bind, whether the public surface is restricted, and where
+// the login page says the administrator key is kept (names only).
 type httpSurface struct {
-	Diagnostics string
-	Internal    string
-	Restricted  bool
+	Diagnostics    string
+	Internal       string
+	Restricted     bool
+	AdminKeySecret ui.AdminKeySecret
 }
 
 func httpSurfaceOf(cfg config.Config) httpSurface {
-	return httpSurface{Diagnostics: cfg.HTTP.DiagnosticsListen, Internal: cfg.HTTP.InternalListen, Restricted: cfg.PublicSurfaceRestrictionRequested()}
+	secret := cfg.CLI.AdminKeySecret
+	return httpSurface{Diagnostics: cfg.HTTP.DiagnosticsListen, Internal: cfg.HTTP.InternalListen, Restricted: cfg.PublicSurfaceRestrictionRequested(),
+		AdminKeySecret: ui.AdminKeySecret{Namespace: secret.Namespace, Name: secret.Name, Key: secret.Key}}
 }
 
 type runtimeModeDependencies struct {
@@ -110,7 +115,8 @@ func defaultPhaseTwoApplicationDependencies() phaseTwoApplicationDependencies {
 		configureCPU: configurePhaseTwoCPU, lifecycle: newLifecycleRecord,
 		run: runPhaseTwoApplication, openBundle: openProductionPhaseTwoBundle,
 		newHTTP: func(recorder *metric.Recorder, source observability.HealthSource, surface httpSurface) (httpRuntime, error) {
-			options := []httpservice.Option{httpservice.WithDiagnosticsAddress(surface.Diagnostics), httpservice.WithInternalAddress(surface.Internal)}
+			options := []httpservice.Option{httpservice.WithDiagnosticsAddress(surface.Diagnostics), httpservice.WithInternalAddress(surface.Internal),
+				httpservice.WithAdminKeySecret(surface.AdminKeySecret)}
 			if surface.Restricted {
 				options = append(options, httpservice.WithRestrictedPublicSurface())
 			}
