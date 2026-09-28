@@ -27,7 +27,7 @@ func StoreOperations(service *obevidence.Service) []Operation {
 		"business":      {Type: "string", MaxLength: 256, MinLength: 1, Description: "发布计划的业务筛选。", Source: "strategy.get plans[].business"},
 	}
 	storeFields := map[string]Field{
-		"family":      {Type: "string", Enum: []string{"source_strategy", "target_group", "dynamic_config", "query_progress", "query_cooldown"}, Description: "受支持的存储证据族；query_cooldown 是运行对象在降级池里的持久记录（入池时间、失败次数、上次出池及原因、写入者任期），重启或换持有者后按它恢复。"},
+		"family":      {Type: "string", Enum: []string{"source_strategy", "target_group", "dynamic_config", "query_progress", "query_cooldown"}, Description: "受支持的存储证据族；query_cooldown 是运行对象在降级池里的持久记录（入池时间、失败次数、上次出池及原因、写入者任期），重启或换持有者后按它恢复；query_progress 的键里只有运行对象 ID 的 SHA-256（花括号内），结果的 key_identity 给出两者的对应。"},
 		"strategy_id": id, "query_group": object,
 		"group_id": {Type: "string", Pattern: "^[^\\s\\x00-\\x1f\\x7f]+$", MinLength: 1, MaxLength: 512, Description: "目标组ID。", Source: "源策略 target 配置或既有目标组证据"},
 		"fields":   {Type: "array", MaxItems: len(platformsettings.Fields), UniqueItems: true, Items: &fields, Description: "动态配置字段；省略或空数组时读取全部四项。"},

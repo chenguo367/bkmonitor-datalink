@@ -867,8 +867,18 @@ func (store *RedisStore) ownershipKey(queryGroup execution.QueryGroupIdentity) s
 }
 
 func (store *RedisStore) controlKey(queryGroup execution.QueryGroupIdentity, namespace string) string {
+	return store.prefix + ":{" + ControlHashTag(queryGroup) + "}:" + namespace
+}
+
+// ControlHashTag is the part of a Query Group's control keys between the
+// braces: the SHA-256 of the Query Group identity, hex. As a Redis Cluster
+// hash tag it keeps every control key of one Query Group -- ownership,
+// progress, the rest -- in one slot. A key names its Query Group only
+// through this digest, so a reader holding the key and the identity checks
+// one against the other here.
+func ControlHashTag(queryGroup execution.QueryGroupIdentity) string {
 	digest := sha256.Sum256([]byte(queryGroup))
-	return store.prefix + ":{" + hex.EncodeToString(digest[:]) + "}:" + namespace
+	return hex.EncodeToString(digest[:])
 }
 
 func validateFence(fence execution.OwnerFence) error {
