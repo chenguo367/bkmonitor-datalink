@@ -318,3 +318,18 @@ func TestTheSampleKeepsTheFirstMissesAsTheyArrive(t *testing.T) {
 		t.Fatalf("a miss after all eight changed the sample: %+v", after)
 	}
 }
+
+// Two Plans of one group that differ only by strategy - the usual case, one
+// tenant and one business - are kept in strategy order whichever arrives
+// first, so which of them the sample names at its bound does not depend on
+// the order the roster was walked in.
+func TestTwoPlansOfAGroupAreKeptInStrategyOrderWhicheverArrivesFirst(t *testing.T) {
+	first := CostDueMiss{Scope: "strategy_owned", QueryGroupKey: "g", Plan: CostPlanIdentity{"tenant", "business", "1001"}}
+	second := CostDueMiss{Scope: "strategy_owned", QueryGroupKey: "g", Plan: CostPlanIdentity{"tenant", "business", "1002"}}
+	for _, arrival := range [][2]CostDueMiss{{first, second}, {second, first}} {
+		kept := keepDueMiss(keepDueMiss(nil, arrival[0]), arrival[1])
+		if len(kept) != 2 || kept[0] != first || kept[1] != second {
+			t.Fatalf("arriving %s then %s = %+v, want 1001 before 1002", arrival[0].Plan.StrategyID, arrival[1].Plan.StrategyID, kept)
+		}
+	}
+}
