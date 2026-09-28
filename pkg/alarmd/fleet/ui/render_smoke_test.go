@@ -1528,6 +1528,9 @@ func lineStarting(text, prefix string) string {
 	return ""
 }
 
+// smokeEnd is the harness's last line; its absence means the output was cut.
+const smokeEnd = "SMOKE END"
+
 // smokeHarness stubs just enough DOM for the render functions and calls them.
 // It is deliberately small: a fuller emulator would be a second implementation
 // to maintain, and the failure being caught here needs nothing more than a real
@@ -1535,9 +1538,6 @@ func lineStarting(text, prefix string) string {
 // It also runs the one rule the page deliberately duplicates -- "can this
 // window ever fill" -- against the verdicts the Go side computed, so the two
 // copies are checked by execution rather than by a substring.
-// smokeEnd is the harness's last line; its absence means the output was cut.
-const smokeEnd = "SMOKE END"
-
 const smokeHarness = `
 const fs = require('fs'), vm = require('vm'), path = require('path');
 const dir = process.argv[2];
