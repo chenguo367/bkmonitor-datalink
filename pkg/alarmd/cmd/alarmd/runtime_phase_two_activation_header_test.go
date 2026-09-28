@@ -163,3 +163,26 @@ func TestARenewalRetriesOnceAfterTheHeaderRebuildConflicts(t *testing.T) {
 		}
 	}
 }
+
+// The other side of the retry: the header another writer's conflict implied
+// is gone again by the second renewal. The retry answers for it rather than
+// swallowing it - the round is degraded on the last good activation, named
+// activation missing, and the header is not asked for a second time.
+func TestARenewalRetriedAfterAConflictStillReportsAHeaderStillMissing(t *testing.T) {
+	repository := &fakeProductionCatalogRepository{
+		renewErrs:     []error{controlplane.ErrActivationHeaderMissing, controlplane.ErrActivationHeaderMissing},
+		headerRebuild: controlplane.ActivationHeaderRebuildConflict,
+	}
+	missing := observability.ReasonCode(contract.ReasonActivationMissing)
+	result, renewals := headerRound(t, controlplane.SourceRefreshPendingConfirmation, repository)
+	if repository.headerRebuilds != 1 || repository.renewCalls != 2 {
+		t.Fatalf("rebuilds %d, renewals %d, want one rebuild and one retry", repository.headerRebuilds, repository.renewCalls)
+	}
+	if result.Status != phaseTwoControlDegradedLastGood || result.ReasonCode != missing ||
+		!errors.Is(result.Cause, controlplane.ErrActivationHeaderMissing) {
+		t.Fatalf("result = %#v, want degraded on the last good activation, named activation missing", result)
+	}
+	if len(renewals) != 1 || renewals[0].Result != observability.ResultDegraded || renewals[0].ReasonCode != missing {
+		t.Fatalf("renewal observations = %#v, want one degraded, named activation missing", renewals)
+	}
+}
