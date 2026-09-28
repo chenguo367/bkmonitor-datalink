@@ -356,3 +356,19 @@ func cliSlotReadError(err error, reader *cliSlotRedis) error {
 	}
 	return obchannel.ErrHistoricalContractUnavailable
 }
+
+// cliLatestPublication reads the newest publication from the catalog, the
+// one strategy.get reports, for slot.get to set beside a Slot's own. Nil
+// without a catalog, and slot.get then carries no latest publication.
+func cliLatestPublication(catalog *controlplane.RedisCatalogRepository) func(context.Context) (obchannel.SlotPublication, error) {
+	if catalog == nil {
+		return nil
+	}
+	return func(ctx context.Context) (obchannel.SlotPublication, error) {
+		latest, err := catalog.LoadLatestPublication(ctx)
+		if err != nil {
+			return obchannel.SlotPublication{}, err
+		}
+		return obchannel.SlotPublication{SnapshotRevision: latest.SnapshotRevision, PublicationEpoch: latest.PublicationEpoch}, nil
+	}
+}

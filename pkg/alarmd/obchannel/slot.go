@@ -22,7 +22,34 @@ type SlotOptions struct {
 	Resolve  func(context.Context, execution.SlotIdentity) (SlotPlan, error)
 	Evidence func(context.Context, execution.SlotIdentity) (SlotEvidence, error)
 	UQ       *uq.DiagnosticClient
+	// LatestPublication, when set, reads the newest publication, the one
+	// strategy.get reports, so a Slot's older snapshot_revision is read
+	// beside it rather than taken for a fault.
+	LatestPublication func(context.Context) (SlotPublication, error)
 }
+
+// SlotPublication is a publication by its content revision and epoch.
+type SlotPublication struct {
+	SnapshotRevision execution.SnapshotRevision `json:"snapshot_revision"`
+	PublicationEpoch uint64                     `json:"publication_epoch"`
+	// SameAsSlot is whether it is the publication the Slot's Segment began
+	// under.
+	SameAsSlot bool `json:"same_as_slot"`
+}
+
+// slotSnapshotNote says why a Slot names an older publication than the
+// latest: its snapshot_revision is the publication its schedule Segment
+// began under, and a Segment is kept across publications while the Query
+// Group's execution content -- its ObjectDigest -- is unchanged (see
+// controlplane/content_cutover.go). Two readers of the first acceptance
+// stopped on the difference and asked. It must not explain a change that
+// did not take effect as normal: any change to the execution content, a
+// threshold or the members included, cuts a new Segment.
+const slotSnapshotNote = "slot.snapshot_revision is the publication this Slot's schedule Segment began under (schedule_segment_start). " +
+	"A Segment is kept across publications while this Query Group's execution content (object_digest: its query, schedule, membership " +
+	"and what its Plans evaluate) is unchanged, so a Slot can name an older publication than latest_publication. A change to any of that " +
+	"starts a new Segment; a change to rendering only does not. Whether this Slot ran the same content as a publication is decided by " +
+	"object_digest, not by snapshot_revision."
 
 type SlotContext struct {
 	QueryGroup       execution.QueryGroupIdentity `json:"query_group"`
@@ -50,11 +77,15 @@ type SlotQueryPlan struct {
 }
 
 type SlotGetResult struct {
-	Kind                    string          `json:"kind"`
-	Slot                    SlotContext     `json:"slot"`
-	Queries                 []SlotQueryPlan `json:"queries"`
-	Retained                SlotEvidence    `json:"retained"`
-	HistoricalInputComplete bool            `json:"historical_input_complete"`
+	Kind string      `json:"kind"`
+	Slot SlotContext `json:"slot"`
+	// LatestPublication is the newest publication beside the Slot's own,
+	// and SnapshotNote why the two differ, present only when they do.
+	LatestPublication       *SlotPublication `json:"latest_publication,omitempty"`
+	SnapshotNote            string           `json:"snapshot_note,omitempty"`
+	Queries                 []SlotQueryPlan  `json:"queries"`
+	Retained                SlotEvidence     `json:"retained"`
+	HistoricalInputComplete bool             `json:"historical_input_complete"`
 }
 
 type SlotQueryResult struct {
@@ -119,6 +150,17 @@ func SlotOperations(options SlotOptions) []Operation {
 			next := slotParams(result.Slot)
 			next["contract_digest"], next["physical_query_digest"], next["request_digest"] = result.Slot.ContractDigest, string(query.Spec.Digest), preview.RequestDigest
 			out.Next = append(out.Next, Call{Operation: "slot.query", Params: next, Reason: "选取此物理查询按原条件重查UQ；默认通过控制面定位当前owner，结果属于本次查询。"})
+		}
+		if options.LatestPublication != nil {
+			if latest, err := options.LatestPublication(ctx); err == nil {
+				latest.SameAsSlot = latest.SnapshotRevision == result.Slot.SnapshotRevision
+				result.LatestPublication = &latest
+				if !latest.SameAsSlot {
+					result.SnapshotNote = slotSnapshotNote
+				}
+			} else {
+				out.Limitations = append(out.Limitations, "The latest publication could not be read; slot.snapshot_revision is the publication the Slot's Segment began under, not necessarily the latest.")
+			}
 		}
 		if options.Evidence != nil {
 			evidence, err := options.Evidence(ctx, plan.Contract.Slot)
