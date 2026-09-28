@@ -1153,7 +1153,7 @@ func (coordinator *SlotExecutionCoordinator) applyGapChunks(
 		}
 		totals.keys += int64(len(chunkItems))
 		coordinator.observeChunk(ctx, observability.StageGapGuardCommitted, operation, chunkStarted, started, "", reason,
-			chunk, totals, observability.Counts{}, err, nil, nil, 0, extensions...)
+			chunk, totals, observability.Counts{}, err, nil, nil, "", 0, extensions...)
 		return err
 	})
 }
@@ -1398,7 +1398,11 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 			if err := coordinator.admit(ctx, request, due); err != nil {
 				return execution.SlotExecutionResult{}, err
 			}
-			rejected, encodedBytes, err := coordinator.admitState(ctx, request.Operation, request.Contract, retention, horizon, mutations)
+			// Under the Plan's strategy, so the refusal is filed under the
+			// Plan it refused rather than the Query Group alone.
+			planCtx := observability.ContextWithTraceFields(ctx, observability.TraceFields{
+				StrategyID: planResult.Plan.StrategyID, BusinessID: planResult.Plan.BusinessID})
+			rejected, encodedBytes, err := coordinator.admitState(planCtx, request.Operation, request.Contract, retention, horizon, mutations)
 			if err != nil {
 				return execution.SlotExecutionResult{}, err
 			}
@@ -2051,6 +2055,7 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 		rejected := 0
 		chunkLegacyIDs := 0
 		var refusalRules []string
+		var refusalText string
 		if err == nil {
 			if err = result.Validate(); err == nil {
 				actual := make([]execution.StateKeyIdentity, len(result.Items))
@@ -2074,6 +2079,11 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 					case execution.StateAdmissionDeterministicInvalid:
 						deterministic[item.Identity] = item.ReasonCode
 						refusalRules = addRefusalRule(refusalRules, item.RefusalRule)
+						// The first sentence of the chunk: a Plan refused
+						// whole says the same one for every mutation.
+						if refusalText == "" {
+							refusalText = item.RefusalText
+						}
 						rejected++
 					default:
 						err = fmt.Errorf("state admission did not complete: %s", item.Status)
@@ -2088,7 +2098,8 @@ func (coordinator *SlotExecutionCoordinator) admitState(
 		totals.keys += int64(len(chunkItems))
 		totals.bytes += chunkBytes
 		coordinator.observeChunk(ctx, observability.StageStateAdmission, operation, chunkStarted, started, observationResult, reason,
-			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, nil, refusalRules, chunkLegacyIDs)
+			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes}, err, nil, refusalRules,
+			observability.SanitizeErrorText(refusalText), chunkLegacyIDs)
 		return err
 	})
 	if err != nil {
@@ -2275,7 +2286,7 @@ func (coordinator *SlotExecutionCoordinator) applyState(
 		coordinator.observeChunk(ctx, observability.StageStateApplied, operation, chunkStarted, started, observationResult, reason,
 			chunk, totals, observability.Counts{Keys: int64(len(chunkItems)), StateBytes: chunkBytes,
 				EnvelopeReadsApply: int64(result.EnvelopeReads)}, err, conflictFacts,
-			applyRefusalRules, chunkLegacyIDs)
+			applyRefusalRules, "", chunkLegacyIDs)
 		return err
 	})
 	if !alreadyApplied.Empty() {

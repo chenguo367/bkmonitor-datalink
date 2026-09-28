@@ -347,6 +347,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		if len(f.RefusalRules) > 0 {
 			attributes = append(attributes, slog.String("state_refusal_rules", strings.Join(f.RefusalRules, ",")))
 		}
+		if f.RefusalText != "" {
+			attributes = append(attributes, slog.String("state_refusal_text", f.RefusalText))
+		}
 		if f.LegacyRecordIDs > 0 {
 			attributes = append(attributes, slog.Int("state_legacy_record_ids", f.LegacyRecordIDs))
 		}

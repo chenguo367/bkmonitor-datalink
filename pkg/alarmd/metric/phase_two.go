@@ -99,6 +99,7 @@ type phaseTwoMetrics struct {
 	replayExpiries                 *prometheus.CounterVec
 	rangeGateDecisions             *prometheus.CounterVec
 	statePreflights                *prometheus.CounterVec
+	stateAdmissions                *prometheus.CounterVec
 	scheduleCutoverQueryGroups     *prometheus.CounterVec
 	scheduleCutoverTimelinesRead   prometheus.Gauge
 	// The last successful cutover's exact duration, set with its payload and
@@ -933,6 +934,23 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.statePreflights.WithLabelValues(string(result), string(reason))
 		}
 	}
+	// The admission's result and reason, as a series, for the same reason the
+	// preflight's are: a Plan whose every round is refused at admission ends
+	// each round terminal and moves nothing else fleet-wide.
+	metrics.stateAdmissions = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "state_admission_total",
+		Help: "Runtime State admission calls by how they ended: success when every mutation was admitted; " +
+			"terminal when some were refused (STATE_BUDGET_EXCEEDED: the Plan's state lifetime is past the " +
+			"store's ceiling or a record is past the value limit; STATE_CORRUPT: the record breaks the framed " +
+			"contract); failed when the call did not complete. One per admission call, which is one per Plan " +
+			"per round unless the Plan's mutations take more than one call; the refused Plan, the rule and the " +
+			"store's sentence with its numbers are on the state_admission line and the object row.",
+	}, []string{"result", "reason"})
+	for _, result := range observability.StateAdmissionResults {
+		for _, reason := range observability.StateAdmissionReasons {
+			metrics.stateAdmissions.WithLabelValues(string(result), string(reason))
+		}
+	}
 	metrics.scheduleCutoverTimelinesRead = prometheus.NewGauge(prometheus.GaugeOpts{Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "schedule_cutover_timelines_read", Help: "Schedule timelines the last publication cutover read to decide. Equal to the population on the first cutover of a Control Leader process, the changed set afterwards."})
 	// The failure code itself is an open vocabulary and stays in the log and
 	// the fleet view; the counter carries the bounded stage and category so a
@@ -1669,7 +1687,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.scheduleCutoverLastDuration, m.scheduleCutoverFirstDuration,
-		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.rangeGateDecisions, m.statePreflights,
+		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
@@ -1813,6 +1831,10 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		result, reason := observability.NormalizeStatePreflight(observation.Result, observation.ReasonCode)
 		m.statePreflights.WithLabelValues(string(result), string(reason)).Inc()
 		m.observeEnvelopePass(observation.Counts)
+	}
+	if observation.Component == observability.ComponentState && observation.Stage == observability.StageStateAdmission {
+		result, reason := observability.NormalizeStateAdmission(observation.Result, observation.ReasonCode)
+		m.stateAdmissions.WithLabelValues(string(result), string(reason)).Inc()
 	}
 	if observation.Component == observability.ComponentState && observation.Stage == observability.StageStateApplied &&
 		observation.Counts.EnvelopeReadsApply > 0 {

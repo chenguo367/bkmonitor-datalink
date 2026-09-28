@@ -237,8 +237,9 @@ func rejectRuntimeBudget(items []execution.StateMutation) []execution.StateApply
 	results := make([]execution.StateApplyItemResult, len(items))
 	for index, mutation := range items {
 		results[index] = execution.StateApplyItemResult{Identity: mutation.Identity,
-			Status:     execution.StateApplyDeterministicInvalid,
-			ReasonCode: execution.ReasonCode(contract.ReasonStateBudgetExceeded)}
+			Status:      execution.StateApplyDeterministicInvalid,
+			ReasonCode:  execution.ReasonCode(contract.ReasonStateBudgetExceeded),
+			RefusalRule: RuntimeRuleLifetimePastCeiling}
 	}
 	return results
 }
@@ -396,11 +397,14 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 		if !errors.Is(err, ErrStateBudget) {
 			return execution.StateAdmissionResult{}, fmt.Errorf("state: invalid runtime admission request: %w", err)
 		}
+		// Every mutation of the Plan, under the rule and with the sentence,
+		// which names the lifetime required and the ceiling.
 		result := execution.StateAdmissionResult{Items: make([]execution.StateAdmissionItemResult, len(request.Items))}
 		for index, mutation := range request.Items {
 			result.Items[index] = execution.StateAdmissionItemResult{Identity: mutation.Identity,
-				Status:     execution.StateAdmissionDeterministicInvalid,
-				ReasonCode: execution.ReasonCode(contract.ReasonStateBudgetExceeded)}
+				Status:      execution.StateAdmissionDeterministicInvalid,
+				ReasonCode:  execution.ReasonCode(contract.ReasonStateBudgetExceeded),
+				RefusalRule: RuntimeRuleLifetimePastCeiling, RefusalText: err.Error()}
 		}
 		return result, result.Validate()
 	}
@@ -415,10 +419,10 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 		}
 		// Sized in the representation the write stores. The revision only
 		// widens one varint in the header, so any revision measures the same.
-		encoded, refusal, rule, legacyIDs := store.encodeForWrite(mutation, mutation.ExpectedBlobRevision+1)
-		if refusal != "" {
-			item.Status, item.ReasonCode = execution.StateAdmissionDeterministicInvalid, execution.ReasonCode(refusal)
-			item.RefusalRule = rule
+		encoded, refusal, legacyIDs := store.encodeForWrite(mutation, mutation.ExpectedBlobRevision+1)
+		if refusal.reason != "" {
+			item.Status, item.ReasonCode = execution.StateAdmissionDeterministicInvalid, execution.ReasonCode(refusal.reason)
+			item.RefusalRule, item.RefusalText = refusal.rule, refusal.text
 		} else {
 			item.EncodedBytes, item.LegacyRecordIDs = len(encoded), legacyIDs
 			// The frame measured is the frame the write stores when the key's
@@ -437,10 +441,10 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 // fresh encode otherwise. The two are the same bytes where the first is used
 // -- one encoder, one mutation, one revision -- so which one is written is a
 // matter of cost only.
-func (store *ExecutionStore) frameForWrite(request execution.StateApplyRequest, index int, mutation execution.StateMutation, revision uint64) ([]byte, string, string, int) {
+func (store *ExecutionStore) frameForWrite(request execution.StateApplyRequest, index int, mutation execution.StateMutation, revision uint64) ([]byte, writeRefusal, int) {
 	if index < len(request.Frames) {
 		if frame := request.Frames[index]; frame != nil && frame.Revision == revision && frame.MutationDigest == mutation.MutationDigest {
-			return frame.Bytes, "", "", frame.LegacyRecordIDs
+			return frame.Bytes, writeRefusal{}, frame.LegacyRecordIDs
 		}
 	}
 	return store.encodeForWrite(mutation, revision)

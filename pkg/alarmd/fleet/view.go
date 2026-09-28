@@ -312,6 +312,31 @@ var NoDataMemoryRepresentations = func() []string {
 	return names
 }()
 
+// StateAdmissionRefusal is a Plan whose runtime state the store refused to
+// admit, on the object row, as the refusing round's admission line said it:
+// the reason, the rules that refused and the store's sentence with its
+// numbers -- the lifetime required against the ceiling, the bytes encoded
+// against the limit. A Plan refused at every round ends every round terminal
+// and stops detecting, and its row said STATE_BUDGET_EXCEEDED and no more:
+// which limit, and by how much, was on a pod log a busy replica rotates in
+// minutes. Kept until a later round admits the Plan.
+type StateAdmissionRefusal struct {
+	Plan   StrategyRef `json:"plan"`
+	Reason string      `json:"reason"`
+	Rules  []string    `json:"rules,omitempty"`
+	Text   string      `json:"text,omitempty"`
+	// EvaluationTime is the Slot of the latest refusal; Refusals how many
+	// admission calls of the Plan this process has seen refused since
+	// FirstAt.
+	EvaluationTime int64     `json:"evaluation_time,omitempty"`
+	FirstAt        time.Time `json:"first_at"`
+	LastAt         time.Time `json:"last_at"`
+	Refusals       int       `json:"refusals"`
+	// Plans is how many of the object's Plans are refused; the row carries
+	// the one refused most recently.
+	Plans int `json:"plans,omitempty"`
+}
+
 // NoDataMemoryUpkeep is the last this process saw of a Plan's absence memory
 // being kept alive, on the object row: which stored shape the last read came
 // from, when a renewal last reached the store and whether it renewed, and the
@@ -1368,6 +1393,10 @@ type Anomaly struct {
 	// stored shape and the last renewal. Absent until a renewal reached the
 	// store or a read said what it read.
 	NoDataMemoryUpkeep *NoDataMemoryUpkeep `json:"no_data_memory_upkeep,omitempty"`
+	// StateAdmissionRefusal is on every row of an object one of whose Plans
+	// this process has seen refused at state admission and not admitted
+	// since: the one refused most recently, with the store's sentence.
+	StateAdmissionRefusal *StateAdmissionRefusal `json:"state_admission_refusal,omitempty"`
 	// WireFormats is on every row of an object whose Plans this process has
 	// seen evaluate: the wire format each Plan's events are published as, by
 	// Plan, smallest strategy first, from the Plan's own evaluation line.
