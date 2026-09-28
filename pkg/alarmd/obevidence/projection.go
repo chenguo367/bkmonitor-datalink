@@ -68,9 +68,21 @@ var sourcePolicy = fields("id bk_biz_id bk_tenant_id space_uid is_global_strateg
 		"target_plan": targetPolicy, "no_data_config": noDataPolicy,
 	}),
 	"detects":        fields("level priority connector", map[string]*policy{"trigger_config": triggerPolicy, "recovery_config": triggerPolicy, "effective_time": uptimePolicy}),
-	"effective_time": uptimePolicy, "uptime": uptimePolicy,
+	"effective_time": uptimePolicy, "uptime": uptimePolicy, "effective_time_snapshot": effectiveSnapshotPolicy,
 })
 var groupPolicy = fields("model_id model_inst_ids", map[string]*policy{"member_list": memberPolicy})
+
+// effectiveSnapshotPolicy is the writer's effective-time snapshot as the
+// compiler reads it (strategy/effective_rules.go): its own status and reason
+// are what decide a strategy withheld as EFFECTIVE_TIME_SNAPSHOT_*, and were
+// the one part of that verdict no reader could see.
+var effectiveSnapshotPolicy = fields("schema_version status reason business_timezone", map[string]*policy{
+	"calendars": fields("id bk_tenant_id status", map[string]*policy{
+		"items": fields("id time_kind start_time end_time time_zone parent_id", map[string]*policy{
+			"repeat": fields("freq interval until every exclude_date exclude_date_encoding_timezone", nil),
+		}),
+	}),
+})
 
 var scalarPolicy = fields("Kind StringValue NumberValue BoolValue", nil)
 var frozenFunctionPolicy = fields("Method Field Without Dimensions Position Window Subquery Step", map[string]*policy{"Arguments": scalarPolicy})
