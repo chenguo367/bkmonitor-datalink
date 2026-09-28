@@ -319,8 +319,12 @@ func aggregateCapacity(view *View, snapshots []Snapshot) {
 		setCeiling("permit_budget_per_replica", &capacity.PermitBudget, facts.PermitBudget)
 		setCeiling("queue_budget_per_replica", &capacity.QueueBudget, facts.QueueBudget)
 		setCeiling("cpu_cores_per_replica", &capacity.CPUCores, facts.CPUCores)
+		// Two replicas at one share name the one whose name sorts first, so
+		// the replica named does not follow the order the replicas were read.
 		if facts.MemoryLimitKnown && facts.MemoryLimit > 0 {
-			if share := float64(facts.MemoryUsed) / float64(facts.MemoryLimit); share > capacity.MemoryUsedShareMax {
+			share := float64(facts.MemoryUsed) / float64(facts.MemoryLimit)
+			if share > capacity.MemoryUsedShareMax || (share == capacity.MemoryUsedShareMax &&
+				(capacity.MemoryUsedShareMaxReplica == "" || snapshot.Replica < capacity.MemoryUsedShareMaxReplica)) {
 				capacity.MemoryUsedShareMax, capacity.MemoryUsedShareMaxReplica = share, snapshot.Replica
 			}
 		}

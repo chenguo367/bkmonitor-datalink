@@ -124,6 +124,17 @@ func TestTheFullestReplicasMemoryShareIsItsOwnNotTheSumOverOneLimit(t *testing.T
 		}
 	}
 
+	// Two replicas at one share name the same one whichever is read first.
+	for _, order := range [][]string{{"pod-a", "pod-b"}, {"pod-b", "pod-a"}} {
+		tied := Aggregate(Expectation{QueryGroups: 20, Known: true}, []Snapshot{
+			capacitySnapshot("pod-a", at, &Capacity{MemoryUsed: 1 << 30, MemoryLimit: limit, MemoryLimitKnown: true}),
+			capacitySnapshot("pod-b", at, &Capacity{MemoryUsed: 1 << 30, MemoryLimit: limit, MemoryLimitKnown: true}),
+		}, order, at, time.Minute).Capacity
+		if tied.MemoryUsedShareMaxReplica != "pod-a" {
+			t.Fatalf("read in order %v, the tie named %s, want pod-a", order, tied.MemoryUsedShareMaxReplica)
+		}
+	}
+
 	// A replica that does not know its limit has no share, and none known
 	// leaves the field out rather than reading zero.
 	unknown := Aggregate(Expectation{QueryGroups: 20, Known: true}, []Snapshot{
