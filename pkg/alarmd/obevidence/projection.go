@@ -75,8 +75,8 @@ var groupPolicy = fields("model_id model_inst_ids", map[string]*policy{"member_l
 var scalarPolicy = fields("Kind StringValue NumberValue BoolValue", nil)
 var frozenFunctionPolicy = fields("Method Field Without Dimensions Position Window Subquery Step", map[string]*policy{"Arguments": scalarPolicy})
 var frozenConditionsPolicy = fields("Connectors", map[string]*policy{"Fields": namedValues(fields("Field Operator Wildcard Prefix Suffix", map[string]*policy{"Values": scalarPolicy}))})
-var frozenClausePolicy = fields("FieldSemantics DataSource Driver TableID FieldName TimeField IsRegexp ReferenceName Dimensions Offset OffsetForward KeepColumns QueryString", map[string]*policy{
-	"SourceConditions": frozenConditionsPolicy, "Conditions": frozenConditionsPolicy, "Functions": frozenFunctionPolicy, "TimeAggregation": frozenFunctionPolicy,
+var frozenClausePolicy = fields("DataSource Driver TableID FieldName TimeField IsRegexp ReferenceName Dimensions Offset OffsetForward KeepColumns QueryString", map[string]*policy{
+	"Conditions": frozenConditionsPolicy, "Functions": frozenFunctionPolicy, "TimeAggregation": frozenFunctionPolicy,
 })
 var frozenQueryPolicy = fields("QueryDelaySeconds SourceSemantics QueryRevision Provider ProviderRouteRef TenantID BusinessID SpaceScope GlobalBusiness MetricMerge StepMillis AlignmentMillis DownSampleRange Timezone NotTimeAlign", map[string]*policy{
 	"QueryList": frozenClausePolicy, "PromQL": fields("Expression Match", nil),

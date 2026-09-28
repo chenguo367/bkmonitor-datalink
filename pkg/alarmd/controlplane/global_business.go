@@ -26,9 +26,8 @@ const (
 	GlobalBusinessLegacyTarget = "legacy_target"
 	// GlobalBusinessQueryKind: the query is not a structured time series
 	// query over the metric router. PromQL is scoped only by the space the
-	// provider is told, FTA conditions carry the Plan's own business, and
-	// how logs, events and the computing platform's tables are routed with
-	// the space skipped has not been established.
+	// provider is told, and how logs, events and the computing platform's
+	// tables are routed with the space skipped has not been established.
 	GlobalBusinessQueryKind = "query_kind"
 	// GlobalBusinessQueryTable: a query names no table or data label. With
 	// the space skipped the provider has no space to find tables in, answers
@@ -73,10 +72,6 @@ func globalBusinessRefusal(
 		}
 	}
 	for _, clause := range facts.QueryList {
-		if clause.FieldSemantics != "" || clause.SourceConditions != nil {
-			refusal := globalBusinessUnsupported(sourceID, GlobalBusinessQueryKind, "items[0].query_configs")
-			return &refusal
-		}
 		if !namesTableOrDataLabel(clause.TableID) {
 			refusal := globalBusinessUnsupported(sourceID, GlobalBusinessQueryTable, "items[0].query_configs")
 			return &refusal

@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/platformsettings"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
@@ -55,7 +54,6 @@ type PhaseTwoRuntimeFilterConfig struct {
 }
 
 type PhaseTwoLegacyQueryRuntimeConfig struct {
-	FTAEventStorage *execution.QueryStorage `yaml:"fta_event_storage"`
 	// Deprecated: the four keys below are the platform's own settings and
 	// live under phase_two.platform_settings, which the platform's dynamic
 	// configuration distribution overrides at run time. They are still

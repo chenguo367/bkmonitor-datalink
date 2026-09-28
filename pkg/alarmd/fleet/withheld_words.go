@@ -129,6 +129,11 @@ var withheldReasonWords = map[string]WithheldReasonWords{
 	"UNSUPPORTED_MULTI_ITEM_STRATEGY": {Kind: WithheldBuildCapability,
 		What: "多 item 的策略本构建不支持",
 		Next: "等支持多 item 的构建；改部署参数没有用"},
+	// Not a capability still to come: FTA event sources are not supported,
+	// and no build or deployment parameter changes that.
+	"QUERY_FTA_UNSUPPORTED": {Kind: WithheldStrategyDefinition,
+		What: "FTA 告警事件类数据源不支持：这类查询要用查询服务没有的字段，不带这些字段就会把整张表的告警都算进来，所以一律不编译",
+		Next: "不会在这里检测，也没有开关可开；需要检测的话，策略负责人改用其它数据源"},
 	"QUERY_SOURCE_NOT_MIGRATED": {Kind: WithheldBuildCapability,
 		What: "该数据源的查询还没迁到 Go 侧",
 		Next: "等带该数据源的构建；改部署参数没有用"},
