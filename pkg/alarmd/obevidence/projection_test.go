@@ -61,3 +61,45 @@ func TestTheEffectiveTimeSnapshotShowsWhatTheCompilerReads(t *testing.T) {
 		t.Fatalf("snapshot projection passed an unknown field: %s %+v", data, omitted)
 	}
 }
+
+// A Kubernetes static target's match, a model_inst_id rule's model mapping and
+// a dynamic group's id read in the source view; a field outside them does not.
+func TestTheTargetPlanShowsStaticMatchesAndTheModelMapping(t *testing.T) {
+	raw := []byte(`{"items":[{"target_plan":{"schema_version":1,"model_id":"k8s","target_rule":"match","model_match":{"cw_object_model_id":"23","token":"MAP_SECRET"},` +
+		`"static_targets":[{"model_id":"k8s","match":{"bcs_cluster_id":"BCS-K8S-00001","namespace":"prod","workload_kind":"Deployment","workload_name":"api","password":"MATCH_SECRET"}}],` +
+		`"dynamic_groups":[],"dynamic_topologies":[]}},` +
+		`{"target_plan":{"schema_version":1,"model_id":"host","target_rule":"host_id","dynamic_groups":[{"dynamic_group_id":"g1","token":"GROUP_SECRET"}]}}]}`)
+	value, omitted, err := projectJSON(raw, sourcePolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(value)
+	for _, want := range []string{`"bcs_cluster_id":"BCS-K8S-00001"`, `"workload_name":"api"`, `"cw_object_model_id":"23"`, `"dynamic_groups":[]`, `"dynamic_group_id":"g1"`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("target plan projection lacks %s: %s", want, data)
+		}
+	}
+	if strings.Contains(string(data), "SECRET") || len(omitted) != 3 {
+		t.Fatalf("target plan projection passed an unknown field: %s %+v", data, omitted)
+	}
+}
+
+// The published plan freezes each dynamic group as its bare id; the object the
+// writer's source spells does not replace it there.
+func TestTheFrozenTargetPlanKeepsItsDynamicGroupIDs(t *testing.T) {
+	raw := []byte(`{"plans":[{"target_plan":{"schema_version":1,"model_id":"host","target_rule":"host_id","dynamic_groups":["g1","g2"]},` +
+		`"target_scope":{"schema_version":1,"model_id":"host","dynamic_groups":["g3"]}}]}`)
+	value, omitted, err := projectJSON(raw, publishedPolicy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(value)
+	for _, want := range []string{`"dynamic_groups":["g1","g2"]`, `"dynamic_groups":["g3"]`} {
+		if !strings.Contains(string(data), want) {
+			t.Fatalf("frozen target plan lacks %s: %s %+v", want, data, omitted)
+		}
+	}
+	if len(omitted) != 0 {
+		t.Fatalf("frozen dynamic group ids were omitted: %+v", omitted)
+	}
+}

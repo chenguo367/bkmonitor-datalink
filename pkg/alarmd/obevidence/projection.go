@@ -35,14 +35,29 @@ func dictionary(value *policy) *policy { return &policy{values: value} }
 
 func namedValues(p *policy) *policy { p.namedValue = true; return p }
 
+// scalarOr lets a plain value through where the policy otherwise expects an
+// object: one field that the source document spells as an object and the
+// frozen plan as a bare value reads in both.
+func scalarOr(p *policy) *policy { p.scalar = true; return p }
+
 var conditionPolicy = namedValues(fields("condition key method value field operator values keys group", nil))
-var memberPolicy = fields("model_id model_inst_id bk_host_id bk_biz_id bk_obj_id bk_inst_id bcs_cluster_id namespace workload_kind workload_name node id ip bk_cloud_id", nil)
-var targetPolicy = fields("schema_version model_id target_rule failure_policy static_keys dynamic_groups type selection_type target_type model_inst_ids", map[string]*policy{
+var memberPolicy = fields("model_id model_inst_id bk_host_id bk_biz_id bk_obj_id bk_inst_id bcs_cluster_id namespace workload_kind workload_name node id ip bk_cloud_id", map[string]*policy{
+	// A Kubernetes static target names what it matches here, as the writer
+	// spells it; without it the target reads as a model and nothing else.
+	"match": fields("bcs_cluster_id namespace node workload_kind workload_name", nil),
+})
+var targetPolicy = fields("schema_version model_id target_rule failure_policy static_keys type selection_type target_type model_inst_ids", map[string]*policy{
 	"identity":       fields("dimensions model_dimension model_value host_identity", nil),
 	"static_members": memberPolicy, "static_targets": memberPolicy, "dynamic_topologies": memberPolicy,
 	"groups": fields("", map[string]*policy{"conditions": conditionPolicy}), "conditions": conditionPolicy,
 	"conditions_list": conditionPolicy, "nodes": memberPolicy, "hosts": memberPolicy,
 	"static_businesses": dictionary(leaf),
+	// The writer's model mapping for a model_inst_id rule.
+	"model_match": fields("cw_object_model_id", nil),
+	// The writer spells each dynamic group as an object naming it, the frozen
+	// plan as the bare id; as a leaf the source's read only while the writer
+	// left the list empty.
+	"dynamic_groups": scalarOr(fields("dynamic_group_id", nil)),
 })
 var uptimePolicy = fields("is_enabled type timezone start end begin end_time begin_time week weekdays days months exclude_days include_days", map[string]*policy{
 	"time_ranges": fields("start end begin end_time begin_time", nil),
