@@ -403,7 +403,7 @@ func (service *Service) dynamicConfig(ctx context.Context, request StoreRequest)
 		entry := results[i+1]
 		if entry.Status == "ok" {
 			var value any
-			if json.Unmarshal(raws[i+1], &value) != nil || !validSetting(field, value) {
+			if json.Unmarshal(raws[i+1], &value) != nil || platformsettings.CheckFieldValue(field, raws[i+1]) != nil {
 				entry.Status = "invalid_document"
 				entry.Complete = false
 			} else {
@@ -423,24 +423,4 @@ func (service *Service) dynamicConfig(ctx context.Context, request StoreRequest)
 	}
 	r.Value = map[string]any{"revision": revision, "fields": values, "tenant": platformsettings.Tenant, "publication_present": revision.Status == "ok", "applied_to_runtime": "not_proven_by_this_read"}
 	return r
-}
-
-func validSetting(field platformsettings.Field, value any) bool {
-	if field == platformsettings.FieldIsAccessBKData {
-		_, ok := value.(bool)
-		return ok
-	}
-	if value == nil {
-		return true
-	}
-	items, ok := value.([]any)
-	if !ok {
-		return false
-	}
-	for _, item := range items {
-		if _, ok := item.(string); !ok {
-			return false
-		}
-	}
-	return true
 }

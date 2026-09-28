@@ -68,8 +68,8 @@ func TestCatalogCompositionReportsEverySupportedSource(t *testing.T) {
 	if groups["bk_monitor/log"] != 12 {
 		t.Fatalf("bk_monitor/log=%v, want 12", groups["bk_monitor/log"])
 	}
-	if groups["bk_fta/event"] != 0 {
-		t.Fatalf("bk_fta/event=%v, want a pre-created 0", groups["bk_fta/event"])
+	if groups["prometheus/time_series"] != 0 {
+		t.Fatalf("prometheus/time_series=%v, want a pre-created 0", groups["prometheus/time_series"])
 	}
 	if plans := compositionSeries(t, r, "bkmonitor_alarmd_catalog_plans", "source_semantics"); plans["bk_monitor/log"] != 30 {
 		t.Fatalf("bk_monitor/log plans=%v, want 30", plans["bk_monitor/log"])

@@ -13,6 +13,7 @@ import (
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 )
 
@@ -120,6 +121,11 @@ type Config struct {
 	// printed with no measured load beside it says nothing about whether
 	// anything is near it. Optional.
 	ObserveSeriesPulled func(records uint64)
+	// Lookback keeps a small sample of first reads as the provider delivered
+	// them, before any target filtering, to read the same window again later;
+	// see package lookback. It sees the query and hands nothing back into the
+	// pipeline. Optional.
+	Lookback *lookback.Engine
 }
 
 type Source struct {
@@ -315,20 +321,27 @@ func (source *Source) Execute(ctx context.Context, request execution.QueryExecut
 			dispatchErr = err
 			break
 		}
+		kept := source.config.Lookback.Begin(lookback.Query{Contract: request.Contract, Spec: query.Spec,
+			Operation: request.Operation, AttemptNo: attempt.AttemptNo, Plans: prepared.Header.DuePlans, Requirements: query.Requirements})
 		running.Add(1)
 		go func(index int, query PlannedQuery, attempt execution.QueryAttempt, permit QueryPermit) {
 			defer running.Done()
 			adapter := &seriesAdapter{consumer: consumer, query: query, attemptNo: attempt.AttemptNo,
 				admission: source.config.Admission, observe: source.config.ObserveAdmission,
 				pulled: source.config.ObserveSeriesPulled, scopes: scopes,
-				scopeSink: source.config.ScopeDrops, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime)}
+				scopeSink: source.config.ScopeDrops, outputs: outputs, round: int64(request.Contract.Slot.EvaluationTime),
+				lookback: kept}
 			adapters[index] = adapter
 			completion, err := source.executeWithPermit(queryCtx, attempt, adapter, permit)
 			if err != nil {
 				err = fmt.Errorf("alarmd access: execute physical query: %w", err)
 			} else if !trustedProviderCompletion(query.Spec.Digest, completion) {
 				err = errors.New("alarmd access: G1 provider returned an untrusted completion")
-			} else {
+			}
+			// The provider's own completion: a first read is kept as the
+			// provider delivered it, and a recheck is compared with that.
+			kept.Complete(completion, err)
+			if err == nil {
 				completion = adapter.reconcileCompletion(completion)
 			}
 			results[index].completion = completion
@@ -833,6 +846,9 @@ type seriesAdapter struct {
 	round        int64
 	scopeScreens map[execution.PlanIdentity]string
 	scopeTallies map[scopeTallyKey]int
+	// lookback is this query's kept first read when it was sampled; nil
+	// otherwise, and every call on it is then nothing.
+	lookback *lookback.Read
 
 	// forwarded accumulates the delivery proofs of the batches that actually
 	// reached the consumer, and withheld counts the ones the monitoring target
@@ -851,6 +867,9 @@ func (adapter *seriesAdapter) ConsumeProviderSeries(ctx context.Context, batch e
 		return errors.New("alarmd access: provider delivered an invalid series")
 	}
 	admitted := adapter.admittedPlans(batch)
+	// Kept before the target filter returns: a recheck reads the whole
+	// dimension set, and a series every Plan turned away is still data.
+	adapter.lookback.Series(batch.Dataset, admitted)
 	bindings, err := dataBindings(adapter.query, batch, adapter.attemptNo, admitted)
 	if err != nil {
 		return err

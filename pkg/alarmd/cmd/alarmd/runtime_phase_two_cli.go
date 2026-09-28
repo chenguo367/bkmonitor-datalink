@@ -26,6 +26,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/evidenceroute"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/k8sread"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/metric"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obevidence"
@@ -58,6 +59,10 @@ type cliControlBinding struct {
 	// Redis clients -- evidence, auth -- by its reason, with the error's
 	// bounded text where the answer cannot carry it (auth).
 	RedisFailures func(client, reason, detail string)
+	// Lookback is this process's late-data lookback, nil when it does not
+	// run one, and LookbackStanding why; read by lookback.get.
+	Lookback         *lookback.Engine
+	LookbackStanding lookbackStanding
 }
 
 // cliRedisFailures counts an unanswered call of a CLI client by its reason,
@@ -172,6 +177,7 @@ func buildPhaseTwoCLI(cfg config.Config, native http.Handler, catalog *controlpl
 	}
 	ops := append(obchannel.NativeOperations(native), store...)
 	ops = append(ops, cliRuntimeOperation(facts, settings))
+	ops = append(ops, cliLookbackOperation(control.Lookback, control.LookbackStanding))
 	ops = append(ops, cliLifecycleOperation(diagnosticRuntime, lifecycleRecordKey(cfg)))
 	ops = append(ops, workload...)
 	ops = append(ops, obchannel.MetricsOperations(control.Metrics)...)

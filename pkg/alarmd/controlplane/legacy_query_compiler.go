@@ -63,7 +63,6 @@ type LegacyRuntimeFilterFact struct {
 // present in a cached strategy document. A nil slice or pointer means that the
 // fact was not observed; an explicitly empty slice is a valid observed value.
 type LegacyQueryRuntimeFacts struct {
-	FTAEventStorage       *execution.QueryStorage
 	AccessBKData          *bool
 	BKDataCMDBLevelTables []string
 	SystemDiskFilter      LegacyRuntimeFilterFact
@@ -73,10 +72,6 @@ type LegacyQueryRuntimeFacts struct {
 func NewLegacyPrimaryQueryCompiler(providerRoute execution.ProviderRouteRef, timezone string, runtimeFacts LegacyQueryRuntimeFacts) (*LegacyPrimaryQueryCompiler, error) {
 	if providerRoute == "" || timezone == "" {
 		return nil, errors.New("alarmd controlplane: provider route and timezone are required")
-	}
-	if runtimeFacts.FTAEventStorage != nil {
-		storage := *runtimeFacts.FTAEventStorage
-		runtimeFacts.FTAEventStorage = &storage
 	}
 	runtimeFacts.BKDataCMDBLevelTables = cloneStringsPreservingNil(runtimeFacts.BKDataCMDBLevelTables)
 	runtimeFacts.SystemDiskFilter.Values = cloneStringsPreservingNil(runtimeFacts.SystemDiskFilter.Values)
@@ -236,6 +231,12 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 			// with a document of a few hundred keys and a word.
 			return execution.QueryPlanFacts{}, atQueryConfig(queryConfigRejected("QUERY_CONFIG_INVALID", err), index)
 		}
+		if config.DataSourceLabel == "bk_fta" {
+			// FTA event sources are not supported, and nothing turns them back
+			// on: the query they need names fields the query service does not
+			// hold, and without them it reads every alert of the table.
+			return execution.QueryPlanFacts{}, atQueryConfig(queryUnsupported("QUERY_FTA_UNSUPPORTED", nil), index)
+		}
 		if !pollingSourceSupported(config) {
 			return execution.QueryPlanFacts{}, atQueryConfig(queryUnsupported("QUERY_SOURCE_NOT_MIGRATED", nil), index)
 		}
@@ -250,7 +251,6 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 		return compiler.compilePromQL(source, configs[0])
 	}
 	queryList := make([]execution.QueryClause, 0, len(configs))
-	storages := map[string][]execution.QueryStorage{}
 	aliases := map[string]string{}
 	sourceSemantics := make([]string, 0, len(configs))
 	identitySet := make(map[string]struct{})
@@ -268,11 +268,6 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 		}
 		queryList = append(queryList, clauses...)
 		sourceSemantics = append(sourceSemantics, config.DataSourceLabel+"/"+config.DataTypeLabel)
-		for _, clause := range clauses {
-			if clause.FieldSemantics != "" {
-				storages[clause.ReferenceName] = []execution.QueryStorage{*compiler.runtimeFacts.FTAEventStorage}
-			}
-		}
 		if config.DataSourceLabel == "custom" && config.DataTypeLabel == "event" || config.DataSourceLabel == "bk_monitor" && config.DataTypeLabel == "log" {
 			for _, field := range config.AggDimensions {
 				if monitorEventField(field) != field {
@@ -336,7 +331,7 @@ func (compiler *LegacyPrimaryQueryCompiler) CompilePrimaryQuery(_ context.Contex
 		}
 	}
 	facts, err := execution.BuildQueryPlanFacts(execution.QueryPlanFacts{
-		SourceSemantics: sourceSemantics, TSDBMap: storages, QueryDelaySeconds: delay,
+		SourceSemantics: sourceSemantics, QueryDelaySeconds: delay,
 		Provider:         execution.ProviderUQ,
 		ProviderRouteRef: compiler.providerRoute,
 		TenantID:         source.Identity.TenantID,
