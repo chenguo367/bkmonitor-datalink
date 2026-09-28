@@ -45,6 +45,8 @@ func TestAPlanRecordsReadNamesEachKeyItsLifeSizeAndHeader(t *testing.T) {
 	object := controlplane.QueryGroupObject{ContractVersion: "alarmd-query-group-object-v1", Identity: "group", Plans: []controlplane.QueryGroupPlanObject{
 		{Identity: plan, PlanID: "p7", StateGeneration: "generation"},
 		{Identity: sibling, PlanID: "p8", StateGeneration: "generation"},
+		// Written before objects carried the generation.
+		{Identity: execution.PlanIdentity{TenantID: "default", BusinessID: "2", StrategyID: "10"}, PlanID: "p10"},
 	}}
 	raw, err := contract.CanonicalJSONV2(object)
 	if err != nil {
@@ -75,7 +77,7 @@ func TestAPlanRecordsReadNamesEachKeyItsLifeSizeAndHeader(t *testing.T) {
 		r := service.Store(ctx, request)
 		log.assertBounded(t)
 		plans, _ := r.Value.([]PlanRecords)
-		if r.Status != "ok" || !r.Complete || len(plans) != 1 || plans[0].Plan != plan || plans[0].StateGeneration != "generation" {
+		if r.Status != "ok" || !r.Complete || len(plans) != 1 || plans[0].Plan.StrategyID != request.StrategyID || plans[0].StateGeneration != "generation" {
 			t.Fatalf("%s = %+v, want this Plan's records read whole", request.Family, r)
 		}
 		return plans[0].Records
@@ -89,6 +91,29 @@ func TestAPlanRecordsReadNamesEachKeyItsLifeSizeAndHeader(t *testing.T) {
 	version := execution.ApplyVersion{StateApplyEpoch: 1, EvaluationTime: 60, SlotDigest: "slot"}
 	ref := execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "group", EvaluationTime: 60}, SnapshotRevision: "snapshot",
 		QueryRevision: "query", ScheduleRevision: "schedule", ScheduleSegmentStart: 60, DuePlanSetDigest: "plans"}
+	// Each Plan's own retention, as the writer carries it: a one-minute Plan
+	// whose records live the one-day floor, and a Plan past a day -- thirty
+	// hourly points -- whose records live its own lifetime.
+	retention := execution.GenerationRetention{ByPlan: map[execution.PlanIdentity][]execution.StateRetentionRequirement{
+		plan:    {{LevelID: 1, RetentionPoints: 5, EvaluationInterval: time.Minute}},
+		sibling: {{LevelID: 1, RetentionPoints: 30, EvaluationInterval: time.Hour}},
+	}}
+	lifetime := func(identity execution.PlanIdentity) time.Duration {
+		t.Helper()
+		levels := retention.ByPlan[identity]
+		ttl, err := state.GenerationScopedTTL([]state.LevelRequirement{state.NewLevelRequirement(levels[0], "", 0)}, time.Minute, time.Minute, 720*time.Hour)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ttl
+	}
+	// The remaining life in milliseconds, within a minute of the write's.
+	wantLife := func(record PlanRecord, want time.Duration) {
+		t.Helper()
+		if record.TTLMS == nil || *record.TTLMS > want.Milliseconds() || *record.TTLMS <= (want-time.Minute).Milliseconds() {
+			t.Fatalf("%s remaining life = %v ms, want within a minute of %d ms", record.Kind, record.TTLMS, want.Milliseconds())
+		}
+	}
 	writeGap := func(identity execution.PlanIdentity) {
 		t.Helper()
 		gap, err := execution.BuildPlanGapMutation(execution.PlanGapMutation{
@@ -99,18 +124,21 @@ func TestAPlanRecordsReadNamesEachKeyItsLifeSizeAndHeader(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		applied, err := store.ApplyGap(ctx, execution.GapGuardApplyRequest{Contract: ref, Items: []execution.PlanGapMutation{gap}})
+		applied, err := store.ApplyGap(ctx, execution.GapGuardApplyRequest{Contract: ref, Items: []execution.PlanGapMutation{gap}, Retention: retention})
 		if err != nil || applied.Items[0].Status != execution.GapGuardApplied {
 			t.Fatalf("ApplyGap() = (%+v, %v)", applied, err)
 		}
 	}
 	writeGap(plan)
 	gap := recordsOf(gapRequest)[0]
-	if gap.Status != "ok" || gap.Type != "string" || gap.TTLMS == nil || *gap.TTLMS <= 0 || *gap.TTLMS > state.GenerationScopedFloor.Milliseconds() ||
-		gap.Bytes == nil || *gap.Bytes <= 0 || gap.Header == nil || gap.Header.MarkerRevision != 1 || gap.Header.EvaluationTime != 60 ||
-		gap.Header.Scopes != 1 || gap.Header.ScheduleRevision != "plan-r1" {
-		t.Fatalf("gap marker = %+v header %+v, want it present at the write's lifetime with its header", gap, gap.Header)
+	if gap.Status != "ok" || gap.Type != "string" || gap.Bytes == nil || *gap.Bytes <= 0 || gap.Header == nil || gap.Header.MarkerRevision != 1 ||
+		gap.Header.EvaluationTime != 60 || gap.Header.Scopes != 1 || gap.Header.ScheduleRevision != "plan-r1" {
+		t.Fatalf("gap marker = %+v header %+v, want it present with its header", gap, gap.Header)
 	}
+	if lifetime(plan) != state.GenerationScopedFloor {
+		t.Fatalf("setup: a one-minute Plan's records live %s, want the floor", lifetime(plan))
+	}
+	wantLife(gap, state.GenerationScopedFloor)
 
 	noData, err := execution.BuildPlanNoDataMutation(execution.PlanNoDataMemoryUpdate{
 		DerivedFrom: execution.NoDataRepresentationNone, Identity: execution.PlanNoDataIdentity{Plan: plan, StateGeneration: "generation"},
@@ -120,7 +148,7 @@ func TestAPlanRecordsReadNamesEachKeyItsLifeSizeAndHeader(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if applied, err := store.ApplyNoData(ctx, execution.NoDataApplyRequest{Contract: ref, Items: []execution.PlanNoDataMutation{noData}}); err != nil ||
+	if applied, err := store.ApplyNoData(ctx, execution.NoDataApplyRequest{Contract: ref, Items: []execution.PlanNoDataMutation{noData}, Retention: retention}); err != nil ||
 		applied.Items[0].Status != execution.NoDataApplied {
 		t.Fatalf("ApplyNoData() = (%+v, %v)", applied, err)
 	}
@@ -129,17 +157,28 @@ func TestAPlanRecordsReadNamesEachKeyItsLifeSizeAndHeader(t *testing.T) {
 		t.Fatalf("absence memory = %+v, want the per-group record and the whole one", memory)
 	}
 	perGroup := memory[0]
-	if perGroup.Status != "ok" || perGroup.Type != "hash" || perGroup.TTLMS == nil || *perGroup.TTLMS <= 0 ||
-		perGroup.Fields == nil || *perGroup.Fields < 2 || perGroup.Header == nil || perGroup.Header.MarkerRevision != 1 || perGroup.Header.PresentAsOf != 1000 {
+	if perGroup.Status != "ok" || perGroup.Type != "hash" || perGroup.Fields == nil || *perGroup.Fields < 2 || perGroup.Header == nil ||
+		perGroup.Header.MarkerRevision != 1 || perGroup.Header.PresentAsOf != 1000 {
 		t.Fatalf("per-group memory = %+v header %+v, want it present with its fields and header", perGroup, perGroup.Header)
 	}
+	wantLife(perGroup, state.GenerationScopedFloor)
 	if memory[1].Status != "missing" {
 		t.Fatalf("whole memory = %+v, want missing: this build does not write it", memory[1])
 	}
 
+	// A Plan past a day: its marker lives its own lifetime, past the floor,
+	// which is what reading a sixty-hour strategy's keys has to show.
+	writeGap(sibling)
+	siblingRequest := gapRequest
+	siblingRequest.StrategyID = "8"
+	long := recordsOf(siblingRequest)[0]
+	if lifetime(sibling) <= state.GenerationScopedFloor {
+		t.Fatalf("setup: a thirty-hour Plan's records live %s, want past the floor", lifetime(sibling))
+	}
+	wantLife(long, lifetime(sibling))
+
 	// A key holding another Plan's record is not this Plan's; one holding the
 	// wrong shape says so.
-	writeGap(sibling)
 	siblingKey, err := state.PlanGapKeyV2(prefix, execution.PlanGapIdentity{Plan: sibling, StateGeneration: "generation"})
 	if err != nil {
 		t.Fatal(err)
@@ -166,6 +205,16 @@ func TestAPlanRecordsReadNamesEachKeyItsLifeSizeAndHeader(t *testing.T) {
 	missing.StrategyID = "9"
 	if r := service.Store(ctx, missing); r.Status != "plan_not_in_object" || r.Value != nil {
 		t.Fatalf("a Plan outside the object = %+v", r)
+	}
+	// A Plan the object names without a generation has keys nobody can name
+	// from it: said by name, and the answer is not complete.
+	unnamed := gapRequest
+	unnamed.StrategyID = "10"
+	log.reset()
+	r := service.Store(ctx, unnamed)
+	log.assertBounded(t)
+	if plans, _ := r.Value.([]PlanRecords); r.Complete || len(plans) != 1 || plans[0].Status != "generation_unknown" || len(plans[0].Records) != 0 {
+		t.Fatalf("a Plan without a generation = %+v, want it named generation_unknown and the answer incomplete", r)
 	}
 	// The tenant and the business narrow as strategy.config's published view
 	// does: the strategy under another business is not this Plan.

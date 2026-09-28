@@ -42,7 +42,12 @@ type PlanRecords struct {
 	Plan            execution.PlanIdentity    `json:"plan"`
 	StateGeneration execution.StateGeneration `json:"state_generation"`
 	Shard           *execution.ShardRef       `json:"shard,omitempty"`
-	Records         []PlanRecord              `json:"records"`
+	// Status is generation_unknown for a Plan the object names without a
+	// state generation -- an object written before the field -- whose keys
+	// cannot be named from it; empty otherwise. A Plan that is running carries
+	// one: the runtime refuses a Slot whose object and activation disagree.
+	Status  string       `json:"status,omitempty"`
+	Records []PlanRecord `json:"records"`
 }
 
 // PlanRecord is one key: whether it is there, its remaining life, its size and
@@ -125,6 +130,10 @@ func (service *Service) planRecords(ctx context.Context, request StoreRequest) R
 		}
 		index := len(plans)
 		plans = append(plans, PlanRecords{Plan: plan.Identity, StateGeneration: plan.StateGeneration, Shard: plan.Shard})
+		if plan.StateGeneration == "" {
+			plans[index].Status = "generation_unknown"
+			continue
+		}
 		planReads, readErr := planRecordReads(request.Family, binding.Location.Prefix, plan, index)
 		if readErr != nil {
 			r.Status, r.Complete = "invalid_document", false
@@ -145,12 +154,22 @@ func (service *Service) planRecords(ctx context.Context, request StoreRequest) R
 	r.Location.Key = ""
 	r.Type = "plan_records"
 	r.TTLMS = nil
-	r.Limits.Commands = commands
-	complete, bytesRead := readPlanRecords(ctx, binding, reads, plans)
-	r.Limits.Bytes += bytesRead
+	complete := true
+	if len(reads) > 0 {
+		r.Limits.Commands = commands
+		answered, bytesRead := readPlanRecords(ctx, binding, reads, plans)
+		r.Limits.Bytes += bytesRead
+		complete = answered
+	}
 	r.Status, r.Complete = "ok", complete
 	if !complete {
 		r.Status = "dependency_unavailable"
+	}
+	// A Plan whose keys could not be named leaves the answer incomplete.
+	for _, read := range plans {
+		if read.Status != "" {
+			r.Complete = false
+		}
 	}
 	r.Value = plans
 	return r
