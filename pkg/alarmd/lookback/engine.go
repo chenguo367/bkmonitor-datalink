@@ -110,22 +110,27 @@ type Permit func() (release func(), refused string)
 
 // Options wire an Engine. MemoryBytes is the lookback's explicit share of
 // the diagnostics memory; zero refuses every sample, as memory_full.
+// SampleOneIn is SampleOneIn when zero; only a test sets it.
 type Options struct {
 	Now         func() time.Time
 	Recheck     Recheck
 	Permit      Permit
 	Owns        func(execution.QueryGroupIdentity) bool
 	MemoryBytes int
+	SampleOneIn uint64
 }
 
 // Query is what the access layer knows about a physical query before it is
-// sent: enough to decide whether it is sampled.
+// sent: enough to decide whether it is sampled. Plans is every due Plan of
+// the Slot and Requirements the query's own; the Plans the query feeds are
+// picked out only once it is sampled, so a query that is not costs nothing.
 type Query struct {
-	Contract  execution.FrozenExecutionContractRef
-	Spec      execution.PhysicalQuerySpec
-	Operation execution.Operation
-	AttemptNo uint32
-	Plans     []execution.DuePlan
+	Contract     execution.FrozenExecutionContractRef
+	Spec         execution.PhysicalQuerySpec
+	Operation    execution.Operation
+	AttemptNo    uint32
+	Plans        []execution.DuePlan
+	Requirements []execution.DataRequirement
 }
 
 // Engine is the lookback of one process.
@@ -177,6 +182,9 @@ func New(options Options) (*Engine, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+	if options.SampleOneIn == 0 {
+		options.SampleOneIn = SampleOneIn
+	}
 	return &Engine{options: options, counts: newCounters()}, nil
 }
 
@@ -188,23 +196,41 @@ func (engine *Engine) Begin(query Query) *Read {
 		return nil
 	}
 	source, measured := SourceOf(query.Spec.PlanFacts)
-	if !measured || !sampled(query.Spec.Digest, query.Contract.Slot.EvaluationTime) {
+	if !measured || !sampled(query.Spec.Digest, query.Contract.Slot.EvaluationTime, engine.options.SampleOneIn) {
 		return nil
 	}
 	plans := make([]planCheck, 0, len(query.Plans))
 	for _, due := range query.Plans {
-		plans = append(plans, planCheckOf(due.Identity, due.CompiledPlan, query.Spec.PlanFacts.Normalization.CanonicalValueField))
+		if feeds(query.Requirements, due.Identity) {
+			plans = append(plans, planCheckOf(due.Identity, due.CompiledPlan, query.Spec.PlanFacts.Normalization.CanonicalValueField))
+		}
 	}
 	return &Read{engine: engine, source: source, query: query, plans: plans, first: readSet{}, readAt: engine.options.Now()}
 }
 
-func sampled(digest execution.PhysicalQueryDigest, at execution.EvaluationTime) bool {
+func sampled(digest execution.PhysicalQueryDigest, at execution.EvaluationTime, oneIn uint64) bool {
 	sum := sha256.New()
 	sum.Write([]byte(digest))
 	var buf [8]byte
 	binary.BigEndian.PutUint64(buf[:], uint64(at))
 	sum.Write(buf[:])
-	return binary.BigEndian.Uint64(sum.Sum(nil)[:8])%SampleOneIn == 0
+	return binary.BigEndian.Uint64(sum.Sum(nil)[:8])%oneIn == 0
+}
+
+// feeds says whether a Plan consumes one of the query's requirements. With
+// no requirements given every Plan does.
+func feeds(requirements []execution.DataRequirement, plan execution.PlanIdentity) bool {
+	if len(requirements) == 0 {
+		return true
+	}
+	for _, requirement := range requirements {
+		for _, consumer := range requirement.Consumers {
+			if consumer.Consumer.Plan == plan {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Read is one sampled first read being kept. The access layer calls Series

@@ -168,7 +168,7 @@ func logSpec(digest string) execution.PhysicalQuerySpec {
 func sampledQuery(t testing.TB, spec execution.PhysicalQuerySpec, plans []execution.DuePlan) Query {
 	t.Helper()
 	for at := execution.EvaluationTime(60); at < 60*100000; at += 60 {
-		if sampled(spec.Digest, at) {
+		if sampled(spec.Digest, at, SampleOneIn) {
 			return Query{Contract: execution.FrozenExecutionContractRef{Slot: execution.SlotIdentity{QueryGroup: "qg", EvaluationTime: at}},
 				Spec: spec, Operation: execution.OperationNormal, AttemptNo: 1, Plans: plans}
 		}
