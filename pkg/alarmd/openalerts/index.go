@@ -707,10 +707,14 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 // Which read counts is the choice here:
 //
 //   - A first recovery, while the sets are authoritative: the first read of
-//     either kind that began after it - the per-minute read of the set, or a
-//     calibration. A consumer that took the RECOVERY and failed to process it
-//     keeps the alert open; waiting for the next calibration left it open for
-//     up to a calibration interval before it was asked again.
+//     the set taken once the retention has passed. A read from inside the
+//     retention does not count, however recent: it may have been taken
+//     before the consumer processed the recovery, and a consumer that is
+//     keeping up would be sent it again on the strength of it. A consumer
+//     that took the RECOVERY and failed to process it keeps the alert open;
+//     waiting for the next calibration left it open for up to a calibration
+//     interval before it was asked again. A calibration past the retention
+//     releases it too, by pruning the entry (applyCalibration).
 //   - A recovery already sent again (resent): a calibration that began after
 //     it, and with no current calibration, as long as one would take. A
 //     consumer that is behind by more than the retention has both copies
@@ -721,26 +725,23 @@ func (cache *Cache) indexContains(m member, now time.Time, count bool) bool {
 //     none current, the next read. What the sets say about this process's
 //     alerts is not trusted then, and the gate answers from its own record.
 func (cache *Cache) removalHides(entry *indexEntry, removed stamped, now time.Time) bool {
-	if entry == nil || now.Sub(removed.at) <= cache.index.options.LocalRetention {
+	retention := cache.index.options.LocalRetention
+	if entry == nil || now.Sub(removed.at) <= retention {
 		return true
 	}
 	calibrated := cache.calibrated(entry, now)
-	observed := entry.indexReadAt
 	switch {
+	case cache.index.disjoint && calibrated:
+		return !removed.at.Before(entry.calibratedStarted)
 	case cache.index.disjoint:
-		if calibrated {
-			observed = entry.calibratedStarted
-		}
+		return !removed.at.Before(entry.indexReadAt)
 	case !removed.resent:
-		if entry.calibratedStarted.After(observed) {
-			observed = entry.calibratedStarted
-		}
+		return !removed.at.Add(retention).Before(entry.indexReadAt)
 	case calibrated:
-		observed = entry.calibratedStarted
-	case now.Sub(removed.at) <= cache.index.options.ReconcileInterval:
-		return true
+		return !removed.at.Before(entry.calibratedStarted)
+	default:
+		return now.Sub(removed.at) <= cache.index.options.ReconcileInterval || !removed.at.Before(entry.indexReadAt)
 	}
-	return !removed.at.Before(observed)
 }
 
 func (cache *Cache) Snapshot(key StrategyKey) StrategySnapshot {

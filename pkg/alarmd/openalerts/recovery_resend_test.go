@@ -190,10 +190,9 @@ func TestADisjointCopyDoesNotSendARecoveryAgainOnARead(t *testing.T) {
 	}
 }
 
-// The first read past the retention may be a calibration rather than the
-// per-minute read of the set. A calibration that began after the recovery,
-// with no read since, still carrying the alert, lets the recovery through
-// again just the same.
+// A calibration past the retention, with no read of the set since the
+// recovery, still carrying the alert, lets the recovery through again just
+// the same: it prunes the ledger entry.
 func TestACalibrationAloneCanBeTheReadThatSendsARecoveryAgain(t *testing.T) {
 	f := newResendFixture(t, "fp")
 	f.cache.index.options.IndexInterval = time.Hour
@@ -208,5 +207,24 @@ func TestACalibrationAloneCanBeTheReadThatSendsARecoveryAgain(t *testing.T) {
 	}
 	if !f.open("fp") {
 		t.Fatal("a calibration past the retention still carrying the alert did not let the recovery through")
+	}
+}
+
+// Only a read taken once the retention has passed counts. A read from inside
+// it may predate the consumer processing the recovery, so the alert it
+// still carried says nothing; the next read, past the retention, decides.
+func TestAReadFromInsideTheRetentionDoesNotSendARecoveryAgain(t *testing.T) {
+	f := newResendFixture(t, "fp")
+	f.acknowledge(abnormal(keyA, "fp"))
+	f.c.advance(time.Second)
+	f.acknowledge(recovery(keyA, "fp"))
+	f.read(30 * time.Second)
+	f.c.advance(31 * time.Second)
+	if f.open("fp") {
+		t.Fatal("a read from inside the retention sent the recovery again")
+	}
+	f.read(time.Second)
+	if !f.open("fp") {
+		t.Fatal("the first read past the retention still carrying the alert did not send the recovery again")
 	}
 }
