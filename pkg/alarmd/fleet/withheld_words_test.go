@@ -10,9 +10,13 @@
 package fleet
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -89,6 +93,13 @@ func TestEveryCapabilityReasonHasWordsAndEveryWordIsAReason(t *testing.T) {
 	}
 	if terminals < 3 {
 		t.Fatalf("read %d compiler terminals filed under the capability disposition, want at least the three the compiler produces", terminals)
+	}
+	// The dispositions the control plane builds itself, read from the syntax
+	// rather than the text: a reason named by a constant is as produced as
+	// one spelled in place, and the literal pattern above never saw it --
+	// GLOBAL_STRATEGY_UNSUPPORTED withheld strategies with no words at all.
+	for _, reason := range capabilityDispositionReasons(t) {
+		produced[reason] = true
 	}
 	if len(produced) < 8 {
 		t.Fatalf("read %d reasons from the source, too few to be the set: %v", len(produced), produced)
@@ -174,4 +185,107 @@ func TestTheCapabilityLineNamesTheKindsUnderItAndNotOneCauseForAll(t *testing.T)
 	if unknown := words["NEW_WORD_NOBODY_EXPLAINED"]; unknown == nil || unknown.Kind != WithheldUnknownReason || !strings.Contains(unknown.What, "NEW_WORD_NOBODY_EXPLAINED") {
 		t.Errorf("unknown reason words = %+v, want the reason named as unknown", unknown)
 	}
+}
+
+// capabilityDispositionReasons is every reason the control plane sets beside
+// Disposition: DispositionUnsupported in a composite literal, resolved to its
+// word whether it is written as a literal or names a constant of the control
+// plane or of a package it imports.
+func capabilityDispositionReasons(t *testing.T) []string {
+	t.Helper()
+	fset := token.NewFileSet()
+	packages := map[string]string{"controlplane": "../controlplane", "contract": "../contract", "strategy": "../strategy"}
+	type constant struct {
+		pkg  string
+		expr ast.Expr
+	}
+	constants := map[string]constant{}
+	files := map[string][]*ast.File{}
+	for name, dir := range packages {
+		parsed, err := parser.ParseDir(fset, dir, func(info os.FileInfo) bool { return !strings.HasSuffix(info.Name(), "_test.go") }, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pkg := range parsed {
+			for _, file := range pkg.Files {
+				files[name] = append(files[name], file)
+				for _, decl := range file.Decls {
+					gen, ok := decl.(*ast.GenDecl)
+					if !ok || gen.Tok != token.CONST {
+						continue
+					}
+					for _, spec := range gen.Specs {
+						value := spec.(*ast.ValueSpec)
+						for index, ident := range value.Names {
+							if index < len(value.Values) {
+								constants[name+"."+ident.Name] = constant{pkg: name, expr: value.Values[index]}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	var resolve func(pkg string, expr ast.Expr, depth int) (string, bool)
+	resolve = func(pkg string, expr ast.Expr, depth int) (string, bool) {
+		if depth > 8 {
+			return "", false
+		}
+		key := ""
+		switch expr := expr.(type) {
+		case *ast.BasicLit:
+			if expr.Kind != token.STRING {
+				return "", false
+			}
+			word, err := strconv.Unquote(expr.Value)
+			return word, err == nil
+		case *ast.Ident:
+			key = pkg + "." + expr.Name
+		case *ast.SelectorExpr:
+			qualifier, ok := expr.X.(*ast.Ident)
+			if !ok {
+				return "", false
+			}
+			key = qualifier.Name + "." + expr.Sel.Name
+		default:
+			return "", false
+		}
+		found, ok := constants[key]
+		if !ok {
+			return "", false
+		}
+		return resolve(found.pkg, found.expr, depth+1)
+	}
+	var reasons []string
+	for _, file := range files["controlplane"] {
+		ast.Inspect(file, func(node ast.Node) bool {
+			literal, ok := node.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			var disposition, reason ast.Expr
+			for _, element := range literal.Elts {
+				pair, ok := element.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				if key, ok := pair.Key.(*ast.Ident); ok {
+					switch key.Name {
+					case "Disposition":
+						disposition = pair.Value
+					case "Reason":
+						reason = pair.Value
+					}
+				}
+			}
+			if ident, ok := disposition.(*ast.Ident); !ok || ident.Name != "DispositionUnsupported" || reason == nil {
+				return true
+			}
+			if word, ok := resolve("controlplane", reason, 0); ok {
+				reasons = append(reasons, word)
+			}
+			return true
+		})
+	}
+	return reasons
 }
