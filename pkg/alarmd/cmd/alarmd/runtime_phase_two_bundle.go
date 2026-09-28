@@ -659,6 +659,12 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// they exist. It exists only with the alert link's Console, as the
 	// absent-strategy close does; see targetScopeCloseFor.
 	scopeClose, scopeDrops := targetScopeCloseFor(cfg, external.Now)
+	lookbackOwner := &lookbackOwnership{}
+	lookbackEngine, lookbackState, err := buildLookback(cfg.PhaseTwo.Observation, observationCapacity, queryClient.Recheck, flights,
+		lookbackOwner, external.Now)
+	if err != nil {
+		return nil, err
+	}
 	querySource, err := access.NewSource(frozen, queryClient, productionQueryPermitAcquirer{flights: flights}, access.Config{
 		MinReadyDelay:       cfg.PhaseTwo.Access.MinReadyDelay.Duration(),
 		Now:                 external.Now,
@@ -667,6 +673,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		ObserveAdmission:    recorder.RecordSeriesAdmission,
 		ScopeDrops:          scopeDrops,
 		ObserveSeriesPulled: seriesPullTally.Add,
+		Lookback:            lookbackEngine,
 	})
 	if err != nil {
 		return nil, err
@@ -1124,7 +1131,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 		}
 		return bundle.runtimeConfig
 	}, cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer(),
-		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now), RedisFailures: cliRedisFailures(recorder, observer)})
+		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now), RedisFailures: cliRedisFailures(recorder, observer),
+		Lookback: lookbackEngine, LookbackStanding: lookbackState})
 	defer func() {
 		if resultErr != nil {
 			_ = closeCLI()
@@ -1133,6 +1141,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	surface := publicSurfaceStandingOf(cfg, publicRestricted)
 	surface.warn(logger)
 	bundle, err = newPhaseTwoWorkerBundle(phaseTwoWorkerBundleDependencies{
+		Lookback:          lookbackEngine,
 		ActivationBlocked: repository.ActivationBlockedReading,
 		ActivationHeader:  repository.ActivationHeaderReading,
 		Config:            cfg, Health: health, Control: control, Ownership: productionOwnership,
@@ -1195,6 +1204,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	lookbackOwner.bind(bundle)
 	bundle.workerPorts = workerPorts
 	maintenance := &effectiveMaintenance{bundle: bundle, catalog: catalog, cache: openAlertCopy, writer: events,
 		capacity: linkdBudget, sourceID: cfg.PhaseTwo.Linkd.EventSourceID, legacy: legacyTime.Provider(), legacyCache: legacyTime}

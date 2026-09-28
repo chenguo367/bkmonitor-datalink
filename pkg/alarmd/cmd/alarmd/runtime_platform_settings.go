@@ -54,9 +54,8 @@ func buildPlatformSettings(ctx context.Context, cfg config.Config, client redis.
 }
 
 // legacyQueryRuntimeFacts is what the legacy query compiler compiles by:
-// the platform settings as the copy answers them now, and the FTA event
-// storage the deployment states. The two device filters' field names are
-// the platform's constants.
+// the platform settings as the copy answers them now. The two device
+// filters' field names are the platform's constants.
 func legacyQueryRuntimeFacts(cfg config.Config, settings platformsettings.Settings) controlplane.LegacyQueryRuntimeFacts {
 	accessBKData := settings.IsAccessBKData
 	facts := controlplane.LegacyQueryRuntimeFacts{
@@ -68,10 +67,6 @@ func legacyQueryRuntimeFacts(cfg config.Config, settings platformsettings.Settin
 		SystemNetworkFilter: controlplane.LegacyRuntimeFilterFact{
 			FieldName: config.SystemNetworkFilterField, Values: config.SystemNetworkFilterValues(),
 		},
-	}
-	if storage := cfg.PhaseTwo.Control.LegacyQueryRuntime.FTAEventStorage; storage != nil {
-		copied := *storage
-		facts.FTAEventStorage = &copied
 	}
 	return facts
 }

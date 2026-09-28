@@ -156,6 +156,11 @@ func phaseTwoRuntimeProfile(cfg config.Config, cpuSource string, procs int) (obs
 			DynamicGroupKeyPrefix:     targetGroupPrefix(cfg),
 			PlatformSettingsKeyPrefix: cfg.PhaseTwo.PlatformSettings.RedisKeyPrefix,
 		},
+		Linkd: observability.RuntimeLinkdFacts{
+			ConsoleConfigured: cfg.PhaseTwo.Linkd.ConsoleURL != "",
+			EventSourceID:     cfg.PhaseTwo.Linkd.EventSourceID, HookName: cfg.PhaseTwo.Linkd.HookName,
+			AbsentCloseSend: cfg.PhaseTwo.Linkd.AbsentCloseSend,
+		},
 	}
 	// Digest the exact logged safe values, with the digest field still empty.
 	digest, err := contract.DeriveCanonicalDigestV2("alarmd-runtime-config-v2", facts)

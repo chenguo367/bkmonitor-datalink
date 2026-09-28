@@ -290,6 +290,27 @@ func decodeLayer(values map[Field]json.RawMessage) (Layer, error) {
 	return layer, nil
 }
 
+// CheckFieldValue checks one field's distributed JSON by the rules a layer is
+// decoded with (decodeLayer), for a reader that shows the fields one at a
+// time: what it refuses is what the runtime refuses, and nothing else. A
+// reader keeping its own copy of the rules is how a valid horizon came to
+// read as invalid_document.
+func CheckFieldValue(field Field, raw json.RawMessage) error {
+	if !ValidField(field) {
+		return fmt.Errorf("alarmd platformsettings: unknown field %s", field)
+	}
+	var err error
+	switch field {
+	case FieldNoDataTrackingHorizonSeconds:
+		_, _, err = decodeHorizon(raw)
+	case FieldIsAccessBKData:
+		_, err = decodeBool(raw)
+	default:
+		_, err = decodeStringList(raw)
+	}
+	return err
+}
+
 var jsonNull = []byte("null")
 
 // decodeHorizon reads the horizon by presence: a JSON null states nothing

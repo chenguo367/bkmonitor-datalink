@@ -137,7 +137,6 @@ type StrategyQueryClause struct {
 	Driver          string                    `json:"driver,omitempty"`
 	TableID         string                    `json:"table_id,omitempty"`
 	Field           string                    `json:"field,omitempty"`
-	FieldSemantics  string                    `json:"field_semantics,omitempty"`
 	TimeField       string                    `json:"time_field,omitempty"`
 	Regexp          bool                      `json:"regexp,omitempty"`
 	Functions       []StrategyQueryFunction   `json:"functions,omitempty"`
@@ -440,7 +439,7 @@ func strategyQueryConfigOf(shared model.QueryPlanFacts, own map[model.LogicalQue
 func strategyQueryClauseOf(clause model.QueryClause) StrategyQueryClause {
 	projected := StrategyQueryClause{
 		Reference: clause.ReferenceName, DataSource: clause.DataSource, Driver: clause.Driver, TableID: clause.TableID,
-		Field: clause.FieldName, FieldSemantics: clause.FieldSemantics, TimeField: clause.TimeField, Regexp: clause.IsRegexp,
+		Field: clause.FieldName, TimeField: clause.TimeField, Regexp: clause.IsRegexp,
 		Dimensions: append([]string(nil), clause.Dimensions...), Offset: clause.Offset,
 		Connectors: append([]string(nil), clause.Conditions.Connectors...),
 	}

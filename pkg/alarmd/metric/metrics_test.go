@@ -229,6 +229,9 @@ func TestCustomMetricFamilySeriesDevelopmentLimits(t *testing.T) {
 		"bkmonitor_alarmd_redis_command_total": (len(redisCommandNames) + 1) * 2 * (len(redisClientNames) + 1),
 		"bkmonitor_alarmd_redis_command_failure_total": (len(redisCommandNames) + 1) * 2 *
 			(len(redisClientNames) + 1),
+		// Reasons are a closed word set and the family does not carry the
+		// command, so it stays one client by nine words.
+		"bkmonitor_alarmd_redis_failure_reason_total": (len(redisClientNames) + 1) * len(redisfailure.Reasons),
 		"bkmonitor_alarmd_redis_command_duration_seconds": (len(redisCommandNames) + 1) * 2 *
 			(len(redisClientNames) + 1) * (12 + 1 + 2),
 	} {
@@ -315,6 +318,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_redis_pool_waits_total":                       "variableLabels: {client,result}",
 		"bkmonitor_alarmd_redis_command_total":                          "variableLabels: {client,command,pipelined}",
 		"bkmonitor_alarmd_redis_command_failure_total":                  "variableLabels: {client,command,pipelined}",
+		"bkmonitor_alarmd_redis_failure_reason_total":                   "variableLabels: {client,reason}",
 		"bkmonitor_alarmd_redis_command_duration_seconds":               "variableLabels: {client,command,pipelined}",
 		"bkmonitor_alarmd_short_period_slot_completions_total":          "variableLabels: {cohort,operation,completion_kind}",
 		"bkmonitor_alarmd_query_cooldown_events_total":                  "variableLabels: {event}",
@@ -477,6 +481,15 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_event_business_attribution_total"] = "variableLabels: {source}"
 	expected["bkmonitor_alarmd_diagnostic_redis_failures_total"] = "variableLabels: {client,reason}"
 	expected["bkmonitor_alarmd_leader_round_stage_seconds_total"] = "variableLabels: {stage}"
+	expected["bkmonitor_alarmd_lookback_samples_total"] = "variableLabels: {source,outcome}"
+	expected["bkmonitor_alarmd_lookback_rechecks_total"] = "variableLabels: {source,tier,outcome}"
+	expected["bkmonitor_alarmd_lookback_compared_buckets_total"] = "variableLabels: {source,tier}"
+	expected["bkmonitor_alarmd_lookback_compared_windows_total"] = "variableLabels: {source,tier,differed}"
+	expected["bkmonitor_alarmd_lookback_differences_total"] = "variableLabels: {source,tier,class}"
+	expected["bkmonitor_alarmd_lookback_judgments_total"] = "variableLabels: {source,tier,class}"
+	expected["bkmonitor_alarmd_lookback_series_total"] = "variableLabels: {source,tier,kind}"
+	expected["bkmonitor_alarmd_lookback_windows_by_age_total"] = "variableLabels: {source,age,differed}"
+	expected["bkmonitor_alarmd_lookback_pending"] = "variableLabels: {what}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"
@@ -835,6 +848,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("redis_pool_waits_total"):              6,
 		fqName("redis_command_total"):                 redisCommandSeries,
 		fqName("redis_command_failure_total"):         redisCommandSeries,
+		fqName("redis_failure_reason_total"):          (len(redisClientNames) + 1) * len(redisfailure.Reasons),
 		fqName("redis_command_duration_seconds"):      histogramSeries(redisCommandSeries, 12),
 		fqName("short_period_slot_completions_total"): 56,
 		// 11 codes UQ declares plus OTHER, times allowed/unavailable/other.
@@ -1040,6 +1054,9 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("event_business_attribution_total")] = len(contract.BusinessAttributionSources)
 	bounds[fqName("diagnostic_redis_failures_total")] = len(DiagnosticRedisClients) * len(redisfailure.Reasons)
 	bounds[fqName("leader_round_stage_seconds_total")] = len(fleet.LeaderRoundStages) + 1
+	for name, n := range lookbackSeriesUpperBounds() {
+		bounds[fqName(name)] = n
+	}
 	// Five states; three operations by two results.
 	bounds[fqName("linkd_console_state")] = 5
 	bounds[fqName("linkd_console_calls_total")] = 6
