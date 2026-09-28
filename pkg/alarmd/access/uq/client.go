@@ -143,7 +143,8 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 		defer cancel()
 	}
 	return client.execute(callerCtx, ctx, queryIdentity{Spec: attempt.Spec, AttemptNo: attempt.AttemptNo,
-		EvaluationTime: attempt.Slot.EvaluationTime}, sink, nil)
+		Budget: queryBudget{StartUnixMilli: attempt.BudgetStartUnixMilli, ReadyAtUnixMilli: attempt.ReadyAtUnixMilli,
+			DeadlineUnixMilli: attempt.DeadlineUnixMilli}}, sink, nil)
 }
 
 // queryIdentity carries provider-local accounting only. Diagnostic reads do
@@ -151,10 +152,14 @@ func (client *Client) Execute(ctx context.Context, attempt execution.QueryAttemp
 type queryIdentity struct {
 	Spec      execution.PhysicalQuerySpec
 	AttemptNo uint32
-	// EvaluationTime is the Slot's, where its query budget starts; zero for
-	// a read that is not a Slot's, which then reports no timing.
-	EvaluationTime execution.EvaluationTime
+	// Budget is the Slot query's, which a failure is timed against; zero
+	// for a read that is not a Slot's, which then reports no timing.
+	Budget queryBudget
 }
+
+// queryBudget is a Slot query's budget as its attempt carries it: where it
+// began, when the window could first be read, and the deadline it ends at.
+type queryBudget struct{ StartUnixMilli, ReadyAtUnixMilli, DeadlineUnixMilli int64 }
 
 // scopeHeaders are the headers that say whose data a query reads: the
 // tenant always, and then either the strategy's space or, for a global
@@ -235,7 +240,7 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		}
 		completion := client.unavailableCompletion(attempt, reason, execution.TransportRouteDetail(classifyTransportFailure(err)))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
-		completion.RouteFacts.Attempts[0].Timing = attemptTiming(ctx, attempt, started, client.now())
+		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now())
 		return completion, nil
 	}
 	defer response.Body.Close()
@@ -250,7 +255,7 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 		}
 		completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable), execution.HTTPStatusRouteDetail(response.StatusCode))
 		completion.Stats.QueryMillis = uint64(client.now().Sub(started).Milliseconds())
-		completion.RouteFacts.Attempts[0].Timing = attemptTiming(ctx, attempt, started, client.now())
+		completion.RouteFacts.Attempts[0].Timing = attemptTiming(attempt.Budget, started, client.now())
 		return completion, nil
 	}
 	counted := &countingReader{reader: response.Body}
@@ -267,18 +272,21 @@ func (client *Client) execute(callerCtx, ctx context.Context, attempt queryIdent
 	return completion, nil
 }
 
-// attemptTiming splits a failed Slot query's budget at the moment its
-// request went out (see execution.AttemptTiming). The deadline is the one the
-// request ran under: the attempt's, or the caller's when that came first.
-// Nil for a read that is not a Slot's or has no deadline.
-func attemptTiming(ctx context.Context, attempt queryIdentity, started, failed time.Time) *execution.AttemptTiming {
-	deadline, bounded := ctx.Deadline()
-	if attempt.EvaluationTime <= 0 || !bounded {
+// attemptTiming splits a failed Slot query's budget where its window could
+// be read and where its request went out (see execution.AttemptTiming). The
+// request's start is taken to the millisecond before splitting, so the
+// three parts add up to the budget exactly; elapsed is on the monotonic
+// clock. Nil for a read that is not a Slot's.
+func attemptTiming(budget queryBudget, started, failed time.Time) *execution.AttemptTiming {
+	if budget.StartUnixMilli <= 0 || budget.DeadlineUnixMilli <= 0 {
 		return nil
 	}
+	readable := max(budget.StartUnixMilli, budget.ReadyAtUnixMilli)
+	sent := started.UnixMilli()
 	return &execution.AttemptTiming{
-		StartLateMillis: started.Sub(time.Unix(int64(attempt.EvaluationTime), 0)).Milliseconds(),
-		BudgetMillis:    deadline.Sub(started).Milliseconds(),
+		SettleMillis:    readable - budget.StartUnixMilli,
+		StartLateMillis: sent - readable,
+		BudgetMillis:    budget.DeadlineUnixMilli - sent,
 		ElapsedMillis:   failed.Sub(started).Milliseconds(),
 	}
 }

@@ -237,7 +237,7 @@ func providerFailureFacts(completion execution.QueryExecutionCompletion) *observ
 			}
 			facts.Detail = attempt.Detail
 			if timing := attempt.Timing; timing != nil {
-				facts.Timing = &observability.QueryTiming{StartLateMillis: timing.StartLateMillis,
+				facts.Timing = &observability.QueryTiming{SettleMillis: timing.SettleMillis, StartLateMillis: timing.StartLateMillis,
 					BudgetMillis: timing.BudgetMillis, ElapsedMillis: timing.ElapsedMillis}
 			}
 			break

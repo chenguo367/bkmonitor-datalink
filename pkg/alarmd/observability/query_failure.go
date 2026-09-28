@@ -13,13 +13,18 @@ type QueryFailureFacts struct {
 	Timing *QueryTiming
 }
 
-// QueryTiming splits a Slot query's budget - from the Slot's evaluation time
-// to its query deadline - at the moment the request went out: the part spent
-// before it began, what was left to the deadline then, and what the request
-// used. It is what tells a timeout apart: a backend that did not answer in
-// time uses its whole budget having begun on time; a query begun late had
-// little left; a budget short to begin with is small in both added together.
+// QueryTiming splits a Slot query's budget - from its Slot's evaluation
+// time, or a recovery's arrival, to its query deadline - at the moment its
+// window could be read and the moment its request went out: the settling
+// wait the Plan puts first by design, the part lost after it before the
+// query began, what was left to the deadline then, and what the request
+// used. The first three add up to the whole budget. It is what tells a
+// timeout apart: a backend that did not answer in time uses its whole
+// budget having begun on time; a query begun late had little left; a budget
+// short to begin with is small in all three added together. See
+// execution.AttemptTiming.
 type QueryTiming struct {
+	SettleMillis    int64 `json:"settle_ms"`
 	StartLateMillis int64 `json:"start_late_ms"`
 	BudgetMillis    int64 `json:"budget_ms"`
 	ElapsedMillis   int64 `json:"elapsed_ms"`

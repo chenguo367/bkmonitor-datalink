@@ -412,13 +412,13 @@ func TestARoundThatEndedAfterItsErrorIsNotBeingRetried(t *testing.T) {
 
 // A timeout's row carries this round's query read against its budget, from
 // the observation that reported the failure to the blocked reading: begun
-// 41 s after its Slot's evaluation time with 9 s left, and all of it used,
+// 11 s after its 30 s settling wait with 9 s left, and all of it used,
 // reads as a query begun late - which UNLOCATED alone could not say. A
 // failure kept from an earlier Slot times nothing on this round's row.
 func TestATimeoutsRowCarriesThisRoundsQueryAgainstItsBudget(t *testing.T) {
 	at := &clock{at: now}
 	tracker := newTracker(t, at)
-	timing := observability.QueryTiming{StartLateMillis: 41_000, BudgetMillis: 9_000, ElapsedMillis: 9_004}
+	timing := observability.QueryTiming{SettleMillis: 30_000, StartLateMillis: 11_000, BudgetMillis: 9_000, ElapsedMillis: 9_004}
 	for round := 0; round < DefaultDegradedRounds; round++ {
 		slot := int64(100 + 60*round)
 		reported := timing

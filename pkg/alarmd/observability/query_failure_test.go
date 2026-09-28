@@ -115,13 +115,15 @@ func TestQueryFailureFactsSurviveWithoutErrorForDegradedProviderResults(t *testi
 	}
 }
 
-// A timed-out query's line carries the three numbers its row reads the
-// timeout by: how late it began, what it was given, what it used. A line
-// without a timing carries none of them rather than zeros.
+// A timed-out query's line carries the four numbers its row reads the
+// timeout by: the settling wait, how late after it the query began, what it
+// was given, what it used - a query begun past its deadline too, whose
+// budget is below zero. A line without a timing carries none of them rather
+// than zeros.
 func TestATimedOutQueryLogsItsBudgetBesideItsDetail(t *testing.T) {
 	var output bytes.Buffer
 	facts := QueryFailureFacts{Stage: "provider", Category: "provider_transport", Code: "QUERY_TIMEOUT", Detail: "transport=timeout",
-		Timing: &QueryTiming{StartLateMillis: 41_000, BudgetMillis: 9_000, ElapsedMillis: 9_004}}
+		Timing: &QueryTiming{SettleMillis: 30_000, StartLateMillis: 11_000, BudgetMillis: 9_000, ElapsedMillis: 9_004}}
 	observer := newQueryFailureTestObserver(&output)
 	observer.Observe(context.Background(), Observation{Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultDegraded,
 		ReasonCode: "QUERY_TIMEOUT", QueryFailure: &facts, Trace: TraceFields{QueryGroupKey: "query-group-1"}})
@@ -129,9 +131,22 @@ func TestATimedOutQueryLogsItsBudgetBesideItsDetail(t *testing.T) {
 	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
 		t.Fatalf("decode: %v; log=%s", err, output.String())
 	}
-	for field, want := range map[string]any{"failure_start_late_ms": 41_000.0, "failure_budget_ms": 9_000.0, "failure_elapsed_ms": 9_004.0} {
+	for field, want := range map[string]any{"failure_settle_ms": 30_000.0, "failure_start_late_ms": 11_000.0, "failure_budget_ms": 9_000.0, "failure_elapsed_ms": 9_004.0} {
 		if event[field] != want {
 			t.Fatalf("event[%q]=%#v, want %#v; event=%#v", field, event[field], want, event)
+		}
+	}
+	output.Reset()
+	facts.Timing = &QueryTiming{SettleMillis: 30_000, StartLateMillis: 32_000, BudgetMillis: -2_000, ElapsedMillis: 0}
+	observer.Observe(context.Background(), Observation{Component: ComponentAccess, Stage: StageQueryCompleted, Result: ResultDegraded,
+		ReasonCode: "QUERY_TIMEOUT", QueryFailure: &facts, Trace: TraceFields{QueryGroupKey: "query-group-late"}})
+	event = nil
+	if err := json.Unmarshal(output.Bytes(), &event); err != nil {
+		t.Fatalf("decode: %v; log=%s", err, output.String())
+	}
+	for field, want := range map[string]any{"failure_settle_ms": 30_000.0, "failure_start_late_ms": 32_000.0, "failure_budget_ms": -2_000.0, "failure_elapsed_ms": 0.0} {
+		if event[field] != want {
+			t.Fatalf("begun past its deadline: event[%q]=%#v, want %#v; event=%#v", field, event[field], want, event)
 		}
 	}
 	output.Reset()

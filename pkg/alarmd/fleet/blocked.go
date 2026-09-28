@@ -54,12 +54,12 @@ type Blocked struct {
 	Retrying bool   `json:"retrying"`
 	Effect   Effect `json:"effect"`
 	// Timing is this round's failed query read against its budget, when it
-	// measured it: how long after its Slot's evaluation time it began, what
-	// was left to its deadline then, and what it used. It is what the
-	// Dependency above cannot say for a timeout: a backend slow to answer
-	// uses its whole budget having begun on time, a query begun late had
-	// little left, and a budget short to begin with is small in both added
-	// together. See observability.QueryTiming.
+	// measured it: the settling wait by design, how late after it the query
+	// began, what was left to its deadline then, and what it used. It is
+	// what the Dependency above cannot say for a timeout: a backend slow to
+	// answer uses its whole budget having begun on time, a query begun late
+	// had little left, and a budget short to begin with is small in all
+	// three added together. See observability.QueryTiming.
 	Timing *observability.QueryTiming `json:"timing,omitempty"`
 }
 
