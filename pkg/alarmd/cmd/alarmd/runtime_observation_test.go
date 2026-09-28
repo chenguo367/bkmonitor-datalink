@@ -181,6 +181,31 @@ func TestObservationRedisHasIndependentPoolAndNoHiddenRetries(t *testing.T) {
 	}
 }
 
+// The cost summary is sized to the most groups that fit its half of the
+// budget: those fit, and one group more does not. Halving the budget until it
+// fit left up to half of it unused, so a reservation a few hundred bytes a
+// group larger could halve the groups a replica tracks; at a 5% share of a
+// 4 GiB container it did, from 3276 to 1638.
+func TestTheCostSummaryTracksTheMostGroupsItsBudgetFits(t *testing.T) {
+	for _, percent := range []int{1, 3, 5, 12, 25} {
+		for _, limit := range []uint64{1 << 30, 4 << 30, 16 << 30} {
+			capacity := config.DeriveObservationCapacity(config.CapacityInputs{MemorySource: "pod_limit", MemoryLimitBytes: limit, CPUBudget: 2}, config.PhaseTwoObservationConfig{MemoryPercent: percent})
+			collector := int64(capacity.CostBytes / 2)
+			o := observationCostOptions(capacity, "process", time.Now)
+			if o.GroupCapacity == 0 {
+				t.Fatalf("%d%% of %d MiB: no groups tracked", percent, limit>>20)
+			}
+			if got := observability.CostSummaryCapacityBytes(o); got > collector {
+				t.Fatalf("%d%% of %d MiB: %d groups reserve %d, over the collector's %d", percent, limit>>20, o.GroupCapacity, got, collector)
+			}
+			next := observationCostOptionsFor(capacity, o.GroupCapacity+1, "process", time.Now)
+			if got := observability.CostSummaryCapacityBytes(next); got <= collector {
+				t.Fatalf("%d%% of %d MiB: %d groups tracked, but %d reserve %d and fit the collector's %d", percent, limit>>20, o.GroupCapacity, next.GroupCapacity, got, collector)
+			}
+		}
+	}
+}
+
 // TopN is derived from the rankings the summary publishes -- two scopes
 // times its dimensions -- not from a count of the dimensions it once had:
 // at a budget where the literal for six dimensions gave one row more than
