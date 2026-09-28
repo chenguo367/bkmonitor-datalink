@@ -197,3 +197,45 @@ func TestAGroupTheSchedulerHeldIsHeldNotMissing(t *testing.T) {
 		t.Fatalf("a group whose rounds only had nothing due = %+v, want it unseen and the window incomplete", coverage)
 	}
 }
+
+// Every word the scheduler returns a round with is decided here, held or
+// not, and nothing else is: a new word fails this until someone says which
+// it is, instead of reading as not held. Each held word, alone, holds a due
+// group for the window.
+func TestEveryRunOutcomeIsDecidedHeldOrNot(t *testing.T) {
+	notHeld := map[string]bool{"execute_returned": true, "source_not_due": true, "panic": true, "other_error": true}
+	known := map[string]bool{}
+	for _, outcome := range RunOutcomes {
+		known[outcome] = true
+		if costHeldOutcomes[outcome] == notHeld[outcome] {
+			t.Errorf("run outcome %q is held=%v and not held=%v, want exactly one", outcome, costHeldOutcomes[outcome], notHeld[outcome])
+		}
+	}
+	for outcome := range costHeldOutcomes {
+		if !known[outcome] {
+			t.Errorf("held outcome %q is no run outcome", outcome)
+		}
+	}
+	for outcome := range costHeldOutcomes {
+		c, now := costDueFixture(t, costMinute, costHourly)
+		c.Observe(context.Background(), Observation{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal,
+			RunOutcome: outcome, Trace: TraceFields{QueryGroupKey: "minute"}})
+		c.Publish(*now)
+		if coverage := c.Snapshot().Coverage; coverage.HeldDueGroups != 1 || coverage.Incomplete {
+			t.Errorf("a group held by %q = %+v, want it held and the window complete", outcome, coverage)
+		}
+	}
+}
+
+// A group held only in the window's earlier bucket is held for the window.
+func TestAGroupHeldInTheEarlierBucketIsHeld(t *testing.T) {
+	c, now := costDueFixture(t, costMinute, costHourly)
+	*now = time.Unix(1000, 0)
+	c.Observe(context.Background(), Observation{Component: ComponentScheduler, Stage: StageRunnerReturned, Result: ResultTerminal,
+		RunOutcome: "query_cooldown", Trace: TraceFields{QueryGroupKey: "minute"}})
+	*now = time.Unix(1440, 0)
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.HeldDueGroups != 1 || coverage.UnobservedDueGroups != 0 || coverage.Incomplete {
+		t.Fatalf("a group held in the earlier bucket only = %+v, want it held and the window complete", coverage)
+	}
+}
