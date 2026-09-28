@@ -381,25 +381,17 @@ func buildRequest(spec execution.PhysicalQuerySpec) (request, error) {
 		if err != nil {
 			return request{}, err
 		}
-		var sourceConditions *conditions
-		if source.SourceConditions != nil {
-			mapped, err := mapConditions(*source.SourceConditions)
-			if err != nil {
-				return request{}, err
-			}
-			sourceConditions = &mapped
-		}
 		offsetForward, err := parseQueryBool("offset_forward", source.OffsetForward)
 		if err != nil {
 			return request{}, err
 		}
 		queries = append(queries, queryClause{
-			FieldSemantics: source.FieldSemantics, DataSource: source.DataSource, TableID: source.TableID, FieldName: source.FieldName,
+			DataSource: source.DataSource, TableID: source.TableID, FieldName: source.FieldName,
 			Driver: source.Driver, TimeField: source.TimeField, IsRegexp: source.IsRegexp,
 			ReferenceName: source.ReferenceName, Functions: functions, TimeAggregation: timeAggregation,
 			Dimensions: append([]string(nil), source.Dimensions...),
-			Conditions: queryConditions, SourceConditions: sourceConditions,
-			Offset: source.Offset, OffsetForward: offsetForward,
+			Conditions: queryConditions,
+			Offset:     source.Offset, OffsetForward: offsetForward,
 			KeepColumns: append([]string(nil), source.KeepColumns...), QueryString: source.QueryString,
 		})
 	}

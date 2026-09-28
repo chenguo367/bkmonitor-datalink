@@ -13,6 +13,8 @@ import (
 
 	"github.com/go-redis/redis/v8"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 )
 
 // Redis load is the one budget nobody can currently attribute: the instance
@@ -36,6 +38,7 @@ import (
 // connection load join on the same label.
 var redisClientNames = map[string]struct{}{
 	"source": {}, "runtime": {}, "cmdb": {}, "dynamic_config": {}, "target_group": {}, "legacy_output": {}, "legacy_pod_cache": {}, "diagnostics": {},
+	"linkd": {},
 }
 
 // RedisClientHealth is what this process has last seen of one Redis client:
@@ -163,6 +166,15 @@ type redisCallMetrics struct {
 	// pool counts one acquisition per attempt, so attempts minus operations is
 	// the number of retries.
 	operations *prometheus.CounterVec
+	// reasons says why the operations of a client failed. failures says which
+	// command, and on the runtime and control plane clients that was all there
+	// was: a timeout, a connection cut while idle and a Sentinel with no master
+	// read the same. It counts operations, as operations does, so the two
+	// divide into a failure rate per client; a pipeline is one operation and
+	// its first failing member decides the reason. The words are the ones the
+	// diagnostic clients are counted by (redisfailure), so the two readings
+	// join.
+	reasons *prometheus.CounterVec
 }
 
 func newRedisCallMetrics() redisCallMetrics {
@@ -171,8 +183,24 @@ func newRedisCallMetrics() redisCallMetrics {
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_operation_total",
 		Help: "Redis operations issued, counting one per call or pipeline batch rather than per command.",
 	}, []string{"client"})
+	reasons := prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_failure_reason_total",
+		Help: "Redis operations that failed, by client and by why, one per call or pipeline batch; a batch's first " +
+			"failing member decides the reason: connection_closed, connection_refused, sentinel_unreachable, timeout, " +
+			"pool_timeout, canceled, server_error, malformed_reply, other. The empty-result signal and a NOSCRIPT " +
+			"reply are not failures and are not counted. Every cell exists from startup, so a zero is a count.",
+	}, []string{"client", "reason"})
+	for client := range redisClientNames {
+		for _, reason := range redisfailure.Reasons {
+			reasons.WithLabelValues(client, reason)
+		}
+	}
+	for _, reason := range redisfailure.Reasons {
+		reasons.WithLabelValues("other", reason)
+	}
 	return redisCallMetrics{
 		operations: operations,
+		reasons:    reasons,
 		calls: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_command_total",
 			Help: "Redis commands issued by this process by bounded command name and pipelining.",
@@ -190,7 +218,17 @@ func newRedisCallMetrics() redisCallMetrics {
 }
 
 func (m redisCallMetrics) collectors() []prometheus.Collector {
-	return []prometheus.Collector{m.calls, m.duration, m.failures, m.operations}
+	return []prometheus.Collector{m.calls, m.duration, m.failures, m.operations, m.reasons}
+}
+
+// failureReason is why an operation failed, or "" when it did not. The
+// empty-result signal is an answer, and a NOSCRIPT reply is a script cache
+// miss the caller answers with EVAL; neither is the dependency failing.
+func failureReason(err error) string {
+	if err == nil || err == redis.Nil || noScriptReply(err) {
+		return ""
+	}
+	return redisfailure.Reason(err)
 }
 
 func boundedRedisCommand(name string) string {
@@ -273,6 +311,7 @@ func (h *RedisCallHook) AfterProcessPipeline(ctx context.Context, cmds []redis.C
 		return nil
 	}
 	var failed error
+	reason := ""
 	for index, cmd := range cmds {
 		name := boundedRedisCommand(cmd.Name())
 		h.metrics.calls.WithLabelValues(h.client, name, "true").Inc()
@@ -282,9 +321,15 @@ func (h *RedisCallHook) AfterProcessPipeline(ctx context.Context, cmds []redis.C
 				failed = err
 			}
 		}
+		if reason == "" {
+			reason = failureReason(cmd.Err())
+		}
 		if index == 0 {
 			h.observeDuration(ctx, name, "true")
 		}
+	}
+	if reason != "" {
+		h.metrics.reasons.WithLabelValues(h.client, reason).Inc()
 	}
 	h.health.note(h.client, h.now(), failed)
 	return nil
@@ -294,6 +339,9 @@ func (h *RedisCallHook) record(ctx context.Context, name, pipelined string, err 
 	h.metrics.calls.WithLabelValues(h.client, name, pipelined).Inc()
 	if err != nil && err != redis.Nil {
 		h.metrics.failures.WithLabelValues(h.client, name, pipelined).Inc()
+	}
+	if reason := failureReason(err); reason != "" {
+		h.metrics.reasons.WithLabelValues(h.client, reason).Inc()
 	}
 	h.health.note(h.client, h.now(), err)
 	h.observeDuration(ctx, name, pipelined)

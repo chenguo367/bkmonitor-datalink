@@ -155,8 +155,7 @@ func formatOutcomes(outcomes map[string]string) string {
 // accepted Plan; "" is accepted and nothing else. The refusals are this
 // build's named limits on what the writer publishes, not disagreements about
 // the contract:
-//   - an FTA event query needs the event storage fact, which this test's
-//     runtime facts do not configure;
+//   - an FTA event source is not supported;
 //   - an AIOps algorithm is not migrated;
 //   - three legacy target forms the writer publishes without a target_plan -
 //     a dynamic group it could not convert without loss, a service topology
@@ -173,7 +172,7 @@ var writerDocumentOutcomes = map[string]string{
 	"test_projector_does_not_treat_neq_as_eq":                               "",
 	"test_projector_normalizes_source_specific_query_contracts[0]":          "",
 	"test_projector_normalizes_source_specific_query_contracts[1]":          "",
-	"test_projector_normalizes_source_specific_query_contracts[2]":          "SOURCE_INCOMPLETE QUERY_FTA_EVENT_STORAGE_FACT_MISSING",
+	"test_projector_normalizes_source_specific_query_contracts[2]":          "UNSUPPORTED_PHASE2_CAPABILITY QUERY_FTA_UNSUPPORTED at items[0].query_configs[0]",
 	"test_projector_omits_model_inst_plan_when_model_mapping_is_missing":    "",
 	"test_projector_omits_target_plan_when_conversion_is_not_lossless[0]":   "",
 	"test_projector_omits_target_plan_when_conversion_is_not_lossless[1]":   "",

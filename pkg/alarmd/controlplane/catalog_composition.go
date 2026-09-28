@@ -37,7 +37,6 @@ var SupportedSourceSemantics = []string{
 	"custom/time_series",
 	"custom/event",
 	"prometheus/time_series",
-	"bk_fta/event",
 }
 
 // SourceSemanticsOther is the label for semantics outside the supported list.

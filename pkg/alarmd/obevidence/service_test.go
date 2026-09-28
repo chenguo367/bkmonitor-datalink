@@ -229,8 +229,11 @@ func TestTargetGroupAndDynamicConfigUseConfiguredKeys(t *testing.T) {
 	_ = client.Set(ctx, platformsettings.RevisionKey(prefix), "r5", 0).Err()
 	for _, field := range platformsettings.Fields {
 		value := `["ignore"]`
-		if field == platformsettings.FieldIsAccessBKData {
+		switch field {
+		case platformsettings.FieldIsAccessBKData:
 			value = "false"
+		case platformsettings.FieldNoDataTrackingHorizonSeconds:
+			value = "86400"
 		}
 		_ = client.Set(ctx, platformsettings.ConfigKey(prefix, platformsettings.Tenant, field.DBKey()), value, 0).Err()
 	}
@@ -241,8 +244,19 @@ func TestTargetGroupAndDynamicConfigUseConfiguredKeys(t *testing.T) {
 	}
 	log.assertBounded(t)
 	text = encoded(t, r)
-	if !strings.Contains(text, `"publication_present":true`) || !strings.Contains(text, `"value":false`) {
+	if !strings.Contains(text, `"publication_present":true`) || !strings.Contains(text, `"value":false`) || !strings.Contains(text, `"value":86400`) {
 		t.Fatal(text)
+	}
+	// A field is shown invalid exactly when the runtime refuses it: the
+	// horizon as a positive whole number or null, never a list.
+	horizon := platformsettings.FieldNoDataTrackingHorizonSeconds
+	for raw, want := range map[string]string{"86400": "ok", "null": "ok", "0": "invalid_document", "1.5": "invalid_document", `["ignore"]`: "invalid_document"} {
+		_ = client.Set(ctx, platformsettings.ConfigKey(prefix, platformsettings.Tenant, horizon.DBKey()), raw, 0).Err()
+		r := service.Store(ctx, StoreRequest{Family: FamilyDynamicConfig, Fields: []platformsettings.Field{horizon}})
+		entries := r.Value.(map[string]any)["fields"].(map[platformsettings.Field]Result)
+		if entries[horizon].Status != want {
+			t.Fatalf("horizon %s read as %s, want %s", raw, entries[horizon].Status, want)
+		}
 	}
 	field := platformsettings.FieldFileSystemTypeIgnore
 	_ = client.Set(ctx, platformsettings.ConfigKey(prefix, platformsettings.Tenant, field.DBKey()), "null", 0).Err()
