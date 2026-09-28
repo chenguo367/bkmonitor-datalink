@@ -553,20 +553,14 @@ func BuildApplyVersion(contractRef FrozenExecutionContractRef, epoch StateApplyE
 	if epoch == 0 {
 		return ApplyVersion{}, errors.New("alarmd execution: positive state apply epoch is required")
 	}
-	digest, err := contract.DeriveCanonicalDigestV2("alarmd-slot-identity-v2", struct {
-		QueryGroup     QueryGroupIdentity `json:"query_group"`
-		EvaluationTime EvaluationTime     `json:"evaluation_time"`
-	}{
-		QueryGroup:     contractRef.Slot.QueryGroup,
-		EvaluationTime: contractRef.Slot.EvaluationTime,
-	})
+	digest, err := slotIdentityDigest(contractRef.Slot)
 	if err != nil {
-		return ApplyVersion{}, fmt.Errorf("alarmd execution: derive Slot identity digest: %w", err)
+		return ApplyVersion{}, err
 	}
 	return ApplyVersion{
 		StateApplyEpoch: epoch,
 		EvaluationTime:  contractRef.Slot.EvaluationTime,
-		SlotDigest:      SlotIdentityDigest(digest),
+		SlotDigest:      digest,
 	}, nil
 }
 
