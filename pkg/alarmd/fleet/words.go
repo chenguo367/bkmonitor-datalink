@@ -128,6 +128,7 @@ func ProductWords() Words {
 		Verdict: map[WindowVerdict]string{
 			VerdictDataAbsentWhenQueried: "查询时数据不在", VerdictInputIncomplete: "本侧没查全",
 			VerdictPointsUnusable: "记录检测用不了", VerdictUnknown: "说不出是谁的",
+			VerdictQueryAnsweredEmpty: "查询正常返回但一行都没有",
 		},
 		SinceBasis: map[SinceBasis]string{
 			SinceExact: "起点确切", SinceAtLeast: "只会更久", SinceAtMost: "只会更短", SinceRefused: "时间异常，请上报",
@@ -208,6 +209,7 @@ var checkWords = map[Check]wordPair{
 	CheckConfigUnresolved:       {StateResultUntrusted, ActionWatch},
 	CheckBackendNotAnswering:    {StateDependencyUnanswered, ActionServiceFix},
 	CheckSeriesDataMissing:      {StateResultUntrusted, ActionServiceFix},
+	CheckSeriesSparse:           {StateDataAbsent, ActionDataCheck},
 	CheckNoDataPersistent:       {StateDataAbsent, ActionDataCheck},
 	CheckEmptyEveryRound:        {StateDataAbsent, ActionStrategyEdit},
 	CheckSeriesChurning:         {StateResultUntrusted, ActionStrategyEdit},

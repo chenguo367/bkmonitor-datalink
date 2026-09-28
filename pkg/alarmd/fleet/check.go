@@ -88,6 +88,11 @@ const (
 	// stops the strategy whole, and which nothing announced before it came.
 	CheckRetainedShareApproaching Check = "RETAINED_SHARE_APPROACHING"
 	CheckNoDataPersistent         Check = "NO_DATA_PERSISTENT"
+	// Every short window of the object is short only by minutes the query
+	// answered whole without the series: the data was not there when it was
+	// asked for, and nothing on this side is on record as missing it. The
+	// data owner's, and not an item for this deployment to act on.
+	CheckSeriesSparse Check = "SERIES_SPARSE"
 	// EmptyEveryRound is the strategy's half of no-data: an object this
 	// process has never seen return records and whose every round for an
 	// hour completed empty. Kept apart from NO_DATA_PERSISTENT -- data that
@@ -275,6 +280,7 @@ var checkAnswers = map[Check]struct {
 	CheckCoverageReadingRefused: {OwnerAlarmd, GroupByDetail},
 
 	CheckNoDataPersistent: {OwnerData, GroupByStrategy},
+	CheckSeriesSparse:     {OwnerData, GroupByStrategy},
 
 	CheckEmptyEveryRound:    {OwnerStrategy, GroupByStrategy},
 	CheckSeriesChurning:     {OwnerStrategy, GroupByStrategy},
@@ -331,6 +337,7 @@ var checkOrder = []Check{
 	CheckBackendNotAnswering,
 	CheckSeriesDataMissing,
 	CheckNoDataPersistent,
+	CheckSeriesSparse,
 	CheckEmptyEveryRound,
 	CheckSeriesChurning,
 	CheckPlanUnevaluable,
