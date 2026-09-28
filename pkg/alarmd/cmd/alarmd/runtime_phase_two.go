@@ -230,6 +230,14 @@ func runPhaseTwoApplicationWithDependencies(
 	contract.SetCanonicalShadowStride(cfg.PhaseTwo.Canonical.Stride())
 	logger.Info("canonical_encoder", contract.CanonicalMode(), 0, 0,
 		slog.Uint64("shadow_sample_stride", cfg.PhaseTwo.Canonical.Stride()))
+	// A series delivery digest assembled from its shared parts that differed
+	// from the generic one: counted on canonical_encoding_records_shadow_total
+	// and said here at most once a minute. The generic digest was returned.
+	contract.SetRecordsDigestDivergenceReporter(func(divergence contract.RecordsDigestDivergence) {
+		logger.Warn("canonical_encoder", "records_digest_differed", divergence.Records, 0,
+			slog.String("domain", divergence.Domain), slog.String("served", divergence.Served),
+			slog.String("established", divergence.Established))
+	})
 
 	server, err := dependencies.newHTTP(recorder, application, httpSurfaceOf(cfg))
 	if err != nil {

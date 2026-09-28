@@ -843,7 +843,7 @@ func normalizeSeries(spec execution.PhysicalQuerySpec, ref execution.ProviderRes
 			Dimensions:        dimensions, ReceivedTime: receivedAt})
 	}
 	dataset := execution.NewDataset(records)
-	digest, err := contract.DeriveCanonicalDigestV2("alarmd-provider-series-delivery-v1", records)
+	digest, err := contract.DeriveRecordsDigestV2("alarmd-provider-series-delivery-v1", records)
 	if err != nil {
 		return execution.ProviderSeriesBatch{}, 0, err
 	}
