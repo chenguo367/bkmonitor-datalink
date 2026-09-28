@@ -617,3 +617,155 @@ func TestARefusedRoundKeepsTheWordsItWasRefusedWith(t *testing.T) {
 		t.Fatalf("blocked = %+v, want a round without words read without the earlier ones", blocked)
 	}
 }
+
+// The source answering that nothing is due ends a run the source or the view
+// refused: the gate has let the round through and no Slot is owed. A refusal
+// at startup that ends in seconds no longer stands as this deployment's own
+// until the object's next round. Everything else stays as it was: a panic, an
+// execution failure, a backoff that is not an answer, and a source that says
+// "not due" with nothing refused before it.
+func TestASourceAnsweringNotDueEndsTheRunItRefused(t *testing.T) {
+	type tracked struct {
+		tracker *Tracker
+		now     *time.Time
+	}
+	start := func() tracked {
+		now := time.Date(2026, 9, 28, 5, 20, 0, 0, time.UTC)
+		return tracked{tracker: NewTracker(nil, "pod-a", func() time.Time { return now }), now: &now}
+	}
+	run := func(tr tracked, outcome string, err error) {
+		*tr.now = tr.now.Add(time.Second)
+		tr.tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageRunnerReturned,
+			Result: observability.ResultTerminal, RunOutcome: outcome, Err: err,
+			Trace: observability.TraceFields{QueryGroupKey: "qg"},
+		})
+	}
+	refuse := func(tr tracked, outcome string, rounds int) {
+		for round := 0; round < rounds; round++ {
+			run(tr, outcome, errors.New(outcome))
+		}
+	}
+	for _, outcome := range []string{"view_not_executable", "source_error", "source_retry", "source_blocked"} {
+		t.Run(outcome, func(t *testing.T) {
+			tr := start()
+			refuse(tr, outcome, DefaultBlockedRounds+1)
+			if rows := tr.tracker.Anomalies(); len(rows) != 1 || rows[0].Kind != KindBlockedRun {
+				t.Fatalf("rows = %+v, want the refused run listed", rows)
+			}
+			run(tr, "source_not_due", nil)
+			if rows := tr.tracker.Anomalies(); len(rows) != 0 {
+				t.Fatalf("rows = %+v, want the run ended by the source's answer", rows)
+			}
+			if !tr.tracker.HasConclusion("qg") {
+				t.Fatal("the object lost its conclusion")
+			}
+			// A refusal after the answer starts its own streak.
+			refuse(tr, outcome, DefaultBlockedRounds)
+			if rows := tr.tracker.Anomalies(); len(rows) != 1 || rows[0].Consecutive != DefaultBlockedRounds {
+				t.Fatalf("rows = %+v, want a new streak of %d", rows, DefaultBlockedRounds)
+			}
+		})
+	}
+	t.Run("a panic is the round's own", func(t *testing.T) {
+		tr := start()
+		refuse(tr, "panic", DefaultBlockedRounds+1)
+		run(tr, "source_not_due", nil)
+		if rows := tr.tracker.Anomalies(); len(rows) != 1 || rows[0].ReasonCode != "panic" {
+			t.Fatalf("rows = %+v, want the panic kept", rows)
+		}
+	})
+	t.Run("a backoff is not an answer", func(t *testing.T) {
+		tr := start()
+		refuse(tr, "view_not_executable", DefaultBlockedRounds+1)
+		run(tr, "source_backoff", nil)
+		if rows := tr.tracker.Anomalies(); len(rows) != 1 || rows[0].ReasonCode != "view_not_executable" {
+			t.Fatalf("rows = %+v, want the refusal kept through a backoff", rows)
+		}
+	})
+	t.Run("an execution failure is not a refusal", func(t *testing.T) {
+		tr := start()
+		for round := 0; round < DefaultDegradedRounds+1; round++ {
+			*tr.now = tr.now.Add(time.Second)
+			tr.tracker.Observe(context.Background(), observability.Observation{
+				ExecuteOutcome: "error", Err: errors.New("redis: connection pool timeout"), Operation: "commit",
+				Trace: observability.TraceFields{QueryGroupKey: "qg", EvaluationTime: 160},
+			})
+		}
+		before := tr.tracker.Anomalies()
+		run(tr, "source_not_due", nil)
+		if rows := tr.tracker.Anomalies(); len(before) != 1 || len(rows) != 1 || rows[0].Kind != before[0].Kind {
+			t.Fatalf("rows = %+v (before %+v), want the failure kept", rows, before)
+		}
+	})
+	t.Run("not due with nothing refused", func(t *testing.T) {
+		tr := start()
+		run(tr, "source_not_due", nil)
+		if rows := tr.tracker.Anomalies(); len(rows) != 0 || tr.tracker.HasConclusion("qg") {
+			t.Fatalf("rows = %+v, conclusion = %v, want nothing from an answer alone", rows, tr.tracker.HasConclusion("qg"))
+		}
+	})
+}
+
+// A not-due answer is not a round that went wrong: it neither starts a run nor
+// lends its time to one. A refusal streak after it, or after a run it ended,
+// is dated from its own first refusal; and an object the pool once exposed
+// does not become a row because its source answered.
+func TestANotDueAnswerStartsNoRunAndLendsNoStart(t *testing.T) {
+	now := time.Date(2026, 9, 28, 5, 20, 0, 0, time.UTC)
+	tracker := NewTracker(nil, "pod-a", func() time.Time { return now })
+	run := func(queryGroup, outcome string) {
+		now = now.Add(time.Second)
+		var err error
+		if outcome != "source_not_due" {
+			err = errors.New(outcome)
+		}
+		tracker.Observe(context.Background(), observability.Observation{
+			Component: observability.ComponentScheduler, Stage: observability.StageRunnerReturned,
+			Result: observability.ResultTerminal, RunOutcome: outcome, Err: err,
+			Trace: observability.TraceFields{QueryGroupKey: queryGroup},
+		})
+	}
+	sinceOf := func(queryGroup string) time.Time {
+		for _, row := range tracker.Anomalies() {
+			if row.QueryGroup == queryGroup {
+				return row.Since
+			}
+		}
+		t.Fatalf("%s is not listed: %+v", queryGroup, tracker.Anomalies())
+		return time.Time{}
+	}
+
+	run("qg-a", "source_not_due")
+	now = now.Add(10 * time.Minute)
+	firstRefusal := now.Add(time.Second)
+	for round := 0; round < DefaultBlockedRounds; round++ {
+		run("qg-a", "source_error")
+	}
+	if since := sinceOf("qg-a"); !since.Equal(firstRefusal) {
+		t.Fatalf("since = %v, want the first refusal %v, not the earlier answer", since, firstRefusal)
+	}
+
+	run("qg-a", "source_not_due")
+	now = now.Add(time.Hour)
+	secondStreak := now.Add(time.Second)
+	for round := 0; round < DefaultBlockedRounds; round++ {
+		run("qg-a", "view_not_executable")
+	}
+	if since := sinceOf("qg-a"); !since.Equal(secondStreak) {
+		t.Fatalf("since = %v, want the new streak's first refusal %v, not the ended run's", since, secondStreak)
+	}
+
+	tracker.Observe(context.Background(), observability.Observation{QueryCooldown: &cooldownFacts,
+		Trace: observability.TraceFields{QueryGroupKey: "qg-b"}})
+	tracker.Observe(context.Background(), observability.Observation{
+		QueryCooldown: &observability.QueryCooldownFacts{Event: "recovered"},
+		Trace:         observability.TraceFields{QueryGroupKey: "qg-b"},
+	})
+	run("qg-b", "source_not_due")
+	for _, row := range append(tracker.Anomalies(), tracker.Demoted()...) {
+		if row.QueryGroup == "qg-b" {
+			t.Fatalf("an object the pool once exposed became a row on a not-due answer: %+v", row)
+		}
+	}
+}
