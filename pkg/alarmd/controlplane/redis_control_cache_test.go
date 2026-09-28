@@ -62,6 +62,27 @@ func TestControlReadCacheTimelinesAreBoundedByEntriesAndBytes(t *testing.T) {
 	}
 }
 
+// A peek at a timeline does not make it recently used: the cost roster peeks
+// every owned Query Group once a refresh, and that must not keep alive an
+// entry execution no longer reads. With the cache full, peeking the oldest
+// entry and storing one more evicts the entry peeked.
+func TestAPeekLeavesTheEvictionOrderAsExecutionMadeIt(t *testing.T) {
+	four := cachedTimelineBytes(4)
+	cache := newControlReadCache(2, 16*four)
+	cache.storeTimeline("v1", "qg-a", cachedTimelineFor("qg-a", 1), 4)
+	cache.storeTimeline("v1", "qg-b", cachedTimelineFor("qg-b", 2), 4)
+	if _, ok := cache.peekTimelineAtRevision("qg-a", 1); !ok {
+		t.Fatal("setup: the peek did not find qg-a at revision 1")
+	}
+	cache.storeTimeline("v1", "qg-c", cachedTimelineFor("qg-c", 3), 4)
+	if _, ok := cache.lookupTimeline("v1", "qg-a"); ok {
+		t.Fatal("the peeked qg-a survived eviction: the peek made it recently used")
+	}
+	if _, ok := cache.lookupTimeline("v1", "qg-b"); !ok {
+		t.Fatal("qg-b was evicted in place of the older, only peeked qg-a")
+	}
+}
+
 func TestControlReadCacheVersionChangeEvictsEverything(t *testing.T) {
 	four := cachedTimelineBytes(4)
 	cache := newControlReadCache(8, 16*four)

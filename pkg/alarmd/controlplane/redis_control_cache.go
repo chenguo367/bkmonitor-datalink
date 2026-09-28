@@ -350,6 +350,22 @@ func (cache *controlReadCache) lookupTimelineAtRevision(
 	return element.Value.(*cachedTimeline).timeline, true
 }
 
+// peekTimelineAtRevision is lookupTimelineAtRevision for a reader that is
+// not executing: it leaves the eviction order as the executing reads made
+// it, so an observation pass over every owned Query Group cannot keep an
+// entry alive that execution no longer uses.
+func (cache *controlReadCache) peekTimelineAtRevision(
+	queryGroup execution.QueryGroupIdentity, revision uint64,
+) (persistedScheduleTimeline, bool) {
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	element, ok := cache.timelines[queryGroup]
+	if !ok || element.Value.(*cachedTimeline).timeline.RecordRevision != revision {
+		return persistedScheduleTimeline{}, false
+	}
+	return element.Value.(*cachedTimeline).timeline, true
+}
+
 // storeTimelineAtCurrentVersion stores a body a hinted read fetched, under
 // whatever version the cache is on, without entering a new one: the hinted
 // read learned nothing about the header.

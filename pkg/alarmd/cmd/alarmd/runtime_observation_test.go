@@ -13,21 +13,103 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 )
 
-func TestObservationRegistrationUsesOwnedCurrentGroupsAndRealVersions(t *testing.T) {
-	s := controlplane.StrategyDirectorySnapshot{Complete: true}
-	for _, qg := range []execution.QueryGroupIdentity{"ours", "others"} {
-		s.Rows = append(s.Rows, controlplane.StrategyDirectoryRow{Identity: execution.PlanIdentity{TenantID: "t", BusinessID: "b", StrategyID: string(qg)}, QueryGroup: qg, Role: string(execution.ActivationCurrent), QueryRevision: "query", ScheduleRevision: "schedule", Publication: controlplane.SnapshotPublicationRef{SnapshotRevision: "snapshot", PublicationEpoch: 1}})
+// The cost roster is what each owned Query Group executes: the Segment its
+// Slots are frozen from, with that Segment's Plans. An event carrying its
+// Slot's revisions is counted against the group; one carrying the latest
+// publication's revisions - which a roster read from the directory's
+// PUBLISHED rows would have held - is not the group's. A Query Group whose
+// owner is not accepting, or whose identity is not in memory, is left out and
+// the roster says it is incomplete.
+func TestTheCostRosterIsWhatEachOwnedGroupExecutes(t *testing.T) {
+	running := controlplane.ExecutionIdentity{SnapshotRevision: "snapshot-running", QueryRevision: "query-running",
+		ScheduleRevision: "schedule-running", Plans: []execution.PlanIdentity{{TenantID: "t", BusinessID: "b", StrategyID: "11440"}}}
+	identity := func(qg execution.QueryGroupIdentity, revision uint64, at execution.EvaluationTime) (controlplane.ExecutionIdentity, bool) {
+		// The idle group has an identity in memory too: only its lease not
+		// accepting keeps it out.
+		if (qg == "ours" && revision == 3 || qg == "idle" && revision == 4) && at == 600 {
+			return running, true
+		}
+		return controlplane.ExecutionIdentity{}, false
 	}
-	g, complete := observationCostGroups(s, []execution.QueryGroupIdentity{"ours"})
-	if !complete || len(g) != 1 || g[0].QueryGroupKey != "ours" || g[0].QueryRevision != "query" || g[0].ScheduleRevision != "schedule" || g[0].SnapshotRevision != "snapshot" || g[0].Members[0].StrategyID != "ours" {
-		t.Fatalf("registration %+v complete=%v", g, complete)
+	owned := []ownedLease{{queryGroup: "ours", revision: 3, accepting: true}, {queryGroup: "idle", revision: 4},
+		{queryGroup: "cold", revision: 5, accepting: true}}
+	groups, complete := executionCostGroups(owned, identity, 600)
+	if complete || len(groups) != 1 {
+		t.Fatalf("roster = %+v complete=%v, want only the group that answered, incomplete", groups, complete)
 	}
-	if _, complete = observationCostGroups(s, []execution.QueryGroupIdentity{"ours", "unknown"}); complete {
-		t.Fatal("unmapped owner claimed complete")
+	g := groups[0]
+	if g.QueryGroupKey != "ours" || g.SnapshotRevision != "snapshot-running" || g.QueryRevision != "query-running" ||
+		g.ScheduleRevision != "schedule-running" || len(g.Members) != 1 || g.Members[0].StrategyID != "11440" {
+		t.Fatalf("roster group = %+v, want the running Segment's revisions and its Plan", g)
 	}
-	s.Rows[0].Role = "PUBLISHED"
-	if g, complete = observationCostGroups(s, []execution.QueryGroupIdentity{"ours"}); complete || len(g) != 0 {
-		t.Fatalf("published plan charged %+v", g)
+	if groups, complete = executionCostGroups([]ownedLease{owned[0], owned[2]}, identity, 600); complete || len(groups) != 1 {
+		t.Fatalf("an accepting group with no identity in memory: roster %+v complete=%v, want it left out and incomplete", groups, complete)
+	}
+	if groups, complete = executionCostGroups(owned[:1], identity, 600); !complete || len(groups) != 1 {
+		t.Fatalf("every owned group answered: roster %+v complete=%v, want complete", groups, complete)
+	}
+	if groups, complete = executionCostGroups(owned[:1], nil, 600); complete || len(groups) != 0 {
+		t.Fatalf("no identity source: roster %+v complete=%v, want empty and incomplete", groups, complete)
+	}
+
+	now := time.Unix(600, 0)
+	cost := observability.NewCostSummary(observability.CostSummaryOptions{ProcessID: "p", Window: time.Minute, GroupCapacity: 4,
+		PlanCapacity: 8, MetadataBytes: 4096, TopN: 2, Now: func() time.Time { return now }})
+	groups, complete = executionCostGroups(owned[:1], identity, 600)
+	cost.Reconcile(groups, complete)
+	slot := func(snapshot string) observability.Observation {
+		return observability.Observation{Stage: observability.StageSlotCompleted, Result: observability.ResultSuccess, Duration: time.Millisecond,
+			Trace: observability.TraceFields{QueryGroupKey: "ours", SnapshotRevision: snapshot, QueryRevision: "query-running",
+				ScheduleRevision: "schedule-running", EvaluationTime: 590}}
+	}
+	cost.Observe(context.Background(), slot("snapshot-running"))
+	cost.Observe(context.Background(), slot("snapshot-latest"))
+	cost.Publish(now)
+	coverage := cost.Snapshot().Coverage
+	if !coverage.CatalogComplete || coverage.TrackedGroups != 1 || coverage.TrackedPlans != 1 || coverage.ObservedGroups != 1 ||
+		coverage.UntrackedObservations != 1 {
+		t.Fatalf("coverage = %+v, want the running Slot counted against its group and the latest publication's not", coverage)
+	}
+}
+
+// A refresh builds the roster at its own clock's second from the owned leases
+// and reconciles it into the summary, whether or not this replica keeps a
+// strategy directory: the roster no longer reads one.
+func TestARefreshReconcilesTheExecutingRosterAtItsOwnTime(t *testing.T) {
+	now := time.Unix(600, 0)
+	cost := observability.NewCostSummary(observability.CostSummaryOptions{ProcessID: "p", Window: time.Minute, GroupCapacity: 4,
+		PlanCapacity: 8, MetadataBytes: 4096, TopN: 2, Now: func() time.Time { return now }})
+	refresh := &observationRefresh{cost: cost, now: func() time.Time { return now }, interval: time.Minute,
+		owned: func() []ownedLease { return []ownedLease{{queryGroup: "ours", revision: 3, accepting: true}} },
+		identity: func(qg execution.QueryGroupIdentity, revision uint64, at execution.EvaluationTime) (controlplane.ExecutionIdentity, bool) {
+			if qg != "ours" || revision != 3 || at != execution.EvaluationTime(now.Unix()) {
+				return controlplane.ExecutionIdentity{}, false
+			}
+			return controlplane.ExecutionIdentity{SnapshotRevision: "s", QueryRevision: "q", ScheduleRevision: "r",
+				Plans: []execution.PlanIdentity{{TenantID: "t", BusinessID: "b", StrategyID: "1"}}}, true
+		}}
+	refresh.publish(context.Background())
+	if coverage := cost.Snapshot().Coverage; !coverage.CatalogComplete || coverage.TrackedGroups != 1 || coverage.TrackedPlans != 1 {
+		t.Fatalf("coverage after a refresh = %+v, want the owned group tracked at the refresh's second", coverage)
+	}
+}
+
+// The owned leases are read from each Runner's lease in memory: its timeline
+// revision and whether its owner accepts on it. A Runner with no lease to
+// read is owned and not accepting, so the roster leaves it out rather than
+// charging it under a revision it may not run.
+func TestOwnedLeasesAreEachRunnersLeaseFromMemory(t *testing.T) {
+	bundle := &phaseTwoWorkerBundle{runners: map[execution.QueryGroupIdentity]*phaseTwoQueryGroupLifecycle{
+		"leased":   {runner: &maintenanceTestRunner{scope: "obj", revision: 7}},
+		"unleased": {runner: &fakePhaseTwoQueryGroup{}},
+	}}
+	got := map[execution.QueryGroupIdentity]ownedLease{}
+	for _, lease := range bundle.ownedLeases() {
+		got[lease.queryGroup] = lease
+	}
+	if len(got) != 2 || got["leased"] != (ownedLease{queryGroup: "leased", revision: 7, accepting: true}) ||
+		got["unleased"] != (ownedLease{queryGroup: "unleased"}) {
+		t.Fatalf("owned leases = %+v, want the leased Runner at revision 7 accepting and the other not accepting", got)
 	}
 }
 
