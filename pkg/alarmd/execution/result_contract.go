@@ -59,7 +59,7 @@ type LevelOutcome struct {
 	// reason because of that guard alone: the Level was held by a gap an
 	// earlier round left, and this round proposed no incomplete input of its
 	// own for it. Set by the evaluator, which is the only place that knows;
-	// read by the completion's cause (UnknownIsGuardTail).
+	// read by the completion's cause (SlotInputWholeness.UnknownIsGuardTail).
 	GuardTail bool
 }
 

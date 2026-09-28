@@ -69,7 +69,7 @@ func TestAnUnknownIsMarkedAsTheGuardsAloneOnlyWhenTheRoundProposesNoGuardOfItsOw
 			if outcomes[0].GuardTail != testCase.tail {
 				t.Fatalf("GuardTail = %t, want %t", outcomes[0].GuardTail, testCase.tail)
 			}
-			if got := execution.UnknownIsGuardTail(input.Inputs, outcomes[0]); got != testCase.tail {
+			if got := execution.NewSlotInputWholeness(input.Inputs).UnknownIsGuardTail(outcomes[0]); got != testCase.tail {
 				t.Fatalf("UnknownIsGuardTail() = %t, want %t", got, testCase.tail)
 			}
 		})

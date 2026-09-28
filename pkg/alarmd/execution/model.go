@@ -3633,7 +3633,7 @@ const (
 	CauseLevelOutcomeUnknown CompletionCause = "LEVEL_OUTCOME_UNKNOWN"
 	// CauseGapGuardWarming is a Slot that answered whole and still left a Level
 	// UNKNOWN, only because a guard an earlier round's gap raised is warming
-	// towards its requirement (UnknownIsGuardTail). The reason beside it is
+	// towards its requirement (SlotInputWholeness.UnknownIsGuardTail). The reason beside it is
 	// the guard's - why the gap was opened, not what happened this round - and
 	// nothing needs doing: the guard clears once enough whole rounds pass.
 	CauseGapGuardWarming CompletionCause = "GAP_GUARD_WARMING"
@@ -3757,6 +3757,7 @@ func deriveCompletionDetail(input InternalExecution, result EvaluationResult) (
 	}
 	allFullEmpty := primary.Completeness == CompletenessFull && primary.DataState == DataStateEmpty
 	hasTerminal := false
+	wholeness := NewSlotInputWholeness(input.Inputs)
 	for _, plan := range result.Plans {
 		switch plan.Disposition {
 		case PlanTerminal:
@@ -3787,7 +3788,7 @@ func deriveCompletionDetail(input InternalExecution, result EvaluationResult) (
 					hasTerminal = true
 				case LevelOutcomeUnknown:
 					hasUnavailable = true
-					if UnknownIsGuardTail(input.Inputs, outcome) {
+					if wholeness.UnknownIsGuardTail(outcome) {
 						note(CauseGapGuardWarming, outcome.ReasonCode)
 					} else {
 						note(CauseLevelOutcomeUnknown, outcome.ReasonCode)

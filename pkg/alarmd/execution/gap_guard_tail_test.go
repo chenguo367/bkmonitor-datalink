@@ -10,6 +10,7 @@
 package execution_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -56,7 +57,7 @@ func TestAnUnknownIsAGuardTailOnlyWhenItsPlanAnsweredWhole(t *testing.T) {
 			input.Inputs = append([]execution.NamedInputBinding(nil), input.Inputs...)
 			outcome := guardTailOutcome(input)
 			testCase.edit(&input, &outcome)
-			if got := execution.UnknownIsGuardTail(input.Inputs, outcome); got != testCase.want {
+			if got := execution.NewSlotInputWholeness(input.Inputs).UnknownIsGuardTail(outcome); got != testCase.want {
 				t.Fatalf("UnknownIsGuardTail() = %t, want %t", got, testCase.want)
 			}
 		})
@@ -97,6 +98,38 @@ func TestAGuardTailIsItsOwnCauseAndAnythingOfThisRoundOutranksIt(t *testing.T) {
 			if kind != execution.CompletionUnavailable || cause != testCase.cause || reason != testCase.reason {
 				t.Fatalf("completion = %s / %s / %s, want %s / %s / %s", kind, cause, reason,
 					execution.CompletionUnavailable, testCase.cause, testCase.reason)
+			}
+		})
+	}
+}
+
+// A Slot whose guard is warming holds every Level of every series, and its
+// inputs are one binding per series, Level and requirement: the completion's
+// cost has to grow with the series, not with their square. Compare ns/op
+// across the sizes - ten times the series, about ten times the time.
+func BenchmarkACompletionUnderAWarmingGuard(b *testing.B) {
+	for _, series := range []int{1_000, 10_000} {
+		b.Run(fmt.Sprintf("series_%d", series), func(b *testing.B) {
+			input := validInternalExecution()
+			binding := input.Inputs[0]
+			tail := guardTailOutcome(input)
+			const levels, requirements = 3, 2
+			input.Inputs = make([]execution.NamedInputBinding, 0, series*levels*requirements)
+			outcomes := make([]execution.LevelOutcome, 0, series*levels)
+			for index := 0; index < series*levels; index++ {
+				for requirement := 0; requirement < requirements; requirement++ {
+					input.Inputs = append(input.Inputs, binding)
+				}
+				outcomes = append(outcomes, tail)
+			}
+			result := execution.EvaluationResult{Plans: []execution.PlanEvaluationResult{{
+				Plan: input.DuePlans[0].Identity, Disposition: execution.PlanDecidedDegraded, LevelOutcomes: outcomes}}}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, cause, _, err := execution.DeriveCompletionDetail(input, result); err != nil || cause != execution.CauseGapGuardWarming {
+					b.Fatalf("cause = %s, err = %v", cause, err)
+				}
 			}
 		})
 	}

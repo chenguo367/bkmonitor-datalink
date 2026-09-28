@@ -22,14 +22,46 @@ package execution
 // the inputs alone look whole.
 func PlanInputsWhole(inputs []NamedInputBinding, plan PlanIdentity) bool {
 	for _, binding := range inputs {
-		if binding.Consumer.Plan != plan {
-			continue
-		}
-		if binding.Completeness != CompletenessFull || binding.Disposition != AccessAvailable {
+		if binding.Consumer.Plan == plan && !inputWhole(binding) {
 			return false
 		}
 	}
 	return true
+}
+
+func inputWhole(binding NamedInputBinding) bool {
+	return binding.Completeness == CompletenessFull && binding.Disposition == AccessAvailable
+}
+
+// SlotInputWholeness answers PlanInputsWhole for every Plan of one Slot from
+// a single pass over its inputs, for a caller that asks once per outcome.
+//
+// A Slot's inputs are one binding per series, Level and requirement, and so
+// are its outcomes: asking PlanInputsWhole per outcome is series squared, in
+// exactly the Slot that asks most - a guard warming holds every Level of every
+// series. The pass runs on the first question, so a Slot that asks none pays
+// nothing.
+type SlotInputWholeness struct {
+	inputs   []NamedInputBinding
+	notWhole map[PlanIdentity]struct{}
+}
+
+// NewSlotInputWholeness reads inputs only when first asked.
+func NewSlotInputWholeness(inputs []NamedInputBinding) *SlotInputWholeness {
+	return &SlotInputWholeness{inputs: inputs}
+}
+
+func (wholeness *SlotInputWholeness) planWhole(plan PlanIdentity) bool {
+	if wholeness.notWhole == nil {
+		wholeness.notWhole = make(map[PlanIdentity]struct{})
+		for _, binding := range wholeness.inputs {
+			if !inputWhole(binding) {
+				wholeness.notWhole[binding.Consumer.Plan] = struct{}{}
+			}
+		}
+	}
+	_, found := wholeness.notWhole[plan]
+	return !found
 }
 
 // UnknownIsGuardTail says whether an UNKNOWN Level outcome is only the tail of
@@ -42,6 +74,6 @@ func PlanInputsWhole(inputs []NamedInputBinding, plan PlanIdentity) bool {
 // An outcome whose Plan had an incomplete input this round is not a tail,
 // even under a guard: whatever the guard's reason, this round has a failure
 // of its own, and that is what the Slot reports.
-func UnknownIsGuardTail(inputs []NamedInputBinding, outcome LevelOutcome) bool {
-	return outcome.Outcome == LevelOutcomeUnknown && outcome.GuardTail && PlanInputsWhole(inputs, outcome.Plan)
+func (wholeness *SlotInputWholeness) UnknownIsGuardTail(outcome LevelOutcome) bool {
+	return outcome.Outcome == LevelOutcomeUnknown && outcome.GuardTail && wholeness.planWhole(outcome.Plan)
 }
