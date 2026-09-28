@@ -392,9 +392,12 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 				continue
 			}
 			// A refresh that spent its allowance on the groups before this
-			// manifest did not read it; the next refresh goes on from its
-			// cursor. Named failed, a follower's first minutes after a restart
-			// read as the store failing on an old publication.
+			// manifest did not read it. Later refreshes reach it as the groups
+			// already read come from the object cache and the entries this
+			// directory knows, fewer reads each round; the cursor only orders
+			// the groups inside a publication. Named failed, a follower's first
+			// minutes after a restart read as the store failing on an old
+			// publication.
 			read.Manifest = "failed"
 			if errors.Is(err, ErrObservationBudget) {
 				read.Manifest = "unread"
