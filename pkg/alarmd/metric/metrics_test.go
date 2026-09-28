@@ -1391,9 +1391,9 @@ func TestDiagnosticRedisDialRetriesAreCountedByReason(t *testing.T) {
 // a count of clusters and not a series nobody registered.
 func TestTheBusinessMappingGaugeHasEveryCellFromStartup(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
-	r.SetCMDBBusinessMapping("bcs_cluster", 3, 1, 0, true)
-	r.SetCMDBBusinessMapping("bcs_namespace", 5, 0, 2, false)
-	r.SetCMDBBusinessMapping("guessed", 9, 9, 9, true)
+	r.SetCMDBBusinessMapping("bcs_cluster", 3, 1, 0, true, false)
+	r.SetCMDBBusinessMapping("bcs_namespace", 5, 0, 2, false, true)
+	r.SetCMDBBusinessMapping("guessed", 9, 9, 9, true, true)
 	values := map[string]float64{}
 	for _, m := range gatherFamily(t, r, "bkmonitor_alarmd_cmdb_index_business_mappings") {
 		labels := map[string]string{}
@@ -1404,7 +1404,9 @@ func TestTheBusinessMappingGaugeHasEveryCellFromStartup(t *testing.T) {
 	}
 	want := map[string]float64{
 		"bcs_cluster/held": 3, "bcs_cluster/refused": 1, "bcs_cluster/truncated": 0, "bcs_cluster/read_failed": 1,
-		"bcs_namespace/held": 5, "bcs_namespace/refused": 0, "bcs_namespace/truncated": 2, "bcs_namespace/read_failed": 0,
+		"bcs_cluster/emptied": 0,
+		"bcs_namespace/held":  5, "bcs_namespace/refused": 0, "bcs_namespace/truncated": 2, "bcs_namespace/read_failed": 0,
+		"bcs_namespace/emptied": 1,
 	}
 	if len(values) != len(want) {
 		t.Fatalf("gauge = %v, want exactly %v", values, want)

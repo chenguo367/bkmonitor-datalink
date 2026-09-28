@@ -1444,9 +1444,11 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"a global business strategy's Kubernetes events are attributed. By state: held (entries in use), " +
 			"refused (fields whose business was not a positive integer), truncated (entries past the load bound), " +
 			"read_failed (1 when the latest load could not read the mapping at all; the hosts still refreshed, and " +
-			"the held counts are the last read that succeeded). Zero held is a writer that does not publish the " +
-			"mapping yet; every event that would have used it is then counted as unmapped in " +
-			"event_business_attribution_total.",
+			"the held counts are the last read that succeeded), emptied (1 when the latest load read the mapping " +
+			"empty after one that held entries - a writer publishes an empty mapping by deleting it, which is also " +
+			"a source that answered nothing - and the held counts are the last load that held entries). Zero held " +
+			"is a writer that does not publish the mapping yet; every event that would have used it is then " +
+			"counted as unmapped in event_business_attribution_total.",
 	}, []string{"mapping", "state"})
 	for _, mapping := range CMDBBusinessMappings {
 		for _, state := range CMDBBusinessMappingStates {
