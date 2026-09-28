@@ -92,6 +92,29 @@ func TestAnOrdinaryPlansEventIsNotAttributed(t *testing.T) {
 	}
 }
 
+// The switch is the strategy's and says nothing about its business: a
+// strategy in an ordinary business with the switch on, whose event names no
+// target, no business and no cluster, is filed under the strategy's own
+// business, and counted as the fallback it is.
+func TestASwitchedOnStrategyWithNothingToAttributeKeepsItsOwnBusiness(t *testing.T) {
+	observe, sources := recordingAttribution()
+	evaluator := newEvaluator(t).WithBusinessAttribution(admission.BusinessLookups{}, observe)
+	plan := compiledWindowEdited(t, 1, 1, nil, false, func(plan *contract.EvaluationPlanV2) { plan.GlobalBusiness = true })
+	record := clusterRecord(`60`)
+	delete(record[0].Dimensions, "bcs_cluster_id")
+	result, err := evaluator.Evaluate(context.Background(), requestFixtureForPlan(t, plan, record, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := resultEvents(result)
+	if len(events) != 1 || events[0].BusinessID != "2" || events[0].AttributedBusinessID != "2" {
+		t.Fatalf("events %+v, want one event of business 2 attributed to its own business 2", events)
+	}
+	if len(*sources) != 1 || (*sources)[0] != contract.BusinessAttributionGlobal {
+		t.Fatalf("attributions counted %v, want one fallback", *sources)
+	}
+}
+
 // A no-data event on a roster group goes through the same construction and
 // the same attribution: the group's static target names its business.
 func TestAGlobalBusinessNoDataEventIsAttributedToItsGroupsTarget(t *testing.T) {

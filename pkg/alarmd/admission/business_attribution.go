@@ -65,11 +65,13 @@ type BusinessAttribution struct {
 //     when the namespace mapping does not hold the pair, the business it
 //     published for the cluster. This is the alert pipeline's own order: a
 //     namespace's business first, then its cluster's. A cluster neither
-//     mapping holds is filed under the global business and counted as
-//     unmapped, apart from a record that named no cluster at all.
-//  4. The Plan's own business: a strategy that neither targets nor groups by
-//     business or cluster aggregates across businesses, and its alert is the
-//     global business's own.
+//     mapping holds is filed under the strategy's own business and counted
+//     as unmapped, apart from a record that named no cluster at all.
+//  4. The Plan's own business - the business the strategy lives in, a
+//     global business or an ordinary one; the global switch is the
+//     strategy's and does not choose it. A strategy that neither targets nor
+//     groups by business or cluster aggregates across businesses, and its
+//     alert is its own business's.
 //
 // The caches are read now, not when the record was admitted: a host cache
 // or a mapping refreshed in between answers with the current business.

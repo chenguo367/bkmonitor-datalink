@@ -120,7 +120,7 @@ func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []s
 			BusinessID     int64           `json:"bk_biz_id"`
 			TenantID       json.RawMessage `json:"bk_tenant_id"`
 			SpaceUID       json.RawMessage `json:"space_uid"`
-			GlobalBusiness json.RawMessage `json:"is_global_biz"`
+			GlobalBusiness json.RawMessage `json:"is_global_strategy"`
 		}
 		if err := json.Unmarshal(payload, &identityDTO); err != nil {
 			strategy.SourceDisposition = &ObjectDisposition{
@@ -164,11 +164,11 @@ func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []s
 		if !globalOK {
 			// Not read as false. A writer that meant true and spelled it
 			// otherwise would have the strategy run as an ordinary one,
-			// scoped to the global business's own space: every other
-			// business's data gone with nothing on the page to say so.
+			// scoped to its own business's space: every other business's
+			// data gone with nothing on the page to say so.
 			strategy.SourceDisposition = &ObjectDisposition{
 				SourceID: ids[index], Scope: "STRATEGY", Disposition: DispositionConfigRejected,
-				Reason: ReasonGlobalBusinessInvalid, FieldPath: "is_global_biz",
+				Reason: ReasonGlobalStrategyInvalid, FieldPath: "is_global_strategy",
 			}
 			strategies = append(strategies, strategy)
 			continue
@@ -219,11 +219,11 @@ func missingIdentityFieldPath(tenantOK, spaceOK bool) string {
 	}
 }
 
-// ReasonGlobalBusinessInvalid refuses a strategy document whose
-// is_global_biz is present and is not a JSON boolean.
-const ReasonGlobalBusinessInvalid = "STRATEGY_GLOBAL_BUSINESS_INVALID"
+// ReasonGlobalStrategyInvalid refuses a strategy document whose
+// is_global_strategy is present and is not a JSON boolean.
+const ReasonGlobalStrategyInvalid = "STRATEGY_GLOBAL_INVALID"
 
-// decodeGlobalBusiness reads the optional is_global_biz. Absent is false;
+// decodeGlobalBusiness reads the optional is_global_strategy. Absent is false;
 // present, it must be true or false, and anything else - null, a string,
 // a number - is refused rather than guessed.
 func decodeGlobalBusiness(payload json.RawMessage) (bool, bool) {

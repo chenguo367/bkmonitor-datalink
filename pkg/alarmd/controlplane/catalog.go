@@ -26,10 +26,12 @@ type SourceIdentity struct {
 	TenantID   string
 	BusinessID string
 	SpaceScope string
-	// GlobalBusiness is the strategy document's is_global_biz: the writer's
-	// word that the strategy's business is a global business, whose
-	// strategies query every business of the tenant and file each alert
-	// under the business it is about. Absent in the document is false.
+	// GlobalBusiness is the strategy document's is_global_strategy: the
+	// strategy's own switch saying it queries every business of the tenant
+	// and files each alert under the business it is about. It is the
+	// strategy's, and says nothing about which business the strategy lives
+	// in: the writer resolves it, and a strategy it does not claim reads as
+	// ordinary. Absent in the document is false.
 	//
 	// Omitted when false: the source facts digest hashes this struct, and a
 	// field every strategy serialized would move the digest - and with it
@@ -1037,7 +1039,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 	}
 	if refusal := globalBusinessRefusal(source.SourceID, source.Identity, targetScope, facts); refusal != nil {
 		candidate.dispositions = append(candidate.dispositions, *refusal)
-		return candidate, errors.New(ReasonGlobalBusinessUnsupported + ": " + refusal.Detail)
+		return candidate, errors.New(ReasonGlobalStrategyUnsupported + ": " + refusal.Detail)
 	}
 	compiledInputs := compiledPlanInputs{primary: facts}
 	for _, label := range itemDataTypes(item) {
@@ -1092,7 +1094,7 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		// prevent.
 		refusal := globalBusinessUnsupported(source.SourceID, GlobalBusinessOutputProtocol, "")
 		candidate.dispositions = append(candidate.dispositions, refusal)
-		return candidate, errors.New(ReasonGlobalBusinessUnsupported + ": " + refusal.Detail)
+		return candidate, errors.New(ReasonGlobalStrategyUnsupported + ": " + refusal.Detail)
 	}
 	plan.WireFormat = format
 	// Beside the wire format and for the same reason: the sink writes one

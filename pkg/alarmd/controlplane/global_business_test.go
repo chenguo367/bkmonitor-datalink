@@ -44,24 +44,27 @@ func editedDocument(t *testing.T, document json.RawMessage, top func(map[string]
 	return payload
 }
 
-// is_global_biz is read strictly: absent is false, a JSON boolean is
+// is_global_strategy is read strictly: absent is false, a JSON boolean is
 // itself, and anything else refuses the strategy by name - never read as
 // false, which would run a global strategy scoped to one business's space
 // with nothing to show for it. A refused strategy does not take its
-// healthy sibling with it.
-func TestTheStrategySourceReadsIsGlobalBizStrictly(t *testing.T) {
+// healthy sibling with it. The switch is the strategy's own field: the
+// business-level name an earlier draft used is not read as it.
+func TestTheStrategySourceReadsTheGlobalSwitchStrictly(t *testing.T) {
 	for name, test := range map[string]struct {
+		key     string
 		value   any
 		present bool
 		global  bool
 		refused bool
 	}{
-		"absent": {},
-		"true":   {value: true, present: true, global: true},
-		"false":  {value: false, present: true},
-		"null":   {value: nil, present: true, refused: true},
-		"string": {value: "true", present: true, refused: true},
-		"number": {value: 1, present: true, refused: true},
+		"absent":             {},
+		"true":               {value: true, present: true, global: true},
+		"false":              {value: false, present: true},
+		"null":               {value: nil, present: true, refused: true},
+		"string":             {value: "true", present: true, refused: true},
+		"number":             {value: 1, present: true, refused: true},
+		"business-level key": {key: "is_global_biz", value: true, present: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			client := newControlplaneRedis(t)
@@ -69,7 +72,11 @@ func TestTheStrategySourceReadsIsGlobalBizStrictly(t *testing.T) {
 			documents := realThresholdDocuments(t)
 			tested := withWireIdentity(t, documents[0], "tenant-a", "bkcc__2")
 			if test.present {
-				tested = editedDocument(t, tested, func(top map[string]any) { top["is_global_biz"] = test.value }, nil)
+				key := test.key
+				if key == "" {
+					key = "is_global_strategy"
+				}
+				tested = editedDocument(t, tested, func(top map[string]any) { top[key] = test.value }, nil)
 			}
 			healthy := withWireIdentity(t, documents[1], "tenant-a", "bkcc__2")
 			for id, payload := range map[string]json.RawMessage{"1001": tested, "1002": healthy} {
@@ -88,8 +95,8 @@ func TestTheStrategySourceReadsIsGlobalBizStrictly(t *testing.T) {
 			got := strategies[0]
 			if test.refused {
 				if got.SourceDisposition == nil || got.SourceDisposition.Disposition != controlplane.DispositionConfigRejected ||
-					got.SourceDisposition.Reason != controlplane.ReasonGlobalBusinessInvalid || got.SourceDisposition.FieldPath != "is_global_biz" {
-					t.Fatalf("disposition = %+v, want %s at is_global_biz", got.SourceDisposition, controlplane.ReasonGlobalBusinessInvalid)
+					got.SourceDisposition.Reason != controlplane.ReasonGlobalStrategyInvalid || got.SourceDisposition.FieldPath != "is_global_strategy" {
+					t.Fatalf("disposition = %+v, want %s at is_global_strategy", got.SourceDisposition, controlplane.ReasonGlobalStrategyInvalid)
 				}
 			} else {
 				want := controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2", GlobalBusiness: test.global}
@@ -220,7 +227,9 @@ func TestAGlobalBusinessStrategyIsWithheldWhereItCannotRunAsOne(t *testing.T) {
 			}
 			found := false
 			for _, disposition := range global.Dispositions {
-				if disposition.Reason == controlplane.ReasonGlobalBusinessUnsupported {
+				// The word as operators read it, not the constant: it is
+				// what the page and the acceptance reading name.
+				if disposition.Reason == "GLOBAL_STRATEGY_UNSUPPORTED" {
 					found = true
 					if disposition.Disposition != controlplane.DispositionUnsupported || disposition.Detail != "reason="+test.reason {
 						t.Fatalf("disposition = %+v, want UNSUPPORTED with reason=%s", disposition, test.reason)
@@ -228,7 +237,7 @@ func TestAGlobalBusinessStrategyIsWithheldWhereItCannotRunAsOne(t *testing.T) {
 				}
 			}
 			if !found {
-				t.Fatalf("dispositions %+v name no %s", global.Dispositions, controlplane.ReasonGlobalBusinessUnsupported)
+				t.Fatalf("dispositions %+v name no GLOBAL_STRATEGY_UNSUPPORTED", global.Dispositions)
 			}
 		})
 	}
