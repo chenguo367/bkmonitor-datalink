@@ -805,10 +805,14 @@ type DetailResponse struct {
 	RecordsStatus   string                 `json:"records_status"`
 	RecordsScope    string                 `json:"records_scope,omitempty"`
 	RecoveryContext *ObjectRecoveryContext `json:"recovery_context,omitempty"`
-	Health          Health                 `json:"health"`
-	Gaps            []Gap                  `json:"gaps,omitempty"`
-	Complete        bool                   `json:"view_complete"`
-	QueryGroup      string                 `json:"query_group"`
+	// Health is the deployment's verdict, not the object's. On an object
+	// proven absent it moves to DeploymentHealth: beside existence "absent"
+	// a bare "health": "HEALTHY" read as the object being healthy.
+	Health           Health `json:"health,omitempty"`
+	DeploymentHealth Health `json:"deployment_health,omitempty"`
+	Gaps             []Gap  `json:"gaps,omitempty"`
+	Complete         bool   `json:"view_complete"`
+	QueryGroup       string `json:"query_group"`
 	// Records is what an observation window captured for this object, present
 	// only when the caller asked for it. Its health travels with it so an empty
 	// list can be read correctly: "nothing happened" and "nothing was recorded"
@@ -1276,6 +1280,8 @@ func objectDetail(response http.ResponseWriter, request *http.Request, service *
 		writeJSON(response, http.StatusServiceUnavailable, body)
 		return
 	}
+	// Proven absent: the verdict stays, named as the deployment's.
+	body.DeploymentHealth, body.Health = body.Health, ""
 	writeJSON(response, http.StatusNotFound, body)
 }
 

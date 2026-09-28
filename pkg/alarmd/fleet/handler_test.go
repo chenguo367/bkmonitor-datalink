@@ -107,6 +107,9 @@ func TestDetailReturnsTheObjectWhenTheViewIsComplete(t *testing.T) {
 	if body["view_complete"] != true {
 		t.Fatalf("view_complete = %v, want true", body["view_complete"])
 	}
+	if _, moved := body["deployment_health"]; moved || body["health"] == nil {
+		t.Fatalf("a found object's health moved: health %v deployment_health %v", body["health"], body["deployment_health"])
+	}
 }
 
 // Absent from an incomplete view is not the same as healthy, and the response
@@ -121,8 +124,13 @@ func TestDetailSaysWhetherNotFoundCanBeTrusted(t *testing.T) {
 	if status != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404", status)
 	}
-	if body["view_complete"] != true || body["health"] != string(HealthDegraded) {
+	if body["view_complete"] != true || body["deployment_health"] != string(HealthDegraded) {
 		t.Fatalf("body = %+v, want a trustworthy not-found", body)
+	}
+	// The verdict is the deployment's: beside existence "absent" it is not
+	// carried as the object's health.
+	if _, present := body["health"]; present || body["existence"] != "absent" {
+		t.Fatalf("an absent object carries health %v (existence %v), want it only as deployment_health", body["health"], body["existence"])
 	}
 
 	service := mustService(t,
