@@ -21,14 +21,18 @@ import (
 // addFieldsDecodingEveryRecord is how host records were filed before the
 // second copy of a host was recognised before it was read: every record read
 // whole, then dropped when its host id was already filed. The reference the
-// current reading is held to.
+// current reading is held to. What it refuses is counted as the current
+// reading counts it: a record that does not decode under every field, a
+// topology node once for the host it files.
 func (builder *indexBuilder) addFieldsDecodingEveryRecord(fields []string) {
 	for position := 0; position+1 < len(fields); position += 2 {
 		identity, payload := fields[position], fields[position+1]
-		facts, err := decodeHost(payload)
+		wire, err := decodeWireHost(payload)
 		if err != nil {
+			builder.index.refused.host(identity)
 			continue
 		}
+		facts, refusedNodes := hostFactsOf(wire, payload)
 		if facts.HostID != "" {
 			if existing, found := builder.seen[facts.HostID]; found {
 				builder.index.byIdentity[identity] = existing
@@ -36,6 +40,7 @@ func (builder *indexBuilder) addFieldsDecodingEveryRecord(fields []string) {
 			}
 			builder.seen[facts.HostID] = facts
 		}
+		builder.index.refused.topoNodes("host", identity, refusedNodes)
 		builder.index.hosts++
 		builder.index.byIdentity[identity] = facts
 		builder.addToNodes(facts)

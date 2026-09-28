@@ -194,6 +194,7 @@ type phaseTwoMetrics struct {
 	cmdbIndexHosts                  prometheus.Gauge
 	cmdbIndexServiceInstances       prometheus.Gauge
 	cmdbIndexBusinessMappings       *prometheus.GaugeVec
+	cmdbIndexRecordsRefused         *prometheus.GaugeVec
 	fleetSnapshotBytes              prometheus.Gauge
 	fleetViewSnapshotLoads          prometheus.Counter
 	fleetViewSnapshotBytes          prometheus.Counter
@@ -1455,6 +1456,19 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			metrics.cmdbIndexBusinessMappings.WithLabelValues(mapping, state)
 		}
 	}
+	metrics.cmdbIndexRecordsRefused = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "cmdb_index_records_refused",
+		Help: "What the latest CMDB index load read and could not use, set on every refresh: host (fields of the " +
+			"host hash whose record does not decode), service_instance (fields of the service instance hash whose " +
+			"record does not decode), topo_node (topology nodes of decoded records that do not decode to an object " +
+			"and a numeric instance). Each is taken as absent, as a record the writer deleted is. host counts fields, " +
+			"not hosts: the writer publishes every host under two fields, so one bad host is usually 2, and a record " +
+			"that does not decode cannot say which host it is. A topology node counts once per record. Back to 0 " +
+			"when a load reads clean; the first field of each is on the cmdb_cache dependency's writer evidence.",
+	}, []string{"record"})
+	for _, record := range CMDBRefusedRecords {
+		metrics.cmdbIndexRecordsRefused.WithLabelValues(record)
+	}
 	// The fleet snapshot this replica publishes, and the snapshots every
 	// fleet view read pulls. A view is one MGET over every replica's
 	// snapshot on the replica that answers, and it is read on every page
@@ -1710,7 +1724,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
 		m.controlSourceRetainedStale, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
-		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.hostDisableMonitorStates, m.cmdbIndexAge,
+		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
 		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
 		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus)...)

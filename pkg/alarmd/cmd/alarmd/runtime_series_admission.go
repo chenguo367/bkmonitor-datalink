@@ -70,6 +70,7 @@ func buildSeriesAdmission(
 	store, err := cmdbcache.NewStore(reader, cmdbcache.StoreOptions{
 		RefreshInterval: cmdbIndexRefreshInterval,
 		MaxAge:          cmdbIndexStalenessBound,
+		RefusalsChanged: cmdbRefusalLogger(logger),
 	})
 	if err != nil {
 		return nil, nil, err
@@ -171,6 +172,52 @@ func publishCMDBIndexHealth(recorder *metric.Recorder, store *cmdbcache.Store) {
 	)
 	recorder.SetCMDBServiceInstanceIndex(health.ServiceInstances)
 	publishCMDBBusinessMappings(recorder, health)
+	publishCMDBRefusedRecords(recorder, health)
+}
+
+// publishCMDBRefusedRecords names each count of what the held index's load
+// refused by the label its gauge carries, for the same reason the mappings
+// are named: the recorder would not notice two counts swapped.
+func publishCMDBRefusedRecords(recorder *metric.Recorder, health cmdbcache.Health) {
+	for record, refused := range map[string]int{
+		"host": health.Refused.Hosts, "service_instance": health.Refused.ServiceInstances, "topo_node": health.Refused.TopoNodes,
+	} {
+		recorder.SetCMDBRecordsRefused(record, refused)
+	}
+}
+
+// cmdbRefusalLogger writes the line the store asks for when what a CMDB
+// index load refused changes in number: the three counts, and the first
+// field of each by which the record can be read back from the cache. The
+// store asks only on a change, so a writer that keeps publishing the same
+// bad record is said once, and the load that reads clean again is said
+// once too.
+func cmdbRefusalLogger(logger *observability.Logger) func(cmdbcache.RefusedRecords) {
+	if logger == nil {
+		return nil
+	}
+	return func(refused cmdbcache.RefusedRecords) {
+		attributes := []slog.Attr{
+			slog.Int("host", refused.Hosts),
+			slog.Int("service_instance", refused.ServiceInstances),
+			slog.Int("topo_node", refused.TopoNodes),
+		}
+		if refused.FirstHost != "" {
+			attributes = append(attributes, slog.String("first_host", refused.FirstHost))
+		}
+		if refused.FirstServiceInstance != "" {
+			attributes = append(attributes, slog.String("first_service_instance", refused.FirstServiceInstance))
+		}
+		if refused.FirstTopoNode != "" {
+			attributes = append(attributes, slog.String("first_topo_node", refused.FirstTopoNode))
+		}
+		total := refused.Hosts + refused.ServiceInstances + refused.TopoNodes
+		if total == 0 {
+			logger.Info("cmdb_index", "records_refused", 0, 0, attributes...)
+			return
+		}
+		logger.Warn("cmdb_index", "records_refused", total, 0, attributes...)
+	}
 }
 
 // publishCMDBBusinessMappings names each business mapping the index holds by

@@ -32,7 +32,7 @@ const (
 )
 
 func TestAServiceInstanceRecordDecodesToItsHostAndModuleChain(t *testing.T) {
-	facts, err := decodeServiceInstance(instanceOnSpareHost)
+	facts, _, err := decodeServiceInstance(instanceOnSpareHost)
 	if err != nil {
 		t.Fatalf("decode: %v", err)
 	}
@@ -45,7 +45,7 @@ func TestAServiceInstanceRecordDecodesToItsHostAndModuleChain(t *testing.T) {
 	}
 	// A record without a cloud is in the direct area, as a host without one
 	// is.
-	bare, err := decodeServiceInstance(`{"service_instance_id":9,"bk_host_id":1,"ip":"10.0.0.9"}`)
+	bare, _, err := decodeServiceInstance(`{"service_instance_id":9,"bk_host_id":1,"ip":"192.0.2.9"}`)
 	if err != nil || bare.CloudID != "0" {
 		t.Fatalf("bare instance = %+v, %v", bare, err)
 	}

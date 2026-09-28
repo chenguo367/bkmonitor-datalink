@@ -23,7 +23,8 @@ import (
 
 // The platform's CMDB records, one at a time: a host by its id or by its
 // "ip|cloud" field, a service instance by its id. The index loads the two
-// hashes whole and drops every record it cannot decode without a word; a
+// hashes whole and takes every record it cannot decode as absent, counting
+// it and naming the first by its field (the cmdb_cache writer evidence); a
 // record read here says whether the cache has the host at all, what the
 // writer wrote, and whether alarmd can read it.
 const (
@@ -93,7 +94,7 @@ func (service *Service) cmdbRecord(ctx context.Context, request StoreRequest) Re
 				"business_id": facts.BusinessID, "topo_nodes": facts.TopoNodes}
 		}
 	} else {
-		facts, err := cmdbcache.DecodeServiceInstanceRecord(field, string(raw))
+		facts, _, err := cmdbcache.DecodeServiceInstanceRecord(field, string(raw))
 		if err != nil {
 			record.DecodeError = err.Error()
 		} else {

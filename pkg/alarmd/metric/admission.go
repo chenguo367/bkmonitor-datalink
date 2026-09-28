@@ -139,6 +139,20 @@ func (r *Recorder) SetCMDBBusinessMapping(mapping string, held, refused, truncat
 	gauge.WithLabelValues(mapping, "emptied").Set(carried)
 }
 
+// CMDBRefusedRecords are the kinds of record a CMDB index load counts as
+// refused.
+var CMDBRefusedRecords = []string{"host", "service_instance", "topo_node"}
+
+// SetCMDBRecordsRefused publishes how many records of one kind the latest
+// CMDB index load refused. A kind outside CMDBRefusedRecords is dropped
+// rather than creating a series.
+func (r *Recorder) SetCMDBRecordsRefused(record string, refused int) {
+	if r == nil || r.phaseTwo.cmdbIndexRecordsRefused == nil || !knownLabel(CMDBRefusedRecords, record) {
+		return
+	}
+	r.phaseTwo.cmdbIndexRecordsRefused.WithLabelValues(record).Set(float64(refused))
+}
+
 // SnapshotPublished records the size of the fleet snapshot this replica just
 // published; SnapshotsLoaded records one fleet view read and the bytes it
 // pulled. Together they make the fleet store's Redis traffic readable on
