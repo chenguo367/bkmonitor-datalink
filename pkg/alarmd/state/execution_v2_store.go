@@ -402,10 +402,29 @@ func (store *ExecutionStore) AdmitRuntime(_ context.Context, request execution.S
 			item.RefusalRule = rule
 		} else {
 			item.EncodedBytes, item.LegacyRecordIDs = len(encoded), legacyIDs
+			// The frame measured is the frame the write stores when the key's
+			// revision is still the one the mutation expects; handed back so
+			// a caller that holds it spares the write the same encode.
+			item.Frame = &execution.EncodedStateFrame{MutationDigest: mutation.MutationDigest,
+				Revision: mutation.ExpectedBlobRevision + 1, Bytes: encoded, LegacyRecordIDs: legacyIDs}
 		}
 		result.Items[index] = item
 	}
 	return result, result.Validate()
+}
+
+// frameForWrite is the frame the write stores for one item: the one admission
+// encoded, when it was encoded from this mutation for this revision, and a
+// fresh encode otherwise. The two are the same bytes where the first is used
+// -- one encoder, one mutation, one revision -- so which one is written is a
+// matter of cost only.
+func (store *ExecutionStore) frameForWrite(request execution.StateApplyRequest, index int, mutation execution.StateMutation, revision uint64) ([]byte, string, string, int) {
+	if index < len(request.Frames) {
+		if frame := request.Frames[index]; frame != nil && frame.Revision == revision && frame.MutationDigest == mutation.MutationDigest {
+			return frame.Bytes, "", "", frame.LegacyRecordIDs
+		}
+	}
+	return store.encodeForWrite(mutation, revision)
 }
 
 // ApplyRuntime applies without an owner fence. Items whose key was witnessed by

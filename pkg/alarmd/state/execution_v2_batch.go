@@ -456,7 +456,7 @@ func (store *ExecutionStore) applyRuntime(
 			result.Items[index] = classified
 			continue
 		}
-		encoded, refusal, rule, legacyIDs := store.encodeForWrite(mutation, witness.framedRevision+1)
+		encoded, refusal, rule, legacyIDs := store.frameForWrite(request, index, mutation, witness.framedRevision+1)
 		if refusal != "" {
 			item.Status, item.ReasonCode = execution.StateApplyDeterministicInvalid, execution.ReasonCode(refusal)
 			item.RefusalRule = rule

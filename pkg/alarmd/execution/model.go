@@ -3381,6 +3381,25 @@ type StateApplyRequest struct {
 	// that stops appearing leaves no state behind for longer than H. Zero
 	// leaves the retention's own lifetime uncapped.
 	HorizonSeconds int64
+	// Frames, when present, are aligned with Items: the frame the store
+	// encoded for that item when it admitted it, or nil. The store writes a
+	// frame only where it is the one it would encode now -- the same
+	// mutation, the same revision -- and encodes the item itself otherwise,
+	// so a frame that is missing, stale or misaligned costs an encode and
+	// nothing else.
+	Frames []*EncodedStateFrame
+}
+
+// EncodedStateFrame is a mutation as the store encodes it for writing, kept
+// from its admission so the write need not encode it again. It names what it
+// was encoded from, which is what the store checks before writing it.
+type EncodedStateFrame struct {
+	MutationDigest MutationDigest
+	// Revision is the stored record's revision the frame carries: the one it
+	// was encoded for.
+	Revision        uint64
+	Bytes           []byte
+	LegacyRecordIDs int
 }
 
 type StateAdmissionStatus string
@@ -3406,6 +3425,10 @@ type StateAdmissionItemResult struct {
 	// LegacyRecordIDs is how many of the mutation's points carried an id the
 	// derivation could not rebuild, so the id had to be stored.
 	LegacyRecordIDs int
+	// Frame is what the store encoded to measure an admitted mutation, for a
+	// caller that can hold it until the write (StateApplyRequest.Frames);
+	// nil for every other status, and from a store that does not keep one.
+	Frame *EncodedStateFrame
 }
 
 type StateAdmissionResult struct {
