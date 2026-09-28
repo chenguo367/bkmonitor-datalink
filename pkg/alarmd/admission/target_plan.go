@@ -18,6 +18,24 @@ type TargetMembership interface {
 	Contains(key string) bool
 }
 
+// UnavailableMembership is what a target plan resolution says when one of
+// its selectors could not answer this Slot: its members are the ones that
+// did, and a key outside them is not known to be outside the target. A
+// membership without the method is never unavailable.
+type UnavailableMembership interface {
+	Unavailable() bool
+}
+
+// outsideReason is why a record whose key the members do not hold is
+// refused: outside the target when the resolution answered, and not known
+// otherwise.
+func outsideReason(members TargetMembership) string {
+	if membership, knows := members.(UnavailableMembership); knows && membership.Unavailable() {
+		return TargetPlanReasonSelectorUnavailable
+	}
+	return TargetPlanReasonOutOfTarget
+}
+
 // TargetPlanContext is a Plan's target in its second frozen form together
 // with what this Slot resolved it to. Members nil means nothing resolved the
 // target this Slot, and the filter admits nothing rather than everything: a
@@ -47,6 +65,15 @@ const (
 	// refusal so that a path that skipped the resolution drops records under
 	// a name instead of admitting them under none.
 	TargetPlanReasonUnresolved = "target_plan_unresolved"
+	// TargetPlanReasonSelectorUnavailable says the record's key is not among
+	// the members and this Slot's resolution was unavailable: a selector
+	// could not answer, so "not a member" is not the target's answer. The
+	// record is refused all the same - the writer's contract has a selector
+	// that cannot answer match nothing - but the refusal must not read as the
+	// filter working. When some selectors answered and one did not, every
+	// record outside the members that did is counted here: this Slot cannot
+	// say any of them is outside the target.
+	TargetPlanReasonSelectorUnavailable = "target_selector_unavailable"
 )
 
 // TargetPlanFilter admits a record when its key, read by the Plan's frozen
@@ -107,9 +134,15 @@ func (TargetPlanFilter) Admit(plan PlanContext, facts *Facts) Decision {
 			}
 		}
 		if !placed {
+			// No host id to match by. When the host index could not be read,
+			// a record naming its host by address could not be taught one:
+			// that is the index, and not the writer or the query.
+			if facts.HostFactsUnavailable {
+				return Decision{Reason: facts.FactsUnavailableReason()}
+			}
 			return Decision{Reason: TargetPlanReasonKeyMissing}
 		}
-		return Decision{Reason: TargetPlanReasonOutOfTarget}
+		return Decision{Reason: outsideReason(target.Members)}
 	}
 	key, ok := target.Identity.Key(func(name string) string { return dimensionText(facts.Dimensions, name) })
 	if !ok {
@@ -118,5 +151,5 @@ func (TargetPlanFilter) Admit(plan PlanContext, facts *Facts) Decision {
 	if target.Members.Contains(key) {
 		return Decision{Admit: true}
 	}
-	return Decision{Reason: TargetPlanReasonOutOfTarget}
+	return Decision{Reason: outsideReason(target.Members)}
 }

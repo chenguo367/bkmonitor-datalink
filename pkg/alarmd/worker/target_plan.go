@@ -62,6 +62,13 @@ func (target *resolvedTarget) Definitive() bool {
 	return target.definitive
 }
 
+// Unavailable says a selector of the resolution could not answer this Slot,
+// nothing resolving it included: a key outside the members is then not known
+// to be outside the target, and the admission filter says so.
+func (target *resolvedTarget) Unavailable() bool {
+	return target != nil && target.absence.State == nodata.TargetResolutionUnavailable
+}
+
 // absenceView is what the no-data round reads; nil when nothing resolved.
 func (target *resolvedTarget) absenceView() *nodata.TargetResolution {
 	if target == nil {

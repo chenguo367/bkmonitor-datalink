@@ -29,7 +29,11 @@ var admissionReasons = map[string]struct{}{
 	// querying side, a record outside the resolved members is the filter
 	// working, and a target nobody resolved is this process not filtering -
 	// the third is structurally unreachable and alertable if it ever counts.
+	// A record outside the members of a resolution one of whose selectors
+	// could not answer is neither: target_selector_unavailable, refused as
+	// the contract says, and not known to be outside the target.
 	"in_target": {}, "target_key_missing": {}, "out_of_target": {}, "target_plan_unresolved": {},
+	"target_selector_unavailable": {},
 	// Host status: the reasons matter separately because they call for
 	// different actions - a disabled host is the filter working, an unknown
 	// host is a CMDB gap, and unavailable facts mean it is not filtering.
