@@ -109,7 +109,8 @@ type StrategyDirectoryRow struct {
 
 // DirectoryPublication is one publication a directory refresh read: how many
 // active Plans the activation carries on it, and where its manifest came
-// from -- index, store, or failed when the read did not return it.
+// from -- index or store; expired when a carried publication's manifest key
+// is gone, failed when the read did not return it for any other reason.
 type DirectoryPublication struct {
 	Publication SnapshotPublicationRef `json:"publication"`
 	Plans       int                    `json:"plans"`

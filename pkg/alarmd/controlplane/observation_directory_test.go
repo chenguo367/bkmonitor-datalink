@@ -725,7 +725,7 @@ func TestADirectoryRefreshThatFailsSaysWhichReadAndWhy(t *testing.T) {
 // its key.
 func TestADirectoryNamesACarriedPublicationWhoseManifestIsGoneAndGoesOn(t *testing.T) {
 	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
-	for _, side := range []string{"carried", "latest"} {
+	for _, side := range []string{"carried", "latest", "carried read failed"} {
 		t.Run(side, func(t *testing.T) {
 			h, baseline, at := directoryFixture(t, 32)
 			baseline.Refresh(h.ctx, at)
@@ -746,16 +746,36 @@ func TestADirectoryNamesACarriedPublicationWhoseManifestIsGoneAndGoesOn(t *testi
 			if err = h.client.Set(h.ctx, h.prefix+":latest_publication", "2\n"+string(manifest.SnapshotRevision), 0).Err(); err != nil {
 				t.Fatal(err)
 			}
-			gone := map[string]string{"carried": carriedKey, "latest": latestKey}[side]
-			if err = h.client.Del(h.ctx, gone).Err(); err != nil {
+			var reads []redis.Cmdable
+			if side == "carried read failed" {
+				// The carried manifest is there and its read fails: that is
+				// not a manifest past its retention, and it fails the refresh.
+				reads = append(reads, &failingReadSpy{Cmdable: h.client, fail: carriedKey, err: errors.New("read tcp 127.0.0.1:6379: i/o timeout")})
+			} else if err = h.client.Del(h.ctx, map[string]string{"carried": carriedKey, "latest": latestKey}[side]).Err(); err != nil {
 				t.Fatal(err)
 			}
-			d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits)
+			d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, reads...)
 			if err != nil {
 				t.Fatal(err)
 			}
 			d.Refresh(h.ctx, at)
 			s := d.Page(at, "", "", "", 0, 100)
+			if side == "carried read failed" {
+				if s.Complete || s.FailedRead != "manifest" || s.FailedKey != carriedKey || s.FailedPublication == nil || *s.FailedPublication != carried {
+					t.Fatalf("carried read failed = complete %v read %q key %q publication %+v, want the refresh failed on the carried manifest by name",
+						s.Complete, s.FailedRead, s.FailedKey, s.FailedPublication)
+				}
+				for _, row := range s.Rows {
+					if row.ManifestExpired {
+						t.Fatalf("row %+v marked expired for a manifest whose read failed", row)
+					}
+				}
+				last := s.Publications[len(s.Publications)-1]
+				if last.Publication != carried || last.Manifest != "failed" {
+					t.Fatalf("publications = %+v, want the carried one marked failed, not expired", s.Publications)
+				}
+				return
+			}
 			if side == "latest" {
 				latest := controlplane.SnapshotPublicationRef{SnapshotRevision: manifest.SnapshotRevision, PublicationEpoch: 2}
 				if s.Complete || s.FailedRead != "manifest" || s.FailedKey != latestKey || s.FailedPublication == nil || *s.FailedPublication != latest {
