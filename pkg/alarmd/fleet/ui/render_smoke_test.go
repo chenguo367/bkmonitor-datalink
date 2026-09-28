@@ -790,6 +790,17 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	command.Env = append(os.Environ(), "TZ=Asia/Shanghai", "LANG=en_GB.UTF-8", "LC_ALL=en_GB.UTF-8")
 	output, err := command.CombinedOutput()
 	text := strings.TrimSpace(string(output))
+	// Output that stops before the harness's last line is one fact -- the
+	// process ended with writes still queued -- and read line by line it
+	// came out as thirty separate complaints about missing sentences.
+	if !strings.HasSuffix(text, smokeEnd) {
+		last := text
+		if cut := strings.LastIndexByte(text, '\n'); cut >= 0 {
+			last = text[cut+1:]
+		}
+		t.Fatalf("the harness's output stopped before its last line (%d bytes, exit %v): the page's findings cannot be read from it; last line: %q",
+			len(output), err, last)
+	}
 	if dump := os.Getenv("FLEET_SMOKE_DUMP"); dump != "" {
 		// The whole rendering, for reading the sentences a change produced
 		// before pinning them; never part of the verdict.
@@ -1524,6 +1535,9 @@ func lineStarting(text, prefix string) string {
 // It also runs the one rule the page deliberately duplicates -- "can this
 // window ever fill" -- against the verdicts the Go side computed, so the two
 // copies are checked by execution rather than by a substring.
+// smokeEnd is the harness's last line; its absence means the output was cut.
+const smokeEnd = "SMOKE END"
+
 const smokeHarness = `
 const fs = require('fs'), vm = require('vm'), path = require('path');
 const dir = process.argv[2];
@@ -1985,5 +1999,11 @@ for (const c of data.page_tail_cases || []) {
   console.log('TAIL ' + c.name + ' :: ' + tail);
 }
 
-process.exit(failed ? 1 : 0);
+// The last line, and an exit node takes on its own once everything above has
+// been written. process.exit() does not wait for a pipe: on macOS stdout to a
+// pipe is written asynchronously, and on a busy machine the process ended with
+// lines still queued, which read as thirty findings about sentences the page
+// had rendered.
+console.log('` + smokeEnd + `');
+process.exitCode = failed ? 1 : 0;
 `
