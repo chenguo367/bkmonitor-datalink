@@ -118,6 +118,17 @@ func startCutoverFixtureWith(
 	t *testing.T, configure func(*config.Config), logger *observability.Logger, before func(ctx context.Context, client *redis.Client, cfg config.Config),
 ) *cutoverStallFixture {
 	t.Helper()
+	return startCutoverFixtureOpened(t, configure, logger, before, nil)
+}
+
+// startCutoverFixtureOpened is startCutoverFixtureWith with a hook run on
+// the bundle after it opens and before it starts -- for a test that needs a
+// background loop not to run at all, rather than to have not run yet.
+func startCutoverFixtureOpened(
+	t *testing.T, configure func(*config.Config), logger *observability.Logger, before func(ctx context.Context, client *redis.Client, cfg config.Config),
+	opened func(*phaseTwoWorkerBundle),
+) *cutoverStallFixture {
+	t.Helper()
 	address, redisClient := startPhaseTwoRedis(t)
 	ctx := context.Background()
 	installCutoverStallStrategies(t, ctx, redisClient, "system.mem", 1725000000)
@@ -204,6 +215,9 @@ func startCutoverFixtureWith(
 	)
 	if err != nil {
 		t.Fatalf("openProductionPhaseTwoBundleWithDependencies() error = %v", err)
+	}
+	if opened != nil {
+		opened(bundle)
 	}
 	if err := bundle.Start(ctx); err != nil {
 		t.Fatalf("phase-two production Start() error = %v", err)
