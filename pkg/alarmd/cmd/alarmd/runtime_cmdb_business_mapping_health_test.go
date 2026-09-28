@@ -58,11 +58,13 @@ func TestEachBusinessMappingIsPublishedUnderItsOwnName(t *testing.T) {
 	recorder := metric.NewRecorder(metric.BuildInfo{})
 	publishCMDBBusinessMappings(recorder, cmdbcache.Health{
 		ClusterBusinessMapping:   cmdbcache.MappingStats{Held: 11, Refused: 12, Truncated: 13},
-		NamespaceBusinessMapping: cmdbcache.MappingStats{Held: 21, Refused: 22, Truncated: 23, ReadFailed: true},
+		NamespaceBusinessMapping: cmdbcache.MappingStats{Held: 21, Refused: 22, Truncated: 23, ReadFailed: true, Emptied: true},
 	})
 	assertBusinessMappingCells(t, businessMappingCells(t, recorder), map[string]float64{
 		"bcs_cluster/held": 11, "bcs_cluster/refused": 12, "bcs_cluster/truncated": 13, "bcs_cluster/read_failed": 0,
-		"bcs_namespace/held": 21, "bcs_namespace/refused": 22, "bcs_namespace/truncated": 23, "bcs_namespace/read_failed": 1,
+		"bcs_cluster/emptied": 0,
+		"bcs_namespace/held":  21, "bcs_namespace/refused": 22, "bcs_namespace/truncated": 23, "bcs_namespace/read_failed": 1,
+		"bcs_namespace/emptied": 1,
 	})
 }
 
@@ -76,8 +78,8 @@ func (emptyIndexLoader) Load(context.Context, time.Time) (*cmdbcache.Index, erro
 // load that holds neither mapping clears the cells an earlier one set.
 func TestTheIndexHealthPublishedAfterARefreshCarriesTheMappings(t *testing.T) {
 	recorder := metric.NewRecorder(metric.BuildInfo{})
-	recorder.SetCMDBBusinessMapping("bcs_cluster", 9, 9, 9, true)
-	recorder.SetCMDBBusinessMapping("bcs_namespace", 9, 9, 9, true)
+	recorder.SetCMDBBusinessMapping("bcs_cluster", 9, 9, 9, true, true)
+	recorder.SetCMDBBusinessMapping("bcs_namespace", 9, 9, 9, true, true)
 	store, err := cmdbcache.NewStore(emptyIndexLoader{}, cmdbcache.StoreOptions{RefreshInterval: time.Minute, MaxAge: time.Hour})
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +90,8 @@ func TestTheIndexHealthPublishedAfterARefreshCarriesTheMappings(t *testing.T) {
 	publishCMDBIndexHealth(recorder, store)
 	assertBusinessMappingCells(t, businessMappingCells(t, recorder), map[string]float64{
 		"bcs_cluster/held": 0, "bcs_cluster/refused": 0, "bcs_cluster/truncated": 0, "bcs_cluster/read_failed": 0,
-		"bcs_namespace/held": 0, "bcs_namespace/refused": 0, "bcs_namespace/truncated": 0, "bcs_namespace/read_failed": 0,
+		"bcs_cluster/emptied": 0,
+		"bcs_namespace/held":  0, "bcs_namespace/refused": 0, "bcs_namespace/truncated": 0, "bcs_namespace/read_failed": 0,
+		"bcs_namespace/emptied": 0,
 	})
 }

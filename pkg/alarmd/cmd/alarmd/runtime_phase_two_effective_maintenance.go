@@ -102,6 +102,7 @@ const (
 	closeOutcomeUnavailable          = string(observability.EffectiveCloseUnavailable)
 	closeOutcomeUnsupportedRunner    = string(observability.EffectiveCloseUnsupportedRunner)
 	closeOutcomeViewNotExecutable    = string(observability.EffectiveCloseViewNotExecutable)
+	closeOutcomeDeletionUnsettled    = string(observability.EffectiveCloseCalendarDeletionUnsettled)
 )
 
 // maintenanceGroup is what the loop knows about one owned Query Group from
@@ -118,6 +119,10 @@ type maintenanceGroup struct {
 	// Level is inactive: on the standard wire, with a schedule, and compiled
 	// in full.
 	closable []controlplane.MaintenancePlan
+	// calendars are the calendars the read Plans' effective-time snapshots
+	// name, each true when at least one snapshot holds it present. See
+	// settleCalendarDeletions.
+	calendars map[int64]bool
 }
 
 type effectiveMaintenance struct {
@@ -146,6 +151,13 @@ type effectiveMaintenance struct {
 	legacyCursor map[execution.QueryGroupIdentity]int
 	countsMu     sync.Mutex
 	counts       map[string]uint64
+
+	// deletedSince is when each calendar the owned Plans name started to
+	// read deleted in every snapshot that names it, and sourceLossAt the
+	// last step at which every one of them read deleted. See
+	// settleCalendarDeletions.
+	deletedSince map[int64]time.Time
+	sourceLossAt time.Time
 }
 
 // Stats is the outcome counts, for the metric that reports every cell.
@@ -295,6 +307,7 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 		}
 	}
 
+	deletions := m.settleCalendarDeletions(calendarReads(readUnderCurrentLease(m.groups, runners)), now)
 	for _, qg := range groups {
 		if ctx.Err() != nil {
 			return
@@ -305,7 +318,142 @@ func (m *effectiveMaintenance) step(ctx context.Context) {
 			continue
 		}
 		m.refreshLegacy(ctx, qg, known.legacy)
-		m.closeInactive(ctx, qg, runner, known.closable)
+		m.closeInactive(ctx, qg, runner, known.closable, deletions)
+	}
+}
+
+// readUnderCurrentLease is the groups whose Plans were read under the lease
+// their owner holds now. A group whose lease moved holds Plans from before
+// the change: in the minute a source-wide loss arrives, the groups not read
+// again yet would still name the calendars present and let the groups
+// already read close.
+func readUnderCurrentLease(groups map[execution.QueryGroupIdentity]*maintenanceGroup,
+	runners map[execution.QueryGroupIdentity]maintenanceRunner) map[execution.QueryGroupIdentity]*maintenanceGroup {
+	current := make(map[execution.QueryGroupIdentity]*maintenanceGroup, len(groups))
+	for qg, known := range groups {
+		if runner := runners[qg]; runner != nil {
+			if scope, revision, accepting := runner.maintenanceLease(); accepting &&
+				known.contentScope == scope && known.timelineRevision == revision {
+				current[qg] = known
+			}
+		}
+	}
+	return current
+}
+
+// calendarDeletionSettle is how long a calendar has to read deleted, in
+// every snapshot that names it, and how long since every calendar last read
+// deleted at once, before a deletion closes an alert.
+//
+// The writer rebuilds the strategies' snapshots page by page once a minute
+// and reads the calendars again for each page. A calendar source lost or
+// restored in the middle of a round publishes the pages before it one way
+// and the pages after it the other, in one publication: a calendar read
+// deleted beside ones still present, or the same calendar read both ways.
+// The next round reads every page the same way. The settle time is ten of
+// those rounds. Python keeps a calendar for as long as its cache entry
+// lives, up to a day after the calendar stops being refreshed, so a
+// deletion closing ten minutes late still closes sooner than in Python.
+const calendarDeletionSettle = 10 * time.Minute
+
+var errCalendarDeletionUnsettled = errors.New("inactive close held: calendar deletion not settled")
+
+// calendarDeletions is which of the calendars the owned Plans read deleted
+// may close an alert in this step. See settleCalendarDeletions.
+type calendarDeletions struct {
+	settled    map[int64]struct{}
+	sourceLoss bool
+}
+
+// calendarReads is what the groups' snapshots say of each calendar they
+// name: true when at least one of them holds it present.
+func calendarReads(groups map[execution.QueryGroupIdentity]*maintenanceGroup) map[int64]bool {
+	reads := make(map[int64]bool)
+	for _, group := range groups {
+		for id, present := range group.calendars {
+			reads[id] = reads[id] || present
+		}
+	}
+	return reads
+}
+
+// settleCalendarDeletions records, from this step's reads, since when each
+// calendar has read deleted everywhere and whether every calendar reads
+// deleted, and answers which deletions may close.
+//
+// One calendar deleted is a deletion, and the Plans that named it as their
+// only alert days are inactive and closed, as Python closes them - once it
+// has read deleted in every snapshot that names it for
+// calendarDeletionSettle. Every calendar deleted at once is the writer's
+// calendar source gone: the writer marks each calendar it cannot find as
+// deleted and keeps the snapshot READY, so a calendar table that answered
+// nothing arrives as every calendar deleted, and read as deletions it would
+// close the alerts of every strategy that alerts on calendar days. No
+// deletion settles while that holds or within calendarDeletionSettle of it
+// last holding, the same way an empty strategy list is held back from
+// removing strategies. Detection still reads the calendars as empty, as
+// Python does: reading them as unknown would freeze the strategies whose
+// calendars are rest days, which is missed alerts.
+//
+// The reads are this replica's owned Plans, from memory: the whole catalog
+// is not read here, and in a source-wide loss every replica's share reads
+// the same way. A replica whose share names only calendars that were really
+// deleted holds their closes too, until it is assigned a Plan that names a
+// present calendar, which leaves alerts open rather than closing them
+// wrongly.
+func (m *effectiveMaintenance) settleCalendarDeletions(reads map[int64]bool, now time.Time) calendarDeletions {
+	if m.deletedSince == nil {
+		m.deletedSince = make(map[int64]time.Time)
+	}
+	sourceLoss := len(reads) > 0
+	for id, present := range reads {
+		if present {
+			sourceLoss = false
+			delete(m.deletedSince, id)
+		} else if _, known := m.deletedSince[id]; !known {
+			m.deletedSince[id] = now
+		}
+	}
+	for id := range m.deletedSince {
+		if _, named := reads[id]; !named {
+			delete(m.deletedSince, id)
+		}
+	}
+	if sourceLoss {
+		m.sourceLossAt = now
+	}
+	deletions := calendarDeletions{settled: make(map[int64]struct{})}
+	if !m.sourceLossAt.IsZero() && now.Sub(m.sourceLossAt) < calendarDeletionSettle {
+		deletions.sourceLoss = true
+		return deletions
+	}
+	for id, since := range m.deletedSince {
+		if now.Sub(since) >= calendarDeletionSettle {
+			deletions.settled[id] = struct{}{}
+		}
+	}
+	return deletions
+}
+
+// held names why the Plan's alerts are not closed for a calendar it reads
+// deleted, or is nil when none holds it. A Plan that reads no calendar
+// deleted closes as before, whatever the other Plans read.
+func (deletions calendarDeletions) held(plan *strategy.CompiledPlan) error {
+	var unsettled int64
+	plan.EffectiveTimeCalendars(func(id int64, deleted bool) {
+		if _, settled := deletions.settled[id]; deleted && !settled && (unsettled == 0 || id < unsettled) {
+			unsettled = id
+		}
+	})
+	switch {
+	case unsettled == 0:
+		return nil
+	case deletions.sourceLoss:
+		return fmt.Errorf("%w: every calendar the owned strategies name read deleted within %s, calendar %d among them",
+			errCalendarDeletionUnsettled, calendarDeletionSettle, unsettled)
+	default:
+		return fmt.Errorf("%w: calendar %d has not read deleted in every snapshot that names it for %s",
+			errCalendarDeletionUnsettled, unsettled, calendarDeletionSettle)
 	}
 }
 
@@ -332,6 +480,12 @@ func (m *effectiveMaintenance) readGroup(ctx context.Context, qg execution.Query
 	}
 	known := &maintenanceGroup{contentScope: scope, timelineRevision: revision}
 	for _, plan := range read.Plans {
+		plan.Compiled.EffectiveTimeCalendars(func(id int64, deleted bool) {
+			if known.calendars == nil {
+				known.calendars = make(map[int64]bool)
+			}
+			known.calendars[id] = known.calendars[id] || !deleted
+		})
 		if !planHasSchedule(plan.Compiled) {
 			continue
 		}
@@ -366,8 +520,9 @@ func planHasSchedule(plan *strategy.CompiledPlan) bool {
 // closeInactive closes the current alerts of every Plan whose Levels are all
 // inactive now. The judgement is from memory; the store is touched only
 // when a batch is ready to send, for the owner check before the send and
-// the send itself.
-func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plans []controlplane.MaintenancePlan) {
+// the send itself. A Plan that reads a calendar deleted is not closed until
+// the deletion settles (settleCalendarDeletions).
+func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.QueryGroupIdentity, runner maintenanceRunner, plans []controlplane.MaintenancePlan, deletions calendarDeletions) {
 	if len(plans) == 0 {
 		return
 	}
@@ -410,6 +565,11 @@ func (m *effectiveMaintenance) closeInactive(ctx context.Context, qg execution.Q
 			}
 		}
 		if len(alerts) == 0 {
+			continue
+		}
+		if err := deletions.held(plan.Compiled); err != nil {
+			m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg), StrategyID: plan.Identity.StrategyID},
+				closeOutcomeDeletionUnsettled, err, 0)
 			continue
 		}
 		business, err := strconv.ParseInt(plan.Identity.BusinessID, 10, 64)
@@ -646,11 +806,17 @@ func (m *effectiveMaintenance) requestCalibration(key openalerts.StrategyKey, at
 // is measured in - alerts for close_acked - and
 // one for the outcomes that are events in their own right.
 func (m *effectiveMaintenance) observe(ctx context.Context, qg execution.QueryGroupIdentity, outcome string, err error, count int) {
+	m.observeTrace(ctx, observability.TraceFields{QueryGroupKey: string(qg)}, outcome, err, count)
+}
+
+// observeTrace is observe with the line's identity given in full, for an
+// outcome that is about one strategy rather than the whole Query Group.
+func (m *effectiveMaintenance) observeTrace(ctx context.Context, trace observability.TraceFields, outcome string, err error, count int) {
 	result := observability.ResultSuccess
 	if err != nil {
 		result = observability.ResultDegraded
 	}
 	m.count(outcome, max(count, 1))
 	m.bundle.dependencies.Observer.Observe(ctx, observability.Observation{Component: observability.ComponentRuntime, Stage: observability.StageEffectiveTimeMaintenance, Result: observability.Result(result),
-		ReasonCode: observability.ReasonCode(outcome), Trace: observability.TraceFields{QueryGroupKey: string(qg)}, Counts: observability.Counts{Events: int64(count)}, Err: err})
+		ReasonCode: observability.ReasonCode(outcome), Trace: trace, Counts: observability.Counts{Events: int64(count)}, Err: err})
 }

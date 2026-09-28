@@ -134,18 +134,21 @@ type Index struct {
 }
 
 // MappingStats describes one published business mapping the index read:
-// the entries held, the fields left out as not a positive business or past
-// the bound, and whether the latest load could not read it (the entries are
-// then an earlier load's).
+// the entries held, the fields the latest load that read the hash left out
+// as not a positive business or past the bound, and whether the latest load
+// could not read it or read it empty after one that held entries (the
+// entries are then an earlier load's).
 type MappingStats struct {
 	Held       int
 	Refused    int
 	Truncated  int
 	ReadFailed bool
+	Emptied    bool
 }
 
 func (mapping businessMapping) stats() MappingStats {
-	return MappingStats{Held: len(mapping.entries), Refused: mapping.refused, Truncated: mapping.truncated, ReadFailed: mapping.readFailed}
+	return MappingStats{Held: len(mapping.entries), Refused: mapping.refused, Truncated: mapping.truncated,
+		ReadFailed: mapping.readFailed, Emptied: mapping.emptied}
 }
 
 // businessMapping is one published "key -> business" hash read into the
@@ -160,11 +163,20 @@ func (mapping businessMapping) stats() MappingStats {
 // without it and says so; the store then carries the entries of the index
 // it replaces, so one failed read does not turn every mapped event into an
 // unmapped one, and the flag stays up until a read succeeds.
+//
+// emptied says this load read the hash empty while the index it replaces
+// held entries. The writer publishes an empty mapping by deleting the hash,
+// which is also what a source that answered nothing looks like, and read as
+// fact it would file every global business event under its strategy's own
+// business at once. The store carries the previous entries as it does for a
+// failed read, and the flag stays up until a load holds entries again. A
+// mapping never held stays empty: that is a writer not publishing it yet.
 type businessMapping struct {
 	entries    map[string]string
 	refused    int
 	truncated  int
 	readFailed bool
+	emptied    bool
 }
 
 // add records one page of field, value pairs, up to bound entries.
@@ -194,14 +206,22 @@ func (mapping *businessMapping) add(fields []string, bound int) {
 	}
 }
 
-// carriedFrom is this mapping, or, when this load could not read it, the
-// entries of the previous one with the failure still flagged.
+// carriedFrom is this mapping, or the entries of the previous one when this
+// load could not read it or read it empty after one that held entries, with
+// the reason flagged.
 func (mapping businessMapping) carriedFrom(previous businessMapping) businessMapping {
-	if !mapping.readFailed {
-		return mapping
+	switch {
+	case mapping.readFailed:
+		previous.readFailed = true
+		return previous
+	case len(mapping.entries) == 0 && len(previous.entries) > 0:
+		// This load read the hash: what it left out is its own count, and a
+		// hash whose every field was refused reads as refused, not as gone.
+		previous.refused, previous.truncated = mapping.refused, mapping.truncated
+		previous.readFailed, previous.emptied = false, true
+		return previous
 	}
-	previous.readFailed = true
-	return previous
+	return mapping
 }
 
 // LookupModelInstance finds the host carrying the canonical (model,
@@ -346,7 +366,8 @@ func (index *Index) NamespaceBusinessStats() MappingStats {
 }
 
 // carryOptional takes over, from the index this one replaces, the optional
-// mappings this load could not read.
+// mappings this load could not read or read empty while that index held
+// entries (see carriedFrom).
 func (index *Index) carryOptional(previous *Index) {
 	if index == nil || previous == nil {
 		return
@@ -437,8 +458,9 @@ func (reader *Reader) Load(ctx context.Context, now time.Time) (*Index, error) {
 	// same round as the hosts, read into the same snapshot so a host and a
 	// cluster are never attributed from two refreshes. An absent hash is a
 	// writer that does not publish it yet: no cluster is mapped, and every
-	// event that would have used one is counted as unmapped. A hash that
-	// cannot be read is not a failed load (see businessMapping).
+	// event that would have used one is counted as unmapped - unless the
+	// index before held entries, which the store then carries (emptied, see
+	// businessMapping). A hash that cannot be read is not a failed load.
 	builder.index.clusterBusiness = reader.readMapping(ctx, reader.clusterBusinessKey(), MaxClusterBusinesses)
 	builder.index.namespaceBusiness = reader.readMapping(ctx, reader.namespaceBusinessKey(), MaxNamespaceBusinesses)
 	index := builder.index
