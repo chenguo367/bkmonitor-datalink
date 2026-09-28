@@ -426,32 +426,50 @@ func (repository *RedisCatalogRepository) LoadSegmentQueryGroup(
 	at execution.EvaluationTime,
 	fallback func(context.Context) (QueryGroup, error),
 ) (QueryGroup, error) {
+	group, _, err := repository.LoadSegmentQueryGroupContent(ctx, segment, at, fallback)
+	return group, err
+}
+
+// LoadSegmentQueryGroupContent is LoadSegmentQueryGroup saying whether the
+// group was assembled from the content the Segment names. Only then is every
+// byte of its Plans and dataset contract in the Query Group object the
+// Segment names at the evaluation time and in each Plan's output context it
+// names there, both read by digest and checked against it; a group served
+// from the Snapshot is not, and says false.
+func (repository *RedisCatalogRepository) LoadSegmentQueryGroupContent(
+	ctx context.Context,
+	segment execution.ScheduleSegmentFact,
+	at execution.EvaluationTime,
+	fallback func(context.Context) (QueryGroup, error),
+) (QueryGroup, bool, error) {
 	if repository == nil || fallback == nil {
-		return QueryGroup{}, errors.New("alarmd controlplane: Segment Query Group read requires a fallback")
+		return QueryGroup{}, false, errors.New("alarmd controlplane: Segment Query Group read requires a fallback")
 	}
 	if !segment.Contains(at) {
-		return QueryGroup{}, errors.New("alarmd controlplane: Segment Query Group read is outside the Segment")
+		return QueryGroup{}, false, errors.New("alarmd controlplane: Segment Query Group read is outside the Segment")
 	}
 	segment = segment.At(at)
 	if segment.ObjectDigest == "" {
 		repository.observeObjectRead(ctx, objectReadKindSegment, segmentReadLegacySegment)
 		repository.localView.forget(segment.QueryGroup)
-		return fallback(ctx)
+		group, err := fallback(ctx)
+		return group, false, err
 	}
 	group, entry, result, err := repository.loadSegmentQueryGroupByContent(ctx, segment)
 	if err == nil {
 		repository.observeObjectRead(ctx, objectReadKindSegment, segmentReadObject)
 		repository.localView.record(segment.QueryGroup, entry)
-		return group, nil
+		return group, true, nil
 	}
 	if result == "" {
-		return QueryGroup{}, err
+		return QueryGroup{}, false, err
 	}
 	repository.observeObjectRead(ctx, objectReadKindSegment, result)
 	// Served from the Snapshot, not by content: the Query Group leaves the
 	// view until a Slot is read by content again.
 	repository.localView.forget(segment.QueryGroup)
-	return fallback(ctx)
+	group, err = fallback(ctx)
+	return group, false, err
 }
 
 // loadSegmentQueryGroupByContent returns the assembled Query Group and what

@@ -81,6 +81,13 @@ type CompileRequest struct {
 	Plan            contract.EvaluationPlanV2
 	DatasetContract contract.DatasetContractV2
 	StateSemantics  StateSemantics
+	// ContentKey, when set, names the content Plan and DatasetContract were
+	// built from, such that the same key always means the same Plan and the
+	// same DatasetContract: the caller says so, and the compiler takes its
+	// word for it. The cache key is then derived from the Plan the first time
+	// a key is seen and remembered for it after. Empty derives the cache key
+	// from the Plan every time, as a caller with nothing to name does.
+	ContentKey string
 }
 
 type Terminal struct {

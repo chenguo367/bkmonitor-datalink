@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
@@ -37,6 +38,29 @@ type PlanCompiler struct {
 	cache            *compileCache
 	capabilityDigest string
 	budgetDigest     string
+	keys             compileKeyMemo
+}
+
+// compileKeyMemoEntries bounds how many content keys the compiler remembers
+// a cache key for. A replica freezes the Slots of the Query Groups it owns --
+// on a production deployment some seven hundred groups holding about 2,900
+// Plans -- and a publication that changes content brings a second key for
+// each Plan it changes while the first is still being frozen. Twice the Plans
+// with room over is 8,192 entries at about 350 bytes each, under 3 MB. Past it
+// the memory is cleared whole and refilled; a cleared key only derives its
+// cache key from the Plan again, as a request without a content key does.
+const compileKeyMemoEntries = 8192
+
+// compileKeyMemo is the cache key each content key was found to have, by
+// content key and the state semantics the key was derived under.
+type compileKeyMemo struct {
+	mu   sync.RWMutex
+	keys map[compileKeyMemoKey]string
+}
+
+type compileKeyMemoKey struct {
+	content string
+	state   StateSemantics
 }
 
 func NewCompiler(registry *AlgorithmCompilerRegistry, limits Limits) (*PlanCompiler, error) {
@@ -788,7 +812,40 @@ func compilePlanFingerprints(plan *CompiledPlan) error {
 	return nil
 }
 
+// compileCacheKey is the cache key of the request: remembered by its content
+// key when it has one, derived from the Plan otherwise. What is remembered is
+// the key deriving it gives, so the cache holds and shares entries exactly as
+// it did before; only the derivation, the whole Plan's canonical encoding and
+// its digest, is skipped for a content key already seen. That was 3.4% of a
+// replica's CPU, all of it on Slots whose Plan had not changed.
 func (c *PlanCompiler) compileCacheKey(request CompileRequest) (string, error) {
+	if request.ContentKey == "" {
+		return c.deriveCompileCacheKey(request)
+	}
+	memoKey := compileKeyMemoKey{content: request.ContentKey, state: request.StateSemantics}
+	c.keys.mu.RLock()
+	key, ok := c.keys.keys[memoKey]
+	c.keys.mu.RUnlock()
+	if ok {
+		return key, nil
+	}
+	key, err := c.deriveCompileCacheKey(request)
+	if err != nil {
+		return "", err
+	}
+	c.keys.mu.Lock()
+	if c.keys.keys == nil || len(c.keys.keys) >= compileKeyMemoEntries {
+		c.keys.keys = make(map[compileKeyMemoKey]string)
+	}
+	c.keys.keys[memoKey] = key
+	c.keys.mu.Unlock()
+	return key, nil
+}
+
+// deriveCompileCacheKey derives the cache key from everything the compiler
+// reads: the Plan, the dataset contract, the state semantics, and the
+// compiler's own algorithms and budgets.
+func (c *PlanCompiler) deriveCompileCacheKey(request CompileRequest) (string, error) {
 	planDigest, err := contract.DeriveCanonicalDigestV2("strategy-plan-semantic-v1", request.Plan)
 	if err != nil {
 		return "", err
