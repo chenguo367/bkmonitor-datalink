@@ -3631,6 +3631,12 @@ const (
 	// CauseLevelOutcomeUnknown is a Level whose outcome could not be determined
 	// even though its Plan was.
 	CauseLevelOutcomeUnknown CompletionCause = "LEVEL_OUTCOME_UNKNOWN"
+	// CauseGapGuardWarming is a Slot that answered whole and still left a Level
+	// UNKNOWN, only because a guard an earlier round's gap raised is warming
+	// towards its requirement (UnknownIsGuardTail). The reason beside it is
+	// the guard's - why the gap was opened, not what happened this round - and
+	// nothing needs doing: the guard clears once enough whole rounds pass.
+	CauseGapGuardWarming CompletionCause = "GAP_GUARD_WARMING"
 	// CausePrimaryInputPartial is the provider answering the primary input's
 	// query with a stretch of the window missing. The Slot completes as
 	// COMPLETED_WITH_PARTIAL_GAP, and the missing stretch is the data link's or
@@ -3781,7 +3787,11 @@ func deriveCompletionDetail(input InternalExecution, result EvaluationResult) (
 					hasTerminal = true
 				case LevelOutcomeUnknown:
 					hasUnavailable = true
-					note(CauseLevelOutcomeUnknown, outcome.ReasonCode)
+					if UnknownIsGuardTail(input.Inputs, outcome) {
+						note(CauseGapGuardWarming, outcome.ReasonCode)
+					} else {
+						note(CauseLevelOutcomeUnknown, outcome.ReasonCode)
+					}
 				}
 			}
 		default:
@@ -3825,12 +3835,14 @@ func deriveCompletionDetail(input InternalExecution, result EvaluationResult) (
 func causeRank(cause CompletionCause) int {
 	switch cause {
 	case CausePrimaryInputUnavailable:
-		return 6
+		return 7
 	case CausePlanUnavailable:
-		return 5
+		return 6
 	case CauseLevelOutcomeUnknown:
-		return 4
+		return 5
 	case CauseDataNotReady:
+		return 4
+	case CauseGapGuardWarming:
 		return 3
 	case CausePrimaryInputPartial:
 		return 2

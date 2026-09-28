@@ -55,6 +55,12 @@ type LevelOutcome struct {
 	// result contract expects no TriggerEvent for such a record, and only for
 	// such a record.
 	EnvelopeHeld bool
+	// GuardTail marks an UNKNOWN outcome that carries a standing guard's
+	// reason because of that guard alone: the Level was held by a gap an
+	// earlier round left, and this round proposed no incomplete input of its
+	// own for it. Set by the evaluator, which is the only place that knows;
+	// read by the completion's cause (UnknownIsGuardTail).
+	GuardTail bool
 }
 
 type levelOutcomeIdentity struct {

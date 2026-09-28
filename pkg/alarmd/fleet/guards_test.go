@@ -195,3 +195,36 @@ func TestTheProgressWordIsTheEmittersNotDerived(t *testing.T) {
 		t.Fatalf("vocabularies = %v / %v, want the emitter's three words and two statuses", GapProgressValues, GapGuardStatuses)
 	}
 }
+
+// A round whose only UNKNOWN is a guard's tail answered whole: it is filed
+// under GAP_GUARD_WARMING, not under the guard's reason, and read on the
+// undecided-window line. The same reason under an UNKNOWN of the round's own
+// still reads as the backend not answering - the other side of the rule.
+func TestAGuardTailRoundIsFiledUnderItsCauseNotTheGuardsReason(t *testing.T) {
+	for _, testCase := range []struct {
+		name  string
+		cause string
+		filed string
+		check Check
+	}{
+		{name: "the guard's tail", cause: "GAP_GUARD_WARMING", filed: "GAP_GUARD_WARMING", check: CheckWindowUndecided},
+		{name: "an UNKNOWN of this round's own", cause: "LEVEL_OUTCOME_UNKNOWN", filed: "QUERY_UNAVAILABLE", check: CheckBackendNotAnswering},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			at := &clock{at: now}
+			tracker := newTracker(t, at)
+			ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-tail"})
+			for round := 0; round < DefaultDegradedRounds; round++ {
+				tracker.Observe(ctx, observability.Observation{ProgressCompletionKind: "COMPLETED_WITH_UNAVAILABLE",
+					ProgressCompletionCause: testCase.cause, ProgressCompletionReason: "QUERY_UNAVAILABLE",
+					Trace: observability.TraceFields{EvaluationTime: int64(1000 + 60*round)}})
+				at.at = at.at.Add(time.Minute)
+			}
+			rows := anyColumn(tracker)
+			Attribute(rows, at.at)
+			if len(rows) != 1 || rows[0].CauseReason != testCase.filed || rows[0].Finding.Check != testCase.check {
+				t.Fatalf("rows = %+v, want filed under %s on %s", rows, testCase.filed, testCase.check)
+			}
+		})
+	}
+}

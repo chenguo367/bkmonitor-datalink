@@ -629,6 +629,12 @@ var codeChecks = map[string]verdict{
 	"PLAN_BUDGET_EXCEEDED":  lands(CheckPlanUnevaluable),
 	"LEVEL_BUDGET_EXCEEDED": lands(CheckPlanUnevaluable),
 
+	// A round that answered whole with a Level still held by a guard an
+	// earlier round's gap opened: the question is why the guard has not yet
+	// released, which is the undecided window's, as for a guard held at the
+	// window (guardHeld) - not whether the backend answers, which it did.
+	"GAP_GUARD_WARMING": lands(CheckWindowUndecided),
+
 	// The backend was asked and did not answer usefully.
 	"QUERY_TIMEOUT":     lands(CheckBackendNotAnswering),
 	"QUERY_UNAVAILABLE": lands(CheckBackendNotAnswering),

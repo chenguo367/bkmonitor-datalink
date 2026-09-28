@@ -12,6 +12,7 @@ package fleet
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sort"
 	"sync"
 	"time"
@@ -568,6 +569,25 @@ func boundedErrorTail(text string) string {
 // says the data arrived, stopped, and came back -- a hole in a stream that was
 // flowing, which is a question about the data rather than about how long the
 // series lives. Folding it in would answer that question by assumption.
+// roundFiledUnder is the reason a completed round is filed under: the reason
+// of its cause, except for a round whose cause is GAP_GUARD_WARMING. That
+// round answered whole; its reason is why an earlier round's gap opened the
+// guard it is still waiting on, and filed under it every hole of the minute,
+// on every series of the Query Group, read as the backend failing then - a
+// Query Group whose one Plan was warming a guard read as a query failing
+// every round. It is filed under the cause.
+func roundFiledUnder(cause, reason string) string {
+	if slices.Contains(FiledCauses, cause) {
+		return cause
+	}
+	return reason
+}
+
+// FiledCauses are the completion causes a round is filed under in place of
+// its reason (roundFiledUnder): a vocabulary of its own beside the reason
+// catalogue, since these words reach the checks as a round's reason.
+var FiledCauses = []string{string(model.CauseGapGuardWarming)}
+
 func undecidableReason(reason string) bool {
 	return reason == "HISTORY_WARMING"
 }
@@ -1245,7 +1265,8 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// Every completion, healthy or not, goes on the ring the holes are
 		// read against: a healthy round is exactly the one a later hole at
 		// its minute has to be matched to.
-		rememberRound(state, trace.EvaluationTime, completion, observation.ProgressCompletionReason,
+		roundReason := roundFiledUnder(observation.ProgressCompletionCause, observation.ProgressCompletionReason)
+		rememberRound(state, trace.EvaluationTime, completion, roundReason,
 			observation.HistoryCoverage, observation.PrimaryInput)
 		// A round completed in this process speaks for the object; the
 		// summary it was restored from is history now.
@@ -1253,7 +1274,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		state.configChanged = state.completedRevisions.known() && state.seenRevisions.known() &&
 			state.seenRevisions != state.completedRevisions
 		state.completedRevisions = state.seenRevisions
-		tracker.noteReason(state, completion+"/"+observation.ProgressCompletionReason, at)
+		tracker.noteReason(state, completion+"/"+roundReason, at)
 		// The no-data run is kept apart from the anomaly run: an empty
 		// completion is healthy for the equation and ends any anomaly run, and
 		// a round with records -- degraded or not -- ends the empty run.
@@ -1353,14 +1374,14 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 		// would mark the run for the others -- so an object interrupted by a
 		// config edit would be filed as a fault, which is the shape of bug
 		// this flag exists to prevent, pointing the other way.
-		if !noActionReason(observation.ProgressCompletionReason) {
+		if !noActionReason(roundReason) {
 			state.sawSomethingWrong = true
 		}
 		state.degradedRuns++
 		state.currentKind = KindDegradedRun
 		state.reasonCode = completion
 		state.cause = observation.ProgressCompletionCause
-		state.causeReason = observation.ProgressCompletionReason
+		state.causeReason = roundReason
 		// A round whose reading the observer refused carries no windows, and
 		// that is not the same as a round with no windows short. It holds
 		// every run counter below as it stands -- neither extending a run

@@ -1,0 +1,41 @@
+// Tencent is pleased to support the open source community by making
+// 蓝鲸智云 - 监控平台 (BlueKing - Monitor) available.
+// Copyright (C) 2017-2025 Tencent. All rights reserved.
+// Licensed under the MIT License (the "License"); you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at http://opensource.org/licenses/MIT
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+// an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+
+package execution
+
+// PlanInputsWhole says whether every input of plan answered FULL and was
+// available this round - the PRIMARY input and every dependency. It is the
+// one judgement of "the Plan's input was whole": a round that meets it is one
+// a gap guard's warmup counts, and one on which a Level still held by a guard
+// is held only by the past.
+func PlanInputsWhole(inputs []NamedInputBinding, plan PlanIdentity) bool {
+	for _, binding := range inputs {
+		if binding.Consumer.Plan != plan {
+			continue
+		}
+		if binding.Completeness != CompletenessFull || binding.Disposition != AccessAvailable {
+			return false
+		}
+	}
+	return true
+}
+
+// UnknownIsGuardTail says whether an UNKNOWN Level outcome is only the tail of
+// an earlier gap: a standing guard held the Level for a reason an earlier
+// round left (outcome.GuardTail), and every input of the outcome's Plan
+// answered whole this round. Then nothing about this round is unknown; the
+// Level waits for the guard's warmup, and the reason it carries is why the
+// guard was opened, not what happened now.
+//
+// An outcome whose Plan had an incomplete input this round is not a tail,
+// even under a guard: whatever the guard's reason, this round has a failure
+// of its own, and that is what the Slot reports.
+func UnknownIsGuardTail(inputs []NamedInputBinding, outcome LevelOutcome) bool {
+	return outcome.Outcome == LevelOutcomeUnknown && outcome.GuardTail && PlanInputsWhole(inputs, outcome.Plan)
+}

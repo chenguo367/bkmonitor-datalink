@@ -367,6 +367,9 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 	for i, o := range tr.LevelOutcomes {
 		kind := execution.LevelOutcomeKind(o.Result)
 		reason := execution.ReasonCode(observability.ReasonNone)
+		// guardTail: the UNKNOWN below carries a standing guard's reason
+		// because of that guard alone, this round adding nothing of its own.
+		guardTail := false
 		// A recovery reached on a round whose own inputs were incomplete is
 		// held, and carries the reason of the guard this round proposes.
 		//
@@ -401,7 +404,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// dependency point or the EffectiveTime made it UNKNOWN. Only a
 			// record that converges the guard keeps its own local reason.
 			if guarded, found := durableGuardReasons[o.LevelID]; found && guardStaysActive(o, historyCompleteness[o.LevelID]) {
-				reason = guarded
+				reason, guardTail = guarded, true
 				// Unless this round has incomplete inputs of its own for the
 				// Level. Then the guard that ends up covering this outcome is
 				// the one this round proposes, carrying the fold of those
@@ -415,7 +418,7 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 				if folded, proposed := execution.RoundGuardReasonForLevel(
 					evaluationBindings(request), due.Identity, o.LevelID,
 				); proposed {
-					reason = folded
+					reason, guardTail = folded, false
 				}
 			}
 		}
@@ -423,7 +426,8 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 			// The result contract expects one envelope per record with a
 			// business outcome. A record the recovery gate held has RECOVERY
 			// outcomes and no envelope, and says so on each of them.
-			EnvelopeHeld: tr.RecoveryGate.Held && kind == execution.LevelOutcomeRecovery}
+			EnvelopeHeld: tr.RecoveryGate.Held && kind == execution.LevelOutcomeRecovery,
+			GuardTail:    guardTail}
 	}
 	// A Level the trigger would advance while its outcome is UNKNOWN records
 	// a business fact into a history the guard has not yet released. The
