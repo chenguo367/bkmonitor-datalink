@@ -76,7 +76,12 @@ func (fixture *cutoverStallFixture) seedLevelGuard(ctx context.Context, reason s
 // after every one of them. Until the first current round the persisted marker
 // is reseeded to one fresh Level scope with the given reason, so the first
 // current round meets exactly that.
-func (fixture *cutoverStallFixture) runCurrentDataRounds(ctx context.Context, reason string, rounds int, each func(round int, outcome execution.SlotExecutionResult)) {
+func (fixture *cutoverStallFixture) runCurrentDataRounds(
+	ctx context.Context,
+	reason string,
+	rounds int,
+	each func(round int, outcome execution.SlotExecutionResult, observed []observability.Observation),
+) {
 	t := fixture.t
 	t.Helper()
 	limits := fixture.production.dependencies.RecoveryLimits
@@ -120,7 +125,7 @@ func (fixture *cutoverStallFixture) runCurrentDataRounds(ctx context.Context, re
 		}
 		if slot+60 > at.Unix() && fixture.uqCalls.Load() > queriesBefore {
 			current++
-			each(current, outcome)
+			each(current, outcome, fixture.observed()[before:])
 		}
 	}
 	if !rewritten {
@@ -129,6 +134,17 @@ func (fixture *cutoverStallFixture) runCurrentDataRounds(ctx context.Context, re
 	if current < rounds {
 		t.Fatalf("ran %d current data rounds, want %d", current, rounds)
 	}
+}
+
+// committedCause is the completion cause and its reason the round's progress
+// was committed under.
+func committedCause(observed []observability.Observation) (string, string) {
+	for _, observation := range observed {
+		if observation.Stage == observability.StageProgressCommitted {
+			return string(observation.ProgressCompletionCause), string(observation.ProgressCompletionReason)
+		}
+	}
+	return "", ""
 }
 
 func newZeroSeriesGapFixture(t *testing.T) *cutoverStallFixture {
@@ -160,7 +176,7 @@ func TestAPlanMatchingNoSeriesClearsItsLevelGuardAfterTheRequiredWholeRounds(t *
 	if required < 2 {
 		t.Fatalf("RequiredFullSlots = %d, want at least 2 so both sides of the boundary are rounds", required)
 	}
-	fixture.runCurrentDataRounds(ctx, contract.ReasonQueryUnavailable, required, func(round int, _ execution.SlotExecutionResult) {
+	fixture.runCurrentDataRounds(ctx, contract.ReasonQueryUnavailable, required, func(round int, _ execution.SlotExecutionResult, _ []observability.Observation) {
 		observed, _, standing := fixture.levelGuard(ctx)
 		switch {
 		case round < required && !standing:
@@ -192,7 +208,7 @@ func TestASeriesThatReturnsDuringTheWarmupIsStillUnderTheGuard(t *testing.T) {
 		}
 		return []string{}
 	}
-	fixture.runCurrentDataRounds(ctx, contract.ReasonQueryUnavailable, required+1, func(round int, outcome execution.SlotExecutionResult) {
+	fixture.runCurrentDataRounds(ctx, contract.ReasonQueryUnavailable, required+1, func(round int, outcome execution.SlotExecutionResult, seen []observability.Observation) {
 		observed, _, standing := fixture.levelGuard(ctx)
 		if round < required && (!standing || int(observed) != round) {
 			t.Fatalf("round %d of %d (series back: %t): guard standing %t, observed %v, want standing at %d",
@@ -209,6 +225,15 @@ func TestASeriesThatReturnsDuringTheWarmupIsStillUnderTheGuard(t *testing.T) {
 				round, required, outcome.CompletionKind, outcome.ReasonCode)
 		case round > required && held:
 			t.Fatalf("round %d, after the guard cleared: still held: %s %s", round, outcome.CompletionKind, outcome.ReasonCode)
+		}
+		// The round answered whole, so what held the series is the guard's
+		// warmup and not this round's query: the cause says so, beside the
+		// guard's reason.
+		if returning && round <= required {
+			if cause, reason := committedCause(seen); cause != string(execution.CauseGapGuardWarming) || reason != contract.ReasonQueryUnavailable {
+				t.Fatalf("round %d of %d: committed under %q / %q, want %s / %s", round, required, cause, reason,
+					execution.CauseGapGuardWarming, contract.ReasonQueryUnavailable)
+			}
 		}
 		// The series comes back from the second round on: the first round
 		// is empty and counts, the rest evaluate the series under the guard.

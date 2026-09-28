@@ -2218,18 +2218,7 @@ func planCompletedFullEmpty(bindings []execution.NamedInputBinding, plan executi
 // So: FULL EMPTY as the completion judged it, and on top of that every binding
 // of this Plan whole and available, dependencies included.
 func emptySourceSlotIsWholeInput(bindings []execution.NamedInputBinding, plan execution.PlanIdentity) bool {
-	if !planCompletedFullEmpty(bindings, plan) {
-		return false
-	}
-	for _, binding := range bindings {
-		if binding.Consumer.Plan != plan {
-			continue
-		}
-		if binding.Completeness != execution.CompletenessFull || binding.Disposition != execution.AccessAvailable {
-			return false
-		}
-	}
-	return true
+	return planCompletedFullEmpty(bindings, plan) && execution.PlanInputsWhole(bindings, plan)
 }
 
 // completionGapMutationFor builds the Plan gap mutation for a set of

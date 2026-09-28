@@ -327,6 +327,10 @@ var failureFacets = map[string]facets{
 	// The window: the detection ran and could not decide.
 	"HISTORY_GAPPED":  {StageEvaluate, ClassUnlocated, ""},
 	"HISTORY_WARMING": {StageEvaluate, ClassUnlocated, ""},
+	// A Level held by a guard an earlier round's gap opened, on a round that
+	// answered whole: where it stops is evaluation, and what holds it is the
+	// guard's warmup, not a dependency.
+	"GAP_GUARD_WARMING": {StageEvaluate, ClassUnlocated, ""},
 
 	// The strategy's own configuration.
 	"CONFIG_DRIFT":            {StageConfig, ClassConfig, DependencyNone},
