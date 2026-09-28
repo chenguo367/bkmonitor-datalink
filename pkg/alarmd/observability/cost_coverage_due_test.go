@@ -1,0 +1,119 @@
+package observability
+
+import (
+	"context"
+	"testing"
+	"time"
+)
+
+// A Slot is due in a window when the first evaluation time at or after the
+// window's start completes by its end. The deadline landing exactly on the
+// end is due, a second later is not; the first evaluation time follows the
+// alignment; a short Plan's own completion offset is what it is given; and a
+// schedule nobody knows is due in every window.
+func TestASlotIsDueWhenItsDeadlineFallsInsideTheWindow(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		due        costDue
+		start, end int64
+		want       bool
+	}{
+		"deadline on the end":           {costDue{interval: 300}, 900, 1200, true},
+		"deadline a second past it":     {costDue{interval: 300}, 900, 1199, false},
+		"first time after an alignment": {costDue{interval: 60, alignment: 30}, 900, 990, true},
+		"aligned one second too late":   {costDue{interval: 60, alignment: 30}, 900, 989, false},
+		"an hour's in minutes":          {costDue{interval: 3600}, 900, 1500, false},
+		"a short Plan's own offset":     {costDue{interval: 10, offset: 30}, 900, 930, true},
+		"one second short of it":        {costDue{interval: 10, offset: 30}, 900, 929, false},
+		"no offset means the interval":  {costDue{interval: 60}, 900, 960, true},
+		"a schedule nobody knows":       {costDue{}, 900, 901, true},
+	} {
+		if got := testCase.due.dueIn(testCase.start, testCase.end); got != testCase.want {
+			t.Errorf("%s: dueIn(%d, %d) = %v, want %v", name, testCase.start, testCase.end, got, testCase.want)
+		}
+	}
+}
+
+// costDueFixture tracks two groups from before the window began: one on a
+// minute, due in every window, and one on an hour, due in none of these.
+// The window is two five-minute buckets, 900 to 1440.
+func costDueFixture(t *testing.T, groups ...CostGroup) (*CostSummary, *time.Time) {
+	t.Helper()
+	now := time.Unix(800, 0)
+	c := NewCostSummary(CostSummaryOptions{ProcessID: "process-a", Window: 5 * time.Minute, GroupCapacity: 8, PlanCapacity: 8,
+		MetadataBytes: 4096, TopN: 2, Now: func() time.Time { return now }})
+	c.Reconcile(groups, true)
+	now = time.Unix(1440, 0)
+	return c, &now
+}
+
+var (
+	costMinute = CostGroup{QueryGroupKey: "minute", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", Members: []CostPlanIdentity{costA},
+		Schedules: []CostSchedule{{Plan: costA, IntervalSeconds: 60, CompletionOffsetSeconds: 60}}}
+	costHourly = CostGroup{QueryGroupKey: "hourly", QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", Members: []CostPlanIdentity{costB},
+		Schedules: []CostSchedule{{Plan: costB, IntervalSeconds: 3600, CompletionOffsetSeconds: 3600}}}
+)
+
+// ran reports one Slot of the group and, when a Plan is named, that Plan's
+// evaluation, all timed.
+func ran(c *CostSummary, group string, plan CostPlanIdentity) {
+	trace := TraceFields{QueryGroupKey: group, QueryRevision: "q", SnapshotRevision: "s", ScheduleRevision: "r", EvaluationTime: 1320}
+	c.Observe(context.Background(), Observation{Stage: StageSlotCompleted, Result: ResultSuccess, Duration: time.Millisecond, DurationKnown: true, Trace: trace})
+	if plan.valid() {
+		c.Observe(context.Background(), Observation{Stage: StageEvaluationCompleted, Result: ResultSuccess, Duration: time.Millisecond, DurationKnown: true,
+			EvaluationOwner: plan, EvaluationRecordsKnown: true, Trace: trace})
+	}
+}
+
+// A window is incomplete for a group it should have seen and did not - not
+// for one whose next Slot is not due in it. On a live deployment every
+// replica tracked a handful of groups on intervals longer than the window,
+// had no observation of them, and so read incomplete in every window; the
+// flag said nothing. A group or a Plan that was due and left nothing in the
+// window is still what makes it incomplete.
+func TestAWindowIsIncompleteForWhatWasDueInItAndWentUnseen(t *testing.T) {
+	c, now := costDueFixture(t, costMinute, costHourly)
+	ran(c, "minute", costA)
+	c.Publish(*now)
+	coverage := c.Snapshot().Coverage
+	if coverage.TrackedGroups != 2 || coverage.ObservedGroups != 1 || coverage.DueGroups != 1 || coverage.UnobservedDueGroups != 0 ||
+		coverage.DuePlans != 1 || coverage.UnobservedDuePlans != 0 || coverage.Incomplete {
+		t.Fatalf("the hourly group not due in the window = %+v, want complete: nothing due went unseen", coverage)
+	}
+
+	c, now = costDueFixture(t, costMinute, costHourly)
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.UnobservedDueGroups != 1 || coverage.UnobservedDuePlans != 1 || !coverage.Incomplete {
+		t.Fatalf("the minute group missing from its window = %+v, want it counted and the window incomplete", coverage)
+	}
+
+	c, now = costDueFixture(t, costMinute, costHourly)
+	ran(c, "minute", CostPlanIdentity{})
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.UnobservedDueGroups != 0 || coverage.UnobservedDuePlans != 1 || !coverage.Incomplete {
+		t.Fatalf("a due Plan whose group ran without evaluating it = %+v, want the Plan counted and the window incomplete", coverage)
+	}
+
+	// A Plan the roster carried two schedules for - a split Plan, one per
+	// piece - is read by the one due most often: it is due in this window
+	// when either piece is, and unseen it makes the window incomplete.
+	split := costHourly
+	split.Schedules = []CostSchedule{costHourly.Schedules[0], {Plan: costB, IntervalSeconds: 60, CompletionOffsetSeconds: 60}}
+	c, now = costDueFixture(t, costMinute, split)
+	ran(c, "minute", costA)
+	ran(c, "hourly", CostPlanIdentity{})
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.DuePlans != 2 || coverage.UnobservedDuePlans != 1 || !coverage.Incomplete {
+		t.Fatalf("a split Plan with a piece due, unevaluated = %+v, want it due and the window incomplete", coverage)
+	}
+
+	// A group the roster carried no schedule for is due in every window: a
+	// missing schedule does not read as nothing expected.
+	unknown := costHourly
+	unknown.Schedules = nil
+	c, now = costDueFixture(t, costMinute, unknown)
+	ran(c, "minute", costA)
+	c.Publish(*now)
+	if coverage := c.Snapshot().Coverage; coverage.DueGroups != 2 || coverage.UnobservedDueGroups != 1 || !coverage.Incomplete {
+		t.Fatalf("a group with no schedule, unseen = %+v, want it due and the window incomplete", coverage)
+	}
+}

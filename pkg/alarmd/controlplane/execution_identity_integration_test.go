@@ -11,6 +11,7 @@ package controlplane_test
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"testing"
 	"time"
@@ -87,6 +88,11 @@ func TestTheExecutionIdentityIsTheCachedSegmentASlotIsFrozenFrom(t *testing.T) {
 	}
 	if len(want) == 0 || !sameIdentities(identity.Plans, want) {
 		t.Fatalf("identity plans = %v, want the Segment's activated Plans %v", identity.Plans, want)
+	}
+	// And when each of them is due, as the Segment froze it: what a reader of
+	// a window needs to know which of them it should have seen.
+	if len(identity.Schedules) != len(open.Plans) || !reflect.DeepEqual(identity.Schedules, open.Plans) {
+		t.Fatalf("identity schedules = %+v, want the Segment's frozen Plan schedules %+v", identity.Schedules, open.Plans)
 	}
 
 	// A lease at another revision, and a time no Segment holds, have none.

@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -279,6 +280,7 @@ func (stream *streamedExecution) evaluateNoData(
 		// cannot disagree about which Plans this Slot had. A Plan seen here and
 		// missing from the outcomes was dropped between the two.
 		stream.noDataPlansSeen++
+		started := time.Now()
 		round, err := stream.noDataRoundFor(due, seriesDimensionsFor(prepared, due.Identity),
 			stream.noDataCompleteness(due))
 		if err != nil {
@@ -297,7 +299,7 @@ func (stream *streamedExecution) evaluateNoData(
 			// said must not record that it said them: the next round would
 			// count the absence from a checkpoint no alert was ever raised
 			// against.
-			stream.observeNoDataLocalFailure(ctx, due, outcome, err)
+			stream.observeNoDataLocalFailure(ctx, started, due, outcome, err)
 			stream.recordNoDataOutcome(ctx, due, outcome)
 			continue
 		}

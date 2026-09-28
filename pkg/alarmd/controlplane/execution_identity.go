@@ -31,6 +31,11 @@ type ExecutionIdentity struct {
 	QueryRevision    execution.QueryRevision
 	ScheduleRevision execution.ScheduleRevision
 	Plans            []execution.PlanIdentity
+
+	// Schedules are the Segment's frozen schedules of those Plans: when each
+	// of them is due, which a reader of what ran in a window needs to know
+	// what should have.
+	Schedules []execution.FrozenPlanSchedule
 }
 
 // CachedExecutionIdentity answers from the timeline this process already
@@ -70,6 +75,11 @@ func (repository *RedisCatalogRepository) CachedExecutionIdentity(
 			identity.Plans = append(identity.Plans, plan)
 		}
 		sort.Slice(identity.Plans, func(i, j int) bool { return lessPlanIdentity(identity.Plans[i], identity.Plans[j]) })
+		for _, schedule := range segment.Schedule.Plans {
+			if _, current := seen[schedule.Identity]; current {
+				identity.Schedules = append(identity.Schedules, schedule)
+			}
+		}
 		return identity, true
 	}
 	return ExecutionIdentity{}, false
