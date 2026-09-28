@@ -561,6 +561,40 @@ func (fact FrozenSlotContractFact) DeriveDuePlanSetDigest() (DuePlanSetDigest, e
 }
 
 func (fact FrozenSlotContractFact) Validate(request FreezeSlotContractRequest) error {
+	if err := fact.validateAgainst(request); err != nil {
+		return err
+	}
+	digest, err := fact.DeriveDuePlanSetDigest()
+	if err != nil {
+		return err
+	}
+	if digest != fact.Contract.DuePlanSetDigest {
+		return errors.New("alarmd execution: frozen due Plan digest cannot be independently reproduced")
+	}
+	return nil
+}
+
+// SealFrozenSlotContractFact is how the freeze that builds a fact finishes
+// it: the due Plan set digest derived here, once, from the fact's own due
+// Plans and requirements, and every other rule Validate holds a fact to. The
+// freeze used to derive the digest, then validate the fact, which derived it
+// again from the same slices a line later -- the whole of the due Plans'
+// canonical encoding twice per Slot, for a comparison that could not fail.
+// Validate stays what a fact arriving from anywhere else is held to.
+func SealFrozenSlotContractFact(fact FrozenSlotContractFact, request FreezeSlotContractRequest) (FrozenSlotContractFact, error) {
+	digest, err := fact.DeriveDuePlanSetDigest()
+	if err != nil {
+		return FrozenSlotContractFact{}, err
+	}
+	fact.Contract.DuePlanSetDigest = digest
+	if err := fact.validateAgainst(request); err != nil {
+		return FrozenSlotContractFact{}, err
+	}
+	return fact, nil
+}
+
+// validateAgainst is every rule Validate holds a fact to but the digest.
+func (fact FrozenSlotContractFact) validateAgainst(request FreezeSlotContractRequest) error {
 	if err := request.Validate(); err != nil {
 		return err
 	}
@@ -602,13 +636,6 @@ func (fact FrozenSlotContractFact) Validate(request FreezeSlotContractRequest) e
 			return errors.New("alarmd execution: duplicate frozen due Plan fact")
 		}
 		seen[due.Identity] = struct{}{}
-	}
-	digest, err := fact.DeriveDuePlanSetDigest()
-	if err != nil {
-		return err
-	}
-	if digest != fact.Contract.DuePlanSetDigest {
-		return errors.New("alarmd execution: frozen due Plan digest cannot be independently reproduced")
 	}
 	return nil
 }

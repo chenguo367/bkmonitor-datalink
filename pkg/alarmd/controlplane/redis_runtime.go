@@ -2462,17 +2462,12 @@ func (runtime *RedisCatalogRuntime) freezeSlotContract(ctx context.Context, requ
 	if err != nil {
 		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureInputClosure, err)
 	}
-	digest, err := execution.DeriveDuePlanSetDigest(duePlans, requirements)
-	if err != nil {
-		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
-	}
-	fact := execution.FrozenSlotContractFact{Contract: execution.FrozenExecutionContractRef{
+	fact, err := execution.SealFrozenSlotContractFact(execution.FrozenSlotContractFact{Contract: execution.FrozenExecutionContractRef{
 		Slot:             execution.SlotIdentity{QueryGroup: request.QueryGroup, EvaluationTime: request.EvaluationTime},
 		SnapshotRevision: schedule.Segment.Publication.SnapshotRevision, QueryRevision: schedule.Segment.QueryRevision,
 		ScheduleRevision: request.ScheduleRevision, ScheduleSegmentStart: request.ScheduleSegmentStart,
-		DuePlanSetDigest: digest,
-	}, DuePlans: duePlans, Requirements: requirements}
-	if err := fact.Validate(request); err != nil {
+	}, DuePlans: duePlans, Requirements: requirements}, request)
+	if err != nil {
 		return execution.FrozenSlotContractFact{}, freezeSlotContractError(FreezeSlotFailureContractValidation, err)
 	}
 	return fact, nil
