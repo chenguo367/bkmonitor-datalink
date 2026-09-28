@@ -3344,9 +3344,12 @@ type GenerationRetention struct {
 	ByPlan map[PlanIdentity][]StateRetentionRequirement
 	// Unknown says the writer has no compiled Plan to read the retention from
 	// -- a round that ran no query writes an activated Plan's marker from its
-	// activation record alone -- and the key is written at the floor, as it
-	// was before this was carried. Said, rather than being what an empty map
-	// means, so a writer that forgot the retention is refused instead.
+	// activation record alone -- and the key is written at the store's
+	// ceiling, which no Plan's own lifetime exceeds. The next round that
+	// evaluates the Plan writes the marker again for the Plan's own lifetime,
+	// so only a marker no round evaluates after keeps the longer life. Said,
+	// rather than being what an empty map means, so a writer that forgot the
+	// retention is refused instead.
 	Unknown bool
 }
 

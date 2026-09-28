@@ -359,6 +359,10 @@ func (stream *streamedExecution) noDataCompleteness(due execution.DuePlan) execu
 // that could not store it reports from the memory it had, which is the previous
 // round's, and the round after that stores again. Failing the Slot over it
 // would throw away evaluations that were already correct and already sent.
+//
+// A memory for a Plan this round does not have, or one whose retention cannot
+// be derived, is not a refusal: nothing was asked of the store, the wiring
+// handed it a write it cannot place, and that does fail the Slot.
 func (coordinator *SlotExecutionCoordinator) applyNoDataMemory(
 	ctx context.Context, request execution.SlotExecutionRequest, duePlans []execution.DuePlan,
 	mutations []execution.PlanNoDataMutation,

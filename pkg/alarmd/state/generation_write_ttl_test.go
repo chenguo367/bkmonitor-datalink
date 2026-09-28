@@ -193,7 +193,8 @@ func TestAKeyWrittenAfterAnAskOutlivesTheGatesSilence(t *testing.T) {
 
 // A write that does not say what its Plan's keys live for is refused whole,
 // on both paths, rather than written at a guess; a writer that says it has no
-// compiled Plan writes at the floor, as before.
+// compiled Plan writes at the ceiling, which the next evaluated round's write
+// takes back to the Plan's own lifetime.
 func TestAGenerationWriteWithoutItsPlansRetentionIsRefused(t *testing.T) {
 	store := generationStore(t, &casMemoryBackend{values: make(map[string][]byte)})
 	_, gapErr := store.ApplyGap(context.Background(), execution.GapGuardApplyRequest{
@@ -222,7 +223,55 @@ func TestAGenerationWriteWithoutItsPlansRetentionIsRefused(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	ceiling := 30 * 24 * time.Hour
+	if got := backend.writeTTLs[key]; got != ceiling {
+		t.Fatalf("a marker written without a compiled Plan lives %s, want the ceiling %s", got, ceiling)
+	}
+
+	// The next round that evaluates the Plan writes it for the Plan's own
+	// lifetime: the ceiling stays only on a marker nothing evaluates after.
+	retention := retentionEvery(30, time.Hour)
+	want := renewedTo(t, retention)
+	if want <= GenerationScopedFloor || want >= ceiling {
+		t.Fatalf("setup: the Plan's lifetime %s is not between the floor and the ceiling", want)
+	}
+	result, err := generationStore(t, backend).ApplyGap(context.Background(), execution.GapGuardApplyRequest{
+		Contract: frozenRef(), Items: []execution.PlanGapMutation{gapMarkerMutation(t, 120, 1)}, Retention: planRetention(retention),
+	})
+	if err != nil || result.Items[0].Status != execution.GapGuardApplied {
+		t.Fatalf("the evaluated round's write = %+v, %v", result.Items, err)
+	}
+	if got := backend.writeTTLs[key]; got != want {
+		t.Fatalf("the marker the next evaluated round wrote lives %s, want the Plan's own %s", got, want)
+	}
+}
+
+// A store whose ceiling is under a day still writes a marker without a
+// compiled Plan for the floor: no generation-scoped key lives less.
+func TestAWriteWithoutACompiledPlanNeverGoesBelowTheFloor(t *testing.T) {
+	backend := &casMemoryBackend{values: make(map[string][]byte)}
+	router, err := NewFixedRouter("target", backend)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := NewExecutionStore(ExecutionStoreOptions{
+		Prefix: "alarmd", Router: router, MaxValueBytes: 4096, MaxItemsPerCall: 4,
+		MinTTL: time.Minute, MaxTTL: time.Hour, RestartMargin: time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := PlanGapKeyV2("alarmd", execution.PlanGapIdentity{Plan: stateIdentityV2().Plan, StateGeneration: "generation"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyGap(context.Background(), execution.GapGuardApplyRequest{
+		Contract: frozenRef(), Items: []execution.PlanGapMutation{gapMarkerMutation(t, 60, 0)},
+		Retention: execution.GenerationRetention{Unknown: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if got := backend.writeTTLs[key]; got != GenerationScopedFloor {
-		t.Fatalf("a marker written without a compiled Plan lives %s, want the floor", got)
+		t.Fatalf("a marker written without a compiled Plan under a one-hour ceiling lives %s, want the floor", got)
 	}
 }

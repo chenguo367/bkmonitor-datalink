@@ -90,7 +90,7 @@ func TestNoDataMemoryRoundTripsThroughTheStore(t *testing.T) {
 	}
 
 	mutation := noDataMutationV2(t, 0, execution.NoDataGroupMemory{GroupKey: "a", FirstAbsent: 940})
-	applied, err := store.ApplyNoData(ctx, execution.NoDataApplyRequest{Retention: execution.GenerationRetention{Unknown: true},
+	applied, err := store.ApplyNoData(ctx, execution.NoDataApplyRequest{Retention: planRetention(retentionEvery(5, time.Minute)),
 		Contract: frozenRef(), Items: []execution.PlanNoDataMutation{mutation},
 	})
 	if err != nil {

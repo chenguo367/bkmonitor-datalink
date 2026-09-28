@@ -1078,9 +1078,9 @@ func (coordinator *SlotExecutionCoordinator) applyActivatedPlanGaps(
 	extensions ...map[execution.PlanGapIdentity]*observability.GapExtensionFacts,
 ) (bool, error) {
 	allAlready := len(items) > 0
-	// A round that ran no query has no compiled Plan to read the retention
-	// from, only the activation record: the markers go at the floor, and the
-	// request says so.
+	// These markers are written from the activation record alone, which
+	// carries no retention: the request says so, and the store writes them
+	// for its ceiling, which outlives any Plan's next round.
 	err := coordinator.applyGapChunks(ctx, operation, contractRef, items, execution.GenerationRetention{Unknown: true}, "activated Plan gap guard",
 		func(item execution.GapGuardApplyItemResult) error {
 			if item.Status != execution.GapGuardAlreadyApplied {
