@@ -9,7 +9,10 @@
 
 package fleet
 
-import "sort"
+import (
+	"encoding/json"
+	"sort"
+)
 
 // Capacity is one replica's answer to "how close am I to my limits".
 //
@@ -102,6 +105,35 @@ type Capacity struct {
 	// Pulled is how much this replica actually read. Absent on a replica that
 	// does not report it.
 	Pulled *SeriesPull `json:"pulled,omitempty"`
+}
+
+// MarshalJSON keeps a measured zero on the wire. throttled_seconds and
+// memory_limit_hits are omitted while zero, which is right when nothing was
+// read and wrong when the flag beside them says something was: a reader told
+// "measured" and handed no value cannot tell "never throttled" from a field
+// this build does not send. The outer fields shadow the embedded ones of the
+// same name, and decoding needs no counterpart. memory_oom_kills keeps its
+// omission: no flag says it was read, and cgroup v1 has no kill count.
+func (capacity Capacity) MarshalJSON() ([]byte, error) {
+	type wire Capacity
+	return json.Marshal(struct {
+		wire
+		ThrottledSeconds *float64 `json:"throttled_seconds,omitempty"`
+		MemoryLimitHits  *uint64  `json:"memory_limit_hits,omitempty"`
+	}{
+		wire:             wire(capacity),
+		ThrottledSeconds: measured(capacity.ThrottledKnown, capacity.ThrottledSeconds),
+		MemoryLimitHits:  measured(capacity.MemoryLimitKnown, capacity.MemoryLimitHits),
+	})
+}
+
+// measured is a counter as the wire carries it: present whenever it was read,
+// even at zero, and otherwise present only when it is not zero, as before.
+func measured[T float64 | uint64](known bool, value T) *T {
+	if !known && value == 0 {
+		return nil
+	}
+	return &value
 }
 
 // Rotation is one pass of the dispatcher over everything a replica owns.
@@ -218,6 +250,23 @@ type CapacityView struct {
 	// running different limits is a real condition -- a half-finished rollout --
 	// and averaging it would hide exactly the thing worth seeing.
 	Disagreement []string `json:"disagreement,omitempty"`
+}
+
+// MarshalJSON keeps a measured zero on the wire, for the same reason as
+// Capacity's: the deployment's throttled_known and memory_limit_known each
+// hold only when every replica measured, and then the summed count is a
+// reading even when it is zero.
+func (capacity CapacityView) MarshalJSON() ([]byte, error) {
+	type wire CapacityView
+	return json.Marshal(struct {
+		wire
+		ThrottledSeconds *float64 `json:"throttled_seconds,omitempty"`
+		MemoryLimitHits  *uint64  `json:"memory_limit_hits,omitempty"`
+	}{
+		wire:             wire(capacity),
+		ThrottledSeconds: measured(capacity.ThrottledKnown, capacity.ThrottledSeconds),
+		MemoryLimitHits:  measured(capacity.MemoryLimitKnown, capacity.MemoryLimitHits),
+	})
 }
 
 func aggregateCapacity(view *View, snapshots []Snapshot) {
