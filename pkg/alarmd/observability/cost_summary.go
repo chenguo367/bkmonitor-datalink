@@ -7,6 +7,7 @@ package observability
 
 import (
 	"context"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -51,11 +52,12 @@ type CostSummaryOptions struct {
 }
 
 // CostSummaryCapacityBytes estimates a conservative reservation, including two
-// rolling counters, map entries, reconciliation replacement, and cached/read
-// snapshots. Go allocator/map overhead varies: validate the reservation against
-// the deployment's measured allocations. All population/metadata limits are
-// supplied by the caller's resource budget; there is no permanent default cap.
-// The per-entry allowance includes map buckets and membership slice capacity;
+// rolling counters, map entries, reconciliation replacement, Publish's copy of
+// every tracked window, and cached/read snapshots. Go allocator/map overhead
+// varies: validate the reservation against the deployment's measured
+// allocations. All population/metadata limits are supplied by the caller's
+// resource budget; there is no permanent default cap. The per-entry allowance
+// includes map buckets and membership slice capacity;
 // BenchmarkCostSummaryReconcile measures the replacement generation as well.
 func CostSummaryCapacityBytes(o CostSummaryOptions) int64 {
 	if o.GroupCapacity <= 0 || o.PlanCapacity <= 0 || o.MetadataBytes <= 0 || o.TopN <= 0 {
@@ -65,7 +67,10 @@ func CostSummaryCapacityBytes(o CostSummaryOptions) int64 {
 	// Two scopes times the dimensions, TopN rows each.
 	rankingRows := int64(2 * len(costDimensions) * o.TopN)
 	rows := min(groups+plans, rankingRows)
-	return 2*(groups*(int64(unsafe.Sizeof(costGroupState{}))+256)+plans*(int64(unsafe.Sizeof(costPlanState{}))+256)+int64(o.MetadataBytes)) +
+	group := int64(unsafe.Sizeof(costGroupState{}) + unsafe.Sizeof(costAccount{}))
+	plan := int64(unsafe.Sizeof(costPlanState{}) + unsafe.Sizeof(costWindows{}))
+	return 2*(groups*(group+256)+plans*(plan+256)+int64(o.MetadataBytes)) +
+		(groups+plans)*int64(unsafe.Sizeof(costCopy{})) +
 		3*(rows*int64(unsafe.Sizeof(CostContributor{}))+plans*int64(unsafe.Sizeof(CostPlanIdentity{}))+rankingRows*8)
 }
 
@@ -146,21 +151,92 @@ func (w *costWindows) rotate(epoch int64) {
 
 type costPlanState struct {
 	identity CostPlanIdentity
-	windows  costWindows
-	since    time.Time
+	// windows is guarded by the group's account, and carried by pointer
+	// across a reconciliation that keeps both the group and the Plan.
+	windows *costWindows
+	since   time.Time
+}
+
+// costAccount is one Query Group's windows and the lock that guards them
+// and its Plans'. It is the only lock Observe takes, so an observation can be
+// lost only to another holder of the same group's account, and every other
+// holder holds it for a copy of that one group's windows. A reconciliation
+// that keeps the group's revisions hands the new state the same account,
+// which is how an observation made against the roster it replaced still
+// lands in the counters that are read.
+type costAccount struct {
+	mu      sync.Mutex
+	windows costWindows
 }
 
 type costGroupState struct {
 	group   CostGroup
 	plans   map[CostPlanIdentity]*costPlanState
-	windows costWindows
+	account *costAccount
 	since   time.Time
 }
 
+// costScope is one reconciliation's roster. It is stored whole and never
+// modified afterwards, so it is read without a lock.
+type costScope struct {
+	groups   map[string]*costGroupState
+	coverage CostCoverage
+}
+
+// costEventWindows counts process-level events by the window they happened
+// in, without a lock: the path that counts them is the one that could not,
+// or need not, take a group's account. Each slot is one word, the window's
+// number in the high half and its count in the low, so a count is never read
+// under another window's number. Four slots, where two are read, leave a
+// late add for a window long gone nothing to overwrite.
+type costEventWindows struct {
+	slots [4]atomic.Uint64
+}
+
+func (w *costEventWindows) add(epoch int64) {
+	slot, tag := &w.slots[epoch&3], uint32(epoch)
+	for {
+		v := slot.Load()
+		next := uint64(tag)<<32 | 1
+		switch held := uint32(v >> 32); {
+		case held == tag:
+			if uint32(v) == ^uint32(0) {
+				return
+			}
+			next = v + 1
+		case int32(tag-held) < 0:
+			// A window older than the one the slot already holds.
+			return
+		}
+		if slot.CompareAndSwap(v, next) {
+			return
+		}
+	}
+}
+
+func (w *costEventWindows) count(epoch int64) uint64 {
+	v := w.slots[epoch&3].Load()
+	if uint32(v>>32) != uint32(epoch) {
+		return 0
+	}
+	return uint64(uint32(v))
+}
+
+// window is the count over the window the reading is for and the one
+// before it, as the scalar windows are read.
+func (w *costEventWindows) window(epoch int64) uint64 {
+	return w.count(epoch) + w.count(epoch-1)
+}
+
 type CostCoverage struct {
-	// ContentionDroppedTotal is process cumulative, not assigned to a guessed
-	// event window. Once contention loses facts, completeness stays conservative.
+	// ContentionDroppedTotal is the process's cumulative count of
+	// observations lost to a held account, a counter for rates.
+	// ContentionDropped is the part of it in this reading's window, counted
+	// by the window each loss happened in: it is what makes the window
+	// incomplete, so one loss marks the windows it fell in and not every
+	// window after it.
 	ContentionDroppedTotal  uint64 `json:"contention_dropped_total"`
+	ContentionDropped       uint64 `json:"contention_dropped"`
 	CatalogComplete         bool   `json:"catalog_complete"`
 	TotalGroups             int    `json:"total_groups"`
 	TrackedGroups           int    `json:"tracked_groups"`
@@ -248,32 +324,67 @@ type CostSnapshot struct {
 // or snapshots: rereads cannot double count, while genuine same-Slot retries
 // (including different owners) remain separate attempts. No run/series set is
 // retained. Reconcile and Publish belong to existing control/report ticks.
+//
+// Observe takes one lock, the account of the group it counts for, and
+// nothing that Reconcile, Publish, Snapshot or RetainedPeaks does in
+// proportion to the roster happens under it: Reconcile builds the next
+// roster aside and stores it whole, Publish copies each group's windows
+// under that group's account and ranks the copy, and Snapshot reads a
+// published snapshot nobody modifies.
 type CostSummary struct {
-	mu       sync.Mutex
-	options  CostSummaryOptions
-	enabled  bool
-	groups   map[string]*costGroupState
-	coverage CostCoverage
-	dropped  costWindows
-	// retained holds the process-level refusal counts of the retained-byte
-	// budget and, once a completion row has carried it, the pool's size.
-	retained          costWindows
-	retainedLimit     uint64
-	snapshot          CostSnapshot
+	options CostSummaryOptions
+	enabled bool
+	scope   atomic.Pointer[costScope]
+	// reconciling and publishing order the maintenance calls among
+	// themselves; Observe takes neither.
+	reconciling sync.Mutex
+	publishing  sync.Mutex
+	// copies is Publish's copy of every tracked window, kept for the next
+	// Publish so the copy is not an allocation every tick.
+	copies   []costCopy
+	snapshot atomic.Pointer[CostSnapshot]
+	// untracked, the retained-byte refusals and contention are counted by
+	// window at the process level; retainedLimit is the pool's size once a
+	// completion row has carried it.
+	untracked         costEventWindows
+	hardStops         costEventWindows
+	shareStops        costEventWindows
+	contention        costEventWindows
+	retainedLimit     atomic.Uint64
 	contentionDropped atomic.Uint64
+	// rankingStarted, when set, is called by Publish between the copy and
+	// the ranking; a test holds the ranking there.
+	rankingStarted func()
+	// yield is what an observation does between its two tries at a held
+	// account: runtime.Gosched, which a test replaces to act at that moment.
+	yield func()
+}
+
+// lockAccount takes an account for an observation, yielding once to a holder
+// before giving up. Every holder holds it for one group's copy or one
+// observation's addition, so a holder found at the first try has almost
+// always let go by the second; what is lost is lost to a holder that is
+// itself held up. It never waits for more than the one yield.
+func (c *CostSummary) lockAccount(account *costAccount) bool {
+	if account.mu.TryLock() {
+		return true
+	}
+	c.yield()
+	return account.mu.TryLock()
 }
 
 func NewCostSummary(o CostSummaryOptions) *CostSummary {
 	if o.Now == nil {
 		o.Now = time.Now
 	}
-	c := &CostSummary{options: o, enabled: o.ProcessID != "" && o.Window > 0 && CostSummaryCapacityBytes(o) > 0}
-	c.snapshot = CostSnapshot{Enabled: c.enabled, ProcessID: o.ProcessID, Scope: "process_observed_candidates", CapacityBytesEstimated: CostSummaryCapacityBytes(o)}
-	c.snapshot.Coverage.Incomplete = true
+	c := &CostSummary{options: o, enabled: o.ProcessID != "" && o.Window > 0 && CostSummaryCapacityBytes(o) > 0, yield: runtime.Gosched}
+	snapshot := &CostSnapshot{Enabled: c.enabled, ProcessID: o.ProcessID, Scope: "process_observed_candidates", CapacityBytesEstimated: CostSummaryCapacityBytes(o)}
+	snapshot.Coverage.Incomplete = true
 	if !c.enabled {
-		c.snapshot.DisabledReason = "resource_budget_or_process_identity_missing"
-		c.snapshot.Coverage.Incomplete = true
+		snapshot.DisabledReason = "resource_budget_or_process_identity_missing"
+		snapshot.Coverage.Incomplete = true
 	}
+	c.snapshot.Store(snapshot)
 	return c
 }
 
@@ -285,8 +396,12 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 	if c == nil || !c.enabled {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.reconciling.Lock()
+	defer c.reconciling.Unlock()
+	var previous map[string]*costGroupState
+	if scope := c.scope.Load(); scope != nil {
+		previous = scope.groups
+	}
 	coverage := CostCoverage{CatalogComplete: complete, TotalGroups: len(groups)}
 	next := make(map[string]*costGroupState, min(len(groups), c.options.GroupCapacity))
 	now := c.options.Now()
@@ -299,12 +414,13 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 		if _, exists := next[input.QueryGroupKey]; exists {
 			continue
 		}
-		old := c.groups[input.QueryGroupKey]
+		old := previous[input.QueryGroupKey]
 		state := &costGroupState{since: now, plans: make(map[CostPlanIdentity]*costPlanState)}
 		if old != nil && old.group.QueryRevision == input.QueryRevision && old.group.SnapshotRevision == input.SnapshotRevision && old.group.ScheduleRevision == input.ScheduleRevision {
-			state.windows, state.since = old.windows, old.since
+			state.account, state.since = old.account, old.since
 		} else {
 			old = nil
+			state.account = &costAccount{}
 		}
 		state.group = CostGroup{QueryGroupKey: strings.Clone(input.QueryGroupKey), QueryRevision: strings.Clone(input.QueryRevision), SnapshotRevision: strings.Clone(input.SnapshotRevision), ScheduleRevision: strings.Clone(input.ScheduleRevision), TotalMembers: len(input.Members)}
 		coverage.MetadataBytes += bytes
@@ -320,6 +436,8 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 			plan := &costPlanState{identity: identity, since: now}
 			if old != nil && old.plans[member] != nil {
 				plan.windows, plan.since = old.plans[member].windows, old.plans[member].since
+			} else {
+				plan.windows = &costWindows{}
 			}
 			state.plans[identity] = plan
 			state.group.Members = append(state.group.Members, identity)
@@ -330,11 +448,13 @@ func (c *CostSummary) Reconcile(groups []CostGroup, complete bool) {
 	}
 	coverage.TrackedGroups = len(next)
 	coverage.Incomplete = !complete || coverage.TrackedGroups != coverage.TotalGroups || coverage.TrackedPlans != coverage.TotalPlans
-	c.groups, c.coverage = next, coverage
+	c.scope.Store(&costScope{groups: next, coverage: coverage})
 }
 
 // Observe never waits for another observer, reconciliation, publication, or an
-// API read. Contention loses only observability facts and is explicitly counted.
+// API read. Contention loses only observability facts and is explicitly
+// counted; it is contention for one group's account, which the maintenance
+// calls hold for a copy of that group's windows and no longer.
 func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 	if c == nil || !c.enabled {
 		return
@@ -351,16 +471,15 @@ func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 	trace := mergeTraceFields(o.Trace, TraceFieldsFromContext(ctx))
 	now := c.options.Now()
 	epoch := now.UnixNano() / int64(c.options.Window)
-	if !c.mu.TryLock() {
-		c.contentionDropped.Add(1)
-		return
-	}
-	defer c.mu.Unlock()
 	// Counted where it is raised, before the object lookup: a refusal on an
 	// object this summary does not track is still a refusal of this pool.
 	if o.Stage == StageResourceHard {
-		c.retained.rotate(epoch)
-		addRetainedStop(&c.retained.current, o)
+		switch string(o.ReasonCode) {
+		case contract.ReasonResourceHardStop:
+			c.hardStops.add(epoch)
+		case contract.ReasonQGBudgetShareExceeded:
+			c.shareStops.add(epoch)
+		}
 	}
 	// Learned only from a row that carries it: a completion whose stream was
 	// never built reports the zero account, and a zero read as the pool would
@@ -368,22 +487,31 @@ func (c *CostSummary) Observe(ctx context.Context, o Observation) {
 	// very round a Slot failed to start. Under real configuration the pool is
 	// never zero, so zero can only be that row.
 	if usage := o.SlotBudgetUsage; usage != nil && usage.RetainedBytesLimit > 0 {
-		c.retainedLimit = usage.RetainedBytesLimit
+		c.retainedLimit.Store(usage.RetainedBytesLimit)
 	}
-	g := c.groups[trace.QueryGroupKey]
+	var g *costGroupState
+	if scope := c.scope.Load(); scope != nil {
+		g = scope.groups[trace.QueryGroupKey]
+	}
 	if g == nil || (trace.SnapshotRevision != "" && trace.SnapshotRevision != g.group.SnapshotRevision) || (trace.QueryRevision != "" && trace.QueryRevision != g.group.QueryRevision) || (trace.ScheduleRevision != "" && trace.ScheduleRevision != g.group.ScheduleRevision) {
-		c.dropped.rotate(epoch)
-		c.dropped.current.Observations++
+		c.untracked.add(epoch)
 		return
 	}
-	g.windows.rotate(epoch)
-	addCost(&g.windows.current, o, trace, now)
+	account := g.account
+	if !c.lockAccount(account) {
+		c.contentionDropped.Add(1)
+		c.contention.add(epoch)
+		return
+	}
+	defer account.mu.Unlock()
+	account.windows.rotate(epoch)
+	addCost(&account.windows.current, o, trace, now)
 	if o.Stage == StageEvaluationCompleted {
 		if p := g.plans[o.EvaluationOwner]; o.EvaluationOwner.valid() && p != nil {
 			p.windows.rotate(epoch)
 			addCost(&p.windows.current, o, trace, now)
 		} else {
-			g.windows.current.UnattributedEvaluations++
+			account.windows.current.UnattributedEvaluations++
 		}
 	}
 }
@@ -524,36 +652,68 @@ func costRank(w costWindows, dimension int) int64 {
 	}
 }
 
+// costCopy is one tracked object's windows as Publish copied them under its
+// group's account, beside the object they belong to, whose identity does not
+// change once its roster is stored.
+type costCopy struct {
+	group   *costGroupState
+	plan    *costPlanState
+	windows costWindows
+}
+
 type costCandidate struct {
-	group *costGroupState
-	plan  *costPlanState
+	copy  *costCopy
 	value int64
 }
 
 // Publish computes bounded candidate rankings once on the existing report tick.
 // Snapshot only reads this cache. No Redis, JSON, series copies, or I/O occurs
 // here or on Observe. Unobserved catalog members are not measured-zero rows.
+//
+// Each group's windows, its own and its Plans', are rotated and copied under
+// the group's account, one group at a time; the coverage, the rankings and
+// the rows are made from the copy with no account held. Ranking under a lock
+// Observe takes is what lost observations: the ranking is in proportion to
+// the roster, and every observation that arrived while it ran was dropped.
 func (c *CostSummary) Publish(now time.Time) {
 	if c == nil || !c.enabled {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.publishing.Lock()
+	defer c.publishing.Unlock()
 	epoch := now.UnixNano() / int64(c.options.Window)
 	start := time.Unix(0, epoch*int64(c.options.Window))
-	snapshot := CostSnapshot{Enabled: true, ProcessID: c.options.ProcessID, Scope: "process_observed_candidates", GeneratedAt: now, WindowStart: start.Add(-c.options.Window), CurrentWindowStart: start, WindowEnd: now, CapacityBytesEstimated: CostSummaryCapacityBytes(c.options), Coverage: c.coverage}
-	c.dropped.rotate(epoch)
-	snapshot.Coverage.UntrackedObservations = c.dropped.current.Observations + c.dropped.previous.Observations
+	snapshot := CostSnapshot{Enabled: true, ProcessID: c.options.ProcessID, Scope: "process_observed_candidates", GeneratedAt: now, WindowStart: start.Add(-c.options.Window), CurrentWindowStart: start, WindowEnd: now, CapacityBytesEstimated: CostSummaryCapacityBytes(c.options)}
+	copies := c.copies[:0]
+	if scope := c.scope.Load(); scope != nil {
+		snapshot.Coverage = scope.coverage
+		for _, g := range scope.groups {
+			g.account.mu.Lock()
+			g.account.windows.rotate(epoch)
+			copies = append(copies, costCopy{group: g, windows: g.account.windows})
+			for _, p := range g.plans {
+				p.windows.rotate(epoch)
+				copies = append(copies, costCopy{group: g, plan: p, windows: *p.windows})
+			}
+			g.account.mu.Unlock()
+		}
+	}
+	c.copies = copies
+	if c.rankingStarted != nil {
+		c.rankingStarted()
+	}
+	snapshot.Coverage.UntrackedObservations = c.untracked.window(epoch)
 	snapshot.Coverage.ContentionDroppedTotal = c.contentionDropped.Load()
+	snapshot.Coverage.ContentionDropped = c.contention.window(epoch)
 	var rankings [2 * len(costDimensions)][]costCandidate
-	add := func(g *costGroupState, p *costPlanState, w costWindows) {
+	add := func(entry *costCopy) {
 		for dim := range costDimensions {
-			value := costRank(w, dim)
+			value := costRank(entry.windows, dim)
 			if value <= 0 {
 				continue
 			}
-			candidate := costCandidate{g, p, value}
-			if p != nil {
+			candidate := costCandidate{entry, value}
+			if entry.plan != nil {
 				dim += len(costDimensions)
 			}
 			rows := rankings[dim]
@@ -574,81 +734,85 @@ func (c *CostSummary) Publish(now time.Time) {
 			rankings[dim] = rows
 		}
 	}
-	for _, g := range c.groups {
-		g.windows.rotate(epoch)
-		if g.windows.current.Observations+g.windows.previous.Observations > 0 {
-			snapshot.Coverage.ObservedGroups++
-		}
-		if g.since.After(snapshot.WindowStart) {
-			snapshot.Coverage.PartialWindowGroups++
-		}
-		for _, s := range [2]CostScalars{g.windows.current, g.windows.previous} {
-			snapshot.Coverage.UnknownWallObservations += s.EvaluationWall.Unknown + s.StateWall.Unknown + s.QueryWall.Unknown + s.RunWall.Unknown
-		}
-		snapshot.Coverage.UnattributedEvaluations += g.windows.current.UnattributedEvaluations + g.windows.previous.UnattributedEvaluations
-		if peak := max(g.windows.current.RetainedBytesPeak, g.windows.previous.RetainedBytesPeak); peak > 0 {
-			snapshot.Retained.PeakSumBytes += peak
-			snapshot.Retained.GroupsWithPeak++
-		}
-		add(g, nil, g.windows)
-		for _, p := range g.plans {
-			p.windows.rotate(epoch)
-			if p.windows.current.Observations+p.windows.previous.Observations > 0 {
+	for i := range copies {
+		entry := &copies[i]
+		w := entry.windows
+		if entry.plan == nil {
+			if w.current.Observations+w.previous.Observations > 0 {
+				snapshot.Coverage.ObservedGroups++
+			}
+			if entry.group.since.After(snapshot.WindowStart) {
+				snapshot.Coverage.PartialWindowGroups++
+			}
+			for _, s := range [2]CostScalars{w.current, w.previous} {
+				snapshot.Coverage.UnknownWallObservations += s.EvaluationWall.Unknown + s.StateWall.Unknown + s.QueryWall.Unknown + s.RunWall.Unknown
+			}
+			snapshot.Coverage.UnattributedEvaluations += w.current.UnattributedEvaluations + w.previous.UnattributedEvaluations
+			if peak := max(w.current.RetainedBytesPeak, w.previous.RetainedBytesPeak); peak > 0 {
+				snapshot.Retained.PeakSumBytes += peak
+				snapshot.Retained.GroupsWithPeak++
+			}
+		} else {
+			if w.current.Observations+w.previous.Observations > 0 {
 				snapshot.Coverage.ObservedPlans++
 			}
-			if p.since.After(snapshot.WindowStart) {
+			if entry.plan.since.After(snapshot.WindowStart) {
 				snapshot.Coverage.PartialWindowPlans++
 			}
-			add(g, p, p.windows)
 		}
+		add(entry)
 	}
-	c.retained.rotate(epoch)
-	snapshot.Retained.HardStops = c.retained.current.RetainedHardStops + c.retained.previous.RetainedHardStops
-	snapshot.Retained.ShareStops = c.retained.current.RetainedShareStops + c.retained.previous.RetainedShareStops
-	if c.retainedLimit > 0 {
-		snapshot.Retained.LimitBytes, snapshot.Retained.LimitKnown = c.retainedLimit, true
-		snapshot.Retained.PeakShare = float64(snapshot.Retained.PeakSumBytes) / float64(c.retainedLimit)
+	snapshot.Retained.HardStops = c.hardStops.window(epoch)
+	snapshot.Retained.ShareStops = c.shareStops.window(epoch)
+	if limit := c.retainedLimit.Load(); limit > 0 {
+		snapshot.Retained.LimitBytes, snapshot.Retained.LimitKnown = limit, true
+		snapshot.Retained.PeakShare = float64(snapshot.Retained.PeakSumBytes) / float64(limit)
 	}
-	snapshot.Coverage.Incomplete = snapshot.Coverage.Incomplete || snapshot.Coverage.ContentionDroppedTotal > 0 || snapshot.Coverage.UntrackedObservations > 0 || snapshot.Coverage.UnattributedEvaluations > 0 || snapshot.Coverage.UnknownWallObservations > 0 || snapshot.Coverage.PartialWindowGroups > 0 || snapshot.Coverage.ObservedGroups != snapshot.Coverage.TrackedGroups || snapshot.Coverage.ObservedPlans != snapshot.Coverage.TrackedPlans
-	indexes := make(map[costCandidate]int)
+	snapshot.Coverage.Incomplete = snapshot.Coverage.Incomplete || snapshot.Coverage.ContentionDropped > 0 || snapshot.Coverage.UntrackedObservations > 0 || snapshot.Coverage.UnattributedEvaluations > 0 || snapshot.Coverage.UnknownWallObservations > 0 || snapshot.Coverage.PartialWindowGroups > 0 || snapshot.Coverage.ObservedGroups != snapshot.Coverage.TrackedGroups || snapshot.Coverage.ObservedPlans != snapshot.Coverage.TrackedPlans
+	indexes := make(map[*costCopy]int)
 	for dim, rows := range rankings {
 		ranking := CostRanking{Dimension: costDimensions[dim%len(costDimensions)], Scope: "query_group"}
 		if dim >= len(costDimensions) {
 			ranking.Scope = "strategy_owned"
 		}
 		for _, candidate := range rows {
-			candidate.value = 0
-			index, exists := indexes[candidate]
+			entry := candidate.copy
+			index, exists := indexes[entry]
 			if !exists {
-				w, since := candidate.group.windows, candidate.group.since
-				row := CostContributor{Scope: "query_group", Group: candidate.group.group}
-				if candidate.plan != nil {
-					row.Scope, row.Plan = "strategy_owned", candidate.plan.identity
+				w, since := entry.windows, entry.group.since
+				row := CostContributor{Scope: "query_group", Group: entry.group.group}
+				if entry.plan != nil {
+					row.Scope, row.Plan = "strategy_owned", entry.plan.identity
 					row.Group.Members = nil
-					w, since = candidate.plan.windows, candidate.plan.since
+					since = entry.plan.since
 				} else {
 					row.Group.Members = append([]CostPlanIdentity(nil), row.Group.Members...)
 				}
 				row.TrackedSince, row.Observed, row.Current, row.Previous = since, w.current.Observations+w.previous.Observations > 0, w.current, w.previous
 				index = len(snapshot.Contributors)
-				indexes[candidate] = index
+				indexes[entry] = index
 				snapshot.Contributors = append(snapshot.Contributors, row)
 			}
 			ranking.Indexes = append(ranking.Indexes, index)
 		}
 		snapshot.Rankings = append(snapshot.Rankings, ranking)
 	}
-	c.snapshot = snapshot
+	// The copy keeps its windows for the next tick, not the roster it was
+	// taken from.
+	for i := range copies {
+		copies[i].group, copies[i].plan = nil, nil
+	}
+	c.snapshot.Store(&snapshot)
 }
 
 func costCandidateLess(a, b costCandidate) bool {
-	if a.group.group.QueryGroupKey != b.group.group.QueryGroupKey {
-		return a.group.group.QueryGroupKey < b.group.group.QueryGroupKey
+	if a.copy.group.group.QueryGroupKey != b.copy.group.group.QueryGroupKey {
+		return a.copy.group.group.QueryGroupKey < b.copy.group.group.QueryGroupKey
 	}
-	if a.plan == nil || b.plan == nil {
-		return a.plan == nil && b.plan != nil
+	if a.copy.plan == nil || b.copy.plan == nil {
+		return a.copy.plan == nil && b.copy.plan != nil
 	}
-	aID, bID := a.plan.identity, b.plan.identity
+	aID, bID := a.copy.plan.identity, b.copy.plan.identity
 	if aID.TenantID != bID.TenantID {
 		return aID.TenantID < bID.TenantID
 	}
@@ -664,9 +828,7 @@ func (c *CostSummary) Snapshot() CostSnapshot {
 	if c == nil {
 		return CostSnapshot{DisabledReason: "resource_budget_missing", Coverage: CostCoverage{Incomplete: true}}
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := c.snapshot
+	out := *c.snapshot.Load()
 	out.Contributors = append([]CostContributor(nil), out.Contributors...)
 	for i := range out.Contributors {
 		out.Contributors[i].Group.Members = append([]CostPlanIdentity(nil), out.Contributors[i].Group.Members...)
@@ -709,21 +871,25 @@ type CostRetainedPeak struct {
 // be invisible on both pages.
 //
 // Read-only. It does not rotate the windows, so calling it between Publish
-// ticks neither advances nor disturbs them.
+// ticks neither advances nor disturbs them. Each group's windows are read
+// under its own account, one group at a time, and the list is sorted with
+// none held.
 func (c *CostSummary) RetainedPeaks() []CostRetainedPeak {
-	if c == nil {
+	if c == nil || !c.enabled {
 		return nil
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if !c.enabled {
-		return nil
+	scope := c.scope.Load()
+	if scope == nil {
+		return []CostRetainedPeak{}
 	}
-	peaks := make([]CostRetainedPeak, 0, len(c.groups))
-	for key, g := range c.groups {
+	peaks := make([]CostRetainedPeak, 0, len(scope.groups))
+	for key, g := range scope.groups {
+		g.account.mu.Lock()
+		w := g.account.windows
+		g.account.mu.Unlock()
 		reading := CostRetainedPeak{QueryGroupKey: key,
-			RetainedBytesPeak: max(g.windows.current.RetainedBytesPeak, g.windows.previous.RetainedBytesPeak)}
-		for _, s := range [2]CostScalars{g.windows.current, g.windows.previous} {
+			RetainedBytesPeak: max(w.current.RetainedBytesPeak, w.previous.RetainedBytesPeak)}
+		for _, s := range [2]CostScalars{w.current, w.previous} {
 			reading.ComputeWallNS += s.EvaluationWall.ObservedNS + s.StateWall.ObservedNS
 			reading.ComputeWallUnknown += s.EvaluationWall.Unknown + s.StateWall.Unknown
 		}
