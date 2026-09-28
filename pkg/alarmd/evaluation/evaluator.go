@@ -32,6 +32,10 @@ type Evaluator struct {
 	// cache answers for nothing it would have held.
 	lookups            admission.BusinessLookups
 	observeAttribution func(source string)
+	// rebuildGuardWindow makes the first record build its own window instead
+	// of taking the guard's. Nothing sets it outside the tests that hold the
+	// two to the same result.
+	rebuildGuardWindow bool
 }
 
 // WithBusinessAttribution gives the evaluator what a global business Plan's
@@ -167,7 +171,11 @@ func countOpenAlertGate(counts *execution.OpenAlertGateCounts, gate trigger.Reco
 
 type recordDetector func() ([]detect.LevelFact, []detect.ProjectedValue, error)
 
-func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView, view execution.RuntimeStateView, guardConvergence map[uint32]bool, sample *observability.SeriesSampleReservation, run recordDetector) (recordResult, error) {
+// guardWindow, when not nil, is the window guardConvergenceAllowed built from
+// this same view: the Plan's Level requirements with view.History applied.
+// The record takes it instead of building the same window a second time, and
+// applies its own point to it, so it must be this view's and used once.
+func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView, view execution.RuntimeStateView, guardConvergence map[uint32]bool, guardWindow *state.Window, sample *observability.SeriesSampleReservation, run recordDetector) (recordResult, error) {
 	series := execution.SeriesIdentityDigest(record.DimensionIdentityDigest())
 	identity := execution.StateKeyIdentity{Plan: due.Identity, StateGeneration: due.StateGeneration, SeriesIdentityDigest: series}
 	if view.Identity != identity {
@@ -177,17 +185,19 @@ func (e *Evaluator) evaluateRecordWith(ctx context.Context, request execution.Ev
 		return e.constrainedRecord(request, due, record, view)
 	}
 	levels := due.CompiledPlan.Levels()
-	reqs, err := planLevelRequirements(due.CompiledPlan)
-	if err != nil {
-		return recordResult{}, err
-	}
-	window, err := state.NewWindow(reqs)
-	if err != nil {
-		return recordResult{}, err
-	}
-	if len(view.History) > 0 {
-		if _, err = window.Apply(toStatePoints(view.History)); err != nil {
+	window := guardWindow
+	if window == nil {
+		reqs, err := planLevelRequirements(due.CompiledPlan)
+		if err != nil {
 			return recordResult{}, err
+		}
+		if window, err = state.NewWindow(reqs); err != nil {
+			return recordResult{}, err
+		}
+		if len(view.History) > 0 {
+			if _, err = window.Apply(toStatePoints(view.History)); err != nil {
+				return recordResult{}, err
+			}
 		}
 	}
 	facts, projected, err := run()
@@ -585,7 +595,7 @@ func (e *Evaluator) evaluateSeries(
 	if !ok {
 		return execution.PlanEvaluationResult{}, errors.New("alarmd evaluation: runtime state missing")
 	}
-	converged, err := guardConvergenceAllowed(view, due.CompiledPlan)
+	converged, guardWindow, err := guardConvergenceAllowed(view, due.CompiledPlan)
 	if err != nil {
 		return execution.PlanEvaluationResult{}, err
 	}
@@ -629,7 +639,14 @@ func (e *Evaluator) evaluateSeries(
 		if recordIndex == 0 && e.samples != nil {
 			sample = e.reserveSeriesSample(ctx, header, due, ordered, record, view)
 		}
-		one, runErr := e.evaluateRecordWith(ctx, legacy, due, record, view, converged, sample, func() ([]detect.LevelFact, []detect.ProjectedValue, error) {
+		// The first record reads the loaded view, so it takes the window the
+		// guard already built from it; a later record reads the provisional
+		// view the records before it left, and builds its own.
+		var reuse *state.Window
+		if recordIndex == 0 && !e.rebuildGuardWindow {
+			reuse, guardWindow = guardWindow, nil
+		}
+		one, runErr := e.evaluateRecordWith(ctx, legacy, due, record, view, converged, reuse, sample, func() ([]detect.LevelFact, []detect.ProjectedValue, error) {
 			facts, projected, _, detectErr := e.detect.EvaluatePreparedSeriesRecord(ctx, prepared, ordered, record)
 			return facts, projected, detectErr
 		})
@@ -867,20 +884,28 @@ func planLevelRequirements(plan *strategy.CompiledPlan) ([]state.LevelRequiremen
 // already forms the required full window at the last processed record, so a
 // WARMING or GAPPED Level guard may converge on the next FULL record. A Level
 // whose live window still lacks points stays guarded.
-func guardConvergenceAllowed(view execution.RuntimeStateView, plan *strategy.CompiledPlan) (map[uint32]bool, error) {
+//
+// It returns the window it built as well: the Plan's Level requirements with
+// the loaded history applied, which is exactly the window the first record
+// of this series starts from. Only read here, never written, so the first
+// record takes it rather than building it again -- the second build was a
+// whole copy of the history, per series per round. The window is built here
+// whatever the Levels' states, so every error the loaded history can raise
+// is raised where it was, on every path, the constrained ones included.
+func guardConvergenceAllowed(view execution.RuntimeStateView, plan *strategy.CompiledPlan) (map[uint32]bool, *state.Window, error) {
 	levels := plan.Levels()
 	allowed := make(map[uint32]bool, len(levels))
 	requirements, err := planLevelRequirements(plan)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	window, err := state.NewWindow(requirements)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(view.History) > 0 {
 		if _, err = window.Apply(toStatePoints(view.History)); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	for _, level := range levels {
@@ -896,7 +921,7 @@ func guardConvergenceAllowed(view execution.RuntimeStateView, plan *strategy.Com
 		summary := history.Summarize(current.LastProcessedEventTime, level.RequiredDetectHistoryPoints())
 		allowed[level.Definition().LevelID] = summary.Completeness == state.HistoryFull
 	}
-	return allowed, nil
+	return allowed, window, nil
 }
 
 func (e *Evaluator) constrainedRecord(request execution.EvaluationRequest, due execution.DuePlan, record execution.RecordView, view execution.RuntimeStateView) (recordResult, error) {
