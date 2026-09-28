@@ -190,7 +190,8 @@ func TestSlotGetSetsTheLatestPublicationBesideTheSlotsOwn(t *testing.T) {
 		view.LatestPublication.SameAsSlot || view.Slot.SnapshotRevision != "snapshot" {
 		t.Fatalf("latest beside the Slot = %+v (slot %s)", view.LatestPublication, view.Slot.SnapshotRevision)
 	}
-	if !strings.Contains(view.SnapshotNote, "schedule Segment began under") || !strings.Contains(view.SnapshotNote, "object_digest") {
+	if !strings.Contains(view.SnapshotNote, "execution content") || !strings.Contains(view.SnapshotNote, "decided by object_digest") ||
+		strings.Contains(view.SnapshotNote, "running now") {
 		t.Fatalf("an older Slot publication is not explained: %q", view.SnapshotNote)
 	}
 

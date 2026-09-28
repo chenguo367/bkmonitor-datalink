@@ -39,12 +39,17 @@ type SlotPublication struct {
 
 // slotSnapshotNote says why a Slot names an older publication than the
 // latest: its snapshot_revision is the publication its schedule Segment
-// began under, and a later publication that leaves the Query Group's query
-// and schedule as they were keeps the Segment. Two readers of the first
-// acceptance stopped on the difference and asked.
-const slotSnapshotNote = "slot.snapshot_revision is the publication this Slot's schedule Segment began under (at schedule_segment_start). " +
-	"A later publication that leaves this Query Group's query and schedule unchanged keeps the Segment, so the Slot can name an older " +
-	"publication than latest_publication while its object_digest is the one running now; a change of query or schedule starts a new Segment."
+// began under, and a Segment is kept across publications while the Query
+// Group's execution content -- its ObjectDigest -- is unchanged (see
+// controlplane/content_cutover.go). Two readers of the first acceptance
+// stopped on the difference and asked. It must not explain a change that
+// did not take effect as normal: any change to the execution content, a
+// threshold or the members included, cuts a new Segment.
+const slotSnapshotNote = "slot.snapshot_revision is the publication this Slot's schedule Segment began under (schedule_segment_start). " +
+	"A Segment is kept across publications while this Query Group's execution content (object_digest: its query, schedule, membership " +
+	"and what its Plans evaluate) is unchanged, so a Slot can name an older publication than latest_publication. A change to any of that " +
+	"starts a new Segment; a change to rendering only does not. Whether this Slot ran the same content as a publication is decided by " +
+	"object_digest, not by snapshot_revision."
 
 type SlotContext struct {
 	QueryGroup       execution.QueryGroupIdentity `json:"query_group"`
