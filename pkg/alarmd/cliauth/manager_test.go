@@ -21,16 +21,15 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
+
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/internal/redistest"
 )
 
 const testAdminKey = "fixture-only-administrator-key-0123456789abcdef"
 
 func startRedis(t *testing.T) *redis.Client {
 	t.Helper()
-	path, err := exec.LookPath("redis-server")
-	if err != nil {
-		t.Skip("redis-server is not installed")
-	}
+	path := redistest.Server(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
