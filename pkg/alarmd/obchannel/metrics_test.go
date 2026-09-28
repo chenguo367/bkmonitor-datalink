@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -143,6 +144,74 @@ func TestMetricsGetSaysWhenACollectorFailedAndKeepsNonFiniteValues(t *testing.T)
 	for i := range first.Families[0].Series {
 		if first.Families[0].Series[i].Labels["k"] != second.Families[0].Series[i].Labels["k"] {
 			t.Fatalf("two reads cut different series at %d", i)
+		}
+	}
+}
+
+// metrics.list names every alarmd family the process registers -- sorted,
+// with its type, help and series count -- and only alarmd's; contains
+// narrows it by name or help; a metrics.get that asked for a name the
+// process does not register points at it.
+func TestMetricsListNamesTheFamiliesSoNamesAreNotGuessed(t *testing.T) {
+	registry := metricsRegistry(t)
+	foreign := prometheus.NewGauge(prometheus.GaugeOpts{Name: "go_goroutines_fixture", Help: "not ours"})
+	long := prometheus.NewCounter(prometheus.CounterOpts{Name: "bkmonitor_alarmd_long_help_total", Help: strings.Repeat("长", MaxListedHelpBytes)})
+	registry.MustRegister(foreign, long)
+	c := testChannel(t, &testAuth{}, MetricsOperations(registry)...)
+	status, out := call(t, c, envelope(c, "invoke", "metrics.list", Params{}))
+	if status != 200 || out.Status != "ok" {
+		t.Fatalf("metrics.list = %d %+v", status, out)
+	}
+	encoded, _ := json.Marshal(out.Result)
+	var result MetricsListResult
+	if err := json.Unmarshal(encoded, &result); err != nil {
+		t.Fatal(err)
+	}
+	names := []string{}
+	for _, family := range result.Families {
+		names = append(names, family.Name)
+	}
+	want := []string{"bkmonitor_alarmd_long_help_total", "bkmonitor_alarmd_loop_turn_duration_seconds", "bkmonitor_alarmd_redis_pool_size",
+		"bkmonitor_alarmd_source_refresh_total", "bkmonitor_alarmd_wide_total"}
+	if strings.Join(names, ",") != strings.Join(want, ",") || result.Matched != len(want) {
+		t.Fatalf("listed %v (matched %d), want %v and nothing outside alarmd's namespace", names, result.Matched, want)
+	}
+	for _, family := range result.Families {
+		switch family.Name {
+		case "bkmonitor_alarmd_source_refresh_total":
+			if family.Type != "COUNTER" || family.Help != "rounds" || family.Series != 2 {
+				t.Fatalf("refresh family = %+v", family)
+			}
+		case "bkmonitor_alarmd_loop_turn_duration_seconds":
+			if family.Type != "HISTOGRAM" || family.Series != 1 {
+				t.Fatalf("histogram family = %+v", family)
+			}
+		case "bkmonitor_alarmd_long_help_total":
+			if len(family.Help) > MaxListedHelpBytes+3 || !strings.HasSuffix(family.Help, "...") || !utf8.ValidString(family.Help) {
+				t.Fatalf("long help not cut on a character boundary: %d bytes %q", len(family.Help), family.Help[len(family.Help)-8:])
+			}
+		}
+	}
+	_, narrowed := call(t, c, envelope(c, "invoke", "metrics.list", Params{"contains": "ROUNDS"}))
+	encoded, _ = json.Marshal(narrowed.Result)
+	var only MetricsListResult
+	_ = json.Unmarshal(encoded, &only)
+	if len(only.Families) != 1 || only.Families[0].Name != "bkmonitor_alarmd_source_refresh_total" {
+		t.Fatalf("contains matched help case-insensitively? got %+v", only.Families)
+	}
+	_, got, _ := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_recovery_total"}})
+	if len(got.Next) != 1 || got.Next[0].Operation != "metrics.list" {
+		t.Fatalf("a name the process does not register gave no way to find the right one: %+v", got.Next)
+	}
+	_, known, _ := invokeMetrics(t, c, Params{"names": []any{"bkmonitor_alarmd_source_refresh_total"}})
+	for _, next := range known.Next {
+		if next.Operation == "metrics.list" {
+			t.Fatal("a read of a registered family pointed at metrics.list")
+		}
+	}
+	for _, bad := range []Params{{"contains": ""}, {"contains": "a;b"}, {"contains": strings.Repeat("a", 65)}} {
+		if err := validate(c.ops["metrics.list"], bad); err == nil {
+			t.Fatalf("contains %v accepted", bad)
 		}
 	}
 }
