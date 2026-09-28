@@ -1786,11 +1786,14 @@ type ShardAwareFacts struct {
 // Query Groups have no reported peak; both are said rather than read as
 // "no pressure".
 type ByteConstraintFacts struct {
-	SharePercent   int              `json:"share_percent"`
-	Judged         int              `json:"judged"`
-	PoolUnknown    []string         `json:"pool_unknown,omitempty"`
-	Unread         int              `json:"unread"`
-	Unsettled      []string         `json:"unsettled,omitempty"`
+	SharePercent int      `json:"share_percent"`
+	Judged       int      `json:"judged"`
+	PoolUnknown  []string `json:"pool_unknown,omitempty"`
+	Unread       int      `json:"unread"`
+	Unsettled    []string `json:"unsettled,omitempty"`
+	// UnreadEstimate is what each unread Query Group on a destination was
+	// counted at this round; zero when no peak was read.
+	UnreadEstimate uint64           `json:"unread_estimate_bytes"`
 	Sums           []ByteSumSample  `json:"sums,omitempty"`
 	Overloaded     []string         `json:"overloaded,omitempty"`
 	Unplaceable    []string         `json:"unplaceable,omitempty"`

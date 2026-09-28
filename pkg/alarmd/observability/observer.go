@@ -1467,6 +1467,7 @@ type ByteConstraintFacts struct {
 	PoolUnknown    []string         `json:"pool_unknown,omitempty"`
 	Unread         int              `json:"unread"`
 	Unsettled      []string         `json:"unsettled,omitempty"`
+	UnreadEstimate uint64           `json:"unread_estimate_bytes"`
 	Overloaded     []string         `json:"overloaded,omitempty"`
 	Unplaceable    []string         `json:"unplaceable,omitempty"`
 	PlannedMoves   int              `json:"planned_moves"`

@@ -6,6 +6,7 @@
 package scheduler
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 	"time"
@@ -117,12 +118,12 @@ func TestRouterPlanByteMovesJudgesOnlyWhatIsKnownAndSaysWhatIsNot(t *testing.T) 
 }
 
 // A Worker holding a Query Group with no reading has a sum that is a lower
-// bound: it can be judged overloaded on its known part, but it is not a
-// destination - the room it appears to have may be exactly what it does
-// not. Two overloaded Workers and one that looks empty because nothing on
-// it has reported: nothing moves to it, and the round says which Workers
-// were unsettled. The Worker a move just landed on is the first such case
-// in production, until its heartbeat reports the new Query Group.
+// bound: it can be judged overloaded on its known part, and as a
+// destination its unread Query Group is counted at the ninetieth percentile
+// of the read peaks - 500 here - rather than at nothing. Two overloaded
+// Workers and one that looks empty because nothing on it has reported:
+// counted at the estimate it has no room for either, nothing moves to it,
+// and the round says which Workers were unsettled.
 func TestRouterPlanByteMovesDoesNotLandOnAWorkerWithUnreadQueryGroups(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	live := now.Add(time.Minute)
@@ -277,5 +278,84 @@ func TestRouterPlanRebalanceWithBytesNeitherUndoesAByteMoveNorOverfillsADestinat
 	fitted := router.PlanRebalanceWithBytes(crowded, only, crowdedReadings, now)
 	if len(fitted.Moves) != 1 || fitted.Moves[0].QueryGroup != "a-s1" {
 		t.Fatalf("plan = %+v, want the first that fits c's share, not the big one first by identity", fitted.Moves)
+	}
+}
+
+// A Worker holding a Query Group that has not run since the restart is a
+// destination when its read sum plus that Query Group at the round's
+// ninetieth-percentile peak leaves room. It was refused outright, so after a
+// rolling restart every Worker held one of the hourly-to-sixty-hour Query
+// Groups, none was a destination for the longest cadence, and an overloaded
+// Worker was never relieved.
+func TestRouterPlanByteMovesCountsAnUnreadQueryGroupAtTheReadNinetiethPercentile(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	live := now.Add(time.Minute)
+	workers := []ownership.WorkerRegistration{byteWorker("a", 1000, live), byteWorker("c", 1000, live)}
+	owners := map[execution.QueryGroupIdentity]string{"a-1": "a", "a-2": "a", "c-unread": "c"}
+	peaks := map[execution.QueryGroupIdentity]uint64{"a-1": 500, "a-2": 400}
+	for index := 0; index < 20; index++ {
+		queryGroup := execution.QueryGroupIdentity(fmt.Sprintf("c-%02d", index))
+		owners[queryGroup], peaks[queryGroup] = "c", 10
+	}
+	readings := ByteReadings{Pool: map[string]uint64{"a": 1000, "c": 1000}, Peak: peaks}
+	plan := NewRouter(nil).PlanByteMoves(owners, workers, readings, now)
+	// 22 read peaks, twenty of them 10: the ninetieth percentile by nearest
+	// rank is the twentieth, 10. c counts 200 + 10, and a's 500 fits in 800.
+	if plan.UnreadEstimate != 10 || !reflect.DeepEqual(plan.Unsettled, []string{"c"}) || plan.Unread != 1 {
+		t.Fatalf("plan = %+v, want the unread Query Group on c counted at 10 and c named unsettled", plan)
+	}
+	want := []ByteMove{{QueryGroup: "a-1", From: "a", To: "c", Bytes: 500}}
+	if !reflect.DeepEqual(plan.Moves, want) {
+		t.Fatalf("moves = %+v, want a's largest on c", plan.Moves)
+	}
+}
+
+// The estimate is a boundary: the destination whose read sum, unread
+// Query Groups at the estimate and the moved peak come to exactly its share
+// takes the move, and one byte more does not.
+func TestRouterPlanByteMovesUnreadEstimateBoundary(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	live := now.Add(time.Minute)
+	for _, tc := range []struct {
+		name  string
+		extra uint64
+		moved execution.QueryGroupIdentity
+	}{{"exactly the share", 10, "a-1"}, {"a byte past it", 11, "a-2"}} {
+		workers := []ownership.WorkerRegistration{byteWorker("a", 1000, live), byteWorker("c", 1000, live)}
+		owners := map[execution.QueryGroupIdentity]string{"a-1": "a", "a-2": "a", "c-unread": "c", "c-last": "c"}
+		peaks := map[execution.QueryGroupIdentity]uint64{"a-1": 500, "a-2": 400, "c-last": tc.extra}
+		for index := 0; index < 28; index++ {
+			queryGroup := execution.QueryGroupIdentity(fmt.Sprintf("c-%02d", index))
+			owners[queryGroup], peaks[queryGroup] = "c", 10
+		}
+		plan := NewRouter(nil).PlanByteMoves(owners, workers, ByteReadings{Pool: map[string]uint64{"a": 1000, "c": 1000}, Peak: peaks}, now)
+		// 31 read peaks, at least 29 of them 10: the twenty-eighth is 10.
+		// c counts 280 + extra + 10 against a share of 800: a's 500 fits at
+		// exactly 800, and one byte more leaves only a's 400 fitting.
+		if plan.UnreadEstimate != 10 {
+			t.Fatalf("%s: estimate = %d, want 10", tc.name, plan.UnreadEstimate)
+		}
+		if len(plan.Moves) != 1 || plan.Moves[0].QueryGroup != tc.moved || plan.Moves[0].To != "c" {
+			t.Fatalf("%s: moves = %+v, want %s on c", tc.name, plan.Moves, tc.moved)
+		}
+	}
+}
+
+func TestUnreadEstimateIsTheNearestRankNinetiethPercentile(t *testing.T) {
+	if got := unreadEstimate(nil); got != 0 {
+		t.Fatalf("no peak read: estimate = %d, want 0", got)
+	}
+	if got := unreadEstimate([]uint64{7}); got != 7 {
+		t.Fatalf("one peak: estimate = %d, want it", got)
+	}
+	peaks := make([]uint64, 0, 10)
+	for value := uint64(10); value >= 1; value-- {
+		peaks = append(peaks, value)
+	}
+	if got := unreadEstimate(peaks); got != 9 {
+		t.Fatalf("1..10: estimate = %d, want the ninth, 9", got)
+	}
+	if peaks[0] != 10 {
+		t.Fatal("the estimate sorted the caller's slice")
 	}
 }
