@@ -42,10 +42,21 @@ import (
 // (ReadRecordsDigestShadowCounts) and reported at most once a minute, and
 // the call succeeds either way.
 func DeriveRecordsDigestV2(domain string, records []CanonicalRecordV2) (string, error) {
+	return DeriveSeriesRecordsDigestV2(domain, records, DimensionIdentityEncodingV2{})
+}
+
+// DeriveSeriesRecordsDigestV2 is DeriveRecordsDigestV2 for a series whose
+// dimension identity was derived with EncodeDimensionIdentityV2: the fields
+// the identity digest was derived from are the fields every record carries
+// in its dimension identity, and their canonical encoding is taken from the
+// identity rather than made again. It is taken only when the records carry
+// that identity -- its digest, and the very list it was encoded from -- and
+// otherwise the fields are encoded here, as DeriveRecordsDigestV2 does.
+func DeriveSeriesRecordsDigestV2(domain string, records []CanonicalRecordV2, identity DimensionIdentityEncodingV2) (string, error) {
 	if !isOpaqueASCII(domain) {
 		return "", invalid("canonical_digest.domain", "must be non-empty opaque ASCII")
 	}
-	digest, shared := assembleRecordsDigest(domain, records)
+	digest, shared := assembleRecordsDigest(domain, records, identity)
 	if !shared {
 		return DeriveCanonicalDigestV2(domain, records)
 	}
@@ -69,7 +80,7 @@ var assembleRecordsDigest = deriveSharedRecordsDigest
 // deriveSharedRecordsDigest is the digest assembled from the series' shared
 // parts, and false when the records do not share them or a part cannot be
 // encoded.
-func deriveSharedRecordsDigest(domain string, records []CanonicalRecordV2) (string, bool) {
+func deriveSharedRecordsDigest(domain string, records []CanonicalRecordV2, encoded DimensionIdentityEncodingV2) (string, bool) {
 	if len(records) == 0 {
 		return "", false
 	}
@@ -86,7 +97,7 @@ func deriveSharedRecordsDigest(domain string, records []CanonicalRecordV2) (stri
 	if err != nil {
 		return "", false
 	}
-	identity, err := CanonicalJSONV2(first.DimensionIdentity)
+	identity, err := dimensionIdentityPart(first.DimensionIdentity, encoded)
 	if err != nil {
 		return "", false
 	}
@@ -155,6 +166,43 @@ func deriveSharedRecordsDigest(domain string, records []CanonicalRecordV2) (stri
 	}
 	_, _ = hash.Write([]byte{']'})
 	return hex.EncodeToString(hash.Sum(nil)), true
+}
+
+// dimensionIdentityPart is the canonical encoding of a record's dimension
+// identity. When encoded is that identity's own -- the same digest, and the
+// very list it was encoded from -- the fields' encoding is encoded's and only
+// the object around it is written: the keys in canonical order, digest before
+// fields, and the digest, lowercase hexadecimal, as the string it is.
+// Anything else is encoded whole.
+func dimensionIdentityPart(identity DimensionIdentityV2, encoded DimensionIdentityEncodingV2) ([]byte, error) {
+	if encoded.canonical == nil || encoded.Digest != identity.Digest || !sha256Pattern.MatchString(identity.Digest) ||
+		!sameSlice(encoded.fields, identity.Fields) {
+		identityPartEncoded.Add(1)
+		return CanonicalJSONV2(identity)
+	}
+	identityPartReused.Add(1)
+	part := make([]byte, 0, len(encoded.canonical)+len(identity.Digest)+24)
+	part = append(part, `{"digest":"`...)
+	part = append(part, identity.Digest...)
+	part = append(part, `","fields":`...)
+	part = append(part, encoded.canonical...)
+	return append(part, '}'), nil
+}
+
+// identityPartReused and identityPartEncoded count the series' delivery
+// digests by where their dimension identity's encoding came from: the
+// identity's own, or encoded here. Only dimensionIdentityPart writes them,
+// so they read the path and nothing else.
+var (
+	identityPartReused  atomic.Uint64
+	identityPartEncoded atomic.Uint64
+)
+
+// ReadIdentityPartCounts is how many series' delivery digests, since the
+// process started, took their dimension identity's encoding from the
+// identity, and how many encoded it themselves.
+func ReadIdentityPartCounts() (reused, encoded uint64) {
+	return identityPartReused.Load(), identityPartEncoded.Load()
 }
 
 // sameSlice is whether two field lists are the one list: the records of a

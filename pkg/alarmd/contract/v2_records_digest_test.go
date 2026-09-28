@@ -106,7 +106,7 @@ func TestAssembledRecordsDigestIsTheCanonicalOne(t *testing.T) {
 			for index := 0; index < 600; index++ {
 				records := seriesRecords(random, 1+random.Intn(60))
 				want, wantErr := DeriveCanonicalDigestV2(recordsTestDomain, records)
-				got, shared := deriveSharedRecordsDigest(recordsTestDomain, records)
+				got, shared := deriveSharedRecordsDigest(recordsTestDomain, records, DimensionIdentityEncodingV2{})
 				if wantErr != nil {
 					if shared {
 						t.Fatalf("%s case %d: assembled %s where the canonical digest refuses: %v", mode, index, got, wantErr)
@@ -156,7 +156,7 @@ func TestRecordsThatAreNotOneSeriesTakeTheCanonicalDigest(t *testing.T) {
 				records = records[:0]
 			}
 			split(records)
-			if _, shared := deriveSharedRecordsDigest(recordsTestDomain, records); shared {
+			if _, shared := deriveSharedRecordsDigest(recordsTestDomain, records, DimensionIdentityEncodingV2{}); shared {
 				t.Fatal("records that are not one series were assembled")
 			}
 			want, wantErr := DeriveCanonicalDigestV2(recordsTestDomain, records)
@@ -219,7 +219,9 @@ func TestTheShadowServesTheCanonicalDigestAndReportsADifferenceOnce(t *testing.T
 		t.Fatalf("an agreeing call counted compared %d->%d, differed %d->%d", compared, nowCompared, differed, nowDiffered)
 	}
 
-	assembleRecordsDigest = func(string, []CanonicalRecordV2) (string, bool) { return strings.Repeat("0", 64), true }
+	assembleRecordsDigest = func(string, []CanonicalRecordV2, DimensionIdentityEncodingV2) (string, bool) {
+		return strings.Repeat("0", 64), true
+	}
 	var reports []RecordsDigestDivergence
 	SetRecordsDigestDivergenceReporter(func(divergence RecordsDigestDivergence) { reports = append(reports, divergence) })
 	recordsDivergenceReported.Store(0)
@@ -247,7 +249,7 @@ func TestAssemblingASeriesDigestAllocatesAFractionOfTheCanonicalOne(t *testing.T
 		records = seriesRecords(random, 60)
 	}
 	canonical := testing.AllocsPerRun(20, func() { _, _ = DeriveCanonicalDigestV2(recordsTestDomain, records) })
-	assembled := testing.AllocsPerRun(20, func() { _, _ = deriveSharedRecordsDigest(recordsTestDomain, records) })
+	assembled := testing.AllocsPerRun(20, func() { _, _ = deriveSharedRecordsDigest(recordsTestDomain, records, DimensionIdentityEncodingV2{}) })
 	if assembled*2 > canonical {
 		t.Fatalf("assembling allocates %.0f times against %.0f for the canonical encoding", assembled, canonical)
 	}
