@@ -66,3 +66,33 @@ func TestTheCommittedLineNamesTheCauseAndWhereItWasFound(t *testing.T) {
 		}
 	}
 }
+
+// Every word NormalizeReason keeps is counted by NormalizedReasonCount, the
+// bound a counter labelled by a normalized reason declares: the words of
+// every catalogue it keeps, and the three it answers with outside them. A
+// catalogue added to the one and not the other is a counter whose series
+// can outgrow what it declared.
+func TestTheReasonBoundCountsEveryWordNormalizeReasonKeeps(t *testing.T) {
+	kept := map[ReasonCode]bool{ReasonNone: true, ReasonNotReported: true, ReasonOther: true}
+	catalogues := []map[ReasonCode]struct{}{commonReasonSet, resourceReasonSet, activationFailureReasonSet, viewStreamReasonSet,
+		schedulerDecisionReasonSet, effectiveMaintenanceReasonSet, absentCloseReasonSet, completionAttributionReasonSet}
+	words := []ReasonCode{}
+	for _, catalogue := range catalogues {
+		for word := range catalogue {
+			words = append(words, word)
+		}
+	}
+	for word := range contractObservationReasonSet {
+		words = append(words, ReasonCode(word))
+	}
+	for _, word := range words {
+		// none is one of the three: kept for a result that allows it.
+		if word != ReasonNone && NormalizeReason(word, ResultDegraded) != word {
+			t.Fatalf("%s is in a catalogue and NormalizeReason does not keep it", word)
+		}
+		kept[word] = true
+	}
+	if len(kept) > NormalizedReasonCount() {
+		t.Fatalf("NormalizeReason keeps %d words, the bound counts %d", len(kept), NormalizedReasonCount())
+	}
+}
