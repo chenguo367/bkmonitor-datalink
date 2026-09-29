@@ -449,10 +449,13 @@ type Catalog struct {
 	// make it refuse the whole publication.
 	ObjectRetention time.Duration
 	// GlobalStrategies is one record per strategy the source marks global
-	// (SourceIdentity.GlobalBusiness), in source order: whether the round
-	// compiled it, the word it was refused for as a global strategy, and the
-	// source its query reads. Nil when the source marks none, so a Catalog of
-	// a deployment without global strategies is the one it always was.
+	// (SourceIdentity.GlobalBusiness), in source order: the word it was
+	// refused for as a global strategy and the source its query reads. Nil
+	// when the source marks none, so a Catalog of a deployment without global
+	// strategies is the one it always was. Whether it runs is not recorded
+	// here: the runtime check and the deployment's admission can still
+	// withhold a strategy this build compiled, and each replaces its ACCEPTED
+	// disposition when it does, so the dispositions are where that is read.
 	GlobalStrategies []GlobalStrategy
 }
 
@@ -462,8 +465,6 @@ type Catalog struct {
 // carry, so the global composition counts strategies and not records.
 type GlobalStrategy struct {
 	SourceID string
-	// Accepted says the round compiled it into a Plan.
-	Accepted bool
 	// Refusal is the GLOBAL_STRATEGY_UNSUPPORTED word (GlobalBusinessQueryKind
 	// and the rest) when this build refused to run it as a global strategy,
 	// whether or not a last good Plan was retained for it; empty otherwise.
@@ -607,12 +608,12 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	// the global composition counts strategies, and a path that skipped it
 	// would make the outcomes stop adding up to the strategies the source
 	// marks global.
-	recordGlobal := func(source SourceStrategy, accepted bool, candidate sourceCandidate) {
+	recordGlobal := func(source SourceStrategy, candidate sourceCandidate) {
 		if !source.Identity.GlobalBusiness {
 			return
 		}
 		catalog.GlobalStrategies = append(catalog.GlobalStrategies, GlobalStrategy{
-			SourceID: source.SourceID, Accepted: accepted, Refusal: candidate.globalRefusal, QuerySource: candidate.querySource,
+			SourceID: source.SourceID, Refusal: candidate.globalRefusal, QuerySource: candidate.querySource,
 		})
 	}
 	observed := make(map[string]struct{}, len(request.Strategies))
@@ -627,7 +628,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 				(disposition.Disposition != DispositionSourceIncomplete && disposition.Disposition != DispositionConfigRejected) {
 				return Catalog{}, errors.New("alarmd controlplane: invalid source disposition")
 			}
-			recordGlobal(source, false, sourceCandidate{})
+			recordGlobal(source, sourceCandidate{})
 			if compiled := compileTargetPlanDocument(source); compiled.refusal != nil {
 				catalog.Dispositions = append(catalog.Dispositions, disposition, *compiled.refusal)
 				continue
@@ -643,12 +644,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			continue
 		}
 		candidate, err := request.Cache.build(ctx, planner, source, request.OutputProtocol, request.TargetSources, request.NoDataPolicy)
-		accepted := false
-		if err == nil {
-			_, duplicate := seenPlans[candidate.plan.Key()]
-			accepted = !duplicate
-		}
-		recordGlobal(source, accepted, candidate)
+		recordGlobal(source, candidate)
 		if err != nil {
 			if len(candidate.dispositions) > 0 {
 				catalog.Dispositions = append(catalog.Dispositions, candidate.dispositions...)

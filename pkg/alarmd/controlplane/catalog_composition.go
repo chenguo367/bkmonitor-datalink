@@ -212,8 +212,8 @@ type CatalogComposition struct {
 
 // What a round did with a strategy the source marks global.
 const (
-	// GlobalOutcomeAccepted: compiled into a Plan that runs as a global
-	// strategy.
+	// GlobalOutcomeAccepted: runs as a global strategy - its ACCEPTED
+	// disposition survived to the Catalog as published.
 	GlobalOutcomeAccepted = "accepted"
 	// GlobalOutcomeUnsupported: refused as GLOBAL_STRATEGY_UNSUPPORTED - a
 	// strategy this build cannot yet run across businesses. It stopped
@@ -386,13 +386,32 @@ func ComposeCatalog(catalog Catalog) CatalogComposition {
 		composition.GlobalStrategies[outcome] = 0
 	}
 	composition.GlobalUnsupported = make(map[GlobalUnsupportedKey]int)
+	// Accepted is read off the Catalog as published, not off the record: a
+	// strategy this build compiled can still be withheld by the runtime check
+	// or the deployment's admission, and each replaces its ACCEPTED with the
+	// reason it withheld it. Counted from the record it would read accepted
+	// while it stopped running.
+	accepted := make(map[string]bool, len(catalog.GlobalStrategies))
+	for _, disposition := range catalog.Dispositions {
+		if disposition.Scope == "PLAN" && disposition.Disposition == DispositionAccepted {
+			accepted[disposition.SourceID] = true
+		}
+	}
+	// Once per strategy: the same one listed twice is one strategy, as it
+	// is one object in catalog_objects, and its first record is the one
+	// that compiled.
+	counted := make(map[string]bool, len(catalog.GlobalStrategies))
 	for _, global := range catalog.GlobalStrategies {
+		if counted[global.SourceID] {
+			continue
+		}
+		counted[global.SourceID] = true
 		switch {
-		case global.Accepted:
-			composition.GlobalStrategies[GlobalOutcomeAccepted]++
 		case global.Refusal != "":
 			composition.GlobalStrategies[GlobalOutcomeUnsupported]++
 			composition.GlobalUnsupported[GlobalUnsupportedKey{Reason: global.Refusal, QuerySource: global.QuerySource}]++
+		case accepted[global.SourceID]:
+			composition.GlobalStrategies[GlobalOutcomeAccepted]++
 		default:
 			composition.GlobalStrategies[GlobalOutcomeWithheld]++
 		}

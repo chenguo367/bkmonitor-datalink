@@ -304,9 +304,13 @@ func TestAGlobalBusinessStrategyThatMeetsTheConditionsCompiles(t *testing.T) {
 			if name == "a custom time series" {
 				source = "custom/time_series"
 			}
-			wantRecord := []controlplane.GlobalStrategy{{SourceID: strategy.SourceID, Accepted: true, QuerySource: source}}
+			wantRecord := []controlplane.GlobalStrategy{{SourceID: strategy.SourceID, QuerySource: source}}
 			if !reflect.DeepEqual(catalog.GlobalStrategies, wantRecord) {
 				t.Fatalf("global strategies = %+v, want %+v", catalog.GlobalStrategies, wantRecord)
+			}
+			wantOutcomes := map[string]int{"accepted": 1, "global_unsupported": 0, "withheld": 0}
+			if got := controlplane.ComposeCatalog(catalog).GlobalStrategies; !reflect.DeepEqual(got, wantOutcomes) {
+				t.Fatalf("outcomes = %v, want %v", got, wantOutcomes)
 			}
 			if strings.HasPrefix(name, "a Kubernetes") {
 				want := map[string]string{"cluster-a": "11"}
@@ -398,5 +402,58 @@ func TestTheGlobalOutcomesArePublishedAtZeroWithoutGlobalStrategies(t *testing.T
 	want := map[string]int{"accepted": 0, "global_unsupported": 0, "withheld": 0}
 	if !reflect.DeepEqual(composition.GlobalStrategies, want) || len(composition.GlobalUnsupported) != 0 {
 		t.Fatalf("composition = %v %v, want %v and no refused pairs", composition.GlobalStrategies, composition.GlobalUnsupported, want)
+	}
+}
+
+// Accepted is what runs, read off the Catalog as published: a global strategy
+// this build compiled and a later stage withheld - the runtime check or the
+// deployment's admission, each replacing its ACCEPTED with its own reason -
+// is withheld, and one kept on its last good Plan under another refusal is
+// withheld too. Counted from the build it would read accepted while it
+// stopped running or ran an old configuration.
+func TestAGlobalStrategyALaterStageWithheldIsNotCountedAccepted(t *testing.T) {
+	catalog := controlplane.Catalog{
+		GlobalStrategies: []controlplane.GlobalStrategy{
+			{SourceID: "1", QuerySource: "bk_monitor/time_series"},
+			{SourceID: "2", QuerySource: "bk_monitor/time_series"},
+			{SourceID: "3", QuerySource: "bk_monitor/time_series"},
+		},
+		Dispositions: []controlplane.ObjectDisposition{
+			{SourceID: "1", Scope: "PLAN", Disposition: controlplane.DispositionAccepted},
+			{SourceID: "2", Scope: "PLAN", Disposition: controlplane.DispositionUnsupported, Reason: "SNAPSHOT_RETENTION_INSUFFICIENT"},
+			{SourceID: "3", Scope: "PLAN", Disposition: controlplane.DispositionStaleConfig, Reason: "LEVEL_INVALID"},
+			// A level-scope ACCEPTED is not the strategy running.
+			{SourceID: "3", Scope: "LEVEL", LevelID: 1, Disposition: controlplane.DispositionAccepted},
+		},
+	}
+	want := map[string]int{"accepted": 1, "global_unsupported": 0, "withheld": 2}
+	if got := controlplane.ComposeCatalog(catalog).GlobalStrategies; !reflect.DeepEqual(got, want) {
+		t.Fatalf("outcomes = %v, want %v", got, want)
+	}
+}
+
+// A global strategy listed twice is one strategy: the round records both
+// entries and withholds the second as the duplicate, and the composition
+// counts the strategy once, accepted, because its first entry runs.
+func TestAGlobalStrategyListedTwiceIsCountedOnceAccepted(t *testing.T) {
+	strategies := twoThresholdStrategiesWithDelay(t, 0)
+	global := strategies[0]
+	global.Document = editedDocument(t, global.Document, func(top map[string]any) { top["strategy_revision"] = 7 }, nil)
+	global.Identity.GlobalBusiness = true
+	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{
+		Planner: globalBusinessPlanner(t), Strategies: []controlplane.SourceStrategy{global, global},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	duplicate := false
+	for _, disposition := range catalog.Dispositions {
+		duplicate = duplicate || disposition.Reason == "DUPLICATE_STRATEGY_IDENTITY"
+	}
+	composition := controlplane.ComposeCatalog(catalog)
+	want := map[string]int{"accepted": 1, "global_unsupported": 0, "withheld": 0}
+	if !duplicate || len(catalog.GlobalStrategies) != 2 || !reflect.DeepEqual(composition.GlobalStrategies, want) {
+		t.Fatalf("duplicate withheld=%t, %d records, outcomes %v; want the duplicate withheld, 2 records and %v",
+			duplicate, len(catalog.GlobalStrategies), composition.GlobalStrategies, want)
 	}
 }

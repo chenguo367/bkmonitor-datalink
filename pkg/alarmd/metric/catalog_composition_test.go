@@ -91,14 +91,16 @@ func TestCatalogCompositionReportsEverySupportedSource(t *testing.T) {
 // global_unsupported.
 func TestCatalogCompositionReportsGlobalStrategiesByOutcomeAndRefusal(t *testing.T) {
 	r := NewRecorder(BuildInfo{})
-	composition := controlplane.ComposeCatalog(controlplane.Catalog{GlobalStrategies: []controlplane.GlobalStrategy{
-		{SourceID: "1", Accepted: true, QuerySource: "bk_monitor/time_series"},
-		{SourceID: "2", Refusal: controlplane.GlobalBusinessQueryKind, QuerySource: "bk_monitor/log"},
-		{SourceID: "3", Refusal: controlplane.GlobalBusinessQueryKind, QuerySource: "bk_monitor/log"},
-		{SourceID: "4", Refusal: controlplane.GlobalBusinessQueryKind, QuerySource: controlplane.GlobalQuerySourcePromQL},
-		{SourceID: "5", Refusal: controlplane.GlobalBusinessQueryTable, QuerySource: "bk_monitor/time_series"},
-		{SourceID: "6"},
-	}})
+	composition := controlplane.ComposeCatalog(controlplane.Catalog{
+		Dispositions: []controlplane.ObjectDisposition{{SourceID: "1", Scope: "PLAN", Disposition: controlplane.DispositionAccepted}},
+		GlobalStrategies: []controlplane.GlobalStrategy{
+			{SourceID: "1", QuerySource: "bk_monitor/time_series"},
+			{SourceID: "2", Refusal: controlplane.GlobalBusinessQueryKind, QuerySource: "bk_monitor/log"},
+			{SourceID: "3", Refusal: controlplane.GlobalBusinessQueryKind, QuerySource: "bk_monitor/log"},
+			{SourceID: "4", Refusal: controlplane.GlobalBusinessQueryKind, QuerySource: controlplane.GlobalQuerySourcePromQL},
+			{SourceID: "5", Refusal: controlplane.GlobalBusinessQueryTable, QuerySource: "bk_monitor/time_series"},
+			{SourceID: "6"},
+		}})
 	r.SetCatalogCompositionSource(func() *controlplane.CatalogComposition { return &composition })
 
 	outcomes := compositionSeries(t, r, "bkmonitor_alarmd_catalog_global_strategies", "outcome")
