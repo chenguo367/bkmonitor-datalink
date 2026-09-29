@@ -315,8 +315,8 @@ type queryGroupState struct {
 	// to each of this object's Plans, by Plan, from the Plan's evaluation
 	// lines.
 	planSeries map[StrategyRef]*PlanSeriesMatched
-	// rounds is the object's recent completions, oldest first, at most
-	// RecentRoundsKept of them: what each hole on a window is read against
+	// rounds is the object's completions in minute order, every one from
+	// windowStart (keptRounds): what each hole on a window is read against
 	// to say whose minute it is. slotOffset is the object's distance from a
 	// Slot to the record minute it evaluates, from the latest round that
 	// reported one, so a round that carried no record can still be matched
@@ -328,6 +328,10 @@ type queryGroupState struct {
 	// the object, kept after that round rolls out of rounds: what
 	// rememberedSince tells a hole this process never saw from one it forgot.
 	firstSlot int64
+	// windowStart is where the object's windows start, the latest the
+	// worker said: no hole of theirs is older, so no round older is kept.
+	// Zero while the worker has said nothing (an older worker).
+	windowStart int64
 	// worstWindow is the key of the window the worst pair belonged to on
 	// the last round, so the round-over-round counters know when the pair
 	// moved to another window.
@@ -1576,6 +1580,11 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 			}
 			if len(state.coverage.Windows) > 0 {
 				state.coverage.RoundsRemembered, state.coverage.RoundsKept = len(state.rounds), RecentRoundsKept
+				if state.windowStart > 0 {
+					// Kept by the window, not by a count: every round from
+					// where the windows start is kept.
+					state.coverage.RoundsKept = len(state.rounds)
+				}
 			}
 			state.coverage.UnlistedHolesAnswered = unlistedHolesAnswered(state.rounds, facts)
 			state.coverage.UnlistedHolesBeforeThisProcess = unlistedHolesBeforeThisProcess(state.rounds, facts, rememberedSince(state))
