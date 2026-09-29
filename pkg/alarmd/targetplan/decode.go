@@ -76,6 +76,49 @@ type Options struct {
 	ObjectIdentities [][2]string
 }
 
+// The protocol's fields at each place in a plan. onlyKeys holds a document
+// to them, and DocumentKeys lists them.
+var (
+	planFields = []string{"schema_version", "model_id", "target_rule", "failure_policy",
+		"static_targets", "dynamic_groups", "dynamic_topologies", "model_match"}
+	dynamicGroupFields    = []string{"dynamic_group_id"}
+	dynamicTopologyFields = []string{"bk_biz_id", "bk_obj_id", "bk_inst_id"}
+	hostTargetFields      = []string{"bk_host_id"}
+	memberTargetFields    = []string{"model_id", "model_inst_id"}
+	// matchedTargetFields is a Kubernetes static target, which may also
+	// carry its cluster's business (staticTargetBusinessField).
+	matchedTargetFields       = []string{"model_id", "model_inst_id", "match"}
+	staticTargetBusinessField = "bk_biz_id"
+)
+
+// DocumentKeys is every key Decode reads, as a dotted path below the
+// target_plan with arrays left out (static_targets.match.namespace). The
+// key of a model match is whatever dimension the writer names; it is listed
+// by the platform's default one.
+func DocumentKeys() []string {
+	keys := append([]string(nil), planFields...)
+	add := func(prefix string, names ...string) {
+		for _, name := range names {
+			keys = append(keys, prefix+"."+name)
+		}
+	}
+	add("model_match", DefaultObjectModelDimension)
+	add("dynamic_groups", dynamicGroupFields...)
+	add("dynamic_topologies", dynamicTopologyFields...)
+	add("static_targets", hostTargetFields...)
+	add("static_targets", memberTargetFields...)
+	add("static_targets", matchedTargetFields...)
+	add("static_targets", staticTargetBusinessField)
+	for _, rule := range contract.TargetPlanRules() {
+		if rule == contract.TargetPlanRuleHostID || rule == contract.TargetPlanRuleModelInstID {
+			continue // decodeStaticTarget reads no match for these
+		}
+		dimensions, _ := contract.TargetPlanRuleDimensions(rule)
+		add("static_targets.match", dimensions...)
+	}
+	return keys
+}
+
 // Decode reads one target_plan document. A nil error means the plan is
 // frozen and valid; the frozen form passes contract validation by
 // construction.
@@ -84,8 +127,7 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 	if err != nil {
 		return nil, unsupported("", "%s", err)
 	}
-	if err := onlyKeys(fields, "", "schema_version", "model_id", "target_rule", "failure_policy",
-		"static_targets", "dynamic_groups", "dynamic_topologies", "model_match"); err != nil {
+	if err := onlyKeys(fields, "", planFields...); err != nil {
 		return nil, err
 	}
 	if strings.TrimSpace(string(fields["schema_version"])) != "1" {
@@ -157,7 +199,7 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 		if err != nil {
 			return nil, unsupported(path, "%s", err)
 		}
-		if err := onlyKeys(members, path, "dynamic_group_id"); err != nil {
+		if err := onlyKeys(members, path, dynamicGroupFields...); err != nil {
 			return nil, err
 		}
 		id, err := scalarText(members["dynamic_group_id"])
@@ -184,7 +226,7 @@ func Decode(raw json.RawMessage, options Options) (*contract.TargetPlanV1, *Erro
 		if err != nil {
 			return nil, unsupported(path, "%s", err)
 		}
-		if err := onlyKeys(members, path, "bk_biz_id", "bk_obj_id", "bk_inst_id"); err != nil {
+		if err := onlyKeys(members, path, dynamicTopologyFields...); err != nil {
 			return nil, err
 		}
 		business, err := integerText(members["bk_biz_id"])
@@ -296,7 +338,7 @@ func decodeStaticTarget(
 	}
 	switch rule {
 	case contract.TargetPlanRuleHostID:
-		if err := onlyKeys(fields, path, "bk_host_id"); err != nil {
+		if err := onlyKeys(fields, path, hostTargetFields...); err != nil {
 			return "", nil, "", err
 		}
 		host, err := integerText(fields["bk_host_id"])
@@ -305,7 +347,7 @@ func decodeStaticTarget(
 		}
 		return contract.TargetPlanMemberKey(host), nil, "", nil
 	case contract.TargetPlanRuleModelInstID:
-		if err := onlyKeys(fields, path, "model_id", "model_inst_id"); err != nil {
+		if err := onlyKeys(fields, path, memberTargetFields...); err != nil {
 			return "", nil, "", err
 		}
 		model, instance, err := memberModelInstance(fields, path, plan.ModelID)
@@ -321,15 +363,15 @@ func decodeStaticTarget(
 		// a static target: read and taken out before the closed key check,
 		// so every other field stays exactly as required as it was.
 		business := ""
-		if raw, present := fields["bk_biz_id"]; present {
+		if raw, present := fields[staticTargetBusinessField]; present {
 			text, err := integerText(raw)
 			if err != nil {
 				return "", nil, "", unsupported(path+".bk_biz_id", "%s", err)
 			}
 			business = text
-			delete(fields, "bk_biz_id")
+			delete(fields, staticTargetBusinessField)
 		}
-		if err := onlyKeys(fields, path, "model_id", "model_inst_id", "match"); err != nil {
+		if err := onlyKeys(fields, path, matchedTargetFields...); err != nil {
 			return "", nil, "", err
 		}
 		if _, _, err := memberModelInstance(fields, path, plan.ModelID); err != nil {

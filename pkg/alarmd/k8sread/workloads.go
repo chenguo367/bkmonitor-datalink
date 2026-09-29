@@ -51,6 +51,13 @@ const (
 	OriginOwn        = "own"
 	OriginDerived    = "derived"
 	OriginConfigured = "configured"
+	// OriginShortName is a dependency addressed by a bare Service name, placed
+	// in this process's own namespace because that is where a Pod's resolver
+	// looks it up first. It is an assumption the address supports, not one it
+	// proves: a hostAliases entry or the node's search domains can send the
+	// name elsewhere, and the origin says so rather than reading like a
+	// namespace the address names.
+	OriginShortName = "short_name"
 )
 
 // ReasonNoNamespace is why a dependency adds no namespace: its address is not
@@ -361,7 +368,8 @@ func (r *Reader) Workloads(ctx context.Context, dependencies []Dependency, confi
 			// A bare Service name resolves in this process's own namespace:
 			// the dependency is read there, and named on that section, rather
 			// than listed as an address that names none.
-			namespace, ok = own, true
+			add(own, NamespaceOrigin{Kind: OriginShortName, Dependency: dependency.Name, Address: dependency.Address})
+			continue
 		}
 		if !ok {
 			result.Unresolved = append(result.Unresolved, UnresolvedDependency{Dependency: dependency.Name, Address: dependency.Address, Reason: ReasonNoNamespace})
