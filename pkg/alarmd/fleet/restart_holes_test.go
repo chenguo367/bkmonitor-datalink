@@ -172,7 +172,7 @@ func TestARestartedProcessWaitsUntilTheWindowSlidesPastItsFirstRound(t *testing.
 		t.Fatalf("unnamed windows: before this process %v, answered %v; want before this process only",
 			row.Coverage.UnlistedHolesBeforeThisProcess, row.Coverage.UnlistedHolesAnswered)
 	}
-	if clause := evidenceClause(row); !strings.Contains(clause, "2 分钟早于本进程开始看这个对象") {
+	if clause := evidenceClause(row); !strings.Contains(clause, "2 分钟早于本副本接手这个对象") {
 		t.Fatalf("evidence clause = %q, want the two minutes before this process named", clause)
 	}
 	if !planScopedCheck(row.Finding.Check) {

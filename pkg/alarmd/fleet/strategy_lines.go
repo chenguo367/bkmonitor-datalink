@@ -242,7 +242,7 @@ func evidenceClause(row Anomaly) string {
 	case unknown > 0:
 		return clause + fmt.Sprintf("，缺的分钟里 %d 分钟说不出是谁的", unknown)
 	case before > 0:
-		return clause + fmt.Sprintf("，缺的分钟里 %d 分钟早于本进程开始看这个对象，窗口滑过后再判", before)
+		return clause + fmt.Sprintf("，缺的分钟里 %d 分钟早于本副本接手这个对象，窗口滑过后再判", before)
 	default:
 		return clause + fmt.Sprintf("，缺的 %d 分钟查询都正常返回、序列不在结果里", data)
 	}

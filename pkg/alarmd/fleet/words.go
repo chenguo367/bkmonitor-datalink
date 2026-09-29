@@ -129,7 +129,7 @@ func ProductWords() Words {
 			HoleAnsweredWithoutSeries: "查询正常返回，这条序列不在结果里", HoleAnsweredEmpty: "查询正常返回，整个对象没有数据",
 			HoleInputIncomplete: "本侧那一轮没查全", HolePointUnusable: "记录到了，检测用不了",
 			HolePrimaryUnrecorded: "那一轮查询答了什么没记下来", HoleNotInMemory: "超出本进程记忆",
-			HoleBeforeThisProcess: "早于本进程开始看这个对象，窗口滑过后再判",
+			HoleBeforeThisProcess: "早于本副本接手这个对象，窗口滑过后再判",
 		},
 		Verdict: map[WindowVerdict]string{
 			VerdictDataAbsentWhenQueried: "查询时数据不在", VerdictInputIncomplete: "本侧没查全",

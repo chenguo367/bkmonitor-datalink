@@ -934,7 +934,9 @@ const (
 	// A limit of the reader, not a finding.
 	HoleNotInMemory HoleCause = "NOT_IN_MEMORY"
 	// The minute is before the first round this process remembers for the
-	// object: this process started, or began watching the object, after it.
+	// object: this process started, or took the object over from another
+	// replica, after it. The tracker is fed by this replica's own
+	// completions, so a new owner remembers nothing of the old one's rounds.
 	// A limit of the reader like NOT_IN_MEMORY, apart from it because it
 	// ends by itself: once the window slides past that first round every
 	// minute in it is one this process saw.
