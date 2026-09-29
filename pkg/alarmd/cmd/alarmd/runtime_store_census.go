@@ -83,11 +83,28 @@ func censusStoresOf(cfg config.Config, source, runtime, compatOutput redis.Unive
 	)
 }
 
+// censusVocabulary is the words the census keeps of a key: the built-in ones
+// and every key prefix the deployment configures, which are its and not data.
+func censusVocabulary(cfg config.Config) *storecensus.Vocabulary {
+	prefixes := []string{cfg.Redis.StatePrefix, cfg.PhaseTwo.Control.StrategyCachePrefix,
+		cfg.Kafka.LegacyAdapter.SnapshotPrefix, cfg.PhaseTwo.PlatformSettings.RedisKeyPrefix, cfg.PhaseTwo.Linkd.Prefix()}
+	if prefix, found := cfg.DynamicGroupKeyPrefix(); found {
+		prefixes = append(prefixes, prefix)
+	}
+	if pods := cfg.Kafka.LegacyAdapter.PodCache; pods != nil {
+		prefixes = append(prefixes, pods.KeyPrefix)
+	}
+	return storecensus.NewVocabulary(prefixes...)
+}
+
 // storeCensus is the latest census of each store, as the scrape reads it.
 type storeCensus struct {
 	stores []censusStore
-	now    func() time.Time
-	last   atomic.Pointer[[]storecensus.Result]
+	// vocabulary names the keys: the built-in words and the deployment's
+	// configured key prefixes.
+	vocabulary *storecensus.Vocabulary
+	now        func() time.Time
+	last       atomic.Pointer[[]storecensus.Result]
 }
 
 // measure takes a census of every store while leading and forgets the last
@@ -101,7 +118,7 @@ func (census *storeCensus) measure(ctx context.Context, leading bool) {
 	results := make([]storecensus.Result, 0, len(census.stores))
 	for _, store := range census.stores {
 		measureCtx, cancel := context.WithTimeout(redisfailure.WithCaller(ctx, redisfailure.CallerStoreCensus), storeCensusTimeout)
-		result, err := storecensus.Measure(measureCtx, store.client, store.name, census.now)
+		result, err := storecensus.Measure(measureCtx, store.client, store.name, census.vocabulary, census.now)
 		cancel()
 		if err == nil {
 			results = append(results, result)

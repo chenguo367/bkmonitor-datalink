@@ -101,8 +101,12 @@ type Result struct {
 	Duration time.Duration
 }
 
-// Measure takes one census of the store client reaches.
-func Measure(ctx context.Context, client redis.UniversalClient, store string, now func() time.Time) (Result, error) {
+// Measure takes one census of the store client reaches, its keys named by
+// vocabulary (nil: the built-in words alone).
+func Measure(ctx context.Context, client redis.UniversalClient, store string, vocabulary *Vocabulary, now func() time.Time) (Result, error) {
+	if vocabulary == nil {
+		vocabulary = defaultVocabulary
+	}
 	if _, cluster := client.(*redis.ClusterClient); cluster {
 		return Result{}, ErrUnsupported
 	}
@@ -122,7 +126,7 @@ func Measure(ctx context.Context, client redis.UniversalClient, store string, no
 	if err != nil {
 		return Result{}, err
 	}
-	families, weighed, gone := estimate(drawn, sizes, keys, result.Exact)
+	families, weighed, gone := estimate(vocabulary, drawn, sizes, keys, result.Exact)
 	result.Weighed, result.Gone = weighed, gone
 	result.Families = fold(families)
 	result.Duration = now().Sub(started)
@@ -132,8 +136,8 @@ func Measure(ctx context.Context, client redis.UniversalClient, store string, no
 // estimate is the families of the keys drawn, scaled to a store of keys
 // keys unless they were every key: each family's share of every draw, gone
 // ones included, times the store's count.
-func estimate(drawn []string, sizes []int64, keys int64, exact bool) (families []Family, weighed, gone int) {
-	families, weighed, gone = tally(drawn, sizes)
+func estimate(vocabulary *Vocabulary, drawn []string, sizes []int64, keys int64, exact bool) (families []Family, weighed, gone int) {
+	families, weighed, gone = tally(vocabulary, drawn, sizes)
 	if exact || len(drawn) == 0 {
 		return families, weighed, gone
 	}
@@ -148,10 +152,10 @@ func estimate(drawn []string, sizes []int64, keys int64, exact bool) (families [
 // tally is the keys drawn by family, unscaled, and how many were weighed and
 // how many had gone before they could be: a key gone counts in its family's
 // keys and adds nothing to its bytes.
-func tally(drawn []string, sizes []int64) (families []Family, weighed, gone int) {
+func tally(vocabulary *Vocabulary, drawn []string, sizes []int64) (families []Family, weighed, gone int) {
 	byName := map[string]int{}
 	for index, key := range drawn {
-		name := FamilyOf(key)
+		name := vocabulary.FamilyOf(key)
 		position, found := byName[name]
 		if !found {
 			position = len(families)

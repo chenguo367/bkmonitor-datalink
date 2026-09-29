@@ -21,17 +21,27 @@ const (
 	maxFamilyName = 96
 )
 
+// FamilyOf is the family a key belongs to, by the built-in words alone;
+// Vocabulary.FamilyOf adds a deployment's configured prefixes.
+func FamilyOf(key string) string { return defaultVocabulary.FamilyOf(key) }
+
 // FamilyOf is the family a key belongs to. A key is segments between its
 // separators - ":" as alarmd and most Redis users write them, "." as the
-// platform's Python cache writes its keys - and each segment that names one
-// instance rather than a kind is written "*": a number, a digest, a hash
-// tag, a UUID, a long token; inside a segment, each "_"-separated part that
-// is one (strategy_group_<digest> is strategy_group_*). The separators are
-// kept, so a family reads as its keys do. Keys that differ only in which
-// Query Group, series or strategy they are about are one family.
-func FamilyOf(key string) string {
+// platform's Python cache writes its keys - and within a segment, parts
+// between "_" and "-". A part is kept only when it is a word of the code
+// that writes the store (Vocabulary) and does not name one thing; every
+// other part - a number, a digest, a hash tag, a UUID, and any word that is
+// data, a receiver's or a strategy's name, a mail address, text in any
+// language - is written "*". A mail address is split by its own dots, so
+// from a segment with an "@" on, every segment joined to it by "." is its
+// domain and is written "*" too, whatever words of the code it happens to
+// spell. The separators are kept, so a family reads as its keys do: keys
+// that differ only in which Query Group, series, strategy or receiver they
+// are about are one family.
+func (vocabulary *Vocabulary) FamilyOf(key string) string {
 	var name strings.Builder
 	segments, start := 0, 0
+	address := false
 	for index := 0; index <= len(key); index++ {
 		if index < len(key) && key[index] == '{' {
 			// A hash tag is one segment whatever it holds.
@@ -47,7 +57,18 @@ func FamilyOf(key string) string {
 			name.WriteString("*")
 			break
 		}
-		name.WriteString(kind(key[start:index]))
+		segment := key[start:index]
+		if start == 0 || key[start-1] != '.' {
+			address = false
+		}
+		if strings.Contains(segment, "@") {
+			address = true
+		}
+		if address {
+			name.WriteString("*")
+		} else {
+			name.WriteString(vocabulary.kind(segment))
+		}
 		segments++
 		if index < len(key) {
 			name.WriteByte(key[index])
@@ -61,31 +82,60 @@ func FamilyOf(key string) string {
 	return family
 }
 
-// kind is a segment with its instances written "*": each of its
-// "_"-separated parts that is one, a UUID it ends in (celery-task-meta-<uuid>
-// is celery-task-meta-*), and otherwise the whole of it when it is one - a
-// long token or a hash tag that happens to hold a "_".
-func kind(segment string) string {
-	if prefix, found := beforeTrailingUUID(segment); found {
-		return prefix + "*"
-	}
-	if !strings.Contains(segment, "_") {
-		if instance(segment) {
-			return "*"
-		}
+// kind is a segment with everything but the code's words written "*": a
+// segment of a configured prefix as it is, a hash tag whole, the prefix of
+// a UUID it ends in (celery-task-meta-<uuid> is celery-task-meta-*), and
+// otherwise part by part.
+func (vocabulary *Vocabulary) kind(segment string) string {
+	if _, configured := vocabulary.segments[segment]; configured {
 		return segment
 	}
-	parts := strings.Split(segment, "_")
-	folded := false
-	for index, part := range parts {
-		if instance(part) {
-			parts[index], folded = "*", true
-		}
-	}
-	if !folded && instance(segment) {
+	if strings.HasPrefix(segment, "{") && strings.HasSuffix(segment, "}") {
 		return "*"
 	}
-	return strings.Join(parts, "_")
+	if prefix, found := beforeTrailingUUID(segment); found {
+		if named := vocabulary.parts(prefix); named != "*" {
+			return named + "*"
+		}
+		return "*"
+	}
+	return vocabulary.parts(segment)
+}
+
+// parts writes each part of a segment between "_" and "-" as itself when it
+// is a word of the code, and "*" when it names one thing (a number, a
+// digest); at the first part that is neither - a word of data - the rest of
+// the segment is that data's, a user's table name or a pod's, and is one
+// "*". A segment with no word of the code is "*" whole. Empty parts - a
+// leading "_", a trailing "-" - stay empty.
+func (vocabulary *Vocabulary) parts(segment string) string {
+	var name strings.Builder
+	known, start := false, 0
+	for index := 0; index <= len(segment); index++ {
+		if index < len(segment) && segment[index] != '_' && segment[index] != '-' {
+			continue
+		}
+		part := segment[start:index]
+		switch {
+		case part == "":
+		case instance(part):
+			name.WriteString("*")
+		case vocabulary.knows(part):
+			name.WriteString(part)
+			known = true
+		default:
+			name.WriteString("*")
+			index = len(segment)
+		}
+		if index < len(segment) {
+			name.WriteByte(segment[index])
+		}
+		start = index + 1
+	}
+	if !known {
+		return "*"
+	}
+	return name.String()
 }
 
 // instance reports a segment that names one thing rather than a kind.

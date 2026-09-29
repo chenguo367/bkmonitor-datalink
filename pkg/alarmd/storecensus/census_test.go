@@ -91,7 +91,7 @@ func TestASmallStoreIsCountedExactly(t *testing.T) {
 	client := startRedis(t)
 	fill(t, client, "alarmd:state", 300, 200)
 	fill(t, client, "alarmd:gap", 100, 20)
-	result, err := Measure(context.Background(), client, "runtime", time.Now)
+	result, err := Measure(context.Background(), client, "runtime", nil, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +121,7 @@ func TestALargeStoreIsSampledAndScaled(t *testing.T) {
 	client := startRedis(t)
 	fill(t, client, "alarmd:state", 6000, 400)
 	fill(t, client, "python:cache", 2000, 40)
-	result, err := Measure(context.Background(), client, "runtime", time.Now)
+	result, err := Measure(context.Background(), client, "runtime", nil, time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestFamiliesPastTheBoundAreFoldedIntoOther(t *testing.T) {
 // An empty store is a census of nothing, not an error.
 func TestAnEmptyStoreIsACensusOfNothing(t *testing.T) {
 	client := startRedis(t)
-	result, err := Measure(context.Background(), client, "runtime", time.Now)
+	result, err := Measure(context.Background(), client, "runtime", nil, time.Now)
 	if err != nil || result.Keys != 0 || len(result.Families) != 0 || !result.Exact {
 		t.Fatalf("empty store = (%+v, %v), want an exact census of nothing", result, err)
 	}
@@ -180,7 +180,7 @@ func TestAnEmptyStoreIsACensusOfNothing(t *testing.T) {
 func TestAClusterIsNotMeasured(t *testing.T) {
 	cluster := redis.NewClusterClient(&redis.ClusterOptions{Addrs: []string{"127.0.0.1:1"}})
 	defer cluster.Close()
-	if _, err := Measure(context.Background(), cluster, "runtime", time.Now); err != ErrUnsupported {
+	if _, err := Measure(context.Background(), cluster, "runtime", nil, time.Now); err != ErrUnsupported {
 		t.Fatalf("cluster = %v, want ErrUnsupported", err)
 	}
 }
@@ -190,17 +190,17 @@ func TestAClusterIsNotMeasured(t *testing.T) {
 // bytes, and a sample is scaled by every draw, so the families' keys add up
 // to the store's count.
 func TestAKeyGoneBeforeItWasWeighedCountsInItsFamilyWithNoBytes(t *testing.T) {
-	families, weighed, gone := estimate([]string{"a:1", "a:2", "b:1"}, []int64{10, -1, 5}, 300, false)
+	families, weighed, gone := estimate(defaultVocabulary, []string{"alarmd:1", "alarmd:2", "celery:1"}, []int64{10, -1, 5}, 300, false)
 	if weighed != 2 || gone != 1 || len(families) != 2 {
 		t.Fatalf("estimate = %+v weighed %d gone %d, want two families of the three keys drawn", families, weighed, gone)
 	}
-	want := map[string]Family{"a:*": {Name: "a:*", Samples: 2, Keys: 200, Bytes: 1000}, "b:*": {Name: "b:*", Samples: 1, Keys: 100, Bytes: 500}}
+	want := map[string]Family{"alarmd:*": {Name: "alarmd:*", Samples: 2, Keys: 200, Bytes: 1000}, "celery:*": {Name: "celery:*", Samples: 1, Keys: 100, Bytes: 500}}
 	for _, family := range families {
 		if family != want[family.Name] {
 			t.Fatalf("family %+v, want %+v", family, want[family.Name])
 		}
 	}
-	exact, _, _ := estimate([]string{"a:1", "a:2"}, []int64{10, -1}, 300, true)
+	exact, _, _ := estimate(defaultVocabulary, []string{"alarmd:1", "alarmd:2"}, []int64{10, -1}, 300, true)
 	if len(exact) != 1 || exact[0].Keys != 2 || exact[0].Bytes != 10 {
 		t.Fatalf("an exact census = %+v, want its keys as counted", exact)
 	}
@@ -228,5 +228,26 @@ func TestAWalkThatOverrunsIsNotACensusOfEveryKey(t *testing.T) {
 	walked := appendNew(appendNew(nil, seen, []string{"a", "b"}), seen, []string{"b", "c", "c"})
 	if strings.Join(walked, ",") != "a,b,c" {
 		t.Fatalf("pages walked = %v, want each key once", walked)
+	}
+}
+
+// A census names its families with the vocabulary it is given: a
+// deployment's prefix it knows stays, one it does not is folded.
+func TestACensusNamesFamiliesWithItsVocabulary(t *testing.T) {
+	client := startRedis(t)
+	fill(t, client, "deployment[x]:state", 10, 20)
+	named := func(vocabulary *Vocabulary) string {
+		t.Helper()
+		result, err := Measure(context.Background(), client, "runtime", vocabulary, time.Now)
+		if err != nil || len(result.Families) != 1 {
+			t.Fatalf("census = %+v, %v", result, err)
+		}
+		return result.Families[0].Name
+	}
+	if got := named(NewVocabulary("deployment[x]")); got != "deployment[x]:state:*" {
+		t.Errorf("with the prefix = %q", got)
+	}
+	if got := named(nil); got != "*:state:*" {
+		t.Errorf("without it = %q", got)
 	}
 }

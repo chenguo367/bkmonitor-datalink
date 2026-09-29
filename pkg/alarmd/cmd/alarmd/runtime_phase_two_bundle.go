@@ -886,7 +886,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// for the deployment, the Control Leader's, of each store it writes to -
 	// the strategy source, the runtime store, and the service Redis the
 	// compatibility output keeps its strategy snapshots in - each once.
-	census := &storeCensus{now: external.Now, stores: censusStoresOf(cfg, controlClient, runtimeClient, compatOutputClient)}
+	census := &storeCensus{now: external.Now, stores: censusStoresOf(cfg, controlClient, runtimeClient, compatOutputClient),
+		vocabulary: censusVocabulary(cfg)}
 	if err := recorder.BindStoreCensus(census.read); err != nil {
 		return nil, err
 	}
