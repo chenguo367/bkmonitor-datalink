@@ -912,7 +912,9 @@ func NewHandler(
 		Decide(&view, at, stallAfter)
 		service.RecordVerdict(&view, at)
 		history, since := service.VerdictHistory()
-		columns := Report(&view, at).Columns
+		// The columns alone: the check lines and the to-do they would draw
+		// are the list route's, and this route answers neither.
+		columns := viewColumns(&view)
 		writeJSON(response, http.StatusOK, HealthResponse{
 			Cohorts: cohortList(Cohorts(&view, columns)), Cooling: Cooling(&view, columns, at),
 			Health: view.Health, Expected: view.Expected, Covered: view.Covered,
