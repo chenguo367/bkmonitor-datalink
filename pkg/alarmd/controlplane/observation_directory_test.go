@@ -1480,6 +1480,92 @@ func TestAStoppedRefreshStillWalksWhatItHolds(t *testing.T) {
 	}
 }
 
+// A publication a stopped refresh does not hold is listed unread and the walk
+// goes on past it: three publications, the latest listing a group the store
+// refuses, and an activation carrying one Plan on each of the two before it,
+// of which the directory holds only the older manifest. The newer carried
+// manifest is unread and not asked about; the older one after it is walked
+// from what the directory holds and makes its row.
+func TestAStoppedRefreshWalksPastAnUnreadManifestToOneItHolds(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	fixture := newCutoverFixture(t, "alarmd:control:directory-three-publications")
+	first, second := cutoverCatalog(t, 80, nil), cutoverCatalog(t, 90, nil)
+	edited, untouched := splitEdited(t, first, second)
+	older := fixture.publish(t, first, 60).Publication
+	repository, err := controlplane.NewRedisCatalogRepository(fixture.client, fixture.prefix, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := execution.ObjectDigest(strings.Repeat("a", 64))
+	spy := &stoppingSpy{Cmdable: fixture.client, part: string(fake)}
+	d, err := controlplane.NewObservationDirectory(repository, limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	at := time.Unix(1000, 0)
+	d.Refresh(fixture.ctx, at)
+	if !slices.Contains(d.RememberedManifestsForTest(), older.SnapshotRevision) {
+		t.Fatalf("setup: remembered %v, want the first publication's manifest", d.RememberedManifestsForTest())
+	}
+
+	// The edit moves one Query Group's Plan to the second publication and
+	// leaves the other's on the first; a third publication, listing only a
+	// group the store refuses, becomes the latest.
+	newer := fixture.publish(t, second, 120).Publication
+	activation := fixture.activation(t)
+	if got := recordsOf(activation, edited); len(got) != 1 || got[0].Publication != newer {
+		t.Fatalf("setup: the edited group's Plan = %+v, want it on the second publication", got)
+	}
+	if got := recordsOf(activation, untouched); len(got) != 1 || got[0].Publication != older {
+		t.Fatalf("setup: the untouched group's Plan = %+v, want it still on the first publication", got)
+	}
+	manifest, err := fixture.repository.LoadCatalogManifest(fixture.ctx, newer.SnapshotRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SnapshotRevision = execution.SnapshotRevision(strings.Repeat("e", 64))
+	manifest.QueryGroups = []controlplane.ManifestQueryGroup{{QueryGroup: "a-refused-group", ObjectDigest: fake}}
+	payload, _ := json.Marshal(manifest)
+	if err = fixture.client.Set(fixture.ctx, fixture.prefix+":manifest:"+string(manifest.SnapshotRevision), payload, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err = fixture.client.Set(fixture.ctx, fixture.prefix+":latest_publication", "3\n"+string(manifest.SnapshotRevision), 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+
+	spy.fail = func(_ context.Context, _ int) *redis.StringCmd {
+		return redis.NewStringResult("", errors.New("dial tcp 127.0.0.1:6379: connect: connection refused"))
+	}
+	spy.keys = nil
+	d.Refresh(fixture.ctx, at.Add(time.Second))
+	s := d.Page(at.Add(time.Second), "", "", "", 0, 20)
+	var order []string
+	sources := map[controlplane.SnapshotPublicationRef]string{}
+	for _, publication := range s.Publications {
+		order = append(order, publication.Manifest)
+		sources[publication.Publication] = publication.Manifest
+	}
+	if s.FailedRead != "group_object" || !slices.Equal(order, []string{"store", "unread", "remembered"}) ||
+		sources[newer] != "unread" || sources[older] != "remembered" {
+		t.Fatalf("stopped on the latest = failed %q, publications %+v; want the latest read, the second unread, the first walked from what is held",
+			s.FailedRead, s.Publications)
+	}
+	for _, key := range spy.keys {
+		if strings.Contains(key, string(newer.SnapshotRevision)) || strings.Contains(key, string(older.SnapshotRevision)) {
+			t.Fatalf("read %s after the refresh stopped; reads %v", key, spy.keys)
+		}
+	}
+	rows := 0
+	for _, row := range s.Rows {
+		if row.Publication == older && row.QueryGroup == untouched.Identity {
+			rows++
+		}
+	}
+	if rows != 1 {
+		t.Fatalf("the held publication after the unread one made %d rows of the untouched group, want 1: %+v", rows, s.Rows)
+	}
+}
+
 // A manifest is sent when it fits what the refresh has left exactly, and not
 // when it is one byte longer; with the refresh's commands spent its length
 // is not asked. A manifest held from the index is not remembered: the index
