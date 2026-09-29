@@ -98,6 +98,7 @@ type phaseTwoMetrics struct {
 	scheduleCutoverDuration        *prometheus.HistogramVec
 	scheduleCutovers               *prometheus.CounterVec
 	replayExpiries                 *prometheus.CounterVec
+	replayTakeovers                *prometheus.CounterVec
 	rangeGateDecisions             *prometheus.CounterVec
 	statePreflights                *prometheus.CounterVec
 	stateAdmissions                *prometheus.CounterVec
@@ -162,6 +163,7 @@ type phaseTwoMetrics struct {
 	activationRebuild               *activationRebuildCollector
 	activationHeader                *activationHeaderCollector
 	activationBlocked               *activationBlockedCollector
+	roundMemory                     *roundMemoryCollector
 	effectiveClose                  *effectiveCloseCollector
 	absentClose                     *absentCloseCollector
 	targetScopeClose                *targetScopeCloseCollector
@@ -174,6 +176,7 @@ type phaseTwoMetrics struct {
 	diagnosticRedisDialRetries      *prometheus.CounterVec
 	leaderForward                   *prometheus.HistogramVec
 	controlSourceRetainedStale      prometheus.Counter
+	controlSourceLastGoodIdentity   prometheus.Counter
 	controlSource                   *controlSourceCollector
 	leaderRound                     *leaderRoundCollector
 	lookback                        *lookbackCollector
@@ -912,6 +915,20 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	for _, reason := range observability.ReplayExpiryReasons {
 		metrics.replayExpiries.WithLabelValues(reason)
 	}
+	metrics.replayTakeovers = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "replay_takeover_slots_total",
+		Help: "Slots evaluated before this process took their Query Group over from another owner, by outcome, " +
+			"counted each time such a Slot is classified, so a Slot retried after a failed replay counts again: " +
+			"replayed, because nobody here could have run them and they are within the replay age; " +
+			"age_exceeded, given up on like any Slot that old. The distance rule, which gives up on Slots a " +
+			"Query Group fell behind on while it held them, does not apply to these. A rollout's handover " +
+			"is read here: replayed near the Slots its restart made the new owners miss, age_exceeded at zero " +
+			"while a handover takes less than the replay age. Compared on the Slot's evaluation time, not on " +
+			"when it became ready: one evaluated just before the takeover and ready after it counts too.",
+	}, []string{"outcome"})
+	for _, outcome := range observability.ReplayTakeoverOutcomes {
+		metrics.replayTakeovers.WithLabelValues(outcome)
+	}
 	// The word each round that gave up on a Slot puts on its range_gate line,
 	// as a series: the log had the thirteen words and the metric had none, so
 	// "which refusal is holding the Query Groups that never catch up" could
@@ -1308,6 +1325,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.activationRebuild = newActivationRebuildCollector()
 	metrics.activationHeader = newActivationHeaderCollector()
 	metrics.activationBlocked = newActivationBlockedCollector()
+	metrics.roundMemory = newRoundMemoryCollector()
 	metrics.effectiveClose = newEffectiveCloseCollector()
 	metrics.absentClose = newAbsentCloseCollector()
 	metrics.targetScopeClose = newTargetScopeCloseCollector()
@@ -1427,6 +1445,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"one release this is zero by construction; it rises, for every retained Plan at once, when a release " +
 			"changes either, and each such Plan leaves the Catalog under its disposition until its document " +
 			"compiles again, instead of the whole Catalog failing to build as it did before.",
+	})
+	metrics.controlSourceLastGoodIdentity = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_source_last_good_identity_changed_total",
+		Help: "Last-good Plans a Catalog build refused to retain because the source now states another tenant, " +
+			"business, space or global switch for the strategy than the Plan was built for (disposition " +
+			"LAST_GOOD_IDENTITY_CHANGED): the number is the same and the strategy is not, as when a writer's " +
+			"numbering started over. Counted where a document that did not compile, or compiled and was refused " +
+			"whole or in part, would otherwise keep its last good definition. Zero while every writer keeps its " +
+			"numbering; each such strategy stays out of the Catalog under its own disposition until its document " +
+			"compiles.",
 	})
 	metrics.catalogComposition = newCatalogCompositionCollector()
 	metrics.seriesAdmission = prometheus.NewCounterVec(prometheus.CounterOpts{
@@ -1719,15 +1747,15 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.scheduleCutoverPayload, m.scheduleCutoverTimelineMax, m.scheduleTimelineBytes, m.scheduleSegmentsPruned, m.envelopePass, m.envelopeApply, m.retainedShareApproaching, m.schedulePruneSkipped, m.scheduleCutoverDuration,
 		m.scheduleCutovers,
 		m.scheduleCutoverQueryGroups, m.scheduleCutoverTimelinesRead, m.scheduleCutoverLastDuration, m.scheduleCutoverFirstDuration,
-		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
+		m.scheduleCutoverFirstTimelines, m.scheduleCutoverPayloadSize, m.replayExpiries, m.replayTakeovers, m.rangeGateDecisions, m.statePreflights, m.stateAdmissions,
 		m.queryFailures,
 		m.objectCatalogObjects, m.objectCatalogRedis, m.objectCatalogManifestBytes, m.objectCatalogWrittenBytes, m.objectReads, m.stateGenerationSkew, m.stateCarry,
 		m.legacyMigration, m.legacyMigrationScan, m.legacyMigrationTime,
 		m.undrainedDrainingQueryGroups, m.drainingCursorPrunedQueryGroups, m.rebalancePlannedMoves, m.shardUnawareReadyReplicas, m.rebalanceGap, m.assignmentMoves, m.rebalancePaused, m.controlReadRoundTrips, m.controlReadKeys, m.controlReadDuration, m.assignmentIndexStaleRounds, m.assignmentIndexWrites, m.assignmentIndexReads, m.assignmentIndexConfirm, m.assignmentRecordReads, m.scheduleCursorAdvances, m.activationHeldQueryGroups, m.activationHeldAgeSecondsMax,
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
-		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
-		m.controlSourceRetainedStale, m.platformSettings,
+		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.roundMemory, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
+		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
@@ -1749,6 +1777,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.sourceRefreshes.WithLabelValues(string(facts.Status)).Inc()
 		if facts.RetainedStaleRevisions > 0 {
 			m.controlSourceRetainedStale.Add(float64(facts.RetainedStaleRevisions))
+		}
+		if facts.LastGoodIdentityChanged > 0 {
+			m.controlSourceLastGoodIdentity.Add(float64(facts.LastGoodIdentityChanged))
 		}
 		if facts.CompiledStrategies > 0 {
 			m.sourceCompiles.WithLabelValues("compiled").Add(float64(facts.CompiledStrategies))
@@ -1856,6 +1887,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 	}
 	if facts := observation.ReplayExpiry; facts != nil {
 		m.replayExpiries.WithLabelValues(facts.Reason).Inc()
+	}
+	if facts := observation.ReplayTakeover; facts != nil {
+		m.replayTakeovers.WithLabelValues(facts.Outcome).Inc()
 	}
 	if facts := observation.RangeGate; facts != nil {
 		// The normalized word: an outcome outside the list has already been

@@ -775,7 +775,7 @@ func (stream *streamedExecution) complete(ctx context.Context, completion execut
 			binding.Completeness = execution.CompletenessUnavailable
 			binding.DataState = execution.DataStateUnknown
 			binding.Disposition = execution.AccessUnavailable
-			binding.ReasonCode = physicalFailureReason(item.RouteFacts)
+			binding.ReasonCode, binding.UnavailableAttribution = physicalFailureReason(item.RouteFacts)
 			binding.PartialEvidence = nil
 		default:
 			return completionContractError(codeInvalidCompleteness, "alarmd worker: invalid physical completion completeness")
@@ -1379,7 +1379,7 @@ func (stream *streamedExecution) completedBinding(
 	case execution.CompletenessUnavailable:
 		binding.DataState = execution.DataStateUnknown
 		binding.Disposition = execution.AccessUnavailable
-		binding.ReasonCode = physicalFailureReason(completed.RouteFacts)
+		binding.ReasonCode, binding.UnavailableAttribution = physicalFailureReason(completed.RouteFacts)
 	default:
 		return execution.NamedInputBinding{}, namedInputError(codePhysicalCompletenessInvalid, "invalid physical completion completeness")
 	}
@@ -2347,12 +2347,12 @@ func requiredFullSlots(plan *strategy.CompiledPlan) uint32 {
 }
 
 // physicalFailureReason picks the code an unavailable physical completion
-// carries; the walk and the fallback live in execution.AttributeUnavailable.
-// Where the code came from is counted by providerUnavailableFacts when the
-// completion is observed, not bound here.
-func physicalFailureReason(facts execution.ProviderRouteFacts) execution.ReasonCode {
-	code, _ := execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))
-	return code
+// carries and where it came from; the walk and the fallback live in
+// execution.AttributeUnavailable. The binding keeps both: the code for what
+// reads bindings, the attribution for the completion, which names a
+// fallback as the fallback.
+func physicalFailureReason(facts execution.ProviderRouteFacts) (execution.ReasonCode, execution.UnavailableAttribution) {
+	return execution.AttributeUnavailable(facts, execution.ReasonCode(contract.ReasonQueryUnavailable))
 }
 
 func provisionalResult(result execution.EvaluationResult) (observability.Result, execution.ReasonCode) {

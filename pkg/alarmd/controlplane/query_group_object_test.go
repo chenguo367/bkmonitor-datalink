@@ -295,7 +295,10 @@ func TestPublishedPlanFieldsAreEachPlacedInOneDigest(t *testing.T) {
 			// GlobalStrategies is a count's input like RetainedStaleRevisions:
 			// the leader's composition reads it and nothing persists it, and
 			// what it says per strategy is in the dispositions already.
-			neither: []string{"ObservationID", "SnapshotRevision", "Dispositions", "RetainedStaleRevisions", "Retention", "ObjectRetention", "GlobalStrategies"},
+			// LastGoodIdentityChanged is a build count like
+			// RetainedStaleRevisions, for the same reason.
+			neither: []string{"ObservationID", "SnapshotRevision", "Dispositions", "RetainedStaleRevisions", "LastGoodIdentityChanged",
+				"Retention", "ObjectRetention", "GlobalStrategies"},
 		},
 		reflect.TypeOf(controlplane.QueryGroup{}): {
 			execution: []string{"Identity", "QueryPlan", "MembershipDigest", "ScheduleRevision"},

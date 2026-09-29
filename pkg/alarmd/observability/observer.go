@@ -113,6 +113,7 @@ const (
 	StageSlotSourceCompleted    = "slot_source_completed"
 	StageScheduleCursorAdvanced = "schedule_cursor_advanced"
 	StageReplayExpired          = "replay_expired"
+	StageReplayTakeover         = "replay_takeover"
 	StageRangeDistanceExpired   = "range_distance_expired"
 	StageRangeGateDecided       = "range_gate_decided"
 	StageSlotWait               = "slot_wait"
@@ -1256,6 +1257,28 @@ var ReplayExpiryReasons = []string{
 	"REPLAY_AGE_EXCEEDED", "REPLAY_DISTANCE_EXCEEDED", "REPLAY_WAIT_EXCEEDS_DISTANCE", "REPLAY_RANGE_EXPIRED",
 }
 
+// ReplayTakeoverFacts is one Slot evaluated before this process took its
+// Query Group over from another owner (scheduler.TakeoverClock): replayed,
+// because nobody here could have run it and it is within the replay age, or
+// past the replay age and given up on like any Slot that old. The distance
+// rule does not apply to it. TakeoverOffsetSeconds is how long after the
+// takeover the Slot was classified. One is reported each time such a Slot
+// is classified, so a Slot retried after a failed replay is reported again.
+type ReplayTakeoverFacts struct {
+	Outcome               string
+	AgeSeconds            float64
+	TakeoverOffsetSeconds float64
+}
+
+// The outcomes of a Slot due before a takeover, closed.
+const (
+	ReplayTakeoverReplayed    = "replayed"
+	ReplayTakeoverAgeExceeded = "age_exceeded"
+)
+
+// ReplayTakeoverOutcomes is every outcome, for the metric to pre-create.
+var ReplayTakeoverOutcomes = []string{ReplayTakeoverReplayed, ReplayTakeoverAgeExceeded}
+
 // ObjectCatalogFacts describe one write or renewal of the content-addressed
 // Query Group objects, output contexts and the manifest that names them for
 // one publication. Written counts objects the operation created, Present
@@ -1886,6 +1909,11 @@ type SourceRefreshFacts struct {
 	// from their facts; non-zero only across a change of the revision
 	// formula, when it is the whole population of retained Plans.
 	RetainedStaleRevisions int
+	// LastGoodIdentityChanged is how many last-good Plans the round's Catalog
+	// refused to retain because the source now states another tenant,
+	// business, space or global switch for the strategy; non-zero when a
+	// writer's numbering started over and a number names another strategy.
+	LastGoodIdentityChanged int
 }
 
 // SourceReadMode and SourceReadReason mirror the control plane's vocabulary
@@ -2290,6 +2318,9 @@ type Observation struct {
 	// population -- on a running deployment, 61 of 62 objects sharing a label
 	// that could not say whose problem they were.
 	ProgressCompletionReason string
+	// ProgressCompletionScope is where that cause was found: the Plan, and the
+	// Level or the physical query. Nil when the completion carried no cause.
+	ProgressCompletionScope *CompletionScopeFacts
 	// HistoryCoverage says how far short of the required window the series in
 	// this run actually were. HISTORY_WARMING alone cannot tell a series two
 	// rounds into its life, which converges by itself, from a series whose
@@ -2360,6 +2391,7 @@ type Observation struct {
 	ActiveQGSet           *ActiveQGSetFacts
 	ScheduleCutover       *ScheduleCutoverFacts
 	ReplayExpiry          *ReplayExpiryFacts
+	ReplayTakeover        *ReplayTakeoverFacts
 	// HeldBy is what the round before this one did with the Query Group. It
 	// sits on the Observation rather than inside one cohort's fact bundle:
 	// it first shipped inside ShortPeriodCompletionFacts, and every Query
@@ -3299,6 +3331,9 @@ func NormalizeReason(reason ReasonCode, result Result) ReasonCode {
 	if _, ok := absentCloseReasonSet[reason]; ok {
 		return reason
 	}
+	if _, ok := completionAttributionReasonSet[reason]; ok {
+		return reason
+	}
 	return ReasonOther
 }
 
@@ -3491,6 +3526,7 @@ var phaseTwoComponentStages = []ComponentStage{
 	{ComponentScheduler, StageDispatchTurnaway},
 	{ComponentScheduler, StageRunnerCompleted}, {ComponentScheduler, StageSlotSourceCompleted},
 	{ComponentScheduler, StageScheduleCursorAdvanced}, {ComponentScheduler, StageReplayExpired},
+	{ComponentScheduler, StageReplayTakeover},
 	{ComponentScheduler, StageRangeDistanceExpired},
 	{ComponentScheduler, StageRangeGateDecided},
 	{ComponentScheduler, StageSlotWait},

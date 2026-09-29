@@ -38,6 +38,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/ownership"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/progress"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/redisfailure"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/state"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/strategy"
@@ -211,6 +212,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// anomaly list costs no reads of its own. It forwards every observation
 	// untouched: diagnostics must not change what the pipeline reports.
 	fleetTracker := fleet.NewTracker(baseObserver, cfg.PhaseTwo.Worker.ID, external.Now)
+	recorder.SetRoundMemorySource(fleetTracker.RoundMemory)
 	var observer observability.Observer = fleetTracker
 	targetFlow, err := observability.NewTargetFlow(logger)
 	if err != nil {
@@ -393,7 +395,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// The platform's settings this process evaluates by, read once here so the
 	// compiler and the admission filters start on the platform's word where
 	// there is one, then kept current by the runtime once a minute.
-	platformSettings, err := buildPlatformSettings(ctx, cfg, dynamicConfigClient, external.Now)
+	platformSettings, err := buildPlatformSettings(ctx, cfg, redisForCaller(dynamicConfigClient, redisfailure.CallerDynamicConfig), external.Now)
 	if err != nil {
 		return nil, err
 	}
@@ -407,7 +409,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	fleetTracker.SetPlatformNoDataHorizon(func() int64 {
 		return platformSettings.Current().NoDataTrackingHorizonSeconds
 	})
-	strategySource, err := newStrategySource(controlClient, cfg.PhaseTwo.Control.StrategyCachePrefix)
+	strategySource, err := newStrategySource(redisForCaller(controlClient, redisfailure.CallerStrategySource), cfg.PhaseTwo.Control.StrategyCachePrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -420,7 +422,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	repository, err := controlplane.NewRedisCatalogRepository(
-		runtimeClient, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "catalog"), phaseTwoCatalogRetention(cfg),
+		redisForCaller(runtimeClient, redisfailure.CallerControlPlane), productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "catalog"), phaseTwoCatalogRetention(cfg),
 	)
 	if err != nil {
 		return nil, err
@@ -552,7 +554,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	ownershipStore, err := ownership.NewRedisStoreWithClient(
-		runtimeClient, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership"),
+		redisForCaller(runtimeClient, redisfailure.CallerOwnership), productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "ownership"),
 	)
 	if err != nil {
 		return nil, err
@@ -566,7 +568,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// keys here rather than guessing the ownership prefix.
 	repository.WithAssignmentRecordKey(ownershipStore.AssignmentKey)
 
-	stateBackend, err := state.NewRedisBackendWithClient(productionRedisAddress(runtimeConnection), runtimeClient)
+	stateBackend, err := state.NewRedisBackendWithClient(productionRedisAddress(runtimeConnection), redisForCaller(runtimeClient, redisfailure.CallerRuntimeState))
 	if err != nil {
 		return nil, err
 	}
@@ -641,7 +643,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// A series is evaluated for a strategy only inside that strategy's
 	// monitoring target. The facts it is decided on come from the platform's
 	// CMDB host cache, on the database this client already uses.
-	seriesAdmission, cmdbIndex, err := buildSeriesAdmission(ctx, cfg, cmdbClient, recorder, logger, hostStatus, wait)
+	seriesAdmission, cmdbIndex, err := buildSeriesAdmission(ctx, cfg, redisForCaller(cmdbClient, redisfailure.CallerCMDBCache), recorder, logger, hostStatus, wait)
 	if err != nil {
 		return nil, err
 	}
@@ -657,7 +659,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// What a target plan's dynamic references resolve against, once per
 	// Plan per Slot (decision-017). The group store, when there is one,
 	// refreshes on the same cadence as the host index and stops with it.
-	targetResolver, groupStore, err := buildTargetResolver(cfg, targetGroupClient, cmdbIndex, logger)
+	targetResolver, groupStore, err := buildTargetResolver(cfg, redisForCaller(targetGroupClient, redisfailure.CallerTargetGroup), cmdbIndex, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -797,7 +799,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// External facts reuse runtime Redis unless the deployment binds Linkd
 	// elsewhere. A failed index is not a startup dependency of detection.
 	linkdConnection := runtimeConnection
-	linkdClient := runtimeClient
+	linkdClient := redisForCaller(runtimeClient, redisfailure.CallerLinkd)
 	linkdClientOwned := false
 	if cfg.PhaseTwo.Linkd.Connection != nil {
 		linkdConnection = *cfg.PhaseTwo.Linkd.Connection
@@ -816,7 +818,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// a client for it once; the runtime connection keeps the runtime client.
 	openLinkdClient := func(connection config.RedisConnectionConfig) (redis.UniversalClient, bool) {
 		if sameRedisConnection(connection, runtimeConnection) {
-			return runtimeClient, false
+			return redisForCaller(runtimeClient, redisfailure.CallerLinkd), false
 		}
 		client := redis.NewUniversalClient(productionRedisOptions(connection))
 		client.AddHook(recorder.RedisHook("linkd"))
@@ -833,7 +835,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	recorder.SetActivationBlockedSource(repository.ActivationBlockedReading)
 	recorder.SetActivationBodyBytesSource(repository.ActivationBodyBytes)
 	linkdBudget := config.DeriveLinkdCapacity(config.DetectCapacityInputs())
-	legacyTime := strategycache.NewLegacyEffectiveTime(controlClient, cmdbClient, cfg.PlatformKeyPrefix(), external.Now, linkdBudget.Strategies, linkdBudget.Bytes/4)
+	legacyTime := strategycache.NewLegacyEffectiveTime(redisForCaller(controlClient, redisfailure.CallerLegacyEffectiveTime),
+		redisForCaller(cmdbClient, redisfailure.CallerLegacyEffectiveTime), cfg.PlatformKeyPrefix(), external.Now, linkdBudget.Strategies, linkdBudget.Bytes/4)
 	// The mark a failed attempt leaves behind. Wired here and asserted by a
 	// test on this function: the port is allowed to be nil, and a production
 	// runtime that left it nil would lose every query-free completion's
@@ -918,7 +921,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	productionOwnership, err := newProductionPhaseTwoOwnership(productionPhaseTwoOwnershipDependencies{
 		SteppedDownAsLeader: recorder.ControlLeaderStepDown,
 		ExpiredRangeEnabled: cfg.PhaseTwo.Scheduler.ExpiredRangeEnabled,
-		QueryCooldowns:      newProductionQueryCooldownStore(cfg, runtimeClient, recorder, observer),
+		QueryCooldowns:      newProductionQueryCooldownStore(cfg, redisForCaller(runtimeClient, redisfailure.CallerQueryCooldown), recorder, observer),
 		Store:               ownershipStore, WorkerID: cfg.PhaseTwo.Worker.ID, Catalog: catalog, Progress: progressStore,
 		Executor: executor, Now: external.Now, ControlLeaderTTL: cfg.PhaseTwo.Ownership.ControlLeaderTTL.Duration(),
 		Observer: observer, Reconcile: assignmentReconciler, Flights: flights, RecoveryLimits: recoveryLimits,
@@ -988,7 +991,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}
 	// Same client and prefix convention as the catalog and ownership stores:
 	// these snapshots are phase-two runtime state, not a separate channel.
-	fleetStore, err := fleet.NewRedisStore(runtimeClient, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "fleet"), fleetRetention, 0)
+	fleetStore, err := fleet.NewRedisStore(redisForCaller(runtimeClient, redisfailure.CallerFleet), productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "fleet"), fleetRetention, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -1015,7 +1018,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// Windows live under the same phase-two prefix as the rest of the runtime
 	// objects, and every replica reads them on the reconcile tick it already
 	// runs, so opening one needs neither a restart nor a release.
-	windowStore, err := fleet.NewWindowStore(runtimeClient, productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "fleet"))
+	windowStore, err := fleet.NewWindowStore(redisForCaller(runtimeClient, redisfailure.CallerFleet), productionPhaseTwoPrefix(cfg.Redis.StatePrefix, "fleet"))
 	if err != nil {
 		return nil, err
 	}

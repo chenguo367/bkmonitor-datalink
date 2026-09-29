@@ -122,7 +122,10 @@ func newLookbackCollector() *lookbackCollector {
 			"Samples whose query's lookback (a window, a range, an offset) could not be read, rechecked from one "+
 				"step before the window's tail instead.", "source"),
 		coverage: desc("lookback_coverage",
-			"The Query Groups this process owns, and how many of them have a fresh measurement; the aim is all.",
+			"The Query Groups this process owns (owned), how many of them have a fresh measurement (covered), and how "+
+				"many have never had a whole first read (never_complete_first_read) - never measurable, named by "+
+				"lookback.get, and left out of what covered is read against: covered / (owned - "+
+				"never_complete_first_read), the aim being all.",
 			"what"),
 		pending: desc("lookback_pending",
 			"Samples in flight - one at most per owned Query Group, and one waiting for its deep recheck - and the "+
@@ -222,6 +225,7 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	gauge(c.coverage, float64(stats.Coverage.Owned), "owned")
 	gauge(c.coverage, float64(stats.Coverage.Covered), "covered")
+	gauge(c.coverage, float64(stats.Coverage.NeverCompleteFirstRead), "never_complete_first_read")
 	gauge(c.pending, float64(stats.Pending), "samples")
 	gauge(c.pending, float64(stats.PendingBytes), "bytes")
 }

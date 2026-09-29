@@ -128,6 +128,11 @@ type HistoryCoverageFacts struct {
 	// window. It is what lets a later hole at that minute be matched to
 	// this round.
 	End int64 `json:"end,omitempty"`
+	// WindowStart is the oldest position any window of the run reaches back
+	// to: a reader matching holes to rounds needs the rounds from here to End
+	// and no older. Carried when it is a minute no later than End; dropped
+	// otherwise, never the reason a set is refused.
+	WindowStart int64 `json:"window_start,omitempty"`
 }
 
 // MaxHistoryWindows and MaxHistoryWindowHoles are the bounds the evaluator
@@ -243,7 +248,7 @@ func (f HistoryCoverageFacts) reportsNothing() bool {
 		f.Guarded == 0 && f.Fresh == 0 && f.ShortFresh == 0 &&
 		f.Abnormal == 0 && f.AbnormalOnIncomplete == 0 &&
 		f.Unusable == 0 && f.UnusableReason == "" &&
-		len(f.Windows) == 0 && f.End == 0 &&
+		len(f.Windows) == 0 && f.End == 0 && f.WindowStart == 0 &&
 		len(f.MissingMinutes) == 0 && !f.MissingMinutesTruncated && f.ShortUnusable == 0 &&
 		f.Resumed == 0 && f.Constrained == 0
 }
@@ -260,7 +265,7 @@ func (f HistoryCoverageFacts) summarisedNothing() bool {
 		f.Guarded == 0 && f.Fresh == 0 && f.ShortFresh == 0 &&
 		f.Abnormal == 0 && f.AbnormalOnIncomplete == 0 &&
 		f.Unusable == 0 && f.UnusableReason == "" &&
-		len(f.Windows) == 0 && f.End == 0 &&
+		len(f.Windows) == 0 && f.End == 0 && f.WindowStart == 0 &&
 		len(f.MissingMinutes) == 0 && !f.MissingMinutesTruncated && f.ShortUnusable == 0
 }
 
@@ -397,6 +402,11 @@ func normalizeHistoryCoverageFacts(facts *HistoryCoverageFacts) (*HistoryCoverag
 // not name, and marked truncated it says nothing, which is the reading it had
 // before it existed. With nothing short there is nothing for it to describe.
 func (f *HistoryCoverageFacts) normalizeMissingMinutes() {
+	// A window start the round could not have had is not carried; the reader
+	// then keeps rounds as it would for a worker that sends none.
+	if f.WindowStart < 0 || (f.WindowStart > 0 && (f.End <= 0 || f.WindowStart > f.End)) {
+		f.WindowStart = 0
+	}
 	if f.Short == 0 {
 		f.MissingMinutes, f.MissingMinutesTruncated, f.ShortUnusable = nil, false, 0
 		return

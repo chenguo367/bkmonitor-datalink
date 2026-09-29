@@ -42,7 +42,7 @@ func TestTheReplayThatWasDyingIsDispatched(t *testing.T) {
 	source, catalog := replayClassificationSource(t, 10, slot, 30*time.Second, testRecoveryLimits())
 	deadline := int64(slot)*1000 + 25_000
 
-	operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline, time.Unix(int64(slot)+26, 0))
+	operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline, time.Unix(int64(slot)+26, 0), execution.OwnerFence{})
 	if err != nil {
 		t.Fatalf("classifyRecovery() error = %v", err)
 	}
@@ -102,7 +102,7 @@ func TestAReplayHeldPastItsOwnWindowIsRefusedAndNamed(t *testing.T) {
 			deadline := (int64(slot) + test.budgetSeconds) * 1000
 
 			operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline,
-				time.Unix(int64(slot)+test.reachedAfter, 0))
+				time.Unix(int64(slot)+test.reachedAfter, 0), execution.OwnerFence{})
 			if err != nil {
 				t.Fatalf("classifyRecovery() error = %v", err)
 			}
@@ -151,7 +151,7 @@ func TestTheOrdinaryExpiriesAreNamedAndCounted(t *testing.T) {
 			deadline := int64(slot)*1000 + 25_000
 
 			operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline,
-				time.Unix(int64(slot), 0).Add(test.at))
+				time.Unix(int64(slot), 0).Add(test.at), execution.OwnerFence{})
 			if err != nil {
 				t.Fatalf("classifyRecovery() error = %v", err)
 			}

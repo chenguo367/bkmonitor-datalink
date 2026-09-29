@@ -24,11 +24,11 @@ import (
 // the union, and every other kind of round, says nothing about them.
 func TestUnnamedShortWindowsAreTheDatasOnlyAtMinutesAnsweredWhole(t *testing.T) {
 	rounds := []roundMark{
-		{slot: 160, end: 100, kind: "COMPLETED_WITH_UNAVAILABLE", primary: primary("FULL", "DATA")},
-		{slot: 220, end: 160, kind: "COMPLETED_WITH_UNAVAILABLE", primary: primary("FULL", "DATA")},
-		{slot: 280, end: 220, kind: "COMPLETED_WITH_UNAVAILABLE", primary: primary("FULL", "EMPTY")},
-		{slot: 340, end: 280, kind: "COMPLETED_WITH_PARTIAL_GAP", primary: primary("PARTIAL", "DATA")},
-		{slot: 400, end: 340, kind: "COMPLETED_WITH_UNAVAILABLE"},
+		mark(100, "COMPLETED_WITH_UNAVAILABLE", "", primary("FULL", "DATA"), false),
+		mark(160, "COMPLETED_WITH_UNAVAILABLE", "", primary("FULL", "DATA"), false),
+		mark(220, "COMPLETED_WITH_UNAVAILABLE", "", primary("FULL", "EMPTY"), false),
+		mark(280, "COMPLETED_WITH_PARTIAL_GAP", "", primary("PARTIAL", "DATA"), false),
+		mark(340, "COMPLETED_WITH_UNAVAILABLE", "", nil, false),
 	}
 	for name, tc := range map[string]struct {
 		mutate func(*observability.HistoryCoverageFacts)

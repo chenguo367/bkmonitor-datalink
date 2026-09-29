@@ -226,12 +226,13 @@ func evidenceClause(row Anomaly) string {
 	if len(coverage.Windows) == 0 {
 		return clause
 	}
-	var data, incomplete, unusable, unknown uint32
+	var data, incomplete, unusable, unknown, before uint32
 	for _, window := range coverage.Windows {
 		data += window.HolesBy.AnsweredWithoutSeries + window.HolesBy.AnsweredEmpty
 		incomplete += window.HolesBy.InputIncomplete
 		unusable += window.HolesBy.Unusable
 		unknown += window.HolesBy.NotInMemory + window.HolesBy.PrimaryUnrecorded
+		before += window.HolesBy.BeforeThisProcess
 	}
 	switch {
 	case incomplete > 0:
@@ -240,6 +241,8 @@ func evidenceClause(row Anomaly) string {
 		return clause + fmt.Sprintf("，%d 分钟的记录检测用不了", unusable)
 	case unknown > 0:
 		return clause + fmt.Sprintf("，缺的分钟里 %d 分钟说不出是谁的", unknown)
+	case before > 0:
+		return clause + fmt.Sprintf("，缺的分钟里 %d 分钟早于本副本接手这个对象，窗口滑过后再判", before)
 	default:
 		return clause + fmt.Sprintf("，缺的 %d 分钟查询都正常返回、序列不在结果里", data)
 	}

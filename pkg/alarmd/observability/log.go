@@ -495,6 +495,7 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 	}
 	attributes = appendHeldByAttributes(attributes, observation.HeldBy)
 	attributes = appendSlotCompletionKind(attributes, observation.SlotCompletionKind)
+	attributes = appendCompletionCause(attributes, observation)
 	if facts := observation.SegmentContent; facts != nil {
 		attributes = append(attributes, slog.String("segment_content", facts.State))
 	}
@@ -762,6 +763,9 @@ func (l *Logger) logObservation(ctx context.Context, observation Observation, ad
 		)
 		if facts.RetainedStaleRevisions > 0 {
 			attributes = append(attributes, slog.Int("source_retained_stale_revisions", facts.RetainedStaleRevisions))
+		}
+		if facts.LastGoodIdentityChanged > 0 {
+			attributes = append(attributes, slog.Int("source_last_good_identity_changed", facts.LastGoodIdentityChanged))
 		}
 		if facts.ReadMode != "" {
 			attributes = append(attributes,

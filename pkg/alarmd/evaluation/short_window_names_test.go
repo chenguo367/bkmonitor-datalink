@@ -46,6 +46,11 @@ func TestEvaluationNamesTheShortWindowAndItsEmptyPositions(t *testing.T) {
 	if coverage.End != 300 {
 		t.Fatalf("end = %d, want the record's minute 300 on the run", coverage.End)
 	}
+	// The three-position window ending at 300 reaches back to 180: no hole
+	// of this run is older, so no round older is needed to read its holes.
+	if coverage.WindowStart != 180 {
+		t.Fatalf("window start = %d, want 180, where the three-position window starts", coverage.WindowStart)
+	}
 	window := coverage.Windows[0]
 	if window.Series != execution.SeriesIdentityDigest(strings.Repeat("c", 64)) || window.LevelID != 5 || window.End != 300 {
 		t.Fatalf("window = %+v, want series c, Level 5, ending at the record's source time 300", window)
@@ -69,6 +74,10 @@ func TestEvaluationNamesTheShortWindowAndItsEmptyPositions(t *testing.T) {
 	}
 	if got := full.Plans[0].HistoryCoverage; got.Short != 0 || len(got.Windows) != 0 {
 		t.Fatalf("a complete window was named as short: %+v", got.Windows)
+	}
+	// A full window says where it starts too: a hole can open in it later.
+	if got := full.Plans[0].HistoryCoverage.WindowStart; got != 300 {
+		t.Fatalf("a complete one-position window starts at %d, want 300", got)
 	}
 }
 

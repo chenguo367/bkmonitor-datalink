@@ -1373,7 +1373,7 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 		"ConstrainedRounds": true, "ResumedRounds": true,
 		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "UnchangedRounds": true, "Measure": true,
 		"WorstWindow": true, "WorstWindowChanged": true, "Windows": true, "RoundsRemembered": true, "RoundsKept": true,
-		"UnlistedHolesAnswered": true}
+		"UnlistedHolesAnswered": true, "UnlistedHolesBeforeThisProcess": true}
 	for i := 0; i < published.NumField(); i++ {
 		name := published.Type().Field(i).Name
 		if rowOnly[name] {
@@ -1394,9 +1394,10 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 		// End is read into the object's round ring, where every hole is
 		// matched against it, and not rendered on its own. The missing-minute
 		// union and its two companions are read against that ring into
-		// UnlistedHolesAnswered, and not rendered on their own either.
+		// UnlistedHolesAnswered and UnlistedHolesBeforeThisProcess, and not
+		// rendered on their own either.
 		switch name {
-		case "End", "MissingMinutes", "MissingMinutesTruncated", "ShortUnusable":
+		case "End", "WindowStart", "MissingMinutes", "MissingMinutesTruncated", "ShortUnusable":
 			continue
 		}
 		if !published.FieldByName(name).IsValid() {

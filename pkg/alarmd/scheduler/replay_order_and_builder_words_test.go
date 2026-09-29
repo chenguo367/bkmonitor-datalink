@@ -48,7 +48,7 @@ func TestAReplayHeldPastItsWindowIsNamedEvenWhenItIsAlsoTooFar(t *testing.T) {
 			deadline := (int64(slot) + 2) * 1000
 
 			operation, facts, err := source.classifyRecovery(context.Background(), slot, deadline,
-				time.Unix(int64(slot)+test.reachedAfter, 0))
+				time.Unix(int64(slot)+test.reachedAfter, 0), execution.OwnerFence{})
 			if err != nil {
 				t.Fatalf("classifyRecovery() error = %v", err)
 			}
