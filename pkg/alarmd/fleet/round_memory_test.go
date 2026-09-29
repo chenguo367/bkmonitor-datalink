@@ -444,7 +444,24 @@ func TestAHoleTheLineLetGoOfSaysSoOnTheRow(t *testing.T) {
 		t.Fatalf("rows = %+v, want the one object with its window", rows)
 	}
 	coverage := rows[0].Coverage
-	if coverage.Windows[0].HolesBy.NotInMemory != 1 || coverage.RoundsHeldThrough == nil || coverage.RoundsHeldThrough.Unix() < first {
-		t.Fatalf("coverage = %+v held through %v, want the hole NOT_IN_MEMORY and the minute the line let go named", coverage.Windows[0].HolesBy, coverage.RoundsHeldThrough)
+	// Sixteen rounds fit; each round after them - four healthy, then the
+	// short ones - let the oldest go, so the last let go is the one that
+	// many minutes in.
+	heldThrough := first + (20-16+DefaultDegradedRounds-1)*period
+	if coverage.Windows[0].HolesBy != (WindowHoleCounts{HeldByLine: 1}) || coverage.Windows[0].Holes[0].Cause != HoleHeldByLine ||
+		coverage.RoundsHeldThrough == nil || coverage.RoundsHeldThrough.Unix() != heldThrough {
+		t.Fatalf("coverage = %+v held through %v, want the hole HELD_BY_MEMORY_LINE and held through %d",
+			coverage.Windows[0].HolesBy, coverage.RoundsHeldThrough, heldThrough)
+	}
+	// Once the windows start past the minute let go - and past the next one,
+	// so the round they no longer name makes the room and none is let go
+	// for the line - the row says nothing of it.
+	moved := &observability.HistoryCoverageFacts{Levels: 1, Short: 1, WorstValid: 19, WorstRequired: 20, End: last, WindowStart: heldThrough + 2*period,
+		Windows: []observability.HistoryWindowFact{{Series: "c", Level: 1, Valid: 19, Required: 20, End: last,
+			Missing: []int64{last}, MissingTotal: 1}}}
+	round(ctx, tracker, last+period, "COMPLETED_WITH_UNAVAILABLE", "LEVEL_OUTCOME_UNKNOWN", "HISTORY_GAPPED", primary("FULL", "DATA"), moved)
+	rows = anyColumn(tracker)
+	if len(rows) != 1 || rows[0].Coverage == nil || rows[0].Coverage.RoundsHeldThrough != nil {
+		t.Fatalf("rows = %+v, want the one object and no minute held once the windows start past it", rows)
 	}
 }

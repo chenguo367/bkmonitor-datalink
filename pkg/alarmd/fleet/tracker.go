@@ -1586,7 +1586,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				Abnormal: facts.Abnormal, AbnormalOnIncomplete: facts.AbnormalOnIncomplete,
 				NoProgressRounds: state.noProgressRounds, UnchangedRounds: state.unchangedRounds,
 				WorstWindow: worstWindow, WorstWindowChanged: worstWindowChanged,
-				Windows: windowRows(state.rounds, facts, rememberedSince(state)),
+				Windows: windowRows(state.rounds, facts, rememberedSince(state), heldInWindow(state)),
 			}
 			if len(state.coverage.Windows) > 0 {
 				state.coverage.RoundsRemembered, state.coverage.RoundsKept = len(state.rounds), RecentRoundsKept

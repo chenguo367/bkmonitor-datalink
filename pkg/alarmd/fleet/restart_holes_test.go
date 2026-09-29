@@ -147,7 +147,7 @@ func TestEveryCauseAHoleIsFiledUnderIsListed(t *testing.T) {
 	}
 	rows := windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, End: 840,
 		Windows: []observability.HistoryWindowFact{{Series: "c", Level: 1, Valid: 1, Required: 9, End: 840,
-			Missing: []int64{300, 540, 600, 660, 720, 780}, MissingTotal: 6, Unusable: []int64{840}, UnusableTotal: 1}}}, 540)
+			Missing: []int64{300, 540, 560, 600, 660, 720, 780}, MissingTotal: 7, Unusable: []int64{840}, UnusableTotal: 1}}}, 540, 560)
 	listed := map[HoleCause]bool{}
 	for _, cause := range HoleCauses {
 		listed[cause] = true

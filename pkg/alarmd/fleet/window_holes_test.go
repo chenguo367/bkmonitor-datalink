@@ -139,7 +139,7 @@ func TestTheWindowVerdictIsDecidedFromItsHoles(t *testing.T) {
 		"an unusable record":             {window([]int64{240}, 1, []int64{300}, 1), VerdictPointsUnusable},
 		"unusable beside an unseen hole": {window([]int64{120}, 1, []int64{300}, 1), VerdictPointsUnusable},
 	} {
-		rows := windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{testCase.window}}, 0)
+		rows := windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{testCase.window}}, 0, 0)
 		if len(rows) != 1 || rows[0].Verdict != testCase.verdict {
 			t.Fatalf("%s: rows = %+v, want verdict %s", name, rows, testCase.verdict)
 		}
@@ -147,14 +147,14 @@ func TestTheWindowVerdictIsDecidedFromItsHoles(t *testing.T) {
 	// An incomplete round outranks everything else on the window.
 	rounds = append(rounds, mark(360, "COMPLETED_WITH_UNAVAILABLE", "", primary("PARTIAL", "DATA"), false))
 	rows := windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1,
-		Windows: []observability.HistoryWindowFact{window([]int64{120, 240, 360}, 3, []int64{300}, 1)}}, 0)
+		Windows: []observability.HistoryWindowFact{window([]int64{120, 240, 360}, 3, []int64{300}, 1)}}, 0, 0)
 	if rows[0].Verdict != VerdictInputIncomplete || rows[0].HolesBy.InputIncomplete != 1 {
 		t.Fatalf("rows = %+v, want INPUT_INCOMPLETE over unusable and unseen", rows)
 	}
 	// A Slot given up without a query carries no primary, and the kind says
 	// why: the minute was not seen whole by this side.
 	rounds = []roundMark{mark(240, "GAP_SKIPPED", "GAP_SKIPPED", nil, false)}
-	rows = windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{window([]int64{240}, 1, nil, 0)}}, 0)
+	rows = windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{window([]int64{240}, 1, nil, 0)}}, 0, 0)
 	if rows[0].Holes[0].Cause != HoleInputIncomplete || rows[0].Holes[0].Reason != "GAP_SKIPPED" {
 		t.Fatalf("a skipped round's hole = %+v, want INPUT_INCOMPLETE carrying the skip reason", rows[0].Holes[0])
 	}
@@ -164,14 +164,14 @@ func TestTheWindowVerdictIsDecidedFromItsHoles(t *testing.T) {
 	// side's: "the dependency did not answer" and "we did not write down
 	// what it answered" must not share the strongest word.
 	rounds = []roundMark{mark(240, "FULL_COMPLETED", "", nil, false)}
-	rows = windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{window([]int64{240}, 1, nil, 0)}}, 0)
+	rows = windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{window([]int64{240}, 1, nil, 0)}}, 0, 0)
 	if hole := rows[0].Holes[0]; hole.Cause != HolePrimaryUnrecorded || hole.Round != "FULL_COMPLETED" {
 		t.Fatalf("a round without its primary on record = %+v, want ROUND_PRIMARY_UNRECORDED", hole)
 	}
 	if rows[0].Verdict != VerdictUnknown || rows[0].HolesBy.PrimaryUnrecorded != 1 || rows[0].HolesBy.InputIncomplete != 0 {
 		t.Fatalf("rows = %+v, want UNKNOWN with the unrecorded hole counted on its own", rows)
 	}
-	if windowRows(rounds, nil, 0) != nil || windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1}, 0) != nil {
+	if windowRows(rounds, nil, 0, 0) != nil || windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1}, 0, 0) != nil {
 		t.Fatal("rows were made for a round that named no window")
 	}
 	// A minute both a reported round and an inferred one claim is the
@@ -182,7 +182,7 @@ func TestTheWindowVerdictIsDecidedFromItsHoles(t *testing.T) {
 		mark(240, "FULL_COMPLETED", "", primary("FULL", "DATA"), false),
 		mark(240, "FULL_EMPTY_COMPLETED", "", primary("FULL", "EMPTY"), true),
 	}
-	rows = windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{window([]int64{240}, 1, nil, 0)}}, 0)
+	rows = windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, Windows: []observability.HistoryWindowFact{window([]int64{240}, 1, nil, 0)}}, 0, 0)
 	if hole := rows[0].Holes[0]; hole.Cause != HoleAnsweredWithoutSeries || hole.Inferred || hole.Round != "FULL_COMPLETED" {
 		t.Fatalf("hole = %+v, want the reported round over the inferred ones either side of it", hole)
 	}
