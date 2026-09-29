@@ -12,6 +12,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -27,8 +28,10 @@ type fakeRedis struct {
 	values  map[string]string
 	lastTTL time.Duration
 	setErr  error
-	// mgets is how many keys each MGET asked for.
-	mgets []int
+	// mgets is how many keys each MGET asked for, and mgetFailsAt the one,
+	// counted from 1, whose transport fails.
+	mgets       []int
+	mgetFailsAt int
 }
 
 func newFakeRedis() *fakeRedis { return &fakeRedis{values: map[string]string{}} }
@@ -58,7 +61,14 @@ func (pipe *fakePipe) StrLen(_ context.Context, key string) *redis.IntCmd {
 }
 
 func (client *fakeRedis) MGet(_ context.Context, keys ...string) *redis.SliceCmd {
+	if len(keys) == 0 {
+		// As Redis answers an MGET of no keys.
+		return redis.NewSliceResult(nil, errors.New("ERR wrong number of arguments for 'mget' command"))
+	}
 	client.mgets = append(client.mgets, len(keys))
+	if client.mgetFailsAt > 0 && len(client.mgets) == client.mgetFailsAt {
+		return redis.NewSliceResult(nil, errors.New("connection reset"))
+	}
 	result := make([]interface{}, 0, len(keys))
 	for _, key := range keys {
 		if value, ok := client.values[key]; ok {
@@ -379,5 +389,31 @@ func TestALoadReadsSnapshotsInMGetsOfTheListBudget(t *testing.T) {
 	}
 	if total <= 1000 {
 		t.Fatalf("the fixture's snapshots total %d bytes, within one MGET's budget", total)
+	}
+}
+
+// A load whose transport fails part way through is an error and no read:
+// the snapshots decoded before it are not returned, and the meter does not
+// count bytes of a view that was never built.
+func TestALoadWhoseTransportFailsPartWayIsNotCounted(t *testing.T) {
+	client := newFakeRedis()
+	store := mustStore(t, client, time.Minute, 1000)
+	meter := &storeMeterRecord{}
+	store.Meter(meter)
+	replicas := []string{"pod-a", "pod-b", "pod-c"}
+	for _, replica := range replicas {
+		owned := make([]string, 0, 40)
+		for n := 0; n < 40; n++ {
+			owned = append(owned, fmt.Sprintf("%s-object-%02d", replica, n))
+		}
+		encoded, _ := json.Marshal(Snapshot{Replica: replica, TakenAt: now, Owned: len(owned), OwnedObjects: owned})
+		client.values[store.snapshotKey(replica)] = string(encoded)
+	}
+	client.mgetFailsAt = 2
+	if snapshots, err := store.Load(context.Background(), replicas); err == nil || snapshots != nil {
+		t.Fatalf("loaded %d snapshots, error %v; want the failed read refused whole", len(snapshots), err)
+	}
+	if len(client.mgets) != 2 || meter.loads != 0 {
+		t.Fatalf("MGETs %v, meter loads %d; want the read stopped at the failure and nothing counted", client.mgets, meter.loads)
 	}
 }

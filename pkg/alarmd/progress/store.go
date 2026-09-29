@@ -91,7 +91,10 @@ func (store *Store) LoadProgress(ctx context.Context, identity execution.Progres
 	return store.decodeLoaded(identity, raw, missing)
 }
 
-// LoadProgressBatch loads the Progress of many Query Groups. Every entry of
+// LoadProgressBatch loads the Progress of many Query Groups, bounded by
+// count alone: the production readers of batches read within bytes
+// (LoadProgressWithin), and this serves a store that cannot say how long its
+// records are. Every entry of
 // the result is filled: a per-identity error is returned in place, so one
 // unreadable or invalid Progress does not hide the others. A transport
 // failure of a whole batch is reported on every identity of that batch.
