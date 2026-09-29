@@ -680,7 +680,7 @@ func (run *acceptRun) checkDiagnosis() {
 			verdict = verdictPass
 		}
 		run.add("diagnosis covers every strategy", verdict, stringField(record, "summary"))
-		run.checkDetecting(diagnosis)
+		run.checkDetecting(diagnosis, verdict == verdictPass)
 	}
 }
 
@@ -696,7 +696,10 @@ const acceptListedNotDetecting = 5
 // strategy stopped at rather than one release uncovering the next. A set
 // that lists strategies and detects none fails; otherwise the table is
 // information.
-func (run *acceptRun) checkDetecting(diagnosis diagnosisRun) {
+//
+// On a diagnosis that did not cover every strategy the table is only what was
+// read: it is information, never a failure decided on part of the set.
+func (run *acceptRun) checkDetecting(diagnosis diagnosisRun, covered bool) {
 	total, detecting := 0, diagnosis.byVerdict["DETECTING"]
 	words := make([]string, 0, len(diagnosis.byVerdict))
 	for word, n := range diagnosis.byVerdict {
@@ -761,7 +764,10 @@ func (run *acceptRun) checkDetecting(diagnosis diagnosisRun) {
 		detail += "; not detecting: " + strings.Join(named, "; ")
 	}
 	verdict := verdictInfo
-	if total > 0 && detecting == 0 {
+	switch {
+	case !covered:
+		detail = "coverage does not hold, so this is what was read, not the set: " + detail
+	case total > 0 && detecting == 0:
 		verdict = verdictFail
 	}
 	run.add("strategies detecting", verdict, detail)
