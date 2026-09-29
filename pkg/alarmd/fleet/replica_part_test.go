@@ -55,8 +55,25 @@ func partReplicas() []Snapshot {
 			{IntervalSeconds: 60, Objects: 50 + index, Cooling: 1}, {IntervalSeconds: 120, Objects: 40, Cooling: 1}}}
 		for n := 0; n <= index; n++ {
 			snapshot.NoData = append(snapshot.NoData, Anomaly{QueryGroup: snapshot.Replica + "-empty-" + string(rune('a'+n)),
-				Kind: KindEmptyEveryRound, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: snapshot.Replica})
+				Kind: KindEmptyEveryRound, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: snapshot.Replica,
+				Since: now.Add(-time.Duration(index*3+n+1) * 37 * time.Minute)})
 		}
+		// Each replica's rows failing since a different moment, a few objects
+		// no replica has said anything conclusive about, a loss in progress
+		// on two replicas at different moments, and a pooled object's skip.
+		for row := range snapshot.Anomalies {
+			snapshot.Anomalies[row].Since = now.Add(-3*time.Hour - time.Duration(index*10+row)*time.Minute)
+		}
+		snapshot.Determined -= index
+		if snapshot.GapSkips == nil {
+			snapshot.GapSkips = map[string]SkippedSpan{}
+		}
+		if index > 0 {
+			snapshot.GapSkips[snapshot.Replica+"-lost"] = SkippedSpan{FirstSlot: 1, LastSlot: 3, Slots: 3,
+				At: now.Add(-time.Duration(index) * time.Minute), Replica: snapshot.Replica}
+		}
+		snapshot.GapSkips[snapshot.Demoted[0].QueryGroup] = SkippedSpan{FirstSlot: 1, LastSlot: 2, Slots: 2,
+			At: now.Add(-time.Duration(index+1) * 4 * time.Minute), Replica: snapshot.Replica}
 	}
 	return snapshots
 }
