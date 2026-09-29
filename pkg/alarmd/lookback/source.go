@@ -18,29 +18,25 @@
 package lookback
 
 import (
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
 
-// Source labels besides the data sources a deployment names
-// (Options.Sources): a query reading several sources, a PromQL query, and a
-// source the list does not name.
+// Source labels besides the data sources a query can be compiled from: a
+// query reading several of them, and one the list does not name.
 const (
-	SourceMixed  = "mixed"
-	SourcePromQL = "promql"
-	SourceOther  = "other"
+	SourceMixed = controlplane.SourceSemanticsMixed
+	SourceOther = controlplane.SourceSemanticsOther
 )
 
-// sourceOf labels the source a query reads, from the sources the engine
-// counts by name.
-func sourceOf(facts execution.QueryPlanFacts, named map[string]bool) string {
-	switch {
-	case facts.PromQL != nil:
-		return SourcePromQL
-	case len(facts.SourceSemantics) > 1:
-		return SourceMixed
-	case len(facts.SourceSemantics) == 1 && named[facts.SourceSemantics[0]]:
-		return facts.SourceSemantics[0]
-	default:
-		return SourceOther
-	}
+// Sources is every source label, each counted from the start: the data
+// sources, mixed and other.
+var Sources = append(append([]string{}, controlplane.SupportedSourceSemantics...), SourceMixed, SourceOther)
+
+// sourceOf labels the data source a query reads as the catalog labels its
+// Query Group, so a source's lateness reads beside its Query Groups: a plan
+// with no semantics is plain time series, a PromQL query reads the source
+// its plan names, and one label the list does not name is other.
+func sourceOf(facts execution.QueryPlanFacts) string {
+	return controlplane.SourceSemanticsLabel(facts.SourceSemantics)
 }

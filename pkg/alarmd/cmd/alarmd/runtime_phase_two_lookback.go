@@ -15,7 +15,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
@@ -103,7 +102,7 @@ func lookbackOptions(
 	now func() time.Time,
 ) lookback.Options {
 	return lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, Owned: ownership.count,
-		Sources: controlplane.SupportedSourceSemantics, Refusals: scheduler.LookbackRefusals, LimitRefusal: scheduler.LookbackRefusedLimit,
+		Refusals: scheduler.LookbackRefusals, LimitRefusal: scheduler.LookbackRefusedLimit,
 		Permit: lookbackPermit(flights),
 		OnFault: func(reason string, queryGroup execution.QueryGroupIdentity) {
 			if logger != nil {
