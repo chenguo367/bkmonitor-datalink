@@ -215,7 +215,8 @@ func newRedisCallMetrics() redisCallMetrics {
 			"share one client: on the diagnostics client directory_read, diagnostic_write, " +
 			"diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment " +
 			"points both at one Redis) strategy_source, legacy_effective_time, control_plane, ownership, runtime_state, " +
-			"query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share.",
+			"query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share; " +
+			"store_census on the source and runtime clients.",
 	}, []string{"client", "caller"})
 	callerReasons := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_caller_failure_reason_total",
