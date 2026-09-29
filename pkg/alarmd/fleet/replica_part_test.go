@@ -99,6 +99,10 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	columns := viewColumns(&whole)
 	sameJSON(t, "cohorts", merged.Cohorts(whole.Schedule), Cohorts(&whole, columns))
 	sameJSON(t, "cooling", merged.CoolingAt(whole.Schedule, now), Cooling(&whole, columns, now))
+	sameJSON(t, "load", merged.Load(&whole), LoadOf(&whole, now))
+	if loss := LoadOf(&whole, now).Loss; loss.Ongoing+loss.AfterRestart == 0 {
+		t.Fatalf("fixture loss %+v, want the skip counted as in progress", loss)
+	}
 	// The pooled rows carry no period and make a cohort of their own at 0.
 	if cohorts := Cohorts(&whole, columns); len(cohorts) != 3 || cohorts[1].Listed == 0 || cohorts[2].Listed == 0 ||
 		cohorts[1].Objects != 153 {

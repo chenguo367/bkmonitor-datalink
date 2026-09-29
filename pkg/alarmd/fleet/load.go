@@ -211,9 +211,16 @@ const (
 
 // LoadOf decides the judgment from the view.
 func LoadOf(view *View, now time.Time) Load {
+	return loadOf(view, lossOfView(view, now))
+}
+
+// loadOf decides the judgment from the view's replica facts and the loss
+// its records were counted into, which replicas' parts add up to
+// (ReplicaPart.Loss).
+func loadOf(view *View, loss LoadLoss) Load {
 	load := Load{Limits: []LoadLimit{LimitNoHeadroomEstimate}}
 	load.OnTime, load.Backlog = onTimeOf(view.Schedule), backlogOf(view.Schedule)
-	load.Loss = lossOfView(view, now)
+	load.Loss = loss
 	// The restart's catch-up asks no capacity question: only a loss by some
 	// other mechanism does.
 	behind := load.OnTime.State == OnTimeFallingBehind || load.OnTime.State == OnTimeCatchingUp ||
@@ -311,10 +318,25 @@ func lossOfView(view *View, now time.Time) LoadLoss {
 			}
 		}
 	})
+	return reading.settled()
+}
+
+// settled names the loss's state from its counts.
+func (reading LoadLoss) settled() LoadLoss {
+	reading.State = LossNone
 	if reading.Ongoing > 0 || reading.AfterRestart > 0 || reading.AfterCooldown > 0 {
 		reading.State = LossInProgress
 	}
 	return reading
+}
+
+// mergeLoss adds one replica's loss counts into another's.
+func mergeLoss(into *LoadLoss, from LoadLoss) {
+	into.Ongoing += from.Ongoing
+	into.AfterRestart += from.AfterRestart
+	into.AfterCooldown += from.AfterCooldown
+	into.WhileDemotedRecent += from.WhileDemotedRecent
+	into.WindowSeconds, into.RestartGraceSeconds = from.WindowSeconds, from.RestartGraceSeconds
 }
 
 // bottleneckOf names the resource the evidence points at. Most specific

@@ -38,6 +38,8 @@ type ReplicaPart struct {
 	// row count and is aggregated with it.
 	CohortRows map[int64]*CohortView
 	Cooling    coolingRows
+	// Loss is the load's loss, counted from the replica's skip records.
+	Loss LoadLoss
 }
 
 // AttributionTally is the anomaly column's rows by attribution: Ours and
@@ -74,6 +76,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	columns := viewColumns(&view)
 	part.CohortRows = cohortRowsOf(columns)
 	part.Cooling = coolingRowsOf(columns, now)
+	part.Loss = lossOfView(&view, now)
 	for _, demoted := range view.Demoted {
 		if cooldown := demoted.QueryCooldown; cooldown != nil && !cooldown.Until.IsZero() && cooldown.Until.Before(now) {
 			part.DemotedDue++
@@ -102,7 +105,9 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		}
 		mergeCohortRows(merged.CohortRows, part.CohortRows)
 		mergeCoolingRows(&merged.Cooling, part.Cooling)
+		mergeLoss(&merged.Loss, part.Loss)
 	}
+	merged.Loss = merged.Loss.settled()
 	merged.Impact = MergeImpactTallies(tallies...)
 	return merged
 }
@@ -125,4 +130,10 @@ func (part ReplicaPart) Cohorts(schedule *ScheduleCensus) []CohortView {
 // measured at now.
 func (part ReplicaPart) CoolingAt(schedule *ScheduleCensus, now time.Time) CoolingFacts {
 	return coolingOf(schedule, part.Cooling, now)
+}
+
+// Load is the load judgment from the replicas' facts on view and the
+// part's loss.
+func (part ReplicaPart) Load(view *View) Load {
+	return loadOf(view, part.Loss)
 }
