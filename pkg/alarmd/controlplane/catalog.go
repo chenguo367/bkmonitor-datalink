@@ -441,6 +441,13 @@ type Catalog struct {
 	// retain because their persisted facts no longer hold under this binary,
 	// under either refusal. Zero on every build within one release.
 	RetainedStaleRevisions int
+	// LastGoodIdentityChanged counts the last-good Plans this build did not
+	// retain because the source now states another identity for the
+	// strategy (LAST_GOOD_IDENTITY_CHANGED): at build time for a document
+	// that did not compile, and at runtime compile for one that compiled and
+	// was then refused whole or in part. Zero while every writer keeps its
+	// numbering.
+	LastGoodIdentityChanged int
 	// Retention is what this build's Levels ask the state store to keep,
 	// measured off the compiled Levels rather than modelled from the shapes in
 	// the strategy documents. It is the only place the whole compiled
@@ -595,7 +602,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 	// strategy whose document cannot currently be compiled. It leaves the
 	// Catalog, named and counted, until its document compiles again, and
 	// the other strategies keep evaluating.
-	retainLastGood := func(sourceID string) (bool, error) {
+	retainLastGood := func(sourceID string, current *SourceIdentity) (bool, error) {
 		entry, ok := lastGood[sourceID]
 		if !ok {
 			return false, nil
@@ -604,6 +611,12 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: sourceID, Scope: "PLAN",
 				Disposition: DispositionConfigRejected, Reason: reason})
 			catalog.RetainedStaleRevisions++
+			return false, nil
+		}
+		if !lastGoodIdentityHolds(current, entry) {
+			catalog.Dispositions = append(catalog.Dispositions, ObjectDisposition{SourceID: sourceID, Scope: "PLAN",
+				Disposition: DispositionConfigRejected, Reason: reasonLastGoodIdentityChanged})
+			catalog.LastGoodIdentityChanged++
 			return false, nil
 		}
 		if err := addPlan(entry.facts, entry.plan); err != nil {
@@ -640,7 +653,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 				catalog.Dispositions = append(catalog.Dispositions, disposition, *compiled.refusal)
 				continue
 			}
-			retained, err := retainLastGood(source.SourceID)
+			retained, err := retainLastGood(source.SourceID, statedIdentity(source))
 			if err != nil {
 				return Catalog{}, err
 			}
@@ -666,7 +679,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 					Disposition: DispositionConfigRejected, Reason: "PLAN_INVALID", Detail: dispositionDetail(err.Error())})
 			}
 			if shouldRetainLastGood(candidate.dispositions) {
-				retained, retainErr := retainLastGood(source.SourceID)
+				retained, retainErr := retainLastGood(source.SourceID, statedIdentity(source))
 				if retainErr != nil {
 					return Catalog{}, retainErr
 				}
@@ -719,7 +732,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			since = now.Unix()
 		}
 		if activeSetEmpty {
-			retained, err := retainLastGood(sourceID)
+			retained, err := retainLastGood(sourceID, nil)
 			if err != nil {
 				return Catalog{}, err
 			}
@@ -734,7 +747,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 				Disposition: DispositionRemoved, Reason: "ABSENT_FROM_ACTIVE_SET", AbsentSince: since})
 			continue
 		}
-		retained, err := retainLastGood(sourceID)
+		retained, err := retainLastGood(sourceID, nil)
 		if err != nil {
 			return Catalog{}, err
 		}
@@ -1530,11 +1543,44 @@ func validateQueryIdentity(identity SourceIdentity, facts execution.QueryPlanFac
 	if err := facts.Validate(); err != nil {
 		return err
 	}
-	if facts.TenantID != identity.TenantID || facts.BusinessID != identity.BusinessID || facts.SpaceScope != identity.SpaceScope ||
-		facts.GlobalBusiness != identity.GlobalBusiness {
+	if identityOfFacts(facts) != identity {
 		return errors.New("alarmd controlplane: query plan identity differs from control facts")
 	}
 	return nil
+}
+
+// identityOfFacts is the source identity a Plan's query facts were built
+// for: the one derivation both the compile-time check and the last-good
+// check read.
+func identityOfFacts(facts execution.QueryPlanFacts) SourceIdentity {
+	return SourceIdentity{TenantID: facts.TenantID, BusinessID: facts.BusinessID, SpaceScope: facts.SpaceScope,
+		GlobalBusiness: facts.GlobalBusiness}
+}
+
+// reasonLastGoodIdentityChanged: the source now states another tenant,
+// business, space or global switch for the strategy than its last-good Plan
+// was built for. The number is the same and the strategy is not -- a writer
+// whose numbering started over names another strategy with it -- so the old
+// Plan is not run under the new one's name.
+const reasonLastGoodIdentityChanged = "LAST_GOOD_IDENTITY_CHANGED"
+
+// lastGoodIdentityHolds reports whether a last-good Plan may stand in for
+// the strategy the source names now. current is that identity, nil where
+// there is no document to read one from (the active set no longer lists the
+// strategy) or the document states none that validates: nothing says the
+// strategy changed, and the last good definition is kept as before.
+func lastGoodIdentityHolds(current *SourceIdentity, entry lastGoodPlan) bool {
+	return current == nil || identityOfFacts(entry.facts) == *current
+}
+
+// statedIdentity is the identity a source document states for its
+// strategy, or nil when it states none that validates.
+func statedIdentity(source SourceStrategy) *SourceIdentity {
+	if source.Identity.validate() != nil {
+		return nil
+	}
+	identity := source.Identity
+	return &identity
 }
 
 func lessPlanIdentity(left, right execution.PlanIdentity) bool {

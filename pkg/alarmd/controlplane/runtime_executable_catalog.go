@@ -70,6 +70,24 @@ func retainRuntimeExecutableCatalog(
 	groups := make(map[execution.QueryGroupIdentity]*QueryGroup, len(catalog.QueryGroups))
 	seenPlans := make(map[execution.PlanKey]struct{})
 	lastGoodPlans := indexLastGoodPlans(lastGood)
+	// lastGoodFor is the strategy's last-good Plan when it may stand in for
+	// the one built this round, whole or Level by Level: built for the same
+	// identity as current, the facts this round's document compiled to. A
+	// last-good Plan of another identity is named and counted, and not used.
+	lastGoodFor := func(strategyID string, current execution.QueryPlanFacts) (lastGoodPlan, bool) {
+		entry, ok := lastGoodPlans[strategyID]
+		if !ok {
+			return lastGoodPlan{}, false
+		}
+		identity := identityOfFacts(current)
+		if !lastGoodIdentityHolds(&identity, entry) {
+			result.Dispositions = append(result.Dispositions, ObjectDisposition{SourceID: strategyID, Scope: "PLAN",
+				Disposition: DispositionConfigRejected, Reason: reasonLastGoodIdentityChanged})
+			result.LastGoodIdentityChanged++
+			return lastGoodPlan{}, false
+		}
+		return entry, true
+	}
 	rejectClosure := func(sourceID string, dispositions ...ObjectDisposition) {
 		result.Dispositions = append(result.Dispositions, dispositions...)
 		result.Dispositions = withoutAcceptedPlanDisposition(result.Dispositions, sourceID)
@@ -131,7 +149,7 @@ func retainRuntimeExecutableCatalog(
 				disposition := terminalDisposition(sourcePlan.Identity.StrategyID, "PLAN", *terminal)
 				result.Dispositions = withoutAcceptedPlanDisposition(result.Dispositions, sourcePlan.Identity.StrategyID)
 				if RetainsLastGoodDefinition(disposition.Disposition) {
-					if entry, ok := lastGoodPlans[sourcePlan.Identity.StrategyID]; ok {
+					if entry, ok := lastGoodFor(sourcePlan.Identity.StrategyID, sourceGroup.QueryPlan); ok {
 						lastGoodCompiled, executable, err := runtimePlanIsTerminalFree(ctx, entry, compiler, stateSemantics)
 						if err != nil {
 							return Catalog{}, err
@@ -181,7 +199,7 @@ func retainRuntimeExecutableCatalog(
 			}
 			supplementedLevels := map[uint32]struct{}{}
 			if retainsLastGood {
-				if entry, ok := lastGoodPlans[sourcePlan.Identity.StrategyID]; ok {
+				if entry, ok := lastGoodFor(sourcePlan.Identity.StrategyID, sourceGroup.QueryPlan); ok {
 					_, executable, err := runtimePlanIsTerminalFree(ctx, entry, compiler, stateSemantics)
 					if err != nil {
 						return Catalog{}, err

@@ -1886,6 +1886,11 @@ type SourceRefreshFacts struct {
 	// from their facts; non-zero only across a change of the revision
 	// formula, when it is the whole population of retained Plans.
 	RetainedStaleRevisions int
+	// LastGoodIdentityChanged is how many last-good Plans the round's Catalog
+	// refused to retain because the source now states another tenant,
+	// business, space or global switch for the strategy; non-zero when a
+	// writer's numbering started over and a number names another strategy.
+	LastGoodIdentityChanged int
 }
 
 // SourceReadMode and SourceReadReason mirror the control plane's vocabulary

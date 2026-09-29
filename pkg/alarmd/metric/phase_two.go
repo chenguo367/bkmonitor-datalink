@@ -174,6 +174,7 @@ type phaseTwoMetrics struct {
 	diagnosticRedisDialRetries      *prometheus.CounterVec
 	leaderForward                   *prometheus.HistogramVec
 	controlSourceRetainedStale      prometheus.Counter
+	controlSourceLastGoodIdentity   prometheus.Counter
 	controlSource                   *controlSourceCollector
 	leaderRound                     *leaderRoundCollector
 	lookback                        *lookbackCollector
@@ -1428,6 +1429,16 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"changes either, and each such Plan leaves the Catalog under its disposition until its document " +
 			"compiles again, instead of the whole Catalog failing to build as it did before.",
 	})
+	metrics.controlSourceLastGoodIdentity = prometheus.NewCounter(prometheus.CounterOpts{
+		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "control_source_last_good_identity_changed_total",
+		Help: "Last-good Plans a Catalog build refused to retain because the source now states another tenant, " +
+			"business, space or global switch for the strategy than the Plan was built for (disposition " +
+			"LAST_GOOD_IDENTITY_CHANGED): the number is the same and the strategy is not, as when a writer's " +
+			"numbering started over. Counted where a document that did not compile, or compiled and was refused " +
+			"whole or in part, would otherwise keep its last good definition. Zero while every writer keeps its " +
+			"numbering; each such strategy stays out of the Catalog under its own disposition until its document " +
+			"compiles.",
+	})
 	metrics.catalogComposition = newCatalogCompositionCollector()
 	metrics.seriesAdmission = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "series_admission_total",
@@ -1727,7 +1738,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.algorithmEvaluations, m.algorithmInputs, m.levelAbnormal, m.levelOutcomes, m.splitPlans, m.splitRoundObjects, m.shardQueries, m.splitRounds, m.shardabilityPlans, m.dimensionCensusWrites, m.dimensionCensusValues, m.historyCoverageRejected, m.historyCoverageUnsummarised, m.recoveryBeside, m.openAlertGate,
 	}...), append(append(append(m.redisCalls.collectors(), m.dueIndex.collectors()...), m.controlFacts.collectors()...),
 		m.startupDependencyWaits, m.liveness, m.controlCache, m.dispatchRotation, m.localView, m.viewStream, m.viewClient, m.openAlertSet, m.activationRebuild, m.activationHeader, m.activationBlocked, m.effectiveClose, m.absentClose, m.targetScopeClose, m.linkdConsole, m.controlSourceRounds, m.strategiesReturnedAfterRemoval, m.queryCooldownSaves, m.eventBusinessAttribution, m.diagnosticRedisFailures, m.diagnosticRedisDialRetries, m.leaderForward, m.controlSource, m.leaderRound, m.lookback,
-		m.controlSourceRetainedStale, m.platformSettings,
+		m.controlSourceRetainedStale, m.controlSourceLastGoodIdentity, m.platformSettings,
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
@@ -1749,6 +1760,9 @@ func (m phaseTwoMetrics) observe(observation observability.Observation) {
 		m.sourceRefreshes.WithLabelValues(string(facts.Status)).Inc()
 		if facts.RetainedStaleRevisions > 0 {
 			m.controlSourceRetainedStale.Add(float64(facts.RetainedStaleRevisions))
+		}
+		if facts.LastGoodIdentityChanged > 0 {
+			m.controlSourceLastGoodIdentity.Add(float64(facts.LastGoodIdentityChanged))
 		}
 		if facts.CompiledStrategies > 0 {
 			m.sourceCompiles.WithLabelValues("compiled").Add(float64(facts.CompiledStrategies))
