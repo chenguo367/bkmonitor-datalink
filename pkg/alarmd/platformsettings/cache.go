@@ -146,7 +146,7 @@ func New(options Options) (*Cache, error) {
 		options.StalenessBound = DefaultStalenessBound
 	}
 	cache := &Cache{
-		source: options.Source, deployment: options.Deployment, defaults: CodeDefaults(),
+		source: options.Source, deployment: deploymentLayer(options.Deployment), defaults: CodeDefaults(),
 		now: options.Now, bound: options.StalenessBound,
 		mode:        ModeNeverLoaded,
 		unavailable: make(map[UnavailableReason]uint64, len(UnavailableReasons)),
@@ -378,4 +378,11 @@ func shorten(raw []byte) string {
 		return string(raw)
 	}
 	return string(raw[:limit]) + "..."
+}
+
+// deploymentLayer is the deployment's own layer, named as the layer it is
+// whatever its builder wrote: a field read from it says it came from VALUES.
+func deploymentLayer(layer Layer) Layer {
+	layer.Origin = HorizonSourceValues
+	return layer
 }
