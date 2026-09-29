@@ -945,7 +945,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 	// Not confirmed as this deployment's is its own part, not on the list
 	// above and not handed over: the bare refusal and the undecided windows.
 	pendingLine := lineStarting(text, "PENDING ::")
-	for _, want := range []string{"后端拒绝了 1 个对象的查询", "待确认", "个对象的窗口填不满，还分不出是谁的"} {
+	for _, want := range []string{"待确认", "个对象的窗口填不满，还分不出是谁的"} {
 		if !strings.Contains(pendingLine, want) {
 			t.Errorf("the undetermined part does not say %q:\n%s", want, pendingLine)
 		}
@@ -999,14 +999,17 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"CHECKS ::", "alarmd 自己的依赖没答，1 个对象受影响（1 种）——配置获取 · 依赖待定位 · 不可用（source_blocked 1）：1 个，仍然受阻，最近失败 17:59:30"},
 		{"CHECKS ::", "；GAP_SCOPE_REASON_CONFLICT（内部错误，第二事实）：1 个，仍然受阻"},
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\""},
-		{"PENDING ::", "证据：分组的后端回答只有状态码/状态词（非 200 的响应正文当前不保留，\"最近一次错误\"是结束这一轮的 alarmd 错误，不是后端原文）"},
+		// A refused query is the strategy's too: governance, not 待确认.
+		{"GOV ::", "后端拒绝了 1 个对象的查询"},
+		{"GOV ::", "证据：分组的后端回答只有状态码/状态词（非 200 的响应正文当前不保留，\"最近一次错误\"是结束这一轮的 alarmd 错误，不是后端原文）"},
+		{"GOV ::", "若平台检测器对同一条策略的查询能过，就是 alarmd 构造的问题，回 alarmd"},
 		// The timeout and the short old-series window are not the data side's
 		// until the query path and the fetch are ruled out: both are here, not
 		// under governance.
 		{"PENDING ::", "查询没有得到应答，5 个对象受影响（2 种症状，1 条策略）——客户端超时或 5xx，查询预算、网络、后端耗时哪一环还分不出"},
 		{"PENDING ::", "下一步：先查查询链路：超时看查询预算、网络、后端耗时哪一环超了"},
 		{"PENDING ::", "恢复所需的老序列数据不完整（1 条策略），恢复判不了——是数据没到还是 alarmd 没取到还分不出"},
-		{"PENDING ::", "恢复标准：分出归属后转到对应行（策略侧或 alarmd）；不是等它消失"},
+		{"GOV ::", "恢复标准：策略改好后冷却到期自动重试成功，对象离开降级池；核出是 alarmd 构造的转到 alarmd"},
 		{"HISTORY COUNT ::", "漏检记录 2 个对象，其中 1 个最近 1 小时内还发生过，最后一次 "},
 		{"HISTORY COUNT ::", "；记账被打断（检测做过了）：当前可观测副本自各自启动以来累计 9 个 Slot（3 个对象），最近 17:30:00"},
 		// The two records: every Slot executed whole, said so with no Blocked
@@ -1043,9 +1046,9 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// and -- the verdict here is UNKNOWN for a coverage gap -- that the
 		// verdict is about the second clause. Same words whichever response
 		// rendered last.
-		{"BLOCKED SENTENCE ::", "受阻：环节待定位 · 依赖待定位 · 类型待定位（COMPLETED_WITH_UNAVAILABLE 3、error 1） 4 个，仍然受阻；数据查询 · 依赖待定位 · 超时（QUERY_TIMEOUT 4） 4 个，正在恢复；配置获取 · 依赖待定位 · 不可用（source_blocked 1） 1 个，仍然受阻；另 4 组共 4 个，见各行"},
+		{"BLOCKED SENTENCE ::", "受阻：环节待定位 · 依赖待定位 · 类型待定位（COMPLETED_WITH_UNAVAILABLE 3、error 1） 4 个，仍然受阻；数据查询 · 依赖待定位 · 超时（QUERY_TIMEOUT 4） 4 个，正在恢复；配置获取 · 依赖待定位 · 不可用（source_blocked 1） 1 个，仍然受阻；另 3 组共 3 个，见各行"},
 		{"BLOCKED SENTENCE ::", "；待确认：8 个对象说不出结论（没留下成因，各自再跑完一轮就补上）；判定停在 UNKNOWN 说的是这一句，不抵消前一句"},
-		{"BLOCKED SENTENCE BEFORE HEALTH ::", "另 4 组共 4 个，见各行"},
+		{"BLOCKED SENTENCE BEFORE HEALTH ::", "另 3 组共 3 个，见各行"},
 		{"BLOCKED SENTENCE AFTER HEALTH ::", "受阻：环节待定位 · 依赖待定位 · 类型待定位（COMPLETED_WITH_UNAVAILABLE 3、error 1） 4 个，仍然受阻；数据查询 · 依赖待定位 · 超时（QUERY_TIMEOUT 4） 4 个，正在恢复；"},
 		{"BLOCKED SENTENCE AFTER HEALTH ::", "；待确认：8 个对象说不出结论"},
 		// The problems that recovered within the hour, on the history side:
@@ -1062,7 +1065,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		{"GOV ::", "2 个对象的查询被后端回\"表或字段不存在\"（1 种回答，1 条策略，1 个业务）——按策略引用核，未逐个核过实际请求与元数据前不认定是策略写错；其中 1 个已降级，不再反复查；其中 1 个在被拒期间还跳过了检测（最近 10 分钟内 1 个）——冷却让旧轮次超出重放范围，首要原因是查询不可用，扩容无用"},
 		{"GOV ::", "策略侧"},
 		{"ACTION ::", "现在要做的：找策略缓存的写入方（bk-monitor 后台的 cache 进程，或替代它的模块）：缺身份字段的要写方按合同补 bk_tenant_id / space_uid"},
-		{"ACTION ::", "（策略缓存里 60 条策略的文档不满足合同，没有进入检测（2 种原因）——是写入方写的内容缺东西，不是策略配置错）；之后还有 10 类，按顺序在下面；待归因 5 类另看，别交出去"},
+		{"ACTION ::", "（策略缓存里 60 条策略的文档不满足合同，没有进入检测（2 种原因）——是写入方写的内容缺东西，不是策略配置错）；之后还有 10 类，按顺序在下面；待归因 4 类另看，别交出去"},
 		// A record line's folds name what each loss is; the refusal's object
 		// row says what it lost while under its line.
 		// Every fold with object rows carries the problem's state and its
@@ -1233,7 +1236,7 @@ func TestTheRenderFunctionsRunWithoutThrowing(t *testing.T) {
 		// none), and one retained record made an hour ago.
 		// Three parts from the server's arithmetic, then what is being lost
 		// now and what the refused objects lost, apart from the record.
-		"需要处理：现在要处理 11 类（18 个对象，去重；其中平台写入方 1 类（60 条策略），按策略计不按对象计）；待归因 5 类（17 个对象）；业务侧已确认 4 类（4 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
+		"需要处理：现在要处理 11 类（18 个对象，去重；其中平台写入方 1 类（60 条策略），按策略计不按对象计）；待归因 4 类（16 个对象）；业务侧已确认 5 类（5 个对象）在运营治理。正在漏检 1 个对象（最近 10 分钟内跳过，最近一次 ",
 		"另有 1 个是滚动后的追赶漏检（副本启动或首次接手 5 分钟内），看它还有没有新增",
 		"被拒的对象里 1 个在冷却期间跳过了检测（最近 10 分钟内 1 个），首要原因是查询不可用；已停止的漏检记录 2 个对象另列",
 		// On time, and on a stale publication: both true at once, and the

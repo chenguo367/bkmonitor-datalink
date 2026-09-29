@@ -753,7 +753,14 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 			// sink; the completion keeps their DataState and Delivery only so
 			// that delivery conservation holds. The consumer never receives them:
 			// every binding of an UNAVAILABLE completion is UNKNOWN.
-			unavailable := client.responseContractUnavailable(attempt, execution.ResponseStatusRouteDetail(status.Code),
+			// A table or field that does not route in the space is named for
+			// what it is: the strategy's data is not where it points, which no
+			// retry and no backend recovery changes.
+			reason := execution.ReasonCode(contract.ReasonQueryUnavailable)
+			if _, targetMissing := dataExistenceStatusCodes[status.Code]; targetMissing {
+				reason = execution.ReasonCode(contract.ReasonQueryTargetMissing)
+			}
+			unavailable := client.responseContractUnavailable(attempt, reason, execution.ResponseStatusRouteDetail(status.Code),
 				dataState, delivery, resultTableIDs, stats)
 			unavailable.RouteFacts.Status = &execution.ProviderStatusFact{Code: status.Code}
 			return unavailable, nil
@@ -772,8 +779,8 @@ func (client *Client) decodeQuery(ctx context.Context, reader io.Reader, attempt
 		passthroughStatus = &execution.ProviderStatusFact{Code: status.Code, Allowed: true}
 	}
 	if isPartial == nil {
-		return client.responseContractUnavailable(attempt, execution.ResponseRouteDetail(execution.ResponseFailureIsPartialMissing),
-			dataState, delivery, resultTableIDs, stats), nil
+		return client.responseContractUnavailable(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable),
+			execution.ResponseRouteDetail(execution.ResponseFailureIsPartialMissing), dataState, delivery, resultTableIDs, stats), nil
 	}
 	completeness := execution.CompletenessFull
 	if *isPartial || status != nil && status.Code == queryTSPartial {
@@ -825,13 +832,14 @@ func usableDespiteStatus(code string, delivery execution.SeriesDelivery) bool {
 // series already streamed to the sink so the completion conserves them.
 func (client *Client) responseContractUnavailable(
 	attempt queryIdentity,
+	reason execution.ReasonCode,
 	detail string,
 	dataState execution.DataState,
 	delivery execution.SeriesDelivery,
 	resultTableIDs []string,
 	stats execution.ProviderStats,
 ) execution.ProviderCompletion {
-	completion := client.unavailableCompletion(attempt, execution.ReasonCode(contract.ReasonQueryUnavailable), detail)
+	completion := client.unavailableCompletion(attempt, reason, detail)
 	completion.DataState = dataState
 	completion.Delivery = delivery
 	completion.RouteFacts.ResultTableIDs = append([]string(nil), resultTableIDs...)
