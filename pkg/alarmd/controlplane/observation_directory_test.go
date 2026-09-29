@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,13 +183,14 @@ func TestObservationDirectoryColdWarmPointConfigAndReadOnlyHTTP(t *testing.T) {
 }
 
 func TestObservationDirectoryColdBudgetMakesProgressWithoutHTTPReads(t *testing.T) {
-	h, d, at := directoryFixture(t, 3)
-	// Latest publication, manifest, then exactly one cold object; the
-	// activation comes through the repository's own cache and is not one of
-	// the directory's commands. A later tick reuses that identity projection.
+	h, d, at := directoryFixture(t, 4)
+	// Latest publication, the manifest's length and bytes, then exactly one
+	// cold object; the activation comes through the repository's own cache
+	// and is not one of the directory's commands. A later tick reuses that
+	// identity projection and the manifest it walked.
 	d.Refresh(h.ctx, at)
 	first := d.Page(at, "", "", "", 0, 20)
-	if first.Complete || first.ReadCommands > 3 || len(first.Rows) != 1 {
+	if first.Complete || first.ReadCommands > 4 || len(first.Rows) != 1 {
 		t.Fatalf("first %+v", first)
 	}
 	d.Refresh(h.ctx, at.Add(time.Second))
@@ -656,7 +659,8 @@ func (s *failingReadSpy) GetRange(ctx context.Context, key string, start, end in
 	return s.Cmdable.GetRange(ctx, key, start, end)
 }
 
-// readOrderSpy records the keys a directory refresh reads, in order.
+// readOrderSpy records the keys a directory refresh reads, in order, a key
+// once for each command on it - a manifest's length, then its bytes.
 type readOrderSpy struct {
 	redis.Cmdable
 	keys []string
@@ -665,6 +669,11 @@ type readOrderSpy struct {
 func (s *readOrderSpy) GetRange(ctx context.Context, key string, start, end int64) *redis.StringCmd {
 	s.keys = append(s.keys, key)
 	return s.Cmdable.GetRange(ctx, key, start, end)
+}
+
+func (s *readOrderSpy) StrLen(ctx context.Context, key string) *redis.IntCmd {
+	s.keys = append(s.keys, key)
+	return s.Cmdable.StrLen(ctx, key)
 }
 
 // A refresh that fails says which step failed and in its own words, not only
@@ -1038,8 +1047,15 @@ func TestADirectoryRefreshThatStoppedReadsNothingAfterItAndKeepsWhatItKnows(t *t
 		known.fail = refused
 		known.keys = nil
 		kept.Refresh(h.ctx, at.Add(time.Second))
-		if s := kept.Page(at.Add(time.Second), "", "", "", 0, 20); len(known.read(":qgobj:")) != 1 || len(s.Rows) != 1 || s.GroupsUnread != 0 {
-			t.Fatalf("%s, its group unread = reads %v, %d rows, %d unread; want the unchanged group's row", name, known.keys, len(s.Rows), s.GroupsUnread)
+		s := kept.Page(at.Add(time.Second), "", "", "", 0, 20)
+		latest := 0
+		for _, row := range s.Rows {
+			if row.Publication == s.Published {
+				latest++
+			}
+		}
+		if len(known.read(":qgobj:")) != 1 || latest != 1 || s.GroupsUnread != 0 {
+			t.Fatalf("%s, its group unread = reads %v, %d rows of the new publication, %d unread; want the unchanged group's row", name, known.keys, latest, s.GroupsUnread)
 		}
 	}
 }
@@ -1071,4 +1087,230 @@ func objectCatalogTwoGroupsChangingSecond(t *testing.T, thresholdB int) controlp
 		t.Fatalf("setup: catalog %d groups, %v", len(catalog.QueryGroups), err)
 	}
 	return catalog
+}
+
+// manifestReadSpy records the length and byte reads a directory refresh makes
+// of manifest keys.
+type manifestReadSpy struct {
+	redis.Cmdable
+	lengths, reads []string
+}
+
+func (s *manifestReadSpy) StrLen(ctx context.Context, key string) *redis.IntCmd {
+	if strings.Contains(key, ":manifest:") {
+		s.lengths = append(s.lengths, key)
+	}
+	return s.Cmdable.StrLen(ctx, key)
+}
+
+func (s *manifestReadSpy) GetRange(ctx context.Context, key string, start, end int64) *redis.StringCmd {
+	if strings.Contains(key, ":manifest:") {
+		s.reads = append(s.reads, key)
+	}
+	return s.Cmdable.GetRange(ctx, key, start, end)
+}
+
+func (s *manifestReadSpy) of(revision execution.SnapshotRevision) (lengths, reads int) {
+	for _, key := range s.lengths {
+		if strings.HasSuffix(key, ":"+string(revision)) {
+			lengths++
+		}
+	}
+	for _, key := range s.reads {
+		if strings.HasSuffix(key, ":"+string(revision)) {
+			reads++
+		}
+	}
+	return lengths, reads
+}
+
+// A revision's manifest is read once: the refresh after walks it again
+// without a length or a byte read, and a new revision is read. The Slot
+// path's manifest cache is not written by the directory, and a revision a
+// refresh does not walk is forgotten.
+func TestADirectoryReadsARevisionsManifestOnce(t *testing.T) {
+	h, _, at := directoryFixture(t, 32)
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	spy := &manifestReadSpy{Cmdable: h.client}
+	repository := h.newRepository(t)
+	d, err := controlplane.NewObservationDirectory(repository, limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	first := d.Page(at, "", "", "", 0, 20)
+	revision := first.Published.SnapshotRevision
+	if lengths, reads := spy.of(revision); !first.Complete || lengths != 1 || reads != 1 ||
+		!slices.Equal(d.RememberedManifestsForTest(), []execution.SnapshotRevision{revision}) {
+		t.Fatalf("first refresh = %d length and %d byte reads, remembered %v, %+v; want one of each and the revision remembered",
+			lengths, reads, d.RememberedManifestsForTest(), first)
+	}
+
+	spy.lengths, spy.reads = nil, nil
+	d.Refresh(h.ctx, at.Add(time.Second))
+	second := d.Page(at.Add(time.Second), "", "", "", 0, 20)
+	if len(spy.lengths)+len(spy.reads) != 0 || !second.Complete || len(second.Rows) != 2 || second.ManifestsRemembered != 1 ||
+		second.Publications[0].Manifest != "remembered" {
+		t.Fatalf("the same revision again = lengths %v reads %v, %+v; want it walked unread", spy.lengths, spy.reads, second)
+	}
+	// The rows it makes are the ones the read made, output contexts included.
+	contextsOf := func(rows []controlplane.StrategyDirectoryRow) string {
+		var contexts []string
+		for _, row := range rows {
+			contexts = append(contexts, string(row.QueryGroup)+"="+string(row.OutputContext))
+		}
+		return strings.Join(contexts, ",")
+	}
+	if contextsOf(first.Rows) != contextsOf(second.Rows) || first.Rows[0].OutputContext == "" {
+		t.Fatalf("rows walked from the remembered manifest = %s, want %s as read", contextsOf(second.Rows), contextsOf(first.Rows))
+	}
+
+	h.publish(t, catalogWithSchedule(t, objectCatalogTwoGroups(t, 90), 60, 0))
+	spy.lengths, spy.reads = nil, nil
+	d.Refresh(h.ctx, at.Add(2*time.Second))
+	third := d.Page(at.Add(2*time.Second), "", "", "", 0, 20)
+	next := third.Published.SnapshotRevision
+	if lengths, reads := spy.of(next); next == revision || lengths != 1 || reads != 1 || !slices.Contains(d.RememberedManifestsForTest(), next) {
+		t.Fatalf("a new revision = %s read %d/%d, remembered %v; want it read and remembered", next, lengths, reads, d.RememberedManifestsForTest())
+	}
+	for _, r := range []execution.SnapshotRevision{revision, next} {
+		if _, cached := repository.SlotManifestForTest(r); cached {
+			t.Fatalf("the directory put %s in the Slot path's manifest cache", r)
+		}
+	}
+
+	stale := execution.SnapshotRevision(strings.Repeat("f", 64))
+	d.RememberManifestForTest(stale)
+	d.Refresh(h.ctx, at.Add(3*time.Second))
+	if slices.Contains(d.RememberedManifestsForTest(), stale) {
+		t.Fatalf("remembered %v after a refresh that did not walk %s", d.RememberedManifestsForTest(), stale)
+	}
+}
+
+// A manifest is sized before it is read: a carried publication whose manifest
+// key is gone has a length of zero and is named expired with no bytes read,
+// and a manifest longer than the refresh has left is unread with none of it
+// sent.
+func TestADirectorySizesAManifestBeforeReadingIt(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	h, baseline, at := directoryFixture(t, 32)
+	baseline.Refresh(h.ctx, at)
+	carried := baseline.Page(at, "", "", "", 0, 20).Published
+	manifest, err := h.repository.LoadCatalogManifest(h.ctx, carried.SnapshotRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SnapshotRevision = execution.SnapshotRevision(strings.Repeat("e", 64))
+	payload, _ := json.Marshal(manifest)
+	if err = h.client.Set(h.ctx, h.prefix+":manifest:"+string(manifest.SnapshotRevision), payload, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.client.Set(h.ctx, h.prefix+":latest_publication", "2\n"+string(manifest.SnapshotRevision), 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.client.Del(h.ctx, h.prefix+":manifest:"+string(carried.SnapshotRevision)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	spy := &manifestReadSpy{Cmdable: h.client}
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	expired := false
+	for _, publication := range d.Page(at, "", "", "", 0, 20).Publications {
+		expired = expired || (publication.Publication == carried && publication.Manifest == "expired")
+	}
+	if lengths, reads := spy.of(carried.SnapshotRevision); lengths != 1 || reads != 0 || !expired {
+		t.Fatalf("a carried manifest gone = %d length and %d byte reads, expired %v; want its length read, zero, and no bytes", lengths, reads, expired)
+	}
+
+	h, _, at = directoryFixture(t, 32)
+	latest, err := h.client.Get(h.ctx, h.prefix+":latest_publication").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	small := &manifestReadSpy{Cmdable: h.client}
+	tight, err := controlplane.NewObservationDirectory(h.newRepository(t), controlplane.DirectoryLimits{WireBytes: len(latest) + 16, Commands: 32,
+		Entries: 100, Timeout: time.Second, FreshFor: time.Minute}, small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tight.Refresh(h.ctx, at)
+	s := tight.Page(at, "", "", "", 0, 20)
+	if len(small.lengths) != 1 || len(small.reads) != 0 || len(s.Publications) != 1 || s.Publications[0].Manifest != "unread" || s.ReadBytes != len(latest) ||
+		s.Reason != "RESOURCE_BUDGET" {
+		t.Fatalf("a manifest longer than the allowance left = lengths %v reads %v, %+v; want it unread with no bytes of it sent", small.lengths, small.reads, s)
+	}
+}
+
+// The latest publication's manifest in the Slot path's cache is walked
+// without a read and left as it was: in the order the cache holds it, which
+// every Slot reading it sees. Refreshes reading it while Slots read it race
+// with nothing (run under -race).
+func TestADirectoryWalksTheSlotCachesManifestWithoutReadingOrReorderingIt(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	h, baseline, at := directoryFixture(t, 32)
+	baseline.Refresh(h.ctx, at)
+	revision := baseline.Page(at, "", "", "", 0, 20).Published.SnapshotRevision
+	manifest, err := h.repository.LoadCatalogManifest(h.ctx, revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Held in the order a directory would change: descending.
+	sort.Slice(manifest.QueryGroups, func(i, j int) bool { return manifest.QueryGroups[i].QueryGroup > manifest.QueryGroups[j].QueryGroup })
+	order := func(m controlplane.CatalogManifest) string {
+		var groups []string
+		for _, group := range m.QueryGroups {
+			groups = append(groups, string(group.QueryGroup))
+		}
+		return strings.Join(groups, ",")
+	}
+	held := order(manifest)
+	repository := h.newRepository(t)
+	repository.StoreSlotManifestForTest(manifest)
+
+	spy := &manifestReadSpy{Cmdable: h.client}
+	d, err := controlplane.NewObservationDirectory(repository, limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	s := d.Page(at, "", "", "", 0, 20)
+	cached, _ := repository.SlotManifestForTest(revision)
+	if len(spy.lengths)+len(spy.reads) != 0 || !s.Complete || len(s.Rows) != 2 || s.Publications[0].Manifest != "slot_cache" || order(cached) != held {
+		t.Fatalf("the Slot cache's manifest = lengths %v reads %v, cached order %s (held %s), %+v; want it walked unread and unchanged",
+			spy.lengths, spy.reads, order(cached), held, s)
+	}
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if m, ok := repository.SlotManifestForTest(revision); ok {
+					_ = order(m)
+				}
+			}
+		}()
+	}
+	for i := range 8 {
+		fresh, err := controlplane.NewObservationDirectory(repository, limits, h.client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fresh.Refresh(h.ctx, at.Add(time.Duration(i)*time.Second))
+	}
+	close(stop)
+	readers.Wait()
+	if cached, _ := repository.SlotManifestForTest(revision); order(cached) != held {
+		t.Fatalf("the Slot cache's manifest after concurrent refreshes = %s, want %s", order(cached), held)
+	}
 }
