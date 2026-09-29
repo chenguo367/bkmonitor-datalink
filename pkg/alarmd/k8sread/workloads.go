@@ -198,6 +198,9 @@ var dnsLabel = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`)
 // the <pod>.<service>.<namespace>.svc form of a headless Service. The address
 // may be a URL, host:port or a bare host. Anything else - an IP, an external
 // name, a short <service>.<namespace> that could be either - names none.
+// What follows svc is not checked against the cluster's own domain, so an
+// external name with a label "svc" in it is taken for one: the cost is one
+// more LIST, answered by name (usually forbidden), and one of MaxNamespaces.
 func NamespaceOfAddress(address string) (string, bool) {
 	host := strings.TrimSpace(address)
 	if strings.Contains(host, "://") {
@@ -510,7 +513,7 @@ func describeRollouts(workload *Workload, replicaSets []replicaSetObject) {
 		if i == MaxRollouts {
 			break
 		}
-		rollout := Rollout{ReplicaSet: rs.Metadata.Name, Revision: rs.Metadata.Annotations["deployment.kubernetes.io/revision"],
+		rollout := Rollout{ReplicaSet: rs.Metadata.Name, Revision: rs.Metadata.Annotations.Revision,
 			CreatedAt: rs.Metadata.CreationTimestamp, Ready: rs.Status.ReadyReplicas, Images: rs.Spec.Template.Spec.images()}
 		if rs.Spec.Replicas != nil {
 			rollout.Desired = *rs.Spec.Replicas
@@ -520,7 +523,7 @@ func describeRollouts(workload *Workload, replicaSets []replicaSetObject) {
 }
 
 func revisionOf(rs replicaSetObject) int64 {
-	revision, err := strconv.ParseInt(rs.Metadata.Annotations["deployment.kubernetes.io/revision"], 10, 64)
+	revision, err := strconv.ParseInt(rs.Metadata.Annotations.Revision, 10, 64)
 	if err != nil {
 		return 0
 	}

@@ -166,6 +166,7 @@ func TestNamespaceOfAddress(t *testing.T) {
 		"redis.example.test:6379":                   "",
 		"redis.storage:6379":                        "",
 		"svc.bad_name.svc.cluster.local":            "",
+		"x_y.ns.svc.cluster.local":                  "",
 		"":                                          "",
 	} {
 		got, ok := NamespaceOfAddress(address)
@@ -304,6 +305,8 @@ func TestWorkloadsSaysWhereItWasCut(t *testing.T) {
 	for i := 0; i < MaxNamespaces+2; i++ {
 		listed = append(listed, "listed-"+string(rune('a'+i)))
 	}
+	// A namespace past the bound named twice is named once.
+	listed = append(listed, listed[len(listed)-1])
 	result, err := reader.Workloads(context.Background(), nil, listed, 24)
 	if err != nil {
 		t.Fatal(err)

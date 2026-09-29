@@ -330,7 +330,6 @@ func (r *Reader) getJSON(ctx context.Context, resource, path string, query url.V
 type objectMeta struct {
 	Name              string            `json:"name"`
 	Labels            map[string]string `json:"labels"`
-	Annotations       map[string]string `json:"annotations"`
 	CreationTimestamp time.Time         `json:"creationTimestamp"`
 	DeletionTimestamp *time.Time        `json:"deletionTimestamp"`
 	OwnerReferences   []struct {
@@ -338,6 +337,14 @@ type objectMeta struct {
 		Name       string `json:"name"`
 		Controller *bool  `json:"controller"`
 	} `json:"ownerReferences"`
+
+	// Annotations decodes the one key a read uses, the Deployment revision
+	// on a ReplicaSet. Every other annotation - last-applied-configuration
+	// among them, which holds a whole manifest env values and all - is
+	// skipped by the decoder, not held.
+	Annotations struct {
+		Revision string `json:"deployment.kubernetes.io/revision"`
+	} `json:"annotations"`
 }
 
 func (m objectMeta) controller(kind string) string {
