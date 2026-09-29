@@ -2145,12 +2145,50 @@ var RoundMemoryBuckets = []string{"le_16", "le_64", "le_256", "le_1440", "gt_144
 // for them over all objects -- the slices' capacity, what the heap holds --
 // the most any one object keeps, and how many objects keep theirs by the
 // window their worker named rather than by the last RecentRoundsKept.
+// Largest names the object keeping MaxRounds; nil while no object keeps
+// any.
 type RoundMemoryFacts struct {
 	Objects     map[string]int
 	Rounds      int
 	Bytes       uint64
 	MaxRounds   int
 	WindowSized int
+	Largest     *LargestRoundMemory
+}
+
+// LargestRoundMemory is the object keeping the most rounds, named so the
+// reading answers which one and not only how many: its Query Group, the
+// strategies it runs (sorted, the first largestStrategiesListed of
+// StrategiesTotal), the rounds it keeps, and where its windows start -- the
+// span that sets how many it keeps once they fill; absent for an object whose
+// worker named no start, which keeps the last RecentRoundsKept. Of objects keeping as
+// many, the one with the least key, so the name does not change from one
+// reading to the next while the counts do not.
+type LargestRoundMemory struct {
+	QueryGroup      string        `json:"query_group"`
+	Strategies      []StrategyRef `json:"strategies"`
+	StrategiesTotal int           `json:"strategies_total"`
+	Rounds          int           `json:"rounds"`
+	WindowStart     *time.Time    `json:"window_start,omitempty"`
+}
+
+// largestStrategiesListed bounds the strategies named for the largest
+// object; the total counts them all.
+const largestStrategiesListed = 4
+
+// RoundMemorySummary is what a replica publishes of its RoundMemoryFacts:
+// the rounds over every object it runs, the bytes they hold, and the object
+// keeping the most. The counts are also metrics; only the snapshot can name
+// the object.
+type RoundMemorySummary struct {
+	Rounds  int                 `json:"rounds"`
+	Bytes   uint64              `json:"bytes"`
+	Largest *LargestRoundMemory `json:"largest,omitempty"`
+}
+
+// Summary is the part of the reading a replica publishes.
+func (facts RoundMemoryFacts) Summary() RoundMemorySummary {
+	return RoundMemorySummary{Rounds: facts.Rounds, Bytes: facts.Bytes, Largest: facts.Largest}
 }
 
 // RoundMemory reads what the tracker holds for the holes, at the moment it
@@ -2165,8 +2203,13 @@ func (tracker *Tracker) RoundMemory() RoundMemoryFacts {
 	}
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
-	for _, state := range tracker.groups {
+	largestKey := ""
+	var largest *queryGroupState
+	for key, state := range tracker.groups {
 		kept := len(state.rounds)
+		if kept > facts.MaxRounds || (kept == facts.MaxRounds && key < largestKey) {
+			largestKey, largest = key, state
+		}
 		switch {
 		case kept <= 16:
 			facts.Objects["le_16"]++
@@ -2185,6 +2228,20 @@ func (tracker *Tracker) RoundMemory() RoundMemoryFacts {
 		if state.windowStart > 0 {
 			facts.WindowSized++
 		}
+	}
+	if largest != nil {
+		named := &LargestRoundMemory{QueryGroup: largestKey, Rounds: len(largest.rounds), StrategiesTotal: len(largest.strategies)}
+		strategies := make([]StrategyRef, 0, len(largest.strategies))
+		for strategy := range largest.strategies {
+			strategies = append(strategies, strategy)
+		}
+		sortStrategies(strategies)
+		named.Strategies = strategies[:min(len(strategies), largestStrategiesListed)]
+		if largest.windowStart > 0 {
+			start := time.Unix(largest.windowStart, 0).UTC()
+			named.WindowStart = &start
+		}
+		facts.Largest = named
 	}
 	return facts
 }

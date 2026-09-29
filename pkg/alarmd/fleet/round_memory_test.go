@@ -11,8 +11,12 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"math"
+	"strings"
 	"testing"
+	"time"
 	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -201,4 +205,149 @@ func TestAMinuteRunTwiceIsReadAgainstItsLaterRound(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The reading names the object keeping the most rounds: its Query Group,
+// its strategies sorted and bounded with the total beside them, and where its
+// windows start. Of two keeping as many the least key is named, whatever
+// order the table is walked in; an object keeping none is never named.
+func TestTheRoundMemoryReadingNamesTheLargestObject(t *testing.T) {
+	tracker := newTracker(t, &clock{at: now})
+	if got := tracker.RoundMemory(); got.Largest != nil {
+		t.Fatalf("empty tracker names %+v, want nothing", got.Largest)
+	}
+	tracker.groups["qg-none"] = &queryGroupState{}
+	if got := tracker.RoundMemory(); got.Largest != nil {
+		t.Fatalf("a tracker whose objects keep no rounds names %+v, want nothing", got.Largest)
+	}
+	strategies := map[StrategyRef]struct{}{}
+	for _, id := range []string{"9", "901", "12", "7", "31", "5"} {
+		strategies[StrategyRef{StrategyID: id, BusinessID: "2"}] = struct{}{}
+	}
+	tracker.groups["qg-b-long"] = &queryGroupState{rounds: make([]roundMark, 1469), windowStart: 86_400, strategies: strategies}
+	tracker.groups["qg-a-short"] = &queryGroupState{rounds: make([]roundMark, 300), windowStart: 172_000}
+	tracker.groups["qg-c-long"] = &queryGroupState{rounds: make([]roundMark, 1469), windowStart: 90_000}
+	for i := 0; i < 20; i++ {
+		got := tracker.RoundMemory().Largest
+		if got == nil || got.QueryGroup != "qg-b-long" || got.Rounds != 1469 || got.StrategiesTotal != 6 ||
+			got.WindowStart == nil || !got.WindowStart.Equal(time.Unix(86_400, 0)) {
+			t.Fatalf("largest = %+v, want qg-b-long, the least key of the two keeping 1469", got)
+		}
+		all := make([]StrategyRef, 0, len(strategies))
+		for strategy := range strategies {
+			all = append(all, strategy)
+		}
+		sortStrategies(all)
+		if len(got.Strategies) != 4 {
+			t.Fatalf("strategies = %+v, want the first 4 of the sorted %+v", got.Strategies, all)
+		}
+		for j := range got.Strategies {
+			if got.Strategies[j] != all[j] {
+				t.Fatalf("strategies = %+v, want the first 4 of the sorted %+v", got.Strategies, all)
+			}
+		}
+	}
+	// Fifty keeping as many: whichever the walk meets first, the least key.
+	tied := newTracker(t, &clock{at: now})
+	for i := 49; i >= 0; i-- {
+		tied.groups[fmt.Sprintf("qg-tied-%02d", i)] = &queryGroupState{rounds: make([]roundMark, 60)}
+	}
+	for i := 0; i < 20; i++ {
+		if got := tied.RoundMemory().Largest; got == nil || got.QueryGroup != "qg-tied-00" {
+			t.Fatalf("largest of fifty tied = %+v, want qg-tied-00", got)
+		}
+	}
+	summary := tracker.RoundMemory().Summary()
+	if summary.Rounds != 1469*2+300 || summary.Bytes != uint64(1469*2+300)*16 || summary.Largest == nil || summary.Largest.QueryGroup != "qg-b-long" {
+		t.Fatalf("summary = %+v, want the counts and the named object", summary)
+	}
+}
+
+// Each replica's row carries the round memory it published, the largest
+// object named, on the health route by its JSON names; a copy, so a later
+// change to the snapshot does not reach it; and absent for a replica that
+// published none, not filled in as zero.
+func TestTheReplicaRowCarriesItsRoundMemory(t *testing.T) {
+	windowStart := time.Unix(86_400, 0).UTC()
+	snapshots := healthySnapshots()
+	snapshots[0].RoundMemory = &RoundMemorySummary{Rounds: 1769, Bytes: 28304, Largest: &LargestRoundMemory{
+		QueryGroup: "qg-long", Strategies: []StrategyRef{{StrategyID: "901", BusinessID: "2"}}, StrategiesTotal: 1,
+		Rounds: 1469, WindowStart: &windowStart}}
+	view := Aggregate(Expectation{QueryGroups: 949, Known: true}, snapshots, replicas(), now, freshness)
+	rows := map[string]ReplicaView{}
+	for _, row := range view.PerReplica {
+		rows[row.Replica] = row
+	}
+	got := rows["pod-a"].RoundMemory
+	if got == nil || got.Rounds != 1769 || got.Largest == nil || got.Largest.QueryGroup != "qg-long" || got.Largest.Strategies[0].StrategyID != "901" {
+		t.Fatalf("pod-a round memory = %+v, want what it published", got)
+	}
+	if rows["pod-b"].RoundMemory != nil {
+		t.Fatalf("pod-b published none and its row says %+v", rows["pod-b"].RoundMemory)
+	}
+	snapshots[0].RoundMemory.Largest.Strategies[0].StrategyID = "1"
+	snapshots[0].RoundMemory.Largest.QueryGroup = "qg-other"
+	windowStart = time.Unix(1, 0).UTC()
+	if got.Largest.Strategies[0].StrategyID != "901" || got.Largest.QueryGroup != "qg-long" || !got.Largest.WindowStart.Equal(time.Unix(86_400, 0)) {
+		t.Fatal("the replica row aliases the snapshot's round memory")
+	}
+	snapshots[0].RoundMemory.Largest.Strategies[0].StrategyID = "901"
+	snapshots[0].RoundMemory.Largest.QueryGroup = "qg-long"
+	windowStart = time.Unix(86_400, 0).UTC()
+
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas())
+	_, health := get(t, handler, "/api/health")
+	perReplica, _ := health["per_replica"].([]any)
+	var memory map[string]any
+	for _, row := range perReplica {
+		if fields := row.(map[string]any); fields["replica"] == "pod-a" {
+			memory, _ = fields["round_memory"].(map[string]any)
+		}
+	}
+	largest, _ := memory["largest"].(map[string]any)
+	if memory["rounds"] != float64(1769) || memory["bytes"] != float64(28304) || largest["query_group"] != "qg-long" ||
+		largest["rounds"] != float64(1469) || largest["strategies_total"] != float64(1) || largest["window_start"] != "1970-01-02T00:00:00Z" {
+		t.Fatalf("health per_replica round_memory = %v, want pod-a's by its JSON names", memory)
+	}
+}
+
+// An object whose worker named no window start publishes none, not the zero
+// time read as a real date, and an object running no strategy publishes an
+// empty list, not null read as unknown -- on the snapshot as the tracker
+// reads it and on the health route after the view copies it.
+func TestALargestObjectWithoutAStartOrStrategiesSaysSo(t *testing.T) {
+	tracker := newTracker(t, &clock{at: now})
+	tracker.groups["qg-last-sixteen"] = &queryGroupState{rounds: make([]roundMark, 16)}
+	summary := tracker.RoundMemory().Summary()
+	encoded, err := json.Marshal(summary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := string(encoded); strings.Contains(text, "window_start") || !strings.Contains(text, `"strategies":[]`) {
+		t.Fatalf("encoded = %s, want no window_start and an empty strategies list", text)
+	}
+
+	snapshots := healthySnapshots()
+	var published RoundMemorySummary
+	if err := json.Unmarshal(encoded, &published); err != nil {
+		t.Fatal(err)
+	}
+	snapshots[0].RoundMemory = &published
+	handler := handlerWith(t, snapshots, Expectation{QueryGroups: 949, Known: true}, replicas())
+	_, health := get(t, handler, "/api/health")
+	perReplica, _ := health["per_replica"].([]any)
+	for _, row := range perReplica {
+		fields := row.(map[string]any)
+		if fields["replica"] != "pod-a" {
+			continue
+		}
+		memory, _ := fields["round_memory"].(map[string]any)
+		largest, _ := memory["largest"].(map[string]any)
+		strategies, isList := largest["strategies"].([]any)
+		if _, named := largest["window_start"]; named || !isList || len(strategies) != 0 {
+			t.Fatalf("health largest = %v, want no window_start and strategies []", largest)
+		}
+		return
+	}
+	t.Fatalf("health per_replica = %v, want pod-a's row", perReplica)
 }
