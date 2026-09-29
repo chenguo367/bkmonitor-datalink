@@ -43,6 +43,9 @@ type TakeoverClock struct {
 type takeover struct {
 	epoch uint64
 	at    time.Time
+	// classified is the latest Slot reported as due before the takeover, by
+	// outcome (FirstClassification).
+	classified map[string]execution.EvaluationTime
 }
 
 // NewTakeoverClock is an empty clock: every Query Group's first epoch here
@@ -68,10 +71,39 @@ func (clock *TakeoverClock) Anchor(queryGroup execution.QueryGroupIdentity, fenc
 	case held && fence.OwnerEpoch == last.epoch+1:
 		// Acquired again right after this process's own epoch: rebuilt
 		// here, not taken over.
-		clock.owned[queryGroup] = takeover{epoch: fence.OwnerEpoch, at: last.at}
+		clock.owned[queryGroup] = takeover{epoch: fence.OwnerEpoch, at: last.at, classified: last.classified}
 		return last.at
 	default:
 		clock.owned[queryGroup] = takeover{epoch: fence.OwnerEpoch, at: now}
 		return now
 	}
+}
+
+// FirstClassification reports whether this is the first time the Slot at
+// evaluationTime is reported with this outcome since the Query Group was
+// taken over, and remembers that it was. A Slot classified again -- its
+// replay failed and is retried, or its Runner woke before it ran -- is one
+// Slot, and counted once; one replayed and later given up on for its age is
+// counted once under each. A Query Group's Slots are classified in
+// evaluation order, so the latest reported is all it keeps. True on a nil
+// clock and for a Query Group it holds no takeover of.
+func (clock *TakeoverClock) FirstClassification(queryGroup execution.QueryGroupIdentity, evaluationTime execution.EvaluationTime, outcome string) bool {
+	if clock == nil {
+		return true
+	}
+	clock.mu.Lock()
+	defer clock.mu.Unlock()
+	last, held := clock.owned[queryGroup]
+	if !held {
+		return true
+	}
+	if evaluationTime <= last.classified[outcome] {
+		return false
+	}
+	if last.classified == nil {
+		last.classified = make(map[string]execution.EvaluationTime, 2)
+	}
+	last.classified[outcome] = evaluationTime
+	clock.owned[queryGroup] = last
+	return true
 }

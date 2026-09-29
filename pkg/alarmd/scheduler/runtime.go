@@ -751,7 +751,7 @@ func (runner *Runner) runOneTracked(
 	ctx = withVerifiedOwnership(ctx, runner.queryGroup, confirmedAssignment, confirmedFence)
 	runner.restoreQueryCooldown(ctx, confirmedFence)
 	decision = "source_next"
-	slot, due, facts, err := runner.source.Next(ctx, runner.queryGroup)
+	slot, due, facts, err := runner.source.Next(withQueryCooldownHeld(ctx, runner.queryCooldownHolds()), runner.queryGroup)
 	sourceFacts = facts
 	if err != nil {
 		if isViewNotExecutable(err) {

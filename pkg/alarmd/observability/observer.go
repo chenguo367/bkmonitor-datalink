@@ -1262,12 +1262,15 @@ var ReplayExpiryReasons = []string{
 // because nobody here could have run it and it is within the replay age, or
 // past the replay age and given up on like any Slot that old. The distance
 // rule does not apply to it. TakeoverOffsetSeconds is how long after the
-// takeover the Slot was classified. One is reported each time such a Slot
-// is classified, so a Slot retried after a failed replay is reported again.
+// takeover the Slot was first classified. One is reported per Slot and
+// outcome, however many times the Slot is classified: a Slot retried after a
+// failed replay is not reported again, and one replayed and later given up
+// on for its age is reported under each. A Query Group the degraded pool
+// holds reports none: its Slots are given up on for distance as before.
 type ReplayTakeoverFacts struct {
-	Outcome               string
-	AgeSeconds            float64
-	TakeoverOffsetSeconds float64
+	Outcome               string  `json:"outcome"`
+	AgeSeconds            float64 `json:"age_seconds"`
+	TakeoverOffsetSeconds float64 `json:"takeover_offset_seconds"`
 }
 
 // The outcomes of a Slot due before a takeover, closed.

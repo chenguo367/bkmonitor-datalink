@@ -918,7 +918,8 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 	metrics.replayTakeovers = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "replay_takeover_slots_total",
 		Help: "Slots evaluated before this process took their Query Group over from another owner, by outcome, " +
-			"counted each time such a Slot is classified, so a Slot retried after a failed replay counts again: " +
+			"counted once per Slot and outcome however often it is classified, and not for a Query Group the " +
+			"degraded pool holds, whose Slots are given up on for distance as before: " +
 			"replayed, because nobody here could have run them and they are within the replay age; " +
 			"age_exceeded, given up on like any Slot that old. The distance rule, which gives up on Slots a " +
 			"Query Group fell behind on while it held them, does not apply to these. A rollout's handover " +
