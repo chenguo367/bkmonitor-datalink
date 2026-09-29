@@ -14,25 +14,29 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 )
 
-// stubDirectory answers every page with snapshot; with entered set, a page
-// says it has started and waits for release before answering.
+// stubDirectory answers every page with snapshot. With entered set, the
+// first page says it has started and waits for release before answering;
+// every later page answers at once, so one let in beside it is answered
+// rather than held.
 type stubDirectory struct {
 	available bool
 	snapshot  controlplane.StrategyDirectorySnapshot
 	entered   chan struct{}
 	release   chan struct{}
+	pages     atomic.Int32
 }
 
 func (d *stubDirectory) Available() bool { return d.available }
 
 func (d *stubDirectory) Page(context.Context, time.Time, string, string, string, int, int) controlplane.StrategyDirectorySnapshot {
-	if d.entered != nil {
+	if d.pages.Add(1) == 1 && d.entered != nil {
 		d.entered <- struct{}{}
 		<-d.release
 	}
@@ -75,7 +79,6 @@ func TestOneDirectoryPageIsBuiltAtATime(t *testing.T) {
 		t.Fatalf("first request = %d %s, want its page", first.Code, first.Body.String())
 	}
 	// The flight is released with the answer.
-	directory.entered = nil
 	third := httptest.NewRecorder()
 	handler.ServeHTTP(third, httptest.NewRequest(http.MethodGet, "/api/objects?scope=strategies", nil))
 	if third.Code != http.StatusOK {
