@@ -227,7 +227,9 @@ func (m *effectiveMaintenance) remember(trace observability.TraceFields, outcome
 	at := m.bundle.dependencies.Now().UTC()
 	text := ""
 	if err != nil {
-		text = cutAtRune(err.Error(), maintenanceErrorBytes)
+		// Redacted as every error this process serves is: a Redis or alert
+		// link failure can carry an address or a URL with its credentials.
+		text = cutAtRune(observability.SanitizeErrorText(err.Error()), maintenanceErrorBytes)
 	}
 	m.countsMu.Lock()
 	defer m.countsMu.Unlock()

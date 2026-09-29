@@ -55,6 +55,10 @@ func TestTheMaintenanceKeepsTheQueryGroupsItCouldNotComplete(t *testing.T) {
 	f.m.observeTrace(context.Background(), observability.TraceFields{QueryGroupKey: "qg-send", StrategyID: "4101", BusinessID: "2"},
 		closeOutcomeSendFailed, errors.New(long), 3)
 	f.m.observe(context.Background(), "qg-acked", closeOutcomeAcked, nil, 5)
+	// Served as every error is: a URL's credentials never reach a reader.
+	f.advance(time.Second)
+	f.m.observe(context.Background(), "qg-console", closeOutcomeSendFailed,
+		errors.New("console refused: https://user:secret@example.test/api/close"), 1)
 
 	reading := f.m.Reading()
 	unavailable := reading.Recent[closeOutcomeUnavailable]
@@ -74,12 +78,17 @@ func TestTheMaintenanceKeepsTheQueryGroupsItCouldNotComplete(t *testing.T) {
 		t.Fatalf("held close kept %+v, want it once, counted 100, since its first tick, with the latest error", deletion)
 	}
 	sent := reading.Recent[closeOutcomeSendFailed]
-	if len(sent) != 1 || sent[0].StrategyID != "4101" || sent[0].BusinessID != "2" || len(sent[0].Error) > maintenanceErrorBytes ||
+	if len(sent) != 2 || sent[0].QueryGroup != "qg-console" || strings.Contains(sent[0].Error, "secret") ||
+		strings.Contains(sent[0].Error, "user:") || !strings.Contains(sent[0].Error, "console refused") {
+		t.Fatalf("send_failed kept %+v, want the console's URL redacted and the rest of the error kept", sent)
+	}
+	sent = sent[1:]
+	if sent[0].StrategyID != "4101" || sent[0].BusinessID != "2" || len(sent[0].Error) > maintenanceErrorBytes ||
 		!utf8.ValidString(sent[0].Error) || !strings.HasPrefix(long, sent[0].Error) || len(sent[0].Error) < maintenanceErrorBytes-3 {
 		t.Fatalf("send_failed kept %+v, want the strategy and the error cut on a rune to %d bytes", sent, maintenanceErrorBytes)
 	}
 	if _, kept := reading.Recent[closeOutcomeAcked]; kept || len(f.m.recent[closeOutcomeAcked]) != 0 || reading.Counts[closeOutcomeAcked] != 5 ||
-		reading.Counts[closeOutcomeUnavailable] != uint64(maintenanceRecentKept+8) || reading.Counts[closeOutcomeSendFailed] != 3 ||
+		reading.Counts[closeOutcomeUnavailable] != uint64(maintenanceRecentKept+8) || reading.Counts[closeOutcomeSendFailed] != 4 ||
 		reading.Counts[closeOutcomeDeletionUnsettled] != 101 {
 		t.Fatalf("counts %v recent words %d; want close_acked counted and not kept", reading.Counts, len(reading.Recent))
 	}
