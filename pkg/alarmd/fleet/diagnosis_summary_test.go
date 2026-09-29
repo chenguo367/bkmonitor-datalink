@@ -110,7 +110,10 @@ func TestAFirstScreenCountDoesNotPushADiagnosisOutOfTheCache(t *testing.T) {
 	}
 	first := rig.page(t, "", 3)
 	reads := rig.universeReads
+	// Each count past the last one's freshness, so each is a read of its
+	// own - and all of them well inside the paged diagnosis's own TTL.
 	for range 2 * DiagnosisCacheEntries {
+		rig.clock = rig.clock.Add(DiagnosisSummaryFreshFor)
 		if code, _ := rig.summary(t, "summary=1"); code != http.StatusOK {
 			t.Fatalf("status %d", code)
 		}
@@ -122,5 +125,34 @@ func TestAFirstScreenCountDoesNotPushADiagnosisOutOfTheCache(t *testing.T) {
 	if next.SnapshotReread || rig.universeReads != reads+2*DiagnosisCacheEntries {
 		t.Fatalf("the paged diagnosis reread (%v, %d reads) after the counts, want its own read kept", next.SnapshotReread,
 			rig.universeReads-reads)
+	}
+}
+
+// A count answers every page that asks while it is fresh, read once however
+// many ask, and is read again after DiagnosisSummaryFreshFor. One that could
+// not be read is not kept: the next ask reads again.
+func TestAFirstScreenCountIsReadOnceWhileFresh(t *testing.T) {
+	rig := newDiagnosisRig(t, diagnosisFacts(), nil)
+	rig.universe = []string{"4101", "4102"}
+	for range 3 {
+		if code, _ := rig.summary(t, "summary=1"); code != http.StatusOK {
+			t.Fatalf("status %d", code)
+		}
+	}
+	if rig.universeReads != 1 {
+		t.Fatalf("universe read %d times for three counts within %v, want once", rig.universeReads, DiagnosisSummaryFreshFor)
+	}
+	rig.universe = append(rig.universe, "4103")
+	rig.clock = rig.clock.Add(DiagnosisSummaryFreshFor)
+	if _, body := rig.summary(t, "summary=1"); rig.universeReads != 2 || body.Summary.Strategies != 3 {
+		t.Fatalf("after %v: %d reads, %d strategies; want a new read counting three", DiagnosisSummaryFreshFor, rig.universeReads,
+			body.Summary.Strategies)
+	}
+	rig.universeErr = errors.New("SOURCE_UNREADABLE")
+	rig.clock = rig.clock.Add(DiagnosisSummaryFreshFor)
+	rig.summary(t, "summary=1")
+	rig.universeErr = nil
+	if _, body := rig.summary(t, "summary=1"); rig.universeReads != 4 || body.Universe.Status != "ok" {
+		t.Fatalf("after an unreadable count: %d reads, universe %+v; want it read again and answered", rig.universeReads, body.Universe)
 	}
 }

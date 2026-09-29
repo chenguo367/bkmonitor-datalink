@@ -105,6 +105,22 @@ type DiagnosisSummaryResponse struct {
 	Timing     DiagnosisTiming   `json:"timing_ms"`
 }
 
+// DiagnosisSummaryFreshFor is how long one first-screen count answers every
+// page that asks. Each count reads every replica's snapshot and decides a
+// row for every strategy - on one deployment about 2.4 MB of snapshots and
+// three-quarters of a second - and a page asks on each refresh, so without
+// it every open page would pay that on every refresh; with it the leader
+// pays it once in this long however many pages are open. A count that could
+// not be read is not kept.
+const DiagnosisSummaryFreshFor = 30 * time.Second
+
+// summaryCache is the one count kept, and when it was read.
+type summaryCache struct {
+	mu   sync.Mutex
+	at   time.Time
+	body *DiagnosisSummaryResponse
+}
+
 // summarizeDiagnosis counts every id of the universe by the verdict its row
 // takes, the row being the one a page writes for it.
 func summarizeDiagnosis(universe []string, view *View, row func(string) DiagnosisRow) DiagnosisSummary {
@@ -262,6 +278,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 		now = time.Now
 	}
 	cache := &diagnosisCache{entries: map[string]*diagnosisEntry{}}
+	counted := &summaryCache{}
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/diagnose" {
 			next.ServeHTTP(response, request)
@@ -313,12 +330,22 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			// LOOKUP_UNAVAILABLE and the universe is still counted.
 		}
 		at := now()
+		if summaryOnly {
+			// One count at a time, and the last one answers while it is
+			// fresh: pages asking together wait for one read, not one each.
+			counted.mu.Lock()
+			defer counted.mu.Unlock()
+			if counted.body != nil && at.Sub(counted.at) < DiagnosisSummaryFreshFor {
+				writeJSON(response, http.StatusOK, counted.body)
+				return
+			}
+		}
 		var entry *diagnosisEntry
 		fresh := true
 		if summaryOnly {
-			// Read for this answer alone and kept by nobody: a page asks on
-			// every refresh, and each ask kept would push out a diagnosis
-			// somebody is paging through from the few the cache holds.
+			// Read for this answer alone and kept out of the diagnoses'
+			// cache: a page asks on every refresh, and each ask kept there
+			// would push out a diagnosis somebody is paging through.
 			readCtx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), DiagnosisReadTimeout)
 			entry = readDiagnosisEntry(readCtx, service, universe, at, stallAfter)
 			cancel()
@@ -367,6 +394,7 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 				return diagnoseStrategy(id, lookup(id), ctx)
 			})
 			summary.Timing.RowsMillis = time.Since(started).Milliseconds()
+			counted.at, counted.body = at, &summary
 			writeJSON(response, http.StatusOK, summary)
 			return
 		}
