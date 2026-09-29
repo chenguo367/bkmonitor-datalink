@@ -53,9 +53,19 @@ const (
 // Consumers is every consumer, in the order they are reported.
 var Consumers = []Consumer{ConsumerCostSummary, ConsumerCostProjection, ConsumerSeriesSampler, ConsumerLookback, ConsumerFleetRounds}
 
-// Reserve is what one detection budget may still take: its size less what
-// it holds now. The line leaves that room to detection.
-type Reserve func() uint64
+// Budget is one detection budget as the line reads it: its size - the most
+// it can come to hold, a cache's working set rather than its ceiling - and
+// what it holds now. Its room, the size less what it holds, is left to
+// detection.
+type Budget func() (size, held uint64)
+
+// room is what a budget may still take.
+func room(size, held uint64) uint64 {
+	if held >= size {
+		return 0
+	}
+	return size - held
+}
 
 // heap is the runtime's reading the line is drawn from.
 type heap struct {
@@ -67,8 +77,13 @@ type heap struct {
 type Line struct {
 	read func() heap
 
-	mu       sync.Mutex
-	reserves []Reserve
+	mu      sync.Mutex
+	budgets []Budget
+	// sizes is each budget's size as the collection ended (or as it was
+	// reserved, for one reserved since), and peaks the largest size each has
+	// had since, in the order of budgets.
+	sizes []uint64
+	peaks []uint64
 	// cycle is the collection the grants below were made after: from the
 	// next one on, what they took is in the live heap. reserved is what the
 	// detection budgets could still take as that collection ended (New) or,
@@ -77,10 +92,16 @@ type Line struct {
 	// does not show yet, so the room stays detection's until then; and what
 	// detection gives back before the next one is still in the live heap
 	// that collection measured, so it is not detection's room a second
-	// time. A budget reserved since adds its own room to it.
-	cycle    uint64
-	granted  uint64
+	// time. A budget reserved since adds its own room to it, and a budget
+	// that grew since adds what it grew by: a Worker that took on more Query
+	// Groups, a Leader reading a larger publication, is room detection is
+	// about to take, before it has taken it.
+	cycle   uint64
+	granted uint64
+	// reserved is the budgets' room as the collection ended, and grown the
+	// room they have grown by since (reservedLocked).
 	reserved uint64
+	grown    uint64
 
 	// refused and admitted are by consumer, in the order of Consumers.
 	refused  []atomic.Uint64
@@ -156,16 +177,19 @@ func sampleValue(sample runtimemetrics.Sample) uint64 {
 }
 
 // Reserve leaves room for one more detection budget.
-func (line *Line) Reserve(reserve Reserve) {
-	if line == nil || reserve == nil {
+func (line *Line) Reserve(budget Budget) {
+	if line == nil || budget == nil {
 		return
 	}
 	line.mu.Lock()
-	line.reserves = append(line.reserves, reserve)
+	size, held := budget()
+	line.budgets = append(line.budgets, budget)
+	line.sizes = append(line.sizes, size)
+	line.peaks = append(line.peaks, size)
 	// Its own room only: taking every budget's room again would drop what
 	// the others took since the collection, which is in neither the live
 	// heap it measured nor their room now.
-	line.reserved = saturatingAdd(line.reserved, reserve())
+	line.reserved = saturatingAdd(line.reserved, room(size, held))
 	line.mu.Unlock()
 }
 
@@ -198,29 +222,45 @@ func (line *Line) Admit(consumer Consumer, bytes uint64) bool {
 }
 
 // reservedLocked is the room left to detection at collection cycle: what
-// its budgets could take as the collection ended, and no more when they
-// could take more now. A budget that gave back what it held since the
-// collection gave back bytes the collection's live heap still holds:
-// reading its room again as well counted those bytes twice, once live and
-// once as room, until the next collection - on a replica whose Slots
-// released their retained bytes after a collection that ran while they
-// held them, the line went hundreds of megabytes past itself every round
-// and refused observation that fit. A new collection forgets the grants,
-// whose bytes its live heap holds.
+// its budgets could take as the collection ended, and the most each has
+// grown by since - but not what they gave back since.
+//
+// A budget that gave back what it held since the collection gave back bytes
+// the collection's live heap still holds: reading its room again as well
+// counted those bytes twice, once live and once as room, until the next
+// collection - on a replica whose Slots released their retained bytes after
+// a collection that ran while they held them, the line went hundreds of
+// megabytes past itself every round and refused observation that fit.
+//
+// A budget that grew is the other way round: the room it grew by is in
+// neither the live heap nor the snapshot, and is detection's the moment its
+// size says so - a cache that names the reads it is about to store has
+// grown before it stores them. Its highest size since the collection is
+// what counts, not each rise: a cache whose size rises by a batch as the
+// batch is named and falls back as it is stored would otherwise add every
+// batch again, and hold observation off with room no batch took. Whatever
+// it stored since stays in the heap however it evicts, so a size that fell
+// back does not take the growth away. A new collection forgets the grants,
+// whose bytes its live heap holds, and the growth, which its live heap
+// holds too.
 func (line *Line) reservedLocked(cycle uint64) uint64 {
 	if cycle != line.cycle {
-		line.cycle, line.granted, line.reserved = cycle, 0, line.unusedLocked()
+		line.cycle, line.granted, line.reserved, line.grown = cycle, 0, 0, 0
+		for index, budget := range line.budgets {
+			size, held := budget()
+			line.sizes[index], line.peaks[index] = size, size
+			line.reserved = saturatingAdd(line.reserved, room(size, held))
+		}
+		return line.reserved
 	}
-	return line.reserved
-}
-
-// unusedLocked is what the detection budgets may still take.
-func (line *Line) unusedLocked() uint64 {
-	var unused uint64
-	for _, reserve := range line.reserves {
-		unused = saturatingAdd(unused, reserve())
+	line.grown = 0
+	for index, budget := range line.budgets {
+		if size, _ := budget(); size > line.peaks[index] {
+			line.peaks[index] = size
+		}
+		line.grown = saturatingAdd(line.grown, line.peaks[index]-line.sizes[index])
 	}
-	return unused
+	return saturatingAdd(line.reserved, line.grown)
 }
 
 // Reading is the line as a reader sees it: the soft limit, the live heap

@@ -470,7 +470,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}); err != nil {
 		return nil, err
 	}
-	observationMemory.Reserve(repository.UnusedCacheBytes)
+	observationMemory.Reserve(repository.TimelineCacheBudget)
+	observationMemory.Reserve(repository.ObjectCacheBudget)
 	repository.ConfigureObserver(observer)
 	// The cache counters are what said a decoded-timeline cache was worth
 	// building, and nothing consumed them before. The timeline occupancy joins
@@ -894,8 +895,8 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err := recorder.BindRetainedReservation(func() uint64 { return worker.RetainedReserved(coordinator) }); err != nil {
 		return nil, err
 	}
-	observationMemory.Reserve(func() uint64 {
-		return cfg.PhaseTwo.Coordinator.MaxRetainedBytes - min(worker.RetainedReserved(coordinator), cfg.PhaseTwo.Coordinator.MaxRetainedBytes)
+	observationMemory.Reserve(func() (uint64, uint64) {
+		return cfg.PhaseTwo.Coordinator.MaxRetainedBytes, worker.RetainedReserved(coordinator)
 	})
 	// Only the static compatibility is read from this one; the heartbeat that
 	// carries acknowledgement and load is written by the bundle once it exists.

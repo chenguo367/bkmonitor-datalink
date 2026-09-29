@@ -167,27 +167,28 @@ func (repository *RedisCatalogRepository) ConfigureObjectCache(maxEntries, maxBy
 	return nil
 }
 
-// UnusedCacheBytes is what the control timeline cache and the catalog object
-// cache may still take of their budgets: the room detection keeps for them,
-// which observation memory leaves free (package memoryline).
-func (repository *RedisCatalogRepository) UnusedCacheBytes() uint64 {
-	if repository == nil {
-		return 0
+// TimelineCacheBudget is the control timeline cache as a detection budget of
+// observation memory (package memoryline): its size and what it holds, in
+// decoded bytes (cachedTimelineBytes).
+func (repository *RedisCatalogRepository) TimelineCacheBudget() (size, held uint64) {
+	if repository == nil || repository.controlCache == nil {
+		return 0, 0
 	}
-	var unused uint64
-	if repository.controlCache != nil {
-		// Charged in decoded bytes already (cachedTimelineBytes).
-		occupancy := repository.controlCache.timelineOccupancy()
-		unused += uint64(max(occupancy.MaxBytes-occupancy.Bytes, 0))
+	occupancy := repository.controlCache.timelineOccupancy()
+	return uint64(max(occupancy.MaxBytes, 0)), uint64(max(occupancy.Bytes, 0))
+}
+
+// ObjectCacheBudget is the catalog object cache as a detection budget of
+// observation memory: its size and what it holds, charged as the objects
+// decoded from the stored bytes it counts (decodedObjectBytes).
+func (repository *RedisCatalogRepository) ObjectCacheBudget() (size, held uint64) {
+	cache := repository.objects()
+	if cache == nil {
+		return 0, 0
 	}
-	if cache := repository.objects(); cache != nil {
-		// Charged in stored bytes; what the rest of it takes on the heap is
-		// the objects decoded from them.
-		cache.mu.Lock()
-		unused += uint64(decodedObjectBytes(max(cache.maxBytes-cache.bytes, 0)))
-		cache.mu.Unlock()
-	}
-	return unused
+	cache.mu.Lock()
+	defer cache.mu.Unlock()
+	return uint64(decodedObjectBytes(max(cache.maxBytes, 0))), uint64(decodedObjectBytes(max(cache.bytes, 0)))
 }
 
 // decodedObjectBytes is the heap the object cache's entries take for stored

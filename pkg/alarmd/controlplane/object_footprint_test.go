@@ -109,16 +109,16 @@ func worstDecodedObjectHeap(t *testing.T, payload []byte) float64 {
 	return worst
 }
 
-// The room the object cache keeps from observation is its unused budget in
-// decoded bytes: the cache counts stored bytes, and the heap it has still to
-// take is the objects decoded from them.
-func TestTheObjectCachesUnusedBudgetIsReservedDecoded(t *testing.T) {
+// The object cache as a budget of observation memory is charged in decoded
+// bytes: the cache counts stored bytes, and the heap its objects take is the
+// objects decoded from them.
+func TestTheObjectCachesBudgetIsChargedDecoded(t *testing.T) {
 	h := newObjectCatalogHarness(t)
-	baseline := h.repository.UnusedCacheBytes()
 	if err := h.repository.ConfigureObjectCache(64, 1<<20); err != nil {
 		t.Fatal(err)
 	}
-	if got, want := h.repository.UnusedCacheBytes()-baseline, uint64(controlplane.DecodedObjectBytesForTest(1<<20)); got != want {
-		t.Fatalf("an empty object cache of 1 MiB reserves %d bytes, want %d decoded", got, want)
+	size, held := h.repository.ObjectCacheBudget()
+	if want := uint64(controlplane.DecodedObjectBytesForTest(1 << 20)); size != want || held != 0 {
+		t.Fatalf("an empty object cache of 1 MiB = (%d, %d), want (%d, 0) decoded", size, held, want)
 	}
 }
