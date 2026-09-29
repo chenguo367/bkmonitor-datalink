@@ -39,9 +39,11 @@ import (
 // the Segment does - through cutovers that change the Plan's detection and
 // not its schedule - while the content the Plan runs follows every cutover,
 // through its Query Group's content scope. So a Plan runs the activation's
-// current publication's content, wherever its record sits, unless it drains:
-// a Plan with records on two publications runs, on each, that publication's
-// content until the older one retires. The content of the publication the
+// current publication's content, wherever its record sits. An activation
+// holds one record per Plan (validateActivationState refuses a key twice);
+// a draining Query Group is named in the activation's Draining list, not by
+// a second record. A PENDING record, which nothing produces today, would run
+// the publication it sits on. The content of the publication the
 // Leader made is the catalog: a Plan whose content is that publication's is
 // the catalog's row, carrying its activation. Another publication's content
 // is what the activation round holds: from there, the revisions from its
@@ -145,7 +147,7 @@ func (view *DirectoryView) answer(ctx context.Context, at time.Time) (*directory
 		counts[record.Publication]++
 	}
 	// The publications a row's content may come from besides the published
-	// one: the current one, and each a record sits on (a drain's).
+	// one: the current one, and each a record sits on (a PENDING one's).
 	named := map[SnapshotPublicationRef]bool{index.publication: true}
 	for _, publication := range append([]SnapshotPublicationRef{activation.Current}, recordPublications(activation.Plans)...) {
 		if !named[publication] && publication.validate() == nil {
@@ -179,14 +181,10 @@ func recordPublications(records []PlanActivationRecord) []SnapshotPublicationRef
 }
 
 // contentOf is the publication a record's Plan runs the content of: the
-// current one, unless the Plan drains - records on two publications - when
-// each record's is its own.
+// current one, wherever the record sits; a PENDING record's own.
 func (a *directoryAnswer) contentOf(record PlanActivationRecord) SnapshotPublicationRef {
-	key := record.Fact.Key()
-	for _, other := range a.records[record.Fact.Plan] {
-		if other.Fact.Key() == key && other.Publication != record.Publication {
-			return record.Publication
-		}
+	if record.Fact.Selection == execution.ActivationPending {
+		return record.Publication
 	}
 	return a.current
 }

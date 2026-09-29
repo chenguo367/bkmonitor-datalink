@@ -52,7 +52,7 @@ func (f rowsFixture) answer(current SnapshotPublicationRef, records []PlanActiva
 }
 
 // A Plan's row is named from the content it runs: the current publication's,
-// wherever its record sits, unless it drains. The catalog row carries the
+// wherever its record sits, and a PENDING record's own. The catalog row carries the
 // activation of a Plan whose content is the published catalog's, and no
 // second row stands beside it; another publication's content comes from what
 // the activation round holds, or the row says it is not held.
@@ -69,30 +69,13 @@ func TestADirectoryRowIsNamedFromTheContentItsPlanRuns(t *testing.T) {
 		t.Fatalf("unchanged across two cutovers = %+v, want the catalog's row carrying its activation, activated on P1", rows)
 	}
 
-	// A later publication pending: the Plan current on P1 runs P1's content
-	// and is pending on P2. Two rows, the current one from P1's content -
-	// never P2's, the published one's - and the pending one the catalog's.
+	// A PENDING record runs the publication it sits on: on the published
+	// one, it is the catalog's row.
 	f.published = p2
-	for _, holds := range []bool{true, false} {
-		held := map[SnapshotPublicationRef]heldPublication{}
-		if holds {
-			held[p1] = f.holding("qg-current")
-		}
-		rows = f.answer(p1, []PlanActivationRecord{f.record(p1, execution.ActivationCurrent), f.record(p2, execution.ActivationPending)}, held).drafts(f.plan)
-		var current, pending *StrategyDirectoryRow
-		for index := range rows {
-			switch rows[index].row.Role {
-			case string(execution.ActivationCurrent):
-				current = &rows[index].row
-			case string(execution.ActivationPending):
-				pending = &rows[index].row
-			}
-		}
-		if len(rows) != 2 || current == nil || pending == nil || pending.Publication != p2 || pending.QueryGroup != "qg-published" ||
-			current.Publication != p1 || current.QueryGroup == "qg-published" || current.ContentNotHeld == holds ||
-			holds && current.QueryGroup != "qg-current" {
-			t.Fatalf("pending on the published one, P1 held %v = %+v, want a current row of P1's content and a pending catalog row", holds, rows)
-		}
+	rows = f.answer(p1, []PlanActivationRecord{f.record(p2, execution.ActivationPending)}, nil).drafts(f.plan)
+	if len(rows) != 1 || rows[0].row.Role != string(execution.ActivationPending) || rows[0].row.Publication != p2 ||
+		rows[0].row.QueryGroup != "qg-published" || rows[0].row.ActivatedOn != nil {
+		t.Fatalf("pending on the published one = %+v, want the catalog's row carrying it", rows)
 	}
 
 	// A record older than the current publication while a later one is
@@ -109,19 +92,5 @@ func TestADirectoryRowIsNamedFromTheContentItsPlanRuns(t *testing.T) {
 	}
 	if current == nil || current.Publication != p2 || current.QueryGroup != "qg-current" || current.ActivatedOn == nil || *current.ActivatedOn != p1 {
 		t.Fatalf("activated on P1, current P2, published P3 = %+v, want P2's content activated on P1", rows)
-	}
-
-	// A drain under the current publication: the Plan's record on it is the
-	// catalog row's, and the older one runs its own publication's content.
-	rows = f.answer(p3, []PlanActivationRecord{f.record(p1, execution.ActivationCurrent), f.record(p3, execution.ActivationPending)},
-		map[SnapshotPublicationRef]heldPublication{p1: f.holding("qg-draining")}).drafts(f.plan)
-	current = nil
-	for index := range rows {
-		if rows[index].row.Role == string(execution.ActivationCurrent) {
-			current = &rows[index].row
-		}
-	}
-	if len(rows) != 2 || current == nil || current.Publication != p1 || current.QueryGroup != "qg-draining" || current.ActivatedOn != nil {
-		t.Fatalf("draining under the current publication = %+v, want the old record on its own content beside the catalog row", rows)
 	}
 }
