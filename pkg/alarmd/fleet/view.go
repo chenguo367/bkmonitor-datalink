@@ -888,6 +888,13 @@ type HistoryCoverage struct {
 	// not a finding about the round.
 	RoundsRemembered int `json:"rounds_remembered,omitempty"`
 	RoundsKept       int `json:"rounds_kept,omitempty"`
+	// RoundsHeldThrough is the latest minute whose round this process let go
+	// because its observation memory line refused the rounds more room,
+	// while the windows still reach it. A listed hole at or before it that no
+	// remembered round covers is HELD_BY_MEMORY_LINE, counted as
+	// WindowHoleCounts.HeldByLine; a hole past the listing bound stays
+	// NOT_IN_MEMORY, its minute unknown. Absent when none is.
+	RoundsHeldThrough *time.Time `json:"rounds_held_through,omitempty"`
 	// UnlistedHolesAnswered says every short window the round did not name
 	// is short only at minutes whose round answered its query whole, with data
 	// or empty, and with no unusable point in any of them: the data's, read
@@ -964,11 +971,17 @@ const (
 	// ends by itself: once the window slides past that first round every
 	// minute in it is one this process saw.
 	HoleBeforeThisProcess HoleCause = "BEFORE_THIS_PROCESS"
+	// No round this process remembers evaluated that minute because it let
+	// that round go: the observation memory line refused the object's rounds
+	// more room (RoundsHeldThrough). A limit of the reader like NOT_IN_MEMORY,
+	// apart from it because it names why and ends by itself: once the
+	// windows start past it, it is no longer read.
+	HoleHeldByLine HoleCause = "HELD_BY_MEMORY_LINE"
 )
 
 // HoleCauses is the closed list, for the page's completeness check.
 var HoleCauses = []HoleCause{HoleAnsweredWithoutSeries, HoleAnsweredEmpty, HoleInputIncomplete, HolePointUnusable,
-	HolePrimaryUnrecorded, HoleNotInMemory, HoleBeforeThisProcess}
+	HolePrimaryUnrecorded, HoleNotInMemory, HoleBeforeThisProcess, HoleHeldByLine}
 
 // WindowVerdict is what a window's holes say together about whose the
 // shortfall is. Decided here from the causes, so the page states a verdict
@@ -1058,6 +1071,7 @@ type WindowHoleCounts struct {
 	PrimaryUnrecorded     uint32 `json:"primary_unrecorded"`
 	NotInMemory           uint32 `json:"not_in_memory"`
 	BeforeThisProcess     uint32 `json:"before_this_process"`
+	HeldByLine            uint32 `json:"held_by_line"`
 }
 
 // verdictOf reads the counts into the one word: this side's incomplete
@@ -1071,7 +1085,7 @@ func verdictOf(counts WindowHoleCounts) WindowVerdict {
 		return VerdictInputIncomplete
 	case counts.Unusable > 0:
 		return VerdictPointsUnusable
-	case counts.NotInMemory > 0 || counts.PrimaryUnrecorded > 0 || counts.BeforeThisProcess > 0:
+	case counts.NotInMemory > 0 || counts.PrimaryUnrecorded > 0 || counts.BeforeThisProcess > 0 || counts.HeldByLine > 0:
 		return VerdictUnknown
 	case counts.AnsweredEmpty > 0:
 		return VerdictQueryAnsweredEmpty

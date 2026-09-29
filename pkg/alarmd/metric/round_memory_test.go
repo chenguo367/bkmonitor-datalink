@@ -32,7 +32,8 @@ func TestRoundMemoryReadsTheTrackerAtScrape(t *testing.T) {
 					values["objects:"+sample.GetLabel()[0].GetValue()] = sample.GetGauge().GetValue()
 					buckets++
 				case "bkmonitor_alarmd_fleet_round_memory_rounds", "bkmonitor_alarmd_fleet_round_memory_bytes",
-					"bkmonitor_alarmd_fleet_round_memory_max_rounds", "bkmonitor_alarmd_fleet_round_memory_window_sized_objects":
+					"bkmonitor_alarmd_fleet_round_memory_max_rounds", "bkmonitor_alarmd_fleet_round_memory_window_sized_objects",
+					"bkmonitor_alarmd_fleet_round_memory_line_held_objects":
 					values[name] = sample.GetGauge().GetValue()
 				}
 			}
@@ -41,7 +42,7 @@ func TestRoundMemoryReadsTheTrackerAtScrape(t *testing.T) {
 	}
 	recorder := NewRecorder(BuildInfo{})
 	values, buckets := read(recorder)
-	if buckets != len(fleet.RoundMemoryBuckets) || len(values) != len(fleet.RoundMemoryBuckets)+4 {
+	if buckets != len(fleet.RoundMemoryBuckets) || len(values) != len(fleet.RoundMemoryBuckets)+5 {
 		t.Fatalf("unbound series = %v over %d buckets, want every bucket and gauge", values, buckets)
 	}
 	for name, value := range values {
@@ -52,7 +53,7 @@ func TestRoundMemoryReadsTheTrackerAtScrape(t *testing.T) {
 	recorder.SetRoundMemorySource(func() fleet.RoundMemoryFacts {
 		return fleet.RoundMemoryFacts{
 			Objects: map[string]int{"le_16": 5, "le_1440": 2},
-			Rounds:  900, Bytes: 16384, MaxRounds: 720, WindowSized: 6,
+			Rounds:  900, Bytes: 16384, MaxRounds: 720, WindowSized: 6, HeldByLine: 3,
 		}
 	})
 	values, _ = read(recorder)
@@ -62,6 +63,7 @@ func TestRoundMemoryReadsTheTrackerAtScrape(t *testing.T) {
 		"bkmonitor_alarmd_fleet_round_memory_bytes":                16384,
 		"bkmonitor_alarmd_fleet_round_memory_max_rounds":           720,
 		"bkmonitor_alarmd_fleet_round_memory_window_sized_objects": 6,
+		"bkmonitor_alarmd_fleet_round_memory_line_held_objects":    3,
 	}
 	for name, value := range want {
 		if values[name] != value {

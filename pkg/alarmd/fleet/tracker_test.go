@@ -1372,7 +1372,7 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 	rowOnly := map[string]bool{"ShortRounds": true, "RefusedRounds": true, "Held": true, "EmptyRounds": true, "FreshRounds": true, "HeldFullRounds": true,
 		"ConstrainedRounds": true, "ResumedRounds": true,
 		"PreviousWorstValid": true, "PreviousKnown": true, "NoProgressRounds": true, "UnchangedRounds": true, "Measure": true,
-		"WorstWindow": true, "WorstWindowChanged": true, "Windows": true, "RoundsRemembered": true, "RoundsKept": true,
+		"WorstWindow": true, "WorstWindowChanged": true, "Windows": true, "RoundsRemembered": true, "RoundsKept": true, "RoundsHeldThrough": true,
 		"UnlistedHolesAnswered": true, "UnlistedHolesBeforeThisProcess": true}
 	for i := 0; i < published.NumField(); i++ {
 		name := published.Type().Field(i).Name

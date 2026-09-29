@@ -41,7 +41,9 @@ func newObservationMemoryCollector(source ObservationMemorySource) *observationM
 		refused: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_refused_total"),
 			"Asks for more memory the line refused, by consumer: cost_summary (groups past the refusal are not "+
 				"tracked), cost_projection (the refresh reads no projections), series_sampler (a new sample window "+
-				"gets no buffer), lookback (the read stops its per-series sums and the sample is unclassified). "+
+				"gets no buffer), lookback (the read stops its per-series sums and the sample is unclassified), "+
+				"fleet_rounds (an object whose rounds are full keeps them at what they hold and lets its oldest go; "+
+				"asked again each round while full, so this counts objects times rounds). "+
 				"Zero in normal running.", []string{"consumer"}, nil),
 		admitted: prometheus.NewDesc(prometheus.BuildFQName(metricNamespace, metricSubsystem, "observation_memory_admitted_bytes_total"),
 			"Bytes the line admitted, by consumer: what each consumer's growth asked for and got. Nothing is given "+

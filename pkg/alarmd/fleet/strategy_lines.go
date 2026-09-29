@@ -231,7 +231,7 @@ func evidenceClause(row Anomaly) string {
 		data += window.HolesBy.AnsweredWithoutSeries + window.HolesBy.AnsweredEmpty
 		incomplete += window.HolesBy.InputIncomplete
 		unusable += window.HolesBy.Unusable
-		unknown += window.HolesBy.NotInMemory + window.HolesBy.PrimaryUnrecorded
+		unknown += window.HolesBy.NotInMemory + window.HolesBy.PrimaryUnrecorded + window.HolesBy.HeldByLine
 		before += window.HolesBy.BeforeThisProcess
 	}
 	switch {

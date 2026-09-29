@@ -130,6 +130,7 @@ func ProductWords() Words {
 			HoleInputIncomplete: "本侧那一轮没查全", HolePointUnusable: "记录到了，检测用不了",
 			HolePrimaryUnrecorded: "那一轮查询答了什么没记下来", HoleNotInMemory: "超出本进程记忆",
 			HoleBeforeThisProcess: "早于本副本接手这个对象，窗口滑过后再判",
+			HoleHeldByLine:        "观测内存安全线没给空间，本进程放掉了那一轮",
 		},
 		Verdict: map[WindowVerdict]string{
 			VerdictDataAbsentWhenQueried: "查询时数据不在", VerdictInputIncomplete: "本侧没查全",

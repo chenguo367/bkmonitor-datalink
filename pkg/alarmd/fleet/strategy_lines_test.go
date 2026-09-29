@@ -105,6 +105,12 @@ func TestTheEvidenceClauseSaysWhereTheHolesFall(t *testing.T) {
 		"incomplete first": {shortWindows(6, 9, VerdictInputIncomplete, VerdictPointsUnusable), "最差窗口 6/9，缺的分钟里 1 分钟本侧没查全"},
 		"unusable next":    {shortWindows(6, 9, VerdictPointsUnusable, VerdictUnknown), "最差窗口 6/9，1 分钟的记录检测用不了"},
 		"unknown last":     {shortWindows(6, 9, VerdictUnknown, VerdictDataAbsentWhenQueried), "最差窗口 6/9，缺的分钟里 1 分钟说不出是谁的"},
+		"held by the line": {func() *HistoryCoverage {
+			coverage := shortWindows(6, 9, VerdictDataAbsentWhenQueried)
+			coverage.Windows[0].HolesBy = WindowHoleCounts{AnsweredWithoutSeries: 2, HeldByLine: 1}
+			coverage.Windows[0].Verdict = VerdictUnknown
+			return coverage
+		}(), "最差窗口 6/9，缺的分钟里 1 分钟说不出是谁的"},
 	} {
 		if got := evidenceClause(Anomaly{Coverage: testCase.coverage}); got != testCase.want {
 			t.Errorf("%s: clause = %q, want %q", name, got, testCase.want)

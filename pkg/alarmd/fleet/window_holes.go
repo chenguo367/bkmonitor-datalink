@@ -230,7 +230,7 @@ func windowKey(strategy, series string, level uint32) string {
 // minute it is, the unlisted holes counted as beyond memory, and the verdict
 // decided from the counts. since is rememberedSince: a hole no remembered
 // round covers is BEFORE_THIS_PROCESS when its minute is before it.
-func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts, since int64) []WindowRow {
+func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts, since, held int64) []WindowRow {
 	if facts == nil || len(facts.Windows) == 0 {
 		return nil
 	}
@@ -270,6 +270,9 @@ func windowRows(rounds []roundMark, facts *observability.HistoryCoverageFacts, s
 			} else if minute < since {
 				hole.Cause = HoleBeforeThisProcess
 				row.HolesBy.BeforeThisProcess++
+			} else if held > 0 && minute <= held {
+				hole.Cause = HoleHeldByLine
+				row.HolesBy.HeldByLine++
 			} else {
 				hole.Cause = HoleNotInMemory
 				row.HolesBy.NotInMemory++

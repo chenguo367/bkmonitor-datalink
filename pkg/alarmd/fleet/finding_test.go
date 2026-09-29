@@ -703,11 +703,12 @@ func TestAWindowVerdictIsTheDatasOnlyOnMinutesAnsweredWithoutTheSeries(t *testin
 		counts WindowHoleCounts
 		want   WindowVerdict
 	}{
-		"answered without the series": {WindowHoleCounts{AnsweredWithoutSeries: 3}, VerdictDataAbsentWhenQueried},
-		"an empty answer among them":  {WindowHoleCounts{AnsweredWithoutSeries: 3, AnsweredEmpty: 1}, VerdictQueryAnsweredEmpty},
-		"no hole on record":           {WindowHoleCounts{}, VerdictUnknown},
-		"one round this side missed":  {WindowHoleCounts{AnsweredWithoutSeries: 3, InputIncomplete: 1}, VerdictInputIncomplete},
-		"a minute not remembered":     {WindowHoleCounts{AnsweredWithoutSeries: 3, NotInMemory: 1}, VerdictUnknown},
+		"answered without the series":  {WindowHoleCounts{AnsweredWithoutSeries: 3}, VerdictDataAbsentWhenQueried},
+		"an empty answer among them":   {WindowHoleCounts{AnsweredWithoutSeries: 3, AnsweredEmpty: 1}, VerdictQueryAnsweredEmpty},
+		"no hole on record":            {WindowHoleCounts{}, VerdictUnknown},
+		"one round this side missed":   {WindowHoleCounts{AnsweredWithoutSeries: 3, InputIncomplete: 1}, VerdictInputIncomplete},
+		"a minute not remembered":      {WindowHoleCounts{AnsweredWithoutSeries: 3, NotInMemory: 1}, VerdictUnknown},
+		"a minute let go for the line": {WindowHoleCounts{AnsweredWithoutSeries: 3, HeldByLine: 1}, VerdictUnknown},
 	} {
 		if got := verdictOf(tc.counts); got != tc.want {
 			t.Errorf("%s: verdict = %s, want %s", name, got, tc.want)
