@@ -234,6 +234,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err := recorder.BindObservationMemory(observationMemory.Read); err != nil {
 		return nil, err
 	}
+	// The rounds the tracker keeps past the fixed last few grow by how far
+	// each object's windows reach back, and take their room under the line.
+	fleetTracker.SetRoundAdmission(observationAdmit(observationMemory, memoryline.ConsumerFleetRounds))
 	warnObservationMemoryPercent(logger, cfg.PhaseTwo.Observation)
 	costSummary := observability.NewCostSummary(observationCostOptions(fmt.Sprintf("%s:%d", cfg.PhaseTwo.Worker.ID, external.Now().UnixNano()),
 		external.Now, observationAdmit(observationMemory, memoryline.ConsumerCostSummary)))

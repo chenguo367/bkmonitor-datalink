@@ -150,6 +150,42 @@ func TestProductionBundleReportsFleetSnapshotPublishOutcome(t *testing.T) {
 	if got := recorderGauge(t, recorder, "bkmonitor_alarmd_fleet_round_memory_rounds"); got != 1 {
 		t.Fatalf("round memory rounds = %v, want the one round observed through the bundle", got)
 	}
+	// Past the fixed sixteen an object's rounds grow under the observation
+	// memory line, asked for as its own consumer: the seventeenth round of an
+	// object whose windows reach further asks for the eight more it grows by.
+	windowCtx := observability.ContextWithTraceFields(ctx, observability.TraceFields{QueryGroupKey: "qg-round-memory-window"})
+	for i := int64(0); i < 17; i++ {
+		end := 6000 + i*60
+		bundle.dependencies.Observer.Observe(windowCtx, observability.Observation{
+			ProgressCompletionKind: "FULL_COMPLETED",
+			Trace:                  observability.TraceFields{StrategyID: "4102", BusinessID: "7", EvaluationTime: end + 60},
+			HistoryCoverage:        &observability.HistoryCoverageFacts{Levels: 1, End: end, WindowStart: 1},
+		})
+	}
+	if got := consumerCounter(t, recorder, "bkmonitor_alarmd_observation_memory_admitted_bytes_total", "fleet_rounds"); got != 128 {
+		t.Fatalf("fleet_rounds admitted bytes = %v, want the 128 the seventeenth round grew by", got)
+	}
+}
+
+func consumerCounter(t *testing.T, recorder *metric.Recorder, name, consumer string) float64 {
+	t.Helper()
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() != name {
+			continue
+		}
+		for _, series := range family.GetMetric() {
+			for _, label := range series.GetLabel() {
+				if label.GetName() == "consumer" && label.GetValue() == consumer {
+					return series.GetCounter().GetValue()
+				}
+			}
+		}
+	}
+	return -1
 }
 
 func recorderGauge(t *testing.T, recorder *metric.Recorder, name string) float64 {

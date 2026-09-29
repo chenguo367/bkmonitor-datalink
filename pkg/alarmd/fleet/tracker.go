@@ -333,6 +333,11 @@ type queryGroupState struct {
 	// worker said: no hole of theirs is older, so no round older is kept.
 	// Zero while the worker has said nothing (an older worker).
 	windowStart int64
+	// heldThrough is the latest minute whose round was let go to make room
+	// because the observation memory line refused the rounds more
+	// (Tracker.roundRoom): a hole at or before it that reads NOT_IN_MEMORY
+	// is the line's doing, not the window's, while it is inside the window.
+	heldThrough int64
 	// worstWindow is the key of the window the worst pair belonged to on
 	// the last round, so the round-over-round counters know when the pair
 	// moved to another window.
@@ -718,7 +723,10 @@ func noActionReason(reason string) bool {
 // produced them: a process restart resets them. That is why every anomaly it
 // produces is labelled as such, rather than presented as an absolute age.
 type Tracker struct {
-	next           observability.Observer
+	next observability.Observer
+	// admitRounds is the observation memory line's admission for the rounds
+	// kept past RecentRoundsKept (SetRoundAdmission); nil admits all.
+	admitRounds    func(bytes uint64) bool
 	replica        string
 	degradedRounds int
 	blockedRounds  int
@@ -1337,6 +1345,7 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 				roundReason = reason
 			}
 		}
+		tracker.roundRoom(state, observation.HistoryCoverage)
 		rememberRound(state, trace.EvaluationTime, completion, roundReason,
 			observation.HistoryCoverage, observation.PrimaryInput)
 		// A round completed in this process speaks for the object; the
@@ -1585,6 +1594,10 @@ func (tracker *Tracker) Observe(ctx context.Context, observation observability.O
 					// Kept by the window, not by a count: every round from
 					// where the windows start is kept.
 					state.coverage.RoundsKept = len(state.rounds)
+				}
+				if held := heldInWindow(state); held > 0 {
+					at := time.Unix(held, 0).UTC()
+					state.coverage.RoundsHeldThrough = &at
 				}
 			}
 			state.coverage.UnlistedHolesAnswered = unlistedHolesAnswered(state.rounds, facts)
@@ -2153,7 +2166,10 @@ type RoundMemoryFacts struct {
 	Bytes       uint64
 	MaxRounds   int
 	WindowSized int
-	Largest     *LargestRoundMemory
+	// HeldByLine is the objects that let a round their windows still name
+	// go because the memory line refused them more room.
+	HeldByLine int
+	Largest    *LargestRoundMemory
 }
 
 // LargestRoundMemory is the object keeping the most rounds, named so the
@@ -2228,6 +2244,9 @@ func (tracker *Tracker) RoundMemory() RoundMemoryFacts {
 		if state.windowStart > 0 {
 			facts.WindowSized++
 		}
+		if heldInWindow(state) > 0 {
+			facts.HeldByLine++
+		}
 	}
 	if largest != nil {
 		named := &LargestRoundMemory{QueryGroup: largestKey, Rounds: len(largest.rounds), StrategiesTotal: len(largest.strategies)}
@@ -2244,6 +2263,56 @@ func (tracker *Tracker) RoundMemory() RoundMemoryFacts {
 		facts.Largest = named
 	}
 	return facts
+}
+
+// SetRoundAdmission puts the rounds kept past RecentRoundsKept under the
+// process's observation memory line: admit is asked for the bytes before an
+// object's rounds grow, and a refusal keeps them at what they hold.
+func (tracker *Tracker) SetRoundAdmission(admit func(bytes uint64) bool) {
+	if tracker == nil {
+		return
+	}
+	tracker.mu.Lock()
+	tracker.admitRounds = admit
+	tracker.mu.Unlock()
+}
+
+// roundRoom makes room for one more round of the object before it is
+// remembered. The rounds before where the incoming round's windows start go
+// first, as remembering it would drop them anyway: room they free is not
+// asked for and costs no round the windows name. Rounds up to
+// RecentRoundsKept are the fixed few every object has always kept and are
+// not asked for. Past them a full slice grows by half again, asked of the
+// memory line first; refused, it keeps its size and lets its oldest round
+// go, and the object remembers the minute it let go (heldThrough). Caller
+// holds tracker.mu.
+func (tracker *Tracker) roundRoom(state *queryGroupState, coverage *observability.HistoryCoverageFacts) {
+	if coverage != nil && coverage.WindowStart > 0 {
+		state.rounds = keptRounds(state.rounds, coverage.WindowStart)
+	}
+	held := cap(state.rounds)
+	if len(state.rounds) < held || held < RecentRoundsKept {
+		return
+	}
+	grown := held + held/2
+	bytes := uint64(grown-held) * uint64(unsafe.Sizeof(roundMark{}))
+	if tracker.admitRounds == nil || tracker.admitRounds(bytes) {
+		rounds := make([]roundMark, len(state.rounds), grown)
+		copy(rounds, state.rounds)
+		state.rounds = rounds
+		return
+	}
+	state.heldThrough = max(state.heldThrough, state.rounds[0].end)
+	state.rounds = state.rounds[:copy(state.rounds, state.rounds[1:])]
+}
+
+// heldInWindow is the latest minute the line made the object let go of,
+// while the object's windows still reach it; zero when none does.
+func heldInWindow(state *queryGroupState) int64 {
+	if state.heldThrough <= 0 || state.windowStart <= 0 || state.heldThrough < state.windowStart {
+		return 0
+	}
+	return state.heldThrough
 }
 
 // recordStrategy adds the strategy a trace names to an object's set, one entry

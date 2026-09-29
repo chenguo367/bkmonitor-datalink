@@ -888,6 +888,11 @@ type HistoryCoverage struct {
 	// not a finding about the round.
 	RoundsRemembered int `json:"rounds_remembered,omitempty"`
 	RoundsKept       int `json:"rounds_kept,omitempty"`
+	// RoundsHeldThrough is the latest minute whose round this process let go
+	// because its observation memory line refused the rounds more room,
+	// while the windows still reach it: a NOT_IN_MEMORY hole at or before it
+	// is the line's, not the window's. Absent when none is.
+	RoundsHeldThrough *time.Time `json:"rounds_held_through,omitempty"`
 	// UnlistedHolesAnswered says every short window the round did not name
 	// is short only at minutes whose round answered its query whole, with data
 	// or empty, and with no unusable point in any of them: the data's, read

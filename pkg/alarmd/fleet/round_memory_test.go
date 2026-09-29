@@ -351,3 +351,100 @@ func TestALargestObjectWithoutAStartOrStrategiesSaysSo(t *testing.T) {
 	}
 	t.Fatalf("health per_replica = %v, want pod-a's row", perReplica)
 }
+
+// The rounds an object keeps past the fixed last sixteen grow under the
+// observation memory line: the sixteen are not asked for, a full slice past
+// them asks for the half again it grows by, and a refusal keeps it at what it
+// holds and lets the oldest round go. The object says which minute it let go
+// for the line while its windows still reach it, and stops saying so once
+// they do not.
+func TestRoundsPastTheFixedFewGrowUnderTheMemoryLine(t *testing.T) {
+	tracker := newTracker(t, &clock{at: now})
+	var asked []uint64
+	admit := true
+	tracker.SetRoundAdmission(func(bytes uint64) bool {
+		asked = append(asked, bytes)
+		return admit
+	})
+	ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-line"})
+	const period, first = int64(60), int64(60_000)
+	start := first - 200*period
+	feed := func(from, count int64, windowStart int64) {
+		for i := from; i < from+count; i++ {
+			end := first + i*period
+			round(ctx, tracker, end+period, "FULL_COMPLETED", "", "", primary("FULL", "DATA"),
+				&observability.HistoryCoverageFacts{Levels: 1, End: end, WindowStart: windowStart})
+		}
+	}
+	feed(0, 16, start)
+	state := tracker.groups["qg-line"]
+	if len(asked) != 0 || len(state.rounds) != 16 {
+		t.Fatalf("after sixteen rounds the line was asked %v (kept %d), want nothing asked", asked, len(state.rounds))
+	}
+	feed(16, 1, start)
+	if fmt.Sprint(asked) != "[128]" || cap(state.rounds) != 24 || len(state.rounds) != 17 {
+		t.Fatalf("the seventeenth round asked %v and kept %d of %d, want 128 bytes asked and 24 held", asked, len(state.rounds), cap(state.rounds))
+	}
+	admit = false
+	feed(17, 7, start)
+	if cap(state.rounds) != 24 || len(state.rounds) != 24 || tracker.RoundMemory().HeldByLine != 0 {
+		t.Fatalf("filling the room asked nothing more: kept %d of %d, held %d", len(state.rounds), cap(state.rounds), tracker.RoundMemory().HeldByLine)
+	}
+	feed(24, 3, start)
+	if cap(state.rounds) != 24 || len(state.rounds) != 24 || state.rounds[0].end != first+3*period {
+		t.Fatalf("refused, the rounds are %d of %d from %d, want 24 kept from the fourth", len(state.rounds), cap(state.rounds), state.rounds[0].end)
+	}
+	if got := heldInWindow(state); got != first+2*period {
+		t.Fatalf("held through %d, want the third round's minute %d", got, first+2*period)
+	}
+	if memory := tracker.RoundMemory(); memory.HeldByLine != 1 {
+		t.Fatalf("round memory = %+v, want the one object held by the line", memory)
+	}
+	// The windows move past the minute let go: nothing held is in reach, and
+	// the rounds they no longer name make the room, so the line is not asked.
+	askedBefore := len(asked)
+	feed(27, 1, first+5*period)
+	if state.rounds[0].end != first+5*period || len(asked) != askedBefore {
+		t.Fatalf("the rounds start at %d and the line was asked %v, want the new window start %d and nothing asked",
+			state.rounds[0].end, asked[askedBefore:], first+5*period)
+	}
+	if got, memory := heldInWindow(state), tracker.RoundMemory(); got != 0 || memory.HeldByLine != 0 {
+		t.Fatalf("held through %d, %d objects held, once the windows start past it; want none", got, memory.HeldByLine)
+	}
+	// Admitted again, the rounds grow again.
+	admit = true
+	feed(28, 30, start)
+	if cap(state.rounds) <= 24 {
+		t.Fatalf("admitted again the rounds stayed at %d", cap(state.rounds))
+	}
+}
+
+// A row whose windows are short at a minute let go for the line says so
+// beside the NOT_IN_MEMORY hole it reads.
+func TestAHoleTheLineLetGoOfSaysSoOnTheRow(t *testing.T) {
+	tracker := newTracker(t, &clock{at: now})
+	tracker.SetRoundAdmission(func(uint64) bool { return false })
+	ctx := observability.ContextWithTraceFields(context.Background(), observability.TraceFields{QueryGroupKey: "qg-held"})
+	const period, first = int64(60), int64(60_000)
+	start := first
+	for i := int64(0); i < 20; i++ {
+		end := first + i*period
+		round(ctx, tracker, end+period, "FULL_COMPLETED", "", "", primary("FULL", "DATA"),
+			&observability.HistoryCoverageFacts{Levels: 1, End: end, WindowStart: start})
+	}
+	last := first + 19*period
+	short := &observability.HistoryCoverageFacts{Levels: 1, Short: 1, WorstValid: 19, WorstRequired: 20, End: last, WindowStart: start,
+		Windows: []observability.HistoryWindowFact{{Series: "c", Level: 1, Valid: 19, Required: 20, End: last,
+			Missing: []int64{first}, MissingTotal: 1}}}
+	for i := 0; i < DefaultDegradedRounds; i++ {
+		round(ctx, tracker, last+period, "COMPLETED_WITH_UNAVAILABLE", "LEVEL_OUTCOME_UNKNOWN", "HISTORY_GAPPED", primary("FULL", "DATA"), short)
+	}
+	rows := anyColumn(tracker)
+	if len(rows) != 1 || rows[0].Coverage == nil || len(rows[0].Coverage.Windows) != 1 {
+		t.Fatalf("rows = %+v, want the one object with its window", rows)
+	}
+	coverage := rows[0].Coverage
+	if coverage.Windows[0].HolesBy.NotInMemory != 1 || coverage.RoundsHeldThrough == nil || coverage.RoundsHeldThrough.Unix() < first {
+		t.Fatalf("coverage = %+v held through %v, want the hole NOT_IN_MEMORY and the minute the line let go named", coverage.Windows[0].HolesBy, coverage.RoundsHeldThrough)
+	}
+}

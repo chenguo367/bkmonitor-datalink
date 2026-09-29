@@ -29,6 +29,7 @@ type roundMemoryCollector struct {
 	bytes       *prometheus.Desc
 	maxRounds   *prometheus.Desc
 	windowSized *prometheus.Desc
+	lineHeld    *prometheus.Desc
 }
 
 func newRoundMemoryCollector() *roundMemoryCollector {
@@ -47,6 +48,9 @@ func newRoundMemoryCollector() *roundMemoryCollector {
 		windowSized: prometheus.NewDesc(name("fleet_round_memory_window_sized_objects"),
 			"Objects whose rounds are kept by the window start their worker reported rather than by the last "+
 				"sixteen: every object once every worker reports it.", nil, nil),
+		lineHeld: prometheus.NewDesc(name("fleet_round_memory_line_held_objects"),
+			"Objects that let go a round their windows still name because the observation memory line refused "+
+				"their rounds more room: their older holes read NOT_IN_MEMORY for the line, not for the window.", nil, nil),
 	}
 }
 
@@ -61,7 +65,7 @@ func (r *Recorder) SetRoundMemorySource(source func() fleet.RoundMemoryFacts) {
 }
 
 func (c *roundMemoryCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, desc := range []*prometheus.Desc{c.objects, c.rounds, c.bytes, c.maxRounds, c.windowSized} {
+	for _, desc := range []*prometheus.Desc{c.objects, c.rounds, c.bytes, c.maxRounds, c.windowSized, c.lineHeld} {
 		ch <- desc
 	}
 }
@@ -81,4 +85,5 @@ func (c *roundMemoryCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.bytes, prometheus.GaugeValue, float64(facts.Bytes))
 	ch <- prometheus.MustNewConstMetric(c.maxRounds, prometheus.GaugeValue, float64(facts.MaxRounds))
 	ch <- prometheus.MustNewConstMetric(c.windowSized, prometheus.GaugeValue, float64(facts.WindowSized))
+	ch <- prometheus.MustNewConstMetric(c.lineHeld, prometheus.GaugeValue, float64(facts.HeldByLine))
 }

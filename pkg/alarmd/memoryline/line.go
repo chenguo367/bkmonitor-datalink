@@ -45,10 +45,13 @@ const (
 	ConsumerSeriesSampler Consumer = "series_sampler"
 	// ConsumerLookback is the late-data lookback's per-series tables.
 	ConsumerLookback Consumer = "lookback"
+	// ConsumerFleetRounds is the fleet tracker's rounds kept per object past
+	// the fixed last few, sized by how far each object's windows reach back.
+	ConsumerFleetRounds Consumer = "fleet_rounds"
 )
 
 // Consumers is every consumer, in the order they are reported.
-var Consumers = []Consumer{ConsumerCostSummary, ConsumerCostProjection, ConsumerSeriesSampler, ConsumerLookback}
+var Consumers = []Consumer{ConsumerCostSummary, ConsumerCostProjection, ConsumerSeriesSampler, ConsumerLookback, ConsumerFleetRounds}
 
 // Reserve is what one detection budget may still take: its size less what
 // it holds now. The line leaves that room to detection.
