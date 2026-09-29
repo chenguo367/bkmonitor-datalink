@@ -459,6 +459,10 @@ func (reconciler *SourceReconciler) Refresh(
 		activation, activationErr := reconciler.repository.LoadActivationHead(ctx)
 		if activationErr == nil && activation.Current.SnapshotRevision == reuse.catalog.SnapshotRevision {
 			build, reuseNext = SourceRefreshReused, reuse
+			// A reused round's identity count is zero: the refusal left the
+			// last-good Plan out of the catalog it published, so the rounds
+			// after it have nothing to refuse again. Carried for symmetry
+			// with the stale count, not because the carry matters.
 			retainedStaleRevisions, lastGoodIdentityChanged, composition = reuse.retainedStaleRevisions, reuse.lastGoodIdentityChanged, reuse.composition
 			withheld = ChangedWithheld(composition.WithheldObjects, reconciler.namedWithheld)
 			reconciler.namedWithheld = RememberNamed(reconciler.namedWithheld, composition.WithheldObjects, withheld.Lines)
