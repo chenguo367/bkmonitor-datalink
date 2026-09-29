@@ -17,13 +17,20 @@
 // A store of at most SampleKeys keys is walked whole and every key weighed:
 // the census is exact. A larger one is sampled: SampleKeys draws of
 // RANDOMKEY, with replacement, each weighed with MEMORY USAGE, and a
-// family's keys and bytes are its share of the draws times DBSIZE. A family
-// holding a share p of the keys is drawn about p*SampleKeys times, so its
-// estimate is good to about 1/sqrt(p*SampleKeys): a family of one key in a
-// thousand is drawn once or not at all, and its Samples says so. Bytes
-// follow keys, not size: a family of few, very large keys is estimated from
-// the few of them drawn. MEMORY USAGE weighs an aggregate - a hash, a set -
-// from a sample of its elements, as the server does.
+// family's keys and bytes are its share of the draws times DBSIZE.
+//
+// The error, by the sample size N = SampleKeys. A family holding a share p
+// of the keys is drawn n = p*N times on average, and its key estimate has a
+// relative standard error of sqrt((1-p)/(p*N)): 3.1% at p = 0.5, 9.4% at
+// p = 0.1, 31% at p = 0.01, and a family of one key in a thousand is drawn
+// once or not at all. Its bytes carry, beside that, the spread of its keys'
+// sizes: a relative standard error of sqrt((1-p+c*c)/(p*N)), c being the
+// coefficient of variation of the family's key sizes - so a family of equal
+// keys is as good as its key count, and one of few very large keys among
+// many small ones is known only as well as the large ones happen to be
+// drawn. Samples, reported with every family, is n: the error of a reading
+// is read from it, 1/sqrt(n) at the least. MEMORY USAGE weighs an aggregate
+// - a hash, a set - from a sample of its elements, as the server does.
 package storecensus
 
 import (
@@ -110,37 +117,44 @@ func Measure(ctx context.Context, client redis.UniversalClient, store string, no
 	if err != nil {
 		return Result{}, err
 	}
-	type tally struct {
-		samples int
-		bytes   float64
-	}
-	families := map[string]*tally{}
-	for index, key := range drawn {
-		if sizes[index] < 0 {
-			result.Gone++
-			continue
-		}
-		result.Weighed++
-		name := FamilyOf(key)
-		entry := families[name]
-		if entry == nil {
-			entry = &tally{}
-			families[name] = entry
-		}
-		entry.samples++
-		entry.bytes += float64(sizes[index])
-	}
+	families, weighed, gone := tally(drawn, sizes)
+	result.Weighed, result.Gone = weighed, gone
 	scale := 1.0
-	if !result.Exact && result.Weighed > 0 {
-		scale = float64(keys) / float64(result.Weighed)
+	if !result.Exact && weighed > 0 {
+		scale = float64(keys) / float64(weighed)
 	}
-	for name, entry := range families {
-		result.Families = append(result.Families, Family{Name: name, Samples: entry.samples,
-			Keys: float64(entry.samples) * scale, Bytes: entry.bytes * scale})
+	for index := range families {
+		families[index].Keys *= scale
+		families[index].Bytes *= scale
 	}
-	result.Families = fold(result.Families)
+	result.Families = fold(families)
 	result.Duration = now().Sub(started)
 	return result, nil
+}
+
+// tally is the keys weighed by family, unscaled, and how many were weighed
+// and how many had gone before they could be: a key gone is no part of any
+// family, and does not dilute the share of those that were there.
+func tally(drawn []string, sizes []int64) (families []Family, weighed, gone int) {
+	byName := map[string]int{}
+	for index, key := range drawn {
+		if sizes[index] < 0 {
+			gone++
+			continue
+		}
+		weighed++
+		name := FamilyOf(key)
+		position, found := byName[name]
+		if !found {
+			position = len(families)
+			byName[name] = position
+			families = append(families, Family{Name: name})
+		}
+		families[position].Samples++
+		families[position].Keys++
+		families[position].Bytes += float64(sizes[index])
+	}
+	return families, weighed, gone
 }
 
 // walk is every key of a small store.

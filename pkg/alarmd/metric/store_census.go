@@ -50,7 +50,8 @@ func newStoreCensusCollector(source StoreCensusSource) *storeCensusCollector {
 			[]string{"client", "family"}, nil),
 		familyBytes: prometheus.NewDesc(name("family_bytes"),
 			"Bytes the store holds for one family, as MEMORY USAGE weighs its keys, estimated as family_keys is. "+
-				"Read it with family_samples: an estimate rests on the keys weighed of that family alone.",
+				"Read it with family_samples, n: its relative standard error is at least 1/sqrt(n), and "+
+				"sqrt((1-p+c^2)/n) with p the family's share of keys and c the spread of its key sizes.",
 			[]string{"client", "family"}, nil),
 		familySample: prometheus.NewDesc(name("family_samples"),
 			"Keys of one family the latest census weighed: the family's estimates rest on these.",

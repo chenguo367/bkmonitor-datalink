@@ -184,3 +184,18 @@ func TestAClusterIsNotMeasured(t *testing.T) {
 		t.Fatalf("cluster = %v, want ErrUnsupported", err)
 	}
 }
+
+// A key drawn and gone before it was weighed belongs to no family and is not
+// counted as weighed: it would otherwise dilute every family's share, and
+// add its "no size" to its family's bytes.
+func TestAKeyGoneBeforeItWasWeighedCountsForNothing(t *testing.T) {
+	families, weighed, gone := tally([]string{"a:1", "a:2", "b:1"}, []int64{10, -1, 5})
+	if weighed != 2 || gone != 1 || len(families) != 2 {
+		t.Fatalf("tally = %+v weighed %d gone %d, want two families of the two keys there", families, weighed, gone)
+	}
+	for _, family := range families {
+		if family.Samples != 1 || family.Keys != 1 || family.Name == "a:*" && family.Bytes != 10 || family.Name == "b:*" && family.Bytes != 5 {
+			t.Fatalf("family %+v, want one key and its own size", family)
+		}
+	}
+}
