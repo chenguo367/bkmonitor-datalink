@@ -14,42 +14,36 @@ import "sync"
 // The lookback reads a finished Slot's window again, later, to see what
 // arrived after the formal read. It spends the same query budget as
 // detection and must never be the reason a formal query waits. A permit for
-// it is therefore granted only on a pool with room to spare and never
+// it is therefore granted only from permits nobody is waiting for, and never
 // queued for:
 //
 //   - nobody is waiting for a query permit, normal or recovery;
-//   - the lookback holds fewer than LookbackPermitLimit permits;
-//   - after this one is granted, at least LookbackPermitLimit permits are
-//     still free for the next formal queries.
+//   - a process permit is free.
 //
-// Room at the grant is not room for the whole read: a burst can take the
-// free permits while a lookback read is still running. The moment a formal
-// query has to wait for a permit, every lookback permit held is asked to
-// yield (LookbackPermit.Yield), and the reads stop and give their permits
-// back, so a formal query waits for no lookback read.
+// It is not held to a share of the pool. Queries are waits on the query
+// service, not work of this process, and a count of them is the wrong thing
+// to divide: a permit nobody is waiting for costs a formal query nothing.
+// What a count would guard against - a free permit taken the moment before a
+// burst takes the rest - is answered by the yield instead: the moment a
+// formal query has to wait for a permit, every lookback permit held is asked
+// to yield (LookbackPermit.Yield), and the reads stop and give their permits
+// back, so a formal query waits for no lookback read longer than one takes
+// to stop.
 //
 // A lookback permit is not an Operation. It has its own inflight count and
 // held seconds, so the normal and recovery readings the capacity is sized on
 // never include it, while the process total does.
 
-// LookbackPermitLimit is the most lookback permits one process holds at once:
-// an eighth of its query permits, at least one. A batch of first reads is
-// sampled together and comes due together; the limit keeps that batch from
-// taking every free permit in the moment it finds them.
-func LookbackPermitLimit(processPermits int) int {
-	return max(1, processPermits/8)
-}
-
 // Why a lookback permit was not granted, closed.
 const (
 	LookbackRefusedDisabled = "disabled"
 	LookbackRefusedWaiting  = "waiters"
-	LookbackRefusedLimit    = "lookback_limit"
-	LookbackRefusedHeadroom = "headroom"
+	// LookbackRefusedFull: every process permit is held.
+	LookbackRefusedFull = "full"
 )
 
 // LookbackRefusals is every reason a lookback permit is refused.
-var LookbackRefusals = []string{LookbackRefusedDisabled, LookbackRefusedWaiting, LookbackRefusedLimit, LookbackRefusedHeadroom}
+var LookbackRefusals = []string{LookbackRefusedDisabled, LookbackRefusedWaiting, LookbackRefusedFull}
 
 // LookbackPermit is one lookback query's share of the query budget.
 type LookbackPermit struct {
@@ -86,12 +80,8 @@ func (coordinator *FlightCoordinator) TryAcquireLookbackPermit() (*LookbackPermi
 	if len(coordinator.normalWaiters) > 0 || len(coordinator.recoveryWaiters) > 0 || len(coordinator.recoveryChannelWaiters) > 0 {
 		return nil, LookbackRefusedWaiting
 	}
-	limit := LookbackPermitLimit(coordinator.limits.ProcessQueryPermits)
-	if coordinator.lookbackInflight >= limit {
-		return nil, LookbackRefusedLimit
-	}
-	if coordinator.limits.ProcessQueryPermits-coordinator.queryInflight-1 < limit {
-		return nil, LookbackRefusedHeadroom
+	if coordinator.queryInflight >= coordinator.limits.ProcessQueryPermits {
+		return nil, LookbackRefusedFull
 	}
 	coordinator.queryInflight++
 	coordinator.lookbackInflight++

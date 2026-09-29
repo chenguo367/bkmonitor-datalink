@@ -11,6 +11,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -48,11 +49,10 @@ func TestTheLookbackRunsWithoutConfiguration(t *testing.T) {
 	if stats.Coverage.Owned != 0 {
 		t.Fatalf("an unbound bundle owns %d Query Groups", stats.Coverage.Owned)
 	}
-	// A refusal at the lookback's own share of the permits is a fault, and
-	// the first samples are spread.
-	if options := lookbackOptions(noRecheck, nil, owner, nil, time.Now); options.LimitRefusal != scheduler.LookbackRefusedLimit ||
+	// The refusals are the scheduler's, and the first samples are spread.
+	if options := lookbackOptions(noRecheck, nil, owner, nil, time.Now); !slices.Equal(options.Refusals, scheduler.LookbackRefusals) ||
 		options.UnspreadFirstSamples {
-		t.Fatalf("limit refusal %q, unspread %v", options.LimitRefusal, options.UnspreadFirstSamples)
+		t.Fatalf("refusals %v, unspread %v", options.Refusals, options.UnspreadFirstSamples)
 	}
 }
 
@@ -74,9 +74,6 @@ func TestTheLookbackPermitYieldsToAWaitingFormalQuery(t *testing.T) {
 	if release == nil || yield == nil || refused != "" {
 		t.Fatalf("an idle pool gave the lookback %v %v %q", release != nil, yield != nil, refused)
 	}
-	if _, _, again := permit(); again != scheduler.LookbackRefusedLimit {
-		t.Fatalf("a second lookback permit of two = %q, want refused at the limit", again)
-	}
 	ctx := context.Background()
 	formal, err := flights.AcquireQueryPermit(ctx, execution.SlotIdentity{QueryGroup: "a", EvaluationTime: 60},
 		execution.OperationNormal, time.Now().Add(time.Minute))
@@ -84,6 +81,9 @@ func TestTheLookbackPermitYieldsToAWaitingFormalQuery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer formal.Release()
+	if _, _, again := permit(); again != scheduler.LookbackRefusedFull {
+		t.Fatalf("a lookback permit with both of two held = %q, want refused as full", again)
+	}
 	waiting := make(chan *scheduler.QueryPermit, 1)
 	go func() {
 		granted, err := flights.AcquireQueryPermit(ctx, execution.SlotIdentity{QueryGroup: "b", EvaluationTime: 60},

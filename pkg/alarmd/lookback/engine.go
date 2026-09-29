@@ -62,11 +62,13 @@ const (
 	// eight clean ones in a row happen one time in ten; a single late sample
 	// restores the rung at once.
 	cleanSamplesToShallow = 8
-	// probeEvery: one sample in so many of a Query Group, and its first, is
-	// read once more at the deepest rung after the rungs its group reads -
-	// the deep recheck - so data later than those rungs is seen however
+	// probeEvery: one sample in so many of a Query Group, and its second,
+	// is read once more at the deepest rung after the rungs its group reads
+	// - the deep recheck - so data later than those rungs is seen however
 	// late it is up to the deepest one, and however short the window. A
-	// punctual group rechecks a quarter more for it.
+	// punctual group rechecks a quarter more for it. Not its first: the
+	// first samples of every group come due within the hour after a start,
+	// and the second, a rest later, no longer come together.
 	probeEvery = 4
 	// maxRecent bounds the changed rechecks kept whole, maxLatest the Query
 	// Groups listed by their latest completion.
@@ -137,13 +139,17 @@ var RecheckOutcomes = []string{RecheckCompared, RecheckYielded, RecheckFailed, R
 const (
 	// FaultBucketsExceeded is a read with more buckets than any window has.
 	FaultBucketsExceeded = "buckets_exceeded"
-	// FaultPermitLimit is a recheck refused at the lookback's own share of
-	// the query permits, which the spread of the samples keeps it off.
-	FaultPermitLimit = "permit_limit"
+	// FaultYieldOverdue is a recheck that still held its permit
+	// RecheckTimeout after a waiting formal query asked it to yield. The
+	// yield cancels the read, and the read's own deadline is RecheckTimeout
+	// from its start, so only a read that honours neither holds on that
+	// long: a formal query waits for no lookback read longer than one takes
+	// to stop, and this counts the reads that did not stop.
+	FaultYieldOverdue = "yield_overdue"
 )
 
 // Faults is every fault.
-var Faults = []string{FaultBucketsExceeded, FaultPermitLimit}
+var Faults = []string{FaultBucketsExceeded, FaultYieldOverdue}
 
 // RefusedOther counts a permit refusal whose reason Options.Refusals does
 // not name.
@@ -172,21 +178,22 @@ type Permit func() (release func(), yield <-chan struct{}, refused string)
 
 // Options wire an Engine. Owned is how many Query Groups this process owns,
 // the denominator of the coverage. Refusals is every reason Permit
-// refuses with, counted from the start, any other as RefusedOther; a refusal
-// for LimitRefusal - the lookback's own share of the permits - is also a
-// fault. OnFault, when set, is told of every fault. UnspreadFirstSamples
-// takes each Query Group's first sample at its first read instead of
-// spreading them over restCap; only a test sets it.
+// refuses with, counted from the start, any other as RefusedOther. OnFault,
+// when set, is told of every fault. UnspreadFirstSamples takes each Query
+// Group's first sample at its first read instead of spreading them over
+// restCap, and ProbeFirstSamples probes that first sample instead of the
+// second; only a test sets either, to pin a mechanism on a group's first
+// sample.
 type Options struct {
 	Now                  func() time.Time
 	Recheck              Recheck
 	Permit               Permit
 	Refusals             []string
-	LimitRefusal         string
 	Owns                 func(execution.QueryGroupIdentity) bool
 	Owned                func() int
 	OnFault              func(reason string, queryGroup execution.QueryGroupIdentity)
 	UnspreadFirstSamples bool
+	ProbeFirstSamples    bool
 }
 
 // Query is what the access layer knows about a physical query before it is
@@ -280,6 +287,14 @@ type sample struct {
 	unread        bool
 	running       bool
 	dropped       bool
+	// yieldAt is when a waiting formal query asked the read in flight to
+	// yield, zero while none has; overdue is set once the read held its
+	// permit past RecheckTimeout after that and was counted as a fault.
+	// returned is set the moment the read came back, before it gives its
+	// permit back: a yield after that did not stop it.
+	yieldAt  time.Time
+	overdue  bool
+	returned bool
 	// probe is set on a sample to be read once more at the deepest rung
 	// after its planned ones; probing once its planned rungs are read and
 	// its completion taken, and probeChanged when that read changed.
@@ -344,7 +359,10 @@ func (engine *Engine) Begin(query Query) *Read {
 	state := engine.groups[slot.QueryGroup]
 	if state == nil {
 		// A group not seen before is probed at its first sample.
-		state = &group{depth: 1, rest: RungSteps[0], sinceProbe: probeEvery - 1}
+		state = &group{depth: 1, rest: RungSteps[0], sinceProbe: probeEvery - 2}
+		if engine.options.ProbeFirstSamples {
+			state.sinceProbe = probeEvery - 1
+		}
 		if !engine.options.UnspreadFirstSamples {
 			// A process's Query Groups all read for the first time within a
 			// period of its start: spread their first samples over an hour,
@@ -499,7 +517,16 @@ func (engine *Engine) Step(ctx context.Context) {
 	due := make([]*sample, 0)
 	for _, state := range engine.groups {
 		for _, candidate := range [...]*sample{state.sample, state.probe} {
-			if candidate == nil || candidate.running {
+			if candidate != nil && candidate.running {
+				// A read asked to yield that still holds its permit past its
+				// own deadline has stopped honouring either.
+				if !candidate.yieldAt.IsZero() && !candidate.overdue && now.Sub(candidate.yieldAt) > RecheckTimeout {
+					candidate.overdue = true
+					engine.faultLocked(FaultYieldOverdue, candidate.source, candidate.queryGroup)
+				}
+				continue
+			}
+			if candidate == nil {
 				continue
 			}
 			at := candidate.readAt.Add(rungDelay(candidate.rung, candidate.step))
@@ -525,9 +552,6 @@ func (engine *Engine) Step(ctx context.Context) {
 		if refused != "" {
 			// No room now; the rung keeps its window and is tried again.
 			engine.mu.Lock()
-			if refused == engine.options.LimitRefusal {
-				engine.faultLocked(FaultPermitLimit, candidate.source, candidate.queryGroup)
-			}
 			if _, named := engine.counts.refusals[refused]; !named {
 				refused = RefusedOther
 			}
@@ -697,20 +721,43 @@ func recheckFrom(candidate *sample) int64 {
 
 func (engine *Engine) recheck(ctx context.Context, candidate *sample, release func(), yield <-chan struct{}) {
 	readCtx, cancel := context.WithTimeout(ctx, RecheckTimeout)
+	// The watcher waits for the read to come back, not for the read's
+	// context: a read that honours neither the yield nor its deadline is
+	// still holding its permit after its context ended, and a yield that
+	// comes then is the one yield_overdue is for.
+	watched, back := make(chan struct{}), make(chan struct{})
 	if yield != nil {
 		go func() {
+			defer close(watched)
 			select {
 			case <-yield:
+				engine.mu.Lock()
+				if !candidate.returned {
+					candidate.yieldAt = engine.options.Now()
+				}
+				engine.mu.Unlock()
 				cancel()
-			case <-readCtx.Done():
+			case <-back:
 			}
 		}()
+	} else {
+		close(watched)
 	}
 	sink := &recheckSink{summary: newSummarizer(candidate.spec.PlanFacts.Normalization.CanonicalValueField)}
 	started := engine.options.Now()
 	completion, err := engine.options.Recheck(readCtx, tailSpec(candidate.spec, recheckFrom(candidate)), sink)
-	cancel()
+	engine.mu.Lock()
+	candidate.returned = true
+	engine.mu.Unlock()
 	release()
+	released := engine.options.Now()
+	// Only after the permit is back: a yield that came while it was being
+	// given back finds the watcher still waiting, and returned, not the
+	// order two ready channels happen to be picked in, is what leaves it
+	// untimed.
+	close(back)
+	cancel()
+	engine.releasedAfterYield(candidate, released, watched)
 	rung := RungNames[candidate.rung]
 	if (err != nil || completion.Completeness != execution.CompletenessFull) && closed(yield) {
 		// Stopped for a formal query, not a read that failed: the rung keeps
@@ -773,6 +820,29 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	}
 	if state := engine.groups[candidate.queryGroup]; state != nil && (state.sample == candidate || state.probe == candidate) {
 		engine.advanceLocked(state, candidate, engine.options.Now())
+	}
+}
+
+// releasedAfterYield counts how long a read asked to yield took to give its
+// permit back, once its watcher is done. A yield is noted only while the
+// read has not come back (sample.returned), so one that came after it did
+// not stop it and is not counted. The read is clear of its yield for its
+// next rung.
+func (engine *Engine) releasedAfterYield(candidate *sample, released time.Time, watched <-chan struct{}) {
+	<-watched
+	engine.mu.Lock()
+	defer engine.mu.Unlock()
+	yieldAt, overdue := candidate.yieldAt, candidate.overdue
+	candidate.yieldAt, candidate.overdue, candidate.returned = time.Time{}, false, false
+	if yieldAt.IsZero() {
+		return
+	}
+	took := released.Sub(yieldAt)
+	engine.counts.yieldReleases[candidate.source]++
+	engine.counts.yieldReleaseSeconds[candidate.source] += took.Seconds()
+	engine.counts.yieldReleaseMax[candidate.source] = max(engine.counts.yieldReleaseMax[candidate.source], took)
+	if took > RecheckTimeout && !overdue {
+		engine.faultLocked(FaultYieldOverdue, candidate.source, candidate.queryGroup)
 	}
 }
 

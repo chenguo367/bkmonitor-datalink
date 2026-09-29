@@ -40,6 +40,11 @@ type counters struct {
 	maxCompletion   map[string]time.Duration
 	recheckBytes    map[string]uint64
 	unknownLookback map[string]uint64
+	// Per source: reads a waiting formal query asked to yield, how long
+	// they took to give their permit back in all, and the longest.
+	yieldReleases       map[string]uint64
+	yieldReleaseSeconds map[string]float64
+	yieldReleaseMax     map[string]time.Duration
 }
 
 func newCounters(sources, refusals []string) counters {
@@ -47,7 +52,8 @@ func newCounters(sources, refusals []string) counters {
 		changed: map[string]uint64{}, changes: map[string]uint64{}, preempted: map[string]uint64{},
 		completion: map[string]uint64{}, probes: map[string]uint64{}, emptyFirstReads: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
-		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{}}
+		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
+		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
 	for _, reason := range refusals {
 		c.refusals[reason] = 0
 	}
@@ -57,6 +63,7 @@ func newCounters(sources, refusals []string) counters {
 	for _, source := range sources {
 		c.firstReads[source] = 0
 		c.maxCompletion[source], c.recheckBytes[source], c.unknownLookback[source] = 0, 0, 0
+		c.yieldReleases[source], c.yieldReleaseSeconds[source], c.yieldReleaseMax[source] = 0, 0, 0
 		for _, outcome := range SampleOutcomes {
 			c.samples[key2(source, outcome)] = 0
 		}
@@ -131,6 +138,13 @@ type SourceStats struct {
 	FirstReads     uint64 `json:"first_reads"`
 	FirstReadBytes uint64 `json:"first_read_bytes"`
 	RecheckBytes   uint64 `json:"recheck_bytes"`
+	// YieldReleases is the reads a waiting formal query asked to yield, and
+	// YieldReleaseSeconds and YieldReleaseMaxSeconds how long they took to
+	// give their permits back, in all and at most: the wait a formal query
+	// can owe the lookback, the moment it has to wait at all.
+	YieldReleases          uint64  `json:"yield_releases"`
+	YieldReleaseSeconds    float64 `json:"yield_release_seconds"`
+	YieldReleaseMaxSeconds float64 `json:"yield_release_max_seconds"`
 	// Samples: outcome -> count. UnobservedRatio is the unobserved samples -
 	// their last rungs not read - over all finished ones, and
 	// ProbeChangedRatio the probe_changed ones: windows later than the rungs
@@ -247,7 +261,9 @@ func (engine *Engine) Stats() Stats {
 	for _, source := range Sources {
 		entry := SourceStats{FirstReads: engine.counts.firstReads[source], FirstReadBytes: engine.firstReadBytes[source].Load(),
 			RecheckBytes: engine.counts.recheckBytes[source], UnknownLookback: engine.counts.unknownLookback[source],
-			Samples: map[string]uint64{}, Rechecks: map[string]map[string]uint64{}, ChangedWindows: map[string]uint64{},
+			YieldReleases: engine.counts.yieldReleases[source], YieldReleaseSeconds: engine.counts.yieldReleaseSeconds[source],
+			YieldReleaseMaxSeconds: engine.counts.yieldReleaseMax[source].Seconds(),
+			Samples:                map[string]uint64{}, Rechecks: map[string]map[string]uint64{}, ChangedWindows: map[string]uint64{},
 			Changes: map[string]map[string]uint64{}, Preempted: map[string]uint64{}, Completion: map[string]uint64{},
 			MaxCompletionSeconds: int64(engine.counts.maxCompletion[source] / time.Second), DepthGroups: map[string]uint64{},
 			Probes: map[string]uint64{}, EmptyFirstReads: map[string]uint64{}, EmptyFirstReadCompletion: map[string]uint64{}}

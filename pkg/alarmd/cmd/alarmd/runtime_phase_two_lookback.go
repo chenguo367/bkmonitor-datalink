@@ -92,8 +92,7 @@ func buildLookback(
 }
 
 // lookbackOptions wire the lookback to this process: its query client, its
-// permits - a refusal at the lookback's own share of them a fault - its
-// Runner set, the sources a query can be compiled from, and its log.
+// permits, its Runner set and its log.
 func lookbackOptions(
 	recheck lookback.Recheck,
 	flights *scheduler.FlightCoordinator,
@@ -102,8 +101,7 @@ func lookbackOptions(
 	now func() time.Time,
 ) lookback.Options {
 	return lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, Owned: ownership.count,
-		Refusals: scheduler.LookbackRefusals, LimitRefusal: scheduler.LookbackRefusedLimit,
-		Permit: lookbackPermit(flights),
+		Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights),
 		OnFault: func(reason string, queryGroup execution.QueryGroupIdentity) {
 			if logger != nil {
 				logger.Warn("lookback", "fault", 0, 0, slog.String("reason", reason), slog.String("query_group", string(queryGroup)))
@@ -112,8 +110,8 @@ func lookbackOptions(
 }
 
 // lookbackPermit is the lookback's permit from the process's query budget:
-// granted only with room to spare, and yielded the moment a formal query has
-// to wait for one.
+// granted only from a permit nobody is waiting for, and yielded the moment a
+// formal query has to wait for one.
 func lookbackPermit(flights *scheduler.FlightCoordinator) lookback.Permit {
 	return func() (func(), <-chan struct{}, string) {
 		permit, refused := flights.TryAcquireLookbackPermit()

@@ -44,41 +44,43 @@ func holdNormal(t *testing.T, flights *FlightCoordinator, clock *mutableClock, n
 	return held
 }
 
-// The lookback takes at most an eighth of the pool, and never the room the
-// next formal queries need: with 16 permits it holds two at most, and none
-// once fewer than two would stay free after granting it.
-func TestTheLookbackTakesABoundedShareAndLeavesHeadroom(t *testing.T) {
+// The lookback takes any permit nobody is waiting for, to the last one, and
+// holds no share of its own: with 16 permits and 15 held formally it takes
+// the 16th, and with every permit held it is refused as full. Its permits
+// fill the pool as formal ones do.
+func TestTheLookbackTakesAnyFreePermitAndNoShare(t *testing.T) {
 	clock := newMutableClock(time.Unix(300, 0))
 	flights := lookbackFlights(t, clock)
-	if LookbackPermitLimit(16) != 2 || LookbackPermitLimit(3) != 1 || LookbackPermitLimit(0) != 1 {
-		t.Fatalf("limits %d %d %d, want 2 1 1", LookbackPermitLimit(16), LookbackPermitLimit(3), LookbackPermitLimit(0))
+	lookbacks := make([]*LookbackPermit, 0, 16)
+	for range 16 {
+		permit, refused := flights.TryAcquireLookbackPermit()
+		if permit == nil || refused != "" {
+			t.Fatalf("an idle pool refused lookback permit %d: %q", len(lookbacks)+1, refused)
+		}
+		lookbacks = append(lookbacks, permit)
 	}
-	first, refused := flights.TryAcquireLookbackPermit()
-	second, refusedAgain := flights.TryAcquireLookbackPermit()
-	if first == nil || second == nil || refused != "" || refusedAgain != "" {
-		t.Fatalf("an idle pool refused the lookback: %q %q", refused, refusedAgain)
+	if permit, reason := flights.TryAcquireLookbackPermit(); permit != nil || reason != LookbackRefusedFull {
+		t.Fatalf("a 17th permit of 16 = %v %q, want refused as full", permit, reason)
 	}
-	if third, reason := flights.TryAcquireLookbackPermit(); third != nil || reason != LookbackRefusedLimit {
-		t.Fatalf("a third lookback permit = %v %q, want refused at the limit", third, reason)
+	for _, permit := range lookbacks {
+		permit.Release()
+		permit.Release() // a second release changes nothing
 	}
-	first.Release()
-	second.Release()
-	second.Release() // a second release changes nothing
 
-	// 13 formal permits held: 3 free, granting one leaves 2 = the limit.
-	normal := holdNormal(t, flights, clock, 13)
-	permit, reason := flights.TryAcquireLookbackPermit()
-	if permit == nil || reason != "" {
-		t.Fatalf("with 3 free the lookback was refused: %q", reason)
+	normal := holdNormal(t, flights, clock, 15)
+	last, reason := flights.TryAcquireLookbackPermit()
+	if last == nil || reason != "" {
+		t.Fatalf("with one permit free the lookback was refused: %q", reason)
 	}
-	permit.Release()
-	// 14 held: 2 free, granting one would leave 1 < the limit.
-	normal = append(normal, holdNormal(t, flights, clock, 1)...)
-	if permit, reason := flights.TryAcquireLookbackPermit(); permit != nil || reason != LookbackRefusedHeadroom {
-		t.Fatalf("with 2 free the lookback = %v %q, want refused for headroom", permit, reason)
+	if permit, reason := flights.TryAcquireLookbackPermit(); permit != nil || reason != LookbackRefusedFull {
+		t.Fatalf("with every permit held the lookback = %v %q, want refused as full", permit, reason)
 	}
+	last.Release()
 	for _, held := range normal {
 		held.Release()
+	}
+	if inflight := flights.queryPermitSnapshot().Inflight; inflight != 0 {
+		t.Fatalf("after every release %d permits are still held", inflight)
 	}
 }
 
