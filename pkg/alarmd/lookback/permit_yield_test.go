@@ -118,6 +118,82 @@ func TestAReadStillHoldingItsPermitPastItsDeadlineAfterAYieldIsAFault(t *testing
 	}
 }
 
+// A read that honours neither its deadline nor a cancellation is still
+// holding its permit after its context has ended. A yield that comes only
+// then is still noted: past RecheckTimeout it is a yield_overdue fault, and
+// the release, when it finally comes, is timed.
+func TestAYieldAfterTheReadsContextEndedIsStillWatched(t *testing.T) {
+	c := &clock{at: time.Unix(1_700_000_100, 0)}
+	yield := make(chan struct{})
+	started := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	engine, err := New(Options{Now: c.now, UnspreadFirstSamples: true,
+		Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			started <- struct{}{}
+			<-stop // honours neither its context nor the yield
+			return execution.ProviderCompletion{}, errors.New("stopped late")
+		},
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, yield, "" },
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := engine.Begin(query("qg", 1_700_000_100, minute, sourceLog))
+	read.Series(dataset("h1", steady), 10)
+	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	c.set(c.now().Add(rungDelay(0, minute)))
+	ctx, cancel := context.WithCancel(context.Background())
+	engine.Step(ctx)
+	<-started
+	cancel() // the read's context ends; the read does not
+	time.Sleep(50 * time.Millisecond)
+	close(yield)
+	time.Sleep(50 * time.Millisecond)
+	c.set(c.now().Add(RecheckTimeout + time.Second))
+	engine.Step(context.Background())
+	if n := engine.Stats().Faults[FaultYieldOverdue]; n != 1 {
+		t.Fatalf("yield_overdue %d, want the yield after the read's context ended watched and counted", n)
+	}
+	close(stop)
+	for deadline := time.Now().Add(5 * time.Second); engine.Stats().Sources[sourceLog].YieldReleases != 1; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the release after the late yield was not timed")
+		}
+	}
+}
+
+// A permit's yield is almost never closed: most reads finish while nobody
+// waits. Such a read settles its rung and lets its watcher go, however long
+// the yield stays open.
+func TestAReadNeverAskedToYieldSettlesItsRung(t *testing.T) {
+	c := &clock{at: time.Unix(1_700_000_100, 0)}
+	engine, err := New(Options{Now: c.now, UnspreadFirstSamples: true,
+		Recheck: func(ctx context.Context, _ execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			_ = sink.ConsumeProviderSeries(ctx, execution.ProviderSeriesBatch{Dataset: dataset("h1", steady)})
+			return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil
+		},
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, make(chan struct{}), "" },
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := engine.Begin(query("qg", 1_700_000_100, minute, sourceLog))
+	read.Series(dataset("h1", steady), 10)
+	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	c.set(c.now().Add(rungDelay(0, minute)))
+	engine.Step(context.Background())
+	for deadline := time.Now().Add(5 * time.Second); engine.Stats().Sources[sourceLog].Samples[OutcomeCompleted] != 1; time.Sleep(time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("a read no formal query asked to yield never settled: %v", engine.Stats().Sources[sourceLog].Rechecks[RungNames[0]])
+		}
+	}
+	if source := engine.Stats().Sources[sourceLog]; source.YieldReleases != 0 || source.Preempted[RungNames[0]] != 0 {
+		t.Fatalf("a read never asked to yield: yield releases %d, preempted %v", source.YieldReleases, source.Preempted)
+	}
+}
+
 // A formal query that comes to wait after a read came back, while it
 // gives its permit back, did not stop it: the release is not timed as a
 // yield, and the rung is compared, not preempted.

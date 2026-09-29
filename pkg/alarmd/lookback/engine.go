@@ -721,7 +721,11 @@ func recheckFrom(candidate *sample) int64 {
 
 func (engine *Engine) recheck(ctx context.Context, candidate *sample, release func(), yield <-chan struct{}) {
 	readCtx, cancel := context.WithTimeout(ctx, RecheckTimeout)
-	watched := make(chan struct{})
+	// The watcher waits for the read to come back, not for the read's
+	// context: a read that honours neither the yield nor its deadline is
+	// still holding its permit after its context ended, and a yield that
+	// comes then is the one yield_overdue is for.
+	watched, back := make(chan struct{}), make(chan struct{})
 	if yield != nil {
 		go func() {
 			defer close(watched)
@@ -733,7 +737,7 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 				}
 				engine.mu.Unlock()
 				cancel()
-			case <-readCtx.Done():
+			case <-back:
 			}
 		}()
 	} else {
@@ -747,6 +751,11 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 	engine.mu.Unlock()
 	release()
 	released := engine.options.Now()
+	// Only after the permit is back: a yield that came while it was being
+	// given back finds the watcher still waiting, and returned, not the
+	// order two ready channels happen to be picked in, is what leaves it
+	// untimed.
+	close(back)
 	cancel()
 	engine.releasedAfterYield(candidate, released, watched)
 	rung := RungNames[candidate.rung]
