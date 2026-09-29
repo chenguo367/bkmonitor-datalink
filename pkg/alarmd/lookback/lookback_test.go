@@ -542,8 +542,10 @@ func TestEachQueryGroupLearnsItsOwnDepth(t *testing.T) {
 	}
 }
 
-// A Query Group reads one rung less only after cleanSamplesToShallow
-// samples in a row needed less; one sample that needed the rung again
+// A Query Group reads fewer rungs only after cleanSamplesToShallow samples
+// in a row needed fewer, and then at once as few as the most any of them
+// needed, not a rung at a time: a group whose deep lateness has passed is
+// back within that many samples. One sample that needed the rung again
 // restarts the count.
 func TestADeepQueryGroupShallowsOnlyAfterCleanSamplesInARow(t *testing.T) {
 	f := newFixture(t)
@@ -560,22 +562,88 @@ func TestADeepQueryGroupShallowsOnlyAfterCleanSamplesInARow(t *testing.T) {
 		f.rest("qg")
 		return depth
 	}
-	if depth := sample(1); depth != 3 {
-		t.Fatalf("data changing up to the second rung left depth %d, want 3", depth)
+	// clean reads n samples needing fewer rungs, the second of them changing
+	// at the first rung when oneAtFirstRung, and returns the depth after each.
+	clean := func(n int, oneAtFirstRung bool) []int {
+		t.Helper()
+		depths := []int{}
+		for index := 0; index < n; index++ {
+			if oneAtFirstRung && index == 1 {
+				depths = append(depths, sample(0))
+			} else {
+				depths = append(depths, sample(-1))
+			}
+		}
+		return depths
 	}
-	for clean := 1; clean < cleanSamplesToShallow; clean++ {
-		if depth := sample(-1); depth != 3 {
-			t.Fatalf("after %d clean samples depth %d, want 3", clean, depth)
+	want := func(what string, got []int, depths ...int) {
+		t.Helper()
+		if fmt.Sprint(got) != fmt.Sprint(depths) {
+			t.Fatalf("%s: depths %v, want %v", what, got, depths)
 		}
 	}
 	if depth := sample(1); depth != 3 {
+		t.Fatalf("data changing up to the second rung left depth %d, want 3", depth)
+	}
+	// Seven in a row needing fewer, one of them two rungs, then one needing
+	// the rung again: the count, and what the seven needed, start over.
+	want("seven clean samples", clean(cleanSamplesToShallow-1, true), 3, 3, 3, 3, 3, 3, 3)
+	if depth := sample(1); depth != 3 {
 		t.Fatalf("a late sample did not hold the depth: %d", depth)
 	}
-	for clean := 1; clean < cleanSamplesToShallow; clean++ {
-		sample(-1)
+	want("eight punctual samples after it", clean(cleanSamplesToShallow, false), 3, 3, 3, 3, 3, 3, 3, 1)
+	// Eight in a row needing fewer, one of them two rungs: two rungs.
+	sample(1)
+	want("eight clean samples, one needing two rungs", clean(cleanSamplesToShallow, true), 3, 3, 3, 3, 3, 3, 3, 2)
+	// What clean samples needed before the group deepened is not carried
+	// past it: lateness to the fourth rung, then none, is one rung at once.
+	sample(1)
+	sample(0)
+	if depth := sample(3); depth != 5 {
+		t.Fatalf("data changing up to the fourth rung left depth %d, want 5", depth)
 	}
-	if depth := sample(-1); depth != 2 {
-		t.Fatalf("after %d clean samples in a row depth %d, want 2", cleanSamplesToShallow, depth)
+	want("eight punctual samples after deep lateness", clean(cleanSamplesToShallow, false), 5, 5, 5, 5, 5, 5, 5, 1)
+}
+
+// A group that settles after a deep recheck forgets what its clean samples
+// needed before: those were read at the depth the deep recheck found too
+// shallow.
+func TestASettlingQueryGroupForgetsWhatItsCleanSamplesNeededBefore(t *testing.T) {
+	f := newFixture(t)
+	// sample's data changes at every rung up to lastChange, and at the
+	// deepest when late - read only by a deep recheck of a shallower group.
+	sample := func(lastChange int, late bool) int {
+		t.Helper()
+		f.sample("qg", sourceLog, minute, "3", func(rung int) string {
+			switch {
+			case late && rung == len(RungSteps)-1:
+				return "99"
+			case lastChange < 0:
+				return "3"
+			}
+			return fmt.Sprint(10 + min(rung, lastChange))
+		})
+		depth := f.group("qg").depth
+		f.rest("qg")
+		return depth
+	}
+	// Probed at its first sample and at its fifth.
+	sample(1, false)
+	sample(0, false)
+	sample(-1, false)
+	sample(-1, false)
+	if depth := sample(-1, true); depth != len(RungSteps) || f.engine.Stats().Sources[sourceLog].Samples[OutcomeProbeChanged] != 1 {
+		t.Fatalf("the fifth sample's deep recheck found data: depth %d, want every rung", depth)
+	}
+	if depth := sample(2, false); depth != 4 {
+		t.Fatalf("settled at depth %d, want 4", depth)
+	}
+	depths := []int{}
+	for range cleanSamplesToShallow {
+		depths = append(depths, sample(-1, false))
+	}
+	if depths[len(depths)-1] != 1 {
+		t.Fatalf("eight punctual samples after settling: depths %v, want one rung at the end", depths)
 	}
 }
 

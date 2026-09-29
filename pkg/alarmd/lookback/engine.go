@@ -56,9 +56,11 @@ const (
 	restCap = time.Hour
 	// cleanSamplesToShallow is how many samples of a Query Group in a row
 	// must show nothing changing at its two deepest rungs before it
-	// rechecks one rung less. At a true late rate of one sample in four
-	// there, eight clean ones in a row happen one time in ten; a single late
-	// sample restores the rung at once.
+	// rechecks only as deep as the most any of them needed - at once, so a
+	// group whose lateness has passed is back within as many samples,
+	// however deep it went. At a true late rate of one sample in four there,
+	// eight clean ones in a row happen one time in ten; a single late sample
+	// restores the rung at once.
 	cleanSamplesToShallow = 8
 	// probeEvery: one sample in so many of a Query Group, and its first, is
 	// read once more at the deepest rung after the rungs its group reads -
@@ -223,15 +225,17 @@ type group struct {
 	source string
 	step   time.Duration
 	// depth is how many rungs its sample reads, rest how long it rests
-	// between two samples, in its steps, and clean its samples in a row
-	// that needed less than depth. settle is set when a deep recheck found
+	// between two samples, in its steps, clean its samples in a row that
+	// needed less than depth and cleanNeed the most any of them needed.
+	// settle is set when a deep recheck found
 	// data later than depth: the group reads every rung, and its next
 	// completed sample sets depth from where its data stopped, shallower
 	// at once if that is shallower.
-	depth  int
-	rest   float64
-	clean  int
-	settle bool
+	depth     int
+	rest      float64
+	clean     int
+	cleanNeed int
+	settle    bool
 	// sinceProbe is its samples finished since its last deep recheck;
 	// probe the sample, if any, whose rungs were read and which waits for
 	// its deep recheck. It does not hold the next sample back.
@@ -578,9 +582,10 @@ func (engine *Engine) advanceLocked(state *group, candidate *sample, now time.Ti
 // A sample every rung of which was read after its last change is complete:
 // the window was complete at that change, or at the first read if none. The
 // group then needs one rung past its last change, a guard showing nothing
-// more arrived: more at once when a sample needed more, one fewer only after
-// cleanSamplesToShallow samples in a row needed fewer - or at once, to what
-// it needed, when the group settles after a deep recheck. It rests only its
+// more arrived: more at once when a sample needed more, fewer only after
+// cleanSamplesToShallow samples in a row needed fewer, and then the most any
+// of them needed - or at once, to what it needed, when the group settles
+// after a deep recheck. It rests only its
 // new deepest rung's length when it just deepened - lateness it had not
 // shown, to be learned quickly - and otherwise twice its last rest, up to
 // restCap, however late its data is, as long as it is late as before: a
@@ -598,7 +603,7 @@ func (engine *Engine) finishLocked(state *group, candidate *sample, now time.Tim
 	need := min(max(candidate.lastChange+2, 1), len(RungSteps))
 	deepened := need > state.depth
 	if deepened {
-		state.depth, state.clean, state.rest = need, 0, RungSteps[need-1]
+		state.depth, state.clean, state.cleanNeed, state.rest = need, 0, 0, RungSteps[need-1]
 	}
 	outcome := OutcomeCompleted
 	if candidate.unread {
@@ -616,14 +621,14 @@ func (engine *Engine) finishLocked(state *group, candidate *sample, now time.Tim
 		if !deepened {
 			switch {
 			case candidate.settles:
-				state.depth, state.clean = need, 0
+				state.depth, state.clean, state.cleanNeed = need, 0, 0
 			case need < state.depth:
-				state.clean++
+				state.clean, state.cleanNeed = state.clean+1, max(state.cleanNeed, need)
 				if state.clean >= cleanSamplesToShallow {
-					state.depth, state.clean = state.depth-1, 0
+					state.depth, state.clean, state.cleanNeed = state.cleanNeed, 0, 0
 				}
 			default:
-				state.clean = 0
+				state.clean, state.cleanNeed = 0, 0
 			}
 			state.rest = min(state.rest*2, float64(restCap)/float64(state.step))
 		}
