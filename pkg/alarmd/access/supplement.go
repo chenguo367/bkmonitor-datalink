@@ -40,7 +40,8 @@ func WithKeptRead(ctx context.Context, read KeptRead) context.Context {
 	return context.WithValue(ctx, keptReadKey{}, read)
 }
 
-func keptReadFrom(ctx context.Context) (KeptRead, bool) {
+// KeptReadOf is the read WithKeptRead gave ctx, if any.
+func KeptReadOf(ctx context.Context) (KeptRead, bool) {
 	read, found := ctx.Value(keptReadKey{}).(KeptRead)
 	return read, found && read != nil
 }
@@ -63,7 +64,7 @@ func (source *Source) executeSupplement(
 	request execution.QueryExecutionRequest,
 	consumer execution.QueryExecutionConsumer,
 ) (execution.QueryExecutionCompletion, error) {
-	read, found := keptReadFrom(ctx)
+	read, found := KeptReadOf(ctx)
 	if !found {
 		return execution.QueryExecutionCompletion{}, errors.New("alarmd access: a supplement runs on a kept read, and none was given")
 	}

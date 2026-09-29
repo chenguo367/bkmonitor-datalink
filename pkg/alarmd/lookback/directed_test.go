@@ -338,3 +338,70 @@ func TestADirectedReadAsksForTheSlotsFrozenQueryWhole(t *testing.T) {
 		t.Fatalf("the frozen query did not replay: %v", err)
 	}
 }
+
+// A directed Query Group's Slots are read one at a time, the oldest first:
+// the supplement of a Slot runs before the supplement of the Slot after
+// it, so a series late in both is supplemented at the first before the
+// second moves its State past it.
+func TestADirectedGroupsSlotsAreReadOneAtATimeOldestFirst(t *testing.T) {
+	f, _ := directedFixture(t, SupplementOutcome{Ran: true})
+	release := make(chan struct{})
+	var mu sync.Mutex
+	var order []execution.EvaluationTime
+	f.engine.options.Supplement = func(_ context.Context, job SupplementJob) SupplementOutcome {
+		mu.Lock()
+		order = append(order, job.EvaluationTime)
+		first := len(order) == 1
+		mu.Unlock()
+		if first {
+			<-release
+		}
+		return SupplementOutcome{Ran: true}
+	}
+	first := f.clock.now().Unix()
+	f.firstRead(first, execution.CompletenessFull)
+	readAt := f.clock.now()
+	f.clock.set(readAt.Add(minute))
+	second := f.clock.now().Unix()
+	f.firstRead(second, execution.CompletenessFull)
+	// Both due: the first at the end of its rung's window, the second at its
+	// moment.
+	f.clock.set(readAt.Add(rungDelay(0, minute) + minute))
+	late := func(slot int64) answer {
+		return delivered(point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"}))
+	}
+	f.answers <- late(first)
+	f.engine.Step(context.Background())
+	for {
+		mu.Lock()
+		started := len(order)
+		mu.Unlock()
+		if started == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	// Its supplement still running, the second is not read.
+	f.engine.Step(context.Background())
+	if len(f.answers) != 0 {
+		t.Fatal("an answer was taken off the queue with no read due")
+	}
+	f.answers <- late(second)
+	f.engine.Step(context.Background())
+	time.Sleep(10 * time.Millisecond)
+	mu.Lock()
+	if len(order) != 1 {
+		mu.Unlock()
+		t.Fatalf("supplements %v, want the second Slot to wait for the first", order)
+	}
+	mu.Unlock()
+	close(release)
+	f.waitFor(func(stats Stats) bool { return stats.Sources[sourceLog].SupplementWindows[DirectedSupplemented] == 1 })
+	f.engine.Step(context.Background())
+	f.waitFor(func(stats Stats) bool { return stats.Sources[sourceLog].SupplementWindows[DirectedSupplemented] == 2 })
+	mu.Lock()
+	defer mu.Unlock()
+	if len(order) != 2 || order[0] != execution.EvaluationTime(first) || order[1] != execution.EvaluationTime(second) {
+		t.Fatalf("supplements %v, want %d then %d", order, first, second)
+	}
+}

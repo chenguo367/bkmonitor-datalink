@@ -237,12 +237,19 @@ func completeDirectedLocked(captured *directedQuery, completion execution.Provid
 	captured.complete = err == nil && completion.Completeness == execution.CompletenessFull && !captured.first.refused
 }
 
-// dueDirectedLocked is the directed Slots of one Query Group whose moment
-// has come, after settling the ones that will not be read.
+// dueDirectedLocked is the directed Slot of one Query Group to read now,
+// if any, after settling the ones that will not be read.
+//
+// One at a time per Query Group, the oldest first: a supplement of a Slot
+// runs after the supplements of the Slots before it, so a series late in
+// two Slots in a row is supplemented at the first before the second moves
+// its State past it.
 func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directedSlot {
-	var due []*directedSlot
+	var oldest *directedSlot
+	running := false
 	for evaluation, slot := range state.directed {
 		if slot.running {
+			running = true
 			continue
 		}
 		at := slot.readAt.Add(rungDelay(slot.rung, slot.step))
@@ -266,9 +273,14 @@ func (engine *Engine) dueDirectedLocked(state *group, now time.Time) []*directed
 			delete(state.directed, evaluation)
 			continue
 		}
-		due = append(due, slot)
+		if oldest == nil || slot.evaluation < oldest.evaluation {
+			oldest = slot
+		}
 	}
-	return due
+	if running || oldest == nil {
+		return nil
+	}
+	return []*directedSlot{oldest}
 }
 
 // noteDirectedLocked counts a directed Slot's end on its Query Group and
