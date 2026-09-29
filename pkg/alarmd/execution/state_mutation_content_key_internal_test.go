@@ -74,6 +74,13 @@ func marshalledContentKey(payload stateMutationDigestPayload) ([sha256.Size]byte
 // Keying keeps nothing of the document: it allocates at least the
 // document's length less than marshalling it did.
 func TestTheContentKeyDoesNotKeepTheDocument(t *testing.T) {
+	if raceEnabled {
+		// Both arms encode into a buffer from the encoder's pool. The race
+		// detector's pool drops a quarter of the buffers put back, so calls
+		// grow a new one at random and the difference is lost in it: one run
+		// in five read less than the document's length.
+		t.Skip("allocation is not measurable through a pooled buffer under the race detector")
+	}
 	payload := stateMutationDigestPayloadOf(normalizeStateMutation(sealTestMutation(30)))
 	document, err := json.Marshal(payload)
 	if err != nil {
