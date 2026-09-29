@@ -11,6 +11,7 @@ package fleet
 
 import (
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -35,6 +36,17 @@ func partReplicas() []Snapshot {
 		for row := range snapshot.Anomalies {
 			interval := int64(60 * (1 + (row+index)%2))
 			snapshot.Anomalies[row].Wake = &WakeFacts{Known: true, IntervalSeconds: interval, DueAt: now.Add(time.Minute)}
+		}
+		// More of each list than the first screen carries on one replica,
+		// fewer on the others, with values that interleave across replicas.
+		snapshot.PrunedSkips = map[string]PrunedSkip{}
+		for n := 0; n < 3+index*4; n++ {
+			queryGroup := fmt.Sprintf("%s-pruned-%d", snapshot.Replica, n)
+			snapshot.PrunedSkips[queryGroup] = PrunedSkip{From: 0, To: int64(60 * (3*n + index)), At: now.Add(-time.Hour)}
+			snapshot.RetainedShare = append(snapshot.RetainedShare, Anomaly{QueryGroup: queryGroup, Replica: snapshot.Replica,
+				RetainedShare: &RetainedShareFacts{PercentOfShare: uint64(50 + 3*n + index)}})
+			snapshot.ReadEarly = append(snapshot.ReadEarly, Anomaly{QueryGroup: queryGroup, Replica: snapshot.Replica,
+				ReadEarly: &ReadEarlyFacts{CurrentDelaySeconds: 0, SuggestedDelaySeconds: int64(15 * (3*n + index))}})
 		}
 		snapshot.Schedule = &ScheduleCensus{Waiting: 90, Cooling: 2, Cohorts: []ScheduleCohort{
 			{IntervalSeconds: 60, Objects: 50 + index, Cooling: 1}, {IntervalSeconds: 120, Objects: 40, Cooling: 1}}}
@@ -100,6 +112,17 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	sameJSON(t, "cohorts", merged.Cohorts(whole.Schedule), Cohorts(&whole, columns))
 	sameJSON(t, "cooling", merged.CoolingAt(whole.Schedule, now), Cooling(&whole, columns, now))
 	sameJSON(t, "load", merged.Load(&whole), LoadOf(&whole, now))
+	pruned, retained, readEarly := prunedSkipList(whole.PrunedSkips), retainedShareList(whole.RetainedShare), readEarlyList(whole.ReadEarly)
+	sameJSON(t, "pruned skips", merged.PrunedSkips, firstScreenList(pruned))
+	sameJSON(t, "retained share", merged.RetainedShare, firstScreenList(retained))
+	sameJSON(t, "read early", merged.ReadEarly, firstScreenList(readEarly))
+	if merged.PrunedSkipsTotal != len(pruned) || merged.RetainedShareTotal != len(retained) || merged.ReadEarlyTotal != len(readEarly) {
+		t.Errorf("totals %d/%d/%d, whole view %d/%d/%d", merged.PrunedSkipsTotal, merged.RetainedShareTotal, merged.ReadEarlyTotal,
+			len(pruned), len(retained), len(readEarly))
+	}
+	if len(pruned) != 21 || len(merged.PrunedSkips) != FirstScreenListBound {
+		t.Fatalf("fixture lists: %d pruned, %d carried", len(pruned), len(merged.PrunedSkips))
+	}
 	if loss := LoadOf(&whole, now).Loss; loss.Ongoing+loss.AfterRestart == 0 {
 		t.Fatalf("fixture loss %+v, want the skip counted as in progress", loss)
 	}

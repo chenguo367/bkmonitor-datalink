@@ -9,7 +9,10 @@
 
 package fleet
 
-import "time"
+import (
+	"sort"
+	"time"
+)
 
 // ReplicaPart is one replica's share of the numbers the first screen draws
 // from rows, in the shape that adds across replicas: counts add, sets take
@@ -40,6 +43,17 @@ type ReplicaPart struct {
 	Cooling    coolingRows
 	// Loss is the load's loss, counted from the replica's skip records.
 	Loss LoadLoss
+	// PrunedSkips, RetainedShare and ReadEarly are the first
+	// FirstScreenListBound of each of the health route's object lists, in the
+	// list's order, and each total is how many there are. The first few of
+	// the merged lists are among the first few of some replica's, so this is
+	// all a merge needs.
+	PrunedSkips        []PrunedSkipRef
+	PrunedSkipsTotal   int
+	RetainedShare      []RetainedShareRef
+	RetainedShareTotal int
+	ReadEarly          []ReadEarlyRef
+	ReadEarlyTotal     int
 }
 
 // AttributionTally is the anomaly column's rows by attribution: Ours and
@@ -77,6 +91,10 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 	part.CohortRows = cohortRowsOf(columns)
 	part.Cooling = coolingRowsOf(columns, now)
 	part.Loss = lossOfView(&view, now)
+	pruned, retained, readEarly := prunedSkipList(view.PrunedSkips), retainedShareList(view.RetainedShare), readEarlyList(view.ReadEarly)
+	part.PrunedSkips, part.PrunedSkipsTotal = firstScreenList(pruned), len(pruned)
+	part.RetainedShare, part.RetainedShareTotal = firstScreenList(retained), len(retained)
+	part.ReadEarly, part.ReadEarlyTotal = firstScreenList(readEarly), len(readEarly)
 	for _, demoted := range view.Demoted {
 		if cooldown := demoted.QueryCooldown; cooldown != nil && !cooldown.Until.IsZero() && cooldown.Until.Before(now) {
 			part.DemotedDue++
@@ -106,8 +124,20 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		mergeCohortRows(merged.CohortRows, part.CohortRows)
 		mergeCoolingRows(&merged.Cooling, part.Cooling)
 		mergeLoss(&merged.Loss, part.Loss)
+		merged.PrunedSkips, merged.PrunedSkipsTotal = append(merged.PrunedSkips, part.PrunedSkips...), merged.PrunedSkipsTotal+part.PrunedSkipsTotal
+		merged.RetainedShare = append(merged.RetainedShare, part.RetainedShare...)
+		merged.RetainedShareTotal += part.RetainedShareTotal
+		merged.ReadEarly, merged.ReadEarlyTotal = append(merged.ReadEarly, part.ReadEarly...), merged.ReadEarlyTotal+part.ReadEarlyTotal
 	}
 	merged.Loss = merged.Loss.settled()
+	sort.Slice(merged.PrunedSkips, func(l, r int) bool { return prunedSkipBefore(merged.PrunedSkips[l], merged.PrunedSkips[r]) })
+	sort.Slice(merged.RetainedShare, func(l, r int) bool {
+		return retainedShareBefore(merged.RetainedShare[l], merged.RetainedShare[r])
+	})
+	sort.Slice(merged.ReadEarly, func(l, r int) bool { return readEarlyBefore(merged.ReadEarly[l], merged.ReadEarly[r]) })
+	merged.PrunedSkips = firstScreenList(merged.PrunedSkips)
+	merged.RetainedShare = firstScreenList(merged.RetainedShare)
+	merged.ReadEarly = firstScreenList(merged.ReadEarly)
 	merged.Impact = MergeImpactTallies(tallies...)
 	return merged
 }
