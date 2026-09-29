@@ -257,11 +257,7 @@ func (stream *streamedExecution) Begin(ctx context.Context, header execution.Int
 		return fmt.Errorf("alarmd worker: prepare EffectiveTime facts: %w", err)
 	}
 	stream.effective = effective
-	if stream.supplement == nil {
-		// A supplement is not a round of the Query Group: it takes no census,
-		// and the gate left closed is what keeps it from counting one.
-		stream.openCensusGate(header.Contract.Slot.QueryGroup)
-	}
+	stream.openCensusGate(header.Contract.Slot.QueryGroup)
 	// The target plans are resolved here, before any series arrives: the
 	// source reads the memberships right after Begin to filter the records,
 	// and the absence judgement at completion reads the same resolutions.

@@ -237,3 +237,44 @@ func TestASupplementRefusesAContractThatDriftedFromItsSegment(t *testing.T) {
 		t.Fatalf("drifted contract: %v, want ErrSlotContractDrift", err)
 	}
 }
+
+// blockingSupplementExecutor holds a supplement in execution until released.
+type blockingSupplementExecutor struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (executor *blockingSupplementExecutor) Execute(_ context.Context, _ execution.SlotExecutionRequest) (execution.SlotExecutionResult, error) {
+	close(executor.started)
+	<-executor.release
+	return execution.SlotExecutionResult{Supplement: &execution.SupplementFacts{}}, nil
+}
+
+// A supplement and its Query Group's Slot never run at once. The supplement
+// writes its Slot's events and then its State from a view read before it
+// wrote; a Slot of the same Query Group writing the same series in between
+// would leave events with no State behind them. So while a supplement runs,
+// the Slot is refused its flight - it is dispatched again later, as for any
+// Slot in flight - and while a Slot runs, the supplement is refused its own.
+func TestASupplementAndItsQueryGroupsSlotNeverRunAtOnce(t *testing.T) {
+	source := &supplementSource{slot: supplementSlot(t)}
+	executor := &blockingSupplementExecutor{started: make(chan struct{}), release: make(chan struct{})}
+	runner, err := NewRunner("query-group-1", &fakeSession{fence: testFence(7)}, source, executor, NewFlightCoordinator(),
+		func() time.Time { return time.Unix(260, 0) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := runner.Supplement(context.Background(), 120, execution.SupplementScope{Series: []execution.SeriesIdentityDigest{"a"}})
+		done <- err
+	}()
+	<-executor.started
+	if _, _, err := runner.RunOne(context.Background()); !errors.Is(err, ErrSlotInFlight) || source.calls != 0 {
+		t.Fatalf("a Slot ran beside the supplement: error %v, source calls %d", err, source.calls)
+	}
+	close(executor.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
