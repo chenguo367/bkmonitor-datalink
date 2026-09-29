@@ -123,6 +123,11 @@ func TestTheLateSeriesReportsGoWhenTheGroupIsNoLongerDirected(t *testing.T) {
 	if len(f.engine.LatePastRound()) != 1 || len(f.engine.ResidualMisses()) != 1 {
 		t.Fatal("the fixture did not report both")
 	}
+	// lookback.get reads them beside read_early.
+	if stats := f.engine.Stats(); len(stats.LatePastRound) != 1 || len(stats.ResidualMisses) != 1 ||
+		stats.ResidualMisses[0].CrossedSeries != 1 {
+		t.Fatalf("stats carry %+v and %+v", stats.LatePastRound, stats.ResidualMisses)
+	}
 	f.engine.mu.Lock()
 	f.engine.groups["qg"].seriesLate = nil
 	f.engine.mu.Unlock()

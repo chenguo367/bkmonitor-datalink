@@ -47,8 +47,14 @@ func TestUnrecoveredLateSeriesAreRowsOnTheirOwnLines(t *testing.T) {
 	}
 	snapshot := Snapshot{Replica: "pod-a", TakenAt: now.Add(-10 * time.Second), Owned: 2, Determined: 2, LateSeries: rows}
 	view := decidedView([]Snapshot{snapshot})
+	screen := Report(&view, now)
+	// Neither object is this deployment's to act on: both count with the
+	// other owners' objects on the to-do.
+	if screen.Todo.GovernanceObjects != 2 || screen.Todo.Objects != view.Unknown {
+		t.Fatalf("to-do %+v, want both objects with the strategy's and the data's", screen.Todo)
+	}
 	lines := map[Check]CheckReport{}
-	for _, report := range Report(&view, now).Checks {
+	for _, report := range screen.Checks {
 		lines[report.Code] = report
 	}
 	if lines[CheckLatePastRound].Objects != 1 || lines[CheckLatePastRound].Owner != OwnerStrategy ||
