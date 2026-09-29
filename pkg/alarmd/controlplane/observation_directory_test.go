@@ -1386,10 +1386,12 @@ func TestAHeldManifestWhoseKeyIsGoneIsNotWalked(t *testing.T) {
 	for _, row := range s.Rows {
 		named = named || (row.Publication == carried && row.ManifestExpired)
 	}
-	if lengths, reads := spy.of(carried.SnapshotRevision); lengths != 1 || reads != 0 || !expired || !named ||
+	// Held and walked that round is the latest manifest alone: the carried
+	// one found gone is not counted as held.
+	if lengths, reads := spy.of(carried.SnapshotRevision); lengths != 1 || reads != 0 || !expired || !named || s.ManifestsRemembered != 1 ||
 		slices.Contains(d.RememberedManifestsForTest(), carried.SnapshotRevision) {
-		t.Fatalf("a held carried manifest gone = %d length and %d byte reads, expired %v, rows named %v, remembered %v; want it expired and forgotten",
-			lengths, reads, expired, named, d.RememberedManifestsForTest())
+		t.Fatalf("a held carried manifest gone = %d length and %d byte reads, expired %v, rows named %v, %d held, remembered %v; want it expired, not counted and forgotten",
+			lengths, reads, expired, named, s.ManifestsRemembered, d.RememberedManifestsForTest())
 	}
 
 	h, _, at = directoryFixture(t, 32)
@@ -1404,7 +1406,7 @@ func TestAHeldManifestWhoseKeyIsGoneIsNotWalked(t *testing.T) {
 	}
 	latest.Refresh(h.ctx, at.Add(time.Second))
 	if s := latest.Page(at.Add(time.Second), "", "", "", 0, 20); s.Complete || s.FailedRead != "manifest" || s.Publications[0].Manifest != "failed" ||
-		len(latest.RememberedManifestsForTest()) != 0 {
+		s.ManifestsRemembered != 0 || len(latest.RememberedManifestsForTest()) != 0 {
 		t.Fatalf("the latest manifest gone though held = %+v, remembered %v; want the refresh failed on it", s, latest.RememberedManifestsForTest())
 	}
 }
