@@ -124,9 +124,11 @@ func newLookbackCollector() *lookbackCollector {
 			"Bytes the directed reads delivered, by source: a Slot's frozen query each, read against "+
 				"lookback_first_read_bytes_total over lookback_first_reads_total.", "source"),
 		supplementHold: desc("lookback_supplement_hold_total",
-			"Supplements by how long each held its Query Group's flight, by source: the time the group's own Slot "+
-				"waited behind it, bounded at le_100ms, le_500ms, le_1s, le_5s and gt_5s. A supplement refused for "+
-				"the flight never held it and is not counted.", "source", "bucket"),
+			"Supplements by how long each held its Query Group's flight, by source: from taking the flight to the "+
+				"supplement's return - freezing the Slot's contract, evaluating, writing its State, and any wait on "+
+				"Redis inside them - which is how long the group's own Slot waited behind it. Buckets close at their "+
+				"bound: le_100ms, le_500ms, le_1s, le_5s, gt_5s. A supplement refused for the flight never held it "+
+				"and is not counted.", "source", "bucket"),
 		supplementHoldMax: desc("lookback_supplement_hold_max_seconds",
 			"The longest a supplement held its Query Group's flight in this process, by source.", "source"),
 		empty: desc("lookback_empty_first_reads_total",

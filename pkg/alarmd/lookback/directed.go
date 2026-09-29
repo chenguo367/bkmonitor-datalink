@@ -112,9 +112,10 @@ type SupplementOutcome struct {
 	Ran     bool
 	Facts   execution.SupplementFacts
 	Refused string
-	// Held is how long the supplement held its Query Group's flight: the
-	// time its group's own Slot waited behind it, zero when it never took
-	// the flight.
+	// Held is how long the supplement held its Query Group's flight, from
+	// taking it to the supplement's return - freezing the contract,
+	// evaluating, writing State and any Redis wait inside them: the time its
+	// group's own Slot waited behind it. Zero when it never took the flight.
 	Held time.Duration
 }
 
