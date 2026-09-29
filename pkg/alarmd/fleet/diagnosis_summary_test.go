@@ -99,3 +99,28 @@ func TestAFirstScreenCountTakesNoPageAndNamesAnUnreadableUniverse(t *testing.T) 
 		t.Fatalf("status %d body %+v, want the universe named unreadable and nothing counted", code, body)
 	}
 }
+
+// A first-screen count is read for itself and kept by nobody: a page asks
+// on every refresh, and a diagnosis somebody is paging through keeps its
+// read however many counts are asked between its pages.
+func TestAFirstScreenCountDoesNotPushADiagnosisOutOfTheCache(t *testing.T) {
+	rig := newDiagnosisRig(t, diagnosisFacts(), nil)
+	for i := 1; i <= 7; i++ {
+		rig.universe = append(rig.universe, strconv.Itoa(5000+i))
+	}
+	first := rig.page(t, "", 3)
+	reads := rig.universeReads
+	for range 2 * DiagnosisCacheEntries {
+		if code, _ := rig.summary(t, "summary=1"); code != http.StatusOK {
+			t.Fatalf("status %d", code)
+		}
+	}
+	if rig.universeReads != reads+2*DiagnosisCacheEntries {
+		t.Fatalf("universe read %d times for %d counts, want one each", rig.universeReads-reads, 2*DiagnosisCacheEntries)
+	}
+	next := rig.page(t, first.NextCursor, 3)
+	if next.SnapshotReread || rig.universeReads != reads+2*DiagnosisCacheEntries {
+		t.Fatalf("the paged diagnosis reread (%v, %d reads) after the counts, want its own read kept", next.SnapshotReread,
+			rig.universeReads-reads)
+	}
+}

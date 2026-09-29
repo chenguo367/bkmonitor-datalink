@@ -313,9 +313,21 @@ func WithDiagnosis(next http.Handler, service *Service, lookup StrategyLookupFun
 			// LOOKUP_UNAVAILABLE and the universe is still counted.
 		}
 		at := now()
-		entry, fresh := cache.get(request.Context(), cursor.Diagnosis, at, func(ctx context.Context) *diagnosisEntry {
-			return readDiagnosisEntry(ctx, service, universe, at, stallAfter)
-		})
+		var entry *diagnosisEntry
+		fresh := true
+		if summaryOnly {
+			// Read for this answer alone and kept by nobody: a page asks on
+			// every refresh, and each ask kept would push out a diagnosis
+			// somebody is paging through from the few the cache holds.
+			readCtx, cancel := context.WithTimeout(context.WithoutCancel(request.Context()), DiagnosisReadTimeout)
+			entry = readDiagnosisEntry(readCtx, service, universe, at, stallAfter)
+			cancel()
+			entry.id = newDiagnosisID()
+		} else {
+			entry, fresh = cache.get(request.Context(), cursor.Diagnosis, at, func(ctx context.Context) *diagnosisEntry {
+				return readDiagnosisEntry(ctx, service, universe, at, stallAfter)
+			})
+		}
 		body := DiagnosisResponse{Diagnosis: entry.id, AnsweredBy: replica, Strategies: []DiagnosisRow{},
 			Verdicts: DiagnosisVerdicts(), UnknownReasons: append([]string(nil), DiagnosisUnknownReasons...),
 			SnapshotReread: fresh && cursor.Diagnosis != "", Progress: "not_wired", Warmed: warmer.Last()}
