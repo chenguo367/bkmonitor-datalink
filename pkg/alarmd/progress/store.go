@@ -204,9 +204,12 @@ func (store *Store) LoadProgressWithin(ctx context.Context, identities []executi
 
 // recordCharge is what a record of length bytes is admitted as: 3/2 of it,
 // the charge the object cache puts on what it decodes. Read and decoded one
-// after another, a batch holds each record raw and then decoded, and a
-// decoded record is at most 1.33 of its length for a record carrying an
-// unfinished range of 300 plans, about 0.8 for one without.
+// after another, a batch holds each record raw and then decoded. Decoded, a
+// record without an unfinished range is about 0.8 of its length; one with a
+// range, measured from 2 plans to the 4,380 that reach the record's 1 MiB
+// bound, is 0.67 to 1.31 of it, the highest tooth at 299 plans, where the
+// plans' slice has just grown past what it holds (1.45 under the race
+// detector). None is above the charge.
 func recordCharge(length uint64) uint64 {
 	return length + length/2
 }
