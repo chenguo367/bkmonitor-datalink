@@ -26,7 +26,10 @@ import (
 // same as a window read early. Two such windows in a row report it, and a
 // window the supplement admitted anything in, or one with nothing late, ends
 // it: the rule a window read early is reported and cleared by, with no
-// proportion of its own.
+// proportion of its own. Every series means every one: a window some of
+// whose series were withheld, read incomplete, drifted in configuration or
+// recorded absent was not late alone, and a longer time_delay is not what it
+// asks for. With nothing admitted it neither adds to the run nor ends it.
 //
 // Some series were admitted and some had crossed: the supplement is doing its
 // work, and a longer time_delay would slow the whole Query Group for a few
@@ -36,7 +39,8 @@ import (
 // None had crossed: the supplement recovered everything late.
 //
 // Both reports stand while the Query Group is read directed (seriesLateState)
-// and go when its series are late no more.
+// and go, with what they were counted from, when its series are late no
+// more: a Query Group read directed again starts both afresh.
 
 // LatePastRoundSample is one supplemented window every late series of which
 // had crossed its Slot: the Slot, the rung its late series were read at and
@@ -117,7 +121,7 @@ func (engine *Engine) noteLateSeriesLocked(state *group, slot *directedSlot, out
 		state.latePastRound = nil
 	case outcome != DirectedSupplemented || facts == nil:
 		// Not read, or read and not supplemented: says nothing either way.
-	case facts.CrossedT > 0 && facts.Admitted == 0:
+	case everyLateSeriesCrossed(*facts):
 		run := state.latePastRound
 		if run == nil {
 			run = &latePastRoundState{since: engine.options.Now()}
@@ -144,7 +148,23 @@ func (engine *Engine) noteLateSeriesLocked(state *group, slot *directedSlot, out
 		residual.crossed += uint64(facts.CrossedT)
 		residual.samples = keepLast(append(residual.samples, ResidualMissSample{EvaluationTime: slot.evaluation,
 			AdmittedSeries: facts.Admitted, CrossedSeries: facts.CrossedT}), residualMissKept)
+	default:
+		// Nothing admitted and not every series crossed: some were not late
+		// alone. It says nothing either way.
 	}
+}
+
+// everyLateSeriesCrossed reports whether every series of a supplemented
+// window had crossed its Slot: each one given was decided, and decided
+// crossed.
+func everyLateSeriesCrossed(facts execution.SupplementFacts) bool {
+	return facts.CrossedT > 0 && facts.CrossedT == facts.Decided() && facts.Decided() == facts.Candidates
+}
+
+// endLateSeries drops what a Query Group's supplemented windows were counted
+// into, when it is read directed no more. Caller holds engine.mu.
+func endLateSeries(state *group) {
+	state.seriesLate, state.latePastRound, state.residualMiss = nil, nil, nil
 }
 
 // keepLast is the last n of a list, in a slice of its own.

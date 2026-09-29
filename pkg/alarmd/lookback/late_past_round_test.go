@@ -135,3 +135,137 @@ func TestTheLateSeriesReportsGoWhenTheGroupIsNoLongerDirected(t *testing.T) {
 		t.Fatal("reported after the group stopped being read directed")
 	}
 }
+
+// A window only some of whose series had crossed their Slots, the rest
+// withheld, read incomplete, drifted in configuration, recorded absent or
+// not accounted for, was not late alone: it neither adds to a run nor ends
+// one, and is no residual miss either, with nothing recovered.
+func TestAWindowWhoseSeriesWereNotLateAloneNeitherAddsToNorEndsTheRun(t *testing.T) {
+	for name, facts := range map[string]execution.SupplementFacts{
+		"withheld":         {Candidates: 10, CrossedT: 1, Withheld: 9},
+		"input incomplete": {Candidates: 10, CrossedT: 1, InputIncomplete: 9},
+		"config drift":     {Candidates: 10, CrossedT: 1, ConfigDrift: 9},
+		"recorded absent":  {Candidates: 10, CrossedT: 1, NoDataFact: 9},
+		"not accounted":    {Candidates: 10, CrossedT: 1},
+	} {
+		other := facts
+		f, _ := directedFixture(t, SupplementOutcome{})
+		lateWindow(f, 600, 1, 60, DirectedSupplemented, &other)
+		lateWindow(f, 660, 1, 60, DirectedSupplemented, &other)
+		if readings := f.engine.LatePastRound(); len(readings) != 0 {
+			t.Errorf("%s: two such windows reported: %+v", name, readings)
+		}
+		lateWindow(f, 720, 1, 60, DirectedSupplemented, crossed(2))
+		lateWindow(f, 780, 1, 60, DirectedSupplemented, &other)
+		lateWindow(f, 840, 1, 60, DirectedSupplemented, crossed(2))
+		if readings := f.engine.LatePastRound(); len(readings) != 1 || len(readings[0].Samples) != 2 ||
+			readings[0].Samples[0].EvaluationTime != 720 {
+			t.Errorf("%s: such a window ended the run or was counted in it: %+v", name, readings)
+		}
+		if residual := f.engine.ResidualMisses(); len(residual) != 0 {
+			t.Errorf("%s: counted as a residual miss with nothing recovered: %+v", name, residual)
+		}
+	}
+}
+
+// A Query Group read directed again after its series were late no more
+// starts both reports afresh: nothing from before is reported before a new
+// window, and a run needs two new windows in a row.
+func TestAGroupReadDirectedAgainCountsItsLateSeriesAfresh(t *testing.T) {
+	f, recorder := directedFixture(t, SupplementOutcome{})
+	lateWindow(f, 600, 1, 60, DirectedSupplemented, mixed(1, 1))
+	lateWindow(f, 660, 1, 60, DirectedSupplemented, crossed(2))
+	if len(f.engine.ResidualMisses()) != 1 {
+		t.Fatal("the fixture did not count a residual miss")
+	}
+	f.engine.mu.Lock()
+	before := f.engine.groups["qg"].latePastRound.since
+	f.engine.mu.Unlock()
+
+	sample := func(later func(slot int64) []*execution.Dataset) {
+		f.engine.mu.Lock()
+		f.engine.groups["qg"].nextAt = f.clock.now()
+		f.engine.mu.Unlock()
+		f.classSample(0, []*execution.Dataset{point(f.clock.now().Unix(), "1")}, later)
+	}
+	f.engine.options.Supplement = nil
+	whole := func(slot int64) []*execution.Dataset { return []*execution.Dataset{point(slot, "1")} }
+	for round := 0; round < seriesLateCleanToEnd; round++ {
+		sample(whole)
+	}
+	sample(func(slot int64) []*execution.Dataset {
+		return []*execution.Dataset{point(slot, "1"), dataset("h2", map[int64]string{slot - 60: "5"})}
+	})
+	f.engine.options.Supplement = recorder.run
+	f.engine.mu.Lock()
+	late := f.engine.groups["qg"].seriesLate
+	f.engine.mu.Unlock()
+	if late == nil {
+		t.Fatal("the group is not read directed again")
+	}
+	if residual := f.engine.ResidualMisses(); len(residual) != 0 {
+		t.Fatalf("a residual miss from before it was late no more: %+v", residual)
+	}
+	lateWindow(f, 900, 1, 60, DirectedSupplemented, crossed(2))
+	if readings := f.engine.LatePastRound(); len(readings) != 0 {
+		t.Fatalf("one window after it was read directed again reported, the run carried: %+v", readings)
+	}
+	lateWindow(f, 960, 1, 60, DirectedSupplemented, crossed(2))
+	readings := f.engine.LatePastRound()
+	if len(readings) != 1 || len(readings[0].Samples) != 2 || readings[0].Samples[0].EvaluationTime != 900 ||
+		!readings[0].Since.After(before) {
+		t.Fatalf("readings %+v, want a run of the two new windows since after %v", readings, before)
+	}
+}
+
+// Each report keeps the latest windows only, however long it runs: the
+// lookback's own bound, newest last.
+func TestTheLateSeriesReportsKeepTheirLatestWindowsOnly(t *testing.T) {
+	f, _ := directedFixture(t, SupplementOutcome{})
+	for window := int64(0); window < latePastRoundKept+2; window++ {
+		lateWindow(f, 600+60*window, 1, 60, DirectedSupplemented, crossed(2))
+	}
+	last := execution.EvaluationTime(600 + 60*(latePastRoundKept+1))
+	if readings := f.engine.LatePastRound(); len(readings) != 1 || len(readings[0].Samples) != latePastRoundKept ||
+		readings[0].Samples[latePastRoundKept-1].EvaluationTime != last {
+		t.Fatalf("readings %+v, want the last %d windows, newest last", readings, latePastRoundKept)
+	}
+	for window := int64(0); window < residualMissKept+2; window++ {
+		lateWindow(f, 1200+60*window, 1, 60, DirectedSupplemented, mixed(1, 1))
+	}
+	last = execution.EvaluationTime(1200 + 60*(residualMissKept+1))
+	if residual := f.engine.ResidualMisses(); len(residual) != 1 || residual[0].Windows != residualMissKept+2 ||
+		len(residual[0].Samples) != residualMissKept || residual[0].Samples[residualMissKept-1].EvaluationTime != last {
+		t.Fatalf("residual %+v, want every window counted and the last %d kept, newest last", residual, residualMissKept)
+	}
+}
+
+// The suggestion reads the deepest rung any window's late series were seen
+// at, not the latest window's.
+func TestTheSuggestionReadsTheDeepestRungOfItsWindows(t *testing.T) {
+	f, _ := directedFixture(t, SupplementOutcome{})
+	lateWindow(f, 600, 2, 60, DirectedSupplemented, crossed(2))
+	lateWindow(f, 660, 1, 60, DirectedSupplemented, crossed(2))
+	want := int64(60) + int64(rungDelay(2, minute).Seconds())
+	want = (want + 59) / 60 * 60
+	if readings := f.engine.LatePastRound(); len(readings) != 1 || readings[0].SuggestedDelaySeconds != want {
+		t.Fatalf("readings %+v, want the suggestion %d from the deeper, earlier window", readings, want)
+	}
+}
+
+// A Query Group this replica does not own is another replica's to report.
+func TestAGroupAnotherReplicaOwnsIsNotReportedHere(t *testing.T) {
+	f, _ := directedFixture(t, SupplementOutcome{})
+	lateWindow(f, 600, 1, 60, DirectedSupplemented, crossed(2))
+	lateWindow(f, 660, 1, 60, DirectedSupplemented, crossed(2))
+	lateWindow(f, 720, 1, 60, DirectedSupplemented, mixed(1, 1))
+	lateWindow(f, 780, 1, 60, DirectedSupplemented, crossed(2))
+	lateWindow(f, 840, 1, 60, DirectedSupplemented, crossed(2))
+	if len(f.engine.LatePastRound()) != 1 || len(f.engine.ResidualMisses()) != 1 {
+		t.Fatal("the fixture did not report both")
+	}
+	f.engine.options.Owns = func(execution.QueryGroupIdentity) bool { return false }
+	if past, residual := f.engine.LatePastRound(), f.engine.ResidualMisses(); len(past) != 0 || len(residual) != 0 {
+		t.Fatalf("reported a group it does not own: %+v %+v", past, residual)
+	}
+}
