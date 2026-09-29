@@ -13,6 +13,7 @@ import (
 	"math"
 	"reflect"
 	"sync/atomic"
+	"unsafe"
 )
 
 // decodeSampleEvery is how many objects the object cache stores for each one
@@ -64,9 +65,13 @@ func (sampler *decodedSampler) reading() DecodedObjectReading {
 // structuralBytes is the heap a value's data takes by its structure: the
 // value itself, every string's bytes, every slice's backing array at its
 // capacity, every map's entries, and every pointer's target, each address
-// once. It does not see allocator size classes, a map's buckets beyond its
+// once - a string, an array or a map two fields share is counted for the
+// first. It does not see allocator size classes, a map's buckets beyond its
 // entries, or what a decoder leaves unreachable, so it is a lower bound on
-// what the value retains.
+// what the value retains. Two views of one array that start at different
+// addresses would each be counted; a decoder does not make them. An address
+// reached as two kinds - a slice and a pointer to its first element - is
+// counted as the first, which undercounts and keeps the bound.
 func structuralBytes(value any) uint64 {
 	root := reflect.ValueOf(value)
 	if !root.IsValid() {
@@ -76,16 +81,18 @@ func structuralBytes(value any) uint64 {
 }
 
 func indirectBytes(value reflect.Value, seen map[uintptr]struct{}) uint64 {
-	switch value.Kind() {
-	case reflect.Pointer:
-		if value.IsNil() {
-			return 0
-		}
-		address := value.Pointer()
+	first := func(address uintptr) bool {
 		if _, counted := seen[address]; counted {
-			return 0
+			return false
 		}
 		seen[address] = struct{}{}
+		return true
+	}
+	switch value.Kind() {
+	case reflect.Pointer:
+		if value.IsNil() || !first(value.Pointer()) {
+			return 0
+		}
 		return uint64(value.Type().Elem().Size()) + indirectBytes(value.Elem(), seen)
 	case reflect.Interface:
 		if value.IsNil() {
@@ -98,9 +105,12 @@ func indirectBytes(value reflect.Value, seen map[uintptr]struct{}) uint64 {
 		}
 		return boxed + indirectBytes(held, seen)
 	case reflect.String:
+		if value.Len() == 0 || !first(uintptr(unsafe.Pointer(unsafe.StringData(value.String())))) {
+			return 0
+		}
 		return uint64(value.Len())
 	case reflect.Slice:
-		if value.IsNil() {
+		if value.Cap() == 0 || !first(value.Pointer()) {
 			return 0
 		}
 		total := uint64(value.Cap()) * uint64(value.Type().Elem().Size())
@@ -121,7 +131,7 @@ func indirectBytes(value reflect.Value, seen map[uintptr]struct{}) uint64 {
 		}
 		return total
 	case reflect.Map:
-		if value.IsNil() {
+		if value.IsNil() || !first(value.Pointer()) {
 			return 0
 		}
 		total := uint64(value.Len()) * uint64(value.Type().Key().Size()+value.Type().Elem().Size())

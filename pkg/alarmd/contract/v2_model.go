@@ -126,7 +126,11 @@ const (
 	// refused because the table or field it names does not route in the
 	// strategy's space: a statement about where the data is, not about
 	// whether the backend answers. It stays until somebody changes the
-	// strategy or the space.
+	// strategy or the space; the routing it reports takes no time range, so
+	// a replay says it as an on-time query does. An expression with a
+	// fallback (`... or vector(100)`) that still produced series is used
+	// despite it, so such a Query Group can leave the query cooldown on the
+	// rounds its fallback answers and return on the rounds it does not.
 	ReasonQueryTargetMissing     = "QUERY_TARGET_MISSING"
 	ReasonReadinessBudgetInvalid = "READINESS_BUDGET_INVALID"
 	// ReasonQueryNotReady names a Slot deferred because the window it would

@@ -4689,6 +4689,11 @@ const (
 type SlotExecutionResult struct {
 	// Set only after successful Progress commit for the unchanged configuration.
 	QueryAvailability QueryAvailability
+	// QueryUnavailableReason is, with QueryAvailabilityUnavailable, why the
+	// primary query was unavailable, as its binding states it
+	// (AttributedReason): what the query cooldown that this result feeds
+	// reports its entries and exits under.
+	QueryUnavailableReason ReasonCode
 	// Set only after a successful Progress commit, not inferred from Result.
 	CompletionKind CompletionKind
 	Completed      bool

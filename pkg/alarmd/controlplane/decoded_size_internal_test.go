@@ -17,16 +17,18 @@ import (
 )
 
 // The structure of a value is what its strings, slices, maps and pointers
-// hold beside it, each address once.
+// hold beside it, each address once: a string, an array or a map that two
+// fields share is one allocation, and counted as one.
 func TestAValuesStructureIsCountedOnce(t *testing.T) {
 	type leaf struct{ Name string }
 	shared := &leaf{Name: strings.Repeat("x", 100)}
+	name, items, tags := strings.Repeat("n", 3), make([]int64, 2, 4), map[string]string{"k": "vv"}
 	value := struct {
-		Name  string
-		Items []int64
-		Refs  []*leaf
-		Tags  map[string]string
-	}{Name: "abc", Items: make([]int64, 2, 4), Refs: []*leaf{shared, shared}, Tags: map[string]string{"k": "vv"}}
+		Name, Alias  string
+		Items, Again []int64
+		Refs         []*leaf
+		Tags, Same   map[string]string
+	}{Name: name, Alias: name, Items: items, Again: items, Refs: []*leaf{shared, shared}, Tags: tags, Same: tags}
 	want := uint64(unsafe.Sizeof(value)) + 3 + 4*8 + // the name and the items' backing array at its capacity
 		2*uint64(unsafe.Sizeof(shared)) + uint64(unsafe.Sizeof(leaf{})) + 100 + // two references, one leaf
 		uint64(unsafe.Sizeof("")*2) + 1 + 2 // one map entry and its strings

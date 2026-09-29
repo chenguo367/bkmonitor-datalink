@@ -488,7 +488,7 @@ func (coordinator *SlotExecutionCoordinator) Execute(
 		var executeErr error
 		result, executeErr = coordinator.finalizePreparedWithGaps(
 			sequenceCtx, request, stream.header, stream.bindings, stream.state, stream.gaps, stream.evaluated,
-			stream.noDataMutations, stream.queryEvidence.availability(), stream.seriesCensus, stream.targetSummaries(),
+			stream.noDataMutations, stream.queryEvidence, stream.seriesCensus, stream.targetSummaries(),
 		)
 		return executeErr
 	})
@@ -1244,7 +1244,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePrepared(
 ) (execution.SlotExecutionResult, error) {
 	return coordinator.finalizePreparedWithGaps(
 		ctx, request, header, bindings, loadedState, execution.GapLoadResult{}, evaluated, nil,
-		execution.QueryAvailabilityUnknown,
+		queryAvailabilityEvidence{},
 		// The census a caller with no stream can state: the loaded views are
 		// the series it read, and it meant to evaluate exactly those.
 		seriesCensus{Due: len(loadedState.Items), Read: len(loadedState.Items)},
@@ -1261,7 +1261,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 	loadedGaps execution.GapLoadResult,
 	evaluated execution.EvaluationResult,
 	noDataMemory []execution.PlanNoDataMutation,
-	queryAvailability execution.QueryAvailability,
+	query queryAvailabilityEvidence,
 	census seriesCensus,
 	targets []execution.TargetResolutionSummary,
 ) (execution.SlotExecutionResult, error) {
@@ -1677,7 +1677,7 @@ func (coordinator *SlotExecutionCoordinator) finalizePreparedWithGaps(
 
 	result, err := coordinator.commitProgress(ctx, request, completion, attribution)
 	if err == nil && result.Completed {
-		result.QueryAvailability = queryAvailability
+		result.QueryAvailability, result.QueryUnavailableReason = query.availability(), query.unavailableReason()
 	}
 	return result, err
 }

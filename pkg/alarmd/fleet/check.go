@@ -304,8 +304,12 @@ var checkAnswers = map[Check]struct {
 	CheckReadBeforeComplete: {OwnerStrategy, GroupByStrategy},
 	// The strategy's: the backend read the query and rejected it - a
 	// condition value its storage refuses, an expression it cannot parse -
-	// and the platform's own detector is refused the same way. Folded by the
-	// stage and class the refusal was blocked at.
+	// and the platform's own detector is refused the same way. The owner
+	// rests on the cases checked on 2026-09-29: five refused queries, each
+	// compared with the platform detector's request for the same strategy,
+	// all five refused there too (four condition values opening with control
+	// characters, one expression that did not parse). Folded by the stage
+	// and class the refusal was blocked at.
 	CheckQueryRefused: {OwnerStrategy, GroupByBlocked},
 
 	CheckWindowUndecided:  {OwnerUndetermined, GroupByCause},
