@@ -58,11 +58,12 @@ func TestAnOrdinaryStrategysSourceDigestIsWhatItWas(t *testing.T) {
 // so facts without the semantics would otherwise pass every check.
 func TestAGlobalBusinessPromQLQueryIsRefusedByItsShape(t *testing.T) {
 	facts := execution.QueryPlanFacts{PromQL: &execution.PromQLQuery{Expression: "sum(up)"}}
-	refusal := globalBusinessRefusal("1001", SourceIdentity{GlobalBusiness: true}, nil, facts)
-	if refusal == nil || refusal.Detail != "reason="+GlobalBusinessQueryKind {
-		t.Fatalf("refusal = %+v, want reason=%s", refusal, GlobalBusinessQueryKind)
+	refusal, word := globalBusinessRefusal("1001", SourceIdentity{GlobalBusiness: true}, nil, facts)
+	want := "reason=" + GlobalBusinessQueryKind + " source=" + GlobalQuerySourcePromQL
+	if refusal == nil || refusal.Detail != want || word != GlobalBusinessQueryKind {
+		t.Fatalf("refusal = %+v word %q, want detail %q and word %s", refusal, word, want, GlobalBusinessQueryKind)
 	}
-	if refusal := globalBusinessRefusal("1001", SourceIdentity{}, nil, facts); refusal != nil {
-		t.Fatalf("an ordinary PromQL strategy was refused: %+v", refusal)
+	if refusal, word := globalBusinessRefusal("1001", SourceIdentity{}, nil, facts); refusal != nil || word != "" {
+		t.Fatalf("an ordinary PromQL strategy was refused: %+v %q", refusal, word)
 	}
 }

@@ -448,6 +448,30 @@ type Catalog struct {
 	// is decoded strictly, and a field an older reader does not know would
 	// make it refuse the whole publication.
 	ObjectRetention time.Duration
+	// GlobalStrategies is one record per strategy the source marks global
+	// (SourceIdentity.GlobalBusiness), in source order: the word it was
+	// refused for as a global strategy and the source its query reads. Nil
+	// when the source marks none, so a Catalog of a deployment without global
+	// strategies is the one it always was. Whether it runs is not recorded
+	// here: the runtime check and the deployment's admission can still
+	// withhold a strategy this build compiled, and each replaces its ACCEPTED
+	// disposition when it does, so the dispositions are where that is read.
+	GlobalStrategies []GlobalStrategy
+}
+
+// GlobalStrategy is what one round did with a strategy the source marks
+// global. The dispositions say it too, one record per scope and level; this
+// says it once per strategy, with the query source the dispositions do not
+// carry, so the global composition counts strategies and not records.
+type GlobalStrategy struct {
+	SourceID string
+	// Refusal is the GLOBAL_STRATEGY_UNSUPPORTED word (GlobalBusinessQueryKind
+	// and the rest) when this build refused to run it as a global strategy,
+	// whether or not a last good Plan was retained for it; empty otherwise.
+	Refusal string
+	// QuerySource is GlobalQuerySource of its compiled query; empty when the
+	// round withheld it before its query was compiled.
+	QuerySource string
 }
 
 // CatalogRetention sums the retained window of every Level the runtime
@@ -580,6 +604,18 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 		}
 		return true, nil
 	}
+	// Every source leaves the loop below through one of these calls, once:
+	// the global composition counts strategies, and a path that skipped it
+	// would make the outcomes stop adding up to the strategies the source
+	// marks global.
+	recordGlobal := func(source SourceStrategy, candidate sourceCandidate) {
+		if !source.Identity.GlobalBusiness {
+			return
+		}
+		catalog.GlobalStrategies = append(catalog.GlobalStrategies, GlobalStrategy{
+			SourceID: source.SourceID, Refusal: candidate.globalRefusal, QuerySource: candidate.querySource,
+		})
+	}
 	observed := make(map[string]struct{}, len(request.Strategies))
 	for _, source := range request.Strategies {
 		observed[source.SourceID] = struct{}{}
@@ -592,6 +628,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 				(disposition.Disposition != DispositionSourceIncomplete && disposition.Disposition != DispositionConfigRejected) {
 				return Catalog{}, errors.New("alarmd controlplane: invalid source disposition")
 			}
+			recordGlobal(source, sourceCandidate{})
 			if compiled := compileTargetPlanDocument(source); compiled.refusal != nil {
 				catalog.Dispositions = append(catalog.Dispositions, disposition, *compiled.refusal)
 				continue
@@ -607,6 +644,7 @@ func BuildCatalog(ctx context.Context, request BuildRequest) (Catalog, error) {
 			continue
 		}
 		candidate, err := request.Cache.build(ctx, planner, source, request.OutputProtocol, request.TargetSources, request.NoDataPolicy)
+		recordGlobal(source, candidate)
 		if err != nil {
 			if len(candidate.dispositions) > 0 {
 				catalog.Dispositions = append(catalog.Dispositions, candidate.dispositions...)
@@ -1045,6 +1083,13 @@ type sourceCandidate struct {
 	facts        execution.QueryPlanFacts
 	plan         FrozenPlan
 	dispositions []ObjectDisposition
+
+	// querySource and globalRefusal are the candidate's GlobalStrategy
+	// fields: set once its query is compiled and when it is refused as a
+	// global strategy, and kept on a refused candidate too, which has no
+	// facts.
+	querySource   string
+	globalRefusal string
 }
 
 func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source SourceStrategy, outputProtocol string, sources TargetSources, policy NoDataPolicy) (sourceCandidate, error) {
@@ -1162,11 +1207,13 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		}
 		return candidate, fmt.Errorf("QUERY_PLAN_INVALID: %w", err)
 	}
+	candidate.querySource = GlobalQuerySource(facts)
 	if err := validateQueryIdentity(source.Identity, facts); err != nil {
 		return candidate, err
 	}
-	if refusal := globalBusinessRefusal(source.SourceID, source.Identity, targetScope, facts); refusal != nil {
+	if refusal, word := globalBusinessRefusal(source.SourceID, source.Identity, targetScope, facts); refusal != nil {
 		candidate.dispositions = append(candidate.dispositions, *refusal)
+		candidate.globalRefusal = word
 		return candidate, errors.New(ReasonGlobalStrategyUnsupported + ": " + refusal.Detail)
 	}
 	compiledInputs := compiledPlanInputs{primary: facts}
@@ -1220,8 +1267,9 @@ func buildCandidate(ctx context.Context, planner PrimaryQueryCompiler, source So
 		// alert is about: every alert of a global strategy would land on
 		// the global business, the one outcome the attribution exists to
 		// prevent.
-		refusal := globalBusinessUnsupported(source.SourceID, GlobalBusinessOutputProtocol, "")
+		refusal := globalBusinessUnsupported(source.SourceID, GlobalBusinessOutputProtocol, "", candidate.querySource)
 		candidate.dispositions = append(candidate.dispositions, refusal)
+		candidate.globalRefusal = GlobalBusinessOutputProtocol
 		return candidate, errors.New(ReasonGlobalStrategyUnsupported + ": " + refusal.Detail)
 	}
 	plan.WireFormat = format
