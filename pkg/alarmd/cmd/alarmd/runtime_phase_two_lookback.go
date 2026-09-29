@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/fleet"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
@@ -122,6 +123,27 @@ func lookbackPermit(flights *scheduler.FlightCoordinator) lookback.Permit {
 	}
 }
 
+// lookbackReadEarly is the lookback's report of the objects read before
+// their data was complete, as the fleet snapshot carries it; nil without a
+// lookback.
+func lookbackReadEarly(engine *lookback.Engine) func() map[string]fleet.ReadEarlyFacts {
+	if engine == nil {
+		return nil
+	}
+	return func() map[string]fleet.ReadEarlyFacts {
+		readings := engine.ReadEarly()
+		facts := make(map[string]fleet.ReadEarlyFacts, len(readings))
+		for _, reading := range readings {
+			// The samples stay on this replica's lookback.get: the row rides
+			// on every snapshot, and the values are all it needs.
+			facts[string(reading.QueryGroup)] = fleet.ReadEarlyFacts{StepSeconds: reading.StepSeconds,
+				CurrentDelaySeconds: reading.CurrentDelaySeconds, SuggestedDelaySeconds: reading.SuggestedDelaySeconds,
+				Since: reading.Since}
+		}
+		return facts
+	}
+}
+
 // runLookback rechecks due samples until the bundle stops.
 func runLookback(ctx context.Context, engine *lookback.Engine) {
 	engine.Run(ctx, lookbackTick)
@@ -141,7 +163,7 @@ type cliLookbackReading struct {
 // keeps its own; the operation is targetable so each can be read in turn.
 func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) obchannel.Operation {
 	return obchannel.Operation{ID: "lookback.get",
-		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（目标 100%）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、未观测比例（unobserved 占已结束样本）、深探结果（干净、有变化、未读到）与深探才发现迟到的样本比例（probe_changed 占已结束样本，不进到齐分布）、首读完整但为空的样本后来是否到数及其到齐时刻、各深度的查询组数与平均休息期、首读与复查的次数和字节（额外查询量）、取不出回看的样本数、让出与许可拒绝；到齐最晚的查询组与最近有变化的复查；可指定实例。",
+		Summary:       "读取实际回答进程的晚到数据回看：拥有的查询组有新鲜测量的覆盖率（目标 100%）；按来源给出每档复查与上一次读有变化的窗口数、按变化类别的桶数、到齐时刻的分布与最大值、未观测比例（unobserved 占已结束样本）、深探结果（干净、有变化、未读到）与深探才发现迟到的样本比例（probe_changed 占已结束样本，不进到齐分布）、首读完整但为空的样本后来是否到数及其到齐时刻、按事实分的四类样本数（整窗读早、部分序列迟到、完整、未分类：序列表被内存安全线拒绝而分不出，按原因计）与连续两次整窗读早的查询组（read_early：当前有效 time_delay、建议值（上界）、依据的样本与变化的桶）、各深度的查询组数与平均休息期、首读与复查的次数和字节（额外查询量）、取不出回看的样本数、让出与许可拒绝；到齐最晚的查询组与最近有变化的复查；可指定实例。",
 		EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{},
 		OutputSchema: obchannel.SchemaOf(cliLookbackReading{}),
 		Limits:       map[string]any{"redis_commands": 0, "scope": "answering_replica", "recent": 32, "latest": 32},
@@ -156,6 +178,7 @@ func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) ob
 				"Each rung is compared with the read before it; a window is complete at the last rung that changed, or at the first read when none did. Only rechecks with outcome compared are windows observed; every other outcome is a window not observed, not a window that did not change.",
 				"Rungs are at 1.5, 3.5, 7.5, 15.5, 31.5 and 63.5 of the Query Group's data steps. Each Query Group learns from its own samples how many to read and how long to rest between samples, at most an hour; a source only sums its groups. A recheck reads and compares only the window's last 65 steps - the whole of a shorter window - from the query's own lookback before them.",
 				"A Query Group's first sample and one in four after it are read once more at the deepest rung after the rungs the group reads; data found there makes that sample probe_changed, with no completion, and the group reads every rung and settles from its next sample. A window still changing at the deepest rung is counted complete there: lateness past it is not measured.",
+				"Each completed sample is classed by the facts of its series against the first read: window_read_early when the first read was empty and data came later, or a series it had came back with other points or values or not at all (the strategy's time_delay moves the read; a value revised after it was judged is not judged again); series_late when every series it had came back as it was and others came later (supplementary detection's); unclassified when a rung changed and its series could not be compared because the memory line refused a series table (counted by reason under unclassified, not a fault); complete otherwise. read_early lists the Query Groups read early twice in a row, with the time_delay they run under and the one that would have read their samples complete: the largest completion past the first read added, aligned up to the step as a strategy's time_delay is compiled. A completion is the age of the recheck that first read the data whole, so the suggestion is an upper bound.",
 				"A sample waiting for its deep recheck does not hold its group's next sample back: a punctual Query Group settles at 1 to 1.25 rechecks an hour, about a fifth of them deep (simulated: 1.23 at a ten-second step, 1.21 at a minute, 1.02 at five minutes - a group rests from its first rung, 1.5 steps after its read, and waits for its next first read).",
 				"A recheck reads through the same query service as the first read. The query service keeps no result cache by its source (its caches hold routing metadata and reload coordination); the deployed version is read from its workload image, not from here. A storage-layer cache that answers until its next refresh, such as a search engine's request cache, is a known boundary: it can return the first read again.",
 			}}

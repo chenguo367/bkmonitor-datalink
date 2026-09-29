@@ -31,6 +31,9 @@ type lookbackCollector struct {
 	changes    *prometheus.Desc
 	completion *prometheus.Desc
 	probes     *prometheus.Desc
+	classes    *prometheus.Desc
+	readEarly  *prometheus.Desc
+	seriesLate *prometheus.Desc
 	empty      *prometheus.Desc
 	emptyAt    *prometheus.Desc
 	latest     *prometheus.Desc
@@ -84,6 +87,16 @@ func newLookbackCollector() *lookbackCollector {
 				"in four and a group's first - by source and outcome: clean, changed (data arrived after those rungs; "+
 				"the group then reads every rung and settles), unobserved (not read; the next sample is probed).",
 			"source", "outcome"),
+		classes: desc("lookback_sample_classes_total",
+			"Completed samples by what their rungs found against the first read, by source: window_read_early (the "+
+				"first read was empty and data came later, or a series it had came back changed or not at all - the "+
+				"strategy's time_delay moves the read), series_late (every series it had came back as it was, and "+
+				"others came later - supplementary detection fills them), complete.", "source", "class"),
+		readEarly: desc("lookback_read_early_groups",
+			"The source's Query Groups whose window was read early in two completed samples in a row, each reported "+
+				"with the time_delay that would have read it complete (lookback.get read_early).", "source"),
+		seriesLate: desc("lookback_series_late_groups",
+			"The source's Query Groups some of whose series were seen coming later than the first read.", "source"),
 		empty: desc("lookback_empty_first_reads_total",
 			"Completed samples whose first read was complete and held no point, by source and whether their data "+
 				"arrived at a later rung (arrived) or never did (stayed_empty); arrived over completed samples is the "+
@@ -139,7 +152,7 @@ func newLookbackCollector() *lookbackCollector {
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, desc := range []*prometheus.Desc{c.firstReads, c.samples, c.checks, c.changed, c.changes, c.completion,
-		c.probes, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
+		c.probes, c.classes, c.readEarly, c.seriesLate, c.empty, c.emptyAt, c.latest, c.groups, c.rest, c.readBytes, c.checkBytes, c.unknown, c.coverage,
 		c.pending, c.yields, c.refused, c.faults, c.yieldReleases, c.yieldSeconds, c.yieldMax} {
 		ch <- desc
 	}
@@ -171,6 +184,11 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 		for _, outcome := range lookback.ProbeOutcomes {
 			counter(c.probes, source.Probes[outcome], name, outcome)
 		}
+		for _, class := range lookback.SampleClasses {
+			counter(c.classes, source.Classes[class], name, class)
+		}
+		gauge(c.readEarly, float64(source.ReadEarlyGroups), name)
+		gauge(c.seriesLate, float64(source.SeriesLateGroups), name)
 		for _, outcome := range lookback.EmptyFirstReadOutcomes {
 			counter(c.empty, source.EmptyFirstReads[outcome], name, outcome)
 		}

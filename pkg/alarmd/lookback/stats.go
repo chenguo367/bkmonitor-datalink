@@ -29,6 +29,9 @@ type counters struct {
 	preempted  map[string]uint64 // source|rung: reads stopped for a formal query
 	completion map[string]uint64 // source|age: completed samples by when the window was complete
 	probes     map[string]uint64 // source|outcome: deep rechecks
+	classes    map[string]uint64 // source|class: completed samples by what their rungs found
+	// source|reason: unclassified samples by why their series are not known.
+	unclassified map[string]uint64
 	// source|outcome and source|age: completed samples whose first read was
 	// empty, and when those whose data arrived later were complete.
 	emptyFirstReads map[string]uint64
@@ -50,7 +53,7 @@ type counters struct {
 func newCounters(sources, refusals []string) counters {
 	c := counters{firstReads: map[string]uint64{}, samples: map[string]uint64{}, rechecks: map[string]uint64{},
 		changed: map[string]uint64{}, changes: map[string]uint64{}, preempted: map[string]uint64{},
-		completion: map[string]uint64{}, probes: map[string]uint64{}, emptyFirstReads: map[string]uint64{},
+		completion: map[string]uint64{}, probes: map[string]uint64{}, classes: map[string]uint64{}, unclassified: map[string]uint64{}, emptyFirstReads: map[string]uint64{},
 		emptyCompletion: map[string]uint64{}, refusals: map[string]uint64{RefusedOther: 0}, faults: map[string]uint64{},
 		maxCompletion: map[string]time.Duration{}, recheckBytes: map[string]uint64{}, unknownLookback: map[string]uint64{},
 		yieldReleases: map[string]uint64{}, yieldReleaseSeconds: map[string]float64{}, yieldReleaseMax: map[string]time.Duration{}}
@@ -73,6 +76,12 @@ func newCounters(sources, refusals []string) counters {
 		}
 		for _, outcome := range ProbeOutcomes {
 			c.probes[key2(source, outcome)] = 0
+		}
+		for _, class := range SampleClasses {
+			c.classes[key2(source, class)] = 0
+		}
+		for _, reason := range UnclassifiedReasons {
+			c.unclassified[key2(source, reason)] = 0
 		}
 		for _, outcome := range EmptyFirstReadOutcomes {
 			c.emptyFirstReads[key2(source, outcome)] = 0
@@ -113,6 +122,11 @@ type Stats struct {
 	// Latest is the measured Query Groups whose data was complete latest,
 	// latest first, at most maxLatest.
 	Latest []GroupLateness `json:"latest"`
+	// ReadEarly is the owned Query Groups whose window was read early in
+	// readEarlyRepeat completed samples in a row, with the time_delay that
+	// would have read them complete, the furthest from it first, at most
+	// maxLatest.
+	ReadEarly []ReadEarlyReading `json:"read_early"`
 	// Recent is the latest rechecks that found a change, at most maxRecent.
 	Recent []Recent `json:"recent"`
 }
@@ -156,6 +170,15 @@ type SourceStats struct {
 	// Probes: outcome -> deep rechecks. Changed over clean and changed is
 	// how often a group's data was later than the rungs it read.
 	Probes map[string]uint64 `json:"probes"`
+	// Classes: class -> completed samples by what their rungs found against
+	// the first read (see ClassWindowReadEarly), and Unclassified: reason ->
+	// those of them whose series are not known. ReadEarlyGroups is its
+	// Query Groups now reported as read early, SeriesLateGroups those whose
+	// late series were seen.
+	Classes          map[string]uint64 `json:"classes"`
+	Unclassified     map[string]uint64 `json:"unclassified"`
+	ReadEarlyGroups  int               `json:"read_early_groups"`
+	SeriesLateGroups int               `json:"series_late_groups"`
 	// EmptyFirstReads: outcome -> completed samples whose first read was
 	// complete and held no point - arrived when data came at a later rung,
 	// stayed_empty when none did - and EmptyFirstReadCompletion when those
@@ -204,7 +227,7 @@ type GroupLateness struct {
 // lock: the Runner set that answers it calls Forget while holding its own.
 func (engine *Engine) Stats() Stats {
 	stats := Stats{Sources: map[string]SourceStats{}, PermitRefusals: map[string]uint64{}, Faults: map[string]uint64{},
-		Latest: []GroupLateness{}, Recent: []Recent{}}
+		Latest: []GroupLateness{}, ReadEarly: []ReadEarlyReading{}, Recent: []Recent{}}
 	if engine == nil {
 		return stats
 	}
@@ -213,11 +236,14 @@ func (engine *Engine) Stats() Stats {
 		queryGroup execution.QueryGroupIdentity
 		fresh      bool
 		lateness   *GroupLateness
+		readEarly  *ReadEarlyReading
 	}
 	type groupSums struct {
-		groups int
-		depths map[string]uint64
-		rest   time.Duration
+		groups     int
+		depths     map[string]uint64
+		rest       time.Duration
+		readEarly  int
+		seriesLate int
 	}
 	sums := map[string]*groupSums{}
 	engine.mu.Lock()
@@ -244,6 +270,13 @@ func (engine *Engine) Stats() Stats {
 			sum.groups++
 			sum.depths[DepthLabels[state.depth-1]]++
 			sum.rest += rest
+			if reading, reported := readingOf(queryGroup, state); reported {
+				sum.readEarly++
+				entry.readEarly = &reading
+			}
+			if state.seriesLate != nil {
+				sum.seriesLate++
+			}
 		}
 		if state.measured {
 			entry.lateness = &GroupLateness{QueryGroup: queryGroup, Source: state.source,
@@ -253,7 +286,7 @@ func (engine *Engine) Stats() Stats {
 		for _, pending := range [...]*sample{state.sample, state.probe} {
 			if pending != nil {
 				stats.Pending++
-				stats.PendingBytes += pending.last.bytes()
+				stats.PendingBytes += pending.last.bytes() + len(pending.first)*seriesEntryBytes
 			}
 		}
 		candidates = append(candidates, entry)
@@ -266,7 +299,8 @@ func (engine *Engine) Stats() Stats {
 			Samples:                map[string]uint64{}, Rechecks: map[string]map[string]uint64{}, ChangedWindows: map[string]uint64{},
 			Changes: map[string]map[string]uint64{}, Preempted: map[string]uint64{}, Completion: map[string]uint64{},
 			MaxCompletionSeconds: int64(engine.counts.maxCompletion[source] / time.Second), DepthGroups: map[string]uint64{},
-			Probes: map[string]uint64{}, EmptyFirstReads: map[string]uint64{}, EmptyFirstReadCompletion: map[string]uint64{}}
+			Probes: map[string]uint64{}, EmptyFirstReads: map[string]uint64{}, EmptyFirstReadCompletion: map[string]uint64{},
+			Classes: map[string]uint64{}, Unclassified: map[string]uint64{}}
 		for _, depth := range DepthLabels {
 			entry.DepthGroups[depth] = 0
 		}
@@ -276,6 +310,13 @@ func (engine *Engine) Stats() Stats {
 				entry.DepthGroups[depth] = n
 			}
 			entry.MeanRestSeconds = sum.rest.Seconds() / float64(sum.groups)
+			entry.ReadEarlyGroups, entry.SeriesLateGroups = sum.readEarly, sum.seriesLate
+		}
+		for _, class := range SampleClasses {
+			entry.Classes[class] = engine.counts.classes[key2(source, class)]
+		}
+		for _, reason := range UnclassifiedReasons {
+			entry.Unclassified[reason] = engine.counts.unclassified[key2(source, reason)]
 		}
 		for _, outcome := range SampleOutcomes {
 			entry.Samples[outcome] = engine.counts.samples[key2(source, outcome)]
@@ -328,6 +369,20 @@ func (engine *Engine) Stats() Stats {
 		if entry.lateness != nil {
 			stats.Latest = append(stats.Latest, *entry.lateness)
 		}
+		if entry.readEarly != nil {
+			stats.ReadEarly = append(stats.ReadEarly, *entry.readEarly)
+		}
+	}
+	sort.Slice(stats.ReadEarly, func(i, j int) bool {
+		left := stats.ReadEarly[i].SuggestedDelaySeconds - stats.ReadEarly[i].CurrentDelaySeconds
+		right := stats.ReadEarly[j].SuggestedDelaySeconds - stats.ReadEarly[j].CurrentDelaySeconds
+		if left != right {
+			return left > right
+		}
+		return stats.ReadEarly[i].QueryGroup < stats.ReadEarly[j].QueryGroup
+	})
+	if len(stats.ReadEarly) > maxLatest {
+		stats.ReadEarly = stats.ReadEarly[:maxLatest]
 	}
 	if stats.Coverage.Owned > 0 {
 		stats.Coverage.Ratio = float64(stats.Coverage.Covered) / float64(stats.Coverage.Owned)

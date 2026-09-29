@@ -141,6 +141,8 @@ func checkOnCounts(anomaly Anomaly, schedule Schedule) (check Check, under bool,
 		return CheckNoDataMemoryRefused, true, false
 	case anomaly.Kind == KindRetainedShareApproaching:
 		return CheckRetainedShareApproaching, true, false
+	case anomaly.Kind == KindReadBeforeComplete:
+		return CheckReadBeforeComplete, true, false
 	case anomaly.Kind == KindQueryCooldown, anomaly.HeldBy == heldByCooldown:
 		// Cooldown is what this deployment does about a backend that keeps not
 		// answering; the line is the backend's, unless the backend answered and

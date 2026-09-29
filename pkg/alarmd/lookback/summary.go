@@ -11,6 +11,7 @@ package lookback
 
 import (
 	"math"
+	"sort"
 	"strconv"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
@@ -44,19 +45,66 @@ func (summary readSummary) bytes() int { return len(summary) * summaryEntryBytes
 // and not kept, never a bound that normal running meets.
 const maxBucketsPerSample = 1 << 17
 
-// summarizer builds a readSummary from delivered series.
+// seriesSummary is one series over the kept tail, summed the way a bucket is:
+// how many points it had there and the sum of their point hashes. Two reads of
+// the series that agree on it had the same points with the same values.
+type seriesSummary struct {
+	points uint64
+	values uint64
+}
+
+// seriesEntryBytes is what one series is charged: its key, its two words
+// and the map's share of an entry, as the heap holds them after a
+// collection - measured at 44 to 53 bytes, charged a little above.
+const seriesEntryBytes = 56
+
+// seriesAdmitStep is how many series a table grows by between two asks of
+// the process's memory line: one call per step keeps the ask off the path
+// every point takes.
+const seriesAdmitStep = 4096
+
+// summarizer builds a readSummary from delivered series, and, from
+// seriesFrom on, a summary per series: which series a read had, and what.
+//
+// The series table has no bound of its own. It grows as the process's
+// memory line admits it, a step at a time; once the line refuses, the read
+// stops summing series (seriesRefused) and keeps its buckets, so the sample
+// goes on and only what the series would have told is not known.
 type summarizer struct {
-	valueField string
-	buckets    readSummary
-	buffer     []byte
-	faulted    bool
+	valueField    string
+	buckets       readSummary
+	series        map[uint64]seriesSummary
+	seriesFrom    int64
+	admit         func(bytes uint64) bool
+	granted       int
+	seriesRefused bool
+	buffer        []byte
+	faulted       bool
 }
 
 func newSummarizer(valueField string) *summarizer {
 	return &summarizer{valueField: valueField, buckets: readSummary{}}
 }
 
-// add sums one delivered series: every record's bucket.
+// trackSeries sums every series too, over its records from from on, as far
+// as admit lets the table grow; a nil admit lets it grow as far as it goes.
+func (summarizer *summarizer) trackSeries(from int64, admit func(bytes uint64) bool) *summarizer {
+	summarizer.series, summarizer.seriesFrom, summarizer.admit = map[uint64]seriesSummary{}, from, admit
+	return summarizer
+}
+
+// grow asks for room for seriesAdmitStep more series, and stops the series
+// sums for good when it is refused.
+func (summarizer *summarizer) grow() bool {
+	if summarizer.admit != nil && !summarizer.admit(seriesAdmitStep*seriesEntryBytes) {
+		summarizer.series, summarizer.seriesRefused = nil, true
+		return false
+	}
+	summarizer.granted += seriesAdmitStep
+	return true
+}
+
+// add sums one delivered series: every record's bucket, and the series.
 func (summarizer *summarizer) add(dataset *execution.Dataset) {
 	if summarizer.faulted || dataset == nil || dataset.Len() == 0 {
 		return
@@ -69,16 +117,81 @@ func (summarizer *summarizer) add(dataset *execution.Dataset) {
 		at := record.SourceTime()
 		bucket, known := summarizer.buckets[at]
 		if !known && len(summarizer.buckets) >= maxBucketsPerSample {
-			summarizer.faulted = true
-			summarizer.buckets = nil
+			summarizer.fault()
 			return
 		}
 		summarizer.buffer, _ = record.AppendValue(summarizer.buffer[:0], summarizer.valueField)
+		point := pointHash(series, at, valueBits(summarizer.buffer))
 		bucket.points++
 		bucket.series += seriesTerm
-		bucket.values += pointHash(series, at, valueBits(summarizer.buffer))
+		bucket.values += point
 		summarizer.buckets[at] = bucket
+		if summarizer.series == nil || at < summarizer.seriesFrom {
+			continue
+		}
+		sum, known := summarizer.series[series]
+		if !known && len(summarizer.series) >= summarizer.granted && !summarizer.grow() {
+			continue
+		}
+		sum.points++
+		sum.values += point
+		summarizer.series[series] = sum
 	}
+}
+
+// fault drops a read past every window's buckets.
+func (summarizer *summarizer) fault() {
+	summarizer.faulted = true
+	summarizer.buckets, summarizer.series = nil, nil
+}
+
+// seriesChange is how a later read's series stand against the first read's:
+// how many of the first read's series it has with other points or values, or
+// has lost, and how many it has that the first read did not.
+type seriesChange struct {
+	existingChanged int
+	added           int
+}
+
+// compareSeries compares a later read's series with the first read's.
+func compareSeries(first, later map[uint64]seriesSummary) seriesChange {
+	var change seriesChange
+	for series, after := range later {
+		before, present := first[series]
+		switch {
+		case !present:
+			change.added++
+		case before != after:
+			change.existingChanged++
+		}
+	}
+	for series := range first {
+		if _, present := later[series]; !present {
+			change.existingChanged++
+		}
+	}
+	return change
+}
+
+// changedBuckets is the buckets of later that differ from earlier, oldest
+// first, at most limit of them.
+func changedBuckets(earlier, later readSummary, limit int) []int64 {
+	var changed []int64
+	for at, after := range later {
+		if earlier[at] != after {
+			changed = append(changed, at)
+		}
+	}
+	for at := range earlier {
+		if _, present := later[at]; !present {
+			changed = append(changed, at)
+		}
+	}
+	sort.Slice(changed, func(i, j int) bool { return changed[i] < changed[j] })
+	if len(changed) > limit {
+		changed = changed[:limit]
+	}
+	return changed
 }
 
 // valueBits is a value as the bits it is compared by: a number's IEEE bits,

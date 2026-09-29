@@ -11,10 +11,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
@@ -188,4 +191,74 @@ func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 		len(on.Stats.Sources[source].Rechecks) != len(lookback.RungNames) {
 		t.Fatalf("on = %+v", on)
 	}
+}
+
+// The lookback's report of an object read early reaches the fleet snapshot
+// as it was read: the time_delay the query runs under, the one that would
+// have read it complete, and the samples. A process without a lookback
+// publishes no such line.
+func TestAnObjectTheLookbackFindsReadEarlyReachesTheSnapshot(t *testing.T) {
+	if lookbackReadEarly(nil) != nil {
+		t.Fatal("a process without a lookback publishes a read-early line")
+	}
+	var mu sync.Mutex
+	now := time.Unix(1_700_000_060, 0)
+	clock := func() time.Time { mu.Lock(); defer mu.Unlock(); return now }
+	set := func(at time.Time) { mu.Lock(); now = at; mu.Unlock() }
+	revised := func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+		_ = sink.ConsumeProviderSeries(ctx, execution.ProviderSeriesBatch{Dataset: lookbackPoint(spec.LogicalWindow.End, "3")})
+		return execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil
+	}
+	engine, err := lookback.New(lookback.Options{Now: clock, Recheck: revised, UnspreadFirstSamples: true,
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" },
+		Owns:   func(execution.QueryGroupIdentity) bool { return true }, Owned: func() int { return 1 }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const queryGroup = execution.QueryGroupIdentity("qg-late")
+	for sample := 0; sample < 2; sample++ {
+		query := sampledQuery(queryGroup)
+		end := clock().Unix()
+		query.Contract.Slot.EvaluationTime = execution.EvaluationTime(end)
+		query.Spec.LogicalWindow = execution.QueryWindow{Start: end - 60, End: end}
+		query.Spec.PlanFacts.QueryDelaySeconds = 60
+		read := engine.Begin(query)
+		read.Series(lookbackPoint(end, "1"), 10)
+		read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+		readAt := clock()
+		// Each rung's moment in turn, until the sample is counted complete.
+		completed := func() uint64 {
+			return engine.Stats().Sources[controlplane.SupportedSourceSemantics[0]].Samples[lookback.OutcomeCompleted]
+		}
+		for rung := range lookback.RungSteps {
+			set(readAt.Add(time.Duration(lookback.RungSteps[rung] * float64(time.Minute))))
+			engine.Step(context.Background())
+			for settle := time.Now().Add(200 * time.Millisecond); time.Now().Before(settle) && completed() <= uint64(sample); {
+				time.Sleep(time.Millisecond)
+			}
+			if completed() > uint64(sample) {
+				break
+			}
+		}
+		if completed() != uint64(sample+1) {
+			t.Fatalf("sample %d was not counted complete: %+v", sample, engine.Stats().Sources[controlplane.SupportedSourceSemantics[0]].Samples)
+		}
+		set(readAt.Add(2 * time.Hour))
+	}
+	facts := lookbackReadEarly(engine)()
+	got, reported := facts[string(queryGroup)]
+	if !reported || got.CurrentDelaySeconds != 60 || got.SuggestedDelaySeconds != 180 || got.StepSeconds != 60 {
+		t.Fatalf("facts %+v, want the object with 60 s now and 180 s suggested", facts)
+	}
+	// The samples it was read from stay on this replica's lookback.
+	if readings := engine.Stats().ReadEarly; len(readings) != 1 || len(readings[0].Samples) != 2 ||
+		readings[0].Samples[1].Rung != lookback.RungNames[0] {
+		t.Fatalf("lookback read_early %+v, want the two samples", readings)
+	}
+}
+
+func lookbackPoint(end int64, value string) *execution.Dataset {
+	return execution.NewDataset([]contract.CanonicalRecordV2{{RecordID: "h1", SourceTime: end - 60,
+		DimensionIdentity: contract.DimensionIdentityV2{Digest: "digest-h1"},
+		Values:            map[string]json.RawMessage{"value": json.RawMessage(value)}}})
 }

@@ -175,6 +175,10 @@ type fleetPublisher struct {
 	// use, so the page can answer "how close are we" from the same read that
 	// produced the verdict instead of waiting on collection.
 	capacity func() *fleet.Capacity
+	// readEarly is the late-data lookback's report of the owned objects read
+	// before their data was complete, by object. Nil on a process that runs
+	// no lookback, and the snapshot then carries no such line.
+	readEarly func() map[string]fleet.ReadEarlyFacts
 	// applied is the Activation record revision this replica executes by,
 	// published on every snapshot so the page can compare it with what the
 	// control plane published.
@@ -549,6 +553,11 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	// And the objects nearing their one-object share of the retained pool:
 	// rounds completing, and the next few percent of growth refused whole.
 	snapshot.RetainedShare = publisher.tracker.RetainedShare()
+	// And the objects the lookback found read before their data was
+	// complete: rounds completing, from data that was not all there.
+	if publisher.readEarly != nil {
+		snapshot.ReadEarly = publisher.tracker.ReadEarly(publisher.readEarly())
+	}
 	// And the problems whose objects recovered within the hour: the evidence
 	// the RECOVERED reading is made of, which nothing on the current lines
 	// carries once the objects have left them.
@@ -565,7 +574,7 @@ func (publisher *fleetPublisher) snapshot(ctx context.Context) fleet.Snapshot {
 	if publisher.schedule != nil {
 		census := publisher.schedule.Census(at, len(owned))
 		snapshot.Schedule = &census
-		for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Demoted, snapshot.Undecidable, snapshot.ByDesign, snapshot.NoData, snapshot.NoDataMemory, snapshot.RetainedShare} {
+		for _, column := range [][]fleet.Anomaly{snapshot.Anomalies, snapshot.Demoted, snapshot.Undecidable, snapshot.ByDesign, snapshot.NoData, snapshot.NoDataMemory, snapshot.RetainedShare, snapshot.ReadEarly} {
 			for index := range column {
 				wake := publisher.schedule.WakeOf(column[index].QueryGroup)
 				column[index].Wake = &wake
