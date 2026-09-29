@@ -70,7 +70,7 @@ func partReplicas() []Snapshot {
 		}
 		if index > 0 {
 			snapshot.GapSkips[snapshot.Replica+"-lost"] = SkippedSpan{FirstSlot: 1, LastSlot: 3, Slots: 3,
-				At: now.Add(-time.Duration(index) * time.Minute), Replica: snapshot.Replica}
+				At: now.Add(-time.Duration(index*3) * time.Minute), Replica: snapshot.Replica}
 		}
 		snapshot.GapSkips[snapshot.Demoted[0].QueryGroup] = SkippedSpan{FirstSlot: 1, LastSlot: 2, Slots: 2,
 			At: now.Add(-time.Duration(index+1) * 4 * time.Minute), Replica: snapshot.Replica}
