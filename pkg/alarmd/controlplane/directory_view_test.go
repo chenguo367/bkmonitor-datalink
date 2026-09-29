@@ -888,3 +888,54 @@ func TestAPlanUnchangedAcrossCutoversIsTheCatalogsRowWithItsActivation(t *testin
 		}
 	}
 }
+
+// A current publication no record sits on - a cutover that only removed a
+// strategy leaves the others' records where their Segments opened - still
+// names the rows while a later publication is published and not yet
+// active: a Plan runs the current one's content, and the activation round
+// holds it though no record points there.
+func TestTheCurrentPublicationsContentNamesRowsWithNoRecordOnIt(t *testing.T) {
+	f := newViewFixture(t, headCatalog(t, 80, "AB"))
+	first := f.published.Publication
+	clock := sharedClock()
+	removedCatalog := catalogWithSchedule(t, headCatalog(t, 80, "B"), 60, 0)
+	removed := f.h.publish(t, removedCatalog)
+	if _, err := indexReconciler(t, f.h.repository, clock).Ensure(f.h.ctx, removed.Publication); err != nil {
+		t.Fatal(err)
+	}
+	latestCatalog := catalogWithSchedule(t, headCatalog(t, 95, "AB"), 60, 0)
+	latest := f.h.publish(t, latestCatalog)
+	f.reconciler.RememberPublicationForTest(latest.Publication, latestCatalog)
+	activation, err := f.h.repository.LoadActivation(f.h.ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, record := range activation.Plans {
+		if record.Publication == removed.Publication {
+			t.Fatalf("setup: a record sits on the current publication: %+v", record)
+		}
+	}
+	if activation.Current != removed.Publication || !f.h.repository.HoldsContentForTest(removed.Publication) {
+		t.Fatalf("setup: current %+v, held %v; want the removal current and held", activation.Current,
+			f.h.repository.HoldsContentForTest(removed.Publication))
+	}
+	s := f.page(t, f.view, "1002")
+	var current *controlplane.StrategyDirectoryRow
+	for index := range s.Rows {
+		if s.Rows[index].Role == string(execution.ActivationCurrent) {
+			current = &s.Rows[index]
+		}
+	}
+	if current == nil {
+		t.Fatalf("1002 rows %+v, want a current row", s.Rows)
+	}
+	group := f.group(t, removedCatalog, current.QueryGroup)
+	digest, err := controlplane.DeriveQueryGroupObjectDigest(group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Publication != removed.Publication || current.ContentNotHeld || current.ObjectDigest != digest ||
+		current.ActivatedOn == nil || *current.ActivatedOn != first {
+		t.Fatalf("1002 rows %+v, want its current row named from the current publication's content, activated on the first", s.Rows)
+	}
+}
