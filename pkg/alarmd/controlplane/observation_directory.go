@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -110,7 +111,8 @@ type StrategyDirectoryRow struct {
 
 // DirectoryPublication is one publication a directory refresh read: how many
 // active Plans the activation carries on it, and where its manifest came
-// from -- index or store; expired when a carried publication's manifest key
+// from -- index, store, remembered from the refresh before, or the Slot
+// path's cache; expired when a carried publication's manifest key
 // is gone, unread when the refresh's allowance ran out before it, failed
 // when the read did not return it for any other reason.
 type DirectoryPublication struct {
@@ -166,7 +168,17 @@ type StrategyDirectorySnapshot struct {
 	// checks to know the directory is riding the runtime's cache and not
 	// re-reading the manifest on every refresh.
 	ManifestsFromIndex int `json:"manifests_from_index"`
-	byStrategy         map[string][]int
+	// ManifestsRemembered is how many of this refresh's manifests it had
+	// without reading them: walked by the refresh before, or in the Slot
+	// path's cache.
+	ManifestsRemembered int `json:"manifests_remembered"`
+
+	// GroupsUnread is how many groups this refresh stopped before reading:
+	// a read that failed for the store or its own time and budget stops the
+	// refresh's reads, the groups after it are not tried, and the next
+	// refresh starts after it.
+	GroupsUnread int `json:"groups_unread"`
+	byStrategy   map[string][]int
 }
 
 // ObservationDirectory is a disposable read projection over the existing
@@ -183,13 +195,79 @@ type ObservationDirectory struct {
 	readClient        redis.Cmdable
 	cursor            map[execution.SnapshotRevision]int
 	publicationCursor SnapshotPublicationRef
+	// manifests are the manifests the last refresh walked, by revision, that
+	// fit what its rows left of the retained allowance. See directoryManifest.
+	manifests map[execution.SnapshotRevision]directoryManifest
+}
+
+// directoryManifest is a manifest the directory decoded and walked: its groups
+// in walk order and its Plans' output contexts. A revision's manifest does not
+// change - the writer refuses to write other bytes under a revision it has
+// written, and the Slot path caches manifests on the same ground - so the
+// next refresh walks a remembered revision without reading it.
+type directoryManifest struct {
+	revision execution.SnapshotRevision
+	groups   []ManifestQueryGroup
+	contexts map[execution.PlanIdentity]execution.OutputContextDigest
+}
+
+// size is what remembering m holds, charged against the directory's retained
+// allowance: the groups and the context naming, strings included.
+func (m directoryManifest) size() int {
+	size := int(unsafe.Sizeof(m)) + len(m.revision) + cap(m.groups)*int(unsafe.Sizeof(ManifestQueryGroup{}))
+	for _, group := range m.groups {
+		size += len(group.QueryGroup) + len(group.ObjectDigest)
+	}
+	for id, digest := range m.contexts {
+		size += int(unsafe.Sizeof(id)) + len(id.TenantID) + len(id.BusinessID) + len(id.StrategyID) + len(digest) + directoryManifestEntryOverhead
+	}
+	return size
+}
+
+// directoryManifestEntryOverhead is a map entry's share of buckets and hash
+// state beyond its key and value.
+const directoryManifestEntryOverhead = 48
+
+// heldManifest is a manifest the directory has without reading it, and where
+// from: remembered from the refresh before, or the Slot path's cache.
+type heldManifest struct {
+	manifest CatalogManifest
+	contexts map[execution.PlanIdentity]execution.OutputContextDigest
+	source   string
+}
+
+// cachedManifest is revision's manifest remembered from the refresh before, or
+// else in the Slot path's cache, looked up and never stored into.
+func (d *ObservationDirectory) cachedManifest(revision execution.SnapshotRevision) (heldManifest, bool) {
+	if remembered, ok := d.manifests[revision]; ok {
+		return heldManifest{manifest: CatalogManifest{SchemaVersion: catalogManifestSchemaVersion, SnapshotRevision: revision, QueryGroups: remembered.groups},
+			contexts: remembered.contexts, source: "remembered"}, true
+	}
+	if shared, ok := d.repository.manifestCache.lookup(revision); ok {
+		return heldManifest{manifest: shared, source: "slot_cache"}, true
+	}
+	return heldManifest{}, false
+}
+
+// rememberWithin keeps the walked manifests that fit in room, in walk order:
+// one that does not fit is not kept, and is read again when it is walked.
+func rememberWithin(walked []directoryManifest, room int) map[execution.SnapshotRevision]directoryManifest {
+	remembered := make(map[execution.SnapshotRevision]directoryManifest, len(walked))
+	for _, m := range walked {
+		if size := m.size(); size <= room {
+			remembered[m.revision] = m
+			room -= size
+		}
+	}
+	return remembered
 }
 
 func NewObservationDirectory(repository *RedisCatalogRepository, limits DirectoryLimits, reader ...redis.Cmdable) (*ObservationDirectory, error) {
 	if repository == nil || limits.WireBytes <= 0 || limits.Commands <= 0 || limits.Entries <= 0 || limits.Timeout <= 0 || limits.FreshFor <= 0 {
 		return nil, errors.New("observation directory requires finite resource allowances")
 	}
-	d := &ObservationDirectory{repository: repository, limits: limits, known: make(map[execution.ObjectDigest]catalogIndexEntry), cursor: make(map[execution.SnapshotRevision]int)}
+	d := &ObservationDirectory{repository: repository, limits: limits, known: make(map[execution.ObjectDigest]catalogIndexEntry), cursor: make(map[execution.SnapshotRevision]int),
+		manifests: make(map[execution.SnapshotRevision]directoryManifest)}
 	d.readClient = repository.client
 	if len(reader) > 0 && reader[0] != nil {
 		d.readClient = reader[0]
@@ -263,6 +341,48 @@ func (r *directoryRead) decode(ctx context.Context, key string, out any) error {
 	return json.Unmarshal(b, out)
 }
 
+// readManifest reads a manifest by its length first: a key that is gone is a
+// length of zero, the expired manifest as before, and a manifest longer than
+// the refresh has left is not sent at all rather than sent up to the
+// allowance and refused - every refresh, on a deployment whose manifest is
+// larger than the allowance, the whole allowance for nothing.
+func (r *directoryRead) readManifest(ctx context.Context, key string, out *CatalogManifest) error {
+	length, err := r.length(ctx, key)
+	if err != nil {
+		return err
+	}
+	if length > int64(r.limits.WireBytes-r.bytes) {
+		return ErrObservationBudget
+	}
+	payload, err := r.read(ctx, key)
+	if err != nil {
+		return err
+	}
+	// A manifest that does not decode is that manifest's, not the store
+	// failing: named as a corrupt object, it does not stop the refresh.
+	if json.Unmarshal(payload, out) != nil {
+		return ErrCatalogObjectCorrupt
+	}
+	return nil
+}
+
+// length is a key's length, one command of the refresh's allowance; a key
+// that is gone is ErrSnapshotUnavailable.
+func (r *directoryRead) length(ctx context.Context, key string) (int64, error) {
+	if r.commands >= r.limits.Commands {
+		return 0, ErrObservationBudget
+	}
+	r.commands++
+	length, err := r.client.StrLen(ctx, key).Result()
+	if err != nil {
+		return 0, err
+	}
+	if length == 0 {
+		return 0, ErrSnapshotUnavailable
+	}
+	return length, nil
+}
+
 func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	if !d.refresh.TryLock() {
 		return
@@ -273,10 +393,15 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	r := directoryRead{repository: d.repository, client: d.readClient, limits: d.limits}
 	s := &StrategyDirectorySnapshot{ObservedAt: at, Limits: d.limits, Rows: []StrategyDirectoryRow{}, byStrategy: map[string][]int{}}
 	defer func() { s.ReadBytes, s.ReadCommands = r.bytes, r.commands; d.state.Store(s) }()
+	// outOfBudget says a failure is the refresh's own allowance or time
+	// running out rather than the store failing.
+	outOfBudget := func(err error) bool {
+		return errors.Is(err, ErrObservationBudget) || errors.Is(ctx.Err(), context.DeadlineExceeded)
+	}
 	fail := func(step string, err error) {
 		s.Complete = false
 		s.Reason = "DEPENDENCY_UNAVAILABLE"
-		if errors.Is(err, ErrObservationBudget) {
+		if outOfBudget(err) {
 			s.Reason = "RESOURCE_BUDGET"
 		}
 		// The first failure is the one that explains the rest: the walk goes
@@ -293,6 +418,26 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 		fail(step, err)
 		if first {
 			s.FailedKey, s.FailedPublication = key, publication
+		}
+	}
+	// stops says a failed read ends this refresh's reads. A key missing or an
+	// object that does not decode is that one object's, and the walk goes on
+	// past it; anything else is the store failing or the refresh out of time
+	// or budget, and every later read would fail the same way - past the
+	// deadline, at once and without reaching the network, one failure counted
+	// per remaining object. Once stopped, the groups the directory already
+	// knows still make their rows; the ones it would have to read are unread.
+	stopped, stoppedOutOfBudget := false, false
+	stops := func(err error) bool {
+		return errors.Is(err, ErrObservationBudget) || ctx.Err() != nil ||
+			!(errors.Is(err, ErrSnapshotUnavailable) || errors.Is(err, ErrCatalogObjectContractNewer) || errors.Is(err, ErrCatalogObjectCorrupt))
+	}
+	// stopAt stops the refresh's reads when err is one that does, keeping why
+	// as it was at that moment: a later failure of another kind rewrites the
+	// snapshot's reason, not why the reads stopped.
+	stopAt := func(err error) {
+		if !stopped && stops(err) {
+			stopped, stoppedOutOfBudget = true, outOfBudget(err)
 		}
 	}
 	payload, err := r.read(ctx, d.repository.latestPublicationKey())
@@ -361,6 +506,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	nextCursor := make(map[execution.SnapshotRevision]int)
 	retained := 0
 	retainedBytes := 0
+	var walked []directoryManifest
 	s.Complete = true
 	for _, pub := range publications {
 		// The manifest of the publication this process executes is already in
@@ -370,12 +516,37 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 		// same bytes over the wire every refresh. Only a publication this
 		// process has not loaded -- a carried one, or a cold start -- is read.
 		var manifest CatalogManifest
+		var contexts map[execution.PlanIdentity]execution.OutputContextDigest
+		var manifestErr error
 		read := DirectoryPublication{Publication: pub, Plans: carried[pub], Manifest: "store"}
 		if cachedRevision == pub.SnapshotRevision && len(cached) > 0 {
 			manifest = manifestFromIndex(pub.SnapshotRevision, cached)
 			s.ManifestsFromIndex++
 			read.Manifest = "index"
-		} else if err = r.decode(ctx, d.repository.catalogManifestKey(pub.SnapshotRevision), &manifest); err != nil {
+		} else if held, ok := d.cachedManifest(pub.SnapshotRevision); ok {
+			// Held from the refresh before, or the Slot path's copy - looked
+			// up there, never stored into, as a revision only this directory
+			// walks would push out one a Slot needs. Its key is still asked
+			// whether it exists, one STRLEN and no bytes, so a manifest past
+			// its retention is expired on every replica in the same round,
+			// held or not, and the latest one gone still fails the refresh. A
+			// stopped refresh asks nothing and walks what it holds.
+			if !stopped {
+				_, manifestErr = r.length(ctx, d.repository.catalogManifestKey(pub.SnapshotRevision))
+			}
+			if manifestErr == nil {
+				manifest, contexts = held.manifest, held.contexts
+				s.ManifestsRemembered++
+				read.Manifest = held.source
+			}
+		} else if stopped {
+			read.Manifest = "unread"
+			s.Publications = append(s.Publications, read)
+			continue
+		} else {
+			manifestErr = r.readManifest(ctx, d.repository.catalogManifestKey(pub.SnapshotRevision), &manifest)
+		}
+		if err = manifestErr; err != nil {
 			// A publication an active Plan is still carried on keeps its
 			// objects renewed and not its manifest, so past the catalog's
 			// retention the manifest is gone while its Plans run. Stopping
@@ -406,6 +577,7 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			s.Publications = append(s.Publications, read)
 			failed := pub
 			failAt("manifest", d.repository.catalogManifestKey(pub.SnapshotRevision), &failed, err)
+			stopAt(err)
 			break
 		}
 		s.Publications = append(s.Publications, read)
@@ -415,8 +587,13 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 			break
 		}
 		// One order however the manifest arrived, so the cursor below means
-		// the same position from one refresh to the next.
-		sort.Slice(manifest.QueryGroups, func(i, j int) bool { return manifest.QueryGroups[i].QueryGroup < manifest.QueryGroups[j].QueryGroup })
+		// the same position from one refresh to the next. Sorted on a copy:
+		// the groups may be the Slot path's or last refresh's, read by others.
+		byGroup := func(i, j int) bool { return manifest.QueryGroups[i].QueryGroup < manifest.QueryGroups[j].QueryGroup }
+		if !sort.SliceIsSorted(manifest.QueryGroups, byGroup) {
+			manifest.QueryGroups = slices.Clone(manifest.QueryGroups)
+			sort.Slice(manifest.QueryGroups, byGroup)
+		}
 		s.GroupsTotal += len(manifest.QueryGroups)
 		// Which output context each Plan renders by. A manifest read from the
 		// store names them; one rebuilt from the index does not, and the
@@ -424,12 +601,16 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 		// free, the same way the index stood in for the manifest. A row whose
 		// publication neither has stays without one, and the read that wants
 		// it says so rather than fetching a manifest per request to find out.
-		contexts := manifestContextRefs(manifest)
-		if len(contexts) == 0 {
-			contexts = d.repository.rememberedContextRefs(pub)
+		if contexts == nil {
+			contexts = manifestContextRefs(manifest)
+			if len(contexts) == 0 {
+				contexts = d.repository.rememberedContextRefs(pub)
+			}
+		}
+		if read.Manifest != "index" {
+			walked = append(walked, directoryManifest{revision: pub.SnapshotRevision, groups: manifest.QueryGroups, contexts: contexts})
 		}
 		start := d.cursor[pub.SnapshotRevision]
-		budgetFailed := false
 		for step := range manifest.QueryGroups {
 			index := (start + step) % len(manifest.QueryGroups)
 			ref := manifest.QueryGroups[index]
@@ -445,16 +626,21 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 				if cachedObject, _, hit := d.repository.objects().lookup(d.repository.queryGroupObjectKey(ref.ObjectDigest)); hit {
 					obj = cachedObject.(storedQueryGroupObject).object
 					err = nil
+				} else if stopped {
+					s.GroupsUnread++
+					continue
 				} else {
 					obj, err = d.readGroup(ctx, &r, ref.ObjectDigest)
 				}
 				if err != nil {
-					if errors.Is(err, ErrObservationBudget) && !budgetFailed {
-						nextCursor[pub.SnapshotRevision] = (index + 1) % len(manifest.QueryGroups)
-						budgetFailed = true
-					}
 					failed := pub
 					failAt("group_object", d.repository.queryGroupObjectKey(ref.ObjectDigest), &failed, err)
+					if !stopped && stops(err) {
+						// The next refresh starts after this group, so one
+						// that fails every time is tried last, not first.
+						nextCursor[pub.SnapshotRevision] = (index + 1) % len(manifest.QueryGroups)
+						stopAt(err)
+					}
 					continue
 				}
 				if obj.Identity != ref.QueryGroup {
@@ -522,7 +708,18 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	// A large audit must never starve the current strategy directory. It has
 	// no tenant identity, so its source dispositions remain unattributed.
 	s.SourceReason = "SOURCE_AUDIT_UNAVAILABLE"
-	id, auditErr := r.read(ctx, d.repository.latestAuditKey())
+	var id []byte
+	var auditErr error
+	switch {
+	case !stopped:
+		id, auditErr = r.read(ctx, d.repository.latestAuditKey())
+	case stoppedOutOfBudget:
+		// Stopped for its own time or budget: the audit is unread for it.
+		auditErr = ErrObservationBudget
+	default:
+		// Stopped for the store failing: the audit is not read into it.
+		auditErr = ErrSnapshotUnavailable
+	}
 	if auditErr == nil {
 		var audit SourceAuditState
 		auditErr = r.decode(ctx, d.repository.auditKey(string(id)), &audit)
@@ -540,6 +737,11 @@ func (d *ObservationDirectory) Refresh(ctx context.Context, at time.Time) {
 	}
 	d.known = nextKnown
 	d.cursor = nextCursor
+	// The manifests this refresh walked are kept in what its rows left of
+	// the retained allowance, in walk order; one that does not fit is read
+	// again next refresh, as every manifest was. A revision this refresh did
+	// not walk is forgotten.
+	d.manifests = rememberWithin(walked, d.limits.Entries*DirectoryEntryReservationBytes()-retainedBytes)
 	sort.Slice(s.Rows, func(i, j int) bool {
 		a, b := s.Rows[i], s.Rows[j]
 		if a.Identity != b.Identity {

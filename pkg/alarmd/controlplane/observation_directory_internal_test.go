@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"testing"
 	"time"
+	"unsafe"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 )
@@ -65,5 +66,52 @@ func BenchmarkObservationDirectoryCachedStrategyPage(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+// The manifests a refresh walked are kept in walk order while they fit what
+// the rows left: one that does not fit is not kept - read again when walked,
+// as every manifest was - and one after it that fits still is.
+func TestTheWalkedManifestsAreKeptWhileTheyFit(t *testing.T) {
+	manifest := func(revision string, groups int) directoryManifest {
+		m := directoryManifest{revision: execution.SnapshotRevision(revision)}
+		for i := 0; i < groups; i++ {
+			m.groups = append(m.groups, ManifestQueryGroup{QueryGroup: execution.QueryGroupIdentity(fmt.Sprintf("group-%d", i)), ObjectDigest: execution.ObjectDigest(fmt.Sprintf("%064d", i))})
+		}
+		return m
+	}
+	small, large, last := manifest("a", 1), manifest("b", 50), manifest("c", 1)
+	room := small.size() + last.size() + large.size()/2
+	kept := rememberWithin([]directoryManifest{small, large, last}, room)
+	if _, ok := kept["a"]; !ok || len(kept) != 2 {
+		t.Fatalf("kept %d manifests in room %d, want the small ones and not the one that does not fit", len(kept), room)
+	}
+	if _, ok := kept["b"]; ok {
+		t.Fatal("kept a manifest larger than the room left")
+	}
+	if kept := rememberWithin([]directoryManifest{small}, small.size()-1); len(kept) != 0 {
+		t.Fatalf("kept %d in a room one byte short", len(kept))
+	}
+	if kept := rememberWithin([]directoryManifest{small}, small.size()); len(kept) != 1 {
+		t.Fatalf("kept %d in a room of exactly its size, want it kept", len(kept))
+	}
+}
+
+// What remembering a manifest holds, by hand: the directoryManifest itself,
+// the revision, the groups' slice at its capacity, their strings, and each
+// context entry with its strings and its map share.
+func TestAManifestsSizeCountsItsCapacityAndStrings(t *testing.T) {
+	if unsafe.Sizeof(uintptr(0)) != 8 {
+		t.Skip("sizes by hand are a 64-bit platform's")
+	}
+	groups := make([]ManifestQueryGroup, 2, 4)
+	groups[0] = ManifestQueryGroup{QueryGroup: "g1", ObjectDigest: "d1"}
+	groups[1] = ManifestQueryGroup{QueryGroup: "g2", ObjectDigest: "d2"}
+	m := directoryManifest{revision: "r", groups: groups,
+		contexts: map[execution.PlanIdentity]execution.OutputContextDigest{{TenantID: "t", BusinessID: "b", StrategyID: "s"}: "c"}}
+	// 48 for the struct, 1 revision, 4 x 32 groups at capacity, 8 group
+	// strings, 48 + 3 + 1 + 48 for the one context entry.
+	if got, want := m.size(), 48+1+4*32+8+(48+3+1+48); got != want {
+		t.Fatalf("size = %d, want %d", got, want)
 	}
 }

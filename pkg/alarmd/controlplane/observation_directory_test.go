@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,13 +183,14 @@ func TestObservationDirectoryColdWarmPointConfigAndReadOnlyHTTP(t *testing.T) {
 }
 
 func TestObservationDirectoryColdBudgetMakesProgressWithoutHTTPReads(t *testing.T) {
-	h, d, at := directoryFixture(t, 3)
-	// Latest publication, manifest, then exactly one cold object; the
-	// activation comes through the repository's own cache and is not one of
-	// the directory's commands. A later tick reuses that identity projection.
+	h, d, at := directoryFixture(t, 4)
+	// Latest publication, the manifest's length and bytes, then exactly one
+	// cold object; the activation comes through the repository's own cache
+	// and is not one of the directory's commands. A later tick reuses that
+	// identity projection and the manifest it walked.
 	d.Refresh(h.ctx, at)
 	first := d.Page(at, "", "", "", 0, 20)
-	if first.Complete || first.ReadCommands > 3 || len(first.Rows) != 1 {
+	if first.Complete || first.ReadCommands > 4 || len(first.Rows) != 1 {
 		t.Fatalf("first %+v", first)
 	}
 	d.Refresh(h.ctx, at.Add(time.Second))
@@ -656,7 +659,8 @@ func (s *failingReadSpy) GetRange(ctx context.Context, key string, start, end in
 	return s.Cmdable.GetRange(ctx, key, start, end)
 }
 
-// readOrderSpy records the keys a directory refresh reads, in order.
+// readOrderSpy records the keys a directory refresh reads, in order, a key
+// once for each command on it - a manifest's length, then its bytes.
 type readOrderSpy struct {
 	redis.Cmdable
 	keys []string
@@ -665,6 +669,11 @@ type readOrderSpy struct {
 func (s *readOrderSpy) GetRange(ctx context.Context, key string, start, end int64) *redis.StringCmd {
 	s.keys = append(s.keys, key)
 	return s.Cmdable.GetRange(ctx, key, start, end)
+}
+
+func (s *readOrderSpy) StrLen(ctx context.Context, key string) *redis.IntCmd {
+	s.keys = append(s.keys, key)
+	return s.Cmdable.StrLen(ctx, key)
 }
 
 // A refresh that fails says which step failed and in its own words, not only
@@ -687,16 +696,17 @@ func TestADirectoryRefreshThatFailsSaysWhichReadAndWhy(t *testing.T) {
 		t.Fatalf("manifest failure = complete %v reason %q read %q error %q", s.Complete, s.Reason, s.FailedRead, s.Error)
 	}
 
-	// Every group object fails, each in its own words: the first is the one
-	// kept, since the walk went on past it.
+	// Every group object would fail: the first failure stops the refresh's
+	// reads, so it is the only one - kept, in its own words - and the group
+	// after it is unread.
 	groups := &failingReadSpy{Cmdable: h.client, fail: ":qgobj:"}
 	walked, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, groups)
 	if err != nil {
 		t.Fatal(err)
 	}
 	walked.Refresh(h.ctx, at)
-	if s := walked.Page(at, "", "", "", 0, 20); groups.failed < 2 || s.FailedRead != "group_object" || !strings.Contains(s.Error, "failure number 1") {
-		t.Fatalf("group failures = %d, read %q error %q, want the first of them", groups.failed, s.FailedRead, s.Error)
+	if s := walked.Page(at, "", "", "", 0, 20); groups.failed != 1 || s.FailedRead != "group_object" || !strings.Contains(s.Error, "failure number 1") || s.GroupsUnread != 1 {
+		t.Fatalf("group failures = %d, read %q error %q unread %d, want the one failure and the other group unread", groups.failed, s.FailedRead, s.Error, s.GroupsUnread)
 	}
 
 	ctx, cancel := context.WithCancel(h.ctx)
@@ -857,5 +867,732 @@ func TestADirectoryNamesACarriedPublicationWhoseManifestIsGoneAndGoesOn(t *testi
 				t.Fatalf("publications = %v, want %v", names, want)
 			}
 		})
+	}
+}
+
+// stoppingSpy records every key a directory refresh reads, in order, and
+// answers a read of a key containing part (a group object when empty) with
+// fail's answer for it - nil passes the read through to the store.
+type stoppingSpy struct {
+	redis.Cmdable
+	part string
+	fail func(ctx context.Context, n int) *redis.StringCmd
+	keys []string
+	n    int
+}
+
+func (s *stoppingSpy) GetRange(ctx context.Context, key string, start, end int64) *redis.StringCmd {
+	s.keys = append(s.keys, key)
+	part := s.part
+	if part == "" {
+		part = ":qgobj:"
+	}
+	if strings.Contains(key, part) && s.fail != nil {
+		s.n++
+		if cmd := s.fail(ctx, s.n); cmd != nil {
+			return cmd
+		}
+	}
+	return s.Cmdable.GetRange(ctx, key, start, end)
+}
+
+func (s *stoppingSpy) StrLen(ctx context.Context, key string) *redis.IntCmd {
+	s.keys = append(s.keys, key)
+	return s.Cmdable.StrLen(ctx, key)
+}
+
+func (s *stoppingSpy) read(part string) []string {
+	var keys []string
+	for _, key := range s.keys {
+		if strings.Contains(key, part) {
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}
+
+// A read that fails for the store stops the refresh's reads: one failure
+// counted, the group after it unread and not tried, the audit not read. The
+// next refresh starts after the group that failed and reads both. A refresh
+// that runs out of its own time stops the same way, named by its budget - a
+// read on a spent deadline fails at once and says no Sentinel answered, and
+// every later one would too. A group whose key is missing is that group's
+// and the walk goes on past it.
+func TestADirectoryRefreshStopsReadingAtAFailureAndResumesAfterIt(t *testing.T) {
+	h, _, at := directoryFixture(t, 32)
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	refused := errors.New("dial tcp 127.0.0.1:6379: connect: connection refused")
+	spy := &stoppingSpy{Cmdable: h.client, fail: func(_ context.Context, n int) *redis.StringCmd {
+		if n == 1 {
+			return redis.NewStringResult("", refused)
+		}
+		return nil
+	}}
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	first := d.Page(at, "", "", "", 0, 20)
+	failedGroup := spy.read(":qgobj:")
+	if len(failedGroup) != 1 || len(spy.read(":latest_audit")) != 0 || first.Complete || first.Reason != "DEPENDENCY_UNAVAILABLE" ||
+		first.FailedRead != "group_object" || first.GroupsUnread != 1 || first.SourceReason != "SOURCE_AUDIT_UNAVAILABLE" {
+		t.Fatalf("a refresh whose group read was refused = reads %v, %+v; want one group read, no audit read, the other unread", spy.keys, first)
+	}
+
+	spy.keys = nil
+	d.Refresh(h.ctx, at.Add(time.Second))
+	second := d.Page(at.Add(time.Second), "", "", "", 0, 20)
+	groupsRead := spy.read(":qgobj:")
+	if !second.Complete || len(second.Rows) != 2 || second.GroupsUnread != 0 || len(groupsRead) != 2 || groupsRead[0] == failedGroup[0] ||
+		groupsRead[1] != failedGroup[0] {
+		t.Fatalf("the next refresh = reads %v, %+v; want both groups, the one that failed last", groupsRead, second)
+	}
+
+	late, err := controlplane.NewObservationDirectory(h.newRepository(t), controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100,
+		Timeout: 50 * time.Millisecond, FreshFor: time.Minute}, &stoppingSpy{Cmdable: h.client, fail: func(ctx context.Context, _ int) *redis.StringCmd {
+		<-ctx.Done()
+		return redis.NewStringResult("", errors.New("redis: all sentinels specified in configuration are unreachable"))
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	late.Refresh(h.ctx, at)
+	if s := late.Page(at, "", "", "", 0, 20); s.Reason != "RESOURCE_BUDGET" || s.FailedRead != "group_object" || s.GroupsUnread != 1 || s.SourceReason != "RESOURCE_BUDGET" {
+		t.Fatalf("a refresh out of time = %+v, want it named by its budget with the other group unread", s)
+	}
+
+	missing := &stoppingSpy{Cmdable: h.client, fail: func(_ context.Context, n int) *redis.StringCmd {
+		if n == 1 {
+			return redis.NewStringResult("", nil)
+		}
+		return nil
+	}}
+	gone, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, missing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gone.Refresh(h.ctx, at)
+	if s := gone.Page(at, "", "", "", 0, 20); len(missing.read(":qgobj:")) != 2 || s.GroupsUnread != 0 || len(missing.read(":latest_audit")) != 1 || len(s.Rows) != 1 {
+		t.Fatalf("a group whose key is missing = reads %v, %+v; want the walk to go on to the other group and the audit", missing.keys, s)
+	}
+}
+
+// Once a refresh has stopped, nothing after it is read: a manifest read the
+// store refused stops the audit read too, and a group read refused on the
+// latest publication leaves a carried publication's manifest unread and
+// listed so. What needs no read still counts: a group whose object is
+// unchanged in a new publication makes its rows though the changed group
+// before it could not be read.
+func TestADirectoryRefreshThatStoppedReadsNothingAfterItAndKeepsWhatItKnows(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	refused := func(_ context.Context, _ int) *redis.StringCmd {
+		return redis.NewStringResult("", errors.New("dial tcp 127.0.0.1:6379: connect: connection refused"))
+	}
+
+	h, _, at := directoryFixture(t, 32)
+	manifestSpy := &stoppingSpy{Cmdable: h.client, part: ":manifest:", fail: refused}
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, manifestSpy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	if s := d.Page(at, "", "", "", 0, 20); len(manifestSpy.read(":latest_audit")) != 0 || s.FailedRead != "manifest" || s.Reason != "DEPENDENCY_UNAVAILABLE" {
+		t.Fatalf("a refused manifest read = reads %v, %+v; want the refresh stopped there, the audit not read", manifestSpy.keys, s)
+	}
+
+	h, baseline, at := directoryFixture(t, 32)
+	baseline.Refresh(h.ctx, at)
+	carried := baseline.Page(at, "", "", "", 0, 20).Published
+	manifest, err := h.repository.LoadCatalogManifest(h.ctx, carried.SnapshotRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SnapshotRevision = execution.SnapshotRevision(strings.Repeat("e", 64))
+	payload, _ := json.Marshal(manifest)
+	carriedKey := h.prefix + ":manifest:" + string(carried.SnapshotRevision)
+	if err = h.client.Set(h.ctx, h.prefix+":manifest:"+string(manifest.SnapshotRevision), payload, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.client.Set(h.ctx, h.prefix+":latest_publication", "2\n"+string(manifest.SnapshotRevision), 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	groupSpy := &stoppingSpy{Cmdable: h.client, fail: refused}
+	two, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, groupSpy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	two.Refresh(h.ctx, at)
+	s := two.Page(at, "", "", "", 0, 20)
+	listed := false
+	for _, publication := range s.Publications {
+		listed = listed || (publication.Publication == carried && publication.Manifest == "unread")
+	}
+	if slices.Contains(groupSpy.keys, carriedKey) || !listed || len(groupSpy.read(":qgobj:")) != 1 {
+		t.Fatalf("a refused group read on the latest publication = reads %v, publications %+v; want the carried manifest unread and listed", groupSpy.keys, s.Publications)
+	}
+
+	// Each group changed in turn, so that in one of the two the changed group
+	// is walked before the unchanged one, whichever sorts first.
+	for name, next := range map[string]func() controlplane.Catalog{
+		"first document changed":  func() controlplane.Catalog { return objectCatalogTwoGroups(t, 90) },
+		"second document changed": func() controlplane.Catalog { return objectCatalogTwoGroupsChangingSecond(t, 95) },
+	} {
+		h, _, at := directoryFixture(t, 32)
+		known := &stoppingSpy{Cmdable: h.client}
+		kept, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, known)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kept.Refresh(h.ctx, at)
+		if first := kept.Page(at, "", "", "", 0, 20); !first.Complete || len(first.Rows) != 2 {
+			t.Fatalf("%s setup: %+v, want both groups known", name, first)
+		}
+		h.publish(t, catalogWithSchedule(t, next(), 60, 0))
+		known.fail = refused
+		known.keys = nil
+		kept.Refresh(h.ctx, at.Add(time.Second))
+		s := kept.Page(at.Add(time.Second), "", "", "", 0, 20)
+		latest := 0
+		for _, row := range s.Rows {
+			if row.Publication == s.Published {
+				latest++
+			}
+		}
+		if len(known.read(":qgobj:")) != 1 || latest != 1 || s.GroupsUnread != 0 {
+			t.Fatalf("%s, its group unread = reads %v, %d rows of the new publication, %d unread; want the unchanged group's row", name, known.keys, latest, s.GroupsUnread)
+		}
+	}
+}
+
+// objectCatalogTwoGroupsChangingSecond is objectCatalogTwoGroups with the
+// second strategy's threshold changed instead of the first's.
+func objectCatalogTwoGroupsChangingSecond(t *testing.T, thresholdB int) controlplane.Catalog {
+	t.Helper()
+	documents := realThresholdDocuments(t)
+	second := string(withWireIdentity(t, documents[1], "tenant-a", "bkcc__3"))
+	if strings.Count(second, `"threshold":90`) != 1 {
+		t.Fatalf("setup: the second document's threshold is not 90 once: %s", second)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal([]byte(strings.Replace(second, `"threshold":90`, fmt.Sprintf(`"threshold":%d`, thresholdB), 1)), &decoded); err != nil {
+		t.Fatal(err)
+	}
+	decoded["bk_biz_id"] = float64(3)
+	documentB, err := json.Marshal(decoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planner := &businessPlanner{facts: map[string]execution.QueryPlanFacts{"2": queryFactsFor(t, "2", "bkcc__2"), "3": queryFactsFor(t, "3", "bkcc__3")}}
+	catalog, err := controlplane.BuildCatalog(context.Background(), controlplane.BuildRequest{Strategies: []controlplane.SourceStrategy{
+		{SourceID: "1001", Document: documents[0], Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "2", SpaceScope: "bkcc__2"}},
+		{SourceID: "1002", Document: documentB, Identity: controlplane.SourceIdentity{TenantID: "tenant-a", BusinessID: "3", SpaceScope: "bkcc__3"}},
+	}, Planner: planner})
+	if err != nil || len(catalog.QueryGroups) != 2 {
+		t.Fatalf("setup: catalog %d groups, %v", len(catalog.QueryGroups), err)
+	}
+	return catalog
+}
+
+// manifestReadSpy records the length and byte reads a directory refresh makes
+// of manifest keys.
+type manifestReadSpy struct {
+	redis.Cmdable
+	lengths, reads []string
+}
+
+func (s *manifestReadSpy) StrLen(ctx context.Context, key string) *redis.IntCmd {
+	if strings.Contains(key, ":manifest:") {
+		s.lengths = append(s.lengths, key)
+	}
+	return s.Cmdable.StrLen(ctx, key)
+}
+
+func (s *manifestReadSpy) GetRange(ctx context.Context, key string, start, end int64) *redis.StringCmd {
+	if strings.Contains(key, ":manifest:") {
+		s.reads = append(s.reads, key)
+	}
+	return s.Cmdable.GetRange(ctx, key, start, end)
+}
+
+func (s *manifestReadSpy) of(revision execution.SnapshotRevision) (lengths, reads int) {
+	for _, key := range s.lengths {
+		if strings.HasSuffix(key, ":"+string(revision)) {
+			lengths++
+		}
+	}
+	for _, key := range s.reads {
+		if strings.HasSuffix(key, ":"+string(revision)) {
+			reads++
+		}
+	}
+	return lengths, reads
+}
+
+// A revision's manifest is read once: the refresh after walks it again with
+// one length read asking the key still exists and no byte read, and a new
+// revision is read. The Slot
+// path's manifest cache is not written by the directory, and a revision a
+// refresh does not walk is forgotten.
+func TestADirectoryReadsARevisionsManifestOnce(t *testing.T) {
+	h, _, at := directoryFixture(t, 32)
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	spy := &manifestReadSpy{Cmdable: h.client}
+	repository := h.newRepository(t)
+	d, err := controlplane.NewObservationDirectory(repository, limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	first := d.Page(at, "", "", "", 0, 20)
+	revision := first.Published.SnapshotRevision
+	if lengths, reads := spy.of(revision); !first.Complete || lengths != 1 || reads != 1 ||
+		!slices.Equal(d.RememberedManifestsForTest(), []execution.SnapshotRevision{revision}) {
+		t.Fatalf("first refresh = %d length and %d byte reads, remembered %v, %+v; want one of each and the revision remembered",
+			lengths, reads, d.RememberedManifestsForTest(), first)
+	}
+
+	spy.lengths, spy.reads = nil, nil
+	d.Refresh(h.ctx, at.Add(time.Second))
+	second := d.Page(at.Add(time.Second), "", "", "", 0, 20)
+	if len(spy.lengths) != 1 || len(spy.reads) != 0 || !second.Complete || len(second.Rows) != 2 || second.ManifestsRemembered != 1 ||
+		second.Publications[0].Manifest != "remembered" {
+		t.Fatalf("the same revision again = lengths %v reads %v, %+v; want its key asked about and its bytes not read", spy.lengths, spy.reads, second)
+	}
+	// The rows it makes are the ones the read made, output contexts included.
+	contextsOf := func(rows []controlplane.StrategyDirectoryRow) string {
+		var contexts []string
+		for _, row := range rows {
+			contexts = append(contexts, string(row.QueryGroup)+"="+string(row.OutputContext))
+		}
+		return strings.Join(contexts, ",")
+	}
+	if contextsOf(first.Rows) != contextsOf(second.Rows) || first.Rows[0].OutputContext == "" {
+		t.Fatalf("rows walked from the remembered manifest = %s, want %s as read", contextsOf(second.Rows), contextsOf(first.Rows))
+	}
+
+	h.publish(t, catalogWithSchedule(t, objectCatalogTwoGroups(t, 90), 60, 0))
+	spy.lengths, spy.reads = nil, nil
+	d.Refresh(h.ctx, at.Add(2*time.Second))
+	third := d.Page(at.Add(2*time.Second), "", "", "", 0, 20)
+	next := third.Published.SnapshotRevision
+	if lengths, reads := spy.of(next); next == revision || lengths != 1 || reads != 1 || !slices.Contains(d.RememberedManifestsForTest(), next) {
+		t.Fatalf("a new revision = %s read %d/%d, remembered %v; want it read and remembered", next, lengths, reads, d.RememberedManifestsForTest())
+	}
+	for _, r := range []execution.SnapshotRevision{revision, next} {
+		if _, cached := repository.SlotManifestForTest(r); cached {
+			t.Fatalf("the directory put %s in the Slot path's manifest cache", r)
+		}
+	}
+
+	stale := execution.SnapshotRevision(strings.Repeat("f", 64))
+	d.RememberManifestForTest(stale)
+	d.Refresh(h.ctx, at.Add(3*time.Second))
+	if slices.Contains(d.RememberedManifestsForTest(), stale) {
+		t.Fatalf("remembered %v after a refresh that did not walk %s", d.RememberedManifestsForTest(), stale)
+	}
+}
+
+// A manifest is sized before it is read: a carried publication whose manifest
+// key is gone has a length of zero and is named expired with no bytes read,
+// and a manifest longer than the refresh has left is unread with none of it
+// sent.
+func TestADirectorySizesAManifestBeforeReadingIt(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	h, baseline, at := directoryFixture(t, 32)
+	baseline.Refresh(h.ctx, at)
+	carried := baseline.Page(at, "", "", "", 0, 20).Published
+	manifest, err := h.repository.LoadCatalogManifest(h.ctx, carried.SnapshotRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SnapshotRevision = execution.SnapshotRevision(strings.Repeat("e", 64))
+	payload, _ := json.Marshal(manifest)
+	if err = h.client.Set(h.ctx, h.prefix+":manifest:"+string(manifest.SnapshotRevision), payload, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.client.Set(h.ctx, h.prefix+":latest_publication", "2\n"+string(manifest.SnapshotRevision), 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.client.Del(h.ctx, h.prefix+":manifest:"+string(carried.SnapshotRevision)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	spy := &manifestReadSpy{Cmdable: h.client}
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	expired := false
+	for _, publication := range d.Page(at, "", "", "", 0, 20).Publications {
+		expired = expired || (publication.Publication == carried && publication.Manifest == "expired")
+	}
+	if lengths, reads := spy.of(carried.SnapshotRevision); lengths != 1 || reads != 0 || !expired {
+		t.Fatalf("a carried manifest gone = %d length and %d byte reads, expired %v; want its length read, zero, and no bytes", lengths, reads, expired)
+	}
+
+	h, _, at = directoryFixture(t, 32)
+	latest, err := h.client.Get(h.ctx, h.prefix+":latest_publication").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	small := &manifestReadSpy{Cmdable: h.client}
+	tight, err := controlplane.NewObservationDirectory(h.newRepository(t), controlplane.DirectoryLimits{WireBytes: len(latest) + 16, Commands: 32,
+		Entries: 100, Timeout: time.Second, FreshFor: time.Minute}, small)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tight.Refresh(h.ctx, at)
+	s := tight.Page(at, "", "", "", 0, 20)
+	if len(small.lengths) != 1 || len(small.reads) != 0 || len(s.Publications) != 1 || s.Publications[0].Manifest != "unread" || s.ReadBytes != len(latest) ||
+		s.Reason != "RESOURCE_BUDGET" {
+		t.Fatalf("a manifest longer than the allowance left = lengths %v reads %v, %+v; want it unread with no bytes of it sent", small.lengths, small.reads, s)
+	}
+}
+
+// The latest publication's manifest in the Slot path's cache is walked with
+// its key asked about and its bytes not read, and left as it was: in the order the cache holds it, which
+// every Slot reading it sees. Refreshes reading it while Slots read it race
+// with nothing (run under -race).
+func TestADirectoryWalksTheSlotCachesManifestWithoutReadingOrReorderingIt(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	h, baseline, at := directoryFixture(t, 32)
+	baseline.Refresh(h.ctx, at)
+	revision := baseline.Page(at, "", "", "", 0, 20).Published.SnapshotRevision
+	manifest, err := h.repository.LoadCatalogManifest(h.ctx, revision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Held in the order a directory would change: descending.
+	sort.Slice(manifest.QueryGroups, func(i, j int) bool { return manifest.QueryGroups[i].QueryGroup > manifest.QueryGroups[j].QueryGroup })
+	order := func(m controlplane.CatalogManifest) string {
+		var groups []string
+		for _, group := range m.QueryGroups {
+			groups = append(groups, string(group.QueryGroup))
+		}
+		return strings.Join(groups, ",")
+	}
+	held := order(manifest)
+	repository := h.newRepository(t)
+	repository.StoreSlotManifestForTest(manifest)
+
+	spy := &manifestReadSpy{Cmdable: h.client}
+	d, err := controlplane.NewObservationDirectory(repository, limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	s := d.Page(at, "", "", "", 0, 20)
+	cached, _ := repository.SlotManifestForTest(revision)
+	if len(spy.lengths) != 1 || len(spy.reads) != 0 || !s.Complete || len(s.Rows) != 2 || s.Publications[0].Manifest != "slot_cache" ||
+		s.ManifestsRemembered != 1 || order(cached) != held {
+		t.Fatalf("the Slot cache's manifest = lengths %v reads %v, cached order %s (held %s), %+v; want it walked unread and unchanged",
+			spy.lengths, spy.reads, order(cached), held, s)
+	}
+
+	stop := make(chan struct{})
+	var readers sync.WaitGroup
+	for range 4 {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if m, ok := repository.SlotManifestForTest(revision); ok {
+					_ = order(m)
+				}
+			}
+		}()
+	}
+	for i := range 8 {
+		fresh, err := controlplane.NewObservationDirectory(repository, limits, h.client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fresh.Refresh(h.ctx, at.Add(time.Duration(i)*time.Second))
+	}
+	close(stop)
+	readers.Wait()
+	if cached, _ := repository.SlotManifestForTest(revision); order(cached) != held {
+		t.Fatalf("the Slot cache's manifest after concurrent refreshes = %s, want %s", order(cached), held)
+	}
+}
+
+// twoPublications makes the fixture's publication a carried one: a later
+// publication (revision e...) becomes the latest while the activation stays
+// on the first. Its manifest is manifest when given, else the carried one's
+// groups under the new revision.
+func twoPublications(t *testing.T, h *objectCatalogHarness, at time.Time, latest func(controlplane.CatalogManifest) controlplane.CatalogManifest) (carried controlplane.SnapshotPublicationRef, carriedKey, latestKey string) {
+	t.Helper()
+	baseline, err := controlplane.NewObservationDirectory(h.newRepository(t), controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100,
+		Timeout: time.Second, FreshFor: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseline.Refresh(h.ctx, at)
+	carried = baseline.Page(at, "", "", "", 0, 20).Published
+	manifest, err := h.repository.LoadCatalogManifest(h.ctx, carried.SnapshotRevision)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.SnapshotRevision = execution.SnapshotRevision(strings.Repeat("e", 64))
+	if latest != nil {
+		manifest = latest(manifest)
+	}
+	payload, _ := json.Marshal(manifest)
+	latestKey = h.prefix + ":manifest:" + string(manifest.SnapshotRevision)
+	carriedKey = h.prefix + ":manifest:" + string(carried.SnapshotRevision)
+	if err = h.client.Set(h.ctx, latestKey, payload, 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if err = h.client.Set(h.ctx, h.prefix+":latest_publication", "2\n"+string(manifest.SnapshotRevision), 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	return carried, carriedKey, latestKey
+}
+
+// A held manifest's key is still asked about: a carried publication whose
+// manifest went past its retention after the directory remembered it is
+// expired - one length read, no bytes, its Plans named as expired - and
+// forgotten, as it is on a replica that never held it. The latest
+// publication's manifest gone fails the refresh though it was held.
+func TestAHeldManifestWhoseKeyIsGoneIsNotWalked(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	h, _, at := directoryFixture(t, 32)
+	carried, carriedKey, _ := twoPublications(t, h, at, nil)
+	spy := &manifestReadSpy{Cmdable: h.client}
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	if !slices.Contains(d.RememberedManifestsForTest(), carried.SnapshotRevision) {
+		t.Fatalf("setup: remembered %v, want the carried revision", d.RememberedManifestsForTest())
+	}
+	if err = h.client.Del(h.ctx, carriedKey).Err(); err != nil {
+		t.Fatal(err)
+	}
+	spy.lengths, spy.reads = nil, nil
+	d.Refresh(h.ctx, at.Add(time.Second))
+	s := d.Page(at.Add(time.Second), "", "", "", 0, 20)
+	expired, named := false, false
+	for _, publication := range s.Publications {
+		expired = expired || (publication.Publication == carried && publication.Manifest == "expired")
+	}
+	for _, row := range s.Rows {
+		named = named || (row.Publication == carried && row.ManifestExpired)
+	}
+	if lengths, reads := spy.of(carried.SnapshotRevision); lengths != 1 || reads != 0 || !expired || !named ||
+		slices.Contains(d.RememberedManifestsForTest(), carried.SnapshotRevision) {
+		t.Fatalf("a held carried manifest gone = %d length and %d byte reads, expired %v, rows named %v, remembered %v; want it expired and forgotten",
+			lengths, reads, expired, named, d.RememberedManifestsForTest())
+	}
+
+	h, _, at = directoryFixture(t, 32)
+	latest, err := controlplane.NewObservationDirectory(h.newRepository(t), limits)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest.Refresh(h.ctx, at)
+	revision := latest.Page(at, "", "", "", 0, 20).Published.SnapshotRevision
+	if err = h.client.Del(h.ctx, h.prefix+":manifest:"+string(revision)).Err(); err != nil {
+		t.Fatal(err)
+	}
+	latest.Refresh(h.ctx, at.Add(time.Second))
+	if s := latest.Page(at.Add(time.Second), "", "", "", 0, 20); s.Complete || s.FailedRead != "manifest" || s.Publications[0].Manifest != "failed" ||
+		len(latest.RememberedManifestsForTest()) != 0 {
+		t.Fatalf("the latest manifest gone though held = %+v, remembered %v; want the refresh failed on it", s, latest.RememberedManifestsForTest())
+	}
+}
+
+// A refresh that stopped on the latest publication still walks what it holds
+// without a read: a carried publication from the index, remembered from the
+// refresh before, or in the Slot path's cache is walked, listed and makes
+// its rows, from groups the directory knows or the object cache holds.
+func TestAStoppedRefreshStillWalksWhatItHolds(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	fake := execution.ObjectDigest(strings.Repeat("a", 64))
+	refused := func(_ context.Context, _ int) *redis.StringCmd {
+		return redis.NewStringResult("", errors.New("dial tcp 127.0.0.1:6379: connect: connection refused"))
+	}
+	for _, source := range []string{"index", "remembered", "slot_cache"} {
+		t.Run(source, func(t *testing.T) {
+			h, _, at := directoryFixture(t, 32)
+			// The latest publication lists one group the store refuses, so
+			// the refresh stops on it before it reaches the carried one.
+			carried, carriedKey, _ := twoPublications(t, h, at, func(m controlplane.CatalogManifest) controlplane.CatalogManifest {
+				m.QueryGroups = []controlplane.ManifestQueryGroup{{QueryGroup: "a-refused-group", ObjectDigest: fake}}
+				return m
+			})
+			spy := &stoppingSpy{Cmdable: h.client, part: string(fake)}
+			repository := h.newRepository(t)
+			if err := repository.ConfigureObjectCache(64, 1<<20); err != nil {
+				t.Fatal(err)
+			}
+			carriedManifest, err := h.repository.LoadCatalogManifest(h.ctx, carried.SnapshotRevision)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, group := range carriedManifest.QueryGroups {
+				if _, err := repository.LoadQueryGroupObject(h.ctx, group.ObjectDigest); err != nil {
+					t.Fatal(err)
+				}
+			}
+			d, err := controlplane.NewObservationDirectory(repository, limits, spy)
+			switch source {
+			case "index":
+				d, err = controlplane.NewObservationDirectory(h.repository, limits, spy)
+			case "slot_cache":
+				repository.StoreSlotManifestForTest(carriedManifest)
+			case "remembered":
+				// Two refreshes the store answers, so the carried manifest is
+				// remembered and the next refresh walks the latest first again.
+				d.Refresh(h.ctx, at)
+				d.Refresh(h.ctx, at.Add(time.Second))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			spy.fail = refused
+			spy.keys = nil
+			d.Refresh(h.ctx, at.Add(2*time.Second))
+			s := d.Page(at.Add(2*time.Second), "", "", "", 0, 20)
+			listed, rows := false, 0
+			for _, publication := range s.Publications {
+				listed = listed || (publication.Publication == carried && publication.Manifest == source)
+			}
+			for _, row := range s.Rows {
+				if row.Publication == carried {
+					rows++
+				}
+			}
+			if s.FailedRead != "group_object" || !listed || rows != 2 || slices.Contains(spy.keys, carriedKey) {
+				t.Fatalf("stopped on the latest, the carried one from %s = failed %q, publications %+v, %d rows, reads %v; want it walked, listed, its 2 rows, its key not asked about",
+					source, s.FailedRead, s.Publications, rows, spy.keys)
+			}
+		})
+	}
+}
+
+// A manifest is sent when it fits what the refresh has left exactly, and not
+// when it is one byte longer; with the refresh's commands spent its length
+// is not asked. A manifest held from the index is not remembered: the index
+// is there every refresh. The manifests remembered are held in what the rows
+// leave: rows filling most of the allowance leave room for one of two.
+func TestAManifestIsReadOnlyWhenItFitsAndHeldOnlyInWhatIsLeft(t *testing.T) {
+	h, _, at := directoryFixture(t, 32)
+	latest, err := h.client.Get(h.ctx, h.prefix+":latest_publication").Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	revision := execution.SnapshotRevision(strings.Split(latest, "\n")[1])
+	length, err := h.client.StrLen(h.ctx, h.prefix+":manifest:"+string(revision)).Result()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct {
+		name     string
+		limits   controlplane.DirectoryLimits
+		lengths  int
+		reads    int
+		manifest string
+	}{
+		{"fits exactly", controlplane.DirectoryLimits{WireBytes: len(latest) + int(length), Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}, 1, 1, "store"},
+		{"one byte long", controlplane.DirectoryLimits{WireBytes: len(latest) + int(length) - 1, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}, 1, 0, "unread"},
+		{"commands spent", controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 1, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}, 0, 0, "unread"},
+	} {
+		spy := &manifestReadSpy{Cmdable: h.client}
+		d, err := controlplane.NewObservationDirectory(h.newRepository(t), c.limits, spy)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Refresh(h.ctx, at)
+		s := d.Page(at, "", "", "", 0, 20)
+		if lengths, reads := spy.of(revision); lengths != c.lengths || reads != c.reads || s.Publications[0].Manifest != c.manifest {
+			t.Errorf("%s = %d length and %d byte reads, manifest %q; want %d, %d, %q", c.name, lengths, reads, s.Publications[0].Manifest, c.lengths, c.reads, c.manifest)
+		}
+	}
+
+	indexed, err := controlplane.NewObservationDirectory(h.repository, controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100,
+		Timeout: time.Second, FreshFor: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexed.Refresh(h.ctx, at)
+	if s := indexed.Page(at, "", "", "", 0, 20); s.Publications[0].Manifest != "index" || len(indexed.RememberedManifestsForTest()) != 0 {
+		t.Fatalf("a manifest from the index = %q, remembered %v; want it not remembered", s.Publications[0].Manifest, indexed.RememberedManifestsForTest())
+	}
+
+	for _, c := range []struct {
+		entries, remembered int
+	}{{100, 2}, {3, 1}} {
+		h, _, at := directoryFixture(t, 32)
+		twoPublications(t, h, at, nil)
+		d, err := controlplane.NewObservationDirectory(h.newRepository(t), controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: c.entries,
+			Timeout: time.Second, FreshFor: time.Minute})
+		if err != nil {
+			t.Fatal(err)
+		}
+		d.Refresh(h.ctx, at)
+		if got := len(d.RememberedManifestsForTest()); got != c.remembered {
+			t.Errorf("two manifests walked with %d entries' allowance = %d remembered, want %d", c.entries, got, c.remembered)
+		}
+	}
+}
+
+// A manifest that does not decode is that manifest's: the refresh does not
+// stop on it and still reads the audit. A refresh cancelled by its caller is
+// the store unavailable to it, not its budget.
+func TestAManifestThatDoesNotDecodeDoesNotStopTheRefresh(t *testing.T) {
+	limits := controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 100, Timeout: time.Second, FreshFor: time.Minute}
+	h, _, at := directoryFixture(t, 32)
+	_, carriedKey, _ := twoPublications(t, h, at, nil)
+	if err := h.client.Set(h.ctx, carriedKey, "{not json", 0).Err(); err != nil {
+		t.Fatal(err)
+	}
+	spy := &stoppingSpy{Cmdable: h.client}
+	d, err := controlplane.NewObservationDirectory(h.newRepository(t), limits, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	if s := d.Page(at, "", "", "", 0, 20); s.FailedRead != "manifest" || len(spy.read(":latest_audit")) != 1 {
+		t.Fatalf("a carried manifest that does not decode = failed %q, reads %v; want it named and the audit still read", s.FailedRead, spy.keys)
+	}
+
+	ctx, cancel := context.WithCancel(h.ctx)
+	cancel()
+	d.Refresh(ctx, at.Add(time.Second))
+	if s := d.Page(at.Add(time.Second), "", "", "", 0, 20); s.Reason != "DEPENDENCY_UNAVAILABLE" {
+		t.Fatalf("a refresh its caller cancelled = %q, want DEPENDENCY_UNAVAILABLE", s.Reason)
+	}
+}
+
+// Why a refresh's reads stopped is kept as it was then: stopped on the store
+// refusing a read, and past it out of room for rows, the snapshot's reason
+// reads the budget, and the unread audit still says the store stopped it.
+func TestWhyAStoppedRefreshStoppedIsKeptPastALaterFailure(t *testing.T) {
+	h, _, at := directoryFixture(t, 32)
+	fake := execution.ObjectDigest(strings.Repeat("a", 64))
+	twoPublications(t, h, at, func(m controlplane.CatalogManifest) controlplane.CatalogManifest {
+		m.QueryGroups = []controlplane.ManifestQueryGroup{{QueryGroup: "a-refused-group", ObjectDigest: fake}}
+		return m
+	})
+	spy := &stoppingSpy{Cmdable: h.client, part: string(fake), fail: func(_ context.Context, _ int) *redis.StringCmd {
+		return redis.NewStringResult("", errors.New("dial tcp 127.0.0.1:6379: connect: connection refused"))
+	}}
+	d, err := controlplane.NewObservationDirectory(h.repository, controlplane.DirectoryLimits{WireBytes: 1 << 20, Commands: 32, Entries: 1,
+		Timeout: time.Second, FreshFor: time.Minute}, spy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Refresh(h.ctx, at)
+	if s := d.Page(at, "", "", "", 0, 20); s.FailedRead != "group_object" || s.Reason != "RESOURCE_BUDGET" || s.SourceReason != "SOURCE_AUDIT_UNAVAILABLE" {
+		t.Fatalf("stopped on a refused read, then out of room = failed %q reason %q source %q; want the audit named by why the reads stopped",
+			s.FailedRead, s.Reason, s.SourceReason)
 	}
 }
