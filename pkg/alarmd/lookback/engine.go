@@ -105,20 +105,29 @@ func ageBucket(age time.Duration) string {
 // Recheck reads a frozen physical query again; see uq.Client.Recheck.
 type Recheck func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error)
 
-// Permit grants a lookback query permit now, or refuses with the reason.
-type Permit func() (release func(), refused string)
+// Permit grants a lookback query permit now, or refuses with the reason. A
+// granted permit's yield is closed when a formal query has to wait for one:
+// the read holding it stops and releases it.
+type Permit func() (release func(), yield <-chan struct{}, refused string)
 
 // Options wire an Engine. MemoryBytes is the lookback's explicit share of
 // the diagnostics memory; zero refuses every sample, as memory_full.
-// SampleOneIn is SampleOneIn when zero; only a test sets it.
+// Refusals is every reason Permit refuses with, counted from the start; a
+// reason outside it is counted as RefusedOther. SampleOneIn is SampleOneIn
+// when zero; only a test sets it.
 type Options struct {
 	Now         func() time.Time
 	Recheck     Recheck
 	Permit      Permit
+	Refusals    []string
 	Owns        func(execution.QueryGroupIdentity) bool
 	MemoryBytes int
 	SampleOneIn uint64
 }
+
+// RefusedOther counts a permit refusal whose reason Options.Refusals does
+// not name.
+const RefusedOther = "other"
 
 // Query is what the access layer knows about a physical query before it is
 // sent: enough to decide whether it is sampled. Plans is every due Plan of
@@ -189,7 +198,7 @@ func New(options Options) (*Engine, error) {
 	if options.SampleOneIn == 0 {
 		options.SampleOneIn = SampleOneIn
 	}
-	return &Engine{options: options, counts: newCounters()}, nil
+	return &Engine{options: options, counts: newCounters(options.Refusals)}, nil
 }
 
 // Begin decides whether a physical query is sampled, before it is sent. A
@@ -410,9 +419,15 @@ func (engine *Engine) Step(ctx context.Context) {
 			engine.Forget(candidate.queryGroup)
 			continue
 		}
-		release, refused := engine.options.Permit()
+		release, yield, refused := engine.options.Permit()
 		if refused != "" {
 			// No room now; the tier keeps its window and is tried again.
+			engine.mu.Lock()
+			if _, named := engine.counts.refusals[refused]; !named {
+				refused = RefusedOther
+			}
+			engine.counts.refusals[refused]++
+			engine.mu.Unlock()
 			break
 		}
 		engine.mu.Lock()
@@ -425,7 +440,7 @@ func (engine *Engine) Step(ctx context.Context) {
 		}
 		candidate.running = true
 		engine.mu.Unlock()
-		go engine.recheck(ctx, candidate, release)
+		go engine.recheck(ctx, candidate, release, yield)
 	}
 }
 
@@ -440,14 +455,35 @@ func (engine *Engine) advanceLocked(candidate *sample) bool {
 	return false
 }
 
-func (engine *Engine) recheck(ctx context.Context, candidate *sample, release func()) {
+func (engine *Engine) recheck(ctx context.Context, candidate *sample, release func(), yield <-chan struct{}) {
 	readCtx, cancel := context.WithTimeout(ctx, RecheckTimeout)
+	if yield != nil {
+		go func() {
+			select {
+			case <-yield:
+				cancel()
+			case <-readCtx.Done():
+			}
+		}()
+	}
 	sink := &recheckSink{series: readSet{}, valueField: candidate.spec.PlanFacts.Normalization.CanonicalValueField}
 	started := engine.options.Now()
 	completion, err := engine.options.Recheck(readCtx, candidate.spec, sink)
 	cancel()
 	release()
 	tier := TierNames[candidate.tier]
+	if (err != nil || completion.Completeness != execution.CompletenessFull) && closed(yield) {
+		// Stopped for a formal query, not a read that failed: the tier
+		// keeps its window and is tried again, and is counted once, by what
+		// it finally comes to.
+		engine.mu.Lock()
+		candidate.running = false
+		if !candidate.dropped {
+			engine.counts.preempted[key2(candidate.source, tier)]++
+		}
+		engine.mu.Unlock()
+		return
+	}
 	outcome := RecheckCompared
 	switch {
 	case err != nil || completion.Completeness == execution.CompletenessUnavailable:
@@ -488,6 +524,19 @@ func (engine *Engine) recheck(ctx context.Context, candidate *sample, release fu
 			}
 		}
 		engine.pending = kept
+	}
+}
+
+// closed reports whether a yield has been closed; a nil one never is.
+func closed(yield <-chan struct{}) bool {
+	if yield == nil {
+		return false
+	}
+	select {
+	case <-yield:
+		return true
+	default:
+		return false
 	}
 }
 

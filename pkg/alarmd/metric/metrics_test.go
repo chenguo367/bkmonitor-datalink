@@ -498,6 +498,8 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_lookback_series_total"] = "variableLabels: {source,tier,kind}"
 	expected["bkmonitor_alarmd_lookback_windows_by_age_total"] = "variableLabels: {source,age,differed}"
 	expected["bkmonitor_alarmd_lookback_pending"] = "variableLabels: {what}"
+	expected["bkmonitor_alarmd_lookback_preemptions_total"] = "variableLabels: {source,tier}"
+	expected["bkmonitor_alarmd_lookback_permit_refusals_total"] = "variableLabels: {reason}"
 	expected["bkmonitor_alarmd_linkd_console_state"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_linkd_console_calls_total"] = "variableLabels: {op,result}"
 	expected["bkmonitor_alarmd_control_source_retained_stale_revisions_total"] = "variableLabels: {}"

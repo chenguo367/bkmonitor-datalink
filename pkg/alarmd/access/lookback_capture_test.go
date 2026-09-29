@@ -83,7 +83,7 @@ func TestASampledQueryIsKeptBeforeTheTargetFilterWithItsAdmissions(t *testing.T)
 	recheck := &lookbackRecheck{hosts: map[string]string{"192.0.2.10": "70", "192.0.2.99": "90"}}
 	engine, err := lookback.New(lookback.Options{SampleOneIn: 1, MemoryBytes: 1 << 20, Recheck: recheck.read,
 		Now:    func() time.Time { clock.Lock(); defer clock.Unlock(); return now },
-		Permit: func() (func(), string) { return func() {}, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true }})
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestAQueryOutsideTheMeasuredSourcesIsNotKept(t *testing.T) {
 			t.Error("a query outside the measured sources was rechecked")
 			return execution.ProviderCompletion{}, nil
 		},
-		Permit: func() (func(), string) { return func() {}, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true }})
+		Permit: func() (func(), <-chan struct{}, string) { return func() {}, nil, "" }, Owns: func(execution.QueryGroupIdentity) bool { return true }})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -33,6 +33,8 @@ type lookbackCollector struct {
 	series  *prometheus.Desc
 	ages    *prometheus.Desc
 	pending *prometheus.Desc
+	yields  *prometheus.Desc
+	refused *prometheus.Desc
 }
 
 func newLookbackCollector() *lookbackCollector {
@@ -72,11 +74,19 @@ func newLookbackCollector() *lookbackCollector {
 		pending: desc("lookback_pending",
 			"Samples waiting for their next tier, and the bytes charged for them against memory_bytes, the share.",
 			"what"),
+		yields: desc("lookback_preemptions_total",
+			"Recheck reads stopped because a formal query had to wait for a query permit, by source and tier. "+
+				"The tier is tried again within its window and counted in lookback_rechecks_total by what it finally comes to.",
+			"source", "tier"),
+		refused: desc("lookback_permit_refusals_total",
+			"Lookback query permits refused, by reason: waiters (a formal query is waiting), lookback_limit, headroom "+
+				"(granting it would leave the formal queries too little), disabled. A refused tier keeps its window.",
+			"reason"),
 	}
 }
 
 func (c *lookbackCollector) Describe(ch chan<- *prometheus.Desc) {
-	for _, desc := range []*prometheus.Desc{c.samples, c.checks, c.buckets, c.windows, c.diffs, c.judged, c.series, c.ages, c.pending} {
+	for _, desc := range []*prometheus.Desc{c.samples, c.checks, c.buckets, c.windows, c.diffs, c.judged, c.series, c.ages, c.pending, c.yields, c.refused} {
 		ch <- desc
 	}
 }
@@ -118,7 +128,11 @@ func (c *lookbackCollector) Collect(ch chan<- prometheus.Metric) {
 			for _, kind := range []string{"new", "vanished"} {
 				counter(c.series, stats.Series[source][tier][kind], source, tier, kind)
 			}
+			counter(c.yields, stats.Preempted[source][tier], source, tier)
 		}
+	}
+	for reason, n := range stats.PermitRefusals {
+		counter(c.refused, n, reason)
 	}
 	for what, value := range map[string]int{"samples": stats.Pending, "bytes": stats.PendingBytes, "memory_bytes": stats.MemoryBytes} {
 		ch <- prometheus.MustNewConstMetric(c.pending, prometheus.GaugeValue, float64(value), what)

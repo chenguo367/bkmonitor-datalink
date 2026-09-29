@@ -18,6 +18,7 @@ import (
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 func noRecheck(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
@@ -37,6 +38,64 @@ func TestTheLookbackRunsWhereverItHasAShare(t *testing.T) {
 	if err != nil || engine == nil || standing != (lookbackStanding{Running: true}) || engine.Stats().MemoryBytes != 1<<20 {
 		t.Fatalf("with a share: %v %+v %v", engine, standing, err)
 	}
+	// Every reason the scheduler refuses with is a series from the start.
+	refusals := engine.Stats().PermitRefusals
+	for _, reason := range append([]string{lookback.RefusedOther}, scheduler.LookbackRefusals...) {
+		if count, present := refusals[reason]; !present || count != 0 {
+			t.Fatalf("refusal %q is not counted from the start: %v", reason, refusals)
+		}
+	}
+}
+
+// The lookback's permit is the scheduler's: a refusal carries its reason,
+// and a granted permit yields the moment a formal query has to wait.
+func TestTheLookbackPermitYieldsToAWaitingFormalQuery(t *testing.T) {
+	flights, err := scheduler.NewFlightCoordinatorWithRecovery(scheduler.RecoveryLimits{
+		ProcessQueryPermits: 2, RecoveryQueryPermits: 1,
+		ReadyQueueCapacity: 8, RecoveryQueueCapacity: 8,
+		MaxQueuedItemsPerQG: 2,
+		MaxReplaySlots:      3, MaxReplayAge: 10 * time.Minute,
+		RetryMinDelay: time.Second, RetryMaxDelay: 8 * time.Second,
+	}, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	permit := lookbackPermit(flights)
+	release, yield, refused := permit()
+	if release == nil || yield == nil || refused != "" {
+		t.Fatalf("an idle pool gave the lookback %v %v %q", release != nil, yield != nil, refused)
+	}
+	if _, _, again := permit(); again != scheduler.LookbackRefusedLimit {
+		t.Fatalf("a second lookback permit of two = %q, want refused at the limit", again)
+	}
+	ctx := context.Background()
+	formal, err := flights.AcquireQueryPermit(ctx, execution.SlotIdentity{QueryGroup: "a", EvaluationTime: 60},
+		execution.OperationNormal, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer formal.Release()
+	waiting := make(chan *scheduler.QueryPermit, 1)
+	go func() {
+		granted, err := flights.AcquireQueryPermit(ctx, execution.SlotIdentity{QueryGroup: "b", EvaluationTime: 60},
+			execution.OperationNormal, time.Now().Add(time.Minute))
+		if err != nil {
+			t.Error(err)
+		}
+		waiting <- granted
+	}()
+	select {
+	case <-yield:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a formal query waits and the lookback permit was not asked to yield")
+	}
+	release()
+	select {
+	case granted := <-waiting:
+		granted.Release()
+	case <-time.After(5 * time.Second):
+		t.Fatal("the permit the lookback gave back did not reach the waiting query")
+	}
 }
 
 func sampledLogQuery(t *testing.T, queryGroup execution.QueryGroupIdentity) lookback.Query {
@@ -55,7 +114,7 @@ func sampledLogQuery(t *testing.T, queryGroup execution.QueryGroupIdentity) look
 func TestAQueryGroupTheBundleStopsOwningLeavesTheLookback(t *testing.T) {
 	owner := &lookbackOwnership{}
 	engine, err := lookback.New(lookback.Options{SampleOneIn: 1, MemoryBytes: 1 << 20, Recheck: noRecheck, Owns: owner.owns,
-		Permit: func() (func(), string) { return nil, "headroom" }})
+		Permit: func() (func(), <-chan struct{}, string) { return nil, nil, "headroom" }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +167,7 @@ func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 		t.Fatalf("off = %+v", off)
 	}
 	engine, err := lookback.New(lookback.Options{MemoryBytes: 4096, Recheck: noRecheck,
-		Owns: func(execution.QueryGroupIdentity) bool { return true }, Permit: func() (func(), string) { return nil, "headroom" }})
+		Owns: func(execution.QueryGroupIdentity) bool { return true }, Permit: func() (func(), <-chan struct{}, string) { return nil, nil, "headroom" }})
 	if err != nil {
 		t.Fatal(err)
 	}

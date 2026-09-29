@@ -24,12 +24,18 @@ type counters struct {
 	judgments   map[string]uint64 // source|tier|class
 	series      map[string]uint64 // source|tier|new or vanished
 	ages        map[string]uint64 // source|age|differed
+	preempted   map[string]uint64 // source|tier: reads stopped for a formal query
+	refusals    map[string]uint64 // reason: permits refused
 }
 
-func newCounters() counters {
+func newCounters(refusals []string) counters {
 	c := counters{samples: map[string]uint64{}, rechecks: map[string]uint64{}, buckets: map[string]uint64{},
 		windows: map[string]uint64{}, differences: map[string]uint64{}, judgments: map[string]uint64{},
-		series: map[string]uint64{}, ages: map[string]uint64{}}
+		series: map[string]uint64{}, ages: map[string]uint64{}, preempted: map[string]uint64{},
+		refusals: map[string]uint64{RefusedOther: 0}}
+	for _, reason := range refusals {
+		c.refusals[reason] = 0
+	}
 	for _, source := range Sources {
 		for _, outcome := range SampleOutcomes {
 			c.samples[key2(source, outcome)] = 0
@@ -39,6 +45,7 @@ func newCounters() counters {
 		}
 		for _, tier := range TierNames {
 			c.buckets[key2(source, tier)] = 0
+			c.preempted[key2(source, tier)] = 0
 			c.windows[key3(source, tier, "yes")], c.windows[key3(source, tier, "no")] = 0, 0
 			c.series[key3(source, tier, "new")], c.series[key3(source, tier, "vanished")] = 0, 0
 			for _, outcome := range RecheckOutcomes {
@@ -99,6 +106,13 @@ type Stats struct {
 	Series map[string]map[string]map[string]uint64 `json:"series"`
 	// ByAge: source -> age read -> "yes"/"no" -> windows: the delay profile.
 	ByAge map[string]map[string]map[string]uint64 `json:"by_age"`
+	// Preempted: source -> tier -> reads stopped because a formal query had
+	// to wait for a permit. The tier is tried again within its window and
+	// counted in Rechecks by what it finally comes to.
+	Preempted map[string]map[string]uint64 `json:"preempted"`
+	// PermitRefusals: reason -> permits refused. A refused tier keeps its
+	// window; one that finds no permit in it is counted as yielded.
+	PermitRefusals map[string]uint64 `json:"permit_refusals"`
 
 	Pending      int      `json:"pending"`
 	PendingBytes int      `json:"pending_bytes"`
@@ -111,7 +125,8 @@ func (engine *Engine) Stats() Stats {
 	stats := Stats{Samples: map[string]map[string]uint64{}, Rechecks: map[string]map[string]map[string]uint64{},
 		ComparedBuckets: map[string]map[string]uint64{}, ComparedWindows: map[string]map[string]map[string]uint64{},
 		Differences: map[string]map[string]map[string]uint64{}, Judgments: map[string]map[string]map[string]uint64{},
-		Series: map[string]map[string]map[string]uint64{}, ByAge: map[string]map[string]map[string]uint64{}, Recent: []Recent{}}
+		Series: map[string]map[string]map[string]uint64{}, ByAge: map[string]map[string]map[string]uint64{},
+		Preempted: map[string]map[string]uint64{}, PermitRefusals: map[string]uint64{}, Recent: []Recent{}}
 	if engine == nil {
 		return stats
 	}
@@ -146,6 +161,10 @@ func (engine *Engine) Stats() Stats {
 	three(engine.counts.judgments, stats.Judgments)
 	three(engine.counts.series, stats.Series)
 	three(engine.counts.ages, stats.ByAge)
+	two(engine.counts.preempted, stats.Preempted)
+	for reason, n := range engine.counts.refusals {
+		stats.PermitRefusals[reason] = n
+	}
 	stats.Pending, stats.PendingBytes, stats.MemoryBytes = len(engine.pending), engine.bytes, engine.options.MemoryBytes
 	stats.Recent = append(stats.Recent, engine.recent...)
 	return stats

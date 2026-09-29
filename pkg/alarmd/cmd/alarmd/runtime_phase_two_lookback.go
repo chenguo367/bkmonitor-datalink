@@ -78,13 +78,7 @@ func buildLookback(
 		return nil, lookbackStanding{Reason: lookbackNoObservationShare}, nil
 	}
 	engine, err := lookback.New(lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, MemoryBytes: capacity.LookbackBytes,
-		Permit: func() (func(), string) {
-			permit, refused := flights.TryAcquireLookbackPermit()
-			if permit == nil {
-				return nil, refused
-			}
-			return permit.Release, ""
-		}})
+		Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights)})
 	if err != nil {
 		return nil, lookbackStanding{}, err
 	}
@@ -92,6 +86,19 @@ func buildLookback(
 }
 
 // runLookback rechecks due samples until the bundle stops.
+// lookbackPermit is the lookback's permit from the process's query budget:
+// granted only with room to spare, and yielded the moment a formal query has
+// to wait for one.
+func lookbackPermit(flights *scheduler.FlightCoordinator) lookback.Permit {
+	return func() (func(), <-chan struct{}, string) {
+		permit, refused := flights.TryAcquireLookbackPermit()
+		if permit == nil {
+			return nil, nil, refused
+		}
+		return permit.Release, permit.Yield(), ""
+	}
+}
+
 func runLookback(ctx context.Context, engine *lookback.Engine) {
 	engine.Run(ctx, lookbackTick)
 }

@@ -202,7 +202,7 @@ func newFixture(t *testing.T, memory int) *fixture {
 	t.Helper()
 	f := &fixture{clock: &clock{at: time.Unix(1_700_000_100, 0)}, owned: true,
 		answers: make(chan func(sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error), 8)}
-	engine, err := New(Options{Now: f.clock.now, MemoryBytes: memory,
+	engine, err := New(Options{Now: f.clock.now, MemoryBytes: memory, Refusals: []string{"waiters", "headroom"},
 		Recheck: func(ctx context.Context, spec execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 			if _, ok := ctx.Deadline(); !ok {
 				t.Error("a recheck ran without a deadline")
@@ -210,13 +210,13 @@ func newFixture(t *testing.T, memory int) *fixture {
 			answer := <-f.answers
 			return answer(sink)
 		},
-		Permit: func() (func(), string) {
+		Permit: func() (func(), <-chan struct{}, string) {
 			f.mu.Lock()
 			defer f.mu.Unlock()
 			if f.refuse != "" {
-				return nil, f.refuse
+				return nil, nil, f.refuse
 			}
-			return func() {}, ""
+			return func() {}, nil, ""
 		},
 		Owns: func(execution.QueryGroupIdentity) bool { f.mu.Lock(); defer f.mu.Unlock(); return f.owned }})
 	if err != nil {
@@ -374,6 +374,10 @@ func TestEveryUnobservedWindowIsNamedAndNeverCountedAsStable(t *testing.T) {
 	if n := f.engine.Stats().Rechecks[SourceLogSearch]["t90"][RecheckYielded]; n != 1 {
 		t.Fatalf("yielded %d, want 1", n)
 	}
+	// The one Step inside the window was refused, and counted by its reason.
+	if refusals := f.engine.Stats().PermitRefusals; refusals["waiters"] != 1 || refusals["headroom"] != 0 || refusals[RefusedOther] != 0 {
+		t.Fatalf("permit refusals %v, want waiters 1", refusals)
+	}
 	f.set(func() { f.refuse = "" })
 	// t210 fails, then later samples are partial and truncated.
 	f.clock.advance(60 * time.Second)
@@ -435,7 +439,7 @@ func TestEveryCounterCellExistsFromTheStart(t *testing.T) {
 func BenchmarkFirstReadCapture(b *testing.B) {
 	engine, _ := New(Options{Recheck: func(context.Context, execution.PhysicalQuerySpec, execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
 		return execution.ProviderCompletion{}, nil
-	}, Permit: func() (func(), string) { return nil, "x" }, Owns: func(execution.QueryGroupIdentity) bool { return true }, MemoryBytes: 1 << 30})
+	}, Permit: func() (func(), <-chan struct{}, string) { return nil, nil, "x" }, Owns: func(execution.QueryGroupIdentity) bool { return true }, MemoryBytes: 1 << 30})
 	spec := logSpec("q-bench")
 	b.Run("not_sampled", func(b *testing.B) {
 		query := Query{Spec: spec, Operation: execution.OperationRetry, AttemptNo: 1}
@@ -500,12 +504,12 @@ func TestASampleForgottenWhileStepTakesItIsSettledOnce(t *testing.T) {
 			return execution.ProviderCompletion{}, nil
 		},
 		Owns: func(execution.QueryGroupIdentity) bool { mu.Lock(); defer mu.Unlock(); return owned },
-		Permit: func() (func(), string) {
+		Permit: func() (func(), <-chan struct{}, string) {
 			mu.Lock()
 			owned = false
 			mu.Unlock()
 			engine.Forget("qg")
-			return func() { mu.Lock(); released++; mu.Unlock() }, ""
+			return func() { mu.Lock(); released++; mu.Unlock() }, nil, ""
 		}})
 	if err != nil {
 		t.Fatal(err)
@@ -527,5 +531,89 @@ func TestASampleForgottenWhileStepTakesItIsSettledOnce(t *testing.T) {
 	engine.Step(context.Background())
 	if again := engine.Stats(); again.PendingBytes != 0 || again.Samples[SourceLogSearch][OutcomeOwnerLost] != 1 {
 		t.Fatalf("a later Step settled it again: %+v", again.Samples[SourceLogSearch])
+	}
+}
+
+// A permit refused for a reason the wiring did not name is still counted,
+// as other, never under a word no reader was told of.
+func TestARefusalForAnUnnamedReasonIsCountedAsOther(t *testing.T) {
+	f := newFixture(t, 1<<20)
+	f.engine.Begin(sampledQuery(t, logSpec("q-other"), nil)).Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	f.set(func() { f.refuse = "unnamed" })
+	f.clock.advance(90 * time.Second)
+	f.engine.Step(context.Background())
+	refusals := f.engine.Stats().PermitRefusals
+	if _, kept := refusals["unnamed"]; kept || refusals[RefusedOther] != 1 {
+		t.Fatalf("permit refusals %v, want the unnamed reason counted as %s", refusals, RefusedOther)
+	}
+}
+
+// A read asked to yield - a formal query is waiting for a permit - stops at
+// once and gives its permit back, long before its own timeout. Its tier is
+// not settled by it: counted as preempted, tried again inside its window,
+// and then counted once, by what it came to.
+func TestAReadAskedToYieldStopsAndItsTierIsTriedAgain(t *testing.T) {
+	var mu sync.Mutex
+	at := time.Unix(1_700_000_100, 0)
+	yield := make(chan struct{})
+	released, attempts := 0, 0
+	engine, err := New(Options{Now: func() time.Time { mu.Lock(); defer mu.Unlock(); return at }, MemoryBytes: 1 << 20,
+		Recheck: func(ctx context.Context, _ execution.PhysicalQuerySpec, sink execution.ProviderSeriesSink) (execution.ProviderCompletion, error) {
+			mu.Lock()
+			attempts++
+			first := attempts == 1
+			mu.Unlock()
+			if first {
+				<-ctx.Done()
+				return execution.ProviderCompletion{}, ctx.Err()
+			}
+			return full(dataset("h1", map[int64]string{60: "1"}))(sink)
+		},
+		Owns: func(execution.QueryGroupIdentity) bool { return true },
+		Permit: func() (func(), <-chan struct{}, string) {
+			mu.Lock()
+			defer mu.Unlock()
+			return func() { mu.Lock(); released++; mu.Unlock() }, yield, ""
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := engine.Begin(sampledQuery(t, logSpec("q-yield"), nil))
+	read.Series(dataset("h1", map[int64]string{60: "1"}), nil)
+	read.Complete(execution.ProviderCompletion{Completeness: execution.CompletenessFull}, nil)
+	mu.Lock()
+	at = at.Add(Tiers[0])
+	mu.Unlock()
+	engine.Step(context.Background())
+	asked := time.Now()
+	close(yield)
+	for engine.Stats().Preempted[SourceLogSearch]["t90"] != 1 {
+		if time.Since(asked) > RecheckTimeout/2 {
+			t.Fatalf("a read asked to yield kept running: %v", engine.Stats().Preempted)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stats := engine.Stats()
+	for _, outcome := range RecheckOutcomes {
+		if n := stats.Rechecks[SourceLogSearch]["t90"][outcome]; n != 0 {
+			t.Fatalf("the preempted read settled its tier as %s", outcome)
+		}
+	}
+	mu.Lock()
+	if released != 1 {
+		t.Fatalf("released %d permits, want the preempted read's", released)
+	}
+	yield = make(chan struct{})
+	mu.Unlock()
+	engine.Step(context.Background())
+	deadline := time.Now().Add(5 * time.Second)
+	for engine.Stats().Rechecks[SourceLogSearch]["t90"][RecheckCompared] != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the tier was not tried again in its window: %v", engine.Stats().Rechecks[SourceLogSearch]["t90"])
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if n := engine.Stats().Preempted[SourceLogSearch]["t90"]; n != 1 {
+		t.Fatalf("preempted %d, want 1", n)
 	}
 }

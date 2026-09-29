@@ -162,3 +162,67 @@ func TestTheLookbackIsRefusedWithoutARecoveryBudget(t *testing.T) {
 		t.Fatalf("a nil coordinator granted %v %q", permit, reason)
 	}
 }
+
+// Room at the grant is not room for the whole read. A burst that takes the
+// free permits while a lookback read runs makes a formal query wait; the
+// moment it does, the lookback permit is asked to yield, and once the read
+// gives it back the waiting query has it. A second waiter asks again
+// without closing the channel twice, and no permit is asked while nobody
+// waits.
+func TestAWaitingFormalQueryMakesTheLookbackYield(t *testing.T) {
+	clock := newMutableClock(time.Unix(300, 0))
+	flights := lookbackFlights(t, clock)
+	lookback, refused := flights.TryAcquireLookbackPermit()
+	if lookback == nil || refused != "" {
+		t.Fatalf("an idle pool refused the lookback: %q", refused)
+	}
+	normal := holdNormal(t, flights, clock, 15) // the pool of 16 is full
+	select {
+	case <-lookback.Yield():
+		t.Fatal("the lookback was asked to yield while no formal query waited")
+	default:
+	}
+	wait := func(name string) chan *QueryPermit {
+		granted := make(chan *QueryPermit, 1)
+		go func() {
+			permit, err := flights.AcquireQueryPermit(context.Background(),
+				execution.SlotIdentity{QueryGroup: execution.QueryGroupIdentity(name), EvaluationTime: 60},
+				execution.OperationNormal, clock.Now().Add(time.Minute))
+			if err != nil {
+				t.Error(err)
+			}
+			granted <- permit
+		}()
+		return granted
+	}
+	first := wait("qg-first")
+	select {
+	case <-lookback.Yield():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a formal query waits and the lookback was not asked to yield")
+	}
+	second := wait("qg-second")
+	deadline := time.Now().Add(5 * time.Second)
+	for flights.QueryPermitOccupancy().Waiting["normal"] != 2 {
+		if time.Now().After(deadline) {
+			t.Fatal("the second formal query never queued")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	lookback.Release()
+	select {
+	case permit := <-first:
+		permit.Release()
+	case <-time.After(5 * time.Second):
+		t.Fatal("the permit the lookback gave back did not reach the waiting query")
+	}
+	select {
+	case permit := <-second:
+		permit.Release()
+	case <-time.After(5 * time.Second):
+		t.Fatal("the second waiter was not granted")
+	}
+	for _, held := range normal {
+		held.Release()
+	}
+}

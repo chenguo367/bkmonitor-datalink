@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/lookback"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
 )
 
 // lookbackSeriesUpperBounds is each lookback family's series count once
@@ -29,6 +30,9 @@ func lookbackSeriesUpperBounds() map[string]int {
 		"lookback_series_total":           sources * tiers * 2,
 		"lookback_windows_by_age_total":   sources * len(lookback.AgeBuckets) * 2,
 		"lookback_pending":                3,
+		"lookback_preemptions_total":      sources * tiers,
+		// Every reason the scheduler refuses with, and other.
+		"lookback_permit_refusals_total": len(scheduler.LookbackRefusals) + 1,
 	}
 }
 
@@ -43,8 +47,14 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 		Samples:     map[string]map[string]uint64{lookback.SourceLogSearch: {lookback.OutcomeCaptured: 4}},
 		Differences: map[string]map[string]map[string]uint64{lookback.SourceCollectorLog: {"t210": {lookback.DiffZeroToNonzero: 7}}},
 		ByAge:       map[string]map[string]map[string]uint64{lookback.SourceLogSearch: {"le_240s": {"yes": 2}}},
+		Preempted:   map[string]map[string]uint64{lookback.SourceLogSearch: {"t90": 5}},
 		Pending:     3, PendingBytes: 4096, MemoryBytes: 1 << 20,
+		PermitRefusals: map[string]uint64{},
 	}
+	for _, reason := range append([]string{lookback.RefusedOther}, scheduler.LookbackRefusals...) {
+		stats.PermitRefusals[reason] = 0
+	}
+	stats.PermitRefusals[scheduler.LookbackRefusedWaiting] = 9
 	r.SetLookbackSource(func() lookback.Stats { return stats })
 	for name, n := range lookbackSeriesUpperBounds() {
 		if got := len(gatherFamily(t, r, "bkmonitor_alarmd_"+name)); got != n {
@@ -80,5 +90,11 @@ func TestTheLookbackCollectorEmitsEveryCellOnceBound(t *testing.T) {
 	}
 	if got := value("bkmonitor_alarmd_lookback_pending", map[string]string{"what": "bytes"}); got != 4096 {
 		t.Fatalf("pending bytes = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_preemptions_total", map[string]string{"source": lookback.SourceLogSearch, "tier": "t90"}); got != 5 {
+		t.Fatalf("preemptions = %v", got)
+	}
+	if got := value("bkmonitor_alarmd_lookback_permit_refusals_total", map[string]string{"reason": scheduler.LookbackRefusedWaiting}); got != 9 {
+		t.Fatalf("refusals = %v", got)
 	}
 }
