@@ -1137,6 +1137,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		return nil, err
 	}
 	var publisher fleetPublisher
+	maintenanceReadings := &maintenanceSource{}
 	fleetAPI, closeCLI, publicRestricted := buildPhaseTwoCLI(cfg, fleetAPI, repository, progressStore, platformSettings, func() *observability.RuntimeConfigFacts {
 		if bundle == nil {
 			return nil
@@ -1145,7 +1146,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	}, cliControlBinding{Incarnation: incarnation, StreamToken: streamIdentity.Token, Server: viewServer, Metrics: recorder.Gatherer(),
 		PublicWindows: fleet.NewPublicWindowsHandler(windowStore, external.Now), RedisFailures: cliRedisFailures(recorder, observer),
 		RedisDialRetries: recorder.ObserveDiagnosticRedisDialRetry,
-		Lookback:         lookbackEngine, LookbackStanding: lookbackState})
+		Lookback:         lookbackEngine, LookbackStanding: lookbackState, Maintenance: maintenanceReadings})
 	defer func() {
 		if resultErr != nil {
 			_ = closeCLI()
@@ -1228,6 +1229,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		}
 	}
 	bundle.dependencies.RunEffectiveTime = maintenance.run
+	maintenanceReadings.bind(maintenance)
 	bindTargetScopeClose(bundle, scopeClose, openAlertCopy, events, recorder)
 	openAlertFacts := withTargetScopeClose(openAlertSetFactsSource(openAlertCopy, external.Now), scopeClose)
 	// The control leader's difference against the strategies that no longer

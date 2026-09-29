@@ -7,13 +7,16 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/config"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/contract"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/controlplane"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/execution"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/linkdoutput"
+	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/obchannel"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/observability"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/openalerts"
 	"github.com/TencentBlueKing/bkmonitor-datalink/pkg/alarmd/scheduler"
@@ -151,6 +154,11 @@ type effectiveMaintenance struct {
 	legacyCursor map[execution.QueryGroupIdentity]int
 	countsMu     sync.Mutex
 	counts       map[string]uint64
+	// recent is the latest outcomes of every word but close_acked, at most
+	// maintenanceRecentKept of each, newest last: which Query Group, when
+	// and what it said, which the counts cannot say and the log lines, kept
+	// minutes on a busy Pod, no longer can.
+	recent map[string][]maintenanceOutcome
 
 	// deletedSince is when each calendar the owned Plans name started to
 	// read deleted in every snapshot that names it, and sourceLossAt the
@@ -158,6 +166,79 @@ type effectiveMaintenance struct {
 	// settleCalendarDeletions.
 	deletedSince map[int64]time.Time
 	sourceLossAt time.Time
+}
+
+// maintenanceRecentKept bounds the outcomes kept of each word, and
+// maintenanceErrorBytes the text kept of each one's error.
+const (
+	maintenanceRecentKept = 32
+	maintenanceErrorBytes = 256
+)
+
+// maintenanceOutcome is one outcome of the loop that was not an
+// acknowledged close: the Query Group, the strategy when the outcome was
+// about one, when, and the error's text, cut to maintenanceErrorBytes.
+type maintenanceOutcome struct {
+	At         time.Time `json:"at"`
+	QueryGroup string    `json:"query_group"`
+	StrategyID string    `json:"strategy_id,omitempty"`
+	BusinessID string    `json:"business_id,omitempty"`
+	Error      string    `json:"error,omitempty"`
+}
+
+// maintenanceReading is the loop's counts and its latest outcomes of every
+// word but close_acked, each list present, empty when none was seen.
+type maintenanceReading struct {
+	Counts map[string]uint64               `json:"counts"`
+	Recent map[string][]maintenanceOutcome `json:"recent"`
+}
+
+// Reading is the counts and the recent outcomes, copied.
+func (m *effectiveMaintenance) Reading() maintenanceReading {
+	reading := maintenanceReading{Counts: m.Stats(), Recent: map[string][]maintenanceOutcome{}}
+	m.countsMu.Lock()
+	defer m.countsMu.Unlock()
+	for _, outcome := range observability.EffectiveCloseOutcomes {
+		if string(outcome) == closeOutcomeAcked {
+			continue
+		}
+		reading.Recent[string(outcome)] = append([]maintenanceOutcome{}, m.recent[string(outcome)]...)
+	}
+	return reading
+}
+
+// remember keeps an outcome that was not an acknowledged close.
+func (m *effectiveMaintenance) remember(trace observability.TraceFields, outcome string, err error) {
+	if outcome == closeOutcomeAcked {
+		return
+	}
+	kept := maintenanceOutcome{At: m.bundle.dependencies.Now().UTC(), QueryGroup: trace.QueryGroupKey,
+		StrategyID: trace.StrategyID, BusinessID: trace.BusinessID}
+	if err != nil {
+		kept.Error = cutAtRune(err.Error(), maintenanceErrorBytes)
+	}
+	m.countsMu.Lock()
+	defer m.countsMu.Unlock()
+	if m.recent == nil {
+		m.recent = make(map[string][]maintenanceOutcome, len(observability.EffectiveCloseOutcomes))
+	}
+	list := append(m.recent[outcome], kept)
+	if len(list) > maintenanceRecentKept {
+		list = append([]maintenanceOutcome(nil), list[len(list)-maintenanceRecentKept:]...)
+	}
+	m.recent[outcome] = list
+}
+
+// cutAtRune is text cut to at most limit bytes on a rune boundary.
+func cutAtRune(text string, limit int) string {
+	if len(text) <= limit {
+		return text
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	return text[:cut]
 }
 
 // Stats is the outcome counts, for the metric that reports every cell.
@@ -826,6 +907,59 @@ func (m *effectiveMaintenance) observeTrace(ctx context.Context, trace observabi
 		result = observability.ResultDegraded
 	}
 	m.count(outcome, max(count, 1))
+	m.remember(trace, outcome, err)
 	m.bundle.dependencies.Observer.Observe(ctx, observability.Observation{Component: observability.ComponentRuntime, Stage: observability.StageEffectiveTimeMaintenance, Result: observability.Result(result),
 		ReasonCode: observability.ReasonCode(outcome), Trace: trace, Counts: observability.Counts{Events: int64(count)}, Err: err})
+}
+
+// maintenanceSource is the effective-time maintenance as the CLI reads it,
+// bound once the loop is built: the CLI is built before it.
+type maintenanceSource struct {
+	loop atomic.Pointer[effectiveMaintenance]
+}
+
+func (source *maintenanceSource) bind(loop *effectiveMaintenance) {
+	if source != nil {
+		source.loop.Store(loop)
+	}
+}
+
+// cliMaintenanceReading is maintenance.get's answer: the answering process's
+// effective-time maintenance, by outcome, and the latest of every outcome
+// that was not an acknowledged close.
+type cliMaintenanceReading struct {
+	Scope   string                          `json:"scope"`
+	ReadAt  time.Time                       `json:"read_at"`
+	Running bool                            `json:"running"`
+	Counts  map[string]uint64               `json:"counts"`
+	Recent  map[string][]maintenanceOutcome `json:"recent"`
+}
+
+// cliMaintenanceOperation reads this process's effective-time maintenance.
+// The counts are effective_close_total's; the recent outcomes are what the
+// counts cannot say - which Query Group, which strategy, when, and why - and
+// what the log lines, rotated out within minutes on a busy Pod, no longer
+// can by the time someone asks.
+func cliMaintenanceOperation(source *maintenanceSource) obchannel.Operation {
+	return obchannel.Operation{ID: "maintenance.get",
+		Summary:       "读取实际回答进程的生效时间维护：按结局的计数（与 effective_close_total 同源），以及除 close_acked 外每种结局最近 32 条（查询组、策略、时间、错误原文，截到 256 字节），用来一步读出 unavailable 等是哪个查询组、什么原因；可指定实例。",
+		EvidenceScope: "process", Targetable: true, Fields: map[string]obchannel.Field{},
+		OutputSchema: obchannel.SchemaOf(cliMaintenanceReading{}),
+		Limits: map[string]any{"redis_commands": 0, "scope": "answering_replica", "recent": maintenanceRecentKept,
+			"error_bytes": maintenanceErrorBytes},
+		Run: func(context.Context, obchannel.Params) obchannel.Outcome {
+			reading := cliMaintenanceReading{Scope: "answering_replica", ReadAt: time.Now().UTC(),
+				Counts: map[string]uint64{}, Recent: map[string][]maintenanceOutcome{}}
+			var loop *effectiveMaintenance
+			if source != nil {
+				loop = source.loop.Load()
+			}
+			if loop != nil {
+				kept := loop.Reading()
+				reading.Running, reading.Counts, reading.Recent = true, kept.Counts, kept.Recent
+			}
+			return obchannel.Outcome{Value: reading, Complete: reading.Running,
+				Limitations: []string{"Use meta.answered_by to identify this process: each replica maintains the Query Groups it owns, and another replica's outcomes are read by targeting it.",
+					"Counts and outcomes are this process's since it started; the last 32 of each outcome word are kept, and each error's text is cut to 256 bytes."}}
+		}}
 }
