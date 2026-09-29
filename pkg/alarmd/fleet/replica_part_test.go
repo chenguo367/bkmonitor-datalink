@@ -88,6 +88,24 @@ func partReplicas() []Snapshot {
 			snapshot.Anomalies[1].ReasonCode = "GAP_SKIPPED"
 		}
 		snapshot.Demoted[0].Strategies = append(snapshot.Demoted[0].Strategies, StrategyRef{StrategyID: "950"})
+		// The same group's rows last healthy at a different moment on each
+		// replica; empty rows with no start on two replicas, and runs that
+		// began in the same minute on two; a record of a loss that stopped,
+		// on two.
+		snapshot.Anomalies[0].LastHealthyAt = now.Add(-time.Duration(index+2) * 13 * time.Minute)
+		if index < 2 {
+			snapshot.NoData = append(snapshot.NoData, Anomaly{QueryGroup: snapshot.Replica + "-empty-unstarted",
+				Kind: KindEmptyEveryRound, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: snapshot.Replica})
+		}
+		if index > 0 {
+			snapshot.NoData = append(snapshot.NoData, Anomaly{QueryGroup: snapshot.Replica + "-empty-together",
+				Kind: KindEmptyEveryRound, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: snapshot.Replica,
+				Since: now.Add(-5 * time.Hour).Truncate(time.Minute).Add(time.Duration(index) * time.Second)})
+		}
+		if index != 1 {
+			snapshot.GapSkips[snapshot.Replica+"-stopped"] = SkippedSpan{FirstSlot: 1, LastSlot: 4, Slots: 4,
+				At: now.Add(-time.Duration(30+index) * time.Minute), Replica: snapshot.Replica}
+		}
 		snapshot.GapSkips[snapshot.Demoted[0].QueryGroup] = SkippedSpan{FirstSlot: 1, LastSlot: 2, Slots: 2,
 			At: now.Add(-time.Duration(index+1) * 4 * time.Minute), Replica: snapshot.Replica}
 	}
@@ -136,6 +154,25 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 		"after cooldown":       func(p ReplicaPart) int { return p.Loss.AfterCooldown },
 		"while demoted recent": func(p ReplicaPart) int { return p.Loss.WhileDemotedRecent },
 		"cooling extended":     func(p ReplicaPart) int { return p.Cooling.Extended },
+		"retained records":     func(p ReplicaPart) int { return p.TodoRows.Retained },
+		"rows without onset": func(p ReplicaPart) int {
+			n := 0
+			for _, tally := range p.CheckRows {
+				n += tally.withoutOnset
+			}
+			return n
+		},
+		"groups last healthy": func(p ReplicaPart) int {
+			n := 0
+			for _, tally := range p.CheckRows {
+				for _, group := range tally.groups {
+					if group.LastSuccess != nil {
+						n++
+					}
+				}
+			}
+			return n
+		},
 		"cohort gap skipped": func(p ReplicaPart) int {
 			n := 0
 			for _, cohort := range p.CohortRows {
@@ -220,7 +257,7 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	// Numbers the fixture must reach, or the equalities above are between
 	// zeros: several due with different waits, several empty rows, and rows
 	// on each side of the verdict.
-	if whole.DemotedDue != 3 || whole.DemotedDueOldestSeconds != 21*60 || whole.EmptyEveryRoundTotal != 6 ||
+	if whole.DemotedDue != 3 || whole.DemotedDueOldestSeconds != 21*60 || whole.EmptyEveryRoundTotal != 10 ||
 		OursCount(whole.Anomalies) == 0 || OursCount(whole.Anomalies) == len(whole.Anomalies) {
 		t.Fatalf("fixture: due %d oldest %ds, empty %d, ours %d of %d", whole.DemotedDue, whole.DemotedDueOldestSeconds,
 			whole.EmptyEveryRoundTotal, OursCount(whole.Anomalies), len(whole.Anomalies))
