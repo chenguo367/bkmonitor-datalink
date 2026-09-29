@@ -103,9 +103,24 @@ func restoredRoundOf(summary *execution.LastCompletionSummary) *fleet.RestoredRo
 //
 // It is a rate, not a cap: every owned object is eventually restored, just
 // spread across publishes rather than read in one burst at the moment the
-// process is least settled. At the current publish cadence a full deployment is
-// covered in well under a minute, against the many minutes of unknown a restart
-// otherwise costs.
+// process is least settled.
+//
+// What it guards is the publish itself. restoreOwned runs inline before the
+// snapshot is built and reads one Progress record per object, one round trip
+// each, so the budget bounds what a publish waits on to 128 round trips --
+// tens of milliseconds at in-cluster latency, against a publish interval of
+// seconds -- and a restarting replica's reads on the control-plane store to
+// 128 per interval.
+//
+// What it costs is time to a complete view after a start: ceil(wanted/128)
+// publishes, wanted being the owned objects not yet determined plus those
+// determined without records (fleet.Tracker.WantsRestore). At the default
+// 5 s interval that is about 30 to 40 s for the 700 to 900 a replica wants
+// on the deployments this has run on, and it grows linearly: 20,000 would
+// take about 13 minutes, past RestartCatchUpGrace. Reading in batches the way
+// the diagnosis path does (LoadProgressBatch, one pipeline of many GETs) is
+// what removes that linear term; the budget would then be a byte budget per
+// publish rather than a count.
 const fleetRestoreBudgetPerPublish = 128
 
 // A failed read may be retried on later publishes, within the shared read budget.
