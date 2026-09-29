@@ -58,28 +58,30 @@ type seriesSummary struct {
 // collection - measured at 44 to 53 bytes, charged a little above.
 const seriesEntryBytes = 56
 
-// seriesAdmitStep is how many series a table grows by between two asks of
-// the process's memory line: one call per step keeps the ask off the path
-// every point takes.
-const seriesAdmitStep = 4096
+// seriesAdmitFirst is how many series a table asks the process's memory
+// line for first; every later ask doubles what it holds. What a table has
+// been admitted is then never more than twice what it uses - the line counts
+// an admission until the next collection, so room asked for and not used
+// would crowd out what does use it - and a table of n series asks about
+// log2(n/64) times, off the path every point takes.
+const seriesAdmitFirst = 64
 
 // summarizer builds a readSummary from delivered series, and, from
 // seriesFrom on, a summary per series: which series a read had, and what.
 //
 // The series table has no bound of its own. It grows as the process's
-// memory line admits it, a step at a time; once the line refuses, the read
-// stops summing series (seriesRefused) and keeps its buckets, so the sample
-// goes on and only what the series would have told is not known.
+// memory line admits it, doubling; once the line refuses, the read stops
+// summing series - the table is dropped - and keeps its buckets, so the
+// sample goes on and only what the series would have told is not known.
 type summarizer struct {
-	valueField    string
-	buckets       readSummary
-	series        map[uint64]seriesSummary
-	seriesFrom    int64
-	admit         func(bytes uint64) bool
-	granted       int
-	seriesRefused bool
-	buffer        []byte
-	faulted       bool
+	valueField string
+	buckets    readSummary
+	series     map[uint64]seriesSummary
+	seriesFrom int64
+	admit      func(bytes uint64) bool
+	granted    int
+	buffer     []byte
+	faulted    bool
 }
 
 func newSummarizer(valueField string) *summarizer {
@@ -93,14 +95,16 @@ func (summarizer *summarizer) trackSeries(from int64, admit func(bytes uint64) b
 	return summarizer
 }
 
-// grow asks for room for seriesAdmitStep more series, and stops the series
-// sums for good when it is refused.
+// grow asks for room for as many series again as the table was admitted,
+// seriesAdmitFirst the first time, and stops the series sums for good when
+// it is refused.
 func (summarizer *summarizer) grow() bool {
-	if summarizer.admit != nil && !summarizer.admit(seriesAdmitStep*seriesEntryBytes) {
-		summarizer.series, summarizer.seriesRefused = nil, true
+	step := max(summarizer.granted, seriesAdmitFirst)
+	if summarizer.admit != nil && !summarizer.admit(uint64(step)*seriesEntryBytes) {
+		summarizer.series = nil
 		return false
 	}
-	summarizer.granted += seriesAdmitStep
+	summarizer.granted += step
 	return true
 }
 
