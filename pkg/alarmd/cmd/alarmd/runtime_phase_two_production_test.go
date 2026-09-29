@@ -2804,6 +2804,16 @@ func TestProductionMaintainLeaseRetriesTransientRenewFailureInsideTTL(t *testing
 	waitPhaseTwoCondition(t, 3*time.Second, "lease renewal recovery", func() bool {
 		return countLeaseRenewalObservations(fixture.observations(), observability.ResultSuccess, observability.ReasonNone) > 0
 	})
+	// Every renewal line names the lease it is about: the Query Group and
+	// the owner renewing it, failed and renewed alike.
+	for _, observation := range fixture.observations() {
+		if observation.Stage != observability.StageLeaseRenewed {
+			continue
+		}
+		if observation.Trace.QueryGroupKey != "query-group-1" || observation.Trace.OwnerID == "" || observation.Trace.OwnerEpoch == 0 {
+			t.Fatalf("lease renewal %s names %+v, want the Query Group and its owner", observation.Result, observation.Trace)
+		}
+	}
 	select {
 	case err := <-leaseDone:
 		t.Fatalf("MaintainLease() returned %v after the store recovered", err)
@@ -2886,6 +2896,16 @@ func TestProductionMaintainControlLeaderRetriesTransientRenewFailureInsideTTL(t 
 	waitPhaseTwoCondition(t, 3*time.Second, "control leader renewal recovery", func() bool {
 		return countLeaseRenewalObservations(fixture.observations(), observability.ResultSuccess, observability.ReasonNone) > 0
 	})
+	// The control leader's renewal lines name its lease too: the leader key
+	// and the owner renewing it.
+	for _, observation := range fixture.observations() {
+		if observation.Stage != observability.StageLeaseRenewed {
+			continue
+		}
+		if observation.Trace.QueryGroupKey == "" || observation.Trace.OwnerID == "" || observation.Trace.OwnerEpoch == 0 {
+			t.Fatalf("control leader renewal %s names %+v, want the leader key and its owner", observation.Result, observation.Trace)
+		}
+	}
 
 	failure.set(transient)
 	fixture.clock.Advance(2 * time.Minute)

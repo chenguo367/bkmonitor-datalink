@@ -470,6 +470,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_open_alert_set_refresh_total"] = "variableLabels: {result}"
 	expected["bkmonitor_alarmd_open_alert_set_lookup_total"] = "variableLabels: {answer}"
 	expected["bkmonitor_alarmd_effective_close_total"] = "variableLabels: {outcome}"
+	expected["bkmonitor_alarmd_log_lines_total"] = "variableLabels: {stage,admission}"
 	expected["bkmonitor_alarmd_absent_strategy_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_target_scope_close_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_absent_strategy_difference"] = "variableLabels: {side}"
@@ -1083,6 +1084,8 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	bounds[fqName("open_alert_set_refresh_total")] = 3
 	bounds[fqName("open_alert_set_lookup_total")] = len(openalerts.Answers)
 	bounds[fqName("effective_close_total")] = len(observability.EffectiveCloseOutcomes)
+	// Every stage of the closed list, _other among them, written and limited.
+	bounds[fqName("log_lines_total")] = 2 * len(observability.AllStages())
 	bounds[fqName("absent_strategy_close_total")] = len(absentalerts.Outcomes)
 	bounds[fqName("target_scope_close_total")] = len(scopeclose.Outcomes)
 	bounds[fqName("absent_strategy_round_total")] = len(absentalerts.Refusals)
