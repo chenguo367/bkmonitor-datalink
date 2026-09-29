@@ -25,6 +25,24 @@ var ErrActiveStrategyIDInvalid = errors.New("alarmd controlplane: active strateg
 // reader needs enough to find it, not all of it.
 const invalidActiveStrategyIDText = 64
 
+// legacyStrategyMGetChunk bounds one MGET of strategy documents.
+//
+// A full read used to ask for every document in one MGET. Redis builds that
+// reply in one go and every other client of the instance waits behind it, and
+// the strategy cache is a shared instance - it can be the very database that
+// holds alarmd's own runtime state. A strategy document is a few kilobytes,
+// so ten thousand strategies would be a single reply of tens of megabytes;
+// five hundred keys keep one reply to a few megabytes, which the instance
+// serves between other commands. A read of no more than this many documents
+// is one MGET, as before.
+//
+// One MGET was one instant of the store; chunks are several. A publication
+// that lands between two chunks can leave one round with documents from both.
+// Each is a document the writer published, and the round cannot mistake the
+// mix for the current state for long: its change signal was read before the
+// documents, so the next round finds it moved and reads them all again.
+const legacyStrategyMGetChunk = 500
+
 type legacyRedisCommands interface {
 	Get(context.Context, string) *redis.StringCmd
 	MGet(context.Context, ...string) *redis.SliceCmd
@@ -97,9 +115,14 @@ func (source *LegacyRedisStrategySource) Strategies(ctx context.Context, ids []s
 		}
 		keys[index] = source.strategyKeyStem + id
 	}
-	values, err := source.client.MGet(ctx, keys...).Result()
-	if err != nil {
-		return nil, fmt.Errorf("alarmd controlplane: read legacy strategy objects: %w", err)
+	values := make([]interface{}, 0, len(keys))
+	for start := 0; start < len(keys); start += legacyStrategyMGetChunk {
+		chunk := keys[start:min(start+legacyStrategyMGetChunk, len(keys))]
+		read, err := source.client.MGet(ctx, chunk...).Result()
+		if err != nil {
+			return nil, fmt.Errorf("alarmd controlplane: read legacy strategy objects: %w", err)
+		}
+		values = append(values, read...)
 	}
 	if len(values) != len(ids) {
 		return nil, ErrObservationUnstable
