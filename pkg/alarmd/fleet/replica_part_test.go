@@ -10,6 +10,7 @@
 package fleet
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -29,6 +30,14 @@ func partReplicas() []Snapshot {
 		later.QueryCooldown = &observability.QueryCooldownFacts{Until: now.Add(time.Hour)}
 		snapshot.Demoted = append(snapshot.Demoted, later)
 		snapshot.TotalDemoted++
+		// Two periods on each replica, one of them shared, and each replica's
+		// census of them.
+		for row := range snapshot.Anomalies {
+			interval := int64(60 * (1 + (row+index)%2))
+			snapshot.Anomalies[row].Wake = &WakeFacts{Known: true, IntervalSeconds: interval, DueAt: now.Add(time.Minute)}
+		}
+		snapshot.Schedule = &ScheduleCensus{Waiting: 90, Cooling: 2, Cohorts: []ScheduleCohort{
+			{IntervalSeconds: 60, Objects: 50 + index, Cooling: 1}, {IntervalSeconds: 120, Objects: 40, Cooling: 1}}}
 		for n := 0; n <= index; n++ {
 			snapshot.NoData = append(snapshot.NoData, Anomaly{QueryGroup: snapshot.Replica + "-empty-" + string(rune('a'+n)),
 				Kind: KindEmptyEveryRound, ReasonCode: "FULL_EMPTY_COMPLETED", Replica: snapshot.Replica})
@@ -87,6 +96,17 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 	if merged.Impact.Impact() != ImpactOf(whole, now) {
 		t.Errorf("impact %+v, whole view %+v", merged.Impact.Impact(), ImpactOf(whole, now))
 	}
+	columns := viewColumns(&whole)
+	sameJSON(t, "cohorts", merged.Cohorts(whole.Schedule), Cohorts(&whole, columns))
+	sameJSON(t, "cooling", merged.CoolingAt(whole.Schedule, now), Cooling(&whole, columns, now))
+	// The pooled rows carry no period and make a cohort of their own at 0.
+	if cohorts := Cohorts(&whole, columns); len(cohorts) != 3 || cohorts[1].Listed == 0 || cohorts[2].Listed == 0 ||
+		cohorts[1].Objects != 153 {
+		t.Fatalf("fixture cohorts %+v, want two periods with rows and their census, and the pooled rows at 0", cohorts)
+	}
+	if cooling := Cooling(&whole, columns, now); cooling.Listed < 6 || cooling.OldestSinceSeconds == 0 {
+		t.Fatalf("fixture cooling %+v, want every pooled row cooling and an oldest reason", cooling)
+	}
 	// Numbers the fixture must reach, or the equalities above are between
 	// zeros: several due with different waits, several empty rows, and rows
 	// on each side of the verdict.
@@ -94,5 +114,16 @@ func TestReplicaPartsAddUpToTheWholeViewsRowNumbers(t *testing.T) {
 		OursCount(whole.Anomalies) == 0 || OursCount(whole.Anomalies) == len(whole.Anomalies) {
 		t.Fatalf("fixture: due %d oldest %ds, empty %d, ours %d of %d", whole.DemotedDue, whole.DemotedDueOldestSeconds,
 			whole.EmptyEveryRoundTotal, OursCount(whole.Anomalies), len(whole.Anomalies))
+	}
+}
+
+// sameJSON compares two readings as the route serves them, so an empty map
+// and a missing one are the same answer, as they are on the wire.
+func sameJSON(t *testing.T, what string, got, want any) {
+	t.Helper()
+	encodedGot, _ := json.Marshal(got)
+	encodedWant, _ := json.Marshal(want)
+	if string(encodedGot) != string(encodedWant) {
+		t.Errorf("%s from parts:\n%s\nfrom the whole view:\n%s", what, encodedGot, encodedWant)
 	}
 }

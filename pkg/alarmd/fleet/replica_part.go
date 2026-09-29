@@ -33,6 +33,11 @@ type ReplicaPart struct {
 	// DemotedDueSince the earliest end among them, zero when none has.
 	DemotedDue      int
 	DemotedDueSince time.Time
+	// CohortRows and Cooling are the rows' sides of Cohorts and Cooling; the
+	// census they are joined with is the replicas' schedule, which is not a
+	// row count and is aggregated with it.
+	CohortRows map[int64]*CohortView
+	Cooling    coolingRows
 }
 
 // AttributionTally is the anomaly column's rows by attribution: Ours and
@@ -66,6 +71,9 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 		}
 	}
 	part.EmptyEveryRound = countEmptyEveryRound(view.NoData)
+	columns := viewColumns(&view)
+	part.CohortRows = cohortRowsOf(columns)
+	part.Cooling = coolingRowsOf(columns, now)
 	for _, demoted := range view.Demoted {
 		if cooldown := demoted.QueryCooldown; cooldown != nil && !cooldown.Until.IsZero() && cooldown.Until.Before(now) {
 			part.DemotedDue++
@@ -79,7 +87,7 @@ func ReplicaPartOf(view View, now time.Time) ReplicaPart {
 
 // MergeReplicaParts adds replicas' parts into the deployment's.
 func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
-	merged := ReplicaPart{}
+	merged := ReplicaPart{CohortRows: map[int64]*CohortView{}}
 	tallies := make([]ImpactTally, 0, len(parts))
 	for _, part := range parts {
 		merged.Attribution.Ours += part.Attribution.Ours
@@ -92,6 +100,8 @@ func MergeReplicaParts(parts ...ReplicaPart) ReplicaPart {
 		if !part.DemotedDueSince.IsZero() && (merged.DemotedDueSince.IsZero() || part.DemotedDueSince.Before(merged.DemotedDueSince)) {
 			merged.DemotedDueSince = part.DemotedDueSince
 		}
+		mergeCohortRows(merged.CohortRows, part.CohortRows)
+		mergeCoolingRows(&merged.Cooling, part.Cooling)
 	}
 	merged.Impact = MergeImpactTallies(tallies...)
 	return merged
@@ -104,4 +114,15 @@ func (part ReplicaPart) DemotedDueOldestSeconds(now time.Time) int {
 		return 0
 	}
 	return int(now.Sub(part.DemotedDueSince).Seconds())
+}
+
+// Cohorts joins the replicas' schedule census with the part's rows.
+func (part ReplicaPart) Cohorts(schedule *ScheduleCensus) []CohortView {
+	return cohortsOf(schedule, part.CohortRows)
+}
+
+// CoolingAt is Cooling from the part's rows and the replicas' schedule,
+// measured at now.
+func (part ReplicaPart) CoolingAt(schedule *ScheduleCensus, now time.Time) CoolingFacts {
+	return coolingOf(schedule, part.Cooling, now)
 }
