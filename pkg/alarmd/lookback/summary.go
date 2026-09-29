@@ -198,9 +198,24 @@ func changedBuckets(earlier, later readSummary, limit int) []int64 {
 	return changed
 }
 
-// valueBits is a value as the bits it is compared by: a number's IEEE bits,
-// so the same number rendered two ways is one value, with -0 read as 0 and
-// every NaN as one; anything else by a hash of its text.
+// valueFractionBits is how many of a number's 52 fraction bits it is compared
+// by. The store sums a query's series in no fixed order, so one window read
+// twice comes back different in its last bits: in one deployment, three
+// reads of the same twenty-minute-old window of a sum by one dimension over
+// many series differed at every point, by at most about 1.4e-15 of the
+// value. Compared bit for bit, every rung of such a group found a value
+// revised after it was judged, and the group was reported read early with a
+// time_delay of minutes. Rounded to 28 fraction bits, one part in 2^28 or
+// about 3.7e-9 of the value, those reads agree; a revision smaller than that
+// is not one a threshold turns on. Two reads whose noise straddles a
+// rounding boundary still differ, about once in ten million values at that
+// noise.
+const valueFractionBits = 28
+
+// valueBits is a value as the bits it is compared by: a number's IEEE bits
+// rounded to valueFractionBits, so the same number rendered two ways, or
+// summed in another order, is one value, with -0 read as 0, every NaN as
+// one and an infinity as itself; anything else by a hash of its text.
 func valueBits(text []byte) uint64 {
 	if number, err := strconv.ParseFloat(string(text), 64); err == nil {
 		switch {
@@ -208,8 +223,21 @@ func valueBits(text []byte) uint64 {
 			return 0
 		case math.IsNaN(number):
 			return math.Float64bits(math.NaN())
-		default:
+		case math.IsInf(number, 0):
 			return math.Float64bits(number)
+		default:
+			// Half of the dropped part added before it is cleared rounds to
+			// the nearest; a carry out of the fraction moves the exponent
+			// up, which is the next representable value in order. Only the
+			// largest finite numbers could carry into infinity, and they are
+			// kept as they are.
+			const dropped = 52 - valueFractionBits
+			bits := math.Float64bits(number)
+			rounded := (bits + 1<<(dropped-1)) &^ (1<<dropped - 1)
+			if math.IsInf(math.Float64frombits(rounded), 0) {
+				return bits
+			}
+			return rounded
 		}
 	}
 	return hashBytes(text) ^ 0xa0761d6478bd642f
