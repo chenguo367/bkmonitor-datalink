@@ -179,3 +179,31 @@ func TestRedisMemoryNearTheLimitIsReportedPastItsLine(t *testing.T) {
 		t.Errorf("standings %+v", memory)
 	}
 }
+
+// The publisher's own record rides in the deployment section beside the
+// source standing, whole: it is how a reader learns why the source holds
+// what it holds when the source itself cannot say.
+func TestDiagnoseEnvironmentKeepsThePublisherRecordBesideTheSourceStanding(t *testing.T) {
+	page := map[string]any{"universe": map[string]any{"status": "ok", "count": 0},
+		"page": map[string]any{"holds": true, "ids_expected": 0, "rows": 0}, "strategies": []any{}}
+	record := map[string]any{"state": "provided", "label": "写方自述", "outcome": "blocked", "reason": "SPLIT_RECORDS_NOT_BACKFILLED"}
+	native := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/diagnose":
+			_ = json.NewEncoder(w).Encode(page)
+		case "/api/health":
+			_ = json.NewEncoder(w).Encode(map[string]any{"health": "HEALTHY", "source_standing": map[string]any{"kind": "NOTHING_LISTED"},
+				"source_publisher": record, "source_publisher_replica": "pod-a"})
+		default:
+			w.WriteHeader(404)
+		}
+	})
+	c := testChannel(t, &testAuth{}, DiagnoseOperation(native, nil))
+	_, out := call(t, c, envelope(c, "invoke", "diagnose.environment", Params{}))
+	result := out.Result.(map[string]any)
+	fleetFacts := result["deployment"].(map[string]any)["fleet"].(map[string]any)
+	kept, _ := fleetFacts["source_publisher"].(map[string]any)
+	if kept["label"] != "写方自述" || kept["reason"] != "SPLIT_RECORDS_NOT_BACKFILLED" || fleetFacts["source_standing"] == nil {
+		t.Fatalf("fleet = %v, want the publisher record beside the standing", fleetFacts)
+	}
+}

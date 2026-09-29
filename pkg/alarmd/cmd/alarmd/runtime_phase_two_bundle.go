@@ -401,6 +401,9 @@ func openProductionPhaseTwoBundleWithDependencies(
 	if err != nil {
 		return nil, err
 	}
+	if reader, ok := strategySource.(controlplane.PublisherReportSource); ok {
+		recorder.SetStrategyPublisherSource(reader)
+	}
 	// The compiler reads the copy when each control round opens, so a
 	// setting the platform changes reaches the plans on the next round:
 	// every strategy recompiles under it and the cutover carries the new
@@ -1318,6 +1321,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 		leaderRound:      bundle.leaderRoundFleetFacts,
 		viewStream:       viewStreamFleetFacts(bundle.dependencies.ViewStreamStats, external.Now),
 		source:           bundle.sourceFleetFacts,
+		sourcePublisher:  sourcePublisherFleetFacts(strategySource),
 		endpoints: withLinkdConsole(endpointFactsSource(cfg, sharing, recorder, cmdbIndex, platformSettings,
 			bundle.sourceFleetFacts, events.State, openAlertFacts, external.Now),
 			linkd.Console, linkd.Location, external.Now),

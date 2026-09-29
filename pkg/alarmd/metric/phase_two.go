@@ -211,6 +211,9 @@ type phaseTwoMetrics struct {
 	// catalogComposition reports what the Catalog the leader last built is
 	// made of; see catalog_composition.go.
 	catalogComposition *catalogCompositionCollector
+	// strategyPublisher reports the strategy cache publisher's record of
+	// its runs; see strategy_publisher.go.
+	strategyPublisher *strategyPublisherCollector
 }
 
 var activeQGSetDurationBuckets = []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 5, 30}
@@ -1429,6 +1432,7 @@ func newPhaseTwoMetrics() phaseTwoMetrics {
 			"compiles again, instead of the whole Catalog failing to build as it did before.",
 	})
 	metrics.catalogComposition = newCatalogCompositionCollector()
+	metrics.strategyPublisher = newStrategyPublisherCollector()
 	metrics.seriesAdmission = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "series_admission_total",
 		Help: "Access-path admission decisions by filter, outcome and bounded reason.",
@@ -1731,7 +1735,7 @@ func (m phaseTwoMetrics) collectors() []prometheus.Collector {
 		m.redisPool, m.renewalGate, m.canonicalEncoding, m.legacyPodCache,
 		m.seriesAdmission, m.cmdbIndexHosts, m.cmdbIndexServiceInstances, m.cmdbIndexBusinessMappings, m.cmdbIndexRecordsRefused, m.hostDisableMonitorStates, m.cmdbIndexAge,
 		m.fleetSnapshotBytes, m.fleetViewSnapshotLoads, m.fleetViewSnapshotBytes, m.retainedPeakCensusGroups, m.retainedPeakCensusOverflow,
-		m.cmdbIndexDegraded, m.catalogComposition, m.noDataMemoryReads, m.noDataMemoryRenewals,
+		m.cmdbIndexDegraded, m.catalogComposition, m.strategyPublisher, m.noDataMemoryReads, m.noDataMemoryRenewals,
 		m.queryFreeCompletions, m.executionEvidenceWrites, m.outputEventsByWireFormat, m.outputEventsWithoutMessage, m.outputEventsByKind, m.outputEventsRejected, m.outputRejectedStrategyOverflow, m.frozenStateRenewals, m.frozenStateCensus)...)
 }
 

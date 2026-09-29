@@ -310,6 +310,12 @@ type HealthResponse struct {
 	// whether the cache can update the run, and the two sentences the first
 	// screen shows for the run and for the cache. Absent without a round.
 	SourceStanding *SourceStanding `json:"source_standing,omitempty"`
+	// SourcePublisher is the strategy cache publisher's own word on its
+	// last run (写方自述), and SourcePublisherReplica which replica read it.
+	// Beside the standing because it says what the standing cannot: why the
+	// source holds what it holds. Absent until a replica reads the source.
+	SourcePublisher        *SourcePublisherReport `json:"source_publisher,omitempty"`
+	SourcePublisherReplica string                 `json:"source_publisher_replica,omitempty"`
 	// NoDataTracking is the fleet's one line on the no-data tracking horizon:
 	// how many Plans decide against which kind of horizon and what their last
 	// deciding rounds counted, summed over the counted replicas. Absent when
@@ -941,6 +947,7 @@ func NewHandler(
 			LeaderRound: view.LeaderRound, LeaderRoundReplica: view.LeaderRoundReplica,
 			ViewStream: view.ViewStream, ViewStreamReplica: view.ViewStreamReplica,
 			Source: view.Source, SourceReplica: view.SourceReplica, SourceStanding: view.SourceStanding,
+			SourcePublisher: view.SourcePublisher, SourcePublisherReplica: view.SourcePublisherReplica,
 			NoDataTracking: view.NoDataTracking,
 			Dependencies:   dependencyList(view.Dependencies), DependenciesReplica: view.DependenciesReplica,
 			DependenciesReplicas: view.DependenciesReplicas, LinkdConsole: view.LinkdConsole, ReplicasNotReady: view.ReplicasNotReady,
