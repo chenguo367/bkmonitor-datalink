@@ -211,6 +211,7 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// anomaly list costs no reads of its own. It forwards every observation
 	// untouched: diagnostics must not change what the pipeline reports.
 	fleetTracker := fleet.NewTracker(baseObserver, cfg.PhaseTwo.Worker.ID, external.Now)
+	recorder.SetRoundMemorySource(fleetTracker.RoundMemory)
 	var observer observability.Observer = fleetTracker
 	targetFlow, err := observability.NewTargetFlow(logger)
 	if err != nil {

@@ -87,9 +87,9 @@ func TestAWindowShortOnlyBeforeThisProcessWaits(t *testing.T) {
 // unusable point: none of these is a wait.
 func TestTheUnnamedMinutesBeforeThisProcessAreToldApart(t *testing.T) {
 	rounds := []roundMark{
-		{slot: 600, end: 540, kind: "FULL_COMPLETED", primary: primary("FULL", "DATA")},
-		{slot: 660, end: 600, kind: "COMPLETED_WITH_UNAVAILABLE", primary: primary("PARTIAL", "DATA")},
-		{slot: 780, end: 720, kind: "FULL_EMPTY_COMPLETED", primary: primary("FULL", "EMPTY")},
+		mark(540, "FULL_COMPLETED", "", primary("FULL", "DATA"), false),
+		mark(600, "COMPLETED_WITH_UNAVAILABLE", "", primary("PARTIAL", "DATA"), false),
+		mark(720, "FULL_EMPTY_COMPLETED", "", primary("FULL", "EMPTY"), false),
 	}
 	facts := func(minutes ...int64) *observability.HistoryCoverageFacts {
 		return &observability.HistoryCoverageFacts{Levels: 10, Short: 10, End: 720, MissingMinutes: minutes,
@@ -139,11 +139,11 @@ func TestTheUnnamedMinutesBeforeThisProcessAreToldApart(t *testing.T) {
 // checks its words against: one of each, each named in HoleCauses.
 func TestEveryCauseAHoleIsFiledUnderIsListed(t *testing.T) {
 	rounds := []roundMark{
-		{slot: 600, end: 540, kind: "FULL_COMPLETED", primary: primary("FULL", "DATA")},
-		{slot: 660, end: 600, kind: "FULL_EMPTY_COMPLETED", primary: primary("FULL", "EMPTY")},
-		{slot: 720, end: 660, kind: "COMPLETED_WITH_UNAVAILABLE", primary: primary("PARTIAL", "DATA")},
-		{slot: 780, end: 720, kind: "FULL_COMPLETED"},
-		{slot: 900, end: 840, kind: "FULL_COMPLETED", primary: primary("FULL", "DATA")},
+		mark(540, "FULL_COMPLETED", "", primary("FULL", "DATA"), false),
+		mark(600, "FULL_EMPTY_COMPLETED", "", primary("FULL", "EMPTY"), false),
+		mark(660, "COMPLETED_WITH_UNAVAILABLE", "", primary("PARTIAL", "DATA"), false),
+		mark(720, "FULL_COMPLETED", "", nil, false),
+		mark(840, "FULL_COMPLETED", "", primary("FULL", "DATA"), false),
 	}
 	rows := windowRows(rounds, &observability.HistoryCoverageFacts{Levels: 1, Short: 1, End: 840,
 		Windows: []observability.HistoryWindowFact{{Series: "c", Level: 1, Valid: 1, Required: 9, End: 840,

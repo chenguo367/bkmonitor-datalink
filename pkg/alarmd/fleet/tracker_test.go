@@ -1397,7 +1397,7 @@ func TestEveryPublishedWindowCountReachesTheRow(t *testing.T) {
 		// UnlistedHolesAnswered and UnlistedHolesBeforeThisProcess, and not
 		// rendered on their own either.
 		switch name {
-		case "End", "MissingMinutes", "MissingMinutesTruncated", "ShortUnusable":
+		case "End", "WindowStart", "MissingMinutes", "MissingMinutesTruncated", "ShortUnusable":
 			continue
 		}
 		if !published.FieldByName(name).IsValid() {

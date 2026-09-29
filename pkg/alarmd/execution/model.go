@@ -2349,6 +2349,21 @@ type HistoryCoverage struct {
 	// summarised a window, full or short, so the round can be matched to
 	// the minute a later hole names.
 	End int64
+	// WindowStart is the oldest position any window of this run reaches
+	// back to, full or short: no hole of this run's windows is older. A
+	// reader that matches holes to the rounds of their minutes needs the
+	// rounds from here to End and no older ones; zero when no window said.
+	WindowStart int64
+}
+
+// ObserveWindowStart notes where one window reaches back to.
+func (coverage *HistoryCoverage) ObserveWindowStart(start int64) {
+	if coverage == nil || start <= 0 {
+		return
+	}
+	if coverage.WindowStart == 0 || start < coverage.WindowStart {
+		coverage.WindowStart = start
+	}
 }
 
 // MaxCoverageWindows bounds how many short windows a round names, and
@@ -2609,6 +2624,7 @@ func (coverage *HistoryCoverage) Merge(other HistoryCoverage) {
 	if other.End > coverage.End {
 		coverage.End = other.End
 	}
+	coverage.ObserveWindowStart(other.WindowStart)
 }
 
 type EvaluationResult struct {

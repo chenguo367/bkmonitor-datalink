@@ -881,9 +881,11 @@ type HistoryCoverage struct {
 	// -- which minutes, and did this side ask for them.
 	Windows []WindowRow `json:"windows,omitempty"`
 	// RoundsRemembered is how many recent rounds the holes were read against,
-	// and RoundsKept the most this process keeps per object. A hole older
-	// than the remembered rounds reads NOT_IN_MEMORY, which is a limit of
-	// the reader, not a finding about the round.
+	// and RoundsKept the most this process keeps for the object: every round
+	// from where its windows start, when the worker says where (then the two
+	// are equal), else the last RecentRoundsKept. A hole older than the
+	// remembered rounds reads NOT_IN_MEMORY, which is a limit of the reader,
+	// not a finding about the round.
 	RoundsRemembered int `json:"rounds_remembered,omitempty"`
 	RoundsKept       int `json:"rounds_kept,omitempty"`
 	// UnlistedHolesAnswered says every short window the round did not name
