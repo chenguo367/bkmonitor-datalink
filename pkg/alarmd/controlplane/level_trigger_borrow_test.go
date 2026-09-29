@@ -130,6 +130,23 @@ func TestALevelWithoutItsOwnTriggerRunsOnTheFirstOne(t *testing.T) {
 		}
 	})
 
+	// Detects are compared by what the platform reads of them: two that
+	// differ only in a key it passes over are one trigger.
+	t.Run("a level written twice differing only in a key the platform does not read is one trigger", func(t *testing.T) {
+		const ownKey = `"uptime":{"calendars":[],"time_ranges":[{"start":"09:00","end":"18:00"}],"own_calendars":[7]}`
+		catalog := build(t, `{"level":2,"connector":"and","trigger_config":{"count":2,"check_window":6,`+allDay+`}},`+
+			`{"level":2,"connector":"and","trigger_config":{"count":2,"check_window":6,`+ownKey+`}}`)
+		_, trigger, _ := levelOf(t, catalog)
+		if trigger["uptime"] == nil {
+			t.Fatalf("trigger=%v", trigger)
+		}
+		for _, disposition := range catalog.Dispositions {
+			if disposition.Disposition != controlplane.DispositionAccepted {
+				t.Fatalf("two detects saying the same thing were refused: %#v", catalog.Dispositions)
+			}
+		}
+	})
+
 	t.Run("a level written twice with different recoveries is refused", func(t *testing.T) {
 		missing(t, build(t, `{"level":2,"trigger_config":{"count":1,"check_window":5},"recovery_config":{"check_window":3}},`+
 			`{"level":2,"trigger_config":{"count":1,"check_window":5},"recovery_config":{"check_window":4}}`))

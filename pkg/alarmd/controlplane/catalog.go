@@ -1906,6 +1906,36 @@ type legacyRecovery struct {
 	CheckWindow uint32 `json:"check_window"`
 }
 
+// onlyKeysThePlatformReads drops the keys of a legacy object that Python does
+// not read. Python reads these objects key by key and passes over the rest,
+// and writers carry keys of their own beside the ones it reads (one writes a
+// calendar list of its own into every uptime); the compiler decodes them
+// strictly, so a key left in refused the whole Level. An object that carries nothing
+// else comes back byte for byte, and its plans do not change. So does one
+// carrying none of the keys, which Python fails on (a non-empty uptime without
+// time_ranges is a KeyError), and so does what is not an object: the compiler
+// refuses both, as before.
+func onlyKeysThePlatformReads(raw json.RawMessage, keys []string) json.RawMessage {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || len(fields) == 0 {
+		return raw
+	}
+	read := make(map[string]json.RawMessage, len(keys))
+	for _, key := range keys {
+		if value, ok := fields[key]; ok {
+			read[key] = value
+		}
+	}
+	if len(read) == len(fields) || len(read) == 0 {
+		return raw
+	}
+	encoded, err := json.Marshal(read)
+	if err != nil {
+		return raw
+	}
+	return encoded
+}
+
 func decodeLegacyStrategy(document json.RawMessage) (legacyStrategy, error) {
 	decoder := json.NewDecoder(strings.NewReader(string(document)))
 	decoder.UseNumber()
@@ -1915,6 +1945,9 @@ func decodeLegacyStrategy(document json.RawMessage) (legacyStrategy, error) {
 	}
 	if value.ID <= 0 || value.BusinessID == 0 || len(value.Items) == 0 {
 		return value, errors.New("alarmd controlplane: incomplete legacy strategy")
+	}
+	for index := range value.Detects {
+		value.Detects[index].Trigger.Uptime = onlyKeysThePlatformReads(value.Detects[index].Trigger.Uptime, strategy.UptimeKeys())
 	}
 	if len(value.SnapshotRevision) != 0 {
 		var revision int64
@@ -2376,7 +2409,7 @@ func compileAlgorithmConfig(
 	}
 	if strategy.IsTraditionalComparison(raw.Type) {
 		var sourceConfig map[string]json.RawMessage
-		if err := json.Unmarshal(raw.Config, &sourceConfig); err != nil {
+		if err := json.Unmarshal(onlyKeysThePlatformReads(raw.Config, strategy.TraditionalComparisonKeys()), &sourceConfig); err != nil {
 			return nil, err
 		}
 		for key, value := range map[string]any{"data_unit": unit, "algorithm_unit": raw.UnitPrefix, "precision": 6, "missing_history_as_zero": inputs.missingHistoryAsZero, "input_projection": algorithmProjection, "requirements": algorithmRequirements} {

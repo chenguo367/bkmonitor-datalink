@@ -89,6 +89,16 @@ func assertCompilesWithEvaluationCore(t *testing.T, plan contract.EvaluationPlan
 
 func compileWithEvaluationCore(t *testing.T, plan contract.EvaluationPlanV2, dataset contract.DatasetContractV2) *strategy.CompiledPlan {
 	t.Helper()
+	result := evaluationCoreResult(t, plan, dataset)
+	compiled, ok := result.Plan()
+	if !ok {
+		t.Fatalf("Evaluation Core rejected plan: terminal=%#v levels=%#v", result.PlanTerminal(), result.LevelTerminals())
+	}
+	return compiled
+}
+
+func evaluationCoreResult(t *testing.T, plan contract.EvaluationPlanV2, dataset contract.DatasetContractV2) strategy.CompileResult {
+	t.Helper()
 	compiler, err := strategy.NewCompiler(strategy.NewDefaultAlgorithmCompilerRegistry(), strategy.Limits{
 		MaxPlanBytes: 64 << 10, MaxLevelsPerPlan: 16, MaxAlgorithmsPerLevel: 8, MaxGroupsPerAlgorithm: 16,
 		MaxConditionsPerAlgorithm: 64, MaxASTNodesPerLevel: 256, MaxTriggerWindowSize: 4096,
@@ -106,11 +116,7 @@ func compileWithEvaluationCore(t *testing.T, plan contract.EvaluationPlanV2, dat
 	if err != nil {
 		t.Fatal(err)
 	}
-	compiled, ok := result.Plan()
-	if !ok {
-		t.Fatalf("Evaluation Core rejected plan: terminal=%#v levels=%#v", result.PlanTerminal(), result.LevelTerminals())
-	}
-	return compiled
+	return result
 }
 
 func TestBuildCatalogRejectsMissingRealTenantFact(t *testing.T) {
