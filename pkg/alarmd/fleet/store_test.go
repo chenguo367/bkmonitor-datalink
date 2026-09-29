@@ -417,3 +417,108 @@ func TestALoadWhoseTransportFailsPartWayIsNotCounted(t *testing.T) {
 		t.Fatalf("MGETs %v, meter loads %d; want the read stopped at the failure and nothing counted", client.mgets, meter.loads)
 	}
 }
+
+// A load asks the memory line for what its snapshots decode to -- their
+// lengths times snapshotDecodedCharge -- before reading any, and refused it
+// reads none and counts no read; admitted, it reads them all.
+func TestALoadAsksTheMemoryLineForWhatItsSnapshotsDecodeTo(t *testing.T) {
+	client := newFakeRedis()
+	store := mustStore(t, client, time.Minute, 0)
+	meter := &storeMeterRecord{}
+	store.Meter(meter)
+	total := 0
+	for _, replica := range replicas() {
+		encoded, _ := json.Marshal(Snapshot{Replica: replica, TakenAt: now, Owned: 1})
+		client.values[store.snapshotKey(replica)] = string(encoded)
+		total += len(encoded)
+	}
+	var asked []uint64
+	store.AdmitLoads(func(bytes uint64) bool {
+		asked = append(asked, bytes)
+		return false
+	})
+	if snapshots, err := store.Load(context.Background(), replicas()); !errors.Is(err, ErrSnapshotsDeferred) || snapshots != nil {
+		t.Fatalf("loaded %v with error %v, want the load deferred", snapshots, err)
+	}
+	if len(asked) != 1 || asked[0] != uint64(total*snapshotDecodedCharge) || len(client.mgets) != 0 || meter.loads != 0 {
+		t.Fatalf("asked %v for %d bytes, MGETs %v, loads %d; want one ask for the decoded size and nothing read or counted",
+			asked, total, client.mgets, meter.loads)
+	}
+	store.AdmitLoads(func(uint64) bool { return true })
+	if snapshots, err := store.Load(context.Background(), replicas()); err != nil || len(snapshots) != 2 || meter.loads != 1 {
+		t.Fatalf("loaded %d snapshots with error %v and %d loads, want both read and counted once", len(snapshots), err, meter.loads)
+	}
+}
+
+// A view whose load the memory line refused says so in its own gap, not as
+// replicas missing nor as a read that failed; nothing is counted and the
+// verdict is unknown.
+func TestAViewTheMemoryLineRefusedIsOneGapAndNothingElse(t *testing.T) {
+	client := newFakeRedis()
+	store := mustStore(t, client, time.Minute, 0)
+	for _, snapshot := range snapshotsWithAnomalies(2) {
+		snapshot.TakenAt = now
+		encoded, _ := json.Marshal(snapshot)
+		client.values[store.snapshotKey(snapshot.Replica)] = string(encoded)
+	}
+	store.AdmitLoads(func(uint64) bool { return false })
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}}, stubRegistry{replicas: replicas()}, store)
+	view := service.View(context.Background())
+	summarized, _ := service.Summarized(context.Background(), time.Minute)
+	for name, read := range map[string]View{"view": view, "summarized": summarized} {
+		if !hasGap(read, GapSnapshotsDeferred) || hasGap(read, GapReplicaMissing) || hasGap(read, GapSnapshotsUnreadable) ||
+			read.Health != HealthUnknown || read.AnomaliesTotal != 0 || read.Covered != 0 {
+			t.Errorf("%s: gaps %+v health %s anomalies %d covered %d, want the deferred gap, no replica missing, nothing counted",
+				name, read.Gaps, read.Health, read.AnomaliesTotal, read.Covered)
+		}
+	}
+	if MetricGapKind(GapSnapshotsDeferred) != string(GapSnapshotsDeferred) {
+		t.Fatalf("the deferred gap folds to %q on the metric label", MetricGapKind(GapSnapshotsDeferred))
+	}
+}
+
+// A diagnosis over a view the memory line deferred reads every Plan as not
+// read, and says it was deferred rather than unreadable.
+func TestADiagnosisOverADeferredViewSaysItWasDeferred(t *testing.T) {
+	facts := diagnosisFacts()["4101"]
+	for kind, detail := range map[GapKind]string{
+		GapSnapshotsDeferred:   "fleet snapshots deferred: no room under the observation memory line",
+		GapSnapshotsUnreadable: "fleet snapshots unreadable",
+	} {
+		ctx := newDiagnosisContext(&View{Gaps: []Gap{{Kind: kind}}}, "pod-a", now)
+		row := diagnoseStrategy("4101", facts, ctx)
+		if len(row.UnknownParts) == 0 || row.UnknownParts[0].Reason != UnknownReplicaUnreadable || row.UnknownParts[0].Detail != detail {
+			t.Errorf("%s: parts %+v, want every Plan unread with %q", kind, row.UnknownParts, detail)
+		}
+	}
+}
+
+// The verdict scrape's read never asks the memory line: with the line
+// refusing everything, pages read the deferred gap and the scrape's view is
+// the one it reads with room, the line never asked on its path.
+func TestTheVerdictScrapesReadNeverAsksTheMemoryLine(t *testing.T) {
+	client := newFakeRedis()
+	store := mustStore(t, client, time.Minute, 0)
+	for _, snapshot := range snapshotsWithAnomalies(2) {
+		snapshot.TakenAt = now
+		encoded, _ := json.Marshal(snapshot)
+		client.values[store.snapshotKey(snapshot.Replica)] = string(encoded)
+	}
+	service := mustService(t, stubExpectations{expectation: Expectation{QueryGroups: 949, Known: true}}, stubRegistry{replicas: replicas()}, store)
+	store.AdmitLoads(func(uint64) bool { return true })
+	withRoom := service.ViewAsPublished(context.Background(), time.Minute)
+	asked := 0
+	store.AdmitLoads(func(uint64) bool {
+		asked++
+		return false
+	})
+	if page := service.View(context.Background()); !hasGap(page, GapSnapshotsDeferred) || asked != 1 {
+		t.Fatalf("page read gaps %+v after %d asks, want the deferred gap from one ask", page.Gaps, asked)
+	}
+	asked = 0
+	scrape := service.ViewAsPublished(context.Background(), time.Minute)
+	if asked != 0 || hasGap(scrape, GapSnapshotsDeferred) {
+		t.Fatalf("the scrape's read asked the line %d times, gaps %+v; want it never asked", asked, scrape.Gaps)
+	}
+	sameJSON(t, "the scrape's view with the line refusing", scrape, withRoom)
+}

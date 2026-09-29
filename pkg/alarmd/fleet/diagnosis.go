@@ -151,12 +151,14 @@ const (
 
 // diagnosisContext is what every row of one page is decided against.
 type diagnosisContext struct {
-	view    *View
-	lines   map[string][]StrategyLine
-	stale   map[string]bool
-	unread  map[string]bool
-	replica string
-	now     time.Time
+	view   *View
+	lines  map[string][]StrategyLine
+	stale  map[string]bool
+	unread map[string]bool
+	// unreadAll says why no replica's snapshot was read, when none was.
+	unreadAll string
+	replica   string
+	now       time.Time
 }
 
 func newDiagnosisContext(view *View, replica string, now time.Time) diagnosisContext {
@@ -170,7 +172,9 @@ func newDiagnosisContext(view *View, replica string, now time.Time) diagnosisCon
 		case GapSnapshotStale:
 			ctx.stale[gap.Replica] = true
 		case GapSnapshotsUnreadable:
-			ctx.unread[""] = true
+			ctx.unread[""], ctx.unreadAll = true, "fleet snapshots unreadable"
+		case GapSnapshotsDeferred:
+			ctx.unread[""], ctx.unreadAll = true, "fleet snapshots deferred: no room under the observation memory line"
 		default:
 			if gap.Replica != "" {
 				ctx.unread[gap.Replica] = true
@@ -205,7 +209,7 @@ func diagnoseStrategy(id string, facts StrategyLookupFacts, ctx diagnosisContext
 		}
 		switch {
 		case ctx.unread[""]:
-			row.UnknownParts = append(row.UnknownParts, DiagnosisPart{What: plan.QueryGroup, Reason: UnknownReplicaUnreadable, Detail: "fleet snapshots unreadable"})
+			row.UnknownParts = append(row.UnknownParts, DiagnosisPart{What: plan.QueryGroup, Reason: UnknownReplicaUnreadable, Detail: ctx.unreadAll})
 		case plan.Replica != "" && ctx.unread[plan.Replica]:
 			row.UnknownParts = append(row.UnknownParts, DiagnosisPart{What: plan.QueryGroup, Reason: UnknownReplicaUnreadable, Detail: plan.Replica})
 		case plan.Replica != "" && ctx.stale[plan.Replica]:

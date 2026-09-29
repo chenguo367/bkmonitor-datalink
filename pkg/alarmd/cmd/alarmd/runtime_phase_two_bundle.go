@@ -1031,6 +1031,10 @@ func openProductionPhaseTwoBundleWithDependencies(
 	// everything else on this connection, so its traffic is invisible in the
 	// per-connection counters; these are written by it alone.
 	fleetStore.Meter(recorder)
+	// A whole view a reader asks for is read only when the memory line has
+	// room for what its snapshots decode to; refused, the view is a gap, not
+	// half of one. The verdict scrape reads without asking.
+	fleetStore.AdmitLoads(observationAdmit(observationMemory, memoryline.ConsumerFleetView))
 	// Freshness has to be shorter than the snapshot TTL, or a replica that
 	// stops publishing goes straight from fresh to absent and the stale branch
 	// never fires. The two say different things: stale means alive but stuck,

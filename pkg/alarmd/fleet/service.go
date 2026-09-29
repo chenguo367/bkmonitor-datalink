@@ -29,6 +29,13 @@ const GapRegistryUnavailable GapKind = "REGISTRY_UNAVAILABLE"
 // field left to say the read itself had failed.
 const GapSnapshotsUnreadable GapKind = "SNAPSHOTS_UNREADABLE"
 
+// GapSnapshotsDeferred means this process did not read the snapshots this
+// time: the observation memory line had no room for what they decode to
+// (ErrSnapshotsDeferred). Like an unreadable read it says nothing of any
+// replica, and asked again it may read them. Read whole or not read: a view
+// of half the replicas would count as if it were all of them.
+const GapSnapshotsDeferred GapKind = "SNAPSHOTS_DEFERRED"
+
 // ExpectationSource reads the authoritative object set from the control plane.
 //
 // It is deliberately not derived from the calling replica's own state: on a
@@ -47,6 +54,12 @@ type ReplicaRegistry interface {
 // SnapshotReader reads published snapshots for the given replicas.
 type SnapshotReader interface {
 	Load(ctx context.Context, replicas []string) ([]Snapshot, error)
+}
+
+// unadmittedReader is a SnapshotReader that can also read without asking
+// the observation memory line (RedisStore.LoadUnadmitted).
+type unadmittedReader interface {
+	LoadUnadmitted(ctx context.Context, replicas []string) ([]Snapshot, error)
 }
 
 // SummaryReader reads what replicas publish beside their snapshots: their
@@ -196,14 +209,21 @@ func (service *Service) View(ctx context.Context) View {
 // ViewAsPublished is View with each replica's rows decided at the moment it
 // published them, as its summary decides them (publishedView): the view a
 // reader that counts rows reads to agree with the health route, which reads
-// the summaries. Its rows are decided already; no Decide follows.
+// the summaries. Its rows are decided already; no Decide follows. It is the
+// verdict scrape's, and reads without asking the observation memory line:
+// a verdict unknown for want of observation memory is an alert that follows
+// the load, not alarmd.
 func (service *Service) ViewAsPublished(ctx context.Context, stallAfter time.Duration) View {
 	at := service.now()
 	replicas, replicasErr, expectation, expectationErr := service.sources(ctx, at)
 	if replicasErr != nil {
 		return registryUnavailable(expectation, replicasErr)
 	}
-	snapshots, snapshotsErr := service.snapshots.Load(ctx, replicas)
+	load := service.snapshots.Load
+	if unadmitted, ok := service.snapshots.(unadmittedReader); ok {
+		load = unadmitted.LoadUnadmitted
+	}
+	snapshots, snapshotsErr := load(ctx, replicas)
 	if snapshotsErr != nil {
 		snapshots = nil
 	}
@@ -238,7 +258,11 @@ func readFailed(view *View, snapshotsErr, expectationErr error) {
 				kept = append(kept, gap)
 			}
 		}
-		view.Gaps = append(kept, Gap{Kind: GapSnapshotsUnreadable, Detail: gapDetail(snapshotsErr)})
+		failed := Gap{Kind: GapSnapshotsUnreadable, Detail: gapDetail(snapshotsErr)}
+		if errors.Is(snapshotsErr, ErrSnapshotsDeferred) {
+			failed = Gap{Kind: GapSnapshotsDeferred}
+		}
+		view.Gaps = append(kept, failed)
 		// Said here and not left to the aggregation: a view that read no
 		// snapshot cannot tell, whatever the aggregation made of an empty
 		// set. Today it produced a gap per expected replica and so was
