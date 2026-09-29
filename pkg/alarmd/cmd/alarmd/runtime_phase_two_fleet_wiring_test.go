@@ -139,6 +139,31 @@ func TestProductionBundleReportsFleetSnapshotPublishOutcome(t *testing.T) {
 	if after := fleetPublishObservations(&mu, &observations); len(after) != len(before) {
 		t.Fatalf("a second healthy publish reported %d observations, want none", len(after)-len(before))
 	}
+
+	// The round memory the scrape reads is this bundle's tracker's: a round
+	// observed through the bundle's stream is the one round counted.
+	roundCtx := observability.ContextWithTraceFields(ctx, observability.TraceFields{QueryGroupKey: "qg-round-memory"})
+	bundle.dependencies.Observer.Observe(roundCtx, observability.Observation{
+		ProgressCompletionKind: "FULL_COMPLETED",
+		Trace:                  observability.TraceFields{StrategyID: "4101", BusinessID: "7", EvaluationTime: 600},
+	})
+	if got := recorderGauge(t, recorder, "bkmonitor_alarmd_fleet_round_memory_rounds"); got != 1 {
+		t.Fatalf("round memory rounds = %v, want the one round observed through the bundle", got)
+	}
+}
+
+func recorderGauge(t *testing.T, recorder *metric.Recorder, name string) float64 {
+	t.Helper()
+	families, err := recorder.Gatherer().Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range families {
+		if family.GetName() == name && len(family.GetMetric()) == 1 {
+			return family.GetMetric()[0].GetGauge().GetValue()
+		}
+	}
+	return -1
 }
 
 // A window is only worth anything if opening it changes what the replica

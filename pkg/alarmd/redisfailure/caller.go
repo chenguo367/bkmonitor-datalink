@@ -10,15 +10,14 @@ import "context"
 // Callers, closed: the jobs that share one Redis client and whose failures
 // have to be told apart. A client's failures by reason say how often and why,
 // and not whose - on the diagnostics client, which several observation jobs
-// share on one small pool, a timeout could be a directory refresh that read a
-// stale snapshot, a diagnostic record that was never written, or a cost
+// share on one small pool, a timeout could be a directory answer that came
+// back short, a diagnostic record that was never written, or a cost
 // projection that published nothing, and those lose different things.
 const (
-	// CallerDirectoryRefresh is the strategy directory's periodic read of the
-	// published catalog.
-	CallerDirectoryRefresh = "directory_refresh"
-	// CallerDirectoryRead is a point read the directory makes for an answer:
-	// one Plan's effective content or output.
+	// CallerDirectoryRead is a read the strategy directory makes for an
+	// answer: the activation, the objects of the rows it returns, one Plan's
+	// effective content or output. The directory keeps no copy of its own
+	// and has no periodic read.
 	CallerDirectoryRead = "directory_read"
 	// CallerDiagnosticWrite is the diagnostic store writing an observation
 	// window's records and series samples.
@@ -65,7 +64,7 @@ const (
 )
 
 // Callers is every caller name, for callers that must enumerate them.
-var Callers = []string{CallerDirectoryRefresh, CallerDirectoryRead, CallerDiagnosticWrite, CallerDiagnosticRead, CallerCostProjection,
+var Callers = []string{CallerDirectoryRead, CallerDiagnosticWrite, CallerDiagnosticRead, CallerCostProjection,
 	CallerStrategySource, CallerLegacyEffectiveTime, CallerControlPlane, CallerOwnership, CallerRuntimeState, CallerQueryCooldown,
 	CallerFleet, CallerCMDBCache, CallerTargetGroup, CallerDynamicConfig, CallerLinkd, CallerStoreCensus}
 

@@ -84,8 +84,9 @@ func buildLookback(
 	ownership *lookbackOwnership,
 	logger *observability.Logger,
 	now func() time.Time,
+	memory func(bytes uint64) bool,
 ) (*lookback.Engine, lookbackStanding, error) {
-	engine, err := lookback.New(lookbackOptions(recheck, flights, ownership, logger, now))
+	engine, err := lookback.New(lookbackOptions(recheck, flights, ownership, logger, now, memory))
 	if err != nil {
 		return nil, lookbackStanding{}, err
 	}
@@ -93,16 +94,18 @@ func buildLookback(
 }
 
 // lookbackOptions wire the lookback to this process: its query client, its
-// permits, its Runner set and its log.
+// permits, its Runner set, its log and the observation memory line its
+// series tables grow under.
 func lookbackOptions(
 	recheck lookback.Recheck,
 	flights *scheduler.FlightCoordinator,
 	ownership *lookbackOwnership,
 	logger *observability.Logger,
 	now func() time.Time,
+	memory func(bytes uint64) bool,
 ) lookback.Options {
 	return lookback.Options{Now: now, Recheck: recheck, Owns: ownership.owns, Owned: ownership.count,
-		Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights),
+		Refusals: scheduler.LookbackRefusals, Permit: lookbackPermit(flights), Memory: memory,
 		OnFault: func(reason string, queryGroup execution.QueryGroupIdentity) {
 			if logger != nil {
 				logger.Warn("lookback", "fault", 0, 0, slog.String("reason", reason), slog.String("query_group", string(queryGroup)))
@@ -134,11 +137,17 @@ func lookbackReadEarly(engine *lookback.Engine) func() map[string]fleet.ReadEarl
 		readings := engine.ReadEarly()
 		facts := make(map[string]fleet.ReadEarlyFacts, len(readings))
 		for _, reading := range readings {
-			// The samples stay on this replica's lookback.get: the row rides
-			// on every snapshot, and the values are all it needs.
-			facts[string(reading.QueryGroup)] = fleet.ReadEarlyFacts{StepSeconds: reading.StepSeconds,
+			// The samples ride with the values: the suggestion and what it
+			// rests on are one read, bounded by the fleet's row.
+			row := fleet.ReadEarlyFacts{StepSeconds: reading.StepSeconds,
 				CurrentDelaySeconds: reading.CurrentDelaySeconds, SuggestedDelaySeconds: reading.SuggestedDelaySeconds,
 				Since: reading.Since}
+			for _, sample := range reading.Samples {
+				row.Samples = append(row.Samples, fleet.ReadEarlySample{EvaluationTime: int64(sample.EvaluationTime),
+					FirstReadAgeSeconds: sample.FirstReadAgeSeconds, CompletionAgeSeconds: sample.CompletionAgeSeconds,
+					Rung: sample.Rung, ChangedAgeSeconds: sample.ChangedAgeSeconds, Buckets: sample.Buckets})
+			}
+			facts[string(reading.QueryGroup)] = row
 		}
 		return facts
 	}
@@ -177,8 +186,8 @@ func cliLookbackOperation(engine *lookback.Engine, standing lookbackStanding) ob
 				"Counts are this process's since it started; use meta.answered_by, and target each replica for the deployment.",
 				"Each rung is compared with the read before it; a window is complete at the last rung that changed, or at the first read when none did. Only rechecks with outcome compared are windows observed; every other outcome is a window not observed, not a window that did not change.",
 				"Rungs are at 1.5, 3.5, 7.5, 15.5, 31.5 and 63.5 of the Query Group's data steps. Each Query Group learns from its own samples how many to read and how long to rest between samples, at most an hour; a source only sums its groups. A recheck reads and compares only the window's last 65 steps - the whole of a shorter window - from the query's own lookback before them.",
-				"A Query Group's first sample and one in four after it are read once more at the deepest rung after the rungs the group reads; data found there makes that sample probe_changed, with no completion, and the group reads every rung and settles from its next sample. A window still changing at the deepest rung is counted complete there: lateness past it is not measured.",
-				"Each completed sample is classed by the facts of its series against the first read: window_read_early when the first read was empty and data came later, or a series it had came back with other points or values or not at all (the strategy's time_delay moves the read; a value revised after it was judged is not judged again); series_late when every series it had came back as it was and others came later (supplementary detection's); unclassified when a rung changed and its series could not be compared because the memory line refused a series table (counted by reason under unclassified, not a fault); complete otherwise. read_early lists the Query Groups read early twice in a row, with the time_delay they run under and the one that would have read their samples complete: the largest completion past the first read added, aligned up to the step as a strategy's time_delay is compiled. A completion is the age of the recheck that first read the data whole, so the suggestion is an upper bound.",
+				"A Query Group's first sample and one in four after it are read once more at the deepest rung after the rungs the group reads; data found there makes that sample probe_changed, with no completion, and the group reads every rung and settles from its next sample. A window still changing at the deepest rung has its completion counted there, and lateness past it is not measured; its class is unclassified (unsettled), not complete, because no later read agrees with that last one.",
+				"Each completed sample is classed by the facts of its series against the first read, as its data settled: the read of its last change, which a later rung read again the same, so a change that came back is not one; values are compared to one part in 2^28 (about 3.7e-9 of the value), so reads that differ only in the order the store summed them are one read: window_read_early when the first read was empty and data came later, or a series it had came back with other points or values or not at all (the strategy's time_delay moves the read; a value revised after it was judged is not judged again); series_late when every series it had came back as it was and others came later (supplementary detection's); unclassified when a rung changed and its series could not be compared because the memory line refused a series table (memory_refused), or the deepest rung still changed so no later read says the data settled (unsettled) (counted by reason under unclassified, not a fault); complete otherwise. read_early lists the Query Groups read early twice in a row, with the time_delay they run under and the one that would have read their samples complete: the largest completion past the first read added, aligned up to the step as a strategy's time_delay is compiled. A completion is the age of the recheck that first read the data whole, so the suggestion is an upper bound.",
 				"A sample waiting for its deep recheck does not hold its group's next sample back: a punctual Query Group settles at 1 to 1.25 rechecks an hour, about a fifth of them deep (simulated: 1.23 at a ten-second step, 1.21 at a minute, 1.02 at five minutes - a group rests from its first rung, 1.5 steps after its read, and waits for its next first read).",
 				"A recheck reads through the same query service as the first read. The query service keeps no result cache by its source (its caches hold routing metadata and reload coordination); the deployed version is read from its workload image, not from here. A storage-layer cache that answers until its next refresh, such as a search engine's request cache, is a known boundary: it can return the first read again.",
 			}}

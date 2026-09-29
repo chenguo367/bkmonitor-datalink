@@ -11,6 +11,8 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 )
@@ -97,5 +99,45 @@ func TestAReadEarlyObjectReachesItsLineTheDiagnosisAndTheHealthResponse(t *testi
 	entry, _ := list[0].(map[string]any)
 	if entry["query_group"] != "qg-late" || entry["suggested_time_delay_seconds"] != float64(180) || entry["current_time_delay_seconds"] != float64(60) {
 		t.Fatalf("health entry %v", entry)
+	}
+}
+
+// The row carries the samples its suggestion rests on, the newest
+// MaxReadEarlySamples of what it is given with at most MaxReadEarlyBuckets
+// buckets each, in a copy of its own: a longer list, or one changed after,
+// does not reach the snapshot. At its widest the row is under 1 KB.
+func TestAReadEarlyRowCarriesItsEvidenceWithinItsBounds(t *testing.T) {
+	now := time.Date(2026, 9, 29, 8, 0, 0, 0, time.UTC)
+	tracker := newTracker(t, &clock{at: now})
+	tracker.Observe(context.Background(), slotCompleted("qg-late", 0, 0, now))
+	facts := readEarlyFacts(now)
+	// Slots and buckets as they are, ten digits each; ages and rungs at
+	// their widest.
+	const slot = int64(1_790_694_000)
+	for sample := int64(0); sample < 5; sample++ {
+		buckets := make([]int64, 12)
+		for index := range buckets {
+			buckets[index] = slot + 1000*sample + int64(index)
+		}
+		facts.Samples = append(facts.Samples, ReadEarlySample{EvaluationTime: slot + 60*sample, FirstReadAgeSeconds: 3599,
+			CompletionAgeSeconds: 99999, Rung: "x63.5", ChangedAgeSeconds: 99999, Buckets: buckets})
+	}
+	row := rowsOfKind(tracker.ReadEarly(map[string]ReadEarlyFacts{"qg-late": facts}), KindReadBeforeComplete)["qg-late"]
+	facts.Samples[4].Buckets[0] = -1
+	got := row.ReadEarly.Samples
+	if len(got) != MaxReadEarlySamples || got[0].EvaluationTime != slot+120 || got[2].EvaluationTime != slot+240 {
+		t.Fatalf("samples %+v, want the newest %d", got, MaxReadEarlySamples)
+	}
+	for _, sample := range got {
+		if len(sample.Buckets) != MaxReadEarlyBuckets || sample.Buckets[0] != slot+1000*((sample.EvaluationTime-slot)/60) {
+			t.Fatalf("sample %+v, want its first %d buckets as given", sample, MaxReadEarlyBuckets)
+		}
+	}
+	encoded, err := json.Marshal(row.ReadEarly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"samples":[{"evaluation_time":1790694120`) || len(encoded) > 1024 {
+		t.Fatalf("encoded %s (%d bytes), want the row within 1 KB at its widest", encoded, len(encoded))
 	}
 }

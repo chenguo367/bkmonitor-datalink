@@ -212,7 +212,7 @@ func newRedisCallMetrics() redisCallMetrics {
 	callerOperations := prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace, Subsystem: metricSubsystem, Name: "redis_caller_operation_total",
 		Help: "Redis operations issued by a named job on a client, one per call or pipeline batch, for the jobs that " +
-			"share one client: on the diagnostics client directory_refresh, directory_read, diagnostic_write, " +
+			"share one client: on the diagnostics client directory_read, diagnostic_write, " +
 			"diagnostic_read, cost_projection; on the source and runtime clients (one client when the deployment " +
 			"points both at one Redis) strategy_source, legacy_effective_time, control_plane, ownership, runtime_state, " +
 			"query_cooldown, fleet, linkd; cmdb_cache, target_group and dynamic_config on whichever client they share; " +

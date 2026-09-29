@@ -34,7 +34,7 @@ func noRecheck(context.Context, execution.PhysicalQuerySpec, execution.ProviderS
 // reason the scheduler refuses a permit with, from the start.
 func TestTheLookbackRunsWithoutConfiguration(t *testing.T) {
 	owner := &lookbackOwnership{}
-	engine, standing, err := buildLookback(noRecheck, nil, owner, nil, time.Now)
+	engine, standing, err := buildLookback(noRecheck, nil, owner, nil, time.Now, nil)
 	if err != nil || engine == nil || standing != (lookbackStanding{Running: true}) {
 		t.Fatalf("built: %v %+v %v", engine, standing, err)
 	}
@@ -53,9 +53,15 @@ func TestTheLookbackRunsWithoutConfiguration(t *testing.T) {
 		t.Fatalf("an unbound bundle owns %d Query Groups", stats.Coverage.Owned)
 	}
 	// The refusals are the scheduler's, and the first samples are spread.
-	if options := lookbackOptions(noRecheck, nil, owner, nil, time.Now); !slices.Equal(options.Refusals, scheduler.LookbackRefusals) ||
+	if options := lookbackOptions(noRecheck, nil, owner, nil, time.Now, nil); !slices.Equal(options.Refusals, scheduler.LookbackRefusals) ||
 		options.UnspreadFirstSamples {
 		t.Fatalf("refusals %v, unspread %v", options.Refusals, options.UnspreadFirstSamples)
+	}
+	// Its series tables grow under the memory line it is given.
+	var asked uint64
+	if options := lookbackOptions(noRecheck, nil, owner, nil, time.Now, func(bytes uint64) bool { asked = bytes; return false }); options.Memory == nil ||
+		options.Memory(7) || asked != 7 {
+		t.Fatalf("the lookback's memory is not the line it was given (asked %d)", asked)
 	}
 }
 
@@ -125,7 +131,7 @@ func sampledQuery(queryGroup execution.QueryGroupIdentity) lookback.Query {
 func TestAQueryGroupTheBundleStopsOwningLeavesTheLookback(t *testing.T) {
 	owner := &lookbackOwnership{}
 	// Built as buildLookback builds it, with each first sample taken at once.
-	options := lookbackOptions(noRecheck, nil, owner, nil, time.Now)
+	options := lookbackOptions(noRecheck, nil, owner, nil, time.Now, nil)
 	options.UnspreadFirstSamples = true
 	engine, err := lookback.New(options)
 	if err != nil {
@@ -181,7 +187,7 @@ func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 	if off := read(cliLookbackOperation(nil, lookbackStanding{})); off.Running || off.Stats != nil {
 		t.Fatalf("off = %+v", off)
 	}
-	engine, standing, err := buildLookback(noRecheck, nil, &lookbackOwnership{}, nil, time.Now)
+	engine, standing, err := buildLookback(noRecheck, nil, &lookbackOwnership{}, nil, time.Now, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,8 +201,8 @@ func TestLookbackGetSaysWhetherItRunsAndCarriesTheCounts(t *testing.T) {
 
 // The lookback's report of an object read early reaches the fleet snapshot
 // as it was read: the time_delay the query runs under, the one that would
-// have read it complete, and the samples. A process without a lookback
-// publishes no such line.
+// have read it complete, and the samples it rests on. A process without a
+// lookback publishes no such line.
 func TestAnObjectTheLookbackFindsReadEarlyReachesTheSnapshot(t *testing.T) {
 	if lookbackReadEarly(nil) != nil {
 		t.Fatal("a process without a lookback publishes a read-early line")
@@ -250,10 +256,18 @@ func TestAnObjectTheLookbackFindsReadEarlyReachesTheSnapshot(t *testing.T) {
 	if !reported || got.CurrentDelaySeconds != 60 || got.SuggestedDelaySeconds != 180 || got.StepSeconds != 60 {
 		t.Fatalf("facts %+v, want the object with 60 s now and 180 s suggested", facts)
 	}
-	// The samples it was read from stay on this replica's lookback.
-	if readings := engine.Stats().ReadEarly; len(readings) != 1 || len(readings[0].Samples) != 2 ||
-		readings[0].Samples[1].Rung != lookback.RungNames[0] {
-		t.Fatalf("lookback read_early %+v, want the two samples", readings)
+	// The samples it was read from ride with it, as the lookback has them.
+	readings := engine.Stats().ReadEarly
+	if len(readings) != 1 || len(readings[0].Samples) != 2 || len(got.Samples) != 2 {
+		t.Fatalf("lookback read_early %+v, facts %+v, want the two samples on both", readings, got)
+	}
+	for index, sample := range got.Samples {
+		want := readings[0].Samples[index]
+		if sample.EvaluationTime != int64(want.EvaluationTime) || sample.Rung != lookback.RungNames[0] || sample.Rung != want.Rung ||
+			sample.FirstReadAgeSeconds != want.FirstReadAgeSeconds || sample.CompletionAgeSeconds != want.CompletionAgeSeconds ||
+			sample.ChangedAgeSeconds != want.ChangedAgeSeconds || len(sample.Buckets) != 1 || sample.Buckets[0] != want.Buckets[0] {
+			t.Fatalf("sample %d on the snapshot %+v, want %+v", index, sample, want)
+		}
 	}
 }
 

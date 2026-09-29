@@ -2797,6 +2797,7 @@ func historyCoverageFacts(coverage execution.HistoryCoverage) *observability.His
 		MissingMinutesTruncated: coverage.MissingMinutesTruncated,
 		ShortUnusable:           coverage.ShortUnusable,
 		End:                     coverage.End,
+		WindowStart:             coverage.WindowStart,
 	}
 	if len(facts.MissingMinutes) == 0 {
 		facts.MissingMinutes = nil

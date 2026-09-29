@@ -438,6 +438,11 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 		"bkmonitor_alarmd_activation_blocked_set_total":                 "variableLabels: {accounting}",
 		"bkmonitor_alarmd_activation_timeline_reopened_total":           "variableLabels: {}",
 		"bkmonitor_alarmd_activation_body_bytes":                        "variableLabels: {}",
+		"bkmonitor_alarmd_fleet_round_memory_objects":                   "variableLabels: {rounds}",
+		"bkmonitor_alarmd_fleet_round_memory_rounds":                    "variableLabels: {}",
+		"bkmonitor_alarmd_fleet_round_memory_bytes":                     "variableLabels: {}",
+		"bkmonitor_alarmd_fleet_round_memory_max_rounds":                "variableLabels: {}",
+		"bkmonitor_alarmd_fleet_round_memory_window_sized_objects":      "variableLabels: {}",
 		"bkmonitor_alarmd_loop_turn_age_seconds":                        "variableLabels: {loop}",
 		"bkmonitor_alarmd_loop_turn_duration_seconds":                   "variableLabels: {loop}",
 		"bkmonitor_alarmd_executions_past_deadline":                     "variableLabels: {}",
@@ -552,6 +557,7 @@ func TestCustomMetricDescriptorsAreExplicitlyApproved(t *testing.T) {
 	expected["bkmonitor_alarmd_segment_content_freshness_total"] = "variableLabels: {state}"
 	expected["bkmonitor_alarmd_schedule_cutover_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_replay_expired_total"] = "variableLabels: {reason}"
+	expected["bkmonitor_alarmd_replay_takeover_slots_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_range_gate_total"] = "variableLabels: {outcome}"
 	expected["bkmonitor_alarmd_state_preflight_total"] = "variableLabels: {result,reason}"
 	expected["bkmonitor_alarmd_state_admission_total"] = "variableLabels: {result,reason}"
@@ -1022,22 +1028,27 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 		fqName("assignment_index_write_total"):                2,
 		// Closed label sets, every series created at construction; see
 		// control_facts.go.
-		fqName("control_facts_read_total"):           len(controlFactNames),
-		fqName("control_facts_unavailable_total"):    len(controlFactNames) * len(controlFactUnavailableReasons),
-		fqName("control_facts_rebuilt_total"):        len(controlFactNames),
-		fqName("control_health_facts_total"):         len(controlHealthStatuses),
-		fqName("control_health_invalid_total"):       len(controlHealthInvalidFields),
-		fqName("startup_dependency_wait_total"):      len(StartupDependencies),
-		fqName("activation_blocked_query_groups"):    len(ActivationBlockedReasons),
-		fqName("activation_blocked_set_total"):       len(controlplane.BlockedSetAccountings),
-		fqName("activation_timeline_reopened_total"): 1,
-		fqName("activation_body_bytes"):              1,
-		fqName("loop_turn_age_seconds"):              len(LivenessLoops),
-		fqName("loop_turn_duration_seconds"):         histogramSeries(len(LivenessLoops), len(loopTurnDurationBuckets)),
-		fqName("executions_past_deadline"):           1,
-		fqName("assignment_index_read_total"):        4,
-		fqName("assignment_index_confirm_total"):     4,
-		fqName("assignment_record_read_total"):       2,
+		fqName("control_facts_read_total"):                len(controlFactNames),
+		fqName("control_facts_unavailable_total"):         len(controlFactNames) * len(controlFactUnavailableReasons),
+		fqName("control_facts_rebuilt_total"):             len(controlFactNames),
+		fqName("control_health_facts_total"):              len(controlHealthStatuses),
+		fqName("control_health_invalid_total"):            len(controlHealthInvalidFields),
+		fqName("startup_dependency_wait_total"):           len(StartupDependencies),
+		fqName("activation_blocked_query_groups"):         len(ActivationBlockedReasons),
+		fqName("activation_blocked_set_total"):            len(controlplane.BlockedSetAccountings),
+		fqName("activation_timeline_reopened_total"):      1,
+		fqName("activation_body_bytes"):                   1,
+		fqName("fleet_round_memory_objects"):              len(fleet.RoundMemoryBuckets),
+		fqName("fleet_round_memory_rounds"):               1,
+		fqName("fleet_round_memory_bytes"):                1,
+		fqName("fleet_round_memory_max_rounds"):           1,
+		fqName("fleet_round_memory_window_sized_objects"): 1,
+		fqName("loop_turn_age_seconds"):                   len(LivenessLoops),
+		fqName("loop_turn_duration_seconds"):              histogramSeries(len(LivenessLoops), len(loopTurnDurationBuckets)),
+		fqName("executions_past_deadline"):                1,
+		fqName("assignment_index_read_total"):             4,
+		fqName("assignment_index_confirm_total"):          4,
+		fqName("assignment_record_read_total"):            2,
 		// Four outcomes without a refusal, plus a conflict for each refusal
 		// OTHER included, all created at construction.
 		fqName("schedule_cursor_advance_total"):   len(observability.CursorAdvanceStatuses) - 1 + len(observability.CursorRefusals),
@@ -1200,6 +1211,7 @@ func customMetricFamilySeriesUpperBounds() map[string]int {
 	// written only from the list observability publishes, and the scheduler's
 	// typed constants are held to that list by a test of its own.
 	bounds[fqName("replay_expired_total")] = len(observability.ReplayExpiryReasons)
+	bounds[fqName("replay_takeover_slots_total")] = len(observability.ReplayTakeoverOutcomes)
 	// One per word the range gate can put on a round, applied included, and
 	// no more: the label is written from the facts after normalization, which
 	// folds any other word to unexplained.

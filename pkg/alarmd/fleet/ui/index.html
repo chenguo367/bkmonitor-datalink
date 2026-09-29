@@ -179,6 +179,12 @@ details.group table{margin:6px 0 0 12px}
          totals are then a mix that no single build produced. -->
     <p class="basis" id="buildLine"></p>
     <div class="brief">
+      <!-- Two denominators, said together: the strategies, as the diagnosis
+           counts them, and the Query Groups they make up, which every cell
+           of the grid below counts. The grid alone read as the strategies:
+           eleven strategies made up into six groups were "6 expected". -->
+      <p id="strategyCount"></p>
+      <p id="strategyVerdicts"></p>
       <p id="briefAction"></p>
       <!-- Where detection is stuck and how much cannot yet be said, as two
            clauses of one sentence that stands whatever the badge says: a
@@ -197,19 +203,20 @@ details.group table{margin:6px 0 0 12px}
          while reading as though it made both. -->
     <div id="impact" class="impact"></div>
     <p class="basis">时间口径：本次请求时刻的聚合快照，非时间窗聚合。<span id="splitBasis"></span></p>
+    <p class="basis">下面各格按查询组计，单位是组：一个查询组由查询相同的策略合成，组数不是策略数。</p>
     <div class="grid">
-      <div class="cell"><div class="k">正常</div><div class="v" id="healthy">–</div>
+      <div class="cell"><div class="k">正常（组）</div><div class="v" id="healthy">–</div>
         <div class="k">跑完了，结果完整</div></div>
-      <div class="cell hl"><div class="k">没跑成待查</div><div class="v" id="ownBad">–</div>
+      <div class="cell hl"><div class="k">没跑成待查（组）</div><div class="v" id="ownBad">–</div>
         <div class="k">这一轮没跑成，而且不属于右边任何一类已经有结论的情况。
           <b>不等于就是 alarmd 的问题</b>——栏里还要再分一次，只有归到 alarmd 的那部分才决定上面的判定</div></div>
-      <div class="cell"><div class="k">策略本身不可用</div><div class="v" id="demoted">–</div>
+      <div class="cell"><div class="k">策略本身不可用（组）</div><div class="v" id="demoted">–</div>
         <div class="k" id="demotedHint">后端持续查不到，已降级不再反复查</div></div>
-      <div class="cell"><div class="k">判不了恢复</div><div class="v" id="undecidable">–</div>
+      <div class="cell"><div class="k">判不了恢复（组）</div><div class="v" id="undecidable">–</div>
         <div class="k" id="undecidableHint">检测窗口没攒够点，恢复无从判起——正常现象，不是故障</div></div>
-      <div class="cell"><div class="k">按配置不处理</div><div class="v" id="byDesign">–</div>
+      <div class="cell"><div class="k">按配置不处理（组）</div><div class="v" id="byDesign">–</div>
         <div class="k" id="byDesignHint">策略自己的生效时段说现在不该跑——这是常驻状态，不是过渡状态</div></div>
-      <div class="cell hl"><div class="k">状态未知</div><div class="v" id="unknown">–</div>
+      <div class="cell hl"><div class="k">状态未知（组）</div><div class="v" id="unknown">–</div>
         <div class="k">没有副本能报告它的状态。不知道不等于正常</div></div>
       <div class="cell hl" id="unattributedCell" hidden>
         <div class="k">成因没保留</div>
@@ -223,10 +230,10 @@ details.group table{margin:6px 0 0 12px}
       </div>
     </div>
     <div class="grid">
-      <div class="cell"><div class="k">应有 (expected)</div><div class="v" id="expected">–</div>
+      <div class="cell"><div class="k">应有（组，expected）</div><div class="v" id="expected">–</div>
         <div class="k" id="expectedHint"></div></div>
-      <div class="cell"><div class="k">已覆盖 (covered)</div><div class="v" id="covered">–</div></div>
-      <div class="cell"><div class="k">已知状态 (determined)</div><div class="v" id="determined">–</div></div>
+      <div class="cell"><div class="k">已覆盖（组，covered）</div><div class="v" id="covered">–</div></div>
+      <div class="cell"><div class="k">已知状态（组，determined）</div><div class="v" id="determined">–</div></div>
       <div class="cell wide">
         <div class="k">出过降级池</div>
         <div class="v" id="poolExits">–</div>
@@ -2713,6 +2720,40 @@ function rangeLabel(startAt, endAt) {
   return dated(start) + ' – ' + dated(end);
 }
 
+// The first screen's count of strategies, from the diagnosis's own summary:
+// the number a reader sets beside the CLI's diagnose is the one the CLI
+// sums, decided by the same rows. When it cannot be read the line says so,
+// and the grid's groups are never put in its place.
+function loadStrategyCount() {
+  return api('diagnose?summary=1').then(function (countRead) { renderStrategyCount(countRead, ''); })
+    .catch(function (e) { renderStrategyCount(null, String((e && e.message) || e)); });
+}
+
+// Named apart from every other response on the page - countRead, its
+// countUniverse and its strategyTally - so the check that every field the
+// page reads exists in the API can be pointed at each.
+function renderStrategyCount(countRead, failure) {
+  var countUniverse = countRead && countRead.universe;
+  if (failure || !countUniverse || countUniverse.status !== 'ok') {
+    var why = failure || (countUniverse && countUniverse.reason) || '没有说明原因';
+    text('strategyCount', '策略条数读不到（' + why + '）；下面各格是查询组数，不是策略数');
+    text('strategyVerdicts', '');
+    return;
+  }
+  var strategyTally = countRead.summary || {};
+  var groups = strategyTally.query_groups === null || strategyTally.query_groups === undefined
+    ? '合成的查询组数读不到' : '合成 ' + strategyTally.query_groups + ' 个查询组';
+  text('strategyCount', strategyTally.strategies + ' 条策略，' + groups);
+  var words = (countRead.words && countRead.words.state) || {};
+  var counts = strategyTally.by_verdict || {};
+  var parts = [];
+  (countRead.verdicts || []).forEach(function (word) {
+    if (counts[word] > 0) { parts.push((words[word] || word) + ' ' + counts[word]); }
+  });
+  text('strategyVerdicts', '按策略的状态：' + (parts.length ? parts.join(' · ') : '一条都没有')
+    + '（与 CLI diagnose 同一套判定，数到 ' + strategyTally.strategies + ' 条）');
+}
+
 function loadHealth() {
   // Called rather than passed by reference. The check that every page function
   // has a call site reads call syntax, and a bare reference is invisible to it
@@ -5159,6 +5200,7 @@ function refresh() {
   lastRead = Date.now();
   text('stamp', '读取于 ' + new Date().toLocaleTimeString());
   tickAge();
+  loadStrategyCount();
   loadHealth();
   loadChecks();
   loadWindows();

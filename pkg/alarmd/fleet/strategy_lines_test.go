@@ -145,7 +145,9 @@ func TestTheStrategyListIsServedWithItsWords(t *testing.T) {
 	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
 	}
-	if len(body.Words.State) != len(StateWords) || len(body.Words.Action) != len(ActionWords) || len(body.Words.Health) != 3 {
+	// The states rendered are every word a row can carry, the diagnosis's
+	// UNKNOWN among them.
+	if len(body.Words.State) != len(DiagnosisVerdicts()) || len(body.Words.Action) != len(ActionWords) || len(body.Words.Health) != 3 {
 		t.Fatalf("words = %+v, want the whole vocabulary on the response", body.Words)
 	}
 	if body.Summary.Strategies != 2 || body.Summary.Lead == nil {

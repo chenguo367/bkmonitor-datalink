@@ -506,6 +506,15 @@ func TestEverySummaryFieldThePageReadsExistsInTheAPI(t *testing.T) {
 	assertFieldsExist(t, "summary", reflect.TypeOf(fleet.Summary{}))
 }
 
+// The first screen's count of strategies, read as three names of its own:
+// a misspelled count there renders "undefined 条策略", or no state at all,
+// on the line a reader sets beside the CLI's diagnose.
+func TestEveryStrategyCountFieldThePageReadsExistsInTheAPI(t *testing.T) {
+	assertFieldsExist(t, "countRead", reflect.TypeOf(fleet.DiagnosisSummaryResponse{}))
+	assertFieldsExist(t, "countUniverse", reflect.TypeOf(fleet.DiagnosisUniverse{}))
+	assertFieldsExist(t, "strategyTally", reflect.TypeOf(fleet.DiagnosisSummary{}))
+}
+
 // The anomaly row is the busiest object on the page -- every cell in the table
 // reads it -- and it had no field check at all, for the same reason the list
 // response had none: it was read into a variable named a, which matches too
